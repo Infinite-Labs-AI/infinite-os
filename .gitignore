@@ -19,8 +19,10 @@ node_modules/
 .pnpm-store/
 apps/*/dist/
 packages/*/dist/
+ui-tui/packages/*/dist/
 apps/*/*.tsbuildinfo
 packages/*/*.tsbuildinfo
+ui-tui/packages/*/*.tsbuildinfo
 logs/
 testlogs
 tmp/
