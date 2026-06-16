@@ -47,7 +47,15 @@ dependencies_need_install() {
   return 1
 }
 
-install_dependencies() { (cd "$ROOT" && pnpm install --frozen-lockfile); }
+install_dependencies() {
+  # pnpm symlinks infinite-tag's bin (-> packages/instrument/dist/src/cli.js) during
+  # install — before the build creates that file — printing a harmless one-time
+  # "Failed to create bin … ENOENT" warning. Pre-create the (empty) target so the
+  # symlink lands cleanly; build_workspace() then compiles the real file over it.
+  mkdir -p "$ROOT/packages/instrument/dist/src"
+  [ -f "$ROOT/packages/instrument/dist/src/cli.js" ] || : > "$ROOT/packages/instrument/dist/src/cli.js"
+  (cd "$ROOT" && pnpm install --frozen-lockfile)
+}
 build_workspace() { (cd "$ROOT" && pnpm -r --if-present --workspace-concurrency=1 build); }
 
 # Number of workspace packages that expose a `build` script. This is the total
