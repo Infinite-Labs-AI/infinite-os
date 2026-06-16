@@ -41,7 +41,7 @@ pnpm -r --if-present build             # or just run ./infinite once (it builds 
 
 # 4. verify — ALL must pass before opening the PR
 pnpm typecheck                                 # tsc -b
-pnpm test                                      # full vitest suite
+pnpm test                                      # vitest suite (CI gates on a curated subset — see Tests)
 PUBLIC_SURFACE=1 scripts/ci/repo-tripwire.sh   # no secrets / internal files tracked
 
 # 5. PR
@@ -83,8 +83,14 @@ secret-gated check can't run.
 
 ## Tests
 
-Single root `vitest.config.ts`. `pnpm test` runs everything; run one file with
+Single root `vitest.config.ts`. `pnpm test` runs the whole suite; run one file with
 `pnpm exec vitest run <path>` — **not** `pnpm --filter`.
+
+**CI is the source of truth, and it gates on a *curated subset* that excludes
+`packages/llm-controller`** — some of its tests depend on local model auth / the OS
+keychain and flake off a configured machine. So if `pnpm test` fails *only* in
+`llm-controller` and is unrelated to your change, that's the known environment
+dependence, not a regression — what your PR must turn green is CI.
 
 ## Security
 
