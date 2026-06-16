@@ -1,0 +1,17 @@
+{
+  "files": [],
+  "references": [
+    { "path": "./packages/core" },
+    { "path": "./packages/config" },
+    { "path": "./packages/metadata" },
+    { "path": "./packages/db" },
+    { "path": "./packages/connectors" },
+    { "path": "./packages/runtime" },
+    { "path": "./packages/setup" },
+    { "path": "./packages/analytical-engine" },
+    { "path": "./packages/llm-controller" },
+    { "path": "./apps/app" },
+    { "path": "./apps/cli" },
+    { "path": "./apps/worker" }
+  ]
+}

@@ -1,0 +1,103 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      # No explicit version: pnpm/action-setup reads the "packageManager"
+      # field from package.json (pnpm@10.0.0), so it can never drift.
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Security/IP tripwire for the public repo: no secret-shaped tracked
+      # files, no paid-IP package paths, no private-IP canary strings, no
+      # confidential local-only docs, no personal data. Canary phrases live
+      # ONLY in the IP_CANARIES Actions secret (newline-separated) so they are
+      # never published in this repo; the check self-skips while it is unset.
+      - name: Repo tripwire (security/IP)
+        env:
+          IP_CANARIES: ${{ secrets.IP_CANARIES }}
+          # The PUBLIC repo sets the repository variable PUBLIC_SURFACE=1 so the
+          # tripwire hard-fails if docs/internal/ is ever tracked there.
+          PUBLIC_SURFACE: ${{ vars.PUBLIC_SURFACE || '0' }}
+        run: bash scripts/ci/repo-tripwire.sh
+
+      # Secret scan over the TIP TREE (what this commit actually ships).
+      # History scanning is a flip-time audit, not a per-push gate: this
+      # private repo's history intentionally keeps fixture-shaped secrets,
+      # and the public repo launches with fresh history. Fixture paths are
+      # allowlisted in .gitleaks.toml. Pinned release binary verified by
+      # sha256 — deliberately NOT gitleaks-action (needs an org license key).
+      - name: Secret scan (gitleaks, working tree)
+        run: |
+          GITLEAKS_VERSION="8.30.1"
+          GITLEAKS_SHA256="551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+          curl -fsSL -o /tmp/gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  /tmp/gitleaks.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
+          # -v lists each finding (file/commit/rule) in the log for triage;
+          # --redact keeps the secret values themselves out of the log.
+          /tmp/gitleaks dir --no-banner --redact -v .
+
+      # packages/setup tests dynamically import "infinite-tag"
+      # (packages/setup/src/provisioner.ts), which resolves to
+      # packages/instrument's built dist — so build it first.
+      - name: Build packages/instrument
+        run: pnpm -C packages/instrument run build
+
+      # apps/cli tests import @infinite-os/ink, whose entry re-exports
+      # dist/ink-bundle.js — a fresh checkout does not have it.
+      - name: Build ink bundle
+        run: pnpm -C ui-tui/packages/ink run build
+
+      - name: Typecheck
+        run: pnpm exec tsc -b --pretty false
+
+      # The green set: every suite in the root vitest config EXCEPT
+      # packages/llm-controller — some of its tests are environment-dependent
+      # (local model auth / OS keychain) and can flake outside a configured
+      # machine. TODO: isolate those and re-add (then this is `pnpm test`).
+      #
+      # Suites/tests that need live services self-skip and stay green:
+      #   - tests/integration/* and apps/app/test/projects.integration.test.ts
+      #     skip unless GROWTH_OS_INTEGRATION_DB (live Postgres) is set.
+      #   - two cli-smoke setup-wizard tests in apps/cli/src/index.test.ts
+      #     (they open a pg pool via setupProjectStep) gate on the same var.
+      #   TODO: add a Postgres service container to cover all of these.
+      # ui-tui/** is not in the root vitest include and has no root-level runner.
+      - name: Unit tests
+        run: >
+          pnpm exec vitest run
+          apps/app
+          apps/cli
+          apps/worker
+          packages/analytical-engine
+          packages/config
+          packages/connectors
+          packages/core
+          packages/db
+          packages/instrument
+          packages/metadata
+          packages/runtime
+          packages/setup
+          tests

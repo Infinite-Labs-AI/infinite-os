@@ -1,0 +1,178 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+ENTRY="$ROOT/apps/cli/dist/index.js"
+SOURCE_ENTRY="$ROOT/apps/cli/src/index.ts"
+WORKSPACE_LINK="$ROOT/apps/cli/node_modules/@infinite-os/analytical-engine"
+PNPM_INSTALL_STATE="$ROOT/node_modules/.pnpm/lock.yaml"
+CLI_RUNTIME_DEPS=(
+  "$ROOT/apps/cli/node_modules/ink"
+  "$ROOT/apps/cli/node_modules/react"
+  "$ROOT/apps/cli/node_modules/unicode-animations"
+)
+
+build_is_stale() {
+  if [[ ! -f "$ENTRY" ]]; then
+    return 0
+  fi
+  if find \
+    "$ROOT/apps/cli/src" \
+    "$ROOT/apps/app/src" \
+    "$ROOT/packages" \
+    -type f \
+    \( -name '*.ts' -o -name '*.js' -o -name '*.json' \) \
+    -newer "$ENTRY" \
+    -print -quit 2>/dev/null | grep -q .; then
+    return 0
+  fi
+  return 1
+}
+
+dependencies_need_install() {
+  if [[ ! -d "$ROOT/node_modules" || ! -e "$WORKSPACE_LINK" ]]; then
+    return 0
+  fi
+  if [[ -f "$ROOT/pnpm-lock.yaml" ]]; then
+    if [[ ! -f "$PNPM_INSTALL_STATE" || "$ROOT/pnpm-lock.yaml" -nt "$PNPM_INSTALL_STATE" ]]; then
+      return 0
+    fi
+  fi
+  local dep
+  for dep in "${CLI_RUNTIME_DEPS[@]}"; do
+    if [[ ! -e "$dep" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+install_dependencies() { (cd "$ROOT" && pnpm install --frozen-lockfile); }
+build_workspace() { (cd "$ROOT" && pnpm -r --if-present --workspace-concurrency=1 build); }
+
+# Number of workspace packages that expose a `build` script. This is the total
+# the progress bar counts toward — pnpm runs one of these per package.
+count_build_targets() {
+  node -e '
+    const fs = require("fs");
+    const path = require("path");
+    const root = process.argv[1];
+    let n = 0;
+    for (const base of ["apps", "packages", "ui-tui/packages"]) {
+      let entries = [];
+      try { entries = fs.readdirSync(path.join(root, base)); } catch { continue; }
+      for (const e of entries) {
+        try {
+          const j = JSON.parse(fs.readFileSync(path.join(root, base, e, "package.json"), "utf8"));
+          if (j.scripts && j.scripts.build) n++;
+        } catch {}
+      }
+    }
+    process.stdout.write(String(n));
+  ' "$ROOT" 2>/dev/null || printf '0'
+}
+
+draw_bar() {
+  local filled=$1 width=$2 bar='' i
+  for ((i = 0; i < width; i++)); do
+    if ((i < filled)); then bar+='█'; else bar+='░'; fi
+  done
+  printf '%s' "$bar"
+}
+
+# Building the workspace can take 20-30s on the first run (or after pulling new
+# sources). Without feedback the terminal looks frozen, so render a live
+# progress bar driven by pnpm's serialized (--workspace-concurrency=1) output:
+# pnpm prints "Scope: N of M workspace projects" once it resolves the graph and
+# then "> name@ver build /abs/path" as each package starts compiling. Counting
+# those start lines (the last one is the package in flight) gives an honest
+# done/total plus the name of what's building right now. On a non-interactive
+# stream we run inline so CI keeps pnpm's full output; the build log is captured
+# and shown only if the build fails.
+build_with_progress() {
+  if [[ ! -t 2 ]]; then
+    printf '%s\n' "Infinite: building the CLI (first run or sources changed)…" >&2
+    build_workspace
+    return $?
+  fi
+  local total width=28 log start status
+  total=$(count_build_targets)
+  if ! [[ "$total" =~ ^[0-9]+$ ]]; then total=0; fi
+  log="$(mktemp -t infinite-build.XXXXXX)"
+  start=$SECONDS
+  printf '%s\n' "Infinite: building the CLI (first run or sources changed; usually ~20-30s)…" >&2
+  build_workspace >"$log" 2>&1 &
+  local pid=$!
+  # Clean up the temp log and stop the background build if the user interrupts.
+  trap 'printf "\r\033[K\n  build interrupted\n" >&2; kill "$pid" 2>/dev/null; rm -f "$log"; exit 130' INT TERM
+  local scope started done_count current filled elapsed
+  while kill -0 "$pid" 2>/dev/null; do
+    # Total comes from pnpm's "Scope: N of M …" (or "Scope: all N …") banner.
+    scope=$(sed -nE 's/^Scope: (all )?([0-9]+).*/\2/p' "$log" 2>/dev/null | head -n1)
+    if [[ "$scope" =~ ^[0-9]+$ ]]; then total=$scope; fi
+    started=$(grep -cE '^> .+ build /' "$log" 2>/dev/null || true)
+    if ! [[ "$started" =~ ^[0-9]+$ ]]; then started=0; fi
+    current=$(sed -n 's#^> .* build \(/.*\)$#\1#p' "$log" 2>/dev/null | tail -n1)
+    current=${current##*/}
+    # The most recently started package is still compiling; the rest are done.
+    if ((started > 0)); then done_count=$((started - 1)); else done_count=0; fi
+    elapsed=$((SECONDS - start))
+    if ((total > 0)); then
+      filled=$((done_count * width / total))
+      if ((filled > width)); then filled=$width; fi
+      printf '\r\033[K  [%s] %s/%s  %-18s %ss' \
+        "$(draw_bar "$filled" "$width")" "$done_count" "$total" "${current:-resolving…}" "$elapsed" >&2
+    else
+      printf '\r\033[K  building %s… (%ss)' "${current:-resolving…}" "$elapsed" >&2
+    fi
+    sleep 0.2
+  done
+  if wait "$pid"; then status=0; else status=$?; fi
+  trap - INT TERM
+  elapsed=$((SECONDS - start))
+  printf '\r\033[K' >&2
+  if ((status != 0)); then
+    printf '  build failed after %ss — output:\n' "$elapsed" >&2
+    cat "$log" >&2
+  elif ((total > 0)); then
+    printf '  ✓ built %s packages in %ss\n' "$total" "$elapsed" >&2
+  else
+    printf '  ✓ build complete in %ss\n' "$elapsed" >&2
+  fi
+  rm -f "$log"
+  return $status
+}
+
+if dependencies_need_install; then
+  if ! command -v pnpm >/dev/null 2>&1; then
+    printf '%s\n' "Infinite dependencies are not installed and pnpm was not found." >&2
+    printf '%s\n' "Install pnpm, then run: ./infinite setup" >&2
+    exit 1
+  fi
+  # pnpm install renders its own live "resolved/reused/downloaded" progress, so
+  # let it stream straight through rather than hiding it behind a bar.
+  printf '%s\n' "Infinite: installing workspace dependencies (one-time, this can take a minute)…" >&2
+  install_dependencies
+fi
+
+if [[ -f "$ENTRY" ]] && ! build_is_stale; then
+  exec node "$ENTRY" "$@"
+fi
+
+if command -v pnpm >/dev/null 2>&1; then
+  build_with_progress
+  if [[ -f "$ENTRY" ]]; then
+    # tsc -b is content-incremental: a source whose mtime moved (e.g. via a git
+    # checkout/pull) but whose content is unchanged leaves dist/index.js
+    # untouched, which keeps build_is_stale() true and forces a rebuild on every
+    # launch. Bump the entry's mtime so an unchanged tree is recognized as fresh
+    # next time and takes the fast path.
+    touch "$ENTRY"
+    exec node "$ENTRY" "$@"
+  fi
+  exec pnpm exec tsx "$SOURCE_ENTRY" "$@"
+fi
+
+printf '%s\n' "Infinite CLI is not built yet and pnpm is unavailable for source execution." >&2
+printf '%s\n' "Install pnpm, then run: ./infinite setup" >&2
+exit 1

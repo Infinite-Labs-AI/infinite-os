@@ -1,0 +1,142 @@
+name: growth-os
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-growth_os}
+      POSTGRES_USER: ${POSTGRES_USER:-growth_os}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env (copy .env.example)}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - growth_os_postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-growth_os} -d ${POSTGRES_DB:-growth_os}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  migrate:
+    image: node:20-bookworm-slim
+    working_dir: /workspace
+    command: ["sh", "-lc", "corepack enable && apt-get update && apt-get install -y --no-install-recommends python3 make g++ && pnpm install --frozen-lockfile --force --store-dir /root/.local/share/pnpm/store && pnpm db:migrate"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: "postgres://${POSTGRES_USER:-growth_os}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .growth-os/.env (run infinite setup)}@postgres:5432/${POSTGRES_DB:-growth_os}"
+      GROWTH_OS_ENCRYPTION_KEY: ${GROWTH_OS_ENCRYPTION_KEY:?set GROWTH_OS_ENCRYPTION_KEY in .env (copy .env.example; never the old dev default)}
+      GROWTH_OS_READ_TOKEN: ${GROWTH_OS_READ_TOKEN:?set GROWTH_OS_READ_TOKEN in .env (copy .env.example)}
+      GROWTH_OS_OPERATOR_TOKEN: ${GROWTH_OS_OPERATOR_TOKEN:?set GROWTH_OS_OPERATOR_TOKEN in .env (copy .env.example)}
+      GROWTH_OS_WORKSPACE_ROOT: /workspace
+      CI: "true"
+    volumes:
+      - .:/workspace
+      - growth_os_migrate_root_node_modules:/workspace/node_modules
+      - growth_os_migrate_db_node_modules:/workspace/packages/db/node_modules
+      - growth_os_migrate_config_node_modules:/workspace/packages/config/node_modules
+      - growth_os_migrate_core_node_modules:/workspace/packages/core/node_modules
+      - growth_os_migrate_pnpm_store:/root/.local/share/pnpm/store
+
+  app:
+    image: node:20-bookworm-slim
+    restart: unless-stopped
+    working_dir: /workspace
+    command: ["sh", "-lc", "corepack enable && apt-get update && apt-get install -y --no-install-recommends python3 make g++ && pnpm install --frozen-lockfile --force --store-dir /root/.local/share/pnpm/store && pnpm --filter @infinite-os/app dev"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: "postgres://${POSTGRES_USER:-growth_os}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .growth-os/.env (run infinite setup)}@postgres:5432/${POSTGRES_DB:-growth_os}"
+      GROWTH_OS_ENCRYPTION_KEY: ${GROWTH_OS_ENCRYPTION_KEY:?set GROWTH_OS_ENCRYPTION_KEY in .env (copy .env.example; never the old dev default)}
+      GROWTH_OS_READ_TOKEN: ${GROWTH_OS_READ_TOKEN:?set GROWTH_OS_READ_TOKEN in .env (copy .env.example)}
+      GROWTH_OS_OPERATOR_TOKEN: ${GROWTH_OS_OPERATOR_TOKEN:?set GROWTH_OS_OPERATOR_TOKEN in .env (copy .env.example)}
+      GROWTH_OS_WORKSPACE_ROOT: /workspace
+      GROWTH_OS_APP_HOST: 0.0.0.0
+      GROWTH_OS_APP_PORT: 3000
+      CI: "true"
+      # Code identity stamped by `infinite start` (git HEAD, plus -dirty.<hash>
+      # for local edits). app/worker run bind-mounted code under long-lived
+      # processes, so a changed value is config drift that makes `up -d`
+      # recreate them onto the new code; unchanged stays a no-op. postgres
+      # deliberately does NOT get this var — its env must stay stable so it is
+      # never needlessly recreated. migrate doesn't need it: it is a one-shot
+      # that re-runs its full command from the bind mount on every `up`.
+      GROWTH_OS_CODE_VERSION: ${GROWTH_OS_CODE_VERSION:-dev}
+    ports:
+      - "${GROWTH_OS_APP_PORT:-3000}:3000"
+    healthcheck:
+      # node is the image's runtime; bookworm-slim has no curl/wget. start_period
+      # is generous because first boot runs apt-get + pnpm install + native build
+      # before the server listens — failures in that window don't mark it unhealthy.
+      test: ["CMD", "node", "-e", "require('http').get('http://127.0.0.1:3000/health',(r)=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 300s
+    volumes:
+      - .:/workspace
+      - growth_os_app_root_node_modules:/workspace/node_modules
+      - growth_os_app_node_modules:/workspace/apps/app/node_modules
+      - growth_os_app_runtime_node_modules:/workspace/packages/runtime/node_modules
+      - growth_os_app_config_node_modules:/workspace/packages/config/node_modules
+      - growth_os_app_core_node_modules:/workspace/packages/core/node_modules
+      - growth_os_app_db_node_modules:/workspace/packages/db/node_modules
+      - growth_os_app_connectors_node_modules:/workspace/packages/connectors/node_modules
+      - growth_os_app_analytical_engine_node_modules:/workspace/packages/analytical-engine/node_modules
+      - growth_os_app_pnpm_store:/root/.local/share/pnpm/store
+
+  worker:
+    image: node:20-bookworm-slim
+    restart: unless-stopped
+    working_dir: /workspace
+    command: ["sh", "-lc", "corepack enable && apt-get update && apt-get install -y --no-install-recommends python3 make g++ && pnpm install --frozen-lockfile --force --store-dir /root/.local/share/pnpm/store && pnpm --filter @infinite-os/worker dev"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: "postgres://${POSTGRES_USER:-growth_os}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .growth-os/.env (run infinite setup)}@postgres:5432/${POSTGRES_DB:-growth_os}"
+      GROWTH_OS_ENCRYPTION_KEY: ${GROWTH_OS_ENCRYPTION_KEY:?set GROWTH_OS_ENCRYPTION_KEY in .env (copy .env.example; never the old dev default)}
+      GROWTH_OS_READ_TOKEN: ${GROWTH_OS_READ_TOKEN:?set GROWTH_OS_READ_TOKEN in .env (copy .env.example)}
+      GROWTH_OS_OPERATOR_TOKEN: ${GROWTH_OS_OPERATOR_TOKEN:?set GROWTH_OS_OPERATOR_TOKEN in .env (copy .env.example)}
+      GROWTH_OS_WORKSPACE_ROOT: /workspace
+      CI: "true"
+      # See the app service: recreate-on-new-code stamp set by `infinite start`.
+      GROWTH_OS_CODE_VERSION: ${GROWTH_OS_CODE_VERSION:-dev}
+    volumes:
+      - .:/workspace
+      - growth_os_worker_root_node_modules:/workspace/node_modules
+      - growth_os_worker_node_modules:/workspace/apps/worker/node_modules
+      - growth_os_worker_connectors_node_modules:/workspace/packages/connectors/node_modules
+      - growth_os_db_node_modules:/workspace/packages/db/node_modules
+      - growth_os_worker_runtime_node_modules:/workspace/packages/runtime/node_modules
+      - growth_os_worker_config_node_modules:/workspace/packages/config/node_modules
+      - growth_os_worker_core_node_modules:/workspace/packages/core/node_modules
+      - growth_os_worker_pnpm_store:/root/.local/share/pnpm/store
+
+volumes:
+  growth_os_postgres:
+  growth_os_app_pnpm_store:
+  growth_os_worker_pnpm_store:
+  growth_os_app_root_node_modules:
+  growth_os_worker_root_node_modules:
+  growth_os_app_node_modules:
+  growth_os_worker_node_modules:
+  growth_os_worker_connectors_node_modules:
+  growth_os_db_node_modules:
+  growth_os_migrate_root_node_modules:
+  growth_os_migrate_db_node_modules:
+  growth_os_migrate_config_node_modules:
+  growth_os_migrate_core_node_modules:
+  growth_os_migrate_pnpm_store:
+  growth_os_app_runtime_node_modules:
+  growth_os_app_config_node_modules:
+  growth_os_app_core_node_modules:
+  growth_os_app_db_node_modules:
+  growth_os_app_connectors_node_modules:
+  growth_os_app_analytical_engine_node_modules:
+  growth_os_worker_runtime_node_modules:
+  growth_os_worker_config_node_modules:
+  growth_os_worker_core_node_modules:

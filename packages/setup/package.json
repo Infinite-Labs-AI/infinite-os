@@ -1,0 +1,28 @@
+{
+  "name": "@infinite-os/setup",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./dist/src/index.js"
+  },
+  "scripts": {
+    "build": "tsc -b tsconfig.json",
+    "test": "vitest run --root ../.. ../../packages/setup/src",
+    "typecheck": "tsc --noEmit --pretty false"
+  },
+  "dependencies": {
+    "@infinite-os/connectors": "workspace:*",
+    "@infinite-os/db": "workspace:*",
+    "@infinite-os/runtime": "workspace:*",
+    "infinite-tag": "workspace:*"
+  },
+  "peerDependencies": {
+    "playwright": "*"
+  },
+  "peerDependenciesMeta": {
+    "playwright": {
+      "optional": true
+    }
+  }
+}

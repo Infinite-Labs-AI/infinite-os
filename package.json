@@ -1,0 +1,48 @@
+{
+  "name": "infinite-os-runtime",
+  "version": "0.1.0",
+  "description": "Self-hosted growth-analytics runtime for GA4, PostHog, and Stripe.",
+  "author": "Ultima AI, Inc",
+  "private": true,
+  "bin": {
+    "infinite": "./infinite"
+  },
+  "packageManager": "pnpm@10.0.0",
+  "scripts": {
+    "postinstall": "echo 'Infinite OS workspace ready. Run: pnpm typecheck && pnpm test'",
+    "typecheck": "tsc -b --pretty false",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "dev:app": "pnpm --filter @infinite-os/app dev",
+    "dev:worker": "pnpm --filter @infinite-os/worker dev",
+    "db:migrate": "pnpm --filter @infinite-os/db migrate",
+    "prepare": "git config core.hooksPath .githooks || true"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Infinite-Labs-AI/infinite-os.git"
+  },
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/Infinite-Labs-AI/infinite-os/issues"
+  },
+  "homepage": "https://github.com/Infinite-Labs-AI/infinite-os#readme",
+  "devDependencies": {
+    "@eslint/js": "^9.0.0",
+    "@types/node": "^22.0.0",
+    "eslint": "^9.0.0",
+    "prettier": "^3.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.0.0",
+    "vitest": "^3.0.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild",
+      "unicode-animations"
+    ]
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

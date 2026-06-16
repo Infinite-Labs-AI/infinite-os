@@ -1,0 +1,14 @@
+{
+  "name": "@infinite-os/config",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./dist/src/index.js"
+  },
+  "scripts": {
+    "build": "tsc -b tsconfig.json",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit --pretty false"
+  }
+}

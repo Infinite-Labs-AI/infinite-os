@@ -1,0 +1,18 @@
+{
+  "name": "@infinite-os/llm-controller",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./dist/src/index.js"
+  },
+  "scripts": {
+    "build": "tsc -b tsconfig.json",
+    "test": "cd ../.. && vitest run packages/llm-controller/test/controller.test.ts packages/llm-controller/test/founder-question-eval.test.ts",
+    "typecheck": "tsc --noEmit --pretty false"
+  },
+  "dependencies": {
+    "@infinite-os/config": "workspace:*",
+    "@infinite-os/runtime": "workspace:*"
+  }
+}

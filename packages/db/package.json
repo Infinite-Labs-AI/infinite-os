@@ -1,0 +1,23 @@
+{
+  "name": "@infinite-os/db",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./dist/src/index.js"
+  },
+  "scripts": {
+    "build": "tsc -b tsconfig.json",
+    "migrate": "tsx src/migrate.ts",
+    "test": "vitest run --root ../.. ../../packages/db/src/index.test.ts ../../packages/db/test/migrations.test.ts",
+    "typecheck": "tsc --noEmit --pretty false"
+  },
+  "dependencies": {
+    "@infinite-os/core": "workspace:*",
+    "@infinite-os/config": "workspace:*",
+    "pg": "^8.13.0"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.11.0"
+  }
+}

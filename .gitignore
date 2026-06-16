@@ -1,0 +1,63 @@
+.DS_Store
+.vscode/
+
+# Env / secrets — never commit
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+.env.development
+.env.test
+
+# Release-injected OAuth client configs (non-committed secrets dropped by the installer)
+ga4-oauth-client.json
+*.ga4-oauth-client.json
+
+# Runtime / build output
+node_modules/
+.pnpm-store/
+apps/*/dist/
+packages/*/dist/
+apps/*/*.tsbuildinfo
+packages/*/*.tsbuildinfo
+logs/
+testlogs
+tmp/
+data/
+data/*
+export*
+images/
+
+# Local runtime state + secrets (DB url, encryption key, tokens, synced data)
+.growth-os/
+
+# Private keys
+*.ppk
+*.pem
+privvy*
+
+# CLI config (may contain sensitive SSH paths)
+cli-config.yaml
+
+# Local-only working dirs
+ignored/
+.worktrees/
+
+# Release script temp files
+.release_notes.md
+
+# Local planning / working docs — kept on disk, not committed
+docs/superpowers/plans/
+
+# Confidential strategy docs + agent-local state — NEVER commit these.
+# The restructure plan documents the private hosted/IP architecture; it must
+# not enter git history (history ships the day the repo goes public).
+docs/*restructure*
+AGENT_CONTEXT.md
+.claude/
+.omc/
+.omx/
+.context/
+.conductor/
+*.local-copy.md

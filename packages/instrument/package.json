@@ -1,0 +1,30 @@
+{
+  "name": "infinite-tag",
+  "version": "0.1.2",
+  "description": "Founder-run installer that adds analytics (Google Analytics 4, PostHog, X/Twitter Pixel) to your web app — public keys only, idempotent, and reversible.",
+  "keywords": ["analytics","ga4","google-analytics","posthog","twitter-pixel","installer","instrumentation","nextjs","vite","infinite"],
+  "license": "MIT",
+  "author": "Ultima AI, Inc",
+  "repository": { "type": "git", "url": "git+https://github.com/Infinite-Labs-AI/infinite-os.git", "directory": "packages/instrument" },
+  "homepage": "https://github.com/Infinite-Labs-AI/infinite-os#readme",
+  "bugs": { "url": "https://github.com/Infinite-Labs-AI/infinite-os/issues" },
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "bin": {
+    "infinite-tag": "./dist/src/cli.js"
+  },
+  "exports": {
+    ".": "./dist/src/index.js"
+  },
+  "files": [
+    "dist/src"
+  ],
+  "scripts": {
+    "build": "tsc -b tsconfig.json",
+    "prepack": "rm -rf dist && tsc -p tsconfig.build.json",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit --pretty false"
+  }
+}

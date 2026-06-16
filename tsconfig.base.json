@@ -1,0 +1,27 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "baseUrl": ".",
+    "paths": {
+      "@infinite-os/analytical-engine": ["packages/analytical-engine/src/index.ts"],
+      "@infinite-os/config": ["packages/config/src/index.ts"],
+      "@infinite-os/connectors": ["packages/connectors/src/index.ts"],
+      "@infinite-os/core": ["packages/core/src/index.ts"],
+      "@infinite-os/db": ["packages/db/src/index.ts"],
+      "@infinite-os/llm-controller": ["packages/llm-controller/src/index.ts"],
+      "@infinite-os/metadata": ["packages/metadata/src/index.ts"],
+      "@infinite-os/runtime": ["packages/runtime/src/index.ts"]
+    },
+    "strict": true,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "composite": true,
+    "rootDir": ".",
+    "outDir": "dist",
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true
+  }
+}

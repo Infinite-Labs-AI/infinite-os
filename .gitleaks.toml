@@ -1,0 +1,19 @@
+# Gitleaks config for CI's working-tree scan (see ci.yml "Secret scan" step).
+# Test fixtures and documented examples are deliberately secret-shaped
+# (redaction/sanitization tests need realistic inputs) — allowlist them.
+# Real credentials must never live in these paths anyway; the repo tripwire
+# and review cover them, and the public repo ships with fresh history.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "secret-shaped test fixtures and documentation examples"
+paths = [
+  '''^tests/''',
+  '''\.test\.(ts|tsx)$''',
+  '''^apps/[^/]+/test/''',
+  '''^packages/[^/]+/test/''',
+  '''^docs/''',
+  '''\.env\.example$''',
+]

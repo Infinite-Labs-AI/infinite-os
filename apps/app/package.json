@@ -1,0 +1,20 @@
+{
+  "name": "@infinite-os/app",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -b tsconfig.json",
+    "dev": "tsx src/index.ts",
+    "test": "vitest run --root ../.. ../../apps/app/test/app.test.ts",
+    "typecheck": "tsc --noEmit --pretty false"
+  },
+  "dependencies": {
+    "@infinite-os/analytical-engine": "workspace:*",
+    "@infinite-os/config": "workspace:*",
+    "@infinite-os/db": "workspace:*",
+    "@infinite-os/llm-controller": "workspace:*",
+    "@infinite-os/runtime": "workspace:*",
+    "fastify": "^5.0.0"
+  }
+}

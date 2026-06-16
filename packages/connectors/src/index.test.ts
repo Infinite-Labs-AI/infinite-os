@@ -1,0 +1,2053 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { describe, expect, it } from "vitest";
+import { encryptCredentialPayload } from "@infinite-os/core";
+import { type InfiniteOsDb } from "@infinite-os/db";
+
+import {
+  connectorFor,
+  connectorProviderForSetupProvider,
+  ga4ConnectSourceFromSetup,
+  posthogConnectSourceFromSetup,
+  xConnectSourceFromSetup
+} from "./index.js";
+
+const TEST_ENCRYPTION_KEY = "connector-test-encryption-key";
+
+describe("first-phase connector registry", () => {
+  it("registers GA4, PostHog, Stripe, X, Shopify, and Meta Ads connectors", () => {
+    expect(connectorFor("google_analytics_4").provider).toBe("google_analytics_4");
+    expect(connectorFor("posthog").provider).toBe("posthog");
+    expect(connectorFor("stripe").provider).toBe("stripe");
+    expect(connectorFor("x").provider).toBe("x");
+    expect(connectorFor("shopify").provider).toBe("shopify");
+    expect(connectorFor("meta_ads").provider).toBe("meta_ads");
+  });
+});
+
+describe("setup credential adapters", () => {
+  it("maps setup provider ids to explicit connector provider ids", () => {
+    expect(connectorProviderForSetupProvider("ga4")).toBe("google_analytics_4");
+    expect(connectorProviderForSetupProvider("posthog")).toBe("posthog");
+    expect(connectorProviderForSetupProvider("x")).toBe("x");
+  });
+
+  it("builds GA4 connect_source inputs from setup output without guessing ids", () => {
+    expect(
+      ga4ConnectSourceFromSetup({
+        propertyId: "properties/123",
+        accessToken: "ga4-token",
+        apiBaseUrl: "https://analyticsdata.googleapis.com/v1beta"
+      })
+    ).toEqual({
+      provider: "google_analytics_4",
+      connectionName: "Google Analytics 4",
+      credentialKind: "oauth_access_token",
+      accountExternalId: "properties/123",
+      credentialPayload: {
+        mode: "live",
+        propertyId: "properties/123",
+        accessToken: "ga4-token",
+        apiBaseUrl: "https://analyticsdata.googleapis.com/v1beta"
+      }
+    });
+  });
+
+  it("supports PostHog personal API keys or OAuth access tokens explicitly", () => {
+    expect(
+      posthogConnectSourceFromSetup({
+        projectId: "42",
+        personalApiKey: "phx_personal",
+        apiHost: "https://us.i.posthog.com"
+      })
+    ).toMatchObject({
+      provider: "posthog",
+      credentialKind: "personal_api_key",
+      accountExternalId: "42",
+      credentialPayload: {
+        mode: "live",
+        projectId: "42",
+        personalApiKey: "phx_personal",
+        apiHost: "https://us.i.posthog.com"
+      }
+    });
+    expect(
+      posthogConnectSourceFromSetup({
+        projectId: 84,
+        accessToken: "oauth-token",
+        apiHost: "https://eu.i.posthog.com"
+      })
+    ).toMatchObject({
+      provider: "posthog",
+      credentialKind: "oauth_access_token",
+      accountExternalId: "84",
+      credentialPayload: {
+        mode: "live",
+        projectId: 84,
+        accessToken: "oauth-token",
+        apiHost: "https://eu.i.posthog.com"
+      }
+    });
+  });
+
+  it("builds X connector payloads from setup output using raw bearer credentials only", () => {
+    expect(
+      xConnectSourceFromSetup({
+        bearerToken: "x-secret",
+        userId: "99",
+        username: "@growthos"
+      })
+    ).toEqual({
+      provider: "x",
+      connectionName: "X",
+      credentialKind: "bearer_token",
+      accountExternalId: "99",
+      credentialPayload: {
+        mode: "live",
+        bearerToken: "x-secret",
+        userId: "99",
+        username: "growthos"
+      }
+    });
+  });
+});
+
+describe("live provider clients", () => {
+  it("tests GA4 credentials and extracts overview + page runReport rows", async () => {
+    const requests: Array<{ url: string; body: Ga4ReportBody | null; authorization: string | null }> = [];
+    await withMockFetch(async (url, init) => {
+      const body = init.body ? (JSON.parse(String(init.body)) as Ga4ReportBody) : null;
+      requests.push({
+        url,
+        body,
+        authorization: headerValue(init.headers, "Authorization")
+      });
+      // Call-aware mock: testConnection asks for a single `date` dim; Report A is
+      // overview-shaped (9 dims / 9 metrics); Report C is page-shaped (4 dims /
+      // 5 metrics, includes pagePath). A shared single-shape mock mis-parses.
+      if (isGa4PageReportBody(body)) {
+        return jsonResponse({ rows: [ga4PageReportRowFixture()] });
+      }
+      if (isGa4OverviewReportBody(body)) {
+        return jsonResponse({ rows: [ga4OverviewReportRowFixture()] });
+      }
+      // testConnection probe.
+      return jsonResponse({ rows: [] });
+    }, async () => {
+      const db = fakeDb({
+        credential: {
+          credential_kind: "oauth_access_token",
+          encrypted_payload: encryptedCredential({
+            mode: "live",
+            propertyId: "properties/123",
+            accessToken: "ga4-token",
+            apiBaseUrl: "https://ga4.test"
+          })
+        }
+      });
+      const connector = connectorFor("google_analytics_4");
+      await expect(connector.testConnection(db, request("google_analytics_4"))).resolves.toMatchObject({
+        ok: true,
+        mode: "live",
+        accountExternalId: "properties/123"
+      });
+      const rows = await connector.extract(db, request("google_analytics_4"), {
+        cursorKey: "ga4_run_report",
+        cursorStart: null,
+        cursorEnd: "2026-06-03T00:00:00.000Z",
+        refreshWindowDays: 7,
+        mode: "live"
+      });
+
+      // requests[0] = testConnection, [1] = Report A (overview), [2] = Report C (page).
+      expect(requests[0]).toMatchObject({
+        url: "https://ga4.test/properties/123:runReport",
+        authorization: "Bearer ga4-token"
+      });
+      expect(requests[1].body).toMatchObject({
+        dimensions: expect.arrayContaining([
+          { name: "landingPagePlusQueryString" },
+          { name: "sessionSource" },
+          { name: "sessionDefaultChannelGroup" },
+          { name: "hostName" },
+          { name: "deviceCategory" }
+        ]),
+        metrics: expect.arrayContaining([
+          { name: "newUsers" },
+          { name: "screenPageViews" },
+          { name: "engagedSessions" },
+          { name: "engagementRate" },
+          { name: "averageSessionDuration" },
+          { name: "keyEvents" }
+        ])
+      });
+      expect(requests[2].body).toMatchObject({
+        dimensions: expect.arrayContaining([
+          { name: "hostName" },
+          { name: "pagePath" },
+          { name: "pageTitle" }
+        ]),
+        metrics: expect.arrayContaining([
+          { name: "screenPageViews" },
+          { name: "sessions" },
+          { name: "engagedSessions" },
+          { name: "averageSessionDuration" },
+          { name: "keyEvents" }
+        ])
+      });
+
+      // Regression guard: GA4 caps a single runReport at 9 dimensions. pageReferrer was
+      // dropped to fit; re-adding a 10th dimension would 400 against the live API.
+      expect(ga4DimNames(requests[1].body)).toHaveLength(9);
+      expect(ga4DimNames(requests[1].body)).not.toContain("pageReferrer");
+
+      const overviewRecord = rows.find((row) => row.objectType === "ga4_run_report");
+      const pageRecord = rows.find((row) => row.objectType === "ga4_page_report");
+      expect(overviewRecord).toMatchObject({
+        externalId: "ga4:20260601:United Kingdom:/:google:organic:brand:Organic Search:rtk.dev:desktop",
+        objectType: "ga4_run_report",
+        payload: {
+          kind: "overview",
+          reportingDate: "2026-06-01",
+          country: "United Kingdom",
+          sessionDefaultChannelGroup: "Organic Search",
+          hostName: "rtk.dev",
+          deviceCategory: "desktop",
+          sessions: 10,
+          totalUsers: 12,
+          newUsers: 7,
+          screenPageViews: 30,
+          engagedSessions: 6,
+          engagementRate: 0.75,
+          averageSessionDuration: 95.5,
+          keyEvents: 3
+        }
+      });
+      expect(pageRecord).toMatchObject({
+        objectType: "ga4_page_report",
+        payload: {
+          kind: "page",
+          reportingDate: "2026-06-01",
+          hostName: "rtk.dev",
+          pagePath: "/pricing",
+          pageTitle: "Pricing",
+          screenPageViews: 42,
+          sessions: 18,
+          engagedSessions: 14,
+          averageSessionDuration: 73.5,
+          keyEvents: 6
+        }
+      });
+    });
+  });
+
+  it("falls back from keyEvents to conversions on a GA4 400 and maps it into keyEvents", async () => {
+    const requests: Array<{ body: Ga4ReportBody | null }> = [];
+    await withMockFetch(async (_url, init) => {
+      const body = init.body ? (JSON.parse(String(init.body)) as Ga4ReportBody) : null;
+      requests.push({ body });
+      if (!body) {
+        return jsonResponse({ rows: [] });
+      }
+      const metricNames = body.metrics.map((entry) => entry.name);
+      // First time a report asks for keyEvents, reject with a GA4-style 400 naming the
+      // invalid metric. fetchJson throws on 400; the connector retries with conversions.
+      if (metricNames.includes("keyEvents")) {
+        return new Response(
+          JSON.stringify({
+            error: { code: 400, message: "Field keyEvents is not a valid metric." }
+          }),
+          { status: 400, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (isGa4PageReportBody(body)) {
+        return jsonResponse({ rows: [ga4PageReportRowFixture({ keyEvents: "11" })] });
+      }
+      if (isGa4OverviewReportBody(body)) {
+        return jsonResponse({ rows: [ga4OverviewReportRowFixture({ keyEvents: "9" })] });
+      }
+      return jsonResponse({ rows: [] });
+    }, async () => {
+      const db = fakeDb({
+        credential: {
+          credential_kind: "oauth_access_token",
+          encrypted_payload: encryptedCredential({
+            mode: "live",
+            propertyId: "properties/123",
+            accessToken: "ga4-token",
+            apiBaseUrl: "https://ga4.test"
+          })
+        }
+      });
+      const connector = connectorFor("google_analytics_4");
+      const rows = await connector.extract(db, request("google_analytics_4"), {
+        cursorKey: "ga4_run_report",
+        cursorStart: null,
+        cursorEnd: "2026-06-03T00:00:00.000Z",
+        refreshWindowDays: 7,
+        mode: "live"
+      });
+
+      // Each report retried with `conversions` substituted for keyEvents.
+      const retried = requests.filter((entry) => entry.body?.metrics.some((m) => m.name === "conversions"));
+      expect(retried.length).toBe(2);
+      for (const entry of retried) {
+        expect(entry.body?.metrics.map((m) => m.name)).not.toContain("keyEvents");
+      }
+
+      const overviewRecord = rows.find((row) => row.objectType === "ga4_run_report");
+      const pageRecord = rows.find((row) => row.objectType === "ga4_page_report");
+      // The conversions value is mapped back into the keyEvents field positionally.
+      expect((overviewRecord?.payload as { keyEvents: number }).keyEvents).toBe(9);
+      expect((pageRecord?.payload as { keyEvents: number }).keyEvents).toBe(11);
+    });
+  });
+
+  it("plans PostHog cursor windows and maps event properties", async () => {
+    const requests: Array<{ body: Record<string, unknown> }> = [];
+    await withMockFetch(async (_url, init) => {
+      requests.push({ body: JSON.parse(String(init.body)) });
+      return jsonResponse({
+        columns: [
+          { name: "uuid" },
+          { name: "event" },
+          { name: "distinct_id" },
+          { name: "person_id" },
+          { name: "properties" },
+          { name: "timestamp" }
+        ],
+        results: [
+          [
+            "evt_1",
+            "signup",
+            "anon_1",
+            "person_1",
+            JSON.stringify({
+              email: "founder@example.com",
+              $session_id: "session_1",
+              $current_url: "/pricing",
+              $referrer: "https://newsletter.example",
+              utm_source: "newsletter",
+              utm_medium: "email",
+              utm_campaign: "launch"
+            }),
+            "2026-06-02T10:00:00.000Z"
+          ]
+        ]
+      });
+    }, async () => {
+      const db = fakeDb({
+        cursorValue: "2026-06-01T00:00:00.000Z",
+        credential: {
+          credential_kind: "personal_api_key",
+          encrypted_payload: encryptedCredential({
+            mode: "live",
+            projectId: 42,
+            personalApiKey: "ph-key",
+            apiHost: "https://posthog.test"
+          })
+        }
+      });
+      const connector = connectorFor("posthog");
+      await expect(connector.planSync(db, request("posthog"))).resolves.toMatchObject({
+        cursorKey: "posthog_event",
+        cursorStart: "2026-06-01T00:00:00.000Z",
+        mode: "live"
+      });
+      const rows = await connector.extract(db, request("posthog"), {
+        cursorKey: "posthog_event",
+        cursorStart: "2026-06-01T00:00:00.000Z",
+        cursorEnd: "2026-06-03T00:00:00.000Z",
+        refreshWindowDays: 7,
+        mode: "live"
+      });
+
+      expect(rows[0]).toMatchObject({
+        externalId: "posthog:evt_1",
+        objectType: "posthog_event",
+        payload: {
+          eventId: "evt_1",
+          eventName: "signup",
+          personId: "person_1",
+          sessionId: "session_1",
+          utmSource: "newsletter"
+        }
+      });
+      const query = (requests[0]?.body.query as { query?: string; values?: Record<string, unknown> } | undefined);
+      expect(query?.query).toContain("toDateTime('2026-06-01 00:00:00')");
+      expect(query?.query).not.toContain("{start_time}");
+      expect(query?.values).toEqual({});
+    });
+  });
+
+  it("treats an empty PostHog cursor as no cursor", async () => {
+    const requests: Array<{ body: Record<string, unknown> }> = [];
+    await withMockFetch(async (_url, init) => {
+      requests.push({ body: JSON.parse(String(init.body)) });
+      return jsonResponse({
+        columns: [{ name: "uuid" }, { name: "event" }, { name: "distinct_id" }, { name: "timestamp" }],
+        results: []
+      });
+    }, async () => {
+      const db = fakeDb({
+        cursorValue: "",
+        credential: {
+          credential_kind: "personal_api_key",
+          encrypted_payload: encryptedCredential({
+            mode: "live",
+            projectId: 42,
+            personalApiKey: "ph-key",
+            apiHost: "https://posthog.test"
+          })
+        }
+      });
+      const connector = connectorFor("posthog");
+      const plan = await connector.planSync(db, request("posthog"));
+
+      expect(plan.cursorStart).toBeNull();
+      await expect(connector.extract(db, request("posthog"), plan)).resolves.toEqual([]);
+      const query = (requests[0]?.body.query as { query?: string; values?: Record<string, unknown> } | undefined);
+      expect(query?.query).toMatch(/where timestamp >= toDateTime\('\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}'\)/);
+      expect(query?.values).toEqual({});
+    });
+  });
+
+  it("accepts a PostHog OAuth access token for queryability checks", async () => {
+    const requests: Array<{ url: string; authorization: string | null }> = [];
+    await withMockFetch(async (url, init) => {
+      requests.push({
+        url,
+        authorization: headerValue(init.headers, "Authorization")
+      });
+      return jsonResponse({ results: [{ ok: 1 }] });
+    }, async () => {
+      const db = fakeDb({
+        credential: {
+          credential_kind: "oauth_access_token",
+          encrypted_payload: encryptedCredential({
+            mode: "live",
+            projectId: "oauth-project",
+            accessToken: "oauth-secret",
+            apiHost: "https://oauth.posthog.test"
+          })
+        }
+      });
+      await expect(connectorFor("posthog").testConnection(db, request("posthog"))).resolves.toMatchObject({
+        ok: true,
+        mode: "live",
+        accountExternalId: "oauth-project"
+      });
+      expect(requests).toEqual([
+        {
+          url: "https://oauth.posthog.test/api/projects/oauth-project/query/",
+          authorization: "Bearer oauth-secret"
+        }
+      ]);
+    });
+  });
+
+  it("paginates Stripe invoices and preserves line-item references", async () => {
+    const urls: string[] = [];
+    await withMockFetch(async (url) => {
+      urls.push(url);
+      if (url.includes("/v1/customers")) {
+        return jsonResponse({ data: [], has_more: false });
+      }
+      if (url.includes("starting_after=in_1")) {
+        return jsonResponse({
+          data: [
+            stripeInvoice("in_2", {
+              lines: { data: [stripeLine("il_2")], has_more: false }
+            })
+          ],
+          has_more: false
+        });
+      }
+      return jsonResponse({
+        data: [
+          stripeInvoice("in_1", {
+            lines: { data: [stripeLine("il_1")], has_more: false }
+          })
+        ],
+        has_more: true
+      });
+    }, async () => {
+      const db = fakeDb({
+        credential: {
+          credential_kind: "api_key",
+          encrypted_payload: encryptedCredential({
+            mode: "live",
+            secretKey: "sk_test",
+            apiBaseUrl: "https://stripe.test"
+          })
+        }
+      });
+      const connector = connectorFor("stripe");
+      await expect(connector.testConnection(db, request("stripe"))).resolves.toMatchObject({
+        ok: true,
+        mode: "live"
+      });
+      const rows = await connector.extract(db, request("stripe"), {
+        cursorKey: "stripe_invoice",
+        cursorStart: "2026-06-01T00:00:00.000Z",
+        cursorEnd: "2026-06-03T00:00:00.000Z",
+        refreshWindowDays: 30,
+        mode: "live"
+      });
+
+      expect(urls.some((url) => url.includes("starting_after=in_1"))).toBe(true);
+      expect(rows).toHaveLength(2);
+      expect(rows[0]).toMatchObject({
+        objectType: "stripe_invoice",
+        payload: {
+          invoiceId: "in_1",
+          customerId: "cus_1",
+          externalOrderId: "order_1",
+          lines: [{ lineId: "il_1", productId: "prod_1", priceId: "price_1" }]
+        }
+      });
+    });
+  });
+
+  it("tests Shopify credentials and extracts order rows from GraphQL Admin", async () => {
+    const requests: Array<{ url: string; body: unknown; token: string | null }> = [];
+    await withMockFetch(async (url, init) => {
+      const body = init.body ? JSON.parse(String(init.body)) : null;
+      requests.push({
+        url,
+        body,
+        token: headerValue(init.headers, "X-Shopify-Access-Token")
+      });
+      if (typeof body?.query === "string" && body.query.includes("shop {")) {
+        return jsonResponse({ data: { shop: { myshopifyDomain: "demo-shop.myshopify.com" } } });
+      }
+      if (typeof body?.query === "string" && body.query.includes("products(")) {
+        return jsonResponse({
+          data: {
+            products: {
+              pageInfo: { hasNextPage: false, endCursor: null },
+              edges: [
+                {
+                  node: {
+                    id: "gid://shopify/Product/200",
+                    title: "Logo Tee",
+                    vendor: "Infinite OS",
+                    productType: "Apparel",
+                    status: "ACTIVE",
+                    createdAt: "2026-05-01T10:00:00.000Z",
+                    updatedAt: "2026-06-02T09:00:00.000Z"
+                  }
+                }
+              ]
+            }
+          }
+        });
+      }
+      return jsonResponse({
+        data: {
+          orders: {
+            pageInfo: { hasNextPage: false, endCursor: null },
+            edges: [
+              {
+                node: {
+                  id: "gid://shopify/Order/1001",
+                  name: "#1001",
+                  createdAt: "2026-06-02T10:00:00.000Z",
+                  processedAt: "2026-06-02T10:05:00.000Z",
+                  displayFinancialStatus: "PAID",
+                  displayFulfillmentStatus: "FULFILLED",
+                  customer: {
+                    id: "gid://shopify/Customer/501",
+                    email: "buyer@example.com"
+                  },
+                  currentSubtotalPriceSet: {
+                    shopMoney: { amount: "100.00", currencyCode: "USD" }
+                  },
+                  currentTotalTaxSet: {
+                    shopMoney: { amount: "5.00", currencyCode: "USD" }
+                  },
+                  currentTotalDiscountsSet: {
+                    shopMoney: { amount: "10.00", currencyCode: "USD" }
+                  },
+                  currentTotalPriceSet: {
+                    shopMoney: { amount: "95.00", currencyCode: "USD" }
+                  },
+                  lineItems: {
+                    edges: [
+                      {
+                        node: {
+                          id: "gid://shopify/LineItem/1",
+                          sku: "tee-1",
+                          quantity: 2,
+                          name: "Logo Tee",
+                          originalUnitPriceSet: {
+                            shopMoney: { amount: "50.00", currencyCode: "USD" }
+                          },
+                          product: {
+                            id: "gid://shopify/Product/200",
+                            title: "Logo Tee",
+                            vendor: "Infinite OS",
+                            productType: "Apparel",
+                            status: "ACTIVE"
+                          },
+                          variant: { id: "gid://shopify/ProductVariant/300" }
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        }
+      });
+    }, async () => {
+      const db = fakeDb({
+        credential: {
+          credential_kind: "admin_api_access_token",
+          encrypted_payload: encryptedCredential({
+            mode: "live",
+            storeDomain: "demo-shop.myshopify.com",
+            adminAccessToken: "shpat_test",
+            apiVersion: "2026-01"
+          })
+        }
+      });
+      const connector = connectorFor("shopify");
+      await expect(connector.testConnection(db, request("shopify"))).resolves.toMatchObject({
+        ok: true,
+        mode: "live",
+        provider: "shopify",
+        accountExternalId: "demo-shop.myshopify.com"
+      });
+      const rows = await connector.extract(db, request("shopify"), {
+        cursorKey: "shopify_order",
+        cursorStart: "2026-06-01T00:00:00.000Z",
+        cursorEnd: "2026-06-03T00:00:00.000Z",
+        refreshWindowDays: 30,
+        mode: "live"
+      });
+
+      expect(requests[0]).toMatchObject({
+        url: "https://demo-shop.myshopify.com/admin/api/2026-01/graphql.json",
+        token: "shpat_test"
+      });
+      expect(requests[1]?.body).toMatchObject({
+        variables: expect.objectContaining({ cursor: null })
+      });
+      expect(String((requests[1]?.body as { query?: string } | undefined)?.query ?? "")).toContain("orders(");
+      expect(String((requests[2]?.body as { query?: string } | undefined)?.query ?? "")).toContain("products(");
+      expect(rows[0]).toMatchObject({
+        externalId: "shopify:gid://shopify/Order/1001",
+        objectType: "shopify_order",
+        payload: {
+          orderId: "gid://shopify/Order/1001",
+          orderName: "#1001",
+          customerEmail: "buyer@example.com",
+          currency: "USD",
+          totalPriceAmount: 9500,
+          lineItems: [
+            {
+              lineItemId: "gid://shopify/LineItem/1",
+              productId: "gid://shopify/Product/200",
+              variantId: "gid://shopify/ProductVariant/300",
+              quantity: 2,
+              lineTotalAmount: 10000
+            }
+          ]
+        }
+      });
+      expect(rows[1]).toMatchObject({
+        externalId: "shopify_product:gid://shopify/Product/200",
+        objectType: "shopify_product",
+        payload: {
+          productId: "gid://shopify/Product/200",
+          title: "Logo Tee",
+          vendor: "Infinite OS",
+          productType: "Apparel",
+          status: "ACTIVE"
+        }
+      });
+    });
+  });
+
+  it("rejects invalid Shopify store domains before sending the admin token", async () => {
+    const requests: string[] = [];
+    await withMockFetch(async (url) => {
+      requests.push(url);
+      return jsonResponse({});
+    }, async () => {
+      const db = fakeDb({
+        credential: {
+          credential_kind: "admin_api_access_token",
+          encrypted_payload: encryptedCredential({
+            mode: "live",
+            storeDomain: "evil.example.com",
+            adminAccessToken: "shpat_test"
+          })
+        }
+      });
+      await expect(connectorFor("shopify").testConnection(db, request("shopify"))).rejects.toThrow(/myshopify\.com/);
+      expect(requests).toHaveLength(0);
+    });
+  });
+
+  it("paginates Shopify order line items past the first 100 rows", async () => {
+    await withMockFetch(async (_url, init) => {
+      const body = init.body ? JSON.parse(String(init.body)) : null;
+      if (typeof body?.query === "string" && body.query.includes("shop {")) {
+        return jsonResponse({ data: { shop: { myshopifyDomain: "demo-shop.myshopify.com" } } });
+      }
+      if (typeof body?.query === "string" && body.query.includes("order(id: $orderId)")) {
+        return jsonResponse({
+          data: {
+            order: {
+              lineItems: {
+                pageInfo: { hasNextPage: false, endCursor: null },
+                edges: [
+                  {
+                    node: {
+                      id: "gid://shopify/LineItem/2",
+                      sku: "tee-2",
+                      quantity: 1,
+                      name: "Backup Tee",
+                      originalUnitPriceSet: { shopMoney: { amount: "25.00", currencyCode: "USD" } },
+                      product: {
+                        id: "gid://shopify/Product/201",
+                        title: "Backup Tee",
+                        vendor: "Infinite OS",
+                        productType: "Apparel",
+                        status: "ACTIVE"
+                      },
+                      variant: { id: "gid://shopify/ProductVariant/301" }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        });
+      }
+      if (typeof body?.query === "string" && body.query.includes("products(")) {
+        return jsonResponse({
+          data: { products: { pageInfo: { hasNextPage: false, endCursor: null }, edges: [] } }
+        });
+      }
+      return jsonResponse({
+        data: {
+          orders: {
+            pageInfo: { hasNextPage: false, endCursor: null },
+            edges: [
+              {
+                node: {
+                  id: "gid://shopify/Order/1001",
+                  name: "#1001",
+                  createdAt: "2026-06-02T10:00:00.000Z",
+                  processedAt: "2026-06-02T10:05:00.000Z",
+                  displayFinancialStatus: "PAID",
+                  displayFulfillmentStatus: "FULFILLED",
+                  customer: { id: "gid://shopify/Customer/501", email: "buyer@example.com" },
+                  currentSubtotalPriceSet: { shopMoney: { amount: "125.00", currencyCode: "USD" } },
+                  currentTotalTaxSet: { shopMoney: { amount: "5.00", currencyCode: "USD" } },
+                  currentTotalDiscountsSet: { shopMoney: { amount: "0.00", currencyCode: "USD" } },
+                  currentTotalPriceSet: { shopMoney: { amount: "130.00", currencyCode: "USD" } },
+                  lineItems: {
+                    pageInfo: { hasNextPage: true, endCursor: "cursor-1" },
+                    edges: [
+                      {
+                        node: {
+                          id: "gid://shopify/LineItem/1",
+                          sku: "tee-1",
+                          quantity: 2,
+                          name: "Logo Tee",
+                          originalUnitPriceSet: { shopMoney: { amount: "50.00", currencyCode: "USD" } },
+                          product: {
+                            id: "gid://shopify/Product/200",
+                            title: "Logo Tee",
+                            vendor: "Infinite OS",
+                            productType: "Apparel",
+                            status: "ACTIVE"
+                          },
+                          variant: { id: "gid://shopify/ProductVariant/300" }
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        }
+      });
+    }, async () => {
+      const db = fakeDb({
+        credential: {
+          credential_kind: "admin_api_access_token",
+          encrypted_payload: encryptedCredential({
+            mode: "live",
+            storeDomain: "demo-shop.myshopify.com",
+            adminAccessToken: "shpat_test",
+            apiVersion: "2026-01"
+          })
+        }
+      });
+      const rows = await connectorFor("shopify").extract(db, request("shopify"), {
+        cursorKey: "shopify_order",
+        cursorStart: "2026-06-01T00:00:00.000Z",
+        cursorEnd: "2026-06-03T00:00:00.000Z",
+        refreshWindowDays: 30,
+        mode: "live"
+      });
+      expect(rows[0]).toMatchObject({
+        payload: {
+          lineItems: [
+            expect.objectContaining({ lineItemId: "gid://shopify/LineItem/1" }),
+            expect.objectContaining({ lineItemId: "gid://shopify/LineItem/2" })
+          ]
+        }
+      });
+    });
+  });
+
+  it("tests Meta Ads credentials and extracts daily campaign insight rows", async () => {
+    const requests: Array<{ url: string; authorization: string | null }> = [];
+    await withMockFetch(async (url, init) => {
+      requests.push({
+        url,
+        authorization: headerValue(init.headers, "Authorization")
+      });
+      return jsonResponse({
+        data: [
+          {
+            campaign_id: "1200000001",
+            campaign_name: "Scale Growth",
+            date_start: "2026-06-01",
+            spend: "123.45",
+            clicks: "89",
+            impressions: "4567",
+            reach: "3200",
+            cpm: "27.03",
+            cpc: "1.39",
+            ctr: "1.95"
+          }
+        ],
+        paging: {}
+      });
+    }, async () => {
+      const db = fakeDb({
+        credential: {
+          credential_kind: "marketing_api_access_token",
+          encrypted_payload: encryptedCredential({
+            mode: "live",
+            adAccountId: "1234567890",
+            accessToken: "meta-access-token",
+            apiVersion: "v24.0"
+          })
+        }
+      });
+      const connector = connectorFor("meta_ads");
+      await expect(connector.testConnection(db, request("meta_ads"))).resolves.toMatchObject({
+        ok: true,
+        mode: "live",
+        provider: "meta_ads",
+        accountExternalId: "act_1234567890"
+      });
+      const rows = await connector.extract(db, request("meta_ads"), {
+        cursorKey: "meta_ads_campaign_daily",
+        cursorStart: "2026-06-01T00:00:00.000Z",
+        cursorEnd: "2026-06-03T00:00:00.000Z",
+        refreshWindowDays: 30,
+        mode: "live"
+      });
+
+      expect(requests[0]).toMatchObject({
+        url: expect.stringContaining("https://graph.facebook.com/v24.0/act_1234567890/insights"),
+        authorization: "Bearer meta-access-token"
+      });
+      expect(requests[0]?.url).not.toContain("access_token=");
+      expect(requests[1]?.url).toContain("time_increment=1");
+      expect(requests[1]?.url).toContain("campaign_id%2Ccampaign_name%2Cdate_start%2Cspend%2Cclicks%2Cimpressions%2Creach%2Ccpm%2Ccpc%2Cctr");
+      expect(rows[0]).toMatchObject({
+        externalId: "meta_ads:act_1234567890:1200000001:2026-06-01",
+        objectType: "meta_ads_campaign_daily",
+        payload: {
+          adAccountId: "act_1234567890",
+          campaignId: "1200000001",
+          campaignName: "Scale Growth",
+          occurredOn: "2026-06-01",
+          spend: 123.45,
+          clicks: 89,
+          impressions: 4567,
+          reach: 3200
+        }
+      });
+    });
+  });
+
+  it("uses Meta Ads backfill request options when planning and extracting", async () => {
+    const requests: Array<{ url: string; authorization: string | null }> = [];
+    await withMockFetch(async (url, init) => {
+      requests.push({
+        url,
+        authorization: headerValue(init.headers, "Authorization")
+      });
+      return jsonResponse({
+        data: [
+          {
+            campaign_id: "1200000001",
+            campaign_name: "Scale Growth",
+            date_start: "2026-06-01",
+            spend: "123.45",
+            clicks: "89",
+            impressions: "4567",
+            reach: "3200"
+          }
+        ],
+        paging: {}
+      });
+    }, async () => {
+      const db = fakeDb({
+        credential: {
+          credential_kind: "marketing_api_access_token",
+          encrypted_payload: encryptedCredential({
+            mode: "live",
+            adAccountId: "1234567890",
+            accessToken: "meta-access-token",
+            apiVersion: "v24.0"
+          })
+        }
+      });
+      const connector = connectorFor("meta_ads");
+      const sixMonthPlan = await connector.planSync(db, {
+        ...request("meta_ads"),
+        backfillWindow: "6_months",
+        refreshWindowDays: 180
+      });
+      expect(sixMonthPlan).toMatchObject({
+        cursorKey: "meta_ads_campaign_daily",
+        refreshWindowDays: 180,
+        backfillWindow: "6_months"
+      });
+
+      const allTimePlan = await connector.planSync(db, {
+        ...request("meta_ads"),
+        backfillWindow: "all_time"
+      });
+      const rows = await connector.extract(
+        db,
+        { ...request("meta_ads"), backfillWindow: "all_time" },
+        allTimePlan
+      );
+
+      expect(requests[0]?.url).toContain("date_preset=maximum");
+      expect(requests[0]?.url).not.toContain("time_range=");
+      expect(requests[0]?.authorization).toBe("Bearer meta-access-token");
+      expect(rows[0]).toMatchObject({
+        externalId: "meta_ads:act_1234567890:1200000001:2026-06-01"
+      });
+    });
+  });
+
+  it("ignores an existing Meta Ads cursor when planning an explicit backfill", async () => {
+    const requests: Array<{ url: string; authorization: string | null }> = [];
+    await withMockFetch(async (url, init) => {
+      requests.push({
+        url,
+        authorization: headerValue(init.headers, "Authorization")
+      });
+      return jsonResponse({
+        data: [
+          {
+            campaign_id: "1200000001",
+            campaign_name: "Scale Growth",
+            date_start: "2026-03-17",
+            spend: "8.29",
+            clicks: "37",
+            impressions: "1314"
+          }
+        ],
+        paging: {}
+      });
+    }, async () => {
+      const db = fakeDb({
+        cursorValue: "2026-06-05T04:08:40.304Z",
+        credential: {
+          credential_kind: "marketing_api_access_token",
+          encrypted_payload: encryptedCredential({
+            mode: "live",
+            adAccountId: "1234567890",
+            accessToken: "meta-access-token",
+            apiVersion: "v24.0"
+          })
+        }
+      });
+      const connector = connectorFor("meta_ads");
+      const plan = await connector.planSync(db, {
+        ...request("meta_ads"),
+        mode: "backfill",
+        refreshWindowDays: 120
+      });
+
+      await connector.extract(db, { ...request("meta_ads"), mode: "backfill", refreshWindowDays: 120 }, plan);
+
+      const queryUrl = new URL(requests[0]?.url ?? "");
+      const timeRange = JSON.parse(queryUrl.searchParams.get("time_range") ?? "{}") as {
+        since?: string;
+        until?: string;
+      };
+      expect(timeRange.since).not.toBe("2026-06-05");
+      expect(timeRange.since).toMatch(/20\d\d-\d\d-\d\d/);
+      expect(requests[0]?.authorization).toBe("Bearer meta-access-token");
+    });
+  });
+
+  it("supports Meta Ads extraction through a configured MCP stdio command", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "growth-os-meta-mcp-"));
+    const script = join(dir, "server.mjs");
+    writeFileSync(
+      script,
+      `
+import process from "node:process";
+let buffer = Buffer.alloc(0);
+function send(message) {
+  const body = Buffer.from(JSON.stringify(message), "utf8");
+  process.stdout.write(\`Content-Length: \${body.length}\\r\\n\\r\\n\`);
+  process.stdout.write(body);
+}
+function handle(message) {
+  if (message.method === "initialize" && message.id) {
+    send({ jsonrpc: "2.0", id: message.id, result: { protocolVersion: "2025-03-26", capabilities: {}, serverInfo: { name: "fake-meta-mcp", version: "1.0.0" } } });
+    return;
+  }
+  if (message.method === "tools/list" && message.id) {
+    send({ jsonrpc: "2.0", id: message.id, result: { tools: [{ name: "get_campaign_insights" }] } });
+    return;
+  }
+  if (message.method === "tools/call" && message.id) {
+    const after = message.params?.arguments?.after;
+    send({
+      jsonrpc: "2.0",
+      id: message.id,
+      result: {
+        structuredContent: after === "page-2"
+          ? {
+              data: [
+                {
+                  campaign_id: "1200000002",
+                  campaign_name: "Retargeting",
+                  date_start: "2026-06-02",
+                  spend: "67.89",
+                  clicks: "34",
+                  impressions: "2100",
+                  reach: "1800",
+                  cpm: "32.33",
+                  cpc: "2.00",
+                  ctr: "1.62"
+                }
+              ]
+            }
+          : {
+              data: [
+                {
+                  campaign_id: "1200000001",
+                  campaign_name: "Scale Growth",
+                  date_start: "2026-06-01",
+                  spend: "123.45",
+                  clicks: "89",
+                  impressions: "4567",
+                  reach: "3200",
+                  cpm: "27.03",
+                  cpc: "1.39",
+                  ctr: "1.95"
+                }
+              ],
+              paging: {
+                cursors: {
+                  after: "page-2"
+                }
+              }
+            }
+      }
+    });
+  }
+}
+process.stdin.on("data", (chunk) => {
+  buffer = Buffer.concat([buffer, chunk]);
+  for (;;) {
+    const headerEnd = buffer.indexOf("\\r\\n\\r\\n");
+    if (headerEnd === -1) break;
+    const header = buffer.slice(0, headerEnd).toString("utf8");
+    const match = header.match(/Content-Length:\\s*(\\d+)/i);
+    if (!match) {
+      process.exit(1);
+    }
+    const bodyStart = headerEnd + 4;
+    const length = Number(match[1]);
+    if (buffer.length < bodyStart + length) break;
+    const body = buffer.slice(bodyStart, bodyStart + length).toString("utf8");
+    buffer = buffer.slice(bodyStart + length);
+    handle(JSON.parse(body));
+  }
+});
+      `.trim(),
+      "utf8"
+    );
+    try {
+      const db = fakeDb({
+        credential: {
+          credential_kind: "mcp_server_command",
+          encrypted_payload: encryptedCredential({
+            mode: "live",
+            transport: "mcp_stdio",
+            adAccountId: "1234567890",
+            mcpCommand: `${JSON.stringify(process.execPath)} ${JSON.stringify(script)}`,
+            mcpToolName: "get_campaign_insights"
+          })
+        }
+      });
+      const connector = connectorFor("meta_ads");
+      await expect(connector.testConnection(db, request("meta_ads"))).resolves.toMatchObject({
+        ok: true,
+        mode: "live",
+        provider: "meta_ads",
+        accountExternalId: "act_1234567890"
+      });
+      const rows = await connector.extract(db, request("meta_ads"), {
+        cursorKey: "meta_ads_campaign_daily",
+        cursorStart: "2026-06-01T00:00:00.000Z",
+        cursorEnd: "2026-06-03T00:00:00.000Z",
+        refreshWindowDays: 30,
+        mode: "live"
+      });
+      expect(rows).toHaveLength(2);
+      expect(rows[0]).toMatchObject({
+        externalId: "meta_ads:act_1234567890:1200000001:2026-06-01",
+        objectType: "meta_ads_campaign_daily",
+        payload: {
+          campaignId: "1200000001",
+          spend: 123.45,
+          clicks: 89
+        }
+      });
+      expect(rows[1]).toMatchObject({
+        externalId: "meta_ads:act_1234567890:1200000002:2026-06-02",
+        objectType: "meta_ads_campaign_daily",
+        payload: {
+          campaignId: "1200000002",
+          spend: 67.89,
+          clicks: 34
+        }
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("supports Meta Ads extraction through the official Ads CLI command shape", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "growth-os-meta-cli-"));
+    const script = join(dir, "meta-cli.mjs");
+    writeFileSync(
+      script,
+      `
+import process from "node:process";
+const args = process.argv.slice(2);
+function argValue(name) {
+  const index = args.indexOf(name);
+  return index === -1 ? undefined : args[index + 1];
+}
+if (argValue("--output") !== "json") process.exit(2);
+if (!args.includes("ads") || !args.includes("insights") || !args.includes("get")) process.exit(3);
+if (argValue("--ad-account-id") !== "1234567890") process.exit(4);
+if (process.env.AD_ACCOUNT_ID !== "1234567890") process.exit(5);
+const fields = argValue("--fields") ?? "";
+if (!fields.includes("campaign_id") || !fields.includes("spend")) process.exit(6);
+if (argValue("--date-preset") === "today") {
+  console.log(JSON.stringify({ data: [] }));
+  process.exit(0);
+}
+if (argValue("--since") !== "2026-06-01" || argValue("--until") !== "2026-06-03") process.exit(7);
+if (argValue("--time-increment") !== "daily") process.exit(8);
+console.log(JSON.stringify({
+  data: [
+    {
+      campaign_id: "1200000003",
+      campaign_name: "CLI Growth",
+      date_start: "2026-06-01",
+      spend: "44.50",
+      clicks: "22",
+      impressions: "1200",
+      reach: "1000",
+      cpm: "37.08",
+      cpc: "2.02",
+      ctr: "1.83"
+    }
+  ]
+}));
+      `.trim(),
+      "utf8"
+    );
+    try {
+      const db = fakeDb({
+        credential: {
+          credential_kind: "ads_cli",
+          encrypted_payload: encryptedCredential({
+            mode: "live",
+            transport: "meta_ads_cli",
+            adAccountId: "1234567890",
+            cliCommand: `${JSON.stringify(process.execPath)} ${JSON.stringify(script)}`
+          })
+        }
+      });
+      const connector = connectorFor("meta_ads");
+      await expect(connector.testConnection(db, request("meta_ads"))).resolves.toMatchObject({
+        ok: true,
+        mode: "live",
+        provider: "meta_ads",
+        accountExternalId: "act_1234567890"
+      });
+      const rows = await connector.extract(db, request("meta_ads"), {
+        cursorKey: "meta_ads_campaign_daily",
+        cursorStart: "2026-06-01T00:00:00.000Z",
+        cursorEnd: "2026-06-03T00:00:00.000Z",
+        refreshWindowDays: 30,
+        mode: "live"
+      });
+
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({
+        externalId: "meta_ads:act_1234567890:1200000003:2026-06-01",
+        objectType: "meta_ads_campaign_daily",
+        payload: {
+          campaignId: "1200000003",
+          campaignName: "CLI Growth",
+          spend: 44.5,
+          clicks: 22,
+          impressions: 1200
+        }
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("uses X app-only bearer auth and maps timeline public metrics", async () => {
+    const requests: Array<{ url: string; authorization: string | null }> = [];
+    await withMockFetch(async (url, init) => {
+      requests.push({ url, authorization: headerValue(init.headers, "Authorization") });
+      if (url.includes("/2/users/by/username/XDevelopers")) {
+        return jsonResponse({ data: { id: "2244994945", username: "XDevelopers" } });
+      }
+      return jsonResponse({
+        data: [
+          {
+            id: "1800000000000000001",
+            text: "X public metrics post",
+            author_id: "2244994945",
+            conversation_id: "1800000000000000001",
+            created_at: "2026-06-02T10:00:00.000Z",
+            public_metrics: {
+              retweet_count: 7,
+              reply_count: 3,
+              like_count: 88,
+              quote_count: 2,
+              bookmark_count: 5,
+              impression_count: 9001
+            }
+          }
+        ],
+        meta: {}
+      });
+    }, async () => {
+      const db = fakeDb({
+        credential: {
+          credential_kind: "bearer_token",
+          encrypted_payload: encryptedCredential({
+            mode: "live",
+            bearerToken: "x-bearer-token",
+            username: "XDevelopers",
+            apiBaseUrl: "https://x.test"
+          })
+        }
+      });
+      const connector = connectorFor("x");
+      await expect(connector.testConnection(db, request("x"))).resolves.toMatchObject({
+        ok: true,
+        mode: "live",
+        provider: "x",
+        accountExternalId: "2244994945"
+      });
+      const rows = await connector.extract(db, request("x"), {
+        cursorKey: "x_user_timeline",
+        cursorStart: "2026-06-01T00:00:00.000Z",
+        cursorEnd: "2026-06-03T00:00:00.000Z",
+        refreshWindowDays: 7,
+        mode: "live"
+      });
+
+      expect(requests.every((entry) => entry.authorization === "Bearer x-bearer-token")).toBe(true);
+      expect(requests[1].url).toContain("/2/users/by/username/XDevelopers");
+      expect(requests[2].url).toContain("/2/users/2244994945/tweets");
+      expect(requests[2].url).toContain("tweet.fields=author_id%2Cconversation_id%2Ccreated_at%2Cpublic_metrics");
+      expect(rows[0]).toMatchObject({
+        externalId: "x:1800000000000000001",
+        objectType: "x_post",
+        payload: {
+          postId: "1800000000000000001",
+          authorId: "2244994945",
+          postUrl: "https://x.com/XDevelopers/status/1800000000000000001",
+          publicMetrics: {
+            retweetCount: 7,
+            replyCount: 3,
+            likeCount: 88,
+            quoteCount: 2,
+            bookmarkCount: 5,
+            impressionCount: 9001
+          }
+        }
+      });
+    });
+  });
+
+  it("honors explicit X sync refresh windows instead of reusing the incremental cursor", async () => {
+    const requests: Array<{ url: string; authorization: string | null }> = [];
+    await withMockFetch(async (url, init) => {
+      requests.push({ url, authorization: headerValue(init.headers, "Authorization") });
+      if (url.includes("/2/users/by/username/YourHandle")) {
+        return jsonResponse({ data: { id: "83950207", username: "YourHandle" } });
+      }
+      return jsonResponse({ data: [], meta: {} });
+    }, async () => {
+      const db = fakeDb({
+        cursorValue: "2026-06-06T15:34:32.364Z",
+        credential: {
+          credential_kind: "bearer_token",
+          encrypted_payload: encryptedCredential({
+            mode: "live",
+            bearerToken: "x-bearer-token",
+            username: "YourHandle",
+            apiBaseUrl: "https://x.test"
+          })
+        }
+      });
+      await connectorFor("x").extract(db, { ...request("x"), refreshWindowDays: 30 }, await connectorFor("x").planSync(db, {
+        ...request("x"),
+        refreshWindowDays: 30
+      }));
+    });
+
+    const timelineRequest = requests.find((entry) => entry.url.includes("/2/users/83950207/tweets"));
+    expect(timelineRequest?.url).toContain("start_time=");
+    expect(timelineRequest?.url).not.toContain("2026-06-06T15%3A34%3A32.364Z");
+  });
+
+  it("writes X raw rows before provider truth and uses idempotent upserts", async () => {
+    const queries: string[] = [];
+    const result = await connectorFor("x").sync(
+      fakeDb({
+        queries,
+        credential: {
+          credential_kind: "fixture",
+          encrypted_payload: "fixture-encrypted"
+        }
+      }),
+      request("x")
+    );
+
+    const rawIndex = queries.findIndex((sql) => sql.includes("insert into raw_records"));
+    const postIndex = queries.findIndex((sql) => sql.includes("insert into x_post"));
+    const metricIndex = queries.findIndex((sql) => sql.includes("insert into x_post_metric_snapshot"));
+    expect(result).toMatchObject({ provider: "x", recordsExtracted: 1, recordsLoaded: 1 });
+    expect(rawIndex).toBeGreaterThanOrEqual(0);
+    expect(postIndex).toBeGreaterThan(rawIndex);
+    expect(metricIndex).toBeGreaterThan(postIndex);
+    expect(queries.some((sql) => sql.includes("on conflict (source_id, x_post_id)"))).toBe(true);
+    expect(queries.some((sql) => sql.includes("on conflict (source_id, x_post_id, captured_at)"))).toBe(true);
+  });
+
+  it("writes Shopify raw rows before order, line, and product truth", async () => {
+    const queries: string[] = [];
+    await withMockFetch(async (url, init) => {
+      const body = init.body ? JSON.parse(String(init.body)) : null;
+      if (typeof body?.query === "string" && body.query.includes("shop {")) {
+        return jsonResponse({ data: { shop: { myshopifyDomain: "demo-shop.myshopify.com" } } });
+      }
+      if (typeof body?.query === "string" && body.query.includes("products(")) {
+        return jsonResponse({
+          data: {
+            products: {
+              pageInfo: { hasNextPage: false, endCursor: null },
+              edges: [
+                {
+                  node: {
+                    id: "gid://shopify/Product/200",
+                    title: "Logo Tee",
+                    vendor: "Infinite OS",
+                    productType: "Apparel",
+                    status: "ACTIVE",
+                    createdAt: "2026-05-01T10:00:00.000Z",
+                    updatedAt: "2026-06-02T09:00:00.000Z"
+                  }
+                }
+              ]
+            }
+          }
+        });
+      }
+      return jsonResponse({
+        data: {
+          orders: {
+            pageInfo: { hasNextPage: false, endCursor: null },
+            edges: [
+              {
+                node: {
+                  id: "gid://shopify/Order/1001",
+                  name: "#1001",
+                  createdAt: "2026-06-02T10:00:00.000Z",
+                  processedAt: "2026-06-02T10:05:00.000Z",
+                  displayFinancialStatus: "PAID",
+                  displayFulfillmentStatus: "FULFILLED",
+                  customer: { id: "gid://shopify/Customer/501", email: "buyer@example.com" },
+                  currentSubtotalPriceSet: { shopMoney: { amount: "100.00", currencyCode: "USD" } },
+                  currentTotalTaxSet: { shopMoney: { amount: "5.00", currencyCode: "USD" } },
+                  currentTotalDiscountsSet: { shopMoney: { amount: "10.00", currencyCode: "USD" } },
+                  currentTotalPriceSet: { shopMoney: { amount: "95.00", currencyCode: "USD" } },
+                  lineItems: {
+                    edges: [
+                      {
+                        node: {
+                          id: "gid://shopify/LineItem/1",
+                          sku: "tee-1",
+                          quantity: 2,
+                          name: "Logo Tee",
+                          originalUnitPriceSet: { shopMoney: { amount: "50.00", currencyCode: "USD" } },
+                          product: {
+                            id: "gid://shopify/Product/200",
+                            title: "Logo Tee",
+                            vendor: "Infinite OS",
+                            productType: "Apparel",
+                            status: "ACTIVE"
+                          },
+                          variant: { id: "gid://shopify/ProductVariant/300" }
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        }
+      });
+    }, async () => {
+      const result = await connectorFor("shopify").sync(
+        fakeDb({
+          queries,
+          credential: {
+            credential_kind: "admin_api_access_token",
+            encrypted_payload: encryptedCredential({
+              mode: "live",
+              storeDomain: "demo-shop.myshopify.com",
+              adminAccessToken: "shpat_test",
+              apiVersion: "2026-01"
+            })
+          }
+        }),
+        request("shopify")
+      );
+
+      const rawIndex = queries.findIndex((sql) => sql.includes("insert into raw_records"));
+      const orderIndex = queries.findIndex((sql) => sql.includes("insert into shopify_orders"));
+      const lineIndex = queries.findIndex((sql) => sql.includes("insert into shopify_order_lines"));
+      const productIndex = queries.findIndex((sql) => sql.includes("insert into shopify_products"));
+      expect(result).toMatchObject({ provider: "shopify", recordsExtracted: 2, recordsLoaded: 2 });
+      expect(rawIndex).toBeGreaterThanOrEqual(0);
+      expect(orderIndex).toBeGreaterThan(rawIndex);
+      expect(lineIndex).toBeGreaterThan(orderIndex);
+      expect(productIndex).toBeGreaterThan(lineIndex);
+      expect(queries.some((sql) => sql.includes("on conflict (source_id, shopify_order_id)"))).toBe(true);
+      expect(queries.some((sql) => sql.includes("on conflict (source_id, shopify_line_item_id)"))).toBe(true);
+      expect(queries.some((sql) => sql.includes("on conflict (source_id, shopify_product_id)"))).toBe(true);
+    });
+  });
+
+  it("writes Meta Ads raw rows before campaign-daily truth", async () => {
+    const queries: string[] = [];
+    await withMockFetch(async () =>
+      jsonResponse({
+        data: [
+          {
+            campaign_id: "1200000001",
+            campaign_name: "Scale Growth",
+            date_start: "2026-06-01",
+            spend: "123.45",
+            clicks: "89",
+            impressions: "4567",
+            reach: "3200",
+            cpm: "27.03",
+            cpc: "1.39",
+            ctr: "1.95"
+          }
+        ],
+        paging: {}
+      }), async () => {
+      const result = await connectorFor("meta_ads").sync(
+        fakeDb({
+          queries,
+          credential: {
+            credential_kind: "marketing_api_access_token",
+            encrypted_payload: encryptedCredential({
+              mode: "live",
+              adAccountId: "1234567890",
+              accessToken: "meta-access-token",
+              apiVersion: "v24.0"
+            })
+          }
+        }),
+        request("meta_ads")
+      );
+
+      const rawIndex = queries.findIndex((sql) => sql.includes("insert into raw_records"));
+      const truthIndex = queries.findIndex((sql) => sql.includes("insert into meta_ads_campaign_daily"));
+      expect(result).toMatchObject({ provider: "meta_ads", recordsExtracted: 1, recordsLoaded: 1 });
+      expect(rawIndex).toBeGreaterThanOrEqual(0);
+      expect(truthIndex).toBeGreaterThan(rawIndex);
+      expect(queries.some((sql) => sql.includes("on conflict (source_id, ad_account_id, campaign_id, occurred_on)"))).toBe(true);
+    });
+  });
+
+  it("classifies provider auth failures and rate limits", async () => {
+    await withMockFetch(async () => new Response("unauthorized", { status: 401 }), async () => {
+      await expect(
+        connectorFor("stripe").testConnection(
+          fakeDb({
+            credential: {
+              credential_kind: "api_key",
+              encrypted_payload: encryptedCredential({ mode: "live", secretKey: "bad", apiBaseUrl: "https://stripe.test" })
+            }
+          }),
+          request("stripe")
+        )
+      ).rejects.toThrow(/provider auth failed/);
+    });
+
+    await withMockFetch(async () => new Response("rate limited", { status: 429 }), async () => {
+      await expect(
+        connectorFor("posthog").testConnection(
+          fakeDb({
+            credential: {
+              credential_kind: "personal_api_key",
+              encrypted_payload: encryptedCredential({
+                mode: "live",
+                projectId: 1,
+                personalApiKey: "ph-key",
+                apiHost: "https://posthog.test"
+              })
+            }
+          }),
+          request("posthog")
+        )
+      ).rejects.toThrow(/provider rate limited/);
+    });
+
+    await withMockFetch(
+      async () => new Response(
+        JSON.stringify({
+          type: "authentication_error",
+          code: "permission_denied",
+          detail: "API key missing required scope 'query:read'",
+          key: "phx_secret_to_redact",
+          authorization: "Bearer oauth-secret-token"
+        }),
+        { status: 403, headers: { "Content-Type": "application/json" } }
+      ),
+      async () => {
+        await expect(
+          connectorFor("posthog").testConnection(
+            fakeDb({
+              credential: {
+                credential_kind: "personal_api_key",
+                encrypted_payload: encryptedCredential({
+                  mode: "live",
+                  projectId: 1,
+                  personalApiKey: "ph-key",
+                  apiHost: "https://posthog.test"
+                })
+              }
+            }),
+            request("posthog")
+          )
+        ).rejects.toThrow(
+          /provider auth failed 403 for https:\/\/posthog\.test\/api\/projects\/1\/query\/: .*query:read.*phx_\[redacted\].*Bearer \[redacted\]/
+        );
+      }
+    );
+
+    await withMockFetch(async () => new Response("unauthorized", { status: 401 }), async () => {
+      await expect(
+        connectorFor("x").testConnection(
+          fakeDb({
+            credential: {
+              credential_kind: "bearer_token",
+              encrypted_payload: encryptedCredential({
+                mode: "live",
+                bearerToken: "bad",
+                username: "XDevelopers",
+                apiBaseUrl: "https://x.test"
+              })
+            }
+          }),
+          request("x")
+        )
+      ).rejects.toThrow(/provider auth failed/);
+    });
+
+    await withMockFetch(async () => new Response("rate limited", { status: 429 }), async () => {
+      await expect(
+        connectorFor("x").testConnection(
+          fakeDb({
+            credential: {
+              credential_kind: "bearer_token",
+              encrypted_payload: encryptedCredential({
+                mode: "live",
+                bearerToken: "x-bearer-token",
+                userId: "2244994945",
+                apiBaseUrl: "https://x.test"
+              })
+            }
+          }),
+          request("x")
+        )
+      ).rejects.toThrow(/provider rate limited/);
+    });
+
+    await withMockFetch(async () => new Response("unauthorized", { status: 401 }), async () => {
+      await expect(
+        connectorFor("meta_ads").testConnection(
+          fakeDb({
+            credential: {
+              credential_kind: "marketing_api_access_token",
+              encrypted_payload: encryptedCredential({
+                mode: "live",
+                adAccountId: "1234567890",
+                accessToken: "meta-secret-token",
+                apiVersion: "v24.0"
+              })
+            }
+          }),
+          request("meta_ads")
+        )
+      ).rejects.not.toThrow(/meta-secret-token|access_token=/);
+    });
+  });
+
+  it("records pre-raw provider failures as sync errors", async () => {
+    const queries: string[] = [];
+    await withMockFetch(async () => new Response("unauthorized", { status: 401 }), async () => {
+      await expect(
+        connectorFor("google_analytics_4").sync(
+          fakeDb({
+            queries,
+            credential: {
+              credential_kind: "oauth_access_token",
+              encrypted_payload: encryptedCredential({
+                mode: "live",
+                propertyId: "123",
+                accessToken: "bad",
+                apiBaseUrl: "https://ga4.test"
+              })
+            }
+          }),
+          request("google_analytics_4")
+        )
+      ).rejects.toThrow(/provider auth failed/);
+    });
+
+    expect(queries.some((sql) => sql.includes("insert into sync_errors"))).toBe(true);
+    expect(queries.some((sql) => sql.includes("insert into raw_records"))).toBe(false);
+  });
+});
+
+describe("oauth_token_id dual-read", () => {
+  it("reads the live linked oauth token and merges it with encrypted_payload metadata", async () => {
+    const requests: Array<{ url: string; authorization: string | null }> = [];
+    await withMockFetch(async (url, init) => {
+      requests.push({ url, authorization: headerValue(init.headers, "Authorization") });
+      return jsonResponse({ rows: [] });
+    }, async () => {
+      const queries: string[] = [];
+      const db = oauthFakeDb({
+        // Metadata only — no token here. The token comes from oauth_tokens.
+        credential: {
+          credential_kind: "oauth_access_token",
+          encrypted_payload: encryptedCredential({
+            mode: "live",
+            propertyId: "properties/777",
+            apiBaseUrl: "https://ga4.test"
+          }),
+          oauth_token_id: "oauth_token_live"
+        },
+        oauthTokens: {
+          oauth_token_live: {
+            encrypted_payload: encryptedCredential({
+              accessToken: "fresh-access-token",
+              refreshToken: "refresh-token",
+              expiresAt: new Date(Date.now() + 3600_000).toISOString()
+            }),
+            expires_at: new Date(Date.now() + 3600_000).toISOString()
+          }
+        },
+        queries
+      });
+
+      await expect(
+        connectorFor("google_analytics_4").testConnection(db, request("google_analytics_4"))
+      ).resolves.toMatchObject({ ok: true, mode: "live", accountExternalId: "properties/777" });
+
+      expect(requests[0]).toMatchObject({
+        url: "https://ga4.test/properties/777:runReport",
+        authorization: "Bearer fresh-access-token"
+      });
+      // Valid token => no refresh and no oauth_tokens UPDATE.
+      expect(requests).toHaveLength(1);
+      expect(queries.some((sql) => sql.includes("update oauth_tokens"))).toBe(false);
+    });
+  });
+
+  it("refreshes an expired linked oauth token in place and uses the new token", async () => {
+    const requests: Array<{ url: string; authorization: string | null; body: string | null }> = [];
+    await withMockFetch(async (url, init) => {
+      requests.push({
+        url,
+        authorization: headerValue(init.headers, "Authorization"),
+        body: init.body ? String(init.body) : null
+      });
+      if (url.includes("/token")) {
+        return jsonResponse({ access_token: "rotated-access-token", expires_in: 3600 });
+      }
+      return jsonResponse({ rows: [] });
+    }, async () => {
+      const queries: Array<{ sql: string; params?: unknown[] }> = [];
+      const db = oauthFakeDb({
+        credential: {
+          credential_kind: "oauth_access_token",
+          encrypted_payload: encryptedCredential({
+            mode: "live",
+            propertyId: "properties/888",
+            apiBaseUrl: "https://ga4.test"
+          }),
+          oauth_token_id: "oauth_token_expired"
+        },
+        oauthTokens: {
+          oauth_token_expired: {
+            encrypted_payload: encryptedCredential({
+              accessToken: "stale-access-token",
+              refreshToken: "stored-refresh-token",
+              expiresAt: new Date(Date.now() - 3600_000).toISOString(),
+              oauthApp: {
+                clientId: "client-id",
+                clientSecret: "client-secret",
+                tokenUrl: "https://oauth2.test/token"
+              }
+            }),
+            expires_at: new Date(Date.now() - 3600_000).toISOString()
+          }
+        },
+        queryLog: queries
+      });
+
+      await expect(
+        connectorFor("google_analytics_4").testConnection(db, request("google_analytics_4"))
+      ).resolves.toMatchObject({ ok: true, mode: "live" });
+
+      const tokenCall = requests.find((req) => req.url === "https://oauth2.test/token");
+      expect(tokenCall).toBeDefined();
+      expect(tokenCall?.body).toContain("grant_type=refresh_token");
+      expect(tokenCall?.body).toContain("refresh_token=stored-refresh-token");
+
+      const runReportCall = requests.find((req) => req.url.includes("runReport"));
+      expect(runReportCall?.authorization).toBe("Bearer rotated-access-token");
+
+      const update = queries.find((entry) => entry.sql.includes("update oauth_tokens"));
+      expect(update).toBeDefined();
+      expect(update?.params?.[0]).toBe("oauth_token_expired");
+    });
+  });
+
+  it("keeps reading encrypted_payload (no oauth_tokens lookup) when oauth_token_id is NULL", async () => {
+    const requests: Array<{ authorization: string | null }> = [];
+    await withMockFetch(async (_url, init) => {
+      requests.push({ authorization: headerValue(init.headers, "Authorization") });
+      return jsonResponse({ rows: [] });
+    }, async () => {
+      const queries: string[] = [];
+      const db = oauthFakeDb({
+        credential: {
+          credential_kind: "oauth_access_token",
+          encrypted_payload: encryptedCredential({
+            mode: "live",
+            propertyId: "properties/legacy",
+            accessToken: "legacy-token",
+            apiBaseUrl: "https://ga4.test"
+          }),
+          oauth_token_id: null
+        },
+        oauthTokens: {},
+        queries
+      });
+
+      await connectorFor("google_analytics_4").testConnection(db, request("google_analytics_4"));
+
+      expect(requests[0].authorization).toBe("Bearer legacy-token");
+      expect(queries.some((sql) => sql.includes("oauth_tokens"))).toBe(false);
+    });
+  });
+
+  it("reads a non-OAuth credential directly from encrypted_payload (NULL oauth_token_id)", async () => {
+    await withMockFetch(async () => jsonResponse({ results: [] }), async () => {
+      const queries: string[] = [];
+      const db = oauthFakeDb({
+        credential: {
+          credential_kind: "personal_api_key",
+          encrypted_payload: encryptedCredential({
+            mode: "live",
+            projectId: 99,
+            personalApiKey: "ph-personal-key",
+            apiHost: "https://posthog.test"
+          }),
+          oauth_token_id: null
+        },
+        oauthTokens: {},
+        queries
+      });
+
+      await expect(
+        connectorFor("posthog").testConnection(db, request("posthog"))
+      ).resolves.toMatchObject({ ok: true, mode: "live", accountExternalId: "99" });
+      expect(queries.some((sql) => sql.includes("oauth_tokens"))).toBe(false);
+    });
+  });
+});
+
+function request(provider: "google_analytics_4" | "posthog" | "stripe" | "x" | "shopify" | "meta_ads") {
+  return {
+    workspaceId: "workspace",
+    sourceId: `source_${provider}`,
+    provider,
+    syncRunId: `sync_${provider}`
+  };
+}
+
+function encryptedCredential(payload: Record<string, unknown>): string {
+  process.env.GROWTH_OS_ENCRYPTION_KEY = TEST_ENCRYPTION_KEY;
+  return encryptCredentialPayload(payload, TEST_ENCRYPTION_KEY);
+}
+
+function fakeDb(options: {
+  credential: { credential_kind: string; encrypted_payload: string };
+  cursorValue?: string;
+  queries?: string[];
+}): InfiniteOsDb {
+  return {
+    async one<T>(sql: string): Promise<T | null> {
+      options.queries?.push(sql);
+      if (sql.includes("connection_credentials")) {
+        return options.credential as T;
+      }
+      if (sql.includes("sync_cursors") && options.cursorValue) {
+        return { cursor_value: options.cursorValue } as T;
+      }
+      return null;
+    },
+    async query(sql: string) {
+      options.queries?.push(sql);
+      return [];
+    },
+    async close() {},
+    async ensureWorkspace() {},
+    async ensureFirstPhaseDatasets() {},
+    async connectSource() {
+      return {};
+    },
+    async updateSourceStatus() {},
+    async createJob() {
+      return {};
+    },
+    async claimNextJob() {
+      return null;
+    },
+    async completeJob() {},
+    async withTransaction(fn) {
+      return fn(this);
+    }
+  };
+}
+
+function oauthFakeDb(options: {
+  credential: { credential_kind: string; encrypted_payload: string; oauth_token_id: string | null };
+  oauthTokens: Record<string, { encrypted_payload: string; expires_at: string | null }>;
+  oauthApp?: { encrypted_payload: string };
+  queries?: string[];
+  queryLog?: Array<{ sql: string; params?: unknown[] }>;
+}): InfiniteOsDb {
+  const record = (sql: string, params?: unknown[]) => {
+    options.queries?.push(sql);
+    options.queryLog?.push({ sql, params });
+  };
+  return {
+    async one<T>(sql: string, params?: unknown[]): Promise<T | null> {
+      record(sql, params);
+      if (sql.includes("connection_credentials")) {
+        return options.credential as T;
+      }
+      if (sql.includes("from oauth_tokens")) {
+        const tokenId = String(params?.[0] ?? "");
+        return (options.oauthTokens[tokenId] ?? null) as T | null;
+      }
+      if (sql.includes("from oauth_apps")) {
+        return (options.oauthApp ?? null) as T | null;
+      }
+      return null;
+    },
+    async query(sql: string, params?: unknown[]) {
+      record(sql, params);
+      return [];
+    },
+    async close() {},
+    async ensureWorkspace() {},
+    async ensureFirstPhaseDatasets() {},
+    async connectSource() {
+      return {};
+    },
+    async updateSourceStatus() {},
+    async createJob() {
+      return {};
+    },
+    async claimNextJob() {
+      return null;
+    },
+    async completeJob() {},
+    async withTransaction(fn) {
+      return fn(this);
+    }
+  };
+}
+
+async function withMockFetch(
+  handler: (url: string, init: RequestInit) => Response | Promise<Response>,
+  fn: () => Promise<void>
+) {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) =>
+    handler(String(input), init ?? {})) as typeof fetch;
+  try {
+    await fn();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
+
+function jsonResponse(value: unknown): Response {
+  return new Response(JSON.stringify(value), {
+    status: 200,
+    headers: { "Content-Type": "application/json" }
+  });
+}
+
+function headerValue(headers: RequestInit["headers"], key: string): string | null {
+  if (!headers) return null;
+  if (headers instanceof Headers) return headers.get(key);
+  return (headers as Record<string, string>)[key] ?? null;
+}
+
+interface Ga4ReportBody {
+  dimensions: Array<{ name: string }>;
+  metrics: Array<{ name: string }>;
+  limit?: string;
+}
+
+function ga4DimNames(body: Ga4ReportBody | null): string[] {
+  return (body?.dimensions ?? []).map((entry) => entry.name);
+}
+
+function isGa4PageReportBody(body: Ga4ReportBody | null): boolean {
+  return ga4DimNames(body).includes("pagePath");
+}
+
+function isGa4OverviewReportBody(body: Ga4ReportBody | null): boolean {
+  const dims = ga4DimNames(body);
+  return dims.includes("landingPagePlusQueryString") && dims.includes("sessionDefaultChannelGroup");
+}
+
+function ga4OverviewReportRowFixture(overrides?: { keyEvents?: string }) {
+  return {
+    dimensionValues: [
+      { value: "20260601" },
+      { value: "United Kingdom" },
+      { value: "/" },
+      { value: "google" },
+      { value: "organic" },
+      { value: "brand" },
+      { value: "Organic Search" },
+      { value: "rtk.dev" },
+      { value: "desktop" }
+    ],
+    metricValues: [
+      { value: "10" },
+      { value: "8" },
+      { value: "12" },
+      { value: "7" },
+      { value: "30" },
+      { value: "6" },
+      { value: "0.75" },
+      { value: "95.5" },
+      { value: overrides?.keyEvents ?? "3" }
+    ]
+  };
+}
+
+function ga4PageReportRowFixture(overrides?: { keyEvents?: string }) {
+  return {
+    dimensionValues: [
+      { value: "20260601" },
+      { value: "rtk.dev" },
+      { value: "/pricing" },
+      { value: "Pricing" }
+    ],
+    metricValues: [
+      { value: "42" },
+      { value: "18" },
+      { value: "14" },
+      { value: "73.5" },
+      { value: overrides?.keyEvents ?? "6" }
+    ]
+  };
+}
+
+function stripeInvoice(id: string, overrides: Record<string, unknown> = {}) {
+  return {
+    id,
+    customer: { id: "cus_1", email: "founder@example.com", name: "Founder" },
+    subscription: { id: "sub_1", current_period_end: 1780000000 },
+    currency: "usd",
+    amount_paid: 4900,
+    amount_due: 0,
+    created: 1760000000,
+    status_transitions: { paid_at: 1760000100 },
+    metadata: { external_order_id: "order_1" },
+    ...overrides
+  };
+}
+
+function stripeLine(id: string) {
+  return {
+    id,
+    amount: 4900,
+    description: "Infinite OS Pro",
+    price: {
+      id: "price_1",
+      product: { id: "prod_1", name: "Infinite OS Pro" }
+    },
+    period: { start: 1760000000, end: 1762600000 }
+  };
+}

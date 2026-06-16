@@ -1,0 +1,154 @@
+name: "🐛 Bug Report"
+description: Report a bug — something that's broken, crashes, or behaves incorrectly.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug! Please fill out the sections below so we can reproduce and fix it quickly.
+
+        **Before submitting**, please:
+        - [ ] Search [existing issues](https://github.com/Infinite-Labs-AI/infinite-os/issues) to avoid duplicates
+        - [ ] Update to the latest version (`infinite update`) and confirm the bug still exists
+        - [ ] Run `infinite setup status` and paste the output below (see Environment section)
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Bug Description
+      description: A clear description of what's broken. Include error messages or screenshots if relevant.
+      placeholder: |
+        What happened? What did you expect to happen instead?
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to Reproduce
+      description: Minimal steps to trigger the bug. The more specific, the faster we can fix it.
+      placeholder: |
+        1. Run `infinite`
+        2. Ask "how many page views in the last 7 days"
+        3. Agent calls a query tool
+        4. Error appears: ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: What should have happened instead?
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual Behavior
+      description: What actually happened? Include full error output if available.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Affected Component
+      description: Which part of Infinite OS is affected?
+      multiple: true
+      options:
+        - CLI / interactive chat
+        - Setup / Installation / connecting a data source
+        - Query / analytics engine (metrics, breakdowns, answers)
+        - Sync worker (data sync from a source)
+        - Data source connector (GA4, PostHog, Stripe, Shopify, Meta, X)
+        - Local runtime / Docker (app daemon, Postgres)
+        - Configuration (.env, .growth-os/, infinite setup)
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: source
+    attributes:
+      label: Data source (if connector-related)
+      description: Which connector is involved?
+      multiple: true
+      options:
+        - N/A
+        - Google Analytics 4
+        - PostHog
+        - Stripe
+        - Shopify
+        - Meta
+        - X (Twitter)
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: |
+        Paste the output of `infinite setup status` (it reports runtime, model, and connector status — no secrets).
+        If the app is running, `infinite logs` output for the relevant window is also helpful.
+      placeholder: |
+        $ infinite setup status
+        ...
+      render: shell
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: Operating System
+      description: e.g. Ubuntu 24.04, macOS 15.2, Windows 11 (WSL2)
+      placeholder: macOS 15.2
+    validations:
+      required: true
+
+  - type: input
+    id: node-version
+    attributes:
+      label: Node.js Version
+      description: Output of `node --version`
+      placeholder: "v20.11.0"
+
+  - type: input
+    id: infinite-version
+    attributes:
+      label: Infinite Version
+      description: Your installed version, or the short git commit of your checkout (`git rev-parse --short HEAD`)
+      placeholder: "0.2.0 / a1b2c3d"
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Additional Logs (optional)
+      description: |
+        Any extra error output or screenshots not captured above. Please redact secrets/tokens.
+      render: shell
+
+  - type: textarea
+    id: root-cause
+    attributes:
+      label: Root Cause Analysis (optional)
+      description: |
+        If you've dug into the code and identified the root cause, share it here.
+        Include file paths, line numbers, and code snippets if possible. This massively speeds up fixes.
+      placeholder: |
+        The bug is in `packages/analytical-engine/src/...` — the metric view resolves to ...
+
+  - type: textarea
+    id: proposed-fix
+    attributes:
+      label: Proposed Fix (optional)
+      description: If you have a fix in mind (or a PR ready), describe it here.
+
+  - type: checkboxes
+    id: pr-ready
+    attributes:
+      label: Are you willing to submit a PR for this?
+      options:
+        - label: I'd like to fix this myself and submit a PR

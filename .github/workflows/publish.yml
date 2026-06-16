@@ -1,0 +1,81 @@
+name: publish
+
+# Publishes the `infinite-tag` npm package (packages/instrument) via npm OIDC
+# "trusted publishing" — NO long-lived npm token lives in CI.
+#
+# ── One-time setup on npmjs.com (required before this workflow can publish) ──
+#   The package must ALREADY exist on npm. Trusted publishing cannot do a brand-new
+#   package's FIRST publish (the npmjs.com UI only shows the Trusted Publisher section
+#   once a package exists) — that first version was bootstrapped with a manual
+#   `npm publish`. For every version after that:
+#
+#   npmjs.com → infinite-tag → Settings → Trusted Publisher → "GitHub Actions":
+#     Organization or user:  <owner of the repo this workflow runs in>
+#     Repository:            <repo name>     (e.g. infinite-os, post-flip)
+#     Workflow filename:     publish.yml     (must match this file's name exactly)
+#   These three fields must EXACTLY match the workflow run, or npm rejects the OIDC
+#   token with an opaque 403/404.
+#
+# Trusted publishing requires npm CLI >= 11.5.1 and Node >= 22.14.0 (hence the npm
+# upgrade + Node 22 below — deliberately newer than ci.yml's Node 20).
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: "Pack & inspect only — do NOT publish to npm"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  id-token: write # REQUIRED: lets the job mint the OIDC token npm exchanges for a short-lived publish token
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # No explicit version: pnpm/action-setup reads "packageManager" from
+      # package.json (pnpm@10.0.0), matching ci.yml so it can never drift.
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22 # >= 22.14 for trusted publishing (ci.yml uses 20)
+          registry-url: https://registry.npmjs.org
+          cache: pnpm
+
+      # Node 22 ships npm 10.x; trusted publishing needs >= 11.5.1.
+      - name: Upgrade npm for OIDC trusted publishing
+        run: npm install -g npm@latest
+
+      - name: Install workspace deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Build + test the instrument package
+        # vitest uses the single ROOT config (include globs are repo-root-relative),
+        # so tests must run from root with a path — `pnpm -C <pkg> test` finds zero.
+        run: |
+          pnpm -C packages/instrument run build
+          pnpm exec vitest run packages/instrument
+
+      - name: Inspect the tarball (whitelist must hold — dist/src only)
+        working-directory: packages/instrument
+        run: |
+          npm pack --dry-run --json | node -e '
+            const pkgs = JSON.parse(require("fs").readFileSync(0, "utf8"));
+            const files = pkgs[0].files.map((f) => f.path);
+            const bad = files.filter((f) => !/^(dist\/src\/|package\.json$|README|LICENSE)/.test(f));
+            if (bad.length) {
+              console.error("Unexpected files in the tarball:\n  " + bad.join("\n  "));
+              process.exit(1);
+            }
+            console.log(`Tarball OK — ${files.length} files, whitelist clean.`);
+          '
+
+      - name: Publish to npm (OIDC trusted publishing, provenance automatic)
+        if: ${{ !inputs.dry-run }}
+        working-directory: packages/instrument
+        run: npm publish --access public
