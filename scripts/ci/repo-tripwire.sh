@@ -101,19 +101,17 @@ if [ "${PUBLIC_SURFACE:-0}" = "1" ]; then
   matches="$(git ls-files | grep -E '^docs/internal/' || true)"
   if [ -n "$matches" ]; then echo "$matches" >&2; fail "internal docs tracked on the public surface"; fi
 
-  # Private working-agreement / internal-planning files must never reach the
-  # public snapshot. These ARE legitimately tracked in the private repo
-  # (CLAUDE.md/AGENTS.md are agent working agreements; plans/ holds internal
-  # planning docs), so this check is PUBLIC-MODE-ONLY — it must never fire in
-  # private mode. On flip day the Phase-2 snapshot filter removes them before
-  # the public push; this is the machine-enforced safety net that fails the
-  # build if that filter is ever skipped or regresses. (CONTRIBUTING.md is a
-  # legitimate public doc and is intentionally NOT in this list.)
-  matches="$(git ls-files | grep -E '^CLAUDE\.md$|^AGENTS\.md$|^plans/' || true)"
+  # Internal *planning* docs (plans/) must never reach the public surface. This is
+  # PUBLIC-MODE-ONLY so the private repo's own CI (private mode) stays green.
+  # NOTE: CLAUDE.md and AGENTS.md are intentionally ALLOWED here — they are the
+  # public, secret-free contributor/agent working agreement for this repo (the
+  # OSS dev home, not a snapshot of somewhere else), the same as CONTRIBUTING.md.
+  # Keep them free of secrets, internal links, and IP. Only plans/ stays banned.
+  matches="$(git ls-files | grep -E '^plans/' || true)"
   if [ -n "$matches" ]; then
     echo "$matches" >&2
-    echo "::error::private working-agreement / internal-planning files would leak into the public snapshot (see list above): remove CLAUDE.md/AGENTS.md and any plans/* before publishing"
-    fail "private working-agreement files tracked on the public surface"
+    echo "::error::internal planning files (plans/*) must not be tracked on the public surface — move them to the private repo"
+    fail "internal planning files tracked on the public surface"
   fi
 fi
 # Convention (both repos): plan/transcript/handoff docs live under docs/internal/,
