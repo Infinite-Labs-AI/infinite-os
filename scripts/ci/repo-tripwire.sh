@@ -22,12 +22,15 @@ fail() {
 # 1. Secret-shaped tracked files must not exist.
 #    Intent: credential FILES (.env and .env.* variants such as
 #    .env.production/.env.local — except the legitimate tracked
-#    .env.example template — auth.json-named files, .growth-os/ state, key
-#    material), not source files that merely mention "credential".
-#    auth\.json is end-anchored to filenames so docs like oauth.json.md
-#    don't trip, while a real oauth.json file still does.
+#    .env.example template — auth.json-named files, *-oauth-client.json
+#    OAuth-client files (e.g. the GA4 quick-connect client, which is
+#    distributed out-of-band as a release asset and must never be tracked),
+#    .growth-os/ state, key material), not source files that merely mention
+#    "credential". The *auth\.json / *oauth-client\.json patterns are
+#    end-anchored to filenames so docs like oauth.json.md don't trip, while a
+#    real oauth.json / ga4-oauth-client.json file still does.
 # ---------------------------------------------------------------------------
-secret_matches="$(git ls-files | grep -iE '(^|/)\.env(\..+)?$|[^/]*auth\.json$|(^|/)\.growth-os/|credential.*\.(json|ya?ml|pem|key)$|\.pem$' | grep -v '\.env\.example$' || true)"
+secret_matches="$(git ls-files | grep -iE '(^|/)\.env(\..+)?$|[^/]*auth\.json$|[^/]*oauth-client\.json$|(^|/)\.growth-os/|credential.*\.(json|ya?ml|pem|key)$|\.pem$' | grep -v '\.env\.example$' || true)"
 if [[ -n "$secret_matches" ]]; then
   echo "$secret_matches" >&2
   fail "secret-shaped files are tracked by git (see list above)"
