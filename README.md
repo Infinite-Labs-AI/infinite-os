@@ -26,6 +26,20 @@ Everything runs locally as one small stack:
 
 You connect a source once, sync it, then ask questions. Answers come from a typed metric layer with authority/provenance rules — not free-form SQL — so a number is either source-accurate or honestly reported as unavailable.
 
+## Example questions
+
+Once a source is connected and synced, just ask — in plain English:
+
+- *"How many page views did I get in the last 7 days?"*
+- *"What were my top pages this week?"*
+- *"Which channels drove the most traffic last month?"*
+- *"How many new users this week vs last week?"*
+- *"What's my engagement rate over the last 30 days?"*
+- *"How much revenue did I make in the last 30 days?"* (Stripe)
+- *"Compare this week's traffic to the previous week."*
+
+Infinite figures out the right metric, runs it against your synced data, and answers with the numbers + a short read — citing the source and flagging anything it can't verify (it won't guess).
+
 ## Quickstart
 
 Install with one command (macOS / Linux). It checks you have git, Node ≥ 20, and pnpm (it won't install or change them for you), puts Infinite at `~/.infinite/app`, drops an `infinite` command on your PATH, and runs setup:
