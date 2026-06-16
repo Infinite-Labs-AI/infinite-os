@@ -51,10 +51,13 @@ install_dependencies() {
   # pnpm symlinks infinite-tag's bin (-> packages/instrument/dist/src/cli.js) during
   # install — before the build creates that file — printing a harmless one-time
   # "Failed to create bin … ENOENT" warning. Pre-create the (empty) target so the
-  # symlink lands cleanly; build_workspace() then compiles the real file over it.
-  mkdir -p "$ROOT/packages/instrument/dist/src"
-  [ -f "$ROOT/packages/instrument/dist/src/cli.js" ] || : > "$ROOT/packages/instrument/dist/src/cli.js"
+  # symlink lands cleanly, then drop our placeholder once install is done so a
+  # 0-byte cli.js can never linger as a stale artifact; build_workspace() compiles
+  # the real file next. (Only ever touch a file we created — never an existing one.)
+  local stub="$ROOT/packages/instrument/dist/src/cli.js" made=0
+  if [[ ! -f "$stub" ]]; then mkdir -p "$(dirname "$stub")"; : > "$stub"; made=1; fi
   (cd "$ROOT" && pnpm install --frozen-lockfile)
+  if [[ "$made" == 1 && ! -s "$stub" ]]; then rm -f "$stub"; fi
 }
 build_workspace() { (cd "$ROOT" && pnpm -r --if-present --workspace-concurrency=1 build); }
 
