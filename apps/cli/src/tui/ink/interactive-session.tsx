@@ -1495,6 +1495,12 @@ export function composerCursorLayout(
       // continues the text. The explicit-`\n` boundary is handled by `lastSubOfLine`
       // (the offset before a real newline stays at the end of the current line).
       if (position < rowEnd || (position === rowEnd && lastSubOfLine)) {
+        // Column uses displayWidth (the TUI's width source everywhere else); for
+        // plain text it agrees with the string-width wrap-ansi used for the rows, so
+        // the caret is exact. They diverge only for wide/emoji glyphs (e.g. ZWJ
+        // sequences), where the caret column — and, at a width boundary, the
+        // deferred-wrap row below — can be approximate. That is the pre-existing
+        // displayWidth-vs-terminal-width gap, not the row drift this fix targets.
         let column = displayWidth(sub.slice(0, position - rowStart));
         let line = displayRow;
         // A cursor exactly at the end of a width-filled row shows at the start of the
