@@ -1314,6 +1314,464 @@ describe("live setup orchestration", () => {
     });
   });
 
+  it("surfaces status.error and offers the options menu when the GA4 OAuth session fails (#7)", async () => {
+    const { store } = capturingStore();
+    const onFailed = vi.fn(async () => null);
+    const bootstrap = {
+      prepareConfig: vi.fn(async () => ({
+        clientId: "ga-client-id",
+        clientSecret: "ga-client-secret",
+        redirectUri: "http://127.0.0.1:3000/oauth/callback/google_analytics_4"
+      })),
+      start: vi.fn(async (_input: unknown) => ({
+        sessionId: "oauth_session_1",
+        provider: "google_analytics_4",
+        status: "pending" as const,
+        authorizationUrl: "https://accounts.google.com/o/oauth2/v2/auth?state=s1",
+        redirectUri: "http://127.0.0.1:3000/oauth/callback/google_analytics_4"
+      })),
+      status: vi.fn(async (_sessionId: string) => ({
+        sessionId: "oauth_session_1",
+        provider: "google_analytics_4",
+        status: "failed" as const,
+        authorizationUrl: "https://accounts.google.com/o/oauth2/v2/auth?state=s1",
+        redirectUri: "http://127.0.0.1:3000/oauth/callback/google_analytics_4",
+        error: "redirect_uri_mismatch"
+      })),
+      exchange: vi.fn(async (_sessionId: string) => {
+        throw new Error("exchange must not run on a failed session");
+      })
+    };
+
+    const result = await runLiveSetupOnboarding({
+      db: fakeDb() as never,
+      workspaceId: "ws_1",
+      interview: {
+        projectName: "Acme",
+        websiteUrl: "https://acme.test",
+        productSurface: "web",
+        providerInventory: [
+          { provider: "ga4", hasAccount: true, installState: "unknown", selected: true, recommended: true },
+          { provider: "posthog", hasAccount: false, installState: "unknown", selected: false, recommended: false },
+          { provider: "x", hasAccount: false, installState: "unknown", selected: false, recommended: false }
+        ]
+      },
+      actions: ctx.actions,
+      prompt: ctx.prompt,
+      browserFactory: ctx.browser,
+      browserSessionStore,
+      runStore: store,
+      handoffLauncher: async () => undefined,
+      ga4OauthBootstrap: bootstrap,
+      ga4OauthWaitMs: 1000,
+      ga4OauthPollIntervalMs: 1,
+      sleep: async () => {},
+      // Inject the interaction so the failure surfaces status.error; returning null = pause.
+      ga4OauthInteraction: { onFailed }
+    });
+
+    expect(onFailed).toHaveBeenCalledWith({ error: "redirect_uri_mismatch", sessionId: "oauth_session_1" });
+    expect(bootstrap.exchange).not.toHaveBeenCalled();
+    // A null decision falls through to the resumable pause.
+    expect(result.paused).toEqual(["ga4"]);
+  });
+
+  it("retries the GA4 OAuth bootstrap exactly once when the injected interaction cancels with retry (#7)", async () => {
+    const { store } = capturingStore();
+    const waitForDecision = vi
+      .fn(async (): Promise<"retry" | null> => null)
+      // First wait: founder hits a key and chooses retry. Second wait: let the poll finish.
+      .mockResolvedValueOnce("retry")
+      .mockResolvedValue(null);
+
+    let statusCalls = 0;
+    const bootstrap = {
+      prepareConfig: vi.fn(async () => ({
+        clientId: "ga-client-id",
+        clientSecret: "ga-client-secret",
+        redirectUri: "http://127.0.0.1:3000/oauth/callback/google_analytics_4"
+      })),
+      start: vi.fn(async (_input: unknown) => ({
+        sessionId: "oauth_session_1",
+        provider: "google_analytics_4",
+        status: "pending" as const,
+        authorizationUrl: "https://accounts.google.com/o/oauth2/v2/auth?state=s1",
+        redirectUri: "http://127.0.0.1:3000/oauth/callback/google_analytics_4"
+      })),
+      status: vi.fn(async (_sessionId: string) => {
+        statusCalls += 1;
+        // Stay pending so the first attempt is interrupted by the retry decision; the second
+        // attempt also stays pending and times out into a resumable pause.
+        return {
+          sessionId: "oauth_session_1",
+          provider: "google_analytics_4",
+          status: "pending" as const,
+          authorizationUrl: "https://accounts.google.com/o/oauth2/v2/auth?state=s1",
+          redirectUri: "http://127.0.0.1:3000/oauth/callback/google_analytics_4",
+          error: null
+        };
+      }),
+      exchange: vi.fn(async () => {
+        throw new Error("exchange must not run");
+      })
+    };
+
+    const result = await runLiveSetupOnboarding({
+      db: fakeDb() as never,
+      workspaceId: "ws_1",
+      interview: {
+        projectName: "Acme",
+        websiteUrl: "https://acme.test",
+        productSurface: "web",
+        providerInventory: [
+          { provider: "ga4", hasAccount: true, installState: "unknown", selected: true, recommended: true },
+          { provider: "posthog", hasAccount: false, installState: "unknown", selected: false, recommended: false },
+          { provider: "x", hasAccount: false, installState: "unknown", selected: false, recommended: false }
+        ]
+      },
+      actions: ctx.actions,
+      prompt: ctx.prompt,
+      browserFactory: ctx.browser,
+      browserSessionStore,
+      runStore: store,
+      handoffLauncher: async () => undefined,
+      ga4OauthBootstrap: bootstrap,
+      ga4OauthWaitMs: 30,
+      ga4OauthPollIntervalMs: 1,
+      sleep: async () => {},
+      ga4OauthInteraction: {
+        waitForDecision
+      }
+    });
+
+    // retry re-starts the bootstrap exactly once more (no orphan-session chain) → 2 starts total.
+    expect(bootstrap.start).toHaveBeenCalledTimes(2);
+    expect(result.paused).toEqual(["ga4"]);
+    expect(statusCalls).toBeGreaterThan(0);
+  });
+
+  it("maps an injected quit/byo/manual decision to the resumable pause without exchanging (#7)", async () => {
+    for (const decision of ["byo", "manual", "quit"] as const) {
+      const { store } = capturingStore();
+      const bootstrap = {
+        prepareConfig: vi.fn(async () => ({
+          clientId: "ga-client-id",
+          clientSecret: "ga-client-secret",
+          redirectUri: "http://127.0.0.1:3000/oauth/callback/google_analytics_4"
+        })),
+        start: vi.fn(async (_input: unknown) => ({
+          sessionId: "oauth_session_1",
+          provider: "google_analytics_4",
+          status: "pending" as const,
+          authorizationUrl: "https://accounts.google.com/o/oauth2/v2/auth?state=s1",
+          redirectUri: "http://127.0.0.1:3000/oauth/callback/google_analytics_4"
+        })),
+        status: vi.fn(async (_sessionId: string) => ({
+          sessionId: "oauth_session_1",
+          provider: "google_analytics_4",
+          status: "pending" as const,
+          authorizationUrl: "https://accounts.google.com/o/oauth2/v2/auth?state=s1",
+          redirectUri: "http://127.0.0.1:3000/oauth/callback/google_analytics_4",
+          error: null
+        })),
+        exchange: vi.fn(async () => {
+          throw new Error("exchange must not run");
+        })
+      };
+      const result = await runLiveSetupOnboarding({
+        db: fakeDb() as never,
+        workspaceId: "ws_1",
+        interview: {
+          projectName: "Acme",
+          websiteUrl: "https://acme.test",
+          productSurface: "web",
+          providerInventory: [
+            { provider: "ga4", hasAccount: true, installState: "unknown", selected: true, recommended: true },
+            { provider: "posthog", hasAccount: false, installState: "unknown", selected: false, recommended: false },
+            { provider: "x", hasAccount: false, installState: "unknown", selected: false, recommended: false }
+          ]
+        },
+        actions: ctx.actions,
+        prompt: ctx.prompt,
+        browserFactory: ctx.browser,
+        browserSessionStore,
+        runStore: store,
+        handoffLauncher: async () => undefined,
+        ga4OauthBootstrap: bootstrap,
+        ga4OauthWaitMs: 1000,
+        ga4OauthPollIntervalMs: 1,
+        sleep: async () => {},
+        ga4OauthInteraction: { waitForDecision: vi.fn(async () => decision) }
+      });
+      // Non-retry decisions never re-start; they fall through to a single resumable pause.
+      expect(bootstrap.start).toHaveBeenCalledTimes(1);
+      expect(bootstrap.exchange).not.toHaveBeenCalled();
+      expect(result.paused).toEqual(["ga4"]);
+    }
+  });
+
+  it("non-interactive GA4 wait (no interaction) keeps today's timeout→pause and never prompts (#7)", async () => {
+    const { store } = capturingStore();
+    const bootstrap = {
+      prepareConfig: vi.fn(async () => ({
+        clientId: "ga-client-id",
+        clientSecret: "ga-client-secret",
+        redirectUri: "http://127.0.0.1:3000/oauth/callback/google_analytics_4"
+      })),
+      start: vi.fn(async (_input: unknown) => ({
+        sessionId: "oauth_session_1",
+        provider: "google_analytics_4",
+        status: "pending" as const,
+        authorizationUrl: "https://accounts.google.com/o/oauth2/v2/auth?state=s1",
+        redirectUri: "http://127.0.0.1:3000/oauth/callback/google_analytics_4"
+      })),
+      status: vi.fn(async (_sessionId: string) => ({
+        sessionId: "oauth_session_1",
+        provider: "google_analytics_4",
+        status: "pending" as const,
+        authorizationUrl: "https://accounts.google.com/o/oauth2/v2/auth?state=s1",
+        redirectUri: "http://127.0.0.1:3000/oauth/callback/google_analytics_4",
+        error: null
+      })),
+      exchange: vi.fn(async () => {
+        throw new Error("exchange must not run");
+      })
+    };
+
+    const result = await runLiveSetupOnboarding({
+      db: fakeDb() as never,
+      workspaceId: "ws_1",
+      interview: {
+        projectName: "Acme",
+        websiteUrl: "https://acme.test",
+        productSurface: "web",
+        providerInventory: [
+          { provider: "ga4", hasAccount: true, installState: "unknown", selected: true, recommended: true },
+          { provider: "posthog", hasAccount: false, installState: "unknown", selected: false, recommended: false },
+          { provider: "x", hasAccount: false, installState: "unknown", selected: false, recommended: false }
+        ]
+      },
+      actions: ctx.actions,
+      prompt: ctx.prompt,
+      browserFactory: ctx.browser,
+      browserSessionStore,
+      runStore: store,
+      handoffLauncher: async () => undefined,
+      ga4OauthBootstrap: bootstrap,
+      ga4OauthWaitMs: 5,
+      ga4OauthPollIntervalMs: 1,
+      sleep: async () => {}
+      // No ga4OauthInteraction injected → non-interactive path.
+    });
+
+    // Exactly one start, no exchange, resumable pause with the OAuth session id preserved.
+    expect(bootstrap.start).toHaveBeenCalledTimes(1);
+    expect(bootstrap.exchange).not.toHaveBeenCalled();
+    expect(result.paused).toEqual(["ga4"]);
+    expect(result.runs.ga4?.phases.detect).toMatchObject({
+      status: "needs_human",
+      data: { resume: expect.objectContaining({ oauthSessionId: "oauth_session_1" }) }
+    });
+  });
+
+  it("opens paused hand-offs strictly sequentially in canonical order, gated between launches (#8)", async () => {
+    const launchOrder: string[] = [];
+    const gateOrder: string[] = [];
+    let gateResolvedFor: string | null = null;
+    const handoffLauncher = vi.fn(async (input: { provider: string }) => {
+      // When PostHog launches, GA4's gate must already have resolved (one-at-a-time).
+      if (input.provider === "posthog") {
+        expect(gateResolvedFor).toBe("ga4");
+      }
+      launchOrder.push(input.provider);
+    });
+    const awaitProviderHandoff = vi.fn(async (provider: "ga4" | "posthog" | "x") => {
+      gateOrder.push(provider);
+      gateResolvedFor = provider;
+    });
+
+    const ga4Handoff: PhaseResult = {
+      status: "needs_human",
+      detail: "Finish GA4.",
+      handoff: { kind: "open_url", url: "https://analytics.google.com/analytics/web/", instructions: "Finish GA4." }
+    };
+    const posthogHandoff: PhaseResult = {
+      status: "needs_human",
+      detail: "Finish PostHog.",
+      handoff: {
+        kind: "open_url",
+        url: "https://us.posthog.com/settings/user-api-keys",
+        instructions: "Finish PostHog."
+      }
+    };
+
+    const result = await runLiveSetupOnboarding({
+      // DB returns active runs in PostHog-first (recency) order on purpose — the launcher must
+      // re-sort to canonical GA4 → PostHog regardless of DB ordering.
+      db: fakeDb([
+        {
+          id: "run_posthog",
+          provider: "posthog",
+          tool: "posthog",
+          status: "paused_handoff",
+          pendingHandoff: {
+            kind: "open_url",
+            url: "https://us.posthog.com/settings/user-api-keys",
+            instructions: "Finish PostHog.",
+            provider: "posthog",
+            runId: "run_posthog",
+            reason: "posthog_manual_key",
+            browser: { profileRef: "posthog-api-key", resumeNonce: "n2" }
+          },
+          browserProfile: "posthog-api-key"
+        },
+        {
+          id: "run_ga4",
+          provider: "ga4",
+          tool: "ga4",
+          status: "paused_handoff",
+          pendingHandoff: {
+            kind: "open_url",
+            url: "https://analytics.google.com/analytics/web/",
+            instructions: "Finish GA4.",
+            provider: "ga4",
+            runId: "run_ga4",
+            reason: "google_login",
+            browser: { profileRef: "ga4-google", resumeNonce: "n1" }
+          },
+          browserProfile: "ga4-google"
+        }
+      ]) as never,
+      workspaceId: "ws_1",
+      interview: {
+        projectName: "Acme",
+        websiteUrl: "https://acme.test",
+        productSurface: "web",
+        providerInventory: [
+          { provider: "ga4", hasAccount: true, installState: "unknown", selected: true, recommended: true },
+          { provider: "posthog", hasAccount: true, installState: "unknown", selected: true, recommended: true },
+          { provider: "x", hasAccount: false, installState: "unknown", selected: false, recommended: false }
+        ]
+      },
+      actions: ctx.actions,
+      prompt: ctx.prompt,
+      browserFactory: ctx.browser,
+      browserSessionStore,
+      runStore: fakeStore(),
+      handoffLauncher,
+      awaitProviderHandoff,
+      async createProvisioners() {
+        return [
+          setupProvisioner("ga4", {
+            async connect() {
+              return { result: ga4Handoff, browser: { profileRef: "ga4-google", resumeNonce: "n1" } };
+            }
+          }),
+          setupProvisioner("posthog", {
+            async connect() {
+              return { result: posthogHandoff, browser: { profileRef: "posthog-api-key", resumeNonce: "n2" } };
+            }
+          })
+        ];
+      }
+    });
+
+    expect(result.paused.sort()).toEqual(["ga4", "posthog"]);
+    // Canonical launch order, GA4 first, with the gate firing for GA4 before PostHog launches.
+    expect(launchOrder).toEqual(["ga4", "posthog"]);
+    expect(gateOrder).toEqual(["ga4", "posthog"]);
+    expect(handoffLauncher).toHaveBeenCalledTimes(2);
+  });
+
+  it("non-interactive paused launch opens every handoff with no gate prompt (#8)", async () => {
+    const handoffLauncher = vi.fn(async () => undefined);
+    const ga4Handoff: PhaseResult = {
+      status: "needs_human",
+      detail: "Finish GA4.",
+      handoff: { kind: "open_url", url: "https://analytics.google.com/analytics/web/", instructions: "Finish GA4." }
+    };
+    const posthogHandoff: PhaseResult = {
+      status: "needs_human",
+      detail: "Finish PostHog.",
+      handoff: {
+        kind: "open_url",
+        url: "https://us.posthog.com/settings/user-api-keys",
+        instructions: "Finish PostHog."
+      }
+    };
+
+    await runLiveSetupOnboarding({
+      db: fakeDb([
+        {
+          id: "run_ga4",
+          provider: "ga4",
+          tool: "ga4",
+          status: "paused_handoff",
+          pendingHandoff: {
+            kind: "open_url",
+            url: "https://analytics.google.com/analytics/web/",
+            instructions: "Finish GA4.",
+            provider: "ga4",
+            runId: "run_ga4",
+            reason: "google_login",
+            browser: { profileRef: "ga4-google", resumeNonce: "n1" }
+          },
+          browserProfile: "ga4-google"
+        },
+        {
+          id: "run_posthog",
+          provider: "posthog",
+          tool: "posthog",
+          status: "paused_handoff",
+          pendingHandoff: {
+            kind: "open_url",
+            url: "https://us.posthog.com/settings/user-api-keys",
+            instructions: "Finish PostHog.",
+            provider: "posthog",
+            runId: "run_posthog",
+            reason: "posthog_manual_key",
+            browser: { profileRef: "posthog-api-key", resumeNonce: "n2" }
+          },
+          browserProfile: "posthog-api-key"
+        }
+      ]) as never,
+      workspaceId: "ws_1",
+      interview: {
+        projectName: "Acme",
+        websiteUrl: "https://acme.test",
+        productSurface: "web",
+        providerInventory: [
+          { provider: "ga4", hasAccount: true, installState: "unknown", selected: true, recommended: true },
+          { provider: "posthog", hasAccount: true, installState: "unknown", selected: true, recommended: true },
+          { provider: "x", hasAccount: false, installState: "unknown", selected: false, recommended: false }
+        ]
+      },
+      actions: ctx.actions,
+      prompt: ctx.prompt,
+      browserFactory: ctx.browser,
+      browserSessionStore,
+      runStore: fakeStore(),
+      handoffLauncher,
+      // No awaitProviderHandoff → gate is a no-op; both URLs are still launched.
+      async createProvisioners() {
+        return [
+          setupProvisioner("ga4", {
+            async connect() {
+              return { result: ga4Handoff, browser: { profileRef: "ga4-google", resumeNonce: "n1" } };
+            }
+          }),
+          setupProvisioner("posthog", {
+            async connect() {
+              return { result: posthogHandoff, browser: { profileRef: "posthog-api-key", resumeNonce: "n2" } };
+            }
+          })
+        ];
+      }
+    });
+
+    expect(handoffLauncher).toHaveBeenCalledTimes(2);
+  });
+
   it("launches paused provider handoffs after sequential onboarding completes", async () => {
     const handoffLauncher = vi.fn(async () => undefined);
     const interview: SetupInterview = {

@@ -17,10 +17,20 @@ export interface OnboardingResult {
   runs: Partial<Record<SetupProviderId, SetupRunResult>>;
 }
 
+export interface RunOnboardingHooks {
+  /**
+   * Fired once per selected provider, in canonical run order, immediately before its
+   * `runSetup` begins — so the CLI can print the "Now connecting <Provider> (N of M)…"
+   * sequencing boundary (#8 Part 1). `total` is the count of selected providers.
+   */
+  onProviderStart?: (input: { provider: SetupProviderId; index: number; total: number }) => void;
+}
+
 export async function runOnboarding(
   input: { interview: SetupInterview; provisioners: Provisioner[] },
   ctx: ProvisionerContext,
-  store: SetupRunStore
+  store: SetupRunStore,
+  hooks: RunOnboardingHooks = {}
 ): Promise<OnboardingResult> {
   const recommendationMap = new Map(
     buildSetupRecommendations({
@@ -65,10 +75,21 @@ export async function runOnboarding(
     }
   };
 
+  // Provisioners already run sequentially in canonical order (GA4 → PostHog → X); compute
+  // a stable "N of M" index over the SELECTED providers so the CLI can frame each step.
+  const total = selectedProviders.length;
+  let selectedIndex = 0;
   for (const provisioner of input.provisioners) {
     if (!selectedProviders.includes(provisioner.tool as SetupProviderId)) {
       continue;
     }
+
+    selectedIndex += 1;
+    hooks.onProviderStart?.({
+      provider: provisioner.tool as SetupProviderId,
+      index: selectedIndex,
+      total
+    });
 
     const inventory = selectedInventory.get(provisioner.tool as SetupProviderId);
     // skipImplement: the single codemod pass wires all completed tools afterward (v6 §5/§7.3).

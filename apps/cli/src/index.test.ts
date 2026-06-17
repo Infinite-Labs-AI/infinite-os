@@ -87,6 +87,7 @@ import {
   parsePersistentInputHistory,
   requiresOperatorConfirmation,
   createLocalGa4OauthBootstrap,
+  createSetupInteractionWiring,
   runGa4TagInstallOffer,
   expandHomePath,
   createCliAgentRuntime,
@@ -7770,6 +7771,215 @@ describe("cli smoke", () => {
     } finally {
       writeSpy.mockRestore();
     }
+  });
+
+  it("start() always prints the pasteable authorization URL, even when the browser opened (#7)", async () => {
+    const isTTYDescriptor = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
+    const originalFetch = globalThis.fetch;
+    const writes: string[] = [];
+    const writeSpy = vi.spyOn(process.stdout, "write").mockImplementation((chunk: string | Uint8Array) => {
+      writes.push(String(chunk));
+      return true;
+    });
+    try {
+      // A TTY + a browser opener that exits 0 makes openBrowserForAuth report opened:true.
+      Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
+      globalThis.fetch = (async () =>
+        new Response(
+          JSON.stringify({
+            sessionId: "oauth_session_1",
+            provider: "google_analytics_4",
+            status: "pending",
+            authorizationUrl: "https://accounts.google.com/o/oauth2/v2/auth?state=paste-me",
+            redirectUri: "http://127.0.0.1:3000/oauth/callback/google_analytics_4"
+          }),
+          { status: 200 }
+        )) as typeof fetch;
+
+      const bootstrap = createLocalGa4OauthBootstrap({
+        env: { GROWTH_OS_AUTH_BROWSER_BIN: "true" },
+        config: {} as Parameters<typeof createLocalGa4OauthBootstrap>[0]["config"]
+      });
+      await bootstrap.start({ clientId: "id", clientSecret: "secret" });
+
+      const combined = writes.join("");
+      // The URL is surfaced AND the "Opened Google" success copy is present (opened:true path).
+      expect(combined).toContain("Opened Google in your browser");
+      expect(combined).toContain("Paste this link:");
+      expect(combined).toContain("https://accounts.google.com/o/oauth2/v2/auth?state=paste-me");
+    } finally {
+      globalThis.fetch = originalFetch;
+      writeSpy.mockRestore();
+      if (isTTYDescriptor) {
+        Object.defineProperty(process.stdin, "isTTY", isTTYDescriptor);
+      } else {
+        delete (process.stdin as { isTTY?: boolean }).isTTY;
+      }
+    }
+  });
+
+  it("start() writes nothing to stdout in --json mode (keeps the JSON payload clean) (#7)", async () => {
+    const originalFetch = globalThis.fetch;
+    const writes: string[] = [];
+    const writeSpy = vi.spyOn(process.stdout, "write").mockImplementation((chunk: string | Uint8Array) => {
+      writes.push(String(chunk));
+      return true;
+    });
+    try {
+      globalThis.fetch = (async () =>
+        new Response(
+          JSON.stringify({
+            sessionId: "oauth_session_1",
+            provider: "google_analytics_4",
+            status: "pending",
+            authorizationUrl: "https://accounts.google.com/o/oauth2/v2/auth?state=json"
+          }),
+          { status: 200 }
+        )) as typeof fetch;
+
+      const bootstrap = createLocalGa4OauthBootstrap({
+        env: {},
+        jsonMode: true,
+        config: {} as Parameters<typeof createLocalGa4OauthBootstrap>[0]["config"]
+      });
+      await bootstrap.start({ clientId: "id", clientSecret: "secret" });
+
+      expect(writes.join("")).toBe("");
+    } finally {
+      globalThis.fetch = originalFetch;
+      writeSpy.mockRestore();
+    }
+  });
+
+  it("start() uses the injected guidance renderer for the open-site block (#8 composes with #7)", async () => {
+    const originalFetch = globalThis.fetch;
+    const isTTYDescriptor = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
+    const writes: string[] = [];
+    const guidance = vi.fn(
+      (step: string, ctx: { authorizationUrl?: string }) =>
+        `GUIDANCE[${step}]: open ${ctx.authorizationUrl}`
+    );
+    const writeSpy = vi.spyOn(process.stdout, "write").mockImplementation((chunk: string | Uint8Array) => {
+      writes.push(String(chunk));
+      return true;
+    });
+    try {
+      Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
+      globalThis.fetch = (async () =>
+        new Response(
+          JSON.stringify({
+            sessionId: "oauth_session_1",
+            authorizationUrl: "https://accounts.google.com/o/oauth2/v2/auth?state=guide"
+          }),
+          { status: 200 }
+        )) as typeof fetch;
+
+      const bootstrap = createLocalGa4OauthBootstrap({
+        env: { GROWTH_OS_AUTH_BROWSER_BIN: "true" },
+        config: {} as Parameters<typeof createLocalGa4OauthBootstrap>[0]["config"],
+        guidance: guidance as never
+      });
+      await bootstrap.start({ clientId: "id", clientSecret: "secret" });
+
+      expect(guidance).toHaveBeenCalledWith(
+        "quick_connect",
+        expect.objectContaining({ authorizationUrl: "https://accounts.google.com/o/oauth2/v2/auth?state=guide" })
+      );
+      expect(writes.join("")).toContain("GUIDANCE[quick_connect]");
+    } finally {
+      globalThis.fetch = originalFetch;
+      writeSpy.mockRestore();
+      if (isTTYDescriptor) {
+        Object.defineProperty(process.stdin, "isTTY", isTTYDescriptor);
+      } else {
+        delete (process.stdin as { isTTY?: boolean }).isTTY;
+      }
+    }
+  });
+
+  describe("createSetupInteractionWiring predicate (#7/#8 non-interactive safety)", () => {
+    const fakeSetup = {
+      providerGuidance: () => "guidance"
+    } as unknown as Parameters<typeof createSetupInteractionWiring>[0]["setup"];
+
+    function withTTY<T>(value: boolean | undefined, fn: () => T): T {
+      const descriptor = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
+      if (value === undefined) {
+        delete (process.stdin as { isTTY?: boolean }).isTTY;
+      } else {
+        Object.defineProperty(process.stdin, "isTTY", { value, configurable: true });
+      }
+      try {
+        return fn();
+      } finally {
+        if (descriptor) {
+          Object.defineProperty(process.stdin, "isTTY", descriptor);
+        } else {
+          delete (process.stdin as { isTTY?: boolean }).isTTY;
+        }
+      }
+    }
+
+    it("installs NO interaction/gate/onProviderStart on a non-TTY (headless) run", () => {
+      const wiring = withTTY(false, () =>
+        createSetupInteractionWiring({ env: {}, setup: fakeSetup })
+      );
+      expect(wiring.ga4OauthInteraction).toBeUndefined();
+      expect(wiring.awaitProviderHandoff).toBeUndefined();
+      expect(wiring.onProviderStart).toBeUndefined();
+      // dispose() is always safe to call.
+      expect(() => wiring.dispose()).not.toThrow();
+    });
+
+    it("installs NO interaction/gate in --json mode even on a TTY", () => {
+      const wiring = withTTY(true, () =>
+        createSetupInteractionWiring({ env: {}, jsonMode: true, setup: fakeSetup })
+      );
+      expect(wiring.ga4OauthInteraction).toBeUndefined();
+      expect(wiring.awaitProviderHandoff).toBeUndefined();
+      expect(wiring.onProviderStart).toBeUndefined();
+    });
+
+    it("installs NO interaction/gate when GROWTH_OS_CLI_NONINTERACTIVE=1 even on a TTY", () => {
+      const wiring = withTTY(true, () =>
+        createSetupInteractionWiring({ env: { GROWTH_OS_CLI_NONINTERACTIVE: "1" }, setup: fakeSetup })
+      );
+      expect(wiring.ga4OauthInteraction).toBeUndefined();
+      expect(wiring.awaitProviderHandoff).toBeUndefined();
+      expect(wiring.onProviderStart).toBeUndefined();
+    });
+
+    it("installs the interaction/gate/boundary on an interactive TTY", () => {
+      const wiring = withTTY(true, () => createSetupInteractionWiring({ env: {}, setup: fakeSetup }));
+      expect(wiring.ga4OauthInteraction).toBeDefined();
+      expect(wiring.awaitProviderHandoff).toBeDefined();
+      expect(wiring.onProviderStart).toBeDefined();
+      wiring.dispose();
+    });
+
+    it("dispose() resolves a still-armed wait to null without blocking (no leak / always torn down)", async () => {
+      const rawModeCalls: boolean[] = [];
+      const stdin = process.stdin as NodeJS.ReadStream & { setRawMode?: (mode: boolean) => unknown };
+      const originalSetRawMode = stdin.setRawMode?.bind(stdin);
+      // Spy on the real stdin's setRawMode so we can confirm it is restored, without swapping
+      // out process.stdin (which is a non-configurable getter on some Node builds).
+      stdin.setRawMode = ((mode: boolean) => {
+        rawModeCalls.push(mode);
+        return stdin;
+      }) as typeof stdin.setRawMode;
+      const wiring = withTTY(true, () => createSetupInteractionWiring({ env: {}, setup: fakeSetup }));
+      try {
+        // Arm the wait but never press a key — it must not block the test.
+        const pending = wiring.ga4OauthInteraction?.waitForDecision?.();
+        expect(rawModeCalls).toContain(true); // raw mode armed
+        wiring.dispose();
+        // dispose() cancels the armed keypress → raw mode restored AND the promise resolves null.
+        expect(rawModeCalls).toContain(false);
+        await expect(pending).resolves.toBeNull();
+      } finally {
+        stdin.setRawMode = originalSetRawMode as typeof stdin.setRawMode;
+      }
+    });
   });
 
   it("shows configured connector labels when sources already exist", async () => {

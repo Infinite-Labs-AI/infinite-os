@@ -1,0 +1,64 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`provider-guidance > snapshots the ga4/byo block 1`] = `
+"Connecting Google Analytics with your own Google Cloud app — opening your browser now.
+What to do there:
+  1. Sign in to Google (Infinite never sees your password).
+  2. If you see "Google hasn't verified this app", click Advanced → Continue (it's your own unverified app — expected, no Google verification needed).
+  3. Approve the Analytics permissions and accept any Terms of Service.
+Why: lets Infinite create/read your GA4 property + web stream and capture the Measurement ID (G-…) to install on your site.
+Confirm: this terminal continues automatically once Google redirects back (or press Ctrl-C for more options).
+Skip: press Ctrl-C to install the GA4 tag manually later."
+`;
+
+exports[`provider-guidance > snapshots the ga4/quick_connect block 1`] = `
+"Connecting Google Analytics — opening your browser now.
+What to do there:
+  1. Sign in to Google (Infinite never sees your password).
+  2. If you see "Google hasn't verified this app", click Advanced → Continue (it's Infinite's app, pending Google review).
+  3. Approve the Analytics permissions and accept any Terms of Service.
+Why: lets Infinite create/read your GA4 property + web stream and capture the Measurement ID (G-…) to install on your site.
+Confirm: this terminal continues automatically once Google redirects back (or press Ctrl-C for more options).
+Skip: press Ctrl-C to use your own Google Cloud app or install the tag manually later."
+`;
+
+exports[`provider-guidance > snapshots the ga4/tos block 1`] = `
+"Connecting Google Analytics — opening Google Analytics in your browser now.
+What to do there:
+  1. Sign in to Google Analytics.
+  2. Approve access for this workspace and accept any pending Analytics Terms of Service.
+  3. In Google Analytics, open the Web data stream for this site and keep the Measurement ID (G-…) visible.
+Why: GA4 authorization lets Infinite create/read the Analytics property and web stream for sync/query, then store the Measurement ID for site installation.
+Confirm: resume setup afterward — Infinite keeps this setup run state.
+Skip: press Ctrl-C to install the GA4 tag manually later."
+`;
+
+exports[`provider-guidance > snapshots the posthog/api_key block 1`] = `
+"Connecting PostHog — opening the personal API keys page now.
+What to do there:
+  1. If Infinite can't auto-create the key, create a scoped personal API key (phx_…).
+  2. Copy it.
+Why: the phx_ key lets Infinite sync your PostHog data server-side (it can't read it from the browser).
+Confirm: paste it here when prompted, or run \`infinite setup resume <run_id>\` and paste/import it.
+Skip: press Enter at the paste prompt to continue without sync for now."
+`;
+
+exports[`provider-guidance > snapshots the posthog/signup block 1`] = `
+"Setting up PostHog — opening PostHog signup now.
+What to do there:
+  1. Finish signup, login, or email verification until you reach a PostHog project home page.
+  2. Return to this terminal and run resume — Infinite will open the API-key step next.
+Why: Infinite needs a PostHog project so it can mint a scoped key and sync your product analytics server-side.
+Confirm: run \`infinite setup resume <run_id>\` once you reach a PostHog project home page.
+Skip: you don't need to find the project API key/pixel yet — the next step handles it."
+`;
+
+exports[`provider-guidance > snapshots the x/billing block 1`] = `
+"Connecting X — opening the X developer portal now.
+What to do there:
+  1. Mint or copy a bearer token in the X developer portal.
+  2. Reconnect the X source with that token.
+Why: the bearer token lets Infinite read your X ads/analytics data for sync/query.
+Confirm: run \`infinite setup resume <run_id>\` after you have the token.
+Skip: press Enter to skip X for now — it's optional and can be connected later."
+`;

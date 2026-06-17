@@ -11,6 +11,7 @@ import { readLatestSetupPublicArtifacts, type InfiniteOsDb, type SetupResolvedAr
 import type { SessionContext } from "@infinite-os/runtime";
 
 import { runOnboarding, type OnboardingResult } from "./onboarding-controller.js";
+import { providerGuidance, type GuidanceStep } from "./provider-guidance.js";
 import { buildProviderConfirmations } from "./confirmations.js";
 import { writeSetupArtifactsFile } from "./artifacts-file.js";
 import { buildInstrumentInstallCommand } from "./install-command.js";
@@ -138,6 +139,19 @@ export interface LiveSetupExecutionOptions {
     resumePublicArtifacts?: Partial<Record<SetupProviderId, SetupProviderPublicArtifacts | undefined>>;
   }) => Promise<Provisioner[]>;
   handoffLauncher?: (input: BrowserHandoffLaunchInput) => Promise<void>;
+  /**
+   * Per-provider sequencing gate (#8 Part 1). After each paused provider's browser opens,
+   * the CLI awaits this gate (an Enter-to-continue ack on a TTY) before the next provider's
+   * browser opens — so hand-offs are strictly one-at-a-time. Non-interactive callers leave
+   * it undefined (default no-op), preserving today's "open all, return URLs" behavior.
+   *
+   * This is the SHARED wait/gate seam #7 and #8 compose on: #8 supplies sequencing here, #7
+   * threads its `AbortSignal` so Ctrl-C cancels the current provider's wait. The setup
+   * package never owns the TTY — this is implemented in the CLI and injected.
+   */
+  awaitProviderHandoff?: ProviderHandoffGate;
+  /** Per-provider "Now connecting <Provider> (N of M)…" boundary, printed by the CLI. */
+  onProviderStart?: (input: { provider: SetupProviderId; index: number; total: number }) => void;
   runStore?: SetupRunStore;
   timeZone?: string;
   log?: ProvisionerContext["log"];
@@ -147,15 +161,73 @@ export interface LiveSetupExecutionOptions {
   ga4OauthPollIntervalMs?: number;
   /** Injectable sleep for tests so the GA4 OAuth poll loop does not wait real time. */
   sleep?: (ms: number) => Promise<void>;
+  /**
+   * Optional cancellable-wait interaction for the GA4 OAuth poll (#7). The setup package
+   * stays free of TTY/readline: the CLI implements the keypress + options menu and injects
+   * it here. Undefined on non-interactive / --json / headless runs — the poll then keeps
+   * today's print-URL + poll + resumable-pause behavior and NEVER blocks on a keypress.
+   */
+  ga4OauthInteraction?: Ga4OauthWaitInteraction;
 }
 
 const DEFAULT_GA4_OAUTH_WAIT_MS = 5 * 60 * 1000;
 const DEFAULT_GA4_OAUTH_POLL_INTERVAL_MS = 2000;
 
+/**
+ * The shared per-provider hand-off gate (`awaitProviderHandoff`). Resolves when the founder
+ * acks the current provider's browser hand-off (or immediately on non-interactive paths).
+ * #7 adds the `signal`: when aborted (Ctrl-C), the gate rejects/returns and the provider is
+ * left `paused_handoff`.
+ */
+export type ProviderHandoffGate = (
+  provider: SetupProviderId,
+  context: { index: number; total: number; url?: string; signal?: AbortSignal }
+) => Promise<void>;
+
+/** Outcome the founder chose from the cancellable GA4 OAuth wait menu (#7). */
+export type Ga4OauthWaitDecision = "retry" | "byo" | "manual" | "quit";
+
+/**
+ * CLI-implemented interaction surface for the cancellable GA4 OAuth wait (#7). All methods
+ * are optional so a partial stub works in tests. The setup package only calls these — it
+ * never touches stdin/raw mode itself.
+ */
+export interface Ga4OauthWaitInteraction {
+  /** Called once when the wait begins, with the pasteable authorization URL. */
+  onWaitStarted?(input: { authorizationUrl?: string; sessionId: string }): void;
+  /**
+   * Races against the status poll. Resolve with a decision when the founder interrupts the
+   * wait (keypress / Ctrl-C then a menu choice); resolve with `null` to let the poll continue.
+   * Never resolve (or return a never-settling promise) on non-interactive paths — but on
+   * those paths this interaction is simply not injected.
+   */
+  waitForDecision?(): Promise<Ga4OauthWaitDecision | null>;
+  /** Called when the poll window elapses with no terminal status; returns the menu choice (or null to pause). */
+  onTimeout?(input: { error?: string | null; sessionId: string }): Promise<Ga4OauthWaitDecision | null>;
+  /** Called when the OAuth session reports `failed`; surfaces `status.error` and returns the menu choice (or null to pause). */
+  onFailed?(input: { error?: string | null; sessionId: string }): Promise<Ga4OauthWaitDecision | null>;
+}
+
+/** Typed outcome of the GA4 OAuth poll/race (replaces the old bare `null`). */
+type Ga4OauthPollOutcome =
+  | { kind: "authorized"; resolution: Ga4AuthResolution }
+  | { kind: "decision"; decision: Ga4OauthWaitDecision; error?: string | null }
+  | { kind: "timeout"; error?: string | null }
+  | { kind: "failed"; error?: string | null };
+
 interface Ga4OauthPollConfig {
   waitMs: number;
   pollIntervalMs: number;
   sleep: (ms: number) => Promise<void>;
+  interaction?: Ga4OauthWaitInteraction;
+}
+
+/** Canonical provider order for sequencing hand-offs (#8): GA4 → PostHog → X. */
+const CANONICAL_PROVIDER_ORDER: SetupProviderId[] = ["ga4", "posthog", "x"];
+
+function canonicalProviderRank(provider: SetupProviderId): number {
+  const rank = CANONICAL_PROVIDER_ORDER.indexOf(provider);
+  return rank === -1 ? CANONICAL_PROVIDER_ORDER.length : rank;
 }
 
 export interface ResumeLiveSetupExecutionOptions extends Omit<LiveSetupExecutionOptions, "interview"> {
@@ -281,7 +353,8 @@ async function executeLiveSetupOnboarding(
   const ga4OauthPoll: Ga4OauthPollConfig = {
     waitMs: options.ga4OauthWaitMs ?? DEFAULT_GA4_OAUTH_WAIT_MS,
     pollIntervalMs: options.ga4OauthPollIntervalMs ?? DEFAULT_GA4_OAUTH_POLL_INTERVAL_MS,
-    sleep: options.sleep ?? ((ms) => delay(ms))
+    sleep: options.sleep ?? ((ms) => delay(ms)),
+    interaction: options.ga4OauthInteraction
   };
   const createProvisioners =
     options.createProvisioners ??
@@ -328,7 +401,8 @@ async function executeLiveSetupOnboarding(
       provisioners
     },
     ctx,
-    runStore
+    runStore,
+    { onProviderStart: options.onProviderStart }
   );
 
   await launchPausedHandoffs(
@@ -336,7 +410,8 @@ async function executeLiveSetupOnboarding(
     options.handoffLauncher ??
       ((input) => launchBrowserHandoff(input, browserSessionStore)),
     options.prompt,
-    browserSessionScope
+    browserSessionScope,
+    options.awaitProviderHandoff
   );
 
   const activeRuns = await listActiveSetupRuns(options.db, options.workspaceId);
@@ -812,35 +887,51 @@ async function authorizeGa4Session(
 
     const config = await bootstrap.prepareConfig();
     if (config) {
-      const session = await bootstrap.start(config);
-      const oauthSessionId = stringValue(session.sessionId);
-      if (oauthSessionId) {
-        const poll = oauthPoll ?? {
-          waitMs: DEFAULT_GA4_OAUTH_WAIT_MS,
-          pollIntervalMs: DEFAULT_GA4_OAUTH_POLL_INTERVAL_MS,
-          sleep: (ms: number) => delay(ms)
-        };
-        const authorized = await pollGa4OauthUntilComplete({
+      const poll = oauthPoll ?? {
+        waitMs: DEFAULT_GA4_OAUTH_WAIT_MS,
+        pollIntervalMs: DEFAULT_GA4_OAUTH_POLL_INTERVAL_MS,
+        sleep: (ms: number) => delay(ms)
+      };
+      // `retry` re-starts the SAME bootstrap idempotently — at most one extra start, so a
+      // cancel→retry never spawns an unbounded chain of orphaned OAuth sessions. byo/manual/
+      // quit and timeout all fall through to the resumable pause (resume keeps working).
+      const maxStarts = 2;
+      let session: Ga4OauthBootstrapStatus | undefined;
+      for (let attempt = 0; attempt < maxStarts; attempt += 1) {
+        session = await bootstrap.start(config);
+        const oauthSessionId = stringValue(session.sessionId);
+        if (!oauthSessionId) {
+          break;
+        }
+        const outcome = await pollGa4OauthUntilComplete({
           db,
           workspaceId,
           bootstrap,
           browser,
           oauthSessionId,
+          authorizationUrl: stringValue(session.authorizationUrl),
           timeoutMs: poll.waitMs,
           intervalMs: poll.pollIntervalMs,
-          sleep: poll.sleep
+          sleep: poll.sleep,
+          interaction: poll.interaction
         });
-        if (authorized) {
-          return authorized;
+        if (outcome.kind === "authorized") {
+          return outcome.resolution;
         }
+        if (outcome.kind === "decision" && outcome.decision === "retry" && attempt < maxStarts - 1) {
+          // Loop and re-start the bootstrap (idempotent). The prior pending session is
+          // superseded server-side by the next start; we never leave it actively polled.
+          continue;
+        }
+        // byo / manual / quit / timeout / failed → resumable pause, surfacing the real error.
+        break;
       }
-      // Timed out (or no session id): fall back to the resumable handoff (resume still works).
-      return {
-        ...ga4BootstrapNeedsHuman(session, browser, {
+      if (session) {
+        return ga4BootstrapNeedsHuman(session, browser, {
           hasAccount,
           source: "setup_owned_oauth_bootstrap"
-        })
-      };
+        });
+      }
     }
   }
   const ga4CredentialResumeNotice =
@@ -895,34 +986,116 @@ async function finalizeGa4OauthSession(input: {
   return null;
 }
 
+const CANCEL_SENTINEL = Symbol("ga4-oauth-cancel");
+
 async function pollGa4OauthUntilComplete(input: {
   db: InfiniteOsDb;
   workspaceId: string;
   bootstrap: Ga4OauthBootstrapClient;
   browser: SetupBrowserHandoffRef;
   oauthSessionId: string;
+  authorizationUrl?: string;
   timeoutMs: number;
   intervalMs: number;
   sleep: (ms: number) => Promise<void>;
-}): Promise<Ga4AuthResolution | null> {
+  interaction?: Ga4OauthWaitInteraction;
+}): Promise<Ga4OauthPollOutcome> {
+  const interaction = input.interaction;
+  // Tell the CLI the wait has started (so it can always print the pasteable URL and arm
+  // the keypress listener). On non-interactive paths `interaction` is undefined → no-op.
+  interaction?.onWaitStarted?.({
+    authorizationUrl: input.authorizationUrl,
+    sessionId: input.oauthSessionId
+  });
+
+  // `waitForDecision` is a single long-lived promise we race against each poll tick. When it
+  // resolves with a decision the founder interrupted the wait; `null` means keep polling.
+  // It NEVER blocks on its own — the poll's own timeout still fires independently below.
+  const decisionPromise: Promise<Ga4OauthWaitDecision | typeof CANCEL_SENTINEL> | null =
+    interaction?.waitForDecision
+      ? interaction
+          .waitForDecision()
+          .then((decision) => decision ?? CANCEL_SENTINEL)
+          .catch(() => CANCEL_SENTINEL)
+      : null;
+  let pendingDecision: Ga4OauthWaitDecision | null = null;
+  if (decisionPromise) {
+    void decisionPromise.then((value) => {
+      if (value !== CANCEL_SENTINEL) {
+        pendingDecision = value;
+      }
+    });
+  }
+
   const start = Date.now();
+  let lastError: string | null | undefined;
   while (Date.now() - start < input.timeoutMs) {
     const status = await input.bootstrap.status(input.oauthSessionId);
+    lastError = status.error;
     if (status.status === "completed") {
-      return finalizeGa4OauthSession({
+      const resolution = await finalizeGa4OauthSession({
         db: input.db,
         workspaceId: input.workspaceId,
         bootstrap: input.bootstrap,
         oauthSessionId: input.oauthSessionId,
         browser: input.browser
       });
+      if (resolution) {
+        return { kind: "authorized", resolution };
+      }
+      // Exchange produced no usable token — treat as a failure so the founder can act.
+      return interactionFailed(interaction, input.oauthSessionId, status.error);
     }
     if (status.status === "failed") {
-      return null;
+      return interactionFailed(interaction, input.oauthSessionId, status.error);
     }
-    await input.sleep(input.intervalMs);
+    if (pendingDecision) {
+      return { kind: "decision", decision: pendingDecision, error: lastError };
+    }
+    // Race the poll interval against the founder's decision so a keypress interrupts promptly.
+    const raced = await raceSleepAgainstDecision(input.sleep(input.intervalMs), decisionPromise);
+    if (raced !== CANCEL_SENTINEL && raced !== undefined) {
+      return { kind: "decision", decision: raced, error: lastError };
+    }
   }
-  return null; // timeout → caller falls back to the resumable pause
+
+  // Timeout: surface the real error and offer the same options menu (or pause when no interaction).
+  if (interaction?.onTimeout) {
+    const decision = await interaction.onTimeout({ error: lastError, sessionId: input.oauthSessionId });
+    if (decision) {
+      return { kind: "decision", decision, error: lastError };
+    }
+  }
+  return { kind: "timeout", error: lastError };
+}
+
+async function interactionFailed(
+  interaction: Ga4OauthWaitInteraction | undefined,
+  sessionId: string,
+  error: string | null | undefined
+): Promise<Ga4OauthPollOutcome> {
+  if (interaction?.onFailed) {
+    const decision = await interaction.onFailed({ error, sessionId });
+    if (decision) {
+      return { kind: "decision", decision, error };
+    }
+  }
+  return { kind: "failed", error };
+}
+
+async function raceSleepAgainstDecision(
+  sleep: Promise<void>,
+  decisionPromise: Promise<Ga4OauthWaitDecision | typeof CANCEL_SENTINEL> | null
+): Promise<Ga4OauthWaitDecision | typeof CANCEL_SENTINEL | undefined> {
+  if (!decisionPromise) {
+    await sleep;
+    return undefined;
+  }
+  const result = await Promise.race([
+    sleep.then(() => undefined as undefined),
+    decisionPromise
+  ]);
+  return result;
 }
 
 async function resumeGa4OauthBootstrap(input: {
@@ -1154,6 +1327,10 @@ async function resolvePostHogAccess(
     resumeHandoff?.provider === "posthog" && resumeHandoff.reason === "posthog_signup";
   const accountReady = hasAccount || resumedFromSignup;
   if (handoffBrowserMode() === "playwright") {
+    // Just-in-time guidance (#8 Part 2): the PostHog browser opens HERE during the run in
+    // playwright mode, so print the what/why/confirm block before it opens (the system-mode
+    // open + its note happen later in launchPausedHandoffs).
+    prompt.note(providerGuidance("posthog", accountReady ? "api_key" : "signup"));
     const browserSession = await resolvePostHogBrowserSession({
       browserFactory,
       browserSessionStore,
@@ -1477,30 +1654,88 @@ async function launchPausedHandoffs(
   result: OnboardingResult,
   launch: (input: BrowserHandoffLaunchInput) => Promise<void>,
   prompt: Prompter,
-  browserSessionScope: string
+  browserSessionScope: string,
+  awaitProviderHandoff?: ProviderHandoffGate
 ): Promise<void> {
-  for (const provider of result.paused) {
-    const run = result.runs[provider];
-    const handoff = firstHandoff(run);
-    const profileRef = stringValue(run?.providerState?.browser?.profileRef);
-    if (!handoff?.url || !profileRef) {
-      continue;
-    }
+  // Strictly sequential, gated hand-offs (#8 Part 1): sort by canonical provider order
+  // (GA4 → PostHog → X), NOT DB recency, then open AT MOST ONE browser at a time. The gate
+  // (`awaitProviderHandoff`) is awaited between launches so the next browser does not open
+  // until the founder acks the current one. Non-interactive callers leave the gate undefined
+  // → it is a no-op and every URL is still surfaced (today's behavior, no prompt).
+  const launchable = result.paused
+    .map((provider) => {
+      const run = result.runs[provider];
+      const handoff = firstHandoff(run);
+      const url = stringValue(handoff?.url);
+      const profileRef = stringValue(run?.providerState?.browser?.profileRef);
+      if (!handoff || !url || !profileRef) {
+        return null;
+      }
+      const sessionKey =
+        browserSessionKeyForProvider(stringValue(run?.providerState?.browser?.sessionKey), provider) ??
+        buildBrowserSessionKey(provider, profileRef, browserSessionScope);
+      return {
+        provider,
+        url,
+        instructions: stringValue(handoff.instructions),
+        profileRef,
+        sessionKey
+      };
+    })
+    .filter((entry): entry is NonNullable<typeof entry> => entry !== null)
+    .sort((left, right) => canonicalProviderRank(left.provider) - canonicalProviderRank(right.provider));
+
+  const total = launchable.length;
+  let index = 0;
+  for (const { provider, url, instructions, profileRef, sessionKey } of launchable) {
+    index += 1;
+    // Print the just-in-time guidance block BEFORE the browser opens so it reuses the same
+    // per-provider template as the resume path (one source of truth).
+    prompt.note(pausedHandoffGuidance(provider, { url, instructions }));
     await launch({
       provider,
-      url: handoff.url,
+      url,
       contextRef: profileRef,
-      sessionKey:
-        browserSessionKeyForProvider(stringValue(run?.providerState?.browser?.sessionKey), provider) ??
-        buildBrowserSessionKey(provider, profileRef, browserSessionScope)
+      sessionKey
     });
-    const instructions = stringValue(handoff.instructions);
-    prompt.note(
-      instructions
-        ? `${provider.toUpperCase()}: ${instructions} Open: ${displayHandoffUrl(handoff.url)}`
-        : `${provider.toUpperCase()}: finish the browser handoff at ${displayHandoffUrl(handoff.url)}, then resume setup so Infinite can pick up the next required step.`
-    );
+    // Gate before the NEXT provider opens. On non-interactive paths this is a no-op.
+    if (awaitProviderHandoff) {
+      await awaitProviderHandoff(provider, { index, total, url });
+    }
   }
+}
+
+/**
+ * Builds the per-provider paused/resume note. It REUSES the data-driven guidance template
+ * (provider-guidance.ts) so just-in-time and resume copy stay identical, while still carrying
+ * the run-specific `instructions` + pasteable URL that the needs_human resolution attached.
+ */
+function pausedHandoffGuidance(
+  provider: SetupProviderId,
+  handoff: { url: string; instructions?: string }
+): string {
+  const url = displayHandoffUrl(handoff.url);
+  const step = guidanceStepForPausedProvider(provider, handoff.url);
+  const block = providerGuidance(provider, step, { authorizationUrl: url });
+  const instructions = stringValue(handoff.instructions);
+  // The run-specific header line (carrying resolution-specific instructions + the Open: URL)
+  // stays first and verbatim, then the shared guidance template is appended so just-in-time
+  // and resume copy come from one source of truth.
+  const header = instructions
+    ? `${provider.toUpperCase()}: ${instructions} Open: ${url}`
+    : `${provider.toUpperCase()}: finish the browser handoff at ${url}, then resume setup so Infinite can pick up the next required step.`;
+  return `${header}\n\n${block}`;
+}
+
+function guidanceStepForPausedProvider(provider: SetupProviderId, url: string): GuidanceStep {
+  if (provider === "posthog") {
+    // The signup URL ends in /signup; the personal-key URL ends in /settings/user-api-keys.
+    return url.includes("/signup") ? "signup" : "api_key";
+  }
+  if (provider === "x") {
+    return "billing";
+  }
+  return "tos";
 }
 
 async function launchBrowserHandoff(
