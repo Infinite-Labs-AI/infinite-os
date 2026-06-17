@@ -206,6 +206,144 @@ export async function findProject(
   );
 }
 
+export interface DeleteProjectResult {
+  deleted: boolean;
+}
+
+// Workspace-scoped tables (every table carrying a `workspace_id` FK to
+// `workspaces`), listed strictly leaves -> roots so each delete runs before any
+// table it still references. Ordering is the load-bearing invariant: most FKs
+// default to ON DELETE RESTRICT, so a delete is rejected while any child row
+// survives. Encrypted credential tables (`connection_credentials`,
+// `oauth_tokens`, `oauth_apps`) are an explicit, auditable data-safety event —
+// see AGENTS.md. Keep this list in sync as new `workspace_id` tables land; the
+// live-Postgres integration test asserts zero residual rows and catches misses.
+//
+// A handful of child tables carry no `workspace_id` of their own and are deleted
+// via a subquery scoped to the workspace (see DELETE_PROJECT_VIA_PARENT below)
+// BEFORE the workspace-scoped parents they reference.
+const DELETE_PROJECT_WORKSPACE_TABLES: readonly string[] = [
+  // --- provider truth/fact leaves (reference sources + raw_records) ---
+  "ga4_metadata_catalog",
+  "ga4_page_report_fact",
+  "ga4_report_snapshot_fact",
+  "meta_ads_campaign_daily",
+  "posthog_event_truth",
+  "posthog_person_current",
+  "posthog_session_fact",
+  "posthog_person_distinct_ids",
+  "record_lineage",
+  "shopify_order_lines",
+  "shopify_orders",
+  "shopify_products",
+  "stripe_customers",
+  "stripe_invoice_lines",
+  "stripe_invoices",
+  "stripe_prices",
+  "stripe_products",
+  "stripe_subscriptions",
+  "x_post",
+  "x_post_metric_snapshot",
+  "x_profile_snapshot",
+  // --- sync error rows reference sync_runs/sync_batches ---
+  "sync_errors",
+  // --- raw_records references sync_batches (and is referenced by truth/fact above) ---
+  "raw_records",
+  // --- setup_runs references workspace_sites (set null) ---
+  "setup_runs",
+  // --- sync_batches references sync_runs ---
+  "sync_batches",
+  // --- remaining children of sources ---
+  "connection_credentials",
+  "integration_audit_log",
+  "source_scopes",
+  "sync_cursors",
+  "sync_runs",
+  "sync_schedules",
+  "workspace_sites",
+  // --- journey facts reference journey.actors / journey.entities ---
+  'journey.behavior_facts',
+  'journey.touchpoint_facts',
+  'journey.actor_identities',
+  'journey.billing_facts',
+  'journey.conversion_facts',
+  'journey.lifecycle_states',
+  'journey.ltv_windows',
+  // --- saved_report_exports references saved_reports + job_runs ---
+  "saved_report_exports",
+  // --- chat memory references chat_sessions (set null) ---
+  "chat_memory_facts",
+  // --- sources (referenced by all the provider tables above) ---
+  "sources",
+  // --- roots: tables that reference only workspaces (or each other above) ---
+  "chat_sessions",
+  "datasets",
+  "job_runs",
+  'journey.actors',
+  'journey.entities',
+  'journey.evidence_refs',
+  'metadata.context_cards',
+  'metadata.journey_template_suggestions',
+  "oauth_apps",
+  "oauth_tokens",
+  "saved_reports",
+  "tool_execution_log",
+  "workspace_preferences"
+];
+
+// Child tables with no `workspace_id` column. Each is deleted via a subquery
+// scoped to the workspace through its parent, ahead of that parent's own delete
+// in DELETE_PROJECT_WORKSPACE_TABLES. `chat_messages`/`chat_action_calls`/
+// `chat_session_summaries` cascade from `chat_sessions`, but we delete them
+// explicitly for an auditable, deterministic order.
+const DELETE_PROJECT_VIA_PARENT: ReadonlyArray<{ sql: string }> = [
+  {
+    sql: "delete from sync_batch_records where sync_batch_id in (select id from sync_batches where workspace_id = $1)"
+  },
+  {
+    sql: "delete from chat_action_calls where session_id in (select id from chat_sessions where workspace_id = $1)"
+  },
+  {
+    sql: "delete from chat_session_summaries where session_id in (select id from chat_sessions where workspace_id = $1)"
+  },
+  {
+    sql: "delete from chat_messages where session_id in (select id from chat_sessions where workspace_id = $1)"
+  },
+  {
+    sql: "delete from job_locks where job_run_id in (select id from job_runs where workspace_id = $1)"
+  }
+];
+
+// Explicit, transactional project (workspace) delete. Removes every child row in
+// dependency order (leaves -> roots) and finally the `workspaces` row, all inside
+// a single transaction so a partial failure rolls back cleanly. Returns
+// `{ deleted: false }` (no throw) when no workspace matches `id`.
+export async function deleteProject(
+  db: Pick<InfiniteOsDb, "one" | "withTransaction">,
+  id: string
+): Promise<DeleteProjectResult> {
+  return db.withTransaction(async (tx) => {
+    const existing = await tx.one<{ id: string }>(
+      "select id from workspaces where id = $1",
+      [id]
+    );
+    if (!existing) {
+      return { deleted: false };
+    }
+    // 1. No-`workspace_id` child rows, scoped through their parent.
+    for (const { sql } of DELETE_PROJECT_VIA_PARENT) {
+      await tx.query(sql, [id]);
+    }
+    // 2. Workspace-scoped tables, leaves -> roots.
+    for (const table of DELETE_PROJECT_WORKSPACE_TABLES) {
+      await tx.query(`delete from ${table} where workspace_id = $1`, [id]);
+    }
+    // 3. Finally the workspace row itself.
+    await tx.query("delete from workspaces where id = $1", [id]);
+    return { deleted: true };
+  });
+}
+
 type JsonRecord = Record<string, unknown>;
 type SetupProviderId = "ga4" | "posthog" | "x";
 

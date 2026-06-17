@@ -85,6 +85,8 @@ import {
   maybeNotifyUpdateAvailable,
   navigateInputHistory,
   parsePersistentInputHistory,
+  projectCommand,
+  renderProjectDeleteResult,
   requiresOperatorConfirmation,
   createLocalGa4OauthBootstrap,
   runGa4TagInstallOffer,
@@ -10103,6 +10105,245 @@ describe("@-pin picker — pre-turn gate (PR5)", () => {
       // `@rtk` resolves to one project → not ambiguous → PR4 handles the switch.
       expect(decidePreTurnProjectSelection(envWith(), "@rtk how many views")).toBeUndefined();
     });
+  });
+});
+
+describe("project delete (CLI)", () => {
+  const PROJECTS = [
+    { id: "proj_aaaaaaaaaaaaaaaa", name: "Acme" },
+    { id: "proj_bbbbbbbbbbbbbbbb", name: "Beta" }
+  ];
+
+  // Records the URLs/methods seen so tests can assert the DELETE actually fired
+  // (or did not, when the command refuses/cancels before the API call).
+  function stubProjectsApi(projects: Array<{ id: string; name: string }>): {
+    calls: Array<{ url: string; method: string }>;
+    deleteStatus?: number;
+  } {
+    const state: { calls: Array<{ url: string; method: string }>; deleteStatus?: number } = {
+      calls: []
+    };
+    globalThis.fetch = (async (url: string | URL, init?: RequestInit) => {
+      const href = typeof url === "string" ? url : url.toString();
+      const method = (init?.method ?? "GET").toUpperCase();
+      state.calls.push({ url: href, method });
+      if (method === "DELETE") {
+        const status = state.deleteStatus ?? 200;
+        if (status === 404) {
+          return new Response(
+            JSON.stringify({ ok: false, error: { code: "project_not_found" } }),
+            { status: 404 }
+          );
+        }
+        return new Response(JSON.stringify({ ok: true, deleted: true }), { status });
+      }
+      // GET /projects
+      return new Response(JSON.stringify({ projects }), { status: 200 });
+    }) as typeof fetch;
+    return state;
+  }
+
+  let originalFetch: typeof globalThis.fetch;
+  beforeEach(() => {
+    originalFetch = globalThis.fetch;
+    setProjectListCacheForTest(PROJECTS);
+  });
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    setProjectListCacheForTest([]);
+  });
+
+  it("resolves a name to its id and DELETEs that id", async () => {
+    const api = stubProjectsApi(PROJECTS);
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-project-delete-resolve-"));
+    try {
+      const env = {
+        GROWTH_OS_HOME: growthHome,
+        GROWTH_OS_API_URL: "http://127.0.0.1:9999",
+        GROWTH_OS_CLI_NONINTERACTIVE: "1"
+      } as never;
+      const result = (await projectCommand(["delete", "Acme"], env, {
+        confirmDelete: async () => true
+      })) as { ok: boolean; deleted?: boolean; id?: string };
+      expect(result.ok).toBe(true);
+      expect(result.deleted).toBe(true);
+      expect(result.id).toBe("proj_aaaaaaaaaaaaaaaa");
+      // The DELETE targeted the resolved id, not the raw name.
+      const del = api.calls.find((c) => c.method === "DELETE");
+      expect(del?.url).toContain("/projects/proj_aaaaaaaaaaaaaaaa");
+      // The deleted project is dropped from the @name/completion cache.
+      expect(getProjectListCache().some((p) => p.id === "proj_aaaaaaaaaaaaaaaa")).toBe(false);
+    } finally {
+      rmSync(growthHome, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses to delete the last remaining project (no DELETE call)", async () => {
+    const only = [{ id: "proj_only0000000000", name: "Solo" }];
+    const api = stubProjectsApi(only);
+    const env = {
+      GROWTH_OS_API_URL: "http://127.0.0.1:9999",
+      GROWTH_OS_CLI_NONINTERACTIVE: "1"
+    } as never;
+    const result = (await projectCommand(["delete", "Solo"], env, {
+      confirmDelete: async () => true
+    })) as { ok: boolean; error?: { code?: string } };
+    expect(result.ok).toBe(false);
+    expect(result.error?.code).toBe("cannot_delete_last_project");
+    expect(api.calls.some((c) => c.method === "DELETE")).toBe(false);
+  });
+
+  it("honors --yes: deletes without invoking the confirm seam", async () => {
+    const api = stubProjectsApi(PROJECTS);
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-project-delete-yes-"));
+    try {
+      const env = {
+        GROWTH_OS_HOME: growthHome,
+        GROWTH_OS_API_URL: "http://127.0.0.1:9999",
+        GROWTH_OS_CLI_NONINTERACTIVE: "1"
+      } as never;
+      const confirmDelete = vi.fn(async () => true);
+      const result = (await projectCommand(["delete", "Beta", "--yes"], env, {
+        confirmDelete
+      })) as { ok: boolean; deleted?: boolean };
+      expect(result.ok).toBe(true);
+      expect(result.deleted).toBe(true);
+      // --yes bypasses confirmation entirely.
+      expect(confirmDelete).not.toHaveBeenCalled();
+      expect(api.calls.some((c) => c.method === "DELETE")).toBe(true);
+    } finally {
+      rmSync(growthHome, { recursive: true, force: true });
+    }
+  });
+
+  it("without --yes invokes the confirm seam and cancels on a NO (no DELETE)", async () => {
+    const api = stubProjectsApi(PROJECTS);
+    const env = {
+      GROWTH_OS_API_URL: "http://127.0.0.1:9999",
+      GROWTH_OS_CLI_NONINTERACTIVE: "1"
+    } as never;
+    const confirmDelete = vi.fn(async () => false);
+    const result = (await projectCommand(["delete", "Beta"], env, {
+      confirmDelete
+    })) as { ok: boolean; cancelled?: boolean };
+    expect(confirmDelete).toHaveBeenCalledTimes(1);
+    expect(result.ok).toBe(false);
+    expect(result.cancelled).toBe(true);
+    expect(api.calls.some((c) => c.method === "DELETE")).toBe(false);
+  });
+
+  it("clears the active pin and persisted default when they point at the deleted id", async () => {
+    stubProjectsApi(PROJECTS);
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-project-delete-pointer-"));
+    try {
+      const env = {
+        GROWTH_OS_HOME: growthHome,
+        GROWTH_OS_API_URL: "http://127.0.0.1:9999",
+        GROWTH_OS_CLI_NONINTERACTIVE: "1"
+      } as never;
+      // Both pointers reference the project we are about to delete.
+      writeActiveProjectId("proj_aaaaaaaaaaaaaaaa", env);
+      writeDefaultProjectId("proj_aaaaaaaaaaaaaaaa", env);
+      expect(readActiveProjectId(env)).toBe("proj_aaaaaaaaaaaaaaaa");
+      expect(readDefaultProjectId(env)).toBe("proj_aaaaaaaaaaaaaaaa");
+      const result = (await projectCommand(["delete", "Acme", "--yes"], env, {})) as {
+        clearedActivePin?: boolean;
+        clearedDefault?: boolean;
+      };
+      expect(result.clearedActivePin).toBe(true);
+      expect(result.clearedDefault).toBe(true);
+      // Both client-side pointers are cleared from state.json.
+      expect(readActiveProjectId(env)).toBeUndefined();
+      expect(readDefaultProjectId(env)).toBeUndefined();
+    } finally {
+      rmSync(growthHome, { recursive: true, force: true });
+    }
+  });
+
+  it("leaves a non-matching active pin untouched", async () => {
+    stubProjectsApi(PROJECTS);
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-project-delete-other-pin-"));
+    try {
+      const env = {
+        GROWTH_OS_HOME: growthHome,
+        GROWTH_OS_API_URL: "http://127.0.0.1:9999",
+        GROWTH_OS_CLI_NONINTERACTIVE: "1"
+      } as never;
+      // Pin a DIFFERENT project than the one being deleted.
+      writeActiveProjectId("proj_bbbbbbbbbbbbbbbb", env);
+      const result = (await projectCommand(["delete", "Acme", "--yes"], env, {})) as {
+        clearedActivePin?: boolean;
+      };
+      expect(result.clearedActivePin).toBe(false);
+      expect(readActiveProjectId(env)).toBe("proj_bbbbbbbbbbbbbbbb");
+    } finally {
+      rmSync(growthHome, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects an unknown name before any DELETE (friendly message)", async () => {
+    const api = stubProjectsApi(PROJECTS);
+    const env = {
+      GROWTH_OS_API_URL: "http://127.0.0.1:9999",
+      GROWTH_OS_CLI_NONINTERACTIVE: "1"
+    } as never;
+    await expect(
+      projectCommand(["delete", "Nope", "--yes"], env, {})
+    ).rejects.toThrow("Unknown project: Nope");
+    expect(api.calls.some((c) => c.method === "DELETE")).toBe(false);
+  });
+
+  it("surfaces a friendly 404 if the project vanished between list and DELETE", async () => {
+    const api = stubProjectsApi(PROJECTS);
+    api.deleteStatus = 404; // race: gone by the time the DELETE fires
+    const env = {
+      GROWTH_OS_API_URL: "http://127.0.0.1:9999",
+      GROWTH_OS_CLI_NONINTERACTIVE: "1"
+    } as never;
+    await expect(
+      projectCommand(["delete", "Acme", "--yes"], env, {})
+    ).rejects.toThrow("Unknown project: Acme");
+  });
+
+  it("refuses in non-interactive mode without --yes (never silently deletes)", async () => {
+    const api = stubProjectsApi(PROJECTS);
+    const env = {
+      GROWTH_OS_API_URL: "http://127.0.0.1:9999",
+      GROWTH_OS_CLI_NONINTERACTIVE: "1"
+    } as never;
+    // No confirmDelete seam + non-interactive + no --yes -> hard refusal.
+    await expect(projectCommand(["delete", "Beta"], env, {})).rejects.toThrow(
+      /Refusing to delete .* without confirmation/
+    );
+    expect(api.calls.some((c) => c.method === "DELETE")).toBe(false);
+  });
+
+  it("renderProjectDeleteResult summarizes success, last-project, and cancel", () => {
+    expect(
+      renderProjectDeleteResult({
+        section: "project_delete",
+        name: "Acme",
+        id: "proj_aaaaaaaaaaaaaaaa",
+        deleted: true,
+        clearedActivePin: true
+      })
+    ).toContain("Deleted project: Acme (proj_aaaaaaaaaaaaaaaa)");
+    expect(
+      renderProjectDeleteResult({
+        section: "project_delete",
+        name: "Solo",
+        id: "proj_only",
+        error: { code: "cannot_delete_last_project" }
+      })
+    ).toContain("last remaining project");
+    expect(
+      renderProjectDeleteResult({
+        section: "project_delete",
+        name: "Acme",
+        id: "proj_aaaaaaaaaaaaaaaa",
+        cancelled: true
+      })
+    ).toContain("was not deleted");
   });
 });
 

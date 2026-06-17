@@ -7,6 +7,7 @@ import { decryptCredentialPayload, encryptCredentialPayload } from "@infinite-os
 import {
   createInfiniteOsDb,
   createProject,
+  deleteProject,
   listProjects,
   readLatestSetupPublicArtifacts,
   upsertWorkspaceSite,
@@ -850,6 +851,23 @@ export function createApp(options: {
       return { ok: false, error: { code: "database_unavailable" } };
     }
     return { ok: true, projects: await listProjects(database) };
+  });
+
+  app.delete<{ Params: { id: string } }>("/projects/:id", async (request, reply) => {
+    if (request.auth.authority !== "operator") {
+      reply.code(403);
+      return { ok: false, error: { code: "operator_authority_required" } };
+    }
+    if (!database) {
+      reply.code(503);
+      return { ok: false, error: { code: "database_unavailable" } };
+    }
+    const { deleted } = await deleteProject(database, request.params.id);
+    if (!deleted) {
+      reply.code(404);
+      return { ok: false, error: { code: "project_not_found" } };
+    }
+    return { ok: true, deleted: true };
   });
 
   app.get("/external-connections", async () => ({
