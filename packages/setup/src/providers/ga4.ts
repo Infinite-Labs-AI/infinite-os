@@ -13,6 +13,7 @@ import type {
   DetectionState,
   PhaseResult,
   SetupBrowserHandoffRef,
+  SetupProviderId,
   SetupProviderPublicArtifacts,
   SetupSecretRefs,
   SetupVerificationState
@@ -885,12 +886,6 @@ export async function implementGa4Contract(
   input: Ga4ImplementInput,
   deps: Ga4ImplementDependencies
 ): Promise<Ga4ContractOutcome> {
-  const state: DetectionState = {
-    accountExists: true,
-    assetExists: true,
-    installId: input.measurementId
-  };
-
   if (!input.measurementId) {
     return {
       result: {
@@ -900,21 +895,92 @@ export async function implementGa4Contract(
       state: { accountExists: false, assetExists: false }
     };
   }
+  return implementProviderTagsContract(
+    {
+      artifacts: { ga4: { measurementId: input.measurementId } },
+      repoRoot: input.repoRoot,
+      workspaceId: input.workspaceId,
+      ...(input.confirm ? { confirm: input.confirm } : {})
+    },
+    deps
+  );
+}
 
-  const artifacts: WorkspaceInstallArtifacts = {
-    ga4: { measurementId: input.measurementId }
+/** A noun-aware label for the tag(s) being installed, used in the provider-neutral guard copy. */
+const PROVIDER_TAG_INSTALL_NOUNS: Record<SetupProviderId, string> = {
+  ga4: "GA4 tag",
+  posthog: "PostHog snippet",
+  x: "X pixel"
+};
+
+function describeProviderTags(providers: SetupProviderId[]): string {
+  const nouns = providers.map((provider) => PROVIDER_TAG_INSTALL_NOUNS[provider]);
+  if (nouns.length === 0) {
+    return "the analytics tag(s)";
+  }
+  if (nouns.length === 1) {
+    return nouns[0]!;
+  }
+  if (nouns.length === 2) {
+    return `${nouns[0]} and ${nouns[1]}`;
+  }
+  return `${nouns.slice(0, -1).join(", ")}, and ${nouns[nouns.length - 1]}`;
+}
+
+export interface ProviderTagsImplementInput {
+  artifacts: WorkspaceInstallArtifacts;
+  repoRoot: string;
+  workspaceId: string;
+  /**
+   * Founder confirmation gate. Called only after every guard passes (plan is
+   * auto-applyable, repo clean, confidence high enough) and immediately before any
+   * file is written. Returning false aborts the install before touching the repo.
+   */
+  confirm?: (plan: InstallPlan) => Promise<boolean>;
+}
+
+/**
+ * Provider-neutral core extracted from {@link implementGa4Contract}: plans + guards +
+ * applies the tag(s) for EVERY provider in `artifacts` in a SINGLE combined pass so the
+ * managed analytics module is rewritten once (a per-provider `--yes` would clobber the
+ * others). The guard copy lists the providers in the plan rather than hard-coding GA4.
+ */
+export async function implementProviderTagsContract(
+  input: ProviderTagsImplementInput,
+  deps: Ga4ImplementDependencies
+): Promise<Ga4ContractOutcome> {
+  const requestedProviders = Object.keys(input.artifacts) as SetupProviderId[];
+  // Preserve the GA4-shaped `state` for the back-compat installGa4Tag path: installId
+  // carries the GA4 measurement id when GA4 is part of the plan, undefined otherwise.
+  const state: DetectionState = {
+    accountExists: true,
+    assetExists: true,
+    ...(input.artifacts.ga4?.measurementId ? { installId: input.artifacts.ga4.measurementId } : {})
   };
+
+  if (requestedProviders.length === 0) {
+    return {
+      result: {
+        status: "skipped",
+        detail: "No analytics artifacts available — run setup before installing the tag(s)."
+      },
+      state: { accountExists: false, assetExists: false }
+    };
+  }
+
   const plan = deps.planInstallation({
     root: input.repoRoot,
     workspaceId: input.workspaceId,
-    artifacts
+    artifacts: input.artifacts
   });
+  const planProviders = plan.providers.filter(isSetupProviderId);
+  const tagNoun = describeProviderTags(planProviders.length > 0 ? planProviders : requestedProviders);
 
   if (plan.blockers.length > 0) {
     return {
       result: {
         status: "blocked",
-        detail: `Could not install the GA4 tag: ${plan.blockers.join(" ")}`
+        detail: `Could not install ${tagNoun}: ${plan.blockers.join(" ")}`
       },
       state,
       verification: implementVerification("failed")
@@ -924,8 +990,8 @@ export async function implementGa4Contract(
   if (plan.applyMode !== "supported") {
     const firstInstruction = plan.instructions[0];
     const detail = firstInstruction
-      ? `Manual GA4 tag install required: ${firstInstruction.description}`
-      : `Manual GA4 tag install required for ${plan.framework}.`;
+      ? `Manual install required: ${firstInstruction.description}`
+      : `Manual install of ${tagNoun} required for ${plan.framework}.`;
     return {
       result: { status: "needs_human", detail },
       state,
@@ -938,7 +1004,7 @@ export async function implementGa4Contract(
       result: {
         status: "blocked",
         detail:
-          "Your app repo has uncommitted changes. Commit or stash them, then re-run the GA4 tag install."
+          "Your app repo has uncommitted changes. Commit or stash them, then re-run the install."
       },
       state,
       verification: implementVerification("failed")
@@ -949,7 +1015,7 @@ export async function implementGa4Contract(
     return {
       result: {
         status: "needs_human",
-        detail: `Not confident enough to auto-install the GA4 tag for ${plan.framework}. Install it manually.`
+        detail: `Not confident enough to auto-install ${tagNoun} for ${plan.framework}. Install it manually.`
       },
       state,
       verification: implementVerification("pending")
@@ -960,7 +1026,7 @@ export async function implementGa4Contract(
     return {
       result: {
         status: "skipped",
-        detail: "GA4 tag install skipped — no files were changed."
+        detail: "Install skipped — no files were changed."
       },
       state,
       verification: implementVerification("pending")
@@ -978,7 +1044,7 @@ export async function implementGa4Contract(
     return {
       result: {
         status: "blocked",
-        detail: `GA4 tag install could not be applied: ${
+        detail: `Install could not be applied: ${
           error instanceof Error ? error.message : String(error)
         }`
       },
@@ -992,8 +1058,8 @@ export async function implementGa4Contract(
       status: "ok",
       detail:
         result.changedFiles.length > 0
-          ? `Installed the GA4 tag (${result.changedFiles.join(", ")}).`
-          : "GA4 tag already in place — no files changed.",
+          ? `Installed ${tagNoun} (${result.changedFiles.join(", ")}).`
+          : `${tagNoun} already in place — no files changed.`,
       data: {
         changedFiles: result.changedFiles,
         manifestPath: result.manifestPath,
@@ -1004,6 +1070,10 @@ export async function implementGa4Contract(
     state,
     verification: implementVerification("verified")
   };
+}
+
+function isSetupProviderId(value: string): value is SetupProviderId {
+  return value === "ga4" || value === "posthog" || value === "x";
 }
 
 /** Repo-change preview shown to the founder before any GA4 tag file is written. */
@@ -1040,6 +1110,51 @@ export async function installGa4Tag(input: {
                 appRoot: plan.appRoot,
                 packageManager: plan.packageManager,
                 files: plan.files
+              })
+          }
+        : {})
+    },
+    { planInstallation, applyInstallation }
+  );
+}
+
+/** Repo-change preview for a multi-provider install; carries WHICH providers will be written. */
+export interface ProviderTagsInstallPlanSummary {
+  framework: string;
+  appRoot: string;
+  packageManager: string;
+  files: string[];
+  providers: SetupProviderId[];
+}
+
+/**
+ * High-level, provider-neutral entry point for installing the captured tag(s) into the
+ * founder's site repo. Mirrors {@link installGa4Tag} but takes the full
+ * {@link WorkspaceInstallArtifacts} map so GA4 + PostHog + X are planned and applied in
+ * ONE pass (no managed-module clobber). The confirm summary names the providers so the
+ * caller can preview exactly which tags will land.
+ */
+export async function installProviderTags(input: {
+  artifacts: WorkspaceInstallArtifacts;
+  repoRoot: string;
+  workspaceId: string;
+  confirm?: (summary: ProviderTagsInstallPlanSummary) => Promise<boolean>;
+}): Promise<Ga4ContractOutcome> {
+  const { planInstallation, applyInstallation } = await import("infinite-tag");
+  return implementProviderTagsContract(
+    {
+      artifacts: input.artifacts,
+      repoRoot: input.repoRoot,
+      workspaceId: input.workspaceId,
+      ...(input.confirm
+        ? {
+            confirm: (plan: InstallPlan) =>
+              input.confirm!({
+                framework: plan.framework,
+                appRoot: plan.appRoot,
+                packageManager: plan.packageManager,
+                files: plan.files,
+                providers: plan.providers.filter(isSetupProviderId)
               })
           }
         : {})

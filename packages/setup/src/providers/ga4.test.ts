@@ -6,6 +6,7 @@ import {
   createGa4LiveDependencies,
   detectGa4Contract,
   implementGa4Contract,
+  implementProviderTagsContract,
   setupGa4Contract,
   syncGa4Contract,
   type Ga4AuthResolution,
@@ -14,7 +15,7 @@ import {
   type Ga4PropertySelector,
   type Ga4SelectPropertyInput
 } from "./ga4.js";
-import type { ApplyResult, InstallPlan } from "infinite-tag";
+import type { ApplyResult, InstallPlan, WorkspaceInstallArtifacts } from "infinite-tag";
 
 describe("GA4 provider contract", () => {
   it("detects an existing account/property/web stream through the live Admin API and keeps OAuth secrets out of public artifacts", async () => {
@@ -694,6 +695,71 @@ describe("GA4 provider contract", () => {
     expect(applyInstallation).not.toHaveBeenCalled();
     expect(outcome.result.status).toBe("needs_human");
     expect(outcome.result.detail).toContain("Not confident enough");
+  });
+});
+
+describe("implementProviderTagsContract (#9 provider-neutral combined install)", () => {
+  function multiPlan(providers: string[], overrides: Partial<InstallPlan> = {}): InstallPlan {
+    return {
+      framework: "next-app-router",
+      providers,
+      files: ["lib/infinite-analytics.ts"],
+      envKeys: [],
+      applyMode: "supported",
+      instructions: [],
+      assumptions: [],
+      blockers: [],
+      confidence: 1,
+      appRoot: ".",
+      packageManager: "pnpm",
+      repoStatus: "clean",
+      workspaceId: "ws_1",
+      artifacts: {},
+      ...overrides
+    };
+  }
+
+  it("returns skipped (no plan) when the artifacts map is empty", async () => {
+    const planInstallation = vi.fn(() => multiPlan([]));
+    const applyInstallation = vi.fn((): ApplyResult => ({ changedFiles: [], manifestPath: "", warnings: [] }));
+    const outcome = await implementProviderTagsContract(
+      { artifacts: {}, repoRoot: "/tmp/app", workspaceId: "ws_1" },
+      { planInstallation, applyInstallation }
+    );
+    expect(planInstallation).not.toHaveBeenCalled();
+    expect(outcome.result.status).toBe("skipped");
+  });
+
+  it("plans + applies ALL providers in one pass and names them in the success detail", async () => {
+    const artifacts: WorkspaceInstallArtifacts = {
+      ga4: { measurementId: "G-OK" },
+      posthog: { projectKey: "phc_1", apiHost: "https://us.i.posthog.com" },
+      x: { pixelId: "px_1", eventTagIds: ["tag_a"] }
+    };
+    const plan = multiPlan(["ga4", "posthog", "x"]);
+    const planInstallation = vi.fn(() => plan);
+    const applyInstallation = vi.fn((): ApplyResult => ({ changedFiles: ["lib/infinite-analytics.ts"], manifestPath: "/repo/.infinite/install.json", warnings: [] }));
+    const confirm = vi.fn(async () => true);
+    const outcome = await implementProviderTagsContract(
+      { artifacts, repoRoot: "/tmp/app", workspaceId: "ws_1", confirm },
+      { planInstallation, applyInstallation }
+    );
+    expect(planInstallation).toHaveBeenCalledOnce();
+    expect(planInstallation).toHaveBeenCalledWith({ root: "/tmp/app", workspaceId: "ws_1", artifacts });
+    expect(applyInstallation).toHaveBeenCalledOnce();
+    expect(outcome.result.status).toBe("ok");
+    expect(outcome.result.detail).toContain("GA4 tag, PostHog snippet, and X pixel");
+  });
+
+  it("uses provider-neutral (non-GA4) wording in the guard details for a PostHog-only plan", async () => {
+    const plan = multiPlan(["posthog"], { blockers: ["Unsupported repository shape."] });
+    const outcome = await implementProviderTagsContract(
+      { artifacts: { posthog: { projectKey: "phc_1", apiHost: "https://us.i.posthog.com" } }, repoRoot: "/tmp/app", workspaceId: "ws_1" },
+      { planInstallation: vi.fn(() => plan), applyInstallation: vi.fn((): ApplyResult => ({ changedFiles: [], manifestPath: "", warnings: [] })) }
+    );
+    expect(outcome.result.status).toBe("blocked");
+    expect(outcome.result.detail).toContain("Could not install PostHog snippet");
+    expect(outcome.result.detail).not.toContain("GA4");
   });
 });
 

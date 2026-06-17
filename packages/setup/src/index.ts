@@ -16,6 +16,14 @@ export * from "./onboarding-controller.js";
 export * from "./provider-guidance.js";
 export * from "./confirmations.js";
 export * from "./install-command.js";
+export * from "./artifacts-file.js";
+// Re-export the tested public bootstrap-snippet builders so the runtime-loaded CLI can
+// render the EXACT manual-install snippets (#9) without re-authoring them.
+export {
+  buildPostHogBootstrapSnippet,
+  buildXBootstrapSnippet,
+  wrapHtmlSnippet
+} from "infinite-tag";
 export * from "./setup-run-store.js";
 export * from "./browser/handoff-launcher.js";
 export * from "./live.js";

@@ -26,7 +26,8 @@ import {
   promptProviderMatrix,
   promptText,
   promptUrl,
-  shouldUseInteractivePrompts
+  shouldUseInteractivePrompts,
+  type SetupProviderId
 } from "./setup-prompts.js";
 import * as setupPrompts from "./setup-prompts.js";
 import { formatInfiniteBusyIndicator } from "./tui/ink/status-indicator.js";
@@ -89,8 +90,9 @@ import {
   renderProjectDeleteResult,
   requiresOperatorConfirmation,
   createLocalGa4OauthBootstrap,
+  createLocalSetupPrompter,
   createSetupInteractionWiring,
-  runGa4TagInstallOffer,
+  runTagInstallOffer,
   expandHomePath,
   createCliAgentRuntime,
   runCli,
@@ -175,6 +177,7 @@ describe("cli smoke", () => {
     expect(helpText()).toContain("setup connectors");
     expect(helpText()).toContain("setup query");
     expect(helpText()).toContain("setup resume <run_id>");
+    expect(helpText()).toContain("setup resume --all");
     expect(helpText()).toContain("setup reset [tool]");
     expect(helpText()).toContain("auth login codex");
     expect(helpText()).toContain("model use");
@@ -7457,6 +7460,9 @@ describe("cli smoke", () => {
       {
         selectedProviders: ["ga4"],
         recommendedProviders: ["ga4"],
+        recommendations: [
+          { provider: "ga4", status: "recommended", reasonCode: "web_default", rationale: "GA4 is the default web stack." }
+        ],
         completed: ["ga4"],
         paused: [],
         failed: [],
@@ -9690,16 +9696,17 @@ describe("expandHomePath", () => {
   });
 });
 
-describe("runGa4TagInstallOffer", () => {
-  function fakeIo(overrides: Partial<Parameters<typeof runGa4TagInstallOffer>[0]["io"]> = {}) {
+describe("runTagInstallOffer (#9 per-provider parity)", () => {
+  function fakeIo(overrides: Partial<Parameters<typeof runTagInstallOffer>[0]["io"]> = {}) {
     const writes: string[] = [];
-    const installGa4Tag = vi.fn(async (inp: { confirm?: (s: { framework: string; appRoot: string; packageManager: string; files: string[] }) => Promise<boolean> }) => {
+    const installProviderTags = vi.fn(async (inp: Parameters<Parameters<typeof runTagInstallOffer>[0]["io"]["installProviderTags"]>[0]) => {
+      const providers = Object.keys(inp.artifacts) as SetupProviderId[];
       const ok = inp.confirm
-        ? await inp.confirm({ framework: "next-app-router", appRoot: ".", packageManager: "pnpm", files: ["app/layout.tsx"] })
+        ? await inp.confirm({ framework: "next-app-router", appRoot: ".", packageManager: "pnpm", files: ["lib/infinite-analytics.ts"], providers })
         : true;
       return ok
-        ? { result: { status: "ok", detail: "Installed the GA4 tag (app/layout.tsx)." } }
-        : { result: { status: "skipped", detail: "GA4 tag install skipped — no files were changed." } };
+        ? { result: { status: "ok", detail: "Installed the analytics tag(s) (lib/infinite-analytics.ts).", data: { changedFiles: ["lib/infinite-analytics.ts"] } } }
+        : { result: { status: "skipped", detail: "Install skipped — no files were changed." } };
     });
     const io = {
       isInteractive: true,
@@ -9708,89 +9715,438 @@ describe("runGa4TagInstallOffer", () => {
       },
       promptText: async () => "",
       promptYesNo: async () => true,
-      installGa4Tag,
+      installProviderTags,
+      buildPostHogBootstrapSnippet: (projectKey: string, apiHost: string) => `posthog.init(${projectKey}, ${apiHost})`,
+      buildXBootstrapSnippet: (pixelId: string) => `twq('config', ${pixelId})`,
+      wrapHtmlSnippet: (source: string) => `<script>\n${source}\n</script>`,
       ...overrides
     };
-    return { writes, installGa4Tag, io };
+    return { writes, installProviderTags, io };
   }
 
-  it("does nothing when GA4 did not complete or has no measurement id", async () => {
+  const ga4Only = { ga4: { measurementId: "G-OK" }, posthog: {}, x: {} };
+
+  it("does nothing when no completed provider has a captured artifact", async () => {
     const a = fakeIo();
-    await runGa4TagInstallOffer({ completed: [], measurementId: "G-1", workspaceId: "ws", io: a.io });
+    await runTagInstallOffer({ completed: [], resolvedPublicArtifacts: ga4Only, workspaceId: "ws", io: a.io });
     const b = fakeIo();
-    await runGa4TagInstallOffer({ completed: ["ga4"], measurementId: undefined, workspaceId: "ws", io: b.io });
-    expect(a.installGa4Tag).not.toHaveBeenCalled();
-    expect(b.installGa4Tag).not.toHaveBeenCalled();
+    await runTagInstallOffer({ completed: ["ga4"], resolvedPublicArtifacts: { ga4: {}, posthog: {}, x: {} }, workspaceId: "ws", io: b.io });
+    expect(a.installProviderTags).not.toHaveBeenCalled();
+    expect(b.installProviderTags).not.toHaveBeenCalled();
     expect(a.writes).toEqual([]);
     expect(b.writes).toEqual([]);
   });
 
   it("stays completely silent (no writes, no install) when non-interactive", async () => {
     const a = fakeIo({ isInteractive: false });
-    await runGa4TagInstallOffer({ completed: ["ga4"], measurementId: "G-1", workspaceId: "ws", io: a.io });
-    expect(a.installGa4Tag).not.toHaveBeenCalled();
+    await runTagInstallOffer({ completed: ["ga4"], resolvedPublicArtifacts: ga4Only, workspaceId: "ws", io: a.io });
+    expect(a.installProviderTags).not.toHaveBeenCalled();
     expect(a.writes).toEqual([]);
   });
 
-  it("prints the manual gtag snippet and does not install when the founder skips the repo prompt", async () => {
+  it("GA4-only: prints the GA4 connected line + manual gtag snippet on skip", async () => {
     const a = fakeIo({ promptText: async () => "  " });
-    await runGa4TagInstallOffer({ completed: ["ga4"], measurementId: "G-SKIP", workspaceId: "ws", io: a.io });
-    expect(a.installGa4Tag).not.toHaveBeenCalled();
+    await runTagInstallOffer({ completed: ["ga4"], resolvedPublicArtifacts: { ga4: { measurementId: "G-SKIP" }, posthog: {}, x: {} }, workspaceId: "ws", io: a.io });
+    expect(a.installProviderTags).not.toHaveBeenCalled();
     const out = a.writes.join("");
+    expect(out).toContain("GA4 is connected. To start collecting data, add the GA4 tag to your site.");
+    expect(out).toContain("npx infinite-tag install");
     expect(out).toContain("googletagmanager.com/gtag/js?id=G-SKIP");
-    expect(out).toContain("gtag('config', 'G-SKIP')");
   });
 
-  it("installs against the resolved repo path and previews the manifest write", async () => {
+  it("PostHog-only: prints the PostHog connected line + manual snippet on skip", async () => {
+    const a = fakeIo({ promptText: async () => "" });
+    await runTagInstallOffer({ completed: ["posthog"], resolvedPublicArtifacts: { ga4: {}, posthog: { projectKey: "phc_ph1" }, x: {} }, workspaceId: "ws", io: a.io });
+    expect(a.installProviderTags).not.toHaveBeenCalled();
+    const out = a.writes.join("");
+    expect(out).toContain("PostHog is connected. To start capturing product events, add the PostHog snippet to your site.");
+    // apiHost defaults when none captured.
+    expect(out).toContain("project key phc_ph1, host https://us.i.posthog.com");
+    expect(out).toContain("posthog.init(phc_ph1, https://us.i.posthog.com)");
+  });
+
+  it("X-only: prints the X connected line + manual pixel on skip", async () => {
+    const a = fakeIo({ promptText: async () => "" });
+    await runTagInstallOffer({ completed: ["x"], resolvedPublicArtifacts: { ga4: {}, posthog: {}, x: { pixelId: "px_1", eventTagIds: { a: "tag_a" } } }, workspaceId: "ws", io: a.io });
+    expect(a.installProviderTags).not.toHaveBeenCalled();
+    const out = a.writes.join("");
+    expect(out).toContain("X is connected. To start tracking conversions, add the X pixel to your site.");
+    expect(out).toContain("X pixel to the <head> of every page (pixel id px_1)");
+    expect(out).toContain("twq('config', px_1)");
+  });
+
+  it("all-three: ONE combined installProviderTags apply with all providers, naming each in the preview", async () => {
     const a = fakeIo({ promptText: async () => "~/sites/app" });
-    await runGa4TagInstallOffer({ completed: ["ga4"], measurementId: "G-OK", workspaceId: "ws_1", io: a.io });
-    expect(a.installGa4Tag).toHaveBeenCalledTimes(1);
-    const call = a.installGa4Tag.mock.calls[0]![0] as { repoRoot: string; measurementId: string; workspaceId: string };
-    expect(call.measurementId).toBe("G-OK");
+    await runTagInstallOffer({
+      completed: ["ga4", "posthog", "x"],
+      resolvedPublicArtifacts: { ga4: { measurementId: "G-OK" }, posthog: { projectKey: "phc_ph1", apiHost: "https://eu.i.posthog.com" }, x: { pixelId: "px_1", eventTagIds: { a: "tag_a", b: "tag_a" } } },
+      workspaceId: "ws_1",
+      io: a.io
+    });
+    expect(a.installProviderTags).toHaveBeenCalledTimes(1);
+    const call = a.installProviderTags.mock.calls[0]![0] as { repoRoot: string; workspaceId: string; artifacts: Record<string, unknown> };
     expect(call.workspaceId).toBe("ws_1");
     expect(call.repoRoot).toBe(`${homedir()}/sites/app`);
+    expect(Object.keys(call.artifacts).sort()).toEqual(["ga4", "posthog", "x"]);
+    expect((call.artifacts as { posthog: { apiHost: string } }).posthog.apiHost).toBe("https://eu.i.posthog.com");
+    // event tags deduped.
+    expect((call.artifacts as { x: { eventTagIds: string[] } }).x.eventTagIds).toEqual(["tag_a"]);
     const out = a.writes.join("");
-    expect(out).toContain("plus an Infinite install manifest");
-    expect(out).toContain("app/layout.tsx");
-    expect(out).toContain("Installed the GA4 tag");
+    expect(out).toContain("install the GA4 tag, PostHog snippet, and X pixel into your next-app-router app");
+    expect(out).toContain("Installed the analytics tag(s)");
   });
 
-  it("falls back to the manual snippet when the founder declines the confirm", async () => {
+  it("decline: prints the manual snippet for EVERY not-written provider (no silent drop)", async () => {
     const a = fakeIo({ promptText: async () => "/srv/app", promptYesNo: async () => false });
-    await runGa4TagInstallOffer({ completed: ["ga4"], measurementId: "G-NO", workspaceId: "ws", io: a.io });
-    expect(a.installGa4Tag).toHaveBeenCalledTimes(1);
+    await runTagInstallOffer({
+      completed: ["ga4", "posthog", "x"],
+      resolvedPublicArtifacts: { ga4: { measurementId: "G-NO" }, posthog: { projectKey: "phc_no" }, x: { pixelId: "px_no", eventTagIds: {} } },
+      workspaceId: "ws",
+      io: a.io
+    });
+    expect(a.installProviderTags).toHaveBeenCalledTimes(1);
     const out = a.writes.join("");
-    expect(out).toContain("skipped");
-    expect(out).toContain("gtag('config', 'G-NO')");
+    expect(out).toContain("Install skipped");
+    expect(out).toContain("googletagmanager.com/gtag/js?id=G-NO");
+    expect(out).toContain("posthog.init(phc_no");
+    expect(out).toContain("twq('config', px_no)");
   });
 
-  it("falls back to the manual snippet when installGa4Tag throws", async () => {
+  it("throw: prints the manual snippet for every provider and does not propagate", async () => {
     const a = fakeIo({
       promptText: async () => "/srv/app",
-      installGa4Tag: vi.fn(async () => {
+      installProviderTags: vi.fn(async () => {
         throw new Error("ENOENT: no such directory");
       })
     });
-    await runGa4TagInstallOffer({ completed: ["ga4"], measurementId: "G-ERR", workspaceId: "ws", io: a.io });
+    await expect(
+      runTagInstallOffer({
+        completed: ["ga4", "posthog"],
+        resolvedPublicArtifacts: { ga4: { measurementId: "G-ERR" }, posthog: { projectKey: "phc_err" }, x: {} },
+        workspaceId: "ws",
+        io: a.io
+      })
+    ).resolves.toBeUndefined();
     const out = a.writes.join("");
-    expect(out).toContain("Could not install the GA4 tag automatically");
+    expect(out).toContain("Could not install your analytics tags automatically");
     expect(out).toContain("ENOENT");
-    expect(out).toContain("gtag('config', 'G-ERR')");
+    expect(out).toContain("googletagmanager.com/gtag/js?id=G-ERR");
+    expect(out).toContain("posthog.init(phc_err");
   });
 
-  it("resolves without throwing when promptText rejects (e.g. readline closed mid-prompt) and falls back to the manual snippet", async () => {
+  it("resolves without throwing when promptText rejects (readline closed) and falls back to manual snippets", async () => {
     const a = fakeIo({
       promptText: async () => {
         throw new Error("readline was closed");
       }
     });
-    // Must not throw — the offer must degrade gracefully so setup is not failed.
     await expect(
-      runGa4TagInstallOffer({ completed: ["ga4"], measurementId: "G-RLCLOSE", workspaceId: "ws", io: a.io })
+      runTagInstallOffer({ completed: ["ga4"], resolvedPublicArtifacts: { ga4: { measurementId: "G-RLCLOSE" }, posthog: {}, x: {} }, workspaceId: "ws", io: a.io })
     ).resolves.toBeUndefined();
-    expect(a.installGa4Tag).not.toHaveBeenCalled();
-    const out = a.writes.join("");
-    expect(out).toContain("gtag('config', 'G-RLCLOSE')");
+    expect(a.installProviderTags).not.toHaveBeenCalled();
+    expect(a.writes.join("")).toContain("googletagmanager.com/gtag/js?id=G-RLCLOSE");
+  });
+});
+
+describe("createLocalSetupPrompter (#10 json/stdout purity)", () => {
+  const interview = (): Parameters<typeof buildSetupOnboardingResult>[0] => ({
+    projectName: "Acme",
+    websiteUrl: "https://acme.test",
+    productSurface: "web",
+    providerInventory: []
+  });
+
+  it("note() in non-interactive mode writes NOTHING to stdout or stderr", () => {
+    const prompter = createLocalSetupPrompter({ interactive: false });
+    const stdoutSpy = vi.spyOn(process.stdout, "write").mockReturnValue(true);
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    try {
+      prompter.note("a confirmation line");
+      expect(stdoutSpy).not.toHaveBeenCalled();
+      expect(stderrSpy).not.toHaveBeenCalled();
+    } finally {
+      stdoutSpy.mockRestore();
+      stderrSpy.mockRestore();
+    }
+  });
+
+  it("note() in interactive mode writes to stderr, never stdout", () => {
+    const prompter = createLocalSetupPrompter({ interactive: true });
+    const stdoutSpy = vi.spyOn(process.stdout, "write").mockReturnValue(true);
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    try {
+      prompter.note("a confirmation line");
+      expect(stdoutSpy).not.toHaveBeenCalled();
+      expect(stderrSpy).toHaveBeenCalledWith("a confirmation line\n");
+    } finally {
+      stdoutSpy.mockRestore();
+      stderrSpy.mockRestore();
+    }
+  });
+
+  it("ask() in non-interactive mode returns the headless default without opening readline or touching stdout", async () => {
+    const prompter = createLocalSetupPrompter({ interactive: false });
+    const stdoutSpy = vi.spyOn(process.stdout, "write").mockReturnValue(true);
+    try {
+      await expect(prompter.ask("paste your key")).resolves.toBe("");
+      await expect(prompter.ask("pick one", ["first", "second"])).resolves.toBe("first");
+      expect(stdoutSpy).not.toHaveBeenCalled();
+    } finally {
+      stdoutSpy.mockRestore();
+    }
+  });
+
+  it("the serialized setup --json payload is a single JSON.parse-able object carrying the honesty fields", () => {
+    // The `setup --json` chokepoint writes ONLY `JSON.stringify(result)` to stdout. With the
+    // prompter no longer writing notes/asks to stdout (above), this payload IS the stdout.
+    const onboardingResult = buildSetupOnboardingResult(
+      { ...interview(), providerInventory: [
+        { provider: "ga4", hasAccount: true, installState: "unknown", selected: true, recommended: true },
+        { provider: "posthog", hasAccount: false, installState: "unknown", selected: true, recommended: true }
+      ] },
+      {
+        selectedProviders: ["ga4", "posthog"],
+        recommendedProviders: ["ga4", "posthog"],
+        recommendations: [
+          { provider: "ga4", status: "recommended", reasonCode: "web_default", rationale: "default web stack" },
+          { provider: "posthog", status: "recommended", reasonCode: "web_default", rationale: "default web stack" }
+        ],
+        completed: ["ga4"],
+        paused: ["posthog"],
+        failed: [],
+        runs: { ga4: { phases: {}, providerState: {} } },
+        activeRuns: [{ id: "run_ph1", provider: "posthog", status: "paused_handoff", pendingHandoff: { instructions: "finish PostHog signup" } }],
+        resolvedPublicArtifacts: { ga4: { measurementId: "G-ACME123" }, posthog: {}, x: {} },
+        installCommand: "npx infinite-tag install --workspace proj_1 --ga4-measurement-id G-ACME123 --yes",
+        installArtifactsPath: null
+      }
+    );
+    const stdout = `${JSON.stringify(onboardingResult, null, 2)}\n`;
+    expect(stdout.trim().startsWith("{")).toBe(true);
+    const parsed = JSON.parse(stdout) as ReturnType<typeof buildSetupOnboardingResult>;
+    expect(parsed.ok).toBe(false);
+    expect(parsed.outstanding).toEqual([{ provider: "posthog", runId: "run_ph1", instructions: "finish PostHog signup" }]);
+    expect(parsed.next).toContain("infinite setup resume run_ph1");
+  });
+});
+
+describe("buildSetupOnboardingResult honesty (#11/#12/#13/#14)", () => {
+  function moduleResult(overrides: Partial<Parameters<typeof buildSetupOnboardingResult>[1]> = {}): Parameters<typeof buildSetupOnboardingResult>[1] {
+    return {
+      selectedProviders: [],
+      recommendedProviders: ["ga4", "posthog"],
+      recommendations: [],
+      completed: [],
+      paused: [],
+      failed: [],
+      runs: {},
+      activeRuns: [],
+      resolvedPublicArtifacts: { ga4: {}, posthog: {}, x: {} },
+      installCommand: null,
+      installArtifactsPath: null,
+      ...overrides
+    };
+  }
+  const interviewWith = (
+    inventory: Parameters<typeof buildSetupOnboardingResult>[0]["providerInventory"]
+  ): Parameters<typeof buildSetupOnboardingResult>[0] => ({
+    projectName: "Acme",
+    websiteUrl: "https://acme.test",
+    productSurface: "web",
+    providerInventory: inventory
+  });
+
+  it("#13 a ticked-but-deferred X renders status=deferred with rationale + reenable kind", () => {
+    const result = buildSetupOnboardingResult(
+      interviewWith([
+        { provider: "ga4", hasAccount: true, installState: "unknown", selected: true, recommended: true },
+        { provider: "x", hasAccount: false, installState: "unknown", selected: true, recommended: false }
+      ]),
+      moduleResult({
+        selectedProviders: ["ga4"],
+        completed: ["ga4"],
+        resolvedPublicArtifacts: { ga4: { measurementId: "G-ACME123" }, posthog: {}, x: {} },
+        recommendations: [
+          { provider: "ga4", status: "recommended", reasonCode: "web_default", rationale: "default" },
+          { provider: "x", status: "deferred", reasonCode: "developer_billing_friction", rationale: "X stays deferred by default because billing friction." }
+        ]
+      })
+    );
+    const x = result.providers.find((p) => p.provider === "x")!;
+    expect(x.status).toBe("deferred");
+    expect(x.deferralReason).toContain("billing friction");
+    expect(x.deferralKind).toBe("reenable");
+    const rendered = renderCliResult(result);
+    expect(rendered).toContain("X: deferred");
+    expect(rendered).toContain("Why: X stays deferred");
+    expect(rendered).toContain("re-run `infinite setup` and tick X");
+  });
+
+  it("#13 a not_applicable provider on a non-web surface renders deferred with the future kind", () => {
+    const result = buildSetupOnboardingResult(
+      interviewWith([
+        { provider: "x", hasAccount: false, installState: "unknown", selected: false, recommended: false }
+      ]),
+      moduleResult({
+        completed: ["ga4"],
+        recommendations: [
+          { provider: "x", status: "not_applicable", reasonCode: "surface_not_supported", rationale: "Web analytics only." }
+        ]
+      })
+    );
+    const x = result.providers.find((p) => p.provider === "x")!;
+    expect(x.status).toBe("deferred");
+    expect(x.deferralKind).toBe("future");
+    expect(renderCliResult(result)).toContain("tracked for a future release");
+  });
+
+  it("#13 a genuinely-unticked, non-deferred provider stays not_selected", () => {
+    const result = buildSetupOnboardingResult(
+      interviewWith([
+        { provider: "ga4", hasAccount: true, installState: "unknown", selected: true, recommended: true },
+        { provider: "x", hasAccount: false, installState: "unknown", selected: false, recommended: false }
+      ]),
+      moduleResult({
+        selectedProviders: ["ga4"],
+        completed: ["ga4"],
+        recommendations: [
+          { provider: "ga4", status: "recommended", reasonCode: "web_default", rationale: "default" }
+        ]
+      })
+    );
+    expect(result.providers.find((p) => p.provider === "x")!.status).toBe("not_selected");
+  });
+
+  it("#11 two paused providers → outstanding length 2, deduped, and a next that names the count (never 'continue')", () => {
+    const result = buildSetupOnboardingResult(
+      interviewWith([
+        { provider: "posthog", hasAccount: false, installState: "unknown", selected: true, recommended: true },
+        { provider: "x", hasAccount: false, installState: "unknown", selected: true, recommended: true }
+      ]),
+      moduleResult({
+        selectedProviders: ["posthog", "x"],
+        paused: ["posthog", "x"],
+        recommendations: [
+          { provider: "posthog", status: "recommended", reasonCode: "web_default", rationale: "default" },
+          { provider: "x", status: "recommended", reasonCode: "explicit_founder_request", rationale: "requested" }
+        ],
+        activeRuns: [
+          { id: "run_ph_new", provider: "posthog", status: "paused_handoff", pendingHandoff: null },
+          { id: "run_ph_old", provider: "posthog", status: "paused_handoff", pendingHandoff: null },
+          { id: "run_x1", provider: "x", status: "paused_handoff", pendingHandoff: null }
+        ]
+      })
+    );
+    expect(result.outstanding).toHaveLength(2);
+    // deduped per provider, keeping the most-recent (first) id.
+    expect(result.outstanding!.find((o) => o.provider === "posthog")!.runId).toBe("run_ph_new");
+    expect(result.ok).toBe(false);
+    expect(result.next).toContain("2 providers are still paused (POSTHOG, X)");
+    const rendered = renderCliResult(result);
+    expect(rendered).toContain("Still paused (finish these to capture every selected provider):");
+    expect(rendered).toContain("1. POSTHOG");
+    expect(rendered).toContain("2. X");
+    expect(rendered).toContain("infinite setup resume --all");
+  });
+
+  it("#11 exactly one outstanding → next resumes that one, no --all footer", () => {
+    const result = buildSetupOnboardingResult(
+      interviewWith([
+        { provider: "posthog", hasAccount: false, installState: "unknown", selected: true, recommended: true }
+      ]),
+      moduleResult({
+        selectedProviders: ["posthog"],
+        paused: ["posthog"],
+        recommendations: [{ provider: "posthog", status: "recommended", reasonCode: "web_default", rationale: "default" }],
+        activeRuns: [{ id: "run_ph1", provider: "posthog", status: "paused_handoff", pendingHandoff: { instructions: "finish signup" } }]
+      })
+    );
+    expect(result.outstanding).toHaveLength(1);
+    expect(result.next).toBe("Run `infinite setup resume run_ph1` after completing the POSTHOG handoff.");
+    const rendered = renderCliResult(result);
+    expect(rendered).toContain("1. POSTHOG — finish signup, then run `infinite setup resume run_ph1`");
+    expect(rendered).not.toContain("infinite setup resume --all");
+  });
+
+  it("#12 partial install: caveat names paused + failed not-covered providers after the install command", () => {
+    const result = buildSetupOnboardingResult(
+      interviewWith([
+        { provider: "ga4", hasAccount: true, installState: "unknown", selected: true, recommended: true },
+        { provider: "posthog", hasAccount: false, installState: "unknown", selected: true, recommended: true },
+        { provider: "x", hasAccount: false, installState: "unknown", selected: true, recommended: true }
+      ]),
+      moduleResult({
+        selectedProviders: ["ga4", "posthog", "x"],
+        completed: ["ga4"],
+        paused: ["posthog"],
+        failed: ["x"],
+        resolvedPublicArtifacts: { ga4: { measurementId: "G-ACME123" }, posthog: {}, x: {} },
+        installCommand: "npx infinite-tag install --workspace proj_1 --ga4-measurement-id G-ACME123 --yes",
+        recommendations: [
+          { provider: "ga4", status: "recommended", reasonCode: "web_default", rationale: "default" },
+          { provider: "posthog", status: "recommended", reasonCode: "web_default", rationale: "default" },
+          { provider: "x", status: "recommended", reasonCode: "explicit_founder_request", rationale: "requested" }
+        ],
+        activeRuns: [{ id: "run_ph1", provider: "posthog", status: "paused_handoff", pendingHandoff: null }]
+      })
+    );
+    const rendered = renderCliResult(result);
+    expect(rendered).toContain("Heads up: this command only installs tags for the providers that finished.");
+    expect(rendered).toContain("POSTHOG: paused mid-setup — finish it with `infinite setup resume run_ph1`");
+    // A failed provider has no active run id (failed runs are not resumable), so it falls
+    // back to the status-based path rather than a resume command.
+    expect(rendered).toContain("X: not finished — run `infinite setup status` to continue");
+  });
+
+  it("#12 no caveat when nothing is paused/failed", () => {
+    const result = buildSetupOnboardingResult(
+      interviewWith([
+        { provider: "ga4", hasAccount: true, installState: "unknown", selected: true, recommended: true }
+      ]),
+      moduleResult({
+        selectedProviders: ["ga4"],
+        completed: ["ga4"],
+        resolvedPublicArtifacts: { ga4: { measurementId: "G-ACME123" }, posthog: {}, x: {} },
+        installCommand: "npx infinite-tag install --workspace proj_1 --ga4-measurement-id G-ACME123 --yes",
+        recommendations: [{ provider: "ga4", status: "recommended", reasonCode: "web_default", rationale: "default" }]
+      })
+    );
+    expect(renderCliResult(result)).not.toContain("Heads up: this command only installs");
+  });
+
+  it("#14 none-selected / all-deferred → ok:false, pick-a-source next, and a primary banner", () => {
+    const result = buildSetupOnboardingResult(
+      interviewWith([
+        { provider: "x", hasAccount: false, installState: "unknown", selected: false, recommended: false }
+      ]),
+      moduleResult({
+        recommendations: [
+          { provider: "x", status: "deferred", reasonCode: "developer_billing_friction", rationale: "billing friction" }
+        ]
+      })
+    );
+    expect(result.ok).toBe(false);
+    expect(result.next).toContain("Run `infinite setup` and select a data source");
+    const rendered = renderCliResult(result);
+    expect(rendered).toContain("No data source was configured — nothing was set up.");
+    // The deferred row still renders below the banner (secondary detail).
+    expect(rendered).toContain("X: deferred");
+  });
+
+  it("#14 a normal completed run still reports ok:true (regression)", () => {
+    const result = buildSetupOnboardingResult(
+      interviewWith([
+        { provider: "ga4", hasAccount: true, installState: "unknown", selected: true, recommended: true }
+      ]),
+      moduleResult({
+        selectedProviders: ["ga4"],
+        completed: ["ga4"],
+        resolvedPublicArtifacts: { ga4: { measurementId: "G-ACME123" }, posthog: {}, x: {} },
+        recommendations: [{ provider: "ga4", status: "recommended", reasonCode: "web_default", rationale: "default" }]
+      })
+    );
+    expect(result.ok).toBe(true);
+    expect(result.next).toBe("Run `infinite setup query` or `infinite` to continue.");
   });
 });
 

@@ -13,7 +13,12 @@ import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+import type { WorkspaceInstallArtifacts } from "infinite-tag";
+
 import type { InstallCommandArtifacts } from "./install-command.js";
+
+/** Default PostHog ingest host when a captured PostHog artifact has no host of its own. */
+export const DEFAULT_POSTHOG_API_HOST = "https://us.i.posthog.com";
 
 /** The exact (and only) shape ever written; matches what `infinite-tag` coerces on read. */
 export interface SetupArtifactsFilePayload {
@@ -67,6 +72,39 @@ export function buildSetupArtifactsFilePayload(
   }
 
   return installable ? payload : null;
+}
+
+/**
+ * Maps the captured PUBLIC artifacts into the installer's {@link WorkspaceInstallArtifacts}
+ * map for the auto-install lane. REUSES {@link buildSetupArtifactsFilePayload} so the
+ * provider whitelist + X event-tag dedup + "PostHog needs a project key first" rules never
+ * drift from the same-machine handoff file. The only extra step: `infinite-tag` requires a
+ * concrete `apiHost: string`, so a captured PostHog with no host defaults to
+ * {@link DEFAULT_POSTHOG_API_HOST} (the founder can re-run with `--posthog-api-host`).
+ * Returns null when nothing installable was captured.
+ */
+export function buildWorkspaceArtifactsFromResolved(
+  workspaceId: string,
+  artifacts: InstallCommandArtifacts | null | undefined
+): WorkspaceInstallArtifacts | null {
+  const payload = buildSetupArtifactsFilePayload(workspaceId, artifacts);
+  if (!payload) {
+    return null;
+  }
+  const out: WorkspaceInstallArtifacts = {};
+  if (payload.ga4) {
+    out.ga4 = { measurementId: payload.ga4.measurementId };
+  }
+  if (payload.posthog) {
+    out.posthog = {
+      projectKey: payload.posthog.projectKey,
+      apiHost: payload.posthog.apiHost ?? DEFAULT_POSTHOG_API_HOST
+    };
+  }
+  if (payload.x) {
+    out.x = { pixelId: payload.x.pixelId, eventTagIds: payload.x.eventTagIds };
+  }
+  return out;
 }
 
 /**
