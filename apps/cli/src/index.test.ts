@@ -11064,6 +11064,108 @@ describe("project delete (CLI)", () => {
   });
 });
 
+describe("in-chat /connect meta_ads wizard — end-to-end dispatch (#2)", () => {
+  // The masked wizard's final confirm builds a leading-slash dispatch line via
+  // buildConnectDispatchLine, then submits it through runSlashCommand → runCommand.
+  // This drives that REAL chain end-to-end and proves: (a) the chosen backfill
+  // window reaches queueMetaAdsBackfillForConnect (Option B — not the silent
+  // 30-day default), (b) transport derives to the native marketing_api, and
+  // (c) the access token never leaks into the surfaced result.
+  it("threads the in-chat-chosen backfill window into the /sources/{id}/sync body and never leaks the token", async () => {
+    const { buildConnectDispatchLine, connectorSetupDefinition, runSlashCommand } = await import(
+      "./index.js"
+    );
+    const RAW_TOKEN = "EAAB_SYSTEM_USER_SECRET_TOKEN";
+    const definition = connectorSetupDefinition("meta_ads")!;
+    const line = buildConnectDispatchLine(definition, "Meta Ads", {
+      adAccountId: "act_9988776655",
+      accessToken: RAW_TOKEN,
+      backfillWindow: "6_months"
+    });
+    // Compact JSON has no internal spaces, so the leading-slash line splits cleanly
+    // on /\s+/ the same way the interactive dispatch path does.
+    expect(line).toContain(" --backfill-window 6_months ");
+    expect(line).not.toContain(RAW_TOKEN.toLowerCase());
+
+    const requests: Array<{ url: string; body: Record<string, unknown> | null }> = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+      requests.push({ url: String(url), body: init?.body ? JSON.parse(String(init.body)) : null });
+      return new Response(
+        JSON.stringify({ ok: true, data: { source: { id: "src_meta_ads" } } }),
+        { status: 200 }
+      );
+    }) as typeof fetch;
+
+    let result: unknown;
+    try {
+      result = await runSlashCommand(line, {
+        GROWTH_OS_OPERATOR_TOKEN: "operator",
+        GROWTH_OS_WORKSPACE_ID: "proj_test"
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    // Connect call: the space-containing connection name round-trips and the window
+    // flag is stripped out of it; the token rides ONLY in the credential payload.
+    expect(requests[0]).toMatchObject({
+      url: "http://127.0.0.1:3000/sources/connect",
+      body: {
+        provider: "meta_ads",
+        connectionName: "Meta Ads",
+        credentialPayload: {
+          transport: "marketing_api",
+          adAccountId: "9988776655",
+          accessToken: RAW_TOKEN
+        }
+      }
+    });
+    // Backfill sync uses the USER'S window (6 months), not the silent 30-day default.
+    expect(requests[1]).toMatchObject({
+      url: "http://127.0.0.1:3000/sources/src_meta_ads/sync",
+      body: { mode: "backfill", backfillWindow: "6_months", refreshWindowDays: 180 }
+    });
+    expect(result).toMatchObject({ backfill: { queued: true, sourceId: "src_meta_ads" } });
+    // The token NEVER surfaces in the result that gets rendered/echoed.
+    expect(JSON.stringify(result)).not.toContain(RAW_TOKEN);
+  });
+
+  it("threads an all_time window (no refreshWindowDays) the same way", async () => {
+    const { buildConnectDispatchLine, connectorSetupDefinition, runSlashCommand } = await import(
+      "./index.js"
+    );
+    const definition = connectorSetupDefinition("meta_ads")!;
+    const line = buildConnectDispatchLine(definition, "Meta Ads", {
+      adAccountId: "1",
+      accessToken: "tok",
+      backfillWindow: "all_time"
+    });
+
+    const requests: Array<{ url: string; body: Record<string, unknown> | null }> = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+      requests.push({ url: String(url), body: init?.body ? JSON.parse(String(init.body)) : null });
+      return new Response(
+        JSON.stringify({ ok: true, data: { source: { id: "src_meta_ads" } } }),
+        { status: 200 }
+      );
+    }) as typeof fetch;
+
+    try {
+      await runSlashCommand(line, {
+        GROWTH_OS_OPERATOR_TOKEN: "operator",
+        GROWTH_OS_WORKSPACE_ID: "proj_test"
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    expect(requests[1]?.body).toMatchObject({ mode: "backfill", backfillWindow: "all_time" });
+    expect(requests[1]?.body).not.toHaveProperty("refreshWindowDays");
+  });
+});
+
 function isRecordResult(value: unknown): boolean {
   return value !== null && typeof value === "object";
 }

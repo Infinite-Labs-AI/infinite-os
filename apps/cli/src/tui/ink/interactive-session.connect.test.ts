@@ -49,7 +49,53 @@ const POSTHOG_WIZARD = {
   }
 };
 
+// Mirrors the production meta_ads descriptor (index.ts buildConnectSetupDescriptor):
+// plain ad account id → MASKED access token → backfill-window choice (Option B).
+const META_ADS_WIZARD = {
+  kind: "wizard" as const,
+  descriptor: {
+    provider: "meta_ads",
+    label: "Meta Ads",
+    description: "Campaign performance insights",
+    connectionName: "Meta Ads",
+    docsUrl: "https://developers.facebook.com/docs/marketing-apis",
+    fields: [
+      {
+        key: "adAccountId",
+        label: "Meta ad account ID",
+        secret: false,
+        required: true,
+        guidance: "Format act_XXXX."
+      },
+      {
+        key: "accessToken",
+        label: "Meta access token",
+        secret: true,
+        required: true,
+        guidance: "A system-user token."
+      },
+      {
+        key: "backfillWindow",
+        label: "Backfill window",
+        secret: false,
+        required: true,
+        guidance: "How far back to pull insights.",
+        choices: [
+          { value: "7_days", label: "7 days" },
+          { value: "14_days", label: "14 days" },
+          { value: "30_days", label: "30 days", description: "default" },
+          { value: "3_months", label: "3 months" },
+          { value: "6_months", label: "6 months" },
+          { value: "12_months", label: "12 months" },
+          { value: "all_time", label: "all time" }
+        ]
+      }
+    ]
+  }
+};
+
 const RAW_SECRET = "phx_SUPER_SECRET_KEY_abc123";
+const RAW_META_TOKEN = "EAAB_META_SYSTEM_USER_TOKEN_xyz789";
 
 describe("in-chat /connect wizard (#20) — structural security guards (CI-runnable)", () => {
   // These assert the dangerous leak paths are BYPASSED in source, mirroring the
@@ -246,6 +292,89 @@ describe("in-chat /connect wizard (#20) — live PTY flow (skipped on CI)", () =
   );
 
   it.skipIf(process.env.CI === "true")(
+    "meta_ads: collects a masked token + a chosen backfill window; dispatch carries --backfill-window and never leaks the token",
+    { timeout: 30_000 },
+    async () => {
+      const input = ttyInput();
+      const output = ttyOutput();
+      const errorOutput = ttyOutput();
+      const remembered: string[] = [];
+      const dispatched: string[] = [];
+
+      const session = runInkInteractiveSession({
+        columns: 80,
+        errorOutput,
+        input,
+        output,
+        title: "Infinite TUI",
+        onRememberInput: (line) => remembered.push(line),
+        connectWizard: (line) =>
+          line.includes("connect meta_ads") ? META_ADS_WIZARD : { kind: "none" },
+        // Mirror the production splice: the backfill window rides as a pre-JSON
+        // token, never inside the credential JSON.
+        buildConnectDispatch: (provider, connectionName, collected) => {
+          const { backfillWindow, ...credentials } = collected;
+          const flag = backfillWindow ? ` --backfill-window ${backfillWindow}` : "";
+          return `/connect ${provider} ${connectionName}${flag} ${JSON.stringify({
+            mode: "live",
+            transport: "marketing_api",
+            ...credentials
+          })}`;
+        },
+        async onSubmitLine(line) {
+          dispatched.push(line);
+          return { exit: true, messages: [{ role: "assistant", text: "connected" }] };
+        }
+      });
+
+      await waitFor(() => output.text().includes("ready"));
+
+      await sendKeys(input, "/connect meta_ads\r");
+      await waitFor(() => output.text().includes("Step 1 of 3"), 4_000, output.text);
+
+      // Field 1: ad account id (plain — echoed).
+      await sendKeys(input, "act_9988776655\r");
+      await waitFor(() => output.text().includes("Meta ad account ID: act_9988776655"), 4_000, output.text);
+
+      // Field 2: the MASKED access token.
+      await sendKeys(input, `${RAW_META_TOKEN}\r`);
+      await waitFor(() => output.text().includes("(hidden)"), 4_000, output.text);
+
+      // Field 3: backfill window — default cursor is the first option (7 days);
+      // arrow down four times to land on 6 months, then Enter.
+      await waitFor(() => output.text().includes("7 days"), 4_000, output.text);
+      for (let i = 0; i < 4; i += 1) {
+        await sendRaw(input, "\x1b[B");
+      }
+      await waitFor(() => output.text().includes("> 6 months"), 4_000, output.text);
+      await sendKeys(input, "\r");
+
+      // Final confirm — Enter dispatches.
+      await waitFor(() => output.text().includes("Connect Meta Ads as"), 4_000, output.text);
+      await sendKeys(input, "\r");
+
+      await waitFor(() => dispatched.length === 1, 4_000, output.text);
+      await session;
+
+      expect(dispatched).toHaveLength(1);
+      expect(dispatched[0]!.startsWith("/")).toBe(true);
+      // The chosen window is a PRE-JSON token; the token is ONLY in the JSON.
+      expect(dispatched[0]!).toContain("--backfill-window 6_months");
+      expect(dispatched[0]!.indexOf("--backfill-window")).toBeLessThan(dispatched[0]!.indexOf("{"));
+      expect(dispatched[0]!).toContain(RAW_META_TOKEN);
+      // The window must NOT leak into the credential JSON.
+      const json = JSON.parse(dispatched[0]!.slice(dispatched[0]!.indexOf("{"))) as Record<string, unknown>;
+      expect(json).not.toHaveProperty("backfillWindow");
+      expect(json.transport).toBe("marketing_api");
+
+      // The raw token NEVER appears in any rendered frame nor in input history.
+      expect(output.text()).not.toContain(RAW_META_TOKEN);
+      expect(remembered.join("\n")).not.toContain(RAW_META_TOKEN);
+      expect(output.text()).toContain("(hidden)");
+    }
+  );
+
+  it.skipIf(process.env.CI === "true")(
     "Ctrl-C during the wizard cancels the wizard (does NOT exit the session) and leaves no remembered/transcript secret",
     { timeout: 30_000 },
     async () => {
@@ -333,10 +462,10 @@ describe("in-chat /connect wizard (#20) — live PTY flow (skipped on CI)", () =
   );
 
   it.skipIf(process.env.CI === "true")(
-    "/connect meta_ads and /connect shopify show the terminal-fallback note",
+    "/connect shopify shows the terminal-fallback note",
     { timeout: 30_000 },
     async () => {
-      for (const provider of ["meta_ads", "shopify"]) {
+      for (const provider of ["shopify"]) {
         const input = ttyInput();
         const output = ttyOutput();
         const errorOutput = ttyOutput();
