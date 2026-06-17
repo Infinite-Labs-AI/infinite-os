@@ -43,6 +43,7 @@ import {
   type CompletionSuggestion,
   type InkInteractiveSelectionPrompt
 } from "./tui/ink/interactive-session.js";
+import { runInfiniteWelcome } from "./tui/ink/infinite-welcome.js";
 import { appendPersistentInputHistory, loadPersistentInputHistory } from "./tui/ink/input-history.js";
 import { resolveCliRenderSurface, usesTranscriptRenderSurface } from "./tui/runtime/render-surface.js";
 import { resolveTheme, type Theme } from "./tui/theme.js";
@@ -6041,10 +6042,46 @@ interface MaybeNotifyUpdateOptions {
   cachePath?: string;
 }
 
+// ~/.infinite (or under GROWTH_OS_HOME when set) — the per-user state dir.
+function infiniteHomeDir(env: CliEnv): string {
+  return env.GROWTH_OS_HOME ? resolve(env.GROWTH_OS_HOME) : join(homedir(), ".infinite");
+}
+
 // ~/.infinite/update-check.json (or under GROWTH_OS_HOME when set).
 function updateCheckCachePath(env: CliEnv): string {
-  const home = env.GROWTH_OS_HOME ? resolve(env.GROWTH_OS_HOME) : join(homedir(), ".infinite");
-  return join(home, "update-check.json");
+  return join(infiniteHomeDir(env), "update-check.json");
+}
+
+// ~/.infinite/welcome-seen — written once the first-run welcome is dismissed.
+function welcomeSeenPath(env: CliEnv): string {
+  return join(infiniteHomeDir(env), "welcome-seen");
+}
+
+// Show the big-INFINITE welcome on first interactive launch only. `INFINITE_FORCE_WELCOME`
+// replays it (for previewing); `INFINITE_NO_ANIMATION` skips the splash entirely.
+function shouldShowInfiniteWelcome(env: CliEnv): boolean {
+  const flags = env as NodeJS.ProcessEnv;
+  if (flags.INFINITE_FORCE_WELCOME === "1" || flags.INFINITE_FORCE_WELCOME === "true") {
+    return true;
+  }
+  if (flags.INFINITE_NO_ANIMATION === "1" || flags.INFINITE_NO_ANIMATION === "true") {
+    return false;
+  }
+  try {
+    return !existsSync(welcomeSeenPath(env));
+  } catch {
+    return false;
+  }
+}
+
+function recordInfiniteWelcomeSeen(env: CliEnv): void {
+  try {
+    const path = welcomeSeenPath(env);
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, "seen\n");
+  } catch {
+    // Best-effort: a marker we can't persist just means the welcome may replay.
+  }
 }
 
 function readUpdateCheckCache(cachePath: string): UpdateCheckCache | undefined {
@@ -6545,6 +6582,20 @@ function connectorOAuthExchangeCommand(args: string[], env: CliEnv): Promise<unk
 }
 
 async function interactiveSession(env: CliEnv): Promise<void> {
+  // First-run front door: the big INFINITE welcome, before readiness/preflight.
+  // Only on an Ink-capable interactive TTY; "press Enter to launch" hands off
+  // into the session (which lands on the rocket home banner).
+  if (shouldShowInfiniteWelcome(env) && shouldUseInkInteractiveSession(input, output, env)) {
+    await runInfiniteWelcome({
+      columns: output.columns,
+      errorOutput,
+      input,
+      output,
+      theme: resolveTheme(env as NodeJS.ProcessEnv)
+    });
+    recordInfiniteWelcomeSeen(env);
+  }
+
   const readiness = await localChatReadiness(env);
   if (!readiness.ok) {
     if (env.GROWTH_OS_CLI_NONINTERACTIVE === "1" || input.isTTY !== true) {
