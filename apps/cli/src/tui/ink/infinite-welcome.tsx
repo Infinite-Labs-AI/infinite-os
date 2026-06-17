@@ -97,6 +97,7 @@ export function InfiniteWelcome({
       <Box marginTop={1}>
         <Text color={RETRO.light}>∞ </Text>
         <Text color={RETRO.grey}>{GROWTH_TAGLINE.toUpperCase()}</Text>
+        <Text color={RETRO.light}> ∞</Text>
       </Box>
       <Box marginTop={1}>
         <Text color={RETRO.grey}>press </Text>
