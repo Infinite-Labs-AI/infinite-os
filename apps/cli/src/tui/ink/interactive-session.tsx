@@ -2,6 +2,12 @@ import { existsSync, readdirSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import { stdin as defaultInput, stderr as defaultErrorOutput, stdout as defaultOutput } from "node:process";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+// The composer value renders in `<Text wrap="wrap">` (see InkLineInput), and Ink's
+// wrap="wrap" word-wraps via `wrapAnsi(text, width, { trim: false, hard: true })`
+// (ink/build/wrap-text.js). The native-cursor row prediction MUST use the SAME
+// wrap so it never lands a row off the line the user is typing on — char-by-char
+// width accumulation (a different, tighter packing) drifts from Ink's word-wrap.
+import wrapAnsi from "wrap-ansi";
 import { Box, Text, render, renderToString, useApp, useCursor, useInput, useStdin, useStdout } from "./renderer.js";
 
 import type { ChatProgressEvent } from "@infinite-os/llm-controller";
@@ -1463,40 +1469,54 @@ export function composerCursorLayout(
 ): { column: number; line: number } {
   const position = snapComposerCursor(value, cursor);
   const width = Math.max(1, columns);
-  let column = 0;
-  let line = 0;
 
-  composerSegmenter ??= new Intl.Segmenter(undefined, { granularity: "grapheme" });
-  for (const { segment, index } of composerSegmenter.segment(value)) {
-    if (index >= position) {
-      break;
+  // Mirror Ink's `<Text wrap="wrap">` exactly: word-wrap each explicit (`\n`-split)
+  // logical line with the same wrap-ansi call Ink uses. wrap-ansi with
+  // { trim: false, hard: true } only INSERTS line breaks and preserves every other
+  // character, so within a single logical line `subs.join("") === logical` — letting
+  // us map the original cursor offset onto the wrapped rows by cumulative length.
+  const logicalLines = value.split("\n");
+  let displayRow = 0;
+  let valueOffset = 0;
+
+  for (let li = 0; li < logicalLines.length; li++) {
+    const logical = logicalLines[li] ?? "";
+    const subs = wrapAnsi(logical, width, { trim: false, hard: true }).split("\n");
+
+    for (let si = 0; si < subs.length; si++) {
+      const sub = subs[si] ?? "";
+      const rowStart = valueOffset;
+      const rowEnd = valueOffset + sub.length;
+      const lastSubOfLine = si === subs.length - 1;
+      // Place the cursor on this row when its offset is strictly inside the row, OR
+      // exactly at the row's end AND this is the line's final wrapped row. At a SOFT
+      // wrap boundary (end of a non-final sub) the offset belongs to the next word,
+      // so we fall through to start that next row at column 0 — matching where Ink
+      // continues the text. The explicit-`\n` boundary is handled by `lastSubOfLine`
+      // (the offset before a real newline stays at the end of the current line).
+      if (position < rowEnd || (position === rowEnd && lastSubOfLine)) {
+        let column = displayWidth(sub.slice(0, position - rowStart));
+        let line = displayRow;
+        // A cursor exactly at the end of a width-filled row shows at the start of the
+        // next (deferred wrap) — preserves the long-standing exact-boundary behavior.
+        if (column >= width) {
+          line += 1;
+          column = 0;
+        }
+        return { column, line };
+      }
+      valueOffset = rowEnd;
+      displayRow += 1;
     }
 
-    if (segment === "\n") {
-      line += 1;
-      column = 0;
-      continue;
+    // Step over the explicit newline separating logical lines (not after the last).
+    if (li < logicalLines.length - 1) {
+      valueOffset += 1;
     }
-
-    const segmentWidth = displayWidth(segment);
-    if (!segmentWidth) {
-      continue;
-    }
-
-    if (column + segmentWidth > width) {
-      line += 1;
-      column = 0;
-    }
-
-    column += segmentWidth;
   }
 
-  if (column >= width) {
-    line += 1;
-    column = 0;
-  }
-
-  return { column, line };
+  // Cursor past the rendered content (defensive): park it on the last row.
+  return { column: 0, line: Math.max(0, displayRow - 1) };
 }
 
 export function composerNativeCursorPosition({
