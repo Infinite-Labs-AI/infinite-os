@@ -402,6 +402,7 @@ export function InkInteractiveSessionApp({
   const composerRow = inkTranscriptRowCount({
     busy,
     columns,
+    homeBanner: true,
     indicatorTick: labelTick,
     nowMs: clock,
     showComposer: false,
@@ -919,6 +920,7 @@ export function InkInteractiveSessionApp({
       <InkTranscriptApp
         busy={busy}
         columns={columns}
+        homeBanner
         indicatorTick={labelTick}
         nowMs={clock}
         prompt={{ placeholder: promptPlaceholder }}
