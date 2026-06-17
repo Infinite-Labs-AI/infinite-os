@@ -18,6 +18,11 @@ export interface SyncRequest {
   mode?: string;
   refreshWindowDays?: number;
   backfillWindow?: string;
+  // Phase 0 plumbing: optional Meta Ads insights grain overrides. Unset today (so the
+  // connector falls back to campaign/daily — identical to prior behavior); a later phase
+  // can set these to request adset/ad level or a different time_increment.
+  metaAdsInsightsLevel?: string;
+  metaAdsInsightsTimeIncrement?: string;
 }
 
 export interface SyncPlan {
@@ -895,9 +900,10 @@ const metaAdsConnector = createConnector<MetaAdsCredential, MetaAdsCampaignDaily
       { ignoreCursor: request.mode === "backfill" || Boolean(request.backfillWindow) }
     );
   },
-  async extractLive(_db, _request, plan, credential) {
+  async extractLive(_db, request, plan, credential) {
     const adAccountId = metaAdsAccountId(credential);
     const timeOptions = metaAdsTimeOptions(plan);
+    const { level, timeIncrement } = metaAdsInsightsGrain(request);
     const rows: MetaAdsCampaignDailyRow[] = [];
     if (isMetaAdsMcpTransport(credential)) {
       let after: string | undefined;
@@ -905,9 +911,9 @@ const metaAdsConnector = createConnector<MetaAdsCredential, MetaAdsCampaignDaily
         const response = await metaAdsMcpInsights(credential, {
           adAccountId,
           fields: "campaign_id,campaign_name,date_start,spend,clicks,impressions,reach,cpm,cpc,ctr",
-          level: "campaign",
+          level,
           limit: "100",
-          timeIncrement: "1",
+          timeIncrement,
           ...timeOptions,
           after
         });
@@ -933,9 +939,9 @@ const metaAdsConnector = createConnector<MetaAdsCredential, MetaAdsCampaignDaily
     let nextUrl: string | null = metaAdsInsightsUrl(credential, {
       adAccountId,
       fields: "campaign_id,campaign_name,date_start,spend,clicks,impressions,reach,cpm,cpc,ctr",
-      level: "campaign",
+      level,
       limit: "100",
-      timeIncrement: "1",
+      timeIncrement,
       ...timeOptions
     });
     while (nextUrl) {
@@ -2800,6 +2806,25 @@ function isMetaAdsCliTransport(credential: MetaAdsCredential): boolean {
 // that the captured WRITE shapes were recovered from. Configurable per-credential.
 function metaAdsApiVersion(credential: MetaAdsCredential): string {
   return credential.apiVersion ?? "v25.0";
+}
+
+// Meta Ads insights grain defaults. Phase 0 plumbing: `level` + `time_increment` are
+// now resolved through these constants instead of being hardcoded inline at each call
+// site, so a later phase can request adset/ad grain or a non-daily increment by passing
+// overrides on the SyncRequest. The DEFAULTS reproduce today's behavior EXACTLY
+// (campaign grain, daily increment), so with no override the emitted insights request is
+// byte-for-byte identical to before this change.
+const META_ADS_INSIGHTS_DEFAULT_LEVEL = "campaign";
+const META_ADS_INSIGHTS_DEFAULT_TIME_INCREMENT = "1";
+
+function metaAdsInsightsGrain(request: SyncRequest): {
+  level: string;
+  timeIncrement: string;
+} {
+  return {
+    level: request.metaAdsInsightsLevel ?? META_ADS_INSIGHTS_DEFAULT_LEVEL,
+    timeIncrement: request.metaAdsInsightsTimeIncrement ?? META_ADS_INSIGHTS_DEFAULT_TIME_INCREMENT
+  };
 }
 
 function metaAdsTimeOptions(plan: SyncPlan): {

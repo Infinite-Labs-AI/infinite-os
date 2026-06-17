@@ -43,6 +43,51 @@ describe("analytical engine smoke", () => {
     );
   });
 
+  describe("Meta Ads queryable metrics (Phase 0)", () => {
+    it("routes impressions/reach/cpm/cpc/ctr to vw_meta_ads_campaign_daily", () => {
+      for (const metric of ["impressions", "reach", "cpm", "cpc", "ctr"]) {
+        expect(metricView(metric)).toBe("queryable.vw_meta_ads_campaign_daily");
+      }
+      // spend/clicks unchanged.
+      expect(metricView("meta_ads_spend")).toBe("queryable.vw_meta_ads_campaign_daily");
+      expect(metricView("meta_ads_clicks")).toBe("queryable.vw_meta_ads_campaign_daily");
+    });
+
+    it("sums the additive Meta metrics (impressions, reach)", () => {
+      expect(aggregateExpression("impressions", metricColumn("impressions"))).toBe("sum(impressions)");
+      expect(aggregateExpression("reach", metricColumn("reach"))).toBe("sum(reach)");
+    });
+
+    it("RECOMPUTES cpm/cpc/ctr from summed bases — never avg(per-row ratio)", () => {
+      // LOAD-BEARING: these MUST divide summed numerator by summed denominator. If anyone
+      // reverts to avg(cpm)/avg(cpc)/avg(ctr) (per-row ratio averaging) these assertions fail.
+      const cpm = aggregateExpression("cpm", metricColumn("cpm"));
+      expect(cpm).toBe("sum(meta_ads_spend) / nullif(sum(impressions), 0) * 1000");
+      expect(cpm).not.toContain("avg(");
+
+      const cpc = aggregateExpression("cpc", metricColumn("cpc"));
+      expect(cpc).toBe("sum(meta_ads_spend) / nullif(sum(meta_ads_clicks), 0)");
+      expect(cpc).not.toContain("avg(");
+
+      const ctr = aggregateExpression("ctr", metricColumn("ctr"));
+      expect(ctr).toBe("sum(meta_ads_clicks) / nullif(sum(impressions), 0)");
+      expect(ctr).not.toContain("avg(");
+    });
+
+    it("flags reach as APPROXIMATE and keeps the read-only marketing-api caveat on all 5", () => {
+      expect(caveatsForMetric("reach")).toContain(
+        "reach_is_approximate_summed_daily_reach_overcounts_unique_people"
+      );
+      for (const metric of ["impressions", "reach", "cpm", "cpc", "ctr"]) {
+        expect(caveatsForMetric(metric)).toContain("read_only_marketing_api_reporting");
+      }
+      // impressions is exact (additive) — must NOT carry the reach approximation flag.
+      expect(caveatsForMetric("impressions")).not.toContain(
+        "reach_is_approximate_summed_daily_reach_overcounts_unique_people"
+      );
+    });
+  });
+
   it("does not export the deterministic question resolver as a public surface", async () => {
     const module = await import("./index.js");
     expect("resolveQuestion" in module).toBe(false);
@@ -1705,6 +1750,141 @@ describe("analytical engine smoke", () => {
     expect(queries.some((entry) => entry.sql.includes("from queryable.vw_meta_ads_campaign_daily") && entry.sql.includes("campaign_id as campaign_id"))).toBe(true);
     expect(queries.some((entry) => entry.sql.includes("from queryable.vw_meta_ads_campaign_daily") && entry.sql.includes("campaign_name as campaign_name"))).toBe(true);
     expect(queries.some((entry) => entry.sql.includes("from queryable.vw_meta_ads_campaign_daily") && entry.sql.includes("occurred_on as occurred_on"))).toBe(true);
+  });
+
+  // Phase 0 Change 1 end-to-end: these run the full run_metric_query handler against a
+  // fake-db that EVALUATES the emitted aggregate SQL over a fixed campaign×day fixture.
+  // Because the fixture's per-row ratios differ from the true volume-weighted ratio, a
+  // revert to avg(per-row cpm/cpc/ctr) would return a DIFFERENT number and fail these.
+  describe("run_metric_query for Meta Ads queryable metrics (Phase 0)", () => {
+    // Two campaign×day rows for one campaign. Bases chosen so sum-then-divide differs
+    // sharply from avg-of-per-row-ratios:
+    //   day1: spend 100, clicks 10,  impressions 1000  -> cpm 100, cpc 10,   ctr 0.01
+    //   day2: spend  20, clicks 80,  impressions 9000  -> cpm  2.222, cpc 0.25, ctr 0.00889
+    // Correct (recomputed) totals over sums:
+    //   sum spend 120, sum clicks 90, sum impressions 10000
+    //   cpm = 120 / 10000 * 1000 = 12
+    //   cpc = 120 / 90            = 1.3333...
+    //   ctr = 90 / 10000          = 0.009
+    //   impressions = 10000 ; reach (sum) = 5000
+    const fixture = [
+      { spend: 100, clicks: 10, impressions: 1000, reach: 3000, cpm: 100, cpc: 10, ctr: 0.01 },
+      { spend: 20, clicks: 80, impressions: 9000, reach: 2000, cpm: 2.222, cpc: 0.25, ctr: 0.0088888 }
+    ];
+    const sums = {
+      spend: fixture.reduce((acc, row) => acc + row.spend, 0),
+      clicks: fixture.reduce((acc, row) => acc + row.clicks, 0),
+      impressions: fixture.reduce((acc, row) => acc + row.impressions, 0),
+      reach: fixture.reduce((acc, row) => acc + row.reach, 0)
+    };
+
+    // Evaluate ONLY the exact aggregate expressions Change 1 registers. Any other shape
+    // (e.g. an avg(cpm) revert) is unrecognized and throws — so a wrong SQL can never
+    // silently pass by returning a coincidentally-right number.
+    function evalAggregate(metric: string, sql: string): number {
+      const measure = sql.slice(sql.indexOf("select ") + "select ".length, sql.indexOf(` as ${metric}`)).trim();
+      if (measure === "sum(impressions)") return sums.impressions;
+      if (measure === "sum(reach)") return sums.reach;
+      if (measure === "sum(meta_ads_spend) / nullif(sum(impressions), 0) * 1000") {
+        return sums.spend / sums.impressions * 1000;
+      }
+      if (measure === "sum(meta_ads_spend) / nullif(sum(meta_ads_clicks), 0)") {
+        return sums.spend / sums.clicks;
+      }
+      if (measure === "sum(meta_ads_clicks) / nullif(sum(impressions), 0)") {
+        return sums.clicks / sums.impressions;
+      }
+      throw new Error(`unexpected_aggregate_for_${metric}:${measure}`);
+    }
+
+    function metaAggregateFakeDb(metric: string, queries: Array<{ sql: string }>): InfiniteOsDb {
+      return {
+        async query<T = Record<string, unknown>>(sql: string): Promise<T[]> {
+          queries.push({ sql });
+          if (sql.includes("from queryable.vw_meta_ads_campaign_daily")) {
+            return [{ [metric]: evalAggregate(metric, sql) }] as T[];
+          }
+          return [] as T[];
+        },
+        async one() {
+          return null;
+        },
+        async close() {},
+        async ensureWorkspace() {},
+        async ensureFirstPhaseDatasets() {},
+        async connectSource() {
+          return null as never;
+        },
+        async updateSourceStatus() {},
+        async createJob() {
+          return {};
+        },
+        async claimNextJob() {
+          return null;
+        },
+        async completeJob() {},
+        async withTransaction(fn) {
+          return fn(this);
+        }
+      };
+    }
+
+    const ctx = {
+      workspaceId: "workspace",
+      authority: "tool_agent" as const,
+      surface: "api" as const,
+      actorId: "operator",
+      sessionId: "session"
+    };
+
+    it("sums impressions and reach over the campaign×day grain", async () => {
+      for (const metric of ["impressions", "reach"] as const) {
+        const queries: Array<{ sql: string }> = [];
+        const handlers = createActionHandlers(metaAggregateFakeDb(metric, queries));
+        const result = await handlers.run_metric_query?.({ metric }, ctx);
+        const sql = queries.find((entry) => entry.sql.includes("from queryable.vw_meta_ads_campaign_daily"))?.sql;
+        expect(sql).toContain(`sum(${metric}) as ${metric}`);
+        expect(result?.data).toMatchObject({ metric, view: "queryable.vw_meta_ads_campaign_daily" });
+        const rows = (result?.data as { rows: Array<Record<string, number>> }).rows;
+        expect(rows[0]?.[metric]).toBe(sums[metric]);
+      }
+    });
+
+    it("recomputes cpm/cpc/ctr from summed bases (avg-per-row would be wrong)", async () => {
+      const expected: Record<string, number> = {
+        cpm: (sums.spend / sums.impressions) * 1000, // 12
+        cpc: sums.spend / sums.clicks, // 1.3333...
+        ctr: sums.clicks / sums.impressions // 0.009
+      };
+      // The avg-of-per-row-ratio answer the revert would produce — proven DISTINCT here so
+      // the equality assertion below genuinely rejects the averaged value.
+      const avgPerRow: Record<string, number> = {
+        cpm: (fixture[0]!.cpm + fixture[1]!.cpm) / 2,
+        cpc: (fixture[0]!.cpc + fixture[1]!.cpc) / 2,
+        ctr: (fixture[0]!.ctr + fixture[1]!.ctr) / 2
+      };
+      for (const metric of ["cpm", "cpc", "ctr"] as const) {
+        const queries: Array<{ sql: string }> = [];
+        const handlers = createActionHandlers(metaAggregateFakeDb(metric, queries));
+        const result = await handlers.run_metric_query?.({ metric }, ctx);
+        const sql = queries.find((entry) => entry.sql.includes("from queryable.vw_meta_ads_campaign_daily"))?.sql;
+        expect(sql).not.toContain(`avg(${metric})`);
+        const rows = (result?.data as { rows: Array<Record<string, number>> }).rows;
+        expect(rows[0]?.[metric]).toBeCloseTo(expected[metric]!, 9);
+        // Guard the guard: the recomputed value must NOT equal the averaged value.
+        expect(Math.abs(rows[0]![metric]! - avgPerRow[metric]!)).toBeGreaterThan(1e-6);
+      }
+    });
+
+    it("flags reach as approximate on the run_metric_query envelope", async () => {
+      const queries: Array<{ sql: string }> = [];
+      const handlers = createActionHandlers(metaAggregateFakeDb("reach", queries));
+      const result = await handlers.run_metric_query?.({ metric: "reach" }, ctx);
+      expect(result?.caveats).toContain(
+        "reach_is_approximate_summed_daily_reach_overcounts_unique_people"
+      );
+      expect(result?.caveats).toContain("read_only_marketing_api_reporting");
+    });
   });
 
   it("accepts event and channel breakdown dimensions for PostHog event counts", async () => {
