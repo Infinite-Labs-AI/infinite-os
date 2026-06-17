@@ -4533,11 +4533,14 @@ export function connectorSetupDefinition(provider: string | undefined): Connecto
 // never the LLM chatRequest).
 
 // Token providers that get the full in-chat masked field wizard this round.
-const IN_CHAT_CONNECT_TOKEN_PROVIDERS = new Set(["posthog", "stripe", "x"]);
+// meta_ads joins via a system-user access token + a synthesised backfill-window
+// choice step (see buildConnectSetupDescriptor); the in-chat path always uses the
+// native marketing_api Graph transport (CLI/MCP transport stays terminal-only).
+const IN_CHAT_CONNECT_TOKEN_PROVIDERS = new Set(["posthog", "stripe", "x", "meta_ads"]);
 // Providers deferred to the terminal CLI for now (browser OAuth driver or
 // backfill/transport sub-pickers the simple field loop can't drive in-chat).
 const IN_CHAT_CONNECT_OAUTH_NOTE_PROVIDERS = new Set(["google_analytics_4"]);
-const IN_CHAT_CONNECT_TERMINAL_ONLY_PROVIDERS = new Set(["meta_ads", "shopify"]);
+const IN_CHAT_CONNECT_TERMINAL_ONLY_PROVIDERS = new Set(["shopify"]);
 
 export interface ConnectWizardField {
   key: string;
@@ -4582,8 +4585,27 @@ const CONNECT_FIELD_GUIDANCE: Record<string, string> = {
   "x:bearerToken":
     "An X API v2 Bearer Token (App-only). X Developer Portal → your Project & App → Keys and tokens → \"Bearer Token\". Needs read access to the public-metrics/tweets endpoints. Stays hidden in chat.",
   "x:username":
-    "The public @handle to track, e.g. `@infinite_os` (the leading @ is fine — it's stripped automatically)."
+    "The public @handle to track, e.g. `@infinite_os` (the leading @ is fine — it's stripped automatically).",
+  "meta_ads:adAccountId":
+    "Your Meta ad account ID, format `act_XXXXXXXXXX` (the `act_` prefix is fine — it's stripped automatically). Find it by running `meta ads adaccount list` and reading the `id` column, or in Meta Ads Manager's account dropdown.",
+  "meta_ads:accessToken":
+    "A Meta system-user access token. In Meta Business Suite → Settings → Users → System Users, click Add to create an Admin system user (e.g. \"Ads CLI\"), select it and Assign Assets to grant it the ad account you're connecting, add it as an App Admin under Meta for Developers → App Settings → Roles → Roles, then click Generate New Token, select your app, and grant the management scopes: business_management, ads_management, pages_show_list, pages_read_engagement, pages_manage_ads, catalog_management, read_insights. Click Generate Token and paste it here. Stays hidden in chat."
 };
+
+// The meta_ads backfill-window step (Option B): how far back to pull insights on
+// first connect. Mirrors POSTHOG_REGION_CHOICES — a fixed pick-list whose `value`
+// is the literal window the backfill queue understands (META_ADS_BACKFILL_OPTIONS).
+// This is NOT a credential field; it's spliced into the dispatch line as a
+// `--backfill-window` token, never into the credential JSON.
+const META_ADS_BACKFILL_CHOICES: { value: string; label: string; description?: string }[] =
+  META_ADS_BACKFILL_OPTIONS.map((option) => ({
+    value: option.value,
+    label: option.label,
+    description:
+      option.value === DEFAULT_META_ADS_BACKFILL_OPTION.value ? "default" : undefined
+  }));
+// The synthesised wizard field key for the backfill window (NOT a registry field).
+const META_ADS_BACKFILL_FIELD_KEY = "backfillWindow";
 
 // The PostHog region step (BINDING REVISION): an explicit US/EU pick that sets
 // apiHost, never a silent default-to-US free-text host (that 403'd the EU user).
@@ -4632,9 +4654,26 @@ export function buildConnectSetupDescriptor(
     }
     if (!field.required) {
       // Don't surface other optional fields — keep the wizard as light as the CLI.
+      // (meta_ads cliCommand/mcpCommand/mcpToolName/apiVersion are dropped here, so
+      // the in-chat path always lands on the native marketing_api transport.)
       continue;
     }
     fields.push(toConnectWizardField(definition.provider, field));
+  }
+  if (definition.provider === "meta_ads") {
+    // Option B: ask how far back to backfill AFTER the credential fields, so the
+    // masked token is collected first and the (non-secret) window pick is last
+    // before the Connect/Cancel confirm. The chosen value is threaded into the
+    // dispatch line by buildConnectDispatchLine (NOT into the credential JSON).
+    fields.push({
+      key: META_ADS_BACKFILL_FIELD_KEY,
+      label: "Backfill window",
+      secret: false,
+      required: true,
+      guidance:
+        "How far back to pull Meta Ads insights on first connect. Larger windows take longer — you can always backfill more later.",
+      choices: META_ADS_BACKFILL_CHOICES
+    });
   }
   return {
     provider: definition.provider,
@@ -4700,8 +4739,20 @@ export function buildConnectDispatchLine(
   connectionName: string,
   collected: Record<string, string>
 ): string {
-  const payload = normalizeConnectorPayload(definition, collected);
-  return `/connect ${definition.provider} ${connectionName} ${JSON.stringify(payload)}`;
+  // The meta_ads backfill window is NOT a credential — pull it out of the map
+  // before normalizeConnectorPayload (so it never lands in the credential JSON) and
+  // emit it as a pre-JSON `--backfill-window <value>` token. runCommand's connect
+  // branch reads that token via metaAdsBackfillBody(connectionNameParts,…) and
+  // stripBackfillFlags keeps it out of the connectionName — so the user's pick
+  // actually drives queueMetaAdsBackfillForConnect (Option B), matching the
+  // terminal/setup paths instead of silently defaulting to 30 days.
+  const { [META_ADS_BACKFILL_FIELD_KEY]: backfillWindow, ...credentials } = collected;
+  const payload = normalizeConnectorPayload(definition, credentials);
+  const backfillToken =
+    definition.provider === "meta_ads" && backfillWindow
+      ? ` --backfill-window ${backfillWindow}`
+      : "";
+  return `/connect ${definition.provider} ${connectionName}${backfillToken} ${JSON.stringify(payload)}`;
 }
 
 export interface ExistingConnection {

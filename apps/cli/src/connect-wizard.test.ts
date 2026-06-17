@@ -47,8 +47,8 @@ describe("decideConnectWizard — scope + routing", () => {
     }
   });
 
-  it("GUARDS meta_ads + shopify: /connect <provider> shows the terminal fallback note (no wizard)", () => {
-    for (const provider of ["meta_ads", "shopify", "meta", "facebook"]) {
+  it("GUARDS shopify: /connect shopify shows the terminal fallback note (no wizard)", () => {
+    for (const provider of ["shopify"]) {
       const decision = decideConnectWizard(`/connect ${provider}`);
       expect(decision.kind).toBe("note");
       if (decision.kind !== "note") {
@@ -56,6 +56,18 @@ describe("decideConnectWizard — scope + routing", () => {
       }
       expect(decision.text).toContain("infinite connect");
       expect(decision.text).toContain("in your terminal");
+    }
+  });
+
+  it("ROUTES meta_ads to the masked wizard (not the terminal-only note) via meta/facebook aliases too", () => {
+    for (const token of ["meta_ads", "meta", "facebook"]) {
+      const decision = decideConnectWizard(`/connect ${token}`);
+      expect(decision.kind).toBe("wizard");
+      if (decision.kind !== "wizard") {
+        throw new Error("expected wizard");
+      }
+      expect(decision.descriptor.provider).toBe("meta_ads");
+      expect(decision.descriptor.fields.length).toBeGreaterThan(0);
     }
   });
 
@@ -107,6 +119,47 @@ describe("buildConnectSetupDescriptor — fields, masking, region step, guidance
     expect(descriptor.fields.map((f) => f.key)).toEqual(["bearerToken", "username"]);
     expect(descriptor.fields.find((f) => f.key === "bearerToken")!.secret).toBe(true);
     expect(descriptor.fields.find((f) => f.key === "username")!.secret).toBe(false);
+  });
+
+  it("meta_ads: plain ad account id → MASKED access token → backfill-window choice (transport fields dropped)", () => {
+    const descriptor = buildConnectSetupDescriptor(connectorSetupDefinition("meta_ads")!);
+    // Credential fields first, backfill-window LAST (so the secret is collected
+    // before the non-secret window pick), and the optional CLI/MCP/apiVersion
+    // transport fields are dropped (in-chat always uses the native marketing_api).
+    expect(descriptor.fields.map((f) => f.key)).toEqual([
+      "adAccountId",
+      "accessToken",
+      "backfillWindow"
+    ]);
+
+    const adAccountId = descriptor.fields.find((f) => f.key === "adAccountId")!;
+    expect(adAccountId.secret).toBe(false);
+    expect(adAccountId.required).toBe(true);
+    expect(adAccountId.guidance).toContain("act_");
+
+    const token = descriptor.fields.find((f) => f.key === "accessToken")!;
+    expect(token.secret).toBe(true);
+    expect(token.required).toBe(true);
+    // The broad management scopes so a later write PR needs no token re-mint.
+    expect(token.guidance).toContain("ads_management");
+    expect(token.guidance).toContain("business_management");
+    expect(token.guidance).toContain("System Users");
+
+    // Option B: the backfill window is a fixed pick-list (NOT a secret/free-text),
+    // covering every META_ADS_BACKFILL_OPTIONS value, defaulting to 30 days.
+    const window = descriptor.fields.find((f) => f.key === "backfillWindow")!;
+    expect(window.secret).toBe(false);
+    expect(window.required).toBe(true);
+    expect(window.choices?.map((c) => c.value)).toEqual([
+      "7_days",
+      "14_days",
+      "30_days",
+      "3_months",
+      "6_months",
+      "12_months",
+      "all_time"
+    ]);
+    expect(window.choices?.find((c) => c.value === "30_days")?.description).toBe("default");
   });
 });
 
@@ -166,6 +219,44 @@ describe("buildConnectDispatchLine — leading slash + normalization (security s
     const definition = connectorSetupDefinition("stripe")!;
     const payload = normalizeConnectorPayload(definition, { secretKey: "sk_live_x", apiBaseUrl: "" });
     expect(payload).toEqual({ mode: "live", secretKey: "sk_live_x" });
+  });
+
+  it("meta_ads: derives transport=marketing_api, strips act_, keeps the masked token in JSON, and splices --backfill-window OUT of the credential JSON", () => {
+    const definition = connectorSetupDefinition("meta_ads")!;
+    const line = buildConnectDispatchLine(definition, "Meta Ads", {
+      adAccountId: "act_1234567890",
+      accessToken: "EAAB_system_user_token",
+      backfillWindow: "6_months"
+    });
+
+    // Leading slash routes to POST /sources/connect (never the LLM chat branch).
+    expect(line.startsWith("/connect meta_ads Meta Ads ")).toBe(true);
+    // The chosen window rides as a PRE-JSON token so runCommand's connect branch
+    // (metaAdsBackfillBody) drives the backfill with the user's pick (Option B).
+    expect(line).toContain(" --backfill-window 6_months ");
+    expect(line.indexOf("--backfill-window")).toBeLessThan(line.indexOf("{"));
+
+    const payload = JSON.parse(line.slice(line.indexOf("{"))) as Record<string, unknown>;
+    // No cliCommand/mcpCommand collected in chat → native Graph transport.
+    expect(payload.transport).toBe("marketing_api");
+    // act_ prefix stripped; the masked token rides ONLY in the JSON arg.
+    expect(payload.adAccountId).toBe("1234567890");
+    expect(payload.accessToken).toBe("EAAB_system_user_token");
+    // The window is NOT a credential — it must never leak into the payload.
+    expect(payload).not.toHaveProperty("backfillWindow");
+    expect(payload.mode).toBe("live");
+  });
+
+  it("meta_ads: the default 30-day window round-trips as a pre-JSON token", () => {
+    const definition = connectorSetupDefinition("meta_ads")!;
+    const line = buildConnectDispatchLine(definition, "Meta Ads", {
+      adAccountId: "1",
+      accessToken: "tok",
+      backfillWindow: "30_days"
+    });
+    expect(line).toContain(" --backfill-window 30_days ");
+    const payload = JSON.parse(line.slice(line.indexOf("{"))) as Record<string, unknown>;
+    expect(payload).not.toHaveProperty("backfillWindow");
   });
 });
 
