@@ -88,6 +88,168 @@ describe("analytical engine smoke", () => {
     });
   });
 
+  // FIX 2 — catalog regression guard. The 0029 migration SEEDS metric_definitions
+  // rows for the 5 new Meta Ads metrics so describe_metric / list_metrics return
+  // full authority+provenance metadata. This test proves those handlers return a
+  // POPULATED row for EACH of the 5 — so the catalog gap (engine routed/aggregated
+  // them but the DB catalog had no rows) can't silently recur.
+  describe("metric_definitions catalog rows for the 5 new Meta Ads metrics (Phase 0)", () => {
+    // Mirror what migration 0029 inserts — the rows the catalog must return.
+    const seededRows: Record<string, Record<string, unknown>> = {
+      impressions: {
+        id: "impressions",
+        name: "Meta Ads impressions",
+        description: "Daily Meta Ads impressions from campaign insights",
+        source_view: "queryable.vw_meta_ads_campaign_daily",
+        metric_type: "count",
+        aggregation: "sum",
+        default_time_column: "occurred_on",
+        allowed_dimensions: ["ad_account_id", "campaign_id", "campaign_name"],
+        caveats: "read_only_marketing_api_reporting"
+      },
+      reach: {
+        id: "reach",
+        name: "Meta Ads reach (approximate)",
+        description:
+          "Daily Meta Ads reach summed across campaign×day. APPROXIMATE: summing daily reach overcounts unique people.",
+        source_view: "queryable.vw_meta_ads_campaign_daily",
+        metric_type: "count",
+        aggregation: "sum",
+        default_time_column: "occurred_on",
+        allowed_dimensions: ["ad_account_id", "campaign_id", "campaign_name"],
+        caveats:
+          "read_only_marketing_api_reporting; reach_is_approximate_summed_daily_reach_overcounts_unique_people"
+      },
+      cpm: {
+        id: "cpm",
+        name: "Meta Ads CPM",
+        description:
+          "Meta Ads cost per 1,000 impressions, recomputed from summed bases: sum(meta_ads_spend)/nullif(sum(impressions),0)*1000.",
+        source_view: "queryable.vw_meta_ads_campaign_daily",
+        metric_type: "ratio",
+        aggregation: "recomputed_ratio",
+        default_time_column: "occurred_on",
+        allowed_dimensions: ["ad_account_id", "campaign_id", "campaign_name"],
+        caveats: "read_only_marketing_api_reporting; ratio_recomputed_from_summed_bases"
+      },
+      cpc: {
+        id: "cpc",
+        name: "Meta Ads CPC",
+        description:
+          "Meta Ads cost per click, recomputed from summed bases: sum(meta_ads_spend)/nullif(sum(meta_ads_clicks),0).",
+        source_view: "queryable.vw_meta_ads_campaign_daily",
+        metric_type: "ratio",
+        aggregation: "recomputed_ratio",
+        default_time_column: "occurred_on",
+        allowed_dimensions: ["ad_account_id", "campaign_id", "campaign_name"],
+        caveats: "read_only_marketing_api_reporting; ratio_recomputed_from_summed_bases"
+      },
+      ctr: {
+        id: "ctr",
+        name: "Meta Ads CTR",
+        description:
+          "Meta Ads click-through rate, recomputed from summed bases: sum(meta_ads_clicks)/nullif(sum(impressions),0).",
+        source_view: "queryable.vw_meta_ads_campaign_daily",
+        metric_type: "ratio",
+        aggregation: "recomputed_ratio",
+        default_time_column: "occurred_on",
+        allowed_dimensions: ["ad_account_id", "campaign_id", "campaign_name"],
+        caveats: "read_only_marketing_api_reporting; ratio_recomputed_from_summed_bases"
+      }
+    };
+
+    function catalogFakeDb(): InfiniteOsDb {
+      return {
+        // list_metrics reads via query(); describe_metric reads via one().
+        async query<T = Record<string, unknown>>(sql: string): Promise<T[]> {
+          if (sql.includes("from metric_definitions")) {
+            return Object.values(seededRows) as T[];
+          }
+          return [] as T[];
+        },
+        async one<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T | null> {
+          if (sql.includes("from metric_definitions")) {
+            const id = (params?.[0] as string) ?? "";
+            return (seededRows[id] as T) ?? null;
+          }
+          return null;
+        },
+        async close() {},
+        async ensureWorkspace() {},
+        async ensureFirstPhaseDatasets() {},
+        async connectSource() {
+          return null as never;
+        },
+        async updateSourceStatus() {},
+        async createJob() {
+          return {};
+        },
+        async claimNextJob() {
+          return null;
+        },
+        async completeJob() {},
+        async withTransaction(fn) {
+          return fn(this);
+        }
+      };
+    }
+
+    const ctx = {
+      workspaceId: "workspace",
+      authority: "tool_agent" as const,
+      surface: "api" as const,
+      actorId: "operator",
+      sessionId: "session"
+    };
+
+    it("describe_metric returns a populated catalog row for EACH of the 5 new metrics", async () => {
+      const handlers = createActionHandlers(catalogFakeDb());
+      for (const metricId of ["impressions", "reach", "cpm", "cpc", "ctr"] as const) {
+        const result = await handlers.describe_metric?.({ metricId }, ctx);
+        expect(result?.status).not.toBe("unsupported");
+        const metric = (result?.data as { metric: Record<string, unknown> }).metric;
+        // Populated — not an empty {} (which hydrateMetricMetadata returns for a null row).
+        expect(metric.id).toBe(metricId);
+        expect(typeof metric.name).toBe("string");
+        expect(metric.name).not.toBe("");
+        expect(metric.description).toBeTruthy();
+        expect(metric.source_view).toBe("queryable.vw_meta_ads_campaign_daily");
+        // Authority/provenance metadata is present.
+        expect(metric.caveats).toContain("read_only_marketing_api_reporting");
+        // The catalog row is sourced from metric_definitions provenance.
+        expect(result?.provenance).toContain("metric_definitions");
+      }
+    });
+
+    it("ratio rows carry recompute provenance and reach is flagged approximate", async () => {
+      const handlers = createActionHandlers(catalogFakeDb());
+      for (const metricId of ["cpm", "cpc", "ctr"] as const) {
+        const result = await handlers.describe_metric?.({ metricId }, ctx);
+        const metric = (result?.data as { metric: Record<string, unknown> }).metric;
+        expect(metric.caveats).toContain("ratio_recomputed_from_summed_bases");
+        expect(metric.metric_type).toBe("ratio");
+      }
+      const reach = await handlers.describe_metric?.({ metricId: "reach" }, ctx);
+      const reachMetric = (reach?.data as { metric: Record<string, unknown> }).metric;
+      expect(reachMetric.caveats).toContain(
+        "reach_is_approximate_summed_daily_reach_overcounts_unique_people"
+      );
+    });
+
+    it("list_metrics includes a populated row for all 5 new metrics", async () => {
+      const handlers = createActionHandlers(catalogFakeDb());
+      const result = await handlers.list_metrics?.({}, ctx);
+      const metrics = (result?.data as { metrics: Array<Record<string, unknown>> }).metrics;
+      const byId = new Map(metrics.map((metric) => [metric.id as string, metric]));
+      for (const metricId of ["impressions", "reach", "cpm", "cpc", "ctr"] as const) {
+        const metric = byId.get(metricId);
+        expect(metric, `list_metrics is missing catalog row for ${metricId}`).toBeTruthy();
+        expect(metric?.source_view).toBe("queryable.vw_meta_ads_campaign_daily");
+        expect(metric?.name).toBeTruthy();
+      }
+    });
+  });
+
   it("does not export the deterministic question resolver as a public surface", async () => {
     const module = await import("./index.js");
     expect("resolveQuestion" in module).toBe(false);
@@ -182,6 +344,179 @@ describe("analytical engine smoke", () => {
     expect(result.evidence?.[0]).toMatchObject({
       id: "evidence:journey:meta_ads_clicks:campaign",
       kind: "query_result"
+    });
+  });
+
+  // FIX 5 — journey-path recompute guard, mirroring the run_metric_query Phase-0 test.
+  // metaCampaignJourneyRows() emits cpm/cpc/ctr in its SELECT. They MUST be recomputed
+  // from summed bases (the same expressions aggregateExpression() uses), never avg(cpm)/
+  // avg(cpc)/avg(ctr). This fake-db EVALUATES the emitted SELECT over a multi-day fixture
+  // where avg-of-per-row-ratios differs sharply from the recomputed ratio. A revert to
+  // avg() yields an UNRECOGNIZED SELECT expression here and THROWS — so the test fails.
+  describe("journey path recomputes cpm/cpc/ctr from summed bases (Phase 0)", () => {
+    // Two campaign×day rows for one campaign — bases chosen so sum-then-divide differs
+    // sharply from avg-of-per-row-ratios:
+    //   day1: spend 100, clicks 10,  impressions 1000, reach 3000
+    //   day2: spend  20, clicks 80,  impressions 9000, reach 2000
+    // Recomputed (correct) totals over sums:
+    //   sum spend 120, sum clicks 90, sum impressions 10000, sum reach 5000
+    //   cpm = 120 / 10000 * 1000 = 12 ; cpc = 120 / 90 = 1.3333... ; ctr = 90 / 10000 = 0.009
+    const fixture = [
+      { spend: 100, clicks: 10, impressions: 1000, reach: 3000, cpm: 100, cpc: 10, ctr: 0.01 },
+      { spend: 20, clicks: 80, impressions: 9000, reach: 2000, cpm: 2.222, cpc: 0.25, ctr: 0.0088888 }
+    ];
+    const sums = {
+      spend: fixture.reduce((acc, row) => acc + row.spend, 0),
+      clicks: fixture.reduce((acc, row) => acc + row.clicks, 0),
+      impressions: fixture.reduce((acc, row) => acc + row.impressions, 0),
+      reach: fixture.reduce((acc, row) => acc + row.reach, 0)
+    };
+    const recomputed = {
+      cpm: (sums.spend / sums.impressions) * 1000, // 12
+      cpc: sums.spend / sums.clicks, // 1.3333...
+      ctr: sums.clicks / sums.impressions // 0.009
+    };
+    const avgPerRow = {
+      cpm: (fixture[0]!.cpm + fixture[1]!.cpm) / 2,
+      cpc: (fixture[0]!.cpc + fixture[1]!.cpc) / 2,
+      ctr: (fixture[0]!.ctr + fixture[1]!.ctr) / 2
+    };
+
+    // Resolve the SELECT expression for a given output alias in the journey SQL, then
+    // evaluate it over the summed fixture. ONLY the exact recompute expressions Change 1
+    // emits are recognized — a revert to avg(cpm)/avg(cpc)/avg(ctr) is unrecognized and
+    // throws, so a wrong SQL can never silently pass by returning a coincidental number.
+    function evalSelect(sql: string, alias: string): number {
+      // Each journey measure is on its own SELECT line: "<expr> as <alias>[,]". Match the
+      // line so internal commas (e.g. nullif(sum(impressions), 0)) stay inside <expr>.
+      const re = new RegExp(`(?:^|\\n)\\s*(.+?)\\s+as\\s+${alias}\\s*,?\\s*(?=\\n)`);
+      const expr = sql.match(re)?.[1]?.trim() ?? "";
+      switch (expr) {
+        case "sum(meta_ads_clicks)":
+          return sums.clicks;
+        case "sum(meta_ads_spend)":
+          return sums.spend;
+        case "sum(impressions)":
+          return sums.impressions;
+        case "sum(reach)":
+          return sums.reach;
+        case "sum(meta_ads_spend) / nullif(sum(impressions), 0) * 1000":
+          return (sums.spend / sums.impressions) * 1000;
+        case "sum(meta_ads_spend) / nullif(sum(meta_ads_clicks), 0)":
+          return sums.spend / sums.clicks;
+        case "sum(meta_ads_clicks) / nullif(sum(impressions), 0)":
+          return sums.clicks / sums.impressions;
+        default:
+          throw new Error(`unexpected_journey_select_for_${alias}:${expr}`);
+      }
+    }
+
+    function journeyRecomputeFakeDb(): InfiniteOsDb {
+      return {
+        async query<T = Record<string, unknown>>(sql: string): Promise<T[]> {
+          if (sql.includes("from sources")) {
+            return [
+              { id: "src_meta", provider: "meta_ads", connection_name: "Meta Ads", status: "connected", last_synced_at: "2026-06-07T00:00:00.000Z" }
+            ] as T[];
+          }
+          if (sql.includes("from metric_definitions")) {
+            return [
+              { id: "meta_ads_clicks", name: "Meta Ads clicks", source_view: "queryable.vw_meta_ads_campaign_daily", description: "Daily Meta Ads clicks" }
+            ] as T[];
+          }
+          if (sql.includes("from queryable.vw_meta_ads_campaign_daily")) {
+            // Evaluate the emitted journey aggregate SELECT for the single fixture campaign.
+            return [
+              {
+                source_id: "src_meta",
+                campaign_id: "cmp_launch",
+                campaign_name: "Launch Demo Requests",
+                first_seen_on: "2026-06-01",
+                last_seen_on: "2026-06-02",
+                meta_ads_clicks: evalSelect(sql, "meta_ads_clicks"),
+                meta_ads_spend: evalSelect(sql, "meta_ads_spend"),
+                impressions: evalSelect(sql, "impressions"),
+                reach: evalSelect(sql, "reach"),
+                cpm: evalSelect(sql, "cpm"),
+                cpc: evalSelect(sql, "cpc"),
+                ctr: evalSelect(sql, "ctr")
+              }
+            ] as T[];
+          }
+          return [] as T[];
+        },
+        async one() {
+          return null;
+        },
+        async close() {},
+        async ensureWorkspace() {},
+        async ensureFirstPhaseDatasets() {},
+        async connectSource() {
+          return null as never;
+        },
+        async updateSourceStatus() {},
+        async createJob() {
+          return {};
+        },
+        async claimNextJob() {
+          return null;
+        },
+        async completeJob() {},
+        async withTransaction(fn) {
+          return fn(this);
+        }
+      };
+    }
+
+    const context = {
+      workspaceId: "workspace",
+      authority: "tool_agent",
+      surface: "mcp",
+      actorId: "founder",
+      sessionId: "session"
+    } as const;
+
+    it("returns recomputed cpm/cpc/ctr (NOT avg-of-ratios) and matches run_metric_query", async () => {
+      // Sanity: the recomputed answer and the averaged answer are genuinely distinct, so
+      // the equality assertions below actually reject the averaged value.
+      for (const metric of ["cpm", "cpc", "ctr"] as const) {
+        expect(Math.abs(recomputed[metric] - avgPerRow[metric])).toBeGreaterThan(1e-6);
+      }
+
+      const registry = createInfiniteOsRegistry(createActionHandlers(journeyRecomputeFakeDb()));
+      const plan = {
+        intent: "rank_entities_by_outcome",
+        actor: { grain: "person" },
+        journeyTemplateId: "touchpoint_to_paid_conversion",
+        entity: { type: "campaign" },
+        outcome: { id: "meta_ads_clicks", window: "30d" },
+        timeRange: { start: "2026-06-01", end: "2026-06-02" },
+        ranking: { metric: "ctr", direction: "desc" },
+        limit: 5
+      };
+
+      const result = await registry.execute(
+        "run_journey_query",
+        { plan, validationId: "validation_meta_recompute", limit: 5 },
+        context
+      );
+
+      expect(result.status).toBe("resolved");
+      const rows = (result.data as { rows: Array<Record<string, number>> }).rows;
+      const row = rows[0]!;
+      // Journey path agrees with run_metric_query's recomputed-from-sums values.
+      expect(row.cpm).toBeCloseTo(recomputed.cpm, 9);
+      expect(row.cpc).toBeCloseTo(recomputed.cpc, 9);
+      expect(row.ctr).toBeCloseTo(recomputed.ctr, 9);
+      // Additive bases still sum.
+      expect(row.impressions).toBe(sums.impressions);
+      expect(row.reach).toBe(sums.reach);
+      expect(row.meta_ads_clicks).toBe(sums.clicks);
+      expect(row.meta_ads_spend).toBe(sums.spend);
+      // Guard the guard: the recomputed value must NOT equal the averaged value.
+      expect(Math.abs(row.cpm - avgPerRow.cpm)).toBeGreaterThan(1e-6);
+      expect(Math.abs(row.cpc - avgPerRow.cpc)).toBeGreaterThan(1e-6);
+      expect(Math.abs(row.ctr - avgPerRow.ctr)).toBeGreaterThan(1e-6);
     });
   });
 

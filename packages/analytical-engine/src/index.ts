@@ -923,9 +923,9 @@ async function metaCampaignJourneyRows(
         sum(meta_ads_spend) as meta_ads_spend,
         sum(impressions) as impressions,
         sum(reach) as reach,
-        avg(cpm) as cpm,
-        avg(cpc) as cpc,
-        avg(ctr) as ctr
+        sum(meta_ads_spend) / nullif(sum(impressions), 0) * 1000 as cpm,
+        sum(meta_ads_spend) / nullif(sum(meta_ads_clicks), 0) as cpc,
+        sum(meta_ads_clicks) / nullif(sum(impressions), 0) as ctr
       from queryable.vw_meta_ads_campaign_daily
       where workspace_id = $1
         and ($2::date is null or occurred_on >= $2::date)
@@ -1046,7 +1046,11 @@ function metaJourneyOrderExpression(metric: string): string {
     return "sum(reach)";
   }
   if (metric === "ctr") {
-    return "avg(ctr)";
+    // Rank by the volume-weighted CTR recomputed from summed bases (matching
+    // aggregateExpression()/metaCampaignJourneyRows()), NOT avg(ctr) per-row.
+    // avg(ctr) would weight every campaign×day equally regardless of impression
+    // volume, so "top campaigns by CTR" would surface low-volume noise.
+    return "sum(meta_ads_clicks) / nullif(sum(impressions), 0)";
   }
   return "sum(meta_ads_clicks)";
 }
