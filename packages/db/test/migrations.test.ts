@@ -42,7 +42,8 @@ describe("Infinite OS migration stack", () => {
       "0025_ga4_page_report.sql",
       "0026_workspace_site_ga4_link.sql",
       "0027_exclude_dev_host_traffic.sql",
-      "0028_meta_write_dedup.sql"
+      "0028_meta_write_dedup.sql",
+      "0029_meta_ads_extended_metric_seeds.sql"
     ]);
   });
 
@@ -348,7 +349,8 @@ describe("Infinite OS migration stack", () => {
       "0025_ga4_page_report.sql",
       "0026_workspace_site_ga4_link.sql",
       "0027_exclude_dev_host_traffic.sql",
-      "0028_meta_write_dedup.sql"
+      "0028_meta_write_dedup.sql",
+      "0029_meta_ads_extended_metric_seeds.sql"
     ]);
   });
 
@@ -496,5 +498,46 @@ describe("Infinite OS migration stack", () => {
     expect(sql).toContain(
       "grant select on queryable.vw_site_conversion_rate to growth_os_tool_agent, growth_os_app, growth_os_read_api"
     );
+  });
+
+  it("seeds metric_definitions catalog rows for impressions/reach/cpm/cpc/ctr bound to the meta view (0029)", () => {
+    const migration = loadMigrations().find(
+      (candidate) => candidate.id === "0029_meta_ads_extended_metric_seeds.sql"
+    );
+    const sql = migration?.sql ?? "";
+    const lower = sql.toLowerCase();
+
+    // The five previously-unregistered Meta Ads metrics now have catalog rows so
+    // describe_metric / list_metrics / search_context can return full
+    // authority+provenance metadata for them (closing the catalog gap).
+    for (const metricId of ["'impressions'", "'reach'", "'cpm'", "'cpc'", "'ctr'"]) {
+      expect(sql).toContain(metricId);
+    }
+
+    // All five are bound to the same authority view as meta_ads_spend/meta_ads_clicks.
+    expect(sql.match(/queryable\.vw_meta_ads_campaign_daily/g)?.length).toBeGreaterThanOrEqual(5);
+
+    // Same read-only marketing-api authority carried on every row.
+    expect(lower.match(/read_only_marketing_api_reporting/g)?.length).toBeGreaterThanOrEqual(5);
+
+    // reach is flagged APPROXIMATE (summing daily reach overcounts unique people).
+    expect(lower).toContain("reach_is_approximate_summed_daily_reach_overcounts_unique_people");
+
+    // The ratio metrics encode the summed-base recompute semantics + caveat, and
+    // must NOT be averaged from per-row ratios.
+    // One caveat per ratio row (cpm/cpc/ctr); the header comment also references it.
+    expect(lower.match(/ratio_recomputed_from_summed_bases/g)?.length).toBeGreaterThanOrEqual(3);
+    expect(lower).toContain("sum(meta_ads_spend) / nullif(sum(impressions),0) * 1000"); // cpm
+    expect(lower).toContain("sum(meta_ads_spend) / nullif(sum(meta_ads_clicks),0)"); // cpc
+    expect(lower).toContain("sum(meta_ads_clicks) / nullif(sum(impressions),0)"); // ctr
+    expect(lower).not.toContain("avg(cpm)");
+    expect(lower).not.toContain("avg(cpc)");
+    expect(lower).not.toContain("avg(ctr)");
+
+    // Idempotent additive seed: upsert, no destructive statements.
+    expect(lower).toContain("on conflict (id) do update set");
+    expect(lower).not.toContain("drop table");
+    expect(lower).not.toContain("drop column");
+    expect(lower).not.toContain("delete from");
   });
 });
