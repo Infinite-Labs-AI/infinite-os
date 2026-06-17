@@ -7980,6 +7980,117 @@ describe("cli smoke", () => {
         stdin.setRawMode = originalSetRawMode as typeof stdin.setRawMode;
       }
     });
+
+    // Regression for the #7 cancellable-wait teardown bug: the keypress wait is armed once for
+    // the whole poll, so on the terminal paths (#7 added) where no key was pressed — timeout and
+    // failed — the wait's 'keypress' listener was STILL attached on process.stdin when
+    // onTimeout()/onFailed() opened showOptionsMenu()->promptChoice(), which attaches its OWN
+    // keypress listener to the SAME process.stdin. The first menu keystroke fired BOTH listeners,
+    // freezing the menu and resolving the stale waitForDecision (a second concurrent menu). The
+    // fix: the poll calls cancelWait() the instant it reaches a terminal state — BEFORE the menu —
+    // fully tearing the wait down (remove listener, raw mode off, resolve the pending decision).
+    // This test exercises the REAL waitForAnyKeypress + promptChoice stdin (no fake interaction);
+    // pre-fix it fails because cancelWait does not exist and the stale listener survives.
+    it("tears the armed keypress wait fully down before a terminal menu/prompt runs (#7 teardown)", async () => {
+      let rawMode = false;
+      const stdin = process.stdin as NodeJS.ReadStream & { setRawMode?: (mode: boolean) => unknown };
+      const originalSetRawMode = stdin.setRawMode?.bind(stdin);
+      stdin.setRawMode = ((mode: boolean) => {
+        rawMode = mode;
+        return stdin;
+      }) as typeof stdin.setRawMode;
+      const keypressBaseline = stdin.listenerCount("keypress");
+      // The terminal menu (showOptionsMenu) routes to stderr; force its interactive keypress branch
+      // so we exercise the REAL stdin keypress collision the reviewer found (in production stderr is
+      // a TTY, so promptChoice reads keypresses from process.stdin — the same stream the wait armed).
+      const stderr = process.stderr as NodeJS.WriteStream & { isTTY?: boolean };
+      const stderrTtyDescriptor = Object.getOwnPropertyDescriptor(stderr, "isTTY");
+      Object.defineProperty(stderr, "isTTY", { value: true, configurable: true });
+      const waitForKeypressListener = async (count: number): Promise<void> => {
+        for (let i = 0; i < 200 && stdin.listenerCount("keypress") !== count; i += 1) {
+          await new Promise((resolve) => setImmediate(resolve));
+        }
+      };
+      const wiring = withTTY(true, () => createSetupInteractionWiring({ env: {}, setup: fakeSetup }));
+      const interaction = wiring.ga4OauthInteraction;
+      try {
+        // The fix must exist as a callable seam the poll can use at terminal state. (Pre-fix this
+        // assertion already fails — there is no cancelWait — which is what left the listener stale.)
+        expect(typeof interaction?.cancelWait).toBe("function");
+
+        // 1) Arm the wait exactly as the poll does (waitForDecision once at the start). Never press
+        //    a key — this is the timeout/failed scenario. The real waitForAnyKeypress attaches a
+        //    'keypress' listener to process.stdin and turns raw mode on.
+        const pending = interaction?.waitForDecision?.();
+        expect(stdin.listenerCount("keypress")).toBe(keypressBaseline + 1); // wait armed
+        expect(rawMode).toBe(true);
+
+        // 2) Poll reaches a terminal state → it disarms the wait BEFORE opening the menu.
+        interaction?.cancelWait?.();
+
+        // 3) BEFORE the menu's prompt runs, the stale listener is gone and raw mode is restored.
+        expect(stdin.listenerCount("keypress")).toBe(keypressBaseline); // no stale wait listener
+        expect(rawMode).toBe(false); // raw mode restored
+
+        // 4) The pending waitForDecision resolved to null — it can never fire later and spawn a
+        //    second concurrent menu while the real menu owns stdin.
+        await expect(pending).resolves.toBeNull();
+
+        // 5) Now run the REAL terminal menu (onTimeout -> showOptionsMenu -> promptChoice). With a
+        //    clean stdin it attaches exactly ONE keypress listener (its own); a stale wait listener
+        //    would have made this 2 and frozen the menu. Drive it to a decision with a real ENTER.
+        const decisionPromise = interaction?.onTimeout?.({ error: "took too long", sessionId: "s1" });
+        await waitForKeypressListener(keypressBaseline + 1); // let promptChoice attach its listener
+        expect(stdin.listenerCount("keypress")).toBe(keypressBaseline + 1); // only the menu's own
+        stdin.emit("keypress", "\r", { name: "return" }); // select default choice -> "retry"
+        await expect(decisionPromise).resolves.toBe("retry");
+        // After the menu, withRawPrompt has torn down too: stdin is clean again.
+        expect(stdin.listenerCount("keypress")).toBe(keypressBaseline);
+        expect(rawMode).toBe(false);
+      } finally {
+        wiring.dispose();
+        stdin.setRawMode = originalSetRawMode as typeof stdin.setRawMode;
+        if (stderrTtyDescriptor) {
+          Object.defineProperty(stderr, "isTTY", stderrTtyDescriptor);
+        } else {
+          delete (stderr as { isTTY?: boolean }).isTTY;
+        }
+      }
+    });
+
+    // The same root cause broke the multi-provider happy path: on GA4 success the poll returns
+    // {authorized} WITHOUT disarming the wait, leaving raw mode ON + a stale listener while
+    // PostHog's later inline prompt.ask()/askPostHogPersonalApiKey (readline on process.stdin)
+    // runs before dispose(). Assert the success teardown leaves stdin clean for that next prompt.
+    it("leaves stdin clean on the success path so a later prompt.ask gets no stale listener (#7 teardown)", async () => {
+      let rawMode = false;
+      const stdin = process.stdin as NodeJS.ReadStream & { setRawMode?: (mode: boolean) => unknown };
+      const originalSetRawMode = stdin.setRawMode?.bind(stdin);
+      stdin.setRawMode = ((mode: boolean) => {
+        rawMode = mode;
+        return stdin;
+      }) as typeof stdin.setRawMode;
+      const keypressBaseline = stdin.listenerCount("keypress");
+      const wiring = withTTY(true, () => createSetupInteractionWiring({ env: {}, setup: fakeSetup }));
+      const interaction = wiring.ga4OauthInteraction;
+      try {
+        const pending = interaction?.waitForDecision?.();
+        expect(stdin.listenerCount("keypress")).toBe(keypressBaseline + 1);
+        expect(rawMode).toBe(true);
+
+        // GA4 OAuth completed: the poll returns {authorized} but first disarms the wait.
+        interaction?.cancelWait?.();
+
+        // Fully disarmed: no residual listener, raw mode off — a subsequent readline prompt.ask
+        // (PostHog personal API key) now gets a clean stdin instead of a frozen, raw-mode terminal.
+        expect(stdin.listenerCount("keypress")).toBe(keypressBaseline);
+        expect(rawMode).toBe(false);
+        await expect(pending).resolves.toBeNull();
+      } finally {
+        wiring.dispose();
+        stdin.setRawMode = originalSetRawMode as typeof stdin.setRawMode;
+      }
+    });
   });
 
   it("shows configured connector labels when sources already exist", async () => {

@@ -1376,6 +1376,92 @@ describe("live setup orchestration", () => {
     expect(result.paused).toEqual(["ga4"]);
   });
 
+  // Regression for the #7 cancellable-wait teardown bug. The wait is armed once (waitForDecision)
+  // for the whole poll; on the terminal paths #7 added (failed/timeout) no key is pressed, so the
+  // poll MUST tear the wait down (cancelWait) BEFORE onTimeout()/onFailed() open their stdin menu —
+  // otherwise the stale keypress listener collides with the menu's own. Here we assert the poll
+  // calls cancelWait strictly before onFailed/onTimeout (the CLI's cancelWait does the real stdin
+  // teardown). Pre-fix the poll never calls cancelWait → these order assertions fail.
+  it("disarms the keypress wait (cancelWait) before opening the failed/timeout menu (#7)", async () => {
+    for (const terminal of ["failed", "timeout"] as const) {
+      const { store } = capturingStore();
+      const order: string[] = [];
+      const interaction = {
+        waitForDecision: vi.fn(async () => null),
+        cancelWait: vi.fn(() => {
+          order.push("cancelWait");
+        }),
+        onFailed: vi.fn(async () => {
+          order.push("onFailed");
+          return null;
+        }),
+        onTimeout: vi.fn(async () => {
+          order.push("onTimeout");
+          return null;
+        })
+      };
+      const bootstrap = {
+        prepareConfig: vi.fn(async () => ({
+          clientId: "ga-client-id",
+          clientSecret: "ga-client-secret",
+          redirectUri: "http://127.0.0.1:3000/oauth/callback/google_analytics_4"
+        })),
+        start: vi.fn(async (_input: unknown) => ({
+          sessionId: "oauth_session_1",
+          provider: "google_analytics_4",
+          status: "pending" as const,
+          authorizationUrl: "https://accounts.google.com/o/oauth2/v2/auth?state=s1",
+          redirectUri: "http://127.0.0.1:3000/oauth/callback/google_analytics_4"
+        })),
+        status: vi.fn(async (_sessionId: string) => ({
+          sessionId: "oauth_session_1",
+          provider: "google_analytics_4",
+          status: terminal === "failed" ? ("failed" as const) : ("pending" as const),
+          authorizationUrl: "https://accounts.google.com/o/oauth2/v2/auth?state=s1",
+          redirectUri: "http://127.0.0.1:3000/oauth/callback/google_analytics_4",
+          error: terminal === "failed" ? "redirect_uri_mismatch" : null
+        })),
+        exchange: vi.fn(async () => {
+          throw new Error("exchange must not run");
+        })
+      };
+
+      const result = await runLiveSetupOnboarding({
+        db: fakeDb() as never,
+        workspaceId: "ws_1",
+        interview: {
+          projectName: "Acme",
+          websiteUrl: "https://acme.test",
+          productSurface: "web",
+          providerInventory: [
+            { provider: "ga4", hasAccount: true, installState: "unknown", selected: true, recommended: true },
+            { provider: "posthog", hasAccount: false, installState: "unknown", selected: false, recommended: false },
+            { provider: "x", hasAccount: false, installState: "unknown", selected: false, recommended: false }
+          ]
+        },
+        actions: ctx.actions,
+        prompt: ctx.prompt,
+        browserFactory: ctx.browser,
+        browserSessionStore,
+        runStore: store,
+        handoffLauncher: async () => undefined,
+        ga4OauthBootstrap: bootstrap,
+        // A tiny window so the pending (non-failed) case times out into onTimeout quickly.
+        ga4OauthWaitMs: terminal === "failed" ? 1000 : 5,
+        ga4OauthPollIntervalMs: 1,
+        sleep: async () => {},
+        ga4OauthInteraction: interaction
+      });
+
+      const menuCall = terminal === "failed" ? "onFailed" : "onTimeout";
+      // The wait was disarmed, and strictly BEFORE the menu opened.
+      expect(interaction.cancelWait).toHaveBeenCalled();
+      expect(order.indexOf("cancelWait")).toBeGreaterThanOrEqual(0);
+      expect(order.indexOf("cancelWait")).toBeLessThan(order.indexOf(menuCall));
+      expect(result.paused).toEqual(["ga4"]);
+    }
+  });
+
   it("retries the GA4 OAuth bootstrap exactly once when the injected interaction cancels with retry (#7)", async () => {
     const { store } = capturingStore();
     const waitForDecision = vi

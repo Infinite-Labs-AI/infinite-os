@@ -202,6 +202,14 @@ export interface Ga4OauthWaitInteraction {
    * those paths this interaction is simply not injected.
    */
   waitForDecision?(): Promise<Ga4OauthWaitDecision | null>;
+  /**
+   * Tears down any armed keypress wait NOW (remove the listener, restore raw mode, resolve the
+   * pending `waitForDecision` so it can never fire later). The poll calls this the instant it
+   * reaches ANY terminal state — before `onTimeout`/`onFailed` open their menu, and before it
+   * returns an authorized result — so whatever prompt runs next gets a clean stdin. Idempotent
+   * and exception-safe; a no-op when no wait is armed.
+   */
+  cancelWait?(): void;
   /** Called when the poll window elapses with no terminal status; returns the menu choice (or null to pause). */
   onTimeout?(input: { error?: string | null; sessionId: string }): Promise<Ga4OauthWaitDecision | null>;
   /** Called when the OAuth session reports `failed`; surfaces `status.error` and returns the menu choice (or null to pause). */
@@ -1027,6 +1035,20 @@ async function pollGa4OauthUntilComplete(input: {
     });
   }
 
+  // Disarm the keypress wait the instant the poll reaches a terminal state. The wait was armed
+  // once at the top (waitForDecision arms a persistent 'keypress' listener + raw mode); if a key
+  // was never pressed it is STILL attached. Calling cancelWait() here removes that listener,
+  // restores raw mode, and resolves the pending waitForDecision so it can never fire later —
+  // BEFORE onTimeout/onFailed open their menu, and before we return an authorized result — so the
+  // next prompt gets a clean stdin. Idempotent + exception-safe; a no-op when no wait is armed.
+  const tearDownWait = (): void => {
+    try {
+      interaction?.cancelWait?.();
+    } catch {
+      // best-effort: a teardown failure must never mask the poll outcome.
+    }
+  };
+
   const start = Date.now();
   let lastError: string | null | undefined;
   while (Date.now() - start < input.timeoutMs) {
@@ -1041,25 +1063,34 @@ async function pollGa4OauthUntilComplete(input: {
         browser: input.browser
       });
       if (resolution) {
+        tearDownWait();
         return { kind: "authorized", resolution };
       }
       // Exchange produced no usable token — treat as a failure so the founder can act.
+      tearDownWait();
       return interactionFailed(interaction, input.oauthSessionId, status.error);
     }
     if (status.status === "failed") {
+      tearDownWait();
       return interactionFailed(interaction, input.oauthSessionId, status.error);
     }
     if (pendingDecision) {
+      // A decision means a key was pressed → the wait already tore itself down. Disarm again is
+      // a no-op (idempotent) but keeps the invariant explicit.
+      tearDownWait();
       return { kind: "decision", decision: pendingDecision, error: lastError };
     }
     // Race the poll interval against the founder's decision so a keypress interrupts promptly.
     const raced = await raceSleepAgainstDecision(input.sleep(input.intervalMs), decisionPromise);
     if (raced !== CANCEL_SENTINEL && raced !== undefined) {
+      tearDownWait();
       return { kind: "decision", decision: raced, error: lastError };
     }
   }
 
-  // Timeout: surface the real error and offer the same options menu (or pause when no interaction).
+  // Timeout: disarm the still-armed wait BEFORE opening the menu, then surface the real error and
+  // offer the same options menu (or pause when no interaction).
+  tearDownWait();
   if (interaction?.onTimeout) {
     const decision = await interaction.onTimeout({ error: lastError, sessionId: input.oauthSessionId });
     if (decision) {
@@ -1074,6 +1105,13 @@ async function interactionFailed(
   sessionId: string,
   error: string | null | undefined
 ): Promise<Ga4OauthPollOutcome> {
+  // Defensive: callers already disarm the wait before reaching here, but onFailed opens a menu so
+  // make sure no stale keypress listener survives even if a future caller forgets. Idempotent.
+  try {
+    interaction?.cancelWait?.();
+  } catch {
+    // best-effort
+  }
   if (interaction?.onFailed) {
     const decision = await interaction.onFailed({ error, sessionId });
     if (decision) {

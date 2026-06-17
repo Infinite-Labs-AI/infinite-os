@@ -408,6 +408,7 @@ type Ga4OauthWaitDecision = "retry" | "byo" | "manual" | "quit";
 interface Ga4OauthWaitInteraction {
   onWaitStarted?(input: { authorizationUrl?: string; sessionId: string }): void;
   waitForDecision?(): Promise<Ga4OauthWaitDecision | null>;
+  cancelWait?(): void;
   onTimeout?(input: { error?: string | null; sessionId: string }): Promise<Ga4OauthWaitDecision | null>;
   onFailed?(input: { error?: string | null; sessionId: string }): Promise<Ga4OauthWaitDecision | null>;
 }
@@ -2276,6 +2277,20 @@ export function createSetupInteractionWiring(args: {
       );
       ctrlCArmed = false;
       return decision;
+    },
+    cancelWait() {
+      // Tear down the armed keypress wait NOW (the poll reached a terminal state). activeCancel()
+      // removes the 'keypress' listener, restores raw mode (setRawMode(false)), pauses stdin, AND
+      // resolves the pending waitForDecision to a cancelled outcome so it can never fire while the
+      // options menu / next prompt owns stdin. Idempotent (cancel() is a no-op once settled) and
+      // exception-safe so a teardown hiccup never masks the poll outcome.
+      try {
+        activeCancel?.();
+      } catch {
+        // best-effort restore — never throw out of teardown.
+      } finally {
+        activeCancel = null;
+      }
     },
     async onTimeout({ error }) {
       const header = error
