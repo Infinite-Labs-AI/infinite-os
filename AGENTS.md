@@ -66,6 +66,44 @@ secret-gated check can't run.
 - **Author and review are separate passes.** Don't self-approve a change in the same
   breath you wrote it — have a fresh pass (a reviewer or a second read) check it.
 
+## Versioning & releases
+
+**Distribution model — git checkout, not npm.** `install.sh` clones this repo to
+`~/.infinite/app` and drops the `infinite` launcher on the PATH. So "the latest
+version" of the runtime is **the tip of your branch on `origin`** — there is *no npm
+package to poll* for the CLI/runtime. (The only published npm package in this repo is
+`infinite-tag` — see the name-collision warning below — and it is unrelated to runtime
+versioning.)
+
+- **The version number lives in the root `package.json`** (`version`), single source of
+  truth — `infinite version` reads it. It follows **SemVer** (`MAJOR.MINOR.PATCH`) and
+  **only changes when a human bumps it** — nothing auto-bumps it (no changesets, no
+  semantic-release). A commit to `main` moves the git SHA; it does **not** move the
+  version. Pre-1.0, bump **PATCH** for fixes/small features and **MINOR** for larger ones.
+- **Bump as part of the PR that completes the work** — edit `version` in the same PR,
+  don't leave it trailing.
+- **The on-launch update is SHA-based, not version-based.** The `infinite` launcher
+  fast-forwards the checkout on launch (once/24h, clean tree only, ff-only, offline-safe,
+  skipped for `GROWTH_OS_CLI_NONINTERACTIVE=1`); opt out with `INFINITE_NO_AUTO_UPDATE=1`.
+  `maybeNotifyUpdateAvailable` (in `apps/cli/src/index.ts`) prints the `⬆ Update
+  available` notice. Both compare `origin/<branch>` vs local HEAD, so they react to every
+  commit on `main`, not to releases.
+- **Cutting a release (optional, manual).** A *release* is a blessed commit, marked by a
+  **git tag** + a **GitHub Release** (the Release can host assets — e.g. `v0.1.0` hosts
+  the GA4 `client_secret`). To cut one after the version-bump PR merges:
+  ```bash
+  git tag vX.Y.Z && git push origin vX.Y.Z
+  gh release create vX.Y.Z --generate-notes
+  ```
+
+> [!WARNING]
+> **"git tag" ≠ `infinite-tag` — do not confuse them.** A **git tag** (`vX.Y.Z`) is a
+> label on a commit in *this* repo that marks a release. **`infinite-tag`** is our
+> *published npm package* (`packages/instrument`) that installs analytics tracking tags
+> into a **user's own website repo** (`npx infinite-tag install`). Cutting a git tag does
+> **not** touch, rebuild, or republish the `infinite-tag` package, and vice-versa. They
+> share three letters and nothing else.
+
 ## Golden rules (non-negotiable)
 
 1. **Never commit secrets.** `.env*` and `.growth-os/` are gitignored — never
