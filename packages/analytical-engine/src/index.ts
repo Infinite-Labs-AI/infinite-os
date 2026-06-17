@@ -6,6 +6,7 @@ import {
   createMetaAdSet,
   createMetaCampaign,
   createMetaCreative,
+  deleteMetaEntity,
   getMetaEntity,
   listMetaEntities,
   resolveMetaAdsCredential,
@@ -115,7 +116,8 @@ export function createActionHandlers(db: InfiniteOsDb): Partial<Record<InfiniteO
     create_meta_ad_set: (input, context) => createMetaAdSetHandler(db, context, input),
     create_meta_creative: (input, context) => createMetaCreativeHandler(db, context, input),
     create_meta_ad: (input, context) => createMetaAdHandler(db, context, input),
-    set_meta_entity_status: (input, context) => setMetaEntityStatusHandler(db, context, input)
+    set_meta_entity_status: (input, context) => setMetaEntityStatusHandler(db, context, input),
+    delete_meta_entity: (input, context) => deleteMetaEntityHandler(db, context, input)
   };
 }
 
@@ -1772,6 +1774,51 @@ async function setMetaEntityStatusHandler(
     action,
     context.authority,
     { id: result.id, status: result.status, activation: status === "ACTIVE" },
+    ["integration_audit_log"],
+    "ok"
+  );
+}
+
+// Destructive cleanup (DELETE /{id}). Operator-only + irreversible. Runs the
+// connector delete INLINE (the syncSourceNow pattern — NEVER db.createJob, so a
+// destructive write never touches the worker's retry machinery), and writes an
+// integration_audit_log row with the token redacted. The connector layer makes
+// the DELETE non-retryable; the CLI's destructive confirm gate lives above this
+// layer. Does NOT spend, so there is no dedup/activation bookkeeping.
+async function deleteMetaEntityHandler(
+  db: InfiniteOsDb,
+  context: SessionContext,
+  input: unknown
+): Promise<ActionEnvelope> {
+  const sourceId = requiredString(input, "sourceId");
+  const entityId = requiredString(input, "entityId");
+  // Optional entity-kind hint for the audit row only (the DELETE node call needs
+  // just the id). null when the caller did not supply it.
+  const entity = optionalString(input, "entity") ?? null;
+  const action: InfiniteOsActionId = "delete_meta_entity";
+  const credential = await resolveMetaCredentialForWrite(db, context, sourceId);
+  let result;
+  try {
+    result = await deleteMetaEntity(credential, entityId);
+  } catch (error) {
+    await metaAuditLog(db, context, sourceId, action, "failed", {
+      action,
+      entity,
+      entity_id: entityId,
+      error_code: metaErrorCode(error)
+    });
+    throw error;
+  }
+  await metaAuditLog(db, context, sourceId, action, "succeeded", {
+    action,
+    entity,
+    entity_id: entityId,
+    deleted: result.deleted
+  });
+  return envelope(
+    action,
+    context.authority,
+    { id: result.id, deleted: result.deleted, entity },
     ["integration_audit_log"],
     "ok"
   );

@@ -302,15 +302,18 @@ export const OPERATOR_ACTIONS = [
   "create_saved_report",
   "run_saved_report",
   "export_saved_report",
-  // Meta Ads WRITE/management — every one can move money (create or go-live), so
-  // all are operator-authority. An LLM/tool_agent session can NEVER fire these
-  // (assertAuthority throws "operator authority required"). Creates ALWAYS land
-  // PAUSED; set_meta_entity_status is the separate, gated go-live transition.
+  // Meta Ads WRITE/management — every one can move money (create or go-live) or
+  // destroy live spend objects, so all are operator-authority. An LLM/tool_agent
+  // session can NEVER fire these (assertAuthority throws "operator authority
+  // required"). Creates ALWAYS land PAUSED; set_meta_entity_status is the
+  // separate, gated go-live transition; delete_meta_entity is the destructive
+  // (irreversible) cleanup transition.
   "create_meta_campaign",
   "create_meta_ad_set",
   "create_meta_ad",
   "create_meta_creative",
-  "set_meta_entity_status"
+  "set_meta_entity_status",
+  "delete_meta_entity"
 ] as const;
 
 export const FIRST_PHASE_ACTIONS = [
@@ -812,6 +815,14 @@ function metadataFor(id: InfiniteOsActionId): {
       category: "operator",
       recommendedNextActions: ["get_meta_entity", "list_meta_entities"],
       recipeIds: []
+    },
+    delete_meta_entity: {
+      title: "Delete Meta Ads entity",
+      summary:
+        "Operator-only. Permanently DELETE a Meta Ads campaign/ad set/ad node (irreversible cleanup). Does not spend; the CLI applies a destructive confirm gate before reaching this handler.",
+      category: "operator",
+      recommendedNextActions: ["list_meta_entities"],
+      recipeIds: []
     }
   };
   return metadata[id];
@@ -1079,6 +1090,17 @@ function inputSchemaFor(id: InfiniteOsActionId): Record<string, unknown> {
         status: { enum: ["ACTIVE", "PAUSED"] }
       },
       ["sourceId", "entityId", "status"]
+    ),
+    delete_meta_entity: requiredObject(
+      {
+        sourceId: { type: "string" },
+        entityId: { type: "string" },
+        // Optional entity-kind hint recorded in the audit row. Delete is a NODE
+        // call (DELETE /{id}); creatives are not deletable via this verb. The
+        // CLI's destructive confirm gate lives above this layer.
+        entity: { enum: ["campaign", "adset", "ad"] }
+      },
+      ["sourceId", "entityId"]
     )
   };
   return schemas[id] ?? requiredObject({});
