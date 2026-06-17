@@ -6590,8 +6590,7 @@ async function interactiveSession(env: CliEnv): Promise<void> {
       columns: output.columns,
       errorOutput,
       input,
-      output,
-      theme: resolveTheme(env as NodeJS.ProcessEnv)
+      output
     });
     recordInfiniteWelcomeSeen(env);
   }

@@ -178,7 +178,7 @@ export function InkTranscriptApp({
         // (fixed ROCKET_BANNER_ROWS tall). It replaces the old welcome line —
         // the input composer's placeholder already shows "Type a message, …",
         // so the banner doesn't repeat the hint.
-        <RocketBanner theme={t} />
+        <RocketBanner />
       ) : (
         // Empty transcript elsewhere (progress renders, non-home): a single
         // BLANK row — exactly one row so it matches inkTranscriptRowCount()'s
