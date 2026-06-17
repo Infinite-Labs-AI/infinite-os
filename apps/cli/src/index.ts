@@ -4867,14 +4867,13 @@ export async function connectProviderPicker(
     deps.select ?? ((question, choices, defaultIndex, description) =>
       promptChoice(question, choices, defaultIndex, { description }));
   const runNew = deps.runNew ?? configureInteractiveConnector;
+  // FIX 3: the default `reconnect` collects a FRESH credential and submits it to
+  // the reconnect route, so the server replaces the stored (possibly dead) token
+  // and tests with the NEW one. The previous default POSTed an EMPTY body, which
+  // re-authenticated with the stored old token — so "Reconnect <dead account>"
+  // failed before the operator could ever supply a working credential.
   const reconnect =
-    deps.reconnect ??
-    ((sourceId, reconnectEnv) =>
-      apiRequest(`/sources/${encodeURIComponent(sourceId)}/reconnect`, reconnectEnv, {
-        method: "POST",
-        operator: true,
-        body: {}
-      }));
+    deps.reconnect ?? ((sourceId, reconnectEnv) => reconnectExistingConnector(definition, sourceId, reconnectEnv));
 
   const existing = await listExisting(definition.provider, env);
   if (existing.length === 0) {
@@ -4891,6 +4890,81 @@ export async function connectProviderPicker(
   return action.kind === "new" ? runNew(definition, env) : reconnect(action.sourceId, env);
 }
 
+// Resolve the stored `credentialKind` for a connect/reconnect submission. Meta
+// Ads varies by transport (mcp_stdio → mcp_server_command, meta_ads_cli →
+// ads_cli); everything else uses the definition default. Shared by the new
+// connect flow and the reconnect flow so they stay in lock-step.
+function connectorCredentialKind(
+  definition: ConnectorSetupDefinition,
+  credentialPayload: Record<string, unknown>
+): string {
+  if (definition.provider === "meta_ads" && credentialPayload.transport === "mcp_stdio") {
+    return "mcp_server_command";
+  }
+  if (definition.provider === "meta_ads" && credentialPayload.transport === "meta_ads_cli") {
+    return "ads_cli";
+  }
+  return definition.credentialKind;
+}
+
+// FIX 3: reconnect an EXISTING source by collecting a NEW credential and handing
+// it to the reconnect route, which revokes the stored credential, persists the
+// new one, and ONLY THEN tests the connection — with the NEW token. We never POST
+// an empty reconnect (the old broken behavior), so a dead stored token can no
+// longer block the operator from entering a working one. OAuth providers re-run
+// the browser OAuth flow (which already mints a fresh token) rather than this
+// token-payload path.
+export async function reconnectExistingConnector(
+  definition: ConnectorSetupDefinition,
+  sourceId: string,
+  env: CliEnv,
+  deps: {
+    // Seam: collect the FRESH credential. Defaults to the interactive
+    // flag/prompt resolver. Tests inject a deterministic payload without TTY.
+    resolveCredential?: (
+      definition: ConnectorSetupDefinition,
+      args: string[],
+      env: CliEnv
+    ) => Promise<Record<string, unknown> | null>;
+    // Seam: the OAuth re-auth path (GA4) that mints a brand-new token.
+    runOAuth?: (definition: ConnectorSetupDefinition, env: CliEnv) => Promise<Record<string, unknown>>;
+  } = {}
+): Promise<Record<string, unknown>> {
+  // OAuth providers (GA4) mint a brand-new token via the browser flow; defer to
+  // the same `runNew` OAuth path, which always authenticates with the fresh
+  // token. (The stored token is never consulted.)
+  if (definition.oauth) {
+    const runOAuth = deps.runOAuth ?? configureInteractiveConnector;
+    return runOAuth(definition, env);
+  }
+  const resolveCredential = deps.resolveCredential ?? resolveConnectorCredentialPayload;
+  const credentialPayload = await resolveCredential(definition, [], env);
+  if (!credentialPayload) {
+    return connectorSetupNeedsInput(definition);
+  }
+  const credentialKind = connectorCredentialKind(definition, credentialPayload);
+  // The NEW credential goes in the reconnect body, so the server replaces the
+  // stored token and tests with THIS one — it never pre-authenticates with the
+  // old token. (This is the whole fix.)
+  const response = await apiRequest(`/sources/${encodeURIComponent(sourceId)}/reconnect`, env, {
+    method: "POST",
+    operator: true,
+    body: { credentialKind, credentialPayload }
+  });
+  return {
+    ok: true,
+    section: "connectors",
+    provider: definition.provider,
+    label: definition.label,
+    description: definition.description,
+    docsUrl: definition.docsUrl,
+    reconnected: true,
+    sourceId,
+    result: response,
+    next: "Reconnected. Run `infinite setup query` or `infinite` to continue."
+  };
+}
+
 async function setupTokenConnector(
   definition: ConnectorSetupDefinition,
   args: string[],
@@ -4903,12 +4977,7 @@ async function setupTokenConnector(
   if (!credentialPayload) {
     return connectorSetupNeedsInput(definition);
   }
-  const credentialKind =
-    definition.provider === "meta_ads" && credentialPayload.transport === "mcp_stdio"
-      ? "mcp_server_command"
-      : definition.provider === "meta_ads" && credentialPayload.transport === "meta_ads_cli"
-        ? "ads_cli"
-      : definition.credentialKind;
+  const credentialKind = connectorCredentialKind(definition, credentialPayload);
   const response = await apiRequest("/sources/connect", env, {
     method: "POST",
     operator: true,
@@ -6972,8 +7041,8 @@ const META_STATUS_OBJECTS = ["campaign", "adset", "ad"] as const;
 type MetaStatusObject = (typeof META_STATUS_OBJECTS)[number];
 
 export interface MetaCommandOptions {
-  // Confirm seam for the terminal write gate (create/pause). Defaults to an
-  // interactive yes/no prompt (default NO) on a TTY; unit tests inject a
+  // Confirm seam for the terminal write gate (create/pause/delete). Defaults to
+  // an interactive yes/no prompt (default NO) on a TTY; unit tests inject a
   // deterministic confirm without juggling stdin.
   confirmMutation?: (details: { action: string; object: MetaObject; summary: string }) => Promise<boolean>;
   // Stricter typed-confirm seam for `activate` (the only money-spending
@@ -7129,7 +7198,7 @@ export async function metaCommand(
   const [object, action, ...rest] = args;
   if (!object || !action) {
     throw new Error(
-      "Usage: infinite meta <campaign|adset|ad|creative> <create|activate|pause|list|get> [...]"
+      "Usage: infinite meta <campaign|adset|ad|creative> <create|activate|pause|delete|list|get> [...]"
     );
   }
   if (!META_OBJECTS.includes(object as MetaObject)) {
@@ -7160,9 +7229,11 @@ export async function metaCommand(
       throw new Error(`meta ${metaObject} get requires an entity id`);
     }
     const fields = optionValue(rest, "--fields");
+    // FIX 1: pass the entity kind so `get` requests the SAME full field set as
+    // `list` (id/name/status/…) instead of degrading to Graph's id-only node.
     return metaToolCall(
       "get_meta_entity",
-      { sourceId, entityId, ...(fields ? { fields } : {}) },
+      { sourceId, entityId, entity: META_ENTITY_FOR_OBJECT[metaObject], ...(fields ? { fields } : {}) },
       env
     );
   }
@@ -7184,8 +7255,51 @@ export async function metaCommand(
       { json, sourceId }
     );
   }
+  if (action === "delete") {
+    return metaDeleteCommand(metaObject, rest, env, options, { json, sourceId });
+  }
   throw new Error(
-    `Unknown meta action: ${action} (expected create|activate|pause|list|get)`
+    `Unknown meta action: ${action} (expected create|activate|pause|delete|list|get)`
+  );
+}
+
+// FIX 2: `infinite meta {campaign|adset|ad} delete <id> --source-id <id> [--yes]
+// [--json]`. Delete is an IRREVERSIBLE cleanup (no spend), so it goes through the
+// SAME standard destructive confirm gate as `pause` — NOT the stricter typed
+// confirm reserved for `activate` (the spend path). Creatives are not deletable
+// via this verb (matches the runtime `entity` enum + the engine handler). The
+// entity-kind hint is passed for a precise audit row.
+async function metaDeleteCommand(
+  object: MetaObject,
+  rest: string[],
+  env: CliEnv,
+  options: MetaCommandOptions,
+  ctx: { json: boolean; sourceId: string }
+): Promise<unknown> {
+  if (!META_STATUS_OBJECTS.includes(object as MetaStatusObject)) {
+    throw new Error(`meta ${object} has no delete verb (creatives are not deletable here)`);
+  }
+  const entityId = metaPositionalId(rest);
+  if (!entityId) {
+    throw new Error(`meta ${object} delete requires an entity id`);
+  }
+  const section = `meta_${object}_delete`;
+  const proceed = await metaConfirmWrite(
+    "delete",
+    object,
+    `Permanently DELETE ${object} ${entityId} (irreversible)`,
+    rest,
+    env,
+    options,
+    section
+  );
+  if (!proceed.ok) {
+    return proceed.result;
+  }
+  return metaToolCall(
+    "delete_meta_entity",
+    { sourceId: ctx.sourceId, entityId, entity: META_ENTITY_FOR_OBJECT[object] },
+    env
   );
 }
 

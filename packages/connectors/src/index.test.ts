@@ -12,6 +12,7 @@ import {
   createMetaAdSet,
   createMetaCampaign,
   createMetaCreative,
+  deleteMetaEntity,
   findMetaDedupHit,
   ga4ConnectSourceFromSetup,
   getMetaEntity,
@@ -2419,6 +2420,78 @@ describe("Meta Ads WRITE helpers", () => {
     });
   });
 
+  describe("delete (cleanup)", () => {
+    it("issues DELETE to the entity NODE /{id} (not an act_ edge) with no body", async () => {
+      await captureWrites(
+        () => jsonResponse({ success: true }),
+        async (captured) => {
+          const result = await deleteMetaEntity(metaWriteCredential, "120000000000005");
+          expect(result).toEqual({ ok: true, id: "120000000000005", deleted: true });
+          expect(captured[0].method).toBe("DELETE");
+          // Node id, NOT an act_/<edge> path.
+          expect(captured[0].url).toBe("https://graph.facebook.com/v25.0/120000000000005");
+          expect(captured[0].url).not.toContain("act_");
+          // DELETE is bodyless.
+          expect(captured[0].body).toBeNull();
+          // Token only in the Authorization header, never in the URL.
+          expect(captured[0].authorization).toBe("Bearer meta-write-token");
+          expect(captured[0].url).not.toContain("access_token");
+          expect(captured[0].url).not.toContain("meta-write-token");
+        }
+      );
+    });
+
+    it("returns {id, deleted:true} on Meta's {success:true}", async () => {
+      await captureWrites(
+        () => jsonResponse({ success: true }),
+        async () => {
+          const result = await deleteMetaEntity(metaWriteCredential, "abc123");
+          expect(result).toEqual({ ok: true, id: "abc123", deleted: true });
+        }
+      );
+    });
+
+    // INVARIANT 3: a delete is a write — NON-retryable for ALL status codes,
+    // including 429/5xx (must NOT inherit the read retryable:true taxonomy).
+    for (const status of [500, 429, 503, 400] as const) {
+      it(`marks a delete failure (${status}) as retryable:false`, async () => {
+        await captureWrites(
+          () => new Response("{\"error\":{\"message\":\"boom\"}}", { status }),
+          async () => {
+            await expect(deleteMetaEntity(metaWriteCredential, "120000000000005")).rejects.toMatchObject({
+              retryable: false
+            });
+          }
+        );
+      });
+    }
+
+    it("marks a network failure on a delete as retryable:false", async () => {
+      await withMockFetch(
+        () => {
+          throw new Error("ECONNRESET");
+        },
+        async () => {
+          await expect(deleteMetaEntity(metaWriteCredential, "120000000000005")).rejects.toMatchObject({
+            retryable: false,
+            code: "provider_api_error"
+          });
+        }
+      );
+    });
+
+    it("refuses a delete when the transport is meta_ads_cli (non-retryable)", async () => {
+      await withMockFetch(
+        () => jsonResponse({ success: true }),
+        async () => {
+          await expect(
+            deleteMetaEntity({ ...metaWriteCredential, transport: "meta_ads_cli" }, "120000000000005")
+          ).rejects.toMatchObject({ code: "provider_unsupported", retryable: false });
+        }
+      );
+    });
+  });
+
   describe("writes are NON-retryable for ALL status codes", () => {
     for (const status of [500, 429, 503, 400] as const) {
       it(`marks a create failure (${status}) as retryable:false`, async () => {
@@ -2475,14 +2548,87 @@ describe("Meta Ads WRITE helpers", () => {
       );
     });
 
-    it("gets a single entity by node id", async () => {
+    it("gets a single entity by node id with an explicit field set", async () => {
       await captureWrites(
-        () => jsonResponse({ id: "c1", name: "Launch" }),
+        () => jsonResponse({ id: "c1", name: "Launch", status: "PAUSED" }),
         async (captured) => {
           const entity = await getMetaEntity(metaWriteCredential, "c1", { fields: "id,name,status" });
-          expect(entity).toEqual({ id: "c1", name: "Launch" });
+          expect(entity).toEqual({ id: "c1", name: "Launch", status: "PAUSED" });
           expect(captured[0].method).toBe("GET");
           expect(captured[0].url).toContain("https://graph.facebook.com/v25.0/c1");
+          // The explicit override is honored verbatim.
+          expect(captured[0].url).toContain("fields=id%2Cname%2Cstatus");
+          expect(captured[0].authorization).toBe("Bearer meta-write-token");
+          expect(captured[0].url).not.toContain("meta-write-token");
+        }
+      );
+    });
+
+    // FIX 1 (revert-proof): with no explicit `fields`, `get` must default the
+    // SAME full per-type field set as `list` — never the id-only Graph default.
+    // These assertions fail if `getMetaEntity` reverts to omitting `fields`.
+    const getDefaultFieldCases: Array<{ entity: "campaign" | "adset" | "ad" | "creative"; expected: string[] }> = [
+      { entity: "campaign", expected: ["id", "name", "status", "objective", "effective_status"] },
+      {
+        entity: "adset",
+        expected: ["id", "name", "status", "campaign_id", "optimization_goal", "billing_event", "effective_status"]
+      },
+      { entity: "ad", expected: ["id", "name", "status", "adset_id", "effective_status"] },
+      { entity: "creative", expected: ["id", "name", "object_story_spec"] }
+    ];
+    for (const { entity, expected } of getDefaultFieldCases) {
+      it(`get on a ${entity} requests the FULL default field set (mirrors list)`, async () => {
+        await captureWrites(
+          () => jsonResponse({ id: "x1", name: "Thing" }),
+          async (captured) => {
+            await getMetaEntity(metaWriteCredential, "x1", { entity });
+            expect(captured[0].method).toBe("GET");
+            // The exact field string `list` would send for this entity must be
+            // present on the get URL — a get that surfaces only `{id}` fails here.
+            const decoded = decodeURIComponent(captured[0].url);
+            expect(decoded).toContain(`fields=${expected.join(",")}`);
+            for (const field of expected) {
+              expect(decoded).toContain(field);
+            }
+            // The id-only regression: a bare `fields=id` (or no fields) is rejected.
+            expect(decoded).not.toMatch(/[?&]fields=id(&|$)/);
+            expect(captured[0].url).not.toContain("meta-write-token");
+          }
+        );
+      });
+    }
+
+    it("get and list request the IDENTICAL field set for the same object type", async () => {
+      let getUrl = "";
+      let listUrl = "";
+      await captureWrites(
+        () => jsonResponse({ id: "a1" }),
+        async (captured) => {
+          await getMetaEntity(metaWriteCredential, "a1", { entity: "adset" });
+          getUrl = captured[0].url;
+        }
+      );
+      await captureWrites(
+        () => jsonResponse({ data: [] }),
+        async (captured) => {
+          await listMetaEntities(metaWriteCredential, "adset");
+          listUrl = captured[0].url;
+        }
+      );
+      const getFields = new URL(getUrl).searchParams.get("fields");
+      const listFields = new URL(listUrl).searchParams.get("fields");
+      expect(getFields).toBe(listFields);
+      expect(getFields).toBe("id,name,status,campaign_id,optimization_goal,billing_event,effective_status");
+    });
+
+    it("get keeps the normal retryable taxonomy (429 → retryable:true)", async () => {
+      await captureWrites(
+        () => new Response("{}", { status: 429 }),
+        async () => {
+          await expect(getMetaEntity(metaWriteCredential, "c1", { entity: "campaign" })).rejects.toMatchObject({
+            retryable: true,
+            code: "provider_rate_limited"
+          });
         }
       );
     });

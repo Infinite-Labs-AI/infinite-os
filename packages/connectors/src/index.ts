@@ -3059,6 +3059,12 @@ export interface MetaStatusResult {
   status: MetaEntityStatus;
 }
 
+export interface MetaDeleteResult {
+  ok: boolean;
+  id: string;
+  deleted: boolean;
+}
+
 // Form-encode a Graph WRITE payload. Meta's WRITE edges expect
 // application/x-www-form-urlencoded: every NESTED object/array value is encoded
 // as a JSON STRING in its own field (special_ad_categories, targeting,
@@ -3092,6 +3098,21 @@ async function metaAdsGraphPost(
   path: string,
   params: Record<string, unknown>
 ): Promise<MetaGraphWriteResponse> {
+  return metaAdsGraphWrite(credential, "POST", path, params);
+}
+
+// Core write transport, shared by POST writes (create/status) and DELETE
+// (delete). Critically, it translates EVERY non-2xx — and every network failure
+// — into a NON-retryable ConnectorError (retryable:false) regardless of status
+// code (INVARIANT 3). This keeps a money/cleanup write off the worker's retry
+// machinery. Token only in the Authorization header; never in the URL. DELETE
+// targets a node (`/{id}`) and sends no body; POST form-encodes its params.
+async function metaAdsGraphWrite(
+  credential: MetaAdsCredential,
+  method: "POST" | "DELETE",
+  path: string,
+  params: Record<string, unknown>
+): Promise<MetaGraphWriteResponse> {
   if (isMetaAdsCliTransport(credential) || isMetaAdsMcpTransport(credential)) {
     // A CLI/MCP write transport is a deliberate later add. Until then refuse
     // loudly and non-retryably rather than silently dropping a money write.
@@ -3104,10 +3125,11 @@ async function metaAdsGraphPost(
   const accessToken = requireCredential(credential, "accessToken");
   const url = `https://graph.facebook.com/${metaAdsApiVersion(credential)}/${path}`;
   const safeUrl = safeUrlForLogs(url);
+  const isPost = method === "POST";
   let response: Response;
   try {
     response = await fetch(url, {
-      method: "POST",
+      method,
       headers: {
         // Meta Graph WRITE endpoints take application/x-www-form-urlencoded.
         // Nested object/array fields (special_ad_categories, targeting,
@@ -3115,14 +3137,15 @@ async function metaAdsGraphPost(
         // STRING in their own field — mirrors the READ path's per-field
         // `JSON.stringify(time_range)` convention. Sending native nested JSON
         // (Content-Type: application/json) is REJECTED by the real Graph API.
-        "Content-Type": "application/x-www-form-urlencoded",
+        // DELETE is a bodyless node call, so it carries no Content-Type.
+        ...(isPost ? { "Content-Type": "application/x-www-form-urlencoded" } : {}),
         ...bearerHeaders(accessToken)
       },
-      body: metaFormEncode(params).toString()
+      ...(isPost ? { body: metaFormEncode(params).toString() } : {})
     });
   } catch (error) {
-    // Network/transport failure on a money write is NON-retryable too: we never
-    // want the action handler to silently re-POST a create.
+    // Network/transport failure on a write is NON-retryable too: we never
+    // want the action handler to silently re-issue a create/delete.
     throw new ConnectorError(
       "provider_api_error",
       `Meta Ads write request failed for ${safeUrl}: ${error instanceof Error ? error.message : String(error)}`,
@@ -3513,6 +3536,23 @@ export async function setMetaEntityStatus(
   return { ok: true, id: entityId, status: echoed ?? status };
 }
 
+// ── Delete (cleanup) ── DELETE /{entity_id} ──────────────────────────────────
+// Destructive, irreversible removal of a campaign/adset/ad node. Like the status
+// transition this is a NODE call (no act_ edge, no body) and rides the SAME
+// non-retryable write transport (INVARIANT 3: a delete is never auto-retried).
+// Graph answers a successful DELETE with `{ success: true }`. Token only ever
+// travels in the Authorization header (bearerHeaders); the URL has no query and
+// is `safeUrlForLogs`-scrubbed in any error path — the token is never logged.
+export async function deleteMetaEntity(
+  credential: MetaAdsCredential,
+  entityId: string
+): Promise<MetaDeleteResult> {
+  await metaAdsGraphWrite(credential, "DELETE", entityId, {});
+  // A non-2xx already threw a non-retryable ConnectorError above; reaching here
+  // means Graph returned a 2xx `{ success: true }`.
+  return { ok: true, id: entityId, deleted: true };
+}
+
 // ── Reads: list / get ── normal retryable taxonomy via fetchJson ──────────────
 interface MetaListResponse {
   data?: Array<Record<string, unknown>>;
@@ -3541,13 +3581,18 @@ export async function listMetaEntities(
 export async function getMetaEntity(
   credential: MetaAdsCredential,
   entityId: string,
-  options: { fields?: string } = {}
+  // FIX 1: `get` must surface the SAME full field set as `list` per object type.
+  // Graph returns ONLY `{id}` when no `fields` param is supplied, so — exactly
+  // like `listMetaEntities` — we ALWAYS set `fields`, defaulting to the canonical
+  // per-entity set via `metaDefaultReadFields(entity)`. An explicit
+  // `options.fields` still overrides; `options.entity` selects the default set.
+  // (`entity` is optional for back-compat; when omitted with no explicit fields
+  // we fall back to the campaign field set so a get never degrades to id-only.)
+  options: { fields?: string; entity?: MetaWriteEntity } = {}
 ): Promise<Record<string, unknown>> {
   const accessToken = requireCredential(credential, "accessToken");
   const url = new URL(`https://graph.facebook.com/${metaAdsApiVersion(credential)}/${entityId}`);
-  if (options.fields) {
-    url.searchParams.set("fields", options.fields);
-  }
+  url.searchParams.set("fields", options.fields ?? metaDefaultReadFields(options.entity ?? "campaign"));
   return fetchJson<Record<string, unknown>>(url.toString(), {
     method: "GET",
     headers: bearerHeaders(accessToken)

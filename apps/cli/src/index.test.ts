@@ -11257,8 +11257,40 @@ describe("meta command (CLI write surface + confirm gates)", () => {
     await metaCommand(["ad", "get", "120777", "--source-id", "src_meta"], ENV);
     expect(toolCalls(api)[1]?.body).toMatchObject({
       actionId: "get_meta_entity",
-      input: { sourceId: "src_meta", entityId: "120777" }
+      // FIX 1: the get branch threads the entity KIND so the handler/connector
+      // requests the full default field set for that object (mirrors `list`)
+      // instead of degrading to Graph's id-only node.
+      input: { sourceId: "src_meta", entityId: "120777", entity: "ad" }
     });
+  });
+
+  // FIX 1 (revert-proof): every object kind threads its `entity` to get_meta_entity
+  // so `get` requests the SAME field set as `list`. Dropping the `entity` pass-through
+  // (the original id-only bug) fails this matrix.
+  it("get threads the entity kind for each object so get mirrors list", async () => {
+    const api = stubToolsApi();
+    const cases: Array<[string, string]> = [
+      ["campaign", "campaign"],
+      ["adset", "adset"],
+      ["ad", "ad"],
+      ["creative", "creative"]
+    ];
+    for (const [object] of cases) {
+      await metaCommand([object, "get", "id_1", "--source-id", "src_meta"], ENV);
+    }
+    const gets = toolCalls(api).filter((c) => (c.body as { body?: unknown }) && (c.body.actionId === "get_meta_entity"));
+    for (let i = 0; i < cases.length; i += 1) {
+      const input = gets[i]?.body.input as Record<string, unknown>;
+      expect(input.entity).toBe(cases[i][1]);
+      expect(input.entityId).toBe("id_1");
+    }
+  });
+
+  it("get with explicit --fields still forwards both fields and entity", async () => {
+    const api = stubToolsApi();
+    await metaCommand(["campaign", "get", "cmp_1", "--source-id", "src_meta", "--fields", "id,name"], ENV);
+    const input = toolCalls(api)[0]?.body.input as Record<string, unknown>;
+    expect(input).toMatchObject({ entity: "campaign", fields: "id,name", entityId: "cmp_1" });
   });
 
   it("create --yes bypasses the confirm seam and POSTs create_meta_campaign", async () => {
@@ -11449,6 +11481,113 @@ describe("meta command (CLI write surface + confirm gates)", () => {
 
   it("requires --source-id for every verb", async () => {
     await expect(metaCommand(["campaign", "list"], ENV, {})).rejects.toThrow(/--source-id/);
+  });
+
+  // ── FIX 2: delete verb — destructive, operator-only, standard confirm gate ──
+  describe("delete (destructive cleanup, standard confirm gate)", () => {
+    it("delete --yes bypasses the confirm seam and POSTs delete_meta_entity to /tools/call", async () => {
+      const api = stubToolsApi();
+      const confirmMutation = vi.fn(async () => true);
+      await metaCommand(
+        ["campaign", "delete", "120000000000000001", "--source-id", "src_meta", "--yes"],
+        ENV,
+        { confirmMutation }
+      );
+      // --yes skips the gate entirely.
+      expect(confirmMutation).not.toHaveBeenCalled();
+      const call = toolCalls(api)[0];
+      expect(call?.body).toMatchObject({
+        actionId: "delete_meta_entity",
+        // Threads the entity-kind hint so the audit row is precise.
+        input: { sourceId: "src_meta", entityId: "120000000000000001", entity: "campaign" }
+      });
+      // Operator token attached by apiRequest, never echoed by metaCommand.
+      expect(call?.auth).toBe("Bearer operator-secret");
+    });
+
+    it("delete -y short flag also bypasses the confirm seam", async () => {
+      const api = stubToolsApi();
+      const confirmMutation = vi.fn(async () => true);
+      await metaCommand(
+        ["adset", "delete", "120000000000000002", "--source-id", "src_meta", "-y"],
+        ENV,
+        { confirmMutation }
+      );
+      expect(confirmMutation).not.toHaveBeenCalled();
+      expect(toolCalls(api)[0]?.body).toMatchObject({
+        actionId: "delete_meta_entity",
+        input: { entityId: "120000000000000002", entity: "adset" }
+      });
+    });
+
+    it("delete uses the STANDARD confirm seam (confirmMutation), NOT the activate typed-confirm", async () => {
+      const api = stubToolsApi();
+      const confirmMutation = vi.fn(async () => true);
+      const confirmActivate = vi.fn(async () => "activate");
+      await metaCommand(
+        ["ad", "delete", "120000000000000003", "--source-id", "src_meta"],
+        // Force the interactive seam path.
+        { ...(ENV as Record<string, string>), GROWTH_OS_CLI_NONINTERACTIVE: "0" } as never,
+        { confirmMutation, confirmActivate }
+      );
+      expect(confirmMutation).toHaveBeenCalledTimes(1);
+      // The stricter typed-confirm (reserved for activate=spend) is NEVER used.
+      expect(confirmActivate).not.toHaveBeenCalled();
+      expect(toolCalls(api)[0]?.body).toMatchObject({ actionId: "delete_meta_entity" });
+    });
+
+    it("delete without --yes: a NO returns cancelled and issues NO /tools/call", async () => {
+      const api = stubToolsApi();
+      const confirmMutation = vi.fn(async () => false);
+      const result = (await metaCommand(
+        ["campaign", "delete", "120000000000000001", "--source-id", "src_meta"],
+        ENV,
+        { confirmMutation }
+      )) as { ok: boolean; cancelled?: boolean; section?: string };
+      expect(confirmMutation).toHaveBeenCalledTimes(1);
+      expect(result.ok).toBe(false);
+      expect(result.cancelled).toBe(true);
+      expect(result.section).toBe("meta_campaign_delete");
+      expect(toolCalls(api).length).toBe(0);
+    });
+
+    it("delete in non-interactive mode without --yes hard-refuses (no /tools/call)", async () => {
+      const api = stubToolsApi();
+      await expect(
+        metaCommand(["campaign", "delete", "120000000000000001", "--source-id", "src_meta"], ENV, {})
+      ).rejects.toThrow(/Refusing to delete campaign without confirmation/);
+      expect(toolCalls(api).length).toBe(0);
+    });
+
+    it("delete requires an entity id", async () => {
+      await expect(
+        metaCommand(["campaign", "delete", "--source-id", "src_meta", "--yes"], ENV, {})
+      ).rejects.toThrow(/delete requires an entity id/);
+    });
+
+    it("creative has no delete verb (not deletable via this surface)", async () => {
+      await expect(
+        metaCommand(["creative", "delete", "cr_1", "--source-id", "src_meta", "--yes"], ENV, {})
+      ).rejects.toThrow(/no delete verb/);
+    });
+
+    it("delete --source-id BEFORE the id targets the CORRECT entity, never the source value", async () => {
+      const api = stubToolsApi();
+      await metaCommand(
+        ["adset", "delete", "--source-id", "act_123", "as_555", "--yes"],
+        ENV,
+        {}
+      );
+      const input = toolCalls(api)[0]?.body.input as Record<string, unknown>;
+      expect(input.entityId).toBe("as_555");
+      expect(input.sourceId).toBe("act_123");
+      expect(input.entity).toBe("adset");
+    });
+
+    it("delete is gated by requiresOperatorConfirmation (interactive session gate)", () => {
+      expect(requiresOperatorConfirmation("meta campaign delete 123")).toBe(true);
+      expect(requiresOperatorConfirmation("/meta ad delete 456 --source-id src")).toBe(true);
+    });
   });
 
   // ── Positional-id resolution must not mistake a flag VALUE for the entity id ──

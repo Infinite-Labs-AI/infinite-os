@@ -197,7 +197,10 @@ describe("Meta Ads management action authority (money-safety)", () => {
     "create_meta_ad_set",
     "create_meta_ad",
     "create_meta_creative",
-    "set_meta_entity_status"
+    "set_meta_entity_status",
+    // delete_meta_entity is destructive (irreversible) → operator-only, exactly
+    // like the spend-bearing writes: a tool_agent must NEVER be able to delete.
+    "delete_meta_entity"
   ] as const;
   const META_READ_IDS = ["list_meta_entities", "get_meta_entity"] as const;
 
@@ -256,5 +259,32 @@ describe("Meta Ads management action authority (money-safety)", () => {
       expect(envelope.actionId).toBe(id);
       expect(envelope.authority).toBe("operator");
     }
+  });
+
+  it("registers delete_meta_entity as a destructive operator-only verb a tool_agent can never fire", async () => {
+    // Revert-proof guard for the destructive cleanup verb: if it ever drifts into
+    // READ_ACTIONS / tool_agent authority, an LLM session could delete live ad
+    // objects. Keep this assertion narrow and explicit.
+    expect((OPERATOR_ACTIONS as readonly string[]).includes("delete_meta_entity")).toBe(true);
+    expect((READ_ACTIONS as readonly string[]).includes("delete_meta_entity")).toBe(false);
+    const card = ACTION_CATALOG.find((action) => action.id === "delete_meta_entity");
+    expect(card?.authority).toBe("operator");
+    expect(card?.provenancePolicy).toBe("operator_audit");
+    const schema = card?.inputSchema as { required?: string[] } | undefined;
+    expect(schema?.required).toEqual(["sourceId", "entityId"]);
+
+    const registry = createInfiniteOsRegistry();
+    const toolAgentContext = createSessionContext({
+      workspaceId: "workspace",
+      authority: "tool_agent",
+      surface: "app"
+    });
+    await expect(
+      registry.execute(
+        "delete_meta_entity",
+        { sourceId: "src_meta", entityId: "120000000000333" },
+        toolAgentContext
+      )
+    ).rejects.toThrow("operator authority required");
   });
 });

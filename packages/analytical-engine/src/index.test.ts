@@ -3500,6 +3500,111 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
     );
   });
 
+  it("deletes an entity INLINE (DELETE /{id}, bodyless, bearer-only) and audits with the token redacted", async () => {
+    const audits: AuditRow[] = [];
+    const db = metaWriteTestDb({ audits });
+    await withGraph(
+      // Graph answers a successful DELETE with { success: true }.
+      () => jsonResponse({ success: true }),
+      async (calls) => {
+        const handlers = createActionHandlers(db);
+        const result = await handlers.delete_meta_entity?.(
+          { sourceId: "src_meta", entityId: "120000000000444", entity: "campaign" },
+          operatorContext
+        );
+        // DELETE hits the NODE id (no act_ edge), is bodyless, bearer-only.
+        expect(calls).toHaveLength(1);
+        expect(calls[0].url).toBe("https://graph.facebook.com/v25.0/120000000000444");
+        expect(calls[0].method).toBe("DELETE");
+        expect(calls[0].url).not.toContain("act_");
+        expect(calls[0].body).toBeNull();
+        expect(calls[0].authorization).toBe("Bearer secret-meta-token");
+        expect(result?.data).toMatchObject({ id: "120000000000444", deleted: true, entity: "campaign" });
+
+        // Operator audit row: succeeded, action/entity-id/status recorded, token redacted.
+        const audit = audits.find((row) => row.action === "delete_meta_entity");
+        expect(audit?.status).toBe("succeeded");
+        expect(audit?.actor_type).toBe("operator");
+        expect(audit?.details).toMatchObject({
+          action: "delete_meta_entity",
+          entity: "campaign",
+          entity_id: "120000000000444",
+          deleted: true
+        });
+        const serialized = JSON.stringify(audits);
+        expect(serialized).not.toContain("secret-meta-token");
+        // INVARIANT 3: a destructive write must NEVER enqueue a worker job (the
+        // fake db's createJob throws if called) — reaching here proves it ran inline.
+      }
+    );
+  });
+
+  it("audits a delete failure (non-retryable) and re-throws WITHOUT the token", async () => {
+    const audits: AuditRow[] = [];
+    const db = metaWriteTestDb({ audits });
+    await withGraph(
+      () => jsonResponse({ error: { message: "boom" } }, 500),
+      async (calls) => {
+        const handlers = createActionHandlers(db);
+        await expect(
+          handlers.delete_meta_entity?.(
+            { sourceId: "src_meta", entityId: "120000000000555", entity: "ad" },
+            operatorContext
+          )
+        ).rejects.toMatchObject({ retryable: false });
+        // The connector still issued exactly one DELETE; no retry, no second call.
+        expect(calls).toHaveLength(1);
+        const audit = audits.find((row) => row.action === "delete_meta_entity");
+        expect(audit?.status).toBe("failed");
+        expect(audit?.details).toMatchObject({ entity: "ad", entity_id: "120000000000555" });
+        expect(JSON.stringify(audits)).not.toContain("secret-meta-token");
+      }
+    );
+  });
+
+  it("delete is non-retryable on a 429 too (never inherits the read retryable taxonomy)", async () => {
+    const audits: AuditRow[] = [];
+    const db = metaWriteTestDb({ audits });
+    await withGraph(
+      () => jsonResponse({ error: { message: "rate limited" } }, 429),
+      async () => {
+        const handlers = createActionHandlers(db);
+        await expect(
+          handlers.delete_meta_entity?.(
+            { sourceId: "src_meta", entityId: "120000000000666", entity: "adset" },
+            operatorContext
+          )
+        ).rejects.toMatchObject({ retryable: false });
+      }
+    );
+  });
+
+  it("refuses a non-Meta source before issuing the DELETE", async () => {
+    const audits: AuditRow[] = [];
+    const db: InfiniteOsDb = {
+      ...metaWriteTestDb({ audits }),
+      async one<T>(sql: string): Promise<T | null> {
+        if (sql.includes("from sources")) {
+          return { provider: "stripe" } as T;
+        }
+        return null;
+      }
+    };
+    await withGraph(
+      () => jsonResponse({ success: true }),
+      async (calls) => {
+        const handlers = createActionHandlers(db);
+        await expect(
+          handlers.delete_meta_entity?.(
+            { sourceId: "src_stripe", entityId: "120000000000777" },
+            operatorContext
+          )
+        ).rejects.toThrow("source_provider_mismatch");
+        expect(calls).toHaveLength(0);
+      }
+    );
+  });
+
   it("lists entities as a read (no audit row, normal taxonomy)", async () => {
     const audits: AuditRow[] = [];
     const db = metaWriteTestDb({ audits });
@@ -3516,6 +3621,65 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
         expect(result?.data).toMatchObject({ entity: "campaign", count: 1 });
         // Reads do not write an audit row.
         expect(audits).toHaveLength(0);
+      }
+    );
+  });
+
+  // FIX 1 (downstream): get_meta_entity threads the entity-kind hint so the
+  // connector requests the SAME full field set as `list` for that object type,
+  // instead of degrading to Graph's id-only node. Revert-proof: dropping the
+  // `entity` pass-through in the handler reverts the request to the campaign
+  // default and fails the adset assertion below.
+  it("get_meta_entity threads the entity kind so it requests the full per-type field set", async () => {
+    const audits: AuditRow[] = [];
+    const db = metaWriteTestDb({ audits });
+    await withGraph(
+      () =>
+        jsonResponse({
+          id: "as_1",
+          name: "AS",
+          status: "PAUSED",
+          campaign_id: "cmp_1",
+          optimization_goal: "OFFSITE_CONVERSIONS",
+          billing_event: "IMPRESSIONS",
+          effective_status: "PAUSED"
+        }),
+      async (calls) => {
+        const handlers = createActionHandlers(db);
+        const result = await handlers.get_meta_entity?.(
+          { sourceId: "src_meta", entityId: "as_1", entity: "adset" },
+          { ...operatorContext, authority: "tool_agent" }
+        );
+        expect(calls[0].method).toBe("GET");
+        const url = new URL(calls[0].url);
+        expect(url.pathname.endsWith("/as_1")).toBe(true);
+        // The adset default field set (NOT the campaign default) is requested.
+        expect(url.searchParams.get("fields")).toBe(
+          "id,name,status,campaign_id,optimization_goal,billing_event,effective_status"
+        );
+        // The full node — not just {id} — flows back through the envelope.
+        expect(result?.data).toMatchObject({
+          id: "as_1",
+          entity: { id: "as_1", name: "AS", campaign_id: "cmp_1" }
+        });
+        // Reads do not write an audit row.
+        expect(audits).toHaveLength(0);
+      }
+    );
+  });
+
+  it("get_meta_entity honors an explicit fields override", async () => {
+    const audits: AuditRow[] = [];
+    const db = metaWriteTestDb({ audits });
+    await withGraph(
+      () => jsonResponse({ id: "cmp_1", name: "C" }),
+      async (calls) => {
+        const handlers = createActionHandlers(db);
+        await handlers.get_meta_entity?.(
+          { sourceId: "src_meta", entityId: "cmp_1", entity: "campaign", fields: "id,name" },
+          { ...operatorContext, authority: "tool_agent" }
+        );
+        expect(new URL(calls[0].url).searchParams.get("fields")).toBe("id,name");
       }
     );
   });
