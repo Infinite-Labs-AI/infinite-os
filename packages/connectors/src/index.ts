@@ -3059,6 +3059,29 @@ export interface MetaStatusResult {
   status: MetaEntityStatus;
 }
 
+// Form-encode a Graph WRITE payload. Meta's WRITE edges expect
+// application/x-www-form-urlencoded: every NESTED object/array value is encoded
+// as a JSON STRING in its own field (special_ad_categories, targeting,
+// object_story_spec, promoted_object, creative …), scalars are sent verbatim.
+// This mirrors the READ path's `url.searchParams.set("time_range",
+// JSON.stringify(...))` convention. `null`/`undefined` fields are dropped.
+function metaFormEncode(params: Record<string, unknown>): URLSearchParams {
+  const form = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value === undefined || value === null) {
+      continue;
+    }
+    if (typeof value === "object") {
+      // Nested object or array → JSON string in its own field.
+      form.set(key, JSON.stringify(value));
+    } else {
+      // Scalar (string/number/boolean) → verbatim.
+      form.set(key, String(value));
+    }
+  }
+  return form;
+}
+
 // Core write transport. Mirrors `metaAdsInsightsUrl` + `bearerHeaders` but POSTs
 // and — critically — translates EVERY non-2xx into a NON-retryable
 // ConnectorError (retryable:false), regardless of status code. This is what
@@ -3086,10 +3109,16 @@ async function metaAdsGraphPost(
     response = await fetch(url, {
       method: "POST",
       headers: {
-        "Content-Type": "application/json",
+        // Meta Graph WRITE endpoints take application/x-www-form-urlencoded.
+        // Nested object/array fields (special_ad_categories, targeting,
+        // object_story_spec, promoted_object, creative) must each be a JSON
+        // STRING in their own field — mirrors the READ path's per-field
+        // `JSON.stringify(time_range)` convention. Sending native nested JSON
+        // (Content-Type: application/json) is REJECTED by the real Graph API.
+        "Content-Type": "application/x-www-form-urlencoded",
         ...bearerHeaders(accessToken)
       },
-      body: JSON.stringify(params)
+      body: metaFormEncode(params).toString()
     });
   } catch (error) {
     // Network/transport failure on a money write is NON-retryable too: we never
@@ -3169,6 +3198,145 @@ function metaCents(value: number | undefined): number | undefined {
   return value;
 }
 
+// ── Enum normalization + allow-list validation ────────────────────────────────
+// Meta Graph enums are UPPERCASE. We normalize (uppercase + trim) BEFORE the POST
+// and validate against a known allow-list so a typo'd enum surfaces as a clear,
+// NON-retryable error at our boundary instead of an opaque Graph #100 rejection
+// (and so a lowercase value never reaches the wire). Allow-lists below cover the
+// STANDARD surface this PR ships; extend them as new objectives/goals are added.
+//
+// VERIFY against a real Meta sandbox capture before live use: the exact accepted
+// enum members evolve per Graph version — these lists reflect the captured SDK /
+// docs for v25 and should be reconciled against a sandbox on go-live.
+const META_OBJECTIVE_VALUES = new Set<string>([
+  "OUTCOME_AWARENESS",
+  "OUTCOME_TRAFFIC",
+  "OUTCOME_ENGAGEMENT",
+  "OUTCOME_LEADS",
+  "OUTCOME_APP_PROMOTION",
+  "OUTCOME_SALES"
+]);
+const META_OPTIMIZATION_GOAL_VALUES = new Set<string>([
+  "NONE",
+  "APP_INSTALLS",
+  "AD_RECALL_LIFT",
+  "ENGAGED_USERS",
+  "EVENT_RESPONSES",
+  "IMPRESSIONS",
+  "LEAD_GENERATION",
+  "QUALITY_LEAD",
+  "LINK_CLICKS",
+  "OFFSITE_CONVERSIONS",
+  "PAGE_LIKES",
+  "POST_ENGAGEMENT",
+  "QUALITY_CALL",
+  "REACH",
+  "LANDING_PAGE_VIEWS",
+  "VISIT_INSTAGRAM_PROFILE",
+  "VALUE",
+  "THRUPLAY",
+  "CONVERSATIONS"
+]);
+const META_BILLING_EVENT_VALUES = new Set<string>([
+  "APP_INSTALLS",
+  "CLICKS",
+  "IMPRESSIONS",
+  "LINK_CLICKS",
+  "NONE",
+  "PAGE_LIKES",
+  "POST_ENGAGEMENT",
+  "THRUPLAY",
+  "PURCHASE",
+  "LISTING_INTERACTION"
+]);
+const META_CALL_TO_ACTION_VALUES = new Set<string>([
+  "OPEN_LINK",
+  "LIKE_PAGE",
+  "SHOP_NOW",
+  "PLAY_GAME",
+  "INSTALL_APP",
+  "USE_APP",
+  "INSTALL_MOBILE_APP",
+  "USE_MOBILE_APP",
+  "BOOK_TRAVEL",
+  "LISTEN_MUSIC",
+  "LEARN_MORE",
+  "SIGN_UP",
+  "DOWNLOAD",
+  "WATCH_MORE",
+  "NO_BUTTON",
+  "CALL_NOW",
+  "APPLY_NOW",
+  "BUY_NOW",
+  "GET_OFFER",
+  "GET_QUOTE",
+  "GET_DIRECTIONS",
+  "SUBSCRIBE",
+  "CONTACT_US",
+  "ORDER_NOW",
+  "DONATE_NOW",
+  "SAY_THANKS",
+  "SELL_NOW",
+  "SHARE",
+  "BOOK_NOW",
+  "MESSAGE_PAGE",
+  "REQUEST_TIME",
+  "SEE_MENU",
+  "GET_SHOWTIMES",
+  "WHATSAPP_MESSAGE"
+]);
+const META_CUSTOM_EVENT_TYPE_VALUES = new Set<string>([
+  "AD_IMPRESSION",
+  "RATE",
+  "TUTORIAL_COMPLETION",
+  "CONTACT",
+  "CUSTOMIZE_PRODUCT",
+  "DONATE",
+  "FIND_LOCATION",
+  "SCHEDULE",
+  "START_TRIAL",
+  "SUBMIT_APPLICATION",
+  "SUBSCRIBE",
+  "ADD_TO_CART",
+  "ADD_TO_WISHLIST",
+  "INITIATED_CHECKOUT",
+  "ADD_PAYMENT_INFO",
+  "PURCHASE",
+  "LEAD",
+  "COMPLETE_REGISTRATION",
+  "CONTENT_VIEW",
+  "SEARCH",
+  "SERVICE_BOOKING_REQUEST",
+  "MESSAGING_CONVERSATION_STARTED_7D",
+  "LEVEL_ACHIEVED",
+  "ACHIEVEMENT_UNLOCKED",
+  "SPENT_CREDITS",
+  "LISTING_INTERACTION",
+  "OTHER"
+]);
+
+// Normalize an enum value to UPPERCASE and validate it against an allow-list.
+// Unknown values throw a clear NON-retryable ConnectorError so a bad enum can
+// never reach the Graph POST. `undefined` passes through (optional fields).
+function metaEnum(
+  value: string | undefined,
+  allowed: Set<string>,
+  field: string
+): string | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  const normalized = value.trim().toUpperCase();
+  if (!allowed.has(normalized)) {
+    throw new ConnectorError(
+      "provider_api_error",
+      `Unsupported Meta Ads ${field}: "${value}" (expected one of ${[...allowed].join(", ")})`,
+      false
+    );
+  }
+  return normalized;
+}
+
 // ── Create: Campaign ── POST /act_{id}/campaigns ──────────────────────────────
 export async function createMetaCampaign(
   credential: MetaAdsCredential,
@@ -3179,9 +3347,11 @@ export async function createMetaCampaign(
   //   `special_ad_categories: []` is [INFERRED-REQUIRED] by Graph v25 (POST
   //   rejects campaigns without it). The field is present in the SDK; its
   //   requiredness was not observed at runtime.
+  // FIX 3: normalize+validate enums to UPPERCASE before they reach the Graph POST.
+  const objective = metaEnum(input.objective, META_OBJECTIVE_VALUES, "objective")!;
   const params: Record<string, unknown> = {
     name: input.name,
-    objective: input.objective,
+    objective,
     status: META_CREATE_STATUS, // INVARIANT 1: hard-coded PAUSED, ignores any caller status.
     special_ad_categories: [] // VERIFY against a real Meta sandbox capture before live use
   };
@@ -3202,11 +3372,14 @@ export async function createMetaAdSet(
   input: MetaAdSetCreateInput
 ): Promise<MetaWriteResult> {
   const adAccountId = metaAdsAccountId(credential);
+  // FIX 3: normalize+validate enums to UPPERCASE before they reach the Graph POST.
+  const optimizationGoal = metaEnum(input.optimizationGoal, META_OPTIMIZATION_GOAL_VALUES, "optimization goal")!;
+  const billingEvent = metaEnum(input.billingEvent, META_BILLING_EVENT_VALUES, "billing event")!;
   const params: Record<string, unknown> = {
     name: input.name,
     campaign_id: input.campaignId,
-    optimization_goal: input.optimizationGoal,
-    billing_event: input.billingEvent,
+    optimization_goal: optimizationGoal,
+    billing_event: billingEvent,
     status: META_CREATE_STATUS // INVARIANT 1: hard-coded PAUSED, ignores any caller status.
   };
   const dailyBudget = metaCents(input.dailyBudget);
@@ -3226,9 +3399,12 @@ export async function createMetaAdSet(
   }
   if (input.pixelId) {
     // promoted_object only when a pixel is supplied (conversion adsets).
+    // FIX 3: custom_event_type is an enum → normalize+validate before the POST.
+    const customEventType =
+      metaEnum(input.customEventType, META_CUSTOM_EVENT_TYPE_VALUES, "custom event type") ?? "PURCHASE";
     params.promoted_object = {
       pixel_id: input.pixelId,
-      custom_event_type: input.customEventType ?? "PURCHASE"
+      custom_event_type: customEventType
     };
   }
 
@@ -3270,8 +3446,10 @@ export async function createMetaCreative(
     if (input.title) linkData.name = input.title;
     if (input.description) linkData.description = input.description;
     if (input.callToAction) {
+      // FIX 3: call_to_action.type is an enum → normalize+validate before the POST.
+      const callToAction = metaEnum(input.callToAction, META_CALL_TO_ACTION_VALUES, "call to action")!;
       linkData.call_to_action = {
-        type: input.callToAction,
+        type: callToAction,
         value: { link: input.linkUrl }
       };
     }

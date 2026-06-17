@@ -11441,6 +11441,98 @@ describe("meta command (CLI write surface + confirm gates)", () => {
   it("requires --source-id for every verb", async () => {
     await expect(metaCommand(["campaign", "list"], ENV, {})).rejects.toThrow(/--source-id/);
   });
+
+  // ── Positional-id resolution must not mistake a flag VALUE for the entity id ──
+  // Regression for the firstPositionalArg bug: with the value flag BEFORE the
+  // positional id (e.g. `--source-id act_123 cmp_999`), the old resolver returned
+  // the flag value (`act_123`). A mis-read id on `activate` could target the WRONG
+  // money-spending entity, so these are money-safety regressions.
+  describe("positional-id resolution (flag value must never be read as the id)", () => {
+    it("adset create: --source-id BEFORE the campaign id resolves the campaign id, not the source value", async () => {
+      const api = stubToolsApi();
+      await metaCommand(
+        [
+          "adset",
+          "create",
+          "--source-id",
+          "act_123",
+          "cmp_999",
+          "--name",
+          "AS",
+          "--optimization-goal",
+          "OFFSITE_CONVERSIONS",
+          "--billing-event",
+          "IMPRESSIONS",
+          "--yes"
+        ],
+        ENV,
+        { confirmMutation: vi.fn(async () => true) }
+      );
+      const input = toolCalls(api)[0]?.body.input as Record<string, unknown>;
+      expect(input.campaignId).toBe("cmp_999");
+      expect(input.sourceId).toBe("act_123");
+    });
+
+    it("ad create: --source-id BEFORE the ad set id resolves the ad set id, not the source value", async () => {
+      const api = stubToolsApi();
+      await metaCommand(
+        [
+          "ad",
+          "create",
+          "--source-id",
+          "act_123",
+          "as_888",
+          "--name",
+          "Ad",
+          "--creative-id",
+          "cr_1",
+          "--yes"
+        ],
+        ENV,
+        { confirmMutation: vi.fn(async () => true) }
+      );
+      const input = toolCalls(api)[0]?.body.input as Record<string, unknown>;
+      expect(input.adsetId).toBe("as_888");
+      expect(input.sourceId).toBe("act_123");
+    });
+
+    it("activate: --source-id BEFORE the entity id targets the CORRECT entity, never the source value", async () => {
+      const api = stubToolsApi();
+      // confirmActivate must match the RESOLVED entity id (the typed-confirm seam),
+      // proving the resolver picked cmp_777 and not act_123.
+      const confirmActivate = vi.fn(async () => "cmp_777");
+      await metaCommand(
+        ["campaign", "activate", "--source-id", "act_123", "cmp_777"],
+        ENV,
+        { confirmActivate }
+      );
+      const input = toolCalls(api)[0]?.body.input as Record<string, unknown>;
+      expect(input.entityId).toBe("cmp_777");
+      expect(input.sourceId).toBe("act_123");
+      expect(input.status).toBe("ACTIVE");
+    });
+
+    it("pause: --source-id BEFORE the entity id targets the CORRECT entity, never the source value", async () => {
+      const api = stubToolsApi();
+      await metaCommand(
+        ["adset", "pause", "--source-id", "act_123", "as_555"],
+        ENV,
+        { confirmMutation: vi.fn(async () => true) }
+      );
+      const input = toolCalls(api)[0]?.body.input as Record<string, unknown>;
+      expect(input.entityId).toBe("as_555");
+      expect(input.sourceId).toBe("act_123");
+      expect(input.status).toBe("PAUSED");
+    });
+
+    it("get: --source-id BEFORE the entity id resolves the entity id, not the source value", async () => {
+      const api = stubToolsApi();
+      await metaCommand(["ad", "get", "--source-id", "act_123", "120777"], ENV, {});
+      const input = toolCalls(api)[0]?.body.input as Record<string, unknown>;
+      expect(input.entityId).toBe("120777");
+      expect(input.sourceId).toBe("act_123");
+    });
+  });
 });
 
 function isRecordResult(value: unknown): boolean {

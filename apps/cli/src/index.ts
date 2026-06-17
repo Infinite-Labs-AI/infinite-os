@@ -6943,6 +6943,70 @@ function metaSourceIdFromArgs(args: string[]): string {
   return sourceId;
 }
 
+// Value-taking flags across the whole `meta` surface. The positional-id resolver
+// MUST skip both the flag AND its following value so that, e.g.,
+// `--source-id act_123 cmp_999` resolves to `cmp_999` (the entity id), NOT to
+// `act_123` (a flag value). Getting this wrong on `activate`/`pause` could target
+// the WRONG (money-spending) entity — this is a money-safety boundary.
+const META_VALUE_FLAGS = new Set<string>([
+  "--source-id",
+  "--source",
+  "--name",
+  "--objective",
+  "--daily-budget",
+  "--lifetime-budget",
+  "--bid-amount",
+  "--optimization-goal",
+  "--billing-event",
+  "--targeting-countries",
+  "--pixel-id",
+  "--custom-event-type",
+  "--start-time",
+  "--end-time",
+  "--creative-id",
+  "--page-id",
+  "--link-url",
+  "--body",
+  "--title",
+  "--description",
+  "--call-to-action",
+  "--instagram-user-id",
+  "--image-hash",
+  "--client-token",
+  "--fields",
+  "-l",
+  "--limit"
+]);
+
+// Resolve the positional entity id for a `meta <object> <action>` invocation.
+// Unlike the generic `firstPositionalArg`, this skips known value-taking flags
+// AND the value that follows them, so a flag value can never be mistaken for the
+// positional id regardless of argument ordering. `--flag=value` forms carry their
+// value inline (no separate token to skip). Boolean flags (`--yes`, `--json`, …)
+// take no value and are simply skipped.
+function metaPositionalId(rest: string[]): string | undefined {
+  for (let i = 0; i < rest.length; i += 1) {
+    const arg = rest[i];
+    if (arg.startsWith("--") && arg.includes("=")) {
+      // `--flag=value` — inline value, nothing to skip after it.
+      continue;
+    }
+    if (META_VALUE_FLAGS.has(arg)) {
+      // Skip this flag AND consume its value token so the value is never read
+      // as the positional id.
+      i += 1;
+      continue;
+    }
+    if (arg.startsWith("-")) {
+      // Any other flag (boolean like --yes/--json/--force/-y, or an unknown
+      // flag) — skip the flag itself; it carries no positional meaning.
+      continue;
+    }
+    return arg;
+  }
+  return undefined;
+}
+
 // Parse an integer-cents flag. Budgets/bids are INTEGER minor units (cents) in
 // the ad-account currency (5000 = $50.00). Reject non-integers up front so a
 // malformed amount never reaches the Graph POST.
@@ -7040,7 +7104,7 @@ export async function metaCommand(
     );
   }
   if (action === "get") {
-    const entityId = firstPositionalArg(rest);
+    const entityId = metaPositionalId(rest);
     if (!entityId) {
       throw new Error(`meta ${metaObject} get requires an entity id`);
     }
@@ -7101,7 +7165,7 @@ async function metaCreateCommand(
       ...(clientToken ? { clientToken } : {})
     };
   } else if (object === "adset") {
-    const campaignId = firstPositionalArg(rest);
+    const campaignId = metaPositionalId(rest);
     if (!campaignId) {
       throw new Error("meta adset create requires a campaign id (positional)");
     }
@@ -7160,7 +7224,7 @@ async function metaCreateCommand(
       ...(clientToken ? { clientToken } : {})
     };
   } else {
-    const adsetId = firstPositionalArg(rest);
+    const adsetId = metaPositionalId(rest);
     if (!adsetId) {
       throw new Error("meta ad create requires an ad set id (positional)");
     }
@@ -7197,7 +7261,7 @@ async function metaStatusCommand(
   options: MetaCommandOptions,
   ctx: { json: boolean; sourceId: string }
 ): Promise<unknown> {
-  const entityId = firstPositionalArg(rest);
+  const entityId = metaPositionalId(rest);
   if (!entityId) {
     throw new Error(`meta ${object} ${action} requires an entity id`);
   }

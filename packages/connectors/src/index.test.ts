@@ -1993,7 +1993,36 @@ describe("Meta Ads WRITE helpers", () => {
     url: string;
     method: string | undefined;
     authorization: string | null;
+    contentType: string | null;
+    // The decoded WRITE body. WRITE POSTs are form-encoded
+    // (application/x-www-form-urlencoded): each nested object/array field is a
+    // JSON STRING, so we URL-decode the form and JSON.parse any field whose
+    // value is a JSON object/array. Scalars (name/objective/budgets) stay as
+    // strings — assertions account for that. GET reads have no body → null.
     body: Record<string, unknown> | null;
+    // The raw form field map BEFORE JSON-parsing nested fields, so a test can
+    // assert that nested fields are sent as JSON STRINGS on the wire.
+    rawForm: Record<string, string> | null;
+  }
+
+  // Decode a form-encoded WRITE body. Mirrors the production `metaFormEncode`:
+  // every field is a string; nested-object/array fields are JSON strings, which
+  // we parse back so the shape assertions read naturally.
+  function decodeWriteBody(raw: string): { body: Record<string, unknown>; rawForm: Record<string, string> } {
+    const params = new URLSearchParams(raw);
+    const body: Record<string, unknown> = {};
+    const rawForm: Record<string, string> = {};
+    for (const [key, value] of params.entries()) {
+      rawForm[key] = value;
+      const trimmed = value.trim();
+      if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+        // A nested object/array field — sent as a JSON string per the wire format.
+        body[key] = JSON.parse(value);
+      } else {
+        body[key] = value;
+      }
+    }
+    return { body, rawForm };
   }
 
   function captureWrites(
@@ -2004,18 +2033,24 @@ describe("Meta Ads WRITE helpers", () => {
     return withMockFetch(
       (url, init) => {
         let body: Record<string, unknown> | null = null;
+        let rawForm: Record<string, string> | null = null;
         if (typeof init.body === "string") {
           try {
-            body = JSON.parse(init.body) as Record<string, unknown>;
+            const decoded = decodeWriteBody(init.body);
+            body = decoded.body;
+            rawForm = decoded.rawForm;
           } catch {
             body = null;
+            rawForm = null;
           }
         }
         const capture: CapturedWrite = {
           url,
           method: init.method,
           authorization: headerValue(init.headers, "Authorization"),
-          body
+          contentType: headerValue(init.headers, "Content-Type"),
+          body,
+          rawForm
         };
         captured.push(capture);
         return responder(capture);
@@ -2083,7 +2118,7 @@ describe("Meta Ads WRITE helpers", () => {
     );
   });
 
-  it("sends the documented Graph payload shapes for each create", async () => {
+  it("sends the documented Graph payload shapes for each create (form-encoded wire)", async () => {
     await captureWrites(
       () => jsonResponse({ id: "c1", status: "PAUSED" }),
       async (captured) => {
@@ -2092,13 +2127,18 @@ describe("Meta Ads WRITE helpers", () => {
           objective: "OUTCOME_SALES",
           dailyBudget: 5000
         });
+        // WIRE FORMAT: form-encoded, scalars verbatim (budgets become strings),
+        // nested arrays/objects are JSON STRINGS in their own field.
+        expect(captured[0].contentType).toBe("application/x-www-form-urlencoded");
         expect(captured[0].body).toEqual({
           name: "Launch",
           objective: "OUTCOME_SALES",
           status: "PAUSED",
           special_ad_categories: [],
-          daily_budget: 5000
+          daily_budget: "5000"
         });
+        // special_ad_categories must ride as a JSON STRING on the wire.
+        expect(captured[0].rawForm?.special_ad_categories).toBe("[]");
       }
     );
 
@@ -2114,16 +2154,24 @@ describe("Meta Ads WRITE helpers", () => {
           targetingCountries: ["US", "CA"],
           pixelId: "px_1"
         });
+        expect(captured[0].contentType).toBe("application/x-www-form-urlencoded");
         expect(captured[0].body).toEqual({
           name: "AdSet",
           campaign_id: "c1",
           optimization_goal: "OFFSITE_CONVERSIONS",
           billing_event: "IMPRESSIONS",
           status: "PAUSED",
-          daily_budget: 2500,
+          daily_budget: "2500",
           targeting: { geo_locations: { countries: ["US", "CA"] } },
           promoted_object: { pixel_id: "px_1", custom_event_type: "PURCHASE" }
         });
+        // targeting + promoted_object ride as JSON STRINGS on the wire.
+        expect(captured[0].rawForm?.targeting).toBe(
+          JSON.stringify({ geo_locations: { countries: ["US", "CA"] } })
+        );
+        expect(captured[0].rawForm?.promoted_object).toBe(
+          JSON.stringify({ pixel_id: "px_1", custom_event_type: "PURCHASE" })
+        );
       }
     );
 
@@ -2141,6 +2189,7 @@ describe("Meta Ads WRITE helpers", () => {
           description: "Limited time offer",
           callToAction: "SHOP_NOW"
         });
+        expect(captured[0].contentType).toBe("application/x-www-form-urlencoded");
         expect(captured[0].body).toEqual({
           name: "LinkCreative",
           object_story_spec: {
@@ -2155,6 +2204,20 @@ describe("Meta Ads WRITE helpers", () => {
             }
           }
         });
+        // object_story_spec is a single JSON-string field on the wire.
+        expect(captured[0].rawForm?.object_story_spec).toBe(
+          JSON.stringify({
+            page_id: "page_1",
+            link_data: {
+              link: "https://example.com",
+              image_hash: "hash_abc",
+              message: "50% off everything!",
+              name: "Shop Now",
+              description: "Limited time offer",
+              call_to_action: { type: "SHOP_NOW", value: { link: "https://example.com" } }
+            }
+          })
+        );
       }
     );
 
@@ -2192,6 +2255,8 @@ describe("Meta Ads WRITE helpers", () => {
           creative: { creative_id: "cr1" },
           status: "PAUSED"
         });
+        // creative wraps {creative_id} as a JSON STRING on the wire.
+        expect(captured[0].rawForm?.creative).toBe(JSON.stringify({ creative_id: "cr1" }));
       }
     );
   });
@@ -2232,6 +2297,96 @@ describe("Meta Ads WRITE helpers", () => {
           await expect(
             createMetaCampaign(metaWriteCredential, { name: "X", objective: "OUTCOME_TRAFFIC" })
           ).resolves.toMatchObject({ ok: true, id: "c1", status: null });
+        }
+      );
+    });
+  });
+
+  describe("enum normalization + allow-list validation (FIX 3)", () => {
+    it("uppercases objective / optimizationGoal / billingEvent / customEventType / callToAction before the POST", async () => {
+      // Campaign objective lowercase → uppercased on the wire.
+      await captureWrites(
+        () => jsonResponse({ id: "c1", status: "PAUSED" }),
+        async (captured) => {
+          await createMetaCampaign(metaWriteCredential, {
+            name: "X",
+            objective: "outcome_sales"
+          });
+          expect(captured[0].body?.objective).toBe("OUTCOME_SALES");
+        }
+      );
+
+      // Ad set goal/billing/customEventType lowercase → uppercased.
+      await captureWrites(
+        () => jsonResponse({ id: "as1", status: "PAUSED" }),
+        async (captured) => {
+          await createMetaAdSet(metaWriteCredential, {
+            name: "AS",
+            campaignId: "c1",
+            optimizationGoal: "offsite_conversions",
+            billingEvent: "impressions",
+            pixelId: "px_1",
+            customEventType: "purchase"
+          });
+          expect(captured[0].body?.optimization_goal).toBe("OFFSITE_CONVERSIONS");
+          expect(captured[0].body?.billing_event).toBe("IMPRESSIONS");
+          expect(captured[0].body?.promoted_object).toEqual({
+            pixel_id: "px_1",
+            custom_event_type: "PURCHASE"
+          });
+        }
+      );
+
+      // Creative call-to-action lowercase → uppercased inside link_data.
+      await captureWrites(
+        () => jsonResponse({ id: "cr1" }),
+        async (captured) => {
+          await createMetaCreative(metaWriteCredential, {
+            name: "CR",
+            pageId: "page_1",
+            imageHash: "hash_abc",
+            linkUrl: "https://example.com",
+            callToAction: "shop_now"
+          });
+          const oss = captured[0].body?.object_story_spec as Record<string, unknown>;
+          const linkData = oss.link_data as Record<string, unknown>;
+          expect((linkData.call_to_action as Record<string, unknown>).type).toBe("SHOP_NOW");
+        }
+      );
+    });
+
+    it("rejects an UNKNOWN enum value with a clear non-retryable error (never POSTs)", async () => {
+      await withMockFetch(
+        () => jsonResponse({ id: "should-not-happen" }),
+        async () => {
+          await expect(
+            createMetaCampaign(metaWriteCredential, { name: "X", objective: "OUTCOME_BOGUS" })
+          ).rejects.toMatchObject({ code: "provider_api_error", retryable: false });
+          await expect(
+            createMetaAdSet(metaWriteCredential, {
+              name: "AS",
+              campaignId: "c1",
+              optimizationGoal: "NOT_A_GOAL",
+              billingEvent: "IMPRESSIONS"
+            })
+          ).rejects.toMatchObject({ code: "provider_api_error", retryable: false });
+          await expect(
+            createMetaAdSet(metaWriteCredential, {
+              name: "AS",
+              campaignId: "c1",
+              optimizationGoal: "LINK_CLICKS",
+              billingEvent: "NOT_A_BILLING_EVENT"
+            })
+          ).rejects.toMatchObject({ code: "provider_api_error", retryable: false });
+          await expect(
+            createMetaCreative(metaWriteCredential, {
+              name: "CR",
+              pageId: "page_1",
+              imageHash: "hash_abc",
+              linkUrl: "https://example.com",
+              callToAction: "NOT_A_CTA"
+            })
+          ).rejects.toMatchObject({ code: "provider_api_error", retryable: false });
         }
       );
     });

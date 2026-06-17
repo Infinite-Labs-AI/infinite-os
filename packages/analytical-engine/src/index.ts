@@ -1381,35 +1381,96 @@ async function syncSourceNow(
 // enforces create-always-PAUSED + non-retryable writes; here we resolve the
 // live credential, audit, and dedup.
 
-// Reuse integration_audit_log as a durable, already-provisioned dedup ledger:
-// the analytical-engine does not own a bespoke dedup table, so a prior SUCCEEDED
-// create row carrying the same client_token IS the dedup record. This keeps the
-// dedup keyed by (workspace_id, source_id, client_token) with no new migration.
-async function findMetaDedup(
+// ATOMIC dedup against the dedicated meta_write_dedup table (migration 0028),
+// keyed by (workspace_id, source_id, client_token) with a UNIQUE index. The old
+// approach scanned integration_audit_log non-atomically (check-then-POST with no
+// backing constraint), so two concurrent same-token creates could both POST and
+// double-spend. Now we CLAIM the key BEFORE the Graph POST: the DB rejects a
+// second concurrent claim, so exactly one create can POST.
+//
+// clientToken is OPTIONAL (opt-out): a tokenless create writes NO dedup row and
+// is intentionally NOT deduped — the caller accepts that a retried tokenless
+// create may POST twice. Only tokenful creates are atomic + idempotent.
+interface MetaDedupClaim {
+  // We won the claim (no prior row) → safe to POST. claimId backfilled on success.
+  won: boolean;
+  claimId: string | null;
+  // The existing entity id when another claim already holds the key (deduped).
+  existingId: string | null;
+}
+
+// Attempt to claim the dedup key. `insert ... on conflict do nothing returning`
+// is atomic: at most one concurrent caller gets a row back. On conflict we read
+// the existing row's entity_id (may be null if the winner is still mid-flight,
+// in which case we still dedup to avoid a double-POST).
+async function claimMetaDedup(
   db: InfiniteOsDb,
   workspaceId: string,
   sourceId: string,
+  entity: MetaWriteEntity,
   clientToken: string | undefined
-): Promise<string | undefined> {
+): Promise<MetaDedupClaim | undefined> {
   if (!clientToken) {
+    // Opt-out: no token → no dedup row, no idempotency guarantee.
     return undefined;
   }
-  const row = await db.one<{ entity_id: string | null }>(
+  const claimId = `mwd_${randomUUID()}`;
+  const claimed = await db.one<{ id: string }>(
     `
-      select details->>'entity_id' as entity_id
-      from integration_audit_log
-      where workspace_id = $1
-        and source_id = $2
-        and status = 'succeeded'
-        and details->>'client_token' = $3
-        and details->>'entity_id' is not null
-      order by created_at desc
+      insert into meta_write_dedup (id, workspace_id, source_id, client_token, entity)
+      values ($1, $2, $3, $4, $5)
+      on conflict (workspace_id, source_id, client_token) do nothing
+      returning id
+    `,
+    [claimId, workspaceId, sourceId, clientToken, entity]
+  );
+  if (claimed) {
+    return { won: true, claimId: claimed.id, existingId: null };
+  }
+  // Lost the race (or a prior create already holds this token): return the
+  // existing entity id (deduped). A null entity_id means the winner is still
+  // mid-flight — we still dedup rather than risk a second POST.
+  const existing = await db.one<{ entity_id: string | null }>(
+    `
+      select entity_id
+      from meta_write_dedup
+      where workspace_id = $1 and source_id = $2 and client_token = $3
       limit 1
     `,
     [workspaceId, sourceId, clientToken]
   );
-  const entityId = row?.entity_id;
-  return typeof entityId === "string" && entityId.trim() !== "" ? entityId : undefined;
+  const existingId =
+    typeof existing?.entity_id === "string" && existing.entity_id.trim() !== ""
+      ? existing.entity_id
+      : null;
+  return { won: false, claimId: null, existingId };
+}
+
+// Backfill the claim row with the created entity id once the POST succeeds, so a
+// later dedup hit can return the concrete id (not just "claimed").
+async function resolveMetaDedup(
+  db: InfiniteOsDb,
+  claimId: string | null,
+  entityId: string
+): Promise<void> {
+  if (!claimId) {
+    return;
+  }
+  await db.query(
+    `update meta_write_dedup set entity_id = $2, resolved_at = now() where id = $1`,
+    [claimId, entityId]
+  );
+}
+
+// Release an unresolved claim when the POST fails, so a transient failure does
+// not permanently poison the token (a later retry with the same token can claim
+// again). Only deletes rows still un-resolved (entity_id is null) to never drop a
+// successful create's dedup record.
+async function releaseMetaDedup(db: InfiniteOsDb, claimId: string | null): Promise<void> {
+  if (!claimId) {
+    return;
+  }
+  await db.query(`delete from meta_write_dedup where id = $1 and entity_id is null`, [claimId]);
 }
 
 // Write the operator audit row. details NEVER carries the access token and NEVER
@@ -1506,10 +1567,12 @@ async function runMetaCreate(
   const clientToken = optionalString(input, "clientToken");
   const presence = metaBudgetPresence(input);
 
-  // INVARIANT 4: check-before-create. A repeat with the same client token
-  // returns the existing id with deduped:true and never POSTs again.
-  const existingId = await findMetaDedup(db, context.workspaceId, sourceId, clientToken);
-  if (existingId) {
+  // INVARIANT 4: ATOMIC claim-before-create. Claiming the dedup key first means a
+  // concurrent same-token create gets a unique violation and never POSTs. On a
+  // dedup hit we return the existing id with deduped:true and never POST again.
+  const claim = await claimMetaDedup(db, context.workspaceId, sourceId, entity, clientToken);
+  if (claim && !claim.won) {
+    const existingId = claim.existingId;
     await metaAuditLog(db, context, sourceId, action, "succeeded", {
       action,
       entity,
@@ -1533,6 +1596,9 @@ async function runMetaCreate(
   try {
     result = await write(credential);
   } catch (error) {
+    // Release the un-resolved claim so a transient failure does not poison the
+    // token (a later retry with the same token can claim again).
+    await releaseMetaDedup(db, claim?.claimId ?? null);
     // INVARIANT 1/6: audit a failure (incl. a money_safety_violation when Graph
     // echoed ACTIVE) WITHOUT the token or raw spend, then surface the error.
     await metaAuditLog(db, context, sourceId, action, "failed", {
@@ -1545,6 +1611,10 @@ async function runMetaCreate(
     });
     throw error;
   }
+
+  // POST succeeded — backfill the claim row with the concrete entity id so a
+  // later dedup hit returns the id (not just "claimed").
+  await resolveMetaDedup(db, claim?.claimId ?? null, result.id);
 
   await metaAuditLog(db, context, sourceId, action, "succeeded", {
     action,
