@@ -898,6 +898,84 @@ describe("live provider clients", () => {
     });
   });
 
+  it("emits the IDENTICAL default Meta Ads insights request (level=campaign, time_increment=1)", async () => {
+    // Phase 0 Change 2 regression guard: `level`/`time_increment` are now resolved through
+    // defaults instead of inline literals. With no SyncRequest override the emitted insights
+    // request MUST be byte-for-byte what it was before (campaign grain, daily increment).
+    // If a future edit changes the default, or drops level/time_increment, this fails.
+    const requests: Array<{ url: string }> = [];
+    await withMockFetch(async (url) => {
+      requests.push({ url });
+      return jsonResponse({ data: [], paging: {} });
+    }, async () => {
+      const db = fakeDb({
+        credential: {
+          credential_kind: "marketing_api_access_token",
+          encrypted_payload: encryptedCredential({
+            mode: "live",
+            adAccountId: "1234567890",
+            accessToken: "meta-access-token",
+            apiVersion: "v24.0"
+          })
+        }
+      });
+      const connector = connectorFor("meta_ads");
+      await connector.extract(db, request("meta_ads"), {
+        cursorKey: "meta_ads_campaign_daily",
+        cursorStart: "2026-06-01T00:00:00.000Z",
+        cursorEnd: "2026-06-03T00:00:00.000Z",
+        refreshWindowDays: 30,
+        mode: "live"
+      });
+
+      const insightsUrl = new URL(requests[0]?.url ?? "");
+      expect(insightsUrl.searchParams.get("level")).toBe("campaign");
+      expect(insightsUrl.searchParams.get("time_increment")).toBe("1");
+      expect(insightsUrl.searchParams.get("fields")).toBe(
+        "campaign_id,campaign_name,date_start,spend,clicks,impressions,reach,cpm,cpc,ctr"
+      );
+      expect(insightsUrl.searchParams.get("limit")).toBe("100");
+    });
+  });
+
+  it("threads Meta Ads insights grain overrides through to the request (plumbing is real)", async () => {
+    // Proves the params are genuinely wired (not dead defaults): a future phase can set
+    // adset grain / hourly increment via the SyncRequest and the call honors them.
+    const requests: Array<{ url: string }> = [];
+    await withMockFetch(async (url) => {
+      requests.push({ url });
+      return jsonResponse({ data: [], paging: {} });
+    }, async () => {
+      const db = fakeDb({
+        credential: {
+          credential_kind: "marketing_api_access_token",
+          encrypted_payload: encryptedCredential({
+            mode: "live",
+            adAccountId: "1234567890",
+            accessToken: "meta-access-token",
+            apiVersion: "v24.0"
+          })
+        }
+      });
+      const connector = connectorFor("meta_ads");
+      await connector.extract(
+        db,
+        { ...request("meta_ads"), metaAdsInsightsLevel: "adset", metaAdsInsightsTimeIncrement: "all_days" },
+        {
+          cursorKey: "meta_ads_campaign_daily",
+          cursorStart: "2026-06-01T00:00:00.000Z",
+          cursorEnd: "2026-06-03T00:00:00.000Z",
+          refreshWindowDays: 30,
+          mode: "live"
+        }
+      );
+
+      const insightsUrl = new URL(requests[0]?.url ?? "");
+      expect(insightsUrl.searchParams.get("level")).toBe("adset");
+      expect(insightsUrl.searchParams.get("time_increment")).toBe("all_days");
+    });
+  });
+
   it("uses Meta Ads backfill request options when planning and extracting", async () => {
     const requests: Array<{ url: string; authorization: string | null }> = [];
     await withMockFetch(async (url, init) => {

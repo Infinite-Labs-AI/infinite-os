@@ -923,9 +923,9 @@ async function metaCampaignJourneyRows(
         sum(meta_ads_spend) as meta_ads_spend,
         sum(impressions) as impressions,
         sum(reach) as reach,
-        avg(cpm) as cpm,
-        avg(cpc) as cpc,
-        avg(ctr) as ctr
+        sum(meta_ads_spend) / nullif(sum(impressions), 0) * 1000 as cpm,
+        sum(meta_ads_spend) / nullif(sum(meta_ads_clicks), 0) as cpc,
+        sum(meta_ads_clicks) / nullif(sum(impressions), 0) as ctr
       from queryable.vw_meta_ads_campaign_daily
       where workspace_id = $1
         and ($2::date is null or occurred_on >= $2::date)
@@ -1046,7 +1046,11 @@ function metaJourneyOrderExpression(metric: string): string {
     return "sum(reach)";
   }
   if (metric === "ctr") {
-    return "avg(ctr)";
+    // Rank by the volume-weighted CTR recomputed from summed bases (matching
+    // aggregateExpression()/metaCampaignJourneyRows()), NOT avg(ctr) per-row.
+    // avg(ctr) would weight every campaign×day equally regardless of impression
+    // volume, so "top campaigns by CTR" would surface low-volume noise.
+    return "sum(meta_ads_clicks) / nullif(sum(impressions), 0)";
   }
   return "sum(meta_ads_clicks)";
 }
@@ -2965,7 +2969,15 @@ async function providerTruthRows(
       [workspaceId, sourceIdFilter ?? null, limit]
     );
   }
-  if (metric === "meta_ads_spend" || metric === "meta_ads_clicks") {
+  if (
+    metric === "meta_ads_spend" ||
+    metric === "meta_ads_clicks" ||
+    metric === "impressions" ||
+    metric === "reach" ||
+    metric === "cpm" ||
+    metric === "cpc" ||
+    metric === "ctr"
+  ) {
     return db.query(
       `
         select id, source_id, ad_account_id, campaign_id, campaign_name, occurred_on,
@@ -3242,7 +3254,17 @@ export function metricView(metric: string): string {
   if (metric === "posthog_event_count") return "queryable.vw_posthog_events";
   if (metric === "recognized_revenue") return "queryable.vw_revenue_by_source";
   if (metric === "shopify_gross_sales" || metric === "shopify_order_count") return "queryable.vw_shopify_orders";
-  if (metric === "meta_ads_spend" || metric === "meta_ads_clicks") return "queryable.vw_meta_ads_campaign_daily";
+  if (
+    metric === "meta_ads_spend" ||
+    metric === "meta_ads_clicks" ||
+    metric === "impressions" ||
+    metric === "reach" ||
+    metric === "cpm" ||
+    metric === "cpc" ||
+    metric === "ctr"
+  ) {
+    return "queryable.vw_meta_ads_campaign_daily";
+  }
   if (metric === "x_public_engagement") return "queryable.vw_x_post_public_metrics";
   if (metric === "x_post_count" || metric === "x_comment_count") return "queryable.vw_x_authored_activity";
   if (metric === "x_follower_count") return "queryable.vw_x_profile_public_metrics";
@@ -3274,6 +3296,19 @@ export function aggregateExpression(metric: string, column: string): string {
   }
   if (metric === "average_session_duration") {
     return "case when sum(sessions) = 0 then null else sum(average_session_duration * sessions) / sum(sessions) end";
+  }
+  // Meta Ads ratio metrics are NON-ADDITIVE: they MUST be recomputed from the summed
+  // numerator/denominator over the campaign×day grain, never averaged per-row (avg(cpm)
+  // would weight every campaign-day equally regardless of spend/impression volume, which
+  // is arithmetically wrong). nullif(...,0) guards divide-by-zero -> NULL.
+  if (metric === "cpm") {
+    return "sum(meta_ads_spend) / nullif(sum(impressions), 0) * 1000";
+  }
+  if (metric === "cpc") {
+    return "sum(meta_ads_spend) / nullif(sum(meta_ads_clicks), 0)";
+  }
+  if (metric === "ctr") {
+    return "sum(meta_ads_clicks) / nullif(sum(impressions), 0)";
   }
   return `sum(${column})`;
 }
@@ -3400,6 +3435,18 @@ export function caveatsForMetric(metric: string): string[] {
   if (metric === "posthog_event_count") return ["source_native_event_counts"];
   if (metric === "shopify_gross_sales" || metric === "shopify_order_count") return ["order_level_shopify_commerce_authority"];
   if (metric === "meta_ads_spend" || metric === "meta_ads_clicks") return ["read_only_marketing_api_reporting"];
+  if (metric === "impressions") return ["read_only_marketing_api_reporting"];
+  // reach is APPROXIMATE at campaign×day grain: summing daily reach overcounts unique
+  // people (someone reached on two days is counted twice). We surface the daily-reach
+  // sum but flag it so it is never claimed as exact de-duplicated unique reach.
+  if (metric === "reach") {
+    return ["read_only_marketing_api_reporting", "reach_is_approximate_summed_daily_reach_overcounts_unique_people"];
+  }
+  // Ratio metrics are recomputed from summed bases (see aggregateExpression). The caveat
+  // records that these are derived/recomputed ratios, not stored per-row averages.
+  if (metric === "cpm" || metric === "cpc" || metric === "ctr") {
+    return ["read_only_marketing_api_reporting", "ratio_recomputed_from_summed_bases"];
+  }
   if (metric === "site_visitors") return ["source_native_attribution_only"];
   if (metric === "page_views_by_page") return ["source_native_attribution_only"];
   if (metric === "page_views" || metric === "new_users" || metric === "engaged_sessions") {
@@ -3434,7 +3481,17 @@ function sourceAuthorityForMetric(metric: string): string {
   if (metric === "recognized_revenue") return "Stripe is the first-phase revenue authority";
   if (metric === "posthog_event_count") return "PostHog event records are the first-phase event authority";
   if (metric === "shopify_gross_sales" || metric === "shopify_order_count") return "Shopify order records are the first-phase commerce authority";
-  if (metric === "meta_ads_spend" || metric === "meta_ads_clicks") return "Meta Ads campaign insights are the first-phase paid media authority";
+  if (
+    metric === "meta_ads_spend" ||
+    metric === "meta_ads_clicks" ||
+    metric === "impressions" ||
+    metric === "reach" ||
+    metric === "cpm" ||
+    metric === "cpc" ||
+    metric === "ctr"
+  ) {
+    return "Meta Ads campaign insights are the first-phase paid media authority";
+  }
   if (metric === "site_visitors") return "GA4 is the first-phase traffic authority";
   if (
     metric === "page_views_by_page" ||
@@ -3458,7 +3515,17 @@ function drilldownForMetric(metric: string): string {
   if (metric === "recognized_revenue") return "drilldown.stripe_revenue_provider_rows";
   if (metric === "posthog_event_count") return "drilldown.posthog_event_provider_rows";
   if (metric === "shopify_gross_sales" || metric === "shopify_order_count") return "drilldown.shopify_order_rows";
-  if (metric === "meta_ads_spend" || metric === "meta_ads_clicks") return "drilldown.meta_ads_campaign_rows";
+  if (
+    metric === "meta_ads_spend" ||
+    metric === "meta_ads_clicks" ||
+    metric === "impressions" ||
+    metric === "reach" ||
+    metric === "cpm" ||
+    metric === "cpc" ||
+    metric === "ctr"
+  ) {
+    return "drilldown.meta_ads_campaign_rows";
+  }
   if (metric === "site_visitors") return "drilldown.ga4_traffic_provider_rows";
   if (metric === "page_views_by_page") return "drilldown.ga4_page_provider_rows";
   if (
