@@ -7,6 +7,7 @@ import { getTurnState, type TurnState } from "../app/turn-store.js";
 import { parseAnsiSegments } from "../lib/ansi-segments.js";
 import { displayWidth, padEndCells, truncateCells } from "../lib/display-width.js";
 import { resolveTheme, type Theme } from "../theme.js";
+import { ROCKET_BANNER_ROWS, RocketBanner } from "./rocket-banner.js";
 import {
   FACE_TICK_MS,
   formatInfiniteBusyIndicator,
@@ -19,6 +20,13 @@ export interface InkTranscriptAppProps {
   columns?: number;
   indicatorTick?: number;
   nowMs?: number;
+  /**
+   * Render the home-screen rocket mascot (fixed `ROCKET_BANNER_ROWS` tall) in
+   * the empty-transcript state instead of a blank row. Must be passed
+   * identically to the live render and to `inkTranscriptRowCount` so the
+   * composer's native-cursor row prediction stays exact.
+   */
+  homeBanner?: boolean;
   prompt?: {
     placeholder?: string;
     text?: string;
@@ -105,6 +113,7 @@ export function useInfiniteTranscriptClock({
 export function InkTranscriptApp({
   busy: busyOverride = false,
   columns = 88,
+  homeBanner = false,
   indicatorTick,
   nowMs,
   prompt,
@@ -164,8 +173,17 @@ export function InkTranscriptApp({
             </Text>
           );
         })
+      ) : homeBanner ? (
+        // Empty transcript on the interactive home screen: the rocket mascot
+        // (fixed ROCKET_BANNER_ROWS tall). It replaces the old welcome line —
+        // the input composer's placeholder already shows "Type a message, …",
+        // so the banner doesn't repeat the hint.
+        <RocketBanner theme={t} />
       ) : (
-        <Text color={t.color.muted} wrap="truncate-end">{`${t.brand.tool} ${t.brand.welcome}`}</Text>
+        // Empty transcript elsewhere (progress renders, non-home): a single
+        // BLANK row — exactly one row so it matches inkTranscriptRowCount()'s
+        // reservation and the predicted composer/native-cursor row.
+        <Text wrap="truncate-end">{" "}</Text>
       )}
       <InkStatusRule
         busy={busy}
@@ -199,6 +217,7 @@ export function renderInkTranscriptToString(
 export function inkTranscriptRowCount({
   busy: busyOverride = false,
   columns = 88,
+  homeBanner = false,
   indicatorTick = 0,
   nowMs = Date.now(),
   showComposer = true,
@@ -212,11 +231,14 @@ export function inkTranscriptRowCount({
   const width = clampColumns(columns);
   const state = transcript?.state ?? getTurnState();
   const busy = busyOverride || isInfiniteTurnBusy(state);
-  const transcriptRows = Math.max(1, renderTranscriptLines(transcript ?? { state }, {
+  // Mirror the empty-transcript render branch exactly: the home banner renders
+  // ROCKET_BANNER_ROWS rows, everything else falls back to a single blank row.
+  const lineCount = renderTranscriptLines(transcript ?? { state }, {
     columns: width,
     nowMs,
     theme: t
-  }).length);
+  }).length;
+  const transcriptRows = lineCount > 0 ? lineCount : homeBanner ? ROCKET_BANNER_ROWS : 1;
   const statusRows = statusRowStrings({
     busy,
     columns: width,
