@@ -54,6 +54,7 @@ import {
   parseSimpleYaml,
   readActiveProjectId,
   writeActiveProjectId,
+  clearActiveProjectId,
   readDefaultProjectId,
   writeDefaultProjectId,
   clearDefaultProjectId,
@@ -5879,7 +5880,30 @@ function shouldOfferLaunchAfterSetup(result: unknown, env: CliEnv, interactiveOv
   return false;
 }
 
-async function projectCommand(args: string[], env: CliEnv): Promise<unknown> {
+export interface ProjectCommandOptions {
+  // Confirm seam for `project delete`. Defaults to an interactive yes/no prompt
+  // on a TTY; unit tests inject a deterministic confirm without juggling stdin.
+  confirmDelete?: (project: { id: string; name: string }) => Promise<boolean>;
+}
+
+// `apiRequest` throws `new Error(JSON.stringify({ ok:false, error:{ code } }))`
+// on a non-2xx response. Detect the API's `project_not_found` envelope so the CLI
+// can surface a friendly message instead of raw JSON.
+function isProjectNotFoundError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  try {
+    const payload = JSON.parse(error.message) as { error?: { code?: string } };
+    return payload?.error?.code === "project_not_found";
+  } catch {
+    return false;
+  }
+}
+
+export async function projectCommand(
+  args: string[],
+  env: CliEnv,
+  options: ProjectCommandOptions = {}
+): Promise<unknown> {
   const sub = args[0];
   if (sub === "new") {
     const name = args.slice(1).join(" ").trim();
@@ -5969,7 +5993,103 @@ async function projectCommand(args: string[], env: CliEnv): Promise<unknown> {
       defaultProjectId: defaultProjectId ?? null
     };
   }
-  throw new Error("Usage: infinite project <new|list|use|current|default>");
+  if (sub === "delete" || sub === "rm") {
+    const rest = args.slice(1);
+    const flags = new Set(rest.filter((arg) => arg.startsWith("--")));
+    // `-y` is a single-dash short flag, so it never lands in `flags` (which only
+    // collects `--` tokens). Match it against the raw args instead.
+    const skipConfirm = flags.has("--yes") || flags.has("--force") || rest.includes("-y");
+    const idOrName = rest
+      .filter((arg) => !arg.startsWith("--") && arg !== "-y")
+      .join(" ")
+      .trim();
+    if (!idOrName) throw new Error("project delete requires a name or id");
+    // Resolve name -> id against the live list (same lookup as `project use`).
+    const res = (await apiRequest(`/projects`, env, { operator: true, omitWorkspace: true })) as {
+      projects: Array<{ id: string; name: string }>;
+    };
+    const match = res.projects.find((p) => p.id === idOrName || p.name === idOrName);
+    if (!match) throw new Error(`Unknown project: ${idOrName}`);
+    // Refuse to delete the last remaining project — a workspace-less install is a
+    // broken state (no active pin can ever resolve).
+    if (res.projects.length <= 1) {
+      return {
+        ok: false,
+        section: "project_delete" as const,
+        error: { code: "cannot_delete_last_project" },
+        name: match.name,
+        id: match.id
+      };
+    }
+    // Confirm unless `--yes`/`--force`. Non-interactive without a skip flag is a
+    // refusal (never silently delete in a script).
+    if (!skipConfirm) {
+      const interactive = input.isTTY === true && env.GROWTH_OS_CLI_NONINTERACTIVE !== "1";
+      const confirm =
+        options.confirmDelete ??
+        ((project) =>
+          promptYesNo(
+            `Delete project "${project.name}" (${project.id})? This permanently removes its synced data, connections, chats, and reports. This cannot be undone.`,
+            false,
+            { io: { input, output: errorOutput } }
+          ));
+      if (!options.confirmDelete && !interactive) {
+        throw new Error(
+          `Refusing to delete "${match.name}" without confirmation. Re-run with --yes to confirm.`
+        );
+      }
+      const confirmed = await confirm(match);
+      if (!confirmed) {
+        return {
+          ok: false,
+          section: "project_delete" as const,
+          cancelled: true,
+          name: match.name,
+          id: match.id
+        };
+      }
+    }
+    try {
+      await apiRequest(`/projects/${encodeURIComponent(match.id)}`, env, {
+        method: "DELETE",
+        operator: true,
+        omitWorkspace: true
+      });
+    } catch (error) {
+      // Friendly 404 if the project vanished between the list lookup and the
+      // DELETE (another operator/tab raced us). apiRequest throws a JSON-encoded
+      // error envelope on non-2xx.
+      if (isProjectNotFoundError(error)) {
+        throw new Error(`Unknown project: ${idOrName}`);
+      }
+      throw error;
+    }
+    // Local pointer cleanup: the active pin and persisted default are client-side
+    // (`~/.growth-os/state.json`) — clear either if it pointed at the deleted id.
+    const clearedActive = readActiveProjectId(env as NodeJS.ProcessEnv) === match.id;
+    if (clearedActive) {
+      clearActiveProjectId(env as NodeJS.ProcessEnv);
+    }
+    const clearedDefault = readDefaultProjectId(env as NodeJS.ProcessEnv) === match.id;
+    if (clearedDefault) {
+      clearDefaultProjectId(env as NodeJS.ProcessEnv);
+    }
+    // Drop the deleted project from the in-memory `@name`/completion cache.
+    projectListCache = projectListCache.filter((p) => p.id !== match.id);
+    if (activeProjectLabel === match.name) {
+      activeProjectLabel = undefined;
+    }
+    return {
+      ok: true,
+      section: "project_delete" as const,
+      deleted: true,
+      id: match.id,
+      name: match.name,
+      clearedActivePin: clearedActive,
+      clearedDefault
+    };
+  }
+  throw new Error("Usage: infinite project <new|list|use|current|default|delete>");
 }
 
 async function projectDefaultCommand(args: string[], env: CliEnv): Promise<unknown> {
@@ -8062,7 +8182,51 @@ export function renderCliResult(result: unknown): string {
   if (isProjectUseResult(result)) {
     return renderProjectUseResult(result);
   }
+  if (isProjectDeleteResult(result)) {
+    return renderProjectDeleteResult(result);
+  }
   return JSON.stringify(result, null, 2);
+}
+
+interface ProjectDeleteResult {
+  ok?: boolean;
+  section: "project_delete";
+  name: string;
+  id: string;
+  deleted?: boolean;
+  cancelled?: boolean;
+  clearedActivePin?: boolean;
+  clearedDefault?: boolean;
+  error?: { code?: string };
+}
+
+function isProjectDeleteResult(result: unknown): result is ProjectDeleteResult {
+  return (
+    isRecord(result) &&
+    result.section === "project_delete" &&
+    typeof result.name === "string" &&
+    typeof result.id === "string"
+  );
+}
+
+export function renderProjectDeleteResult(result: ProjectDeleteResult): string {
+  if (result.error?.code === "cannot_delete_last_project") {
+    return (
+      `Cannot delete "${result.name}" — it is the last remaining project.\n` +
+      `Create another project first (\`infinite project new <name>\`), then delete this one.`
+    );
+  }
+  if (result.cancelled) {
+    return `Cancelled — "${result.name}" was not deleted.`;
+  }
+  const lines = [`Deleted project: ${result.name} (${result.id})`];
+  if (result.clearedActivePin) {
+    lines.push("Cleared the active project pin (it pointed at the deleted project).");
+  }
+  if (result.clearedDefault) {
+    lines.push("Cleared the persisted default project (it pointed at the deleted project).");
+  }
+  return lines.join("\n");
 }
 
 function isProjectUseResult(result: unknown): result is {
