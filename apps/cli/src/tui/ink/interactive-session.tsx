@@ -6,6 +6,15 @@ import { Box, Text, render, renderToString, useApp, useCursor, useInput, useStdi
 
 import type { ChatProgressEvent } from "@infinite-os/llm-controller";
 
+// Type-only import (erased at build, no runtime cycle): the in-chat /connect
+// wizard descriptor + decision are owned by index.ts (which owns the registry /
+// copy / dispatch helpers). The TUI only renders them and drives raw-mode input.
+import type {
+  ConnectSetupDescriptor,
+  ConnectWizardDecision,
+  ConnectWizardField
+} from "../../index.js";
+
 import { turnController } from "../app/turn-controller.js";
 import { getTurnState, subscribeTurnState, type TurnState } from "../app/turn-store.js";
 import { TYPING_IDLE_MS } from "../config/timing.js";
@@ -116,6 +125,21 @@ export interface CompletionOptions {
 
 export interface InkInteractiveSessionAppProps {
   columns?: number;
+  // In-chat /connect wizard (#20). Given a submitted line, decides whether it is a
+  // token-provider connect (returns a `wizard` descriptor the TUI renders as a
+  // masked field loop), a deferred provider (returns a `note` line to show), or
+  // nothing of interest (`none`/undefined → normal routing). Owned by index.ts so
+  // the registry/copy/dispatch helpers stay there; the TUI only renders + collects.
+  connectWizard?: (line: string) => ConnectWizardDecision | undefined;
+  // Build the leading-slash `/connect <provider> <name> <json>` dispatch line on
+  // final confirm (index.ts's `buildConnectDispatchLine`, which owns normalization
+  // + JSON.stringify). Kept on the index.ts side so the secret normalization isn't
+  // duplicated in the TUI.
+  buildConnectDispatch?: (
+    provider: string,
+    connectionName: string,
+    collected: Record<string, string>
+  ) => string;
   /** Live agent label for the active project (e.g. `() => "Infinite — Acme"`). */
   getAgentTitle?: () => string | undefined;
   getCompletions?: (value: string) => readonly CompletionSuggestion[];
@@ -241,6 +265,8 @@ export function buildProjectSelectionPrompt(selection: {
 
 export function InkInteractiveSessionApp({
   columns = 88,
+  connectWizard,
+  buildConnectDispatch,
   getAgentTitle,
   getCompletions,
   initialInputCursor,
@@ -280,6 +306,23 @@ export function InkInteractiveSessionApp({
     prompt: InkInteractiveSelectionPrompt;
     selectedIndex: number;
   } | null>(null);
+  // In-chat /connect wizard (#20). `pendingFieldPrompt` drives the masked field
+  // loop. `collected` holds committed field values IN MEMORY ONLY — including the
+  // secret; it never flows to the transcript or input history. For a `choices`
+  // field (the PostHog region step) `choiceIndex` tracks the highlighted option.
+  const [pendingFieldPrompt, setPendingFieldPrompt] = useState<{
+    descriptor: ConnectSetupDescriptor;
+    index: number;
+    collected: Record<string, string>;
+    choiceIndex: number;
+  } | null>(null);
+  // The ACTIVE field's in-progress value lives ONLY here (a ref), never in
+  // `inputValue` / the composer `value` / `submitLine` — so a secret keystroke is
+  // never echoed or persisted. `activeFieldTick` forces a re-render on each
+  // keystroke so the masked bullet count (or the plain value) updates. Zeroized on
+  // commit / cancel / unmount.
+  const activeFieldValueRef = useRef("");
+  const [activeFieldTick, setActiveFieldTick] = useState(0);
   const [queuedLines, setQueuedLines] = useState<readonly string[]>([]);
   const [turnState, setTurnState] = useState<TurnState>(() => getTurnState());
   const typingIdleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -510,6 +553,209 @@ export function InkInteractiveSessionApp({
     }
   }, [app, appendMessages, getAgentTitle, onSubmitLine]);
 
+  // ── In-chat /connect wizard (#20) ───────────────────────────────────────────
+  // The final "Connect <Provider> / Cancel" step. Kept SEPARATE from
+  // `pendingSelection` so its accept handler (`acceptConnectConfirm` below) NEVER
+  // calls `rememberInputLine`/`appendMessages` on the secret-bearing dispatch line.
+  const [pendingConnectConfirm, setPendingConnectConfirm] = useState<{
+    descriptor: ConnectSetupDescriptor;
+    collected: Record<string, string>;
+    selectedIndex: number;
+  } | null>(null);
+
+  const fieldPromptActive = Boolean(pendingFieldPrompt);
+  const currentConnectField: ConnectWizardField | null =
+    pendingFieldPrompt?.descriptor.fields[pendingFieldPrompt.index] ?? null;
+
+  // Zeroize the secret-bearing wizard state. Overwrite the ref's string before
+  // dropping it, clear the field prompt + the final confirm, and reset the tick.
+  // Called on cancel, on completion, and on Ctrl-C.
+  const zeroizeConnectWizard = useCallback(() => {
+    activeFieldValueRef.current = "";
+    setActiveFieldTick(0);
+    setPendingFieldPrompt(null);
+    setPendingConnectConfirm(null);
+  }, []);
+
+  // Arm the masked field loop for a token provider. No transcript echo of the raw
+  // `/connect <provider>` line beyond the user line already appended by the caller.
+  const startConnectWizard = useCallback((descriptor: ConnectSetupDescriptor) => {
+    activeFieldValueRef.current = "";
+    setActiveFieldTick(0);
+    setPendingConnectConfirm(null);
+    if (descriptor.fields.length === 0) {
+      // Defensive: a descriptor with no fields can't collect anything. Bail with a
+      // note rather than dead-ending in an empty wizard.
+      appendMessages([{
+        kind: "slash",
+        role: "system",
+        text: `Nothing to collect for ${descriptor.label}. Run \`infinite connect ${descriptor.provider}\` in your terminal.`
+      }]);
+      return;
+    }
+    setPendingFieldPrompt({ descriptor, index: 0, collected: {}, choiceIndex: 0 });
+    appendMessages([{
+      kind: "slash",
+      role: "system",
+      text: `Connecting ${descriptor.label} — ${descriptor.description}. Docs: ${descriptor.docsUrl}`
+    }]);
+  }, [appendMessages]);
+
+  const cancelConnectWizard = useCallback(() => {
+    const label = pendingFieldPrompt?.descriptor.label ?? pendingConnectConfirm?.descriptor.label;
+    zeroizeConnectWizard();
+    appendMessages([{
+      kind: "slash",
+      role: "system",
+      text: label ? `Cancelled connecting ${label}.` : "Cancelled connecting."
+    }]);
+  }, [appendMessages, pendingConnectConfirm, pendingFieldPrompt, zeroizeConnectWizard]);
+
+  // Move to the next field, or to the final Connect/Cancel confirm after the last.
+  // `collected` is threaded forward by value so the secret stays in memory only.
+  const advanceConnectWizard = useCallback((collected: Record<string, string>) => {
+    setPendingFieldPrompt((current) => {
+      if (!current) {
+        return null;
+      }
+      const nextIndex = current.index + 1;
+      if (nextIndex >= current.descriptor.fields.length) {
+        // All fields collected → arm the final confirm; leave the field loop.
+        setPendingConnectConfirm({ descriptor: current.descriptor, collected, selectedIndex: 0 });
+        return null;
+      }
+      return { ...current, index: nextIndex, collected, choiceIndex: 0 };
+    });
+    activeFieldValueRef.current = "";
+    setActiveFieldTick(0);
+  }, []);
+
+  // Commit a free-text field on Enter. Secret fields append a REDACTED system line
+  // and skip `rememberInputLine` (no disk history); non-secret fields echo a normal
+  // labelled line. The raw value moves from the transient ref into `collected`.
+  const commitConnectField = useCallback(() => {
+    if (!pendingFieldPrompt || !currentConnectField || currentConnectField.choices) {
+      return;
+    }
+    const field = currentConnectField;
+    const raw = activeFieldValueRef.current;
+    const value = field.secret ? raw : raw.trim();
+    if (field.required && !value) {
+      appendMessages([{
+        kind: "slash",
+        role: "system",
+        text: `${field.label} is required.`
+      }]);
+      return;
+    }
+    const collected = { ...pendingFieldPrompt.collected, [field.key]: value };
+    if (field.secret) {
+      // Redacted echo only — never the raw key, and never to input history.
+      appendMessages([{
+        kind: "slash",
+        role: "system",
+        text: `${field.label}: ${"•".repeat(Math.min(Math.max(value.length, 1), 24))} (hidden)`
+      }]);
+    } else if (value) {
+      appendMessages([{ kind: "slash", role: "system", text: `${field.label}: ${value}` }]);
+    } else {
+      appendMessages([{ kind: "slash", role: "system", text: `${field.label}: (skipped)` }]);
+    }
+    advanceConnectWizard(collected);
+  }, [advanceConnectWizard, appendMessages, currentConnectField, pendingFieldPrompt]);
+
+  // Commit a fixed-choice field (the PostHog region step) on Enter. Stores the
+  // option's `value` (e.g. `eu.posthog.com`); echoes the readable label.
+  const commitConnectChoice = useCallback(() => {
+    if (!pendingFieldPrompt || !currentConnectField?.choices) {
+      return;
+    }
+    const field = currentConnectField;
+    const choice = field.choices?.[pendingFieldPrompt.choiceIndex];
+    if (!choice) {
+      return;
+    }
+    const collected = { ...pendingFieldPrompt.collected, [field.key]: choice.value };
+    appendMessages([{ kind: "slash", role: "system", text: `${field.label}: ${choice.label}` }]);
+    advanceConnectWizard(collected);
+  }, [advanceConnectWizard, appendMessages, currentConnectField, pendingFieldPrompt]);
+
+  const moveConnectChoice = useCallback((direction: "next" | "previous") => {
+    setPendingFieldPrompt((current) => {
+      const choices = current?.descriptor.fields[current.index]?.choices;
+      if (!current || !choices || choices.length <= 1) {
+        return current;
+      }
+      const delta = direction === "next" ? 1 : -1;
+      const choiceIndex = (current.choiceIndex + delta + choices.length) % choices.length;
+      return { ...current, choiceIndex };
+    });
+  }, []);
+
+  // Keystroke handlers for the ACTIVE free-text field. They mutate ONLY the ref
+  // (never `inputValue`/the composer/`submitLine`), then bump the tick to re-render
+  // the masked/plain row. Secrets therefore never enter any echoed/persisted path.
+  const appendConnectFieldKey = useCallback((text: string) => {
+    if (!currentConnectField || currentConnectField.choices) {
+      return;
+    }
+    activeFieldValueRef.current += text;
+    setActiveFieldTick((tick) => tick + 1);
+  }, [currentConnectField]);
+
+  const backspaceConnectField = useCallback(() => {
+    if (!currentConnectField || currentConnectField.choices) {
+      return;
+    }
+    activeFieldValueRef.current = activeFieldValueRef.current.slice(0, -1);
+    setActiveFieldTick((tick) => tick + 1);
+  }, [currentConnectField]);
+
+  const moveConnectConfirm = useCallback((direction: "next" | "previous") => {
+    setPendingConnectConfirm((current) => {
+      if (!current) {
+        return current;
+      }
+      // Two options: Connect / Cancel.
+      const delta = direction === "next" ? 1 : -1;
+      const selectedIndex = (current.selectedIndex + delta + 2) % 2;
+      return { ...current, selectedIndex };
+    });
+  }, []);
+
+  // The DEDICATED final-confirm handler (binding revision). On "Connect" it builds
+  // the leading-slash dispatch line from `collected` (in memory) and dispatches it
+  // via `submitExecutableLine` WITHOUT `rememberInputLine` (no disk history) and
+  // WITHOUT echoing the secret-bearing line to the transcript. On "Cancel" it
+  // zeroizes. Either way the wizard state is cleared (secret dropped).
+  const acceptConnectConfirm = useCallback(() => {
+    if (!pendingConnectConfirm) {
+      return;
+    }
+    const { descriptor, collected, selectedIndex } = pendingConnectConfirm;
+    if (selectedIndex !== 0) {
+      cancelConnectWizard();
+      return;
+    }
+    // Build the leading-slash dispatch line from `collected` (in memory) via the
+    // caller-provided builder (index.ts's `buildConnectDispatchLine`, which owns the
+    // normalization + JSON.stringify). The line starts with `/` so it routes
+    // runCommand → POST /sources/connect, never the LLM. Zeroize the wizard state
+    // FIRST (drops the secret from component state), then dispatch the snapshotted
+    // line WITHOUT `rememberInputLine` (no disk history) and WITHOUT echoing it to
+    // the transcript.
+    const line = buildConnectDispatch
+      ? buildConnectDispatch(descriptor.provider, descriptor.connectionName, collected)
+      : `/connect ${descriptor.provider} ${descriptor.connectionName} ${JSON.stringify({ mode: "live", ...collected })}`;
+    zeroizeConnectWizard();
+    appendMessages([{
+      kind: "slash",
+      role: "system",
+      text: `Connecting ${descriptor.label}…`
+    }]);
+    void submitExecutableLine(line);
+  }, [appendMessages, buildConnectDispatch, cancelConnectWizard, pendingConnectConfirm, submitExecutableLine, zeroizeConnectWizard]);
+
   const runSubmittedLine = useCallback((line: string) => {
     if (pendingOperatorLine) {
       appendMessages([{ role: "user", text: line }]);
@@ -525,6 +771,24 @@ export function InkInteractiveSessionApp({
     }
 
     appendMessages([{ role: "user", text: line }]);
+
+    // In-chat /connect wizard (#20): intercept BEFORE the operator confirm gate and
+    // the LLM. For a token provider this arms the masked field loop (replacing the
+    // heavy "Type confirm" gate with the wizard's own Connect/Cancel step); for a
+    // deferred provider it shows a one-line note (no field loop, no LLM). `none`
+    // falls through to the normal routing (so `/connect <provider> {json}` and the
+    // oauth subcommands keep working). The raw `/connect <provider>` user line is
+    // already echoed above; no secret is in it.
+    const connectDecision = connectWizard?.(line);
+    if (connectDecision && connectDecision.kind === "wizard") {
+      startConnectWizard(connectDecision.descriptor);
+      return;
+    }
+    if (connectDecision && connectDecision.kind === "note") {
+      appendMessages([{ kind: "slash", role: "system", text: connectDecision.text }]);
+      return;
+    }
+
     const selection = requiresSelection?.(line);
     if (selection && selection.options.length > 0) {
       setPendingSelection({ prompt: selection, selectedIndex: 0 });
@@ -539,7 +803,7 @@ export function InkInteractiveSessionApp({
     }
 
     void submitExecutableLine(line);
-  }, [appendMessages, pendingOperatorLine, requiresConfirmation, requiresSelection, submitExecutableLine]);
+  }, [appendMessages, connectWizard, pendingOperatorLine, requiresConfirmation, requiresSelection, startConnectWizard, submitExecutableLine]);
 
   const selectPendingOption = useCallback((direction: "next" | "previous") => {
     setPendingSelection((current) => {
@@ -567,7 +831,16 @@ export function InkInteractiveSessionApp({
   }, [appendMessages, pendingSelection, rememberInputLine, runSubmittedLine]);
 
   useEffect(() => {
-    if (busy || pendingOperatorLine || pendingSelection || queuedLines.length === 0) {
+    // Don't drain a queued line while a /connect wizard is active — its keystrokes
+    // are routed to the field buffer, and a drained line must not pre-empt it.
+    if (
+      busy ||
+      pendingOperatorLine ||
+      pendingSelection ||
+      pendingFieldPrompt ||
+      pendingConnectConfirm ||
+      queuedLines.length === 0
+    ) {
       return;
     }
 
@@ -579,7 +852,7 @@ export function InkInteractiveSessionApp({
 
     setQueuedLines(remainingLines);
     runSubmittedLine(nextLine);
-  }, [busy, pendingOperatorLine, pendingSelection, queuedLines, runSubmittedLine]);
+  }, [busy, pendingConnectConfirm, pendingFieldPrompt, pendingOperatorLine, pendingSelection, queuedLines, runSubmittedLine]);
 
   const submitLine = useCallback((rawLine: string) => {
     const line = rawLine.trim();
@@ -604,6 +877,37 @@ export function InkInteractiveSessionApp({
     runSubmittedLine(line);
   }, [app, busy, queueBusyLine, rememberInputLine, runSubmittedLine]);
 
+  // The composer row shows the ACTIVE wizard field's value when a free-text field
+  // is being collected: masked (bullets ×length) for secret fields, plain for the
+  // rest. Reads the transient ref (never `inputValue`), so a secret keystroke is
+  // never the composer `value`. `activeFieldTick` is in the deps so the bullet
+  // count updates per keystroke. Choice fields render in `ConnectWizard`, not here.
+  const activeFieldComposer = useMemo(() => {
+    if (!fieldPromptActive || !currentConnectField || currentConnectField.choices) {
+      return null;
+    }
+    const raw = activeFieldValueRef.current;
+    return {
+      label: currentConnectField.label,
+      secret: currentConnectField.secret,
+      display: currentConnectField.secret ? "•".repeat(raw.length) : raw
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fieldPromptActive, currentConnectField, activeFieldTick]);
+
+  const connectComposerValue = activeFieldComposer ? activeFieldComposer.display : inputValue;
+  const connectPlaceholder = activeFieldComposer
+    ? activeFieldComposer.secret
+      ? "type the secret (hidden), Enter to continue, Ctrl-C to cancel"
+      : "type a value, Enter to continue, Ctrl-C to cancel"
+    : pendingConnectConfirm
+      ? "choose with up/down, Enter to select"
+      : pendingSelection
+        ? "choose with up/down, Enter to select"
+        : pendingOperatorLine
+          ? "type confirm to continue, anything else to cancel"
+          : promptPlaceholder;
+
   return (
     <Box flexDirection="column" width={columns}>
       <InkTranscriptApp
@@ -625,14 +929,38 @@ export function InkInteractiveSessionApp({
         theme={t}
         width={columns}
       />
+      <ConnectWizard
+        active={fieldPromptActive ? pendingFieldPrompt : null}
+        maskedValue={activeFieldComposer && activeFieldComposer.secret ? activeFieldComposer.display : undefined}
+        theme={t}
+        width={columns}
+      />
+      <ConnectConfirmMenu
+        pending={pendingConnectConfirm}
+        theme={t}
+        width={columns}
+      />
       <InkLineInput
         busy={busy}
         completionActive={completions.length > 0}
         cursor={inputCursor}
+        connectConfirmActive={Boolean(pendingConnectConfirm)}
+        fieldPromptActive={fieldPromptActive}
+        fieldChoiceActive={Boolean(currentConnectField?.choices)}
         onChange={setComposerState}
         onCompletionAccept={acceptCompletion}
         onCompletionNext={() => selectCompletion("next")}
         onCompletionPrevious={() => selectCompletion("previous")}
+        onConnectConfirmAccept={acceptConnectConfirm}
+        onConnectConfirmNext={() => moveConnectConfirm("next")}
+        onConnectConfirmPrevious={() => moveConnectConfirm("previous")}
+        onConnectCancel={cancelConnectWizard}
+        onFieldKey={appendConnectFieldKey}
+        onFieldBackspace={backspaceConnectField}
+        onFieldCommit={commitConnectField}
+        onChoiceCommit={commitConnectChoice}
+        onChoiceNext={() => moveConnectChoice("next")}
+        onChoicePrevious={() => moveConnectChoice("previous")}
         onHistoryNewer={() => navigateHistory("newer")}
         onHistoryOlder={() => navigateHistory("older")}
         onSelectionAccept={acceptPendingSelection}
@@ -640,18 +968,13 @@ export function InkInteractiveSessionApp({
         onSelectionPrevious={() => selectPendingOption("previous")}
         onSubmit={submitLine}
         pendingConfirmation={Boolean(pendingOperatorLine)}
-        placeholder={
-          pendingSelection
-            ? "choose with up/down, Enter to select"
-            : pendingOperatorLine
-              ? "type confirm to continue, anything else to cancel"
-              : promptPlaceholder
-        }
+        placeholder={connectPlaceholder}
         row={composerRow}
         selectionActive={Boolean(pendingSelection)}
         theme={t}
-        value={inputValue}
-        selection={inputSelection}
+        value={activeFieldComposer ? connectComposerValue : inputValue}
+        valueIsMasked={Boolean(activeFieldComposer)}
+        selection={activeFieldComposer ? null : inputSelection}
         width={columns}
       />
       <CompletionMenu
@@ -1352,11 +1675,24 @@ export function navigateInputHistory(
 function InkLineInput({
   busy,
   completionActive,
+  connectConfirmActive,
   cursor,
+  fieldChoiceActive,
+  fieldPromptActive,
   onChange,
+  onChoiceCommit,
+  onChoiceNext,
+  onChoicePrevious,
   onCompletionAccept,
   onCompletionNext,
   onCompletionPrevious,
+  onConnectCancel,
+  onConnectConfirmAccept,
+  onConnectConfirmNext,
+  onConnectConfirmPrevious,
+  onFieldBackspace,
+  onFieldCommit,
+  onFieldKey,
   onHistoryNewer,
   onHistoryOlder,
   onSelectionAccept,
@@ -1370,15 +1706,29 @@ function InkLineInput({
   selectionActive,
   theme,
   value,
+  valueIsMasked,
   width
 }: {
   busy: boolean;
   completionActive: boolean;
+  connectConfirmActive: boolean;
   cursor: number;
+  fieldChoiceActive: boolean;
+  fieldPromptActive: boolean;
   onChange(state: ComposerEditState): void;
+  onChoiceCommit(): void;
+  onChoiceNext(): void;
+  onChoicePrevious(): void;
   onCompletionAccept(): void;
   onCompletionNext(): boolean;
   onCompletionPrevious(): boolean;
+  onConnectCancel(): void;
+  onConnectConfirmAccept(): void;
+  onConnectConfirmNext(): void;
+  onConnectConfirmPrevious(): void;
+  onFieldBackspace(): void;
+  onFieldCommit(): void;
+  onFieldKey(text: string): void;
   onHistoryNewer(): void;
   onHistoryOlder(): void;
   onSelectionAccept(): void;
@@ -1392,6 +1742,7 @@ function InkLineInput({
   selectionActive: boolean;
   theme: Theme;
   value: string;
+  valueIsMasked?: boolean;
   width: number;
 }) {
   const app = useApp();
@@ -1400,8 +1751,67 @@ function InkLineInput({
   const forwardDelete = useForwardDeleteSignal();
   useInput((input, key) => {
     const editState = { cursor, selection, value };
+    // In-chat /connect wizard (#20): Ctrl-C cancels the WIZARD ONLY (zeroizing the
+    // secret) and must be guarded BEFORE the session-wide `app.exit()` below — a
+    // bare Ctrl-C mid-wizard must not quit the whole session.
     if (key.ctrl && input === "c") {
+      if (fieldPromptActive || connectConfirmActive) {
+        onConnectCancel();
+        return;
+      }
       app.exit();
+      return;
+    }
+    // Field-collection loop: every printable keystroke is routed to the wizard's
+    // transient buffer (NEVER `inputValue`/the composer/submit), so a secret never
+    // flows through any echoed/persisted path. Choice fields (the PostHog region
+    // step) navigate with up/down + Enter; free-text fields type + Enter to commit.
+    if (fieldPromptActive) {
+      if (fieldChoiceActive) {
+        if (key.return) {
+          onChoiceCommit();
+          return;
+        }
+        if (key.upArrow) {
+          onChoicePrevious();
+          return;
+        }
+        if (key.downArrow) {
+          onChoiceNext();
+          return;
+        }
+        return;
+      }
+      if (key.return) {
+        onFieldCommit();
+        return;
+      }
+      if (key.backspace || key.delete) {
+        onFieldBackspace();
+        return;
+      }
+      // Printable keys only (mirrors the composer's printable guard below). No
+      // ctrl/meta chords reach the field buffer.
+      if (input && !key.ctrl && !key.meta) {
+        onFieldKey(input);
+      }
+      return;
+    }
+    // Final "Connect <Provider> / Cancel" step — a dedicated yes/no overlay whose
+    // accept handler dispatches WITHOUT remembering or echoing the secret line.
+    if (connectConfirmActive) {
+      if (key.return) {
+        onConnectConfirmAccept();
+        return;
+      }
+      if (key.upArrow) {
+        onConnectConfirmPrevious();
+        return;
+      }
+      if (key.downArrow) {
+        onConnectConfirmNext();
+        return;
+      }
       return;
     }
     if (selectionActive) {
@@ -1510,22 +1920,32 @@ function InkLineInput({
     }
   });
 
-  const label = pendingConfirmation ? "!" : selectionActive ? "?" : theme.brand.prompt;
+  // In-chat /connect wizard (#20): a free-text field row uses a `?`-style prompt
+  // and never the native cursor (the rendered `value` is already the masked bullets
+  // string for secret fields, so there is no raw value to position a cursor in).
+  const fieldRowActive = fieldPromptActive && !fieldChoiceActive;
+  const overlayActive = selectionActive || connectConfirmActive || fieldRowActive;
+  const label = pendingConfirmation ? "!" : overlayActive ? "?" : theme.brand.prompt;
   const promptWidth = displayWidth(`${label} `);
   const inputWidth = Math.max(1, width - promptWidth);
-  const nativeCursor = !busy && !selectionActive && !composerSelectedRange(value, selection) && Boolean(stdout?.isTTY);
+  const nativeCursor =
+    !busy && !overlayActive && !valueIsMasked && !composerSelectedRange(value, selection) && Boolean(stdout?.isTTY);
   setCursorPosition(nativeCursor
     ? composerNativeCursorPosition({ cursor, label, row, value, width })
     : undefined);
 
-  const content = value
-    ? renderComposerValueWithCursor(value, cursor, selection, { nativeCursor })
-    : placeholder;
+  const content = fieldRowActive
+    // Masked or plain field value with a trailing cursor — `value` already carries
+    // bullets for a secret field, so the raw secret is never in the render tree.
+    ? (value ? `${value}|` : placeholder)
+    : value
+      ? renderComposerValueWithCursor(value, cursor, selection, { nativeCursor })
+      : placeholder;
   const color = value ? theme.color.text : theme.color.muted;
 
   return (
     <Box width={width}>
-      <Text color={pendingConfirmation || selectionActive ? theme.color.warning : theme.color.primaryBright}>{label} </Text>
+      <Text color={pendingConfirmation || overlayActive ? theme.color.warning : theme.color.primaryBright}>{label} </Text>
       <Box width={inputWidth}>
         <Text color={color} wrap="wrap">{content}</Text>
       </Box>
@@ -1565,6 +1985,92 @@ function SelectionMenu({
         return (
           <Text key={`${option.line}-${index}`} color={selected ? theme.color.primaryBright : theme.color.text}>
             {truncateCells(`${marker} ${command} ${option.label}${detail}`, width)}
+          </Text>
+        );
+      })}
+    </Box>
+  );
+}
+
+// In-chat /connect wizard (#20): the header + current-field overlay. Purely
+// presentational — all key handling stays in the single `useInput` owner. For a
+// secret free-text field the masked bullets render in the composer row below (this
+// shows the guidance + a redacted hint); for a choice field (the PostHog region
+// step) the options render here with a `>` cursor.
+function ConnectWizard({
+  active,
+  maskedValue,
+  theme,
+  width
+}: {
+  active: { descriptor: ConnectSetupDescriptor; index: number; choiceIndex: number } | null;
+  maskedValue?: string;
+  theme: Theme;
+  width: number;
+}) {
+  if (!active) {
+    return null;
+  }
+  const field = active.descriptor.fields[active.index];
+  if (!field) {
+    return null;
+  }
+  const stepLine = `Step ${active.index + 1} of ${active.descriptor.fields.length} · ${field.label}${field.secret ? "  (hidden)" : ""}`;
+  return (
+    <Box flexDirection="column" width={width}>
+      <Text color={theme.color.primaryBright}>
+        {truncateCells(`Connect ${active.descriptor.label} — ${active.descriptor.description}`, width)}
+      </Text>
+      <Text color={theme.color.muted}>{truncateCells(`docs: ${active.descriptor.docsUrl}`, width)}</Text>
+      <Text color={theme.color.text}>{truncateCells(stepLine, width)}</Text>
+      {field.guidance ? (
+        <Text color={theme.color.muted} wrap="wrap">{field.guidance}</Text>
+      ) : null}
+      {field.choices ? (
+        field.choices.map((choice, index) => {
+          const selected = index === active.choiceIndex;
+          const marker = selected ? ">" : " ";
+          const detail = choice.description ? ` — ${choice.description}` : "";
+          return (
+            <Text key={`${choice.value}-${index}`} color={selected ? theme.color.primaryBright : theme.color.text}>
+              {truncateCells(`${marker} ${choice.label}${detail}`, width)}
+            </Text>
+          );
+        })
+      ) : field.secret && maskedValue ? (
+        <Text color={theme.color.muted}>{truncateCells(`entered: ${maskedValue}`, width)}</Text>
+      ) : null}
+    </Box>
+  );
+}
+
+// The final "Connect <Provider> / Cancel" overlay. Its accept handler
+// (`acceptConnectConfirm`) is the dedicated, secret-safe dispatcher — this is purely
+// presentational. No `option.line` carries the secret (unlike `SelectionMenu`).
+function ConnectConfirmMenu({
+  pending,
+  theme,
+  width
+}: {
+  pending: { descriptor: ConnectSetupDescriptor; selectedIndex: number } | null;
+  theme: Theme;
+  width: number;
+}) {
+  if (!pending) {
+    return null;
+  }
+  const options = [`Connect ${pending.descriptor.label}`, "Cancel"];
+  return (
+    <Box flexDirection="column" width={width}>
+      <Text color={theme.color.primaryBright}>
+        {truncateCells(`Connect ${pending.descriptor.label} as "${pending.descriptor.connectionName}"?`, width)}
+      </Text>
+      {options.map((label, index) => {
+        const selected = index === pending.selectedIndex;
+        const marker = selected ? ">" : " ";
+        return (
+          <Text key={`${label}-${index}`} color={selected ? theme.color.primaryBright : theme.color.text}>
+            {truncateCells(`${marker} ${label}`, width)}
           </Text>
         );
       })}

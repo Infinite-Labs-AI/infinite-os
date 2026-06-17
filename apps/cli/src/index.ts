@@ -705,7 +705,7 @@ interface ConnectorFieldDefinition {
   secret?: boolean;
 }
 
-interface ConnectorSetupDefinition {
+export interface ConnectorSetupDefinition {
   provider: "google_analytics_4" | "posthog" | "stripe" | "x" | "shopify" | "meta_ads";
   label: string;
   description: string;
@@ -4521,6 +4521,189 @@ export function connectorSetupDefinition(provider: string | undefined): Connecto
   return CONNECTOR_SETUP_REGISTRY.find((entry) => entry.provider === canonical);
 }
 
+// ── In-chat /connect wizard (#20) ────────────────────────────────────────────
+// The TUI re-renders the connector field prompts itself (a masked Ink state
+// machine) instead of the raw-mode `promptSecretValue` loop, then dispatches the
+// already-supported non-interactive `connect <provider> <name> <json>` form. These
+// pure, exportable helpers own the registry → descriptor mapping, the dispatch
+// string, and the per-provider scope/where-to-find guidance copy; the TUI owns the
+// render + raw-mode input. The secret NEVER touches these helpers as transcript or
+// disk — it only enters the JSON arg `buildConnectDispatchLine` assembles, which is
+// dispatched as a LEADING-SLASH line (routes to runCommand → POST /sources/connect,
+// never the LLM chatRequest).
+
+// Token providers that get the full in-chat masked field wizard this round.
+const IN_CHAT_CONNECT_TOKEN_PROVIDERS = new Set(["posthog", "stripe", "x"]);
+// Providers deferred to the terminal CLI for now (browser OAuth driver or
+// backfill/transport sub-pickers the simple field loop can't drive in-chat).
+const IN_CHAT_CONNECT_OAUTH_NOTE_PROVIDERS = new Set(["google_analytics_4"]);
+const IN_CHAT_CONNECT_TERMINAL_ONLY_PROVIDERS = new Set(["meta_ads", "shopify"]);
+
+export interface ConnectWizardField {
+  key: string;
+  label: string;
+  secret: boolean;
+  required: boolean;
+  guidance?: string;
+  // A fixed pick-list (region step) rendered as a selection rather than free text.
+  // Each option's `value` is the literal stored on the field; the wizard never
+  // free-texts these.
+  choices?: { value: string; label: string; description?: string }[];
+}
+
+export interface ConnectSetupDescriptor {
+  provider: string;
+  label: string;
+  description: string;
+  connectionName: string;
+  docsUrl: string;
+  fields: ConnectWizardField[];
+}
+
+// A line typed in chat that should NOT launch the field wizard: it either resolves
+// to a deferred provider (show a note, no field loop, no LLM) or is unknown.
+export type ConnectWizardDecision =
+  | { kind: "wizard"; descriptor: ConnectSetupDescriptor }
+  | { kind: "note"; text: string }
+  | { kind: "none" };
+
+// Per-provider, per-field guidance copy (scopes, where to find the id, masking
+// reassurance). Keyed `provider:fieldKey`. Labels come from the registry; this is
+// the human-facing help that replaces bare flag labels.
+const CONNECT_FIELD_GUIDANCE: Record<string, string> = {
+  "posthog:projectId":
+    "The numeric project id from your PostHog URL — app.posthog.com/project/<THIS NUMBER>/… — or Settings → Project → General → \"Project ID\". Digits only (e.g. 12345).",
+  "posthog:personalApiKey":
+    "A Personal API key that starts with `phx_` (NOT the `phc_` project token). Create it at Settings → Personal API keys → \"Create personal API key\" with read scopes Query (`query:read`) and Project (`project:read`). Stays hidden in chat.",
+  "posthog:apiHost":
+    "Pick the cloud your PostHog account lives in. US → us.posthog.com, EU → eu.posthog.com. Choosing the wrong region returns 403s.",
+  "stripe:secretKey":
+    "Your Stripe secret key, starting `sk_live_` (or `sk_test_` for test mode), or a restricted key `rk_live_…`. Stripe Dashboard → Developers → API keys. Read access to Charges, Invoices, and Subscriptions is enough. Stays hidden in chat.",
+  "x:bearerToken":
+    "An X API v2 Bearer Token (App-only). X Developer Portal → your Project & App → Keys and tokens → \"Bearer Token\". Needs read access to the public-metrics/tweets endpoints. Stays hidden in chat.",
+  "x:username":
+    "The public @handle to track, e.g. `@infinite_os` (the leading @ is fine — it's stripped automatically)."
+};
+
+// The PostHog region step (BINDING REVISION): an explicit US/EU pick that sets
+// apiHost, never a silent default-to-US free-text host (that 403'd the EU user).
+const POSTHOG_REGION_CHOICES: { value: string; label: string; description?: string }[] = [
+  { value: "us.posthog.com", label: "US (us.posthog.com)", description: "US cloud" },
+  { value: "eu.posthog.com", label: "EU (eu.posthog.com)", description: "EU cloud" }
+];
+
+// Map a registry field to a wizard field, attaching guidance and (for the PostHog
+// host) the region pick-list. Only fields the wizard actually prompts are mapped by
+// the caller; this keeps the wizard as light as the gold-standard CLI flow.
+function toConnectWizardField(provider: string, field: ConnectorFieldDefinition): ConnectWizardField {
+  if (provider === "posthog" && field.key === "apiHost") {
+    return {
+      key: field.key,
+      // Promote the optional host to a required region step (binding revision).
+      label: "PostHog region",
+      secret: false,
+      required: true,
+      guidance: CONNECT_FIELD_GUIDANCE["posthog:apiHost"],
+      choices: POSTHOG_REGION_CHOICES
+    };
+  }
+  return {
+    key: field.key,
+    label: field.label,
+    secret: Boolean(field.secret),
+    required: field.required,
+    guidance: CONNECT_FIELD_GUIDANCE[`${provider}:${field.key}`]
+  };
+}
+
+// Build the descriptor the TUI renders. Only token providers reach here (the
+// dispatcher filters ga4/meta_ads/shopify to notes first). The wizard prompts the
+// registry's REQUIRED fields (matching the terminal CLI) PLUS the deliberate
+// PostHog region step. Pure + exportable for unit tests.
+export function buildConnectSetupDescriptor(
+  definition: ConnectorSetupDefinition
+): ConnectSetupDescriptor {
+  const fields: ConnectWizardField[] = [];
+  for (const field of definition.fields) {
+    if (definition.provider === "posthog" && field.key === "apiHost") {
+      // Optional in the registry; promoted to the required region step.
+      fields.push(toConnectWizardField(definition.provider, field));
+      continue;
+    }
+    if (!field.required) {
+      // Don't surface other optional fields — keep the wizard as light as the CLI.
+      continue;
+    }
+    fields.push(toConnectWizardField(definition.provider, field));
+  }
+  return {
+    provider: definition.provider,
+    label: definition.label,
+    description: definition.description,
+    connectionName: definition.defaultConnectionName,
+    docsUrl: definition.docsUrl,
+    fields
+  };
+}
+
+// Decide what `/connect <line>` should do IN CHAT, before the operator gate or the
+// LLM. Returns a `wizard` descriptor for the token providers, a one-line `note` for
+// the deferred providers (ga4 → run `infinite setup`; meta_ads/shopify → run the
+// terminal `infinite connect`), or `none` (unknown provider, inline JSON, or an
+// oauth subcommand) so the existing routing handles it. Exported for tests.
+export function decideConnectWizard(line: string): ConnectWizardDecision {
+  const parts = (line.startsWith("/") ? line.slice(1) : line).trim().split(/\s+/);
+  const [command, providerToken, ...rest] = parts;
+  if (command !== "connect" || !providerToken) {
+    return { kind: "none" };
+  }
+  // Power-user inline-JSON form (`/connect posthog {…}`) and the oauth subcommands
+  // keep the existing non-interactive path — never the field wizard.
+  if (["oauth", "oauth-status", "oauth-exchange"].includes(providerToken)) {
+    return { kind: "none" };
+  }
+  if (rest.some((part) => part.trim().startsWith("{"))) {
+    return { kind: "none" };
+  }
+  const definition = connectorSetupDefinition(providerToken);
+  if (!definition) {
+    return { kind: "none" };
+  }
+  if (IN_CHAT_CONNECT_OAUTH_NOTE_PROVIDERS.has(definition.provider)) {
+    return {
+      kind: "note",
+      text: "GA4 quick-connect opens a browser — run `infinite setup` in your terminal to connect GA4."
+    };
+  }
+  if (IN_CHAT_CONNECT_TERMINAL_ONLY_PROVIDERS.has(definition.provider)) {
+    return {
+      kind: "note",
+      text: `Run \`infinite connect ${definition.provider}\` in your terminal for now.`
+    };
+  }
+  if (!IN_CHAT_CONNECT_TOKEN_PROVIDERS.has(definition.provider)) {
+    return { kind: "none" };
+  }
+  return { kind: "wizard", descriptor: buildConnectSetupDescriptor(definition) };
+}
+
+// Assemble the LEADING-SLASH non-interactive dispatch line the wizard re-submits on
+// final confirm: `/connect <provider> <connectionName> <json>`. The leading slash is
+// load-bearing — it routes runCommand → POST /sources/connect (never the LLM chat
+// branch). `collected` is the wizard's in-memory field map; this is the ONLY place
+// the secret leaves wizard state, and only into this dispatched line (never the
+// transcript or input history). Exported for tests. `normalizeConnectorPayload`
+// (now exported) drops empties and applies the per-field normalization (PostHog
+// projectId→Number, apiHost via normalizePostHogApiHost, @handle stripping).
+export function buildConnectDispatchLine(
+  definition: ConnectorSetupDefinition,
+  connectionName: string,
+  collected: Record<string, string>
+): string {
+  const payload = normalizeConnectorPayload(definition, collected);
+  return `/connect ${definition.provider} ${connectionName} ${JSON.stringify(payload)}`;
+}
+
 export interface ExistingConnection {
   id: string;
   connectionName?: string;
@@ -5423,7 +5606,7 @@ async function promptSecretValue(question: string, fallback?: string): Promise<s
   });
 }
 
-function normalizeConnectorPayload(
+export function normalizeConnectorPayload(
   definition: ConnectorSetupDefinition,
   values: Record<string, string | undefined>
 ): Record<string, unknown> {
@@ -6273,6 +6456,25 @@ async function interactiveSession(env: CliEnv): Promise<void> {
         onRememberInput: (line) => appendPersistentInputHistory(line, env as NodeJS.ProcessEnv),
         output,
         promptPlaceholder: "Type a message, /help, or /exit.",
+        // In-chat /connect (#20): for token providers this returns a `wizard`
+        // descriptor the TUI renders as a masked field loop (NOT the operator
+        // confirm gate, NOT the LLM); for ga4/meta_ads/shopify it returns a `note`
+        // the TUI shows as a system line. index.ts owns the registry/copy; the TUI
+        // owns the render + raw-mode input. The terminal readline path below keeps
+        // its `requiresOperatorConfirmation` "Type confirm" gate untouched.
+        connectWizard: (line) => decideConnectWizard(line),
+        // On the wizard's final "Connect" confirm, the TUI calls this to assemble
+        // the leading-slash dispatch line from the in-memory collected fields. The
+        // normalization (projectId→Number, apiHost via normalizePostHogApiHost,
+        // @handle stripping) stays HERE; the secret only enters the line at dispatch
+        // time and the line routes to POST /sources/connect (never the LLM).
+        buildConnectDispatch: (provider, connectionName, collected) => {
+          const definition = connectorSetupDefinition(provider);
+          if (!definition) {
+            throw new Error(`Unknown connector provider: ${provider}`);
+          }
+          return buildConnectDispatchLine(definition, connectionName, collected);
+        },
         requiresConfirmation: (line) =>
           requiresOperatorConfirmation(line) ? `${operatorConfirmationText(line)} Type confirm to continue.` : undefined,
         requiresSelection: syncWindowSelectionPrompt,
