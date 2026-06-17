@@ -1,6 +1,21 @@
 import { createHash, randomUUID } from "node:crypto";
 import { decryptCredentialPayload, encryptCredentialPayload, isEncryptedCredentialPayload } from "@infinite-os/core";
-import { connectorFor, type ConnectionTestResult } from "@infinite-os/connectors";
+import {
+  connectorFor,
+  createMetaAd,
+  createMetaAdSet,
+  createMetaCampaign,
+  createMetaCreative,
+  getMetaEntity,
+  listMetaEntities,
+  resolveMetaAdsCredential,
+  setMetaEntityStatus,
+  type ConnectionTestResult,
+  type MetaAdsCredential,
+  type MetaEntityStatus,
+  type MetaWriteEntity,
+  type MetaWriteResult
+} from "@infinite-os/connectors";
 import {
   describeContextCard,
   searchContextCards,
@@ -93,7 +108,14 @@ export function createActionHandlers(db: InfiniteOsDb): Partial<Record<InfiniteO
     verify_claims: (input, context) => verifyClaims(db, context, input),
     create_saved_report: (input, context) => createSavedReport(db, context, input),
     run_saved_report: (input, context) => runSavedReport(db, context, input),
-    export_saved_report: (input, context) => exportSavedReport(db, context, input)
+    export_saved_report: (input, context) => exportSavedReport(db, context, input),
+    list_meta_entities: (input, context) => listMetaEntitiesHandler(db, context, input),
+    get_meta_entity: (input, context) => getMetaEntityHandler(db, context, input),
+    create_meta_campaign: (input, context) => createMetaCampaignHandler(db, context, input),
+    create_meta_ad_set: (input, context) => createMetaAdSetHandler(db, context, input),
+    create_meta_creative: (input, context) => createMetaCreativeHandler(db, context, input),
+    create_meta_ad: (input, context) => createMetaAdHandler(db, context, input),
+    set_meta_entity_status: (input, context) => setMetaEntityStatusHandler(db, context, input)
   };
 }
 
@@ -1347,6 +1369,387 @@ async function syncSourceNow(
     "ok",
     [],
     ["run_metric_query", "run_breakdown_query", "get_recent_sync_runs"]
+  );
+}
+
+// ── Meta Ads management handlers (operator-only) ──────────────────────────────
+// Every WRITE handler runs the connector write fn INLINE (the syncSourceNow
+// pattern — NEVER db.createJob, so a money write never touches the worker's
+// retry machinery), writes an integration_audit_log row with the token + raw
+// budget/bid REDACTED, and (for creates) does a check-before-create dedup keyed
+// by (workspace_id, source_id, client_token). The connector layer already
+// enforces create-always-PAUSED + non-retryable writes; here we resolve the
+// live credential, audit, and dedup.
+
+// Reuse integration_audit_log as a durable, already-provisioned dedup ledger:
+// the analytical-engine does not own a bespoke dedup table, so a prior SUCCEEDED
+// create row carrying the same client_token IS the dedup record. This keeps the
+// dedup keyed by (workspace_id, source_id, client_token) with no new migration.
+async function findMetaDedup(
+  db: InfiniteOsDb,
+  workspaceId: string,
+  sourceId: string,
+  clientToken: string | undefined
+): Promise<string | undefined> {
+  if (!clientToken) {
+    return undefined;
+  }
+  const row = await db.one<{ entity_id: string | null }>(
+    `
+      select details->>'entity_id' as entity_id
+      from integration_audit_log
+      where workspace_id = $1
+        and source_id = $2
+        and status = 'succeeded'
+        and details->>'client_token' = $3
+        and details->>'entity_id' is not null
+      order by created_at desc
+      limit 1
+    `,
+    [workspaceId, sourceId, clientToken]
+  );
+  const entityId = row?.entity_id;
+  return typeof entityId === "string" && entityId.trim() !== "" ? entityId : undefined;
+}
+
+// Write the operator audit row. details NEVER carries the access token and NEVER
+// the raw budget/bid amounts — only budget_present:true (INV-6). The token only
+// ever lives inside the resolved credential object passed to the connector.
+async function metaAuditLog(
+  db: InfiniteOsDb,
+  context: SessionContext,
+  sourceId: string,
+  action: InfiniteOsActionId,
+  status: "succeeded" | "failed",
+  details: Record<string, unknown>
+): Promise<void> {
+  await db.query(
+    `
+      insert into integration_audit_log (id, workspace_id, source_id, actor_type, action, status, details)
+      values ($1, $2, $3, $4, $5, $6, $7::jsonb)
+    `,
+    [
+      `audit_${randomUUID()}`,
+      context.workspaceId,
+      sourceId,
+      context.authority,
+      action,
+      status,
+      JSON.stringify(redactMetaAuditDetails(details))
+    ]
+  );
+}
+
+// Defence-in-depth redaction for the audit details blob: drop any secret-ish or
+// raw-spend key (the handlers already build a redacted blob, but this guarantees
+// a stray amount/token can never reach the durable row).
+function redactMetaAuditDetails(details: Record<string, unknown>): Record<string, unknown> {
+  // Drop access/secret tokens and raw spend, but DELIBERATELY keep client_token
+  // (the dedup key the spec requires the audit row to record). The token-ish
+  // patterns below intentionally exclude the literal "client_token".
+  const SECRET_OR_SPEND =
+    /access[_-]?token|secret|password|api[_-]?key|^daily_budget$|^lifetime_budget$|^bid_amount$|^dailyBudget$|^lifetimeBudget$|^bidAmount$/i;
+  const safe: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(details)) {
+    if (key !== "client_token" && SECRET_OR_SPEND.test(key)) {
+      continue;
+    }
+    safe[key] = value;
+  }
+  return safe;
+}
+
+// Bucket budget/bid presence WITHOUT recording the amount (INV-6). The handler
+// records budget_present / bid_present booleans only.
+function metaBudgetPresence(input: unknown): {
+  budget_present: boolean;
+  bid_present: boolean;
+} {
+  const daily = numberOrNull(input, "dailyBudget");
+  const lifetime = numberOrNull(input, "lifetimeBudget");
+  const bid = numberOrNull(input, "bidAmount");
+  return {
+    budget_present: daily !== null || lifetime !== null,
+    bid_present: bid !== null
+  };
+}
+
+async function resolveMetaCredentialForWrite(
+  db: InfiniteOsDb,
+  context: SessionContext,
+  sourceId: string
+): Promise<MetaAdsCredential> {
+  // Pin the source to meta_ads before touching the Graph API (a non-Meta source
+  // id must never reach the write transport).
+  const provider = await sourceProvider(db, context.workspaceId, sourceId);
+  if (provider !== "meta_ads") {
+    throw new Error(`source_provider_mismatch:expected meta_ads got ${provider}`);
+  }
+  return resolveMetaAdsCredential(db, {
+    workspaceId: context.workspaceId,
+    sourceId
+  });
+}
+
+// Shared create flow: dedup-check → INLINE connector POST → audit. The connector
+// fn already hard-codes status:PAUSED and is non-retryable; we add the
+// durable dedup + audit-log around it. On dedup hit we short-circuit (no POST).
+async function runMetaCreate(
+  db: InfiniteOsDb,
+  context: SessionContext,
+  input: unknown,
+  action: InfiniteOsActionId,
+  entity: MetaWriteEntity,
+  write: (credential: MetaAdsCredential) => Promise<MetaWriteResult>
+): Promise<ActionEnvelope> {
+  const sourceId = requiredString(input, "sourceId");
+  const clientToken = optionalString(input, "clientToken");
+  const presence = metaBudgetPresence(input);
+
+  // INVARIANT 4: check-before-create. A repeat with the same client token
+  // returns the existing id with deduped:true and never POSTs again.
+  const existingId = await findMetaDedup(db, context.workspaceId, sourceId, clientToken);
+  if (existingId) {
+    await metaAuditLog(db, context, sourceId, action, "succeeded", {
+      action,
+      entity,
+      entity_id: existingId,
+      client_token: clientToken ?? null,
+      status: entity === "creative" ? null : "PAUSED",
+      deduped: true,
+      ...presence
+    });
+    return envelope(
+      action,
+      context.authority,
+      { entity, id: existingId, status: entity === "creative" ? null : "PAUSED", deduped: true, clientToken: clientToken ?? null },
+      ["integration_audit_log"],
+      "ok"
+    );
+  }
+
+  const credential = await resolveMetaCredentialForWrite(db, context, sourceId);
+  let result: MetaWriteResult;
+  try {
+    result = await write(credential);
+  } catch (error) {
+    // INVARIANT 1/6: audit a failure (incl. a money_safety_violation when Graph
+    // echoed ACTIVE) WITHOUT the token or raw spend, then surface the error.
+    await metaAuditLog(db, context, sourceId, action, "failed", {
+      action,
+      entity,
+      client_token: clientToken ?? null,
+      error_code: metaErrorCode(error),
+      deduped: false,
+      ...presence
+    });
+    throw error;
+  }
+
+  await metaAuditLog(db, context, sourceId, action, "succeeded", {
+    action,
+    entity,
+    entity_id: result.id,
+    client_token: clientToken ?? null,
+    status: result.status,
+    deduped: false,
+    ...presence
+  });
+
+  return envelope(
+    action,
+    context.authority,
+    { entity, id: result.id, status: result.status, deduped: false, clientToken: clientToken ?? null },
+    ["integration_audit_log"],
+    "ok"
+  );
+}
+
+function metaErrorCode(error: unknown): string {
+  if (error && typeof error === "object" && "code" in error) {
+    const code = (error as { code?: unknown }).code;
+    if (typeof code === "string") {
+      return code;
+    }
+  }
+  return "write_failed";
+}
+
+async function createMetaCampaignHandler(
+  db: InfiniteOsDb,
+  context: SessionContext,
+  input: unknown
+): Promise<ActionEnvelope> {
+  const name = requiredString(input, "name");
+  const objective = requiredString(input, "objective");
+  const dailyBudget = numberOrNull(input, "dailyBudget");
+  const lifetimeBudget = numberOrNull(input, "lifetimeBudget");
+  return runMetaCreate(db, context, input, "create_meta_campaign", "campaign", (credential) =>
+    createMetaCampaign(credential, {
+      name,
+      objective,
+      ...(dailyBudget === null ? {} : { dailyBudget }),
+      ...(lifetimeBudget === null ? {} : { lifetimeBudget })
+    })
+  );
+}
+
+async function createMetaAdSetHandler(
+  db: InfiniteOsDb,
+  context: SessionContext,
+  input: unknown
+): Promise<ActionEnvelope> {
+  const campaignId = requiredString(input, "campaignId");
+  const name = requiredString(input, "name");
+  const optimizationGoal = requiredString(input, "optimizationGoal");
+  const billingEvent = requiredString(input, "billingEvent");
+  const dailyBudget = numberOrNull(input, "dailyBudget");
+  const lifetimeBudget = numberOrNull(input, "lifetimeBudget");
+  const bidAmount = numberOrNull(input, "bidAmount");
+  const targetingCountries = stringArray(input, "targetingCountries");
+  return runMetaCreate(db, context, input, "create_meta_ad_set", "adset", (credential) =>
+    createMetaAdSet(credential, {
+      campaignId,
+      name,
+      optimizationGoal,
+      billingEvent,
+      ...(dailyBudget === null ? {} : { dailyBudget }),
+      ...(lifetimeBudget === null ? {} : { lifetimeBudget }),
+      ...(bidAmount === null ? {} : { bidAmount }),
+      ...(optionalString(input, "startTime") ? { startTime: optionalString(input, "startTime") } : {}),
+      ...(optionalString(input, "endTime") ? { endTime: optionalString(input, "endTime") } : {}),
+      ...(targetingCountries.length > 0 ? { targetingCountries } : {}),
+      ...(optionalString(input, "pixelId") ? { pixelId: optionalString(input, "pixelId") } : {}),
+      ...(optionalString(input, "customEventType") ? { customEventType: optionalString(input, "customEventType") } : {})
+    })
+  );
+}
+
+async function createMetaCreativeHandler(
+  db: InfiniteOsDb,
+  context: SessionContext,
+  input: unknown
+): Promise<ActionEnvelope> {
+  const name = requiredString(input, "name");
+  const pageId = requiredString(input, "pageId");
+  return runMetaCreate(db, context, input, "create_meta_creative", "creative", (credential) =>
+    createMetaCreative(credential, {
+      name,
+      pageId,
+      ...(optionalString(input, "imageHash") ? { imageHash: optionalString(input, "imageHash") } : {}),
+      ...(optionalString(input, "instagramUserId") ? { instagramUserId: optionalString(input, "instagramUserId") } : {}),
+      ...(optionalString(input, "linkUrl") ? { linkUrl: optionalString(input, "linkUrl") } : {}),
+      ...(optionalString(input, "body") ? { body: optionalString(input, "body") } : {}),
+      ...(optionalString(input, "title") ? { title: optionalString(input, "title") } : {}),
+      ...(optionalString(input, "description") ? { description: optionalString(input, "description") } : {}),
+      ...(optionalString(input, "callToAction") ? { callToAction: optionalString(input, "callToAction") } : {})
+    })
+  );
+}
+
+async function createMetaAdHandler(
+  db: InfiniteOsDb,
+  context: SessionContext,
+  input: unknown
+): Promise<ActionEnvelope> {
+  const adsetId = requiredString(input, "adsetId");
+  const name = requiredString(input, "name");
+  const creativeId = requiredString(input, "creativeId");
+  return runMetaCreate(db, context, input, "create_meta_ad", "ad", (credential) =>
+    createMetaAd(credential, { adsetId, name, creativeId })
+  );
+}
+
+// Status transition (activate/pause). The CLI/operator confirm gates (incl. the
+// stricter typed-confirm for activate) live above this layer; here we perform
+// the transition INLINE and audit it. activate/pause are naturally idempotent at
+// Meta but still operator-gated + audited.
+async function setMetaEntityStatusHandler(
+  db: InfiniteOsDb,
+  context: SessionContext,
+  input: unknown
+): Promise<ActionEnvelope> {
+  const sourceId = requiredString(input, "sourceId");
+  const entityId = requiredString(input, "entityId");
+  const status = requiredString(input, "status").toUpperCase();
+  if (status !== "ACTIVE" && status !== "PAUSED") {
+    throw new Error(`unsupported_meta_status:${status}`);
+  }
+  const action: InfiniteOsActionId = "set_meta_entity_status";
+  const credential = await resolveMetaCredentialForWrite(db, context, sourceId);
+  let result;
+  try {
+    result = await setMetaEntityStatus(credential, entityId, status as MetaEntityStatus);
+  } catch (error) {
+    await metaAuditLog(db, context, sourceId, action, "failed", {
+      action,
+      entity_id: entityId,
+      requested_status: status,
+      error_code: metaErrorCode(error),
+      // Flag the spend-bearing transition for auditors even on failure.
+      activation: status === "ACTIVE"
+    });
+    throw error;
+  }
+  await metaAuditLog(db, context, sourceId, action, "succeeded", {
+    action,
+    entity_id: entityId,
+    requested_status: status,
+    status: result.status,
+    activation: status === "ACTIVE"
+  });
+  return envelope(
+    action,
+    context.authority,
+    { id: result.id, status: result.status, activation: status === "ACTIVE" },
+    ["integration_audit_log"],
+    "ok"
+  );
+}
+
+// Reads — no money movement, no audit row, normal retryable taxonomy.
+async function listMetaEntitiesHandler(
+  db: InfiniteOsDb,
+  context: SessionContext,
+  input: unknown
+): Promise<ActionEnvelope> {
+  const sourceId = requiredString(input, "sourceId");
+  const entity = requiredString(input, "entity") as MetaWriteEntity;
+  if (!["campaign", "adset", "ad", "creative"].includes(entity)) {
+    throw new Error(`unsupported_meta_entity:${entity}`);
+  }
+  const credential = await resolveMetaCredentialForWrite(db, context, sourceId);
+  const limit = numberOrNull(input, "limit") ?? undefined;
+  const fields = optionalString(input, "fields");
+  const entities = await listMetaEntities(credential, entity, {
+    ...(limit === undefined ? {} : { limit }),
+    ...(fields ? { fields } : {})
+  });
+  return envelope(
+    "list_meta_entities",
+    context.authority,
+    { entity, entities, count: entities.length },
+    ["provider_truth"],
+    "ok"
+  );
+}
+
+async function getMetaEntityHandler(
+  db: InfiniteOsDb,
+  context: SessionContext,
+  input: unknown
+): Promise<ActionEnvelope> {
+  const sourceId = requiredString(input, "sourceId");
+  const entityId = requiredString(input, "entityId");
+  const credential = await resolveMetaCredentialForWrite(db, context, sourceId);
+  const fields = optionalString(input, "fields");
+  const entity = await getMetaEntity(credential, entityId, fields ? { fields } : {});
+  return envelope(
+    "get_meta_entity",
+    context.authority,
+    { id: entityId, entity },
+    ["provider_truth"],
+    "ok"
   );
 }
 

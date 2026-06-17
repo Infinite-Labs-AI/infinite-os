@@ -69,7 +69,13 @@ describe("Infinite OS runtime action registry", () => {
       "resume_source_schedule",
       "create_saved_report",
       "run_saved_report",
-      "export_saved_report"
+      "export_saved_report",
+      // Meta Ads WRITE/management (operator-only) — see OPERATOR_ACTIONS.
+      "create_meta_campaign",
+      "create_meta_ad_set",
+      "create_meta_ad",
+      "create_meta_creative",
+      "set_meta_entity_status"
     ]);
     expect(FIRST_PHASE_ACTIONS).toEqual(
       expect.arrayContaining([...ORIGINAL_FIRST_PHASE_ACTIONS])

@@ -2978,8 +2978,8 @@ function metaAdsPagingAfter(response: MetaAdsInsightsResponse): string | undefin
 // `// VERIFY against a real Meta sandbox capture before live use` comment.
 // ───────────────────────────────────────────────────────────────────────────
 
-type MetaWriteEntity = "campaign" | "adset" | "ad" | "creative";
-type MetaEntityStatus = "ACTIVE" | "PAUSED";
+export type MetaWriteEntity = "campaign" | "adset" | "ad" | "creative";
+export type MetaEntityStatus = "ACTIVE" | "PAUSED";
 
 const META_CREATE_STATUS = "PAUSED" as const;
 
@@ -3413,6 +3413,27 @@ export function findMetaDedupHit(
     return undefined;
   }
   return existing.find((record) => record.clientToken === clientToken)?.entityId;
+}
+
+// Resolve a live, OAuth-bridged MetaAdsCredential for an operator WRITE handler.
+// The connector's `sync()` path reads credentials through the module-private
+// `sourceCredential` (which follows the oauth_tokens FK + refreshes on demand);
+// the write handlers in the analytical-engine run INLINE and need the same
+// resolved credential without going through a connector method. This thin
+// exported wrapper reuses that exact resolver (no duplicate decrypt/refresh
+// logic, no token ever leaving the credential object) so a Meta write reuses
+// the same live-token bridge a Meta read/sync does.
+export async function resolveMetaAdsCredential(
+  db: InfiniteOsDb,
+  request: { workspaceId: string; sourceId: string }
+): Promise<MetaAdsCredential> {
+  const credential = await sourceCredential<MetaAdsCredential>(db, {
+    workspaceId: request.workspaceId,
+    sourceId: request.sourceId,
+    provider: "meta_ads",
+    syncRunId: `write_${Date.now()}`
+  });
+  return credential.payload;
 }
 
 function metaAdsCliAccountId(credential: MetaAdsCredential): string {

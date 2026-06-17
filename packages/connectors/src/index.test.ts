@@ -18,6 +18,7 @@ import {
   listMetaEntities,
   metaDedupKey,
   posthogConnectSourceFromSetup,
+  resolveMetaAdsCredential,
   setMetaEntityStatus,
   xConnectSourceFromSetup,
   type MetaAdsCredential,
@@ -2404,6 +2405,67 @@ describe("Meta Ads WRITE helpers", () => {
         ).rejects.toMatchObject({ retryable: false });
       }
     );
+  });
+});
+
+describe("resolveMetaAdsCredential (operator write credential resolver)", () => {
+  it("reuses the oauth_tokens bridge and merges the live token over stored metadata", async () => {
+    const credential = await resolveMetaAdsCredential(
+      oauthFakeDb({
+        // Only non-secret metadata lives in connection_credentials; the live
+        // system-user token is followed through the oauth_tokens FK — exactly
+        // the bridge the read/sync path uses.
+        credential: {
+          credential_kind: "oauth_access_token",
+          encrypted_payload: encryptedCredential({
+            mode: "live",
+            transport: "marketing_api",
+            adAccountId: "act_555",
+            apiVersion: "v25.0"
+          }),
+          oauth_token_id: "meta_token_live"
+        },
+        oauthTokens: {
+          meta_token_live: {
+            encrypted_payload: encryptedCredential({
+              accessToken: "live-meta-write-token",
+              refreshToken: "meta-refresh",
+              expiresAt: new Date(Date.now() + 3600_000).toISOString()
+            }),
+            expires_at: new Date(Date.now() + 3600_000).toISOString()
+          }
+        }
+      }),
+      { workspaceId: "workspace", sourceId: "src_meta" }
+    );
+
+    expect(credential).toMatchObject({
+      adAccountId: "act_555",
+      apiVersion: "v25.0",
+      accessToken: "live-meta-write-token"
+    });
+  });
+
+  it("reads encrypted_payload directly when there is no linked oauth token", async () => {
+    const credential = await resolveMetaAdsCredential(
+      oauthFakeDb({
+        credential: {
+          credential_kind: "system_user_token",
+          encrypted_payload: encryptedCredential({
+            mode: "live",
+            transport: "marketing_api",
+            adAccountId: "act_777",
+            accessToken: "inline-meta-token"
+          }),
+          oauth_token_id: null
+        },
+        oauthTokens: {}
+      }),
+      { workspaceId: "workspace", sourceId: "src_meta" }
+    );
+
+    expect(credential.accessToken).toBe("inline-meta-token");
+    expect(credential.adAccountId).toBe("act_777");
   });
 });
 

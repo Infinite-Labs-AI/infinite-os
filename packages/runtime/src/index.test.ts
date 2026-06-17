@@ -2,8 +2,12 @@ import { NoActiveProjectError } from "@infinite-os/config";
 import { describe, expect, it } from "vitest";
 
 import {
+  ACTION_CATALOG,
   MissingWorkspaceError,
+  OPERATOR_ACTIONS,
+  READ_ACTIONS,
   createEnvelope,
+  createInfiniteOsRegistry,
   createSessionContext,
   runtimeBoot,
   runtimeVersion,
@@ -184,5 +188,73 @@ describe("createSessionContext workspace fail-closed", () => {
     }
     expect(caught).toBeInstanceOf(NoActiveProjectError);
     expect(caught).toBeInstanceOf(MissingWorkspaceError);
+  });
+});
+
+describe("Meta Ads management action authority (money-safety)", () => {
+  const META_WRITE_IDS = [
+    "create_meta_campaign",
+    "create_meta_ad_set",
+    "create_meta_ad",
+    "create_meta_creative",
+    "set_meta_entity_status"
+  ] as const;
+  const META_READ_IDS = ["list_meta_entities", "get_meta_entity"] as const;
+
+  it("registers every Meta WRITE id as operator-authority and every Meta READ id as tool_agent", () => {
+    for (const id of META_WRITE_IDS) {
+      expect((OPERATOR_ACTIONS as readonly string[]).includes(id)).toBe(true);
+      expect((READ_ACTIONS as readonly string[]).includes(id)).toBe(false);
+      const card = ACTION_CATALOG.find((action) => action.id === id);
+      expect(card?.authority).toBe("operator");
+      // Operator writes audit through the operator_audit provenance policy.
+      expect(card?.provenancePolicy).toBe("operator_audit");
+    }
+    for (const id of META_READ_IDS) {
+      expect((READ_ACTIONS as readonly string[]).includes(id)).toBe(true);
+      expect((OPERATOR_ACTIONS as readonly string[]).includes(id)).toBe(false);
+      const card = ACTION_CATALOG.find((action) => action.id === id);
+      expect(card?.authority).toBe("tool_agent");
+    }
+  });
+
+  it("exposes an input schema requiring sourceId for every Meta management action", () => {
+    for (const id of [...META_WRITE_IDS, ...META_READ_IDS]) {
+      const card = ACTION_CATALOG.find((action) => action.id === id);
+      expect(card).toBeDefined();
+      const schema = card?.inputSchema as { required?: string[] } | undefined;
+      expect(schema?.required).toContain("sourceId");
+    }
+  });
+
+  it("forbids a tool_agent session from executing any Meta WRITE action", async () => {
+    const registry = createInfiniteOsRegistry();
+    const toolAgentContext = createSessionContext({
+      workspaceId: "workspace",
+      authority: "tool_agent",
+      surface: "app"
+    });
+    for (const id of META_WRITE_IDS) {
+      await expect(
+        registry.execute(id, { sourceId: "src_meta" }, toolAgentContext)
+      ).rejects.toThrow("operator authority required");
+    }
+  });
+
+  it("lets an operator session reach the (unwired) Meta WRITE handlers without an authority error", async () => {
+    // With no handler injected the catalog returns the not_implemented stub, but
+    // crucially assertAuthority must NOT throw for an operator — proving the gate
+    // is authority, not a blanket block.
+    const registry = createInfiniteOsRegistry();
+    const operatorContext = createSessionContext({
+      workspaceId: "workspace",
+      authority: "operator",
+      surface: "cli"
+    });
+    for (const id of META_WRITE_IDS) {
+      const envelope = await registry.execute(id, { sourceId: "src_meta" }, operatorContext);
+      expect(envelope.actionId).toBe(id);
+      expect(envelope.authority).toBe("operator");
+    }
   });
 });

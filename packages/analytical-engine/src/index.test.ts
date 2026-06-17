@@ -3103,6 +3103,299 @@ describe("setup action helpers", () => {
   });
 });
 
+describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
+  const operatorContext = {
+    workspaceId: "workspace",
+    authority: "operator",
+    surface: "cli",
+    actorId: "operator",
+    sessionId: "session"
+  } as const;
+
+  interface AuditRow {
+    action: string;
+    status: string;
+    source_id: string;
+    actor_type: string;
+    details: Record<string, unknown>;
+  }
+
+  interface GraphCall {
+    url: string;
+    method: string | undefined;
+    authorization: string | null;
+    body: Record<string, unknown> | null;
+  }
+
+  // A fake db that serves the meta_ads source + an encrypted Meta credential, and
+  // records integration_audit_log inserts (also serving them back for dedup).
+  function metaWriteTestDb(options: {
+    audits: AuditRow[];
+    dedup?: { clientToken: string; entityId: string };
+  }): InfiniteOsDb {
+    return {
+      async query<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T[]> {
+        if (sql.includes("insert into integration_audit_log")) {
+          const p = params ?? [];
+          options.audits.push({
+            source_id: String(p[2]),
+            actor_type: String(p[3]),
+            action: String(p[4]),
+            status: String(p[5]),
+            details: JSON.parse(String(p[6])) as Record<string, unknown>
+          });
+        }
+        return [] as T[];
+      },
+      async one<T>(sql: string, params?: unknown[]): Promise<T | null> {
+        if (sql.includes("from sources")) {
+          return { provider: "meta_ads" } as T;
+        }
+        if (sql.includes("from connection_credentials")) {
+          return {
+            credential_kind: "system_user_token",
+            encrypted_payload: encryptForTest({
+              mode: "live",
+              transport: "marketing_api",
+              adAccountId: "act_999",
+              accessToken: "secret-meta-token",
+              apiVersion: "v25.0"
+            }),
+            oauth_token_id: null
+          } as T;
+        }
+        if (sql.includes("from integration_audit_log")) {
+          const token = String(params?.[2] ?? "");
+          if (options.dedup && options.dedup.clientToken === token) {
+            return { entity_id: options.dedup.entityId } as T;
+          }
+          return null;
+        }
+        return null;
+      },
+      async close() {},
+      async ensureWorkspace() {},
+      async ensureFirstPhaseDatasets() {},
+      async connectSource() {
+        return {};
+      },
+      async updateSourceStatus() {},
+      async createJob() {
+        // INVARIANT 3: a money write must NEVER enqueue a worker job.
+        throw new Error("createJob must not be called by a Meta write handler");
+      },
+      async claimNextJob() {
+        return null;
+      },
+      async completeJob() {},
+      async withTransaction(fn) {
+        return fn(this);
+      }
+    };
+  }
+
+  async function withGraph(
+    responder: (call: GraphCall) => Response | Promise<Response>,
+    fn: (calls: GraphCall[]) => Promise<void>
+  ): Promise<void> {
+    process.env.GROWTH_OS_ENCRYPTION_KEY = "analytical-test-encryption-key";
+    const calls: GraphCall[] = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      let body: Record<string, unknown> | null = null;
+      if (init?.body && typeof init.body === "string") {
+        try {
+          body = JSON.parse(init.body) as Record<string, unknown>;
+        } catch {
+          body = null;
+        }
+      }
+      const headers = (init?.headers ?? {}) as Record<string, string>;
+      const call: GraphCall = {
+        url,
+        method: init?.method,
+        authorization: headers.Authorization ?? headers.authorization ?? null,
+        body
+      };
+      calls.push(call);
+      return Promise.resolve(responder(call));
+    }) as typeof fetch;
+    try {
+      await fn(calls);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  }
+
+  function jsonResponse(value: unknown, status = 200): Response {
+    return new Response(JSON.stringify(value), {
+      status,
+      headers: { "Content-Type": "application/json" }
+    });
+  }
+
+  it("creates a campaign INLINE, lands PAUSED, never logs the token or raw budget", async () => {
+    const audits: AuditRow[] = [];
+    const db = metaWriteTestDb({ audits });
+    await withGraph(
+      () => jsonResponse({ id: "120000000000777", status: "PAUSED" }),
+      async (calls) => {
+        const handlers = createActionHandlers(db);
+        const result = await handlers.create_meta_campaign?.(
+          {
+            sourceId: "src_meta",
+            name: "Demo Requests",
+            objective: "OUTCOME_TRAFFIC",
+            dailyBudget: 5000,
+            clientToken: "tok_camp_1"
+          },
+          operatorContext
+        );
+
+        // INVARIANT 1: hard-coded PAUSED in the POST body, status echoed back.
+        expect(calls[0].url).toBe("https://graph.facebook.com/v25.0/act_999/campaigns");
+        expect(calls[0].method).toBe("POST");
+        expect(calls[0].body).toMatchObject({ status: "PAUSED", objective: "OUTCOME_TRAFFIC" });
+        expect(calls[0].authorization).toBe("Bearer secret-meta-token");
+        expect(result?.data).toMatchObject({ id: "120000000000777", status: "PAUSED", deduped: false });
+
+        // INVARIANT 6: audit row stores presence flags + ids, NEVER the token/amount.
+        const audit = audits.find((row) => row.action === "create_meta_campaign");
+        expect(audit?.status).toBe("succeeded");
+        expect(audit?.actor_type).toBe("operator");
+        expect(audit?.details).toMatchObject({
+          entity: "campaign",
+          entity_id: "120000000000777",
+          client_token: "tok_camp_1",
+          status: "PAUSED",
+          budget_present: true,
+          deduped: false
+        });
+        const serialized = JSON.stringify(audits);
+        expect(serialized).not.toContain("secret-meta-token");
+        expect(serialized).not.toContain("5000");
+        expect(serialized).not.toContain("daily_budget");
+      }
+    );
+  });
+
+  it("dedups a repeat create by client_token without a second POST", async () => {
+    const audits: AuditRow[] = [];
+    const db = metaWriteTestDb({
+      audits,
+      dedup: { clientToken: "tok_dupe", entityId: "120000000000111" }
+    });
+    await withGraph(
+      () => jsonResponse({ id: "should-not-be-created", status: "PAUSED" }),
+      async (calls) => {
+        const handlers = createActionHandlers(db);
+        const result = await handlers.create_meta_campaign?.(
+          {
+            sourceId: "src_meta",
+            name: "Dup",
+            objective: "OUTCOME_TRAFFIC",
+            clientToken: "tok_dupe"
+          },
+          operatorContext
+        );
+        // No Graph POST happened.
+        expect(calls).toHaveLength(0);
+        expect(result?.data).toMatchObject({ id: "120000000000111", deduped: true });
+        const audit = audits.find((row) => row.action === "create_meta_campaign");
+        expect(audit?.details).toMatchObject({ deduped: true, entity_id: "120000000000111" });
+      }
+    );
+  });
+
+  it("audits a failure and re-throws when Graph echoes ACTIVE (money-safety violation)", async () => {
+    const audits: AuditRow[] = [];
+    const db = metaWriteTestDb({ audits });
+    await withGraph(
+      () => jsonResponse({ id: "120000000000222", status: "ACTIVE" }),
+      async () => {
+        const handlers = createActionHandlers(db);
+        await expect(
+          handlers.create_meta_campaign?.(
+            { sourceId: "src_meta", name: "Sneaky", objective: "OUTCOME_TRAFFIC" },
+            operatorContext
+          )
+        ).rejects.toMatchObject({ code: "money_safety_violation", retryable: false });
+        const audit = audits.find((row) => row.action === "create_meta_campaign");
+        expect(audit?.status).toBe("failed");
+        expect(audit?.details).toMatchObject({ error_code: "money_safety_violation" });
+      }
+    );
+  });
+
+  it("activates an entity (the spend-bearing transition) and audits activation:true", async () => {
+    const audits: AuditRow[] = [];
+    const db = metaWriteTestDb({ audits });
+    await withGraph(
+      () => jsonResponse({ success: true, status: "ACTIVE" }),
+      async (calls) => {
+        const handlers = createActionHandlers(db);
+        const result = await handlers.set_meta_entity_status?.(
+          { sourceId: "src_meta", entityId: "120000000000333", status: "ACTIVE" },
+          operatorContext
+        );
+        expect(calls[0].url).toBe("https://graph.facebook.com/v25.0/120000000000333");
+        expect(calls[0].body).toEqual({ status: "ACTIVE" });
+        expect(result?.data).toMatchObject({ id: "120000000000333", status: "ACTIVE", activation: true });
+        const audit = audits.find((row) => row.action === "set_meta_entity_status");
+        expect(audit?.status).toBe("succeeded");
+        expect(audit?.details).toMatchObject({ requested_status: "ACTIVE", activation: true });
+      }
+    );
+  });
+
+  it("lists entities as a read (no audit row, normal taxonomy)", async () => {
+    const audits: AuditRow[] = [];
+    const db = metaWriteTestDb({ audits });
+    await withGraph(
+      () => jsonResponse({ data: [{ id: "c1", name: "Camp", status: "PAUSED" }] }),
+      async (calls) => {
+        const handlers = createActionHandlers(db);
+        const result = await handlers.list_meta_entities?.(
+          { sourceId: "src_meta", entity: "campaign", limit: 5 },
+          { ...operatorContext, authority: "tool_agent" }
+        );
+        expect(calls[0].method).toBe("GET");
+        expect(calls[0].url).toContain("/act_999/campaigns");
+        expect(result?.data).toMatchObject({ entity: "campaign", count: 1 });
+        // Reads do not write an audit row.
+        expect(audits).toHaveLength(0);
+      }
+    );
+  });
+
+  it("refuses a non-Meta source before touching the Graph API", async () => {
+    const audits: AuditRow[] = [];
+    const db: InfiniteOsDb = {
+      ...metaWriteTestDb({ audits }),
+      async one<T>(sql: string): Promise<T | null> {
+        if (sql.includes("from sources")) {
+          return { provider: "stripe" } as T;
+        }
+        return null;
+      }
+    };
+    await withGraph(
+      () => jsonResponse({ id: "nope" }),
+      async (calls) => {
+        const handlers = createActionHandlers(db);
+        await expect(
+          handlers.create_meta_campaign?.(
+            { sourceId: "src_stripe", name: "X", objective: "OUTCOME_TRAFFIC" },
+            operatorContext
+          )
+        ).rejects.toThrow("source_provider_mismatch");
+        expect(calls).toHaveLength(0);
+      }
+    );
+  });
+});
+
 function journeyTestDb(): InfiniteOsDb {
   return {
     async query<T = Record<string, unknown>>(sql: string): Promise<T[]> {

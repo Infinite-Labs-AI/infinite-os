@@ -283,7 +283,12 @@ export const READ_ACTIONS = [
   "validate_journey_plan",
   "run_journey_query",
   "fetch_evidence",
-  "verify_claims"
+  "verify_claims",
+  // Meta Ads management READS (no money movement): list/get keep tool_agent
+  // authority and the normal retryable taxonomy. The WRITE ids below are
+  // operator-only.
+  "list_meta_entities",
+  "get_meta_entity"
 ] as const;
 
 export const OPERATOR_ACTIONS = [
@@ -296,7 +301,16 @@ export const OPERATOR_ACTIONS = [
   "resume_source_schedule",
   "create_saved_report",
   "run_saved_report",
-  "export_saved_report"
+  "export_saved_report",
+  // Meta Ads WRITE/management — every one can move money (create or go-live), so
+  // all are operator-authority. An LLM/tool_agent session can NEVER fire these
+  // (assertAuthority throws "operator authority required"). Creates ALWAYS land
+  // PAUSED; set_meta_entity_status is the separate, gated go-live transition.
+  "create_meta_campaign",
+  "create_meta_ad_set",
+  "create_meta_ad",
+  "create_meta_creative",
+  "set_meta_entity_status"
 ] as const;
 
 export const FIRST_PHASE_ACTIONS = [
@@ -743,6 +757,61 @@ function metadataFor(id: InfiniteOsActionId): {
       category: "reports",
       recommendedNextActions: ["get_recent_sync_runs"],
       recipeIds: ["export_report", "save_export_report"]
+    },
+    list_meta_entities: {
+      title: "List Meta Ads entities",
+      summary:
+        "Read Meta Ads campaigns, ad sets, ads, or creatives for one source (no money movement).",
+      category: "sources",
+      recommendedNextActions: ["get_meta_entity", "set_meta_entity_status"],
+      recipeIds: []
+    },
+    get_meta_entity: {
+      title: "Get Meta Ads entity",
+      summary: "Read a single Meta Ads entity node by id (no money movement).",
+      category: "sources",
+      recommendedNextActions: ["set_meta_entity_status", "list_meta_entities"],
+      recipeIds: []
+    },
+    create_meta_campaign: {
+      title: "Create Meta Ads campaign",
+      summary:
+        "Operator-only. Create a Meta Ads campaign that ALWAYS lands PAUSED; going live is a separate, gated set_meta_entity_status step.",
+      category: "operator",
+      recommendedNextActions: ["create_meta_ad_set", "set_meta_entity_status"],
+      recipeIds: []
+    },
+    create_meta_ad_set: {
+      title: "Create Meta Ads ad set",
+      summary:
+        "Operator-only. Create a Meta Ads ad set under a campaign; ALWAYS lands PAUSED. Budgets/bids are integer cents in the ad-account currency.",
+      category: "operator",
+      recommendedNextActions: ["create_meta_creative", "create_meta_ad"],
+      recipeIds: []
+    },
+    create_meta_creative: {
+      title: "Create Meta Ads creative",
+      summary:
+        "Operator-only. Create a STANDARD single-image/video Meta Ads creative. Creatives have no go-live status.",
+      category: "operator",
+      recommendedNextActions: ["create_meta_ad"],
+      recipeIds: []
+    },
+    create_meta_ad: {
+      title: "Create Meta Ads ad",
+      summary:
+        "Operator-only. Create a Meta Ads ad wiring an ad set to a creative; ALWAYS lands PAUSED.",
+      category: "operator",
+      recommendedNextActions: ["set_meta_entity_status", "get_meta_entity"],
+      recipeIds: []
+    },
+    set_meta_entity_status: {
+      title: "Set Meta Ads entity status",
+      summary:
+        "Operator-only. Activate or pause a Meta Ads campaign/ad set/ad. Activating is the ONLY money-spending transition; it is per-level and never cascades.",
+      category: "operator",
+      recommendedNextActions: ["get_meta_entity", "list_meta_entities"],
+      recipeIds: []
     }
   };
   return metadata[id];
@@ -920,6 +989,96 @@ function inputSchemaFor(id: InfiniteOsActionId): Record<string, unknown> {
         format: { enum: ["json"] }
       },
       ["reportId"]
+    ),
+    list_meta_entities: requiredObject(
+      {
+        sourceId: { type: "string" },
+        entity: { enum: ["campaign", "adset", "ad", "creative"] },
+        limit: { type: "number", minimum: 1, maximum: 500 },
+        fields: { type: "string" }
+      },
+      ["sourceId", "entity"]
+    ),
+    get_meta_entity: requiredObject(
+      {
+        sourceId: { type: "string" },
+        entityId: { type: "string" },
+        fields: { type: "string" }
+      },
+      ["sourceId", "entityId"]
+    ),
+    create_meta_campaign: requiredObject(
+      {
+        sourceId: { type: "string" },
+        name: { type: "string" },
+        objective: {
+          type: "string",
+          description: "Meta outcome objective, e.g. OUTCOME_TRAFFIC, OUTCOME_SALES (uppercase)."
+        },
+        // Budgets are integer minor units (cents) in the ad-account currency.
+        dailyBudget: { type: "number", minimum: 0 },
+        lifetimeBudget: { type: "number", minimum: 0 },
+        clientToken: {
+          type: "string",
+          description: "Optional idempotency token; a repeat with the same token returns the existing id (deduped)."
+        }
+      },
+      ["sourceId", "name", "objective"]
+    ),
+    create_meta_ad_set: requiredObject(
+      {
+        sourceId: { type: "string" },
+        campaignId: { type: "string" },
+        name: { type: "string" },
+        optimizationGoal: { type: "string" },
+        billingEvent: { type: "string" },
+        dailyBudget: { type: "number", minimum: 0 },
+        lifetimeBudget: { type: "number", minimum: 0 },
+        bidAmount: { type: "number", minimum: 0 },
+        startTime: { type: "string" },
+        endTime: { type: "string" },
+        targetingCountries: { type: "array", items: { type: "string" } },
+        pixelId: { type: "string" },
+        customEventType: { type: "string" },
+        clientToken: { type: "string" }
+      },
+      ["sourceId", "campaignId", "name", "optimizationGoal", "billingEvent"]
+    ),
+    create_meta_creative: requiredObject(
+      {
+        sourceId: { type: "string" },
+        name: { type: "string" },
+        pageId: { type: "string" },
+        imageHash: { type: "string" },
+        instagramUserId: { type: "string" },
+        linkUrl: { type: "string" },
+        body: { type: "string" },
+        title: { type: "string" },
+        description: { type: "string" },
+        callToAction: { type: "string" },
+        clientToken: { type: "string" }
+      },
+      ["sourceId", "name", "pageId"]
+    ),
+    create_meta_ad: requiredObject(
+      {
+        sourceId: { type: "string" },
+        adsetId: { type: "string" },
+        name: { type: "string" },
+        creativeId: { type: "string" },
+        clientToken: { type: "string" }
+      },
+      ["sourceId", "adsetId", "name", "creativeId"]
+    ),
+    set_meta_entity_status: requiredObject(
+      {
+        sourceId: { type: "string" },
+        entityId: { type: "string" },
+        // ACTIVE is the only money-spending transition; the CLI/operator confirm
+        // gates live above this layer.
+        status: { enum: ["ACTIVE", "PAUSED"] }
+      },
+      ["sourceId", "entityId", "status"]
     )
   };
   return schemas[id] ?? requiredObject({});
