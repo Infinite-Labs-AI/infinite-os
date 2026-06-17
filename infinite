@@ -171,7 +171,10 @@ build_with_progress() {
 #
 # Opt out entirely with INFINITE_NO_AUTO_UPDATE=1.
 AUTO_UPDATE_INTERVAL=${INFINITE_AUTO_UPDATE_INTERVAL:-86400} # seconds; default 24h
-AUTO_UPDATE_STAMP="${XDG_CACHE_HOME:-$HOME/.cache}/infinite/autoupdate-stamp"
+# HOME has its own fallback: this line runs at top level under `set -u`, before the
+# opt-out check, so an unset HOME (cron / systemd / minimal container) must not abort
+# the launcher — the whole point is to never block startup.
+AUTO_UPDATE_STAMP="${XDG_CACHE_HOME:-${HOME:-/tmp}/.cache}/infinite/autoupdate-stamp"
 
 git_quiet() { git -C "$ROOT" "$@" 2>/dev/null; }
 
