@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { Text } from "./renderer.js";
 
-import type { Theme } from "../theme.js";
+import { RETRO } from "./retro-style.js";
 
 /**
  * Fixed render height of the home-screen rocket banner, in terminal rows.
@@ -46,13 +46,11 @@ function animationEnabled(env: NodeJS.ProcessEnv): boolean {
  * later on top of this same fixed-row banner.
  */
 export function RocketBanner({
-  theme,
   animate
 }: {
-  theme: Theme;
   /** Override the env-derived animation gate (tests / reduced-motion). */
   animate?: boolean;
-}) {
+} = {}) {
   const animated = animate ?? animationEnabled(process.env);
   const [flameTick, setFlameTick] = useState(0);
 
@@ -65,12 +63,14 @@ export function RocketBanner({
     return () => clearInterval(id);
   }, [animated]);
 
+  // Pure black & white to match the retro welcome — no hue. The pilot flame
+  // flickers white-hot ↔ grey instead of orange.
   const flame = FLAME_FRAMES[flameTick % FLAME_FRAMES.length];
-  const ship = theme.color.primary;
-  const pad = theme.color.muted;
-  const brand = theme.color.primaryBright;
-  const tagline = theme.color.muted;
-  const flameColor = flame.hot ? theme.color.primaryBright : theme.color.warning;
+  const ship = RETRO.light;
+  const pad = RETRO.grey;
+  const brand = RETRO.white;
+  const tagline = RETRO.grey;
+  const flameColor = flame.hot ? RETRO.white : RETRO.mid;
 
   // Each row is its own truncate-end <Text> so a narrow terminal clips the
   // right-hand wordmark instead of wrapping the rocket onto a 5th row.
