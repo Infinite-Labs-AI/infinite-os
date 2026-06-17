@@ -15,7 +15,7 @@ const PROVIDER_LABELS: Record<SetupProviderId, string> = {
 };
 
 /** What `npx infinite-tag install` drops into the founder's site for each provider. */
-const PROVIDER_TAG_NOUNS: Record<SetupProviderId, string> = {
+export const PROVIDER_TAG_NOUNS: Record<SetupProviderId, string> = {
   ga4: "GA4 tag",
   posthog: "PostHog snippet",
   x: "X pixel"
@@ -107,8 +107,9 @@ function formatSucceeded(
   }
   // Point at the single COMBINED command printed at the end of setup. A per-provider
   // `--yes` command here could clobber another provider's tag if pasted in sequence
-  // (each rewrites the managed analytics module with only its own flags).
-  return `${status} Next: use the install command at the end of this setup (covers all connected providers).`;
+  // (each rewrites the managed analytics module with only its own flags). Name WHICH tag
+  // via PROVIDER_TAG_NOUNS so the founder knows what this provider contributes.
+  return `${status} Next: add the ${PROVIDER_TAG_NOUNS[provider]} with the install command at the end of this setup (covers all connected providers).`;
 }
 
 function formatPaused(label: string, runId: string | undefined): string {

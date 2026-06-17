@@ -27,7 +27,7 @@ describe("formatProviderConfirmation", () => {
 
     expect(line).toBe(
       "✓ GA4 connected — property properties/123 · Measurement ID G-ACME123. " +
-        "Next: use the install command at the end of this setup (covers all connected providers)."
+        "Next: add the GA4 tag with the install command at the end of this setup (covers all connected providers)."
     );
     // Never a per-provider --yes command: pasting two of those in sequence could
     // rewrite the managed analytics module without the first provider's tag.
@@ -60,7 +60,7 @@ describe("formatProviderConfirmation", () => {
 
     expect(line).toBe(
       "✓ PostHog connected — project key phc_test_key captured + pixel ready · project project_1. " +
-        "Next: use the install command at the end of this setup (covers all connected providers)."
+        "Next: add the PostHog snippet with the install command at the end of this setup (covers all connected providers)."
     );
     expect(line).not.toContain("npx infinite-tag install");
   });
@@ -74,7 +74,7 @@ describe("formatProviderConfirmation", () => {
 
     expect(line).toBe(
       "✓ X connected — pixel id px_123 captured. " +
-        "Next: use the install command at the end of this setup (covers all connected providers)."
+        "Next: add the X pixel with the install command at the end of this setup (covers all connected providers)."
     );
     expect(line).not.toContain("npx infinite-tag install");
   });
@@ -178,7 +178,7 @@ describe("buildProviderConfirmations", () => {
     expect(lines).toHaveLength(2);
     expect(lines[0]).toContain("✓ GA4 connected — Measurement ID G-ACME123.");
     expect(lines[0]).toContain(
-      "Next: use the install command at the end of this setup (covers all connected providers)."
+      "Next: add the GA4 tag with the install command at the end of this setup (covers all connected providers)."
     );
     expect(lines[0]).not.toContain("npx infinite-tag install");
     expect(lines[1]).toContain("→ PostHog not connected yet");

@@ -40,6 +40,11 @@ export {
 export { buildPackageManagerCommands, detectPackageManager } from "./package-manager.js"
 export { planInstallation } from "./plan.js"
 export { getProviderAdapter, providerAdapters } from "./providers/index.js"
+// Public bootstrap-snippet builders + the <script> framing, reused by the CLI's
+// per-provider manual-install fallback printers so the manual copy never drifts
+// from the tested snippets the installer writes.
+export { buildPostHogBootstrapSnippet, wrapHtmlSnippet } from "./providers/posthog.js"
+export { buildXBootstrapSnippet } from "./providers/x.js"
 export { runCli } from "./cli.js"
 export { uninstallInstallation } from "./uninstall.js"
 export { resolveWorkspaceArtifacts } from "./workspace-artifacts.js"

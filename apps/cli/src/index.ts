@@ -344,9 +344,13 @@ interface SetupOnboardingProviderSummary {
   provider: SetupProviderId;
   selected: boolean;
   recommended: boolean;
-  status: "completed" | "paused_handoff" | "failed" | "not_selected";
+  status: "completed" | "paused_handoff" | "failed" | "not_selected" | "deferred";
   runId?: string;
   detail?: string;
+  /** Human rationale for a deferred provider (#13), surfaced from the recommendation. */
+  deferralReason?: string;
+  /** Drives the enable-path copy: "reenable" → re-tick & re-run; "future" → not in this version. */
+  deferralKind?: "reenable" | "future";
   handoff?: {
     url?: string;
     lastUrl?: string;
@@ -374,6 +378,12 @@ interface SetupOnboardingResult {
   installCommand?: string | null;
   /** Same-machine handoff file with the saved PUBLIC keys (~/.infinite/artifacts/<workspaceId>.json); null when not written. */
   installArtifactsPath?: string | null;
+  /**
+   * Every provider in the workspace still paused on a browser handoff (#11), derived from
+   * the workspace-wide activeRuns (NOT the scoped interview), deduped per provider. Lets
+   * the render + `next` surface all outstanding providers, not just the first/scoped one.
+   */
+  outstanding?: Array<{ provider: SetupProviderId; runId: string; instructions?: string; url?: string }>;
   next?: string;
 }
 
@@ -447,6 +457,8 @@ interface SetupModuleApi {
   }): Promise<{
     selectedProviders: SetupProviderId[];
     recommendedProviders: SetupProviderId[];
+    /** Per-provider recommendation truth (#13): carries deferral status + rationale + reasonCode. */
+    recommendations: Array<{ provider: SetupProviderId; status: "recommended" | "deferred" | "not_applicable"; reasonCode: string; rationale: string }>;
     completed: SetupProviderId[];
     paused: SetupProviderId[];
     failed: SetupProviderId[];
@@ -494,6 +506,8 @@ interface SetupModuleApi {
     interview?: SetupInterview;
     selectedProviders: SetupProviderId[];
     recommendedProviders: SetupProviderId[];
+    /** Per-provider recommendation truth (#13): carries deferral status + rationale + reasonCode. */
+    recommendations: Array<{ provider: SetupProviderId; status: "recommended" | "deferred" | "not_applicable"; reasonCode: string; rationale: string }>;
     completed: SetupProviderId[];
     paused: SetupProviderId[];
     failed: SetupProviderId[];
@@ -538,6 +552,46 @@ interface SetupModuleApi {
     result: { status: string; detail: string; data?: Record<string, unknown>; caveats?: string[] };
     verification?: { installStatus: string; queryabilityStatus?: string };
   }>;
+  /**
+   * Provider-neutral combined install (#9): plans + applies every captured tag in ONE
+   * pass so the managed analytics module is rewritten once. Mirrors {@link installGa4Tag}
+   * but takes the full artifacts map; the confirm summary names which providers will be
+   * written. Restated structurally here because the setup module is loaded at runtime.
+   */
+  installProviderTags(input: {
+    artifacts: SetupWorkspaceInstallArtifacts;
+    repoRoot: string;
+    workspaceId: string;
+    confirm?: (summary: {
+      framework: string;
+      appRoot: string;
+      packageManager: string;
+      files: string[];
+      providers: SetupProviderId[];
+    }) => Promise<boolean>;
+  }): Promise<{
+    result: { status: string; detail: string; data?: Record<string, unknown>; caveats?: string[] };
+    verification?: { installStatus: string; queryabilityStatus?: string };
+  }>;
+  /** Workspace-wide active/paused setup runs (#11 outstanding + `setup resume --all`). */
+  listActiveSetupRuns(
+    db: InfiniteOsDb,
+    workspaceId: string
+  ): Promise<Array<{ id: string; provider?: string; status?: string; pendingHandoff?: { url?: string; lastUrl?: string; instructions?: string } | null }>>;
+  /** Tested public bootstrap-snippet builders re-exported from infinite-tag (#9 manual fallback). */
+  buildPostHogBootstrapSnippet(projectKey: string, apiHost: string): string;
+  buildXBootstrapSnippet(pixelId: string, eventTagIds: string[]): string;
+  wrapHtmlSnippet(source: string): string;
+}
+
+/**
+ * Structural restatement of @infinite-os/setup's `WorkspaceInstallArtifacts` (= infinite-tag).
+ * The CLI builds this map from `resolvedPublicArtifacts` to drive the combined install.
+ */
+interface SetupWorkspaceInstallArtifacts {
+  ga4?: { measurementId: string };
+  posthog?: { projectKey: string; apiHost: string };
+  x?: { pixelId: string; eventTagIds: string[] };
 }
 
 async function loadSetupModule(): Promise<SetupModuleApi> {
@@ -1134,6 +1188,7 @@ export function helpText(): string {
     "  connect <provider> [name] <json_credential_payload>",
     "  sources                         List connected sources",
     "  setup resume <run_id>          Resume a paused browser or OAuth setup handoff",
+    "  setup resume --all             Resume every paused provider, one at a time",
     "  setup reset [tool]             Clear stuck setup runs so a fresh run can start",
     "  Providers: ga4, posthog, x, meta, stripe, shopify",
     "",
@@ -1956,8 +2011,18 @@ export async function runSetupWizard(
     return runSetupReset(args.slice(1), env);
   }
   if (args[0] === "resume") {
-    const [runId] = args.slice(1);
     const workspaceId = await requireActiveProject(env);
+    // #11 `setup resume --all`: resume every outstanding paused provider one at a time.
+    // Inserted BEFORE the "requires a run id" throw so the no-positional `--all` path works.
+    if (hasFlag(args, "--all")) {
+      return runLocalSetupResumeAll({
+        env,
+        workspaceId,
+        jsonMode: options.jsonMode,
+        resumeSetupRun: options.resumeSetupRun ?? runLocalSetupResume
+      });
+    }
+    const runId = args.slice(1).find((arg) => !arg.startsWith("--"));
     if (!runId) {
       throw new Error("setup resume requires a run id");
     }
@@ -2350,7 +2415,7 @@ async function runLocalSetupOnboarding(input: {
   }
   const db = createInfiniteOsDb(config.databaseUrl);
   const actions = createLocalSetupActionRunner(db);
-  const prompt = createLocalSetupPrompter();
+  const prompt = createLocalSetupPrompter({ interactive: isSetupInteractive(input.env, input.jsonMode) });
   const ga4OauthBootstrap = createLocalGa4OauthBootstrap({
     env: input.env,
     config,
@@ -2371,10 +2436,10 @@ async function runLocalSetupOnboarding(input: {
       awaitProviderHandoff: interaction.awaitProviderHandoff,
       onProviderStart: interaction.onProviderStart
     });
-    // Once GA4 is connected + synced, offer to install the gtag into the founder's
-    // site repo — the path is prompted explicitly (never cwd / Infinite's own repo)
-    // and the founder confirms before any file is written.
-    await offerGa4TagInstall({ setup, result, env: input.env, workspaceId: input.workspaceId, jsonMode: input.jsonMode });
+    // Once each provider is connected + synced, offer to install its tag into the founder's
+    // site repo — the path is prompted explicitly (never cwd / Infinite's own repo) and the
+    // founder confirms before any file is written. One combined apply across all providers.
+    await offerProviderTagInstall({ setup, result, env: input.env, workspaceId: input.workspaceId, jsonMode: input.jsonMode });
     return buildSetupOnboardingResult(input.interview, result);
   } finally {
     interaction.dispose();
@@ -2382,18 +2447,86 @@ async function runLocalSetupOnboarding(input: {
   }
 }
 
-async function offerGa4TagInstall(args: {
+/** Provider display order for the post-run install offer (GA4 → PostHog → X). */
+const TAG_INSTALL_PROVIDER_ORDER: SetupProviderId[] = ["ga4", "posthog", "x"];
+
+/** The "<Provider> is connected — add the <noun> to your site" line, per provider. */
+const TAG_INSTALL_CONNECTED_LINES: Record<SetupProviderId, string> = {
+  ga4: "GA4 is connected. To start collecting data, add the GA4 tag to your site.",
+  posthog: "PostHog is connected. To start capturing product events, add the PostHog snippet to your site.",
+  x: "X is connected. To start tracking conversions, add the X pixel to your site."
+};
+
+/** Mixed-case display names so a single end-state view never reads both "PostHog" and "POSTHOG". */
+const TAG_INSTALL_NOUNS: Record<SetupProviderId, string> = {
+  ga4: "GA4 tag",
+  posthog: "PostHog snippet",
+  x: "X pixel"
+};
+
+/** What the founder still needs from each provider before its artifact exists. */
+interface ProviderInstallArtifact {
+  provider: SetupProviderId;
+  artifacts: SetupWorkspaceInstallArtifacts;
+}
+
+/**
+ * Builds the per-provider {@link SetupWorkspaceInstallArtifacts} slices for the install
+ * offer: a completed provider is included only when its required PUBLIC id was captured.
+ * Mirrors install-command.ts / artifacts-file.ts rules (PostHog needs a project key, X
+ * event tags need a pixel id, apiHost defaults when null). Returned in provider order.
+ */
+function collectInstallableProviderArtifacts(
+  completed: string[],
+  resolved: SetupOnboardingResult["resolvedPublicArtifacts"] | undefined
+): ProviderInstallArtifact[] {
+  const completedSet = new Set(completed);
+  const out: ProviderInstallArtifact[] = [];
+  for (const provider of TAG_INSTALL_PROVIDER_ORDER) {
+    if (!completedSet.has(provider)) {
+      continue;
+    }
+    if (provider === "ga4") {
+      const measurementId = stringValue(resolved?.ga4?.measurementId);
+      if (measurementId) {
+        out.push({ provider, artifacts: { ga4: { measurementId } } });
+      }
+    } else if (provider === "posthog") {
+      const projectKey = stringValue(resolved?.posthog?.projectKey);
+      if (projectKey) {
+        const apiHost = stringValue(resolved?.posthog?.apiHost) ?? "https://us.i.posthog.com";
+        out.push({ provider, artifacts: { posthog: { projectKey, apiHost } } });
+      }
+    } else if (provider === "x") {
+      const pixelId = stringValue(resolved?.x?.pixelId);
+      if (pixelId) {
+        const rawTags = resolved?.x?.eventTagIds;
+        const eventTagIds = [
+          ...new Set(
+            Object.values((rawTags && typeof rawTags === "object" ? rawTags : {}) as Record<string, unknown>)
+              .map((id) => stringValue(id))
+              .filter((id): id is string => Boolean(id))
+          )
+        ];
+        out.push({ provider, artifacts: { x: { pixelId, eventTagIds } } });
+      }
+    }
+  }
+  return out;
+}
+
+async function offerProviderTagInstall(args: {
   setup: SetupModuleApi;
-  result: { completed: SetupProviderId[]; resolvedPublicArtifacts: { ga4: Record<string, unknown> } };
+  result: { completed: SetupProviderId[]; resolvedPublicArtifacts: SetupOnboardingResult["resolvedPublicArtifacts"] };
   env: CliEnv;
   workspaceId: string;
   jsonMode?: boolean;
 }): Promise<void> {
   // Route the install's prompts + progress to stderr so they never corrupt the stdout
   // payload of `infinite setup --json` (and conventionally, interactive UI belongs there).
-  await runGa4TagInstallOffer({
+  await runTagInstallOffer({
     completed: args.result.completed,
-    measurementId: stringValue(args.result.resolvedPublicArtifacts.ga4.measurementId),
+    resolvedPublicArtifacts: args.result.resolvedPublicArtifacts,
     workspaceId: args.workspaceId,
     io: {
       isInteractive: input.isTTY === true && !args.jsonMode && args.env.GROWTH_OS_CLI_NONINTERACTIVE !== "1",
@@ -2403,46 +2536,62 @@ async function offerGa4TagInstall(args: {
       promptText: (question) => promptText(question, "", { io: { input, output: errorOutput } }),
       promptYesNo: (question, defaultValue) =>
         promptYesNo(question, defaultValue, { io: { input, output: errorOutput } }),
-      installGa4Tag: args.setup.installGa4Tag
+      installProviderTags: args.setup.installProviderTags,
+      buildPostHogBootstrapSnippet: args.setup.buildPostHogBootstrapSnippet,
+      buildXBootstrapSnippet: args.setup.buildXBootstrapSnippet,
+      wrapHtmlSnippet: args.setup.wrapHtmlSnippet
     }
   });
 }
 
-export interface Ga4TagInstallIo {
+export interface TagInstallIo {
   isInteractive: boolean;
   write: (message: string) => void;
   promptText: (question: string) => Promise<string>;
   promptYesNo: (question: string, defaultValue: boolean) => Promise<boolean>;
-  installGa4Tag: SetupModuleApi["installGa4Tag"];
+  installProviderTags: SetupModuleApi["installProviderTags"];
+  /** Tested instrument snippet builders, injected so the manual fallback never drifts. */
+  buildPostHogBootstrapSnippet: SetupModuleApi["buildPostHogBootstrapSnippet"];
+  buildXBootstrapSnippet: SetupModuleApi["buildXBootstrapSnippet"];
+  wrapHtmlSnippet: SetupModuleApi["wrapHtmlSnippet"];
 }
 
 /**
- * Offers the founder the GA4 tag install after a completed run. Pure over its {@link
- * Ga4TagInstallIo} seam so it is unit-testable: gate -> prompt for repo -> confirm the
- * planned changes -> apply, with a copy-paste gtag snippet on skip / decline / a repo
- * the installer can't safely auto-edit.
+ * Per-provider tag-install offer after a completed run (#9). Pure over its {@link
+ * TagInstallIo} seam so it is unit-testable: for every completed provider with a captured
+ * artifact (GA4 + PostHog + X), print one connected line, recommend `npx infinite-tag
+ * install`, then offer to apply ALL of them into the founder's repo in ONE combined pass.
+ * On skip / decline / error, print the manual snippet for EVERY not-written provider so
+ * nothing is silently dropped.
  */
-export async function runGa4TagInstallOffer(args: {
+export async function runTagInstallOffer(args: {
   completed: string[];
-  measurementId: string | undefined;
+  resolvedPublicArtifacts: SetupOnboardingResult["resolvedPublicArtifacts"] | undefined;
   workspaceId: string;
-  io: Ga4TagInstallIo;
+  io: TagInstallIo;
 }): Promise<void> {
   const { io } = args;
-  const measurementId = args.measurementId;
-  if (!args.completed.includes("ga4") || !measurementId) {
+  const installable = collectInstallableProviderArtifacts(args.completed, args.resolvedPublicArtifacts);
+  if (installable.length === 0) {
     return;
   }
   if (!io.isInteractive) {
     // Non-interactive (piped / CI / --json consumers): never write to a repo we cannot
-    // confirm. The Measurement ID is in the returned result for manual installation.
+    // confirm. The public ids ride out in the JSON result + the combined install command.
     return;
   }
 
+  const printManualForProviders = (providers: ProviderInstallArtifact[]): void => {
+    for (const entry of providers) {
+      printProviderManualSnippet(io, entry);
+    }
+  };
+
   try {
+    const connectedLines = installable.map((entry) => TAG_INSTALL_CONNECTED_LINES[entry.provider]);
     io.write(
-      "\nGA4 is connected. To start collecting data, add the tag (gtag.js) to your website's code.\n" +
-        "Recommended — run this inside your site's code repo (it finds your Measurement ID automatically):\n\n" +
+      `\n${connectedLines.join("\n")}\n` +
+        "Recommended — run this inside your site's code repo (it finds your captured tags automatically):\n\n" +
         "  npx infinite-tag install\n"
     );
     const repoAnswer = (
@@ -2451,21 +2600,28 @@ export async function runGa4TagInstallOffer(args: {
       )
     ).trim();
     if (!repoAnswer) {
-      printGa4ManualTag(io.write, measurementId);
+      printManualForProviders(installable);
       return;
     }
 
     const repoRoot = resolve(expandHomePath(repoAnswer));
-    let outcome: Awaited<ReturnType<SetupModuleApi["installGa4Tag"]>>;
+    const combinedArtifacts: SetupWorkspaceInstallArtifacts = {};
+    for (const entry of installable) {
+      Object.assign(combinedArtifacts, entry.artifacts);
+    }
+    let outcome: Awaited<ReturnType<SetupModuleApi["installProviderTags"]>>;
     try {
-      outcome = await io.installGa4Tag({
-        measurementId,
+      outcome = await io.installProviderTags({
+        artifacts: combinedArtifacts,
         repoRoot,
         workspaceId: args.workspaceId,
         confirm: async (summary) => {
           const count = summary.files.length;
+          const nounList = describeInstallNouns(
+            (summary.providers.length > 0 ? summary.providers : installable.map((entry) => entry.provider))
+          );
           io.write(
-            `\nInfinite will install the GA4 tag into your ${summary.framework} app (updates ${count} file${count === 1 ? "" : "s"} plus an Infinite install manifest):\n`
+            `\nInfinite will install the ${nounList} into your ${summary.framework} app (updates ${count} file${count === 1 ? "" : "s"} plus an Infinite install manifest):\n`
           );
           for (const file of summary.files) {
             io.write(`  - ${file}\n`);
@@ -2475,22 +2631,49 @@ export async function runGa4TagInstallOffer(args: {
       });
     } catch (error) {
       io.write(
-        `\nCould not install the GA4 tag automatically: ${error instanceof Error ? error.message : String(error)}\n`
+        `\nCould not install your analytics tags automatically: ${error instanceof Error ? error.message : String(error)}\n`
       );
-      printGa4ManualTag(io.write, measurementId);
+      printManualForProviders(installable);
       return;
     }
 
     io.write(`\n${outcome.result.detail}\n`);
     if (outcome.result.status !== "ok") {
-      // skipped / needs_human / blocked → hand the founder the snippet to do it themselves.
-      printGa4ManualTag(io.write, measurementId);
+      // skipped / needs_human / blocked → the combined apply wrote nothing for ANY provider
+      // (one managed module, one apply), so hand the founder the snippet for EVERY provider
+      // so nothing is silently dropped.
+      printManualForProviders(installable);
     }
   } catch {
     // A prompt rejection (e.g. readline close on Ctrl+C / EOF / stream error) must
-    // never propagate out and fail the enclosing setup run. GA4 is already connected;
-    // the founder can add the tag manually at any time.
-    printGa4ManualTag(io.write, measurementId);
+    // never propagate out and fail the enclosing setup run. The providers are already
+    // connected; the founder can add each tag manually at any time.
+    printManualForProviders(installable);
+  }
+}
+
+/** "GA4 tag", "GA4 tag and PostHog snippet", "GA4 tag, PostHog snippet, and X pixel". */
+function describeInstallNouns(providers: SetupProviderId[]): string {
+  const nouns = providers.map((provider) => TAG_INSTALL_NOUNS[provider]);
+  if (nouns.length === 0) {
+    return "analytics tags";
+  }
+  if (nouns.length === 1) {
+    return nouns[0]!;
+  }
+  if (nouns.length === 2) {
+    return `${nouns[0]} and ${nouns[1]}`;
+  }
+  return `${nouns.slice(0, -1).join(", ")}, and ${nouns[nouns.length - 1]}`;
+}
+
+function printProviderManualSnippet(io: TagInstallIo, entry: ProviderInstallArtifact): void {
+  if (entry.provider === "ga4" && entry.artifacts.ga4) {
+    printGa4ManualTag(io.write, entry.artifacts.ga4.measurementId);
+  } else if (entry.provider === "posthog" && entry.artifacts.posthog) {
+    printPostHogManualSnippet(io, entry.artifacts.posthog.projectKey, entry.artifacts.posthog.apiHost);
+  } else if (entry.provider === "x" && entry.artifacts.x) {
+    printXManualPixel(io, entry.artifacts.x.pixelId, entry.artifacts.x.eventTagIds);
   }
 }
 
@@ -2527,6 +2710,30 @@ function printGa4ManualTag(write: (message: string) => void, measurementId: stri
       "    gtag('js', new Date());",
       `    gtag('config', '${measurementId}');`,
       "  </script>",
+      ""
+    ].join("\n")
+  );
+}
+
+function printPostHogManualSnippet(io: TagInstallIo, projectKey: string, apiHost: string): void {
+  io.write(
+    [
+      "",
+      `Add this PostHog snippet to the <head> of every page (project key ${projectKey}, host ${apiHost}):`,
+      "",
+      ...io.wrapHtmlSnippet(io.buildPostHogBootstrapSnippet(projectKey, apiHost)).split("\n").map((line) => `  ${line}`),
+      ""
+    ].join("\n")
+  );
+}
+
+function printXManualPixel(io: TagInstallIo, pixelId: string, eventTagIds: string[]): void {
+  io.write(
+    [
+      "",
+      `Add this X pixel to the <head> of every page (pixel id ${pixelId}):`,
+      "",
+      ...io.wrapHtmlSnippet(io.buildXBootstrapSnippet(pixelId, eventTagIds)).split("\n").map((line) => `  ${line}`),
       ""
     ].join("\n")
   );
@@ -2593,7 +2800,7 @@ async function runLocalSetupResume(input: {
   }
   const db = createInfiniteOsDb(config.databaseUrl);
   const actions = createLocalSetupActionRunner(db);
-  const prompt = createLocalSetupPrompter();
+  const prompt = createLocalSetupPrompter({ interactive: isSetupInteractive(input.env, input.jsonMode) });
   const ga4OauthBootstrap = createLocalGa4OauthBootstrap({
     env: input.env,
     config,
@@ -2632,13 +2839,131 @@ async function runLocalSetupResume(input: {
     if (!result.interview) {
       throw new Error(`setup run ${input.runId} did not return onboarding state`);
     }
-    // A resumed run can be the one that finally connects GA4 — offer the tag install here too.
-    await offerGa4TagInstall({ setup, result, env: input.env, workspaceId: input.workspaceId, jsonMode: input.jsonMode });
+    // A resumed run can be the one that finally connects a provider — offer the tag install here too.
+    await offerProviderTagInstall({ setup, result, env: input.env, workspaceId: input.workspaceId, jsonMode: input.jsonMode });
     return buildSetupOnboardingResult(result.interview, result);
   } finally {
     interaction.dispose();
     await db.close();
   }
+}
+
+/** Re-derives `next` (#11 ladder) from the final outstanding set after a `--all` pass. */
+function nextFromOutstanding(
+  outstanding: NonNullable<SetupOnboardingResult["outstanding"]>,
+  failedCount: number
+): string {
+  if (outstanding.length >= 2) {
+    const labels = outstanding.map((entry) => formatSetupProviderLabel(entry.provider)).join(", ");
+    return `${outstanding.length} providers are still paused (${labels}) — finish each handoff, then resume from the "Still paused" list above (or run \`infinite setup resume --all\`).`;
+  }
+  if (outstanding.length === 1) {
+    const only = outstanding[0]!;
+    return `Run \`infinite setup resume ${only.runId}\` after completing the ${formatSetupProviderLabel(only.provider)} handoff.`;
+  }
+  if (failedCount > 0) {
+    return "Run `infinite setup status` to review failed providers.";
+  }
+  return "Run `infinite setup query` or `infinite` to continue.";
+}
+
+/**
+ * #11 `infinite setup resume --all`: resume every outstanding paused provider SEQUENTIALLY
+ * (in updated_at order via listActiveSetupRuns), reusing #8's one-at-a-time hand-off gate per
+ * iteration. Continue-on-error so one provider's browser failure cannot strand the others.
+ * After the pass, the combined end-state's `outstanding`/`next`/`ok` are recomputed from the
+ * FINAL activeRuns so a provider that re-paused mid-loop is still surfaced.
+ */
+async function runLocalSetupResumeAll(input: {
+  env: CliEnv;
+  workspaceId: string;
+  jsonMode?: boolean;
+  resumeSetupRun: (input: SetupResumeRunInput) => Promise<SetupOnboardingResult>;
+}): Promise<SetupCliResult> {
+  const setup = await loadSetupModule();
+  const workspaceRoot = workspaceRootFor(input.env);
+  const config = loadInfiniteOsConfig({ workspaceRoot, env: input.env as NodeJS.ProcessEnv });
+  if (!process.env.GROWTH_OS_ENCRYPTION_KEY && config.encryptionKey) {
+    process.env.GROWTH_OS_ENCRYPTION_KEY = config.encryptionKey;
+  }
+
+  // Guard against an older loaded setup build that predates listActiveSetupRuns on the seam.
+  if (typeof setup.listActiveSetupRuns !== "function") {
+    return {
+      ok: false,
+      section: "connectors",
+      workflow: "onboarding",
+      status: "unsupported",
+      next: "This setup build does not support `resume --all`. Resume each run with `infinite setup resume <run_id>` (see `infinite setup status`)."
+    };
+  }
+
+  const listOutstanding = async (): Promise<Array<{ id: string; provider?: string }>> => {
+    const db = createInfiniteOsDb(config.databaseUrl);
+    try {
+      const runs = await setup.listActiveSetupRuns(db, input.workspaceId);
+      // Oldest-first so the founder is walked through handoffs in the order they paused.
+      return runs.filter((run) => run.status === "paused_handoff").reverse();
+    } finally {
+      await db.close();
+    }
+  };
+
+  const initialOutstanding = await listOutstanding();
+  if (initialOutstanding.length === 0) {
+    return {
+      ok: true,
+      section: "connectors",
+      workflow: "onboarding",
+      status: "no_outstanding",
+      next: "No setup runs are paused. Run `infinite setup status` to review setup."
+    };
+  }
+
+  let lastResult: SetupOnboardingResult | null = null;
+  const failures: Array<{ runId: string; error: string }> = [];
+  for (const run of initialOutstanding) {
+    try {
+      lastResult = await input.resumeSetupRun({
+        runId: run.id,
+        env: input.env,
+        workspaceId: input.workspaceId,
+        jsonMode: input.jsonMode
+      });
+    } catch (error) {
+      failures.push({ runId: run.id, error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
+  // Recompute the end-state from the FINAL activeRuns (a provider may have re-paused).
+  const finalRuns = await listOutstanding();
+  const outstanding = finalRuns.flatMap((run) =>
+    typeof run.provider === "string" && isSetupProviderId(run.provider)
+      ? [{ provider: run.provider, runId: run.id }]
+      : []
+  );
+  if (lastResult) {
+    const failedCount = lastResult.failed.length;
+    return {
+      ...lastResult,
+      outstanding,
+      ok: outstanding.length === 0 && failedCount === 0 && failures.length === 0,
+      next: nextFromOutstanding(outstanding, failedCount)
+    };
+  }
+  // Every resume threw — there is no onboarding result to combine. Surface the failures.
+  return {
+    ok: false,
+    section: "connectors",
+    workflow: "onboarding",
+    status: "resume_all_failed",
+    failures,
+    outstanding,
+    next:
+      outstanding.length > 0
+        ? nextFromOutstanding(outstanding, 0)
+        : "Run `infinite setup status` to review setup."
+  };
 }
 
 async function enrichSetupResumeError(
@@ -2674,17 +2999,36 @@ function createLocalSetupActionRunner(
   };
 }
 
-function createLocalSetupPrompter(): { ask(question: string, choices?: string[]): Promise<string>; note(message: string): void } {
+/**
+ * The setup module's only founder-facing seam: every confirmation/note/ask in
+ * packages/setup flows through this injected prompter. Gating on `interactive`
+ * (not raw jsonMode) keeps `--json` stdout pure AND fixes piped/non-TTY runs where
+ * readline would otherwise write the prompt to stdout:
+ *   - note(): interactive → stderr (mirrors createSetupInteractionWiring.writeLine);
+ *     non-interactive/json → no-op (advisory copy; the JSON carries the structured truth).
+ *   - ask(): interactive → prompt on stderr (never stdout); non-interactive/json →
+ *     return the headless default immediately WITHOUT opening readline. The default is
+ *     load-bearing (PostHog paste-key treats "" as skip; the GA4 selector resolves
+ *     unknown→entries[0]), so a no-op ask yields the same outcome the run already expects.
+ */
+export function createLocalSetupPrompter(opts: {
+  interactive: boolean;
+}): { ask(question: string, choices?: string[]): Promise<string>; note(message: string): void } {
   return {
     async ask(question, choices) {
+      if (!opts.interactive) {
+        return choices && choices.length > 0 ? (choices[0] ?? "") : "";
+      }
       if (choices && choices.length > 0) {
-        const selected = await promptChoice(question, choices, 0);
+        const selected = await promptChoice(question, choices, 0, { io: { input, output: errorOutput } });
         return choices[selected] ?? choices[0] ?? "";
       }
-      return promptText(question);
+      return promptText(question, "", { io: { input, output: errorOutput } });
     },
     note(message) {
-      output.write(`${message}\n`);
+      if (opts.interactive) {
+        errorOutput.write(`${message}\n`);
+      }
     }
   };
 }
@@ -2773,6 +3117,44 @@ export function createLocalGa4OauthBootstrap(options: {
   };
 }
 
+/** A deferred recommendation's reasonCode → which enable-path copy the founder should read. */
+function deferralKindFromReasonCode(reasonCode: string): "reenable" | "future" {
+  // Friction the founder can clear (billing/explicit) → re-tick & re-run; scope/surface
+  // limits → tracked for a future release.
+  return reasonCode === "developer_billing_friction" || reasonCode === "explicit_founder_request"
+    ? "reenable"
+    : "future";
+}
+
+/**
+ * Derives EVERY still-paused provider in the workspace from the workspace-wide activeRuns
+ * (#11), deduped per provider keeping the most-recent (first) id — mirrors
+ * confirmations.ts:71-77. Independent of the scoped interview, so a 2nd/3rd paused
+ * provider is never dropped on resume.
+ */
+function deriveOutstanding(
+  activeRuns: Awaited<ReturnType<SetupModuleApi["runLiveSetupOnboarding"]>>["activeRuns"]
+): NonNullable<SetupOnboardingResult["outstanding"]> {
+  const seen = new Set<SetupProviderId>();
+  const outstanding: NonNullable<SetupOnboardingResult["outstanding"]> = [];
+  for (const run of activeRuns) {
+    if (run.status !== "paused_handoff" || typeof run.provider !== "string" || !isSetupProviderId(run.provider)) {
+      continue;
+    }
+    if (seen.has(run.provider)) {
+      continue;
+    }
+    seen.add(run.provider);
+    outstanding.push({
+      provider: run.provider,
+      runId: run.id,
+      ...(run.pendingHandoff?.instructions ? { instructions: run.pendingHandoff.instructions } : {}),
+      ...(run.pendingHandoff?.url ? { url: run.pendingHandoff.url } : {})
+    });
+  }
+  return outstanding;
+}
+
 export function buildSetupOnboardingResult(
   interview: SetupInterview,
   result: Awaited<ReturnType<SetupModuleApi["runLiveSetupOnboarding"]>>
@@ -2787,25 +3169,47 @@ export function buildSetupOnboardingResult(
   const completed = new Set(result.completed);
   const paused = new Set(result.paused);
   const failed = new Set(result.failed);
+  const recByProvider = new Map(
+    (result.recommendations ?? []).map((rec) => [rec.provider, rec] as const)
+  );
   const providers: SetupOnboardingProviderSummary[] = interview.providerInventory.map((row) => {
     const activeRun = activeRunsByProvider.get(row.provider);
     const summary = result.runs[row.provider];
     const handoff = activeRun?.pendingHandoff ?? firstProviderHandoff(summary);
+    const recommendation = recByProvider.get(row.provider);
+    // #13 status ladder: a row that connected/paused/failed renders its run status; a row
+    // that was ticked-but-dropped (deferred/not_applicable recommendation, or selected yet
+    // never reached a run) renders "deferred" WITH its rationale + enable path; only a row
+    // that was genuinely never ticked AND not deferred falls to "not_selected".
+    const isDeferredRecommendation =
+      recommendation?.status === "deferred" || recommendation?.status === "not_applicable";
+    let status: SetupOnboardingProviderSummary["status"];
+    if (completed.has(row.provider)) {
+      status = "completed";
+    } else if (paused.has(row.provider)) {
+      status = "paused_handoff";
+    } else if (failed.has(row.provider)) {
+      status = "failed";
+    } else if (row.selected || isDeferredRecommendation) {
+      status = "deferred";
+    } else {
+      status = "not_selected";
+    }
+    const deferral =
+      status === "deferred" && recommendation
+        ? {
+            deferralReason: recommendation.rationale,
+            deferralKind: deferralKindFromReasonCode(recommendation.reasonCode)
+          }
+        : {};
     return {
       provider: row.provider,
       selected: row.selected,
       recommended: row.recommended,
-      status: !row.selected
-        ? "not_selected"
-        : completed.has(row.provider)
-          ? "completed"
-          : paused.has(row.provider)
-            ? "paused_handoff"
-            : failed.has(row.provider)
-              ? "failed"
-              : "not_selected",
+      status,
       runId: activeRun?.id,
       detail: firstProviderDetail(summary),
+      ...deferral,
       handoff: handoff
         ? {
             url: handoff.url,
@@ -2815,9 +3219,38 @@ export function buildSetupOnboardingResult(
     };
   });
 
-  const firstPaused = providers.find((provider) => provider.status === "paused_handoff" && provider.runId);
+  const outstanding = deriveOutstanding(result.activeRuns);
+  // #14 none-selected / all-deferred: nothing was even attempted (equivalent to empty
+  // selectedProviders) → an honest no-data-source verdict, not a false success.
+  const noDataSource =
+    result.completed.length === 0 && result.paused.length === 0 && result.failed.length === 0;
+
+  // SINGLE next/ok precedence ladder (#11/#13/#14 never collide; #13 renders inline):
+  //   (1) noDataSource → pick-a-source; (2) outstanding ≥1 → resume; (3) failed>0 → review;
+  //   (4) otherwise → continue. deferred providers add NO `next` (rendered per-row).
+  let ok: boolean;
+  let next: string;
+  if (noDataSource) {
+    ok = false;
+    next = "Run `infinite setup` and select a data source (GA4 or PostHog) — nothing was configured yet.";
+  } else if (outstanding.length >= 2) {
+    ok = false;
+    const labels = outstanding.map((entry) => formatSetupProviderLabel(entry.provider)).join(", ");
+    next = `${outstanding.length} providers are still paused (${labels}) — finish each handoff, then resume from the "Still paused" list above (or run \`infinite setup resume --all\`).`;
+  } else if (outstanding.length === 1) {
+    ok = false;
+    const only = outstanding[0]!;
+    next = `Run \`infinite setup resume ${only.runId}\` after completing the ${formatSetupProviderLabel(only.provider)} handoff.`;
+  } else if (result.failed.length > 0) {
+    ok = false;
+    next = "Run `infinite setup status` to review failed providers.";
+  } else {
+    ok = true;
+    next = "Run `infinite setup query` or `infinite` to continue.";
+  }
+
   return {
-    ok: result.failed.length === 0 && result.paused.length === 0,
+    ok,
     section: "connectors",
     workflow: "onboarding",
     interview,
@@ -2830,11 +3263,8 @@ export function buildSetupOnboardingResult(
     resolvedPublicArtifacts: result.resolvedPublicArtifacts,
     installCommand: result.installCommand ?? null,
     installArtifactsPath: result.installArtifactsPath ?? null,
-    next: firstPaused?.runId
-      ? `Run \`infinite setup resume ${firstPaused.runId}\` after completing the ${firstPaused.provider.toUpperCase()} handoff.`
-      : result.failed.length > 0
-        ? "Run `infinite setup status` to review failed providers."
-        : "Run `infinite setup query` or `infinite` to continue."
+    outstanding,
+    next
   };
 }
 
@@ -9451,10 +9881,23 @@ function renderSetupOnboardingResult(result: SetupOnboardingResult): string {
 
   lines.push(
     `Surface: ${result.interview.productSurface}`,
-    `Website: ${result.interview.websiteUrl ?? "not provided"}`,
-    "",
-    "Providers:"
+    `Website: ${result.interview.websiteUrl ?? "not provided"}`
   );
+
+  // #14 PRIMARY verdict: when nothing was even attempted, lead with the no-data-source
+  // banner so the founder reads it before the (secondary) deferred provider rows below.
+  const noDataSource =
+    result.completed.length === 0 && result.paused.length === 0 && result.failed.length === 0;
+  if (noDataSource) {
+    lines.push(
+      "",
+      "No data source was configured — nothing was set up.",
+      "Pick at least one analytics source (GA4 or PostHog are free) so Infinite has data to work with:",
+      "  Run `infinite setup` and select a provider to get started."
+    );
+  }
+
+  lines.push("", "Providers:");
 
   for (const provider of result.providers) {
     const handoffUrl = displaySetupHandoffUrl(provider.handoff?.url);
@@ -9466,6 +9909,18 @@ function renderSetupOnboardingResult(result: SetupOnboardingResult): string {
     }
     if (provider.detail) {
       lines.push(`    Detail: ${provider.detail}`);
+    }
+    // #13 a deferred (ticked-but-dropped / default-deferred) provider gets a rationale +
+    // a concrete enable path so it is never a silent "not_selected".
+    if (provider.status === "deferred") {
+      if (provider.deferralReason) {
+        lines.push(`    Why: ${provider.deferralReason}`);
+      }
+      lines.push(
+        provider.deferralKind === "future"
+          ? "    Enable it: Not available in this version yet — tracked for a future release."
+          : `    Enable it: re-run \`infinite setup\` and tick ${formatSetupProviderLabel(provider.provider)} to set it up now.`
+      );
     }
     if (provider.handoff?.instructions) {
       lines.push(`    Action required: ${provider.handoff.instructions}`);
@@ -9506,6 +9961,39 @@ function renderSetupOnboardingResult(result: SetupOnboardingResult): string {
       lines.push(
         `  (on this machine you can simply run: npx infinite-tag install — Infinite saved your public keys to ${contractHomePath(result.installArtifactsPath)})`
       );
+    }
+    // #12 the install command only covers FINISHED providers (paused/failed never produced
+    // a public id). Name every not-covered provider + its resume/retry path so the founder
+    // is never handed a command that silently omits a source they selected.
+    const notCovered = [...result.providers].filter(
+      (provider) => provider.status === "paused_handoff" || provider.status === "failed"
+    );
+    if (notCovered.length > 0) {
+      lines.push("", "Heads up: this command only installs tags for the providers that finished. Still to do:");
+      for (const provider of notCovered) {
+        const label = formatSetupProviderLabel(provider.provider);
+        if (!provider.runId) {
+          lines.push(`  - ${label}: not finished — run \`infinite setup status\` to continue, then re-run the install command.`);
+        } else if (provider.status === "paused_handoff") {
+          lines.push(`  - ${label}: paused mid-setup — finish it with \`${setupResumeCommand({ id: provider.runId })}\`, then re-run the install command.`);
+        } else {
+          lines.push(`  - ${label}: setup failed — retry with \`${setupResumeCommand({ id: provider.runId })}\` (see \`infinite setup status\`), then re-run the install command.`);
+        }
+      }
+    }
+  }
+
+  // #11 Surface EVERY still-paused provider (not just the first/scoped one) so the 2nd/3rd
+  // is never silently abandoned. Numbered for skimmability; the `--all` footer appears at ≥2.
+  if (result.outstanding && result.outstanding.length > 0) {
+    lines.push("", "Still paused (finish these to capture every selected provider):");
+    result.outstanding.forEach((entry, index) => {
+      const label = formatSetupProviderLabel(entry.provider);
+      const lead = entry.instructions ? entry.instructions : "finish the step in your browser";
+      lines.push(`  ${index + 1}. ${label} — ${lead}, then run \`${setupResumeCommand({ id: entry.runId })}\`.`);
+    });
+    if (result.outstanding.length >= 2) {
+      lines.push("  Or resume them all in order: `infinite setup resume --all`");
     }
   }
 

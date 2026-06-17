@@ -820,7 +820,7 @@ describe("live setup orchestration", () => {
       expect(notes[0]).toBe("GA4: using the existing property Acme — properties/123.");
       expect(notes[1]).toContain("✓ GA4 connected — property properties/123 · Measurement ID G-ACME123.");
       expect(notes[1]).toContain(
-        "Next: use the install command at the end of this setup (covers all connected providers)."
+        "Next: add the GA4 tag with the install command at the end of this setup (covers all connected providers)."
       );
       expect(notes[1]).not.toContain("npx infinite-tag install");
       expect(result.runs.ga4?.phases.detect).toMatchObject({

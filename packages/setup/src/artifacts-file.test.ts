@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { SetupResolvedArtifacts } from "@infinite-os/db";
 
-import { writeSetupArtifactsFile } from "./artifacts-file.js";
+import { buildWorkspaceArtifactsFromResolved, writeSetupArtifactsFile } from "./artifacts-file.js";
 
 const tempDirs: string[] = [];
 let savedEnvDir: string | undefined;
@@ -185,5 +185,47 @@ describe("writeSetupArtifactsFile", () => {
         dir: blocked
       })
     ).toThrow();
+  });
+});
+
+describe("buildWorkspaceArtifactsFromResolved (#9 resolved → installer map)", () => {
+  it("returns null when nothing installable was captured", () => {
+    expect(buildWorkspaceArtifactsFromResolved("ws_1", resolvedArtifacts())).toBeNull();
+  });
+
+  it("includes only providers with their required public id, deduping X tags", () => {
+    const map = buildWorkspaceArtifactsFromResolved(
+      "ws_1",
+      resolvedArtifacts({
+        ga4: { measurementId: "G-ACME123", propertyId: "properties/1" },
+        posthog: { projectId: "p1", projectKey: "phc_1", apiHost: "https://eu.i.posthog.com" },
+        x: { pixelId: "px_1", eventTagIds: { a: "tag_a", b: "tag_a", c: "tag_b" } }
+      })
+    );
+    expect(map).toEqual({
+      ga4: { measurementId: "G-ACME123" },
+      posthog: { projectKey: "phc_1", apiHost: "https://eu.i.posthog.com" },
+      x: { pixelId: "px_1", eventTagIds: ["tag_a", "tag_b"] }
+    });
+  });
+
+  it("defaults the PostHog apiHost to us.i.posthog.com when none was captured", () => {
+    const map = buildWorkspaceArtifactsFromResolved(
+      "ws_1",
+      resolvedArtifacts({ posthog: { projectId: null, projectKey: "phc_1", apiHost: null } })
+    );
+    expect(map?.posthog).toEqual({ projectKey: "phc_1", apiHost: "https://us.i.posthog.com" });
+  });
+
+  it("omits PostHog without a project key and X without a pixel id", () => {
+    const map = buildWorkspaceArtifactsFromResolved(
+      "ws_1",
+      resolvedArtifacts({
+        ga4: { measurementId: "G-ACME123", propertyId: null },
+        posthog: { projectId: "p1", projectKey: null, apiHost: "https://us.i.posthog.com" },
+        x: { pixelId: null, eventTagIds: { a: "tag_a" } }
+      })
+    );
+    expect(map).toEqual({ ga4: { measurementId: "G-ACME123" } });
   });
 });
