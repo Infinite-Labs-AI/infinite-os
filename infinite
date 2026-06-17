@@ -154,6 +154,68 @@ build_with_progress() {
   return $status
 }
 
+# ── Auto-update on launch ────────────────────────────────────────────────────
+# Infinite ships as a git checkout (install.sh clones it to ~/.infinite/app and
+# `infinite update` fast-forwards it), so "the latest version" is the tip of this
+# branch on origin — there is no npm package to check. To keep users current
+# without a manual `infinite update`, fast-forward the checkout on launch. After a
+# successful pull the dependency / stale-build checks below rebuild and reinstall
+# as needed, so this function only has to move HEAD.
+#
+# It is deliberately conservative — it must never block, surprise, or destroy:
+#   • only inside a git checkout (skips a tarball/zip install)
+#   • throttled to once per AUTO_UPDATE_INTERVAL (default 24h) via a cache stamp
+#   • never touches a dirty tree — same stance as `infinite update` / install.sh
+#   • fast-forward only; offline / fetch failure / detached HEAD are silent no-ops
+#   • skipped for automation (GROWTH_OS_CLI_NONINTERACTIVE=1)
+#
+# Opt out entirely with INFINITE_NO_AUTO_UPDATE=1.
+AUTO_UPDATE_INTERVAL=${INFINITE_AUTO_UPDATE_INTERVAL:-86400} # seconds; default 24h
+AUTO_UPDATE_STAMP="${XDG_CACHE_HOME:-$HOME/.cache}/infinite/autoupdate-stamp"
+
+git_quiet() { git -C "$ROOT" "$@" 2>/dev/null; }
+
+maybe_auto_update() {
+  [[ "${INFINITE_NO_AUTO_UPDATE:-}" == "1" ]] && return 0
+  [[ "${GROWTH_OS_CLI_NONINTERACTIVE:-}" == "1" ]] && return 0
+  # Only a git checkout can fast-forward; anything else is a silent no-op.
+  git_quiet rev-parse --is-inside-work-tree >/dev/null || return 0
+  # Throttle: skip if we already checked within the interval. The stamp is written
+  # below BEFORE the network op so an offline/slow run doesn't re-probe every launch.
+  local now last
+  now=$(date +%s 2>/dev/null || printf '0')
+  if [[ -f "$AUTO_UPDATE_STAMP" ]]; then
+    last=$(cat "$AUTO_UPDATE_STAMP" 2>/dev/null || printf '0')
+    if [[ "$now" =~ ^[0-9]+$ && "$last" =~ ^[0-9]+$ ]] && ((now - last < AUTO_UPDATE_INTERVAL)); then
+      return 0
+    fi
+  fi
+  mkdir -p "$(dirname "$AUTO_UPDATE_STAMP")" 2>/dev/null || true
+  printf '%s' "$now" >"$AUTO_UPDATE_STAMP" 2>/dev/null || true
+  # If git status can't be read, don't risk a pull. A non-empty status = dirty tree
+  # (local edits / staged changes) → leave it alone so nothing is clobbered.
+  local dirty
+  dirty=$(git_quiet status --porcelain) || return 0
+  [[ -n "$dirty" ]] && return 0
+  # Track the current branch; a detached HEAD has nothing to fast-forward toward.
+  local branch
+  branch=$(git_quiet rev-parse --abbrev-ref HEAD) || return 0
+  [[ -z "$branch" || "$branch" == "HEAD" ]] && return 0
+  local before after
+  before=$(git_quiet rev-parse HEAD) || return 0
+  # The one bounded network op. Offline / no-upstream / non-fast-forward all fail
+  # softly here and leave the checkout exactly as it was.
+  git_quiet fetch --quiet origin "$branch" || return 0
+  git_quiet pull --quiet --ff-only origin "$branch" || return 0
+  after=$(git_quiet rev-parse HEAD) || return 0
+  if [[ -n "$before" && -n "$after" && "$before" != "$after" ]]; then
+    printf 'Infinite: updated to the latest version (%s → %s) — rebuilding…\n' \
+      "${before:0:7}" "${after:0:7}" >&2
+  fi
+}
+
+maybe_auto_update
+
 if dependencies_need_install; then
   if ! command -v pnpm >/dev/null 2>&1; then
     printf '%s\n' "Infinite dependencies are not installed and pnpm was not found." >&2

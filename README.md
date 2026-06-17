@@ -84,6 +84,12 @@ cd infinite
 | `infinite update` | Pull the latest code on this branch and restart |
 | `infinite help` | Full command list |
 
+Infinite keeps itself current automatically: on launch it fast-forwards the
+checkout to the latest version on your branch (at most once a day, only when your
+tree is clean, silently skipped when offline) and rebuilds. Run `infinite update`
+to update on demand, or set `INFINITE_NO_AUTO_UPDATE=1` to turn the on-launch
+update off.
+
 ## Connectors
 
 **Connectable:** Google Analytics 4 · PostHog · Stripe · Meta · Shopify · X (read-only public post metrics). Deeper attribution and content analysis are on the roadmap.
