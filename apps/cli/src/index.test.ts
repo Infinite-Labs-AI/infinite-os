@@ -2073,10 +2073,19 @@ describe("cli smoke", () => {
   });
 
   it("moves the native cursor onto wrapped composer rows for long input", () => {
+    // The composer renders with Ink word-wrap (<Text wrap="wrap">), so the cursor
+    // row must follow the SAME wrap. "show revenue for every segment" at width 10
+    // word-wraps to ["show ", "revenue ", "for every ", "segment"] (4 rows), and the
+    // end cursor sits AFTER "segment" on the last row. The old char-packing put it at
+    // column 0 here (start of the last word, not the caret) — and, for inputs that
+    // word-wrap to more rows than char-packing, a row ABOVE the typed line (the
+    // reported bug; see interactive-session.cursor-row.test.ts for those cases).
     expect(composerCursorLayout("show revenue for every segment", "show revenue for every segment".length, 10)).toEqual({
-      column: 0,
+      column: "segment".length,
       line: 3
     });
+    // width 12 → composer inputWidth 10 (minus the "❯ " prompt): same word-wrap, so
+    // x = prompt + "segment".length, y = transcript row 4 + composer line 3.
     expect(composerNativeCursorPosition({
       cursor: "show revenue for every segment".length,
       label: "❯",
@@ -2084,7 +2093,7 @@ describe("cli smoke", () => {
       value: "show revenue for every segment",
       width: 12
     })).toEqual({
-      x: 2,
+      x: "❯ ".length + "segment".length,
       y: 7
     });
   });

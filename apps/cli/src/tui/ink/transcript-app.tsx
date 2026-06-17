@@ -136,7 +136,13 @@ export function InkTranscriptApp({
 
   return (
     <Box flexDirection="column" width={width}>
-      <Text color={t.color.primary}>{topRule(title ?? t.brand.name, t, width)}</Text>
+      {/* truncate-end keeps the top rule to EXACTLY one terminal row — matching the
+          literal `1` inkTranscriptRowCount() assumes for it. Without this, a label
+          whose Ink string-width exceeds the repo's displayWidth (emoji-presentation
+          glyphs like ♾️/✅ in the brand icon or agent title) — or a title long enough
+          to overflow `columns` — word-wraps the rule to 2 rows, so the predicted
+          composer row (and thus the native cursor) lands one row above the input. */}
+      <Text color={t.color.primary} wrap="truncate-end">{topRule(title ?? t.brand.name, t, width)}</Text>
       {transcriptLines.length ? (
         transcriptLines.map((line, index) => {
           const segments = parseAnsiSegments(line);
@@ -159,7 +165,7 @@ export function InkTranscriptApp({
           );
         })
       ) : (
-        <Text color={t.color.muted}>{`${t.brand.tool} ${t.brand.welcome}`}</Text>
+        <Text color={t.color.muted} wrap="truncate-end">{`${t.brand.tool} ${t.brand.welcome}`}</Text>
       )}
       <InkStatusRule
         busy={busy}

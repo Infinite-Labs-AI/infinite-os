@@ -86,6 +86,9 @@ importers:
       unicode-animations:
         specifier: ^1.0.3
         version: 1.0.3
+      wrap-ansi:
+        specifier: ^9.0.0
+        version: 9.0.2
     devDependencies:
       '@types/react':
         specifier: ^19.2.14
