@@ -247,6 +247,9 @@ interface RunCommandOptions {
   syncWaitTimeoutMs?: number;
   sleep?: (ms: number) => Promise<void>;
   now?: () => number;
+  // Confirm/typed-confirm seams for `infinite meta <object> <action>` writes.
+  // Production never sets this; tests inject deterministic gates.
+  meta?: MetaCommandOptions;
 }
 
 type SetupPreflightAction = "continue" | "status" | "exit";
@@ -1229,6 +1232,17 @@ export function helpText(): string {
     "Schedules:",
     "  schedules                      List source schedules",
     "",
+    "Meta Ads (operator-only writes; creates land PAUSED):",
+    "  meta <campaign|adset|ad|creative> list --source-id <id> [-l 10]",
+    "  meta <campaign|adset|ad|creative> get <id> --source-id <id>",
+    "  meta campaign create --source-id <id> --name <s> --objective <OUTCOME_*> [--daily-budget <cents>]",
+    "  meta adset create <campaign_id> --source-id <id> --name <s> --optimization-goal <enum> --billing-event <enum>",
+    "  meta creative create --source-id <id> --name <s> --page-id <id> [--link-url <url>] [--body <s>]",
+    "  meta ad create <adset_id> --source-id <id> --name <s> --creative-id <id>",
+    "  meta <campaign|adset|ad> activate <id> --source-id <id>   (separate, typed-confirm; spends money)",
+    "  meta <campaign|adset|ad> pause <id> --source-id <id>",
+    "  Budgets/bids are integer cents in the ad-account currency. Use --yes to skip the confirm.",
+    "",
     "Reports:",
     "  saved-report create <name> [json_tool_plan]",
     "  saved-report run <report_id>",
@@ -1334,7 +1348,9 @@ export async function runCli(
   } finally {
     progress.stop();
   }
-  if (command === "setup" && hasFlag(rest, "--json")) {
+  if ((command === "setup" || command === "meta") && hasFlag(rest, "--json")) {
+    // `--json` returns the raw `{ok,...}` envelope. `runCli` only honors `--json`
+    // for `setup` and `meta`; other commands ignore the flag and render normally.
     output.write(`${JSON.stringify(result, null, 2)}\n`);
     return;
   }
@@ -1565,6 +1581,9 @@ export async function runCommand(
   }
   if (command === "project") {
     return projectCommand(args, env);
+  }
+  if (command === "meta") {
+    return metaCommand(args, env, options.meta);
   }
   if (command === "explain") {
     return apiRequest("/tools/call", env, {
@@ -6874,6 +6893,486 @@ function isProjectNotFoundError(error: unknown): boolean {
   }
 }
 
+// ── Meta Ads WRITE/management surface ──────────────────────────────────────
+// `infinite meta <object> <action>`. CREATE always lands PAUSED (money-safety
+// INV-1); going live is the separate, gated `activate` transition (INV-2). All
+// write verbs route to `/tools/call` with `operator:true` — the operator token
+// is attached by `apiRequest`, NEVER echoed. Reads (list/get) are ungated. The
+// CLI gates writes in TWO independent places: (a) this terminal sub-command gate
+// — `--yes`/`--force`/`-y` skip, non-interactive WITHOUT a skip flag THROWS, the
+// yes/no prompt defaults to NO — with a STRICTER typed-confirm for `activate`
+// (type the id or the word "activate"); (b) `requiresOperatorConfirmation("meta")`
+// gates the interactive session. There is intentionally NO `--token` flag — the
+// secret contract keeps the access token server-side only.
+
+const META_OBJECTS = ["campaign", "adset", "ad", "creative"] as const;
+type MetaObject = (typeof META_OBJECTS)[number];
+
+const META_ENTITY_FOR_OBJECT: Record<MetaObject, "campaign" | "adset" | "ad" | "creative"> = {
+  campaign: "campaign",
+  adset: "adset",
+  ad: "ad",
+  creative: "creative"
+};
+
+// `activate`/`pause` map directly onto a single `set_meta_entity_status` action;
+// `creative` has no go-live, so it is excluded from the status verbs below.
+const META_STATUS_OBJECTS = ["campaign", "adset", "ad"] as const;
+type MetaStatusObject = (typeof META_STATUS_OBJECTS)[number];
+
+export interface MetaCommandOptions {
+  // Confirm seam for the terminal write gate (create/pause). Defaults to an
+  // interactive yes/no prompt (default NO) on a TTY; unit tests inject a
+  // deterministic confirm without juggling stdin.
+  confirmMutation?: (details: { action: string; object: MetaObject; summary: string }) => Promise<boolean>;
+  // Stricter typed-confirm seam for `activate` (the only money-spending
+  // transition): the operator must type the entity id or the word "activate".
+  // Returns the raw typed string; the caller validates it.
+  confirmActivate?: (details: { object: MetaStatusObject; entityId: string }) => Promise<string>;
+  // Optional override for the ad-account currency shown on budget entry. Tests
+  // inject a deterministic value; the default is a generic note (a live currency
+  // read is deferred — there is no client-resolvable account-currency action).
+  adAccountCurrency?: string;
+}
+
+function metaSourceIdFromArgs(args: string[]): string {
+  const sourceId = optionValue(args, "--source-id") ?? optionValue(args, "--source");
+  if (!sourceId) {
+    throw new Error("meta requires --source-id <id> (the connected meta_ads source)");
+  }
+  return sourceId;
+}
+
+// Value-taking flags across the whole `meta` surface. The positional-id resolver
+// MUST skip both the flag AND its following value so that, e.g.,
+// `--source-id act_123 cmp_999` resolves to `cmp_999` (the entity id), NOT to
+// `act_123` (a flag value). Getting this wrong on `activate`/`pause` could target
+// the WRONG (money-spending) entity — this is a money-safety boundary.
+const META_VALUE_FLAGS = new Set<string>([
+  "--source-id",
+  "--source",
+  "--name",
+  "--objective",
+  "--daily-budget",
+  "--lifetime-budget",
+  "--bid-amount",
+  "--optimization-goal",
+  "--billing-event",
+  "--targeting-countries",
+  "--pixel-id",
+  "--custom-event-type",
+  "--start-time",
+  "--end-time",
+  "--creative-id",
+  "--page-id",
+  "--link-url",
+  "--body",
+  "--title",
+  "--description",
+  "--call-to-action",
+  "--instagram-user-id",
+  "--image-hash",
+  "--client-token",
+  "--fields",
+  "-l",
+  "--limit"
+]);
+
+// Resolve the positional entity id for a `meta <object> <action>` invocation.
+// Unlike the generic `firstPositionalArg`, this skips known value-taking flags
+// AND the value that follows them, so a flag value can never be mistaken for the
+// positional id regardless of argument ordering. `--flag=value` forms carry their
+// value inline (no separate token to skip). Boolean flags (`--yes`, `--json`, …)
+// take no value and are simply skipped.
+function metaPositionalId(rest: string[]): string | undefined {
+  for (let i = 0; i < rest.length; i += 1) {
+    const arg = rest[i];
+    if (arg.startsWith("--") && arg.includes("=")) {
+      // `--flag=value` — inline value, nothing to skip after it.
+      continue;
+    }
+    if (META_VALUE_FLAGS.has(arg)) {
+      // Skip this flag AND consume its value token so the value is never read
+      // as the positional id.
+      i += 1;
+      continue;
+    }
+    if (arg.startsWith("-")) {
+      // Any other flag (boolean like --yes/--json/--force/-y, or an unknown
+      // flag) — skip the flag itself; it carries no positional meaning.
+      continue;
+    }
+    return arg;
+  }
+  return undefined;
+}
+
+// Parse an integer-cents flag. Budgets/bids are INTEGER minor units (cents) in
+// the ad-account currency (5000 = $50.00). Reject non-integers up front so a
+// malformed amount never reaches the Graph POST.
+function metaCentsFlag(args: string[], flag: string): number | undefined {
+  const raw = optionValue(args, flag);
+  if (raw === undefined) {
+    return undefined;
+  }
+  if (!/^\d+$/.test(raw.trim())) {
+    throw new Error(`${flag} must be an integer number of cents (e.g. 5000 = $50.00)`);
+  }
+  return Number.parseInt(raw.trim(), 10);
+}
+
+function metaCsvFlag(args: string[], flag: string): string[] | undefined {
+  const raw = optionValue(args, flag);
+  if (raw === undefined) {
+    return undefined;
+  }
+  return raw
+    .split(",")
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+
+// Render the budget line shown on the write confirmation. The amount is integer
+// cents; the currency follows the ad account. We surface the ISO code when a
+// deterministic value is supplied (test seam) and otherwise note it generically.
+function metaBudgetSummary(
+  input: { dailyBudget?: number; lifetimeBudget?: number; bidAmount?: number },
+  currency?: string
+): string {
+  const suffix = currency ? ` ${currency}` : " (ad-account currency)";
+  const parts: string[] = [];
+  if (input.dailyBudget !== undefined) {
+    parts.push(`daily budget ${input.dailyBudget} cents${suffix}`);
+  }
+  if (input.lifetimeBudget !== undefined) {
+    parts.push(`lifetime budget ${input.lifetimeBudget} cents${suffix}`);
+  }
+  if (input.bidAmount !== undefined) {
+    parts.push(`bid ${input.bidAmount} cents${suffix}`);
+  }
+  return parts.join(", ");
+}
+
+function metaWriteSkipConfirm(rest: string[]): boolean {
+  const flags = new Set(rest.filter((arg) => arg.startsWith("--")));
+  return flags.has("--yes") || flags.has("--force") || rest.includes("-y");
+}
+
+function metaInteractive(env: CliEnv): boolean {
+  return input.isTTY === true && env.GROWTH_OS_CLI_NONINTERACTIVE !== "1";
+}
+
+async function metaToolCall(actionId: string, toolInput: Record<string, unknown>, env: CliEnv): Promise<unknown> {
+  return apiRequest("/tools/call", env, {
+    method: "POST",
+    operator: true,
+    body: { actionId, input: toolInput }
+  });
+}
+
+export async function metaCommand(
+  args: string[],
+  env: CliEnv,
+  options: MetaCommandOptions = {}
+): Promise<unknown> {
+  const [object, action, ...rest] = args;
+  if (!object || !action) {
+    throw new Error(
+      "Usage: infinite meta <campaign|adset|ad|creative> <create|activate|pause|list|get> [...]"
+    );
+  }
+  if (!META_OBJECTS.includes(object as MetaObject)) {
+    throw new Error(`Unknown meta object: ${object} (expected campaign|adset|ad|creative)`);
+  }
+  const metaObject = object as MetaObject;
+  const json = hasFlag(rest, "--json");
+  const sourceId = metaSourceIdFromArgs(rest);
+
+  // ── READS (ungated) ──────────────────────────────────────────────────────
+  if (action === "list") {
+    const limit = metaCentsFlag(rest, "-l") ?? metaCentsFlag(rest, "--limit");
+    const fields = optionValue(rest, "--fields");
+    return metaToolCall(
+      "list_meta_entities",
+      {
+        sourceId,
+        entity: META_ENTITY_FOR_OBJECT[metaObject],
+        ...(limit === undefined ? {} : { limit }),
+        ...(fields ? { fields } : {})
+      },
+      env
+    );
+  }
+  if (action === "get") {
+    const entityId = metaPositionalId(rest);
+    if (!entityId) {
+      throw new Error(`meta ${metaObject} get requires an entity id`);
+    }
+    const fields = optionValue(rest, "--fields");
+    return metaToolCall(
+      "get_meta_entity",
+      { sourceId, entityId, ...(fields ? { fields } : {}) },
+      env
+    );
+  }
+
+  // ── WRITES (gated) ───────────────────────────────────────────────────────
+  if (action === "create") {
+    return metaCreateCommand(metaObject, rest, env, options, { json, sourceId });
+  }
+  if (action === "activate" || action === "pause") {
+    if (!META_STATUS_OBJECTS.includes(metaObject as MetaStatusObject)) {
+      throw new Error(`meta ${metaObject} has no ${action} transition (creatives never go live)`);
+    }
+    return metaStatusCommand(
+      metaObject as MetaStatusObject,
+      action,
+      rest,
+      env,
+      options,
+      { json, sourceId }
+    );
+  }
+  throw new Error(
+    `Unknown meta action: ${action} (expected create|activate|pause|list|get)`
+  );
+}
+
+async function metaCreateCommand(
+  object: MetaObject,
+  rest: string[],
+  env: CliEnv,
+  options: MetaCommandOptions,
+  ctx: { json: boolean; sourceId: string }
+): Promise<unknown> {
+  const clientToken = optionValue(rest, "--client-token");
+  const section = `meta_${object}_create`;
+  let actionId: string;
+  let toolInput: Record<string, unknown>;
+
+  if (object === "campaign") {
+    const name = requireMetaFlag(rest, "--name", "campaign create");
+    const objective = requireMetaFlag(rest, "--objective", "campaign create");
+    const dailyBudget = metaCentsFlag(rest, "--daily-budget");
+    const lifetimeBudget = metaCentsFlag(rest, "--lifetime-budget");
+    actionId = "create_meta_campaign";
+    toolInput = {
+      sourceId: ctx.sourceId,
+      name,
+      objective,
+      ...(dailyBudget === undefined ? {} : { dailyBudget }),
+      ...(lifetimeBudget === undefined ? {} : { lifetimeBudget }),
+      ...(clientToken ? { clientToken } : {})
+    };
+  } else if (object === "adset") {
+    const campaignId = metaPositionalId(rest);
+    if (!campaignId) {
+      throw new Error("meta adset create requires a campaign id (positional)");
+    }
+    const name = requireMetaFlag(rest, "--name", "adset create");
+    const optimizationGoal = requireMetaFlag(rest, "--optimization-goal", "adset create");
+    const billingEvent = requireMetaFlag(rest, "--billing-event", "adset create");
+    const dailyBudget = metaCentsFlag(rest, "--daily-budget");
+    const lifetimeBudget = metaCentsFlag(rest, "--lifetime-budget");
+    const bidAmount = metaCentsFlag(rest, "--bid-amount");
+    const targetingCountries = metaCsvFlag(rest, "--targeting-countries");
+    const pixelId = optionValue(rest, "--pixel-id");
+    const customEventType = optionValue(rest, "--custom-event-type");
+    const startTime = optionValue(rest, "--start-time");
+    const endTime = optionValue(rest, "--end-time");
+    actionId = "create_meta_ad_set";
+    toolInput = {
+      sourceId: ctx.sourceId,
+      campaignId,
+      name,
+      optimizationGoal,
+      billingEvent,
+      ...(dailyBudget === undefined ? {} : { dailyBudget }),
+      ...(lifetimeBudget === undefined ? {} : { lifetimeBudget }),
+      ...(bidAmount === undefined ? {} : { bidAmount }),
+      ...(startTime ? { startTime } : {}),
+      ...(endTime ? { endTime } : {}),
+      ...(targetingCountries ? { targetingCountries } : {}),
+      ...(pixelId ? { pixelId } : {}),
+      ...(customEventType ? { customEventType } : {}),
+      ...(clientToken ? { clientToken } : {})
+    };
+  } else if (object === "creative") {
+    const name = requireMetaFlag(rest, "--name", "creative create");
+    const pageId = requireMetaFlag(rest, "--page-id", "creative create");
+    const linkUrl = optionValue(rest, "--link-url");
+    const body = optionValue(rest, "--body");
+    const title = optionValue(rest, "--title");
+    const description = optionValue(rest, "--description");
+    const callToAction = optionValue(rest, "--call-to-action");
+    const instagramUserId = optionValue(rest, "--instagram-user-id");
+    // STANDARD creatives only: a single uploaded image referenced by hash. The
+    // `/adimages` upload→imageHash flow is deferred; we pass a supplied hash.
+    const imageHash = optionValue(rest, "--image-hash");
+    actionId = "create_meta_creative";
+    toolInput = {
+      sourceId: ctx.sourceId,
+      name,
+      pageId,
+      ...(imageHash ? { imageHash } : {}),
+      ...(instagramUserId ? { instagramUserId } : {}),
+      ...(linkUrl ? { linkUrl } : {}),
+      ...(body ? { body } : {}),
+      ...(title ? { title } : {}),
+      ...(description ? { description } : {}),
+      ...(callToAction ? { callToAction } : {}),
+      ...(clientToken ? { clientToken } : {})
+    };
+  } else {
+    const adsetId = metaPositionalId(rest);
+    if (!adsetId) {
+      throw new Error("meta ad create requires an ad set id (positional)");
+    }
+    const name = requireMetaFlag(rest, "--name", "ad create");
+    const creativeId = requireMetaFlag(rest, "--creative-id", "ad create");
+    actionId = "create_meta_ad";
+    toolInput = {
+      sourceId: ctx.sourceId,
+      adsetId,
+      name,
+      creativeId,
+      ...(clientToken ? { clientToken } : {})
+    };
+  }
+
+  // Confirm gate (create lands PAUSED — no spend — but it is still an operator
+  // mutation, so it goes through the same terminal gate as `project delete`).
+  const budgetLine = metaBudgetSummary(toolInput as never, options.adAccountCurrency);
+  const summary =
+    `Create ${object} "${String(toolInput.name)}" (lands PAUSED — never spends until you activate it)` +
+    (budgetLine ? ` — ${budgetLine}` : "");
+  const proceed = await metaConfirmWrite(`create`, object, summary, rest, env, options, section);
+  if (!proceed.ok) {
+    return proceed.result;
+  }
+  return metaToolCall(actionId, toolInput, env);
+}
+
+async function metaStatusCommand(
+  object: MetaStatusObject,
+  action: "activate" | "pause",
+  rest: string[],
+  env: CliEnv,
+  options: MetaCommandOptions,
+  ctx: { json: boolean; sourceId: string }
+): Promise<unknown> {
+  const entityId = metaPositionalId(rest);
+  if (!entityId) {
+    throw new Error(`meta ${object} ${action} requires an entity id`);
+  }
+  const section = `meta_${object}_${action}`;
+  const status = action === "activate" ? "ACTIVE" : "PAUSED";
+  const toolInput = { sourceId: ctx.sourceId, entityId, status };
+
+  if (action === "pause") {
+    // Pause is naturally idempotent but still gated by the standard write gate.
+    const proceed = await metaConfirmWrite(
+      "pause",
+      object,
+      `Pause ${object} ${entityId}`,
+      rest,
+      env,
+      options,
+      section
+    );
+    if (!proceed.ok) {
+      return proceed.result;
+    }
+    return metaToolCall("set_meta_entity_status", toolInput, env);
+  }
+
+  // ── activate: the only money-spending transition → STRICTER typed-confirm ──
+  // `--yes`/`--force`/`-y` skip the gate (scripted operators opt in explicitly);
+  // otherwise the operator must type the entity id or the literal word
+  // "activate". Non-interactive WITHOUT a skip flag THROWS (never silently go
+  // live in a script).
+  if (!metaWriteSkipConfirm(rest)) {
+    if (!options.confirmActivate && !metaInteractive(env)) {
+      throw new Error(
+        `Refusing to activate ${object} ${entityId} without confirmation. ` +
+          `Re-run with --yes to confirm (this transition spends money).`
+      );
+    }
+    const typed = (
+      options.confirmActivate
+        ? await options.confirmActivate({ object, entityId })
+        : await metaPromptTypedConfirm(object, entityId)
+    ).trim();
+    const expected = new Set([entityId, "activate"]);
+    if (!expected.has(typed)) {
+      return {
+        ok: false,
+        section,
+        cancelled: true,
+        object,
+        entityId,
+        reason: "typed_confirmation_mismatch"
+      };
+    }
+  }
+  return metaToolCall("set_meta_entity_status", toolInput, env);
+}
+
+// Terminal write gate, mirroring `project delete`: `--yes`/`--force`/`-y` skip;
+// otherwise prompt (default NO). Non-interactive WITHOUT a skip flag and WITHOUT
+// an injected seam is a hard refusal. Returns `{ok:false}` on a NO/cancel with a
+// `cancelled` envelope; `{ok:true}` to proceed.
+async function metaConfirmWrite(
+  action: string,
+  object: MetaObject,
+  summary: string,
+  rest: string[],
+  env: CliEnv,
+  options: MetaCommandOptions,
+  section: string
+): Promise<{ ok: true } | { ok: false; result: Record<string, unknown> }> {
+  if (metaWriteSkipConfirm(rest)) {
+    return { ok: true };
+  }
+  if (!options.confirmMutation && !metaInteractive(env)) {
+    throw new Error(
+      `Refusing to ${action} ${object} without confirmation. Re-run with --yes to confirm.`
+    );
+  }
+  const confirm =
+    options.confirmMutation ??
+    (async () =>
+      promptYesNo(`${summary}. Proceed?`, false, { io: { input, output: errorOutput } }));
+  const confirmed = await confirm({ action, object, summary });
+  if (!confirmed) {
+    return {
+      ok: false,
+      result: { ok: false, section, cancelled: true, object }
+    };
+  }
+  return { ok: true };
+}
+
+async function metaPromptTypedConfirm(object: MetaStatusObject, entityId: string): Promise<string> {
+  const rl = createInterface({ input, output: errorOutput });
+  try {
+    return await rl.question(
+      `Activating ${object} ${entityId} will start spending money. ` +
+        `Type the id (${entityId}) or "activate" to confirm: `
+    );
+  } finally {
+    rl.close();
+  }
+}
+
+function requireMetaFlag(args: string[], flag: string, context: string): string {
+  const value = optionValue(args, flag);
+  if (!value) {
+    throw new Error(`meta ${context} requires ${flag} <value>`);
+  }
+  return value;
+}
+
 export async function projectCommand(
   args: string[],
   env: CliEnv,
@@ -9644,6 +10143,7 @@ export function requiresOperatorConfirmation(line: string): boolean {
     "saved-report",
     "reconnect",
     "revoke",
+    "meta",
     "update_source_schedule",
     "pause_source_schedule",
     "resume_source_schedule"

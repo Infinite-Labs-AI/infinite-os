@@ -256,6 +256,7 @@ const DELETE_PROJECT_WORKSPACE_TABLES: readonly string[] = [
   // --- remaining children of sources ---
   "connection_credentials",
   "integration_audit_log",
+  "meta_write_dedup",
   "source_scopes",
   "sync_cursors",
   "sync_runs",

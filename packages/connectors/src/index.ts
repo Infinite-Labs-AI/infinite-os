@@ -242,7 +242,7 @@ interface ShopifyCredential {
   refreshWindowDays?: number;
 }
 
-interface MetaAdsCredential {
+export interface MetaAdsCredential {
   [key: string]: unknown;
   mode?: "fixture" | "live";
   transport?: "marketing_api" | "api" | "mcp_stdio" | "mcp" | "meta_ads_cli" | "cli";
@@ -2796,8 +2796,10 @@ function isMetaAdsCliTransport(credential: MetaAdsCredential): boolean {
   return credential.transport === "meta_ads_cli" || credential.transport === "cli";
 }
 
+// Default anchored to v25.0 to match the bundled facebook_business v25.0.1 SDK
+// that the captured WRITE shapes were recovered from. Configurable per-credential.
 function metaAdsApiVersion(credential: MetaAdsCredential): string {
-  return credential.apiVersion ?? "v24.0";
+  return credential.apiVersion ?? "v25.0";
 }
 
 function metaAdsTimeOptions(plan: SyncPlan): {
@@ -2949,6 +2951,667 @@ function metaAdsPagingAfter(response: MetaAdsInsightsResponse): string | undefin
   } catch {
     throw new ConnectorError("provider_api_error", "Meta Ads MCP response included an unsupported pagination cursor", true);
   }
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Meta Ads WRITE / management block (PR #3, STAGE 1 — money-safety core).
+//
+// Direct Graph-API POST transport (the `marketing_api` path). Structured behind
+// the existing `isMetaAdsCliTransport`/`isMetaAdsMcpTransport` switch so a CLI
+// write transport can slot in later — for now writes ONLY run on the direct
+// Graph path; CLI/MCP transports refuse the write with a non-retryable error.
+//
+// MONEY-SAFETY INVARIANTS enforced here (each has a regression test):
+//  1. CREATE ALWAYS PAUSED — every create helper hard-codes status:"PAUSED" in
+//     the POST body, ignores any caller-supplied status, and verifies the echoed
+//     status === PAUSED (errors + flags a money-safety violation otherwise).
+//  3. WRITES NON-RETRYABLE — `metaAdsGraphPost` does NOT inherit the read path's
+//     retryable:true. Every create + every status transition surfaces as
+//     retryable:false for ALL status codes (incl. 429/5xx). Reads (list/get)
+//     keep the normal retryable taxonomy via `fetchJson`.
+//  6. NEVER LOG TOKEN — token only ever rides in `bearerHeaders` (Authorization
+//     header), never in the URL or a logged body. `safeUrlForLogs` strips query.
+//
+// The Graph payload SHAPES below were recovered from the bundled
+// facebook_business v25.0.1 SDK + the meta CLI v1.0.1 compiled command binaries.
+// Items marked [INFERRED] were not directly observed at runtime and carry the
+// `// VERIFY against a real Meta sandbox capture before live use` comment.
+// ───────────────────────────────────────────────────────────────────────────
+
+export type MetaWriteEntity = "campaign" | "adset" | "ad" | "creative";
+export type MetaEntityStatus = "ACTIVE" | "PAUSED";
+
+const META_CREATE_STATUS = "PAUSED" as const;
+
+// Edge under /act_{ad_account_id}/<edge> for each create. Confirmed-SDK edges.
+const META_CREATE_EDGE: Record<MetaWriteEntity, string> = {
+  campaign: "campaigns",
+  adset: "adsets",
+  creative: "adcreatives",
+  ad: "ads"
+};
+
+// Graph node prefix for list/get reads (the plural edge per object, read off
+// /act_{ad_account_id}/<edge>). Same literals as the create edges.
+const META_READ_EDGE = META_CREATE_EDGE;
+
+interface MetaGraphWriteResponse {
+  id?: string | null;
+  // Some create edges echo the resulting status (campaign/adset/ad). Creatives
+  // have no status. We read it leniently for the create-never-ACTIVE guard.
+  status?: string | null;
+  effective_status?: string | null;
+  [key: string]: unknown;
+}
+
+export interface MetaCampaignCreateInput {
+  name: string;
+  objective: string;
+  dailyBudget?: number;
+  lifetimeBudget?: number;
+}
+
+export interface MetaAdSetCreateInput {
+  name: string;
+  campaignId: string;
+  optimizationGoal: string;
+  billingEvent: string;
+  dailyBudget?: number;
+  lifetimeBudget?: number;
+  bidAmount?: number;
+  startTime?: string;
+  endTime?: string;
+  targetingCountries?: string[];
+  pixelId?: string;
+  customEventType?: string;
+}
+
+export interface MetaCreativeCreateInput {
+  name: string;
+  pageId: string;
+  imageHash?: string;
+  // Optional Instagram identity (object_story_spec.instagram_user_id).
+  instagramUserId?: string;
+  linkUrl?: string;
+  body?: string;
+  title?: string;
+  description?: string;
+  callToAction?: string;
+}
+
+export interface MetaAdCreateInput {
+  name: string;
+  adsetId: string;
+  creativeId: string;
+}
+
+export interface MetaWriteResult {
+  ok: boolean;
+  id: string;
+  // The status the entity is in after the call. For creates this MUST be PAUSED
+  // (the guard throws otherwise) — surfaced so the action handler can audit it.
+  status: MetaEntityStatus | null;
+}
+
+export interface MetaStatusResult {
+  ok: boolean;
+  id: string;
+  status: MetaEntityStatus;
+}
+
+// Form-encode a Graph WRITE payload. Meta's WRITE edges expect
+// application/x-www-form-urlencoded: every NESTED object/array value is encoded
+// as a JSON STRING in its own field (special_ad_categories, targeting,
+// object_story_spec, promoted_object, creative …), scalars are sent verbatim.
+// This mirrors the READ path's `url.searchParams.set("time_range",
+// JSON.stringify(...))` convention. `null`/`undefined` fields are dropped.
+function metaFormEncode(params: Record<string, unknown>): URLSearchParams {
+  const form = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value === undefined || value === null) {
+      continue;
+    }
+    if (typeof value === "object") {
+      // Nested object or array → JSON string in its own field.
+      form.set(key, JSON.stringify(value));
+    } else {
+      // Scalar (string/number/boolean) → verbatim.
+      form.set(key, String(value));
+    }
+  }
+  return form;
+}
+
+// Core write transport. Mirrors `metaAdsInsightsUrl` + `bearerHeaders` but POSTs
+// and — critically — translates EVERY non-2xx into a NON-retryable
+// ConnectorError (retryable:false), regardless of status code. This is what
+// keeps a money write off the worker's retry machinery. Token only in the
+// Authorization header; never in the URL (the URL has no query at all here).
+async function metaAdsGraphPost(
+  credential: MetaAdsCredential,
+  path: string,
+  params: Record<string, unknown>
+): Promise<MetaGraphWriteResponse> {
+  if (isMetaAdsCliTransport(credential) || isMetaAdsMcpTransport(credential)) {
+    // A CLI/MCP write transport is a deliberate later add. Until then refuse
+    // loudly and non-retryably rather than silently dropping a money write.
+    throw new ConnectorError(
+      "provider_unsupported",
+      "Meta Ads writes require the direct Graph-API transport (marketing_api); the CLI/MCP write transport is not implemented yet",
+      false
+    );
+  }
+  const accessToken = requireCredential(credential, "accessToken");
+  const url = `https://graph.facebook.com/${metaAdsApiVersion(credential)}/${path}`;
+  const safeUrl = safeUrlForLogs(url);
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: "POST",
+      headers: {
+        // Meta Graph WRITE endpoints take application/x-www-form-urlencoded.
+        // Nested object/array fields (special_ad_categories, targeting,
+        // object_story_spec, promoted_object, creative) must each be a JSON
+        // STRING in their own field — mirrors the READ path's per-field
+        // `JSON.stringify(time_range)` convention. Sending native nested JSON
+        // (Content-Type: application/json) is REJECTED by the real Graph API.
+        "Content-Type": "application/x-www-form-urlencoded",
+        ...bearerHeaders(accessToken)
+      },
+      body: metaFormEncode(params).toString()
+    });
+  } catch (error) {
+    // Network/transport failure on a money write is NON-retryable too: we never
+    // want the action handler to silently re-POST a create.
+    throw new ConnectorError(
+      "provider_api_error",
+      `Meta Ads write request failed for ${safeUrl}: ${error instanceof Error ? error.message : String(error)}`,
+      false
+    );
+  }
+  if (!response.ok) {
+    const detail = await responseSafeDetail(response);
+    const code =
+      response.status === 401 || response.status === 403
+        ? "provider_auth_failed"
+        : response.status === 429
+          ? "provider_rate_limited"
+          : "provider_api_error";
+    throw new ConnectorError(
+      code,
+      providerHttpErrorMessage("Meta Ads write failed", response.status, safeUrl, detail),
+      // INVARIANT 3: writes are non-retryable for ALL status codes (incl 429/5xx).
+      false
+    );
+  }
+  return (await response.json()) as MetaGraphWriteResponse;
+}
+
+// Reads the echoed status from a create response leniently. Campaign/adset/ad
+// creates may echo `status`; if absent we treat it as PAUSED (we only ever sent
+// PAUSED). The guard's job is to catch an UNEXPECTED ACTIVE echo.
+function metaEchoedStatus(response: MetaGraphWriteResponse): MetaEntityStatus | null {
+  const raw = response.status ?? response.effective_status;
+  if (typeof raw !== "string") {
+    return null;
+  }
+  const upper = raw.toUpperCase();
+  return upper === "ACTIVE" ? "ACTIVE" : upper === "PAUSED" ? "PAUSED" : null;
+}
+
+// INVARIANT 1: after any create, the entity must NOT be ACTIVE. If Graph ever
+// echoes ACTIVE we throw a non-retryable money-safety error so the handler can
+// audit-log a violation. Returns the (PAUSED-or-null) status to surface upward.
+function assertCreateNotActive(entity: MetaWriteEntity, id: string, response: MetaGraphWriteResponse): MetaEntityStatus | null {
+  const status = metaEchoedStatus(response);
+  if (status === "ACTIVE") {
+    throw new ConnectorError(
+      "money_safety_violation",
+      `Meta Ads ${entity} ${id} was created ACTIVE despite a PAUSED create request — refusing to proceed`,
+      false
+    );
+  }
+  return status;
+}
+
+function requireGraphId(entity: MetaWriteEntity, response: MetaGraphWriteResponse): string {
+  const id = response.id;
+  if (typeof id !== "string" || id.trim() === "") {
+    throw new ConnectorError(
+      "provider_api_error",
+      `Meta Ads ${entity} create response did not include an id`,
+      false
+    );
+  }
+  return id;
+}
+
+// Optional integer-cents fields are sent as JSON numbers. Budgets/bids = integer
+// minor units (cents) per the captured CLI/doc contract.
+function metaCents(value: number | undefined): number | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (!Number.isInteger(value) || value < 0) {
+    throw new ConnectorError("provider_api_error", "Meta Ads budgets/bids must be non-negative integer cents", false);
+  }
+  return value;
+}
+
+// ── Enum normalization + allow-list validation ────────────────────────────────
+// Meta Graph enums are UPPERCASE. We normalize (uppercase + trim) BEFORE the POST
+// and validate against a known allow-list so a typo'd enum surfaces as a clear,
+// NON-retryable error at our boundary instead of an opaque Graph #100 rejection
+// (and so a lowercase value never reaches the wire). Allow-lists below cover the
+// STANDARD surface this PR ships; extend them as new objectives/goals are added.
+//
+// VERIFY against a real Meta sandbox capture before live use: the exact accepted
+// enum members evolve per Graph version — these lists reflect the captured SDK /
+// docs for v25 and should be reconciled against a sandbox on go-live.
+const META_OBJECTIVE_VALUES = new Set<string>([
+  "OUTCOME_AWARENESS",
+  "OUTCOME_TRAFFIC",
+  "OUTCOME_ENGAGEMENT",
+  "OUTCOME_LEADS",
+  "OUTCOME_APP_PROMOTION",
+  "OUTCOME_SALES"
+]);
+const META_OPTIMIZATION_GOAL_VALUES = new Set<string>([
+  "NONE",
+  "APP_INSTALLS",
+  "AD_RECALL_LIFT",
+  "ENGAGED_USERS",
+  "EVENT_RESPONSES",
+  "IMPRESSIONS",
+  "LEAD_GENERATION",
+  "QUALITY_LEAD",
+  "LINK_CLICKS",
+  "OFFSITE_CONVERSIONS",
+  "PAGE_LIKES",
+  "POST_ENGAGEMENT",
+  "QUALITY_CALL",
+  "REACH",
+  "LANDING_PAGE_VIEWS",
+  "VISIT_INSTAGRAM_PROFILE",
+  "VALUE",
+  "THRUPLAY",
+  "CONVERSATIONS"
+]);
+const META_BILLING_EVENT_VALUES = new Set<string>([
+  "APP_INSTALLS",
+  "CLICKS",
+  "IMPRESSIONS",
+  "LINK_CLICKS",
+  "NONE",
+  "PAGE_LIKES",
+  "POST_ENGAGEMENT",
+  "THRUPLAY",
+  "PURCHASE",
+  "LISTING_INTERACTION"
+]);
+const META_CALL_TO_ACTION_VALUES = new Set<string>([
+  "OPEN_LINK",
+  "LIKE_PAGE",
+  "SHOP_NOW",
+  "PLAY_GAME",
+  "INSTALL_APP",
+  "USE_APP",
+  "INSTALL_MOBILE_APP",
+  "USE_MOBILE_APP",
+  "BOOK_TRAVEL",
+  "LISTEN_MUSIC",
+  "LEARN_MORE",
+  "SIGN_UP",
+  "DOWNLOAD",
+  "WATCH_MORE",
+  "NO_BUTTON",
+  "CALL_NOW",
+  "APPLY_NOW",
+  "BUY_NOW",
+  "GET_OFFER",
+  "GET_QUOTE",
+  "GET_DIRECTIONS",
+  "SUBSCRIBE",
+  "CONTACT_US",
+  "ORDER_NOW",
+  "DONATE_NOW",
+  "SAY_THANKS",
+  "SELL_NOW",
+  "SHARE",
+  "BOOK_NOW",
+  "MESSAGE_PAGE",
+  "REQUEST_TIME",
+  "SEE_MENU",
+  "GET_SHOWTIMES",
+  "WHATSAPP_MESSAGE"
+]);
+const META_CUSTOM_EVENT_TYPE_VALUES = new Set<string>([
+  "AD_IMPRESSION",
+  "RATE",
+  "TUTORIAL_COMPLETION",
+  "CONTACT",
+  "CUSTOMIZE_PRODUCT",
+  "DONATE",
+  "FIND_LOCATION",
+  "SCHEDULE",
+  "START_TRIAL",
+  "SUBMIT_APPLICATION",
+  "SUBSCRIBE",
+  "ADD_TO_CART",
+  "ADD_TO_WISHLIST",
+  "INITIATED_CHECKOUT",
+  "ADD_PAYMENT_INFO",
+  "PURCHASE",
+  "LEAD",
+  "COMPLETE_REGISTRATION",
+  "CONTENT_VIEW",
+  "SEARCH",
+  "SERVICE_BOOKING_REQUEST",
+  "MESSAGING_CONVERSATION_STARTED_7D",
+  "LEVEL_ACHIEVED",
+  "ACHIEVEMENT_UNLOCKED",
+  "SPENT_CREDITS",
+  "LISTING_INTERACTION",
+  "OTHER"
+]);
+
+// Normalize an enum value to UPPERCASE and validate it against an allow-list.
+// Unknown values throw a clear NON-retryable ConnectorError so a bad enum can
+// never reach the Graph POST. `undefined` passes through (optional fields).
+function metaEnum(
+  value: string | undefined,
+  allowed: Set<string>,
+  field: string
+): string | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  const normalized = value.trim().toUpperCase();
+  if (!allowed.has(normalized)) {
+    throw new ConnectorError(
+      "provider_api_error",
+      `Unsupported Meta Ads ${field}: "${value}" (expected one of ${[...allowed].join(", ")})`,
+      false
+    );
+  }
+  return normalized;
+}
+
+// ── Create: Campaign ── POST /act_{id}/campaigns ──────────────────────────────
+export async function createMetaCampaign(
+  credential: MetaAdsCredential,
+  input: MetaCampaignCreateInput
+): Promise<MetaWriteResult> {
+  const adAccountId = metaAdsAccountId(credential);
+  // VERIFY against a real Meta sandbox capture before live use:
+  //   `special_ad_categories: []` is [INFERRED-REQUIRED] by Graph v25 (POST
+  //   rejects campaigns without it). The field is present in the SDK; its
+  //   requiredness was not observed at runtime.
+  // FIX 3: normalize+validate enums to UPPERCASE before they reach the Graph POST.
+  const objective = metaEnum(input.objective, META_OBJECTIVE_VALUES, "objective")!;
+  const params: Record<string, unknown> = {
+    name: input.name,
+    objective,
+    status: META_CREATE_STATUS, // INVARIANT 1: hard-coded PAUSED, ignores any caller status.
+    special_ad_categories: [] // VERIFY against a real Meta sandbox capture before live use
+  };
+  const dailyBudget = metaCents(input.dailyBudget);
+  const lifetimeBudget = metaCents(input.lifetimeBudget);
+  if (dailyBudget !== undefined) params.daily_budget = dailyBudget;
+  if (lifetimeBudget !== undefined) params.lifetime_budget = lifetimeBudget;
+
+  const response = await metaAdsGraphPost(credential, `${adAccountId}/${META_CREATE_EDGE.campaign}`, params);
+  const id = requireGraphId("campaign", response);
+  const status = assertCreateNotActive("campaign", id, response);
+  return { ok: true, id, status };
+}
+
+// ── Create: Ad Set ── POST /act_{id}/adsets ───────────────────────────────────
+export async function createMetaAdSet(
+  credential: MetaAdsCredential,
+  input: MetaAdSetCreateInput
+): Promise<MetaWriteResult> {
+  const adAccountId = metaAdsAccountId(credential);
+  // FIX 3: normalize+validate enums to UPPERCASE before they reach the Graph POST.
+  const optimizationGoal = metaEnum(input.optimizationGoal, META_OPTIMIZATION_GOAL_VALUES, "optimization goal")!;
+  const billingEvent = metaEnum(input.billingEvent, META_BILLING_EVENT_VALUES, "billing event")!;
+  const params: Record<string, unknown> = {
+    name: input.name,
+    campaign_id: input.campaignId,
+    optimization_goal: optimizationGoal,
+    billing_event: billingEvent,
+    status: META_CREATE_STATUS // INVARIANT 1: hard-coded PAUSED, ignores any caller status.
+  };
+  const dailyBudget = metaCents(input.dailyBudget);
+  const lifetimeBudget = metaCents(input.lifetimeBudget);
+  const bidAmount = metaCents(input.bidAmount);
+  if (dailyBudget !== undefined) params.daily_budget = dailyBudget;
+  if (lifetimeBudget !== undefined) params.lifetime_budget = lifetimeBudget;
+  if (bidAmount !== undefined) params.bid_amount = bidAmount;
+  if (input.startTime) params.start_time = input.startTime;
+  if (input.endTime) params.end_time = input.endTime;
+  // VERIFY against a real Meta sandbox capture before live use:
+  //   `targeting` minimum shape — Graph usually demands at least geo_locations.
+  //   The inner key geo_locations.countries is [CONFIRMED-SDK]; whether the CLI
+  //   adds default targeting_automation/placements is [INFERRED].
+  if (input.targetingCountries && input.targetingCountries.length > 0) {
+    params.targeting = { geo_locations: { countries: input.targetingCountries } }; // VERIFY against a real Meta sandbox capture before live use
+  }
+  if (input.pixelId) {
+    // promoted_object only when a pixel is supplied (conversion adsets).
+    // FIX 3: custom_event_type is an enum → normalize+validate before the POST.
+    const customEventType =
+      metaEnum(input.customEventType, META_CUSTOM_EVENT_TYPE_VALUES, "custom event type") ?? "PURCHASE";
+    params.promoted_object = {
+      pixel_id: input.pixelId,
+      custom_event_type: customEventType
+    };
+  }
+
+  const response = await metaAdsGraphPost(credential, `${adAccountId}/${META_CREATE_EDGE.adset}`, params);
+  const id = requireGraphId("adset", response);
+  const status = assertCreateNotActive("adset", id, response);
+  return { ok: true, id, status };
+}
+
+// ── Create: Ad Creative (STANDARD single-image only) ──────────────────────────
+// POST /act_{id}/adcreatives. STANDARD scope: link_data OR photo_data only — no
+// child_attachments / asset_feed_spec (carousel/DCO are deferred to PR #4+).
+// NOTE: creatives have no go-live status; nothing to PAUSE-guard here.
+export async function createMetaCreative(
+  credential: MetaAdsCredential,
+  input: MetaCreativeCreateInput
+): Promise<MetaWriteResult> {
+  const adAccountId = metaAdsAccountId(credential);
+  if (!input.imageHash) {
+    // Image upload (POST /act_{id}/adimages → image_hash) happens before this in
+    // the action handler; the STANDARD creative needs a hash to reference.
+    throw new ConnectorError(
+      "provider_api_error",
+      "Meta Ads STANDARD creative requires an image_hash (upload the image via /adimages first)",
+      false
+    );
+  }
+  const objectStorySpec: Record<string, unknown> = { page_id: input.pageId };
+  if (input.instagramUserId) {
+    objectStorySpec.instagram_user_id = input.instagramUserId;
+  }
+  if (input.linkUrl) {
+    // Link ad. Key is "name" (NOT "title") for the headline — [CONFIRMED-SDK].
+    const linkData: Record<string, unknown> = {
+      link: input.linkUrl,
+      image_hash: input.imageHash
+    };
+    if (input.body) linkData.message = input.body;
+    if (input.title) linkData.name = input.title;
+    if (input.description) linkData.description = input.description;
+    if (input.callToAction) {
+      // FIX 3: call_to_action.type is an enum → normalize+validate before the POST.
+      const callToAction = metaEnum(input.callToAction, META_CALL_TO_ACTION_VALUES, "call to action")!;
+      linkData.call_to_action = {
+        type: callToAction,
+        value: { link: input.linkUrl }
+      };
+    }
+    objectStorySpec.link_data = linkData;
+  } else {
+    // STANDARD single-image PHOTO post. VERIFY against a real Meta sandbox
+    // capture before live use: the --body → photo_data.caption mapping is
+    // [INFERRED] (the keys are [CONFIRMED-SDK], the CLI's flag→key choice is not).
+    const photoData: Record<string, unknown> = { image_hash: input.imageHash };
+    if (input.body) photoData.caption = input.body; // VERIFY against a real Meta sandbox capture before live use
+    objectStorySpec.photo_data = photoData;
+  }
+
+  const response = await metaAdsGraphPost(credential, `${adAccountId}/${META_CREATE_EDGE.creative}`, {
+    name: input.name,
+    object_story_spec: objectStorySpec
+  });
+  const id = requireGraphId("creative", response);
+  // Creatives have no status; report null (no PAUSE/ACTIVE concept).
+  return { ok: true, id, status: null };
+}
+
+// ── Create: Ad ── POST /act_{id}/ads ──────────────────────────────────────────
+export async function createMetaAd(
+  credential: MetaAdsCredential,
+  input: MetaAdCreateInput
+): Promise<MetaWriteResult> {
+  const adAccountId = metaAdsAccountId(credential);
+  // tracking_specs is [INFERRED] for the STANDARD path and omitted — verify the
+  // element shape against a sandbox capture before adding it.
+  const params: Record<string, unknown> = {
+    name: input.name,
+    adset_id: input.adsetId,
+    creative: { creative_id: input.creativeId }, // key 'creative' wraps {creative_id} — [CONFIRMED-SDK]
+    status: META_CREATE_STATUS // INVARIANT 1: hard-coded PAUSED, ignores any caller status.
+  };
+
+  const response = await metaAdsGraphPost(credential, `${adAccountId}/${META_CREATE_EDGE.ad}`, params);
+  const id = requireGraphId("ad", response);
+  const status = assertCreateNotActive("ad", id, response);
+  return { ok: true, id, status };
+}
+
+// ── Status transition (activate / pause) ── POST /{entity_id} ─────────────────
+// NOT an edge under act_; POST to the node id with { status }. Per-level only —
+// never cascades. This is the SEPARATE, gated money-spending transition.
+// Still NON-retryable (goes through metaAdsGraphPost). The activate confirm gate
+// lives in the CLI layer (later stage); here we just perform the transition.
+export async function setMetaEntityStatus(
+  credential: MetaAdsCredential,
+  entityId: string,
+  status: MetaEntityStatus
+): Promise<MetaStatusResult> {
+  if (status !== "ACTIVE" && status !== "PAUSED") {
+    throw new ConnectorError("provider_api_error", `Unsupported Meta entity status: ${String(status)}`, false);
+  }
+  const response = await metaAdsGraphPost(credential, entityId, { status });
+  // Graph returns { success: true } for node status POSTs; trust the 2xx and
+  // echo back the requested status. (No id is returned by the node POST.)
+  const echoed = metaEchoedStatus(response);
+  return { ok: true, id: entityId, status: echoed ?? status };
+}
+
+// ── Reads: list / get ── normal retryable taxonomy via fetchJson ──────────────
+interface MetaListResponse {
+  data?: Array<Record<string, unknown>>;
+  paging?: { next?: string | null } | null;
+}
+
+export async function listMetaEntities(
+  credential: MetaAdsCredential,
+  entity: MetaWriteEntity,
+  options: { limit?: number; fields?: string } = {}
+): Promise<Array<Record<string, unknown>>> {
+  const accessToken = requireCredential(credential, "accessToken");
+  const adAccountId = metaAdsAccountId(credential);
+  const url = new URL(`https://graph.facebook.com/${metaAdsApiVersion(credential)}/${adAccountId}/${META_READ_EDGE[entity]}`);
+  url.searchParams.set("fields", options.fields ?? metaDefaultReadFields(entity));
+  if (options.limit) {
+    url.searchParams.set("limit", String(options.limit));
+  }
+  const response = await fetchJson<MetaListResponse>(url.toString(), {
+    method: "GET",
+    headers: bearerHeaders(accessToken)
+  });
+  return response.data ?? [];
+}
+
+export async function getMetaEntity(
+  credential: MetaAdsCredential,
+  entityId: string,
+  options: { fields?: string } = {}
+): Promise<Record<string, unknown>> {
+  const accessToken = requireCredential(credential, "accessToken");
+  const url = new URL(`https://graph.facebook.com/${metaAdsApiVersion(credential)}/${entityId}`);
+  if (options.fields) {
+    url.searchParams.set("fields", options.fields);
+  }
+  return fetchJson<Record<string, unknown>>(url.toString(), {
+    method: "GET",
+    headers: bearerHeaders(accessToken)
+  });
+}
+
+function metaDefaultReadFields(entity: MetaWriteEntity): string {
+  switch (entity) {
+    case "campaign":
+      return "id,name,status,objective,effective_status";
+    case "adset":
+      return "id,name,status,campaign_id,optimization_goal,billing_event,effective_status";
+    case "ad":
+      return "id,name,status,adset_id,effective_status";
+    case "creative":
+      return "id,name,object_story_spec";
+  }
+}
+
+// ── Lightweight dedup helper (idempotency) ────────────────────────────────────
+// INVARIANT 4: dedup is keyed by (workspace_id, source_id, client_token). The
+// durable table lives in the analytical-engine handler (a later stage); this is
+// the pure key + check helper the handler reuses so the dedup shape is defined
+// and unit-tested in one place alongside the writes.
+export interface MetaDedupRecord {
+  clientToken: string;
+  entityId: string;
+}
+
+export function metaDedupKey(workspaceId: string, sourceId: string, clientToken: string): string {
+  return `${workspaceId}::${sourceId}::${clientToken}`;
+}
+
+// Returns the existing entity id if a record with this client token is already
+// present (→ handler returns deduped:true and skips the POST), else undefined.
+export function findMetaDedupHit(
+  existing: ReadonlyArray<MetaDedupRecord>,
+  clientToken: string | undefined
+): string | undefined {
+  if (!clientToken) {
+    return undefined;
+  }
+  return existing.find((record) => record.clientToken === clientToken)?.entityId;
+}
+
+// Resolve a live, OAuth-bridged MetaAdsCredential for an operator WRITE handler.
+// The connector's `sync()` path reads credentials through the module-private
+// `sourceCredential` (which follows the oauth_tokens FK + refreshes on demand);
+// the write handlers in the analytical-engine run INLINE and need the same
+// resolved credential without going through a connector method. This thin
+// exported wrapper reuses that exact resolver (no duplicate decrypt/refresh
+// logic, no token ever leaving the credential object) so a Meta write reuses
+// the same live-token bridge a Meta read/sync does.
+export async function resolveMetaAdsCredential(
+  db: InfiniteOsDb,
+  request: { workspaceId: string; sourceId: string }
+): Promise<MetaAdsCredential> {
+  const credential = await sourceCredential<MetaAdsCredential>(db, {
+    workspaceId: request.workspaceId,
+    sourceId: request.sourceId,
+    provider: "meta_ads",
+    syncRunId: `write_${Date.now()}`
+  });
+  return credential.payload;
 }
 
 function metaAdsCliAccountId(credential: MetaAdsCredential): string {

@@ -41,7 +41,8 @@ describe("Infinite OS migration stack", () => {
       "0024_ga4_analytics_v1.sql",
       "0025_ga4_page_report.sql",
       "0026_workspace_site_ga4_link.sql",
-      "0027_exclude_dev_host_traffic.sql"
+      "0027_exclude_dev_host_traffic.sql",
+      "0028_meta_write_dedup.sql"
     ]);
   });
 
@@ -346,7 +347,8 @@ describe("Infinite OS migration stack", () => {
       "0024_ga4_analytics_v1.sql",
       "0025_ga4_page_report.sql",
       "0026_workspace_site_ga4_link.sql",
-      "0027_exclude_dev_host_traffic.sql"
+      "0027_exclude_dev_host_traffic.sql",
+      "0028_meta_write_dedup.sql"
     ]);
   });
 

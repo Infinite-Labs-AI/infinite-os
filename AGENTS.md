@@ -83,6 +83,25 @@ secret-gated check can't run.
    it via the bin symlink / `npx`, not just `node dist/...` — a direct path can mask
    an entrypoint-resolution bug that only bites under a symlinked launcher.
 
+## Meta Ads writes (money-safety)
+
+Meta Ads campaign/ad-set/creative/ad **writes are operator-only** (the `create_meta_*`
+and `set_meta_entity_status` actions are `OPERATOR_ACTIONS` — a `tool_agent`/LLM session
+can never fire one) and go over a **direct Graph-API POST** transport. Two rules are
+load-bearing and must never regress:
+
+- **Create always lands PAUSED.** Every create hard-codes `status:"PAUSED"`; the input
+  types carry no `status`, and an echoed `ACTIVE` is treated as a money-safety violation.
+  Creates run **inline** (never enqueued as a retryable worker job) and surface as
+  **non-retryable** regardless of status code.
+- **Activation is separate and gated.** Going live is a distinct
+  `infinite meta <obj> activate <id>` → `set_meta_entity_status status=ACTIVE`, behind a
+  **stricter typed-confirm** (type the entity id or `activate`). Creates/pauses use the
+  standard `--yes`-skippable confirm; `"meta"` is also in `requiresOperatorConfirmation`.
+
+Never log the access token or raw budget/bid amounts; the audit log records
+`budget_present`/`client_token`/resulting-status only. There is no `--token` CLI flag.
+
 ## Tests
 
 Single root `vitest.config.ts`. `pnpm test` runs the whole suite; run one file with

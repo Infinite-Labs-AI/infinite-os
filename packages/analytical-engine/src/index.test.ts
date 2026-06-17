@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   decryptCredentialPayload,
   encryptCredentialPayload,
@@ -222,12 +222,15 @@ describe("analytical engine smoke", () => {
   it("stores live source credentials as encrypted envelopes and omits secrets from output", async () => {
     process.env.GROWTH_OS_ENCRYPTION_KEY = "analytical-test-encryption-key";
     const stored: { credential_kind?: string; encrypted_payload?: string } = {};
-    const originalFetch = globalThis.fetch;
-    globalThis.fetch = (async () =>
-      new Response(JSON.stringify({ data: [], has_more: false }), {
-        status: 200,
-        headers: { "Content-Type": "application/json" }
-      })) as typeof fetch;
+    // FIX 4: vi.stubGlobal/unstubAllGlobals — deterministic under parallel CI.
+    vi.stubGlobal(
+      "fetch",
+      (async () =>
+        new Response(JSON.stringify({ data: [], has_more: false }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        })) as typeof fetch
+    );
     const db: InfiniteOsDb = {
       async query() {
         return [];
@@ -296,7 +299,7 @@ describe("analytical engine smoke", () => {
         connectionTest: { ok: true, mode: "live", provider: "stripe" }
       });
     } finally {
-      globalThis.fetch = originalFetch;
+      vi.unstubAllGlobals();
     }
   });
 
@@ -307,12 +310,15 @@ describe("analytical engine smoke", () => {
       encrypted_payload?: string;
       oauth_token_id?: string | null;
     } = {};
-    const originalFetch = globalThis.fetch;
-    globalThis.fetch = (async () =>
-      new Response(JSON.stringify({ rows: [] }), {
-        status: 200,
-        headers: { "Content-Type": "application/json" }
-      })) as typeof fetch;
+    // FIX 4: vi.stubGlobal/unstubAllGlobals — deterministic under parallel CI.
+    vi.stubGlobal(
+      "fetch",
+      (async () =>
+        new Response(JSON.stringify({ rows: [] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        })) as typeof fetch
+    );
     const db: InfiniteOsDb = {
       async query() {
         return [];
@@ -407,7 +413,7 @@ describe("analytical engine smoke", () => {
       expect(metadata.expiresAt).toBeUndefined();
       expect(JSON.stringify(result)).not.toContain("ga4-refresh-token");
     } finally {
-      globalThis.fetch = originalFetch;
+      vi.unstubAllGlobals();
     }
   });
 
@@ -418,12 +424,15 @@ describe("analytical engine smoke", () => {
       encrypted_payload?: string;
       oauth_token_id?: string | null;
     } = {};
-    const originalFetch = globalThis.fetch;
-    globalThis.fetch = (async () =>
-      new Response(JSON.stringify({ results: [] }), {
-        status: 200,
-        headers: { "Content-Type": "application/json" }
-      })) as typeof fetch;
+    // FIX 4: vi.stubGlobal/unstubAllGlobals — deterministic under parallel CI.
+    vi.stubGlobal(
+      "fetch",
+      (async () =>
+        new Response(JSON.stringify({ results: [] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        })) as typeof fetch
+    );
     const db: InfiniteOsDb = {
       async query() {
         return [];
@@ -494,7 +503,7 @@ describe("analytical engine smoke", () => {
       );
       expect(payload).toMatchObject({ personalApiKey: "ph-personal-key", projectId: "42" });
     } finally {
-      globalThis.fetch = originalFetch;
+      vi.unstubAllGlobals();
     }
   });
 
@@ -3100,6 +3109,441 @@ describe("setup action helpers", () => {
       job: { id: "job_sync_1", jobType: "source_sync" },
       jobId: "job_sync_1"
     });
+  });
+});
+
+describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
+  const operatorContext = {
+    workspaceId: "workspace",
+    authority: "operator",
+    surface: "cli",
+    actorId: "operator",
+    sessionId: "session"
+  } as const;
+
+  interface AuditRow {
+    action: string;
+    status: string;
+    source_id: string;
+    actor_type: string;
+    details: Record<string, unknown>;
+  }
+
+  interface GraphCall {
+    url: string;
+    method: string | undefined;
+    authorization: string | null;
+    body: Record<string, unknown> | null;
+  }
+
+  // In-memory model of the meta_write_dedup table (migration 0028): a UNIQUE key
+  // on (workspace_id, source_id, client_token). `claim` rows are keyed by token;
+  // an `insert ... on conflict do nothing` returns the new id only when no row
+  // with that token exists yet (mirrors the DB's atomic claim).
+  interface DedupRow {
+    id: string;
+    clientToken: string;
+    entityId: string | null;
+  }
+
+  // A fake db that serves the meta_ads source + an encrypted Meta credential,
+  // records integration_audit_log inserts, and models the atomic dedup table.
+  // `dedup` pre-seeds a RESOLVED dedup row (a prior succeeded create) so a repeat
+  // with the same client_token is deduped. `dedupRows` lets a test inspect claims.
+  function metaWriteTestDb(options: {
+    audits: AuditRow[];
+    dedup?: { clientToken: string; entityId: string };
+    dedupRows?: DedupRow[];
+  }): InfiniteOsDb {
+    const dedupRows: DedupRow[] = options.dedupRows ?? [];
+    if (options.dedup) {
+      dedupRows.push({
+        id: "mwd_seed",
+        clientToken: options.dedup.clientToken,
+        entityId: options.dedup.entityId
+      });
+    }
+    return {
+      async query<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T[]> {
+        if (sql.includes("insert into integration_audit_log")) {
+          const p = params ?? [];
+          options.audits.push({
+            source_id: String(p[2]),
+            actor_type: String(p[3]),
+            action: String(p[4]),
+            status: String(p[5]),
+            details: JSON.parse(String(p[6])) as Record<string, unknown>
+          });
+        }
+        if (sql.includes("update meta_write_dedup")) {
+          const p = params ?? [];
+          const row = dedupRows.find((r) => r.id === String(p[0]));
+          if (row) {
+            row.entityId = String(p[1]);
+          }
+        }
+        if (sql.includes("delete from meta_write_dedup")) {
+          const p = params ?? [];
+          const idx = dedupRows.findIndex((r) => r.id === String(p[0]) && r.entityId === null);
+          if (idx !== -1) {
+            dedupRows.splice(idx, 1);
+          }
+        }
+        return [] as T[];
+      },
+      async one<T>(sql: string, params?: unknown[]): Promise<T | null> {
+        if (sql.includes("from sources")) {
+          return { provider: "meta_ads" } as T;
+        }
+        if (sql.includes("from connection_credentials")) {
+          return {
+            credential_kind: "system_user_token",
+            encrypted_payload: encryptForTest({
+              mode: "live",
+              transport: "marketing_api",
+              adAccountId: "act_999",
+              accessToken: "secret-meta-token",
+              apiVersion: "v25.0"
+            }),
+            oauth_token_id: null
+          } as T;
+        }
+        // Atomic dedup CLAIM: insert ... on conflict do nothing returning id.
+        if (sql.includes("insert into meta_write_dedup")) {
+          const p = params ?? [];
+          const claimId = String(p[0]);
+          const token = String(p[3]);
+          const entity = String(p[4]);
+          if (dedupRows.some((r) => r.clientToken === token)) {
+            // Conflict → no row returned (someone else holds the key).
+            return null;
+          }
+          dedupRows.push({ id: claimId, clientToken: token, entityId: null });
+          void entity;
+          return { id: claimId } as T;
+        }
+        // Read back the existing claim's entity id on a dedup hit.
+        if (sql.includes("from meta_write_dedup")) {
+          const token = String(params?.[2] ?? "");
+          const row = dedupRows.find((r) => r.clientToken === token);
+          return row ? ({ entity_id: row.entityId } as T) : null;
+        }
+        return null;
+      },
+      async close() {},
+      async ensureWorkspace() {},
+      async ensureFirstPhaseDatasets() {},
+      async connectSource() {
+        return {};
+      },
+      async updateSourceStatus() {},
+      async createJob() {
+        // INVARIANT 3: a money write must NEVER enqueue a worker job.
+        throw new Error("createJob must not be called by a Meta write handler");
+      },
+      async claimNextJob() {
+        return null;
+      },
+      async completeJob() {},
+      async withTransaction(fn) {
+        return fn(this);
+      }
+    };
+  }
+
+  // Decode a Meta WRITE POST body. WRITE POSTs are form-encoded
+  // (application/x-www-form-urlencoded): each nested object/array field is a JSON
+  // STRING, which we parse back so shape assertions read naturally. Scalars stay
+  // strings. Mirrors the production `metaFormEncode` + the connector test decoder.
+  function decodeMetaWriteBody(raw: string): Record<string, unknown> | null {
+    try {
+      const params = new URLSearchParams(raw);
+      const body: Record<string, unknown> = {};
+      for (const [key, value] of params.entries()) {
+        const trimmed = value.trim();
+        body[key] = trimmed.startsWith("{") || trimmed.startsWith("[") ? JSON.parse(value) : value;
+      }
+      return body;
+    } catch {
+      return null;
+    }
+  }
+
+  async function withGraph(
+    responder: (call: GraphCall) => Response | Promise<Response>,
+    fn: (calls: GraphCall[]) => Promise<void>
+  ): Promise<void> {
+    process.env.GROWTH_OS_ENCRYPTION_KEY = "analytical-test-encryption-key";
+    const calls: GraphCall[] = [];
+    // FIX 4: vi.stubGlobal/unstubAllGlobals (deterministic under parallel CI)
+    // instead of raw `globalThis.fetch = …` + try/finally restore. A contaminated
+    // fetch from another concurrent test can no longer mask a money-safety
+    // regression here.
+    vi.stubGlobal("fetch", ((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const body =
+        init?.body && typeof init.body === "string" ? decodeMetaWriteBody(init.body) : null;
+      const headers = (init?.headers ?? {}) as Record<string, string>;
+      const call: GraphCall = {
+        url,
+        method: init?.method,
+        authorization: headers.Authorization ?? headers.authorization ?? null,
+        body
+      };
+      calls.push(call);
+      return Promise.resolve(responder(call));
+    }) as typeof fetch);
+    try {
+      await fn(calls);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  }
+
+  function jsonResponse(value: unknown, status = 200): Response {
+    return new Response(JSON.stringify(value), {
+      status,
+      headers: { "Content-Type": "application/json" }
+    });
+  }
+
+  it("creates a campaign INLINE, lands PAUSED, never logs the token or raw budget", async () => {
+    const audits: AuditRow[] = [];
+    const db = metaWriteTestDb({ audits });
+    await withGraph(
+      () => jsonResponse({ id: "120000000000777", status: "PAUSED" }),
+      async (calls) => {
+        const handlers = createActionHandlers(db);
+        const result = await handlers.create_meta_campaign?.(
+          {
+            sourceId: "src_meta",
+            name: "Demo Requests",
+            objective: "OUTCOME_TRAFFIC",
+            dailyBudget: 5000,
+            clientToken: "tok_camp_1"
+          },
+          operatorContext
+        );
+
+        // INVARIANT 1: hard-coded PAUSED in the POST body, status echoed back.
+        expect(calls[0].url).toBe("https://graph.facebook.com/v25.0/act_999/campaigns");
+        expect(calls[0].method).toBe("POST");
+        expect(calls[0].body).toMatchObject({ status: "PAUSED", objective: "OUTCOME_TRAFFIC" });
+        expect(calls[0].authorization).toBe("Bearer secret-meta-token");
+        expect(result?.data).toMatchObject({ id: "120000000000777", status: "PAUSED", deduped: false });
+
+        // INVARIANT 6: audit row stores presence flags + ids, NEVER the token/amount.
+        const audit = audits.find((row) => row.action === "create_meta_campaign");
+        expect(audit?.status).toBe("succeeded");
+        expect(audit?.actor_type).toBe("operator");
+        expect(audit?.details).toMatchObject({
+          entity: "campaign",
+          entity_id: "120000000000777",
+          client_token: "tok_camp_1",
+          status: "PAUSED",
+          budget_present: true,
+          deduped: false
+        });
+        const serialized = JSON.stringify(audits);
+        expect(serialized).not.toContain("secret-meta-token");
+        expect(serialized).not.toContain("5000");
+        expect(serialized).not.toContain("daily_budget");
+      }
+    );
+  });
+
+  it("dedups a repeat create by client_token without a second POST", async () => {
+    const audits: AuditRow[] = [];
+    const db = metaWriteTestDb({
+      audits,
+      dedup: { clientToken: "tok_dupe", entityId: "120000000000111" }
+    });
+    await withGraph(
+      () => jsonResponse({ id: "should-not-be-created", status: "PAUSED" }),
+      async (calls) => {
+        const handlers = createActionHandlers(db);
+        const result = await handlers.create_meta_campaign?.(
+          {
+            sourceId: "src_meta",
+            name: "Dup",
+            objective: "OUTCOME_TRAFFIC",
+            clientToken: "tok_dupe"
+          },
+          operatorContext
+        );
+        // No Graph POST happened.
+        expect(calls).toHaveLength(0);
+        expect(result?.data).toMatchObject({ id: "120000000000111", deduped: true });
+        const audit = audits.find((row) => row.action === "create_meta_campaign");
+        expect(audit?.details).toMatchObject({ deduped: true, entity_id: "120000000000111" });
+      }
+    );
+  });
+
+  it("ATOMIC dedup: two concurrent same-token creates POST exactly once (FIX 5)", async () => {
+    const audits: AuditRow[] = [];
+    const dedupRows: DedupRow[] = [];
+    const db = metaWriteTestDb({ audits, dedupRows });
+    await withGraph(
+      () => jsonResponse({ id: "120000000000999", status: "PAUSED" }),
+      async (calls) => {
+        const handlers = createActionHandlers(db);
+        // Fire two creates with the SAME client_token concurrently. The UNIQUE
+        // claim means only ONE wins the claim and POSTs; the other dedups.
+        const [a, b] = await Promise.all([
+          handlers.create_meta_campaign?.(
+            { sourceId: "src_meta", name: "Race A", objective: "OUTCOME_TRAFFIC", clientToken: "tok_race" },
+            operatorContext
+          ),
+          handlers.create_meta_campaign?.(
+            { sourceId: "src_meta", name: "Race B", objective: "OUTCOME_TRAFFIC", clientToken: "tok_race" },
+            operatorContext
+          )
+        ]);
+        // THE money-safety guarantee: exactly ONE Graph POST despite two
+        // concurrent same-token creates (the UNIQUE claim blocked the second).
+        expect(calls).toHaveLength(1);
+        // Exactly one result is the real create (deduped:false) and one is the
+        // deduped short-circuit (deduped:true). The winner carries the concrete
+        // id; the loser carries the existing id, or null if it read the claim
+        // while the winner was still mid-flight (documented concurrent behavior).
+        const results = [a?.data, b?.data] as Array<Record<string, unknown>>;
+        const winner = results.find((d) => d.deduped === false);
+        const loser = results.find((d) => d.deduped === true);
+        expect(winner).toBeDefined();
+        expect(loser).toBeDefined();
+        expect(winner?.id).toBe("120000000000999");
+        // Only ONE dedup row exists and it resolves to the created entity id.
+        expect(dedupRows).toHaveLength(1);
+        expect(dedupRows[0].entityId).toBe("120000000000999");
+      }
+    );
+  });
+
+  it("clientToken is OPTIONAL (opt-out): a tokenless create writes NO dedup row and is not deduped", async () => {
+    const audits: AuditRow[] = [];
+    const dedupRows: DedupRow[] = [];
+    const db = metaWriteTestDb({ audits, dedupRows });
+    await withGraph(
+      () => jsonResponse({ id: "120000000000888", status: "PAUSED" }),
+      async (calls) => {
+        const handlers = createActionHandlers(db);
+        // No clientToken → no dedup row, normal POST.
+        await handlers.create_meta_campaign?.(
+          { sourceId: "src_meta", name: "NoToken", objective: "OUTCOME_TRAFFIC" },
+          operatorContext
+        );
+        expect(calls).toHaveLength(1);
+        expect(dedupRows).toHaveLength(0);
+      }
+    );
+  });
+
+  it("releases an un-resolved claim on a failed POST so the same token can retry", async () => {
+    const audits: AuditRow[] = [];
+    const dedupRows: DedupRow[] = [];
+    const db = metaWriteTestDb({ audits, dedupRows });
+    await withGraph(
+      () => jsonResponse({ error: { message: "boom" } }, 500),
+      async () => {
+        const handlers = createActionHandlers(db);
+        await expect(
+          handlers.create_meta_campaign?.(
+            { sourceId: "src_meta", name: "Fails", objective: "OUTCOME_TRAFFIC", clientToken: "tok_fail" },
+            operatorContext
+          )
+        ).rejects.toMatchObject({ retryable: false });
+        // The un-resolved claim was released, so the poisoned token is freed.
+        expect(dedupRows).toHaveLength(0);
+      }
+    );
+  });
+
+  it("audits a failure and re-throws when Graph echoes ACTIVE (money-safety violation)", async () => {
+    const audits: AuditRow[] = [];
+    const db = metaWriteTestDb({ audits });
+    await withGraph(
+      () => jsonResponse({ id: "120000000000222", status: "ACTIVE" }),
+      async () => {
+        const handlers = createActionHandlers(db);
+        await expect(
+          handlers.create_meta_campaign?.(
+            { sourceId: "src_meta", name: "Sneaky", objective: "OUTCOME_TRAFFIC" },
+            operatorContext
+          )
+        ).rejects.toMatchObject({ code: "money_safety_violation", retryable: false });
+        const audit = audits.find((row) => row.action === "create_meta_campaign");
+        expect(audit?.status).toBe("failed");
+        expect(audit?.details).toMatchObject({ error_code: "money_safety_violation" });
+      }
+    );
+  });
+
+  it("activates an entity (the spend-bearing transition) and audits activation:true", async () => {
+    const audits: AuditRow[] = [];
+    const db = metaWriteTestDb({ audits });
+    await withGraph(
+      () => jsonResponse({ success: true, status: "ACTIVE" }),
+      async (calls) => {
+        const handlers = createActionHandlers(db);
+        const result = await handlers.set_meta_entity_status?.(
+          { sourceId: "src_meta", entityId: "120000000000333", status: "ACTIVE" },
+          operatorContext
+        );
+        expect(calls[0].url).toBe("https://graph.facebook.com/v25.0/120000000000333");
+        expect(calls[0].body).toEqual({ status: "ACTIVE" });
+        expect(result?.data).toMatchObject({ id: "120000000000333", status: "ACTIVE", activation: true });
+        const audit = audits.find((row) => row.action === "set_meta_entity_status");
+        expect(audit?.status).toBe("succeeded");
+        expect(audit?.details).toMatchObject({ requested_status: "ACTIVE", activation: true });
+      }
+    );
+  });
+
+  it("lists entities as a read (no audit row, normal taxonomy)", async () => {
+    const audits: AuditRow[] = [];
+    const db = metaWriteTestDb({ audits });
+    await withGraph(
+      () => jsonResponse({ data: [{ id: "c1", name: "Camp", status: "PAUSED" }] }),
+      async (calls) => {
+        const handlers = createActionHandlers(db);
+        const result = await handlers.list_meta_entities?.(
+          { sourceId: "src_meta", entity: "campaign", limit: 5 },
+          { ...operatorContext, authority: "tool_agent" }
+        );
+        expect(calls[0].method).toBe("GET");
+        expect(calls[0].url).toContain("/act_999/campaigns");
+        expect(result?.data).toMatchObject({ entity: "campaign", count: 1 });
+        // Reads do not write an audit row.
+        expect(audits).toHaveLength(0);
+      }
+    );
+  });
+
+  it("refuses a non-Meta source before touching the Graph API", async () => {
+    const audits: AuditRow[] = [];
+    const db: InfiniteOsDb = {
+      ...metaWriteTestDb({ audits }),
+      async one<T>(sql: string): Promise<T | null> {
+        if (sql.includes("from sources")) {
+          return { provider: "stripe" } as T;
+        }
+        return null;
+      }
+    };
+    await withGraph(
+      () => jsonResponse({ id: "nope" }),
+      async (calls) => {
+        const handlers = createActionHandlers(db);
+        await expect(
+          handlers.create_meta_campaign?.(
+            { sourceId: "src_stripe", name: "X", objective: "OUTCOME_TRAFFIC" },
+            operatorContext
+          )
+        ).rejects.toThrow("source_provider_mismatch");
+        expect(calls).toHaveLength(0);
+      }
+    );
   });
 });
 
