@@ -75,7 +75,9 @@ describe("Infinite OS runtime action registry", () => {
       "create_meta_ad_set",
       "create_meta_ad",
       "create_meta_creative",
-      "set_meta_entity_status"
+      "set_meta_entity_status",
+      // Destructive cleanup (operator-only, irreversible, no spend) — PR #3b.
+      "delete_meta_entity"
     ]);
     expect(FIRST_PHASE_ACTIONS).toEqual(
       expect.arrayContaining([...ORIGINAL_FIRST_PHASE_ACTIONS])

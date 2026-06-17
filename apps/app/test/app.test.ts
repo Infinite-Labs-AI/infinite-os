@@ -104,6 +104,26 @@ describe("Infinite OS app-hosted API/MCP skeleton", () => {
     }
   });
 
+  it("denies a tool_agent delete_meta_entity via /tools/call with 403 (operator-only)", async () => {
+    // FIX 2: the CLI fires delete via the generic /tools/call route (dispatch by
+    // actionId), which goes through guardedAction → assertAuthority. Because
+    // delete_meta_entity is an OPERATOR action, a tool_agent (read token) can
+    // NEVER delete — it 403s before any DELETE reaches the connector.
+    const app = createApp({ database: workspaceProbeDb() });
+    for (const url of ["/tools/call", "/mcp/tools/call"]) {
+      const response = await app.inject({
+        method: "POST",
+        url,
+        headers: { authorization: `Bearer ${READ_TOKEN}`, "x-growth-os-workspace": WORKSPACE },
+        payload: { actionId: "delete_meta_entity", input: { sourceId: "src_meta", entityId: "120000000000000001" } }
+      });
+      expect(response.statusCode, `${url} delete_meta_entity should 403 for tool_agent`).toBe(403);
+      expect(response.json()).toMatchObject({
+        error: { code: "operator_authority_required" }
+      });
+    }
+  });
+
   it("does not register the public deterministic resolve-question route", async () => {
     const app = createApp({ database: workspaceProbeDb() });
     const response = await app.inject({

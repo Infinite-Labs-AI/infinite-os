@@ -6,6 +6,7 @@ import {
   createMetaAdSet,
   createMetaCampaign,
   createMetaCreative,
+  deleteMetaEntity,
   getMetaEntity,
   listMetaEntities,
   resolveMetaAdsCredential,
@@ -115,7 +116,8 @@ export function createActionHandlers(db: InfiniteOsDb): Partial<Record<InfiniteO
     create_meta_ad_set: (input, context) => createMetaAdSetHandler(db, context, input),
     create_meta_creative: (input, context) => createMetaCreativeHandler(db, context, input),
     create_meta_ad: (input, context) => createMetaAdHandler(db, context, input),
-    set_meta_entity_status: (input, context) => setMetaEntityStatusHandler(db, context, input)
+    set_meta_entity_status: (input, context) => setMetaEntityStatusHandler(db, context, input),
+    delete_meta_entity: (input, context) => deleteMetaEntityHandler(db, context, input)
   };
 }
 
@@ -1777,6 +1779,51 @@ async function setMetaEntityStatusHandler(
   );
 }
 
+// Destructive cleanup (DELETE /{id}). Operator-only + irreversible. Runs the
+// connector delete INLINE (the syncSourceNow pattern — NEVER db.createJob, so a
+// destructive write never touches the worker's retry machinery), and writes an
+// integration_audit_log row with the token redacted. The connector layer makes
+// the DELETE non-retryable; the CLI's destructive confirm gate lives above this
+// layer. Does NOT spend, so there is no dedup/activation bookkeeping.
+async function deleteMetaEntityHandler(
+  db: InfiniteOsDb,
+  context: SessionContext,
+  input: unknown
+): Promise<ActionEnvelope> {
+  const sourceId = requiredString(input, "sourceId");
+  const entityId = requiredString(input, "entityId");
+  // Optional entity-kind hint for the audit row only (the DELETE node call needs
+  // just the id). null when the caller did not supply it.
+  const entity = optionalString(input, "entity") ?? null;
+  const action: InfiniteOsActionId = "delete_meta_entity";
+  const credential = await resolveMetaCredentialForWrite(db, context, sourceId);
+  let result;
+  try {
+    result = await deleteMetaEntity(credential, entityId);
+  } catch (error) {
+    await metaAuditLog(db, context, sourceId, action, "failed", {
+      action,
+      entity,
+      entity_id: entityId,
+      error_code: metaErrorCode(error)
+    });
+    throw error;
+  }
+  await metaAuditLog(db, context, sourceId, action, "succeeded", {
+    action,
+    entity,
+    entity_id: entityId,
+    deleted: result.deleted
+  });
+  return envelope(
+    action,
+    context.authority,
+    { id: result.id, deleted: result.deleted, entity },
+    ["integration_audit_log"],
+    "ok"
+  );
+}
+
 // Reads — no money movement, no audit row, normal retryable taxonomy.
 async function listMetaEntitiesHandler(
   db: InfiniteOsDb,
@@ -1813,7 +1860,14 @@ async function getMetaEntityHandler(
   const entityId = requiredString(input, "entityId");
   const credential = await resolveMetaCredentialForWrite(db, context, sourceId);
   const fields = optionalString(input, "fields");
-  const entity = await getMetaEntity(credential, entityId, fields ? { fields } : {});
+  // FIX 1: thread the entity-kind hint so `get` requests the SAME full field set
+  // as `list` for the object type (campaign/adset/ad/creative) instead of
+  // degrading to Graph's id-only node. An explicit `fields` still overrides.
+  const entityKind = optionalString(input, "entity") as MetaWriteEntity | undefined;
+  const entity = await getMetaEntity(credential, entityId, {
+    ...(fields ? { fields } : {}),
+    ...(entityKind ? { entity: entityKind } : {})
+  });
   return envelope(
     "get_meta_entity",
     context.authority,
