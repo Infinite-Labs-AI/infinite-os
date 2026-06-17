@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { delimiter, join, resolve } from "node:path";
 import {
   decryptCredentialPayload,
   encryptCredentialPayload,
@@ -2876,16 +2876,25 @@ async function metaAdsMcpInsights(
 ): Promise<MetaAdsInsightsResponse> {
   const mcpCommand = requireCredential(credential, "mcpCommand");
   const mcpToolName = credential.mcpToolName ? String(credential.mcpToolName) : undefined;
-  const result = await callMcpToolOverStdio(mcpCommand, mcpToolName, {
-    ad_account_id: input.adAccountId,
-    level: input.level,
-    fields: input.fields.split(","),
-    limit: input.limit ? Number(input.limit) : undefined,
-    date_preset: input.datePreset,
-    time_increment: input.timeIncrement ? Number(input.timeIncrement) : undefined,
-    time_range: input.timeRange,
-    after: input.after
-  });
+  const accessToken = metaAdsCliAccessToken(credential);
+  const result = await callMcpToolOverStdio(
+    mcpCommand,
+    mcpToolName,
+    {
+      ad_account_id: input.adAccountId,
+      level: input.level,
+      fields: input.fields.split(","),
+      limit: input.limit ? Number(input.limit) : undefined,
+      date_preset: input.datePreset,
+      time_increment: input.timeIncrement ? Number(input.timeIncrement) : undefined,
+      time_range: input.timeRange,
+      after: input.after
+    },
+    {
+      AD_ACCOUNT_ID: metaAdsCliAccountId(credential),
+      ...(accessToken ? { ACCESS_TOKEN: accessToken } : {})
+    }
+  );
   return coerceMetaAdsInsightsResponse(result);
 }
 
@@ -2946,13 +2955,48 @@ function metaAdsCliAccountId(credential: MetaAdsCredential): string {
   return requireCredential(credential, "adAccountId").replace(/^act_/i, "");
 }
 
+// The `meta` CLI (and the MCP server) read the system-user token from the ACCESS_TOKEN
+// env var. Read it leniently from the already-decrypted credential: for transport
+// meta_ads_cli the connect flow marks accessToken NOT-required, so it can legitimately be
+// absent when the operator relies on the CLI's own ambient auth — in that case we leave the
+// inherited process.env.ACCESS_TOKEN untouched rather than hard-failing. NEVER log/echo this.
+function metaAdsCliAccessToken(credential: MetaAdsCredential): string | undefined {
+  const token = credential.accessToken;
+  return typeof token === "string" && token.trim() ? token : undefined;
+}
+
+// Best-effort preflight so a missing binary surfaces an actionable, non-retryable error
+// instead of the cryptic, retried-forever "failed to start" from the child 'error' handler.
+// Caveat: a PATH walk with existsSync does not verify the +x bit or resolve OS shims; it
+// catches the common "pip not run / not on PATH" case cheaply without an extra spawn.
+function ensureExecutableOnPath(executable: string, label: string): void {
+  const message = `${label}: "${executable}" was not found. Install Meta's Ads CLI: pip install meta-ads`;
+  if (executable.includes("/")) {
+    if (!existsSync(resolve(executable))) {
+      throw new ConnectorError("provider_auth_failed", message, false);
+    }
+    return;
+  }
+  const pathDirs = (process.env.PATH ?? "").split(delimiter).filter(Boolean);
+  if (pathDirs.some((dir) => existsSync(join(dir, executable)))) {
+    return;
+  }
+  throw new ConnectorError("provider_auth_failed", message, false);
+}
+
 async function callMcpToolOverStdio(
   command: string,
   toolName: string | undefined,
-  args: Record<string, unknown>
+  args: Record<string, unknown>,
+  env?: Record<string, string>
 ): Promise<unknown> {
   const { executable, args: commandArgs } = parseProcessCommand(command, "MCP command");
-  const child = spawn(executable, commandArgs, { stdio: ["pipe", "pipe", "pipe"], shell: false });
+  ensureExecutableOnPath(executable, "MCP command");
+  const child = spawn(executable, commandArgs, {
+    stdio: ["pipe", "pipe", "pipe"],
+    shell: false,
+    env: { ...process.env, ...(env ?? {}) }
+  });
   let nextId = 1;
   let stdoutBuffer = Buffer.alloc(0);
   let stderrBuffer = "";
@@ -3086,12 +3130,15 @@ async function callMetaAdsCliJson(credential: MetaAdsCredential, args: string[])
     typeof credential.cliCommand === "string" && credential.cliCommand.trim() ? credential.cliCommand : "meta",
     "Meta Ads CLI command"
   );
+  ensureExecutableOnPath(executable, "Meta Ads CLI command");
+  const accessToken = metaAdsCliAccessToken(credential);
   const child = spawn(executable, [...commandArgs, ...args], {
     stdio: ["ignore", "pipe", "pipe"],
     shell: false,
     env: {
       ...process.env,
-      AD_ACCOUNT_ID: metaAdsCliAccountId(credential)
+      AD_ACCOUNT_ID: metaAdsCliAccountId(credential),
+      ...(accessToken ? { ACCESS_TOKEN: accessToken } : {})
     }
   });
   let stdoutBuffer = "";
