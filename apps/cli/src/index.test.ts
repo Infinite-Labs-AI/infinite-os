@@ -87,6 +87,7 @@ import {
   navigateInputHistory,
   parsePersistentInputHistory,
   projectCommand,
+  metaCommand,
   renderProjectDeleteResult,
   requiresOperatorConfirmation,
   createLocalGa4OauthBootstrap,
@@ -11163,6 +11164,282 @@ describe("in-chat /connect meta_ads wizard — end-to-end dispatch (#2)", () => 
 
     expect(requests[1]?.body).toMatchObject({ mode: "backfill", backfillWindow: "all_time" });
     expect(requests[1]?.body).not.toHaveProperty("refreshWindowDays");
+  });
+});
+
+describe("meta command (CLI write surface + confirm gates)", () => {
+  // Capture every /tools/call so a test can assert a write either fired (with the
+  // right actionId/input + operator token) or — when the gate cancels/refuses —
+  // did NOT fire at all. The fake fetch returns a canned operator envelope.
+  function stubToolsApi(): {
+    calls: Array<{ url: string; method: string; auth?: string; body: Record<string, unknown> }>;
+  } {
+    const state: {
+      calls: Array<{ url: string; method: string; auth?: string; body: Record<string, unknown> }>;
+    } = { calls: [] };
+    globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+      const href = typeof url === "string" ? url : url.toString();
+      const headers = (init?.headers ?? {}) as Record<string, string>;
+      state.calls.push({
+        url: href,
+        method: (init?.method ?? "GET").toUpperCase(),
+        auth: headers.Authorization,
+        body: init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : {}
+      });
+      return new Response(
+        JSON.stringify({
+          ok: true,
+          actionId: "create_meta_campaign",
+          status: "ok",
+          authority: "operator",
+          data: { id: "120000000000000001", status: "PAUSED" }
+        }),
+        { status: 200 }
+      );
+    }) as typeof fetch;
+    return state;
+  }
+
+  function toolCalls(state: {
+    calls: Array<{ url: string; method: string; auth?: string; body: Record<string, unknown> }>;
+  }) {
+    return state.calls.filter((c) => c.url.includes("/tools/call"));
+  }
+
+  const ENV = {
+    GROWTH_OS_API_URL: "http://127.0.0.1:9999",
+    GROWTH_OS_OPERATOR_TOKEN: "operator-secret",
+    GROWTH_OS_WORKSPACE_ID: "proj_test",
+    GROWTH_OS_CLI_NONINTERACTIVE: "1"
+  } as never;
+
+  let originalFetch: typeof globalThis.fetch;
+  beforeEach(() => {
+    originalFetch = globalThis.fetch;
+  });
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  it("requiresOperatorConfirmation gates every meta verb (incl. activate)", () => {
+    expect(requiresOperatorConfirmation("meta campaign activate 123")).toBe(true);
+    expect(requiresOperatorConfirmation("meta campaign create --name X")).toBe(true);
+    expect(requiresOperatorConfirmation("meta campaign list")).toBe(true);
+    expect(requiresOperatorConfirmation("/meta adset pause 456")).toBe(true);
+    // A non-meta command is unaffected.
+    expect(requiresOperatorConfirmation("sources")).toBe(false);
+  });
+
+  it("reads (list/get) are ungated and route to /tools/call with the operator token", async () => {
+    const api = stubToolsApi();
+    const list = (await metaCommand(
+      ["campaign", "list", "--source-id", "src_meta", "-l", "5"],
+      ENV
+    )) as { ok: boolean };
+    expect(list.ok).toBe(true);
+    const call = toolCalls(api)[0];
+    expect(call?.body).toMatchObject({
+      actionId: "list_meta_entities",
+      input: { sourceId: "src_meta", entity: "campaign", limit: 5 }
+    });
+    // The operator token is attached by apiRequest (never echoed by metaCommand).
+    expect(call?.auth).toBe("Bearer operator-secret");
+
+    await metaCommand(["ad", "get", "120777", "--source-id", "src_meta"], ENV);
+    expect(toolCalls(api)[1]?.body).toMatchObject({
+      actionId: "get_meta_entity",
+      input: { sourceId: "src_meta", entityId: "120777" }
+    });
+  });
+
+  it("create --yes bypasses the confirm seam and POSTs create_meta_campaign", async () => {
+    const api = stubToolsApi();
+    const confirmMutation = vi.fn(async () => true);
+    await metaCommand(
+      ["campaign", "create", "--source-id", "src_meta", "--name", "Launch", "--objective", "OUTCOME_SALES", "--daily-budget", "5000", "--yes"],
+      ENV,
+      { confirmMutation }
+    );
+    expect(confirmMutation).not.toHaveBeenCalled();
+    const call = toolCalls(api)[0];
+    expect(call?.body).toMatchObject({
+      actionId: "create_meta_campaign",
+      input: { sourceId: "src_meta", name: "Launch", objective: "OUTCOME_SALES", dailyBudget: 5000 }
+    });
+    // No --status: the input never carries a caller status (create is always PAUSED).
+    expect((call?.body.input as Record<string, unknown>).status).toBeUndefined();
+  });
+
+  it("create -y short flag also bypasses the confirm seam", async () => {
+    const api = stubToolsApi();
+    const confirmMutation = vi.fn(async () => true);
+    await metaCommand(
+      ["adset", "create", "120555", "--source-id", "src_meta", "--name", "AS", "--optimization-goal", "OFFSITE_CONVERSIONS", "--billing-event", "IMPRESSIONS", "-y"],
+      ENV,
+      { confirmMutation }
+    );
+    expect(confirmMutation).not.toHaveBeenCalled();
+    expect(toolCalls(api)[0]?.body).toMatchObject({
+      actionId: "create_meta_ad_set",
+      input: { campaignId: "120555", optimizationGoal: "OFFSITE_CONVERSIONS", billingEvent: "IMPRESSIONS" }
+    });
+  });
+
+  it("create without --yes: a NO returns cancelled and issues NO /tools/call", async () => {
+    const api = stubToolsApi();
+    const confirmMutation = vi.fn(async () => false);
+    const result = (await metaCommand(
+      ["campaign", "create", "--source-id", "src_meta", "--name", "Launch", "--objective", "OUTCOME_SALES"],
+      ENV,
+      { confirmMutation }
+    )) as { ok: boolean; cancelled?: boolean; section?: string };
+    expect(confirmMutation).toHaveBeenCalledTimes(1);
+    expect(result.ok).toBe(false);
+    expect(result.cancelled).toBe(true);
+    expect(result.section).toBe("meta_campaign_create");
+    expect(toolCalls(api).length).toBe(0);
+  });
+
+  it("create in non-interactive mode without --yes hard-refuses (no /tools/call)", async () => {
+    const api = stubToolsApi();
+    await expect(
+      metaCommand(
+        ["campaign", "create", "--source-id", "src_meta", "--name", "Launch", "--objective", "OUTCOME_SALES"],
+        ENV,
+        {}
+      )
+    ).rejects.toThrow(/Refusing to create campaign without confirmation/);
+    expect(toolCalls(api).length).toBe(0);
+  });
+
+  it("the budget confirmation summary surfaces the ad-account currency seam", async () => {
+    stubToolsApi();
+    let seenSummary = "";
+    const confirmMutation = vi.fn(async (details: { summary: string }) => {
+      seenSummary = details.summary;
+      return true;
+    });
+    await metaCommand(
+      ["campaign", "create", "--source-id", "src_meta", "--name", "Launch", "--objective", "OUTCOME_SALES", "--daily-budget", "5000"],
+      // Force the interactive seam path by clearing the non-interactive marker.
+      { ...(ENV as Record<string, string>), GROWTH_OS_CLI_NONINTERACTIVE: "0" } as never,
+      { confirmMutation, adAccountCurrency: "USD" }
+    );
+    expect(seenSummary).toContain("daily budget 5000 cents USD");
+    expect(seenSummary).toContain("lands PAUSED");
+  });
+
+  it("activate without --yes: a WRONG typed value cancels and issues NO /tools/call", async () => {
+    const api = stubToolsApi();
+    const confirmActivate = vi.fn(async () => "nope");
+    const result = (await metaCommand(
+      ["campaign", "activate", "120000000000000001", "--source-id", "src_meta"],
+      ENV,
+      { confirmActivate }
+    )) as { ok: boolean; cancelled?: boolean; reason?: string };
+    expect(confirmActivate).toHaveBeenCalledTimes(1);
+    expect(result.ok).toBe(false);
+    expect(result.cancelled).toBe(true);
+    expect(result.reason).toBe("typed_confirmation_mismatch");
+    expect(toolCalls(api).length).toBe(0);
+  });
+
+  it("activate with the CORRECT typed id fires set_meta_entity_status ACTIVE", async () => {
+    const api = stubToolsApi();
+    const confirmActivate = vi.fn(async () => "120000000000000001");
+    await metaCommand(
+      ["campaign", "activate", "120000000000000001", "--source-id", "src_meta"],
+      ENV,
+      { confirmActivate }
+    );
+    expect(toolCalls(api)[0]?.body).toMatchObject({
+      actionId: "set_meta_entity_status",
+      input: { sourceId: "src_meta", entityId: "120000000000000001", status: "ACTIVE" }
+    });
+  });
+
+  it("activate accepts the literal word \"activate\" as typed confirmation", async () => {
+    const api = stubToolsApi();
+    const confirmActivate = vi.fn(async () => "activate");
+    await metaCommand(
+      ["adset", "activate", "120000000000000002", "--source-id", "src_meta"],
+      ENV,
+      { confirmActivate }
+    );
+    expect(toolCalls(api)[0]?.body).toMatchObject({
+      actionId: "set_meta_entity_status",
+      input: { entityId: "120000000000000002", status: "ACTIVE" }
+    });
+  });
+
+  it("activate in non-interactive mode without --yes throws (never silently goes live)", async () => {
+    const api = stubToolsApi();
+    await expect(
+      metaCommand(["campaign", "activate", "120000000000000001", "--source-id", "src_meta"], ENV, {})
+    ).rejects.toThrow(/Refusing to activate campaign 120000000000000001 without confirmation/);
+    expect(toolCalls(api).length).toBe(0);
+  });
+
+  it("activate --yes bypasses the typed-confirm and fires ACTIVE", async () => {
+    const api = stubToolsApi();
+    const confirmActivate = vi.fn(async () => "wrong");
+    await metaCommand(
+      ["ad", "activate", "120000000000000003", "--source-id", "src_meta", "--yes"],
+      ENV,
+      { confirmActivate }
+    );
+    // --yes skips the typed-confirm seam entirely.
+    expect(confirmActivate).not.toHaveBeenCalled();
+    expect(toolCalls(api)[0]?.body).toMatchObject({
+      actionId: "set_meta_entity_status",
+      input: { entityId: "120000000000000003", status: "ACTIVE" }
+    });
+  });
+
+  it("pause goes through the standard write gate (NO cancels, no /tools/call)", async () => {
+    const api = stubToolsApi();
+    const confirmMutation = vi.fn(async () => false);
+    const result = (await metaCommand(
+      ["campaign", "pause", "120000000000000001", "--source-id", "src_meta"],
+      ENV,
+      { confirmMutation }
+    )) as { ok: boolean; cancelled?: boolean };
+    expect(result.cancelled).toBe(true);
+    expect(toolCalls(api).length).toBe(0);
+  });
+
+  it("creative has no activate transition", async () => {
+    await expect(
+      metaCommand(["creative", "activate", "120000000000000009", "--source-id", "src_meta"], ENV, {})
+    ).rejects.toThrow(/creatives never go live/);
+  });
+
+  it("--json prints the raw {ok,...} envelope through runCli", async () => {
+    stubToolsApi();
+    const writes: string[] = [];
+    const writeSpy = vi.spyOn(process.stdout, "write").mockImplementation((chunk: string | Uint8Array) => {
+      writes.push(String(chunk));
+      return true;
+    });
+    try {
+      await runCli(
+        ["meta", "campaign", "create", "--source-id", "src_meta", "--name", "Launch", "--objective", "OUTCOME_SALES", "--yes", "--json"],
+        ENV
+      );
+      const parsed = JSON.parse(writes.join(""));
+      expect(parsed).toMatchObject({
+        ok: true,
+        actionId: "create_meta_campaign",
+        status: "ok",
+        authority: "operator"
+      });
+    } finally {
+      writeSpy.mockRestore();
+    }
+  });
+
+  it("requires --source-id for every verb", async () => {
+    await expect(metaCommand(["campaign", "list"], ENV, {})).rejects.toThrow(/--source-id/);
   });
 });
 

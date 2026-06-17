@@ -490,6 +490,30 @@ export function createApp(options: {
     }
   );
 
+  // Meta Ads WRITE/management — operator-only money mutations. Each route mirrors
+  // `/sources/:id/sync`: it goes through `guardedAction`, which denies non-operator
+  // authority with 403 (a tool_agent/LLM session can NEVER fire a Meta write). The
+  // create actions ALWAYS land PAUSED in the handler; `set_meta_entity_status` is
+  // the separate, gated go-live transition. The `/tools/call` route already exposes
+  // these same action ids; these named routes are the explicit, mirrored surface.
+  const META_WRITE_ROUTES: Array<{ path: string; actionId: string }> = [
+    { path: "/meta/campaigns", actionId: "create_meta_campaign" },
+    { path: "/meta/adsets", actionId: "create_meta_ad_set" },
+    { path: "/meta/creatives", actionId: "create_meta_creative" },
+    { path: "/meta/ads", actionId: "create_meta_ad" },
+    { path: "/meta/status", actionId: "set_meta_entity_status" }
+  ];
+  for (const { path, actionId } of META_WRITE_ROUTES) {
+    app.post<{ Body: Record<string, unknown> }>(path, async (request, reply) => {
+      const ws = request.auth.workspaceId;
+      if (!ws) {
+        reply.code(400);
+        return { ok: false, error: { code: "unknown_workspace" } };
+      }
+      return guardedAction(reply, request.auth.authority, actionId, request.body ?? {}, "api", ws);
+    });
+  }
+
   app.get("/chat/sessions", async (request, reply) => {
     if (!sessionStore) {
       return { ok: true, sessions: [] };

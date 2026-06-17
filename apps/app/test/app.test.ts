@@ -86,6 +86,24 @@ describe("Infinite OS app-hosted API/MCP skeleton", () => {
     });
   });
 
+  it("denies a tool_agent (read token) Meta write route with 403", async () => {
+    const app = createApp({ database: workspaceProbeDb() });
+    // Each Meta write route is operator-only; a read token resolves to tool_agent.
+    const routes = ["/meta/campaigns", "/meta/adsets", "/meta/creatives", "/meta/ads", "/meta/status"];
+    for (const url of routes) {
+      const response = await app.inject({
+        method: "POST",
+        url,
+        headers: { authorization: `Bearer ${READ_TOKEN}`, "x-growth-os-workspace": WORKSPACE },
+        payload: { sourceId: "src_meta", name: "X", objective: "OUTCOME_SALES" }
+      });
+      expect(response.statusCode, `${url} should 403 for tool_agent`).toBe(403);
+      expect(response.json()).toMatchObject({
+        error: { code: "operator_authority_required" }
+      });
+    }
+  });
+
   it("does not register the public deterministic resolve-question route", async () => {
     const app = createApp({ database: workspaceProbeDb() });
     const response = await app.inject({
