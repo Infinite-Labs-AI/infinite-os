@@ -8,9 +8,20 @@ import { type InfiniteOsDb } from "@infinite-os/db";
 import {
   connectorFor,
   connectorProviderForSetupProvider,
+  createMetaAd,
+  createMetaAdSet,
+  createMetaCampaign,
+  createMetaCreative,
+  findMetaDedupHit,
   ga4ConnectSourceFromSetup,
+  getMetaEntity,
+  listMetaEntities,
+  metaDedupKey,
   posthogConnectSourceFromSetup,
-  xConnectSourceFromSetup
+  setMetaEntityStatus,
+  xConnectSourceFromSetup,
+  type MetaAdsCredential,
+  type MetaDedupRecord
 } from "./index.js";
 
 const TEST_ENCRYPTION_KEY = "connector-test-encryption-key";
@@ -1964,6 +1975,435 @@ describe("oauth_token_id dual-read", () => {
       ).resolves.toMatchObject({ ok: true, mode: "live", accountExternalId: "99" });
       expect(queries.some((sql) => sql.includes("oauth_tokens"))).toBe(false);
     });
+  });
+});
+
+// ── Meta Ads WRITE / management (PR #3 STAGE 1 — money-safety core) ───────────
+describe("Meta Ads WRITE helpers", () => {
+  const metaWriteCredential: MetaAdsCredential = {
+    mode: "live",
+    transport: "marketing_api",
+    adAccountId: "1234567890",
+    accessToken: "meta-write-token",
+    apiVersion: "v25.0"
+  };
+
+  interface CapturedWrite {
+    url: string;
+    method: string | undefined;
+    authorization: string | null;
+    body: Record<string, unknown> | null;
+  }
+
+  function captureWrites(
+    responder: (capture: CapturedWrite) => Response | Promise<Response>,
+    fn: (captured: CapturedWrite[]) => Promise<void>
+  ) {
+    const captured: CapturedWrite[] = [];
+    return withMockFetch(
+      (url, init) => {
+        let body: Record<string, unknown> | null = null;
+        if (typeof init.body === "string") {
+          try {
+            body = JSON.parse(init.body) as Record<string, unknown>;
+          } catch {
+            body = null;
+          }
+        }
+        const capture: CapturedWrite = {
+          url,
+          method: init.method,
+          authorization: headerValue(init.headers, "Authorization"),
+          body
+        };
+        captured.push(capture);
+        return responder(capture);
+      },
+      () => fn(captured)
+    );
+  }
+
+  it("POSTs to the correct edge per object with the bearer header and never the token in the URL", async () => {
+    // Campaign → /campaigns
+    await captureWrites(
+      () => jsonResponse({ id: "120000000000001", status: "PAUSED" }),
+      async (captured) => {
+        const result = await createMetaCampaign(metaWriteCredential, {
+          name: "Launch",
+          objective: "OUTCOME_TRAFFIC"
+        });
+        expect(result).toEqual({ ok: true, id: "120000000000001", status: "PAUSED" });
+        expect(captured[0].url).toBe("https://graph.facebook.com/v25.0/act_1234567890/campaigns");
+        expect(captured[0].method).toBe("POST");
+        expect(captured[0].authorization).toBe("Bearer meta-write-token");
+        expect(captured[0].url).not.toContain("access_token");
+        expect(captured[0].url).not.toContain("meta-write-token");
+      }
+    );
+
+    // Ad set → /adsets
+    await captureWrites(
+      () => jsonResponse({ id: "120000000000002", status: "PAUSED" }),
+      async (captured) => {
+        await createMetaAdSet(metaWriteCredential, {
+          name: "AdSet",
+          campaignId: "120000000000001",
+          optimizationGoal: "LINK_CLICKS",
+          billingEvent: "IMPRESSIONS"
+        });
+        expect(captured[0].url).toBe("https://graph.facebook.com/v25.0/act_1234567890/adsets");
+      }
+    );
+
+    // Creative → /adcreatives
+    await captureWrites(
+      () => jsonResponse({ id: "120000000000003" }),
+      async (captured) => {
+        await createMetaCreative(metaWriteCredential, {
+          name: "Creative",
+          pageId: "page_1",
+          imageHash: "hash_abc"
+        });
+        expect(captured[0].url).toBe("https://graph.facebook.com/v25.0/act_1234567890/adcreatives");
+      }
+    );
+
+    // Ad → /ads
+    await captureWrites(
+      () => jsonResponse({ id: "120000000000004", status: "PAUSED" }),
+      async (captured) => {
+        await createMetaAd(metaWriteCredential, {
+          name: "Ad",
+          adsetId: "120000000000002",
+          creativeId: "120000000000003"
+        });
+        expect(captured[0].url).toBe("https://graph.facebook.com/v25.0/act_1234567890/ads");
+      }
+    );
+  });
+
+  it("sends the documented Graph payload shapes for each create", async () => {
+    await captureWrites(
+      () => jsonResponse({ id: "c1", status: "PAUSED" }),
+      async (captured) => {
+        await createMetaCampaign(metaWriteCredential, {
+          name: "Launch",
+          objective: "OUTCOME_SALES",
+          dailyBudget: 5000
+        });
+        expect(captured[0].body).toEqual({
+          name: "Launch",
+          objective: "OUTCOME_SALES",
+          status: "PAUSED",
+          special_ad_categories: [],
+          daily_budget: 5000
+        });
+      }
+    );
+
+    await captureWrites(
+      () => jsonResponse({ id: "as1", status: "PAUSED" }),
+      async (captured) => {
+        await createMetaAdSet(metaWriteCredential, {
+          name: "AdSet",
+          campaignId: "c1",
+          optimizationGoal: "OFFSITE_CONVERSIONS",
+          billingEvent: "IMPRESSIONS",
+          dailyBudget: 2500,
+          targetingCountries: ["US", "CA"],
+          pixelId: "px_1"
+        });
+        expect(captured[0].body).toEqual({
+          name: "AdSet",
+          campaign_id: "c1",
+          optimization_goal: "OFFSITE_CONVERSIONS",
+          billing_event: "IMPRESSIONS",
+          status: "PAUSED",
+          daily_budget: 2500,
+          targeting: { geo_locations: { countries: ["US", "CA"] } },
+          promoted_object: { pixel_id: "px_1", custom_event_type: "PURCHASE" }
+        });
+      }
+    );
+
+    // Link creative → object_story_spec.link_data (headline key is "name").
+    await captureWrites(
+      () => jsonResponse({ id: "cr1" }),
+      async (captured) => {
+        await createMetaCreative(metaWriteCredential, {
+          name: "LinkCreative",
+          pageId: "page_1",
+          imageHash: "hash_abc",
+          linkUrl: "https://example.com",
+          body: "50% off everything!",
+          title: "Shop Now",
+          description: "Limited time offer",
+          callToAction: "SHOP_NOW"
+        });
+        expect(captured[0].body).toEqual({
+          name: "LinkCreative",
+          object_story_spec: {
+            page_id: "page_1",
+            link_data: {
+              link: "https://example.com",
+              image_hash: "hash_abc",
+              message: "50% off everything!",
+              name: "Shop Now",
+              description: "Limited time offer",
+              call_to_action: { type: "SHOP_NOW", value: { link: "https://example.com" } }
+            }
+          }
+        });
+      }
+    );
+
+    // Photo creative (no link) → object_story_spec.photo_data, --body → caption.
+    await captureWrites(
+      () => jsonResponse({ id: "cr2" }),
+      async (captured) => {
+        await createMetaCreative(metaWriteCredential, {
+          name: "PhotoCreative",
+          pageId: "page_1",
+          imageHash: "hash_xyz",
+          body: "Check out our latest product!"
+        });
+        expect(captured[0].body).toEqual({
+          name: "PhotoCreative",
+          object_story_spec: {
+            page_id: "page_1",
+            photo_data: { image_hash: "hash_xyz", caption: "Check out our latest product!" }
+          }
+        });
+      }
+    );
+
+    await captureWrites(
+      () => jsonResponse({ id: "ad1", status: "PAUSED" }),
+      async (captured) => {
+        await createMetaAd(metaWriteCredential, {
+          name: "Ad",
+          adsetId: "as1",
+          creativeId: "cr1"
+        });
+        expect(captured[0].body).toEqual({
+          name: "Ad",
+          adset_id: "as1",
+          creative: { creative_id: "cr1" },
+          status: "PAUSED"
+        });
+      }
+    );
+  });
+
+  describe("money-safety: create never yields ACTIVE", () => {
+    it("hard-codes PAUSED in the body and ignores any caller-supplied status", async () => {
+      await captureWrites(
+        () => jsonResponse({ id: "c1", status: "PAUSED" }),
+        async (captured) => {
+          // Sneak an ACTIVE status in via the loose credential index signature /
+          // an extra input field — the helper must drop it and send PAUSED.
+          await createMetaCampaign(metaWriteCredential, {
+            name: "Sneaky",
+            objective: "OUTCOME_TRAFFIC",
+            status: "ACTIVE"
+          } as Parameters<typeof createMetaCampaign>[1]);
+          expect(captured[0].body?.status).toBe("PAUSED");
+          expect(JSON.stringify(captured[0].body)).not.toContain("ACTIVE");
+        }
+      );
+    });
+
+    it("errors (and reports a money-safety violation) when Graph echoes ACTIVE on a create", async () => {
+      await captureWrites(
+        () => jsonResponse({ id: "c1", status: "ACTIVE" }),
+        async () => {
+          await expect(
+            createMetaCampaign(metaWriteCredential, { name: "X", objective: "OUTCOME_TRAFFIC" })
+          ).rejects.toMatchObject({ code: "money_safety_violation", retryable: false });
+        }
+      );
+    });
+
+    it("accepts a create that echoes no status (treated as PAUSED)", async () => {
+      await captureWrites(
+        () => jsonResponse({ id: "c1" }),
+        async () => {
+          await expect(
+            createMetaCampaign(metaWriteCredential, { name: "X", objective: "OUTCOME_TRAFFIC" })
+          ).resolves.toMatchObject({ ok: true, id: "c1", status: null });
+        }
+      );
+    });
+  });
+
+  describe("status transitions (activate / pause)", () => {
+    it("activate POSTs status:ACTIVE to the entity NODE (not an act_ edge)", async () => {
+      await captureWrites(
+        () => jsonResponse({ success: true }),
+        async (captured) => {
+          const result = await setMetaEntityStatus(metaWriteCredential, "120000000000001", "ACTIVE");
+          expect(result).toEqual({ ok: true, id: "120000000000001", status: "ACTIVE" });
+          expect(captured[0].url).toBe("https://graph.facebook.com/v25.0/120000000000001");
+          expect(captured[0].method).toBe("POST");
+          expect(captured[0].body).toEqual({ status: "ACTIVE" });
+          expect(captured[0].authorization).toBe("Bearer meta-write-token");
+        }
+      );
+    });
+
+    it("pause POSTs status:PAUSED to the entity NODE", async () => {
+      await captureWrites(
+        () => jsonResponse({ success: true }),
+        async (captured) => {
+          const result = await setMetaEntityStatus(metaWriteCredential, "120000000000002", "PAUSED");
+          expect(result).toEqual({ ok: true, id: "120000000000002", status: "PAUSED" });
+          expect(captured[0].body).toEqual({ status: "PAUSED" });
+        }
+      );
+    });
+  });
+
+  describe("writes are NON-retryable for ALL status codes", () => {
+    for (const status of [500, 429, 503, 400] as const) {
+      it(`marks a create failure (${status}) as retryable:false`, async () => {
+        await captureWrites(
+          () => new Response("{\"error\":{\"message\":\"boom\"}}", { status }),
+          async () => {
+            await expect(
+              createMetaCampaign(metaWriteCredential, { name: "X", objective: "OUTCOME_TRAFFIC" })
+            ).rejects.toMatchObject({ retryable: false });
+          }
+        );
+      });
+
+      it(`marks an activate failure (${status}) as retryable:false`, async () => {
+        await captureWrites(
+          () => new Response("{\"error\":{\"message\":\"boom\"}}", { status }),
+          async () => {
+            await expect(
+              setMetaEntityStatus(metaWriteCredential, "120000000000001", "ACTIVE")
+            ).rejects.toMatchObject({ retryable: false });
+          }
+        );
+      });
+    }
+
+    it("marks a network failure on a write as retryable:false", async () => {
+      await withMockFetch(
+        () => {
+          throw new Error("ECONNRESET");
+        },
+        async () => {
+          await expect(
+            createMetaCampaign(metaWriteCredential, { name: "X", objective: "OUTCOME_TRAFFIC" })
+          ).rejects.toMatchObject({ retryable: false, code: "provider_api_error" });
+        }
+      );
+    });
+  });
+
+  describe("reads (list/get) keep the normal retryable taxonomy", () => {
+    it("lists campaigns via GET with default fields and the bearer header", async () => {
+      await captureWrites(
+        () => jsonResponse({ data: [{ id: "c1", name: "Launch", status: "PAUSED" }] }),
+        async (captured) => {
+          const rows = await listMetaEntities(metaWriteCredential, "campaign", { limit: 10 });
+          expect(rows).toEqual([{ id: "c1", name: "Launch", status: "PAUSED" }]);
+          expect(captured[0].method).toBe("GET");
+          expect(captured[0].url).toContain("https://graph.facebook.com/v25.0/act_1234567890/campaigns");
+          expect(captured[0].url).toContain("limit=10");
+          expect(captured[0].url).toContain("fields=");
+          expect(captured[0].authorization).toBe("Bearer meta-write-token");
+          expect(captured[0].url).not.toContain("meta-write-token");
+        }
+      );
+    });
+
+    it("gets a single entity by node id", async () => {
+      await captureWrites(
+        () => jsonResponse({ id: "c1", name: "Launch" }),
+        async (captured) => {
+          const entity = await getMetaEntity(metaWriteCredential, "c1", { fields: "id,name,status" });
+          expect(entity).toEqual({ id: "c1", name: "Launch" });
+          expect(captured[0].method).toBe("GET");
+          expect(captured[0].url).toContain("https://graph.facebook.com/v25.0/c1");
+        }
+      );
+    });
+
+    it("surfaces a 429 on a READ as retryable:true (normal taxonomy)", async () => {
+      await captureWrites(
+        () => new Response("{}", { status: 429 }),
+        async () => {
+          await expect(listMetaEntities(metaWriteCredential, "campaign")).rejects.toMatchObject({
+            retryable: true,
+            code: "provider_rate_limited"
+          });
+        }
+      );
+    });
+  });
+
+  describe("CLI/MCP write transports are refused (non-retryable)", () => {
+    it("refuses a write when transport is meta_ads_cli", async () => {
+      await withMockFetch(
+        () => jsonResponse({ id: "should-not-happen" }),
+        async () => {
+          await expect(
+            createMetaCampaign(
+              { ...metaWriteCredential, transport: "meta_ads_cli" },
+              { name: "X", objective: "OUTCOME_TRAFFIC" }
+            )
+          ).rejects.toMatchObject({ code: "provider_unsupported", retryable: false });
+        }
+      );
+    });
+  });
+
+  describe("dedup helper", () => {
+    it("derives a stable composite key", () => {
+      expect(metaDedupKey("ws_1", "src_1", "tok_1")).toBe("ws_1::src_1::tok_1");
+    });
+
+    it("returns the existing entity id when the client token already exists", () => {
+      const existing: MetaDedupRecord[] = [
+        { clientToken: "tok_a", entityId: "c_a" },
+        { clientToken: "tok_b", entityId: "c_b" }
+      ];
+      expect(findMetaDedupHit(existing, "tok_b")).toBe("c_b");
+    });
+
+    it("returns undefined for an unseen token or when no token is supplied", () => {
+      const existing: MetaDedupRecord[] = [{ clientToken: "tok_a", entityId: "c_a" }];
+      expect(findMetaDedupHit(existing, "tok_z")).toBeUndefined();
+      expect(findMetaDedupHit(existing, undefined)).toBeUndefined();
+    });
+  });
+
+  it("requires an image_hash for a STANDARD creative (upload happens first)", async () => {
+    await withMockFetch(
+      () => jsonResponse({ id: "should-not-happen" }),
+      async () => {
+        await expect(
+          createMetaCreative(metaWriteCredential, { name: "NoImage", pageId: "page_1" })
+        ).rejects.toMatchObject({ code: "provider_api_error", retryable: false });
+      }
+    );
+  });
+
+  it("rejects non-integer / negative budgets before POSTing", async () => {
+    await withMockFetch(
+      () => jsonResponse({ id: "should-not-happen" }),
+      async () => {
+        await expect(
+          createMetaCampaign(metaWriteCredential, {
+            name: "BadBudget",
+            objective: "OUTCOME_TRAFFIC",
+            dailyBudget: 12.5
+          })
+        ).rejects.toMatchObject({ retryable: false });
+      }
+    );
   });
 });
 
