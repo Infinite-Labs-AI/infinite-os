@@ -3625,6 +3625,65 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
     );
   });
 
+  // FIX 1 (downstream): get_meta_entity threads the entity-kind hint so the
+  // connector requests the SAME full field set as `list` for that object type,
+  // instead of degrading to Graph's id-only node. Revert-proof: dropping the
+  // `entity` pass-through in the handler reverts the request to the campaign
+  // default and fails the adset assertion below.
+  it("get_meta_entity threads the entity kind so it requests the full per-type field set", async () => {
+    const audits: AuditRow[] = [];
+    const db = metaWriteTestDb({ audits });
+    await withGraph(
+      () =>
+        jsonResponse({
+          id: "as_1",
+          name: "AS",
+          status: "PAUSED",
+          campaign_id: "cmp_1",
+          optimization_goal: "OFFSITE_CONVERSIONS",
+          billing_event: "IMPRESSIONS",
+          effective_status: "PAUSED"
+        }),
+      async (calls) => {
+        const handlers = createActionHandlers(db);
+        const result = await handlers.get_meta_entity?.(
+          { sourceId: "src_meta", entityId: "as_1", entity: "adset" },
+          { ...operatorContext, authority: "tool_agent" }
+        );
+        expect(calls[0].method).toBe("GET");
+        const url = new URL(calls[0].url);
+        expect(url.pathname.endsWith("/as_1")).toBe(true);
+        // The adset default field set (NOT the campaign default) is requested.
+        expect(url.searchParams.get("fields")).toBe(
+          "id,name,status,campaign_id,optimization_goal,billing_event,effective_status"
+        );
+        // The full node — not just {id} — flows back through the envelope.
+        expect(result?.data).toMatchObject({
+          id: "as_1",
+          entity: { id: "as_1", name: "AS", campaign_id: "cmp_1" }
+        });
+        // Reads do not write an audit row.
+        expect(audits).toHaveLength(0);
+      }
+    );
+  });
+
+  it("get_meta_entity honors an explicit fields override", async () => {
+    const audits: AuditRow[] = [];
+    const db = metaWriteTestDb({ audits });
+    await withGraph(
+      () => jsonResponse({ id: "cmp_1", name: "C" }),
+      async (calls) => {
+        const handlers = createActionHandlers(db);
+        await handlers.get_meta_entity?.(
+          { sourceId: "src_meta", entityId: "cmp_1", entity: "campaign", fields: "id,name" },
+          { ...operatorContext, authority: "tool_agent" }
+        );
+        expect(new URL(calls[0].url).searchParams.get("fields")).toBe("id,name");
+      }
+    );
+  });
+
   it("refuses a non-Meta source before touching the Graph API", async () => {
     const audits: AuditRow[] = [];
     const db: InfiniteOsDb = {

@@ -841,7 +841,21 @@ function inputSchemaFor(id: InfiniteOsActionId): Record<string, unknown> {
       },
       ["provider"]
     ),
-    reconnect_source: requiredObject({ sourceId: { type: "string" } }),
+    reconnect_source: requiredObject(
+      {
+        sourceId: { type: "string" },
+        // FIX 3: reconnect accepts a FRESH credential so the handler replaces the
+        // stored (possibly dead) token and tests with the NEW one — it never
+        // re-authenticates with the old token. When omitted, the handler falls
+        // back to re-testing the stored credential (legacy refresh-only path).
+        connectionName: { type: "string" },
+        credentialKind: { type: "string" },
+        credentialPayload: { type: "object", additionalProperties: true },
+        encryptedPayload: { type: "string" },
+        oauthTokenId: { type: "string" }
+      },
+      ["sourceId"]
+    ),
     revoke_source: requiredObject({ sourceId: { type: "string" } }),
     start_source_sync: requiredObject(
       {
@@ -1014,6 +1028,10 @@ function inputSchemaFor(id: InfiniteOsActionId): Record<string, unknown> {
       {
         sourceId: { type: "string" },
         entityId: { type: "string" },
+        // Optional entity-kind hint. Selects the canonical default field set so a
+        // `get` mirrors `list` (campaign/adset/ad/creative) instead of degrading
+        // to Graph's id-only response. An explicit `fields` still overrides.
+        entity: { enum: ["campaign", "adset", "ad", "creative"] },
         fields: { type: "string" }
       },
       ["sourceId", "entityId"]

@@ -1860,7 +1860,14 @@ async function getMetaEntityHandler(
   const entityId = requiredString(input, "entityId");
   const credential = await resolveMetaCredentialForWrite(db, context, sourceId);
   const fields = optionalString(input, "fields");
-  const entity = await getMetaEntity(credential, entityId, fields ? { fields } : {});
+  // FIX 1: thread the entity-kind hint so `get` requests the SAME full field set
+  // as `list` for the object type (campaign/adset/ad/creative) instead of
+  // degrading to Graph's id-only node. An explicit `fields` still overrides.
+  const entityKind = optionalString(input, "entity") as MetaWriteEntity | undefined;
+  const entity = await getMetaEntity(credential, entityId, {
+    ...(fields ? { fields } : {}),
+    ...(entityKind ? { entity: entityKind } : {})
+  });
   return envelope(
     "get_meta_entity",
     context.authority,
