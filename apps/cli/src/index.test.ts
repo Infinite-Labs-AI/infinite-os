@@ -10146,9 +10146,24 @@ describe("@name project pin (PR4)", () => {
       expect(result.remainder).toBe("how many views");
     });
 
-    it("normalizes slugs by lowercasing and stripping whitespace", () => {
+    it("resolves @name when trailing punctuation is glued on with no space (e.g. '@rtk?')", () => {
+      // Real chat input from a user typing a natural question: the "?" jammed
+      // against "@rtk" must NOT break the match (regression for #17).
+      const result = resolveProjectPin("how many views did i get in @rtk?");
+      expect(result.status).toBe("switched");
+      expect(result.project?.id).toBe("proj_aaaaaaaaaaaaaaaa");
+    });
+
+    it("strips trailing punctuation from the slug so @name. / @name, / @name) resolve", () => {
+      expect(resolveProjectPin("@rtk.").project?.id).toBe("proj_aaaaaaaaaaaaaaaa");
+      expect(resolveProjectPin("revenue @rtk, please").project?.id).toBe("proj_aaaaaaaaaaaaaaaa");
+      expect(resolveProjectPin("@rtk)").project?.id).toBe("proj_aaaaaaaaaaaaaaaa");
+    });
+
+    it("normalizes slugs by lowercasing and stripping whitespace + punctuation", () => {
       expect(normalizeProjectSlug("Acme Co")).toBe("acmeco");
       expect(normalizeProjectSlug("  RTK ")).toBe("rtk");
+      expect(normalizeProjectSlug("rtk?")).toBe("rtk");
     });
   });
 

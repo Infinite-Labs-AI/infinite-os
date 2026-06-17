@@ -943,9 +943,12 @@ async function loadProjectListCache(env: CliEnv): Promise<void> {
 }
 
 // Normalize a project name / `@token` for case-insensitive matching: lowercase
-// and strip all whitespace (so `Acme Co` matches `@acmeco`).
+// and strip everything that isn't a letter or digit (so `Acme Co` matches
+// `@acmeco`, AND natural-question punctuation glued onto a mention — `@rtk?`,
+// `@rtk.`, `@rtk,` — doesn't break the match, since `@(\S+)` captures the
+// trailing char when there's no space after the mention).
 export function normalizeProjectSlug(value: string): string {
-  return value.toLowerCase().replace(/\s+/g, "");
+  return value.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
 }
 
 // First `@<token>` anywhere in the line (the token runs to the next whitespace).
