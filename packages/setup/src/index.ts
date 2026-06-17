@@ -13,6 +13,7 @@ export * from "./providers/posthog.js";
 export * from "./providers/x.js";
 export * from "./setup-controller.js";
 export * from "./onboarding-controller.js";
+export * from "./provider-guidance.js";
 export * from "./confirmations.js";
 export * from "./install-command.js";
 export * from "./setup-run-store.js";

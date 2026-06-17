@@ -22,6 +22,8 @@ Pure-TypeScript **pnpm-workspace monorepo**, Node ≥ 20:
 | `packages/*` | the engine (`db`, `core`, `config`, `connectors`, `runtime`, `metadata`, `analytical-engine`, `setup`, `llm-controller`, `instrument`) |
 | `ui-tui/` | terminal UI (Ink) renderer |
 
+> **`packages/instrument` is the published npm package [`infinite-tag`](https://www.npmjs.com/package/infinite-tag)** (NOT private). It's the founder-run installer that adds the GA4 / PostHog / X tracking tags into the *user's own website repo* (via `npx infinite-tag install` — public keys only, idempotent, reversible). `infinite setup` prints a pre-filled `npx infinite-tag install …` after analytics connect; GA4 also auto-installs it in-process (`packages/setup/src/provisioner.ts` → `import("infinite-tag")`). Don't reinvent tag-install logic — it lives here and is published via `.github/workflows/publish.yml`.
+
 ## The shipping workflow
 
 `main` is protected: **no direct pushes, squash-merge only, CI (`ci`) must be green.**

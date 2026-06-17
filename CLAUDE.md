@@ -14,3 +14,4 @@ Claude Code specifics:
 - Keep authoring and review in **separate passes** — don't self-approve your own diff;
   have a fresh reviewer pass read it.
 - Never commit secrets or personal data; `.env*` and `.growth-os/` are gitignored.
+- **We publish an npm package: [`infinite-tag`](https://www.npmjs.com/package/infinite-tag) (= `packages/instrument`).** It's the founder-run installer that adds the GA4 / PostHog / X tracking tags into the *user's own website repo* (`npx infinite-tag install`, public keys only). `infinite setup` surfaces a pre-filled `npx infinite-tag install …` after analytics connect. When anything touches "install the tag on the user's site," remember this package exists — don't reinvent it. (See AGENTS.md → repo layout.)

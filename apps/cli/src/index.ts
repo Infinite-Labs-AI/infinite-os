@@ -3,6 +3,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { createInterface } from "node:readline/promises";
+import { emitKeypressEvents } from "node:readline";
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { isIP } from "node:net";
 import { dirname, join, resolve } from "node:path";
@@ -188,6 +189,9 @@ export interface CliEnv {
   ANTHROPIC_API_KEY?: string;
   HOME?: string;
   PWD?: string;
+  /** Set by SSH; used as a hint that the loopback OAuth redirect lands on THIS box (#7). */
+  SSH_CONNECTION?: string;
+  SSH_TTY?: string;
 }
 
 interface CliOutputStream {
@@ -397,6 +401,23 @@ interface SetupWizardOptions {
   jsonMode?: boolean;
 }
 
+// These mirror the exported types in @infinite-os/setup (provider-guidance.ts / live.ts).
+// The setup module is loaded at runtime (not statically imported), so we restate the seam
+// types structurally here. Keep them in sync with the setup package.
+type GuidanceStep = "quick_connect" | "byo" | "tos" | "api_key" | "signup" | "billing";
+type Ga4OauthWaitDecision = "retry" | "byo" | "manual" | "quit";
+interface Ga4OauthWaitInteraction {
+  onWaitStarted?(input: { authorizationUrl?: string; sessionId: string }): void;
+  waitForDecision?(): Promise<Ga4OauthWaitDecision | null>;
+  cancelWait?(): void;
+  onTimeout?(input: { error?: string | null; sessionId: string }): Promise<Ga4OauthWaitDecision | null>;
+  onFailed?(input: { error?: string | null; sessionId: string }): Promise<Ga4OauthWaitDecision | null>;
+}
+type ProviderHandoffGate = (
+  provider: SetupProviderId,
+  context: { index: number; total: number; url?: string; signal?: AbortSignal }
+) => Promise<void>;
+
 interface SetupModuleApi {
   runLiveSetupOnboarding(input: {
     db: InfiniteOsDb;
@@ -416,6 +437,12 @@ interface SetupModuleApi {
       status(sessionId: string): Promise<Record<string, unknown>>;
       exchange(sessionId: string): Promise<Record<string, unknown>>;
     };
+    /** Cancellable GA4 OAuth wait interaction (#7); omitted on non-interactive/--json/headless. */
+    ga4OauthInteraction?: Ga4OauthWaitInteraction;
+    /** Sequencing gate between paused provider hand-offs (#8); omitted on non-interactive. */
+    awaitProviderHandoff?: ProviderHandoffGate;
+    /** Per-provider "Now connecting <Provider> (N of M)…" boundary callback (#8). */
+    onProviderStart?: (input: { provider: SetupProviderId; index: number; total: number }) => void;
     log?: (event: { phase: string; status: string; detail?: string }) => void;
   }): Promise<{
     selectedProviders: SetupProviderId[];
@@ -456,6 +483,12 @@ interface SetupModuleApi {
       status(sessionId: string): Promise<Record<string, unknown>>;
       exchange(sessionId: string): Promise<Record<string, unknown>>;
     };
+    /** Cancellable GA4 OAuth wait interaction (#7); omitted on non-interactive/--json/headless. */
+    ga4OauthInteraction?: Ga4OauthWaitInteraction;
+    /** Sequencing gate between paused provider hand-offs (#8); omitted on non-interactive. */
+    awaitProviderHandoff?: ProviderHandoffGate;
+    /** Per-provider "Now connecting <Provider> (N of M)…" boundary callback (#8). */
+    onProviderStart?: (input: { provider: SetupProviderId; index: number; total: number }) => void;
     log?: (event: { phase: string; status: string; detail?: string }) => void;
   }): Promise<{
     interview?: SetupInterview;
@@ -474,6 +507,13 @@ interface SetupModuleApi {
     installCommand: string | null;
     installArtifactsPath: string | null;
   }>;
+  /** Pure-string per-provider guidance template; reused by the CLI just-in-time (#8 Part 2). */
+  providerGuidance(
+    provider: SetupProviderId,
+    step: GuidanceStep,
+    ctx?: { authorizationUrl?: string; runId?: string; remoteLoopbackHint?: boolean },
+    hasAccount?: boolean
+  ): string;
   readSetupInterviewFromRun(
     db: InfiniteOsDb,
     workspaceId: string,
@@ -2078,6 +2118,221 @@ async function runSetupOnboardingStep(
   });
 }
 
+/** The single interactivity predicate honored everywhere for setup TTY interaction. */
+function isSetupInteractive(env: CliEnv, jsonMode?: boolean): boolean {
+  return input.isTTY === true && !jsonMode && env.GROWTH_OS_CLI_NONINTERACTIVE !== "1";
+}
+
+const SETUP_PROVIDER_LABEL: Record<SetupProviderId, string> = {
+  ga4: "Google Analytics",
+  posthog: "PostHog",
+  x: "X"
+};
+
+/**
+ * Reads exactly one keypress from a raw-mode stdin. ALWAYS restores raw mode and removes the
+ * listener — on a keypress, or when `cancel()` is called (e.g. the poll completed first). This
+ * is the same raw-mode hazard promptSecretValue handles. Resolves `{ ctrlC }` on a key, or
+ * `{ cancelled: true }` when cancelled.
+ */
+function waitForAnyKeypress(): {
+  promise: Promise<{ key: string; ctrlC: boolean; cancelled?: boolean }>;
+  cancel: () => void;
+} {
+  const stdin = process.stdin;
+  let settled = false;
+  let onKeypress: (str: string, key: { name?: string; ctrl?: boolean; sequence?: string } | undefined) => void = () => {};
+  const teardown = () => {
+    stdin.removeListener("keypress", onKeypress);
+    try {
+      stdin.setRawMode?.(false);
+    } catch {
+      // best-effort restore
+    }
+    stdin.pause();
+  };
+  let cancel = () => {
+    settled = true;
+    teardown();
+  };
+  const promise = new Promise<{ key: string; ctrlC: boolean; cancelled?: boolean }>((resolveKey) => {
+    onKeypress = (_str, key) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      teardown();
+      resolveKey({
+        key: key?.name ?? key?.sequence ?? "",
+        ctrlC: key?.ctrl === true && key?.name === "c"
+      });
+    };
+    cancel = () => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      teardown();
+      resolveKey({ key: "", ctrlC: false, cancelled: true });
+    };
+    try {
+      emitKeypressEvents(stdin);
+    } catch {
+      // best-effort — onKeypress still fires from a raw stdin on the real interactive path
+    }
+    try {
+      stdin.setRawMode?.(true);
+    } catch {
+      // non-raw stdin (shouldn't happen on the interactive path) — onKeypress still fires
+    }
+    stdin.resume();
+    stdin.on("keypress", onKeypress);
+  });
+  return { promise, cancel };
+}
+
+/**
+ * Builds the CLI-owned interaction/gate seams shared by #7 (cancellable GA4 wait) and #8
+ * (sequencing). Returns `{}` (no wiring) on non-interactive / --json / headless runs so the
+ * setup module keeps today's print-URL + poll + resumable-pause behavior and NEVER blocks on
+ * a keypress. `dispose()` tears down any armed keypress listener / raw mode in the caller's
+ * finally — a hard guarantee that raw mode is always restored.
+ */
+export function createSetupInteractionWiring(args: {
+  env: CliEnv;
+  jsonMode?: boolean;
+  setup: SetupModuleApi;
+}): {
+  ga4OauthInteraction?: Ga4OauthWaitInteraction;
+  awaitProviderHandoff?: ProviderHandoffGate;
+  onProviderStart?: (input: { provider: SetupProviderId; index: number; total: number }) => void;
+  dispose(): void;
+} {
+  if (!isSetupInteractive(args.env, args.jsonMode)) {
+    // Non-interactive: no menus, no keypress — preserve today's behavior exactly.
+    return { dispose() {} };
+  }
+
+  let disposed = false;
+  let activeCancel: (() => void) | null = null;
+  let lastAuthorizationUrl: string | undefined;
+  let ctrlCArmed = false;
+
+  const writeLine = (message: string) => {
+    errorOutput.write(`${message}\n`);
+  };
+
+  const showOptionsMenu = async (header: string): Promise<Ga4OauthWaitDecision> => {
+    for (;;) {
+      writeLine(header);
+      const choices = [
+        "Keep waiting / retry the browser sign-in",
+        "Show the link again",
+        "Use your own Google Cloud app",
+        "Skip OAuth — install the GA4 tag manually",
+        "Quit setup (resume later)"
+      ];
+      const selected = await promptChoice("How do you want to continue connecting Google Analytics?", choices, 0, {
+        io: { input, output: errorOutput }
+      });
+      if (selected === 1) {
+        // Show the link again, then re-open the menu without ending the wait.
+        writeLine(args.setup.providerGuidance("ga4", "quick_connect", { authorizationUrl: lastAuthorizationUrl }));
+        continue;
+      }
+      if (selected === 2) return "byo";
+      if (selected === 3) return "manual";
+      if (selected === 4) return "quit";
+      return "retry";
+    }
+  };
+
+  const ga4OauthInteraction: Ga4OauthWaitInteraction = {
+    onWaitStarted({ authorizationUrl }) {
+      lastAuthorizationUrl = authorizationUrl;
+      writeLine(
+        "Waiting for Google… press any key for options (retry · show link · use your own app · manual tag · quit)."
+      );
+    },
+    async waitForDecision() {
+      if (disposed) {
+        return null;
+      }
+      const press = waitForAnyKeypress();
+      activeCancel = press.cancel;
+      const { ctrlC, cancelled } = await press.promise;
+      activeCancel = null;
+      if (disposed || cancelled) {
+        // The poll completed first (cancel) — never block; let the caller use its outcome.
+        return null;
+      }
+      if (ctrlC) {
+        if (ctrlCArmed) {
+          // Second Ctrl-C: hard-exit cleanly.
+          process.exit(130);
+        }
+        ctrlCArmed = true;
+      }
+      const decision = await showOptionsMenu(
+        ctrlC ? "Paused. Choose how to continue (press Ctrl-C again to force-quit)." : "Paused."
+      );
+      ctrlCArmed = false;
+      return decision;
+    },
+    cancelWait() {
+      // Tear down the armed keypress wait NOW (the poll reached a terminal state). activeCancel()
+      // removes the 'keypress' listener, restores raw mode (setRawMode(false)), pauses stdin, AND
+      // resolves the pending waitForDecision to a cancelled outcome so it can never fire while the
+      // options menu / next prompt owns stdin. Idempotent (cancel() is a no-op once settled) and
+      // exception-safe so a teardown hiccup never masks the poll outcome.
+      try {
+        activeCancel?.();
+      } catch {
+        // best-effort restore — never throw out of teardown.
+      } finally {
+        activeCancel = null;
+      }
+    },
+    async onTimeout({ error }) {
+      const header = error
+        ? `We didn't hear back from Google in a few minutes. Google reported: ${error}`
+        : "We didn't hear back from Google in a few minutes.";
+      return showOptionsMenu(header);
+    },
+    async onFailed({ error }) {
+      const header = error ? `Google sign-in didn't complete: ${error}` : "Google sign-in didn't complete.";
+      return showOptionsMenu(header);
+    }
+  };
+
+  const awaitProviderHandoff: ProviderHandoffGate = async (provider) => {
+    // One browser at a time: block until the founder acks (Enter) before the next opens.
+    await promptText(
+      `Press Enter once ${SETUP_PROVIDER_LABEL[provider]} is connected, or to skip and continue…`,
+      "",
+      { io: { input, output: errorOutput } }
+    );
+  };
+
+  const onProviderStart = (info: { provider: SetupProviderId; index: number; total: number }) => {
+    writeLine(`\nNow connecting ${SETUP_PROVIDER_LABEL[info.provider]} (${info.index} of ${info.total})…`);
+  };
+
+  return {
+    ga4OauthInteraction,
+    awaitProviderHandoff,
+    onProviderStart,
+    dispose() {
+      disposed = true;
+      // If a keypress listener is still armed (poll resolved first), cancel it — this removes
+      // the listener AND restores raw mode, so raw mode is ALWAYS torn down even if the poll
+      // won the race against a pending keypress.
+      activeCancel?.();
+      activeCancel = null;
+    }
+  };
+}
+
 async function runLocalSetupOnboarding(input: {
   interview: SetupInterview;
   env: CliEnv;
@@ -2093,7 +2348,13 @@ async function runLocalSetupOnboarding(input: {
   const db = createInfiniteOsDb(config.databaseUrl);
   const actions = createLocalSetupActionRunner(db);
   const prompt = createLocalSetupPrompter();
-  const ga4OauthBootstrap = createLocalGa4OauthBootstrap({ env: input.env, config, jsonMode: input.jsonMode });
+  const ga4OauthBootstrap = createLocalGa4OauthBootstrap({
+    env: input.env,
+    config,
+    jsonMode: input.jsonMode,
+    guidance: (step, ctx) => setup.providerGuidance("ga4", step, ctx)
+  });
+  const interaction = createSetupInteractionWiring({ env: input.env, jsonMode: input.jsonMode, setup });
 
   try {
     const result = await setup.runLiveSetupOnboarding({
@@ -2102,7 +2363,10 @@ async function runLocalSetupOnboarding(input: {
       interview: input.interview,
       actions,
       prompt,
-      ga4OauthBootstrap
+      ga4OauthBootstrap,
+      ga4OauthInteraction: interaction.ga4OauthInteraction,
+      awaitProviderHandoff: interaction.awaitProviderHandoff,
+      onProviderStart: interaction.onProviderStart
     });
     // Once GA4 is connected + synced, offer to install the gtag into the founder's
     // site repo — the path is prompted explicitly (never cwd / Infinite's own repo)
@@ -2110,6 +2374,7 @@ async function runLocalSetupOnboarding(input: {
     await offerGa4TagInstall({ setup, result, env: input.env, workspaceId: input.workspaceId, jsonMode: input.jsonMode });
     return buildSetupOnboardingResult(input.interview, result);
   } finally {
+    interaction.dispose();
     await db.close();
   }
 }
@@ -2326,7 +2591,13 @@ async function runLocalSetupResume(input: {
   const db = createInfiniteOsDb(config.databaseUrl);
   const actions = createLocalSetupActionRunner(db);
   const prompt = createLocalSetupPrompter();
-  const ga4OauthBootstrap = createLocalGa4OauthBootstrap({ env: input.env, config, jsonMode: input.jsonMode });
+  const ga4OauthBootstrap = createLocalGa4OauthBootstrap({
+    env: input.env,
+    config,
+    jsonMode: input.jsonMode,
+    guidance: (step, ctx) => setup.providerGuidance("ga4", step, ctx)
+  });
+  const interaction = createSetupInteractionWiring({ env: input.env, jsonMode: input.jsonMode, setup });
 
   try {
     let result: Awaited<ReturnType<SetupModuleApi["resumeLiveSetupOnboarding"]>>;
@@ -2347,7 +2618,10 @@ async function runLocalSetupResume(input: {
           : {}),
         actions,
         prompt,
-        ga4OauthBootstrap
+        ga4OauthBootstrap,
+        ga4OauthInteraction: interaction.ga4OauthInteraction,
+        awaitProviderHandoff: interaction.awaitProviderHandoff,
+        onProviderStart: interaction.onProviderStart
       });
     } catch (error) {
       throw await enrichSetupResumeError(error, input.runId, input.env, config);
@@ -2359,6 +2633,7 @@ async function runLocalSetupResume(input: {
     await offerGa4TagInstall({ setup, result, env: input.env, workspaceId: input.workspaceId, jsonMode: input.jsonMode });
     return buildSetupOnboardingResult(result.interview, result);
   } finally {
+    interaction.dispose();
     await db.close();
   }
 }
@@ -2418,6 +2693,12 @@ export function createLocalGa4OauthBootstrap(options: {
   jsonMode?: boolean;
   /** Injectable for tests/isolation; defaults to reading the release file. */
   readReleaseConfig?: () => EmbeddedGa4OAuthClient | null;
+  /**
+   * Renders the GA4 guidance block (provider-guidance.ts) at the open site (#8 Part 2),
+   * carrying #7's "paste this link" line. Injectable for tests; defaults to the local
+   * template so the bootstrap works without the loaded setup module.
+   */
+  guidance?: (step: GuidanceStep, ctx: { authorizationUrl?: string; remoteLoopbackHint?: boolean }) => string;
 }): NonNullable<Parameters<SetupModuleApi["runLiveSetupOnboarding"]>[0]["ga4OauthBootstrap"]> {
   const hydrated = hydrateApiSettings(options.env, options.config);
   const defaultRedirectUri = `${hydrated.baseUrl}/oauth/callback/google_analytics_4`;
@@ -2451,17 +2732,25 @@ export function createLocalGa4OauthBootstrap(options: {
           redirectUri: input.redirectUri
         }
       })) as Record<string, unknown>;
-      // Open the consent page in the founder's browser, then setup polls for
-      // completion and continues automatically. If the browser can't be opened
-      // (non-interactive/headless), print the URL so they're never stuck.
+      // Open the consent page in the founder's browser, then setup polls for completion and
+      // continues automatically. #7: ALWAYS surface the copy-pasteable URL (even when the
+      // browser reports opened:true) so an SSH/remote/wrong-account/closed-tab founder is never
+      // stuck. --json keeps stdout clean (the URL is on the returned session).
       const authorizationUrl =
         typeof session.authorizationUrl === "string" ? session.authorizationUrl : "";
-      if (authorizationUrl) {
+      if (authorizationUrl && !options.jsonMode) {
         const launch = openBrowserForAuth(authorizationUrl, options.env);
+        const remoteLoopbackHint =
+          isRemoteSession(options.env) && isLoopbackRedirect(stringValue(session.redirectUri) ?? defaultRedirectUri);
+        const renderGuidance =
+          options.guidance ??
+          ((step: GuidanceStep, ctx: { authorizationUrl?: string; remoteLoopbackHint?: boolean }) =>
+            localGa4Guidance(step, ctx));
+        const block = renderGuidance("quick_connect", { authorizationUrl, remoteLoopbackHint });
         output.write(
-          launch.opened
-            ? "Opened Google in your browser. Finish signing in there — this terminal continues automatically.\n"
-            : `Open this link to connect Google Analytics:\n  ${authorizationUrl}\nThis terminal continues automatically once you finish.\n`
+          (launch.opened
+            ? "Opened Google in your browser. Finish signing in there.\n"
+            : "") + block + "\n"
         );
       }
       return session;
@@ -6750,6 +7039,58 @@ async function pollCodexAuthorizationCode(
 async function fetchJson(url: string, init: RequestInit, label: string): Promise<Record<string, unknown>> {
   const response = await fetch(url, init);
   return responseJson(response, label);
+}
+
+/** Heuristic remote/SSH detection so we can warn about the loopback redirect (#7). */
+function isRemoteSession(env: CliEnv): boolean {
+  return Boolean(env.SSH_CONNECTION?.trim() || env.SSH_TTY?.trim());
+}
+
+/** True when the OAuth redirect targets a loopback host — the callback lands on THIS box. */
+function isLoopbackRedirect(redirectUri: string | undefined): boolean {
+  if (!redirectUri) {
+    return false;
+  }
+  try {
+    const host = new URL(redirectUri).hostname;
+    return host === "127.0.0.1" || host === "localhost" || host === "::1" || host === "0.0.0.0";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Fallback GA4 guidance renderer used when the loaded setup module isn't injected (tests /
+ * the bootstrap start site). Mirrors provider-guidance.ts `quick_connect`/`byo`. Kept minimal
+ * and load-bearing on the "paste this link" line + the remote/SSH note.
+ */
+function localGa4Guidance(
+  step: GuidanceStep,
+  ctx: { authorizationUrl?: string; remoteLoopbackHint?: boolean }
+): string {
+  const lines: string[] = [
+    "Connecting Google Analytics — opening your browser now.",
+    "What to do there:",
+    "  1. Sign in to Google (Infinite never sees your password).",
+    step === "byo"
+      ? "  2. If you see \"Google hasn't verified this app\", click Advanced → Continue (it's your own unverified app — expected)."
+      : "  2. If you see \"Google hasn't verified this app\", click Advanced → Continue (it's Infinite's app, pending Google review).",
+    "  3. Approve the Analytics permissions and accept any Terms of Service.",
+    "Why: lets Infinite create/read your GA4 property + web stream and capture the Measurement ID (G-…) to install on your site.",
+    "Confirm: this terminal continues automatically once Google redirects back (or press Ctrl-C for more options)."
+  ];
+  const url = ctx.authorizationUrl?.trim();
+  if (url) {
+    lines.push(`Didn't open / wrong machine? Paste this link:\n  ${url}`);
+    if (ctx.remoteLoopbackHint) {
+      lines.push(
+        "Remote/SSH note: the sign-in redirect lands on 127.0.0.1 of THIS machine, not your browser's. " +
+          "If your browser is on a different machine, use your own Google Cloud app or install the tag manually instead."
+      );
+    }
+  }
+  lines.push("Skip: press Ctrl-C to use your own Google Cloud app or install the tag manually later.");
+  return lines.join("\n");
 }
 
 function openBrowserForAuth(url: string, env: CliEnv): { opened: boolean; command?: string; reason?: string } {
