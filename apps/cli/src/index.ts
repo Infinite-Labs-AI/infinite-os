@@ -5994,10 +5994,12 @@ export async function projectCommand(
     };
   }
   if (sub === "delete" || sub === "rm") {
-    const flags = new Set(args.slice(1).filter((arg) => arg.startsWith("--")));
-    const skipConfirm = flags.has("--yes") || flags.has("-y") || flags.has("--force");
-    const idOrName = args
-      .slice(1)
+    const rest = args.slice(1);
+    const flags = new Set(rest.filter((arg) => arg.startsWith("--")));
+    // `-y` is a single-dash short flag, so it never lands in `flags` (which only
+    // collects `--` tokens). Match it against the raw args instead.
+    const skipConfirm = flags.has("--yes") || flags.has("--force") || rest.includes("-y");
+    const idOrName = rest
       .filter((arg) => !arg.startsWith("--") && arg !== "-y")
       .join(" ")
       .trim();

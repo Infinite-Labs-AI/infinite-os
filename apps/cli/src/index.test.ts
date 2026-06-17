@@ -10216,6 +10216,31 @@ describe("project delete (CLI)", () => {
     }
   });
 
+  it("honors the -y short flag: deletes without invoking the confirm seam", async () => {
+    const api = stubProjectsApi(PROJECTS);
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-project-delete-y-short-"));
+    try {
+      const env = {
+        GROWTH_OS_HOME: growthHome,
+        GROWTH_OS_API_URL: "http://127.0.0.1:9999",
+        // Non-interactive: without a working skip flag this would THROW the refusal.
+        GROWTH_OS_CLI_NONINTERACTIVE: "1"
+      } as never;
+      const confirmDelete = vi.fn(async () => true);
+      const result = (await projectCommand(["delete", "Beta", "-y"], env, {
+        confirmDelete
+      })) as { ok: boolean; deleted?: boolean };
+      // (a) the DELETE actually fired (no refusal thrown in non-interactive mode).
+      expect(result.ok).toBe(true);
+      expect(result.deleted).toBe(true);
+      expect(api.calls.some((c) => c.method === "DELETE")).toBe(true);
+      // (b) `-y` bypassed the confirm prompt entirely.
+      expect(confirmDelete).not.toHaveBeenCalled();
+    } finally {
+      rmSync(growthHome, { recursive: true, force: true });
+    }
+  });
+
   it("without --yes invokes the confirm seam and cancels on a NO (no DELETE)", async () => {
     const api = stubProjectsApi(PROJECTS);
     const env = {
