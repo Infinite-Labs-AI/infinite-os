@@ -88,6 +88,17 @@ cd infinite
 
 **Connectable:** Google Analytics 4 · PostHog · Stripe · Meta · Shopify · X (read-only public post metrics). Deeper attribution and content analysis are on the roadmap.
 
+## Install the tracking tag on your site
+
+GA4 and PostHog only start collecting data once their tracking tag is on your website. After `infinite setup` connects an analytics source, install the tag into **your own site's repo** with our published npm package, **[`infinite-tag`](packages/instrument/README.md)** — it uses only your **public** keys, auto-detects your framework, and writes idempotent, fully reversible changes:
+
+```bash
+# run inside your website's code repo
+npx infinite-tag@latest install
+```
+
+`infinite setup` prints a ready-to-paste `npx infinite-tag install …` command with your Measurement ID / PostHog key and workspace id already filled in (and saves your public keys to `~/.infinite/artifacts/`, so a bare `npx infinite-tag install` discovers them automatically). See **[`packages/instrument/README.md`](packages/instrument/README.md)** for all flags and the supported frameworks (Next.js, Vite + React, static HTML).
+
 ## Configuration & data safety
 
 `infinite setup` writes your config and secrets into a gitignored `.growth-os/` directory; connector credentials are encrypted at rest. **Your data stays on your machine** — nothing is sent anywhere unless you do it. See [SECURITY.md](SECURITY.md) for the trust model and the full variable list.
