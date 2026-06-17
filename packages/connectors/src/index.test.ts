@@ -1231,6 +1231,144 @@ console.log(JSON.stringify({
     }
   });
 
+  it("injects ACCESS_TOKEN into the spawned meta CLI env", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "growth-os-meta-cli-token-"));
+    const script = join(dir, "meta-cli.mjs");
+    // The fake script asserts the token is present and never echoes it back.
+    writeFileSync(
+      script,
+      `
+import process from "node:process";
+const args = process.argv.slice(2);
+function argValue(name) {
+  const index = args.indexOf(name);
+  return index === -1 ? undefined : args[index + 1];
+}
+if (process.env.ACCESS_TOKEN !== "test-system-user-token") process.exit(9);
+if (argValue("--date-preset") === "today") {
+  console.log(JSON.stringify({ data: [] }));
+  process.exit(0);
+}
+console.log(JSON.stringify({ data: [] }));
+      `.trim(),
+      "utf8"
+    );
+    const previousToken = process.env.ACCESS_TOKEN;
+    delete process.env.ACCESS_TOKEN;
+    try {
+      const db = fakeDb({
+        credential: {
+          credential_kind: "ads_cli",
+          encrypted_payload: encryptedCredential({
+            mode: "live",
+            transport: "meta_ads_cli",
+            adAccountId: "1234567890",
+            accessToken: "test-system-user-token",
+            cliCommand: `${JSON.stringify(process.execPath)} ${JSON.stringify(script)}`
+          })
+        }
+      });
+      const connector = connectorFor("meta_ads");
+      // Before the fix the child exits 9 → connector throws → this resolve fails.
+      await expect(connector.testConnection(db, request("meta_ads"))).resolves.toMatchObject({
+        ok: true,
+        mode: "live",
+        provider: "meta_ads"
+      });
+      // The token must never leak into a thrown error message.
+      try {
+        await connector.extract(db, request("meta_ads"), {
+          cursorKey: "meta_ads_campaign_daily",
+          cursorStart: "2026-06-01T00:00:00.000Z",
+          cursorEnd: "2026-06-03T00:00:00.000Z",
+          refreshWindowDays: 30,
+          mode: "live"
+        });
+      } catch (error) {
+        expect(String((error as Error).message)).not.toContain("test-system-user-token");
+        throw error;
+      }
+    } finally {
+      if (previousToken === undefined) {
+        delete process.env.ACCESS_TOKEN;
+      } else {
+        process.env.ACCESS_TOKEN = previousToken;
+      }
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves an ambient ACCESS_TOKEN when the credential omits a token", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "growth-os-meta-cli-ambient-"));
+    const script = join(dir, "meta-cli.mjs");
+    writeFileSync(
+      script,
+      `
+import process from "node:process";
+const args = process.argv.slice(2);
+function argValue(name) {
+  const index = args.indexOf(name);
+  return index === -1 ? undefined : args[index + 1];
+}
+if (process.env.ACCESS_TOKEN !== "ambient-operator-token") process.exit(9);
+if (argValue("--date-preset") === "today") {
+  console.log(JSON.stringify({ data: [] }));
+  process.exit(0);
+}
+console.log(JSON.stringify({ data: [] }));
+      `.trim(),
+      "utf8"
+    );
+    const previousToken = process.env.ACCESS_TOKEN;
+    process.env.ACCESS_TOKEN = "ambient-operator-token";
+    try {
+      const db = fakeDb({
+        credential: {
+          credential_kind: "ads_cli",
+          encrypted_payload: encryptedCredential({
+            mode: "live",
+            transport: "meta_ads_cli",
+            adAccountId: "1234567890",
+            cliCommand: `${JSON.stringify(process.execPath)} ${JSON.stringify(script)}`
+          })
+        }
+      });
+      const connector = connectorFor("meta_ads");
+      await expect(connector.testConnection(db, request("meta_ads"))).resolves.toMatchObject({
+        ok: true,
+        mode: "live",
+        provider: "meta_ads"
+      });
+    } finally {
+      if (previousToken === undefined) {
+        delete process.env.ACCESS_TOKEN;
+      } else {
+        process.env.ACCESS_TOKEN = previousToken;
+      }
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("fails fast with an actionable, non-retryable error when the meta binary is missing", async () => {
+    const db = fakeDb({
+      credential: {
+        credential_kind: "ads_cli",
+        encrypted_payload: encryptedCredential({
+          mode: "live",
+          transport: "meta_ads_cli",
+          adAccountId: "1234567890",
+          cliCommand: "definitely-not-a-real-binary-xyz"
+        })
+      }
+    });
+    const connector = connectorFor("meta_ads");
+    await expect(connector.testConnection(db, request("meta_ads"))).rejects.toMatchObject({
+      code: "provider_auth_failed",
+      retryable: false,
+      message: expect.stringContaining("pip install meta-ads")
+    });
+  });
+
   it("uses X app-only bearer auth and maps timeline public metrics", async () => {
     const requests: Array<{ url: string; authorization: string | null }> = [];
     await withMockFetch(async (url, init) => {
