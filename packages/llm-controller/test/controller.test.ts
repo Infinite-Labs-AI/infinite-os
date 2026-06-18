@@ -5178,6 +5178,57 @@ describe("Infinite OS LLM controller", () => {
     expect(sections.join("\n")).not.toContain("Metric-question refinement guidance:");
   });
 
+  it("does NOT re-fire metric-question guidance once describe_metric has located a metric", async () => {
+    const { buildQueryRefinementSections } = await import("../src/query-advisor.js");
+    const sections = buildQueryRefinementSections("how many clicks did we get", [
+      {
+        name: "list_sources",
+        result: createEnvelope({
+          actionId: "list_sources",
+          authority: "tool_agent",
+          data: { sources: [{ id: "src_meta", provider: "meta_ads", status: "connected" }] },
+          provenance: ["sources"]
+        })
+      },
+      {
+        name: "describe_metric",
+        result: createEnvelope({
+          actionId: "describe_metric",
+          authority: "tool_agent",
+          data: { metric: { id: "meta_ads_clicks" } },
+          provenance: ["metric_definitions"]
+        })
+      }
+    ]);
+
+    expect(sections.join("\n")).not.toContain("Metric-question refinement guidance:");
+  });
+
+  it("does NOT fire metric-question guidance for a conversational sentence that merely mentions a metric noun", async () => {
+    const { buildQueryRefinementSections } = await import("../src/query-advisor.js");
+    const sections = buildQueryRefinementSections("tell me a joke about sales", [
+      {
+        name: "list_sources",
+        result: createEnvelope({
+          actionId: "list_sources",
+          authority: "tool_agent",
+          data: { sources: [{ id: "src_meta", provider: "meta_ads", status: "connected" }] },
+          provenance: ["sources"]
+        })
+      }
+    ]);
+
+    expect(sections.join("\n")).not.toContain("Metric-question refinement guidance:");
+  });
+
+  it("classifies bare 'what's my revenue' phrasings as recognized_revenue so revenue still confirms a time window", async () => {
+    const { classifyQueryFamily } = await import("../src/query-advisor.js");
+    expect(classifyQueryFamily("what's my revenue?")).toBe("recognized_revenue");
+    expect(classifyQueryFamily("what is our revenue")).toBe("recognized_revenue");
+    expect(classifyQueryFamily("how's revenue")).toBe("recognized_revenue");
+    expect(classifyQueryFamily("show me my revenue")).toBe("recognized_revenue");
+  });
+
   it("builds open-ended refinement guidance when only metric coverage is known", async () => {
     const { buildQueryRefinementSections } = await import("../src/query-advisor.js");
     const sections = buildQueryRefinementSections("what should i know here", [

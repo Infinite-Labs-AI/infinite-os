@@ -1261,7 +1261,7 @@ function isAmbiguousBusinessChannelQuestion(message: string): boolean {
 }
 
 function isDirectRevenueQuestion(message: string): boolean {
-  return /\b(how much revenue|what revenue did|revenue total|total revenue|how is revenue doing|how are revenues doing)\b/i.test(message);
+  return /\b(how much revenue|how much (?:did|have) (?:i|we) (?:make|made|earn|earned)|what(?:'s| is| are)? (?:my|our|the) revenues?|what revenue did|revenue total|total revenue|how(?:'s| is| are) (?:my |our |the )?revenues?( doing)?|show me (?:my |our |the )?revenues?)\b/i.test(message);
 }
 
 function isDirectRevenueBreakdownQuestion(message: string): boolean {
@@ -1559,6 +1559,7 @@ function genericOpenEndedRefinementSections(
   const hasViews = toolResults.some((result) => result.name === "list_queryable_views" && isRecord(result.result));
   const hasMetricResult = toolResults.some((result) => result.name === "run_metric_query" && isRecord(result.result));
   const hasBreakdownResult = toolResults.some((result) => result.name === "run_breakdown_query" && isRecord(result.result));
+  const hasMetricDetail = toolResults.some((result) => result.name === "describe_metric" && isRecord(result.result));
 
   // Targeted metric questions ("how many clicks?", "what's my CTR?", "cost per lead?") are not
   // open-ended, but the codex model still sometimes bails after list_sources and asks for a time
@@ -1571,6 +1572,7 @@ function genericOpenEndedRefinementSections(
     isTargetedMetricQuestion(message) &&
     hasSources &&
     !hasMetrics &&
+    !hasMetricDetail &&
     !hasViews &&
     !hasMetricResult &&
     !hasBreakdownResult
@@ -1666,7 +1668,7 @@ const METRIC_TERM_RE =
   /\b(clicks?|impressions?|reach|ctr|cpc|cpm|cpl|cpa|roas|frequency|spend|cost per (?:lead|result|acquisition|conversion|click|mille|thousand)|conversions?|results?|leads?|purchases?|link clicks?|landing page views?|page ?views?|visitors?|users?|sessions?|signups?|orders?|revenue|sales|gmv|followers?|tweets?|posts?|comments?|replies|engagement|events?|conversion (?:rate|value)|engagement rate|session duration)\b/i;
 function isTargetedMetricQuestion(message: string): boolean {
   const metricShaped =
-    /\b(how many|how much|what(?:'s| is| are)? (?:my|our|the)|what was (?:my|our|the)|show me|give me|tell me)\b/i.test(message) ||
+    /\b(how many|how much|what(?:'s| is| are)? (?:my|our|the)|what was (?:my|our|the)|show me|give me)\b/i.test(message) ||
     /\bcost per\b/i.test(message);
   return metricShaped && METRIC_TERM_RE.test(message);
 }
@@ -1849,7 +1851,10 @@ export function classifyQueryFamily(message: string): QueryFamily {
     /\brevenue this (month|week|quarter|year)\b/i.test(message) ||
     /\btell me about revenue\b/i.test(message) ||
     /\brevenue overview\b/i.test(message) ||
-    /\brevenue total\b/i.test(message)
+    /\brevenue total\b/i.test(message) ||
+    /\bwhat(?:'s| is| are)? (?:my|our|the) revenues?\b/i.test(message) ||
+    /\bhow(?:'s| is| are) (?:my |our |the )?revenues?\b/i.test(message) ||
+    /\bshow me (?:my |our |the )?revenues?\b/i.test(message)
   ) {
     return "recognized_revenue";
   }
