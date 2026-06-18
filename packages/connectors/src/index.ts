@@ -3170,9 +3170,10 @@ function metaInsightsResultsValue(row: MetaAdsInsightsRow): number | null {
   return Number.isFinite(total) ? total : null;
 }
 
-function metaInsightsGetResultType(row: MetaAdsInsightsRow): string | null {
-  // result_values_performance_indicator is the result_type source-of-truth string
-  // (e.g. 'actions:offsite_conversion.fb_pixel_purchase'); strip the 'actions:' prefix.
+function metaInsightsReportedResultType(row: MetaAdsInsightsRow): string | null {
+  // result_values_performance_indicator is Meta's own result_type source-of-truth
+  // string (e.g. 'actions:offsite_conversion.fb_pixel_purchase'); strip the 'actions:'
+  // prefix to get the bare action_type.
   const indicator = stringOrNull(
     row.result_values_performance_indicator as string | null | undefined
   );
@@ -3180,6 +3181,22 @@ function metaInsightsGetResultType(row: MetaAdsInsightsRow): string | null {
     return null;
   }
   return indicator.replace(/^actions:/, "");
+}
+
+// Cross-check: does Meta's reported result indicator name an action_type that belongs
+// to OUR canonical rule for this row? Used only to flag a meta_results fallback whose
+// type we could NOT verify (so reconciliation drift is visible), never to relabel the
+// stored result_type. When Meta reports no indicator we treat it as verified (nothing
+// to contradict).
+function metaResultTypeMatchesRule(
+  row: MetaAdsInsightsRow,
+  rule: MetaCanonicalEventRule
+): boolean {
+  const reported = metaInsightsReportedResultType(row);
+  if (!reported) {
+    return true;
+  }
+  return rule.actionTypes.includes(reported);
 }
 
 function metaAdsInsightsGrain(request: SyncRequest): {
@@ -3279,6 +3296,10 @@ function metaAdsConversionRows(
     if (metaResults === null) {
       return [];
     }
+    // Keep the result_type label consistent with the canonical mapping (clean labels
+    // like 'lead'/'purchase'). Meta's result_values_performance_indicator is used only
+    // as a cross-check (metaResultTypeMatchesRule), never as the stored label — mixing
+    // raw action_type strings into result_type would fracture the REQUIRED partition.
     return [
       {
         resultType: rule.resultType,
@@ -3286,7 +3307,11 @@ function metaAdsConversionRows(
         conversionValue: null,
         attributionSetting: context.attributionSetting,
         isPrimary: true,
-        resultsSource: "meta_results"
+        // Distinguish a clean cross-check match from a type-mismatched fallback so a
+        // reconciliation drift is visible in results_source.
+        resultsSource: metaResultTypeMatchesRule(row, rule)
+          ? "meta_results"
+          : "meta_results_unverified_type"
       }
     ];
   }

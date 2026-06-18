@@ -18,12 +18,16 @@
 -- (offsite_conversion.fb_pixel_purchase + its action_value) — never omni (§4).
 --
 -- results_source records which path produced the headline `results`:
---   'derived_from_canonical_mapping' — WE applied the §4b objective->event mapping
---                                       to actions[] (deterministic, we control it).
---   'meta_results'                   — Meta's own results/cost_per_result field fed
---                                       the row (reconciliation cross-check path).
--- A blank Meta `results` therefore falls back to the derivation instead of nulling
--- the headline.
+--   'derived_from_canonical_mapping'  — WE applied the §4b objective->event mapping
+--                                        to actions[] (deterministic, we control it).
+--   'meta_results'                    — Meta's own results field fed the row AND its
+--                                        result_values_performance_indicator matched
+--                                        our canonical rule (verified cross-check).
+--   'meta_results_unverified_type'    — Meta's results field fed the row but its
+--                                        reported indicator did NOT match our rule's
+--                                        action types (reconciliation drift flagged).
+-- The actions[] derivation is preferred; the meta_results paths are the fallback so a
+-- blank actions[] does not null the headline.
 --
 -- is_primary = true for the objective's canonical result (the headline number);
 -- secondary rows (e.g. a lead row on a purchase campaign) carry is_primary = false.
