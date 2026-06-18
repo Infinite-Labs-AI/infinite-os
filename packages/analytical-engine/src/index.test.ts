@@ -1812,6 +1812,109 @@ describe("analytical engine smoke", () => {
     expect(result?.provenance).toContain("drilldown.x_authored_post_rows");
   });
 
+  // §9 regression (findings #1/#5) — drilldown for the Phase-1 conversion/value metrics MUST
+  // hit the Meta tables, never the posthog_event_truth default fallthrough. Before this guard,
+  // providerTruthRows had no branch for results/cost_per_result/conversion_value/roas/
+  // roas_from_stripe (or the delivery metrics link_clicks/landing_page_views/frequency), so
+  // drilldown_result served UNRELATED PostHog event rows behind a
+  // drilldown.meta_ads_campaign_conversion_rows / drilldown.meta_stripe_campaign_value_rows
+  // provenance envelope — a provenance/data mismatch. This is the identical guard the GA4 work
+  // added after its 6 metrics fell through to the wrong branch.
+  it("drills down Phase-1 Meta conversion/value metrics to the Meta tables, never posthog_event_truth", async () => {
+    const cases: Array<{
+      metric: string;
+      table: string;
+      provenance: string;
+      filters?: Array<{ field: string; operator: string; value: string }>;
+    }> = [
+      // Conversion-family -> typed conversions fact (result_type pinned to satisfy the partition).
+      {
+        metric: "cost_per_result",
+        table: "from meta_ads_campaign_conversions_daily",
+        provenance: "drilldown.meta_ads_campaign_conversion_rows",
+        filters: [{ field: "result_type", operator: "equals", value: "lead" }]
+      },
+      {
+        metric: "results",
+        table: "from meta_ads_campaign_conversions_daily",
+        provenance: "drilldown.meta_ads_campaign_conversion_rows",
+        filters: [{ field: "result_type", operator: "equals", value: "lead" }]
+      },
+      {
+        metric: "roas",
+        table: "from meta_ads_campaign_conversions_daily",
+        provenance: "drilldown.meta_ads_campaign_conversion_rows",
+        filters: [{ field: "result_type", operator: "equals", value: "offsite_conversion.fb_pixel_purchase" }]
+      },
+      // Stripe-attributed ROAS -> the Meta↔Stripe join view.
+      {
+        metric: "roas_from_stripe",
+        table: "from queryable.vw_meta_stripe_campaign_value_daily",
+        provenance: "drilldown.meta_stripe_campaign_value_rows"
+      },
+      // Delivery-fact metrics -> the delivery fact.
+      {
+        metric: "link_clicks",
+        table: "from meta_ads_campaign_daily",
+        provenance: "drilldown.meta_ads_campaign_rows"
+      },
+      {
+        metric: "frequency",
+        table: "from meta_ads_campaign_daily",
+        provenance: "drilldown.meta_ads_campaign_rows"
+      }
+    ];
+
+    for (const testCase of cases) {
+      const queries: string[] = [];
+      const db: InfiniteOsDb = {
+        async query<T = Record<string, unknown>>(sql: string): Promise<T[]> {
+          queries.push(sql);
+          return [] as T[];
+        },
+        async one() {
+          return null;
+        },
+        async close() {},
+        async ensureWorkspace() {},
+        async ensureFirstPhaseDatasets() {},
+        async connectSource() {
+          return null as never;
+        },
+        async updateSourceStatus() {},
+        async createJob() {
+          return {};
+        },
+        async claimNextJob() {
+          return null;
+        },
+        async completeJob() {},
+        async withTransaction(fn) {
+          return fn(this);
+        }
+      };
+
+      const handlers = createActionHandlers(db);
+      const result = await handlers.drilldown_result?.(
+        { metric: testCase.metric, limit: 5, ...(testCase.filters ? { filters: testCase.filters } : {}) },
+        {
+          workspaceId: "workspace",
+          authority: "tool_agent",
+          surface: "api",
+          actorId: "operator",
+          sessionId: "session"
+        }
+      );
+
+      // The drilldown SQL hits the correct Meta table...
+      expect(queries.some((sql) => sql.includes(testCase.table))).toBe(true);
+      // ...and NEVER falls through to the posthog_event_truth default branch.
+      expect(queries.some((sql) => sql.includes("from posthog_event_truth"))).toBe(false);
+      // ...behind the matching provenance envelope (no advertise/serve mismatch).
+      expect(result?.provenance).toContain(testCase.provenance);
+    }
+  });
+
   it("rejects metric and view mismatches before executing SQL", async () => {
     const queries: string[] = [];
     const db: InfiniteOsDb = {

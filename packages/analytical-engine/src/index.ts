@@ -2994,13 +2994,73 @@ async function providerTruthRows(
     metric === "reach" ||
     metric === "cpm" ||
     metric === "cpc" ||
-    metric === "ctr"
+    metric === "ctr" ||
+    // Phase-1 §6: link_clicks/landing_page_views/frequency are delivery-fact columns
+    // (or a recomputed ratio over the delivery grain). They share the delivery view
+    // (see metricView/drilldownForMetric) and so MUST drill down to meta_ads_campaign_daily,
+    // not the posthog default fallthrough below. The select is widened to the Phase-1
+    // delivery columns (inline_link_clicks, landing_page_views, frequency, currency).
+    metric === "link_clicks" ||
+    metric === "landing_page_views" ||
+    metric === "frequency"
   ) {
     return db.query(
       `
         select id, source_id, ad_account_id, campaign_id, campaign_name, occurred_on,
-          spend, clicks, impressions, reach, cpm, cpc, ctr
+          spend, clicks, inline_link_clicks, landing_page_views, impressions, reach,
+          cpm, cpc, ctr, frequency, currency
         from meta_ads_campaign_daily
+        where workspace_id = $1
+          and ($2::text is null or source_id = $2)
+        order by occurred_on desc, campaign_id asc
+        limit $3
+      `,
+      [workspaceId, sourceIdFilter ?? null, limit]
+    );
+  }
+  // Phase-1 §6 — typed conversions drilldown. results/cost_per_result/conversion_value/roas
+  // read the child conversions fact (campaign × day × result_type), LEFT JOINing the delivery
+  // fact's spend exactly like the queryable view (cost_per_result = spend/results,
+  // roas = conversion_value/spend). Previously these fell through to the posthog_event_truth
+  // default branch and returned UNRELATED event rows while the envelope advertised
+  // drilldown.meta_ads_campaign_conversion_rows — a provenance/data mismatch. result_type /
+  // is_primary / results_source travel so the drilldown is honestly typed.
+  if (
+    metric === "results" ||
+    metric === "cost_per_result" ||
+    metric === "conversion_value" ||
+    metric === "roas"
+  ) {
+    return db.query(
+      `
+        select c.id, c.source_id, c.ad_account_id, c.campaign_id, d.campaign_name,
+          c.occurred_on, c.result_type, c.results, c.conversion_value,
+          d.spend as meta_ads_spend, c.is_primary, c.results_source
+        from meta_ads_campaign_conversions_daily c
+        left join meta_ads_campaign_daily d
+          on d.source_id = c.source_id
+          and d.ad_account_id = c.ad_account_id
+          and d.campaign_id = c.campaign_id
+          and d.occurred_on = c.occurred_on
+        where c.workspace_id = $1
+          and ($2::text is null or c.source_id = $2)
+        order by c.occurred_on desc, c.campaign_id asc, c.result_type asc
+        limit $3
+      `,
+      [workspaceId, sourceIdFilter ?? null, limit]
+    );
+  }
+  // Phase-1 §5 — Stripe-attributed ROAS drilldown reads the Meta↔Stripe join view (the same
+  // view metricView/aggregateExpression use), carrying matched/unmatched spend + revenue and
+  // the match_confidence signal. Falling through to posthog_event_truth here would serve event
+  // rows behind a drilldown.meta_stripe_campaign_value_rows envelope.
+  if (metric === "roas_from_stripe") {
+    return db.query(
+      `
+        select source_id, ad_account_id, campaign_id, campaign_name, occurred_on,
+          currency, match_confidence, matched_spend_major, matched_revenue_major,
+          unmatched_spend_major, unmatched_revenue_major
+        from queryable.vw_meta_stripe_campaign_value_daily
         where workspace_id = $1
           and ($2::text is null or source_id = $2)
         order by occurred_on desc, campaign_id asc
