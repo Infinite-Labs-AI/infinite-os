@@ -173,16 +173,16 @@ export function createSourceAwareQueryAdvisor(options: {
             ]
           };
         }
-        const followUpTimeScopeMessage = missingTimeScopeClarificationMessage(resolvedBusinessMetricQuestion);
-        if (followUpTimeScopeMessage) {
+        const followUpShowWindowsSections = timeSensitiveShowWindowsSections(resolvedBusinessMetricQuestion);
+        if (followUpShowWindowsSections.length > 0) {
           return {
             effectiveMessage: resolvedBusinessMetricQuestion,
-            message: `For "${resolvedBusinessMetricQuestion}", ${lowercaseFirst(followUpTimeScopeMessage)}`,
             promptSections: [
               "Resolved missing business metric scope for this turn:",
               `Original question: ${pendingBusinessMetricQuestion}`,
               `Clarifying business metric reply: ${input.message}`,
-              "Interpret this turn as a clarification reply that resolves the previously ambiguous business metric target."
+              "Interpret this turn as a clarification reply that resolves the previously ambiguous business metric target.",
+              ...followUpShowWindowsSections
             ]
           };
         }
@@ -214,10 +214,11 @@ export function createSourceAwareQueryAdvisor(options: {
           ]
         };
       }
-      const missingTimeScopeMessage = missingTimeScopeClarificationMessage(input.message);
-      if (missingTimeScopeMessage) {
+      const showWindowsSections = timeSensitiveShowWindowsSections(input.message);
+      if (showWindowsSections.length > 0) {
         return {
-          message: missingTimeScopeMessage
+          effectiveMessage: input.message,
+          promptSections: showWindowsSections
         };
       }
       const businessTimeScopeSections = explicitBusinessTimeScopePromptSections(input.message, input.now ?? new Date());
@@ -936,10 +937,6 @@ function removeTimeScopePhrase(question: string): string {
   return question.replace(new RegExp(`\\b${escapeRegExp(timeScope)}\\b`, "i"), "").replace(/\s{2,}/g, " ").trim();
 }
 
-function lowercaseFirst(value: string): string {
-  return value ? value.charAt(0).toLowerCase() + value.slice(1) : value;
-}
-
 function resolveIdentitySelection(message: string, identities: ConnectedXIdentity[]): ConnectedXIdentity | undefined {
   const explicitHandle = extractExplicitHandle(message);
   if (explicitHandle) {
@@ -1114,36 +1111,62 @@ function missingBusinessMetricClarificationMessage(message: string): string | un
   return "Do you mean best channel for traffic, signups, conversion rate, or revenue?";
 }
 
-function missingTimeScopeClarificationMessage(message: string): string | undefined {
+// Detection only: which time-sensitive metric family is being asked about with no
+// explicit time scope. Drives the show-windows guidance helper. Returns a short human
+// label for the metric, or undefined when the message is not a bare time-sensitive
+// family question. (The prior PRE-EMPT ask builder that also consumed this label has
+// been removed — ambiguous time-sensitive questions now SHOW a few standard windows
+// instead of asking.)
+function timeSensitiveFamilyMetricLabel(message: string): string | undefined {
   if (hasExplicitTimeScope(message)) {
     return undefined;
   }
   const family = classifyQueryFamily(message);
   if (family === "recognized_revenue" && isDirectRevenueQuestion(message)) {
-    return "Which time period do you want for revenue: today, this week, this month, this quarter, this year, or all time?";
+    return "revenue";
   }
   if (family === "revenue_source" && isDirectRevenueBreakdownQuestion(message)) {
-    return "Which time period do you want for the revenue/source breakdown: today, this week, this month, this quarter, this year, or all time?";
+    return "the revenue/source breakdown";
   }
   if (family === "site_visitors" && isDirectVisitorQuestion(message)) {
-    return "Which time period do you want for visitors or traffic: today, this week, this month, this quarter, this year, or all time?";
+    return "visitors or traffic";
   }
   if (family === "signup_count" && isDirectSignupQuestion(message)) {
-    return "Which time period do you want for signups: today, this week, this month, this quarter, this year, or all time?";
+    return "signups";
   }
   if (family === "site_conversion_rate" && isDirectConversionQuestion(message)) {
-    return "Which time period do you want for conversion rate: today, this week, this month, this quarter, this year, or all time?";
+    return "conversion rate";
   }
   if (family === "visitor_channel_breakdown" && isDirectTrafficBreakdownQuestion(message)) {
-    return "Which time period do you want for the traffic/source breakdown: today, this week, this month, this quarter, this year, or all time?";
+    return "the traffic/source breakdown";
   }
   if (family === "signup_channel_breakdown" && isDirectSignupBreakdownQuestion(message)) {
-    return "Which time period do you want for the signup/source breakdown: today, this week, this month, this quarter, this year, or all time?";
+    return "the signup/source breakdown";
   }
   if (family === "conversion_channel_breakdown" && isDirectConversionBreakdownQuestion(message)) {
-    return "Which time period do you want for the conversion/source breakdown: today, this week, this month, this quarter, this year, or all time?";
+    return "the conversion/source breakdown";
   }
   return undefined;
+}
+
+// "Show, don't ask" guidance for the time-sensitive metric families when no explicit
+// time scope is given. Instead of pre-empting with a clarification question, we let the
+// model run with instructions to show the metric across a few standard windows and
+// invite the user to narrow. Returns [] when the message is not a bare time-sensitive
+// family question (so callers can fall through to other behavior).
+function timeSensitiveShowWindowsSections(message: string): string[] {
+  const metricLabel = timeSensitiveFamilyMetricLabel(message);
+  if (!metricLabel) {
+    return [];
+  }
+  return [
+    "Time-sensitive metric without a time range — show a few standard windows, do not ask:",
+    `This question targets ${metricLabel}, a time-sensitive metric, but names no time range.`,
+    "Do NOT ask the user to pick a window, and do NOT silently use only all-time.",
+    "Run the metric (or breakdown) for a few standard windows — last 7 days, last 30 days, and all time — and present them together so the trend is visible.",
+    "After showing those windows, invite the user to narrow to a specific range if they want one.",
+    "If a window legitimately returns no data, say so for that window rather than dropping it."
+  ];
 }
 
 function hasExplicitTimeScope(message: string): boolean {

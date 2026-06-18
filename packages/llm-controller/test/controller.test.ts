@@ -106,6 +106,21 @@ describe("Infinite OS LLM controller", () => {
     expect(systemPrompt).toContain("name the likely options directly");
     expect(systemPrompt).toContain("one or two concrete next questions");
     expect(systemPrompt).toContain("Use recalled session context and turn-resolution context");
+    // "Show, don't ask" for the bare cost-per-result phrasing: show the per-result_type
+    // breakdown rather than asking which type.
+    expect(systemPrompt).toContain(
+      "For the bare 'cost per result'/'cost per conversion' phrasing with no implied result type, do NOT ask which type"
+    );
+    expect(systemPrompt).toContain("run a breakdown grouped by result_type");
+    expect(systemPrompt).toContain("SHOW all result types together");
+    expect(systemPrompt).not.toContain("Only ask for the result_type when the phrasing is the bare");
+    // The partition guard is preserved as the backstop (now satisfied via the grouped breakdown).
+    expect(systemPrompt).toContain("must still be partitioned by result_type");
+    // "Show, don't ask" carve-out for the time-sensitive metric families.
+    expect(systemPrompt).toContain(
+      "show a few standard windows (last 7 days, last 30 days, and all time) together and invite the user to narrow"
+    );
+    expect(systemPrompt).not.toContain("confirm a time window (today, this week, this month");
     const toolNames = (prompts[0] as { tools: Array<{ name: string }> }).tools.map((tool) => tool.name);
     expect(toolNames).not.toContain("terminal");
     expect(toolNames).not.toContain("read_file");
@@ -495,8 +510,8 @@ describe("Infinite OS LLM controller", () => {
     expect(result.message).toBe("Recognized revenue is $120.00.");
   });
 
-  it("asks for a time-period clarification on direct revenue questions without a timeframe", async () => {
-    let modelCalled = false;
+  it("shows standard windows instead of asking on direct revenue questions without a timeframe", async () => {
+    const requests: ModelRequest[] = [];
     const { createSourceAwareQueryAdvisor } = await import("../src/query-advisor.js");
     const controller = createLlmController({
       registry: createInfiniteOsRegistry({}),
@@ -506,9 +521,9 @@ describe("Infinite OS LLM controller", () => {
         }
       }),
       modelClient: {
-        complete: async () => {
-          modelCalled = true;
-          return { message: "should not run" };
+        complete: async (request) => {
+          requests.push(request);
+          return { message: "Revenue across windows." };
         }
       }
     });
@@ -521,13 +536,17 @@ describe("Infinite OS LLM controller", () => {
       surface: "api"
     });
 
-    expect(modelCalled).toBe(false);
-    expect(result.message).toContain("Which time period do you want for revenue");
-    expect(result.message).toContain("this month");
+    expect(requests).toHaveLength(1);
+    expect(result.message).toBe("Revenue across windows.");
+    expect(result.message).not.toContain("Which time period do you want");
+    expect(requests[0]?.systemPrompt).toContain("Time-sensitive metric without a time range");
+    expect(requests[0]?.systemPrompt).toContain("last 7 days, last 30 days, and all time");
+    expect(requests[0]?.systemPrompt).toContain("This question targets revenue");
+    expect(requests[0]?.systemPrompt).not.toContain("Which time period do you want");
   });
 
-  it("asks for a time-period clarification on direct visitor questions without a timeframe", async () => {
-    let modelCalled = false;
+  it("shows standard windows for a bare \"what's my revenue?\" instead of asking", async () => {
+    const requests: ModelRequest[] = [];
     const { createSourceAwareQueryAdvisor } = await import("../src/query-advisor.js");
     const controller = createLlmController({
       registry: createInfiniteOsRegistry({}),
@@ -537,9 +556,45 @@ describe("Infinite OS LLM controller", () => {
         }
       }),
       modelClient: {
-        complete: async () => {
-          modelCalled = true;
-          return { message: "should not run" };
+        complete: async (request) => {
+          requests.push(request);
+          return { message: "Here is revenue over a few windows." };
+        }
+      }
+    });
+
+    const result = await controller.chat({
+      message: "what's my revenue?",
+      sessionId: "session-bare-revenue-show-windows",
+      workspaceId: "workspace-1",
+      actorId: "operator-1",
+      surface: "api"
+    });
+
+    expect(requests).toHaveLength(1);
+    expect(result.message).toBe("Here is revenue over a few windows.");
+    expect(result.message).not.toContain("Which time period do you want");
+    expect(requests[0]?.systemPrompt).toContain("Time-sensitive metric without a time range");
+    expect(requests[0]?.systemPrompt).toContain("Do NOT ask the user to pick a window");
+    expect(requests[0]?.systemPrompt).toContain("last 7 days, last 30 days, and all time");
+    expect(requests[0]?.systemPrompt).toContain("This question targets revenue");
+    expect(requests[0]?.systemPrompt).not.toContain("Which time period do you want");
+  });
+
+  it("shows standard windows instead of asking on direct visitor questions without a timeframe", async () => {
+    const requests: ModelRequest[] = [];
+    const { createSourceAwareQueryAdvisor } = await import("../src/query-advisor.js");
+    const controller = createLlmController({
+      registry: createInfiniteOsRegistry({}),
+      queryAdvisor: createSourceAwareQueryAdvisor({
+        async listConnectedXIdentities() {
+          return [];
+        }
+      }),
+      modelClient: {
+        complete: async (request) => {
+          requests.push(request);
+          return { message: "Visitors across windows." };
         }
       }
     });
@@ -552,13 +607,17 @@ describe("Infinite OS LLM controller", () => {
       surface: "api"
     });
 
-    expect(modelCalled).toBe(false);
-    expect(result.message).toContain("Which time period do you want for visitors or traffic");
-    expect(result.message).toContain("this month");
+    expect(requests).toHaveLength(1);
+    expect(result.message).toBe("Visitors across windows.");
+    expect(result.message).not.toContain("Which time period do you want");
+    expect(requests[0]?.systemPrompt).toContain("Time-sensitive metric without a time range");
+    expect(requests[0]?.systemPrompt).toContain("last 7 days, last 30 days, and all time");
+    expect(requests[0]?.systemPrompt).toContain("This question targets visitors or traffic");
+    expect(requests[0]?.systemPrompt).not.toContain("Which time period do you want");
   });
 
-  it("asks for a time-period clarification on direct signup questions without a timeframe", async () => {
-    let modelCalled = false;
+  it("shows standard windows instead of asking on direct signup questions without a timeframe", async () => {
+    const requests: ModelRequest[] = [];
     const { createSourceAwareQueryAdvisor } = await import("../src/query-advisor.js");
     const controller = createLlmController({
       registry: createInfiniteOsRegistry({}),
@@ -568,9 +627,9 @@ describe("Infinite OS LLM controller", () => {
         }
       }),
       modelClient: {
-        complete: async () => {
-          modelCalled = true;
-          return { message: "should not run" };
+        complete: async (request) => {
+          requests.push(request);
+          return { message: "Signups across windows." };
         }
       }
     });
@@ -583,13 +642,17 @@ describe("Infinite OS LLM controller", () => {
       surface: "api"
     });
 
-    expect(modelCalled).toBe(false);
-    expect(result.message).toContain("Which time period do you want for signups");
-    expect(result.message).toContain("this month");
+    expect(requests).toHaveLength(1);
+    expect(result.message).toBe("Signups across windows.");
+    expect(result.message).not.toContain("Which time period do you want");
+    expect(requests[0]?.systemPrompt).toContain("Time-sensitive metric without a time range");
+    expect(requests[0]?.systemPrompt).toContain("last 7 days, last 30 days, and all time");
+    expect(requests[0]?.systemPrompt).toContain("This question targets signups");
+    expect(requests[0]?.systemPrompt).not.toContain("Which time period do you want");
   });
 
-  it("asks for a time-period clarification on direct conversion-rate questions without a timeframe", async () => {
-    let modelCalled = false;
+  it("shows standard windows instead of asking on direct conversion-rate questions without a timeframe", async () => {
+    const requests: ModelRequest[] = [];
     const { createSourceAwareQueryAdvisor } = await import("../src/query-advisor.js");
     const controller = createLlmController({
       registry: createInfiniteOsRegistry({}),
@@ -599,9 +662,9 @@ describe("Infinite OS LLM controller", () => {
         }
       }),
       modelClient: {
-        complete: async () => {
-          modelCalled = true;
-          return { message: "should not run" };
+        complete: async (request) => {
+          requests.push(request);
+          return { message: "Conversion rate across windows." };
         }
       }
     });
@@ -614,13 +677,17 @@ describe("Infinite OS LLM controller", () => {
       surface: "api"
     });
 
-    expect(modelCalled).toBe(false);
-    expect(result.message).toContain("Which time period do you want for conversion rate");
-    expect(result.message).toContain("this month");
+    expect(requests).toHaveLength(1);
+    expect(result.message).toBe("Conversion rate across windows.");
+    expect(result.message).not.toContain("Which time period do you want");
+    expect(requests[0]?.systemPrompt).toContain("Time-sensitive metric without a time range");
+    expect(requests[0]?.systemPrompt).toContain("last 7 days, last 30 days, and all time");
+    expect(requests[0]?.systemPrompt).toContain("This question targets conversion rate");
+    expect(requests[0]?.systemPrompt).not.toContain("Which time period do you want");
   });
 
-  it("asks for a time-period clarification on broader signup-trend questions without a timeframe", async () => {
-    let modelCalled = false;
+  it("shows standard windows instead of asking on broader signup-trend questions without a timeframe", async () => {
+    const requests: ModelRequest[] = [];
     const { createSourceAwareQueryAdvisor } = await import("../src/query-advisor.js");
     const controller = createLlmController({
       registry: createInfiniteOsRegistry({}),
@@ -630,9 +697,9 @@ describe("Infinite OS LLM controller", () => {
         }
       }),
       modelClient: {
-        complete: async () => {
-          modelCalled = true;
-          return { message: "should not run" };
+        complete: async (request) => {
+          requests.push(request);
+          return { message: "Signup trend across windows." };
         }
       }
     });
@@ -645,12 +712,15 @@ describe("Infinite OS LLM controller", () => {
       surface: "api"
     });
 
-    expect(modelCalled).toBe(false);
-    expect(result.message).toContain("Which time period do you want for signups");
+    expect(requests).toHaveLength(1);
+    expect(result.message).toBe("Signup trend across windows.");
+    expect(result.message).not.toContain("Which time period do you want");
+    expect(requests[0]?.systemPrompt).toContain("Time-sensitive metric without a time range");
+    expect(requests[0]?.systemPrompt).toContain("This question targets signups");
   });
 
-  it("asks for a time-period clarification on broader traffic-trend questions without a timeframe", async () => {
-    let modelCalled = false;
+  it("shows standard windows instead of asking on broader traffic-trend questions without a timeframe", async () => {
+    const requests: ModelRequest[] = [];
     const { createSourceAwareQueryAdvisor } = await import("../src/query-advisor.js");
     const controller = createLlmController({
       registry: createInfiniteOsRegistry({}),
@@ -660,9 +730,9 @@ describe("Infinite OS LLM controller", () => {
         }
       }),
       modelClient: {
-        complete: async () => {
-          modelCalled = true;
-          return { message: "should not run" };
+        complete: async (request) => {
+          requests.push(request);
+          return { message: "Traffic trend across windows." };
         }
       }
     });
@@ -675,12 +745,15 @@ describe("Infinite OS LLM controller", () => {
       surface: "api"
     });
 
-    expect(modelCalled).toBe(false);
-    expect(result.message).toContain("Which time period do you want for visitors or traffic");
+    expect(requests).toHaveLength(1);
+    expect(result.message).toBe("Traffic trend across windows.");
+    expect(result.message).not.toContain("Which time period do you want");
+    expect(requests[0]?.systemPrompt).toContain("Time-sensitive metric without a time range");
+    expect(requests[0]?.systemPrompt).toContain("This question targets visitors or traffic");
   });
 
-  it("asks for a time-period clarification on traffic breakdown questions without a timeframe", async () => {
-    let modelCalled = false;
+  it("shows standard windows instead of asking on traffic breakdown questions without a timeframe", async () => {
+    const requests: ModelRequest[] = [];
     const { createSourceAwareQueryAdvisor } = await import("../src/query-advisor.js");
     const controller = createLlmController({
       registry: createInfiniteOsRegistry({}),
@@ -690,9 +763,9 @@ describe("Infinite OS LLM controller", () => {
         }
       }),
       modelClient: {
-        complete: async () => {
-          modelCalled = true;
-          return { message: "should not run" };
+        complete: async (request) => {
+          requests.push(request);
+          return { message: "Traffic breakdown across windows." };
         }
       }
     });
@@ -705,12 +778,15 @@ describe("Infinite OS LLM controller", () => {
       surface: "api"
     });
 
-    expect(modelCalled).toBe(false);
-    expect(result.message).toContain("Which time period do you want for the traffic/source breakdown");
+    expect(requests).toHaveLength(1);
+    expect(result.message).toBe("Traffic breakdown across windows.");
+    expect(result.message).not.toContain("Which time period do you want");
+    expect(requests[0]?.systemPrompt).toContain("Time-sensitive metric without a time range");
+    expect(requests[0]?.systemPrompt).toContain("This question targets the traffic/source breakdown");
   });
 
-  it("asks for a time-period clarification on revenue breakdown questions without a timeframe", async () => {
-    let modelCalled = false;
+  it("shows standard windows instead of asking on revenue breakdown questions without a timeframe", async () => {
+    const requests: ModelRequest[] = [];
     const { createSourceAwareQueryAdvisor } = await import("../src/query-advisor.js");
     const controller = createLlmController({
       registry: createInfiniteOsRegistry({}),
@@ -720,9 +796,9 @@ describe("Infinite OS LLM controller", () => {
         }
       }),
       modelClient: {
-        complete: async () => {
-          modelCalled = true;
-          return { message: "should not run" };
+        complete: async (request) => {
+          requests.push(request);
+          return { message: "Revenue breakdown across windows." };
         }
       }
     });
@@ -735,12 +811,15 @@ describe("Infinite OS LLM controller", () => {
       surface: "api"
     });
 
-    expect(modelCalled).toBe(false);
-    expect(result.message).toContain("Which time period do you want for the revenue/source breakdown");
+    expect(requests).toHaveLength(1);
+    expect(result.message).toBe("Revenue breakdown across windows.");
+    expect(result.message).not.toContain("Which time period do you want");
+    expect(requests[0]?.systemPrompt).toContain("Time-sensitive metric without a time range");
+    expect(requests[0]?.systemPrompt).toContain("This question targets the revenue/source breakdown");
   });
 
-  it("asks for a time-period clarification on signup breakdown questions without a timeframe", async () => {
-    let modelCalled = false;
+  it("shows standard windows instead of asking on signup breakdown questions without a timeframe", async () => {
+    const requests: ModelRequest[] = [];
     const { createSourceAwareQueryAdvisor } = await import("../src/query-advisor.js");
     const controller = createLlmController({
       registry: createInfiniteOsRegistry({}),
@@ -750,9 +829,9 @@ describe("Infinite OS LLM controller", () => {
         }
       }),
       modelClient: {
-        complete: async () => {
-          modelCalled = true;
-          return { message: "should not run" };
+        complete: async (request) => {
+          requests.push(request);
+          return { message: "Signup breakdown across windows." };
         }
       }
     });
@@ -765,12 +844,15 @@ describe("Infinite OS LLM controller", () => {
       surface: "api"
     });
 
-    expect(modelCalled).toBe(false);
-    expect(result.message).toContain("Which time period do you want for the signup/source breakdown");
+    expect(requests).toHaveLength(1);
+    expect(result.message).toBe("Signup breakdown across windows.");
+    expect(result.message).not.toContain("Which time period do you want");
+    expect(requests[0]?.systemPrompt).toContain("Time-sensitive metric without a time range");
+    expect(requests[0]?.systemPrompt).toContain("This question targets the signup/source breakdown");
   });
 
-  it("asks for a time-period clarification on conversion breakdown questions without a timeframe", async () => {
-    let modelCalled = false;
+  it("shows standard windows instead of asking on conversion breakdown questions without a timeframe", async () => {
+    const requests: ModelRequest[] = [];
     const { createSourceAwareQueryAdvisor } = await import("../src/query-advisor.js");
     const controller = createLlmController({
       registry: createInfiniteOsRegistry({}),
@@ -780,9 +862,9 @@ describe("Infinite OS LLM controller", () => {
         }
       }),
       modelClient: {
-        complete: async () => {
-          modelCalled = true;
-          return { message: "should not run" };
+        complete: async (request) => {
+          requests.push(request);
+          return { message: "Conversion breakdown across windows." };
         }
       }
     });
@@ -795,8 +877,11 @@ describe("Infinite OS LLM controller", () => {
       surface: "api"
     });
 
-    expect(modelCalled).toBe(false);
-    expect(result.message).toContain("Which time period do you want for the conversion/source breakdown");
+    expect(requests).toHaveLength(1);
+    expect(result.message).toBe("Conversion breakdown across windows.");
+    expect(result.message).not.toContain("Which time period do you want");
+    expect(requests[0]?.systemPrompt).toContain("Time-sensitive metric without a time range");
+    expect(requests[0]?.systemPrompt).toContain("This question targets the conversion/source breakdown");
   });
 
   it("asks for a business-metric clarification on ambiguous best-channel questions", async () => {
@@ -4008,7 +4093,7 @@ describe("Infinite OS LLM controller", () => {
     expect(requests[0]?.systemPrompt).toContain("Clarifying time scope reply: this quarter");
   });
 
-  it("resolves a business-metric clarification reply back into the original best-channel question for the model loop", async () => {
+  it("resolves a business-metric clarification reply then shows standard windows instead of re-asking for a timeframe", async () => {
     const requests: ModelRequest[] = [];
     const { createSourceAwareQueryAdvisor } = await import("../src/query-advisor.js");
     const store: ChatSessionStore = {
@@ -4051,7 +4136,7 @@ describe("Infinite OS LLM controller", () => {
       modelClient: {
         complete: async (request) => {
           requests.push(request);
-          return { message: "Signup-channel answer." };
+          return { message: "Signup-channel answer across windows." };
         }
       }
     });
@@ -4064,8 +4149,17 @@ describe("Infinite OS LLM controller", () => {
       surface: "api"
     });
 
-    expect(result.message).toContain("For \"what's our best channel for signups\", which time period do you want");
-    expect(requests).toHaveLength(0);
+    // The follow-up no longer pre-empts with a time-period ask: the model runs with
+    // the resolved business-metric AND show-windows guidance.
+    expect(requests).toHaveLength(1);
+    expect(result.message).toBe("Signup-channel answer across windows.");
+    expect(result.message).not.toContain("which time period do you want");
+    expect(requests[0]?.userMessage).toBe("what's our best channel for signups");
+    expect(requests[0]?.systemPrompt).toContain("Resolved missing business metric scope for this turn:");
+    expect(requests[0]?.systemPrompt).toContain("Clarifying business metric reply: signups");
+    expect(requests[0]?.systemPrompt).toContain("Time-sensitive metric without a time range");
+    expect(requests[0]?.systemPrompt).toContain("This question targets the signup/source breakdown");
+    expect(requests[0]?.systemPrompt).not.toContain("Which time period do you want");
   });
 
   it("resolves a time-scope clarification reply back into the original business-metric question for the model loop", async () => {
@@ -4378,7 +4472,7 @@ describe("Infinite OS LLM controller", () => {
       modelClient: {
         complete: async (request) => {
           requests.push(request);
-          return { message: "Full phrase answer." };
+          return { message: "Full phrase answer across windows." };
         }
       }
     });
@@ -4391,8 +4485,15 @@ describe("Infinite OS LLM controller", () => {
       surface: "api"
     });
 
-    expect(result.message).toContain("For \"what's our best channel for signups\", which time period do you want");
-    expect(requests).toHaveLength(0);
+    // The fuller reply phrase still resolves the business metric; with no time scope the
+    // follow-up now shows standard windows instead of pre-empting with a time-period ask.
+    expect(requests).toHaveLength(1);
+    expect(result.message).toBe("Full phrase answer across windows.");
+    expect(result.message).not.toContain("which time period do you want");
+    expect(requests[0]?.userMessage).toBe("what's our best channel for signups");
+    expect(requests[0]?.systemPrompt).toContain("Clarifying business metric reply: best channel for signups");
+    expect(requests[0]?.systemPrompt).toContain("Time-sensitive metric without a time range");
+    expect(requests[0]?.systemPrompt).toContain("This question targets the signup/source breakdown");
   });
 
   it("reconstructs a business-metric clarification naturally when the original question already had a time scope", async () => {
