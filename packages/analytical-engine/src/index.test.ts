@@ -345,11 +345,16 @@ describe("analytical engine smoke", () => {
       expect(caveatsForMetric("frequency")).toContain(
         "reach_is_approximate_summed_daily_reach_overcounts_unique_people"
       );
-      // roas_from_stripe is mapping-dependent and currency-reconciled.
+      // roas_from_stripe is mapping-dependent and currency-reconciled, and MUST carry the
+      // loud source-level over-attribution + unmatched-revenue caveats (DEFECT 2): the map is
+      // source-level so matched_revenue is an upper bound, and unmapped-source revenue surfaces
+      // on campaign-NULL rows. Reverting either honesty caveat fails this assertion.
       expect(caveatsForMetric("roas_from_stripe")).toEqual(
         expect.arrayContaining([
           "stripe_attributed_roas_is_mapping_dependent",
           "excludes_unmatched_spend_and_unmatched_revenue",
+          "unmatched_revenue_surfaced_on_campaign_null_rows",
+          "stripe_revenue_is_source_level_may_over_attribute",
           "currency_reconciled_to_account_currency_before_dividing"
         ])
       );
@@ -1912,6 +1917,148 @@ describe("analytical engine smoke", () => {
       expect(queries.some((sql) => sql.includes("from posthog_event_truth"))).toBe(false);
       // ...behind the matching provenance envelope (no advertise/serve mismatch).
       expect(result?.provenance).toContain(testCase.provenance);
+    }
+  });
+
+  // DEFECT 1 REGRESSION GUARD — the drilldown for the delivery metrics (link_clicks /
+  // landing_page_views / frequency) selects FROM meta_ads_campaign_daily. The original test above
+  // only asserts the SQL string CONTAINS the table name, so it happily passed while the projection
+  // selected a bare `frequency` column that DOES NOT EXIST on meta_ads_campaign_daily (frequency
+  // is a recomputed impressions/reach ratio — never stored; see migration 0032). At runtime that
+  // threw `column "frequency" does not exist`. This guard cross-checks every column the projection
+  // references against the KNOWN column set of meta_ads_campaign_daily (migrations 0015 + 0032),
+  // allowing computed `<expr> as <alias>` projections. Reverting the fix (selecting a bare
+  // `frequency`) makes `frequency` a referenced-but-nonexistent column -> this test FAILS.
+  it("only selects columns that exist on meta_ads_campaign_daily for the delivery-fact drilldown", async () => {
+    // The real columns of meta_ads_campaign_daily: 0015 (create table) + 0032 (additive alter).
+    const KNOWN_DELIVERY_COLUMNS = new Set([
+      // 0015 create table meta_ads_campaign_daily
+      "id",
+      "workspace_id",
+      "source_id",
+      "raw_record_id",
+      "ad_account_id",
+      "campaign_id",
+      "campaign_name",
+      "occurred_on",
+      "spend",
+      "clicks",
+      "impressions",
+      "reach",
+      "cpm",
+      "cpc",
+      "ctr",
+      "created_at",
+      "updated_at",
+      // 0032 add columns
+      "currency",
+      "inline_link_clicks",
+      "landing_page_views",
+      "attribution_setting",
+      "actions_raw",
+      "api_version"
+    ]);
+
+    for (const metric of ["link_clicks", "landing_page_views", "frequency"] as const) {
+      const queries: string[] = [];
+      const db: InfiniteOsDb = {
+        async query<T = Record<string, unknown>>(sql: string): Promise<T[]> {
+          queries.push(sql);
+          return [] as T[];
+        },
+        async one() {
+          return null;
+        },
+        async close() {},
+        async ensureWorkspace() {},
+        async ensureFirstPhaseDatasets() {},
+        async connectSource() {
+          return null as never;
+        },
+        async updateSourceStatus() {},
+        async createJob() {
+          return {};
+        },
+        async claimNextJob() {
+          return null;
+        },
+        async completeJob() {},
+        async withTransaction(fn) {
+          return fn(this);
+        }
+      };
+
+      const handlers = createActionHandlers(db);
+      await handlers.drilldown_result?.(
+        { metric, limit: 5 },
+        {
+          workspaceId: "workspace",
+          authority: "tool_agent",
+          surface: "api",
+          actorId: "operator",
+          sessionId: "session"
+        }
+      );
+
+      const sql = queries.find((q) => q.includes("from meta_ads_campaign_daily"));
+      expect(sql).toBeDefined();
+
+      // Isolate the projection list: everything between `select` and `from`. STRIP `--` line
+      // comments FIRST (per line, before splitting) — an inline comment can itself contain commas
+      // and would otherwise be mis-split into bogus "columns".
+      const projection = sql!
+        .slice(sql!.toLowerCase().indexOf("select") + "select".length, sql!.toLowerCase().indexOf("from "))
+        .split("\n")
+        .map((line) => line.replace(/--.*$/, ""))
+        .join("\n");
+
+      // Split on TOP-LEVEL commas only — a computed item like `impressions::numeric /
+      // nullif(reach, 0) as frequency` carries a comma INSIDE its parens that must not split it.
+      const items: string[] = [];
+      let depth = 0;
+      let buf = "";
+      for (const ch of projection) {
+        if (ch === "(") depth++;
+        else if (ch === ")") depth--;
+        if (ch === "," && depth === 0) {
+          items.push(buf.trim());
+          buf = "";
+        } else {
+          buf += ch;
+        }
+      }
+      if (buf.trim()) items.push(buf.trim());
+
+      for (const item of items) {
+        // A computed projection (`<expr> as <alias>`) is allowed regardless of the alias — the
+        // alias is an output name, not a referenced table column. We only validate bare column
+        // references (the kind that can be a phantom). Detect computed items by the presence of
+        // an operator / function call / `as` keyword.
+        const isComputed = / as | as$|[()/*+:-]/i.test(` ${item} `);
+        if (isComputed) {
+          // Every bare identifier referenced inside the expression must still exist on the table.
+          const identifiers = item.match(/[a-z_][a-z0-9_]*/gi) ?? [];
+          for (const ident of identifiers) {
+            const lower = ident.toLowerCase();
+            // skip the alias keyword, the alias itself (token after `as`), and numeric/cast noise.
+            if (lower === "as" || lower === "numeric" || lower === "nullif") continue;
+            // The alias (last identifier after `as`) is an output name; allow it.
+            const afterAs = / as +([a-z_][a-z0-9_]*)/i.exec(item)?.[1]?.toLowerCase();
+            if (lower === afterAs) continue;
+            expect(
+              KNOWN_DELIVERY_COLUMNS.has(lower),
+              `computed projection "${item}" references nonexistent column "${ident}" on meta_ads_campaign_daily`
+            ).toBe(true);
+          }
+          continue;
+        }
+        // A bare column reference (strip any table qualifier) must exist on the table.
+        const column = item.replace(/^[a-z_][a-z0-9_]*\./i, "").toLowerCase();
+        expect(
+          KNOWN_DELIVERY_COLUMNS.has(column),
+          `drilldown for "${metric}" selects nonexistent column "${column}" on meta_ads_campaign_daily`
+        ).toBe(true);
+      }
     }
   });
 

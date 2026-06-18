@@ -2582,8 +2582,11 @@ async function runAggregate(
       (filter) => normalizeDimensionAlias(view, filter.field) === "result_type" && filter.operator === "equals"
     );
     if (!groupsByResultType && !pinsResultType) {
-      // unsupported_partition:* is caught by the handlers and turned into a needs_clarification
-      // envelope asking the caller to group by / filter to a result_type. CPL+CPA never blend.
+      // The engine THROWS here — it does not return an envelope. The unsupported_partition:*
+      // error propagates out of run_metric_query / run_breakdown_query (the action handlers
+      // re-throw it); a higher layer (the LLM controller / CLI) is what wraps it into a
+      // needs_clarification response asking the caller to group by / filter to a result_type.
+      // The hard refusal at this layer is the load-bearing guarantee that CPL+CPA never blend.
       throw new Error(`unsupported_partition:result_type_required:${metric}`);
     }
   }
@@ -3008,7 +3011,14 @@ async function providerTruthRows(
       `
         select id, source_id, ad_account_id, campaign_id, campaign_name, occurred_on,
           spend, clicks, inline_link_clicks, landing_page_views, impressions, reach,
-          cpm, cpc, ctr, frequency, currency
+          cpm, cpc, ctr,
+          -- frequency is a RECOMPUTED ratio (impressions/reach), NOT a stored column on
+          -- meta_ads_campaign_daily (see migration 0032 -- frequency is never added). Compute
+          -- it inline at the per-row drilldown grain, mirroring the metric_definitions seed
+          -- (0034): impressions/nullif(reach,0), reach-APPROXIMATE caveat inherited. Selecting
+          -- a bare frequency column here threw the runtime error column frequency does not exist.
+          impressions::numeric / nullif(reach, 0) as frequency,
+          currency
         from meta_ads_campaign_daily
         where workspace_id = $1
           and ($2::text is null or source_id = $2)
@@ -3662,6 +3672,13 @@ export function caveatsForMetric(metric: string): string[] {
       "stripe_attributed_roas_is_mapping_dependent",
       "ratio_recomputed_from_summed_bases",
       "excludes_unmatched_spend_and_unmatched_revenue",
+      // Unmapped Stripe-source revenue surfaces on campaign-NULL rows of the view (the §5
+      // join-quality signal) — without it unmatched_revenue is structurally 0.
+      "unmatched_revenue_surfaced_on_campaign_null_rows",
+      // The map is SOURCE-LEVEL: matched_revenue sums the whole Stripe-source-day revenue and can
+      // over-credit unrelated invoices billed through the same account. Upper bound, not per-order
+      // attribution (per-order/UTM attribution is out of Phase-1 scope).
+      "stripe_revenue_is_source_level_may_over_attribute",
       "currency_reconciled_to_account_currency_before_dividing",
       "meta_vs_stripe_attribution_date_offset"
     ];
