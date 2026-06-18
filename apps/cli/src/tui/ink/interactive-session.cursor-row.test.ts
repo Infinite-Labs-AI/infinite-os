@@ -1,11 +1,15 @@
+import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
 import { createElement } from "react";
 import { describe, expect, it } from "vitest";
 
-import { composerCursorLayout, composerNativeCursorPosition, renderInkInteractiveSessionToString } from "./interactive-session.js";
+import { composerCursorLayout, composerNativeCursorPosition, renderInkInteractiveSessionToString, wouldTriggerInkFullscreen } from "./interactive-session.js";
 import { inkTranscriptRowCount, renderInkTranscriptToString } from "./transcript-app.js";
 import { Box, Text, renderToString } from "./renderer.js";
 import { DEFAULT_THEME, type Theme } from "../theme.js";
 import { displayWidth } from "../lib/display-width.js";
+import type { Msg } from "../types.js";
 
 // Regression coverage for the native cursor parking one row off the composer.
 // Two independent off-by-one bugs in the row prediction (both deterministic, no PTY):
@@ -118,3 +122,134 @@ describe("top-rule height prediction matches the render (Bug B)", () => {
     });
   }
 });
+
+describe("native cursor under ink's fullscreen write branch (the /sync-tall regression)", () => {
+  // Distinct from Bug A/B: those were errors in OUR static row prediction (still correct —
+  // the suites above prove delta 0). This guards a defect INSIDE ink@6.8: when the frame is
+  // as tall as the terminal it writes `output` without the trailing "\n" (its fullscreen
+  // branch), which violates buildCursorSuffix's "cursor just after the last line" assumption
+  // and parks the native cursor a row ABOVE the composer (width-independent; a tall /sync all
+  // dump trips it). We predict that condition and fall back to the in-text caret.
+
+  it("predicts ink's fullscreen flip conservatively (>= rows - 1) and not below it", () => {
+    // predicted frame height = rowsAboveComposer + composerRows + rowsBelowComposer.
+    // ink itself flips at height >= terminalRows; we trip one row earlier (>= rows-1).
+    expect(wouldTriggerInkFullscreen({ rowsAboveComposer: 10, composerRows: 1, terminalRows: 24 })).toBe(false); // height 11
+    expect(wouldTriggerInkFullscreen({ rowsAboveComposer: 22, composerRows: 1, terminalRows: 24 })).toBe(true);  // height 23 == rows-1: conservative early trip
+    expect(wouldTriggerInkFullscreen({ rowsAboveComposer: 21, composerRows: 1, terminalRows: 24 })).toBe(false); // height 22 < 23
+    expect(wouldTriggerInkFullscreen({ rowsAboveComposer: 22, composerRows: 2, terminalRows: 24 })).toBe(true);  // height 24: composer's own span counted
+    // Completion menu rows render BELOW the composer and count toward ink's outputHeight.
+    expect(wouldTriggerInkFullscreen({ rowsAboveComposer: 10, composerRows: 1, rowsBelowComposer: 0, terminalRows: 18 })).toBe(false); // height 11
+    expect(wouldTriggerInkFullscreen({ rowsAboveComposer: 10, composerRows: 1, rowsBelowComposer: 6, terminalRows: 18 })).toBe(true);  // height 17 == rows-1
+    // No reliable terminal height → never suppress (matches non-TTY / renderToString-less paths).
+    expect(wouldTriggerInkFullscreen({ rowsAboveComposer: 100, composerRows: 5, terminalRows: undefined })).toBe(false);
+    expect(wouldTriggerInkFullscreen({ rowsAboveComposer: 100, composerRows: 5, terminalRows: 0 })).toBe(false);
+  });
+
+  it("wires the fullscreen guard into the composer's native-cursor decision (caller regression)", () => {
+    // The behaviour can't be observed through renderToString — that path has isTTY=false,
+    // so the native cursor is always off there regardless of the guard (same non-PTY limit
+    // the animation-clock wiring guard documents). So pin the wiring: InkLineInput must
+    // consult wouldTriggerInkFullscreen and gate the native cursor on it, using the live
+    // terminal row count. Dropping any of these reopens the /sync-tall drift.
+    const source = readFileSync(fileURLToPath(new URL("./interactive-session.tsx", import.meta.url)), "utf8");
+    expect(source).toContain("wouldTriggerInkFullscreen");
+    expect(source).toContain("terminalRows: stdout?.rows");
+    expect(source).toContain("rowsBelowComposer: completionRows"); // open completion menu counts toward ink's height
+    expect(source).toMatch(/&&\s*!inkFullscreen/);
+  });
+
+  // Behavioural proof, deterministic & no PTY: replay frames through ink's REAL log-update
+  // module (the actual moveUp/eraseLines code) and emulate the terminal, so we observe the
+  // physical native-cursor row. Confirms the bug exists in ink's fullscreen path and that
+  // suppressing the native cursor (what the gate does) removes the one-row-high parking.
+  it("ink's fullscreen write parks the native cursor a row high; suppression fixes it", () => {
+    const tall: Msg[] = Array.from({ length: 18 }, (_, i) => ({ kind: "trail", role: "system", text: `sync line ${i}` }));
+    const value = "confeeeeeee so this is still happening";
+    const columns = 80;
+    const frame = renderInkInteractiveSessionToString(
+      { columns, initialInputValue: value, onSubmitLine: async () => ({}), title: "Infinite TUI", initialMessages: tall },
+      { columns }
+    ).replace(/\n+$/, "");
+    const composerLogicalRow = stripAnsi(frame).split("\n").findIndex((l) => l.startsWith("❯"));
+    const promptWidth = displayWidth("❯ ");
+    const pos = composerNativeCursorPosition({ cursor: value.length, label: "❯", row: composerLogicalRow, value, width: columns });
+
+    // (a) ink's FULLSCREEN write (bare frame, no trailing newline) WITH a native cursor → −1.
+    const fs = replayLogUpdate({ frame, cursor: pos, fullscreen: true, columns });
+    expect(fs.cursorRow).toBe(fs.composerRow - 1);
+
+    // (b) the fix: same fullscreen write but native cursor SUPPRESSED → ink emits no cursor
+    //     positioning, so it never parks above the composer (the in-text caret takes over).
+    const fixed = replayLogUpdate({ frame, cursor: undefined, fullscreen: true, columns });
+    expect(fixed.cursorParked).toBe(false);
+
+    // (c) control: the NORMAL write (frame + "\n") is already correct at any width.
+    const normal = replayLogUpdate({ frame, cursor: pos, fullscreen: false, columns });
+    expect(normal.cursorRow).toBe(normal.composerRow);
+  });
+});
+
+// Replays a frame through ink@6.8's REAL log-update (its true moveUp/eraseLines/cursor code),
+// then runs the captured ANSI through a minimal VT100 emulator (DECAWM deferred-wrap + ONLCR)
+// to report the PHYSICAL native-cursor row vs the composer row. `fullscreen` mirrors ink.js's
+// `outputToRender = isFullscreen ? output : output + "\n"`.
+function replayLogUpdate(
+  { frame, cursor, fullscreen, columns }:
+  { frame: string; cursor: { x: number; y: number } | undefined; fullscreen: boolean; columns: number }
+): { cursorRow: number; composerRow: number; cursorParked: boolean } {
+  const require = createRequire(import.meta.url);
+  const logUpdatePath = require.resolve("ink").replace(/index\.js$/, "log-update.js");
+  const logUpdate = require(logUpdatePath).default as {
+    create: (s: NodeJS.WriteStream) => { (str: string): boolean; setCursorPosition: (p: { x: number; y: number } | undefined) => void };
+  };
+  const bytes: string[] = [];
+  const out = { write: (c: string) => { bytes.push(String(c)); return true; }, columns, rows: 50, isTTY: true } as unknown as NodeJS.WriteStream;
+  const logu = logUpdate.create(out);
+  logu.setCursorPosition(cursor);
+  logu(fullscreen ? frame : frame + "\n");
+  const joined = bytes.join("");
+  const { row, grid } = emulateVt(joined, columns);
+  const composerRow = grid.map((r) => r.join("")).findIndex((l) => stripAnsi(l).startsWith("❯"));
+  // `?25h` (show cursor) only appears when ink positioned a native cursor.
+  const cursorParked = joined.includes("\x1b[?25h");
+  return { cursorRow: row, composerRow, cursorParked };
+}
+
+function emulateVt(bytes: string, width: number) {
+  const grid: string[][] = [];
+  let row = 0, col = 0, pendingWrap = false;
+  const ensure = (r: number) => { while (grid.length <= r) grid.push([]); };
+  const put = (ch: string) => {
+    if (pendingWrap) { col = 0; row += 1; pendingWrap = false; }
+    ensure(row); grid[row]![col] = ch;
+    if (col >= width - 1) pendingWrap = true; else col += 1;
+  };
+  let i = 0;
+  while (i < bytes.length) {
+    const ch = bytes[i]!;
+    if (ch === "\x1b" && bytes[i + 1] === "[") {
+      let j = i + 2, params = "";
+      while (j < bytes.length && /[0-9;?]/.test(bytes[j]!)) { params += bytes[j]!; j += 1; }
+      const final = bytes[j]!; const nums = params.replace(/\?/g, "").split(";").filter((x) => x !== "").map(Number); const n = nums[0] ?? 1;
+      switch (final) {
+        case "A": row = Math.max(0, row - n); pendingWrap = false; break;
+        case "B": row += n; pendingWrap = false; break;
+        case "C": col = Math.min(width - 1, col + n); pendingWrap = false; break;
+        case "D": col = Math.max(0, col - n); pendingWrap = false; break;
+        case "G": col = Math.max(0, n - 1); pendingWrap = false; break;
+        case "H": case "f": row = Math.max(0, (nums[0] ?? 1) - 1); col = Math.max(0, (nums[1] ?? 1) - 1); pendingWrap = false; break;
+        case "J": if (n === 2 || n === 3) grid.length = 0; break;
+        case "K": { ensure(row); const m = nums[0] ?? 0; if (m === 2) grid[row]!.length = 0; else if (m === 0) grid[row]!.splice(col); else for (let c = 0; c <= col; c++) grid[row]![c] = " "; break; }
+        default: break;
+      }
+      i = j + 1; continue;
+    }
+    if (ch === "\x1b") { i += 2; continue; }
+    if (ch === "\n") { row += 1; col = 0; pendingWrap = false; i += 1; continue; } // TTY ONLCR
+    if (ch === "\r") { col = 0; pendingWrap = false; i += 1; continue; }
+    if (ch === "\b") { col = Math.max(0, col - 1); pendingWrap = false; i += 1; continue; }
+    put(ch); i += 1;
+  }
+  return { row, grid };
+}

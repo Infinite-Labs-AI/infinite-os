@@ -951,6 +951,7 @@ export function InkInteractiveSessionApp({
       <InkLineInput
         busy={busy}
         completionActive={completions.length > 0}
+        completionRows={completions.length}
         cursor={inputCursor}
         connectConfirmActive={Boolean(pendingConnectConfirm)}
         fieldPromptActive={fieldPromptActive}
@@ -1549,6 +1550,45 @@ export function composerNativeCursorPosition({
   };
 }
 
+/**
+ * Predict whether ink will take its fullscreen write branch for the current frame.
+ *
+ * ink@6.8 (`ink.js`) renders `outputToRender = isFullscreen ? output : output + "\n"`
+ * where `isFullscreen = stdout.isTTY && outputHeight >= stdout.rows` and `outputHeight`
+ * is the frame's LOGICAL line count. Its cursor helper (`cursor-helpers.js`) then parks
+ * the native cursor with `cursorUp(visibleLineCount − y)` under the documented assumption
+ * that the cursor sits "just after the last output line" — which only holds when that
+ * trailing "\n" is written. In the fullscreen branch the bare `output` leaves the cursor
+ * ON the last line, so the native cursor lands one row ABOVE the composer (a cursor-only
+ * re-render compounds it to two). The defect is width-independent; a tall transcript (e.g.
+ * a `/sync all` dump that pushes the frame to the terminal height) is what trips it.
+ *
+ * We can't change ink's branch, so we predict the same condition and suppress the native
+ * cursor (falling back to the in-text caret, which renders on the correct row regardless).
+ * `rowsAboveComposer` is `inkTranscriptRowCount({ showComposer: false })` (verified to equal
+ * the rendered rows above the composer), `composerRows` is the composer's OWN wrapped row
+ * span (NOT the literal 1 that `inkTranscriptRowCount` reserves), and `rowsBelowComposer`
+ * covers anything ink counts in `outputHeight` after the composer (the completion menu —
+ * the other overlays already force the native cursor off). Their sum mirrors ink's
+ * `outputHeight`; the `− 1` keeps the gate biased to trip no later than ink's actual flip.
+ */
+export function wouldTriggerInkFullscreen({
+  rowsAboveComposer,
+  composerRows,
+  rowsBelowComposer = 0,
+  terminalRows
+}: {
+  rowsAboveComposer: number;
+  composerRows: number;
+  rowsBelowComposer?: number;
+  terminalRows: number | undefined;
+}): boolean {
+  if (typeof terminalRows !== "number" || terminalRows <= 0) {
+    return false;
+  }
+  return rowsAboveComposer + composerRows + rowsBelowComposer >= terminalRows - 1;
+}
+
 export function completePathArguments(
   value: string,
   options: CompletionOptions = {}
@@ -1703,6 +1743,7 @@ export function navigateInputHistory(
 function InkLineInput({
   busy,
   completionActive,
+  completionRows,
   connectConfirmActive,
   cursor,
   fieldChoiceActive,
@@ -1739,6 +1780,7 @@ function InkLineInput({
 }: {
   busy: boolean;
   completionActive: boolean;
+  completionRows: number;
   connectConfirmActive: boolean;
   cursor: number;
   fieldChoiceActive: boolean;
@@ -1956,8 +1998,21 @@ function InkLineInput({
   const label = pendingConfirmation ? "!" : overlayActive ? "?" : theme.brand.prompt;
   const promptWidth = displayWidth(`${label} `);
   const inputWidth = Math.max(1, width - promptWidth);
+  // When the frame is tall enough to trip ink's fullscreen write branch, ink parks the
+  // native cursor a row above the composer (see wouldTriggerInkFullscreen). Suppress the
+  // native cursor there and let renderComposerValueWithCursor draw the in-text caret.
+  // An open completion menu renders BELOW the composer and counts toward ink's outputHeight
+  // (the other overlays already force the native cursor off), so include its rows here.
+  const composerRows = composerCursorLayout(value, value.length, inputWidth).line + 1;
+  const inkFullscreen = wouldTriggerInkFullscreen({
+    rowsAboveComposer: row,
+    composerRows,
+    rowsBelowComposer: completionRows,
+    terminalRows: stdout?.rows
+  });
   const nativeCursor =
-    !busy && !overlayActive && !valueIsMasked && !composerSelectedRange(value, selection) && Boolean(stdout?.isTTY);
+    !busy && !overlayActive && !valueIsMasked && !composerSelectedRange(value, selection)
+    && Boolean(stdout?.isTTY) && !inkFullscreen;
   setCursorPosition(nativeCursor
     ? composerNativeCursorPosition({ cursor, label, row, value, width })
     : undefined);
