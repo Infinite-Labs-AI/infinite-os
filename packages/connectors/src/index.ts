@@ -2103,12 +2103,90 @@ async function writeShopifyTruth(
   }
 }
 
+// §2.1 — fold the campaign×day delivery rows down to one dimension row per campaign and
+// upsert meta_ads_campaigns. The dimension carries the account currency + coarse objective +
+// display name the §5 Stripe-join views LEFT JOIN for currency/objective. Without this writer
+// dim.currency/dim.objective were always NULL (so is_mapped was always false and the Stripe
+// ROAS numerator was always 0). The dimension is campaign-grain, so we keep the LAST non-null
+// value seen across the synced days for each (source, account, campaign) — last-write-wins,
+// matching the §4c restatement model. Currency/objective rarely change within a window; when
+// they do, the most recent day's value wins.
+function metaAdsDimensionRows(
+  rows: MetaAdsCampaignDailyRow[]
+): Map<string, { adAccountId: string; campaignId: string; name: string | null; objective: string | null; currency: string | null }> {
+  const dims = new Map<
+    string,
+    { adAccountId: string; campaignId: string; name: string | null; objective: string | null; currency: string | null }
+  >();
+  for (const row of rows) {
+    const key = `${row.adAccountId}:${row.campaignId}`;
+    const existing = dims.get(key);
+    dims.set(key, {
+      adAccountId: row.adAccountId,
+      campaignId: row.campaignId,
+      // Coalesce so a later day with a null field does not erase an earlier non-null value.
+      name: row.campaignName ?? existing?.name ?? null,
+      objective: row.objective ?? existing?.objective ?? null,
+      currency: row.currency ?? existing?.currency ?? null
+    });
+  }
+  return dims;
+}
+
+async function writeMetaAdsCampaignDimension(
+  tx: InfiniteOsDb,
+  request: SyncRequest,
+  rows: MetaAdsCampaignDailyRow[],
+  rawIds: string[]
+): Promise<void> {
+  // A raw_record_id for provenance (any row from this run; the dimension is a fold, not a
+  // single source row). Use the first row's raw id when present.
+  const rawRecordId = rawIds[0] ?? null;
+  for (const dim of metaAdsDimensionRows(rows).values()) {
+    await tx.query(
+      `
+        insert into meta_ads_campaigns (
+          id, workspace_id, source_id, raw_record_id, ad_account_id, campaign_id,
+          name, objective, currency
+        )
+        values ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+        on conflict (source_id, ad_account_id, campaign_id)
+        do update set
+          raw_record_id = excluded.raw_record_id,
+          -- coalesce so a re-sync that momentarily lacks a field never nulls a known value.
+          name = coalesce(excluded.name, meta_ads_campaigns.name),
+          objective = coalesce(excluded.objective, meta_ads_campaigns.objective),
+          currency = coalesce(excluded.currency, meta_ads_campaigns.currency),
+          updated_at = now()
+      `,
+      [
+        `madm_${randomUUID()}`,
+        request.workspaceId,
+        request.sourceId,
+        rawRecordId,
+        dim.adAccountId,
+        dim.campaignId,
+        dim.name,
+        dim.objective,
+        dim.currency
+      ]
+    );
+    // Lineage carries an FK to raw_records, so only write it when a real raw id exists for
+    // this run (the dimension is a fold of the day rows; a fabricated id would break the FK).
+    if (rawRecordId) {
+      await writeLineage(tx, request, "meta_ads_campaigns", `${dim.adAccountId}:${dim.campaignId}`, rawRecordId);
+    }
+  }
+}
+
 async function writeMetaAdsTruth(
   tx: InfiniteOsDb,
   request: SyncRequest,
   rows: MetaAdsCampaignDailyRow[],
   rawIds: string[]
 ): Promise<void> {
+  // §2.1 — populate the campaign dimension first so the §5 join views have currency/objective.
+  await writeMetaAdsCampaignDimension(tx, request, rows, rawIds);
   for (let index = 0; index < rows.length; index += 1) {
     const row = rows[index];
     // §4c restatement — the unique key (source_id, ad_account_id, campaign_id,

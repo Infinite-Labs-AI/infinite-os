@@ -744,6 +744,23 @@ describe("Infinite OS migration stack", () => {
     expect(lower).toContain("/ 100.0");
     expect(lower).toContain("lower(r.currency) = s.account_currency");
 
+    // §5 DOUBLE-COUNT GUARD (finding #4): a Stripe source mapped to N campaigns must NOT fan
+    // the full source-day revenue onto every campaign (account-level roas_from_stripe sums
+    // matched_revenue_major across campaigns and would inflate ROAS ~N-fold). The view totals
+    // revenue ONCE per revenue-source-day (a distinct-source-day CTE) and attributes the whole
+    // total to a SINGLE representative campaign per source-day via row_number()=1. A revert to
+    // grouping revenue by campaign_id directly off `spend` reintroduces the fan-out and fails.
+    expect(lower).toContain("source_day_revenue");
+    expect(lower).toContain("mapped_campaign_pick");
+    expect(lower).toContain("row_number() over");
+    expect(collapsed).toContain("where p.rn = 1");
+    // The revenue total is computed over a DISTINCT revenue-source-day set, not per campaign.
+    expect(lower).toContain("select distinct");
+    // Guard the guard: the old per-campaign revenue group-by (the fan-out) must be gone.
+    expect(collapsed).not.toContain(
+      "group by s.workspace_id, s.source_id, s.ad_account_id, s.campaign_id, s.occurred_on"
+    );
+
     // §6 seeds for frequency (delivery view) + roas_from_stripe (join view), recomputed from
     // summed bases — never per-row avg.
     expect(sql).toContain("'frequency'");

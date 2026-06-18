@@ -147,24 +147,80 @@ with spend as (
     and m.ad_account_id = d.ad_account_id
     and m.campaign_id = d.campaign_id
 ),
--- Revenue attributed to a campaign via the mapping, reconciled to the account currency BEFORE
--- it is divided. Only same-currency revenue is matched (no FX); cents -> major via /100.0.
-revenue as (
+-- Revenue attributed via the mapping, reconciled to the account currency BEFORE it is divided.
+-- Only same-currency revenue is matched (no FX); cents -> major via /100.0.
+--
+-- DOUBLE-COUNT GUARD (the load-bearing §5 correctness rule): vw_revenue_by_source has NO
+-- campaign key, so a single Stripe revenue_source_id maps to N campaigns is the NORMAL
+-- topology. If we joined the source-day revenue onto EVERY co-mapped campaign, an account-level
+-- roas_from_stripe (which sums matched_revenue_major across campaigns) would count that day's
+-- revenue N times and inflate ROAS ~N-fold. Instead we:
+--   1. (source_day_revenue) total the per-(meta source, account, revenue source, day, currency)
+--      revenue EXACTLY ONCE, independent of how many campaigns are mapped to it; then
+--   2. (revenue) attribute that whole total to a SINGLE representative campaign per
+--      revenue-source-day (the lexicographically-first mapped campaign_id, picked
+--      deterministically via row_number()), and 0 to the rest.
+-- Net: summing matched_revenue_major across the co-mapped campaigns equals the source-day
+-- revenue ONCE — never N times. Per-campaign spend is unaffected (spend is genuinely
+-- per-campaign and is never fanned). When exactly one campaign maps to a source this collapses
+-- to the obvious 1:1 attribution. (A future explicit per-campaign revenue weight on the map
+-- would replace the single-representative pick with a split; until then attribution is
+-- whole-to-one so the account-level total stays exact.)
+source_day_revenue as (
   select
     s.workspace_id,
     s.source_id,
     s.ad_account_id,
-    s.campaign_id,
+    s.revenue_source_id,
     s.occurred_on,
+    s.account_currency,
     sum(r.recognized_revenue) / 100.0 as revenue_major
-  from spend s
+  from (
+    -- distinct revenue-source-days in the mapped set, so the revenue total is computed once
+    -- per source-day and not multiplied by the number of co-mapped campaigns.
+    select distinct
+      workspace_id, source_id, ad_account_id, revenue_source_id, occurred_on, account_currency
+    from spend
+    where is_mapped
+  ) s
   join queryable.vw_revenue_by_source r
     on r.workspace_id = s.workspace_id
     and r.source_id = s.revenue_source_id
     and r.occurred_on = s.occurred_on
     and lower(r.currency) = s.account_currency
-  where s.is_mapped
-  group by s.workspace_id, s.source_id, s.ad_account_id, s.campaign_id, s.occurred_on
+  group by s.workspace_id, s.source_id, s.ad_account_id, s.revenue_source_id,
+    s.occurred_on, s.account_currency
+),
+-- Deterministically pick ONE campaign per revenue-source-day to carry the whole revenue total.
+mapped_campaign_pick as (
+  select
+    workspace_id, source_id, ad_account_id, campaign_id, revenue_source_id, occurred_on,
+    account_currency,
+    row_number() over (
+      partition by workspace_id, source_id, ad_account_id, revenue_source_id, occurred_on,
+        account_currency
+      order by campaign_id
+    ) as rn
+  from spend
+  where is_mapped
+),
+revenue as (
+  select
+    p.workspace_id,
+    p.source_id,
+    p.ad_account_id,
+    p.campaign_id,
+    p.occurred_on,
+    sdr.revenue_major
+  from mapped_campaign_pick p
+  join source_day_revenue sdr
+    on sdr.workspace_id = p.workspace_id
+    and sdr.source_id = p.source_id
+    and sdr.ad_account_id = p.ad_account_id
+    and sdr.revenue_source_id = p.revenue_source_id
+    and sdr.occurred_on = p.occurred_on
+    and sdr.account_currency = p.account_currency
+  where p.rn = 1
 )
 select
   s.workspace_id,

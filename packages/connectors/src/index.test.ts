@@ -1836,8 +1836,8 @@ console.log(JSON.stringify({ data: [] }));
     });
   });
 
-  it("writes Meta Ads raw rows before campaign-daily truth", async () => {
-    const queries: string[] = [];
+  it("writes Meta Ads raw rows + the campaign dimension before campaign-daily truth", async () => {
+    const queries: Array<{ sql: string; params?: unknown[] }> = [];
     await withMockFetch(async () =>
       jsonResponse({
         data: [
@@ -1851,14 +1851,16 @@ console.log(JSON.stringify({ data: [] }));
             reach: "3200",
             cpm: "27.03",
             cpc: "1.39",
-            ctr: "1.95"
+            ctr: "1.95",
+            objective: "OUTCOME_LEADS",
+            account_currency: "USD"
           }
         ],
         paging: {}
       }), async () => {
       const result = await connectorFor("meta_ads").sync(
         fakeDb({
-          queries,
+          queryLog: queries,
           credential: {
             credential_kind: "marketing_api_access_token",
             encrypted_payload: encryptedCredential({
@@ -1872,12 +1874,25 @@ console.log(JSON.stringify({ data: [] }));
         request("meta_ads")
       );
 
-      const rawIndex = queries.findIndex((sql) => sql.includes("insert into raw_records"));
-      const truthIndex = queries.findIndex((sql) => sql.includes("insert into meta_ads_campaign_daily"));
+      const sqls = queries.map((entry) => entry.sql);
+      const rawIndex = sqls.findIndex((sql) => sql.includes("insert into raw_records"));
+      const dimIndex = sqls.findIndex((sql) => sql.includes("insert into meta_ads_campaigns"));
+      const truthIndex = sqls.findIndex((sql) => sql.includes("insert into meta_ads_campaign_daily"));
       expect(result).toMatchObject({ provider: "meta_ads", recordsExtracted: 1, recordsLoaded: 1 });
       expect(rawIndex).toBeGreaterThanOrEqual(0);
+      // §2.1 — the dimension is populated (currency/objective for the §5 Stripe join), and it
+      // is written BEFORE the delivery fact so the join views always have a campaign row.
+      expect(dimIndex).toBeGreaterThanOrEqual(0);
+      expect(dimIndex).toBeLessThan(truthIndex);
       expect(truthIndex).toBeGreaterThan(rawIndex);
-      expect(queries.some((sql) => sql.includes("on conflict (source_id, ad_account_id, campaign_id, occurred_on)"))).toBe(true);
+      expect(queries.some((entry) => entry.sql.includes("on conflict (source_id, ad_account_id, campaign_id, occurred_on)"))).toBe(true);
+      // The dimension upsert carries the load-bearing currency (lowercased) + objective so
+      // dim.currency / dim.objective are no longer always NULL on the join views.
+      const dimQuery = queries.find((entry) => entry.sql.includes("insert into meta_ads_campaigns"));
+      expect(dimQuery?.sql).toContain("on conflict (source_id, ad_account_id, campaign_id)");
+      expect(dimQuery?.params).toContain("usd"); // currency lowercased
+      expect(dimQuery?.params).toContain("OUTCOME_LEADS"); // coarse objective
+      expect(dimQuery?.params).toContain("1200000001"); // campaign_id
     });
   });
 
@@ -3002,10 +3017,17 @@ function fakeDb(options: {
   credential: { credential_kind: string; encrypted_payload: string };
   cursorValue?: string;
   queries?: string[];
+  // Optional params-aware log (mirrors oauthFakeDb.queryLog) for tests that assert on the
+  // bound values, e.g. the campaign-dimension currency/objective upsert.
+  queryLog?: Array<{ sql: string; params?: unknown[] }>;
 }): InfiniteOsDb {
+  const record = (sql: string, params?: unknown[]) => {
+    options.queries?.push(sql);
+    options.queryLog?.push({ sql, params });
+  };
   return {
-    async one<T>(sql: string): Promise<T | null> {
-      options.queries?.push(sql);
+    async one<T>(sql: string, params?: unknown[]): Promise<T | null> {
+      record(sql, params);
       if (sql.includes("connection_credentials")) {
         return options.credential as T;
       }
@@ -3014,8 +3036,8 @@ function fakeDb(options: {
       }
       return null;
     },
-    async query(sql: string) {
-      options.queries?.push(sql);
+    async query(sql: string, params?: unknown[]) {
+      record(sql, params);
       return [];
     },
     async close() {},
