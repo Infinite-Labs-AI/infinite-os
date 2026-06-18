@@ -639,12 +639,46 @@ async function verifyClaims(
   });
 }
 
+// Stop-words stripped before the relaxed near-candidate pass: generic campaign/entity filler that
+// would otherwise drag in every campaign (e.g. "sales campaign" must search for "sales", not "campaign").
+const CAMPAIGN_QUERY_STOP_WORDS = new Set([
+  "campaign", "campaigns", "the", "a", "an", "my", "our", "ad", "ads", "on", "for", "of", "in", "and", "meta", "facebook", "instagram"
+]);
+
+function significantCampaignTokens(query: string): string[] {
+  const seen = new Set<string>();
+  const tokens: string[] = [];
+  for (const raw of query.toLowerCase().split(/[^a-z0-9]+/i)) {
+    const token = raw.trim();
+    if (token.length < 2 || CAMPAIGN_QUERY_STOP_WORDS.has(token) || seen.has(token)) {
+      continue;
+    }
+    seen.add(token);
+    tokens.push(token);
+  }
+  return tokens;
+}
+
 async function resolveCampaignEntities(
   db: InfiniteOsDb,
   workspaceId: string,
   query: string,
   limit: number
 ): Promise<Record<string, unknown>[]> {
+  const toEvidence = (rows: Record<string, unknown>[]): Record<string, unknown>[] =>
+    rows.map((row) => sanitizeEvidenceRow({
+      entityType: "campaign",
+      entityKey: row.campaign_id,
+      label: row.campaign_name ?? row.campaign_id,
+      sourceId: row.source_id,
+      lastSeenOn: row.last_seen_on,
+      metrics: {
+        meta_ads_clicks: row.meta_ads_clicks,
+        meta_ads_spend: row.meta_ads_spend,
+        impressions: row.impressions
+      }
+    }));
+
   const like = `%${query}%`;
   const rows = await db.query<Record<string, unknown>>(
     `
@@ -662,18 +696,40 @@ async function resolveCampaignEntities(
     `,
     [workspaceId, like, limit]
   );
-  return rows.map((row) => sanitizeEvidenceRow({
-    entityType: "campaign",
-    entityKey: row.campaign_id,
-    label: row.campaign_name ?? row.campaign_id,
-    sourceId: row.source_id,
-    lastSeenOn: row.last_seen_on,
-    metrics: {
-      meta_ads_clicks: row.meta_ads_clicks,
-      meta_ads_spend: row.meta_ads_spend,
-      impressions: row.impressions
-    }
-  }));
+  if (rows.length > 0) {
+    return toEvidence(rows);
+  }
+
+  // Relaxed near-candidate pass: the exact `%query%` substring matched nothing, so tokenize the
+  // query, drop generic stop-words, and OR the significant tokens (e.g. "sales campaign" -> "sales")
+  // so "sales campaign" still surfaces "Sales — Summer Sale". Returned as candidates the controller
+  // can pick from or present to the user instead of bailing with no leads. READ-ONLY — same view,
+  // same grouping; nothing here writes or relaxes a partition.
+  const tokens = significantCampaignTokens(query);
+  if (tokens.length === 0) {
+    return [];
+  }
+  const tokenParams = tokens.map((token) => `%${token}%`);
+  const tokenClauses = tokens
+    .map((_token, index) => `(campaign_id ilike $${index + 2} or campaign_name ilike $${index + 2})`)
+    .join(" or ");
+  const nearRows = await db.query<Record<string, unknown>>(
+    `
+      select source_id, campaign_id, campaign_name,
+        sum(meta_ads_clicks) as meta_ads_clicks,
+        sum(meta_ads_spend) as meta_ads_spend,
+        sum(impressions) as impressions,
+        max(occurred_on) as last_seen_on
+      from queryable.vw_meta_ads_campaign_daily
+      where workspace_id = $1
+        and (${tokenClauses})
+      group by source_id, campaign_id, campaign_name
+      order by sum(meta_ads_clicks) desc nulls last, max(occurred_on) desc nulls last
+      limit $${tokens.length + 2}
+    `,
+    [workspaceId, ...tokenParams, limit]
+  );
+  return toEvidence(nearRows);
 }
 
 async function resolveXContentEntities(

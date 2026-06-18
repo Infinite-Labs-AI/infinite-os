@@ -620,6 +620,134 @@ describe("analytical engine smoke", () => {
     });
   });
 
+  it("resolve_entity falls back to tokenized near-candidates when the exact substring misses", async () => {
+    // Fake db that HONORS the ilike substring pass (which the real SQL does) so the relaxed
+    // second pass is observable: the exact `%sales campaign%` substring matches no campaign_name,
+    // but tokenizing to "sales" (campaign is a stop-word) surfaces "Sales — Summer Sale".
+    const campaigns = [
+      { source_id: "src_meta", campaign_id: "cmp_summer", campaign_name: "Sales — Summer Sale" },
+      { source_id: "src_meta", campaign_id: "cmp_brand", campaign_name: "Brand Awareness" }
+    ];
+    const fakeDb = {
+      async query<T = Record<string, unknown>>(sql: string, params: unknown[] = []): Promise<T[]> {
+        if (sql.includes("from queryable.vw_meta_ads_campaign_daily")) {
+          // params: [workspaceId, ...%token% patterns, limit]. Emulate the OR-of-ilike WHERE.
+          const patterns = params
+            .slice(1, -1)
+            .map((value) => String(value).replace(/%/g, "").toLowerCase());
+          const matched = campaigns.filter((campaign) =>
+            patterns.some(
+              (pattern) =>
+                campaign.campaign_id.toLowerCase().includes(pattern) ||
+                campaign.campaign_name.toLowerCase().includes(pattern)
+            )
+          );
+          return matched.map((campaign) => ({
+            ...campaign,
+            meta_ads_clicks: "10",
+            meta_ads_spend: "5",
+            impressions: "100",
+            last_seen_on: "2026-06-07"
+          })) as T[];
+        }
+        return [] as T[];
+      },
+      async one() {
+        return null;
+      },
+      async close() {},
+      async ensureWorkspace() {},
+      async ensureFirstPhaseDatasets() {},
+      async connectSource() {
+        return null as never;
+      },
+      async updateSourceStatus() {},
+      async createJob() {
+        return {};
+      },
+      async claimNextJob() {
+        return null;
+      },
+      async completeJob() {},
+      async withTransaction(fn: (db: InfiniteOsDb) => unknown) {
+        return fn(this as unknown as InfiniteOsDb);
+      }
+    } as unknown as InfiniteOsDb;
+
+    const registry = createInfiniteOsRegistry(createActionHandlers(fakeDb));
+    const context = {
+      workspaceId: "workspace",
+      authority: "tool_agent",
+      surface: "mcp",
+      actorId: "founder",
+      sessionId: "session"
+    } as const;
+
+    const resolved = await registry.execute(
+      "resolve_entity",
+      { entityType: "campaign", query: "sales campaign" },
+      context
+    );
+
+    expect(resolved.status).toBe("resolved");
+    expect(resolved.data).toMatchObject({
+      candidates: expect.arrayContaining([
+        expect.objectContaining({ entityType: "campaign", label: "Sales — Summer Sale" })
+      ])
+    });
+    // The stop-word-only / unrelated campaign must NOT be dragged in by the relaxed pass.
+    const labels = (resolved.data as { candidates: Array<{ label: string }> }).candidates.map(
+      (candidate) => candidate.label
+    );
+    expect(labels).not.toContain("Brand Awareness");
+  });
+
+  it("resolve_entity returns no candidates when even the relaxed token pass misses", async () => {
+    const fakeDb = {
+      async query<T = Record<string, unknown>>(): Promise<T[]> {
+        return [] as T[];
+      },
+      async one() {
+        return null;
+      },
+      async close() {},
+      async ensureWorkspace() {},
+      async ensureFirstPhaseDatasets() {},
+      async connectSource() {
+        return null as never;
+      },
+      async updateSourceStatus() {},
+      async createJob() {
+        return {};
+      },
+      async claimNextJob() {
+        return null;
+      },
+      async completeJob() {},
+      async withTransaction(fn: (db: InfiniteOsDb) => unknown) {
+        return fn(this as unknown as InfiniteOsDb);
+      }
+    } as unknown as InfiniteOsDb;
+
+    const registry = createInfiniteOsRegistry(createActionHandlers(fakeDb));
+    const context = {
+      workspaceId: "workspace",
+      authority: "tool_agent",
+      surface: "mcp",
+      actorId: "founder",
+      sessionId: "session"
+    } as const;
+
+    const resolved = await registry.execute(
+      "resolve_entity",
+      { entityType: "campaign", query: "nonexistent campaign" },
+      context
+    );
+
+    expect(resolved.status).toBe("needs_clarification");
+    expect(resolved.caveats).toContain("no_matching_entity");
+  });
+
   // FIX 5 — journey-path recompute guard, mirroring the run_metric_query Phase-0 test.
   // metaCampaignJourneyRows() emits cpm/cpc/ctr in its SELECT. They MUST be recomputed
   // from summed bases (the same expressions aggregateExpression() uses), never avg(cpm)/
