@@ -91,6 +91,7 @@ describe("Infinite OS LLM controller", () => {
     expect(systemPrompt).toContain("why it matters");
     expect(systemPrompt).toContain("one scalar result or one lonely ranked row");
     expect(systemPrompt).toContain("do not stop at inventory-only results");
+    expect(systemPrompt).toContain("recognized_revenue returns values in the currency's MINOR unit");
     expect(systemPrompt).toContain("source lists, sync lists, metric lists, or view lists");
     expect(systemPrompt).toContain("combine three things before answering strongly");
     expect(systemPrompt).toContain("what is connected, whether it looks current/fresh, and at least one concrete analytical signal");
@@ -5322,11 +5323,13 @@ describe("Infinite OS LLM controller", () => {
     expect(sections.join("\n")).not.toContain("Metric-question refinement guidance:");
   });
 
-  it("classifies bare 'what's my revenue' phrasings as recognized_revenue so revenue still confirms a time window", async () => {
+  it("classifies bare 'what's my revenue' phrasings (incl. apostrophe-less) as recognized_revenue so revenue shows standard windows", async () => {
     const { classifyQueryFamily } = await import("../src/query-advisor.js");
     expect(classifyQueryFamily("what's my revenue?")).toBe("recognized_revenue");
+    expect(classifyQueryFamily("whats my revenue")).toBe("recognized_revenue");
     expect(classifyQueryFamily("what is our revenue")).toBe("recognized_revenue");
     expect(classifyQueryFamily("how's revenue")).toBe("recognized_revenue");
+    expect(classifyQueryFamily("hows revenue")).toBe("recognized_revenue");
     expect(classifyQueryFamily("show me my revenue")).toBe("recognized_revenue");
   });
 

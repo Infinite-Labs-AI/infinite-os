@@ -838,6 +838,9 @@ function pendingXClarificationQuestion(
   return undefined;
 }
 
+// Retained as a one-release migration shim: with "show, don't ask" nothing currently
+// emits a "Which time period do you want" question, but this still resolves a bare
+// time-scope reply if any session history (or a future ask) contains that prompt.
 function pendingTimeScopeClarificationQuestion(
   recentMessages: QueryAdvisorInput["recentMessages"]
 ): string | undefined {
@@ -1284,7 +1287,7 @@ function isAmbiguousBusinessChannelQuestion(message: string): boolean {
 }
 
 function isDirectRevenueQuestion(message: string): boolean {
-  return /\b(how much revenue|how much (?:did|have) (?:i|we) (?:make|made|earn|earned)|what(?:'s| is| are)? (?:my|our|the) revenues?|what revenue did|revenue total|total revenue|how(?:'s| is| are) (?:my |our |the )?revenues?( doing)?|show me (?:my |our |the )?revenues?)\b/i.test(message);
+  return /\b(how much revenue|how much (?:did|have) (?:i|we) (?:make|made|earn|earned)|what(?:['’]?s| is| are)? (?:my|our|the) revenues?|what revenue did|revenue total|total revenue|how(?:['’]?s| is| are) (?:my |our |the )?revenues?( doing)?|show me (?:my |our |the )?revenues?)\b/i.test(message);
 }
 
 function isDirectRevenueBreakdownQuestion(message: string): boolean {
@@ -1691,7 +1694,7 @@ const METRIC_TERM_RE =
   /\b(clicks?|impressions?|reach|ctr|cpc|cpm|cpl|cpa|roas|frequency|spend|cost per (?:lead|result|acquisition|conversion|click|mille|thousand)|conversions?|results?|leads?|purchases?|link clicks?|landing page views?|page ?views?|visitors?|users?|sessions?|signups?|orders?|revenue|sales|gmv|followers?|tweets?|posts?|comments?|replies|engagement|events?|conversion (?:rate|value)|engagement rate|session duration)\b/i;
 function isTargetedMetricQuestion(message: string): boolean {
   const metricShaped =
-    /\b(how many|how much|what(?:'s| is| are)? (?:my|our|the)|what was (?:my|our|the)|show me|give me)\b/i.test(message) ||
+    /\b(how many|how much|what(?:['’]?s| is| are)? (?:my|our|the)|what was (?:my|our|the)|show me|give me)\b/i.test(message) ||
     /\bcost per\b/i.test(message);
   return metricShaped && METRIC_TERM_RE.test(message);
 }
@@ -1875,8 +1878,8 @@ export function classifyQueryFamily(message: string): QueryFamily {
     /\btell me about revenue\b/i.test(message) ||
     /\brevenue overview\b/i.test(message) ||
     /\brevenue total\b/i.test(message) ||
-    /\bwhat(?:'s| is| are)? (?:my|our|the) revenues?\b/i.test(message) ||
-    /\bhow(?:'s| is| are) (?:my |our |the )?revenues?\b/i.test(message) ||
+    /\bwhat(?:['’]?s| is| are)? (?:my|our|the) revenues?\b/i.test(message) ||
+    /\bhow(?:['’]?s| is| are) (?:my |our |the )?revenues?\b/i.test(message) ||
     /\bshow me (?:my |our |the )?revenues?\b/i.test(message)
   ) {
     return "recognized_revenue";
