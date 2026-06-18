@@ -43,7 +43,11 @@ describe("Infinite OS migration stack", () => {
       "0026_workspace_site_ga4_link.sql",
       "0027_exclude_dev_host_traffic.sql",
       "0028_meta_write_dedup.sql",
-      "0029_meta_ads_extended_metric_seeds.sql"
+      "0029_meta_ads_extended_metric_seeds.sql",
+      "0030_meta_ads_campaigns.sql",
+      "0031_meta_ads_campaign_conversions_daily.sql",
+      "0032_meta_ads_campaign_daily_conversion_columns.sql",
+      "0033_meta_ads_conversion_views_and_metric_seeds.sql"
     ]);
   });
 
@@ -102,6 +106,8 @@ describe("Infinite OS migration stack", () => {
       "shopify_order_lines",
       "shopify_products",
       "meta_ads_campaign_daily",
+      "meta_ads_campaigns",
+      "meta_ads_campaign_conversions_daily",
       "chat_sessions",
       "chat_messages",
       "chat_action_calls",
@@ -350,7 +356,11 @@ describe("Infinite OS migration stack", () => {
       "0026_workspace_site_ga4_link.sql",
       "0027_exclude_dev_host_traffic.sql",
       "0028_meta_write_dedup.sql",
-      "0029_meta_ads_extended_metric_seeds.sql"
+      "0029_meta_ads_extended_metric_seeds.sql",
+      "0030_meta_ads_campaigns.sql",
+      "0031_meta_ads_campaign_conversions_daily.sql",
+      "0032_meta_ads_campaign_daily_conversion_columns.sql",
+      "0033_meta_ads_conversion_views_and_metric_seeds.sql"
     ]);
   });
 
@@ -535,6 +545,157 @@ describe("Infinite OS migration stack", () => {
     expect(lower).not.toContain("avg(ctr)");
 
     // Idempotent additive seed: upsert, no destructive statements.
+    expect(lower).toContain("on conflict (id) do update set");
+    expect(lower).not.toContain("drop table");
+    expect(lower).not.toContain("drop column");
+    expect(lower).not.toContain("delete from");
+  });
+
+  it("creates the Meta Ads campaign dimension with the load-bearing currency column (0030)", () => {
+    const migration = loadMigrations().find(
+      (candidate) => candidate.id === "0030_meta_ads_campaigns.sql"
+    );
+    const sql = (migration?.sql ?? "").toLowerCase();
+    const collapsed = sql.replace(/\s+/g, " ");
+
+    expect(sql).toContain("create table meta_ads_campaigns");
+    // §2.1 columns incl. the load-bearing account currency.
+    for (const col of ["objective", "effective_status", "configured_status", "currency"]) {
+      expect(sql).toContain(col);
+    }
+    // Campaign-grain identity (one row per campaign per source/account).
+    expect(collapsed).toContain("unique (source_id, ad_account_id, campaign_id)");
+    // Worker ingests the dimension; grant guarded for a fresh DB (0028 pattern).
+    expect(sql).toContain("grant select, insert, update on meta_ads_campaigns to growth_os_worker");
+    expect(sql).toContain("if exists (select from pg_roles where rolname = 'growth_os_worker')");
+    // Additive table create only — no destructive statements.
+    expect(sql).not.toContain("drop table");
+    expect(sql).not.toContain("delete from");
+  });
+
+  it("creates the typed conversions child fact at campaign x day x result_type grain (0031)", () => {
+    const migration = loadMigrations().find(
+      (candidate) => candidate.id === "0031_meta_ads_campaign_conversions_daily.sql"
+    );
+    const sql = (migration?.sql ?? "").toLowerCase();
+    const collapsed = sql.replace(/\s+/g, " ");
+
+    expect(sql).toContain("create table meta_ads_campaign_conversions_daily");
+    // §2.3 columns: typed grain + guarded value + provenance.
+    for (const col of [
+      "result_type",
+      "results",
+      "conversion_value",
+      "attribution_setting",
+      "is_primary",
+      "results_source"
+    ]) {
+      expect(sql).toContain(col);
+    }
+    // The typed grain is enforced by the unique key INCLUDING result_type — a
+    // lead+purchase campaign-day gets BOTH rows, no loser dropped.
+    expect(collapsed).toContain(
+      "unique (source_id, ad_account_id, campaign_id, occurred_on, result_type)"
+    );
+    // result_type travels on every row (NOT NULL) so CPL/CPA can never blend.
+    expect(collapsed).toContain("result_type text not null");
+    // Worker restates this fact; grant guarded for a fresh DB.
+    expect(sql).toContain(
+      "grant select, insert, update on meta_ads_campaign_conversions_daily to growth_os_worker"
+    );
+    expect(sql).not.toContain("drop table");
+    expect(sql).not.toContain("delete from");
+  });
+
+  it("extends the delivery fact additively WITHOUT scalar results/result_type or per-window columns (0032)", () => {
+    const migration = loadMigrations().find(
+      (candidate) => candidate.id === "0032_meta_ads_campaign_daily_conversion_columns.sql"
+    );
+    const sql = (migration?.sql ?? "").toLowerCase();
+
+    expect(sql).toContain("alter table meta_ads_campaign_daily");
+    // §2.2 additive columns, all `if not exists`.
+    for (const col of [
+      "add column if not exists currency",
+      "add column if not exists inline_link_clicks",
+      "add column if not exists landing_page_views",
+      "add column if not exists attribution_setting",
+      "add column if not exists actions_raw jsonb",
+      "add column if not exists api_version"
+    ]) {
+      expect(sql).toContain(col);
+    }
+    // §2.2 invariant: NO scalar results/result_type on the delivery fact (that
+    // would force one type to win — the Ultima corruption). It lives on the child
+    // fact (0031) instead.
+    expect(sql).not.toContain("add column if not exists result_type");
+    expect(sql).not.toContain("add column if not exists results ");
+    // §2.2 invariant: NO parallel per-window columns — per-window lives in actions_raw.
+    // Assert no `add column` line introduces an attribution-window-named column.
+    const addColumnLines = sql
+      .split("\n")
+      .filter((line) => line.includes("add column"));
+    for (const line of addColumnLines) {
+      expect(line).not.toMatch(/7d_click|1d_view|1d_click|28d/);
+    }
+    // Purely additive: no drops/deletes.
+    expect(sql).not.toContain("drop table");
+    expect(sql).not.toContain("drop column");
+    expect(sql).not.toContain("delete from");
+  });
+
+  it("recreates the meta view via DROP CASCADE, adds the conversions view, re-grants, and seeds Phase-1 metrics (0033)", () => {
+    const migration = loadMigrations().find(
+      (candidate) => candidate.id === "0033_meta_ads_conversion_views_and_metric_seeds.sql"
+    );
+    const sql = migration?.sql ?? "";
+    const lower = sql.toLowerCase();
+    const collapsed = lower.replace(/\s+/g, " ");
+
+    // §3.4 — the delivery view is recreated via DROP CASCADE (column add/retype),
+    // NOT create-or-replace (which cannot add columns mid-list).
+    expect(collapsed).toContain("drop view if exists queryable.vw_meta_ads_campaign_daily cascade");
+    expect(lower).toContain("create view queryable.vw_meta_ads_campaign_daily");
+    expect(lower).not.toContain("create or replace view queryable.vw_meta_ads_campaign_daily");
+    // The recreated view surfaces the new §2.2 measures (non-omni LPV + link clicks).
+    expect(lower).toContain("inline_link_clicks as link_clicks");
+    expect(lower).toContain("landing_page_views");
+    expect(lower).toContain("currency");
+    // New typed-conversions view exposing result_type as a column.
+    expect(lower).toContain("create view queryable.vw_meta_ads_campaign_conversions_daily");
+
+    // §3.5 — Phase-1 metric seeds.
+    for (const metricId of [
+      "'results'",
+      "'cost_per_result'",
+      "'conversion_value'",
+      "'roas'",
+      "'link_clicks'",
+      "'landing_page_views'"
+    ]) {
+      expect(sql).toContain(metricId);
+    }
+    // result_type + objective as a REQUIRED partition (required_filters, not just a dim).
+    expect(lower).toContain('"partition_by":["result_type","objective"]');
+    // Load-bearing caveats: never blend CPL/CPA across types; value/roas in account currency.
+    expect(lower).toContain("cost_per_result_must_not_blend_across_result_types");
+    expect(lower).toContain("value_in_account_currency");
+    // Recompute-from-summed-bases for the ratios; never per-row avg.
+    expect(lower).toContain("sum(meta_ads_spend)");
+    expect(lower).toContain("sum(results)");
+    expect(lower).toContain("sum(conversion_value)");
+    expect(lower).not.toContain("avg(cost_per_result)");
+    expect(lower).not.toContain("avg(roas)");
+
+    // §3.4 GRANT divergence trap: re-grant to tool_agent + app ONLY (the meta view
+    // never had growth_os_read_api, unlike the 0027 GA4 views).
+    expect(lower).toContain(
+      "grant select on queryable.vw_meta_ads_campaign_daily, queryable.vw_meta_ads_campaign_conversions_daily to growth_os_tool_agent, growth_os_app"
+    );
+    expect(collapsed).not.toContain("to growth_os_tool_agent, growth_os_app, growth_os_read_api");
+
+    // Idempotent additive seeds. 0033 legitimately uses `drop view if exists`, so do
+    // NOT assert a broad not.toContain("drop"); only forbid destructive table/column drops.
     expect(lower).toContain("on conflict (id) do update set");
     expect(lower).not.toContain("drop table");
     expect(lower).not.toContain("drop column");
