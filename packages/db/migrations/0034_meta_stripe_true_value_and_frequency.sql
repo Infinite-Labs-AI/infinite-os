@@ -110,7 +110,7 @@ begin
   end if;
 end $$;
 
--- 3. The Meta<->Stripe true-value join view (§5). One row per campaign x day, carrying:
+-- 3. The Meta<->Stripe true-value join view (§5). Rows carry:
 --      * matched_spend_major   — Meta spend (major units) for matched campaigns.
 --      * matched_revenue_major — Stripe revenue (converted cents -> major units) attributed
 --                                to the campaign AT THE RECONCILED CURRENCY.
@@ -121,6 +121,29 @@ end $$;
 --    Currency is the campaign's account currency (lowercased). Revenue is matched ONLY when
 --    the Stripe per-invoice currency equals that account currency (no FX table -> no
 --    cross-currency summation); mismatched-currency revenue lands in unmatched_revenue_major.
+--
+-- TWO SHAPES OF ROW (union):
+--   A. campaign rows (campaign_id NOT NULL) — one per campaign x day, carrying that campaign's
+--      spend (matched or unmatched) plus matched_revenue when the campaign is mapped.
+--   B. unmatched-revenue rows (campaign_id NULL) — one per UNMAPPED Stripe revenue-source x day.
+--      Revenue from a Stripe source that is NOT mapped to ANY campaign can NEVER be matched
+--      (there is nothing to attribute it to), so it MUST surface as unmatched_revenue — a
+--      join-quality signal (§5). Without these synthetic rows unmatched_revenue is STRUCTURALLY
+--      unreachable (always 0): revenue only ever entered the view through the mapped branch.
+--      These rows mirror how an unmapped CAMPAIGN surfaces unmatched_spend, just on the revenue
+--      axis — there is simply no campaign key to hang the unmatched revenue on.
+--
+-- COARSE-BY-DESIGN OVER-ATTRIBUTION CAVEAT (the §5 honesty rule): the map links a whole Stripe
+-- SOURCE to a campaign, and matched_revenue sums the ENTIRE source-day revenue for that source.
+-- If a mapped source's day also contains revenue from invoices UNRELATED to the campaign (e.g. a
+-- separate product line billed through the same Stripe account), that revenue is over-credited to
+-- the campaign — matched_revenue is an UPPER BOUND, not a per-order attribution. Per-order/UTM
+-- attribution is explicitly OUT of Phase-1 scope; the view instead stays HONEST in two ways:
+--   (1) it never MULTIPLY-counts a source-day across co-mapped campaigns (single-representative
+--       pick below), so the account-level total is at least internally consistent; and
+--   (2) the over-attribution is made loud via the view's
+--       stripe_revenue_is_source_level_may_over_attribute caveat + the roas_from_stripe
+--       metric_definition caveat, so the number is never read as a precise per-campaign ROAS.
 create view queryable.vw_meta_stripe_campaign_value_daily as
 with spend as (
   select
@@ -221,7 +244,34 @@ revenue as (
     and sdr.occurred_on = p.occurred_on
     and sdr.account_currency = p.account_currency
   where p.rn = 1
+),
+-- The set of Stripe revenue sources that ARE mapped to at least one campaign (with a confident
+-- mapping). Used to EXCLUDE them from the unmatched-revenue branch so revenue is counted on
+-- exactly one side (matched OR unmatched), never both.
+mapped_revenue_sources as (
+  select distinct workspace_id, revenue_source_id
+  from spend
+  where is_mapped and revenue_source_id is not null
+),
+-- UNMATCHED REVENUE (§5 join-quality signal). Every Stripe revenue-source x day whose source is
+-- NOT mapped to any campaign in this workspace. There is no campaign key to attribute it to, so
+-- it surfaces as a campaign_id-NULL row carrying ONLY unmatched_revenue_major. This is the fix
+-- for the structurally-unreachable unmatched_revenue: previously revenue only flowed in through
+-- the mapped branch, so an unmapped Stripe source's revenue silently vanished.
+unmatched_revenue as (
+  select
+    r.workspace_id,
+    r.occurred_on,
+    lower(r.currency) as currency,
+    sum(r.recognized_revenue) / 100.0 as revenue_major
+  from queryable.vw_revenue_by_source r
+  left join mapped_revenue_sources mrs
+    on mrs.workspace_id = r.workspace_id
+    and mrs.revenue_source_id = r.source_id
+  where mrs.revenue_source_id is null
+  group by r.workspace_id, r.occurred_on, lower(r.currency)
 )
+-- A. campaign rows: per-campaign spend + matched revenue (mapped) / none (unmapped campaign).
 select
   s.workspace_id,
   s.source_id,
@@ -236,14 +286,33 @@ select
   case when s.is_mapped then s.spend_major else 0 end as matched_spend_major,
   coalesce(case when s.is_mapped then rev.revenue_major else 0 end, 0) as matched_revenue_major,
   case when s.is_mapped then 0 else s.spend_major end as unmatched_spend_major,
-  coalesce(case when s.is_mapped then 0 else rev.revenue_major end, 0) as unmatched_revenue_major
+  -- Unmatched revenue NEVER rides a campaign row — it has no campaign. Campaign rows always
+  -- carry 0 here; the unmapped-source revenue lives on the campaign-NULL rows below.
+  0::numeric as unmatched_revenue_major
 from spend s
 left join revenue rev
   on rev.workspace_id = s.workspace_id
   and rev.source_id = s.source_id
   and rev.ad_account_id = s.ad_account_id
   and rev.campaign_id = s.campaign_id
-  and rev.occurred_on = s.occurred_on;
+  and rev.occurred_on = s.occurred_on
+union all
+-- B. unmatched-revenue rows: revenue from Stripe sources mapped to NO campaign. campaign_id NULL,
+-- zero spend, zero matched revenue; the source-day's revenue lands in unmatched_revenue_major.
+select
+  ur.workspace_id,
+  null::text as source_id,
+  null::text as ad_account_id,
+  null::text as campaign_id,
+  null::text as campaign_name,
+  ur.occurred_on,
+  ur.currency,
+  'unmatched'::text as match_confidence,
+  0::numeric as matched_spend_major,
+  0::numeric as matched_revenue_major,
+  0::numeric as unmatched_spend_major,
+  ur.revenue_major as unmatched_revenue_major
+from unmatched_revenue ur;
 
 -- 4. Re-register the recreated conversions view + register the new join view in the
 --    queryable_views catalog (idempotent). The conversions view registry row gains
@@ -279,14 +348,14 @@ values
 (
   'queryable.vw_meta_stripe_campaign_value_daily',
   'vw_meta_stripe_campaign_value_daily',
-  'Meta<->Stripe true-value join (campaign x day): Meta spend joined to Stripe revenue via the campaign<->revenue map, currency-reconciled before dividing. Emits matched/unmatched spend + revenue and a match_confidence signal (exact|normalized|fuzzy|unmatched). roas_from_stripe is mapping-dependent — read it WITH the match rate.',
+  'Meta<->Stripe true-value join (campaign x day, plus campaign-NULL rows for revenue from Stripe sources mapped to no campaign): Meta spend joined to Stripe revenue via the campaign<->revenue map, currency-reconciled before dividing. Emits matched/unmatched spend + revenue and a match_confidence signal (exact|normalized|fuzzy|unmatched). roas_from_stripe is mapping-dependent — read it WITH the match rate. CAVEAT: matched_revenue is SOURCE-LEVEL — it sums the whole Stripe-source-day revenue and may over-attribute unrelated invoices billed through the same Stripe account (upper bound, not per-order attribution).',
   'campaign/day',
   'occurred_on',
   '["ad_account_id","campaign_id","campaign_name","match_confidence","currency"]',
   '["matched_spend_major","matched_revenue_major","unmatched_spend_major","unmatched_revenue_major"]',
   '["meta_ads_campaign_daily","meta_ads_campaigns","meta_ads_campaign_revenue_map","stripe_invoices","stripe_invoice_lines"]',
   '24 hours',
-  'stripe_attributed_roas_is_mapping_dependent; excludes_unmatched_spend_and_unmatched_revenue; currency_reconciled_to_account_currency_before_dividing; meta_vs_stripe_attribution_date_offset',
+  'stripe_attributed_roas_is_mapping_dependent; excludes_unmatched_spend_and_unmatched_revenue; unmatched_revenue_surfaced_on_campaign_null_rows; stripe_revenue_is_source_level_may_over_attribute; currency_reconciled_to_account_currency_before_dividing; meta_vs_stripe_attribution_date_offset',
   'drilldown.meta_stripe_campaign_value_rows'
 )
 on conflict (id) do update set
@@ -342,7 +411,7 @@ values
 (
   'roas_from_stripe',
   'Stripe-attributed ROAS (Meta spend vs Stripe revenue)',
-  'Return on ad spend from the Meta<->Stripe true-value join: sum(matched_revenue_major) / nullif(sum(matched_spend_major),0), currency-reconciled to the account currency BEFORE dividing. MAPPING-DEPENDENT: only campaigns matched to Stripe revenue contribute; unmatched spend and unmatched revenue are excluded from the ratio and surfaced separately. Read it WITH the match rate (match_confidence). Inherent Meta-vs-Stripe attribution-date offset.',
+  'Return on ad spend from the Meta<->Stripe true-value join: sum(matched_revenue_major) / nullif(sum(matched_spend_major),0), currency-reconciled to the account currency BEFORE dividing. MAPPING-DEPENDENT: only campaigns matched to Stripe revenue contribute; unmatched spend and unmatched revenue are excluded from the ratio and surfaced separately (unmatched revenue from a Stripe source mapped to no campaign appears on campaign-NULL rows). Read it WITH the match rate (match_confidence). OVER-ATTRIBUTION CAVEAT: the map is SOURCE-LEVEL, so matched_revenue sums the entire Stripe-source-day revenue and can over-credit unrelated invoices billed through the same Stripe account — it is an upper bound, not per-order attribution (per-order/UTM attribution is out of Phase-1 scope). Inherent Meta-vs-Stripe attribution-date offset.',
   '["stripe roas","true roas","real roas","stripe attributed roas","roas from stripe","return on ad spend from revenue"]',
   'queryable.vw_meta_stripe_campaign_value_daily',
   '{"type":"ratio","view":"queryable.vw_meta_stripe_campaign_value_daily","numerator":"sum(matched_revenue_major)","denominator":"sum(matched_spend_major)","zeroDenominator":"null","recompute":"from_summed_bases"}',
@@ -352,7 +421,7 @@ values
   'occurred_on',
   '["ad_account_id","campaign_id","campaign_name","match_confidence","currency"]',
   '{}',
-  'stripe_attributed_roas_is_mapping_dependent; ratio_recomputed_from_summed_bases; excludes_unmatched_spend_and_unmatched_revenue; currency_reconciled_to_account_currency_before_dividing; meta_vs_stripe_attribution_date_offset',
+  'stripe_attributed_roas_is_mapping_dependent; ratio_recomputed_from_summed_bases; excludes_unmatched_spend_and_unmatched_revenue; unmatched_revenue_surfaced_on_campaign_null_rows; stripe_revenue_is_source_level_may_over_attribute; currency_reconciled_to_account_currency_before_dividing; meta_vs_stripe_attribution_date_offset',
   '["What is our true ROAS from Stripe revenue on the Meta purchase campaigns this month?"]'
 )
 on conflict (id) do update set
