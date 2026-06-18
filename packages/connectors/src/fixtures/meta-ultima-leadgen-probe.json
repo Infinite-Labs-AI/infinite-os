@@ -1,0 +1,82 @@
+{
+  "_comment": "Golden fixture (spec §9) — the live Ultima probe from act_887743100560299 (Mar-Jun 2026), a LEAD-GEN account. The SAME 2 leads appear under 4 action_types (lead, offsite_conversion.fb_pixel_lead, onsite_web_lead, offsite_lead_add_20_s_calls). Summing actions[] gives 8; the deterministic §4b canonical-event mapping must collapse this to exactly 2 leads. action_values is empty (no Meta revenue for lead-gen) and purchase_roas is null. Each action element carries per-window subvalues; the headline window is 7d_click(1) + 1d_view(1) = 2 (the element-level `value` is 7d_click only = 1).",
+  "data": [
+    {
+      "campaign_id": "120000000000111",
+      "campaign_name": "Ultima — Lead Gen Q2",
+      "date_start": "2026-06-01",
+      "objective": "OUTCOME_LEADS",
+      "optimization_goal": "LEAD_GENERATION",
+      "spend": "412.83",
+      "clicks": "318",
+      "inline_link_clicks": "274",
+      "impressions": "21450",
+      "reach": "18233",
+      "frequency": "1.176",
+      "cpm": "19.25",
+      "cpc": "1.30",
+      "ctr": "1.48",
+      "account_currency": "USD",
+      "result_values_performance_indicator": "actions:lead",
+      "results": [
+        { "values": [{ "value": "2" }] }
+      ],
+      "cost_per_result": [
+        { "values": [{ "value": "206.415" }] }
+      ],
+      "action_values": [],
+      "actions": [
+        {
+          "action_type": "lead",
+          "value": "1",
+          "1d_click": "1",
+          "7d_click": "1",
+          "1d_view": "1"
+        },
+        {
+          "action_type": "offsite_conversion.fb_pixel_lead",
+          "value": "1",
+          "1d_click": "1",
+          "7d_click": "1",
+          "1d_view": "1"
+        },
+        {
+          "action_type": "onsite_web_lead",
+          "value": "1",
+          "1d_click": "1",
+          "7d_click": "1",
+          "1d_view": "1"
+        },
+        {
+          "action_type": "offsite_lead_add_20_s_calls",
+          "value": "1",
+          "1d_click": "1",
+          "7d_click": "1",
+          "1d_view": "1"
+        },
+        {
+          "action_type": "landing_page_view",
+          "value": "190",
+          "1d_click": "180",
+          "7d_click": "188",
+          "1d_view": "12"
+        },
+        {
+          "action_type": "omni_landing_page_view",
+          "value": "245",
+          "1d_click": "230",
+          "7d_click": "240",
+          "1d_view": "30"
+        },
+        {
+          "action_type": "link_click",
+          "value": "274",
+          "1d_click": "270",
+          "7d_click": "274",
+          "1d_view": "5"
+        }
+      ]
+    }
+  ],
+  "paging": {}
+}

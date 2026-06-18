@@ -5,7 +5,8 @@ import {
   metricView,
   metricColumn,
   aggregateExpression,
-  caveatsForMetric
+  caveatsForMetric,
+  requiresResultTypePartition
 } from "@infinite-os/analytical-engine";
 import { loadInfiniteOsConfig } from "@infinite-os/config";
 import { connectorFor } from "@infinite-os/connectors";
@@ -383,6 +384,14 @@ async function runSavedReport(db: InfiniteOsDb, workspaceId: string, reportId: s
   // See packages/analytical-engine metricColumn() and .context/ga4-v1-build-plan.md (PR2 Step 10).
   if (metric === "page_views_by_page") {
     throw new Error("saved_report_metric_unsupported:page_views_by_page_is_breakdown_only");
+  }
+  // Phase-1 §6 — the saved-report path is ungrouped (no GROUP BY, no result_type partition),
+  // so the conversion-family metrics (results/cost_per_result/conversion_value/roas) cannot be
+  // honored here without silently blending CPL+CPA across result_types. Exclude them the same
+  // way as page_views_by_page rather than emit a meaningless blended number. They remain fully
+  // queryable through run_metric_query / run_breakdown_query, which enforce the partition.
+  if (requiresResultTypePartition(metric)) {
+    throw new Error(`saved_report_metric_unsupported:${metric}_requires_result_type_partition`);
   }
   const view = metricView(metric);
   const column = metricColumn(metric);

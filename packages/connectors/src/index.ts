@@ -309,6 +309,19 @@ interface ShopifyProductSnapshotRow {
 
 type ShopifySyncRow = ShopifyOrderRow | ShopifyProductSnapshotRow;
 
+// One persisted child conversion row (§2.3), produced per canonical result_type for a
+// campaign-day. The writer fans these into meta_ads_campaign_conversions_daily.
+interface MetaAdsConversionRow {
+  resultType: string;
+  results: number;
+  // Purchase-type ONLY (§2.3 guard); null for lead and other non-purchase types.
+  conversionValue: number | null;
+  attributionSetting: string;
+  isPrimary: boolean;
+  // 'derived_from_canonical_mapping' | 'meta_results'
+  resultsSource: string;
+}
+
 interface MetaAdsCampaignDailyRow {
   externalId: string;
   adAccountId: string;
@@ -317,11 +330,24 @@ interface MetaAdsCampaignDailyRow {
   occurredOn: string;
   spend: number;
   clicks: number;
+  // §2.2 additions.
+  inlineLinkClicks: number;
+  landingPageViews: number;
   impressions: number;
   reach: number;
   cpm: number | null;
   cpc: number | null;
   ctr: number | null;
+  currency: string | null;
+  attributionSetting: string;
+  apiVersion: string;
+  // Full actions[] + action_values[] (with per-window subvalues), persisted as jsonb.
+  actionsRaw: unknown;
+  // Coarse objective + adset optimization_goal (drive the §4b mapping).
+  objective: string | null;
+  optimizationGoal: string | null;
+  // The typed child conversion rows derived for this campaign-day (§2.3).
+  conversions: MetaAdsConversionRow[];
 }
 
 interface XProfileSnapshot {
@@ -855,14 +881,14 @@ const metaAdsConnector = createConnector<MetaAdsCredential, MetaAdsCampaignDaily
     if (isMetaAdsMcpTransport(credential)) {
       await metaAdsMcpInsights(credential, {
         adAccountId,
-        fields: "campaign_id,date_start,impressions,clicks,spend",
+        fields: META_ADS_INSIGHTS_PROBE_FIELDS,
         level: "campaign",
         limit: "1",
         datePreset: "today"
       });
     } else if (isMetaAdsCliTransport(credential)) {
       await metaAdsCliInsights(credential, {
-        fields: "campaign_id,date_start,impressions,clicks,spend",
+        fields: META_ADS_INSIGHTS_PROBE_FIELDS,
         limit: "1",
         datePreset: "today"
       });
@@ -872,7 +898,7 @@ const metaAdsConnector = createConnector<MetaAdsCredential, MetaAdsCampaignDaily
         metaAdsInsightsUrl(credential, {
           adAccountId,
           datePreset: "today",
-          fields: "campaign_id,date_start,impressions,clicks,spend",
+          fields: META_ADS_INSIGHTS_PROBE_FIELDS,
           level: "campaign",
           limit: "1"
         }),
@@ -904,20 +930,31 @@ const metaAdsConnector = createConnector<MetaAdsCredential, MetaAdsCampaignDaily
     const adAccountId = metaAdsAccountId(credential);
     const timeOptions = metaAdsTimeOptions(plan);
     const { level, timeIncrement } = metaAdsInsightsGrain(request);
+    // §4 — the extract context pins the Graph API version and records the attribution
+    // request shape on every row produced from this run.
+    const context: MetaAdsInsightsContext = {
+      apiVersion: metaAdsApiVersion(credential),
+      attributionSetting: META_ADS_ATTRIBUTION_SETTING
+    };
     const rows: MetaAdsCampaignDailyRow[] = [];
     if (isMetaAdsMcpTransport(credential)) {
       let after: string | undefined;
       for (let page = 0; page < 100; page += 1) {
         const response = await metaAdsMcpInsights(credential, {
           adAccountId,
-          fields: "campaign_id,campaign_name,date_start,spend,clicks,impressions,reach,cpm,cpc,ctr",
+          fields: META_ADS_INSIGHTS_FIELDS,
           level,
           limit: "100",
           timeIncrement,
+          attributionWindows: META_ADS_ATTRIBUTION_WINDOWS,
           ...timeOptions,
           after
         });
-        rows.push(...(response.data ?? []).map((row: MetaAdsInsightsRow) => metaAdsCampaignDailyRow(adAccountId, row)));
+        rows.push(
+          ...(response.data ?? []).map((row: MetaAdsInsightsRow) =>
+            metaAdsCampaignDailyRow(adAccountId, row, context)
+          )
+        );
         const nextAfter = metaAdsPagingAfter(response);
         if (!nextAfter) {
           return rows;
@@ -928,20 +965,24 @@ const metaAdsConnector = createConnector<MetaAdsCredential, MetaAdsCampaignDaily
     }
     if (isMetaAdsCliTransport(credential)) {
       const response = await metaAdsCliInsights(credential, {
-        fields: "campaign_id,campaign_name,date_start,spend,clicks,impressions,reach,cpm,cpc,ctr",
+        fields: META_ADS_INSIGHTS_FIELDS,
         limit: "100",
         timeIncrement: "daily",
+        attributionWindows: META_ADS_ATTRIBUTION_WINDOWS,
         ...timeOptions
       });
-      return (response.data ?? []).map((row: MetaAdsInsightsRow) => metaAdsCampaignDailyRow(adAccountId, row));
+      return (response.data ?? []).map((row: MetaAdsInsightsRow) =>
+        metaAdsCampaignDailyRow(adAccountId, row, context)
+      );
     }
     const accessToken = requireCredential(credential, "accessToken");
     let nextUrl: string | null = metaAdsInsightsUrl(credential, {
       adAccountId,
-      fields: "campaign_id,campaign_name,date_start,spend,clicks,impressions,reach,cpm,cpc,ctr",
+      fields: META_ADS_INSIGHTS_FIELDS,
       level,
       limit: "100",
       timeIncrement,
+      attributionWindows: META_ADS_ATTRIBUTION_WINDOWS,
       ...timeOptions
     });
     while (nextUrl) {
@@ -949,7 +990,11 @@ const metaAdsConnector = createConnector<MetaAdsCredential, MetaAdsCampaignDaily
         method: "GET",
         headers: bearerHeaders(accessToken)
       });
-      rows.push(...(response.data ?? []).map((row: MetaAdsInsightsRow) => metaAdsCampaignDailyRow(adAccountId, row)));
+      rows.push(
+        ...(response.data ?? []).map((row: MetaAdsInsightsRow) =>
+          metaAdsCampaignDailyRow(adAccountId, row, context)
+        )
+      );
       nextUrl = response.paging?.next ?? null;
     }
     return rows;
@@ -2058,32 +2103,123 @@ async function writeShopifyTruth(
   }
 }
 
+// §2.1 — fold the campaign×day delivery rows down to one dimension row per campaign and
+// upsert meta_ads_campaigns. The dimension carries the account currency + coarse objective +
+// display name the §5 Stripe-join views LEFT JOIN for currency/objective. Without this writer
+// dim.currency/dim.objective were always NULL (so is_mapped was always false and the Stripe
+// ROAS numerator was always 0). The dimension is campaign-grain, so we keep the LAST non-null
+// value seen across the synced days for each (source, account, campaign) — last-write-wins,
+// matching the §4c restatement model. Currency/objective rarely change within a window; when
+// they do, the most recent day's value wins.
+function metaAdsDimensionRows(
+  rows: MetaAdsCampaignDailyRow[]
+): Map<string, { adAccountId: string; campaignId: string; name: string | null; objective: string | null; currency: string | null }> {
+  const dims = new Map<
+    string,
+    { adAccountId: string; campaignId: string; name: string | null; objective: string | null; currency: string | null }
+  >();
+  for (const row of rows) {
+    const key = `${row.adAccountId}:${row.campaignId}`;
+    const existing = dims.get(key);
+    dims.set(key, {
+      adAccountId: row.adAccountId,
+      campaignId: row.campaignId,
+      // Coalesce so a later day with a null field does not erase an earlier non-null value.
+      name: row.campaignName ?? existing?.name ?? null,
+      objective: row.objective ?? existing?.objective ?? null,
+      currency: row.currency ?? existing?.currency ?? null
+    });
+  }
+  return dims;
+}
+
+async function writeMetaAdsCampaignDimension(
+  tx: InfiniteOsDb,
+  request: SyncRequest,
+  rows: MetaAdsCampaignDailyRow[],
+  rawIds: string[]
+): Promise<void> {
+  // A raw_record_id for provenance (any row from this run; the dimension is a fold, not a
+  // single source row). Use the first row's raw id when present.
+  const rawRecordId = rawIds[0] ?? null;
+  for (const dim of metaAdsDimensionRows(rows).values()) {
+    await tx.query(
+      `
+        insert into meta_ads_campaigns (
+          id, workspace_id, source_id, raw_record_id, ad_account_id, campaign_id,
+          name, objective, currency
+        )
+        values ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+        on conflict (source_id, ad_account_id, campaign_id)
+        do update set
+          raw_record_id = excluded.raw_record_id,
+          -- coalesce so a re-sync that momentarily lacks a field never nulls a known value.
+          name = coalesce(excluded.name, meta_ads_campaigns.name),
+          objective = coalesce(excluded.objective, meta_ads_campaigns.objective),
+          currency = coalesce(excluded.currency, meta_ads_campaigns.currency),
+          updated_at = now()
+      `,
+      [
+        `madm_${randomUUID()}`,
+        request.workspaceId,
+        request.sourceId,
+        rawRecordId,
+        dim.adAccountId,
+        dim.campaignId,
+        dim.name,
+        dim.objective,
+        dim.currency
+      ]
+    );
+    // Lineage carries an FK to raw_records, so only write it when a real raw id exists for
+    // this run (the dimension is a fold of the day rows; a fabricated id would break the FK).
+    if (rawRecordId) {
+      await writeLineage(tx, request, "meta_ads_campaigns", `${dim.adAccountId}:${dim.campaignId}`, rawRecordId);
+    }
+  }
+}
+
 async function writeMetaAdsTruth(
   tx: InfiniteOsDb,
   request: SyncRequest,
   rows: MetaAdsCampaignDailyRow[],
   rawIds: string[]
 ): Promise<void> {
+  // §2.1 — populate the campaign dimension first so the §5 join views have currency/objective.
+  await writeMetaAdsCampaignDimension(tx, request, rows, rawIds);
   for (let index = 0; index < rows.length; index += 1) {
     const row = rows[index];
+    // §4c restatement — the unique key (source_id, ad_account_id, campaign_id,
+    // occurred_on) makes this last-write-wins. Re-syncing the rolling 28-day window
+    // overwrites spend/clicks/conversion columns/actions_raw so late-attributed
+    // conversions restate history without drift.
     await tx.query(
       `
         insert into meta_ads_campaign_daily (
           id, workspace_id, source_id, raw_record_id, ad_account_id, campaign_id, campaign_name,
-          occurred_on, spend, clicks, impressions, reach, cpm, cpc, ctr
+          occurred_on, spend, clicks, inline_link_clicks, landing_page_views, impressions, reach,
+          cpm, cpc, ctr, currency, attribution_setting, actions_raw, api_version
         )
-        values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+        values (
+          $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20::jsonb,$21
+        )
         on conflict (source_id, ad_account_id, campaign_id, occurred_on)
         do update set
           raw_record_id = excluded.raw_record_id,
           campaign_name = excluded.campaign_name,
           spend = excluded.spend,
           clicks = excluded.clicks,
+          inline_link_clicks = excluded.inline_link_clicks,
+          landing_page_views = excluded.landing_page_views,
           impressions = excluded.impressions,
           reach = excluded.reach,
           cpm = excluded.cpm,
           cpc = excluded.cpc,
           ctr = excluded.ctr,
+          currency = excluded.currency,
+          attribution_setting = excluded.attribution_setting,
+          actions_raw = excluded.actions_raw,
+          api_version = excluded.api_version,
           updated_at = now()
       `,
       [
@@ -2097,11 +2233,17 @@ async function writeMetaAdsTruth(
         row.occurredOn,
         row.spend,
         row.clicks,
+        row.inlineLinkClicks,
+        row.landingPageViews,
         row.impressions,
         row.reach,
         row.cpm,
         row.cpc,
-        row.ctr
+        row.ctr,
+        row.currency,
+        row.attributionSetting,
+        JSON.stringify(row.actionsRaw ?? {}),
+        row.apiVersion
       ]
     );
     await writeLineage(
@@ -2110,6 +2252,63 @@ async function writeMetaAdsTruth(
       "meta_ads_campaign_daily",
       `${row.adAccountId}:${row.campaignId}:${row.occurredOn}`,
       rawIds[index]
+    );
+    await writeMetaAdsConversionRows(tx, request, row, rawIds[index]);
+  }
+}
+
+// §2.3 / §4c — fan the derived child conversion rows into
+// meta_ads_campaign_conversions_daily. Each row is upserted on
+// (source_id, ad_account_id, campaign_id, occurred_on, result_type) so a re-sync
+// restates results/conversion_value last-write-wins. result_type travels on every
+// row (the REQUIRED partition) so CPL/CPA never blend.
+async function writeMetaAdsConversionRows(
+  tx: InfiniteOsDb,
+  request: SyncRequest,
+  row: MetaAdsCampaignDailyRow,
+  rawRecordId: string
+): Promise<void> {
+  for (const conversion of row.conversions) {
+    await tx.query(
+      `
+        insert into meta_ads_campaign_conversions_daily (
+          id, workspace_id, source_id, raw_record_id, ad_account_id, campaign_id,
+          occurred_on, result_type, results, conversion_value, attribution_setting,
+          is_primary, results_source
+        )
+        values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+        on conflict (source_id, ad_account_id, campaign_id, occurred_on, result_type)
+        do update set
+          raw_record_id = excluded.raw_record_id,
+          results = excluded.results,
+          conversion_value = excluded.conversion_value,
+          attribution_setting = excluded.attribution_setting,
+          is_primary = excluded.is_primary,
+          results_source = excluded.results_source,
+          updated_at = now()
+      `,
+      [
+        `madc_${randomUUID()}`,
+        request.workspaceId,
+        request.sourceId,
+        rawRecordId,
+        row.adAccountId,
+        row.campaignId,
+        row.occurredOn,
+        conversion.resultType,
+        conversion.results,
+        conversion.conversionValue,
+        conversion.attributionSetting,
+        conversion.isPrimary,
+        conversion.resultsSource
+      ]
+    );
+    await writeLineage(
+      tx,
+      request,
+      "meta_ads_campaign_conversions_daily",
+      `${row.adAccountId}:${row.campaignId}:${row.occurredOn}:${conversion.resultType}`,
+      rawRecordId
     );
   }
 }
@@ -2817,6 +3016,275 @@ function metaAdsApiVersion(credential: MetaAdsCredential): string {
 const META_ADS_INSIGHTS_DEFAULT_LEVEL = "campaign";
 const META_ADS_INSIGHTS_DEFAULT_TIME_INCREMENT = "1";
 
+// §4 — the SINGLE source of truth for the insights field list, hoisted so all three
+// transports (direct Graph, MCP, CLI) request EXACTLY the same fields. Previously the
+// list was duplicated inline at each call site; any drift between transports is a bug.
+//
+// Added in Phase 1 (§4): inline_link_clicks, actions, action_values, results,
+// cost_per_result, result_values_performance_indicator (the result_type source string),
+// frequency, objective (campaign), optimization_goal (adset). We deliberately do NOT
+// request `landing_page_view_actions` (not a real field → API error); landing page views
+// are extracted from actions[action_type='landing_page_view'] (NON-omni) instead.
+//
+// account_currency (§2.1, LOAD-BEARING): the ad-account currency is read from each
+// insights row's `account_currency` field (a valid Insights field that the API only
+// returns when explicitly requested). It populates meta_ads_campaign_daily.currency AND
+// the meta_ads_campaigns dimension; it is the reconciliation axis for the Meta↔Stripe
+// value join (§5). Without it in this list, currency is ALWAYS null in live mode and the
+// Stripe ROAS join can never reconcile a currency — so it MUST be requested here.
+const META_ADS_INSIGHTS_FIELDS = [
+  "campaign_id",
+  "campaign_name",
+  "date_start",
+  "spend",
+  "clicks",
+  "inline_link_clicks",
+  "impressions",
+  "reach",
+  "frequency",
+  "cpm",
+  "cpc",
+  "ctr",
+  "actions",
+  "action_values",
+  "results",
+  "cost_per_result",
+  "result_values_performance_indicator",
+  "objective",
+  "optimization_goal",
+  "account_currency"
+].join(",");
+
+// §4 — the smaller field set used only by the connectivity probe (testLive). It does
+// NOT need the conversion fields; keep it minimal so the probe stays cheap.
+const META_ADS_INSIGHTS_PROBE_FIELDS = "campaign_id,date_start,impressions,clicks,spend";
+
+// §4 / §7 — attribution reality post-Jan-2026. Request the three windows whose
+// per-window subvalues we sum into the headline (7d_click + 1d_view). We HARD-EXCLUDE
+// 7d_view / 28d_view (removed Jan 2026 → silent empty), and we do NOT send
+// use_unified_attribution_setting or action_report_time (both no-ops post-2026-01-12).
+// The element `value` field on each actions[]/action_values[] entry is 7d_click ONLY —
+// the headline must be COMPUTED as element['7d_click'] + element['1d_view'].
+const META_ADS_ATTRIBUTION_WINDOWS = ["1d_click", "7d_click", "1d_view"] as const;
+
+// The attribution_setting string we persist describing the REQUEST shape (provenance,
+// not a lever). Matches the windows we send.
+const META_ADS_ATTRIBUTION_SETTING = META_ADS_ATTRIBUTION_WINDOWS.join(",");
+
+// ──────────────────────────────────────────────────────────────────────────────────
+// §4b — Objective → canonical-event mapping (the load-bearing artifact).
+//
+// Committed as code/config because it is OUR deterministic control point: the headline
+// conversion number is THIS mapping applied to actions[] — we NEVER sum actions[]
+// variants (the §0 Ultima trap: the same 2 leads appeared under 4 action_types; summing
+// gives 8). We pick exactly ONE canonical action_type per (campaign, result_type) and
+// derive both the COUNT (from actions[]) and the VALUE (from action_values[]) from the
+// SAME channel.
+//
+// PRECEDENCE (§4b): key on the adset `optimization_goal` FIRST (the real driver of
+// result_type), then fall back to the campaign `objective` (ODAX = 6 outcomes). Within a
+// resolved entry, the `primary` action_type is tried first; `fallbacks` are
+// SAME-POPULATION variants only — NEVER omni_* (a different population: web+app+offline,
+// not a duplicate). The first action_type present in actions[] wins; we stop there.
+//
+// `resultType` is the canonical conversion type label stored on the child fact. `value`
+// flags whether a conversion_value is meaningful for this type (purchase-only guard,
+// §2.3): a configured lead value must NOT be stored as revenue.
+interface MetaCanonicalEventRule {
+  resultType: string;
+  // Ordered: primary first, then SAME-POPULATION fallbacks. NEVER omni_*.
+  actionTypes: string[];
+  // Whether conversion_value is meaningful for this result type (purchase-only).
+  value: boolean;
+}
+
+// Keyed by adset optimization_goal (uppercase, as Meta returns it).
+const META_OPTIMIZATION_GOAL_RULES: Record<string, MetaCanonicalEventRule> = {
+  LEAD_GENERATION: {
+    resultType: "lead",
+    // Same-population lead variants; the Ultima 4-action_types collapse to ONE of these.
+    actionTypes: ["lead", "offsite_conversion.fb_pixel_lead", "onsite_web_lead"],
+    value: false
+  },
+  // OFFSITE_CONVERSIONS with custom_event=PURCHASE → pixel purchase. Count AND value come
+  // from offsite_conversion.fb_pixel_purchase (same channel). NEVER omni_purchase.
+  OFFSITE_CONVERSIONS: {
+    resultType: "purchase",
+    actionTypes: ["offsite_conversion.fb_pixel_purchase", "onsite_web_purchase"],
+    value: true
+  },
+  LANDING_PAGE_VIEWS: {
+    resultType: "landing_page_view",
+    // Non-omni: omni_landing_page_view is a broader population, excluded.
+    actionTypes: ["landing_page_view"],
+    value: false
+  },
+  LINK_CLICKS: {
+    resultType: "link_click",
+    actionTypes: ["link_click"],
+    value: false
+  }
+};
+
+// Coarse fallback keyed by campaign objective (ODAX, 6 outcomes) when optimization_goal
+// is absent. Same action_type drives BOTH count and value.
+const META_OBJECTIVE_RULES: Record<string, MetaCanonicalEventRule | null> = {
+  OUTCOME_LEADS: { resultType: "lead", actionTypes: ["lead"], value: false },
+  OUTCOME_SALES: {
+    resultType: "purchase",
+    actionTypes: ["offsite_conversion.fb_pixel_purchase"],
+    value: true
+  },
+  OUTCOME_TRAFFIC: { resultType: "link_click", actionTypes: ["link_click"], value: false },
+  OUTCOME_ENGAGEMENT: {
+    resultType: "post_engagement",
+    actionTypes: ["post_engagement"],
+    value: false
+  },
+  // Awareness has no conversion event (reach/impressions only) — no canonical result.
+  OUTCOME_AWARENESS: null,
+  OUTCOME_APP_PROMOTION: {
+    resultType: "mobile_app_install",
+    actionTypes: ["mobile_app_install"],
+    value: false
+  }
+};
+
+// Resolve the canonical-event rule for a row: optimization_goal (adset) FIRST, then
+// objective (campaign). Returns null when the objective is awareness (no conversion) or
+// nothing matches.
+function metaCanonicalEventRule(
+  optimizationGoal: string | null,
+  objective: string | null
+): MetaCanonicalEventRule | null {
+  const goalKey = optimizationGoal?.toUpperCase();
+  if (goalKey && goalKey in META_OPTIMIZATION_GOAL_RULES) {
+    return META_OPTIMIZATION_GOAL_RULES[goalKey];
+  }
+  const objectiveKey = objective?.toUpperCase();
+  if (objectiveKey && objectiveKey in META_OBJECTIVE_RULES) {
+    return META_OBJECTIVE_RULES[objectiveKey];
+  }
+  return null;
+}
+
+// ──────────────────────────────────────────────────────────────────────────────────
+// §4 — actions[]/action_values[] parsing (deterministic, never sum variants).
+//
+// Each element looks like { action_type, value, '1d_click'?, '7d_click'?, '1d_view'? }.
+// The element-level `value` is 7d_click ONLY (post-Jan-2026); the headline window we
+// compute is 7d_click + 1d_view from the per-window subvalues. If subvalues are absent
+// (older payloads), we fall back to the element `value`.
+
+interface MetaActionElement {
+  action_type?: string | null;
+  value?: string | number | null;
+  "1d_click"?: string | number | null;
+  "7d_click"?: string | number | null;
+  "1d_view"?: string | number | null;
+  [key: string]: unknown;
+}
+
+// Compute the headline (7d_click + 1d_view) for one action element. Per-window
+// subvalues are summed; if neither subvalue is present we fall back to `value`
+// (which is 7d_click only) so we never lose the count entirely.
+function metaHeadlineWindowValue(element: MetaActionElement): number {
+  const sevenDayClick = element["7d_click"];
+  const oneDayView = element["1d_view"];
+  if (sevenDayClick !== undefined || oneDayView !== undefined) {
+    return numberOrZero(sevenDayClick) + numberOrZero(oneDayView);
+  }
+  return numberOrZero(element.value);
+}
+
+// Find the FIRST action element whose action_type is in `actionTypes` (precedence
+// order). Returns the matched element — we STOP at the first match and never sum across
+// variants (the Ultima trap). Returns null when none of the canonical action types are
+// present.
+function metaPickCanonicalAction(
+  actions: MetaActionElement[] | undefined | null,
+  actionTypes: string[]
+): MetaActionElement | null {
+  if (!Array.isArray(actions)) {
+    return null;
+  }
+  for (const actionType of actionTypes) {
+    const match = actions.find((element) => element.action_type === actionType);
+    if (match) {
+      return match;
+    }
+  }
+  return null;
+}
+
+// Sum the headline window value for a SPECIFIC action_type across the actions array
+// (used for non-omni landing_page_view extraction). There is normally one element per
+// action_type, but summing is safe because we filter to a single action_type first.
+function metaSumActionType(
+  actions: MetaActionElement[] | undefined | null,
+  actionType: string
+): number {
+  if (!Array.isArray(actions)) {
+    return 0;
+  }
+  return actions
+    .filter((element) => element.action_type === actionType)
+    .reduce((total, element) => total + metaHeadlineWindowValue(element), 0);
+}
+
+function metaInsightsActions(row: MetaAdsInsightsRow): MetaActionElement[] | null {
+  return Array.isArray(row.actions) ? (row.actions as MetaActionElement[]) : null;
+}
+
+function metaInsightsActionValues(row: MetaAdsInsightsRow): MetaActionElement[] | null {
+  return Array.isArray(row.action_values) ? (row.action_values as MetaActionElement[]) : null;
+}
+
+function metaInsightsResultsValue(row: MetaAdsInsightsRow): number | null {
+  // Meta's `results` field is an array of objects, each with a `values` array of
+  // { value } entries — the parallel "objective_results" family. We sum the values of
+  // the first result element as the reconciliation cross-check count.
+  const results = row.results;
+  if (!Array.isArray(results) || results.length === 0) {
+    return null;
+  }
+  const first = results[0] as { values?: Array<{ value?: string | number | null }> };
+  if (!Array.isArray(first.values)) {
+    return null;
+  }
+  const total = first.values.reduce((sum, entry) => sum + numberOrZero(entry?.value), 0);
+  return Number.isFinite(total) ? total : null;
+}
+
+function metaInsightsReportedResultType(row: MetaAdsInsightsRow): string | null {
+  // result_values_performance_indicator is Meta's own result_type source-of-truth
+  // string (e.g. 'actions:offsite_conversion.fb_pixel_purchase'); strip the 'actions:'
+  // prefix to get the bare action_type.
+  const indicator = stringOrNull(
+    row.result_values_performance_indicator as string | null | undefined
+  );
+  if (!indicator) {
+    return null;
+  }
+  return indicator.replace(/^actions:/, "");
+}
+
+// Cross-check: does Meta's reported result indicator name an action_type that belongs
+// to OUR canonical rule for this row? Used only to flag a meta_results fallback whose
+// type we could NOT verify (so reconciliation drift is visible), never to relabel the
+// stored result_type. When Meta reports no indicator we treat it as verified (nothing
+// to contradict).
+function metaResultTypeMatchesRule(
+  row: MetaAdsInsightsRow,
+  rule: MetaCanonicalEventRule
+): boolean {
+  const reported = metaInsightsReportedResultType(row);
+  if (!reported) {
+    return true;
+  }
+  return rule.actionTypes.includes(reported);
+}
+
 function metaAdsInsightsGrain(request: SyncRequest): {
   level: string;
   timeIncrement: string;
@@ -2852,6 +3320,8 @@ function metaAdsInsightsUrl(
     datePreset?: string;
     timeIncrement?: string;
     timeRange?: { since: string; until: string };
+    // §4 — request per-window subvalues so the headline 7d_click+1d_view is computable.
+    attributionWindows?: readonly string[];
   }
 ): string {
   const url = new URL(`https://graph.facebook.com/${metaAdsApiVersion(credential)}/${options.adAccountId}/insights`);
@@ -2867,11 +3337,103 @@ function metaAdsInsightsUrl(
   if (options.timeRange) {
     url.searchParams.set("time_range", JSON.stringify(options.timeRange));
   }
+  if (options.attributionWindows && options.attributionWindows.length > 0) {
+    // 7d_view / 28d_view are hard-excluded (removed Jan 2026); use_unified_attribution_setting
+    // and action_report_time are no-ops post-2026-01-12 and deliberately NOT sent.
+    url.searchParams.set("action_attribution_windows", JSON.stringify([...options.attributionWindows]));
+  }
   return url.toString();
 }
 
-function metaAdsCampaignDailyRow(adAccountId: string, row: MetaAdsInsightsRow): MetaAdsCampaignDailyRow {
+interface MetaAdsInsightsContext {
+  apiVersion: string;
+  attributionSetting: string;
+}
+
+// §4 — derive the typed child conversion rows for one campaign-day from the raw
+// actions[]/action_values[] arrays, using the §4b objective→canonical-event mapping.
+//
+// DETERMINISTIC, NEVER SUM VARIANTS: we resolve ONE canonical rule (optimization_goal
+// first, then objective), pick the FIRST present action_type from its precedence list,
+// and take the COUNT (from actions[]) and VALUE (from action_values[]) from that SAME
+// action_type — the same pixel channel. This is what collapses the §0 Ultima 4
+// action_types to a single result (2 leads, not 8).
+//
+// conversion_value is populated ONLY when the rule is value-bearing (purchase-type),
+// per the §2.3 guard — a configured lead value is never stored as revenue.
+function metaAdsConversionRows(
+  row: MetaAdsInsightsRow,
+  context: MetaAdsInsightsContext
+): MetaAdsConversionRow[] {
+  const rule = metaCanonicalEventRule(
+    stringOrNull(row.optimization_goal),
+    stringOrNull(row.objective)
+  );
+  if (!rule) {
+    // Awareness / unmapped objective: no conversion result for this row.
+    return [];
+  }
+  const actions = metaInsightsActions(row);
+  const canonicalAction = metaPickCanonicalAction(actions, rule.actionTypes);
+  if (!canonicalAction || !canonicalAction.action_type) {
+    // The canonical event did not fire for this campaign-day; Meta's own results
+    // field is the fallback so a blank actions[] does not null the headline.
+    const metaResults = metaInsightsResultsValue(row);
+    if (metaResults === null) {
+      return [];
+    }
+    // Keep the result_type label consistent with the canonical mapping (clean labels
+    // like 'lead'/'purchase'). Meta's result_values_performance_indicator is used only
+    // as a cross-check (metaResultTypeMatchesRule), never as the stored label — mixing
+    // raw action_type strings into result_type would fracture the REQUIRED partition.
+    return [
+      {
+        resultType: rule.resultType,
+        results: metaResults,
+        conversionValue: null,
+        attributionSetting: context.attributionSetting,
+        isPrimary: true,
+        // Distinguish a clean cross-check match from a type-mismatched fallback so a
+        // reconciliation drift is visible in results_source.
+        resultsSource: metaResultTypeMatchesRule(row, rule)
+          ? "meta_results"
+          : "meta_results_unverified_type"
+      }
+    ];
+  }
+  // Count from the SAME canonical channel (headline window = 7d_click + 1d_view).
+  const results = metaHeadlineWindowValue(canonicalAction);
+  // Value ONLY for purchase-type rules, from action_values[] of the SAME action_type.
+  let conversionValue: number | null = null;
+  if (rule.value) {
+    const valueElement = metaPickCanonicalAction(
+      metaInsightsActionValues(row),
+      [canonicalAction.action_type]
+    );
+    conversionValue = valueElement ? metaHeadlineWindowValue(valueElement) : 0;
+  }
+  return [
+    {
+      resultType: rule.resultType,
+      results,
+      conversionValue,
+      attributionSetting: context.attributionSetting,
+      isPrimary: true,
+      resultsSource: "derived_from_canonical_mapping"
+    }
+  ];
+}
+
+function metaAdsCampaignDailyRow(
+  adAccountId: string,
+  row: MetaAdsInsightsRow,
+  context: MetaAdsInsightsContext
+): MetaAdsCampaignDailyRow {
   const occurredOn = row.date_start ?? daysAgo(0);
+  const actions = metaInsightsActions(row);
+  // Landing page views from actions[action_type='landing_page_view'], NON-omni
+  // (omni_landing_page_view is a broader population and is deliberately excluded).
+  const landingPageViews = Math.round(metaSumActionType(actions, "landing_page_view"));
   return {
     externalId: `meta_ads:${adAccountId}:${row.campaign_id ?? "unknown"}:${occurredOn}`,
     adAccountId,
@@ -2880,11 +3442,24 @@ function metaAdsCampaignDailyRow(adAccountId: string, row: MetaAdsInsightsRow): 
     occurredOn,
     spend: numberOrZero(row.spend),
     clicks: integerOrZero(row.clicks),
+    inlineLinkClicks: integerOrZero(row.inline_link_clicks),
+    landingPageViews,
     impressions: integerOrZero(row.impressions),
     reach: integerOrZero(row.reach),
     cpm: numberOrNull(row.cpm),
     cpc: numberOrNull(row.cpc),
-    ctr: numberOrNull(row.ctr)
+    ctr: numberOrNull(row.ctr),
+    currency: stringOrNull(row.account_currency)?.toLowerCase() ?? null,
+    attributionSetting: context.attributionSetting,
+    apiVersion: context.apiVersion,
+    // Persist the full actions[] + action_values[] for audit/recompute.
+    actionsRaw: {
+      actions: actions ?? [],
+      action_values: metaInsightsActionValues(row) ?? []
+    },
+    objective: stringOrNull(row.objective),
+    optimizationGoal: stringOrNull(row.optimization_goal),
+    conversions: metaAdsConversionRows(row, context)
   };
 }
 
@@ -2899,6 +3474,7 @@ async function metaAdsMcpInsights(
     timeIncrement?: string;
     timeRange?: { since: string; until: string };
     after?: string;
+    attributionWindows?: readonly string[];
   }
 ): Promise<MetaAdsInsightsResponse> {
   const mcpCommand = requireCredential(credential, "mcpCommand");
@@ -2915,6 +3491,11 @@ async function metaAdsMcpInsights(
       date_preset: input.datePreset,
       time_increment: input.timeIncrement ? Number(input.timeIncrement) : undefined,
       time_range: input.timeRange,
+      // §4 — MCP takes the windows as an array of enum strings (native shape).
+      action_attribution_windows:
+        input.attributionWindows && input.attributionWindows.length > 0
+          ? [...input.attributionWindows]
+          : undefined,
       after: input.after
     },
     {
@@ -2933,6 +3514,7 @@ async function metaAdsCliInsights(
     datePreset?: string;
     timeIncrement?: "daily" | "weekly" | "monthly" | "all_days";
     timeRange?: { since: string; until: string };
+    attributionWindows?: readonly string[];
   }
 ): Promise<MetaAdsInsightsResponse> {
   const args = [
@@ -2957,6 +3539,12 @@ async function metaAdsCliInsights(
   }
   if (input.timeRange) {
     args.push("--since", input.timeRange.since, "--until", input.timeRange.until);
+  }
+  if (input.attributionWindows && input.attributionWindows.length > 0) {
+    // §4 — CLI takes each window as a repeated --action-attribution-window flag.
+    for (const window of input.attributionWindows) {
+      args.push("--action-attribution-window", window);
+    }
   }
   return coerceMetaAdsInsightsResponse(await callMetaAdsCliJson(credential, args));
 }
@@ -4371,11 +4959,31 @@ interface MetaAdsInsightsRow {
   date_start?: string | null;
   spend?: string | number | null;
   clicks?: string | number | null;
+  inline_link_clicks?: string | number | null;
   impressions?: string | number | null;
   reach?: string | number | null;
+  frequency?: string | number | null;
   cpm?: string | number | null;
   cpc?: string | number | null;
   ctr?: string | number | null;
+  // §4 conversion fields. actions[]/action_values[] carry per-window subvalues
+  // ('1d_click','7d_click','1d_view') alongside the element-level `value` (7d_click only).
+  actions?: MetaActionElement[] | null;
+  action_values?: MetaActionElement[] | null;
+  // Meta's own results family (reconciliation cross-check). Array of result objects,
+  // each with a `values` array of { value } entries.
+  results?: Array<{ values?: Array<{ value?: string | number | null }> }> | null;
+  cost_per_result?: Array<{ values?: Array<{ value?: string | number | null }> }> | null;
+  // The result_type source-of-truth string (e.g. 'actions:offsite_conversion.fb_pixel_purchase').
+  result_values_performance_indicator?: string | null;
+  // Campaign objective (coarse key) + adset optimization_goal (the real result driver).
+  objective?: string | null;
+  optimization_goal?: string | null;
+  // Account currency (§2.1, load-bearing for the Stripe value join). account_currency is
+  // a valid Insights field that the API returns only when explicitly requested — it IS in
+  // META_ADS_INSIGHTS_FIELDS, so live insights rows carry it and the delivery fact +
+  // campaign dimension are populated WITHOUT a second ad-account read.
+  account_currency?: string | null;
 }
 
 interface MetaAdsInsightsResponse {

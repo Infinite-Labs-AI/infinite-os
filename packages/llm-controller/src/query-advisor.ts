@@ -173,16 +173,16 @@ export function createSourceAwareQueryAdvisor(options: {
             ]
           };
         }
-        const followUpTimeScopeMessage = missingTimeScopeClarificationMessage(resolvedBusinessMetricQuestion);
-        if (followUpTimeScopeMessage) {
+        const followUpShowWindowsSections = timeSensitiveShowWindowsSections(resolvedBusinessMetricQuestion);
+        if (followUpShowWindowsSections.length > 0) {
           return {
             effectiveMessage: resolvedBusinessMetricQuestion,
-            message: `For "${resolvedBusinessMetricQuestion}", ${lowercaseFirst(followUpTimeScopeMessage)}`,
             promptSections: [
               "Resolved missing business metric scope for this turn:",
               `Original question: ${pendingBusinessMetricQuestion}`,
               `Clarifying business metric reply: ${input.message}`,
-              "Interpret this turn as a clarification reply that resolves the previously ambiguous business metric target."
+              "Interpret this turn as a clarification reply that resolves the previously ambiguous business metric target.",
+              ...followUpShowWindowsSections
             ]
           };
         }
@@ -214,10 +214,11 @@ export function createSourceAwareQueryAdvisor(options: {
           ]
         };
       }
-      const missingTimeScopeMessage = missingTimeScopeClarificationMessage(input.message);
-      if (missingTimeScopeMessage) {
+      const showWindowsSections = timeSensitiveShowWindowsSections(input.message);
+      if (showWindowsSections.length > 0) {
         return {
-          message: missingTimeScopeMessage
+          effectiveMessage: input.message,
+          promptSections: showWindowsSections
         };
       }
       const businessTimeScopeSections = explicitBusinessTimeScopePromptSections(input.message, input.now ?? new Date());
@@ -837,6 +838,9 @@ function pendingXClarificationQuestion(
   return undefined;
 }
 
+// Retained as a one-release migration shim: with "show, don't ask" nothing currently
+// emits a "Which time period do you want" question, but this still resolves a bare
+// time-scope reply if any session history (or a future ask) contains that prompt.
 function pendingTimeScopeClarificationQuestion(
   recentMessages: QueryAdvisorInput["recentMessages"]
 ): string | undefined {
@@ -934,10 +938,6 @@ function removeTimeScopePhrase(question: string): string {
     return question.trim();
   }
   return question.replace(new RegExp(`\\b${escapeRegExp(timeScope)}\\b`, "i"), "").replace(/\s{2,}/g, " ").trim();
-}
-
-function lowercaseFirst(value: string): string {
-  return value ? value.charAt(0).toLowerCase() + value.slice(1) : value;
 }
 
 function resolveIdentitySelection(message: string, identities: ConnectedXIdentity[]): ConnectedXIdentity | undefined {
@@ -1114,36 +1114,62 @@ function missingBusinessMetricClarificationMessage(message: string): string | un
   return "Do you mean best channel for traffic, signups, conversion rate, or revenue?";
 }
 
-function missingTimeScopeClarificationMessage(message: string): string | undefined {
+// Detection only: which time-sensitive metric family is being asked about with no
+// explicit time scope. Drives the show-windows guidance helper. Returns a short human
+// label for the metric, or undefined when the message is not a bare time-sensitive
+// family question. (The prior PRE-EMPT ask builder that also consumed this label has
+// been removed — ambiguous time-sensitive questions now SHOW a few standard windows
+// instead of asking.)
+function timeSensitiveFamilyMetricLabel(message: string): string | undefined {
   if (hasExplicitTimeScope(message)) {
     return undefined;
   }
   const family = classifyQueryFamily(message);
   if (family === "recognized_revenue" && isDirectRevenueQuestion(message)) {
-    return "Which time period do you want for revenue: today, this week, this month, this quarter, this year, or all time?";
+    return "revenue";
   }
   if (family === "revenue_source" && isDirectRevenueBreakdownQuestion(message)) {
-    return "Which time period do you want for the revenue/source breakdown: today, this week, this month, this quarter, this year, or all time?";
+    return "the revenue/source breakdown";
   }
   if (family === "site_visitors" && isDirectVisitorQuestion(message)) {
-    return "Which time period do you want for visitors or traffic: today, this week, this month, this quarter, this year, or all time?";
+    return "visitors or traffic";
   }
   if (family === "signup_count" && isDirectSignupQuestion(message)) {
-    return "Which time period do you want for signups: today, this week, this month, this quarter, this year, or all time?";
+    return "signups";
   }
   if (family === "site_conversion_rate" && isDirectConversionQuestion(message)) {
-    return "Which time period do you want for conversion rate: today, this week, this month, this quarter, this year, or all time?";
+    return "conversion rate";
   }
   if (family === "visitor_channel_breakdown" && isDirectTrafficBreakdownQuestion(message)) {
-    return "Which time period do you want for the traffic/source breakdown: today, this week, this month, this quarter, this year, or all time?";
+    return "the traffic/source breakdown";
   }
   if (family === "signup_channel_breakdown" && isDirectSignupBreakdownQuestion(message)) {
-    return "Which time period do you want for the signup/source breakdown: today, this week, this month, this quarter, this year, or all time?";
+    return "the signup/source breakdown";
   }
   if (family === "conversion_channel_breakdown" && isDirectConversionBreakdownQuestion(message)) {
-    return "Which time period do you want for the conversion/source breakdown: today, this week, this month, this quarter, this year, or all time?";
+    return "the conversion/source breakdown";
   }
   return undefined;
+}
+
+// "Show, don't ask" guidance for the time-sensitive metric families when no explicit
+// time scope is given. Instead of pre-empting with a clarification question, we let the
+// model run with instructions to show the metric across a few standard windows and
+// invite the user to narrow. Returns [] when the message is not a bare time-sensitive
+// family question (so callers can fall through to other behavior).
+function timeSensitiveShowWindowsSections(message: string): string[] {
+  const metricLabel = timeSensitiveFamilyMetricLabel(message);
+  if (!metricLabel) {
+    return [];
+  }
+  return [
+    "Time-sensitive metric without a time range — show a few standard windows, do not ask:",
+    `This question targets ${metricLabel}, a time-sensitive metric, but names no time range.`,
+    "Do NOT ask the user to pick a window, and do NOT silently use only all-time.",
+    "Run the metric (or breakdown) for a few standard windows — last 7 days, last 30 days, and all time — and present them together so the trend is visible.",
+    "After showing those windows, invite the user to narrow to a specific range if they want one.",
+    "If a window legitimately returns no data, say so for that window rather than dropping it."
+  ];
 }
 
 function hasExplicitTimeScope(message: string): boolean {
@@ -1261,7 +1287,7 @@ function isAmbiguousBusinessChannelQuestion(message: string): boolean {
 }
 
 function isDirectRevenueQuestion(message: string): boolean {
-  return /\b(how much revenue|what revenue did|revenue total|total revenue|how is revenue doing|how are revenues doing)\b/i.test(message);
+  return /\b(how much revenue|how much (?:did|have) (?:i|we) (?:make|made|earn|earned)|what(?:['’]?s| is| are)? (?:my|our|the) revenues?|what revenue did|revenue total|total revenue|how(?:['’]?s| is| are) (?:my |our |the )?revenues?( doing)?|show me (?:my |our |the )?revenues?)\b/i.test(message);
 }
 
 function isDirectRevenueBreakdownQuestion(message: string): boolean {
@@ -1553,16 +1579,41 @@ function genericOpenEndedRefinementSections(
     }
   }
 
-  if (!isOpenEndedAnalysisPrompt(message)) {
-    return [];
-  }
-
   const hasSources = toolResults.some((result) => result.name === "list_sources" && isRecord(result.result));
   const hasSyncs = toolResults.some((result) => result.name === "get_recent_sync_runs" && isRecord(result.result));
   const hasMetrics = toolResults.some((result) => result.name === "list_metrics" && isRecord(result.result));
   const hasViews = toolResults.some((result) => result.name === "list_queryable_views" && isRecord(result.result));
   const hasMetricResult = toolResults.some((result) => result.name === "run_metric_query" && isRecord(result.result));
   const hasBreakdownResult = toolResults.some((result) => result.name === "run_breakdown_query" && isRecord(result.result));
+  const hasMetricDetail = toolResults.some((result) => result.name === "describe_metric" && isRecord(result.result));
+
+  // Targeted metric questions ("how many clicks?", "what's my CTR?", "cost per lead?") are not
+  // open-ended, but the codex model still sometimes bails after list_sources and asks for a time
+  // range instead of answering. Fire the "go fetch a metric, don't stop at the source list" rescue
+  // for metric-shaped turns too — but ONLY when the turn so far has list_sources and has not yet run
+  // (or even located) any metric. This is conservative: it cannot fire once a metric query/breakdown
+  // result exists, and it never relaxes the result_type partition or any write confirmation.
+  if (
+    !isOpenEndedAnalysisPrompt(message) &&
+    isTargetedMetricQuestion(message) &&
+    hasSources &&
+    !hasMetrics &&
+    !hasMetricDetail &&
+    !hasViews &&
+    !hasMetricResult &&
+    !hasBreakdownResult
+  ) {
+    return [
+      "Metric-question refinement guidance:",
+      "- The user asked for a specific metric or number, but you only have a source list so far.",
+      "- Do not stop to ask for a time range. Identify the metric (use the metric-aliases hint, or list_metrics/describe_metric if unsure) and run run_metric_query or run_breakdown_query over all available data, then state the assumed scope as a caveat and offer to narrow.",
+      "- Only report a metric as unavailable after confirming it is not reachable under any alias."
+    ];
+  }
+
+  if (!isOpenEndedAnalysisPrompt(message)) {
+    return [];
+  }
 
   if (hasSources && !hasMetrics && !hasViews) {
     return [
@@ -1633,6 +1684,19 @@ function genericOpenEndedRefinementSections(
 
 function isOpenEndedAnalysisPrompt(message: string): boolean {
   return /\b(what stands out|what should i know|what matters|what jumps out|help me understand|analy[sz]e this|analyze this)\b/i.test(message);
+}
+
+// Conservative detector for a targeted "what's my X / how many X / cost per X" metric question.
+// Requires both a metric-question shape (how many / what is my / cost per / show me) AND a known
+// metric noun or alias term so it does not fire on vague or non-metric prompts. Kept deliberately
+// narrow: this only relaxes the "fetch a metric before answering" rescue, never any safety gate.
+const METRIC_TERM_RE =
+  /\b(clicks?|impressions?|reach|ctr|cpc|cpm|cpl|cpa|roas|frequency|spend|cost per (?:lead|result|acquisition|conversion|click|mille|thousand)|conversions?|results?|leads?|purchases?|link clicks?|landing page views?|page ?views?|visitors?|users?|sessions?|signups?|orders?|revenue|sales|gmv|followers?|tweets?|posts?|comments?|replies|engagement|events?|conversion (?:rate|value)|engagement rate|session duration)\b/i;
+function isTargetedMetricQuestion(message: string): boolean {
+  const metricShaped =
+    /\b(how many|how much|what(?:['’]?s| is| are)? (?:my|our|the)|what was (?:my|our|the)|show me|give me)\b/i.test(message) ||
+    /\bcost per\b/i.test(message);
+  return metricShaped && METRIC_TERM_RE.test(message);
 }
 
 function isCapabilityExplorationPrompt(message: string): boolean {
@@ -1813,7 +1877,10 @@ export function classifyQueryFamily(message: string): QueryFamily {
     /\brevenue this (month|week|quarter|year)\b/i.test(message) ||
     /\btell me about revenue\b/i.test(message) ||
     /\brevenue overview\b/i.test(message) ||
-    /\brevenue total\b/i.test(message)
+    /\brevenue total\b/i.test(message) ||
+    /\bwhat(?:['’]?s| is| are)? (?:my|our|the) revenues?\b/i.test(message) ||
+    /\bhow(?:['’]?s| is| are) (?:my |our |the )?revenues?\b/i.test(message) ||
+    /\bshow me (?:my |our |the )?revenues?\b/i.test(message)
   ) {
     return "recognized_revenue";
   }

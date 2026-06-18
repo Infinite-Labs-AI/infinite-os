@@ -1,6 +1,7 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { encryptCredentialPayload } from "@infinite-os/core";
 import { type InfiniteOsDb } from "@infinite-os/db";
@@ -880,7 +881,23 @@ describe("live provider clients", () => {
       });
       expect(requests[0]?.url).not.toContain("access_token=");
       expect(requests[1]?.url).toContain("time_increment=1");
-      expect(requests[1]?.url).toContain("campaign_id%2Ccampaign_name%2Cdate_start%2Cspend%2Cclicks%2Cimpressions%2Creach%2Ccpm%2Ccpc%2Cctr");
+      // Phase-1 (§4) field list: spend/clicks/impressions/reach/cpm/cpc/ctr PLUS the
+      // conversion fields (inline_link_clicks, frequency, actions, action_values,
+      // results, cost_per_result, result_values_performance_indicator, objective,
+      // optimization_goal). All transports request the SAME list (META_ADS_INSIGHTS_FIELDS).
+      expect(requests[1]?.url).toContain(
+        "campaign_id%2Ccampaign_name%2Cdate_start%2Cspend%2Cclicks%2Cinline_link_clicks%2Cimpressions%2Creach%2Cfrequency%2Ccpm%2Ccpc%2Cctr%2Cactions%2Caction_values%2Cresults%2Ccost_per_result%2Cresult_values_performance_indicator%2Cobjective%2Coptimization_goal"
+      );
+      // §4 — per-window attribution requested (1d_click,7d_click,1d_view); the
+      // headline 7d_click+1d_view is computed from the subvalues. 7d_view/28d_view
+      // are hard-excluded and use_unified_attribution_setting is NOT sent (a no-op).
+      expect(requests[1]?.url).toContain("action_attribution_windows=");
+      expect(requests[1]?.url).toContain("1d_click");
+      expect(requests[1]?.url).toContain("7d_click");
+      expect(requests[1]?.url).toContain("1d_view");
+      expect(requests[1]?.url).not.toContain("7d_view");
+      expect(requests[1]?.url).not.toContain("28d_view");
+      expect(requests[1]?.url).not.toContain("use_unified_attribution_setting");
       expect(rows[0]).toMatchObject({
         externalId: "meta_ads:act_1234567890:1200000001:2026-06-01",
         objectType: "meta_ads_campaign_daily",
@@ -898,11 +915,12 @@ describe("live provider clients", () => {
     });
   });
 
-  it("emits the IDENTICAL default Meta Ads insights request (level=campaign, time_increment=1)", async () => {
-    // Phase 0 Change 2 regression guard: `level`/`time_increment` are now resolved through
-    // defaults instead of inline literals. With no SyncRequest override the emitted insights
-    // request MUST be byte-for-byte what it was before (campaign grain, daily increment).
-    // If a future edit changes the default, or drops level/time_increment, this fails.
+  it("emits the Phase-1 default Meta Ads insights request (level=campaign, time_increment=1, conversion fields + attribution windows)", async () => {
+    // Grain guard: `level`/`time_increment` are resolved through defaults — with no
+    // SyncRequest override the emitted request keeps campaign grain + daily increment.
+    // Phase-1 (§4) additionally pins the full conversion field list and the
+    // action_attribution_windows. If a future edit changes the default grain, drops
+    // level/time_increment, or drifts the field list across transports, this fails.
     const requests: Array<{ url: string }> = [];
     await withMockFetch(async (url) => {
       requests.push({ url });
@@ -931,10 +949,20 @@ describe("live provider clients", () => {
       const insightsUrl = new URL(requests[0]?.url ?? "");
       expect(insightsUrl.searchParams.get("level")).toBe("campaign");
       expect(insightsUrl.searchParams.get("time_increment")).toBe("1");
+      // account_currency is REQUESTED (§2.1, load-bearing for the Stripe join). It is a
+      // valid Insights field the API returns only when asked; if it ever falls out of the
+      // list, currency goes null in live mode and the Meta↔Stripe ROAS join can't reconcile.
       expect(insightsUrl.searchParams.get("fields")).toBe(
-        "campaign_id,campaign_name,date_start,spend,clicks,impressions,reach,cpm,cpc,ctr"
+        "campaign_id,campaign_name,date_start,spend,clicks,inline_link_clicks,impressions,reach,frequency,cpm,cpc,ctr,actions,action_values,results,cost_per_result,result_values_performance_indicator,objective,optimization_goal,account_currency"
       );
+      expect(insightsUrl.searchParams.get("fields")).toContain("account_currency");
       expect(insightsUrl.searchParams.get("limit")).toBe("100");
+      // §4 — attribution windows sent as a JSON array; 7d_view/28d_view excluded.
+      expect(JSON.parse(insightsUrl.searchParams.get("action_attribution_windows") ?? "[]")).toEqual([
+        "1d_click",
+        "7d_click",
+        "1d_view"
+      ]);
     });
   });
 
@@ -1091,6 +1119,114 @@ describe("live provider clients", () => {
       expect(timeRange.since).toMatch(/20\d\d-\d\d-\d\d/);
       expect(requests[0]?.authorization).toBe("Bearer meta-access-token");
     });
+  });
+
+  // ────────────────────────────────────────────────────────────────────────────
+  // §9 GOLDEN FIXTURE — the live Ultima lead-gen probe. The SAME 2 leads appear
+  // under 4 action_types; the §4b canonical-event mapping must collapse this to
+  // exactly 2 leads (NOT 8). This is the acceptance gate for "never sum actions[]".
+  const ULTIMA_PROBE = JSON.parse(
+    readFileSync(
+      fileURLToPath(new URL("./fixtures/meta-ultima-leadgen-probe.json", import.meta.url)),
+      "utf8"
+    )
+  ) as { data: Array<Record<string, unknown>>; paging: Record<string, unknown> };
+
+  async function extractUltimaRow(): Promise<Record<string, unknown>> {
+    let payload: Record<string, unknown> = {};
+    await withMockFetch(
+      async () => jsonResponse({ data: ULTIMA_PROBE.data, paging: ULTIMA_PROBE.paging }),
+      async () => {
+        const db = fakeDb({
+          credential: {
+            credential_kind: "marketing_api_access_token",
+            encrypted_payload: encryptedCredential({
+              mode: "live",
+              adAccountId: "887743100560299",
+              accessToken: "meta-access-token",
+              apiVersion: "v25.0"
+            })
+          }
+        });
+        const connector = connectorFor("meta_ads");
+        const rows = await connector.extract(db, request("meta_ads"), {
+          cursorKey: "meta_ads_campaign_daily",
+          cursorStart: "2026-06-01T00:00:00.000Z",
+          cursorEnd: "2026-06-03T00:00:00.000Z",
+          refreshWindowDays: 30,
+          mode: "live"
+        });
+        payload = rows[0]?.payload as Record<string, unknown>;
+      }
+    );
+    return payload;
+  }
+
+  it("§9: collapses the Ultima 4 lead action_types to exactly 2 leads (never sums actions[])", async () => {
+    const payload = await extractUltimaRow();
+    const conversions = payload.conversions as Array<Record<string, unknown>>;
+
+    // Exactly ONE conversion row for this lead-gen campaign-day, of type 'lead'.
+    expect(conversions).toHaveLength(1);
+    const lead = conversions[0];
+    expect(lead.resultType).toBe("lead");
+
+    // THE ACCEPTANCE GATE: 2 leads, NOT 8. The 4 action_types (lead,
+    // offsite_conversion.fb_pixel_lead, onsite_web_lead, offsite_lead_add_20_s_calls)
+    // each report 2 (headline 7d_click+1d_view = 1+1); summing all four gives 8.
+    // The deterministic mapping picks ONE canonical action_type and stops → 2.
+    expect(lead.results).toBe(2);
+    expect(lead.results).not.toBe(8);
+
+    // §2.3 guard: lead-gen carries NO revenue — conversion_value must stay null.
+    expect(lead.conversionValue).toBeNull();
+
+    // Provenance: derived from OUR mapping (not Meta's results field) since the
+    // canonical action fired.
+    expect(lead.resultsSource).toBe("derived_from_canonical_mapping");
+    expect(lead.isPrimary).toBe(true);
+    expect(lead.attributionSetting).toBe("1d_click,7d_click,1d_view");
+  });
+
+  it("§9: regression — naively summing every lead action_type would yield 8, proving dedup is load-bearing", async () => {
+    // This asserts the SHAPE of the trap so a future revert to summing actions[] is
+    // caught: the raw fixture genuinely reports 4 lead action_types that each sum to
+    // 2 (total 8). If someone changes the parser to sum variants, the §9 test above
+    // flips from 2 to 8 and fails — this test documents WHY that is wrong.
+    const leadActionTypes = [
+      "lead",
+      "offsite_conversion.fb_pixel_lead",
+      "onsite_web_lead",
+      "offsite_lead_add_20_s_calls"
+    ];
+    const actions = ULTIMA_PROBE.data[0].actions as Array<Record<string, unknown>>;
+    const summedAcrossVariants = actions
+      .filter((a) => leadActionTypes.includes(String(a.action_type)))
+      .reduce((total, a) => total + Number(a["7d_click"]) + Number(a["1d_view"]), 0);
+    // The trap: 4 variants x (1 + 1) = 8 — the WRONG number the connector must avoid.
+    expect(summedAcrossVariants).toBe(8);
+
+    // And the connector's actual output is 2, never this summed figure.
+    const payload = await extractUltimaRow();
+    const conversions = payload.conversions as Array<Record<string, unknown>>;
+    expect(conversions[0].results).not.toBe(summedAcrossVariants);
+    expect(conversions[0].results).toBe(2);
+  });
+
+  it("§9: extracts non-omni landing_page_views (excludes omni_landing_page_view) and the §2.2 delivery columns", async () => {
+    const payload = await extractUltimaRow();
+
+    // landing_page_view headline window 7d_click(188)+1d_view(12)=200; the
+    // omni_landing_page_view variant (240+30=270) is NOT counted.
+    expect(payload.landingPageViews).toBe(200);
+    expect(payload.inlineLinkClicks).toBe(274);
+    expect(payload.currency).toBe("usd");
+    expect(payload.apiVersion).toBe("v25.0");
+    expect(payload.attributionSetting).toBe("1d_click,7d_click,1d_view");
+    // actions_raw preserves the full arrays for audit/recompute.
+    const actionsRaw = payload.actionsRaw as { actions?: unknown[]; action_values?: unknown[] };
+    expect(Array.isArray(actionsRaw.actions)).toBe(true);
+    expect((actionsRaw.actions ?? []).length).toBeGreaterThan(0);
   });
 
   it("supports Meta Ads extraction through a configured MCP stdio command", async () => {
@@ -1700,8 +1836,8 @@ console.log(JSON.stringify({ data: [] }));
     });
   });
 
-  it("writes Meta Ads raw rows before campaign-daily truth", async () => {
-    const queries: string[] = [];
+  it("writes Meta Ads raw rows + the campaign dimension before campaign-daily truth", async () => {
+    const queries: Array<{ sql: string; params?: unknown[] }> = [];
     await withMockFetch(async () =>
       jsonResponse({
         data: [
@@ -1715,14 +1851,16 @@ console.log(JSON.stringify({ data: [] }));
             reach: "3200",
             cpm: "27.03",
             cpc: "1.39",
-            ctr: "1.95"
+            ctr: "1.95",
+            objective: "OUTCOME_LEADS",
+            account_currency: "USD"
           }
         ],
         paging: {}
       }), async () => {
       const result = await connectorFor("meta_ads").sync(
         fakeDb({
-          queries,
+          queryLog: queries,
           credential: {
             credential_kind: "marketing_api_access_token",
             encrypted_payload: encryptedCredential({
@@ -1736,12 +1874,25 @@ console.log(JSON.stringify({ data: [] }));
         request("meta_ads")
       );
 
-      const rawIndex = queries.findIndex((sql) => sql.includes("insert into raw_records"));
-      const truthIndex = queries.findIndex((sql) => sql.includes("insert into meta_ads_campaign_daily"));
+      const sqls = queries.map((entry) => entry.sql);
+      const rawIndex = sqls.findIndex((sql) => sql.includes("insert into raw_records"));
+      const dimIndex = sqls.findIndex((sql) => sql.includes("insert into meta_ads_campaigns"));
+      const truthIndex = sqls.findIndex((sql) => sql.includes("insert into meta_ads_campaign_daily"));
       expect(result).toMatchObject({ provider: "meta_ads", recordsExtracted: 1, recordsLoaded: 1 });
       expect(rawIndex).toBeGreaterThanOrEqual(0);
+      // §2.1 — the dimension is populated (currency/objective for the §5 Stripe join), and it
+      // is written BEFORE the delivery fact so the join views always have a campaign row.
+      expect(dimIndex).toBeGreaterThanOrEqual(0);
+      expect(dimIndex).toBeLessThan(truthIndex);
       expect(truthIndex).toBeGreaterThan(rawIndex);
-      expect(queries.some((sql) => sql.includes("on conflict (source_id, ad_account_id, campaign_id, occurred_on)"))).toBe(true);
+      expect(queries.some((entry) => entry.sql.includes("on conflict (source_id, ad_account_id, campaign_id, occurred_on)"))).toBe(true);
+      // The dimension upsert carries the load-bearing currency (lowercased) + objective so
+      // dim.currency / dim.objective are no longer always NULL on the join views.
+      const dimQuery = queries.find((entry) => entry.sql.includes("insert into meta_ads_campaigns"));
+      expect(dimQuery?.sql).toContain("on conflict (source_id, ad_account_id, campaign_id)");
+      expect(dimQuery?.params).toContain("usd"); // currency lowercased
+      expect(dimQuery?.params).toContain("OUTCOME_LEADS"); // coarse objective
+      expect(dimQuery?.params).toContain("1200000001"); // campaign_id
     });
   });
 
@@ -2866,10 +3017,17 @@ function fakeDb(options: {
   credential: { credential_kind: string; encrypted_payload: string };
   cursorValue?: string;
   queries?: string[];
+  // Optional params-aware log (mirrors oauthFakeDb.queryLog) for tests that assert on the
+  // bound values, e.g. the campaign-dimension currency/objective upsert.
+  queryLog?: Array<{ sql: string; params?: unknown[] }>;
 }): InfiniteOsDb {
+  const record = (sql: string, params?: unknown[]) => {
+    options.queries?.push(sql);
+    options.queryLog?.push({ sql, params });
+  };
   return {
-    async one<T>(sql: string): Promise<T | null> {
-      options.queries?.push(sql);
+    async one<T>(sql: string, params?: unknown[]): Promise<T | null> {
+      record(sql, params);
       if (sql.includes("connection_credentials")) {
         return options.credential as T;
       }
@@ -2878,8 +3036,8 @@ function fakeDb(options: {
       }
       return null;
     },
-    async query(sql: string) {
-      options.queries?.push(sql);
+    async query(sql: string, params?: unknown[]) {
+      record(sql, params);
       return [];
     },
     async close() {},

@@ -639,12 +639,46 @@ async function verifyClaims(
   });
 }
 
+// Stop-words stripped before the relaxed near-candidate pass: generic campaign/entity filler that
+// would otherwise drag in every campaign (e.g. "sales campaign" must search for "sales", not "campaign").
+const CAMPAIGN_QUERY_STOP_WORDS = new Set([
+  "campaign", "campaigns", "the", "a", "an", "my", "our", "ad", "ads", "on", "for", "of", "in", "and", "meta", "facebook", "instagram"
+]);
+
+function significantCampaignTokens(query: string): string[] {
+  const seen = new Set<string>();
+  const tokens: string[] = [];
+  for (const raw of query.toLowerCase().split(/[^a-z0-9]+/i)) {
+    const token = raw.trim();
+    if (token.length < 2 || CAMPAIGN_QUERY_STOP_WORDS.has(token) || seen.has(token)) {
+      continue;
+    }
+    seen.add(token);
+    tokens.push(token);
+  }
+  return tokens;
+}
+
 async function resolveCampaignEntities(
   db: InfiniteOsDb,
   workspaceId: string,
   query: string,
   limit: number
 ): Promise<Record<string, unknown>[]> {
+  const toEvidence = (rows: Record<string, unknown>[]): Record<string, unknown>[] =>
+    rows.map((row) => sanitizeEvidenceRow({
+      entityType: "campaign",
+      entityKey: row.campaign_id,
+      label: row.campaign_name ?? row.campaign_id,
+      sourceId: row.source_id,
+      lastSeenOn: row.last_seen_on,
+      metrics: {
+        meta_ads_clicks: row.meta_ads_clicks,
+        meta_ads_spend: row.meta_ads_spend,
+        impressions: row.impressions
+      }
+    }));
+
   const like = `%${query}%`;
   const rows = await db.query<Record<string, unknown>>(
     `
@@ -662,18 +696,40 @@ async function resolveCampaignEntities(
     `,
     [workspaceId, like, limit]
   );
-  return rows.map((row) => sanitizeEvidenceRow({
-    entityType: "campaign",
-    entityKey: row.campaign_id,
-    label: row.campaign_name ?? row.campaign_id,
-    sourceId: row.source_id,
-    lastSeenOn: row.last_seen_on,
-    metrics: {
-      meta_ads_clicks: row.meta_ads_clicks,
-      meta_ads_spend: row.meta_ads_spend,
-      impressions: row.impressions
-    }
-  }));
+  if (rows.length > 0) {
+    return toEvidence(rows);
+  }
+
+  // Relaxed near-candidate pass: the exact `%query%` substring matched nothing, so tokenize the
+  // query, drop generic stop-words, and OR the significant tokens (e.g. "sales campaign" -> "sales")
+  // so "sales campaign" still surfaces "Sales — Summer Sale". Returned as candidates the controller
+  // can pick from or present to the user instead of bailing with no leads. READ-ONLY — same view,
+  // same grouping; nothing here writes or relaxes a partition.
+  const tokens = significantCampaignTokens(query);
+  if (tokens.length === 0) {
+    return [];
+  }
+  const tokenParams = tokens.map((token) => `%${token}%`);
+  const tokenClauses = tokens
+    .map((_token, index) => `(campaign_id ilike $${index + 2} or campaign_name ilike $${index + 2})`)
+    .join(" or ");
+  const nearRows = await db.query<Record<string, unknown>>(
+    `
+      select source_id, campaign_id, campaign_name,
+        sum(meta_ads_clicks) as meta_ads_clicks,
+        sum(meta_ads_spend) as meta_ads_spend,
+        sum(impressions) as impressions,
+        max(occurred_on) as last_seen_on
+      from queryable.vw_meta_ads_campaign_daily
+      where workspace_id = $1
+        and (${tokenClauses})
+      group by source_id, campaign_id, campaign_name
+      order by sum(meta_ads_clicks) desc nulls last, max(occurred_on) desc nulls last
+      limit $${tokens.length + 2}
+    `,
+    [workspaceId, ...tokenParams, limit]
+  );
+  return toEvidence(nearRows);
 }
 
 async function resolveXContentEntities(
@@ -2569,6 +2625,27 @@ async function runAggregate(
     }
   }
   const filters = filtersFrom(input);
+  // Phase-1 §6 — result_type is a REQUIRED partition for the conversion-family metrics. The
+  // engine MUST refuse to aggregate results/cost_per_result/conversion_value/roas across mixed
+  // result_types: a single number blending CPL (leads) and CPA (purchases) is meaningless, and
+  // worse, silently averages two populations. This is the ONLY place that decides GROUP BY, so
+  // it is the load-bearing enforcement point (metric_definitions.required_filters records the
+  // contract but nothing reads it). A query is allowed ONLY if it either groups BY result_type
+  // (so each type is its own row) OR pins result_type to a single value via an equals filter.
+  if (requiresResultTypePartition(metric)) {
+    const groupsByResultType = normalizedGroupBy.includes("result_type");
+    const pinsResultType = filters.some(
+      (filter) => normalizeDimensionAlias(view, filter.field) === "result_type" && filter.operator === "equals"
+    );
+    if (!groupsByResultType && !pinsResultType) {
+      // The engine THROWS here — it does not return an envelope. The unsupported_partition:*
+      // error propagates out of run_metric_query / run_breakdown_query (the action handlers
+      // re-throw it); a higher layer (the LLM controller / CLI) is what wraps it into a
+      // needs_clarification response asking the caller to group by / filter to a result_type.
+      // The hard refusal at this layer is the load-bearing guarantee that CPL+CPA never blend.
+      throw new Error(`unsupported_partition:result_type_required:${metric}`);
+    }
+  }
   const where = ["workspace_id = $1"];
   const params: unknown[] = [workspaceId];
   for (const filter of filters) {
@@ -2976,13 +3053,80 @@ async function providerTruthRows(
     metric === "reach" ||
     metric === "cpm" ||
     metric === "cpc" ||
-    metric === "ctr"
+    metric === "ctr" ||
+    // Phase-1 §6: link_clicks/landing_page_views/frequency are delivery-fact columns
+    // (or a recomputed ratio over the delivery grain). They share the delivery view
+    // (see metricView/drilldownForMetric) and so MUST drill down to meta_ads_campaign_daily,
+    // not the posthog default fallthrough below. The select is widened to the Phase-1
+    // delivery columns (inline_link_clicks, landing_page_views, frequency, currency).
+    metric === "link_clicks" ||
+    metric === "landing_page_views" ||
+    metric === "frequency"
   ) {
     return db.query(
       `
         select id, source_id, ad_account_id, campaign_id, campaign_name, occurred_on,
-          spend, clicks, impressions, reach, cpm, cpc, ctr
+          spend, clicks, inline_link_clicks, landing_page_views, impressions, reach,
+          cpm, cpc, ctr,
+          -- frequency is a RECOMPUTED ratio (impressions/reach), NOT a stored column on
+          -- meta_ads_campaign_daily (see migration 0032 -- frequency is never added). Compute
+          -- it inline at the per-row drilldown grain, mirroring the metric_definitions seed
+          -- (0034): impressions/nullif(reach,0), reach-APPROXIMATE caveat inherited. Selecting
+          -- a bare frequency column here threw the runtime error column frequency does not exist.
+          impressions::numeric / nullif(reach, 0) as frequency,
+          currency
         from meta_ads_campaign_daily
+        where workspace_id = $1
+          and ($2::text is null or source_id = $2)
+        order by occurred_on desc, campaign_id asc
+        limit $3
+      `,
+      [workspaceId, sourceIdFilter ?? null, limit]
+    );
+  }
+  // Phase-1 §6 — typed conversions drilldown. results/cost_per_result/conversion_value/roas
+  // read the child conversions fact (campaign × day × result_type), LEFT JOINing the delivery
+  // fact's spend exactly like the queryable view (cost_per_result = spend/results,
+  // roas = conversion_value/spend). Previously these fell through to the posthog_event_truth
+  // default branch and returned UNRELATED event rows while the envelope advertised
+  // drilldown.meta_ads_campaign_conversion_rows — a provenance/data mismatch. result_type /
+  // is_primary / results_source travel so the drilldown is honestly typed.
+  if (
+    metric === "results" ||
+    metric === "cost_per_result" ||
+    metric === "conversion_value" ||
+    metric === "roas"
+  ) {
+    return db.query(
+      `
+        select c.id, c.source_id, c.ad_account_id, c.campaign_id, d.campaign_name,
+          c.occurred_on, c.result_type, c.results, c.conversion_value,
+          d.spend as meta_ads_spend, c.is_primary, c.results_source
+        from meta_ads_campaign_conversions_daily c
+        left join meta_ads_campaign_daily d
+          on d.source_id = c.source_id
+          and d.ad_account_id = c.ad_account_id
+          and d.campaign_id = c.campaign_id
+          and d.occurred_on = c.occurred_on
+        where c.workspace_id = $1
+          and ($2::text is null or c.source_id = $2)
+        order by c.occurred_on desc, c.campaign_id asc, c.result_type asc
+        limit $3
+      `,
+      [workspaceId, sourceIdFilter ?? null, limit]
+    );
+  }
+  // Phase-1 §5 — Stripe-attributed ROAS drilldown reads the Meta↔Stripe join view (the same
+  // view metricView/aggregateExpression use), carrying matched/unmatched spend + revenue and
+  // the match_confidence signal. Falling through to posthog_event_truth here would serve event
+  // rows behind a drilldown.meta_stripe_campaign_value_rows envelope.
+  if (metric === "roas_from_stripe") {
+    return db.query(
+      `
+        select source_id, ad_account_id, campaign_id, campaign_name, occurred_on,
+          currency, match_confidence, matched_spend_major, matched_revenue_major,
+          unmatched_spend_major, unmatched_revenue_major
+        from queryable.vw_meta_stripe_campaign_value_daily
         where workspace_id = $1
           and ($2::text is null or source_id = $2)
         order by occurred_on desc, campaign_id asc
@@ -3261,10 +3405,29 @@ export function metricView(metric: string): string {
     metric === "reach" ||
     metric === "cpm" ||
     metric === "cpc" ||
-    metric === "ctr"
+    metric === "ctr" ||
+    // Phase-1 §6: link_clicks/landing_page_views are delivery-fact columns; frequency is a
+    // recomputed ratio (impressions/reach) over the SAME delivery grain. All three read the
+    // delivery view, not the typed conversions view.
+    metric === "link_clicks" ||
+    metric === "landing_page_views" ||
+    metric === "frequency"
   ) {
     return "queryable.vw_meta_ads_campaign_daily";
   }
+  // Phase-1 §6: typed conversions (results/cost_per_result/conversion_value/roas) live on the
+  // child fact partitioned by result_type. result_type is a REQUIRED partition for these —
+  // see requiresResultTypePartition() + runAggregate's refusal guard.
+  if (
+    metric === "results" ||
+    metric === "cost_per_result" ||
+    metric === "conversion_value" ||
+    metric === "roas"
+  ) {
+    return "queryable.vw_meta_ads_campaign_conversions_daily";
+  }
+  // Phase-1 §5: Stripe-sourced ROAS reads the Meta↔Stripe true-value join view.
+  if (metric === "roas_from_stripe") return "queryable.vw_meta_stripe_campaign_value_daily";
   if (metric === "x_public_engagement") return "queryable.vw_x_post_public_metrics";
   if (metric === "x_post_count" || metric === "x_comment_count") return "queryable.vw_x_authored_activity";
   if (metric === "x_follower_count") return "queryable.vw_x_profile_public_metrics";
@@ -3310,7 +3473,53 @@ export function aggregateExpression(metric: string, column: string): string {
   if (metric === "ctr") {
     return "sum(meta_ads_clicks) / nullif(sum(impressions), 0)";
   }
+  // Phase-1 §6 Meta conversions/value ratio metrics — same recompute-from-summed-bases rule
+  // as cpm/cpc/ctr. cost_per_result and roas are NON-ADDITIVE: avg(per-row cost_per_result)
+  // or avg(per-row roas) would weight every campaign-day equally regardless of spend volume,
+  // which is arithmetically wrong. They MUST divide the summed numerator by the summed
+  // denominator. CRITICAL (§6): for cost_per_result/roas this summation is only ever valid
+  // WITHIN a single result_type — result_type is a REQUIRED partition (requiresResultTypePartition
+  // + runAggregate's refusal guard force a per-type group-by) so CPL and CPA never blend.
+  if (metric === "cost_per_result") {
+    return "sum(meta_ads_spend) / nullif(sum(results), 0)";
+  }
+  if (metric === "roas") {
+    return "sum(conversion_value) / nullif(sum(meta_ads_spend), 0)";
+  }
+  // frequency = impressions / reach, recomputed from summed bases (inherits reach's
+  // APPROXIMATE caveat — see caveatsForMetric). Never avg(per-row frequency).
+  if (metric === "frequency") {
+    return "sum(impressions) / nullif(sum(reach), 0)";
+  }
+  // Phase-1 §5 Stripe-sourced ROAS — recomputed from the summed, currency-reconciled bases
+  // the join view exposes (revenue already converted to major units in the matched account
+  // currency; spend in major units). Mapping-dependent: only matched rows contribute (the
+  // view drops unmatched spend/revenue from the numerator/denominator and surfaces them
+  // separately). avg(per-row roas) would be wrong here too.
+  if (metric === "roas_from_stripe") {
+    return "sum(matched_revenue_major) / nullif(sum(matched_spend_major), 0)";
+  }
+  // results/conversion_value/link_clicks/landing_page_views are additive -> sum(column).
   return `sum(${column})`;
+}
+
+// Phase-1 §6 — the conversion-family metrics for which result_type is a REQUIRED partition,
+// not merely an allowed dimension. A query over these MUST group by result_type (or filter to
+// a single result_type) so CPL and CPA are NEVER silently blended/averaged across types. This
+// is the imperative guard the spec demands — metric_definitions.required_filters records the
+// contract but nothing reads it; the enforcement lives here + in runAggregate.
+//
+// Exported so the worker saved-report path (which cannot group-by) can EXCLUDE these metrics
+// the same way it excludes page_views_by_page, rather than emit a silently-blended number.
+const RESULT_TYPE_PARTITIONED_METRICS = new Set<string>([
+  "results",
+  "cost_per_result",
+  "conversion_value",
+  "roas"
+]);
+
+export function requiresResultTypePartition(metric: string): boolean {
+  return RESULT_TYPE_PARTITIONED_METRICS.has(metric);
 }
 
 function allowedDimensionsForView(view: string): string[] {
@@ -3343,7 +3552,19 @@ function allowedDimensionsForView(view: string): string[] {
     return ["shopify_product_id", "title", "vendor", "product_type", "status"];
   }
   if (view === "queryable.vw_meta_ads_campaign_daily") {
-    return ["ad_account_id", "campaign_id", "campaign_name", "occurred_on"];
+    return ["ad_account_id", "campaign_id", "campaign_name", "currency", "occurred_on"];
+  }
+  // Phase-1 §6 — the typed conversions view. result_type is the REQUIRED partition for the
+  // conversion-family metrics (results/cost_per_result/conversion_value/roas); it is in the
+  // allowlist so callers CAN group/filter by it, and requiresResultTypePartition() forces
+  // them to. is_primary/results_source let callers isolate the canonical headline result.
+  if (view === "queryable.vw_meta_ads_campaign_conversions_daily") {
+    return ["ad_account_id", "campaign_id", "result_type", "is_primary", "results_source", "occurred_on"];
+  }
+  // Phase-1 §5 — the Meta↔Stripe true-value join view. match_confidence is the join-quality
+  // signal (exact|normalized|fuzzy|unmatched); currency is the reconciled account currency.
+  if (view === "queryable.vw_meta_stripe_campaign_value_daily") {
+    return ["ad_account_id", "campaign_id", "campaign_name", "match_confidence", "currency", "occurred_on"];
   }
   if (view === "queryable.vw_x_post_public_metrics") {
     return [
@@ -3447,6 +3668,77 @@ export function caveatsForMetric(metric: string): string[] {
   if (metric === "cpm" || metric === "cpc" || metric === "ctr") {
     return ["read_only_marketing_api_reporting", "ratio_recomputed_from_summed_bases"];
   }
+  // Phase-1 §6 — Meta conversions/value metrics. result_type is a REQUIRED partition: the
+  // engine refuses to aggregate these across mixed result_types (see runAggregate's guard),
+  // and the caveat documents the contract so an envelope consumer never blends CPL+CPA.
+  if (metric === "results") {
+    return ["read_only_marketing_api_reporting", "result_type_is_a_required_partition"];
+  }
+  if (metric === "cost_per_result") {
+    return [
+      "read_only_marketing_api_reporting",
+      "ratio_recomputed_from_summed_bases",
+      "cost_per_result_must_not_blend_across_result_types",
+      "value_in_account_currency"
+    ];
+  }
+  // conversion_value is purchase-only (a configured lead value is NOT revenue) and in the
+  // ad-account currency — same channel as the count spine (offsite_conversion.fb_pixel_purchase).
+  if (metric === "conversion_value") {
+    return [
+      "read_only_marketing_api_reporting",
+      "result_type_is_a_required_partition",
+      "conversion_value_purchase_only",
+      "value_in_account_currency"
+    ];
+  }
+  // roas is NULL for lead-gen (no Meta revenue); a browser/pixel-attributed floor in the
+  // account currency; recomputed from summed bases, never blended across result_types.
+  if (metric === "roas") {
+    return [
+      "read_only_marketing_api_reporting",
+      "ratio_recomputed_from_summed_bases",
+      "cost_per_result_must_not_blend_across_result_types",
+      "value_in_account_currency",
+      "roas_null_for_lead_gen_browser_attributed_floor"
+    ];
+  }
+  if (metric === "link_clicks") {
+    return ["read_only_marketing_api_reporting"];
+  }
+  // landing_page_views is the non-omni action (the omni_landing_page_view superset is excluded).
+  if (metric === "landing_page_views") {
+    return ["read_only_marketing_api_reporting", "landing_page_views_non_omni"];
+  }
+  // frequency = impressions/reach (recomputed from summed bases) inherits reach's APPROXIMATE
+  // caveat: summing daily reach overcounts unique people, so the denominator is approximate.
+  if (metric === "frequency") {
+    return [
+      "read_only_marketing_api_reporting",
+      "ratio_recomputed_from_summed_bases",
+      "reach_is_approximate_summed_daily_reach_overcounts_unique_people"
+    ];
+  }
+  // Phase-1 §5 — Stripe-sourced ROAS is mapping-dependent: it divides matched Stripe revenue
+  // (currency-reconciled to the Meta account currency) by matched Meta spend, so it is only as
+  // good as the campaign↔revenue match. Unmatched spend/revenue are excluded and surfaced
+  // separately by the view; there is an inherent Meta-vs-Stripe attribution-date offset.
+  if (metric === "roas_from_stripe") {
+    return [
+      "stripe_attributed_roas_is_mapping_dependent",
+      "ratio_recomputed_from_summed_bases",
+      "excludes_unmatched_spend_and_unmatched_revenue",
+      // Unmapped Stripe-source revenue surfaces on campaign-NULL rows of the view (the §5
+      // join-quality signal) — without it unmatched_revenue is structurally 0.
+      "unmatched_revenue_surfaced_on_campaign_null_rows",
+      // The map is SOURCE-LEVEL: matched_revenue sums the whole Stripe-source-day revenue and can
+      // over-credit unrelated invoices billed through the same account. Upper bound, not per-order
+      // attribution (per-order/UTM attribution is out of Phase-1 scope).
+      "stripe_revenue_is_source_level_may_over_attribute",
+      "currency_reconciled_to_account_currency_before_dividing",
+      "meta_vs_stripe_attribution_date_offset"
+    ];
+  }
   if (metric === "site_visitors") return ["source_native_attribution_only"];
   if (metric === "page_views_by_page") return ["source_native_attribution_only"];
   if (metric === "page_views" || metric === "new_users" || metric === "engaged_sessions") {
@@ -3488,9 +3780,21 @@ function sourceAuthorityForMetric(metric: string): string {
     metric === "reach" ||
     metric === "cpm" ||
     metric === "cpc" ||
-    metric === "ctr"
+    metric === "ctr" ||
+    metric === "results" ||
+    metric === "cost_per_result" ||
+    metric === "conversion_value" ||
+    metric === "roas" ||
+    metric === "link_clicks" ||
+    metric === "landing_page_views" ||
+    metric === "frequency"
   ) {
     return "Meta Ads campaign insights are the first-phase paid media authority";
+  }
+  // Phase-1 §5 — Stripe is the revenue authority; Meta is the spend authority; the join view
+  // derives ROAS from both. Surfaced as a derived cross-source authority.
+  if (metric === "roas_from_stripe") {
+    return "Stripe revenue joined to Meta Ads spend is the first-phase Stripe-attributed ROAS authority";
   }
   if (metric === "site_visitors") return "GA4 is the first-phase traffic authority";
   if (
@@ -3522,10 +3826,24 @@ function drilldownForMetric(metric: string): string {
     metric === "reach" ||
     metric === "cpm" ||
     metric === "cpc" ||
-    metric === "ctr"
+    metric === "ctr" ||
+    metric === "link_clicks" ||
+    metric === "landing_page_views" ||
+    metric === "frequency"
   ) {
     return "drilldown.meta_ads_campaign_rows";
   }
+  // Phase-1 §6 — typed conversions drill down to the per-result_type conversion rows.
+  if (
+    metric === "results" ||
+    metric === "cost_per_result" ||
+    metric === "conversion_value" ||
+    metric === "roas"
+  ) {
+    return "drilldown.meta_ads_campaign_conversion_rows";
+  }
+  // Phase-1 §5 — Stripe-attributed ROAS drills down to the matched campaign↔revenue rows.
+  if (metric === "roas_from_stripe") return "drilldown.meta_stripe_campaign_value_rows";
   if (metric === "site_visitors") return "drilldown.ga4_traffic_provider_rows";
   if (metric === "page_views_by_page") return "drilldown.ga4_page_provider_rows";
   if (

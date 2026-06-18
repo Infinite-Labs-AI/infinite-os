@@ -18,6 +18,7 @@ import {
   metricView,
   queryabilityStatusFromSourceVerification,
   queuedSourceSyncFromEnvelope,
+  requiresResultTypePartition,
   unsupportedReason
 } from "./index.js";
 
@@ -84,6 +85,278 @@ describe("analytical engine smoke", () => {
       // impressions is exact (additive) — must NOT carry the reach approximation flag.
       expect(caveatsForMetric("impressions")).not.toContain(
         "reach_is_approximate_summed_daily_reach_overcounts_unique_people"
+      );
+    });
+  });
+
+  // §9 — Phase-1 Meta conversions/value metrics read-path. These pin the load-bearing
+  // invariants: (1) the conversion-family ratios are RECOMPUTED from summed bases (never
+  // avg-of-per-row-ratios) — a revert is unrepresentable and throws; (2) result_type is a
+  // REQUIRED partition — a query blending CPL+CPA across result_types is REFUSED, not
+  // silently averaged; (3) roas/value carry the account-currency caveat; (4) link_clicks/
+  // landing_page_views/frequency route + aggregate correctly.
+  describe("Meta Ads conversions/value metrics (Phase 1 §6)", () => {
+    const ctx = {
+      workspaceId: "workspace",
+      authority: "tool_agent" as const,
+      surface: "mcp" as const,
+      actorId: "founder",
+      sessionId: "session"
+    };
+
+    it("routes the conversion-family metrics to the typed conversions view", () => {
+      for (const metric of ["results", "cost_per_result", "conversion_value", "roas"]) {
+        expect(metricView(metric)).toBe("queryable.vw_meta_ads_campaign_conversions_daily");
+      }
+      // link_clicks / landing_page_views / frequency are delivery-fact metrics.
+      for (const metric of ["link_clicks", "landing_page_views", "frequency"]) {
+        expect(metricView(metric)).toBe("queryable.vw_meta_ads_campaign_daily");
+      }
+      // roas_from_stripe is the §5 join view.
+      expect(metricView("roas_from_stripe")).toBe("queryable.vw_meta_stripe_campaign_value_daily");
+    });
+
+    it("sums the additive conversion metrics (results, conversion_value, link_clicks, landing_page_views)", () => {
+      expect(aggregateExpression("results", metricColumn("results"))).toBe("sum(results)");
+      expect(aggregateExpression("conversion_value", metricColumn("conversion_value"))).toBe(
+        "sum(conversion_value)"
+      );
+      expect(aggregateExpression("link_clicks", metricColumn("link_clicks"))).toBe("sum(link_clicks)");
+      expect(aggregateExpression("landing_page_views", metricColumn("landing_page_views"))).toBe(
+        "sum(landing_page_views)"
+      );
+    });
+
+    it("RECOMPUTES cost_per_result / roas / frequency from summed bases — never avg(per-row ratio)", () => {
+      // LOAD-BEARING (§9): a revert to avg(cost_per_result)/avg(roas)/avg(frequency) — i.e.
+      // averaging per-row ratios — fails these. cost_per_result = spend/results,
+      // roas = value/spend, frequency = impressions/reach, each divide summed numerator by
+      // summed denominator with a nullif divide-by-zero guard.
+      const cpr = aggregateExpression("cost_per_result", metricColumn("cost_per_result"));
+      expect(cpr).toBe("sum(meta_ads_spend) / nullif(sum(results), 0)");
+      expect(cpr).not.toContain("avg(");
+
+      const roas = aggregateExpression("roas", metricColumn("roas"));
+      expect(roas).toBe("sum(conversion_value) / nullif(sum(meta_ads_spend), 0)");
+      expect(roas).not.toContain("avg(");
+
+      const freq = aggregateExpression("frequency", metricColumn("frequency"));
+      expect(freq).toBe("sum(impressions) / nullif(sum(reach), 0)");
+      expect(freq).not.toContain("avg(");
+
+      const stripeRoas = aggregateExpression("roas_from_stripe", metricColumn("roas_from_stripe"));
+      expect(stripeRoas).toBe("sum(matched_revenue_major) / nullif(sum(matched_spend_major), 0)");
+      expect(stripeRoas).not.toContain("avg(");
+    });
+
+    it("END-TO-END: a multi-result_type fixture proves cost_per_result is per-type, NOT a blended average", async () => {
+      // Two result_types for one campaign-day with sharply different cost-per-result so a
+      // blended (avg) number is unmistakably wrong:
+      //   lead:     spend 600, results 60  -> CPL = 10
+      //   purchase: spend 400, results  8  -> CPA = 50
+      // A WRONG cross-type blend would be sum(spend)/sum(results) = 1000/68 ≈ 14.7, or the
+      // avg-of-per-row-ratios (10+50)/2 = 30 — BOTH meaningless. The required-partition guard
+      // forces a per-result_type group-by, so each type keeps its own correct ratio.
+      const perType: Record<string, { spend: number; results: number }> = {
+        lead: { spend: 600, results: 60 },
+        purchase: { spend: 400, results: 8 }
+      };
+      const blendFakeDb = (): InfiniteOsDb => ({
+        async query<T = Record<string, unknown>>(sql: string): Promise<T[]> {
+          if (sql.includes("from queryable.vw_meta_ads_campaign_conversions_daily")) {
+            // The emitted SQL groups by result_type (the REQUIRED partition) and computes
+            // cost_per_result as the recompute-from-summed-bases expression WITHIN each
+            // partition. Both must be present, and the expression must NOT be an avg/blend.
+            expect(sql).toContain("group by");
+            expect(sql).toContain("result_type");
+            expect(sql).toContain("sum(meta_ads_spend) / nullif(sum(results), 0) as cost_per_result");
+            expect(sql).not.toContain("avg(");
+            return Object.entries(perType).map(([result_type, b]) => ({
+              result_type,
+              cost_per_result: b.spend / b.results
+            })) as T[];
+          }
+          return [] as T[];
+        },
+        async one() {
+          return null;
+        },
+        async close() {},
+        async ensureWorkspace() {},
+        async ensureFirstPhaseDatasets() {},
+        async connectSource() {
+          return null as never;
+        },
+        async updateSourceStatus() {},
+        async createJob() {
+          return {};
+        },
+        async claimNextJob() {
+          return null;
+        },
+        async completeJob() {},
+        async withTransaction(fn) {
+          return fn(this);
+        }
+      });
+      const registry = createInfiniteOsRegistry(createActionHandlers(blendFakeDb()));
+      const result = await registry.execute(
+        "run_breakdown_query",
+        { metric: "cost_per_result", groupBy: ["result_type"] },
+        ctx
+      );
+      expect(result.status).toBe("ok");
+      const rows = (result.data as { rows: Array<{ result_type: string; cost_per_result: number }> }).rows;
+      const byType = new Map(rows.map((row) => [row.result_type, row.cost_per_result]));
+      // Each result_type keeps its OWN cost-per-result; they are never blended.
+      expect(byType.get("lead")).toBeCloseTo(10, 9); // CPL
+      expect(byType.get("purchase")).toBeCloseTo(50, 9); // CPA
+      // Guard the guard: neither the cross-type blend (≈14.7) nor the avg-of-ratios (30)
+      // appears as a row value.
+      for (const value of byType.values()) {
+        expect(Math.abs(value - 1000 / 68)).toBeGreaterThan(1e-6);
+        expect(Math.abs(value - 30)).toBeGreaterThan(1e-6);
+      }
+    });
+
+    it("REFUSES to aggregate cost_per_result/roas/results/conversion_value across mixed result_types", async () => {
+      // §6: result_type is a REQUIRED partition. An ungrouped run_metric_query over a
+      // conversion-family metric (which would blend CPL+CPA into one number) MUST be refused.
+      const noopDb = (): InfiniteOsDb => ({
+        async query() {
+          // Should never be reached — the partition guard throws before any SQL runs.
+          throw new Error("query_should_not_run_when_partition_is_missing");
+        },
+        async one() {
+          return null;
+        },
+        async close() {},
+        async ensureWorkspace() {},
+        async ensureFirstPhaseDatasets() {},
+        async connectSource() {
+          return null as never;
+        },
+        async updateSourceStatus() {},
+        async createJob() {
+          return {};
+        },
+        async claimNextJob() {
+          return null;
+        },
+        async completeJob() {},
+        async withTransaction(fn) {
+          return fn(this);
+        }
+      });
+      const registry = createInfiniteOsRegistry(createActionHandlers(noopDb()));
+      for (const metric of ["cost_per_result", "roas", "results", "conversion_value"] as const) {
+        // Ungrouped run_metric_query — no result_type partition -> refused.
+        await expect(
+          registry.execute("run_metric_query", { metric }, ctx)
+        ).rejects.toThrow(/unsupported_partition:result_type_required/);
+        // A breakdown that groups by a DIFFERENT dimension (campaign_id) but NOT result_type
+        // is still a cross-type blend within each campaign -> also refused.
+        await expect(
+          registry.execute("run_breakdown_query", { metric, groupBy: ["campaign_id"] }, ctx)
+        ).rejects.toThrow(/unsupported_partition:result_type_required/);
+      }
+    });
+
+    it("ALLOWS a conversion-family query when result_type is pinned to a single value", async () => {
+      // The partition is satisfied either by grouping BY result_type OR by filtering to ONE
+      // result_type (no blending possible). This proves the guard is not over-broad.
+      const pinnedDb = (): InfiniteOsDb => ({
+        async query<T = Record<string, unknown>>(sql: string): Promise<T[]> {
+          if (sql.includes("from queryable.vw_meta_ads_campaign_conversions_daily")) {
+            return [{ cost_per_result: 10 }] as T[];
+          }
+          return [] as T[];
+        },
+        async one() {
+          return null;
+        },
+        async close() {},
+        async ensureWorkspace() {},
+        async ensureFirstPhaseDatasets() {},
+        async connectSource() {
+          return null as never;
+        },
+        async updateSourceStatus() {},
+        async createJob() {
+          return {};
+        },
+        async claimNextJob() {
+          return null;
+        },
+        async completeJob() {},
+        async withTransaction(fn) {
+          return fn(this);
+        }
+      });
+      const registry = createInfiniteOsRegistry(createActionHandlers(pinnedDb()));
+      const result = await registry.execute(
+        "run_metric_query",
+        { metric: "cost_per_result", filters: [{ field: "result_type", operator: "equals", value: "lead" }] },
+        ctx
+      );
+      expect(result.status).toBe("ok");
+      const rows = (result.data as { rows: Array<{ cost_per_result: number }> }).rows;
+      expect(rows[0]?.cost_per_result).toBeCloseTo(10, 9);
+    });
+
+    it("requiresResultTypePartition() flags exactly the conversion-family metrics", () => {
+      for (const metric of ["results", "cost_per_result", "conversion_value", "roas"]) {
+        expect(requiresResultTypePartition(metric)).toBe(true);
+      }
+      // Delivery-fact + non-conversion metrics are NOT partition-gated.
+      for (const metric of [
+        "link_clicks",
+        "landing_page_views",
+        "frequency",
+        "meta_ads_spend",
+        "impressions",
+        "roas_from_stripe"
+      ]) {
+        expect(requiresResultTypePartition(metric)).toBe(false);
+      }
+    });
+
+    it("attaches the account-currency + no-blend caveats to value/ratio metrics", () => {
+      expect(caveatsForMetric("cost_per_result")).toEqual(
+        expect.arrayContaining([
+          "cost_per_result_must_not_blend_across_result_types",
+          "value_in_account_currency",
+          "ratio_recomputed_from_summed_bases"
+        ])
+      );
+      expect(caveatsForMetric("roas")).toEqual(
+        expect.arrayContaining([
+          "value_in_account_currency",
+          "roas_null_for_lead_gen_browser_attributed_floor",
+          "cost_per_result_must_not_blend_across_result_types"
+        ])
+      );
+      expect(caveatsForMetric("conversion_value")).toEqual(
+        expect.arrayContaining(["conversion_value_purchase_only", "value_in_account_currency"])
+      );
+      // landing_page_views is the non-omni action.
+      expect(caveatsForMetric("landing_page_views")).toContain("landing_page_views_non_omni");
+      // frequency inherits reach's APPROXIMATE caveat.
+      expect(caveatsForMetric("frequency")).toContain(
+        "reach_is_approximate_summed_daily_reach_overcounts_unique_people"
+      );
+      // roas_from_stripe is mapping-dependent and currency-reconciled, and MUST carry the
+      // loud source-level over-attribution + unmatched-revenue caveats (DEFECT 2): the map is
+      // source-level so matched_revenue is an upper bound, and unmapped-source revenue surfaces
+      // on campaign-NULL rows. Reverting either honesty caveat fails this assertion.
+      expect(caveatsForMetric("roas_from_stripe")).toEqual(
+        expect.arrayContaining([
+          "stripe_attributed_roas_is_mapping_dependent",
+          "excludes_unmatched_spend_and_unmatched_revenue",
+          "unmatched_revenue_surfaced_on_campaign_null_rows",
+          "stripe_revenue_is_source_level_may_over_attribute",
+          "currency_reconciled_to_account_currency_before_dividing"
+        ])
       );
     });
   });
@@ -345,6 +618,134 @@ describe("analytical engine smoke", () => {
       id: "evidence:journey:meta_ads_clicks:campaign",
       kind: "query_result"
     });
+  });
+
+  it("resolve_entity falls back to tokenized near-candidates when the exact substring misses", async () => {
+    // Fake db that HONORS the ilike substring pass (which the real SQL does) so the relaxed
+    // second pass is observable: the exact `%sales campaign%` substring matches no campaign_name,
+    // but tokenizing to "sales" (campaign is a stop-word) surfaces "Sales — Summer Sale".
+    const campaigns = [
+      { source_id: "src_meta", campaign_id: "cmp_summer", campaign_name: "Sales — Summer Sale" },
+      { source_id: "src_meta", campaign_id: "cmp_brand", campaign_name: "Brand Awareness" }
+    ];
+    const fakeDb = {
+      async query<T = Record<string, unknown>>(sql: string, params: unknown[] = []): Promise<T[]> {
+        if (sql.includes("from queryable.vw_meta_ads_campaign_daily")) {
+          // params: [workspaceId, ...%token% patterns, limit]. Emulate the OR-of-ilike WHERE.
+          const patterns = params
+            .slice(1, -1)
+            .map((value) => String(value).replace(/%/g, "").toLowerCase());
+          const matched = campaigns.filter((campaign) =>
+            patterns.some(
+              (pattern) =>
+                campaign.campaign_id.toLowerCase().includes(pattern) ||
+                campaign.campaign_name.toLowerCase().includes(pattern)
+            )
+          );
+          return matched.map((campaign) => ({
+            ...campaign,
+            meta_ads_clicks: "10",
+            meta_ads_spend: "5",
+            impressions: "100",
+            last_seen_on: "2026-06-07"
+          })) as T[];
+        }
+        return [] as T[];
+      },
+      async one() {
+        return null;
+      },
+      async close() {},
+      async ensureWorkspace() {},
+      async ensureFirstPhaseDatasets() {},
+      async connectSource() {
+        return null as never;
+      },
+      async updateSourceStatus() {},
+      async createJob() {
+        return {};
+      },
+      async claimNextJob() {
+        return null;
+      },
+      async completeJob() {},
+      async withTransaction(fn: (db: InfiniteOsDb) => unknown) {
+        return fn(this as unknown as InfiniteOsDb);
+      }
+    } as unknown as InfiniteOsDb;
+
+    const registry = createInfiniteOsRegistry(createActionHandlers(fakeDb));
+    const context = {
+      workspaceId: "workspace",
+      authority: "tool_agent",
+      surface: "mcp",
+      actorId: "founder",
+      sessionId: "session"
+    } as const;
+
+    const resolved = await registry.execute(
+      "resolve_entity",
+      { entityType: "campaign", query: "sales campaign" },
+      context
+    );
+
+    expect(resolved.status).toBe("resolved");
+    expect(resolved.data).toMatchObject({
+      candidates: expect.arrayContaining([
+        expect.objectContaining({ entityType: "campaign", label: "Sales — Summer Sale" })
+      ])
+    });
+    // The stop-word-only / unrelated campaign must NOT be dragged in by the relaxed pass.
+    const labels = (resolved.data as { candidates: Array<{ label: string }> }).candidates.map(
+      (candidate) => candidate.label
+    );
+    expect(labels).not.toContain("Brand Awareness");
+  });
+
+  it("resolve_entity returns no candidates when even the relaxed token pass misses", async () => {
+    const fakeDb = {
+      async query<T = Record<string, unknown>>(): Promise<T[]> {
+        return [] as T[];
+      },
+      async one() {
+        return null;
+      },
+      async close() {},
+      async ensureWorkspace() {},
+      async ensureFirstPhaseDatasets() {},
+      async connectSource() {
+        return null as never;
+      },
+      async updateSourceStatus() {},
+      async createJob() {
+        return {};
+      },
+      async claimNextJob() {
+        return null;
+      },
+      async completeJob() {},
+      async withTransaction(fn: (db: InfiniteOsDb) => unknown) {
+        return fn(this as unknown as InfiniteOsDb);
+      }
+    } as unknown as InfiniteOsDb;
+
+    const registry = createInfiniteOsRegistry(createActionHandlers(fakeDb));
+    const context = {
+      workspaceId: "workspace",
+      authority: "tool_agent",
+      surface: "mcp",
+      actorId: "founder",
+      sessionId: "session"
+    } as const;
+
+    const resolved = await registry.execute(
+      "resolve_entity",
+      { entityType: "campaign", query: "nonexistent campaign" },
+      context
+    );
+
+    expect(resolved.status).toBe("needs_clarification");
+    expect(resolved.caveats).toContain("no_matching_entity");
   });
 
   // FIX 5 — journey-path recompute guard, mirroring the run_metric_query Phase-0 test.
@@ -1542,6 +1943,251 @@ describe("analytical engine smoke", () => {
       post_url: "https://x.com/YourHandle/status/2063231313730306485"
     });
     expect(result?.provenance).toContain("drilldown.x_authored_post_rows");
+  });
+
+  // §9 regression (findings #1/#5) — drilldown for the Phase-1 conversion/value metrics MUST
+  // hit the Meta tables, never the posthog_event_truth default fallthrough. Before this guard,
+  // providerTruthRows had no branch for results/cost_per_result/conversion_value/roas/
+  // roas_from_stripe (or the delivery metrics link_clicks/landing_page_views/frequency), so
+  // drilldown_result served UNRELATED PostHog event rows behind a
+  // drilldown.meta_ads_campaign_conversion_rows / drilldown.meta_stripe_campaign_value_rows
+  // provenance envelope — a provenance/data mismatch. This is the identical guard the GA4 work
+  // added after its 6 metrics fell through to the wrong branch.
+  it("drills down Phase-1 Meta conversion/value metrics to the Meta tables, never posthog_event_truth", async () => {
+    const cases: Array<{
+      metric: string;
+      table: string;
+      provenance: string;
+      filters?: Array<{ field: string; operator: string; value: string }>;
+    }> = [
+      // Conversion-family -> typed conversions fact (result_type pinned to satisfy the partition).
+      {
+        metric: "cost_per_result",
+        table: "from meta_ads_campaign_conversions_daily",
+        provenance: "drilldown.meta_ads_campaign_conversion_rows",
+        filters: [{ field: "result_type", operator: "equals", value: "lead" }]
+      },
+      {
+        metric: "results",
+        table: "from meta_ads_campaign_conversions_daily",
+        provenance: "drilldown.meta_ads_campaign_conversion_rows",
+        filters: [{ field: "result_type", operator: "equals", value: "lead" }]
+      },
+      {
+        metric: "roas",
+        table: "from meta_ads_campaign_conversions_daily",
+        provenance: "drilldown.meta_ads_campaign_conversion_rows",
+        filters: [{ field: "result_type", operator: "equals", value: "offsite_conversion.fb_pixel_purchase" }]
+      },
+      // Stripe-attributed ROAS -> the Meta↔Stripe join view.
+      {
+        metric: "roas_from_stripe",
+        table: "from queryable.vw_meta_stripe_campaign_value_daily",
+        provenance: "drilldown.meta_stripe_campaign_value_rows"
+      },
+      // Delivery-fact metrics -> the delivery fact.
+      {
+        metric: "link_clicks",
+        table: "from meta_ads_campaign_daily",
+        provenance: "drilldown.meta_ads_campaign_rows"
+      },
+      {
+        metric: "frequency",
+        table: "from meta_ads_campaign_daily",
+        provenance: "drilldown.meta_ads_campaign_rows"
+      }
+    ];
+
+    for (const testCase of cases) {
+      const queries: string[] = [];
+      const db: InfiniteOsDb = {
+        async query<T = Record<string, unknown>>(sql: string): Promise<T[]> {
+          queries.push(sql);
+          return [] as T[];
+        },
+        async one() {
+          return null;
+        },
+        async close() {},
+        async ensureWorkspace() {},
+        async ensureFirstPhaseDatasets() {},
+        async connectSource() {
+          return null as never;
+        },
+        async updateSourceStatus() {},
+        async createJob() {
+          return {};
+        },
+        async claimNextJob() {
+          return null;
+        },
+        async completeJob() {},
+        async withTransaction(fn) {
+          return fn(this);
+        }
+      };
+
+      const handlers = createActionHandlers(db);
+      const result = await handlers.drilldown_result?.(
+        { metric: testCase.metric, limit: 5, ...(testCase.filters ? { filters: testCase.filters } : {}) },
+        {
+          workspaceId: "workspace",
+          authority: "tool_agent",
+          surface: "api",
+          actorId: "operator",
+          sessionId: "session"
+        }
+      );
+
+      // The drilldown SQL hits the correct Meta table...
+      expect(queries.some((sql) => sql.includes(testCase.table))).toBe(true);
+      // ...and NEVER falls through to the posthog_event_truth default branch.
+      expect(queries.some((sql) => sql.includes("from posthog_event_truth"))).toBe(false);
+      // ...behind the matching provenance envelope (no advertise/serve mismatch).
+      expect(result?.provenance).toContain(testCase.provenance);
+    }
+  });
+
+  // DEFECT 1 REGRESSION GUARD — the drilldown for the delivery metrics (link_clicks /
+  // landing_page_views / frequency) selects FROM meta_ads_campaign_daily. The original test above
+  // only asserts the SQL string CONTAINS the table name, so it happily passed while the projection
+  // selected a bare `frequency` column that DOES NOT EXIST on meta_ads_campaign_daily (frequency
+  // is a recomputed impressions/reach ratio — never stored; see migration 0032). At runtime that
+  // threw `column "frequency" does not exist`. This guard cross-checks every column the projection
+  // references against the KNOWN column set of meta_ads_campaign_daily (migrations 0015 + 0032),
+  // allowing computed `<expr> as <alias>` projections. Reverting the fix (selecting a bare
+  // `frequency`) makes `frequency` a referenced-but-nonexistent column -> this test FAILS.
+  it("only selects columns that exist on meta_ads_campaign_daily for the delivery-fact drilldown", async () => {
+    // The real columns of meta_ads_campaign_daily: 0015 (create table) + 0032 (additive alter).
+    const KNOWN_DELIVERY_COLUMNS = new Set([
+      // 0015 create table meta_ads_campaign_daily
+      "id",
+      "workspace_id",
+      "source_id",
+      "raw_record_id",
+      "ad_account_id",
+      "campaign_id",
+      "campaign_name",
+      "occurred_on",
+      "spend",
+      "clicks",
+      "impressions",
+      "reach",
+      "cpm",
+      "cpc",
+      "ctr",
+      "created_at",
+      "updated_at",
+      // 0032 add columns
+      "currency",
+      "inline_link_clicks",
+      "landing_page_views",
+      "attribution_setting",
+      "actions_raw",
+      "api_version"
+    ]);
+
+    for (const metric of ["link_clicks", "landing_page_views", "frequency"] as const) {
+      const queries: string[] = [];
+      const db: InfiniteOsDb = {
+        async query<T = Record<string, unknown>>(sql: string): Promise<T[]> {
+          queries.push(sql);
+          return [] as T[];
+        },
+        async one() {
+          return null;
+        },
+        async close() {},
+        async ensureWorkspace() {},
+        async ensureFirstPhaseDatasets() {},
+        async connectSource() {
+          return null as never;
+        },
+        async updateSourceStatus() {},
+        async createJob() {
+          return {};
+        },
+        async claimNextJob() {
+          return null;
+        },
+        async completeJob() {},
+        async withTransaction(fn) {
+          return fn(this);
+        }
+      };
+
+      const handlers = createActionHandlers(db);
+      await handlers.drilldown_result?.(
+        { metric, limit: 5 },
+        {
+          workspaceId: "workspace",
+          authority: "tool_agent",
+          surface: "api",
+          actorId: "operator",
+          sessionId: "session"
+        }
+      );
+
+      const sql = queries.find((q) => q.includes("from meta_ads_campaign_daily"));
+      expect(sql).toBeDefined();
+
+      // Isolate the projection list: everything between `select` and `from`. STRIP `--` line
+      // comments FIRST (per line, before splitting) — an inline comment can itself contain commas
+      // and would otherwise be mis-split into bogus "columns".
+      const projection = sql!
+        .slice(sql!.toLowerCase().indexOf("select") + "select".length, sql!.toLowerCase().indexOf("from "))
+        .split("\n")
+        .map((line) => line.replace(/--.*$/, ""))
+        .join("\n");
+
+      // Split on TOP-LEVEL commas only — a computed item like `impressions::numeric /
+      // nullif(reach, 0) as frequency` carries a comma INSIDE its parens that must not split it.
+      const items: string[] = [];
+      let depth = 0;
+      let buf = "";
+      for (const ch of projection) {
+        if (ch === "(") depth++;
+        else if (ch === ")") depth--;
+        if (ch === "," && depth === 0) {
+          items.push(buf.trim());
+          buf = "";
+        } else {
+          buf += ch;
+        }
+      }
+      if (buf.trim()) items.push(buf.trim());
+
+      for (const item of items) {
+        // A computed projection (`<expr> as <alias>`) is allowed regardless of the alias — the
+        // alias is an output name, not a referenced table column. We only validate bare column
+        // references (the kind that can be a phantom). Detect computed items by the presence of
+        // an operator / function call / `as` keyword.
+        const isComputed = / as | as$|[()/*+:-]/i.test(` ${item} `);
+        if (isComputed) {
+          // Every bare identifier referenced inside the expression must still exist on the table.
+          const identifiers = item.match(/[a-z_][a-z0-9_]*/gi) ?? [];
+          for (const ident of identifiers) {
+            const lower = ident.toLowerCase();
+            // skip the alias keyword, the alias itself (token after `as`), and numeric/cast noise.
+            if (lower === "as" || lower === "numeric" || lower === "nullif") continue;
+            // The alias (last identifier after `as`) is an output name; allow it.
+            const afterAs = / as +([a-z_][a-z0-9_]*)/i.exec(item)?.[1]?.toLowerCase();
+            if (lower === afterAs) continue;
+            expect(
+              KNOWN_DELIVERY_COLUMNS.has(lower),
+              `computed projection "${item}" references nonexistent column "${ident}" on meta_ads_campaign_daily`
+            ).toBe(true);
+          }
+          continue;
+        }
+        // A bare column reference (strip any table qualifier) must exist on the table.
+        const column = item.replace(/^[a-z_][a-z0-9_]*\./i, "").toLowerCase();
+        expect(
+          KNOWN_DELIVERY_COLUMNS.has(column),
+          `drilldown for "${metric}" selects nonexistent column "${column}" on meta_ads_campaign_daily`
+        ).toBe(true);
+      }
+    }
   });
 
   it("rejects metric and view mismatches before executing SQL", async () => {

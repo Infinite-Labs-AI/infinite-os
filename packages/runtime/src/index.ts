@@ -236,6 +236,12 @@ export const FIRST_PHASE_QUERYABLE_VIEWS = [
   "queryable.vw_shopify_orders",
   "queryable.vw_shopify_products",
   "queryable.vw_meta_ads_campaign_daily",
+  // Phase-1 §3.3 — the typed conversions view (campaign × day × result_type). A view is
+  // invisible to the tool agent until it is in this allowlist AND has parallel entries in
+  // the analytical-engine switch-functions; the SQL seed in migration 0033 is otherwise inert.
+  "queryable.vw_meta_ads_campaign_conversions_daily",
+  // Phase-1 §5 — the Meta↔Stripe true-value (ROAS) join view (migration 0034).
+  "queryable.vw_meta_stripe_campaign_value_daily",
   "queryable.vw_site_pages"
 ] as const;
 
@@ -258,6 +264,19 @@ export const FIRST_PHASE_METRICS = [
   "cpm",
   "cpc",
   "ctr",
+  // Phase-1 §6 — Meta conversions/value metrics. results/cost_per_result/conversion_value/
+  // roas read the typed conversions view (result_type is a REQUIRED partition — the engine
+  // refuses to blend CPL+CPA across distinct result_types). link_clicks/landing_page_views
+  // read the delivery view. frequency is a recomputed ratio (impressions/reach) on the
+  // delivery view. roas_from_stripe reads the §5 Meta↔Stripe value-join view.
+  "results",
+  "cost_per_result",
+  "conversion_value",
+  "roas",
+  "link_clicks",
+  "landing_page_views",
+  "frequency",
+  "roas_from_stripe",
   "page_views",
   "new_users",
   "engaged_sessions",
@@ -266,6 +285,48 @@ export const FIRST_PHASE_METRICS = [
   "average_session_duration",
   "page_views_by_page"
 ] as const;
+
+// Compact {metric id -> common aliases} hint, mirrored by hand from the `aliases` column of the
+// metric_definitions seeds (migrations 0005/0011/0014/0016/0022/0024/0025/0029/0033/0034). The
+// authoritative source is still the DB (list_metrics/describe_metric hydrate the live aliases);
+// this map is only a prompt-time hint so common phrasings like "cost per lead" or "cpl" resolve
+// to cost_per_result WITHOUT a discovery round-trip. Keep it in sync with the seeds when aliases
+// change — drift only costs a discovery call, it never produces wrong numbers.
+export const FIRST_PHASE_METRIC_ALIASES: Record<string, readonly string[]> = {
+  site_visitors: ["visitors", "users"],
+  signup_count: ["signups"],
+  site_conversion_rate: ["conversion percentage", "conversion rate"],
+  posthog_event_count: ["events", "event count", "event counts", "posthog events"],
+  recognized_revenue: ["revenue"],
+  x_public_engagement: ["best tweet", "best post", "most popular tweet", "tweet engagement", "post engagement"],
+  x_post_count: ["tweets made", "tweet count", "posts made", "how many tweets have i made"],
+  x_comment_count: ["comments made", "replies made", "comments authored"],
+  x_follower_count: ["followers", "follower count"],
+  shopify_gross_sales: ["shopify revenue", "shop sales", "gross merchandise value", "gmv"],
+  shopify_order_count: ["orders", "shopify orders"],
+  meta_ads_spend: ["facebook ads spend", "instagram ads spend", "meta spend"],
+  meta_ads_clicks: ["facebook ads clicks", "instagram ads clicks", "meta clicks"],
+  impressions: ["facebook ads impressions", "instagram ads impressions", "meta impressions", "ad impressions"],
+  reach: ["facebook ads reach", "instagram ads reach", "meta reach", "unique reach"],
+  cpm: ["cost per mille", "cost per thousand impressions", "meta cpm", "facebook cpm"],
+  cpc: ["cost per click", "meta cpc", "facebook cpc", "instagram cpc"],
+  ctr: ["click through rate", "click-through rate", "meta ctr", "facebook ctr"],
+  results: ["conversions", "meta results", "conversion count", "leads", "purchases"],
+  cost_per_result: ["cpl", "cpa", "cost per lead", "cost per acquisition", "cost per conversion", "cost per result"],
+  conversion_value: ["purchase value", "conversion value", "meta revenue", "pixel purchase value"],
+  roas: ["roas", "return on ad spend", "meta roas", "purchase roas"],
+  link_clicks: ["link clicks", "inline link clicks", "meta link clicks", "facebook link clicks"],
+  landing_page_views: ["landing page views", "lpv", "meta landing page views"],
+  frequency: ["frequency", "impressions per person", "avg frequency"],
+  roas_from_stripe: ["stripe roas", "true roas", "real roas", "stripe attributed roas", "roas from stripe", "return on ad spend from revenue"],
+  page_views: ["page views", "pageviews", "screen page views", "views"],
+  new_users: ["new users", "first-time users", "new visitors"],
+  engaged_sessions: ["engaged sessions", "engaged visits"],
+  key_events: ["key events", "conversions", "key event count"],
+  engagement_rate: ["engagement rate", "engaged rate"],
+  average_session_duration: ["average session duration", "avg session duration", "session length"],
+  page_views_by_page: ["top pages", "page views by page", "most viewed pages", "popular pages"]
+} as const;
 
 export const READ_ACTIONS = [
   "list_sources",
