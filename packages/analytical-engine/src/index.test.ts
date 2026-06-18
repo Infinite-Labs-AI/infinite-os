@@ -18,6 +18,7 @@ import {
   metricView,
   queryabilityStatusFromSourceVerification,
   queuedSourceSyncFromEnvelope,
+  requiresResultTypePartition,
   unsupportedReason
 } from "./index.js";
 
@@ -84,6 +85,273 @@ describe("analytical engine smoke", () => {
       // impressions is exact (additive) — must NOT carry the reach approximation flag.
       expect(caveatsForMetric("impressions")).not.toContain(
         "reach_is_approximate_summed_daily_reach_overcounts_unique_people"
+      );
+    });
+  });
+
+  // §9 — Phase-1 Meta conversions/value metrics read-path. These pin the load-bearing
+  // invariants: (1) the conversion-family ratios are RECOMPUTED from summed bases (never
+  // avg-of-per-row-ratios) — a revert is unrepresentable and throws; (2) result_type is a
+  // REQUIRED partition — a query blending CPL+CPA across result_types is REFUSED, not
+  // silently averaged; (3) roas/value carry the account-currency caveat; (4) link_clicks/
+  // landing_page_views/frequency route + aggregate correctly.
+  describe("Meta Ads conversions/value metrics (Phase 1 §6)", () => {
+    const ctx = {
+      workspaceId: "workspace",
+      authority: "tool_agent" as const,
+      surface: "mcp" as const,
+      actorId: "founder",
+      sessionId: "session"
+    };
+
+    it("routes the conversion-family metrics to the typed conversions view", () => {
+      for (const metric of ["results", "cost_per_result", "conversion_value", "roas"]) {
+        expect(metricView(metric)).toBe("queryable.vw_meta_ads_campaign_conversions_daily");
+      }
+      // link_clicks / landing_page_views / frequency are delivery-fact metrics.
+      for (const metric of ["link_clicks", "landing_page_views", "frequency"]) {
+        expect(metricView(metric)).toBe("queryable.vw_meta_ads_campaign_daily");
+      }
+      // roas_from_stripe is the §5 join view.
+      expect(metricView("roas_from_stripe")).toBe("queryable.vw_meta_stripe_campaign_value_daily");
+    });
+
+    it("sums the additive conversion metrics (results, conversion_value, link_clicks, landing_page_views)", () => {
+      expect(aggregateExpression("results", metricColumn("results"))).toBe("sum(results)");
+      expect(aggregateExpression("conversion_value", metricColumn("conversion_value"))).toBe(
+        "sum(conversion_value)"
+      );
+      expect(aggregateExpression("link_clicks", metricColumn("link_clicks"))).toBe("sum(link_clicks)");
+      expect(aggregateExpression("landing_page_views", metricColumn("landing_page_views"))).toBe(
+        "sum(landing_page_views)"
+      );
+    });
+
+    it("RECOMPUTES cost_per_result / roas / frequency from summed bases — never avg(per-row ratio)", () => {
+      // LOAD-BEARING (§9): a revert to avg(cost_per_result)/avg(roas)/avg(frequency) — i.e.
+      // averaging per-row ratios — fails these. cost_per_result = spend/results,
+      // roas = value/spend, frequency = impressions/reach, each divide summed numerator by
+      // summed denominator with a nullif divide-by-zero guard.
+      const cpr = aggregateExpression("cost_per_result", metricColumn("cost_per_result"));
+      expect(cpr).toBe("sum(meta_ads_spend) / nullif(sum(results), 0)");
+      expect(cpr).not.toContain("avg(");
+
+      const roas = aggregateExpression("roas", metricColumn("roas"));
+      expect(roas).toBe("sum(conversion_value) / nullif(sum(meta_ads_spend), 0)");
+      expect(roas).not.toContain("avg(");
+
+      const freq = aggregateExpression("frequency", metricColumn("frequency"));
+      expect(freq).toBe("sum(impressions) / nullif(sum(reach), 0)");
+      expect(freq).not.toContain("avg(");
+
+      const stripeRoas = aggregateExpression("roas_from_stripe", metricColumn("roas_from_stripe"));
+      expect(stripeRoas).toBe("sum(matched_revenue_major) / nullif(sum(matched_spend_major), 0)");
+      expect(stripeRoas).not.toContain("avg(");
+    });
+
+    it("END-TO-END: a multi-result_type fixture proves cost_per_result is per-type, NOT a blended average", async () => {
+      // Two result_types for one campaign-day with sharply different cost-per-result so a
+      // blended (avg) number is unmistakably wrong:
+      //   lead:     spend 600, results 60  -> CPL = 10
+      //   purchase: spend 400, results  8  -> CPA = 50
+      // A WRONG cross-type blend would be sum(spend)/sum(results) = 1000/68 ≈ 14.7, or the
+      // avg-of-per-row-ratios (10+50)/2 = 30 — BOTH meaningless. The required-partition guard
+      // forces a per-result_type group-by, so each type keeps its own correct ratio.
+      const perType: Record<string, { spend: number; results: number }> = {
+        lead: { spend: 600, results: 60 },
+        purchase: { spend: 400, results: 8 }
+      };
+      const blendFakeDb = (): InfiniteOsDb => ({
+        async query<T = Record<string, unknown>>(sql: string): Promise<T[]> {
+          if (sql.includes("from queryable.vw_meta_ads_campaign_conversions_daily")) {
+            // The emitted SQL groups by result_type (the REQUIRED partition) and computes
+            // cost_per_result as the recompute-from-summed-bases expression WITHIN each
+            // partition. Both must be present, and the expression must NOT be an avg/blend.
+            expect(sql).toContain("group by");
+            expect(sql).toContain("result_type");
+            expect(sql).toContain("sum(meta_ads_spend) / nullif(sum(results), 0) as cost_per_result");
+            expect(sql).not.toContain("avg(");
+            return Object.entries(perType).map(([result_type, b]) => ({
+              result_type,
+              cost_per_result: b.spend / b.results
+            })) as T[];
+          }
+          return [] as T[];
+        },
+        async one() {
+          return null;
+        },
+        async close() {},
+        async ensureWorkspace() {},
+        async ensureFirstPhaseDatasets() {},
+        async connectSource() {
+          return null as never;
+        },
+        async updateSourceStatus() {},
+        async createJob() {
+          return {};
+        },
+        async claimNextJob() {
+          return null;
+        },
+        async completeJob() {},
+        async withTransaction(fn) {
+          return fn(this);
+        }
+      });
+      const registry = createInfiniteOsRegistry(createActionHandlers(blendFakeDb()));
+      const result = await registry.execute(
+        "run_breakdown_query",
+        { metric: "cost_per_result", groupBy: ["result_type"] },
+        ctx
+      );
+      expect(result.status).toBe("ok");
+      const rows = (result.data as { rows: Array<{ result_type: string; cost_per_result: number }> }).rows;
+      const byType = new Map(rows.map((row) => [row.result_type, row.cost_per_result]));
+      // Each result_type keeps its OWN cost-per-result; they are never blended.
+      expect(byType.get("lead")).toBeCloseTo(10, 9); // CPL
+      expect(byType.get("purchase")).toBeCloseTo(50, 9); // CPA
+      // Guard the guard: neither the cross-type blend (≈14.7) nor the avg-of-ratios (30)
+      // appears as a row value.
+      for (const value of byType.values()) {
+        expect(Math.abs(value - 1000 / 68)).toBeGreaterThan(1e-6);
+        expect(Math.abs(value - 30)).toBeGreaterThan(1e-6);
+      }
+    });
+
+    it("REFUSES to aggregate cost_per_result/roas/results/conversion_value across mixed result_types", async () => {
+      // §6: result_type is a REQUIRED partition. An ungrouped run_metric_query over a
+      // conversion-family metric (which would blend CPL+CPA into one number) MUST be refused.
+      const noopDb = (): InfiniteOsDb => ({
+        async query() {
+          // Should never be reached — the partition guard throws before any SQL runs.
+          throw new Error("query_should_not_run_when_partition_is_missing");
+        },
+        async one() {
+          return null;
+        },
+        async close() {},
+        async ensureWorkspace() {},
+        async ensureFirstPhaseDatasets() {},
+        async connectSource() {
+          return null as never;
+        },
+        async updateSourceStatus() {},
+        async createJob() {
+          return {};
+        },
+        async claimNextJob() {
+          return null;
+        },
+        async completeJob() {},
+        async withTransaction(fn) {
+          return fn(this);
+        }
+      });
+      const registry = createInfiniteOsRegistry(createActionHandlers(noopDb()));
+      for (const metric of ["cost_per_result", "roas", "results", "conversion_value"] as const) {
+        // Ungrouped run_metric_query — no result_type partition -> refused.
+        await expect(
+          registry.execute("run_metric_query", { metric }, ctx)
+        ).rejects.toThrow(/unsupported_partition:result_type_required/);
+        // A breakdown that groups by a DIFFERENT dimension (campaign_id) but NOT result_type
+        // is still a cross-type blend within each campaign -> also refused.
+        await expect(
+          registry.execute("run_breakdown_query", { metric, groupBy: ["campaign_id"] }, ctx)
+        ).rejects.toThrow(/unsupported_partition:result_type_required/);
+      }
+    });
+
+    it("ALLOWS a conversion-family query when result_type is pinned to a single value", async () => {
+      // The partition is satisfied either by grouping BY result_type OR by filtering to ONE
+      // result_type (no blending possible). This proves the guard is not over-broad.
+      const pinnedDb = (): InfiniteOsDb => ({
+        async query<T = Record<string, unknown>>(sql: string): Promise<T[]> {
+          if (sql.includes("from queryable.vw_meta_ads_campaign_conversions_daily")) {
+            return [{ cost_per_result: 10 }] as T[];
+          }
+          return [] as T[];
+        },
+        async one() {
+          return null;
+        },
+        async close() {},
+        async ensureWorkspace() {},
+        async ensureFirstPhaseDatasets() {},
+        async connectSource() {
+          return null as never;
+        },
+        async updateSourceStatus() {},
+        async createJob() {
+          return {};
+        },
+        async claimNextJob() {
+          return null;
+        },
+        async completeJob() {},
+        async withTransaction(fn) {
+          return fn(this);
+        }
+      });
+      const registry = createInfiniteOsRegistry(createActionHandlers(pinnedDb()));
+      const result = await registry.execute(
+        "run_metric_query",
+        { metric: "cost_per_result", filters: [{ field: "result_type", operator: "equals", value: "lead" }] },
+        ctx
+      );
+      expect(result.status).toBe("ok");
+      const rows = (result.data as { rows: Array<{ cost_per_result: number }> }).rows;
+      expect(rows[0]?.cost_per_result).toBeCloseTo(10, 9);
+    });
+
+    it("requiresResultTypePartition() flags exactly the conversion-family metrics", () => {
+      for (const metric of ["results", "cost_per_result", "conversion_value", "roas"]) {
+        expect(requiresResultTypePartition(metric)).toBe(true);
+      }
+      // Delivery-fact + non-conversion metrics are NOT partition-gated.
+      for (const metric of [
+        "link_clicks",
+        "landing_page_views",
+        "frequency",
+        "meta_ads_spend",
+        "impressions",
+        "roas_from_stripe"
+      ]) {
+        expect(requiresResultTypePartition(metric)).toBe(false);
+      }
+    });
+
+    it("attaches the account-currency + no-blend caveats to value/ratio metrics", () => {
+      expect(caveatsForMetric("cost_per_result")).toEqual(
+        expect.arrayContaining([
+          "cost_per_result_must_not_blend_across_result_types",
+          "value_in_account_currency",
+          "ratio_recomputed_from_summed_bases"
+        ])
+      );
+      expect(caveatsForMetric("roas")).toEqual(
+        expect.arrayContaining([
+          "value_in_account_currency",
+          "roas_null_for_lead_gen_browser_attributed_floor",
+          "cost_per_result_must_not_blend_across_result_types"
+        ])
+      );
+      expect(caveatsForMetric("conversion_value")).toEqual(
+        expect.arrayContaining(["conversion_value_purchase_only", "value_in_account_currency"])
+      );
+      // landing_page_views is the non-omni action.
+      expect(caveatsForMetric("landing_page_views")).toContain("landing_page_views_non_omni");
+      // frequency inherits reach's APPROXIMATE caveat.
+      expect(caveatsForMetric("frequency")).toContain(
+        "reach_is_approximate_summed_daily_reach_overcounts_unique_people"
+      );
+      // roas_from_stripe is mapping-dependent and currency-reconciled.
+      expect(caveatsForMetric("roas_from_stripe")).toEqual(
+        expect.arrayContaining([
+          "stripe_attributed_roas_is_mapping_dependent",
+          "excludes_unmatched_spend_and_unmatched_revenue",
+          "currency_reconciled_to_account_currency_before_dividing"
+        ])
       );
     });
   });

@@ -47,7 +47,8 @@ describe("Infinite OS migration stack", () => {
       "0030_meta_ads_campaigns.sql",
       "0031_meta_ads_campaign_conversions_daily.sql",
       "0032_meta_ads_campaign_daily_conversion_columns.sql",
-      "0033_meta_ads_conversion_views_and_metric_seeds.sql"
+      "0033_meta_ads_conversion_views_and_metric_seeds.sql",
+      "0034_meta_stripe_true_value_and_frequency.sql"
     ]);
   });
 
@@ -360,7 +361,8 @@ describe("Infinite OS migration stack", () => {
       "0030_meta_ads_campaigns.sql",
       "0031_meta_ads_campaign_conversions_daily.sql",
       "0032_meta_ads_campaign_daily_conversion_columns.sql",
-      "0033_meta_ads_conversion_views_and_metric_seeds.sql"
+      "0033_meta_ads_conversion_views_and_metric_seeds.sql",
+      "0034_meta_stripe_true_value_and_frequency.sql"
     ]);
   });
 
@@ -696,6 +698,72 @@ describe("Infinite OS migration stack", () => {
 
     // Idempotent additive seeds. 0033 legitimately uses `drop view if exists`, so do
     // NOT assert a broad not.toContain("drop"); only forbid destructive table/column drops.
+    expect(lower).toContain("on conflict (id) do update set");
+    expect(lower).not.toContain("drop table");
+    expect(lower).not.toContain("drop column");
+    expect(lower).not.toContain("delete from");
+  });
+
+  // §5 + §6 — the Meta<->Stripe true-value join + the conversions-view spend recreate +
+  // the frequency / roas_from_stripe seeds (0034).
+  it("builds the Meta<->Stripe true-value join with a match_confidence signal, currency reconciliation, and unmatched totals (0034)", () => {
+    const migration = loadMigrations().find(
+      (candidate) => candidate.id === "0034_meta_stripe_true_value_and_frequency.sql"
+    );
+    const sql = migration?.sql ?? "";
+    const lower = sql.toLowerCase();
+    const collapsed = lower.replace(/\s+/g, " ");
+
+    // The conversions view is recreated via DROP CASCADE so cost_per_result/roas can divide
+    // by delivery spend co-resident in the SAME view (the engine never joins two views).
+    expect(collapsed).toContain(
+      "drop view if exists queryable.vw_meta_ads_campaign_conversions_daily cascade"
+    );
+    expect(lower).toContain("create view queryable.vw_meta_ads_campaign_conversions_daily");
+    expect(lower).toContain("d.spend as meta_ads_spend");
+
+    // §5 mapping table keyed on the IMMUTABLE campaign_id, with a normalized fallback key and
+    // the match_confidence enum (exact|normalized|fuzzy|unmatched) constrained at the DB level.
+    expect(lower).toContain("create table meta_ads_campaign_revenue_map");
+    expect(lower).toContain("campaign_id text not null");
+    expect(lower).toContain("normalized_name text");
+    expect(collapsed).toContain(
+      "match_confidence text not null default 'unmatched' check (match_confidence in ('exact', 'normalized', 'fuzzy', 'unmatched'))"
+    );
+
+    // §5 join view: matched + unmatched spend/revenue totals (the join-quality signal).
+    expect(lower).toContain("create view queryable.vw_meta_stripe_campaign_value_daily");
+    expect(lower).toContain("matched_spend_major");
+    expect(lower).toContain("matched_revenue_major");
+    expect(lower).toContain("unmatched_spend_major");
+    expect(lower).toContain("unmatched_revenue_major");
+    expect(lower).toContain("match_confidence");
+
+    // §5 currency reconciliation BEFORE dividing: Stripe cents -> major units (/100.0), and
+    // revenue is matched ONLY when the Stripe currency equals the account currency (no FX).
+    expect(lower).toContain("/ 100.0");
+    expect(lower).toContain("lower(r.currency) = s.account_currency");
+
+    // §6 seeds for frequency (delivery view) + roas_from_stripe (join view), recomputed from
+    // summed bases — never per-row avg.
+    expect(sql).toContain("'frequency'");
+    expect(sql).toContain("'roas_from_stripe'");
+    expect(lower).toContain("sum(matched_revenue_major)");
+    expect(lower).toContain("sum(impressions)");
+    expect(lower).toContain("stripe_attributed_roas_is_mapping_dependent");
+    expect(lower).not.toContain("avg(roas_from_stripe)");
+    expect(lower).not.toContain("avg(frequency)");
+
+    // GRANT divergence trap: tool_agent + app ONLY (NOT growth_os_read_api).
+    expect(lower).toContain(
+      "grant select on queryable.vw_meta_ads_campaign_conversions_daily, queryable.vw_meta_stripe_campaign_value_daily to growth_os_tool_agent, growth_os_app"
+    );
+    expect(collapsed).not.toContain(
+      "to growth_os_tool_agent, growth_os_app, growth_os_read_api"
+    );
+
+    // Idempotent + non-destructive (the conversions-view recreate uses drop view if exists,
+    // which is allowed; forbid destructive table/column drops + deletes).
     expect(lower).toContain("on conflict (id) do update set");
     expect(lower).not.toContain("drop table");
     expect(lower).not.toContain("drop column");
