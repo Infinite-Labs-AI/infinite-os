@@ -2947,6 +2947,13 @@ const META_ADS_INSIGHTS_DEFAULT_TIME_INCREMENT = "1";
 // frequency, objective (campaign), optimization_goal (adset). We deliberately do NOT
 // request `landing_page_view_actions` (not a real field → API error); landing page views
 // are extracted from actions[action_type='landing_page_view'] (NON-omni) instead.
+//
+// account_currency (§2.1, LOAD-BEARING): the ad-account currency is read from each
+// insights row's `account_currency` field (a valid Insights field that the API only
+// returns when explicitly requested). It populates meta_ads_campaign_daily.currency AND
+// the meta_ads_campaigns dimension; it is the reconciliation axis for the Meta↔Stripe
+// value join (§5). Without it in this list, currency is ALWAYS null in live mode and the
+// Stripe ROAS join can never reconcile a currency — so it MUST be requested here.
 const META_ADS_INSIGHTS_FIELDS = [
   "campaign_id",
   "campaign_name",
@@ -2966,7 +2973,8 @@ const META_ADS_INSIGHTS_FIELDS = [
   "cost_per_result",
   "result_values_performance_indicator",
   "objective",
-  "optimization_goal"
+  "optimization_goal",
+  "account_currency"
 ].join(",");
 
 // §4 — the smaller field set used only by the connectivity probe (testLive). It does
@@ -4893,9 +4901,10 @@ interface MetaAdsInsightsRow {
   // Campaign objective (coarse key) + adset optimization_goal (the real result driver).
   objective?: string | null;
   optimization_goal?: string | null;
-  // Account currency, when the insights payload includes it (account_currency). The
-  // authoritative source is the ad-account read (§2.1); the insights row carries it
-  // opportunistically so the delivery fact can be populated without a second call.
+  // Account currency (§2.1, load-bearing for the Stripe value join). account_currency is
+  // a valid Insights field that the API returns only when explicitly requested — it IS in
+  // META_ADS_INSIGHTS_FIELDS, so live insights rows carry it and the delivery fact +
+  // campaign dimension are populated WITHOUT a second ad-account read.
   account_currency?: string | null;
 }
 

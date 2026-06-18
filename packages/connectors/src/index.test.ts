@@ -949,9 +949,13 @@ describe("live provider clients", () => {
       const insightsUrl = new URL(requests[0]?.url ?? "");
       expect(insightsUrl.searchParams.get("level")).toBe("campaign");
       expect(insightsUrl.searchParams.get("time_increment")).toBe("1");
+      // account_currency is REQUESTED (§2.1, load-bearing for the Stripe join). It is a
+      // valid Insights field the API returns only when asked; if it ever falls out of the
+      // list, currency goes null in live mode and the Meta↔Stripe ROAS join can't reconcile.
       expect(insightsUrl.searchParams.get("fields")).toBe(
-        "campaign_id,campaign_name,date_start,spend,clicks,inline_link_clicks,impressions,reach,frequency,cpm,cpc,ctr,actions,action_values,results,cost_per_result,result_values_performance_indicator,objective,optimization_goal"
+        "campaign_id,campaign_name,date_start,spend,clicks,inline_link_clicks,impressions,reach,frequency,cpm,cpc,ctr,actions,action_values,results,cost_per_result,result_values_performance_indicator,objective,optimization_goal,account_currency"
       );
+      expect(insightsUrl.searchParams.get("fields")).toContain("account_currency");
       expect(insightsUrl.searchParams.get("limit")).toBe("100");
       // §4 — attribution windows sent as a JSON array; 7d_view/28d_view excluded.
       expect(JSON.parse(insightsUrl.searchParams.get("action_attribution_windows") ?? "[]")).toEqual([
