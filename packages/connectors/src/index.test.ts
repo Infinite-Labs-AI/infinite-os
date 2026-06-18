@@ -1,6 +1,7 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { encryptCredentialPayload } from "@infinite-os/core";
 import { type InfiniteOsDb } from "@infinite-os/db";
@@ -1114,6 +1115,114 @@ describe("live provider clients", () => {
       expect(timeRange.since).toMatch(/20\d\d-\d\d-\d\d/);
       expect(requests[0]?.authorization).toBe("Bearer meta-access-token");
     });
+  });
+
+  // ────────────────────────────────────────────────────────────────────────────
+  // §9 GOLDEN FIXTURE — the live Ultima lead-gen probe. The SAME 2 leads appear
+  // under 4 action_types; the §4b canonical-event mapping must collapse this to
+  // exactly 2 leads (NOT 8). This is the acceptance gate for "never sum actions[]".
+  const ULTIMA_PROBE = JSON.parse(
+    readFileSync(
+      fileURLToPath(new URL("./fixtures/meta-ultima-leadgen-probe.json", import.meta.url)),
+      "utf8"
+    )
+  ) as { data: Array<Record<string, unknown>>; paging: Record<string, unknown> };
+
+  async function extractUltimaRow(): Promise<Record<string, unknown>> {
+    let payload: Record<string, unknown> = {};
+    await withMockFetch(
+      async () => jsonResponse({ data: ULTIMA_PROBE.data, paging: ULTIMA_PROBE.paging }),
+      async () => {
+        const db = fakeDb({
+          credential: {
+            credential_kind: "marketing_api_access_token",
+            encrypted_payload: encryptedCredential({
+              mode: "live",
+              adAccountId: "887743100560299",
+              accessToken: "meta-access-token",
+              apiVersion: "v25.0"
+            })
+          }
+        });
+        const connector = connectorFor("meta_ads");
+        const rows = await connector.extract(db, request("meta_ads"), {
+          cursorKey: "meta_ads_campaign_daily",
+          cursorStart: "2026-06-01T00:00:00.000Z",
+          cursorEnd: "2026-06-03T00:00:00.000Z",
+          refreshWindowDays: 30,
+          mode: "live"
+        });
+        payload = rows[0]?.payload as Record<string, unknown>;
+      }
+    );
+    return payload;
+  }
+
+  it("§9: collapses the Ultima 4 lead action_types to exactly 2 leads (never sums actions[])", async () => {
+    const payload = await extractUltimaRow();
+    const conversions = payload.conversions as Array<Record<string, unknown>>;
+
+    // Exactly ONE conversion row for this lead-gen campaign-day, of type 'lead'.
+    expect(conversions).toHaveLength(1);
+    const lead = conversions[0];
+    expect(lead.resultType).toBe("lead");
+
+    // THE ACCEPTANCE GATE: 2 leads, NOT 8. The 4 action_types (lead,
+    // offsite_conversion.fb_pixel_lead, onsite_web_lead, offsite_lead_add_20_s_calls)
+    // each report 2 (headline 7d_click+1d_view = 1+1); summing all four gives 8.
+    // The deterministic mapping picks ONE canonical action_type and stops → 2.
+    expect(lead.results).toBe(2);
+    expect(lead.results).not.toBe(8);
+
+    // §2.3 guard: lead-gen carries NO revenue — conversion_value must stay null.
+    expect(lead.conversionValue).toBeNull();
+
+    // Provenance: derived from OUR mapping (not Meta's results field) since the
+    // canonical action fired.
+    expect(lead.resultsSource).toBe("derived_from_canonical_mapping");
+    expect(lead.isPrimary).toBe(true);
+    expect(lead.attributionSetting).toBe("1d_click,7d_click,1d_view");
+  });
+
+  it("§9: regression — naively summing every lead action_type would yield 8, proving dedup is load-bearing", async () => {
+    // This asserts the SHAPE of the trap so a future revert to summing actions[] is
+    // caught: the raw fixture genuinely reports 4 lead action_types that each sum to
+    // 2 (total 8). If someone changes the parser to sum variants, the §9 test above
+    // flips from 2 to 8 and fails — this test documents WHY that is wrong.
+    const leadActionTypes = [
+      "lead",
+      "offsite_conversion.fb_pixel_lead",
+      "onsite_web_lead",
+      "offsite_lead_add_20_s_calls"
+    ];
+    const actions = ULTIMA_PROBE.data[0].actions as Array<Record<string, unknown>>;
+    const summedAcrossVariants = actions
+      .filter((a) => leadActionTypes.includes(String(a.action_type)))
+      .reduce((total, a) => total + Number(a["7d_click"]) + Number(a["1d_view"]), 0);
+    // The trap: 4 variants x (1 + 1) = 8 — the WRONG number the connector must avoid.
+    expect(summedAcrossVariants).toBe(8);
+
+    // And the connector's actual output is 2, never this summed figure.
+    const payload = await extractUltimaRow();
+    const conversions = payload.conversions as Array<Record<string, unknown>>;
+    expect(conversions[0].results).not.toBe(summedAcrossVariants);
+    expect(conversions[0].results).toBe(2);
+  });
+
+  it("§9: extracts non-omni landing_page_views (excludes omni_landing_page_view) and the §2.2 delivery columns", async () => {
+    const payload = await extractUltimaRow();
+
+    // landing_page_view headline window 7d_click(188)+1d_view(12)=200; the
+    // omni_landing_page_view variant (240+30=270) is NOT counted.
+    expect(payload.landingPageViews).toBe(200);
+    expect(payload.inlineLinkClicks).toBe(274);
+    expect(payload.currency).toBe("usd");
+    expect(payload.apiVersion).toBe("v25.0");
+    expect(payload.attributionSetting).toBe("1d_click,7d_click,1d_view");
+    // actions_raw preserves the full arrays for audit/recompute.
+    const actionsRaw = payload.actionsRaw as { actions?: unknown[]; action_values?: unknown[] };
+    expect(Array.isArray(actionsRaw.actions)).toBe(true);
+    expect((actionsRaw.actions ?? []).length).toBeGreaterThan(0);
   });
 
   it("supports Meta Ads extraction through a configured MCP stdio command", async () => {
