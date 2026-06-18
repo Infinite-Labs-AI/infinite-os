@@ -236,6 +236,12 @@ export const FIRST_PHASE_QUERYABLE_VIEWS = [
   "queryable.vw_shopify_orders",
   "queryable.vw_shopify_products",
   "queryable.vw_meta_ads_campaign_daily",
+  // Phase-1 §3.3 — the typed conversions view (campaign × day × result_type). A view is
+  // invisible to the tool agent until it is in this allowlist AND has parallel entries in
+  // the analytical-engine switch-functions; the SQL seed in migration 0033 is otherwise inert.
+  "queryable.vw_meta_ads_campaign_conversions_daily",
+  // Phase-1 §5 — the Meta↔Stripe true-value (ROAS) join view (migration 0034).
+  "queryable.vw_meta_stripe_campaign_value_daily",
   "queryable.vw_site_pages"
 ] as const;
 
@@ -258,6 +264,19 @@ export const FIRST_PHASE_METRICS = [
   "cpm",
   "cpc",
   "ctr",
+  // Phase-1 §6 — Meta conversions/value metrics. results/cost_per_result/conversion_value/
+  // roas read the typed conversions view (result_type is a REQUIRED partition — the engine
+  // refuses to blend CPL+CPA across distinct result_types). link_clicks/landing_page_views
+  // read the delivery view. frequency is a recomputed ratio (impressions/reach) on the
+  // delivery view. roas_from_stripe reads the §5 Meta↔Stripe value-join view.
+  "results",
+  "cost_per_result",
+  "conversion_value",
+  "roas",
+  "link_clicks",
+  "landing_page_views",
+  "frequency",
+  "roas_from_stripe",
   "page_views",
   "new_users",
   "engaged_sessions",

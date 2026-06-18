@@ -229,6 +229,7 @@ const DELETE_PROJECT_WORKSPACE_TABLES: readonly string[] = [
   "ga4_report_snapshot_fact",
   "meta_ads_campaign_conversions_daily",
   "meta_ads_campaign_daily",
+  "meta_ads_campaign_revenue_map",
   "meta_ads_campaigns",
   "posthog_event_truth",
   "posthog_person_current",
