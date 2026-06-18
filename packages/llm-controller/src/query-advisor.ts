@@ -1553,16 +1553,39 @@ function genericOpenEndedRefinementSections(
     }
   }
 
-  if (!isOpenEndedAnalysisPrompt(message)) {
-    return [];
-  }
-
   const hasSources = toolResults.some((result) => result.name === "list_sources" && isRecord(result.result));
   const hasSyncs = toolResults.some((result) => result.name === "get_recent_sync_runs" && isRecord(result.result));
   const hasMetrics = toolResults.some((result) => result.name === "list_metrics" && isRecord(result.result));
   const hasViews = toolResults.some((result) => result.name === "list_queryable_views" && isRecord(result.result));
   const hasMetricResult = toolResults.some((result) => result.name === "run_metric_query" && isRecord(result.result));
   const hasBreakdownResult = toolResults.some((result) => result.name === "run_breakdown_query" && isRecord(result.result));
+
+  // Targeted metric questions ("how many clicks?", "what's my CTR?", "cost per lead?") are not
+  // open-ended, but the codex model still sometimes bails after list_sources and asks for a time
+  // range instead of answering. Fire the "go fetch a metric, don't stop at the source list" rescue
+  // for metric-shaped turns too — but ONLY when the turn so far has list_sources and has not yet run
+  // (or even located) any metric. This is conservative: it cannot fire once a metric query/breakdown
+  // result exists, and it never relaxes the result_type partition or any write confirmation.
+  if (
+    !isOpenEndedAnalysisPrompt(message) &&
+    isTargetedMetricQuestion(message) &&
+    hasSources &&
+    !hasMetrics &&
+    !hasViews &&
+    !hasMetricResult &&
+    !hasBreakdownResult
+  ) {
+    return [
+      "Metric-question refinement guidance:",
+      "- The user asked for a specific metric or number, but you only have a source list so far.",
+      "- Do not stop to ask for a time range. Identify the metric (use the metric-aliases hint, or list_metrics/describe_metric if unsure) and run run_metric_query or run_breakdown_query over all available data, then state the assumed scope as a caveat and offer to narrow.",
+      "- Only report a metric as unavailable after confirming it is not reachable under any alias."
+    ];
+  }
+
+  if (!isOpenEndedAnalysisPrompt(message)) {
+    return [];
+  }
 
   if (hasSources && !hasMetrics && !hasViews) {
     return [
@@ -1633,6 +1656,19 @@ function genericOpenEndedRefinementSections(
 
 function isOpenEndedAnalysisPrompt(message: string): boolean {
   return /\b(what stands out|what should i know|what matters|what jumps out|help me understand|analy[sz]e this|analyze this)\b/i.test(message);
+}
+
+// Conservative detector for a targeted "what's my X / how many X / cost per X" metric question.
+// Requires both a metric-question shape (how many / what is my / cost per / show me) AND a known
+// metric noun or alias term so it does not fire on vague or non-metric prompts. Kept deliberately
+// narrow: this only relaxes the "fetch a metric before answering" rescue, never any safety gate.
+const METRIC_TERM_RE =
+  /\b(clicks?|impressions?|reach|ctr|cpc|cpm|cpl|cpa|roas|frequency|spend|cost per (?:lead|result|acquisition|conversion|click|mille|thousand)|conversions?|results?|leads?|purchases?|link clicks?|landing page views?|page ?views?|visitors?|users?|sessions?|signups?|orders?|revenue|sales|gmv|followers?|tweets?|posts?|comments?|replies|engagement|events?|conversion (?:rate|value)|engagement rate|session duration)\b/i;
+function isTargetedMetricQuestion(message: string): boolean {
+  const metricShaped =
+    /\b(how many|how much|what(?:'s| is| are)? (?:my|our|the)|what was (?:my|our|the)|show me|give me|tell me)\b/i.test(message) ||
+    /\bcost per\b/i.test(message);
+  return metricShaped && METRIC_TERM_RE.test(message);
 }
 
 function isCapabilityExplorationPrompt(message: string): boolean {

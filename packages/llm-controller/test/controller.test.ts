@@ -5095,6 +5095,89 @@ describe("Infinite OS LLM controller", () => {
     expect(sections.join("\n")).toContain("what metrics or views are available");
   });
 
+  it("builds metric-question refinement guidance when a targeted metric question bailed at list_sources", async () => {
+    const { buildQueryRefinementSections } = await import("../src/query-advisor.js");
+    // "how many clicks?" is a targeted (not open-ended) metric question. The old gate only fired
+    // for open-ended prompts, so this previously returned no guidance and let the model stop here.
+    const sections = buildQueryRefinementSections("how many clicks did we get", [
+      {
+        name: "list_sources",
+        result: createEnvelope({
+          actionId: "list_sources",
+          authority: "tool_agent",
+          data: {
+            sources: [{ id: "src_meta", provider: "meta_ads", status: "connected" }]
+          },
+          provenance: ["sources"]
+        })
+      }
+    ]);
+
+    expect(sections.join("\n")).toContain("Metric-question refinement guidance:");
+    expect(sections.join("\n")).toContain("only have a source list");
+    expect(sections.join("\n")).toContain("Do not stop to ask for a time range");
+  });
+
+  it("also fires metric-question guidance for cost-per-lead phrasing", async () => {
+    const { buildQueryRefinementSections } = await import("../src/query-advisor.js");
+    const sections = buildQueryRefinementSections("what's my cost per lead", [
+      {
+        name: "list_sources",
+        result: createEnvelope({
+          actionId: "list_sources",
+          authority: "tool_agent",
+          data: { sources: [{ id: "src_meta", provider: "meta_ads", status: "connected" }] },
+          provenance: ["sources"]
+        })
+      }
+    ]);
+
+    expect(sections.join("\n")).toContain("Metric-question refinement guidance:");
+  });
+
+  it("does NOT fire metric-question guidance once a metric result already exists", async () => {
+    const { buildQueryRefinementSections } = await import("../src/query-advisor.js");
+    const sections = buildQueryRefinementSections("how many clicks did we get", [
+      {
+        name: "list_sources",
+        result: createEnvelope({
+          actionId: "list_sources",
+          authority: "tool_agent",
+          data: { sources: [{ id: "src_meta", provider: "meta_ads", status: "connected" }] },
+          provenance: ["sources"]
+        })
+      },
+      {
+        name: "run_metric_query",
+        result: createEnvelope({
+          actionId: "run_metric_query",
+          authority: "tool_agent",
+          data: { rows: [{ meta_ads_clicks: "1234" }], metric: "meta_ads_clicks", view: "queryable.vw_meta_ads_campaign_daily" },
+          provenance: ["queryable.vw_meta_ads_campaign_daily"]
+        })
+      }
+    ]);
+
+    expect(sections.join("\n")).not.toContain("Metric-question refinement guidance:");
+  });
+
+  it("does NOT fire metric-question guidance for a non-metric prompt with only a source list", async () => {
+    const { buildQueryRefinementSections } = await import("../src/query-advisor.js");
+    const sections = buildQueryRefinementSections("which sources are connected", [
+      {
+        name: "list_sources",
+        result: createEnvelope({
+          actionId: "list_sources",
+          authority: "tool_agent",
+          data: { sources: [{ id: "src_meta", provider: "meta_ads", status: "connected" }] },
+          provenance: ["sources"]
+        })
+      }
+    ]);
+
+    expect(sections.join("\n")).not.toContain("Metric-question refinement guidance:");
+  });
+
   it("builds open-ended refinement guidance when only metric coverage is known", async () => {
     const { buildQueryRefinementSections } = await import("../src/query-advisor.js");
     const sections = buildQueryRefinementSections("what should i know here", [
