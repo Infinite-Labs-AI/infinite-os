@@ -880,7 +880,23 @@ describe("live provider clients", () => {
       });
       expect(requests[0]?.url).not.toContain("access_token=");
       expect(requests[1]?.url).toContain("time_increment=1");
-      expect(requests[1]?.url).toContain("campaign_id%2Ccampaign_name%2Cdate_start%2Cspend%2Cclicks%2Cimpressions%2Creach%2Ccpm%2Ccpc%2Cctr");
+      // Phase-1 (§4) field list: spend/clicks/impressions/reach/cpm/cpc/ctr PLUS the
+      // conversion fields (inline_link_clicks, frequency, actions, action_values,
+      // results, cost_per_result, result_values_performance_indicator, objective,
+      // optimization_goal). All transports request the SAME list (META_ADS_INSIGHTS_FIELDS).
+      expect(requests[1]?.url).toContain(
+        "campaign_id%2Ccampaign_name%2Cdate_start%2Cspend%2Cclicks%2Cinline_link_clicks%2Cimpressions%2Creach%2Cfrequency%2Ccpm%2Ccpc%2Cctr%2Cactions%2Caction_values%2Cresults%2Ccost_per_result%2Cresult_values_performance_indicator%2Cobjective%2Coptimization_goal"
+      );
+      // §4 — per-window attribution requested (1d_click,7d_click,1d_view); the
+      // headline 7d_click+1d_view is computed from the subvalues. 7d_view/28d_view
+      // are hard-excluded and use_unified_attribution_setting is NOT sent (a no-op).
+      expect(requests[1]?.url).toContain("action_attribution_windows=");
+      expect(requests[1]?.url).toContain("1d_click");
+      expect(requests[1]?.url).toContain("7d_click");
+      expect(requests[1]?.url).toContain("1d_view");
+      expect(requests[1]?.url).not.toContain("7d_view");
+      expect(requests[1]?.url).not.toContain("28d_view");
+      expect(requests[1]?.url).not.toContain("use_unified_attribution_setting");
       expect(rows[0]).toMatchObject({
         externalId: "meta_ads:act_1234567890:1200000001:2026-06-01",
         objectType: "meta_ads_campaign_daily",
@@ -898,11 +914,12 @@ describe("live provider clients", () => {
     });
   });
 
-  it("emits the IDENTICAL default Meta Ads insights request (level=campaign, time_increment=1)", async () => {
-    // Phase 0 Change 2 regression guard: `level`/`time_increment` are now resolved through
-    // defaults instead of inline literals. With no SyncRequest override the emitted insights
-    // request MUST be byte-for-byte what it was before (campaign grain, daily increment).
-    // If a future edit changes the default, or drops level/time_increment, this fails.
+  it("emits the Phase-1 default Meta Ads insights request (level=campaign, time_increment=1, conversion fields + attribution windows)", async () => {
+    // Grain guard: `level`/`time_increment` are resolved through defaults — with no
+    // SyncRequest override the emitted request keeps campaign grain + daily increment.
+    // Phase-1 (§4) additionally pins the full conversion field list and the
+    // action_attribution_windows. If a future edit changes the default grain, drops
+    // level/time_increment, or drifts the field list across transports, this fails.
     const requests: Array<{ url: string }> = [];
     await withMockFetch(async (url) => {
       requests.push({ url });
@@ -932,9 +949,15 @@ describe("live provider clients", () => {
       expect(insightsUrl.searchParams.get("level")).toBe("campaign");
       expect(insightsUrl.searchParams.get("time_increment")).toBe("1");
       expect(insightsUrl.searchParams.get("fields")).toBe(
-        "campaign_id,campaign_name,date_start,spend,clicks,impressions,reach,cpm,cpc,ctr"
+        "campaign_id,campaign_name,date_start,spend,clicks,inline_link_clicks,impressions,reach,frequency,cpm,cpc,ctr,actions,action_values,results,cost_per_result,result_values_performance_indicator,objective,optimization_goal"
       );
       expect(insightsUrl.searchParams.get("limit")).toBe("100");
+      // §4 — attribution windows sent as a JSON array; 7d_view/28d_view excluded.
+      expect(JSON.parse(insightsUrl.searchParams.get("action_attribution_windows") ?? "[]")).toEqual([
+        "1d_click",
+        "7d_click",
+        "1d_view"
+      ]);
     });
   });
 
