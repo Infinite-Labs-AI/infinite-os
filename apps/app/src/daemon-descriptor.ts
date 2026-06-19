@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 
@@ -39,6 +39,12 @@ export interface BoundAddress {
 // ephemeral) port from the bound socket is always used, never the requested one.
 export function daemonUrlFromAddress(addr: BoundAddress): string {
   const port = addr.port;
+  // Post-listen the OS has assigned a real port; a 0/missing port means address()
+  // was read before listen resolved (or on a closed server) — a programmer error,
+  // not a runtime fallback to paper over. Advertising :0 would be unconnectable.
+  if (!Number.isInteger(port) || port < 1) {
+    throw new Error(`daemon descriptor got a non-listening port (${String(port)}); read address() AFTER listen resolves`);
+  }
   const raw = (addr.address ?? "").trim();
   const isIpv6Family = addr.family === "IPv6" || addr.family === "6" || raw.includes(":");
 
@@ -102,8 +108,20 @@ export function writeDaemonDescriptor(
   const home = infiniteOsHome(env);
   mkdirSync(home, { recursive: true, mode: 0o700 });
   const path = daemonDescriptorPath(env);
-  writeFileSync(path, JSON.stringify(descriptor, null, 2), { mode: 0o600 });
-  chmodSync(path, 0o600);
+  // Atomic publish: write a complete pid-unique temp file in the SAME dir (same
+  // filesystem, so rename is atomic + can't cross a device boundary), then rename
+  // it over the final path. A concurrent desktop reader sees either the old file
+  // or the whole new one — never a half-written/truncated JSON. pid in the temp
+  // name keeps two daemons from clobbering each other's in-progress write.
+  const tmp = `${path}.${process.pid}.tmp`;
+  writeFileSync(tmp, JSON.stringify(descriptor, null, 2), { mode: 0o600 });
+  chmodSync(tmp, 0o600);
+  try {
+    renameSync(tmp, path);
+  } catch (err) {
+    rmSync(tmp, { force: true });
+    throw err;
+  }
   return { path };
 }
 

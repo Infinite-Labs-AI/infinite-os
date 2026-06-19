@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -60,6 +60,14 @@ describe("daemon descriptor", () => {
         "http://127.0.0.1:54123"
       );
     });
+
+    it("throws on a non-listening port (0 / negative / NaN) rather than advertising :0", () => {
+      // address() read before listen resolved would carry port 0 — fail loud, do not
+      // publish an unconnectable URL.
+      expect(() => daemonUrlFromAddress({ address: "127.0.0.1", port: 0 })).toThrow(/non-listening port/);
+      expect(() => daemonUrlFromAddress({ address: "127.0.0.1", port: -1 })).toThrow(/non-listening port/);
+      expect(() => daemonUrlFromAddress({ address: "127.0.0.1", port: NaN })).toThrow(/non-listening port/);
+    });
   });
 
   describe("buildDaemonDescriptor", () => {
@@ -116,6 +124,21 @@ describe("daemon descriptor", () => {
       expect(onDisk).not.toHaveProperty("token");
 
       expect(readDaemonDescriptor(env)).toEqual(descriptor);
+    });
+
+    it("publishes atomically — leaves no .tmp sibling and overwrites cleanly", () => {
+      const first = buildDaemonDescriptor({ address: { address: "127.0.0.1", port: 3000 }, version: "1.0.0" });
+      writeDaemonDescriptor(first, env);
+      // The temp file used for the atomic rename must not survive the write.
+      expect(readdirSync(home).filter((f) => f.endsWith(".tmp"))).toEqual([]);
+
+      // A second write (daemon restart on a new port) replaces the file wholesale —
+      // a reader sees the old or the new descriptor, never a mix — and still no temp.
+      const second = buildDaemonDescriptor({ address: { address: "127.0.0.1", port: 4000 }, version: "2.0.0" });
+      writeDaemonDescriptor(second, env);
+      expect(readdirSync(home).filter((f) => f.endsWith(".tmp"))).toEqual([]);
+      expect(readDaemonDescriptor(env)).toEqual(second);
+      expect(statSync(join(home, "daemon.json")).mode & 0o777).toBe(0o600);
     });
 
     it("removes the descriptor so a stale file never points at a dead port", () => {

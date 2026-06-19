@@ -2218,6 +2218,11 @@ if (import.meta.url === `file://${process.argv[1]}`) {
         // teardown error never blocks exit.
       })
       .finally(() => {
+        // Belt-and-suspenders: if app.close() rejected BEFORE the onClose hook ran
+        // (e.g. it threw mid-teardown), the descriptor would survive. Remove it
+        // directly here too — removeDaemonDescriptor is idempotent (force + swallow),
+        // so a normal shutdown that already cleaned up just no-ops.
+        removeDaemonDescriptor();
         process.exit(signal === "SIGINT" ? 130 : 143);
       });
   };
