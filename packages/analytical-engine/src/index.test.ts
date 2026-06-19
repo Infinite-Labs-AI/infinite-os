@@ -16,6 +16,7 @@ import {
   derivePriorRange,
   metricColumn,
   metricView,
+  metricViewForGrain,
   queryabilityStatusFromSourceVerification,
   queuedSourceSyncFromEnvelope,
   requiresResultTypePartition,
@@ -3692,6 +3693,352 @@ const COMPARISON_CONTEXT = {
   actorId: "operator",
   sessionId: "session"
 } as const;
+
+// ─────────────────────────────────────────────────────────────────────────────────────────
+// Phase-2 slice-1a Stage-1 — the grain-aware view resolver (spec §5, the keystone).
+//
+// This stage adds the CAPABILITY (metric→view selection now depends on grain) with NO behavior
+// change: the adset views do not exist on disk yet, so every existing query must keep resolving
+// to its campaign view byte-for-byte. These tests are the keystone REGRESSION GATE:
+//   (1) metricViewForGrain defaults to campaign for every metric when no adset dim is present;
+//   (2) the loosened metric/view guard accepts the campaign view AND the adset sibling, and
+//       still rejects an unrelated view;
+//   (3) an adset_id/adset_name group-by (or filter — §5e) flips view selection to the adset
+//       sibling, while a campaign-only group-by stays campaign;
+//   (4) roas_from_stripe is forced campaign-grain even with an adset dim present (§5e/§10);
+//   (5) the worker's no-group-by entry point (metricView) is unchanged (§5d — pinned here so a
+//       regression in the campaign-default shim fails in this suite, not just the worker suite).
+// ─────────────────────────────────────────────────────────────────────────────────────────
+describe("Phase-2 §5 grain-aware view resolver (Stage-1 keystone)", () => {
+  const ctx = {
+    workspaceId: "workspace",
+    authority: "tool_agent" as const,
+    surface: "api" as const,
+    actorId: "operator",
+    sessionId: "session"
+  };
+
+  // The Meta metric families that have an adset sibling view this slice.
+  const META_DELIVERY_METRICS = [
+    "meta_ads_spend",
+    "meta_ads_clicks",
+    "impressions",
+    "reach",
+    "cpm",
+    "cpc",
+    "ctr",
+    "link_clicks",
+    "landing_page_views",
+    "frequency"
+  ] as const;
+  const META_CONVERSION_METRICS = ["results", "cost_per_result", "conversion_value", "roas"] as const;
+  // Every first-phase metric id (so the regression test proves the campaign default is total).
+  const ALL_METRICS = [
+    "site_visitors",
+    "page_views",
+    "new_users",
+    "engaged_sessions",
+    "key_events",
+    "engagement_rate",
+    "average_session_duration",
+    "page_views_by_page",
+    "posthog_event_count",
+    "recognized_revenue",
+    "shopify_gross_sales",
+    "shopify_order_count",
+    "roas_from_stripe",
+    "x_public_engagement",
+    "x_post_count",
+    "x_comment_count",
+    "x_follower_count",
+    ...META_DELIVERY_METRICS,
+    ...META_CONVERSION_METRICS
+  ] as const;
+
+  describe("REGRESSION: campaign default (no adset dim → metricView byte-for-byte)", () => {
+    it("metricViewForGrain(metric, [], []) === metricView(metric) for EVERY metric", () => {
+      // The no-regression contract: with no group-by and no filters, the resolver MUST return
+      // exactly today's campaign default for every metric (no view ever changes).
+      for (const metric of ALL_METRICS) {
+        expect(metricViewForGrain(metric, [], [])).toBe(metricView(metric));
+      }
+    });
+
+    it("a campaign-only group-by/filter still resolves to the campaign view", () => {
+      // Campaign-grain breakdowns (campaign_id / campaign_name / occurred_on / result_type)
+      // must NOT flip to the adset view — only an adset_id/adset_name dim does.
+      for (const metric of META_DELIVERY_METRICS) {
+        expect(metricViewForGrain(metric, ["campaign_id"], [])).toBe("queryable.vw_meta_ads_campaign_daily");
+        expect(metricViewForGrain(metric, ["campaign_name", "occurred_on"], [])).toBe(
+          "queryable.vw_meta_ads_campaign_daily"
+        );
+        expect(metricViewForGrain(metric, [], [{ field: "campaign_id" }])).toBe(
+          "queryable.vw_meta_ads_campaign_daily"
+        );
+      }
+      for (const metric of META_CONVERSION_METRICS) {
+        expect(metricViewForGrain(metric, ["campaign_id", "result_type"], [])).toBe(
+          "queryable.vw_meta_ads_campaign_conversions_daily"
+        );
+      }
+    });
+
+    it("metricView is UNCHANGED (§5d — the worker's no-group-by campaign shim)", () => {
+      // The worker calls metricView(metric) with no group-by; pinning these here means a
+      // regression in the campaign-default shim fails in the engine suite directly.
+      for (const metric of META_DELIVERY_METRICS) {
+        expect(metricView(metric)).toBe("queryable.vw_meta_ads_campaign_daily");
+      }
+      for (const metric of META_CONVERSION_METRICS) {
+        expect(metricView(metric)).toBe("queryable.vw_meta_ads_campaign_conversions_daily");
+      }
+      expect(metricView("roas_from_stripe")).toBe("queryable.vw_meta_stripe_campaign_value_daily");
+    });
+  });
+
+  describe("§5a: an adset dim flips view selection to the adset sibling", () => {
+    it("an adset_id/adset_name group-by routes Meta delivery metrics to vw_meta_ads_adset_daily", () => {
+      for (const metric of META_DELIVERY_METRICS) {
+        expect(metricViewForGrain(metric, ["adset_id"], [])).toBe("queryable.vw_meta_ads_adset_daily");
+        expect(metricViewForGrain(metric, ["adset_name"], [])).toBe("queryable.vw_meta_ads_adset_daily");
+        // alias forms (adset / ad_set) normalize to adset_name and still flip.
+        expect(metricViewForGrain(metric, ["adset"], [])).toBe("queryable.vw_meta_ads_adset_daily");
+      }
+    });
+
+    it("an adset_id group-by routes the conversion family to vw_meta_ads_adset_conversions_daily", () => {
+      for (const metric of META_CONVERSION_METRICS) {
+        expect(metricViewForGrain(metric, ["adset_id", "result_type"], [])).toBe(
+          "queryable.vw_meta_ads_adset_conversions_daily"
+        );
+      }
+    });
+
+    it("§5e: an adset dim in a FILTER (no group-by) also flips to the adset view", () => {
+      // run_metric_query has no group-by; a filter like effective_status=ACTIVE pinned with an
+      // adset_id filter must still select the adset view so the status/adset dims are queryable.
+      expect(metricViewForGrain("cost_per_result", [], [{ field: "adset_id" }])).toBe(
+        "queryable.vw_meta_ads_adset_conversions_daily"
+      );
+      expect(metricViewForGrain("meta_ads_spend", [], [{ field: "adset_name" }])).toBe(
+        "queryable.vw_meta_ads_adset_daily"
+      );
+    });
+
+    it("§5e: coarser campaign_id FILTER + finer adset_id GROUP-BY resolves to the adset view", () => {
+      // "spend per adset within campaign X": the group-by drives the grain to adset; campaign_id
+      // is a carry dim on the adset view, so the filter still applies there.
+      expect(metricViewForGrain("meta_ads_spend", ["adset_id"], [{ field: "campaign_id" }])).toBe(
+        "queryable.vw_meta_ads_adset_daily"
+      );
+    });
+
+    it("§5e/§10: roas_from_stripe stays campaign-grain even with an adset dim (no adset sibling)", () => {
+      // Its view (vw_meta_stripe_campaign_value_daily) has no adset sibling; swapping would 404.
+      expect(metricViewForGrain("roas_from_stripe", ["adset_id"], [])).toBe(
+        "queryable.vw_meta_stripe_campaign_value_daily"
+      );
+      expect(metricViewForGrain("roas_from_stripe", [], [{ field: "adset_id" }])).toBe(
+        "queryable.vw_meta_stripe_campaign_value_daily"
+      );
+    });
+
+    it("non-Meta metrics never flip even if an adset_id dim is (nonsensically) passed", () => {
+      // A non-Meta metric has no adset sibling, so its family is a single view — stays put.
+      expect(metricViewForGrain("page_views", ["adset_id"], [])).toBe("queryable.vw_site_traffic");
+      expect(metricViewForGrain("shopify_order_count", ["adset_id"], [])).toBe("queryable.vw_shopify_orders");
+    });
+  });
+
+  describe("§5b: the grain-FAMILY guard (rejectMetricViewMismatch via the handlers)", () => {
+    // rejectMetricViewMismatch is internal; we exercise it through run_metric_query's `view`
+    // override, which calls it directly. A view IN the metric's grain family is accepted; an
+    // unrelated view is rejected with unsupported_view_for_metric:*.
+    function passthroughDb(): InfiniteOsDb {
+      return {
+        async query() {
+          return [];
+        },
+        async one() {
+          return null;
+        },
+        async close() {},
+        async ensureWorkspace() {},
+        async ensureFirstPhaseDatasets() {},
+        async connectSource() {
+          return null as never;
+        },
+        async updateSourceStatus() {},
+        async createJob() {
+          return {};
+        },
+        async claimNextJob() {
+          return null;
+        },
+        async completeJob() {},
+        async withTransaction(fn) {
+          return fn(this);
+        }
+      };
+    }
+
+    it("accepts the CAMPAIGN view for a Meta conversion metric (the family base)", async () => {
+      const handlers = createActionHandlers(passthroughDb());
+      const result = await handlers.run_metric_query?.(
+        {
+          metric: "results",
+          view: "queryable.vw_meta_ads_campaign_conversions_daily",
+          filters: [{ field: "result_type", operator: "equals", value: "lead" }]
+        },
+        ctx
+      );
+      expect(result?.data).toMatchObject({ view: "queryable.vw_meta_ads_campaign_conversions_daily" });
+    });
+
+    it("accepts the ADSET SIBLING view for the same metric (the loosened family check)", async () => {
+      const handlers = createActionHandlers(passthroughDb());
+      const result = await handlers.run_metric_query?.(
+        {
+          metric: "results",
+          view: "queryable.vw_meta_ads_adset_conversions_daily",
+          filters: [{ field: "result_type", operator: "equals", value: "lead" }]
+        },
+        ctx
+      );
+      expect(result?.data).toMatchObject({ view: "queryable.vw_meta_ads_adset_conversions_daily" });
+    });
+
+    it("REJECTS a view outside the metric's grain family", async () => {
+      const handlers = createActionHandlers(passthroughDb());
+      // results belongs to the conversions family; the delivery adset view is NOT in it.
+      await expect(
+        handlers.run_metric_query?.(
+          {
+            metric: "results",
+            view: "queryable.vw_meta_ads_adset_daily",
+            filters: [{ field: "result_type", operator: "equals", value: "lead" }]
+          },
+          ctx
+        )
+      ).rejects.toThrow(/unsupported_view_for_metric:results:queryable\.vw_meta_ads_adset_daily/);
+    });
+
+    it("REJECTS the adset view for roas_from_stripe (campaign-only family)", async () => {
+      const handlers = createActionHandlers(passthroughDb());
+      await expect(
+        handlers.run_metric_query?.(
+          { metric: "roas_from_stripe", view: "queryable.vw_meta_ads_adset_conversions_daily" },
+          ctx
+        )
+      ).rejects.toThrow(/unsupported_view_for_metric:roas_from_stripe/);
+    });
+  });
+
+  describe("§5a end-to-end: run_breakdown_query routes by group-by grain", () => {
+    function routingFakeDb(queries: Array<{ sql: string }>): InfiniteOsDb {
+      return {
+        async query<T = Record<string, unknown>>(sql: string): Promise<T[]> {
+          queries.push({ sql });
+          return [] as T[];
+        },
+        async one() {
+          return null;
+        },
+        async close() {},
+        async ensureWorkspace() {},
+        async ensureFirstPhaseDatasets() {},
+        async connectSource() {
+          return null as never;
+        },
+        async updateSourceStatus() {},
+        async createJob() {
+          return {};
+        },
+        async claimNextJob() {
+          return null;
+        },
+        async completeJob() {},
+        async withTransaction(fn) {
+          return fn(this);
+        }
+      };
+    }
+
+    it("groupBy=[campaign_id] queries the CAMPAIGN delivery view", async () => {
+      const queries: Array<{ sql: string }> = [];
+      const handlers = createActionHandlers(routingFakeDb(queries));
+      const result = await handlers.run_breakdown_query?.(
+        { metric: "meta_ads_spend", groupBy: ["campaign_id"] },
+        ctx
+      );
+      expect(result?.data).toMatchObject({ view: "queryable.vw_meta_ads_campaign_daily" });
+      expect(queries.some((q) => q.sql.includes("from queryable.vw_meta_ads_campaign_daily"))).toBe(true);
+      expect(queries.every((q) => !q.sql.includes("from queryable.vw_meta_ads_adset_daily"))).toBe(true);
+    });
+
+    it("groupBy=[adset_id] queries the ADSET delivery view (the primary grain seam)", async () => {
+      const queries: Array<{ sql: string }> = [];
+      const handlers = createActionHandlers(routingFakeDb(queries));
+      const result = await handlers.run_breakdown_query?.(
+        { metric: "meta_ads_spend", groupBy: ["adset_id"] },
+        ctx
+      );
+      expect(result?.data).toMatchObject({ view: "queryable.vw_meta_ads_adset_daily" });
+      const sql = queries.find((q) => q.sql.includes("from queryable.vw_meta_ads_adset_daily"))?.sql;
+      expect(sql).toBeDefined();
+      // adset_id is in the adset view's allowed dims, so the group column is emitted (not
+      // rejected as unsupported_dimension).
+      expect(sql).toContain("adset_id as adset_id");
+    });
+
+    it("groupBy=[adset_id, result_type] queries the ADSET conversions view (partition satisfied)", async () => {
+      const queries: Array<{ sql: string }> = [];
+      const handlers = createActionHandlers(routingFakeDb(queries));
+      const result = await handlers.run_breakdown_query?.(
+        { metric: "cost_per_result", groupBy: ["adset_id", "result_type"] },
+        ctx
+      );
+      expect(result?.data).toMatchObject({ view: "queryable.vw_meta_ads_adset_conversions_daily" });
+      const sql = queries.find((q) => q.sql.includes("from queryable.vw_meta_ads_adset_conversions_daily"))?.sql;
+      expect(sql).toBeDefined();
+      // the recompute-from-summed-bases expression is byte-identical at adset grain (only the
+      // view name swapped) — the no-rewrite-of-expressions guarantee.
+      expect(sql).toContain("sum(meta_ads_spend) / nullif(sum(results), 0) as cost_per_result");
+      expect(sql).toContain("group by");
+      expect(sql).toContain("result_type");
+    });
+
+    it("a status group-by on the adset view is allowed (on/off as a dimension, §6/§7)", async () => {
+      const queries: Array<{ sql: string }> = [];
+      const handlers = createActionHandlers(routingFakeDb(queries));
+      const result = await handlers.run_breakdown_query?.(
+        { metric: "meta_ads_spend", groupBy: ["adset_id", "effective_status"] },
+        ctx
+      );
+      expect(result?.data).toMatchObject({ view: "queryable.vw_meta_ads_adset_daily" });
+      const sql = queries.find((q) => q.sql.includes("from queryable.vw_meta_ads_adset_daily"))?.sql;
+      expect(sql).toContain("effective_status as effective_status");
+    });
+
+    it("an effective_status FILTER on the adset view passes runAggregate's gate (\"ACTIVE adsets\")", async () => {
+      const queries: Array<{ sql: string }> = [];
+      const handlers = createActionHandlers(routingFakeDb(queries));
+      // "CPL for my ACTIVE adsets": group adset_id+result_type, filter effective_status=ACTIVE.
+      const result = await handlers.run_breakdown_query?.(
+        {
+          metric: "cost_per_result",
+          groupBy: ["adset_id", "result_type"],
+          filters: [{ field: "effective_status", operator: "equals", value: "ACTIVE" }]
+        },
+        ctx
+      );
+      expect(result?.data).toMatchObject({ view: "queryable.vw_meta_ads_adset_conversions_daily" });
+      const sql = queries.find((q) => q.sql.includes("from queryable.vw_meta_ads_adset_conversions_daily"))?.sql;
+      // the status filter is rendered into the WHERE clause (not rejected as unsupported).
+      expect(sql).toContain("effective_status =");
+    });
+  });
+});
 
 describe("run_metric_query comparison (compareTo)", () => {
   describe("derivePriorRange", () => {
