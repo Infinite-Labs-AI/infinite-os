@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "build": "tsc -b tsconfig.json",
+    "build:bundle": "node scripts/bundle.mjs",
     "dev": "tsx src/index.ts",
     "test": "vitest run --root ../.. ../../apps/app/test/app.test.ts",
     "typecheck": "tsc --noEmit --pretty false"
@@ -16,5 +17,8 @@
     "@infinite-os/llm-controller": "workspace:*",
     "@infinite-os/runtime": "workspace:*",
     "fastify": "^5.0.0"
+  },
+  "devDependencies": {
+    "esbuild": "0.27.7"
   }
 }

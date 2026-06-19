@@ -1,4 +1,5 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import Fastify from "fastify";
 import { createActionHandlers } from "@infinite-os/analytical-engine";
@@ -2203,7 +2204,22 @@ function isLocalHost(host: string | undefined): boolean {
   return h === "127.0.0.1" || h === "localhost" || h === "::1";
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+// Is THIS module the process entrypoint (run directly, e.g. `node daemon.mjs` or `tsx index.ts`)?
+// A raw `import.meta.url === file://${process.argv[1]}` string compare is fragile: it breaks on
+// symlinked paths (macOS /tmp → /private/var/folders, app-bundle symlinks), on path encoding
+// (spaces → %20 in the URL but not in argv), and on the esbuild bundle run via node — any of which
+// silently skips the listen block. Compare symlink-resolved REAL paths instead.
+function isProcessEntrypoint(): boolean {
+  const argv1 = process.argv[1];
+  if (!argv1) return false;
+  try {
+    return realpathSync(fileURLToPath(import.meta.url)) === realpathSync(argv1);
+  } catch {
+    return false;
+  }
+}
+
+if (isProcessEntrypoint()) {
   const config = loadInfiniteOsConfig();
   const app = createApp({ databaseUrl: config.databaseUrl });
 
@@ -2225,6 +2241,9 @@ if (import.meta.url === `file://${process.argv[1]}`) {
       // A daemon with a broken/half-applied schema must NOT serve. Fail loud with a clear cause
       // (not an opaque unhandled rejection) and exit so the desktop/supervisor surfaces it. Safe to
       // exit here: this runs before listen + before the keystone descriptor is written.
+      // console.error too — app.log may be a no-op (default Fastify logger), and a FATAL that exits
+      // the process MUST be visible (an `app.log.error?.` alone silently swallowed it in the bundle).
+      console.error("FATAL: boot migration failed; refusing to start with an unmigrated schema:", err);
       app.log.error?.({ err }, "FATAL: boot migration failed; refusing to start with an unmigrated schema");
       process.exit(1);
     }

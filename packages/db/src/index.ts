@@ -31,8 +31,13 @@ export interface Migration {
 }
 
 export function migrationsDir(): string {
+  // Explicit override — the bundled daemon ships the .sql files as a sidecar and points here, since
+  // the source-relative candidates below don't resolve once the package is esbuild-bundled.
+  const fromEnv = process.env.GROWTH_OS_MIGRATIONS_DIR?.trim();
+  if (fromEnv) return fromEnv;
   const moduleDir = dirname(fileURLToPath(import.meta.url));
   const candidates = [
+    join(moduleDir, "migrations"), // bundled: migrations sit NEXT TO the daemon bundle (daemon.mjs)
     join(moduleDir, "..", "migrations"),
     join(moduleDir, "..", "..", "migrations")
   ];
