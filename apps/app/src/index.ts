@@ -72,6 +72,17 @@ function platformToSurface(platform: string): GatewayControllerSurface {
   }
 }
 
+// The controller keys sessions by the workspace-qualified id (`<conversationId>:<ws>`), but the
+// API must hand the CLIENT back the UNqualified conversation id. The next turn round-trips this
+// value as its `sessionId`, and we re-qualify it (`:<ws>`) idempotently — so returning the
+// qualified key would make turn 2 send `<conversationId>:<ws>`, which we'd re-qualify to
+// `<conversationId>:<ws>:<ws>`: a brand-new orphaned session that silently breaks multi-turn
+// continuity. Mirrors the CLI's stripWorkspaceSuffix (apps/cli/src/index.ts).
+function stripWorkspaceSuffix(id: string, workspaceId: string): string {
+  const suffix = `:${workspaceId}`;
+  return id.endsWith(suffix) ? id.slice(0, -suffix.length) : id;
+}
+
 export interface CompactSessionRequestBody {
   newSessionId?: string;
   summaryText?: string;
@@ -416,7 +427,10 @@ export function createApp(options: {
       platform,
       channelId,
       actorId,
-      sessionId: response.sessionId,
+      // Hand back the UNqualified conversation id so the next turn round-trips to a value we
+      // re-qualify idempotently. response.sessionId is the workspace-qualified controller key
+      // (it may also have rotated via compaction); strip the `:<ws>` suffix either way.
+      sessionId: stripWorkspaceSuffix(response.sessionId, ws),
       message: response.message,
       provenance: response.provenance,
       actionCalls: response.actionCalls
