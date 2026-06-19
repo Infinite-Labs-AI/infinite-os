@@ -3,6 +3,12 @@ import { fileURLToPath } from "node:url";
 import Fastify from "fastify";
 import { createActionHandlers } from "@infinite-os/analytical-engine";
 import { loadInfiniteOsConfig } from "@infinite-os/config";
+import {
+  buildDaemonDescriptor,
+  removeDaemonDescriptor,
+  writeDaemonDescriptor,
+  type BoundAddress
+} from "./daemon-descriptor.js";
 import { decryptCredentialPayload, encryptCredentialPayload } from "@infinite-os/core";
 import {
   createInfiniteOsDb,
@@ -2185,5 +2191,51 @@ function isLocalHost(host: string | undefined): boolean {
 if (import.meta.url === `file://${process.argv[1]}`) {
   const config = loadInfiniteOsConfig();
   const app = createApp({ databaseUrl: config.databaseUrl });
+
+  // C2 keystone: announce the live daemon so the desktop can discover it instead of
+  // guessing the port. Register the cleanup hook BEFORE listen — Fastify v5 forbids
+  // addHook once the instance is listening — so app.close() (SIGTERM/SIGINT/graceful
+  // shutdown) removes the descriptor and never leaves a stale file pointing at a dead
+  // port. Removal is scoped to this standalone entrypoint, the only place a descriptor
+  // is written, so in-process app.inject() callers (tests) never touch the file.
+  app.addHook("onClose", async () => {
+    removeDaemonDescriptor();
+  });
+
+  // SIGTERM/SIGINT must run app.close() so the onClose hook fires. Fastify does NOT
+  // close itself on signals — a bare SIGTERM would terminate the process abruptly and
+  // leave a stale descriptor pointing at a now-dead port. Wire the handlers BEFORE
+  // listen so a signal during early startup is still handled. Guard against double
+  // invocation (SIGINT then SIGTERM) so close runs exactly once.
+  let closing = false;
+  const shutdown = (signal: NodeJS.Signals) => {
+    if (closing) return;
+    closing = true;
+    void app
+      .close()
+      .catch(() => {
+        // app.close() already ran the onClose descriptor cleanup; swallow so a
+        // teardown error never blocks exit.
+      })
+      .finally(() => {
+        // Belt-and-suspenders: if app.close() rejected BEFORE the onClose hook ran
+        // (e.g. it threw mid-teardown), the descriptor would survive. Remove it
+        // directly here too — removeDaemonDescriptor is idempotent (force + swallow),
+        // so a normal shutdown that already cleaned up just no-ops.
+        removeDaemonDescriptor();
+        process.exit(signal === "SIGINT" ? 130 : 143);
+      });
+  };
+  process.once("SIGTERM", shutdown);
+  process.once("SIGINT", shutdown);
+
   await app.listen({ host: config.appHost, port: config.appPort });
+
+  // config.appPort may be 0 (ephemeral) — the OS-assigned port is only knowable
+  // AFTER listen resolves, via the bound socket address. The descriptor is
+  // discovery-only: NO tokens.
+  const bound = app.server.address();
+  const descriptor = buildDaemonDescriptor({ address: bound as BoundAddress | string | null });
+  const { path: descriptorPath } = writeDaemonDescriptor(descriptor);
+  app.log.info?.({ url: descriptor.url, descriptor: descriptorPath }, "daemon descriptor written");
 }
