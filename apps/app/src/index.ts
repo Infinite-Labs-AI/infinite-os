@@ -16,6 +16,7 @@ import {
   deleteProject,
   listProjects,
   readLatestSetupPublicArtifacts,
+  runMigrations,
   upsertWorkspaceSite,
   type InfiniteOsDb
 } from "@infinite-os/db";
@@ -2205,6 +2206,19 @@ function isLocalHost(host: string | undefined): boolean {
 if (import.meta.url === `file://${process.argv[1]}`) {
   const config = loadInfiniteOsConfig();
   const app = createApp({ databaseUrl: config.databaseUrl });
+
+  // A LOCAL daemon owns its schema. The desktop spawns this entrypoint against a freshly-created
+  // embedded PGlite data dir (DATABASE_URL=pglite://…) that has NO tables, so EVERY DB request would
+  // 500 with "relation … does not exist" until something migrates it. Bring the schema up to date on
+  // boot BEFORE we listen/announce. runMigrations is idempotent (re-applies 0 when current), so a
+  // CLI that already ran `infinite setup` just no-ops. NETWORK (prod) mode is intentionally NOT
+  // auto-migrated — there migrations stay a controlled deploy step against the shared Postgres.
+  if (config.runtimeMode === "local") {
+    const applied = await runMigrations(config.databaseUrl);
+    if (applied.length > 0) {
+      app.log.info?.({ count: applied.length }, "applied pending migrations on boot (local mode)");
+    }
+  }
 
   // C2 keystone: announce the live daemon so the desktop can discover it instead of
   // guessing the port. Register the cleanup hook BEFORE listen — Fastify v5 forbids
