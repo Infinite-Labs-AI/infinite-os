@@ -140,6 +140,7 @@ export function createPgliteDb(
   // instance — the latter is needed for the native transaction() (see withTransaction) and an
   // honest close(). Concurrent first calls share the single boot promise (no double-create).
   let booted: Promise<{ db: InfiniteOsDb; instance: PgliteInstance }> | undefined;
+  let closed = false;
   const ready = (): Promise<{ db: InfiniteOsDb; instance: PgliteInstance }> => {
     if (!booted) {
       booted = importPglite()
@@ -163,16 +164,22 @@ export function createPgliteDb(
       return (await ready()).db.one<T>(sql, params);
     },
     async close() {
-      // Nothing started → nothing to release. If the boot promise REJECTED (PGlite failed to load
-      // or create the data dir), awaiting it here would re-throw that boot error OUT of teardown —
-      // swallow it. close() must never throw; there is nothing to release after a failed boot.
-      if (!booted) return;
+      // Terminal + idempotent: a second close() is a no-op (the `closed` flag), so instance.close()
+      // is never called twice.
+      if (closed || !booted) return;
+      closed = true;
+      let instance: PgliteInstance;
       try {
-        const { instance } = await booted;
-        await instance.close();
+        ({ instance } = await booted);
       } catch {
-        // boot failed or already closed — nothing to release
+        // ONLY the failed-BOOT case is quiet: the boot promise rejected, so there is nothing to
+        // release and re-throwing a boot error out of teardown would be wrong.
+        return;
       }
+      // A genuine close()/closeFs() failure on a HEALTHY instance (e.g. a final persistence flush
+      // that didn't durably land) is NOT swallowed — masking it would hide real data loss, against
+      // the no-fallbacks rule.
+      await instance.close();
     },
     async ensureWorkspace(workspaceId, name) {
       return (await ready()).db.ensureWorkspace(workspaceId, name);
@@ -203,7 +210,21 @@ export function createPgliteDb(
       // HIGH). transaction() holds the connection mutex for the whole callback, serializing them.
       // The tx satisfies QueryableClient (it carries `query`), so wrap it as a child InfiniteOsDb
       // whose close is a no-op — the tx lifecycle is owned by transaction().
-      return instance.transaction((tx) => fn(wrapPool(tx, async () => undefined)));
+      return instance.transaction((tx) => {
+        const child = wrapPool(tx, async () => undefined);
+        // Re-entry guard: a NESTED withTransaction on this child would hit wrapPool's single-client
+        // branch and issue `begin` on a connection ALREADY inside the native transaction. Postgres
+        // ignores the nested BEGIN, and the inner COMMIT would commit the OUTER tx early — a silent
+        // partial-commit / lost-rollback. No caller nests today; make a future one fail LOUD (per
+        // the no-fallbacks rule) instead of silently corrupting.
+        const guarded: InfiniteOsDb = {
+          ...child,
+          withTransaction: () => {
+            throw new Error("nested withTransaction is unsupported on PGlite's single connection");
+          },
+        };
+        return fn(guarded);
+      });
     }
   };
 }

@@ -15,7 +15,8 @@ import {
 } from "../src/index.js";
 import {
   isPgliteDatabaseUrl,
-  resolvePgliteDataDir
+  resolvePgliteDataDir,
+  runPgliteMigrations
 } from "../src/pglite-adapter.js";
 
 // End-to-end proof that the embedded PGlite backend applies the WHOLE migration
@@ -60,11 +61,18 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
   let dataDir: string;
   let url: string;
   let db: InfiniteOsDb;
+  let firstRun: string[];
 
-  beforeAll(() => {
+  beforeAll(async () => {
     dataDir = mkdtempSync(join(tmpdir(), "infinite-os-pglite-"));
     url = `pglite://${dataDir}`;
-  });
+    // Boot ONCE for the whole describe: run the migration stack, then open the shared db. Doing this
+    // in beforeAll (not as a side effect of the first `it`) keeps every test order-INDEPENDENT — the
+    // concurrency regression test below must stand on its own under `-t` / `.only` / shuffle, not
+    // rely on an earlier `it` having assigned `db`.
+    firstRun = await runMigrations(url);
+    db = createInfiniteOsDb(url);
+  }, 60_000);
 
   afterAll(async () => {
     if (db) {
@@ -73,29 +81,21 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
     rmSync(dataDir, { recursive: true, force: true });
   });
 
-  it(
-    "applies ALL 37 migrations on first boot and is idempotent on the second",
-    async () => {
-      const expectedCount = loadMigrations().length;
-      expect(expectedCount).toBe(37);
+  it("applied ALL 37 migrations on first boot and is idempotent on a re-run", async () => {
+    expect(loadMigrations().length).toBe(37);
+    expect(firstRun).toHaveLength(37);
+    expect(firstRun).toContain("0001_control_plane.sql");
+    expect(firstRun).toContain("0006_security_roles.sql");
+    expect(firstRun).toContain("0036_chat_sessions_desktop_surface.sql");
+    expect(firstRun).toContain("0037_meta_ads_ad_grain.sql");
 
-      const firstRun = await runMigrations(url);
-      expect(firstRun).toHaveLength(expectedCount);
-      expect(firstRun).toContain("0001_control_plane.sql");
-      expect(firstRun).toContain("0006_security_roles.sql");
-      expect(firstRun).toContain("0036_chat_sessions_desktop_surface.sql");
-      expect(firstRun).toContain("0037_meta_ads_ad_grain.sql");
-
-      // Idempotent: a second boot re-applies zero (the `rows.length` gate, not
-      // the pg `rowCount` gate, makes this true on PGlite).
-      const secondRun = await runMigrations(url);
-      expect(secondRun).toEqual([]);
-    },
-    60_000
-  );
+    // Idempotent: a second boot re-applies zero (the `rows.length` gate, not the pg `rowCount`
+    // gate, makes this true on PGlite).
+    const secondRun = await runMigrations(url);
+    expect(secondRun).toEqual([]);
+  });
 
   it("created the schema_migrations ledger with all 37 rows", async () => {
-    db = createInfiniteOsDb(url);
     const ledger = await db.query<{ id: string }>(
       "select id from schema_migrations order by id"
     );
@@ -223,4 +223,47 @@ describe("pglite boot-failure handling", () => {
     const neverUsed = createInfiniteOsDb(`pglite://${join(tmpdir(), "infinite-os-pglite-unused")}`);
     await expect(neverUsed.close()).resolves.toBeUndefined();
   });
+
+  it("double-close of a booted facade is idempotent (the `closed` flag no-ops the second)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "infinite-os-pglite-dblclose-"));
+    try {
+      const dbx = createInfiniteOsDb(`pglite://${dir}`);
+      await dbx.query("select 1"); // force a real boot
+      await expect(dbx.close()).resolves.toBeUndefined();
+      // Raw PGlite.close() THROWS ("PGlite is closed") on a second call; the facade's `closed`
+      // flag must make the second close a no-op rather than re-invoking it.
+      await expect(dbx.close()).resolves.toBeUndefined();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it("a FAILING migration rolls back atomically — no ledger row, no partial schema (native tx)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "infinite-os-pglite-rollback-"));
+    const url = `pglite://${dir}`;
+    try {
+      const ok = { id: "9001_ok.sql", sql: "create table mig_ok (id int);" };
+      // The good DDL and the invalid statement share ONE migration body — the whole body must roll
+      // back, so neither mig_bad nor a ledger row for 9002 may survive.
+      const bad = { id: "9002_bad.sql", sql: "create table mig_bad (id int); this is not valid sql;" };
+      await expect(runPgliteMigrations(url, [ok, bad])).rejects.toThrow();
+
+      const after = createInfiniteOsDb(url);
+      try {
+        const ledger = await after.query<{ id: string }>(
+          "select id from schema_migrations order by id"
+        );
+        expect(ledger.map((r) => r.id)).toEqual(["9001_ok.sql"]); // 9001 committed; 9002 NOT recorded
+        const tables = await after.query<{ table_name: string }>(
+          "select table_name from information_schema.tables where table_name in ('mig_ok','mig_bad')"
+        );
+        // mig_ok persisted (9001 committed in its own tx); mig_bad rolled back with the bad statement.
+        expect(tables.map((r) => r.table_name).sort()).toEqual(["mig_ok"]);
+      } finally {
+        await after.close();
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
 });
