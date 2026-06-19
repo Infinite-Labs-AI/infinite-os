@@ -4,8 +4,45 @@ import {
   infiniteOsVersion,
   type JourneyEntityType
 } from "@infinite-os/core";
+import {
+  FIRST_PHASE_ACTIONS,
+  OPERATOR_ACTIONS,
+  READ_ACTIONS,
+  type ActionEnvelope,
+  type AnswerabilityReason,
+  type AnswerabilityStatus,
+  type Authority,
+  type CoverageSummary,
+  type EvidenceHandle,
+  type InfiniteOsActionId,
+  type PolicyRef,
+  type RuntimeSurface,
+  type SessionContext
+} from "@infinite-os/types";
 import type { RecipeId } from "./recipes.js";
 export * from "./setup-module-loader.js";
+
+// Re-export the canonical contract types/consts so the rest of the engine keeps
+// importing them from `@infinite-os/runtime` unchanged. `@infinite-os/types` is
+// the single source of truth; this barrel forwards them. Note the contract
+// `ActionEnvelope.interpretedPlan` is `unknown` — the engine only ever WRITES a
+// `JourneyQueryPlan` into it (never reads it back typed), so the contract shape
+// is sufficient everywhere in the engine and no runtime-local override is needed.
+export {
+  FIRST_PHASE_ACTIONS,
+  OPERATOR_ACTIONS,
+  READ_ACTIONS,
+  type ActionEnvelope,
+  type AnswerabilityReason,
+  type AnswerabilityStatus,
+  type Authority,
+  type CoverageSummary,
+  type EvidenceHandle,
+  type InfiniteOsActionId,
+  type PolicyRef,
+  type RuntimeSurface,
+  type SessionContext
+};
 
 /**
  * Thrown when a session context is built without a resolved workspace id. It
@@ -19,18 +56,6 @@ export class MissingWorkspaceError extends NoActiveProjectError {
     super(message);
     this.name = "MissingWorkspaceError";
   }
-}
-
-export type Authority = "tool_agent" | "operator";
-export type RuntimeSurface = "cli" | "api" | "app" | "mcp" | "worker";
-
-export interface SessionContext {
-  workspaceId: string;
-  sessionId: string;
-  actorId: string;
-  authority: Authority;
-  surface: RuntimeSurface;
-  timezone?: string;
 }
 
 export interface ActionDefinition<Input = unknown, Output = unknown> {
@@ -49,63 +74,6 @@ export interface ActionDefinition<Input = unknown, Output = unknown> {
   recommendedNextActions: InfiniteOsActionId[];
   recipeIds: RecipeId[];
   handler: (input: Input, context: SessionContext) => Promise<Output> | Output;
-}
-
-export type AnswerabilityStatus =
-  | "ok"
-  | "resolved"
-  | "unsupported"
-  | "not_implemented"
-  | "low_coverage"
-  | "needs_clarification"
-  | "too_expensive"
-  | "queued"
-  | "error";
-
-export type AnswerabilityReason =
-  | "missing_context"
-  | "missing_journey_template"
-  | "unapproved_journey_template"
-  | "insufficient_source_coverage"
-  | "ambiguous_entity"
-  | "unsupported_intent"
-  | "policy_blocked"
-  | "cost_limit_exceeded"
-  | "execution_error";
-
-export interface EvidenceHandle {
-  id: string;
-  kind:
-    | "context_item"
-    | "query_result"
-    | "provider_record"
-    | "claim_verification";
-  sourceIds: string[];
-  claimIds?: string[];
-  createdAt?: string;
-  expiresAt?: string | null;
-}
-
-export interface CoverageSummary {
-  sourceIds: string[];
-  requiredSourceIds?: string[];
-  coveredCount: number;
-  expectedCount: number;
-  coverageRatio?: number;
-  missingSourceIds?: string[];
-  staleSourceIds?: string[];
-}
-
-export interface PolicyRef {
-  id: string;
-  kind:
-    | "metric_definition"
-    | "journey_template"
-    | "source_capability"
-    | "privacy"
-    | "operator_policy";
-  version?: string;
-  approved: boolean;
 }
 
 export type JourneyQueryIntent =
@@ -144,32 +112,11 @@ export interface JourneyQueryPlan {
   limit?: number;
 }
 
-export interface ActionEnvelope<T = unknown> {
-  ok: boolean;
-  actionId: InfiniteOsActionId;
-  authority: Authority;
-  status: AnswerabilityStatus;
-  data?: T;
-  error?: { code: string; message: string; field?: string };
-  answerabilityReason?: AnswerabilityReason;
-  interpretedPlan?: JourneyQueryPlan;
-  resultHandle?: string;
-  evidence?: EvidenceHandle[];
-  coverage?: CoverageSummary;
-  policyRefs?: PolicyRef[];
-  provenance: string[];
-  freshness?: { target: string; asOf: string | null; stale: boolean };
-  caveats: string[];
-  truncated: boolean;
-  nextActions: InfiniteOsActionId[];
-}
-
 export type ActionHandler = (
   input: unknown,
   context: SessionContext
 ) => Promise<ActionEnvelope> | ActionEnvelope;
 
-export type InfiniteOsActionId = (typeof FIRST_PHASE_ACTIONS)[number];
 export type ActionCategory =
   | "sources"
   | "schedules"
@@ -336,65 +283,6 @@ export const FIRST_PHASE_METRIC_ALIASES: Record<string, readonly string[]> = {
   average_session_duration: ["average session duration", "avg session duration", "session length"],
   page_views_by_page: ["top pages", "page views by page", "most viewed pages", "popular pages"]
 } as const;
-
-export const READ_ACTIONS = [
-  "list_sources",
-  "describe_source",
-  "get_recent_sync_runs",
-  "sync_source_now",
-  "list_source_schedules",
-  "list_queryable_views",
-  "describe_queryable_view",
-  "list_metrics",
-  "describe_metric",
-  "run_metric_query",
-  "run_breakdown_query",
-  "run_funnel_query",
-  "explain_answer",
-  "drilldown_result",
-  "search_context",
-  "describe_context_item",
-  "resolve_entity",
-  "validate_journey_plan",
-  "run_journey_query",
-  "fetch_evidence",
-  "verify_claims",
-  // Meta Ads management READS (no money movement): list/get keep tool_agent
-  // authority and the normal retryable taxonomy. The WRITE ids below are
-  // operator-only.
-  "list_meta_entities",
-  "get_meta_entity"
-] as const;
-
-export const OPERATOR_ACTIONS = [
-  "connect_source",
-  "reconnect_source",
-  "revoke_source",
-  "start_source_sync",
-  "update_source_schedule",
-  "pause_source_schedule",
-  "resume_source_schedule",
-  "create_saved_report",
-  "run_saved_report",
-  "export_saved_report",
-  // Meta Ads WRITE/management — every one can move money (create or go-live) or
-  // destroy live spend objects, so all are operator-authority. An LLM/tool_agent
-  // session can NEVER fire these (assertAuthority throws "operator authority
-  // required"). Creates ALWAYS land PAUSED; set_meta_entity_status is the
-  // separate, gated go-live transition; delete_meta_entity is the destructive
-  // (irreversible) cleanup transition.
-  "create_meta_campaign",
-  "create_meta_ad_set",
-  "create_meta_ad",
-  "create_meta_creative",
-  "set_meta_entity_status",
-  "delete_meta_entity"
-] as const;
-
-export const FIRST_PHASE_ACTIONS = [
-  ...READ_ACTIONS,
-  ...OPERATOR_ACTIONS
-] as const;
 
 export const ACTION_CATALOG: Omit<ActionDefinition, "handler">[] =
   FIRST_PHASE_ACTIONS.map((id) => {

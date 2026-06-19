@@ -3,7 +3,7 @@ export interface QueryAdvisorInput {
   workspaceId: string;
   actorId: string;
   sessionId: string;
-  surface: "api" | "app" | "cli";
+  surface: "api" | "app" | "cli" | "desktop";
   now?: Date;
   recentMessages?: Array<{ role?: unknown; content?: unknown }>;
   curatedMemory?: Array<{ scope?: unknown; fact?: unknown }>;

@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@infinite-os/config": "workspace:*",
-    "@infinite-os/runtime": "workspace:*"
+    "@infinite-os/runtime": "workspace:*",
+    "@infinite-os/types": "workspace:*"
   }
 }
