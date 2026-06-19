@@ -213,10 +213,10 @@ describe("Infinite OS app-hosted API/MCP skeleton", () => {
         platform: "slack",
         channelId: "channel-1",
         actorId: "user-1",
-        // Session id is workspace-qualified, mirroring the CLI's
-        // deriveControllerSessionId so chat_sessions PKs cannot collide across
-        // workspaces that share a conversation id.
-        sessionId: `slack:channel-1:user-1:${WORKSPACE}`,
+        // The RESPONSE sessionId is UNqualified (no `:<ws>`) so the client can round-trip it
+        // safely — re-qualification on the next turn is idempotent. (The INTERNAL controller key
+        // is still workspace-qualified; see the ensureSession assertion below.)
+        sessionId: `slack:channel-1:user-1`,
         message: "Stripe revenue is up this month."
       });
       expect((modelRequests[0] as { userMessage: string }).userMessage).toBe("Revenue?");
@@ -230,8 +230,8 @@ describe("Infinite OS app-hosted API/MCP skeleton", () => {
         WORKSPACE
       ]);
 
-      // A "desktop" platform maps to the "desktop" RuntimeSurface (B2.5) and
-      // the session id is still workspace-qualified (B2), matching the CLI.
+      // A "desktop" platform maps to the "desktop" RuntimeSurface (B2.5). The RESPONSE sessionId
+      // is UNqualified for round-trip safety; the internal ensureSession key stays qualified.
       const desktopTurn = await app.inject({
         method: "POST",
         url: "/gateway/turn",
@@ -241,7 +241,7 @@ describe("Infinite OS app-hosted API/MCP skeleton", () => {
       expect(desktopTurn.statusCode).toBe(200);
       expect(desktopTurn.json()).toMatchObject({
         platform: "desktop",
-        sessionId: `desktop:channel-1:user-1:${WORKSPACE}`
+        sessionId: `desktop:channel-1:user-1`
       });
       const desktopEnsure = (sessionEvents as Array<[string, string, string, string, string]>).find(
         (event) => event[0] === "ensureSession" && event[1] === `desktop:channel-1:user-1:${WORKSPACE}`
@@ -252,6 +252,59 @@ describe("Infinite OS app-hosted API/MCP skeleton", () => {
         "user-1",
         "desktop",
         WORKSPACE
+      ]);
+    } finally {
+      // env restored by afterEach
+    }
+  });
+
+  it("returns an UNqualified sessionId that round-trips to the SAME session (no double-qualify)", async () => {
+    // Regression guard for the gateway double-qualification bug: if the response carried the
+    // workspace-qualified key, a client round-tripping it would make turn 2 re-qualify to
+    // `<conv>:<ws>:<ws>` — a new orphaned session that silently breaks multi-turn memory.
+    const ensured: string[] = [];
+    const sessionStore: ChatSessionStore = {
+      async ensureSession(input) { ensured.push(input.sessionId); },
+      async appendMessage() {},
+      async recordActionCall() {},
+      async listSessions() { return []; },
+      async getSession() { return null; },
+      async searchSessions() { return []; },
+      async resumeSession() {},
+      async endSession() {},
+      async compactSession(input) { return { sessionId: input.newSessionId ?? input.sessionId, parentSessionId: input.sessionId }; }
+    };
+    const app = createApp({
+      database: workspaceProbeDb(),
+      sessionStore,
+      modelClient: { complete: async () => ({ message: "ok" }) }
+    });
+    try {
+      const turn1 = await app.inject({
+        method: "POST",
+        url: "/gateway/turn",
+        headers: OPERATOR_HEADERS,
+        payload: { platform: "desktop", actorId: "user-1", channelId: "channel-1", message: "first" }
+      });
+      const sid1 = (turn1.json() as { sessionId: string }).sessionId;
+      expect(sid1).toBe("desktop:channel-1:user-1");
+      expect(sid1.endsWith(`:${WORKSPACE}`)).toBe(false); // unqualified — safe to round-trip
+
+      // Feed the returned id back as the next turn's sessionId, exactly as a real client does.
+      const turn2 = await app.inject({
+        method: "POST",
+        url: "/gateway/turn",
+        headers: OPERATOR_HEADERS,
+        payload: { sessionId: sid1, platform: "desktop", actorId: "user-1", channelId: "channel-1", message: "second" }
+      });
+      const sid2 = (turn2.json() as { sessionId: string }).sessionId;
+      expect(sid2).toBe(sid1); // stable identifier across turns
+
+      // The crux: BOTH turns resolve to the SAME workspace-qualified controller key, not a
+      // `:<ws>:<ws>` orphan on turn 2.
+      expect(ensured).toEqual([
+        `desktop:channel-1:user-1:${WORKSPACE}`,
+        `desktop:channel-1:user-1:${WORKSPACE}`
       ]);
     } finally {
       // env restored by afterEach
