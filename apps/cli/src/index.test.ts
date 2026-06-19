@@ -3614,6 +3614,9 @@ describe("cli smoke", () => {
 
   it("runs runtime setup for external Postgres without invoking Docker compose", async () => {
     const workspaceRoot = mkdtempSync(join(tmpdir(), "growth-os-runtime-external-"));
+    // Isolated machine home prevents cross-test DATABASE_URL conflicts detected
+    // by the mirrorMachineHomeEnv conflict guard (FIX A1).
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-runtime-external-home-"));
     try {
       const result = await runCommand(
         "setup",
@@ -3626,6 +3629,7 @@ describe("cli smoke", () => {
         ],
         {
           GROWTH_OS_WORKSPACE_ROOT: workspaceRoot,
+          GROWTH_OS_HOME: growthHome,
           GROWTH_OS_CLI_DRY_RUN: "1"
         }
       );
@@ -3645,11 +3649,15 @@ describe("cli smoke", () => {
       expect(readFileSync(join(workspaceRoot, ".growth-os", ".env"), "utf8")).toContain("DATABASE_URL=postgres://growth:supersecret@db.example.com:5432/growth");
     } finally {
       rmSync(workspaceRoot, { recursive: true, force: true });
+      rmSync(growthHome, { recursive: true, force: true });
     }
   });
 
   it("runs runtime setup for Supabase through the same external Postgres migration path", async () => {
     const workspaceRoot = mkdtempSync(join(tmpdir(), "growth-os-runtime-supabase-"));
+    // Isolated machine home prevents cross-test DATABASE_URL conflicts detected
+    // by the mirrorMachineHomeEnv conflict guard (FIX A1).
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-runtime-supabase-home-"));
     try {
       const result = await runCommand(
         "setup",
@@ -3662,6 +3670,7 @@ describe("cli smoke", () => {
         ],
         {
           GROWTH_OS_WORKSPACE_ROOT: workspaceRoot,
+          GROWTH_OS_HOME: growthHome,
           GROWTH_OS_CLI_DRY_RUN: "1"
         }
       );
@@ -3680,6 +3689,7 @@ describe("cli smoke", () => {
       expect(readFileSync(join(workspaceRoot, ".growth-os", "config.yml"), "utf8")).toContain("runtime_target: supabase");
     } finally {
       rmSync(workspaceRoot, { recursive: true, force: true });
+      rmSync(growthHome, { recursive: true, force: true });
     }
   });
 
