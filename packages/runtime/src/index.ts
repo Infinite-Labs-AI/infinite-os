@@ -1,6 +1,7 @@
 import { NoActiveProjectError } from "@infinite-os/config";
 import {
   JOURNEY_ENTITY_TYPES,
+  RESOLVABLE_ENTITY_TYPES,
   infiniteOsVersion,
   type JourneyEntityType
 } from "@infinite-os/core";
@@ -196,6 +197,17 @@ export const FIRST_PHASE_QUERYABLE_VIEWS = [
   // inert (campaign-default) until the matching migration views + engine switch-branches land.
   "queryable.vw_meta_ads_adset_daily",
   "queryable.vw_meta_ads_adset_conversions_daily",
+  // Phase-2 slice-1b §3/§5 — the ad-grain delivery + typed-conversions views (ad × day,
+  // ad × day × result_type). Same invisible-until-allowlisted rule applies: these are the
+  // FINEST-grain siblings the §5 grain-aware resolver (metricViewForGrain) swaps to when an
+  // ad_id/ad_name dimension is present (ad > adset > campaign, finest-grain-wins). Listing them
+  // here simultaneously (a) lets rejectUnsafeView/QUERYABLE_VIEW_SET accept them and (b) admits
+  // them to the run_metric_query/run_breakdown_query `view` enum (analyticalQuerySchema below).
+  // They stay inert-but-ready: until the matching migration views land (§3), the resolver's ad
+  // branch is the only thing wired, and it routes ad-dim queries to these names — the SQL fails
+  // only if a query actually targets ad grain before the migration runs.
+  "queryable.vw_meta_ads_ad_daily",
+  "queryable.vw_meta_ads_ad_conversions_daily",
   // Phase-1 §5 — the Meta↔Stripe true-value (ROAS) join view (migration 0034).
   "queryable.vw_meta_stripe_campaign_value_daily",
   "queryable.vw_site_pages"
@@ -917,7 +929,10 @@ function inputSchemaFor(id: InfiniteOsActionId): Record<string, unknown> {
     resolve_entity: requiredObject(
       {
         entityType: {
-          enum: [...JOURNEY_ENTITY_TYPES]
+          // resolve_entity widens to RESOLVABLE_ENTITY_TYPES (adds adset/ad) — the journey-plan
+          // schema below stays on JOURNEY_ENTITY_TYPES so run_journey_query/validate_journey_plan
+          // keep rejecting adset/ad. (Slice 1b §7 enum split.)
+          enum: [...RESOLVABLE_ENTITY_TYPES]
         },
         query: { type: "string" },
         filters: { type: "object", additionalProperties: true }

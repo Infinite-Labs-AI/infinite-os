@@ -432,9 +432,13 @@ async function resolveEntity(
   const candidates =
     entityType === "campaign"
       ? await resolveCampaignEntities(db, context.workspaceId, query, limit)
-      : ["content_item", "event_item"].includes(entityType)
-        ? await resolveXContentEntities(db, context.workspaceId, query, limit)
-        : [];
+      : entityType === "adset"
+        ? await resolveAdsetEntities(db, context.workspaceId, query, limit)
+        : entityType === "ad"
+          ? await resolveAdEntities(db, context.workspaceId, query, limit)
+          : ["content_item", "event_item"].includes(entityType)
+            ? await resolveXContentEntities(db, context.workspaceId, query, limit)
+            : [];
   return createEnvelope({
     actionId: "resolve_entity",
     authority: context.authority,
@@ -443,7 +447,11 @@ async function resolveEntity(
     data: { entityType, query, candidates },
     provenance: entityType === "campaign"
       ? ["queryable.vw_meta_ads_campaign_daily"]
-      : ["queryable.vw_x_post_public_metrics"],
+      : entityType === "adset"
+        ? ["queryable.vw_meta_ads_adset_daily"]
+        : entityType === "ad"
+          ? ["queryable.vw_meta_ads_ad_daily"]
+          : ["queryable.vw_x_post_public_metrics"],
     freshness: { target: "24 hours", asOf: null, stale: false },
     caveats: candidates.length ? [] : ["no_matching_entity"],
     nextActions: ["validate_journey_plan", "run_journey_query"]
@@ -724,6 +732,152 @@ async function resolveCampaignEntities(
       where workspace_id = $1
         and (${tokenClauses})
       group by source_id, campaign_id, campaign_name
+      order by sum(meta_ads_clicks) desc nulls last, max(occurred_on) desc nulls last
+      limit $${tokens.length + 2}
+    `,
+    [workspaceId, ...tokenParams, limit]
+  );
+  return toEvidence(nearRows);
+}
+
+// Adset-grain entity resolution — the exact mirror of resolveCampaignEntities over the
+// vw_meta_ads_adset_daily view (adset_id/adset_name dims, campaign_id carried). Same
+// exact-substring-then-tokenized-near-candidate shape; READ-ONLY (same view, same grouping).
+async function resolveAdsetEntities(
+  db: InfiniteOsDb,
+  workspaceId: string,
+  query: string,
+  limit: number
+): Promise<Record<string, unknown>[]> {
+  const toEvidence = (rows: Record<string, unknown>[]): Record<string, unknown>[] =>
+    rows.map((row) => sanitizeEvidenceRow({
+      entityType: "adset",
+      entityKey: row.adset_id,
+      label: row.adset_name ?? row.adset_id,
+      sourceId: row.source_id,
+      campaignId: row.campaign_id,
+      lastSeenOn: row.last_seen_on,
+      metrics: {
+        meta_ads_clicks: row.meta_ads_clicks,
+        meta_ads_spend: row.meta_ads_spend,
+        impressions: row.impressions
+      }
+    }));
+
+  const like = `%${query}%`;
+  const rows = await db.query<Record<string, unknown>>(
+    `
+      select source_id, campaign_id, adset_id, adset_name,
+        sum(meta_ads_clicks) as meta_ads_clicks,
+        sum(meta_ads_spend) as meta_ads_spend,
+        sum(impressions) as impressions,
+        max(occurred_on) as last_seen_on
+      from queryable.vw_meta_ads_adset_daily
+      where workspace_id = $1
+        and (adset_id ilike $2 or adset_name ilike $2)
+      group by source_id, campaign_id, adset_id, adset_name
+      order by sum(meta_ads_clicks) desc nulls last, max(occurred_on) desc nulls last
+      limit $3
+    `,
+    [workspaceId, like, limit]
+  );
+  if (rows.length > 0) {
+    return toEvidence(rows);
+  }
+
+  const tokens = significantCampaignTokens(query);
+  if (tokens.length === 0) {
+    return [];
+  }
+  const tokenParams = tokens.map((token) => `%${token}%`);
+  const tokenClauses = tokens
+    .map((_token, index) => `(adset_id ilike $${index + 2} or adset_name ilike $${index + 2})`)
+    .join(" or ");
+  const nearRows = await db.query<Record<string, unknown>>(
+    `
+      select source_id, campaign_id, adset_id, adset_name,
+        sum(meta_ads_clicks) as meta_ads_clicks,
+        sum(meta_ads_spend) as meta_ads_spend,
+        sum(impressions) as impressions,
+        max(occurred_on) as last_seen_on
+      from queryable.vw_meta_ads_adset_daily
+      where workspace_id = $1
+        and (${tokenClauses})
+      group by source_id, campaign_id, adset_id, adset_name
+      order by sum(meta_ads_clicks) desc nulls last, max(occurred_on) desc nulls last
+      limit $${tokens.length + 2}
+    `,
+    [workspaceId, ...tokenParams, limit]
+  );
+  return toEvidence(nearRows);
+}
+
+// Ad-grain entity resolution — mirror over vw_meta_ads_ad_daily (ad_id/ad_name dims; adset_id
+// + campaign_id carried). adset_id is ORPHAN-TOLERANT: an ad with no adset surfaces a null
+// adset_id carry without failing (§7a). NO optimization_goal (adset property; not on the ad
+// view). READ-ONLY; same exact-then-tokenized shape as the campaign/adset resolvers.
+async function resolveAdEntities(
+  db: InfiniteOsDb,
+  workspaceId: string,
+  query: string,
+  limit: number
+): Promise<Record<string, unknown>[]> {
+  const toEvidence = (rows: Record<string, unknown>[]): Record<string, unknown>[] =>
+    rows.map((row) => sanitizeEvidenceRow({
+      entityType: "ad",
+      entityKey: row.ad_id,
+      label: row.ad_name ?? row.ad_id,
+      sourceId: row.source_id,
+      adsetId: row.adset_id ?? null,
+      campaignId: row.campaign_id,
+      lastSeenOn: row.last_seen_on,
+      metrics: {
+        meta_ads_clicks: row.meta_ads_clicks,
+        meta_ads_spend: row.meta_ads_spend,
+        impressions: row.impressions
+      }
+    }));
+
+  const like = `%${query}%`;
+  const rows = await db.query<Record<string, unknown>>(
+    `
+      select source_id, campaign_id, adset_id, ad_id, ad_name,
+        sum(meta_ads_clicks) as meta_ads_clicks,
+        sum(meta_ads_spend) as meta_ads_spend,
+        sum(impressions) as impressions,
+        max(occurred_on) as last_seen_on
+      from queryable.vw_meta_ads_ad_daily
+      where workspace_id = $1
+        and (ad_id ilike $2 or ad_name ilike $2)
+      group by source_id, campaign_id, adset_id, ad_id, ad_name
+      order by sum(meta_ads_clicks) desc nulls last, max(occurred_on) desc nulls last
+      limit $3
+    `,
+    [workspaceId, like, limit]
+  );
+  if (rows.length > 0) {
+    return toEvidence(rows);
+  }
+
+  const tokens = significantCampaignTokens(query);
+  if (tokens.length === 0) {
+    return [];
+  }
+  const tokenParams = tokens.map((token) => `%${token}%`);
+  const tokenClauses = tokens
+    .map((_token, index) => `(ad_id ilike $${index + 2} or ad_name ilike $${index + 2})`)
+    .join(" or ");
+  const nearRows = await db.query<Record<string, unknown>>(
+    `
+      select source_id, campaign_id, adset_id, ad_id, ad_name,
+        sum(meta_ads_clicks) as meta_ads_clicks,
+        sum(meta_ads_spend) as meta_ads_spend,
+        sum(impressions) as impressions,
+        max(occurred_on) as last_seen_on
+      from queryable.vw_meta_ads_ad_daily
+      where workspace_id = $1
+        and (${tokenClauses})
+      group by source_id, campaign_id, adset_id, ad_id, ad_name
       order by sum(meta_ads_clicks) desc nulls last, max(occurred_on) desc nulls last
       limit $${tokens.length + 2}
     `,
@@ -2942,6 +3096,24 @@ function normalizeDimensionAlias(view: string, field: string): string {
     if (field === "status" || field === "effective" || field === "delivery_status") return "effective_status";
     if (field === "configured") return "configured_status";
   }
+  // Phase-2 slice-1b §5/§3 — the ad-grain views (delivery + conversions). They carry campaign_id
+  // AND adset_id, so the campaign + adset aliases still resolve at ad grain; they ADD the ad
+  // identity aliases (ad/creative_name → ad_name, ad_key/ad_external_id → ad_id) and the same
+  // on/off status aliases. This is ALSO the table metricViewForGrain consults to detect an ad
+  // dim (isAdDimension runs on the alias-normalized field), so "ad"/"creative_name" group-bys
+  // flip view selection to the ad sibling — so this arm must exist for the §5 picker, not just
+  // the §3 view work. The ad-set aliases here are carries (a coarse "adset" filter at ad grain
+  // still resolves), but they do NOT re-flip the picker: the ad branch returns first (§5e).
+  if (view === "queryable.vw_meta_ads_ad_daily" || view === "queryable.vw_meta_ads_ad_conversions_daily") {
+    if (field === "campaign" || field === "ad_campaign") return "campaign_name";
+    if (field === "campaign_key" || field === "campaign_external_id") return "campaign_id";
+    if (field === "adset" || field === "ad_set" || field === "ad_set_name") return "adset_name";
+    if (field === "adset_key" || field === "adset_external_id" || field === "ad_set_id") return "adset_id";
+    if (field === "ad" || field === "creative" || field === "creative_name") return "ad_name";
+    if (field === "ad_key" || field === "ad_external_id") return "ad_id";
+    if (field === "status" || field === "effective" || field === "delivery_status") return "effective_status";
+    if (field === "configured") return "configured_status";
+  }
   if (view.startsWith("queryable.vw_x_")) {
     if (field === "post_id" || field === "tweet_id") return "x_post_id";
     if (field === "user_id") return view === "queryable.vw_x_profile_public_metrics" ? "x_user_id" : "author_id";
@@ -3420,13 +3592,29 @@ const META_ADSET_VIEW_BY_CAMPAIGN_VIEW: Record<string, string> = {
   "queryable.vw_meta_ads_campaign_conversions_daily": "queryable.vw_meta_ads_adset_conversions_daily"
 };
 
-// The metric's grain family = the set of views it may legitimately resolve to. For a Meta
-// metric with an adset sibling that is [campaignView, adsetView]; for everything else (incl.
-// roas_from_stripe) it is just [metricView(metric)]. Used by rejectMetricViewMismatch (§5b).
+// Phase-2 slice-1b §5 — the campaign→ad sibling map (the THIRD, finest grain). Parallel to
+// META_ADSET_VIEW_BY_CAMPAIGN_VIEW: the campaign view is still the family base, and the ad view
+// is the FINEST-grain sibling the resolver swaps to when an ad_id/ad_name dim is present (§5),
+// taking precedence over the adset view (finest-grain-wins). roas_from_stripe is again
+// DELIBERATELY ABSENT (campaign-only at every grain — its Stripe-join view has no ad sibling).
+// ZERO-REGRESSION DEFAULT: until the ad views exist on disk (this slice's migration), the picker
+// guards every ad branch on `adView && …`, so a metric whose campaign view is absent here (or any
+// caller before the migration lands) collapses to exactly today's adset-or-campaign binary.
+const META_AD_VIEW_BY_CAMPAIGN_VIEW: Record<string, string> = {
+  "queryable.vw_meta_ads_campaign_daily": "queryable.vw_meta_ads_ad_daily",
+  "queryable.vw_meta_ads_campaign_conversions_daily": "queryable.vw_meta_ads_ad_conversions_daily"
+};
+
+// The metric's grain family = the set of views it may legitimately resolve to (§5b loosening,
+// extended one notch for ad grain). For a Meta metric with siblings that is
+// [campaignView, adsetView, adView]; for everything else (incl. roas_from_stripe) it is just
+// [metricView(metric)]. Absent siblings are filtered out so the family is never padded with a
+// view that does not exist for the metric. Used by rejectMetricViewMismatch (§5b).
 function metricGrainFamily(metric: string): string[] {
   const base = metricView(metric);
   const adsetSibling = META_ADSET_VIEW_BY_CAMPAIGN_VIEW[base];
-  return adsetSibling ? [base, adsetSibling] : [base];
+  const adSibling = META_AD_VIEW_BY_CAMPAIGN_VIEW[base];
+  return [base, adsetSibling, adSibling].filter((view): view is string => Boolean(view));
 }
 
 // Exported (DEDUP single-source-of-truth): consumed by apps/worker runSavedReport.
@@ -3482,34 +3670,55 @@ export function metricView(metric: string): string {
   return "queryable.vw_site_conversion_rate";
 }
 
-// Phase-2 slice-1a §5a — the GRAIN-AWARE view resolver (the keystone). It picks the FINEST
-// grain present in the query: an adset_id/adset_name dimension in EITHER the group-by OR a
-// filter (§5e: a coarser campaign filter + a finer adset group-by, or vice-versa, still flips
-// to adset) selects the metric's adset sibling view; otherwise it returns metricView(metric),
-// today's campaign default. metricView stays the campaign-only shim (the family base + the
-// worker's no-group-by entry point — §5d), so EVERY existing call site that does not pass an
-// adset dim resolves byte-for-byte to the campaign view it does today (the no-regression
-// contract). roas_from_stripe is forced campaign-only (§5e + §10): its view has no adset
-// sibling, so it must never swap even when an adset dim is present.
+// Phase-2 slice-1a §5a / slice-1b §5 — the GRAIN-AWARE view resolver (the keystone). It picks
+// the FINEST grain present in the query, with finest-grain-wins precedence ad > adset > campaign:
+//   • an ad_id/ad_name dim in the group-by OR a filter selects the metric's ad sibling view;
+//   • else an adset_id/adset_name dim selects the metric's adset sibling view;
+//   • else it returns metricView(metric), today's campaign default.
+// Detection runs on the FINEST grain first and returns early, so when an ad dim co-occurs with an
+// adset_id (or a campaign_id filter), adset_id/campaign_id become CARRIES at ad grain — the ad
+// branch already returned and the coarser checks never re-flip the picker (§5e precedence).
+// metricView stays the campaign-only shim (the family base + the worker's no-group-by entry
+// point — §5d), so EVERY existing call site that passes no finer dim resolves byte-for-byte to
+// the campaign view it does today (the no-regression contract). roas_from_stripe is forced
+// campaign-only (§5e + §10): its view has no adset/ad sibling, so it never swaps.
+//
+// ZERO-REGRESSION DEFAULT is structural, not just tested: each finer branch is guarded on the
+// sibling existing (`if (adSibling && …)`), so when the ad views are not on disk yet (the ad
+// lookup returns undefined) the ad branch is skipped and the function collapses to EXACTLY the
+// slice-1a adset-or-campaign binary. campaign + adset resolve byte-for-byte until the ad views
+// exist; the ad routing turns on only once META_AD_VIEW_BY_CAMPAIGN_VIEW resolves a real view.
 //
 // Exported alongside metricView so callers that need grain-aware routing (the interactive
 // run_metric_query / run_breakdown_query handlers) share one source of truth.
 export function metricViewForGrain(metric: string, groupBy: string[], filters: { field: string }[]): string {
   const campaignView = metricView(metric);
-  // roas_from_stripe has no adset sibling — always campaign-grain (§5e/§10). Special-case it
-  // BEFORE the adset-dim detection so an incidental adset_id elsewhere can't 404 its view.
+  // roas_from_stripe has no adset/ad sibling — always campaign-grain (§5e/§10). Special-case it
+  // BEFORE any dim detection so an incidental adset_id/ad_id elsewhere can't 404 its view.
   if (metric === "roas_from_stripe") {
     return campaignView;
+  }
+  // FINEST FIRST: detect an ad dimension in the group-by OR the filters. We normalize each
+  // candidate field against the ad sibling view's alias table (so ad/ad_name/ad_key/… all
+  // resolve to the canonical ad_id|ad_name) — mirroring how runAggregate normalizes against the
+  // RESOLVED view. Guarded on adSibling so absence (no ad view yet) is the no-op default.
+  const adSibling = META_AD_VIEW_BY_CAMPAIGN_VIEW[campaignView];
+  if (adSibling) {
+    const hasAdDim =
+      groupBy.some((field) => isAdDimension(normalizeDimensionAlias(adSibling, field))) ||
+      filters.some((filter) => isAdDimension(normalizeDimensionAlias(adSibling, filter.field)));
+    if (hasAdDim) {
+      return adSibling;
+    }
   }
   const adsetSibling = META_ADSET_VIEW_BY_CAMPAIGN_VIEW[campaignView];
   // No adset sibling (non-Meta metric, or a Meta metric whose view has none) → campaign.
   if (!adsetSibling) {
     return campaignView;
   }
-  // Detect an adset dimension in the group-by OR the filters. We normalize each candidate
-  // field against the adset sibling view's alias table (so adset/adset_name/adset_key/… all
-  // resolve to the canonical adset_id|adset_name) — mirroring how runAggregate normalizes
-  // against the RESOLVED view. If any normalizes to an adset identity dim, swap to the sibling.
+  // Detect an adset dimension in the group-by OR the filters (§5e: a coarser campaign filter +
+  // a finer adset group-by, or vice-versa, still flips to adset). Normalize against the adset
+  // sibling view's alias table, as runAggregate does against the resolved view.
   const hasAdsetDim =
     groupBy.some((field) => isAdsetDimension(normalizeDimensionAlias(adsetSibling, field))) ||
     filters.some((filter) => isAdsetDimension(normalizeDimensionAlias(adsetSibling, filter.field)));
@@ -3522,6 +3731,15 @@ export function metricViewForGrain(metric: string, groupBy: string[], filters: {
 // §5e coarser-filter + finer-group case, which must resolve to ADSET, driven by the group-by).
 function isAdsetDimension(field: string): boolean {
   return field === "adset_id" || field === "adset_name";
+}
+
+// Phase-2 slice-1b §5 — true when a (already alias-normalized) dimension is an AD-grain identity
+// dim, the signal that flips view selection to the ad sibling (the finest grain). Mirrors
+// isAdsetDimension. adset_id and campaign_id are NOT here: at ad grain they are CARRY columns
+// (present on the ad views' allowlists), so an adset_id that co-occurs with an ad dim never
+// re-flips the picker — the ad branch in metricViewForGrain returns before the adset check runs.
+function isAdDimension(field: string): boolean {
+  return field === "ad_id" || field === "ad_name";
 }
 
 // Exported (DEDUP single-source-of-truth): consumed by apps/worker runSavedReport.
@@ -3662,6 +3880,26 @@ function allowedDimensionsForView(view: string): string[] {
       "occurred_on"
     ];
   }
+  // Phase-2 slice-1b §3/§5 — the ad-grain delivery view. Mirrors the adset delivery view's dims
+  // and ADDS the ad identity dims (ad_id/ad_name). campaign_id AND adset_id are CARRIED so the
+  // §5e finer-group + coarser-filter case (filter adset_id/campaign_id while grouping ad_id)
+  // passes runAggregate's filter gate — without adset_id here, a "spend per ad within adset X"
+  // query routes correctly to the ad view but then throws unsupported_dimension on the filter.
+  // optimization_goal is DELIBERATELY ABSENT — it is an ADSET property the connector carries
+  // in-memory from the adset-dim map, never a queryable ad dim (§2.3/§5).
+  if (view === "queryable.vw_meta_ads_ad_daily") {
+    return [
+      "ad_account_id",
+      "campaign_id",
+      "adset_id",
+      "ad_id",
+      "ad_name",
+      "effective_status",
+      "configured_status",
+      "currency",
+      "occurred_on"
+    ];
+  }
   // Phase-1 §6 — the typed conversions view. result_type is the REQUIRED partition for the
   // conversion-family metrics (results/cost_per_result/conversion_value/roas); it is in the
   // allowlist so callers CAN group/filter by it, and requiresResultTypePartition() forces
@@ -3678,6 +3916,26 @@ function allowedDimensionsForView(view: string): string[] {
       "campaign_id",
       "adset_id",
       "adset_name",
+      "effective_status",
+      "configured_status",
+      "result_type",
+      "is_primary",
+      "results_source",
+      "occurred_on"
+    ];
+  }
+  // Phase-2 slice-1b §3/§5 — the ad-grain typed-conversions view. Same conversion-family dims as
+  // the adset conversions view (result_type stays the REQUIRED partition — requiresResultType-
+  // Partition is metric-keyed, so it already fires at ad grain) PLUS the ad identity dim. carry
+  // campaign_id + adset_id (§5e). optimization_goal is DROPPED from the ad conversions SELECT
+  // (adset property) so it is NOT in this allowlist.
+  if (view === "queryable.vw_meta_ads_ad_conversions_daily") {
+    return [
+      "ad_account_id",
+      "campaign_id",
+      "adset_id",
+      "ad_id",
+      "ad_name",
       "effective_status",
       "configured_status",
       "result_type",

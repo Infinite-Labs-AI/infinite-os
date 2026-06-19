@@ -749,6 +749,258 @@ describe("analytical engine smoke", () => {
     expect(resolved.caveats).toContain("no_matching_entity");
   });
 
+  // Slice 1b §7 — resolve_entity by name at the new adset/ad grains. The dispatch must route
+  // entityType "adset" → vw_meta_ads_adset_daily and "ad" → vw_meta_ads_ad_daily, mirror the
+  // campaign resolver's exact-then-tokenized passes, carry the parent ids (campaign/adset), and
+  // tolerate an ORPHAN ad (null adset_id). The same enum split must keep run_journey_query
+  // REJECTING adset/ad so the journey surface never widens.
+  describe("resolve_entity at adset/ad grain (slice 1b §7)", () => {
+    // A fake db that emulates the OR-of-ilike WHERE for BOTH the adset and ad views, so both the
+    // exact `%query%` pass and the relaxed tokenized fallback are observable per grain.
+    const adsetFixture = [
+      {
+        source_id: "src_meta",
+        campaign_id: "cmp_launch",
+        adset_id: "ads_video",
+        adset_name: "Video — Broad",
+        meta_ads_clicks: "30",
+        meta_ads_spend: "12",
+        impressions: "900",
+        last_seen_on: "2026-06-07"
+      },
+      {
+        source_id: "src_meta",
+        campaign_id: "cmp_launch",
+        adset_id: "ads_retarget",
+        adset_name: "Retargeting — 30d",
+        meta_ads_clicks: "10",
+        meta_ads_spend: "4",
+        impressions: "200",
+        last_seen_on: "2026-06-06"
+      }
+    ];
+    const adFixture = [
+      {
+        source_id: "src_meta",
+        campaign_id: "cmp_launch",
+        adset_id: "ads_video",
+        ad_id: "ad_hero",
+        ad_name: "Hero Reel v3",
+        meta_ads_clicks: "20",
+        meta_ads_spend: "8",
+        impressions: "600",
+        last_seen_on: "2026-06-07"
+      },
+      {
+        // Orphan ad — no parent adset (null adset_id). Must resolve without failing (§7a).
+        source_id: "src_meta",
+        campaign_id: "cmp_launch",
+        adset_id: null,
+        ad_id: "ad_orphan",
+        ad_name: "Hero Static",
+        meta_ads_clicks: "5",
+        meta_ads_spend: "2",
+        impressions: "120",
+        last_seen_on: "2026-06-05"
+      }
+    ];
+    const matchView = (
+      sql: string,
+      params: unknown[],
+      view: string,
+      fixture: Array<Record<string, unknown>>,
+      idKey: string,
+      nameKey: string
+    ): Record<string, unknown>[] | null => {
+      if (!sql.includes(`from queryable.${view}`)) {
+        return null;
+      }
+      const patterns = params
+        .slice(1, -1)
+        .map((value) => String(value).replace(/%/g, "").toLowerCase());
+      return fixture.filter((row) =>
+        patterns.some(
+          (pattern) =>
+            String(row[idKey] ?? "").toLowerCase().includes(pattern) ||
+            String(row[nameKey] ?? "").toLowerCase().includes(pattern)
+        )
+      );
+    };
+    const makeFakeDb = () =>
+      ({
+        async query<T = Record<string, unknown>>(sql: string, params: unknown[] = []): Promise<T[]> {
+          const adset = matchView(
+            sql,
+            params,
+            "vw_meta_ads_adset_daily",
+            adsetFixture,
+            "adset_id",
+            "adset_name"
+          );
+          if (adset) return adset as T[];
+          const ad = matchView(sql, params, "vw_meta_ads_ad_daily", adFixture, "ad_id", "ad_name");
+          if (ad) return ad as T[];
+          return [] as T[];
+        },
+        async one() {
+          return null;
+        },
+        async close() {},
+        async ensureWorkspace() {},
+        async ensureFirstPhaseDatasets() {},
+        async connectSource() {
+          return null as never;
+        },
+        async updateSourceStatus() {},
+        async createJob() {
+          return {};
+        },
+        async claimNextJob() {
+          return null;
+        },
+        async completeJob() {},
+        async withTransaction(fn: (db: InfiniteOsDb) => unknown) {
+          return fn(this as unknown as InfiniteOsDb);
+        }
+      }) as unknown as InfiniteOsDb;
+    const context = {
+      workspaceId: "workspace",
+      authority: "tool_agent",
+      surface: "mcp",
+      actorId: "founder",
+      sessionId: "session"
+    } as const;
+
+    it("resolves an adset by exact name and carries its campaign id", async () => {
+      const registry = createInfiniteOsRegistry(createActionHandlers(makeFakeDb()));
+      const resolved = await registry.execute(
+        "resolve_entity",
+        { entityType: "adset", query: "Video" },
+        context
+      );
+      expect(resolved.status).toBe("resolved");
+      expect(resolved.provenance).toContain("queryable.vw_meta_ads_adset_daily");
+      expect(resolved.data).toMatchObject({
+        candidates: expect.arrayContaining([
+          expect.objectContaining({
+            entityType: "adset",
+            entityKey: "ads_video",
+            label: "Video — Broad",
+            campaignId: "cmp_launch"
+          })
+        ])
+      });
+    });
+
+    it("resolves an ad by exact name, carrying adset + campaign ids", async () => {
+      const registry = createInfiniteOsRegistry(createActionHandlers(makeFakeDb()));
+      const resolved = await registry.execute(
+        "resolve_entity",
+        { entityType: "ad", query: "Hero Reel" },
+        context
+      );
+      expect(resolved.status).toBe("resolved");
+      expect(resolved.provenance).toContain("queryable.vw_meta_ads_ad_daily");
+      expect(resolved.data).toMatchObject({
+        candidates: expect.arrayContaining([
+          expect.objectContaining({
+            entityType: "ad",
+            entityKey: "ad_hero",
+            label: "Hero Reel v3",
+            adsetId: "ads_video",
+            campaignId: "cmp_launch"
+          })
+        ])
+      });
+    });
+
+    it("resolves an ORPHAN ad (null adset_id) without failing (§7a)", async () => {
+      const registry = createInfiniteOsRegistry(createActionHandlers(makeFakeDb()));
+      const resolved = await registry.execute(
+        "resolve_entity",
+        { entityType: "ad", query: "Hero Static" },
+        context
+      );
+      expect(resolved.status).toBe("resolved");
+      const candidate = (resolved.data as { candidates: Array<Record<string, unknown>> })
+        .candidates.find((row) => row.entityKey === "ad_orphan");
+      expect(candidate).toBeDefined();
+      // adset_id is a carry, NOT a grain signal: a null parent surfaces as null, not an error.
+      expect(candidate?.adsetId).toBeNull();
+      expect(candidate?.campaignId).toBe("cmp_launch");
+    });
+
+    it("falls back to tokenized near-candidates at ad grain", async () => {
+      const registry = createInfiniteOsRegistry(createActionHandlers(makeFakeDb()));
+      // Exact "%hero ad%" misses (no ad name contains that substring); tokenizing drops the
+      // "ad" stop-word and ORs "hero", surfacing both Hero ads.
+      const resolved = await registry.execute(
+        "resolve_entity",
+        { entityType: "ad", query: "hero ad" },
+        context
+      );
+      expect(resolved.status).toBe("resolved");
+      const labels = (resolved.data as { candidates: Array<{ label: string }> }).candidates.map(
+        (candidate) => candidate.label
+      );
+      expect(labels).toEqual(expect.arrayContaining(["Hero Reel v3", "Hero Static"]));
+    });
+
+    it("returns needs_clarification when no adset/ad matches", async () => {
+      const registry = createInfiniteOsRegistry(createActionHandlers(makeFakeDb()));
+      const resolved = await registry.execute(
+        "resolve_entity",
+        { entityType: "ad", query: "nonexistent creative xyz" },
+        context
+      );
+      expect(resolved.status).toBe("needs_clarification");
+      expect(resolved.caveats).toContain("no_matching_entity");
+    });
+
+    it("run_journey_query schema still REJECTS adset/ad (the enum split held)", () => {
+      // The journey-plan schema (shared by validate_journey_plan AND run_journey_query) stays
+      // bound to JOURNEY_ENTITY_TYPES, so the entity.type enum admits campaign but NOT adset/ad.
+      // resolve_entity widened to RESOLVABLE_ENTITY_TYPES; the journey surface did not.
+      const registry = createInfiniteOsRegistry(createActionHandlers(makeFakeDb()));
+      const runJourneySchema = registry.get("run_journey_query")
+        ?.inputSchema as Record<string, any>;
+      const journeyEntityEnum =
+        runJourneySchema.properties.plan.properties.entity.properties.type.enum as string[];
+      expect(journeyEntityEnum).toContain("campaign");
+      expect(journeyEntityEnum).not.toContain("adset");
+      expect(journeyEntityEnum).not.toContain("ad");
+
+      // And the resolve_entity schema DID widen — the two surfaces are decoupled.
+      const resolveSchema = registry.get("resolve_entity")?.inputSchema as Record<string, any>;
+      expect(resolveSchema.properties.entityType.enum).toEqual(
+        expect.arrayContaining(["adset", "ad"])
+      );
+    });
+
+    it("run_journey_query with an adset/ad entity.type compiles to an unsupported envelope (not a campaign roll-up)", async () => {
+      // Defense-in-depth: even if a hand-built plan smuggles entity.type "ad" past the schema, the
+      // engine's compileJourneyPlan has no ad/adset branch, so it returns an `unsupported` envelope
+      // rather than silently rolling the ad up into a campaign journey. (Uses a non-meta metric so
+      // the metric-based campaign fallback in compileJourneyPlan does not fire.)
+      const registry = createInfiniteOsRegistry(createActionHandlers(makeFakeDb()));
+      const plan = {
+        intent: "rank_entities_by_outcome",
+        actor: { grain: "account" },
+        journeyTemplateId: "meta_ads_basic",
+        entity: { type: "ad" },
+        ranking: { metric: "roas" },
+        timeRange: { start: "2026-06-01", end: "2026-06-07" }
+      };
+      const result = await registry.execute(
+        "run_journey_query",
+        { plan, validationId: "v", limit: 2 },
+        context
+      );
+      expect(result.status).toBe("unsupported");
+      expect(result.caveats).toContain("journey_template_not_supported");
+    });
+  });
+
   // FIX 5 — journey-path recompute guard, mirroring the run_metric_query Phase-0 test.
   // metaCampaignJourneyRows() emits cpm/cpc/ctr in its SELECT. They MUST be recomputed
   // from summed bases (the same expressions aggregateExpression() uses), never avg(cpm)/
@@ -3850,6 +4102,89 @@ describe("Phase-2 §5 grain-aware view resolver (Stage-1 keystone)", () => {
     });
   });
 
+  // Phase-2 slice-1b §5 — the AD grain (the finest, third grain). The resolver now picks
+  // ad > adset > campaign (finest-grain-wins). These tests pin: (a) an ad_id/ad_name dim routes
+  // Meta metrics to the ad view; (b) PRECEDENCE — adset_id + ad_id resolves to ad, and a coarser
+  // campaign_id/adset_id FILTER + finer ad_id GROUP-BY resolves to ad (the coarse dims are
+  // carries at ad grain); (c) the grain family now spans up to 3 views; (d) roas_from_stripe
+  // and non-Meta metrics still never flip to an ad view.
+  describe("§5 slice-1b: an ad dim flips view selection to the ad sibling (finest grain wins)", () => {
+    it("an ad_id/ad_name group-by routes Meta delivery metrics to vw_meta_ads_ad_daily", () => {
+      for (const metric of META_DELIVERY_METRICS) {
+        expect(metricViewForGrain(metric, ["ad_id"], [])).toBe("queryable.vw_meta_ads_ad_daily");
+        expect(metricViewForGrain(metric, ["ad_name"], [])).toBe("queryable.vw_meta_ads_ad_daily");
+        // alias forms (ad / creative / creative_name) normalize to ad_name and still flip.
+        expect(metricViewForGrain(metric, ["ad"], [])).toBe("queryable.vw_meta_ads_ad_daily");
+        expect(metricViewForGrain(metric, ["creative_name"], [])).toBe("queryable.vw_meta_ads_ad_daily");
+      }
+    });
+
+    it("an ad_id group-by routes the conversion family to vw_meta_ads_ad_conversions_daily", () => {
+      for (const metric of META_CONVERSION_METRICS) {
+        expect(metricViewForGrain(metric, ["ad_id", "result_type"], [])).toBe(
+          "queryable.vw_meta_ads_ad_conversions_daily"
+        );
+      }
+    });
+
+    it("§5e: an ad dim in a FILTER (no group-by) also flips to the ad view", () => {
+      expect(metricViewForGrain("cost_per_result", [], [{ field: "ad_id" }])).toBe(
+        "queryable.vw_meta_ads_ad_conversions_daily"
+      );
+      expect(metricViewForGrain("meta_ads_spend", [], [{ field: "ad_name" }])).toBe(
+        "queryable.vw_meta_ads_ad_daily"
+      );
+    });
+
+    it("§5e PRECEDENCE: adset_id + ad_id co-occur → AD view (finest wins, adset_id is a carry)", () => {
+      // The ad-dim check runs FIRST and returns early; adset_id never re-flips the picker.
+      expect(metricViewForGrain("meta_ads_spend", ["adset_id", "ad_id"], [])).toBe(
+        "queryable.vw_meta_ads_ad_daily"
+      );
+      expect(metricViewForGrain("cost_per_result", ["adset_id", "ad_id", "result_type"], [])).toBe(
+        "queryable.vw_meta_ads_ad_conversions_daily"
+      );
+    });
+
+    it("§5e PRECEDENCE: coarser campaign_id/adset_id FILTER + finer ad_id GROUP-BY → AD view", () => {
+      // "spend per ad within campaign X" / "within adset Y": the group-by drives the grain to ad;
+      // campaign_id/adset_id are carry dims on the ad view, so the filters still apply there.
+      expect(metricViewForGrain("meta_ads_spend", ["ad_id"], [{ field: "campaign_id" }])).toBe(
+        "queryable.vw_meta_ads_ad_daily"
+      );
+      expect(metricViewForGrain("meta_ads_spend", ["ad_id"], [{ field: "adset_id" }])).toBe(
+        "queryable.vw_meta_ads_ad_daily"
+      );
+    });
+
+    it("§5e/§10: roas_from_stripe stays campaign-grain even with an ad dim (no ad sibling)", () => {
+      expect(metricViewForGrain("roas_from_stripe", ["ad_id"], [])).toBe(
+        "queryable.vw_meta_stripe_campaign_value_daily"
+      );
+      expect(metricViewForGrain("roas_from_stripe", [], [{ field: "ad_id" }])).toBe(
+        "queryable.vw_meta_stripe_campaign_value_daily"
+      );
+    });
+
+    it("non-Meta metrics never flip even if an ad_id dim is (nonsensically) passed", () => {
+      expect(metricViewForGrain("page_views", ["ad_id"], [])).toBe("queryable.vw_site_traffic");
+      expect(metricViewForGrain("shopify_order_count", ["ad_id"], [])).toBe("queryable.vw_shopify_orders");
+    });
+
+    it("REGRESSION: adset routing is unchanged when no ad dim is present (finest-wins is layered)", () => {
+      // The slice-1a adset behavior must survive the slice-1b layering: an adset_id alone still
+      // routes to the adset view (the ad branch is skipped because no ad dim is present).
+      for (const metric of META_DELIVERY_METRICS) {
+        expect(metricViewForGrain(metric, ["adset_id"], [])).toBe("queryable.vw_meta_ads_adset_daily");
+      }
+      for (const metric of META_CONVERSION_METRICS) {
+        expect(metricViewForGrain(metric, ["adset_id", "result_type"], [])).toBe(
+          "queryable.vw_meta_ads_adset_conversions_daily"
+        );
+      }
+    });
+  });
+
   describe("§5b: the grain-FAMILY guard (rejectMetricViewMismatch via the handlers)", () => {
     // rejectMetricViewMismatch is internal; we exercise it through run_metric_query's `view`
     // override, which calls it directly. A view IN the metric's grain family is accepted; an
@@ -3928,6 +4263,46 @@ describe("Phase-2 §5 grain-aware view resolver (Stage-1 keystone)", () => {
       await expect(
         handlers.run_metric_query?.(
           { metric: "roas_from_stripe", view: "queryable.vw_meta_ads_adset_conversions_daily" },
+          ctx
+        )
+      ).rejects.toThrow(/unsupported_view_for_metric:roas_from_stripe/);
+    });
+
+    it("§5b slice-1b: accepts the AD SIBLING view for the same metric (family now spans 3)", async () => {
+      // The grain family loosened one more notch: the ad conversions view is in `results`' family.
+      const handlers = createActionHandlers(passthroughDb());
+      const result = await handlers.run_metric_query?.(
+        {
+          metric: "results",
+          view: "queryable.vw_meta_ads_ad_conversions_daily",
+          filters: [{ field: "result_type", operator: "equals", value: "lead" }]
+        },
+        ctx
+      );
+      expect(result?.data).toMatchObject({ view: "queryable.vw_meta_ads_ad_conversions_daily" });
+    });
+
+    it("§5b slice-1b: REJECTS the AD DELIVERY view for a conversion metric (cross-family)", async () => {
+      // results belongs to the conversions family; the ad DELIVERY view is NOT in it (same guard
+      // that rejects the adset delivery view, extended to ad grain).
+      const handlers = createActionHandlers(passthroughDb());
+      await expect(
+        handlers.run_metric_query?.(
+          {
+            metric: "results",
+            view: "queryable.vw_meta_ads_ad_daily",
+            filters: [{ field: "result_type", operator: "equals", value: "lead" }]
+          },
+          ctx
+        )
+      ).rejects.toThrow(/unsupported_view_for_metric:results:queryable\.vw_meta_ads_ad_daily/);
+    });
+
+    it("§5b slice-1b: REJECTS the ad view for roas_from_stripe (campaign-only family)", async () => {
+      const handlers = createActionHandlers(passthroughDb());
+      await expect(
+        handlers.run_metric_query?.(
+          { metric: "roas_from_stripe", view: "queryable.vw_meta_ads_ad_conversions_daily" },
           ctx
         )
       ).rejects.toThrow(/unsupported_view_for_metric:roas_from_stripe/);

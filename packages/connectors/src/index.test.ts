@@ -1591,11 +1591,13 @@ describe("live provider clients", () => {
     expect(campaignDim?.params).toContain("OUTCOME_LEADS");
   });
 
-  it("§4d adset: FAILS LOUD when the insights throttle header reports high account utilization", async () => {
-    // The §4d volume guard reads x-fb-ads-insights-throttle (which fetchJson discards) off the
-    // /insights response and THROWS a retryable rate-limit error rather than returning a
-    // silently-truncated window. The edge reads (no throttle header) succeed; the campaign
-    // insights GET returns acc_id_util_pct=99 → the extract must reject.
+  it("§4e adset: backs off then FAILS LOUD when the insights throttle header stays high after retries", async () => {
+    // The §4e backoff reads x-fb-ads-insights-throttle (which fetchJson discards) off the
+    // /insights response and, on a sustained high acc_id_util_pct, retries with backoff and
+    // THEN throws a retryable rate-limit error rather than returning a silently-truncated
+    // window (it never returns a partial window that looks complete). The edge reads (no
+    // throttle header) succeed; every /insights GET returns acc_id_util_pct=99 → after the
+    // retry budget the extract must reject. (Under vitest the backoff sleeps are collapsed.)
     await expect(
       (async () => {
         await withMockFetch(
@@ -1681,6 +1683,574 @@ describe("live provider clients", () => {
         expect(rows).toEqual([]);
       }
     );
+  });
+
+  // ────────────────────────────────────────────────────────────────────────────
+  // Phase-2 slice-1b §9 GOLDEN AD FIXTURE — two ads (+ one orphan) under one ad set.
+  // The re-key on ad_id must keep the ad rows DISTINCT; creative_id must parse from
+  // creative{id}; status (effective/configured) must be POPULATED from the /ads edge;
+  // typed conversions must be correct at ad grain (carried optimization_goal from the
+  // adset map); ad-summed results (2+2=4) must NOT equal the adset total (3); the orphan
+  // ad must carry a NULL adset_id + NULL creative_id without failing (§7a).
+  // ────────────────────────────────────────────────────────────────────────────
+  const AD_PROBE = JSON.parse(
+    readFileSync(
+      fileURLToPath(new URL("./fixtures/meta-ultima-ad-grain-probe.json", import.meta.url)),
+      "utf8"
+    )
+  ) as {
+    insights: Array<Record<string, unknown>>;
+    adsEdge: { data: Array<Record<string, unknown>>; paging: Record<string, unknown> };
+    adsetsEdge: { data: Array<Record<string, unknown>>; paging: Record<string, unknown> };
+    campaignsEdge: { data: Array<Record<string, unknown>>; paging: Record<string, unknown> };
+  };
+
+  // Route the direct-Graph calls: /ads + /adsets + /campaigns edges return the fixture
+  // rows; the ad insights pass returns the three ad rows; the campaign + adset insights
+  // passes return empty (this fixture exercises the ad grain). Pin level=ad via the
+  // SyncRequest override so ONLY the ad pass runs (single time_range, not the backfill loop).
+  function adProbeRouter(url: string): Response {
+    if (isMetaAdsEdgeRequest(url)) {
+      return jsonResponse(AD_PROBE.adsEdge);
+    }
+    if (url.includes("/adsets")) {
+      return jsonResponse(AD_PROBE.adsetsEdge);
+    }
+    if (url.includes("/campaigns")) {
+      return jsonResponse(AD_PROBE.campaignsEdge);
+    }
+    if (isMetaAdInsightsRequest(url)) {
+      return jsonResponse({ data: AD_PROBE.insights, paging: {} });
+    }
+    return jsonResponse({ data: [], paging: {} });
+  }
+
+  async function extractAdRows(): Promise<Array<Record<string, unknown>>> {
+    let rows: Array<Record<string, unknown>> = [];
+    await withMockFetch(
+      async (url) => adProbeRouter(url),
+      async () => {
+        const db = fakeDb({
+          credential: {
+            credential_kind: "marketing_api_access_token",
+            encrypted_payload: encryptedCredential({
+              mode: "live",
+              adAccountId: "887743100560299",
+              accessToken: "meta-access-token",
+              apiVersion: "v25.0"
+            })
+          }
+        });
+        const extracted = await connectorFor("meta_ads").extract(
+          db,
+          { ...request("meta_ads"), metaAdsInsightsLevel: "ad" },
+          {
+            cursorKey: "meta_ads_campaign_daily",
+            cursorStart: "2026-06-01T00:00:00.000Z",
+            cursorEnd: "2026-06-03T00:00:00.000Z",
+            refreshWindowDays: 30,
+            mode: "live"
+          }
+        );
+        rows = extracted as unknown as Array<Record<string, unknown>>;
+      }
+    );
+    return rows;
+  }
+
+  it("§4c ad: the level=ad insights pass requests ad_id,ad_name,adset_id,campaign_id", async () => {
+    const requests: string[] = [];
+    await withMockFetch(
+      async (url) => {
+        requests.push(url);
+        return adProbeRouter(url);
+      },
+      async () => {
+        await connectorFor("meta_ads").extract(
+          fakeDb({
+            credential: {
+              credential_kind: "marketing_api_access_token",
+              encrypted_payload: encryptedCredential({
+                mode: "live",
+                adAccountId: "887743100560299",
+                accessToken: "meta-access-token",
+                apiVersion: "v25.0"
+              })
+            }
+          }),
+          { ...request("meta_ads"), metaAdsInsightsLevel: "ad" },
+          {
+            cursorKey: "meta_ads_campaign_daily",
+            cursorStart: "2026-06-01T00:00:00.000Z",
+            cursorEnd: "2026-06-03T00:00:00.000Z",
+            refreshWindowDays: 30,
+            mode: "live"
+          }
+        );
+      }
+    );
+    const adInsightsUrl = new URL(requests.find((url) => isMetaAdInsightsRequest(url)) ?? "");
+    expect(adInsightsUrl.searchParams.get("level")).toBe("ad");
+    // The ad field list PREPENDS the ad identity + the carried parent ids.
+    // The ad field list PREPENDS ad_id,ad_name,adset_id; campaign_id,campaign_name already lead
+    // the base field list (the carried parent keys are echoed at every grain — not duplicated).
+    expect(adInsightsUrl.searchParams.get("fields")).toBe(
+      "ad_id,ad_name,adset_id,campaign_id,campaign_name,date_start,spend,clicks,inline_link_clicks,impressions,reach,frequency,cpm,cpc,ctr,actions,action_values,results,cost_per_result,result_values_performance_indicator,objective,optimization_goal,account_currency"
+    );
+    // The /ads edge requests creative{id} (the field-expansion, NO body) + the parent ids.
+    const adsEdgeRequest = requests.find((url) => isMetaAdsEdgeRequest(url));
+    expect(adsEdgeRequest).toBeDefined();
+    const adsEdgeUrl = new URL(adsEdgeRequest ?? "");
+    expect(adsEdgeUrl.searchParams.get("fields")).toContain("creative{id}");
+    expect(adsEdgeUrl.searchParams.get("fields")).toContain("adset_id");
+    expect(adsEdgeUrl.searchParams.get("fields")).toContain("campaign_id");
+  });
+
+  it("§9 ad: RE-KEYS externalId on ad_id so two ads under one adset never collapse", async () => {
+    const rows = await extractAdRows();
+    const adRows = rows.filter((row) => row.objectType === "meta_ads_ad_daily");
+    // Three DISTINCT ad rows (two real + one orphan), never one collapsed/corrupted row.
+    expect(adRows).toHaveLength(3);
+    const externalIds = adRows.map((row) => row.externalId);
+    expect(new Set(externalIds).size).toBe(3);
+    // The re-key is on ad_id (not adset_id/campaign_id) — the #1 corruption fix.
+    expect(externalIds).toContain("meta_ads:ad:act_887743100560299:330000000000301:2026-06-01");
+    expect(externalIds).toContain("meta_ads:ad:act_887743100560299:330000000000302:2026-06-01");
+  });
+
+  it("§9 ad: parses creative_id from creative{id} + populates status from the /ads edge", async () => {
+    const rows = await extractAdRows();
+    const byAd = new Map(
+      rows
+        .filter((row) => row.objectType === "meta_ads_ad_daily")
+        .map((row) => [(row.payload as Record<string, unknown>).adId as string, row.payload as Record<string, unknown>])
+    );
+    const active = byAd.get("330000000000301");
+    const paused = byAd.get("330000000000302");
+    // creative_id parsed from the nested creative{id} field-expansion (NO body fetched).
+    expect(active?.creativeId).toBe("cr_900001");
+    expect(paused?.creativeId).toBe("cr_900002");
+    // Status is NOT on insights — folded in from the /ads edge (§4a). One live, one paused.
+    expect(active?.effectiveStatus).toBe("ACTIVE");
+    expect(active?.configuredStatus).toBe("ACTIVE");
+    expect(paused?.effectiveStatus).toBe("PAUSED");
+    expect(paused?.configuredStatus).toBe("PAUSED");
+    // Parent ids carried (never the key).
+    expect(active?.adsetId).toBe("220000000000201");
+    expect(active?.campaignId).toBe("120000000000111");
+  });
+
+  it("§7a ad: an orphan ad (no adset) carries NULL adset_id + NULL creative_id without failing", async () => {
+    const rows = await extractAdRows();
+    const orphan = rows
+      .filter((row) => row.objectType === "meta_ads_ad_daily")
+      .map((row) => row.payload as Record<string, unknown>)
+      .find((payload) => payload.adId === "330000000000303");
+    expect(orphan).toBeDefined();
+    // §7a — the ad exists with no resolvable ad set + no creative; both are carried NULL.
+    expect(orphan?.adsetId).toBeNull();
+    expect(orphan?.creativeId).toBeNull();
+    // It still carries its campaign + its own status (ACTIVE).
+    expect(orphan?.campaignId).toBe("120000000000111");
+    expect(orphan?.effectiveStatus).toBe("ACTIVE");
+  });
+
+  it("§4e ad: typed conversions are correct at ad grain (carried optimization_goal → 2 leads each)", async () => {
+    const rows = await extractAdRows();
+    const withAdset = rows
+      .filter((row) => row.objectType === "meta_ads_ad_daily")
+      .map((row) => row.payload as Record<string, unknown>)
+      .filter((payload) => payload.adId !== "330000000000303");
+    for (const payload of withAdset) {
+      const conversions = payload.conversions as Array<Record<string, unknown>>;
+      // §4e — optimization_goal is carried from the ADSET dim (LEAD_GENERATION), so the §4b
+      // mapping collapses the 3 lead action_types to ONE 'lead' row of 2 (7d_click+1d_view),
+      // never the summed 6, and never via roll-up from a coarser grain.
+      expect(conversions).toHaveLength(1);
+      expect(conversions[0].resultType).toBe("lead");
+      expect(conversions[0].results).toBe(2);
+      expect(conversions[0].conversionValue).toBeNull();
+      expect(conversions[0].resultsSource).toBe("derived_from_canonical_mapping");
+    }
+  });
+
+  it("§9 ad: spend is additive but conversions are NOT summed to the adset (stored-not-derived)", async () => {
+    const rows = await extractAdRows();
+    const adRows = rows
+      .filter((row) => row.objectType === "meta_ads_ad_daily")
+      .map((row) => row.payload as Record<string, unknown>);
+    // Spend IS additive: 160 + 100 + 12 = 272.00.
+    const summedSpend = adRows.reduce((total, row) => total + Number(row.spend), 0);
+    expect(Number(summedSpend.toFixed(2))).toBe(272.0);
+    // Conversions are NOT additive to the adset total: ad-summed leads = 2 + 2 = 4, but the
+    // adset reports 3 (Meta dedups across ads within the ad set). The connector stores each
+    // grain as reported and NEVER derives the adset total from the ad sum.
+    const summedLeads = adRows.reduce((total, row) => {
+      const conversions = (row.conversions as Array<Record<string, unknown>>) ?? [];
+      return total + (conversions[0] ? Number(conversions[0].results) : 0);
+    }, 0);
+    expect(summedLeads).toBe(4);
+    expect(summedLeads).not.toBe(3);
+  });
+
+  it("§9 ad: the dispatching writer upserts the ad dim + facts on ad_id-keyed unique keys (dim-before-fact)", async () => {
+    const queries: Array<{ sql: string; params?: unknown[] }> = [];
+    await withMockFetch(
+      async (url) => adProbeRouter(url),
+      async () => {
+        await connectorFor("meta_ads").sync(
+          fakeDb({
+            queryLog: queries,
+            credential: {
+              credential_kind: "marketing_api_access_token",
+              encrypted_payload: encryptedCredential({
+                mode: "live",
+                adAccountId: "887743100560299",
+                accessToken: "meta-access-token",
+                apiVersion: "v25.0"
+              })
+            }
+          }),
+          { ...request("meta_ads"), metaAdsInsightsLevel: "ad" }
+        );
+      }
+    );
+    const sqls = queries.map((entry) => entry.sql);
+    const adDimIndex = sqls.findIndex((sql) => sql.includes("insert into meta_ads_ads"));
+    const adDailyIndex = sqls.findIndex((sql) => sql.includes("insert into meta_ads_ad_daily"));
+    const adConvIndex = sqls.findIndex((sql) => sql.includes("insert into meta_ads_ad_conversions_daily"));
+    // §7a dim-before-fact: the ad dim is upserted before the ad facts.
+    expect(adDimIndex).toBeGreaterThanOrEqual(0);
+    expect(adDailyIndex).toBeGreaterThan(adDimIndex);
+    expect(adConvIndex).toBeGreaterThan(adDimIndex);
+    // The conflict targets are RE-KEYED on ad_id (the #1 corruption fix).
+    expect(sqls.some((sql) => sql.includes("on conflict (source_id, ad_account_id, ad_id)"))).toBe(true);
+    expect(sqls.some((sql) => sql.includes("on conflict (source_id, ad_account_id, ad_id, occurred_on)"))).toBe(true);
+    expect(
+      sqls.some((sql) => sql.includes("on conflict (source_id, ad_account_id, ad_id, occurred_on, result_type)"))
+    ).toBe(true);
+    // The ad dim upsert carries creative_id (coalesced, freeze-on-disappearance) + status.
+    const adDim = queries.find((entry) => entry.sql.includes("insert into meta_ads_ads"));
+    expect(adDim?.sql).toContain("creative_id = coalesce(excluded.creative_id");
+    expect((adDim?.params ?? []).some((p) => p === "cr_900001" || p === "cr_900002")).toBe(true);
+  });
+
+  it("§4d ad: a backfill (all_time) is issued MONTH-BY-MONTH, never date_preset=maximum", async () => {
+    const insightsUrls: string[] = [];
+    await withMockFetch(
+      async (url) => {
+        if (isMetaAdInsightsRequest(url)) {
+          insightsUrls.push(url);
+          return jsonResponse({ data: [], paging: {} });
+        }
+        return adProbeRouter(url);
+      },
+      async () => {
+        await connectorFor("meta_ads").extract(
+          fakeDb({
+            credential: {
+              credential_kind: "marketing_api_access_token",
+              encrypted_payload: encryptedCredential({
+                mode: "live",
+                adAccountId: "887743100560299",
+                accessToken: "meta-access-token",
+                apiVersion: "v25.0"
+              })
+            }
+          }),
+          { ...request("meta_ads"), metaAdsInsightsLevel: "ad", backfillWindow: "all_time" },
+          {
+            cursorKey: "meta_ads_campaign_daily",
+            cursorStart: "2026-03-01T00:00:00.000Z",
+            cursorEnd: "2026-06-03T00:00:00.000Z",
+            refreshWindowDays: 30,
+            mode: "live",
+            backfillWindow: "all_time"
+          }
+        );
+      }
+    );
+    // The ad backfill must NEVER use date_preset=maximum (it 1487534s at ad grain).
+    for (const url of insightsUrls) {
+      expect(new URL(url).searchParams.get("date_preset")).toBeNull();
+      expect(new URL(url).searchParams.get("time_range")).not.toBeNull();
+    }
+    // Mar 1 → Jun 3 spans 4 calendar-month windows (Mar, Apr, May, Jun) — one request each.
+    expect(insightsUrls.length).toBe(4);
+    const ranges = insightsUrls.map((url) => JSON.parse(new URL(url).searchParams.get("time_range") as string));
+    expect(ranges[0]).toEqual({ since: "2026-03-01", until: "2026-03-31" });
+    expect(ranges[3]).toEqual({ since: "2026-06-01", until: "2026-06-03" });
+  });
+
+  it("§4d ad: a BOUNDED backfill (12_months) is also issued MONTH-BY-MONTH, never one wide time_range", async () => {
+    // REGRESSION GUARD: the CLI's 3/6/12-month backfills queue backfillWindow:'12_months'
+    // (NOT 'all_time') with refreshWindowDays:365. The ad pass must chunk these EXACTLY like
+    // all_time — a single un-chunked 365-day level=ad daily request is the wide-range shape
+    // that trips Meta 100/subcode 1487534. The chunk decision is driven by plan.backfillWindow,
+    // not the date_preset=maximum sentinel.
+    const insightsUrls: string[] = [];
+    await withMockFetch(
+      async (url) => {
+        if (isMetaAdInsightsRequest(url)) {
+          insightsUrls.push(url);
+          return jsonResponse({ data: [], paging: {} });
+        }
+        return adProbeRouter(url);
+      },
+      async () => {
+        await connectorFor("meta_ads").extract(
+          fakeDb({
+            credential: {
+              credential_kind: "marketing_api_access_token",
+              encrypted_payload: encryptedCredential({
+                mode: "live",
+                adAccountId: "887743100560299",
+                accessToken: "meta-access-token",
+                apiVersion: "v25.0"
+              })
+            }
+          }),
+          { ...request("meta_ads"), metaAdsInsightsLevel: "ad", backfillWindow: "12_months" },
+          {
+            // A 12-month backfill: cursorStart pinned ~12 months before cursorEnd. The plan
+            // carries backfillWindow:'12_months' (a bounded window — NOT all_time).
+            cursorKey: "meta_ads_campaign_daily",
+            cursorStart: "2025-06-03T00:00:00.000Z",
+            cursorEnd: "2026-06-03T00:00:00.000Z",
+            refreshWindowDays: 365,
+            mode: "live",
+            backfillWindow: "12_months"
+          }
+        );
+      }
+    );
+    expect(insightsUrls.length).toBeGreaterThan(1);
+    // No request may use date_preset, and NO single time_range may exceed 31 days (a month).
+    for (const url of insightsUrls) {
+      expect(new URL(url).searchParams.get("date_preset")).toBeNull();
+      const range = JSON.parse(new URL(url).searchParams.get("time_range") as string) as {
+        since: string;
+        until: string;
+      };
+      const span =
+        (new Date(`${range.until}T00:00:00Z`).getTime() - new Date(`${range.since}T00:00:00Z`).getTime()) /
+        (24 * 60 * 60 * 1000);
+      expect(span).toBeLessThanOrEqual(31);
+    }
+    // Jun 2025 → Jun 2026 is 13 calendar-month windows; the first starts at the pinned cursor.
+    const ranges = insightsUrls.map((url) => JSON.parse(new URL(url).searchParams.get("time_range") as string));
+    expect(ranges[0]).toEqual({ since: "2025-06-03", until: "2025-06-30" });
+    expect(ranges[ranges.length - 1]).toEqual({ since: "2026-06-01", until: "2026-06-03" });
+  });
+
+  it("§4d ad: a BOUNDED backfill narrows to weeks on a forced 1487534 (no whole-run failure)", async () => {
+    // The bounded path must carry the SAME 1487534 classify-and-retry-narrower as all_time:
+    // force the first month window to the data-volume error, then succeed on the week retries.
+    const insightsRanges: Array<{ since: string; until: string }> = [];
+    let firstWindowFailed = false;
+    await withMockFetch(
+      async (url) => {
+        if (isMetaAdInsightsRequest(url)) {
+          const range = JSON.parse(new URL(url).searchParams.get("time_range") as string);
+          if (!firstWindowFailed && range.since === "2025-06-03" && range.until === "2025-06-30") {
+            firstWindowFailed = true;
+            return new Response(
+              JSON.stringify({
+                error: { message: "Please reduce the amount of data", code: 100, error_subcode: 1487534 }
+              }),
+              { status: 400, headers: { "Content-Type": "application/json" } }
+            );
+          }
+          insightsRanges.push(range);
+          return jsonResponse({ data: [], paging: {} });
+        }
+        return adProbeRouter(url);
+      },
+      async () => {
+        await connectorFor("meta_ads").extract(
+          fakeDb({
+            credential: {
+              credential_kind: "marketing_api_access_token",
+              encrypted_payload: encryptedCredential({
+                mode: "live",
+                adAccountId: "887743100560299",
+                accessToken: "meta-access-token",
+                apiVersion: "v25.0"
+              })
+            }
+          }),
+          { ...request("meta_ads"), metaAdsInsightsLevel: "ad", backfillWindow: "12_months" },
+          {
+            cursorKey: "meta_ads_campaign_daily",
+            cursorStart: "2025-06-03T00:00:00.000Z",
+            cursorEnd: "2025-06-30T00:00:00.000Z",
+            refreshWindowDays: 365,
+            mode: "live",
+            backfillWindow: "12_months"
+          }
+        );
+      }
+    );
+    expect(firstWindowFailed).toBe(true);
+    // The failed month was retried as ≤7-day sub-windows covering the whole month, no failure.
+    expect(insightsRanges.length).toBeGreaterThan(1);
+    for (const range of insightsRanges) {
+      const span =
+        (new Date(`${range.until}T00:00:00Z`).getTime() - new Date(`${range.since}T00:00:00Z`).getTime()) /
+        (24 * 60 * 60 * 1000);
+      expect(span).toBeLessThanOrEqual(6);
+    }
+    expect(insightsRanges[0].since).toBe("2025-06-03");
+    expect(insightsRanges[insightsRanges.length - 1].until).toBe("2025-06-30");
+  });
+
+  it("§9 ad: the ad read path issues NO Graph write verb (GET-only boundary)", async () => {
+    // BOUNDARY: slice-1b adds only GET edge + insights reads. Capture every fetch method on the
+    // ad path and assert none is a write verb — locking the read-only boundary into the gate so
+    // a future POST/PUT/PATCH/DELETE regression on the ad path is caught.
+    const methods: string[] = [];
+    await withMockFetch(
+      async (url, init) => {
+        methods.push(((init?.method ?? "GET") as string).toUpperCase());
+        return adProbeRouter(url);
+      },
+      async () => {
+        await connectorFor("meta_ads").extract(
+          fakeDb({
+            credential: {
+              credential_kind: "marketing_api_access_token",
+              encrypted_payload: encryptedCredential({
+                mode: "live",
+                adAccountId: "887743100560299",
+                accessToken: "meta-access-token",
+                apiVersion: "v25.0"
+              })
+            }
+          }),
+          { ...request("meta_ads"), metaAdsInsightsLevel: "ad" },
+          {
+            cursorKey: "meta_ads_campaign_daily",
+            cursorStart: "2026-06-01T00:00:00.000Z",
+            cursorEnd: "2026-06-03T00:00:00.000Z",
+            refreshWindowDays: 30,
+            mode: "live"
+          }
+        );
+      }
+    );
+    expect(methods.length).toBeGreaterThan(0);
+    for (const method of methods) {
+      expect(["POST", "PUT", "PATCH", "DELETE"]).not.toContain(method);
+      expect(method).toBe("GET");
+    }
+  });
+
+  it("§4d ad: a window that returns subcode 1487534 retries NARROWER (week sub-windows)", async () => {
+    // Force the FIRST month window to 1487534, then succeed on the week retries. The connector
+    // must classify the subcode + re-issue that ONE window split into weeks (never fail the run).
+    const insightsRanges: Array<{ since: string; until: string }> = [];
+    let firstWindowFailed = false;
+    await withMockFetch(
+      async (url) => {
+        if (isMetaAdInsightsRequest(url)) {
+          const range = JSON.parse(new URL(url).searchParams.get("time_range") as string);
+          // The first March MONTH window (a full calendar month) trips the data-volume error
+          // once; the WEEK sub-windows (until < the month end) succeed.
+          if (!firstWindowFailed && range.since === "2026-03-01" && range.until === "2026-03-31") {
+            firstWindowFailed = true;
+            return new Response(
+              JSON.stringify({
+                error: { message: "Please reduce the amount of data", code: 100, error_subcode: 1487534 }
+              }),
+              { status: 400, headers: { "Content-Type": "application/json" } }
+            );
+          }
+          insightsRanges.push(range);
+          return jsonResponse({ data: [], paging: {} });
+        }
+        return adProbeRouter(url);
+      },
+      async () => {
+        await connectorFor("meta_ads").extract(
+          fakeDb({
+            credential: {
+              credential_kind: "marketing_api_access_token",
+              encrypted_payload: encryptedCredential({
+                mode: "live",
+                adAccountId: "887743100560299",
+                accessToken: "meta-access-token",
+                apiVersion: "v25.0"
+              })
+            }
+          }),
+          { ...request("meta_ads"), metaAdsInsightsLevel: "ad", backfillWindow: "all_time" },
+          {
+            cursorKey: "meta_ads_campaign_daily",
+            cursorStart: "2026-03-01T00:00:00.000Z",
+            cursorEnd: "2026-03-31T00:00:00.000Z",
+            refreshWindowDays: 30,
+            mode: "live",
+            backfillWindow: "all_time"
+          }
+        );
+      }
+    );
+    // The failed March month was retried as WEEK windows (each ≤ 7 days), all succeeding.
+    expect(firstWindowFailed).toBe(true);
+    expect(insightsRanges.length).toBeGreaterThan(1);
+    // Every retried sub-window is at most a week wide (the narrower retry granularity).
+    for (const range of insightsRanges) {
+      const span =
+        (new Date(`${range.until}T00:00:00Z`).getTime() - new Date(`${range.since}T00:00:00Z`).getTime()) /
+        (24 * 60 * 60 * 1000);
+      expect(span).toBeLessThanOrEqual(6);
+    }
+    // The sub-windows cover the whole month start→end (no silent truncation).
+    expect(insightsRanges[0].since).toBe("2026-03-01");
+    expect(insightsRanges[insightsRanges.length - 1].until).toBe("2026-03-31");
+  });
+
+  it("§4d ad: the backfill start is CLAMPED to the 37-month retention floor (older windows not requested)", async () => {
+    const insightsRanges: Array<{ since: string; until: string }> = [];
+    await withMockFetch(
+      async (url) => {
+        if (isMetaAdInsightsRequest(url)) {
+          insightsRanges.push(JSON.parse(new URL(url).searchParams.get("time_range") as string));
+          return jsonResponse({ data: [], paging: {} });
+        }
+        return adProbeRouter(url);
+      },
+      async () => {
+        await connectorFor("meta_ads").extract(
+          fakeDb({
+            credential: {
+              credential_kind: "marketing_api_access_token",
+              encrypted_payload: encryptedCredential({
+                mode: "live",
+                adAccountId: "887743100560299",
+                accessToken: "meta-access-token",
+                apiVersion: "v25.0"
+              })
+            }
+          }),
+          { ...request("meta_ads"), metaAdsInsightsLevel: "ad", backfillWindow: "all_time" },
+          {
+            // Ask for a start 5 years before the cursorEnd — well past the 37-month floor.
+            cursorKey: "meta_ads_campaign_daily",
+            cursorStart: "2021-06-03T00:00:00.000Z",
+            cursorEnd: "2026-06-03T00:00:00.000Z",
+            refreshWindowDays: 30,
+            mode: "live",
+            backfillWindow: "all_time"
+          }
+        );
+      }
+    );
+    // The earliest requested window must not start before 37 months before Jun 3 2026
+    // (≈ 2023-05-03). 2021 is silently empty at Meta, so we never ask for it.
+    const earliest = insightsRanges.map((r) => r.since).sort()[0];
+    expect(earliest >= "2023-05-01").toBe(true);
+    expect(earliest < "2023-06-15").toBe(true);
   });
 
   it("supports Meta Ads extraction through a configured MCP stdio command", async () => {
@@ -3585,17 +4155,17 @@ function jsonResponse(value: unknown): Response {
   });
 }
 
-// Phase-2 slice-1a — the Meta direct-Graph extract now issues, per run: the /adsets +
-// /campaigns status EDGE reads (§4a), the campaign /insights pass, AND an internal adset
-// /insights pass (§4c). This router lets a CAMPAIGN-GRAIN test supply ONLY the campaign
-// insights body: the edge reads + the adset insights pass return empty, so the grain
-// fan-out doesn't pollute campaign-grain assertions or record counts.
+// Phase-2 slice-1a/1b — the Meta direct-Graph extract now issues, per run: the /ads +
+// /adsets + /campaigns status EDGE reads (§4a), the campaign /insights pass, AND internal
+// adset + ad /insights passes (§4c). This router lets a CAMPAIGN-GRAIN test supply ONLY the
+// campaign insights body: the edge reads + the adset AND ad insights passes return empty, so
+// the grain fan-out doesn't pollute campaign-grain assertions or record counts.
 function metaGraphMockRouter(insightsBody: { data: unknown[]; paging?: unknown }) {
   return async (url: string): Promise<Response> => {
-    if (url.includes("/adsets") || url.includes("/campaigns")) {
+    if (url.includes("/adsets") || url.includes("/campaigns") || isMetaAdsEdgeRequest(url)) {
       return jsonResponse({ data: [], paging: {} });
     }
-    if (isMetaAdsetInsightsRequest(url)) {
+    if (isMetaAdsetInsightsRequest(url) || isMetaAdInsightsRequest(url)) {
       return jsonResponse({ data: [], paging: {} });
     }
     return jsonResponse({ data: insightsBody.data, paging: insightsBody.paging ?? {} });
@@ -3605,6 +4175,20 @@ function metaGraphMockRouter(insightsBody: { data: unknown[]; paging?: unknown }
 // Is this a Meta /insights request at level=adset? (the internal adset pass.)
 function isMetaAdsetInsightsRequest(url: string): boolean {
   return url.includes("/insights") && new URL(url).searchParams.get("level") === "adset";
+}
+
+// Phase-2 slice-1b — is this a Meta /insights request at level=ad? (the ad pass.)
+function isMetaAdInsightsRequest(url: string): boolean {
+  return url.includes("/insights") && new URL(url).searchParams.get("level") === "ad";
+}
+
+// Is this the /act_<id>/ads EDGE read (NOT /adsets, NOT /insights)? The path segment after
+// the account id is exactly "ads" — match on the pathname's final segment, not a substring,
+// so /adsets (which also contains "/ads") is excluded.
+function isMetaAdsEdgeRequest(url: string): boolean {
+  if (url.includes("/insights")) return false;
+  const segments = new URL(url).pathname.split("/");
+  return segments[segments.length - 1] === "ads";
 }
 
 // Is this a Meta /insights request at level=campaign? (the campaign pass / probe.)

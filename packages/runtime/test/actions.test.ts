@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { JOURNEY_ENTITY_TYPES } from "@infinite-os/core";
+import { JOURNEY_ENTITY_TYPES, RESOLVABLE_ENTITY_TYPES } from "@infinite-os/core";
 
 import {
   FIRST_PHASE_ACTIONS,
@@ -125,6 +125,32 @@ describe("Infinite OS runtime action registry", () => {
     }
   });
 
+  // Phase-2 slice-1b §3/§5 — the same two-place allowlist contract for the AD (finest) grain.
+  // The §5 resolver swaps to these ad siblings when an ad_id/ad_name dim is present; this pins
+  // that the runtime half exposes them so an ad-grain query is not 404'd at the runtime guard
+  // before the finest-grain-wins resolver ever runs.
+  it("§5 slice-1b: exposes both ad grain views in the allowlist AND the analytical tool-schema view enum", () => {
+    for (const view of [
+      "queryable.vw_meta_ads_ad_daily",
+      "queryable.vw_meta_ads_ad_conversions_daily"
+    ]) {
+      expect(FIRST_PHASE_QUERYABLE_VIEWS).toContain(view);
+    }
+
+    const registry = createInfiniteOsRegistry();
+    for (const actionId of ["run_metric_query", "run_breakdown_query"]) {
+      const schema = registry.get(actionId)?.inputSchema as
+        | { properties?: { view?: { enum?: string[] } } }
+        | undefined;
+      const viewEnum = schema?.properties?.view?.enum ?? [];
+      expect(viewEnum).toContain("queryable.vw_meta_ads_ad_daily");
+      expect(viewEnum).toContain("queryable.vw_meta_ads_ad_conversions_daily");
+      // The adset + campaign siblings stay exposed (no-regression at the coarser grains).
+      expect(viewEnum).toContain("queryable.vw_meta_ads_adset_daily");
+      expect(viewEnum).toContain("queryable.vw_meta_ads_campaign_daily");
+    }
+  });
+
   it("exposes governed curated action metadata without raw SQL", () => {
     const registry = createInfiniteOsRegistry();
     const actionIds = registry.list().map((action) => action.id);
@@ -206,19 +232,41 @@ describe("Infinite OS runtime action registry", () => {
     expect(breakdownSchema.required).toEqual(["metric", "groupBy"]);
   });
 
-  it("keeps journey entity tool schemas aligned to the shared vocabulary", () => {
+  it("splits resolve_entity (RESOLVABLE) from the journey-plan vocabulary (JOURNEY)", () => {
+    // Slice 1b §7: resolve_entity widens to RESOLVABLE_ENTITY_TYPES (adds adset/ad) so an analyst
+    // can resolve an ad/adset by name; the journey-plan schema (shared by validate_journey_plan AND
+    // run_journey_query) stays on JOURNEY_ENTITY_TYPES so the journey surface NEVER sees adset/ad.
     const registry = createInfiniteOsRegistry();
     const resolveEntitySchema = registry.get("resolve_entity")
       ?.inputSchema as Record<string, any>;
     const validatePlanSchema = registry.get("validate_journey_plan")
       ?.inputSchema as Record<string, any>;
+    const runJourneySchema = registry.get("run_journey_query")
+      ?.inputSchema as Record<string, any>;
 
+    // resolve_entity widened to the superset (incl. adset/ad).
     expect(resolveEntitySchema.properties.entityType.enum).toEqual([
-      ...JOURNEY_ENTITY_TYPES
+      ...RESOLVABLE_ENTITY_TYPES
     ]);
+    expect(resolveEntitySchema.properties.entityType.enum).toEqual(
+      expect.arrayContaining(["adset", "ad"])
+    );
+
+    // Both journey-plan surfaces (validate + run) stay bound to the NARROW journey vocabulary.
     expect(
       validatePlanSchema.properties.plan.properties.entity.properties.type.enum
     ).toEqual([...JOURNEY_ENTITY_TYPES]);
+    expect(
+      runJourneySchema.properties.plan.properties.entity.properties.type.enum
+    ).toEqual([...JOURNEY_ENTITY_TYPES]);
+
+    // The split held: the journey-plan enum did NOT widen — adset/ad are rejected there.
+    expect(
+      validatePlanSchema.properties.plan.properties.entity.properties.type.enum
+    ).not.toEqual(expect.arrayContaining(["adset", "ad"]));
+    expect(
+      runJourneySchema.properties.plan.properties.entity.properties.type.enum
+    ).not.toEqual(expect.arrayContaining(["adset", "ad"]));
   });
 
   it("blocks operator actions from tool-agent sessions", async () => {
