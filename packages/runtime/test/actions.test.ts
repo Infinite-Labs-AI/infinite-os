@@ -97,6 +97,34 @@ describe("Infinite OS runtime action registry", () => {
     expect(FIRST_PHASE_METRICS).toContain("posthog_event_count");
   });
 
+  // Phase-2 slice-1a §3/§5/§9 — the TWO-PLACE allowlist contract. A grain-aware view is invisible
+  // to the tool agent unless it is in FIRST_PHASE_QUERYABLE_VIEWS (which feeds BOTH
+  // rejectUnsafeView/QUERYABLE_VIEW_SET in the engine AND the run_metric_query/run_breakdown_query
+  // `view` enum here). The §5 resolver swaps to these adset siblings by grain; this pins that the
+  // runtime half of the two-place allowlist actually exposes them (a regression that drops them
+  // would silently 404 every adset query at the runtime guard before the resolver ever runs).
+  it("§9: exposes both adset grain views in the allowlist AND the analytical tool-schema view enum", () => {
+    for (const view of [
+      "queryable.vw_meta_ads_adset_daily",
+      "queryable.vw_meta_ads_adset_conversions_daily"
+    ]) {
+      expect(FIRST_PHASE_QUERYABLE_VIEWS).toContain(view);
+    }
+
+    const registry = createInfiniteOsRegistry();
+    for (const actionId of ["run_metric_query", "run_breakdown_query"]) {
+      const schema = registry.get(actionId)?.inputSchema as
+        | { properties?: { view?: { enum?: string[] } } }
+        | undefined;
+      const viewEnum = schema?.properties?.view?.enum ?? [];
+      expect(viewEnum).toContain("queryable.vw_meta_ads_adset_daily");
+      expect(viewEnum).toContain("queryable.vw_meta_ads_adset_conversions_daily");
+      // The campaign siblings stay exposed too (no-regression: the family base is still valid).
+      expect(viewEnum).toContain("queryable.vw_meta_ads_campaign_daily");
+      expect(viewEnum).toContain("queryable.vw_meta_ads_campaign_conversions_daily");
+    }
+  });
+
   it("exposes governed curated action metadata without raw SQL", () => {
     const registry = createInfiniteOsRegistry();
     const actionIds = registry.list().map((action) => action.id);

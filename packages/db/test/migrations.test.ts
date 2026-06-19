@@ -794,4 +794,102 @@ describe("Infinite OS migration stack", () => {
     expect(lower).not.toContain("drop column");
     expect(lower).not.toContain("delete from");
   });
+
+  // Phase-2 slice-1a §2/§3/§9 — the adset grain + on/off status migration (0035). Asserts the
+  // load-bearing structural contracts the §9 acceptance gate depends on: the dim carries status,
+  // every adset fact is RE-KEYED on adset_id (the #1 corruption fix), the views alias columns
+  // IDENTICALLY to the campaign views (so the §5 resolver swaps only the NAME) AND expose
+  // status + campaign_id, the conversions view LEFT JOINs its OWN adset-grain spend (never
+  // campaign spend — no N-counting), the partition stays result_type-only, and the grant target
+  // is tool_agent + app ONLY.
+  it("creates the adset grain (dim+facts+views) re-keyed on adset_id with status and own-grain spend (0035)", () => {
+    const migration = loadMigrations().find(
+      (candidate) => candidate.id === "0035_meta_ads_adset_grain.sql"
+    );
+    const sql = migration?.sql ?? "";
+    const lower = sql.toLowerCase();
+    const collapsed = lower.replace(/\s+/g, " ");
+
+    // §2.1 — the dim carries BOTH status columns + the per-adset optimization_goal/billing_event
+    // and the carried campaign_id, unique on (source_id, ad_account_id, adset_id).
+    expect(lower).toContain("create table meta_ads_adsets");
+    for (const col of ["effective_status", "configured_status", "optimization_goal", "billing_event"]) {
+      expect(lower).toContain(col);
+    }
+    expect(collapsed).toContain("unique (source_id, ad_account_id, adset_id)");
+
+    // §2.2/§2.3 — the two fact tables and their RE-KEYED unique keys (adset_id, NOT campaign_id —
+    // the #1 corruption fix). The conversions key additionally pins result_type (the partition).
+    expect(lower).toContain("create table meta_ads_adset_daily");
+    expect(lower).toContain("create table meta_ads_adset_conversions_daily");
+    expect(collapsed).toContain("unique (source_id, ad_account_id, adset_id, occurred_on)");
+    expect(collapsed).toContain("unique (source_id, ad_account_id, adset_id, occurred_on, result_type)");
+    // result_type is NOT NULL on the conversions fact (the REQUIRED partition is structural).
+    expect(collapsed).toContain("result_type text not null");
+    // campaign_id is CARRIED on every adset table (the §5e coarser-filter case) but is never the
+    // row key — assert it is present as a plain column on each.
+    expect(lower).toContain("campaign_id text not null");
+    // Race-tolerant (§7a): the facts carry adset_id/campaign_id with NO hard FK to the dim
+    // (mirrors the campaign topology). Forbid an accidental hard FK on the facts.
+    expect(lower).not.toContain("references meta_ads_adsets");
+
+    // §3 — the two views. Aliases IDENTICAL to the campaign views (so the resolver swaps only the
+    // NAME), PLUS the net-new adset identity + on/off status dims.
+    expect(lower).toContain("create view queryable.vw_meta_ads_adset_daily");
+    expect(lower).toContain("create view queryable.vw_meta_ads_adset_conversions_daily");
+    expect(lower).toContain("d.spend as meta_ads_spend");
+    expect(lower).toContain("d.clicks as meta_ads_clicks");
+    expect(lower).toContain("d.inline_link_clicks as link_clicks");
+    // Status + the parent campaign_id are exposed as columns on the views (for filter + label).
+    expect(lower).toContain("dim.effective_status");
+    expect(lower).toContain("dim.configured_status");
+    expect(lower).toContain("d.adset_id");
+    expect(lower).toContain("c.campaign_id");
+
+    // §3 NO N-COUNTING: the conversions view LEFT JOINs its OWN adset-grain delivery spend
+    // (meta_ads_adset_daily on adset_id + occurred_on), NEVER campaign spend. Joining campaign
+    // spend onto N adset rows would N-count it — the corruption the no-roll-up rule forbids in
+    // reverse. Assert the join is to the adset delivery fact keyed on adset_id.
+    expect(collapsed).toContain("left join meta_ads_adset_daily d on d.source_id = c.source_id");
+    expect(collapsed).toContain("and d.adset_id = c.adset_id");
+    expect(collapsed).toContain("and d.occurred_on = c.occurred_on");
+    // The conversions view must NOT read the campaign delivery fact for spend — assert no
+    // FROM/JOIN against meta_ads_campaign_daily (the bare string also appears in doc comments
+    // that reference mirroring 0015/0033, so forbid the load-bearing clause forms, not the word).
+    expect(collapsed).not.toContain("join meta_ads_campaign_daily");
+    expect(collapsed).not.toContain("from meta_ads_campaign_daily");
+
+    // §3.4 — the metric_definitions expansion: partition = result_type ONLY at adset grain (the
+    // campaign seed's two-element {result_type,objective} is dropped). Assert the single-element
+    // partition is written and the two-element form is NOT present in this migration.
+    expect(lower).toContain('"partition_by":["result_type"]');
+    expect(lower).not.toContain('"partition_by":["result_type","objective"]');
+    // The allowed_dimensions expansion adds the adset + status dims (NO new metric IDs — §6).
+    expect(lower).toContain('"adset_id"');
+    expect(lower).toContain('"effective_status"');
+    expect(lower).toContain('"configured_status"');
+
+    // §3 — recompute-from-summed-bases stays byte-identical (only the view name swapped): the
+    // views alias spend/results/conversion_value so the engine's ratio expressions are unchanged.
+    // No avg-of-ratios anywhere in the migration.
+    expect(lower).not.toContain("avg(cost_per_result)");
+    expect(lower).not.toContain("avg(roas)");
+
+    // §3 GRANT divergence trap: tool_agent + app ONLY (the Meta views never had read_api).
+    expect(lower).toContain(
+      "grant select on queryable.vw_meta_ads_adset_daily, queryable.vw_meta_ads_adset_conversions_daily to growth_os_tool_agent, growth_os_app"
+    );
+    expect(collapsed).not.toContain("to growth_os_tool_agent, growth_os_app, growth_os_read_api");
+
+    // Idempotent + non-destructive. The view recreate uses `drop view if exists ... cascade`
+    // (re-runnability), which is allowed; forbid destructive TABLE/COLUMN drops + deletes.
+    expect(lower).toContain("on conflict (id) do update set");
+    expect(lower).not.toContain("drop table");
+    expect(lower).not.toContain("drop column");
+    expect(lower).not.toContain("delete from");
+    // SCOPE TRIPWIRE (open-core boundary): this slice is reads only — no ad-account mutation
+    // can ride in a migration. There is no Graph write here, but assert the migration does not
+    // attempt to flip any status to ACTIVE (a write-shaped value has no place in a read migration).
+    expect(collapsed).not.toContain("set effective_status = 'active'");
+  });
 });
