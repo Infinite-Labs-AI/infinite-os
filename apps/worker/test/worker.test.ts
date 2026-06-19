@@ -490,6 +490,84 @@ describe("Infinite OS worker loop", () => {
     }
   });
 
+  // Phase-2 slice-1a §5d/§9 — the saved-report path is the worker's no-group-by entry point; it
+  // calls metricView(metric) (the campaign-default shim), so a Meta saved report MUST stay
+  // campaign-grain and can NEVER reach the new adset view. This pins the no-drift contract end-to-
+  // end through the job loop (a regression that routed a Meta saved report to the adset view —
+  // e.g. by swapping metricView for metricViewForGrain in runSavedReport — fails here).
+  it("§9: a Meta saved report (meta_ads_spend) stays campaign-grain — never the adset view", async () => {
+    const root = mkdtempSync(join(tmpdir(), "growth-os-worker-"));
+    const queries: Array<{ sql: string; params: unknown[] }> = [];
+    const job = {
+      id: "job_export_meta",
+      workspace_id: "workspace",
+      job_type: "saved_report_export",
+      payload: { reportId: "report_meta", format: "json" }
+    };
+    let claimed = false;
+    const db: InfiniteOsDb = {
+      async query<T>(sql: string, params: unknown[] = []): Promise<T[]> {
+        queries.push({ sql, params });
+        if (sql.includes("from queryable.vw_meta_ads_campaign_daily")) {
+          return [{ meta_ads_spend: "1234.56" }] as T[];
+        }
+        return [] as T[];
+      },
+      async one<T>(sql: string): Promise<T | null> {
+        if (sql.includes("from saved_reports")) {
+          return {
+            id: "report_meta",
+            name: "Meta spend report",
+            tool_plan: { metric: "meta_ads_spend" }
+          } as T;
+        }
+        return null;
+      },
+      async close() {},
+      async ensureWorkspace() {},
+      async ensureFirstPhaseDatasets() {},
+      async connectSource() {
+        return {};
+      },
+      async updateSourceStatus() {},
+      async createJob() {
+        return {};
+      },
+      async claimNextJob() {
+        if (claimed) return null;
+        claimed = true;
+        return job;
+      },
+      async completeJob() {},
+      async withTransaction(fn) {
+        return fn(this);
+      }
+    };
+
+    try {
+      const result = await createWorkerLoop({ db, workspaceRoot: root }).tick();
+      expect(result).toMatchObject({ status: "processed", jobId: "job_export_meta" });
+
+      const metric = "meta_ads_spend";
+      // The worker's entry point is metricView (the campaign shim) — NOT metricViewForGrain.
+      expect(metricView(metric)).toBe("queryable.vw_meta_ads_campaign_daily");
+      const reportQuery = queries.find((query) =>
+        query.sql.includes("from queryable.vw_meta_ads_campaign_daily")
+      );
+      expect(reportQuery?.sql).toBeDefined();
+      expect(reportQuery?.sql).toContain(
+        `select ${aggregateExpression(metric, metricColumn(metric))} as ${metric}`
+      );
+      // The adset view is NEVER reachable from a saved report.
+      expect(queries.every((query) => !query.sql.includes("from queryable.vw_meta_ads_adset_daily"))).toBe(true);
+      expect(
+        queries.every((query) => !query.sql.includes("from queryable.vw_meta_ads_adset_conversions_daily"))
+      ).toBe(true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("emits sync failure notifications when source jobs fail", async () => {
     const notifications: NotificationEvent[] = [];
     const job = {

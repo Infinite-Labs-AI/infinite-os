@@ -92,6 +92,7 @@ describe("Infinite OS LLM controller", () => {
     expect(systemPrompt).toContain("one scalar result or one lonely ranked row");
     expect(systemPrompt).toContain("do not stop at inventory-only results");
     expect(systemPrompt).toContain("recognized_revenue returns values in the currency's MINOR unit");
+    expect(systemPrompt).toContain("On/off status is QUERYABLE from the warehouse");
     expect(systemPrompt).toContain("source lists, sync lists, metric lists, or view lists");
     expect(systemPrompt).toContain("combine three things before answering strongly");
     expect(systemPrompt).toContain("what is connected, whether it looks current/fresh, and at least one concrete analytical signal");

@@ -187,6 +187,15 @@ export const FIRST_PHASE_QUERYABLE_VIEWS = [
   // invisible to the tool agent until it is in this allowlist AND has parallel entries in
   // the analytical-engine switch-functions; the SQL seed in migration 0033 is otherwise inert.
   "queryable.vw_meta_ads_campaign_conversions_daily",
+  // Phase-2 slice-1a §3 — the adset-grain delivery + typed-conversions views (adset × day,
+  // adset × day × result_type). Same invisible-until-allowlisted rule applies: these are the
+  // siblings the §5 grain-aware resolver (metricViewForGrain) swaps to when an adset_id/
+  // adset_name dimension is present in a group-by or filter. Listing them here simultaneously
+  // (a) lets rejectUnsafeView/QUERYABLE_VIEW_SET accept them and (b) admits them to the
+  // run_metric_query/run_breakdown_query `view` enum (analyticalQuerySchema below). They stay
+  // inert (campaign-default) until the matching migration views + engine switch-branches land.
+  "queryable.vw_meta_ads_adset_daily",
+  "queryable.vw_meta_ads_adset_conversions_daily",
   // Phase-1 §5 — the Meta↔Stripe true-value (ROAS) join view (migration 0034).
   "queryable.vw_meta_stripe_campaign_value_daily",
   "queryable.vw_site_pages"
