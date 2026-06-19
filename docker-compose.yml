@@ -65,6 +65,13 @@ services:
       # never needlessly recreated. migrate doesn't need it: it is a one-shot
       # that re-runs its full command from the bind mount on every `up`.
       GROWTH_OS_CODE_VERSION: ${GROWTH_OS_CODE_VERSION:-dev}
+      # Docker-compose coexistence: the daemon binds 0.0.0.0:3000 inside the
+      # container, but writes its descriptor to /root/.growth-os/daemon.json
+      # (container HOME). The host volume mount below puts that file on the host
+      # at ~/.growth-os/daemon.json. GROWTH_OS_ADVERTISED_URL tells the daemon to
+      # record the host-reachable published-port URL instead of the in-container
+      # bind address, so the desktop can attach via http://127.0.0.1:3000.
+      GROWTH_OS_ADVERTISED_URL: "http://127.0.0.1:3000"
     ports:
       - "${GROWTH_OS_APP_PORT:-3000}:3000"
     healthcheck:
@@ -78,6 +85,10 @@ services:
       start_period: 300s
     volumes:
       - .:/workspace
+      # Bind-mount the host machine home so daemon.json (and any other machine-home
+      # files) land on the host at ~/.growth-os/. The container user is root
+      # (node:20-bookworm-slim default), so its HOME is /root.
+      - ${HOME}/.growth-os:/root/.growth-os
       - growth_os_app_root_node_modules:/workspace/node_modules
       - growth_os_app_node_modules:/workspace/apps/app/node_modules
       - growth_os_app_runtime_node_modules:/workspace/packages/runtime/node_modules
