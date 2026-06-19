@@ -4,7 +4,26 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import pg, { type Pool, type PoolClient, type QueryResultRow } from "pg";
 
+import {
+  createPgliteDb,
+  isPgliteDatabaseUrl,
+  runPgliteMigrations
+} from "./pglite-adapter.js";
+
 export const dbBoot = true;
+
+// The minimal surface every db backend must expose for the domain helpers and
+// `wrapPool` to operate. `pg.Pool`, `pg.PoolClient`, and the PGlite instance all
+// satisfy this structurally — `result.rows` is the only field the helpers read.
+// Widening the helpers to this interface (instead of `Pool | PoolClient`) is what
+// lets the embedded PGlite backend reuse the exact same domain helpers and
+// transaction plumbing without touching the real-Postgres code path.
+export interface QueryableClient {
+  query<T extends QueryResultRow = QueryResultRow>(
+    sql: string,
+    params?: unknown[]
+  ): Promise<{ rows: T[] }>;
+}
 
 export interface Migration {
   id: string;
@@ -31,6 +50,14 @@ export function loadMigrations(directory = migrationsDir()): Migration[] {
 }
 
 export async function runMigrations(databaseUrl: string): Promise<string[]> {
+  // Desktop path: a `pglite://`/`file:`/bare-path URL selects the embedded
+  // single-connection WASM Postgres. The migration loop differs only in adapter
+  // mechanics (no pg.Client, `rows.length` instead of `rowCount`, `exec` for the
+  // multi-statement SQL bodies) — same schema_migrations table, same per-file
+  // transactional apply, same idempotency.
+  if (isPgliteDatabaseUrl(databaseUrl)) {
+    return runPgliteMigrations(databaseUrl, loadMigrations());
+  }
   const client = new pg.Client({ connectionString: databaseUrl });
   await client.connect();
   try {
@@ -541,12 +568,23 @@ export async function readLatestSetupPublicArtifacts(
 }
 
 export function createInfiniteOsDb(databaseUrl: string): InfiniteOsDb {
+  // Desktop path: embedded in-process PGlite. Creating the WASM instance is async,
+  // but every existing caller uses `createInfiniteOsDb` synchronously (`const db =
+  // createInfiniteOsDb(url)` then `db.query(...)`), so the signature MUST stay
+  // synchronous to keep the real-Postgres path byte-identical. `createPgliteDb`
+  // therefore returns a lazy `InfiniteOsDb` facade that boots PGlite on first use.
+  // The PGlite instance is itself a `QueryableClient`, so once booted it flows
+  // through the exact same `wrapPool` plumbing as a real Postgres pool (the
+  // single-client begin/commit/rollback branch, since PGlite has no `.connect`).
+  if (isPgliteDatabaseUrl(databaseUrl)) {
+    return createPgliteDb(databaseUrl, wrapPool);
+  }
   const pool = new pg.Pool({ connectionString: databaseUrl });
   return wrapPool(pool, () => pool.end());
 }
 
 function wrapPool(
-  client: Pool | PoolClient,
+  client: QueryableClient,
   closeFn: () => Promise<void>
 ): InfiniteOsDb {
   return {
@@ -608,7 +646,7 @@ function wrapPool(
 }
 
 async function ensureWorkspace(
-  client: Pool | PoolClient,
+  client: QueryableClient,
   workspaceId: string,
   name = "Default workspace"
 ): Promise<void> {
@@ -627,7 +665,7 @@ async function ensureWorkspace(
 }
 
 async function ensureFirstPhaseDatasets(
-  client: Pool | PoolClient,
+  client: QueryableClient,
   workspaceId: string
 ): Promise<void> {
   await client.query(
@@ -643,7 +681,7 @@ async function ensureFirstPhaseDatasets(
 }
 
 async function connectSource(
-  client: Pool | PoolClient,
+  client: QueryableClient,
   input: ConnectSourceInput
 ): Promise<Record<string, unknown>> {
   assertFirstPhaseProvider(input.provider);
@@ -723,7 +761,7 @@ async function connectSource(
 }
 
 async function updateSourceStatus(
-  client: Pool | PoolClient,
+  client: QueryableClient,
   sourceId: string,
   status: string,
   lastSyncedAt?: string
@@ -739,7 +777,7 @@ async function updateSourceStatus(
 }
 
 async function createJob(
-  client: Pool | PoolClient,
+  client: QueryableClient,
   input: CreateJobInput
 ): Promise<Record<string, unknown>> {
   const result = await client.query(
@@ -759,7 +797,7 @@ async function createJob(
 }
 
 async function claimNextJob(
-  client: Pool | PoolClient,
+  client: QueryableClient,
   workerId: string,
   leaseSeconds = 60
 ): Promise<Record<string, unknown> | null> {
@@ -794,7 +832,7 @@ async function claimNextJob(
 }
 
 async function completeJob(
-  client: Pool | PoolClient,
+  client: QueryableClient,
   jobId: string,
   status: "succeeded" | "failed",
   error?: string
