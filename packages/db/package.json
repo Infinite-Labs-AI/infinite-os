@@ -9,10 +9,11 @@
   "scripts": {
     "build": "tsc -b tsconfig.json",
     "migrate": "tsx src/migrate.ts",
-    "test": "vitest run --root ../.. ../../packages/db/src/index.test.ts ../../packages/db/test/migrations.test.ts",
+    "test": "vitest run --root ../.. ../../packages/db/src/index.test.ts ../../packages/db/test/migrations.test.ts ../../packages/db/test/pglite.test.ts",
     "typecheck": "tsc --noEmit --pretty false"
   },
   "dependencies": {
+    "@electric-sql/pglite": "^0.5.3",
     "@infinite-os/core": "workspace:*",
     "@infinite-os/config": "workspace:*",
     "pg": "^8.13.0"
