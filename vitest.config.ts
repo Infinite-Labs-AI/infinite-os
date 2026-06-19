@@ -27,6 +27,10 @@ export default defineConfig({
       "@infinite-os/runtime": new URL(
         "./packages/runtime/src/index.ts",
         import.meta.url
+      ).pathname,
+      "@infinite-os/types": new URL(
+        "./packages/types/src/index.ts",
+        import.meta.url
       ).pathname
     }
   },

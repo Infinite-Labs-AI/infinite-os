@@ -9,7 +9,7 @@ import {
 export interface PromptAssemblyInput {
   actions: ActionDefinition[];
   workspaceId: string;
-  surface: "api" | "app" | "cli";
+  surface: "api" | "app" | "cli" | "desktop";
   currentDate?: string;
   modelProvider?: "codex" | "claude";
   advisories?: string[];

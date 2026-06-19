@@ -14,7 +14,7 @@ export interface EnsureSessionInput {
   sessionId: string;
   workspaceId: string;
   actorId: string;
-  surface: "cli" | "api" | "app" | "mcp";
+  surface: "cli" | "api" | "app" | "mcp" | "desktop";
   modelProvider?: string;
   modelName?: string;
   modelAuthSource?: string;
@@ -447,7 +447,7 @@ export function createSessionStore(db: SessionStoreDb): ChatSessionStore {
         workspaceId: string;
         sessionKey: string;
         actorId: string;
-        surface: "cli" | "api" | "app" | "mcp";
+        surface: "cli" | "api" | "app" | "mcp" | "desktop";
         modelProvider?: string | null;
         modelName?: string | null;
         modelAuthSource?: string | null;

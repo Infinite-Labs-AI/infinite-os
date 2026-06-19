@@ -12,7 +12,8 @@
       "@infinite-os/db": ["packages/db/src/index.ts"],
       "@infinite-os/llm-controller": ["packages/llm-controller/src/index.ts"],
       "@infinite-os/metadata": ["packages/metadata/src/index.ts"],
-      "@infinite-os/runtime": ["packages/runtime/src/index.ts"]
+      "@infinite-os/runtime": ["packages/runtime/src/index.ts"],
+      "@infinite-os/types": ["packages/types/src/index.ts"]
     },
     "strict": true,
     "declaration": true,

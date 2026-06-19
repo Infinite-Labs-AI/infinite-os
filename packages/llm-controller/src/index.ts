@@ -16,7 +16,15 @@ import {
   classifyQueryFamily,
   type InfiniteOsQueryAdvisor
 } from "./query-advisor.js";
+import type { ChatResponse } from "@infinite-os/types";
 import type { ChatSessionStore } from "./session-store.js";
+
+// `ChatResponse` is canonical in `@infinite-os/types` (the cross-zone contract
+// the desktop also consumes). Re-export it so engine callers keep importing it
+// from `@infinite-os/llm-controller` unchanged. The local `ChatActionCall` /
+// `ModelUsage` shapes below stay engine-internal and are structurally identical
+// to the contract copies, so internally-built `ChatResponse` objects still type.
+export type { ChatResponse } from "@infinite-os/types";
 
 export type {
   ChatSessionDetail,
@@ -274,7 +282,7 @@ export interface ChatInput {
   sessionId?: string;
   workspaceId: string;
   actorId: string;
-  surface: Extract<RuntimeSurface, "api" | "app" | "cli">;
+  surface: Extract<RuntimeSurface, "api" | "app" | "cli" | "desktop">;
   modelProvider?: "codex" | "claude";
   modelName?: string;
   modelAuthSource?: string;
@@ -292,18 +300,6 @@ export interface ChatActionCall {
   inputHash?: string;
   envelope?: ActionEnvelope;
   error?: { code: string; message: string };
-}
-
-export interface ChatResponse {
-  ok: boolean;
-  sessionId: string;
-  message: string;
-  provenance: string[];
-  actionCalls: ChatActionCall[];
-  usage?: ModelUsage;
-  modelProvider?: "codex" | "claude";
-  modelName?: string;
-  modelAuthSource?: string;
 }
 
 const RECENT_SYNC_LOOKUP_LIMIT = 20;
@@ -749,7 +745,7 @@ async function loadQueryAdvisory(
     workspaceId: string;
     actorId: string;
     sessionId: string;
-    surface: Extract<RuntimeSurface, "api" | "app" | "cli">;
+    surface: Extract<RuntimeSurface, "api" | "app" | "cli" | "desktop">;
     now?: Date;
     recentMessages?: Array<{ role?: unknown; content?: unknown }>;
     curatedMemory?: Array<{ scope?: unknown; fact?: unknown }>;

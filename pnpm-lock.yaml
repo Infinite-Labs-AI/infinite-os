@@ -169,6 +169,9 @@ importers:
       '@infinite-os/runtime':
         specifier: workspace:*
         version: link:../runtime
+      '@infinite-os/types':
+        specifier: workspace:*
+        version: link:../types
 
   packages/metadata:
     dependencies:
@@ -184,6 +187,9 @@ importers:
       '@infinite-os/core':
         specifier: workspace:*
         version: link:../core
+      '@infinite-os/types':
+        specifier: workspace:*
+        version: link:../types
 
   packages/setup:
     dependencies:
@@ -202,6 +208,8 @@ importers:
       playwright:
         specifier: '*'
         version: 1.60.0
+
+  packages/types: {}
 
   ui-tui/packages/ink:
     dependencies:
