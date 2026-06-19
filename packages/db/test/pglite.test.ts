@@ -60,16 +60,17 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
   });
 
   it(
-    "applies ALL 36 migrations on first boot and is idempotent on the second",
+    "applies ALL 37 migrations on first boot and is idempotent on the second",
     async () => {
       const expectedCount = loadMigrations().length;
-      expect(expectedCount).toBe(36);
+      expect(expectedCount).toBe(37);
 
       const firstRun = await runMigrations(url);
       expect(firstRun).toHaveLength(expectedCount);
       expect(firstRun).toContain("0001_control_plane.sql");
       expect(firstRun).toContain("0006_security_roles.sql");
       expect(firstRun).toContain("0036_chat_sessions_desktop_surface.sql");
+      expect(firstRun).toContain("0037_meta_ads_ad_grain.sql");
 
       // Idempotent: a second boot re-applies zero (the `rows.length` gate, not
       // the pg `rowCount` gate, makes this true on PGlite).
@@ -79,14 +80,14 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
     60_000
   );
 
-  it("created the schema_migrations ledger with all 36 rows", async () => {
+  it("created the schema_migrations ledger with all 37 rows", async () => {
     db = createInfiniteOsDb(url);
     const ledger = await db.query<{ id: string }>(
       "select id from schema_migrations order by id"
     );
-    expect(ledger).toHaveLength(36);
+    expect(ledger).toHaveLength(37);
     expect(ledger[0]?.id).toBe("0001_control_plane.sql");
-    expect(ledger.at(-1)?.id).toBe("0036_chat_sessions_desktop_surface.sql");
+    expect(ledger.at(-1)?.id).toBe("0037_meta_ads_ad_grain.sql");
   });
 
   it("created all five growth_os_* roles (0006 applied on PGlite)", async () => {
