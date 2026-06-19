@@ -2237,14 +2237,31 @@ if (isProcessEntrypoint()) {
       if (applied.length > 0) {
         app.log.info?.({ count: applied.length }, "applied pending migrations on boot (local mode)");
       }
+      // Migrations create SCHEMA, not rows. A fresh self-contained DB has an EMPTY workspaces table,
+      // so the auth hook (select 1 from workspaces where id=$1) rejects every workspace-scoped
+      // request with unknown_workspace. Seed a default "Local" workspace (idempotent upsert) so a
+      // freshly-spawned daemon can serve immediately; a client discovers its id via GET /projects.
+      // The id is overridable via GROWTH_OS_WORKSPACE_ID. This opens a short-lived db just for the
+      // seed (a separate, SEQUENTIAL PGlite open after runMigrations closed its own, before the app's
+      // lazy db opens on the first request — PGlite handles sequential opens of one data dir fine,
+      // live-verified). We deliberately do NOT share createApp's db: createApp only closes the db it
+      // creates itself (not a passed-in one), so sharing would force us to own that close lifecycle —
+      // more risk than the one-time first-boot cost of an extra open.
+      const localWorkspaceId = process.env.GROWTH_OS_WORKSPACE_ID?.trim() || "ws_local";
+      const seedDb = createInfiniteOsDb(config.databaseUrl);
+      try {
+        await seedDb.ensureWorkspace(localWorkspaceId, "Local");
+      } finally {
+        await seedDb.close();
+      }
     } catch (err) {
-      // A daemon with a broken/half-applied schema must NOT serve. Fail loud with a clear cause
-      // (not an opaque unhandled rejection) and exit so the desktop/supervisor surfaces it. Safe to
-      // exit here: this runs before listen + before the keystone descriptor is written.
+      // A daemon with a broken/half-applied schema (or an unseedable DB) must NOT serve. Fail loud
+      // with a clear cause (not an opaque unhandled rejection) and exit so the desktop/supervisor
+      // surfaces it. Safe to exit here: this runs before listen + before the keystone descriptor.
       // console.error too — app.log may be a no-op (default Fastify logger), and a FATAL that exits
       // the process MUST be visible (an `app.log.error?.` alone silently swallowed it in the bundle).
-      console.error("FATAL: boot migration failed; refusing to start with an unmigrated schema:", err);
-      app.log.error?.({ err }, "FATAL: boot migration failed; refusing to start with an unmigrated schema");
+      console.error("FATAL: boot migration/seed failed; refusing to start:", err);
+      app.log.error?.({ err }, "FATAL: boot migration/seed failed; refusing to start");
       process.exit(1);
     }
   }
