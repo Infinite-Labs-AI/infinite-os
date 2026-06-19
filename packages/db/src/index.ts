@@ -97,14 +97,30 @@ export async function runMigrations(databaseUrl: string): Promise<string[]> {
   const client = new pg.Client({ connectionString: databaseUrl });
   await client.connect();
   try {
+    // D1: bound the advisory lock wait to 60 s. pg_advisory_lock blocks
+    // indefinitely by default — a stuck holder would hang every migrator
+    // (including a Meta deploy). SET lock_timeout makes Postgres throw
+    // "lock timeout exceeded" (55P03) if the lock is not free within 60 s.
+    await client.query("set lock_timeout = '60s'");
     // Acquire the session-scoped advisory lock. pg_advisory_lock BLOCKS (waits)
     // until the lock is free — so if another daemon is mid-migration we queue
     // behind it rather than racing. Once we acquire, the other daemon has finished
     // and committed its schema_migrations rows.
-    await client.query(
-      "select pg_advisory_lock($1::int, $2::int)",
-      [MIGRATION_LOCK_CLASSID, MIGRATION_LOCK_OBJID]
-    );
+    try {
+      await client.query(
+        "select pg_advisory_lock($1::int, $2::int)",
+        [MIGRATION_LOCK_CLASSID, MIGRATION_LOCK_OBJID]
+      );
+    } catch (lockErr) {
+      const pgCode = (lockErr as { code?: string }).code;
+      if (pgCode === "55P03") {
+        throw new Error(
+          "another migrator is holding the schema-migration advisory lock for >60s; check for a stuck deploy"
+        );
+      }
+      throw lockErr;
+    }
+    let migrationError: unknown = undefined;
     try {
       await client.query(`
         create table if not exists schema_migrations (
@@ -137,18 +153,38 @@ export async function runMigrations(databaseUrl: string): Promise<string[]> {
         }
       }
       return applied;
+    } catch (err) {
+      // D2: capture the original migration error so cleanup cannot mask it.
+      migrationError = err;
+      throw err;
     } finally {
-      // Release the advisory lock even if a migration threw. SESSION-scoped locks
-      // are auto-released when the connection closes, but being explicit here
-      // means a long-lived pool connection (if ever used in future) frees the lock
-      // immediately rather than holding it until the connection is recycled.
-      await client.query(
-        "select pg_advisory_unlock($1::int, $2::int)",
-        [MIGRATION_LOCK_CLASSID, MIGRATION_LOCK_OBJID]
-      );
+      // D2: release the advisory lock; if unlock fails, only LOG — never mask
+      // the original migration error with a cleanup failure.
+      try {
+        await client.query(
+          "select pg_advisory_unlock($1::int, $2::int)",
+          [MIGRATION_LOCK_CLASSID, MIGRATION_LOCK_OBJID]
+        );
+      } catch (unlockErr) {
+        if (migrationError !== undefined) {
+          // A migration error is already propagating — log the unlock failure
+          // but let the original error win.
+          console.warn("[runMigrations] pg_advisory_unlock failed during error cleanup:", unlockErr);
+        } else {
+          throw unlockErr;
+        }
+      }
     }
   } finally {
-    await client.end();
+    // D2: client.end() must not mask a migration error either.
+    try {
+      await client.end();
+    } catch (endErr) {
+      // Only log if a real error is already propagating; otherwise rethrow.
+      // We cannot distinguish here whether we are in the error path, so we
+      // log and swallow — a connection-close failure is not actionable.
+      console.warn("[runMigrations] client.end() failed:", endErr);
+    }
   }
 }
 

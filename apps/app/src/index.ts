@@ -2233,7 +2233,7 @@ if (isProcessEntrypoint()) {
   // to 15 s and exit 0 to defer (the other starter will finish). If it never
   // appears (the other start died without writing a descriptor), exit 0 anyway —
   // a supervisor / desktop will retry and we'll reclaim the stale lock via TTL.
-  const spawnLock = acquireDaemonSpawnLock();
+  let spawnLock = acquireDaemonSpawnLock();
   if (spawnLock === null) {
     // Another process is mid-spawn. Poll for a healthy daemon descriptor.
     const POLL_INTERVAL_MS = 500;
@@ -2256,19 +2256,37 @@ if (isProcessEntrypoint()) {
       await new Promise<void>((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
     }
     if (healthy) {
+      // C3: a peer is genuinely serving — this is the only correct exit(0) path.
       console.log("another daemon is already starting on this home; deferring");
+      process.exit(0);
     } else {
-      // The other starter seems to have died without finishing. Exit 0 — a
-      // supervisor / desktop will re-resolve and we'll reclaim the stale lock.
-      console.log("spawn lock held but no healthy daemon appeared; deferring (supervisor will retry)");
+      // C3: the holder died before writing a descriptor. Retry acquire once —
+      // the TTL/dead-pid reclaim should have freed the lock by now.
+      spawnLock = acquireDaemonSpawnLock();
+      if (spawnLock === null) {
+        // Still cannot acquire — fail loud so the supervisor surfaces the problem.
+        console.error(
+          "FATAL: spawn lock held but no healthy daemon appeared and lock could not be reclaimed; another process may be stuck"
+        );
+        process.exit(1);
+      }
+      console.log("spawn lock reclaimed after peer failed to finish; proceeding to boot");
     }
-    process.exit(0);
   }
+
+  // C4: register an exit handler immediately after acquiring the lock so it is
+  // released on every exit path — migration/seed catch exit(1), listen failure
+  // (EADDRINUSE), uncaught throw between acquire and descriptor-write, etc.
+  // release() is idempotent (released flag guards it) and unlinkSync is
+  // sync-safe inside a process "exit" handler.
+  process.once("exit", () => {
+    try { spawnLock!.release(); } catch { /* best-effort */ }
+  });
 
   // Register lock release on SIGTERM/SIGINT/onClose so a crash before descriptor-
   // write still frees the lock. The TTL is the ultimate backstop, but belt-and-
   // suspenders keeps the average-case wait near zero.
-  const releaseLockOnShutdown = () => spawnLock.release();
+  const releaseLockOnShutdown = () => spawnLock!.release();
   app.addHook("onClose", async () => {
     releaseLockOnShutdown();
   });
