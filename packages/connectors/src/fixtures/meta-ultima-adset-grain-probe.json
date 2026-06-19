@@ -1,5 +1,5 @@
 {
-  "_comment": "Golden fixture (spec §9 — adset grain) for act_887743100560299. ONE lead-gen campaign (120000000000111) with TWO ad sets (220000000000201 ACTIVE, 220000000000202 PAUSED). The DIVERGENCE rule: each adset reports 2 leads (2 + 2 = 4), but the SAME campaign-grain row reports only 3 leads (Meta dedups conversions across ad sets within the campaign) — so adset-summed results (4) MUST NOT equal the campaign total (3). The re-key on adset_id keeps the two adset rows distinct (campaign-keyed they would collapse to one corrupted row). 'insights' = level=adset insights rows; 'adsetsEdge' = the /act_<id>/adsets status read; 'campaignsEdge' = the /act_<id>/campaigns status backfill. Each action element carries per-window subvalues; the headline window is 7d_click + 1d_view.",
+  "_comment": "Golden fixture (spec §9 — adset grain) for act_887743100560299. ONE lead-gen campaign (120000000000111) with TWO ad sets (220000000000201 ACTIVE, 220000000000202 PAUSED). The DIVERGENCE rule: each adset reports 2 leads (2 + 2 = 4), but the SAME campaign-grain row reports only 3 leads (Meta dedups conversions across ad sets within the campaign) — so adset-summed results (4) MUST NOT equal the campaign total (3). The re-key on adset_id keeps the two adset rows distinct (campaign-keyed they would collapse to one corrupted row). 'insights' = level=adset insights rows; 'adsetsEdge' = the /act_<id>/adsets status read; 'campaignsEdge' = the /act_<id>/campaigns status backfill. Each action element carries per-window subvalues; the headline window is 7d_click + 1d_view. ARCHIVED-REGRESSION (§7a): 'archivedAdsetInsights' is a residual insights row for a recently-archived adset (220000000000203) still inside the rolling window (no recent leads), and 'adsetsEdgeWithArchived' is the /adsets response the connector gets ONLY because it passes the explicit effective_status filter (the edge default-excludes archived). Its effective_status MUST stay ARCHIVED (not NULL/status-unknown) so an archived adset is labeled, not flagged for low-spend underperformance.",
   "insights": [
     {
       "adset_id": "220000000000201",
@@ -94,6 +94,64 @@
         "effective_status": "ACTIVE",
         "status": "ACTIVE",
         "objective": "OUTCOME_LEADS"
+      }
+    ],
+    "paging": {}
+  },
+  "archivedAdsetInsights": [
+    {
+      "adset_id": "220000000000203",
+      "adset_name": "Ultima — Retired: Broad",
+      "campaign_id": "120000000000111",
+      "campaign_name": "Ultima — Lead Gen Q2",
+      "date_start": "2026-06-01",
+      "objective": "OUTCOME_LEADS",
+      "optimization_goal": "LEAD_GENERATION",
+      "spend": "0.00",
+      "clicks": "0",
+      "inline_link_clicks": "0",
+      "impressions": "0",
+      "reach": "0",
+      "frequency": "0",
+      "cpm": "0",
+      "cpc": "0",
+      "ctr": "0",
+      "account_currency": "USD",
+      "result_values_performance_indicator": "actions:lead",
+      "results": [{ "values": [{ "value": "0" }] }],
+      "cost_per_result": [{ "values": [{ "value": "0" }] }],
+      "action_values": [],
+      "actions": []
+    }
+  ],
+  "adsetsEdgeWithArchived": {
+    "data": [
+      {
+        "id": "220000000000201",
+        "name": "Ultima — Lookalike 1%",
+        "optimization_goal": "LEAD_GENERATION",
+        "billing_event": "IMPRESSIONS",
+        "effective_status": "ACTIVE",
+        "status": "ACTIVE",
+        "campaign_id": "120000000000111"
+      },
+      {
+        "id": "220000000000202",
+        "name": "Ultima — Interest: Skincare",
+        "optimization_goal": "LEAD_GENERATION",
+        "billing_event": "IMPRESSIONS",
+        "effective_status": "PAUSED",
+        "status": "PAUSED",
+        "campaign_id": "120000000000111"
+      },
+      {
+        "id": "220000000000203",
+        "name": "Ultima — Retired: Broad",
+        "optimization_goal": "LEAD_GENERATION",
+        "billing_event": "IMPRESSIONS",
+        "effective_status": "ARCHIVED",
+        "status": "ARCHIVED",
+        "campaign_id": "120000000000111"
       }
     ],
     "paging": {}

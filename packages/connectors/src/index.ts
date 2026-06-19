@@ -4110,6 +4110,28 @@ function metaAdsPagingAfter(response: MetaAdsInsightsResponse): string | undefin
 // the cursor never terminates within this many pages we THROW rather than silently truncate.
 const META_ADS_EDGE_PAGE_LIMIT = 200;
 
+// §7a — the /adsets + /campaigns edges DEFAULT-EXCLUDE archived (and deleted) entities from
+// the result set. Without an explicit effective_status filter, a recently-archived adset or
+// campaign that still has insights rows in the rolling window is absent from the dim/status
+// map, so its status falls back to NULL — exactly the on/off regression the spec calls out
+// (a paused/archived adset must be LABELED as such, not treated as status-unknown). Passing
+// this superset filter returns active+paused+archived (incl. inherited campaign/adset-paused
+// and the in-process/with-issues delivery states) on BOTH edges so status stays populated and
+// on/off history stays queryable. DELETED is intentionally omitted (hard-removed, no insights).
+const META_ADS_EDGE_STATUS_FILTER = [
+  "ACTIVE",
+  "PAUSED",
+  "CAMPAIGN_PAUSED",
+  "ADSET_PAUSED",
+  "ARCHIVED",
+  "IN_PROCESS",
+  "WITH_ISSUES",
+  "PENDING_REVIEW",
+  "DISAPPROVED",
+  "PREAPPROVED",
+  "PENDING_BILLING_INFO"
+] as const;
+
 // The on/off status pair for a campaign or adset, read off its Graph node. effectiveStatus
 // = Meta's COMPUTED delivery state (incl. inherited CAMPAIGN_PAUSED/ADSET_PAUSED);
 // configuredStatus = the operator-set value (the Graph `status` field).
@@ -4182,6 +4204,9 @@ async function metaAdsReadEdge(
     const url = new URL(`https://graph.facebook.com/${metaAdsApiVersion(credential)}/${adAccountId}/${edge}`);
     url.searchParams.set("fields", fields);
     url.searchParams.set("limit", "100");
+    // §7a — include archived/paused entities (default-excluded) so their status stays
+    // populated for any insights row still inside the rolling window. See the constant.
+    url.searchParams.set("effective_status", JSON.stringify([...META_ADS_EDGE_STATUS_FILTER]));
     if (after) {
       url.searchParams.set("after", after);
     }

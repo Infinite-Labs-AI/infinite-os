@@ -1287,6 +1287,8 @@ describe("live provider clients", () => {
     insights: Array<Record<string, unknown>>;
     adsetsEdge: { data: Array<Record<string, unknown>>; paging: Record<string, unknown> };
     campaignsEdge: { data: Array<Record<string, unknown>>; paging: Record<string, unknown> };
+    archivedAdsetInsights: Array<Record<string, unknown>>;
+    adsetsEdgeWithArchived: { data: Array<Record<string, unknown>>; paging: Record<string, unknown> };
   };
 
   // Route the direct-Graph calls: /adsets + /campaigns edges return the fixture status
@@ -1401,6 +1403,100 @@ describe("live provider clients", () => {
     }, 0);
     expect(summedLeads).toBe(4);
     expect(summedLeads).not.toBe(3);
+  });
+
+  it("§7a adset: the /adsets + /campaigns edge reads pass an effective_status filter that includes ARCHIVED", async () => {
+    const edgeUrls: string[] = [];
+    await withMockFetch(
+      async (url) => {
+        if (url.includes("/adsets") || url.includes("/campaigns")) {
+          edgeUrls.push(url);
+        }
+        return adsetProbeRouter(url);
+      },
+      async () => {
+        const db = fakeDb({
+          credential: {
+            credential_kind: "marketing_api_access_token",
+            encrypted_payload: encryptedCredential({
+              mode: "live",
+              adAccountId: "887743100560299",
+              accessToken: "meta-access-token",
+              apiVersion: "v25.0"
+            })
+          }
+        });
+        await connectorFor("meta_ads").extract(db, request("meta_ads"), {
+          cursorKey: "meta_ads_campaign_daily",
+          cursorStart: "2026-06-01T00:00:00.000Z",
+          cursorEnd: "2026-06-03T00:00:00.000Z",
+          refreshWindowDays: 30,
+          mode: "live"
+        });
+      }
+    );
+    // Both status edge reads must constrain effective_status (default-excludes archived).
+    const adsetsUrl = edgeUrls.find((url) => url.includes("/adsets"));
+    const campaignsUrl = edgeUrls.find((url) => url.includes("/campaigns"));
+    expect(adsetsUrl).toBeDefined();
+    expect(campaignsUrl).toBeDefined();
+    for (const url of [adsetsUrl, campaignsUrl]) {
+      const filter = new URL(url as string).searchParams.get("effective_status");
+      expect(filter).not.toBeNull();
+      const parsed = JSON.parse(filter as string) as string[];
+      // The filter must surface PAUSED *and* ARCHIVED so on/off history stays queryable.
+      expect(parsed).toContain("ACTIVE");
+      expect(parsed).toContain("PAUSED");
+      expect(parsed).toContain("ARCHIVED");
+    }
+  });
+
+  it("§7a adset: a recently-archived adset with residual insights keeps effective_status=ARCHIVED (not NULL)", async () => {
+    // The /adsets edge returns ACTIVE+PAUSED+ARCHIVED ONLY because the connector passes the
+    // status filter; the archived adset (203) still has an insights row in the rolling window.
+    let rows: Array<Record<string, unknown>> = [];
+    await withMockFetch(
+      async (url) => {
+        if (url.includes("/adsets")) return jsonResponse(ADSET_PROBE.adsetsEdgeWithArchived);
+        if (url.includes("/campaigns")) return jsonResponse(ADSET_PROBE.campaignsEdge);
+        if (isMetaAdsetInsightsRequest(url)) {
+          return jsonResponse({
+            data: [...ADSET_PROBE.insights, ...ADSET_PROBE.archivedAdsetInsights],
+            paging: {}
+          });
+        }
+        return jsonResponse({ data: [], paging: {} });
+      },
+      async () => {
+        const db = fakeDb({
+          credential: {
+            credential_kind: "marketing_api_access_token",
+            encrypted_payload: encryptedCredential({
+              mode: "live",
+              adAccountId: "887743100560299",
+              accessToken: "meta-access-token",
+              apiVersion: "v25.0"
+            })
+          }
+        });
+        const extracted = await connectorFor("meta_ads").extract(db, request("meta_ads"), {
+          cursorKey: "meta_ads_campaign_daily",
+          cursorStart: "2026-06-01T00:00:00.000Z",
+          cursorEnd: "2026-06-03T00:00:00.000Z",
+          refreshWindowDays: 30,
+          mode: "live"
+        });
+        rows = extracted as unknown as Array<Record<string, unknown>>;
+      }
+    );
+    const archived = rows
+      .filter((row) => row.objectType === "meta_ads_adset_daily")
+      .map((row) => row.payload as Record<string, unknown>)
+      .find((payload) => payload.adsetId === "220000000000203");
+    expect(archived).toBeDefined();
+    // The regression lock: its status is ARCHIVED (labelable), never NULL/status-unknown.
+    expect(archived?.effectiveStatus).toBe("ARCHIVED");
+    expect(archived?.configuredStatus).toBe("ARCHIVED");
   });
 
   it("§9 adset: the dispatching writer upserts the adset dim + facts on adset_id-keyed unique keys", async () => {
