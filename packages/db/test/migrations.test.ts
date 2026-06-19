@@ -50,7 +50,8 @@ describe("Infinite OS migration stack", () => {
       "0033_meta_ads_conversion_views_and_metric_seeds.sql",
       "0034_meta_stripe_true_value_and_frequency.sql",
       "0035_meta_ads_adset_grain.sql",
-      "0036_chat_sessions_desktop_surface.sql"
+      "0036_chat_sessions_desktop_surface.sql",
+      "0037_meta_ads_ad_grain.sql"
     ]);
   });
 
@@ -114,6 +115,9 @@ describe("Infinite OS migration stack", () => {
       "meta_ads_adsets",
       "meta_ads_adset_daily",
       "meta_ads_adset_conversions_daily",
+      "meta_ads_ads",
+      "meta_ads_ad_daily",
+      "meta_ads_ad_conversions_daily",
       "chat_sessions",
       "chat_messages",
       "chat_action_calls",
@@ -175,6 +179,9 @@ describe("Infinite OS migration stack", () => {
     // Phase-2 slice-1a — the adset-grain delivery + typed-conversions views.
     expect(sql).toContain("queryable.vw_meta_ads_adset_daily");
     expect(sql).toContain("queryable.vw_meta_ads_adset_conversions_daily");
+    // Phase-2 slice-1b — the ad-grain delivery + typed-conversions views.
+    expect(sql).toContain("queryable.vw_meta_ads_ad_daily");
+    expect(sql).toContain("queryable.vw_meta_ads_ad_conversions_daily");
     expect(sql).toContain("'site_visitors'");
     expect(sql).toContain("'signup_count'");
     expect(sql).toContain("'site_conversion_rate'");
@@ -372,7 +379,8 @@ describe("Infinite OS migration stack", () => {
       "0033_meta_ads_conversion_views_and_metric_seeds.sql",
       "0034_meta_stripe_true_value_and_frequency.sql",
       "0035_meta_ads_adset_grain.sql",
-      "0036_chat_sessions_desktop_surface.sql"
+      "0036_chat_sessions_desktop_surface.sql",
+      "0037_meta_ads_ad_grain.sql"
     ]);
   });
 
@@ -892,6 +900,108 @@ describe("Infinite OS migration stack", () => {
     // SCOPE TRIPWIRE (open-core boundary): this slice is reads only — no ad-account mutation
     // can ride in a migration. There is no Graph write here, but assert the migration does not
     // attempt to flip any status to ACTIVE (a write-shaped value has no place in a read migration).
+    expect(collapsed).not.toContain("set effective_status = 'active'");
+  });
+
+  // Phase-2 slice-1b §2/§3/§9 — the ad/creative grain migration (0037). Mirrors the 0035 adset
+  // contracts at AD grain: the dim carries status + creative_id + a NULLABLE adset_id (orphan
+  // tolerance), every ad fact is RE-KEYED on ad_id (the #1 corruption fix), the views alias
+  // columns IDENTICALLY to the campaign/adset views (so the §5 resolver swaps only the NAME) and
+  // expose status + adset_id/campaign_id, the conversions view LEFT JOINs its OWN ad-grain spend
+  // (never coarser spend — no N-counting) AND DROPS optimization_goal (an adset property), the
+  // partition stays result_type-only, and the grant target is tool_agent + app ONLY.
+  it("creates the ad grain (dim+facts+views) re-keyed on ad_id with creative_id, nullable adset_id, own-grain spend (0037)", () => {
+    const migration = loadMigrations().find(
+      (candidate) => candidate.id === "0037_meta_ads_ad_grain.sql"
+    );
+    const sql = migration?.sql ?? "";
+    const lower = sql.toLowerCase();
+    const collapsed = lower.replace(/\s+/g, " ");
+
+    // §2.1 — the dim carries BOTH status columns + creative_id (NULLABLE) + a NULLABLE adset_id
+    // (orphan tolerance) and a NOT NULL campaign_id, unique on (source_id, ad_account_id, ad_id).
+    expect(lower).toContain("create table meta_ads_ads");
+    for (const col of ["effective_status", "configured_status", "creative_id"]) {
+      expect(lower).toContain(col);
+    }
+    expect(collapsed).toContain("unique (source_id, ad_account_id, ad_id)");
+    // optimization_goal is NOT a COLUMN on the ad stack (it is an adset property carried
+    // in-memory). The word appears in explanatory comments, so forbid only the column form.
+    expect(lower).not.toContain("optimization_goal text");
+
+    // §2.2/§2.3 — the two fact tables and their RE-KEYED unique keys (ad_id, NOT adset/campaign
+    // — the #1 corruption fix). The conversions key additionally pins result_type (the partition).
+    expect(lower).toContain("create table meta_ads_ad_daily");
+    expect(lower).toContain("create table meta_ads_ad_conversions_daily");
+    expect(collapsed).toContain("unique (source_id, ad_account_id, ad_id, occurred_on)");
+    expect(collapsed).toContain("unique (source_id, ad_account_id, ad_id, occurred_on, result_type)");
+    // result_type is NOT NULL on the conversions fact (the REQUIRED partition is structural).
+    expect(collapsed).toContain("result_type text not null");
+    // campaign_id is CARRIED NOT NULL; adset_id is CARRIED but NULLABLE (orphan tolerance, §7a).
+    expect(lower).toContain("campaign_id text not null");
+    // Race-tolerant (§7a): the facts carry ad_id/adset_id/campaign_id with NO hard FK to the
+    // ad/adset dims (mirrors the campaign/adset topology). Forbid an accidental hard FK on facts.
+    expect(lower).not.toContain("references meta_ads_ads");
+    expect(lower).not.toContain("references meta_ads_adsets");
+
+    // §3 — the two views. Aliases IDENTICAL to the campaign/adset views (so the resolver swaps
+    // only the NAME), PLUS the net-new ad identity + the carried adset_id/campaign_id + on/off
+    // status dims.
+    expect(lower).toContain("create view queryable.vw_meta_ads_ad_daily");
+    expect(lower).toContain("create view queryable.vw_meta_ads_ad_conversions_daily");
+    expect(lower).toContain("d.spend as meta_ads_spend");
+    expect(lower).toContain("d.clicks as meta_ads_clicks");
+    expect(lower).toContain("d.inline_link_clicks as link_clicks");
+    // Status + the ad identity + the carried parent ids are exposed as columns on the views.
+    expect(lower).toContain("dim.effective_status");
+    expect(lower).toContain("dim.configured_status");
+    expect(lower).toContain("d.ad_id");
+    expect(lower).toContain("c.adset_id");
+    expect(lower).toContain("c.campaign_id");
+
+    // §2.3 — the ad CONVERSIONS view DROPS optimization_goal from its SELECT (it is an adset
+    // property carried in-memory by the connector, never on the ad dim). Assert the SELECT does
+    // not pull dim.optimization_goal anywhere in this migration.
+    expect(lower).not.toContain("dim.optimization_goal");
+
+    // §3 NO N-COUNTING: the conversions view LEFT JOINs its OWN ad-grain delivery spend
+    // (meta_ads_ad_daily on ad_id + occurred_on), NEVER adset/campaign spend (which would
+    // N-count it). Assert the join is to the ad delivery fact keyed on ad_id.
+    expect(collapsed).toContain("left join meta_ads_ad_daily d on d.source_id = c.source_id");
+    expect(collapsed).toContain("and d.ad_id = c.ad_id");
+    expect(collapsed).toContain("and d.occurred_on = c.occurred_on");
+    // The conversions view must NOT read the campaign/adset delivery fact for spend.
+    expect(collapsed).not.toContain("join meta_ads_campaign_daily");
+    expect(collapsed).not.toContain("from meta_ads_campaign_daily");
+    expect(collapsed).not.toContain("join meta_ads_adset_daily");
+    expect(collapsed).not.toContain("from meta_ads_adset_daily");
+
+    // §3.4 — the metric_definitions expansion: partition = result_type ONLY at ad grain. Assert
+    // the single-element partition is written and the two-element form is NOT present.
+    expect(lower).toContain('"partition_by":["result_type"]');
+    expect(lower).not.toContain('"partition_by":["result_type","objective"]');
+    // The allowed_dimensions expansion adds the ad + status dims (NO new metric IDs — §6).
+    expect(lower).toContain('"ad_id"');
+    expect(lower).toContain('"ad_name"');
+    expect(lower).toContain('"effective_status"');
+    expect(lower).toContain('"configured_status"');
+
+    // §3 — recompute-from-summed-bases stays byte-identical (only the view name swapped).
+    expect(lower).not.toContain("avg(cost_per_result)");
+    expect(lower).not.toContain("avg(roas)");
+
+    // §3 GRANT divergence trap: tool_agent + app ONLY (the Meta views never had read_api).
+    expect(lower).toContain(
+      "grant select on queryable.vw_meta_ads_ad_daily, queryable.vw_meta_ads_ad_conversions_daily to growth_os_tool_agent, growth_os_app"
+    );
+    expect(collapsed).not.toContain("to growth_os_tool_agent, growth_os_app, growth_os_read_api");
+
+    // Idempotent + non-destructive. The view recreate uses `drop view if exists ... cascade`.
+    expect(lower).toContain("on conflict (id) do update set");
+    expect(lower).not.toContain("drop table");
+    expect(lower).not.toContain("drop column");
+    expect(lower).not.toContain("delete from");
+    // SCOPE TRIPWIRE (open-core boundary): reads only — no ad-account mutation, no creative BODY.
     expect(collapsed).not.toContain("set effective_status = 'active'");
   });
 });

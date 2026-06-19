@@ -1,0 +1,145 @@
+{
+  "_comment": "Golden fixture (spec §9 — ad/creative grain) for act_887743100560299. ONE lead-gen ad set (220000000000201) under campaign 120000000000111, with TWO ads (330000000000301 ACTIVE w/ creative cr_900001, 330000000000302 PAUSED w/ creative cr_900002) PLUS one ORPHAN ad with NO adset (330000000000303, ACTIVE, no creative). The DIVERGENCE rule (now one grain finer): each ad reports 2 leads (2 + 2 = 4), but the SAME adset-grain row reports only 3 leads (Meta dedups conversions across ads within the ad set) — so ad-summed results (4) MUST NOT equal the adset total (3). The re-key on ad_id keeps the ad rows distinct (adset/campaign-keyed they would collapse to one corrupted row). 'insights' = level=ad insights rows; 'adsEdge' = the /act_<id>/ads read (status + creative{id} + parent ids); 'adsetsEdge' = the /act_<id>/adsets read (carries optimization_goal that the §4e conversion mapping uses); 'campaignsEdge' = the /act_<id>/campaigns status read. Each action element carries per-window subvalues; the headline window is 7d_click + 1d_view. creative{id} is the field-expansion ONLY — NO creative body. The orphan ad (303) carries a NULL adset_id without failing (§7a) and a NULL creative_id (ad-with-no-creative).",
+  "insights": [
+    {
+      "ad_id": "330000000000301",
+      "ad_name": "Ultima — Hook A (UGC)",
+      "adset_id": "220000000000201",
+      "campaign_id": "120000000000111",
+      "campaign_name": "Ultima — Lead Gen Q2",
+      "date_start": "2026-06-01",
+      "objective": "OUTCOME_LEADS",
+      "spend": "160.00",
+      "clicks": "130",
+      "inline_link_clicks": "110",
+      "impressions": "9000",
+      "reach": "7600",
+      "frequency": "1.184",
+      "cpm": "17.77",
+      "cpc": "1.23",
+      "ctr": "1.44",
+      "account_currency": "USD",
+      "result_values_performance_indicator": "actions:lead",
+      "results": [{ "values": [{ "value": "2" }] }],
+      "cost_per_result": [{ "values": [{ "value": "80.0" }] }],
+      "action_values": [],
+      "actions": [
+        { "action_type": "lead", "value": "1", "1d_click": "1", "7d_click": "1", "1d_view": "1" },
+        { "action_type": "offsite_conversion.fb_pixel_lead", "value": "1", "1d_click": "1", "7d_click": "1", "1d_view": "1" },
+        { "action_type": "onsite_web_lead", "value": "1", "1d_click": "1", "7d_click": "1", "1d_view": "1" },
+        { "action_type": "landing_page_view", "value": "100", "1d_click": "96", "7d_click": "99", "1d_view": "6" },
+        { "action_type": "link_click", "value": "110", "1d_click": "108", "7d_click": "110", "1d_view": "2" }
+      ]
+    },
+    {
+      "ad_id": "330000000000302",
+      "ad_name": "Ultima — Hook B (Static)",
+      "adset_id": "220000000000201",
+      "campaign_id": "120000000000111",
+      "campaign_name": "Ultima — Lead Gen Q2",
+      "date_start": "2026-06-01",
+      "objective": "OUTCOME_LEADS",
+      "spend": "100.00",
+      "clicks": "80",
+      "inline_link_clicks": "70",
+      "impressions": "5000",
+      "reach": "4400",
+      "frequency": "1.136",
+      "cpm": "20.0",
+      "cpc": "1.25",
+      "ctr": "1.6",
+      "account_currency": "USD",
+      "result_values_performance_indicator": "actions:lead",
+      "results": [{ "values": [{ "value": "2" }] }],
+      "cost_per_result": [{ "values": [{ "value": "50.0" }] }],
+      "action_values": [],
+      "actions": [
+        { "action_type": "lead", "value": "1", "1d_click": "1", "7d_click": "1", "1d_view": "1" },
+        { "action_type": "offsite_conversion.fb_pixel_lead", "value": "1", "1d_click": "1", "7d_click": "1", "1d_view": "1" },
+        { "action_type": "onsite_web_lead", "value": "1", "1d_click": "1", "7d_click": "1", "1d_view": "1" },
+        { "action_type": "landing_page_view", "value": "60", "1d_click": "57", "7d_click": "59", "1d_view": "3" },
+        { "action_type": "link_click", "value": "70", "1d_click": "68", "7d_click": "70", "1d_view": "1" }
+      ]
+    },
+    {
+      "ad_id": "330000000000303",
+      "ad_name": "Ultima — Orphan (no adset)",
+      "adset_id": null,
+      "campaign_id": "120000000000111",
+      "campaign_name": "Ultima — Lead Gen Q2",
+      "date_start": "2026-06-01",
+      "objective": "OUTCOME_LEADS",
+      "spend": "12.00",
+      "clicks": "4",
+      "inline_link_clicks": "3",
+      "impressions": "400",
+      "reach": "390",
+      "frequency": "1.025",
+      "cpm": "30.0",
+      "cpc": "3.0",
+      "ctr": "1.0",
+      "account_currency": "USD",
+      "result_values_performance_indicator": "actions:lead",
+      "results": [{ "values": [{ "value": "0" }] }],
+      "cost_per_result": [{ "values": [{ "value": "0" }] }],
+      "action_values": [],
+      "actions": []
+    }
+  ],
+  "adsEdge": {
+    "data": [
+      {
+        "id": "330000000000301",
+        "name": "Ultima — Hook A (UGC)",
+        "creative": { "id": "cr_900001" },
+        "adset_id": "220000000000201",
+        "campaign_id": "120000000000111",
+        "effective_status": "ACTIVE",
+        "status": "ACTIVE"
+      },
+      {
+        "id": "330000000000302",
+        "name": "Ultima — Hook B (Static)",
+        "creative": { "id": "cr_900002" },
+        "adset_id": "220000000000201",
+        "campaign_id": "120000000000111",
+        "effective_status": "PAUSED",
+        "status": "PAUSED"
+      },
+      {
+        "id": "330000000000303",
+        "name": "Ultima — Orphan (no adset)",
+        "adset_id": null,
+        "campaign_id": "120000000000111",
+        "effective_status": "ACTIVE",
+        "status": "ACTIVE"
+      }
+    ],
+    "paging": {}
+  },
+  "adsetsEdge": {
+    "data": [
+      {
+        "id": "220000000000201",
+        "name": "Ultima — Lookalike 1%",
+        "optimization_goal": "LEAD_GENERATION",
+        "billing_event": "IMPRESSIONS",
+        "effective_status": "ACTIVE",
+        "status": "ACTIVE",
+        "campaign_id": "120000000000111"
+      }
+    ],
+    "paging": {}
+  },
+  "campaignsEdge": {
+    "data": [
+      {
+        "id": "120000000000111",
+        "effective_status": "ACTIVE",
+        "status": "ACTIVE",
+        "objective": "OUTCOME_LEADS"
+      }
+    ],
+    "paging": {}
+  }
+}

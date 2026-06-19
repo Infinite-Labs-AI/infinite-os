@@ -397,10 +397,54 @@ interface MetaAdsAdsetDailyRow {
   conversions: MetaAdsConversionRow[];
 }
 
-// §4c — the grain-tagged extract union. extractLive emits a flat array of both grains;
+// Phase-2 slice-1b §2.2/§2.3 — the AD-grain delivery+conversions row. Mirrors the adset
+// row at AD grain, RE-KEYED on ad_id (the #1 corruption fix). campaign_id is CARRIED (never
+// the key); adset_id is CARRIED and NULLABLE (orphan tolerance, §7a ad-with-no-adset). The
+// ad dim attributes (creative_id, on/off status) are folded out of the net-new /ads edge
+// read (§4a) so the dispatching writer can upsert the ad dim before the ad facts (§7a).
+// optimization_goal is an ADSET property carried in-memory from the adset-dim map (§4e) —
+// it is NOT a field on this row; it only drives the §4b conversion mapping at map time.
+interface MetaAdsAdDailyRow {
+  grain: "ad";
+  // RE-KEYED on ad_id (§4c): `meta_ads:ad:<act>:<ad_id>:<day>`. Reusing the adset/campaign
+  // externalId would collapse every ad of an adset onto one corrupted raw_record.
+  externalId: string;
+  adAccountId: string;
+  campaignId: string;
+  // CARRIED parent adset id; NULLABLE — an ad can exist with no resolvable ad set (§7a).
+  adsetId: string | null;
+  adId: string;
+  adName: string | null;
+  // The creative id from the /ads edge creative{id} field-expansion (§4a). NULLABLE
+  // (ad-with-no-creative); coalesced on dim upsert so a later null never wipes it. NO body.
+  creativeId: string | null;
+  occurredOn: string;
+  spend: number;
+  clicks: number;
+  inlineLinkClicks: number;
+  landingPageViews: number;
+  impressions: number;
+  reach: number;
+  cpm: number | null;
+  cpc: number | null;
+  ctr: number | null;
+  currency: string | null;
+  attributionSetting: string;
+  apiVersion: string;
+  actionsRaw: unknown;
+  // Ad dim status attributes (from the /ads edge — §4a). NO optimization_goal/billing_event
+  // (those are adset properties; the §4b mapping carries optimization_goal in-memory, §4e).
+  effectiveStatus: string | null;
+  configuredStatus: string | null;
+  // Typed child conversion rows derived for this ad-day (§2.3), keyed by ad_id. The §4b
+  // mapping is computed against the PARENT adset's optimization_goal (carried, §4e).
+  conversions: MetaAdsConversionRow[];
+}
+
+// §4c — the grain-tagged extract union. extractLive emits a flat array of all three grains;
 // the dispatching writeMetaAdsTruth routes each row to its grain's dim+daily+conversions
-// writer. Both members carry `externalId` (the factory's Row constraint) + `grain`.
-type MetaAdsSyncRow = MetaAdsCampaignDailyRow | MetaAdsAdsetDailyRow;
+// writer. Every member carries `externalId` (the factory's Row constraint) + `grain`.
+type MetaAdsSyncRow = MetaAdsCampaignDailyRow | MetaAdsAdsetDailyRow | MetaAdsAdDailyRow;
 
 interface XProfileSnapshot {
   userId: string;
@@ -932,7 +976,14 @@ const metaAdsConnector = createConnector<MetaAdsCredential, MetaAdsSyncRow>({
   // by grain (adset rows are also RE-KEYED on adset_id in externalId, keeping them distinct).
   toExtractedRecord: (row, plan) => ({
     externalId: row.externalId,
-    objectType: row.grain === "adset" ? "meta_ads_adset_daily" : "meta_ads_campaign_daily",
+    // §4c — objectType tracks grain (campaign | adset | ad) so raw_records/extracted records
+    // are grain-tagged; each grain's externalId is re-keyed on its id, keeping rows distinct.
+    objectType:
+      row.grain === "ad"
+        ? "meta_ads_ad_daily"
+        : row.grain === "adset"
+          ? "meta_ads_adset_daily"
+          : "meta_ads_campaign_daily",
     payloadVersion: plan.mode === "fixture" ? "fixture-v1" : "live-v1",
     sourceUpdatedAt: plan.mode === "fixture" ? null : plan.cursorEnd,
     payload: row
@@ -1043,15 +1094,19 @@ const metaAdsConnector = createConnector<MetaAdsCredential, MetaAdsSyncRow>({
     const accessToken = requireCredential(credential, "accessToken");
 
     // §4a — net-new edge reads. The adset dim map (status + optimization_goal) drives the
-    // adset rows; the campaign status map backfills the campaign dim's NULL-status gap.
+    // adset rows; the campaign status map backfills the campaign dim's NULL-status gap; the
+    // ad dim map (status + creative_id + parent ids) drives the ad rows (§4c). All header-
+    // aware GETs (§4b) — no ad-account mutation anywhere.
     const adsetDims = await metaAdsReadAdsetDims(credential);
     const campaignStatus = await metaAdsReadCampaignStatus(credential);
+    const adDims = await metaAdsReadAdAdims(credential);
 
     const rows: MetaAdsSyncRow[] = [];
 
-    // The campaign insights pass runs unless the caller EXPLICITLY pinned level=adset (the
-    // Phase-0 plumbing override). With no override (the worker's path) level is campaign.
-    if (level !== "adset") {
+    // The campaign insights pass runs unless the caller EXPLICITLY pinned a finer grain (the
+    // Phase-0 plumbing override level=adset/ad). With no override (the worker's path) level is
+    // campaign and all three passes run (§4f: 3 passes/sync is deliberate — no roll-up).
+    if (level !== "adset" && level !== "ad") {
       await metaAdsFetchInsightsPages(
         accessToken,
         metaAdsInsightsUrl(credential, {
@@ -1067,22 +1122,56 @@ const metaAdsConnector = createConnector<MetaAdsCredential, MetaAdsSyncRow>({
       );
     }
 
-    // §4b/§4c — the adset insights pass. Always runs on the primary transport (the worker
-    // does not request adset grain via the flag, so the fan-out lives here). When the caller
-    // explicitly pinned level=adset, only this pass runs (the campaign pass was skipped).
-    await metaAdsFetchInsightsPages(
-      accessToken,
+    // §4b/§4c — the adset insights pass. Runs on the primary transport unless the caller
+    // EXPLICITLY pinned level=ad (then only the ad pass runs). The worker does not request a
+    // finer grain via the flag, so the adset fan-out lives here alongside campaign + ad.
+    if (level !== "ad") {
+      await metaAdsFetchInsightsPages(
+        accessToken,
+        metaAdsInsightsUrl(credential, {
+          adAccountId,
+          fields: metaAdsInsightsFieldsForLevel("adset"),
+          level: "adset",
+          limit: "100",
+          timeIncrement,
+          attributionWindows: META_ADS_ATTRIBUTION_WINDOWS,
+          ...timeOptions
+        }),
+        (row) => rows.push(metaAdsAdsetDailyRow(adAccountId, row, context, adsetDims))
+      );
+    }
+
+    // §4c/§4d/§4e — the AD insights pass (the FINEST grain, the §4f third unconditional pass).
+    // Re-keys on ad_id; carries optimization_goal from the adsetDims map (§4e). VOLUME: the ad
+    // grain cannot survive date_preset=maximum or a wide single window (Meta 100/1487534), so
+    // the all_time BACKFILL is issued MONTH-BY-MONTH (metaAdsFetchAdInsightsChunked, 37-month
+    // clamp, 1487534 → week-narrower retry). Incremental daily syncs (a finite time_range, not
+    // backfillWindow=all_time) stay a SINGLE request — small enough not to trip the data cap.
+    const adRowSink = (row: MetaAdsInsightsRow) =>
+      rows.push(metaAdsAdDailyRow(adAccountId, row, context, adDims, adsetDims));
+    const adUrlFor = (range: { since: string; until: string }) =>
       metaAdsInsightsUrl(credential, {
         adAccountId,
-        fields: metaAdsInsightsFieldsForLevel("adset"),
-        level: "adset",
+        fields: metaAdsInsightsFieldsForLevel("ad"),
+        level: "ad",
         limit: "100",
         timeIncrement,
-        attributionWindows: META_ADS_ATTRIBUTION_WINDOWS,
-        ...timeOptions
-      }),
-      (row) => rows.push(metaAdsAdsetDailyRow(adAccountId, row, context, adsetDims))
-    );
+        timeRange: range,
+        attributionWindows: META_ADS_ATTRIBUTION_WINDOWS
+      });
+    if (timeOptions.datePreset === "maximum") {
+      // §4d — month-by-month backfill instead of date_preset=maximum (which 1487534s at ad
+      // grain). Clamp the start to the 37-month retention floor; iterate calendar months; one
+      // metaAdsFetchInsightsPages call per window, narrowing to weeks on a data-volume error.
+      const untilDay = plan.cursorEnd.slice(0, 10);
+      const sinceDay = metaAdsClampBackfillStart(cursorStartIso(plan).slice(0, 10), untilDay);
+      for (const window of metaAdsMonthWindows(sinceDay, untilDay)) {
+        await metaAdsFetchAdInsightsChunked(accessToken, window, adUrlFor, adRowSink);
+      }
+    } else if (timeOptions.timeRange) {
+      // Incremental trailing window — single request (the rolling sync is small enough).
+      await metaAdsFetchInsightsPages(accessToken, adUrlFor(timeOptions.timeRange), adRowSink);
+    }
 
     return rows;
   },
@@ -2263,6 +2352,40 @@ function metaAdsAdsetDimensionRows(rows: MetaAdsAdsetDailyRow[]): Map<string, Me
   return dims;
 }
 
+// Phase-2 slice-1b §4a/§4c — fold the ad day rows into the ad dimension. Mirrors
+// metaAdsAdsetDimensionRows at ad grain; carries creative_id + status read off the /ads edge.
+// adset_id is NULLABLE (orphan tolerance); coalesce so a re-sync momentarily lacking a value
+// (incl. a creative that disappears) never nulls a previously-seen field (§7 freeze-on-disappear).
+interface MetaAdsAdDimFold {
+  adAccountId: string;
+  campaignId: string;
+  adsetId: string | null;
+  adId: string;
+  name: string | null;
+  creativeId: string | null;
+  effectiveStatus: string | null;
+  configuredStatus: string | null;
+}
+
+function metaAdsAdDimensionRows(rows: MetaAdsAdDailyRow[]): Map<string, MetaAdsAdDimFold> {
+  const dims = new Map<string, MetaAdsAdDimFold>();
+  for (const row of rows) {
+    const key = `${row.adAccountId}:${row.adId}`;
+    const existing = dims.get(key);
+    dims.set(key, {
+      adAccountId: row.adAccountId,
+      campaignId: row.campaignId,
+      adsetId: row.adsetId ?? existing?.adsetId ?? null,
+      adId: row.adId,
+      name: row.adName ?? existing?.name ?? null,
+      creativeId: row.creativeId ?? existing?.creativeId ?? null,
+      effectiveStatus: row.effectiveStatus ?? existing?.effectiveStatus ?? null,
+      configuredStatus: row.configuredStatus ?? existing?.configuredStatus ?? null
+    });
+  }
+  return dims;
+}
+
 async function writeMetaAdsCampaignDimension(
   tx: InfiniteOsDb,
   request: SyncRequest,
@@ -2330,9 +2453,14 @@ async function writeMetaAdsTruth(
   const campaignRawIds: string[] = [];
   const adsetRows: MetaAdsAdsetDailyRow[] = [];
   const adsetRawIds: string[] = [];
+  const adRows: MetaAdsAdDailyRow[] = [];
+  const adRawIds: string[] = [];
   for (let index = 0; index < rows.length; index += 1) {
     const row = rows[index];
-    if (row.grain === "adset") {
+    if (row.grain === "ad") {
+      adRows.push(row);
+      adRawIds.push(rawIds[index]);
+    } else if (row.grain === "adset") {
       adsetRows.push(row);
       adsetRawIds.push(rawIds[index]);
     } else {
@@ -2340,9 +2468,11 @@ async function writeMetaAdsTruth(
       campaignRawIds.push(rawIds[index]);
     }
   }
-  // §7a dim-before-fact: each grain's writer upserts its dim before its facts.
+  // §7a dim-before-fact: each grain's writer upserts its dim before its facts. The three
+  // grains are written independently (no roll-up); ad facts carry adset_id/campaign_id plain.
   await writeMetaAdsCampaignTruth(tx, request, campaignRows, campaignRawIds);
   await writeMetaAdsAdsetTruth(tx, request, adsetRows, adsetRawIds);
+  await writeMetaAdsAdTruth(tx, request, adRows, adRawIds);
 }
 
 async function writeMetaAdsCampaignTruth(
@@ -2668,6 +2798,203 @@ async function writeMetaAdsAdsetConversionRows(
       request,
       "meta_ads_adset_conversions_daily",
       `${row.adAccountId}:${row.adsetId}:${row.occurredOn}:${conversion.resultType}`,
+      rawRecordId
+    );
+  }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────────
+// Phase-2 slice-1b §4c/§7a — the AD-grain writer trio. Mirrors the adset writers, RE-KEYED
+// on ad_id (the #1 corruption fix): the dim conflict key is (source_id, ad_account_id,
+// ad_id), the daily key adds occurred_on, the conversions key adds result_type. campaign_id
+// is CARRIED on every row; adset_id is CARRIED and NULLABLE (§7a). creative_id coalesces on
+// upsert (freeze-on-disappearance, §7). §7a dim-before-fact: the dim upsert runs before facts.
+// ──────────────────────────────────────────────────────────────────────────────────
+async function writeMetaAdsAdDimension(
+  tx: InfiniteOsDb,
+  request: SyncRequest,
+  rows: MetaAdsAdDailyRow[],
+  rawIds: string[]
+): Promise<void> {
+  const rawRecordId = rawIds[0] ?? null;
+  for (const dim of metaAdsAdDimensionRows(rows).values()) {
+    await tx.query(
+      `
+        insert into meta_ads_ads (
+          id, workspace_id, source_id, raw_record_id, ad_account_id, campaign_id, adset_id,
+          ad_id, name, creative_id, effective_status, configured_status
+        )
+        values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+        on conflict (source_id, ad_account_id, ad_id)
+        do update set
+          raw_record_id = excluded.raw_record_id,
+          -- coalesce so a re-sync momentarily lacking a field never nulls a known value;
+          -- §7 freeze-on-disappearance: a paused/archived ad (or a creative that drops out of
+          -- the edge response) retains its row + last creative_id/status, so on/off + creative
+          -- lifecycle history stays queryable. adset_id is NULLABLE (orphan tolerance, §7a).
+          campaign_id = coalesce(excluded.campaign_id, meta_ads_ads.campaign_id),
+          adset_id = coalesce(excluded.adset_id, meta_ads_ads.adset_id),
+          name = coalesce(excluded.name, meta_ads_ads.name),
+          creative_id = coalesce(excluded.creative_id, meta_ads_ads.creative_id),
+          effective_status = coalesce(excluded.effective_status, meta_ads_ads.effective_status),
+          configured_status = coalesce(excluded.configured_status, meta_ads_ads.configured_status),
+          updated_at = now()
+      `,
+      [
+        `madx_${randomUUID()}`,
+        request.workspaceId,
+        request.sourceId,
+        rawRecordId,
+        dim.adAccountId,
+        dim.campaignId,
+        dim.adsetId,
+        dim.adId,
+        dim.name,
+        dim.creativeId,
+        dim.effectiveStatus,
+        dim.configuredStatus
+      ]
+    );
+    if (rawRecordId) {
+      await writeLineage(tx, request, "meta_ads_ads", `${dim.adAccountId}:${dim.adId}`, rawRecordId);
+    }
+  }
+}
+
+async function writeMetaAdsAdTruth(
+  tx: InfiniteOsDb,
+  request: SyncRequest,
+  rows: MetaAdsAdDailyRow[],
+  rawIds: string[]
+): Promise<void> {
+  // §7a — upsert the ad dim BEFORE the ad facts (so creative_id/status exist).
+  await writeMetaAdsAdDimension(tx, request, rows, rawIds);
+  for (let index = 0; index < rows.length; index += 1) {
+    const row = rows[index];
+    // §4c restatement — unique key (source_id, ad_account_id, ad_id, occurred_on) is RE-KEYED
+    // on ad_id, so each ad's day row is distinct (no adset/campaign-keyed collapse) and a
+    // re-sync of the rolling window is last-write-wins.
+    await tx.query(
+      `
+        insert into meta_ads_ad_daily (
+          id, workspace_id, source_id, raw_record_id, ad_account_id, campaign_id, adset_id,
+          ad_id, ad_name, occurred_on, spend, clicks, inline_link_clicks, landing_page_views,
+          impressions, reach, cpm, cpc, ctr, currency, attribution_setting, actions_raw, api_version
+        )
+        values (
+          $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22::jsonb,$23
+        )
+        on conflict (source_id, ad_account_id, ad_id, occurred_on)
+        do update set
+          raw_record_id = excluded.raw_record_id,
+          campaign_id = excluded.campaign_id,
+          adset_id = excluded.adset_id,
+          ad_name = excluded.ad_name,
+          spend = excluded.spend,
+          clicks = excluded.clicks,
+          inline_link_clicks = excluded.inline_link_clicks,
+          landing_page_views = excluded.landing_page_views,
+          impressions = excluded.impressions,
+          reach = excluded.reach,
+          cpm = excluded.cpm,
+          cpc = excluded.cpc,
+          ctr = excluded.ctr,
+          currency = excluded.currency,
+          attribution_setting = excluded.attribution_setting,
+          actions_raw = excluded.actions_raw,
+          api_version = excluded.api_version,
+          updated_at = now()
+      `,
+      [
+        `madad_${randomUUID()}`,
+        request.workspaceId,
+        request.sourceId,
+        rawIds[index],
+        row.adAccountId,
+        row.campaignId,
+        row.adsetId,
+        row.adId,
+        row.adName,
+        row.occurredOn,
+        row.spend,
+        row.clicks,
+        row.inlineLinkClicks,
+        row.landingPageViews,
+        row.impressions,
+        row.reach,
+        row.cpm,
+        row.cpc,
+        row.ctr,
+        row.currency,
+        row.attributionSetting,
+        JSON.stringify(row.actionsRaw ?? {}),
+        row.apiVersion
+      ]
+    );
+    await writeLineage(
+      tx,
+      request,
+      "meta_ads_ad_daily",
+      `${row.adAccountId}:${row.adId}:${row.occurredOn}`,
+      rawIds[index]
+    );
+    await writeMetaAdsAdConversionRows(tx, request, row, rawIds[index]);
+  }
+}
+
+// §2.3 / §4c — fan the ad day's typed child conversions into meta_ads_ad_conversions_daily.
+// Unique key RE-KEYED on ad_id (+ result_type partition). NEVER summed up to adset or
+// campaign — Meta dedups conversions only within an ad set, so ad sums can EXCEED the adset.
+async function writeMetaAdsAdConversionRows(
+  tx: InfiniteOsDb,
+  request: SyncRequest,
+  row: MetaAdsAdDailyRow,
+  rawRecordId: string
+): Promise<void> {
+  for (const conversion of row.conversions) {
+    await tx.query(
+      `
+        insert into meta_ads_ad_conversions_daily (
+          id, workspace_id, source_id, raw_record_id, ad_account_id, campaign_id, adset_id,
+          ad_id, occurred_on, result_type, results, conversion_value, attribution_setting,
+          is_primary, results_source
+        )
+        values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+        on conflict (source_id, ad_account_id, ad_id, occurred_on, result_type)
+        do update set
+          raw_record_id = excluded.raw_record_id,
+          campaign_id = excluded.campaign_id,
+          adset_id = excluded.adset_id,
+          results = excluded.results,
+          conversion_value = excluded.conversion_value,
+          attribution_setting = excluded.attribution_setting,
+          is_primary = excluded.is_primary,
+          results_source = excluded.results_source,
+          updated_at = now()
+      `,
+      [
+        `madadc_${randomUUID()}`,
+        request.workspaceId,
+        request.sourceId,
+        rawRecordId,
+        row.adAccountId,
+        row.campaignId,
+        row.adsetId,
+        row.adId,
+        row.occurredOn,
+        conversion.resultType,
+        conversion.results,
+        conversion.conversionValue,
+        conversion.attributionSetting,
+        conversion.isPrimary,
+        conversion.resultsSource
+      ]
+    );
+    await writeLineage(
+      tx,
+      request,
+      "meta_ads_ad_conversions_daily",
+      `${row.adAccountId}:${row.adId}:${row.occurredOn}:${conversion.resultType}`,
       rawRecordId
     );
   }
@@ -3422,6 +3749,13 @@ const META_ADS_INSIGHTS_FIELDS = [
 // shared field list never silently adds adset_id to the campaign request (or to the
 // MCP/CLI transports, which stay campaign-grain this slice).
 function metaAdsInsightsFieldsForLevel(level: string): string {
+  // Phase-2 slice-1b §4c — at level=ad we PREPEND ad_id,ad_name,adset_id so the ad row mapper
+  // can re-key on ad_id (the #1 corruption fix) AND carry the parent adset_id (also the key the
+  // §4e optimization_goal carry uses to look up the adset dim). campaign_id is NOT prepended —
+  // it already leads META_ADS_INSIGHTS_FIELDS (the carried parent key is echoed at every grain).
+  if (level === "ad") {
+    return `ad_id,ad_name,adset_id,${META_ADS_INSIGHTS_FIELDS}`;
+  }
   if (level === "adset") {
     return `adset_id,adset_name,${META_ADS_INSIGHTS_FIELDS}`;
   }
@@ -3718,6 +4052,78 @@ function metaAdsInsightsUrl(
   return url.toString();
 }
 
+// ──────────────────────────────────────────────────────────────────────────────────
+// Phase-2 slice-1b §4d — MONTH-BY-MONTH DATE-CHUNKING for the level=ad BACKFILL.
+//
+// WHY (the founder-chosen volume solution): a level=ad + daily + wide-range + many-ads
+// insights request trips Meta error 100 / subcode 1487534 ("reduce the amount of data"),
+// and date_preset=maximum at ad grain WILL fail outright. So the ad backfill is NEVER one
+// request — it is issued in MONTH-sized time_range windows. Each window is small enough to
+// return synchronously; a window that STILL 1487534s is retried NARROWER (split into weeks).
+// Async report-run jobs are deferred to Slice 2 (this is the §10 locked decision).
+//
+// 37-MONTH CLAMP: Meta retains ad-grain insights for ~37 months; older windows silently
+// return empty. We CLAMP the backfill start to 37 months ago rather than asking for windows
+// that can only ever be empty (label-don't-fail). Incremental daily syncs (the trailing
+// rolling window) are small enough to stay single-request and never enter this chunk loop.
+// ──────────────────────────────────────────────────────────────────────────────────
+const META_ADS_AD_BACKFILL_MAX_MONTHS = 37;
+
+// A single inclusive [since, until] day window (YYYY-MM-DD), the shape time_range wants.
+interface MetaAdsDateWindow {
+  since: string;
+  until: string;
+}
+
+function metaAdsIsoDay(date: Date): string {
+  return date.toISOString().slice(0, 10);
+}
+
+// Clamp the backfill start to at most META_ADS_AD_BACKFILL_MAX_MONTHS before `until`. Returns
+// the LATER of the requested start and the 37-month floor (older → silently-empty windows).
+function metaAdsClampBackfillStart(sinceDay: string, untilDay: string): string {
+  const floor = new Date(`${untilDay}T00:00:00.000Z`);
+  floor.setUTCMonth(floor.getUTCMonth() - META_ADS_AD_BACKFILL_MAX_MONTHS);
+  const floorDay = metaAdsIsoDay(floor);
+  return sinceDay < floorDay ? floorDay : sinceDay;
+}
+
+// Split [since, until] into consecutive MONTH-sized windows (calendar-month boundaries; the
+// first/last windows are partial). Each window is one metaAdsFetchInsightsPages call.
+function metaAdsMonthWindows(sinceDay: string, untilDay: string): MetaAdsDateWindow[] {
+  const windows: MetaAdsDateWindow[] = [];
+  if (sinceDay > untilDay) {
+    return windows;
+  }
+  let cursor = new Date(`${sinceDay}T00:00:00.000Z`);
+  const until = new Date(`${untilDay}T00:00:00.000Z`);
+  while (cursor <= until) {
+    // The end of THIS calendar month (or `until`, whichever is earlier).
+    const monthEnd = new Date(Date.UTC(cursor.getUTCFullYear(), cursor.getUTCMonth() + 1, 0));
+    const windowUntil = monthEnd < until ? monthEnd : until;
+    windows.push({ since: metaAdsIsoDay(cursor), until: metaAdsIsoDay(windowUntil) });
+    // Advance to the first day of the next month.
+    cursor = new Date(Date.UTC(windowUntil.getUTCFullYear(), windowUntil.getUTCMonth() + 1, 1));
+  }
+  return windows;
+}
+
+// Split one window into WEEK-sized sub-windows (the narrower retry when a month 1487534s).
+function metaAdsWeekWindows(window: MetaAdsDateWindow): MetaAdsDateWindow[] {
+  const windows: MetaAdsDateWindow[] = [];
+  let cursor = new Date(`${window.since}T00:00:00.000Z`);
+  const until = new Date(`${window.until}T00:00:00.000Z`);
+  while (cursor <= until) {
+    const weekEnd = new Date(cursor);
+    weekEnd.setUTCDate(weekEnd.getUTCDate() + 6);
+    const windowUntil = weekEnd < until ? weekEnd : until;
+    windows.push({ since: metaAdsIsoDay(cursor), until: metaAdsIsoDay(windowUntil) });
+    cursor = new Date(windowUntil);
+    cursor.setUTCDate(cursor.getUTCDate() + 1);
+  }
+  return windows;
+}
+
 interface MetaAdsInsightsContext {
   apiVersion: string;
   attributionSetting: string;
@@ -3733,6 +4139,31 @@ interface MetaAdsInsightsContext {
 //     near-throttle run never returns a partial window that looks complete.
 const META_ADS_INSIGHTS_PAGE_LIMIT = 1000;
 const META_ADS_THROTTLE_CEILING_PCT = 95;
+
+// §4e — real backoff-with-retry on high utilization (replaces the slice-1a fail-loud throw).
+// When acc_id_util_pct crosses the ceiling we sleep and retry the SAME request up to
+// META_ADS_THROTTLE_MAX_RETRIES times, with an exponential backoff (base * 2^attempt). Only
+// AFTER the retries are exhausted do we fail loud (refusing to truncate the window). The
+// backoff is reachable on BOTH transports now that edge reads are header-aware (§4b).
+const META_ADS_THROTTLE_MAX_RETRIES = 4;
+const META_ADS_THROTTLE_BACKOFF_BASE_MS = 1000;
+
+// §4d — Meta error code 100 / subcode 1487534 ("Please reduce the amount of data you're
+// asking for") fires on wide-range, high-cardinality reads (level=ad + daily + many ads +
+// long window, and date_preset=maximum at ad grain). It surfaces as a 400 carrying the
+// subcode in the JSON error body. The chunk-loop caller classifies it to retry the window
+// NARROWER (month → week) rather than failing the whole backfill.
+const META_ADS_DATA_VOLUME_ERROR_SUBCODE = 1487534;
+
+// Sleep helper for the throttle backoff. Resolves after `ms` milliseconds. Under vitest the
+// delay is collapsed to a microtask so the retry control-flow is exercised without real
+// wall-clock waits (the retry COUNT/sequence is asserted, not the literal sleep duration).
+function metaAdsSleep(ms: number): Promise<void> {
+  if (process.env.VITEST) {
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 // Parse acc_id_util_pct out of the x-fb-ads-insights-throttle header. The header is a JSON
 // object like {"app_id_util_pct":1.2,"acc_id_util_pct":42.0,"ads_api_access_tier":"..."}.
@@ -3750,6 +4181,73 @@ function metaAdsThrottleUtilization(header: string | null): number | null {
   }
 }
 
+// §4d — does this thrown error carry Meta's "reduce the amount of data" subcode (1487534)?
+// The subcode is preserved in the ConnectorError.message (responseSafeDetail keeps the JSON
+// error body; redactProviderErrorDetail only strips tokens), so we match it textually — the
+// transport helpers branch only on HTTP status and never structurally parse error_subcode.
+// Matching the subcode (a stable Meta constant) keeps the narrower-retry trigger explicit.
+function isMetaAdsDataVolumeError(error: unknown): boolean {
+  if (!(error instanceof ConnectorError)) {
+    return false;
+  }
+  return error.message.includes(String(META_ADS_DATA_VOLUME_ERROR_SUBCODE));
+}
+
+// §4b/§4e — a single header-aware GET with throttle backoff-with-retry. Reads the
+// x-fb-ads-insights-throttle header (which fetchJson discards) and, on high acc_id_util_pct,
+// sleeps + retries the SAME request rather than failing loud. Mirrors fetchJson's retryable
+// taxonomy for the status branches (401/403 non-retryable auth, 429 retryable, other non-2xx
+// retryable). Returns the OK Response with its body still unread so the caller can json() it.
+// Used by BOTH the edge reader (§4b) and the insights pager (§4e). 429s also back off here.
+async function metaAdsFetchWithThrottleBackoff(url: string, init: RequestInit): Promise<Response> {
+  const safeUrl = safeUrlForLogs(url);
+  for (let attempt = 0; ; attempt += 1) {
+    const response = await fetch(url, init);
+    if (response.status === 401 || response.status === 403) {
+      throw new ConnectorError(
+        "provider_auth_failed",
+        providerHttpErrorMessage("provider auth failed", response.status, safeUrl, await responseSafeDetail(response)),
+        false
+      );
+    }
+    // §4e — a 429 (hard rate limit) backs off and retries like a high-utilization response;
+    // only after the retry budget is exhausted does it surface as the retryable error.
+    if (response.status === 429) {
+      if (attempt < META_ADS_THROTTLE_MAX_RETRIES) {
+        await metaAdsSleep(META_ADS_THROTTLE_BACKOFF_BASE_MS * 2 ** attempt);
+        continue;
+      }
+      throw new ConnectorError(
+        "provider_rate_limited",
+        providerHttpErrorMessage("provider rate limited", response.status, safeUrl, await responseSafeDetail(response)),
+        true
+      );
+    }
+    if (!response.ok) {
+      throw new ConnectorError(
+        "provider_api_error",
+        providerHttpErrorMessage("provider request failed", response.status, safeUrl, await responseSafeDetail(response)),
+        true
+      );
+    }
+    // §4e — back off on high account utilization BEFORE consuming the window. Sleep + retry
+    // the same request; fail loud only once the retry budget is spent (refusing to truncate).
+    const utilization = metaAdsThrottleUtilization(response.headers.get("x-fb-ads-insights-throttle"));
+    if (utilization !== null && utilization >= META_ADS_THROTTLE_CEILING_PCT) {
+      if (attempt < META_ADS_THROTTLE_MAX_RETRIES) {
+        await metaAdsSleep(META_ADS_THROTTLE_BACKOFF_BASE_MS * 2 ** attempt);
+        continue;
+      }
+      throw new ConnectorError(
+        "provider_rate_limited",
+        `Meta Ads insights throttle high (acc_id_util_pct=${utilization} >= ${META_ADS_THROTTLE_CEILING_PCT}) after ${META_ADS_THROTTLE_MAX_RETRIES} retries; refusing to truncate the window`,
+        true
+      );
+    }
+    return response;
+  }
+}
+
 // §4d — page through a direct-Graph /insights URL, invoking `onRow` for every row, with the
 // fail-loud page cap + throttle guard. Header-aware (reads x-fb-ads-insights-throttle, which
 // fetchJson would discard); otherwise mirrors fetchJson's retryable taxonomy (401/403 auth
@@ -3764,41 +4262,14 @@ async function metaAdsFetchInsightsPages(
     if (!nextUrl) {
       return;
     }
-    const safeUrl = safeUrlForLogs(nextUrl);
-    const response = await fetch(nextUrl, {
+    // §4e — header-aware GET with real throttle backoff-with-retry (was fail-loud in
+    // slice-1a). A 400 carrying error_subcode 1487534 surfaces as a retryable
+    // provider_api_error here; the §4d chunk-loop caller classifies it (isMetaAdsDataVolume-
+    // Error) and retries the WINDOW narrower — this pager itself does not narrow.
+    const response = await metaAdsFetchWithThrottleBackoff(nextUrl, {
       method: "GET",
       headers: { "Content-Type": "application/json", ...bearerHeaders(accessToken) }
     });
-    if (response.status === 401 || response.status === 403) {
-      throw new ConnectorError(
-        "provider_auth_failed",
-        providerHttpErrorMessage("provider auth failed", response.status, safeUrl, await responseSafeDetail(response)),
-        false
-      );
-    }
-    if (response.status === 429) {
-      throw new ConnectorError(
-        "provider_rate_limited",
-        providerHttpErrorMessage("provider rate limited", response.status, safeUrl, await responseSafeDetail(response)),
-        true
-      );
-    }
-    if (!response.ok) {
-      throw new ConnectorError(
-        "provider_api_error",
-        providerHttpErrorMessage("provider request failed", response.status, safeUrl, await responseSafeDetail(response)),
-        true
-      );
-    }
-    // §4d — fail loud on high account utilization BEFORE consuming a partial window.
-    const utilization = metaAdsThrottleUtilization(response.headers.get("x-fb-ads-insights-throttle"));
-    if (utilization !== null && utilization >= META_ADS_THROTTLE_CEILING_PCT) {
-      throw new ConnectorError(
-        "provider_rate_limited",
-        `Meta Ads insights throttle high (acc_id_util_pct=${utilization} >= ${META_ADS_THROTTLE_CEILING_PCT}); refusing to truncate the window`,
-        true
-      );
-    }
     const body = (await response.json()) as MetaAdsInsightsResponse;
     for (const row of body.data ?? []) {
       onRow(row);
@@ -3812,6 +4283,33 @@ async function metaAdsFetchInsightsPages(
     `Meta Ads insights pagination exceeded the ${META_ADS_INSIGHTS_PAGE_LIMIT}-page limit (refusing to truncate)`,
     true
   );
+}
+
+// Phase-2 slice-1b §4d — run the level=ad BACKFILL over MONTH-sized windows. For each month
+// window we issue one metaAdsFetchInsightsPages call; if Meta answers a window with subcode
+// 1487534 ("reduce the amount of data") we DO NOT fail the backfill — we retry that ONE
+// window split into WEEK sub-windows. Any error that is NOT a data-volume error (auth, a
+// genuine 5xx after retries, the page-cap throw) propagates unchanged. `urlFor` builds the
+// /insights URL for a given time_range so the loop owns only the windowing, not the field set.
+async function metaAdsFetchAdInsightsChunked(
+  accessToken: string,
+  window: MetaAdsDateWindow,
+  urlFor: (range: MetaAdsDateWindow) => string,
+  onRow: (row: MetaAdsInsightsRow) => void
+): Promise<void> {
+  try {
+    await metaAdsFetchInsightsPages(accessToken, urlFor(window), onRow);
+  } catch (error) {
+    // §4d — ONLY a data-volume (1487534) error triggers the narrower retry; everything else
+    // (auth/rate-limit-after-retries/page-cap) is a real failure and re-throws.
+    if (!isMetaAdsDataVolumeError(error)) {
+      throw error;
+    }
+    // The month window is still too wide — split it into weeks and retry each sub-window.
+    for (const week of metaAdsWeekWindows(window)) {
+      await metaAdsFetchInsightsPages(accessToken, urlFor(week), onRow);
+    }
+  }
 }
 
 // §4 — derive the typed child conversion rows for one campaign-day from the raw
@@ -3992,6 +4490,71 @@ function metaAdsAdsetDailyRow(
   };
 }
 
+// Phase-2 slice-1b §4c/§4e — map one AD-level insights row to an AD-grain row. externalId is
+// RE-KEYED on ad_id (the #1 corruption fix). The ad dim attributes (creative_id, status) come
+// from the /ads edge map (§4a); the parent adset_id/campaign_id are carried (adset_id is
+// NULLABLE, §7a). The §4b conversion mapping needs optimization_goal — an ADSET property — so
+// it is carried in-memory from the ADSET-dim map keyed on the row's adset_id (§4e), NOT from
+// the ad dim and NOT from the ad insights row (level=ad insights does not echo it reliably).
+function metaAdsAdDailyRow(
+  adAccountId: string,
+  row: MetaAdsInsightsRow,
+  context: MetaAdsInsightsContext,
+  adById: Map<string, MetaAdsAdDim>,
+  adsetById: Map<string, MetaAdsAdsetDim>
+): MetaAdsAdDailyRow {
+  const occurredOn = row.date_start ?? daysAgo(0);
+  const actions = metaInsightsActions(row);
+  const landingPageViews = Math.round(metaSumActionType(actions, "landing_page_view"));
+  const adId = String(row.ad_id ?? "unknown");
+  const dim = adById.get(adId);
+  // Carry the parent adset_id (NULLABLE): prefer the insights echo, fall back to the ad dim.
+  const adsetId = stringOrNull(row.adset_id) ?? dim?.adsetId ?? null;
+  // §4e — optimization_goal is carried from the PARENT ADSET dim (keyed on adset_id), the
+  // exact driver of the §4b result_type mapping. We rebuild the conversion row with it so
+  // metaAdsConversionRows resolves the same canonical rule it does at adset grain. Fall back
+  // to the campaign objective echo (already on the row) when the ad has no resolvable adset.
+  const adsetDim = adsetId ? adsetById.get(adsetId) : undefined;
+  const optimizationGoal = adsetDim?.optimizationGoal ?? stringOrNull(row.optimization_goal);
+  const conversionRow: MetaAdsInsightsRow = {
+    ...row,
+    optimization_goal: optimizationGoal ?? row.optimization_goal ?? null
+  };
+  return {
+    grain: "ad",
+    externalId: `meta_ads:ad:${adAccountId}:${adId}:${occurredOn}`,
+    adAccountId,
+    // Carry the parent campaign_id: prefer the insights echo, fall back to the ad dim.
+    campaignId: String(row.campaign_id ?? dim?.campaignId ?? "unknown"),
+    adsetId,
+    adId,
+    adName: stringOrNull(row.ad_name) ?? dim?.name ?? null,
+    // creative_id from the /ads edge (creative{id}); freeze-on-disappearance is the writer's
+    // coalesce — here we just surface the last-seen value from the dim map.
+    creativeId: dim?.creativeId ?? null,
+    occurredOn,
+    spend: numberOrZero(row.spend),
+    clicks: integerOrZero(row.clicks),
+    inlineLinkClicks: integerOrZero(row.inline_link_clicks),
+    landingPageViews,
+    impressions: integerOrZero(row.impressions),
+    reach: integerOrZero(row.reach),
+    cpm: numberOrNull(row.cpm),
+    cpc: numberOrNull(row.cpc),
+    ctr: numberOrNull(row.ctr),
+    currency: stringOrNull(row.account_currency)?.toLowerCase() ?? null,
+    attributionSetting: context.attributionSetting,
+    apiVersion: context.apiVersion,
+    actionsRaw: {
+      actions: actions ?? [],
+      action_values: metaInsightsActionValues(row) ?? []
+    },
+    effectiveStatus: dim?.effectiveStatus ?? null,
+    configuredStatus: dim?.configuredStatus ?? null,
+    conversions: metaAdsConversionRows(conversionRow, context)
+  };
+}
+
 async function metaAdsMcpInsights(
   credential: MetaAdsCredential,
   input: {
@@ -4152,6 +4715,20 @@ interface MetaAdsAdsetDim extends MetaAdsEntityStatus {
   currency: string | null;
 }
 
+// Phase-2 slice-1b §4a — one ad dim row read off /act_<id>/ads. The ad node carries its
+// parent adset_id + campaign_id (carried onto the ad facts) and the creative{id}
+// field-expansion (creative?.id). status comes from here (it is not on insights). NO
+// optimization_goal here — that is an ADSET property the §4b mapping carries in-memory from
+// the adset-dim map (§4e). adsetId is NULLABLE (orphan tolerance, §7a ad-with-no-adset).
+interface MetaAdsAdDim extends MetaAdsEntityStatus {
+  adId: string;
+  campaignId: string | null;
+  adsetId: string | null;
+  name: string | null;
+  // From the creative{id} field-expansion — the creative id ONLY, never a creative body.
+  creativeId: string | null;
+}
+
 // One Graph edge node as returned by /act_<id>/<edge>. Loose by design (Graph echoes only
 // requested fields). NOTE: Graph returns the operator-configured status under `status`
 // (NOT `configured_status`); effective_status is its own field. We map `status` into the
@@ -4166,6 +4743,11 @@ interface MetaAdsEdgeNode {
   optimization_goal?: string | null;
   billing_event?: string | null;
   campaign_id?: string | null;
+  // §4a — the parent adset id, echoed on the /ads edge (carried onto the ad dim/facts).
+  adset_id?: string | null;
+  // §4a — the creative{id} field-expansion on the /ads edge: a nested object carrying only
+  // the creative id (NO body is requested). creative?.id ?? null becomes the ad's creative_id.
+  creative?: { id?: string | null } | null;
 }
 
 interface MetaAdsEdgeResponse {
@@ -4186,14 +4768,18 @@ function metaAdsEdgeNodeStatus(node: MetaAdsEdgeNode): MetaAdsEntityStatus {
   };
 }
 
-// Cursor-paginated GET over an /act_<id>/<edge> read. Reuses fetchJson (read taxonomy) +
-// bearerHeaders (token in Authorization only, never the URL) + metaAdsPagingAfter (the
-// existing cursor extractor, which listMetaEntities ignores). §4d fail-loud: a hard page
-// cap that THROWS on overrun (no silent truncation). Direct-Graph (marketing_api) only —
-// MCP/CLI transports have no edge reader this slice (status degrades to NULL with a caveat).
+// Cursor-paginated GET over an /act_<id>/<edge> read. §4b — HEADER-AWARE: it does its OWN
+// raw fetch() (NOT fetchJson, which discards response.headers) so edge reads honor the
+// x-fb-ads-insights-throttle / X-Business-Use-Case-Usage utilization headers — the same
+// pattern metaAdsFetchInsightsPages uses for /insights. §4e — real backoff-with-retry on
+// high utilization (metaAdsFetchWithThrottleBackoff) rather than fail-loud, now that the
+// headers are reachable on edges. §4d fail-loud: a hard page cap that THROWS on overrun (no
+// silent truncation). bearerHeaders keeps the token in Authorization only, never the URL.
+// Direct-Graph (marketing_api) only — MCP/CLI transports have no edge reader this slice
+// (status degrades to NULL with a caveat). The 'ads' edge (§4a) is added to the union.
 async function metaAdsReadEdge(
   credential: MetaAdsCredential,
-  edge: "adsets" | "campaigns",
+  edge: "adsets" | "campaigns" | "ads",
   fields: string
 ): Promise<MetaAdsEdgeNode[]> {
   const accessToken = requireCredential(credential, "accessToken");
@@ -4210,19 +4796,23 @@ async function metaAdsReadEdge(
     if (after) {
       url.searchParams.set("after", after);
     }
-    const response = await fetchJson<MetaAdsEdgeResponse>(url.toString(), {
+    // §4b/§4e — header-aware GET with throttle backoff. Mirrors fetchJson's retryable
+    // taxonomy (401/403 non-retryable, 429 retryable, other non-2xx retryable) but reads the
+    // throttle headers fetchJson would discard and backs off instead of failing loud.
+    const response = await metaAdsFetchWithThrottleBackoff(url.toString(), {
       method: "GET",
-      headers: bearerHeaders(accessToken)
+      headers: { "Content-Type": "application/json", ...bearerHeaders(accessToken) }
     });
-    nodes.push(...(response.data ?? []));
-    const nextAfter = metaAdsPagingAfter(response as MetaAdsInsightsResponse);
+    const body = (await response.json()) as MetaAdsEdgeResponse;
+    nodes.push(...(body.data ?? []));
+    const nextAfter = metaAdsPagingAfter(body as MetaAdsInsightsResponse);
     if (!nextAfter) {
       return nodes;
     }
     after = nextAfter;
   }
   // §4d — the cursor never terminated within the cap. Fail LOUD (retryable) rather than
-  // returning a silently-truncated status set that would label live adsets as unknown.
+  // returning a silently-truncated status set that would label live entities as unknown.
   throw new ConnectorError(
     "provider_api_error",
     `Meta Ads /${edge} edge pagination exceeded the ${META_ADS_EDGE_PAGE_LIMIT}-page limit (refusing to truncate status)`,
@@ -4252,6 +4842,38 @@ async function metaAdsReadAdsetDims(credential: MetaAdsCredential): Promise<Map<
       optimizationGoal: stringOrNull(node.optimization_goal),
       billingEvent: stringOrNull(node.billing_event),
       currency: null,
+      effectiveStatus: status.effectiveStatus,
+      configuredStatus: status.configuredStatus
+    });
+  }
+  return dims;
+}
+
+// Phase-2 slice-1b §4a — read /act_<id>/ads and build the ad dim map keyed by ad_id. Status,
+// creative_id, and the parent adset_id/campaign_id come from here (none are on insights). The
+// field set requests creative{id} (the field-expansion, NO body). optimization_goal is NOT
+// read here — it is an ADSET property the §4b mapping carries from the adset-dim map (§4e).
+async function metaAdsReadAdAdims(credential: MetaAdsCredential): Promise<Map<string, MetaAdsAdDim>> {
+  const nodes = await metaAdsReadEdge(
+    credential,
+    "ads",
+    "id,name,creative{id},adset_id,campaign_id,effective_status,status"
+  );
+  const dims = new Map<string, MetaAdsAdDim>();
+  for (const node of nodes) {
+    const adId = stringOrNull(node.id);
+    if (!adId) {
+      continue;
+    }
+    const status = metaAdsEdgeNodeStatus(node);
+    dims.set(adId, {
+      adId,
+      campaignId: stringOrNull(node.campaign_id),
+      // §7a — NULLABLE adset_id (ad-with-no-adset tolerated; carried, not required).
+      adsetId: stringOrNull(node.adset_id),
+      name: stringOrNull(node.name),
+      // creative{id} field-expansion → creative?.id ?? null. NEVER a creative body.
+      creativeId: stringOrNull(node.creative?.id),
       effectiveStatus: status.effectiveStatus,
       configuredStatus: status.configuredStatus
     });
@@ -5670,6 +6292,10 @@ interface MetaAdsInsightsRow {
   // grain). campaign_id is still echoed at adset grain (the carried parent key).
   adset_id?: string | null;
   adset_name?: string | null;
+  // Phase-2 slice-1b §4c — ad identity, present ONLY when level=ad (added to the field list at
+  // that grain). adset_id + campaign_id are still echoed at ad grain (the carried parent keys).
+  ad_id?: string | null;
+  ad_name?: string | null;
   date_start?: string | null;
   spend?: string | number | null;
   clicks?: string | number | null;
