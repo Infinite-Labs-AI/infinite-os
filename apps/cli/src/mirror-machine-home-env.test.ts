@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -113,5 +113,134 @@ describe("mirrorMachineHomeEnv", () => {
     );
 
     expect(existsSync(join(machineHome, ".env"))).toBe(true);
+  });
+
+  // FIX A1: conflict guard tests
+  it("throws when DATABASE_URL already exists in machine-home .env with a different value", () => {
+    const projectGrowthDir = join(tmpDir, "project", ".growth-os");
+    const machineHome = join(tmpDir, "machine-home");
+    mkdirSync(projectGrowthDir, { recursive: true });
+    mkdirSync(machineHome, { recursive: true });
+    writeFileSync(
+      join(machineHome, ".env"),
+      "DATABASE_URL=postgres://localhost/original-db\nGROWTH_OS_ENCRYPTION_KEY=original-key\n",
+      { mode: 0o600 }
+    );
+
+    expect(() =>
+      mirrorMachineHomeEnv(
+        projectGrowthDir,
+        {
+          DATABASE_URL: "postgres://localhost/different-db",
+          GROWTH_OS_ENCRYPTION_KEY: "original-key",
+          GROWTH_OS_READ_TOKEN: "tok",
+          GROWTH_OS_OPERATOR_TOKEN: "op"
+        },
+        { GROWTH_OS_HOME: machineHome }
+      )
+    ).toThrow(/conflict on DATABASE_URL/);
+  });
+
+  it("throws when GROWTH_OS_ENCRYPTION_KEY already exists with a different value", () => {
+    const projectGrowthDir = join(tmpDir, "project", ".growth-os");
+    const machineHome = join(tmpDir, "machine-home");
+    mkdirSync(projectGrowthDir, { recursive: true });
+    mkdirSync(machineHome, { recursive: true });
+    writeFileSync(
+      join(machineHome, ".env"),
+      "DATABASE_URL=postgres://localhost/db\nGROWTH_OS_ENCRYPTION_KEY=original-key\n",
+      { mode: 0o600 }
+    );
+
+    expect(() =>
+      mirrorMachineHomeEnv(
+        projectGrowthDir,
+        {
+          DATABASE_URL: "postgres://localhost/db",
+          GROWTH_OS_ENCRYPTION_KEY: "different-key"
+        },
+        { GROWTH_OS_HOME: machineHome }
+      )
+    ).toThrow(/conflict on GROWTH_OS_ENCRYPTION_KEY/);
+  });
+
+  it("does not throw when DATABASE_URL matches the existing machine-home value", () => {
+    const projectGrowthDir = join(tmpDir, "project", ".growth-os");
+    const machineHome = join(tmpDir, "machine-home");
+    mkdirSync(projectGrowthDir, { recursive: true });
+    mkdirSync(machineHome, { recursive: true });
+    writeFileSync(
+      join(machineHome, ".env"),
+      "DATABASE_URL=postgres://localhost/same-db\n",
+      { mode: 0o600 }
+    );
+
+    expect(() =>
+      mirrorMachineHomeEnv(
+        projectGrowthDir,
+        { DATABASE_URL: "postgres://localhost/same-db" },
+        { GROWTH_OS_HOME: machineHome }
+      )
+    ).not.toThrow();
+  });
+
+  // FIX A3: host-reachability filter tests
+  it("does NOT mirror DATABASE_URL when the host is a docker-internal service name", () => {
+    const projectGrowthDir = join(tmpDir, "project", ".growth-os");
+    const machineHome = join(tmpDir, "machine-home");
+    mkdirSync(projectGrowthDir, { recursive: true });
+
+    mirrorMachineHomeEnv(
+      projectGrowthDir,
+      {
+        DATABASE_URL: "postgres://growth_os:secret@postgres:5432/growth_os",
+        GROWTH_OS_ENCRYPTION_KEY: "enc-key",
+        GROWTH_OS_READ_TOKEN: "read-tok",
+        GROWTH_OS_OPERATOR_TOKEN: "op-tok"
+      },
+      { GROWTH_OS_HOME: machineHome }
+    );
+
+    const parsed = parseDotEnv(readFileSync(join(machineHome, ".env"), "utf8"));
+    // DATABASE_URL with docker-internal host must be withheld.
+    expect(parsed.DATABASE_URL).toBeUndefined();
+    // Tokens and encryption key must still be mirrored.
+    expect(parsed.GROWTH_OS_ENCRYPTION_KEY).toBe("enc-key");
+    expect(parsed.GROWTH_OS_READ_TOKEN).toBe("read-tok");
+    expect(parsed.GROWTH_OS_OPERATOR_TOKEN).toBe("op-tok");
+  });
+
+  it("mirrors DATABASE_URL when the host is localhost", () => {
+    const projectGrowthDir = join(tmpDir, "project", ".growth-os");
+    const machineHome = join(tmpDir, "machine-home");
+    mkdirSync(projectGrowthDir, { recursive: true });
+
+    mirrorMachineHomeEnv(
+      projectGrowthDir,
+      {
+        DATABASE_URL: "postgres://growth_os:secret@localhost:5432/growth_os",
+        GROWTH_OS_ENCRYPTION_KEY: "enc-key"
+      },
+      { GROWTH_OS_HOME: machineHome }
+    );
+
+    const parsed = parseDotEnv(readFileSync(join(machineHome, ".env"), "utf8"));
+    expect(parsed.DATABASE_URL).toBe("postgres://growth_os:secret@localhost:5432/growth_os");
+  });
+
+  // FIX A2: atomic write — no .tmp file left behind
+  it("leaves no .tmp file behind after a successful write", () => {
+    const projectGrowthDir = join(tmpDir, "project", ".growth-os");
+    const machineHome = join(tmpDir, "machine-home");
+    mkdirSync(projectGrowthDir, { recursive: true });
+
+    mirrorMachineHomeEnv(
+      projectGrowthDir,
+      { DATABASE_URL: "postgres://localhost/test", GROWTH_OS_ENCRYPTION_KEY: "k" },
+      { GROWTH_OS_HOME: machineHome }
+    );
+
+    const tmpFiles = readdirSync(machineHome).filter((f) => f.endsWith(".tmp"));
+    expect(tmpFiles).toEqual([]);
   });
 });

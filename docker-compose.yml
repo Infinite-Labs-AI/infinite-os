@@ -70,8 +70,10 @@ services:
       # (container HOME). The host volume mount below puts that file on the host
       # at ~/.growth-os/daemon.json. GROWTH_OS_ADVERTISED_URL tells the daemon to
       # record the host-reachable published-port URL instead of the in-container
-      # bind address, so the desktop can attach via http://127.0.0.1:3000.
-      GROWTH_OS_ADVERTISED_URL: "http://127.0.0.1:3000"
+      # bind address, so the desktop can attach on the correct host port.
+      # FIX B2: use the published port var so advertised URL always matches the
+      # host-side port even when GROWTH_OS_APP_PORT is customised.
+      GROWTH_OS_ADVERTISED_URL: "http://127.0.0.1:${GROWTH_OS_APP_PORT:-3000}"
     ports:
       - "${GROWTH_OS_APP_PORT:-3000}:3000"
     healthcheck:
@@ -85,10 +87,20 @@ services:
       start_period: 300s
     volumes:
       - .:/workspace
-      # Bind-mount the host machine home so daemon.json (and any other machine-home
-      # files) land on the host at ~/.growth-os/. The container user is root
-      # (node:20-bookworm-slim default), so its HOME is /root.
-      - ${HOME}/.growth-os:/root/.growth-os
+      # FIX B1: mount only the discovery descriptor file, NOT the entire
+      # ~/.growth-os directory. Mounting the whole dir would expose auth.json
+      # OAuth tokens and the secrets .env (operator token, encryption key) into
+      # the container — those must never cross the host/container boundary.
+      #
+      # We mount only daemon.json: the container writes its descriptor there and
+      # the host desktop reads it at ~/.growth-os/daemon.json to discover the
+      # live daemon URL. auth.json and .env stay on the host exclusively.
+      #
+      # PREREQUISITE: the host file must exist before `docker compose up` so
+      # Docker binds it as a file (not a directory). Run once on the host:
+      #   mkdir -p ~/.growth-os && touch ~/.growth-os/daemon.json
+      # `infinite start` does this automatically; manual users must run it once.
+      - ${HOME}/.growth-os/daemon.json:/root/.growth-os/daemon.json
       - growth_os_app_root_node_modules:/workspace/node_modules
       - growth_os_app_node_modules:/workspace/apps/app/node_modules
       - growth_os_app_runtime_node_modules:/workspace/packages/runtime/node_modules

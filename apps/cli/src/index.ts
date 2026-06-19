@@ -65,6 +65,7 @@ import {
   markMigrationNoticeShown,
   type InfiniteOsConfig,
   infiniteOsAuthPath,
+  infiniteOsHome,
   infiniteOsWorkspaceId,
   infiniteOsUserConfigPath,
   readInfiniteOsAuthState,
@@ -3832,19 +3833,30 @@ function writeRuntimeSetupFiles(options: {
   const envPath = join(growthDir, ".env");
   const configPath = join(growthDir, "config.yml");
   const existingEnv = existsSync(envPath) ? parseDotEnv(readFileSync(envPath, "utf8")) : {};
+  // Read machine-home .env as a secondary fallback for key generation. When a
+  // project-local .env doesn't exist yet (first setup on a fresh workspace) but
+  // the machine home already has keys from a previous project, we reuse them
+  // instead of generating new ones that would conflict with the mirror guard.
+  const machineHomeEnvPath = join(infiniteOsHome(options.env as NodeJS.ProcessEnv), ".env");
+  const machineHomeEnv = existsSync(machineHomeEnvPath)
+    ? parseDotEnv(readFileSync(machineHomeEnvPath, "utf8"))
+    : {};
   const deploymentEnv = {
     DATABASE_URL: options.databaseUrl,
     GROWTH_OS_ENCRYPTION_KEY:
       options.env.GROWTH_OS_ENCRYPTION_KEY ??
       existingEnv.GROWTH_OS_ENCRYPTION_KEY ??
+      machineHomeEnv.GROWTH_OS_ENCRYPTION_KEY ??
       generateEncryptionKey(),
     GROWTH_OS_READ_TOKEN:
       options.env.GROWTH_OS_READ_TOKEN ??
       existingEnv.GROWTH_OS_READ_TOKEN ??
+      machineHomeEnv.GROWTH_OS_READ_TOKEN ??
       "dev-read-token",
     GROWTH_OS_OPERATOR_TOKEN:
       options.env.GROWTH_OS_OPERATOR_TOKEN ??
       existingEnv.GROWTH_OS_OPERATOR_TOKEN ??
+      machineHomeEnv.GROWTH_OS_OPERATOR_TOKEN ??
       "dev-operator-token"
   };
   writeFileSync(

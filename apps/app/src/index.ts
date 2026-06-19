@@ -2309,7 +2309,16 @@ if (isProcessEntrypoint()) {
   // AFTER listen resolves, via the bound socket address. The descriptor is
   // discovery-only: NO tokens.
   const bound = app.server.address();
-  const descriptor = buildDaemonDescriptor({ address: bound as BoundAddress | string | null });
+  // FIX B3: pass advertisedUrl through the descriptor input so the option is
+  // actually threaded (not just read from env inside buildDaemonDescriptor).
+  // The env var GROWTH_OS_ADVERTISED_URL still takes precedence (docker-compose
+  // sets it); the input.advertisedUrl acts as a programmatic fallback for callers
+  // that construct the URL without touching env (e.g. integration tests).
+  const advertisedUrl = process.env.GROWTH_OS_ADVERTISED_URL?.trim() || undefined;
+  const descriptor = buildDaemonDescriptor({
+    address: bound as BoundAddress | string | null,
+    advertisedUrl
+  });
   const { path: descriptorPath } = writeDaemonDescriptor(descriptor);
   app.log.info?.({ url: descriptor.url, descriptor: descriptorPath }, "daemon descriptor written");
 }
