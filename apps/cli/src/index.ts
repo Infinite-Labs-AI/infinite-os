@@ -3820,6 +3820,8 @@ function currentModelSummary(env: CliEnv): {
   };
 }
 
+export { mirrorMachineHomeEnv } from "./mirror-machine-home-env.js";
+
 function writeRuntimeSetupFiles(options: {
   workspaceRoot: string;
   databaseUrl: string;
@@ -3856,6 +3858,9 @@ function writeRuntimeSetupFiles(options: {
       ""
     ].join("\n")
   );
+  // Mirror the 4 runtime secrets to the machine-home rendezvous so the desktop
+  // picks them up regardless of which workspace the CLI was initialised in.
+  mirrorMachineHomeEnv(growthDir, deploymentEnv, options.env as NodeJS.ProcessEnv);
   writeFileSync(
     configPath,
     [

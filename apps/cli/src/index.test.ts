@@ -11683,6 +11683,20 @@ describe("meta command (CLI write surface + confirm gates)", () => {
   });
 });
 
+// mirrorMachineHomeEnv tests live in mirror-machine-home-env.test.ts (no Ink dep)
+
+function parseDotEnvForTest(input: string): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const line of input.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const eq = trimmed.indexOf("=");
+    if (eq === -1) continue;
+    result[trimmed.slice(0, eq).trim()] = trimmed.slice(eq + 1).trim();
+  }
+  return result;
+}
+
 function isRecordResult(value: unknown): boolean {
   return value !== null && typeof value === "object";
 }
