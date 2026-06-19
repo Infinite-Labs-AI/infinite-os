@@ -213,11 +213,46 @@ describe("Infinite OS app-hosted API/MCP skeleton", () => {
         platform: "slack",
         channelId: "channel-1",
         actorId: "user-1",
-        sessionId: "slack:channel-1:user-1",
+        // Session id is workspace-qualified, mirroring the CLI's
+        // deriveControllerSessionId so chat_sessions PKs cannot collide across
+        // workspaces that share a conversation id.
+        sessionId: `slack:channel-1:user-1:${WORKSPACE}`,
         message: "Stripe revenue is up this month."
       });
       expect((modelRequests[0] as { userMessage: string }).userMessage).toBe("Revenue?");
-      expect(sessionEvents[0]).toEqual(["ensureSession", "slack:channel-1:user-1", "user-1", "api", WORKSPACE]);
+      // The controller sees the workspace-qualified session key; an unknown
+      // platform ("slack") maps to the "api" surface default.
+      expect(sessionEvents[0]).toEqual([
+        "ensureSession",
+        `slack:channel-1:user-1:${WORKSPACE}`,
+        "user-1",
+        "api",
+        WORKSPACE
+      ]);
+
+      // A "desktop" platform maps to the "desktop" RuntimeSurface (B2.5) and
+      // the session id is still workspace-qualified (B2), matching the CLI.
+      const desktopTurn = await app.inject({
+        method: "POST",
+        url: "/gateway/turn",
+        headers: OPERATOR_HEADERS,
+        payload: { platform: "desktop", actorId: "user-1", channelId: "channel-1", message: "Revenue?" }
+      });
+      expect(desktopTurn.statusCode).toBe(200);
+      expect(desktopTurn.json()).toMatchObject({
+        platform: "desktop",
+        sessionId: `desktop:channel-1:user-1:${WORKSPACE}`
+      });
+      const desktopEnsure = (sessionEvents as Array<[string, string, string, string, string]>).find(
+        (event) => event[0] === "ensureSession" && event[1] === `desktop:channel-1:user-1:${WORKSPACE}`
+      );
+      expect(desktopEnsure).toEqual([
+        "ensureSession",
+        `desktop:channel-1:user-1:${WORKSPACE}`,
+        "user-1",
+        "desktop",
+        WORKSPACE
+      ]);
     } finally {
       // env restored by afterEach
     }
