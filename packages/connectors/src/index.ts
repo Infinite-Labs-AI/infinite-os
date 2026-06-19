@@ -1143,10 +1143,13 @@ const metaAdsConnector = createConnector<MetaAdsCredential, MetaAdsSyncRow>({
 
     // §4c/§4d/§4e — the AD insights pass (the FINEST grain, the §4f third unconditional pass).
     // Re-keys on ad_id; carries optimization_goal from the adsetDims map (§4e). VOLUME: the ad
-    // grain cannot survive date_preset=maximum or a wide single window (Meta 100/1487534), so
-    // the all_time BACKFILL is issued MONTH-BY-MONTH (metaAdsFetchAdInsightsChunked, 37-month
-    // clamp, 1487534 → week-narrower retry). Incremental daily syncs (a finite time_range, not
-    // backfillWindow=all_time) stay a SINGLE request — small enough not to trip the data cap.
+    // grain cannot survive a wide single window (Meta 100/1487534), so EVERY backfill — whether
+    // the all_time sentinel OR a bounded 3/6/12-month / --days N window — is issued MONTH-BY-
+    // MONTH (metaAdsFetchAdInsightsChunked, 37-month clamp, 1487534 → week-narrower retry). The
+    // chunk decision is driven by plan.backfillWindow + window width, NOT the date_preset=maximum
+    // sentinel: a bounded multi-month backfill is exactly the wide level=ad request that trips
+    // 1487534, so it MUST chunk too. Only a genuinely-small trailing incremental refresh (no
+    // backfillWindow, ≤ one month) stays a SINGLE request.
     const adRowSink = (row: MetaAdsInsightsRow) =>
       rows.push(metaAdsAdDailyRow(adAccountId, row, context, adDims, adsetDims));
     const adUrlFor = (range: { since: string; until: string }) =>
@@ -1159,18 +1162,30 @@ const metaAdsConnector = createConnector<MetaAdsCredential, MetaAdsSyncRow>({
         timeRange: range,
         attributionWindows: META_ADS_ATTRIBUTION_WINDOWS
       });
-    if (timeOptions.datePreset === "maximum") {
-      // §4d — month-by-month backfill instead of date_preset=maximum (which 1487534s at ad
-      // grain). Clamp the start to the 37-month retention floor; iterate calendar months; one
-      // metaAdsFetchInsightsPages call per window, narrowing to weeks on a data-volume error.
-      const untilDay = plan.cursorEnd.slice(0, 10);
-      const sinceDay = metaAdsClampBackfillStart(cursorStartIso(plan).slice(0, 10), untilDay);
-      for (const window of metaAdsMonthWindows(sinceDay, untilDay)) {
+    // The chunked windows are resolved from the plan (all_time → no timeRange; bounded backfill
+    // → a finite timeRange). For the single-request path we need a concrete trailing window: use
+    // timeOptions.timeRange when present, else the plan's resolved span (the all_time case never
+    // reaches the single-request branch because plan.backfillWindow forces chunking).
+    const adTrailingRange = timeOptions.timeRange ?? {
+      since: cursorStartIso(plan).slice(0, 10),
+      until: plan.cursorEnd.slice(0, 10)
+    };
+    if (metaAdsAdPassNeedsChunking(plan, adTrailingRange)) {
+      // §4d — month-by-month backfill (or a defensively-wide incremental window). Clamp the
+      // start to the 37-month retention floor; iterate calendar months; one metaAdsFetchInsights
+      // Pages call per window, narrowing to weeks on a 1487534 data-volume error.
+      for (const window of metaAdsAdBackfillWindows(plan)) {
         await metaAdsFetchAdInsightsChunked(accessToken, window, adUrlFor, adRowSink);
       }
-    } else if (timeOptions.timeRange) {
-      // Incremental trailing window — single request (the rolling sync is small enough).
-      await metaAdsFetchInsightsPages(accessToken, adUrlFor(timeOptions.timeRange), adRowSink);
+    } else {
+      // Incremental trailing window — single request (the rolling sync is small enough). Still
+      // wrapped in the chunk helper so a surprise 1487534 narrows to weeks instead of failing.
+      await metaAdsFetchAdInsightsChunked(
+        accessToken,
+        adTrailingRange,
+        adUrlFor,
+        adRowSink
+      );
     }
 
     return rows;
@@ -4082,8 +4097,18 @@ function metaAdsIsoDay(date: Date): string {
 // Clamp the backfill start to at most META_ADS_AD_BACKFILL_MAX_MONTHS before `until`. Returns
 // the LATER of the requested start and the 37-month floor (older → silently-empty windows).
 function metaAdsClampBackfillStart(sinceDay: string, untilDay: string): string {
-  const floor = new Date(`${untilDay}T00:00:00.000Z`);
+  const until = new Date(`${untilDay}T00:00:00.000Z`);
+  // Anchor the month shift to day-1 BEFORE subtracting months so setUTCMonth never overflows a
+  // short target month (e.g. until=2026-03-31 minus 37mo must land in Feb 2023, not Mar 3). We
+  // then re-apply the original day-of-month, clamped to the target month's length, so the floor
+  // is exactly N months before `until` without the day-of-month carrying into the next month.
+  const day = until.getUTCDate();
+  const floor = new Date(Date.UTC(until.getUTCFullYear(), until.getUTCMonth(), 1));
   floor.setUTCMonth(floor.getUTCMonth() - META_ADS_AD_BACKFILL_MAX_MONTHS);
+  const lastDayOfFloorMonth = new Date(
+    Date.UTC(floor.getUTCFullYear(), floor.getUTCMonth() + 1, 0)
+  ).getUTCDate();
+  floor.setUTCDate(Math.min(day, lastDayOfFloorMonth));
   const floorDay = metaAdsIsoDay(floor);
   return sinceDay < floorDay ? floorDay : sinceDay;
 }
@@ -4122,6 +4147,48 @@ function metaAdsWeekWindows(window: MetaAdsDateWindow): MetaAdsDateWindow[] {
     cursor.setUTCDate(cursor.getUTCDate() + 1);
   }
   return windows;
+}
+
+// §4d — inclusive day-span (days) of a [since, until] window. Used to decide whether the ad
+// pass must chunk: any range wider than a single calendar slice is too wide for one level=ad
+// daily request on a many-ads account (the Meta 100/1487534 trigger).
+function metaAdsWindowSpanDays(window: MetaAdsDateWindow): number {
+  const since = new Date(`${window.since}T00:00:00.000Z`).getTime();
+  const until = new Date(`${window.until}T00:00:00.000Z`).getTime();
+  return Math.round((until - since) / (24 * 60 * 60 * 1000));
+}
+
+// §4d — the day a single un-chunked level=ad request is safe up to. A trailing incremental
+// refresh (≤ this many days) stays ONE request; anything wider is routed through the
+// month-chunk loop. 31 ≈ the widest month so a one-month refresh never needlessly splits.
+const META_ADS_AD_SINGLE_REQUEST_MAX_DAYS = 31;
+
+// §4d — resolve the ad pass's chunked [since, until] windows from the plan. This is the SINGLE
+// source of truth for the ad backfill range and applies to EVERY backfill shape, not just the
+// all_time sentinel:
+//   * all_time          → cursorStart is null → cursorStartIso falls back to the refresh window
+//                         (or, in practice, the worker's all_time intent); clamped to 37 months.
+//   * 3/6/12_months,
+//     --days N, any
+//     mode=backfill      → cursorStart pinned by the plan; the FULL multi-month span is chunked.
+// The start is always clamped to the 37-month retention floor (older windows return empty at
+// Meta — label-don't-fail). Returns month-sized windows ready for metaAdsFetchAdInsightsChunked.
+function metaAdsAdBackfillWindows(plan: SyncPlan): MetaAdsDateWindow[] {
+  const untilDay = plan.cursorEnd.slice(0, 10);
+  const sinceDay = metaAdsClampBackfillStart(cursorStartIso(plan).slice(0, 10), untilDay);
+  return metaAdsMonthWindows(sinceDay, untilDay);
+}
+
+// §4d — does the ad insights pass need the month-chunk loop, or is the trailing window small
+// enough for one request? A BACKFILL (any backfillWindow, including all_time) ALWAYS chunks —
+// the whole point is to never issue a wide level=ad request. A non-backfill incremental sync
+// chunks only when its trailing window is wider than the single-request ceiling (a defensive
+// net for very-high-cardinality accounts whose 30d daily refresh could still 1487534).
+function metaAdsAdPassNeedsChunking(plan: SyncPlan, range: MetaAdsDateWindow): boolean {
+  if (plan.backfillWindow !== undefined) {
+    return true;
+  }
+  return metaAdsWindowSpanDays(range) > META_ADS_AD_SINGLE_REQUEST_MAX_DAYS;
 }
 
 interface MetaAdsInsightsContext {

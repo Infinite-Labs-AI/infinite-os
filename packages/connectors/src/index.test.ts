@@ -1982,6 +1982,169 @@ describe("live provider clients", () => {
     expect(ranges[3]).toEqual({ since: "2026-06-01", until: "2026-06-03" });
   });
 
+  it("§4d ad: a BOUNDED backfill (12_months) is also issued MONTH-BY-MONTH, never one wide time_range", async () => {
+    // REGRESSION GUARD: the CLI's 3/6/12-month backfills queue backfillWindow:'12_months'
+    // (NOT 'all_time') with refreshWindowDays:365. The ad pass must chunk these EXACTLY like
+    // all_time — a single un-chunked 365-day level=ad daily request is the wide-range shape
+    // that trips Meta 100/subcode 1487534. The chunk decision is driven by plan.backfillWindow,
+    // not the date_preset=maximum sentinel.
+    const insightsUrls: string[] = [];
+    await withMockFetch(
+      async (url) => {
+        if (isMetaAdInsightsRequest(url)) {
+          insightsUrls.push(url);
+          return jsonResponse({ data: [], paging: {} });
+        }
+        return adProbeRouter(url);
+      },
+      async () => {
+        await connectorFor("meta_ads").extract(
+          fakeDb({
+            credential: {
+              credential_kind: "marketing_api_access_token",
+              encrypted_payload: encryptedCredential({
+                mode: "live",
+                adAccountId: "887743100560299",
+                accessToken: "meta-access-token",
+                apiVersion: "v25.0"
+              })
+            }
+          }),
+          { ...request("meta_ads"), metaAdsInsightsLevel: "ad", backfillWindow: "12_months" },
+          {
+            // A 12-month backfill: cursorStart pinned ~12 months before cursorEnd. The plan
+            // carries backfillWindow:'12_months' (a bounded window — NOT all_time).
+            cursorKey: "meta_ads_campaign_daily",
+            cursorStart: "2025-06-03T00:00:00.000Z",
+            cursorEnd: "2026-06-03T00:00:00.000Z",
+            refreshWindowDays: 365,
+            mode: "live",
+            backfillWindow: "12_months"
+          }
+        );
+      }
+    );
+    expect(insightsUrls.length).toBeGreaterThan(1);
+    // No request may use date_preset, and NO single time_range may exceed 31 days (a month).
+    for (const url of insightsUrls) {
+      expect(new URL(url).searchParams.get("date_preset")).toBeNull();
+      const range = JSON.parse(new URL(url).searchParams.get("time_range") as string) as {
+        since: string;
+        until: string;
+      };
+      const span =
+        (new Date(`${range.until}T00:00:00Z`).getTime() - new Date(`${range.since}T00:00:00Z`).getTime()) /
+        (24 * 60 * 60 * 1000);
+      expect(span).toBeLessThanOrEqual(31);
+    }
+    // Jun 2025 → Jun 2026 is 13 calendar-month windows; the first starts at the pinned cursor.
+    const ranges = insightsUrls.map((url) => JSON.parse(new URL(url).searchParams.get("time_range") as string));
+    expect(ranges[0]).toEqual({ since: "2025-06-03", until: "2025-06-30" });
+    expect(ranges[ranges.length - 1]).toEqual({ since: "2026-06-01", until: "2026-06-03" });
+  });
+
+  it("§4d ad: a BOUNDED backfill narrows to weeks on a forced 1487534 (no whole-run failure)", async () => {
+    // The bounded path must carry the SAME 1487534 classify-and-retry-narrower as all_time:
+    // force the first month window to the data-volume error, then succeed on the week retries.
+    const insightsRanges: Array<{ since: string; until: string }> = [];
+    let firstWindowFailed = false;
+    await withMockFetch(
+      async (url) => {
+        if (isMetaAdInsightsRequest(url)) {
+          const range = JSON.parse(new URL(url).searchParams.get("time_range") as string);
+          if (!firstWindowFailed && range.since === "2025-06-03" && range.until === "2025-06-30") {
+            firstWindowFailed = true;
+            return new Response(
+              JSON.stringify({
+                error: { message: "Please reduce the amount of data", code: 100, error_subcode: 1487534 }
+              }),
+              { status: 400, headers: { "Content-Type": "application/json" } }
+            );
+          }
+          insightsRanges.push(range);
+          return jsonResponse({ data: [], paging: {} });
+        }
+        return adProbeRouter(url);
+      },
+      async () => {
+        await connectorFor("meta_ads").extract(
+          fakeDb({
+            credential: {
+              credential_kind: "marketing_api_access_token",
+              encrypted_payload: encryptedCredential({
+                mode: "live",
+                adAccountId: "887743100560299",
+                accessToken: "meta-access-token",
+                apiVersion: "v25.0"
+              })
+            }
+          }),
+          { ...request("meta_ads"), metaAdsInsightsLevel: "ad", backfillWindow: "12_months" },
+          {
+            cursorKey: "meta_ads_campaign_daily",
+            cursorStart: "2025-06-03T00:00:00.000Z",
+            cursorEnd: "2025-06-30T00:00:00.000Z",
+            refreshWindowDays: 365,
+            mode: "live",
+            backfillWindow: "12_months"
+          }
+        );
+      }
+    );
+    expect(firstWindowFailed).toBe(true);
+    // The failed month was retried as ≤7-day sub-windows covering the whole month, no failure.
+    expect(insightsRanges.length).toBeGreaterThan(1);
+    for (const range of insightsRanges) {
+      const span =
+        (new Date(`${range.until}T00:00:00Z`).getTime() - new Date(`${range.since}T00:00:00Z`).getTime()) /
+        (24 * 60 * 60 * 1000);
+      expect(span).toBeLessThanOrEqual(6);
+    }
+    expect(insightsRanges[0].since).toBe("2025-06-03");
+    expect(insightsRanges[insightsRanges.length - 1].until).toBe("2025-06-30");
+  });
+
+  it("§9 ad: the ad read path issues NO Graph write verb (GET-only boundary)", async () => {
+    // BOUNDARY: slice-1b adds only GET edge + insights reads. Capture every fetch method on the
+    // ad path and assert none is a write verb — locking the read-only boundary into the gate so
+    // a future POST/PUT/PATCH/DELETE regression on the ad path is caught.
+    const methods: string[] = [];
+    await withMockFetch(
+      async (url, init) => {
+        methods.push(((init?.method ?? "GET") as string).toUpperCase());
+        return adProbeRouter(url);
+      },
+      async () => {
+        await connectorFor("meta_ads").extract(
+          fakeDb({
+            credential: {
+              credential_kind: "marketing_api_access_token",
+              encrypted_payload: encryptedCredential({
+                mode: "live",
+                adAccountId: "887743100560299",
+                accessToken: "meta-access-token",
+                apiVersion: "v25.0"
+              })
+            }
+          }),
+          { ...request("meta_ads"), metaAdsInsightsLevel: "ad" },
+          {
+            cursorKey: "meta_ads_campaign_daily",
+            cursorStart: "2026-06-01T00:00:00.000Z",
+            cursorEnd: "2026-06-03T00:00:00.000Z",
+            refreshWindowDays: 30,
+            mode: "live"
+          }
+        );
+      }
+    );
+    expect(methods.length).toBeGreaterThan(0);
+    for (const method of methods) {
+      expect(["POST", "PUT", "PATCH", "DELETE"]).not.toContain(method);
+      expect(method).toBe("GET");
+    }
+  });
+
   it("§4d ad: a window that returns subcode 1487534 retries NARROWER (week sub-windows)", async () => {
     // Force the FIRST month window to 1487534, then succeed on the week retries. The connector
     // must classify the subcode + re-issue that ONE window split into weeks (never fail the run).
