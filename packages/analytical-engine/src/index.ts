@@ -432,9 +432,13 @@ async function resolveEntity(
   const candidates =
     entityType === "campaign"
       ? await resolveCampaignEntities(db, context.workspaceId, query, limit)
-      : ["content_item", "event_item"].includes(entityType)
-        ? await resolveXContentEntities(db, context.workspaceId, query, limit)
-        : [];
+      : entityType === "adset"
+        ? await resolveAdsetEntities(db, context.workspaceId, query, limit)
+        : entityType === "ad"
+          ? await resolveAdEntities(db, context.workspaceId, query, limit)
+          : ["content_item", "event_item"].includes(entityType)
+            ? await resolveXContentEntities(db, context.workspaceId, query, limit)
+            : [];
   return createEnvelope({
     actionId: "resolve_entity",
     authority: context.authority,
@@ -443,7 +447,11 @@ async function resolveEntity(
     data: { entityType, query, candidates },
     provenance: entityType === "campaign"
       ? ["queryable.vw_meta_ads_campaign_daily"]
-      : ["queryable.vw_x_post_public_metrics"],
+      : entityType === "adset"
+        ? ["queryable.vw_meta_ads_adset_daily"]
+        : entityType === "ad"
+          ? ["queryable.vw_meta_ads_ad_daily"]
+          : ["queryable.vw_x_post_public_metrics"],
     freshness: { target: "24 hours", asOf: null, stale: false },
     caveats: candidates.length ? [] : ["no_matching_entity"],
     nextActions: ["validate_journey_plan", "run_journey_query"]
@@ -724,6 +732,152 @@ async function resolveCampaignEntities(
       where workspace_id = $1
         and (${tokenClauses})
       group by source_id, campaign_id, campaign_name
+      order by sum(meta_ads_clicks) desc nulls last, max(occurred_on) desc nulls last
+      limit $${tokens.length + 2}
+    `,
+    [workspaceId, ...tokenParams, limit]
+  );
+  return toEvidence(nearRows);
+}
+
+// Adset-grain entity resolution — the exact mirror of resolveCampaignEntities over the
+// vw_meta_ads_adset_daily view (adset_id/adset_name dims, campaign_id carried). Same
+// exact-substring-then-tokenized-near-candidate shape; READ-ONLY (same view, same grouping).
+async function resolveAdsetEntities(
+  db: InfiniteOsDb,
+  workspaceId: string,
+  query: string,
+  limit: number
+): Promise<Record<string, unknown>[]> {
+  const toEvidence = (rows: Record<string, unknown>[]): Record<string, unknown>[] =>
+    rows.map((row) => sanitizeEvidenceRow({
+      entityType: "adset",
+      entityKey: row.adset_id,
+      label: row.adset_name ?? row.adset_id,
+      sourceId: row.source_id,
+      campaignId: row.campaign_id,
+      lastSeenOn: row.last_seen_on,
+      metrics: {
+        meta_ads_clicks: row.meta_ads_clicks,
+        meta_ads_spend: row.meta_ads_spend,
+        impressions: row.impressions
+      }
+    }));
+
+  const like = `%${query}%`;
+  const rows = await db.query<Record<string, unknown>>(
+    `
+      select source_id, campaign_id, adset_id, adset_name,
+        sum(meta_ads_clicks) as meta_ads_clicks,
+        sum(meta_ads_spend) as meta_ads_spend,
+        sum(impressions) as impressions,
+        max(occurred_on) as last_seen_on
+      from queryable.vw_meta_ads_adset_daily
+      where workspace_id = $1
+        and (adset_id ilike $2 or adset_name ilike $2)
+      group by source_id, campaign_id, adset_id, adset_name
+      order by sum(meta_ads_clicks) desc nulls last, max(occurred_on) desc nulls last
+      limit $3
+    `,
+    [workspaceId, like, limit]
+  );
+  if (rows.length > 0) {
+    return toEvidence(rows);
+  }
+
+  const tokens = significantCampaignTokens(query);
+  if (tokens.length === 0) {
+    return [];
+  }
+  const tokenParams = tokens.map((token) => `%${token}%`);
+  const tokenClauses = tokens
+    .map((_token, index) => `(adset_id ilike $${index + 2} or adset_name ilike $${index + 2})`)
+    .join(" or ");
+  const nearRows = await db.query<Record<string, unknown>>(
+    `
+      select source_id, campaign_id, adset_id, adset_name,
+        sum(meta_ads_clicks) as meta_ads_clicks,
+        sum(meta_ads_spend) as meta_ads_spend,
+        sum(impressions) as impressions,
+        max(occurred_on) as last_seen_on
+      from queryable.vw_meta_ads_adset_daily
+      where workspace_id = $1
+        and (${tokenClauses})
+      group by source_id, campaign_id, adset_id, adset_name
+      order by sum(meta_ads_clicks) desc nulls last, max(occurred_on) desc nulls last
+      limit $${tokens.length + 2}
+    `,
+    [workspaceId, ...tokenParams, limit]
+  );
+  return toEvidence(nearRows);
+}
+
+// Ad-grain entity resolution — mirror over vw_meta_ads_ad_daily (ad_id/ad_name dims; adset_id
+// + campaign_id carried). adset_id is ORPHAN-TOLERANT: an ad with no adset surfaces a null
+// adset_id carry without failing (§7a). NO optimization_goal (adset property; not on the ad
+// view). READ-ONLY; same exact-then-tokenized shape as the campaign/adset resolvers.
+async function resolveAdEntities(
+  db: InfiniteOsDb,
+  workspaceId: string,
+  query: string,
+  limit: number
+): Promise<Record<string, unknown>[]> {
+  const toEvidence = (rows: Record<string, unknown>[]): Record<string, unknown>[] =>
+    rows.map((row) => sanitizeEvidenceRow({
+      entityType: "ad",
+      entityKey: row.ad_id,
+      label: row.ad_name ?? row.ad_id,
+      sourceId: row.source_id,
+      adsetId: row.adset_id ?? null,
+      campaignId: row.campaign_id,
+      lastSeenOn: row.last_seen_on,
+      metrics: {
+        meta_ads_clicks: row.meta_ads_clicks,
+        meta_ads_spend: row.meta_ads_spend,
+        impressions: row.impressions
+      }
+    }));
+
+  const like = `%${query}%`;
+  const rows = await db.query<Record<string, unknown>>(
+    `
+      select source_id, campaign_id, adset_id, ad_id, ad_name,
+        sum(meta_ads_clicks) as meta_ads_clicks,
+        sum(meta_ads_spend) as meta_ads_spend,
+        sum(impressions) as impressions,
+        max(occurred_on) as last_seen_on
+      from queryable.vw_meta_ads_ad_daily
+      where workspace_id = $1
+        and (ad_id ilike $2 or ad_name ilike $2)
+      group by source_id, campaign_id, adset_id, ad_id, ad_name
+      order by sum(meta_ads_clicks) desc nulls last, max(occurred_on) desc nulls last
+      limit $3
+    `,
+    [workspaceId, like, limit]
+  );
+  if (rows.length > 0) {
+    return toEvidence(rows);
+  }
+
+  const tokens = significantCampaignTokens(query);
+  if (tokens.length === 0) {
+    return [];
+  }
+  const tokenParams = tokens.map((token) => `%${token}%`);
+  const tokenClauses = tokens
+    .map((_token, index) => `(ad_id ilike $${index + 2} or ad_name ilike $${index + 2})`)
+    .join(" or ");
+  const nearRows = await db.query<Record<string, unknown>>(
+    `
+      select source_id, campaign_id, adset_id, ad_id, ad_name,
+        sum(meta_ads_clicks) as meta_ads_clicks,
+        sum(meta_ads_spend) as meta_ads_spend,
+        sum(impressions) as impressions,
+        max(occurred_on) as last_seen_on
+      from queryable.vw_meta_ads_ad_daily
+      where workspace_id = $1
+        and (${tokenClauses})
+      group by source_id, campaign_id, adset_id, ad_id, ad_name
       order by sum(meta_ads_clicks) desc nulls last, max(occurred_on) desc nulls last
       limit $${tokens.length + 2}
     `,

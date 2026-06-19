@@ -1,6 +1,7 @@
 import { NoActiveProjectError } from "@infinite-os/config";
 import {
   JOURNEY_ENTITY_TYPES,
+  RESOLVABLE_ENTITY_TYPES,
   infiniteOsVersion,
   type JourneyEntityType
 } from "@infinite-os/core";
@@ -928,7 +929,10 @@ function inputSchemaFor(id: InfiniteOsActionId): Record<string, unknown> {
     resolve_entity: requiredObject(
       {
         entityType: {
-          enum: [...JOURNEY_ENTITY_TYPES]
+          // resolve_entity widens to RESOLVABLE_ENTITY_TYPES (adds adset/ad) — the journey-plan
+          // schema below stays on JOURNEY_ENTITY_TYPES so run_journey_query/validate_journey_plan
+          // keep rejecting adset/ad. (Slice 1b §7 enum split.)
+          enum: [...RESOLVABLE_ENTITY_TYPES]
         },
         query: { type: "string" },
         filters: { type: "object", additionalProperties: true }

@@ -14,6 +14,18 @@ export const JOURNEY_ENTITY_TYPES = [
 
 export type JourneyEntityType = (typeof JOURNEY_ENTITY_TYPES)[number];
 
+// resolve_entity can name finer Meta grains (adset/ad) that journeys deliberately CANNOT.
+// Derived FROM JOURNEY_ENTITY_TYPES so the journey vocabulary stays a strict subset: the
+// journey-plan schema + assertAllowedJourneyEntityTypes keep reading JOURNEY_ENTITY_TYPES and
+// thus keep REJECTING adset/ad, while only resolve_entity widens to this superset. (Slice 1b §7.)
+export const RESOLVABLE_ENTITY_TYPES = [
+  ...JOURNEY_ENTITY_TYPES,
+  "adset",
+  "ad"
+] as const;
+
+export type ResolvableEntityType = (typeof RESOLVABLE_ENTITY_TYPES)[number];
+
 const CREDENTIAL_ENVELOPE_PREFIX = "growth-os:v1:";
 
 export const KNOWN_DEFAULT_ENCRYPTION_KEYS = new Set([
