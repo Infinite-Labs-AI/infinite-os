@@ -16,14 +16,33 @@ import type { InfiniteOsDb, Migration, QueryableClient } from "./index.js";
 // Why a separate module: it lets the `pg` dependency stay the only thing the
 // server bundle imports eagerly. `@electric-sql/pglite` is `import()`-ed lazily
 // so a real-Postgres deploy never loads the WASM payload.
+//
+// SINGLE-CONNECTION IMPLICATIONS: PGlite serves one connection, so on the desktop
+// there is no cross-connection concurrency. `claimNextJob`'s `for update skip
+// locked` therefore never actually skips a locked row (no other session can hold
+// one) — it degrades to a plain serial dequeue, which is exactly right for a
+// single-process desktop with one worker. Transactions get the same treatment:
+// `withTransaction` uses PGlite's native `transaction()` (which holds the
+// connection mutex) instead of bare begin/commit, so even concurrent in-process
+// callers are serialized rather than interleaved on the shared connection.
 // ---------------------------------------------------------------------------
 
 // The subset of the PGlite instance this adapter relies on. PGlite's own
 // `query` returns `{ rows, affectedRows?, fields }`, which already satisfies the
 // `QueryableClient` contract the domain helpers + `wrapPool` consume — so a
 // booted PGlite instance can be passed straight into `wrapPool` as the client.
+// A PGlite transaction handle carries both `query` (so it satisfies QueryableClient and can be
+// wrapped by wrapPool) AND `exec` (multi-statement, needed to apply a migration body inside the tx).
+interface PgliteTransactionClient extends QueryableClient {
+  exec(sql: string): Promise<unknown>;
+}
+
 interface PgliteInstance extends QueryableClient {
   exec(sql: string): Promise<unknown>;
+  // PGlite's native transaction: it holds the single connection's mutex for the whole callback,
+  // so concurrent transactions are serialized (not interleaved). The callback's `tx` carries
+  // `query`, satisfying QueryableClient — so it can be wrapped by `wrapPool` like any client.
+  transaction<T>(fn: (tx: PgliteTransactionClient) => Promise<T>): Promise<T>;
   close(): Promise<void>;
 }
 
@@ -36,7 +55,13 @@ interface PgliteInstance extends QueryableClient {
  * `postgres://` `DATABASE_URL`) on `pg` unchanged, while letting the desktop
  * encode its data dir as `pglite://<path>` (or just the path).
  */
-export function isPgliteDatabaseUrl(databaseUrl: string): boolean {
+export function isPgliteDatabaseUrl(databaseUrl: string | null | undefined): boolean {
+  // A missing url is NOT a PGlite selector — it keeps the `pg` path (which then fails loudly on a
+  // real-Postgres deploy, or reads PG* env vars). Guarding here keeps the predicate total so a
+  // caller passing `config.databaseUrl` (optional) can't trip a TypeError on `.trim()`.
+  if (!databaseUrl) {
+    return false;
+  }
   const trimmed = databaseUrl.trim();
   if (trimmed === "") {
     return false;
@@ -69,8 +94,10 @@ export function resolvePgliteDataDir(databaseUrl: string): string {
     return "memory://";
   }
 
-  // `pglite://<path>`: strip the scheme, keep whatever path was written.
-  const pgliteMatch = /^pglite:\/\/(.*)$/i.exec(trimmed);
+  // `pglite:<path>` — strip the scheme, keep whatever path was written. The `//` is optional so
+  // `pglite:/data`, `pglite://data`, and `pglite:data` all resolve their path rather than falling
+  // through to `return trimmed` (which would hand PGlite the literal `pglite:...` string as a dir).
+  const pgliteMatch = /^pglite:(?:\/\/)?(.*)$/i.exec(trimmed);
   if (pgliteMatch) {
     const path = pgliteMatch[1];
     return path === "" ? join(infiniteOsHome(), "pglite") : path;
@@ -109,12 +136,15 @@ export function createPgliteDb(
 ): InfiniteOsDb {
   const dataDir = resolvePgliteDataDir(databaseUrl);
 
-  let booted: Promise<InfiniteOsDb> | undefined;
-  const ready = (): Promise<InfiniteOsDb> => {
+  // The boot promise resolves to BOTH the wrapPool-built db (domain methods) AND the raw PGlite
+  // instance — the latter is needed for the native transaction() (see withTransaction) and an
+  // honest close(). Concurrent first calls share the single boot promise (no double-create).
+  let booted: Promise<{ db: InfiniteOsDb; instance: PgliteInstance }> | undefined;
+  const ready = (): Promise<{ db: InfiniteOsDb; instance: PgliteInstance }> => {
     if (!booted) {
       booted = importPglite()
         .then(({ create }) => create(dataDir))
-        .then((instance) => wrapPool(instance, () => instance.close()));
+        .then((instance) => ({ db: wrapPool(instance, () => instance.close()), instance }));
     }
     return booted;
   };
@@ -124,44 +154,56 @@ export function createPgliteDb(
       sql: string,
       params?: unknown[]
     ) {
-      return (await ready()).query<T>(sql, params);
+      return (await ready()).db.query<T>(sql, params);
     },
     async one<T extends QueryResultRow = QueryResultRow>(
       sql: string,
       params?: unknown[]
     ) {
-      return (await ready()).one<T>(sql, params);
+      return (await ready()).db.one<T>(sql, params);
     },
     async close() {
-      // Only close if PGlite was actually booted; closing an un-booted facade is
-      // a no-op (nothing to release).
-      if (booted) {
-        await (await booted).close();
+      // Nothing started → nothing to release. If the boot promise REJECTED (PGlite failed to load
+      // or create the data dir), awaiting it here would re-throw that boot error OUT of teardown —
+      // swallow it. close() must never throw; there is nothing to release after a failed boot.
+      if (!booted) return;
+      try {
+        const { instance } = await booted;
+        await instance.close();
+      } catch {
+        // boot failed or already closed — nothing to release
       }
     },
     async ensureWorkspace(workspaceId, name) {
-      return (await ready()).ensureWorkspace(workspaceId, name);
+      return (await ready()).db.ensureWorkspace(workspaceId, name);
     },
     async ensureFirstPhaseDatasets(workspaceId) {
-      return (await ready()).ensureFirstPhaseDatasets(workspaceId);
+      return (await ready()).db.ensureFirstPhaseDatasets(workspaceId);
     },
     async connectSource(input) {
-      return (await ready()).connectSource(input);
+      return (await ready()).db.connectSource(input);
     },
     async updateSourceStatus(sourceId, status, lastSyncedAt) {
-      return (await ready()).updateSourceStatus(sourceId, status, lastSyncedAt);
+      return (await ready()).db.updateSourceStatus(sourceId, status, lastSyncedAt);
     },
     async createJob(input) {
-      return (await ready()).createJob(input);
+      return (await ready()).db.createJob(input);
     },
     async claimNextJob(workerId, leaseSeconds) {
-      return (await ready()).claimNextJob(workerId, leaseSeconds);
+      return (await ready()).db.claimNextJob(workerId, leaseSeconds);
     },
     async completeJob(jobId, status, error) {
-      return (await ready()).completeJob(jobId, status, error);
+      return (await ready()).db.completeJob(jobId, status, error);
     },
     async withTransaction<T>(fn: (tx: InfiniteOsDb) => Promise<T>): Promise<T> {
-      return (await ready()).withTransaction(fn);
+      const { instance } = await ready();
+      // Use PGlite's NATIVE transaction(), NOT wrapPool's single-client begin/commit. PGlite has
+      // ONE connection: wrapPool would issue `begin` on the shared connection, so two concurrent
+      // withTransaction callers would interleave into a single tangled transaction (the C4-review
+      // HIGH). transaction() holds the connection mutex for the whole callback, serializing them.
+      // The tx satisfies QueryableClient (it carries `query`), so wrap it as a child InfiniteOsDb
+      // whose close is a no-op — the tx lifecycle is owned by transaction().
+      return instance.transaction((tx) => fn(wrapPool(tx, async () => undefined)));
     }
   };
 }
@@ -211,18 +253,16 @@ export async function runPgliteMigrations(
       if (existing.rows.length > 0) {
         continue;
       }
-      try {
-        await db.exec("begin");
-        await db.exec(migration.sql);
-        await db.query("insert into schema_migrations (id) values ($1)", [
-          migration.id
-        ]);
-        await db.exec("commit");
-        applied.push(migration.id);
-      } catch (error) {
-        await db.exec("rollback");
-        throw error;
-      }
+      // Apply the migration body + ledger insert in ONE native transaction. PGlite's transaction()
+      // wraps begin/commit and auto-rolls-back on throw, so a failing migration can't leave a
+      // half-applied schema with the ledger marked done. (Migrations run serially at boot — single
+      // caller — so there's no interleaving concern here; this is for atomic rollback + clarity,
+      // replacing the hand-rolled begin/exec/commit/rollback.)
+      await db.transaction(async (tx) => {
+        await tx.exec(migration.sql);
+        await tx.query("insert into schema_migrations (id) values ($1)", [migration.id]);
+      });
+      applied.push(migration.id);
     }
     return applied;
   } finally {

@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -39,6 +39,20 @@ describe("pglite url selection", () => {
     expect(resolvePgliteDataDir("/tmp/y")).toBe("/tmp/y");
     expect(resolvePgliteDataDir("memory://")).toBe("memory://");
     expect(resolvePgliteDataDir("pglite://")).toMatch(/\.growth-os\/pglite$/);
+  });
+
+  it("treats a missing/blank url as NOT pglite (keeps pg path, no TypeError on undefined)", () => {
+    expect(isPgliteDatabaseUrl(undefined)).toBe(false);
+    expect(isPgliteDatabaseUrl(null)).toBe(false);
+    expect(isPgliteDatabaseUrl("")).toBe(false);
+    expect(isPgliteDatabaseUrl("   ")).toBe(false);
+  });
+
+  it("resolves the pglite: scheme with OR without the // (no-slash edge)", () => {
+    // Without the fix these fell through to `return trimmed`, handing PGlite a literal `pglite:...`.
+    expect(resolvePgliteDataDir("pglite:/tmp/a")).toBe("/tmp/a");
+    expect(resolvePgliteDataDir("pglite:relative/b")).toBe("relative/b");
+    expect(resolvePgliteDataDir("pglite:")).toMatch(/\.growth-os\/pglite$/);
   });
 });
 
@@ -145,6 +159,31 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
     expect(rows).toHaveLength(0);
   });
 
+  it("serializes CONCURRENT withTransaction calls — native tx, no interleaving (C4 HIGH)", async () => {
+    // Read-modify-write one counter from N transactions at once. Under wrapPool's single-connection
+    // begin/commit, the transactions would interleave on PGlite's ONE connection and lose updates
+    // (final < N). PGlite's native transaction() holds the connection mutex, so they serialize and
+    // every increment lands (final === N). The setImmediate yield maximizes the interleaving window.
+    await db.query("create table if not exists tx_race (n int not null)");
+    await db.query("delete from tx_race");
+    await db.query("insert into tx_race (n) values (0)");
+
+    const N = 12;
+    await Promise.all(
+      Array.from({ length: N }, () =>
+        db.withTransaction(async (tx) => {
+          const rows = await tx.query<{ n: number }>("select n from tx_race");
+          const current = Number(rows[0]?.n ?? 0);
+          await new Promise((resolve) => setImmediate(resolve)); // yield — invites interleaving
+          await tx.query("update tx_race set n = $1", [current + 1]);
+        })
+      )
+    );
+
+    const final = await db.query<{ n: number }>("select n from tx_race");
+    expect(Number(final[0]?.n)).toBe(N); // every increment survived → no interleaving
+  });
+
   it("can SELECT from a queryable view (full schema, incl. views, is live)", async () => {
     // vw_meta_ads_adset_daily is created by the last data migration (0035) — a
     // successful empty SELECT proves the whole view stack compiled and applied.
@@ -160,5 +199,28 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
     expect(result.deleted).toBe(true);
     const found = await findProject(db, created.id);
     expect(found).toBeNull();
+  });
+});
+
+describe("pglite boot-failure handling", () => {
+  it("close() after a FAILED boot resolves — it swallows the boot error", async () => {
+    // Point the data dir at a path under a regular FILE so PGlite.create can't mkdir it and the
+    // lazy boot rejects on first use. close() must then NOT re-throw that boot error out of
+    // teardown (awaiting the rejected boot promise would, without the try/catch).
+    const base = mkdtempSync(join(tmpdir(), "infinite-os-pglite-badboot-"));
+    const filePath = join(base, "afile");
+    writeFileSync(filePath, "x");
+    const badDb = createInfiniteOsDb(`pglite://${join(filePath, "nested")}`);
+    try {
+      await expect(badDb.query("select 1")).rejects.toThrow(); // boot fails on first use
+      await expect(badDb.close()).resolves.toBeUndefined(); // close swallows it, no throw
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it("close() on a never-used facade is a no-op (never boots PGlite)", async () => {
+    const neverUsed = createInfiniteOsDb(`pglite://${join(tmpdir(), "infinite-os-pglite-unused")}`);
+    await expect(neverUsed.close()).resolves.toBeUndefined();
   });
 });
