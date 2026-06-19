@@ -3850,6 +3850,89 @@ describe("Phase-2 §5 grain-aware view resolver (Stage-1 keystone)", () => {
     });
   });
 
+  // Phase-2 slice-1b §5 — the AD grain (the finest, third grain). The resolver now picks
+  // ad > adset > campaign (finest-grain-wins). These tests pin: (a) an ad_id/ad_name dim routes
+  // Meta metrics to the ad view; (b) PRECEDENCE — adset_id + ad_id resolves to ad, and a coarser
+  // campaign_id/adset_id FILTER + finer ad_id GROUP-BY resolves to ad (the coarse dims are
+  // carries at ad grain); (c) the grain family now spans up to 3 views; (d) roas_from_stripe
+  // and non-Meta metrics still never flip to an ad view.
+  describe("§5 slice-1b: an ad dim flips view selection to the ad sibling (finest grain wins)", () => {
+    it("an ad_id/ad_name group-by routes Meta delivery metrics to vw_meta_ads_ad_daily", () => {
+      for (const metric of META_DELIVERY_METRICS) {
+        expect(metricViewForGrain(metric, ["ad_id"], [])).toBe("queryable.vw_meta_ads_ad_daily");
+        expect(metricViewForGrain(metric, ["ad_name"], [])).toBe("queryable.vw_meta_ads_ad_daily");
+        // alias forms (ad / creative / creative_name) normalize to ad_name and still flip.
+        expect(metricViewForGrain(metric, ["ad"], [])).toBe("queryable.vw_meta_ads_ad_daily");
+        expect(metricViewForGrain(metric, ["creative_name"], [])).toBe("queryable.vw_meta_ads_ad_daily");
+      }
+    });
+
+    it("an ad_id group-by routes the conversion family to vw_meta_ads_ad_conversions_daily", () => {
+      for (const metric of META_CONVERSION_METRICS) {
+        expect(metricViewForGrain(metric, ["ad_id", "result_type"], [])).toBe(
+          "queryable.vw_meta_ads_ad_conversions_daily"
+        );
+      }
+    });
+
+    it("§5e: an ad dim in a FILTER (no group-by) also flips to the ad view", () => {
+      expect(metricViewForGrain("cost_per_result", [], [{ field: "ad_id" }])).toBe(
+        "queryable.vw_meta_ads_ad_conversions_daily"
+      );
+      expect(metricViewForGrain("meta_ads_spend", [], [{ field: "ad_name" }])).toBe(
+        "queryable.vw_meta_ads_ad_daily"
+      );
+    });
+
+    it("§5e PRECEDENCE: adset_id + ad_id co-occur → AD view (finest wins, adset_id is a carry)", () => {
+      // The ad-dim check runs FIRST and returns early; adset_id never re-flips the picker.
+      expect(metricViewForGrain("meta_ads_spend", ["adset_id", "ad_id"], [])).toBe(
+        "queryable.vw_meta_ads_ad_daily"
+      );
+      expect(metricViewForGrain("cost_per_result", ["adset_id", "ad_id", "result_type"], [])).toBe(
+        "queryable.vw_meta_ads_ad_conversions_daily"
+      );
+    });
+
+    it("§5e PRECEDENCE: coarser campaign_id/adset_id FILTER + finer ad_id GROUP-BY → AD view", () => {
+      // "spend per ad within campaign X" / "within adset Y": the group-by drives the grain to ad;
+      // campaign_id/adset_id are carry dims on the ad view, so the filters still apply there.
+      expect(metricViewForGrain("meta_ads_spend", ["ad_id"], [{ field: "campaign_id" }])).toBe(
+        "queryable.vw_meta_ads_ad_daily"
+      );
+      expect(metricViewForGrain("meta_ads_spend", ["ad_id"], [{ field: "adset_id" }])).toBe(
+        "queryable.vw_meta_ads_ad_daily"
+      );
+    });
+
+    it("§5e/§10: roas_from_stripe stays campaign-grain even with an ad dim (no ad sibling)", () => {
+      expect(metricViewForGrain("roas_from_stripe", ["ad_id"], [])).toBe(
+        "queryable.vw_meta_stripe_campaign_value_daily"
+      );
+      expect(metricViewForGrain("roas_from_stripe", [], [{ field: "ad_id" }])).toBe(
+        "queryable.vw_meta_stripe_campaign_value_daily"
+      );
+    });
+
+    it("non-Meta metrics never flip even if an ad_id dim is (nonsensically) passed", () => {
+      expect(metricViewForGrain("page_views", ["ad_id"], [])).toBe("queryable.vw_site_traffic");
+      expect(metricViewForGrain("shopify_order_count", ["ad_id"], [])).toBe("queryable.vw_shopify_orders");
+    });
+
+    it("REGRESSION: adset routing is unchanged when no ad dim is present (finest-wins is layered)", () => {
+      // The slice-1a adset behavior must survive the slice-1b layering: an adset_id alone still
+      // routes to the adset view (the ad branch is skipped because no ad dim is present).
+      for (const metric of META_DELIVERY_METRICS) {
+        expect(metricViewForGrain(metric, ["adset_id"], [])).toBe("queryable.vw_meta_ads_adset_daily");
+      }
+      for (const metric of META_CONVERSION_METRICS) {
+        expect(metricViewForGrain(metric, ["adset_id", "result_type"], [])).toBe(
+          "queryable.vw_meta_ads_adset_conversions_daily"
+        );
+      }
+    });
+  });
+
   describe("§5b: the grain-FAMILY guard (rejectMetricViewMismatch via the handlers)", () => {
     // rejectMetricViewMismatch is internal; we exercise it through run_metric_query's `view`
     // override, which calls it directly. A view IN the metric's grain family is accepted; an
@@ -3928,6 +4011,46 @@ describe("Phase-2 §5 grain-aware view resolver (Stage-1 keystone)", () => {
       await expect(
         handlers.run_metric_query?.(
           { metric: "roas_from_stripe", view: "queryable.vw_meta_ads_adset_conversions_daily" },
+          ctx
+        )
+      ).rejects.toThrow(/unsupported_view_for_metric:roas_from_stripe/);
+    });
+
+    it("§5b slice-1b: accepts the AD SIBLING view for the same metric (family now spans 3)", async () => {
+      // The grain family loosened one more notch: the ad conversions view is in `results`' family.
+      const handlers = createActionHandlers(passthroughDb());
+      const result = await handlers.run_metric_query?.(
+        {
+          metric: "results",
+          view: "queryable.vw_meta_ads_ad_conversions_daily",
+          filters: [{ field: "result_type", operator: "equals", value: "lead" }]
+        },
+        ctx
+      );
+      expect(result?.data).toMatchObject({ view: "queryable.vw_meta_ads_ad_conversions_daily" });
+    });
+
+    it("§5b slice-1b: REJECTS the AD DELIVERY view for a conversion metric (cross-family)", async () => {
+      // results belongs to the conversions family; the ad DELIVERY view is NOT in it (same guard
+      // that rejects the adset delivery view, extended to ad grain).
+      const handlers = createActionHandlers(passthroughDb());
+      await expect(
+        handlers.run_metric_query?.(
+          {
+            metric: "results",
+            view: "queryable.vw_meta_ads_ad_daily",
+            filters: [{ field: "result_type", operator: "equals", value: "lead" }]
+          },
+          ctx
+        )
+      ).rejects.toThrow(/unsupported_view_for_metric:results:queryable\.vw_meta_ads_ad_daily/);
+    });
+
+    it("§5b slice-1b: REJECTS the ad view for roas_from_stripe (campaign-only family)", async () => {
+      const handlers = createActionHandlers(passthroughDb());
+      await expect(
+        handlers.run_metric_query?.(
+          { metric: "roas_from_stripe", view: "queryable.vw_meta_ads_ad_conversions_daily" },
           ctx
         )
       ).rejects.toThrow(/unsupported_view_for_metric:roas_from_stripe/);

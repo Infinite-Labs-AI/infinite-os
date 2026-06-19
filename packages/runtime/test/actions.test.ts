@@ -125,6 +125,32 @@ describe("Infinite OS runtime action registry", () => {
     }
   });
 
+  // Phase-2 slice-1b §3/§5 — the same two-place allowlist contract for the AD (finest) grain.
+  // The §5 resolver swaps to these ad siblings when an ad_id/ad_name dim is present; this pins
+  // that the runtime half exposes them so an ad-grain query is not 404'd at the runtime guard
+  // before the finest-grain-wins resolver ever runs.
+  it("§5 slice-1b: exposes both ad grain views in the allowlist AND the analytical tool-schema view enum", () => {
+    for (const view of [
+      "queryable.vw_meta_ads_ad_daily",
+      "queryable.vw_meta_ads_ad_conversions_daily"
+    ]) {
+      expect(FIRST_PHASE_QUERYABLE_VIEWS).toContain(view);
+    }
+
+    const registry = createInfiniteOsRegistry();
+    for (const actionId of ["run_metric_query", "run_breakdown_query"]) {
+      const schema = registry.get(actionId)?.inputSchema as
+        | { properties?: { view?: { enum?: string[] } } }
+        | undefined;
+      const viewEnum = schema?.properties?.view?.enum ?? [];
+      expect(viewEnum).toContain("queryable.vw_meta_ads_ad_daily");
+      expect(viewEnum).toContain("queryable.vw_meta_ads_ad_conversions_daily");
+      // The adset + campaign siblings stay exposed (no-regression at the coarser grains).
+      expect(viewEnum).toContain("queryable.vw_meta_ads_adset_daily");
+      expect(viewEnum).toContain("queryable.vw_meta_ads_campaign_daily");
+    }
+  });
+
   it("exposes governed curated action metadata without raw SQL", () => {
     const registry = createInfiniteOsRegistry();
     const actionIds = registry.list().map((action) => action.id);
