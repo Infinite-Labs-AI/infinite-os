@@ -54,47 +54,99 @@ export function loadMigrations(directory = migrationsDir()): Migration[] {
     }));
 }
 
+// Stable advisory lock key for the migration critical section.
+//
+// pg_advisory_lock keys are SESSION-scoped bigints (or two int4s). We use the
+// two-int4 form: pg_advisory_lock(classid, objid). Both values are derived from
+// a deterministic hash of the constant string "growth-os:schema-migrations" so
+// the key is stable across processes and machines.
+//
+// SHA-256("growth-os:schema-migrations")[0..3] as int32BE  => 1441053400  (classid)
+// SHA-256("growth-os:schema-migrations")[4..7] as int32BE  => 1260977462  (objid)
+//
+// Verification (Node REPL):
+//   const { createHash } = require("node:crypto");
+//   const h = createHash("sha256").update("growth-os:schema-migrations").digest();
+//   console.log(h.readInt32BE(0), h.readInt32BE(4));
+//   => 1441053400 1260977462
+//
+// IMPORTANT: the lock is SESSION-scoped and must be acquired and released on the
+// SAME pg.Client connection. A pool client would not work (the server can return
+// a different backend for lock vs. unlock). We always use a dedicated pg.Client.
+const MIGRATION_LOCK_CLASSID = 1441053400;
+const MIGRATION_LOCK_OBJID = 1260977462;
+
 export async function runMigrations(databaseUrl: string): Promise<string[]> {
   // Desktop path: a `pglite://`/`file:`/bare-path URL selects the embedded
   // single-connection WASM Postgres. The migration loop differs only in adapter
   // mechanics (no pg.Client, `rows.length` instead of `rowCount`, `exec` for the
   // multi-statement SQL bodies) — same schema_migrations table, same per-file
   // transactional apply, same idempotency.
+  //
+  // PGlite is single-connection and runs serially in-process; no cross-process
+  // concurrency is possible, so no advisory lock is needed on this path.
   if (isPgliteDatabaseUrl(databaseUrl)) {
     return runPgliteMigrations(databaseUrl, loadMigrations());
   }
+
+  // Postgres path: two daemons booting against the same DB must not migrate
+  // concurrently. We hold a SESSION-scoped pg_advisory_lock for the duration of
+  // the apply loop. The lock + unlock MUST run on the same pg.Client connection
+  // (advisory locks are session-scoped; a pool may route requests to different
+  // backends). We use a dedicated pg.Client here (not a pool).
   const client = new pg.Client({ connectionString: databaseUrl });
   await client.connect();
   try {
-    await client.query(`
-      create table if not exists schema_migrations (
-        id text primary key,
-        applied_at timestamptz not null default now()
-      )
-    `);
-    const applied: string[] = [];
-    for (const migration of loadMigrations()) {
-      const existing = await client.query(
-        "select id from schema_migrations where id = $1",
-        [migration.id]
+    // Acquire the session-scoped advisory lock. pg_advisory_lock BLOCKS (waits)
+    // until the lock is free — so if another daemon is mid-migration we queue
+    // behind it rather than racing. Once we acquire, the other daemon has finished
+    // and committed its schema_migrations rows.
+    await client.query(
+      "select pg_advisory_lock($1::int, $2::int)",
+      [MIGRATION_LOCK_CLASSID, MIGRATION_LOCK_OBJID]
+    );
+    try {
+      await client.query(`
+        create table if not exists schema_migrations (
+          id text primary key,
+          applied_at timestamptz not null default now()
+        )
+      `);
+      const applied: string[] = [];
+      for (const migration of loadMigrations()) {
+        // Re-read the ledger inside the lock so we don't double-apply a migration
+        // that another daemon just committed while we were waiting for the lock.
+        const existing = await client.query(
+          "select id from schema_migrations where id = $1",
+          [migration.id]
+        );
+        if (existing.rowCount) {
+          continue;
+        }
+        await client.query("begin");
+        try {
+          await client.query(migration.sql);
+          await client.query("insert into schema_migrations (id) values ($1)", [
+            migration.id
+          ]);
+          await client.query("commit");
+          applied.push(migration.id);
+        } catch (error) {
+          await client.query("rollback");
+          throw error;
+        }
+      }
+      return applied;
+    } finally {
+      // Release the advisory lock even if a migration threw. SESSION-scoped locks
+      // are auto-released when the connection closes, but being explicit here
+      // means a long-lived pool connection (if ever used in future) frees the lock
+      // immediately rather than holding it until the connection is recycled.
+      await client.query(
+        "select pg_advisory_unlock($1::int, $2::int)",
+        [MIGRATION_LOCK_CLASSID, MIGRATION_LOCK_OBJID]
       );
-      if (existing.rowCount) {
-        continue;
-      }
-      await client.query("begin");
-      try {
-        await client.query(migration.sql);
-        await client.query("insert into schema_migrations (id) values ($1)", [
-          migration.id
-        ]);
-        await client.query("commit");
-        applied.push(migration.id);
-      } catch (error) {
-        await client.query("rollback");
-        throw error;
-      }
     }
-    return applied;
   } finally {
     await client.end();
   }

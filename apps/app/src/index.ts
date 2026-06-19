@@ -10,6 +10,7 @@ import {
   writeDaemonDescriptor,
   type BoundAddress
 } from "./daemon-descriptor.js";
+import { acquireDaemonSpawnLock } from "./daemon-spawn-lock.js";
 import { decryptCredentialPayload, encryptCredentialPayload } from "@infinite-os/core";
 import {
   createInfiniteOsDb,
@@ -2223,6 +2224,55 @@ if (isProcessEntrypoint()) {
   const config = loadInfiniteOsConfig();
   const app = createApp({ databaseUrl: config.databaseUrl });
 
+  // C — Cross-process spawn lock: prevent two cold-starts (CLI + desktop) from
+  // both running migrations / binding the same port concurrently. Acquire BEFORE
+  // runMigrations; release AFTER writeDaemonDescriptor so a concurrent starter
+  // can re-check the descriptor and find a healthy daemon.
+  //
+  // If another live process holds the lock, poll for a healthy descriptor for up
+  // to 15 s and exit 0 to defer (the other starter will finish). If it never
+  // appears (the other start died without writing a descriptor), exit 0 anyway —
+  // a supervisor / desktop will retry and we'll reclaim the stale lock via TTL.
+  const spawnLock = acquireDaemonSpawnLock();
+  if (spawnLock === null) {
+    // Another process is mid-spawn. Poll for a healthy daemon descriptor.
+    const POLL_INTERVAL_MS = 500;
+    const POLL_TIMEOUT_MS = 15_000;
+    const pollStart = Date.now();
+    let healthy = false;
+    while (Date.now() - pollStart < POLL_TIMEOUT_MS) {
+      const desc = (await import("./daemon-descriptor.js")).readDaemonDescriptor();
+      if (desc) {
+        try {
+          const res = await fetch(`${desc.url}/health`, { signal: AbortSignal.timeout(2000) });
+          if (res.ok) {
+            healthy = true;
+            break;
+          }
+        } catch {
+          // not up yet — keep polling
+        }
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+    }
+    if (healthy) {
+      console.log("another daemon is already starting on this home; deferring");
+    } else {
+      // The other starter seems to have died without finishing. Exit 0 — a
+      // supervisor / desktop will re-resolve and we'll reclaim the stale lock.
+      console.log("spawn lock held but no healthy daemon appeared; deferring (supervisor will retry)");
+    }
+    process.exit(0);
+  }
+
+  // Register lock release on SIGTERM/SIGINT/onClose so a crash before descriptor-
+  // write still frees the lock. The TTL is the ultimate backstop, but belt-and-
+  // suspenders keeps the average-case wait near zero.
+  const releaseLockOnShutdown = () => spawnLock.release();
+  app.addHook("onClose", async () => {
+    releaseLockOnShutdown();
+  });
+
   // A LOCAL daemon owns its schema. The desktop spawns this entrypoint against a freshly-created
   // embedded PGlite data dir (DATABASE_URL=pglite://…) that has NO tables, so EVERY DB request would
   // 500 with "relation … does not exist" until something migrates it. Bring the schema up to date on
@@ -2297,6 +2347,9 @@ if (isProcessEntrypoint()) {
         // directly here too — removeDaemonDescriptor is idempotent (force + swallow),
         // so a normal shutdown that already cleaned up just no-ops.
         removeDaemonDescriptor();
+        // Belt-and-suspenders for the spawn lock too: the onClose hook already
+        // called release(); calling again is idempotent (released flag guards it).
+        releaseLockOnShutdown();
         process.exit(signal === "SIGINT" ? 130 : 143);
       });
   };
@@ -2321,4 +2374,8 @@ if (isProcessEntrypoint()) {
   });
   const { path: descriptorPath } = writeDaemonDescriptor(descriptor);
   app.log.info?.({ url: descriptor.url, descriptor: descriptorPath }, "daemon descriptor written");
+  // Release the spawn lock NOW — the descriptor is written, so a concurrent
+  // starter that was polling will find a healthy daemon and exit gracefully
+  // rather than waiting for the full TTL.
+  spawnLock.release();
 }
