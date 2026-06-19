@@ -48,6 +48,7 @@ import { appendPersistentInputHistory, loadPersistentInputHistory } from "./tui/
 import { resolveCliRenderSurface, usesTranscriptRenderSurface } from "./tui/runtime/render-surface.js";
 import { resolveTheme, type Theme } from "./tui/theme.js";
 import type { Msg } from "./tui/types.js";
+import { mirrorMachineHomeEnv } from "./mirror-machine-home-env.js";
 import { createActionHandlers } from "@infinite-os/analytical-engine";
 import {
   loadInfiniteOsConfig,
@@ -3819,8 +3820,6 @@ function currentModelSummary(env: CliEnv): {
     authReady: record ? !isExpired(record.expiresAt) || Boolean(record.refreshToken) : false
   };
 }
-
-export { mirrorMachineHomeEnv } from "./mirror-machine-home-env.js";
 
 function writeRuntimeSetupFiles(options: {
   workspaceRoot: string;
