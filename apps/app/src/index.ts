@@ -16,7 +16,9 @@ import {
 import {
   createDbBackedConnectedXIdentityLookup,
   createConfiguredModelClient,
+  createCuratedMemoryManager,
   createLlmController,
+  createModelBackedMemoryReviewer,
   createSourceAwareQueryAdvisor,
   createSessionStore,
   filterCuratedMemoryCandidates,
@@ -30,7 +32,8 @@ import {
   createInfiniteOsRegistry,
   listRecipes,
   loadSetupModule as loadRuntimeSetupModule,
-  type Authority
+  type Authority,
+  type RuntimeSurface
 } from "@infinite-os/runtime";
 
 declare module "fastify" {
@@ -43,6 +46,24 @@ function timingSafeEqualStr(a: string, b: string): boolean {
   const ab = Buffer.from(a);
   const bb = Buffer.from(b);
   return ab.length === bb.length && timingSafeEqual(ab, bb);
+}
+
+// Map the gateway request's `platform` to the controller RuntimeSurface.
+// ChatInput.surface accepts "api" | "app" | "cli" | "desktop"; the desktop
+// sends platform "desktop". Unknown/missing platforms fall back to "api"
+// (the historical hardcode) so legacy gateway callers are unchanged.
+type GatewayControllerSurface = Extract<RuntimeSurface, "api" | "app" | "cli" | "desktop">;
+function platformToSurface(platform: string): GatewayControllerSurface {
+  switch (platform) {
+    case "desktop":
+      return "desktop";
+    case "app":
+      return "app";
+    case "cli":
+      return "cli";
+    default:
+      return "api";
+  }
 }
 
 export interface CompactSessionRequestBody {
@@ -155,10 +176,22 @@ export function createApp(options: {
         listConnectedXIdentities: createDbBackedConnectedXIdentityLookup(dbAdapter)
       })
     : undefined;
+  // Mirror the CLI in-process runtime (apps/cli/src/index.ts:9545) so the
+  // gateway turn gets curated memory load/review. dbAdapter is optional here
+  // (no DATABASE_URL -> undefined) unlike the CLI, so only build the manager
+  // when the db-backed adapter exists; createLlmController accepts an
+  // optional memoryManager.
+  const memoryManager = dbAdapter
+    ? createCuratedMemoryManager({
+        db: dbAdapter,
+        reviewer: createModelBackedMemoryReviewer(modelClient)
+      })
+    : undefined;
   const llmController = createLlmController({
     registry,
     sessionStore,
     modelClient,
+    memoryManager,
     queryAdvisor
   });
   const oauthSessions = new Map<string, ConnectorOAuthSession>();
@@ -356,15 +389,21 @@ export function createApp(options: {
     const channelId = typeof request.body?.channelId === "string" && request.body.channelId.trim()
       ? request.body.channelId.trim()
       : "default";
-    const sessionId = typeof request.body?.sessionId === "string" && request.body.sessionId.trim()
+    const conversationId = typeof request.body?.sessionId === "string" && request.body.sessionId.trim()
       ? request.body.sessionId.trim()
       : `${platform}:${channelId}:${actorId}`;
+    // Qualify the conversation id with the workspace, mirroring the CLI's
+    // deriveControllerSessionId (apps/cli/src/index.ts:9597). chat_sessions
+    // keys rows on (workspace_id, session_key) but inserts id = session_key =
+    // sessionId, so two workspaces sharing one conversation id would re-insert
+    // the same PK and collide. The `:${ws}` suffix keeps the row per-workspace.
+    const sessionId = `${conversationId}:${ws}`;
     const response = await llmController.chat({
       message,
       sessionId,
       workspaceId: ws,
       actorId,
-      surface: "api"
+      surface: platformToSurface(platform)
     });
     return {
       ok: true,
