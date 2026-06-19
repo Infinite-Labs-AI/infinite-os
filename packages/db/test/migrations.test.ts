@@ -48,7 +48,8 @@ describe("Infinite OS migration stack", () => {
       "0031_meta_ads_campaign_conversions_daily.sql",
       "0032_meta_ads_campaign_daily_conversion_columns.sql",
       "0033_meta_ads_conversion_views_and_metric_seeds.sql",
-      "0034_meta_stripe_true_value_and_frequency.sql"
+      "0034_meta_stripe_true_value_and_frequency.sql",
+      "0035_meta_ads_adset_grain.sql"
     ]);
   });
 
@@ -109,6 +110,9 @@ describe("Infinite OS migration stack", () => {
       "meta_ads_campaign_daily",
       "meta_ads_campaigns",
       "meta_ads_campaign_conversions_daily",
+      "meta_ads_adsets",
+      "meta_ads_adset_daily",
+      "meta_ads_adset_conversions_daily",
       "chat_sessions",
       "chat_messages",
       "chat_action_calls",
@@ -167,6 +171,9 @@ describe("Infinite OS migration stack", () => {
     expect(sql).toContain("queryable.vw_shopify_orders");
     expect(sql).toContain("queryable.vw_shopify_products");
     expect(sql).toContain("queryable.vw_meta_ads_campaign_daily");
+    // Phase-2 slice-1a — the adset-grain delivery + typed-conversions views.
+    expect(sql).toContain("queryable.vw_meta_ads_adset_daily");
+    expect(sql).toContain("queryable.vw_meta_ads_adset_conversions_daily");
     expect(sql).toContain("'site_visitors'");
     expect(sql).toContain("'signup_count'");
     expect(sql).toContain("'site_conversion_rate'");
@@ -362,7 +369,8 @@ describe("Infinite OS migration stack", () => {
       "0031_meta_ads_campaign_conversions_daily.sql",
       "0032_meta_ads_campaign_daily_conversion_columns.sql",
       "0033_meta_ads_conversion_views_and_metric_seeds.sql",
-      "0034_meta_stripe_true_value_and_frequency.sql"
+      "0034_meta_stripe_true_value_and_frequency.sql",
+      "0035_meta_ads_adset_grain.sql"
     ]);
   });
 
