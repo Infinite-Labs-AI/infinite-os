@@ -16,6 +16,7 @@ import {
   createInfiniteOsDb,
   createProject,
   deleteProject,
+  isPgliteDatabaseUrl,
   listProjects,
   readLatestSetupPublicArtifacts,
   runMigrations,
@@ -2305,22 +2306,32 @@ if (isProcessEntrypoint()) {
       if (applied.length > 0) {
         app.log.info?.({ count: applied.length }, "applied pending migrations on boot (local mode)");
       }
-      // Migrations create SCHEMA, not rows. A fresh self-contained DB has an EMPTY workspaces table,
+      // Migrations create SCHEMA, not rows. A fresh EMBEDDED-PGlite DB has an EMPTY workspaces table,
       // so the auth hook (select 1 from workspaces where id=$1) rejects every workspace-scoped
       // request with unknown_workspace. Seed a default "Local" workspace (idempotent upsert) so a
       // freshly-spawned daemon can serve immediately; a client discovers its id via GET /projects.
-      // The id is overridable via GROWTH_OS_WORKSPACE_ID. This opens a short-lived db just for the
-      // seed (a separate, SEQUENTIAL PGlite open after runMigrations closed its own, before the app's
-      // lazy db opens on the first request — PGlite handles sequential opens of one data dir fine,
-      // live-verified). We deliberately do NOT share createApp's db: createApp only closes the db it
-      // creates itself (not a passed-in one), so sharing would force us to own that close lifecycle —
-      // more risk than the one-time first-boot cost of an extra open.
-      const localWorkspaceId = process.env.GROWTH_OS_WORKSPACE_ID?.trim() || "ws_local";
-      const seedDb = createInfiniteOsDb(config.databaseUrl);
-      try {
-        await seedDb.ensureWorkspace(localWorkspaceId, "Local");
-      } finally {
-        await seedDb.close();
+      // The id is overridable via GROWTH_OS_WORKSPACE_ID.
+      //
+      // PGlite-ONLY gate: local mode also covers a local/dev REAL Postgres (DATABASE_URL=postgres://…),
+      // but that is a populated/shared DB that already owns its workspaces (the CLI's `infinite setup`
+      // creates a proj_<hex>). Seeding ws_local there just litters a stray workspace into someone's
+      // real data — observed live in this repo's own Postgres, had to be hand-deleted. Migrations stay
+      // unconditional (idempotent schema), but the SEED is scoped to the embedded desktop DB that is
+      // the only one that actually boots empty and needs it.
+      //
+      // This opens a short-lived db just for the seed (a separate, SEQUENTIAL PGlite open after
+      // runMigrations closed its own, before the app's lazy db opens on the first request — PGlite
+      // handles sequential opens of one data dir fine, live-verified). We deliberately do NOT share
+      // createApp's db: createApp only closes the db it creates itself (not a passed-in one), so
+      // sharing would force us to own that close lifecycle — more risk than the one-time cost.
+      if (isPgliteDatabaseUrl(config.databaseUrl)) {
+        const localWorkspaceId = process.env.GROWTH_OS_WORKSPACE_ID?.trim() || "ws_local";
+        const seedDb = createInfiniteOsDb(config.databaseUrl);
+        try {
+          await seedDb.ensureWorkspace(localWorkspaceId, "Local");
+        } finally {
+          await seedDb.close();
+        }
       }
     } catch (err) {
       // A daemon with a broken/half-applied schema (or an unseedable DB) must NOT serve. Fail loud
@@ -2380,20 +2391,23 @@ if (isProcessEntrypoint()) {
   // AFTER listen resolves, via the bound socket address. The descriptor is
   // discovery-only: NO tokens.
   const bound = app.server.address();
-  // FIX B3: pass advertisedUrl through the descriptor input so the option is
-  // actually threaded (not just read from env inside buildDaemonDescriptor).
-  // The env var GROWTH_OS_ADVERTISED_URL still takes precedence (docker-compose
-  // sets it); the input.advertisedUrl acts as a programmatic fallback for callers
-  // that construct the URL without touching env (e.g. integration tests).
-  const advertisedUrl = process.env.GROWTH_OS_ADVERTISED_URL?.trim() || undefined;
-  const descriptor = buildDaemonDescriptor({
-    address: bound as BoundAddress | string | null,
-    advertisedUrl
-  });
-  const { path: descriptorPath } = writeDaemonDescriptor(descriptor);
-  app.log.info?.({ url: descriptor.url, descriptor: descriptorPath }, "daemon descriptor written");
-  // Release the spawn lock NOW — the descriptor is written, so a concurrent
-  // starter that was polling will find a healthy daemon and exit gracefully
-  // rather than waiting for the full TTL.
+  const descriptor = buildDaemonDescriptor({ address: bound as BoundAddress | string | null });
+  // Publishing the discovery descriptor must NEVER crash a daemon that has already
+  // bound and is serving. writeDaemonDescriptor does an atomic tmp+rename, which can
+  // throw on an unwritable/odd target (full disk, read-only mount, or a bind-mounted
+  // file whose rename can't cross the device boundary). Discovery is best-effort: log
+  // loud and keep serving rather than exit into a supervisor restart-loop. This write
+  // sits OUTSIDE the migration/seed try/catch above, so without this guard a throw
+  // here becomes an unhandled rejection that kills an otherwise-healthy process.
+  try {
+    const { path: descriptorPath } = writeDaemonDescriptor(descriptor);
+    app.log.info?.({ url: descriptor.url, descriptor: descriptorPath }, "daemon descriptor written");
+  } catch (err) {
+    console.error("daemon descriptor write failed; serving without a discovery descriptor:", err);
+    app.log.error?.({ err }, "daemon descriptor write failed; serving without a discovery descriptor");
+  }
+  // Release the spawn lock NOW — the daemon is listening either way, so a concurrent
+  // starter that was polling should stop waiting rather than hold the lock for the
+  // full TTL. (Release is idempotent.)
   spawnLock.release();
 }

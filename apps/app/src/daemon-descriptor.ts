@@ -80,58 +80,19 @@ export function appVersion(): string {
   return "0.0.0";
 }
 
-// Validate that a caller-supplied advertised URL is a loopback http/https URL.
-// The desktop only attaches to loopback addresses; a non-loopback value would
-// be silently ignored there (health check refused), so we fail loud here instead.
-export function validateAdvertisedUrl(url: string): void {
-  let parsed: URL;
-  try {
-    parsed = new URL(url);
-  } catch {
-    throw new Error(`GROWTH_OS_ADVERTISED_URL is not a valid URL: ${url}`);
-  }
-  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-    throw new Error(`GROWTH_OS_ADVERTISED_URL must be http or https, got: ${parsed.protocol}`);
-  }
-  // URL.hostname for IPv6 literals includes brackets: "[::1]" — strip them for comparison.
-  const host = parsed.hostname.replace(/^\[|\]$/g, "");
-  if (host !== "127.0.0.1" && host !== "::1" && host !== "localhost") {
-    throw new Error(
-      `GROWTH_OS_ADVERTISED_URL must be a loopback address (127.0.0.1, ::1, localhost), got: ${host}. ` +
-        "Recording a non-loopback URL would advertise an address the desktop refuses to attach to."
-    );
-  }
-}
-
-export function buildDaemonDescriptor(
-  input: {
-    address: BoundAddress | string | null;
-    pid?: number;
-    version?: string;
-    startedAt?: string;
-    advertisedUrl?: string;
-  },
-  env: NodeJS.ProcessEnv = process.env
-): DaemonDescriptor {
+export function buildDaemonDescriptor(input: {
+  address: BoundAddress | string | null;
+  pid?: number;
+  version?: string;
+  startedAt?: string;
+}): DaemonDescriptor {
   if (input.address === null || typeof input.address === "string") {
     // A string address is a UNIX domain socket / pipe — the daemon path always
     // binds TCP, so this is a programmer error, not a runtime fallback to mask.
     throw new Error("daemon descriptor requires a bound TCP address (AddressInfo), got " + String(input.address));
   }
-  // GROWTH_OS_ADVERTISED_URL lets docker-compose (or any host-external deployment)
-  // override the in-process bound address with the host-reachable published URL.
-  // The env var takes precedence over the input.advertisedUrl option so that
-  // docker-compose.yml can set it without any code change.
-  const advertisedUrl = env.GROWTH_OS_ADVERTISED_URL?.trim() || input.advertisedUrl?.trim();
-  let url: string;
-  if (advertisedUrl) {
-    validateAdvertisedUrl(advertisedUrl);
-    url = advertisedUrl;
-  } else {
-    url = daemonUrlFromAddress(input.address);
-  }
   return {
-    url,
+    url: daemonUrlFromAddress(input.address),
     pid: input.pid ?? process.pid,
     version: input.version ?? appVersion(),
     startedAt: input.startedAt ?? new Date().toISOString()

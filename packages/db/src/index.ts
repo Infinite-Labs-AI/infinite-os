@@ -10,6 +10,10 @@ import {
   runPgliteMigrations
 } from "./pglite-adapter.js";
 
+// Re-export the canonical pglite-vs-postgres scheme check so app-layer callers (e.g. the
+// daemon boot seed gate) can branch on embedded-PGlite vs real Postgres without re-deriving it.
+export { isPgliteDatabaseUrl } from "./pglite-adapter.js";
+
 export const dbBoot = true;
 
 // The minimal surface every db backend must expose for the domain helpers and

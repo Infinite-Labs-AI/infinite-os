@@ -9,7 +9,6 @@ import {
   daemonUrlFromAddress,
   readDaemonDescriptor,
   removeDaemonDescriptor,
-  validateAdvertisedUrl,
   writeDaemonDescriptor
 } from "../src/daemon-descriptor.js";
 
@@ -101,93 +100,6 @@ describe("daemon descriptor", () => {
     it("throws on a non-TCP (string / null) address instead of masking it", () => {
       expect(() => buildDaemonDescriptor({ address: null })).toThrow(/bound TCP address/);
       expect(() => buildDaemonDescriptor({ address: "/tmp/sock" })).toThrow(/bound TCP address/);
-    });
-
-    describe("GROWTH_OS_ADVERTISED_URL override", () => {
-      it("uses the advertised URL from env instead of the bound address", () => {
-        const descriptor = buildDaemonDescriptor(
-          {
-            address: { address: "0.0.0.0", port: 3000, family: "IPv4" },
-            pid: 1,
-            version: "1.0.0",
-            startedAt: "2026-06-19T00:00:00.000Z"
-          },
-          { GROWTH_OS_ADVERTISED_URL: "http://127.0.0.1:3000" }
-        );
-        expect(descriptor.url).toBe("http://127.0.0.1:3000");
-      });
-
-      it("uses the advertisedUrl input option when env var is not set", () => {
-        const descriptor = buildDaemonDescriptor(
-          {
-            address: { address: "0.0.0.0", port: 9999, family: "IPv4" },
-            advertisedUrl: "http://localhost:3000",
-            pid: 1,
-            version: "1.0.0",
-            startedAt: "2026-06-19T00:00:00.000Z"
-          },
-          {}
-        );
-        expect(descriptor.url).toBe("http://localhost:3000");
-      });
-
-      it("env var takes precedence over input.advertisedUrl", () => {
-        const descriptor = buildDaemonDescriptor(
-          {
-            address: { address: "0.0.0.0", port: 9999, family: "IPv4" },
-            advertisedUrl: "http://localhost:9999",
-            pid: 1,
-            version: "1.0.0",
-            startedAt: "2026-06-19T00:00:00.000Z"
-          },
-          { GROWTH_OS_ADVERTISED_URL: "http://127.0.0.1:3000" }
-        );
-        expect(descriptor.url).toBe("http://127.0.0.1:3000");
-      });
-
-      it("falls back to bound address when no advertised url is provided", () => {
-        const descriptor = buildDaemonDescriptor(
-          {
-            address: { address: "0.0.0.0", port: 3000, family: "IPv4" },
-            pid: 1,
-            version: "1.0.0",
-            startedAt: "2026-06-19T00:00:00.000Z"
-          },
-          {}
-        );
-        expect(descriptor.url).toBe("http://127.0.0.1:3000");
-      });
-    });
-  });
-
-  describe("validateAdvertisedUrl", () => {
-    it("accepts loopback http URLs", () => {
-      expect(() => validateAdvertisedUrl("http://127.0.0.1:3000")).not.toThrow();
-      expect(() => validateAdvertisedUrl("http://localhost:3000")).not.toThrow();
-      expect(() => validateAdvertisedUrl("http://[::1]:3000")).not.toThrow();
-    });
-
-    it("accepts https loopback URLs", () => {
-      expect(() => validateAdvertisedUrl("https://127.0.0.1:3000")).not.toThrow();
-    });
-
-    it("rejects a non-loopback host", () => {
-      expect(() => validateAdvertisedUrl("http://192.168.1.1:3000")).toThrow(/loopback/);
-      expect(() => validateAdvertisedUrl("http://0.0.0.0:3000")).toThrow(/loopback/);
-      expect(() => validateAdvertisedUrl("http://example.com:3000")).toThrow(/loopback/);
-    });
-
-    it("rejects non-http protocols", () => {
-      expect(() => validateAdvertisedUrl("ftp://127.0.0.1:3000")).toThrow(/http/);
-      expect(() => validateAdvertisedUrl("ws://127.0.0.1:3000")).toThrow(/http/);
-    });
-
-    it("rejects a malformed URL", () => {
-      expect(() => validateAdvertisedUrl("not-a-url")).toThrow(/valid URL/);
-    });
-
-    it("throws loud on non-loopback so a docker host.docker.internal value never silently slips through", () => {
-      expect(() => validateAdvertisedUrl("http://host.docker.internal:3000")).toThrow(/loopback/);
     });
   });
 
