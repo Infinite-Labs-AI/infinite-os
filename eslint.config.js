@@ -13,6 +13,7 @@ module.exports = [
       "packages/**/*.js.map",
       "packages/**/*.ts",
       "scripts/**",
+      "apps/**/scripts/**",
       "ui-tui/**"
     ]
   },
