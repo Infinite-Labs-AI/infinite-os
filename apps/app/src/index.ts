@@ -1,4 +1,5 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import Fastify from "fastify";
 import { createActionHandlers } from "@infinite-os/analytical-engine";
@@ -9,11 +10,13 @@ import {
   writeDaemonDescriptor,
   type BoundAddress
 } from "./daemon-descriptor.js";
+import { acquireDaemonSpawnLock } from "./daemon-spawn-lock.js";
 import { decryptCredentialPayload, encryptCredentialPayload } from "@infinite-os/core";
 import {
   createInfiniteOsDb,
   createProject,
   deleteProject,
+  isPgliteDatabaseUrl,
   listProjects,
   readLatestSetupPublicArtifacts,
   runMigrations,
@@ -2203,9 +2206,91 @@ function isLocalHost(host: string | undefined): boolean {
   return h === "127.0.0.1" || h === "localhost" || h === "::1";
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+// Is THIS module the process entrypoint (run directly, e.g. `node daemon.mjs` or `tsx index.ts`)?
+// A raw `import.meta.url === file://${process.argv[1]}` string compare is fragile: it breaks on
+// symlinked paths (macOS /tmp → /private/var/folders, app-bundle symlinks), on path encoding
+// (spaces → %20 in the URL but not in argv), and on the esbuild bundle run via node — any of which
+// silently skips the listen block. Compare symlink-resolved REAL paths instead.
+function isProcessEntrypoint(): boolean {
+  const argv1 = process.argv[1];
+  if (!argv1) return false;
+  try {
+    return realpathSync(fileURLToPath(import.meta.url)) === realpathSync(argv1);
+  } catch {
+    return false;
+  }
+}
+
+if (isProcessEntrypoint()) {
   const config = loadInfiniteOsConfig();
   const app = createApp({ databaseUrl: config.databaseUrl });
+
+  // C — Cross-process spawn lock: prevent two cold-starts (CLI + desktop) from
+  // both running migrations / binding the same port concurrently. Acquire BEFORE
+  // runMigrations; release AFTER writeDaemonDescriptor so a concurrent starter
+  // can re-check the descriptor and find a healthy daemon.
+  //
+  // If another live process holds the lock, poll for a healthy descriptor for up
+  // to 15 s and exit 0 to defer (the other starter will finish). If it never
+  // appears (the other start died without writing a descriptor), exit 0 anyway —
+  // a supervisor / desktop will retry and we'll reclaim the stale lock via TTL.
+  let spawnLock = acquireDaemonSpawnLock();
+  if (spawnLock === null) {
+    // Another process is mid-spawn. Poll for a healthy daemon descriptor.
+    const POLL_INTERVAL_MS = 500;
+    const POLL_TIMEOUT_MS = 15_000;
+    const pollStart = Date.now();
+    let healthy = false;
+    while (Date.now() - pollStart < POLL_TIMEOUT_MS) {
+      const desc = (await import("./daemon-descriptor.js")).readDaemonDescriptor();
+      if (desc) {
+        try {
+          const res = await fetch(`${desc.url}/health`, { signal: AbortSignal.timeout(2000) });
+          if (res.ok) {
+            healthy = true;
+            break;
+          }
+        } catch {
+          // not up yet — keep polling
+        }
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+    }
+    if (healthy) {
+      // C3: a peer is genuinely serving — this is the only correct exit(0) path.
+      console.log("another daemon is already starting on this home; deferring");
+      process.exit(0);
+    } else {
+      // C3: the holder died before writing a descriptor. Retry acquire once —
+      // the TTL/dead-pid reclaim should have freed the lock by now.
+      spawnLock = acquireDaemonSpawnLock();
+      if (spawnLock === null) {
+        // Still cannot acquire — fail loud so the supervisor surfaces the problem.
+        console.error(
+          "FATAL: spawn lock held but no healthy daemon appeared and lock could not be reclaimed; another process may be stuck"
+        );
+        process.exit(1);
+      }
+      console.log("spawn lock reclaimed after peer failed to finish; proceeding to boot");
+    }
+  }
+
+  // C4: register an exit handler immediately after acquiring the lock so it is
+  // released on every exit path — migration/seed catch exit(1), listen failure
+  // (EADDRINUSE), uncaught throw between acquire and descriptor-write, etc.
+  // release() is idempotent (released flag guards it) and unlinkSync is
+  // sync-safe inside a process "exit" handler.
+  process.once("exit", () => {
+    try { spawnLock!.release(); } catch { /* best-effort */ }
+  });
+
+  // Register lock release on SIGTERM/SIGINT/onClose so a crash before descriptor-
+  // write still frees the lock. The TTL is the ultimate backstop, but belt-and-
+  // suspenders keeps the average-case wait near zero.
+  const releaseLockOnShutdown = () => spawnLock!.release();
+  app.addHook("onClose", async () => {
+    releaseLockOnShutdown();
+  });
 
   // A LOCAL daemon owns its schema. The desktop spawns this entrypoint against a freshly-created
   // embedded PGlite data dir (DATABASE_URL=pglite://…) that has NO tables, so EVERY DB request would
@@ -2221,11 +2306,41 @@ if (import.meta.url === `file://${process.argv[1]}`) {
       if (applied.length > 0) {
         app.log.info?.({ count: applied.length }, "applied pending migrations on boot (local mode)");
       }
+      // Migrations create SCHEMA, not rows. A fresh EMBEDDED-PGlite DB has an EMPTY workspaces table,
+      // so the auth hook (select 1 from workspaces where id=$1) rejects every workspace-scoped
+      // request with unknown_workspace. Seed a default "Local" workspace (idempotent upsert) so a
+      // freshly-spawned daemon can serve immediately; a client discovers its id via GET /projects.
+      // The id is overridable via GROWTH_OS_WORKSPACE_ID.
+      //
+      // PGlite-ONLY gate: local mode also covers a local/dev REAL Postgres (DATABASE_URL=postgres://…),
+      // but that is a populated/shared DB that already owns its workspaces (the CLI's `infinite setup`
+      // creates a proj_<hex>). Seeding ws_local there just litters a stray workspace into someone's
+      // real data — observed live in this repo's own Postgres, had to be hand-deleted. Migrations stay
+      // unconditional (idempotent schema), but the SEED is scoped to the embedded desktop DB that is
+      // the only one that actually boots empty and needs it.
+      //
+      // This opens a short-lived db just for the seed (a separate, SEQUENTIAL PGlite open after
+      // runMigrations closed its own, before the app's lazy db opens on the first request — PGlite
+      // handles sequential opens of one data dir fine, live-verified). We deliberately do NOT share
+      // createApp's db: createApp only closes the db it creates itself (not a passed-in one), so
+      // sharing would force us to own that close lifecycle — more risk than the one-time cost.
+      if (isPgliteDatabaseUrl(config.databaseUrl)) {
+        const localWorkspaceId = process.env.GROWTH_OS_WORKSPACE_ID?.trim() || "ws_local";
+        const seedDb = createInfiniteOsDb(config.databaseUrl);
+        try {
+          await seedDb.ensureWorkspace(localWorkspaceId, "Local");
+        } finally {
+          await seedDb.close();
+        }
+      }
     } catch (err) {
-      // A daemon with a broken/half-applied schema must NOT serve. Fail loud with a clear cause
-      // (not an opaque unhandled rejection) and exit so the desktop/supervisor surfaces it. Safe to
-      // exit here: this runs before listen + before the keystone descriptor is written.
-      app.log.error?.({ err }, "FATAL: boot migration failed; refusing to start with an unmigrated schema");
+      // A daemon with a broken/half-applied schema (or an unseedable DB) must NOT serve. Fail loud
+      // with a clear cause (not an opaque unhandled rejection) and exit so the desktop/supervisor
+      // surfaces it. Safe to exit here: this runs before listen + before the keystone descriptor.
+      // console.error too — app.log may be a no-op (default Fastify logger), and a FATAL that exits
+      // the process MUST be visible (an `app.log.error?.` alone silently swallowed it in the bundle).
+      console.error("FATAL: boot migration/seed failed; refusing to start:", err);
+      app.log.error?.({ err }, "FATAL: boot migration/seed failed; refusing to start");
       process.exit(1);
     }
   }
@@ -2261,6 +2376,9 @@ if (import.meta.url === `file://${process.argv[1]}`) {
         // directly here too — removeDaemonDescriptor is idempotent (force + swallow),
         // so a normal shutdown that already cleaned up just no-ops.
         removeDaemonDescriptor();
+        // Belt-and-suspenders for the spawn lock too: the onClose hook already
+        // called release(); calling again is idempotent (released flag guards it).
+        releaseLockOnShutdown();
         process.exit(signal === "SIGINT" ? 130 : 143);
       });
   };
@@ -2274,6 +2392,22 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   // discovery-only: NO tokens.
   const bound = app.server.address();
   const descriptor = buildDaemonDescriptor({ address: bound as BoundAddress | string | null });
-  const { path: descriptorPath } = writeDaemonDescriptor(descriptor);
-  app.log.info?.({ url: descriptor.url, descriptor: descriptorPath }, "daemon descriptor written");
+  // Publishing the discovery descriptor must NEVER crash a daemon that has already
+  // bound and is serving. writeDaemonDescriptor does an atomic tmp+rename, which can
+  // throw on an unwritable/odd target (full disk, read-only mount, or a bind-mounted
+  // file whose rename can't cross the device boundary). Discovery is best-effort: log
+  // loud and keep serving rather than exit into a supervisor restart-loop. This write
+  // sits OUTSIDE the migration/seed try/catch above, so without this guard a throw
+  // here becomes an unhandled rejection that kills an otherwise-healthy process.
+  try {
+    const { path: descriptorPath } = writeDaemonDescriptor(descriptor);
+    app.log.info?.({ url: descriptor.url, descriptor: descriptorPath }, "daemon descriptor written");
+  } catch (err) {
+    console.error("daemon descriptor write failed; serving without a discovery descriptor:", err);
+    app.log.error?.({ err }, "daemon descriptor write failed; serving without a discovery descriptor");
+  }
+  // Release the spawn lock NOW — the daemon is listening either way, so a concurrent
+  // starter that was polling should stop waiting rather than hold the lock for the
+  // full TTL. (Release is idempotent.)
+  spawnLock.release();
 }
