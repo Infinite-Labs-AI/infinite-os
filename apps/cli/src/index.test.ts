@@ -107,6 +107,7 @@ import {
   localChatReadiness,
   readSetupReadiness,
   waitForAppReady,
+  invalidateApiBaseUrl,
   type ChatProgressEvent,
   type CliAgentRuntime
 } from "./index.js";
@@ -144,6 +145,9 @@ describe("cli smoke", () => {
 
   afterEach(() => {
     resetTurnState();
+    // Reset the per-process API base-URL discovery memo so a discovery result from
+    // one case never leaks into the next (production only ever has one daemon).
+    invalidateApiBaseUrl();
     vi.unstubAllGlobals();
   });
 
@@ -5208,7 +5212,11 @@ describe("cli smoke", () => {
       if (calls < 3) {
         throw new Error("fetch failed");
       }
-      return { ok: true, status: 200 } as unknown as Response;
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ status: "ok", service: "growth-os-app" })
+      } as unknown as Response;
     }) as unknown as typeof fetch;
     let clock = 0;
     const result = await waitForAppReady(
@@ -5270,6 +5278,162 @@ describe("cli smoke", () => {
     expect(result.lastError).toBe("HTTP 503");
   });
 
+  it("waitForAppReady rejects a foreign /health (service mismatch) even on a 200", async () => {
+    // A squatting server (e.g. `next dev`) accepts the connection and returns 200,
+    // but is NOT the daemon — bare response.ok must no longer count as ready.
+    let clock = 0;
+    const result = await waitForAppReady(
+      { GROWTH_OS_API_URL: "http://127.0.0.1:3000" },
+      {
+        fetchImpl: (async () =>
+          ({
+            ok: true,
+            status: 200,
+            json: async () => ({ service: "next-dev", ready: true })
+          }) as unknown as Response) as unknown as typeof fetch,
+        now: () => clock,
+        sleep: async (ms) => {
+          clock += ms;
+        },
+        intervalMs: 5000,
+        timeoutMs: 8000
+      }
+    );
+    expect(result.ready).toBe(false);
+    expect(result.lastError).toContain("service mismatch");
+  });
+
+  it("waitForAppReady redacts URL userinfo from appUrl / progress (no password leak)", async () => {
+    const progress: string[] = [];
+    let clock = 0;
+    const result = await waitForAppReady(
+      // A GROWTH_OS_API_URL carrying userinfo must never surface its password.
+      { GROWTH_OS_API_URL: "http://user:s3cret@127.0.0.1:3000" },
+      {
+        fetchImpl: (async () => {
+          throw new Error("connect ECONNREFUSED");
+        }) as unknown as typeof fetch,
+        now: () => clock,
+        sleep: async (ms) => {
+          clock += ms;
+        },
+        intervalMs: 5000,
+        timeoutMs: 6000,
+        onProgress: (message) => progress.push(message)
+      }
+    );
+    expect(result.ready).toBe(false);
+    expect(result.appUrl).not.toContain("s3cret");
+    expect(result.appUrl).not.toContain("user:");
+    expect(progress.join("\n")).not.toContain("s3cret");
+  });
+
+  describe("API base-url discovery (descriptor-first, design §3/§7)", () => {
+    let home: string;
+
+    beforeEach(() => {
+      home = mkdtempSync(join(tmpdir(), "growth-os-discovery-"));
+      invalidateApiBaseUrl();
+    });
+
+    afterEach(() => {
+      rmSync(home, { recursive: true, force: true });
+      invalidateApiBaseUrl();
+    });
+
+    it("prefers a live, identity-validated descriptor over the configBaseUrl rung", async () => {
+      // Descriptor advertises a daemon on an ephemeral port; this process IS alive,
+      // so process.kill(pid,0) passes and we then identity-probe /health.
+      const descriptorUrl = "http://127.0.0.1:54321";
+      const descriptor = {
+        url: descriptorUrl,
+        pid: process.pid,
+        version: "0.1.0",
+        startedAt: new Date().toISOString(),
+        nonce: "boot-nonce-abc"
+      };
+      writeFileSync(join(home, "daemon.json"), JSON.stringify(descriptor));
+
+      const seen: string[] = [];
+      const fetchImpl = (async (input: RequestInfo | URL) => {
+        const url = String(input);
+        seen.push(url);
+        if (url.startsWith(descriptorUrl)) {
+          // The real daemon — echoes the descriptor's pid + nonce.
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              status: "ok",
+              service: "growth-os-app",
+              pid: process.pid,
+              nonce: "boot-nonce-abc"
+            })
+          } as unknown as Response;
+        }
+        // configBaseUrl (the squatting next dev) — a foreign 200.
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ service: "next-dev" })
+        } as unknown as Response;
+      }) as unknown as typeof fetch;
+
+      let clock = 0;
+      const result = await waitForAppReady(
+        // No GROWTH_OS_API_URL override → discovery ladder runs; GROWTH_OS_HOME points
+        // at our temp descriptor; configBaseUrl defaults to 127.0.0.1:3000.
+        { GROWTH_OS_HOME: home },
+        {
+          fetchImpl,
+          now: () => clock,
+          sleep: async (ms) => {
+            clock += ms;
+          },
+          intervalMs: 1000,
+          timeoutMs: 30_000
+        }
+      );
+
+      expect(result.ready).toBe(true);
+      // Resolved to the DESCRIPTOR url, not the configBaseUrl :3000 rung.
+      expect(result.appUrl).toBe(`${descriptorUrl}/health`);
+      expect(seen.some((u) => u.startsWith(descriptorUrl))).toBe(true);
+    });
+
+    it("falls through to configBaseUrl only when the descriptor is absent", async () => {
+      // No descriptor on disk → ladder skips to configBaseUrl (default 127.0.0.1:3000),
+      // which here answers as the real daemon.
+      const seen: string[] = [];
+      const fetchImpl = (async (input: RequestInfo | URL) => {
+        const url = String(input);
+        seen.push(url);
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ status: "ok", service: "growth-os-app", pid: 999 })
+        } as unknown as Response;
+      }) as unknown as typeof fetch;
+
+      let clock = 0;
+      const result = await waitForAppReady(
+        { GROWTH_OS_HOME: home },
+        {
+          fetchImpl,
+          now: () => clock,
+          sleep: async (ms) => {
+            clock += ms;
+          },
+          intervalMs: 1000,
+          timeoutMs: 30_000
+        }
+      );
+
+      expect(result.ready).toBe(true);
+      expect(result.appUrl).toBe("http://127.0.0.1:3000/health");
+    });
+  });
+
   it("discovers the source checkout root for lifecycle commands run from the CLI package", async () => {
     const root = mkdtempSync(join(tmpdir(), "growth-os-cli-root-"));
     const nested = join(root, "apps", "cli");
@@ -5320,7 +5484,10 @@ describe("cli smoke", () => {
     }) as typeof fetch;
 
     try {
-      await runCommand("sync-runs", [], { GROWTH_OS_WORKSPACE_ID: "proj_test" });
+      await runCommand("sync-runs", [], {
+        GROWTH_OS_WORKSPACE_ID: "proj_test",
+        GROWTH_OS_API_URL: "http://127.0.0.1:3000"
+      });
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -5697,12 +5864,22 @@ describe("cli smoke", () => {
 
   it("hydrates app API URL and tokens from .growth-os config for CLI commands", async () => {
     const workspaceRoot = mkdtempSync(join(tmpdir(), "growth-os-api-hydration-"));
+    // Isolate GROWTH_OS_HOME so descriptor-first discovery can't read the dev machine's
+    // real ~/.growth-os/daemon.json — with no descriptor the ladder falls through to the
+    // config-derived configBaseUrl (port 3999), which is exactly what this test asserts.
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-api-hydration-home-"));
     const requests: Array<{ url: string; authorization?: string }> = [];
     const originalFetch = globalThis.fetch;
     try {
       await runCommand("init", [], { GROWTH_OS_WORKSPACE_ROOT: workspaceRoot });
       writeFileSync(join(workspaceRoot, ".growth-os", "config.yml"), "runtime_mode: local\napp_port: 3999\n");
       globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+        // Ignore the discovery identity probe to configBaseUrl/health — it returns a
+        // non-daemon body (no `service`), so the ladder correctly rejects it and falls
+        // back to the configBaseUrl literal. We only assert the actual command requests.
+        if (String(url).endsWith("/health")) {
+          return new Response(JSON.stringify({ ok: true }), { status: 200 });
+        }
         requests.push({
           url: String(url),
           authorization: init?.headers && "Authorization" in init.headers
@@ -5714,8 +5891,10 @@ describe("cli smoke", () => {
 
       const guardedEnv = {
         GROWTH_OS_WORKSPACE_ID: "proj_test",
-        GROWTH_OS_WORKSPACE_ROOT: workspaceRoot
+        GROWTH_OS_WORKSPACE_ROOT: workspaceRoot,
+        GROWTH_OS_HOME: growthHome
       };
+      invalidateApiBaseUrl();
       await runCommand("sources", [], guardedEnv);
       await runCommand("sync", ["src_1"], guardedEnv);
 
@@ -5732,6 +5911,7 @@ describe("cli smoke", () => {
     } finally {
       globalThis.fetch = originalFetch;
       rmSync(workspaceRoot, { recursive: true, force: true });
+      rmSync(growthHome, { recursive: true, force: true });
     }
   });
 
@@ -7650,7 +7830,10 @@ describe("cli smoke", () => {
         ],
         {
           GROWTH_OS_WORKSPACE_ROOT: workspaceRoot,
-          GROWTH_OS_OPERATOR_TOKEN: "operator-token"
+          GROWTH_OS_OPERATOR_TOKEN: "operator-token",
+          // Pin the base URL so the request-array assertion targets a known endpoint
+          // and bypasses discovery (whose probes would otherwise pollute `requests`).
+          GROWTH_OS_API_URL: "http://127.0.0.1:3000"
         }
       );
 
@@ -8201,7 +8384,10 @@ describe("cli smoke", () => {
           "--api-host",
           "https://posthog.test"
         ],
-        { GROWTH_OS_OPERATOR_TOKEN: "operator-token" }
+        // Pin the API base URL so this request-shape assertion targets a known
+        // endpoint and bypasses descriptor-first discovery (whose probes would
+        // otherwise read the dev machine's live daemon and pollute `requests`).
+        { GROWTH_OS_OPERATOR_TOKEN: "operator-token", GROWTH_OS_API_URL: "http://127.0.0.1:3000" }
       );
 
       expect(result).toMatchObject({
@@ -8256,7 +8442,10 @@ describe("cli smoke", () => {
           "--api-base-url",
           "https://stripe.test"
         ],
-        { GROWTH_OS_OPERATOR_TOKEN: "operator-token" }
+        // Pin the API base URL so this request-shape assertion targets a known
+        // endpoint and bypasses descriptor-first discovery (whose probes would
+        // otherwise read the dev machine's live daemon and pollute `requests`).
+        { GROWTH_OS_OPERATOR_TOKEN: "operator-token", GROWTH_OS_API_URL: "http://127.0.0.1:3000" }
       );
 
       expect(result).toMatchObject({
@@ -8319,7 +8508,10 @@ describe("cli smoke", () => {
           "--api-base-url",
           "https://x.test"
         ],
-        { GROWTH_OS_OPERATOR_TOKEN: "operator-token" }
+        // Pin the API base URL so this request-shape assertion targets a known
+        // endpoint and bypasses descriptor-first discovery (whose probes would
+        // otherwise read the dev machine's live daemon and pollute `requests`).
+        { GROWTH_OS_OPERATOR_TOKEN: "operator-token", GROWTH_OS_API_URL: "http://127.0.0.1:3000" }
       );
 
       expect(result).toMatchObject({
@@ -8382,7 +8574,10 @@ describe("cli smoke", () => {
           "--api-version",
           "2026-01"
         ],
-        { GROWTH_OS_OPERATOR_TOKEN: "operator-token" }
+        // Pin the API base URL so this request-shape assertion targets a known
+        // endpoint and bypasses descriptor-first discovery (whose probes would
+        // otherwise read the dev machine's live daemon and pollute `requests`).
+        { GROWTH_OS_OPERATOR_TOKEN: "operator-token", GROWTH_OS_API_URL: "http://127.0.0.1:3000" }
       );
 
       expect(result).toMatchObject({
@@ -8439,7 +8634,10 @@ describe("cli smoke", () => {
           "--backfill-window",
           "3_months"
         ],
-        { GROWTH_OS_OPERATOR_TOKEN: "operator-token" }
+        // Pin the API base URL so this request-shape assertion targets a known
+        // endpoint and bypasses descriptor-first discovery (whose probes would
+        // otherwise read the dev machine's live daemon and pollute `requests`).
+        { GROWTH_OS_OPERATOR_TOKEN: "operator-token", GROWTH_OS_API_URL: "http://127.0.0.1:3000" }
       );
 
       expect(result).toMatchObject({
@@ -8517,7 +8715,10 @@ describe("cli smoke", () => {
           "--meta-ads-cli-command",
           "meta"
         ],
-        { GROWTH_OS_OPERATOR_TOKEN: "operator-token" }
+        // Pin the API base URL so this request-shape assertion targets a known
+        // endpoint and bypasses descriptor-first discovery (whose probes would
+        // otherwise read the dev machine's live daemon and pollute `requests`).
+        { GROWTH_OS_OPERATOR_TOKEN: "operator-token", GROWTH_OS_API_URL: "http://127.0.0.1:3000" }
       );
 
       expect(result).toMatchObject({
@@ -8571,7 +8772,10 @@ describe("cli smoke", () => {
           "--mcp-tool-name",
           "get_campaign_insights"
         ],
-        { GROWTH_OS_OPERATOR_TOKEN: "operator-token" }
+        // Pin the API base URL so this request-shape assertion targets a known
+        // endpoint and bypasses descriptor-first discovery (whose probes would
+        // otherwise read the dev machine's live daemon and pollute `requests`).
+        { GROWTH_OS_OPERATOR_TOKEN: "operator-token", GROWTH_OS_API_URL: "http://127.0.0.1:3000" }
       );
 
       expect(result).toMatchObject({
@@ -8642,7 +8846,7 @@ describe("cli smoke", () => {
             apiBaseUrl: "https://stripe.test"
           })
         ],
-        { GROWTH_OS_OPERATOR_TOKEN: "operator", GROWTH_OS_WORKSPACE_ID: "proj_test" }
+        { GROWTH_OS_OPERATOR_TOKEN: "operator", GROWTH_OS_WORKSPACE_ID: "proj_test", GROWTH_OS_API_URL: "http://127.0.0.1:3000" }
       );
       await runCommand(
         "connect",
@@ -8656,7 +8860,7 @@ describe("cli smoke", () => {
             apiHost: "https://posthog.test"
           })
         ],
-        { GROWTH_OS_OPERATOR_TOKEN: "operator", GROWTH_OS_WORKSPACE_ID: "proj_test" }
+        { GROWTH_OS_OPERATOR_TOKEN: "operator", GROWTH_OS_WORKSPACE_ID: "proj_test", GROWTH_OS_API_URL: "http://127.0.0.1:3000" }
       );
       await runCommand(
         "connect",
@@ -8669,12 +8873,13 @@ describe("cli smoke", () => {
             username: "XDevelopers"
           })
         ],
-        { GROWTH_OS_OPERATOR_TOKEN: "operator", GROWTH_OS_WORKSPACE_ID: "proj_test" }
+        { GROWTH_OS_OPERATOR_TOKEN: "operator", GROWTH_OS_WORKSPACE_ID: "proj_test", GROWTH_OS_API_URL: "http://127.0.0.1:3000" }
       );
-      await runCommand("sync", ["src_123"], { GROWTH_OS_OPERATOR_TOKEN: "operator", GROWTH_OS_WORKSPACE_ID: "proj_test" });
+      await runCommand("sync", ["src_123"], { GROWTH_OS_OPERATOR_TOKEN: "operator", GROWTH_OS_WORKSPACE_ID: "proj_test", GROWTH_OS_API_URL: "http://127.0.0.1:3000" });
       await runCommand("saved-report", ["export", "report_123", "json"], {
         GROWTH_OS_OPERATOR_TOKEN: "operator",
-        GROWTH_OS_WORKSPACE_ID: "proj_test"
+        GROWTH_OS_WORKSPACE_ID: "proj_test",
+        GROWTH_OS_API_URL: "http://127.0.0.1:3000"
       });
     } finally {
       globalThis.fetch = originalFetch;
@@ -8737,7 +8942,8 @@ describe("cli smoke", () => {
     await expect(
       runCommand("connect", ["stripe", "Stripe Fixture"], {
         GROWTH_OS_OPERATOR_TOKEN: "operator",
-        GROWTH_OS_WORKSPACE_ID: "proj_test"
+        GROWTH_OS_WORKSPACE_ID: "proj_test",
+        GROWTH_OS_API_URL: "http://127.0.0.1:3000"
       })
     ).rejects.toThrow("connect requires a JSON credential payload");
   });
@@ -8765,11 +8971,12 @@ describe("cli smoke", () => {
           "--redirect-uri",
           "http://localhost:3000/oauth/callback/google_analytics_4"
         ],
-        { GROWTH_OS_OPERATOR_TOKEN: "operator-token", GROWTH_OS_WORKSPACE_ID: "proj_test" }
+        { GROWTH_OS_OPERATOR_TOKEN: "operator-token", GROWTH_OS_WORKSPACE_ID: "proj_test", GROWTH_OS_API_URL: "http://127.0.0.1:3000" }
       );
       await runCommand("connect", ["oauth-status", "oauth_session_1"], {
         GROWTH_OS_OPERATOR_TOKEN: "operator-token",
-        GROWTH_OS_WORKSPACE_ID: "proj_test"
+        GROWTH_OS_WORKSPACE_ID: "proj_test",
+        GROWTH_OS_API_URL: "http://127.0.0.1:3000"
       });
       await runCommand(
         "connect",
@@ -8787,7 +8994,7 @@ describe("cli smoke", () => {
           "--api-base-url",
           "https://analyticsdata.test/v1beta"
         ],
-        { GROWTH_OS_OPERATOR_TOKEN: "operator-token", GROWTH_OS_WORKSPACE_ID: "proj_test" }
+        { GROWTH_OS_OPERATOR_TOKEN: "operator-token", GROWTH_OS_WORKSPACE_ID: "proj_test", GROWTH_OS_API_URL: "http://127.0.0.1:3000" }
       );
     } finally {
       globalThis.fetch = originalFetch;
@@ -8845,7 +9052,7 @@ describe("cli smoke", () => {
           "--token-url",
           "https://oauth2.test/token"
         ],
-        { GROWTH_OS_OPERATOR_TOKEN: "operator-token", GROWTH_OS_WORKSPACE_ID: "proj_test" }
+        { GROWTH_OS_OPERATOR_TOKEN: "operator-token", GROWTH_OS_WORKSPACE_ID: "proj_test", GROWTH_OS_API_URL: "http://127.0.0.1:3000" }
       );
     } finally {
       globalThis.fetch = originalFetch;
@@ -8893,7 +9100,7 @@ describe("cli smoke", () => {
       await runCommand(
         "recipe",
         ["save_export_report", JSON.stringify({ name: "Revenue", toolPlan: { metric: "recognized_revenue" } })],
-        { GROWTH_OS_OPERATOR_TOKEN: "operator", GROWTH_OS_WORKSPACE_ID: "proj_test" }
+        { GROWTH_OS_OPERATOR_TOKEN: "operator", GROWTH_OS_WORKSPACE_ID: "proj_test", GROWTH_OS_API_URL: "http://127.0.0.1:3000" }
       );
       expect(JSON.stringify(recipes)).toContain("save_export_report");
     } finally {
@@ -9044,7 +9251,7 @@ describe("Meta backfill on connect and setup", () => {
             apiVersion: "v24.0"
           })
         ],
-        { GROWTH_OS_OPERATOR_TOKEN: "operator", GROWTH_OS_WORKSPACE_ID: "proj_test" }
+        { GROWTH_OS_OPERATOR_TOKEN: "operator", GROWTH_OS_WORKSPACE_ID: "proj_test", GROWTH_OS_API_URL: "http://127.0.0.1:3000" }
       );
     } finally {
       globalThis.fetch = originalFetch;
@@ -9082,7 +9289,7 @@ describe("Meta backfill on connect and setup", () => {
           "Meta Main",
           JSON.stringify({ mode: "live", transport: "marketing_api", adAccountId: "1", accessToken: "t" })
         ],
-        { GROWTH_OS_OPERATOR_TOKEN: "operator", GROWTH_OS_WORKSPACE_ID: "proj_test" }
+        { GROWTH_OS_OPERATOR_TOKEN: "operator", GROWTH_OS_WORKSPACE_ID: "proj_test", GROWTH_OS_API_URL: "http://127.0.0.1:3000" }
       );
     } finally {
       globalThis.fetch = originalFetch;
@@ -9116,7 +9323,7 @@ describe("Meta backfill on connect and setup", () => {
           "Meta Main",
           JSON.stringify({ mode: "live", transport: "marketing_api", adAccountId: "1", accessToken: "t" })
         ],
-        { GROWTH_OS_OPERATOR_TOKEN: "operator", GROWTH_OS_WORKSPACE_ID: "proj_test" }
+        { GROWTH_OS_OPERATOR_TOKEN: "operator", GROWTH_OS_WORKSPACE_ID: "proj_test", GROWTH_OS_API_URL: "http://127.0.0.1:3000" }
       );
     } finally {
       globalThis.fetch = originalFetch;
@@ -9150,7 +9357,7 @@ describe("Meta backfill on connect and setup", () => {
           "Meta Main",
           JSON.stringify({ mode: "live", transport: "marketing_api", adAccountId: "1", accessToken: "t" })
         ],
-        { GROWTH_OS_OPERATOR_TOKEN: "operator", GROWTH_OS_WORKSPACE_ID: "proj_test" }
+        { GROWTH_OS_OPERATOR_TOKEN: "operator", GROWTH_OS_WORKSPACE_ID: "proj_test", GROWTH_OS_API_URL: "http://127.0.0.1:3000" }
       );
     } finally {
       globalThis.fetch = originalFetch;
@@ -9188,7 +9395,10 @@ describe("Meta backfill on connect and setup", () => {
           "--api-version",
           "v24.0"
         ],
-        { GROWTH_OS_OPERATOR_TOKEN: "operator-token" }
+        // Pin the API base URL so this request-shape assertion targets a known
+        // endpoint and bypasses descriptor-first discovery (whose probes would
+        // otherwise read the dev machine's live daemon and pollute `requests`).
+        { GROWTH_OS_OPERATOR_TOKEN: "operator-token", GROWTH_OS_API_URL: "http://127.0.0.1:3000" }
       );
     } finally {
       globalThis.fetch = originalFetch;
@@ -9232,7 +9442,7 @@ describe("sync command (wizard + targets)", () => {
     const originalFetch = globalThis.fetch;
     globalThis.fetch = syncFetch(requests);
     try {
-      await runCommand("sync", ["src_123"], { GROWTH_OS_OPERATOR_TOKEN: "operator", GROWTH_OS_WORKSPACE_ID: "proj_test" });
+      await runCommand("sync", ["src_123"], { GROWTH_OS_OPERATOR_TOKEN: "operator", GROWTH_OS_WORKSPACE_ID: "proj_test", GROWTH_OS_API_URL: "http://127.0.0.1:3000" });
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -9318,6 +9528,7 @@ describe("sync command (wizard + targets)", () => {
         {
           GROWTH_OS_OPERATOR_TOKEN: "operator",
           GROWTH_OS_WORKSPACE_ID: "proj_test",
+          GROWTH_OS_API_URL: "http://127.0.0.1:3000",
           GROWTH_OS_SYNC_POLL_INTERVAL_MS: "0",
           GROWTH_OS_SYNC_WAIT_TIMEOUT_MS: "1000"
         },
@@ -9351,7 +9562,7 @@ describe("sync command (wizard + targets)", () => {
     const originalFetch = globalThis.fetch;
     globalThis.fetch = syncFetch(requests);
     try {
-      await runCommand("sync", ["src_meta", "6_months"], { GROWTH_OS_OPERATOR_TOKEN: "operator", GROWTH_OS_WORKSPACE_ID: "proj_test" });
+      await runCommand("sync", ["src_meta", "6_months"], { GROWTH_OS_OPERATOR_TOKEN: "operator", GROWTH_OS_WORKSPACE_ID: "proj_test", GROWTH_OS_API_URL: "http://127.0.0.1:3000" });
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -9369,7 +9580,7 @@ describe("sync command (wizard + targets)", () => {
     const originalFetch = globalThis.fetch;
     globalThis.fetch = syncFetch(requests);
     try {
-      await runCommand("sync", ["src_meta", "all_time"], { GROWTH_OS_OPERATOR_TOKEN: "operator", GROWTH_OS_WORKSPACE_ID: "proj_test" });
+      await runCommand("sync", ["src_meta", "all_time"], { GROWTH_OS_OPERATOR_TOKEN: "operator", GROWTH_OS_WORKSPACE_ID: "proj_test", GROWTH_OS_API_URL: "http://127.0.0.1:3000" });
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -9382,7 +9593,7 @@ describe("sync command (wizard + targets)", () => {
     const originalFetch = globalThis.fetch;
     globalThis.fetch = syncFetch(requests);
     try {
-      await runCommand("sync", ["meta", "3_months"], { GROWTH_OS_OPERATOR_TOKEN: "operator", GROWTH_OS_WORKSPACE_ID: "proj_test" });
+      await runCommand("sync", ["meta", "3_months"], { GROWTH_OS_OPERATOR_TOKEN: "operator", GROWTH_OS_WORKSPACE_ID: "proj_test", GROWTH_OS_API_URL: "http://127.0.0.1:3000" });
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -9404,6 +9615,7 @@ describe("sync command (wizard + targets)", () => {
       result = await runCommand("sync", ["meta"], {
         GROWTH_OS_OPERATOR_TOKEN: "operator",
         GROWTH_OS_WORKSPACE_ID: "proj_test",
+        GROWTH_OS_API_URL: "http://127.0.0.1:3000",
         GROWTH_OS_CLI_NONINTERACTIVE: "1"
       });
     } finally {
@@ -9427,7 +9639,7 @@ describe("sync command (wizard + targets)", () => {
     const originalFetch = globalThis.fetch;
     globalThis.fetch = syncFetch(requests);
     try {
-      await runCommand("sync", ["all", "30_days"], { GROWTH_OS_OPERATOR_TOKEN: "operator", GROWTH_OS_WORKSPACE_ID: "proj_test" });
+      await runCommand("sync", ["all", "30_days"], { GROWTH_OS_OPERATOR_TOKEN: "operator", GROWTH_OS_WORKSPACE_ID: "proj_test", GROWTH_OS_API_URL: "http://127.0.0.1:3000" });
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -9446,7 +9658,7 @@ describe("sync command (wizard + targets)", () => {
     globalThis.fetch = syncFetch(requests);
     try {
       await expect(
-        runCommand("sync", ["nope", "30_days"], { GROWTH_OS_OPERATOR_TOKEN: "operator", GROWTH_OS_WORKSPACE_ID: "proj_test" })
+        runCommand("sync", ["nope", "30_days"], { GROWTH_OS_OPERATOR_TOKEN: "operator", GROWTH_OS_WORKSPACE_ID: "proj_test", GROWTH_OS_API_URL: "http://127.0.0.1:3000" })
       ).rejects.toThrow(/No connected source matches/i);
     } finally {
       globalThis.fetch = originalFetch;
@@ -9455,7 +9667,7 @@ describe("sync command (wizard + targets)", () => {
 
   it("rejects an unknown sync window", async () => {
     await expect(
-      runCommand("sync", ["src_meta", "nonsense"], { GROWTH_OS_OPERATOR_TOKEN: "operator", GROWTH_OS_WORKSPACE_ID: "proj_test" })
+      runCommand("sync", ["src_meta", "nonsense"], { GROWTH_OS_OPERATOR_TOKEN: "operator", GROWTH_OS_WORKSPACE_ID: "proj_test", GROWTH_OS_API_URL: "http://127.0.0.1:3000" })
     ).rejects.toThrow(/window/i);
   });
 
@@ -9464,7 +9676,7 @@ describe("sync command (wizard + targets)", () => {
     const originalFetch = globalThis.fetch;
     globalThis.fetch = syncFetch(requests);
     try {
-      await runCommand("sync", ["--window", "6_months", "src_meta"], { GROWTH_OS_OPERATOR_TOKEN: "operator", GROWTH_OS_WORKSPACE_ID: "proj_test" });
+      await runCommand("sync", ["--window", "6_months", "src_meta"], { GROWTH_OS_OPERATOR_TOKEN: "operator", GROWTH_OS_WORKSPACE_ID: "proj_test", GROWTH_OS_API_URL: "http://127.0.0.1:3000" });
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -9482,7 +9694,7 @@ describe("sync command (wizard + targets)", () => {
     globalThis.fetch = syncFetch(requests);
     try {
       await expect(
-        runCommand("sync", ["ga4", "30_days"], { GROWTH_OS_OPERATOR_TOKEN: "operator", GROWTH_OS_WORKSPACE_ID: "proj_test" })
+        runCommand("sync", ["ga4", "30_days"], { GROWTH_OS_OPERATOR_TOKEN: "operator", GROWTH_OS_WORKSPACE_ID: "proj_test", GROWTH_OS_API_URL: "http://127.0.0.1:3000" })
       ).rejects.toThrow(/No google_analytics_4 source is connected/i);
     } finally {
       globalThis.fetch = originalFetch;
@@ -11121,7 +11333,8 @@ describe("in-chat /connect meta_ads wizard — end-to-end dispatch (#2)", () => 
     try {
       result = await runSlashCommand(line, {
         GROWTH_OS_OPERATOR_TOKEN: "operator",
-        GROWTH_OS_WORKSPACE_ID: "proj_test"
+        GROWTH_OS_WORKSPACE_ID: "proj_test",
+        GROWTH_OS_API_URL: "http://127.0.0.1:3000"
       });
     } finally {
       globalThis.fetch = originalFetch;
@@ -11175,7 +11388,8 @@ describe("in-chat /connect meta_ads wizard — end-to-end dispatch (#2)", () => 
     try {
       await runSlashCommand(line, {
         GROWTH_OS_OPERATOR_TOKEN: "operator",
-        GROWTH_OS_WORKSPACE_ID: "proj_test"
+        GROWTH_OS_WORKSPACE_ID: "proj_test",
+        GROWTH_OS_API_URL: "http://127.0.0.1:3000"
       });
     } finally {
       globalThis.fetch = originalFetch;

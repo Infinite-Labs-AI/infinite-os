@@ -3,15 +3,20 @@ import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import Fastify from "fastify";
 import { createActionHandlers } from "@infinite-os/analytical-engine";
-import { loadInfiniteOsConfig } from "@infinite-os/config";
+import { databaseFingerprint, loadInfiniteOsConfig } from "@infinite-os/config";
 import {
+  appVersion,
   buildDaemonDescriptor,
   removeDaemonDescriptor,
   writeDaemonDescriptor,
   type BoundAddress
 } from "./daemon-descriptor.js";
 import { acquireDaemonSpawnLock } from "./daemon-spawn-lock.js";
-import { decryptCredentialPayload, encryptCredentialPayload } from "@infinite-os/core";
+import {
+  decryptCredentialPayload,
+  encryptCredentialPayload,
+  encryptionKeyFingerprint
+} from "@infinite-os/core";
 import {
   createInfiniteOsDb,
   createProject,
@@ -176,6 +181,12 @@ export function createApp(options: {
   database?: InfiniteOsDb;
   modelClient?: InfiniteOsModelClient;
   sessionStore?: ChatSessionStore;
+  // Identity + convergence surface for /health (daemon-discovery §3/§4/§10). The
+  // standalone daemon entrypoint computes these ONCE at boot and passes them in;
+  // in-process callers (tests, app.inject) omit them and get the public-only shape.
+  // databaseId/keyId are non-secret by construction (password-stripped DB hash /
+  // HMAC keyed by the secret) and are returned ONLY to loopback callers anyway.
+  convergence?: { nonce: string; databaseId?: string; keyId?: string };
   resumeSetupRun?: (input: {
     db: InfiniteOsDb;
     workspaceId: string;
@@ -268,11 +279,44 @@ export function createApp(options: {
     request.auth = { authority, workspaceId };
   });
 
-  app.get("/health", async () => ({
-    status: "ok",
-    service: "growth-os-app",
-    runtime: "app-api-mcp"
-  }));
+  // /health is the unauthenticated discovery + convergence surface (daemon-discovery
+  // §3/§4/§10). LIVENESS fields (status/service/runtime/pid/version/nonce) are PUBLIC
+  // so a client can confirm "this is the Infinite OS daemon, alive, at this pid/boot".
+  // The CONVERGENCE fingerprints (databaseId/keyId) are non-secret by construction but
+  // are returned ONLY to loopback callers as defense-in-depth — never exposed LAN-wide.
+  //
+  // nonce: a per-PROCESS value minted once. The standalone daemon supplies the boot
+  // nonce via options.convergence; an in-process caller (tests) gets a per-app fallback
+  // so /health always carries one.
+  const healthNonce = options.convergence?.nonce ?? randomUUID();
+  const healthDatabaseId = options.convergence?.databaseId;
+  const healthKeyId = options.convergence?.keyId;
+  app.get("/health", async (request) => {
+    const body: {
+      status: string;
+      service: string;
+      runtime: string;
+      pid: number;
+      version: string;
+      nonce: string;
+      databaseId?: string;
+      keyId?: string;
+    } = {
+      status: "ok",
+      service: "growth-os-app",
+      runtime: "app-api-mcp",
+      pid: process.pid,
+      version: appVersion(),
+      nonce: healthNonce
+    };
+    // Loopback-gate the convergence fingerprints — a remote (LAN) caller gets liveness
+    // only. isLocalHost reuses the Host-header check used elsewhere (~L2200).
+    if (isLocalHost(request.headers.host)) {
+      if (healthDatabaseId !== undefined) body.databaseId = healthDatabaseId;
+      if (healthKeyId !== undefined) body.keyId = healthKeyId;
+    }
+    return body;
+  });
 
   app.get("/schema", async (request, reply) => {
     const ws = request.auth.workspaceId;
@@ -2221,9 +2265,24 @@ function isProcessEntrypoint(): boolean {
   }
 }
 
+// A per-PROCESS boot nonce, minted ONCE when the standalone daemon module loads.
+// Published on /health + in the descriptor so a discovering client can prove it is
+// talking to THIS live process (not a recycled pid on a stale descriptor). It is a
+// random UUID — NOT derived from any secret (design §10: nonce stays safe/public).
+const BOOT_NONCE = randomUUID();
+
 if (isProcessEntrypoint()) {
   const config = loadInfiniteOsConfig();
-  const app = createApp({ databaseUrl: config.databaseUrl });
+  // Compute the convergence fingerprints ONCE at boot (not per /health request). Both
+  // are non-secret by construction (design §4/§10): databaseId hashes the
+  // password-stripped canonical DB identity; keyId is an HMAC keyed BY the encryption
+  // key under a fixed label (NEVER a bare hash of the key, which would BE the AES key).
+  const bootDatabaseId = databaseFingerprint(config.databaseUrl);
+  const bootKeyId = encryptionKeyFingerprint(config.encryptionKey);
+  const app = createApp({
+    databaseUrl: config.databaseUrl,
+    convergence: { nonce: BOOT_NONCE, databaseId: bootDatabaseId, keyId: bootKeyId }
+  });
 
   // C — Cross-process spawn lock: prevent two cold-starts (CLI + desktop) from
   // both running migrations / binding the same port concurrently. Acquire BEFORE
@@ -2385,13 +2444,41 @@ if (isProcessEntrypoint()) {
   process.once("SIGTERM", shutdown);
   process.once("SIGINT", shutdown);
 
-  await app.listen({ host: config.appHost, port: config.appPort });
+  // Bind the configured host:port. If that exact port is already taken (EADDRINUSE
+  // — e.g. an unrelated `next dev` squatting :3000, or a previous daemon still
+  // closing), fall back to an OS-assigned ephemeral port (port:0) rather than
+  // crashing. The post-listen address() below reads the REAL bound port either way
+  // and the descriptor records it, so a discovering client still finds us. This is
+  // the host-side complement to the descriptor: ports can collide, discovery can't.
+  try {
+    await app.listen({ host: config.appHost, port: config.appPort });
+  } catch (err) {
+    if ((err as { code?: string }).code === "EADDRINUSE") {
+      console.error(
+        `port ${config.appPort} is in use; binding an ephemeral port instead (discover via the daemon descriptor)`
+      );
+      app.log.warn?.(
+        { host: config.appHost, port: config.appPort },
+        "configured port in use (EADDRINUSE); retrying on an ephemeral port"
+      );
+      await app.listen({ host: config.appHost, port: 0 });
+    } else {
+      throw err;
+    }
+  }
 
-  // config.appPort may be 0 (ephemeral) — the OS-assigned port is only knowable
-  // AFTER listen resolves, via the bound socket address. The descriptor is
-  // discovery-only: NO tokens.
+  // config.appPort may be 0 (ephemeral) — OR the configured port was taken and we
+  // fell back to an ephemeral one above. Either way the OS-assigned port is only
+  // knowable AFTER listen resolves, via the bound socket address. The descriptor is
+  // discovery-only: NO tokens. It carries the convergence fingerprints + boot nonce
+  // computed once at boot (non-secret by construction — design §4/§10).
   const bound = app.server.address();
-  const descriptor = buildDaemonDescriptor({ address: bound as BoundAddress | string | null });
+  const descriptor = buildDaemonDescriptor({
+    address: bound as BoundAddress | string | null,
+    nonce: BOOT_NONCE,
+    databaseId: bootDatabaseId,
+    keyId: bootKeyId
+  });
   // Publishing the discovery descriptor must NEVER crash a daemon that has already
   // bound and is serving. writeDaemonDescriptor does an atomic tmp+rename, which can
   // throw on an unwritable/odd target (full disk, read-only mount, or a bind-mounted

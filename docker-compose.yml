@@ -9,6 +9,10 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-growth_os}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env (copy .env.example)}
     ports:
+      # FOLLOW-UP (not this PR): this published Postgres port should likely be
+      # loopback-scoped too — "127.0.0.1:${POSTGRES_PORT:-5432}:5432" — so the DB
+      # is not reachable LAN-wide. Left unchanged here to keep this PR focused on
+      # the app surface; track separately (daemon-discovery §10 blocker 3).
       - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - growth_os_postgres:/var/lib/postgresql/data
@@ -66,7 +70,12 @@ services:
       # that re-runs its full command from the bind mount on every `up`.
       GROWTH_OS_CODE_VERSION: ${GROWTH_OS_CODE_VERSION:-dev}
     ports:
-      - "${GROWTH_OS_APP_PORT:-3000}:3000"
+      # Loopback-scope the published host port so /health (unauthenticated, and now
+      # carrying loopback-gated convergence fingerprints) is NOT reachable LAN-wide
+      # (daemon-discovery §10 blocker 3). The container still binds 0.0.0.0 INSIDE
+      # (GROWTH_OS_APP_HOST=0.0.0.0 above) so the in-network healthcheck + service
+      # DNS keep working; only the HOST publish is restricted to 127.0.0.1.
+      - "127.0.0.1:${GROWTH_OS_APP_PORT:-3000}:3000"
     healthcheck:
       # node is the image's runtime; bookworm-slim has no curl/wget. start_period
       # is generous because first boot runs apt-get + pnpm install + native build
