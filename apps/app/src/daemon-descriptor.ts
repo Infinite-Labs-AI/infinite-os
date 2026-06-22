@@ -1,29 +1,28 @@
 import { chmodSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { join } from "node:path";
 
-import { infiniteOsHome } from "@infinite-os/config";
+import {
+  daemonDescriptorPath,
+  infiniteOsHome,
+  removeDaemonDescriptor,
+  readDaemonDescriptor,
+  type DaemonDescriptor
+} from "@infinite-os/config";
 
-// The descriptor a freshly-spawned daemon drops so the desktop (or any other
-// local client) can discover the live address without guessing the port. When
-// the app binds port 0 the OS picks an ephemeral port, so the descriptor is the
-// ONLY source of truth for where the daemon actually listens.
-//
-// SECURITY: tokens NEVER go in here. Discovery only. The operator/read tokens
-// stay in the desktop main process and the daemon's own config; the descriptor
-// just answers "is a daemon up, and on what URL/pid/version?".
-export interface DaemonDescriptor {
-  url: string;
-  pid: number;
-  version: string;
-  startedAt: string;
-}
-
-const DAEMON_DESCRIPTOR_FILE = "daemon.json";
-
-export function daemonDescriptorPath(env: NodeJS.ProcessEnv = process.env): string {
-  return join(infiniteOsHome(env), DAEMON_DESCRIPTOR_FILE);
-}
+// The descriptor type + readers/removers/path moved to @infinite-os/config so BOTH
+// the CLI and the desktop can discover the daemon WITHOUT taking a dependency edge
+// on @infinite-os/app — the missing edge is exactly why the CLI couldn't read the
+// descriptor before (design §1, §7). This module re-exports them so existing
+// imports (apps/app/src/index.ts, the app tests) keep compiling, and KEEPS the
+// writer side (buildDaemonDescriptor + writeDaemonDescriptor + appVersion) here:
+// appVersion() reads apps/app/package.json via import.meta.url, so moving it would
+// break its path resolution (§7 caveat).
+export {
+  daemonDescriptorPath,
+  readDaemonDescriptor,
+  removeDaemonDescriptor,
+  type DaemonDescriptor
+};
 
 // A Node net AddressInfo, narrowed to the fields we consume. `app.server.address()`
 // returns `AddressInfo | string | null`; only the TCP object form carries a port.
@@ -65,6 +64,9 @@ export function daemonUrlFromAddress(addr: BoundAddress): string {
 // and the compiled entry (apps/app/dist/src/index.js -> ../../package.json), since
 // this package compiles with rootDir "." (dist mirrors the src/ layout). Falls
 // back to "0.0.0" so a missing manifest never blocks daemon startup.
+//
+// STAYS in apps/app (not moved to @infinite-os/config): import.meta.url here points
+// at apps/app, so the relative package.json resolution only works from this package.
 export function appVersion(): string {
   for (const rel of ["../package.json", "../../package.json"]) {
     try {
@@ -85,18 +87,29 @@ export function buildDaemonDescriptor(input: {
   pid?: number;
   version?: string;
   startedAt?: string;
+  // Identity + convergence fields (PR1 — daemon-discovery §3/§4). Optional so the
+  // existing call sites/tests that omit them keep building a valid descriptor.
+  nonce?: string;
+  databaseId?: string;
+  keyId?: string;
 }): DaemonDescriptor {
   if (input.address === null || typeof input.address === "string") {
     // A string address is a UNIX domain socket / pipe — the daemon path always
     // binds TCP, so this is a programmer error, not a runtime fallback to mask.
     throw new Error("daemon descriptor requires a bound TCP address (AddressInfo), got " + String(input.address));
   }
-  return {
+  const descriptor: DaemonDescriptor = {
     url: daemonUrlFromAddress(input.address),
     pid: input.pid ?? process.pid,
     version: input.version ?? appVersion(),
     startedAt: input.startedAt ?? new Date().toISOString()
   };
+  // Only stamp the identity/convergence fields when supplied — an in-process test
+  // caller that omits them produces the legacy 4-field shape.
+  if (input.nonce !== undefined) descriptor.nonce = input.nonce;
+  if (input.databaseId !== undefined) descriptor.databaseId = input.databaseId;
+  if (input.keyId !== undefined) descriptor.keyId = input.keyId;
+  return descriptor;
 }
 
 // Write the descriptor at ~/.growth-os/daemon.json with 0600 perms. The home dir
@@ -123,32 +136,4 @@ export function writeDaemonDescriptor(
     throw err;
   }
   return { path };
-}
-
-// Remove the descriptor on shutdown so a stale file never advertises a dead port.
-// Best-effort: a missing file is fine, and we never throw out of the close hook.
-export function removeDaemonDescriptor(env: NodeJS.ProcessEnv = process.env): void {
-  try {
-    rmSync(daemonDescriptorPath(env), { force: true });
-  } catch {
-    // Cleanup is best-effort; the next daemon overwrites any leftover anyway.
-  }
-}
-
-export function readDaemonDescriptor(env: NodeJS.ProcessEnv = process.env): DaemonDescriptor | null {
-  try {
-    const raw = readFileSync(daemonDescriptorPath(env), "utf8");
-    const parsed = JSON.parse(raw) as Partial<DaemonDescriptor>;
-    if (
-      typeof parsed.url === "string" &&
-      typeof parsed.pid === "number" &&
-      typeof parsed.version === "string" &&
-      typeof parsed.startedAt === "string"
-    ) {
-      return { url: parsed.url, pid: parsed.pid, version: parsed.version, startedAt: parsed.startedAt };
-    }
-    return null;
-  } catch {
-    return null;
-  }
 }

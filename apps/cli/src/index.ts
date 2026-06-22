@@ -52,6 +52,9 @@ import { mirrorMachineHomeEnv } from "./mirror-machine-home-env.js";
 import { createActionHandlers } from "@infinite-os/analytical-engine";
 import {
   loadInfiniteOsConfig,
+  resolveDaemonEndpoint,
+  invalidateResolvedDaemonEndpoint,
+  probeDaemonIdentity,
   NoActiveProjectError,
   parseDotEnv,
   parseSimpleYaml,
@@ -162,6 +165,9 @@ export interface CliEnv {
   GROWTH_OS_CODE_VERSION?: string;
   GROWTH_OS_START_TIMEOUT_MS?: string;
   GROWTH_OS_START_POLL_INTERVAL_MS?: string;
+  /** Short per-probe cap on the interactive readiness path (default 8s) — keeps a
+   * missing/zombie daemon from hanging startup (design §3/§7). */
+  GROWTH_OS_READINESS_PROBE_TIMEOUT_MS?: string;
   GROWTH_OS_SYNC_WAIT_TIMEOUT_MS?: string;
   GROWTH_OS_SYNC_POLL_INTERVAL_MS?: string;
   GROWTH_OS_CLI_DRY_RUN?: string;
@@ -225,6 +231,11 @@ interface ApiOptions {
   // Explicit workspace header, bypassing the env-derived pin. Used by
   // cross-workspace readiness to scope `/sources` per project without a pin.
   workspaceId?: string;
+  // Per-request abort cap (ms). The INTERACTIVE readiness path passes a short cap so
+  // a missing/zombie daemon fails fast (~30-60s budget across the readiness probes)
+  // instead of blocking on a foreign server that accepts the TCP connection but never
+  // answers — the original 5-minute startup hang (design §1/§7). Omitted = no cap.
+  timeoutMs?: number;
 }
 
 interface InteractiveChatState {
@@ -3069,10 +3080,14 @@ export function createLocalGa4OauthBootstrap(options: {
    */
   guidance?: (step: GuidanceStep, ctx: { authorizationUrl?: string; remoteLoopbackHint?: boolean }) => string;
 }): NonNullable<Parameters<SetupModuleApi["runLiveSetupOnboarding"]>[0]["ga4OauthBootstrap"]> {
-  const hydrated = hydrateApiSettings(options.env, options.config);
-  const defaultRedirectUri = `${hydrated.baseUrl}/oauth/callback/google_analytics_4`;
+  // The redirect URI is built from the resolved daemon base URL (descriptor-first
+  // discovery, design §3) — no longer a hardcoded port. Resolved lazily inside the
+  // async hooks since resolveApiBaseUrlOnce is async.
+  const resolveDefaultRedirectUri = async (): Promise<string> =>
+    `${await resolveApiBaseUrlOnce(options.env, options.config)}/oauth/callback/google_analytics_4`;
   return {
     async prepareConfig() {
+      const defaultRedirectUri = await resolveDefaultRedirectUri();
       return prepareGa4ConnectConfig({
         env: options.env,
         interactive:
@@ -3110,7 +3125,8 @@ export function createLocalGa4OauthBootstrap(options: {
       if (authorizationUrl && !options.jsonMode) {
         const launch = openBrowserForAuth(authorizationUrl, options.env);
         const remoteLoopbackHint =
-          isRemoteSession(options.env) && isLoopbackRedirect(stringValue(session.redirectUri) ?? defaultRedirectUri);
+          isRemoteSession(options.env) &&
+          isLoopbackRedirect(stringValue(session.redirectUri) ?? (await resolveDefaultRedirectUri()));
         const renderGuidance =
           options.guidance ??
           ((step: GuidanceStep, ctx: { authorizationUrl?: string; remoteLoopbackHint?: boolean }) =>
@@ -6452,8 +6468,14 @@ function parsePositiveIntEnv(value: string | undefined, fallback: number): numbe
 // Used by `infinite start` so the command only returns once the API is
 // actually usable. `fetchImpl`/`now`/`sleep` are injectable for tests.
 export async function waitForAppReady(env: CliEnv, options: WaitForAppReadyOptions = {}): Promise<AppReadyResult> {
-  const baseUrl = hydrateApiSettings(env).baseUrl;
+  // Use the injected fetch (if any) for discovery too, so a test can drive the whole
+  // ladder; production passes nothing and resolveDaemonEndpoint uses global fetch.
+  const baseUrl = await resolveApiBaseUrlOnce(env, undefined, options.fetchImpl);
   const appUrl = `${baseUrl}/health`;
+  // SECURITY (§10 LOW): the URL can carry userinfo (a user:pass@host
+  // GROWTH_OS_API_URL). Redact it before it enters appUrl-in-message, onProgress,
+  // lastError, or the returned JSON — nothing secret-bearing reaches a transcript.
+  const safeAppUrl = redactUrlUserinfo(appUrl);
   const timeoutMs = options.timeoutMs ?? parsePositiveIntEnv(env.GROWTH_OS_START_TIMEOUT_MS, 300_000);
   const intervalMs = options.intervalMs ?? parsePositiveIntEnv(env.GROWTH_OS_START_POLL_INTERVAL_MS, 3_000);
   const now = options.now ?? (() => Date.now());
@@ -6468,19 +6490,35 @@ export async function waitForAppReady(env: CliEnv, options: WaitForAppReadyOptio
     try {
       const response = await fetchImpl(appUrl, { method: "GET" });
       if (response.ok) {
-        return { ready: true, appUrl, attempts, waitedMs: now() - start };
+        // Identity assertion (design §3 / spec item 2): a 200 from a FOREIGN server
+        // (e.g. a squatting `next dev` on the config port) must NOT count as ready.
+        // Require the body to be the Infinite OS daemon (service === "growth-os-app")
+        // before declaring ready, instead of trusting bare response.ok.
+        let body: unknown;
+        try {
+          body = await response.json();
+        } catch {
+          body = undefined;
+        }
+        if (isRecord(body) && body.service === "growth-os-app") {
+          return { ready: true, appUrl: safeAppUrl, attempts, waitedMs: now() - start };
+        }
+        // A 200 that isn't our daemon — keep polling (the real daemon may still be
+        // coming up on this address); never echo the foreign body into lastError.
+        lastError = "foreign /health response (service mismatch)";
+      } else {
+        lastError = `HTTP ${response.status}`;
       }
-      lastError = `HTTP ${response.status}`;
     } catch (error) {
       lastError = error instanceof Error ? error.message || String(error) : String(error);
     }
 
     const elapsed = now() - start;
     if (elapsed >= timeoutMs) {
-      return { ready: false, appUrl, attempts, waitedMs: elapsed, lastError };
+      return { ready: false, appUrl: safeAppUrl, attempts, waitedMs: elapsed, lastError };
     }
     options.onProgress?.(
-      `Waiting for the app server at ${appUrl} — still booting ` +
+      `Waiting for the app server at ${safeAppUrl} — still booting ` +
         `(${Math.round(elapsed / 1000)}s elapsed; last: ${lastError ?? "no response"})`
     );
     await sleep(intervalMs);
@@ -8887,14 +8925,28 @@ async function readActiveSetupRunSummary(
   }
 
   if (config) {
-    try {
-      const payload = await apiRequest("/setup/runs/active", env, { config });
-      const run = isRecord(payload) ? normalizeSetupRunSummary(payload.run) : null;
-      if (run || (isRecord(payload) && payload.run === null)) {
-        return run;
+    // Probe the app API only when there's a daemon to talk to (explicit
+    // GROWTH_OS_API_URL, network mode, or a live discovered daemon). Otherwise go
+    // straight to the DB — the hang fix (design §3/§7): a pure-local CLI shouldn't
+    // block on a (possibly squatted) config port here.
+    const shouldProbeApi =
+      env.GROWTH_OS_API_URL !== undefined ||
+      config.runtimeMode === "network" ||
+      (await resolveDaemonEndpoint(env as NodeJS.ProcessEnv)) !== null;
+    if (shouldProbeApi) {
+      try {
+        // Cap the probe so a missing/zombie daemon falls through to the DB fast.
+        const payload = await apiRequest("/setup/runs/active", env, {
+          config,
+          timeoutMs: readinessProbeTimeoutMs(env)
+        });
+        const run = isRecord(payload) ? normalizeSetupRunSummary(payload.run) : null;
+        if (run || (isRecord(payload) && payload.run === null)) {
+          return run;
+        }
+      } catch {
+        // Fall back to direct DB access when the app API is not reachable.
       }
-    } catch {
-      // Fall back to direct DB access when the app API is not reachable.
     }
 
     try {
@@ -9355,6 +9407,22 @@ function workspaceNotReadyFromSetupReadiness(readiness: SetupReadiness): Record<
   };
 }
 
+// Cap each API probe on the INTERACTIVE readiness path so a missing/zombie daemon
+// (or a foreign server squatting the config port) yields a fast, friendly "no daemon"
+// message instead of the 5-minute startup hang (design §1/§3/§7). Discovery's own
+// identity probes already use resolveDaemonEndpoint's 1.5s default; this bounds the
+// post-discovery /health + /sources + /projects calls. Honors an explicit override so
+// slow networks can extend it, but defaults short. The total budget across the handful
+// of probes stays well under a minute.
+function readinessProbeTimeoutMs(env: CliEnv): number {
+  // Default 1.5s per probe — generous for a healthy loopback daemon, short enough that
+  // a squatting server that accepts the TCP connection but never answers (the
+  // 127.0.0.1:3000 next-dev case from design §1) fails fast. The readiness path makes a
+  // handful of serial probes; at 1.5s each the whole interactive budget stays a few
+  // seconds (well under a minute — spec item 3), instead of the old 5-minute hang.
+  return parsePositiveIntEnv(env.GROWTH_OS_READINESS_PROBE_TIMEOUT_MS, 1_500);
+}
+
 async function readConnectedSourceReadiness(
   env: CliEnv,
   config: InfiniteOsConfig
@@ -9434,16 +9502,17 @@ async function countConnectedSourcesAcrossWorkspaces(
   env: CliEnv,
   config: InfiniteOsConfig
 ): Promise<number> {
+  const timeoutMs = readinessProbeTimeoutMs(env);
   let projects: Array<{ id: string }> = [];
   try {
-    const payload = await apiRequest("/projects", env, { config, operator: true, omitWorkspace: true });
+    const payload = await apiRequest("/projects", env, { config, operator: true, omitWorkspace: true, timeoutMs });
     projects = isRecord(payload) && Array.isArray(payload.projects)
       ? payload.projects.filter(isRecord).map((p) => ({ id: stringValue(p.id) ?? "" })).filter((p) => p.id)
       : [];
   } catch {
     // No project list (read-only token / older app): fall back to the pinned
     // workspace's `/sources` (pin-tolerant — see `apiRequest`).
-    const payload = await apiRequest("/sources", env, { config });
+    const payload = await apiRequest("/sources", env, { config, timeoutMs });
     return countConnectedSources(payload);
   }
   let total = 0;
@@ -9452,7 +9521,8 @@ async function countConnectedSourcesAcrossWorkspaces(
     try {
       const payload = await apiRequest("/sources", env, {
         config,
-        workspaceId: project.id
+        workspaceId: project.id,
+        timeoutMs
       });
       count = countConnectedSources(payload);
     } catch {
@@ -9474,8 +9544,19 @@ async function readRuntimeServicesReadiness(
   env: CliEnv,
   config: InfiniteOsConfig
 ): Promise<SetupReadiness["runtimeServices"]> {
+  // Skip the /health probe entirely when there's no daemon to talk to: no explicit
+  // GROWTH_OS_API_URL, not network mode, AND descriptor-first discovery found no live
+  // daemon. This is the hang fix (design §3/§7) — a pure-local CLI talks to the DB
+  // directly, so probing a (possibly squatted) config port here only burns the
+  // readiness budget. resolveDaemonEndpoint is memoized, so this is a cheap re-check.
+  if (env.GROWTH_OS_API_URL === undefined && config.runtimeMode !== "network") {
+    const discovered = await resolveDaemonEndpoint(env as NodeJS.ProcessEnv);
+    if (!discovered) {
+      return "down";
+    }
+  }
   try {
-    await apiRequest("/health", env, { config });
+    await apiRequest("/health", env, { config, timeoutMs: readinessProbeTimeoutMs(env) });
     return "ready";
   } catch {
     return "down";
@@ -11400,7 +11481,7 @@ function timestampValue(value: unknown): string | undefined {
 
 async function apiRequest(path: string, env: CliEnv, options: ApiOptions = {}): Promise<unknown> {
   const hydrated = hydrateApiSettings(env, options.config);
-  const baseUrl = hydrated.baseUrl;
+  const baseUrl = await resolveApiBaseUrlOnce(env, options.config);
   const token = options.operator
     ? hydrated.operatorToken
     : hydrated.readToken ?? hydrated.operatorToken;
@@ -11420,15 +11501,28 @@ async function apiRequest(path: string, env: CliEnv, options: ApiOptions = {}): 
       workspaceId = undefined;
     }
   }
-  const response = await fetch(`${baseUrl}${path}`, {
-    method: options.method ?? "GET",
-    headers: {
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...(workspaceId ? { "X-Growth-Os-Workspace": workspaceId } : {}),
-      ...(options.body === undefined ? {} : { "Content-Type": "application/json" })
-    },
-    body: options.body === undefined ? undefined : JSON.stringify(options.body)
-  });
+  let response: Response;
+  try {
+    response = await fetch(`${baseUrl}${path}`, {
+      method: options.method ?? "GET",
+      headers: {
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...(workspaceId ? { "X-Growth-Os-Workspace": workspaceId } : {}),
+        ...(options.body === undefined ? {} : { "Content-Type": "application/json" })
+      },
+      body: options.body === undefined ? undefined : JSON.stringify(options.body),
+      // Short, explicit cap on the interactive readiness path so a squatting server
+      // that never answers can't hang startup; uncapped for normal commands.
+      ...(options.timeoutMs ? { signal: AbortSignal.timeout(options.timeoutMs) } : {})
+    });
+  } catch (error) {
+    // A connection error means the daemon we resolved is gone (or moved to a new
+    // ephemeral port). Drop the memoized base URL so the NEXT request re-runs the
+    // descriptor ladder instead of hammering a dead address. Redact userinfo before
+    // it can reach a thrown Error / transcript (a user:pass@host GROWTH_OS_API_URL).
+    invalidateApiBaseUrl();
+    throw new Error(`API request to ${redactUrlUserinfo(baseUrl)}${path} failed: ${connectionErrorMessage(error)}`);
+  }
   const payload = await response.json();
   if (!response.ok) {
     throw new Error(JSON.stringify(payload));
@@ -11436,17 +11530,110 @@ async function apiRequest(path: string, env: CliEnv, options: ApiOptions = {}): 
   return payload;
 }
 
+// Strip userinfo (user:password@) from a URL before it can enter a thrown Error,
+// onProgress message, lastError, or any returned JSON. Mirrors redactDatabaseUrl's
+// URL.password pattern but redacts the WHOLE userinfo so neither the user nor the
+// password leaks. Best-effort: a non-URL string is returned with a userinfo-shaped
+// substring scrubbed.
+function redactUrlUserinfo(value: string): string {
+  try {
+    const url = new URL(value);
+    if (url.username || url.password) {
+      url.username = "";
+      url.password = "";
+    }
+    return url.toString();
+  } catch {
+    return value.replace(/\/\/[^/@]*@/, "//[redacted]@");
+  }
+}
+
+// Connection errors can carry a `cause` whose message embeds the address; surface a
+// short, safe message rather than the full chain. The address in `${baseUrl}${path}`
+// is already redacted at the call site, so we keep only the error's own text.
+function connectionErrorMessage(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message || error.name || "connection error";
+  }
+  return String(error);
+}
+
+// The tokens + the candidate `configBaseUrl` are resolved synchronously from config;
+// the *actual* base URL is resolved asynchronously (descriptor-first discovery) by
+// resolveApiBaseUrlOnce below. We split them because the URL ladder now does network
+// identity probes, while the tokens never need I/O.
 function hydrateApiSettings(
   env: CliEnv,
   suppliedConfig?: InfiniteOsConfig
-): { baseUrl: string; readToken?: string; operatorToken?: string } {
+): { configBaseUrl?: string; readToken?: string; operatorToken?: string } {
   const config = suppliedConfig ?? loadOptionalInfiniteOsConfig(env);
+  // KEEP configBaseUrl — the dockerized `infinite start` app writes its descriptor
+  // INSIDE the container, so host CLIs reach it only via this fixed host:port. The
+  // hardcoded "http://127.0.0.1:3000" literal is GONE; the equivalent default now
+  // lives in resolveDaemonEndpoint's configBaseUrl rung (design §3).
   const configBaseUrl = config ? `http://${config.appHost}:${config.appPort}` : undefined;
   return {
-    baseUrl: (env.GROWTH_OS_API_URL ?? configBaseUrl ?? "http://127.0.0.1:3000").replace(/\/$/, ""),
+    configBaseUrl,
     readToken: env.GROWTH_OS_READ_TOKEN ?? config?.readToken,
     operatorToken: env.GROWTH_OS_OPERATOR_TOKEN ?? config?.operatorToken
   };
+}
+
+// Per-process memo of the resolved API base URL. resolveDaemonEndpoint is itself
+// memoized, but it returns null when no daemon answers — in which case we still want
+// to fall back to configBaseUrl, and we don't want to re-run the (config-dependent)
+// ladder on every apiRequest. invalidate via invalidateApiBaseUrl() when a request
+// hits a connection error (the daemon may have moved to a new ephemeral port).
+let apiBaseUrlMemo: string | undefined;
+
+// Exported so tests can reset the per-process discovery memo between cases (a process
+// runs many scenarios; production only ever has one daemon). Also called internally on
+// a connection error so a daemon that moved to a new ephemeral port is rediscovered.
+export function invalidateApiBaseUrl(): void {
+  apiBaseUrlMemo = undefined;
+  // Also drop the shared resolver's memo so the descriptor ladder re-probes — a
+  // daemon that just (re)started on a new port must be rediscovered.
+  invalidateResolvedDaemonEndpoint();
+}
+
+/**
+ * Resolve the API base URL with descriptor-first discovery (design §3/§7), memoized
+ * per process. Ladder: GROWTH_OS_API_URL → a validated live daemon (descriptor /
+ * configBaseUrl, identity-probed by resolveDaemonEndpoint) → configBaseUrl.
+ *
+ * configBaseUrl is the LAST-RESORT fallback so the dockerized `infinite start` app
+ * (reachable only on the fixed port) still works even if its in-container descriptor
+ * isn't visible to the host and its /health hasn't come up yet. Never throws — a dead
+ * daemon yields the configBaseUrl fallback (or, with no config, a loopback default),
+ * which the caller's own timeout/identity check then rejects fast.
+ */
+async function resolveApiBaseUrlOnce(
+  env: CliEnv,
+  suppliedConfig?: InfiniteOsConfig,
+  // Injectable only so the discovery ladder can be exercised in tests; production
+  // always uses the global fetch via resolveDaemonEndpoint's own default.
+  fetchImpl?: typeof fetch
+): Promise<string> {
+  // The explicit override is a pure env read — return it directly, never memoized, so
+  // it always reflects the CURRENT env (and so a process that runs many envs — tests —
+  // can't serve a stale value). It is intentionally NOT identity-probed here: it's the
+  // operator's escape hatch, and waitForAppReady / apiRequest still validate the
+  // /health identity before trusting any response from it.
+  const override = env.GROWTH_OS_API_URL?.trim();
+  if (override) {
+    return override.replace(/\/$/, "");
+  }
+  // Discovery path is the per-process memoized one (single daemon per machine).
+  if (apiBaseUrlMemo !== undefined) {
+    return apiBaseUrlMemo;
+  }
+  const { configBaseUrl } = hydrateApiSettings(env, suppliedConfig);
+  const resolved =
+    (await resolveDaemonEndpoint(env as NodeJS.ProcessEnv, fetchImpl ? { fetchImpl } : undefined))?.url ??
+    configBaseUrl ??
+    "http://127.0.0.1:3000";
+  apiBaseUrlMemo = resolved.replace(/\/$/, "");
+  return apiBaseUrlMemo;
 }
 
 function loadOptionalInfiniteOsConfig(env: CliEnv): InfiniteOsConfig | undefined {

@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes } from "node:crypto";
 
 export const infiniteOsVersion = "0.1.0";
 
@@ -93,6 +93,35 @@ function keyBytes(encryptionKey: string): Buffer {
 
 export function generateEncryptionKey(): string {
   return randomBytes(32).toString("hex");
+}
+
+// Domain-separation label for the convergence keyId. A FIXED public label is
+// domain separation, not entropy — it makes the fingerprint reproducible across
+// installs that share the secret (so convergence comparison works) while keeping
+// it non-invertible without the secret (HMAC keyed BY the secret).
+const KEY_ID_LABEL = "infinite-os/keyId/v1";
+
+// Bytes of the truncated keyId, 12 bytes = 96 bits = 24 hex chars. Enough to make
+// collisions across distinct keys negligible while keeping the published surface small.
+const KEY_ID_HEX_LENGTH = 24;
+
+/**
+ * Non-secret convergence fingerprint of the encryption key, published in /health
+ * and the daemon descriptor so a CLI can ASSERT it shares the desktop's key before
+ * trusting credentials encrypted under it.
+ *
+ * SECURITY (verified — see daemon-discovery-design §10): this MUST be an HMAC keyed
+ * BY the secret under a fixed public label, NOT a bare hash of the secret. The live
+ * AES-256-GCM key IS `createHash("sha256").update(encryptionKey).digest()` (keyBytes
+ * above), so publishing `sha256(key)` would publish the literal decryption key. The
+ * HMAC construction is non-invertible without the key, yet deterministic for the same
+ * key — exactly the convergence property. Truncated to 96 bits.
+ */
+export function encryptionKeyFingerprint(encryptionKey: string): string {
+  return createHmac("sha256", encryptionKey)
+    .update(KEY_ID_LABEL)
+    .digest("hex")
+    .slice(0, KEY_ID_HEX_LENGTH);
 }
 
 export interface RefreshOAuthTokenInput {

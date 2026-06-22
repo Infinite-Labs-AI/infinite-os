@@ -207,3 +207,4 @@ function requireString(value: unknown, key: string): string {
 export * from "./growth-os-home.js";
 export * from "./workspace-id.js";
 export * from "./active-project.js";
+export * from "./daemon-endpoint.js";
