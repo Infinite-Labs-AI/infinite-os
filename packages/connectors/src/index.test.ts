@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -4019,37 +4019,50 @@ console.log(${JSON.stringify(JSON.stringify(body))});
       });
     });
 
-    it("creates a creative via `meta ads creative create` (status null, --image=hash)", async () => {
+    // DEFERRED (review BLOCKER): the CLI's `creative create --image` takes a FILE path, but the engine
+    // supplies a pre-uploaded image_hash. Creative-via-CLI is unsupported this slice and must fail loud
+    // (non-retryable) rather than pass a hash as a bogus file path — it never spawns the CLI.
+    it("REFUSES creative create on the CLI transport (image-hash vs file mismatch), non-retryable", async () => {
       await withTmp(async (dir) => {
-        const result = await createMetaCreative(cliCredential(dir, { id: "120000000000030" }), {
-          name: "CLI Creative",
-          pageId: "page_1",
-          imageHash: "hash_abc",
-          linkUrl: "https://example.com",
-          body: "Buy now",
-          title: "Headline",
-          callToAction: "shop_now"
-        });
-        expect(result).toEqual({ ok: true, id: "120000000000030", status: null });
-        const argv = recordedArgv(dir);
-        expect(argv.slice(0, 7)).toEqual(["--output", "json", "ads", "--ad-account-id", "1234567890", "creative", "create"]);
-        expect(argv[argv.indexOf("--page-id") + 1]).toBe("page_1");
-        expect(argv[argv.indexOf("--image") + 1]).toBe("hash_abc");
-        expect(argv[argv.indexOf("--link-url") + 1]).toBe("https://example.com");
-        expect(argv[argv.indexOf("--call-to-action") + 1]).toBe("SHOP_NOW");
-        // creatives carry no --status flag.
-        expect(argv).not.toContain("--status");
+        // The throw precedes the spawn, so the CLI is never invoked (no argv.json written).
+        await expect(
+          createMetaCreative(cliCredential(dir, { id: "should-not-happen" }), {
+            name: "CLI Creative",
+            pageId: "page_1",
+            imageHash: "hash_abc",
+            linkUrl: "https://example.com"
+          })
+        ).rejects.toMatchObject({ code: "provider_unsupported", retryable: false });
       });
     });
 
-    it("rejects a CLI creative without an image_hash (non-retryable)", async () => {
+    // Review HIGH (path-with-space): the desktop stores a BARE absolute path as cliCommand. The engine
+    // must spawn it VERBATIM (not via parseProcessCommand, which splits on whitespace). Prove a path
+    // CONTAINING A SPACE — common on personal Macs (/Users/John Smith/…) — spawns correctly.
+    it("spawns a bare ABSOLUTE cliCommand with a SPACE in its path verbatim (not whitespace-split)", async () => {
       await withTmp(async (dir) => {
-        await expect(
-          createMetaCreative(cliCredential(dir, { id: "should-not-happen" }), {
-            name: "NoImage",
-            pageId: "page_1"
-          })
-        ).rejects.toMatchObject({ code: "provider_api_error", retryable: false });
+        const spaced = join(dir, "John Smith bin"); // a dir with spaces
+        mkdirSync(spaced, { recursive: true });
+        const exe = join(spaced, "meta"); // bare executable, no `node` prefix, no quotes
+        writeFileSync(
+          exe,
+          `#!/usr/bin/env node\nconst { writeFileSync } = require("node:fs");\nwriteFileSync(${JSON.stringify(
+            join(dir, "argv.json"),
+          )}, JSON.stringify(process.argv.slice(2)));\nconsole.log(JSON.stringify({ id: "120000000000099", status: "PAUSED" }));\n`,
+          "utf8",
+        );
+        chmodSync(exe, 0o755);
+        const cred: MetaAdsCredential = {
+          mode: "live",
+          transport: "meta_ads_cli",
+          adAccountId: "1234567890",
+          accessToken: "cli-write-token",
+          cliCommand: exe, // bare absolute path WITH a space
+        };
+        const result = await createMetaCampaign(cred, { name: "Spaced", objective: "OUTCOME_TRAFFIC" });
+        expect(result).toEqual({ ok: true, id: "120000000000099", status: "PAUSED" });
+        // The CLI actually ran (argv recorded) — proving the spaced path was NOT split.
+        expect(recordedArgv(dir).slice(0, 3)).toEqual(["--output", "json", "ads"]);
       });
     });
 

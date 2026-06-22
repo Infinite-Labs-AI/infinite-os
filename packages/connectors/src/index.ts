@@ -6019,11 +6019,21 @@ async function callMcpToolOverStdio(
 }
 
 async function callMetaAdsCliJson(credential: MetaAdsCredential, args: string[]): Promise<unknown> {
-  const { executable, args: commandArgs } = parseProcessCommand(
-    typeof credential.cliCommand === "string" && credential.cliCommand.trim() ? credential.cliCommand : "meta",
-    "Meta Ads CLI command"
-  );
-  ensureExecutableOnPath(executable, "Meta Ads CLI command");
+  const rawCliCommand =
+    typeof credential.cliCommand === "string" && credential.cliCommand.trim() ? credential.cliCommand.trim() : "meta";
+  // An ABSOLUTE path that exists as a file (the desktop stores exactly this) is used VERBATIM as the
+  // executable — NOT run through parseProcessCommand, which tokenizes on whitespace and would split a
+  // home dir containing a space (e.g. "/Users/John Smith/.local/bin/meta") into a broken executable +
+  // bogus args. Only a non-path command (e.g. "uv run meta") falls back to the whitespace tokenizer.
+  let executable: string;
+  let commandArgs: string[];
+  if (rawCliCommand.startsWith("/") && existsSync(rawCliCommand)) {
+    executable = rawCliCommand;
+    commandArgs = [];
+  } else {
+    ({ executable, args: commandArgs } = parseProcessCommand(rawCliCommand, "Meta Ads CLI command"));
+    ensureExecutableOnPath(executable, "Meta Ads CLI command");
+  }
   const accessToken = metaAdsCliAccessToken(credential);
   const child = spawn(executable, [...commandArgs, ...args], {
     stdio: ["ignore", "pipe", "pipe"],
@@ -6243,44 +6253,23 @@ async function createMetaAdSetViaCli(
 // when given --image, but our connector input only carries the hash, so we map it
 // through --image to stay parity-correct with createMetaCreative's contract).
 async function createMetaCreativeViaCli(
-  credential: MetaAdsCredential,
-  input: MetaCreativeCreateInput
+  _credential: MetaAdsCredential,
+  _input: MetaCreativeCreateInput
 ): Promise<MetaWriteResult> {
-  if (!input.imageHash) {
-    throw new ConnectorError(
-      "provider_api_error",
-      "Meta Ads STANDARD creative requires an image_hash (upload the image via /adimages first)",
-      false
-    );
-  }
-  const args = [
-    "--output",
-    "json",
-    "ads",
-    "--ad-account-id",
-    metaAdsCliAccountId(credential),
-    "creative",
-    "create",
-    "--name",
-    input.name,
-    "--page-id",
-    input.pageId,
-    // The image hash references the already-uploaded asset (see createMetaCreative).
-    "--image",
-    input.imageHash
-  ];
-  if (input.body) args.push("--body", input.body);
-  if (input.title) args.push("--title", input.title);
-  if (input.linkUrl) args.push("--link-url", input.linkUrl);
-  if (input.description) args.push("--description", input.description);
-  if (input.callToAction) {
-    const callToAction = metaEnum(input.callToAction, META_CALL_TO_ACTION_VALUES, "call to action")!;
-    args.push("--call-to-action", callToAction);
-  }
-  if (input.instagramUserId) args.push("--instagram-actor-id", input.instagramUserId);
-  const response = await metaAdsCliWrite(credential, args);
-  const id = requireGraphId("creative", response);
-  return { ok: true, id, status: null };
+  // DEFERRED + fail-loud (review BLOCKER): the `meta ads creative create` CLI command takes
+  // `--image FILE` (a path to a local image the CLI uploads itself). Our connector's
+  // MetaCreativeCreateInput carries a pre-uploaded Graph `image_hash` (from /adimages) — there is NO
+  // file path to hand the CLI, and `--image <hash>` is rejected by the CLI as a non-existent file. So
+  // creative creation on the meta_ads_cli transport is NOT supported this slice; surface it as a
+  // clear, non-retryable error rather than silently passing a hash as a file path. (Follow-up: thread
+  // an image-file path through MetaCreativeCreateInput, or upload via the CLI's own image step.)
+  throw new ConnectorError(
+    "provider_unsupported",
+    "Meta creative creation via the `meta` CLI is not yet supported: the CLI's --image expects an " +
+      "image FILE path, but the engine supplies a pre-uploaded image_hash. Use the direct-Graph " +
+      "transport for creatives, or supply an image file.",
+    false
+  );
 }
 
 // ── CLI Create: Ad ── meta ads ad create <ADSET_ID> … ────────────────────────
