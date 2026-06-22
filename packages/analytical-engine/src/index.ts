@@ -1432,6 +1432,9 @@ async function connectSource(
     credentialKind,
     encryptedPayload: credentialPayloadForStorage(input, credentialKind, oauthTokenId),
     oauthTokenId,
+    // P1-2: the Meta account/pixel picker passes the chosen pixel here so CAPI dispatch has a target.
+    // db.connectSource COALESCEs it on re-connect, so rotating the token never nulls a prior pixel.
+    ...(optionalString(input, "selectedPixelId") ? { selectedPixelId: optionalString(input, "selectedPixelId") } : {}),
     actorType: context.authority
   });
   const connectionTest = await testConnectionForSource(db, context, provider, String(source.id));

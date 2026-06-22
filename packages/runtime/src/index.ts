@@ -820,7 +820,10 @@ function inputSchemaFor(id: InfiniteOsActionId): Record<string, unknown> {
         connectionName: { type: "string" },
         credentialKind: { type: "string" },
         credentialPayload: { type: "object", additionalProperties: true },
-        encryptedPayload: { type: "string" }
+        encryptedPayload: { type: "string" },
+        // P1-2: the Meta account/pixel picker passes the chosen pixel so CAPI dispatch has a target.
+        // Schema is additionalProperties:false, so this MUST be declared or the connect is rejected.
+        selectedPixelId: { type: "string" }
       },
       ["provider"]
     ),
