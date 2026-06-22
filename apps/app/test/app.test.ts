@@ -1541,14 +1541,15 @@ describe("Infinite OS app-hosted API/MCP skeleton", () => {
       async compactSession(input) {
         return { sessionId: input.newSessionId ?? "session-child", parentSessionId: input.sessionId };
       },
-      async getPendingActionCall(confirmationId) {
-        events.push(["getPendingActionCall", confirmationId]);
+      async getPendingActionCall(confirmationId, workspaceId) {
+        events.push(["getPendingActionCall", confirmationId, workspaceId]);
         return {
           id: "call_1",
           sessionId: "session-1",
           actionId: "start_source_sync",
           input: { sourceId: "src_1" },
-          inputHash: "hash_abc"
+          inputHash: "hash_abc",
+          workspaceId: WORKSPACE
         };
       },
       async confirmActionCall(input) {
@@ -1611,7 +1612,7 @@ describe("Infinite OS app-hosted API/MCP skeleton", () => {
           authority: "operator"
         }
       });
-      expect(events[0]).toEqual(["getPendingActionCall", "confirm_abc"]);
+      expect(events[0]).toEqual(["getPendingActionCall", "confirm_abc", WORKSPACE]);
       expect(events[1]).toEqual([
         "confirmActionCall",
         "confirm_abc",
@@ -1621,6 +1622,190 @@ describe("Infinite OS app-hosted API/MCP skeleton", () => {
     } finally {
       // env restored by afterEach
     }
+  });
+
+  it("fails closed (403) when a confirmation is confirmed from a DIFFERENT workspace, with zero action execution + an audit row (P0-A)", async () => {
+    // The pending confirmation was authored under WORKSPACE; the confirming request
+    // carries the OTHER_WORKSPACE header (the desktop's currently-active project). This
+    // is the confused-deputy: without the pin, the action would execute under the wrong
+    // brand's resolution context (a cross-workspace Graph write).
+    const events: unknown[] = [];
+    const sessionStore: ChatSessionStore = {
+      async ensureSession() {},
+      async appendMessage() {},
+      async recordActionCall() {},
+      async listSessions() {
+        return [];
+      },
+      async getSession() {
+        return null;
+      },
+      async searchSessions() {
+        return [];
+      },
+      async resumeSession() {},
+      async endSession() {},
+      async compactSession(input) {
+        return { sessionId: input.newSessionId ?? "session-child", parentSessionId: input.sessionId };
+      },
+      // The store is now scoped by (confirmationId, workspaceId). Simulate a row that
+      // exists but is BOUND to WORKSPACE, while the confirming workspace is OTHER_WORKSPACE.
+      // The route must read pending.workspaceId and refuse before executing.
+      async getPendingActionCall(confirmationId, workspaceId) {
+        events.push(["getPendingActionCall", confirmationId, workspaceId]);
+        return {
+          id: "call_1",
+          sessionId: "session-1",
+          actionId: "create_meta_campaign",
+          input: { sourceId: "src_1" },
+          inputHash: "hash_abc",
+          workspaceId: WORKSPACE
+        };
+      },
+      async confirmActionCall(input) {
+        events.push(["confirmActionCall", input.confirmationId, input.workspaceId]);
+      }
+    };
+    const auditRows: Array<{ sql: string; params: unknown[] }> = [];
+    const executions: string[] = [];
+    const db = {
+      query: async (sql: string, params: unknown[] = []) => {
+        if (/insert\s+into\s+integration_audit_log/i.test(sql)) {
+          auditRows.push({ sql, params });
+        }
+        return [];
+      },
+      one: async (sql: string) => {
+        if (sql.includes("from workspaces")) {
+          return { ok: 1 };
+        }
+        return null;
+      },
+      close: async () => {},
+      ensureWorkspace: async () => {},
+      ensureFirstPhaseDatasets: async () => {},
+      connectSource: async () => ({}),
+      updateSourceStatus: async () => {},
+      createJob: async () => {
+        executions.push("createJob");
+        return { id: "job_1", status: "queued" };
+      },
+      claimNextJob: async () => null,
+      completeJob: async () => {},
+      withTransaction: async <T,>(fn: (tx: InfiniteOsDb) => Promise<T>) => fn(db as unknown as InfiniteOsDb)
+    } as unknown as InfiniteOsDb;
+    const app = createApp({ sessionStore, database: db, databaseUrl: "" });
+
+    const denied = await app.inject({
+      method: "POST",
+      url: "/chat/actions/confirm_abc/confirm",
+      headers: operatorHeadersFor(OTHER_WORKSPACE)
+    });
+
+    expect(denied.statusCode).toBe(403);
+    expect(denied.json()).toMatchObject({
+      ok: false,
+      error: { code: "confirmation_workspace_mismatch" }
+    });
+    // The lookup was scoped by the CONFIRMING workspace ($2).
+    expect(events[0]).toEqual(["getPendingActionCall", "confirm_abc", OTHER_WORKSPACE]);
+    // The action NEVER executed and the confirmation was NEVER marked confirmed.
+    expect(executions).toEqual([]);
+    expect(events.some((e) => Array.isArray(e) && e[0] === "confirmActionCall")).toBe(false);
+    // An audit row was written, status='failed', recording the violation.
+    expect(auditRows).toHaveLength(1);
+    expect(auditRows[0]?.params).toContain("failed");
+  });
+
+  it("executes a confirmation against the PENDING row's workspace (not the request header) when they match (P0-A)", async () => {
+    const events: unknown[] = [];
+    const sessionStore: ChatSessionStore = {
+      async ensureSession() {},
+      async appendMessage() {},
+      async recordActionCall() {},
+      async listSessions() {
+        return [];
+      },
+      async getSession() {
+        return null;
+      },
+      async searchSessions() {
+        return [];
+      },
+      async resumeSession() {},
+      async endSession() {},
+      async compactSession(input) {
+        return { sessionId: input.newSessionId ?? "session-child", parentSessionId: input.sessionId };
+      },
+      async getPendingActionCall(confirmationId, workspaceId) {
+        events.push(["getPendingActionCall", confirmationId, workspaceId]);
+        return {
+          id: "call_1",
+          sessionId: "session-1",
+          actionId: "start_source_sync",
+          input: { sourceId: "src_1" },
+          inputHash: "hash_abc",
+          workspaceId: WORKSPACE
+        };
+      },
+      async confirmActionCall(input) {
+        events.push(["confirmActionCall", input.confirmationId, input.status, input.workspaceId]);
+      }
+    };
+    // Capture the workspace_id that reaches the action handler (start_source_sync calls
+    // db.createJob with context.workspaceId) so we can prove the action executed under
+    // the PENDING workspace and NOT the request header.
+    const executionWorkspaces: unknown[] = [];
+    const db = {
+      query: async (sql: string) => {
+        if (sql.includes("from sources")) {
+          return [{ id: "src_1", provider: "x", status: "connected", sync_mode: "incremental" }];
+        }
+        return [];
+      },
+      one: async (sql: string) => {
+        if (sql.includes("from workspaces")) {
+          return { ok: 1 };
+        }
+        if (sql.includes("from sources")) {
+          return { id: "src_1", provider: "x", status: "connected", sync_mode: "incremental" };
+        }
+        return null;
+      },
+      close: async () => {},
+      ensureWorkspace: async () => {},
+      ensureFirstPhaseDatasets: async () => {},
+      connectSource: async () => ({}),
+      updateSourceStatus: async () => {},
+      createJob: async (input: { workspaceId: string }) => {
+        executionWorkspaces.push(input.workspaceId);
+        return { id: "job_1", status: "queued" };
+      },
+      claimNextJob: async () => null,
+      completeJob: async () => {},
+      withTransaction: async <T,>(fn: (tx: InfiniteOsDb) => Promise<T>) => fn(db as unknown as InfiniteOsDb)
+    } as unknown as InfiniteOsDb;
+    const app = createApp({ sessionStore, database: db, databaseUrl: "" });
+
+    const confirmed = await app.inject({
+      method: "POST",
+      url: "/chat/actions/confirm_abc/confirm",
+      headers: operatorHeadersFor(WORKSPACE)
+    });
+
+    expect(confirmed.statusCode).toBe(200);
+    expect(confirmed.json()).toMatchObject({ ok: true, actionId: "start_source_sync" });
+    // The lookup AND the confirmation update were scoped by the workspace.
+    expect(events[0]).toEqual(["getPendingActionCall", "confirm_abc", WORKSPACE]);
+    expect(events.at(-1)).toEqual([
+      "confirmActionCall",
+      "confirm_abc",
+      expect.any(String),
+      WORKSPACE
+    ]);
+    // The action executed under the PENDING workspace (WORKSPACE), never a foreign id.
+    expect(executionWorkspaces.length).toBeGreaterThan(0);
+    expect(executionWorkspaces.every((ws) => ws === WORKSPACE)).toBe(true);
   });
 
   it("keeps API and MCP tool-call envelopes aligned", async () => {
@@ -2408,7 +2593,7 @@ describe("Infinite OS app-hosted API/MCP skeleton", () => {
         return { sessionId: input.newSessionId ?? input.sessionId, parentSessionId: input.sessionId };
       },
       async getPendingActionCall() {
-        return { id: "call_1", sessionId: "session-1", actionId: "start_source_sync", input: {}, inputHash: "h" };
+        return { id: "call_1", sessionId: "session-1", actionId: "start_source_sync", input: {}, inputHash: "h", workspaceId: WORKSPACE };
       },
       async confirmActionCall() {}
     };

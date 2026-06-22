@@ -826,17 +826,59 @@ export function createApp(options: {
       reply.code(404);
       return { ok: false, error: { code: "confirmation_store_unavailable" } };
     }
-    const pending = await sessionStore.getPendingActionCall(request.params.confirmationId);
+    // P0-A: scope the lookup by the CONFIRMING workspace ($2). confirmation_id is not
+    // unique across workspaces, so an unscoped lookup could return another brand's row.
+    const pending = await sessionStore.getPendingActionCall(request.params.confirmationId, ws);
     if (!pending) {
       reply.code(404);
       return { ok: false, error: { code: "confirmation_not_found" } };
     }
+    // P0-A FAIL-CLOSED: the confirmation must be executed under the workspace that
+    // AUTHORED it, never the confirming request's header (the desktop's currently-active
+    // project). If they differ, refuse BEFORE any action runs and write an audit row.
+    // This is the confused-deputy control: once ≥2 brands share an install, a Brand-A
+    // confirmation confirmed while Brand B is active would otherwise execute under
+    // Brand B's resolution context (a cross-workspace money-moving write).
+    if (pending.workspaceId !== ws) {
+      await database?.query(
+        `
+          insert into integration_audit_log (id, workspace_id, source_id, actor_type, action, status, details)
+          values ($1, $2, $3, $4, $5, $6, $7::jsonb)
+        `,
+        [
+          `audit_${randomUUID()}`,
+          ws,
+          null,
+          "operator",
+          pending.actionId,
+          "failed",
+          JSON.stringify({
+            violation: "confirmation_workspace_mismatch",
+            confirmationId: request.params.confirmationId,
+            confirmingWorkspaceId: ws,
+            pendingWorkspaceId: pending.workspaceId
+          })
+        ]
+      );
+      reply.code(403);
+      return { ok: false, error: { code: "confirmation_workspace_mismatch" } };
+    }
     try {
-      const envelope = await actionRequest(pending.actionId, pending.input, "api", "operator", pending.sessionId, ws);
+      // Execute under the PENDING row's workspace (== ws here, having passed the guard).
+      const envelope = await actionRequest(
+        pending.actionId,
+        pending.input,
+        "api",
+        "operator",
+        pending.sessionId,
+        pending.workspaceId
+      );
       await sessionStore.confirmActionCall({
         confirmationId: request.params.confirmationId,
         outputEnvelope: envelope,
-        status: envelope.status
+        status: envelope.status,
+        // P0-A: scope the confirm UPDATE to the pending row's workspace.
+        workspaceId: pending.workspaceId
       });
       return {
         ok: true,
@@ -2250,6 +2292,43 @@ function isLocalHost(host: string | undefined): boolean {
   return h === "127.0.0.1" || h === "localhost" || h === "::1";
 }
 
+// P0-G — Loopback-bind startup invariant. The install-wide operator token (which can
+// act on any workspace via a chosen `x-growth-os-workspace` header) is ONLY safe
+// because the daemon is reachable from localhost. `isLocalHost` above is a per-route
+// Host-header guard — it is NOT enforced on the LISTEN bind. So if `config.appHost`
+// is `0.0.0.0` (or `::`, or a routable LAN address) the operator token becomes
+// LAN-reachable. This pure, exported helper asserts the bind host resolves to a
+// loopback address and FAILS CLOSED (throws `daemon_must_bind_loopback`) otherwise,
+// and MUST be called BEFORE `app.listen`.
+//
+// Opt-out: `GROWTH_OS_ALLOW_NON_LOOPBACK_BIND=1` bypasses the assertion with a LOUD
+// warning. Anyone who can set the daemon's env already controls the operator token,
+// so this is a deliberate, supervised escape hatch — not a silent default.
+export function assertLoopbackAppHost(
+  appHost: string,
+  env: NodeJS.ProcessEnv = process.env
+): void {
+  // `isLocalHost` parses a Host HEADER ("host:port" / "[::1]:port"); a BARE bind host
+  // like "::1" (no brackets, no port) would split on its own colons to "" there, so
+  // accept the unbracketed IPv6 loopback explicitly before delegating the rest.
+  if (appHost.trim().toLowerCase() === "::1" || isLocalHost(appHost)) return;
+  if (env.GROWTH_OS_ALLOW_NON_LOOPBACK_BIND === "1") {
+    console.warn(
+      `[growth-os] WARNING: daemon binding NON-LOOPBACK host "${appHost}" because ` +
+        `GROWTH_OS_ALLOW_NON_LOOPBACK_BIND=1. The install-wide operator token is now ` +
+        `LAN-reachable — anyone on the network who reaches this port can act on any ` +
+        `workspace. Only set this if you fully understand and accept that exposure.`
+    );
+    return;
+  }
+  throw new Error(
+    `daemon_must_bind_loopback: refusing to bind appHost "${appHost}" — it does not ` +
+      `resolve to a loopback address (127.0.0.1 / ::1 / localhost). The install-wide ` +
+      `operator token would become LAN-reachable. Set GROWTH_OS_APP_HOST to a ` +
+      `loopback address, or set GROWTH_OS_ALLOW_NON_LOOPBACK_BIND=1 to override.`
+  );
+}
+
 // Is THIS module the process entrypoint (run directly, e.g. `node daemon.mjs` or `tsx index.ts`)?
 // A raw `import.meta.url === file://${process.argv[1]}` string compare is fragile: it breaks on
 // symlinked paths (macOS /tmp → /private/var/folders, app-bundle symlinks), on path encoding
@@ -2450,6 +2529,12 @@ if (isProcessEntrypoint()) {
   // crashing. The post-listen address() below reads the REAL bound port either way
   // and the descriptor records it, so a discovering client still finds us. This is
   // the host-side complement to the descriptor: ports can collide, discovery can't.
+  // P0-G — Fail closed BEFORE binding if the configured host is not loopback. The
+  // operator token is only safe because the daemon is localhost-only; a non-loopback
+  // bind would expose it to the LAN. Throws `daemon_must_bind_loopback` unless the
+  // explicit GROWTH_OS_ALLOW_NON_LOOPBACK_BIND=1 opt-out is set (loud warning).
+  assertLoopbackAppHost(config.appHost, process.env);
+
   try {
     await app.listen({ host: config.appHost, port: config.appPort });
   } catch (err) {

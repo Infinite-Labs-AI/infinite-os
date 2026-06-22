@@ -599,7 +599,10 @@ export function createLlmController(options: {
             status: call.status,
             requiresConfirmation: call.requiresConfirmation,
             confirmationId: call.confirmationId,
-            inputHash: call.inputHash
+            inputHash: call.inputHash,
+            // P0-A: pin the action call to the authoring workspace so the confirm
+            // path can fail closed on a cross-workspace confirmation.
+            workspaceId: input.workspaceId
           });
           actionCalls.push(call);
           toolResults.push(modelToolResult(call));

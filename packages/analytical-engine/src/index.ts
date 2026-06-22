@@ -1762,6 +1762,18 @@ async function resolveMetaCredentialForWrite(
   if (provider !== "meta_ads") {
     throw new Error(`source_provider_mismatch:expected meta_ads got ${provider}`);
   }
+  // DEFENSE-IN-DEPTH (P0-A, redundant no-op): the real confused-deputy control lives in
+  // the confirm path (chat_action_calls.workspace_id + workspace-scoped getPending/confirm
+  // + fail-closed `confirmation_workspace_mismatch` on both the HTTP and CLI surfaces).
+  // A project-pin assertion HERE is structurally tautological: `sourceProvider` above
+  // already does `select provider from sources where workspace_id = $1 and id = $2` with
+  // $1 = context.workspaceId, so any source it resolves is — by construction — in
+  // context.workspaceId; a sourceId belonging to another workspace throws
+  // `source_not_found` before this point and never reaches the Graph transport. There is
+  // no reachable state in which the resolved credential's workspace differs from
+  // context.workspaceId, so this is left as a documented invariant rather than a tested
+  // violation path (its acceptance test would be structurally unreachable). The pinning
+  // that actually closes the hole is enforced upstream at confirmation time.
   return resolveMetaAdsCredential(db, {
     workspaceId: context.workspaceId,
     sourceId

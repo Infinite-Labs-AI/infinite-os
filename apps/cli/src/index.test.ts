@@ -10455,6 +10455,122 @@ describe("createCliAgentRuntime local workspace validation", () => {
   });
 });
 
+describe("createCliAgentRuntime confirm-path workspace pinning (P0-A)", () => {
+  // The CLI confirm path is a SECOND confused-deputy: it looked the pending row up by
+  // confirmation_id alone, then executed under the env-bound (currently-active) project
+  // — NOT the workspace that authored the confirmation. These tests prove the fix:
+  // (1) the lookup is scoped by the bound workspace ($2); (2) a cross-workspace pending
+  // row is REFUSED before any action executes (zero Graph POSTs); (3) a matching
+  // confirmation executes under pending.workspaceId and the UPDATE is workspace-scoped.
+
+  // A fake db whose chat_action_calls lookup returns a pending row pinned to
+  // `pendingWorkspaceId`. Records every query so we can assert no execution/UPDATE ran.
+  function makeConfirmDb(
+    pendingWorkspaceId: string,
+    calls: Array<{ sql: string; params: unknown[] }>
+  ): growthDb.InfiniteOsDb {
+    const db = {
+      async query(sql: string, params: unknown[] = []) {
+        calls.push({ sql, params });
+        return [];
+      },
+      async one(sql: string, params: unknown[] = []) {
+        calls.push({ sql, params });
+        if (sql.includes("from workspaces")) {
+          return { ok: 1 };
+        }
+        if (/from\s+chat_action_calls/i.test(sql)) {
+          return {
+            id: "call_1",
+            sessionId: "sess_1",
+            actionId: "start_source_sync",
+            input: { sourceId: "src_1" },
+            inputHash: "hash_abc",
+            workspaceId: pendingWorkspaceId
+          };
+        }
+        return null;
+      },
+      async createJob(input: { workspaceId: string }) {
+        calls.push({ sql: "createJob", params: [input.workspaceId] });
+        return { id: "job_1", status: "queued" };
+      },
+      async close() {
+        return undefined;
+      }
+    } as unknown as growthDb.InfiniteOsDb;
+    return db;
+  }
+
+  it("REFUSES a cross-workspace confirmation (pending bound to proj_a, env bound to proj_b) with zero execution", async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "growth-os-confirm-xws-"));
+    await runCommand("init", [], { GROWTH_OS_WORKSPACE_ROOT: workspaceRoot });
+    const calls: Array<{ sql: string; params: unknown[] }> = [];
+    // Pending row authored under proj_a; the CLI env is bound to proj_b.
+    const dbSpy = vi.spyOn(growthDb, "createInfiniteOsDb").mockReturnValue(makeConfirmDb("proj_a", calls));
+    try {
+      const runtime = createCliAgentRuntime({
+        DATABASE_URL: "postgres://growth:password@db.example.com:5432/growth",
+        GROWTH_OS_WORKSPACE_ROOT: workspaceRoot,
+        GROWTH_OS_WORKSPACE_ID: "proj_b",
+        GROWTH_OS_HOME: join(workspaceRoot, ".growth-os-home")
+      });
+      try {
+        const result = (await runtime.confirmAction("confirm_abc")) as {
+          ok: boolean;
+          error?: { code?: string };
+        };
+        expect(result.ok).toBe(false);
+        expect(result.error?.code).toBe("confirmation_workspace_mismatch");
+        // The lookup was scoped by the bound (proj_b) workspace as $2.
+        const lookup = calls.find((c) => /from\s+chat_action_calls/i.test(c.sql));
+        expect(lookup?.params).toEqual(["confirm_abc", "proj_b"]);
+        // ZERO action execution: no job created, no confirm UPDATE issued.
+        expect(calls.some((c) => c.sql === "createJob")).toBe(false);
+        expect(calls.some((c) => /update\s+chat_action_calls/i.test(c.sql))).toBe(false);
+      } finally {
+        await runtime.close?.();
+      }
+    } finally {
+      dbSpy.mockRestore();
+      rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("executes a matching confirmation under pending.workspaceId and scopes the confirm UPDATE", async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "growth-os-confirm-match-"));
+    await runCommand("init", [], { GROWTH_OS_WORKSPACE_ROOT: workspaceRoot });
+    const calls: Array<{ sql: string; params: unknown[] }> = [];
+    // Pending row authored under proj_a; the CLI env is also bound to proj_a.
+    const dbSpy = vi.spyOn(growthDb, "createInfiniteOsDb").mockReturnValue(makeConfirmDb("proj_a", calls));
+    try {
+      const runtime = createCliAgentRuntime({
+        DATABASE_URL: "postgres://growth:password@db.example.com:5432/growth",
+        GROWTH_OS_WORKSPACE_ROOT: workspaceRoot,
+        GROWTH_OS_WORKSPACE_ID: "proj_a",
+        GROWTH_OS_HOME: join(workspaceRoot, ".growth-os-home")
+      });
+      try {
+        const result = (await runtime.confirmAction("confirm_abc")) as { ok: boolean; actionId?: string };
+        expect(result.ok).toBe(true);
+        expect(result.actionId).toBe("start_source_sync");
+        // The action executed under the PENDING workspace (proj_a).
+        const exec = calls.find((c) => c.sql === "createJob");
+        expect(exec?.params).toEqual(["proj_a"]);
+        // The confirm UPDATE was issued and workspace-scoped ($4 = proj_a).
+        const update = calls.find((c) => /update\s+chat_action_calls/i.test(c.sql));
+        expect(update).toBeDefined();
+        expect(update!.params).toContain("proj_a");
+      } finally {
+        await runtime.close?.();
+      }
+    } finally {
+      dbSpy.mockRestore();
+      rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("createCliAgentRuntime per-project session id (PR2)", () => {
   // Records every SQL + params so we can assert the controller session id the
   // runtime keys rows on. `chat_sessions` rows live under `id` / `session_id`;

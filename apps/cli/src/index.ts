@@ -9739,15 +9739,26 @@ export function createCliAgentRuntime(env: CliEnv = process.env): CliAgentRuntim
     },
     async confirmAction(confirmationId) {
       await assertWorkspaceExists();
-      const pending = await sessionStore.getPendingActionCall?.(confirmationId);
+      // P0-A: scope the lookup by the env-bound workspace ($2). confirmation_id is NOT
+      // unique across workspaces, so an unscoped lookup could return another brand's row.
+      const pending = await sessionStore.getPendingActionCall?.(confirmationId, workspaceId);
       if (!pending) {
         return { ok: false, error: { code: "confirmation_not_found" } };
+      }
+      // P0-A FAIL-CLOSED: this CLI confirm path is a SECOND confused-deputy — it used to
+      // execute under the env-bound (currently-active) project, NOT the workspace that
+      // authored the confirmation. Refuse BEFORE executing when they differ so a
+      // proj_a confirmation can never run under proj_b's resolution context.
+      if (pending.workspaceId !== workspaceId) {
+        return { ok: false, error: { code: "confirmation_workspace_mismatch" } };
       }
       const envelope = await registry.execute(
         pending.actionId,
         pending.input,
         createSessionContext({
-          workspaceId,
+          // Execute under the PENDING row's workspace (== workspaceId here, post-guard),
+          // never the env-bound active project.
+          workspaceId: pending.workspaceId,
           sessionId: pending.sessionId,
           actorId: "cli",
           authority: "operator",
@@ -9757,7 +9768,9 @@ export function createCliAgentRuntime(env: CliEnv = process.env): CliAgentRuntim
       await sessionStore.confirmActionCall?.({
         confirmationId,
         outputEnvelope: envelope,
-        status: envelope.status
+        status: envelope.status,
+        // P0-A: scope the confirm UPDATE to the pending row's workspace.
+        workspaceId: pending.workspaceId
       });
       return {
         ok: true,

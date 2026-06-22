@@ -51,7 +51,8 @@ describe("Infinite OS migration stack", () => {
       "0034_meta_stripe_true_value_and_frequency.sql",
       "0035_meta_ads_adset_grain.sql",
       "0036_chat_sessions_desktop_surface.sql",
-      "0037_meta_ads_ad_grain.sql"
+      "0037_meta_ads_ad_grain.sql",
+      "0038_chat_action_calls_workspace_id.sql"
     ]);
   });
 
@@ -380,7 +381,8 @@ describe("Infinite OS migration stack", () => {
       "0034_meta_stripe_true_value_and_frequency.sql",
       "0035_meta_ads_adset_grain.sql",
       "0036_chat_sessions_desktop_surface.sql",
-      "0037_meta_ads_ad_grain.sql"
+      "0037_meta_ads_ad_grain.sql",
+      "0038_chat_action_calls_workspace_id.sql"
     ]);
   });
 

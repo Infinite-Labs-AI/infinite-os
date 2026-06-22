@@ -82,12 +82,13 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
   });
 
   it("applied ALL 37 migrations on first boot and is idempotent on a re-run", async () => {
-    expect(loadMigrations().length).toBe(37);
-    expect(firstRun).toHaveLength(37);
+    expect(loadMigrations().length).toBe(38);
+    expect(firstRun).toHaveLength(38);
     expect(firstRun).toContain("0001_control_plane.sql");
     expect(firstRun).toContain("0006_security_roles.sql");
     expect(firstRun).toContain("0036_chat_sessions_desktop_surface.sql");
     expect(firstRun).toContain("0037_meta_ads_ad_grain.sql");
+    expect(firstRun).toContain("0038_chat_action_calls_workspace_id.sql");
 
     // Idempotent: a second boot re-applies zero (the `rows.length` gate, not the pg `rowCount`
     // gate, makes this true on PGlite).
@@ -95,13 +96,54 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
     expect(secondRun).toEqual([]);
   });
 
-  it("created the schema_migrations ledger with all 37 rows", async () => {
+  it("created the schema_migrations ledger with all 38 rows", async () => {
     const ledger = await db.query<{ id: string }>(
       "select id from schema_migrations order by id"
     );
-    expect(ledger).toHaveLength(37);
+    expect(ledger).toHaveLength(38);
     expect(ledger[0]?.id).toBe("0001_control_plane.sql");
-    expect(ledger.at(-1)?.id).toBe("0037_meta_ads_ad_grain.sql");
+    expect(ledger.at(-1)?.id).toBe("0038_chat_action_calls_workspace_id.sql");
+  });
+
+  it("0038 pins chat_action_calls to its origin workspace (NOT NULL, FK, backfilled from chat_sessions)", async () => {
+    // Column exists, is NOT NULL, and references workspaces(id).
+    const columns = await db.query<{ column_name: string; is_nullable: string; data_type: string }>(
+      `select column_name, is_nullable, data_type
+         from information_schema.columns
+        where table_name = 'chat_action_calls' and column_name = 'workspace_id'`
+    );
+    expect(columns).toHaveLength(1);
+    expect(columns[0]?.is_nullable).toBe("NO");
+    expect(columns[0]?.data_type).toBe("text");
+
+    // The FK to workspaces(id) exists.
+    const fk = await db.query<{ constraint_name: string }>(
+      `select tc.constraint_name
+         from information_schema.table_constraints tc
+         join information_schema.key_column_usage kcu
+           on tc.constraint_name = kcu.constraint_name
+        where tc.table_name = 'chat_action_calls'
+          and tc.constraint_type = 'FOREIGN KEY'
+          and kcu.column_name = 'workspace_id'`
+    );
+    expect(fk.length).toBeGreaterThanOrEqual(1);
+
+    // recordActionCall writes workspace_id; a row is bound to the session's workspace.
+    await db.withTransaction(async (tx) => {
+      await tx.ensureWorkspace("ws_pin_a", "Pin A");
+    });
+    await db.query(
+      `insert into chat_sessions (id, workspace_id, session_key, actor_id, surface)
+       values ('sess_pin_a', 'ws_pin_a', 'sess_pin_a', 'cli', 'cli')`
+    );
+    await db.query(
+      `insert into chat_action_calls (id, session_id, workspace_id, action_id, authority, status)
+       values ('call_pin_a', 'sess_pin_a', 'ws_pin_a', 'create_meta_campaign', 'operator', 'requires_confirmation')`
+    );
+    const stored = await db.query<{ workspace_id: string }>(
+      "select workspace_id from chat_action_calls where id = 'call_pin_a'"
+    );
+    expect(stored[0]?.workspace_id).toBe("ws_pin_a");
   });
 
   it("created all five growth_os_* roles (0006 applied on PGlite)", async () => {
