@@ -508,6 +508,84 @@ describe("connectSource writes the 0039 operational metadata + upserts on re-con
     expect(total[0]?.count).toBe("1");
   });
 
+  it("P0-B2: a re-connect that OMITS metadata PRESERVES prior values (COALESCE upsert), updates encrypted_payload", async () => {
+    const base = {
+      workspaceId: "ws_cs_coalesce",
+      provider: "meta_ads" as const,
+      connectionName: "Meta Coalesce",
+      accountExternalId: "act_coalesce",
+      credentialKind: "access_token"
+    };
+
+    // First connect WITH metadata: pixel + system-user + dispatch telemetry.
+    await db.connectSource({
+      ...base,
+      encryptedPayload: "enc-original",
+      selectedPixelId: "px_1",
+      isSystemUser: true,
+      lastDispatchAt: "2026-06-22T09:00:00.000Z",
+      lastDispatchStatus: "succeeded",
+      lastError: "prior transient error"
+    });
+
+    // Re-connect (same source_id + kind) OMITTING all metadata — only a fresh token.
+    // A naive `= excluded.selected_pixel_id` would null these out; COALESCE must preserve them.
+    await db.connectSource({ ...base, encryptedPayload: "enc-rotated" });
+
+    const rows = await db.query<{
+      encrypted_payload: string;
+      selected_pixel_id: string | null;
+      is_system_user: boolean;
+      last_dispatch_at: string | null;
+      last_dispatch_status: string | null;
+      last_error: string | null;
+    }>(
+      `select cc.encrypted_payload, cc.selected_pixel_id, cc.is_system_user,
+              cc.last_dispatch_at, cc.last_dispatch_status, cc.last_error
+         from connection_credentials cc
+         join sources s on s.id = cc.source_id
+        where s.workspace_id = 'ws_cs_coalesce'
+          and cc.credential_kind = 'access_token'
+          and cc.revoked_at is null`
+    );
+
+    expect(rows).toHaveLength(1);
+    // encrypted_payload SHOULD update (it is a direct excluded, not coalesced).
+    expect(rows[0]?.encrypted_payload).toBe("enc-rotated");
+    // Prior metadata PRESERVED (the re-connect omitted them).
+    expect(rows[0]?.selected_pixel_id).toBe("px_1");
+    expect(rows[0]?.is_system_user).toBe(true); // NOT flipped to false by the omitting re-connect
+    expect(new Date(rows[0]?.last_dispatch_at ?? "").toISOString()).toBe("2026-06-22T09:00:00.000Z");
+    expect(rows[0]?.last_dispatch_status).toBe("succeeded");
+    expect(rows[0]?.last_error).toBe("prior transient error");
+  });
+
+  it("P0-B2: a re-connect MAY still overwrite metadata when it SUPPLIES new non-null values", async () => {
+    const base = {
+      workspaceId: "ws_cs_overwrite",
+      provider: "meta_ads" as const,
+      connectionName: "Meta Overwrite",
+      accountExternalId: "act_overwrite",
+      credentialKind: "access_token"
+    };
+    await db.connectSource({ ...base, encryptedPayload: "enc-a", selectedPixelId: "px_old", isSystemUser: false });
+    // Supplying a new pixel + flipping is_system_user true must take effect (COALESCE picks the
+    // non-null new value).
+    await db.connectSource({ ...base, encryptedPayload: "enc-b", selectedPixelId: "px_new", isSystemUser: true });
+
+    const rows = await db.query<{ selected_pixel_id: string | null; is_system_user: boolean }>(
+      `select cc.selected_pixel_id, cc.is_system_user
+         from connection_credentials cc
+         join sources s on s.id = cc.source_id
+        where s.workspace_id = 'ws_cs_overwrite'
+          and cc.credential_kind = 'access_token'
+          and cc.revoked_at is null`
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.selected_pixel_id).toBe("px_new");
+    expect(rows[0]?.is_system_user).toBe(true);
+  });
+
   it("a re-connect AFTER revoking the prior credential inserts a fresh live row (partial-unique does not block)", async () => {
     const base = {
       workspaceId: "ws_cs_revoke",
@@ -620,4 +698,251 @@ describe("pglite boot-failure handling", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   }, 30_000);
+});
+
+describe("confirm-path workspace scoping against the REAL PGlite DB (P0-A money-safety)", () => {
+  // The mock session-store tests only assert SQL TEXT (`workspace_id = $2`). This proves the
+  // scoping BEHAVIOR against a REAL WASM-Postgres store. We issue the session-store's EXACT
+  // scoped SQL — the `recordActionCall` INSERT, the `getPendingActionCall` `where workspace_id
+  // = $2` SELECT, and the `confirmActionCall` `where workspace_id = $4` UPDATE — kept byte-
+  // faithful to packages/llm-controller/src/session-store.ts. (We re-issue the SQL here rather
+  // than importing `createSessionStore`, which lives in a sibling package that is not a build
+  // dependency of @infinite-os/db; coupling the two via a project reference would break db's
+  // `tsc -b`. The store's value is exactly this SQL, and it is exercised verbatim.)
+  //
+  // confirmation_id is NOT unique across workspaces (`confirm_${sha256({actionId,input}).slice(
+  // 0,16)}` carries no workspace), so two brands on one install collide on the same id. A pending
+  // confirmation recorded under ws_a must be invisible to ws_b's lookup, and a ws_b confirm must
+  // update ZERO rows (the row stays pending) — while ws_a's lookup/confirm sees and mutates it.
+
+  // Byte-faithful copies of the three session-store statements (P0-A).
+  const RECORD_ACTION_CALL_SQL = `
+    insert into chat_action_calls (
+      id, session_id, message_id, provider_tool_call_id, action_id, authority,
+      input_json, output_envelope_json, status, requires_confirmation, confirmation_id,
+      input_hash, workspace_id
+    )
+    values ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9, $10, $11, $12, $13)
+  `;
+  const GET_PENDING_SQL = `
+    select
+      id,
+      session_id as "sessionId",
+      action_id as "actionId",
+      input_json as "input",
+      input_hash as "inputHash",
+      workspace_id as "workspaceId"
+    from chat_action_calls
+    where confirmation_id = $1
+      and workspace_id = $2
+      and requires_confirmation = true
+      and confirmed_at is null
+    limit 1
+  `;
+  const CONFIRM_SQL = `
+    update chat_action_calls
+    set confirmed_at = now(),
+      output_envelope_json = $2::jsonb,
+      status = $3,
+      requires_confirmation = false
+    where confirmation_id = $1
+      and workspace_id = $4
+      and requires_confirmation = true
+      and confirmed_at is null
+  `;
+
+  let dataDir: string;
+  let url: string;
+  let db: InfiniteOsDb;
+
+  const getPending = (confirmationId: string, workspaceId: string) =>
+    db.one<{ id: string; workspaceId: string; actionId: string }>(GET_PENDING_SQL, [
+      confirmationId,
+      workspaceId
+    ]);
+  const confirm = (confirmationId: string, workspaceId: string) =>
+    db.query(CONFIRM_SQL, [confirmationId, JSON.stringify({ ok: true }), "ok", workspaceId]);
+
+  beforeAll(async () => {
+    dataDir = mkdtempSync(join(tmpdir(), "infinite-os-pglite-confirmscope-"));
+    url = `pglite://${dataDir}`;
+    await runMigrations(url);
+    db = createInfiniteOsDb(url);
+
+    // Seed two workspaces + a chat_session per workspace (the FK chain
+    // chat_action_calls.session_id → chat_sessions.id and .workspace_id → workspaces.id).
+    await db.withTransaction(async (tx) => {
+      await tx.ensureWorkspace("ws_a", "Workspace A");
+      await tx.ensureWorkspace("ws_b", "Workspace B");
+    });
+    await db.query(
+      `insert into chat_sessions (id, workspace_id, session_key, actor_id, surface)
+       values ('sess_a', 'ws_a', 'sess_a', 'cli', 'cli'),
+              ('sess_b', 'ws_b', 'sess_b', 'cli', 'cli')`
+    );
+  }, 60_000);
+
+  afterAll(async () => {
+    if (db) {
+      await db.close();
+    }
+    rmSync(dataDir, { recursive: true, force: true });
+  });
+
+  it("a pending confirmation recorded under ws_a is SELECT-invisible to ws_b and visible to ws_a", async () => {
+    // recordActionCall under ws_a — confirmation_id 'confirm_collide' bound to ws_a.
+    await db.query(RECORD_ACTION_CALL_SQL, [
+      "call_a",
+      "sess_a",
+      null,
+      null,
+      "create_meta_campaign",
+      "operator",
+      JSON.stringify({ sourceId: "src_1" }),
+      JSON.stringify({}),
+      "requires_confirmation",
+      true,
+      "confirm_collide",
+      "hash_a",
+      "ws_a"
+    ]);
+
+    // ws_b cannot see ws_a's pending row (the `where workspace_id = $2` SELECT scoping).
+    expect(await getPending("confirm_collide", "ws_b")).toBeNull();
+
+    // ws_a sees its own row, bound to ws_a.
+    const fromA = await getPending("confirm_collide", "ws_a");
+    expect(fromA).not.toBeNull();
+    expect(fromA?.workspaceId).toBe("ws_a");
+    expect(fromA?.actionId).toBe("create_meta_campaign");
+  });
+
+  it("a ws_b confirm updates ZERO rows (the ws_a row stays pending); a ws_a confirm marks it confirmed", async () => {
+    // ws_b tries to confirm ws_a's pending confirmation_id — the `where workspace_id = $4`
+    // UPDATE scoping means it touches NO rows; the ws_a row must remain pending.
+    await confirm("confirm_collide", "ws_b");
+    const stillPending = await db.query<{
+      requires_confirmation: boolean;
+      confirmed_at: string | null;
+      status: string;
+    }>(
+      `select requires_confirmation, confirmed_at, status
+         from chat_action_calls
+        where confirmation_id = 'confirm_collide' and workspace_id = 'ws_a'`
+    );
+    expect(stillPending).toHaveLength(1);
+    expect(stillPending[0]?.requires_confirmation).toBe(true);
+    expect(stillPending[0]?.confirmed_at).toBeNull();
+    expect(stillPending[0]?.status).toBe("requires_confirmation");
+
+    // And ws_a still sees it as pending.
+    expect(await getPending("confirm_collide", "ws_a")).not.toBeNull();
+
+    // The correct workspace (ws_a) confirms — exactly its row is marked confirmed.
+    await confirm("confirm_collide", "ws_a");
+    const afterA = await db.query<{
+      requires_confirmation: boolean;
+      confirmed_at: string | null;
+      status: string;
+    }>(
+      `select requires_confirmation, confirmed_at, status
+         from chat_action_calls
+        where confirmation_id = 'confirm_collide' and workspace_id = 'ws_a'`
+    );
+    expect(afterA).toHaveLength(1);
+    expect(afterA[0]?.requires_confirmation).toBe(false);
+    expect(afterA[0]?.confirmed_at).not.toBeNull();
+    expect(afterA[0]?.status).toBe("ok");
+
+    // Now that it is confirmed, ws_a's pending lookup returns null (confirmed_at is set).
+    expect(await getPending("confirm_collide", "ws_a")).toBeNull();
+  });
+});
+
+describe("0038 backfills chat_action_calls.workspace_id from chat_sessions (partial-migration proof)", () => {
+  // FIX #4 — exercise migration 0038's BACKFILL directly. The harness DOES support a partial
+  // migration set (runPgliteMigrations takes an explicit list), so we apply 0001..0037, insert a
+  // chat_action_call with NO workspace_id (the column doesn't exist pre-0038), then apply 0038
+  // alone and assert: (a) the row's workspace_id was backfilled from its chat_session, and
+  // (b) the NOT NULL now holds (a fresh insert omitting workspace_id is rejected).
+  let dataDir: string;
+  let url: string;
+
+  beforeAll(() => {
+    dataDir = mkdtempSync(join(tmpdir(), "infinite-os-pglite-0038-backfill-"));
+    url = `pglite://${dataDir}`;
+  });
+
+  afterAll(() => {
+    rmSync(dataDir, { recursive: true, force: true });
+  });
+
+  it("backfills legacy NULL workspace_id from the owning session, then sets NOT NULL", async () => {
+    const all = loadMigrations();
+    const upTo0037 = all.filter((m) => m.id <= "0037_meta_ads_ad_grain.sql");
+    const m0038 = all.find((m) => m.id === "0038_chat_action_calls_workspace_id.sql");
+    expect(m0038).toBeDefined();
+    // Sanity: 0038 is NOT in the partial set (so the column is genuinely absent pre-backfill).
+    expect(upTo0037.some((m) => m.id === "0038_chat_action_calls_workspace_id.sql")).toBe(false);
+
+    // 1. Apply 0001..0037 only.
+    await runPgliteMigrations(url, upTo0037);
+
+    const db = createInfiniteOsDb(url);
+    try {
+      // Pre-0038 the column must NOT exist yet.
+      const preCols = await db.query<{ column_name: string }>(
+        `select column_name from information_schema.columns
+          where table_name = 'chat_action_calls' and column_name = 'workspace_id'`
+      );
+      expect(preCols).toHaveLength(0);
+
+      // 2. Seed a workspace + session, then a LEGACY chat_action_call with NO workspace_id column.
+      await db.withTransaction(async (tx) => {
+        await tx.ensureWorkspace("ws_legacy", "Legacy WS");
+      });
+      await db.query(
+        `insert into chat_sessions (id, workspace_id, session_key, actor_id, surface)
+         values ('sess_legacy', 'ws_legacy', 'sess_legacy', 'cli', 'cli')`
+      );
+      await db.query(
+        `insert into chat_action_calls (id, session_id, action_id, authority, status)
+         values ('call_legacy', 'sess_legacy', 'create_meta_campaign', 'operator', 'requires_confirmation')`
+      );
+    } finally {
+      await db.close();
+    }
+
+    // 3. Apply 0038 alone (the add-column + backfill + set-not-null + index).
+    const applied0038 = await runPgliteMigrations(url, [m0038!]);
+    expect(applied0038).toEqual(["0038_chat_action_calls_workspace_id.sql"]);
+
+    const db2 = createInfiniteOsDb(url);
+    try {
+      // (a) BACKFILL: the legacy row's workspace_id was filled from its chat_session.
+      const backfilled = await db2.query<{ workspace_id: string }>(
+        "select workspace_id from chat_action_calls where id = 'call_legacy'"
+      );
+      expect(backfilled).toHaveLength(1);
+      expect(backfilled[0]?.workspace_id).toBe("ws_legacy");
+
+      // The column is now NOT NULL.
+      const cols = await db2.query<{ is_nullable: string }>(
+        `select is_nullable from information_schema.columns
+          where table_name = 'chat_action_calls' and column_name = 'workspace_id'`
+      );
+      expect(cols).toHaveLength(1);
+      expect(cols[0]?.is_nullable).toBe("NO");
+
+      // (b) SET-NOT-NULL HELD: a fresh insert that OMITS workspace_id is rejected.
+      await expect(
+        db2.query(
+          `insert into chat_action_calls (id, session_id, action_id, authority, status)
+           values ('call_after', 'sess_legacy', 'create_meta_campaign', 'operator', 'requires_confirmation')`
+        )
+      ).rejects.toThrow();
+    } finally {
+      await db2.close();
+    }
+  }, 60_000);
 });

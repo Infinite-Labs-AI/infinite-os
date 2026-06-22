@@ -2280,14 +2280,47 @@ function isLocalHost(host: string | undefined): boolean {
 // Opt-out: `GROWTH_OS_ALLOW_NON_LOOPBACK_BIND=1` bypasses the assertion with a LOUD
 // warning. Anyone who can set the daemon's env already controls the operator token,
 // so this is a deliberate, supervised escape hatch — not a silent default.
+// Is `host` a loopback bind LITERAL we accept? This is a literal allowlist — NOT a DNS
+// resolver. We accept:
+//   - 'localhost'
+//   - the FULL IPv4 loopback block 127.0.0.0/8 (any valid dotted-quad whose first octet
+//     is 127), not just 127.0.0.1 — the whole 127/8 range binds loopback-only (RFC 5735)
+//   - IPv6 loopback '::1' (bare or bracketed)
+//   - IPv4-mapped IPv6 loopback '::ffff:127.x.x.x'
+// The input is trim()+toLowerCase()'d first so " 127.0.0.1 " / "LocalHost" are accepted.
+function isLoopbackBindLiteral(host: string): boolean {
+  const h = host.trim().toLowerCase();
+  if (h === "localhost" || h === "::1" || h === "[::1]") return true;
+
+  // IPv4-mapped IPv6 loopback: "::ffff:127.x.x.x" — strip the prefix and validate the quad.
+  const mapped = h.startsWith("::ffff:") ? h.slice("::ffff:".length) : null;
+  if (mapped) return isIpv4LoopbackQuad(mapped);
+
+  return isIpv4LoopbackQuad(h);
+}
+
+// Strict dotted-quad parse: exactly four octets, each a 0-255 integer with no leading-zero
+// trickery beyond a lone "0", and the FIRST octet === 127 (the entire 127.0.0.0/8 block).
+function isIpv4LoopbackQuad(value: string): boolean {
+  const parts = value.split(".");
+  if (parts.length !== 4) return false;
+  const octets: number[] = [];
+  for (const part of parts) {
+    if (!/^\d{1,3}$/.test(part)) return false; // digits only, 1-3 of them (rejects "256"-width too)
+    const n = Number(part);
+    if (n < 0 || n > 255) return false;
+    octets.push(n);
+  }
+  return octets[0] === 127;
+}
+
 export function assertLoopbackAppHost(
   appHost: string,
   env: NodeJS.ProcessEnv = process.env
 ): void {
-  // `isLocalHost` parses a Host HEADER ("host:port" / "[::1]:port"); a BARE bind host
-  // like "::1" (no brackets, no port) would split on its own colons to "" there, so
-  // accept the unbracketed IPv6 loopback explicitly before delegating the rest.
-  if (appHost.trim().toLowerCase() === "::1" || isLocalHost(appHost)) return;
+  // Literal loopback allowlist (trimmed + case-insensitive). Covers 'localhost', the full
+  // 127.0.0.0/8 IPv4 block, '::1', and IPv4-mapped IPv6 loopback. NOT a DNS resolver.
+  if (isLoopbackBindLiteral(appHost)) return;
   if (env.GROWTH_OS_ALLOW_NON_LOOPBACK_BIND === "1") {
     console.warn(
       `[growth-os] WARNING: daemon binding NON-LOOPBACK host "${appHost}" because ` +
@@ -2298,10 +2331,11 @@ export function assertLoopbackAppHost(
     return;
   }
   throw new Error(
-    `daemon_must_bind_loopback: refusing to bind appHost "${appHost}" — it does not ` +
-      `resolve to a loopback address (127.0.0.1 / ::1 / localhost). The install-wide ` +
-      `operator token would become LAN-reachable. Set GROWTH_OS_APP_HOST to a ` +
-      `loopback address, or set GROWTH_OS_ALLOW_NON_LOOPBACK_BIND=1 to override.`
+    `daemon_must_bind_loopback: refusing to bind appHost "${appHost}" — it is not a ` +
+      `recognized loopback literal (localhost / 127.0.0.0/8 / ::1 / ::ffff:127.x.x.x). ` +
+      `This is a literal allowlist, not a DNS resolver. The install-wide operator token ` +
+      `would become LAN-reachable. Set GROWTH_OS_APP_HOST to a loopback address, or set ` +
+      `GROWTH_OS_ALLOW_NON_LOOPBACK_BIND=1 to override.`
   );
 }
 

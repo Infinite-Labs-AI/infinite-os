@@ -48,6 +48,63 @@ describe("assertLoopbackAppHost (P0-G loopback-bind invariant)", () => {
     expect(() => assertLoopbackAppHost("::1", {})).not.toThrow();
   });
 
+  it("passes for the FULL 127.0.0.0/8 loopback range, not just 127.0.0.1", () => {
+    // The whole 127/8 block is loopback (RFC 5735). 127.0.0.2 and 127.255.255.254 bind
+    // loopback-only just like 127.0.0.1 — the assertion must accept the entire range.
+    expect(() => assertLoopbackAppHost("127.0.0.2", {})).not.toThrow();
+    expect(() => assertLoopbackAppHost("127.255.255.254", {})).not.toThrow();
+    expect(() => assertLoopbackAppHost("127.1.2.3", {})).not.toThrow();
+  });
+
+  it("passes for IPv4-mapped IPv6 loopback (::ffff:127.x.x.x)", () => {
+    expect(() => assertLoopbackAppHost("::ffff:127.0.0.1", {})).not.toThrow();
+    expect(() => assertLoopbackAppHost("::ffff:127.0.0.2", {})).not.toThrow();
+  });
+
+  it("trims surrounding whitespace and is case-insensitive before matching", () => {
+    expect(() => assertLoopbackAppHost(" 127.0.0.1 ", {})).not.toThrow();
+    expect(() => assertLoopbackAppHost("  ::1 ", {})).not.toThrow();
+    expect(() => assertLoopbackAppHost("LocalHost", {})).not.toThrow();
+  });
+
+  it("throws for a routable 128.0.0.1 (just outside the 127/8 loopback block)", () => {
+    expect(() => assertLoopbackAppHost("128.0.0.1", {})).toThrow(
+      /daemon_must_bind_loopback/
+    );
+  });
+
+  it("throws for a private-range 10.0.0.1", () => {
+    expect(() => assertLoopbackAppHost("10.0.0.1", {})).toThrow(
+      /daemon_must_bind_loopback/
+    );
+  });
+
+  it("rejects malformed dotted-quads that merely start with 127", () => {
+    // "127" alone, or octets out of the 0-255 range, are NOT valid 127/8 literals.
+    expect(() => assertLoopbackAppHost("127.0.0.256", {})).toThrow(
+      /daemon_must_bind_loopback/
+    );
+    expect(() => assertLoopbackAppHost("127.0.0", {})).toThrow(
+      /daemon_must_bind_loopback/
+    );
+    expect(() => assertLoopbackAppHost("1270.0.0.1", {})).toThrow(
+      /daemon_must_bind_loopback/
+    );
+  });
+
+  it("error message names a loopback LITERAL allowlist, not DNS resolution", () => {
+    // It is a literal allowlist — NOT a resolver. The wording must not claim it
+    // "resolves" anything (no DNS lookup happens).
+    expect(() => assertLoopbackAppHost("192.168.1.50", {})).toThrow(
+      /is not a recognized loopback literal/
+    );
+    try {
+      assertLoopbackAppHost("192.168.1.50", {});
+    } catch (err) {
+      expect((err as Error).message).not.toMatch(/resolve to a loopback address/);
+    }
+  });
+
   it("bypasses the assertion when GROWTH_OS_ALLOW_NON_LOOPBACK_BIND=1 (loud opt-out)", () => {
     const warnings: unknown[][] = [];
     const originalWarn = console.warn;
