@@ -1,22 +1,9 @@
 import React, { useEffect, useState } from "react";
 import { Box, Text, render, useApp, useInput } from "./renderer.js";
 
+import { INFINITE_ART, MIN_BIG_COLUMNS } from "./infinite-wordmark.js";
 import { GROWTH_TAGLINE } from "./rocket-banner.js";
 import { DITHER, RETRO } from "./retro-style.js";
-
-// "INFINITE" in the ANSI-Shadow block-letter style. Six fixed-width rows. The
-// dither shading only swaps █ for a lighter block glyph (▓/▒) per row and never
-// changes a row's width or count, so every frame is the same size.
-const INFINITE_ART: readonly string[] = [
-  " ██╗███╗   ██╗███████╗██╗███╗   ██╗██╗████████╗███████╗",
-  " ██║████╗  ██║██╔════╝██║████╗  ██║██║╚══██╔══╝██╔════╝",
-  " ██║██╔██╗ ██║█████╗  ██║██╔██╗ ██║██║   ██║   █████╗  ",
-  " ██║██║╚██╗██║██╔══╝  ██║██║╚██╗██║██║   ██║   ██╔══╝  ",
-  " ██║██║ ╚████║██║     ██║██║ ╚████║██║   ██║   ███████╗",
-  " ╚═╝╚═╝  ╚═══╝╚═╝     ╚═╝╚═╝  ╚═══╝╚═╝   ╚═╝   ╚══════╝"
-];
-const ART_WIDTH = INFINITE_ART[0].length; // 54
-const MIN_BIG_COLUMNS = ART_WIDTH + 4;
 
 const SHIMMER_TICK_MS = 120;
 // Fixed top-bright → bottom-dim greyscale gradient per row; a scan line drifts

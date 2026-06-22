@@ -670,6 +670,7 @@ const SETUP_OPTIONS_WITH_VALUES = new Set([
   "--x-installed"
 ]);
 const INTERACTIVE_COMMAND_COMPLETIONS: readonly CompletionSuggestion[] = [
+  { value: "/connect", description: "Connect a data source (guided wizard)" },
   { value: "/help", description: "Show CLI help" },
   { value: "/memory", description: "Review or update session memory" },
   { value: "/sessions", description: "List model-backed chat sessions" },
@@ -696,6 +697,93 @@ const INTERACTIVE_COMMAND_COMPLETIONS: readonly CompletionSuggestion[] = [
   { value: "/exit", description: "Exit the interactive shell" },
   { value: "/quit", description: "Exit the interactive shell" }
 ];
+
+// ── Home inventory (every-launch startup screen) ──────────────────────────────
+// A SHORT, friendly curated list of what the OS can DO — verb-phrases, NOT raw
+// action ids. Hand-curated on purpose (the action registry is large and its ids
+// are internal); keep it to the handful that read well as "here's what I can do".
+const HOME_INVENTORY_TOOLS: readonly { label: string }[] = [
+  { label: "connect" },
+  { label: "sync" },
+  { label: "generate ads" },
+  { label: "insights" },
+  { label: "outreach" },
+  { label: "query" }
+];
+
+// The curated subset of slash commands shown on the home screen — the most useful
+// front doors, drawn from INTERACTIVE_COMMAND_COMPLETIONS (the same registry the
+// Tab-completer uses). Kept short so the Commands row stays one line on a normal
+// terminal; the full set is still discoverable via `/help` and Tab.
+const HOME_INVENTORY_COMMAND_VALUES: readonly string[] = [
+  "/connect",
+  "/sync",
+  "/help",
+  "/memory",
+  "/sessions",
+  "/exit"
+];
+
+// Friendly short labels for the Connected row, keyed by the connector `provider`.
+// Falls back to a title-cased provider id for anything not listed here.
+const HOME_INVENTORY_PROVIDER_LABELS: Readonly<Record<string, string>> = {
+  google_analytics_4: "GA4",
+  posthog: "PostHog",
+  stripe: "Stripe",
+  x: "X",
+  shopify: "Shopify",
+  meta_ads: "Facebook"
+};
+
+export function homeInventoryProviderLabel(provider: string): string {
+  return (
+    HOME_INVENTORY_PROVIDER_LABELS[provider] ??
+    provider
+      .split(/[_\s]+/)
+      .filter(Boolean)
+      .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+      .join(" ")
+  );
+}
+
+// The curated command subset, resolved from the registry so a renamed/removed
+// command can't drift out of sync. Skips any value missing from the registry.
+export function homeInventoryCommands(): readonly { value: string }[] {
+  const known = new Set(INTERACTIVE_COMMAND_COMPLETIONS.map((entry) => entry.value));
+  return HOME_INVENTORY_COMMAND_VALUES.filter((value) => known.has(value)).map((value) => ({ value }));
+}
+
+// Best-effort, BOUNDED fetch of the connected sources for the home screen. Uses
+// the app-API `/sources` path (pin-tolerant — `apiRequest` omits the workspace
+// header on a no-pin session) with a SHORT abort cap so a missing/zombie daemon
+// fails fast. Returns `undefined` (NOT an empty array) on ANY failure so the home
+// screen renders the inventory WITHOUT a misleading "nothing connected" line — it
+// shows a muted "daemon not reachable" note instead. NEVER throws, never hangs.
+async function fetchHomeInventoryConnections(
+  env: CliEnv
+): Promise<readonly { label: string; degraded?: boolean }[] | undefined> {
+  // Reuse the readiness probe cap (default 1.5s) so the prompt is never delayed.
+  const timeoutMs = readinessProbeTimeoutMs(env);
+  try {
+    const payload = await apiRequest("/sources", env, { timeoutMs });
+    const connections = configuredConnectionsFromPayload(payload);
+    // De-dupe by provider (a workspace can have multiple connections per provider)
+    // and prefer "connected" over "degraded" for the tick.
+    const byProvider = new Map<string, boolean>();
+    for (const connection of connections) {
+      const degraded = connection.status === "degraded";
+      const existing = byProvider.get(connection.provider);
+      byProvider.set(connection.provider, existing === false ? false : degraded);
+    }
+    return [...byProvider.entries()].map(([provider, degraded]) => ({
+      label: homeInventoryProviderLabel(provider),
+      degraded
+    }));
+  } catch {
+    // Daemon unreachable / no pin resolvable / timeout → omit the live line.
+    return undefined;
+  }
+}
 
 export function completeInteractiveInputForCli(value: string, env: CliEnv): readonly CompletionSuggestion[] {
   const workspaceRoot = workspaceRootFor(env);
@@ -6687,6 +6775,11 @@ async function interactiveSession(env: CliEnv): Promise<void> {
     await refreshActiveProjectLabel(env);
     await loadProjectListCache(env);
     const theme = resolveTheme(env as NodeJS.ProcessEnv);
+    // Home inventory (every-launch startup screen). Tools/Commands are static +
+    // registry-derived; the Connected line is LIVE but BOUNDED — the fetch is
+    // capped by `readinessProbeTimeoutMs` and returns `undefined` on any failure,
+    // so a missing/zombie daemon degrades to a muted note and never hangs startup.
+    const homeInventoryConnections = await fetchHomeInventoryConnections(env);
     try {
       await runInkInteractiveSession({
         columns: output.columns,
@@ -6694,6 +6787,13 @@ async function interactiveSession(env: CliEnv): Promise<void> {
         getAgentTitle: () =>
           activeProjectLabel ? `${theme.brand.name} — ${activeProjectLabel}` : undefined,
         getCompletions: (value) => completeInteractiveInputForCli(value, env),
+        homeInventory: {
+          tools: HOME_INVENTORY_TOOLS,
+          commands: homeInventoryCommands(),
+          connections: homeInventoryConnections,
+          version: cliVersion(),
+          workspace: activeProjectLabel
+        },
         initialInputHistory: loadPersistentInputHistory(env as NodeJS.ProcessEnv),
         input,
         onRememberInput: (line) => appendPersistentInputHistory(line, env as NodeJS.ProcessEnv),
