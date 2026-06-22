@@ -27,8 +27,31 @@ import { TYPING_IDLE_MS } from "../config/timing.js";
 import { displayWidth, truncateCells } from "../lib/display-width.js";
 import { resolveTheme, type Theme } from "../theme.js";
 import type { Msg } from "../types.js";
+import {
+  HomeInventory,
+  homeInventoryRowCount,
+  type HomeInventoryCommand,
+  type HomeInventoryConnection,
+  type HomeInventoryTool
+} from "./home-inventory.js";
 import { isInfiniteTurnBusy } from "./status-indicator.js";
 import { inkTranscriptRowCount, InkTranscriptApp, useInfiniteTranscriptClock } from "./transcript-app.js";
+
+/**
+ * The every-launch home inventory shown above the transcript on the empty home
+ * screen (the big wordmark + Tools / Commands / Connected + welcome). Supplied by
+ * the CLI (`index.ts`) so the registry / curated lists / live source fetch stay
+ * there; the TUI only renders it. Absent (`undefined`) = no inventory (e.g. tests
+ * / non-home paths) and the screen falls back to the bare rocket banner.
+ */
+export interface HomeInventoryData {
+  tools: readonly HomeInventoryTool[];
+  commands: readonly HomeInventoryCommand[];
+  /** `undefined` = daemon unreachable / fetch skipped (renders a muted note). */
+  connections?: readonly HomeInventoryConnection[];
+  version?: string;
+  workspace?: string;
+}
 
 const HISTORY_LIMIT = 120;
 const INPUT_HISTORY_LIMIT = 1000;
@@ -149,6 +172,12 @@ export interface InkInteractiveSessionAppProps {
   /** Live agent label for the active project (e.g. `() => "Infinite — Acme"`). */
   getAgentTitle?: () => string | undefined;
   getCompletions?: (value: string) => readonly CompletionSuggestion[];
+  /**
+   * The every-launch home inventory (big wordmark + Tools / Commands / Connected
+   * + welcome) shown ONCE on the empty home screen, above the transcript. Omitted
+   * = the home screen falls back to the bare rocket banner (e.g. tests).
+   */
+  homeInventory?: HomeInventoryData;
   initialInputCursor?: number;
   initialInputSelection?: ComposerSelection | null;
   initialInputValue?: string;
@@ -275,6 +304,7 @@ export function InkInteractiveSessionApp({
   buildConnectDispatch,
   getAgentTitle,
   getCompletions,
+  homeInventory,
   initialInputCursor,
   initialInputSelection,
   initialInputValue = "",
@@ -399,7 +429,15 @@ export function InkInteractiveSessionApp({
     busy ? "busy" : "ready",
     ...formatQueuedStatus(queuedLines)
   ];
-  const composerRow = inkTranscriptRowCount({
+  // The home inventory shows ONCE, on the empty home screen (no transcript yet)
+  // and only when the CLI supplied its data. The first submitted line scrolls it
+  // away (history is non-empty), so it never repeats per message.
+  const showHomeInventory = Boolean(homeInventory) && history.length === 0;
+  // The inventory renders ABOVE the transcript, so its rows must be added to the
+  // composer's native-cursor row prediction — otherwise the cursor parks too high
+  // (the PR #27 invariant: predicted composer row == live rendered row count).
+  const homeInventoryRows = showHomeInventory ? homeInventoryRowCount(columns) : 0;
+  const composerRow = homeInventoryRows + inkTranscriptRowCount({
     busy,
     columns,
     homeBanner: true,
@@ -917,6 +955,16 @@ export function InkInteractiveSessionApp({
 
   return (
     <Box flexDirection="column" width={columns}>
+      {showHomeInventory && homeInventory ? (
+        <HomeInventory
+          columns={columns}
+          commands={homeInventory.commands}
+          connections={homeInventory.connections}
+          tools={homeInventory.tools}
+          version={homeInventory.version}
+          workspace={homeInventory.workspace}
+        />
+      ) : null}
       <InkTranscriptApp
         busy={busy}
         columns={columns}
