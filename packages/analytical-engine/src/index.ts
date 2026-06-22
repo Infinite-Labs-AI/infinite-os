@@ -1981,6 +1981,22 @@ async function createMetaAdHandler(
 // stricter typed-confirm for activate) live above this layer; here we perform
 // the transition INLINE and audit it. activate/pause are naturally idempotent at
 // Meta but still operator-gated + audited.
+// Read + validate the optional entity-kind hint from an action input. Returns the
+// narrowed MetaWriteEntity (campaign|adset|ad) or undefined. Used both for audit
+// rows and to select the CLI update/delete subcommand. Throws on an unknown value
+// so a typo surfaces here rather than as an opaque CLI failure.
+function metaWriteEntityFromInput(input: unknown): MetaWriteEntity | undefined {
+  const raw = optionalString(input, "entity");
+  if (!raw) {
+    return undefined;
+  }
+  const normalized = raw.toLowerCase();
+  if (normalized === "campaign" || normalized === "adset" || normalized === "ad") {
+    return normalized;
+  }
+  throw new Error(`unsupported_meta_entity:${raw}`);
+}
+
 async function setMetaEntityStatusHandler(
   db: InfiniteOsDb,
   context: SessionContext,
@@ -1992,11 +2008,14 @@ async function setMetaEntityStatusHandler(
   if (status !== "ACTIVE" && status !== "PAUSED") {
     throw new Error(`unsupported_meta_status:${status}`);
   }
+  // The entity token (campaign|adset|ad) selects the CLI update subcommand. The
+  // direct Graph node POST does not need it, so it stays optional for that path.
+  const entity = metaWriteEntityFromInput(input);
   const action: InfiniteOsActionId = "set_meta_entity_status";
   const credential = await resolveMetaCredentialForWrite(db, context, sourceId);
   let result;
   try {
-    result = await setMetaEntityStatus(credential, entityId, status as MetaEntityStatus);
+    result = await setMetaEntityStatus(credential, entityId, status as MetaEntityStatus, entity);
   } catch (error) {
     await metaAuditLog(db, context, sourceId, action, "failed", {
       action,
@@ -2037,14 +2056,15 @@ async function deleteMetaEntityHandler(
 ): Promise<ActionEnvelope> {
   const sourceId = requiredString(input, "sourceId");
   const entityId = requiredString(input, "entityId");
-  // Optional entity-kind hint for the audit row only (the DELETE node call needs
-  // just the id). null when the caller did not supply it.
-  const entity = optionalString(input, "entity") ?? null;
+  // Entity-kind hint. Used for the audit row AND (for the CLI transport) to select
+  // the `meta ads <entity> delete` subcommand. The direct Graph DELETE needs just
+  // the id, so it stays optional there. null when the caller did not supply it.
+  const entity = metaWriteEntityFromInput(input) ?? null;
   const action: InfiniteOsActionId = "delete_meta_entity";
   const credential = await resolveMetaCredentialForWrite(db, context, sourceId);
   let result;
   try {
-    result = await deleteMetaEntity(credential, entityId);
+    result = await deleteMetaEntity(credential, entityId, entity ?? undefined);
   } catch (error) {
     await metaAuditLog(db, context, sourceId, action, "failed", {
       action,

@@ -5377,6 +5377,9 @@ export async function createMetaCampaign(
   credential: MetaAdsCredential,
   input: MetaCampaignCreateInput
 ): Promise<MetaWriteResult> {
+  if (isMetaAdsCliTransport(credential)) {
+    return createMetaCampaignViaCli(credential, input);
+  }
   const adAccountId = metaAdsAccountId(credential);
   // VERIFY against a real Meta sandbox capture before live use:
   //   `special_ad_categories: []` is [INFERRED-REQUIRED] by Graph v25 (POST
@@ -5406,6 +5409,9 @@ export async function createMetaAdSet(
   credential: MetaAdsCredential,
   input: MetaAdSetCreateInput
 ): Promise<MetaWriteResult> {
+  if (isMetaAdsCliTransport(credential)) {
+    return createMetaAdSetViaCli(credential, input);
+  }
   const adAccountId = metaAdsAccountId(credential);
   // FIX 3: normalize+validate enums to UPPERCASE before they reach the Graph POST.
   const optimizationGoal = metaEnum(input.optimizationGoal, META_OPTIMIZATION_GOAL_VALUES, "optimization goal")!;
@@ -5457,6 +5463,9 @@ export async function createMetaCreative(
   credential: MetaAdsCredential,
   input: MetaCreativeCreateInput
 ): Promise<MetaWriteResult> {
+  if (isMetaAdsCliTransport(credential)) {
+    return createMetaCreativeViaCli(credential, input);
+  }
   const adAccountId = metaAdsAccountId(credential);
   if (!input.imageHash) {
     // Image upload (POST /act_{id}/adimages → image_hash) happens before this in
@@ -5512,6 +5521,9 @@ export async function createMetaAd(
   credential: MetaAdsCredential,
   input: MetaAdCreateInput
 ): Promise<MetaWriteResult> {
+  if (isMetaAdsCliTransport(credential)) {
+    return createMetaAdViaCli(credential, input);
+  }
   const adAccountId = metaAdsAccountId(credential);
   // tracking_specs is [INFERRED] for the STANDARD path and omitted — verify the
   // element shape against a sandbox capture before adding it.
@@ -5536,10 +5548,24 @@ export async function createMetaAd(
 export async function setMetaEntityStatus(
   credential: MetaAdsCredential,
   entityId: string,
-  status: MetaEntityStatus
+  status: MetaEntityStatus,
+  // The entity token (campaign|adset|ad) selects the CLI subcommand. The direct
+  // Graph node POST does NOT need it (it targets /{id}); it's only required for the
+  // CLI transport, which has no entity-agnostic update path.
+  entity?: MetaWriteEntity
 ): Promise<MetaStatusResult> {
   if (status !== "ACTIVE" && status !== "PAUSED") {
     throw new ConnectorError("provider_api_error", `Unsupported Meta entity status: ${String(status)}`, false);
+  }
+  if (isMetaAdsCliTransport(credential)) {
+    if (!entity) {
+      throw new ConnectorError(
+        "provider_api_error",
+        "Meta Ads CLI status change requires an entity (campaign|adset|ad) to select the subcommand",
+        false
+      );
+    }
+    return setMetaEntityStatusViaCli(credential, entity, entityId, status);
   }
   const response = await metaAdsGraphPost(credential, entityId, { status });
   // Graph returns { success: true } for node status POSTs; trust the 2xx and
@@ -5557,8 +5583,21 @@ export async function setMetaEntityStatus(
 // is `safeUrlForLogs`-scrubbed in any error path — the token is never logged.
 export async function deleteMetaEntity(
   credential: MetaAdsCredential,
-  entityId: string
+  entityId: string,
+  // The entity token (campaign|adset|ad) selects the CLI subcommand. The direct
+  // Graph node DELETE does NOT need it; required only for the CLI transport.
+  entity?: MetaWriteEntity
 ): Promise<MetaDeleteResult> {
+  if (isMetaAdsCliTransport(credential)) {
+    if (!entity) {
+      throw new ConnectorError(
+        "provider_api_error",
+        "Meta Ads CLI delete requires an entity (campaign|adset|ad) to select the subcommand",
+        false
+      );
+    }
+    return deleteMetaEntityViaCli(credential, entity, entityId);
+  }
   await metaAdsGraphWrite(credential, "DELETE", entityId, {});
   // A non-2xx already threw a non-retryable ConnectorError above; reaching here
   // means Graph returned a 2xx `{ success: true }`.
@@ -6041,13 +6080,295 @@ async function callMetaAdsCliJson(credential: MetaAdsCredential, args: string[])
       }
       finish(() => {
         try {
-          resolve(JSON.parse(stdoutBuffer));
+          // Some `meta` CLI commands prepend a human line (e.g. "Created campaign …")
+          // before the `--output json` payload. Strip any leading non-JSON prefix up
+          // to the first `{`/`[` so the structured body still parses. A pure-JSON
+          // stdout (the read/insights path) is unaffected — it already starts with `{`.
+          resolve(JSON.parse(stripJsonPrefix(stdoutBuffer)));
         } catch {
           reject(new ConnectorError("provider_api_error", "Meta Ads CLI command returned invalid JSON", true));
         }
       });
     });
   });
+}
+
+// Strip any leading human-readable prefix line(s) the `meta` CLI may print before
+// the `--output json` payload (e.g. "Created campaign 120…"). Returns the substring
+// starting at the first top-level `{` or `[`. If neither appears, returns the input
+// unchanged so the strict JSON.parse downstream still throws a clear "invalid JSON".
+function stripJsonPrefix(raw: string): string {
+  const brace = raw.indexOf("{");
+  const bracket = raw.indexOf("[");
+  const candidates = [brace, bracket].filter((i) => i >= 0);
+  if (candidates.length === 0) {
+    return raw;
+  }
+  return raw.slice(Math.min(...candidates));
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Meta Ads CLI WRITE builders (PR — CLI write transport).
+//
+// Mirrors `metaAdsCliInsights`: build the `meta ads <entity> <action> …` argv from
+// the per-op spec and run it via `callMetaAdsCliJson`, which injects AD_ACCOUNT_ID /
+// ACCESS_TOKEN as env. The CLI does the Graph POST itself; we parse the id (and any
+// echoed status) out of the `--output json` body.
+//
+// MONEY-SAFETY parity with the direct Graph path is enforced HERE too:
+//  • creates pass `--status paused` (and the CLI also defaults PAUSED) — INVARIANT 1.
+//  • the parsed response is run through `assertCreateNotActive` — a Graph echo of
+//    ACTIVE throws a non-retryable `money_safety_violation` exactly as on the
+//    direct path.
+//  • EVERY error coming out of a CLI write is normalized to retryable:false
+//    (INVARIANT 3) via `metaAdsCliWrite`, even though the read path's
+//    `callMetaAdsCliJson` marks transient CLI failures retryable. A money write
+//    must never re-run on the worker's retry queue.
+// ───────────────────────────────────────────────────────────────────────────
+
+// Run a CLI write argv and return the parsed Graph response. Wraps
+// `callMetaAdsCliJson` so that ANY error (timeout, non-zero exit, invalid JSON,
+// missing binary) surfaces as a NON-retryable ConnectorError — INVARIANT 3.
+async function metaAdsCliWrite(credential: MetaAdsCredential, args: string[]): Promise<MetaGraphWriteResponse> {
+  let raw: unknown;
+  try {
+    raw = await callMetaAdsCliJson(credential, args);
+  } catch (error) {
+    if (error instanceof ConnectorError) {
+      // Re-stamp as non-retryable: a create/status/delete must never auto-retry.
+      throw new ConnectorError(error.code, error.message, false);
+    }
+    throw new ConnectorError(
+      "provider_api_error",
+      `Meta Ads CLI write failed: ${error instanceof Error ? error.message : String(error)}`,
+      false
+    );
+  }
+  if (raw === null || typeof raw !== "object") {
+    throw new ConnectorError("provider_api_error", "Meta Ads CLI write returned a non-object JSON body", false);
+  }
+  return raw as MetaGraphWriteResponse;
+}
+
+// Push an optional integer-cents flag (validated by metaCents) onto a CLI argv.
+function pushCentsFlag(args: string[], flag: string, value: number | undefined): void {
+  const cents = metaCents(value);
+  if (cents !== undefined) {
+    args.push(flag, String(cents));
+  }
+}
+
+// ── CLI Create: Campaign ── meta ads campaign create … ────────────────────────
+async function createMetaCampaignViaCli(
+  credential: MetaAdsCredential,
+  input: MetaCampaignCreateInput
+): Promise<MetaWriteResult> {
+  // FIX 3 parity: normalize+validate the enum BEFORE it reaches the CLI.
+  const objective = metaEnum(input.objective, META_OBJECTIVE_VALUES, "objective")!;
+  const args = [
+    "--output",
+    "json",
+    "ads",
+    "--ad-account-id",
+    metaAdsCliAccountId(credential),
+    "campaign",
+    "create",
+    "--name",
+    input.name,
+    "--objective",
+    objective,
+    // INVARIANT 1: hard-code PAUSED (the CLI also defaults PAUSED). NEVER `active`.
+    "--status",
+    "paused"
+  ];
+  pushCentsFlag(args, "--daily-budget", input.dailyBudget);
+  pushCentsFlag(args, "--lifetime-budget", input.lifetimeBudget);
+  const response = await metaAdsCliWrite(credential, args);
+  const id = requireGraphId("campaign", response);
+  const status = assertCreateNotActive("campaign", id, response);
+  return { ok: true, id, status };
+}
+
+// ── CLI Create: Ad Set ── meta ads adset create <CAMPAIGN_ID> … ───────────────
+async function createMetaAdSetViaCli(
+  credential: MetaAdsCredential,
+  input: MetaAdSetCreateInput
+): Promise<MetaWriteResult> {
+  const optimizationGoal = metaEnum(input.optimizationGoal, META_OPTIMIZATION_GOAL_VALUES, "optimization goal")!;
+  const billingEvent = metaEnum(input.billingEvent, META_BILLING_EVENT_VALUES, "billing event")!;
+  const args = [
+    "--output",
+    "json",
+    "ads",
+    "--ad-account-id",
+    metaAdsCliAccountId(credential),
+    "adset",
+    "create",
+    input.campaignId, // positional CAMPAIGN_ID
+    "--name",
+    input.name,
+    "--optimization-goal",
+    optimizationGoal,
+    "--billing-event",
+    billingEvent,
+    // INVARIANT 1: hard-code PAUSED.
+    "--status",
+    "paused"
+  ];
+  pushCentsFlag(args, "--daily-budget", input.dailyBudget);
+  pushCentsFlag(args, "--lifetime-budget", input.lifetimeBudget);
+  pushCentsFlag(args, "--bid-amount", input.bidAmount);
+  if (input.startTime) args.push("--start-time", input.startTime);
+  if (input.endTime) args.push("--end-time", input.endTime);
+  if (input.targetingCountries && input.targetingCountries.length > 0) {
+    args.push("--targeting-countries", input.targetingCountries.join(","));
+  }
+  if (input.pixelId) {
+    args.push("--pixel-id", input.pixelId);
+    // Mirror the Graph path: default the conversion event to PURCHASE when a pixel
+    // is supplied. Validate/normalize first so a bad enum throws non-retryably.
+    const customEventType =
+      metaEnum(input.customEventType, META_CUSTOM_EVENT_TYPE_VALUES, "custom event type") ?? "PURCHASE";
+    args.push("--custom-event-type", customEventType);
+  }
+  const response = await metaAdsCliWrite(credential, args);
+  const id = requireGraphId("adset", response);
+  const status = assertCreateNotActive("adset", id, response);
+  return { ok: true, id, status };
+}
+
+// ── CLI Create: Ad Creative ── meta ads creative create … ────────────────────
+// Creatives have no go-live status; nothing to PAUSE-guard. Still require a
+// pre-uploaded image_hash like the Graph path (the CLI uploads the image itself
+// when given --image, but our connector input only carries the hash, so we map it
+// through --image to stay parity-correct with createMetaCreative's contract).
+async function createMetaCreativeViaCli(
+  credential: MetaAdsCredential,
+  input: MetaCreativeCreateInput
+): Promise<MetaWriteResult> {
+  if (!input.imageHash) {
+    throw new ConnectorError(
+      "provider_api_error",
+      "Meta Ads STANDARD creative requires an image_hash (upload the image via /adimages first)",
+      false
+    );
+  }
+  const args = [
+    "--output",
+    "json",
+    "ads",
+    "--ad-account-id",
+    metaAdsCliAccountId(credential),
+    "creative",
+    "create",
+    "--name",
+    input.name,
+    "--page-id",
+    input.pageId,
+    // The image hash references the already-uploaded asset (see createMetaCreative).
+    "--image",
+    input.imageHash
+  ];
+  if (input.body) args.push("--body", input.body);
+  if (input.title) args.push("--title", input.title);
+  if (input.linkUrl) args.push("--link-url", input.linkUrl);
+  if (input.description) args.push("--description", input.description);
+  if (input.callToAction) {
+    const callToAction = metaEnum(input.callToAction, META_CALL_TO_ACTION_VALUES, "call to action")!;
+    args.push("--call-to-action", callToAction);
+  }
+  if (input.instagramUserId) args.push("--instagram-actor-id", input.instagramUserId);
+  const response = await metaAdsCliWrite(credential, args);
+  const id = requireGraphId("creative", response);
+  return { ok: true, id, status: null };
+}
+
+// ── CLI Create: Ad ── meta ads ad create <ADSET_ID> … ────────────────────────
+async function createMetaAdViaCli(
+  credential: MetaAdsCredential,
+  input: MetaAdCreateInput
+): Promise<MetaWriteResult> {
+  const args = [
+    "--output",
+    "json",
+    "ads",
+    "--ad-account-id",
+    metaAdsCliAccountId(credential),
+    "ad",
+    "create",
+    input.adsetId, // positional ADSET_ID
+    "--name",
+    input.name,
+    "--creative-id",
+    input.creativeId,
+    // INVARIANT 1: hard-code PAUSED.
+    "--status",
+    "paused"
+  ];
+  const response = await metaAdsCliWrite(credential, args);
+  const id = requireGraphId("ad", response);
+  const status = assertCreateNotActive("ad", id, response);
+  return { ok: true, id, status };
+}
+
+// ── CLI Status transition ── meta ads <entity> update <ID> --status … ─────────
+// The CLI selects the subcommand by entity token. setMetaEntityStatus is entity-
+// agnostic at the function level, so the CLI path takes the entity explicitly.
+async function setMetaEntityStatusViaCli(
+  credential: MetaAdsCredential,
+  entity: MetaWriteEntity,
+  entityId: string,
+  status: MetaEntityStatus
+): Promise<MetaStatusResult> {
+  const args = [
+    "--output",
+    "json",
+    "ads",
+    "--ad-account-id",
+    metaAdsCliAccountId(credential),
+    metaCliEntityToken(entity),
+    "update",
+    entityId,
+    "--status",
+    status.toLowerCase()
+  ];
+  const response = await metaAdsCliWrite(credential, args);
+  const echoed = metaEchoedStatus(response);
+  return { ok: true, id: entityId, status: echoed ?? status };
+}
+
+// ── CLI Delete ── meta ads <entity> delete <ID> --force ───────────────────────
+async function deleteMetaEntityViaCli(
+  credential: MetaAdsCredential,
+  entity: MetaWriteEntity,
+  entityId: string
+): Promise<MetaDeleteResult> {
+  const args = [
+    "--output",
+    "json",
+    "ads",
+    "--ad-account-id",
+    metaAdsCliAccountId(credential),
+    metaCliEntityToken(entity),
+    "delete",
+    entityId,
+    "--force"
+  ];
+  await metaAdsCliWrite(credential, args);
+  return { ok: true, id: entityId, deleted: true };
+}
+
+// The CLI uses the entity token directly as the `ads <token> …` subcommand.
+// Creatives have no update/delete subcommand in this slice — guard against it.
+function metaCliEntityToken(entity: MetaWriteEntity): string {
+  if (entity === "creative") {
+    throw new ConnectorError(
+      "provider_unsupported",
+      "Meta Ads CLI status/delete is not supported for creatives",
+      false
+    );
+  }
+  return entity;
 }
 
 function parseProcessCommand(command: string, label: string): { executable: string; args: string[] } {

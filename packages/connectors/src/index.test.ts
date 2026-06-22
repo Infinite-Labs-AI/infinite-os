@@ -3734,13 +3734,13 @@ describe("Meta Ads WRITE helpers", () => {
       );
     });
 
-    it("refuses a delete when the transport is meta_ads_cli (non-retryable)", async () => {
+    it("refuses a delete on the CLI transport when no entity hint is supplied (non-retryable)", async () => {
       await withMockFetch(
         () => jsonResponse({ success: true }),
         async () => {
           await expect(
             deleteMetaEntity({ ...metaWriteCredential, transport: "meta_ads_cli" }, "120000000000005")
-          ).rejects.toMatchObject({ code: "provider_unsupported", retryable: false });
+          ).rejects.toMatchObject({ code: "provider_api_error", retryable: false });
         }
       );
     });
@@ -3900,19 +3900,241 @@ describe("Meta Ads WRITE helpers", () => {
     });
   });
 
-  describe("CLI/MCP write transports are refused (non-retryable)", () => {
-    it("refuses a write when transport is meta_ads_cli", async () => {
+  describe("MCP write transport is still refused (out of scope)", () => {
+    it("refuses a write when transport is mcp_stdio (non-retryable)", async () => {
       await withMockFetch(
         () => jsonResponse({ id: "should-not-happen" }),
         async () => {
           await expect(
             createMetaCampaign(
-              { ...metaWriteCredential, transport: "meta_ads_cli" },
+              { ...metaWriteCredential, transport: "mcp_stdio" },
               { name: "X", objective: "OUTCOME_TRAFFIC" }
             )
           ).rejects.toMatchObject({ code: "provider_unsupported", retryable: false });
         }
       );
+    });
+  });
+
+  // ── CLI WRITE transport ── meta ads <entity> <action> … via the spawned `meta`
+  // CLI. Mirrors the CLI insights tests: a fake node `meta` records its argv to a
+  // file and emits the `--output json` body, so we assert the exact tokens AND that
+  // the money-safety contract (PAUSED, never ACTIVE, non-retryable) is preserved.
+  describe("CLI WRITE transport (meta ads <entity> …)", () => {
+    // Build a fake `meta` CLI that writes its argv (JSON array) to argvOut and
+    // prints `body` to stdout (optionally behind a human prefix line to exercise
+    // the JSON-prefix stripping). Returns a cliCommand string for the credential.
+    function fakeCliWriter(dir: string, body: unknown, opts: { prefix?: string } = {}): string {
+      const script = join(dir, "meta-cli-write.mjs");
+      const prefixLine = opts.prefix ? `console.log(${JSON.stringify(opts.prefix)});` : "";
+      writeFileSync(
+        script,
+        `
+import process from "node:process";
+import { writeFileSync } from "node:fs";
+const args = process.argv.slice(2);
+writeFileSync(${JSON.stringify(join(dir, "argv.json"))}, JSON.stringify(args));
+${prefixLine}
+console.log(${JSON.stringify(JSON.stringify(body))});
+        `.trim(),
+        "utf8"
+      );
+      return `${JSON.stringify(process.execPath)} ${JSON.stringify(script)}`;
+    }
+
+    function cliCredential(dir: string, body: unknown, opts?: { prefix?: string }): MetaAdsCredential {
+      return {
+        mode: "live",
+        transport: "meta_ads_cli",
+        adAccountId: "1234567890",
+        accessToken: "cli-write-token",
+        cliCommand: fakeCliWriter(dir, body, opts)
+      };
+    }
+
+    function recordedArgv(dir: string): string[] {
+      return JSON.parse(readFileSync(join(dir, "argv.json"), "utf8")) as string[];
+    }
+
+    function withTmp(fn: (dir: string) => Promise<void>): Promise<void> {
+      const dir = mkdtempSync(join(tmpdir(), "growth-os-meta-cli-write-"));
+      return fn(dir).finally(() => rmSync(dir, { recursive: true, force: true }));
+    }
+
+    it("creates a campaign via `meta ads campaign create` with --status paused (NEVER active)", async () => {
+      await withTmp(async (dir) => {
+        const result = await createMetaCampaign(
+          cliCredential(dir, { id: "120000000000010", status: "PAUSED" }),
+          { name: "CLI Camp", objective: "outcome_traffic", dailyBudget: 5000 }
+        );
+        expect(result).toEqual({ ok: true, id: "120000000000010", status: "PAUSED" });
+        const argv = recordedArgv(dir);
+        expect(argv.slice(0, 7)).toEqual(["--output", "json", "ads", "--ad-account-id", "1234567890", "campaign", "create"]);
+        expect(argv).toContain("--name");
+        expect(argv[argv.indexOf("--name") + 1]).toBe("CLI Camp");
+        // Enum normalized to UPPERCASE before the CLI.
+        expect(argv[argv.indexOf("--objective") + 1]).toBe("OUTCOME_TRAFFIC");
+        // Budget passed as integer cents.
+        expect(argv[argv.indexOf("--daily-budget") + 1]).toBe("5000");
+        // MONEY-SAFETY: --status paused, NEVER active.
+        expect(argv[argv.indexOf("--status") + 1]).toBe("paused");
+        expect(argv).not.toContain("active");
+      });
+    });
+
+    it("strips a human prefix line before parsing the campaign id", async () => {
+      await withTmp(async (dir) => {
+        const result = await createMetaCampaign(
+          cliCredential(dir, { id: "120000000000011" }, { prefix: "Created campaign 120000000000011 (PAUSED)" }),
+          { name: "Prefixed", objective: "OUTCOME_SALES" }
+        );
+        expect(result).toMatchObject({ ok: true, id: "120000000000011" });
+      });
+    });
+
+    it("creates an ad set via `meta ads adset create <CAMPAIGN_ID>` with mapped flags", async () => {
+      await withTmp(async (dir) => {
+        const result = await createMetaAdSet(cliCredential(dir, { id: "120000000000020", status: "PAUSED" }), {
+          name: "CLI AdSet",
+          campaignId: "120000000000010",
+          optimizationGoal: "link_clicks",
+          billingEvent: "impressions",
+          dailyBudget: 3000,
+          targetingCountries: ["US", "CA"],
+          pixelId: "px_1"
+        });
+        expect(result).toMatchObject({ ok: true, id: "120000000000020", status: "PAUSED" });
+        const argv = recordedArgv(dir);
+        expect(argv.slice(0, 7)).toEqual(["--output", "json", "ads", "--ad-account-id", "1234567890", "adset", "create"]);
+        // Positional campaign id immediately after `create`.
+        expect(argv[7]).toBe("120000000000010");
+        expect(argv[argv.indexOf("--optimization-goal") + 1]).toBe("LINK_CLICKS");
+        expect(argv[argv.indexOf("--billing-event") + 1]).toBe("IMPRESSIONS");
+        expect(argv[argv.indexOf("--daily-budget") + 1]).toBe("3000");
+        expect(argv[argv.indexOf("--targeting-countries") + 1]).toBe("US,CA");
+        expect(argv[argv.indexOf("--pixel-id") + 1]).toBe("px_1");
+        // pixel ⇒ default conversion event PURCHASE.
+        expect(argv[argv.indexOf("--custom-event-type") + 1]).toBe("PURCHASE");
+        expect(argv[argv.indexOf("--status") + 1]).toBe("paused");
+      });
+    });
+
+    it("creates a creative via `meta ads creative create` (status null, --image=hash)", async () => {
+      await withTmp(async (dir) => {
+        const result = await createMetaCreative(cliCredential(dir, { id: "120000000000030" }), {
+          name: "CLI Creative",
+          pageId: "page_1",
+          imageHash: "hash_abc",
+          linkUrl: "https://example.com",
+          body: "Buy now",
+          title: "Headline",
+          callToAction: "shop_now"
+        });
+        expect(result).toEqual({ ok: true, id: "120000000000030", status: null });
+        const argv = recordedArgv(dir);
+        expect(argv.slice(0, 7)).toEqual(["--output", "json", "ads", "--ad-account-id", "1234567890", "creative", "create"]);
+        expect(argv[argv.indexOf("--page-id") + 1]).toBe("page_1");
+        expect(argv[argv.indexOf("--image") + 1]).toBe("hash_abc");
+        expect(argv[argv.indexOf("--link-url") + 1]).toBe("https://example.com");
+        expect(argv[argv.indexOf("--call-to-action") + 1]).toBe("SHOP_NOW");
+        // creatives carry no --status flag.
+        expect(argv).not.toContain("--status");
+      });
+    });
+
+    it("rejects a CLI creative without an image_hash (non-retryable)", async () => {
+      await withTmp(async (dir) => {
+        await expect(
+          createMetaCreative(cliCredential(dir, { id: "should-not-happen" }), {
+            name: "NoImage",
+            pageId: "page_1"
+          })
+        ).rejects.toMatchObject({ code: "provider_api_error", retryable: false });
+      });
+    });
+
+    it("creates an ad via `meta ads ad create <ADSET_ID>` with --status paused", async () => {
+      await withTmp(async (dir) => {
+        const result = await createMetaAd(cliCredential(dir, { id: "120000000000040", status: "PAUSED" }), {
+          name: "CLI Ad",
+          adsetId: "120000000000020",
+          creativeId: "120000000000030"
+        });
+        expect(result).toMatchObject({ ok: true, id: "120000000000040", status: "PAUSED" });
+        const argv = recordedArgv(dir);
+        expect(argv.slice(0, 7)).toEqual(["--output", "json", "ads", "--ad-account-id", "1234567890", "ad", "create"]);
+        expect(argv[7]).toBe("120000000000020"); // positional adset id
+        expect(argv[argv.indexOf("--creative-id") + 1]).toBe("120000000000030");
+        expect(argv[argv.indexOf("--status") + 1]).toBe("paused");
+        expect(argv).not.toContain("active");
+      });
+    });
+
+    it("MONEY-SAFETY: a CLI create that echoes ACTIVE throws money_safety_violation (non-retryable)", async () => {
+      await withTmp(async (dir) => {
+        await expect(
+          createMetaCampaign(cliCredential(dir, { id: "120000000000099", status: "ACTIVE" }), {
+            name: "Rogue",
+            objective: "OUTCOME_TRAFFIC"
+          })
+        ).rejects.toMatchObject({ code: "money_safety_violation", retryable: false });
+      });
+    });
+
+    it("sets entity status via `meta ads <entity> update <ID> --status`", async () => {
+      await withTmp(async (dir) => {
+        const result = await setMetaEntityStatus(
+          cliCredential(dir, { id: "120000000000010", status: "ACTIVE" }),
+          "120000000000010",
+          "ACTIVE",
+          "campaign"
+        );
+        expect(result).toEqual({ ok: true, id: "120000000000010", status: "ACTIVE" });
+        const argv = recordedArgv(dir);
+        expect(argv).toEqual([
+          "--output",
+          "json",
+          "ads",
+          "--ad-account-id",
+          "1234567890",
+          "campaign",
+          "update",
+          "120000000000010",
+          "--status",
+          "active"
+        ]);
+      });
+    });
+
+    it("deletes an entity via `meta ads <entity> delete <ID> --force`", async () => {
+      await withTmp(async (dir) => {
+        const result = await deleteMetaEntity(
+          cliCredential(dir, { success: true }),
+          "120000000000040",
+          "ad"
+        );
+        expect(result).toEqual({ ok: true, id: "120000000000040", deleted: true });
+        const argv = recordedArgv(dir);
+        expect(argv).toEqual(["--output", "json", "ads", "--ad-account-id", "1234567890", "ad", "delete", "120000000000040", "--force"]);
+      });
+    });
+
+    it("normalizes a transient CLI write failure to NON-retryable (INVARIANT 3)", async () => {
+      await withTmp(async (dir) => {
+        // A fake CLI that exits non-zero — callMetaAdsCliJson would mark this
+        // retryable:true on the read path; the write wrapper re-stamps it false.
+        const script = join(dir, "meta-cli-fail.mjs");
+        writeFileSync(script, `process.exit(1);`, "utf8");
+        const credential: MetaAdsCredential = {
+          mode: "live",
+          transport: "meta_ads_cli",
+          adAccountId: "1234567890",
+          cliCommand: `${JSON.stringify(process.execPath)} ${JSON.stringify(script)}`
+        };
+        await expect(
+          createMetaCampaign(credential, { name: "X", objective: "OUTCOME_TRAFFIC" })
+        ).rejects.toMatchObject({ retryable: false });
+      });
     });
   });
 
