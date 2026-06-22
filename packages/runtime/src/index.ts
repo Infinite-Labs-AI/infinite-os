@@ -736,6 +736,14 @@ function metadataFor(id: InfiniteOsActionId): {
       recommendedNextActions: ["get_recent_sync_runs"],
       recipeIds: ["export_report", "save_export_report"]
     },
+    list_meta_assets: {
+      title: "List Meta ad accounts & pixels",
+      summary:
+        "Enumerate the ad accounts + pixels a Meta token can see (system-user or OAuth) so the connect flow can pick an account/pixel and validate the token before binding.",
+      category: "sources",
+      recommendedNextActions: ["connect_source"],
+      recipeIds: []
+    },
     list_meta_entities: {
       title: "List Meta Ads entities",
       summary:
@@ -992,6 +1000,14 @@ function inputSchemaFor(id: InfiniteOsActionId): Record<string, unknown> {
         format: { enum: ["json"] }
       },
       ["reportId"]
+    ),
+    list_meta_assets: requiredObject(
+      {
+        accessToken: { type: "string", minLength: 1 },
+        businessId: { type: "string" },
+        apiVersion: { type: "string" }
+      },
+      ["accessToken"]
     ),
     list_meta_entities: requiredObject(
       {

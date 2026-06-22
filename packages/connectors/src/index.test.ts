@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { encryptCredentialPayload } from "@infinite-os/core";
 import { type InfiniteOsDb } from "@infinite-os/db";
 
@@ -17,6 +17,7 @@ import {
   findMetaDedupHit,
   ga4ConnectSourceFromSetup,
   getMetaEntity,
+  listMetaAssets,
   listMetaEntities,
   metaDedupKey,
   posthogConnectSourceFromSetup,
@@ -4293,3 +4294,88 @@ function stripeLine(id: string) {
     period: { start: 1760000000, end: 1762600000 }
   };
 }
+
+describe("listMetaAssets (asset discovery for the connect picker)", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  /** Route Graph requests to canned JSON by URL substring. Records the order of calls. */
+  function stubGraph(routes: Array<{ match: string; body: unknown; status?: number }>) {
+    const calls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string | URL) => {
+        const u = String(url);
+        calls.push(u);
+        const hit = routes.find((r) => u.includes(r.match));
+        const status = hit?.status ?? 200;
+        return {
+          status,
+          ok: status >= 200 && status < 300,
+          json: async () => hit?.body ?? {},
+          text: async () => JSON.stringify(hit?.body ?? {})
+        } as Response;
+      })
+    );
+    return calls;
+  }
+
+  it("SYSTEM-USER token: /me/adaccounts empty -> /me/businesses -> /{biz}/owned_ad_accounts -> pixels", async () => {
+    const calls = stubGraph([
+      { match: "/me/adaccounts", body: { data: [] } }, // system-user token sees no personal accounts
+      { match: "/me/businesses", body: { data: [{ id: "biz_1", name: "Acme" }] } },
+      { match: "/biz_1/owned_ad_accounts", body: { data: [{ id: "act_99", account_id: "99", name: "Acme Ads", currency: "USD" }] } },
+      { match: "/act_99/adspixels", body: { data: [{ id: "px_1", name: "Acme Pixel" }] } }
+    ]);
+
+    const snap = await listMetaAssets("sys-user-token");
+
+    expect(snap.tokenKind).toBe("system_user_token");
+    expect(snap.adAccounts).toEqual([{ id: "act_99", account_id: "99", name: "Acme Ads", currency: "USD" }]);
+    expect(snap.pixels).toEqual([{ id: "px_1", name: "Acme Pixel" }]);
+    expect(snap.pixelsByAccount["act_99"]).toEqual([{ id: "px_1", name: "Acme Pixel" }]);
+    // The system-user edge MUST be hit (not /me/adaccounts as the source of truth).
+    expect(calls.some((u) => u.includes("/biz_1/owned_ad_accounts"))).toBe(true);
+    // Bearer-token reads — the token must never leak into a URL.
+    expect(calls.every((u) => !u.includes("sys-user-token"))).toBe(true);
+  });
+
+  it("OAuth-user token: resolves accounts directly via /me/adaccounts (no business fallback)", async () => {
+    const calls = stubGraph([
+      { match: "/me/adaccounts", body: { data: [{ id: "act_1", account_id: "1", name: "My Ads", currency: "USD" }] } },
+      { match: "/act_1/adspixels", body: { data: [] } },
+      { match: "/me/businesses", body: { data: [] } }
+    ]);
+
+    const snap = await listMetaAssets("oauth-user-token");
+
+    expect(snap.tokenKind).toBe("user_token");
+    expect(snap.adAccounts).toHaveLength(1);
+    expect(calls.some((u) => u.includes("owned_ad_accounts"))).toBe(false); // no system-user fallback
+  });
+
+  it("rejects an empty token without hitting the wire", async () => {
+    const spy = vi.fn();
+    vi.stubGlobal("fetch", spy);
+    await expect(listMetaAssets("  ")).rejects.toMatchObject({ code: "provider_auth_failed" });
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it("an explicit businessId skips /me/businesses discovery", async () => {
+    const calls = stubGraph([
+      { match: "/me/adaccounts", body: { data: [] } },
+      { match: "/biz_x/owned_ad_accounts", body: { data: [{ id: "act_x", account_id: "x", name: "X", currency: "USD" }] } },
+      { match: "/act_x/adspixels", body: { data: [] } }
+    ]);
+    const snap = await listMetaAssets("sys-user-token", { businessId: "biz_x" });
+    expect(snap.adAccounts).toHaveLength(1);
+    expect(calls.some((u) => u.includes("/me/businesses"))).toBe(false);
+  });
+
+  it("an invalid token surfaces provider_auth_failed (validate-before-bind)", async () => {
+    stubGraph([
+      { match: "/me/adaccounts", body: { error: { message: "bad token" } }, status: 401 }, // swallowed -> business path
+      { match: "/me/businesses", body: { error: { message: "bad token" } }, status: 401 } // throws
+    ]);
+    await expect(listMetaAssets("bogus")).rejects.toMatchObject({ code: "provider_auth_failed" });
+  });
+});

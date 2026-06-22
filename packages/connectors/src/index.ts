@@ -5624,6 +5624,140 @@ function metaDefaultReadFields(entity: MetaWriteEntity): string {
   }
 }
 
+// ── Asset discovery (list_meta_assets) ───────────────────────────────────────
+// Enumerate the ad accounts + pixels a RAW token can see, so the desktop connect
+// flow can populate the account/pixel picker AND validate the token BEFORE binding
+// (a token that resolves zero accounts is rejected upstream). Ported from the web
+// app's fetchMetaAssets (src/lib/integrations/meta-fetch-assets.ts), preserving the
+// SYSTEM-USER vs OAuth split: `/me/adaccounts` is the OAuth-user path; a SYSTEM-USER
+// token (the desktop's connect path — a Business Settings system user, NOT an FB-app
+// OAuth user) returns nothing there, so we fall back to `/me/businesses` ->
+// `/{businessId}/owned_ad_accounts`. Pixels come from `/{account}/adspixels`.
+//
+// No MetaAdsCredential here on purpose: the token is raw (not yet a connected source),
+// so we take the access token directly rather than the credential envelope.
+const META_ASSETS_API_VERSION = "v25.0"; // matches metaAdsApiVersion's default
+
+export interface MetaAdAccount {
+  id: string;
+  account_id: string;
+  name: string;
+  currency: string;
+}
+export interface MetaPixel {
+  id: string;
+  name: string;
+}
+export interface MetaBusiness {
+  id: string;
+  name: string;
+}
+export interface MetaAssetsSnapshot {
+  /** Which token class resolved the accounts — drives the desktop's wording. */
+  tokenKind: "user_token" | "system_user_token";
+  adAccounts: MetaAdAccount[];
+  pixels: MetaPixel[];
+  businesses: MetaBusiness[];
+  pixelsByAccount: Record<string, MetaPixel[]>;
+}
+
+interface MetaGraphList<T> {
+  data?: T[];
+  paging?: { next?: string | null } | null;
+}
+
+/** Paginate a Graph list edge with a bearer token. Bounded so a runaway `next` can't loop forever. */
+async function paginateMetaGraph<T>(initialUrl: string, accessToken: string): Promise<T[]> {
+  const items: T[] = [];
+  let next: string | null = initialUrl;
+  let pages = 0;
+  while (next && pages < 50) {
+    pages += 1;
+    const json: MetaGraphList<T> = await fetchJson<MetaGraphList<T>>(next, {
+      method: "GET",
+      headers: bearerHeaders(accessToken)
+    });
+    if (json.data) items.push(...json.data);
+    next = json.paging?.next ?? null;
+  }
+  return items;
+}
+
+export async function listMetaAssets(
+  accessToken: string,
+  options: { apiVersion?: string; businessId?: string } = {}
+): Promise<MetaAssetsSnapshot> {
+  if (!accessToken || accessToken.trim() === "") {
+    throw new ConnectorError("provider_auth_failed", "accessToken is required to list Meta assets", false);
+  }
+  const base = `https://graph.facebook.com/${options.apiVersion ?? META_ASSETS_API_VERSION}`;
+  const snapshot: MetaAssetsSnapshot = {
+    tokenKind: "user_token",
+    adAccounts: [],
+    pixels: [],
+    businesses: [],
+    pixelsByAccount: {}
+  };
+
+  // 1. OAuth-user path. A system-user token returns 200-empty here (it owns no personal accounts);
+  //    an auth error is swallowed so we still try the system-user path below — an actually-invalid
+  //    token then throws on `/me/businesses`/owned_ad_accounts and surfaces as provider_auth_failed.
+  try {
+    snapshot.adAccounts = await paginateMetaGraph<MetaAdAccount>(
+      `${base}/me/adaccounts?fields=id,account_id,name,currency&limit=100`,
+      accessToken
+    );
+  } catch {
+    snapshot.adAccounts = [];
+  }
+
+  // 2. SYSTEM-USER path: enumerate business-owned accounts. An explicit businessId skips discovery.
+  if (snapshot.adAccounts.length === 0) {
+    snapshot.tokenKind = "system_user_token";
+    const businesses = options.businessId
+      ? [{ id: options.businessId, name: options.businessId }]
+      : await paginateMetaGraph<MetaBusiness>(`${base}/me/businesses?fields=id,name`, accessToken);
+    snapshot.businesses = businesses;
+    for (const biz of businesses) {
+      const owned = await paginateMetaGraph<MetaAdAccount>(
+        `${base}/${biz.id}/owned_ad_accounts?fields=id,account_id,name,currency&limit=100`,
+        accessToken
+      );
+      snapshot.adAccounts.push(...owned);
+    }
+  }
+
+  // 3. Pixels per account. One account's failure must not sink the whole snapshot (it may simply
+  //    lack pixel-read on that account), so per-account fetches are best-effort.
+  for (const account of snapshot.adAccounts) {
+    try {
+      const pixels = await paginateMetaGraph<MetaPixel>(
+        `${base}/${account.id}/adspixels?fields=id,name`,
+        accessToken
+      );
+      if (pixels.length > 0) {
+        snapshot.pixelsByAccount[account.id] = pixels;
+        for (const p of pixels) {
+          if (!snapshot.pixels.some((x) => x.id === p.id)) snapshot.pixels.push(p);
+        }
+      }
+    } catch {
+      // best-effort per account
+    }
+  }
+
+  // 4. Businesses (when the OAuth path resolved accounts and we never fetched them in step 2).
+  if (snapshot.businesses.length === 0) {
+    try {
+      snapshot.businesses = await paginateMetaGraph<MetaBusiness>(`${base}/me/businesses?fields=id,name`, accessToken);
+    } catch {
+      // best-effort
+    }
+  }
+
+  return snapshot;
+}
+
 // ── Lightweight dedup helper (idempotency) ────────────────────────────────────
 // INVARIANT 4: dedup is keyed by (workspace_id, source_id, client_token). The
 // durable table lives in the analytical-engine handler (a later stage); this is

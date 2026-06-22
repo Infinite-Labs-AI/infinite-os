@@ -8,6 +8,7 @@ import {
   createMetaCreative,
   deleteMetaEntity,
   getMetaEntity,
+  listMetaAssets,
   listMetaEntities,
   resolveMetaAdsCredential,
   setMetaEntityStatus,
@@ -110,6 +111,7 @@ export function createActionHandlers(db: InfiniteOsDb): Partial<Record<InfiniteO
     create_saved_report: (input, context) => createSavedReport(db, context, input),
     run_saved_report: (input, context) => runSavedReport(db, context, input),
     export_saved_report: (input, context) => exportSavedReport(db, context, input),
+    list_meta_assets: (input, context) => listMetaAssetsHandler(db, context, input),
     list_meta_entities: (input, context) => listMetaEntitiesHandler(db, context, input),
     get_meta_entity: (input, context) => getMetaEntityHandler(db, context, input),
     create_meta_campaign: (input, context) => createMetaCampaignHandler(db, context, input),
@@ -2051,6 +2053,44 @@ async function deleteMetaEntityHandler(
 }
 
 // Reads — no money movement, no audit row, normal retryable taxonomy.
+// list_meta_assets — enumerate the ad accounts + pixels a RAW (system-user) token can see, so the
+// desktop connect flow can populate the account/pixel picker AND validate the token BEFORE binding.
+// READ authority (no money movement, no source mutation): the token arrives in the input over
+// loopback, exactly as connect_source receives it. A token that resolves zero accounts/businesses
+// surfaces a clear error so the desktop never binds an asset-less credential.
+async function listMetaAssetsHandler(
+  _db: InfiniteOsDb,
+  context: SessionContext,
+  input: unknown
+): Promise<ActionEnvelope> {
+  const accessToken = requiredString(input, "accessToken");
+  const businessId = optionalString(input, "businessId");
+  const apiVersion = optionalString(input, "apiVersion");
+  const assets = await listMetaAssets(accessToken, {
+    ...(businessId ? { businessId } : {}),
+    ...(apiVersion ? { apiVersion } : {})
+  });
+  if (assets.adAccounts.length === 0) {
+    throw new Error(
+      "no_meta_ad_accounts: the token sees no ad accounts. For a system-user token, confirm it has " +
+        "the ads_management + business_management scopes and is assigned the ad account in Business Settings."
+    );
+  }
+  return envelope(
+    "list_meta_assets",
+    context.authority,
+    {
+      tokenKind: assets.tokenKind,
+      adAccounts: assets.adAccounts,
+      pixels: assets.pixels,
+      businesses: assets.businesses,
+      pixelsByAccount: assets.pixelsByAccount
+    },
+    ["provider_truth"],
+    "ok"
+  );
+}
+
 async function listMetaEntitiesHandler(
   db: InfiniteOsDb,
   context: SessionContext,
