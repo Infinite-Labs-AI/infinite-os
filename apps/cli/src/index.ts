@@ -9745,19 +9745,16 @@ export function createCliAgentRuntime(env: CliEnv = process.env): CliAgentRuntim
       if (!pending) {
         return { ok: false, error: { code: "confirmation_not_found" } };
       }
-      // P0-A FAIL-CLOSED: this CLI confirm path is a SECOND confused-deputy — it used to
-      // execute under the env-bound (currently-active) project, NOT the workspace that
-      // authored the confirmation. Refuse BEFORE executing when they differ so a
-      // proj_a confirmation can never run under proj_b's resolution context.
-      if (pending.workspaceId !== workspaceId) {
-        return { ok: false, error: { code: "confirmation_workspace_mismatch" } };
-      }
+      // P0-A: the workspace-scoped getPendingActionCall(confirmationId, workspaceId) above IS
+      // the cross-workspace control — a confirmation authored by another project is invisible
+      // to it (returns null → confirmation_not_found above). This CLI path was a second
+      // confused-deputy that used to execute under the env-bound active project; it now always
+      // executes under the pending row's own authoring workspace.
       const envelope = await registry.execute(
         pending.actionId,
         pending.input,
         createSessionContext({
-          // Execute under the PENDING row's workspace (== workspaceId here, post-guard),
-          // never the env-bound active project.
+          // Execute under the pending row's own authoring workspace, never the env-bound project.
           workspaceId: pending.workspaceId,
           sessionId: pending.sessionId,
           actorId: "cli",

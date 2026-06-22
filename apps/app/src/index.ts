@@ -833,38 +833,14 @@ export function createApp(options: {
       reply.code(404);
       return { ok: false, error: { code: "confirmation_not_found" } };
     }
-    // P0-A FAIL-CLOSED: the confirmation must be executed under the workspace that
-    // AUTHORED it, never the confirming request's header (the desktop's currently-active
-    // project). If they differ, refuse BEFORE any action runs and write an audit row.
-    // This is the confused-deputy control: once ≥2 brands share an install, a Brand-A
-    // confirmation confirmed while Brand B is active would otherwise execute under
-    // Brand B's resolution context (a cross-workspace money-moving write).
-    if (pending.workspaceId !== ws) {
-      await database?.query(
-        `
-          insert into integration_audit_log (id, workspace_id, source_id, actor_type, action, status, details)
-          values ($1, $2, $3, $4, $5, $6, $7::jsonb)
-        `,
-        [
-          `audit_${randomUUID()}`,
-          ws,
-          null,
-          "operator",
-          pending.actionId,
-          "failed",
-          JSON.stringify({
-            violation: "confirmation_workspace_mismatch",
-            confirmationId: request.params.confirmationId,
-            confirmingWorkspaceId: ws,
-            pendingWorkspaceId: pending.workspaceId
-          })
-        ]
-      );
-      reply.code(403);
-      return { ok: false, error: { code: "confirmation_workspace_mismatch" } };
-    }
+    // P0-A: the workspace-scoped getPendingActionCall(...,ws) above IS the cross-workspace
+    // control. A confirmation authored by another workspace is invisible to that lookup (its
+    // `where workspace_id = $2` returns null → the `if (!pending)` 404 above), so a
+    // cross-workspace confirm fails closed as `confirmation_not_found` with no info leak about
+    // another brand's pending writes. No explicit mismatch guard is needed; we always execute
+    // under the pending row's own authoring workspace.
     try {
-      // Execute under the PENDING row's workspace (== ws here, having passed the guard).
+      // Execute under the pending row's own authoring workspace.
       const envelope = await actionRequest(
         pending.actionId,
         pending.input,

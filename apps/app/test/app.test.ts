@@ -1624,7 +1624,7 @@ describe("Infinite OS app-hosted API/MCP skeleton", () => {
     }
   });
 
-  it("fails closed (403) when a confirmation is confirmed from a DIFFERENT workspace, with zero action execution + an audit row (P0-A)", async () => {
+  it("fails closed (404 confirmation_not_found) when a confirmation is confirmed from a DIFFERENT workspace — the scoped lookup makes it invisible, with zero action execution (P0-A)", async () => {
     // The pending confirmation was authored under WORKSPACE; the confirming request
     // carries the OTHER_WORKSPACE header (the desktop's currently-active project). This
     // is the confused-deputy: without the pin, the action would execute under the wrong
@@ -1648,11 +1648,12 @@ describe("Infinite OS app-hosted API/MCP skeleton", () => {
       async compactSession(input) {
         return { sessionId: input.newSessionId ?? "session-child", parentSessionId: input.sessionId };
       },
-      // The store is now scoped by (confirmationId, workspaceId). Simulate a row that
-      // exists but is BOUND to WORKSPACE, while the confirming workspace is OTHER_WORKSPACE.
-      // The route must read pending.workspaceId and refuse before executing.
+      // The store is scoped by (confirmationId, workspaceId): the pending row was authored
+      // under WORKSPACE, so a lookup scoped to any OTHER workspace returns null — exactly
+      // like the real `where workspace_id = $2` SQL. That IS the cross-workspace control.
       async getPendingActionCall(confirmationId, workspaceId) {
         events.push(["getPendingActionCall", confirmationId, workspaceId]);
+        if (workspaceId !== WORKSPACE) return null;
         return {
           id: "call_1",
           sessionId: "session-1",
@@ -1702,19 +1703,20 @@ describe("Infinite OS app-hosted API/MCP skeleton", () => {
       headers: operatorHeadersFor(OTHER_WORKSPACE)
     });
 
-    expect(denied.statusCode).toBe(403);
+    // The scoped lookup returns null for the foreign workspace → 404, indistinguishable from
+    // a genuinely-missing confirmation (no info leak about another brand's pending writes).
+    expect(denied.statusCode).toBe(404);
     expect(denied.json()).toMatchObject({
       ok: false,
-      error: { code: "confirmation_workspace_mismatch" }
+      error: { code: "confirmation_not_found" }
     });
     // The lookup was scoped by the CONFIRMING workspace ($2).
     expect(events[0]).toEqual(["getPendingActionCall", "confirm_abc", OTHER_WORKSPACE]);
     // The action NEVER executed and the confirmation was NEVER marked confirmed.
     expect(executions).toEqual([]);
     expect(events.some((e) => Array.isArray(e) && e[0] === "confirmActionCall")).toBe(false);
-    // An audit row was written, status='failed', recording the violation.
-    expect(auditRows).toHaveLength(1);
-    expect(auditRows[0]?.params).toContain("failed");
+    // No audit row: the scoped SELECT is the sole control; a foreign confirm is simply not found.
+    expect(auditRows).toHaveLength(0);
   });
 
   it("executes a confirmation against the PENDING row's workspace (not the request header) when they match (P0-A)", async () => {

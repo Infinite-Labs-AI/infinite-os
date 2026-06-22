@@ -10480,6 +10480,11 @@ describe("createCliAgentRuntime confirm-path workspace pinning (P0-A)", () => {
           return { ok: 1 };
         }
         if (/from\s+chat_action_calls/i.test(sql)) {
+          // Real scoping: the lookup is `where confirmation_id=$1 and workspace_id=$2`, so a
+          // row authored under pendingWorkspaceId is invisible to any other workspace ($2).
+          if (params[1] !== pendingWorkspaceId) {
+            return null;
+          }
           return {
             id: "call_1",
             sessionId: "sess_1",
@@ -10521,7 +10526,9 @@ describe("createCliAgentRuntime confirm-path workspace pinning (P0-A)", () => {
           error?: { code?: string };
         };
         expect(result.ok).toBe(false);
-        expect(result.error?.code).toBe("confirmation_workspace_mismatch");
+        // The scoped lookup returns null for the foreign (proj_b) workspace → confirmation_not_found
+        // (the pending row authored under proj_a is invisible), with zero execution.
+        expect(result.error?.code).toBe("confirmation_not_found");
         // The lookup was scoped by the bound (proj_b) workspace as $2.
         const lookup = calls.find((c) => /from\s+chat_action_calls/i.test(c.sql));
         expect(lookup?.params).toEqual(["confirm_abc", "proj_b"]);
