@@ -1453,6 +1453,19 @@ async function reconnectSource(
   const oauthTokenId = optionalString(input, "oauthTokenId");
   if (credentialKind || objectField(input, "credentialPayload") || optionalString(input, "encryptedPayload")) {
     const resolvedKind = credentialKind ?? defaultCredentialKind(provider);
+    // Carry the Meta CAPI pixel forward across a token rotation: reconnect REVOKES the old row and
+    // INSERTs a fresh one, so without this the prior selected_pixel_id would be silently wiped and
+    // CAPI dispatch would lose its target. An explicit selectedPixelId in the input overrides.
+    const priorPixel = await db.query(
+      `select selected_pixel_id from connection_credentials
+         where workspace_id = $1 and source_id = $2 and revoked_at is null
+         order by created_at desc limit 1`,
+      [context.workspaceId, sourceId]
+    );
+    const priorPixelVal = (priorPixel[0] as Record<string, unknown> | undefined)?.selected_pixel_id;
+    const carriedPixelId =
+      optionalString(input, "selectedPixelId") ??
+      (typeof priorPixelVal === "string" && priorPixelVal !== "" ? priorPixelVal : undefined);
     await db.query(
       "update connection_credentials set revoked_at = now() where workspace_id = $1 and source_id = $2 and revoked_at is null",
       [context.workspaceId, sourceId]
@@ -1460,9 +1473,9 @@ async function reconnectSource(
     await db.query(
       `
         insert into connection_credentials (
-          id, workspace_id, source_id, credential_kind, encrypted_payload, oauth_token_id
+          id, workspace_id, source_id, credential_kind, encrypted_payload, oauth_token_id, selected_pixel_id
         )
-        values ($1,$2,$3,$4,$5,$6)
+        values ($1,$2,$3,$4,$5,$6,$7)
       `,
       [
         `cred_${randomUUID()}`,
@@ -1470,7 +1483,8 @@ async function reconnectSource(
         sourceId,
         resolvedKind,
         credentialPayloadForStorage(input, resolvedKind, oauthTokenId),
-        oauthTokenId ?? null
+        oauthTokenId ?? null,
+        carriedPixelId ?? null
       ]
     );
   }

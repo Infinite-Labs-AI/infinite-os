@@ -838,7 +838,10 @@ function inputSchemaFor(id: InfiniteOsActionId): Record<string, unknown> {
         credentialKind: { type: "string" },
         credentialPayload: { type: "object", additionalProperties: true },
         encryptedPayload: { type: "string" },
-        oauthTokenId: { type: "string" }
+        oauthTokenId: { type: "string" },
+        // P1-2: an explicit pixel override on reconnect; absent, the prior pixel is carried forward
+        // (the handler reads the old selected_pixel_id before revoking). additionalProperties:false.
+        selectedPixelId: { type: "string" }
       },
       ["sourceId"]
     ),
