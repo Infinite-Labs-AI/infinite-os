@@ -81,14 +81,15 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
     rmSync(dataDir, { recursive: true, force: true });
   });
 
-  it("applied ALL 37 migrations on first boot and is idempotent on a re-run", async () => {
-    expect(loadMigrations().length).toBe(38);
-    expect(firstRun).toHaveLength(38);
+  it("applied ALL 39 migrations on first boot and is idempotent on a re-run", async () => {
+    expect(loadMigrations().length).toBe(39);
+    expect(firstRun).toHaveLength(39);
     expect(firstRun).toContain("0001_control_plane.sql");
     expect(firstRun).toContain("0006_security_roles.sql");
     expect(firstRun).toContain("0036_chat_sessions_desktop_surface.sql");
     expect(firstRun).toContain("0037_meta_ads_ad_grain.sql");
     expect(firstRun).toContain("0038_chat_action_calls_workspace_id.sql");
+    expect(firstRun).toContain("0039_connection_credentials_metadata.sql");
 
     // Idempotent: a second boot re-applies zero (the `rows.length` gate, not the pg `rowCount`
     // gate, makes this true on PGlite).
@@ -96,13 +97,13 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
     expect(secondRun).toEqual([]);
   });
 
-  it("created the schema_migrations ledger with all 38 rows", async () => {
+  it("created the schema_migrations ledger with all 39 rows", async () => {
     const ledger = await db.query<{ id: string }>(
       "select id from schema_migrations order by id"
     );
-    expect(ledger).toHaveLength(38);
+    expect(ledger).toHaveLength(39);
     expect(ledger[0]?.id).toBe("0001_control_plane.sql");
-    expect(ledger.at(-1)?.id).toBe("0038_chat_action_calls_workspace_id.sql");
+    expect(ledger.at(-1)?.id).toBe("0039_connection_credentials_metadata.sql");
   });
 
   it("0038 pins chat_action_calls to its origin workspace (NOT NULL, FK, backfilled from chat_sessions)", async () => {
@@ -144,6 +145,118 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
       "select workspace_id from chat_action_calls where id = 'call_pin_a'"
     );
     expect(stored[0]?.workspace_id).toBe("ws_pin_a");
+  });
+
+  it("0039 adds the 5 connection_credentials operational columns with the stated types/defaults", async () => {
+    const columns = await db.query<{
+      column_name: string;
+      data_type: string;
+      is_nullable: string;
+      column_default: string | null;
+    }>(
+      `select column_name, data_type, is_nullable, column_default
+         from information_schema.columns
+        where table_name = 'connection_credentials'
+          and column_name in (
+            'selected_pixel_id', 'is_system_user', 'last_dispatch_at',
+            'last_dispatch_status', 'last_error'
+          )
+        order by column_name`
+    );
+    const byName = Object.fromEntries(columns.map((c) => [c.column_name, c]));
+
+    // All 5 new columns exist.
+    expect(columns).toHaveLength(5);
+
+    // selected_pixel_id — text, nullable.
+    expect(byName.selected_pixel_id?.data_type).toBe("text");
+    expect(byName.selected_pixel_id?.is_nullable).toBe("YES");
+
+    // is_system_user — boolean, NOT NULL, default false.
+    expect(byName.is_system_user?.data_type).toBe("boolean");
+    expect(byName.is_system_user?.is_nullable).toBe("NO");
+    expect(byName.is_system_user?.column_default).toBe("false");
+
+    // last_dispatch_at — timestamptz, nullable.
+    expect(byName.last_dispatch_at?.data_type).toBe("timestamp with time zone");
+    expect(byName.last_dispatch_at?.is_nullable).toBe("YES");
+
+    // last_dispatch_status — text, nullable, no CHECK.
+    expect(byName.last_dispatch_status?.data_type).toBe("text");
+    expect(byName.last_dispatch_status?.is_nullable).toBe("YES");
+
+    // last_error — text, nullable.
+    expect(byName.last_error?.data_type).toBe("text");
+    expect(byName.last_error?.is_nullable).toBe("YES");
+
+    // expires_at is REUSED (added 0021) — token_expires_at must NOT exist.
+    const reused = await db.query<{ column_name: string }>(
+      `select column_name from information_schema.columns
+        where table_name = 'connection_credentials'
+          and column_name in ('expires_at', 'token_expires_at', 'account_external_id')`
+    );
+    const reusedNames = reused.map((r) => r.column_name);
+    expect(reusedNames).toContain("expires_at");
+    expect(reusedNames).not.toContain("token_expires_at");
+    // account_external_id lives on sources — not denormalized here.
+    expect(reusedNames).not.toContain("account_external_id");
+  });
+
+  it("0039 creates the partial-unique connection_credentials_source_kind_uq index (unique, partial on revoked_at is null, on (source_id, credential_kind))", async () => {
+    const idx = await db.query<{ indexname: string; indexdef: string }>(
+      `select indexname, indexdef from pg_indexes
+        where tablename = 'connection_credentials'
+          and indexname = 'connection_credentials_source_kind_uq'`
+    );
+    expect(idx).toHaveLength(1);
+    const def = (idx[0]?.indexdef ?? "").toLowerCase();
+    // Unique, on the right columns, partial on revoked_at is null.
+    expect(def).toContain("create unique index");
+    expect(def).toContain("(source_id, credential_kind)");
+    expect(def).toContain("where (revoked_at is null)");
+  });
+
+  it("0039 partial-unique rejects two live rows of the same (source_id, credential_kind) but allows a revoked + live pair", async () => {
+    // Seed a workspace + dataset + source so the FK chain holds.
+    await db.withTransaction(async (tx) => {
+      await tx.ensureWorkspace("ws_cred_uq", "Cred UQ");
+      await tx.ensureFirstPhaseDatasets("ws_cred_uq");
+    });
+    const ds = await db.query<{ id: string }>(
+      "select id from datasets where workspace_id = 'ws_cred_uq' and key = 'web'"
+    );
+    await db.query(
+      `insert into sources (
+         id, workspace_id, dataset_id, provider, connection_name, account_external_id, status
+       ) values ('src_cred_uq', 'ws_cred_uq', $1, 'posthog', 'conn', 'acct', 'connected')`,
+      [ds[0]?.id]
+    );
+
+    // First live credential of kind 'access_token' — inserts fine.
+    await db.query(
+      `insert into connection_credentials (id, workspace_id, source_id, credential_kind, encrypted_payload)
+       values ('cred_live_1', 'ws_cred_uq', 'src_cred_uq', 'access_token', 'enc')`
+    );
+
+    // Second live credential of the SAME (source_id, credential_kind) — rejected by the partial-unique.
+    await expect(
+      db.query(
+        `insert into connection_credentials (id, workspace_id, source_id, credential_kind, encrypted_payload)
+         values ('cred_live_2', 'ws_cred_uq', 'src_cred_uq', 'access_token', 'enc')`
+      )
+    ).rejects.toThrow();
+
+    // Revoke the live row, then a fresh live row of the same kind is ALLOWED (revoked row excluded from the index).
+    await db.query("update connection_credentials set revoked_at = now() where id = 'cred_live_1'");
+    await db.query(
+      `insert into connection_credentials (id, workspace_id, source_id, credential_kind, encrypted_payload)
+       values ('cred_live_3', 'ws_cred_uq', 'src_cred_uq', 'access_token', 'enc')`
+    );
+    const live = await db.query<{ count: string }>(
+      `select count(*)::text as count from connection_credentials
+        where source_id = 'src_cred_uq' and credential_kind = 'access_token' and revoked_at is null`
+    );
+    expect(live[0]?.count).toBe("1");
   });
 
   it("created all five growth_os_* roles (0006 applied on PGlite)", async () => {
@@ -241,6 +354,205 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
     expect(result.deleted).toBe(true);
     const found = await findProject(db, created.id);
     expect(found).toBeNull();
+  });
+});
+
+describe("connectSource writes the 0039 operational metadata + upserts on re-connect (P0-B2)", () => {
+  let dataDir: string;
+  let url: string;
+  let db: InfiniteOsDb;
+
+  beforeAll(async () => {
+    dataDir = mkdtempSync(join(tmpdir(), "infinite-os-pglite-connectsrc-"));
+    url = `pglite://${dataDir}`;
+    await runMigrations(url);
+    db = createInfiniteOsDb(url);
+  }, 60_000);
+
+  afterAll(async () => {
+    if (db) {
+      await db.close();
+    }
+    rmSync(dataDir, { recursive: true, force: true });
+  });
+
+  it("persists selectedPixelId / isSystemUser / expiresAt / dispatch telemetry when supplied", async () => {
+    await db.connectSource({
+      workspaceId: "ws_cs_supplied",
+      provider: "meta_ads",
+      connectionName: "Meta Supplied",
+      accountExternalId: "act_supplied",
+      credentialKind: "access_token",
+      encryptedPayload: "enc-supplied",
+      selectedPixelId: "px_123",
+      isSystemUser: true,
+      expiresAt: "2027-01-02T03:04:05.000Z",
+      lastDispatchAt: "2026-06-22T10:00:00.000Z",
+      lastDispatchStatus: "succeeded",
+      lastError: "prior transient error"
+    });
+
+    const rows = await db.query<{
+      selected_pixel_id: string | null;
+      is_system_user: boolean;
+      expires_at: string | null;
+      last_dispatch_at: string | null;
+      last_dispatch_status: string | null;
+      last_error: string | null;
+    }>(
+      `select selected_pixel_id, is_system_user, expires_at, last_dispatch_at,
+              last_dispatch_status, last_error
+         from connection_credentials cc
+         join sources s on s.id = cc.source_id
+        where s.workspace_id = 'ws_cs_supplied'
+          and cc.credential_kind = 'access_token'
+          and cc.revoked_at is null`
+    );
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.selected_pixel_id).toBe("px_123");
+    expect(rows[0]?.is_system_user).toBe(true);
+    expect(new Date(rows[0]?.expires_at ?? "").toISOString()).toBe("2027-01-02T03:04:05.000Z");
+    expect(new Date(rows[0]?.last_dispatch_at ?? "").toISOString()).toBe("2026-06-22T10:00:00.000Z");
+    expect(rows[0]?.last_dispatch_status).toBe("succeeded");
+    expect(rows[0]?.last_error).toBe("prior transient error");
+  });
+
+  it("defaults the new columns (NULL / is_system_user=false) when omitted — existing callers unchanged", async () => {
+    await db.connectSource({
+      workspaceId: "ws_cs_default",
+      provider: "stripe",
+      connectionName: "Stripe Default",
+      accountExternalId: "acct_default",
+      credentialKind: "secret_key",
+      encryptedPayload: "enc-default"
+    });
+
+    const rows = await db.query<{
+      selected_pixel_id: string | null;
+      is_system_user: boolean;
+      expires_at: string | null;
+      last_dispatch_at: string | null;
+      last_dispatch_status: string | null;
+      last_error: string | null;
+    }>(
+      `select selected_pixel_id, is_system_user, expires_at, last_dispatch_at,
+              last_dispatch_status, last_error
+         from connection_credentials cc
+         join sources s on s.id = cc.source_id
+        where s.workspace_id = 'ws_cs_default'
+          and cc.credential_kind = 'secret_key'
+          and cc.revoked_at is null`
+    );
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.selected_pixel_id).toBeNull();
+    expect(rows[0]?.is_system_user).toBe(false);
+    expect(rows[0]?.expires_at).toBeNull();
+    expect(rows[0]?.last_dispatch_at).toBeNull();
+    expect(rows[0]?.last_dispatch_status).toBeNull();
+    expect(rows[0]?.last_error).toBeNull();
+  });
+
+  it("a re-run for the same (source_id, credential_kind) UPDATEs — one live row, no duplicate", async () => {
+    const base = {
+      workspaceId: "ws_cs_rerun",
+      provider: "meta_ads" as const,
+      connectionName: "Meta Rerun",
+      accountExternalId: "act_rerun",
+      credentialKind: "access_token"
+    };
+
+    await db.connectSource({
+      ...base,
+      encryptedPayload: "enc-first",
+      selectedPixelId: "px_first",
+      isSystemUser: false
+    });
+    await db.connectSource({
+      ...base,
+      encryptedPayload: "enc-second",
+      selectedPixelId: "px_second",
+      isSystemUser: true,
+      lastError: "second-run error"
+    });
+
+    const rows = await db.query<{
+      encrypted_payload: string;
+      selected_pixel_id: string | null;
+      is_system_user: boolean;
+      last_error: string | null;
+    }>(
+      `select cc.encrypted_payload, cc.selected_pixel_id, cc.is_system_user, cc.last_error
+         from connection_credentials cc
+         join sources s on s.id = cc.source_id
+        where s.workspace_id = 'ws_cs_rerun'
+          and cc.credential_kind = 'access_token'
+          and cc.revoked_at is null`
+    );
+
+    // Exactly one live row — the upsert UPDATEd the existing row rather than orphaning a duplicate.
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.encrypted_payload).toBe("enc-second");
+    expect(rows[0]?.selected_pixel_id).toBe("px_second");
+    expect(rows[0]?.is_system_user).toBe(true);
+    expect(rows[0]?.last_error).toBe("second-run error");
+
+    // And there is still exactly one credential row total for this source (no orphaned duplicate).
+    const total = await db.query<{ count: string }>(
+      `select count(*)::text as count
+         from connection_credentials cc
+         join sources s on s.id = cc.source_id
+        where s.workspace_id = 'ws_cs_rerun' and cc.credential_kind = 'access_token'`
+    );
+    expect(total[0]?.count).toBe("1");
+  });
+
+  it("a re-connect AFTER revoking the prior credential inserts a fresh live row (partial-unique does not block)", async () => {
+    const base = {
+      workspaceId: "ws_cs_revoke",
+      provider: "meta_ads" as const,
+      connectionName: "Meta Revoke",
+      accountExternalId: "act_revoke",
+      credentialKind: "access_token"
+    };
+
+    await db.connectSource({ ...base, encryptedPayload: "enc-original", selectedPixelId: "px_orig" });
+
+    // Operator revokes the live credential (the partial-unique excludes revoked rows).
+    await db.query(
+      `update connection_credentials cc
+          set revoked_at = now()
+         from sources s
+        where cc.source_id = s.id
+          and s.workspace_id = 'ws_cs_revoke'
+          and cc.credential_kind = 'access_token'`
+    );
+
+    // Re-connect — a fresh live row is inserted (the conflict target only sees the live partial index).
+    await db.connectSource({ ...base, encryptedPayload: "enc-reconnected", selectedPixelId: "px_new" });
+
+    const live = await db.query<{ encrypted_payload: string; selected_pixel_id: string | null }>(
+      `select cc.encrypted_payload, cc.selected_pixel_id
+         from connection_credentials cc
+         join sources s on s.id = cc.source_id
+        where s.workspace_id = 'ws_cs_revoke'
+          and cc.credential_kind = 'access_token'
+          and cc.revoked_at is null`
+    );
+    expect(live).toHaveLength(1);
+    expect(live[0]?.encrypted_payload).toBe("enc-reconnected");
+    expect(live[0]?.selected_pixel_id).toBe("px_new");
+
+    // Two rows total: one revoked (history) + one fresh live.
+    const total = await db.query<{ revoked: boolean }[]>(
+      `select (cc.revoked_at is not null) as revoked
+         from connection_credentials cc
+         join sources s on s.id = cc.source_id
+        where s.workspace_id = 'ws_cs_revoke' and cc.credential_kind = 'access_token'
+        order by cc.created_at`
+    );
+    expect(total).toHaveLength(2);
   });
 });
 
