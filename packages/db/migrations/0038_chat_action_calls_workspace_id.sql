@@ -23,6 +23,14 @@ update chat_action_calls c
  where c.session_id = s.id
    and c.workspace_id is null;
 
+-- Drop orphans the backfill could NOT pin: rows whose session is gone or whose chat_session has no
+-- workspace_id. They can't be scoped (a NULL workspace_id re-opens the confused-deputy hole the
+-- lookups close) and a pending confirmation with no resolvable workspace can never be safely
+-- confirmed — so they are dead records. Removing them lets the NOT NULL below hold on a DB that
+-- predates this column. On a fresh DB (or one whose backfill was clean) this deletes zero rows.
+delete from chat_action_calls
+ where workspace_id is null;
+
 -- Lock it down: a NULL workspace_id would re-open the confused-deputy hole the scoped
 -- lookups close, so every row (existing + future) must be pinned.
 alter table chat_action_calls
