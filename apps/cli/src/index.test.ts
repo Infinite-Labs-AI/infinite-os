@@ -11742,8 +11742,14 @@ describe("meta command (CLI write surface + confirm gates)", () => {
     );
     expect(toolCalls(api)[0]?.body).toMatchObject({
       actionId: "set_meta_entity_status",
-      // `entity` is REQUIRED by the handler — the status object must be threaded through.
-      input: { sourceId: "src_meta", entityId: "120000000000000001", status: "ACTIVE", entity: "campaign" }
+      // `entity` is REQUIRED by the handler; `confirmActivation` must echo entityId (activation gate).
+      input: {
+        sourceId: "src_meta",
+        entityId: "120000000000000001",
+        status: "ACTIVE",
+        entity: "campaign",
+        confirmActivation: "120000000000000001"
+      }
     });
   });
 
@@ -11757,7 +11763,7 @@ describe("meta command (CLI write surface + confirm gates)", () => {
     );
     expect(toolCalls(api)[0]?.body).toMatchObject({
       actionId: "set_meta_entity_status",
-      input: { entityId: "120000000000000002", status: "ACTIVE", entity: "adset" }
+      input: { entityId: "120000000000000002", status: "ACTIVE", entity: "adset", confirmActivation: "120000000000000002" }
     });
   });
 
@@ -11781,8 +11787,21 @@ describe("meta command (CLI write surface + confirm gates)", () => {
     expect(confirmActivate).not.toHaveBeenCalled();
     expect(toolCalls(api)[0]?.body).toMatchObject({
       actionId: "set_meta_entity_status",
-      input: { entityId: "120000000000000003", status: "ACTIVE", entity: "ad" }
+      input: { entityId: "120000000000000003", status: "ACTIVE", entity: "ad", confirmActivation: "120000000000000003" }
     });
+  });
+
+  it("pause does NOT send confirmActivation (only ACTIVE is gated)", async () => {
+    const api = stubToolsApi();
+    const confirmMutation = vi.fn(async () => true);
+    await metaCommand(
+      ["campaign", "pause", "120000000000000005", "--source-id", "src_meta"],
+      ENV,
+      { confirmMutation }
+    );
+    const body = toolCalls(api)[0]?.body as { input?: Record<string, unknown> };
+    expect(body.input).toMatchObject({ status: "PAUSED", entity: "campaign" });
+    expect(body.input).not.toHaveProperty("confirmActivation");
   });
 
   it("pause goes through the standard write gate (NO cancels, no /tools/call)", async () => {
