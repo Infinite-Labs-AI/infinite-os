@@ -51,6 +51,7 @@ ignored/
 
 # Local planning / working docs — kept on disk, not committed
 docs/superpowers/plans/
+docs/internal/
 
 # Confidential strategy docs + agent-local state — NEVER commit these.
 # The restructure plan documents the private hosted/IP architecture; it must
