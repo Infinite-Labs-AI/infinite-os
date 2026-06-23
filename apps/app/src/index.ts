@@ -486,6 +486,81 @@ export function createApp(options: {
     };
   });
 
+  // Streaming sibling of /gateway/turn: forwards the controller's onProgress events (message.delta,
+  // message.start/complete, tool.*, subagent.*) to the client as Server-Sent Events, then a final
+  // "done" event carrying the same payload /gateway/turn returns. The desktop consumes this for live
+  // token streaming; the buffering /gateway/turn stays for non-streaming callers. Auth + session
+  // derivation are kept VERBATIM from /gateway/turn — only the response is a hijacked SSE stream.
+  app.post<{ Body: GatewayTurnRequestBody }>("/gateway/turn/stream", async (request, reply) => {
+    if (request.auth.authority !== "operator") {
+      reply.code(403);
+      return { ok: false, error: { code: "operator_authority_required" } };
+    }
+    const ws = request.auth.workspaceId;
+    if (!ws) {
+      reply.code(400);
+      return { ok: false, error: { code: "unknown_workspace" } };
+    }
+    const message = typeof request.body?.message === "string" ? request.body.message.trim() : "";
+    if (!message) {
+      reply.code(400);
+      return { ok: false, error: { code: "gateway_message_required" } };
+    }
+    const platform = typeof request.body?.platform === "string" && request.body.platform.trim()
+      ? request.body.platform.trim()
+      : "gateway";
+    const actorId = typeof request.body?.actorId === "string" && request.body.actorId.trim()
+      ? request.body.actorId.trim()
+      : `${platform}:unknown`;
+    const channelId = typeof request.body?.channelId === "string" && request.body.channelId.trim()
+      ? request.body.channelId.trim()
+      : "default";
+    const conversationId = typeof request.body?.sessionId === "string" && request.body.sessionId.trim()
+      ? request.body.sessionId.trim()
+      : `${platform}:${channelId}:${actorId}`;
+    const sessionId = `${conversationId}:${ws}`;
+
+    // Hijack the socket and stream SSE. Fastify will not serialize a return value after hijack().
+    reply.hijack();
+    const raw = reply.raw;
+    raw.writeHead(200, {
+      "content-type": "text/event-stream",
+      "cache-control": "no-cache",
+      connection: "keep-alive",
+      "x-accel-buffering": "no"
+    });
+    const send = (event: string, data: unknown) => {
+      raw.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    };
+    try {
+      const response = await llmController.chat({
+        message,
+        sessionId,
+        workspaceId: ws,
+        actorId,
+        surface: platformToSurface(platform),
+        progressMode: "both",
+        onProgress: async (event) => {
+          send("progress", event);
+        }
+      });
+      send("done", {
+        ok: true,
+        platform,
+        channelId,
+        actorId,
+        sessionId: stripWorkspaceSuffix(response.sessionId, ws),
+        message: response.message,
+        provenance: response.provenance,
+        actionCalls: response.actionCalls
+      });
+    } catch (err) {
+      send("error", { code: "turn_failed", message: err instanceof Error ? err.message : String(err) });
+    } finally {
+      raw.end();
+    }
+  });
+
   app.get<{ Params: { id: string } }>("/sources/:id", async (request, reply) => {
     const ws = request.auth.workspaceId;
     if (!ws) {
