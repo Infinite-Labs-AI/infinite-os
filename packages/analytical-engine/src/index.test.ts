@@ -5761,7 +5761,7 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
       async (calls) => {
         const handlers = createActionHandlers(db);
         const result = await handlers.set_meta_entity_status?.(
-          { sourceId: "src_meta", entityId: "120000000000333", status: "ACTIVE" },
+          { sourceId: "src_meta", entityId: "120000000000333", status: "ACTIVE", entity: "campaign" },
           operatorContext
         );
         expect(calls[0].url).toBe("https://graph.facebook.com/v25.0/120000000000333");
@@ -5870,7 +5870,7 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
         const handlers = createActionHandlers(db);
         await expect(
           handlers.delete_meta_entity?.(
-            { sourceId: "src_stripe", entityId: "120000000000777" },
+            { sourceId: "src_stripe", entityId: "120000000000777", entity: "ad" },
             operatorContext
           )
         ).rejects.toThrow("source_provider_mismatch");

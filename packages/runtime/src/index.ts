@@ -1079,6 +1079,9 @@ function inputSchemaFor(id: InfiniteOsActionId): Record<string, unknown> {
         name: { type: "string" },
         pageId: { type: "string" },
         imageHash: { type: "string" },
+        // Downloadable image URL. Required by the meta_ads_cli transport (the CLI's
+        // --image needs a local file); ignored by the direct-Graph path (image_hash).
+        imageUrl: { type: "string" },
         instagramUserId: { type: "string" },
         linkUrl: { type: "string" },
         body: { type: "string" },
@@ -1105,20 +1108,26 @@ function inputSchemaFor(id: InfiniteOsActionId): Record<string, unknown> {
         entityId: { type: "string" },
         // ACTIVE is the only money-spending transition; the CLI/operator confirm
         // gates live above this layer.
-        status: { enum: ["ACTIVE", "PAUSED"] }
+        status: { enum: ["ACTIVE", "PAUSED"] },
+        // REQUIRED (review): the entity-kind selects the CLI update subcommand. The
+        // direct Graph node POST does not strictly need it, but requiring it here
+        // makes the failure uniform + EARLY (schema-time) regardless of transport,
+        // rather than failing late at write time only on the CLI path.
+        entity: { enum: ["campaign", "adset", "ad"] }
       },
-      ["sourceId", "entityId", "status"]
+      ["sourceId", "entityId", "status", "entity"]
     ),
     delete_meta_entity: requiredObject(
       {
         sourceId: { type: "string" },
         entityId: { type: "string" },
-        // Optional entity-kind hint recorded in the audit row. Delete is a NODE
-        // call (DELETE /{id}); creatives are not deletable via this verb. The
-        // CLI's destructive confirm gate lives above this layer.
+        // REQUIRED (review): the entity-kind selects the CLI delete subcommand and is
+        // recorded in the audit row. Delete is a NODE call (DELETE /{id}); creatives
+        // are not deletable via this verb. Required so the failure is uniform + EARLY
+        // regardless of transport. The CLI's destructive confirm gate lives above this.
         entity: { enum: ["campaign", "adset", "ad"] }
       },
-      ["sourceId", "entityId"]
+      ["sourceId", "entityId", "entity"]
     )
   };
   return schemas[id] ?? requiredObject({});

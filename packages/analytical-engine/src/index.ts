@@ -1954,6 +1954,7 @@ async function createMetaCreativeHandler(
       name,
       pageId,
       ...(optionalString(input, "imageHash") ? { imageHash: optionalString(input, "imageHash") } : {}),
+      ...(optionalString(input, "imageUrl") ? { imageUrl: optionalString(input, "imageUrl") } : {}),
       ...(optionalString(input, "instagramUserId") ? { instagramUserId: optionalString(input, "instagramUserId") } : {}),
       ...(optionalString(input, "linkUrl") ? { linkUrl: optionalString(input, "linkUrl") } : {}),
       ...(optionalString(input, "body") ? { body: optionalString(input, "body") } : {}),
@@ -1997,6 +1998,18 @@ function metaWriteEntityFromInput(input: unknown): MetaWriteEntity | undefined {
   throw new Error(`unsupported_meta_entity:${raw}`);
 }
 
+// REQUIRED-entity variant (review): set_meta_entity_status and delete_meta_entity now
+// require `entity` so the failure is uniform + EARLY regardless of transport (the CLI
+// path needs it to select the subcommand; the Graph path tolerates its absence but we
+// reject it uniformly). Throws if missing or unrecognized.
+function requiredMetaWriteEntity(input: unknown): MetaWriteEntity {
+  const raw = requiredString(input, "entity").toLowerCase();
+  if (raw === "campaign" || raw === "adset" || raw === "ad") {
+    return raw;
+  }
+  throw new Error(`unsupported_meta_entity:${raw}`);
+}
+
 async function setMetaEntityStatusHandler(
   db: InfiniteOsDb,
   context: SessionContext,
@@ -2008,9 +2021,9 @@ async function setMetaEntityStatusHandler(
   if (status !== "ACTIVE" && status !== "PAUSED") {
     throw new Error(`unsupported_meta_status:${status}`);
   }
-  // The entity token (campaign|adset|ad) selects the CLI update subcommand. The
-  // direct Graph node POST does not need it, so it stays optional for that path.
-  const entity = metaWriteEntityFromInput(input);
+  // REQUIRED (review): the entity token (campaign|adset|ad) selects the CLI update
+  // subcommand. Required uniformly so the failure is early + transport-agnostic.
+  const entity = requiredMetaWriteEntity(input);
   const action: InfiniteOsActionId = "set_meta_entity_status";
   const credential = await resolveMetaCredentialForWrite(db, context, sourceId);
   let result;
@@ -2056,15 +2069,15 @@ async function deleteMetaEntityHandler(
 ): Promise<ActionEnvelope> {
   const sourceId = requiredString(input, "sourceId");
   const entityId = requiredString(input, "entityId");
-  // Entity-kind hint. Used for the audit row AND (for the CLI transport) to select
-  // the `meta ads <entity> delete` subcommand. The direct Graph DELETE needs just
-  // the id, so it stays optional there. null when the caller did not supply it.
-  const entity = metaWriteEntityFromInput(input) ?? null;
+  // REQUIRED (review): the entity-kind is used for the audit row AND (for the CLI
+  // transport) to select the `meta ads <entity> delete` subcommand. Required uniformly
+  // so the failure is early + transport-agnostic.
+  const entity = requiredMetaWriteEntity(input);
   const action: InfiniteOsActionId = "delete_meta_entity";
   const credential = await resolveMetaCredentialForWrite(db, context, sourceId);
   let result;
   try {
-    result = await deleteMetaEntity(credential, entityId, entity ?? undefined);
+    result = await deleteMetaEntity(credential, entityId, entity);
   } catch (error) {
     await metaAuditLog(db, context, sourceId, action, "failed", {
       action,

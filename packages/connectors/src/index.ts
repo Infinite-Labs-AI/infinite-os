@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { delimiter, join, resolve } from "node:path";
 import {
   decryptCredentialPayload,
@@ -5042,6 +5043,11 @@ export interface MetaCreativeCreateInput {
   name: string;
   pageId: string;
   imageHash?: string;
+  // A downloadable image URL. Used by the meta_ads_cli transport, whose `creative
+  // create --image` flag needs a local image FILE (the CLI uploads it itself). The
+  // builder downloads this URL to a temp file and passes it as --image. The direct
+  // Graph path ignores it (it references a pre-uploaded image_hash instead).
+  imageUrl?: string;
   // Optional Instagram identity (object_story_spec.instagram_user_id).
   instagramUserId?: string;
   linkUrl?: string;
@@ -5349,6 +5355,102 @@ const META_CUSTOM_EVENT_TYPE_VALUES = new Set<string>([
   "LISTING_INTERACTION",
   "OTHER"
 ]);
+
+// ── CLI choice sets (review HIGH: ENUM per-transport validation) ──────────────
+// The META_*_VALUES allow-lists above are SUPERSETS of what the `meta` CLI's Click
+// `--objective` / `--optimization-goal` / `--billing-event` / `--custom-event-type`
+// / `--call-to-action` choice sets accept. A Graph-valid value that is NOT in the
+// CLI's set hard-fails INSIDE the CLI (Click "Invalid value" → non-zero exit) AFTER
+// we have already spawned the process. These sets mirror the REAL CLI's Click
+// choices (verified via `meta ads <sub> --help`), expressed UPPERCASE to match the
+// already-normalized value the *ViaCli builders hold. Validate against these BEFORE
+// spawning so an unsupported-on-CLI enum throws a clear non-retryable error early.
+const META_CLI_OBJECTIVE_VALUES = new Set<string>([
+  "OUTCOME_APP_PROMOTION",
+  "OUTCOME_AWARENESS",
+  "OUTCOME_ENGAGEMENT",
+  "OUTCOME_LEADS",
+  "OUTCOME_SALES",
+  "OUTCOME_TRAFFIC"
+]);
+const META_CLI_OPTIMIZATION_GOAL_VALUES = new Set<string>([
+  "APP_INSTALLS",
+  "CONVERSATIONS",
+  "EVENT_RESPONSES",
+  "IMPRESSIONS",
+  "LANDING_PAGE_VIEWS",
+  "LEAD_GENERATION",
+  "LINK_CLICKS",
+  "OFFSITE_CONVERSIONS",
+  "PAGE_LIKES",
+  "POST_ENGAGEMENT",
+  "REACH",
+  "THRUPLAY",
+  "VALUE"
+]);
+const META_CLI_BILLING_EVENT_VALUES = new Set<string>([
+  "APP_INSTALLS",
+  "CLICKS",
+  "IMPRESSIONS",
+  "LINK_CLICKS",
+  "PAGE_LIKES",
+  "POST_ENGAGEMENT",
+  "THRUPLAY"
+]);
+const META_CLI_CUSTOM_EVENT_TYPE_VALUES = new Set<string>([
+  "ADD_PAYMENT_INFO",
+  "ADD_TO_CART",
+  "ADD_TO_WISHLIST",
+  "COMPLETE_REGISTRATION",
+  "CONTACT",
+  "CONTENT_VIEW",
+  "CUSTOMIZE_PRODUCT",
+  "DONATE",
+  "FIND_LOCATION",
+  "INITIATED_CHECKOUT",
+  "LEAD",
+  "OTHER",
+  "PURCHASE",
+  "SCHEDULE",
+  "SEARCH",
+  "START_TRIAL",
+  "SUBMIT_APPLICATION",
+  "SUBSCRIBE"
+]);
+const META_CLI_CALL_TO_ACTION_VALUES = new Set<string>([
+  "APPLY_NOW",
+  "BOOK_TRAVEL",
+  "BUY_NOW",
+  "CONTACT_US",
+  "DOWNLOAD",
+  "GET_OFFER",
+  "GET_QUOTE",
+  "LEARN_MORE",
+  "NO_BUTTON",
+  "OPEN_LINK",
+  "SHOP_NOW",
+  "SIGN_UP",
+  "SUBSCRIBE",
+  "WATCH_MORE"
+]);
+
+// Assert an already-UPPERCASE-normalized enum value is accepted on the `meta_ads_cli`
+// transport (i.e. is a member of the CLI's Click choice set). A value valid on Graph
+// but NOT in the CLI set throws a clear NON-retryable ConnectorError BEFORE the CLI is
+// spawned — so a Graph-only enum fails fast and uniformly rather than as an opaque,
+// retryable "CLI command failed" after a process spawn. `undefined` passes through.
+function assertMetaCliEnum(value: string | undefined, allowed: Set<string>, field: string): void {
+  if (value === undefined) {
+    return;
+  }
+  if (!allowed.has(value)) {
+    throw new ConnectorError(
+      "provider_unsupported",
+      `${field} '${value}' is not supported on the meta_ads_cli transport`,
+      false
+    );
+  }
+}
 
 // Normalize an enum value to UPPERCASE and validate it against an allow-list.
 // Unknown values throw a clear NON-retryable ConnectorError so a bad enum can
@@ -6018,6 +6120,20 @@ async function callMcpToolOverStdio(
   }
 }
 
+// Defense-in-depth (review): redact Meta token material from CLI stderr before it is
+// embedded in a ConnectorError message. Removes the EXACT ACCESS_TOKEN value (when known)
+// and any EAA…-shaped token substring. The token normally travels only via the env var,
+// never in argv or output — this is a belt-and-suspenders scrub for a CLI that echoes it.
+function scrubMetaToken(text: string, accessToken: string | undefined): string {
+  let scrubbed = text;
+  if (accessToken && accessToken.length > 0) {
+    scrubbed = scrubbed.split(accessToken).join("[REDACTED]");
+  }
+  // Meta user/system-user tokens are EAA-prefixed base64url (may contain _ and -). Scrub any such substring.
+  scrubbed = scrubbed.replace(/EAA[A-Za-z0-9_-]+/g, "[REDACTED]");
+  return scrubbed;
+}
+
 async function callMetaAdsCliJson(credential: MetaAdsCredential, args: string[]): Promise<unknown> {
   const rawCliCommand =
     typeof credential.cliCommand === "string" && credential.cliCommand.trim() ? credential.cliCommand.trim() : "meta";
@@ -6084,7 +6200,11 @@ async function callMetaAdsCliJson(credential: MetaAdsCredential, args: string[])
     child.on("exit", (code) => {
       if (settled) return;
       if (code !== 0) {
-        const detail = stderrBuffer.trim() ? `: ${stderrBuffer.trim()}` : "";
+        // Defense-in-depth (review): scrub token-shaped substrings (and the actual
+        // ACCESS_TOKEN value if present) from stderr BEFORE embedding it in the error
+        // message, so a CLI that echoes the token in a diagnostic never leaks it.
+        const scrubbed = scrubMetaToken(stderrBuffer.trim(), accessToken);
+        const detail = scrubbed ? `: ${scrubbed}` : "";
         fail(`Meta Ads CLI command failed${detail}`);
         return;
       }
@@ -6103,18 +6223,91 @@ async function callMetaAdsCliJson(credential: MetaAdsCredential, args: string[])
   });
 }
 
-// Strip any leading human-readable prefix line(s) the `meta` CLI may print before
-// the `--output json` payload (e.g. "Created campaign 120…"). Returns the substring
-// starting at the first top-level `{` or `[`. If neither appears, returns the input
-// unchanged so the strict JSON.parse downstream still throws a clear "invalid JSON".
+// Extract the `--output json` payload the `meta` CLI prints, tolerating human prefix
+// lines (e.g. "Created campaign 120…"). HARDENED (review): slicing at the FIRST `{`/`[`
+// anywhere in stdout is fragile — a human prefix line that itself contains a brace
+// (e.g. "Created campaign 'Sale {summer}'") would start the slice mid-prefix and break
+// the parse. Instead, prefer the LAST line that wholly JSON.parses; if no single line
+// parses, fall back to the LAST balanced top-level JSON block in the full text. Throws
+// loudly (returns the raw input → downstream JSON.parse fails) when no JSON is found.
 function stripJsonPrefix(raw: string): string {
-  const brace = raw.indexOf("{");
-  const bracket = raw.indexOf("[");
-  const candidates = [brace, bracket].filter((i) => i >= 0);
-  if (candidates.length === 0) {
-    return raw;
+  // 1) Prefer the last line that is itself valid JSON (the common `--output json` case:
+  //    the structured body is printed as a single trailing line).
+  const lines = raw.split(/\r?\n/);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i].trim();
+    if (line.length === 0) {
+      continue;
+    }
+    if (line[0] === "{" || line[0] === "[") {
+      try {
+        JSON.parse(line);
+        return line;
+      } catch {
+        // not a complete JSON line — keep scanning upward.
+      }
+    }
   }
-  return raw.slice(Math.min(...candidates));
+  // 2) Fall back to the LAST balanced top-level JSON block found anywhere in the text
+  //    (handles a payload spread across multiple lines after a prefix line).
+  const block = lastBalancedJsonBlock(raw);
+  if (block !== null) {
+    return block;
+  }
+  // 3) No JSON found — return the raw input so the strict JSON.parse downstream throws a
+  //    clear "invalid JSON".
+  return raw;
+}
+
+// Find the LAST balanced top-level JSON object/array block in `text`, or null if none
+// parses. Scans each `{`/`[` start, walks to the matching close (string-aware so braces
+// inside quoted strings don't miscount), and JSON.parses the candidate; returns the last
+// one that parses cleanly.
+function lastBalancedJsonBlock(text: string): string | null {
+  let found: string | null = null;
+  for (let start = 0; start < text.length; start++) {
+    const open = text[start];
+    if (open !== "{" && open !== "[") {
+      continue;
+    }
+    const close = open === "{" ? "}" : "]";
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    for (let i = start; i < text.length; i++) {
+      const ch = text[i];
+      if (inString) {
+        if (escaped) {
+          escaped = false;
+        } else if (ch === "\\") {
+          escaped = true;
+        } else if (ch === '"') {
+          inString = false;
+        }
+        continue;
+      }
+      if (ch === '"') {
+        inString = true;
+        continue;
+      }
+      if (ch === open) {
+        depth++;
+      } else if (ch === close) {
+        depth--;
+        if (depth === 0) {
+          const candidate = text.slice(start, i + 1);
+          try {
+            JSON.parse(candidate);
+            found = candidate;
+          } catch {
+            // not valid JSON — ignore this candidate.
+          }
+          break;
+        }
+      }
+    }
+  }
+  return found;
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -6127,9 +6320,13 @@ function stripJsonPrefix(raw: string): string {
 //
 // MONEY-SAFETY parity with the direct Graph path is enforced HERE too:
 //  • creates pass `--status paused` (and the CLI also defaults PAUSED) — INVARIANT 1.
+//    THIS FLAG is what GUARANTEES the create lands PAUSED. The `assertCreateNotActive`
+//    echo check below is a best-effort SECONDARY guard ONLY: the CLI's `--output json`
+//    body may OMIT `status`, in which case the echo guard is a NO-OP (status comes back
+//    null) — so the PAUSED guarantee rests on `--status paused`, not on the echo.
 //  • the parsed response is run through `assertCreateNotActive` — a Graph echo of
 //    ACTIVE throws a non-retryable `money_safety_violation` exactly as on the
-//    direct path.
+//    direct path (a no-op when the CLI omits status — see above).
 //  • EVERY error coming out of a CLI write is normalized to retryable:false
 //    (INVARIANT 3) via `metaAdsCliWrite`, even though the read path's
 //    `callMetaAdsCliJson` marks transient CLI failures retryable. A money write
@@ -6175,6 +6372,9 @@ async function createMetaCampaignViaCli(
 ): Promise<MetaWriteResult> {
   // FIX 3 parity: normalize+validate the enum BEFORE it reaches the CLI.
   const objective = metaEnum(input.objective, META_OBJECTIVE_VALUES, "objective")!;
+  // Per-transport gate (review HIGH): reject a Graph-valid objective the CLI's Click
+  // choice set does NOT accept, BEFORE spawning, so it fails fast + non-retryably.
+  assertMetaCliEnum(objective, META_CLI_OBJECTIVE_VALUES, "objective");
   const args = [
     "--output",
     "json",
@@ -6206,6 +6406,10 @@ async function createMetaAdSetViaCli(
 ): Promise<MetaWriteResult> {
   const optimizationGoal = metaEnum(input.optimizationGoal, META_OPTIMIZATION_GOAL_VALUES, "optimization goal")!;
   const billingEvent = metaEnum(input.billingEvent, META_BILLING_EVENT_VALUES, "billing event")!;
+  // Per-transport gate (review HIGH): reject Graph-valid goal/billing the CLI's Click
+  // choice sets do NOT accept (e.g. AD_RECALL_LIFT, PURCHASE billing), BEFORE spawning.
+  assertMetaCliEnum(optimizationGoal, META_CLI_OPTIMIZATION_GOAL_VALUES, "optimization goal");
+  assertMetaCliEnum(billingEvent, META_CLI_BILLING_EVENT_VALUES, "billing event");
   const args = [
     "--output",
     "json",
@@ -6214,7 +6418,6 @@ async function createMetaAdSetViaCli(
     metaAdsCliAccountId(credential),
     "adset",
     "create",
-    input.campaignId, // positional CAMPAIGN_ID
     "--name",
     input.name,
     "--optimization-goal",
@@ -6239,8 +6442,15 @@ async function createMetaAdSetViaCli(
     // is supplied. Validate/normalize first so a bad enum throws non-retryably.
     const customEventType =
       metaEnum(input.customEventType, META_CUSTOM_EVENT_TYPE_VALUES, "custom event type") ?? "PURCHASE";
+    // Per-transport gate (review HIGH): reject a Graph-valid custom_event_type the CLI's
+    // Click choice set does NOT accept, BEFORE spawning. (PURCHASE default is in-set.)
+    assertMetaCliEnum(customEventType, META_CLI_CUSTOM_EVENT_TYPE_VALUES, "custom event type");
     args.push("--custom-event-type", customEventType);
   }
+  // POSITIONAL hardening (review): "--" ends option parsing; everything after it is a
+  // positional, so the CAMPAIGN_ID goes LAST (after all flags) and a leading-dash id can
+  // never be misparsed as an option.
+  args.push("--", input.campaignId);
   const response = await metaAdsCliWrite(credential, args);
   const id = requireGraphId("adset", response);
   const status = assertCreateNotActive("adset", id, response);
@@ -6248,28 +6458,130 @@ async function createMetaAdSetViaCli(
 }
 
 // ── CLI Create: Ad Creative ── meta ads creative create … ────────────────────
-// Creatives have no go-live status; nothing to PAUSE-guard. Still require a
-// pre-uploaded image_hash like the Graph path (the CLI uploads the image itself
-// when given --image, but our connector input only carries the hash, so we map it
-// through --image to stay parity-correct with createMetaCreative's contract).
+// Creatives have no go-live status; nothing to PAUSE-guard. The CLI's `--image`
+// flag needs a local image FILE (the CLI uploads it itself), NOT a pre-uploaded
+// Graph image_hash. So this builder requires `imageUrl`: it downloads the URL to a
+// temp file, passes `--image <tempfile>`, runs the CLI, then deletes the temp file
+// in a finally. If ONLY an imageHash is supplied (no URL), there is no file to hand
+// the CLI and a hash can't become a file → fail loud, non-retryable (review BLOCKER).
 async function createMetaCreativeViaCli(
-  _credential: MetaAdsCredential,
-  _input: MetaCreativeCreateInput
+  credential: MetaAdsCredential,
+  input: MetaCreativeCreateInput
 ): Promise<MetaWriteResult> {
-  // DEFERRED + fail-loud (review BLOCKER): the `meta ads creative create` CLI command takes
-  // `--image FILE` (a path to a local image the CLI uploads itself). Our connector's
-  // MetaCreativeCreateInput carries a pre-uploaded Graph `image_hash` (from /adimages) — there is NO
-  // file path to hand the CLI, and `--image <hash>` is rejected by the CLI as a non-existent file. So
-  // creative creation on the meta_ads_cli transport is NOT supported this slice; surface it as a
-  // clear, non-retryable error rather than silently passing a hash as a file path. (Follow-up: thread
-  // an image-file path through MetaCreativeCreateInput, or upload via the CLI's own image step.)
-  throw new ConnectorError(
-    "provider_unsupported",
-    "Meta creative creation via the `meta` CLI is not yet supported: the CLI's --image expects an " +
-      "image FILE path, but the engine supplies a pre-uploaded image_hash. Use the direct-Graph " +
-      "transport for creatives, or supply an image file.",
-    false
-  );
+  if (!input.imageUrl) {
+    // A hash can't become a file. Surface a clear, non-retryable error rather than
+    // passing a hash as a bogus --image path (which the CLI rejects as missing file).
+    throw new ConnectorError(
+      "provider_unsupported",
+      "Meta creative creation via the `meta` CLI requires an imageUrl: the CLI's --image expects an " +
+        "image FILE path, but only a pre-uploaded image_hash was supplied. Provide imageUrl, or use " +
+        "the direct-Graph transport for creatives.",
+      false
+    );
+  }
+  // FIX 3 parity: normalize+validate the CTA enum BEFORE it reaches the CLI, and gate
+  // it against the CLI's narrower Click choice set (review HIGH).
+  const callToAction = metaEnum(input.callToAction, META_CALL_TO_ACTION_VALUES, "call to action");
+  assertMetaCliEnum(callToAction, META_CLI_CALL_TO_ACTION_VALUES, "call to action");
+
+  const tempPath = await downloadToTempFile(input.imageUrl, input.name);
+  try {
+    const args = [
+      "--output",
+      "json",
+      "ads",
+      "--ad-account-id",
+      metaAdsCliAccountId(credential),
+      "creative",
+      "create",
+      "--name",
+      input.name,
+      "--image",
+      tempPath,
+      "--page-id",
+      input.pageId
+    ];
+    if (input.instagramUserId) args.push("--instagram-actor-id", input.instagramUserId);
+    if (input.linkUrl) args.push("--link-url", input.linkUrl);
+    if (input.body) args.push("--body", input.body);
+    if (input.title) args.push("--title", input.title);
+    if (input.description) args.push("--description", input.description);
+    if (callToAction) args.push("--call-to-action", callToAction);
+    const response = await metaAdsCliWrite(credential, args);
+    const id = requireGraphId("creative", response);
+    // Creatives have no status; report null (no PAUSE/ACTIVE concept).
+    return { ok: true, id, status: null };
+  } finally {
+    // Best-effort cleanup; never let a unlink failure mask the real result/error.
+    try {
+      unlinkSync(tempPath);
+    } catch {
+      // ignore — the temp file lives under os.tmpdir() and is reaped by the OS.
+    }
+  }
+}
+
+// Download an image URL to a uniquely-named temp file under os.tmpdir() and return
+// the path. Used by createMetaCreativeViaCli to satisfy the CLI's `--image FILE`.
+// Throws a NON-retryable ConnectorError on a non-2xx response or a fetch failure so
+// a money-adjacent creative create never silently proceeds with a missing/bad file.
+let metaCreativeTempCounter = 0;
+
+// The `meta` CLI validates --image by FILE EXTENSION (_validate_media_path); an extensionless temp
+// file fails immediately with "Unsupported format ''". So the temp file MUST carry an allowed image
+// extension. Derive it from the HTTP Content-Type, else the URL path, else default to .jpg.
+const META_CLI_IMAGE_EXTS = new Set([".bmp", ".gif", ".jpeg", ".jpg", ".png", ".webp"]);
+const META_CONTENT_TYPE_EXT: Record<string, string> = {
+  "image/jpeg": ".jpg",
+  "image/jpg": ".jpg",
+  "image/png": ".png",
+  "image/gif": ".gif",
+  "image/webp": ".webp",
+  "image/bmp": ".bmp"
+};
+function metaImageExt(contentType: string | null, url: string): string {
+  const ct = (contentType ?? "").split(";")[0].trim().toLowerCase();
+  if (META_CONTENT_TYPE_EXT[ct]) return META_CONTENT_TYPE_EXT[ct];
+  // URL path extension fallback (strip query/fragment first).
+  const path = url.split(/[?#]/)[0];
+  const dot = path.lastIndexOf(".");
+  if (dot !== -1) {
+    const ext = path.slice(dot).toLowerCase();
+    if (META_CLI_IMAGE_EXTS.has(ext)) return ext;
+  }
+  return ".jpg"; // last-resort default — an allowed extension so the CLI never rejects on format
+}
+
+async function downloadToTempFile(url: string, label: string): Promise<string> {
+  const slug =
+    label
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 40) || "creative";
+  let response: Response;
+  try {
+    response = await fetch(url);
+  } catch (error) {
+    throw new ConnectorError(
+      "provider_api_error",
+      `Meta creative image download failed: ${error instanceof Error ? error.message : String(error)}`,
+      false
+    );
+  }
+  if (!response.ok) {
+    throw new ConnectorError(
+      "provider_api_error",
+      `Meta creative image download failed: ${response.status} ${safeUrlForLogs(url)}`,
+      false
+    );
+  }
+  // Extension MUST be derived AFTER the fetch (Content-Type wins) — the CLI rejects an extensionless file.
+  const ext = metaImageExt(response.headers.get("content-type"), url);
+  const tempPath = join(tmpdir(), `meta-creative-${slug}-${Date.now()}-${metaCreativeTempCounter++}${ext}`);
+  const bytes = Buffer.from(await response.arrayBuffer());
+  writeFileSync(tempPath, bytes);
+  return tempPath;
 }
 
 // ── CLI Create: Ad ── meta ads ad create <ADSET_ID> … ────────────────────────
@@ -6285,14 +6597,17 @@ async function createMetaAdViaCli(
     metaAdsCliAccountId(credential),
     "ad",
     "create",
-    input.adsetId, // positional ADSET_ID
     "--name",
     input.name,
     "--creative-id",
     input.creativeId,
     // INVARIANT 1: hard-code PAUSED.
     "--status",
-    "paused"
+    "paused",
+    // POSITIONAL hardening (review): "--" ends option parsing; the ADSET_ID positional
+    // goes LAST so a leading-dash id can never be misparsed as an option.
+    "--",
+    input.adsetId // positional ADSET_ID
   ];
   const response = await metaAdsCliWrite(credential, args);
   const id = requireGraphId("ad", response);
@@ -6317,9 +6632,12 @@ async function setMetaEntityStatusViaCli(
     metaAdsCliAccountId(credential),
     metaCliEntityToken(entity),
     "update",
-    entityId,
     "--status",
-    status.toLowerCase()
+    status.toLowerCase(),
+    // POSITIONAL hardening (review): "--" ends option parsing; the entity ID positional
+    // goes LAST so a leading-dash id can never be misparsed as an option.
+    "--",
+    entityId
   ];
   const response = await metaAdsCliWrite(credential, args);
   const echoed = metaEchoedStatus(response);
@@ -6340,8 +6658,11 @@ async function deleteMetaEntityViaCli(
     metaAdsCliAccountId(credential),
     metaCliEntityToken(entity),
     "delete",
-    entityId,
-    "--force"
+    "--force",
+    // POSITIONAL hardening (review): "--" ends option parsing; the entity ID positional
+    // goes LAST so a leading-dash id can never be misparsed as an option.
+    "--",
+    entityId
   ];
   await metaAdsCliWrite(credential, args);
   return { ok: true, id: entityId, deleted: true };

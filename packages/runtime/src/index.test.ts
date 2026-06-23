@@ -230,6 +230,17 @@ describe("Meta Ads management action authority (money-safety)", () => {
     }
   });
 
+  it("requires `entity` for set_meta_entity_status + delete_meta_entity (uniform, early — CLI needs it to pick the subcommand)", () => {
+    for (const id of ["set_meta_entity_status", "delete_meta_entity"] as const) {
+      const card = ACTION_CATALOG.find((action) => action.id === id);
+      const schema = card?.inputSchema as { required?: string[] } | undefined;
+      // entity must be REQUIRED so the failure is uniform regardless of transport (the meta_ads_cli
+      // path needs it to pick `ads <entity> update|delete`; the direct-Graph path tolerates its
+      // absence — making it required closes that transport-dependent late-failure gap).
+      expect(schema?.required).toContain("entity");
+    }
+  });
+
   it("forbids a tool_agent session from executing any Meta WRITE action", async () => {
     const registry = createInfiniteOsRegistry();
     const toolAgentContext = createSessionContext({
@@ -271,7 +282,8 @@ describe("Meta Ads management action authority (money-safety)", () => {
     expect(card?.authority).toBe("operator");
     expect(card?.provenancePolicy).toBe("operator_audit");
     const schema = card?.inputSchema as { required?: string[] } | undefined;
-    expect(schema?.required).toEqual(["sourceId", "entityId"]);
+    // entity is REQUIRED (review): uniform + early failure regardless of transport.
+    expect(schema?.required).toEqual(["sourceId", "entityId", "entity"]);
 
     const registry = createInfiniteOsRegistry();
     const toolAgentContext = createSessionContext({
