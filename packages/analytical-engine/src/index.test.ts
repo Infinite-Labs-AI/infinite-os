@@ -5626,6 +5626,73 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
     );
   });
 
+  it("REMEDIATES an unexpected ACTIVE create: best-effort PAUSE + entity id in the audit, still throws", async () => {
+    const audits: AuditRow[] = [];
+    const db = metaWriteTestDb({ audits });
+    await withGraph(
+      (call) =>
+        // The create echoes ACTIVE (the should-never-happen case); the follow-up PAUSE succeeds.
+        call.url.endsWith("/campaigns")
+          ? jsonResponse({ id: "120000000000999", status: "ACTIVE" })
+          : jsonResponse({ success: true }),
+      async (calls) => {
+        const handlers = createActionHandlers(db);
+        await expect(
+          handlers.create_meta_campaign?.(
+            { sourceId: "src_meta", name: "Oops", objective: "OUTCOME_TRAFFIC", clientToken: "tok_active" },
+            operatorContext
+          )
+        ).rejects.toMatchObject({ code: "money_safety_violation", retryable: false });
+
+        // Two Graph calls: [0] the ACTIVE create, [1] the remediation PAUSE of the SAME entity id.
+        expect(calls).toHaveLength(2);
+        expect(calls[0].url).toBe("https://graph.facebook.com/v25.0/act_999/campaigns");
+        expect(calls[1].url).toBe("https://graph.facebook.com/v25.0/120000000000999");
+        expect(calls[1].method).toBe("POST");
+        expect(calls[1].body).toMatchObject({ status: "PAUSED" });
+
+        // The failed audit names the live entity and records the remediation outcome.
+        const audit = audits.find((row) => row.action === "create_meta_campaign" && row.status === "failed");
+        expect(audit?.details).toMatchObject({
+          entity: "campaign",
+          entity_id: "120000000000999",
+          error_code: "money_safety_violation",
+          money_safety_violation: true,
+          remediation_paused: true
+        });
+        expect(JSON.stringify(audits)).not.toContain("secret-meta-token");
+      }
+    );
+  });
+
+  it("a FAILING remediation pause does not mask the original money_safety_violation (best-effort)", async () => {
+    const audits: AuditRow[] = [];
+    const db = metaWriteTestDb({ audits });
+    await withGraph(
+      (call) =>
+        call.url.endsWith("/campaigns")
+          ? jsonResponse({ id: "120000000000999", status: "ACTIVE" })
+          : jsonResponse({ error: { message: "pause failed" } }, 500), // remediation PAUSE fails
+      async (calls) => {
+        const handlers = createActionHandlers(db);
+        await expect(
+          handlers.create_meta_campaign?.(
+            { sourceId: "src_meta", name: "Oops", objective: "OUTCOME_TRAFFIC", clientToken: "tok_active2" },
+            operatorContext
+          )
+        ).rejects.toMatchObject({ code: "money_safety_violation" });
+        // The pause was attempted (2 calls) but failed; the audit flags it for manual follow-up.
+        expect(calls).toHaveLength(2);
+        const audit = audits.find((row) => row.action === "create_meta_campaign" && row.status === "failed");
+        expect(audit?.details).toMatchObject({
+          entity_id: "120000000000999",
+          money_safety_violation: true,
+          remediation_paused: false
+        });
+      }
+    );
+  });
+
   it("dedups a repeat create by client_token without a second POST", async () => {
     const audits: AuditRow[] = [];
     const db = metaWriteTestDb({
@@ -5761,7 +5828,7 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
       async (calls) => {
         const handlers = createActionHandlers(db);
         const result = await handlers.set_meta_entity_status?.(
-          { sourceId: "src_meta", entityId: "120000000000333", status: "ACTIVE" },
+          { sourceId: "src_meta", entityId: "120000000000333", status: "ACTIVE", entity: "campaign" },
           operatorContext
         );
         expect(calls[0].url).toBe("https://graph.facebook.com/v25.0/120000000000333");
@@ -5870,7 +5937,7 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
         const handlers = createActionHandlers(db);
         await expect(
           handlers.delete_meta_entity?.(
-            { sourceId: "src_stripe", entityId: "120000000000777" },
+            { sourceId: "src_stripe", entityId: "120000000000777", entity: "ad" },
             operatorContext
           )
         ).rejects.toThrow("source_provider_mismatch");

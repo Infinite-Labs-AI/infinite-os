@@ -7585,7 +7585,11 @@ async function metaStatusCommand(
   }
   const section = `meta_${object}_${action}`;
   const status = action === "activate" ? "ACTIVE" : "PAUSED";
-  const toolInput = { sourceId: ctx.sourceId, entityId, status };
+  // `entity` is REQUIRED by set_meta_entity_status (the handler uses it to pick the CLI
+  // `ads <entity> update` subcommand and rejects its absence uniformly). The status object
+  // (campaign|adset|ad) IS the entity, so thread it through — without it the daemon rejects
+  // every activate/pause before doing anything.
+  const toolInput = { sourceId: ctx.sourceId, entityId, status, entity: object };
 
   if (action === "pause") {
     // Pause is naturally idempotent but still gated by the standard write gate.
@@ -9839,15 +9843,23 @@ export function createCliAgentRuntime(env: CliEnv = process.env): CliAgentRuntim
     },
     async confirmAction(confirmationId) {
       await assertWorkspaceExists();
-      const pending = await sessionStore.getPendingActionCall?.(confirmationId);
+      // P0-A: scope the lookup by the env-bound workspace ($2). confirmation_id is NOT
+      // unique across workspaces, so an unscoped lookup could return another brand's row.
+      const pending = await sessionStore.getPendingActionCall?.(confirmationId, workspaceId);
       if (!pending) {
         return { ok: false, error: { code: "confirmation_not_found" } };
       }
+      // P0-A: the workspace-scoped getPendingActionCall(confirmationId, workspaceId) above IS
+      // the cross-workspace control — a confirmation authored by another project is invisible
+      // to it (returns null → confirmation_not_found above). This CLI path was a second
+      // confused-deputy that used to execute under the env-bound active project; it now always
+      // executes under the pending row's own authoring workspace.
       const envelope = await registry.execute(
         pending.actionId,
         pending.input,
         createSessionContext({
-          workspaceId,
+          // Execute under the pending row's own authoring workspace, never the env-bound project.
+          workspaceId: pending.workspaceId,
           sessionId: pending.sessionId,
           actorId: "cli",
           authority: "operator",
@@ -9857,7 +9869,9 @@ export function createCliAgentRuntime(env: CliEnv = process.env): CliAgentRuntim
       await sessionStore.confirmActionCall?.({
         confirmationId,
         outputEnvelope: envelope,
-        status: envelope.status
+        status: envelope.status,
+        // P0-A: scope the confirm UPDATE to the pending row's workspace.
+        workspaceId: pending.workspaceId
       });
       return {
         ok: true,

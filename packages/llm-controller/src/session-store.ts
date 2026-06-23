@@ -44,6 +44,10 @@ export interface RecordActionCallInput {
   requiresConfirmation: boolean;
   confirmationId?: string;
   inputHash?: string;
+  // P0-A: the workspace that authored this action call. Persisted on the row so the
+  // confirm path can scope its lookup/update by workspace and fail closed on a
+  // cross-workspace confirmation (confused-deputy defense).
+  workspaceId: string;
 }
 
 export interface PendingActionCall {
@@ -52,12 +56,19 @@ export interface PendingActionCall {
   actionId: string;
   input: unknown;
   inputHash?: string | null;
+  // P0-A: the workspace that authored this pending confirmation. Confirm surfaces
+  // execute the action under THIS workspace — never the confirming request's header
+  // — and fail closed when it does not match the confirming workspace.
+  workspaceId: string;
 }
 
 export interface ConfirmActionCallInput {
   confirmationId: string;
   outputEnvelope: unknown;
   status: ChatActionStatus;
+  // P0-A: scope the UPDATE so a cross-workspace collision (same confirmation_id across
+  // workspaces) can only mark THIS workspace's pending row confirmed.
+  workspaceId: string;
 }
 
 export interface RecordTokenUsageInput {
@@ -113,7 +124,7 @@ export interface ChatSessionStore {
   ensureSession(input: EnsureSessionInput): Promise<void>;
   appendMessage(input: AppendMessageInput): Promise<void>;
   recordActionCall(input: RecordActionCallInput): Promise<void>;
-  getPendingActionCall?(confirmationId: string): Promise<PendingActionCall | null>;
+  getPendingActionCall?(confirmationId: string, workspaceId: string): Promise<PendingActionCall | null>;
   confirmActionCall?(input: ConfirmActionCallInput): Promise<void>;
   recordTokenUsage?(input: RecordTokenUsageInput): Promise<void>;
   listSessions(workspaceId: string): Promise<ChatSessionListItem[]>;
@@ -189,9 +200,9 @@ export function createSessionStore(db: SessionStoreDb): ChatSessionStore {
           insert into chat_action_calls (
             id, session_id, message_id, provider_tool_call_id, action_id, authority,
             input_json, output_envelope_json, status, requires_confirmation, confirmation_id,
-            input_hash
+            input_hash, workspace_id
           )
-          values ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9, $10, $11, $12)
+          values ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9, $10, $11, $12, $13)
         `,
         [
           `call_${randomUUID()}`,
@@ -205,12 +216,17 @@ export function createSessionStore(db: SessionStoreDb): ChatSessionStore {
           input.status,
           input.requiresConfirmation,
           input.confirmationId ?? null,
-          input.inputHash ?? null
+          input.inputHash ?? null,
+          input.workspaceId
         ]
       );
       await db.query("update chat_sessions set updated_at = now() where id = $1", [input.sessionId]);
     },
-    async getPendingActionCall(confirmationId) {
+    async getPendingActionCall(confirmationId, workspaceId) {
+      // P0-A: scope by workspace_id ($2). confirmation_id is NOT unique across
+      // workspaces (`confirm_${sha256({actionId,input}).slice(0,16)}` carries no
+      // workspace), so an unscoped `limit 1` could return an arbitrary brand's row.
+      // Returning workspace_id lets the confirm surface fail closed on a mismatch.
       return db.one<PendingActionCall>(
         `
           select
@@ -218,17 +234,22 @@ export function createSessionStore(db: SessionStoreDb): ChatSessionStore {
             session_id as "sessionId",
             action_id as "actionId",
             input_json as "input",
-            input_hash as "inputHash"
+            input_hash as "inputHash",
+            workspace_id as "workspaceId"
           from chat_action_calls
           where confirmation_id = $1
+            and workspace_id = $2
             and requires_confirmation = true
             and confirmed_at is null
           limit 1
         `,
-        [confirmationId]
+        [confirmationId, workspaceId]
       );
     },
     async confirmActionCall(input) {
+      // P0-A: scope the UPDATE by workspace_id ($4). Without it a cross-workspace
+      // collision on confirmation_id would mark MULTIPLE pending rows across
+      // workspaces confirmed (cross-workspace write corruption).
       await db.query(
         `
           update chat_action_calls
@@ -237,10 +258,16 @@ export function createSessionStore(db: SessionStoreDb): ChatSessionStore {
             status = $3,
             requires_confirmation = false
           where confirmation_id = $1
+            and workspace_id = $4
             and requires_confirmation = true
             and confirmed_at is null
         `,
-        [input.confirmationId, JSON.stringify(input.outputEnvelope ?? {}), input.status]
+        [
+          input.confirmationId,
+          JSON.stringify(input.outputEnvelope ?? {}),
+          input.status,
+          input.workspaceId
+        ]
       );
     },
     async recordTokenUsage(input) {

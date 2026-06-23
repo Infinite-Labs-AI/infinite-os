@@ -51,7 +51,9 @@ describe("Infinite OS migration stack", () => {
       "0034_meta_stripe_true_value_and_frequency.sql",
       "0035_meta_ads_adset_grain.sql",
       "0036_chat_sessions_desktop_surface.sql",
-      "0037_meta_ads_ad_grain.sql"
+      "0037_meta_ads_ad_grain.sql",
+      "0038_chat_action_calls_workspace_id.sql",
+      "0039_connection_credentials_metadata.sql"
     ]);
   });
 
@@ -380,8 +382,42 @@ describe("Infinite OS migration stack", () => {
       "0034_meta_stripe_true_value_and_frequency.sql",
       "0035_meta_ads_adset_grain.sql",
       "0036_chat_sessions_desktop_surface.sql",
-      "0037_meta_ads_ad_grain.sql"
+      "0037_meta_ads_ad_grain.sql",
+      "0038_chat_action_calls_workspace_id.sql",
+      "0039_connection_credentials_metadata.sql"
     ]);
+  });
+
+  it("adds connection_credentials operational metadata + partial-unique index (0039)", () => {
+    const migration = loadMigrations().find(
+      (m) => m.id === "0039_connection_credentials_metadata.sql"
+    );
+    const sql = (migration?.sql ?? "").toLowerCase();
+
+    // Targets connection_credentials.
+    expect(sql).toContain("alter table connection_credentials");
+
+    // The 5 non-secret operational columns the engine queries without decrypting.
+    expect(sql).toContain("add column if not exists selected_pixel_id");
+    expect(sql).toContain("add column if not exists is_system_user");
+    expect(sql).toContain("add column if not exists last_dispatch_at");
+    expect(sql).toContain("add column if not exists last_dispatch_status");
+    expect(sql).toContain("add column if not exists last_error");
+
+    // is_system_user is NOT NULL DEFAULT false (safe on existing rows).
+    expect(sql).toContain("is_system_user");
+    expect(sql).toMatch(/is_system_user\s+boolean\s+not null\s+default false/);
+
+    // Token expiry reuses the EXISTING expires_at column (0021) — must NOT add token_expires_at
+    // (the comment may mention the name; assert no column is actually ADDED for it).
+    expect(sql).not.toMatch(/add column[^;]*token_expires_at/);
+    // account_external_id lives on sources — must NOT be denormalized here (no column added).
+    expect(sql).not.toMatch(/add column[^;]*account_external_id/);
+
+    // Partial-unique index so P0-B2's `on conflict (source_id, credential_kind)` upsert binds.
+    expect(sql).toContain("create unique index if not exists connection_credentials_source_kind_uq");
+    expect(sql).toContain("(source_id, credential_kind)");
+    expect(sql).toContain("where revoked_at is null");
   });
 
   it("bridges connection_credentials to oauth_tokens additively and backfills GA4 (0023)", () => {

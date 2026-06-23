@@ -1,8 +1,8 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { encryptCredentialPayload } from "@infinite-os/core";
 import { type InfiniteOsDb } from "@infinite-os/db";
 
@@ -17,6 +17,7 @@ import {
   findMetaDedupHit,
   ga4ConnectSourceFromSetup,
   getMetaEntity,
+  listMetaAssets,
   listMetaEntities,
   metaDedupKey,
   posthogConnectSourceFromSetup,
@@ -3733,13 +3734,13 @@ describe("Meta Ads WRITE helpers", () => {
       );
     });
 
-    it("refuses a delete when the transport is meta_ads_cli (non-retryable)", async () => {
+    it("refuses a delete on the CLI transport when no entity hint is supplied (non-retryable)", async () => {
       await withMockFetch(
         () => jsonResponse({ success: true }),
         async () => {
           await expect(
             deleteMetaEntity({ ...metaWriteCredential, transport: "meta_ads_cli" }, "120000000000005")
-          ).rejects.toMatchObject({ code: "provider_unsupported", retryable: false });
+          ).rejects.toMatchObject({ code: "provider_api_error", retryable: false });
         }
       );
     });
@@ -3899,19 +3900,504 @@ describe("Meta Ads WRITE helpers", () => {
     });
   });
 
-  describe("CLI/MCP write transports are refused (non-retryable)", () => {
-    it("refuses a write when transport is meta_ads_cli", async () => {
+  describe("MCP write transport is still refused (out of scope)", () => {
+    it("refuses a write when transport is mcp_stdio (non-retryable)", async () => {
       await withMockFetch(
         () => jsonResponse({ id: "should-not-happen" }),
         async () => {
           await expect(
             createMetaCampaign(
-              { ...metaWriteCredential, transport: "meta_ads_cli" },
+              { ...metaWriteCredential, transport: "mcp_stdio" },
               { name: "X", objective: "OUTCOME_TRAFFIC" }
             )
           ).rejects.toMatchObject({ code: "provider_unsupported", retryable: false });
         }
       );
+    });
+  });
+
+  // ── CLI WRITE transport ── meta ads <entity> <action> … via the spawned `meta`
+  // CLI. Mirrors the CLI insights tests: a fake node `meta` records its argv to a
+  // file and emits the `--output json` body, so we assert the exact tokens AND that
+  // the money-safety contract (PAUSED, never ACTIVE, non-retryable) is preserved.
+  describe("CLI WRITE transport (meta ads <entity> …)", () => {
+    // Build a fake `meta` CLI that writes its argv (JSON array) to argvOut and
+    // prints `body` to stdout (optionally behind a human prefix line to exercise
+    // the JSON-prefix stripping). Returns a cliCommand string for the credential.
+    function fakeCliWriter(dir: string, body: unknown, opts: { prefix?: string } = {}): string {
+      const script = join(dir, "meta-cli-write.mjs");
+      const prefixLine = opts.prefix ? `console.log(${JSON.stringify(opts.prefix)});` : "";
+      writeFileSync(
+        script,
+        `
+import process from "node:process";
+import { writeFileSync } from "node:fs";
+const args = process.argv.slice(2);
+writeFileSync(${JSON.stringify(join(dir, "argv.json"))}, JSON.stringify(args));
+${prefixLine}
+console.log(${JSON.stringify(JSON.stringify(body))});
+        `.trim(),
+        "utf8"
+      );
+      return `${JSON.stringify(process.execPath)} ${JSON.stringify(script)}`;
+    }
+
+    function cliCredential(dir: string, body: unknown, opts?: { prefix?: string }): MetaAdsCredential {
+      return {
+        mode: "live",
+        transport: "meta_ads_cli",
+        adAccountId: "1234567890",
+        accessToken: "cli-write-token",
+        cliCommand: fakeCliWriter(dir, body, opts)
+      };
+    }
+
+    function recordedArgv(dir: string): string[] {
+      return JSON.parse(readFileSync(join(dir, "argv.json"), "utf8")) as string[];
+    }
+
+    function withTmp(fn: (dir: string) => Promise<void>): Promise<void> {
+      const dir = mkdtempSync(join(tmpdir(), "growth-os-meta-cli-write-"));
+      return fn(dir).finally(() => rmSync(dir, { recursive: true, force: true }));
+    }
+
+    it("creates a campaign via `meta ads campaign create` with --status paused (NEVER active)", async () => {
+      await withTmp(async (dir) => {
+        const result = await createMetaCampaign(
+          cliCredential(dir, { id: "120000000000010", status: "PAUSED" }),
+          { name: "CLI Camp", objective: "outcome_traffic", dailyBudget: 5000 }
+        );
+        expect(result).toEqual({ ok: true, id: "120000000000010", status: "PAUSED" });
+        const argv = recordedArgv(dir);
+        expect(argv.slice(0, 7)).toEqual(["--output", "json", "ads", "--ad-account-id", "1234567890", "campaign", "create"]);
+        expect(argv).toContain("--name");
+        expect(argv[argv.indexOf("--name") + 1]).toBe("CLI Camp");
+        // Enum normalized to UPPERCASE before the CLI.
+        expect(argv[argv.indexOf("--objective") + 1]).toBe("OUTCOME_TRAFFIC");
+        // Budget passed as integer cents.
+        expect(argv[argv.indexOf("--daily-budget") + 1]).toBe("5000");
+        // MONEY-SAFETY: --status paused, NEVER active.
+        expect(argv[argv.indexOf("--status") + 1]).toBe("paused");
+        expect(argv).not.toContain("active");
+      });
+    });
+
+    it("strips a human prefix line before parsing the campaign id", async () => {
+      await withTmp(async (dir) => {
+        const result = await createMetaCampaign(
+          cliCredential(dir, { id: "120000000000011" }, { prefix: "Created campaign 120000000000011 (PAUSED)" }),
+          { name: "Prefixed", objective: "OUTCOME_SALES" }
+        );
+        expect(result).toMatchObject({ ok: true, id: "120000000000011" });
+      });
+    });
+
+    it("creates an ad set via `meta ads adset create <CAMPAIGN_ID>` with mapped flags", async () => {
+      await withTmp(async (dir) => {
+        const result = await createMetaAdSet(cliCredential(dir, { id: "120000000000020", status: "PAUSED" }), {
+          name: "CLI AdSet",
+          campaignId: "120000000000010",
+          optimizationGoal: "link_clicks",
+          billingEvent: "impressions",
+          dailyBudget: 3000,
+          targetingCountries: ["US", "CA"],
+          pixelId: "px_1"
+        });
+        expect(result).toMatchObject({ ok: true, id: "120000000000020", status: "PAUSED" });
+        const argv = recordedArgv(dir);
+        expect(argv.slice(0, 7)).toEqual(["--output", "json", "ads", "--ad-account-id", "1234567890", "adset", "create"]);
+        // POSITIONAL hardening: the campaign id is the LAST token, preceded by `--`.
+        expect(argv[argv.length - 1]).toBe("120000000000010");
+        expect(argv[argv.length - 2]).toBe("--");
+        expect(argv.indexOf("--")).toBe(argv.length - 2); // exactly one `--`, at the end
+        expect(argv[argv.indexOf("--optimization-goal") + 1]).toBe("LINK_CLICKS");
+        expect(argv[argv.indexOf("--billing-event") + 1]).toBe("IMPRESSIONS");
+        expect(argv[argv.indexOf("--daily-budget") + 1]).toBe("3000");
+        expect(argv[argv.indexOf("--targeting-countries") + 1]).toBe("US,CA");
+        expect(argv[argv.indexOf("--pixel-id") + 1]).toBe("px_1");
+        // pixel ⇒ default conversion event PURCHASE.
+        expect(argv[argv.indexOf("--custom-event-type") + 1]).toBe("PURCHASE");
+        expect(argv[argv.indexOf("--status") + 1]).toBe("paused");
+      });
+    });
+
+    // review BLOCKER (full fix): the CLI's `creative create --image` takes a FILE path. The engine
+    // downloads imageUrl to a temp file and passes it as --image. A hash-only input still fails loud.
+    it("downloads imageUrl to a temp file and passes it as --image (creative create)", async () => {
+      await withTmp(async (dir) => {
+        const imageBytes = Buffer.from("fake-png-bytes");
+        let fetchedUrl: string | undefined;
+        let imagePathArg: string | undefined;
+        let imageFileContents: Buffer | undefined;
+        await withMockFetch(
+          (url) => {
+            fetchedUrl = url;
+            return new Response(imageBytes, { status: 200 });
+          },
+          async () => {
+            const result = await createMetaCreative(cliCredential(dir, { id: "120000000000050" }), {
+              name: "CLI Creative!",
+              pageId: "page_1",
+              imageUrl: "https://cdn.example.com/banner.png",
+              linkUrl: "https://example.com",
+              body: "Buy now",
+              title: "Headline",
+              callToAction: "shop_now"
+            });
+            expect(result).toEqual({ ok: true, id: "120000000000050", status: null });
+            const argv = recordedArgv(dir);
+            expect(argv.slice(0, 7)).toEqual(["--output", "json", "ads", "--ad-account-id", "1234567890", "creative", "create"]);
+            imagePathArg = argv[argv.indexOf("--image") + 1];
+            // The --image arg is a real temp file path that existed at spawn time; capture its bytes.
+            // (The builder deletes it in a finally, so read it INSIDE the fake CLI is not possible here —
+            // instead assert the path shape + that the download happened.)
+            expect(argv[argv.indexOf("--page-id") + 1]).toBe("page_1");
+            expect(argv[argv.indexOf("--link-url") + 1]).toBe("https://example.com");
+            expect(argv[argv.indexOf("--body") + 1]).toBe("Buy now");
+            expect(argv[argv.indexOf("--title") + 1]).toBe("Headline");
+            // CTA normalized to UPPERCASE before the CLI.
+            expect(argv[argv.indexOf("--call-to-action") + 1]).toBe("SHOP_NOW");
+          }
+        );
+        expect(fetchedUrl).toBe("https://cdn.example.com/banner.png");
+        expect(imagePathArg).toBeDefined();
+        // Path lives under the OS temp dir and is named from the slugged creative name.
+        expect(imagePathArg).toContain(tmpdir());
+        expect(imagePathArg).toContain("meta-creative-cli-creative-");
+        // BLOCKER fix: the temp file MUST carry an allowed image extension (the CLI validates --image by
+        // extension). Here it comes from the URL path (.png) since the mock Response has no Content-Type.
+        expect(imagePathArg).toMatch(/\.png$/);
+        // Temp file cleaned up in the finally.
+        expect(existsSync(imagePathArg as string)).toBe(false);
+        void imageFileContents;
+      });
+    });
+
+    it("derives the temp-file extension from Content-Type, and defaults to .jpg when unknown", async () => {
+      // Content-Type wins over the URL path: a webp content-type on an extensionless URL → .webp.
+      await withTmp(async (dir) => {
+        let imagePathArg: string | undefined;
+        await withMockFetch(
+          () => new Response(Buffer.from("x"), { status: 200, headers: { "content-type": "image/webp" } }),
+          async () => {
+            await createMetaCreative(cliCredential(dir, { id: "120000000000051" }), {
+              name: "Webp",
+              pageId: "page_1",
+              imageUrl: "https://cdn.example.com/asset?id=99" // no extension in the URL
+            });
+            imagePathArg = recordedArgv(dir)[recordedArgv(dir).indexOf("--image") + 1];
+          }
+        );
+        expect(imagePathArg).toMatch(/\.webp$/);
+      });
+
+      // No Content-Type AND no URL extension → default .jpg (never extensionless, which the CLI rejects).
+      await withTmp(async (dir) => {
+        let imagePathArg: string | undefined;
+        await withMockFetch(
+          () => new Response(Buffer.from("x"), { status: 200 }),
+          async () => {
+            await createMetaCreative(cliCredential(dir, { id: "120000000000052" }), {
+              name: "NoExt",
+              pageId: "page_1",
+              imageUrl: "https://cdn.example.com/asset"
+            });
+            imagePathArg = recordedArgv(dir)[recordedArgv(dir).indexOf("--image") + 1];
+          }
+        );
+        expect(imagePathArg).toMatch(/\.jpg$/);
+      });
+    });
+
+    it("REFUSES creative create on the CLI transport when only a hash is supplied (no imageUrl), non-retryable", async () => {
+      await withTmp(async (dir) => {
+        // The throw precedes the spawn, so the CLI is never invoked (no argv.json written).
+        await expect(
+          createMetaCreative(cliCredential(dir, { id: "should-not-happen" }), {
+            name: "CLI Creative",
+            pageId: "page_1",
+            imageHash: "hash_abc",
+            linkUrl: "https://example.com"
+          })
+        ).rejects.toMatchObject({ code: "provider_unsupported", retryable: false });
+      });
+    });
+
+    // Review HIGH (path-with-space): the desktop stores a BARE absolute path as cliCommand. The engine
+    // must spawn it VERBATIM (not via parseProcessCommand, which splits on whitespace). Prove a path
+    // CONTAINING A SPACE — common on personal Macs (/Users/John Smith/…) — spawns correctly.
+    it("spawns a bare ABSOLUTE cliCommand with a SPACE in its path verbatim (not whitespace-split)", async () => {
+      await withTmp(async (dir) => {
+        const spaced = join(dir, "John Smith bin"); // a dir with spaces
+        mkdirSync(spaced, { recursive: true });
+        const exe = join(spaced, "meta"); // bare executable, no `node` prefix, no quotes
+        writeFileSync(
+          exe,
+          `#!/usr/bin/env node\nconst { writeFileSync } = require("node:fs");\nwriteFileSync(${JSON.stringify(
+            join(dir, "argv.json"),
+          )}, JSON.stringify(process.argv.slice(2)));\nconsole.log(JSON.stringify({ id: "120000000000099", status: "PAUSED" }));\n`,
+          "utf8",
+        );
+        chmodSync(exe, 0o755);
+        const cred: MetaAdsCredential = {
+          mode: "live",
+          transport: "meta_ads_cli",
+          adAccountId: "1234567890",
+          accessToken: "cli-write-token",
+          cliCommand: exe, // bare absolute path WITH a space
+        };
+        const result = await createMetaCampaign(cred, { name: "Spaced", objective: "OUTCOME_TRAFFIC" });
+        expect(result).toEqual({ ok: true, id: "120000000000099", status: "PAUSED" });
+        // The CLI actually ran (argv recorded) — proving the spaced path was NOT split.
+        expect(recordedArgv(dir).slice(0, 3)).toEqual(["--output", "json", "ads"]);
+      });
+    });
+
+    it("creates an ad via `meta ads ad create <ADSET_ID>` with --status paused", async () => {
+      await withTmp(async (dir) => {
+        const result = await createMetaAd(cliCredential(dir, { id: "120000000000040", status: "PAUSED" }), {
+          name: "CLI Ad",
+          adsetId: "120000000000020",
+          creativeId: "120000000000030"
+        });
+        expect(result).toMatchObject({ ok: true, id: "120000000000040", status: "PAUSED" });
+        const argv = recordedArgv(dir);
+        expect(argv.slice(0, 7)).toEqual(["--output", "json", "ads", "--ad-account-id", "1234567890", "ad", "create"]);
+        // POSITIONAL hardening: the adset id is the LAST token, preceded by `--`.
+        expect(argv[argv.length - 1]).toBe("120000000000020"); // positional adset id
+        expect(argv[argv.length - 2]).toBe("--");
+        expect(argv[argv.indexOf("--creative-id") + 1]).toBe("120000000000030");
+        expect(argv[argv.indexOf("--status") + 1]).toBe("paused");
+        expect(argv).not.toContain("active");
+      });
+    });
+
+    it("MONEY-SAFETY: a CLI create that echoes ACTIVE throws money_safety_violation (non-retryable)", async () => {
+      await withTmp(async (dir) => {
+        await expect(
+          createMetaCampaign(cliCredential(dir, { id: "120000000000099", status: "ACTIVE" }), {
+            name: "Rogue",
+            objective: "OUTCOME_TRAFFIC"
+          })
+        ).rejects.toMatchObject({ code: "money_safety_violation", retryable: false });
+      });
+    });
+
+    it("sets entity status via `meta ads <entity> update <ID> --status`", async () => {
+      await withTmp(async (dir) => {
+        const result = await setMetaEntityStatus(
+          cliCredential(dir, { id: "120000000000010", status: "ACTIVE" }),
+          "120000000000010",
+          "ACTIVE",
+          "campaign"
+        );
+        expect(result).toEqual({ ok: true, id: "120000000000010", status: "ACTIVE" });
+        const argv = recordedArgv(dir);
+        expect(argv).toEqual([
+          "--output",
+          "json",
+          "ads",
+          "--ad-account-id",
+          "1234567890",
+          "campaign",
+          "update",
+          "--status",
+          "active",
+          // POSITIONAL hardening: the entity id is LAST, preceded by `--`.
+          "--",
+          "120000000000010"
+        ]);
+      });
+    });
+
+    it("deletes an entity via `meta ads <entity> delete <ID> --force`", async () => {
+      await withTmp(async (dir) => {
+        const result = await deleteMetaEntity(
+          cliCredential(dir, { success: true }),
+          "120000000000040",
+          "ad"
+        );
+        expect(result).toEqual({ ok: true, id: "120000000000040", deleted: true });
+        const argv = recordedArgv(dir);
+        // POSITIONAL hardening: --force first, then `--`, then the entity id LAST.
+        expect(argv).toEqual(["--output", "json", "ads", "--ad-account-id", "1234567890", "ad", "delete", "--force", "--", "120000000000040"]);
+      });
+    });
+
+    it("normalizes a transient CLI write failure to NON-retryable (INVARIANT 3)", async () => {
+      await withTmp(async (dir) => {
+        // A fake CLI that exits non-zero — callMetaAdsCliJson would mark this
+        // retryable:true on the read path; the write wrapper re-stamps it false.
+        const script = join(dir, "meta-cli-fail.mjs");
+        writeFileSync(script, `process.exit(1);`, "utf8");
+        const credential: MetaAdsCredential = {
+          mode: "live",
+          transport: "meta_ads_cli",
+          adAccountId: "1234567890",
+          cliCommand: `${JSON.stringify(process.execPath)} ${JSON.stringify(script)}`
+        };
+        await expect(
+          createMetaCampaign(credential, { name: "X", objective: "OUTCOME_TRAFFIC" })
+        ).rejects.toMatchObject({ retryable: false });
+      });
+    });
+
+    // ── ENUM per-transport validation (review HIGH) ── a Graph-valid enum that is NOT
+    // in the CLI's narrower Click choice set must throw a clear non-retryable error
+    // BEFORE the CLI is spawned (no argv.json written).
+    it("rejects a Graph-valid objective that the CLI choice set does NOT accept (before spawn)", async () => {
+      await withTmp(async (dir) => {
+        // OUTCOME_TRAFFIC is fine; there is no objective valid on Graph but not on the CLI
+        // in this set — so prove the gate fires for an optimization goal instead below, and
+        // confirm a CLI-only-invalid goal short-circuits.
+        await expect(
+          createMetaAdSet(cliCredential(dir, { id: "should-not-happen" }), {
+            name: "Set",
+            campaignId: "120000000000010",
+            // AD_RECALL_LIFT is Graph-valid (in META_OPTIMIZATION_GOAL_VALUES) but NOT a CLI choice.
+            optimizationGoal: "AD_RECALL_LIFT",
+            billingEvent: "IMPRESSIONS"
+          })
+        ).rejects.toMatchObject({ code: "provider_unsupported", retryable: false });
+        // The throw precedes the spawn — the CLI never ran.
+        expect(existsSync(join(dir, "argv.json"))).toBe(false);
+      });
+    });
+
+    it("rejects a Graph-valid billing event (PURCHASE) not in the CLI choice set (before spawn)", async () => {
+      await withTmp(async (dir) => {
+        await expect(
+          createMetaAdSet(cliCredential(dir, { id: "should-not-happen" }), {
+            name: "Set",
+            campaignId: "120000000000010",
+            optimizationGoal: "LINK_CLICKS",
+            // PURCHASE is in META_BILLING_EVENT_VALUES but is NOT a CLI billing-event choice.
+            billingEvent: "PURCHASE"
+          })
+        ).rejects.toMatchObject({ code: "provider_unsupported", retryable: false });
+        expect(existsSync(join(dir, "argv.json"))).toBe(false);
+      });
+    });
+
+    it("rejects a Graph-valid CTA (GET_DIRECTIONS) not in the CLI choice set (before spawn)", async () => {
+      await withTmp(async (dir) => {
+        await withMockFetch(
+          () => new Response(Buffer.from("img"), { status: 200 }),
+          async () => {
+            await expect(
+              createMetaCreative(cliCredential(dir, { id: "should-not-happen" }), {
+                name: "Creative",
+                pageId: "page_1",
+                imageUrl: "https://cdn.example.com/x.png",
+                // GET_DIRECTIONS is in META_CALL_TO_ACTION_VALUES but is NOT a CLI CTA choice.
+                callToAction: "GET_DIRECTIONS"
+              })
+            ).rejects.toMatchObject({ code: "provider_unsupported", retryable: false });
+          }
+        );
+        expect(existsSync(join(dir, "argv.json"))).toBe(false);
+      });
+    });
+
+    it("accepts a CLI-supported enum on the CLI transport (regression: gate is not over-eager)", async () => {
+      await withTmp(async (dir) => {
+        const result = await createMetaAdSet(cliCredential(dir, { id: "120000000000060", status: "PAUSED" }), {
+          name: "Set",
+          campaignId: "120000000000010",
+          optimizationGoal: "offsite_conversions", // in both Graph + CLI sets
+          billingEvent: "impressions"
+        });
+        expect(result).toMatchObject({ ok: true, id: "120000000000060" });
+      });
+    });
+
+    // ── stripJsonPrefix hardening (review) ── a multi-line "Created … {id} \n [{…}]"
+    // style output must still parse to the trailing JSON body.
+    it("parses the trailing JSON body past a human prefix line that itself contains a brace", async () => {
+      await withTmp(async (dir) => {
+        const result = await createMetaCampaign(
+          cliCredential(
+            dir,
+            { id: "120000000000070", status: "PAUSED" },
+            // Prefix line contains a brace — the naive first-`{` slice would break on this.
+            { prefix: "Created campaign 'Summer {Sale} 2026' 120000000000070" }
+          ),
+          { name: "Braced", objective: "OUTCOME_SALES" }
+        );
+        expect(result).toMatchObject({ ok: true, id: "120000000000070" });
+      });
+    });
+
+    // ── Token-stderr scrub (review, defense-in-depth) ── a non-zero exit whose stderr
+    // echoes the EAA…-shaped token must NOT leak the token into the error message.
+    it("scrubs an EAA-shaped token from CLI stderr in the error message", async () => {
+      await withTmp(async (dir) => {
+        const script = join(dir, "meta-cli-leak.mjs");
+        // Emit a token-shaped string + the actual ACCESS_TOKEN on stderr, then exit non-zero.
+        writeFileSync(
+          script,
+          `process.stderr.write("auth failed for EAAabc123DEF456 token=" + (process.env.ACCESS_TOKEN || ""));\nprocess.exit(1);`,
+          "utf8"
+        );
+        const credential: MetaAdsCredential = {
+          mode: "live",
+          transport: "meta_ads_cli",
+          adAccountId: "1234567890",
+          accessToken: "EAAsecretLiveToken999",
+          cliCommand: `${JSON.stringify(process.execPath)} ${JSON.stringify(script)}`
+        };
+        await expect(
+          createMetaCampaign(credential, { name: "X", objective: "OUTCOME_TRAFFIC" })
+        ).rejects.toMatchObject({
+          retryable: false,
+          message: expect.not.stringContaining("EAAabc123DEF456")
+        });
+        await createMetaCampaign(credential, { name: "X", objective: "OUTCOME_TRAFFIC" }).catch((error) => {
+          const message = error instanceof Error ? error.message : String(error);
+          expect(message).not.toContain("EAAabc123DEF456");
+          expect(message).not.toContain("EAAsecretLiveToken999");
+          expect(message).toContain("[REDACTED]");
+        });
+      });
+    });
+
+    // ── Ambient-token stderr scrub (review fix) ── in "ambient auth" mode the credential carries
+    // NO accessToken and the CLI uses the INHERITED process.env.ACCESS_TOKEN. That token is NOT
+    // EAA-prefixed here, so the regex fallback cannot catch it — only scrubbing the value the CLI
+    // actually uses keeps it out of the error message (and out of sync_errors.error_message).
+    it("scrubs the INHERITED process.env.ACCESS_TOKEN (ambient mode, non-EAA token) from CLI stderr", async () => {
+      const prior = process.env.ACCESS_TOKEN;
+      process.env.ACCESS_TOKEN = "sysuser-PLAINTEXT-secret-2f8b9";
+      try {
+        await withTmp(async (dir) => {
+          const script = join(dir, "meta-cli-ambient-leak.mjs");
+          // Echo the inherited (non-EAA) token on stderr, then exit non-zero.
+          writeFileSync(
+            script,
+            `process.stderr.write("cli error: token=" + (process.env.ACCESS_TOKEN || ""));\nprocess.exit(1);`,
+            "utf8"
+          );
+          // No accessToken on the credential → metaAdsCliAccessToken returns undefined → ambient mode.
+          const credential: MetaAdsCredential = {
+            mode: "live",
+            transport: "meta_ads_cli",
+            adAccountId: "1234567890",
+            cliCommand: `${JSON.stringify(process.execPath)} ${JSON.stringify(script)}`
+          };
+          await createMetaCampaign(credential, { name: "X", objective: "OUTCOME_TRAFFIC" }).catch((error) => {
+            const message = error instanceof Error ? error.message : String(error);
+            expect(message).not.toContain("sysuser-PLAINTEXT-secret-2f8b9");
+            expect(message).toContain("[REDACTED]");
+            expect((error as { retryable?: boolean }).retryable).toBe(false);
+          });
+        });
+      } finally {
+        if (prior === undefined) {
+          delete process.env.ACCESS_TOKEN;
+        } else {
+          process.env.ACCESS_TOKEN = prior;
+        }
+      }
     });
   });
 
@@ -4293,3 +4779,88 @@ function stripeLine(id: string) {
     period: { start: 1760000000, end: 1762600000 }
   };
 }
+
+describe("listMetaAssets (asset discovery for the connect picker)", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  /** Route Graph requests to canned JSON by URL substring. Records the order of calls. */
+  function stubGraph(routes: Array<{ match: string; body: unknown; status?: number }>) {
+    const calls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string | URL) => {
+        const u = String(url);
+        calls.push(u);
+        const hit = routes.find((r) => u.includes(r.match));
+        const status = hit?.status ?? 200;
+        return {
+          status,
+          ok: status >= 200 && status < 300,
+          json: async () => hit?.body ?? {},
+          text: async () => JSON.stringify(hit?.body ?? {})
+        } as Response;
+      })
+    );
+    return calls;
+  }
+
+  it("SYSTEM-USER token: /me/adaccounts empty -> /me/businesses -> /{biz}/owned_ad_accounts -> pixels", async () => {
+    const calls = stubGraph([
+      { match: "/me/adaccounts", body: { data: [] } }, // system-user token sees no personal accounts
+      { match: "/me/businesses", body: { data: [{ id: "biz_1", name: "Acme" }] } },
+      { match: "/biz_1/owned_ad_accounts", body: { data: [{ id: "act_99", account_id: "99", name: "Acme Ads", currency: "USD" }] } },
+      { match: "/act_99/adspixels", body: { data: [{ id: "px_1", name: "Acme Pixel" }] } }
+    ]);
+
+    const snap = await listMetaAssets("sys-user-token");
+
+    expect(snap.tokenKind).toBe("system_user_token");
+    expect(snap.adAccounts).toEqual([{ id: "act_99", account_id: "99", name: "Acme Ads", currency: "USD" }]);
+    expect(snap.pixels).toEqual([{ id: "px_1", name: "Acme Pixel" }]);
+    expect(snap.pixelsByAccount["act_99"]).toEqual([{ id: "px_1", name: "Acme Pixel" }]);
+    // The system-user edge MUST be hit (not /me/adaccounts as the source of truth).
+    expect(calls.some((u) => u.includes("/biz_1/owned_ad_accounts"))).toBe(true);
+    // Bearer-token reads — the token must never leak into a URL.
+    expect(calls.every((u) => !u.includes("sys-user-token"))).toBe(true);
+  });
+
+  it("OAuth-user token: resolves accounts directly via /me/adaccounts (no business fallback)", async () => {
+    const calls = stubGraph([
+      { match: "/me/adaccounts", body: { data: [{ id: "act_1", account_id: "1", name: "My Ads", currency: "USD" }] } },
+      { match: "/act_1/adspixels", body: { data: [] } },
+      { match: "/me/businesses", body: { data: [] } }
+    ]);
+
+    const snap = await listMetaAssets("oauth-user-token");
+
+    expect(snap.tokenKind).toBe("user_token");
+    expect(snap.adAccounts).toHaveLength(1);
+    expect(calls.some((u) => u.includes("owned_ad_accounts"))).toBe(false); // no system-user fallback
+  });
+
+  it("rejects an empty token without hitting the wire", async () => {
+    const spy = vi.fn();
+    vi.stubGlobal("fetch", spy);
+    await expect(listMetaAssets("  ")).rejects.toMatchObject({ code: "provider_auth_failed" });
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it("an explicit businessId skips /me/businesses discovery", async () => {
+    const calls = stubGraph([
+      { match: "/me/adaccounts", body: { data: [] } },
+      { match: "/biz_x/owned_ad_accounts", body: { data: [{ id: "act_x", account_id: "x", name: "X", currency: "USD" }] } },
+      { match: "/act_x/adspixels", body: { data: [] } }
+    ]);
+    const snap = await listMetaAssets("sys-user-token", { businessId: "biz_x" });
+    expect(snap.adAccounts).toHaveLength(1);
+    expect(calls.some((u) => u.includes("/me/businesses"))).toBe(false);
+  });
+
+  it("an invalid token surfaces provider_auth_failed (validate-before-bind)", async () => {
+    stubGraph([
+      { match: "/me/adaccounts", body: { error: { message: "bad token" } }, status: 401 }, // swallowed -> business path
+      { match: "/me/businesses", body: { error: { message: "bad token" } }, status: 401 } // throws
+    ]);
+    await expect(listMetaAssets("bogus")).rejects.toMatchObject({ code: "provider_auth_failed" });
+  });
+});
