@@ -11742,7 +11742,8 @@ describe("meta command (CLI write surface + confirm gates)", () => {
     );
     expect(toolCalls(api)[0]?.body).toMatchObject({
       actionId: "set_meta_entity_status",
-      input: { sourceId: "src_meta", entityId: "120000000000000001", status: "ACTIVE" }
+      // `entity` is REQUIRED by the handler — the status object must be threaded through.
+      input: { sourceId: "src_meta", entityId: "120000000000000001", status: "ACTIVE", entity: "campaign" }
     });
   });
 
@@ -11756,7 +11757,7 @@ describe("meta command (CLI write surface + confirm gates)", () => {
     );
     expect(toolCalls(api)[0]?.body).toMatchObject({
       actionId: "set_meta_entity_status",
-      input: { entityId: "120000000000000002", status: "ACTIVE" }
+      input: { entityId: "120000000000000002", status: "ACTIVE", entity: "adset" }
     });
   });
 
@@ -11780,7 +11781,7 @@ describe("meta command (CLI write surface + confirm gates)", () => {
     expect(confirmActivate).not.toHaveBeenCalled();
     expect(toolCalls(api)[0]?.body).toMatchObject({
       actionId: "set_meta_entity_status",
-      input: { entityId: "120000000000000003", status: "ACTIVE" }
+      input: { entityId: "120000000000000003", status: "ACTIVE", entity: "ad" }
     });
   });
 
@@ -11794,6 +11795,20 @@ describe("meta command (CLI write surface + confirm gates)", () => {
     )) as { ok: boolean; cancelled?: boolean };
     expect(result.cancelled).toBe(true);
     expect(toolCalls(api).length).toBe(0);
+  });
+
+  it("pause that proceeds fires set_meta_entity_status PAUSED WITH the required entity", async () => {
+    const api = stubToolsApi();
+    const confirmMutation = vi.fn(async () => true);
+    await metaCommand(
+      ["adset", "pause", "120000000000000004", "--source-id", "src_meta"],
+      ENV,
+      { confirmMutation }
+    );
+    expect(toolCalls(api)[0]?.body).toMatchObject({
+      actionId: "set_meta_entity_status",
+      input: { entityId: "120000000000000004", status: "PAUSED", entity: "adset" }
+    });
   });
 
   it("creative has no activate transition", async () => {

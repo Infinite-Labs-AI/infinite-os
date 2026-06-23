@@ -7585,7 +7585,11 @@ async function metaStatusCommand(
   }
   const section = `meta_${object}_${action}`;
   const status = action === "activate" ? "ACTIVE" : "PAUSED";
-  const toolInput = { sourceId: ctx.sourceId, entityId, status };
+  // `entity` is REQUIRED by set_meta_entity_status (the handler uses it to pick the CLI
+  // `ads <entity> update` subcommand and rejects its absence uniformly). The status object
+  // (campaign|adset|ad) IS the entity, so thread it through — without it the daemon rejects
+  // every activate/pause before doing anything.
+  const toolInput = { sourceId: ctx.sourceId, entityId, status, entity: object };
 
   if (action === "pause") {
     // Pause is naturally idempotent but still gated by the standard write gate.
