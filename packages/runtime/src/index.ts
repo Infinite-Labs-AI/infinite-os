@@ -1106,9 +1106,15 @@ function inputSchemaFor(id: InfiniteOsActionId): Record<string, unknown> {
       {
         sourceId: { type: "string" },
         entityId: { type: "string" },
-        // ACTIVE is the only money-spending transition; the CLI/operator confirm
-        // gates live above this layer.
+        // ACTIVE is the only money-SPENDING transition. It is gated TRANSPORT-AGNOSTICALLY in the
+        // handler: confirmActivation must echo entityId, so a bare/accidental request on ANY surface
+        // (HTTP, tools-call, CLI) cannot take an entity live. PAUSED (spend-reducing) needs no gate.
         status: { enum: ["ACTIVE", "PAUSED"] },
+        // Activation confirmation. To permit status:ACTIVE the handler requires this to equal entityId
+        // (naming the exact entity guards accidental + wrong-entity activation). The desktop sets it
+        // after a deliberate gesture (e.g. press-and-hold); the CLI after its typed-confirm. Optional
+        // in the schema because PAUSED never needs it; the handler enforces it for ACTIVE.
+        confirmActivation: { type: "string" },
         // REQUIRED (review): the entity-kind selects the CLI update subcommand. The
         // direct Graph node POST does not strictly need it, but requiring it here
         // makes the failure uniform + EARLY (schema-time) regardless of transport,

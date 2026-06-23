@@ -7637,7 +7637,13 @@ async function metaStatusCommand(
       };
     }
   }
-  return metaToolCall("set_meta_entity_status", toolInput, env);
+  // The operator confirmed (typed-id / "activate" / --yes). Carry the engine's transport-agnostic
+  // activation gate: confirmActivation MUST echo entityId for the handler to permit status:ACTIVE.
+  return metaToolCall(
+    "set_meta_entity_status",
+    { ...toolInput, confirmActivation: entityId },
+    env
+  );
 }
 
 // Terminal write gate, mirroring `project delete`: `--yes`/`--force`/`-y` skip;

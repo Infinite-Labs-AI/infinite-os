@@ -2048,6 +2048,15 @@ async function setMetaEntityStatusHandler(
   // REQUIRED (review): the entity token (campaign|adset|ad) selects the CLI update
   // subcommand. Required uniformly so the failure is early + transport-agnostic.
   const entity = requiredMetaWriteEntity(input);
+  // ACTIVATION GATE (money-safety, transport-agnostic): going ACTIVE is the only money-SPENDING
+  // transition. Require an explicit confirmation that NAMES this entity (confirmActivation ===
+  // entityId), so a bare/accidental request on ANY surface (HTTP /meta/status, /tools/call, CLI)
+  // cannot take an entity live and start spending. PAUSED (spend-reducing) needs none. The desktop
+  // sets confirmActivation after a deliberate gesture (press-and-hold); the CLI after its typed-
+  // confirm. Reject BEFORE resolving the credential or POSTing — no spend on an unconfirmed activate.
+  if (status === "ACTIVE" && optionalString(input, "confirmActivation") !== entityId) {
+    throw new Error(`activation_requires_confirmation:${entityId}`);
+  }
   const action: InfiniteOsActionId = "set_meta_entity_status";
   const credential = await resolveMetaCredentialForWrite(db, context, sourceId);
   let result;
