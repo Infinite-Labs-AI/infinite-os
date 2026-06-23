@@ -81,13 +81,15 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
     rmSync(dataDir, { recursive: true, force: true });
   });
 
-  it("applied ALL 37 migrations on first boot and is idempotent on a re-run", async () => {
-    expect(loadMigrations().length).toBe(37);
-    expect(firstRun).toHaveLength(37);
+  it("applied ALL 39 migrations on first boot and is idempotent on a re-run", async () => {
+    expect(loadMigrations().length).toBe(39);
+    expect(firstRun).toHaveLength(39);
     expect(firstRun).toContain("0001_control_plane.sql");
     expect(firstRun).toContain("0006_security_roles.sql");
     expect(firstRun).toContain("0036_chat_sessions_desktop_surface.sql");
     expect(firstRun).toContain("0037_meta_ads_ad_grain.sql");
+    expect(firstRun).toContain("0038_chat_action_calls_workspace_id.sql");
+    expect(firstRun).toContain("0039_connection_credentials_metadata.sql");
 
     // Idempotent: a second boot re-applies zero (the `rows.length` gate, not the pg `rowCount`
     // gate, makes this true on PGlite).
@@ -95,13 +97,166 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
     expect(secondRun).toEqual([]);
   });
 
-  it("created the schema_migrations ledger with all 37 rows", async () => {
+  it("created the schema_migrations ledger with all 39 rows", async () => {
     const ledger = await db.query<{ id: string }>(
       "select id from schema_migrations order by id"
     );
-    expect(ledger).toHaveLength(37);
+    expect(ledger).toHaveLength(39);
     expect(ledger[0]?.id).toBe("0001_control_plane.sql");
-    expect(ledger.at(-1)?.id).toBe("0037_meta_ads_ad_grain.sql");
+    expect(ledger.at(-1)?.id).toBe("0039_connection_credentials_metadata.sql");
+  });
+
+  it("0038 pins chat_action_calls to its origin workspace (NOT NULL, FK, backfilled from chat_sessions)", async () => {
+    // Column exists, is NOT NULL, and references workspaces(id).
+    const columns = await db.query<{ column_name: string; is_nullable: string; data_type: string }>(
+      `select column_name, is_nullable, data_type
+         from information_schema.columns
+        where table_name = 'chat_action_calls' and column_name = 'workspace_id'`
+    );
+    expect(columns).toHaveLength(1);
+    expect(columns[0]?.is_nullable).toBe("NO");
+    expect(columns[0]?.data_type).toBe("text");
+
+    // The FK to workspaces(id) exists.
+    const fk = await db.query<{ constraint_name: string }>(
+      `select tc.constraint_name
+         from information_schema.table_constraints tc
+         join information_schema.key_column_usage kcu
+           on tc.constraint_name = kcu.constraint_name
+        where tc.table_name = 'chat_action_calls'
+          and tc.constraint_type = 'FOREIGN KEY'
+          and kcu.column_name = 'workspace_id'`
+    );
+    expect(fk.length).toBeGreaterThanOrEqual(1);
+
+    // recordActionCall writes workspace_id; a row is bound to the session's workspace.
+    await db.withTransaction(async (tx) => {
+      await tx.ensureWorkspace("ws_pin_a", "Pin A");
+    });
+    await db.query(
+      `insert into chat_sessions (id, workspace_id, session_key, actor_id, surface)
+       values ('sess_pin_a', 'ws_pin_a', 'sess_pin_a', 'cli', 'cli')`
+    );
+    await db.query(
+      `insert into chat_action_calls (id, session_id, workspace_id, action_id, authority, status)
+       values ('call_pin_a', 'sess_pin_a', 'ws_pin_a', 'create_meta_campaign', 'operator', 'requires_confirmation')`
+    );
+    const stored = await db.query<{ workspace_id: string }>(
+      "select workspace_id from chat_action_calls where id = 'call_pin_a'"
+    );
+    expect(stored[0]?.workspace_id).toBe("ws_pin_a");
+  });
+
+  it("0039 adds the 5 connection_credentials operational columns with the stated types/defaults", async () => {
+    const columns = await db.query<{
+      column_name: string;
+      data_type: string;
+      is_nullable: string;
+      column_default: string | null;
+    }>(
+      `select column_name, data_type, is_nullable, column_default
+         from information_schema.columns
+        where table_name = 'connection_credentials'
+          and column_name in (
+            'selected_pixel_id', 'is_system_user', 'last_dispatch_at',
+            'last_dispatch_status', 'last_error'
+          )
+        order by column_name`
+    );
+    const byName = Object.fromEntries(columns.map((c) => [c.column_name, c]));
+
+    // All 5 new columns exist.
+    expect(columns).toHaveLength(5);
+
+    // selected_pixel_id — text, nullable.
+    expect(byName.selected_pixel_id?.data_type).toBe("text");
+    expect(byName.selected_pixel_id?.is_nullable).toBe("YES");
+
+    // is_system_user — boolean, NOT NULL, default false.
+    expect(byName.is_system_user?.data_type).toBe("boolean");
+    expect(byName.is_system_user?.is_nullable).toBe("NO");
+    expect(byName.is_system_user?.column_default).toBe("false");
+
+    // last_dispatch_at — timestamptz, nullable.
+    expect(byName.last_dispatch_at?.data_type).toBe("timestamp with time zone");
+    expect(byName.last_dispatch_at?.is_nullable).toBe("YES");
+
+    // last_dispatch_status — text, nullable, no CHECK.
+    expect(byName.last_dispatch_status?.data_type).toBe("text");
+    expect(byName.last_dispatch_status?.is_nullable).toBe("YES");
+
+    // last_error — text, nullable.
+    expect(byName.last_error?.data_type).toBe("text");
+    expect(byName.last_error?.is_nullable).toBe("YES");
+
+    // expires_at is REUSED (added 0021) — token_expires_at must NOT exist.
+    const reused = await db.query<{ column_name: string }>(
+      `select column_name from information_schema.columns
+        where table_name = 'connection_credentials'
+          and column_name in ('expires_at', 'token_expires_at', 'account_external_id')`
+    );
+    const reusedNames = reused.map((r) => r.column_name);
+    expect(reusedNames).toContain("expires_at");
+    expect(reusedNames).not.toContain("token_expires_at");
+    // account_external_id lives on sources — not denormalized here.
+    expect(reusedNames).not.toContain("account_external_id");
+  });
+
+  it("0039 creates the partial-unique connection_credentials_source_kind_uq index (unique, partial on revoked_at is null, on (source_id, credential_kind))", async () => {
+    const idx = await db.query<{ indexname: string; indexdef: string }>(
+      `select indexname, indexdef from pg_indexes
+        where tablename = 'connection_credentials'
+          and indexname = 'connection_credentials_source_kind_uq'`
+    );
+    expect(idx).toHaveLength(1);
+    const def = (idx[0]?.indexdef ?? "").toLowerCase();
+    // Unique, on the right columns, partial on revoked_at is null.
+    expect(def).toContain("create unique index");
+    expect(def).toContain("(source_id, credential_kind)");
+    expect(def).toContain("where (revoked_at is null)");
+  });
+
+  it("0039 partial-unique rejects two live rows of the same (source_id, credential_kind) but allows a revoked + live pair", async () => {
+    // Seed a workspace + dataset + source so the FK chain holds.
+    await db.withTransaction(async (tx) => {
+      await tx.ensureWorkspace("ws_cred_uq", "Cred UQ");
+      await tx.ensureFirstPhaseDatasets("ws_cred_uq");
+    });
+    const ds = await db.query<{ id: string }>(
+      "select id from datasets where workspace_id = 'ws_cred_uq' and key = 'web'"
+    );
+    await db.query(
+      `insert into sources (
+         id, workspace_id, dataset_id, provider, connection_name, account_external_id, status
+       ) values ('src_cred_uq', 'ws_cred_uq', $1, 'posthog', 'conn', 'acct', 'connected')`,
+      [ds[0]?.id]
+    );
+
+    // First live credential of kind 'access_token' — inserts fine.
+    await db.query(
+      `insert into connection_credentials (id, workspace_id, source_id, credential_kind, encrypted_payload)
+       values ('cred_live_1', 'ws_cred_uq', 'src_cred_uq', 'access_token', 'enc')`
+    );
+
+    // Second live credential of the SAME (source_id, credential_kind) — rejected by the partial-unique.
+    await expect(
+      db.query(
+        `insert into connection_credentials (id, workspace_id, source_id, credential_kind, encrypted_payload)
+         values ('cred_live_2', 'ws_cred_uq', 'src_cred_uq', 'access_token', 'enc')`
+      )
+    ).rejects.toThrow();
+
+    // Revoke the live row, then a fresh live row of the same kind is ALLOWED (revoked row excluded from the index).
+    await db.query("update connection_credentials set revoked_at = now() where id = 'cred_live_1'");
+    await db.query(
+      `insert into connection_credentials (id, workspace_id, source_id, credential_kind, encrypted_payload)
+       values ('cred_live_3', 'ws_cred_uq', 'src_cred_uq', 'access_token', 'enc')`
+    );
+    const live = await db.query<{ count: string }>(
+      `select count(*)::text as count from connection_credentials
+        where source_id = 'src_cred_uq' and credential_kind = 'access_token' and revoked_at is null`
+    );
+    expect(live[0]?.count).toBe("1");
   });
 
   it("created all five growth_os_* roles (0006 applied on PGlite)", async () => {
@@ -202,6 +357,283 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
   });
 });
 
+describe("connectSource writes the 0039 operational metadata + upserts on re-connect (P0-B2)", () => {
+  let dataDir: string;
+  let url: string;
+  let db: InfiniteOsDb;
+
+  beforeAll(async () => {
+    dataDir = mkdtempSync(join(tmpdir(), "infinite-os-pglite-connectsrc-"));
+    url = `pglite://${dataDir}`;
+    await runMigrations(url);
+    db = createInfiniteOsDb(url);
+  }, 60_000);
+
+  afterAll(async () => {
+    if (db) {
+      await db.close();
+    }
+    rmSync(dataDir, { recursive: true, force: true });
+  });
+
+  it("persists selectedPixelId / isSystemUser / expiresAt / dispatch telemetry when supplied", async () => {
+    await db.connectSource({
+      workspaceId: "ws_cs_supplied",
+      provider: "meta_ads",
+      connectionName: "Meta Supplied",
+      accountExternalId: "act_supplied",
+      credentialKind: "access_token",
+      encryptedPayload: "enc-supplied",
+      selectedPixelId: "px_123",
+      isSystemUser: true,
+      expiresAt: "2027-01-02T03:04:05.000Z",
+      lastDispatchAt: "2026-06-22T10:00:00.000Z",
+      lastDispatchStatus: "succeeded",
+      lastError: "prior transient error"
+    });
+
+    const rows = await db.query<{
+      selected_pixel_id: string | null;
+      is_system_user: boolean;
+      expires_at: string | null;
+      last_dispatch_at: string | null;
+      last_dispatch_status: string | null;
+      last_error: string | null;
+    }>(
+      `select selected_pixel_id, is_system_user, expires_at, last_dispatch_at,
+              last_dispatch_status, last_error
+         from connection_credentials cc
+         join sources s on s.id = cc.source_id
+        where s.workspace_id = 'ws_cs_supplied'
+          and cc.credential_kind = 'access_token'
+          and cc.revoked_at is null`
+    );
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.selected_pixel_id).toBe("px_123");
+    expect(rows[0]?.is_system_user).toBe(true);
+    expect(new Date(rows[0]?.expires_at ?? "").toISOString()).toBe("2027-01-02T03:04:05.000Z");
+    expect(new Date(rows[0]?.last_dispatch_at ?? "").toISOString()).toBe("2026-06-22T10:00:00.000Z");
+    expect(rows[0]?.last_dispatch_status).toBe("succeeded");
+    expect(rows[0]?.last_error).toBe("prior transient error");
+  });
+
+  it("defaults the new columns (NULL / is_system_user=false) when omitted — existing callers unchanged", async () => {
+    await db.connectSource({
+      workspaceId: "ws_cs_default",
+      provider: "stripe",
+      connectionName: "Stripe Default",
+      accountExternalId: "acct_default",
+      credentialKind: "secret_key",
+      encryptedPayload: "enc-default"
+    });
+
+    const rows = await db.query<{
+      selected_pixel_id: string | null;
+      is_system_user: boolean;
+      expires_at: string | null;
+      last_dispatch_at: string | null;
+      last_dispatch_status: string | null;
+      last_error: string | null;
+    }>(
+      `select selected_pixel_id, is_system_user, expires_at, last_dispatch_at,
+              last_dispatch_status, last_error
+         from connection_credentials cc
+         join sources s on s.id = cc.source_id
+        where s.workspace_id = 'ws_cs_default'
+          and cc.credential_kind = 'secret_key'
+          and cc.revoked_at is null`
+    );
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.selected_pixel_id).toBeNull();
+    expect(rows[0]?.is_system_user).toBe(false);
+    expect(rows[0]?.expires_at).toBeNull();
+    expect(rows[0]?.last_dispatch_at).toBeNull();
+    expect(rows[0]?.last_dispatch_status).toBeNull();
+    expect(rows[0]?.last_error).toBeNull();
+  });
+
+  it("a re-run for the same (source_id, credential_kind) UPDATEs — one live row, no duplicate", async () => {
+    const base = {
+      workspaceId: "ws_cs_rerun",
+      provider: "meta_ads" as const,
+      connectionName: "Meta Rerun",
+      accountExternalId: "act_rerun",
+      credentialKind: "access_token"
+    };
+
+    await db.connectSource({
+      ...base,
+      encryptedPayload: "enc-first",
+      selectedPixelId: "px_first",
+      isSystemUser: false
+    });
+    await db.connectSource({
+      ...base,
+      encryptedPayload: "enc-second",
+      selectedPixelId: "px_second",
+      isSystemUser: true,
+      lastError: "second-run error"
+    });
+
+    const rows = await db.query<{
+      encrypted_payload: string;
+      selected_pixel_id: string | null;
+      is_system_user: boolean;
+      last_error: string | null;
+    }>(
+      `select cc.encrypted_payload, cc.selected_pixel_id, cc.is_system_user, cc.last_error
+         from connection_credentials cc
+         join sources s on s.id = cc.source_id
+        where s.workspace_id = 'ws_cs_rerun'
+          and cc.credential_kind = 'access_token'
+          and cc.revoked_at is null`
+    );
+
+    // Exactly one live row — the upsert UPDATEd the existing row rather than orphaning a duplicate.
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.encrypted_payload).toBe("enc-second");
+    expect(rows[0]?.selected_pixel_id).toBe("px_second");
+    expect(rows[0]?.is_system_user).toBe(true);
+    expect(rows[0]?.last_error).toBe("second-run error");
+
+    // And there is still exactly one credential row total for this source (no orphaned duplicate).
+    const total = await db.query<{ count: string }>(
+      `select count(*)::text as count
+         from connection_credentials cc
+         join sources s on s.id = cc.source_id
+        where s.workspace_id = 'ws_cs_rerun' and cc.credential_kind = 'access_token'`
+    );
+    expect(total[0]?.count).toBe("1");
+  });
+
+  it("P0-B2: a re-connect that OMITS metadata PRESERVES prior values (COALESCE upsert), updates encrypted_payload", async () => {
+    const base = {
+      workspaceId: "ws_cs_coalesce",
+      provider: "meta_ads" as const,
+      connectionName: "Meta Coalesce",
+      accountExternalId: "act_coalesce",
+      credentialKind: "access_token"
+    };
+
+    // First connect WITH metadata: pixel + system-user + dispatch telemetry.
+    await db.connectSource({
+      ...base,
+      encryptedPayload: "enc-original",
+      selectedPixelId: "px_1",
+      isSystemUser: true,
+      lastDispatchAt: "2026-06-22T09:00:00.000Z",
+      lastDispatchStatus: "succeeded",
+      lastError: "prior transient error"
+    });
+
+    // Re-connect (same source_id + kind) OMITTING all metadata — only a fresh token.
+    // A naive `= excluded.selected_pixel_id` would null these out; COALESCE must preserve them.
+    await db.connectSource({ ...base, encryptedPayload: "enc-rotated" });
+
+    const rows = await db.query<{
+      encrypted_payload: string;
+      selected_pixel_id: string | null;
+      is_system_user: boolean;
+      last_dispatch_at: string | null;
+      last_dispatch_status: string | null;
+      last_error: string | null;
+    }>(
+      `select cc.encrypted_payload, cc.selected_pixel_id, cc.is_system_user,
+              cc.last_dispatch_at, cc.last_dispatch_status, cc.last_error
+         from connection_credentials cc
+         join sources s on s.id = cc.source_id
+        where s.workspace_id = 'ws_cs_coalesce'
+          and cc.credential_kind = 'access_token'
+          and cc.revoked_at is null`
+    );
+
+    expect(rows).toHaveLength(1);
+    // encrypted_payload SHOULD update (it is a direct excluded, not coalesced).
+    expect(rows[0]?.encrypted_payload).toBe("enc-rotated");
+    // Prior metadata PRESERVED (the re-connect omitted them).
+    expect(rows[0]?.selected_pixel_id).toBe("px_1");
+    expect(rows[0]?.is_system_user).toBe(true); // NOT flipped to false by the omitting re-connect
+    expect(new Date(rows[0]?.last_dispatch_at ?? "").toISOString()).toBe("2026-06-22T09:00:00.000Z");
+    expect(rows[0]?.last_dispatch_status).toBe("succeeded");
+    expect(rows[0]?.last_error).toBe("prior transient error");
+  });
+
+  it("P0-B2: a re-connect MAY still overwrite metadata when it SUPPLIES new non-null values", async () => {
+    const base = {
+      workspaceId: "ws_cs_overwrite",
+      provider: "meta_ads" as const,
+      connectionName: "Meta Overwrite",
+      accountExternalId: "act_overwrite",
+      credentialKind: "access_token"
+    };
+    await db.connectSource({ ...base, encryptedPayload: "enc-a", selectedPixelId: "px_old", isSystemUser: false });
+    // Supplying a new pixel + flipping is_system_user true must take effect (COALESCE picks the
+    // non-null new value).
+    await db.connectSource({ ...base, encryptedPayload: "enc-b", selectedPixelId: "px_new", isSystemUser: true });
+
+    const rows = await db.query<{ selected_pixel_id: string | null; is_system_user: boolean }>(
+      `select cc.selected_pixel_id, cc.is_system_user
+         from connection_credentials cc
+         join sources s on s.id = cc.source_id
+        where s.workspace_id = 'ws_cs_overwrite'
+          and cc.credential_kind = 'access_token'
+          and cc.revoked_at is null`
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.selected_pixel_id).toBe("px_new");
+    expect(rows[0]?.is_system_user).toBe(true);
+  });
+
+  it("a re-connect AFTER revoking the prior credential inserts a fresh live row (partial-unique does not block)", async () => {
+    const base = {
+      workspaceId: "ws_cs_revoke",
+      provider: "meta_ads" as const,
+      connectionName: "Meta Revoke",
+      accountExternalId: "act_revoke",
+      credentialKind: "access_token"
+    };
+
+    await db.connectSource({ ...base, encryptedPayload: "enc-original", selectedPixelId: "px_orig" });
+
+    // Operator revokes the live credential (the partial-unique excludes revoked rows).
+    await db.query(
+      `update connection_credentials cc
+          set revoked_at = now()
+         from sources s
+        where cc.source_id = s.id
+          and s.workspace_id = 'ws_cs_revoke'
+          and cc.credential_kind = 'access_token'`
+    );
+
+    // Re-connect — a fresh live row is inserted (the conflict target only sees the live partial index).
+    await db.connectSource({ ...base, encryptedPayload: "enc-reconnected", selectedPixelId: "px_new" });
+
+    const live = await db.query<{ encrypted_payload: string; selected_pixel_id: string | null }>(
+      `select cc.encrypted_payload, cc.selected_pixel_id
+         from connection_credentials cc
+         join sources s on s.id = cc.source_id
+        where s.workspace_id = 'ws_cs_revoke'
+          and cc.credential_kind = 'access_token'
+          and cc.revoked_at is null`
+    );
+    expect(live).toHaveLength(1);
+    expect(live[0]?.encrypted_payload).toBe("enc-reconnected");
+    expect(live[0]?.selected_pixel_id).toBe("px_new");
+
+    // Two rows total: one revoked (history) + one fresh live.
+    const total = await db.query<{ revoked: boolean }[]>(
+      `select (cc.revoked_at is not null) as revoked
+         from connection_credentials cc
+         join sources s on s.id = cc.source_id
+        where s.workspace_id = 'ws_cs_revoke' and cc.credential_kind = 'access_token'
+        order by cc.created_at`
+    );
+    expect(total).toHaveLength(2);
+  });
+});
+
 describe("pglite boot-failure handling", () => {
   it("close() after a FAILED boot resolves — it swallows the boot error", async () => {
     // Point the data dir at a path under a regular FILE so PGlite.create can't mkdir it and the
@@ -266,4 +698,368 @@ describe("pglite boot-failure handling", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   }, 30_000);
+});
+
+describe("confirm-path workspace scoping against the REAL PGlite DB (P0-A money-safety)", () => {
+  // The mock session-store tests only assert SQL TEXT (`workspace_id = $2`). This proves the
+  // scoping BEHAVIOR against a REAL WASM-Postgres store. We issue the session-store's EXACT
+  // scoped SQL — the `recordActionCall` INSERT, the `getPendingActionCall` `where workspace_id
+  // = $2` SELECT, and the `confirmActionCall` `where workspace_id = $4` UPDATE — kept byte-
+  // faithful to packages/llm-controller/src/session-store.ts. (We re-issue the SQL here rather
+  // than importing `createSessionStore`, which lives in a sibling package that is not a build
+  // dependency of @infinite-os/db; coupling the two via a project reference would break db's
+  // `tsc -b`. The store's value is exactly this SQL, and it is exercised verbatim.)
+  //
+  // confirmation_id is NOT unique across workspaces (`confirm_${sha256({actionId,input}).slice(
+  // 0,16)}` carries no workspace), so two brands on one install collide on the same id. A pending
+  // confirmation recorded under ws_a must be invisible to ws_b's lookup, and a ws_b confirm must
+  // update ZERO rows (the row stays pending) — while ws_a's lookup/confirm sees and mutates it.
+
+  // Byte-faithful copies of the three session-store statements (P0-A).
+  const RECORD_ACTION_CALL_SQL = `
+    insert into chat_action_calls (
+      id, session_id, message_id, provider_tool_call_id, action_id, authority,
+      input_json, output_envelope_json, status, requires_confirmation, confirmation_id,
+      input_hash, workspace_id
+    )
+    values ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9, $10, $11, $12, $13)
+  `;
+  const GET_PENDING_SQL = `
+    select
+      id,
+      session_id as "sessionId",
+      action_id as "actionId",
+      input_json as "input",
+      input_hash as "inputHash",
+      workspace_id as "workspaceId"
+    from chat_action_calls
+    where confirmation_id = $1
+      and workspace_id = $2
+      and requires_confirmation = true
+      and confirmed_at is null
+    limit 1
+  `;
+  const CONFIRM_SQL = `
+    update chat_action_calls
+    set confirmed_at = now(),
+      output_envelope_json = $2::jsonb,
+      status = $3,
+      requires_confirmation = false
+    where confirmation_id = $1
+      and workspace_id = $4
+      and requires_confirmation = true
+      and confirmed_at is null
+  `;
+
+  let dataDir: string;
+  let url: string;
+  let db: InfiniteOsDb;
+
+  const getPending = (confirmationId: string, workspaceId: string) =>
+    db.one<{ id: string; workspaceId: string; actionId: string }>(GET_PENDING_SQL, [
+      confirmationId,
+      workspaceId
+    ]);
+  const confirm = (confirmationId: string, workspaceId: string) =>
+    db.query(CONFIRM_SQL, [confirmationId, JSON.stringify({ ok: true }), "ok", workspaceId]);
+
+  beforeAll(async () => {
+    dataDir = mkdtempSync(join(tmpdir(), "infinite-os-pglite-confirmscope-"));
+    url = `pglite://${dataDir}`;
+    await runMigrations(url);
+    db = createInfiniteOsDb(url);
+
+    // Seed two workspaces + a chat_session per workspace (the FK chain
+    // chat_action_calls.session_id → chat_sessions.id and .workspace_id → workspaces.id).
+    await db.withTransaction(async (tx) => {
+      await tx.ensureWorkspace("ws_a", "Workspace A");
+      await tx.ensureWorkspace("ws_b", "Workspace B");
+    });
+    await db.query(
+      `insert into chat_sessions (id, workspace_id, session_key, actor_id, surface)
+       values ('sess_a', 'ws_a', 'sess_a', 'cli', 'cli'),
+              ('sess_b', 'ws_b', 'sess_b', 'cli', 'cli')`
+    );
+  }, 60_000);
+
+  afterAll(async () => {
+    if (db) {
+      await db.close();
+    }
+    rmSync(dataDir, { recursive: true, force: true });
+  });
+
+  it("a pending confirmation recorded under ws_a is SELECT-invisible to ws_b and visible to ws_a", async () => {
+    // recordActionCall under ws_a — confirmation_id 'confirm_collide' bound to ws_a.
+    await db.query(RECORD_ACTION_CALL_SQL, [
+      "call_a",
+      "sess_a",
+      null,
+      null,
+      "create_meta_campaign",
+      "operator",
+      JSON.stringify({ sourceId: "src_1" }),
+      JSON.stringify({}),
+      "requires_confirmation",
+      true,
+      "confirm_collide",
+      "hash_a",
+      "ws_a"
+    ]);
+
+    // ws_b cannot see ws_a's pending row (the `where workspace_id = $2` SELECT scoping).
+    expect(await getPending("confirm_collide", "ws_b")).toBeNull();
+
+    // ws_a sees its own row, bound to ws_a.
+    const fromA = await getPending("confirm_collide", "ws_a");
+    expect(fromA).not.toBeNull();
+    expect(fromA?.workspaceId).toBe("ws_a");
+    expect(fromA?.actionId).toBe("create_meta_campaign");
+  });
+
+  it("a ws_b confirm updates ZERO rows (the ws_a row stays pending); a ws_a confirm marks it confirmed", async () => {
+    // ws_b tries to confirm ws_a's pending confirmation_id — the `where workspace_id = $4`
+    // UPDATE scoping means it touches NO rows; the ws_a row must remain pending.
+    await confirm("confirm_collide", "ws_b");
+    const stillPending = await db.query<{
+      requires_confirmation: boolean;
+      confirmed_at: string | null;
+      status: string;
+    }>(
+      `select requires_confirmation, confirmed_at, status
+         from chat_action_calls
+        where confirmation_id = 'confirm_collide' and workspace_id = 'ws_a'`
+    );
+    expect(stillPending).toHaveLength(1);
+    expect(stillPending[0]?.requires_confirmation).toBe(true);
+    expect(stillPending[0]?.confirmed_at).toBeNull();
+    expect(stillPending[0]?.status).toBe("requires_confirmation");
+
+    // And ws_a still sees it as pending.
+    expect(await getPending("confirm_collide", "ws_a")).not.toBeNull();
+
+    // The correct workspace (ws_a) confirms — exactly its row is marked confirmed.
+    await confirm("confirm_collide", "ws_a");
+    const afterA = await db.query<{
+      requires_confirmation: boolean;
+      confirmed_at: string | null;
+      status: string;
+    }>(
+      `select requires_confirmation, confirmed_at, status
+         from chat_action_calls
+        where confirmation_id = 'confirm_collide' and workspace_id = 'ws_a'`
+    );
+    expect(afterA).toHaveLength(1);
+    expect(afterA[0]?.requires_confirmation).toBe(false);
+    expect(afterA[0]?.confirmed_at).not.toBeNull();
+    expect(afterA[0]?.status).toBe("ok");
+
+    // Now that it is confirmed, ws_a's pending lookup returns null (confirmed_at is set).
+    expect(await getPending("confirm_collide", "ws_a")).toBeNull();
+  });
+});
+
+describe("0038 backfills chat_action_calls.workspace_id from chat_sessions (partial-migration proof)", () => {
+  // FIX #4 — exercise migration 0038's BACKFILL directly. The harness DOES support a partial
+  // migration set (runPgliteMigrations takes an explicit list), so we apply 0001..0037, insert a
+  // chat_action_call with NO workspace_id (the column doesn't exist pre-0038), then apply 0038
+  // alone and assert: (a) the row's workspace_id was backfilled from its chat_session, and
+  // (b) the NOT NULL now holds (a fresh insert omitting workspace_id is rejected).
+  let dataDir: string;
+  let url: string;
+
+  beforeAll(() => {
+    dataDir = mkdtempSync(join(tmpdir(), "infinite-os-pglite-0038-backfill-"));
+    url = `pglite://${dataDir}`;
+  });
+
+  afterAll(() => {
+    rmSync(dataDir, { recursive: true, force: true });
+  });
+
+  it("backfills legacy NULL workspace_id from the owning session, then sets NOT NULL", async () => {
+    const all = loadMigrations();
+    const upTo0037 = all.filter((m) => m.id <= "0037_meta_ads_ad_grain.sql");
+    const m0038 = all.find((m) => m.id === "0038_chat_action_calls_workspace_id.sql");
+    expect(m0038).toBeDefined();
+    // Sanity: 0038 is NOT in the partial set (so the column is genuinely absent pre-backfill).
+    expect(upTo0037.some((m) => m.id === "0038_chat_action_calls_workspace_id.sql")).toBe(false);
+
+    // 1. Apply 0001..0037 only.
+    await runPgliteMigrations(url, upTo0037);
+
+    const db = createInfiniteOsDb(url);
+    try {
+      // Pre-0038 the column must NOT exist yet.
+      const preCols = await db.query<{ column_name: string }>(
+        `select column_name from information_schema.columns
+          where table_name = 'chat_action_calls' and column_name = 'workspace_id'`
+      );
+      expect(preCols).toHaveLength(0);
+
+      // 2. Seed a workspace + session, then a LEGACY chat_action_call with NO workspace_id column.
+      await db.withTransaction(async (tx) => {
+        await tx.ensureWorkspace("ws_legacy", "Legacy WS");
+      });
+      await db.query(
+        `insert into chat_sessions (id, workspace_id, session_key, actor_id, surface)
+         values ('sess_legacy', 'ws_legacy', 'sess_legacy', 'cli', 'cli')`
+      );
+      await db.query(
+        `insert into chat_action_calls (id, session_id, action_id, authority, status)
+         values ('call_legacy', 'sess_legacy', 'create_meta_campaign', 'operator', 'requires_confirmation')`
+      );
+    } finally {
+      await db.close();
+    }
+
+    // 3. Apply 0038 alone (the add-column + backfill + set-not-null + index).
+    const applied0038 = await runPgliteMigrations(url, [m0038!]);
+    expect(applied0038).toEqual(["0038_chat_action_calls_workspace_id.sql"]);
+
+    const db2 = createInfiniteOsDb(url);
+    try {
+      // (a) BACKFILL: the legacy row's workspace_id was filled from its chat_session.
+      const backfilled = await db2.query<{ workspace_id: string }>(
+        "select workspace_id from chat_action_calls where id = 'call_legacy'"
+      );
+      expect(backfilled).toHaveLength(1);
+      expect(backfilled[0]?.workspace_id).toBe("ws_legacy");
+
+      // The column is now NOT NULL.
+      const cols = await db2.query<{ is_nullable: string }>(
+        `select is_nullable from information_schema.columns
+          where table_name = 'chat_action_calls' and column_name = 'workspace_id'`
+      );
+      expect(cols).toHaveLength(1);
+      expect(cols[0]?.is_nullable).toBe("NO");
+
+      // (b) SET-NOT-NULL HELD: a fresh insert that OMITS workspace_id is rejected.
+      await expect(
+        db2.query(
+          `insert into chat_action_calls (id, session_id, action_id, authority, status)
+           values ('call_after', 'sess_legacy', 'create_meta_campaign', 'operator', 'requires_confirmation')`
+        )
+      ).rejects.toThrow();
+    } finally {
+      await db2.close();
+    }
+  }, 60_000);
+});
+
+describe("0039 dedupes legacy duplicate live credentials BEFORE the partial-unique index (boot-safety proof)", () => {
+  // Pre-P0-B, connectSource was a plain INSERT (new random id, no `on conflict`) that never set
+  // revoked_at, so any install that re-connected a source accumulated MULTIPLE live rows with the
+  // same (source_id, credential_kind). Without a dedupe step, 0039's `create unique index … where
+  // revoked_at is null` aborts with 23505 and (since the daemon auto-migrates on boot) bricks the
+  // daemon on every boot. This applies 0001..0038, seeds duplicate live rows, then applies 0039
+  // alone and asserts: (a) 0039 SUCCEEDS, (b) exactly the NEWEST live row per (source,kind)
+  // survives, (c) already-revoked history is untouched, (d) the index now blocks a new live dup.
+  let dataDir: string;
+  let url: string;
+
+  beforeAll(() => {
+    dataDir = mkdtempSync(join(tmpdir(), "infinite-os-pglite-0039-dedupe-"));
+    url = `pglite://${dataDir}`;
+  });
+
+  afterAll(() => {
+    rmSync(dataDir, { recursive: true, force: true });
+  });
+
+  it("collapses duplicate live rows to the newest, preserves revoked history, then enforces uniqueness", async () => {
+    const all = loadMigrations();
+    const upTo0038 = all.filter((m) => m.id <= "0038_chat_action_calls_workspace_id.sql");
+    const m0039 = all.find((m) => m.id === "0039_connection_credentials_metadata.sql");
+    expect(m0039).toBeDefined();
+    // Sanity: 0039 (and therefore the partial-unique index) is NOT in the partial set yet.
+    expect(upTo0038.some((m) => m.id === "0039_connection_credentials_metadata.sql")).toBe(false);
+
+    // 1. Apply 0001..0038 only (connection_credentials exists; the unique index does NOT).
+    await runPgliteMigrations(url, upTo0038);
+
+    const db = createInfiniteOsDb(url);
+    try {
+      await db.withTransaction(async (tx) => {
+        await tx.ensureWorkspace("ws1", "WS");
+      });
+      await db.query(
+        "insert into datasets (id, workspace_id, key, label) values ('ds1','ws1','k','L')"
+      );
+      await db.query(
+        `insert into sources (id, workspace_id, dataset_id, provider, connection_name, account_external_id, status)
+         values ('src1','ws1','ds1','posthog','conn','acct','connected')`
+      );
+      // Three LIVE rows for (src1, access_token) with distinct created_at — exactly what main's
+      // plain-INSERT connectSource produced across three reconnects. cred_new is the NEWEST.
+      await db.query(
+        `insert into connection_credentials (id, workspace_id, source_id, credential_kind, encrypted_payload, created_at) values
+           ('cred_old','ws1','src1','access_token','enc1','2026-01-01T00:00:00Z'),
+           ('cred_mid','ws1','src1','access_token','enc2','2026-01-15T00:00:00Z'),
+           ('cred_new','ws1','src1','access_token','enc3','2026-02-01T00:00:00Z')`
+      );
+      // An already-REVOKED row for the same (source,kind): must remain untouched (history preserved).
+      await db.query(
+        `insert into connection_credentials (id, workspace_id, source_id, credential_kind, encrypted_payload, created_at, revoked_at)
+         values ('cred_rev','ws1','src1','access_token','enc0','2025-12-01T00:00:00Z','2025-12-02T00:00:00Z')`
+      );
+      // A DIFFERENT kind on the same source with a single live row: must survive independently.
+      await db.query(
+        `insert into connection_credentials (id, workspace_id, source_id, credential_kind, encrypted_payload, created_at)
+         values ('cred_rt','ws1','src1','refresh_token','encR','2026-01-10T00:00:00Z')`
+      );
+    } finally {
+      await db.close();
+    }
+
+    // 2. Apply 0039 alone — must NOT throw despite the 3 duplicate live access_token rows.
+    const applied0039 = await runPgliteMigrations(url, [m0039!]);
+    expect(applied0039).toEqual(["0039_connection_credentials_metadata.sql"]);
+
+    const db2 = createInfiniteOsDb(url);
+    try {
+      // (a) Exactly ONE live access_token row survives, and it is the NEWEST (cred_new).
+      const liveAccess = await db2.query<{ id: string }>(
+        `select id from connection_credentials
+          where source_id = 'src1' and credential_kind = 'access_token' and revoked_at is null`
+      );
+      expect(liveAccess).toHaveLength(1);
+      expect(liveAccess[0]?.id).toBe("cred_new");
+
+      // The older live dups were revoked (not deleted) — history retained.
+      const revokedNow = await db2.query<{ id: string }>(
+        `select id from connection_credentials
+          where id in ('cred_old','cred_mid') and revoked_at is not null order by id`
+      );
+      expect(revokedNow.map((r) => r.id)).toEqual(["cred_mid", "cred_old"]);
+
+      // (b) The originally-revoked row is untouched: same revoked_at timestamp, still revoked.
+      const preRevoked = await db2.query<{ revoked_at: string }>(
+        "select revoked_at from connection_credentials where id = 'cred_rev'"
+      );
+      expect(preRevoked).toHaveLength(1);
+      expect(new Date(preRevoked[0]!.revoked_at).toISOString()).toBe("2025-12-02T00:00:00.000Z");
+
+      // (c) The other credential_kind (single live row) is independent and survives.
+      const liveRt = await db2.query<{ id: string }>(
+        `select id from connection_credentials
+          where source_id = 'src1' and credential_kind = 'refresh_token' and revoked_at is null`
+      );
+      expect(liveRt.map((r) => r.id)).toEqual(["cred_rt"]);
+
+      // (d) The partial-unique index now EXISTS and blocks a second live row for the same kind.
+      const idx = await db2.query<{ indexname: string }>(
+        "select indexname from pg_indexes where indexname = 'connection_credentials_source_kind_uq'"
+      );
+      expect(idx).toHaveLength(1);
+      await expect(
+        db2.query(
+          `insert into connection_credentials (id, workspace_id, source_id, credential_kind, encrypted_payload)
+           values ('cred_dup','ws1','src1','access_token','encX')`
+        )
+      ).rejects.toThrow();
+    } finally {
+      await db2.close();
+    }
+  }, 60_000);
 });

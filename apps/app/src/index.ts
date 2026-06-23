@@ -901,17 +901,35 @@ export function createApp(options: {
       reply.code(404);
       return { ok: false, error: { code: "confirmation_store_unavailable" } };
     }
-    const pending = await sessionStore.getPendingActionCall(request.params.confirmationId);
+    // P0-A: scope the lookup by the CONFIRMING workspace ($2). confirmation_id is not
+    // unique across workspaces, so an unscoped lookup could return another brand's row.
+    const pending = await sessionStore.getPendingActionCall(request.params.confirmationId, ws);
     if (!pending) {
       reply.code(404);
       return { ok: false, error: { code: "confirmation_not_found" } };
     }
+    // P0-A: the workspace-scoped getPendingActionCall(...,ws) above IS the cross-workspace
+    // control. A confirmation authored by another workspace is invisible to that lookup (its
+    // `where workspace_id = $2` returns null → the `if (!pending)` 404 above), so a
+    // cross-workspace confirm fails closed as `confirmation_not_found` with no info leak about
+    // another brand's pending writes. No explicit mismatch guard is needed; we always execute
+    // under the pending row's own authoring workspace.
     try {
-      const envelope = await actionRequest(pending.actionId, pending.input, "api", "operator", pending.sessionId, ws);
+      // Execute under the pending row's own authoring workspace.
+      const envelope = await actionRequest(
+        pending.actionId,
+        pending.input,
+        "api",
+        "operator",
+        pending.sessionId,
+        pending.workspaceId
+      );
       await sessionStore.confirmActionCall({
         confirmationId: request.params.confirmationId,
         outputEnvelope: envelope,
-        status: envelope.status
+        status: envelope.status,
+        // P0-A: scope the confirm UPDATE to the pending row's workspace.
+        workspaceId: pending.workspaceId
       });
       return {
         ok: true,
@@ -2325,6 +2343,77 @@ function isLocalHost(host: string | undefined): boolean {
   return h === "127.0.0.1" || h === "localhost" || h === "::1";
 }
 
+// P0-G — Loopback-bind startup invariant. The install-wide operator token (which can
+// act on any workspace via a chosen `x-growth-os-workspace` header) is ONLY safe
+// because the daemon is reachable from localhost. `isLocalHost` above is a per-route
+// Host-header guard — it is NOT enforced on the LISTEN bind. So if `config.appHost`
+// is `0.0.0.0` (or `::`, or a routable LAN address) the operator token becomes
+// LAN-reachable. This pure, exported helper asserts the bind host resolves to a
+// loopback address and FAILS CLOSED (throws `daemon_must_bind_loopback`) otherwise,
+// and MUST be called BEFORE `app.listen`.
+//
+// Opt-out: `GROWTH_OS_ALLOW_NON_LOOPBACK_BIND=1` bypasses the assertion with a LOUD
+// warning. Anyone who can set the daemon's env already controls the operator token,
+// so this is a deliberate, supervised escape hatch — not a silent default.
+// Is `host` a loopback bind LITERAL we accept? This is a literal allowlist — NOT a DNS
+// resolver. We accept:
+//   - 'localhost'
+//   - the FULL IPv4 loopback block 127.0.0.0/8 (any valid dotted-quad whose first octet
+//     is 127), not just 127.0.0.1 — the whole 127/8 range binds loopback-only (RFC 5735)
+//   - IPv6 loopback '::1' (bare or bracketed)
+//   - IPv4-mapped IPv6 loopback '::ffff:127.x.x.x'
+// The input is trim()+toLowerCase()'d first so " 127.0.0.1 " / "LocalHost" are accepted.
+function isLoopbackBindLiteral(host: string): boolean {
+  const h = host.trim().toLowerCase();
+  if (h === "localhost" || h === "::1" || h === "[::1]") return true;
+
+  // IPv4-mapped IPv6 loopback: "::ffff:127.x.x.x" — strip the prefix and validate the quad.
+  const mapped = h.startsWith("::ffff:") ? h.slice("::ffff:".length) : null;
+  if (mapped) return isIpv4LoopbackQuad(mapped);
+
+  return isIpv4LoopbackQuad(h);
+}
+
+// Strict dotted-quad parse: exactly four octets, each a 0-255 integer with no leading-zero
+// trickery beyond a lone "0", and the FIRST octet === 127 (the entire 127.0.0.0/8 block).
+function isIpv4LoopbackQuad(value: string): boolean {
+  const parts = value.split(".");
+  if (parts.length !== 4) return false;
+  const octets: number[] = [];
+  for (const part of parts) {
+    if (!/^\d{1,3}$/.test(part)) return false; // digits only, 1-3 of them (rejects "256"-width too)
+    const n = Number(part);
+    if (n < 0 || n > 255) return false;
+    octets.push(n);
+  }
+  return octets[0] === 127;
+}
+
+export function assertLoopbackAppHost(
+  appHost: string,
+  env: NodeJS.ProcessEnv = process.env
+): void {
+  // Literal loopback allowlist (trimmed + case-insensitive). Covers 'localhost', the full
+  // 127.0.0.0/8 IPv4 block, '::1', and IPv4-mapped IPv6 loopback. NOT a DNS resolver.
+  if (isLoopbackBindLiteral(appHost)) return;
+  if (env.GROWTH_OS_ALLOW_NON_LOOPBACK_BIND === "1") {
+    console.warn(
+      `[growth-os] WARNING: daemon binding NON-LOOPBACK host "${appHost}" because ` +
+        `GROWTH_OS_ALLOW_NON_LOOPBACK_BIND=1. The install-wide operator token is now ` +
+        `LAN-reachable — anyone on the network who reaches this port can act on any ` +
+        `workspace. Only set this if you fully understand and accept that exposure.`
+    );
+    return;
+  }
+  throw new Error(
+    `daemon_must_bind_loopback: refusing to bind appHost "${appHost}" — it is not a ` +
+      `recognized loopback literal (localhost / 127.0.0.0/8 / ::1 / ::ffff:127.x.x.x). ` +
+      `This is a literal allowlist, not a DNS resolver. The install-wide operator token ` +
+      `would become LAN-reachable. Set GROWTH_OS_APP_HOST to a loopback address, or set ` +
+      `GROWTH_OS_ALLOW_NON_LOOPBACK_BIND=1 to override.`
+  );
+}
+
 // Is THIS module the process entrypoint (run directly, e.g. `node daemon.mjs` or `tsx index.ts`)?
 // A raw `import.meta.url === file://${process.argv[1]}` string compare is fragile: it breaks on
 // symlinked paths (macOS /tmp → /private/var/folders, app-bundle symlinks), on path encoding
@@ -2525,6 +2614,12 @@ if (isProcessEntrypoint()) {
   // crashing. The post-listen address() below reads the REAL bound port either way
   // and the descriptor records it, so a discovering client still finds us. This is
   // the host-side complement to the descriptor: ports can collide, discovery can't.
+  // P0-G — Fail closed BEFORE binding if the configured host is not loopback. The
+  // operator token is only safe because the daemon is localhost-only; a non-loopback
+  // bind would expose it to the LAN. Throws `daemon_must_bind_loopback` unless the
+  // explicit GROWTH_OS_ALLOW_NON_LOOPBACK_BIND=1 opt-out is set (loud warning).
+  assertLoopbackAppHost(config.appHost, process.env);
+
   try {
     await app.listen({ host: config.appHost, port: config.appPort });
   } catch (err) {

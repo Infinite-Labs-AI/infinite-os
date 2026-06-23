@@ -248,6 +248,47 @@ export interface ConnectSourceInput {
   // OAuth token inside encrypted_payload (which only holds non-secret metadata in that case).
   oauthTokenId?: string;
   actorType?: string;
+  // Non-secret operational metadata (migration 0039) the engine queries WITHOUT decrypting
+  // encrypted_payload. All optional → existing callers compile unchanged.
+  selectedPixelId?: string; // Meta CAPI pixel selection (NULL until chosen)
+  // system-user token vs OAuth user token. Nullable end-to-end (P0-B2): omitting it on a
+  // re-connect must NOT flip a prior `true` back to false — the conflict clause coalesces this
+  // raw value onto the existing row, and a genuinely-new row defaults to false (INSERT coalesce).
+  isSystemUser?: boolean | null;
+  // Token expiry reuses the existing expires_at column (migration 0021); NULL for long-lived
+  // system-user tokens, populated for OAuth user tokens.
+  expiresAt?: string;
+  lastDispatchAt?: string; // last CAPI/MP dispatch attempt (Phase 3 telemetry)
+  lastDispatchStatus?: string; // 'succeeded' | 'failed' | NULL
+  lastError?: string; // last write/dispatch error message (no secrets)
+}
+
+// Shape of a `connection_credentials` row as the engine READS it (raw DB column names).
+// Surfaces the non-secret operational metadata added in migration 0039 — the columns the
+// engine queries WITHOUT decrypting `encrypted_payload` (pixel selection, system-user vs
+// OAuth-user distinction, dispatch telemetry). Secrets stay inside `encrypted_payload`.
+// Token expiry reuses the existing `expires_at` column (migration 0021); the provider and
+// `account_external_id` are NOT here — they resolve via `source_id → sources`.
+// (Writing these columns is P0-B2's `connectSource` change.)
+export interface ConnectionCredentialRow {
+  id: string;
+  workspace_id: string;
+  source_id: string;
+  credential_kind: string;
+  encrypted_payload: string;
+  oauth_token_id: string | null;
+  // Reused token-expiry column (migration 0021) — NULL for long-lived system-user tokens.
+  expires_at: string | null;
+  last_rotated_at: string | null;
+  // Migration 0039 operational metadata (non-secret):
+  selected_pixel_id: string | null;
+  is_system_user: boolean;
+  last_dispatch_at: string | null;
+  last_dispatch_status: string | null;
+  last_error: string | null;
+  created_at: string;
+  updated_at: string;
+  revoked_at: string | null;
 }
 
 export interface CreateJobInput {
@@ -818,9 +859,38 @@ async function connectSource(
   await client.query(
     `
       insert into connection_credentials (
-        id, workspace_id, source_id, credential_kind, encrypted_payload, oauth_token_id
+        id, workspace_id, source_id, credential_kind, encrypted_payload, oauth_token_id,
+        selected_pixel_id, is_system_user, expires_at, last_dispatch_at,
+        last_dispatch_status, last_error
       )
-      values ($1, $2, $3, $4, $5, $6)
+      values (
+        $1, $2, $3, $4, $5, $6,
+        $7, coalesce($8, false), $9::timestamptz, $10::timestamptz,
+        $11, $12
+      )
+      -- Restate the partial-index predicate (migration 0039's
+      -- connection_credentials_source_kind_uq is partial on revoked_at is null) so Postgres
+      -- binds this ON CONFLICT to it. A re-connect of the same live (source_id, credential_kind)
+      -- UPDATEs the existing row rather than orphaning a duplicate.
+      --
+      -- P0-B2 COALESCE: a re-connect that OMITS operational metadata must PRESERVE the prior
+      -- value, not null it out -- otherwise rotating a token would silently wipe the pixel
+      -- selection / dispatch telemetry. So every metadata column coalesces the NEW value onto
+      -- the EXISTING row. For is_system_user (NOT NULL default false) excluded.is_system_user
+      -- is post-coalesce (never null), so it cannot distinguish omitted from explicit-false;
+      -- we coalesce the RAW nullable param ($8) instead, so an omitting re-connect keeps a prior
+      -- true. encrypted_payload / oauth_token_id / expires_at / updated_at are direct excluded --
+      -- those SHOULD update on every re-connect (the token rotated; a NULL expiry is meaningful).
+      on conflict (source_id, credential_kind) where revoked_at is null do update set
+        encrypted_payload = excluded.encrypted_payload,
+        oauth_token_id = excluded.oauth_token_id,
+        selected_pixel_id = coalesce(excluded.selected_pixel_id, connection_credentials.selected_pixel_id),
+        is_system_user = coalesce($8, connection_credentials.is_system_user),
+        expires_at = excluded.expires_at,
+        last_dispatch_at = coalesce(excluded.last_dispatch_at, connection_credentials.last_dispatch_at),
+        last_dispatch_status = coalesce(excluded.last_dispatch_status, connection_credentials.last_dispatch_status),
+        last_error = coalesce(excluded.last_error, connection_credentials.last_error),
+        updated_at = now()
     `,
     [
       `cred_${randomUUID()}`,
@@ -828,7 +898,16 @@ async function connectSource(
       row.id,
       input.credentialKind ?? "fixture",
       input.encryptedPayload ?? "fixture-encrypted",
-      input.oauthTokenId ?? null
+      input.oauthTokenId ?? null,
+      input.selectedPixelId ?? null,
+      // $8 is the RAW nullable is_system_user. The INSERT path coalesces it to `false` for a
+      // genuinely-new row; the conflict path coalesces it onto the EXISTING value so an
+      // omitting re-connect (null) preserves a prior `true` instead of flipping it to false.
+      input.isSystemUser ?? null,
+      input.expiresAt ?? null,
+      input.lastDispatchAt ?? null,
+      input.lastDispatchStatus ?? null,
+      input.lastError ?? null
     ]
   );
   await client.query(

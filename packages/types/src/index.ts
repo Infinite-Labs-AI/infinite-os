@@ -150,6 +150,7 @@ export const READ_ACTIONS = [
   // Meta Ads management READS (no money movement): list/get keep tool_agent
   // authority and the normal retryable taxonomy. The WRITE ids below are
   // operator-only.
+  "list_meta_assets",
   "list_meta_entities",
   "get_meta_entity"
 ] as const;

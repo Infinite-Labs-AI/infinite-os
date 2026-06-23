@@ -5626,6 +5626,73 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
     );
   });
 
+  it("REMEDIATES an unexpected ACTIVE create: best-effort PAUSE + entity id in the audit, still throws", async () => {
+    const audits: AuditRow[] = [];
+    const db = metaWriteTestDb({ audits });
+    await withGraph(
+      (call) =>
+        // The create echoes ACTIVE (the should-never-happen case); the follow-up PAUSE succeeds.
+        call.url.endsWith("/campaigns")
+          ? jsonResponse({ id: "120000000000999", status: "ACTIVE" })
+          : jsonResponse({ success: true }),
+      async (calls) => {
+        const handlers = createActionHandlers(db);
+        await expect(
+          handlers.create_meta_campaign?.(
+            { sourceId: "src_meta", name: "Oops", objective: "OUTCOME_TRAFFIC", clientToken: "tok_active" },
+            operatorContext
+          )
+        ).rejects.toMatchObject({ code: "money_safety_violation", retryable: false });
+
+        // Two Graph calls: [0] the ACTIVE create, [1] the remediation PAUSE of the SAME entity id.
+        expect(calls).toHaveLength(2);
+        expect(calls[0].url).toBe("https://graph.facebook.com/v25.0/act_999/campaigns");
+        expect(calls[1].url).toBe("https://graph.facebook.com/v25.0/120000000000999");
+        expect(calls[1].method).toBe("POST");
+        expect(calls[1].body).toMatchObject({ status: "PAUSED" });
+
+        // The failed audit names the live entity and records the remediation outcome.
+        const audit = audits.find((row) => row.action === "create_meta_campaign" && row.status === "failed");
+        expect(audit?.details).toMatchObject({
+          entity: "campaign",
+          entity_id: "120000000000999",
+          error_code: "money_safety_violation",
+          money_safety_violation: true,
+          remediation_paused: true
+        });
+        expect(JSON.stringify(audits)).not.toContain("secret-meta-token");
+      }
+    );
+  });
+
+  it("a FAILING remediation pause does not mask the original money_safety_violation (best-effort)", async () => {
+    const audits: AuditRow[] = [];
+    const db = metaWriteTestDb({ audits });
+    await withGraph(
+      (call) =>
+        call.url.endsWith("/campaigns")
+          ? jsonResponse({ id: "120000000000999", status: "ACTIVE" })
+          : jsonResponse({ error: { message: "pause failed" } }, 500), // remediation PAUSE fails
+      async (calls) => {
+        const handlers = createActionHandlers(db);
+        await expect(
+          handlers.create_meta_campaign?.(
+            { sourceId: "src_meta", name: "Oops", objective: "OUTCOME_TRAFFIC", clientToken: "tok_active2" },
+            operatorContext
+          )
+        ).rejects.toMatchObject({ code: "money_safety_violation" });
+        // The pause was attempted (2 calls) but failed; the audit flags it for manual follow-up.
+        expect(calls).toHaveLength(2);
+        const audit = audits.find((row) => row.action === "create_meta_campaign" && row.status === "failed");
+        expect(audit?.details).toMatchObject({
+          entity_id: "120000000000999",
+          money_safety_violation: true,
+          remediation_paused: false
+        });
+      }
+    );
+  });
+
   it("dedups a repeat create by client_token without a second POST", async () => {
     const audits: AuditRow[] = [];
     const db = metaWriteTestDb({
@@ -5761,7 +5828,14 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
       async (calls) => {
         const handlers = createActionHandlers(db);
         const result = await handlers.set_meta_entity_status?.(
-          { sourceId: "src_meta", entityId: "120000000000333", status: "ACTIVE" },
+          // confirmActivation MUST echo entityId to pass the activation gate.
+          {
+            sourceId: "src_meta",
+            entityId: "120000000000333",
+            status: "ACTIVE",
+            entity: "campaign",
+            confirmActivation: "120000000000333"
+          },
           operatorContext
         );
         expect(calls[0].url).toBe("https://graph.facebook.com/v25.0/120000000000333");
@@ -5770,6 +5844,68 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
         const audit = audits.find((row) => row.action === "set_meta_entity_status");
         expect(audit?.status).toBe("succeeded");
         expect(audit?.details).toMatchObject({ requested_status: "ACTIVE", activation: true });
+      }
+    );
+  });
+
+  it("ACTIVATION GATE: status:ACTIVE WITHOUT confirmActivation is refused — NO POST, no spend", async () => {
+    const audits: AuditRow[] = [];
+    const db = metaWriteTestDb({ audits });
+    await withGraph(
+      () => jsonResponse({ success: true, status: "ACTIVE" }),
+      async (calls) => {
+        const handlers = createActionHandlers(db);
+        // A bare activate (e.g. a raw HTTP/tools-call request) with no confirmation.
+        await expect(
+          handlers.set_meta_entity_status?.(
+            { sourceId: "src_meta", entityId: "120000000000333", status: "ACTIVE", entity: "campaign" },
+            operatorContext
+          )
+        ).rejects.toThrow(/activation_requires_confirmation/);
+        // The gate fires BEFORE any Graph POST — money never moves.
+        expect(calls).toHaveLength(0);
+      }
+    );
+  });
+
+  it("ACTIVATION GATE: a confirmActivation that does NOT match entityId is refused — NO POST", async () => {
+    const audits: AuditRow[] = [];
+    const db = metaWriteTestDb({ audits });
+    await withGraph(
+      () => jsonResponse({ success: true, status: "ACTIVE" }),
+      async (calls) => {
+        const handlers = createActionHandlers(db);
+        await expect(
+          handlers.set_meta_entity_status?.(
+            {
+              sourceId: "src_meta",
+              entityId: "120000000000333",
+              status: "ACTIVE",
+              entity: "campaign",
+              confirmActivation: "120000000000999" // names a DIFFERENT entity
+            },
+            operatorContext
+          )
+        ).rejects.toThrow(/activation_requires_confirmation/);
+        expect(calls).toHaveLength(0);
+      }
+    );
+  });
+
+  it("ACTIVATION GATE: PAUSED needs NO confirmation (spend-reducing) — proceeds normally", async () => {
+    const audits: AuditRow[] = [];
+    const db = metaWriteTestDb({ audits });
+    await withGraph(
+      () => jsonResponse({ success: true, status: "PAUSED" }),
+      async (calls) => {
+        const handlers = createActionHandlers(db);
+        const result = await handlers.set_meta_entity_status?.(
+          { sourceId: "src_meta", entityId: "120000000000333", status: "PAUSED", entity: "campaign" },
+          operatorContext
+        );
+        expect(calls).toHaveLength(1);
+        expect(calls[0].body).toEqual({ status: "PAUSED" });
+        expect(result?.data).toMatchObject({ id: "120000000000333", status: "PAUSED" });
       }
     );
   });
@@ -5870,7 +6006,7 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
         const handlers = createActionHandlers(db);
         await expect(
           handlers.delete_meta_entity?.(
-            { sourceId: "src_stripe", entityId: "120000000000777" },
+            { sourceId: "src_stripe", entityId: "120000000000777", entity: "ad" },
             operatorContext
           )
         ).rejects.toThrow("source_provider_mismatch");

@@ -736,6 +736,14 @@ function metadataFor(id: InfiniteOsActionId): {
       recommendedNextActions: ["get_recent_sync_runs"],
       recipeIds: ["export_report", "save_export_report"]
     },
+    list_meta_assets: {
+      title: "List Meta ad accounts & pixels",
+      summary:
+        "Enumerate the ad accounts + pixels a Meta token can see (system-user or OAuth) so the connect flow can pick an account/pixel and validate the token before binding.",
+      category: "sources",
+      recommendedNextActions: ["connect_source"],
+      recipeIds: []
+    },
     list_meta_entities: {
       title: "List Meta Ads entities",
       summary:
@@ -812,7 +820,10 @@ function inputSchemaFor(id: InfiniteOsActionId): Record<string, unknown> {
         connectionName: { type: "string" },
         credentialKind: { type: "string" },
         credentialPayload: { type: "object", additionalProperties: true },
-        encryptedPayload: { type: "string" }
+        encryptedPayload: { type: "string" },
+        // P1-2: the Meta account/pixel picker passes the chosen pixel so CAPI dispatch has a target.
+        // Schema is additionalProperties:false, so this MUST be declared or the connect is rejected.
+        selectedPixelId: { type: "string" }
       },
       ["provider"]
     ),
@@ -827,7 +838,10 @@ function inputSchemaFor(id: InfiniteOsActionId): Record<string, unknown> {
         credentialKind: { type: "string" },
         credentialPayload: { type: "object", additionalProperties: true },
         encryptedPayload: { type: "string" },
-        oauthTokenId: { type: "string" }
+        oauthTokenId: { type: "string" },
+        // P1-2: an explicit pixel override on reconnect; absent, the prior pixel is carried forward
+        // (the handler reads the old selected_pixel_id before revoking). additionalProperties:false.
+        selectedPixelId: { type: "string" }
       },
       ["sourceId"]
     ),
@@ -993,6 +1007,14 @@ function inputSchemaFor(id: InfiniteOsActionId): Record<string, unknown> {
       },
       ["reportId"]
     ),
+    list_meta_assets: requiredObject(
+      {
+        accessToken: { type: "string", minLength: 1 },
+        businessId: { type: "string" },
+        apiVersion: { type: "string" }
+      },
+      ["accessToken"]
+    ),
     list_meta_entities: requiredObject(
       {
         sourceId: { type: "string" },
@@ -1057,6 +1079,9 @@ function inputSchemaFor(id: InfiniteOsActionId): Record<string, unknown> {
         name: { type: "string" },
         pageId: { type: "string" },
         imageHash: { type: "string" },
+        // Downloadable image URL. Required by the meta_ads_cli transport (the CLI's
+        // --image needs a local file); ignored by the direct-Graph path (image_hash).
+        imageUrl: { type: "string" },
         instagramUserId: { type: "string" },
         linkUrl: { type: "string" },
         body: { type: "string" },
@@ -1081,22 +1106,34 @@ function inputSchemaFor(id: InfiniteOsActionId): Record<string, unknown> {
       {
         sourceId: { type: "string" },
         entityId: { type: "string" },
-        // ACTIVE is the only money-spending transition; the CLI/operator confirm
-        // gates live above this layer.
-        status: { enum: ["ACTIVE", "PAUSED"] }
+        // ACTIVE is the only money-SPENDING transition. It is gated TRANSPORT-AGNOSTICALLY in the
+        // handler: confirmActivation must echo entityId, so a bare/accidental request on ANY surface
+        // (HTTP, tools-call, CLI) cannot take an entity live. PAUSED (spend-reducing) needs no gate.
+        status: { enum: ["ACTIVE", "PAUSED"] },
+        // Activation confirmation. To permit status:ACTIVE the handler requires this to equal entityId
+        // (naming the exact entity guards accidental + wrong-entity activation). The desktop sets it
+        // after a deliberate gesture (e.g. press-and-hold); the CLI after its typed-confirm. Optional
+        // in the schema because PAUSED never needs it; the handler enforces it for ACTIVE.
+        confirmActivation: { type: "string" },
+        // REQUIRED (review): the entity-kind selects the CLI update subcommand. The
+        // direct Graph node POST does not strictly need it, but requiring it here
+        // makes the failure uniform + EARLY (schema-time) regardless of transport,
+        // rather than failing late at write time only on the CLI path.
+        entity: { enum: ["campaign", "adset", "ad"] }
       },
-      ["sourceId", "entityId", "status"]
+      ["sourceId", "entityId", "status", "entity"]
     ),
     delete_meta_entity: requiredObject(
       {
         sourceId: { type: "string" },
         entityId: { type: "string" },
-        // Optional entity-kind hint recorded in the audit row. Delete is a NODE
-        // call (DELETE /{id}); creatives are not deletable via this verb. The
-        // CLI's destructive confirm gate lives above this layer.
+        // REQUIRED (review): the entity-kind selects the CLI delete subcommand and is
+        // recorded in the audit row. Delete is a NODE call (DELETE /{id}); creatives
+        // are not deletable via this verb. Required so the failure is uniform + EARLY
+        // regardless of transport. The CLI's destructive confirm gate lives above this.
         entity: { enum: ["campaign", "adset", "ad"] }
       },
-      ["sourceId", "entityId"]
+      ["sourceId", "entityId", "entity"]
     )
   };
   return schemas[id] ?? requiredObject({});

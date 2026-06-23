@@ -9446,16 +9446,18 @@ describe("Infinite OS LLM controller", () => {
       status: "ok",
       requiresConfirmation: false,
       confirmationId: "confirm_abc",
-      inputHash: "hash_abc"
+      inputHash: "hash_abc",
+      workspaceId: "workspace-1"
     });
     await store.listSessions("workspace-1");
     await store.getSession("session-1");
     await store.searchSessions("workspace-1", "revenue by source", { excludeSessionId: "session-1" });
-    await store.getPendingActionCall?.("confirm_abc");
+    await store.getPendingActionCall?.("confirm_abc", "workspace-1");
     await store.confirmActionCall?.({
       confirmationId: "confirm_abc",
       outputEnvelope: { ok: true, actionId: "start_source_sync" },
-      status: "ok"
+      status: "ok",
+      workspaceId: "workspace-1"
     });
     await store.recordTokenUsage?.({
       sessionId: "session-1",

@@ -8,6 +8,7 @@ import {
   createMetaCreative,
   deleteMetaEntity,
   getMetaEntity,
+  listMetaAssets,
   listMetaEntities,
   resolveMetaAdsCredential,
   setMetaEntityStatus,
@@ -110,6 +111,7 @@ export function createActionHandlers(db: InfiniteOsDb): Partial<Record<InfiniteO
     create_saved_report: (input, context) => createSavedReport(db, context, input),
     run_saved_report: (input, context) => runSavedReport(db, context, input),
     export_saved_report: (input, context) => exportSavedReport(db, context, input),
+    list_meta_assets: (input, context) => listMetaAssetsHandler(db, context, input),
     list_meta_entities: (input, context) => listMetaEntitiesHandler(db, context, input),
     get_meta_entity: (input, context) => getMetaEntityHandler(db, context, input),
     create_meta_campaign: (input, context) => createMetaCampaignHandler(db, context, input),
@@ -1430,6 +1432,9 @@ async function connectSource(
     credentialKind,
     encryptedPayload: credentialPayloadForStorage(input, credentialKind, oauthTokenId),
     oauthTokenId,
+    // P1-2: the Meta account/pixel picker passes the chosen pixel here so CAPI dispatch has a target.
+    // db.connectSource COALESCEs it on re-connect, so rotating the token never nulls a prior pixel.
+    ...(optionalString(input, "selectedPixelId") ? { selectedPixelId: optionalString(input, "selectedPixelId") } : {}),
     actorType: context.authority
   });
   const connectionTest = await testConnectionForSource(db, context, provider, String(source.id));
@@ -1448,6 +1453,19 @@ async function reconnectSource(
   const oauthTokenId = optionalString(input, "oauthTokenId");
   if (credentialKind || objectField(input, "credentialPayload") || optionalString(input, "encryptedPayload")) {
     const resolvedKind = credentialKind ?? defaultCredentialKind(provider);
+    // Carry the Meta CAPI pixel forward across a token rotation: reconnect REVOKES the old row and
+    // INSERTs a fresh one, so without this the prior selected_pixel_id would be silently wiped and
+    // CAPI dispatch would lose its target. An explicit selectedPixelId in the input overrides.
+    const priorPixel = await db.query(
+      `select selected_pixel_id from connection_credentials
+         where workspace_id = $1 and source_id = $2 and revoked_at is null
+         order by created_at desc limit 1`,
+      [context.workspaceId, sourceId]
+    );
+    const priorPixelVal = (priorPixel[0] as Record<string, unknown> | undefined)?.selected_pixel_id;
+    const carriedPixelId =
+      optionalString(input, "selectedPixelId") ??
+      (typeof priorPixelVal === "string" && priorPixelVal !== "" ? priorPixelVal : undefined);
     await db.query(
       "update connection_credentials set revoked_at = now() where workspace_id = $1 and source_id = $2 and revoked_at is null",
       [context.workspaceId, sourceId]
@@ -1455,9 +1473,9 @@ async function reconnectSource(
     await db.query(
       `
         insert into connection_credentials (
-          id, workspace_id, source_id, credential_kind, encrypted_payload, oauth_token_id
+          id, workspace_id, source_id, credential_kind, encrypted_payload, oauth_token_id, selected_pixel_id
         )
-        values ($1,$2,$3,$4,$5,$6)
+        values ($1,$2,$3,$4,$5,$6,$7)
       `,
       [
         `cred_${randomUUID()}`,
@@ -1465,7 +1483,8 @@ async function reconnectSource(
         sourceId,
         resolvedKind,
         credentialPayloadForStorage(input, resolvedKind, oauthTokenId),
-        oauthTokenId ?? null
+        oauthTokenId ?? null,
+        carriedPixelId ?? null
       ]
     );
   }
@@ -1762,6 +1781,18 @@ async function resolveMetaCredentialForWrite(
   if (provider !== "meta_ads") {
     throw new Error(`source_provider_mismatch:expected meta_ads got ${provider}`);
   }
+  // DEFENSE-IN-DEPTH (P0-A, redundant no-op): the real confused-deputy control lives in
+  // the confirm path (chat_action_calls.workspace_id + workspace-scoped getPending/confirm
+  // + fail-closed `confirmation_workspace_mismatch` on both the HTTP and CLI surfaces).
+  // A project-pin assertion HERE is structurally tautological: `sourceProvider` above
+  // already does `select provider from sources where workspace_id = $1 and id = $2` with
+  // $1 = context.workspaceId, so any source it resolves is — by construction — in
+  // context.workspaceId; a sourceId belonging to another workspace throws
+  // `source_not_found` before this point and never reaches the Graph transport. There is
+  // no reachable state in which the resolved credential's workspace differs from
+  // context.workspaceId, so this is left as a documented invariant rather than a tested
+  // violation path (its acceptance test would be structurally unreachable). The pinning
+  // that actually closes the hole is enforced upstream at confirmation time.
   return resolveMetaAdsCredential(db, {
     workspaceId: context.workspaceId,
     sourceId
@@ -1815,6 +1846,27 @@ async function runMetaCreate(
     // Release the un-resolved claim so a transient failure does not poison the
     // token (a later retry with the same token can claim again).
     await releaseMetaDedup(db, claim?.claimId ?? null);
+    // INVARIANT 1/6 REMEDIATION: a money_safety_violation means the create unexpectedly landed
+    // ACTIVE — the entity is ALREADY live and spending, and throwing only stops OUR flow, not
+    // Meta's spend. The connector stamps the violating entity id onto the error; attempt a
+    // best-effort PAUSE (pausing only REDUCES spend, so it needs no confirm gate) and swallow any
+    // pause error so it never masks the original violation. Record the entity id + outcome in the
+    // audit so an operator can verify. A normal (non-violation) failure skips all of this.
+    const violatedId =
+      metaErrorCode(error) === "money_safety_violation" && error && typeof error === "object"
+        ? (typeof (error as { entityId?: unknown }).entityId === "string"
+            ? ((error as { entityId?: string }).entityId as string)
+            : undefined)
+        : undefined;
+    let remediationPaused: boolean | undefined;
+    if (violatedId) {
+      try {
+        await setMetaEntityStatus(credential, violatedId, "PAUSED", entity);
+        remediationPaused = true;
+      } catch {
+        remediationPaused = false; // best-effort only — the audit row flags it for manual follow-up
+      }
+    }
     // INVARIANT 1/6: audit a failure (incl. a money_safety_violation when Graph
     // echoed ACTIVE) WITHOUT the token or raw spend, then surface the error.
     await metaAuditLog(db, context, sourceId, action, "failed", {
@@ -1823,6 +1875,9 @@ async function runMetaCreate(
       client_token: clientToken ?? null,
       error_code: metaErrorCode(error),
       deduped: false,
+      ...(violatedId
+        ? { entity_id: violatedId, money_safety_violation: true, remediation_paused: remediationPaused }
+        : {}),
       ...presence
     });
     throw error;
@@ -1923,6 +1978,7 @@ async function createMetaCreativeHandler(
       name,
       pageId,
       ...(optionalString(input, "imageHash") ? { imageHash: optionalString(input, "imageHash") } : {}),
+      ...(optionalString(input, "imageUrl") ? { imageUrl: optionalString(input, "imageUrl") } : {}),
       ...(optionalString(input, "instagramUserId") ? { instagramUserId: optionalString(input, "instagramUserId") } : {}),
       ...(optionalString(input, "linkUrl") ? { linkUrl: optionalString(input, "linkUrl") } : {}),
       ...(optionalString(input, "body") ? { body: optionalString(input, "body") } : {}),
@@ -1950,6 +2006,34 @@ async function createMetaAdHandler(
 // stricter typed-confirm for activate) live above this layer; here we perform
 // the transition INLINE and audit it. activate/pause are naturally idempotent at
 // Meta but still operator-gated + audited.
+// Read + validate the optional entity-kind hint from an action input. Returns the
+// narrowed MetaWriteEntity (campaign|adset|ad) or undefined. Used both for audit
+// rows and to select the CLI update/delete subcommand. Throws on an unknown value
+// so a typo surfaces here rather than as an opaque CLI failure.
+function metaWriteEntityFromInput(input: unknown): MetaWriteEntity | undefined {
+  const raw = optionalString(input, "entity");
+  if (!raw) {
+    return undefined;
+  }
+  const normalized = raw.toLowerCase();
+  if (normalized === "campaign" || normalized === "adset" || normalized === "ad") {
+    return normalized;
+  }
+  throw new Error(`unsupported_meta_entity:${raw}`);
+}
+
+// REQUIRED-entity variant (review): set_meta_entity_status and delete_meta_entity now
+// require `entity` so the failure is uniform + EARLY regardless of transport (the CLI
+// path needs it to select the subcommand; the Graph path tolerates its absence but we
+// reject it uniformly). Throws if missing or unrecognized.
+function requiredMetaWriteEntity(input: unknown): MetaWriteEntity {
+  const raw = requiredString(input, "entity").toLowerCase();
+  if (raw === "campaign" || raw === "adset" || raw === "ad") {
+    return raw;
+  }
+  throw new Error(`unsupported_meta_entity:${raw}`);
+}
+
 async function setMetaEntityStatusHandler(
   db: InfiniteOsDb,
   context: SessionContext,
@@ -1961,11 +2045,23 @@ async function setMetaEntityStatusHandler(
   if (status !== "ACTIVE" && status !== "PAUSED") {
     throw new Error(`unsupported_meta_status:${status}`);
   }
+  // REQUIRED (review): the entity token (campaign|adset|ad) selects the CLI update
+  // subcommand. Required uniformly so the failure is early + transport-agnostic.
+  const entity = requiredMetaWriteEntity(input);
+  // ACTIVATION GATE (money-safety, transport-agnostic): going ACTIVE is the only money-SPENDING
+  // transition. Require an explicit confirmation that NAMES this entity (confirmActivation ===
+  // entityId), so a bare/accidental request on ANY surface (HTTP /meta/status, /tools/call, CLI)
+  // cannot take an entity live and start spending. PAUSED (spend-reducing) needs none. The desktop
+  // sets confirmActivation after a deliberate gesture (press-and-hold); the CLI after its typed-
+  // confirm. Reject BEFORE resolving the credential or POSTing — no spend on an unconfirmed activate.
+  if (status === "ACTIVE" && optionalString(input, "confirmActivation") !== entityId) {
+    throw new Error(`activation_requires_confirmation:${entityId}`);
+  }
   const action: InfiniteOsActionId = "set_meta_entity_status";
   const credential = await resolveMetaCredentialForWrite(db, context, sourceId);
   let result;
   try {
-    result = await setMetaEntityStatus(credential, entityId, status as MetaEntityStatus);
+    result = await setMetaEntityStatus(credential, entityId, status as MetaEntityStatus, entity);
   } catch (error) {
     await metaAuditLog(db, context, sourceId, action, "failed", {
       action,
@@ -2006,14 +2102,15 @@ async function deleteMetaEntityHandler(
 ): Promise<ActionEnvelope> {
   const sourceId = requiredString(input, "sourceId");
   const entityId = requiredString(input, "entityId");
-  // Optional entity-kind hint for the audit row only (the DELETE node call needs
-  // just the id). null when the caller did not supply it.
-  const entity = optionalString(input, "entity") ?? null;
+  // REQUIRED (review): the entity-kind is used for the audit row AND (for the CLI
+  // transport) to select the `meta ads <entity> delete` subcommand. Required uniformly
+  // so the failure is early + transport-agnostic.
+  const entity = requiredMetaWriteEntity(input);
   const action: InfiniteOsActionId = "delete_meta_entity";
   const credential = await resolveMetaCredentialForWrite(db, context, sourceId);
   let result;
   try {
-    result = await deleteMetaEntity(credential, entityId);
+    result = await deleteMetaEntity(credential, entityId, entity);
   } catch (error) {
     await metaAuditLog(db, context, sourceId, action, "failed", {
       action,
@@ -2039,6 +2136,44 @@ async function deleteMetaEntityHandler(
 }
 
 // Reads — no money movement, no audit row, normal retryable taxonomy.
+// list_meta_assets — enumerate the ad accounts + pixels a RAW (system-user) token can see, so the
+// desktop connect flow can populate the account/pixel picker AND validate the token BEFORE binding.
+// READ authority (no money movement, no source mutation): the token arrives in the input over
+// loopback, exactly as connect_source receives it. A token that resolves zero accounts/businesses
+// surfaces a clear error so the desktop never binds an asset-less credential.
+async function listMetaAssetsHandler(
+  _db: InfiniteOsDb,
+  context: SessionContext,
+  input: unknown
+): Promise<ActionEnvelope> {
+  const accessToken = requiredString(input, "accessToken");
+  const businessId = optionalString(input, "businessId");
+  const apiVersion = optionalString(input, "apiVersion");
+  const assets = await listMetaAssets(accessToken, {
+    ...(businessId ? { businessId } : {}),
+    ...(apiVersion ? { apiVersion } : {})
+  });
+  if (assets.adAccounts.length === 0) {
+    throw new Error(
+      "no_meta_ad_accounts: the token sees no ad accounts. For a system-user token, confirm it has " +
+        "the ads_management + business_management scopes and is assigned the ad account in Business Settings."
+    );
+  }
+  return envelope(
+    "list_meta_assets",
+    context.authority,
+    {
+      tokenKind: assets.tokenKind,
+      adAccounts: assets.adAccounts,
+      pixels: assets.pixels,
+      businesses: assets.businesses,
+      pixelsByAccount: assets.pixelsByAccount
+    },
+    ["provider_truth"],
+    "ok"
+  );
+}
+
 async function listMetaEntitiesHandler(
   db: InfiniteOsDb,
   context: SessionContext,
