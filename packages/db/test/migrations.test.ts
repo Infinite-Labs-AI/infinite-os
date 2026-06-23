@@ -53,7 +53,8 @@ describe("Infinite OS migration stack", () => {
       "0036_chat_sessions_desktop_surface.sql",
       "0037_meta_ads_ad_grain.sql",
       "0038_chat_action_calls_workspace_id.sql",
-      "0039_connection_credentials_metadata.sql"
+      "0039_connection_credentials_metadata.sql",
+      "0040_workspace_owner_id.sql"
     ]);
   });
 
@@ -384,7 +385,8 @@ describe("Infinite OS migration stack", () => {
       "0036_chat_sessions_desktop_surface.sql",
       "0037_meta_ads_ad_grain.sql",
       "0038_chat_action_calls_workspace_id.sql",
-      "0039_connection_credentials_metadata.sql"
+      "0039_connection_credentials_metadata.sql",
+      "0040_workspace_owner_id.sql"
     ]);
   });
 

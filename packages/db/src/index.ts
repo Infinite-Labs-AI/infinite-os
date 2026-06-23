@@ -301,6 +301,10 @@ export interface ProjectRow {
   id: string;
   name: string;
   createdAt: string;
+  /** Cloud account (Supabase user id) that owns this workspace, or null if unclaimed. Stamped via
+   *  claimWorkspace() from the desktop after it verifies the cloud session. Cloud-agnostic: a string,
+   *  not validated engine-side. */
+  ownerId: string | null;
 }
 
 export interface WorkspaceSiteUpsertInput {
@@ -339,7 +343,7 @@ export async function createProject(
     `
       insert into workspaces (id, name)
       values ($1, $2)
-      returning id, name, created_at as "createdAt"
+      returning id, name, created_at as "createdAt", owner_id as "ownerId"
     `,
     [id, name]
   );
@@ -351,7 +355,7 @@ export async function createProject(
 
 export async function listProjects(db: Pick<InfiniteOsDb, "query">): Promise<ProjectRow[]> {
   return db.query<ProjectRow>(
-    `select id, name, created_at as "createdAt" from workspaces order by created_at`
+    `select id, name, created_at as "createdAt", owner_id as "ownerId" from workspaces order by created_at`
   );
 }
 
@@ -361,7 +365,7 @@ export async function findProject(
 ): Promise<ProjectRow | null> {
   return db.one<ProjectRow>(
     `
-      select id, name, created_at as "createdAt"
+      select id, name, created_at as "createdAt", owner_id as "ownerId"
       from workspaces
       where id = $1 or name = $2
       order by created_at asc
@@ -369,6 +373,46 @@ export async function findProject(
     `,
     [idOrName, idOrName]
   );
+}
+
+/** Result of claimWorkspace: claimed (now/already owned by this user), or a refusal reason. */
+export type ClaimWorkspaceResult =
+  | { status: "claimed"; project: ProjectRow }
+  | { status: "owned_by_other" }
+  | { status: "not_found" };
+
+/**
+ * Bind a local workspace to a cloud account (Supabase user id), solo single-device v1. The desktop
+ * verifies the cloud session (GET /api/auth/me) and passes the verified userId here via
+ * POST /projects/:id/claim — the open engine RECORDS ownership, it does not verify a cloud JWT.
+ *
+ * Atomic + anti-theft: the UPDATE only fires when the workspace is unowned OR already this user's, so
+ * a workspace owned by ANOTHER account updates 0 rows and is refused (`owned_by_other`) — a second
+ * account on the same machine can never claim the first account's projects. Idempotent for the owner.
+ */
+export async function claimWorkspace(
+  db: Pick<InfiniteOsDb, "one">,
+  workspaceId: string,
+  userId: string
+): Promise<ClaimWorkspaceResult> {
+  const claimed = await db.one<ProjectRow>(
+    `
+      update workspaces set owner_id = $2
+      where id = $1 and (owner_id is null or owner_id = $2)
+      returning id, name, created_at as "createdAt", owner_id as "ownerId"
+    `,
+    [workspaceId, userId]
+  );
+  if (claimed) {
+    return { status: "claimed", project: claimed };
+  }
+  // 0 rows updated → the workspace is missing, or owned by a different account. Distinguish so the
+  // caller can return 404 vs 409.
+  const existing = await db.one<ProjectRow>(
+    `select id, name, created_at as "createdAt", owner_id as "ownerId" from workspaces where id = $1`,
+    [workspaceId]
+  );
+  return existing ? { status: "owned_by_other" } : { status: "not_found" };
 }
 
 export interface DeleteProjectResult {

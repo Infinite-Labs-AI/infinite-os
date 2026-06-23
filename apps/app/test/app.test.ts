@@ -2504,6 +2504,54 @@ describe("Infinite OS app-hosted API/MCP skeleton", () => {
     }
   });
 
+  it("POST /projects/:id/claim binds a workspace to a cloud account (operator-only, anti-theft)", async () => {
+    // Stateful fake `workspaces` modeling owner_id. claimWorkspace runs UPDATE…returning then a SELECT.
+    const store: Record<string, { id: string; name: string; ownerId: string | null }> = {
+      proj_a: { id: "proj_a", name: "Acme", ownerId: null },
+      proj_b: { id: "proj_b", name: "Beta", ownerId: "user-2" }
+    };
+    const database = {
+      async one(sql: string, params?: unknown[]) {
+        const id = String(params?.[0]);
+        if (sql.includes("update workspaces set owner_id")) {
+          const w = store[id];
+          const userId = String(params?.[1]);
+          if (w && (w.ownerId === null || w.ownerId === userId)) {
+            w.ownerId = userId;
+            return { id: w.id, name: w.name, createdAt: "t", ownerId: w.ownerId };
+          }
+          return null;
+        }
+        if (sql.includes("from workspaces where id")) {
+          const w = store[id];
+          return w ? { id: w.id, name: w.name, createdAt: "t", ownerId: w.ownerId } : null;
+        }
+        return null;
+      },
+      async query() { return []; },
+      async close() {}
+    };
+    const app = createApp({ database: database as never });
+    const op = { authorization: `Bearer ${OPERATOR_TOKEN}` };
+
+    // No token → 401; non-operator token → 403; missing userId → 400.
+    expect((await app.inject({ method: "POST", url: "/projects/proj_a/claim", payload: { userId: "u1" } })).statusCode).toBe(401);
+    expect((await app.inject({ method: "POST", url: "/projects/proj_a/claim", headers: { authorization: `Bearer ${READ_TOKEN}` }, payload: { userId: "u1" } })).statusCode).toBe(403);
+    expect((await app.inject({ method: "POST", url: "/projects/proj_a/claim", headers: op, payload: {} })).statusCode).toBe(400);
+
+    // Claim an unowned workspace → 200, owner stamped.
+    const claimed = await app.inject({ method: "POST", url: "/projects/proj_a/claim", headers: op, payload: { userId: "u1" } });
+    expect(claimed.statusCode).toBe(200);
+    expect(claimed.json().project.ownerId).toBe("u1");
+
+    // Idempotent re-claim by the SAME account → 200.
+    expect((await app.inject({ method: "POST", url: "/projects/proj_a/claim", headers: op, payload: { userId: "u1" } })).statusCode).toBe(200);
+    // Anti-theft: claiming a workspace owned by ANOTHER account → 409.
+    expect((await app.inject({ method: "POST", url: "/projects/proj_b/claim", headers: op, payload: { userId: "u1" } })).statusCode).toBe(409);
+    // Unknown workspace → 404.
+    expect((await app.inject({ method: "POST", url: "/projects/proj_missing/claim", headers: op, payload: { userId: "u1" } })).statusCode).toBe(404);
+  });
+
   it("rejects requests with no token on a non-public route (401)", async () => {
     const app = createApp({ database: workspaceProbeDb() });
     const response = await app.inject({ method: "GET", url: "/capabilities" });

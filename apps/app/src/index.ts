@@ -18,6 +18,7 @@ import {
   encryptionKeyFingerprint
 } from "@infinite-os/core";
 import {
+  claimWorkspace,
   createInfiniteOsDb,
   createProject,
   deleteProject,
@@ -1001,6 +1002,40 @@ export function createApp(options: {
     }
     return { ok: true, projects: await listProjects(database) };
   });
+
+  // Bind a local workspace to a cloud account (solo single-device v1). The DESKTOP verifies the
+  // cloud session (GET /api/auth/me) and posts the verified userId here; the engine records ownership
+  // (it stays cloud-agnostic — no JWT verification). Anti-theft is in claimWorkspace: a workspace
+  // already owned by a DIFFERENT account is refused (409), so a second account on this machine cannot
+  // claim the first account's projects. Operator-only, workspace-agnostic (no x-growth-os-workspace).
+  app.post<{ Params: { id: string }; Body: { userId?: string } }>(
+    "/projects/:id/claim",
+    async (request, reply) => {
+      if (request.auth.authority !== "operator") {
+        reply.code(403);
+        return { ok: false, error: { code: "operator_authority_required" } };
+      }
+      if (!database) {
+        reply.code(503);
+        return { ok: false, error: { code: "database_unavailable" } };
+      }
+      const userId = typeof request.body?.userId === "string" ? request.body.userId.trim() : "";
+      if (!userId) {
+        reply.code(400);
+        return { ok: false, error: { code: "user_id_required" } };
+      }
+      const result = await claimWorkspace(database, request.params.id, userId);
+      if (result.status === "not_found") {
+        reply.code(404);
+        return { ok: false, error: { code: "workspace_not_found" } };
+      }
+      if (result.status === "owned_by_other") {
+        reply.code(409);
+        return { ok: false, error: { code: "workspace_owned_by_other" } };
+      }
+      return { ok: true, project: result.project };
+    }
+  );
 
   app.delete<{ Params: { id: string } }>("/projects/:id", async (request, reply) => {
     if (request.auth.authority !== "operator") {

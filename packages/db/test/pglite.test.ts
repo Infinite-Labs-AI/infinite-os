@@ -81,15 +81,16 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
     rmSync(dataDir, { recursive: true, force: true });
   });
 
-  it("applied ALL 39 migrations on first boot and is idempotent on a re-run", async () => {
-    expect(loadMigrations().length).toBe(39);
-    expect(firstRun).toHaveLength(39);
+  it("applied ALL 40 migrations on first boot and is idempotent on a re-run", async () => {
+    expect(loadMigrations().length).toBe(40);
+    expect(firstRun).toHaveLength(40);
     expect(firstRun).toContain("0001_control_plane.sql");
     expect(firstRun).toContain("0006_security_roles.sql");
     expect(firstRun).toContain("0036_chat_sessions_desktop_surface.sql");
     expect(firstRun).toContain("0037_meta_ads_ad_grain.sql");
     expect(firstRun).toContain("0038_chat_action_calls_workspace_id.sql");
     expect(firstRun).toContain("0039_connection_credentials_metadata.sql");
+    expect(firstRun).toContain("0040_workspace_owner_id.sql");
 
     // Idempotent: a second boot re-applies zero (the `rows.length` gate, not the pg `rowCount`
     // gate, makes this true on PGlite).
@@ -97,13 +98,13 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
     expect(secondRun).toEqual([]);
   });
 
-  it("created the schema_migrations ledger with all 39 rows", async () => {
+  it("created the schema_migrations ledger with all 40 rows", async () => {
     const ledger = await db.query<{ id: string }>(
       "select id from schema_migrations order by id"
     );
-    expect(ledger).toHaveLength(39);
+    expect(ledger).toHaveLength(40);
     expect(ledger[0]?.id).toBe("0001_control_plane.sql");
-    expect(ledger.at(-1)?.id).toBe("0039_connection_credentials_metadata.sql");
+    expect(ledger.at(-1)?.id).toBe("0040_workspace_owner_id.sql");
   });
 
   it("0038 pins chat_action_calls to its origin workspace (NOT NULL, FK, backfilled from chat_sessions)", async () => {
