@@ -4360,6 +4360,45 @@ console.log(${JSON.stringify(JSON.stringify(body))});
         });
       });
     });
+
+    // ── Ambient-token stderr scrub (review fix) ── in "ambient auth" mode the credential carries
+    // NO accessToken and the CLI uses the INHERITED process.env.ACCESS_TOKEN. That token is NOT
+    // EAA-prefixed here, so the regex fallback cannot catch it — only scrubbing the value the CLI
+    // actually uses keeps it out of the error message (and out of sync_errors.error_message).
+    it("scrubs the INHERITED process.env.ACCESS_TOKEN (ambient mode, non-EAA token) from CLI stderr", async () => {
+      const prior = process.env.ACCESS_TOKEN;
+      process.env.ACCESS_TOKEN = "sysuser-PLAINTEXT-secret-2f8b9";
+      try {
+        await withTmp(async (dir) => {
+          const script = join(dir, "meta-cli-ambient-leak.mjs");
+          // Echo the inherited (non-EAA) token on stderr, then exit non-zero.
+          writeFileSync(
+            script,
+            `process.stderr.write("cli error: token=" + (process.env.ACCESS_TOKEN || ""));\nprocess.exit(1);`,
+            "utf8"
+          );
+          // No accessToken on the credential → metaAdsCliAccessToken returns undefined → ambient mode.
+          const credential: MetaAdsCredential = {
+            mode: "live",
+            transport: "meta_ads_cli",
+            adAccountId: "1234567890",
+            cliCommand: `${JSON.stringify(process.execPath)} ${JSON.stringify(script)}`
+          };
+          await createMetaCampaign(credential, { name: "X", objective: "OUTCOME_TRAFFIC" }).catch((error) => {
+            const message = error instanceof Error ? error.message : String(error);
+            expect(message).not.toContain("sysuser-PLAINTEXT-secret-2f8b9");
+            expect(message).toContain("[REDACTED]");
+            expect((error as { retryable?: boolean }).retryable).toBe(false);
+          });
+        });
+      } finally {
+        if (prior === undefined) {
+          delete process.env.ACCESS_TOKEN;
+        } else {
+          process.env.ACCESS_TOKEN = prior;
+        }
+      }
+    });
   });
 
   describe("dedup helper", () => {

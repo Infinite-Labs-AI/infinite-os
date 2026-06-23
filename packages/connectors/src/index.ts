@@ -5206,10 +5206,13 @@ function metaEchoedStatus(response: MetaGraphWriteResponse): MetaEntityStatus | 
 function assertCreateNotActive(entity: MetaWriteEntity, id: string, response: MetaGraphWriteResponse): MetaEntityStatus | null {
   const status = metaEchoedStatus(response);
   if (status === "ACTIVE") {
+    // Carry the entity id (4th arg) so the handler can locate + best-effort PAUSE the entity that
+    // is now LIVE and spending — the throw alone stops OUR flow but does not stop Meta's spend.
     throw new ConnectorError(
       "money_safety_violation",
       `Meta Ads ${entity} ${id} was created ACTIVE despite a PAUSED create request — refusing to proceed`,
-      false
+      false,
+      id
     );
   }
   return status;
@@ -6151,6 +6154,17 @@ async function callMetaAdsCliJson(credential: MetaAdsCredential, args: string[])
     ensureExecutableOnPath(executable, "Meta Ads CLI command");
   }
   const accessToken = metaAdsCliAccessToken(credential);
+  // The CLI reads its token from ACCESS_TOKEN: our explicit credential value when present, else the
+  // INHERITED process.env.ACCESS_TOKEN (the documented "ambient auth" mode where the credential
+  // carries no token). For stderr redaction we must scrub whichever value the CLI ACTUALLY uses —
+  // relying on the credential value alone leaves the inherited token un-scrubbed (it is NOT always
+  // EAA-prefixed, so the regex fallback can miss it), letting a CLI stderr echo leak it into the
+  // ConnectorError message and onward into sync_errors.error_message.
+  const tokenForScrub =
+    accessToken ??
+    (typeof process.env.ACCESS_TOKEN === "string" && process.env.ACCESS_TOKEN.trim()
+      ? process.env.ACCESS_TOKEN
+      : undefined);
   const child = spawn(executable, [...commandArgs, ...args], {
     stdio: ["ignore", "pipe", "pipe"],
     shell: false,
@@ -6201,9 +6215,10 @@ async function callMetaAdsCliJson(credential: MetaAdsCredential, args: string[])
       if (settled) return;
       if (code !== 0) {
         // Defense-in-depth (review): scrub token-shaped substrings (and the actual
-        // ACCESS_TOKEN value if present) from stderr BEFORE embedding it in the error
-        // message, so a CLI that echoes the token in a diagnostic never leaks it.
-        const scrubbed = scrubMetaToken(stderrBuffer.trim(), accessToken);
+        // ACCESS_TOKEN value the CLI uses — explicit OR ambient/inherited) from stderr
+        // BEFORE embedding it in the error message, so a CLI that echoes the token in a
+        // diagnostic never leaks it.
+        const scrubbed = scrubMetaToken(stderrBuffer.trim(), tokenForScrub);
         const detail = scrubbed ? `: ${scrubbed}` : "";
         fail(`Meta Ads CLI command failed${detail}`);
         return;
@@ -6859,7 +6874,10 @@ class ConnectorError extends Error {
   constructor(
     public readonly code: string,
     message: string,
-    public readonly retryable: boolean
+    public readonly retryable: boolean,
+    // Optional: the Graph entity id involved in the error. Set on a money_safety_violation so the
+    // handler can identify (and best-effort PAUSE) an entity that unexpectedly landed ACTIVE.
+    public readonly entityId?: string
   ) {
     super(message);
   }

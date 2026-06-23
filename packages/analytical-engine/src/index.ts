@@ -1846,6 +1846,27 @@ async function runMetaCreate(
     // Release the un-resolved claim so a transient failure does not poison the
     // token (a later retry with the same token can claim again).
     await releaseMetaDedup(db, claim?.claimId ?? null);
+    // INVARIANT 1/6 REMEDIATION: a money_safety_violation means the create unexpectedly landed
+    // ACTIVE — the entity is ALREADY live and spending, and throwing only stops OUR flow, not
+    // Meta's spend. The connector stamps the violating entity id onto the error; attempt a
+    // best-effort PAUSE (pausing only REDUCES spend, so it needs no confirm gate) and swallow any
+    // pause error so it never masks the original violation. Record the entity id + outcome in the
+    // audit so an operator can verify. A normal (non-violation) failure skips all of this.
+    const violatedId =
+      metaErrorCode(error) === "money_safety_violation" && error && typeof error === "object"
+        ? (typeof (error as { entityId?: unknown }).entityId === "string"
+            ? ((error as { entityId?: string }).entityId as string)
+            : undefined)
+        : undefined;
+    let remediationPaused: boolean | undefined;
+    if (violatedId) {
+      try {
+        await setMetaEntityStatus(credential, violatedId, "PAUSED", entity);
+        remediationPaused = true;
+      } catch {
+        remediationPaused = false; // best-effort only — the audit row flags it for manual follow-up
+      }
+    }
     // INVARIANT 1/6: audit a failure (incl. a money_safety_violation when Graph
     // echoed ACTIVE) WITHOUT the token or raw spend, then surface the error.
     await metaAuditLog(db, context, sourceId, action, "failed", {
@@ -1854,6 +1875,9 @@ async function runMetaCreate(
       client_token: clientToken ?? null,
       error_code: metaErrorCode(error),
       deduped: false,
+      ...(violatedId
+        ? { entity_id: violatedId, money_safety_violation: true, remediation_paused: remediationPaused }
+        : {}),
       ...presence
     });
     throw error;
