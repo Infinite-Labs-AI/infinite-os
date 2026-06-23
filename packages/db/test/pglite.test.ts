@@ -946,3 +946,120 @@ describe("0038 backfills chat_action_calls.workspace_id from chat_sessions (part
     }
   }, 60_000);
 });
+
+describe("0039 dedupes legacy duplicate live credentials BEFORE the partial-unique index (boot-safety proof)", () => {
+  // Pre-P0-B, connectSource was a plain INSERT (new random id, no `on conflict`) that never set
+  // revoked_at, so any install that re-connected a source accumulated MULTIPLE live rows with the
+  // same (source_id, credential_kind). Without a dedupe step, 0039's `create unique index … where
+  // revoked_at is null` aborts with 23505 and (since the daemon auto-migrates on boot) bricks the
+  // daemon on every boot. This applies 0001..0038, seeds duplicate live rows, then applies 0039
+  // alone and asserts: (a) 0039 SUCCEEDS, (b) exactly the NEWEST live row per (source,kind)
+  // survives, (c) already-revoked history is untouched, (d) the index now blocks a new live dup.
+  let dataDir: string;
+  let url: string;
+
+  beforeAll(() => {
+    dataDir = mkdtempSync(join(tmpdir(), "infinite-os-pglite-0039-dedupe-"));
+    url = `pglite://${dataDir}`;
+  });
+
+  afterAll(() => {
+    rmSync(dataDir, { recursive: true, force: true });
+  });
+
+  it("collapses duplicate live rows to the newest, preserves revoked history, then enforces uniqueness", async () => {
+    const all = loadMigrations();
+    const upTo0038 = all.filter((m) => m.id <= "0038_chat_action_calls_workspace_id.sql");
+    const m0039 = all.find((m) => m.id === "0039_connection_credentials_metadata.sql");
+    expect(m0039).toBeDefined();
+    // Sanity: 0039 (and therefore the partial-unique index) is NOT in the partial set yet.
+    expect(upTo0038.some((m) => m.id === "0039_connection_credentials_metadata.sql")).toBe(false);
+
+    // 1. Apply 0001..0038 only (connection_credentials exists; the unique index does NOT).
+    await runPgliteMigrations(url, upTo0038);
+
+    const db = createInfiniteOsDb(url);
+    try {
+      await db.withTransaction(async (tx) => {
+        await tx.ensureWorkspace("ws1", "WS");
+      });
+      await db.query(
+        "insert into datasets (id, workspace_id, key, label) values ('ds1','ws1','k','L')"
+      );
+      await db.query(
+        `insert into sources (id, workspace_id, dataset_id, provider, connection_name, account_external_id, status)
+         values ('src1','ws1','ds1','posthog','conn','acct','connected')`
+      );
+      // Three LIVE rows for (src1, access_token) with distinct created_at — exactly what main's
+      // plain-INSERT connectSource produced across three reconnects. cred_new is the NEWEST.
+      await db.query(
+        `insert into connection_credentials (id, workspace_id, source_id, credential_kind, encrypted_payload, created_at) values
+           ('cred_old','ws1','src1','access_token','enc1','2026-01-01T00:00:00Z'),
+           ('cred_mid','ws1','src1','access_token','enc2','2026-01-15T00:00:00Z'),
+           ('cred_new','ws1','src1','access_token','enc3','2026-02-01T00:00:00Z')`
+      );
+      // An already-REVOKED row for the same (source,kind): must remain untouched (history preserved).
+      await db.query(
+        `insert into connection_credentials (id, workspace_id, source_id, credential_kind, encrypted_payload, created_at, revoked_at)
+         values ('cred_rev','ws1','src1','access_token','enc0','2025-12-01T00:00:00Z','2025-12-02T00:00:00Z')`
+      );
+      // A DIFFERENT kind on the same source with a single live row: must survive independently.
+      await db.query(
+        `insert into connection_credentials (id, workspace_id, source_id, credential_kind, encrypted_payload, created_at)
+         values ('cred_rt','ws1','src1','refresh_token','encR','2026-01-10T00:00:00Z')`
+      );
+    } finally {
+      await db.close();
+    }
+
+    // 2. Apply 0039 alone — must NOT throw despite the 3 duplicate live access_token rows.
+    const applied0039 = await runPgliteMigrations(url, [m0039!]);
+    expect(applied0039).toEqual(["0039_connection_credentials_metadata.sql"]);
+
+    const db2 = createInfiniteOsDb(url);
+    try {
+      // (a) Exactly ONE live access_token row survives, and it is the NEWEST (cred_new).
+      const liveAccess = await db2.query<{ id: string }>(
+        `select id from connection_credentials
+          where source_id = 'src1' and credential_kind = 'access_token' and revoked_at is null`
+      );
+      expect(liveAccess).toHaveLength(1);
+      expect(liveAccess[0]?.id).toBe("cred_new");
+
+      // The older live dups were revoked (not deleted) — history retained.
+      const revokedNow = await db2.query<{ id: string }>(
+        `select id from connection_credentials
+          where id in ('cred_old','cred_mid') and revoked_at is not null order by id`
+      );
+      expect(revokedNow.map((r) => r.id)).toEqual(["cred_mid", "cred_old"]);
+
+      // (b) The originally-revoked row is untouched: same revoked_at timestamp, still revoked.
+      const preRevoked = await db2.query<{ revoked_at: string }>(
+        "select revoked_at from connection_credentials where id = 'cred_rev'"
+      );
+      expect(preRevoked).toHaveLength(1);
+      expect(new Date(preRevoked[0]!.revoked_at).toISOString()).toBe("2025-12-02T00:00:00.000Z");
+
+      // (c) The other credential_kind (single live row) is independent and survives.
+      const liveRt = await db2.query<{ id: string }>(
+        `select id from connection_credentials
+          where source_id = 'src1' and credential_kind = 'refresh_token' and revoked_at is null`
+      );
+      expect(liveRt.map((r) => r.id)).toEqual(["cred_rt"]);
+
+      // (d) The partial-unique index now EXISTS and blocks a second live row for the same kind.
+      const idx = await db2.query<{ indexname: string }>(
+        "select indexname from pg_indexes where indexname = 'connection_credentials_source_kind_uq'"
+      );
+      expect(idx).toHaveLength(1);
+      await expect(
+        db2.query(
+          `insert into connection_credentials (id, workspace_id, source_id, credential_kind, encrypted_payload)
+           values ('cred_dup','ws1','src1','access_token','encX')`
+        )
+      ).rejects.toThrow();
+    } finally {
+      await db2.close();
+    }
+  }, 60_000);
+});
