@@ -101,6 +101,7 @@ import {
   runCommand,
   runSlashCommand,
   bareInfiniteCommand,
+  cliVersion,
   resetTurnState,
   resolveProjectFlag,
   setupProjectStep,
@@ -4152,6 +4153,22 @@ describe("cli smoke", () => {
     expect(bareInfiniteCommand("codex import --force")).toBeNull();
     expect(bareInfiniteCommand("tell me about codex")).toBeNull();
     expect(bareInfiniteCommand("")).toBeNull();
+  });
+
+  it("cliVersion reports the root runtime version, not the un-bumped apps/cli version", () => {
+    const rootVersion = (
+      JSON.parse(readFileSync(new URL("../../../package.json", import.meta.url), "utf8")) as { version: string }
+    ).version;
+    expect(cliVersion()).toBe(rootVersion);
+
+    // Regression guard: never fall back to apps/cli/package.json, which is NOT
+    // bumped per release and showed a stale banner version (e.g. 0.1.0).
+    const cliPkgVersion = (
+      JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string }
+    ).version;
+    if (cliPkgVersion !== rootVersion) {
+      expect(cliVersion()).not.toBe(cliPkgVersion);
+    }
   });
 
   it("reuses existing Infinite OS Codex auth on login without touching Codex CLI", async () => {
