@@ -96,6 +96,7 @@ export async function refreshCodexAuth(
     }).toString()
   });
   if (!response.ok) {
+    await logCodexRefreshFailure(response);
     return null;
   }
   const json = (await response.json()) as Record<string, unknown>;
@@ -116,12 +117,103 @@ export async function refreshCodexAuth(
   return refreshed;
 }
 
+// Last-resort recovery when a stored refresh fails: the user may have
+// re-authenticated the upstream `codex` CLI out of band, which rewrites
+// ~/.codex/auth.json with a fresh token. Re-read that file UNCONDITIONALLY
+// (resolveCodexRuntimeCredentials only consults it when the store is empty), and
+// if it now carries a DIFFERENT token than the one that just failed, persist it
+// into the Infinite OS store and return it so the caller can retry. Returns null
+// when ~/.codex is absent, tokenless, or unchanged.
+export function reloadFreshlyRefreshedCodexImport(
+  env: NodeJS.ProcessEnv,
+  previousToken?: string
+): InfiniteOsAuthRecord | null {
+  const imported = codexImportCandidate(env);
+  if (!imported?.token) {
+    return null;
+  }
+  if (previousToken && imported.token === previousToken) {
+    return null;
+  }
+  // Don't adopt an already-expired ~/.codex token: a stale ~/.codex (older than
+  // the store) must not clobber a newer record with a dead token. Opaque
+  // (non-JWT) tokens have no readable exp — adopt them and let the server judge.
+  const importedExpiresAt = codexTokenExpiryMs(imported.token);
+  if (importedExpiresAt !== undefined && importedExpiresAt <= Date.now()) {
+    return null;
+  }
+  const record: InfiniteOsAuthRecord = {
+    provider: "codex",
+    source: imported.path,
+    authMode: imported.authMode ?? "codex-cli-import",
+    token: imported.token,
+    refreshToken: imported.refreshToken,
+    expiresAt: imported.expiresAt
+  };
+  writeInfiniteOsAuthRecord(record, env);
+  return record;
+}
+
+// Surface (never swallow) a non-2xx from the OAuth token endpoint so a failed
+// refresh is debuggable instead of a silent dead-end. Logs ONLY the HTTP status
+// and the OAuth `error` / `error_description` fields — never the refresh_token,
+// access_token, or request body (data-safety: error codes, not secrets).
+async function logCodexRefreshFailure(response: Response): Promise<void> {
+  let detail = "";
+  try {
+    const json = (await response.json()) as Record<string, unknown>;
+    detail = [stringValue(json.error), stringValue(json.error_description)]
+      .filter(Boolean)
+      .join(": ");
+  } catch {
+    detail = "";
+  }
+  console.warn(
+    `[codex-auth] token refresh failed: ${response.status}${detail ? ` ${detail}` : ""}`
+  );
+}
+
 function shouldRefreshCodexToken(auth: InfiniteOsAuthRecord): boolean {
-  const expiresAt = auth.expiresAt ? Date.parse(auth.expiresAt) : Number.NaN;
-  if (!Number.isFinite(expiresAt)) {
+  const expiresAtMs = codexExpiresAtMs(auth);
+  if (expiresAtMs === undefined) {
     return false;
   }
-  return expiresAt - Date.now() <= CODEX_REFRESH_SKEW_MS;
+  return expiresAtMs - Date.now() <= CODEX_REFRESH_SKEW_MS;
+}
+
+// Resolve the access-token expiry in epoch-ms. Prefer the stored ISO `expiresAt`,
+// but the upstream `codex` CLI writes `last_refresh` (not `expires_at`) into
+// ~/.codex/auth.json, so an imported record usually has no string expiry. Fall
+// back to the access-token JWT's `exp` claim so pre-emptive refresh still fires
+// for imported credentials instead of waiting for a 401.
+function codexExpiresAtMs(auth: InfiniteOsAuthRecord): number | undefined {
+  const stored = auth.expiresAt ? Date.parse(auth.expiresAt) : Number.NaN;
+  if (Number.isFinite(stored)) {
+    return stored;
+  }
+  return codexTokenExpiryMs(auth.token);
+}
+
+// Decode the `exp` claim (seconds since epoch) from a Codex OAuth access token (a
+// JWT). Non-JWT/opaque tokens are tolerated — return undefined so the caller
+// falls back to reactive (401-driven) refresh rather than throwing.
+function codexTokenExpiryMs(token: string | undefined): number | undefined {
+  if (typeof token !== "string" || !token.trim()) {
+    return undefined;
+  }
+  const parts = token.split(".");
+  if (parts.length < 2) {
+    return undefined;
+  }
+  try {
+    const padded = parts[1] + "=".repeat((4 - (parts[1].length % 4)) % 4);
+    const decoded = Buffer.from(padded, "base64url").toString("utf8");
+    const claims = JSON.parse(decoded) as Record<string, unknown>;
+    const exp = claims.exp;
+    return typeof exp === "number" && Number.isFinite(exp) ? exp * 1000 : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function stringValue(value: unknown): string | undefined {

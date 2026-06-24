@@ -100,6 +100,7 @@ import {
   runCliInput,
   runCommand,
   runSlashCommand,
+  bareInfiniteCommand,
   resetTurnState,
   resolveProjectFlag,
   setupProjectStep,
@@ -4011,6 +4012,148 @@ describe("cli smoke", () => {
     }
   });
 
+  it("forces a fresh Codex device-code login with `codex login --force` despite a valid session", async () => {
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-codex-force-"));
+    const codexHome = mkCodexHome({
+      access_token: "existing-codex-access",
+      refresh_token: "existing-codex-refresh",
+      expires_at: "2999-01-01T00:00:00.000Z"
+    });
+    const requests: string[] = [];
+    try {
+      // Seed a perfectly valid stored session via import — normally login reuses it.
+      await runCommand("auth", ["import", "codex"], {
+        GROWTH_OS_HOME: growthHome,
+        CODEX_HOME: codexHome
+      });
+      vi.stubGlobal("fetch", async (url: string | URL | Request) => {
+        const u = String(url);
+        requests.push(u);
+        if (u.endsWith("/api/accounts/deviceauth/usercode")) {
+          return new Response(JSON.stringify({ user_code: "FORCE-CODE", device_auth_id: "dev-1", interval: 0 }), { status: 200 });
+        }
+        if (u.endsWith("/api/accounts/deviceauth/token")) {
+          return new Response(JSON.stringify({ authorization_code: "auth-code-1", code_verifier: "verifier-1" }), { status: 200 });
+        }
+        if (u.endsWith("/oauth/token")) {
+          return new Response(JSON.stringify({ access_token: "forced-codex-access", refresh_token: "forced-codex-refresh", expires_at: "2999-01-01T00:00:00.000Z" }), { status: 200 });
+        }
+        return new Response(JSON.stringify({ error: "unexpected" }), { status: 500 });
+      });
+
+      const result = await runCommand("codex", ["login", "--force"], {
+        GROWTH_OS_HOME: growthHome,
+        CODEX_HOME: codexHome,
+        GROWTH_OS_CODEX_AUTH_BASE_URL: "https://auth.openai.test",
+        GROWTH_OS_CODEX_TOKEN_URL: "https://auth.openai.test/oauth/token",
+        GROWTH_OS_CODEX_AUTH_TIMEOUT_MS: "500",
+        GROWTH_OS_CODEX_AUTH_POLL_MS: "0",
+        GROWTH_OS_CODEX_AUTH_SILENT: "1"
+      });
+
+      expect(result).toMatchObject({ ok: true, provider: "codex", mode: "login", source: "growth-os-codex", reused: false });
+      // The device flow actually ran despite the valid imported session.
+      expect(requests).toContain("https://auth.openai.test/api/accounts/deviceauth/usercode");
+      expect(readFileSync(join(growthHome, "auth.json"), "utf8")).toContain("forced-codex-refresh");
+    } finally {
+      rmSync(growthHome, { recursive: true, force: true });
+      rmSync(codexHome, { recursive: true, force: true });
+    }
+  });
+
+  it("honors --force on the `auth login codex` alias too (parity with `codex login`)", async () => {
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-auth-codex-force-"));
+    const codexHome = mkCodexHome({
+      access_token: "existing-codex-access",
+      refresh_token: "existing-codex-refresh",
+      expires_at: "2999-01-01T00:00:00.000Z"
+    });
+    const requests: string[] = [];
+    try {
+      // A valid session exists (imported) — without --force this would reuse.
+      await runCommand("auth", ["import", "codex"], {
+        GROWTH_OS_HOME: growthHome,
+        CODEX_HOME: codexHome
+      });
+      vi.stubGlobal("fetch", async (url: string | URL | Request) => {
+        const u = String(url);
+        requests.push(u);
+        if (u.endsWith("/api/accounts/deviceauth/usercode")) {
+          return new Response(JSON.stringify({ user_code: "FORCE-CODE", device_auth_id: "dev-1", interval: 0 }), { status: 200 });
+        }
+        if (u.endsWith("/api/accounts/deviceauth/token")) {
+          return new Response(JSON.stringify({ authorization_code: "auth-code-1", code_verifier: "verifier-1" }), { status: 200 });
+        }
+        if (u.endsWith("/oauth/token")) {
+          return new Response(JSON.stringify({ access_token: "forced-via-auth-access", refresh_token: "forced-via-auth-refresh", expires_at: "2999-01-01T00:00:00.000Z" }), { status: 200 });
+        }
+        return new Response(JSON.stringify({ error: "unexpected" }), { status: 500 });
+      });
+
+      const result = await runCommand("auth", ["login", "codex", "--force"], {
+        GROWTH_OS_HOME: growthHome,
+        CODEX_HOME: codexHome,
+        GROWTH_OS_CODEX_AUTH_BASE_URL: "https://auth.openai.test",
+        GROWTH_OS_CODEX_TOKEN_URL: "https://auth.openai.test/oauth/token",
+        GROWTH_OS_CODEX_AUTH_TIMEOUT_MS: "500",
+        GROWTH_OS_CODEX_AUTH_POLL_MS: "0",
+        GROWTH_OS_CODEX_AUTH_SILENT: "1"
+      });
+
+      expect(result).toMatchObject({ ok: true, provider: "codex", mode: "login", source: "growth-os-codex", reused: false });
+      expect(requests).toContain("https://auth.openai.test/api/accounts/deviceauth/usercode");
+      expect(readFileSync(join(growthHome, "auth.json"), "utf8")).toContain("forced-via-auth-refresh");
+    } finally {
+      rmSync(growthHome, { recursive: true, force: true });
+      rmSync(codexHome, { recursive: true, force: true });
+    }
+  });
+
+  it("routes `codex import` and `codex status` like their auth aliases", async () => {
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-codex-route-"));
+    const codexHome = mkCodexHome({
+      access_token: "route-codex-access",
+      refresh_token: "route-codex-refresh",
+      expires_at: "2999-01-01T00:00:00.000Z"
+    });
+    try {
+      const imported = await runCommand("codex", ["import"], {
+        GROWTH_OS_HOME: growthHome,
+        CODEX_HOME: codexHome
+      });
+      expect(imported).toMatchObject({ ok: true, provider: "codex", mode: "import", imported: true });
+
+      const status = await runCommand("codex", ["status"], {
+        GROWTH_OS_HOME: growthHome,
+        CODEX_HOME: codexHome
+      });
+      expect(status).toMatchObject({ ok: true, provider: "codex" });
+    } finally {
+      rmSync(growthHome, { recursive: true, force: true });
+      rmSync(codexHome, { recursive: true, force: true });
+    }
+  });
+
+  it("recognizes bare `codex login` as a command but never swallows chat", () => {
+    expect(bareInfiniteCommand("codex login")).toEqual({ command: "codex", args: ["login"] });
+    expect(bareInfiniteCommand("codex login --force")).toEqual({ command: "codex", args: ["login", "--force"] });
+    expect(bareInfiniteCommand("codex login --reauth")).toEqual({ command: "codex", args: ["login", "--reauth"] });
+    expect(bareInfiniteCommand("infinite codex login")).toEqual({ command: "codex", args: ["login"] });
+    expect(bareInfiniteCommand("codex import")).toEqual({ command: "codex", args: ["import"] });
+    expect(bareInfiniteCommand("codex status")).toEqual({ command: "codex", args: ["status"] });
+    // Must fall through to chat (null) — never eat a normal message:
+    expect(bareInfiniteCommand("codex login is broken")).toBeNull();
+    expect(bareInfiniteCommand("why does codex login fail")).toBeNull();
+    expect(bareInfiniteCommand("/codex login")).toBeNull();
+    expect(bareInfiniteCommand("codex")).toBeNull();
+    expect(bareInfiniteCommand("codex login --yolo")).toBeNull();
+    expect(bareInfiniteCommand("codex login --force=1")).toBeNull();
+    expect(bareInfiniteCommand("Codex Login")).toBeNull();
+    expect(bareInfiniteCommand("codex import --force")).toBeNull();
+    expect(bareInfiniteCommand("tell me about codex")).toBeNull();
+    expect(bareInfiniteCommand("")).toBeNull();
+  });
+
   it("reuses existing Infinite OS Codex auth on login without touching Codex CLI", async () => {
     const growthHome = mkdtempSync(join(tmpdir(), "growth-os-codex-reuse-"));
     const binDir = mkdtempSync(join(tmpdir(), "codex-reuse-bin-"));
@@ -4507,7 +4650,7 @@ describe("cli smoke", () => {
             provider: "claude",
             source: "claude-code-credentials-file",
             ready: false,
-            reason: "Claude via OAuth (Claude Code setup-token/reuse credentials) is no longer supported. Set `ANTHROPIC_API_KEY` to use Claude, or run `infinite auth login codex` to use Codex."
+            reason: "Claude via OAuth (Claude Code setup-token/reuse credentials) is no longer supported. Set `ANTHROPIC_API_KEY` to use Claude, or run `codex login` to use Codex."
           }
         ]
       });

@@ -15,6 +15,7 @@ import type {
 import {
   DEFAULT_CODEX_BASE_URL,
   refreshCodexAuth,
+  reloadFreshlyRefreshedCodexImport,
   resolveCodexRuntimeCredentials
 } from "./model-auth/codex-auth.js";
 import { existsSync, readFileSync } from "node:fs";
@@ -38,7 +39,7 @@ const CLAUDE_CODE_VERSION_FALLBACK = "2.1.74";
 // Claude-Code OAuth completions are no longer supported (Anthropic ToS): there is
 // no first-party broker to route OAuth-bearer chat through. Steer users to an API key.
 const CLAUDE_OAUTH_UNSUPPORTED_MESSAGE =
-  "Claude via OAuth (Claude Code setup-token/reuse credentials) is no longer supported. Set `ANTHROPIC_API_KEY` to use Claude, or run `infinite auth login codex` to use Codex.";
+  "Claude via OAuth (Claude Code setup-token/reuse credentials) is no longer supported. Set `ANTHROPIC_API_KEY` to use Claude, or run `codex login` to use Codex.";
 
 export interface CreateConfiguredModelClientOptions {
   env?: NodeJS.ProcessEnv;
@@ -116,7 +117,7 @@ async function completeWithCodex(
 ): Promise<ModelResponse> {
   const credentials = await resolveCodexRuntimeCredentials({ env, fetch: fetchImpl });
   if (!credentials?.token) {
-    return { message: "Codex model auth is not configured. Run `infinite setup`, `infinite auth login codex`, or `infinite auth import codex`." };
+    return { message: "Codex model auth is not configured. Run `codex login` to sign in (from a terminal: `infinite setup` or `infinite codex login`)." };
   }
   const baseUrl = env.GROWTH_OS_CODEX_BASE_URL ?? DEFAULT_CODEX_BASE_URL;
   const responseUrl = `${baseUrl.replace(/\/$/, "")}/responses`;
@@ -129,12 +130,23 @@ async function completeWithCodex(
     tools: request.tools.map(codexTool)
   });
   let response = await fetchImpl(responseUrl, bearerRequest(credentials.token, responseBody));
+  let appliedToken = credentials.token;
   if (response.status === 401 && credentials.auth?.refreshToken) {
     const refreshed = await refreshCodexAuth(credentials.auth, env, fetchImpl);
     if (refreshed?.token) {
+      appliedToken = refreshed.token;
       response = await fetchImpl(responseUrl, bearerRequest(refreshed.token, responseBody));
-    } else {
-      return codexReloginResponse();
+    }
+  }
+  if (response.status === 401) {
+    // Refresh failed or wasn't possible. The user may have re-authenticated the
+    // upstream `codex` CLI out of band (refreshing ~/.codex). Re-import it if it
+    // now carries a DIFFERENT, still-live token, persist it, and retry once before
+    // giving up. Pass the LAST applied token (the refreshed one, if any) as the
+    // dedupe guard so a just-refreshed store record is never clobbered.
+    const reimported = reloadFreshlyRefreshedCodexImport(env, appliedToken);
+    if (reimported?.token) {
+      response = await fetchImpl(responseUrl, bearerRequest(reimported.token, responseBody));
     }
   }
   if (response.status === 401) {
@@ -147,7 +159,7 @@ async function completeWithCodex(
 function codexReloginResponse(): ModelResponse {
   return {
     message:
-      "Codex model auth expired and could not be refreshed. Run `infinite auth login codex` or `infinite auth import codex`, then retry."
+      "Codex model auth expired and could not be refreshed. Run `codex login` to re-authenticate (from a terminal: `infinite codex login`), then retry."
   };
 }
 
