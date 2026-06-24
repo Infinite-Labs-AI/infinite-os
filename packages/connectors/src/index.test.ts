@@ -3071,6 +3071,48 @@ console.log(JSON.stringify({ data: [] }));
     expect(queries.some((sql) => sql.includes("insert into sync_errors"))).toBe(true);
     expect(queries.some((sql) => sql.includes("insert into raw_records"))).toBe(false);
   });
+
+  it("records an undecryptable credential (key mismatch) as a non-retryable failure + marks the source error", async () => {
+    // Regression guard: the decrypt happens in planSync. Pre-fix, planSync ran OUTSIDE sync()'s
+    // try/catch, so a key-mismatch threw before recordSyncFailure could run — the source stayed
+    // "connected" and the worker re-enqueued the doomed sync forever (silent failure).
+    const prev = process.env.GROWTH_OS_ENCRYPTION_KEY;
+    process.env.GROWTH_OS_ENCRYPTION_KEY = "engine-current-key-not-a-default-aaaaaaaa";
+    try {
+      // Credential encrypted under a DIFFERENT key than the engine is configured with.
+      const wrongKeyPayload = encryptCredentialPayload(
+        { mode: "live", propertyId: "123", accessToken: "x", apiBaseUrl: "https://ga4.test" },
+        "a-different-but-valid-key-bbbbbbbbbbbbbbbb"
+      );
+      const queryLog: Array<{ sql: string; params?: unknown[] }> = [];
+      const statuses: Array<{ id: string; status: string }> = [];
+      const db = fakeDb({
+        queryLog,
+        credential: { credential_kind: "oauth_access_token", encrypted_payload: wrongKeyPayload }
+      });
+      db.updateSourceStatus = async (id: string, status: string) => {
+        statuses.push({ id, status });
+      };
+      const req = request("google_analytics_4");
+
+      await expect(connectorFor("google_analytics_4").sync(db, req)).rejects.toThrow(
+        /could not be decrypted/
+      );
+
+      const syncErr = queryLog.find((q) => q.sql.includes("insert into sync_errors"));
+      expect(syncErr, "a sync_errors row must be recorded on a decrypt failure").toBeTruthy();
+      expect(syncErr?.params).toContain("credential_undecryptable");
+      expect(syncErr?.params).toContain(false); // retryable = false (retrying never helps a key mismatch)
+      expect(statuses).toContainEqual({ id: req.sourceId, status: "error" });
+    } finally {
+      // Restore exactly — assigning `undefined` would set the env var to the string "undefined".
+      if (prev === undefined) {
+        delete process.env.GROWTH_OS_ENCRYPTION_KEY;
+      } else {
+        process.env.GROWTH_OS_ENCRYPTION_KEY = prev;
+      }
+    }
+  });
 });
 
 describe("oauth_token_id dual-read", () => {
