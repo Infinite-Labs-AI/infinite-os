@@ -6357,11 +6357,35 @@ export function maybeNotifyUpdateAvailable(env: CliEnv, options: MaybeNotifyUpda
 // The product version, read from this package's package.json (single source of
 // truth). `../package.json` resolves correctly from both the compiled entry
 // (apps/cli/dist/index.js) and the tsx source entry (apps/cli/src/index.ts).
-function cliVersion(): string {
+// Report the ROOT runtime version (package.json `name: "infinite-os-runtime"`),
+// which is the canonical version bumped by hand per release (AGENTS.md →
+// "Versioning & releases"). The previous impl read apps/cli/package.json, which
+// is NOT bumped — so the banner / `infinite version` showed a stale number
+// (e.g. 0.1.0) even after the runtime moved, which read as "the update didn't
+// land". Walk UP from this module to the nearest package.json named
+// "infinite-os-runtime"; fall back to the nearest package.json version, then
+// "0.0.0", so a relocated/packaged build still degrades gracefully.
+export function cliVersion(): string {
   try {
-    const pkgPath = fileURLToPath(new URL("../package.json", import.meta.url));
-    const pkg = JSON.parse(readFileSync(pkgPath, "utf8")) as { version?: string };
-    return typeof pkg.version === "string" && pkg.version ? pkg.version : "0.0.0";
+    let dir = dirname(fileURLToPath(import.meta.url));
+    let nearest: string | undefined;
+    for (let depth = 0; depth < 8; depth += 1) {
+      const pkgPath = join(dir, "package.json");
+      if (existsSync(pkgPath)) {
+        const pkg = JSON.parse(readFileSync(pkgPath, "utf8")) as { name?: string; version?: string };
+        const version = typeof pkg.version === "string" && pkg.version ? pkg.version : undefined;
+        if (pkg.name === "infinite-os-runtime" && version) {
+          return version;
+        }
+        nearest ??= version;
+      }
+      const parent = dirname(dir);
+      if (parent === dir) {
+        break;
+      }
+      dir = parent;
+    }
+    return nearest ?? "0.0.0";
   } catch {
     return "0.0.0";
   }
