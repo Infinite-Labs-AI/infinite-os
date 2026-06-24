@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { homedir, tmpdir } from "node:os";
 import { PassThrough } from "node:stream";
 import * as growthDb from "@infinite-os/db";
+import { encryptCredentialPayload } from "@infinite-os/core";
 import {
   createFileSessionMemoryStore,
   createOperatorSessionMemory,
@@ -38,6 +39,7 @@ import {
   applyCompletionSuggestion,
   applyComposerEdit,
   applySessionPin,
+  assertEncryptionKeyMatchesDatabase,
   cliBoot,
   decidePreTurnProjectSelection,
   resolveDistinctProjectMentions,
@@ -114,6 +116,86 @@ import {
   type CliAgentRuntime
 } from "./index.js";
 
+// Stub the engine DB client to an EMPTY database. Setup's key-mismatch guard
+// (assertEncryptionKeyMatchesDatabase) probes the DB for existing credentials; in these DB-free
+// "first-time install" smoke tests there are none, so the stub keeps them from connecting to a real
+// localhost Postgres (which a dev running the engine would have). Returns the spy so the caller can
+// .mockRestore() it in a finally.
+function stubEmptyEngineDb() {
+  return vi.spyOn(growthDb, "createInfiniteOsDb").mockReturnValue({
+    async one() {
+      return null;
+    },
+    async query() {
+      return [];
+    },
+    async close() {}
+  } as unknown as growthDb.InfiniteOsDb);
+}
+
+describe("assertEncryptionKeyMatchesDatabase", () => {
+  const KEY_A = "key-a-not-a-default-encryption-key-aaaaaaaa";
+  const KEY_B = "key-b-completely-different-encryption-key-bb";
+  const PG = "postgres://growth_os:pw@localhost:5432/growth_os";
+
+  function dbReturning(payload: string | null): (url: string) => Pick<growthDb.InfiniteOsDb, "one" | "close"> {
+    return () =>
+      ({
+        async one(sql: string) {
+          // The probe checks connection_credentials first, then oauth_tokens.
+          if (sql.includes("connection_credentials")) {
+            return payload ? { encrypted_payload: payload } : null;
+          }
+          return null;
+        },
+        async close() {}
+      }) as unknown as Pick<growthDb.InfiniteOsDb, "one" | "close">;
+  }
+
+  it("refuses when the DB holds a credential the resolved key cannot decrypt", async () => {
+    const createDb = dbReturning(encryptCredentialPayload({ token: "x" }, KEY_B));
+    await expect(
+      assertEncryptionKeyMatchesDatabase({ databaseUrl: PG, encryptionKey: KEY_A, createDb })
+    ).rejects.toThrow(/Refusing to write a new GROWTH_OS_ENCRYPTION_KEY/);
+  });
+
+  it("passes when the resolved key decrypts the DB's existing credential", async () => {
+    const createDb = dbReturning(encryptCredentialPayload({ token: "x" }, KEY_A));
+    await expect(
+      assertEncryptionKeyMatchesDatabase({ databaseUrl: PG, encryptionKey: KEY_A, createDb })
+    ).resolves.toBeUndefined();
+  });
+
+  it("passes when the DB has no credentials yet (fresh DB)", async () => {
+    await expect(
+      assertEncryptionKeyMatchesDatabase({ databaseUrl: PG, encryptionKey: KEY_A, createDb: dbReturning(null) })
+    ).resolves.toBeUndefined();
+  });
+
+  it("never connects for a non-postgres URL", async () => {
+    const createDb = vi.fn() as unknown as (url: string) => Pick<growthDb.InfiniteOsDb, "one" | "close">;
+    await expect(
+      assertEncryptionKeyMatchesDatabase({ databaseUrl: "file:///tmp/pglite", encryptionKey: KEY_A, createDb })
+    ).resolves.toBeUndefined();
+    expect(createDb).not.toHaveBeenCalled();
+  });
+
+  it("does not block when the credentials query fails (table absent / unreachable)", async () => {
+    const createDb = (() =>
+      ({
+        async one() {
+          throw new Error('relation "connection_credentials" does not exist');
+        },
+        async close() {}
+      }) as unknown as Pick<growthDb.InfiniteOsDb, "one" | "close">) as (
+      url: string
+    ) => Pick<growthDb.InfiniteOsDb, "one" | "close">;
+    await expect(
+      assertEncryptionKeyMatchesDatabase({ databaseUrl: PG, encryptionKey: KEY_A, createDb })
+    ).resolves.toBeUndefined();
+  });
+});
+
 type RunSetupWizardOptions = NonNullable<Parameters<typeof runSetupWizard>[2]>;
 type RunSetupOnboardingMock = NonNullable<RunSetupWizardOptions["runSetupOnboarding"]>;
 type ResumeSetupRunMock = NonNullable<RunSetupWizardOptions["resumeSetupRun"]>;
@@ -151,6 +233,9 @@ describe("cli smoke", () => {
     // one case never leaks into the next (production only ever has one daemon).
     invalidateApiBaseUrl();
     vi.unstubAllGlobals();
+    // Restore any vi.spyOn (e.g. the createInfiniteOsDb stubs below) so a spy never leaks into a
+    // later case.
+    vi.restoreAllMocks();
   });
 
   it("boots through the runtime package", () => {
@@ -2991,6 +3076,7 @@ describe("cli smoke", () => {
   });
 
   it("prints parseable JSON for setup --json", async () => {
+    stubEmptyEngineDb(); // setup's key guard probes the DB; keep this DB-free test off a real localhost PG
     const growthHome = mkdtempSync(join(tmpdir(), "growth-os-setup-json-home-"));
     const workspaceRoot = mkdtempSync(join(tmpdir(), "growth-os-setup-json-workspace-"));
     const home = mkdtempSync(join(tmpdir(), "growth-os-setup-json-claude-home-"));
@@ -3484,6 +3570,7 @@ describe("cli smoke", () => {
   });
 
   it("supports quick setup mode for first-time installs", async () => {
+    stubEmptyEngineDb(); // setup's key guard probes the DB; keep this DB-free test off a real localhost PG
     const growthHome = mkdtempSync(join(tmpdir(), "growth-os-quick-setup-home-"));
     const workspaceRoot = mkdtempSync(join(tmpdir(), "growth-os-quick-setup-workspace-"));
     const home = mkdtempSync(join(tmpdir(), "growth-os-quick-setup-claude-home-"));
@@ -3526,6 +3613,7 @@ describe("cli smoke", () => {
   });
 
   it("marks setup as reconfigure mode when existing install state is present", async () => {
+    stubEmptyEngineDb(); // setup's key guard probes the DB; keep this DB-free test off a real localhost PG
     const growthHome = mkdtempSync(join(tmpdir(), "growth-os-reconfigure-home-"));
     const workspaceRoot = mkdtempSync(join(tmpdir(), "growth-os-reconfigure-workspace-"));
     const home = mkdtempSync(join(tmpdir(), "growth-os-reconfigure-claude-home-"));
@@ -4783,6 +4871,7 @@ describe("cli smoke", () => {
   });
 
   it("maps compose-managed migration failures during runtime setup to actionable guidance", async () => {
+    stubEmptyEngineDb(); // setup's key guard probes the DB; keep this DB-free test off a real localhost PG
     const root = mkdtempSync(join(tmpdir(), "growth-os-runtime-migrate-failure-"));
     const binDir = mkdtempSync(join(tmpdir(), "growth-os-runtime-migrate-failure-bin-"));
     try {
