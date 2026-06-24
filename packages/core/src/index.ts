@@ -49,6 +49,22 @@ export function encryptCredentialPayload(payload: unknown, encryptionKey: string
   ).toString("base64")}`;
 }
 
+/**
+ * Thrown when a stored credential cannot be decrypted with the configured encryption key — i.e. the
+ * AES-256-GCM auth tag fails to verify (Node's raw error is the opaque "Unsupported state or unable
+ * to authenticate data"). This almost always means `GROWTH_OS_ENCRYPTION_KEY` differs from the key
+ * the credential was encrypted with (the key was rotated, or a different `.growth-os/.env` is in
+ * effect than the one used at connect time). It is NOT a transient/provider error: retrying never
+ * helps — the credential must be re-stored under the current key (reconnect the source). Callers map
+ * this to a typed, non-retryable failure so it surfaces as actionable instead of an opaque crash.
+ */
+export class CredentialDecryptError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "CredentialDecryptError";
+  }
+}
+
 export function decryptCredentialPayload<T = Record<string, unknown>>(
   encryptedPayload: string,
   encryptionKey: string
@@ -62,17 +78,27 @@ export function decryptCredentialPayload<T = Record<string, unknown>>(
   if (envelope.alg !== "aes-256-gcm") {
     throw new Error(`unsupported credential envelope algorithm: ${envelope.alg}`);
   }
-  const decipher = createDecipheriv(
-    "aes-256-gcm",
-    keyBytes(encryptionKey),
-    Buffer.from(envelope.iv, "base64")
-  );
-  decipher.setAuthTag(Buffer.from(envelope.tag, "base64"));
-  const plaintext = Buffer.concat([
-    decipher.update(Buffer.from(envelope.ciphertext, "base64")),
-    decipher.final()
-  ]);
-  return JSON.parse(plaintext.toString("utf8")) as T;
+  // keyBytes() is OUTSIDE the try so its specific "key not configured / is a default" errors keep
+  // propagating as-is; only an actual decrypt (auth-tag) failure becomes a CredentialDecryptError.
+  const key = keyBytes(encryptionKey);
+  try {
+    const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(envelope.iv, "base64"));
+    decipher.setAuthTag(Buffer.from(envelope.tag, "base64"));
+    const plaintext = Buffer.concat([
+      decipher.update(Buffer.from(envelope.ciphertext, "base64")),
+      decipher.final()
+    ]);
+    return JSON.parse(plaintext.toString("utf8")) as T;
+  } catch {
+    // Any failure past keyBytes() — an auth-tag mismatch (the common case: a different
+    // GROWTH_OS_ENCRYPTION_KEY than the one used to encrypt) or a corrupt/garbled envelope — means
+    // this stored credential can't be recovered with the current config. Both resolve the same way.
+    throw new CredentialDecryptError(
+      "credential could not be decrypted: the configured encryption key does not match the key it " +
+        "was encrypted with (or the stored payload is corrupt) — reconnect this source to re-store " +
+        "the credential under the current key"
+    );
+  }
 }
 
 export function isEncryptedCredentialPayload(value: string): boolean {

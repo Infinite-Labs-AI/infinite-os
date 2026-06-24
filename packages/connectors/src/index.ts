@@ -4,6 +4,7 @@ import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join, resolve } from "node:path";
 import {
+  CredentialDecryptError,
   decryptCredentialPayload,
   encryptCredentialPayload,
   isEncryptedCredentialPayload,
@@ -1248,9 +1249,14 @@ function createConnector<
       );
     },
     async sync(db, request) {
-      const plan = await this.planSync(db, request);
+      // planSync resolves (and DECRYPTS) the credential, so it MUST run inside the try: a decrypt
+      // failure here (key mismatch) used to throw before recordSyncFailure could run, leaving the
+      // source `connected` forever while the worker silently re-enqueued the doomed sync. `plan` is
+      // null until planSync succeeds; recordSyncFailure tolerates that.
+      let plan: SyncPlan | null = null;
       let extracted: ExtractedRecord<unknown>[];
       try {
+        plan = await this.planSync(db, request);
         await this.testConnection(db, request);
         extracted = await this.extract(db, request, plan);
       } catch (error) {
@@ -1410,8 +1416,10 @@ async function syncExtractedBatch(
 
 async function recordSyncFailure(
   db: InfiniteOsDb,
+  // `plan` is null when the failure happened DURING planning (e.g. an undecryptable credential), so
+  // there is no cursor to preserve — the cursor write is skipped in that case.
   request: SyncRequest,
-  plan: SyncPlan,
+  plan: SyncPlan | null,
   error: { code: string; message: string; retryable: boolean }
 ): Promise<void> {
   await db.withTransaction(async (tx) => {
@@ -1432,14 +1440,16 @@ async function recordSyncFailure(
       `,
       [`err_${randomUUID()}`, request.workspaceId, request.sourceId, request.syncRunId, error.code, error.message, error.retryable]
     );
-    await tx.query(
-      `
-        insert into sync_cursors (id, workspace_id, source_id, cursor_key, cursor_value)
-        values ($1,$2,$3,$4,$5)
-        on conflict (source_id, cursor_key) do nothing
-      `,
-      [`cursor_${randomUUID()}`, request.workspaceId, request.sourceId, plan.cursorKey, plan.cursorStart ?? ""]
-    );
+    if (plan) {
+      await tx.query(
+        `
+          insert into sync_cursors (id, workspace_id, source_id, cursor_key, cursor_value)
+          values ($1,$2,$3,$4,$5)
+          on conflict (source_id, cursor_key) do nothing
+        `,
+        [`cursor_${randomUUID()}`, request.workspaceId, request.sourceId, plan.cursorKey, plan.cursorStart ?? ""]
+      );
+    }
     await tx.updateSourceStatus(request.sourceId, "error");
   });
 }
@@ -6886,6 +6896,13 @@ class ConnectorError extends Error {
 function providerError(error: unknown): { code: string; message: string; retryable: boolean } {
   if (error instanceof ConnectorError) {
     return { code: error.code, message: error.message, retryable: error.retryable };
+  }
+  // A key-mismatch decrypt failure is NOT retryable — retrying the same undecryptable credential
+  // forever never helps (the worker only re-enqueues connected/degraded sources, so a non-retryable
+  // typed code lets the failure flip the source to `error` and stop the doomed loop). Reconnecting
+  // the source re-stores the credential under the current key.
+  if (error instanceof CredentialDecryptError) {
+    return { code: "credential_undecryptable", message: error.message, retryable: false };
   }
   return {
     code: "provider_api_error",
