@@ -156,6 +156,10 @@ interface ConnectorOAuthSession {
   expiresAt: string;
   code?: string;
   codeVerifier?: string;
+  // The exchanged OAuth token, held in-memory after the FIRST exchange so the list-properties step
+  // and the connect step can both use it (Google consumes the single-use auth code on first
+  // exchange). Never serialized out — redactConnectorOAuthSession whitelists fields and omits this.
+  token?: { accessToken: string; refreshToken?: string; expiresAt?: string };
   error?: string;
   completedAt?: string;
 }
@@ -1249,7 +1253,7 @@ export function createApp(options: {
         request.body ?? {},
         session.oauthAppPayload ?? null
       );
-      const token = await exchangeConnectorOAuthCode(session, exchangeBody);
+      const token = await ensureConnectorOAuthSessionToken(session, exchangeBody);
       const propertyId = stringBodyValue(request.body?.propertyId);
       const persistedOauth =
         database && (!propertyId || process.env.GROWTH_OS_ENCRYPTION_KEY)
@@ -1308,6 +1312,65 @@ export function createApp(options: {
       };
     }
   });
+
+  // GA4 property picker: list the properties this OAuth grant can see, server-side (the token never
+  // leaves the engine), so the desktop/CLI can show a picker before connecting — the GA4 twin of the
+  // Meta asset picker (list_meta_assets). Exchanges + HOLDS the token on the session so the follow-up
+  // /exchange (with the chosen propertyId) reuses it instead of re-spending the single-use code.
+  app.get<{ Params: { sessionId: string } }>(
+    "/oauth/sessions/:sessionId/ga4-properties",
+    async (request, reply) => {
+      if (request.auth.authority !== "operator") {
+        reply.code(403);
+        return { ok: false, error: { code: "operator_authority_required" } };
+      }
+      const ws = request.auth.workspaceId;
+      if (!ws) {
+        reply.code(400);
+        return { ok: false, error: { code: "unknown_workspace" } };
+      }
+      const session = oauthSessions.get(request.params.sessionId);
+      if (!session) {
+        reply.code(404);
+        return { ok: false, error: { code: "oauth_session_not_found" } };
+      }
+      if (session.status === "pending" && Date.parse(session.expiresAt) <= Date.now()) {
+        session.status = "failed";
+        session.error = "expired";
+      }
+      if (session.status !== "completed" || !session.code) {
+        reply.code(400);
+        return { ok: false, error: { code: "oauth_session_not_completed" } };
+      }
+      if (session.provider !== "google_analytics_4") {
+        reply.code(400);
+        return { ok: false, error: { code: "oauth_provider_not_supported" } };
+      }
+      if (session.workspaceId !== ws) {
+        reply.code(400);
+        return { ok: false, error: { code: "oauth_workspace_mismatch" } };
+      }
+      try {
+        const exchangeBody = mergeConnectorOAuthExchangeBodyWithStoredApp(
+          {},
+          session.oauthAppPayload ?? null
+        );
+        const token = await ensureConnectorOAuthSessionToken(session, exchangeBody);
+        const properties = await listGa4PropertySummaries(token.accessToken);
+        session.error = undefined;
+        return {
+          ok: true,
+          sessionId: session.sessionId,
+          provider: session.provider,
+          properties
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        reply.code(400);
+        return { ok: false, error: { code: "ga4_property_list_failed", message } };
+      }
+    }
+  );
 
   app.get<{
     Params: { provider: string };
@@ -1722,6 +1785,65 @@ async function exchangeConnectorOAuthCode(
     refreshToken: stringBodyValue(payload.refresh_token),
     expiresAt: expiresIn ? new Date(Date.now() + expiresIn * 1000).toISOString() : undefined
   };
+}
+
+// Exchange the single-use auth code at most ONCE per session and hold the result, so the
+// list-properties step and the connect step can both use the token (Google consumes the code on the
+// first exchange). The held token never leaves the engine — it is used only for server-side calls.
+async function ensureConnectorOAuthSessionToken(
+  session: ConnectorOAuthSession,
+  body: ConnectorOAuthExchangeRequestBody
+): Promise<{ accessToken: string; refreshToken?: string; expiresAt?: string }> {
+  if (session.token) {
+    return session.token;
+  }
+  const token = await exchangeConnectorOAuthCode(session, body);
+  session.token = token;
+  return token;
+}
+
+// Server-side GA4 property listing: the daemon calls the Admin API with the session's OAuth token,
+// exactly as the connectors call provider APIs server-side (the token NEVER leaves the engine). This
+// is the same `accountSummaries` call the `infinite setup` picker uses (packages/setup providers/ga4).
+async function listGa4PropertySummaries(
+  accessToken: string
+): Promise<Array<{ property: string; displayName: string; account: string; accountDisplayName: string }>> {
+  const base = "https://analyticsadmin.googleapis.com/v1beta";
+  const out: Array<{ property: string; displayName: string; account: string; accountDisplayName: string }> = [];
+  let pageToken: string | undefined;
+  do {
+    const url = new URL(`${base}/accountSummaries`);
+    url.searchParams.set("pageSize", "200");
+    if (pageToken) {
+      url.searchParams.set("pageToken", pageToken);
+    }
+    const response = await fetch(url, { headers: { authorization: `Bearer ${accessToken}` } });
+    if (!response.ok) {
+      throw new Error(`GA4 Admin API account list failed (${response.status})`);
+    }
+    const payload = (await response.json().catch(() => ({}))) as {
+      accountSummaries?: Array<{
+        account?: string;
+        displayName?: string;
+        propertySummaries?: Array<{ property?: string; displayName?: string }>;
+      }>;
+      nextPageToken?: string;
+    };
+    for (const account of payload.accountSummaries ?? []) {
+      for (const property of account.propertySummaries ?? []) {
+        if (property.property) {
+          out.push({
+            property: property.property,
+            displayName: property.displayName ?? property.property,
+            account: account.account ?? "",
+            accountDisplayName: account.displayName ?? ""
+          });
+        }
+      }
+    }
+    pageToken = payload.nextPageToken;
+  } while (pageToken);
+  return out;
 }
 
 async function readConnectorOAuthAppState(
