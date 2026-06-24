@@ -566,6 +566,187 @@ describe("Infinite OS app-hosted API/MCP skeleton", () => {
     }
   });
 
+  it("lists GA4 properties server-side for a completed session, never returning the token", async () => {
+    process.env.GROWTH_OS_PUBLIC_API_URL = "http://growth-os.test";
+    const originalFetch = globalThis.fetch;
+    const fetches: string[] = [];
+    let adminAuth: string | null = null;
+    globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+      const u = String(url);
+      fetches.push(u);
+      if (u.includes("/token")) {
+        return new Response(
+          JSON.stringify({ access_token: "ga4-access-token", refresh_token: "ga4-refresh-token", expires_in: 3600 }),
+          { status: 200 }
+        );
+      }
+      if (u.includes("analyticsadmin.googleapis.com") && u.includes("accountSummaries")) {
+        adminAuth = new Headers(init?.headers).get("authorization");
+        return new Response(
+          JSON.stringify({
+            accountSummaries: [
+              {
+                account: "accounts/9",
+                displayName: "Acme Inc",
+                propertySummaries: [
+                  { property: "properties/123", displayName: "Acme Web" },
+                  { property: "properties/456", displayName: "Acme App" }
+                ]
+              }
+            ]
+          }),
+          { status: 200 }
+        );
+      }
+      return new Response(JSON.stringify({ error: "unexpected" }), { status: 500 });
+    }) as typeof fetch;
+    const app = createApp({ database: workspaceProbeDb() });
+
+    try {
+      const created = await app.inject({
+        method: "POST",
+        url: "/oauth/sessions",
+        headers: OPERATOR_HEADERS,
+        payload: { provider: "google_analytics_4", clientId: "ga-client-id" }
+      });
+      const createdJson = created.json() as { sessionId: string; state: string };
+      await app.inject({
+        method: "GET",
+        url: `/oauth/callback/google_analytics_4?state=${createdJson.state}&code=auth-code`
+      });
+      const props = await app.inject({
+        method: "GET",
+        url: `/oauth/sessions/${createdJson.sessionId}/ga4-properties`,
+        headers: OPERATOR_HEADERS
+      });
+
+      expect(props.statusCode).toBe(200);
+      expect(props.json()).toMatchObject({
+        ok: true,
+        provider: "google_analytics_4",
+        properties: [
+          { property: "properties/123", displayName: "Acme Web", account: "accounts/9", accountDisplayName: "Acme Inc" },
+          { property: "properties/456", displayName: "Acme App", account: "accounts/9", accountDisplayName: "Acme Inc" }
+        ]
+      });
+      // The Admin API call was made SERVER-SIDE carrying the bearer token...
+      expect(adminAuth).toBe("Bearer ga4-access-token");
+      // ...and the token NEVER crosses back to the caller.
+      expect(JSON.stringify(props.json())).not.toContain("ga4-access-token");
+      expect(JSON.stringify(props.json())).not.toContain("ga4-refresh-token");
+    } finally {
+      globalThis.fetch = originalFetch;
+      // env restored by afterEach
+    }
+  });
+
+  it("reuses the held token: listing then connecting GA4 exchanges the single-use code only once", async () => {
+    process.env.DATABASE_URL = "postgres://test";
+    process.env.GROWTH_OS_ENCRYPTION_KEY = "test-encryption-key";
+    process.env.GROWTH_OS_OPERATOR_TOKEN = "operator-token";
+    process.env.GROWTH_OS_PUBLIC_API_URL = "http://growth-os.test";
+    const originalFetch = globalThis.fetch;
+    const storedCredentials: Array<{ credential_kind: string; encrypted_payload: string }> = [];
+    const db = {
+      query: async () => [],
+      one: async (sql: string) => {
+        if (sql.includes("from workspaces")) {
+          return { ok: 1 };
+        }
+        if (sql.includes("from connection_credentials")) {
+          return storedCredentials.at(-1) ?? null;
+        }
+        return null;
+      },
+      close: async () => {},
+      ensureWorkspace: async () => {},
+      ensureFirstPhaseDatasets: async () => {},
+      connectSource: async (input: { credentialKind?: string; encryptedPayload?: string }) => {
+        storedCredentials.push({
+          credential_kind: input.credentialKind ?? "fixture",
+          encrypted_payload: input.encryptedPayload ?? "fixture-encrypted"
+        });
+        return {
+          id: "src_ga4",
+          workspace_id: "default",
+          provider: "google_analytics_4",
+          connection_name: "GA4 Website",
+          account_external_id: "properties/123",
+          status: "connected"
+        };
+      },
+      updateSourceStatus: async () => {},
+      createJob: async () => ({}),
+      claimNextJob: async () => null,
+      completeJob: async () => {},
+      withTransaction: async <T,>(fn: (tx: InfiniteOsDb) => Promise<T>) => fn(db as unknown as InfiniteOsDb)
+    } as unknown as InfiniteOsDb;
+    const fetches: string[] = [];
+    globalThis.fetch = (async (url: RequestInfo | URL) => {
+      const u = String(url);
+      fetches.push(u);
+      if (u.includes("/token")) {
+        return new Response(
+          JSON.stringify({ access_token: "ga4-access-token", refresh_token: "ga4-refresh-token", expires_in: 3600 }),
+          { status: 200 }
+        );
+      }
+      if (u.includes("analyticsadmin.googleapis.com")) {
+        return new Response(
+          JSON.stringify({
+            accountSummaries: [
+              { account: "accounts/9", displayName: "Acme Inc", propertySummaries: [{ property: "properties/123", displayName: "Acme Web" }] }
+            ]
+          }),
+          { status: 200 }
+        );
+      }
+      // connect_source's GA4 live connection test hits the Data API.
+      if (u.includes("analyticsdata.googleapis.com")) {
+        return new Response(JSON.stringify({ rows: [] }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ error: "unexpected" }), { status: 500 });
+    }) as typeof fetch;
+    const app = createApp({ database: db });
+
+    try {
+      const created = await app.inject({
+        method: "POST",
+        url: "/oauth/sessions",
+        headers: OPERATOR_HEADERS,
+        payload: { provider: "google_analytics_4", clientId: "ga-client-id" }
+      });
+      const createdJson = created.json() as { sessionId: string; state: string };
+      await app.inject({
+        method: "GET",
+        url: `/oauth/callback/google_analytics_4?state=${createdJson.state}&code=auth-code`
+      });
+      // 1) list — exchanges the code -> token, held on the session.
+      const props = await app.inject({
+        method: "GET",
+        url: `/oauth/sessions/${createdJson.sessionId}/ga4-properties`,
+        headers: OPERATOR_HEADERS
+      });
+      // 2) connect the chosen property — must REUSE the held token, NOT re-exchange the spent code.
+      const exchange = await app.inject({
+        method: "POST",
+        url: `/oauth/sessions/${createdJson.sessionId}/exchange`,
+        headers: OPERATOR_HEADERS,
+        payload: { propertyId: "properties/123", connectionName: "GA4 Website" }
+      });
+
+      expect(props.statusCode).toBe(200);
+      expect(exchange.statusCode).toBe(200);
+      expect(exchange.json()).toMatchObject({ ok: true, status: "connected" });
+      // The single-use auth code was exchanged EXACTLY ONCE across both calls.
+      expect(fetches.filter((u) => u.includes("/token"))).toHaveLength(1);
+      expect(storedCredentials[0].credential_kind).toBe("oauth_access_token");
+    } finally {
+      globalThis.fetch = originalFetch;
+      // env restored by afterEach
+    }
+  });
+
   it("rejects GA4 OAuth exchange when the workspace header does not match the bound session workspace", async () => {
     const originalFetch = globalThis.fetch;
     process.env.GROWTH_OS_PUBLIC_API_URL = "http://growth-os.test";
