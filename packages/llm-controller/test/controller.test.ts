@@ -22,6 +22,14 @@ function mkCodexHome(tokens: Record<string, string>): string {
   return codexHome;
 }
 
+// Build a JWT-shaped Codex access token with a given `exp` (seconds since epoch).
+// The signature is irrelevant — only the base64url payload's `exp` claim is read.
+function makeJwtWithExp(expSeconds: number): string {
+  const header = Buffer.from(JSON.stringify({ alg: "none", typ: "JWT" })).toString("base64url");
+  const payload = Buffer.from(JSON.stringify({ exp: expSeconds })).toString("base64url");
+  return `${header}.${payload}.sig`;
+}
+
 describe("Infinite OS LLM controller", () => {
   it("executes model-selected read actions and synthesizes an answer with provenance", async () => {
     const registry = createInfiniteOsRegistry({
@@ -8200,6 +8208,200 @@ describe("Infinite OS LLM controller", () => {
     }
   });
 
+  it("pre-emptively refreshes a Codex token whose JWT exp is in the past (no stored expiresAt)", async () => {
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-codex-jwt-exp-"));
+    const fakeHome = mkdtempSync(join(tmpdir(), "growth-os-codex-jwt-home-"));
+    const requests: string[] = [];
+    // A Codex access token is a JWT; encode an `exp` 60s in the PAST. The stored
+    // record has NO `expiresAt` (mirrors a ~/.codex import, which carries
+    // `last_refresh`, not `expires_at`) — so expiry must come from the JWT claim.
+    const expiredJwt = makeJwtWithExp(Math.floor(Date.now() / 1000) - 60);
+    try {
+      const env = { GROWTH_OS_HOME: growthHome, HOME: fakeHome };
+      writeInfiniteOsModelSelection({ provider: "codex", model: "gpt-5.4" }, env);
+      writeInfiniteOsAuthRecord(
+        {
+          provider: "codex",
+          source: "codex-cli-import",
+          authMode: "device-code",
+          token: expiredJwt,
+          refreshToken: "codex-refresh-token"
+        },
+        env
+      );
+      const client = createConfiguredModelClient({
+        env,
+        fetch: async (url) => {
+          requests.push(String(url));
+          if (String(url) === "https://auth.openai.com/oauth/token") {
+            return new Response(
+              JSON.stringify({ access_token: "fresh-codex-token", refresh_token: "fresh-codex-refresh" }),
+              { status: 200 }
+            );
+          }
+          return new Response(JSON.stringify({ output_text: "OK." }), { status: 200 });
+        }
+      });
+
+      const response = await client.complete({
+        systemPrompt: "Use typed Infinite OS actions.",
+        userMessage: "Hello",
+        tools: [],
+        toolResults: []
+      });
+
+      expect(response.message).toBe("OK.");
+      // The refresh fires BEFORE the first /responses call (pre-emptive), so the
+      // token endpoint is hit first and the chat call uses the fresh token.
+      expect(requests[0]).toBe("https://auth.openai.com/oauth/token");
+      expect(requests[1]).toBe("https://chatgpt.com/backend-api/codex/responses");
+      expect(readInfiniteOsAuthState(env).providers.codex).toMatchObject({
+        token: "fresh-codex-token",
+        refreshToken: "fresh-codex-refresh"
+      });
+    } finally {
+      rmSync(growthHome, { recursive: true, force: true });
+      rmSync(fakeHome, { recursive: true, force: true });
+    }
+  });
+
+  it("re-imports a freshly-refreshed ~/.codex and retries when the stored refresh fails", async () => {
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-codex-reimport-"));
+    const codexHome = mkdtempSync(join(tmpdir(), "growth-os-codex-reimport-home-"));
+    const requests: string[] = [];
+    try {
+      const env = {
+        GROWTH_OS_HOME: growthHome,
+        CODEX_HOME: codexHome,
+        GROWTH_OS_CODEX_REFRESH_URL: "https://codex.example.test/oauth/token"
+      };
+      writeInfiniteOsModelSelection({ provider: "codex", model: "gpt-5.4" }, env);
+      writeInfiniteOsAuthRecord(
+        {
+          provider: "codex",
+          source: "codex-cli-import",
+          authMode: "device-code",
+          token: "stale-codex-token",
+          refreshToken: "stale-refresh-token"
+        },
+        env
+      );
+      // The user re-ran `codex login` out of band: ~/.codex now holds a DIFFERENT,
+      // fresh token that Infinite OS has not yet imported into its own store.
+      writeFileSync(
+        join(codexHome, "auth.json"),
+        JSON.stringify({ tokens: { access_token: "reimported-codex-token", refresh_token: "reimported-refresh" } })
+      );
+      const client = createConfiguredModelClient({
+        env,
+        fetch: async (url, init) => {
+          const u = String(url);
+          requests.push(u);
+          if (u === env.GROWTH_OS_CODEX_REFRESH_URL) {
+            return new Response(JSON.stringify({ error: "invalid_grant" }), { status: 400 });
+          }
+          if (u.endsWith("/responses")) {
+            const auth = new Headers(init?.headers).get("authorization");
+            // The stale token 401s; the re-imported token succeeds.
+            if (auth === "Bearer reimported-codex-token") {
+              return new Response(JSON.stringify({ output_text: "Recovered via re-import." }), { status: 200 });
+            }
+            return new Response(JSON.stringify({ error: "expired" }), { status: 401 });
+          }
+          return new Response(JSON.stringify({ output_text: "?" }), { status: 200 });
+        }
+      });
+
+      const response = await client.complete({
+        systemPrompt: "Use typed Infinite OS actions.",
+        userMessage: "Hello",
+        tools: [],
+        toolResults: []
+      });
+
+      expect(response.message).toBe("Recovered via re-import.");
+      expect(requests).toEqual([
+        "https://chatgpt.com/backend-api/codex/responses",
+        "https://codex.example.test/oauth/token",
+        "https://chatgpt.com/backend-api/codex/responses"
+      ]);
+      // The store is updated to the re-imported token so later turns skip the dance.
+      expect(readInfiniteOsAuthState(env).providers.codex).toMatchObject({
+        token: "reimported-codex-token",
+        refreshToken: "reimported-refresh"
+      });
+    } finally {
+      rmSync(growthHome, { recursive: true, force: true });
+      rmSync(codexHome, { recursive: true, force: true });
+    }
+  });
+
+  it("does NOT clobber a freshly-refreshed store token with an expired ~/.codex token", async () => {
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-codex-noclobber-"));
+    const codexHome = mkdtempSync(join(tmpdir(), "growth-os-codex-noclobber-home-"));
+    try {
+      const env = {
+        GROWTH_OS_HOME: growthHome,
+        CODEX_HOME: codexHome,
+        GROWTH_OS_CODEX_REFRESH_URL: "https://codex.example.test/oauth/token"
+      };
+      writeInfiniteOsModelSelection({ provider: "codex", model: "gpt-5.4" }, env);
+      writeInfiniteOsAuthRecord(
+        {
+          provider: "codex",
+          source: "codex-cli-import",
+          authMode: "device-code",
+          token: "stale-codex-token",
+          refreshToken: "stale-refresh-token"
+        },
+        env
+      );
+      // ~/.codex holds an OLDER token that is already expired per its own JWT exp —
+      // it must NOT overwrite the fresher token the in-turn refresh persisted.
+      writeFileSync(
+        join(codexHome, "auth.json"),
+        JSON.stringify({
+          tokens: {
+            access_token: makeJwtWithExp(Math.floor(Date.now() / 1000) - 3600),
+            refresh_token: "old-codex-refresh"
+          }
+        })
+      );
+      const client = createConfiguredModelClient({
+        env,
+        fetch: async (url) => {
+          const u = String(url);
+          if (u === env.GROWTH_OS_CODEX_REFRESH_URL) {
+            // Refresh SUCCEEDS, persisting a fresh token to the store…
+            return new Response(
+              JSON.stringify({ access_token: "fresh-store-token", refresh_token: "fresh-store-refresh" }),
+              { status: 200 }
+            );
+          }
+          // …but every /responses call 401s (transient), forcing the reimport branch.
+          return new Response(JSON.stringify({ error: "expired" }), { status: 401 });
+        }
+      });
+
+      const response = await client.complete({
+        systemPrompt: "Use typed Infinite OS actions.",
+        userMessage: "Hi",
+        tools: [],
+        toolResults: []
+      });
+
+      expect(response.message).toContain("Codex model auth expired and could not be refreshed");
+      // The store keeps the freshly-refreshed token — the expired ~/.codex token did NOT overwrite it.
+      expect(readInfiniteOsAuthState(env).providers.codex).toMatchObject({
+        token: "fresh-store-token",
+        refreshToken: "fresh-store-refresh"
+      });
+    } finally {
+      rmSync(growthHome, { recursive: true, force: true });
+      rmSync(codexHome, { recursive: true, force: true });
+    }
+  });
+
   it("uses the first-party Codex OAuth refresh endpoint by default", async () => {
     const growthHome = mkdtempSync(join(tmpdir(), "growth-os-codex-default-refresh-"));
     const requests: Array<{ url: string; body: string; headers: Headers }> = [];
@@ -8298,8 +8500,9 @@ describe("Infinite OS LLM controller", () => {
         toolResults: []
       });
 
-      expect(response.message).toContain("infinite auth login codex");
-      expect(response.message).toContain("infinite auth import codex");
+      expect(response.message).toContain("Codex model auth expired and could not be refreshed");
+      expect(response.message).toContain("codex login");
+      expect(response.message).toContain("infinite codex login");
     } finally {
       rmSync(growthHome, { recursive: true, force: true });
       rmSync(fakeHome, { recursive: true, force: true });
@@ -8308,8 +8511,11 @@ describe("Infinite OS LLM controller", () => {
 
   it("does not fall back to Claude when the selected Codex provider remains unauthorized", async () => {
     const growthHome = mkdtempSync(join(tmpdir(), "growth-os-codex-no-cross-fallback-"));
+    const fakeHome = mkdtempSync(join(tmpdir(), "growth-os-codex-no-cross-home-"));
     try {
-      const env = { GROWTH_OS_HOME: growthHome };
+      // Isolate HOME (empty) so the ~/.codex re-import fallback finds nothing and
+      // the test stays hermetic regardless of the dev/CI machine's real ~/.codex.
+      const env = { GROWTH_OS_HOME: growthHome, HOME: fakeHome };
       writeInfiniteOsModelSelection({ provider: "codex", model: "gpt-5.4" }, env);
       writeInfiniteOsAuthRecord(
         {
@@ -8353,6 +8559,7 @@ describe("Infinite OS LLM controller", () => {
       expect(requests.some((url) => url.includes("/messages"))).toBe(false);
     } finally {
       rmSync(growthHome, { recursive: true, force: true });
+      rmSync(fakeHome, { recursive: true, force: true });
     }
   });
 

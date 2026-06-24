@@ -291,7 +291,7 @@ interface RunSetupInterviewOptions {
 // Claude-Code OAuth completions are no longer supported (Anthropic ToS — no
 // first-party broker to route OAuth-bearer chat through). Steer users to an API key.
 const CLAUDE_OAUTH_UNSUPPORTED_REASON =
-  "Claude via OAuth (Claude Code setup-token/reuse credentials) is no longer supported. Set `ANTHROPIC_API_KEY` to use Claude, or run `infinite auth login codex` to use Codex.";
+  "Claude via OAuth (Claude Code setup-token/reuse credentials) is no longer supported. Set `ANTHROPIC_API_KEY` to use Claude, or run `codex login` to use Codex.";
 
 export interface SetupReadiness {
   ok: boolean;
@@ -692,6 +692,7 @@ const INTERACTIVE_COMMAND_COMPLETIONS: readonly CompletionSuggestion[] = [
   { value: "/mcp", description: "List app-hosted MCP tools" },
   { value: "/tools", description: "List app-hosted MCP tools" },
   { value: "/auth", description: "Manage model auth" },
+  { value: "/codex", description: "Sign in to Codex (login, import, status)" },
   { value: "/model", description: "Manage model selection" },
   { value: "/project", description: "Create, list, or switch projects" },
   { value: "/exit", description: "Exit the interactive shell" },
@@ -1210,6 +1211,35 @@ export interface PreTurnProjectSelection {
   originalLine: string;
 }
 
+// Recognize a small allow-list of auth commands typed WITHOUT a leading slash in
+// the TUI (e.g. `codex login`), so the command we suggest in error messages is
+// literally typeable. Matched against the WHOLE line + only known flags, so it
+// can never swallow a normal chat message — `codex login is broken` has trailing
+// tokens and falls through to chat. An optional leading `infinite` is tolerated.
+export function bareInfiniteCommand(line: string): { command: string; args: string[] } | null {
+  const trimmed = line.trim();
+  if (!trimmed || trimmed.startsWith("/")) {
+    return null;
+  }
+  let tokens = trimmed.split(/\s+/);
+  if (tokens[0] === "infinite") {
+    tokens = tokens.slice(1);
+  }
+  if (tokens.length < 2 || tokens[0] !== "codex") {
+    return null;
+  }
+  const sub = tokens[1];
+  if (sub !== "login" && sub !== "import" && sub !== "status") {
+    return null;
+  }
+  const flags = tokens.slice(2);
+  const allowed = sub === "login" ? ["--force", "--reauth"] : [];
+  if (!flags.every((flag) => allowed.includes(flag))) {
+    return null;
+  }
+  return { command: "codex", args: tokens.slice(1) };
+}
+
 // PR5 pre-turn gate. Decide whether a line must route to the project picker
 // BEFORE building the runtime (a pin-less session fail-closes at runtime
 // construction). Returns the picker options + the original line to answer once a
@@ -1228,6 +1258,12 @@ export interface PreTurnProjectSelection {
 export function decidePreTurnProjectSelection(env: CliEnv, line: string): PreTurnProjectSelection | undefined {
   const trimmed = line.trim();
   if (!trimmed) {
+    return undefined;
+  }
+
+  // Bare auth commands (e.g. `codex login`) dispatch as commands, not chat — they
+  // never need a project pin, so bypass the picker just like slash commands do.
+  if (bareInfiniteCommand(trimmed)) {
     return undefined;
   }
 
@@ -1321,8 +1357,10 @@ export function helpText(): string {
     "  init                           Create .growth-os config files",
     "",
     "Model/auth:",
-    "  auth login codex               Start Infinite OS-owned Codex login",
-    "  auth import codex              Import existing Codex CLI credentials",
+    "  codex login                    Sign in to Codex (browser); --force re-auths an existing session",
+    "  codex import                   Import existing Codex CLI credentials (~/.codex)",
+    "  auth login codex               Alias for `codex login`",
+    "  auth import codex              Alias for `codex import`",
     "  auth login claude --mode <reuse|setup-token|growth-os-oauth>",
     "  auth status [codex|claude]      Show model auth status without printing tokens",
     "  model list                     List supported login-backed model providers",
@@ -1549,7 +1587,7 @@ function isUnknownCommandError(error: unknown, command: string): boolean {
 const ACTIVE_PROJECT_EXEMPT_COMMANDS = new Set([
   "help", "--help", "-h", "version", "--version", "-v", "init", "setup",
   "start", "up", "update", "stop", "migrate", "logs", "status", "health", "auth",
-  "model", "recipes", "project"
+  "codex", "model", "recipes", "project"
 ]);
 
 export async function runCommand(
@@ -1677,6 +1715,9 @@ export async function runCommand(
   }
   if (command === "auth") {
     return authCommand(args, env);
+  }
+  if (command === "codex") {
+    return codexCommand(args, env);
   }
   if (command === "model") {
     return modelCommand(args, env);
@@ -6955,6 +6996,15 @@ export async function runSlashCommand(
   agentRuntime?: CliAgentRuntimeSource,
   options: RunSlashCommandOptions = {}
 ): Promise<unknown> {
+  // Bare auth commands typed without a slash (e.g. `codex login`) dispatch as
+  // commands so the suggestion we print is literally typeable in the TUI. The
+  // matcher is strict (whole-line + known flags), so real chat is never eaten.
+  const bareCommand = bareInfiniteCommand(line);
+  if (bareCommand) {
+    const result = await runCommand(bareCommand.command, bareCommand.args, env, { onProgress: options.onProgress });
+    rememberResult(memory, memoryStore, result);
+    return result;
+  }
   if (!line.startsWith("/")) {
     memory?.rememberQuestion(line);
     const progress = options.onProgress
@@ -8057,7 +8107,8 @@ async function authCommand(args: string[], env: CliEnv): Promise<Record<string, 
     throw new Error("auth requires login, import, or status");
   }
   if (provider === "codex") {
-    return codexLogin(env);
+    const force = hasFlag(rest, "--force") || hasFlag(rest, "--reauth");
+    return codexLogin(env, { force });
   }
   if (provider === "claude") {
     const mode = optionValue(rest, "--mode") ?? "reuse";
@@ -8088,6 +8139,25 @@ async function authCommand(args: string[], env: CliEnv): Promise<Record<string, 
     throw new Error("claude auth mode must be reuse, setup-token, or growth-os-oauth");
   }
   throw new Error("auth login requires provider codex or claude");
+}
+
+// `codex <login|import|status>` — a provider-first surface that mirrors the
+// upstream `codex` CLI (better muscle memory than `auth login codex`). `auth …`
+// stays as an alias. `codex login --force`/`--reauth` bypasses the idempotent
+// reuse short-circuit and always runs a fresh Infinite OS-owned device login.
+async function codexCommand(args: string[], env: CliEnv): Promise<Record<string, unknown>> {
+  const [subcommand = "login", ...rest] = args;
+  if (subcommand === "login") {
+    const force = hasFlag(rest, "--force") || hasFlag(rest, "--reauth");
+    return codexLogin(env, { force });
+  }
+  if (subcommand === "import") {
+    return codexImportStatus(env);
+  }
+  if (subcommand === "status") {
+    return authCommand(["status", "codex"], env);
+  }
+  throw new Error("codex requires login, import, or status");
 }
 
 async function verifyInfiniteOsProviderAuth(
@@ -8293,7 +8363,7 @@ function isUsableAuthRecord(record: {
 
 function modelAuthRerunCommand(provider: InfiniteOsModelProvider): string {
   return provider === "codex"
-    ? "infinite auth login codex"
+    ? "infinite codex login"
     : "infinite auth login claude --mode setup-token";
 }
 
@@ -8394,41 +8464,49 @@ export function renderDetectedModelAuthStatus(env: CliEnv): string {
   return lines.join("\n");
 }
 
-async function codexLogin(env: CliEnv): Promise<Record<string, unknown>> {
-  const existing = readInfiniteOsAuthState(env as NodeJS.ProcessEnv).providers.codex;
-  if (existing?.token && !isExpired(existing.expiresAt)) {
-    return {
-      ok: true,
-      provider: "codex",
-      mode: "login",
-      source: existing.source,
-      authMode: existing.authMode,
-      reused: true
-    };
-  }
-  if (existing?.refreshToken) {
-    const refreshed = await refreshStoredCodexAuth(existing, env);
-    if (refreshed?.token && !isExpired(refreshed.expiresAt)) {
+async function codexLogin(
+  env: CliEnv,
+  options: { force?: boolean } = {}
+): Promise<Record<string, unknown>> {
+  // Default is idempotent reuse (fast, no surprise browser pop). `--force`/
+  // `--reauth` skips every reuse path and runs a fresh device login, so a user
+  // can re-authenticate even when a valid session already exists.
+  if (!options.force) {
+    const existing = readInfiniteOsAuthState(env as NodeJS.ProcessEnv).providers.codex;
+    if (existing?.token && !isExpired(existing.expiresAt)) {
       return {
         ok: true,
         provider: "codex",
         mode: "login",
-        source: refreshed.source,
-        authMode: refreshed.authMode,
-        reused: true,
-        refreshed: true
-      };
-    }
-  }
-  const importCandidate = codexImportCandidate(env);
-  if (importCandidate?.token || importCandidate?.refreshToken) {
-    const imported = codexImportStatus(env);
-    if (imported.imported) {
-      return {
-        ...imported,
-        mode: "login",
+        source: existing.source,
+        authMode: existing.authMode,
         reused: true
       };
+    }
+    if (existing?.refreshToken) {
+      const refreshed = await refreshStoredCodexAuth(existing, env);
+      if (refreshed?.token && !isExpired(refreshed.expiresAt)) {
+        return {
+          ok: true,
+          provider: "codex",
+          mode: "login",
+          source: refreshed.source,
+          authMode: refreshed.authMode,
+          reused: true,
+          refreshed: true
+        };
+      }
+    }
+    const importCandidate = codexImportCandidate(env);
+    if (importCandidate?.token || importCandidate?.refreshToken) {
+      const imported = codexImportStatus(env);
+      if (imported.imported) {
+        return {
+          ...imported,
+          mode: "login",
+          reused: true
+        };
+      }
     }
   }
   const tokens = await runCodexDeviceCodeLogin(env);
