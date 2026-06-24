@@ -1351,6 +1351,11 @@ export function createApp(options: {
         return { ok: false, error: { code: "oauth_workspace_mismatch" } };
       }
       try {
+        // Source clientSecret/tokenUrl ONLY from the stored OAuth app (empty per-request body) — the
+        // listing step has no client-supplied secret. This is safe with the held-token model: if this
+        // first exchange fails (e.g. missing secret) it throws BEFORE caching, so the code is NOT
+        // consumed and a later secret-bearing POST /exchange still succeeds. Do NOT "fix" this to read
+        // a per-request secret — there is none here, and the held token makes a second exchange a bug.
         const exchangeBody = mergeConnectorOAuthExchangeBodyWithStoredApp(
           {},
           session.oauthAppPayload ?? null
