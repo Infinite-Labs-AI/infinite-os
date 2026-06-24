@@ -11,7 +11,11 @@ import { homedir } from "node:os";
 import { stdin as input, stderr as errorOutput, stdout as output } from "node:process";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
-import { generateEncryptionKey } from "@infinite-os/core";
+import {
+  CredentialDecryptError,
+  decryptCredentialPayload,
+  generateEncryptionKey
+} from "@infinite-os/core";
 import {
   consumeAssistantStreamSurface,
   createInteractiveProgressReporter,
@@ -1768,10 +1772,14 @@ function initWorkspace(env: CliEnv): Record<string, unknown> {
     writeFileSync(configPath, "runtime_mode: local\napp_host: 127.0.0.1\napp_port: 3000\n");
   }
   if (!existsSync(envPath)) {
+    // NOTE: `init` writes only the PROJECT .env (it never mirrors to the machine-home rendezvous the
+    // desktop daemon reads), so it is not the credential-orphaning path that `setup` is. The DB-probe
+    // guard lives on writeRuntimeSetupFiles (the only mirror writer); adding it here would also turn
+    // `init` — used pervasively as lightweight test scaffolding — into a DB-dependent operation.
     writeFileSync(
       envPath,
       [
-        "DATABASE_URL=postgres://growth_os:growth_os_dev@localhost:5432/growth_os",
+        `DATABASE_URL=${DEFAULT_PROJECT_DATABASE_URL}`,
         `GROWTH_OS_ENCRYPTION_KEY=${generateEncryptionKey()}`,
         "GROWTH_OS_READ_TOKEN=dev-read-token",
         "GROWTH_OS_OPERATOR_TOKEN=dev-operator-token",
@@ -3967,12 +3975,104 @@ function currentModelSummary(env: CliEnv): {
   };
 }
 
-function writeRuntimeSetupFiles(options: {
+// Returns true ONLY when the database already holds a credential that `key` cannot decrypt — a
+// proven key mismatch. Never rejects: connection/query/missing-table errors resolve to false so an
+// unreachable or fresh DB is treated as "nothing to protect".
+async function probeForCredentialKeyMismatch(
+  db: Pick<InfiniteOsDb, "one">,
+  key: string
+): Promise<boolean> {
+  let payload: string | null = null;
+  try {
+    const fromCreds = await db.one<{ encrypted_payload: string | null }>(
+      "select encrypted_payload from connection_credentials where encrypted_payload is not null order by created_at limit 1"
+    );
+    payload = fromCreds?.encrypted_payload ?? null;
+    if (!payload) {
+      const fromTokens = await db.one<{ encrypted_payload: string | null }>(
+        "select encrypted_payload from oauth_tokens where encrypted_payload is not null order by created_at limit 1"
+      );
+      payload = fromTokens?.encrypted_payload ?? null;
+    }
+  } catch {
+    return false; // tables don't exist yet (fresh DB) or the query failed — not a proven mismatch
+  }
+  if (!payload) return false; // empty DB — safe to set any key
+  try {
+    decryptCredentialPayload(payload, key);
+    return false; // decrypts cleanly → the key matches the DB's credentials
+  } catch (err) {
+    return err instanceof CredentialDecryptError; // true only on a genuine decrypt mismatch
+  }
+}
+
+/**
+ * Guard against silently re-keying a database that already holds connector credentials.
+ *
+ * The CLI resolves `GROWTH_OS_ENCRYPTION_KEY` from env → project `.env` → machine-home `.env` →
+ * `generateEncryptionKey()`. None of those know which key the *target database's* stored credentials
+ * were actually encrypted with. Resolving a fresh/different key for a DB that already has credentials
+ * makes every one of them undecryptable (syncs fail), and — because the setup flow mirrors the key
+ * into `~/.growth-os/.env` — the desktop daemon inherits the wrong key too.
+ *
+ * So before persisting/mirroring a key, probe the target DB: if it already contains a credential the
+ * resolved key cannot decrypt, REFUSE rather than orphan it. Conservative by design — any uncertainty
+ * (non-postgres URL, unreachable DB, absent tables, empty DB, timeout) is treated as "nothing to
+ * protect" and does NOT block setup. Only a PROVEN decrypt mismatch throws.
+ */
+export async function assertEncryptionKeyMatchesDatabase(opts: {
+  databaseUrl: string;
+  encryptionKey: string;
+  createDb?: (databaseUrl: string) => Pick<InfiniteOsDb, "one" | "close">;
+}): Promise<void> {
+  // Only a real Postgres database can hold pre-existing credentials we'd orphan.
+  if (!/^postgres(ql)?:\/\//i.test(opts.databaseUrl)) return;
+  const makeDb = opts.createDb ?? createInfiniteOsDb;
+  let db: Pick<InfiniteOsDb, "one" | "close">;
+  try {
+    db = makeDb(opts.databaseUrl);
+  } catch {
+    return; // couldn't even construct a client — nothing to validate
+  }
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const mismatch = await Promise.race([
+      probeForCredentialKeyMismatch(db, opts.encryptionKey),
+      // Never let an unreachable DB hang setup; on timeout assume "nothing proven" → don't block.
+      new Promise<boolean>((resolve) => {
+        timer = setTimeout(() => resolve(false), 4000);
+      })
+    ]);
+    if (mismatch) {
+      throw new Error(
+        "Refusing to write a new GROWTH_OS_ENCRYPTION_KEY: the target database already contains " +
+          "connector credentials encrypted with a DIFFERENT key, and the resolved key cannot decrypt " +
+          "them. Proceeding would orphan every stored credential (syncs would fail silently). Set " +
+          "GROWTH_OS_ENCRYPTION_KEY to the key that originally encrypted them — the value in the " +
+          ".growth-os/.env used when the sources were connected — or reconnect the sources to " +
+          "re-encrypt them under the new key."
+      );
+    }
+  } finally {
+    if (timer) clearTimeout(timer);
+    // Best-effort cleanup. If the DB was unreachable the probe left an in-flight connection, and
+    // pool.close() would then block until the OS TCP timeout (~75-120s) — so cap the wait. The
+    // cleanup timer is unref'd so it can never itself keep the process alive.
+    await Promise.race([
+      Promise.resolve(db.close()).catch(() => {}),
+      new Promise<void>((resolve) => {
+        setTimeout(resolve, 2000).unref?.();
+      })
+    ]);
+  }
+}
+
+async function writeRuntimeSetupFiles(options: {
   workspaceRoot: string;
   databaseUrl: string;
   mode: RuntimeSetupMode;
   env: CliEnv;
-}): { configPath: string; envPath: string; databaseUrlRedacted: string } {
+}): Promise<{ configPath: string; envPath: string; databaseUrlRedacted: string }> {
   const growthDir = join(options.workspaceRoot, ".growth-os");
   mkdirSync(growthDir, { recursive: true });
   const envPath = join(growthDir, ".env");
@@ -4004,6 +4104,15 @@ function writeRuntimeSetupFiles(options: {
       machineHomeEnv.GROWTH_OS_OPERATOR_TOKEN ??
       "dev-operator-token"
   };
+  // Before persisting the key into the project .env AND mirroring it into ~/.growth-os/.env (which
+  // the desktop daemon reads), refuse if it can't decrypt credentials the target DB already holds —
+  // otherwise we'd silently orphan them. Skipped in dry-run (no real DB to probe).
+  if (options.env.GROWTH_OS_CLI_DRY_RUN !== "1") {
+    await assertEncryptionKeyMatchesDatabase({
+      databaseUrl: deploymentEnv.DATABASE_URL,
+      encryptionKey: deploymentEnv.GROWTH_OS_ENCRYPTION_KEY
+    });
+  }
   writeFileSync(
     envPath,
     [
@@ -4235,7 +4344,7 @@ async function setupRuntimeSection(args: string[], env: CliEnv): Promise<Record<
   }
 
   const workspaceRoot = workspaceRootFor(env);
-  const files = writeRuntimeSetupFiles({
+  const files = await writeRuntimeSetupFiles({
     workspaceRoot,
     databaseUrl,
     mode,
