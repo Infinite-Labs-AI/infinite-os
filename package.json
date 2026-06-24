@@ -1,6 +1,6 @@
 {
   "name": "infinite-os-runtime",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Self-hosted growth-analytics runtime for GA4, PostHog, and Stripe.",
   "author": "Ultima AI, Inc",
   "private": true,

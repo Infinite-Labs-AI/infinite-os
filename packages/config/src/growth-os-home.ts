@@ -20,7 +20,13 @@ export interface InfiniteOsAuthRecord {
 }
 
 export interface InfiniteOsAuthState {
-  providers: Partial<Record<InfiniteOsModelProvider, InfiniteOsAuthRecord>>;
+  // Known MODEL providers (codex/claude) are typed; arbitrary sibling keys are
+  // carried opaquely so the engine never clobbers records it does not own — e.g.
+  // the desktop's `supabase` session written to the same ~/.growth-os/auth.json.
+  // The `& Record<string, unknown>` collapses to InfiniteOsAuthRecord|undefined
+  // for the known keys (named or computed by InfiniteOsModelProvider) and yields
+  // `unknown` for everything else.
+  providers: Partial<Record<InfiniteOsModelProvider, InfiniteOsAuthRecord>> & Record<string, unknown>;
   updatedAt?: string;
 }
 
@@ -117,7 +123,10 @@ export function readInfiniteOsAuthSummary(env: NodeJS.ProcessEnv = process.env):
   return {
     authPath,
     hasInfiniteOsAuth: existsSync(authPath),
-    providers: Object.values(state.providers)
+    // Only surface the known MODEL providers — opaque passthrough siblings (e.g.
+    // a desktop `supabase` record) must never leak into model-auth status.
+    providers: (["codex", "claude"] as const)
+      .map((provider) => state.providers[provider])
       .filter((record): record is InfiniteOsAuthRecord => Boolean(record))
       .map((record) => ({
         provider: record.provider,
@@ -169,10 +178,18 @@ export function writeInfiniteOsAuthRecord(
 }
 
 function sanitizeAuthState(input: Partial<InfiniteOsAuthState>): InfiniteOsAuthState {
-  const providers: Partial<Record<InfiniteOsModelProvider, InfiniteOsAuthRecord>> = {};
+  // Preserve EVERY provider key untouched (opaque passthrough) so the engine
+  // never clobbers records it does not own — e.g. the desktop's `supabase`
+  // session in the same ~/.growth-os/auth.json (the writer lives in the closed
+  // desktop repo). Only the known MODEL providers (codex/claude) are
+  // re-sanitized into the typed InfiniteOsAuthRecord shape; a missing or
+  // malformed codex/claude record is dropped (not passed through).
+  const rawProviders = (input.providers ?? {}) as Record<string, unknown>;
+  const providers: Record<string, unknown> = { ...rawProviders };
   for (const provider of ["codex", "claude"] as const) {
-    const record = input.providers?.[provider];
-    if (!record || record.provider !== provider) {
+    const record = rawProviders[provider];
+    if (!isModelAuthRecord(record, provider)) {
+      delete providers[provider];
       continue;
     }
     providers[provider] = {
@@ -186,7 +203,18 @@ function sanitizeAuthState(input: Partial<InfiniteOsAuthState>): InfiniteOsAuthS
     };
   }
   return {
-    providers,
+    providers: providers as InfiniteOsAuthState["providers"],
     updatedAt: typeof input.updatedAt === "string" ? input.updatedAt : undefined
   };
+}
+
+function isModelAuthRecord(
+  value: unknown,
+  provider: InfiniteOsModelProvider
+): value is InfiniteOsAuthRecord {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    (value as { provider?: unknown }).provider === provider
+  );
 }

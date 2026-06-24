@@ -225,6 +225,127 @@ describe("Infinite OS config loading", () => {
       }
     });
   });
+
+  it("preserves an unknown sibling provider (e.g. desktop supabase) when writing a model record", ({ task }) => {
+    const growthHome = join("/tmp", `growth-os-auth-passthrough-${task.id}`);
+    const env = { GROWTH_OS_HOME: growthHome };
+    const authPath = infiniteOsAuthPath(env);
+
+    // The desktop wrote a `supabase` session (opaque, NOT InfiniteOsAuthRecord
+    // shape) into the SAME ~/.growth-os/auth.json.
+    mkdirSync(growthHome, { recursive: true });
+    writeFileSync(
+      authPath,
+      JSON.stringify({
+        providers: {
+          supabase: {
+            provider: "supabase",
+            accessToken: "sb-access",
+            refreshToken: "sb-refresh",
+            user: { id: "u_123", email: "founder@ultima.test" }
+          }
+        },
+        updatedAt: "2026-06-01T00:00:00.000Z"
+      })
+    );
+
+    // The engine writes a codex record (as `codex login` / --force does) — a
+    // read-then-write that must NOT drop the supabase sibling (Ultima logout).
+    writeInfiniteOsAuthRecord(
+      {
+        provider: "codex",
+        source: "growth-os-codex",
+        authMode: "device-code",
+        token: "codex-access",
+        refreshToken: "codex-refresh"
+      },
+      env
+    );
+
+    // The supabase sibling SURVIVES verbatim on disk, next to the new codex record.
+    const onDisk = JSON.parse(readFileSync(authPath, "utf8")) as {
+      providers: Record<string, unknown>;
+    };
+    expect(onDisk.providers.supabase).toEqual({
+      provider: "supabase",
+      accessToken: "sb-access",
+      refreshToken: "sb-refresh",
+      user: { id: "u_123", email: "founder@ultima.test" }
+    });
+    expect(onDisk.providers.codex).toMatchObject({ token: "codex-access" });
+
+    // …and reads back through the sanitizer untouched, alongside the typed codex record.
+    const state = readInfiniteOsAuthState(env);
+    expect(state.providers.supabase).toEqual({
+      provider: "supabase",
+      accessToken: "sb-access",
+      refreshToken: "sb-refresh",
+      user: { id: "u_123", email: "founder@ultima.test" }
+    });
+    expect(state.providers.codex).toMatchObject({
+      provider: "codex",
+      source: "growth-os-codex",
+      token: "codex-access"
+    });
+  });
+
+  it("preserves an unknown sibling across two sequential model writes (codex then claude)", ({ task }) => {
+    const growthHome = join("/tmp", `growth-os-auth-twowrite-${task.id}`);
+    const env = { GROWTH_OS_HOME: growthHome };
+    const authPath = infiniteOsAuthPath(env);
+
+    mkdirSync(growthHome, { recursive: true });
+    writeFileSync(
+      authPath,
+      JSON.stringify({ providers: { supabase: { provider: "supabase", accessToken: "sb-access" } } })
+    );
+
+    writeInfiniteOsAuthRecord(
+      { provider: "codex", source: "growth-os-codex", authMode: "device-code", token: "codex-access" },
+      env
+    );
+    writeInfiniteOsAuthRecord(
+      { provider: "claude", source: "claude-code", authMode: "reuse", token: "claude-access" },
+      env
+    );
+
+    const state = readInfiniteOsAuthState(env);
+    expect(state.providers.supabase).toEqual({ provider: "supabase", accessToken: "sb-access" });
+    expect(state.providers.codex).toMatchObject({ provider: "codex", token: "codex-access" });
+    expect(state.providers.claude).toMatchObject({ provider: "claude", token: "claude-access" });
+  });
+
+  it("drops a malformed model record (never opaque passthrough) while keeping unknown siblings", ({ task }) => {
+    const growthHome = join("/tmp", `growth-os-auth-malformed-${task.id}`);
+    const env = { GROWTH_OS_HOME: growthHome };
+    const authPath = infiniteOsAuthPath(env);
+
+    mkdirSync(growthHome, { recursive: true });
+    writeFileSync(
+      authPath,
+      JSON.stringify({
+        providers: {
+          supabase: { provider: "supabase", accessToken: "sb-access" },
+          // Malformed model records: a bare string, and an object whose provider
+          // field doesn't match its key. Neither may be passed through opaquely.
+          codex: "not-a-record",
+          claude: { provider: "codex", token: "mislabeled" }
+        }
+      })
+    );
+
+    writeInfiniteOsAuthRecord(
+      { provider: "codex", source: "growth-os-codex", authMode: "device-code", token: "codex-access" },
+      env
+    );
+
+    const onDisk = JSON.parse(readFileSync(authPath, "utf8")) as { providers: Record<string, unknown> };
+    expect(onDisk.providers.supabase).toEqual({ provider: "supabase", accessToken: "sb-access" });
+    // The mislabeled claude record is dropped, not preserved as junk.
+    expect(onDisk.providers.claude).toBeUndefined();
+    // The fresh codex record replaced the malformed string.
+    expect(onDisk.providers.codex).toMatchObject({ provider: "codex", token: "codex-access" });
+  });
 });
 
 describe("active project pointer", () => {
