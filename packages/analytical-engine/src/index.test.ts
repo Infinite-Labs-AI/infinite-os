@@ -3294,6 +3294,44 @@ describe("analytical engine smoke", () => {
     ).toBe(true);
   });
 
+  it("breaks GA4 traffic down by occurred_on (the daily page_views series the Command Center sparkline reads)", async () => {
+    const queries: Array<{ sql: string; params?: unknown[] }> = [];
+    const db = ga4TrafficFakeDb(queries);
+    const handlers = createActionHandlers(db);
+
+    const result = await handlers.run_breakdown_query?.(
+      {
+        metric: "page_views",
+        view: "queryable.vw_site_traffic",
+        groupBy: ["occurred_on"],
+        orderBy: { field: "page_views", direction: "desc" }
+      },
+      {
+        workspaceId: "workspace",
+        authority: "tool_agent",
+        surface: "api",
+        actorId: "operator",
+        sessionId: "session"
+      }
+    );
+
+    // occurred_on (= reporting_date) is a real groupable dimension on vw_site_traffic — NOT rejected as
+    // unsupported_dimension, NOT date_trunc-wrapped — so the breakdown emits one row per day: the per-day
+    // page_views series the Command Center Views sparkline reads. (Chronological order is applied client-side.)
+    expect(result?.data).toMatchObject({
+      metric: "page_views",
+      view: "queryable.vw_site_traffic",
+      groupBy: ["occurred_on"]
+    });
+    const dailySql = queries.find(
+      (entry) =>
+        entry.sql.includes("from queryable.vw_site_traffic") &&
+        entry.sql.includes("group by occurred_on")
+    )?.sql;
+    expect(dailySql).toBeDefined();
+    expect(dailySql).toContain("occurred_on as occurred_on");
+  });
+
   it("uses session-weighted SQL for a GA4 rate breakdown grouped by channel group", async () => {
     const queries: Array<{ sql: string; params?: unknown[] }> = [];
     const db = ga4TrafficFakeDb(queries);

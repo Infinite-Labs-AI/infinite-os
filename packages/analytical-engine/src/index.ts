@@ -3967,6 +3967,9 @@ export function requiresResultTypePartition(metric: string): boolean {
 
 function allowedDimensionsForView(view: string): string[] {
   if (view === "queryable.vw_site_traffic") {
+    // occurred_on (= reporting_date, the daily grain of ga4_report_snapshot_fact) is a plain column —
+    // no date_trunc / time-grain wrapping — so grouping by it yields a per-day page_views / site_visitors
+    // series (parity with vw_posthog_events and the *_daily ad views that already list occurred_on).
     return [
       "country",
       "landing_page",
@@ -3976,7 +3979,8 @@ function allowedDimensionsForView(view: string): string[] {
       "utm_campaign",
       "session_default_channel_group",
       "host_name",
-      "device_category"
+      "device_category",
+      "occurred_on"
     ];
   }
   if (view === "queryable.vw_site_pages") {
