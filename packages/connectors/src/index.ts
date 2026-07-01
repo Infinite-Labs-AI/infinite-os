@@ -828,6 +828,7 @@ const xConnector = createConnector<XCredential, XPostRow>({
   },
   async planLive(db, request, credential) {
     if (isSessionCredential(credential)) {
+      assertSessionBackendEnabled();
       return defaultPlan(
         db,
         request,
@@ -3578,14 +3579,17 @@ function twitterCliConnectorError(
   );
 }
 
-function getTweetItems(payload: unknown): TwitterCliTweet[] {
+function getTweetItems(
+  payload: unknown,
+  credential: Pick<XCredential, "authToken" | "ct0">
+): TwitterCliTweet[] {
   if (Array.isArray(payload)) {
     return payload as TwitterCliTweet[];
   }
   if (isRecord(payload)) {
     if (payload.ok === false) {
       const detail = optionalNonEmptyString(payload.error ?? payload.message) ?? "twitter-cli returned an error payload";
-      throw new ConnectorError("provider_api_error", detail, true);
+      throw twitterCliConnectorError(1, "", detail, credential);
     }
     if (Array.isArray(payload.data)) {
       return payload.data as TwitterCliTweet[];
@@ -3724,7 +3728,7 @@ async function runTwitterCliSearch(
       finish(() => {
         try {
           const payload = JSON.parse(stripJsonPrefix(stdoutBuffer));
-          resolve(mapTwitterCliTweets(getTweetItems(payload), capturedAt));
+          resolve(mapTwitterCliTweets(getTweetItems(payload, credential), capturedAt));
         } catch (error) {
           if (error instanceof ConnectorError) {
             reject(error);
@@ -7321,7 +7325,7 @@ function requireNonEmptyString(value: string | number | undefined | null, field:
   return normalized;
 }
 
-function optionalNonEmptyString(value: string | number | undefined | null): string | undefined {
+function optionalNonEmptyString(value: unknown): string | undefined {
   if (typeof value === "number" && Number.isFinite(value)) {
     return String(value);
   }

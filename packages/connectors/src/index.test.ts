@@ -2913,6 +2913,50 @@ process.exit(${options.exitCode ?? 0});
       });
     });
 
+    it("maps a `{ ok:true, data:[...] }` twitter-cli envelope into XPostRow records", async () => {
+      await withSessionBackendEnabled(async () => {
+        await withTmp(async (dir) => {
+          const rows = await connectorFor("x").extract(
+            fakeDb({
+              credential: sessionCredential(
+                fakeTwitterCliWriter(dir, {
+                  body: {
+                    ok: true,
+                    data: [
+                      {
+                        id: "1800000000000000002",
+                        text: "wrapped session backend post",
+                        author: { id: "84", screenName: "wrapped_burner", name: "Wrapped" },
+                        createdAtISO: "2026-07-01T11:00:00.000Z",
+                        metrics: { likes: 4, retweets: 2, replies: 1, quotes: 0, views: 123 }
+                      }
+                    ]
+                  }
+                })
+              )
+            }),
+            request("x"),
+            {
+              cursorKey: "x_session_timeline",
+              cursorStart: "2026-07-01T00:00:00.000Z",
+              cursorEnd: "2026-07-01T12:00:00.000Z",
+              refreshWindowDays: 7,
+              mode: "live"
+            }
+          );
+
+          expect(rows[0]).toMatchObject({
+            objectType: "x_post",
+            payload: {
+              postId: "1800000000000000002",
+              postUrl: "https://x.com/wrapped_burner/status/1800000000000000002",
+              bodyText: "wrapped session backend post"
+            }
+          });
+        });
+      });
+    });
+
     it("maps twitter-cli rows, passes cookies by env only, and strips the daemon key from the child env", async () => {
       await withSessionBackendEnabled(async () => {
         await withTmp(async (dir) => {
@@ -2973,6 +3017,58 @@ process.exit(${options.exitCode ?? 0});
       });
     });
 
+    it("scrubs cookie values on the provider_api_error branch when stderr is non-auth", async () => {
+      await withSessionBackendEnabled(async () => {
+        await withTmp(async (dir) => {
+          await expect(
+            connectorFor("x").extract(
+              fakeDb({
+                credential: sessionCredential(
+                  fakeTwitterCliWriter(dir, {
+                    stderr: "rate limited auth-cookie csrf-cookie",
+                    exitCode: 1
+                  })
+                )
+              }),
+              request("x"),
+              {
+                cursorKey: "x_session_timeline",
+                cursorStart: "2026-07-01T00:00:00.000Z",
+                cursorEnd: "2026-07-01T12:00:00.000Z",
+                refreshWindowDays: 7,
+                mode: "live"
+              }
+            )
+          ).rejects.toMatchObject({
+            code: "provider_api_error",
+            retryable: true,
+            message: expect.stringContaining("[redacted]")
+          });
+
+          await expect(
+            connectorFor("x").extract(
+              fakeDb({
+                credential: sessionCredential(
+                  fakeTwitterCliWriter(dir, {
+                    stderr: "rate limited auth-cookie csrf-cookie",
+                    exitCode: 1
+                  })
+                )
+              }),
+              request("x"),
+              {
+                cursorKey: "x_session_timeline",
+                cursorStart: "2026-07-01T00:00:00.000Z",
+                cursorEnd: "2026-07-01T12:00:00.000Z",
+                refreshWindowDays: 7,
+                mode: "live"
+              }
+            )
+          ).rejects.not.toThrow(/auth-cookie|csrf-cookie/);
+        });
+      });
+    });
+
     it("never echoes raw cookie values when twitter-cli exits non-zero", async () => {
       await withSessionBackendEnabled(async () => {
         await withTmp(async (dir) => {
@@ -3000,8 +3096,8 @@ process.exit(${options.exitCode ?? 0});
             retryable: false,
             message: expect.not.stringContaining("auth-cookie")
           });
-          await connectorFor("x")
-            .extract(
+          await expect(
+            connectorFor("x").extract(
               fakeDb({
                 credential: sessionCredential(
                   fakeTwitterCliWriter(dir, {
@@ -3019,11 +3115,56 @@ process.exit(${options.exitCode ?? 0});
                 mode: "live"
               }
             )
-            .catch((error) => {
-              const message = error instanceof Error ? error.message : String(error);
-              expect(message).not.toContain("auth-cookie");
-              expect(message).not.toContain("csrf-cookie");
-            });
+          ).rejects.not.toThrow(/auth-cookie|csrf-cookie/);
+        });
+      });
+    });
+
+    it("classifies a `{ ok:false, error }` auth envelope as provider_auth_failed and scrubs cookie values", async () => {
+      await withSessionBackendEnabled(async () => {
+        await withTmp(async (dir) => {
+          await expect(
+            connectorFor("x").extract(
+              fakeDb({
+                credential: sessionCredential(
+                  fakeTwitterCliWriter(dir, {
+                    body: { ok: false, error: "cookie expired auth-cookie csrf-cookie" }
+                  })
+                )
+              }),
+              request("x"),
+              {
+                cursorKey: "x_session_timeline",
+                cursorStart: "2026-07-01T00:00:00.000Z",
+                cursorEnd: "2026-07-01T12:00:00.000Z",
+                refreshWindowDays: 7,
+                mode: "live"
+              }
+            )
+          ).rejects.toMatchObject({
+            code: "provider_auth_failed",
+            retryable: false
+          });
+
+          await expect(
+            connectorFor("x").extract(
+              fakeDb({
+                credential: sessionCredential(
+                  fakeTwitterCliWriter(dir, {
+                    body: { ok: false, error: "cookie expired auth-cookie csrf-cookie" }
+                  })
+                )
+              }),
+              request("x"),
+              {
+                cursorKey: "x_session_timeline",
+                cursorStart: "2026-07-01T00:00:00.000Z",
+                cursorEnd: "2026-07-01T12:00:00.000Z",
+                refreshWindowDays: 7,
+                mode: "live"
+              }
+            )
+          ).rejects.not.toThrow(/auth-cookie|csrf-cookie/);
         });
       });
     });
@@ -3086,25 +3227,34 @@ process.exit(${options.exitCode ?? 0});
     }
 
     it("rejects session-cookie credentials when the kill-switch is off", async () => {
+      const prior = process.env.X_SESSION_BACKEND_ENABLED;
       delete process.env.X_SESSION_BACKEND_ENABLED;
-      await expect(
-        connectorFor("x").testConnection(
-          fakeDb({
-            credential: {
-              credential_kind: "x_session_cookies",
-              encrypted_payload: encryptedCredential({
-                mode: "live",
-                backendMode: "session_cookie",
-                transport: "twitter_cli",
-                authToken: "auth-cookie",
-                ct0: "csrf-cookie",
-                username: "burner_account"
-              })
-            }
-          }),
-          request("x")
-        )
-      ).rejects.toMatchObject({ code: "provider_auth_failed", retryable: false });
+      try {
+        await expect(
+          connectorFor("x").testConnection(
+            fakeDb({
+              credential: {
+                credential_kind: "x_session_cookies",
+                encrypted_payload: encryptedCredential({
+                  mode: "live",
+                  backendMode: "session_cookie",
+                  transport: "twitter_cli",
+                  authToken: "auth-cookie",
+                  ct0: "csrf-cookie",
+                  username: "burner_account"
+                })
+              }
+            }),
+            request("x")
+          )
+        ).rejects.toMatchObject({ code: "provider_auth_failed", retryable: false });
+      } finally {
+        if (prior === undefined) {
+          delete process.env.X_SESSION_BACKEND_ENABLED;
+        } else {
+          process.env.X_SESSION_BACKEND_ENABLED = prior;
+        }
+      }
     });
 
     it("validates session cookies through the CLI probe when the kill-switch is on", async () => {

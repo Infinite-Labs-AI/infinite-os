@@ -8,7 +8,7 @@
   },
   "scripts": {
     "build": "tsc -b tsconfig.json",
-    "test": "vitest run",
+    "test": "vitest run --root ../.. ../../packages/connectors/src",
     "typecheck": "tsc --noEmit --pretty false"
   },
   "dependencies": {
