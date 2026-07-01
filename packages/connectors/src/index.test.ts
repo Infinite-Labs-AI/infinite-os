@@ -7,6 +7,8 @@ import { encryptCredentialPayload } from "@infinite-os/core";
 import { type InfiniteOsDb } from "@infinite-os/db";
 
 import {
+  __testOnlyMapTwitterCliTweets,
+  __testOnlyTwitterCliError,
   connectorFor,
   connectorProviderForSetupProvider,
   createMetaAd,
@@ -23,6 +25,7 @@ import {
   posthogConnectSourceFromSetup,
   resolveMetaAdsCredential,
   setMetaEntityStatus,
+  xCredentialFromSetup,
   xConnectSourceFromSetup,
   type MetaAdsCredential,
   type MetaDedupRecord
@@ -125,6 +128,43 @@ describe("setup credential adapters", () => {
         username: "growthos"
       }
     });
+  });
+
+  it("builds X session-cookie connector payloads without a bearer token", () => {
+    expect(
+      xConnectSourceFromSetup({
+        backendMode: "session_cookie",
+        authToken: "auth-cookie",
+        ct0: "csrf-cookie",
+        username: "@burner_account",
+        product: "latest"
+      })
+    ).toEqual({
+      provider: "x",
+      connectionName: "X Session",
+      credentialKind: "x_session_cookies",
+      accountExternalId: "burner_account",
+      credentialPayload: {
+        mode: "live",
+        backendMode: "session_cookie",
+        transport: "twitter_cli",
+        authToken: "auth-cookie",
+        ct0: "csrf-cookie",
+        username: "burner_account",
+        product: "latest"
+      }
+    });
+  });
+
+  it("rejects a session-cookie setup with an empty ct0 before it is stored", () => {
+    expect(() =>
+      xCredentialFromSetup({
+        backendMode: "session_cookie",
+        authToken: "auth-cookie",
+        ct0: "",
+        username: "@burner_account"
+      })
+    ).toThrow("ct0 is required");
   });
 });
 
@@ -2753,6 +2793,408 @@ console.log(JSON.stringify({ data: [] }));
     expect(metricIndex).toBeGreaterThan(postIndex);
     expect(queries.some((sql) => sql.includes("on conflict (source_id, x_post_id)"))).toBe(true);
     expect(queries.some((sql) => sql.includes("on conflict (source_id, x_post_id, captured_at)"))).toBe(true);
+  });
+
+  describe("X twitter-cli session adapter", () => {
+    function fakeTwitterCliWriter(
+      dir: string,
+      options: { body?: unknown; stderr?: string; exitCode?: number } = {}
+    ): string {
+      const script = join(dir, "twitter-cli.mjs");
+      writeFileSync(
+        script,
+        `
+import process from "node:process";
+import { writeFileSync } from "node:fs";
+writeFileSync(${JSON.stringify(join(dir, "argv.json"))}, JSON.stringify(process.argv.slice(2)));
+writeFileSync(${JSON.stringify(join(dir, "env.json"))}, JSON.stringify({
+  PATH: process.env.PATH ?? null,
+  HOME: process.env.HOME ?? null,
+  OUTPUT: process.env.OUTPUT ?? null,
+  TWITTER_AUTH_TOKEN: process.env.TWITTER_AUTH_TOKEN ?? null,
+  TWITTER_CT0: process.env.TWITTER_CT0 ?? null,
+  GROWTH_OS_ENCRYPTION_KEY: process.env.GROWTH_OS_ENCRYPTION_KEY ?? null
+}));
+${options.stderr ? `process.stderr.write(${JSON.stringify(options.stderr)});` : ""}
+${options.body !== undefined ? `console.log(${JSON.stringify(JSON.stringify(options.body))});` : ""}
+process.exit(${options.exitCode ?? 0});
+        `.trim(),
+        "utf8"
+      );
+      return `${JSON.stringify(process.execPath)} ${JSON.stringify(script)}`;
+    }
+
+    function sessionCredential(
+      cliCommand: string,
+      overrides: Record<string, unknown> = {}
+    ): { credential_kind: string; encrypted_payload: string } {
+      return {
+        credential_kind: "x_session_cookies",
+        encrypted_payload: encryptedCredential({
+          mode: "live",
+          backendMode: "session_cookie",
+          transport: "twitter_cli",
+          authToken: "auth-cookie",
+          ct0: "csrf-cookie",
+          username: "burner_account",
+          product: "latest",
+          maxResults: 3,
+          cliCommand,
+          ...overrides
+        })
+      };
+    }
+
+    function recordedArgv(dir: string): string[] {
+      return JSON.parse(readFileSync(join(dir, "argv.json"), "utf8")) as string[];
+    }
+
+    function recordedEnv(dir: string): Record<string, string | null> {
+      return JSON.parse(readFileSync(join(dir, "env.json"), "utf8")) as Record<string, string | null>;
+    }
+
+    async function withSessionBackendEnabled(fn: () => Promise<void>) {
+      const prior = process.env.X_SESSION_BACKEND_ENABLED;
+      process.env.X_SESSION_BACKEND_ENABLED = "1";
+      try {
+        await fn();
+      } finally {
+        if (prior === undefined) {
+          delete process.env.X_SESSION_BACKEND_ENABLED;
+        } else {
+          process.env.X_SESSION_BACKEND_ENABLED = prior;
+        }
+      }
+    }
+
+    async function withTmp(fn: (dir: string) => Promise<void>): Promise<void> {
+      const dir = mkdtempSync(join(tmpdir(), "growth-os-x-twitter-cli-"));
+      await fn(dir).finally(() => rmSync(dir, { recursive: true, force: true }));
+    }
+
+    it("classifies expired cookies as provider_auth_failed and never echoes cookie values", () => {
+      const err = __testOnlyTwitterCliError(1, "", "cookie expired (HTTP 401) auth-cookie csrf-cookie", {
+        authToken: "auth-cookie",
+        ct0: "csrf-cookie"
+      });
+      expect(err.code).toBe("provider_auth_failed");
+      expect(err.retryable).toBe(false);
+      expect(err.message).not.toContain("auth-cookie");
+      expect(err.message).not.toContain("csrf-cookie");
+    });
+
+    it("maps a real-shaped twitter-cli tweet into the existing XPostRow", () => {
+      const rows = __testOnlyMapTwitterCliTweets(
+        [
+          {
+            id: "1800000000000000001",
+            text: "hit",
+            author: { id: "42", screenName: "burner_account", name: "Burner" },
+            createdAtISO: "2026-07-01T10:00:00.000Z",
+            metrics: { likes: 3, retweets: 1, replies: 2, quotes: 0, views: 99 }
+          }
+        ],
+        "2026-07-01T12:00:00.000Z"
+      );
+
+      expect(rows[0]).toMatchObject({
+        postId: "1800000000000000001",
+        authorId: "42",
+        postUrl: "https://x.com/burner_account/status/1800000000000000001",
+        bodyText: "hit",
+        publicMetrics: {
+          retweetCount: 1,
+          replyCount: 2,
+          likeCount: 3,
+          quoteCount: 0,
+          bookmarkCount: 0,
+          impressionCount: 99
+        }
+      });
+    });
+
+    it("maps twitter-cli rows, passes cookies by env only, and strips the daemon key from the child env", async () => {
+      await withSessionBackendEnabled(async () => {
+        await withTmp(async (dir) => {
+          const rows = await connectorFor("x").extract(
+            fakeDb({
+              credential: sessionCredential(
+                fakeTwitterCliWriter(dir, {
+                  body: [
+                    {
+                      id: "1800000000000000001",
+                      text: "session backend post",
+                      author: { id: "42", screenName: "burner_account", name: "Burner" },
+                      createdAtISO: "2026-07-01T10:00:00.000Z",
+                      metrics: { likes: 3, retweets: 1, replies: 2, quotes: 0, views: 99 }
+                    }
+                  ]
+                })
+              )
+            }),
+            request("x"),
+            {
+              cursorKey: "x_session_timeline",
+              cursorStart: "2026-07-01T00:00:00.000Z",
+              cursorEnd: "2026-07-01T12:00:00.000Z",
+              refreshWindowDays: 7,
+              mode: "live"
+            }
+          );
+
+          expect(rows[0]).toMatchObject({
+            objectType: "x_post",
+            payload: {
+              postId: "1800000000000000001",
+              postUrl: "https://x.com/burner_account/status/1800000000000000001",
+              bodyText: "session backend post"
+            }
+          });
+
+          expect(recordedArgv(dir)).toEqual([
+            "search",
+            "from:burner_account",
+            "--type",
+            "latest",
+            "--max",
+            "3",
+            "--json"
+          ]);
+          expect(recordedArgv(dir)).not.toContain("auth-cookie");
+          expect(recordedArgv(dir)).not.toContain("csrf-cookie");
+
+          expect(recordedEnv(dir)).toMatchObject({
+            OUTPUT: "json",
+            TWITTER_AUTH_TOKEN: "auth-cookie",
+            TWITTER_CT0: "csrf-cookie"
+          });
+          expect(recordedEnv(dir).GROWTH_OS_ENCRYPTION_KEY).toBeNull();
+        });
+      });
+    });
+
+    it("never echoes raw cookie values when twitter-cli exits non-zero", async () => {
+      await withSessionBackendEnabled(async () => {
+        await withTmp(async (dir) => {
+          await expect(
+            connectorFor("x").extract(
+              fakeDb({
+                credential: sessionCredential(
+                  fakeTwitterCliWriter(dir, {
+                    stderr: "cookie expired auth-cookie csrf-cookie",
+                    exitCode: 1
+                  })
+                )
+              }),
+              request("x"),
+              {
+                cursorKey: "x_session_timeline",
+                cursorStart: "2026-07-01T00:00:00.000Z",
+                cursorEnd: "2026-07-01T12:00:00.000Z",
+                refreshWindowDays: 7,
+                mode: "live"
+              }
+            )
+          ).rejects.toMatchObject({
+            code: "provider_auth_failed",
+            retryable: false,
+            message: expect.not.stringContaining("auth-cookie")
+          });
+          await connectorFor("x")
+            .extract(
+              fakeDb({
+                credential: sessionCredential(
+                  fakeTwitterCliWriter(dir, {
+                    stderr: "cookie expired auth-cookie csrf-cookie",
+                    exitCode: 1
+                  })
+                )
+              }),
+              request("x"),
+              {
+                cursorKey: "x_session_timeline",
+                cursorStart: "2026-07-01T00:00:00.000Z",
+                cursorEnd: "2026-07-01T12:00:00.000Z",
+                refreshWindowDays: 7,
+                mode: "live"
+              }
+            )
+            .catch((error) => {
+              const message = error instanceof Error ? error.message : String(error);
+              expect(message).not.toContain("auth-cookie");
+              expect(message).not.toContain("csrf-cookie");
+            });
+        });
+      });
+    });
+
+    it("throws on an unrecognized twitter-cli payload shape instead of returning an empty list", async () => {
+      await withSessionBackendEnabled(async () => {
+        await withTmp(async (dir) => {
+          await expect(
+            connectorFor("x").extract(
+              fakeDb({
+                credential: sessionCredential(
+                  fakeTwitterCliWriter(dir, {
+                    body: { tweets: [{ id: "1800000000000000001", text: "nope" }] }
+                  })
+                )
+              }),
+              request("x"),
+              {
+                cursorKey: "x_session_timeline",
+                cursorStart: "2026-07-01T00:00:00.000Z",
+                cursorEnd: "2026-07-01T12:00:00.000Z",
+                refreshWindowDays: 7,
+                mode: "live"
+              }
+            )
+          ).rejects.toThrow(/twitter-cli/i);
+        });
+      });
+    });
+  });
+
+  describe("X session-cookie backend", () => {
+    function fakeTwitterCliWriter(
+      dir: string,
+      options: { body?: unknown; stderr?: string; exitCode?: number } = {}
+    ): string {
+      const script = join(dir, "twitter-cli.mjs");
+      writeFileSync(
+        script,
+        `
+import process from "node:process";
+import { writeFileSync } from "node:fs";
+writeFileSync(${JSON.stringify(join(dir, "argv.json"))}, JSON.stringify(process.argv.slice(2)));
+${options.stderr ? `process.stderr.write(${JSON.stringify(options.stderr)});` : ""}
+${options.body !== undefined ? `console.log(${JSON.stringify(JSON.stringify(options.body))});` : ""}
+process.exit(${options.exitCode ?? 0});
+        `.trim(),
+        "utf8"
+      );
+      return `${JSON.stringify(process.execPath)} ${JSON.stringify(script)}`;
+    }
+
+    async function withTmp(fn: (dir: string) => Promise<void>): Promise<void> {
+      const dir = mkdtempSync(join(tmpdir(), "growth-os-x-twitter-cli-"));
+      await fn(dir).finally(() => rmSync(dir, { recursive: true, force: true }));
+    }
+
+    function recordedArgv(dir: string): string[] {
+      return JSON.parse(readFileSync(join(dir, "argv.json"), "utf8")) as string[];
+    }
+
+    it("rejects session-cookie credentials when the kill-switch is off", async () => {
+      delete process.env.X_SESSION_BACKEND_ENABLED;
+      await expect(
+        connectorFor("x").testConnection(
+          fakeDb({
+            credential: {
+              credential_kind: "x_session_cookies",
+              encrypted_payload: encryptedCredential({
+                mode: "live",
+                backendMode: "session_cookie",
+                transport: "twitter_cli",
+                authToken: "auth-cookie",
+                ct0: "csrf-cookie",
+                username: "burner_account"
+              })
+            }
+          }),
+          request("x")
+        )
+      ).rejects.toMatchObject({ code: "provider_auth_failed", retryable: false });
+    });
+
+    it("validates session cookies through the CLI probe when the kill-switch is on", async () => {
+      const prior = process.env.X_SESSION_BACKEND_ENABLED;
+      process.env.X_SESSION_BACKEND_ENABLED = "1";
+      try {
+        await withTmp(async (dir) => {
+          await expect(
+            connectorFor("x").testConnection(
+              fakeDb({
+                credential: {
+                  credential_kind: "x_session_cookies",
+                  encrypted_payload: encryptedCredential({
+                    mode: "live",
+                    backendMode: "session_cookie",
+                    transport: "twitter_cli",
+                    authToken: "auth-cookie",
+                    ct0: "csrf-cookie",
+                    username: "burner_account",
+                    cliCommand: fakeTwitterCliWriter(dir, {
+                      body: [
+                        {
+                          id: "1800000000000000001",
+                          text: "probe",
+                          author: { id: "42", screenName: "burner_account", name: "Burner" },
+                          createdAtISO: "2026-07-01T10:00:00.000Z",
+                          metrics: { likes: 1, retweets: 0, replies: 0, quotes: 0, views: 5 }
+                        }
+                      ]
+                    })
+                  })
+                }
+              }),
+              request("x")
+            )
+          ).resolves.toMatchObject({
+            ok: true,
+            mode: "live",
+            provider: "x",
+            accountExternalId: "burner_account"
+          });
+          expect(recordedArgv(dir)).toEqual([
+            "search",
+            "from:burner_account",
+            "--type",
+            "latest",
+            "--max",
+            "1",
+            "--json"
+          ]);
+        });
+      } finally {
+        if (prior === undefined) {
+          delete process.env.X_SESSION_BACKEND_ENABLED;
+        } else {
+          process.env.X_SESSION_BACKEND_ENABLED = prior;
+        }
+      }
+    });
+
+    it("fails testConnection before spawn when authToken or ct0 is empty", async () => {
+      const prior = process.env.X_SESSION_BACKEND_ENABLED;
+      process.env.X_SESSION_BACKEND_ENABLED = "1";
+      try {
+        await expect(
+          connectorFor("x").testConnection(
+            fakeDb({
+              credential: {
+                credential_kind: "x_session_cookies",
+                encrypted_payload: encryptedCredential({
+                  mode: "live",
+                  backendMode: "session_cookie",
+                  transport: "twitter_cli",
+                  authToken: "",
+                  ct0: "csrf-cookie",
+                  username: "burner_account"
+                })
+              }
+            }),
+            request("x")
+          )
+        ).rejects.toMatchObject({ code: "provider_auth_failed", retryable: false });
+      } finally {
+        if (prior === undefined) {
+          delete process.env.X_SESSION_BACKEND_ENABLED;
+        } else {
+          process.env.X_SESSION_BACKEND_ENABLED = prior;
+        }
+      }
+    });
   });
 
   it("writes Shopify raw rows before order, line, and product truth", async () => {

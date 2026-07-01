@@ -103,7 +103,11 @@ export interface PostHogSetupCredentialInput {
   refreshWindowDays?: number;
 }
 
-export interface XSetupCredentialInput {
+export type XBackendMode = "api_bearer" | "session_cookie";
+export type XProduct = "top" | "latest" | "photos" | "videos";
+
+export interface XApiBearerSetupCredentialInput {
+  backendMode?: "api_bearer";
   bearerToken: string;
   userId: string;
   username: string;
@@ -111,6 +115,19 @@ export interface XSetupCredentialInput {
   refreshWindowDays?: number;
   maxPages?: number;
 }
+
+export interface XSessionCookieSetupCredentialInput {
+  backendMode: "session_cookie";
+  authToken: string;
+  ct0: string;
+  username?: string;
+  product?: XProduct;
+  cliCommand?: string;
+  maxResults?: number;
+  refreshWindowDays?: number;
+}
+
+export type XSetupCredentialInput = XApiBearerSetupCredentialInput | XSessionCookieSetupCredentialInput;
 
 export function connectorProviderForSetupProvider(provider: SetupProviderId): FirstPhaseProvider {
   return SETUP_PROVIDER_TO_CONNECTOR_PROVIDER[provider];
@@ -174,6 +191,20 @@ export function posthogConnectSourceFromSetup(
 }
 
 export function xCredentialFromSetup(input: XSetupCredentialInput): Record<string, unknown> {
+  if (input.backendMode === "session_cookie") {
+    return compactCredential({
+      mode: "live",
+      backendMode: "session_cookie",
+      transport: "twitter_cli",
+      authToken: requireNonEmptyString(input.authToken, "authToken"),
+      ct0: requireNonEmptyString(input.ct0, "ct0"),
+      username: optionalNonEmptyString(input.username)?.replace(/^@/, ""),
+      product: optionalNonEmptyString(input.product) ?? "latest",
+      cliCommand: optionalNonEmptyString(input.cliCommand),
+      maxResults: input.maxResults,
+      refreshWindowDays: input.refreshWindowDays
+    });
+  }
   return compactCredential({
     mode: "live",
     bearerToken: requireNonEmptyString(input.bearerToken, "bearerToken"),
@@ -189,11 +220,12 @@ export function xConnectSourceFromSetup(
   input: XSetupCredentialInput & { connectionName?: string }
 ): SetupConnectSourceActionInput {
   const credentialPayload = xCredentialFromSetup(input);
+  const session = credentialPayload.backendMode === "session_cookie";
   return {
     provider: connectorProviderForSetupProvider("x"),
-    connectionName: input.connectionName ?? "X",
-    credentialKind: "bearer_token",
-    accountExternalId: String(credentialPayload.userId),
+    connectionName: input.connectionName ?? (session ? "X Session" : "X"),
+    credentialKind: session ? "x_session_cookies" : "bearer_token",
+    accountExternalId: String(credentialPayload.userId ?? credentialPayload.username ?? "x-session"),
     credentialPayload
   };
 }
@@ -232,10 +264,17 @@ interface StripeCredential {
 interface XCredential {
   [key: string]: unknown;
   mode?: "fixture" | "live";
+  backendMode?: XBackendMode;
   bearerToken?: string;
   userId?: string;
   username?: string;
+  transport?: "twitter_cli";
+  authToken?: string;
+  ct0?: string;
   apiBaseUrl?: string;
+  product?: XProduct;
+  cliCommand?: string;
+  maxResults?: number;
   refreshWindowDays?: number;
   maxPages?: number;
 }
@@ -757,12 +796,48 @@ const xConnector = createConnector<XCredential, XPostRow>({
   fixtureRows: () => X_POSTS,
   fixtureObjectType: "x_post",
   async testLive(db, request, credential) {
+    if (isSessionCredential(credential)) {
+      assertSessionBackendEnabled();
+      requireCredential(credential, "authToken");
+      requireCredential(credential, "ct0");
+      const capturedAt = new Date().toISOString();
+      const username = optionalNonEmptyString(credential.username)?.replace(/^@/, "") ?? "x-session";
+      await runTwitterCliSearch(credential, `from:${username}`, capturedAt, { max: 1 });
+      await persistXProfileSnapshot(
+        db,
+        request,
+        {
+          id: username,
+          username,
+          public_metrics: {
+            followers_count: 0,
+            following_count: 0,
+            tweet_count: 0,
+            listed_count: 0,
+            like_count: 0
+          }
+        },
+        capturedAt
+      );
+      return { ok: true, mode: "live", provider: "x", accountExternalId: username };
+    }
     const bearerToken = requireCredential(credential, "bearerToken");
     const user = await xResolveUser(credential, bearerToken);
     await persistXProfileSnapshot(db, request, user, new Date().toISOString());
     return { ok: true, mode: "live", provider: "x", accountExternalId: user.id };
   },
   async planLive(db, request, credential) {
+    if (isSessionCredential(credential)) {
+      return defaultPlan(
+        db,
+        request,
+        "x_session_timeline",
+        request.refreshWindowDays ?? credential.refreshWindowDays ?? 7,
+        "live",
+        undefined,
+        { ignoreCursor: request.refreshWindowDays !== undefined }
+      );
+    }
     return defaultPlan(
       db,
       request,
@@ -774,6 +849,14 @@ const xConnector = createConnector<XCredential, XPostRow>({
     );
   },
   async extractLive(_db, _request, plan, credential) {
+    if (isSessionCredential(credential)) {
+      assertSessionBackendEnabled();
+      const username = optionalNonEmptyString(credential.username)?.replace(/^@/, "");
+      if (!username) {
+        return [];
+      }
+      return runTwitterCliSearch(credential, `from:${username}`, plan.cursorEnd);
+    }
     const bearerToken = requireCredential(credential, "bearerToken");
     const user = await xResolveUser(credential, bearerToken);
     return xTimelinePosts(credential, bearerToken, user, plan);
@@ -3165,6 +3248,16 @@ function isInvalidKeyEventsError(error: unknown): boolean {
   );
 }
 
+function isSessionCredential(credential: XCredential): boolean {
+  return credential.backendMode === "session_cookie" || credential.transport === "twitter_cli";
+}
+
+function assertSessionBackendEnabled(): void {
+  if (process.env.X_SESSION_BACKEND_ENABLED !== "1") {
+    throw new ConnectorError("provider_auth_failed", "X session-cookie backend is disabled.", false);
+  }
+}
+
 async function posthogQuery<T>(
   credential: PostHogCredential,
   projectId: string,
@@ -3390,6 +3483,271 @@ async function xResolveUser(credential: XCredential, bearerToken: string): Promi
     throw new ConnectorError("provider_auth_failed", `X user id not found: ${userId}`, false);
   }
   return response.data;
+}
+
+interface TwitterCliTweet {
+  id?: string | number | null;
+  text?: string | null;
+  createdAtISO?: string | null;
+  createdAt?: string | null;
+  author?: {
+    id?: string | number | null;
+    screenName?: string | null;
+    name?: string | null;
+  } | null;
+  metrics?: {
+    likes?: number | string | null;
+    retweets?: number | string | null;
+    replies?: number | string | null;
+    quotes?: number | string | null;
+    views?: number | string | null;
+  } | null;
+}
+
+function normalizeTwitterCliProduct(value: unknown): XProduct {
+  const normalized = optionalNonEmptyString(value)?.toLowerCase();
+  if (!normalized) {
+    return "latest";
+  }
+  if (normalized === "top" || normalized === "latest" || normalized === "photos" || normalized === "videos") {
+    return normalized;
+  }
+  throw new ConnectorError(
+    "provider_auth_failed",
+    `twitter-cli product "${normalized}" is invalid. Use one of: top, latest, photos, videos.`,
+    false
+  );
+}
+
+function normalizeTwitterCliMaxResults(value: unknown, override?: number): number {
+  const raw = override ?? Number(value ?? 20);
+  if (!Number.isFinite(raw)) {
+    return 20;
+  }
+  return Math.max(1, Math.min(Math.round(raw), 100));
+}
+
+function twitterCliChildEnv(credential: XCredential): Record<string, string> {
+  return {
+    ...(typeof process.env.PATH === "string" ? { PATH: process.env.PATH } : {}),
+    ...(typeof process.env.HOME === "string" ? { HOME: process.env.HOME } : {}),
+    ...(typeof process.env.TMPDIR === "string" ? { TMPDIR: process.env.TMPDIR } : {}),
+    ...(typeof process.env.UV_CACHE_DIR === "string" ? { UV_CACHE_DIR: process.env.UV_CACHE_DIR } : {}),
+    ...(typeof process.env.XDG_CACHE_HOME === "string" ? { XDG_CACHE_HOME: process.env.XDG_CACHE_HOME } : {}),
+    ...(typeof process.env.XDG_DATA_HOME === "string" ? { XDG_DATA_HOME: process.env.XDG_DATA_HOME } : {}),
+    ...(typeof process.env.XDG_STATE_HOME === "string" ? { XDG_STATE_HOME: process.env.XDG_STATE_HOME } : {}),
+    TWITTER_AUTH_TOKEN: requireCredential(credential, "authToken"),
+    TWITTER_CT0: requireCredential(credential, "ct0"),
+    OUTPUT: "json"
+  };
+}
+
+function scrubTwitterCliError(text: string, credential: Pick<XCredential, "authToken" | "ct0">): string {
+  let scrubbed = text;
+  const authToken = optionalNonEmptyString(credential.authToken);
+  const ct0 = optionalNonEmptyString(credential.ct0);
+  if (authToken) {
+    scrubbed = scrubbed.split(authToken).join("[redacted]");
+  }
+  if (ct0) {
+    scrubbed = scrubbed.split(ct0).join("[redacted]");
+  }
+  scrubbed = scrubbed.replace(/(TWITTER_AUTH_TOKEN|auth_token)=\S+/gi, "$1=[redacted]");
+  scrubbed = scrubbed.replace(/(TWITTER_CT0|ct0)=\S+/gi, "$1=[redacted]");
+  return scrubbed;
+}
+
+function twitterCliConnectorError(
+  exitCode: number,
+  stdout: string,
+  stderr: string,
+  credential: Pick<XCredential, "authToken" | "ct0">
+): ConnectorError {
+  const scrubbedCombined = scrubTwitterCliError(`${stdout}\n${stderr}`.trim(), credential);
+  if (/(not_authenticated|cookie expired|invalid cookie|unauthorized|forbidden|http (401|403)|\bauth\b)/i.test(scrubbedCombined)) {
+    return new ConnectorError(
+      "provider_auth_failed",
+      "X session cookies expired or were rejected. Reconnect using a burner X account.",
+      false
+    );
+  }
+  return new ConnectorError(
+    "provider_api_error",
+    scrubbedCombined || `twitter-cli exited ${exitCode}`,
+    true
+  );
+}
+
+function getTweetItems(payload: unknown): TwitterCliTweet[] {
+  if (Array.isArray(payload)) {
+    return payload as TwitterCliTweet[];
+  }
+  if (isRecord(payload)) {
+    if (payload.ok === false) {
+      const detail = optionalNonEmptyString(payload.error ?? payload.message) ?? "twitter-cli returned an error payload";
+      throw new ConnectorError("provider_api_error", detail, true);
+    }
+    if (Array.isArray(payload.data)) {
+      return payload.data as TwitterCliTweet[];
+    }
+  }
+  throw new ConnectorError("provider_api_error", "twitter-cli returned an unrecognized JSON shape", true);
+}
+
+function mapTwitterCliTweets(tweets: ReadonlyArray<TwitterCliTweet>, capturedAt: string): XPostRow[] {
+  const rows: XPostRow[] = [];
+  for (const tweet of tweets) {
+    const id = optionalNonEmptyString(tweet.id);
+    const text = optionalNonEmptyString(tweet.text);
+    if (!id || !text) {
+      continue;
+    }
+    const screenName = optionalNonEmptyString(tweet.author?.screenName)?.replace(/^@/, "");
+    const authorId = optionalNonEmptyString(tweet.author?.id) ?? screenName ?? "unknown";
+    rows.push({
+      externalId: `x:${id}`,
+      postId: id,
+      authorId,
+      conversationId: null,
+      postUrl: `https://x.com/${screenName ?? "i"}/status/${id}`,
+      bodyText: text,
+      publishedAt: tweet.createdAtISO || tweet.createdAt ? new Date(tweet.createdAtISO ?? tweet.createdAt ?? capturedAt).toISOString() : null,
+      capturedAt,
+      publicMetrics: {
+        retweetCount: numberOrZero(tweet.metrics?.retweets),
+        replyCount: numberOrZero(tweet.metrics?.replies),
+        likeCount: numberOrZero(tweet.metrics?.likes),
+        quoteCount: numberOrZero(tweet.metrics?.quotes),
+        bookmarkCount: 0,
+        impressionCount: numberOrZero(tweet.metrics?.views)
+      },
+      profileSnapshot: {
+        userId: authorId,
+        username: screenName ?? null,
+        capturedAt,
+        publicMetrics: {
+          followersCount: 0,
+          followingCount: 0,
+          tweetCount: 0,
+          listedCount: 0,
+          likeCount: 0
+        }
+      }
+    });
+  }
+  return rows;
+}
+
+async function runTwitterCliSearch(
+  credential: XCredential,
+  query: string,
+  capturedAt: string,
+  options: { max?: number } = {}
+): Promise<XPostRow[]> {
+  const rawCliCommand =
+    typeof credential.cliCommand === "string" && credential.cliCommand.trim() ? credential.cliCommand.trim() : "uvx";
+  let executable: string;
+  let commandArgs: string[];
+  if (rawCliCommand.startsWith("/") && existsSync(rawCliCommand)) {
+    executable = rawCliCommand;
+    commandArgs = [];
+  } else {
+    ({ executable, args: commandArgs } = parseProcessCommand(rawCliCommand, "twitter-cli command"));
+    ensureExecutableOnPath(
+      executable,
+      "twitter-cli command",
+      'Install uv + twitter-cli: `uv tool install twitter-cli` or use `uvx --from twitter-cli twitter ...`'
+    );
+  }
+  const prefixArgs =
+    commandArgs.length === 0 && (executable === "uvx" || executable.endsWith("/uvx"))
+      ? ["--from", "twitter-cli", "twitter"]
+      : commandArgs;
+  const argv = [
+    ...prefixArgs,
+    "search",
+    query,
+    "--type",
+    normalizeTwitterCliProduct(credential.product),
+    "--max",
+    String(normalizeTwitterCliMaxResults(credential.maxResults, options.max)),
+    "--json"
+  ];
+  const child = spawn(executable, argv, {
+    stdio: ["ignore", "pipe", "pipe"],
+    shell: false,
+    env: twitterCliChildEnv(credential)
+  });
+  let stdoutBuffer = "";
+  let stderrBuffer = "";
+  const CLI_TIMEOUT_MS = 30_000;
+  const CLI_MAX_STDOUT_BYTES = 1_000_000;
+  const CLI_MAX_STDERR_BYTES = 4_096;
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      timeout.unref?.();
+      fn();
+    };
+    const fail = (error: ConnectorError) => {
+      finish(() => {
+        child.kill();
+        reject(error);
+      });
+    };
+    const timeout = setTimeout(() => {
+      fail(new ConnectorError("provider_api_error", "twitter-cli command timed out", true));
+    }, CLI_TIMEOUT_MS);
+
+    child.stdout.on("data", (chunk: Buffer) => {
+      stdoutBuffer = `${stdoutBuffer}${chunk.toString("utf8")}`;
+      if (Buffer.byteLength(stdoutBuffer, "utf8") > CLI_MAX_STDOUT_BYTES) {
+        fail(new ConnectorError("provider_api_error", "twitter-cli command produced too much output", true));
+      }
+    });
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderrBuffer = `${stderrBuffer}${chunk.toString("utf8")}`.slice(0, CLI_MAX_STDERR_BYTES);
+    });
+    child.on("error", () => {
+      fail(new ConnectorError("provider_api_error", "twitter-cli command failed to start", true));
+    });
+    child.on("exit", (code) => {
+      if (settled) return;
+      if (code !== 0) {
+        fail(twitterCliConnectorError(code ?? 1, stdoutBuffer.trim(), stderrBuffer.trim(), credential));
+        return;
+      }
+      finish(() => {
+        try {
+          const payload = JSON.parse(stripJsonPrefix(stdoutBuffer));
+          resolve(mapTwitterCliTweets(getTweetItems(payload), capturedAt));
+        } catch (error) {
+          if (error instanceof ConnectorError) {
+            reject(error);
+            return;
+          }
+          reject(new ConnectorError("provider_api_error", "twitter-cli returned invalid JSON", true));
+        }
+      });
+    });
+  });
+}
+
+export function __testOnlyMapTwitterCliTweets(tweets: ReadonlyArray<TwitterCliTweet>, capturedAt: string): XPostRow[] {
+  return mapTwitterCliTweets(tweets, capturedAt);
+}
+
+export function __testOnlyTwitterCliError(
+  exitCode: number,
+  stdout: string,
+  stderr: string,
+  credential: Pick<XCredential, "authToken" | "ct0">
+): ConnectorError {
+  return twitterCliConnectorError(exitCode, stdout, stderr, credential);
 }
 
 async function xTimelinePosts(
@@ -5977,8 +6335,12 @@ function metaAdsCliAccessToken(credential: MetaAdsCredential): string | undefine
 // instead of the cryptic, retried-forever "failed to start" from the child 'error' handler.
 // Caveat: a PATH walk with existsSync does not verify the +x bit or resolve OS shims; it
 // catches the common "pip not run / not on PATH" case cheaply without an extra spawn.
-function ensureExecutableOnPath(executable: string, label: string): void {
-  const message = `${label}: "${executable}" was not found. Install Meta's Ads CLI: pip install meta-ads`;
+function ensureExecutableOnPath(
+  executable: string,
+  label: string,
+  installHint = "Install Meta's Ads CLI: pip install meta-ads"
+): void {
+  const message = `${label}: "${executable}" was not found. ${installHint}`;
   if (executable.includes("/")) {
     if (!existsSync(resolve(executable))) {
       throw new ConnectorError("provider_auth_failed", message, false);
