@@ -1,0 +1,12898 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { spawnSync } from "node:child_process";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { PassThrough } from "node:stream";
+import * as growthDb from "@infinite-os/db";
+import { encryptCredentialPayload } from "@infinite-os/core";
+import {
+  createFileSessionMemoryStore,
+  createOperatorSessionMemory,
+  sessionMemoryPathForRoot
+} from "@infinite-os/runtime";
+import {
+  NoActiveProjectError,
+  readActiveProjectId,
+  writeActiveProjectId,
+  readDefaultProjectId,
+  writeDefaultProjectId,
+  readMigrationNoticeShown,
+  writeInfiniteOsModelSelection
+} from "@infinite-os/config";
+import { createInteractiveProgressReporter } from "./formatting/live-activity.js";
+import {
+  promptChecklist,
+  promptChoice,
+  promptProviderMatrix,
+  promptText,
+  promptUrl,
+  shouldUseInteractivePrompts,
+  type SetupProviderId
+} from "./setup-prompts.js";
+import * as setupPrompts from "./setup-prompts.js";
+import { formatInfiniteBusyIndicator } from "./tui/ink/status-indicator.js";
+
+import {
+  appendInputHistory,
+  appendPersistentInputHistory,
+  applyCompletionSuggestion,
+  applyComposerEdit,
+  applySessionPin,
+  assertEncryptionKeyMatchesDatabase,
+  cliBoot,
+  decidePreTurnProjectSelection,
+  resolveDistinctProjectMentions,
+  completeInteractiveInputForCli,
+  composerCursorLayout,
+  composerNativeCursorPosition,
+  completeInteractiveInput,
+  getProjectListCache,
+  normalizeProjectSlug,
+  readProjectPinChange,
+  resolveProjectPin,
+  setProjectListCacheForTest,
+  completeSlashCommands,
+  composeCodeVersion,
+  createInfiniteTranscriptRuntime,
+  ensureActiveAgentRuntime,
+  formatInteractiveProgress,
+  getTurnState,
+  InfiniteTurnController,
+  helpText,
+  LongRunToolCharmTicker,
+  operatorConfirmationText,
+  renderAssistantResponsePanel,
+  buildSetupOnboardingResult,
+  renderCliResult,
+  renderCliResultForStream,
+  renderDetectedModelAuthStatus,
+  renderInfiniteAppChrome,
+  renderInfiniteTranscript,
+  resetAgentRuntime,
+  applySessionDefaultPin,
+  runSetupInterview,
+  runSetupWizard,
+  renderInkInteractiveSessionToString,
+  renderInkTranscriptToString,
+  inkTranscriptRowCount,
+  renderStatusFooter,
+  resolveSetupResumePostHogResumeSecrets,
+  resolveSetupResumePostHogPersonalApiKey,
+  resolveCliRenderSurface,
+  resolveTheme,
+  handleInteractiveSetupPreflight,
+  inputHistoryPath,
+  loadPersistentInputHistory,
+  maybeLaunchInfiniteAfterSetup,
+  maybeNotifyUpdateAvailable,
+  navigateInputHistory,
+  parsePersistentInputHistory,
+  projectCommand,
+  metaCommand,
+  renderProjectDeleteResult,
+  requiresOperatorConfirmation,
+  createLocalGa4OauthBootstrap,
+  createLocalSetupPrompter,
+  createSetupInteractionWiring,
+  runTagInstallOffer,
+  expandHomePath,
+  createCliAgentRuntime,
+  runCli,
+  runCliInput,
+  runCommand,
+  runSlashCommand,
+  bareInfiniteCommand,
+  cliVersion,
+  resetTurnState,
+  resolveProjectFlag,
+  setupProjectStep,
+  shouldUseInkInteractiveSession,
+  localChatReadiness,
+  readSetupReadiness,
+  waitForAppReady,
+  invalidateApiBaseUrl,
+  type ChatProgressEvent,
+  type CliAgentRuntime
+} from "./index.js";
+
+// Stub the engine DB client to an EMPTY database. Setup's key-mismatch guard
+// (assertEncryptionKeyMatchesDatabase) probes the DB for existing credentials; in these DB-free
+// "first-time install" smoke tests there are none, so the stub keeps them from connecting to a real
+// localhost Postgres (which a dev running the engine would have). Returns the spy so the caller can
+// .mockRestore() it in a finally.
+function stubEmptyEngineDb() {
+  return vi.spyOn(growthDb, "createInfiniteOsDb").mockReturnValue({
+    async one() {
+      return null;
+    },
+    async query() {
+      return [];
+    },
+    async close() {}
+  } as unknown as growthDb.InfiniteOsDb);
+}
+
+describe("assertEncryptionKeyMatchesDatabase", () => {
+  const KEY_A = "key-a-not-a-default-encryption-key-aaaaaaaa";
+  const KEY_B = "key-b-completely-different-encryption-key-bb";
+  const PG = "postgres://growth_os:pw@localhost:5432/growth_os";
+
+  function dbReturning(payload: string | null): (url: string) => Pick<growthDb.InfiniteOsDb, "one" | "close"> {
+    return () =>
+      ({
+        async one(sql: string) {
+          // The probe checks connection_credentials first, then oauth_tokens.
+          if (sql.includes("connection_credentials")) {
+            return payload ? { encrypted_payload: payload } : null;
+          }
+          return null;
+        },
+        async close() {}
+      }) as unknown as Pick<growthDb.InfiniteOsDb, "one" | "close">;
+  }
+
+  it("refuses when the DB holds a credential the resolved key cannot decrypt", async () => {
+    const createDb = dbReturning(encryptCredentialPayload({ token: "x" }, KEY_B));
+    await expect(
+      assertEncryptionKeyMatchesDatabase({ databaseUrl: PG, encryptionKey: KEY_A, createDb })
+    ).rejects.toThrow(/Refusing to write a new GROWTH_OS_ENCRYPTION_KEY/);
+  });
+
+  it("passes when the resolved key decrypts the DB's existing credential", async () => {
+    const createDb = dbReturning(encryptCredentialPayload({ token: "x" }, KEY_A));
+    await expect(
+      assertEncryptionKeyMatchesDatabase({ databaseUrl: PG, encryptionKey: KEY_A, createDb })
+    ).resolves.toBeUndefined();
+  });
+
+  it("passes when the DB has no credentials yet (fresh DB)", async () => {
+    await expect(
+      assertEncryptionKeyMatchesDatabase({ databaseUrl: PG, encryptionKey: KEY_A, createDb: dbReturning(null) })
+    ).resolves.toBeUndefined();
+  });
+
+  it("never connects for a non-postgres URL", async () => {
+    const createDb = vi.fn() as unknown as (url: string) => Pick<growthDb.InfiniteOsDb, "one" | "close">;
+    await expect(
+      assertEncryptionKeyMatchesDatabase({ databaseUrl: "file:///tmp/pglite", encryptionKey: KEY_A, createDb })
+    ).resolves.toBeUndefined();
+    expect(createDb).not.toHaveBeenCalled();
+  });
+
+  it("does not block when the credentials query fails (table absent / unreachable)", async () => {
+    const createDb = (() =>
+      ({
+        async one() {
+          throw new Error('relation "connection_credentials" does not exist');
+        },
+        async close() {}
+      }) as unknown as Pick<growthDb.InfiniteOsDb, "one" | "close">) as (
+      url: string
+    ) => Pick<growthDb.InfiniteOsDb, "one" | "close">;
+    await expect(
+      assertEncryptionKeyMatchesDatabase({ databaseUrl: PG, encryptionKey: KEY_A, createDb })
+    ).resolves.toBeUndefined();
+  });
+});
+
+type RunSetupWizardOptions = NonNullable<Parameters<typeof runSetupWizard>[2]>;
+type RunSetupOnboardingMock = NonNullable<RunSetupWizardOptions["runSetupOnboarding"]>;
+type ResumeSetupRunMock = NonNullable<RunSetupWizardOptions["resumeSetupRun"]>;
+
+// Box-drawing layout assertions must hold whether or not the terminal advertises
+// color support. When color is enabled (isTTY: true and NO_COLOR unset) the renderer
+// wraps the border glyph and the body text in separate ANSI color spans, so a literal
+// substring like "│ Revenue is up." is split by an SGR reset. Strip ANSI escapes first
+// so these tests verify the rendered glyph + text layout deterministically across
+// environments, instead of silently depending on the ambient NO_COLOR setting.
+// eslint-disable-next-line no-control-regex
+const ANSI_PATTERN = /\[[0-9;]*m/g;
+const stripAnsi = (value: string): string => value.replace(ANSI_PATTERN, "");
+
+function writeFakeDockerBin(directory: string, stderrLines: string[]): string {
+  const dockerBin = join(directory, "docker");
+  writeFileSync(
+    dockerBin,
+    [
+      "#!/usr/bin/env bash",
+      `printf '%s\\n' ${stderrLines.map((line) => `'${line.replace(/'/g, `'\"'\"'`)}'`).join(" ")} >&2`,
+      "exit 1"
+    ].join("\n")
+  );
+  chmodSync(dockerBin, 0o755);
+  return dockerBin;
+}
+
+describe("cli smoke", () => {
+  const waitForStreamBatch = () => new Promise((resolve) => setTimeout(resolve, 20));
+
+  afterEach(() => {
+    resetTurnState();
+    // Reset the per-process API base-URL discovery memo so a discovery result from
+    // one case never leaks into the next (production only ever has one daemon).
+    invalidateApiBaseUrl();
+    vi.unstubAllGlobals();
+    // Restore any vi.spyOn (e.g. the createInfiniteOsDb stubs below) so a spy never leaks into a
+    // later case.
+    vi.restoreAllMocks();
+  });
+
+  // Force process.stdin/stdout TTY-ness for `resolveMode` routing tests, returning a restorer.
+  // `vi.unstubAllGlobals`/`restoreAllMocks` do NOT cover Object.defineProperty, so callers must
+  // invoke the returned restorer in a finally.
+  function forceTty(value: boolean): () => void {
+    const targets: Array<NodeJS.ReadStream | NodeJS.WriteStream> = [process.stdin, process.stdout];
+    const originals = targets.map((target) => Object.getOwnPropertyDescriptor(target, "isTTY"));
+    for (const target of targets) {
+      Object.defineProperty(target, "isTTY", { configurable: true, value });
+    }
+    return () => {
+      targets.forEach((target, index) => {
+        const original = originals[index];
+        if (original) {
+          Object.defineProperty(target, "isTTY", original);
+        } else {
+          delete (target as { isTTY?: boolean }).isTTY;
+        }
+      });
+    };
+  }
+
+  function forcePlatform(value: NodeJS.Platform): () => void {
+    const original = Object.getOwnPropertyDescriptor(process, "platform");
+    Object.defineProperty(process, "platform", { configurable: true, value });
+    return () => {
+      if (original) {
+        Object.defineProperty(process, "platform", original);
+      }
+    };
+  }
+
+  it("boots through the runtime package", () => {
+    expect(cliBoot).toBe(true);
+  });
+
+  it("exposes first-phase CLI commands", () => {
+    expect(helpText()).toContain("init");
+    expect(helpText()).toContain("start");
+    expect(helpText()).toContain("stop");
+    expect(helpText()).toContain("logs [service]");
+    expect(helpText()).toContain("migrate");
+    expect(helpText()).toContain("connect <provider>             Connect or reconnect a provider interactively");
+    expect(helpText()).toContain("connect <provider> [name] <json_credential_payload>");
+    expect(helpText()).not.toContain("connect oauth <provider> --client-id <id>");
+    expect(helpText()).not.toContain("connect oauth-status <session_id>");
+    expect(helpText()).not.toContain("connect oauth-exchange <session_id> [--property-id <id>]");
+    expect(helpText()).toContain("Providers: ga4, posthog, x, meta, stripe, shopify");
+    expect(helpText()).toContain("sync <provider|source_id> [window]");
+    expect(helpText()).toContain("sync all [window]");
+    expect(helpText()).toContain("Windows: incremental, 30_days, 3_months, 6_months, 12_months, all_time");
+    expect(helpText()).toContain("status");
+    expect(helpText()).toContain("sync-runs");
+    expect(helpText()).not.toContain("ask <question>");
+    expect(helpText()).toContain("explain <metric>");
+    expect(helpText()).not.toContain("call <action_id>");
+    expect(helpText()).toContain("saved-report create");
+    expect(helpText()).toContain("setup");
+    expect(helpText()).toContain("setup runtime");
+    expect(helpText()).toContain("setup status");
+    expect(helpText()).toContain("setup connectors");
+    expect(helpText()).toContain("setup query");
+    expect(helpText()).toContain("setup resume <run_id>");
+    expect(helpText()).toContain("setup resume --all");
+    expect(helpText()).toContain("setup reset [tool]");
+    expect(helpText()).toContain("auth login codex");
+    expect(helpText()).toContain("model use");
+    expect(helpText()).toContain("infinite \"message\"");
+    expect(helpText()).not.toContain("/sessions");
+    expect(helpText()).not.toContain("/resume <session_id>");
+    expect(helpText()).not.toContain("/compact [summary]");
+    expect(helpText()).toContain("recipes");
+    expect(helpText()).not.toContain("recipe <recipe_id>");
+    expect(helpText()).not.toContain("mcp | tools");
+    expect(helpText()).not.toContain("gateway start|restart|stop");
+    expect(helpText()).not.toContain("Inside an interactive session");
+    // Examples carry the `infinite local` namespace: the top-level router
+    // rejects the bare engine forms now, so help must never advertise them.
+    expect(helpText()).toContain("infinite local connect x");
+    expect(helpText()).toContain("infinite local connect meta");
+    expect(helpText()).toContain("infinite local sync meta 30_days");
+    expect(helpText()).toContain("infinite local sync all incremental");
+    expect(helpText()).toContain("Common:");
+    expect(helpText()).toContain("Connect data:");
+    expect(helpText()).toContain("Sync data:");
+    expect(helpText()).toContain("Inspect:");
+    expect(helpText()).toContain("Runtime:");
+    expect(helpText()).toContain("Schedules:");
+    expect(helpText()).toContain("Reports:");
+  });
+
+  it("renders analytical envelopes into operator sections", () => {
+    const rendered = renderCliResult({
+      ok: true,
+      actionId: "run_metric_query",
+      authority: "tool_agent",
+      status: "ok",
+      data: {
+        metric: "recognized_revenue",
+        view: "queryable.vw_revenue_by_source",
+        rows: [{ month: "2026-06", value: 123 }]
+      },
+      provenance: ["queryable.vw_revenue_by_source"],
+      freshness: { target: "24 hours", asOf: null, stale: false },
+      caveats: ["content_linkage_not_implemented"],
+      truncated: false,
+      nextActions: ["run_metric_query", "explain_answer", "drilldown_result"]
+    });
+
+    expect(rendered).toContain("Answer");
+    expect(rendered).toContain("Caveats");
+    expect(rendered).toContain("Freshness");
+    expect(rendered).toContain("Provenance");
+    expect(rendered).toContain("Next actions");
+  });
+
+  it("renders chat responses as chat instead of raw JSON", () => {
+    const rendered = renderCliResult({
+      ok: true,
+      sessionId: "cli-session",
+      message: "You have 31 followers.",
+      provenance: ["queryable.vw_x_profile_public_metrics"],
+      actionCalls: []
+    });
+
+    expect(rendered).toBe("You have 31 followers.");
+    expect(rendered).not.toContain('"sessionId"');
+    expect(rendered).not.toContain('"provenance"');
+  });
+
+  it("keeps chat responses plain on non-TTY streams", () => {
+    const rendered = renderCliResultForStream(
+      {
+        ok: true,
+        sessionId: "cli-session",
+        message: "You have 31 followers.",
+        provenance: [],
+        actionCalls: []
+      },
+      { isTTY: false, columns: 80 },
+      {}
+    );
+
+    expect(rendered).toBe("You have 31 followers.");
+  });
+
+  it("frames chat responses with the Hermes-style Infinite panel on TTY streams", () => {
+    const rendered = renderCliResultForStream(
+      {
+        ok: true,
+        sessionId: "cli-session",
+        message: "You have 31 followers.",
+        provenance: [],
+        actionCalls: [],
+        modelProvider: "codex",
+        modelName: "gpt-5.4",
+        usage: { promptTokens: 10, completionTokens: 4 }
+      },
+      { isTTY: true, columns: 54 },
+      {}
+    );
+
+    const plain = stripAnsi(rendered);
+    expect(plain).toContain("╔ ∞ Infinite ");
+    expect(plain).toContain("╭─ ∞ Infinite ");
+    expect(plain).toContain("│ You have 31 followers.");
+    expect(plain).toContain("╰");
+    expect(plain).toContain("session cli-session");
+    expect(plain).toContain("model codex:gpt-5.4");
+    expect(plain).toContain("tokens 10/4");
+  });
+
+  it("resolves built-in Hermes-style CLI skins from the environment", () => {
+    expect(resolveTheme({}).brand.name).toBe("Infinite");
+    expect(resolveTheme({ INFINITE_CLI_SKIN: "mono" }).brand.name).toBe("Infinite Mono");
+    expect(resolveTheme({ INFINITE_THEME: "slate" }).color.primary).toBe("#54C6FF");
+    expect(resolveTheme({ INFINITE_SKIN: "unknown" }).brand.name).toBe("Infinite");
+  });
+
+  it("loads explicit Hermes-style user skin files", () => {
+    const root = mkdtempSync(join(tmpdir(), "growth-os-skin-file-"));
+    try {
+      const skinPath = join(root, "cyber.yaml");
+      writeFileSync(skinPath, [
+        "name: cyber",
+        "colors:",
+        "  response_border: \"#FF00FF\"",
+        "  banner_title: \"#00FFFF\"",
+        "  banner_text: \"#F0FFFF\"",
+        "  status_bar_dim: \"#778899\"",
+        "branding:",
+        "  agent_name: \"Cyber Agent\"",
+        "  prompt_symbol: \"»\"",
+        "tool_prefix: \"▏\""
+      ].join("\n"));
+
+      const theme = resolveTheme({ INFINITE_SKIN_FILE: skinPath });
+      expect(theme.brand.name).toBe("Cyber Agent");
+      expect(theme.brand.prompt).toBe("»");
+      expect(theme.brand.tool).toBe("▏");
+      expect(theme.color.primary).toBe("#FF00FF");
+      expect(theme.color.primaryBright).toBe("#00FFFF");
+      expect(theme.color.text).toBe("#F0FFFF");
+      expect(theme.color.muted).toBe("#778899");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("loads named user skins from configured skin directories", () => {
+    const root = mkdtempSync(join(tmpdir(), "growth-os-skin-dir-"));
+    try {
+      const skinDir = join(root, "skins");
+      mkdirSync(skinDir);
+      writeFileSync(join(skinDir, "aurora.yaml"), [
+        "name: aurora",
+        "colors:",
+        "  ui_accent: \"#44FFDD\"",
+        "  ui_error: \"#FF3366\"",
+        "branding:",
+        "  agent_name: \"Aurora\""
+      ].join("\n"));
+
+      const theme = resolveTheme({ INFINITE_CLI_SKIN: "aurora", INFINITE_SKIN_DIR: skinDir });
+      expect(theme.brand.name).toBe("Aurora");
+      expect(theme.color.primary).toBe("#44FFDD");
+      expect(theme.color.error).toBe("#FF3366");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("applies selected CLI skin to TTY app chrome rendering", () => {
+    const rendered = renderCliResultForStream(
+      {
+        ok: true,
+        sessionId: "cli-session",
+        message: "Revenue is up.",
+        provenance: [],
+        actionCalls: []
+      },
+      { isTTY: true, columns: 72 },
+      { INFINITE_TUI_CHROME: "1", INFINITE_CLI_SKIN: "mono" }
+    );
+
+    expect(rendered).toContain("∞ Infinite Mono");
+    expect(rendered).toContain("Revenue is up.");
+    expect(rendered).toContain("› Type a message, /help, or /exit.");
+  });
+
+  it("resolves CLI render surfaces including Ink/TUI aliases", () => {
+    expect(resolveCliRenderSurface({ isTTY: false }, { INFINITE_RENDER_SURFACE: "chrome" })).toBe("plain");
+    expect(resolveCliRenderSurface({ isTTY: true }, { INFINITE_PLAIN_OUTPUT: "1", INFINITE_RENDER_SURFACE: "ink" })).toBe("plain");
+    expect(resolveCliRenderSurface({ isTTY: true }, {})).toBe("ink");
+    expect(resolveCliRenderSurface({ isTTY: true }, { INFINITE_RENDER_SURFACE: "raw" })).toBe("raw");
+    expect(resolveCliRenderSurface({ isTTY: true }, { INFINITE_TUI_CHROME: "true" })).toBe("chrome");
+    expect(resolveCliRenderSurface({ isTTY: true }, { INFINITE_RENDER_SURFACE: "app_chrome" })).toBe("chrome");
+    expect(resolveCliRenderSurface({ isTTY: true }, { INFINITE_RENDER_SURFACE: "tui" })).toBe("ink");
+    expect(resolveCliRenderSurface({ isTTY: true }, { INFINITE_RENDER_SURFACE: "alternate-screen" })).toBe("ink");
+  });
+
+  it("routes requested Ink/TUI final output through transcript app chrome", () => {
+    const rendered = renderCliResultForStream(
+      {
+        ok: true,
+        sessionId: "cli-session",
+        message: "Revenue is up.",
+        provenance: [],
+        actionCalls: [],
+        modelProvider: "codex",
+        modelName: "gpt-5.4"
+      },
+      { isTTY: true, columns: 72 },
+      { INFINITE_RENDER_SURFACE: "ink" }
+    );
+
+    expect(rendered).toContain("∞ Infinite");
+    expect(rendered).toContain("Revenue is up.");
+    expect(rendered).toContain("session cli-session");
+    expect(rendered).toContain("model codex:gpt-5.4");
+    expect(rendered).toContain("❯ Type a message, /help, or /exit.");
+  });
+
+  it("renders assistant panels and status footers with bounded display width", () => {
+    const panel = renderAssistantResponsePanel("Revenue is up and signups are steady.", {
+      color: false,
+      columns: 48
+    });
+    const footer = renderStatusFooter(["Infinite", "gpt-5.4", "12s", "workspace"], {
+      color: false,
+      columns: 32
+    });
+
+    expect(panel).toContain("Revenue is up and signups are");
+    expect(panel).toContain("steady.");
+    expect(footer).toHaveLength(32);
+    expect(footer.trim()).toBe("Infinite  |  gpt-5.4  |  12s …");
+  });
+
+  it("renders Hermes app chrome around transcript snapshots", () => {
+    const rendered = renderInfiniteAppChrome(
+      {
+        prompt: { placeholder: "Ask about your growth data." },
+        status: ["session cli-session", "model codex:gpt-5.4", "tokens 10/4"],
+        transcript: {
+          messages: [{ role: "assistant", text: "Revenue is up." }]
+        }
+      },
+      { columns: 72, color: false }
+    );
+
+    expect(rendered).toContain("∞ Infinite");
+    expect(rendered).toContain("Revenue is up.");
+    expect(rendered).toContain("session cli-session");
+    expect(rendered).toContain("model codex:gpt-5.4");
+    expect(rendered).toContain("❯ Ask about your growth data.");
+  });
+
+  it("renders inline diff messages in Hermes transcript snapshots", () => {
+    const rendered = renderInfiniteTranscript(
+      {
+        messages: [
+          {
+            kind: "diff",
+            role: "system",
+            text: [
+              "diff --git a/app.ts b/app.ts",
+              "@@ -1,3 +1,3 @@",
+              "-old revenue label",
+              "+new revenue label",
+              " unchanged context"
+            ].join("\n")
+          }
+        ]
+      },
+      { columns: 72, color: false }
+    );
+
+    expect(rendered).toContain("Δ diff");
+    expect(rendered).toContain("diff --git a/app.ts b/app.ts");
+    expect(rendered).toContain("@ -1,3 +1,3 @@");
+    expect(rendered).toContain("- old revenue label");
+    expect(rendered).toContain("+ new revenue label");
+    expect(rendered).toContain("│  unchanged context");
+  });
+
+  it("renders inline diffs inside Hermes app chrome", () => {
+    const rendered = renderInfiniteAppChrome(
+      {
+        status: ["session cli-session"],
+        transcript: {
+          messages: [
+            { kind: "diff", role: "system", text: "-before\n+after" },
+            { role: "assistant", text: "Updated the label." }
+          ]
+        }
+      },
+      { columns: 72, color: false }
+    );
+
+    expect(rendered).toContain("∞ Infinite");
+    expect(rendered).toContain("Δ diff");
+    expect(rendered).toContain("- before");
+    expect(rendered).toContain("+ after");
+    expect(rendered).toContain("Updated the label.");
+  });
+
+  it("can opt into Hermes app chrome for TTY chat responses", () => {
+    const rendered = renderCliResultForStream(
+      {
+        ok: true,
+        sessionId: "cli-session",
+        message: "Revenue is up.",
+        provenance: ["queryable.vw_revenue_by_source"],
+        actionCalls: [
+          {
+            actionId: "run_metric_query",
+            input: { metric: "recognized_revenue", view: "queryable.vw_revenue_by_source" },
+            status: "ok",
+            envelope: {
+              actionId: "run_metric_query",
+              authority: "tool_agent",
+              caveats: [],
+              data: { rows: [{ recognized_revenue: 9800 }] },
+              freshness: { target: "stripe", asOf: "2026-06-01", stale: false },
+              nextActions: [],
+              ok: true,
+              provenance: ["queryable.vw_revenue_by_source"],
+              status: "ok",
+              truncated: false
+            }
+          }
+        ],
+        modelProvider: "codex",
+        modelName: "gpt-5.4",
+        usage: { promptTokens: 10, completionTokens: 4 }
+      },
+      { isTTY: true, columns: 72 },
+      { INFINITE_TUI_CHROME: "1" }
+    );
+
+    expect(rendered).toContain("∞ Infinite");
+    expect(rendered).toContain("Revenue is up.");
+    expect(rendered).toContain("tools 1");
+    expect(rendered).toContain("Run Metric Query");
+    expect(rendered).toContain("metric=recognized_revenue");
+    expect(rendered).toContain("1 row");
+    expect(rendered).toContain("1 source");
+    expect(rendered).toContain("session cli-session");
+    expect(rendered).toContain("model codex:gpt-5.4");
+    expect(rendered).toContain("tokens 10/4");
+    expect(rendered).toContain("actions 1");
+    expect(rendered).toContain("sources 1");
+    expect(rendered).toContain("❯ Type a message, /help, or /exit.");
+  });
+
+  it("renders setup results as a human summary instead of raw JSON", () => {
+    const rendered = renderCliResult({
+      ok: true,
+      init: {
+        configPath: "/workspace/.growth-os/config.yml",
+        envPath: "/workspace/.growth-os/.env"
+      },
+      model: {
+        provider: "claude",
+        model: "claude-sonnet-4-5"
+      },
+      auth: {
+        provider: "claude",
+        ready: true,
+        source: "claude-code-credentials-file"
+      },
+      runtime: {
+        ok: true,
+        command: ["docker", "compose", "up", "-d"]
+      },
+      next: "Run `infinite`, then type your question."
+    });
+
+    expect(rendered).toContain("Infinite setup complete.");
+    expect(rendered).toContain("Runtime:");
+    expect(rendered).toContain("Start: docker compose up -d");
+    expect(rendered).toContain("Provider: claude");
+    expect(rendered).toContain("Auth: ready");
+    expect(rendered).toContain("Run infinite, then type your question.");
+    expect(rendered.trim()).not.toMatch(/^\{/);
+  });
+
+  it("renders runtime setup results as a human summary instead of raw JSON", () => {
+    const rendered = renderCliResult({
+      ok: true,
+      section: "runtime",
+      runtime: {
+        mode: "external_postgres",
+        configPath: "/workspace/.growth-os/config.yml",
+        envPath: "/workspace/.growth-os/.env",
+        databaseUrl: "postgres://user:[redacted]@db.example.com:5432/growth",
+        start: { ok: true, skipped: true, reason: "external_runtime" },
+        migrations: { ok: true, dryRun: true }
+      },
+      next: "Run `infinite local setup model` to choose Codex or Claude."
+    });
+
+    expect(rendered).toContain("Infinite runtime setup");
+    expect(rendered).toContain("Mode: external_postgres");
+    expect(rendered).toContain("Migrations: dry-run");
+    expect(rendered).toContain("Run infinite local setup model to choose Codex or Claude.");
+    expect(rendered.trim()).not.toMatch(/^\{/);
+  });
+
+  it("renders full setup wizard results as a human summary instead of raw JSON", () => {
+    const rendered = renderCliResult({
+      ok: false,
+      section: "wizard",
+      setupMode: "full",
+      existingInstall: true,
+      sections: [
+        {
+          id: "runtime",
+          title: "Runtime and storage",
+          result: { runtime: { mode: "local_docker", migrations: { alreadyUpToDate: true } } }
+        },
+        {
+          id: "model",
+          title: "Model and auth for LLM querying",
+          result: { provider: "claude", model: "claude-sonnet-4-5", auth: { reason: "growth_os_auth_ready" } }
+        },
+        {
+          id: "project",
+          title: "Your first project",
+          result: {
+            interview: {
+              projectName: "Acme",
+              websiteUrl: "https://acme.test",
+              productSurface: "web",
+              providerInventory: [
+                { provider: "ga4", hasAccount: true, installState: "installed", selected: true, recommended: true },
+                { provider: "posthog", hasAccount: false, installState: "unknown", selected: true, recommended: true },
+                { provider: "x", hasAccount: false, installState: "not_installed", selected: false, recommended: true }
+              ]
+            }
+          }
+        },
+        {
+          id: "query",
+          title: "Query readiness",
+          result: { setupReadiness: { llmQuery: "blocked", blockingReasons: ["connectors_missing"] } }
+        },
+        {
+          id: "status",
+          title: "Review and start",
+          result: {
+            files: {
+              projectConfigPath: "/workspace/.growth-os/config.yml",
+              runtimeEnvPath: "/workspace/.growth-os/.env",
+              userConfigPath: "/home/user/.growth-os/config.yml",
+              userAuthPath: "/home/user/.growth-os/auth.json"
+            }
+          }
+        }
+      ],
+      next: "Run `infinite local setup status` to review blockers."
+    });
+
+    expect(rendered).toContain("Infinite setup");
+    expect(rendered).toContain("Reconfigure (full)");
+    expect(rendered).toContain("Runtime and storage");
+    expect(rendered).toContain("Model and auth for LLM querying");
+    expect(rendered).toContain("Your first project");
+    expect(rendered).toContain("project=Acme surface=web providers=GA4, POSTHOG");
+    expect(rendered).toContain("Website: https://acme.test");
+    expect(rendered).toContain("Query readiness");
+    expect(rendered).toContain("Files");
+    expect(rendered).toContain("/workspace/.growth-os/config.yml");
+    expect(rendered).toContain("Setup incomplete.");
+    expect(rendered.trim()).not.toMatch(/^\{/);
+  });
+
+  it("renders default existing-setup wizard summaries without reconfigure wording", () => {
+    const rendered = renderCliResult({
+      ok: false,
+      section: "wizard",
+      setupMode: "reuse",
+      existingInstall: true,
+      sections: [
+        {
+          id: "runtime",
+          title: "Runtime and storage",
+          result: {
+            reused: true,
+            runtime: { mode: "local_docker", migrations: { skipped: true, mode: "existing_setup" } }
+          }
+        }
+      ],
+      next: "Run `infinite local setup status` to review blockers."
+    });
+
+    expect(rendered).toContain("Using existing setup");
+    expect(rendered).toContain("mode=local_docker using existing setup");
+    expect(rendered).not.toContain("Reconfigure (full)");
+  });
+
+  it("renders quick-setup wizard summaries with skipped-section guidance", () => {
+    const rendered = renderCliResult({
+      ok: false,
+      section: "wizard",
+      setupMode: "quick",
+      existingInstall: false,
+      sections: [
+        {
+          id: "connectors",
+          title: "Data connectors",
+          result: {
+            ok: false,
+            skipped: true
+          }
+        }
+      ],
+      next: "Run `infinite local setup status` to review blockers."
+    });
+
+    expect(rendered).toContain("quick");
+    expect(rendered).toContain("Skipped in quick setup.");
+    expect(rendered).toContain("Run `infinite local setup connectors`");
+  });
+
+  it("renders setup status with files, blockers, and exact rerun command", () => {
+    const rendered = renderCliResult({
+      ok: false,
+      section: "status",
+      setupReadiness: {
+        ok: false,
+        workspaceRoot: "/workspace",
+        runtimeConfig: "configured",
+        runtimeServices: "ready",
+        database: "migrated",
+        model: "selected",
+        auth: "ready",
+        connectors: "none",
+        llmQuery: "blocked",
+        blockingReasons: ["connectors_missing: Connect at least one marketing data source."]
+      },
+      files: {
+        projectConfigPath: "/workspace/.growth-os/config.yml",
+        runtimeEnvPath: "/workspace/.growth-os/.env",
+        userConfigPath: "/home/user/.growth-os/config.yml",
+        userAuthPath: "/home/user/.growth-os/auth.json"
+      },
+      nextCommand: "infinite local setup connectors",
+      next: "Run `infinite local setup connectors` to finish setup."
+    });
+
+    expect(rendered).toContain("Infinite setup status");
+    expect(rendered).toContain("Files:");
+    expect(rendered).toContain("Blocking reasons:");
+    expect(rendered).toContain("connectors_missing");
+    expect(rendered).toContain("Rerun:");
+    expect(rendered).toContain("infinite local setup connectors");
+    expect(rendered).not.toContain("supersecret");
+  });
+
+  it("renders setup status with `Next: infinite` when setup is complete", () => {
+    const rendered = renderCliResult({
+      ok: true,
+      section: "status",
+      setupReadiness: {
+        ok: true,
+        workspaceRoot: "/workspace",
+        runtimeConfig: "configured",
+        runtimeServices: "ready",
+        database: "migrated",
+        model: "selected",
+        auth: "ready",
+        connectors: "connected",
+        llmQuery: "ready",
+        blockingReasons: []
+      },
+      files: {
+        projectConfigPath: "/workspace/.growth-os/config.yml",
+        runtimeEnvPath: "/workspace/.growth-os/.env",
+        userConfigPath: "/home/user/.growth-os/config.yml",
+        userAuthPath: "/home/user/.growth-os/auth.json"
+      },
+      nextCommand: "infinite",
+      next: "Run `infinite`, then type your question."
+    });
+
+    expect(rendered).toContain("Next:");
+    expect(rendered).toContain("infinite");
+    expect(rendered).not.toContain("Rerun:");
+  });
+
+  it("renders setup status with active run, handoff, and verification summaries", () => {
+    const rendered = renderCliResult({
+      ok: false,
+      section: "status",
+      setupReadiness: {
+        ok: false,
+        workspaceRoot: "/workspace",
+        runtimeConfig: "configured",
+        runtimeServices: "ready",
+        database: "migrated",
+        model: "selected",
+        auth: "ready",
+        connectors: "none",
+        llmQuery: "blocked",
+        blockingReasons: ["connectors_missing: Connect at least one marketing data source."],
+        activeSetupRun: {
+          id: "setuprun_active",
+          tool: "ga4",
+          provider: "ga4",
+          status: "paused_handoff",
+          interview: {
+            projectName: "Acme",
+            websiteUrl: "https://acme.test",
+            productSurface: "web"
+          },
+          selectedProviders: ["ga4"],
+          recommendedProviders: ["ga4", "posthog"],
+          providers: {
+            ga4: {
+              phases: {
+                detect: { status: "ok", detail: "detected" },
+                connect: { status: "needs_human", detail: "Finish Google sign-in" }
+              },
+              verification: {
+                installStatus: "verified",
+                queryabilityStatus: "pending"
+              }
+            }
+          },
+          pendingHandoff: {
+            kind: "open_url",
+            instructions: "Finish Google sign-in",
+            url: "https://accounts.google.com/o/oauth2/auth"
+          },
+          site: {
+            url: "https://acme.test",
+            repoPath: "/workspace/acme",
+            appDir: "apps/web",
+            framework: "next"
+          }
+        }
+      },
+      files: {
+        projectConfigPath: "/workspace/.growth-os/config.yml",
+        runtimeEnvPath: "/workspace/.growth-os/.env",
+        userConfigPath: "/home/user/.growth-os/config.yml",
+        userAuthPath: "/home/user/.growth-os/auth.json"
+      },
+      nextCommand: "infinite local setup connectors",
+      next: "Run `infinite local setup connectors` to finish setup."
+    });
+
+    expect(rendered).toContain("Active setup run:");
+    expect(rendered).toContain("setuprun_active");
+    expect(rendered).toContain("Acme");
+    expect(rendered).toContain("Selected providers: GA4");
+    expect(rendered).toContain("Action required: Finish Google sign-in");
+    expect(rendered).toContain("Open this page: https://accounts.google.com/o/oauth2/auth");
+    expect(rendered).toContain("Finish Google sign-in");
+    expect(rendered).toContain("Resume: infinite local setup resume setuprun_active");
+    expect(rendered).toContain("Verification:");
+    expect(rendered).toContain("ga4: install=verified, queryability=pending");
+  });
+
+  it("renders a PostHog key-file import hint for active API-key handoffs", () => {
+    const rendered = renderCliResult({
+      ok: false,
+      section: "status",
+      setupReadiness: {
+        ok: false,
+        workspaceRoot: "/workspace",
+        runtimeConfig: "configured",
+        runtimeServices: "ready",
+        database: "migrated",
+        model: "selected",
+        auth: "ready",
+        connectors: "none",
+        llmQuery: "blocked",
+        blockingReasons: [],
+        activeSetupRun: {
+          id: "setuprun_posthog",
+          tool: "posthog",
+          provider: "posthog",
+          status: "paused_handoff",
+          interview: {
+            projectName: "Acme",
+            websiteUrl: "https://acme.test",
+            productSurface: "web"
+          },
+          selectedProviders: ["posthog"],
+          recommendedProviders: ["posthog"],
+          providers: {},
+          pendingHandoff: {
+            kind: "open_url",
+            instructions: "Create a scoped personal API key, then resume setup.",
+            url: "https://us.posthog.com/settings/user-api-keys"
+          }
+        }
+      },
+      nextCommand: "infinite local setup resume setuprun_posthog",
+      next: "Run `infinite local setup resume setuprun_posthog` to resume the active setup run."
+    });
+
+    expect(rendered).toContain("Action required: Create a scoped personal API key, then resume setup.");
+    expect(rendered).toContain(
+      "Key file import: infinite local setup resume setuprun_posthog --posthog-personal-api-key-file .growth-os/tmp/posthog-personal-api-key --posthog-api-host <https://eu.posthog.com|https://us.posthog.com>"
+    );
+    expect(rendered).toContain("Open this page: https://us.posthog.com/settings/user-api-keys");
+  });
+
+  it("does not advertise resume for a running active setup run", () => {
+    const rendered = renderCliResult({
+      ok: false,
+      section: "status",
+      setupReadiness: {
+        ok: false,
+        workspaceRoot: "/workspace",
+        runtimeConfig: "configured",
+        runtimeServices: "ready",
+        database: "migrated",
+        model: "selected",
+        auth: "ready",
+        connectors: "none",
+        llmQuery: "blocked",
+        blockingReasons: [],
+        activeSetupRun: {
+          id: "setuprun_running",
+          tool: "ga4",
+          provider: "ga4",
+          status: "running"
+        }
+      }
+    });
+
+    expect(rendered).toContain("Active setup run:");
+    expect(rendered).toContain("Status: running");
+    expect(rendered).not.toContain("Resume: infinite local setup resume setuprun_running");
+  });
+
+  it("flags a stale active setup run and points at setup reset", () => {
+    const staleReadiness = (updatedAt: string) => ({
+      ok: false,
+      section: "status",
+      setupReadiness: {
+        ok: false,
+        workspaceRoot: "/workspace",
+        runtimeConfig: "configured",
+        runtimeServices: "ready",
+        database: "migrated",
+        model: "selected",
+        auth: "ready",
+        connectors: "none",
+        llmQuery: "blocked",
+        blockingReasons: [],
+        activeSetupRun: {
+          id: "setuprun_stuck",
+          tool: "ga4",
+          provider: "ga4",
+          status: "running",
+          updatedAt
+        }
+      }
+    });
+
+    const stale = renderCliResult(staleReadiness(new Date(Date.now() - 16 * 60 * 1000).toISOString()));
+    expect(stale).toContain("This run looks stale — run `infinite local setup reset` to clear it.");
+
+    const fresh = renderCliResult(staleReadiness(new Date().toISOString()));
+    expect(fresh).not.toContain("looks stale");
+  });
+
+  it("renders setup reset results with the cleared runs", () => {
+    const rendered = renderCliResult({
+      ok: true,
+      section: "reset",
+      cleared: [
+        { id: "setuprun_1", tool: "ga4" },
+        { id: "setuprun_2", tool: "posthog" }
+      ],
+      next: "Run `infinite local setup` to start a fresh setup run."
+    });
+    expect(rendered).toContain("Cleared 2 active setup runs:");
+    expect(rendered).toContain("ga4: setuprun_1");
+    expect(rendered).toContain("posthog: setuprun_2");
+    expect(rendered).toContain("Next:");
+
+    const empty = renderCliResult({ ok: true, section: "reset", cleared: [] });
+    expect(empty).toContain("No active setup runs to clear.");
+  });
+
+  it("redacts OAuth query strings and fragments from active setup run summaries", () => {
+    const rendered = renderCliResult({
+      ok: false,
+      section: "status",
+      setupReadiness: {
+        ok: false,
+        workspaceRoot: "/workspace",
+        runtimeConfig: "configured",
+        runtimeServices: "ready",
+        database: "migrated",
+        model: "selected",
+        auth: "ready",
+        connectors: "none",
+        llmQuery: "blocked",
+        blockingReasons: [],
+        activeSetupRun: {
+          id: "setuprun_active",
+          tool: "ga4",
+          provider: "ga4",
+          status: "paused_handoff",
+          pendingHandoff: {
+            kind: "open_url",
+            instructions: "Finish Google sign-in",
+            url: "https://accounts.google.com/o/oauth2/v2/auth?client_id=ga-client-id&state=secret-state",
+            lastKnownUrl: "https://accounts.google.com/o/oauth2/v2/auth?client_id=ga-client-id&state=secret-state#last"
+          }
+        }
+      }
+    });
+
+    expect(rendered).toContain("Open this page: https://accounts.google.com/o/oauth2/v2/auth");
+    expect(rendered).not.toContain("client_id=ga-client-id");
+    expect(rendered).not.toContain("secret-state");
+    expect(rendered).not.toContain("#last");
+  });
+
+  it("omits resume from setup status nextCommand for a running active setup run", async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "growth-os-setup-status-running-"));
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-setup-status-running-home-"));
+    const originalFetch = globalThis.fetch;
+    const dbSpy = vi.spyOn(growthDb, "createInfiniteOsDb").mockReturnValue({
+      async query(sql: string) {
+        if (sql.includes("from sources")) {
+          return [];
+        }
+        return [];
+      },
+      async one(sql: string) {
+        if (sql.includes("from setup_runs")) {
+          return {
+            id: "setuprun_running",
+            tool: "ga4",
+            provider: "ga4",
+            status: "running",
+            phase_state: {
+              interview: {
+                projectName: "Acme",
+                productSurface: "web",
+                providerInventory: []
+              }
+            },
+            pending_handoff: null,
+            site_id: null
+          };
+        }
+        return null;
+      },
+      async close() {
+        return undefined;
+      }
+    } as unknown as growthDb.InfiniteOsDb);
+
+    try {
+      await runCommand("init", [], {
+        GROWTH_OS_WORKSPACE_ROOT: workspaceRoot
+      });
+      globalThis.fetch = (async () => new Response(JSON.stringify({ status: "ok" }), { status: 200 })) as typeof fetch;
+
+      const result = (await runCommand("setup", ["status"], {
+        GROWTH_OS_WORKSPACE_ROOT: workspaceRoot,
+        GROWTH_OS_WORKSPACE_ID: "proj_running",
+        GROWTH_OS_HOME: growthHome
+      })) as { section?: string; nextCommand?: string; next?: string };
+
+      expect(result).toMatchObject({
+        section: "status"
+      });
+      expect(result.nextCommand).not.toBe("infinite local setup resume setuprun_running");
+      expect(String(result.next)).not.toContain("resume setuprun_running");
+    } finally {
+      dbSpy.mockRestore();
+      globalThis.fetch = originalFetch;
+      rmSync(workspaceRoot, { recursive: true, force: true });
+      rmSync(growthHome, { recursive: true, force: true });
+    }
+  });
+
+  it("renders rerun setup wizard output with active setup run summaries in the status section", () => {
+    const rendered = renderCliResult({
+      ok: false,
+      section: "wizard",
+      existingInstall: true,
+      setupMode: "full",
+      sections: [
+        {
+          id: "status",
+          title: "Setup status",
+          result: {
+            ok: false,
+            section: "status",
+            setupReadiness: {
+              ok: false,
+              workspaceRoot: "/workspace",
+              runtimeConfig: "configured",
+              runtimeServices: "ready",
+              database: "migrated",
+              model: "selected",
+              auth: "ready",
+              connectors: "none",
+              llmQuery: "blocked",
+              blockingReasons: ["connectors_missing: Connect at least one marketing data source."],
+              activeSetupRun: {
+                id: "setuprun_active",
+                tool: "ga4",
+                provider: "ga4",
+                status: "paused_handoff",
+                providers: {
+                  ga4: {
+                    phases: {
+                      connect: { status: "needs_human", detail: "Finish Google sign-in" }
+                    },
+                    verification: {
+                      installStatus: "verified",
+                      queryabilityStatus: "pending"
+                    }
+                  }
+                },
+                pendingHandoff: {
+                  kind: "open_url",
+                  instructions: "Finish Google sign-in"
+                }
+              }
+            }
+          }
+        }
+      ],
+      next: "Run `infinite local setup status` to review blockers."
+    });
+
+    expect(rendered).toContain("Reconfigure (full)");
+    expect(rendered).toContain("run=setuprun_active");
+    expect(rendered).toContain("handoff=Finish Google sign-in");
+    expect(rendered).toContain("verify=ga4:verified/pending");
+  });
+
+  it("identifies operator commands for confirmation in the interactive shell", () => {
+    expect(requiresOperatorConfirmation("/sync src_1")).toBe(true);
+    expect(requiresOperatorConfirmation("/sync x")).toBe(false);
+    expect(requiresOperatorConfirmation("/sync x 30_days")).toBe(true);
+    expect(requiresOperatorConfirmation("/recipe sync_source {\"sourceId\":\"src_1\"}")).toBe(true);
+    expect(operatorConfirmationText("/saved-report export report_1")).toContain("Operator action");
+  });
+
+  it("does not expose ask as a command or slash-command", async () => {
+    const env = { GROWTH_OS_WORKSPACE_ID: "proj_test" };
+    await expect(runCommand("ask", ["What changed?"], env)).rejects.toThrow(
+      "Unknown Infinite OS CLI command: ask"
+    );
+    await expect(runSlashCommand("/ask What changed?", env)).rejects.toThrow(
+      "Unknown Infinite OS CLI command: ask"
+    );
+  });
+
+  it("maps plain interactive input to chat", async () => {
+    const calls: Array<{
+      message: string;
+      onProgress?: (event: ChatProgressEvent) => void;
+      progressMode?: "legacy" | "rich" | "both";
+      sessionId?: string;
+    }> = [];
+    const runtime = fakeAgentRuntime({
+      async chat(input) {
+        calls.push(input);
+        return { ok: true, sessionId: "session-chat" };
+      }
+    });
+
+    await runSlashCommand("How much revenue this month?", {}, undefined, undefined, {
+      conversationId: "session-chat"
+    }, runtime);
+
+    expect(calls[0]).toMatchObject({
+      message: "How much revenue this month?",
+      // The runtime receives the immutable conversation id; the real runtime
+      // derives `${conversationId}:${workspaceId}` (see deriveControllerSessionId),
+      // the fake forwards it verbatim.
+      sessionId: "session-chat"
+    });
+    expect(typeof calls[0]?.onProgress).toBe("function");
+  });
+
+  it("lets the Ink interactive shell inject the chat progress callback", async () => {
+    const progress = vi.fn();
+    const runtime = fakeAgentRuntime({
+      async chat(input) {
+        input.onProgress?.({
+          type: "message.complete",
+          stage: "message",
+          message: "Assistant message complete.",
+          text: "Revenue is up."
+        });
+        return { ok: true, sessionId: "session-chat", message: "Revenue is up." };
+      }
+    });
+
+    await runSlashCommand(
+      "How much revenue this month?",
+      {},
+      undefined,
+      undefined,
+      { conversationId: "session-chat" },
+      runtime,
+      { onProgress: progress }
+    );
+
+    expect(progress).toHaveBeenCalledWith(expect.objectContaining({
+      type: "message.complete",
+      text: "Revenue is up."
+    }));
+  });
+
+  it("renders interactive progress lines with Hermes-style tool formatting", () => {
+    expect(
+      formatInteractiveProgress({ stage: "resolve", message: "Preparing X engagement breakdown." }, 3400)
+    ).toBe("┊ ⚡ preparing X engagement breakdown…  3.4s");
+    expect(
+      formatInteractiveProgress({ stage: "recall", message: "Recalled prior session context." }, 1200)
+    ).toBe("┊ 🔍 recall    Recalled prior session context  1.2s");
+    expect(
+      formatInteractiveProgress({ stage: "tool", message: "Running run_breakdown_query." }, 9800)
+    ).toBe("┊ ⚡ tool      run_breakdown_query  9.8s");
+    expect(
+      formatInteractiveProgress({ stage: "tool", message: "Checking available metrics." }, 2100)
+    ).toBe("┊ 🔍 checking  available metrics  2.1s");
+    expect(
+      formatInteractiveProgress({
+        type: "tool.generating",
+        stage: "tool",
+        message: "Drafting run_breakdown_query.",
+        name: "run_breakdown_query"
+      }, 1800)
+    ).toBe("┊ ⚡ drafting  Run Breakdown Query…  1.8s");
+    expect(
+      formatInteractiveProgress({
+        type: "tool.complete",
+        stage: "tool",
+        message: "Finished run_breakdown_query.",
+        toolId: "call_1",
+        name: "run_breakdown_query",
+        durationMs: 62000,
+        summary: "Finished run_breakdown_query",
+        status: "ok"
+      }, 9800)
+    ).toBe("┊ ⚡ tool      Run Breakdown Query (62.0s) :: Finished run_breakdown_query ✓");
+    expect(
+      formatInteractiveProgress({
+        type: "subagent.start",
+        stage: "subagent",
+        message: "Delegating transcript review.",
+        subagent: {
+          id: "agent_review",
+          model: "gpt-5.4",
+          status: "running",
+          summary: "Review Hermes transcript renderer"
+        }
+      }, 2100)
+    ).toBe("┊ ◇ delegate  Review Hermes transcript renderer  2.1s");
+  });
+
+  it("records Hermes-style turn state from progress events", () => {
+    let now = 1_000;
+    const controller = new InfiniteTurnController(() => now);
+
+    resetTurnState();
+    controller.recordProgressEvent({
+      type: "tool.generating",
+      stage: "tool",
+      message: "Drafting run_metric_query.",
+      name: "run_metric_query"
+    });
+
+    expect(getTurnState().turnTrail).toEqual(["drafting Run Metric Query…"]);
+    expect(getTurnState().activity.at(-1)?.text).toBe("drafting Run Metric Query");
+
+    controller.recordProgressEvent({
+      type: "tool.start",
+      stage: "tool",
+      message: "Running run_metric_query.",
+      toolId: "call_1",
+      name: "run_metric_query",
+      context: "Running revenue total lookup."
+    });
+
+    expect(getTurnState().tools).toMatchObject([
+      {
+        id: "call_1",
+        name: "run_metric_query",
+        context: "Running revenue total lookup.",
+        startedAt: 1_000
+      }
+    ]);
+    expect(getTurnState().turnTrail).toEqual([]);
+
+    controller.recordProgressEvent({
+      type: "reasoning.delta",
+      stage: "thinking",
+      message: "Checking source coverage.",
+      text: "Checking source coverage."
+    });
+
+    expect(getTurnState().reasoning).toBe("Checking source coverage.");
+    expect(getTurnState().reasoningActive).toBe(true);
+    expect(getTurnState().streamSegments[0]).toMatchObject({
+      kind: "trail",
+      role: "system",
+      text: "",
+      thinking: "Checking source coverage."
+    });
+
+    now = 2_750;
+    controller.recordProgressEvent({
+      type: "tool.progress",
+      stage: "tool",
+      message: "Querying recognized revenue.",
+      toolId: "call_1",
+      name: "run_metric_query",
+      preview: "recognized revenue by source"
+    });
+    controller.recordProgressEvent({
+      type: "tool.complete",
+      stage: "tool",
+      message: "Finished run_metric_query.",
+      toolId: "call_1",
+      name: "run_metric_query",
+      durationMs: 1_750,
+      summary: "3 rows",
+      status: "ok"
+    });
+
+    expect(getTurnState().tools).toEqual([]);
+    expect(getTurnState().turnTrail).toEqual(["analyzing tool output…"]);
+    expect(getTurnState().streamSegments[0]?.tools).toEqual([
+      "Run Metric Query(\"recognized revenue by source\") (1.8s) :: 3 rows ✓"
+    ]);
+
+    controller.fullReset();
+  });
+
+  it("splits Hermes reasoning tags into trail details at message completion", () => {
+    const controller = new InfiniteTurnController(() => 1_000);
+
+    resetTurnState();
+    const result = controller.recordMessageComplete({
+      text: "<thinking>Need source freshness.</thinking>\nRevenue is $123."
+    });
+
+    expect(result.finalText).toBe("Revenue is $123.");
+    expect(result.finalMessages).toContainEqual({
+      kind: "trail",
+      role: "system",
+      text: "",
+      thinking: "Need source freshness.",
+      thinkingTokens: 6,
+      toolTokens: undefined
+    });
+    expect(result.finalMessages).toContainEqual({ role: "assistant", text: "Revenue is $123." });
+  });
+
+  it("records Hermes message event deltas into streaming transcript state", async () => {
+    const controller = new InfiniteTurnController(() => 1_000);
+
+    resetTurnState();
+    controller.recordProgressEvent({
+      type: "message.start",
+      stage: "message",
+      message: "Assistant message started."
+    });
+    controller.recordProgressEvent({
+      type: "message.delta",
+      stage: "message",
+      message: "Revenue is",
+      text: "Revenue is"
+    });
+    controller.recordProgressEvent({
+      type: "message.delta",
+      stage: "message",
+      message: " up.",
+      text: " up."
+    });
+    await waitForStreamBatch();
+
+    expect(getTurnState().streaming).toBe("Revenue is up.");
+
+    const complete = controller.recordProgressEvent({
+      type: "message.complete",
+      stage: "message",
+      message: "Assistant message complete.",
+      text: "Revenue is up."
+    });
+
+    expect(complete?.finalMessages).toContainEqual({ role: "assistant", text: "Revenue is up." });
+  });
+
+  it("stacks sequential assistant messages within a single turn", async () => {
+    const controller = new InfiniteTurnController(() => 1_000);
+
+    resetTurnState();
+
+    // First assistant message: prose streamed, then a tool call begins.
+    controller.recordProgressEvent({ type: "message.start", stage: "message", message: "" });
+    controller.recordProgressEvent({ type: "message.delta", stage: "message", message: "First answer.", text: "First answer." });
+    await waitForStreamBatch();
+    expect(getTurnState().streaming).toBe("First answer.");
+
+    // A tool starts. Hermes commits the prior prose into the transcript as
+    // its own segment and clears the live region for the next message.
+    controller.recordProgressEvent({
+      type: "tool.start",
+      stage: "tool",
+      message: "Running run_metric_query.",
+      toolId: "call_1",
+      name: "run_metric_query",
+      context: "recognized revenue"
+    });
+
+    expect(getTurnState().streaming).toBe("");
+    expect(getTurnState().streamSegments).toContainEqual({ role: "assistant", text: "First answer." });
+
+    controller.recordProgressEvent({
+      type: "tool.complete",
+      stage: "tool",
+      message: "Finished run_metric_query.",
+      toolId: "call_1",
+      name: "run_metric_query",
+      durationMs: 800,
+      summary: "3 rows"
+    });
+
+    // Second assistant message: a fresh message.start should not erase the
+    // already-committed first message.
+    controller.recordProgressEvent({ type: "message.start", stage: "message", message: "" });
+    controller.recordProgressEvent({ type: "message.delta", stage: "message", message: "Second answer.", text: "Second answer." });
+    await waitForStreamBatch();
+    expect(getTurnState().streamSegments).toContainEqual({ role: "assistant", text: "First answer." });
+
+    const complete = controller.recordProgressEvent({
+      type: "message.complete",
+      stage: "message",
+      message: "Assistant message complete.",
+      text: "Second answer."
+    });
+
+    const assistantTexts = complete?.finalMessages
+      .filter((msg) => msg.role === "assistant")
+      .map((msg) => msg.text);
+
+    // Both messages must survive into the committed transcript, in order.
+    expect(assistantTexts).toEqual(["First answer.", "Second answer."]);
+  });
+
+  it("renders Hermes transcript snapshots from turn state", async () => {
+    const controller = new InfiniteTurnController(() => 1_000);
+
+    resetTurnState();
+    controller.recordProgressEvent({
+      type: "reasoning.delta",
+      stage: "thinking",
+      message: "Thinking.",
+      text: "Compare revenue against traffic freshness."
+    });
+    controller.recordProgressEvent({
+      type: "tool.start",
+      stage: "tool",
+      message: "Running metric query.",
+      toolId: "call_1",
+      name: "run_metric_query",
+      context: "recognized revenue"
+    });
+    controller.recordProgressEvent({
+      type: "tool.complete",
+      stage: "tool",
+      message: "Metric query complete.",
+      toolId: "call_1",
+      name: "run_metric_query",
+      durationMs: 1_200,
+      summary: "recognized_revenue=9800",
+      status: "ok"
+    });
+    controller.recordProgressEvent({
+      type: "message.delta",
+      stage: "message",
+      message: "Revenue is up.",
+      text: "Revenue is up."
+    });
+    await waitForStreamBatch();
+
+    const rendered = renderInfiniteTranscript(
+      {
+        footer: ["session session-1", "model codex:gpt-5.4", "tokens 12/5"],
+        state: getTurnState()
+      },
+      { columns: 72, color: false, thinkingMode: "full" }
+    );
+
+    expect(rendered).toContain("thinking");
+    expect(rendered).toContain("Compare revenue against traffic freshness.");
+    expect(rendered).toContain("tools 1");
+    expect(rendered).toContain("Run Metric Query(\"recognized revenue\")");
+    expect(rendered).toContain("recognized_revenue=9800");
+    expect(rendered).toContain("Revenue is up.");
+    expect(rendered).toContain("session session-1");
+    expect(rendered).toContain("model codex:gpt-5.4");
+    expect(rendered).toContain("tokens 12/5");
+  });
+
+  it("renders active tools and todos in Hermes transcript snapshots", () => {
+    const controller = new InfiniteTurnController(() => 1_000);
+
+    resetTurnState();
+    controller.recordProgressEvent({
+      type: "tool.start",
+      stage: "tool",
+      message: "Running breakdown.",
+      toolId: "call_2",
+      name: "run_breakdown_query",
+      context: "traffic by channel"
+    });
+    controller.recordTodos([
+      { id: "todo_1", content: "Compare channel mix", status: "in_progress" },
+      { id: "todo_2", content: "Draft recommendation", status: "pending" }
+    ]);
+
+    const rendered = renderInfiniteTranscript({ state: getTurnState() }, { columns: 72, color: false, nowMs: 3_400 });
+
+    expect(rendered).toContain("running 1");
+    expect(rendered).toContain("Run Breakdown Query");
+    expect(rendered).toContain("call_2");
+    expect(rendered).toContain("started");
+    expect(rendered).toContain("traffic by channel");
+    expect(rendered).toContain("2.4s");
+    expect(rendered).toContain("2 todos left");
+    expect(rendered).toContain("Compare channel mix");
+    expect(rendered).toContain("Draft recommendation");
+  });
+
+  it("renders Hermes-style Ink busy status for active tools", () => {
+    const rendered = renderInkTranscriptToString({
+      columns: 96,
+      indicatorTick: 0,
+      nowMs: 3_400,
+      status: ["session cli"],
+      transcript: {
+        state: {
+          ...getTurnState(),
+          tools: [{
+            context: "recognized revenue",
+            id: "call_1",
+            latestPreview: "recognized revenue by source",
+            name: "run_metric_query",
+            progressCount: 2,
+            startedAt: 1_000,
+            updatedAt: 2_200
+          }]
+        }
+      }
+    });
+    const statusLine = rendered.split("\n").find((line) => line.includes("session cli")) ?? "";
+
+    expect(statusLine).toContain("querying…");
+    expect(statusLine).toContain("Run Metric Query");
+    expect(statusLine).toContain("2.4s");
+  });
+
+  it("shows a turn-level elapsed clock while streaming without active tools", () => {
+    const rendered = renderInkTranscriptToString({
+      columns: 96,
+      indicatorTick: 4,
+      nowMs: 2_300,
+      status: ["session cli"],
+      transcript: {
+        state: {
+          ...getTurnState(),
+          streaming: "Revenue is up."
+        }
+      },
+      turnStartedAt: 1_000
+    });
+    const statusLine = rendered.split("\n").find((line) => line.includes("session cli")) ?? "";
+
+    expect(statusLine).toContain("ruminating…");
+    expect(statusLine).toContain("streaming");
+    expect(statusLine).toContain("1.3s");
+  });
+
+  it("keeps Hermes spinner frames independent from slower face and verb ticks", () => {
+    const state = {
+      ...getTurnState(),
+      streaming: "Revenue is up."
+    };
+    const first = formatInfiniteBusyIndicator({
+      labelTick: 0,
+      nowMs: 2_300,
+      spinnerTick: 0,
+      state,
+      turnStartedAt: 1_000
+    });
+    const second = formatInfiniteBusyIndicator({
+      labelTick: 0,
+      nowMs: 2_300,
+      spinnerTick: 1,
+      state,
+      turnStartedAt: 1_000
+    });
+
+    expect(first).toContain("(｡•́︿•̀｡)");
+    expect(second).toContain("(｡•́︿•̀｡)");
+    expect(first).toContain("pondering…");
+    expect(second).toContain("pondering…");
+    expect(first).not.toBe(second);
+  });
+
+  it("renders submit-time busy status before transcript progress events arrive", () => {
+    const rendered = renderInkTranscriptToString({
+      busy: true,
+      columns: 96,
+      indicatorTick: 0,
+      nowMs: 2_300,
+      status: ["session cli"],
+      transcript: {
+        state: getTurnState()
+      },
+      turnStartedAt: 1_000
+    });
+    const statusLine = rendered.split("\n").find((line) => line.includes("session cli")) ?? "";
+
+    expect(statusLine).toContain("pondering…");
+    expect(statusLine).toContain("working");
+    expect(statusLine).toContain("1.3s");
+  });
+
+  it("renders nested subagent trees in Hermes transcript snapshots", () => {
+    const rendered = renderInfiniteTranscript(
+      {
+        messages: [
+          {
+            kind: "trail",
+            role: "system",
+            text: "",
+            subagents: [
+              {
+                depth: 0,
+                durationSeconds: 12,
+                id: "agent_root",
+                index: 0,
+                inputTokens: 1200,
+                model: "gpt-5.4",
+                notes: ["Review Hermes app chrome"],
+                outputTail: [{ isError: false, preview: "mapped appChrome.tsx", tool: "read" }],
+                outputTokens: 400,
+                parentId: null,
+                status: "running",
+                summary: "Review Hermes app chrome",
+                taskCount: 2,
+                thinking: [],
+                toolCount: 3,
+                tools: ["read", "rg"]
+              },
+              {
+                depth: 1,
+                durationSeconds: 4,
+                id: "agent_child",
+                index: 0,
+                model: "gpt-5.4",
+                notes: ["Check status bar widths"],
+                parentId: "agent_root",
+                status: "completed",
+                summary: "Check status bar widths",
+                taskCount: 1,
+                thinking: [],
+                toolCount: 2,
+                tools: ["rg"]
+              }
+            ]
+          }
+        ]
+      },
+      { columns: 88, color: false }
+    );
+
+    expect(rendered).toContain("subagents");
+    expect(rendered).toContain("2 agents");
+    expect(rendered).toContain("5 tools");
+    expect(rendered).toContain("active 1");
+    expect(rendered).toContain("Review Hermes app chrome");
+    expect(rendered).toContain("Check status bar widths");
+    expect(rendered).toContain("mapped appChrome.tsx");
+  });
+
+  it("ingests Hermes subagent progress events into transcript state", () => {
+    let now = 1_000;
+    const controller = new InfiniteTurnController(() => now);
+
+    resetTurnState();
+    controller.recordProgressEvent({
+      type: "subagent.start",
+      stage: "subagent",
+      message: "Delegating Hermes review.",
+      subagent: {
+        id: "agent_root",
+        model: "gpt-5.4",
+        notes: ["Review Hermes app chrome"],
+        summary: "Review Hermes app chrome",
+        taskCount: 2,
+        tools: ["rg"]
+      }
+    });
+    controller.recordProgressEvent({
+      type: "subagent.progress",
+      stage: "subagent",
+      message: "Checking widths.",
+      subagent: {
+        id: "agent_child",
+        model: "gpt-5.4",
+        outputTail: [{ preview: "mapped status rows", tool: "rg" }],
+        parentId: "agent_root",
+        status: "running",
+        summary: "Check status bar widths",
+        tools: ["rg", "read"]
+      }
+    });
+    now = 3_400;
+    controller.recordProgressEvent({
+      type: "subagent.complete",
+      stage: "subagent",
+      message: "Width review complete.",
+      subagent: {
+        durationMs: 2_400,
+        id: "agent_child",
+        outputTail: [{ preview: "status rows fit narrow terminals", tool: "test" }],
+        parentId: "agent_root",
+        status: "completed",
+        summary: "Check status bar widths",
+        toolCount: 2
+      }
+    });
+
+    expect(getTurnState().subagents).toHaveLength(2);
+    expect(getTurnState().subagents[0]).toMatchObject({
+      id: "agent_root",
+      depth: 0,
+      index: 0,
+      status: "running",
+      startedAt: 1_000
+    });
+    expect(getTurnState().subagents[1]).toMatchObject({
+      id: "agent_child",
+      depth: 1,
+      durationSeconds: 2.4,
+      parentId: "agent_root",
+      status: "completed"
+    });
+
+    const rendered = renderInfiniteTranscript({ state: getTurnState() }, { columns: 88, color: false });
+    expect(rendered).toContain("subagents");
+    expect(rendered).toContain("2 agents");
+    expect(rendered).toContain("active 1");
+    expect(rendered).toContain("Review Hermes app chrome");
+    expect(rendered).toContain("Check status bar widths");
+    expect(rendered).toContain("status rows fit narrow terminals");
+  });
+
+  it("renders subagent trees inside Hermes app chrome", () => {
+    const rendered = renderInfiniteAppChrome(
+      {
+        status: ["session cli-session"],
+        transcript: {
+          messages: [
+            {
+              kind: "trail",
+              role: "system",
+              text: "",
+              subagents: [
+                {
+                  depth: 0,
+                  id: "agent_review",
+                  index: 0,
+                  model: "gpt-5.4",
+                  notes: ["Verify transcript renderer"],
+                  parentId: null,
+                  status: "completed",
+                  summary: "Verify transcript renderer",
+                  taskCount: 1,
+                  thinking: [],
+                  toolCount: 1,
+                  tools: ["test"]
+                }
+              ]
+            }
+          ]
+        }
+      },
+      { columns: 72, color: false }
+    );
+
+    expect(rendered).toContain("∞ Infinite");
+    expect(rendered).toContain("subagents");
+    expect(rendered).toContain("Verify transcript renderer");
+    expect(rendered).toContain("session cli-session");
+  });
+
+  it("provides a transcript runtime adapter for Ink component mounts", async () => {
+    let now = 1_000;
+    const runtime = createInfiniteTranscriptRuntime({
+      controller: new InfiniteTurnController(() => now),
+      prompt: { placeholder: "Type a message." },
+      status: () => ["session runtime-session"],
+      title: "Infinite Runtime"
+    });
+    const snapshots: string[] = [];
+    const unsubscribe = runtime.subscribe((state) => {
+      snapshots.push([
+        state.reasoning,
+        state.tools.map((tool) => tool.name).join(","),
+        state.streaming
+      ].filter(Boolean).join("|"));
+    }, { emitCurrent: true });
+
+    resetTurnState();
+    runtime.record({
+      type: "reasoning.delta",
+      stage: "thinking",
+      message: "Checking sources.",
+      text: "Checking sources."
+    });
+    runtime.record({
+      type: "tool.start",
+      stage: "tool",
+      message: "Running run_metric_query.",
+      toolId: "call_runtime",
+      name: "run_metric_query",
+      context: "recognized revenue"
+    });
+    now = 2_500;
+    runtime.record({
+      type: "message.delta",
+      stage: "message",
+      message: "Revenue is up.",
+      text: "Revenue is up."
+    });
+    await waitForStreamBatch();
+
+    const rendered = runtime.render({ columns: 76, color: false, nowMs: now });
+    unsubscribe();
+    runtime.record({
+      type: "status.update",
+      stage: "status",
+      kind: "status",
+      message: "Post-unsubscribe update.",
+      text: "Post-unsubscribe update."
+    });
+    runtime.reset();
+
+    expect(snapshots.length).toBeGreaterThan(2);
+    expect(snapshots.join("\n")).toContain("Checking sources.");
+    expect(snapshots.join("\n")).toContain("run_metric_query");
+    expect(snapshots.join("\n")).toContain("Revenue is up.");
+    expect(rendered).toContain("∞ Infinite Runtime");
+    expect(rendered).toContain("Revenue is up.");
+    expect(rendered).toContain("Run Metric Query");
+    expect(rendered).toContain("session runtime-session");
+    expect(rendered).toContain("Type a message.");
+    expect(snapshots.join("\n")).not.toContain("Post-unsubscribe update.");
+    expect(runtime.snapshot().streaming).toBe("");
+    expect(runtime.snapshot().tools).toEqual([]);
+  });
+
+  it("renders the dependency-backed Ink transcript component layer", () => {
+    const controller = new InfiniteTurnController(() => 1_000);
+
+    resetTurnState();
+    controller.recordProgressEvent({
+      type: "reasoning.delta",
+      stage: "thinking",
+      message: "Checking source coverage.",
+      text: "Checking source coverage."
+    });
+    controller.recordProgressEvent({
+      type: "tool.start",
+      stage: "tool",
+      message: "Running run_metric_query.",
+      toolId: "call_ink",
+      name: "run_metric_query",
+      context: "recognized revenue"
+    });
+
+    const rendered = renderInkTranscriptToString({
+      columns: 88,
+      nowMs: 2_500,
+      prompt: { placeholder: "Type a message." },
+      status: ["session session-1"],
+      title: "Infinite TUI",
+      transcript: { state: getTurnState() }
+    });
+
+    expect(rendered).toContain("∞ Infinite TUI");
+    expect(rendered).toContain("Checking source coverage.");
+    expect(rendered).toContain("Run Metric Query");
+    expect(rendered).toContain("recognized revenue");
+    expect(rendered).toContain("session session-1");
+    expect(rendered).toContain("Type a message.");
+  });
+
+  it("renders the Ink interactive shell with an owned composer row", () => {
+    const rendered = renderInkInteractiveSessionToString({
+      columns: 88,
+      initialMessages: [{ role: "assistant", text: "Prior answer." }],
+      async onSubmitLine() {
+        return { messages: [] };
+      },
+      promptPlaceholder: "Ask Infinite.",
+      status: ["session cli_123"],
+      title: "Infinite TUI"
+    });
+
+    expect(rendered).toContain("∞ Infinite TUI");
+    expect(rendered).toContain("Prior answer.");
+    expect(rendered).toContain("session cli_123");
+    expect(rendered).toContain("ready");
+    expect(rendered).toContain("Ask Infinite.");
+  });
+
+  it("matches slash command completions for the Ink composer", () => {
+    expect(completeSlashCommands("/me", [
+      { value: "/memory", description: "Memory" },
+      { value: "/metrics", description: "Metrics" },
+      { value: "/model", description: "Model" }
+    ])).toEqual([
+      { value: "/memory", description: "Memory" },
+      { value: "/metrics", description: "Metrics" }
+    ]);
+    expect(completeSlashCommands("me", [{ value: "/memory" }])).toEqual([]);
+    expect(completeSlashCommands("/memory add", [{ value: "/memory" }])).toEqual([]);
+    expect(completeSlashCommands("/memory", [{ value: "/memory" }])).toEqual([]);
+  });
+
+  it("renders Ink slash completion menu rows", () => {
+    const rendered = renderInkInteractiveSessionToString({
+      columns: 88,
+      getCompletions: (value) => completeSlashCommands(value, [
+        { value: "/memory", description: "Review memory" },
+        { value: "/metrics", description: "List metrics" }
+      ]),
+      initialInputValue: "/me",
+      async onSubmitLine() {
+        return { messages: [] };
+      },
+      promptPlaceholder: "Ask Infinite.",
+      title: "Infinite TUI"
+    });
+
+    expect(rendered).toContain("/me");
+    expect(rendered).toContain("> /memory");
+    expect(rendered).toContain("Review memory");
+    expect(rendered).toContain("  /metrics");
+    expect(rendered).toContain("List metrics");
+  });
+
+  it("matches path argument completions with Hermes-style replacement offsets", () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "growth-os-ink-path-completions-"));
+    mkdirSync(join(workspaceRoot, "reports"));
+    writeFileSync(join(workspaceRoot, "reports", "revenue.md"), "Revenue notes");
+    writeFileSync(join(workspaceRoot, "reports", "retention.md"), "Retention notes");
+    writeFileSync(join(workspaceRoot, "reports", "costs.md"), "Cost notes");
+    try {
+      const input = "/memory add ./reports/re";
+      const completions = completeInteractiveInput(input, [{ value: "/memory" }], { cwd: workspaceRoot });
+
+      expect(completions).toEqual([
+        { description: "file", kind: "path", replaceFrom: "/memory add ".length, value: "./reports/retention.md" },
+        { description: "file", kind: "path", replaceFrom: "/memory add ".length, value: "./reports/revenue.md" }
+      ]);
+      expect(applyCompletionSuggestion(input, completions[1]!)).toBe("/memory add ./reports/revenue.md");
+    } finally {
+      rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("uses the resolved CLI workspace root for Ink path completions", () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "growth-os-ink-cli-path-root-"));
+    const decoyRoot = mkdtempSync(join(tmpdir(), "growth-os-ink-cli-path-decoy-"));
+    mkdirSync(join(workspaceRoot, "reports"));
+    writeFileSync(join(workspaceRoot, "reports", "revenue.md"), "Revenue notes");
+    try {
+      expect(completeInteractiveInputForCli("/memory add ./reports/re", {
+        GROWTH_OS_WORKSPACE_ROOT: workspaceRoot,
+        PWD: decoyRoot
+      })).toEqual([
+        { description: "file", kind: "path", replaceFrom: "/memory add ".length, value: "./reports/revenue.md" }
+      ]);
+    } finally {
+      rmSync(workspaceRoot, { recursive: true, force: true });
+      rmSync(decoyRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("renders Ink path argument completion menu rows", () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "growth-os-ink-path-menu-"));
+    mkdirSync(join(workspaceRoot, "reports"));
+    mkdirSync(join(workspaceRoot, "reports", "revenue"));
+    writeFileSync(join(workspaceRoot, "reports", "retention.md"), "Retention notes");
+    try {
+      const rendered = renderInkInteractiveSessionToString({
+        columns: 88,
+        getCompletions: (value) => completeInteractiveInput(value, [{ value: "/memory" }], { cwd: workspaceRoot }),
+        initialInputValue: "/memory add ./reports/re",
+        async onSubmitLine() {
+          return { messages: [] };
+        },
+        promptPlaceholder: "Ask Infinite.",
+        title: "Infinite TUI"
+      });
+
+      expect(rendered).toContain("/memory add ./reports/re");
+      expect(rendered).toContain("> ./reports/retention.md");
+      expect(rendered).toContain("file");
+      expect(rendered).toContain("  ./reports/revenue/");
+      expect(rendered).toContain("directory");
+    } finally {
+      rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("applies Hermes-style cursor-aware composer inserts", () => {
+    expect(applyComposerEdit(
+      { cursor: "show ".length, value: "show revenue" },
+      { text: "monthly ", type: "insert" }
+    )).toEqual({
+      cursor: "show monthly ".length,
+      value: "show monthly revenue"
+    });
+  });
+
+  it("moves the Ink composer cursor by grapheme and word boundaries", () => {
+    const value = "show 😊 revenue";
+
+    expect(applyComposerEdit(
+      { cursor: "show 😊".length, value },
+      { type: "move-left" }
+    )).toEqual({
+      cursor: "show ".length,
+      value
+    });
+
+    expect(applyComposerEdit(
+      { cursor: value.length, value },
+      { type: "move-word-left" }
+    )).toEqual({
+      cursor: "show 😊 ".length,
+      value
+    });
+  });
+
+  it("renders the Ink composer cursor at the tracked edit position", () => {
+    const rendered = renderInkInteractiveSessionToString({
+      columns: 88,
+      initialInputCursor: "show ".length,
+      initialInputValue: "show revenue",
+      async onSubmitLine() {
+        return { messages: [] };
+      },
+      promptPlaceholder: "Ask Infinite.",
+      title: "Infinite TUI"
+    });
+
+    expect(rendered).toContain("show |revenue");
+  });
+
+  it("computes Hermes-style native cursor coordinates for the Ink composer", () => {
+    expect(composerCursorLayout("show revenue", "show ".length, 80)).toEqual({
+      column: "show ".length,
+      line: 0
+    });
+    expect(composerCursorLayout("show\nrevenue", "show\nre".length, 80)).toEqual({
+      column: "re".length,
+      line: 1
+    });
+    expect(composerNativeCursorPosition({
+      cursor: "show\nre".length,
+      label: "❯",
+      row: 4,
+      value: "show\nrevenue",
+      width: 88
+    })).toEqual({
+      x: "❯ ".length + "re".length,
+      y: 5
+    });
+  });
+
+  it("moves the native cursor onto wrapped composer rows for long input", () => {
+    // The composer renders with Ink word-wrap (<Text wrap="wrap">), so the cursor
+    // row must follow the SAME wrap. "show revenue for every segment" at width 10
+    // word-wraps to ["show ", "revenue ", "for every ", "segment"] (4 rows), and the
+    // end cursor sits AFTER "segment" on the last row. The old char-packing put it at
+    // column 0 here (start of the last word, not the caret) — and, for inputs that
+    // word-wrap to more rows than char-packing, a row ABOVE the typed line (the
+    // reported bug; see interactive-session.cursor-row.test.ts for those cases).
+    expect(composerCursorLayout("show revenue for every segment", "show revenue for every segment".length, 10)).toEqual({
+      column: "segment".length,
+      line: 3
+    });
+    // width 12 → composer inputWidth 10 (minus the "❯ " prompt): same word-wrap, so
+    // x = prompt + "segment".length, y = transcript row 4 + composer line 3.
+    expect(composerNativeCursorPosition({
+      cursor: "show revenue for every segment".length,
+      label: "❯",
+      row: 4,
+      value: "show revenue for every segment",
+      width: 12
+    })).toEqual({
+      x: "❯ ".length + "segment".length,
+      y: 7
+    });
+  });
+
+  it("counts Ink transcript rows before declaring the composer cursor row", () => {
+    const props = {
+      columns: 88,
+      showComposer: false,
+      status: ["session cli_123"],
+      title: "Infinite TUI",
+      transcript: {
+        messages: [{ role: "assistant" as const, text: "Prior answer." }],
+        state: getTurnState()
+      }
+    };
+
+    expect(inkTranscriptRowCount(props)).toBe(renderInkTranscriptToString(props).split("\n").length);
+  });
+
+  it("applies Hermes-style multiline composer insertion and line navigation", () => {
+    expect(applyComposerEdit(
+      { cursor: "show ".length, value: "show revenue" },
+      { type: "insert-newline" }
+    )).toEqual({
+      cursor: "show \n".length,
+      value: "show \nrevenue"
+    });
+
+    const value = "alpha\nbravo\ncharlie";
+    expect(applyComposerEdit(
+      { cursor: "alpha\nbr".length, value },
+      { type: "move-line-up" }
+    )).toEqual({
+      cursor: "al".length,
+      value
+    });
+    expect(applyComposerEdit(
+      { cursor: "alpha\nbr".length, value },
+      { type: "move-line-down" }
+    )).toEqual({
+      cursor: "alpha\nbravo\nch".length,
+      value
+    });
+  });
+
+  it("normalizes Hermes-style pasted text before inserting at the composer cursor", () => {
+    expect(applyComposerEdit(
+      { cursor: "ask ".length, value: "ask revenue" },
+      { text: "\u001b[200~alpha\nbeta\n\n\u001b[201~", type: "insert-paste" }
+    )).toEqual({
+      cursor: "ask alpha\nbeta".length,
+      value: "ask alpha\nbetarevenue"
+    });
+
+    expect(applyComposerEdit(
+      { cursor: 0, value: "revenue" },
+      { text: "\n\n", type: "insert-paste" }
+    )).toEqual({
+      cursor: 2,
+      value: "\n\nrevenue"
+    });
+  });
+
+  it("replaces selected composer ranges with typed and pasted text", () => {
+    expect(applyComposerEdit(
+      { cursor: "show revenue".length, selection: { end: "show revenue".length, start: "show ".length }, value: "show revenue" },
+      { text: "profit", type: "insert" }
+    )).toEqual({
+      cursor: "show profit".length,
+      value: "show profit"
+    });
+
+    expect(applyComposerEdit(
+      { cursor: "ask revenue".length, selection: { end: "ask revenue".length, start: "ask ".length }, value: "ask revenue" },
+      { text: "\u001b[200~alpha\n\u001b[201~", type: "insert-paste" }
+    )).toEqual({
+      cursor: "ask alpha".length,
+      value: "ask alpha"
+    });
+
+    expect(applyComposerEdit(
+      { cursor: "show revenue".length, selection: { end: "show revenue".length, start: "show ".length }, value: "show revenue" },
+      { type: "backspace" }
+    )).toEqual({
+      cursor: "show ".length,
+      value: "show "
+    });
+  });
+
+  it("renders selected Ink composer content with Hermes inverse styling", () => {
+    const rendered = renderInkInteractiveSessionToString({
+      columns: 88,
+      initialInputCursor: "show revenue".length,
+      initialInputSelection: { end: "show revenue".length, start: "show ".length },
+      initialInputValue: "show revenue",
+      async onSubmitLine() {
+        return { messages: [] };
+      },
+      promptPlaceholder: "Ask Infinite.",
+      title: "Infinite TUI"
+    });
+
+    expect(rendered).toContain("show \u001b[7mrevenue\u001b[27m");
+  });
+
+  it("renders multiline Ink composer content with the tracked cursor", () => {
+    const rendered = renderInkInteractiveSessionToString({
+      columns: 88,
+      initialInputCursor: "show\n".length,
+      initialInputValue: "show\nrevenue",
+      async onSubmitLine() {
+        return { messages: [] };
+      },
+      promptPlaceholder: "Ask Infinite.",
+      title: "Infinite TUI"
+    });
+
+    expect(rendered).toContain("show\n  |revenue");
+  });
+
+  it("routes capable default TTY interactive sessions to the Ink shell", () => {
+    const outputStream = new PassThrough() as PassThrough & { columns?: number; isTTY?: boolean };
+    outputStream.columns = 88;
+    outputStream.isTTY = true;
+
+    expect(shouldUseInkInteractiveSession({ isTTY: true }, outputStream, {})).toBe(true);
+    expect(shouldUseInkInteractiveSession({ isTTY: true }, outputStream, { INFINITE_RENDER_SURFACE: "raw" })).toBe(false);
+    expect(shouldUseInkInteractiveSession({ isTTY: true }, outputStream, { INFINITE_PLAIN_OUTPUT: "1" })).toBe(false);
+    expect(shouldUseInkInteractiveSession({ isTTY: false }, outputStream, {})).toBe(false);
+  });
+
+  it("navigates Ink input history with draft restoration", () => {
+    const entries = appendInputHistory(
+      appendInputHistory(["show revenue"], "show revenue"),
+      "show pipeline"
+    );
+    expect(entries).toEqual(["show revenue", "show pipeline"]);
+
+    const older = navigateInputHistory({ draft: "", entries, index: null }, "older", "draft question");
+    expect(older.value).toBe("show pipeline");
+    expect(older.history).toMatchObject({ draft: "draft question", index: 1 });
+
+    const oldest = navigateInputHistory(older.history, "older", older.value);
+    expect(oldest.value).toBe("show revenue");
+    expect(oldest.history).toMatchObject({ draft: "draft question", index: 0 });
+
+    const newer = navigateInputHistory(oldest.history, "newer", oldest.value);
+    expect(newer.value).toBe("show pipeline");
+    expect(newer.history).toMatchObject({ draft: "draft question", index: 1 });
+
+    const restored = navigateInputHistory(newer.history, "newer", newer.value);
+    expect(restored.value).toBe("draft question");
+    expect(restored.history).toMatchObject({ draft: "", index: null });
+  });
+
+  it("persists Ink input history in Infinite OS home using Hermes-style blocks", () => {
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-input-history-"));
+    const env = { GROWTH_OS_HOME: growthHome } as NodeJS.ProcessEnv;
+    try {
+      appendPersistentInputHistory("show revenue", env);
+      appendPersistentInputHistory("show revenue", env);
+      appendPersistentInputHistory("show\npipeline", env);
+
+      expect(inputHistoryPath(env)).toBe(join(growthHome, "input-history"));
+      expect(loadPersistentInputHistory(env)).toEqual(["show revenue", "show\npipeline"]);
+      expect(parsePersistentInputHistory(readFileSync(inputHistoryPath(env), "utf8"))).toEqual([
+        "show revenue",
+        "show\npipeline"
+      ]);
+    } finally {
+      rmSync(growthHome, { recursive: true, force: true });
+    }
+  });
+
+  it("falls back to HOME for persistent Ink input history", () => {
+    const home = mkdtempSync(join(tmpdir(), "growth-os-input-history-home-"));
+    const env = { HOME: home } as NodeJS.ProcessEnv;
+    try {
+      appendPersistentInputHistory("show sources", env);
+
+      expect(inputHistoryPath(env)).toBe(join(home, ".growth-os", "input-history"));
+      expect(loadPersistentInputHistory(env)).toEqual(["show sources"]);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("adds Hermes long-run tool charms after the delay window", () => {
+    const ticker = new LongRunToolCharmTicker();
+    const activities: string[] = [];
+
+    ticker.tick(
+      [{ id: "call_1", name: "run_metric_query", startedAt: 1_000_000, context: "recognized revenue" }],
+      1_008_100,
+      {
+        pushActivity(text) {
+          activities.push(text);
+        }
+      }
+    );
+
+    expect(activities).toHaveLength(1);
+    expect(activities[0]).toMatch(/\(Run Metric Query · 8s\)$/);
+  });
+
+  it("keeps progress durable for non-TTY output", () => {
+    const chunks: string[] = [];
+    let now = 0;
+    const progress = createInteractiveProgressReporter(
+      { isTTY: false, write: (chunk) => chunks.push(chunk) > 0 },
+      { now: () => now }
+    );
+
+    now = 3_400;
+    progress.progress({ stage: "resolve", message: "Preparing X engagement breakdown." });
+    progress.stop();
+
+    expect(chunks.join("")).toBe("┊ ⚡ preparing X engagement breakdown…  3.4s\n");
+    expect(chunks.join("")).not.toContain("\r");
+  });
+
+  it("does not duplicate assistant message events in non-TTY progress output", () => {
+    const chunks: string[] = [];
+    const progress = createInteractiveProgressReporter(
+      { isTTY: false, write: (chunk) => chunks.push(chunk) > 0 },
+      { now: () => 1_000 }
+    );
+
+    progress.progress({
+      type: "message.start",
+      stage: "message",
+      message: "Assistant message started."
+    });
+    progress.progress({
+      type: "message.delta",
+      stage: "message",
+      message: "Revenue is up.",
+      text: "Revenue is up."
+    });
+    progress.progress({
+      type: "message.complete",
+      stage: "message",
+      message: "Assistant message complete.",
+      text: "Revenue is up."
+    });
+    progress.stop();
+
+    expect(chunks).toEqual([]);
+  });
+
+  it("streams assistant deltas in a Hermes-style TTY frame and suppresses the duplicate final panel", () => {
+    const chunks: string[] = [];
+    const stream = {
+      columns: 80,
+      isTTY: true,
+      write: (chunk: string) => chunks.push(chunk) > 0
+    };
+    const progress = createInteractiveProgressReporter(stream, { animate: true, now: () => 1_000 });
+
+    progress.progress({
+      type: "message.start",
+      stage: "message",
+      message: "Assistant message started."
+    });
+    progress.progress({
+      type: "message.delta",
+      stage: "message",
+      message: "Revenue ",
+      text: "Revenue "
+    });
+    progress.progress({
+      type: "message.delta",
+      stage: "message",
+      message: "is up.",
+      text: "is up."
+    });
+    progress.progress({
+      type: "message.complete",
+      stage: "message",
+      message: "Assistant message complete.",
+      text: "Revenue is up."
+    });
+    progress.stop();
+
+    const output = stripAnsi(chunks.join(""));
+    expect(output).toContain("╭─ Infinite ");
+    expect(output).toContain("│ Revenue is up.");
+    expect(output).toContain("╰");
+
+    const rendered = stripAnsi(renderCliResultForStream(
+      { ok: true, sessionId: "session-1", message: "Revenue is up.", provenance: [], actionCalls: [] },
+      stream,
+      {}
+    ));
+    expect(rendered).toContain("session session-1");
+    expect(rendered).not.toContain("Revenue is up.");
+  });
+
+  it("renders app chrome after streamed TTY output without duplicating the assistant answer", () => {
+    const chunks: string[] = [];
+    const stream = {
+      columns: 80,
+      isTTY: true,
+      write: (chunk: string) => chunks.push(chunk) > 0
+    };
+    const progress = createInteractiveProgressReporter(stream, { animate: true, now: () => 1_000 });
+
+    progress.progress({
+      type: "message.delta",
+      stage: "message",
+      message: "Revenue is up.",
+      text: "Revenue is up."
+    });
+    progress.progress({
+      type: "message.complete",
+      stage: "message",
+      message: "Assistant message complete.",
+      text: "Revenue is up."
+    });
+    progress.stop();
+
+    const rendered = renderCliResultForStream(
+      {
+        ok: true,
+        sessionId: "session-1",
+        message: "Revenue is up.",
+        provenance: ["queryable.vw_revenue_by_source"],
+        actionCalls: [
+          {
+            actionId: "run_metric_query",
+            input: { metric: "recognized_revenue" },
+            status: "ok",
+            envelope: {
+              actionId: "run_metric_query",
+              authority: "tool_agent",
+              caveats: [],
+              data: { rows: [{ recognized_revenue: 9800 }] },
+              nextActions: [],
+              ok: true,
+              provenance: ["queryable.vw_revenue_by_source"],
+              status: "ok",
+              truncated: false
+            }
+          }
+        ],
+        modelProvider: "codex",
+        modelName: "gpt-5.4",
+        usage: { promptTokens: 12, completionTokens: 5 }
+      },
+      stream,
+      { INFINITE_TUI_CHROME: "1" }
+    );
+
+    expect(chunks.join("")).toContain("Revenue is up.");
+    expect(rendered).toContain("∞ Infinite");
+    expect(rendered).toContain("tools 1");
+    expect(rendered).toContain("Run Metric Query");
+    expect(rendered).toContain("metric=recognized_revenue");
+    expect(rendered).toContain("tokens 12/5");
+    expect(rendered).not.toContain("Revenue is up.");
+  });
+
+  it("lets transcript-mode app chrome own streamed assistant text", () => {
+    const chunks: string[] = [];
+    const stream = {
+      columns: 80,
+      isTTY: true,
+      write: (chunk: string) => chunks.push(chunk) > 0
+    };
+    const progress = createInteractiveProgressReporter(stream, {
+      animate: true,
+      now: () => 1_000,
+      renderSurface: "transcript"
+    });
+
+    progress.progress({
+      type: "message.delta",
+      stage: "message",
+      message: "Revenue is up.",
+      text: "Revenue is up."
+    });
+    progress.progress({
+      type: "message.complete",
+      stage: "message",
+      message: "Assistant message complete.",
+      text: "Revenue is up."
+    });
+    progress.stop();
+
+    const rendered = renderCliResultForStream(
+      {
+        ok: true,
+        sessionId: "session-1",
+        message: "Revenue is up.",
+        provenance: [],
+        actionCalls: [],
+        modelProvider: "codex",
+        modelName: "gpt-5.4"
+      },
+      stream,
+      { INFINITE_TUI_CHROME: "1" }
+    );
+
+    expect(chunks.join("")).toContain("∞ Infinite");
+    expect(chunks.join("")).toContain("Revenue is up.");
+    expect(chunks.join("")).toContain("\u001b[");
+    expect(rendered).toContain("∞ Infinite");
+    expect(rendered).toContain("session session-1");
+    expect(rendered).toContain("model codex:gpt-5.4");
+    expect(rendered).toContain("Revenue is up.");
+  });
+
+  it("redraws app chrome around live reasoning and action progress", () => {
+    const chunks: string[] = [];
+    const stream = {
+      columns: 88,
+      isTTY: true,
+      write: (chunk: string) => chunks.push(chunk) > 0
+    };
+    const progress = createInteractiveProgressReporter(stream, {
+      now: () => 1_000,
+      renderSurface: "transcript",
+      transcript: {
+        prompt: { placeholder: "Type a message." },
+        status: ["session session-1"]
+      }
+    });
+
+    progress.progress({
+      type: "reasoning.delta",
+      stage: "thinking",
+      message: "Checking source coverage.",
+      text: "Checking source coverage."
+    });
+    progress.progress({
+      type: "tool.start",
+      stage: "tool",
+      message: "Running run_metric_query.",
+      toolId: "call_1",
+      name: "run_metric_query",
+      context: "recognized revenue"
+    });
+    progress.progress({
+      type: "tool.progress",
+      stage: "tool",
+      message: "Fetching recognized revenue.",
+      toolId: "call_1",
+      name: "run_metric_query",
+      preview: "recognized revenue by source"
+    });
+    progress.stop();
+
+    const output = chunks.join("");
+    expect(output).toContain("∞ Infinite");
+    expect(output).toContain("thinking");
+    expect(output).toContain("Checking source coverage.");
+    expect(output).toContain("running 1");
+    expect(output).toContain("Run Metric Query");
+    expect(output).toContain("recognized revenue");
+    expect(output).toContain("recognized revenue by source");
+    expect(output).toContain("1 update");
+    expect(output).toContain("call_1");
+    expect(output).toContain("session session-1");
+    expect(output).toContain("Type a message.");
+    expect(output).toContain("\u001b[");
+  });
+
+  it("passes turn elapsed timing into the dependency-backed Ink progress reporter", async () => {
+    const chunks: string[] = [];
+    let now = 1_000;
+    const stream = new PassThrough() as PassThrough & { columns?: number; isTTY?: boolean };
+    stream.columns = 96;
+    stream.isTTY = true;
+    stream.on("data", (chunk) => chunks.push(String(chunk)));
+    const progress = createInteractiveProgressReporter(stream, {
+      now: () => now,
+      renderSurface: "ink",
+      transcript: {
+        prompt: { placeholder: "Type a message." },
+        status: ["session session-1"],
+        title: "Infinite TUI"
+      }
+    });
+
+    now = 2_300;
+    progress.progress({
+      type: "message.delta",
+      stage: "message",
+      message: "Revenue is up.",
+      text: "Revenue is up."
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    progress.stop();
+
+    const output = chunks.join("");
+    expect(output).toContain("Revenue is up.");
+    expect(output).toContain("streaming");
+    expect(output).toContain("1.3s");
+    expect(output).toContain("session session-1");
+  });
+
+  it("keeps alternate-screen transcript progress as the simple-stream Ink fallback", () => {
+    const chunks: string[] = [];
+    const stream = {
+      columns: 88,
+      isTTY: true,
+      write: (chunk: string) => chunks.push(chunk) > 0
+    };
+    const progress = createInteractiveProgressReporter(stream, {
+      now: () => 1_000,
+      renderSurface: "alternate",
+      transcript: {
+        prompt: { placeholder: "Type a message." },
+        status: ["session session-1"],
+        title: "Infinite TUI"
+      }
+    });
+
+    progress.progress({
+      type: "reasoning.delta",
+      stage: "thinking",
+      message: "Checking source coverage.",
+      text: "Checking source coverage."
+    });
+    progress.progress({
+      type: "tool.start",
+      stage: "tool",
+      message: "Running run_metric_query.",
+      toolId: "call_alt",
+      name: "run_metric_query",
+      context: "recognized revenue"
+    });
+    progress.stop();
+
+    const output = chunks.join("");
+    expect(output).toContain("\u001b[?1049h");
+    expect(output).toContain("\u001b[?25l");
+    expect(output).toContain("\u001b[H\u001b[2J");
+    expect(output).toContain("∞ Infinite TUI");
+    expect(output).toContain("thinking");
+    expect(output).toContain("Checking source coverage.");
+    expect(output).toContain("Run Metric Query");
+    expect(output).toContain("recognized revenue");
+    expect(output).toContain("session session-1");
+    expect(output).toContain("Type a message.");
+    expect(output).toContain("\u001b[?25h\u001b[?1049l");
+  });
+
+  it("renders final-only assistant completions in the alternate transcript surface", () => {
+    const chunks: string[] = [];
+    const progress = createInteractiveProgressReporter(
+      {
+        columns: 88,
+        isTTY: true,
+        write: (chunk: string) => chunks.push(chunk) > 0
+      },
+      {
+        now: () => 1_000,
+        renderSurface: "alternate",
+        transcript: {
+          prompt: { placeholder: "Type a message." },
+          status: ["session session-1"],
+          title: "Infinite TUI"
+        }
+      }
+    );
+
+    progress.progress({
+      type: "message.complete",
+      stage: "message",
+      message: "Assistant message complete.",
+      text: "Final only answer."
+    });
+    progress.stop();
+
+    const output = chunks.join("");
+    expect(output).toContain("\u001b[?1049h");
+    expect(output).toContain("∞ Infinite TUI");
+    expect(output).toContain("Final only answer.");
+    expect(output).toContain("session session-1");
+    expect(output).toContain("Type a message.");
+    expect(output).toContain("\u001b[?25h\u001b[?1049l");
+  });
+
+  it("realigns markdown tables in streamed assistant frames", () => {
+    const chunks: string[] = [];
+    const progress = createInteractiveProgressReporter(
+      {
+        columns: 88,
+        isTTY: true,
+        write: (chunk: string) => chunks.push(chunk) > 0
+      },
+      { animate: true, now: () => 1_000 }
+    );
+
+    progress.progress({
+      type: "message.delta",
+      stage: "message",
+      message: "| Metric | Value |",
+      text: "| Metric | Value |\n| --- | ---: |\n| Revenue | $123 |\n"
+    });
+    progress.progress({
+      type: "message.delta",
+      stage: "message",
+      message: "| Signups | 45 |",
+      text: "| Signups | 45 |\n\nDone."
+    });
+    progress.progress({
+      type: "message.complete",
+      stage: "message",
+      message: "Assistant message complete.",
+      text: "done"
+    });
+    progress.stop();
+
+    const streamed = stripAnsi(chunks.join(""));
+    expect(streamed).toContain("│ Metric   Value");
+    expect(streamed).toContain("│ Revenue  $123");
+    expect(streamed).toContain("│ Signups  45");
+    expect(streamed).toContain("│ Done.");
+    expect(streamed).not.toContain("---:");
+  });
+
+  it("realigns markdown tables in final TTY assistant panels", () => {
+    const panel = renderAssistantResponsePanel(
+      ["| Metric | Value |", "| --- | ---: |", "| Revenue | $123 |", "| Signups | 45 |"].join("\n"),
+      { color: false, columns: 88 }
+    );
+
+    expect(panel).toContain("Metric   Value");
+    expect(panel).toContain("Revenue  $123");
+    expect(panel).toContain("Signups  45");
+    expect(panel).not.toContain("---:");
+  });
+
+  it("uses a transient carriage-return row for TTY output", () => {
+    const chunks: string[] = [];
+    let now = 1_000;
+    const progress = createInteractiveProgressReporter(
+      { isTTY: true, write: (chunk) => chunks.push(chunk) > 0 },
+      { animate: true, now: () => now }
+    );
+
+    progress.progress({
+      type: "tool.start",
+      stage: "tool",
+      message: "Running run_breakdown_query.",
+      toolId: "call_1",
+      name: "run_breakdown_query",
+      context: "Running run_breakdown_query."
+    });
+    now = 2_250;
+    progress.progress({
+      type: "tool.complete",
+      stage: "tool",
+      message: "Finished run_breakdown_query.",
+      toolId: "call_1",
+      name: "run_breakdown_query",
+      durationMs: 1_250,
+      status: "ok"
+    });
+    progress.stop();
+
+    const rendered = chunks.join("");
+    expect(rendered).toContain("\r  ⠋ Run Breakdown Query · Running run_breakdown_query.  0.0s");
+    expect(rendered).toMatch(/\r {40,}\r/);
+    expect(rendered).toContain("┊ ⚡ tool      Run Breakdown Query (1.3s) ✓\n");
+  });
+
+  it("supports fallback single-choice prompts without a TTY", async () => {
+    const inputStream = new PassThrough();
+    const outputStream = new PassThrough();
+    const outputChunks: Buffer[] = [];
+    outputStream.on("data", (chunk: Buffer) => outputChunks.push(chunk));
+    inputStream.end("2\n");
+
+    const selected = await promptChoice("Select provider:", ["codex", "claude"], 0, {
+      description: "Backfills can take time.",
+      io: {
+        input: inputStream as unknown as NodeJS.ReadStream,
+        output: outputStream as unknown as NodeJS.WriteStream
+      }
+    });
+
+    expect(selected).toBe(1);
+    expect(Buffer.concat(outputChunks).toString("utf8")).toContain("Backfills can take time.");
+  });
+
+  it("supports fallback checklist prompts without a TTY", async () => {
+    const inputStream = new PassThrough();
+    const outputStream = new PassThrough();
+    inputStream.end("1,3\n");
+
+    const selected = await promptChecklist(
+      "Select platforms:",
+      ["Slack", "Discord", "Email"],
+      [],
+      {
+        io: {
+          input: inputStream as unknown as NodeJS.ReadStream,
+          output: outputStream as unknown as NodeJS.WriteStream
+        }
+      }
+    );
+
+    expect(selected).toEqual([0, 2]);
+  });
+
+  it("prefers interactive setup prompts by default on a TTY", () => {
+    const io = {
+      input: { isTTY: true } as NodeJS.ReadStream,
+      output: { isTTY: true } as NodeJS.WriteStream
+    };
+    delete process.env.GROWTH_OS_CLI_FANCY_PROMPTS;
+    expect(shouldUseInteractivePrompts(io)).toBe(true);
+  });
+
+  it("allows disabling interactive setup prompts explicitly", () => {
+    const io = {
+      input: { isTTY: true } as NodeJS.ReadStream,
+      output: { isTTY: true } as NodeJS.WriteStream
+    };
+    process.env.GROWTH_OS_CLI_FANCY_PROMPTS = "0";
+    expect(shouldUseInteractivePrompts(io)).toBe(false);
+    delete process.env.GROWTH_OS_CLI_FANCY_PROMPTS;
+  });
+
+  it("prompts for freeform text with a default value", async () => {
+    const inputStream = new PassThrough();
+    const outputStream = new PassThrough();
+    inputStream.end("\n");
+
+    const value = await promptText("Project name", "Acme", {
+      io: {
+        input: inputStream as unknown as NodeJS.ReadStream,
+        output: outputStream as unknown as NodeJS.WriteStream
+      }
+    });
+
+    expect(value).toBe("Acme");
+  });
+
+  it("re-prompts for URLs until the input is valid", async () => {
+    const inputStream = new PassThrough();
+    const outputStream = new PassThrough();
+    ["not a url\n", "acme.test\n"].forEach((chunk, index, items) => {
+      setTimeout(() => {
+        if (index === items.length - 1) {
+          inputStream.end(chunk);
+          return;
+        }
+        inputStream.write(chunk);
+      }, index * 10);
+    });
+
+    const value = await promptUrl("Website URL", "", {
+      io: {
+        input: inputStream as unknown as NodeJS.ReadStream,
+        output: outputStream as unknown as NodeJS.WriteStream
+      }
+    });
+
+    expect(value).toBe("acme.test");
+    const rendered = outputStream.read()?.toString() ?? "";
+    expect(rendered).toContain("Website URL [https://]");
+    expect(rendered).toContain("https://acme.test");
+  });
+
+  it("shows an https preview and only asks readiness for selected providers", async () => {
+    const inputStream = new PassThrough();
+    const outputStream = new PassThrough();
+    ["1\n", "2\n"].forEach((chunk, index, items) => {
+      setTimeout(() => {
+        if (index === items.length - 1) {
+          inputStream.end(chunk);
+          return;
+        }
+        inputStream.write(chunk);
+      }, index * 10);
+    });
+
+    const rows = await promptProviderMatrix(
+      [
+        { provider: "ga4", hasAccount: false, installState: "unknown", selected: true, recommended: true },
+        { provider: "x", hasAccount: true, installState: "installed", selected: false, recommended: false }
+      ],
+      {
+        io: {
+          input: inputStream as unknown as NodeJS.ReadStream,
+          output: outputStream as unknown as NodeJS.WriteStream
+        }
+      }
+    );
+
+    expect(rows).toEqual([
+      { provider: "ga4", hasAccount: true, installState: "unknown", selected: true, recommended: true },
+      { provider: "x", hasAccount: true, installState: "installed", selected: false, recommended: false }
+    ]);
+
+    const rendered = outputStream.read()?.toString() ?? "";
+    expect(rendered).toContain("Which of these should we help you set up first?");
+    expect(rendered).toContain("GA4 (recommended)");
+    expect(rendered).toContain("X (optional / advanced)");
+    expect(rendered).toContain("Are you already using GA4?");
+    expect(rendered.indexOf("Which of these should we help you set up first?")).toBeLessThan(
+      rendered.indexOf("Are you already using GA4?")
+    );
+    expect(rendered).not.toContain("Are you already using X?");
+    expect(rendered).not.toContain("already live on your site or app");
+  });
+
+  it("maps one-shot unknown argv text to chat", async () => {
+    const calls: Array<{
+      message: string;
+      onProgress?: (event: ChatProgressEvent) => void;
+      progressMode?: "legacy" | "rich" | "both";
+      sessionId?: string;
+    }> = [];
+    const runtime = fakeAgentRuntime({
+      async chat(input) {
+        calls.push(input);
+        return { ok: true, sessionId: "session-chat" };
+      }
+    });
+
+    const progress = vi.fn();
+    await runCliInput("How", ["much", "revenue", "this", "month?"], { GROWTH_OS_WORKSPACE_ID: "proj_test" }, runtime, progress);
+
+    expect(calls[0]).toMatchObject({
+      message: "How much revenue this month?",
+      sessionId: undefined
+    });
+    expect(typeof calls[0]?.onProgress).toBe("function");
+  });
+
+  it("dispatches app status before project resolution, daemon discovery, or local chat fallback", async () => {
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-desktop-app-status-"));
+    const bridgeDirectory = join(growthHome, "desktop-cmdl");
+    mkdirSync(bridgeDirectory, { mode: 0o700 });
+    writeFileSync(
+      join(bridgeDirectory, "bridge.json"),
+      JSON.stringify({
+        schemaVersion: 1,
+        service: "infinite-desktop-cmdl",
+        protocol: { min: 1, max: 1 },
+        capabilities: ["status.v1", "turn.ndjson.v1", "confirm.v1"],
+        url: "http://127.0.0.1:54321",
+        pid: 12345,
+        bootId: "boot-index-test",
+        desktopVersion: "0.2.39",
+        runtime: { variant: "dev", stateLabel: "DEV2" },
+        token: "index-test-owner-token",
+        startedAt: "2026-07-30T12:00:00.000Z"
+      }),
+      { mode: 0o600 }
+    );
+    chmodSync(bridgeDirectory, 0o700);
+    chmodSync(join(bridgeDirectory, "bridge.json"), 0o600);
+    const writes: string[] = [];
+    const writeSpy = vi.spyOn(process.stdout, "write").mockImplementation((chunk: string | Uint8Array) => {
+      writes.push(String(chunk));
+      return true;
+    });
+    const fetchSpy = vi.fn(async (input: string | URL | Request) => {
+      expect(String(input)).toBe("http://127.0.0.1:54321/v1/status");
+      return new Response(
+        JSON.stringify({
+          service: "infinite-desktop-cmdl",
+          bootId: "boot-index-test",
+          protocol: { min: 1, max: 1 },
+          capabilities: ["status.v1", "turn.ndjson.v1", "confirm.v1"],
+          ready: true,
+          contextRevision: "context-index",
+          provider: { id: "codex", model: "gpt-5.6" },
+          workspace: { name: "Acme" }
+        }),
+        { status: 200, headers: { "content-type": "application/json" } }
+      );
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+
+    try {
+      await runCli(["app", "status"], {
+        GROWTH_OS_HOME: growthHome,
+        GROWTH_OS_WORKSPACE_ROOT: join(growthHome, "missing-workspace")
+      });
+
+      expect(writes.join("")).toContain("Desktop Cmd+L: ready");
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      writeSpy.mockRestore();
+      rmSync(growthHome, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a project selector for app without resolving the local project", async () => {
+    await expect(
+      runCli(["--project", "Ghost", "app", "status"], {
+        GROWTH_OS_HOME: join(tmpdir(), "growth-os-desktop-app-project-flag"),
+        GROWTH_OS_WORKSPACE_ROOT: join(tmpdir(), "missing-infinite-workspace")
+      })
+    ).rejects.toMatchObject({
+      code: "desktop_app_project_flag_unsupported",
+      message: expect.stringContaining("Desktop's active workspace")
+    });
+  });
+
+  it("preserves project-like tokens inside an app message", async () => {
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-desktop-app-message-"));
+    const bridgeDirectory = join(growthHome, "desktop-cmdl");
+    mkdirSync(bridgeDirectory, { mode: 0o700 });
+    writeFileSync(
+      join(bridgeDirectory, "bridge.json"),
+      JSON.stringify({
+        schemaVersion: 1,
+        service: "infinite-desktop-cmdl",
+        protocol: { min: 1, max: 1 },
+        capabilities: ["status.v1", "turn.ndjson.v1", "confirm.v1"],
+        url: "http://127.0.0.1:54321",
+        pid: 12345,
+        bootId: "boot-message-test",
+        desktopVersion: "0.2.39",
+        runtime: { variant: "dev", stateLabel: "DEV2" },
+        token: "message-test-owner-token",
+        startedAt: "2026-07-30T12:00:00.000Z"
+      }),
+      { mode: 0o600 }
+    );
+    chmodSync(bridgeDirectory, 0o700);
+    chmodSync(join(bridgeDirectory, "bridge.json"), 0o600);
+    const requestBodies: Array<Record<string, unknown>> = [];
+    const writeSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      if (String(input).endsWith("/v1/status")) {
+        return new Response(
+          JSON.stringify({
+            service: "infinite-desktop-cmdl",
+            bootId: "boot-message-test",
+            protocol: { min: 1, max: 1 },
+            capabilities: ["status.v1", "turn.ndjson.v1", "confirm.v1"],
+            ready: true,
+            contextRevision: "context-message",
+            provider: { id: "codex", model: "gpt-5.6" },
+            workspace: { name: "Acme" }
+          }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        );
+      }
+      requestBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      const requestId = String(requestBodies[0]?.requestId);
+      return new Response(
+        `${JSON.stringify({
+          protocolVersion: 1,
+          requestId,
+          sequence: 1,
+          kind: "done",
+          data: { turnId: "turn-message", message: "Done.", actionCalls: [] }
+        })}\n`,
+        { status: 200, headers: { "content-type": "application/x-ndjson" } }
+      );
+    }));
+
+    try {
+      await runCli(["app", "compare", "--project", "Alpha", "--project=Beta"], {
+        GROWTH_OS_HOME: growthHome,
+        GROWTH_OS_WORKSPACE_ROOT: join(growthHome, "missing-workspace")
+      });
+
+      expect(requestBodies).toHaveLength(1);
+      expect(requestBodies[0]?.message).toBe("compare --project Alpha --project=Beta");
+    } finally {
+      writeSpy.mockRestore();
+      rmSync(growthHome, { recursive: true, force: true });
+    }
+  });
+
+  it("infinite local runs the local engine path", async () => {
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-local-subcmd-home-"));
+    // Cloud-favorable host: a rollout marker exists, we are on macOS, and both
+    // ends are a TTY. A BARE `infinite <msg>` would resolve to cloud here — the
+    // explicit `infinite local` must STRIP the subcommand and dispatch to today's
+    // local command router (never treat `local` as a chat message, never cloud).
+    mkdirSync(join(growthHome, "desktop-cmdl"), { recursive: true });
+    writeFileSync(join(growthHome, "desktop-cmdl", "seen.json"), "{}");
+    const writes: string[] = [];
+    const writeSpy = vi.spyOn(process.stdout, "write").mockImplementation((chunk: string | Uint8Array) => {
+      writes.push(String(chunk));
+      return true;
+    });
+    const fetchSpy = vi.fn(async (_input: string | URL | Request) => new Response("{}", { status: 200 }));
+    vi.stubGlobal("fetch", fetchSpy);
+    const restoreTty = forceTty(true);
+    const restorePlatform = forcePlatform("darwin");
+    try {
+      await runCli(["local", "help"], {
+        GROWTH_OS_WORKSPACE_ID: "proj_test",
+        GROWTH_OS_HOME: growthHome,
+        GROWTH_OS_CLI_NONINTERACTIVE: "1"
+      });
+
+      // `local` is stripped → `help` runs against the local command router (its
+      // output is help text, NOT chat guidance), and the cloud bridge is untouched.
+      const output = writes.join("");
+      expect(output).toContain("Connect data:");
+      expect(output).toContain("infinite local sync meta 30_days");
+      expect(fetchSpy.mock.calls.some(([url]) => String(url).includes("/v1/status"))).toBe(false);
+    } finally {
+      restorePlatform();
+      restoreTty();
+      writeSpy.mockRestore();
+      rmSync(growthHome, { recursive: true, force: true });
+    }
+  });
+
+  it("app is absent from help text", () => {
+    expect(helpText()).not.toMatch(/\binfinite app\b/);
+  });
+
+  it("non-TTY one-shot with no live bridge exits non-zero with guidance, never a local turn", async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "growth-os-nontty-oneshot-"));
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-nontty-oneshot-home-"));
+    // A stale rollout marker + macOS, but NO live bridge: the one-shot must
+    // exit non-zero with guidance (§6.6 step 7) — never a silent local product
+    // turn (Phase 2's onboarding→local degrade is gone), never a dead cloud.
+    mkdirSync(join(growthHome, "desktop-cmdl"), { recursive: true });
+    writeFileSync(join(growthHome, "desktop-cmdl", "seen.json"), "{}");
+    const writes: string[] = [];
+    const writeSpy = vi.spyOn(process.stdout, "write").mockImplementation((chunk: string | Uint8Array) => {
+      writes.push(String(chunk));
+      return true;
+    });
+    const fetchSpy = vi.fn(async (_input: string | URL | Request) => new Response("{}", { status: 200 }));
+    vi.stubGlobal("fetch", fetchSpy);
+    const restoreTty = forceTty(false);
+    const restorePlatform = forcePlatform("darwin");
+    const priorExitCode = process.exitCode;
+    try {
+      await runCli(["How", "much", "revenue", "this", "month?"], {
+        GROWTH_OS_WORKSPACE_ID: "proj_test",
+        GROWTH_OS_WORKSPACE_ROOT: workspaceRoot,
+        GROWTH_OS_HOME: growthHome,
+        GROWTH_OS_CLI_NONINTERACTIVE: "1"
+      });
+
+      const outputText = writes.join("");
+      expect(outputText).toContain("infinite local");
+      expect(outputText).not.toContain("Infinite is not set up yet.");
+      expect(process.exitCode).toBe(1);
+      expect(fetchSpy.mock.calls.some(([url]) => String(url).includes("/v1/turn"))).toBe(false);
+    } finally {
+      process.exitCode = priorExitCode;
+      restorePlatform();
+      restoreTty();
+      writeSpy.mockRestore();
+      rmSync(workspaceRoot, { recursive: true, force: true });
+      rmSync(growthHome, { recursive: true, force: true });
+    }
+  });
+
+  it("cloud-favorable one-shot routes the message through the cloud brain", async () => {
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-oneshot-cloud-"));
+    const bridgeDirectory = join(growthHome, "desktop-cmdl");
+    mkdirSync(bridgeDirectory, { mode: 0o700 });
+    writeFileSync(join(bridgeDirectory, "seen.json"), "{}");
+    writeFileSync(
+      join(bridgeDirectory, "bridge.json"),
+      JSON.stringify({
+        schemaVersion: 1,
+        service: "infinite-desktop-cmdl",
+        protocol: { min: 1, max: 1 },
+        capabilities: ["status.v1", "turn.ndjson.v1", "confirm.v1"],
+        url: "http://127.0.0.1:54321",
+        pid: 12345,
+        bootId: "boot-oneshot-cloud",
+        desktopVersion: "0.2.39",
+        runtime: { variant: "dev", stateLabel: "DEV2" },
+        token: "oneshot-cloud-owner-token",
+        startedAt: "2026-07-30T12:00:00.000Z"
+      }),
+      { mode: 0o600 }
+    );
+    chmodSync(bridgeDirectory, 0o700);
+    chmodSync(join(bridgeDirectory, "bridge.json"), 0o600);
+    const writes: string[] = [];
+    const writeSpy = vi.spyOn(process.stdout, "write").mockImplementation((chunk: string | Uint8Array) => {
+      writes.push(String(chunk));
+      return true;
+    });
+    const fetchSpy = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      if (String(input).endsWith("/v1/status")) {
+        return new Response(
+          JSON.stringify({
+            service: "infinite-desktop-cmdl",
+            bootId: "boot-oneshot-cloud",
+            protocol: { min: 1, max: 1 },
+            capabilities: ["status.v1", "turn.ndjson.v1", "confirm.v1"],
+            ready: true,
+            contextRevision: "ctx-oneshot-cloud",
+            provider: { id: "codex", model: "gpt-5.6" },
+            workspace: { name: "Acme" }
+          }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        );
+      }
+      if (String(input).endsWith("/v1/turn")) {
+        const body = JSON.parse(String(init?.body)) as { requestId: string };
+        return new Response(
+          JSON.stringify({
+            protocolVersion: 1,
+            requestId: body.requestId,
+            sequence: 1,
+            kind: "done",
+            data: { message: "Revenue was $12,345 this month.", actionCalls: [] }
+          }),
+          { status: 200, headers: { "content-type": "application/x-ndjson" } }
+        );
+      }
+      return new Response("{}", { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+    const restoreTty = forceTty(true);
+    const restorePlatform = forcePlatform("darwin");
+    try {
+      // A one-shot message with a LIVE ready bridge is routed to the Desktop
+      // cloud brain, NOT local chat: the live probe (descriptor + /v1/status
+      // ready) — never the seen.json marker alone — picks cloud, and the turn
+      // is proxied over /v1/turn.
+      await runCli(["How", "much", "revenue", "this", "month?"], {
+        GROWTH_OS_WORKSPACE_ID: "proj_test",
+        GROWTH_OS_HOME: growthHome,
+        GROWTH_OS_WORKSPACE_ROOT: join(growthHome, "missing-workspace")
+      });
+
+      expect(fetchSpy.mock.calls.some(([url]) => String(url).endsWith("/v1/turn"))).toBe(true);
+      expect(writes.join("")).toContain("Revenue was $12,345 this month.");
+      expect(writes.join("")).not.toContain("Infinite is not set up yet.");
+    } finally {
+      restorePlatform();
+      restoreTty();
+      writeSpy.mockRestore();
+      rmSync(growthHome, { recursive: true, force: true });
+    }
+  });
+
+  it("bare infinite with a NOT-ready bridge routes to onboarding guidance, never a dead cloud throw", async () => {
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-bare-cloud-"));
+    const bridgeDirectory = join(growthHome, "desktop-cmdl");
+    mkdirSync(bridgeDirectory, { mode: 0o700 });
+    writeFileSync(join(bridgeDirectory, "seen.json"), "{}");
+    writeFileSync(
+      join(bridgeDirectory, "bridge.json"),
+      JSON.stringify({
+        schemaVersion: 1,
+        service: "infinite-desktop-cmdl",
+        protocol: { min: 1, max: 1 },
+        capabilities: ["status.v1", "turn.ndjson.v1", "confirm.v1"],
+        url: "http://127.0.0.1:54321",
+        pid: 12345,
+        bootId: "boot-bare-cloud",
+        desktopVersion: "0.2.39",
+        runtime: { variant: "dev", stateLabel: "DEV2" },
+        token: "bare-cloud-owner-token",
+        startedAt: "2026-07-30T12:00:00.000Z"
+      }),
+      { mode: 0o600 }
+    );
+    chmodSync(bridgeDirectory, 0o700);
+    chmodSync(join(bridgeDirectory, "bridge.json"), 0o600);
+    const writes: string[] = [];
+    const writeSpy = vi.spyOn(process.stdout, "write").mockImplementation((chunk: string | Uint8Array) => {
+      writes.push(String(chunk));
+      return true;
+    });
+    const fetchSpy = vi.fn(async (input: string | URL | Request) => {
+      if (String(input).endsWith("/v1/status")) {
+        return new Response(
+          JSON.stringify({
+            service: "infinite-desktop-cmdl",
+            bootId: "boot-bare-cloud",
+            protocol: { min: 1, max: 1 },
+            capabilities: ["status.v1", "turn.ndjson.v1", "confirm.v1"],
+            ready: false,
+            contextRevision: "ctx-bare-cloud",
+            provider: { id: "codex", model: "gpt-5.6" },
+            workspace: { name: "Acme" }
+          }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        );
+      }
+      return new Response("{}", { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+    const restoreTty = forceTty(true);
+    const restorePlatform = forcePlatform("darwin");
+    const priorExitCode = process.exitCode;
+    try {
+      // The live probe DOES reach /v1/status, sees not-ready, and resolveMode
+      // therefore routes to ONBOARDING (guide/launch Desktop) instead of the old
+      // marker-driven cloud pick that died with `desktop_not_ready`. This temp
+      // GROWTH_OS_HOME is non-canonical, so onboarding guides without launching
+      // and the entry exits non-zero — never a silent local product turn.
+      await runCli([], {
+        GROWTH_OS_HOME: growthHome,
+        GROWTH_OS_WORKSPACE_ROOT: join(growthHome, "missing-workspace")
+      });
+
+      expect(fetchSpy.mock.calls.some(([url]) => String(url).endsWith("/v1/status"))).toBe(true);
+      expect(fetchSpy.mock.calls.some(([url]) => String(url).endsWith("/v1/turn"))).toBe(false);
+      expect(writes.join("")).toContain("infinite local");
+      expect(process.exitCode).toBe(1);
+    } finally {
+      process.exitCode = priorExitCode;
+      restorePlatform();
+      restoreTty();
+      writeSpy.mockRestore();
+      rmSync(growthHome, { recursive: true, force: true });
+    }
+  });
+
+  it("returns setup guidance when local chat is missing workspace runtime config", async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "growth-os-missing-config-"));
+    try {
+      const result = await runCliInput(
+        "How",
+        ["much", "revenue", "this", "month?"],
+        {
+          GROWTH_OS_WORKSPACE_ID: "proj_test",
+          GROWTH_OS_WORKSPACE_ROOT: workspaceRoot,
+          GROWTH_OS_HOME: mkdtempSync(join(tmpdir(), "growth-os-home-missing-config-"))
+        }
+      );
+
+      expect(result).toMatchObject({
+        ok: false,
+        error: { code: "growth_os_workspace_not_ready" }
+      });
+      expect(JSON.stringify(result)).toContain("infinite local setup");
+      expect(JSON.stringify(result)).toContain("infinite local start");
+      expect(JSON.stringify(result)).toContain("infinite local model use");
+      expect(JSON.stringify(result)).toContain("infinite local auth login");
+    } finally {
+      rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("returns exact guidance for noninteractive model setup without provider input", async () => {
+    const result = await runCommand("model", ["use"], {
+      GROWTH_OS_CLI_NONINTERACTIVE: "1"
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: {
+        code: "growth_os_model_setup_requires_input"
+      }
+    });
+    expect(JSON.stringify(result)).toContain("infinite local setup model");
+    expect(JSON.stringify(result)).toContain("infinite local model use codex gpt-5.5 --auth login");
+  });
+
+  it("returns the same guidance for noninteractive setup model without provider input", async () => {
+    const result = await runCommand("setup", ["model"], {
+      GROWTH_OS_CLI_NONINTERACTIVE: "1"
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: {
+        code: "growth_os_model_setup_requires_input"
+      }
+    });
+  });
+
+  // `setup` is namespaced under `infinite local` (§6.6) — this doubles as the
+  // proof that `infinite local setup` still runs the wizard.
+  it("prints parseable JSON for local setup --json", async () => {
+    stubEmptyEngineDb(); // setup's key guard probes the DB; keep this DB-free test off a real localhost PG
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-setup-json-home-"));
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "growth-os-setup-json-workspace-"));
+    const home = mkdtempSync(join(tmpdir(), "growth-os-setup-json-claude-home-"));
+    const writes: string[] = [];
+    const writeSpy = vi.spyOn(process.stdout, "write").mockImplementation((chunk: string | Uint8Array) => {
+      writes.push(String(chunk));
+      return true;
+    });
+    try {
+      mkdirSync(join(home, ".claude"), { recursive: true });
+      writeFileSync(
+        join(home, ".claude", ".credentials.json"),
+        JSON.stringify({
+          claudeAiOauth: {
+            accessToken: "claude-json-access",
+            refreshToken: "claude-json-refresh",
+            expiresAt: "2999-01-01T00:00:00.000Z"
+          }
+        })
+      );
+
+      await runCli(
+        ["local", "setup", "--json", "--provider=claude", "--model", "claude-sonnet-4-5", "--auth", "reuse", "--no-start"],
+        {
+          DATABASE_URL: "postgres://growth:password@127.0.0.1:1/growth",
+          GROWTH_OS_HOME: growthHome,
+          GROWTH_OS_WORKSPACE_ROOT: workspaceRoot,
+          HOME: home
+        }
+      );
+
+      const parsed = JSON.parse(writes.join(""));
+      expect(parsed).toMatchObject({
+        ok: false,
+        section: "wizard",
+        setupMode: expect.any(String),
+        sections: expect.any(Array)
+      });
+    } finally {
+      writeSpy.mockRestore();
+      rmSync(growthHome, { recursive: true, force: true });
+      rmSync(workspaceRoot, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("prints local Claude auth reuse without opening TUI progress chrome", async () => {
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-cli-auth-output-"));
+    const home = mkdtempSync(join(tmpdir(), "claude-cli-auth-output-"));
+    const stdoutWrites: string[] = [];
+    const stderrWrites: string[] = [];
+    const stdoutSpy = vi.spyOn(process.stdout, "write").mockImplementation((chunk: string | Uint8Array) => {
+      stdoutWrites.push(String(chunk));
+      return true;
+    });
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation((chunk: string | Uint8Array) => {
+      stderrWrites.push(String(chunk));
+      return true;
+    });
+    const originalStderrIsTty = process.stderr.isTTY;
+    const originalStderrColumns = process.stderr.columns;
+    try {
+      Object.defineProperty(process.stderr, "isTTY", { configurable: true, value: true });
+      Object.defineProperty(process.stderr, "columns", { configurable: true, value: 88 });
+      mkdirSync(join(home, ".claude"), { recursive: true });
+      writeFileSync(
+        join(home, ".claude", ".credentials.json"),
+        JSON.stringify({
+          claudeAiOauth: {
+            accessToken: "claude-cli-access",
+            refreshToken: "claude-cli-refresh",
+            expiresAt: "2999-01-01T00:00:00.000Z"
+          }
+        })
+      );
+
+      await runCli(["local", "auth", "login", "claude", "--mode", "reuse"], {
+        GROWTH_OS_HOME: growthHome,
+        HOME: home,
+        INFINITE_RENDER_SURFACE: "ink"
+      });
+
+      expect(JSON.parse(stdoutWrites.join(""))).toMatchObject({
+        ok: true,
+        provider: "claude",
+        mode: "reuse",
+        hasCredentials: true
+      });
+      expect(stderrWrites.join("")).not.toContain("∞ Infinite");
+      expect(stderrWrites.join("")).not.toContain("Running request.");
+    } finally {
+      Object.defineProperty(process.stderr, "isTTY", { configurable: true, value: originalStderrIsTty });
+      Object.defineProperty(process.stderr, "columns", { configurable: true, value: originalStderrColumns });
+      stdoutSpy.mockRestore();
+      stderrSpy.mockRestore();
+      rmSync(growthHome, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("routes a noninteractive mac first run to Desktop guidance without opening the interactive shell", async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "growth-os-first-run-"));
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-first-run-home-"));
+    const writes: string[] = [];
+    const writeSpy = vi.spyOn(process.stdout, "write").mockImplementation((chunk: string | Uint8Array) => {
+      writes.push(String(chunk));
+      return true;
+    });
+    const restorePlatform = forcePlatform("darwin");
+    const priorExitCode = process.exitCode;
+    try {
+      // mac + no live bridge → onboarding. Non-interactive, so no GUI launch:
+      // this non-canonical temp home yields guide-only guidance pointing at
+      // `infinite local`, and the entry exits non-zero — the LOCAL interactive
+      // shell must never open from a bare product invocation.
+      await runCli([], {
+        GROWTH_OS_WORKSPACE_ROOT: workspaceRoot,
+        GROWTH_OS_HOME: growthHome,
+        GROWTH_OS_CLI_NONINTERACTIVE: "1"
+      });
+
+      const outputText = writes.join("");
+      expect(outputText).toContain("infinite local");
+      expect(outputText).not.toContain("Infinite OS session. Type a message");
+      expect(process.exitCode).toBe(1);
+    } finally {
+      process.exitCode = priorExitCode;
+      restorePlatform();
+      writeSpy.mockRestore();
+      rmSync(workspaceRoot, { recursive: true, force: true });
+      rmSync(growthHome, { recursive: true, force: true });
+    }
+  });
+
+  it("routes a noninteractive non-mac first run to local-engine guidance without opening the local session", async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "growth-os-first-run-"));
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-first-run-home-"));
+    const writes: string[] = [];
+    const errWrites: string[] = [];
+    const writeSpy = vi.spyOn(process.stdout, "write").mockImplementation((chunk: string | Uint8Array) => {
+      writes.push(String(chunk));
+      return true;
+    });
+    const errSpy = vi.spyOn(process.stderr, "write").mockImplementation((chunk: string | Uint8Array) => {
+      errWrites.push(String(chunk));
+      return true;
+    });
+    const restorePlatform = forcePlatform("linux");
+    const priorExitCode = process.exitCode;
+    try {
+      // Non-mac hosts without the explicit `GROWTH_OS_DEFAULT_TARGET=local`
+      // opt-in must NOT fall back to the local product session: bare
+      // `infinite` exits non-zero with guidance pointing at `infinite local`.
+      await runCli([], {
+        GROWTH_OS_WORKSPACE_ROOT: workspaceRoot,
+        GROWTH_OS_HOME: growthHome,
+        GROWTH_OS_CLI_NONINTERACTIVE: "1"
+      });
+
+      const outputText = writes.join("");
+      const errText = errWrites.join("");
+      expect(errText).toContain("macOS-only");
+      expect(errText).toContain("infinite local");
+      expect(outputText).not.toContain("Infinite is not set up yet.");
+      expect(outputText).not.toContain("Infinite OS session. Type a message");
+      expect(process.exitCode).toBe(1);
+    } finally {
+      process.exitCode = priorExitCode;
+      restorePlatform();
+      writeSpy.mockRestore();
+      errSpy.mockRestore();
+      rmSync(workspaceRoot, { recursive: true, force: true });
+      rmSync(growthHome, { recursive: true, force: true });
+    }
+  });
+
+  it("interactive preflight defaults to continuing setup and proceeds when setup becomes ready", async () => {
+    const writes: string[] = [];
+    const proceed = await handleInteractiveSetupPreflight(
+      {},
+      {
+        ok: false,
+        error: { code: "growth_os_workspace_not_ready" }
+      },
+      {
+        chooseAction: async () => "continue",
+        runWizard: async () => ({
+          ok: true,
+          section: "wizard",
+          sections: [],
+          next: "Run `infinite`, then type your question."
+        }),
+        checkReadiness: async () => ({ ok: true }),
+        writeLine: (text) => {
+          writes.push(text);
+        }
+      }
+    );
+
+    expect(proceed).toBe(true);
+    expect(writes.join("\n")).toContain("Infinite is not set up yet.");
+    expect(writes.join("\n")).toContain("Continue setup");
+  });
+
+  it("interactive preflight can show current status without entering setup", async () => {
+    const writes: string[] = [];
+    const proceed = await handleInteractiveSetupPreflight(
+      {},
+      {
+        ok: false,
+        error: {
+          code: "growth_os_workspace_not_ready",
+          message: "Infinite is not ready to answer through the local LLM runtime."
+        }
+      },
+      {
+        chooseAction: async () => "status",
+        writeLine: (text) => {
+          writes.push(text);
+        }
+      }
+    );
+
+    expect(proceed).toBe(false);
+    expect(writes.join("\n")).toContain("Show current status");
+    expect(writes.join("\n")).toContain("Infinite is not ready to answer through the local LLM runtime.");
+  });
+
+  it("interactive preflight can exit without running setup", async () => {
+    let wizardCalls = 0;
+    const proceed = await handleInteractiveSetupPreflight(
+      {},
+      {
+        ok: false,
+        error: { code: "growth_os_workspace_not_ready" }
+      },
+      {
+        chooseAction: async () => "exit",
+        runWizard: async () => {
+          wizardCalls += 1;
+          return { ok: true };
+        },
+        writeLine: () => {}
+      }
+    );
+
+    expect(proceed).toBe(false);
+    expect(wizardCalls).toBe(0);
+  });
+
+  it("offers launch after a complete setup result and can launch the interactive session", async () => {
+    let launched = 0;
+    const didLaunch = await maybeLaunchInfiniteAfterSetup(
+      {
+        ok: true,
+        section: "wizard"
+      },
+      {},
+      {
+        interactive: true,
+        confirm: async () => true,
+        launch: async () => {
+          launched += 1;
+        }
+      }
+    );
+
+    expect(didLaunch).toBe(true);
+    expect(launched).toBe(1);
+  });
+
+  it("does not offer launch after incomplete setup results", async () => {
+    let launched = 0;
+    const didLaunch = await maybeLaunchInfiniteAfterSetup(
+      {
+        ok: false,
+        section: "wizard"
+      },
+      {},
+      {
+        interactive: true,
+        confirm: async () => true,
+        launch: async () => {
+          launched += 1;
+        }
+      }
+    );
+
+    expect(didLaunch).toBe(false);
+    expect(launched).toBe(0);
+  });
+
+  it("renders detected Codex and Claude credential status for interactive model setup", () => {
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-detected-auth-home-"));
+    const home = mkdtempSync(join(tmpdir(), "growth-os-detected-auth-user-home-"));
+    const codexHome = mkCodexHome({
+      access_token: "codex-access-token",
+      refresh_token: "codex-refresh-token",
+      expires_at: "2999-01-01T00:00:00.000Z"
+    });
+    try {
+      mkdirSync(join(home, ".claude"), { recursive: true });
+      writeFileSync(
+        join(home, ".claude", ".credentials.json"),
+        JSON.stringify({
+          claudeAiOauth: {
+            accessToken: "claude-access-token",
+            refreshToken: "claude-refresh-token",
+            expiresAt: "2999-01-01T00:00:00.000Z"
+          }
+        })
+      );
+      const rendered = renderDetectedModelAuthStatus({
+        GROWTH_OS_HOME: growthHome,
+        CODEX_HOME: codexHome,
+        HOME: home
+      });
+      expect(rendered).toContain("Detected credentials:");
+      expect(rendered).toContain("Codex:");
+      expect(rendered).toContain("Claude:");
+      expect(rendered).toContain("Codex CLI auth");
+      expect(rendered).toMatch(/Claude: (Claude Code credentials|Infinite OS auth \(macos-keychain\)|Claude Code credentials \(macos-keychain\)|macos-keychain)/);
+    } finally {
+      rmSync(growthHome, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true });
+      rmSync(codexHome, { recursive: true, force: true });
+    }
+  });
+
+  it("renders workspace readiness failures as human first-run guidance", async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "growth-os-render-first-run-"));
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-render-first-run-home-"));
+    try {
+      const readiness = await localChatReadiness({
+        GROWTH_OS_WORKSPACE_ROOT: workspaceRoot,
+        GROWTH_OS_HOME: growthHome
+      });
+      const rendered = renderCliResult(readiness);
+
+      expect(rendered).toContain("Infinite is not set up yet.");
+      expect(rendered).toContain("runtime_config_incomplete");
+      expect(rendered).toContain("model_missing");
+      expect(rendered).toContain("Next:");
+      expect(rendered).toContain("infinite local setup");
+    } finally {
+      rmSync(workspaceRoot, { recursive: true, force: true });
+      rmSync(growthHome, { recursive: true, force: true });
+    }
+  });
+
+  it("returns setup guidance when local chat is missing model and auth", async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "growth-os-chat-missing-model-"));
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-chat-missing-model-home-"));
+    try {
+      await runCommand("init", [], {
+        GROWTH_OS_WORKSPACE_ROOT: workspaceRoot
+      });
+
+      const result = await runCliInput(
+        "How",
+        ["much", "revenue", "this", "month?"],
+        {
+          GROWTH_OS_WORKSPACE_ID: "proj_test",
+          GROWTH_OS_WORKSPACE_ROOT: workspaceRoot,
+          GROWTH_OS_HOME: growthHome
+        }
+      );
+
+      expect(result).toMatchObject({
+        ok: false,
+        error: {
+          code: "growth_os_workspace_not_ready"
+        }
+      });
+      expect((result as { error: { reasons: Array<{ code: string }> } }).error.reasons).toEqual(
+        expect.arrayContaining([expect.objectContaining({ code: "model_missing" })])
+      );
+      expect(JSON.stringify(result)).toContain("infinite local setup");
+      expect(JSON.stringify(result)).toContain("infinite local model use");
+    } finally {
+      rmSync(workspaceRoot, { recursive: true, force: true });
+      rmSync(growthHome, { recursive: true, force: true });
+    }
+  });
+
+  it("treats local Codex CLI auth as ready when Codex is selected", async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "growth-os-codex-readiness-workspace-"));
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-codex-readiness-home-"));
+    const codexHome = mkCodexHome({
+      access_token: "codex-cli-access",
+      refresh_token: "codex-cli-refresh",
+      expires_at: "2999-01-01T00:00:00.000Z"
+    });
+    try {
+      await runCommand("init", [], {
+        GROWTH_OS_WORKSPACE_ROOT: workspaceRoot
+      });
+      writeInfiniteOsModelSelection(
+        { provider: "codex", model: "gpt-5.4" },
+        { GROWTH_OS_HOME: growthHome } as NodeJS.ProcessEnv
+      );
+
+      await expect(
+        localChatReadiness({
+          GROWTH_OS_WORKSPACE_ROOT: workspaceRoot,
+          GROWTH_OS_HOME: growthHome,
+          CODEX_HOME: codexHome,
+          DATABASE_URL: "postgres://growth:password@127.0.0.1:1/growth"
+        })
+      ).resolves.toMatchObject({
+        ok: false,
+        setupReadiness: {
+          model: "selected",
+          auth: "ready"
+        }
+      });
+    } finally {
+      rmSync(workspaceRoot, { recursive: true, force: true });
+      rmSync(growthHome, { recursive: true, force: true });
+      rmSync(codexHome, { recursive: true, force: true });
+    }
+  });
+
+  it("maps interactive session slash commands to the local agent runtime", async () => {
+    const requests: Array<[string, ...unknown[]]> = [];
+    const runtime = fakeAgentRuntime({
+      async listSessions() {
+        requests.push(["listSessions"]);
+        return { ok: true, sessions: [] };
+      },
+      async resumeSession(sessionId) {
+        requests.push(["resumeSession", sessionId]);
+        return { ok: true, sessionId };
+      },
+      async compactSession(sessionId, summaryText) {
+        requests.push(["compactSession", sessionId, summaryText]);
+        return { ok: true, sessionId };
+      }
+    });
+    const chatState = { conversationId: "session-1" };
+
+    await runSlashCommand("/sessions", {}, undefined, undefined, chatState, runtime);
+    await runSlashCommand("/resume session-2", {}, undefined, undefined, chatState, runtime);
+    await runSlashCommand("/compact keep the revenue context", {}, undefined, undefined, chatState, runtime);
+
+    // `/resume` and `/compact` both pass the immutable conversation id; the real
+    // runtime derives the per-workspace controller id from it (the fake forwards
+    // verbatim). `/resume` re-points `conversationId`, and `/compact` then keys
+    // the resumed conversation — no double-suffix, all three the same row.
+    expect(requests).toEqual([
+      ["listSessions"],
+      ["resumeSession", "session-2"],
+      ["compactSession", "session-2", "keep the revenue context"]
+    ]);
+    expect(chatState.conversationId).toBe("session-2");
+  });
+
+  it("maps confirmation slash command to the local agent runtime", async () => {
+    const requests: string[] = [];
+    const runtime = fakeAgentRuntime({
+      async confirmAction(confirmationId) {
+        requests.push(confirmationId);
+        return { ok: true, confirmationId };
+      }
+    });
+
+    await runSlashCommand("/confirm confirm_abc", { GROWTH_OS_OPERATOR_TOKEN: "operator-token" }, undefined, undefined, undefined, runtime);
+
+    expect(requests).toEqual(["confirm_abc"]);
+    await expect(runSlashCommand("/confirm", {})).rejects.toThrow("confirm requires a confirmation id");
+  });
+
+  it("initializes local Infinite OS config files", async () => {
+    const root = mkdtempSync(join(tmpdir(), "growth-os-cli-"));
+    try {
+      const result = await runCommand("init", [], { GROWTH_OS_WORKSPACE_ROOT: root });
+      expect(result).toMatchObject({ ok: true });
+      expect(readFileSync(join(root, ".growth-os", "config.yml"), "utf8")).toContain("runtime_mode: local");
+      expect(readFileSync(join(root, ".growth-os", ".env"), "utf8")).toContain("DATABASE_URL=");
+      expect(readFileSync(join(root, ".growth-os", ".env"), "utf8")).not.toContain("ANTHROPIC_API_KEY");
+      expect(readFileSync(join(root, ".growth-os", ".env"), "utf8")).not.toContain("OPENAI_API_KEY");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("runs Hermes-style one-time setup for local runtime, model, and auth", async () => {
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-setup-home-"));
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "growth-os-setup-workspace-"));
+    const home = mkdtempSync(join(tmpdir(), "growth-os-setup-claude-home-"));
+    try {
+      mkdirSync(join(home, ".claude"), { recursive: true });
+      writeFileSync(
+        join(home, ".claude", ".credentials.json"),
+        JSON.stringify({
+          claudeAiOauth: {
+            accessToken: "claude-setup-access",
+            refreshToken: "claude-setup-refresh",
+            expiresAt: "2999-01-01T00:00:00.000Z"
+          }
+        })
+      );
+
+      const result = await runCommand(
+        "setup",
+        ["--provider=claude", "--model", "claude-opus-4-8", "--auth", "reuse"],
+        {
+          DATABASE_URL: "postgres://growth:password@127.0.0.1:1/growth",
+          GROWTH_OS_HOME: growthHome,
+          GROWTH_OS_WORKSPACE_ROOT: workspaceRoot,
+          GROWTH_OS_CLI_DRY_RUN: "1",
+          GROWTH_OS_COMPOSE_PROJECT: "growth-os-setup-test",
+          HOME: home
+        }
+      );
+
+      expect(result).toMatchObject({
+        ok: false,
+        section: "wizard",
+        setupMode: "full",
+        model: { ok: true, provider: "claude", model: "claude-opus-4-8" },
+        auth: { ok: true, provider: "claude", mode: "reuse", hasCredentials: true },
+        runtime: {
+          mode: "local_docker",
+          start: {
+            ok: true,
+            command: ["docker", "compose", "-p", "growth-os-setup-test", "up", "-d"]
+          }
+        }
+      });
+      expect((result as { next?: string }).next).toBe("Run `infinite local setup status` to review blockers.");
+      expect(readFileSync(join(workspaceRoot, ".growth-os", "config.yml"), "utf8")).toContain("runtime_mode: local");
+      expect(readFileSync(join(growthHome, "config.yml"), "utf8")).toContain("model_provider: claude");
+      expect(readFileSync(join(growthHome, "auth.json"), "utf8")).toContain("claude-setup-refresh");
+      expect(existsSync(join(workspaceRoot, ".growth-os", "auth.json"))).toBe(false);
+    } finally {
+      rmSync(growthHome, { recursive: true, force: true });
+      rmSync(workspaceRoot, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("supports quick setup mode for first-time installs", async () => {
+    stubEmptyEngineDb(); // setup's key guard probes the DB; keep this DB-free test off a real localhost PG
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-quick-setup-home-"));
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "growth-os-quick-setup-workspace-"));
+    const home = mkdtempSync(join(tmpdir(), "growth-os-quick-setup-claude-home-"));
+    try {
+      mkdirSync(join(home, ".claude"), { recursive: true });
+      writeFileSync(
+        join(home, ".claude", ".credentials.json"),
+        JSON.stringify({
+          claudeAiOauth: {
+            accessToken: "claude-quick-access",
+            refreshToken: "claude-quick-refresh",
+            expiresAt: "2999-01-01T00:00:00.000Z"
+          }
+        })
+      );
+
+      const result = await runCommand(
+        "setup",
+        ["--quick", "--provider=claude", "--model", "claude-sonnet-4-5", "--auth", "reuse", "--no-start"],
+        {
+          GROWTH_OS_HOME: growthHome,
+          GROWTH_OS_WORKSPACE_ROOT: workspaceRoot,
+          HOME: home
+        }
+      );
+
+      expect(result).toMatchObject({
+        section: "wizard",
+        setupMode: "quick",
+        existingInstall: false,
+        model: { ok: true, provider: "claude", model: "claude-sonnet-4-5" }
+      });
+      expect(JSON.stringify(result)).toContain("connectors");
+      expect(JSON.stringify(result)).toContain("skipped");
+    } finally {
+      rmSync(growthHome, { recursive: true, force: true });
+      rmSync(workspaceRoot, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("marks setup as reconfigure mode when existing install state is present", async () => {
+    stubEmptyEngineDb(); // setup's key guard probes the DB; keep this DB-free test off a real localhost PG
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-reconfigure-home-"));
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "growth-os-reconfigure-workspace-"));
+    const home = mkdtempSync(join(tmpdir(), "growth-os-reconfigure-claude-home-"));
+    try {
+      await runCommand("init", [], { GROWTH_OS_WORKSPACE_ROOT: workspaceRoot });
+      mkdirSync(growthHome, { recursive: true });
+      writeFileSync(join(growthHome, "config.yml"), "model_provider: claude\nmodel_name: claude-sonnet-4-5\n");
+      writeFileSync(
+        join(growthHome, "auth.json"),
+        JSON.stringify({
+          providers: {
+            claude: {
+              provider: "claude",
+              source: "claude-code-credentials-file",
+              authMode: "reuse",
+              token: "claude-reconfigure-access",
+              refreshToken: "claude-reconfigure-refresh",
+              expiresAt: "2999-01-01T00:00:00.000Z"
+            }
+          }
+        })
+      );
+      mkdirSync(join(home, ".claude"), { recursive: true });
+      writeFileSync(
+        join(home, ".claude", ".credentials.json"),
+        JSON.stringify({
+          claudeAiOauth: {
+            accessToken: "claude-reconfigure-access",
+            refreshToken: "claude-reconfigure-refresh",
+            expiresAt: "2999-01-01T00:00:00.000Z"
+          }
+        })
+      );
+
+      const result = await runCommand(
+        "setup",
+        ["--reconfigure", "--provider=claude", "--model", "claude-sonnet-4-5", "--auth", "reuse", "--no-start"],
+        {
+          GROWTH_OS_HOME: growthHome,
+          GROWTH_OS_WORKSPACE_ROOT: workspaceRoot,
+          HOME: home
+        }
+      );
+
+      expect(result).toMatchObject({
+        section: "wizard",
+        setupMode: "full",
+        existingInstall: true
+      });
+      expect(renderCliResult(result)).toContain("Reconfigure (full)");
+      expect(renderCliResult(result)).toContain("provider=claude");
+      expect(renderCliResult(result)).toContain("mode=local_docker");
+    } finally {
+      rmSync(growthHome, { recursive: true, force: true });
+      rmSync(workspaceRoot, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("runs runtime setup for local Docker without exposing raw secrets", async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "growth-os-runtime-local-"));
+    // Runtime setup mirrors into the machine home; never let this test reach ~/.growth-os.
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-runtime-local-home-"));
+    try {
+      const result = await runCommand("setup", ["runtime", "--mode", "local_docker"], {
+        GROWTH_OS_HOME: growthHome,
+        GROWTH_OS_WORKSPACE_ROOT: workspaceRoot,
+        GROWTH_OS_CLI_DRY_RUN: "1",
+        GROWTH_OS_COMPOSE_PROJECT: "growth-os-runtime-local"
+      });
+
+      expect(result).toMatchObject({
+        ok: true,
+        section: "runtime",
+        runtime: {
+          mode: "local_docker",
+          start: {
+            ok: true,
+            command: ["docker", "compose", "-p", "growth-os-runtime-local", "up", "-d"]
+          },
+          migrations: {
+            ok: true,
+            skipped: true,
+            mode: "compose_managed"
+          }
+        }
+      });
+      expect(readFileSync(join(workspaceRoot, ".growth-os", "config.yml"), "utf8")).toContain("runtime_target: local_docker");
+      expect(readFileSync(join(workspaceRoot, ".growth-os", ".env"), "utf8")).toContain("DATABASE_URL=postgres://growth_os:growth_os_dev@localhost:5432/growth_os");
+      expect(readFileSync(join(workspaceRoot, ".growth-os", ".env"), "utf8")).not.toContain("POSTHOG_API_KEY");
+      expect(readFileSync(join(growthHome, ".env"), "utf8")).toContain(
+        "DATABASE_URL=postgres://growth_os:growth_os_dev@localhost:5432/growth_os"
+      );
+    } finally {
+      rmSync(growthHome, { recursive: true, force: true });
+      rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("runs runtime setup for external Postgres without invoking Docker compose", async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "growth-os-runtime-external-"));
+    // Isolated machine home prevents cross-test DATABASE_URL conflicts detected
+    // by the mirrorMachineHomeEnv conflict guard (FIX A1).
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-runtime-external-home-"));
+    try {
+      const result = await runCommand(
+        "setup",
+        [
+          "runtime",
+          "--mode",
+          "external_postgres",
+          "--database-url",
+          "postgres://growth:supersecret@db.example.com:5432/growth"
+        ],
+        {
+          GROWTH_OS_WORKSPACE_ROOT: workspaceRoot,
+          GROWTH_OS_HOME: growthHome,
+          GROWTH_OS_CLI_DRY_RUN: "1"
+        }
+      );
+
+      expect(result).toMatchObject({
+        ok: true,
+        section: "runtime",
+        runtime: {
+          mode: "external_postgres",
+          start: { ok: true, skipped: true, reason: "external_runtime" },
+          migrations: { ok: true, dryRun: true },
+          databaseUrl: "postgres://growth:%5Bredacted%5D@db.example.com:5432/growth"
+        }
+      });
+      expect(JSON.stringify(result)).not.toContain("supersecret");
+      expect(readFileSync(join(workspaceRoot, ".growth-os", "config.yml"), "utf8")).toContain("runtime_target: external_postgres");
+      expect(readFileSync(join(workspaceRoot, ".growth-os", ".env"), "utf8")).toContain("DATABASE_URL=postgres://growth:supersecret@db.example.com:5432/growth");
+    } finally {
+      rmSync(workspaceRoot, { recursive: true, force: true });
+      rmSync(growthHome, { recursive: true, force: true });
+    }
+  });
+
+  it("runs runtime setup for Supabase through the same external Postgres migration path", async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "growth-os-runtime-supabase-"));
+    // Isolated machine home prevents cross-test DATABASE_URL conflicts detected
+    // by the mirrorMachineHomeEnv conflict guard (FIX A1).
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-runtime-supabase-home-"));
+    try {
+      const result = await runCommand(
+        "setup",
+        [
+          "runtime",
+          "--mode",
+          "supabase",
+          "--database-url",
+          "postgres://supabase:supersecret@db.supabase.example.com:5432/postgres"
+        ],
+        {
+          GROWTH_OS_WORKSPACE_ROOT: workspaceRoot,
+          GROWTH_OS_HOME: growthHome,
+          GROWTH_OS_CLI_DRY_RUN: "1"
+        }
+      );
+
+      expect(result).toMatchObject({
+        ok: true,
+        section: "runtime",
+        runtime: {
+          mode: "supabase",
+          start: { ok: true, skipped: true, reason: "external_runtime" },
+          migrations: { ok: true, dryRun: true },
+          databaseUrl: "postgres://supabase:%5Bredacted%5D@db.supabase.example.com:5432/postgres"
+        }
+      });
+      expect(JSON.stringify(result)).not.toContain("supersecret");
+      expect(readFileSync(join(workspaceRoot, ".growth-os", "config.yml"), "utf8")).toContain("runtime_target: supabase");
+    } finally {
+      rmSync(workspaceRoot, { recursive: true, force: true });
+      rmSync(growthHome, { recursive: true, force: true });
+    }
+  });
+
+  it("routes setup model through the shared model/auth setup path", async () => {
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-setup-model-home-"));
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "growth-os-setup-model-workspace-"));
+    const home = mkdtempSync(join(tmpdir(), "growth-os-setup-model-claude-home-"));
+    try {
+      mkdirSync(join(home, ".claude"), { recursive: true });
+      writeFileSync(
+        join(home, ".claude", ".credentials.json"),
+        JSON.stringify({
+          claudeAiOauth: {
+            accessToken: "claude-setup-model-access",
+            refreshToken: "claude-setup-model-refresh",
+            expiresAt: "2999-01-01T00:00:00.000Z"
+          }
+        })
+      );
+
+      const result = await runCommand(
+        "setup",
+        ["model", "claude", "claude-sonnet-4-5", "--auth", "reuse"],
+        {
+          GROWTH_OS_HOME: growthHome,
+          GROWTH_OS_WORKSPACE_ROOT: workspaceRoot,
+          HOME: home
+        }
+      );
+
+      expect(result).toMatchObject({
+        ok: true,
+        provider: "claude",
+        model: "claude-sonnet-4-5",
+        auth: {
+          ready: true,
+          verifiedSource: "claude-code-credentials-file"
+        }
+      });
+      expect(readFileSync(join(growthHome, "config.yml"), "utf8")).toContain("model_provider: claude");
+      expect(readFileSync(join(growthHome, "auth.json"), "utf8")).toContain("claude-setup-model-refresh");
+      expect(existsSync(join(workspaceRoot, ".growth-os", "auth.json"))).toBe(false);
+    } finally {
+      rmSync(growthHome, { recursive: true, force: true });
+      rmSync(workspaceRoot, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("dispatches setup runtime and setup status through their section handlers", async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "growth-os-setup-sections-"));
+    // Runtime setup mirrors into the machine home; never let this test reach ~/.growth-os.
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-setup-sections-home-"));
+    try {
+      const runtime = await runCommand("setup", ["runtime", "--mode", "local_docker"], {
+        GROWTH_OS_HOME: growthHome,
+        GROWTH_OS_WORKSPACE_ROOT: workspaceRoot,
+        GROWTH_OS_CLI_DRY_RUN: "1"
+      });
+      const status = await runCommand("setup", ["status"], {
+        GROWTH_OS_HOME: growthHome,
+        GROWTH_OS_WORKSPACE_ROOT: workspaceRoot
+      });
+
+      expect(runtime).toMatchObject({
+        ok: true,
+        section: "runtime"
+      });
+      expect(status).toMatchObject({
+        setupReadiness: expect.any(Object)
+      });
+    } finally {
+      rmSync(growthHome, { recursive: true, force: true });
+      rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("does not hang noninteractive setup without provider flags", async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "growth-os-setup-no-input-"));
+    try {
+      const result = await runCommand("setup", [], {
+        GROWTH_OS_WORKSPACE_ROOT: workspaceRoot,
+        GROWTH_OS_CLI_NONINTERACTIVE: "1"
+      });
+
+      expect(result).toMatchObject({
+        ok: false,
+        error: { code: "growth_os_setup_requires_input" }
+      });
+      expect(existsSync(join(workspaceRoot, ".growth-os", "config.yml"))).toBe(false);
+    } finally {
+      rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("verifies provider auth before storing selected model in user-level Infinite OS config", async () => {
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-home-"));
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "growth-os-workspace-"));
+    const home = mkdtempSync(join(tmpdir(), "claude-model-use-home-"));
+    try {
+      mkdirSync(join(home, ".claude"), { recursive: true });
+      writeFileSync(
+        join(home, ".claude", ".credentials.json"),
+        JSON.stringify({
+          claudeAiOauth: {
+            accessToken: "claude-model-access",
+            refreshToken: "claude-model-refresh",
+            expiresAt: "2999-01-01T00:00:00.000Z"
+          }
+        })
+      );
+      await runCommand("model", ["use", "claude", "claude-sonnet-4-5"], {
+        GROWTH_OS_HOME: growthHome,
+        GROWTH_OS_WORKSPACE_ROOT: workspaceRoot,
+        HOME: home
+      });
+
+      expect(readFileSync(join(growthHome, "config.yml"), "utf8")).toContain("model_provider: claude");
+      expect(readFileSync(join(growthHome, "config.yml"), "utf8")).toContain("model_name: claude-sonnet-4-5");
+      expect(readFileSync(join(growthHome, "auth.json"), "utf8")).toContain("claude-model-refresh");
+      expect(existsSync(join(workspaceRoot, ".growth-os", "config.yml"))).toBe(false);
+    } finally {
+      rmSync(growthHome, { recursive: true, force: true });
+      rmSync(workspaceRoot, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("does not store explicit model selection when provider auth is missing", async () => {
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-model-missing-auth-"));
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "growth-os-model-missing-auth-workspace-"));
+    try {
+      await expect(
+        runCommand("model", ["use", "claude", "claude-sonnet-4-5"], {
+          GROWTH_OS_HOME: growthHome,
+          GROWTH_OS_WORKSPACE_ROOT: workspaceRoot,
+          HOME: mkdtempSync(join(tmpdir(), "claude-model-no-creds-home-"))
+        })
+      ).rejects.toThrow("claude model auth is not ready");
+
+      expect(existsSync(join(growthHome, "config.yml"))).toBe(false);
+      expect(existsSync(join(workspaceRoot, ".growth-os", "config.yml"))).toBe(false);
+    } finally {
+      rmSync(growthHome, { recursive: true, force: true });
+      rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("falls back to HOME for user-level setup model state when GROWTH_OS_HOME is unset", async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "growth-os-home-fallback-workspace-"));
+    const home = mkdtempSync(join(tmpdir(), "growth-os-home-fallback-user-"));
+    try {
+      mkdirSync(join(home, ".claude"), { recursive: true });
+      writeFileSync(
+        join(home, ".claude", ".credentials.json"),
+        JSON.stringify({
+          claudeAiOauth: {
+            accessToken: "claude-home-fallback-access",
+            refreshToken: "claude-home-fallback-refresh",
+            expiresAt: "2999-01-01T00:00:00.000Z"
+          }
+        })
+      );
+
+      await runCommand("setup", ["model", "claude", "claude-sonnet-4-5", "--auth", "reuse"], {
+        GROWTH_OS_WORKSPACE_ROOT: workspaceRoot,
+        HOME: home
+      });
+
+      expect(readFileSync(join(home, ".growth-os", "config.yml"), "utf8")).toContain("model_provider: claude");
+      expect(readFileSync(join(home, ".growth-os", "auth.json"), "utf8")).toContain("claude-home-fallback-refresh");
+      expect(existsSync(join(workspaceRoot, ".growth-os", "config.yml"))).toBe(false);
+    } finally {
+      rmSync(workspaceRoot, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects unsupported explicit model selections", async () => {
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-unsupported-model-"));
+    try {
+      await expect(
+        runCommand("model", ["use", "codex", "gpt-4o"], {
+          GROWTH_OS_HOME: growthHome
+        })
+      ).rejects.toThrow("unsupported model for codex: gpt-4o");
+    } finally {
+      rmSync(growthHome, { recursive: true, force: true });
+    }
+  });
+
+  it("accepts both current Codex frontier model selections", async () => {
+    for (const model of ["gpt-5.5", "gpt-5.4"]) {
+      const growthHome = mkdtempSync(join(tmpdir(), `growth-os-codex-model-${model}-`));
+      try {
+        await expect(
+          runCommand("model", ["use", "codex", model, "--auth", "none"], {
+            GROWTH_OS_HOME: growthHome
+          })
+        ).resolves.toMatchObject({
+          ok: true,
+          provider: "codex",
+          model
+        });
+        expect(readFileSync(join(growthHome, "config.yml"), "utf8")).toContain(`model_name: ${model}`);
+      } finally {
+        rmSync(growthHome, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it("lists supported models from the shared provider catalog", async () => {
+    const result = await runCommand("model", ["list"], {});
+
+    expect(result).toMatchObject({
+      ok: true,
+      providers: [
+        { provider: "codex", models: ["gpt-5.5", "gpt-5.4"] },
+        { provider: "claude", models: ["claude-sonnet-4-6", "claude-opus-4-8", "claude-opus-4-7", "claude-sonnet-4-5", "claude-haiku-4-5-20251001"] }
+      ]
+    });
+  });
+
+  it("imports Codex CLI auth into user-level Infinite OS auth state without project-local writes", async () => {
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-auth-"));
+    const codexHome = mkdtempSync(join(tmpdir(), "codex-home-"));
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "growth-os-workspace-"));
+    try {
+      writeFileSync(
+        join(codexHome, "auth.json"),
+        JSON.stringify({
+          tokens: {
+            access_token: "codex-access-token",
+            refresh_token: "codex-refresh-token",
+            expires_at: "2999-01-01T00:00:00.000Z"
+          }
+        })
+      );
+
+      const result = await runCommand("auth", ["import", "codex"], {
+        GROWTH_OS_HOME: growthHome,
+        CODEX_HOME: codexHome,
+        GROWTH_OS_WORKSPACE_ROOT: workspaceRoot
+      });
+      const status = await runCommand("auth", ["status", "codex"], {
+        GROWTH_OS_HOME: growthHome,
+        GROWTH_OS_WORKSPACE_ROOT: workspaceRoot
+      });
+
+      expect(result).toMatchObject({ ok: true, provider: "codex", imported: true });
+      expect(readFileSync(join(growthHome, "auth.json"), "utf8")).toContain("codex-refresh-token");
+      expect(JSON.stringify(status)).not.toContain("codex-refresh-token");
+      expect(existsSync(join(workspaceRoot, ".growth-os", "auth.json"))).toBe(false);
+    } finally {
+      rmSync(growthHome, { recursive: true, force: true });
+      rmSync(codexHome, { recursive: true, force: true });
+      rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("runs Infinite OS-owned Codex device-code login without invoking Codex CLI", async () => {
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-codex-login-"));
+    const binDir = mkdtempSync(join(tmpdir(), "codex-login-bin-"));
+    const codexBin = join(binDir, "codex");
+    const requests: Array<{ url: string; body: string }> = [];
+    try {
+      writeFileSync(
+        codexBin,
+        [
+          "#!/usr/bin/env node",
+          "process.exit(9);"
+        ].join("\n")
+      );
+      chmodSync(codexBin, 0o755);
+      vi.stubGlobal(
+        "fetch",
+        async (url: string | URL | Request, init?: RequestInit) => {
+          requests.push({ url: String(url), body: String(init?.body ?? "") });
+          const requestUrl = String(url);
+          if (requestUrl.endsWith("/api/accounts/deviceauth/usercode")) {
+            return new Response(
+              JSON.stringify({
+                user_code: "GROWTH-CODE",
+                device_auth_id: "device-auth-1",
+                interval: 0
+              }),
+              { status: 200 }
+            );
+          }
+          if (requestUrl.endsWith("/api/accounts/deviceauth/token")) {
+            return new Response(
+              JSON.stringify({
+                authorization_code: "authorization-code-1",
+                code_verifier: "code-verifier-1"
+              }),
+              { status: 200 }
+            );
+          }
+          if (requestUrl.endsWith("/oauth/token")) {
+            return new Response(
+              JSON.stringify({
+                access_token: "growth-os-codex-access",
+                refresh_token: "growth-os-codex-refresh",
+                expires_at: "2999-01-01T00:00:00.000Z"
+              }),
+              { status: 200 }
+            );
+          }
+          return new Response(JSON.stringify({ error: "unexpected" }), { status: 500 });
+        }
+      );
+
+      const result = await runCommand("auth", ["login", "codex"], {
+        GROWTH_OS_HOME: growthHome,
+        GROWTH_OS_CODEX_BIN: codexBin,
+        GROWTH_OS_CODEX_AUTH_BASE_URL: "https://auth.openai.test",
+        GROWTH_OS_CODEX_TOKEN_URL: "https://auth.openai.test/oauth/token",
+        GROWTH_OS_CODEX_AUTH_TIMEOUT_MS: "500",
+        GROWTH_OS_CODEX_AUTH_POLL_MS: "0",
+        GROWTH_OS_CODEX_AUTH_SILENT: "1"
+      });
+
+      expect(result).toMatchObject({
+        ok: true,
+        provider: "codex",
+        mode: "login",
+        source: "growth-os-codex",
+        authMode: "device-code"
+      });
+      expect(requests.map((request) => request.url)).toEqual([
+        "https://auth.openai.test/api/accounts/deviceauth/usercode",
+        "https://auth.openai.test/api/accounts/deviceauth/token",
+        "https://auth.openai.test/oauth/token"
+      ]);
+      expect(readFileSync(join(growthHome, "auth.json"), "utf8")).toContain("growth-os-codex-refresh");
+      expect(readFileSync(join(growthHome, "auth.json"), "utf8")).toContain("growth-os-codex");
+    } finally {
+      rmSync(growthHome, { recursive: true, force: true });
+      rmSync(binDir, { recursive: true, force: true });
+    }
+  });
+
+  it("forces a fresh Codex device-code login with `codex login --force` despite a valid session", async () => {
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-codex-force-"));
+    const codexHome = mkCodexHome({
+      access_token: "existing-codex-access",
+      refresh_token: "existing-codex-refresh",
+      expires_at: "2999-01-01T00:00:00.000Z"
+    });
+    const requests: string[] = [];
+    try {
+      // Seed a perfectly valid stored session via import — normally login reuses it.
+      await runCommand("auth", ["import", "codex"], {
+        GROWTH_OS_HOME: growthHome,
+        CODEX_HOME: codexHome
+      });
+      vi.stubGlobal("fetch", async (url: string | URL | Request) => {
+        const u = String(url);
+        requests.push(u);
+        if (u.endsWith("/api/accounts/deviceauth/usercode")) {
+          return new Response(JSON.stringify({ user_code: "FORCE-CODE", device_auth_id: "dev-1", interval: 0 }), { status: 200 });
+        }
+        if (u.endsWith("/api/accounts/deviceauth/token")) {
+          return new Response(JSON.stringify({ authorization_code: "auth-code-1", code_verifier: "verifier-1" }), { status: 200 });
+        }
+        if (u.endsWith("/oauth/token")) {
+          return new Response(JSON.stringify({ access_token: "forced-codex-access", refresh_token: "forced-codex-refresh", expires_at: "2999-01-01T00:00:00.000Z" }), { status: 200 });
+        }
+        return new Response(JSON.stringify({ error: "unexpected" }), { status: 500 });
+      });
+
+      const result = await runCommand("codex", ["login", "--force"], {
+        GROWTH_OS_HOME: growthHome,
+        CODEX_HOME: codexHome,
+        GROWTH_OS_CODEX_AUTH_BASE_URL: "https://auth.openai.test",
+        GROWTH_OS_CODEX_TOKEN_URL: "https://auth.openai.test/oauth/token",
+        GROWTH_OS_CODEX_AUTH_TIMEOUT_MS: "500",
+        GROWTH_OS_CODEX_AUTH_POLL_MS: "0",
+        GROWTH_OS_CODEX_AUTH_SILENT: "1"
+      });
+
+      expect(result).toMatchObject({ ok: true, provider: "codex", mode: "login", source: "growth-os-codex", reused: false });
+      // The device flow actually ran despite the valid imported session.
+      expect(requests).toContain("https://auth.openai.test/api/accounts/deviceauth/usercode");
+      expect(readFileSync(join(growthHome, "auth.json"), "utf8")).toContain("forced-codex-refresh");
+    } finally {
+      rmSync(growthHome, { recursive: true, force: true });
+      rmSync(codexHome, { recursive: true, force: true });
+    }
+  });
+
+  it("honors --force on the `auth login codex` alias too (parity with `codex login`)", async () => {
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-auth-codex-force-"));
+    const codexHome = mkCodexHome({
+      access_token: "existing-codex-access",
+      refresh_token: "existing-codex-refresh",
+      expires_at: "2999-01-01T00:00:00.000Z"
+    });
+    const requests: string[] = [];
+    try {
+      // A valid session exists (imported) — without --force this would reuse.
+      await runCommand("auth", ["import", "codex"], {
+        GROWTH_OS_HOME: growthHome,
+        CODEX_HOME: codexHome
+      });
+      vi.stubGlobal("fetch", async (url: string | URL | Request) => {
+        const u = String(url);
+        requests.push(u);
+        if (u.endsWith("/api/accounts/deviceauth/usercode")) {
+          return new Response(JSON.stringify({ user_code: "FORCE-CODE", device_auth_id: "dev-1", interval: 0 }), { status: 200 });
+        }
+        if (u.endsWith("/api/accounts/deviceauth/token")) {
+          return new Response(JSON.stringify({ authorization_code: "auth-code-1", code_verifier: "verifier-1" }), { status: 200 });
+        }
+        if (u.endsWith("/oauth/token")) {
+          return new Response(JSON.stringify({ access_token: "forced-via-auth-access", refresh_token: "forced-via-auth-refresh", expires_at: "2999-01-01T00:00:00.000Z" }), { status: 200 });
+        }
+        return new Response(JSON.stringify({ error: "unexpected" }), { status: 500 });
+      });
+
+      const result = await runCommand("auth", ["login", "codex", "--force"], {
+        GROWTH_OS_HOME: growthHome,
+        CODEX_HOME: codexHome,
+        GROWTH_OS_CODEX_AUTH_BASE_URL: "https://auth.openai.test",
+        GROWTH_OS_CODEX_TOKEN_URL: "https://auth.openai.test/oauth/token",
+        GROWTH_OS_CODEX_AUTH_TIMEOUT_MS: "500",
+        GROWTH_OS_CODEX_AUTH_POLL_MS: "0",
+        GROWTH_OS_CODEX_AUTH_SILENT: "1"
+      });
+
+      expect(result).toMatchObject({ ok: true, provider: "codex", mode: "login", source: "growth-os-codex", reused: false });
+      expect(requests).toContain("https://auth.openai.test/api/accounts/deviceauth/usercode");
+      expect(readFileSync(join(growthHome, "auth.json"), "utf8")).toContain("forced-via-auth-refresh");
+    } finally {
+      rmSync(growthHome, { recursive: true, force: true });
+      rmSync(codexHome, { recursive: true, force: true });
+    }
+  });
+
+  it("routes `codex import` and `codex status` like their auth aliases", async () => {
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-codex-route-"));
+    const codexHome = mkCodexHome({
+      access_token: "route-codex-access",
+      refresh_token: "route-codex-refresh",
+      expires_at: "2999-01-01T00:00:00.000Z"
+    });
+    try {
+      const imported = await runCommand("codex", ["import"], {
+        GROWTH_OS_HOME: growthHome,
+        CODEX_HOME: codexHome
+      });
+      expect(imported).toMatchObject({ ok: true, provider: "codex", mode: "import", imported: true });
+
+      const status = await runCommand("codex", ["status"], {
+        GROWTH_OS_HOME: growthHome,
+        CODEX_HOME: codexHome
+      });
+      expect(status).toMatchObject({ ok: true, provider: "codex" });
+    } finally {
+      rmSync(growthHome, { recursive: true, force: true });
+      rmSync(codexHome, { recursive: true, force: true });
+    }
+  });
+
+  it("recognizes bare `codex login` as a command but never swallows chat", () => {
+    expect(bareInfiniteCommand("codex login")).toEqual({ command: "codex", args: ["login"] });
+    expect(bareInfiniteCommand("codex login --force")).toEqual({ command: "codex", args: ["login", "--force"] });
+    expect(bareInfiniteCommand("codex login --reauth")).toEqual({ command: "codex", args: ["login", "--reauth"] });
+    expect(bareInfiniteCommand("infinite codex login")).toEqual({ command: "codex", args: ["login"] });
+    expect(bareInfiniteCommand("codex import")).toEqual({ command: "codex", args: ["import"] });
+    expect(bareInfiniteCommand("codex status")).toEqual({ command: "codex", args: ["status"] });
+    // Must fall through to chat (null) — never eat a normal message:
+    expect(bareInfiniteCommand("codex login is broken")).toBeNull();
+    expect(bareInfiniteCommand("why does codex login fail")).toBeNull();
+    expect(bareInfiniteCommand("/codex login")).toBeNull();
+    expect(bareInfiniteCommand("codex")).toBeNull();
+    expect(bareInfiniteCommand("codex login --yolo")).toBeNull();
+    expect(bareInfiniteCommand("codex login --force=1")).toBeNull();
+    expect(bareInfiniteCommand("Codex Login")).toBeNull();
+    expect(bareInfiniteCommand("codex import --force")).toBeNull();
+    expect(bareInfiniteCommand("tell me about codex")).toBeNull();
+    expect(bareInfiniteCommand("")).toBeNull();
+  });
+
+  it("cliVersion reports the root runtime version, not the un-bumped apps/cli version", () => {
+    const rootVersion = (
+      JSON.parse(readFileSync(new URL("../../../package.json", import.meta.url), "utf8")) as { version: string }
+    ).version;
+    expect(cliVersion()).toBe(rootVersion);
+
+    // Regression guard: never fall back to apps/cli/package.json, which is NOT
+    // bumped per release and showed a stale banner version (e.g. 0.1.0).
+    const cliPkgVersion = (
+      JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string }
+    ).version;
+    if (cliPkgVersion !== rootVersion) {
+      expect(cliVersion()).not.toBe(cliPkgVersion);
+    }
+  });
+
+  it("reuses existing Infinite OS Codex auth on login without touching Codex CLI", async () => {
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-codex-reuse-"));
+    const binDir = mkdtempSync(join(tmpdir(), "codex-reuse-bin-"));
+    const codexBin = join(binDir, "codex");
+    let codexHome: string | undefined;
+    try {
+      writeFileSync(
+        codexBin,
+        [
+          "#!/usr/bin/env node",
+          "process.exit(9);"
+        ].join("\n")
+      );
+      chmodSync(codexBin, 0o755);
+      codexHome = mkCodexHome({
+        access_token: "existing-codex-access",
+        refresh_token: "existing-codex-refresh",
+        expires_at: "2999-01-01T00:00:00.000Z"
+      });
+      await runCommand("auth", ["import", "codex"], {
+        GROWTH_OS_HOME: growthHome,
+        CODEX_HOME: codexHome
+      });
+      vi.stubGlobal("fetch", async () => new Response(JSON.stringify({ error: "should not fetch" }), { status: 500 }));
+
+      const result = await runCommand("auth", ["login", "codex"], {
+        GROWTH_OS_HOME: growthHome,
+        GROWTH_OS_CODEX_BIN: codexBin
+      });
+
+      expect(result).toMatchObject({
+        ok: true,
+        provider: "codex",
+        mode: "login",
+        source: "codex-cli-import",
+        reused: true
+      });
+    } finally {
+      rmSync(growthHome, { recursive: true, force: true });
+      rmSync(binDir, { recursive: true, force: true });
+      if (codexHome) {
+        rmSync(codexHome, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it("prefers importing Codex CLI credentials before device-code login", async () => {
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-codex-import-first-"));
+    const codexHome = mkCodexHome({
+      access_token: "codex-cli-access",
+      refresh_token: "codex-cli-refresh",
+      expires_at: "2999-01-01T00:00:00.000Z"
+    });
+    const originalFetch = globalThis.fetch;
+    try {
+      globalThis.fetch = (async () => {
+        throw new Error("device-code flow should not run when Codex CLI credentials are present");
+      }) as typeof fetch;
+
+      const result = await runCommand("auth", ["login", "codex"], {
+        GROWTH_OS_HOME: growthHome,
+        CODEX_HOME: codexHome
+      });
+
+      expect(result).toMatchObject({
+        ok: true,
+        provider: "codex",
+        mode: "login",
+        source: codexHome + "/auth.json",
+        imported: true,
+        reused: true
+      });
+      expect(readFileSync(join(growthHome, "auth.json"), "utf8")).toContain("codex-cli-refresh");
+    } finally {
+      globalThis.fetch = originalFetch;
+      rmSync(growthHome, { recursive: true, force: true });
+      rmSync(codexHome, { recursive: true, force: true });
+    }
+  });
+
+  it("surfaces local Codex CLI credentials in auth status before explicit import", async () => {
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-codex-status-importable-"));
+    const codexHome = mkCodexHome({
+      access_token: "codex-cli-access",
+      refresh_token: "codex-cli-refresh",
+      expires_at: "2999-01-01T00:00:00.000Z"
+    });
+    try {
+      const status = await runCommand("auth", ["status", "codex"], {
+        GROWTH_OS_HOME: growthHome,
+        CODEX_HOME: codexHome
+      });
+
+      expect(status).toMatchObject({
+        providers: [
+          {
+            provider: "codex",
+            source: `${codexHome}/auth.json`,
+            ready: true,
+            reason: "codex_cli_auth_ready"
+          }
+        ]
+      });
+    } finally {
+      rmSync(growthHome, { recursive: true, force: true });
+      rmSync(codexHome, { recursive: true, force: true });
+    }
+  });
+
+  it("refreshes stale Infinite OS Codex auth before reporting model auth ready", async () => {
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-codex-status-refresh-"));
+    const originalFetch = globalThis.fetch;
+    const requests: Array<{ url: string; body: string }> = [];
+    try {
+      mkdirSync(growthHome, { recursive: true });
+      writeFileSync(
+        join(growthHome, "auth.json"),
+        JSON.stringify({
+          providers: {
+            codex: {
+              provider: "codex",
+              source: "growth-os-codex",
+              authMode: "device-code",
+              token: "expired-codex-token",
+              refreshToken: "codex-refresh-token",
+              expiresAt: "2000-01-01T00:00:00.000Z"
+            }
+          }
+        })
+      );
+      globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+        requests.push({ url: String(url), body: String(init?.body ?? "") });
+        return new Response(
+          JSON.stringify({
+            access_token: "fresh-codex-token",
+            refresh_token: "fresh-codex-refresh",
+            expires_at: "2999-01-01T00:00:00.000Z"
+          }),
+          { status: 200 }
+        );
+      }) as typeof fetch;
+
+      const status = await runCommand("auth", ["status", "codex"], {
+        GROWTH_OS_HOME: growthHome,
+        GROWTH_OS_CODEX_TOKEN_URL: "https://auth.openai.test/oauth/token"
+      });
+      writeFileSync(
+        join(growthHome, "auth.json"),
+        JSON.stringify({
+          providers: {
+            codex: {
+              provider: "codex",
+              source: "growth-os-codex",
+              authMode: "device-code",
+              token: "expired-codex-token",
+              refreshToken: "codex-refresh-token",
+              expiresAt: "2000-01-01T00:00:00.000Z"
+            }
+          }
+        })
+      );
+      const login = await runCommand("auth", ["login", "codex"], {
+        GROWTH_OS_HOME: growthHome,
+        GROWTH_OS_CODEX_TOKEN_URL: "https://auth.openai.test/oauth/token"
+      });
+
+      expect(status).toMatchObject({
+        providers: [
+          {
+            provider: "codex",
+            ready: true,
+            reason: "stored_auth_refreshed"
+          }
+        ]
+      });
+      expect(login).toMatchObject({
+        ok: true,
+        provider: "codex",
+        refreshed: true,
+        reused: true
+      });
+      expect(requests[0]).toMatchObject({
+        url: "https://auth.openai.test/oauth/token"
+      });
+      expect(requests[0].body).toContain("grant_type=refresh_token");
+      expect(requests[0].body).toContain("refresh_token=codex-refresh-token");
+      expect(readFileSync(join(growthHome, "auth.json"), "utf8")).toContain("fresh-codex-refresh");
+      expect(JSON.stringify(status)).not.toContain("fresh-codex-token");
+    } finally {
+      globalThis.fetch = originalFetch;
+      rmSync(growthHome, { recursive: true, force: true });
+    }
+  });
+
+  it("records Claude Code credential reuse in user-level Infinite OS auth state", async () => {
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-claude-auth-"));
+    const home = mkdtempSync(join(tmpdir(), "claude-home-"));
+    try {
+      mkdirSync(join(home, ".claude"), { recursive: true });
+      writeFileSync(
+        join(home, ".claude", ".credentials.json"),
+        JSON.stringify({
+          claudeAiOauth: {
+            accessToken: "claude-access-token",
+            refreshToken: "claude-refresh-token",
+            expiresAt: "2999-01-01T00:00:00.000Z"
+          }
+        })
+      );
+
+      const result = await runCommand("auth", ["login", "claude", "--mode", "reuse"], {
+        GROWTH_OS_HOME: growthHome,
+        HOME: home
+      });
+      const status = await runCommand("auth", ["status", "claude"], {
+        GROWTH_OS_HOME: growthHome
+      });
+
+      expect(result).toMatchObject({
+        ok: true,
+        provider: "claude",
+        mode: "reuse",
+        hasCredentials: true
+      });
+      expect(readFileSync(join(growthHome, "auth.json"), "utf8")).toContain("claude-refresh-token");
+      expect(JSON.stringify(status)).not.toContain("claude-refresh-token");
+    } finally {
+      rmSync(growthHome, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("runs Claude setup-token mode and then reuses detected Claude Code credentials", async () => {
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-claude-setup-token-"));
+    const home = mkdtempSync(join(tmpdir(), "claude-setup-home-"));
+    const binDir = mkdtempSync(join(tmpdir(), "claude-setup-bin-"));
+    const claudeBin = join(binDir, "claude");
+    try {
+      writeFileSync(
+        claudeBin,
+        [
+          "#!/usr/bin/env node",
+          "const fs = require('node:fs');",
+          "const path = require('node:path');",
+          "if (process.argv[2] !== 'setup-token') process.exit(2);",
+          "const dir = path.join(process.env.HOME, '.claude');",
+          "fs.mkdirSync(dir, { recursive: true });",
+          "fs.writeFileSync(path.join(dir, '.credentials.json'), JSON.stringify({ claudeAiOauth: { accessToken: 'claude-setup-access', refreshToken: 'claude-setup-refresh', expiresAt: '2999-01-01T00:00:00.000Z' } }));"
+        ].join("\n")
+      );
+      chmodSync(claudeBin, 0o755);
+
+      const result = await runCommand("auth", ["login", "claude", "--mode", "setup-token"], {
+        GROWTH_OS_HOME: growthHome,
+        GROWTH_OS_CLAUDE_BIN: claudeBin,
+        HOME: home
+      });
+
+      expect(result).toMatchObject({
+        ok: true,
+        provider: "claude",
+        mode: "setup-token",
+        hasCredentials: true,
+        setupTokenExitCode: 0
+      });
+      expect(readFileSync(join(growthHome, "auth.json"), "utf8")).toContain("claude-setup-refresh");
+    } finally {
+      rmSync(growthHome, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true });
+      rmSync(binDir, { recursive: true, force: true });
+    }
+  });
+
+  it("labels environment model auth as redacted dev fallback status", async () => {
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-env-auth-status-"));
+    const home = mkdtempSync(join(tmpdir(), "growth-os-env-auth-home-"));
+    try {
+      const codexStatus = await runCommand("auth", ["status", "codex"], {
+        GROWTH_OS_HOME: growthHome,
+        HOME: home,
+        OPENAI_API_KEY: "sk-openai-secret"
+      });
+      const claudeBearerStatus = await runCommand("auth", ["status", "claude"], {
+        GROWTH_OS_HOME: growthHome,
+        HOME: home,
+        CLAUDE_CODE_OAUTH_TOKEN: "claude-oauth-secret"
+      });
+      const claudeApiKeyStatus = await runCommand("auth", ["status", "claude"], {
+        GROWTH_OS_HOME: growthHome,
+        HOME: home,
+        ANTHROPIC_API_KEY: "sk-ant-secret"
+      });
+
+      expect(codexStatus).toMatchObject({
+        providers: [
+          {
+            provider: "codex",
+            source: "openai-api-key-dev-fallback",
+            authMode: "api-key-fallback",
+            hasToken: true,
+            hasRefreshToken: false
+          }
+        ]
+      });
+      expect(claudeBearerStatus).toMatchObject({
+        providers: [
+          {
+            provider: "claude",
+            source: "claude-bearer-env",
+            authMode: "setup-token-env",
+            hasToken: true,
+            hasRefreshToken: false
+          }
+        ]
+      });
+      expect(claudeApiKeyStatus).toMatchObject({
+        providers: [
+          {
+            provider: "claude",
+            source: "anthropic-api-key-dev-fallback",
+            authMode: "api-key-fallback",
+            hasToken: true,
+            hasRefreshToken: false
+          }
+        ]
+      });
+      expect(JSON.stringify(codexStatus)).not.toContain("sk-openai-secret");
+      expect(JSON.stringify(claudeBearerStatus)).not.toContain("claude-oauth-secret");
+      expect(JSON.stringify(claudeApiKeyStatus)).not.toContain("sk-ant-secret");
+    } finally {
+      rmSync(growthHome, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("reports stale stored model auth as not ready", async () => {
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-stale-auth-status-"));
+    const home = mkdtempSync(join(tmpdir(), "claude-stale-home-"));
+    try {
+      mkdirSync(growthHome, { recursive: true });
+      writeFileSync(
+        join(growthHome, "auth.json"),
+        JSON.stringify({
+          providers: {
+            claude: {
+              provider: "claude",
+              source: "claude-code-credentials-file",
+              authMode: "reuse",
+              token: "expired-claude-token",
+              expiresAt: "2000-01-01T00:00:00.000Z"
+            }
+          }
+        })
+      );
+
+      const status = await runCommand("auth", ["status", "claude"], {
+        GROWTH_OS_HOME: growthHome,
+        HOME: home
+      });
+
+      expect(status).toMatchObject({
+        providers: [
+          {
+            provider: "claude",
+            ready: false,
+            reason: "stored_auth_expired"
+          }
+        ]
+      });
+      expect(JSON.stringify(status)).not.toContain("expired-claude-token");
+    } finally {
+      rmSync(growthHome, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("does not mark stale Claude setup-token auth ready when refresh fails", async () => {
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-stale-claude-refresh-fail-"));
+    const home = mkdtempSync(join(tmpdir(), "claude-refresh-fail-home-"));
+    const originalFetch = globalThis.fetch;
+    try {
+      mkdirSync(growthHome, { recursive: true });
+      writeFileSync(
+        join(growthHome, "auth.json"),
+        JSON.stringify({
+          providers: {
+            claude: {
+              provider: "claude",
+              source: "claude-code-credentials-file",
+              authMode: "reuse",
+              token: "expired-claude-token",
+              refreshToken: "claude-refresh-token",
+              expiresAt: "2000-01-01T00:00:00.000Z"
+            }
+          }
+        })
+      );
+      globalThis.fetch = (async () => new Response(JSON.stringify({ error: "invalid_grant" }), { status: 400 })) as typeof fetch;
+
+      const status = await runCommand("auth", ["status", "claude"], {
+        GROWTH_OS_HOME: growthHome,
+        GROWTH_OS_CLAUDE_REFRESH_URL: "https://claude.example.test/oauth/token",
+        HOME: home
+      });
+      await expect(
+        runCommand("model", ["use", "claude", "claude-sonnet-4-5"], {
+          GROWTH_OS_HOME: growthHome,
+          GROWTH_OS_CLAUDE_REFRESH_URL: "https://claude.example.test/oauth/token",
+          HOME: home
+        })
+      ).rejects.toThrow("claude model auth is not ready");
+
+      expect(status).toMatchObject({
+        providers: [
+          {
+            provider: "claude",
+            ready: false,
+            reason: "stored_auth_refresh_failed"
+          }
+        ]
+      });
+      expect(existsSync(join(growthHome, "config.yml"))).toBe(false);
+    } finally {
+      globalThis.fetch = originalFetch;
+      rmSync(growthHome, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("does not mark discovered local Claude credentials ready when refresh fails", async () => {
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-claude-local-refresh-fail-"));
+    const home = mkdtempSync(join(tmpdir(), "claude-local-refresh-fail-home-"));
+    const originalFetch = globalThis.fetch;
+    try {
+      mkdirSync(join(home, ".claude"), { recursive: true });
+      writeFileSync(
+        join(home, ".claude", ".credentials.json"),
+        JSON.stringify({
+          claudeAiOauth: {
+            accessToken: "expired-claude-token",
+            refreshToken: "claude-refresh-token",
+            expiresAt: "2000-01-01T00:00:00.000Z"
+          }
+        })
+      );
+      globalThis.fetch = (async () => new Response(JSON.stringify({ error: "invalid_grant" }), { status: 400 })) as typeof fetch;
+
+      const status = await runCommand("auth", ["status", "claude"], {
+        GROWTH_OS_HOME: growthHome,
+        GROWTH_OS_CLAUDE_REFRESH_URL: "https://claude.example.test/oauth/token",
+        HOME: home
+      });
+
+      expect(status).toMatchObject({
+        providers: [
+          {
+            provider: "claude",
+            ready: false,
+            reason: "claude_code_credentials_refresh_failed"
+          }
+        ]
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+      rmSync(growthHome, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("does not mark Claude Code OAuth (setup-token) credentials ready — OAuth completions are unsupported", async () => {
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-claude-setup-token-unsupported-"));
+    const home = mkdtempSync(join(tmpdir(), "claude-setup-token-unsupported-home-"));
+    try {
+      mkdirSync(join(home, ".claude"), { recursive: true });
+      writeFileSync(
+        join(home, ".claude", ".credentials.json"),
+        JSON.stringify({
+          claudeAiOauth: {
+            accessToken: "sk-ant-oat01-test-access-token",
+            refreshToken: "sk-ant-ort01-test-refresh-token",
+            expiresAt: "2999-01-01T00:00:00.000Z"
+          }
+        })
+      );
+
+      const status = await runCommand("auth", ["status", "claude"], {
+        GROWTH_OS_HOME: growthHome,
+        HOME: home
+      });
+
+      expect(status).toMatchObject({
+        providers: [
+          {
+            provider: "claude",
+            source: "claude-code-credentials-file",
+            ready: false,
+            reason: "Claude via OAuth (Claude Code setup-token/reuse credentials) is no longer supported. Set `ANTHROPIC_API_KEY` to use Claude, or run `codex login` to use Codex."
+          }
+        ]
+      });
+    } finally {
+      rmSync(growthHome, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("blocks interactive chat when stored Claude auth points to stale discovered credentials", async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "growth-os-claude-chat-readiness-"));
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-claude-chat-readiness-home-"));
+    const home = mkdtempSync(join(tmpdir(), "claude-chat-readiness-home-"));
+    const originalFetch = globalThis.fetch;
+    try {
+      await runCommand("init", [], {
+        GROWTH_OS_WORKSPACE_ROOT: workspaceRoot
+      });
+      mkdirSync(growthHome, { recursive: true });
+      mkdirSync(join(home, ".claude"), { recursive: true });
+      writeFileSync(
+        join(growthHome, "auth.json"),
+        JSON.stringify({
+          providers: {
+            claude: {
+              provider: "claude",
+              source: "claude-code-credentials-file",
+              authMode: "reuse",
+              token: "stored-claude-token",
+              refreshToken: "stored-claude-refresh",
+              expiresAt: "2999-01-01T00:00:00.000Z"
+            }
+          }
+        })
+      );
+      writeFileSync(
+        join(home, ".claude", ".credentials.json"),
+        JSON.stringify({
+          claudeAiOauth: {
+            accessToken: "expired-claude-token",
+            refreshToken: "claude-refresh-token",
+            expiresAt: "2000-01-01T00:00:00.000Z"
+          }
+        })
+      );
+      writeInfiniteOsModelSelection(
+        { provider: "claude", model: "claude-opus-4-8" },
+        { GROWTH_OS_HOME: growthHome } as NodeJS.ProcessEnv
+      );
+      globalThis.fetch = (async () => new Response(JSON.stringify({ error: "invalid_grant" }), { status: 400 })) as typeof fetch;
+
+      await expect(
+        localChatReadiness({
+          GROWTH_OS_WORKSPACE_ROOT: workspaceRoot,
+          GROWTH_OS_HOME: growthHome,
+          GROWTH_OS_CLAUDE_REFRESH_URL: "https://claude.example.test/oauth/token",
+          HOME: home
+        })
+      ).resolves.toMatchObject({
+        ok: false,
+        setupReadiness: {
+          authProvider: {
+            provider: "claude",
+            source: "claude-code-credentials-file",
+            reason: "claude_code_credentials_refresh_failed"
+          }
+        }
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+      rmSync(workspaceRoot, { recursive: true, force: true });
+      rmSync(growthHome, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("wraps Docker compose lifecycle commands for package-style startup", async () => {
+    const root = mkdtempSync(join(tmpdir(), "growth-os-cli-lifecycle-"));
+    const env = {
+      GROWTH_OS_WORKSPACE_ROOT: root,
+      GROWTH_OS_CLI_DRY_RUN: "1",
+      GROWTH_OS_COMPOSE_PROJECT: "growth-os-test"
+    };
+    try {
+      await expect(runCommand("start", [], env)).resolves.toMatchObject({
+        ok: true,
+        cwd: root,
+        command: ["docker", "compose", "-p", "growth-os-test", "up", "-d"]
+      });
+      await expect(runCommand("migrate", [], env)).resolves.toMatchObject({
+        ok: true,
+        cwd: root,
+        command: ["docker", "compose", "-p", "growth-os-test", "run", "--rm", "migrate"]
+      });
+      await expect(runCommand("status", [], env)).resolves.toMatchObject({
+        ok: true,
+        cwd: root,
+        command: ["docker", "compose", "-p", "growth-os-test", "ps"]
+      });
+      await expect(runCommand("logs", ["worker"], env)).resolves.toMatchObject({
+        ok: true,
+        cwd: root,
+        command: ["docker", "compose", "-p", "growth-os-test", "logs", "worker"]
+      });
+      await expect(runCommand("stop", [], env)).resolves.toMatchObject({
+        ok: true,
+        cwd: root,
+        command: ["docker", "compose", "-p", "growth-os-test", "stop"]
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("maps compose-managed migration failures during runtime setup to actionable guidance", async () => {
+    stubEmptyEngineDb(); // setup's key guard probes the DB; keep this DB-free test off a real localhost PG
+    const root = mkdtempSync(join(tmpdir(), "growth-os-runtime-migrate-failure-"));
+    const binDir = mkdtempSync(join(tmpdir(), "growth-os-runtime-migrate-failure-bin-"));
+    // Runtime setup mirrors before compose runs; isolate even the failure path.
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-runtime-migrate-failure-home-"));
+    try {
+      const dockerBin = writeFakeDockerBin(binDir, [
+        "[+] Running 4/4",
+        "service \"migrate\" didn't complete successfully: exit 1",
+        "Error response from daemon: container growth-os-migrate-1 exited (1)"
+      ]);
+
+      const result = await runCommand("setup", ["runtime", "--mode", "local_docker"], {
+        GROWTH_OS_HOME: growthHome,
+        GROWTH_OS_WORKSPACE_ROOT: root,
+        GROWTH_OS_DOCKER_BIN: dockerBin
+      });
+
+      expect(result).toMatchObject({
+        ok: false,
+        section: "runtime",
+        error: {
+          code: "growth_os_local_workspace_migration_failed",
+          message: "We couldn't start the local workspace because the database migration step failed."
+        },
+        next: "Run `infinite local logs migrate`, fix the migration error, then retry `infinite local setup` or `infinite local start`."
+      });
+
+      const rendered = renderCliResult(result);
+      expect(rendered).toContain("We couldn't start the local workspace because the database migration step failed.");
+      expect(rendered).toContain("service \"migrate\" didn't complete successfully: exit 1");
+      expect(rendered).toContain("infinite local logs migrate");
+      expect(rendered).not.toContain("Error response from daemon: container growth-os-migrate-1 exited (1)");
+      expect(rendered).not.toContain("[+] Running 4/4");
+    } finally {
+      rmSync(growthHome, { recursive: true, force: true });
+      rmSync(root, { recursive: true, force: true });
+      rmSync(binDir, { recursive: true, force: true });
+    }
+  });
+
+  it("maps compose-managed migration failures during start to the same runtime guidance", async () => {
+    const root = mkdtempSync(join(tmpdir(), "growth-os-start-migrate-failure-"));
+    const binDir = mkdtempSync(join(tmpdir(), "growth-os-start-migrate-failure-bin-"));
+    try {
+      const dockerBin = writeFakeDockerBin(binDir, [
+        "service \"migrate\" didn't complete successfully: exit 1",
+        "error: relation \"events\" does not exist"
+      ]);
+
+      const result = await runCommand("start", [], {
+        GROWTH_OS_WORKSPACE_ROOT: root,
+        GROWTH_OS_DOCKER_BIN: dockerBin
+      });
+
+      expect(result).toMatchObject({
+        ok: false,
+        section: "runtime",
+        error: {
+          code: "growth_os_local_workspace_migration_failed",
+          message: "We couldn't start the local workspace because the database migration step failed."
+        }
+      });
+
+      const rendered = renderCliResult(result);
+      expect(rendered).toContain("We couldn't start the local workspace because the database migration step failed.");
+      expect(rendered).toContain("service \"migrate\" didn't complete successfully: exit 1");
+      expect(rendered).toContain("retry infinite local setup or infinite local start");
+      expect(rendered).not.toContain("error: relation \"events\" does not exist");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+      rmSync(binDir, { recursive: true, force: true });
+    }
+  });
+
+  it("feeds docker-stack secrets from .growth-os/.env into the compose env (single source of truth)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "growth-os-compose-env-"));
+    try {
+      await runCommand("init", [], { GROWTH_OS_WORKSPACE_ROOT: root });
+      const result = (await runCommand("status", [], {
+        GROWTH_OS_WORKSPACE_ROOT: root,
+        GROWTH_OS_CLI_DRY_RUN: "1"
+      })) as { composeEnvKeys?: string[] };
+      // key + tokens copied; postgres password/user/db derived from DATABASE_URL
+      expect(result.composeEnvKeys).toEqual(
+        expect.arrayContaining([
+          "GROWTH_OS_ENCRYPTION_KEY",
+          "GROWTH_OS_OPERATOR_TOKEN",
+          "GROWTH_OS_READ_TOKEN",
+          "POSTGRES_PASSWORD",
+          "POSTGRES_USER",
+          "POSTGRES_DB"
+        ])
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  // app/worker run bind-mounted code under long-lived node processes, so a
+  // plain `docker compose up -d` after `git pull` leaves them executing stale
+  // code. `infinite start` stamps the checkout's code identity into the compose
+  // env (GROWTH_OS_CODE_VERSION); a changed value is config drift, which makes
+  // compose recreate exactly app/worker.
+  describe("start recreates app/worker when the code moved", () => {
+    // Fake docker bin that records its argv and the GROWTH_OS_CODE_VERSION it
+    // was handed, optionally emits compose-style progress lines, and succeeds.
+    const writeRecordingDockerBin = (directory: string, stderrLines: string[] = []): string => {
+      const dockerBin = join(directory, "docker");
+      writeFileSync(
+        dockerBin,
+        [
+          "#!/usr/bin/env bash",
+          `printf '%s\\n' "$@" > "${join(directory, "args.txt")}"`,
+          `printf '%s' "\${GROWTH_OS_CODE_VERSION:-unset}" > "${join(directory, "code-version.txt")}"`,
+          ...stderrLines.map((line) => `printf '%s\\n' '${line.replace(/'/g, `'\"'\"'`)}' >&2`),
+          "exit 0"
+        ].join("\n")
+      );
+      chmodSync(dockerBin, 0o755);
+      return dockerBin;
+    };
+
+    it("composeCodeVersion is the HEAD sha when clean, dev outside git, and drifts per dirty edit", () => {
+      const nonGit = mkdtempSync(join(tmpdir(), "growth-os-code-version-plain-"));
+      const repo = mkdtempSync(join(tmpdir(), "growth-os-code-version-git-"));
+      try {
+        expect(composeCodeVersion(nonGit)).toBe("dev");
+
+        const git = (...args: string[]): string => {
+          const result = spawnSync("git", ["-C", repo, "-c", "commit.gpgsign=false", ...args], {
+            encoding: "utf8"
+          });
+          expect(result.status).toBe(0);
+          return result.stdout.trim();
+        };
+        git("init", "-q");
+        writeFileSync(join(repo, "app.ts"), "export const v = 1;\n");
+        git("add", "app.ts");
+        git("-c", "user.email=test@example.com", "-c", "user.name=Test", "commit", "-q", "-m", "init");
+        const sha = git("rev-parse", "HEAD");
+
+        expect(composeCodeVersion(repo)).toBe(sha);
+
+        // A dirty tree must read as new code (recreate on next start)…
+        writeFileSync(join(repo, "app.ts"), "export const v = 2;\n");
+        const dirtyOnce = composeCodeVersion(repo);
+        expect(dirtyOnce).toMatch(new RegExp(`^${sha}-dirty\\.[0-9a-f]{12}$`));
+
+        // …and successive different edits must each read as new code too. A
+        // bare "-dirty" suffix would only recreate for the first edit.
+        writeFileSync(join(repo, "app.ts"), "export const v = 3;\n");
+        const dirtyTwice = composeCodeVersion(repo);
+        expect(dirtyTwice).toMatch(new RegExp(`^${sha}-dirty\\.[0-9a-f]{12}$`));
+        expect(dirtyTwice).not.toBe(dirtyOnce);
+      } finally {
+        rmSync(nonGit, { recursive: true, force: true });
+        rmSync(repo, { recursive: true, force: true });
+      }
+    });
+
+    it("start passes GROWTH_OS_CODE_VERSION through to docker compose", async () => {
+      const root = mkdtempSync(join(tmpdir(), "growth-os-start-code-version-"));
+      const binDir = mkdtempSync(join(tmpdir(), "growth-os-start-code-version-bin-"));
+      try {
+        const dockerBin = writeRecordingDockerBin(binDir);
+        const result = await runCommand("start", ["--no-wait"], {
+          GROWTH_OS_WORKSPACE_ROOT: root,
+          GROWTH_OS_DOCKER_BIN: dockerBin,
+          GROWTH_OS_CODE_VERSION: "abc123-dirty.feedfacecafe"
+        });
+        expect(result).toMatchObject({ ok: true, cwd: root });
+        expect(readFileSync(join(binDir, "args.txt"), "utf8").trim().split("\n")).toEqual([
+          "compose",
+          "up",
+          "-d"
+        ]);
+        // explicit env override wins (lets ops pin a version)
+        expect(readFileSync(join(binDir, "code-version.txt"), "utf8")).toBe("abc123-dirty.feedfacecafe");
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+        rmSync(binDir, { recursive: true, force: true });
+      }
+    });
+
+    it("start derives the code version from the workspace checkout (dev outside git)", async () => {
+      const root = mkdtempSync(join(tmpdir(), "growth-os-start-code-version-dev-"));
+      const binDir = mkdtempSync(join(tmpdir(), "growth-os-start-code-version-dev-bin-"));
+      try {
+        const dockerBin = writeRecordingDockerBin(binDir);
+        const result = await runCommand("start", ["--no-wait"], {
+          GROWTH_OS_WORKSPACE_ROOT: root,
+          GROWTH_OS_DOCKER_BIN: dockerBin
+        });
+        expect(result).toMatchObject({ ok: true });
+        // tmp root is not a git checkout — compose still gets the documented default
+        expect(readFileSync(join(binDir, "code-version.txt"), "utf8")).toBe("dev");
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+        rmSync(binDir, { recursive: true, force: true });
+      }
+    });
+
+    it("explains the recreate when compose reports app/worker were recreated", async () => {
+      const root = mkdtempSync(join(tmpdir(), "growth-os-start-recreate-notice-"));
+      const binDir = mkdtempSync(join(tmpdir(), "growth-os-start-recreate-notice-bin-"));
+      const stderrChunks: string[] = [];
+      const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation((chunk: string | Uint8Array) => {
+        stderrChunks.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"));
+        return true;
+      });
+      try {
+        const dockerBin = writeRecordingDockerBin(binDir, [
+          " Container growth-os-app-1  Recreated",
+          " Container growth-os-worker-1  Recreated",
+          " Container growth-os-postgres-1  Running"
+        ]);
+        const result = await runCommand("start", ["--no-wait"], {
+          GROWTH_OS_WORKSPACE_ROOT: root,
+          GROWTH_OS_DOCKER_BIN: dockerBin
+        });
+        expect(result).toMatchObject({ ok: true });
+        const stderrText = stripAnsi(stderrChunks.join(""));
+        expect(stderrText).toContain("code changed since containers started — recreating app/worker");
+        // postgres only Running (never recreated) — it must not be named
+        expect(stderrText).not.toContain("postgres");
+      } finally {
+        stderrSpy.mockRestore();
+        rmSync(root, { recursive: true, force: true });
+        rmSync(binDir, { recursive: true, force: true });
+      }
+    });
+
+    it("stays quiet when compose left the containers alone", async () => {
+      const root = mkdtempSync(join(tmpdir(), "growth-os-start-no-recreate-"));
+      const binDir = mkdtempSync(join(tmpdir(), "growth-os-start-no-recreate-bin-"));
+      const stderrChunks: string[] = [];
+      const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation((chunk: string | Uint8Array) => {
+        stderrChunks.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"));
+        return true;
+      });
+      try {
+        const dockerBin = writeRecordingDockerBin(binDir, [
+          " Container growth-os-app-1  Running",
+          " Container growth-os-worker-1  Running"
+        ]);
+        const result = await runCommand("start", ["--no-wait"], {
+          GROWTH_OS_WORKSPACE_ROOT: root,
+          GROWTH_OS_DOCKER_BIN: dockerBin
+        });
+        expect(result).toMatchObject({ ok: true });
+        expect(stripAnsi(stderrChunks.join(""))).not.toContain("code changed since containers started");
+      } finally {
+        stderrSpy.mockRestore();
+        rmSync(root, { recursive: true, force: true });
+        rmSync(binDir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  // `infinite update` mirrors the install script's clean-tree/ff-pull update,
+  // then restarts the stack via the same path as `infinite start`. These build
+  // REAL temp git repos (no spawn mocking) so the fetch/pull and dirty-tree
+  // gates are exercised exactly as they run in production.
+  describe("infinite update", () => {
+    const git = (repo: string, ...args: string[]): string => {
+      const result = spawnSync(
+        "git",
+        ["-C", repo, "-c", "commit.gpgsign=false", "-c", "user.email=test@example.com", "-c", "user.name=Test", ...args],
+        { encoding: "utf8" }
+      );
+      expect(result.status, `git ${args.join(" ")}: ${result.stderr}`).toBe(0);
+      return result.stdout.trim();
+    };
+
+    // Fake docker bin that records its argv (so we can assert "compose up -d"
+    // ran) and exits 0. Mirrors writeRecordingDockerBin in the start suite.
+    const writeRecordingDockerBin = (directory: string): string => {
+      const dockerBin = join(directory, "docker");
+      writeFileSync(
+        dockerBin,
+        ["#!/usr/bin/env bash", `printf '%s\\n' "$@" > "${join(directory, "args.txt")}"`, "exit 0"].join("\n")
+      );
+      chmodSync(dockerBin, 0o755);
+      return dockerBin;
+    };
+
+    // A bare "origin" repo plus a working clone pointed at it, so fetch/pull are
+    // real and deterministic. `advanceOrigin` lands a new commit on origin so a
+    // subsequent pull in the clone fast-forwards.
+    const buildRepoWithOrigin = (): { origin: string; clone: string } => {
+      const origin = mkdtempSync(join(tmpdir(), "growth-os-update-origin-"));
+      const seed = mkdtempSync(join(tmpdir(), "growth-os-update-seed-"));
+      git(origin, "init", "-q", "--bare", "--initial-branch=main");
+      git(seed, "init", "-q", "--initial-branch=main");
+      writeFileSync(join(seed, "app.ts"), "export const v = 1;\n");
+      git(seed, "add", "app.ts");
+      git(seed, "commit", "-q", "-m", "init");
+      git(seed, "remote", "add", "origin", origin);
+      git(seed, "push", "-q", "origin", "main");
+      rmSync(seed, { recursive: true, force: true });
+      const clone = mkdtempSync(join(tmpdir(), "growth-os-update-clone-"));
+      git(clone, "clone", "-q", origin, ".");
+      return { origin, clone };
+    };
+
+    const advanceOrigin = (origin: string): void => {
+      const pusher = mkdtempSync(join(tmpdir(), "growth-os-update-push-"));
+      git(pusher, "clone", "-q", origin, ".");
+      writeFileSync(join(pusher, "app.ts"), "export const v = 2;\n");
+      git(pusher, "add", "app.ts");
+      git(pusher, "commit", "-q", "-m", "advance");
+      git(pusher, "push", "-q", "origin", "main");
+      rmSync(pusher, { recursive: true, force: true });
+    };
+
+    it("fast-forward pulls a clean tree and restarts the stack onto the new commit", async () => {
+      const { origin, clone } = buildRepoWithOrigin();
+      const binDir = mkdtempSync(join(tmpdir(), "growth-os-update-bin-"));
+      try {
+        const previousHead = git(clone, "rev-parse", "HEAD");
+        advanceOrigin(origin);
+        const dockerBin = writeRecordingDockerBin(binDir);
+        const result = (await runCommand("update", ["--no-wait"], {
+          GROWTH_OS_WORKSPACE_ROOT: clone,
+          GROWTH_OS_DOCKER_BIN: dockerBin
+        })) as Record<string, unknown>;
+        const newHead = git(clone, "rev-parse", "HEAD");
+        expect(newHead).not.toBe(previousHead);
+        expect(result).toMatchObject({
+          ok: true,
+          command: "update",
+          branch: "main",
+          previousHead,
+          newHead,
+          pulled: true,
+          codeChanged: true,
+          updated: true
+        });
+        // It actually ran the start path (recorded compose up -d).
+        expect((result.start as Record<string, unknown>).ok).toBe(true);
+        expect(readFileSync(join(binDir, "args.txt"), "utf8").trim().split("\n")).toEqual(["compose", "up", "-d"]);
+        expect(result.note).toContain("refreshes on the next");
+      } finally {
+        rmSync(origin, { recursive: true, force: true });
+        rmSync(clone, { recursive: true, force: true });
+        rmSync(binDir, { recursive: true, force: true });
+      }
+    });
+
+    it("warns and does NOT pull or restart when the working tree is dirty", async () => {
+      const { origin, clone } = buildRepoWithOrigin();
+      const binDir = mkdtempSync(join(tmpdir(), "growth-os-update-dirty-bin-"));
+      try {
+        const previousHead = git(clone, "rev-parse", "HEAD");
+        advanceOrigin(origin);
+        // Local uncommitted edit → dirty tree.
+        writeFileSync(join(clone, "app.ts"), "export const v = 999;\n");
+        const dockerBin = writeRecordingDockerBin(binDir);
+        const result = (await runCommand("update", ["--no-wait"], {
+          GROWTH_OS_WORKSPACE_ROOT: clone,
+          GROWTH_OS_DOCKER_BIN: dockerBin
+        })) as Record<string, unknown>;
+        expect(result).toMatchObject({
+          ok: true,
+          command: "update",
+          pulled: false,
+          updated: false,
+          reason: "working_tree_dirty"
+        });
+        expect(result.warning).toContain("Local changes detected");
+        // HEAD never moved (no pull) and docker was never invoked (no restart).
+        expect(git(clone, "rev-parse", "HEAD")).toBe(previousHead);
+        expect(existsSync(join(binDir, "args.txt"))).toBe(false);
+      } finally {
+        rmSync(origin, { recursive: true, force: true });
+        rmSync(clone, { recursive: true, force: true });
+        rmSync(binDir, { recursive: true, force: true });
+      }
+    });
+
+    it("returns a friendly message (no throw) outside a git checkout", async () => {
+      const nonGit = mkdtempSync(join(tmpdir(), "growth-os-update-plain-"));
+      try {
+        const result = (await runCommand("update", [], {
+          GROWTH_OS_WORKSPACE_ROOT: nonGit
+        })) as Record<string, unknown>;
+        expect(result).toMatchObject({ ok: false, updated: false, reason: "not_a_git_install" });
+        expect(result.message).toContain("install script");
+      } finally {
+        rmSync(nonGit, { recursive: true, force: true });
+      }
+    });
+  });
+
+  // The update notice is offline-first: ≤ one bounded `ls-remote` per 24h,
+  // served from cache, stderr-only, and a complete no-op when offline / not a
+  // git repo / cache fresh / already up to date. All branches are injected
+  // (stderr stream, clock, cache path) so they're deterministic.
+  describe("maybeNotifyUpdateAvailable", () => {
+    const git = (repo: string, ...args: string[]): string => {
+      const result = spawnSync(
+        "git",
+        ["-C", repo, "-c", "commit.gpgsign=false", "-c", "user.email=test@example.com", "-c", "user.name=Test", ...args],
+        { encoding: "utf8" }
+      );
+      expect(result.status, `git ${args.join(" ")}: ${result.stderr}`).toBe(0);
+      return result.stdout.trim();
+    };
+
+    const buildGitRepo = (): string => {
+      const repo = mkdtempSync(join(tmpdir(), "growth-os-notify-"));
+      git(repo, "init", "-q", "--initial-branch=main");
+      writeFileSync(join(repo, "app.ts"), "export const v = 1;\n");
+      git(repo, "add", "app.ts");
+      git(repo, "commit", "-q", "-m", "init");
+      return repo;
+    };
+
+    const collectStderr = (): { stream: { write(chunk: string): boolean }; text: () => string } => {
+      const chunks: string[] = [];
+      return {
+        stream: {
+          write(chunk: string) {
+            chunks.push(chunk);
+            return true;
+          }
+        },
+        text: () => chunks.join("")
+      };
+    };
+
+    it("(a) cache fresh → no ls-remote, no output, cache untouched", () => {
+      const repo = buildGitRepo();
+      const cacheDir = mkdtempSync(join(tmpdir(), "growth-os-notify-cache-"));
+      const cachePath = join(cacheDir, "update-check.json");
+      try {
+        // Fresh cache from 1ms ago, with a remoteSha that matches HEAD so even if
+        // it were read it wouldn't notify — but the point is it must not re-probe.
+        const head = git(repo, "rev-parse", "HEAD");
+        writeFileSync(cachePath, JSON.stringify({ lastCheckTs: 999_000, remoteSha: head }));
+        const sink = collectStderr();
+        maybeNotifyUpdateAvailable(
+          { GROWTH_OS_WORKSPACE_ROOT: repo },
+          { stderrStream: sink.stream, now: () => 1_000_000, cachePath }
+        );
+        expect(sink.text()).toBe("");
+        // Untouched: lastCheckTs still the original (no probe → no rewrite).
+        expect(JSON.parse(readFileSync(cachePath, "utf8")).lastCheckTs).toBe(999_000);
+      } finally {
+        rmSync(repo, { recursive: true, force: true });
+        rmSync(cacheDir, { recursive: true, force: true });
+      }
+    });
+
+    it("(b) HEAD == cached remoteSha → no output even when due for a check", () => {
+      const repo = buildGitRepo();
+      const cacheDir = mkdtempSync(join(tmpdir(), "growth-os-notify-eq-"));
+      const cachePath = join(cacheDir, "update-check.json");
+      try {
+        const head = git(repo, "rev-parse", "HEAD");
+        // No remote configured → the (stale) probe fails, but cached remoteSha
+        // equals HEAD, so there is nothing to notify about.
+        writeFileSync(cachePath, JSON.stringify({ lastCheckTs: 0, remoteSha: head }));
+        const sink = collectStderr();
+        maybeNotifyUpdateAvailable(
+          { GROWTH_OS_WORKSPACE_ROOT: repo },
+          { stderrStream: sink.stream, now: () => 10 * 24 * 60 * 60 * 1000, cachePath }
+        );
+        expect(sink.text()).toBe("");
+      } finally {
+        rmSync(repo, { recursive: true, force: true });
+        rmSync(cacheDir, { recursive: true, force: true });
+      }
+    });
+
+    it("(c) cached remoteSha differs from HEAD (behind) → prints one stderr line, no network", () => {
+      const repo = buildGitRepo();
+      const cacheDir = mkdtempSync(join(tmpdir(), "growth-os-notify-behind-"));
+      const cachePath = join(cacheDir, "update-check.json");
+      try {
+        const head = git(repo, "rev-parse", "HEAD");
+        const remoteSha = "0123456789abcdef0123456789abcdef01234567";
+        // Fresh cache says we're behind → served instantly from cache, no probe.
+        writeFileSync(cachePath, JSON.stringify({ lastCheckTs: 1_000_000, remoteSha }));
+        const sink = collectStderr();
+        maybeNotifyUpdateAvailable(
+          { GROWTH_OS_WORKSPACE_ROOT: repo },
+          { stderrStream: sink.stream, now: () => 1_000_001, cachePath }
+        );
+        const text = sink.text();
+        expect(text).toContain("Update available");
+        expect(text).toContain("infinite update");
+        expect(text).toContain(head.slice(0, 7));
+        expect(text).toContain(remoteSha.slice(0, 7));
+        expect(text.trim().split("\n")).toHaveLength(1); // exactly one line
+      } finally {
+        rmSync(repo, { recursive: true, force: true });
+        rmSync(cacheDir, { recursive: true, force: true });
+      }
+    });
+
+    it("(d) offline / no remote → silent no-op, but lastCheckTs still advances", () => {
+      const repo = buildGitRepo(); // no `origin` configured → ls-remote fails (offline-equivalent)
+      const cacheDir = mkdtempSync(join(tmpdir(), "growth-os-notify-offline-"));
+      const cachePath = join(cacheDir, "update-check.json");
+      try {
+        const sink = collectStderr();
+        const nowTs = 5_000_000;
+        maybeNotifyUpdateAvailable(
+          { GROWTH_OS_WORKSPACE_ROOT: repo },
+          { stderrStream: sink.stream, now: () => nowTs, cachePath } // no cache file → due for a check
+        );
+        // No output (probe failed, nothing cached to notify from)…
+        expect(sink.text()).toBe("");
+        // …but lastCheckTs advanced so we don't re-probe every invocation.
+        expect(JSON.parse(readFileSync(cachePath, "utf8")).lastCheckTs).toBe(nowTs);
+      } finally {
+        rmSync(repo, { recursive: true, force: true });
+        rmSync(cacheDir, { recursive: true, force: true });
+      }
+    });
+
+    it("(e) suppressed for the `update` command and for --json invocations", () => {
+      const repo = buildGitRepo();
+      const cacheDir = mkdtempSync(join(tmpdir(), "growth-os-notify-suppress-"));
+      const cachePath = join(cacheDir, "update-check.json");
+      try {
+        const remoteSha = "0123456789abcdef0123456789abcdef01234567";
+        writeFileSync(cachePath, JSON.stringify({ lastCheckTs: 1_000_000, remoteSha }));
+        const updateSink = collectStderr();
+        maybeNotifyUpdateAvailable(
+          { GROWTH_OS_WORKSPACE_ROOT: repo },
+          { stderrStream: updateSink.stream, now: () => 1_000_001, cachePath, command: "update" }
+        );
+        expect(updateSink.text()).toBe("");
+        const jsonSink = collectStderr();
+        maybeNotifyUpdateAvailable(
+          { GROWTH_OS_WORKSPACE_ROOT: repo },
+          { stderrStream: jsonSink.stream, now: () => 1_000_001, cachePath, command: "setup", args: ["--json"] }
+        );
+        expect(jsonSink.text()).toBe("");
+      } finally {
+        rmSync(repo, { recursive: true, force: true });
+        rmSync(cacheDir, { recursive: true, force: true });
+      }
+    });
+
+    it("dirty working tree suppresses the notice (avoids dev false-positives)", () => {
+      const repo = buildGitRepo();
+      const cacheDir = mkdtempSync(join(tmpdir(), "growth-os-notify-dirty-"));
+      const cachePath = join(cacheDir, "update-check.json");
+      try {
+        const remoteSha = "0123456789abcdef0123456789abcdef01234567";
+        writeFileSync(cachePath, JSON.stringify({ lastCheckTs: 1_000_000, remoteSha }));
+        writeFileSync(join(repo, "app.ts"), "export const v = 2;\n"); // dirty
+        const sink = collectStderr();
+        maybeNotifyUpdateAvailable(
+          { GROWTH_OS_WORKSPACE_ROOT: repo },
+          { stderrStream: sink.stream, now: () => 1_000_001, cachePath }
+        );
+        expect(sink.text()).toBe("");
+      } finally {
+        rmSync(repo, { recursive: true, force: true });
+        rmSync(cacheDir, { recursive: true, force: true });
+      }
+    });
+
+    it("is a no-op outside a git checkout (no output, no cache write)", () => {
+      const nonGit = mkdtempSync(join(tmpdir(), "growth-os-notify-plain-"));
+      const cacheDir = mkdtempSync(join(tmpdir(), "growth-os-notify-plain-cache-"));
+      const cachePath = join(cacheDir, "update-check.json");
+      try {
+        const sink = collectStderr();
+        maybeNotifyUpdateAvailable(
+          { GROWTH_OS_WORKSPACE_ROOT: nonGit },
+          { stderrStream: sink.stream, now: () => 1_000_000, cachePath }
+        );
+        expect(sink.text()).toBe("");
+        expect(existsSync(cachePath)).toBe(false);
+      } finally {
+        rmSync(nonGit, { recursive: true, force: true });
+        rmSync(cacheDir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  it("waitForAppReady resolves once the app /health endpoint responds", async () => {
+    let calls = 0;
+    const fetchImpl = (async () => {
+      calls += 1;
+      if (calls < 3) {
+        throw new Error("fetch failed");
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ status: "ok", service: "growth-os-app" })
+      } as unknown as Response;
+    }) as unknown as typeof fetch;
+    let clock = 0;
+    const result = await waitForAppReady(
+      { GROWTH_OS_API_URL: "http://127.0.0.1:3000" },
+      {
+        fetchImpl,
+        now: () => clock,
+        sleep: async (ms) => {
+          clock += ms;
+        },
+        intervalMs: 1000,
+        timeoutMs: 60_000
+      }
+    );
+    expect(result.ready).toBe(true);
+    expect(result.attempts).toBe(3);
+    expect(result.appUrl).toBe("http://127.0.0.1:3000/health");
+  });
+
+  it("waitForAppReady gives up after the timeout and reports the last error", async () => {
+    let clock = 0;
+    const progress: string[] = [];
+    const result = await waitForAppReady(
+      { GROWTH_OS_API_URL: "http://127.0.0.1:3000" },
+      {
+        fetchImpl: (async () => {
+          throw new Error("connect ECONNREFUSED 127.0.0.1:3000");
+        }) as unknown as typeof fetch,
+        now: () => clock,
+        sleep: async (ms) => {
+          clock += ms;
+        },
+        intervalMs: 5000,
+        timeoutMs: 12_000,
+        onProgress: (message) => progress.push(message)
+      }
+    );
+    expect(result.ready).toBe(false);
+    expect(result.lastError).toContain("ECONNREFUSED");
+    expect(result.waitedMs).toBeGreaterThanOrEqual(12_000);
+    expect(progress.length).toBeGreaterThan(0);
+  });
+
+  it("waitForAppReady treats non-2xx /health responses as not ready", async () => {
+    let clock = 0;
+    const result = await waitForAppReady(
+      { GROWTH_OS_API_URL: "http://127.0.0.1:3000" },
+      {
+        fetchImpl: (async () => ({ ok: false, status: 503 }) as unknown as Response) as unknown as typeof fetch,
+        now: () => clock,
+        sleep: async (ms) => {
+          clock += ms;
+        },
+        intervalMs: 5000,
+        timeoutMs: 8000
+      }
+    );
+    expect(result.ready).toBe(false);
+    expect(result.lastError).toBe("HTTP 503");
+  });
+
+  it("waitForAppReady rejects a foreign /health (service mismatch) even on a 200", async () => {
+    // A squatting server (e.g. `next dev`) accepts the connection and returns 200,
+    // but is NOT the daemon — bare response.ok must no longer count as ready.
+    let clock = 0;
+    const result = await waitForAppReady(
+      { GROWTH_OS_API_URL: "http://127.0.0.1:3000" },
+      {
+        fetchImpl: (async () =>
+          ({
+            ok: true,
+            status: 200,
+            json: async () => ({ service: "next-dev", ready: true })
+          }) as unknown as Response) as unknown as typeof fetch,
+        now: () => clock,
+        sleep: async (ms) => {
+          clock += ms;
+        },
+        intervalMs: 5000,
+        timeoutMs: 8000
+      }
+    );
+    expect(result.ready).toBe(false);
+    expect(result.lastError).toContain("service mismatch");
+  });
+
+  it("waitForAppReady redacts URL userinfo from appUrl / progress (no password leak)", async () => {
+    const progress: string[] = [];
+    let clock = 0;
+    const result = await waitForAppReady(
+      // A GROWTH_OS_API_URL carrying userinfo must never surface its password.
+      { GROWTH_OS_API_URL: "http://user:s3cret@127.0.0.1:3000" },
+      {
+        fetchImpl: (async () => {
+          throw new Error("connect ECONNREFUSED");
+        }) as unknown as typeof fetch,
+        now: () => clock,
+        sleep: async (ms) => {
+          clock += ms;
+        },
+        intervalMs: 5000,
+        timeoutMs: 6000,
+        onProgress: (message) => progress.push(message)
+      }
+    );
+    expect(result.ready).toBe(false);
+    expect(result.appUrl).not.toContain("s3cret");
+    expect(result.appUrl).not.toContain("user:");
+    expect(progress.join("\n")).not.toContain("s3cret");
+  });
+
+  describe("API base-url discovery (descriptor-first, design §3/§7)", () => {
+    let home: string;
+
+    beforeEach(() => {
+      home = mkdtempSync(join(tmpdir(), "growth-os-discovery-"));
+      invalidateApiBaseUrl();
+    });
+
+    afterEach(() => {
+      rmSync(home, { recursive: true, force: true });
+      invalidateApiBaseUrl();
+    });
+
+    it("prefers a live, identity-validated descriptor over the configBaseUrl rung", async () => {
+      // Descriptor advertises a daemon on an ephemeral port; this process IS alive,
+      // so process.kill(pid,0) passes and we then identity-probe /health.
+      const descriptorUrl = "http://127.0.0.1:54321";
+      const descriptor = {
+        url: descriptorUrl,
+        pid: process.pid,
+        version: "0.1.0",
+        startedAt: new Date().toISOString(),
+        nonce: "boot-nonce-abc"
+      };
+      writeFileSync(join(home, "daemon.json"), JSON.stringify(descriptor));
+
+      const seen: string[] = [];
+      const fetchImpl = (async (input: RequestInfo | URL) => {
+        const url = String(input);
+        seen.push(url);
+        if (url.startsWith(descriptorUrl)) {
+          // The real daemon — echoes the descriptor's pid + nonce.
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              status: "ok",
+              service: "growth-os-app",
+              pid: process.pid,
+              nonce: "boot-nonce-abc"
+            })
+          } as unknown as Response;
+        }
+        // configBaseUrl (the squatting next dev) — a foreign 200.
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ service: "next-dev" })
+        } as unknown as Response;
+      }) as unknown as typeof fetch;
+
+      let clock = 0;
+      const result = await waitForAppReady(
+        // No GROWTH_OS_API_URL override → discovery ladder runs; GROWTH_OS_HOME points
+        // at our temp descriptor; configBaseUrl defaults to 127.0.0.1:3000.
+        { GROWTH_OS_HOME: home },
+        {
+          fetchImpl,
+          now: () => clock,
+          sleep: async (ms) => {
+            clock += ms;
+          },
+          intervalMs: 1000,
+          timeoutMs: 30_000
+        }
+      );
+
+      expect(result.ready).toBe(true);
+      // Resolved to the DESCRIPTOR url, not the configBaseUrl :3000 rung.
+      expect(result.appUrl).toBe(`${descriptorUrl}/health`);
+      expect(seen.some((u) => u.startsWith(descriptorUrl))).toBe(true);
+    });
+
+    it("falls through to configBaseUrl only when the descriptor is absent", async () => {
+      // No descriptor on disk → ladder skips to configBaseUrl (default 127.0.0.1:3000),
+      // which here answers as the real daemon.
+      const seen: string[] = [];
+      const fetchImpl = (async (input: RequestInfo | URL) => {
+        const url = String(input);
+        seen.push(url);
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ status: "ok", service: "growth-os-app", pid: 999 })
+        } as unknown as Response;
+      }) as unknown as typeof fetch;
+
+      let clock = 0;
+      const result = await waitForAppReady(
+        { GROWTH_OS_HOME: home },
+        {
+          fetchImpl,
+          now: () => clock,
+          sleep: async (ms) => {
+            clock += ms;
+          },
+          intervalMs: 1000,
+          timeoutMs: 30_000
+        }
+      );
+
+      expect(result.ready).toBe(true);
+      expect(result.appUrl).toBe("http://127.0.0.1:3000/health");
+    });
+  });
+
+  it("discovers the source checkout root for lifecycle commands run from the CLI package", async () => {
+    const root = mkdtempSync(join(tmpdir(), "growth-os-cli-root-"));
+    const nested = join(root, "apps", "cli");
+    mkdirSync(nested, { recursive: true });
+    writeFileSync(join(root, "docker-compose.yml"), "services: {}\n");
+    writeFileSync(join(root, "pnpm-workspace.yaml"), "packages: []\n");
+    try {
+      await expect(
+        runCommand("status", [], {
+          PWD: nested,
+          GROWTH_OS_CLI_DRY_RUN: "1"
+        })
+      ).resolves.toMatchObject({
+        ok: true,
+        cwd: root,
+        command: ["docker", "compose", "ps"]
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("falls back to the CLI's own checkout when run from outside any repo", async () => {
+    // Simulates `infinite` launched from anywhere via the global wrapper: the
+    // invocation dir has no docker-compose.yml/pnpm-workspace.yaml ancestor, so
+    // the root must come from the CLI's own location instead of failing with
+    // docker compose's "no configuration file provided: not found".
+    const outside = mkdtempSync(join(tmpdir(), "growth-os-outside-repo-"));
+    try {
+      const result = (await runCommand("status", [], {
+        PWD: outside,
+        GROWTH_OS_CLI_DRY_RUN: "1"
+      })) as { ok: boolean; cwd: string; command: string[] };
+      expect(result.cwd).not.toBe(outside);
+      expect(existsSync(join(result.cwd, "docker-compose.yml"))).toBe(true);
+      expect(existsSync(join(result.cwd, "pnpm-workspace.yaml"))).toBe(true);
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps sync history on sync-runs so status can report runtime status", async () => {
+    const calls: string[] = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: RequestInfo | URL) => {
+      calls.push(String(url));
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }) as typeof fetch;
+
+    try {
+      await runCommand("sync-runs", [], {
+        GROWTH_OS_WORKSPACE_ID: "proj_test",
+        GROWTH_OS_API_URL: "http://127.0.0.1:3000"
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    expect(calls[0]).toBe("http://127.0.0.1:3000/sync/runs");
+  });
+
+  it("reports setup readiness and blocks query readiness until a marketing connector exists", async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "growth-os-setup-readiness-"));
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-setup-readiness-home-"));
+    const home = mkdtempSync(join(tmpdir(), "growth-os-setup-readiness-user-home-"));
+    const originalFetch = globalThis.fetch;
+    try {
+      await runCommand("init", [], { GROWTH_OS_WORKSPACE_ROOT: workspaceRoot });
+      mkdirSync(growthHome, { recursive: true });
+      writeFileSync(
+        join(growthHome, "config.yml"),
+        "model_provider: claude\nmodel_name: claude-sonnet-4-5\n"
+      );
+      writeFileSync(
+        join(growthHome, "auth.json"),
+        JSON.stringify({
+          providers: {
+            claude: {
+              provider: "claude",
+              source: "claude-code-credentials-file",
+              authMode: "reuse",
+              token: "claude-access",
+              refreshToken: "claude-refresh",
+              expiresAt: "2999-01-01T00:00:00.000Z"
+            }
+          }
+        })
+      );
+      globalThis.fetch = (async () =>
+        new Response(
+          JSON.stringify({
+            ok: true,
+            data: { sources: [] }
+          }),
+          { status: 200 }
+        )) as typeof fetch;
+
+      const status = await runCommand("setup", ["status"], {
+        DATABASE_URL: "postgres://growth:password@127.0.0.1:1/growth",
+        GROWTH_OS_WORKSPACE_ROOT: workspaceRoot,
+        GROWTH_OS_HOME: growthHome,
+        HOME: home,
+        GROWTH_OS_API_URL: "http://127.0.0.1:3999"
+      });
+      const query = await runCommand("setup", ["query"], {
+        DATABASE_URL: "postgres://growth:password@127.0.0.1:1/growth",
+        GROWTH_OS_WORKSPACE_ROOT: workspaceRoot,
+        GROWTH_OS_HOME: growthHome,
+        HOME: home,
+        GROWTH_OS_API_URL: "http://127.0.0.1:3999"
+      });
+      const rendered = renderCliResult(query);
+
+      expect(status).toMatchObject({
+        ok: false,
+        setupReadiness: {
+          runtimeConfig: "configured",
+          database: "migrated",
+          model: "selected",
+          auth: "ready",
+          connectors: "none",
+          llmQuery: "blocked"
+        }
+      });
+      expect(JSON.stringify(status)).toContain("connectors_missing");
+      expect(query).toMatchObject({ ok: false });
+      expect(rendered).toContain("Infinite setup status");
+      expect(rendered).toContain("Marketing data: none");
+      expect(rendered).toContain("connectors_missing");
+    } finally {
+      globalThis.fetch = originalFetch;
+      rmSync(workspaceRoot, { recursive: true, force: true });
+      rmSync(growthHome, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("marks runtime services ready when the DB path succeeds and app health is healthy", async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "growth-os-setup-services-ready-"));
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-setup-services-ready-home-"));
+    const home = mkdtempSync(join(tmpdir(), "growth-os-setup-services-ready-user-home-"));
+    const originalFetch = globalThis.fetch;
+    const fetchCalls: string[] = [];
+    const dbSpy = vi.spyOn(growthDb, "createInfiniteOsDb").mockReturnValue({
+      query: async () => [],
+      close: async () => undefined
+    } as unknown as growthDb.InfiniteOsDb);
+
+    try {
+      await runCommand("init", [], { GROWTH_OS_WORKSPACE_ROOT: workspaceRoot });
+      mkdirSync(growthHome, { recursive: true });
+      writeFileSync(
+        join(growthHome, "config.yml"),
+        "model_provider: claude\nmodel_name: claude-sonnet-4-5\n"
+      );
+      writeFileSync(
+        join(growthHome, "auth.json"),
+        JSON.stringify({
+          providers: {
+            claude: {
+              provider: "claude",
+              source: "claude-code-credentials-file",
+              authMode: "reuse",
+              token: "claude-access",
+              refreshToken: "claude-refresh",
+              expiresAt: "2999-01-01T00:00:00.000Z"
+            }
+          }
+        })
+      );
+      globalThis.fetch = (async (url: RequestInfo | URL) => {
+        fetchCalls.push(String(url));
+        return new Response(JSON.stringify({ status: "ok" }), { status: 200 });
+      }) as typeof fetch;
+
+      const readiness = await readSetupReadiness({
+        DATABASE_URL: "postgres://growth:password@db.example.com:5432/growth",
+        GROWTH_OS_WORKSPACE_ROOT: workspaceRoot,
+        GROWTH_OS_WORKSPACE_ID: "proj_test",
+        GROWTH_OS_HOME: growthHome,
+        HOME: home,
+        GROWTH_OS_API_URL: "http://127.0.0.1:3999"
+      });
+
+      expect(readiness).toMatchObject({
+        runtimeConfig: "configured",
+        runtimeServices: "ready",
+        database: "migrated",
+        connectors: "none"
+      });
+      expect(dbSpy).toHaveBeenCalled();
+      expect(fetchCalls).toContain("http://127.0.0.1:3999/health");
+    } finally {
+      dbSpy.mockRestore();
+      globalThis.fetch = originalFetch;
+      rmSync(workspaceRoot, { recursive: true, force: true });
+      rmSync(growthHome, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("cross-workspace readiness (direct DB): a PIN-LESS session is ready when ANY project has a connected source", async () => {
+    // The crux of the cross-workspace change: chat-readiness must NOT be scoped to
+    // the single active workspace. A no-pin session (no GROWTH_OS_WORKSPACE_ID)
+    // would previously throw in `workspaceIdFor` and route to setup; now the source
+    // query drops the `workspace_id` filter so "some other connected project" makes
+    // the session ready (→ reaches chat + PR5's picker, not the setup wizard).
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "growth-os-xws-readiness-"));
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-xws-readiness-home-"));
+    const home = mkdtempSync(join(tmpdir(), "growth-os-xws-readiness-user-home-"));
+    const originalFetch = globalThis.fetch;
+    const sqls: string[] = [];
+    const params: Array<unknown[] | undefined> = [];
+    const dbSpy = vi.spyOn(growthDb, "createInfiniteOsDb").mockReturnValue({
+      query: async (sql: string, args?: unknown[]) => {
+        sqls.push(sql);
+        params.push(args);
+        if (sql.includes("from sources")) {
+          // A connected source belonging to SOME (unscoped) workspace.
+          return [{ status: "connected" }];
+        }
+        return [];
+      },
+      close: async () => undefined
+    } as unknown as growthDb.InfiniteOsDb);
+
+    try {
+      await runCommand("init", [], { GROWTH_OS_WORKSPACE_ROOT: workspaceRoot });
+      mkdirSync(growthHome, { recursive: true });
+      writeFileSync(
+        join(growthHome, "config.yml"),
+        "model_provider: claude\nmodel_name: claude-sonnet-4-5\n"
+      );
+      writeFileSync(
+        join(growthHome, "auth.json"),
+        JSON.stringify({
+          providers: {
+            claude: {
+              provider: "claude",
+              source: "claude-code-credentials-file",
+              authMode: "reuse",
+              token: "claude-access",
+              refreshToken: "claude-refresh",
+              expiresAt: "2999-01-01T00:00:00.000Z"
+            }
+          }
+        })
+      );
+      globalThis.fetch = (async () => new Response(JSON.stringify({ status: "ok" }), { status: 200 })) as typeof fetch;
+
+      const readiness = await readSetupReadiness({
+        DATABASE_URL: "postgres://growth:password@db.example.com:5432/growth",
+        GROWTH_OS_WORKSPACE_ROOT: workspaceRoot,
+        // NO GROWTH_OS_WORKSPACE_ID — pin-less session.
+        GROWTH_OS_HOME: growthHome,
+        HOME: home,
+        GROWTH_OS_API_URL: "http://127.0.0.1:3999"
+      });
+
+      expect(readiness).toMatchObject({
+        database: "migrated",
+        connectors: "connected",
+        connectedSourceCount: 1,
+        llmQuery: "ready"
+      });
+      // The source query ran WITHOUT a `workspace_id = $1` filter and WITHOUT a
+      // resolved pin (no params), so it counts across ALL workspaces.
+      const sourceSql = sqls.find((s) => s.includes("from sources"));
+      expect(sourceSql).toBeDefined();
+      expect(sourceSql).not.toContain("workspace_id");
+      const sourceIdx = sqls.findIndex((s) => s.includes("from sources"));
+      expect(params[sourceIdx]).toBeUndefined();
+    } finally {
+      dbSpy.mockRestore();
+      globalThis.fetch = originalFetch;
+      rmSync(workspaceRoot, { recursive: true, force: true });
+      rmSync(growthHome, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("does not trust a default local app API for readiness unless GROWTH_OS_API_URL is explicit", async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "growth-os-setup-readiness-local-api-"));
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-setup-readiness-local-api-home-"));
+    const originalFetch = globalThis.fetch;
+    const requests: string[] = [];
+    try {
+      await runCommand("init", [], { GROWTH_OS_WORKSPACE_ROOT: workspaceRoot });
+      mkdirSync(growthHome, { recursive: true });
+      writeFileSync(
+        join(growthHome, "config.yml"),
+        "model_provider: claude\nmodel_name: claude-sonnet-4-5\n"
+      );
+      writeFileSync(
+        join(growthHome, "auth.json"),
+        JSON.stringify({
+          providers: {
+            claude: {
+              provider: "claude",
+              source: "claude-code-credentials-file",
+              authMode: "reuse",
+              token: "claude-access",
+              refreshToken: "claude-refresh",
+              expiresAt: "2999-01-01T00:00:00.000Z"
+            }
+          }
+        })
+      );
+      globalThis.fetch = (async (url: RequestInfo | URL) => {
+        requests.push(String(url));
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            data: { sources: [{ id: "src_1", provider: "google_analytics_4", status: "connected" }] }
+          }),
+          { status: 200 }
+        );
+      }) as typeof fetch;
+
+      const status = await runCommand("setup", ["status"], {
+        DATABASE_URL: "postgres://growth:password@127.0.0.1:1/growth",
+        GROWTH_OS_WORKSPACE_ROOT: workspaceRoot,
+        GROWTH_OS_HOME: growthHome
+      });
+
+      expect(status).toMatchObject({
+        ok: false,
+        setupReadiness: {
+          database: "missing",
+          connectors: "none",
+          llmQuery: "blocked"
+        }
+      });
+      expect(requests).toEqual([]);
+    } finally {
+      globalThis.fetch = originalFetch;
+      rmSync(workspaceRoot, { recursive: true, force: true });
+      rmSync(growthHome, { recursive: true, force: true });
+    }
+  });
+
+  it("marks LLM query readiness ready (app API, NO pin) when ANOTHER project has a connected source", async () => {
+    // Cross-workspace readiness over the app API: a PIN-LESS session must pass
+    // readiness when SOME project is connected. The app `/sources` route is
+    // hard-scoped to one workspace, so readiness fans out over `/projects` and
+    // checks each — here the FIRST project has no sources and the SECOND is
+    // connected, so readiness is ready even though no pin is set.
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "growth-os-ready-query-"));
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-ready-query-home-"));
+    const home = mkdtempSync(join(tmpdir(), "growth-os-ready-query-user-home-"));
+    const originalFetch = globalThis.fetch;
+    const sourceWorkspaces: Array<string | undefined> = [];
+    try {
+      await runCommand("init", [], { GROWTH_OS_WORKSPACE_ROOT: workspaceRoot });
+      mkdirSync(growthHome, { recursive: true });
+      writeFileSync(
+        join(growthHome, "config.yml"),
+        "model_provider: claude\nmodel_name: claude-sonnet-4-5\n"
+      );
+      writeFileSync(
+        join(growthHome, "auth.json"),
+        JSON.stringify({
+          providers: {
+            claude: {
+              provider: "claude",
+              source: "claude-code-credentials-file",
+              authMode: "reuse",
+              token: "claude-access",
+              refreshToken: "claude-refresh",
+              expiresAt: "2999-01-01T00:00:00.000Z"
+            }
+          }
+        })
+      );
+      globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+        const target = String(url);
+        if (target.endsWith("/projects")) {
+          return new Response(
+            JSON.stringify({
+              ok: true,
+              projects: [
+                { id: "proj_empty", name: "Empty" },
+                { id: "proj_connected", name: "Connected" }
+              ]
+            }),
+            { status: 200 }
+          );
+        }
+        if (target.endsWith("/sources")) {
+          const header = (init?.headers as Record<string, string> | undefined)?.["X-Growth-Os-Workspace"];
+          sourceWorkspaces.push(header);
+          // Only the second project has a connected source.
+          const sources =
+            header === "proj_connected"
+              ? [{ id: "src_1", provider: "google_analytics_4", status: "connected" }]
+              : [];
+          return new Response(JSON.stringify({ ok: true, data: { sources } }), { status: 200 });
+        }
+        return new Response(JSON.stringify({ status: "ok" }), { status: 200 });
+      }) as typeof fetch;
+
+      await expect(
+        localChatReadiness({
+          GROWTH_OS_WORKSPACE_ROOT: workspaceRoot,
+          GROWTH_OS_HOME: growthHome,
+          HOME: home,
+          // NO GROWTH_OS_WORKSPACE_ID — a pin-less session must still pass.
+          GROWTH_OS_API_URL: "http://127.0.0.1:3999",
+          DATABASE_URL: "postgres://growth:password@127.0.0.1:1/growth"
+        })
+      ).resolves.toMatchObject({
+        ok: true,
+        setupReadiness: {
+          connectors: "connected",
+          llmQuery: "ready"
+        }
+      });
+      // Both projects were scoped explicitly (per-project header), never a pin.
+      expect(sourceWorkspaces).toContain("proj_empty");
+      expect(sourceWorkspaces).toContain("proj_connected");
+    } finally {
+      globalThis.fetch = originalFetch;
+      rmSync(workspaceRoot, { recursive: true, force: true });
+      rmSync(growthHome, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("hydrates app API URL and tokens from .growth-os config for CLI commands", async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "growth-os-api-hydration-"));
+    // Isolate GROWTH_OS_HOME so descriptor-first discovery can't read the dev machine's
+    // real ~/.growth-os/daemon.json — with no descriptor the ladder falls through to the
+    // config-derived configBaseUrl (port 3999), which is exactly what this test asserts.
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-api-hydration-home-"));
+    const requests: Array<{ url: string; authorization?: string }> = [];
+    const originalFetch = globalThis.fetch;
+    try {
+      await runCommand("init", [], { GROWTH_OS_WORKSPACE_ROOT: workspaceRoot });
+      writeFileSync(join(workspaceRoot, ".growth-os", "config.yml"), "runtime_mode: local\napp_port: 3999\n");
+      globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+        // Ignore the discovery identity probe to configBaseUrl/health — it returns a
+        // non-daemon body (no `service`), so the ladder correctly rejects it and falls
+        // back to the configBaseUrl literal. We only assert the actual command requests.
+        if (String(url).endsWith("/health")) {
+          return new Response(JSON.stringify({ ok: true }), { status: 200 });
+        }
+        requests.push({
+          url: String(url),
+          authorization: init?.headers && "Authorization" in init.headers
+            ? String(init.headers.Authorization)
+            : undefined
+        });
+        return new Response(JSON.stringify({ ok: true, data: { sources: [] } }), { status: 200 });
+      }) as typeof fetch;
+
+      const guardedEnv = {
+        GROWTH_OS_WORKSPACE_ID: "proj_test",
+        GROWTH_OS_WORKSPACE_ROOT: workspaceRoot,
+        GROWTH_OS_HOME: growthHome
+      };
+      invalidateApiBaseUrl();
+      await runCommand("sources", [], guardedEnv);
+      await runCommand("sync", ["src_1"], guardedEnv);
+
+      expect(requests).toEqual([
+        {
+          url: "http://127.0.0.1:3999/sources",
+          authorization: "Bearer dev-read-token"
+        },
+        {
+          url: "http://127.0.0.1:3999/sources/src_1/sync",
+          authorization: "Bearer dev-operator-token"
+        }
+      ]);
+    } finally {
+      globalThis.fetch = originalFetch;
+      rmSync(workspaceRoot, { recursive: true, force: true });
+      rmSync(growthHome, { recursive: true, force: true });
+    }
+  });
+
+  it("sends the workspace header on app API calls and uses it for connector readiness", async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "growth-os-workspace-header-"));
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-workspace-header-home-"));
+    const home = mkdtempSync(join(tmpdir(), "growth-os-workspace-header-user-home-"));
+    const originalFetch = globalThis.fetch;
+    const requests: Array<{ url: string; workspace?: string; authorization?: string }> = [];
+    try {
+      await runCommand("init", [], { GROWTH_OS_WORKSPACE_ROOT: workspaceRoot });
+      mkdirSync(growthHome, { recursive: true });
+      writeFileSync(
+        join(growthHome, "config.yml"),
+        "model_provider: claude\nmodel_name: claude-sonnet-4-5\n"
+      );
+      writeFileSync(
+        join(growthHome, "auth.json"),
+        JSON.stringify({
+          providers: {
+            claude: {
+              provider: "claude",
+              source: "claude-code-credentials-file",
+              authMode: "reuse",
+              token: "claude-access",
+              refreshToken: "claude-refresh",
+              expiresAt: "2999-01-01T00:00:00.000Z"
+            }
+          }
+        })
+      );
+      globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+        const target = String(url);
+        const headers = new Headers(init?.headers);
+        requests.push({
+          url: target,
+          workspace: headers.get("x-growth-os-workspace") ?? undefined,
+          authorization: headers.get("authorization") ?? undefined
+        });
+        if (target.endsWith("/projects")) {
+          // Cross-workspace readiness lists projects, then scopes `/sources` per id.
+          return new Response(
+            JSON.stringify({ ok: true, projects: [{ id: "proj_test", name: "Acme" }] }),
+            { status: 200 }
+          );
+        }
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            data: { sources: [{ id: "src_x", provider: "x", status: "connected", connectionName: "YourHandle Account" }] }
+          }),
+          { status: 200 }
+        );
+      }) as typeof fetch;
+
+      const status = await runCommand("setup", ["status"], {
+        GROWTH_OS_WORKSPACE_ID: "proj_test",
+        GROWTH_OS_WORKSPACE_ROOT: workspaceRoot,
+        GROWTH_OS_HOME: growthHome,
+        HOME: home,
+        GROWTH_OS_API_URL: "http://127.0.0.1:3999",
+        DATABASE_URL: "postgres://growth:password@127.0.0.1:1/growth"
+      });
+
+      expect(status).toMatchObject({
+        ok: true,
+        setupReadiness: {
+          connectors: "connected",
+          llmQuery: "ready"
+        }
+      });
+      // The per-project `/sources` call carries the (explicit) workspace header and
+      // the read token — the cross-workspace fan-out still scopes each lookup.
+      const sourcesCall = requests.find((r) => r.url === "http://127.0.0.1:3999/sources");
+      expect(sourcesCall).toMatchObject({
+        workspace: expect.stringMatching(/^proj_/),
+        authorization: "Bearer dev-read-token"
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+      rmSync(workspaceRoot, { recursive: true, force: true });
+      rmSync(growthHome, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("project new/list/use/current manages projects via state.json", async () => {
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-project-"));
+    const env = { GROWTH_OS_HOME: growthHome, GROWTH_OS_API_URL: "http://127.0.0.1:3999",
+      GROWTH_OS_OPERATOR_TOKEN: "op" } as Record<string, string>;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: RequestInfo | URL) => {
+      if (String(url).endsWith("/projects")) {
+        return new Response(JSON.stringify({ ok: true, project: { id: "proj_aaaaaaaaaaaaaaaa", name: "Acme" } }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }) as typeof fetch;
+    try {
+      await runCommand("project", ["new", "Acme"], env);
+      expect(readActiveProjectId(env as never)).toBe("proj_aaaaaaaaaaaaaaaa");
+      const current = await runCommand("project", ["current"], env);
+      expect(current).toMatchObject({ activeProjectId: "proj_aaaaaaaaaaaaaaaa" });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("project default set/show/clear persists defaultProjectId without clobbering the active pointer", async () => {
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-default-cmd-"));
+    const env = {
+      GROWTH_OS_HOME: growthHome,
+      GROWTH_OS_API_URL: "http://127.0.0.1:3999",
+      GROWTH_OS_OPERATOR_TOKEN: "op"
+    } as Record<string, string>;
+    // An existing active pointer (legacy/`project new`) that the default write
+    // must preserve — this is the merge-preserving requirement.
+    writeActiveProjectId("proj_active", env as never);
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: RequestInfo | URL) => {
+      if (String(url).endsWith("/projects")) {
+        return new Response(
+          JSON.stringify({ ok: true, projects: [{ id: "proj_default1", name: "Beta" }] }),
+          { status: 200 }
+        );
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }) as typeof fetch;
+    try {
+      const show0 = await runCommand("project", ["default", "show"], env);
+      expect(show0).toMatchObject({ ok: true, defaultProjectId: null });
+
+      const set = await runCommand("project", ["default", "set", "Beta"], env);
+      expect(set).toMatchObject({ ok: true, defaultProjectId: "proj_default1", name: "Beta" });
+      expect(readDefaultProjectId(env as never)).toBe("proj_default1");
+      // The active pointer survived the default write.
+      expect(readActiveProjectId(env as never)).toBe("proj_active");
+
+      const show1 = await runCommand("project", ["default", "show"], env);
+      expect(show1).toMatchObject({ ok: true, defaultProjectId: "proj_default1" });
+
+      const clear = await runCommand("project", ["default", "clear"], env);
+      expect(clear).toMatchObject({ ok: true, defaultProjectId: null });
+      expect(readDefaultProjectId(env as never)).toBeUndefined();
+      // Clearing the default still leaves the active pointer intact.
+      expect(readActiveProjectId(env as never)).toBe("proj_active");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("project default set rejects an unknown project", async () => {
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-default-unknown-"));
+    const env = {
+      GROWTH_OS_HOME: growthHome,
+      GROWTH_OS_API_URL: "http://127.0.0.1:3999",
+      GROWTH_OS_OPERATOR_TOKEN: "op"
+    } as Record<string, string>;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ ok: true, projects: [{ id: "proj_x", name: "Beta" }] }), {
+        status: 200
+      })) as typeof fetch;
+    try {
+      await expect(runCommand("project", ["default", "set", "Nope"], env)).rejects.toThrow(
+        /Unknown project: Nope/
+      );
+      expect(readDefaultProjectId(env as never)).toBeUndefined();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("project current reports the pin and the persisted default separately", async () => {
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-current-"));
+    const env = { GROWTH_OS_HOME: growthHome } as Record<string, string>;
+    writeDefaultProjectId("proj_default", env as never);
+    // No pin yet, but a default exists → not a "no_active_project" error.
+    const current0 = await runCommand("project", ["current"], env);
+    expect(current0).toMatchObject({ ok: true, pin: null, defaultProjectId: "proj_default" });
+
+    // An in-process env pin (set by `--project`/CI/`@name`) is reported as the pin.
+    const pinnedEnv = { ...env, GROWTH_OS_WORKSPACE_ID: "proj_pinned" } as Record<string, string>;
+    const current1 = await runCommand("project", ["current"], pinnedEnv);
+    expect(current1).toMatchObject({
+      ok: true,
+      pin: "proj_pinned",
+      activeProjectId: "proj_pinned",
+      defaultProjectId: "proj_default"
+    });
+  });
+
+  it("project current returns no_active_project when there is neither pin nor default", async () => {
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-current-empty-"));
+    const env = { GROWTH_OS_HOME: growthHome } as Record<string, string>;
+    const current = await runCommand("project", ["current"], env);
+    expect(current).toMatchObject({ ok: false, error: { code: "no_active_project" } });
+  });
+
+  describe("applySessionDefaultPin (no default on load + migration notice)", () => {
+    it("loads a persisted default into the in-process env pin and shows no notice", () => {
+      const growthHome = mkdtempSync(join(tmpdir(), "growth-os-pin-default-"));
+      const env = { GROWTH_OS_HOME: growthHome } as Record<string, string>;
+      writeDefaultProjectId("proj_default", env as never);
+      const notice = applySessionDefaultPin(env as never);
+      expect(env.GROWTH_OS_WORKSPACE_ID).toBe("proj_default");
+      expect(notice).toBeUndefined();
+    });
+
+    it("leaves the session unpinned and emits no notice on a fresh install", () => {
+      const growthHome = mkdtempSync(join(tmpdir(), "growth-os-pin-fresh-"));
+      const env = { GROWTH_OS_HOME: growthHome } as Record<string, string>;
+      const notice = applySessionDefaultPin(env as never);
+      expect(env.GROWTH_OS_WORKSPACE_ID).toBeUndefined();
+      expect(notice).toBeUndefined();
+    });
+
+    it("does not overwrite an already-set env pin with the default", () => {
+      const growthHome = mkdtempSync(join(tmpdir(), "growth-os-pin-explicit-"));
+      const env = {
+        GROWTH_OS_HOME: growthHome,
+        GROWTH_OS_WORKSPACE_ID: "proj_explicit"
+      } as Record<string, string>;
+      writeDefaultProjectId("proj_default", env as never);
+      applySessionDefaultPin(env as never);
+      expect(env.GROWTH_OS_WORKSPACE_ID).toBe("proj_explicit");
+    });
+
+    it("emits a one-time migration notice for a legacy activeProjectId, then latches", () => {
+      const growthHome = mkdtempSync(join(tmpdir(), "growth-os-pin-legacy-"));
+      const env = { GROWTH_OS_HOME: growthHome } as Record<string, string>;
+      writeActiveProjectId("proj_legacy", env as never);
+      const first = applySessionDefaultPin(env as never);
+      expect(first).toMatch(/\/project default set|@name/);
+      // No default existed → the legacy pointer is NOT promoted to the env pin.
+      expect(env.GROWTH_OS_WORKSPACE_ID).toBeUndefined();
+      expect(readMigrationNoticeShown(env as never)).toBe(true);
+      // Second session: the notice does not repeat.
+      const second = applySessionDefaultPin({ GROWTH_OS_HOME: growthHome } as never);
+      expect(second).toBeUndefined();
+    });
+  });
+
+  it("resetAgentRuntime closes the memoized runtime and rebuilds a new one", () => {
+    let built = 0;
+    const closed: number[] = [];
+    const factory = (): CliAgentRuntime => {
+      const id = ++built;
+      return {
+        chat: async () => ({ ok: true }),
+        listSessions: async () => ({ ok: true }),
+        resumeSession: async () => ({ ok: true }),
+        compactSession: async () => ({ ok: true }),
+        confirmAction: async () => ({ ok: true }),
+        listMemory: async () => ({ ok: true }),
+        addMemory: async () => ({ ok: true }),
+        deleteMemory: async () => ({ ok: true }),
+        close: async () => {
+          closed.push(id);
+        }
+      };
+    };
+    try {
+      const first = ensureActiveAgentRuntime(factory);
+      // Memoized — same instance on a second call, no rebuild.
+      expect(ensureActiveAgentRuntime(factory)).toBe(first);
+      expect(built).toBe(1);
+      resetAgentRuntime();
+      const second = ensureActiveAgentRuntime(factory);
+      expect(second).not.toBe(first);
+      expect(built).toBe(2);
+      expect(closed).toEqual([1]); // the prior runtime's close() ran on reset
+    } finally {
+      resetAgentRuntime();
+    }
+  });
+
+  it("global --project resolves a project name to its id via direct DB lookup", async () => {
+    const env = { GROWTH_OS_WORKSPACE_ROOT: "/tmp/whatever" } as Record<string, string>;
+    const fakeDb = {
+      async one(_sql: string, params?: unknown[]) {
+        return { id: "proj_bbbbbbbbbbbbbbbb", name: String(params?.[0]), createdAt: "t" };
+      },
+      async close() {}
+    };
+    const resolved = await resolveProjectFlag(["--project", "Acme", "sources"], env, {
+      createDb: () => fakeDb as never,
+      databaseUrl: "postgres://test"
+    });
+    expect(resolved.command).toBe("sources");
+    expect(resolved.args).toEqual(["sources"]);
+    expect(env.GROWTH_OS_WORKSPACE_ID).toBe("proj_bbbbbbbbbbbbbbbb");
+  });
+
+  it("global --project throws for an unknown project", async () => {
+    const env = { GROWTH_OS_WORKSPACE_ROOT: "/tmp/whatever" } as Record<string, string>;
+    const fakeDb = {
+      async one() {
+        return null;
+      },
+      async close() {}
+    };
+    await expect(
+      resolveProjectFlag(["--project=Ghost", "sources"], env, {
+        createDb: () => fakeDb as never,
+        databaseUrl: "postgres://test"
+      })
+    ).rejects.toThrow(/Unknown project: Ghost/);
+  });
+
+  it("global --project is skipped for DB-down-tolerant commands (status)", async () => {
+    const env = { GROWTH_OS_WORKSPACE_ROOT: "/tmp/whatever" } as Record<string, string>;
+    let opened = false;
+    const resolved = await resolveProjectFlag(["--project", "Acme", "status"], env, {
+      createDb: () => {
+        opened = true;
+        return { async one() { return null; }, async close() {} } as never;
+      },
+      databaseUrl: "postgres://test"
+    });
+    expect(resolved.command).toBe("status");
+    expect(resolved.args).toEqual(["status"]);
+    expect(opened).toBe(false); // no DB resolution for status
+    expect(env.GROWTH_OS_WORKSPACE_ID).toBeUndefined();
+  });
+
+  it("first-run project step (--project-name) creates a project and writes the active pointer", async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "growth-os-project-step-"));
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-project-step-home-"));
+    let closed = false;
+    const fakeDb = {
+      async one(sql: string, params?: unknown[]) {
+        if (sql.includes("select id, name")) {
+          return null;
+        }
+        return { id: String(params?.[0]), name: String(params?.[1]), createdAt: "t" };
+      },
+      async close() {
+        closed = true;
+      }
+    };
+    try {
+      await runCommand("init", [], { GROWTH_OS_WORKSPACE_ROOT: workspaceRoot });
+      const env = { GROWTH_OS_WORKSPACE_ROOT: workspaceRoot, GROWTH_OS_HOME: growthHome };
+      const result = await setupProjectStep(["--project-name", "Acme"], env, {
+        createDb: () => fakeDb as never
+      });
+      expect(result).toMatchObject({ section: "project", status: "created", name: "Acme" });
+      expect(readActiveProjectId(env as never)).toMatch(/^proj_/);
+      expect(closed).toBe(true);
+    } finally {
+      rmSync(workspaceRoot, { recursive: true, force: true });
+      rmSync(growthHome, { recursive: true, force: true });
+    }
+  });
+
+  it("first-run project step (interactive) prompts for a name when none is provided", async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "growth-os-project-prompt-"));
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-project-prompt-home-"));
+    const fakeDb = {
+      async one(sql: string, params?: unknown[]) {
+        if (sql.includes("select id, name")) {
+          return null;
+        }
+        return { id: String(params?.[0]), name: String(params?.[1]), createdAt: "t" };
+      },
+      async close() {}
+    };
+    try {
+      await runCommand("init", [], { GROWTH_OS_WORKSPACE_ROOT: workspaceRoot });
+      const env = { GROWTH_OS_WORKSPACE_ROOT: workspaceRoot, GROWTH_OS_HOME: growthHome };
+      const result = await setupProjectStep([], env, {
+        prompt: true,
+        promptName: async () => "Prompted Co",
+        createDb: () => fakeDb as never
+      });
+      expect(result).toMatchObject({ section: "project", status: "created", name: "Prompted Co" });
+      expect(readActiveProjectId(env as never)).toMatch(/^proj_/);
+    } finally {
+      rmSync(workspaceRoot, { recursive: true, force: true });
+      rmSync(growthHome, { recursive: true, force: true });
+    }
+  });
+
+  it("reuses the active project when setup keeps the prompted project name", async () => {
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-project-keep-home-"));
+    const projects = new Map<string, { id: string; name: string; createdAt: string }>();
+    const activeProject = { id: "proj_active", name: "Acme", createdAt: "t" };
+    projects.set(activeProject.id, activeProject);
+    projects.set(activeProject.name, activeProject);
+    const fakeDb = {
+      async one(sql: string, params?: unknown[]) {
+        if (sql.includes("select id, name")) {
+          return (
+            projects.get(String(params?.[0] ?? "")) ??
+            projects.get(String(params?.[1] ?? "")) ??
+            null
+          );
+        }
+        throw new Error(`Unexpected SQL in keep-current-project test: ${sql}`);
+      },
+      async close() {}
+    };
+    try {
+      const env = { GROWTH_OS_HOME: growthHome };
+      writeActiveProjectId(activeProject.id, env as never);
+
+      const result = await setupProjectStep([], env, {
+        interview: {
+          projectName: activeProject.name,
+          productSurface: "web",
+          providerInventory: []
+        },
+        createDb: () => fakeDb as never
+      });
+
+      expect(result).toMatchObject({
+        section: "project",
+        status: "exists",
+        activeProjectId: activeProject.id,
+        name: activeProject.name
+      });
+      expect(readActiveProjectId(env as never)).toBe(activeProject.id);
+    } finally {
+      rmSync(growthHome, { recursive: true, force: true });
+    }
+  });
+
+  it("switches setup to an existing differently named project", async () => {
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-project-switch-home-"));
+    const projects = new Map<string, { id: string; name: string; createdAt: string }>();
+    const activeProject = { id: "proj_active", name: "Acme", createdAt: "t" };
+    const existingProject = { id: "proj_beta", name: "Beta", createdAt: "t" };
+    for (const project of [activeProject, existingProject]) {
+      projects.set(project.id, project);
+      projects.set(project.name, project);
+    }
+    const fakeDb = {
+      async one(sql: string, params?: unknown[]) {
+        if (sql.includes("select id, name")) {
+          return (
+            projects.get(String(params?.[0] ?? "")) ??
+            projects.get(String(params?.[1] ?? "")) ??
+            null
+          );
+        }
+        throw new Error(`Unexpected SQL in switch-existing-project test: ${sql}`);
+      },
+      async close() {}
+    };
+    try {
+      const env = { GROWTH_OS_HOME: growthHome };
+      writeActiveProjectId(activeProject.id, env as never);
+
+      const result = await setupProjectStep([], env, {
+        interview: {
+          projectName: existingProject.name,
+          productSurface: "web",
+          providerInventory: []
+        },
+        createDb: () => fakeDb as never
+      });
+
+      expect(result).toMatchObject({
+        section: "project",
+        status: "selected",
+        activeProjectId: existingProject.id,
+        name: existingProject.name
+      });
+      expect(readActiveProjectId(env as never)).toBe(existingProject.id);
+    } finally {
+      rmSync(growthHome, { recursive: true, force: true });
+    }
+  });
+
+  it("creates and activates a newly named project during setup", async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "growth-os-project-create-new-"));
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-project-create-new-home-"));
+    const projects = new Map<string, { id: string; name: string; createdAt: string }>();
+    const activeProject = { id: "proj_active", name: "Acme", createdAt: "t" };
+    projects.set(activeProject.id, activeProject);
+    projects.set(activeProject.name, activeProject);
+    const fakeDb = {
+      async one(sql: string, params?: unknown[]) {
+        if (sql.includes("select id, name")) {
+          return (
+            projects.get(String(params?.[0] ?? "")) ??
+            projects.get(String(params?.[1] ?? "")) ??
+            null
+          );
+        }
+        if (sql.includes("insert into workspaces")) {
+          const row = {
+            id: String(params?.[0]),
+            name: String(params?.[1]),
+            createdAt: "t"
+          };
+          projects.set(row.id, row);
+          projects.set(row.name, row);
+          return row;
+        }
+        throw new Error(`Unexpected SQL in create-new-project test: ${sql}`);
+      },
+      async close() {}
+    };
+    try {
+      await runCommand("init", [], { GROWTH_OS_WORKSPACE_ROOT: workspaceRoot });
+      const env = { GROWTH_OS_WORKSPACE_ROOT: workspaceRoot, GROWTH_OS_HOME: growthHome };
+      writeActiveProjectId(activeProject.id, env as never);
+
+      const result = await setupProjectStep([], env, {
+        interview: {
+          projectName: "Gamma",
+          productSurface: "web",
+          providerInventory: []
+        },
+        createDb: () => fakeDb as never
+      });
+
+      expect(result).toMatchObject({
+        section: "project",
+        status: "created",
+        name: "Gamma"
+      });
+      expect(readActiveProjectId(env as never)).toMatch(/^proj_/);
+      expect(readActiveProjectId(env as never)).not.toBe(activeProject.id);
+    } finally {
+      rmSync(workspaceRoot, { recursive: true, force: true });
+      rmSync(growthHome, { recursive: true, force: true });
+    }
+  });
+
+  it("builds a setup interview from setup flags with normalized provider inventory", async () => {
+    const interview = await runSetupInterview(
+      [
+        "--project-name",
+        "Acme",
+        "--website-url",
+        "www.ACME.test/",
+        "--providers",
+        "ga4,posthog",
+        "--ga4-account",
+        "--ga4-installed",
+        "installed",
+        "--x-installed",
+        "not_installed"
+      ]
+    );
+
+    expect(interview).toEqual({
+      projectName: "Acme",
+      websiteUrl: "https://acme.test",
+      productSurface: "web",
+      providerInventory: [
+        { provider: "ga4", hasAccount: true, installState: "installed", selected: true, recommended: true },
+        { provider: "posthog", hasAccount: false, installState: "unknown", selected: true, recommended: true },
+        { provider: "x", hasAccount: false, installState: "not_installed", selected: false, recommended: false }
+      ]
+    });
+  });
+
+  it("preserves deprecated setup flags via compatibility warnings instead of silently ignoring them", async () => {
+    const warnings: string[] = [];
+
+    const interview = await runSetupInterview(
+      [
+        "--project-name",
+        "Acme",
+        "--product-description",
+        "AI bookkeeping software",
+        "--product-surface",
+        "mobile"
+      ],
+      { onWarning: (message) => warnings.push(message) }
+    );
+
+    expect(interview).toEqual({
+      projectName: "Acme",
+      productDescription: "AI bookkeeping software",
+      websiteUrl: undefined,
+      productSurface: "web",
+      providerInventory: [
+        { provider: "ga4", hasAccount: false, installState: "unknown", selected: true, recommended: true },
+        { provider: "posthog", hasAccount: false, installState: "unknown", selected: true, recommended: true },
+        { provider: "x", hasAccount: false, installState: "unknown", selected: false, recommended: false }
+      ]
+    });
+    expect(warnings).toHaveLength(2);
+    expect(warnings[0]).toContain("--product-description is deprecated");
+    expect(warnings[1]).toContain("--product-surface is deprecated");
+    expect(warnings[1]).toContain("using web");
+  });
+
+  it("keeps explicit http URLs for common non-loopback development hosts", async () => {
+    const interview = await runSetupInterview([
+      "--project-name",
+      "Acme",
+      "--website-url",
+      "http://app.local:3000/"
+    ]);
+
+    expect(interview?.websiteUrl).toBe("http://app.local:3000");
+  });
+
+  it("asks for project context and url before provider setup questions", async () => {
+    const promptOrder: string[] = [];
+    const promptTextSpy = vi.spyOn(setupPrompts, "promptText").mockImplementation(async (question, defaultValue = "") => {
+      promptOrder.push(question);
+      if (question === "What's your project name?") {
+        return "Acme";
+      }
+      return defaultValue;
+    });
+    const promptChoiceSpy = vi.spyOn(setupPrompts, "promptChoice");
+    const promptUrlSpy = vi.spyOn(setupPrompts, "promptUrl").mockImplementation(async (question) => {
+      promptOrder.push(question);
+      expect(question).toBe("What's your URL?");
+      return "acme.test";
+    });
+    const promptProviderMatrixSpy = vi.spyOn(setupPrompts, "promptProviderMatrix").mockImplementation(async (rows) => {
+      promptOrder.push("Which of these should we help you set up first?");
+      expect(rows).toEqual([
+        { provider: "ga4", hasAccount: false, installState: "unknown", selected: true, recommended: true },
+        { provider: "posthog", hasAccount: false, installState: "unknown", selected: true, recommended: true },
+        { provider: "x", hasAccount: false, installState: "unknown", selected: false, recommended: false }
+      ]);
+      return rows;
+    });
+
+    try {
+      const interview = await runSetupInterview([], { prompt: true });
+
+      expect(promptOrder).toEqual([
+        "What's your project name?",
+        "What's your URL?",
+        "Which of these should we help you set up first?"
+      ]);
+      expect(promptChoiceSpy).not.toHaveBeenCalled();
+      expect(interview).toEqual({
+        projectName: "Acme",
+        websiteUrl: "https://acme.test",
+        productSurface: "web",
+        providerInventory: [
+          { provider: "ga4", hasAccount: false, installState: "unknown", selected: true, recommended: true },
+          { provider: "posthog", hasAccount: false, installState: "unknown", selected: true, recommended: true },
+          { provider: "x", hasAccount: false, installState: "unknown", selected: false, recommended: false }
+        ]
+      });
+    } finally {
+      promptTextSpy.mockRestore();
+      promptChoiceSpy.mockRestore();
+      promptUrlSpy.mockRestore();
+      promptProviderMatrixSpy.mockRestore();
+    }
+  });
+
+  it("prompts for the project name before the url without prefilled active-project text", async () => {
+    const promptOrder: string[] = [];
+
+    const interview = await runSetupInterview([], {
+      prompt: true,
+      defaultProjectName: "Acme",
+      promptProjectName: async (question, defaultValue = "") => {
+        promptOrder.push(question);
+        expect(question).toBe("What's your project name?");
+        expect(defaultValue).toBe("");
+        return "Acme";
+      },
+      promptWebsiteUrl: async (question) => {
+        promptOrder.push(question);
+        expect(question).toBe("What's your URL?");
+        return "acme.test";
+      },
+      promptProviderInventory: async (rows) => {
+        promptOrder.push("Which of these should we help you set up first?");
+        return rows;
+      }
+    });
+
+    expect(promptOrder).toEqual([
+      "What's your project name?",
+      "What's your URL?",
+      "Which of these should we help you set up first?"
+    ]);
+    expect(interview).toEqual({
+      projectName: "Acme",
+      websiteUrl: "https://acme.test",
+      productSurface: "web",
+      providerInventory: [
+        { provider: "ga4", hasAccount: false, installState: "unknown", selected: true, recommended: true },
+        { provider: "posthog", hasAccount: false, installState: "unknown", selected: true, recommended: true },
+        { provider: "x", hasAccount: false, installState: "unknown", selected: false, recommended: false }
+      ]
+    });
+  });
+
+  it("threads the setup interview through the project step result", async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "growth-os-project-interview-"));
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-project-interview-home-"));
+    const fakeDb = {
+      async one(sql: string, params?: unknown[]) {
+        if (sql.includes("select id, name")) {
+          return null;
+        }
+        return { id: String(params?.[0]), name: String(params?.[1]), createdAt: "t" };
+      },
+      async close() {}
+    };
+    try {
+      await runCommand("init", [], { GROWTH_OS_WORKSPACE_ROOT: workspaceRoot });
+      const env = { GROWTH_OS_WORKSPACE_ROOT: workspaceRoot, GROWTH_OS_HOME: growthHome };
+      const interview = await runSetupInterview([], {
+        prompt: true,
+        promptProjectName: async () => "Prompted Co",
+        promptWebsiteUrl: async () => "prompted.co",
+        promptProviderInventory: async (rows) => rows.map((row) => ({ ...row, selected: row.provider !== "x" }))
+      });
+
+      const result = await setupProjectStep([], env, {
+        prompt: true,
+        interview,
+        createDb: () => fakeDb as never
+      });
+
+      expect(result).toMatchObject({
+        section: "project",
+        status: "created",
+        interview: {
+          projectName: "Prompted Co",
+          websiteUrl: "https://prompted.co",
+          productSurface: "web",
+          providerInventory: [
+            expect.objectContaining({ provider: "ga4", selected: true }),
+            expect.objectContaining({ provider: "posthog", selected: true }),
+            expect.objectContaining({ provider: "x", selected: false })
+          ]
+        }
+      });
+    } finally {
+      rmSync(workspaceRoot, { recursive: true, force: true });
+      rmSync(growthHome, { recursive: true, force: true });
+    }
+  });
+
+  // Drives the real setup wizard, whose setupProjectStep opens a pg pool against
+  // the local dev Postgres — gate like the integration suites (ECONNREFUSED on CI).
+  it.skipIf(!process.env.GROWTH_OS_INTEGRATION_DB)("runs analytics onboarding from the production setup wizard path", async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "growth-os-setup-onboarding-"));
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-setup-onboarding-home-"));
+    const runSetupOnboarding = vi.fn<RunSetupOnboardingMock>(async ({ interview, workspaceId }: Parameters<RunSetupOnboardingMock>[0]) => ({
+      ok: false,
+      section: "connectors" as const,
+      workflow: "onboarding" as const,
+      interview,
+      selectedProviders: ["ga4"],
+      recommendedProviders: ["ga4", "posthog"],
+      completed: [],
+      paused: ["ga4"],
+      failed: [],
+      providers: [
+        {
+          provider: "ga4" as const,
+          selected: true,
+          recommended: true,
+          status: "paused_handoff" as const,
+          runId: "run_ga4",
+          handoff: {
+            url: "https://accounts.google.com/",
+            instructions: "Finish Google sign-in."
+          }
+        }
+      ],
+      resolvedPublicArtifacts: {
+        ga4: {},
+        posthog: {},
+        x: {}
+      },
+      next: "Run `infinite local setup resume run_ga4` after completing the GA4 handoff."
+    }));
+    try {
+      await runCommand("init", [], { GROWTH_OS_WORKSPACE_ROOT: workspaceRoot, GROWTH_OS_HOME: growthHome });
+      const result = await runSetupWizard(
+        [
+          "--provider",
+          "codex",
+          "--model",
+          "gpt-5.4",
+          "--auth",
+          "none",
+          "--project-name",
+          "Acme",
+          "--website-url",
+          "acme.test",
+          "--providers",
+          "ga4"
+        ],
+        {
+          GROWTH_OS_WORKSPACE_ROOT: workspaceRoot,
+          GROWTH_OS_HOME: growthHome,
+          GROWTH_OS_CLI_DRY_RUN: "1"
+        },
+        { runSetupOnboarding }
+      );
+
+      expect(runSetupOnboarding).toHaveBeenCalledWith(
+        expect.objectContaining({
+          workspaceId: expect.stringMatching(/^proj_/),
+          interview: expect.objectContaining({
+            projectName: "Acme",
+            websiteUrl: "https://acme.test",
+            productSurface: "web"
+          })
+        })
+      );
+      expect(result).toMatchObject({
+        section: "wizard",
+        next: "Run `infinite local setup resume run_ga4` after completing the GA4 handoff."
+      });
+      const rendered = renderCliResult(result);
+      expect(rendered).toContain("GA4");
+      expect(rendered).toContain("Run ID: run_ga4");
+      expect(rendered).toContain("Resume: infinite local setup resume run_ga4");
+      expect(rendered).toContain("Action required: Finish Google sign-in.");
+      expect(rendered).toContain("Open this page: https://accounts.google.com/");
+    } finally {
+      rmSync(workspaceRoot, { recursive: true, force: true });
+      rmSync(growthHome, { recursive: true, force: true });
+    }
+  });
+
+  // Drives the real setup wizard, whose setupProjectStep opens a pg pool against
+  // the local dev Postgres — gate like the integration suites (ECONNREFUSED on CI).
+  it.skipIf(!process.env.GROWTH_OS_INTEGRATION_DB)("default setup with an active project skips the legacy reconfigure chooser and proceeds into onboarding", async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "growth-os-setup-active-project-"));
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-setup-active-project-home-"));
+    const originalStdinIsTty = process.stdin.isTTY;
+    const promptQuestions: string[] = [];
+    const promptTextQuestions: string[] = [];
+    const projectNameDefaults: string[] = [];
+    const runSetupRuntimeSection = vi.fn(async () => {
+      throw new Error("runtime reconfigure should not run");
+    });
+    const runSetupOnboarding = vi.fn<RunSetupOnboardingMock>(async ({ interview, workspaceId }: Parameters<RunSetupOnboardingMock>[0]) => ({
+      ok: true,
+      section: "connectors" as const,
+      workflow: "onboarding" as const,
+      interview,
+      selectedProviders: ["ga4"],
+      recommendedProviders: ["ga4", "posthog"],
+      completed: ["ga4"],
+      paused: [],
+      failed: [],
+      providers: [
+        {
+          provider: "ga4" as const,
+          selected: true,
+          recommended: true,
+          status: "completed" as const
+        }
+      ],
+      resolvedPublicArtifacts: {
+        ga4: {},
+        posthog: {},
+        x: {}
+      },
+      next: "Run `infinite` to continue."
+    }));
+    const promptChoiceSpy = vi.spyOn(setupPrompts, "promptChoice").mockImplementation(async (question, choices) => {
+      promptQuestions.push(question);
+      if (question === "How would you like to configure Infinite?") {
+        throw new Error("legacy reconfigure chooser should not run");
+      }
+      if (question === "Runtime configuration") return 0;
+      if (question === "Select provider:") return 0;
+      if (question === "Select default model:") return 0;
+      if (question === "Select auth mode:") return choices.indexOf("none");
+      throw new Error(`Unexpected promptChoice question in test: ${question}`);
+    });
+    const promptTextSpy = vi.spyOn(setupPrompts, "promptText").mockImplementation(async (question, defaultValue = "") => {
+      promptTextQuestions.push(question);
+      if (question === "What's your project name?") {
+        projectNameDefaults.push(defaultValue);
+        return "New Project";
+      }
+      return defaultValue;
+    });
+    const promptUrlSpy = vi.spyOn(setupPrompts, "promptUrl").mockImplementation(async (question) => {
+      expect(question).toBe("What's your URL?");
+      return "acme.test";
+    });
+    const promptProviderMatrixSpy = vi.spyOn(setupPrompts, "promptProviderMatrix").mockImplementation(async (rows) =>
+      rows.map((row, index) => ({ ...row, selected: index === 0 }))
+    );
+    try {
+      Object.defineProperty(process.stdin, "isTTY", { configurable: true, value: true });
+      await runCommand("init", [], {
+        GROWTH_OS_WORKSPACE_ROOT: workspaceRoot,
+        GROWTH_OS_HOME: growthHome
+      });
+      writeActiveProjectId("Acme", { GROWTH_OS_HOME: growthHome } as never);
+
+      const result = await runSetupWizard(
+        [],
+        {
+          GROWTH_OS_WORKSPACE_ROOT: workspaceRoot,
+          GROWTH_OS_HOME: growthHome,
+          GROWTH_OS_WORKSPACE_ID: "Acme",
+          GROWTH_OS_CLI_DRY_RUN: "1"
+        },
+        {
+          runSetupOnboarding,
+          runSetupRuntimeSection
+        }
+      );
+
+      expect(runSetupOnboarding).toHaveBeenCalledWith(
+        expect.objectContaining({
+          workspaceId: "Acme",
+          interview: expect.objectContaining({
+            projectName: "New Project",
+            websiteUrl: "https://acme.test",
+            productSurface: "web"
+          })
+        })
+      );
+      expect(runSetupRuntimeSection).not.toHaveBeenCalled();
+      expect(promptQuestions).not.toContain("How would you like to configure Infinite?");
+      expect(promptQuestions).not.toContain("What are you instrumenting first?");
+      expect(promptQuestions).not.toContain("Runtime configuration");
+      expect(promptTextQuestions).toEqual(["What's your project name?"]);
+      expect(projectNameDefaults).toEqual([""]);
+      expect(result).toMatchObject({ section: "wizard" });
+      expect(renderCliResult(result)).toContain("Using existing setup");
+      expect(renderCliResult(result)).not.toContain("Reconfigure (full)");
+      expect(promptChoiceSpy).toHaveBeenCalled();
+      expect(promptUrlSpy).toHaveBeenCalled();
+      expect(promptProviderMatrixSpy).toHaveBeenCalled();
+    } finally {
+      promptChoiceSpy.mockRestore();
+      promptTextSpy.mockRestore();
+      promptUrlSpy.mockRestore();
+      promptProviderMatrixSpy.mockRestore();
+      Object.defineProperty(process.stdin, "isTTY", { configurable: true, value: originalStdinIsTty });
+      rmSync(workspaceRoot, { recursive: true, force: true });
+      rmSync(growthHome, { recursive: true, force: true });
+    }
+  });
+
+  it("default setup reuses existing runtime while explicit reconfigure still routes through runtime setup", async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "growth-os-setup-runtime-routing-"));
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-setup-runtime-routing-home-"));
+    const originalStdinIsTty = process.stdin.isTTY;
+    const runSetupRuntimeSection = vi.fn(async (runtimeArgs: string[]) => ({
+      ok: true,
+      section: "runtime" as const,
+      runtime: {
+        mode: "local_docker",
+        configPath: "/workspace/.growth-os/config.yml",
+        envPath: "/workspace/.growth-os/.env",
+        databaseUrl: "postgres://growth:[redacted]@127.0.0.1:5432/growth",
+        migrations: { ok: true, skipped: true, mode: "compose_managed" },
+        start: { ok: true, skipped: runtimeArgs.includes("--no-start") }
+      }
+    }));
+    const runSetupOnboarding = vi.fn<RunSetupOnboardingMock>(async ({ interview, workspaceId }: Parameters<RunSetupOnboardingMock>[0]) => ({
+      ok: true,
+      section: "connectors" as const,
+      workflow: "onboarding" as const,
+      interview,
+      selectedProviders: ["ga4"],
+      recommendedProviders: ["ga4"],
+      completed: ["ga4"],
+      paused: [],
+      failed: [],
+      providers: [
+        {
+          provider: "ga4" as const,
+          selected: true,
+          recommended: true,
+          status: "completed" as const
+        }
+      ],
+      resolvedPublicArtifacts: {
+        ga4: {},
+        posthog: {},
+        x: {}
+      },
+      next: `Run \`infinite\` to continue in ${workspaceId}.`
+    }));
+    const promptChoiceSpy = vi.spyOn(setupPrompts, "promptChoice").mockImplementation(async (question, choices) => {
+      if (question === "Select provider:") return 0;
+      if (question === "Select default model:") return 0;
+      if (question === "Select auth mode:") return choices.indexOf("none");
+      throw new Error(`Unexpected promptChoice question in test: ${question}`);
+    });
+    const promptTextSpy = vi.spyOn(setupPrompts, "promptText").mockImplementation(async (_question, defaultValue = "") => defaultValue);
+    const promptUrlSpy = vi.spyOn(setupPrompts, "promptUrl").mockImplementation(async () => "acme.test");
+    const promptProviderMatrixSpy = vi.spyOn(setupPrompts, "promptProviderMatrix").mockImplementation(async (rows) =>
+      rows.map((row, index) => ({ ...row, selected: index === 0 }))
+    );
+    try {
+      Object.defineProperty(process.stdin, "isTTY", { configurable: true, value: true });
+      await runCommand("init", [], {
+        GROWTH_OS_WORKSPACE_ROOT: workspaceRoot,
+        GROWTH_OS_HOME: growthHome
+      });
+      writeActiveProjectId("proj_runtime", { GROWTH_OS_HOME: growthHome } as never);
+
+      const reuseResult = await runSetupWizard(
+        [],
+        {
+          GROWTH_OS_WORKSPACE_ROOT: workspaceRoot,
+          GROWTH_OS_HOME: growthHome,
+          GROWTH_OS_WORKSPACE_ID: "proj_runtime",
+          GROWTH_OS_CLI_DRY_RUN: "1"
+        },
+        {
+          runSetupOnboarding,
+          runSetupRuntimeSection
+        }
+      );
+
+      expect(runSetupRuntimeSection).not.toHaveBeenCalled();
+      expect(renderCliResult(reuseResult)).toContain("Using existing setup");
+
+      await runSetupWizard(
+        ["--reconfigure", "--provider=codex", "--model", "gpt-5.4", "--auth", "none", "--no-start"],
+        {
+          GROWTH_OS_WORKSPACE_ROOT: workspaceRoot,
+          GROWTH_OS_HOME: growthHome,
+          GROWTH_OS_WORKSPACE_ID: "proj_runtime",
+          GROWTH_OS_CLI_DRY_RUN: "1"
+        },
+        {
+          runSetupOnboarding,
+          runSetupRuntimeSection
+        }
+      );
+
+      expect(runSetupRuntimeSection).toHaveBeenCalledTimes(1);
+      expect(runSetupRuntimeSection).toHaveBeenCalledWith(["--mode", "local_docker", "--no-start"], expect.any(Object));
+    } finally {
+      promptChoiceSpy.mockRestore();
+      promptTextSpy.mockRestore();
+      promptUrlSpy.mockRestore();
+      promptProviderMatrixSpy.mockRestore();
+      Object.defineProperty(process.stdin, "isTTY", { configurable: true, value: originalStdinIsTty });
+      rmSync(workspaceRoot, { recursive: true, force: true });
+      rmSync(growthHome, { recursive: true, force: true });
+    }
+  });
+
+  it("default setup with no active project asks for project context before any legacy reconfigure chooser", async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "growth-os-setup-project-first-"));
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-setup-project-first-home-"));
+    const originalStdinIsTty = process.stdin.isTTY;
+    const sentinel = new Error("__project_context_prompt_reached__");
+    const promptQuestions: string[] = [];
+    const promptChoiceSpy = vi.spyOn(setupPrompts, "promptChoice").mockImplementation(async (question) => {
+      promptQuestions.push(question);
+      if (question === "How would you like to configure Infinite?") {
+        throw new Error("legacy reconfigure chooser should not run");
+      }
+      if (question === "Which project should Infinite set up?") {
+        throw sentinel;
+      }
+      throw new Error(`Unexpected promptChoice question before project prompt: ${question}`);
+    });
+    const promptTextSpy = vi.spyOn(setupPrompts, "promptText").mockImplementation(async (question) => {
+      if (question === "What's your project name?") {
+        throw sentinel;
+      }
+      throw new Error(`Unexpected promptText question before project prompt: ${question}`);
+    });
+    try {
+      Object.defineProperty(process.stdin, "isTTY", { configurable: true, value: true });
+      await runCommand("init", [], {
+        GROWTH_OS_WORKSPACE_ROOT: workspaceRoot,
+        GROWTH_OS_HOME: growthHome
+      });
+
+      await expect(
+        runSetupWizard([], {
+          GROWTH_OS_WORKSPACE_ROOT: workspaceRoot,
+          GROWTH_OS_HOME: growthHome,
+          GROWTH_OS_CLI_DRY_RUN: "1"
+        })
+      ).rejects.toBe(sentinel);
+
+      expect(promptQuestions).not.toContain("How would you like to configure Infinite?");
+    } finally {
+      promptChoiceSpy.mockRestore();
+      promptTextSpy.mockRestore();
+      Object.defineProperty(process.stdin, "isTTY", { configurable: true, value: originalStdinIsTty });
+      rmSync(workspaceRoot, { recursive: true, force: true });
+      rmSync(growthHome, { recursive: true, force: true });
+    }
+  });
+
+  it("does not auto-resume a paused active setup run before asking for project context", async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "growth-os-setup-resume-"));
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-setup-resume-home-"));
+    const originalStdinIsTty = process.stdin.isTTY;
+    const sentinel = new Error("__project_context_prompt_reached__");
+    const resumeSetupRun = vi.fn<ResumeSetupRunMock>(async () => ({
+      ok: false,
+      section: "connectors" as const,
+      workflow: "onboarding" as const,
+      interview: {
+        projectName: "Acme",
+        websiteUrl: "https://acme.test",
+        productSurface: "web",
+        providerInventory: [
+          { provider: "ga4", hasAccount: true, installState: "installed", selected: true, recommended: true },
+          { provider: "posthog", hasAccount: false, installState: "unknown", selected: false, recommended: true },
+          { provider: "x", hasAccount: false, installState: "unknown", selected: false, recommended: true }
+        ]
+      },
+      selectedProviders: ["ga4"],
+      recommendedProviders: ["ga4"],
+      completed: [],
+      paused: ["ga4"],
+      failed: [],
+      providers: [
+        { provider: "ga4" as const, selected: true, recommended: true, status: "paused_handoff" as const, runId: "run_active" }
+      ],
+      resolvedPublicArtifacts: {
+        ga4: {},
+        posthog: {},
+        x: {}
+      },
+      next: "Run `infinite local setup resume run_active` after completing the GA4 handoff."
+    }));
+    const promptTextSpy = vi.spyOn(setupPrompts, "promptText").mockImplementation(async (question, defaultValue = "") => {
+      if (question === "What's your project name?") {
+        expect(defaultValue).toBe("");
+        throw sentinel;
+      }
+      throw new Error(`Unexpected promptText question before project prompt: ${question}`);
+    });
+
+    try {
+      Object.defineProperty(process.stdin, "isTTY", { configurable: true, value: true });
+      const env = {
+        GROWTH_OS_WORKSPACE_ROOT: workspaceRoot,
+        GROWTH_OS_HOME: growthHome,
+        GROWTH_OS_WORKSPACE_ID: "proj_resume"
+      };
+      writeActiveProjectId("proj_resume", env as never);
+
+      await expect(
+        runSetupWizard(
+          [],
+          env,
+          {
+            activeSetupRun: {
+              id: "run_active",
+              provider: "ga4",
+              tool: "ga4",
+              status: "paused_handoff"
+            },
+            resumeSetupRun
+          },
+        )
+      ).rejects.toBe(sentinel);
+
+      expect(resumeSetupRun).not.toHaveBeenCalled();
+    } finally {
+      promptTextSpy.mockRestore();
+      Object.defineProperty(process.stdin, "isTTY", { configurable: true, value: originalStdinIsTty });
+      rmSync(workspaceRoot, { recursive: true, force: true });
+      rmSync(growthHome, { recursive: true, force: true });
+    }
+  });
+
+  it("does not auto-resume a running active setup run without resumable onboarding state", async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "growth-os-setup-running-no-resume-"));
+    const resumeSetupRun = vi.fn<ResumeSetupRunMock>(async () => ({
+      ok: true,
+      section: "connectors" as const,
+      workflow: "onboarding" as const,
+      interview: {
+        projectName: "Acme",
+        websiteUrl: "https://acme.test",
+        productSurface: "web",
+        providerInventory: []
+      },
+      selectedProviders: [],
+      recommendedProviders: [],
+      completed: [],
+      paused: [],
+      failed: [],
+      providers: [],
+      resolvedPublicArtifacts: {
+        ga4: {},
+        posthog: {},
+        x: {}
+      },
+      next: "Run `infinite` to continue."
+    }));
+    const sentinel = new Error("__runtime_section_reached__");
+    const runSetupRuntimeSection = vi.fn(async () => {
+      throw sentinel;
+    });
+
+    try {
+      await expect(
+        runSetupWizard(
+          [],
+          {
+            GROWTH_OS_WORKSPACE_ROOT: workspaceRoot,
+            GROWTH_OS_WORKSPACE_ID: "proj_running"
+          },
+          {
+            activeSetupRun: {
+              id: "run_running",
+              provider: "ga4",
+              tool: "ga4",
+              status: "running"
+            },
+            resumeSetupRun,
+            runSetupRuntimeSection
+          }
+        )
+      ).rejects.toBe(sentinel);
+
+      expect(resumeSetupRun).not.toHaveBeenCalled();
+    } finally {
+      rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("routes `setup resume <runId>` through the production resume path", async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "growth-os-setup-resume-command-"));
+    const resumeSetupRun = vi.fn<ResumeSetupRunMock>(async ({ runId }: Parameters<ResumeSetupRunMock>[0]) => ({
+      ok: false,
+      section: "connectors" as const,
+      workflow: "onboarding" as const,
+      interview: {
+        projectName: "Acme",
+        websiteUrl: "https://acme.test",
+        productSurface: "web",
+        providerInventory: [
+          { provider: "ga4", hasAccount: true, installState: "installed", selected: true, recommended: true },
+          { provider: "posthog", hasAccount: false, installState: "unknown", selected: false, recommended: true },
+          { provider: "x", hasAccount: false, installState: "unknown", selected: false, recommended: true }
+        ]
+      },
+      selectedProviders: ["ga4"],
+      recommendedProviders: ["ga4", "posthog"],
+      completed: [],
+      paused: ["ga4"],
+      failed: [],
+      providers: [
+        {
+          provider: "ga4" as const,
+          selected: true,
+          recommended: true,
+          status: "paused_handoff" as const,
+          runId,
+          handoff: {
+            url: "https://accounts.google.com/",
+            instructions: "Finish Google sign-in."
+          }
+        }
+      ],
+      resolvedPublicArtifacts: {
+        ga4: {},
+        posthog: {},
+        x: {}
+      },
+      next: `Run \`infinite local setup resume ${runId}\` after completing the GA4 handoff.`
+    }));
+
+    try {
+      const result = await runSetupWizard(
+        ["resume", "run_resume"],
+        {
+          GROWTH_OS_WORKSPACE_ROOT: workspaceRoot,
+          GROWTH_OS_WORKSPACE_ID: "proj_resume_explicit"
+        },
+        { resumeSetupRun }
+      );
+
+      expect(resumeSetupRun).toHaveBeenCalledWith({
+        runId: "run_resume",
+        env: expect.objectContaining({ GROWTH_OS_WORKSPACE_ID: "proj_resume_explicit" }),
+        workspaceId: "proj_resume_explicit"
+      });
+      expect(result).toMatchObject({
+        workflow: "onboarding",
+        next: "Run `infinite local setup resume run_resume` after completing the GA4 handoff."
+      });
+    } finally {
+      rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("passes a supplied PostHog resume key and API host through setup resume without rendering the secret", async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "growth-os-setup-resume-posthog-key-"));
+    const posthogPersonalApiKey = "phx_personal_key";
+    const resumeSetupRun = vi.fn<ResumeSetupRunMock>(async ({ runId }: Parameters<ResumeSetupRunMock>[0]) => ({
+      ok: true,
+      section: "connectors" as const,
+      workflow: "onboarding" as const,
+      interview: {
+        projectName: "Acme",
+        websiteUrl: "https://acme.test",
+        productSurface: "web",
+        providerInventory: [
+          { provider: "ga4", hasAccount: false, installState: "unknown", selected: false, recommended: false },
+          { provider: "posthog", hasAccount: true, installState: "unknown", selected: true, recommended: true },
+          { provider: "x", hasAccount: false, installState: "unknown", selected: false, recommended: false }
+        ]
+      },
+      selectedProviders: ["posthog"],
+      recommendedProviders: ["posthog"],
+      completed: ["posthog"],
+      paused: [],
+      failed: [],
+      providers: [],
+      resolvedPublicArtifacts: {
+        ga4: {},
+        posthog: { projectId: "project_1", projectKey: "phc_project_1" },
+        x: {}
+      },
+      next: `Run \`infinite local setup resume ${runId}\` after completing the POSTHOG handoff.`
+    }));
+
+    try {
+      const result = await runSetupWizard(
+        [
+          "resume",
+          "run_posthog",
+          "--personal-api-key",
+          posthogPersonalApiKey,
+          "--posthog-api-host",
+          "https://eu.posthog.com"
+        ],
+        {
+          GROWTH_OS_WORKSPACE_ROOT: workspaceRoot,
+          GROWTH_OS_WORKSPACE_ID: "proj_resume_posthog"
+        },
+        { resumeSetupRun }
+      );
+
+      expect(resumeSetupRun).toHaveBeenCalledWith({
+        runId: "run_posthog",
+        env: expect.objectContaining({ GROWTH_OS_WORKSPACE_ID: "proj_resume_posthog" }),
+        workspaceId: "proj_resume_posthog",
+        posthogPersonalApiKey,
+        posthogApiHost: "https://eu.posthog.com"
+      });
+      expect(renderCliResult(result)).not.toContain(posthogPersonalApiKey);
+    } finally {
+      rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("loads a supplied PostHog resume key from a local file without rendering the secret or path", async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "growth-os-setup-resume-posthog-key-file-"));
+    const posthogPersonalApiKey = "phx_personal_key_from_file";
+    const posthogPersonalApiKeyPath = join(workspaceRoot, "posthog-personal-api-key.txt");
+    writeFileSync(posthogPersonalApiKeyPath, `${posthogPersonalApiKey}\n`);
+    const resumeSetupRun = vi.fn<ResumeSetupRunMock>(async ({ runId }: Parameters<ResumeSetupRunMock>[0]) => ({
+      ok: true,
+      section: "connectors" as const,
+      workflow: "onboarding" as const,
+      interview: {
+        projectName: "Acme",
+        websiteUrl: "https://acme.test",
+        productSurface: "web",
+        providerInventory: [
+          { provider: "ga4", hasAccount: false, installState: "unknown", selected: false, recommended: false },
+          { provider: "posthog", hasAccount: true, installState: "unknown", selected: true, recommended: true },
+          { provider: "x", hasAccount: false, installState: "unknown", selected: false, recommended: false }
+        ]
+      },
+      selectedProviders: ["posthog"],
+      recommendedProviders: ["posthog"],
+      completed: ["posthog"],
+      paused: [],
+      failed: [],
+      providers: [],
+      resolvedPublicArtifacts: {
+        ga4: {},
+        posthog: { projectId: "project_1", projectKey: "phc_project_1" },
+        x: {}
+      },
+      next: `Run \`infinite local setup resume ${runId}\` after completing the POSTHOG handoff.`
+    }));
+
+    try {
+      const result = await runSetupWizard(
+        [
+          "resume",
+          "run_posthog",
+          "--posthog-personal-api-key-file",
+          posthogPersonalApiKeyPath,
+          "--posthog-api-host",
+          "https://eu.posthog.com"
+        ],
+        {
+          GROWTH_OS_WORKSPACE_ROOT: workspaceRoot,
+          GROWTH_OS_WORKSPACE_ID: "proj_resume_posthog"
+        },
+        { resumeSetupRun }
+      );
+
+      expect(resumeSetupRun).toHaveBeenCalledWith({
+        runId: "run_posthog",
+        env: expect.objectContaining({ GROWTH_OS_WORKSPACE_ID: "proj_resume_posthog" }),
+        workspaceId: "proj_resume_posthog",
+        posthogPersonalApiKey,
+        posthogApiHost: "https://eu.posthog.com"
+      });
+      const rendered = renderCliResult(result);
+      expect(rendered).not.toContain(posthogPersonalApiKey);
+      expect(rendered).not.toContain(posthogPersonalApiKeyPath);
+    } finally {
+      rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("prompts for a PostHog API host choice on the API-key handoff and defaults stale US handoff URLs to EU", async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "growth-os-setup-resume-posthog-host-"));
+    const readRunSummary = vi.fn(async () => ({
+      id: "run_posthog",
+      provider: "posthog",
+      status: "paused_handoff",
+      pendingHandoff: {
+        url: "https://us.posthog.com/settings/user-api-keys",
+        instructions: "Create a PostHog personal API key."
+      }
+    }));
+    const promptChoiceSpy = vi.spyOn(setupPrompts, "promptChoice").mockImplementation(async (_question, choices) => {
+      const euIndex = choices.findIndex((choice) => choice.toLowerCase().includes("eu"));
+      return euIndex === -1 ? 0 : euIndex;
+    });
+    const promptTextSpy = vi.spyOn(setupPrompts, "promptText").mockResolvedValue("https://custom.posthog.test");
+    const promptSecretSpy = vi.fn(async () => "phx_prompted");
+    try {
+      const secrets = await resolveSetupResumePostHogResumeSecrets(
+        ["resume", "run_posthog"],
+        {
+          GROWTH_OS_WORKSPACE_ROOT: workspaceRoot,
+          GROWTH_OS_WORKSPACE_ID: "proj_resume_prompt"
+        },
+        "proj_resume_prompt",
+        {
+          interactive: true,
+          readRunSummary,
+          promptSecret: promptSecretSpy
+        }
+      );
+
+      expect(secrets).toEqual({
+        personalApiKey: "phx_prompted",
+        apiHost: "https://eu.posthog.com"
+      });
+      expect(readRunSummary).toHaveBeenCalledWith("run_posthog");
+      expect(promptSecretSpy).toHaveBeenCalledWith("Paste PostHog personal API key (starts with phx_; stored encrypted): ");
+      expect(promptChoiceSpy).toHaveBeenCalledTimes(1);
+      const [question, choices, defaultIndex] = promptChoiceSpy.mock.calls[0] ?? [];
+      expect(String(question)).toContain("PostHog");
+      expect(defaultIndex).toBe(0);
+      expect(choices).toEqual(
+        expect.arrayContaining([
+          expect.stringMatching(/us/i),
+          expect.stringMatching(/eu/i),
+          expect.stringMatching(/custom/i)
+        ])
+      );
+      expect(promptTextSpy).not.toHaveBeenCalled();
+    } finally {
+      promptChoiceSpy.mockRestore();
+      promptTextSpy.mockRestore();
+      rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("prompts for a PostHog personal API key only when the paused resume run is on the API-key handoff", async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "growth-os-setup-resume-posthog-prompt-"));
+    const promptSecret = vi.fn(async () => "phx_prompted");
+    const readRunSummary = vi.fn(async () => ({
+      id: "run_posthog",
+      provider: "posthog",
+      status: "paused_handoff",
+      pendingHandoff: {
+        url: "https://us.posthog.com/settings/user-api-keys",
+        instructions: "Create a PostHog personal API key."
+      }
+    }));
+
+    try {
+      const secret = await resolveSetupResumePostHogPersonalApiKey(
+        ["resume", "run_posthog"],
+        {
+          GROWTH_OS_WORKSPACE_ROOT: workspaceRoot,
+          GROWTH_OS_WORKSPACE_ID: "proj_resume_prompt"
+        },
+        "proj_resume_prompt",
+        {
+          interactive: true,
+          readRunSummary,
+          promptSecret
+        }
+      );
+
+      expect(secret).toBe("phx_prompted");
+      expect(readRunSummary).toHaveBeenCalledWith("run_posthog");
+      expect(promptSecret).toHaveBeenCalledWith("Paste PostHog personal API key (starts with phx_; stored encrypted): ");
+    } finally {
+      rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("reads a PostHog personal API key from a local file before prompting", async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "growth-os-setup-resume-posthog-secret-file-"));
+    const secretFilePath = join(workspaceRoot, "posthog-personal-api-key.txt");
+    writeFileSync(secretFilePath, "phx_from_file\n");
+    const promptSecret = vi.fn(async () => "phx_prompted");
+
+    try {
+      const secret = await resolveSetupResumePostHogPersonalApiKey(
+        ["resume", "run_posthog", "--posthog-personal-api-key-file", secretFilePath],
+        {
+          GROWTH_OS_WORKSPACE_ROOT: workspaceRoot,
+          GROWTH_OS_WORKSPACE_ID: "proj_resume_prompt"
+        },
+        "proj_resume_prompt",
+        {
+          interactive: true,
+          promptSecret
+        }
+      );
+
+      expect(secret).toBe("phx_from_file");
+      expect(promptSecret).not.toHaveBeenCalled();
+    } finally {
+      rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects non-local PostHog personal API key file paths for setup resume", async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "growth-os-setup-resume-posthog-secret-file-url-"));
+
+    try {
+      await expect(
+        resolveSetupResumePostHogResumeSecrets(
+          [
+            "resume",
+            "run_posthog",
+            "--posthog-personal-api-key-file",
+            "file:///tmp/posthog-personal-api-key"
+          ],
+          {
+            GROWTH_OS_WORKSPACE_ROOT: workspaceRoot,
+            GROWTH_OS_WORKSPACE_ID: "proj_resume_prompt"
+          },
+          "proj_resume_prompt",
+          {
+            interactive: false
+          }
+        )
+      ).rejects.toThrow("PostHog personal API key file must be a local filesystem path.");
+    } finally {
+      rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("renders onboarding handoffs with the provider, run id, url, and exact resume command", () => {
+    const rendered = renderCliResult({
+      ok: false,
+      section: "connectors",
+      workflow: "onboarding",
+      interview: {
+        projectName: "Acme",
+        websiteUrl: "https://acme.test",
+        productSurface: "web",
+        providerInventory: [
+          { provider: "ga4", hasAccount: true, installState: "installed", selected: true, recommended: true },
+          { provider: "posthog", hasAccount: false, installState: "unknown", selected: false, recommended: true },
+          { provider: "x", hasAccount: false, installState: "unknown", selected: false, recommended: true }
+        ]
+      },
+      selectedProviders: ["ga4", "posthog"],
+      recommendedProviders: ["ga4", "posthog"],
+      completed: [],
+      paused: ["ga4", "posthog"],
+      failed: [],
+      providers: [
+        {
+          provider: "ga4" as const,
+          selected: true,
+          recommended: true,
+          status: "paused_handoff" as const,
+          runId: "run_ga4",
+          detail: "Detected a Google Analytics account but no property yet.",
+          handoff: {
+            url: "https://accounts.google.com/",
+            instructions: "Finish Google sign-in."
+          }
+        },
+        {
+          provider: "posthog" as const,
+          selected: true,
+          recommended: true,
+          status: "paused_handoff" as const,
+          runId: "run_posthog",
+          detail: "Create a PostHog personal API key.",
+          handoff: {
+            url: "https://us.posthog.com/settings/user-api-keys",
+            instructions: "Log in to PostHog, create a scoped personal API key, then resume setup."
+          }
+        }
+      ],
+      resolvedPublicArtifacts: {
+        ga4: {},
+        posthog: {},
+        x: {}
+      },
+      next: "Run `infinite local setup resume run_ga4` after completing the GA4 handoff."
+    });
+
+    expect(rendered).toContain("Infinite analytics onboarding");
+    expect(rendered).toContain("GA4");
+    expect(rendered).toContain("Run ID: run_ga4");
+    expect(rendered).toContain("Resume: infinite local setup resume run_ga4");
+    expect(rendered).toContain("Action required: Finish Google sign-in.");
+    expect(rendered).toContain("Open this page: https://accounts.google.com/");
+    expect(rendered).toContain("Finish Google sign-in.");
+    expect(rendered).toContain("PostHog");
+    expect(rendered).toContain("Run ID: run_posthog");
+    expect(rendered).toContain("Resume: infinite local setup resume run_posthog");
+    expect(rendered).toContain("Action required: Log in to PostHog, create a scoped personal API key, then resume setup.");
+    expect(rendered).toContain("Open this page: https://us.posthog.com/settings/user-api-keys");
+  });
+
+  it("prints the complete infinite-tag install command as the final onboarding instruction", () => {
+    const rendered = renderCliResult({
+      ok: true,
+      section: "connectors",
+      workflow: "onboarding",
+      interview: {
+        projectName: "Acme",
+        websiteUrl: "https://acme.test",
+        productSurface: "web",
+        providerInventory: [
+          { provider: "ga4", hasAccount: true, installState: "unknown", selected: true, recommended: true }
+        ]
+      },
+      selectedProviders: ["ga4"],
+      recommendedProviders: ["ga4"],
+      completed: ["ga4"],
+      paused: [],
+      failed: [],
+      providers: [{ provider: "ga4" as const, selected: true, recommended: true, status: "completed" as const }],
+      resolvedPublicArtifacts: {
+        ga4: { measurementId: "G-ACME123", propertyId: "properties/123" },
+        posthog: {},
+        x: {}
+      },
+      installCommand: "npx infinite-tag install --workspace proj_1 --ga4-measurement-id G-ACME123 --yes",
+      installArtifactsPath: `${homedir()}/.infinite/artifacts/proj_1.json`,
+      next: "Run `infinite local setup query` or `infinite` to continue."
+    });
+
+    expect(rendered).toContain("Install your analytics tags — run this inside your website's code repo:");
+    expect(rendered).toContain("npx infinite-tag install --workspace proj_1 --ga4-measurement-id G-ACME123 --yes");
+    expect(rendered).toContain(
+      "(on this machine you can simply run: npx infinite-tag install — Infinite saved your public keys to ~/.infinite/artifacts/proj_1.json)"
+    );
+  });
+
+  it("omits the same-machine hint when the artifacts handoff file was not written", () => {
+    const rendered = renderCliResult({
+      ok: true,
+      section: "connectors",
+      workflow: "onboarding",
+      interview: {
+        projectName: "Acme",
+        websiteUrl: "https://acme.test",
+        productSurface: "web",
+        providerInventory: [
+          { provider: "ga4", hasAccount: true, installState: "unknown", selected: true, recommended: true }
+        ]
+      },
+      selectedProviders: ["ga4"],
+      recommendedProviders: ["ga4"],
+      completed: ["ga4"],
+      paused: [],
+      failed: [],
+      providers: [{ provider: "ga4" as const, selected: true, recommended: true, status: "completed" as const }],
+      resolvedPublicArtifacts: {
+        ga4: { measurementId: "G-ACME123", propertyId: "properties/123" },
+        posthog: {},
+        x: {}
+      },
+      installCommand: "npx infinite-tag install --workspace proj_1 --ga4-measurement-id G-ACME123 --yes",
+      installArtifactsPath: null,
+      next: "Run `infinite local setup query` or `infinite` to continue."
+    });
+
+    expect(rendered).toContain("npx infinite-tag install --workspace proj_1 --ga4-measurement-id G-ACME123 --yes");
+    expect(rendered).not.toContain("on this machine you can simply run");
+  });
+
+  it("omits the install-command section when nothing installable was captured", () => {
+    const rendered = renderCliResult({
+      ok: true,
+      section: "connectors",
+      workflow: "onboarding",
+      interview: {
+        projectName: "Acme",
+        websiteUrl: "https://acme.test",
+        productSurface: "web",
+        providerInventory: [
+          { provider: "ga4", hasAccount: true, installState: "unknown", selected: true, recommended: true }
+        ]
+      },
+      selectedProviders: ["ga4"],
+      recommendedProviders: ["ga4"],
+      completed: ["ga4"],
+      paused: [],
+      failed: [],
+      providers: [{ provider: "ga4" as const, selected: true, recommended: true, status: "completed" as const }],
+      resolvedPublicArtifacts: { ga4: {}, posthog: {}, x: {} },
+      installCommand: null,
+      next: "Run `infinite local setup query` or `infinite` to continue."
+    });
+
+    expect(rendered).not.toContain("Install your analytics tags");
+    expect(rendered).not.toContain("npx infinite-tag install");
+  });
+
+  it("carries the setup module's installCommand through to the onboarding result for --json consumers", () => {
+    const result = buildSetupOnboardingResult(
+      {
+        projectName: "Acme",
+        websiteUrl: "https://acme.test",
+        productSurface: "web",
+        providerInventory: [
+          { provider: "ga4", hasAccount: true, installState: "unknown", selected: true, recommended: true }
+        ]
+      },
+      {
+        selectedProviders: ["ga4"],
+        recommendedProviders: ["ga4"],
+        recommendations: [
+          { provider: "ga4", status: "recommended", reasonCode: "web_default", rationale: "GA4 is the default web stack." }
+        ],
+        completed: ["ga4"],
+        paused: [],
+        failed: [],
+        runs: { ga4: { phases: {}, providerState: {} } },
+        activeRuns: [],
+        resolvedPublicArtifacts: { ga4: { measurementId: "G-ACME123" }, posthog: {}, x: {} },
+        installCommand: "npx infinite-tag install --workspace proj_1 --ga4-measurement-id G-ACME123 --yes",
+        installArtifactsPath: "/founder-home/.infinite/artifacts/proj_1.json"
+      }
+    );
+
+    expect(result.installCommand).toBe(
+      "npx infinite-tag install --workspace proj_1 --ga4-measurement-id G-ACME123 --yes"
+    );
+    expect(result.installArtifactsPath).toBe("/founder-home/.infinite/artifacts/proj_1.json");
+    // `infinite setup --json` serializes this whole object — the command must ride along as data.
+    expect(JSON.parse(JSON.stringify(result)).installCommand).toBe(
+      "npx infinite-tag install --workspace proj_1 --ga4-measurement-id G-ACME123 --yes"
+    );
+    expect(JSON.parse(JSON.stringify(result)).installArtifactsPath).toBe(
+      "/founder-home/.infinite/artifacts/proj_1.json"
+    );
+  });
+
+  it("redacts OAuth query strings and fragments from onboarding handoff summaries", () => {
+    const rendered = renderCliResult({
+      ok: false,
+      section: "connectors",
+      workflow: "onboarding",
+      interview: {
+        projectName: "Acme",
+        websiteUrl: "https://acme.test",
+        productSurface: "web",
+        providerInventory: [
+          { provider: "ga4", hasAccount: true, installState: "installed", selected: true, recommended: true },
+          { provider: "posthog", hasAccount: false, installState: "unknown", selected: false, recommended: false },
+          { provider: "x", hasAccount: false, installState: "unknown", selected: false, recommended: false }
+        ]
+      },
+      selectedProviders: ["ga4"],
+      recommendedProviders: ["ga4"],
+      completed: [],
+      paused: ["ga4"],
+      failed: [],
+      providers: [
+        {
+          provider: "ga4" as const,
+          selected: true,
+          recommended: true,
+          status: "paused_handoff" as const,
+          runId: "run_ga4",
+          detail: "Finish Google sign-in.",
+          handoff: {
+            url: "https://accounts.google.com/o/oauth2/v2/auth?client_id=ga-client-id&state=secret-state#keep-me-out",
+            instructions: "Finish Google sign-in."
+          }
+        }
+      ],
+      resolvedPublicArtifacts: {
+        ga4: {},
+        posthog: {},
+        x: {}
+      },
+      next: "Run `infinite local setup resume run_ga4` after completing the GA4 handoff."
+    });
+
+    expect(rendered).toContain("Open this page: https://accounts.google.com/o/oauth2/v2/auth");
+    expect(rendered).not.toContain("client_id=ga-client-id");
+    expect(rendered).not.toContain("secret-state");
+    expect(rendered).not.toContain("keep-me-out");
+  });
+
+  it("shows connector setup options and starts GA4 OAuth from the setup connector section", async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "growth-os-setup-connectors-"));
+    const requests: Array<{ url: string; body: unknown }> = [];
+    const originalFetch = globalThis.fetch;
+    try {
+      await runCommand("init", [], { GROWTH_OS_WORKSPACE_ROOT: workspaceRoot });
+      globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+        requests.push({
+          url: String(url),
+          body: init?.body ? JSON.parse(String(init.body)) : null
+        });
+        return new Response(JSON.stringify({ ok: true, data: { sources: [] } }), { status: 200 });
+      }) as typeof fetch;
+
+      const checklist = await runCommand("setup", ["connectors"], {
+        DATABASE_URL: "postgres://growth:password@127.0.0.1:1/growth",
+        GROWTH_OS_WORKSPACE_ROOT: workspaceRoot
+      });
+      const oauth = await runCommand(
+        "setup",
+        ["connectors", "google_analytics_4", "--client-id", "ga-client-id"],
+        {
+          GROWTH_OS_WORKSPACE_ROOT: workspaceRoot
+        }
+      );
+
+      expect(checklist).toMatchObject({
+        ok: false,
+        section: "connectors"
+      });
+      expect((checklist as { providers: unknown[] }).providers).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            provider: "google_analytics_4",
+            setup: "infinite local setup connectors google_analytics_4 --client-id <google_oauth_client_id>"
+          }),
+          expect.objectContaining({
+            provider: "shopify",
+            setup: "infinite local setup connectors shopify"
+          }),
+          expect.objectContaining({
+            provider: "meta_ads",
+            setup: "infinite local setup connectors meta_ads"
+          })
+        ])
+      );
+      expect(renderCliResult(checklist)).toContain("Infinite connector setup");
+      expect(renderCliResult(checklist)).toContain("Needs Google authorization for sync/query");
+      expect(oauth).toMatchObject({ ok: true });
+      expect(requests.at(-1)).toMatchObject({
+        url: "http://127.0.0.1:3000/oauth/sessions",
+        body: {
+          provider: "google_analytics_4",
+          clientId: "ga-client-id"
+        }
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+      rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("can complete GA4 setup inside the connector section when property id is provided", async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "growth-os-setup-connectors-ga4-complete-"));
+    const requests: Array<{ url: string; body: unknown }> = [];
+    const originalFetch = globalThis.fetch;
+    try {
+      globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+        requests.push({
+          url: String(url),
+          body: init?.body ? JSON.parse(String(init.body)) : null
+        });
+        if (String(url).endsWith("/oauth/sessions")) {
+          return new Response(JSON.stringify({ ok: true, sessionId: "oauth_session_1" }), { status: 200 });
+        }
+        if (String(url).endsWith("/oauth/sessions/oauth_session_1/exchange")) {
+          return new Response(JSON.stringify({ ok: true, status: "connected" }), { status: 200 });
+        }
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }) as typeof fetch;
+
+      const result = await runCommand(
+        "setup",
+        [
+          "connectors",
+          "google_analytics_4",
+          "--client-id",
+          "ga-client-id",
+          "--property-id",
+          "properties/123",
+          "--connection-name",
+          "GA4 Website"
+        ],
+        {
+          GROWTH_OS_WORKSPACE_ROOT: workspaceRoot,
+          GROWTH_OS_OPERATOR_TOKEN: "operator-token",
+          // Pin the base URL so the request-array assertion targets a known endpoint
+          // and bypasses discovery (whose probes would otherwise pollute `requests`).
+          GROWTH_OS_API_URL: "http://127.0.0.1:3000"
+        }
+      );
+
+      expect(result).toMatchObject({
+        ok: true,
+        section: "connectors",
+        provider: "google_analytics_4",
+        connectionName: "GA4 Website",
+        status: "connected"
+      });
+      expect(requests).toEqual([
+        {
+          url: "http://127.0.0.1:3000/oauth/sessions",
+          body: {
+            provider: "google_analytics_4",
+            clientId: "ga-client-id"
+          }
+        },
+        {
+          url: "http://127.0.0.1:3000/oauth/sessions/oauth_session_1/exchange",
+          body: {
+            propertyId: "properties/123",
+            connectionName: "GA4 Website"
+          }
+        }
+      ]);
+    } finally {
+      globalThis.fetch = originalFetch;
+      rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("prepareConfig returns embedded client without prompting when GROWTH_OS_GA4_OAUTH_CLIENT_ID+SECRET are set", async () => {
+    const bootstrap = createLocalGa4OauthBootstrap({
+      env: {
+        GROWTH_OS_GA4_OAUTH_CLIENT_ID: "embedded-id",
+        GROWTH_OS_GA4_OAUTH_CLIENT_SECRET: "embedded-secret"
+      },
+      config: {} as Parameters<typeof createLocalGa4OauthBootstrap>[0]["config"]
+    });
+    const config = await bootstrap.prepareConfig();
+    expect(config).toMatchObject({ clientId: "embedded-id", clientSecret: "embedded-secret" });
+    expect(typeof config?.redirectUri).toBe("string");
+  });
+
+  it("prepareConfig returns null (self-hoster prompt path) when no embedded GA4 client is available", async () => {
+    // Non-TTY + no env vars + no release file → prepareConfig returns null.
+    // readReleaseConfig is injected so the test never reads the real machine file
+    // (~/.infinite/app/ga4-oauth-client.json), which would otherwise leak real creds.
+    const bootstrap = createLocalGa4OauthBootstrap({
+      env: { GROWTH_OS_CLI_NONINTERACTIVE: "1" },
+      readReleaseConfig: () => null,
+      config: {} as Parameters<typeof createLocalGa4OauthBootstrap>[0]["config"]
+    });
+    const config = await bootstrap.prepareConfig();
+    expect(config).toBeNull();
+  });
+
+  it("returns the embedded client even when non-interactive (headless/agent path)", async () => {
+    // Guards against a future refactor that checks NONINTERACTIVE before the
+    // embedded-client resolve — the embedded path must fire first.
+    const bootstrap = createLocalGa4OauthBootstrap({
+      env: {
+        GROWTH_OS_GA4_OAUTH_CLIENT_ID: "embedded-id",
+        GROWTH_OS_GA4_OAUTH_CLIENT_SECRET: "embedded-secret",
+        GROWTH_OS_CLI_NONINTERACTIVE: "1"
+      },
+      config: {} as Parameters<typeof createLocalGa4OauthBootstrap>[0]["config"]
+    });
+    const config = await bootstrap.prepareConfig();
+    expect(config).toMatchObject({ clientId: "embedded-id", clientSecret: "embedded-secret" });
+  });
+
+  it("prepareConfig never shows the connect chooser in --json mode, even on a TTY", async () => {
+    // `infinite setup --json` with an embedded client must use it silently
+    // (pre-chooser behavior): no prompt, no picker UI on stdout.
+    // isTTY can be read-only on the worker's stdin Socket — stub via defineProperty.
+    const isTTYDescriptor = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
+    const writes: string[] = [];
+    const writeSpy = vi.spyOn(process.stdout, "write").mockImplementation((chunk: string | Uint8Array) => {
+      writes.push(String(chunk));
+      return true;
+    });
+    try {
+      Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
+      const bootstrap = createLocalGa4OauthBootstrap({
+        env: {},
+        jsonMode: true,
+        readReleaseConfig: () => ({ clientId: "rel-id", clientSecret: "rel-secret" }),
+        config: {} as Parameters<typeof createLocalGa4OauthBootstrap>[0]["config"]
+      });
+      const config = await bootstrap.prepareConfig();
+      expect(config).toMatchObject({ clientId: "rel-id", clientSecret: "rel-secret" });
+      expect(writes.join("")).not.toContain("How do you want to connect Google Analytics?");
+    } finally {
+      if (isTTYDescriptor) {
+        Object.defineProperty(process.stdin, "isTTY", isTTYDescriptor);
+      } else {
+        delete (process.stdin as { isTTY?: boolean }).isTTY;
+      }
+      writeSpy.mockRestore();
+    }
+  });
+
+  it("prepareConfig emits unverified-app disclosure when embedded client is present", async () => {
+    const writes: string[] = [];
+    const writeSpy = vi.spyOn(process.stdout, "write").mockImplementation((chunk: string | Uint8Array) => {
+      writes.push(String(chunk));
+      return true;
+    });
+    try {
+      const bootstrap = createLocalGa4OauthBootstrap({
+        env: {
+          GROWTH_OS_GA4_OAUTH_CLIENT_ID: "embedded-id",
+          GROWTH_OS_GA4_OAUTH_CLIENT_SECRET: "embedded-secret"
+        },
+        config: {} as Parameters<typeof createLocalGa4OauthBootstrap>[0]["config"]
+      });
+      await bootstrap.prepareConfig();
+      const combined = writes.join("");
+      expect(combined).toContain("Advanced");
+      expect(combined).toContain("hasn't verified");
+    } finally {
+      writeSpy.mockRestore();
+    }
+  });
+
+  it("prepareConfig disclosure includes Infinite app name and sign-in language", async () => {
+    const writes: string[] = [];
+    const writeSpy = vi.spyOn(process.stdout, "write").mockImplementation((chunk: string | Uint8Array) => {
+      writes.push(String(chunk));
+      return true;
+    });
+    try {
+      const bootstrap = createLocalGa4OauthBootstrap({
+        env: {
+          GROWTH_OS_GA4_OAUTH_CLIENT_ID: "embedded-id",
+          GROWTH_OS_GA4_OAUTH_CLIENT_SECRET: "embedded-secret"
+        },
+        config: {} as Parameters<typeof createLocalGa4OauthBootstrap>[0]["config"]
+      });
+      await bootstrap.prepareConfig();
+      const combined = writes.join("");
+      expect(combined).toContain("Infinite");
+      expect(combined).toContain("sign in with Google");
+    } finally {
+      writeSpy.mockRestore();
+    }
+  });
+
+  it("start() always prints the pasteable authorization URL, even when the browser opened (#7)", async () => {
+    const isTTYDescriptor = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
+    const originalFetch = globalThis.fetch;
+    const writes: string[] = [];
+    const writeSpy = vi.spyOn(process.stdout, "write").mockImplementation((chunk: string | Uint8Array) => {
+      writes.push(String(chunk));
+      return true;
+    });
+    try {
+      // A TTY + a browser opener that exits 0 makes openBrowserForAuth report opened:true.
+      Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
+      globalThis.fetch = (async () =>
+        new Response(
+          JSON.stringify({
+            sessionId: "oauth_session_1",
+            provider: "google_analytics_4",
+            status: "pending",
+            authorizationUrl: "https://accounts.google.com/o/oauth2/v2/auth?state=paste-me",
+            redirectUri: "http://127.0.0.1:3000/oauth/callback/google_analytics_4"
+          }),
+          { status: 200 }
+        )) as typeof fetch;
+
+      const bootstrap = createLocalGa4OauthBootstrap({
+        env: { GROWTH_OS_AUTH_BROWSER_BIN: "true" },
+        config: {} as Parameters<typeof createLocalGa4OauthBootstrap>[0]["config"]
+      });
+      await bootstrap.start({ clientId: "id", clientSecret: "secret" });
+
+      const combined = writes.join("");
+      // The URL is surfaced AND the "Opened Google" success copy is present (opened:true path).
+      expect(combined).toContain("Opened Google in your browser");
+      expect(combined).toContain("Paste this link:");
+      expect(combined).toContain("https://accounts.google.com/o/oauth2/v2/auth?state=paste-me");
+    } finally {
+      globalThis.fetch = originalFetch;
+      writeSpy.mockRestore();
+      if (isTTYDescriptor) {
+        Object.defineProperty(process.stdin, "isTTY", isTTYDescriptor);
+      } else {
+        delete (process.stdin as { isTTY?: boolean }).isTTY;
+      }
+    }
+  });
+
+  it("start() writes nothing to stdout in --json mode (keeps the JSON payload clean) (#7)", async () => {
+    const originalFetch = globalThis.fetch;
+    const writes: string[] = [];
+    const writeSpy = vi.spyOn(process.stdout, "write").mockImplementation((chunk: string | Uint8Array) => {
+      writes.push(String(chunk));
+      return true;
+    });
+    try {
+      globalThis.fetch = (async () =>
+        new Response(
+          JSON.stringify({
+            sessionId: "oauth_session_1",
+            provider: "google_analytics_4",
+            status: "pending",
+            authorizationUrl: "https://accounts.google.com/o/oauth2/v2/auth?state=json"
+          }),
+          { status: 200 }
+        )) as typeof fetch;
+
+      const bootstrap = createLocalGa4OauthBootstrap({
+        env: {},
+        jsonMode: true,
+        config: {} as Parameters<typeof createLocalGa4OauthBootstrap>[0]["config"]
+      });
+      await bootstrap.start({ clientId: "id", clientSecret: "secret" });
+
+      expect(writes.join("")).toBe("");
+    } finally {
+      globalThis.fetch = originalFetch;
+      writeSpy.mockRestore();
+    }
+  });
+
+  it("start() uses the injected guidance renderer for the open-site block (#8 composes with #7)", async () => {
+    const originalFetch = globalThis.fetch;
+    const isTTYDescriptor = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
+    const writes: string[] = [];
+    const guidance = vi.fn(
+      (step: string, ctx: { authorizationUrl?: string }) =>
+        `GUIDANCE[${step}]: open ${ctx.authorizationUrl}`
+    );
+    const writeSpy = vi.spyOn(process.stdout, "write").mockImplementation((chunk: string | Uint8Array) => {
+      writes.push(String(chunk));
+      return true;
+    });
+    try {
+      Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
+      globalThis.fetch = (async () =>
+        new Response(
+          JSON.stringify({
+            sessionId: "oauth_session_1",
+            authorizationUrl: "https://accounts.google.com/o/oauth2/v2/auth?state=guide"
+          }),
+          { status: 200 }
+        )) as typeof fetch;
+
+      const bootstrap = createLocalGa4OauthBootstrap({
+        env: { GROWTH_OS_AUTH_BROWSER_BIN: "true" },
+        config: {} as Parameters<typeof createLocalGa4OauthBootstrap>[0]["config"],
+        guidance: guidance as never
+      });
+      await bootstrap.start({ clientId: "id", clientSecret: "secret" });
+
+      expect(guidance).toHaveBeenCalledWith(
+        "quick_connect",
+        expect.objectContaining({ authorizationUrl: "https://accounts.google.com/o/oauth2/v2/auth?state=guide" })
+      );
+      expect(writes.join("")).toContain("GUIDANCE[quick_connect]");
+    } finally {
+      globalThis.fetch = originalFetch;
+      writeSpy.mockRestore();
+      if (isTTYDescriptor) {
+        Object.defineProperty(process.stdin, "isTTY", isTTYDescriptor);
+      } else {
+        delete (process.stdin as { isTTY?: boolean }).isTTY;
+      }
+    }
+  });
+
+  describe("createSetupInteractionWiring predicate (#7/#8 non-interactive safety)", () => {
+    const fakeSetup = {
+      providerGuidance: () => "guidance"
+    } as unknown as Parameters<typeof createSetupInteractionWiring>[0]["setup"];
+
+    function withTTY<T>(value: boolean | undefined, fn: () => T): T {
+      const descriptor = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
+      if (value === undefined) {
+        delete (process.stdin as { isTTY?: boolean }).isTTY;
+      } else {
+        Object.defineProperty(process.stdin, "isTTY", { value, configurable: true });
+      }
+      try {
+        return fn();
+      } finally {
+        if (descriptor) {
+          Object.defineProperty(process.stdin, "isTTY", descriptor);
+        } else {
+          delete (process.stdin as { isTTY?: boolean }).isTTY;
+        }
+      }
+    }
+
+    it("installs NO interaction/gate/onProviderStart on a non-TTY (headless) run", () => {
+      const wiring = withTTY(false, () =>
+        createSetupInteractionWiring({ env: {}, setup: fakeSetup })
+      );
+      expect(wiring.ga4OauthInteraction).toBeUndefined();
+      expect(wiring.awaitProviderHandoff).toBeUndefined();
+      expect(wiring.onProviderStart).toBeUndefined();
+      // dispose() is always safe to call.
+      expect(() => wiring.dispose()).not.toThrow();
+    });
+
+    it("installs NO interaction/gate in --json mode even on a TTY", () => {
+      const wiring = withTTY(true, () =>
+        createSetupInteractionWiring({ env: {}, jsonMode: true, setup: fakeSetup })
+      );
+      expect(wiring.ga4OauthInteraction).toBeUndefined();
+      expect(wiring.awaitProviderHandoff).toBeUndefined();
+      expect(wiring.onProviderStart).toBeUndefined();
+    });
+
+    it("installs NO interaction/gate when GROWTH_OS_CLI_NONINTERACTIVE=1 even on a TTY", () => {
+      const wiring = withTTY(true, () =>
+        createSetupInteractionWiring({ env: { GROWTH_OS_CLI_NONINTERACTIVE: "1" }, setup: fakeSetup })
+      );
+      expect(wiring.ga4OauthInteraction).toBeUndefined();
+      expect(wiring.awaitProviderHandoff).toBeUndefined();
+      expect(wiring.onProviderStart).toBeUndefined();
+    });
+
+    it("installs the interaction/gate/boundary on an interactive TTY", () => {
+      const wiring = withTTY(true, () => createSetupInteractionWiring({ env: {}, setup: fakeSetup }));
+      expect(wiring.ga4OauthInteraction).toBeDefined();
+      expect(wiring.awaitProviderHandoff).toBeDefined();
+      expect(wiring.onProviderStart).toBeDefined();
+      wiring.dispose();
+    });
+
+    it("dispose() resolves a still-armed wait to null without blocking (no leak / always torn down)", async () => {
+      const rawModeCalls: boolean[] = [];
+      const stdin = process.stdin as NodeJS.ReadStream & { setRawMode?: (mode: boolean) => unknown };
+      const originalSetRawMode = stdin.setRawMode?.bind(stdin);
+      // Spy on the real stdin's setRawMode so we can confirm it is restored, without swapping
+      // out process.stdin (which is a non-configurable getter on some Node builds).
+      stdin.setRawMode = ((mode: boolean) => {
+        rawModeCalls.push(mode);
+        return stdin;
+      }) as typeof stdin.setRawMode;
+      const wiring = withTTY(true, () => createSetupInteractionWiring({ env: {}, setup: fakeSetup }));
+      try {
+        // Arm the wait but never press a key — it must not block the test.
+        const pending = wiring.ga4OauthInteraction?.waitForDecision?.();
+        expect(rawModeCalls).toContain(true); // raw mode armed
+        wiring.dispose();
+        // dispose() cancels the armed keypress → raw mode restored AND the promise resolves null.
+        expect(rawModeCalls).toContain(false);
+        await expect(pending).resolves.toBeNull();
+      } finally {
+        stdin.setRawMode = originalSetRawMode as typeof stdin.setRawMode;
+      }
+    });
+
+    // Regression for the #7 cancellable-wait teardown bug: the keypress wait is armed once for
+    // the whole poll, so on the terminal paths (#7 added) where no key was pressed — timeout and
+    // failed — the wait's 'keypress' listener was STILL attached on process.stdin when
+    // onTimeout()/onFailed() opened showOptionsMenu()->promptChoice(), which attaches its OWN
+    // keypress listener to the SAME process.stdin. The first menu keystroke fired BOTH listeners,
+    // freezing the menu and resolving the stale waitForDecision (a second concurrent menu). The
+    // fix: the poll calls cancelWait() the instant it reaches a terminal state — BEFORE the menu —
+    // fully tearing the wait down (remove listener, raw mode off, resolve the pending decision).
+    // This test exercises the REAL waitForAnyKeypress + promptChoice stdin (no fake interaction);
+    // pre-fix it fails because cancelWait does not exist and the stale listener survives.
+    it("tears the armed keypress wait fully down before a terminal menu/prompt runs (#7 teardown)", async () => {
+      let rawMode = false;
+      const stdin = process.stdin as NodeJS.ReadStream & { setRawMode?: (mode: boolean) => unknown };
+      const originalSetRawMode = stdin.setRawMode?.bind(stdin);
+      stdin.setRawMode = ((mode: boolean) => {
+        rawMode = mode;
+        return stdin;
+      }) as typeof stdin.setRawMode;
+      const keypressBaseline = stdin.listenerCount("keypress");
+      // The terminal menu (showOptionsMenu) routes to stderr; force its interactive keypress branch
+      // so we exercise the REAL stdin keypress collision the reviewer found (in production stderr is
+      // a TTY, so promptChoice reads keypresses from process.stdin — the same stream the wait armed).
+      const stderr = process.stderr as NodeJS.WriteStream & { isTTY?: boolean };
+      const stderrTtyDescriptor = Object.getOwnPropertyDescriptor(stderr, "isTTY");
+      Object.defineProperty(stderr, "isTTY", { value: true, configurable: true });
+      const waitForKeypressListener = async (count: number): Promise<void> => {
+        for (let i = 0; i < 200 && stdin.listenerCount("keypress") !== count; i += 1) {
+          await new Promise((resolve) => setImmediate(resolve));
+        }
+      };
+      const wiring = withTTY(true, () => createSetupInteractionWiring({ env: {}, setup: fakeSetup }));
+      const interaction = wiring.ga4OauthInteraction;
+      try {
+        // The fix must exist as a callable seam the poll can use at terminal state. (Pre-fix this
+        // assertion already fails — there is no cancelWait — which is what left the listener stale.)
+        expect(typeof interaction?.cancelWait).toBe("function");
+
+        // 1) Arm the wait exactly as the poll does (waitForDecision once at the start). Never press
+        //    a key — this is the timeout/failed scenario. The real waitForAnyKeypress attaches a
+        //    'keypress' listener to process.stdin and turns raw mode on.
+        const pending = interaction?.waitForDecision?.();
+        expect(stdin.listenerCount("keypress")).toBe(keypressBaseline + 1); // wait armed
+        expect(rawMode).toBe(true);
+
+        // 2) Poll reaches a terminal state → it disarms the wait BEFORE opening the menu.
+        interaction?.cancelWait?.();
+
+        // 3) BEFORE the menu's prompt runs, the stale listener is gone and raw mode is restored.
+        expect(stdin.listenerCount("keypress")).toBe(keypressBaseline); // no stale wait listener
+        expect(rawMode).toBe(false); // raw mode restored
+
+        // 4) The pending waitForDecision resolved to null — it can never fire later and spawn a
+        //    second concurrent menu while the real menu owns stdin.
+        await expect(pending).resolves.toBeNull();
+
+        // 5) Now run the REAL terminal menu (onTimeout -> showOptionsMenu -> promptChoice). With a
+        //    clean stdin it attaches exactly ONE keypress listener (its own); a stale wait listener
+        //    would have made this 2 and frozen the menu. Drive it to a decision with a real ENTER.
+        const decisionPromise = interaction?.onTimeout?.({ error: "took too long", sessionId: "s1" });
+        await waitForKeypressListener(keypressBaseline + 1); // let promptChoice attach its listener
+        expect(stdin.listenerCount("keypress")).toBe(keypressBaseline + 1); // only the menu's own
+        stdin.emit("keypress", "\r", { name: "return" }); // select default choice -> "retry"
+        await expect(decisionPromise).resolves.toBe("retry");
+        // After the menu, withRawPrompt has torn down too: stdin is clean again.
+        expect(stdin.listenerCount("keypress")).toBe(keypressBaseline);
+        expect(rawMode).toBe(false);
+      } finally {
+        wiring.dispose();
+        stdin.setRawMode = originalSetRawMode as typeof stdin.setRawMode;
+        if (stderrTtyDescriptor) {
+          Object.defineProperty(stderr, "isTTY", stderrTtyDescriptor);
+        } else {
+          delete (stderr as { isTTY?: boolean }).isTTY;
+        }
+      }
+    });
+
+    // The same root cause broke the multi-provider happy path: on GA4 success the poll returns
+    // {authorized} WITHOUT disarming the wait, leaving raw mode ON + a stale listener while
+    // PostHog's later inline prompt.ask()/askPostHogPersonalApiKey (readline on process.stdin)
+    // runs before dispose(). Assert the success teardown leaves stdin clean for that next prompt.
+    it("leaves stdin clean on the success path so a later prompt.ask gets no stale listener (#7 teardown)", async () => {
+      let rawMode = false;
+      const stdin = process.stdin as NodeJS.ReadStream & { setRawMode?: (mode: boolean) => unknown };
+      const originalSetRawMode = stdin.setRawMode?.bind(stdin);
+      stdin.setRawMode = ((mode: boolean) => {
+        rawMode = mode;
+        return stdin;
+      }) as typeof stdin.setRawMode;
+      const keypressBaseline = stdin.listenerCount("keypress");
+      const wiring = withTTY(true, () => createSetupInteractionWiring({ env: {}, setup: fakeSetup }));
+      const interaction = wiring.ga4OauthInteraction;
+      try {
+        const pending = interaction?.waitForDecision?.();
+        expect(stdin.listenerCount("keypress")).toBe(keypressBaseline + 1);
+        expect(rawMode).toBe(true);
+
+        // GA4 OAuth completed: the poll returns {authorized} but first disarms the wait.
+        interaction?.cancelWait?.();
+
+        // Fully disarmed: no residual listener, raw mode off — a subsequent readline prompt.ask
+        // (PostHog personal API key) now gets a clean stdin instead of a frozen, raw-mode terminal.
+        expect(stdin.listenerCount("keypress")).toBe(keypressBaseline);
+        expect(rawMode).toBe(false);
+        await expect(pending).resolves.toBeNull();
+      } finally {
+        wiring.dispose();
+        stdin.setRawMode = originalSetRawMode as typeof stdin.setRawMode;
+      }
+    });
+  });
+
+  it("shows configured connector labels when sources already exist", async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "growth-os-setup-connectors-configured-"));
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-setup-connectors-configured-home-"));
+    const originalFetch = globalThis.fetch;
+    try {
+      await runCommand("init", [], { GROWTH_OS_WORKSPACE_ROOT: workspaceRoot });
+      writeFileSync(join(workspaceRoot, ".growth-os", "config.yml"), "runtime_mode: local\napp_port: 3999\n");
+      globalThis.fetch = (async () =>
+        new Response(
+          JSON.stringify({
+            ok: true,
+            data: {
+              sources: [
+                { id: "src_stripe", provider: "stripe", status: "connected" },
+                { id: "src_x", provider: "x", status: "degraded" }
+              ]
+            }
+          }),
+          { status: 200 }
+        )) as typeof fetch;
+
+      const checklist = await runCommand("setup", ["connectors"], {
+        GROWTH_OS_WORKSPACE_ID: "proj_test",
+        GROWTH_OS_WORKSPACE_ROOT: workspaceRoot,
+        GROWTH_OS_HOME: growthHome
+      });
+
+      expect((checklist as { providers: Array<{ provider: string; status: string }> }).providers).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ provider: "stripe", status: "configured" }),
+          expect.objectContaining({ provider: "x", status: "configured" }),
+          expect.objectContaining({ provider: "posthog", status: "not_configured" })
+        ])
+      );
+      expect((checklist as { configuredConnections: Array<{ provider: string; connectionName?: string; status?: string }> }).configuredConnections).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ provider: "stripe", status: "connected" }),
+          expect.objectContaining({ provider: "x", status: "degraded" })
+        ])
+      );
+      expect((checklist as { summary: { configuredCount: number; degradedCount: number } }).summary).toMatchObject({
+        configuredCount: 2,
+        degradedCount: 1
+      });
+      expect(renderCliResult(checklist)).toContain("Configured connectors:");
+      expect(renderCliResult(checklist)).toContain("x: configured (degraded)");
+      expect(renderCliResult(checklist)).toContain("docs:");
+    } finally {
+      globalThis.fetch = originalFetch;
+      rmSync(workspaceRoot, { recursive: true, force: true });
+      rmSync(growthHome, { recursive: true, force: true });
+    }
+  });
+
+  it("guides PostHog connector setup without requiring raw JSON", async () => {
+    const requests: Array<{ url: string; body: unknown }> = [];
+    const originalFetch = globalThis.fetch;
+    try {
+      globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+        requests.push({
+          url: String(url),
+          body: init?.body ? JSON.parse(String(init.body)) : null
+        });
+        return new Response(JSON.stringify({ ok: true, data: { source: { id: "src_posthog" } } }), { status: 200 });
+      }) as typeof fetch;
+
+      const result = await runCommand(
+        "setup",
+        [
+          "connectors",
+          "posthog",
+          "--connection-name",
+          "Product Analytics",
+          "--project-id",
+          "42",
+          "--personal-api-key",
+          "ph-key",
+          "--api-host",
+          "https://posthog.test"
+        ],
+        // Pin the API base URL so this request-shape assertion targets a known
+        // endpoint and bypasses descriptor-first discovery (whose probes would
+        // otherwise read the dev machine's live daemon and pollute `requests`).
+        { GROWTH_OS_OPERATOR_TOKEN: "operator-token", GROWTH_OS_API_URL: "http://127.0.0.1:3000" }
+      );
+
+      expect(result).toMatchObject({
+        ok: true,
+        section: "connectors",
+        provider: "posthog",
+        connectionName: "Product Analytics",
+        configuredFields: ["projectId", "apiHost"]
+      });
+      expect(requests[0]).toMatchObject({
+        url: "http://127.0.0.1:3000/sources/connect",
+        body: {
+          provider: "posthog",
+          connectionName: "Product Analytics",
+          credentialKind: "personal_api_key",
+          credentialPayload: {
+            mode: "live",
+            projectId: 42,
+            personalApiKey: "ph-key",
+            apiHost: "https://posthog.test"
+          }
+        }
+      });
+      expect(JSON.stringify(result)).not.toContain("ph-key");
+      expect(renderCliResult(result)).not.toContain("ph-key");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("guides Stripe connector setup without requiring raw JSON", async () => {
+    const requests: Array<{ url: string; body: unknown }> = [];
+    const originalFetch = globalThis.fetch;
+    try {
+      globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+        requests.push({
+          url: String(url),
+          body: init?.body ? JSON.parse(String(init.body)) : null
+        });
+        return new Response(JSON.stringify({ ok: true, data: { source: { id: "src_stripe" } } }), { status: 200 });
+      }) as typeof fetch;
+
+      const result = await runCommand(
+        "setup",
+        [
+          "connectors",
+          "stripe",
+          "--connection-name",
+          "Stripe Billing",
+          "--secret-key",
+          "sk-test",
+          "--api-base-url",
+          "https://stripe.test"
+        ],
+        // Pin the API base URL so this request-shape assertion targets a known
+        // endpoint and bypasses descriptor-first discovery (whose probes would
+        // otherwise read the dev machine's live daemon and pollute `requests`).
+        { GROWTH_OS_OPERATOR_TOKEN: "operator-token", GROWTH_OS_API_URL: "http://127.0.0.1:3000" }
+      );
+
+      expect(result).toMatchObject({
+        ok: true,
+        section: "connectors",
+        provider: "stripe",
+        connectionName: "Stripe Billing",
+        configuredFields: ["apiBaseUrl"]
+      });
+      expect(requests[0]).toMatchObject({
+        body: {
+          provider: "stripe",
+          connectionName: "Stripe Billing",
+          credentialKind: "api_key",
+          credentialPayload: {
+            mode: "live",
+            secretKey: "sk-test",
+            apiBaseUrl: "https://stripe.test"
+          }
+        }
+      });
+      expect(JSON.stringify(result)).not.toContain("sk-test");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("guides X connector setup without requiring raw JSON", async () => {
+    const requests: Array<{ url: string; body: unknown }> = [];
+    const originalFetch = globalThis.fetch;
+    try {
+      globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+        requests.push({
+          url: String(url),
+          body: init?.body ? JSON.parse(String(init.body)) : null
+        });
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            data: {
+              source: { id: "src_x" },
+              initialSync: { queued: true, sourceId: "src_x", mode: "incremental" }
+            }
+          }),
+          { status: 200 }
+        );
+      }) as typeof fetch;
+
+      const result = await runCommand(
+        "setup",
+        [
+          "connectors",
+          "x",
+          "--connection-name",
+          "X Public Metrics",
+          "--bearer-token",
+          "x-bearer-token",
+          "--username",
+          "@XDevelopers",
+          "--api-base-url",
+          "https://x.test"
+        ],
+        // Pin the API base URL so this request-shape assertion targets a known
+        // endpoint and bypasses descriptor-first discovery (whose probes would
+        // otherwise read the dev machine's live daemon and pollute `requests`).
+        { GROWTH_OS_OPERATOR_TOKEN: "operator-token", GROWTH_OS_API_URL: "http://127.0.0.1:3000" }
+      );
+
+      expect(result).toMatchObject({
+        ok: true,
+        section: "connectors",
+        provider: "x",
+        connectionName: "X Public Metrics",
+        configuredFields: ["username", "apiBaseUrl"],
+        initialSync: {
+          queued: true,
+          sourceId: "src_x",
+          mode: "incremental"
+        }
+      });
+      expect(requests[0]).toMatchObject({
+        body: {
+          provider: "x",
+          connectionName: "X Public Metrics",
+          credentialKind: "bearer_token",
+          credentialPayload: {
+            mode: "live",
+            bearerToken: "x-bearer-token",
+            username: "XDevelopers",
+            apiBaseUrl: "https://x.test"
+          }
+        }
+      });
+      // Option C: the server enqueues the initial sync at the connect choke point, so the CLI
+      // issues no second HTTP request — it only surfaces initialSync from the connect envelope.
+      expect(requests).toHaveLength(1);
+      expect(JSON.stringify(result)).not.toContain("x-bearer-token");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("guides Shopify connector setup without requiring raw JSON", async () => {
+    const requests: Array<{ url: string; body: unknown }> = [];
+    const originalFetch = globalThis.fetch;
+    try {
+      globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+        requests.push({
+          url: String(url),
+          body: init?.body ? JSON.parse(String(init.body)) : null
+        });
+        return new Response(JSON.stringify({ ok: true, data: { source: { id: "src_shopify" } } }), { status: 200 });
+      }) as typeof fetch;
+
+      const result = await runCommand(
+        "setup",
+        [
+          "connectors",
+          "shopify",
+          "--connection-name",
+          "Shopify Store",
+          "--store-domain",
+          "https://demo-shop.myshopify.com/",
+          "--admin-access-token",
+          "shpat_test",
+          "--api-version",
+          "2026-01"
+        ],
+        // Pin the API base URL so this request-shape assertion targets a known
+        // endpoint and bypasses descriptor-first discovery (whose probes would
+        // otherwise read the dev machine's live daemon and pollute `requests`).
+        { GROWTH_OS_OPERATOR_TOKEN: "operator-token", GROWTH_OS_API_URL: "http://127.0.0.1:3000" }
+      );
+
+      expect(result).toMatchObject({
+        ok: true,
+        section: "connectors",
+        provider: "shopify",
+        connectionName: "Shopify Store",
+        configuredFields: ["storeDomain", "apiVersion"]
+      });
+      expect(requests[0]).toMatchObject({
+        body: {
+          provider: "shopify",
+          connectionName: "Shopify Store",
+          credentialKind: "admin_api_access_token",
+          credentialPayload: {
+            mode: "live",
+            storeDomain: "demo-shop.myshopify.com",
+            adminAccessToken: "shpat_test",
+            apiVersion: "2026-01"
+          }
+        }
+      });
+      expect(JSON.stringify(result)).not.toContain("shpat_test");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("guides Meta Ads connector setup without requiring raw JSON", async () => {
+    const requests: Array<{ url: string; body: unknown }> = [];
+    const originalFetch = globalThis.fetch;
+    try {
+      globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+        requests.push({
+          url: String(url),
+          body: init?.body ? JSON.parse(String(init.body)) : null
+        });
+        return new Response(JSON.stringify({ ok: true, data: { source: { id: "src_meta_ads" } } }), { status: 200 });
+      }) as typeof fetch;
+
+      const result = await runCommand(
+        "setup",
+        [
+          "connectors",
+          "meta_ads",
+          "--connection-name",
+          "Meta Ads Main",
+          "--ad-account-id",
+          "act_1234567890",
+          "--access-token",
+          "meta-access-token",
+          "--api-version",
+          "v24.0",
+          "--backfill-window",
+          "3_months"
+        ],
+        // Pin the API base URL so this request-shape assertion targets a known
+        // endpoint and bypasses descriptor-first discovery (whose probes would
+        // otherwise read the dev machine's live daemon and pollute `requests`).
+        { GROWTH_OS_OPERATOR_TOKEN: "operator-token", GROWTH_OS_API_URL: "http://127.0.0.1:3000" }
+      );
+
+      expect(result).toMatchObject({
+        ok: true,
+        section: "connectors",
+        provider: "meta_ads",
+        connectionName: "Meta Ads Main",
+        configuredFields: ["transport", "adAccountId", "apiVersion"],
+        backfill: {
+          queued: true,
+          sourceId: "src_meta_ads",
+          window: "3_months",
+          windowLabel: "3 months",
+          progress: {
+            percent: 0,
+            max: 100,
+            bar: "[--------------------] 0%"
+          },
+          payload: {
+            mode: "backfill",
+            backfillWindow: "3_months",
+            refreshWindowDays: 90
+          }
+        }
+      });
+      expect(requests[0]).toMatchObject({
+        body: {
+          provider: "meta_ads",
+          connectionName: "Meta Ads Main",
+          credentialKind: "marketing_api_access_token",
+          credentialPayload: {
+            mode: "live",
+            transport: "marketing_api",
+            adAccountId: "1234567890",
+            accessToken: "meta-access-token",
+            apiVersion: "v24.0"
+          }
+        }
+      });
+      expect(requests[1]).toMatchObject({
+        url: expect.stringContaining("/sources/src_meta_ads/sync"),
+        body: {
+          mode: "backfill",
+          backfillWindow: "3_months",
+          refreshWindowDays: 90
+        }
+      });
+      expect(JSON.stringify(result)).not.toContain("meta-access-token");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("guides official Meta Ads CLI setup without requiring raw JSON", async () => {
+    const requests: Array<{ url: string; body: unknown }> = [];
+    const originalFetch = globalThis.fetch;
+    try {
+      globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+        requests.push({
+          url: String(url),
+          body: init?.body ? JSON.parse(String(init.body)) : null
+        });
+        return new Response(JSON.stringify({ ok: true, data: { source: { id: "src_meta_ads_cli" } } }), { status: 200 });
+      }) as typeof fetch;
+
+      const result = await runCommand(
+        "setup",
+        [
+          "connectors",
+          "meta_ads",
+          "--connection-name",
+          "Meta Ads CLI",
+          "--ad-account-id",
+          "act_1234567890",
+          "--meta-ads-cli-command",
+          "meta"
+        ],
+        // Pin the API base URL so this request-shape assertion targets a known
+        // endpoint and bypasses descriptor-first discovery (whose probes would
+        // otherwise read the dev machine's live daemon and pollute `requests`).
+        { GROWTH_OS_OPERATOR_TOKEN: "operator-token", GROWTH_OS_API_URL: "http://127.0.0.1:3000" }
+      );
+
+      expect(result).toMatchObject({
+        ok: true,
+        section: "connectors",
+        provider: "meta_ads",
+        connectionName: "Meta Ads CLI",
+        configuredFields: ["transport", "adAccountId", "cliCommand"]
+      });
+      expect(requests[0]).toMatchObject({
+        body: {
+          provider: "meta_ads",
+          connectionName: "Meta Ads CLI",
+          credentialKind: "ads_cli",
+          credentialPayload: {
+            mode: "live",
+            transport: "meta_ads_cli",
+            adAccountId: "1234567890",
+            cliCommand: "meta"
+          }
+        }
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("guides Meta Ads MCP stdio connector setup without requiring raw JSON", async () => {
+    const requests: Array<{ url: string; body: unknown }> = [];
+    const originalFetch = globalThis.fetch;
+    try {
+      globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+        requests.push({
+          url: String(url),
+          body: init?.body ? JSON.parse(String(init.body)) : null
+        });
+        return new Response(JSON.stringify({ ok: true, data: { source: { id: "src_meta_ads_mcp" } } }), { status: 200 });
+      }) as typeof fetch;
+
+      const result = await runCommand(
+        "setup",
+        [
+          "connectors",
+          "meta_ads",
+          "--connection-name",
+          "Meta Ads MCP",
+          "--ad-account-id",
+          "act_1234567890",
+          "--mcp-stdio-command",
+          "meta-ads-cli --mcp",
+          "--mcp-tool-name",
+          "get_campaign_insights"
+        ],
+        // Pin the API base URL so this request-shape assertion targets a known
+        // endpoint and bypasses descriptor-first discovery (whose probes would
+        // otherwise read the dev machine's live daemon and pollute `requests`).
+        { GROWTH_OS_OPERATOR_TOKEN: "operator-token", GROWTH_OS_API_URL: "http://127.0.0.1:3000" }
+      );
+
+      expect(result).toMatchObject({
+        ok: true,
+        section: "connectors",
+        provider: "meta_ads",
+        connectionName: "Meta Ads MCP",
+        configuredFields: ["transport", "adAccountId", "mcpCommand", "mcpToolName"]
+      });
+      expect(requests[0]).toMatchObject({
+        body: {
+          provider: "meta_ads",
+          connectionName: "Meta Ads MCP",
+          credentialKind: "mcp_server_command",
+          credentialPayload: {
+            mode: "live",
+            transport: "mcp_stdio",
+            adAccountId: "1234567890",
+            mcpCommand: "meta-ads-cli --mcp",
+            mcpToolName: "get_campaign_insights"
+          }
+        }
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("returns actionable guidance when token connector setup is missing required fields", async () => {
+    const result = await runCommand(
+      "setup",
+      ["connectors", "posthog", "--project-id", "42"],
+      { GROWTH_OS_CLI_NONINTERACTIVE: "1" }
+    );
+
+    expect(result).toMatchObject({
+      ok: false,
+      section: "connectors",
+      provider: "posthog",
+      error: {
+        code: "growth_os_connector_setup_requires_input"
+      }
+    });
+    expect(JSON.stringify(result)).toContain("infinite local setup connectors posthog");
+    expect(JSON.stringify(result)).not.toContain("personalApiKey");
+  });
+
+  it("routes operator CLI commands through shared action endpoints", async () => {
+    const requests: Array<{ url: string; body: unknown }> = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+      requests.push({
+        url: String(url),
+        body: init?.body ? JSON.parse(String(init.body)) : null
+      });
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }) as typeof fetch;
+
+    try {
+      await runCommand(
+        "connect",
+        [
+          "stripe",
+          "Stripe Live",
+          JSON.stringify({
+            mode: "live",
+            secretKey: "sk-test",
+            apiBaseUrl: "https://stripe.test"
+          })
+        ],
+        { GROWTH_OS_OPERATOR_TOKEN: "operator", GROWTH_OS_WORKSPACE_ID: "proj_test", GROWTH_OS_API_URL: "http://127.0.0.1:3000" }
+      );
+      await runCommand(
+        "connect",
+        [
+          "posthog",
+          "PostHog Live",
+          JSON.stringify({
+            mode: "live",
+            projectId: 42,
+            personalApiKey: "ph-key",
+            apiHost: "https://posthog.test"
+          })
+        ],
+        { GROWTH_OS_OPERATOR_TOKEN: "operator", GROWTH_OS_WORKSPACE_ID: "proj_test", GROWTH_OS_API_URL: "http://127.0.0.1:3000" }
+      );
+      await runCommand(
+        "connect",
+        [
+          "x",
+          "X Public Metrics",
+          JSON.stringify({
+            mode: "live",
+            bearerToken: "x-bearer-token",
+            username: "XDevelopers"
+          })
+        ],
+        { GROWTH_OS_OPERATOR_TOKEN: "operator", GROWTH_OS_WORKSPACE_ID: "proj_test", GROWTH_OS_API_URL: "http://127.0.0.1:3000" }
+      );
+      await runCommand("sync", ["src_123"], { GROWTH_OS_OPERATOR_TOKEN: "operator", GROWTH_OS_WORKSPACE_ID: "proj_test", GROWTH_OS_API_URL: "http://127.0.0.1:3000" });
+      await runCommand("saved-report", ["export", "report_123", "json"], {
+        GROWTH_OS_OPERATOR_TOKEN: "operator",
+        GROWTH_OS_WORKSPACE_ID: "proj_test",
+        GROWTH_OS_API_URL: "http://127.0.0.1:3000"
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    expect(requests[0]).toMatchObject({
+      url: "http://127.0.0.1:3000/sources/connect",
+      body: {
+        provider: "stripe",
+        connectionName: "Stripe Live",
+        credentialKind: "api_key",
+        credentialPayload: {
+          mode: "live",
+          secretKey: "sk-test",
+          apiBaseUrl: "https://stripe.test"
+        }
+      }
+    });
+    expect(requests[1]).toMatchObject({
+      url: "http://127.0.0.1:3000/sources/connect",
+      body: {
+        provider: "posthog",
+        connectionName: "PostHog Live",
+        credentialKind: "personal_api_key",
+        credentialPayload: {
+          mode: "live",
+          projectId: 42,
+          personalApiKey: "ph-key",
+          apiHost: "https://posthog.test"
+        }
+      }
+    });
+    expect(requests[2]).toMatchObject({
+      url: "http://127.0.0.1:3000/sources/connect",
+      body: {
+        provider: "x",
+        connectionName: "X Public Metrics",
+        credentialKind: "bearer_token",
+        credentialPayload: {
+          mode: "live",
+          bearerToken: "x-bearer-token",
+          username: "XDevelopers"
+        }
+      }
+    });
+    expect(requests[3]).toMatchObject({
+      url: "http://127.0.0.1:3000/sources/src_123/sync",
+      body: {}
+    });
+    expect(requests[4]).toMatchObject({
+      url: "http://127.0.0.1:3000/tools/call",
+      body: {
+        actionId: "export_saved_report",
+        input: { reportId: "report_123", format: "json" }
+      }
+    });
+  });
+
+  it("does not silently connect sources with fixture credentials from the CLI", async () => {
+    await expect(
+      runCommand("connect", ["stripe", "Stripe Fixture"], {
+        GROWTH_OS_OPERATOR_TOKEN: "operator",
+        GROWTH_OS_WORKSPACE_ID: "proj_test",
+        GROWTH_OS_API_URL: "http://127.0.0.1:3000"
+      })
+    ).rejects.toThrow("connect requires a JSON credential payload");
+  });
+
+  it("routes connector OAuth setup and polling through app-hosted OAuth sessions", async () => {
+    const requests: Array<{ url: string; body: unknown; authorization?: string }> = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+      requests.push({
+        url: String(url),
+        body: init?.body ? JSON.parse(String(init.body)) : null,
+        authorization: init?.headers && "Authorization" in init.headers ? String(init.headers.Authorization) : undefined
+      });
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }) as typeof fetch;
+
+    try {
+      await runCommand(
+        "connect",
+        [
+          "oauth",
+          "google_analytics_4",
+          "--client-id",
+          "ga-client-id",
+          "--redirect-uri",
+          "http://localhost:3000/oauth/callback/google_analytics_4"
+        ],
+        { GROWTH_OS_OPERATOR_TOKEN: "operator-token", GROWTH_OS_WORKSPACE_ID: "proj_test", GROWTH_OS_API_URL: "http://127.0.0.1:3000" }
+      );
+      await runCommand("connect", ["oauth-status", "oauth_session_1"], {
+        GROWTH_OS_OPERATOR_TOKEN: "operator-token",
+        GROWTH_OS_WORKSPACE_ID: "proj_test",
+        GROWTH_OS_API_URL: "http://127.0.0.1:3000"
+      });
+      await runCommand(
+        "connect",
+        [
+          "oauth-exchange",
+          "oauth_session_1",
+          "--property-id",
+          "properties/123",
+          "--connection-name",
+          "GA4 Website",
+          "--client-secret",
+          "ga-client-secret",
+          "--token-url",
+          "https://oauth2.test/token",
+          "--api-base-url",
+          "https://analyticsdata.test/v1beta"
+        ],
+        { GROWTH_OS_OPERATOR_TOKEN: "operator-token", GROWTH_OS_WORKSPACE_ID: "proj_test", GROWTH_OS_API_URL: "http://127.0.0.1:3000" }
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    expect(requests).toEqual([
+      {
+        url: "http://127.0.0.1:3000/oauth/sessions",
+        authorization: "Bearer operator-token",
+        body: {
+          provider: "google_analytics_4",
+          clientId: "ga-client-id",
+          redirectUri: "http://localhost:3000/oauth/callback/google_analytics_4"
+        }
+      },
+      {
+        url: "http://127.0.0.1:3000/oauth/sessions/oauth_session_1",
+        authorization: "Bearer operator-token",
+        body: null
+      },
+      {
+        url: "http://127.0.0.1:3000/oauth/sessions/oauth_session_1/exchange",
+        authorization: "Bearer operator-token",
+        body: {
+          propertyId: "properties/123",
+          connectionName: "GA4 Website",
+          clientSecret: "ga-client-secret",
+          tokenUrl: "https://oauth2.test/token",
+          apiBaseUrl: "https://analyticsdata.test/v1beta"
+        }
+      }
+    ]);
+  });
+
+  it("allows OAuth token exchange before a GA4 property is known", async () => {
+    const requests: Array<{ url: string; body: unknown; authorization?: string }> = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+      requests.push({
+        url: String(url),
+        body: init?.body ? JSON.parse(String(init.body)) : null,
+        authorization: init?.headers && "Authorization" in init.headers ? String(init.headers.Authorization) : undefined
+      });
+      return new Response(JSON.stringify({ ok: true, status: "authorized" }), { status: 200 });
+    }) as typeof fetch;
+
+    try {
+      await runCommand(
+        "connect",
+        [
+          "oauth-exchange",
+          "oauth_session_1",
+          "--client-secret",
+          "ga-client-secret",
+          "--token-url",
+          "https://oauth2.test/token"
+        ],
+        { GROWTH_OS_OPERATOR_TOKEN: "operator-token", GROWTH_OS_WORKSPACE_ID: "proj_test", GROWTH_OS_API_URL: "http://127.0.0.1:3000" }
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    expect(requests).toEqual([
+      {
+        url: "http://127.0.0.1:3000/oauth/sessions/oauth_session_1/exchange",
+        authorization: "Bearer operator-token",
+        body: {
+          propertyId: undefined,
+          connectionName: undefined,
+          clientSecret: "ga-client-secret",
+          tokenUrl: "https://oauth2.test/token",
+          apiBaseUrl: undefined
+        }
+      }
+    ]);
+  });
+
+  it("lists and runs curated recipes over existing action calls", async () => {
+    const requests: Array<{ url: string; body: unknown }> = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+      const body = init?.body ? JSON.parse(String(init.body)) : null;
+      requests.push({ url: String(url), body });
+      return new Response(
+        JSON.stringify({
+          ok: true,
+          actionId: body?.actionId ?? "unknown",
+          authority: "operator",
+          status: "ok",
+          data: body?.actionId === "create_saved_report" ? { report: { id: "report_1" } } : {},
+          provenance: [],
+          caveats: [],
+          truncated: false,
+          nextActions: []
+        }),
+        { status: 200 }
+      );
+    }) as typeof fetch;
+
+    try {
+      const recipes = await runCommand("recipes", [], {});
+      await runCommand(
+        "recipe",
+        ["save_export_report", JSON.stringify({ name: "Revenue", toolPlan: { metric: "recognized_revenue" } })],
+        { GROWTH_OS_OPERATOR_TOKEN: "operator", GROWTH_OS_WORKSPACE_ID: "proj_test", GROWTH_OS_API_URL: "http://127.0.0.1:3000" }
+      );
+      expect(JSON.stringify(recipes)).toContain("save_export_report");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    expect(requests.map((request) => (request.body as { actionId: string }).actionId)).toEqual([
+      "create_saved_report",
+      "run_saved_report",
+      "export_saved_report"
+    ]);
+    expect(requests[1]?.body).toMatchObject({
+      input: { reportId: "report_1" }
+    });
+  });
+
+  it("persists narrow memory preferences through slash commands", async () => {
+    const root = mkdtempSync(join(tmpdir(), "growth-os-cli-memory-"));
+    try {
+      const store = createFileSessionMemoryStore(root);
+      const memory = createOperatorSessionMemory({ workspaceRoot: root }, store);
+      const result = await runSlashCommand(
+        "/memory set timezone Europe/London",
+        { GROWTH_OS_WORKSPACE_ROOT: root },
+        memory,
+        store
+      );
+      expect(String(result)).toContain("preferredTimezone: Europe/London");
+      expect(JSON.parse(readFileSync(sessionMemoryPathForRoot(root), "utf8"))).toMatchObject({
+        preferredTimezone: "Europe/London"
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("maps curated memory slash commands to the local agent runtime", async () => {
+    const requests: Array<[string, ...unknown[]]> = [];
+    const runtime = fakeAgentRuntime({
+      async listMemory(sessionId) {
+        requests.push(["listMemory", sessionId]);
+        return { ok: true, memories: [] };
+      },
+      async addMemory(sessionId, scope, fact) {
+        requests.push(["addMemory", sessionId, scope, fact]);
+        return { ok: true };
+      },
+      async deleteMemory(sessionId, memoryId) {
+        requests.push(["deleteMemory", sessionId, memoryId]);
+        return { ok: true };
+      }
+    });
+    const chatState = { conversationId: "session-1" };
+
+    await runSlashCommand("/memory", {}, undefined, undefined, chatState, runtime);
+    await runSlashCommand(
+      "/memory add workspace_preference Use UTC for weekly reports",
+      { GROWTH_OS_OPERATOR_TOKEN: "operator-token" },
+      undefined,
+      undefined,
+      chatState,
+      runtime
+    );
+    await runSlashCommand(
+      "/memory delete mem_1",
+      { GROWTH_OS_OPERATOR_TOKEN: "operator-token" },
+      undefined,
+      undefined,
+      chatState,
+      runtime
+    );
+
+    expect(requests).toEqual([
+      ["listMemory", "session-1"],
+      ["addMemory", "session-1", "workspace_preference", "Use UTC for weekly reports"],
+      ["deleteMemory", "session-1", "mem_1"]
+    ]);
+  });
+});
+
+function fakeAgentRuntime(overrides: Partial<CliAgentRuntime>): CliAgentRuntime {
+  return {
+    async chat() {
+      throw new Error("unexpected chat call");
+    },
+    async listSessions() {
+      throw new Error("unexpected listSessions call");
+    },
+    async resumeSession() {
+      throw new Error("unexpected resumeSession call");
+    },
+    async compactSession() {
+      throw new Error("unexpected compactSession call");
+    },
+    async confirmAction() {
+      throw new Error("unexpected confirmAction call");
+    },
+    async listMemory() {
+      throw new Error("unexpected listMemory call");
+    },
+    async addMemory() {
+      throw new Error("unexpected addMemory call");
+    },
+    async deleteMemory() {
+      throw new Error("unexpected deleteMemory call");
+    },
+    ...overrides
+  };
+}
+
+function mkCodexHome(tokens: Record<string, string>): string {
+  const codexHome = mkdtempSync(join(tmpdir(), "codex-home-"));
+  writeFileSync(join(codexHome, "auth.json"), JSON.stringify({ tokens }));
+  return codexHome;
+}
+
+describe("Meta backfill on connect and setup", () => {
+  it("no longer exposes a standalone /backfill command", async () => {
+    await expect(
+      runCommand("backfill", ["src_meta"], { GROWTH_OS_WORKSPACE_ID: "proj_test" })
+    ).rejects.toThrow("Unknown Infinite OS CLI command: backfill");
+    expect(helpText()).not.toContain("backfill <source_id>");
+  });
+
+  it("connect meta_ads queues a default 30-day backfill after connecting", async () => {
+    const requests: Array<{ url: string; body: Record<string, unknown> | null }> = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+      requests.push({ url: String(url), body: init?.body ? JSON.parse(String(init.body)) : null });
+      return new Response(
+        JSON.stringify({ ok: true, data: { source: { id: "src_meta_ads" } } }),
+        { status: 200 }
+      );
+    }) as typeof fetch;
+
+    let result: unknown;
+    try {
+      result = await runCommand(
+        "connect",
+        [
+          "meta_ads",
+          "Meta Main",
+          JSON.stringify({
+            mode: "live",
+            transport: "marketing_api",
+            adAccountId: "1234567890",
+            accessToken: "meta-access-token",
+            apiVersion: "v24.0"
+          })
+        ],
+        { GROWTH_OS_OPERATOR_TOKEN: "operator", GROWTH_OS_WORKSPACE_ID: "proj_test", GROWTH_OS_API_URL: "http://127.0.0.1:3000" }
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    expect(requests[0]).toMatchObject({
+      url: "http://127.0.0.1:3000/sources/connect",
+      body: { provider: "meta_ads", connectionName: "Meta Main" }
+    });
+    expect(requests[1]).toMatchObject({
+      url: "http://127.0.0.1:3000/sources/src_meta_ads/sync",
+      body: { mode: "backfill", backfillWindow: "30_days", refreshWindowDays: 30 }
+    });
+    expect(result).toMatchObject({ backfill: { queued: true, sourceId: "src_meta_ads" } });
+    expect(JSON.stringify(result)).not.toContain("meta-access-token");
+  });
+
+  it("connect meta_ads --no-backfill connects without queuing a sync", async () => {
+    const requests: Array<{ url: string; body: Record<string, unknown> | null }> = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+      requests.push({ url: String(url), body: init?.body ? JSON.parse(String(init.body)) : null });
+      return new Response(
+        JSON.stringify({ ok: true, data: { source: { id: "src_meta_ads" } } }),
+        { status: 200 }
+      );
+    }) as typeof fetch;
+
+    try {
+      await runCommand(
+        "connect",
+        [
+          "meta_ads",
+          "--no-backfill",
+          "Meta Main",
+          JSON.stringify({ mode: "live", transport: "marketing_api", adAccountId: "1", accessToken: "t" })
+        ],
+        { GROWTH_OS_OPERATOR_TOKEN: "operator", GROWTH_OS_WORKSPACE_ID: "proj_test", GROWTH_OS_API_URL: "http://127.0.0.1:3000" }
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({
+      url: "http://127.0.0.1:3000/sources/connect",
+      body: { provider: "meta_ads", connectionName: "Meta Main" }
+    });
+  });
+
+  it("connect meta_ads honors an explicit --backfill-window", async () => {
+    const requests: Array<{ url: string; body: Record<string, unknown> | null }> = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+      requests.push({ url: String(url), body: init?.body ? JSON.parse(String(init.body)) : null });
+      return new Response(
+        JSON.stringify({ ok: true, data: { source: { id: "src_meta_ads" } } }),
+        { status: 200 }
+      );
+    }) as typeof fetch;
+
+    try {
+      await runCommand(
+        "connect",
+        [
+          "meta_ads",
+          "--backfill-window",
+          "6_months",
+          "Meta Main",
+          JSON.stringify({ mode: "live", transport: "marketing_api", adAccountId: "1", accessToken: "t" })
+        ],
+        { GROWTH_OS_OPERATOR_TOKEN: "operator", GROWTH_OS_WORKSPACE_ID: "proj_test", GROWTH_OS_API_URL: "http://127.0.0.1:3000" }
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    expect(requests[1]).toMatchObject({
+      url: "http://127.0.0.1:3000/sources/src_meta_ads/sync",
+      body: { mode: "backfill", backfillWindow: "6_months", refreshWindowDays: 180 }
+    });
+  });
+
+  it("connect meta_ads does not fail the connection when the backfill sync errors", async () => {
+    let call = 0;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      call += 1;
+      if (call === 1) {
+        return new Response(JSON.stringify({ ok: true, data: { source: { id: "src_meta_ads" } } }), {
+          status: 200
+        });
+      }
+      return new Response(JSON.stringify({ error: "boom" }), { status: 500 });
+    }) as typeof fetch;
+
+    let result: unknown;
+    try {
+      result = await runCommand(
+        "connect",
+        [
+          "meta_ads",
+          "Meta Main",
+          JSON.stringify({ mode: "live", transport: "marketing_api", adAccountId: "1", accessToken: "t" })
+        ],
+        { GROWTH_OS_OPERATOR_TOKEN: "operator", GROWTH_OS_WORKSPACE_ID: "proj_test", GROWTH_OS_API_URL: "http://127.0.0.1:3000" }
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    expect(result).toMatchObject({ ok: true, backfill: { queued: false } });
+  });
+
+  it("setup connectors meta_ads stays connected when the backfill sync errors", async () => {
+    let call = 0;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      call += 1;
+      if (call === 1) {
+        return new Response(JSON.stringify({ ok: true, data: { source: { id: "src_meta_ads" } } }), {
+          status: 200
+        });
+      }
+      return new Response(JSON.stringify({ error: "boom" }), { status: 500 });
+    }) as typeof fetch;
+
+    let result: unknown;
+    try {
+      result = await runCommand(
+        "setup",
+        [
+          "connectors",
+          "meta_ads",
+          "--connection-name",
+          "Meta Ads Main",
+          "--ad-account-id",
+          "act_1234567890",
+          "--access-token",
+          "meta-access-token",
+          "--api-version",
+          "v24.0"
+        ],
+        // Pin the API base URL so this request-shape assertion targets a known
+        // endpoint and bypasses descriptor-first discovery (whose probes would
+        // otherwise read the dev machine's live daemon and pollute `requests`).
+        { GROWTH_OS_OPERATOR_TOKEN: "operator-token", GROWTH_OS_API_URL: "http://127.0.0.1:3000" }
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    expect(result).toMatchObject({
+      ok: true,
+      section: "connectors",
+      provider: "meta_ads",
+      backfill: { queued: false, reason: "sync_request_failed" }
+    });
+  });
+});
+
+describe("sync command (wizard + targets)", () => {
+  function syncFetch(requests: Array<{ url: string; method: string; body: Record<string, unknown> | null }>) {
+    return (async (url: RequestInfo | URL, init?: RequestInit) => {
+      const u = String(url);
+      const method = init?.method ?? "GET";
+      requests.push({ url: u, method, body: init?.body ? JSON.parse(String(init.body)) : null });
+      if (u.endsWith("/sources") && method === "GET") {
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            data: {
+              sources: [
+                { id: "src_meta_a", provider: "meta_ads", connection_name: "Ultima" },
+                { id: "src_stripe", provider: "stripe", connection_name: "Stripe Live" }
+              ]
+            }
+          }),
+          { status: 200 }
+        );
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }) as typeof fetch;
+  }
+
+  it("keeps sync <id> with no window as a plain incremental sync", async () => {
+    const requests: Array<{ url: string; method: string; body: Record<string, unknown> | null }> = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = syncFetch(requests);
+    try {
+      await runCommand("sync", ["src_123"], { GROWTH_OS_OPERATOR_TOKEN: "operator", GROWTH_OS_WORKSPACE_ID: "proj_test", GROWTH_OS_API_URL: "http://127.0.0.1:3000" });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({
+      url: "http://127.0.0.1:3000/sources/src_123/sync",
+      method: "POST",
+      body: {}
+    });
+  });
+
+  it("polls an interactive slash sync job and emits queued/running/completed progress", async () => {
+    const requests: Array<{ url: string; method: string; body: Record<string, unknown> | null }> = [];
+    const progress: ChatProgressEvent[] = [];
+    const originalFetch = globalThis.fetch;
+    let jobPolls = 0;
+    globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+      const u = String(url);
+      const method = init?.method ?? "GET";
+      requests.push({ url: u, method, body: init?.body ? JSON.parse(String(init.body)) : null });
+      if (u.endsWith("/sources/src_123/sync") && method === "POST") {
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            actionId: "start_source_sync",
+            authority: "operator",
+            status: "queued",
+            data: {
+              job: {
+                id: "job_sync_1",
+                workspace_id: "default",
+                job_type: "source_sync",
+                status: "queued",
+                payload: { sourceId: "src_123", mode: "incremental" }
+              }
+            },
+            provenance: ["job_runs"]
+          }),
+          { status: 200 }
+        );
+      }
+      if (u.endsWith("/jobs/job_sync_1") && method === "GET") {
+        jobPolls += 1;
+        const status = jobPolls === 1 ? "queued" : jobPolls === 2 ? "running" : "succeeded";
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            data: {
+              job: {
+                id: "job_sync_1",
+                workspace_id: "default",
+                job_type: "source_sync",
+                status,
+                payload: { sourceId: "src_123", mode: "incremental" },
+                created_at: "2026-06-06T15:34:30.604Z",
+                started_at: jobPolls >= 2 ? "2026-06-06T15:34:32.357Z" : null,
+                finished_at: jobPolls >= 3 ? "2026-06-06T15:34:33.105Z" : null,
+                error: null
+              },
+              syncRun:
+                status === "succeeded"
+                  ? {
+                      id: "sync_1",
+                      status: "succeeded",
+                      records_extracted: 4,
+                      records_loaded: 4,
+                      started_at: "2026-06-06T15:34:32.400Z",
+                      finished_at: "2026-06-06T15:34:33.000Z"
+                    }
+                  : null
+            }
+          }),
+          { status: 200 }
+        );
+      }
+      return new Response(JSON.stringify({ error: "unexpected request" }), { status: 500 });
+    }) as typeof fetch;
+
+    let result: unknown;
+    try {
+      result = await runSlashCommand(
+        "/sync src_123",
+        {
+          GROWTH_OS_OPERATOR_TOKEN: "operator",
+          GROWTH_OS_WORKSPACE_ID: "proj_test",
+          GROWTH_OS_API_URL: "http://127.0.0.1:3000",
+          GROWTH_OS_SYNC_POLL_INTERVAL_MS: "0",
+          GROWTH_OS_SYNC_WAIT_TIMEOUT_MS: "1000"
+        },
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        {
+          onProgress: (event) => progress.push(event)
+        }
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    expect(requests.map((request) => [request.method, request.url])).toEqual([
+      ["POST", "http://127.0.0.1:3000/sources/src_123/sync"],
+      ["GET", "http://127.0.0.1:3000/jobs/job_sync_1"],
+      ["GET", "http://127.0.0.1:3000/jobs/job_sync_1"],
+      ["GET", "http://127.0.0.1:3000/jobs/job_sync_1"]
+    ]);
+    expect(progress.map((event) => ("text" in event ? event.text : event.message)).join("\n")).toMatch(
+      /queued[\s\S]*running[\s\S]*completed/i
+    );
+    expect(renderCliResult(result)).toContain("Sync completed");
+    expect(renderCliResult(result)).toContain("4 records loaded");
+  });
+
+  it("re-pulls a chosen window for sync <id> <window> as a source_sync (no backfill mode)", async () => {
+    const requests: Array<{ url: string; method: string; body: Record<string, unknown> | null }> = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = syncFetch(requests);
+    try {
+      await runCommand("sync", ["src_meta", "6_months"], { GROWTH_OS_OPERATOR_TOKEN: "operator", GROWTH_OS_WORKSPACE_ID: "proj_test", GROWTH_OS_API_URL: "http://127.0.0.1:3000" });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({
+      url: "http://127.0.0.1:3000/sources/src_meta/sync",
+      method: "POST",
+      body: { backfillWindow: "6_months", refreshWindowDays: 180 }
+    });
+    expect(requests[0]?.body).not.toHaveProperty("mode");
+  });
+
+  it("re-pulls full history for sync <id> all_time", async () => {
+    const requests: Array<{ url: string; method: string; body: Record<string, unknown> | null }> = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = syncFetch(requests);
+    try {
+      await runCommand("sync", ["src_meta", "all_time"], { GROWTH_OS_OPERATOR_TOKEN: "operator", GROWTH_OS_WORKSPACE_ID: "proj_test", GROWTH_OS_API_URL: "http://127.0.0.1:3000" });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+    expect(requests[0]?.body).toMatchObject({ backfillWindow: "all_time" });
+    expect(requests[0]?.body).not.toHaveProperty("refreshWindowDays");
+  });
+
+  it("resolves a provider alias to its source via the live list", async () => {
+    const requests: Array<{ url: string; method: string; body: Record<string, unknown> | null }> = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = syncFetch(requests);
+    try {
+      await runCommand("sync", ["meta", "3_months"], { GROWTH_OS_OPERATOR_TOKEN: "operator", GROWTH_OS_WORKSPACE_ID: "proj_test", GROWTH_OS_API_URL: "http://127.0.0.1:3000" });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+    expect(requests[0]).toMatchObject({ url: "http://127.0.0.1:3000/sources", method: "GET" });
+    expect(requests[1]).toMatchObject({
+      url: "http://127.0.0.1:3000/sources/src_meta_a/sync",
+      method: "POST",
+      body: { backfillWindow: "3_months", refreshWindowDays: 90 }
+    });
+    expect(requests).toHaveLength(2);
+  });
+
+  it("asks for a sync window before provider-style sync mutates in non-interactive mode", async () => {
+    const requests: Array<{ url: string; method: string; body: Record<string, unknown> | null }> = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = syncFetch(requests);
+    let result: unknown;
+    try {
+      result = await runCommand("sync", ["meta"], {
+        GROWTH_OS_OPERATOR_TOKEN: "operator",
+        GROWTH_OS_WORKSPACE_ID: "proj_test",
+        GROWTH_OS_API_URL: "http://127.0.0.1:3000",
+        GROWTH_OS_CLI_NONINTERACTIVE: "1"
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    expect(requests).toEqual([
+      {
+        url: "http://127.0.0.1:3000/sources",
+        method: "GET",
+        body: null
+      }
+    ]);
+    expect(renderCliResult(result)).toContain("How far back should we sync meta?");
+    expect(renderCliResult(result)).toContain("/sync meta 30_days");
+    expect(renderCliResult(result)).toContain("infinite local sync meta 30_days");
+  });
+
+  it("fans out sync all to every connected source", async () => {
+    const requests: Array<{ url: string; method: string; body: Record<string, unknown> | null }> = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = syncFetch(requests);
+    try {
+      await runCommand("sync", ["all", "30_days"], { GROWTH_OS_OPERATOR_TOKEN: "operator", GROWTH_OS_WORKSPACE_ID: "proj_test", GROWTH_OS_API_URL: "http://127.0.0.1:3000" });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+    const synced = requests.filter((r) => r.method === "POST").map((r) => r.url);
+    expect(synced).toContain("http://127.0.0.1:3000/sources/src_meta_a/sync");
+    expect(synced).toContain("http://127.0.0.1:3000/sources/src_stripe/sync");
+  });
+
+  it("asks for a target when sync runs with no args in a non-interactive shell", async () => {
+    await expect(runCommand("sync", [], { GROWTH_OS_WORKSPACE_ID: "proj_test" })).rejects.toThrow(/source/i);
+  });
+
+  it("rejects an unknown sync target", async () => {
+    const requests: Array<{ url: string; method: string; body: Record<string, unknown> | null }> = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = syncFetch(requests);
+    try {
+      await expect(
+        runCommand("sync", ["nope", "30_days"], { GROWTH_OS_OPERATOR_TOKEN: "operator", GROWTH_OS_WORKSPACE_ID: "proj_test", GROWTH_OS_API_URL: "http://127.0.0.1:3000" })
+      ).rejects.toThrow(/No connected source matches/i);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("rejects an unknown sync window", async () => {
+    await expect(
+      runCommand("sync", ["src_meta", "nonsense"], { GROWTH_OS_OPERATOR_TOKEN: "operator", GROWTH_OS_WORKSPACE_ID: "proj_test", GROWTH_OS_API_URL: "http://127.0.0.1:3000" })
+    ).rejects.toThrow(/window/i);
+  });
+
+  it("accepts a leading --window flag without consuming the target", async () => {
+    const requests: Array<{ url: string; method: string; body: Record<string, unknown> | null }> = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = syncFetch(requests);
+    try {
+      await runCommand("sync", ["--window", "6_months", "src_meta"], { GROWTH_OS_OPERATOR_TOKEN: "operator", GROWTH_OS_WORKSPACE_ID: "proj_test", GROWTH_OS_API_URL: "http://127.0.0.1:3000" });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({
+      url: "http://127.0.0.1:3000/sources/src_meta/sync",
+      method: "POST",
+      body: { backfillWindow: "6_months", refreshWindowDays: 180 }
+    });
+  });
+
+  it("explains when a known provider has no connected source", async () => {
+    const requests: Array<{ url: string; method: string; body: Record<string, unknown> | null }> = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = syncFetch(requests);
+    try {
+      await expect(
+        runCommand("sync", ["ga4", "30_days"], { GROWTH_OS_OPERATOR_TOKEN: "operator", GROWTH_OS_WORKSPACE_ID: "proj_test", GROWTH_OS_API_URL: "http://127.0.0.1:3000" })
+      ).rejects.toThrow(/No google_analytics_4 source is connected/i);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("documents sync targets in help", () => {
+    expect(helpText()).toContain("sync <provider|source_id> [window]");
+    expect(helpText()).toContain("sync all [window]");
+  });
+});
+
+describe("active-project guard (cutover)", () => {
+  it("setup status exits cleanly with no active project", async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "growth-os-noproj-status-"));
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-noproj-status-home-"));
+    try {
+      const result = await runCommand("setup", ["status"], {
+        GROWTH_OS_WORKSPACE_ROOT: workspaceRoot,
+        GROWTH_OS_HOME: growthHome
+      });
+      // No NoActiveProjectError thrown — setup status is exempt and project-tolerant.
+      expect(isRecordResult(result)).toBe(true);
+    } finally {
+      rmSync(workspaceRoot, { recursive: true, force: true });
+      rmSync(growthHome, { recursive: true, force: true });
+    }
+  });
+
+  it("health exits cleanly with no active project", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => new Response(JSON.stringify({ status: "ok" }), { status: 200 })) as typeof fetch;
+    try {
+      const result = await runCommand("health", [], { GROWTH_OS_API_URL: "http://127.0.0.1:3999" });
+      expect(result).toMatchObject({ status: "ok" });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("a guarded command with no active project throws NoActiveProjectError", async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "growth-os-noproj-guarded-"));
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-noproj-guarded-home-"));
+    try {
+      await expect(
+        runCommand("sources", [], {
+          GROWTH_OS_WORKSPACE_ROOT: workspaceRoot,
+          GROWTH_OS_HOME: growthHome
+        })
+      ).rejects.toBeInstanceOf(NoActiveProjectError);
+    } finally {
+      rmSync(workspaceRoot, { recursive: true, force: true });
+      rmSync(growthHome, { recursive: true, force: true });
+    }
+  });
+
+  it("the NoActiveProjectError message guides the user to setup or project new", async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "growth-os-noproj-message-"));
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-noproj-message-home-"));
+    try {
+      await expect(
+        runCommand("sources", [], {
+          GROWTH_OS_WORKSPACE_ROOT: workspaceRoot,
+          GROWTH_OS_HOME: growthHome
+        })
+      ).rejects.toThrow(/No active project\. Run `infinite local setup` or `infinite local project new <name>`\./);
+    } finally {
+      rmSync(workspaceRoot, { recursive: true, force: true });
+      rmSync(growthHome, { recursive: true, force: true });
+    }
+  });
+
+  it("a guarded command rethrows non-stale DB errors before calling the API", async () => {
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-stale-pointer-"));
+    writeActiveProjectId("proj_deleted", { GROWTH_OS_HOME: growthHome } as never);
+    const originalFetch = globalThis.fetch;
+    const fetchSpy = vi.fn(async () => new Response(JSON.stringify({ ok: true, data: { sources: [] } }), { status: 200 }));
+    globalThis.fetch = fetchSpy as typeof fetch;
+    try {
+      const env = {
+        GROWTH_OS_HOME: growthHome,
+        GROWTH_OS_API_URL: "http://127.0.0.1:3999",
+        GROWTH_OS_ENCRYPTION_KEY: "test-encryption-key",
+        // Unreachable DB → findProject throws connection error, which must surface.
+        DATABASE_URL: "postgres://growth:password@127.0.0.1:1/growth"
+      } as Record<string, string>;
+      await expect(runCommand("sources", [], env)).rejects.toThrow(/ECONNREFUSED|connect|Connection terminated/i);
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      globalThis.fetch = originalFetch;
+      rmSync(growthHome, { recursive: true, force: true });
+    }
+  });
+
+  it("functional isolation: requests carry the active project's id and switch with `project use`", async () => {
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-isolation-"));
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "growth-os-isolation-workspace-"));
+    const headers: string[] = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+      const h = new Headers(init?.headers);
+      if (String(url).endsWith("/projects")) {
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            projects: [
+              { id: "proj_aaaaaaaaaaaaaaaa", name: "Alpha" },
+              { id: "proj_bbbbbbbbbbbbbbbb", name: "Beta" }
+            ]
+          }),
+          { status: 200 }
+        );
+      }
+      headers.push(h.get("x-growth-os-workspace") ?? "");
+      return new Response(JSON.stringify({ ok: true, data: { sources: [] } }), { status: 200 });
+    }) as typeof fetch;
+    try {
+      const env = {
+        GROWTH_OS_HOME: growthHome,
+        GROWTH_OS_WORKSPACE_ROOT: workspaceRoot,
+        GROWTH_OS_API_URL: "http://127.0.0.1:3999",
+        GROWTH_OS_OPERATOR_TOKEN: "op"
+      } as Record<string, string>;
+      writeActiveProjectId("proj_aaaaaaaaaaaaaaaa", env as never);
+      await runCommand("sources", [], env);
+      // PR4 [major]: `/project use` is a SESSION pin, not a persisted pointer. It
+      // returns a pin-change signal instead of calling writeActiveProjectId; the
+      // `onSubmitLine` wrapper applies it to the original session env. Here we
+      // drive that wrapper step explicitly via `applySessionPin`.
+      const useResult = await runCommand("project", ["use", "Beta"], env);
+      const pinChange = readProjectPinChange(useResult);
+      expect(pinChange).toEqual({ id: "proj_bbbbbbbbbbbbbbbb", name: "Beta" });
+      // Not persisted: the legacy active pointer stays on Alpha.
+      expect(readActiveProjectId(env as never)).toBe("proj_aaaaaaaaaaaaaaaa");
+      applySessionPin(env as never, pinChange!);
+      // The in-process env pin now wins (session-only, gone on restart).
+      expect(env.GROWTH_OS_WORKSPACE_ID).toBe("proj_bbbbbbbbbbbbbbbb");
+      await runCommand("sources", [], env);
+      expect(headers).toEqual(["proj_aaaaaaaaaaaaaaaa", "proj_bbbbbbbbbbbbbbbb"]);
+    } finally {
+      globalThis.fetch = originalFetch;
+      rmSync(growthHome, { recursive: true, force: true });
+      rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("standalone `project use` carries (and renders) a hint that the pin is session-only", async () => {
+    // Run NOT from the interactive wrapper (no GROWTH_OS_CLI_NONINTERACTIVE=1
+    // marker): the [PROJECT_PIN_CHANGE] signal goes unconsumed, so the result
+    // must explain that `/project use` only pins an interactive session and to
+    // use `project default set` to persist. Confirm the hint is part of the
+    // rendered, user-facing CLI output (not buried in a non-rendered field).
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-use-hint-"));
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "growth-os-use-hint-ws-"));
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: RequestInfo | URL) => {
+      if (String(url).endsWith("/projects")) {
+        return new Response(
+          JSON.stringify({ ok: true, projects: [{ id: "proj_bbbbbbbbbbbbbbbb", name: "Beta" }] }),
+          { status: 200 }
+        );
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }) as typeof fetch;
+    try {
+      const env = {
+        GROWTH_OS_HOME: growthHome,
+        GROWTH_OS_WORKSPACE_ROOT: workspaceRoot,
+        GROWTH_OS_API_URL: "http://127.0.0.1:3999",
+        GROWTH_OS_OPERATOR_TOKEN: "op"
+      } as Record<string, string>;
+      writeActiveProjectId("proj_bbbbbbbbbbbbbbbb", env as never);
+      const result = await runCommand("project", ["use", "Beta"], env);
+      const rendered = renderCliResult(result);
+      expect(rendered).toContain("Pinned project: Beta");
+      expect(rendered).toContain("interactive session only");
+      expect(rendered).toContain("infinite local project default set Beta");
+    } finally {
+      globalThis.fetch = originalFetch;
+      rmSync(growthHome, { recursive: true, force: true });
+      rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("interactive `project use` (NONINTERACTIVE=1 wrapper marker) omits the standalone hint", async () => {
+    // From the interactive wrapper the [PROJECT_PIN_CHANGE] signal IS consumed
+    // (applySessionPin), so the redundant "persist with default set" hint would
+    // be noise — it must not be attached.
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-use-nohint-"));
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "growth-os-use-nohint-ws-"));
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: RequestInfo | URL) => {
+      if (String(url).endsWith("/projects")) {
+        return new Response(
+          JSON.stringify({ ok: true, projects: [{ id: "proj_bbbbbbbbbbbbbbbb", name: "Beta" }] }),
+          { status: 200 }
+        );
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }) as typeof fetch;
+    try {
+      const env = {
+        GROWTH_OS_HOME: growthHome,
+        GROWTH_OS_WORKSPACE_ROOT: workspaceRoot,
+        GROWTH_OS_API_URL: "http://127.0.0.1:3999",
+        GROWTH_OS_OPERATOR_TOKEN: "op",
+        GROWTH_OS_CLI_NONINTERACTIVE: "1"
+      } as Record<string, string>;
+      writeActiveProjectId("proj_bbbbbbbbbbbbbbbb", env as never);
+      const result = await runCommand("project", ["use", "Beta"], env);
+      expect(readProjectPinChange(result)).toEqual({ id: "proj_bbbbbbbbbbbbbbbb", name: "Beta" });
+      expect((result as { hint?: string }).hint).toBeUndefined();
+    } finally {
+      globalThis.fetch = originalFetch;
+      rmSync(growthHome, { recursive: true, force: true });
+      rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("expandHomePath", () => {
+  it("expands a bare ~ and a ~/-prefixed path to the home directory", () => {
+    expect(expandHomePath("~")).toBe(homedir());
+    expect(expandHomePath("~/sites/app")).toBe(`${homedir()}/sites/app`);
+  });
+
+  it("leaves absolute, relative, and ~user paths untouched", () => {
+    expect(expandHomePath("/srv/app")).toBe("/srv/app");
+    expect(expandHomePath("./app")).toBe("./app");
+    expect(expandHomePath("~deploy/app")).toBe("~deploy/app");
+  });
+});
+
+describe("runTagInstallOffer (#9 per-provider parity)", () => {
+  function fakeIo(overrides: Partial<Parameters<typeof runTagInstallOffer>[0]["io"]> = {}) {
+    const writes: string[] = [];
+    const installProviderTags = vi.fn(async (inp: Parameters<Parameters<typeof runTagInstallOffer>[0]["io"]["installProviderTags"]>[0]) => {
+      const providers = Object.keys(inp.artifacts) as SetupProviderId[];
+      const ok = inp.confirm
+        ? await inp.confirm({ framework: "next-app-router", appRoot: ".", packageManager: "pnpm", files: ["lib/infinite-analytics.ts"], providers })
+        : true;
+      return ok
+        ? { result: { status: "ok", detail: "Installed the analytics tag(s) (lib/infinite-analytics.ts).", data: { changedFiles: ["lib/infinite-analytics.ts"] } } }
+        : { result: { status: "skipped", detail: "Install skipped — no files were changed." } };
+    });
+    const io = {
+      isInteractive: true,
+      write: (message: string) => {
+        writes.push(message);
+      },
+      promptText: async () => "",
+      promptYesNo: async () => true,
+      installProviderTags,
+      buildPostHogBootstrapSnippet: (projectKey: string, apiHost: string) => `posthog.init(${projectKey}, ${apiHost})`,
+      buildXBootstrapSnippet: (pixelId: string) => `twq('config', ${pixelId})`,
+      wrapHtmlSnippet: (source: string) => `<script>\n${source}\n</script>`,
+      ...overrides
+    };
+    return { writes, installProviderTags, io };
+  }
+
+  const ga4Only = { ga4: { measurementId: "G-OK" }, posthog: {}, x: {} };
+
+  it("does nothing when no completed provider has a captured artifact", async () => {
+    const a = fakeIo();
+    await runTagInstallOffer({ completed: [], resolvedPublicArtifacts: ga4Only, workspaceId: "ws", io: a.io });
+    const b = fakeIo();
+    await runTagInstallOffer({ completed: ["ga4"], resolvedPublicArtifacts: { ga4: {}, posthog: {}, x: {} }, workspaceId: "ws", io: b.io });
+    expect(a.installProviderTags).not.toHaveBeenCalled();
+    expect(b.installProviderTags).not.toHaveBeenCalled();
+    expect(a.writes).toEqual([]);
+    expect(b.writes).toEqual([]);
+  });
+
+  it("stays completely silent (no writes, no install) when non-interactive", async () => {
+    const a = fakeIo({ isInteractive: false });
+    await runTagInstallOffer({ completed: ["ga4"], resolvedPublicArtifacts: ga4Only, workspaceId: "ws", io: a.io });
+    expect(a.installProviderTags).not.toHaveBeenCalled();
+    expect(a.writes).toEqual([]);
+  });
+
+  it("GA4-only: prints the GA4 connected line + manual gtag snippet on skip", async () => {
+    const a = fakeIo({ promptText: async () => "  " });
+    await runTagInstallOffer({ completed: ["ga4"], resolvedPublicArtifacts: { ga4: { measurementId: "G-SKIP" }, posthog: {}, x: {} }, workspaceId: "ws", io: a.io });
+    expect(a.installProviderTags).not.toHaveBeenCalled();
+    const out = a.writes.join("");
+    expect(out).toContain("GA4 is connected. To start collecting data, add the GA4 tag to your site.");
+    expect(out).toContain("npx infinite-tag install");
+    expect(out).toContain("googletagmanager.com/gtag/js?id=G-SKIP");
+  });
+
+  it("PostHog-only: prints the PostHog connected line + manual snippet on skip", async () => {
+    const a = fakeIo({ promptText: async () => "" });
+    await runTagInstallOffer({ completed: ["posthog"], resolvedPublicArtifacts: { ga4: {}, posthog: { projectKey: "phc_ph1" }, x: {} }, workspaceId: "ws", io: a.io });
+    expect(a.installProviderTags).not.toHaveBeenCalled();
+    const out = a.writes.join("");
+    expect(out).toContain("PostHog is connected. To start capturing product events, add the PostHog snippet to your site.");
+    // apiHost defaults when none captured.
+    expect(out).toContain("project key phc_ph1, host https://us.i.posthog.com");
+    expect(out).toContain("posthog.init(phc_ph1, https://us.i.posthog.com)");
+  });
+
+  it("X-only: prints the X connected line + manual pixel on skip", async () => {
+    const a = fakeIo({ promptText: async () => "" });
+    await runTagInstallOffer({ completed: ["x"], resolvedPublicArtifacts: { ga4: {}, posthog: {}, x: { pixelId: "px_1", eventTagIds: { a: "tag_a" } } }, workspaceId: "ws", io: a.io });
+    expect(a.installProviderTags).not.toHaveBeenCalled();
+    const out = a.writes.join("");
+    expect(out).toContain("X is connected. To start tracking conversions, add the X pixel to your site.");
+    expect(out).toContain("X pixel to the <head> of every page (pixel id px_1)");
+    expect(out).toContain("twq('config', px_1)");
+  });
+
+  it("all-three: ONE combined installProviderTags apply with all providers, naming each in the preview", async () => {
+    const a = fakeIo({ promptText: async () => "~/sites/app" });
+    await runTagInstallOffer({
+      completed: ["ga4", "posthog", "x"],
+      resolvedPublicArtifacts: { ga4: { measurementId: "G-OK" }, posthog: { projectKey: "phc_ph1", apiHost: "https://eu.i.posthog.com" }, x: { pixelId: "px_1", eventTagIds: { a: "tag_a", b: "tag_a" } } },
+      workspaceId: "ws_1",
+      io: a.io
+    });
+    expect(a.installProviderTags).toHaveBeenCalledTimes(1);
+    const call = a.installProviderTags.mock.calls[0]![0] as { repoRoot: string; workspaceId: string; artifacts: Record<string, unknown> };
+    expect(call.workspaceId).toBe("ws_1");
+    expect(call.repoRoot).toBe(`${homedir()}/sites/app`);
+    expect(Object.keys(call.artifacts).sort()).toEqual(["ga4", "posthog", "x"]);
+    expect((call.artifacts as { posthog: { apiHost: string } }).posthog.apiHost).toBe("https://eu.i.posthog.com");
+    // event tags deduped.
+    expect((call.artifacts as { x: { eventTagIds: string[] } }).x.eventTagIds).toEqual(["tag_a"]);
+    const out = a.writes.join("");
+    expect(out).toContain("install the GA4 tag, PostHog snippet, and X pixel into your next-app-router app");
+    expect(out).toContain("Installed the analytics tag(s)");
+  });
+
+  it("decline: prints the manual snippet for EVERY not-written provider (no silent drop)", async () => {
+    const a = fakeIo({ promptText: async () => "/srv/app", promptYesNo: async () => false });
+    await runTagInstallOffer({
+      completed: ["ga4", "posthog", "x"],
+      resolvedPublicArtifacts: { ga4: { measurementId: "G-NO" }, posthog: { projectKey: "phc_no" }, x: { pixelId: "px_no", eventTagIds: {} } },
+      workspaceId: "ws",
+      io: a.io
+    });
+    expect(a.installProviderTags).toHaveBeenCalledTimes(1);
+    const out = a.writes.join("");
+    expect(out).toContain("Install skipped");
+    expect(out).toContain("googletagmanager.com/gtag/js?id=G-NO");
+    expect(out).toContain("posthog.init(phc_no");
+    expect(out).toContain("twq('config', px_no)");
+  });
+
+  it("throw: prints the manual snippet for every provider and does not propagate", async () => {
+    const a = fakeIo({
+      promptText: async () => "/srv/app",
+      installProviderTags: vi.fn(async () => {
+        throw new Error("ENOENT: no such directory");
+      })
+    });
+    await expect(
+      runTagInstallOffer({
+        completed: ["ga4", "posthog"],
+        resolvedPublicArtifacts: { ga4: { measurementId: "G-ERR" }, posthog: { projectKey: "phc_err" }, x: {} },
+        workspaceId: "ws",
+        io: a.io
+      })
+    ).resolves.toBeUndefined();
+    const out = a.writes.join("");
+    expect(out).toContain("Could not install your analytics tags automatically");
+    expect(out).toContain("ENOENT");
+    expect(out).toContain("googletagmanager.com/gtag/js?id=G-ERR");
+    expect(out).toContain("posthog.init(phc_err");
+  });
+
+  it("resolves without throwing when promptText rejects (readline closed) and falls back to manual snippets", async () => {
+    const a = fakeIo({
+      promptText: async () => {
+        throw new Error("readline was closed");
+      }
+    });
+    await expect(
+      runTagInstallOffer({ completed: ["ga4"], resolvedPublicArtifacts: { ga4: { measurementId: "G-RLCLOSE" }, posthog: {}, x: {} }, workspaceId: "ws", io: a.io })
+    ).resolves.toBeUndefined();
+    expect(a.installProviderTags).not.toHaveBeenCalled();
+    expect(a.writes.join("")).toContain("googletagmanager.com/gtag/js?id=G-RLCLOSE");
+  });
+});
+
+describe("createLocalSetupPrompter (#10 json/stdout purity)", () => {
+  const interview = (): Parameters<typeof buildSetupOnboardingResult>[0] => ({
+    projectName: "Acme",
+    websiteUrl: "https://acme.test",
+    productSurface: "web",
+    providerInventory: []
+  });
+
+  it("note() in non-interactive mode writes NOTHING to stdout or stderr", () => {
+    const prompter = createLocalSetupPrompter({ interactive: false });
+    const stdoutSpy = vi.spyOn(process.stdout, "write").mockReturnValue(true);
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    try {
+      prompter.note("a confirmation line");
+      expect(stdoutSpy).not.toHaveBeenCalled();
+      expect(stderrSpy).not.toHaveBeenCalled();
+    } finally {
+      stdoutSpy.mockRestore();
+      stderrSpy.mockRestore();
+    }
+  });
+
+  it("note() in interactive mode writes to stderr, never stdout", () => {
+    const prompter = createLocalSetupPrompter({ interactive: true });
+    const stdoutSpy = vi.spyOn(process.stdout, "write").mockReturnValue(true);
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    try {
+      prompter.note("a confirmation line");
+      expect(stdoutSpy).not.toHaveBeenCalled();
+      expect(stderrSpy).toHaveBeenCalledWith("a confirmation line\n");
+    } finally {
+      stdoutSpy.mockRestore();
+      stderrSpy.mockRestore();
+    }
+  });
+
+  it("ask() in non-interactive mode returns the headless default without opening readline or touching stdout", async () => {
+    const prompter = createLocalSetupPrompter({ interactive: false });
+    const stdoutSpy = vi.spyOn(process.stdout, "write").mockReturnValue(true);
+    try {
+      await expect(prompter.ask("paste your key")).resolves.toBe("");
+      await expect(prompter.ask("pick one", ["first", "second"])).resolves.toBe("first");
+      expect(stdoutSpy).not.toHaveBeenCalled();
+    } finally {
+      stdoutSpy.mockRestore();
+    }
+  });
+
+  it("the serialized setup --json payload is a single JSON.parse-able object carrying the honesty fields", () => {
+    // The `setup --json` chokepoint writes ONLY `JSON.stringify(result)` to stdout. With the
+    // prompter no longer writing notes/asks to stdout (above), this payload IS the stdout.
+    const onboardingResult = buildSetupOnboardingResult(
+      { ...interview(), providerInventory: [
+        { provider: "ga4", hasAccount: true, installState: "unknown", selected: true, recommended: true },
+        { provider: "posthog", hasAccount: false, installState: "unknown", selected: true, recommended: true }
+      ] },
+      {
+        selectedProviders: ["ga4", "posthog"],
+        recommendedProviders: ["ga4", "posthog"],
+        recommendations: [
+          { provider: "ga4", status: "recommended", reasonCode: "web_default", rationale: "default web stack" },
+          { provider: "posthog", status: "recommended", reasonCode: "web_default", rationale: "default web stack" }
+        ],
+        completed: ["ga4"],
+        paused: ["posthog"],
+        failed: [],
+        runs: { ga4: { phases: {}, providerState: {} } },
+        activeRuns: [{ id: "run_ph1", provider: "posthog", status: "paused_handoff", pendingHandoff: { instructions: "finish PostHog signup" } }],
+        resolvedPublicArtifacts: { ga4: { measurementId: "G-ACME123" }, posthog: {}, x: {} },
+        installCommand: "npx infinite-tag install --workspace proj_1 --ga4-measurement-id G-ACME123 --yes",
+        installArtifactsPath: null
+      }
+    );
+    const stdout = `${JSON.stringify(onboardingResult, null, 2)}\n`;
+    expect(stdout.trim().startsWith("{")).toBe(true);
+    const parsed = JSON.parse(stdout) as ReturnType<typeof buildSetupOnboardingResult>;
+    expect(parsed.ok).toBe(false);
+    expect(parsed.outstanding).toEqual([{ provider: "posthog", runId: "run_ph1", instructions: "finish PostHog signup" }]);
+    expect(parsed.next).toContain("infinite local setup resume run_ph1");
+  });
+});
+
+describe("buildSetupOnboardingResult honesty (#11/#12/#13/#14)", () => {
+  function moduleResult(overrides: Partial<Parameters<typeof buildSetupOnboardingResult>[1]> = {}): Parameters<typeof buildSetupOnboardingResult>[1] {
+    return {
+      selectedProviders: [],
+      recommendedProviders: ["ga4", "posthog"],
+      recommendations: [],
+      completed: [],
+      paused: [],
+      failed: [],
+      runs: {},
+      activeRuns: [],
+      resolvedPublicArtifacts: { ga4: {}, posthog: {}, x: {} },
+      installCommand: null,
+      installArtifactsPath: null,
+      ...overrides
+    };
+  }
+  const interviewWith = (
+    inventory: Parameters<typeof buildSetupOnboardingResult>[0]["providerInventory"]
+  ): Parameters<typeof buildSetupOnboardingResult>[0] => ({
+    projectName: "Acme",
+    websiteUrl: "https://acme.test",
+    productSurface: "web",
+    providerInventory: inventory
+  });
+
+  it("#13 a ticked-but-deferred X renders status=deferred with rationale + reenable kind", () => {
+    const result = buildSetupOnboardingResult(
+      interviewWith([
+        { provider: "ga4", hasAccount: true, installState: "unknown", selected: true, recommended: true },
+        { provider: "x", hasAccount: false, installState: "unknown", selected: true, recommended: false }
+      ]),
+      moduleResult({
+        selectedProviders: ["ga4"],
+        completed: ["ga4"],
+        resolvedPublicArtifacts: { ga4: { measurementId: "G-ACME123" }, posthog: {}, x: {} },
+        recommendations: [
+          { provider: "ga4", status: "recommended", reasonCode: "web_default", rationale: "default" },
+          { provider: "x", status: "deferred", reasonCode: "developer_billing_friction", rationale: "X stays deferred by default because billing friction." }
+        ]
+      })
+    );
+    const x = result.providers.find((p) => p.provider === "x")!;
+    expect(x.status).toBe("deferred");
+    expect(x.deferralReason).toContain("billing friction");
+    expect(x.deferralKind).toBe("reenable");
+    const rendered = renderCliResult(result);
+    expect(rendered).toContain("X: deferred");
+    expect(rendered).toContain("Why: X stays deferred");
+    expect(rendered).toContain("re-run `infinite local setup` and tick X");
+  });
+
+  it("#13 a not_applicable provider on a non-web surface renders deferred with the future kind", () => {
+    const result = buildSetupOnboardingResult(
+      interviewWith([
+        { provider: "x", hasAccount: false, installState: "unknown", selected: false, recommended: false }
+      ]),
+      moduleResult({
+        completed: ["ga4"],
+        recommendations: [
+          { provider: "x", status: "not_applicable", reasonCode: "surface_not_supported", rationale: "Web analytics only." }
+        ]
+      })
+    );
+    const x = result.providers.find((p) => p.provider === "x")!;
+    expect(x.status).toBe("deferred");
+    expect(x.deferralKind).toBe("future");
+    expect(renderCliResult(result)).toContain("tracked for a future release");
+  });
+
+  it("#13 a genuinely-unticked, non-deferred provider stays not_selected", () => {
+    const result = buildSetupOnboardingResult(
+      interviewWith([
+        { provider: "ga4", hasAccount: true, installState: "unknown", selected: true, recommended: true },
+        { provider: "x", hasAccount: false, installState: "unknown", selected: false, recommended: false }
+      ]),
+      moduleResult({
+        selectedProviders: ["ga4"],
+        completed: ["ga4"],
+        recommendations: [
+          { provider: "ga4", status: "recommended", reasonCode: "web_default", rationale: "default" }
+        ]
+      })
+    );
+    expect(result.providers.find((p) => p.provider === "x")!.status).toBe("not_selected");
+  });
+
+  it("#11 two paused providers → outstanding length 2, deduped, and a next that names the count (never 'continue')", () => {
+    const result = buildSetupOnboardingResult(
+      interviewWith([
+        { provider: "posthog", hasAccount: false, installState: "unknown", selected: true, recommended: true },
+        { provider: "x", hasAccount: false, installState: "unknown", selected: true, recommended: true }
+      ]),
+      moduleResult({
+        selectedProviders: ["posthog", "x"],
+        paused: ["posthog", "x"],
+        recommendations: [
+          { provider: "posthog", status: "recommended", reasonCode: "web_default", rationale: "default" },
+          { provider: "x", status: "recommended", reasonCode: "explicit_founder_request", rationale: "requested" }
+        ],
+        activeRuns: [
+          { id: "run_ph_new", provider: "posthog", status: "paused_handoff", pendingHandoff: null },
+          { id: "run_ph_old", provider: "posthog", status: "paused_handoff", pendingHandoff: null },
+          { id: "run_x1", provider: "x", status: "paused_handoff", pendingHandoff: null }
+        ]
+      })
+    );
+    expect(result.outstanding).toHaveLength(2);
+    // deduped per provider, keeping the most-recent (first) id.
+    expect(result.outstanding!.find((o) => o.provider === "posthog")!.runId).toBe("run_ph_new");
+    expect(result.ok).toBe(false);
+    expect(result.next).toContain("2 providers are still paused (POSTHOG, X)");
+    const rendered = renderCliResult(result);
+    expect(rendered).toContain("Still paused (finish these to capture every selected provider):");
+    expect(rendered).toContain("1. POSTHOG");
+    expect(rendered).toContain("2. X");
+    expect(rendered).toContain("infinite local setup resume --all");
+  });
+
+  it("#11 exactly one outstanding → next resumes that one, no --all footer", () => {
+    const result = buildSetupOnboardingResult(
+      interviewWith([
+        { provider: "posthog", hasAccount: false, installState: "unknown", selected: true, recommended: true }
+      ]),
+      moduleResult({
+        selectedProviders: ["posthog"],
+        paused: ["posthog"],
+        recommendations: [{ provider: "posthog", status: "recommended", reasonCode: "web_default", rationale: "default" }],
+        activeRuns: [{ id: "run_ph1", provider: "posthog", status: "paused_handoff", pendingHandoff: { instructions: "finish signup" } }]
+      })
+    );
+    expect(result.outstanding).toHaveLength(1);
+    expect(result.next).toBe("Run `infinite local setup resume run_ph1` after completing the POSTHOG handoff.");
+    const rendered = renderCliResult(result);
+    expect(rendered).toContain("1. POSTHOG — finish signup, then run `infinite local setup resume run_ph1`");
+    expect(rendered).not.toContain("infinite local setup resume --all");
+  });
+
+  it("#12 partial install: caveat names paused + failed not-covered providers after the install command", () => {
+    const result = buildSetupOnboardingResult(
+      interviewWith([
+        { provider: "ga4", hasAccount: true, installState: "unknown", selected: true, recommended: true },
+        { provider: "posthog", hasAccount: false, installState: "unknown", selected: true, recommended: true },
+        { provider: "x", hasAccount: false, installState: "unknown", selected: true, recommended: true }
+      ]),
+      moduleResult({
+        selectedProviders: ["ga4", "posthog", "x"],
+        completed: ["ga4"],
+        paused: ["posthog"],
+        failed: ["x"],
+        resolvedPublicArtifacts: { ga4: { measurementId: "G-ACME123" }, posthog: {}, x: {} },
+        installCommand: "npx infinite-tag install --workspace proj_1 --ga4-measurement-id G-ACME123 --yes",
+        recommendations: [
+          { provider: "ga4", status: "recommended", reasonCode: "web_default", rationale: "default" },
+          { provider: "posthog", status: "recommended", reasonCode: "web_default", rationale: "default" },
+          { provider: "x", status: "recommended", reasonCode: "explicit_founder_request", rationale: "requested" }
+        ],
+        activeRuns: [{ id: "run_ph1", provider: "posthog", status: "paused_handoff", pendingHandoff: null }]
+      })
+    );
+    const rendered = renderCliResult(result);
+    expect(rendered).toContain("Heads up: this command only installs tags for the providers that finished.");
+    expect(rendered).toContain("POSTHOG: paused mid-setup — finish it with `infinite local setup resume run_ph1`");
+    // A failed provider has no active run id (failed runs are not resumable), so it falls
+    // back to the status-based path rather than a resume command.
+    expect(rendered).toContain("X: not finished — run `infinite local setup status` to continue");
+  });
+
+  it("#12 no caveat when nothing is paused/failed", () => {
+    const result = buildSetupOnboardingResult(
+      interviewWith([
+        { provider: "ga4", hasAccount: true, installState: "unknown", selected: true, recommended: true }
+      ]),
+      moduleResult({
+        selectedProviders: ["ga4"],
+        completed: ["ga4"],
+        resolvedPublicArtifacts: { ga4: { measurementId: "G-ACME123" }, posthog: {}, x: {} },
+        installCommand: "npx infinite-tag install --workspace proj_1 --ga4-measurement-id G-ACME123 --yes",
+        recommendations: [{ provider: "ga4", status: "recommended", reasonCode: "web_default", rationale: "default" }]
+      })
+    );
+    expect(renderCliResult(result)).not.toContain("Heads up: this command only installs");
+  });
+
+  it("#14 none-selected / all-deferred → ok:false, pick-a-source next, and a primary banner", () => {
+    const result = buildSetupOnboardingResult(
+      interviewWith([
+        { provider: "x", hasAccount: false, installState: "unknown", selected: false, recommended: false }
+      ]),
+      moduleResult({
+        recommendations: [
+          { provider: "x", status: "deferred", reasonCode: "developer_billing_friction", rationale: "billing friction" }
+        ]
+      })
+    );
+    expect(result.ok).toBe(false);
+    expect(result.next).toContain("Run `infinite local setup` and select a data source");
+    const rendered = renderCliResult(result);
+    expect(rendered).toContain("No data source was configured — nothing was set up.");
+    // The deferred row still renders below the banner (secondary detail).
+    expect(rendered).toContain("X: deferred");
+  });
+
+  it("#14 a normal completed run still reports ok:true (regression)", () => {
+    const result = buildSetupOnboardingResult(
+      interviewWith([
+        { provider: "ga4", hasAccount: true, installState: "unknown", selected: true, recommended: true }
+      ]),
+      moduleResult({
+        selectedProviders: ["ga4"],
+        completed: ["ga4"],
+        resolvedPublicArtifacts: { ga4: { measurementId: "G-ACME123" }, posthog: {}, x: {} },
+        recommendations: [{ provider: "ga4", status: "recommended", reasonCode: "web_default", rationale: "default" }]
+      })
+    );
+    expect(result.ok).toBe(true);
+    expect(result.next).toBe("Run `infinite local setup query` or `infinite` to continue.");
+  });
+});
+
+describe("createCliAgentRuntime local workspace validation", () => {
+  function makeFakeDb(workspaceExists: boolean, calls: string[]): growthDb.InfiniteOsDb {
+    return {
+      async query() {
+        return [];
+      },
+      async one(sql: string) {
+        if (sql.includes("from workspaces")) {
+          calls.push(sql);
+          return workspaceExists ? { ok: 1 } : null;
+        }
+        return null;
+      },
+      async close() {
+        return undefined;
+      }
+    } as unknown as growthDb.InfiniteOsDb;
+  }
+
+  it("throws NoActiveProjectError when the pinned workspace is not in workspaces", async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "growth-os-runtime-validate-missing-"));
+    const calls: string[] = [];
+    const dbSpy = vi
+      .spyOn(growthDb, "createInfiniteOsDb")
+      .mockReturnValue(makeFakeDb(false, calls));
+    try {
+      await runCommand("init", [], { GROWTH_OS_WORKSPACE_ROOT: workspaceRoot });
+      const runtime = createCliAgentRuntime({
+        DATABASE_URL: "postgres://growth:password@db.example.com:5432/growth",
+        GROWTH_OS_WORKSPACE_ROOT: workspaceRoot,
+        GROWTH_OS_WORKSPACE_ID: "proj_unknown"
+      });
+      try {
+        await expect(runtime.listSessions()).rejects.toBeInstanceOf(NoActiveProjectError);
+        // The validation reuses the gateway-path `select 1 ... from workspaces` check.
+        expect(calls.some((sql) => /select\s+1.*from\s+workspaces/is.test(sql))).toBe(true);
+      } finally {
+        await runtime.close?.();
+      }
+    } finally {
+      dbSpy.mockRestore();
+      rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("passes validation when the pinned workspace exists (memoized to one round-trip)", async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "growth-os-runtime-validate-ok-"));
+    const calls: string[] = [];
+    const dbSpy = vi
+      .spyOn(growthDb, "createInfiniteOsDb")
+      .mockReturnValue(makeFakeDb(true, calls));
+    try {
+      await runCommand("init", [], { GROWTH_OS_WORKSPACE_ROOT: workspaceRoot });
+      const runtime = createCliAgentRuntime({
+        DATABASE_URL: "postgres://growth:password@db.example.com:5432/growth",
+        GROWTH_OS_WORKSPACE_ROOT: workspaceRoot,
+        GROWTH_OS_WORKSPACE_ID: "proj_known"
+      });
+      try {
+        await expect(runtime.listSessions()).resolves.toMatchObject({ ok: true });
+        // Second call must not re-query workspaces (the check is memoized per runtime).
+        await runtime.listSessions();
+        expect(calls.length).toBe(1);
+      } finally {
+        await runtime.close?.();
+      }
+    } finally {
+      dbSpy.mockRestore();
+      rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("createCliAgentRuntime confirm-path workspace pinning (P0-A)", () => {
+  // The CLI confirm path is a SECOND confused-deputy: it looked the pending row up by
+  // confirmation_id alone, then executed under the env-bound (currently-active) project
+  // — NOT the workspace that authored the confirmation. These tests prove the fix:
+  // (1) the lookup is scoped by the bound workspace ($2); (2) a cross-workspace pending
+  // row is REFUSED before any action executes (zero Graph POSTs); (3) a matching
+  // confirmation executes under pending.workspaceId and the UPDATE is workspace-scoped.
+
+  // A fake db whose chat_action_calls lookup returns a pending row pinned to
+  // `pendingWorkspaceId`. Records every query so we can assert no execution/UPDATE ran.
+  function makeConfirmDb(
+    pendingWorkspaceId: string,
+    calls: Array<{ sql: string; params: unknown[] }>
+  ): growthDb.InfiniteOsDb {
+    const db = {
+      async query(sql: string, params: unknown[] = []) {
+        calls.push({ sql, params });
+        return [];
+      },
+      async one(sql: string, params: unknown[] = []) {
+        calls.push({ sql, params });
+        if (sql.includes("from workspaces")) {
+          return { ok: 1 };
+        }
+        if (/from\s+chat_action_calls/i.test(sql)) {
+          // Real scoping: the lookup is `where confirmation_id=$1 and workspace_id=$2`, so a
+          // row authored under pendingWorkspaceId is invisible to any other workspace ($2).
+          if (params[1] !== pendingWorkspaceId) {
+            return null;
+          }
+          return {
+            id: "call_1",
+            sessionId: "sess_1",
+            actionId: "start_source_sync",
+            input: { sourceId: "src_1" },
+            inputHash: "hash_abc",
+            workspaceId: pendingWorkspaceId
+          };
+        }
+        return null;
+      },
+      async createJob(input: { workspaceId: string }) {
+        calls.push({ sql: "createJob", params: [input.workspaceId] });
+        return { id: "job_1", status: "queued" };
+      },
+      async close() {
+        return undefined;
+      }
+    } as unknown as growthDb.InfiniteOsDb;
+    return db;
+  }
+
+  it("REFUSES a cross-workspace confirmation (pending bound to proj_a, env bound to proj_b) with zero execution", async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "growth-os-confirm-xws-"));
+    await runCommand("init", [], { GROWTH_OS_WORKSPACE_ROOT: workspaceRoot });
+    const calls: Array<{ sql: string; params: unknown[] }> = [];
+    // Pending row authored under proj_a; the CLI env is bound to proj_b.
+    const dbSpy = vi.spyOn(growthDb, "createInfiniteOsDb").mockReturnValue(makeConfirmDb("proj_a", calls));
+    try {
+      const runtime = createCliAgentRuntime({
+        DATABASE_URL: "postgres://growth:password@db.example.com:5432/growth",
+        GROWTH_OS_WORKSPACE_ROOT: workspaceRoot,
+        GROWTH_OS_WORKSPACE_ID: "proj_b",
+        GROWTH_OS_HOME: join(workspaceRoot, ".growth-os-home")
+      });
+      try {
+        const result = (await runtime.confirmAction("confirm_abc")) as {
+          ok: boolean;
+          error?: { code?: string };
+        };
+        expect(result.ok).toBe(false);
+        // The scoped lookup returns null for the foreign (proj_b) workspace → confirmation_not_found
+        // (the pending row authored under proj_a is invisible), with zero execution.
+        expect(result.error?.code).toBe("confirmation_not_found");
+        // The lookup was scoped by the bound (proj_b) workspace as $2.
+        const lookup = calls.find((c) => /from\s+chat_action_calls/i.test(c.sql));
+        expect(lookup?.params).toEqual(["confirm_abc", "proj_b"]);
+        // ZERO action execution: no job created, no confirm UPDATE issued.
+        expect(calls.some((c) => c.sql === "createJob")).toBe(false);
+        expect(calls.some((c) => /update\s+chat_action_calls/i.test(c.sql))).toBe(false);
+      } finally {
+        await runtime.close?.();
+      }
+    } finally {
+      dbSpy.mockRestore();
+      rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("executes a matching confirmation under pending.workspaceId and scopes the confirm UPDATE", async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "growth-os-confirm-match-"));
+    await runCommand("init", [], { GROWTH_OS_WORKSPACE_ROOT: workspaceRoot });
+    const calls: Array<{ sql: string; params: unknown[] }> = [];
+    // Pending row authored under proj_a; the CLI env is also bound to proj_a.
+    const dbSpy = vi.spyOn(growthDb, "createInfiniteOsDb").mockReturnValue(makeConfirmDb("proj_a", calls));
+    try {
+      const runtime = createCliAgentRuntime({
+        DATABASE_URL: "postgres://growth:password@db.example.com:5432/growth",
+        GROWTH_OS_WORKSPACE_ROOT: workspaceRoot,
+        GROWTH_OS_WORKSPACE_ID: "proj_a",
+        GROWTH_OS_HOME: join(workspaceRoot, ".growth-os-home")
+      });
+      try {
+        const result = (await runtime.confirmAction("confirm_abc")) as { ok: boolean; actionId?: string };
+        expect(result.ok).toBe(true);
+        expect(result.actionId).toBe("start_source_sync");
+        // The action executed under the PENDING workspace (proj_a).
+        const exec = calls.find((c) => c.sql === "createJob");
+        expect(exec?.params).toEqual(["proj_a"]);
+        // The confirm UPDATE was issued and workspace-scoped ($4 = proj_a).
+        const update = calls.find((c) => /update\s+chat_action_calls/i.test(c.sql));
+        expect(update).toBeDefined();
+        expect(update!.params).toContain("proj_a");
+      } finally {
+        await runtime.close?.();
+      }
+    } finally {
+      dbSpy.mockRestore();
+      rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("createCliAgentRuntime per-project session id (PR2)", () => {
+  // Records every SQL + params so we can assert the controller session id the
+  // runtime keys rows on. `chat_sessions` rows live under `id` / `session_id`;
+  // the workspaces check returns ok; compactSession reads back a parent row.
+  function makeRecordingDb(workspaceId: string, calls: Array<{ sql: string; params: unknown[] }>): growthDb.InfiniteOsDb {
+    return {
+      async query(sql: string, params: unknown[] = []) {
+        calls.push({ sql, params });
+        return [];
+      },
+      async one(sql: string, params: unknown[] = []) {
+        calls.push({ sql, params });
+        if (sql.includes("from workspaces")) {
+          return { ok: 1 };
+        }
+        if (/from\s+chat_sessions/i.test(sql)) {
+          // compactSession reads the parent row before re-keying.
+          return {
+            id: params[0],
+            workspaceId,
+            sessionKey: params[0],
+            actorId: "cli",
+            surface: "cli"
+          };
+        }
+        return null;
+      },
+      async close() {
+        return undefined;
+      }
+    } as unknown as growthDb.InfiniteOsDb;
+  }
+
+  // Pull out the `chat_sessions` row keys (id / session_id) a sequence touched,
+  // so we can assert exactly which controller session ids were used.
+  function chatSessionRowKeys(calls: Array<{ sql: string; params: unknown[] }>): string[] {
+    const keys: string[] = [];
+    for (const { sql, params } of calls) {
+      if (/insert\s+into\s+chat_sessions/i.test(sql)) {
+        keys.push(String(params[0])); // id
+      } else if (/update\s+chat_sessions[\s\S]*where\s+id\s*=\s*\$1/i.test(sql)) {
+        keys.push(String(params[0]));
+      } else if (/from\s+chat_sessions\s+where\s+id\s*=\s*\$1/i.test(sql)) {
+        keys.push(String(params[0]));
+      }
+    }
+    return keys;
+  }
+
+  function buildRuntime(workspaceId: string, calls: Array<{ sql: string; params: unknown[] }>, workspaceRoot: string) {
+    const dbSpy = vi.spyOn(growthDb, "createInfiniteOsDb").mockReturnValue(makeRecordingDb(workspaceId, calls));
+    const runtime = createCliAgentRuntime({
+      DATABASE_URL: "postgres://growth:password@db.example.com:5432/growth",
+      GROWTH_OS_WORKSPACE_ROOT: workspaceRoot,
+      GROWTH_OS_WORKSPACE_ID: workspaceId,
+      // Isolate the model/auth home under the (cleaned-up) workspace root so the
+      // runtime never reads the developer's real ~/.growth-os/auth.json. Without
+      // this, a developer with a live codex/claude token has chat() make a real
+      // (slow) provider call and the 5s test times out — the test assumes "no
+      // model client is configured", which is only true when the home is empty.
+      GROWTH_OS_HOME: join(workspaceRoot, ".growth-os-home")
+    });
+    return { runtime, dbSpy };
+  }
+
+  it("keys two workspaces' rows distinctly for one conversation id (no PK collision)", async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "growth-os-pr2-two-ws-"));
+    await runCommand("init", [], { GROWTH_OS_WORKSPACE_ROOT: workspaceRoot });
+    const conversationId = "cli_conv_shared";
+    const callsA: Array<{ sql: string; params: unknown[] }> = [];
+    const callsB: Array<{ sql: string; params: unknown[] }> = [];
+    try {
+      // Same UI conversation id, two different pinned workspaces. The shared PK
+      // path is `resumeSession` (no model call) — historically a re-insert of the
+      // same `id` for a second workspace is the uncaught PK conflict that throws.
+      const a = buildRuntime("proj_a", callsA, workspaceRoot);
+      try {
+        await a.runtime.resumeSession(conversationId);
+      } finally {
+        a.dbSpy.mockRestore();
+        await a.runtime.close?.();
+      }
+      const b = buildRuntime("proj_b", callsB, workspaceRoot);
+      try {
+        await b.runtime.resumeSession(conversationId);
+      } finally {
+        b.dbSpy.mockRestore();
+        await b.runtime.close?.();
+      }
+
+      const keysA = chatSessionRowKeys(callsA);
+      const keysB = chatSessionRowKeys(callsB);
+      // Each workspace keys its own per-project row; the two never collide.
+      expect(keysA).toContain(`${conversationId}:proj_a`);
+      expect(keysB).toContain(`${conversationId}:proj_b`);
+      expect(keysA).not.toContain(`${conversationId}:proj_b`);
+      expect(new Set([...keysA, ...keysB]).size).toBe(2);
+    } finally {
+      rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("chat() keys two workspaces' rows distinctly for one conversation id (no PK collision)", async () => {
+    // The sibling test above exercises the `resumeSession` path; this one drives
+    // the real `chat()` round-trip — the actual user path where `ensureSession`
+    // inserts `chat_sessions (id, session_key)` and a second workspace re-using
+    // the same conversation id would otherwise re-insert the same PK and throw.
+    // No model client is configured in tests, so `modelClient.complete` returns
+    // the benign "no model configured" response — `chat()` resolves
+    // deterministically AFTER `ensureSession` has recorded the derived id.
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "growth-os-pr2-chat-two-ws-"));
+    await runCommand("init", [], { GROWTH_OS_WORKSPACE_ROOT: workspaceRoot });
+    const conversationId = "cli_conv_chat_shared";
+    const callsA: Array<{ sql: string; params: unknown[] }> = [];
+    const callsB: Array<{ sql: string; params: unknown[] }> = [];
+    try {
+      const a = buildRuntime("proj_a", callsA, workspaceRoot);
+      let replyA: { ok: boolean };
+      try {
+        replyA = (await a.runtime.chat({ message: "how many views", sessionId: conversationId })) as { ok: boolean };
+      } finally {
+        a.dbSpy.mockRestore();
+        await a.runtime.close?.();
+      }
+      const b = buildRuntime("proj_b", callsB, workspaceRoot);
+      let replyB: { ok: boolean };
+      try {
+        replyB = (await b.runtime.chat({ message: "how many views", sessionId: conversationId })) as { ok: boolean };
+      } finally {
+        b.dbSpy.mockRestore();
+        await b.runtime.close?.();
+      }
+
+      // Both turns completed (no uncaught PK conflict throw).
+      expect(replyA.ok).toBe(true);
+      expect(replyB.ok).toBe(true);
+
+      const keysA = chatSessionRowKeys(callsA);
+      const keysB = chatSessionRowKeys(callsB);
+      // Each workspace inserted its own per-project `chat_sessions` row.
+      expect(keysA).toContain(`${conversationId}:proj_a`);
+      expect(keysB).toContain(`${conversationId}:proj_b`);
+      // The two never share a key — the PK is qualified by the bound workspace.
+      expect(keysA).not.toContain(`${conversationId}:proj_b`);
+      expect(keysB).not.toContain(`${conversationId}:proj_a`);
+      expect(new Set([...keysA, ...keysB]).size).toBe(2);
+    } finally {
+      rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("resume → compact → list all hit the same per-project row (no double-suffix)", async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "growth-os-pr2-same-row-"));
+    await runCommand("init", [], { GROWTH_OS_WORKSPACE_ROOT: workspaceRoot });
+    const conversationId = "cli_conv_resume";
+    const calls: Array<{ sql: string; params: unknown[] }> = [];
+    const { runtime, dbSpy } = buildRuntime("proj_x", calls, workspaceRoot);
+    try {
+      await runtime.resumeSession(conversationId);
+      const compacted = await runtime.compactSession(conversationId, "keep the revenue context");
+      const listed = (await runtime.listSessions()) as { ok: boolean };
+
+      const derived = `${conversationId}:proj_x`;
+      // Every chat_sessions row key the sequence touched is the SAME single-suffix
+      // controller id — never the compounded `:proj_x:proj_x` a round-tripped id
+      // would produce.
+      for (const key of chatSessionRowKeys(calls)) {
+        if (key.startsWith(conversationId)) {
+          expect(key).toBe(derived);
+        }
+      }
+      expect(chatSessionRowKeys(calls)).toContain(derived);
+      // The runtime echoes back the immutable conversation id (suffix stripped),
+      // so `/resume` and `/compact` round-trip to a re-derivable value.
+      expect(compacted).toMatchObject({ ok: true });
+      expect(listed.ok).toBe(true);
+    } finally {
+      dbSpy.mockRestore();
+      await runtime.close?.();
+      rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("listSessions strips the workspace suffix so /resume round-trips the conversation id", async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "growth-os-pr2-list-strip-"));
+    await runCommand("init", [], { GROWTH_OS_WORKSPACE_ROOT: workspaceRoot });
+    const conversationId = "cli_conv_list";
+    const dbSpy = vi.spyOn(growthDb, "createInfiniteOsDb").mockReturnValue({
+      async query(sql: string) {
+        if (/from\s+chat_sessions/i.test(sql)) {
+          // A stored row carries the derived id; listSessions must surface the
+          // bare conversation id (suffix stripped) for display / `/resume`.
+          return [{ id: `${conversationId}:proj_list`, sessionKey: `${conversationId}:proj_list` }];
+        }
+        return [];
+      },
+      async one(sql: string) {
+        return sql.includes("from workspaces") ? { ok: 1 } : null;
+      },
+      async close() {
+        return undefined;
+      }
+    } as unknown as growthDb.InfiniteOsDb);
+    const runtime = createCliAgentRuntime({
+      DATABASE_URL: "postgres://growth:password@db.example.com:5432/growth",
+      GROWTH_OS_WORKSPACE_ROOT: workspaceRoot,
+      GROWTH_OS_WORKSPACE_ID: "proj_list"
+    });
+    try {
+      const result = (await runtime.listSessions()) as { ok: boolean; sessions: Array<{ id: string }> };
+      expect(result.sessions[0]?.id).toBe(conversationId);
+    } finally {
+      dbSpy.mockRestore();
+      await runtime.close?.();
+      rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("@name project pin (PR4)", () => {
+  const PROJECTS = [
+    { id: "proj_aaaaaaaaaaaaaaaa", name: "rtk" },
+    { id: "proj_bbbbbbbbbbbbbbbb", name: "Acme Co" }
+  ];
+
+  beforeEach(() => {
+    setProjectListCacheForTest(PROJECTS);
+  });
+
+  afterEach(() => {
+    setProjectListCacheForTest([]);
+  });
+
+  describe("resolveProjectPin — parse anywhere, case-insensitive, token strip", () => {
+    it("resolves @name at the end and strips the token, keeping the question", () => {
+      const result = resolveProjectPin("how many views @rtk");
+      expect(result.status).toBe("switched");
+      expect(result.project).toEqual({ id: "proj_aaaaaaaaaaaaaaaa", name: "rtk" });
+      expect(result.remainder).toBe("how many views");
+    });
+
+    it("resolves @name at the start and strips the token", () => {
+      const result = resolveProjectPin("@rtk how many views");
+      expect(result.status).toBe("switched");
+      expect(result.remainder).toBe("how many views");
+    });
+
+    it("resolves a bare @name to an empty remainder (confirm-only switch)", () => {
+      const result = resolveProjectPin("@rtk");
+      expect(result.status).toBe("switched");
+      expect(result.project?.name).toBe("rtk");
+      expect(result.remainder).toBe("");
+    });
+
+    it("matches case-insensitively against the normalized slug", () => {
+      expect(resolveProjectPin("@RTK").project?.id).toBe("proj_aaaaaaaaaaaaaaaa");
+      // Whitespace is stripped from both the name and the token when normalizing.
+      expect(resolveProjectPin("@acmeco numbers").project?.id).toBe("proj_bbbbbbbbbbbbbbbb");
+    });
+
+    it("matches against the raw project id", () => {
+      expect(resolveProjectPin("revenue @proj_bbbbbbbbbbbbbbbb").project?.id).toBe("proj_bbbbbbbbbbbbbbbb");
+    });
+
+    it("reports unknown (never a silent fallback) when no project matches", () => {
+      const result = resolveProjectPin("@nope how many views");
+      expect(result.status).toBe("unknown");
+      expect(result.token).toBe("nope");
+      expect(result.project).toBeUndefined();
+      // The remaining text is still stripped of the token.
+      expect(result.remainder).toBe("how many views");
+    });
+
+    it("returns status none when there is no @token", () => {
+      const result = resolveProjectPin("how many views");
+      expect(result.status).toBe("none");
+      expect(result.remainder).toBe("how many views");
+    });
+
+    it("resolves @name when trailing punctuation is glued on with no space (e.g. '@rtk?')", () => {
+      // Real chat input from a user typing a natural question: the "?" jammed
+      // against "@rtk" must NOT break the match (regression for #17).
+      const result = resolveProjectPin("how many views did i get in @rtk?");
+      expect(result.status).toBe("switched");
+      expect(result.project?.id).toBe("proj_aaaaaaaaaaaaaaaa");
+    });
+
+    it("strips trailing punctuation from the slug so @name. / @name, / @name) resolve", () => {
+      expect(resolveProjectPin("@rtk.").project?.id).toBe("proj_aaaaaaaaaaaaaaaa");
+      expect(resolveProjectPin("revenue @rtk, please").project?.id).toBe("proj_aaaaaaaaaaaaaaaa");
+      expect(resolveProjectPin("@rtk)").project?.id).toBe("proj_aaaaaaaaaaaaaaaa");
+    });
+
+    it("normalizes slugs by lowercasing and stripping whitespace + punctuation", () => {
+      expect(normalizeProjectSlug("Acme Co")).toBe("acmeco");
+      expect(normalizeProjectSlug("  RTK ")).toBe("rtk");
+      expect(normalizeProjectSlug("rtk?")).toBe("rtk");
+    });
+  });
+
+  describe("resolveProjectPin — slug collision is AMBIGUOUS, not an arbitrary first match (Change #2a)", () => {
+    // Two distinct projects normalizing to the SAME `@`-slug (the classic case:
+    // two "Default workspace" → `@Defaultworkspace`). A FIRST-match would silently
+    // pin an arbitrary one; we surface the collision so it routes to the picker.
+    const COLLIDING = [
+      { id: "proj_default_a", name: "Default workspace" },
+      { id: "proj_default_b", name: "Default workspace" },
+      { id: "proj_unique", name: "rtk" }
+    ];
+
+    beforeEach(() => {
+      setProjectListCacheForTest(COLLIDING);
+    });
+
+    it("returns status ambiguous with BOTH colliding projects as candidates", () => {
+      const result = resolveProjectPin("how many views @Defaultworkspace");
+      expect(result.status).toBe("ambiguous");
+      expect(result.token).toBe("Defaultworkspace");
+      expect(result.project).toBeUndefined();
+      // Both colliding projects are offered (distinct by id), not just the first.
+      expect(result.candidates).toEqual([
+        { id: "proj_default_a", name: "Default workspace" },
+        { id: "proj_default_b", name: "Default workspace" }
+      ]);
+      // The token is still stripped so the remainder is the real question.
+      expect(result.remainder).toBe("how many views");
+    });
+
+    it("a UNIQUE slug still switches cleanly (no collision)", () => {
+      const result = resolveProjectPin("@rtk how many views");
+      expect(result.status).toBe("switched");
+      expect(result.project).toEqual({ id: "proj_unique", name: "rtk" });
+      expect(result.remainder).toBe("how many views");
+    });
+
+    it("a raw id resolves uniquely even when its NAME collides (disambiguation path)", () => {
+      // `@<id>` matches exactly one project by id, so it is never ambiguous —
+      // this is how the picker's colliding-option re-submit breaks the loop.
+      const result = resolveProjectPin("@proj_default_b numbers");
+      expect(result.status).toBe("switched");
+      expect(result.project).toEqual({ id: "proj_default_b", name: "Default workspace" });
+    });
+  });
+
+  describe("applySessionPin — session env pin, never persisted", () => {
+    it("sets the in-process env pin and does NOT write state.json", () => {
+      const growthHome = mkdtempSync(join(tmpdir(), "growth-os-pr4-pin-"));
+      try {
+        const env = { GROWTH_OS_HOME: growthHome } as Record<string, string>;
+        // No persisted active pointer before…
+        expect(readActiveProjectId(env as never)).toBeUndefined();
+        applySessionPin(env as never, { id: "proj_aaaaaaaaaaaaaaaa", name: "rtk" });
+        // The env pin is set (infiniteOsWorkspaceId reads this above state.json)…
+        expect(env.GROWTH_OS_WORKSPACE_ID).toBe("proj_aaaaaaaaaaaaaaaa");
+        // …and nothing was persisted (gone on restart).
+        expect(readActiveProjectId(env as never)).toBeUndefined();
+      } finally {
+        rmSync(growthHome, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe("readProjectPinChange — /project use fold-in signal", () => {
+    it("extracts the {id,name} pin-change signal a /project use result carries", () => {
+      expect(
+        readProjectPinChange({ ok: true, __projectPinChange: { id: "p1", name: "n1" } })
+      ).toEqual({ id: "p1", name: "n1" });
+    });
+
+    it("returns undefined for a result without the signal", () => {
+      expect(readProjectPinChange({ ok: true })).toBeUndefined();
+      expect(readProjectPinChange(null)).toBeUndefined();
+      expect(readProjectPinChange("nope")).toBeUndefined();
+    });
+  });
+
+  describe("Tab-completion — @name suggestions run ahead of path completion", () => {
+    it("completes @rt → @rtk with replaceFrom at the @ and a non-path/-slash kind", () => {
+      const completions = completeInteractiveInputForCli("how many views @rt", {
+        GROWTH_OS_WORKSPACE_ROOT: tmpdir()
+      });
+      expect(completions).toEqual([
+        { description: "project", kind: "at", replaceFrom: "how many views ".length, value: "@rtk" }
+      ]);
+      // The suggestion round-trips through applyCompletionSuggestion.
+      expect(applyCompletionSuggestion("how many views @rt", completions[0]!)).toBe("how many views @rtk");
+    });
+
+    it("strips whitespace from multi-word names so the completed token resolves", () => {
+      const completions = completeInteractiveInputForCli("@ac", { GROWTH_OS_WORKSPACE_ROOT: tmpdir() });
+      expect(completions).toEqual([
+        { description: "project", kind: "at", replaceFrom: 0, value: "@AcmeCo" }
+      ]);
+      // And the completed token resolves back to the project.
+      expect(resolveProjectPin("@AcmeCo").project?.id).toBe("proj_bbbbbbbbbbbbbbbb");
+    });
+
+    it("does not let @<partial> fall through to (empty) path completion", () => {
+      // `@rt` is treated as a path word by TAB_PATH_RE; without the earlier @ branch
+      // this would route to path completion and return nothing.
+      const completions = completeInteractiveInputForCli("@rt", { GROWTH_OS_WORKSPACE_ROOT: tmpdir() });
+      expect(completions.map((c) => c.value)).toEqual(["@rtk"]);
+    });
+
+    it("returns no @ suggestions when the cache is empty", () => {
+      setProjectListCacheForTest([]);
+      expect(completeInteractiveInputForCli("@rt", { GROWTH_OS_WORKSPACE_ROOT: tmpdir() })).toEqual([]);
+    });
+
+    it("exposes the loaded project list via the cache reader", () => {
+      expect(getProjectListCache()).toEqual(PROJECTS);
+    });
+  });
+});
+
+describe("@-pin picker — pre-turn gate (PR5)", () => {
+  const PROJECTS = [
+    { id: "proj_aaaaaaaaaaaaaaaa", name: "rtk" },
+    { id: "proj_bbbbbbbbbbbbbbbb", name: "Acme Co" }
+  ];
+
+  beforeEach(() => {
+    setProjectListCacheForTest(PROJECTS);
+  });
+
+  afterEach(() => {
+    setProjectListCacheForTest([]);
+  });
+
+  describe("resolveDistinctProjectMentions — distinct matched projects", () => {
+    it("returns both projects for @a @b (distinct)", () => {
+      expect(resolveDistinctProjectMentions("@rtk vs @acmeco")).toEqual([
+        { id: "proj_aaaaaaaaaaaaaaaa", name: "rtk" },
+        { id: "proj_bbbbbbbbbbbbbbbb", name: "Acme Co" }
+      ]);
+    });
+
+    it("de-dupes repeated mentions of the same project (@a @a → one)", () => {
+      expect(resolveDistinctProjectMentions("@rtk and @RTK again")).toEqual([
+        { id: "proj_aaaaaaaaaaaaaaaa", name: "rtk" }
+      ]);
+    });
+
+    it("ignores unknown mentions, returning only matched projects", () => {
+      expect(resolveDistinctProjectMentions("@rtk @nope")).toEqual([
+        { id: "proj_aaaaaaaaaaaaaaaa", name: "rtk" }
+      ]);
+    });
+
+    it("returns [] when there are no @mentions", () => {
+      expect(resolveDistinctProjectMentions("how many views")).toEqual([]);
+    });
+  });
+
+  describe("decidePreTurnProjectSelection — the three triggers", () => {
+    function envWith(overrides: Record<string, string> = {}): never {
+      // Fresh GROWTH_OS_HOME so readDefaultProjectId starts empty (no state.json).
+      const growthHome = mkdtempSync(join(tmpdir(), "growth-os-pr5-gate-"));
+      return { GROWTH_OS_HOME: growthHome, ...overrides } as never;
+    }
+
+    it("(c) no pin + no @ + no default → picker of the full project list", () => {
+      const selection = decidePreTurnProjectSelection(envWith(), "how many views");
+      expect(selection).toEqual({ options: PROJECTS, originalLine: "how many views" });
+    });
+
+    it("(b) @unknown → picker of the full list, with the token-stripped question", () => {
+      const selection = decidePreTurnProjectSelection(envWith(), "@nope how many views");
+      expect(selection).toEqual({ options: PROJECTS, originalLine: "how many views" });
+    });
+
+    it("(a) multiple distinct @a @b → picker of {a,b} only, with ALL mentions stripped from the question", () => {
+      const selection = decidePreTurnProjectSelection(envWith(), "compare @rtk and @acmeco views");
+      expect(selection).toEqual({
+        options: [
+          { id: "proj_aaaaaaaaaaaaaaaa", name: "rtk" },
+          { id: "proj_bbbbbbbbbbbbbbbb", name: "Acme Co" }
+        ],
+        // mentions stripped so the picker's re-submit resolves to a single switch
+        originalLine: "compare and views"
+      });
+    });
+
+    it("(a) the picker re-submit does NOT loop — a multi-mention pick re-enters the gate as a single switch", () => {
+      const env = envWith();
+      const first = decidePreTurnProjectSelection(env, "compare @rtk and @acmeco views");
+      // The Ink picker re-submits `@<slug> <originalLine>` for the chosen project.
+      const reSubmit = `@${"Acme Co".replace(/\s+/g, "")} ${(first as { originalLine: string }).originalLine}`;
+      expect(reSubmit).toBe("@AcmeCo compare and views");
+      // Second pass must NOT re-trigger the picker (single resolvable @ → dispatch).
+      expect(decidePreTurnProjectSelection(env, reSubmit)).toBeUndefined();
+    });
+
+    it("does NOT prompt once a session pin is set (no re-prompt)", () => {
+      const selection = decidePreTurnProjectSelection(
+        envWith({ GROWTH_OS_WORKSPACE_ID: "proj_aaaaaaaaaaaaaaaa" }),
+        "how many views"
+      );
+      expect(selection).toBeUndefined();
+    });
+
+    it("does NOT prompt when a persisted default exists", () => {
+      const growthHome = mkdtempSync(join(tmpdir(), "growth-os-pr5-default-"));
+      const env = { GROWTH_OS_HOME: growthHome } as never;
+      writeDefaultProjectId("proj_bbbbbbbbbbbbbbbb", env);
+      expect(decidePreTurnProjectSelection(env, "how many views")).toBeUndefined();
+    });
+
+    it("LEGACY install (activeProjectId set, no default, no env pin) STILL reaches the picker", () => {
+      // The crux of the PR3 minor: a legacy install must not silently inherit the
+      // legacy `activeProjectId` and skip the picker. The gate keys off the real
+      // session pin (env) + default, NOT `activeProjectId`, so it fires.
+      const growthHome = mkdtempSync(join(tmpdir(), "growth-os-pr5-legacy-"));
+      const env = { GROWTH_OS_HOME: growthHome } as never;
+      writeActiveProjectId("proj_legacy_pointer", env);
+      // applySessionDefaultPin would NOT promote the legacy pointer to the env pin…
+      expect(applySessionDefaultPin(env)).toMatch(/\/project default set|@name/); // legacy notice
+      expect((env as Record<string, string>).GROWTH_OS_WORKSPACE_ID).toBeUndefined();
+      // …so the no-pin gate still routes to the picker.
+      const selection = decidePreTurnProjectSelection(env, "how many views");
+      expect(selection).toEqual({ options: PROJECTS, originalLine: "how many views" });
+    });
+
+    it("slash commands bypass the gate (they don't need a workspace pin)", () => {
+      expect(decidePreTurnProjectSelection(envWith(), "/help")).toBeUndefined();
+      expect(decidePreTurnProjectSelection(envWith(), "/project default set rtk")).toBeUndefined();
+    });
+
+    it("a resolvable @name (single switch) bypasses the gate — PR4 handles it", () => {
+      expect(decidePreTurnProjectSelection(envWith(), "@rtk how many views")).toBeUndefined();
+    });
+
+    it("no projects in the cache → no picker (the line fail-closes to `project new` guidance)", () => {
+      setProjectListCacheForTest([]);
+      expect(decidePreTurnProjectSelection(envWith(), "how many views")).toBeUndefined();
+    });
+
+    it("@unknown with an empty cache → no picker (the wrapper shows a not-found message instead)", () => {
+      setProjectListCacheForTest([]);
+      expect(decidePreTurnProjectSelection(envWith(), "@nope how many views")).toBeUndefined();
+    });
+
+    it("blank input is a no-op (never a picker)", () => {
+      expect(decidePreTurnProjectSelection(envWith(), "   ")).toBeUndefined();
+    });
+
+    it("(a2) a slug-colliding @token routes to the picker of ONLY the colliding projects (Change #2a)", () => {
+      // Two projects normalize to the same `@`-slug → ambiguous → picker, the same
+      // way `@unknown` routes — but offering ONLY the colliding pair, not the full
+      // list, with the token-stripped question to answer once one is picked.
+      setProjectListCacheForTest([
+        { id: "proj_default_a", name: "Default workspace" },
+        { id: "proj_default_b", name: "Default workspace" },
+        { id: "proj_unique", name: "rtk" }
+      ]);
+      const selection = decidePreTurnProjectSelection(envWith(), "how many views @Defaultworkspace");
+      expect(selection).toEqual({
+        options: [
+          { id: "proj_default_a", name: "Default workspace" },
+          { id: "proj_default_b", name: "Default workspace" }
+        ],
+        originalLine: "how many views"
+      });
+    });
+
+    it("(a2) a unique @slug still bypasses the gate even when OTHER names collide (Change #2a)", () => {
+      setProjectListCacheForTest([
+        { id: "proj_default_a", name: "Default workspace" },
+        { id: "proj_default_b", name: "Default workspace" },
+        { id: "proj_unique", name: "rtk" }
+      ]);
+      // `@rtk` resolves to one project → not ambiguous → PR4 handles the switch.
+      expect(decidePreTurnProjectSelection(envWith(), "@rtk how many views")).toBeUndefined();
+    });
+  });
+});
+
+describe("project delete (CLI)", () => {
+  const PROJECTS = [
+    { id: "proj_aaaaaaaaaaaaaaaa", name: "Acme" },
+    { id: "proj_bbbbbbbbbbbbbbbb", name: "Beta" }
+  ];
+
+  // Records the URLs/methods seen so tests can assert the DELETE actually fired
+  // (or did not, when the command refuses/cancels before the API call).
+  function stubProjectsApi(projects: Array<{ id: string; name: string }>): {
+    calls: Array<{ url: string; method: string }>;
+    deleteStatus?: number;
+  } {
+    const state: { calls: Array<{ url: string; method: string }>; deleteStatus?: number } = {
+      calls: []
+    };
+    globalThis.fetch = (async (url: string | URL, init?: RequestInit) => {
+      const href = typeof url === "string" ? url : url.toString();
+      const method = (init?.method ?? "GET").toUpperCase();
+      state.calls.push({ url: href, method });
+      if (method === "DELETE") {
+        const status = state.deleteStatus ?? 200;
+        if (status === 404) {
+          return new Response(
+            JSON.stringify({ ok: false, error: { code: "project_not_found" } }),
+            { status: 404 }
+          );
+        }
+        return new Response(JSON.stringify({ ok: true, deleted: true }), { status });
+      }
+      // GET /projects
+      return new Response(JSON.stringify({ projects }), { status: 200 });
+    }) as typeof fetch;
+    return state;
+  }
+
+  let originalFetch: typeof globalThis.fetch;
+  beforeEach(() => {
+    originalFetch = globalThis.fetch;
+    setProjectListCacheForTest(PROJECTS);
+  });
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    setProjectListCacheForTest([]);
+  });
+
+  it("resolves a name to its id and DELETEs that id", async () => {
+    const api = stubProjectsApi(PROJECTS);
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-project-delete-resolve-"));
+    try {
+      const env = {
+        GROWTH_OS_HOME: growthHome,
+        GROWTH_OS_API_URL: "http://127.0.0.1:9999",
+        GROWTH_OS_CLI_NONINTERACTIVE: "1"
+      } as never;
+      const result = (await projectCommand(["delete", "Acme"], env, {
+        confirmDelete: async () => true
+      })) as { ok: boolean; deleted?: boolean; id?: string };
+      expect(result.ok).toBe(true);
+      expect(result.deleted).toBe(true);
+      expect(result.id).toBe("proj_aaaaaaaaaaaaaaaa");
+      // The DELETE targeted the resolved id, not the raw name.
+      const del = api.calls.find((c) => c.method === "DELETE");
+      expect(del?.url).toContain("/projects/proj_aaaaaaaaaaaaaaaa");
+      // The deleted project is dropped from the @name/completion cache.
+      expect(getProjectListCache().some((p) => p.id === "proj_aaaaaaaaaaaaaaaa")).toBe(false);
+    } finally {
+      rmSync(growthHome, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses to delete the last remaining project (no DELETE call)", async () => {
+    const only = [{ id: "proj_only0000000000", name: "Solo" }];
+    const api = stubProjectsApi(only);
+    const env = {
+      GROWTH_OS_API_URL: "http://127.0.0.1:9999",
+      GROWTH_OS_CLI_NONINTERACTIVE: "1"
+    } as never;
+    const result = (await projectCommand(["delete", "Solo"], env, {
+      confirmDelete: async () => true
+    })) as { ok: boolean; error?: { code?: string } };
+    expect(result.ok).toBe(false);
+    expect(result.error?.code).toBe("cannot_delete_last_project");
+    expect(api.calls.some((c) => c.method === "DELETE")).toBe(false);
+  });
+
+  it("honors --yes: deletes without invoking the confirm seam", async () => {
+    const api = stubProjectsApi(PROJECTS);
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-project-delete-yes-"));
+    try {
+      const env = {
+        GROWTH_OS_HOME: growthHome,
+        GROWTH_OS_API_URL: "http://127.0.0.1:9999",
+        GROWTH_OS_CLI_NONINTERACTIVE: "1"
+      } as never;
+      const confirmDelete = vi.fn(async () => true);
+      const result = (await projectCommand(["delete", "Beta", "--yes"], env, {
+        confirmDelete
+      })) as { ok: boolean; deleted?: boolean };
+      expect(result.ok).toBe(true);
+      expect(result.deleted).toBe(true);
+      // --yes bypasses confirmation entirely.
+      expect(confirmDelete).not.toHaveBeenCalled();
+      expect(api.calls.some((c) => c.method === "DELETE")).toBe(true);
+    } finally {
+      rmSync(growthHome, { recursive: true, force: true });
+    }
+  });
+
+  it("honors the -y short flag: deletes without invoking the confirm seam", async () => {
+    const api = stubProjectsApi(PROJECTS);
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-project-delete-y-short-"));
+    try {
+      const env = {
+        GROWTH_OS_HOME: growthHome,
+        GROWTH_OS_API_URL: "http://127.0.0.1:9999",
+        // Non-interactive: without a working skip flag this would THROW the refusal.
+        GROWTH_OS_CLI_NONINTERACTIVE: "1"
+      } as never;
+      const confirmDelete = vi.fn(async () => true);
+      const result = (await projectCommand(["delete", "Beta", "-y"], env, {
+        confirmDelete
+      })) as { ok: boolean; deleted?: boolean };
+      // (a) the DELETE actually fired (no refusal thrown in non-interactive mode).
+      expect(result.ok).toBe(true);
+      expect(result.deleted).toBe(true);
+      expect(api.calls.some((c) => c.method === "DELETE")).toBe(true);
+      // (b) `-y` bypassed the confirm prompt entirely.
+      expect(confirmDelete).not.toHaveBeenCalled();
+    } finally {
+      rmSync(growthHome, { recursive: true, force: true });
+    }
+  });
+
+  it("without --yes invokes the confirm seam and cancels on a NO (no DELETE)", async () => {
+    const api = stubProjectsApi(PROJECTS);
+    const env = {
+      GROWTH_OS_API_URL: "http://127.0.0.1:9999",
+      GROWTH_OS_CLI_NONINTERACTIVE: "1"
+    } as never;
+    const confirmDelete = vi.fn(async () => false);
+    const result = (await projectCommand(["delete", "Beta"], env, {
+      confirmDelete
+    })) as { ok: boolean; cancelled?: boolean };
+    expect(confirmDelete).toHaveBeenCalledTimes(1);
+    expect(result.ok).toBe(false);
+    expect(result.cancelled).toBe(true);
+    expect(api.calls.some((c) => c.method === "DELETE")).toBe(false);
+  });
+
+  it("clears the active pin and persisted default when they point at the deleted id", async () => {
+    stubProjectsApi(PROJECTS);
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-project-delete-pointer-"));
+    try {
+      const env = {
+        GROWTH_OS_HOME: growthHome,
+        GROWTH_OS_API_URL: "http://127.0.0.1:9999",
+        GROWTH_OS_CLI_NONINTERACTIVE: "1"
+      } as never;
+      // Both pointers reference the project we are about to delete.
+      writeActiveProjectId("proj_aaaaaaaaaaaaaaaa", env);
+      writeDefaultProjectId("proj_aaaaaaaaaaaaaaaa", env);
+      expect(readActiveProjectId(env)).toBe("proj_aaaaaaaaaaaaaaaa");
+      expect(readDefaultProjectId(env)).toBe("proj_aaaaaaaaaaaaaaaa");
+      const result = (await projectCommand(["delete", "Acme", "--yes"], env, {})) as {
+        clearedActivePin?: boolean;
+        clearedDefault?: boolean;
+      };
+      expect(result.clearedActivePin).toBe(true);
+      expect(result.clearedDefault).toBe(true);
+      // Both client-side pointers are cleared from state.json.
+      expect(readActiveProjectId(env)).toBeUndefined();
+      expect(readDefaultProjectId(env)).toBeUndefined();
+    } finally {
+      rmSync(growthHome, { recursive: true, force: true });
+    }
+  });
+
+  it("leaves a non-matching active pin untouched", async () => {
+    stubProjectsApi(PROJECTS);
+    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-project-delete-other-pin-"));
+    try {
+      const env = {
+        GROWTH_OS_HOME: growthHome,
+        GROWTH_OS_API_URL: "http://127.0.0.1:9999",
+        GROWTH_OS_CLI_NONINTERACTIVE: "1"
+      } as never;
+      // Pin a DIFFERENT project than the one being deleted.
+      writeActiveProjectId("proj_bbbbbbbbbbbbbbbb", env);
+      const result = (await projectCommand(["delete", "Acme", "--yes"], env, {})) as {
+        clearedActivePin?: boolean;
+      };
+      expect(result.clearedActivePin).toBe(false);
+      expect(readActiveProjectId(env)).toBe("proj_bbbbbbbbbbbbbbbb");
+    } finally {
+      rmSync(growthHome, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects an unknown name before any DELETE (friendly message)", async () => {
+    const api = stubProjectsApi(PROJECTS);
+    const env = {
+      GROWTH_OS_API_URL: "http://127.0.0.1:9999",
+      GROWTH_OS_CLI_NONINTERACTIVE: "1"
+    } as never;
+    await expect(
+      projectCommand(["delete", "Nope", "--yes"], env, {})
+    ).rejects.toThrow("Unknown project: Nope");
+    expect(api.calls.some((c) => c.method === "DELETE")).toBe(false);
+  });
+
+  it("surfaces a friendly 404 if the project vanished between list and DELETE", async () => {
+    const api = stubProjectsApi(PROJECTS);
+    api.deleteStatus = 404; // race: gone by the time the DELETE fires
+    const env = {
+      GROWTH_OS_API_URL: "http://127.0.0.1:9999",
+      GROWTH_OS_CLI_NONINTERACTIVE: "1"
+    } as never;
+    await expect(
+      projectCommand(["delete", "Acme", "--yes"], env, {})
+    ).rejects.toThrow("Unknown project: Acme");
+  });
+
+  it("refuses in non-interactive mode without --yes (never silently deletes)", async () => {
+    const api = stubProjectsApi(PROJECTS);
+    const env = {
+      GROWTH_OS_API_URL: "http://127.0.0.1:9999",
+      GROWTH_OS_CLI_NONINTERACTIVE: "1"
+    } as never;
+    // No confirmDelete seam + non-interactive + no --yes -> hard refusal.
+    await expect(projectCommand(["delete", "Beta"], env, {})).rejects.toThrow(
+      /Refusing to delete .* without confirmation/
+    );
+    expect(api.calls.some((c) => c.method === "DELETE")).toBe(false);
+  });
+
+  it("renderProjectDeleteResult summarizes success, last-project, and cancel", () => {
+    expect(
+      renderProjectDeleteResult({
+        section: "project_delete",
+        name: "Acme",
+        id: "proj_aaaaaaaaaaaaaaaa",
+        deleted: true,
+        clearedActivePin: true
+      })
+    ).toContain("Deleted project: Acme (proj_aaaaaaaaaaaaaaaa)");
+    expect(
+      renderProjectDeleteResult({
+        section: "project_delete",
+        name: "Solo",
+        id: "proj_only",
+        error: { code: "cannot_delete_last_project" }
+      })
+    ).toContain("last remaining project");
+    expect(
+      renderProjectDeleteResult({
+        section: "project_delete",
+        name: "Acme",
+        id: "proj_aaaaaaaaaaaaaaaa",
+        cancelled: true
+      })
+    ).toContain("was not deleted");
+  });
+});
+
+describe("in-chat /connect meta_ads wizard — end-to-end dispatch (#2)", () => {
+  // The masked wizard's final confirm builds a leading-slash dispatch line via
+  // buildConnectDispatchLine, then submits it through runSlashCommand → runCommand.
+  // This drives that REAL chain end-to-end and proves: (a) the chosen backfill
+  // window reaches queueMetaAdsBackfillForConnect (Option B — not the silent
+  // 30-day default), (b) transport derives to the native marketing_api, and
+  // (c) the access token never leaks into the surfaced result.
+  it("threads the in-chat-chosen backfill window into the /sources/{id}/sync body and never leaks the token", async () => {
+    const { buildConnectDispatchLine, connectorSetupDefinition, runSlashCommand } = await import(
+      "./index.js"
+    );
+    const RAW_TOKEN = "EAAB_SYSTEM_USER_SECRET_TOKEN";
+    const definition = connectorSetupDefinition("meta_ads")!;
+    const line = buildConnectDispatchLine(definition, "Meta Ads", {
+      adAccountId: "act_9988776655",
+      accessToken: RAW_TOKEN,
+      backfillWindow: "6_months"
+    });
+    // Compact JSON has no internal spaces, so the leading-slash line splits cleanly
+    // on /\s+/ the same way the interactive dispatch path does.
+    expect(line).toContain(" --backfill-window 6_months ");
+    expect(line).not.toContain(RAW_TOKEN.toLowerCase());
+
+    const requests: Array<{ url: string; body: Record<string, unknown> | null }> = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+      requests.push({ url: String(url), body: init?.body ? JSON.parse(String(init.body)) : null });
+      return new Response(
+        JSON.stringify({ ok: true, data: { source: { id: "src_meta_ads" } } }),
+        { status: 200 }
+      );
+    }) as typeof fetch;
+
+    let result: unknown;
+    try {
+      result = await runSlashCommand(line, {
+        GROWTH_OS_OPERATOR_TOKEN: "operator",
+        GROWTH_OS_WORKSPACE_ID: "proj_test",
+        GROWTH_OS_API_URL: "http://127.0.0.1:3000"
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    // Connect call: the space-containing connection name round-trips and the window
+    // flag is stripped out of it; the token rides ONLY in the credential payload.
+    expect(requests[0]).toMatchObject({
+      url: "http://127.0.0.1:3000/sources/connect",
+      body: {
+        provider: "meta_ads",
+        connectionName: "Meta Ads",
+        credentialPayload: {
+          transport: "marketing_api",
+          adAccountId: "9988776655",
+          accessToken: RAW_TOKEN
+        }
+      }
+    });
+    // Backfill sync uses the USER'S window (6 months), not the silent 30-day default.
+    expect(requests[1]).toMatchObject({
+      url: "http://127.0.0.1:3000/sources/src_meta_ads/sync",
+      body: { mode: "backfill", backfillWindow: "6_months", refreshWindowDays: 180 }
+    });
+    expect(result).toMatchObject({ backfill: { queued: true, sourceId: "src_meta_ads" } });
+    // The token NEVER surfaces in the result that gets rendered/echoed.
+    expect(JSON.stringify(result)).not.toContain(RAW_TOKEN);
+  });
+
+  it("threads an all_time window (no refreshWindowDays) the same way", async () => {
+    const { buildConnectDispatchLine, connectorSetupDefinition, runSlashCommand } = await import(
+      "./index.js"
+    );
+    const definition = connectorSetupDefinition("meta_ads")!;
+    const line = buildConnectDispatchLine(definition, "Meta Ads", {
+      adAccountId: "1",
+      accessToken: "tok",
+      backfillWindow: "all_time"
+    });
+
+    const requests: Array<{ url: string; body: Record<string, unknown> | null }> = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+      requests.push({ url: String(url), body: init?.body ? JSON.parse(String(init.body)) : null });
+      return new Response(
+        JSON.stringify({ ok: true, data: { source: { id: "src_meta_ads" } } }),
+        { status: 200 }
+      );
+    }) as typeof fetch;
+
+    try {
+      await runSlashCommand(line, {
+        GROWTH_OS_OPERATOR_TOKEN: "operator",
+        GROWTH_OS_WORKSPACE_ID: "proj_test",
+        GROWTH_OS_API_URL: "http://127.0.0.1:3000"
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    expect(requests[1]?.body).toMatchObject({ mode: "backfill", backfillWindow: "all_time" });
+    expect(requests[1]?.body).not.toHaveProperty("refreshWindowDays");
+  });
+});
+
+describe("meta command (CLI write surface + confirm gates)", () => {
+  // Capture every /tools/call so a test can assert a write either fired (with the
+  // right actionId/input + operator token) or — when the gate cancels/refuses —
+  // did NOT fire at all. The fake fetch returns a canned operator envelope.
+  function stubToolsApi(): {
+    calls: Array<{ url: string; method: string; auth?: string; body: Record<string, unknown> }>;
+  } {
+    const state: {
+      calls: Array<{ url: string; method: string; auth?: string; body: Record<string, unknown> }>;
+    } = { calls: [] };
+    globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+      const href = typeof url === "string" ? url : url.toString();
+      const headers = (init?.headers ?? {}) as Record<string, string>;
+      state.calls.push({
+        url: href,
+        method: (init?.method ?? "GET").toUpperCase(),
+        auth: headers.Authorization,
+        body: init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : {}
+      });
+      return new Response(
+        JSON.stringify({
+          ok: true,
+          actionId: "create_meta_campaign",
+          status: "ok",
+          authority: "operator",
+          data: { id: "120000000000000001", status: "PAUSED" }
+        }),
+        { status: 200 }
+      );
+    }) as typeof fetch;
+    return state;
+  }
+
+  function toolCalls(state: {
+    calls: Array<{ url: string; method: string; auth?: string; body: Record<string, unknown> }>;
+  }) {
+    return state.calls.filter((c) => c.url.includes("/tools/call"));
+  }
+
+  const ENV = {
+    GROWTH_OS_API_URL: "http://127.0.0.1:9999",
+    GROWTH_OS_OPERATOR_TOKEN: "operator-secret",
+    GROWTH_OS_WORKSPACE_ID: "proj_test",
+    GROWTH_OS_CLI_NONINTERACTIVE: "1"
+  } as never;
+
+  let originalFetch: typeof globalThis.fetch;
+  beforeEach(() => {
+    originalFetch = globalThis.fetch;
+  });
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  it("requiresOperatorConfirmation gates every meta verb (incl. activate)", () => {
+    expect(requiresOperatorConfirmation("meta campaign activate 123")).toBe(true);
+    expect(requiresOperatorConfirmation("meta campaign create --name X")).toBe(true);
+    expect(requiresOperatorConfirmation("meta campaign list")).toBe(true);
+    expect(requiresOperatorConfirmation("/meta adset pause 456")).toBe(true);
+    // A non-meta command is unaffected.
+    expect(requiresOperatorConfirmation("sources")).toBe(false);
+  });
+
+  it("reads (list/get) are ungated and route to /tools/call with the operator token", async () => {
+    const api = stubToolsApi();
+    const list = (await metaCommand(
+      ["campaign", "list", "--source-id", "src_meta", "-l", "5"],
+      ENV
+    )) as { ok: boolean };
+    expect(list.ok).toBe(true);
+    const call = toolCalls(api)[0];
+    expect(call?.body).toMatchObject({
+      actionId: "list_meta_entities",
+      input: { sourceId: "src_meta", entity: "campaign", limit: 5 }
+    });
+    // The operator token is attached by apiRequest (never echoed by metaCommand).
+    expect(call?.auth).toBe("Bearer operator-secret");
+
+    await metaCommand(["ad", "get", "120777", "--source-id", "src_meta"], ENV);
+    expect(toolCalls(api)[1]?.body).toMatchObject({
+      actionId: "get_meta_entity",
+      // FIX 1: the get branch threads the entity KIND so the handler/connector
+      // requests the full default field set for that object (mirrors `list`)
+      // instead of degrading to Graph's id-only node.
+      input: { sourceId: "src_meta", entityId: "120777", entity: "ad" }
+    });
+  });
+
+  // FIX 1 (revert-proof): every object kind threads its `entity` to get_meta_entity
+  // so `get` requests the SAME field set as `list`. Dropping the `entity` pass-through
+  // (the original id-only bug) fails this matrix.
+  it("get threads the entity kind for each object so get mirrors list", async () => {
+    const api = stubToolsApi();
+    const cases: Array<[string, string]> = [
+      ["campaign", "campaign"],
+      ["adset", "adset"],
+      ["ad", "ad"],
+      ["creative", "creative"]
+    ];
+    for (const [object] of cases) {
+      await metaCommand([object, "get", "id_1", "--source-id", "src_meta"], ENV);
+    }
+    const gets = toolCalls(api).filter((c) => (c.body as { body?: unknown }) && (c.body.actionId === "get_meta_entity"));
+    for (let i = 0; i < cases.length; i += 1) {
+      const input = gets[i]?.body.input as Record<string, unknown>;
+      expect(input.entity).toBe(cases[i][1]);
+      expect(input.entityId).toBe("id_1");
+    }
+  });
+
+  it("get with explicit --fields still forwards both fields and entity", async () => {
+    const api = stubToolsApi();
+    await metaCommand(["campaign", "get", "cmp_1", "--source-id", "src_meta", "--fields", "id,name"], ENV);
+    const input = toolCalls(api)[0]?.body.input as Record<string, unknown>;
+    expect(input).toMatchObject({ entity: "campaign", fields: "id,name", entityId: "cmp_1" });
+  });
+
+  it("create --yes bypasses the confirm seam and POSTs create_meta_campaign", async () => {
+    const api = stubToolsApi();
+    const confirmMutation = vi.fn(async () => true);
+    await metaCommand(
+      ["campaign", "create", "--source-id", "src_meta", "--name", "Launch", "--objective", "OUTCOME_SALES", "--daily-budget", "5000", "--yes"],
+      ENV,
+      { confirmMutation }
+    );
+    expect(confirmMutation).not.toHaveBeenCalled();
+    const call = toolCalls(api)[0];
+    expect(call?.body).toMatchObject({
+      actionId: "create_meta_campaign",
+      input: { sourceId: "src_meta", name: "Launch", objective: "OUTCOME_SALES", dailyBudget: 5000 }
+    });
+    // No --status: the input never carries a caller status (create is always PAUSED).
+    expect((call?.body.input as Record<string, unknown>).status).toBeUndefined();
+  });
+
+  it("create -y short flag also bypasses the confirm seam", async () => {
+    const api = stubToolsApi();
+    const confirmMutation = vi.fn(async () => true);
+    await metaCommand(
+      ["adset", "create", "120555", "--source-id", "src_meta", "--name", "AS", "--optimization-goal", "OFFSITE_CONVERSIONS", "--billing-event", "IMPRESSIONS", "-y"],
+      ENV,
+      { confirmMutation }
+    );
+    expect(confirmMutation).not.toHaveBeenCalled();
+    expect(toolCalls(api)[0]?.body).toMatchObject({
+      actionId: "create_meta_ad_set",
+      input: { campaignId: "120555", optimizationGoal: "OFFSITE_CONVERSIONS", billingEvent: "IMPRESSIONS" }
+    });
+  });
+
+  it("create without --yes: a NO returns cancelled and issues NO /tools/call", async () => {
+    const api = stubToolsApi();
+    const confirmMutation = vi.fn(async () => false);
+    const result = (await metaCommand(
+      ["campaign", "create", "--source-id", "src_meta", "--name", "Launch", "--objective", "OUTCOME_SALES"],
+      ENV,
+      { confirmMutation }
+    )) as { ok: boolean; cancelled?: boolean; section?: string };
+    expect(confirmMutation).toHaveBeenCalledTimes(1);
+    expect(result.ok).toBe(false);
+    expect(result.cancelled).toBe(true);
+    expect(result.section).toBe("meta_campaign_create");
+    expect(toolCalls(api).length).toBe(0);
+  });
+
+  it("create in non-interactive mode without --yes hard-refuses (no /tools/call)", async () => {
+    const api = stubToolsApi();
+    await expect(
+      metaCommand(
+        ["campaign", "create", "--source-id", "src_meta", "--name", "Launch", "--objective", "OUTCOME_SALES"],
+        ENV,
+        {}
+      )
+    ).rejects.toThrow(/Refusing to create campaign without confirmation/);
+    expect(toolCalls(api).length).toBe(0);
+  });
+
+  it("the budget confirmation summary surfaces the ad-account currency seam", async () => {
+    stubToolsApi();
+    let seenSummary = "";
+    const confirmMutation = vi.fn(async (details: { summary: string }) => {
+      seenSummary = details.summary;
+      return true;
+    });
+    await metaCommand(
+      ["campaign", "create", "--source-id", "src_meta", "--name", "Launch", "--objective", "OUTCOME_SALES", "--daily-budget", "5000"],
+      // Force the interactive seam path by clearing the non-interactive marker.
+      { ...(ENV as Record<string, string>), GROWTH_OS_CLI_NONINTERACTIVE: "0" } as never,
+      { confirmMutation, adAccountCurrency: "USD" }
+    );
+    expect(seenSummary).toContain("daily budget 5000 cents USD");
+    expect(seenSummary).toContain("lands PAUSED");
+  });
+
+  it("activate without --yes: a WRONG typed value cancels and issues NO /tools/call", async () => {
+    const api = stubToolsApi();
+    const confirmActivate = vi.fn(async () => "nope");
+    const result = (await metaCommand(
+      ["campaign", "activate", "120000000000000001", "--source-id", "src_meta"],
+      ENV,
+      { confirmActivate }
+    )) as { ok: boolean; cancelled?: boolean; reason?: string };
+    expect(confirmActivate).toHaveBeenCalledTimes(1);
+    expect(result.ok).toBe(false);
+    expect(result.cancelled).toBe(true);
+    expect(result.reason).toBe("typed_confirmation_mismatch");
+    expect(toolCalls(api).length).toBe(0);
+  });
+
+  it("activate with the CORRECT typed id fires set_meta_entity_status ACTIVE", async () => {
+    const api = stubToolsApi();
+    const confirmActivate = vi.fn(async () => "120000000000000001");
+    await metaCommand(
+      ["campaign", "activate", "120000000000000001", "--source-id", "src_meta"],
+      ENV,
+      { confirmActivate }
+    );
+    expect(toolCalls(api)[0]?.body).toMatchObject({
+      actionId: "set_meta_entity_status",
+      // `entity` is REQUIRED by the handler; `confirmActivation` must echo entityId (activation gate).
+      input: {
+        sourceId: "src_meta",
+        entityId: "120000000000000001",
+        status: "ACTIVE",
+        entity: "campaign",
+        confirmActivation: "120000000000000001"
+      }
+    });
+  });
+
+  it("activate accepts the literal word \"activate\" as typed confirmation", async () => {
+    const api = stubToolsApi();
+    const confirmActivate = vi.fn(async () => "activate");
+    await metaCommand(
+      ["adset", "activate", "120000000000000002", "--source-id", "src_meta"],
+      ENV,
+      { confirmActivate }
+    );
+    expect(toolCalls(api)[0]?.body).toMatchObject({
+      actionId: "set_meta_entity_status",
+      input: { entityId: "120000000000000002", status: "ACTIVE", entity: "adset", confirmActivation: "120000000000000002" }
+    });
+  });
+
+  it("activate in non-interactive mode without --yes throws (never silently goes live)", async () => {
+    const api = stubToolsApi();
+    await expect(
+      metaCommand(["campaign", "activate", "120000000000000001", "--source-id", "src_meta"], ENV, {})
+    ).rejects.toThrow(/Refusing to activate campaign 120000000000000001 without confirmation/);
+    expect(toolCalls(api).length).toBe(0);
+  });
+
+  it("activate --yes bypasses the typed-confirm and fires ACTIVE", async () => {
+    const api = stubToolsApi();
+    const confirmActivate = vi.fn(async () => "wrong");
+    await metaCommand(
+      ["ad", "activate", "120000000000000003", "--source-id", "src_meta", "--yes"],
+      ENV,
+      { confirmActivate }
+    );
+    // --yes skips the typed-confirm seam entirely.
+    expect(confirmActivate).not.toHaveBeenCalled();
+    expect(toolCalls(api)[0]?.body).toMatchObject({
+      actionId: "set_meta_entity_status",
+      input: { entityId: "120000000000000003", status: "ACTIVE", entity: "ad", confirmActivation: "120000000000000003" }
+    });
+  });
+
+  it("pause does NOT send confirmActivation (only ACTIVE is gated)", async () => {
+    const api = stubToolsApi();
+    const confirmMutation = vi.fn(async () => true);
+    await metaCommand(
+      ["campaign", "pause", "120000000000000005", "--source-id", "src_meta"],
+      ENV,
+      { confirmMutation }
+    );
+    const body = toolCalls(api)[0]?.body as { input?: Record<string, unknown> };
+    expect(body.input).toMatchObject({ status: "PAUSED", entity: "campaign" });
+    expect(body.input).not.toHaveProperty("confirmActivation");
+  });
+
+  it("pause goes through the standard write gate (NO cancels, no /tools/call)", async () => {
+    const api = stubToolsApi();
+    const confirmMutation = vi.fn(async () => false);
+    const result = (await metaCommand(
+      ["campaign", "pause", "120000000000000001", "--source-id", "src_meta"],
+      ENV,
+      { confirmMutation }
+    )) as { ok: boolean; cancelled?: boolean };
+    expect(result.cancelled).toBe(true);
+    expect(toolCalls(api).length).toBe(0);
+  });
+
+  it("pause that proceeds fires set_meta_entity_status PAUSED WITH the required entity", async () => {
+    const api = stubToolsApi();
+    const confirmMutation = vi.fn(async () => true);
+    await metaCommand(
+      ["adset", "pause", "120000000000000004", "--source-id", "src_meta"],
+      ENV,
+      { confirmMutation }
+    );
+    expect(toolCalls(api)[0]?.body).toMatchObject({
+      actionId: "set_meta_entity_status",
+      input: { entityId: "120000000000000004", status: "PAUSED", entity: "adset" }
+    });
+  });
+
+  it("budget --yes fires update_meta_budget with entity + dailyBudget and NO status", async () => {
+    const api = stubToolsApi();
+    const confirmMutation = vi.fn(async () => true);
+    await metaCommand(
+      ["campaign", "budget", "120000000000000010", "--source-id", "src_meta", "--daily-budget", "5000", "--yes"],
+      ENV,
+      { confirmMutation }
+    );
+    // --yes skips the standard write gate.
+    expect(confirmMutation).not.toHaveBeenCalled();
+    const body = toolCalls(api)[0]?.body as { actionId?: string; input?: Record<string, unknown> };
+    expect(body).toMatchObject({
+      actionId: "update_meta_budget",
+      input: { sourceId: "src_meta", entityId: "120000000000000010", entity: "campaign", dailyBudget: 5000 }
+    });
+    // MONEY-SAFETY parity: the CLI never sends a status on a budget change.
+    expect(body.input).not.toHaveProperty("status");
+  });
+
+  it("budget on an ad set targets entity=adset", async () => {
+    const api = stubToolsApi();
+    await metaCommand(
+      ["adset", "budget", "120000000000000020", "--source-id", "src_meta", "--daily-budget", "2500", "--yes"],
+      ENV,
+      {}
+    );
+    expect(toolCalls(api)[0]?.body).toMatchObject({
+      actionId: "update_meta_budget",
+      input: { entityId: "120000000000000020", entity: "adset", dailyBudget: 2500 }
+    });
+  });
+
+  it("budget without --yes: a NO returns cancelled and issues NO /tools/call", async () => {
+    const api = stubToolsApi();
+    const confirmMutation = vi.fn(async () => false);
+    const result = (await metaCommand(
+      ["campaign", "budget", "120000000000000010", "--source-id", "src_meta", "--daily-budget", "5000"],
+      ENV,
+      { confirmMutation }
+    )) as { ok: boolean; cancelled?: boolean; section?: string };
+    expect(confirmMutation).toHaveBeenCalledTimes(1);
+    expect(result.cancelled).toBe(true);
+    expect(result.section).toBe("meta_campaign_budget");
+    expect(toolCalls(api).length).toBe(0);
+  });
+
+  it("budget rejects ad/creative (no ad-level budget) and requires --daily-budget", async () => {
+    const api = stubToolsApi();
+    await expect(
+      metaCommand(["ad", "budget", "120000000000000030", "--source-id", "src_meta", "--daily-budget", "5000", "--yes"], ENV, {})
+    ).rejects.toThrow(/has no budget verb/);
+    await expect(
+      metaCommand(["campaign", "budget", "120000000000000010", "--source-id", "src_meta", "--yes"], ENV, {})
+    ).rejects.toThrow(/requires --daily-budget/);
+    // A zero budget is refused before any write.
+    await expect(
+      metaCommand(["campaign", "budget", "120000000000000010", "--source-id", "src_meta", "--daily-budget", "0", "--yes"], ENV, {})
+    ).rejects.toThrow(/must be a positive integer/);
+    expect(toolCalls(api).length).toBe(0);
+  });
+
+  it("creative has no activate transition", async () => {
+    await expect(
+      metaCommand(["creative", "activate", "120000000000000009", "--source-id", "src_meta"], ENV, {})
+    ).rejects.toThrow(/creatives never go live/);
+  });
+
+  it("--json prints the raw {ok,...} envelope through runCli (local namespace)", async () => {
+    stubToolsApi();
+    const writes: string[] = [];
+    const writeSpy = vi.spyOn(process.stdout, "write").mockImplementation((chunk: string | Uint8Array) => {
+      writes.push(String(chunk));
+      return true;
+    });
+    try {
+      await runCli(
+        ["local", "meta", "campaign", "create", "--source-id", "src_meta", "--name", "Launch", "--objective", "OUTCOME_SALES", "--yes", "--json"],
+        ENV
+      );
+      const parsed = JSON.parse(writes.join(""));
+      expect(parsed).toMatchObject({
+        ok: true,
+        actionId: "create_meta_campaign",
+        status: "ok",
+        authority: "operator"
+      });
+    } finally {
+      writeSpy.mockRestore();
+    }
+  });
+
+  it("requires --source-id for every verb", async () => {
+    await expect(metaCommand(["campaign", "list"], ENV, {})).rejects.toThrow(/--source-id/);
+  });
+
+  // ── FIX 2: delete verb — destructive, operator-only, standard confirm gate ──
+  describe("delete (destructive cleanup, standard confirm gate)", () => {
+    it("delete --yes bypasses the confirm seam and POSTs delete_meta_entity to /tools/call", async () => {
+      const api = stubToolsApi();
+      const confirmMutation = vi.fn(async () => true);
+      await metaCommand(
+        ["campaign", "delete", "120000000000000001", "--source-id", "src_meta", "--yes"],
+        ENV,
+        { confirmMutation }
+      );
+      // --yes skips the gate entirely.
+      expect(confirmMutation).not.toHaveBeenCalled();
+      const call = toolCalls(api)[0];
+      expect(call?.body).toMatchObject({
+        actionId: "delete_meta_entity",
+        // Threads the entity-kind hint so the audit row is precise.
+        input: { sourceId: "src_meta", entityId: "120000000000000001", entity: "campaign" }
+      });
+      // Operator token attached by apiRequest, never echoed by metaCommand.
+      expect(call?.auth).toBe("Bearer operator-secret");
+    });
+
+    it("delete -y short flag also bypasses the confirm seam", async () => {
+      const api = stubToolsApi();
+      const confirmMutation = vi.fn(async () => true);
+      await metaCommand(
+        ["adset", "delete", "120000000000000002", "--source-id", "src_meta", "-y"],
+        ENV,
+        { confirmMutation }
+      );
+      expect(confirmMutation).not.toHaveBeenCalled();
+      expect(toolCalls(api)[0]?.body).toMatchObject({
+        actionId: "delete_meta_entity",
+        input: { entityId: "120000000000000002", entity: "adset" }
+      });
+    });
+
+    it("delete uses the STANDARD confirm seam (confirmMutation), NOT the activate typed-confirm", async () => {
+      const api = stubToolsApi();
+      const confirmMutation = vi.fn(async () => true);
+      const confirmActivate = vi.fn(async () => "activate");
+      await metaCommand(
+        ["ad", "delete", "120000000000000003", "--source-id", "src_meta"],
+        // Force the interactive seam path.
+        { ...(ENV as Record<string, string>), GROWTH_OS_CLI_NONINTERACTIVE: "0" } as never,
+        { confirmMutation, confirmActivate }
+      );
+      expect(confirmMutation).toHaveBeenCalledTimes(1);
+      // The stricter typed-confirm (reserved for activate=spend) is NEVER used.
+      expect(confirmActivate).not.toHaveBeenCalled();
+      expect(toolCalls(api)[0]?.body).toMatchObject({ actionId: "delete_meta_entity" });
+    });
+
+    it("delete without --yes: a NO returns cancelled and issues NO /tools/call", async () => {
+      const api = stubToolsApi();
+      const confirmMutation = vi.fn(async () => false);
+      const result = (await metaCommand(
+        ["campaign", "delete", "120000000000000001", "--source-id", "src_meta"],
+        ENV,
+        { confirmMutation }
+      )) as { ok: boolean; cancelled?: boolean; section?: string };
+      expect(confirmMutation).toHaveBeenCalledTimes(1);
+      expect(result.ok).toBe(false);
+      expect(result.cancelled).toBe(true);
+      expect(result.section).toBe("meta_campaign_delete");
+      expect(toolCalls(api).length).toBe(0);
+    });
+
+    it("delete in non-interactive mode without --yes hard-refuses (no /tools/call)", async () => {
+      const api = stubToolsApi();
+      await expect(
+        metaCommand(["campaign", "delete", "120000000000000001", "--source-id", "src_meta"], ENV, {})
+      ).rejects.toThrow(/Refusing to delete campaign without confirmation/);
+      expect(toolCalls(api).length).toBe(0);
+    });
+
+    it("delete requires an entity id", async () => {
+      await expect(
+        metaCommand(["campaign", "delete", "--source-id", "src_meta", "--yes"], ENV, {})
+      ).rejects.toThrow(/delete requires an entity id/);
+    });
+
+    it("creative has no delete verb (not deletable via this surface)", async () => {
+      await expect(
+        metaCommand(["creative", "delete", "cr_1", "--source-id", "src_meta", "--yes"], ENV, {})
+      ).rejects.toThrow(/no delete verb/);
+    });
+
+    it("delete --source-id BEFORE the id targets the CORRECT entity, never the source value", async () => {
+      const api = stubToolsApi();
+      await metaCommand(
+        ["adset", "delete", "--source-id", "act_123", "as_555", "--yes"],
+        ENV,
+        {}
+      );
+      const input = toolCalls(api)[0]?.body.input as Record<string, unknown>;
+      expect(input.entityId).toBe("as_555");
+      expect(input.sourceId).toBe("act_123");
+      expect(input.entity).toBe("adset");
+    });
+
+    it("delete is gated by requiresOperatorConfirmation (interactive session gate)", () => {
+      expect(requiresOperatorConfirmation("meta campaign delete 123")).toBe(true);
+      expect(requiresOperatorConfirmation("/meta ad delete 456 --source-id src")).toBe(true);
+    });
+  });
+
+  // ── Positional-id resolution must not mistake a flag VALUE for the entity id ──
+  // Regression for the firstPositionalArg bug: with the value flag BEFORE the
+  // positional id (e.g. `--source-id act_123 cmp_999`), the old resolver returned
+  // the flag value (`act_123`). A mis-read id on `activate` could target the WRONG
+  // money-spending entity, so these are money-safety regressions.
+  describe("positional-id resolution (flag value must never be read as the id)", () => {
+    it("adset create: --source-id BEFORE the campaign id resolves the campaign id, not the source value", async () => {
+      const api = stubToolsApi();
+      await metaCommand(
+        [
+          "adset",
+          "create",
+          "--source-id",
+          "act_123",
+          "cmp_999",
+          "--name",
+          "AS",
+          "--optimization-goal",
+          "OFFSITE_CONVERSIONS",
+          "--billing-event",
+          "IMPRESSIONS",
+          "--yes"
+        ],
+        ENV,
+        { confirmMutation: vi.fn(async () => true) }
+      );
+      const input = toolCalls(api)[0]?.body.input as Record<string, unknown>;
+      expect(input.campaignId).toBe("cmp_999");
+      expect(input.sourceId).toBe("act_123");
+    });
+
+    it("ad create: --source-id BEFORE the ad set id resolves the ad set id, not the source value", async () => {
+      const api = stubToolsApi();
+      await metaCommand(
+        [
+          "ad",
+          "create",
+          "--source-id",
+          "act_123",
+          "as_888",
+          "--name",
+          "Ad",
+          "--creative-id",
+          "cr_1",
+          "--yes"
+        ],
+        ENV,
+        { confirmMutation: vi.fn(async () => true) }
+      );
+      const input = toolCalls(api)[0]?.body.input as Record<string, unknown>;
+      expect(input.adsetId).toBe("as_888");
+      expect(input.sourceId).toBe("act_123");
+    });
+
+    it("activate: --source-id BEFORE the entity id targets the CORRECT entity, never the source value", async () => {
+      const api = stubToolsApi();
+      // confirmActivate must match the RESOLVED entity id (the typed-confirm seam),
+      // proving the resolver picked cmp_777 and not act_123.
+      const confirmActivate = vi.fn(async () => "cmp_777");
+      await metaCommand(
+        ["campaign", "activate", "--source-id", "act_123", "cmp_777"],
+        ENV,
+        { confirmActivate }
+      );
+      const input = toolCalls(api)[0]?.body.input as Record<string, unknown>;
+      expect(input.entityId).toBe("cmp_777");
+      expect(input.sourceId).toBe("act_123");
+      expect(input.status).toBe("ACTIVE");
+    });
+
+    it("pause: --source-id BEFORE the entity id targets the CORRECT entity, never the source value", async () => {
+      const api = stubToolsApi();
+      await metaCommand(
+        ["adset", "pause", "--source-id", "act_123", "as_555"],
+        ENV,
+        { confirmMutation: vi.fn(async () => true) }
+      );
+      const input = toolCalls(api)[0]?.body.input as Record<string, unknown>;
+      expect(input.entityId).toBe("as_555");
+      expect(input.sourceId).toBe("act_123");
+      expect(input.status).toBe("PAUSED");
+    });
+
+    it("get: --source-id BEFORE the entity id resolves the entity id, not the source value", async () => {
+      const api = stubToolsApi();
+      await metaCommand(["ad", "get", "--source-id", "act_123", "120777"], ENV, {});
+      const input = toolCalls(api)[0]?.body.input as Record<string, unknown>;
+      expect(input.entityId).toBe("120777");
+      expect(input.sourceId).toBe("act_123");
+    });
+  });
+});
+
+// mirrorMachineHomeEnv tests live in mirror-machine-home-env.test.ts (no Ink dep)
+
+function parseDotEnvForTest(input: string): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const line of input.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const eq = trimmed.indexOf("=");
+    if (eq === -1) continue;
+    result[trimmed.slice(0, eq).trim()] = trimmed.slice(eq + 1).trim();
+  }
+  return result;
+}
+
+function isRecordResult(value: unknown): boolean {
+  return value !== null && typeof value === "object";
+}

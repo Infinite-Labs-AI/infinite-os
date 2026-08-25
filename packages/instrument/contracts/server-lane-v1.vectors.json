@@ -1,0 +1,37 @@
+{
+  "$comment": "Server lane (lossless analytics) recipe vectors, shared with the receiving side. Every hex value is lowercase HMAC-SHA256 under `secret`. visitKey message = \"visit:\" + clientIp + \"|\" + userAgent + \"|\" + floor(epochSeconds / 1800); documentEventId = \"doc:\" + HMAC(visitKey + \"|\" + path + \"|\" + occurredAtMs); the body signature is HMAC over the exact JSON bytes of `documentEventBody`; the receipt request (GET …/server-lane/receipt?since=<iso>) signature is HMAC over the RAW QUERY STRING as sent (`receiptQuery`).",
+  "secret": "test-secret",
+  "clientIp": "203.0.113.9",
+  "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+  "occurredAtMs": 1755500000123,
+  "epochSeconds": 1755500000,
+  "visitBucket": 975277,
+  "path": "/pricing",
+  "host": "example.com",
+  "referrer": "https://google.com/search?q=infinite",
+  "visitKey": "b16eaccc3fc131a1fc6428105bf366164c1f8fff3e0de56d0da7bbfa1712005e",
+  "documentEventId": "doc:85c11b1b1ed121d9f91da03777ea890b895033f7a383dceca0694d59ceda8b67",
+  "documentEventBody": "{\"eventId\":\"doc:85c11b1b1ed121d9f91da03777ea890b895033f7a383dceca0694d59ceda8b67\",\"eventName\":\"site_document_request\",\"occurredAt\":\"2025-08-18T06:53:20.123Z\",\"properties\":{\"path\":\"/pricing\",\"host\":\"example.com\",\"visitKey\":\"b16eaccc3fc131a1fc6428105bf366164c1f8fff3e0de56d0da7bbfa1712005e\",\"userAgentFamily\":\"browser\",\"referrerHost\":\"google.com\"}}",
+  "documentEventBodySignature": "679b2a1bd1e69c49f57534707df1c20e890c17a93ff5fa312fb45519950ddf03",
+  "emptyBodySignature": "a41bc6d81d6413576ae0994995e0ad89a416ec97389515c3604f47722122eeeb",
+  "receiptSince": "2026-08-18T20:00:00.000Z",
+  "receiptQuery": "since=2026-08-18T20%3A00%3A00.000Z",
+  "receiptSignature": "2d07572d2a6385584160e88deda6acab37233af2e6ec497b4340572d41aa9b16",
+  "headers": {
+    "sourceKey": "x-infinite-source-key",
+    "signature": "x-infinite-signature"
+  },
+  "userAgentFamilySamples": {
+    "browser": [
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/125.0 Safari/537.36",
+      "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 Version/17.5 Mobile/15E148 Safari/604.1"
+    ],
+    "automation": [
+      "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
+      "curl/8.4.0",
+      "python-requests/2.31.0",
+      "Mozilla/5.0 (X11; Linux x86_64) HeadlessChrome/124.0.0.0 Safari/537.36"
+    ],
+    "unknown": [""]
+  }
+}

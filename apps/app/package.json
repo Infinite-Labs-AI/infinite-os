@@ -1,0 +1,25 @@
+{
+  "name": "@infinite-os/app",
+  "version": "0.1.0",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -b tsconfig.json",
+    "build:bundle": "node scripts/bundle.mjs",
+    "dev": "tsx src/index.ts",
+    "test": "vitest run --root ../.. ../../apps/app/test/app.test.ts ../../apps/app/test/bundle-provenance.test.ts",
+    "typecheck": "tsc --noEmit --pretty false"
+  },
+  "dependencies": {
+    "@infinite-os/analytical-engine": "workspace:*",
+    "@infinite-os/config": "workspace:*",
+    "@infinite-os/db": "workspace:*",
+    "@infinite-os/llm-controller": "workspace:*",
+    "@infinite-os/runtime": "workspace:*",
+    "fastify": "^5.0.0"
+  },
+  "devDependencies": {
+    "esbuild": "0.27.7"
+  }
+}

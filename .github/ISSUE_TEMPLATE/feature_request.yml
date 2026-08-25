@@ -1,0 +1,85 @@
+name: "✨ Feature Request"
+description: Suggest a new feature or improvement.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the suggestion! Before submitting, please:
+
+        - **Search [existing issues](https://github.com/Infinite-Labs-AI/infinite-os/issues)** — someone may have already proposed this.
+        - Skim [CONTRIBUTING.md](https://github.com/Infinite-Labs-AI/infinite-os/blob/main/CONTRIBUTING.md) for how the project is structured.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or Use Case
+      description: What problem does this solve? What are you trying to do that you can't today?
+      placeholder: |
+        I'm trying to analyze [metric/source/workflow] but currently
+        there's no way to...
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed Solution
+      description: How do you think this should work? Be as specific as you can — CLI behavior, config options, the question you'd ask.
+      placeholder: |
+        Add a `--foo` flag to `infinite sync` that enables...
+        Or: support asking "..." and have it resolve to metric `bar`...
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives Considered
+      description: What other approaches did you consider? Why is the proposed solution better?
+
+  - type: dropdown
+    id: type
+    attributes:
+      label: Feature Type
+      options:
+        - New metric / analytics capability
+        - New data source connector
+        - CLI / chat improvement
+        - Setup / onboarding improvement
+        - Sync / data freshness
+        - Configuration option
+        - Performance / reliability
+        - Developer experience (tests, docs, CI)
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Scope
+      description: How big is this change?
+      options:
+        - Small (single file, < 50 lines)
+        - Medium (few files, < 300 lines)
+        - Large (new module or significant refactor)
+
+  - type: checkboxes
+    id: pr-ready
+    attributes:
+      label: Contribution
+      options:
+        - label: I'd like to implement this myself and submit a PR
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment (optional)
+      description: |
+        If this request relates to a problem you're hitting, paste the output of `infinite setup status` so we understand your setup.
+      placeholder: |
+        $ infinite setup status
+        ...
+      render: shell

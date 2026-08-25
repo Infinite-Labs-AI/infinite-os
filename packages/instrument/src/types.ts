@@ -1,0 +1,344 @@
+export const packageManagers = ["pnpm", "npm", "yarn", "bun"] as const
+export type PackageManager = (typeof packageManagers)[number]
+
+export type PackageManagerDetectionKind = PackageManager | "ambiguous" | "unknown"
+export type RepoStatus = "clean" | "dirty" | "not-a-git-repo"
+export type ApplyMode = "supported" | "plan-only"
+
+export const supportedFrameworks = [
+  "next-app-router",
+  "next-pages-router",
+  "vite-react",
+  "static-html"
+] as const
+export type SupportedFramework = (typeof supportedFrameworks)[number]
+
+export const providerIds = ["infinite", "ga4", "posthog", "x", "meta"] as const
+export type ProviderId = (typeof providerIds)[number]
+
+export interface PackageManagerDetection {
+  kind: PackageManagerDetectionKind
+  reason: "lockfile" | "multiple-lockfiles" | "no-lockfile" | "override"
+  lockfiles: string[]
+}
+
+export interface PackageManagerCommands {
+  packageManager: PackageManager
+  oneOff: string
+  repeatableInstall: string
+  repeatableRun: string
+}
+
+export interface InspectResult {
+  framework: string
+  appRoot: string
+  packageManager: string
+  confidence: number
+  existingProviders: string[]
+  repoStatus: RepoStatus
+  assumptions: string[]
+  blockers: string[]
+  detectedFiles: string[]
+}
+
+export interface InstallPlan {
+  framework: string
+  providers: string[]
+  files: string[]
+  envKeys: string[]
+  applyMode: ApplyMode
+  instructions: InstallInstruction[]
+  assumptions: string[]
+  blockers: string[]
+  confidence: number
+  appRoot: string
+  packageManager: string
+  repoStatus: RepoStatus
+  workspaceId?: string
+  artifacts: WorkspaceInstallArtifacts
+  /** Present when the plan was made with `--server-lane`. */
+  serverLane?: ServerLanePlan
+}
+
+export interface ApplyResult {
+  changedFiles: string[]
+  manifestPath: string
+  warnings: string[]
+  /** Present when the plan carried `--server-lane`. */
+  serverLane?: {
+    manifest: ServerLaneManifest
+    /** The rendered agent brief (also written to briefPath unless an unmanaged file was in the way). */
+    brief: string
+    briefWritten: boolean
+  }
+}
+
+export interface UninstallResult {
+  removedFiles: string[]
+  restoredFiles: string[]
+  warnings: string[]
+  manifestPath: string | null
+}
+
+export interface VerifyResult {
+  buildOk: boolean
+  routeChecks: string[]
+  beaconChecks: string[]
+  warnings: string[]
+}
+
+export type InfiniteConsentMode = "required" | "not_required"
+
+export interface InfinitePublicArtifact {
+  siteSourceKey: string
+  collectPath: "/infinite/events/collect" | string
+  productionHosts: string[]
+  staticProxy?: "vercel"
+  /** Optional for legacy artifact decoding; plans with an Infinite source require an explicit value. */
+  consentMode?: InfiniteConsentMode
+  /** The workspace's conversion destination for download-intent clicks. Absent = the platform
+   *  default "/download" — must match the source's cloud config or the collect boundary rejects. */
+  downloadDestinationPath?: string
+}
+
+export interface InfiniteBrowserConfig {
+  siteSourceKey?: string
+  collectPath: string
+  productionHosts: string[]
+  respectDnt: boolean
+  consent:
+    | { mode: "not_required" }
+    | { mode: "required"; storageKey: "infinite_analytics_consent" }
+  /** Conversion destination for app_download_click detection. Absent = "/download". */
+  downloadDestinationPath?: string
+}
+
+/**
+ * What `window.__infiniteHandoffContext()` returns — the narrow, consent-gated context the site
+ * reads when a visitor clicks Download so a browser journey can be handed to the desktop app.
+ *
+ * It is attribution context, never a capability: no event emitter, no `track()`, no workspace,
+ * authority, environment, endpoint, or cloud knowledge. The ids are the runtime's OWN random
+ * localStorage/sessionStorage ids — the accessor mints no new identity — and the accessor exists
+ * only for a configured source on a verified production host. It returns `null` (never a silent
+ * identity) whenever consent is absent, denied, or defaulted away by DNT/GPC.
+ */
+export interface InfiniteHandoffContext {
+  siteSourceKey: string
+  anonymousId: string
+  sessionId: string
+  url: string
+}
+
+export interface MetaPublicArtifact {
+  pixelId: string
+}
+
+export interface Ga4PublicArtifact {
+  measurementId: string
+}
+
+/**
+ * The reverse-proxy ingestion setup for PostHog. Its PRESENCE on a PosthogPublicArtifact is
+ * the signal that the framework adapter must inject the first-party `/ingest` rewrites so
+ * ad-blockers can't drop analytics. `path` is the browser-facing api_host prefix (e.g.
+ * `/ingest`); `assetsHost`/`ingestHost` are the real PostHog upstreams the rewrites forward to.
+ */
+export interface PosthogProxySpec {
+  path: string
+  assetsHost: string
+  ingestHost: string
+}
+
+export interface PosthogPublicArtifact {
+  projectKey: string
+  apiHost: string
+  /** PostHog app host for the toolbar/app-links (posthog.init ui_host); region-derived by default. */
+  uiHost?: string
+  /** When present, the framework adapter injects the reverse-proxy rewrites. */
+  proxy?: PosthogProxySpec
+}
+
+export interface XPublicArtifact {
+  pixelId: string
+  eventTagIds: string[]
+}
+
+export interface WorkspaceInstallArtifacts {
+  /** Explicit host allowlist for the shared browser runtime (Infinite collection only — the
+   *  runtime never forwards into GA4/PostHog since 0.6.0; those providers install natively). */
+  productionHosts?: string[]
+  infinite?: InfinitePublicArtifact
+  ga4?: Ga4PublicArtifact
+  posthog?: PosthogPublicArtifact
+  x?: XPublicArtifact
+  meta?: MetaPublicArtifact
+}
+
+export interface InstallManifest {
+  workspaceId: string
+  appRoot: string
+  framework: SupportedFramework
+  providers: ProviderId[]
+  files: string[]
+  envKeys: string[]
+  contentHashes: Record<string, string>
+  configOwnership?: Record<string, ManagedConfigOwnership>
+  /** Present when `--server-lane` installed the lossless server lane; root-relative paths. */
+  serverLane?: ServerLaneManifest
+  wiringVersion: number
+  verifiedAt: string | null
+}
+
+export interface ServerLaneManifest {
+  mode: ServerLaneMode
+  /** The middleware/proxy file infinite-tag created or patched (ownership in configOwnership). */
+  middleware?: string
+  /** The managed lib/infinite-server-lane.ts module. */
+  module?: string
+  /** The written INSTALL-SERVER-LANE.md agent brief (banner-gated removal, never hash-verified). */
+  brief?: string
+}
+
+export interface ManagedConfigInsertion {
+  offset: number
+  text: string
+}
+
+/** One reversible edit in ORIGINAL-file coordinates: `removed` was replaced by `inserted`. */
+export interface ManagedTextEdit {
+  offset: number
+  removed: string
+  inserted: string
+}
+
+export type ManagedConfigOwnership =
+  | {
+      kind: "created"
+      installedHash: string
+    }
+  | {
+      kind: "vercel-json-insertions"
+      originalHash: string
+      installedHash: string
+      insertions: ManagedConfigInsertion[]
+    }
+  | {
+      kind: "text-edits"
+      originalHash: string
+      installedHash: string
+      edits: ManagedTextEdit[]
+    }
+
+/** "next-middleware": middleware + module + brief; "brief": the agent brief only. */
+export type ServerLaneMode = "next-middleware" | "brief"
+
+export type ServerLaneMiddlewareAction = "create" | "patch" | "keep" | "unpatchable"
+
+export interface ServerLanePlan {
+  mode: ServerLaneMode
+  /** Root-relative path of the brief written into the project. */
+  briefPath: string
+  /** Root-relative path of the managed module (next-middleware mode). */
+  modulePath?: string
+  middleware?: {
+    /** Root-relative path of the middleware/proxy file targeted. */
+    path: string
+    action: ServerLaneMiddlewareAction
+    /** Why an existing file was left untouched (action "unpatchable"). */
+    reason?: string
+  }
+  envKeys: string[]
+  /** Root-relative files the lane manages (hash-verified): middleware + module. */
+  files: string[]
+  assumptions: string[]
+}
+
+export interface FrameworkMatch {
+  framework: SupportedFramework
+  confidence: number
+  files: string[]
+  assumptions: string[]
+}
+
+export interface FrameworkPlanDraft {
+  files: string[]
+  applyMode: ApplyMode
+  instructions: InstallInstruction[]
+  assumptions: string[]
+  blockers: string[]
+  confidence: number
+}
+
+export interface InstallInstruction {
+  path: string
+  action: "create" | "modify"
+  description: string
+  snippet: string
+  provider?: ProviderId
+}
+
+/** Optional context passed to FrameworkAdapter.plan so it can see cross-cutting install choices. */
+export interface FrameworkPlanOptions {
+  posthogProxy?: PosthogProxySpec
+  infiniteProxy?: InfiniteProxySpec
+  allowStaticVercelProxy?: boolean
+  configOwnership?: Record<string, ManagedConfigOwnership>
+}
+
+export interface InfiniteProxySpec {
+  path: string
+  destination: string
+}
+
+export interface FrameworkAdapter {
+  id: SupportedFramework
+  displayName: string
+  detect(root: string): FrameworkMatch | null
+  plan(root: string, options?: FrameworkPlanOptions): FrameworkPlanDraft
+  apply?(context: FrameworkApplyContext): FrameworkApplyResult
+  uninstall?(context: FrameworkUninstallContext): FrameworkUninstallResult
+}
+
+export interface ProviderPlanDraft {
+  assumptions: string[]
+  blockers: string[]
+  instructions: InstallInstruction[]
+}
+
+export interface FrameworkApplyContext {
+  root: string
+  appRoot: string
+  plan: InstallPlan
+  previousManifest: InstallManifest | null
+}
+
+export interface FrameworkApplyResult {
+  changedFiles: string[]
+  warnings: string[]
+  configOwnership?: Record<string, ManagedConfigOwnership>
+}
+
+export interface FrameworkUninstallContext {
+  root: string
+  appRoot: string
+  manifest: InstallManifest
+  dryRun: boolean
+}
+
+export interface FrameworkUninstallResult {
+  removedFiles: string[]
+  restoredFiles: string[]
+  warnings: string[]
+}
+
+export interface ProviderAdapter {
+  id: ProviderId
+  displayName: string
+  envKeys(framework: SupportedFramework): string[]
+  plan(
+    framework: SupportedFramework,
+    artifact: WorkspaceInstallArtifacts[ProviderId] | undefined,
+    context?: { artifacts: WorkspaceInstallArtifacts }
+  ): ProviderPlanDraft
+}

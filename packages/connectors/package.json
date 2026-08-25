@@ -1,0 +1,19 @@
+{
+  "name": "@infinite-os/connectors",
+  "version": "0.1.0",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -b tsconfig.json",
+    "test": "vitest run --root ../.. ../../packages/connectors/src",
+    "typecheck": "tsc --noEmit --pretty false"
+  },
+  "dependencies": {
+    "@infinite-os/core": "workspace:*",
+    "@infinite-os/db": "workspace:*"
+  }
+}

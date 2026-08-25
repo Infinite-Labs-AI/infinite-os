@@ -1,0 +1,1147 @@
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { randomBytes, randomUUID } from "node:crypto";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import pg, { type Pool, type PoolClient, type QueryResultRow } from "pg";
+
+import {
+  createPgliteDb,
+  isPgliteDatabaseUrl,
+  runPgliteMigrations
+} from "./pglite-adapter.js";
+
+// Re-export the canonical pglite-vs-postgres scheme check so app-layer callers (e.g. the
+// daemon boot seed gate) can branch on embedded-PGlite vs real Postgres without re-deriving it.
+export { isPgliteDatabaseUrl } from "./pglite-adapter.js";
+
+export const dbBoot = true;
+
+// The minimal surface every db backend must expose for the domain helpers and
+// `wrapPool` to operate. `pg.Pool`, `pg.PoolClient`, and the PGlite instance all
+// satisfy this structurally — `result.rows` is the only field the helpers read.
+// Widening the helpers to this interface (instead of `Pool | PoolClient`) is what
+// lets the embedded PGlite backend reuse the exact same domain helpers and
+// transaction plumbing without touching the real-Postgres code path.
+export interface QueryableClient {
+  query<T extends QueryResultRow = QueryResultRow>(
+    sql: string,
+    params?: unknown[]
+  ): Promise<{ rows: T[] }>;
+}
+
+export interface Migration {
+  id: string;
+  sql: string;
+}
+
+export function migrationsDir(): string {
+  // Explicit override — the bundled daemon ships the .sql files as a sidecar and points here, since
+  // the source-relative candidates below don't resolve once the package is esbuild-bundled.
+  const fromEnv = process.env.GROWTH_OS_MIGRATIONS_DIR?.trim();
+  if (fromEnv) return fromEnv;
+  const moduleDir = dirname(fileURLToPath(import.meta.url));
+  const candidates = [
+    join(moduleDir, "migrations"), // bundled: migrations sit NEXT TO the daemon bundle (daemon.mjs)
+    join(moduleDir, "..", "migrations"),
+    join(moduleDir, "..", "..", "migrations")
+  ];
+  return candidates.find((candidate) => existsSync(candidate)) ?? candidates[0];
+}
+
+export function loadMigrations(directory = migrationsDir()): Migration[] {
+  return readdirSync(directory)
+    .filter((file) => file.endsWith(".sql"))
+    .sort()
+    .map((file) => ({
+      id: file,
+      sql: readFileSync(join(directory, file), "utf8")
+    }));
+}
+
+// Stable advisory lock key for the migration critical section.
+//
+// pg_advisory_lock keys are SESSION-scoped bigints (or two int4s). We use the
+// two-int4 form: pg_advisory_lock(classid, objid). Both values are derived from
+// a deterministic hash of the constant string "growth-os:schema-migrations" so
+// the key is stable across processes and machines.
+//
+// SHA-256("growth-os:schema-migrations")[0..3] as int32BE  => 1441053400  (classid)
+// SHA-256("growth-os:schema-migrations")[4..7] as int32BE  => 1260977462  (objid)
+//
+// Verification (Node REPL):
+//   const { createHash } = require("node:crypto");
+//   const h = createHash("sha256").update("growth-os:schema-migrations").digest();
+//   console.log(h.readInt32BE(0), h.readInt32BE(4));
+//   => 1441053400 1260977462
+//
+// IMPORTANT: the lock is SESSION-scoped and must be acquired and released on the
+// SAME pg.Client connection. A pool client would not work (the server can return
+// a different backend for lock vs. unlock). We always use a dedicated pg.Client.
+const MIGRATION_LOCK_CLASSID = 1441053400;
+const MIGRATION_LOCK_OBJID = 1260977462;
+
+export async function runMigrations(databaseUrl: string): Promise<string[]> {
+  // Desktop path: a `pglite://`/`file:`/bare-path URL selects the embedded
+  // single-connection WASM Postgres. The migration loop differs only in adapter
+  // mechanics (no pg.Client, `rows.length` instead of `rowCount`, `exec` for the
+  // multi-statement SQL bodies) — same schema_migrations table, same per-file
+  // transactional apply, same idempotency.
+  //
+  // PGlite is single-connection and runs serially in-process; no cross-process
+  // concurrency is possible, so no advisory lock is needed on this path.
+  if (isPgliteDatabaseUrl(databaseUrl)) {
+    return runPgliteMigrations(databaseUrl, loadMigrations());
+  }
+
+  // Postgres path: two daemons booting against the same DB must not migrate
+  // concurrently. We hold a SESSION-scoped pg_advisory_lock for the duration of
+  // the apply loop. The lock + unlock MUST run on the same pg.Client connection
+  // (advisory locks are session-scoped; a pool may route requests to different
+  // backends). We use a dedicated pg.Client here (not a pool).
+  const client = new pg.Client({ connectionString: databaseUrl });
+  await client.connect();
+  try {
+    // D1: bound the advisory lock wait to 60 s. pg_advisory_lock blocks
+    // indefinitely by default — a stuck holder would hang every migrator
+    // (including a Meta deploy). SET lock_timeout makes Postgres throw
+    // "lock timeout exceeded" (55P03) if the lock is not free within 60 s.
+    await client.query("set lock_timeout = '60s'");
+    // Acquire the session-scoped advisory lock. pg_advisory_lock BLOCKS (waits)
+    // until the lock is free — so if another daemon is mid-migration we queue
+    // behind it rather than racing. Once we acquire, the other daemon has finished
+    // and committed its schema_migrations rows.
+    try {
+      await client.query(
+        "select pg_advisory_lock($1::int, $2::int)",
+        [MIGRATION_LOCK_CLASSID, MIGRATION_LOCK_OBJID]
+      );
+    } catch (lockErr) {
+      const pgCode = (lockErr as { code?: string }).code;
+      if (pgCode === "55P03") {
+        throw new Error(
+          "another migrator is holding the schema-migration advisory lock for >60s; check for a stuck deploy"
+        );
+      }
+      throw lockErr;
+    }
+    let migrationError: unknown = undefined;
+    try {
+      await client.query(`
+        create table if not exists schema_migrations (
+          id text primary key,
+          applied_at timestamptz not null default now()
+        )
+      `);
+      const applied: string[] = [];
+      for (const migration of loadMigrations()) {
+        // Re-read the ledger inside the lock so we don't double-apply a migration
+        // that another daemon just committed while we were waiting for the lock.
+        const existing = await client.query(
+          "select id from schema_migrations where id = $1",
+          [migration.id]
+        );
+        if (existing.rowCount) {
+          continue;
+        }
+        await client.query("begin");
+        try {
+          await client.query(migration.sql);
+          await client.query("insert into schema_migrations (id) values ($1)", [
+            migration.id
+          ]);
+          await client.query("commit");
+          applied.push(migration.id);
+        } catch (error) {
+          await client.query("rollback");
+          throw error;
+        }
+      }
+      return applied;
+    } catch (err) {
+      // D2: capture the original migration error so cleanup cannot mask it.
+      migrationError = err;
+      throw err;
+    } finally {
+      // D2: release the advisory lock; if unlock fails, only LOG — never mask
+      // the original migration error with a cleanup failure.
+      try {
+        await client.query(
+          "select pg_advisory_unlock($1::int, $2::int)",
+          [MIGRATION_LOCK_CLASSID, MIGRATION_LOCK_OBJID]
+        );
+      } catch (unlockErr) {
+        if (migrationError !== undefined) {
+          // A migration error is already propagating — log the unlock failure
+          // but let the original error win.
+          console.warn("[runMigrations] pg_advisory_unlock failed during error cleanup:", unlockErr);
+        } else {
+          throw unlockErr;
+        }
+      }
+    }
+  } finally {
+    // D2: client.end() must not mask a migration error either.
+    try {
+      await client.end();
+    } catch (endErr) {
+      // Only log if a real error is already propagating; otherwise rethrow.
+      // We cannot distinguish here whether we are in the error path, so we
+      // log and swallow — a connection-close failure is not actionable.
+      console.warn("[runMigrations] client.end() failed:", endErr);
+    }
+  }
+}
+
+export type FirstPhaseProvider =
+  | "google_analytics_4"
+  | "posthog"
+  | "stripe"
+  | "x"
+  | "shopify"
+  | "meta_ads";
+export type JobType =
+  | "source_sync"
+  | "source_backfill"
+  | "materialized_view_refresh"
+  | "saved_report_run"
+  | "saved_report_export";
+
+export interface InfiniteOsDb {
+  query<T extends QueryResultRow = QueryResultRow>(
+    sql: string,
+    params?: unknown[]
+  ): Promise<T[]>;
+  one<T extends QueryResultRow = QueryResultRow>(
+    sql: string,
+    params?: unknown[]
+  ): Promise<T | null>;
+  close(): Promise<void>;
+  ensureWorkspace(workspaceId: string, name?: string): Promise<void>;
+  ensureFirstPhaseDatasets(workspaceId: string): Promise<void>;
+  connectSource(input: ConnectSourceInput): Promise<Record<string, unknown>>;
+  updateSourceStatus(
+    sourceId: string,
+    status: string,
+    lastSyncedAt?: string
+  ): Promise<void>;
+  createJob(input: CreateJobInput): Promise<Record<string, unknown>>;
+  claimNextJob(
+    workerId: string,
+    leaseSeconds?: number
+  ): Promise<Record<string, unknown> | null>;
+  completeJob(
+    jobId: string,
+    status: "succeeded" | "failed",
+    error?: string
+  ): Promise<void>;
+  withTransaction<T>(fn: (tx: InfiniteOsDb) => Promise<T>): Promise<T>;
+}
+
+export interface ConnectSourceInput {
+  workspaceId: string;
+  provider: FirstPhaseProvider;
+  connectionName: string;
+  accountExternalId?: string;
+  credentialKind?: string;
+  encryptedPayload?: string;
+  // When set, the credential row is linked to a live oauth_tokens row instead of storing the
+  // OAuth token inside encrypted_payload (which only holds non-secret metadata in that case).
+  oauthTokenId?: string;
+  actorType?: string;
+  // Non-secret operational metadata (migration 0039) the engine queries WITHOUT decrypting
+  // encrypted_payload. All optional → existing callers compile unchanged.
+  selectedPixelId?: string; // Meta CAPI pixel selection (NULL until chosen)
+  // system-user token vs OAuth user token. Nullable end-to-end (P0-B2): omitting it on a
+  // re-connect must NOT flip a prior `true` back to false — the conflict clause coalesces this
+  // raw value onto the existing row, and a genuinely-new row defaults to false (INSERT coalesce).
+  isSystemUser?: boolean | null;
+  // Token expiry reuses the existing expires_at column (migration 0021); NULL for long-lived
+  // system-user tokens, populated for OAuth user tokens.
+  expiresAt?: string;
+  lastDispatchAt?: string; // last CAPI/MP dispatch attempt (Phase 3 telemetry)
+  lastDispatchStatus?: string; // 'succeeded' | 'failed' | NULL
+  lastError?: string; // last write/dispatch error message (no secrets)
+}
+
+// Shape of a `connection_credentials` row as the engine READS it (raw DB column names).
+// Surfaces the non-secret operational metadata added in migration 0039 — the columns the
+// engine queries WITHOUT decrypting `encrypted_payload` (pixel selection, system-user vs
+// OAuth-user distinction, dispatch telemetry). Secrets stay inside `encrypted_payload`.
+// Token expiry reuses the existing `expires_at` column (migration 0021); the provider and
+// `account_external_id` are NOT here — they resolve via `source_id → sources`.
+// (Writing these columns is P0-B2's `connectSource` change.)
+export interface ConnectionCredentialRow {
+  id: string;
+  workspace_id: string;
+  source_id: string;
+  credential_kind: string;
+  encrypted_payload: string;
+  oauth_token_id: string | null;
+  // Reused token-expiry column (migration 0021) — NULL for long-lived system-user tokens.
+  expires_at: string | null;
+  last_rotated_at: string | null;
+  // Migration 0039 operational metadata (non-secret):
+  selected_pixel_id: string | null;
+  is_system_user: boolean;
+  last_dispatch_at: string | null;
+  last_dispatch_status: string | null;
+  last_error: string | null;
+  created_at: string;
+  updated_at: string;
+  revoked_at: string | null;
+}
+
+export interface CreateJobInput {
+  workspaceId: string;
+  jobType: JobType;
+  payload: Record<string, unknown>;
+}
+
+export interface ProjectRow {
+  id: string;
+  name: string;
+  createdAt: string;
+  /** Cloud account (Supabase user id) that owns this workspace, or null if unclaimed. Stamped via
+   *  claimWorkspace() from the desktop after it verifies the cloud session. Cloud-agnostic: a string,
+   *  not validated engine-side. */
+  ownerId: string | null;
+}
+
+export interface WorkspaceSiteUpsertInput {
+  workspaceId: string;
+  url?: string;
+  repoPath?: string;
+  appDir?: string;
+  framework?: string;
+  businessType?: string;
+}
+
+export interface SetupResolvedArtifacts {
+  ga4: {
+    measurementId: string | null;
+    propertyId: string | null;
+  };
+  posthog: {
+    projectId: string | null;
+    projectKey: string | null;
+    apiHost: string | null;
+  };
+  x: {
+    pixelId: string | null;
+    eventTagIds: Record<string, string> | null;
+  };
+}
+
+export async function createProject(
+  db: Pick<InfiniteOsDb, "one">,
+  name: string
+): Promise<ProjectRow> {
+  const id = `proj_${randomBytes(8).toString("hex")}`;
+  // Plain INSERT — the primary key is the existence check. NEVER `on conflict`
+  // (that is ensureWorkspace's upsert and would clobber an existing project's name).
+  const row = await db.one<ProjectRow>(
+    `
+      insert into workspaces (id, name)
+      values ($1, $2)
+      returning id, name, created_at as "createdAt", owner_id as "ownerId"
+    `,
+    [id, name]
+  );
+  if (!row) {
+    throw new Error(`createProject: insert returned no row for ${id}`);
+  }
+  return row;
+}
+
+/** createProjectWithId: refused (the id is already taken) or created. */
+export type CreateProjectWithIdResult =
+  | { status: "created"; project: ProjectRow }
+  | { status: "id_conflict" };
+
+/**
+ * Create a project under a CALLER-SUPPLIED id instead of a minted `proj_*` one. The id is opaque
+ * text to the engine (callers may align it with an external system's identifier; the engine neither
+ * knows nor cares which). Collision-refusing, atomically: `on conflict (id) do nothing` inserts
+ * nothing and returns no row when the id exists, so a taken id can never be renamed or reclaimed —
+ * this is NOT ensureWorkspace's `do update` upsert, which the createProject comment above warns
+ * against. The caller validates the id's shape; this function only owns atomicity.
+ */
+export async function createProjectWithId(
+  db: Pick<InfiniteOsDb, "one">,
+  id: string,
+  name: string
+): Promise<CreateProjectWithIdResult> {
+  const row = await db.one<ProjectRow>(
+    `
+      insert into workspaces (id, name)
+      values ($1, $2)
+      on conflict (id) do nothing
+      returning id, name, created_at as "createdAt", owner_id as "ownerId"
+    `,
+    [id, name]
+  );
+  if (!row) return { status: "id_conflict" };
+  return { status: "created", project: row };
+}
+
+export async function listProjects(db: Pick<InfiniteOsDb, "query">): Promise<ProjectRow[]> {
+  return db.query<ProjectRow>(
+    `select id, name, created_at as "createdAt", owner_id as "ownerId" from workspaces order by created_at`
+  );
+}
+
+export async function findProject(
+  db: Pick<InfiniteOsDb, "one">,
+  idOrName: string
+): Promise<ProjectRow | null> {
+  return db.one<ProjectRow>(
+    `
+      select id, name, created_at as "createdAt", owner_id as "ownerId"
+      from workspaces
+      where id = $1 or name = $2
+      order by created_at asc
+      limit 1
+    `,
+    [idOrName, idOrName]
+  );
+}
+
+/** Result of claimWorkspace: claimed (now/already owned by this user), or a refusal reason. */
+export type ClaimWorkspaceResult =
+  | { status: "claimed"; project: ProjectRow }
+  | { status: "owned_by_other" }
+  | { status: "not_found" };
+
+/**
+ * Bind a local workspace to a cloud account (Supabase user id), solo single-device v1. The desktop
+ * verifies the cloud session (GET /api/auth/me) and passes the verified userId here via
+ * POST /projects/:id/claim — the open engine RECORDS ownership, it does not verify a cloud JWT.
+ *
+ * Atomic + anti-theft: the UPDATE only fires when the workspace is unowned OR already this user's, so
+ * a workspace owned by ANOTHER account updates 0 rows and is refused (`owned_by_other`) — a second
+ * account on the same machine can never claim the first account's projects. Idempotent for the owner.
+ */
+export async function claimWorkspace(
+  db: Pick<InfiniteOsDb, "one">,
+  workspaceId: string,
+  userId: string
+): Promise<ClaimWorkspaceResult> {
+  const claimed = await db.one<ProjectRow>(
+    `
+      update workspaces set owner_id = $2
+      where id = $1 and (owner_id is null or owner_id = $2)
+      returning id, name, created_at as "createdAt", owner_id as "ownerId"
+    `,
+    [workspaceId, userId]
+  );
+  if (claimed) {
+    return { status: "claimed", project: claimed };
+  }
+  // 0 rows updated → the workspace is missing, or owned by a different account. Distinguish so the
+  // caller can return 404 vs 409.
+  const existing = await db.one<ProjectRow>(
+    `select id, name, created_at as "createdAt", owner_id as "ownerId" from workspaces where id = $1`,
+    [workspaceId]
+  );
+  return existing ? { status: "owned_by_other" } : { status: "not_found" };
+}
+
+export interface DeleteProjectResult {
+  deleted: boolean;
+}
+
+// Workspace-scoped tables (every table carrying a `workspace_id` FK to
+// `workspaces`), listed strictly leaves -> roots so each delete runs before any
+// table it still references. Ordering is the load-bearing invariant: most FKs
+// default to ON DELETE RESTRICT, so a delete is rejected while any child row
+// survives. Encrypted credential tables (`connection_credentials`,
+// `oauth_tokens`, `oauth_apps`) are an explicit, auditable data-safety event —
+// see AGENTS.md. Keep this list in sync as new `workspace_id` tables land; the
+// live-Postgres integration test asserts zero residual rows and catches misses.
+//
+// A handful of child tables carry no `workspace_id` of their own and are deleted
+// via a subquery scoped to the workspace (see DELETE_PROJECT_VIA_PARENT below)
+// BEFORE the workspace-scoped parents they reference.
+const DELETE_PROJECT_WORKSPACE_TABLES: readonly string[] = [
+  // --- provider truth/fact leaves (reference sources + raw_records) ---
+  "ga4_metadata_catalog",
+  "ga4_page_report_fact",
+  "ga4_report_snapshot_fact",
+  "meta_ads_campaign_conversions_daily",
+  "meta_ads_campaign_daily",
+  "meta_ads_campaign_revenue_map",
+  "meta_ads_campaigns",
+  // 0063 day-grain rollups (reference sources only — not truth, not each other).
+  "posthog_event_daily",
+  "posthog_site_daily",
+  // 0064 prune watermark — also references sources only. Omitting it is not a leftover-rows bug: the
+  // FK has no ON DELETE, so deleting `sources` while a watermark row survives aborts the WHOLE
+  // deleteProject transaction. Every workspace whose PostHog raw has ever been pruned would be
+  // undeletable.
+  "posthog_prune_watermarks",
+  "posthog_event_truth",
+  "posthog_person_current",
+  "posthog_session_fact",
+  "posthog_person_distinct_ids",
+  "record_lineage",
+  "shopify_order_lines",
+  "shopify_orders",
+  "shopify_products",
+  "stripe_customer_mrr_movements",
+  "stripe_customer_mrr_states",
+  "stripe_mrr_movement_coverage",
+  "stripe_trial_spells",
+  "stripe_subscription_lifecycle_events",
+  "stripe_trial_history_segments",
+  "stripe_trial_history_coverage",
+  "stripe_subscription_discounts",
+  "stripe_subscription_items",
+  "stripe_customers",
+  "stripe_invoice_lines",
+  "stripe_invoices",
+  "stripe_invoice_sync_state",
+  "stripe_prices",
+  "stripe_products",
+  "stripe_subscriptions",
+  "x_post",
+  "x_post_metric_snapshot",
+  "x_profile_snapshot",
+  // --- sync error rows reference sync_runs/sync_batches ---
+  "sync_errors",
+  // --- raw_records references sync_batches (and is referenced by truth/fact above) ---
+  "raw_records",
+  // --- setup_runs references workspace_sites (set null) ---
+  "setup_runs",
+  // --- sync_batches references sync_runs ---
+  "sync_batches",
+  // --- remaining children of sources ---
+  "connection_credentials",
+  "integration_audit_log",
+  "meta_write_dedup",
+  "source_scopes",
+  "sync_cursors",
+  "sync_runs",
+  "sync_schedules",
+  "workspace_sites",
+  // --- journey facts reference journey.actors / journey.entities ---
+  'journey.behavior_facts',
+  'journey.touchpoint_facts',
+  'journey.actor_identities',
+  'journey.billing_facts',
+  'journey.conversion_facts',
+  'journey.lifecycle_states',
+  'journey.ltv_windows',
+  // --- saved_report_exports references saved_reports + job_runs ---
+  "saved_report_exports",
+  // --- chat memory references chat_sessions (set null) ---
+  "chat_memory_facts",
+  // --- sources (referenced by all the provider tables above) ---
+  "sources",
+  // --- roots: tables that reference only workspaces (or each other above) ---
+  "chat_sessions",
+  "datasets",
+  "job_runs",
+  'journey.actors',
+  'journey.entities',
+  'journey.evidence_refs',
+  'metadata.context_cards',
+  'metadata.journey_template_suggestions',
+  "oauth_apps",
+  "oauth_tokens",
+  "saved_reports",
+  "tool_execution_log",
+  "workspace_preferences"
+];
+
+// Child tables with no `workspace_id` column. Each is deleted via a subquery
+// scoped to the workspace through its parent, ahead of that parent's own delete
+// in DELETE_PROJECT_WORKSPACE_TABLES. `chat_messages`/`chat_action_calls`/
+// `chat_session_summaries` cascade from `chat_sessions`, but we delete them
+// explicitly for an auditable, deterministic order.
+const DELETE_PROJECT_VIA_PARENT: ReadonlyArray<{ sql: string }> = [
+  {
+    sql: "delete from sync_batch_records where sync_batch_id in (select id from sync_batches where workspace_id = $1)"
+  },
+  {
+    sql: "delete from chat_action_calls where session_id in (select id from chat_sessions where workspace_id = $1)"
+  },
+  {
+    sql: "delete from chat_session_summaries where session_id in (select id from chat_sessions where workspace_id = $1)"
+  },
+  {
+    sql: "delete from chat_messages where session_id in (select id from chat_sessions where workspace_id = $1)"
+  },
+  {
+    sql: "delete from job_locks where job_run_id in (select id from job_runs where workspace_id = $1)"
+  }
+];
+
+// Explicit, transactional project (workspace) delete. Removes every child row in
+// dependency order (leaves -> roots) and finally the `workspaces` row, all inside
+// a single transaction so a partial failure rolls back cleanly. Returns
+// `{ deleted: false }` (no throw) when no workspace matches `id`.
+export async function deleteProject(
+  db: Pick<InfiniteOsDb, "one" | "withTransaction">,
+  id: string
+): Promise<DeleteProjectResult> {
+  return db.withTransaction(async (tx) => {
+    const existing = await tx.one<{ id: string }>(
+      "select id from workspaces where id = $1",
+      [id]
+    );
+    if (!existing) {
+      return { deleted: false };
+    }
+    // 1. No-`workspace_id` child rows, scoped through their parent.
+    for (const { sql } of DELETE_PROJECT_VIA_PARENT) {
+      await tx.query(sql, [id]);
+    }
+    // 2. Workspace-scoped tables, leaves -> roots.
+    for (const table of DELETE_PROJECT_WORKSPACE_TABLES) {
+      await tx.query(`delete from ${table} where workspace_id = $1`, [id]);
+    }
+    // 3. Finally the workspace row itself.
+    await tx.query("delete from workspaces where id = $1", [id]);
+    return { deleted: true };
+  });
+}
+
+type JsonRecord = Record<string, unknown>;
+type SetupProviderId = "ga4" | "posthog" | "x";
+
+function isRecord(value: unknown): value is JsonRecord {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function mergeJsonRecords(base: JsonRecord, patch: JsonRecord): JsonRecord {
+  const merged: JsonRecord = { ...base };
+  for (const [key, nextValue] of Object.entries(patch)) {
+    if (nextValue === undefined) {
+      continue;
+    }
+    const currentValue = merged[key];
+    if (isRecord(currentValue) && isRecord(nextValue)) {
+      merged[key] = mergeJsonRecords(currentValue, nextValue);
+      continue;
+    }
+    merged[key] = nextValue;
+  }
+  return merged;
+}
+
+function asString(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value : null;
+}
+
+function asStringRecord(value: unknown): Record<string, string> | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const entries = Object.entries(value).filter((entry): entry is [string, string] => {
+    return typeof entry[1] === "string" && entry[1].trim().length > 0;
+  });
+  return entries.length ? Object.fromEntries(entries) : null;
+}
+
+function providerArtifactsFromPhaseState(
+  phaseState: JsonRecord | null | undefined,
+  provider: SetupProviderId
+): JsonRecord {
+  if (!isRecord(phaseState)) {
+    return {};
+  }
+  const providers = isRecord(phaseState.providers) ? phaseState.providers : {};
+  const providerState = isRecord(providers[provider]) ? providers[provider] : {};
+  return isRecord(providerState.publicArtifacts) ? providerState.publicArtifacts : {};
+}
+
+function applyLegacyResolvedIds(target: SetupResolvedArtifacts, phaseState: JsonRecord | null | undefined): void {
+  if (!isRecord(phaseState) || !isRecord(phaseState.ids)) {
+    return;
+  }
+  const ids = phaseState.ids;
+  target.ga4.measurementId ??= asString(ids.ga4MeasurementId);
+  target.posthog.projectKey ??= asString(ids.posthogProjectKey);
+  target.posthog.apiHost ??= asString(ids.posthogHost);
+  target.x.pixelId ??= asString(ids.xPixelId);
+}
+
+export async function upsertWorkspaceSite(
+  db: Pick<InfiniteOsDb, "one">,
+  input: WorkspaceSiteUpsertInput
+): Promise<{ id: string } | null> {
+  const existing = await db.one<{ id: string }>(
+    `
+      select id
+      from workspace_sites
+      where workspace_id = $1 and is_primary = true
+      limit 1
+    `,
+    [input.workspaceId]
+  );
+  if (existing) {
+    return db.one<{ id: string }>(
+      `
+        update workspace_sites
+        set
+          url = coalesce($2, url),
+          repo_path = coalesce($3, repo_path),
+          app_dir = coalesce($4, app_dir),
+          framework = coalesce($5, framework),
+          business_type = coalesce($6, business_type),
+          updated_at = now()
+        where id = $1
+        returning id
+      `,
+      [
+        existing.id,
+        input.url ?? null,
+        input.repoPath ?? null,
+        input.appDir ?? null,
+        input.framework ?? null,
+        input.businessType ?? null
+      ]
+    );
+  }
+  if (!input.url) {
+    return null;
+  }
+  const id = `site_${randomUUID()}`;
+  return db.one<{ id: string }>(
+    `
+      insert into workspace_sites (
+        id, workspace_id, url, repo_path, app_dir, framework, business_type, is_primary
+      )
+      values ($1, $2, $3, $4, $5, $6, $7, true)
+      returning id
+    `,
+    [
+      id,
+      input.workspaceId,
+      input.url,
+      input.repoPath ?? null,
+      input.appDir ?? null,
+      input.framework ?? null,
+      input.businessType ?? null
+    ]
+  );
+}
+
+export async function mergeSetupRunPhaseState(
+  db: Pick<InfiniteOsDb, "one" | "query">,
+  runId: string,
+  patch: JsonRecord
+): Promise<JsonRecord> {
+  const existing = await db.one<{ phase_state: JsonRecord | null }>(
+    "select phase_state from setup_runs where id = $1",
+    [runId]
+  );
+  const currentPhaseState = isRecord(existing?.phase_state) ? existing.phase_state : {};
+  const nextPhaseState = mergeJsonRecords(currentPhaseState, patch);
+  await db.query(
+    "update setup_runs set phase_state = $2::jsonb, updated_at = now() where id = $1",
+    [runId, nextPhaseState]
+  );
+  return nextPhaseState;
+}
+
+export async function mergeSetupProviderState(
+  db: Pick<InfiniteOsDb, "one" | "query">,
+  runId: string,
+  provider: SetupProviderId,
+  state: JsonRecord
+): Promise<void> {
+  await mergeSetupRunPhaseState(db, runId, {
+    providers: {
+      [provider]: state
+    }
+  });
+}
+
+export async function readLatestSetupPublicArtifacts(
+  db: Pick<InfiniteOsDb, "query">,
+  workspaceId: string
+): Promise<SetupResolvedArtifacts> {
+  const rows = await db.query<{ phase_state: JsonRecord | null }>(
+    `
+      select phase_state
+      from setup_runs
+      where workspace_id = $1
+      order by updated_at desc, created_at desc
+    `,
+    [workspaceId]
+  );
+  const resolved: SetupResolvedArtifacts = {
+    ga4: { measurementId: null, propertyId: null },
+    posthog: { projectId: null, projectKey: null, apiHost: null },
+    x: { pixelId: null, eventTagIds: null }
+  };
+
+  for (const row of rows) {
+    const phaseState = isRecord(row.phase_state) ? row.phase_state : {};
+    const ga4Artifacts = providerArtifactsFromPhaseState(phaseState, "ga4");
+    resolved.ga4.measurementId ??= asString(ga4Artifacts.measurementId);
+    resolved.ga4.propertyId ??= asString(ga4Artifacts.propertyId);
+
+    const posthogArtifacts = providerArtifactsFromPhaseState(phaseState, "posthog");
+    resolved.posthog.projectId ??= asString(posthogArtifacts.projectId);
+    resolved.posthog.projectKey ??= asString(posthogArtifacts.projectKey);
+    resolved.posthog.apiHost ??= asString(posthogArtifacts.apiHost);
+
+    const xArtifacts = providerArtifactsFromPhaseState(phaseState, "x");
+    resolved.x.pixelId ??= asString(xArtifacts.pixelId);
+    resolved.x.eventTagIds ??= asStringRecord(xArtifacts.eventTagIds);
+
+    applyLegacyResolvedIds(resolved, phaseState);
+  }
+
+  return resolved;
+}
+
+export function createInfiniteOsDb(databaseUrl: string): InfiniteOsDb {
+  // Desktop path: embedded in-process PGlite. Creating the WASM instance is async,
+  // but every existing caller uses `createInfiniteOsDb` synchronously (`const db =
+  // createInfiniteOsDb(url)` then `db.query(...)`), so the signature MUST stay
+  // synchronous to keep the real-Postgres path byte-identical. `createPgliteDb`
+  // therefore returns a lazy `InfiniteOsDb` facade that boots PGlite on first use.
+  // The PGlite instance is itself a `QueryableClient`, so once booted it flows
+  // through the exact same `wrapPool` plumbing as a real Postgres pool (the
+  // single-client begin/commit/rollback branch, since PGlite has no `.connect`).
+  if (isPgliteDatabaseUrl(databaseUrl)) {
+    return createPgliteDb(databaseUrl, wrapPool);
+  }
+  const pool = new pg.Pool({ connectionString: databaseUrl });
+  return wrapPool(pool, () => pool.end());
+}
+
+function wrapPool(
+  client: QueryableClient,
+  closeFn: () => Promise<void>
+): InfiniteOsDb {
+  return {
+    async query<T extends QueryResultRow = QueryResultRow>(
+      sql: string,
+      params: unknown[] = []
+    ) {
+      const result = await client.query<T>(sql, params);
+      return [...result.rows];
+    },
+    async one<T extends QueryResultRow = QueryResultRow>(
+      sql: string,
+      params: unknown[] = []
+    ) {
+      const result = await client.query<T>(sql, params);
+      return (result.rows[0] as T | undefined) ?? null;
+    },
+    close: closeFn,
+    ensureWorkspace: (workspaceId, name) =>
+      ensureWorkspace(client, workspaceId, name),
+    ensureFirstPhaseDatasets: (workspaceId) =>
+      ensureFirstPhaseDatasets(client, workspaceId),
+    connectSource: (input) => connectSource(client, input),
+    updateSourceStatus: (sourceId, status, lastSyncedAt) =>
+      updateSourceStatus(client, sourceId, status, lastSyncedAt),
+    createJob: (input) => createJob(client, input),
+    claimNextJob: (workerId, leaseSeconds) =>
+      claimNextJob(client, workerId, leaseSeconds),
+    completeJob: (jobId, status, error) =>
+      completeJob(client, jobId, status, error),
+    async withTransaction<T>(fn: (tx: InfiniteOsDb) => Promise<T>): Promise<T> {
+      if (typeof (client as Pool).connect !== "function") {
+        await client.query("begin");
+        try {
+          const value = await fn(wrapPool(client, async () => undefined));
+          await client.query("commit");
+          return value;
+        } catch (error) {
+          await client.query("rollback");
+          throw error;
+        }
+      }
+      const txClient = await (client as Pool).connect();
+      try {
+        await txClient.query("begin");
+        const value = await fn(
+          wrapPool(txClient as PoolClient, async () => undefined)
+        );
+        await txClient.query("commit");
+        return value;
+      } catch (error) {
+        await txClient.query("rollback");
+        throw error;
+      } finally {
+        txClient.release();
+      }
+    }
+  };
+}
+
+async function ensureWorkspace(
+  client: QueryableClient,
+  workspaceId: string,
+  name = "Default workspace"
+): Promise<void> {
+  // Create-if-absent ONLY. `do nothing` (not `do update set name`) so that an
+  // idempotent ensure (e.g. connectSource) never clobbers a project's user-set
+  // name back to the default. Renaming is an explicit operation, not a side
+  // effect of touching the workspace.
+  await client.query(
+    `
+      insert into workspaces (id, name)
+      values ($1, $2)
+      on conflict (id) do nothing
+    `,
+    [workspaceId, name]
+  );
+}
+
+async function ensureFirstPhaseDatasets(
+  client: QueryableClient,
+  workspaceId: string
+): Promise<void> {
+  await client.query(
+    `
+      insert into datasets (id, workspace_id, key, label)
+      values
+        ($1, $3, 'web', 'Web analytics'),
+        ($2, $3, 'billing', 'Billing')
+      on conflict (workspace_id, key) do update set label = excluded.label
+    `,
+    [`${workspaceId}:web`, `${workspaceId}:billing`, workspaceId]
+  );
+}
+
+async function connectSource(
+  client: QueryableClient,
+  input: ConnectSourceInput
+): Promise<Record<string, unknown>> {
+  assertFirstPhaseProvider(input.provider);
+  await ensureWorkspace(client, input.workspaceId);
+  await ensureFirstPhaseDatasets(client, input.workspaceId);
+  const datasetKey = input.provider === "stripe" ? "billing" : "web";
+  const dataset = await client.query<{ id: string }>(
+    "select id from datasets where workspace_id = $1 and key = $2",
+    [input.workspaceId, datasetKey]
+  );
+  const sourceId = `src_${randomUUID()}`;
+  const accountExternalId = input.accountExternalId ?? input.connectionName;
+  const source = await client.query(
+    `
+      insert into sources (
+        id, workspace_id, dataset_id, provider, connection_name, account_external_id,
+        status, sync_mode, connected_at
+      )
+      values ($1, $2, $3, $4, $5, $6, 'connected', 'incremental', now())
+      on conflict (workspace_id, provider, account_external_id)
+      do update set
+        connection_name = excluded.connection_name,
+        status = 'connected',
+        connected_at = now(),
+        consecutive_sync_failures = 0,
+        last_counted_sync_failure_at = null
+      returning id, workspace_id, provider, connection_name, account_external_id, status
+    `,
+    [
+      sourceId,
+      input.workspaceId,
+      dataset.rows[0]?.id,
+      input.provider,
+      input.connectionName,
+      accountExternalId
+    ]
+  );
+  const row = source.rows[0];
+  await client.query(
+    `
+      insert into connection_credentials (
+        id, workspace_id, source_id, credential_kind, encrypted_payload, oauth_token_id,
+        selected_pixel_id, is_system_user, expires_at, last_dispatch_at,
+        last_dispatch_status, last_error
+      )
+      values (
+        $1, $2, $3, $4, $5, $6,
+        $7, coalesce($8, false), $9::timestamptz, $10::timestamptz,
+        $11, $12
+      )
+      -- Restate the partial-index predicate (migration 0039's
+      -- connection_credentials_source_kind_uq is partial on revoked_at is null) so Postgres
+      -- binds this ON CONFLICT to it. A re-connect of the same live (source_id, credential_kind)
+      -- UPDATEs the existing row rather than orphaning a duplicate.
+      --
+      -- P0-B2 COALESCE: a re-connect that OMITS operational metadata must PRESERVE the prior
+      -- value, not null it out -- otherwise rotating a token would silently wipe the pixel
+      -- selection / dispatch telemetry. So every metadata column coalesces the NEW value onto
+      -- the EXISTING row. For is_system_user (NOT NULL default false) excluded.is_system_user
+      -- is post-coalesce (never null), so it cannot distinguish omitted from explicit-false;
+      -- we coalesce the RAW nullable param ($8) instead, so an omitting re-connect keeps a prior
+      -- true. encrypted_payload / oauth_token_id / expires_at / updated_at are direct excluded --
+      -- those SHOULD update on every re-connect (the token rotated; a NULL expiry is meaningful).
+      on conflict (source_id, credential_kind) where revoked_at is null do update set
+        encrypted_payload = excluded.encrypted_payload,
+        oauth_token_id = excluded.oauth_token_id,
+        selected_pixel_id = coalesce(excluded.selected_pixel_id, connection_credentials.selected_pixel_id),
+        is_system_user = coalesce($8, connection_credentials.is_system_user),
+        expires_at = excluded.expires_at,
+        last_dispatch_at = coalesce(excluded.last_dispatch_at, connection_credentials.last_dispatch_at),
+        last_dispatch_status = coalesce(excluded.last_dispatch_status, connection_credentials.last_dispatch_status),
+        last_error = coalesce(excluded.last_error, connection_credentials.last_error),
+        updated_at = now()
+    `,
+    [
+      `cred_${randomUUID()}`,
+      input.workspaceId,
+      row.id,
+      input.credentialKind ?? "fixture",
+      input.encryptedPayload ?? "fixture-encrypted",
+      input.oauthTokenId ?? null,
+      input.selectedPixelId ?? null,
+      // $8 is the RAW nullable is_system_user. The INSERT path coalesces it to `false` for a
+      // genuinely-new row; the conflict path coalesces it onto the EXISTING value so an
+      // omitting re-connect (null) preserves a prior `true` instead of flipping it to false.
+      input.isSystemUser ?? null,
+      input.expiresAt ?? null,
+      input.lastDispatchAt ?? null,
+      input.lastDispatchStatus ?? null,
+      input.lastError ?? null
+    ]
+  );
+  await client.query(
+    `
+      insert into sync_schedules (
+        id, workspace_id, source_id, schedule_kind, interval_minutes, sync_mode,
+        refresh_window_days, stale_after_minutes, status, next_run_at
+      )
+      values ($1, $2, $3, 'manual_only', null, 'incremental', null, 1440, 'active', null)
+      on conflict (source_id) do nothing
+    `,
+    [`sched_${randomUUID()}`, input.workspaceId, row.id]
+  );
+  await client.query(
+    `
+      insert into integration_audit_log (id, workspace_id, source_id, actor_type, action, status)
+      values ($1, $2, $3, $4, 'connect_source', 'succeeded')
+    `,
+    [
+      `audit_${randomUUID()}`,
+      input.workspaceId,
+      row.id,
+      input.actorType ?? "operator"
+    ]
+  );
+  return row;
+}
+
+async function updateSourceStatus(
+  client: QueryableClient,
+  sourceId: string,
+  status: string,
+  lastSyncedAt?: string
+): Promise<void> {
+  // `connected` means healthy, so it always zeroes the consecutive-transient-sync-failure
+  // streak (the counter that escalates a repeatedly-failing source to `error` — see
+  // recordSyncFailure in @infinite-os/connectors and migration 0044) AND nulls the streak's
+  // time gate (`last_counted_sync_failure_at`, migration 0045 — a stale gate timestamp
+  // surviving a recovery would silently swallow the first strike of the NEXT genuine failure
+  // episode). Resetting HERE, on the status transition itself, covers every path back to
+  // health (successful sync close, manual reconnect) without each caller having to remember
+  // the counter exists.
+  await client.query(
+    `
+      update sources
+      set status = $2,
+        last_synced_at = coalesce($3::timestamptz, last_synced_at),
+        consecutive_sync_failures = case when $2 = 'connected' then 0 else consecutive_sync_failures end,
+        last_counted_sync_failure_at = case when $2 = 'connected' then null else last_counted_sync_failure_at end
+      where id = $1
+    `,
+    [sourceId, status, lastSyncedAt ?? null]
+  );
+}
+
+async function createJob(
+  client: QueryableClient,
+  input: CreateJobInput
+): Promise<Record<string, unknown>> {
+  const result = await client.query(
+    `
+      insert into job_runs (id, workspace_id, job_type, payload, status)
+      values ($1, $2, $3, $4::jsonb, 'queued')
+      returning *
+    `,
+    [
+      `job_${randomUUID()}`,
+      input.workspaceId,
+      input.jobType,
+      JSON.stringify(input.payload)
+    ]
+  );
+  return result.rows[0];
+}
+
+async function claimNextJob(
+  client: QueryableClient,
+  workerId: string,
+  leaseSeconds = 60
+): Promise<Record<string, unknown> | null> {
+  const result = await client.query(
+    `
+      with candidate as (
+        select id
+        from job_runs
+        where status = 'queued'
+        order by created_at asc
+        for update skip locked
+        limit 1
+      )
+      update job_runs
+      set status = 'running', started_at = now(), attempt_count = attempt_count + 1
+      where id in (select id from candidate)
+      returning *
+    `
+  );
+  const job = result.rows[0];
+  if (!job) {
+    return null;
+  }
+  await client.query(
+    `
+      insert into job_locks (id, job_run_id, worker_id, locked_until)
+      values ($1, $2, $3, now() + ($4::text || ' seconds')::interval)
+    `,
+    [`lock_${randomUUID()}`, job.id, workerId, leaseSeconds]
+  );
+  return job;
+}
+
+async function completeJob(
+  client: QueryableClient,
+  jobId: string,
+  status: "succeeded" | "failed",
+  error?: string
+): Promise<void> {
+  await client.query(
+    `
+      update job_runs
+      set status = $2, finished_at = now(), error = $3
+      where id = $1
+    `,
+    [jobId, status, error ?? null]
+  );
+}
+
+export function assertFirstPhaseProvider(
+  provider: string
+): asserts provider is FirstPhaseProvider {
+  if (
+    ![
+      "google_analytics_4",
+      "posthog",
+      "stripe",
+      "x",
+      "shopify",
+      "meta_ads"
+    ].includes(provider)
+  ) {
+    throw new Error(`provider_not_in_first_phase:${provider}`);
+  }
+}

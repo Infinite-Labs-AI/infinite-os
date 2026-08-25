@@ -1,0 +1,17 @@
+-- 0044 — sources.consecutive_sync_failures: proportionate status escalation for sync failures.
+--
+-- WHY: a single transient sync failure (machine asleep mid-fetch → undici "fetch failed",
+-- provider 5xx, 429) used to flip the source to status='error' — a terminal, credential-grade
+-- state that no scheduler retries — so one overnight network blip surfaced as a permanent
+-- "disconnected" until a human manually reconnected a perfectly valid credential (observed
+-- live 2026-07-19 on a meta_ads source). Terminal failures (provider auth rejection,
+-- credential_undecryptable) still flip to 'error' immediately; TRANSIENT failures now
+-- increment this counter and only escalate to 'error' after N consecutive occurrences, so a
+-- genuinely dead path still surfaces. Every sync failure is still recorded honestly in
+-- sync_runs/sync_errors — only the status escalation is proportionate.
+--
+-- Any transition back to 'connected' (successful sync, manual reconnect) resets the counter
+-- to 0 (enforced in code: db.updateSourceStatus + reconnect_source).
+--
+-- `default 0` backfills every existing row, so NOT NULL is orphan-safe here.
+alter table sources add column if not exists consecutive_sync_failures integer not null default 0;

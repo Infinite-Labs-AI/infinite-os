@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Local pre-push gate: stop honest mistakes before they leave the machine.
+# CI remains the enforcement layer (this hook is skippable with --no-verify);
+# GitHub push protection covers the public repo server-side after the flip.
+set -euo pipefail
+root="$(git rev-parse --show-toplevel)"
+bash "$root/scripts/ci/repo-tripwire.sh"
+if command -v gitleaks >/dev/null 2>&1; then
+  # Scan only TRACKED content (a fresh export of HEAD) — that's what actually
+  # gets pushed. Scanning "$root" directly would include gitignored node_modules/,
+  # .growth-os/ (real LOCAL secrets), and .git/ history, producing thousands of
+  # false positives and flagging local secrets that never ship.
+  scan_dir="$(mktemp -d)"
+  git archive HEAD | tar -x -C "$scan_dir"
+  if ! gitleaks dir --no-banner --redact "$scan_dir"; then
+    rm -rf "$scan_dir"
+    echo "pre-push: gitleaks found secrets in TRACKED files — do not push." >&2
+    exit 1
+  fi
+  rm -rf "$scan_dir"
+else
+  echo "pre-push: gitleaks not installed — skipping local secret scan (CI still runs it)." >&2
+fi

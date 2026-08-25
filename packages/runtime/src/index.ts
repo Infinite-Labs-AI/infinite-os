@@ -1,0 +1,1559 @@
+import { NoActiveProjectError } from "@infinite-os/config";
+import {
+  JOURNEY_ENTITY_TYPES,
+  RESOLVABLE_ENTITY_TYPES,
+  infiniteOsVersion,
+  type JourneyEntityType
+} from "@infinite-os/core";
+import {
+  EMBEDDED_ONLY_READ_ACTIONS,
+  FIRST_PHASE_ACTIONS,
+  LOCAL_STORE_READ_ACTIONS,
+  OPERATOR_ACTIONS,
+  READ_ACTIONS,
+  type ActionEnvelope,
+  type AnswerabilityReason,
+  type AnswerabilityStatus,
+  type Authority,
+  type CoverageSummary,
+  type EvidenceHandle,
+  type InfiniteOsActionId,
+  type PolicyRef,
+  type RuntimeSurface,
+  type SessionContext
+} from "@infinite-os/types";
+import type { RecipeId } from "./recipes.js";
+export * from "./setup-module-loader.js";
+
+// Re-export the canonical contract types/consts so the rest of the engine keeps
+// importing them from `@infinite-os/runtime` unchanged. `@infinite-os/types` is
+// the single source of truth; this barrel forwards them. Note the contract
+// `ActionEnvelope.interpretedPlan` is `unknown` — the engine only ever WRITES a
+// `JourneyQueryPlan` into it (never reads it back typed), so the contract shape
+// is sufficient everywhere in the engine and no runtime-local override is needed.
+export {
+  EMBEDDED_ONLY_READ_ACTIONS,
+  FIRST_PHASE_ACTIONS,
+  LOCAL_STORE_READ_ACTIONS,
+  OPERATOR_ACTIONS,
+  READ_ACTIONS,
+  type ActionEnvelope,
+  type AnswerabilityReason,
+  type AnswerabilityStatus,
+  type Authority,
+  type CoverageSummary,
+  type EvidenceHandle,
+  type InfiniteOsActionId,
+  type PolicyRef,
+  type RuntimeSurface,
+  type SessionContext
+};
+
+/**
+ * Thrown when a session context is built without a resolved workspace id. It
+ * extends {@link NoActiveProjectError} so the existing `instanceof
+ * NoActiveProjectError` guards on the CLI path keep catching it — an
+ * unresolved/empty pin must never silently coerce to a workspace named
+ * `"default"`.
+ */
+export class MissingWorkspaceError extends NoActiveProjectError {
+  constructor(message = "No workspace bound for this session. A project must be pinned before a turn.") {
+    super(message);
+    this.name = "MissingWorkspaceError";
+  }
+}
+
+export interface ActionDefinition<Input = unknown, Output = unknown> {
+  id: InfiniteOsActionId;
+  title: string;
+  summary: string;
+  category: ActionCategory;
+  authority: Authority;
+  inputSchema: Record<string, unknown>;
+  outputSchema: Record<string, unknown>;
+  provenancePolicy:
+    | "metadata"
+    | "queryable_view"
+    | "bounded_provider_truth"
+    | "operator_audit";
+  recommendedNextActions: InfiniteOsActionId[];
+  recipeIds: RecipeId[];
+  handler: (input: Input, context: SessionContext) => Promise<Output> | Output;
+}
+
+export type JourneyQueryIntent =
+  | "rank_entities_by_outcome"
+  | "compare_cohorts"
+  | "trace_paths"
+  | "find_behavior_signals"
+  | "summarize_lifecycle"
+  | "explain_change"
+  | "drilldown_evidence";
+
+export interface JourneyQueryPlan {
+  intent: JourneyQueryIntent;
+  actor: {
+    grain: "person" | "account";
+  };
+  journeyTemplateId?: string;
+  entity?: {
+    type: JourneyEntityType;
+    filters?: Record<string, unknown>;
+  };
+  outcome?: {
+    id: string;
+    window?: string;
+    policyId?: string;
+  };
+  timeRange: {
+    start: string;
+    end: string;
+  };
+  groupBy?: string[];
+  ranking?: {
+    metric: string;
+    direction: "asc" | "desc";
+  };
+  limit?: number;
+}
+
+export type ActionHandler = (
+  input: unknown,
+  context: SessionContext
+) => Promise<ActionEnvelope> | ActionEnvelope;
+
+export type ActionCategory =
+  | "sources"
+  | "schedules"
+  | "schema"
+  | "context"
+  | "journey"
+  | "evidence"
+  | "questions"
+  | "reports"
+  | "operator";
+
+export class ActionRegistry {
+  private readonly actions = new Map<InfiniteOsActionId, ActionDefinition>();
+
+  register(action: ActionDefinition): void {
+    if (this.actions.has(action.id)) {
+      throw new Error(`Duplicate action registered: ${action.id}`);
+    }
+    this.actions.set(action.id, action);
+  }
+
+  list(): ActionDefinition[] {
+    return [...this.actions.values()].sort((a, b) => a.id.localeCompare(b.id));
+  }
+
+  get(id: string): ActionDefinition | undefined {
+    return this.actions.get(id as InfiniteOsActionId);
+  }
+
+  async execute(
+    id: string,
+    input: unknown,
+    context: SessionContext
+  ): Promise<ActionEnvelope> {
+    const action = this.actions.get(id as InfiniteOsActionId);
+    if (!action) {
+      throw new Error(`Unknown Infinite OS action: ${id}`);
+    }
+    assertAuthority(context.authority, action.authority);
+    return action.handler(input, context) as Promise<ActionEnvelope>;
+  }
+}
+
+export const FIRST_PHASE_PROVIDERS = [
+  "google_analytics_4",
+  "posthog",
+  "stripe",
+  "x",
+  "shopify",
+  "meta_ads"
+] as const;
+
+export type FirstPhaseProvider = (typeof FIRST_PHASE_PROVIDERS)[number];
+
+export const FIRST_PHASE_QUERYABLE_VIEWS = [
+  "queryable.vw_site_traffic",
+  "queryable.vw_site_conversion_rate",
+  "queryable.vw_posthog_events",
+  "queryable.vw_revenue_by_source",
+  "queryable.vw_recent_sync_status",
+  "queryable.vw_x_post_public_metrics",
+  "queryable.vw_x_authored_activity",
+  "queryable.vw_x_profile_public_metrics",
+  "queryable.vw_shopify_orders",
+  "queryable.vw_shopify_products",
+  "queryable.vw_meta_ads_campaign_daily",
+  // Phase-1 §3.3 — the typed conversions view (campaign × day × result_type). A view is
+  // invisible to the tool agent until it is in this allowlist AND has parallel entries in
+  // the analytical-engine switch-functions; the SQL seed in migration 0033 is otherwise inert.
+  "queryable.vw_meta_ads_campaign_conversions_daily",
+  // Phase-2 slice-1a §3 — the adset-grain delivery + typed-conversions views (adset × day,
+  // adset × day × result_type). Same invisible-until-allowlisted rule applies: these are the
+  // siblings the §5 grain-aware resolver (metricViewForGrain) swaps to when an adset_id/
+  // adset_name dimension is present in a group-by or filter. Listing them here simultaneously
+  // (a) lets rejectUnsafeView/QUERYABLE_VIEW_SET accept them and (b) admits them to the
+  // run_metric_query/run_breakdown_query `view` enum (analyticalQuerySchema below). They stay
+  // inert (campaign-default) until the matching migration views + engine switch-branches land.
+  "queryable.vw_meta_ads_adset_daily",
+  "queryable.vw_meta_ads_adset_conversions_daily",
+  // Phase-2 slice-1b §3/§5 — the ad-grain delivery + typed-conversions views (ad × day,
+  // ad × day × result_type). Same invisible-until-allowlisted rule applies: these are the
+  // FINEST-grain siblings the §5 grain-aware resolver (metricViewForGrain) swaps to when an
+  // ad_id/ad_name dimension is present (ad > adset > campaign, finest-grain-wins). Listing them
+  // here simultaneously (a) lets rejectUnsafeView/QUERYABLE_VIEW_SET accept them and (b) admits
+  // them to the run_metric_query/run_breakdown_query `view` enum (analyticalQuerySchema below).
+  // They stay inert-but-ready: until the matching migration views land (§3), the resolver's ad
+  // branch is the only thing wired, and it routes ad-dim queries to these names — the SQL fails
+  // only if a query actually targets ad grain before the migration runs.
+  "queryable.vw_meta_ads_ad_daily",
+  "queryable.vw_meta_ads_ad_conversions_daily",
+  // Phase-1 §5 — the Meta↔Stripe true-value (ROAS) join view (migration 0034).
+  "queryable.vw_meta_stripe_campaign_value_daily",
+  "queryable.vw_site_pages",
+  // PostHog audience view (slice 1 / migration 0043) — device/OS/geo/browser audience dims
+  // over pageview counts, extracted from posthog_event_truth.properties. A view is invisible
+  // to the tool agent until it is in this allowlist AND has parallel entries in the
+  // analytical-engine switch-functions (allowedDimensionsForView / metricView); the SQL seed
+  // in migration 0043 is otherwise inert.
+  "queryable.vw_posthog_site",
+  "queryable.vw_stripe_subscription_lifecycle",
+  "queryable.vw_stripe_paid_subscribers",
+  // GA4 event-name grain (migration 0061) — per-event counts + per-event key events, so a
+  // property with several key events can answer "downloads only". A view is invisible to the
+  // tool agent until it is in this allowlist AND has parallel entries in the analytical-engine
+  // switch-functions (allowedDimensionsForView / metricView); the SQL seed is otherwise inert.
+  "queryable.vw_site_events"
+] as const;
+
+export const FIRST_PHASE_METRICS = [
+  "site_visitors",
+  "signup_count",
+  "site_conversion_rate",
+  "posthog_event_count",
+  "recognized_revenue",
+  "x_public_engagement",
+  "x_post_count",
+  "x_comment_count",
+  "x_follower_count",
+  "shopify_gross_sales",
+  "shopify_order_count",
+  "meta_ads_spend",
+  "meta_ads_clicks",
+  "impressions",
+  "reach",
+  "cpm",
+  "cpc",
+  "ctr",
+  // Phase-1 §6 — Meta conversions/value metrics. results/cost_per_result/conversion_value/
+  // roas read the typed conversions view (result_type is a REQUIRED partition — the engine
+  // refuses to blend CPL+CPA across distinct result_types). link_clicks/landing_page_views
+  // read the delivery view. frequency is a recomputed ratio (impressions/reach) on the
+  // delivery view. roas_from_stripe reads the §5 Meta↔Stripe value-join view.
+  "results",
+  "cost_per_result",
+  "conversion_value",
+  "roas",
+  "link_clicks",
+  "landing_page_views",
+  "frequency",
+  "roas_from_stripe",
+  "page_views",
+  "sessions",
+  "new_users",
+  "engaged_sessions",
+  "key_events",
+  "engagement_rate",
+  "average_session_duration",
+  "page_views_by_page",
+  // PostHog audience view (slice 1 / migration 0043) — additive pageview count over the
+  // audience view (device/OS/geo/browser). Sessions/visitors (non-additive distinct counts)
+  // are deferred to slice 2.
+  "posthog_page_views",
+  "stripe_current_paid_subscribers",
+  "stripe_new_paid_subscribers",
+  "stripe_trialing_subscribers",
+  "stripe_churned_subscribers",
+  "stripe_paid_subscribers",
+  // GA4 event-name grain (migration 0061) — additive counts over vw_site_events. site_key_events
+  // is the per-event split of the property-wide key_events lump (which stays untouched).
+  "site_event_count",
+  "site_key_events"
+] as const;
+
+// Compact {metric id -> common aliases} hint, mirrored by hand from the `aliases` column of the
+// metric_definitions seeds (migrations 0005/0011/0014/0016/0022/0024/0025/0029/0033/0034). The
+// authoritative source is still the DB (list_metrics/describe_metric hydrate the live aliases);
+// this map is only a prompt-time hint so common phrasings like "cost per lead" or "cpl" resolve
+// to cost_per_result WITHOUT a discovery round-trip. Keep it in sync with the seeds when aliases
+// change — drift only costs a discovery call, it never produces wrong numbers.
+export const FIRST_PHASE_METRIC_ALIASES: Record<string, readonly string[]> = {
+  site_visitors: ["visitors", "users"],
+  signup_count: ["signups"],
+  site_conversion_rate: ["conversion percentage", "conversion rate"],
+  posthog_event_count: ["events", "event count", "event counts", "posthog events"],
+  recognized_revenue: ["revenue"],
+  x_public_engagement: ["best tweet", "best post", "most popular tweet", "tweet engagement", "post engagement"],
+  x_post_count: ["tweets made", "tweet count", "posts made", "how many tweets have i made"],
+  x_comment_count: ["comments made", "replies made", "comments authored"],
+  x_follower_count: ["followers", "follower count"],
+  shopify_gross_sales: ["shopify revenue", "shop sales", "gross merchandise value", "gmv"],
+  shopify_order_count: ["orders", "shopify orders"],
+  meta_ads_spend: ["facebook ads spend", "instagram ads spend", "meta spend"],
+  meta_ads_clicks: ["facebook ads clicks", "instagram ads clicks", "meta clicks"],
+  impressions: ["facebook ads impressions", "instagram ads impressions", "meta impressions", "ad impressions"],
+  reach: ["facebook ads reach", "instagram ads reach", "meta reach", "unique reach"],
+  cpm: ["cost per mille", "cost per thousand impressions", "meta cpm", "facebook cpm"],
+  cpc: ["cost per click", "meta cpc", "facebook cpc", "instagram cpc"],
+  ctr: ["click through rate", "click-through rate", "meta ctr", "facebook ctr"],
+  results: ["conversions", "meta results", "conversion count", "leads", "purchases"],
+  cost_per_result: ["cpl", "cpa", "cost per lead", "cost per acquisition", "cost per conversion", "cost per result"],
+  conversion_value: ["purchase value", "conversion value", "meta revenue", "pixel purchase value"],
+  roas: ["roas", "return on ad spend", "meta roas", "purchase roas"],
+  link_clicks: ["link clicks", "inline link clicks", "meta link clicks", "facebook link clicks"],
+  landing_page_views: ["landing page views", "lpv", "meta landing page views"],
+  frequency: ["frequency", "impressions per person", "avg frequency"],
+  roas_from_stripe: ["stripe roas", "true roas", "real roas", "stripe attributed roas", "roas from stripe", "return on ad spend from revenue"],
+  page_views: ["page views", "pageviews", "screen page views", "views"],
+  sessions: ["sessions", "visits", "session count", "total sessions"],
+  new_users: ["new users", "first-time users", "new visitors"],
+  engaged_sessions: ["engaged sessions", "engaged visits"],
+  key_events: ["key events", "conversions", "key event count"],
+  engagement_rate: ["engagement rate", "engaged rate"],
+  average_session_duration: ["average session duration", "avg session duration", "session length"],
+  page_views_by_page: ["top pages", "page views by page", "most viewed pages", "popular pages"],
+  posthog_page_views: ["posthog page views", "posthog pageviews", "pageviews by device", "pageviews by os", "pageviews by country"],
+  stripe_current_paid_subscribers: ["current paid subscribers", "active paid subscribers", "current customers", "paid customers"],
+  stripe_new_paid_subscribers: ["new paid subscribers", "new customers", "new paid customers"],
+  stripe_trialing_subscribers: ["trialing subscribers", "trials", "trial customers"],
+  stripe_churned_subscribers: ["churned subscribers", "churned customers", "cancellations"],
+  stripe_paid_subscribers: ["paid subscribers", "subscribers", "paid customers", "customers"],
+  site_event_count: ["site events", "ga4 events", "event count by name", "events by name", "event counts"],
+  site_key_events: ["key events by event", "key events by name", "conversions by event", "download clicks", "download conversions"]
+} as const;
+
+export const ACTION_CATALOG: Omit<ActionDefinition, "handler">[] =
+  FIRST_PHASE_ACTIONS.map((id) => {
+    const metadata = metadataFor(id);
+    return {
+      id,
+      title: metadata.title,
+      summary: metadata.summary,
+      category: metadata.category,
+      authority: isOperatorAction(id) ? "operator" : "tool_agent",
+      inputSchema: inputSchemaFor(id),
+      outputSchema: actionOutputSchema(),
+      provenancePolicy: provenancePolicyFor(id),
+      recommendedNextActions: metadata.recommendedNextActions,
+      recipeIds: metadata.recipeIds
+    };
+  });
+
+export function createInfiniteOsRegistry(
+  handlers: Partial<Record<InfiniteOsActionId, ActionHandler>> = {}
+): ActionRegistry {
+  const registry = new ActionRegistry();
+  for (const action of ACTION_CATALOG) {
+    registry.register({
+      ...action,
+      handler:
+        handlers[action.id] ??
+        (() => notImplemented(action.id, action.authority))
+    });
+  }
+  return registry;
+}
+
+/**
+ * The DAEMON-SURFACE registry: permanently excludes every
+ * `EMBEDDED_ONLY_READ_ACTIONS` id from BOTH advertisement (`registry.list()`
+ * feeds `/mcp/tools`, `/capabilities`, and the per-turn chat tool set — union
+ * AND plain-chat) and execution (`registry.execute()` backs `/tools/call` and
+ * `/mcp/tools/call`, so an old client asking the new daemon for
+ * `run_metric_query` gets a typed "Unknown Infinite OS action" error instead
+ * of a silent empty-store read).
+ *
+ * WHY: a standalone daemon's synced store is empty for workspaces whose
+ * connector data lives on an embedding host, so these actions answer with
+ * nulls/zeros a model can present as business numbers. Removing them from the
+ * daemon surface makes that failure class structurally impossible. The
+ * embedding host keeps executing the same handlers in-process via
+ * `createActionHandlers(db, { encryptionKey })` — this factory deliberately
+ * does NOT touch that path.
+ *
+ * This is unconditional by design: no options, no environment switch, no
+ * per-workspace mode. See EMBEDDED_ONLY_READ_ACTIONS in @infinite-os/types
+ * for the inventory rationale and the deletion-gate artifact reference.
+ *
+ * Retired ids are scrubbed from BOTH steering surfaces of the surviving
+ * actions: `recommendedNextActions` on the catalog cards (advertisement) and
+ * `nextActions` on the RUNTIME ENVELOPES the handlers return (e.g. a
+ * surviving validate_journey_plan envelope recommends run_journey_query —
+ * valid on the embedded host, refused here). The envelope scrub is
+ * daemon-registry-scoped: embedded/CLI envelopes are untouched.
+ */
+export function createDaemonActionRegistry(
+  handlers: Partial<Record<InfiniteOsActionId, ActionHandler>> = {}
+): ActionRegistry {
+  const retired = new Set<string>(EMBEDDED_ONLY_READ_ACTIONS);
+  const scrubEnvelopeNextActions = (envelope: ActionEnvelope): ActionEnvelope =>
+    envelope.nextActions?.some((id) => retired.has(id))
+      ? { ...envelope, nextActions: envelope.nextActions.filter((id) => !retired.has(id)) }
+      : envelope;
+  const registry = new ActionRegistry();
+  for (const action of ACTION_CATALOG) {
+    if (retired.has(action.id)) {
+      continue;
+    }
+    const handler = handlers[action.id];
+    registry.register({
+      ...action,
+      recommendedNextActions: action.recommendedNextActions.filter(
+        (id) => !retired.has(id)
+      ),
+      handler: handler
+        ? async (input, context) => scrubEnvelopeNextActions(await handler(input, context))
+        : () => notImplemented(action.id, action.authority)
+    });
+  }
+  return registry;
+}
+
+export const runtimeBoot = true;
+export const runtimeVersion = infiniteOsVersion;
+
+export function assertAuthority(actual: Authority, required: Authority): void {
+  if (required === "operator" && actual !== "operator") {
+    throw new Error("operator authority required");
+  }
+}
+
+export function createSessionContext(input: {
+  workspaceId?: string;
+  sessionId?: string;
+  actorId?: string;
+  authority: Authority;
+  surface: RuntimeSurface;
+  timezone?: string;
+}): SessionContext {
+  // Fail closed: an unresolved/empty pin must never silently become a workspace
+  // named "default" (which would scope queries to the wrong/nonexistent row).
+  // Throwing a NoActiveProjectError subclass keeps the existing CLI guards working.
+  const workspaceId = input.workspaceId?.trim();
+  if (!workspaceId) {
+    throw new MissingWorkspaceError();
+  }
+  return {
+    workspaceId,
+    sessionId: input.sessionId ?? "local-session",
+    actorId: input.actorId ?? input.surface,
+    authority: input.authority,
+    surface: input.surface,
+    timezone: input.timezone ?? "UTC"
+  };
+}
+
+export function createEnvelope<T>(input: {
+  actionId: InfiniteOsActionId;
+  authority: Authority;
+  status?: ActionEnvelope<T>["status"];
+  data?: T;
+  error?: ActionEnvelope<T>["error"];
+  answerabilityReason?: ActionEnvelope<T>["answerabilityReason"];
+  interpretedPlan?: ActionEnvelope<T>["interpretedPlan"];
+  resultHandle?: ActionEnvelope<T>["resultHandle"];
+  evidence?: ActionEnvelope<T>["evidence"];
+  coverage?: ActionEnvelope<T>["coverage"];
+  policyRefs?: ActionEnvelope<T>["policyRefs"];
+  provenance?: string[];
+  freshness?: ActionEnvelope<T>["freshness"];
+  caveats?: string[];
+  truncated?: boolean;
+  nextActions?: InfiniteOsActionId[];
+}): ActionEnvelope<T> {
+  const status = input.error ? "error" : (input.status ?? "ok");
+  return {
+    ok: !input.error && !NON_OK_STATUSES.has(status),
+    actionId: input.actionId,
+    authority: input.authority,
+    status,
+    data: input.data,
+    error: input.error,
+    answerabilityReason: input.answerabilityReason,
+    interpretedPlan: input.interpretedPlan,
+    resultHandle: input.resultHandle,
+    evidence: input.evidence,
+    coverage: input.coverage,
+    policyRefs: input.policyRefs,
+    provenance: input.provenance ?? [],
+    freshness: input.freshness,
+    caveats: input.caveats ?? [],
+    truncated: input.truncated ?? false,
+    nextActions: input.nextActions ?? []
+  };
+}
+
+const NON_OK_STATUSES = new Set<AnswerabilityStatus>([
+  "unsupported",
+  "not_implemented",
+  "low_coverage",
+  "needs_clarification",
+  "too_expensive",
+  "error"
+]);
+
+function notImplemented(
+  id: InfiniteOsActionId,
+  authority: Authority
+): ActionEnvelope {
+  return createEnvelope({
+    actionId: id,
+    authority,
+    status: "not_implemented",
+    data: {
+      firstPhaseProviders: FIRST_PHASE_PROVIDERS,
+      queryableViews: FIRST_PHASE_QUERYABLE_VIEWS,
+      metrics: FIRST_PHASE_METRICS
+    },
+    // No freshness claim: a not-wired handler has no data whose recency it
+    // could honestly describe. (The old hardcoded `stale: false` here was one
+    // of the sites that made every ⌘L "not stale" claim meaningless — see the
+    // real freshness contract in @infinite-os/analytical-engine.)
+    caveats: ["runtime_handler_not_wired"]
+  });
+}
+
+function isOperatorAction(id: string): boolean {
+  return (OPERATOR_ACTIONS as readonly string[]).includes(id);
+}
+
+function provenancePolicyFor(
+  id: InfiniteOsActionId
+): ActionDefinition["provenancePolicy"] {
+  if (id === "fetch_evidence" || id === "verify_claims") {
+    return "bounded_provider_truth";
+  }
+  // Live Graph insights: returns VALUES fetched from the provider (bounded window + row cap),
+  // never the local queryable store — the same class as the evidence readers above.
+  if (id === "run_meta_live_insights") {
+    return "bounded_provider_truth";
+  }
+  if (id === "sync_source_now") {
+    return "operator_audit";
+  }
+  if (id === "run_journey_query") {
+    return "queryable_view";
+  }
+  if (id.includes("drilldown")) {
+    return "bounded_provider_truth";
+  }
+  if (isOperatorAction(id)) {
+    return "operator_audit";
+  }
+  if (id.includes("metric") || id.includes("query")) {
+    return "queryable_view";
+  }
+  return "metadata";
+}
+
+function metadataFor(id: InfiniteOsActionId): {
+  title: string;
+  summary: string;
+  category: ActionCategory;
+  recommendedNextActions: InfiniteOsActionId[];
+  recipeIds: RecipeId[];
+} {
+  const metadata: Record<
+    InfiniteOsActionId,
+    {
+      title: string;
+      summary: string;
+      category: ActionCategory;
+      recommendedNextActions: InfiniteOsActionId[];
+      recipeIds: RecipeId[];
+    }
+  > = {
+    list_sources: {
+      title: "List sources",
+      summary:
+        "Show connected GA4, PostHog, Stripe, X, Shopify, and Meta Ads sources without exposing credentials.",
+      category: "sources",
+      recommendedNextActions: ["describe_source", "start_source_sync"],
+      recipeIds: ["inspect_schema", "sync_source"]
+    },
+    describe_source: {
+      title: "Describe source",
+      summary: "Inspect one source, its provider, status, and sync metadata.",
+      category: "sources",
+      recommendedNextActions: ["start_source_sync", "list_source_schedules"],
+      recipeIds: ["verify_credentials", "sync_source"]
+    },
+    get_recent_sync_runs: {
+      title: "Recent sync runs",
+      summary:
+        "Review recent extraction and load outcomes across first-phase sources.",
+      category: "sources",
+      recommendedNextActions: ["list_sources", "list_source_schedules"],
+      recipeIds: ["sync_source"]
+    },
+    sync_source_now: {
+      title: "Sync source now",
+      summary:
+        "Run one bounded connector sync immediately so same-day/current/latest questions can use fresh provider data before ranking or comparing results.",
+      category: "sources",
+      recommendedNextActions: ["run_metric_query", "run_breakdown_query", "get_recent_sync_runs"],
+      recipeIds: ["sync_source"]
+    },
+    list_source_schedules: {
+      title: "List source schedules",
+      summary:
+        "Show worker-owned source sync policies, pause state, and freshness windows.",
+      category: "schedules",
+      recommendedNextActions: [
+        "update_source_schedule",
+        "pause_source_schedule",
+        "resume_source_schedule"
+      ],
+      recipeIds: ["sync_source"]
+    },
+    list_queryable_views: {
+      title: "List queryable views",
+      summary:
+        "Show the safe queryable views available to CLI, API, and MCP clients.",
+      category: "schema",
+      recommendedNextActions: ["describe_queryable_view", "list_metrics"],
+      recipeIds: ["inspect_schema"]
+    },
+    describe_queryable_view: {
+      title: "Describe queryable view",
+      summary:
+        "Inspect one queryable view, its grain, dimensions, measures, and caveats.",
+      category: "schema",
+      recommendedNextActions: ["list_metrics", "run_metric_query"],
+      recipeIds: ["inspect_schema"]
+    },
+    list_metrics: {
+      title: "List metrics",
+      summary:
+        "Show first-phase metric definitions, source authority, units, and examples.",
+      category: "schema",
+      recommendedNextActions: ["describe_metric", "run_metric_query"],
+      recipeIds: ["inspect_schema"]
+    },
+    describe_metric: {
+      title: "Describe metric",
+      summary:
+        "Inspect one metric definition, source view, allowed dimensions, and caveats before retrying uncertain metric/view pairs.",
+      category: "schema",
+      recommendedNextActions: ["run_metric_query", "run_breakdown_query"],
+      recipeIds: ["explain_answer"]
+    },
+    run_metric_query: {
+      title: "Run metric query",
+      summary:
+        "Execute a read-only metric query against the queryable schema. DATE WINDOWS (over-time metrics — revenue, spend, event/post counts, and every other summed-over-days metric): when the question references ANY time window (today, yesterday, this/last week or month, last N days, a named range), you MUST pass occurred_on (or published_at for X posts) gte/lte filters for that window. Omitting the date range on an over-time metric returns an ALL-TIME total — the response is stamped an `unbounded_date_range` caveat; never present an all-time total as if it answered a windowed question. Exception — snapshot/current-count metrics (x_follower_count, stripe_current_paid_subscribers, stripe_trialing_subscribers) are point-in-time reads: they answer 'as of now', take no date window, and are never stamped unbounded_date_range (x_follower_count's view has no published_at column — a published_at/date filter there is rejected as unsupported_dimension). For trend questions (week-over-week, month-over-month, year-over-year), set compareTo='prior_period' (immediately preceding equal-length range) or 'prior_year' (same range one year earlier) together with occurred_on (published_at for X posts) gte/lte date filters; the response then carries a `comparison` block (current/previous/absoluteDelta/percentDelta/direction) — phrase the answer as 'up/down X% vs prior period'. X compatibility: x_public_engagement -> queryable.vw_x_post_public_metrics; x_post_count and x_comment_count -> queryable.vw_x_authored_activity; x_follower_count -> queryable.vw_x_profile_public_metrics.",
+      category: "questions",
+      recommendedNextActions: [
+        "explain_answer",
+        "drilldown_result",
+        "create_saved_report"
+      ],
+      recipeIds: ["save_report", "save_export_report"]
+    },
+    run_breakdown_query: {
+      title: "Run breakdown query",
+      summary:
+        "Execute a read-only grouped metric query against allowed dimensions, with optional bounded ordering. X compatibility: x_public_engagement -> queryable.vw_x_post_public_metrics; x_post_count and x_comment_count -> queryable.vw_x_authored_activity; x_follower_count -> queryable.vw_x_profile_public_metrics.",
+      category: "questions",
+      recommendedNextActions: [
+        "explain_answer",
+        "drilldown_result",
+        "create_saved_report"
+      ],
+      recipeIds: ["save_report", "save_export_report"]
+    },
+    run_funnel_query: {
+      title: "Run funnel query",
+      summary: "Execute the first-phase visit-to-signup funnel surface.",
+      category: "questions",
+      recommendedNextActions: ["explain_answer", "drilldown_result"],
+      recipeIds: ["explain_answer"]
+    },
+    explain_answer: {
+      title: "Explain answer",
+      summary:
+        "Explain source authority, provenance, and caveats for a prior or supplied metric.",
+      category: "questions",
+      recommendedNextActions: ["drilldown_result"],
+      recipeIds: ["explain_answer"]
+    },
+    drilldown_result: {
+      title: "Drill down result",
+      summary:
+        "Return bounded provider-truth rows without raw payload JSON or generic SQL.",
+      category: "questions",
+      recommendedNextActions: ["create_saved_report"],
+      recipeIds: ["explain_answer"]
+    },
+    search_context: {
+      title: "Search context",
+      summary:
+        "Find approved metric, source, policy, journey, and entity context cards relevant to a question.",
+      category: "context",
+      recommendedNextActions: [
+        "describe_context_item",
+        "resolve_entity",
+        "validate_journey_plan"
+      ],
+      recipeIds: ["inspect_schema", "explain_answer"]
+    },
+    describe_context_item: {
+      title: "Describe context item",
+      summary:
+        "Return one approved context card with provenance, policy references, and caveats.",
+      category: "context",
+      recommendedNextActions: ["resolve_entity", "validate_journey_plan"],
+      recipeIds: ["inspect_schema", "explain_answer"]
+    },
+    resolve_entity: {
+      title: "Resolve entity",
+      summary:
+        "Resolve a business entity mention to governed identifiers before analytical execution.",
+      category: "context",
+      recommendedNextActions: ["validate_journey_plan", "run_journey_query"],
+      recipeIds: ["explain_answer"]
+    },
+    validate_journey_plan: {
+      title: "Validate journey plan",
+      summary:
+        "Validate a journey query plan against approved templates, source coverage, policies, and cost limits.",
+      category: "journey",
+      recommendedNextActions: ["run_journey_query", "search_context"],
+      recipeIds: ["inspect_schema", "explain_answer"]
+    },
+    run_journey_query: {
+      title: "Run journey query",
+      summary:
+        "Execute a validated journey query plan through deterministic, read-only analytical templates.",
+      category: "journey",
+      recommendedNextActions: [
+        "fetch_evidence",
+        "verify_claims",
+        "create_saved_report"
+      ],
+      recipeIds: ["explain_answer", "save_report"]
+    },
+    fetch_evidence: {
+      title: "Fetch evidence",
+      summary:
+        "Fetch bounded evidence rows or context snippets behind a result handle without exposing raw provider payloads.",
+      category: "evidence",
+      recommendedNextActions: ["verify_claims", "explain_answer"],
+      recipeIds: ["explain_answer"]
+    },
+    verify_claims: {
+      title: "Verify claims",
+      summary:
+        "Check generated claims against evidence handles, policy references, and freshness constraints.",
+      category: "evidence",
+      recommendedNextActions: ["fetch_evidence", "explain_answer"],
+      recipeIds: ["explain_answer"]
+    },
+    connect_source: {
+      title: "Connect source",
+      summary:
+        "Create a provider source and store live credentials only as encrypted credential envelopes.",
+      category: "operator",
+      recommendedNextActions: ["start_source_sync", "list_sources"],
+      recipeIds: ["connect_source"]
+    },
+    reconnect_source: {
+      title: "Reconnect source",
+      summary: "Rotate or verify credentials for an existing source.",
+      category: "operator",
+      recommendedNextActions: ["describe_source", "start_source_sync"],
+      recipeIds: ["verify_credentials"]
+    },
+    revoke_source: {
+      title: "Revoke source",
+      summary: "Revoke a source, credential rows, and its sync schedule.",
+      category: "operator",
+      recommendedNextActions: ["list_sources"],
+      recipeIds: ["verify_credentials"]
+    },
+    start_source_sync: {
+      title: "Start source sync",
+      summary: "Queue a worker-owned sync job for one source.",
+      category: "operator",
+      recommendedNextActions: ["get_recent_sync_runs", "list_source_schedules"],
+      recipeIds: ["sync_source"]
+    },
+    update_source_schedule: {
+      title: "Update source schedule",
+      summary:
+        "Change a source sync policy without adding recurring report delivery.",
+      category: "schedules",
+      recommendedNextActions: ["list_source_schedules"],
+      recipeIds: ["sync_source"]
+    },
+    pause_source_schedule: {
+      title: "Pause source schedule",
+      summary: "Pause worker-owned source sync scheduling for one source.",
+      category: "schedules",
+      recommendedNextActions: [
+        "list_source_schedules",
+        "resume_source_schedule"
+      ],
+      recipeIds: ["sync_source"]
+    },
+    resume_source_schedule: {
+      title: "Resume source schedule",
+      summary: "Resume worker-owned source sync scheduling for one source.",
+      category: "schedules",
+      recommendedNextActions: ["list_source_schedules"],
+      recipeIds: ["sync_source"]
+    },
+    create_saved_report: {
+      title: "Create saved report",
+      summary:
+        "Persist an operator-owned report plan over existing analytical actions.",
+      category: "reports",
+      recommendedNextActions: ["run_saved_report", "export_saved_report"],
+      recipeIds: ["save_report", "save_export_report"]
+    },
+    run_saved_report: {
+      title: "Run saved report",
+      summary: "Queue a worker job to execute a saved report plan.",
+      category: "reports",
+      recommendedNextActions: ["export_saved_report"],
+      recipeIds: ["save_report", "save_export_report"]
+    },
+    export_saved_report: {
+      title: "Export saved report",
+      summary: "Queue durable JSON artifact export for a saved report.",
+      category: "reports",
+      recommendedNextActions: ["get_recent_sync_runs"],
+      recipeIds: ["export_report", "save_export_report"]
+    },
+    list_meta_assets: {
+      title: "List Meta ad accounts & pixels",
+      summary:
+        "Enumerate the ad accounts + pixels a Meta token can see (system-user or OAuth) so the connect flow can pick an account/pixel and validate the token before binding.",
+      category: "sources",
+      recommendedNextActions: ["connect_source"],
+      recipeIds: []
+    },
+    list_meta_entities: {
+      title: "List Meta Ads entities",
+      summary:
+        "Read Meta Ads campaigns, ad sets, ads, or creatives for one source (no money movement).",
+      category: "sources",
+      recommendedNextActions: ["get_meta_entity", "set_meta_entity_status"],
+      recipeIds: []
+    },
+    get_meta_entity: {
+      title: "Get Meta Ads entity",
+      summary: "Read a single Meta Ads entity node by id (no money movement).",
+      category: "sources",
+      recommendedNextActions: ["set_meta_entity_status", "list_meta_entities"],
+      recipeIds: []
+    },
+    run_meta_live_insights: {
+      title: "Live Meta Ads insights",
+      summary:
+        "Read live Meta Ads performance (spend, results, ROAS, CTR) straight from the Graph API at campaign/adset/ad grain, aggregated over a date window and sorted by spend (no money movement). Use for best/worst-ad and spend/ROAS questions — Meta data is not synced into the warehouse tables, so an empty warehouse metric never means it is unavailable.",
+      category: "sources",
+      recommendedNextActions: ["get_meta_entity", "list_meta_entities"],
+      recipeIds: []
+    },
+    create_meta_campaign: {
+      title: "Create Meta Ads campaign",
+      summary:
+        "Operator-only. Create a Meta Ads campaign that ALWAYS lands PAUSED; going live is a separate, gated set_meta_entity_status step. OMIT sourceId — the engine targets your connected Meta account automatically (only pass it to disambiguate when several Meta accounts are connected). Budget can be given in the account currency's MAJOR unit via dailyBudgetMajor (e.g. 500 = $500/day on a USD account); the engine reads the account currency and converts to minor units.",
+      category: "operator",
+      recommendedNextActions: ["create_meta_ad_set", "set_meta_entity_status"],
+      recipeIds: []
+    },
+    create_meta_ad_set: {
+      title: "Create Meta Ads ad set",
+      summary:
+        "Operator-only. Create a Meta Ads ad set under a campaign; ALWAYS lands PAUSED. OMIT sourceId — the engine uses your connected Meta account. Budgets accept the account currency's MAJOR unit via dailyBudgetMajor/lifetimeBudgetMajor (e.g. 50 = $50/day on a USD account; the engine converts to minor units), or integer cents via dailyBudget/lifetimeBudget. bidAmount stays integer cents.",
+      category: "operator",
+      recommendedNextActions: ["create_meta_creative", "create_meta_ad"],
+      recipeIds: []
+    },
+    create_meta_creative: {
+      title: "Create Meta Ads creative",
+      summary:
+        "Operator-only. Create a STANDARD single-image/video Meta Ads creative. Creatives have no go-live status.",
+      category: "operator",
+      recommendedNextActions: ["create_meta_ad"],
+      recipeIds: []
+    },
+    create_meta_ad: {
+      title: "Create Meta Ads ad",
+      summary:
+        "Operator-only. Create a Meta Ads ad wiring an ad set to a creative; ALWAYS lands PAUSED.",
+      category: "operator",
+      recommendedNextActions: ["set_meta_entity_status", "get_meta_entity"],
+      recipeIds: []
+    },
+    set_meta_entity_status: {
+      title: "Set Meta Ads entity status",
+      summary:
+        "Operator-only. Activate or pause a Meta Ads campaign/ad set/ad. Activating is the ONLY money-spending transition; it is per-level and never cascades.",
+      category: "operator",
+      recommendedNextActions: ["get_meta_entity", "list_meta_entities"],
+      recipeIds: []
+    },
+    update_meta_budget: {
+      title: "Update Meta Ads daily budget",
+      summary:
+        "Operator-only. Change the daily budget of an EXISTING Meta Ads campaign or ad set (campaign|adset only — Meta has no ad-level budget). dailyBudget is a POSITIVE integer in the ad-account minor units (cents). Adjusts spend ONLY; it never changes delivery status (an already-active entity keeps spending at the new budget; a paused one stays paused).",
+      category: "operator",
+      recommendedNextActions: ["get_meta_entity", "list_meta_entities"],
+      recipeIds: []
+    },
+    delete_meta_entity: {
+      title: "Delete Meta Ads entity",
+      summary:
+        "Operator-only. Permanently DELETE a Meta Ads campaign/ad set/ad node (irreversible cleanup). Does not spend; the CLI applies a destructive confirm gate before reaching this handler.",
+      category: "operator",
+      recommendedNextActions: ["list_meta_entities"],
+      recipeIds: []
+    }
+  };
+  return metadata[id];
+}
+
+function inputSchemaFor(id: InfiniteOsActionId): Record<string, unknown> {
+  const schemas: Partial<Record<InfiniteOsActionId, Record<string, unknown>>> = {
+    describe_source: requiredObject({ sourceId: { type: "string" } }),
+    connect_source: requiredObject(
+      {
+        provider: { enum: FIRST_PHASE_PROVIDERS },
+        connectionName: { type: "string" },
+        credentialKind: { type: "string" },
+        credentialPayload: { type: "object", additionalProperties: true },
+        encryptedPayload: { type: "string" },
+        // P1-2: the Meta account/pixel picker passes the chosen pixel so CAPI dispatch has a target.
+        // Schema is additionalProperties:false, so this MUST be declared or the connect is rejected.
+        selectedPixelId: { type: "string" }
+      },
+      ["provider"]
+    ),
+    reconnect_source: requiredObject(
+      {
+        sourceId: { type: "string" },
+        // FIX 3: reconnect accepts a FRESH credential so the handler replaces the
+        // stored (possibly dead) token and tests with the NEW one — it never
+        // re-authenticates with the old token. When omitted, the handler falls
+        // back to re-testing the stored credential (legacy refresh-only path).
+        connectionName: { type: "string" },
+        credentialKind: { type: "string" },
+        credentialPayload: { type: "object", additionalProperties: true },
+        encryptedPayload: { type: "string" },
+        oauthTokenId: { type: "string" },
+        // P1-2: an explicit pixel override on reconnect; absent, the prior pixel is carried forward
+        // (the handler reads the old selected_pixel_id before revoking). additionalProperties:false.
+        selectedPixelId: { type: "string" }
+      },
+      ["sourceId"]
+    ),
+    revoke_source: requiredObject({ sourceId: { type: "string" } }),
+    start_source_sync: requiredObject(
+      {
+        sourceId: { type: "string" },
+        mode: { type: "string" },
+        syncMode: { type: "string" },
+        backfillWindow: { type: "string" },
+        refreshWindowDays: { type: "number" }
+      },
+      ["sourceId"]
+    ),
+    sync_source_now: requiredObject(
+      {
+        sourceId: { type: "string" },
+        refreshWindowDays: {
+          type: "number",
+          minimum: 1,
+          maximum: 3650,
+          description:
+            "Optional bounded refresh window in days. Use 1 for latest/today/current checks; use up to 3650 when expanding X coverage for earliest/first-post questions."
+        },
+        reason: { type: "string" }
+      },
+      ["sourceId"]
+    ),
+    update_source_schedule: requiredObject(
+      {
+        sourceId: { type: "string" },
+        scheduleKind: {
+          enum: ["manual_only", "every_15_minutes", "hourly", "daily", "weekly"]
+        },
+        syncMode: { enum: ["incremental", "backfill"] },
+        refreshWindowDays: { type: "number" },
+        staleAfterMinutes: { type: "number" }
+      },
+      ["sourceId"]
+    ),
+    pause_source_schedule: requiredObject(
+      { sourceId: { type: "string" }, reason: { type: "string" } },
+      ["sourceId"]
+    ),
+    resume_source_schedule: requiredObject({ sourceId: { type: "string" } }, [
+      "sourceId"
+    ]),
+    describe_queryable_view: requiredObject(
+      { viewId: { enum: FIRST_PHASE_QUERYABLE_VIEWS } },
+      ["viewId"]
+    ),
+    describe_metric: requiredObject(
+      { metricId: { enum: FIRST_PHASE_METRICS } },
+      ["metricId"]
+    ),
+    run_metric_query: analyticalQuerySchema(),
+    run_breakdown_query: analyticalQuerySchema({ groupByRequired: true }),
+    run_funnel_query: analyticalQuerySchema(),
+    explain_answer: requiredObject({
+      metric: {
+        enum: FIRST_PHASE_METRICS,
+        description:
+          "Metric to explain. For X, use the metric's compatible source view when running follow-up queries: x_public_engagement -> queryable.vw_x_post_public_metrics; x_post_count/x_comment_count -> queryable.vw_x_authored_activity; x_follower_count -> queryable.vw_x_profile_public_metrics."
+      },
+      priorResultMetric: { enum: FIRST_PHASE_METRICS }
+    }),
+    drilldown_result: requiredObject({
+      metric: { enum: FIRST_PHASE_METRICS },
+      priorResultMetric: { enum: FIRST_PHASE_METRICS },
+      limit: { type: "number", maximum: 500 }
+    }),
+    search_context: requiredObject(
+      {
+        query: { type: "string" },
+        kinds: {
+          type: "array",
+          items: {
+            enum: [
+              "metric",
+              "source",
+              "policy",
+              "journey_template",
+              "entity",
+              "evidence"
+            ]
+          }
+        },
+        limit: { type: "number", maximum: 50 }
+      },
+      ["query"]
+    ),
+    describe_context_item: requiredObject(
+      {
+        itemId: { type: "string" },
+        includeEvidence: { type: "boolean" }
+      },
+      ["itemId"]
+    ),
+    resolve_entity: requiredObject(
+      {
+        entityType: {
+          // resolve_entity widens to RESOLVABLE_ENTITY_TYPES (adds adset/ad) — the journey-plan
+          // schema below stays on JOURNEY_ENTITY_TYPES so run_journey_query/validate_journey_plan
+          // keep rejecting adset/ad. (Slice 1b §7 enum split.)
+          enum: [...RESOLVABLE_ENTITY_TYPES]
+        },
+        query: { type: "string" },
+        filters: { type: "object", additionalProperties: true }
+      },
+      ["entityType", "query"]
+    ),
+    validate_journey_plan: requiredObject(
+      {
+        plan: journeyQueryPlanSchema(),
+        maxCost: { type: "number" }
+      },
+      ["plan"]
+    ),
+    run_journey_query: requiredObject(
+      {
+        plan: journeyQueryPlanSchema(),
+        validationId: { type: "string" },
+        limit: { type: "number", maximum: 500 }
+      },
+      ["plan", "validationId"]
+    ),
+    fetch_evidence: requiredObject(
+      {
+        evidenceHandleId: { type: "string" },
+        claimIds: { type: "array", items: { type: "string" } },
+        limit: { type: "number", maximum: 500 }
+      },
+      ["evidenceHandleId"]
+    ),
+    verify_claims: requiredObject(
+      {
+        claims: {
+          type: "array",
+          items: { type: "string" }
+        },
+        evidenceHandleIds: {
+          type: "array",
+          items: { type: "string" }
+        },
+        policyRefIds: {
+          type: "array",
+          items: { type: "string" }
+        }
+      },
+      ["claims", "evidenceHandleIds"]
+    ),
+    create_saved_report: requiredObject({
+      name: { type: "string" },
+      toolPlan: { type: "object", additionalProperties: true }
+    }),
+    run_saved_report: requiredObject({ reportId: { type: "string" } }, [
+      "reportId"
+    ]),
+    export_saved_report: requiredObject(
+      {
+        reportId: { type: "string" },
+        format: { enum: ["json"] }
+      },
+      ["reportId"]
+    ),
+    list_meta_assets: requiredObject(
+      {
+        accessToken: { type: "string", minLength: 1 },
+        businessId: { type: "string" },
+        apiVersion: { type: "string" }
+      },
+      ["accessToken"]
+    ),
+    list_meta_entities: requiredObject(
+      {
+        sourceId: { type: "string" },
+        entity: { enum: ["campaign", "adset", "ad", "creative"] },
+        limit: { type: "number", minimum: 1, maximum: 500 },
+        fields: { type: "string" }
+      },
+      ["sourceId", "entity"]
+    ),
+    get_meta_entity: requiredObject(
+      {
+        sourceId: { type: "string" },
+        entityId: { type: "string" },
+        // Optional entity-kind hint. Selects the canonical default field set so a
+        // `get` mirrors `list` (campaign/adset/ad/creative) instead of degrading
+        // to Graph's id-only response. An explicit `fields` still overrides.
+        entity: { enum: ["campaign", "adset", "ad", "creative"] },
+        fields: { type: "string" }
+      },
+      ["sourceId", "entityId"]
+    ),
+    // NOTHING required: sourceId auto-resolves to the workspace's sole connected meta_ads
+    // source (ambiguity fails typed), level defaults to ad, the window to last_30d. Bounded
+    // enums only — no free-form Graph fields/edges are expressible from this schema.
+    run_meta_live_insights: requiredObject(
+      {
+        sourceId: { type: "string" },
+        level: { enum: ["campaign", "adset", "ad"] },
+        datePreset: {
+          enum: [
+            "today",
+            "yesterday",
+            "last_7d",
+            "last_14d",
+            "last_30d",
+            "this_month",
+            "last_month",
+            "maximum"
+          ]
+        },
+        since: { type: "string", description: "YYYY-MM-DD window start (requires until; overrides datePreset)." },
+        until: { type: "string", description: "YYYY-MM-DD window end, inclusive (requires since)." },
+        limit: { type: "number", minimum: 1, maximum: 200 }
+      },
+      []
+    ),
+    create_meta_campaign: requiredObject(
+      {
+        // OPTIONAL. Omit it — the engine resolves the workspace's connected Meta source
+        // server-side (⌘L never plumbs a source id). Pass it only to disambiguate when
+        // multiple Meta accounts are connected.
+        sourceId: { type: "string" },
+        name: { type: "string" },
+        objective: {
+          type: "string",
+          description: "Meta outcome objective, e.g. OUTCOME_TRAFFIC, OUTCOME_SALES (uppercase)."
+        },
+        // Budget as INTEGER MINOR UNITS (cents) in the ad-account currency (back-compat).
+        dailyBudget: { type: "number", minimum: 0 },
+        lifetimeBudget: { type: "number", minimum: 0 },
+        // Budget in the ad account's MAJOR currency unit (dollars for USD, yen for JPY, …).
+        // The engine reads the account currency and converts to minor units — e.g. 500 → $500/day.
+        // Pass EITHER the *Major field OR the cents field for a given budget, never both.
+        dailyBudgetMajor: { type: "number", minimum: 0 },
+        lifetimeBudgetMajor: { type: "number", minimum: 0 },
+        clientToken: {
+          type: "string",
+          description: "Optional idempotency token; a repeat with the same token returns the existing id (deduped)."
+        }
+      },
+      ["name", "objective"]
+    ),
+    create_meta_ad_set: requiredObject(
+      {
+        // OPTIONAL — see create_meta_campaign.sourceId. Auto-resolved server-side when omitted.
+        sourceId: { type: "string" },
+        campaignId: { type: "string" },
+        name: { type: "string" },
+        optimizationGoal: { type: "string" },
+        billingEvent: { type: "string" },
+        // Integer minor units (cents), back-compat.
+        dailyBudget: { type: "number", minimum: 0 },
+        lifetimeBudget: { type: "number", minimum: 0 },
+        // Account MAJOR currency unit (dollars/yen/…); the engine converts to minor units.
+        // Pass EITHER the *Major field OR the cents field for a budget, never both.
+        dailyBudgetMajor: { type: "number", minimum: 0 },
+        lifetimeBudgetMajor: { type: "number", minimum: 0 },
+        bidAmount: { type: "number", minimum: 0 },
+        startTime: { type: "string" },
+        endTime: { type: "string" },
+        targetingCountries: { type: "array", items: { type: "string" } },
+        pixelId: { type: "string" },
+        customEventType: { type: "string" },
+        clientToken: { type: "string" }
+      },
+      ["campaignId", "name", "optimizationGoal", "billingEvent"]
+    ),
+    create_meta_creative: requiredObject(
+      {
+        sourceId: { type: "string" },
+        name: { type: "string" },
+        pageId: { type: "string" },
+        imageHash: { type: "string" },
+        // Downloadable image URL. Required by the meta_ads_cli transport (the CLI's
+        // --image needs a local file); ignored by the direct-Graph path (image_hash).
+        imageUrl: { type: "string" },
+        // Downloadable video URL. Required by the meta_ads_cli transport for
+        // standard single-video creatives (the CLI's --video needs a local file).
+        videoUrl: { type: "string" },
+        instagramUserId: { type: "string" },
+        linkUrl: { type: "string" },
+        body: { type: "string" },
+        title: { type: "string" },
+        description: { type: "string" },
+        callToAction: { type: "string" },
+        clientToken: { type: "string" }
+      },
+      // sourceId OPTIONAL — auto-resolved server-side (see create_meta_campaign.sourceId).
+      ["name", "pageId"]
+    ),
+    create_meta_ad: requiredObject(
+      {
+        sourceId: { type: "string" },
+        adsetId: { type: "string" },
+        name: { type: "string" },
+        creativeId: { type: "string" },
+        clientToken: { type: "string" }
+      },
+      // sourceId OPTIONAL — auto-resolved server-side (see create_meta_campaign.sourceId).
+      ["adsetId", "name", "creativeId"]
+    ),
+    set_meta_entity_status: requiredObject(
+      {
+        sourceId: { type: "string" },
+        entityId: { type: "string" },
+        // ACTIVE is the only money-SPENDING transition. It is gated TRANSPORT-AGNOSTICALLY in the
+        // handler: confirmActivation must echo entityId, so a bare/accidental request on ANY surface
+        // (HTTP, tools-call, CLI) cannot take an entity live. PAUSED (spend-reducing) needs no gate.
+        status: { enum: ["ACTIVE", "PAUSED"] },
+        // Activation confirmation. To permit status:ACTIVE the handler requires this to equal entityId
+        // (naming the exact entity guards accidental + wrong-entity activation). The desktop sets it
+        // after a deliberate gesture (e.g. press-and-hold); the CLI after its typed-confirm. Optional
+        // in the schema because PAUSED never needs it; the handler enforces it for ACTIVE.
+        confirmActivation: { type: "string" },
+        // REQUIRED (review): the entity-kind selects the CLI update subcommand. The
+        // direct Graph node POST does not strictly need it, but requiring it here
+        // makes the failure uniform + EARLY (schema-time) regardless of transport,
+        // rather than failing late at write time only on the CLI path.
+        entity: { enum: ["campaign", "adset", "ad"] }
+      },
+      ["sourceId", "entityId", "status", "entity"]
+    ),
+    update_meta_budget: requiredObject(
+      {
+        sourceId: { type: "string" },
+        entityId: { type: "string" },
+        // Budget writes live on the campaign (CBO) or the ad set ONLY — Meta has no
+        // ad-level budget. The enum EXCLUDES "ad"/"creative" so a wrong target fails
+        // at schema time, and the handler + connector reject it again (defense-in-depth).
+        entity: { enum: ["campaign", "adset"] },
+        // Integer minor units (cents) in the ad-account currency, e.g. 5000 = $50.00.
+        // Unlike create (where an omitted budget is valid) this is REQUIRED and must be
+        // POSITIVE: setting a budget to 0 is not a valid spend instruction, so the enum
+        // is a strict lower bound (exclusiveMinimum 0) and the handler/connector reject
+        // 0 / negative / non-integer amounts before any Graph POST.
+        dailyBudget: { type: "number", exclusiveMinimum: 0 }
+      },
+      ["sourceId", "entityId", "entity", "dailyBudget"]
+    ),
+    delete_meta_entity: requiredObject(
+      {
+        sourceId: { type: "string" },
+        entityId: { type: "string" },
+        // REQUIRED (review): the entity-kind selects the CLI delete subcommand and is
+        // recorded in the audit row. Delete is a NODE call (DELETE /{id}); creatives
+        // are not deletable via this verb. Required so the failure is uniform + EARLY
+        // regardless of transport. The CLI's destructive confirm gate lives above this.
+        entity: { enum: ["campaign", "adset", "ad"] }
+      },
+      ["sourceId", "entityId", "entity"]
+    )
+  };
+  return schemas[id] ?? requiredObject({});
+}
+
+function requiredObject(
+  properties: Record<string, unknown>,
+  required: string[] = []
+): Record<string, unknown> {
+  return {
+    type: "object",
+    properties,
+    required,
+    additionalProperties: false
+  };
+}
+
+function analyticalQuerySchema(
+  options: { groupByRequired?: boolean } = {}
+): Record<string, unknown> {
+  return requiredObject(
+    {
+      metric: {
+        enum: FIRST_PHASE_METRICS,
+        description:
+          "Metric to query. For X, choose a compatible view: x_public_engagement -> queryable.vw_x_post_public_metrics; x_post_count/x_comment_count -> queryable.vw_x_authored_activity; x_follower_count -> queryable.vw_x_profile_public_metrics."
+      },
+      view: {
+        enum: FIRST_PHASE_QUERYABLE_VIEWS,
+        description:
+          "Use a view compatible with the metric. For X: x_public_engagement uses queryable.vw_x_post_public_metrics; x_post_count and x_comment_count use queryable.vw_x_authored_activity; x_follower_count uses queryable.vw_x_profile_public_metrics."
+      },
+      site: {
+        type: "string",
+        description:
+          "Optional GA4 site scope: a site URL (e.g. 'rtk.dev') or workspace_sites id. Resolves to the GA4 source that backs that site so the answer is isolated to one property. Omit only when a single GA4 source exists or a deliberate cross-site total is intended."
+      },
+      filters: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            field: { type: "string" },
+            operator: { enum: ["equals", "matches", "gte", "lte"] },
+            value: { type: "string" }
+          },
+          required: ["field", "value"],
+          additionalProperties: false
+        }
+      },
+      groupBy: { type: "array", items: { type: "string" } },
+      orderBy: {
+        type: "object",
+        properties: {
+          field: { type: "string" },
+          direction: { enum: ["asc", "desc"] }
+        },
+        required: ["field"],
+        additionalProperties: false
+      },
+      limit: { type: "number", maximum: 500 },
+      compareTo: {
+        enum: ["prior_period", "prior_year"],
+        description:
+          "Optional comparison for trend answers (week-over-week, month-over-month, year-over-year). Set 'prior_period' to compare the result against the immediately preceding equal-length date range (e.g. the prior 7 days for a 7-day query — WoW/MoM), or 'prior_year' for the same range one calendar year earlier (YoY). REQUIRES occurred_on (or published_at for X) gte/lte date filters; without a bounded date range the comparison is skipped and a 'comparison_requires_date_range' caveat is added. The response gains a `comparison` block { mode, current, previous, absoluteDelta, percentDelta, direction, range } — phrase results as 'up/down X% vs prior period'. Comparison applies to run_metric_query only (it is ignored by run_breakdown_query)."
+      }
+    },
+    options.groupByRequired ? ["metric", "groupBy"] : ["metric"]
+  );
+}
+
+function actionOutputSchema(): Record<string, unknown> {
+  return {
+    type: "object",
+    required: [
+      "ok",
+      "actionId",
+      "status",
+      "provenance",
+      "caveats",
+      "nextActions"
+    ],
+    properties: {
+      ok: { type: "boolean" },
+      actionId: { enum: FIRST_PHASE_ACTIONS },
+      authority: { enum: ["tool_agent", "operator"] },
+      status: {
+        enum: [
+          "ok",
+          "resolved",
+          "unsupported",
+          "not_implemented",
+          "low_coverage",
+          "needs_clarification",
+          "too_expensive",
+          "queued",
+          "error"
+        ]
+      },
+      answerabilityReason: {
+        enum: [
+          "missing_context",
+          "missing_journey_template",
+          "unapproved_journey_template",
+          "insufficient_source_coverage",
+          "ambiguous_entity",
+          "unsupported_intent",
+          "policy_blocked",
+          "cost_limit_exceeded",
+          "execution_error"
+        ]
+      },
+      interpretedPlan: journeyQueryPlanSchema(),
+      resultHandle: { type: "string" },
+      evidence: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            id: { type: "string" },
+            kind: {
+              enum: [
+                "context_item",
+                "query_result",
+                "provider_record",
+                "claim_verification"
+              ]
+            },
+            sourceIds: { type: "array", items: { type: "string" } },
+            claimIds: { type: "array", items: { type: "string" } },
+            createdAt: { type: "string" },
+            expiresAt: { type: ["string", "null"] }
+          },
+          required: ["id", "kind", "sourceIds"],
+          additionalProperties: false
+        }
+      },
+      coverage: {
+        type: "object",
+        properties: {
+          sourceIds: { type: "array", items: { type: "string" } },
+          requiredSourceIds: { type: "array", items: { type: "string" } },
+          coveredCount: { type: "number" },
+          expectedCount: { type: "number" },
+          coverageRatio: { type: "number" },
+          missingSourceIds: { type: "array", items: { type: "string" } },
+          staleSourceIds: { type: "array", items: { type: "string" } }
+        },
+        required: ["sourceIds", "coveredCount", "expectedCount"],
+        additionalProperties: false
+      },
+      policyRefs: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            id: { type: "string" },
+            kind: {
+              enum: [
+                "metric_definition",
+                "journey_template",
+                "source_capability",
+                "privacy",
+                "operator_policy"
+              ]
+            },
+            version: { type: "string" },
+            approved: { type: "boolean" }
+          },
+          required: ["id", "kind", "approved"],
+          additionalProperties: false
+        }
+      },
+      provenance: { type: "array", items: { type: "string" } },
+      caveats: { type: "array", items: { type: "string" } },
+      nextActions: { type: "array", items: { enum: FIRST_PHASE_ACTIONS } }
+    },
+    additionalProperties: true
+  };
+}
+
+function journeyQueryPlanSchema(): Record<string, unknown> {
+  return requiredObject(
+    {
+      intent: {
+        enum: [
+          "rank_entities_by_outcome",
+          "compare_cohorts",
+          "trace_paths",
+          "find_behavior_signals",
+          "summarize_lifecycle",
+          "explain_change",
+          "drilldown_evidence"
+        ]
+      },
+      actor: requiredObject(
+        {
+          grain: { enum: ["person", "account"] }
+        },
+        ["grain"]
+      ),
+      journeyTemplateId: { type: "string" },
+      entity: requiredObject(
+        {
+          type: {
+            enum: [...JOURNEY_ENTITY_TYPES]
+          },
+          filters: { type: "object", additionalProperties: true }
+        },
+        ["type"]
+      ),
+      outcome: requiredObject(
+        {
+          id: { type: "string" },
+          window: { type: "string" },
+          policyId: { type: "string" }
+        },
+        ["id"]
+      ),
+      timeRange: requiredObject(
+        {
+          start: { type: "string" },
+          end: { type: "string" }
+        },
+        ["start", "end"]
+      ),
+      groupBy: { type: "array", items: { type: "string" } },
+      ranking: requiredObject(
+        {
+          metric: { type: "string" },
+          direction: { enum: ["asc", "desc"] }
+        },
+        ["metric", "direction"]
+      ),
+      limit: { type: "number", maximum: 500 }
+    },
+    ["intent", "actor", "timeRange"]
+  );
+}
+
+export * from "./session-memory.js";
+export * from "./recipes.js";
+export * from "./notifications.js";

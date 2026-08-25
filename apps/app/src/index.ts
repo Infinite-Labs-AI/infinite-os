@@ -1,0 +1,3233 @@
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { realpathSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import Fastify from "fastify";
+import {
+  createActionHandlers,
+  resetStuckSyncingSourcesOnBoot
+} from "@infinite-os/analytical-engine";
+import { databaseFingerprint, loadInfiniteOsConfig } from "@infinite-os/config";
+import {
+  appVersion,
+  buildDaemonDescriptor,
+  removeDaemonDescriptor,
+  writeDaemonDescriptor,
+  type BoundAddress
+} from "./daemon-descriptor.js";
+import { acquireDaemonSpawnLock } from "./daemon-spawn-lock.js";
+import {
+  decryptCredentialPayload,
+  encryptCredentialPayload,
+  encryptionKeyFingerprint
+} from "@infinite-os/core";
+import {
+  claimWorkspace,
+  createInfiniteOsDb,
+  createProject,
+  createProjectWithId,
+  deleteProject,
+  isPgliteDatabaseUrl,
+  listProjects,
+  readLatestSetupPublicArtifacts,
+  runMigrations,
+  upsertWorkspaceSite,
+  type InfiniteOsDb
+} from "@infinite-os/db";
+import {
+  createConfiguredModelClient,
+  createCuratedMemoryManager,
+  createLlmController,
+  createModelBackedMemoryReviewer,
+  createSourceAwareQueryAdvisor,
+  createSessionStore,
+  filterCuratedMemoryCandidates,
+  type InfiniteOsModelClient,
+  type ScopedAppTools,
+  type ChatSessionStore
+} from "@infinite-os/llm-controller";
+import {
+  FIRST_PHASE_METRICS,
+  FIRST_PHASE_PROVIDERS,
+  FIRST_PHASE_QUERYABLE_VIEWS,
+  createDaemonActionRegistry,
+  createEnvelope,
+  createSessionContext,
+  createInfiniteOsRegistry,
+  listRecipes,
+  loadSetupModule as loadRuntimeSetupModule,
+  type Authority,
+  type InfiniteOsActionId,
+  type RuntimeSurface
+} from "@infinite-os/runtime";
+
+declare module "fastify" {
+  interface FastifyRequest {
+    auth: { authority: Authority; workspaceId: string | undefined };
+  }
+}
+
+function timingSafeEqualStr(a: string, b: string): boolean {
+  const ab = Buffer.from(a);
+  const bb = Buffer.from(b);
+  return ab.length === bb.length && timingSafeEqual(ab, bb);
+}
+
+// Map the gateway request's `platform` to the controller RuntimeSurface.
+// ChatInput.surface accepts "api" | "app" | "cli" | "desktop"; the desktop
+// sends platform "desktop". Unknown/missing platforms fall back to "api"
+// (the historical hardcode) so legacy gateway callers are unchanged.
+type GatewayControllerSurface = Extract<RuntimeSurface, "api" | "app" | "cli" | "desktop">;
+function platformToSurface(platform: string): GatewayControllerSurface {
+  switch (platform) {
+    case "desktop":
+      return "desktop";
+    case "app":
+      return "app";
+    case "cli":
+      return "cli";
+    default:
+      return "api";
+  }
+}
+
+// The controller keys sessions by the workspace-qualified id (`<conversationId>:<ws>`), but the
+// API must hand the CLIENT back the UNqualified conversation id. The next turn round-trips this
+// value as its `sessionId`, and we re-qualify it (`:<ws>`) idempotently — so returning the
+// qualified key would make turn 2 send `<conversationId>:<ws>`, which we'd re-qualify to
+// `<conversationId>:<ws>:<ws>`: a brand-new orphaned session that silently breaks multi-turn
+// continuity. Mirrors the CLI's stripWorkspaceSuffix (apps/cli/src/index.ts).
+function stripWorkspaceSuffix(id: string, workspaceId: string): string {
+  const suffix = `:${workspaceId}`;
+  return id.endsWith(suffix) ? id.slice(0, -suffix.length) : id;
+}
+
+// Feature-capability flags published on /health so a discovering desktop can gate an
+// EXTERNAL daemon by FEATURE rather than guessing from the version string. These are
+// PUBLIC (liveness-level, NOT loopback-gated): capability discovery must work over the
+// wire for external daemons, and the entries are non-sensitive feature names (never
+// secrets). ADD-ONLY: append new capabilities as the engine gains them; never rename or
+// remove one a shipped desktop already gates on (that would silently mis-gate it).
+export const APP_CAPABILITIES = [
+  // PR #76 — the scoped app-tool bridge for desktop Ads local-brain sessions.
+  "scoped_app_tools",
+  // Codex chat keystone — the scoped app-tool bridge also supports mode:"union", which
+  // runs a chat turn over the UNION of the native action registry AND the injected app
+  // tools, WITH session memory. The desktop MUST fail CLOSED on this flag: an old daemon
+  // that lacks it must be treated as not supporting union, so the desktop never silently
+  // downgrades a union request to exclusive (which would drop the native analytics).
+  "scoped_app_tools_union",
+  // Meta Ads budget writes: update_meta_budget scales/reduces the daily budget of an
+  // existing campaign|adset via a direct Graph POST. Both the general feature flag and
+  // the exact action id are published so the desktop can gate on whichever it checks.
+  "meta_budget_writes",
+  "update_meta_budget",
+  // Phase-2 native-analytics removal — this daemon's registry is built by
+  // createDaemonActionRegistry and permanently excludes EMBEDDED_ONLY_READ_ACTIONS
+  // (the local-store analytics readers + their retired metadata family) from
+  // advertisement AND execution. Published so an embedding desktop can DETECT the
+  // new daemon generation (e.g. to decide when its interim description-marker
+  // steering is inert for a given daemon); it is deliberately NOT a negotiation
+  // flag — the removal is unconditional either way.
+  "native_analytics_removed",
+  // Live Meta Ads insights read (run_meta_live_insights): the ⌘L Meta answer path executes
+  // on THIS daemon (Meta is permanently local). The desktop fails CLOSED on this flag — an
+  // older daemon without it gets an honest meta_live_engine_outdated error, never a
+  // confusing invalid_tool_input from a registry that lacks the action.
+  "meta_live_insights"
+] as const;
+
+type ScopedAppToolsParseResult =
+  | { value?: ScopedAppTools; error?: undefined }
+  | { value?: undefined; error: { code: "invalid_scoped_app_tools"; message: string } };
+
+function parseScopedAppTools(value: unknown): ScopedAppToolsParseResult {
+  if (value === undefined || value === null) {
+    return {};
+  }
+  if (!isPlainRecord(value)) {
+    return invalidScopedAppTools("Scoped app tools must be an object.");
+  }
+  const serverName = stringField(value, "serverName")?.trim();
+  if (!serverName || !/^[a-zA-Z0-9_-]{1,64}$/.test(serverName)) {
+    return invalidScopedAppTools("Scoped app tool serverName is invalid.");
+  }
+  // Optional composition mode. ABSENT ⇒ exclusive (today's ads sub-agent behavior:
+  // scoped tools REPLACE the native registry, ephemeral turn). "union" runs the turn
+  // over native ∪ app tools WITH memory (Codex chat). Reject any other value — the
+  // strictness of this validator is the security story; an unknown mode must never be
+  // silently coerced to a permissive default.
+  const modeRaw = value.mode;
+  let mode: "exclusive" | "union" | undefined;
+  if (modeRaw !== undefined && modeRaw !== null) {
+    if (modeRaw !== "exclusive" && modeRaw !== "union") {
+      return invalidScopedAppTools("Scoped app tool mode must be \"exclusive\" or \"union\".");
+    }
+    mode = modeRaw;
+  }
+  const allowedToolsRaw = value.allowedTools;
+  if (!Array.isArray(allowedToolsRaw) || allowedToolsRaw.length === 0 || allowedToolsRaw.length > 64) {
+    return invalidScopedAppTools("Scoped app tools require a non-empty allowlist.");
+  }
+  const allowedTools: string[] = [];
+  for (const entry of allowedToolsRaw) {
+    if (typeof entry !== "string" || !/^mcp__[a-zA-Z0-9_-]+__[a-zA-Z0-9_-]+(?:\*)?$/.test(entry)) {
+      return invalidScopedAppTools("Scoped app tool allowlist contains an invalid pattern.");
+    }
+    allowedTools.push(entry);
+  }
+  const toolsRaw = value.tools;
+  if (!Array.isArray(toolsRaw) || toolsRaw.length === 0 || toolsRaw.length > 64) {
+    return invalidScopedAppTools("Scoped app tools require a non-empty catalog.");
+  }
+  const seenTools = new Set<string>();
+  const tools: ScopedAppTools["tools"] = [];
+  for (const entry of toolsRaw) {
+    if (!isPlainRecord(entry)) {
+      return invalidScopedAppTools("Scoped app tool catalog entries must be objects.");
+    }
+    const name = stringField(entry, "name")?.trim();
+    const description = stringField(entry, "description")?.trim();
+    const inputSchema = entry.inputSchema;
+    if (!name || !/^[a-zA-Z0-9_-]{1,80}$/.test(name) || seenTools.has(name)) {
+      return invalidScopedAppTools("Scoped app tool catalog contains an invalid or duplicate tool name.");
+    }
+    if (!description || description.length > 500) {
+      return invalidScopedAppTools("Scoped app tool catalog contains an invalid description.");
+    }
+    if (!isPlainRecord(inputSchema)) {
+      return invalidScopedAppTools("Scoped app tool catalog contains an invalid input schema.");
+    }
+    seenTools.add(name);
+    tools.push({ name, description, inputSchema });
+  }
+  const proxy = value.proxy;
+  if (!isPlainRecord(proxy) || proxy.type !== "mcp-jsonrpc-http") {
+    return invalidScopedAppTools("Scoped app tools require an mcp-jsonrpc-http proxy.");
+  }
+  const proxyUrl = stringField(proxy, "url");
+  if (!proxyUrl || !isLoopbackHttpUrl(proxyUrl)) {
+    return invalidScopedAppTools("Scoped app tool proxy URL must be loopback HTTP.");
+  }
+  const headers = boundedStringRecord(proxy.headers);
+  if (!headers) {
+    return invalidScopedAppTools("Scoped app tool proxy headers are invalid.");
+  }
+  return {
+    value: {
+      serverName,
+      allowedTools,
+      ...(mode ? { mode } : {}),
+      tools,
+      callTool: (toolName, input, context) =>
+        callScopedAppToolProxy({
+          url: proxyUrl,
+          headers,
+          toolCallId: context?.toolCallId ?? randomUUID(),
+          toolName,
+          input
+        })
+    }
+  };
+}
+
+function invalidScopedAppTools(message: string): ScopedAppToolsParseResult {
+  return { error: { code: "invalid_scoped_app_tools", message } };
+}
+
+function isLoopbackHttpUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "http:") {
+      return false;
+    }
+    return url.hostname === "127.0.0.1" || url.hostname === "localhost" || url.hostname === "[::1]" || url.hostname === "::1";
+  } catch {
+    return false;
+  }
+}
+
+function boundedStringRecord(value: unknown): Record<string, string> | null {
+  if (value === undefined || value === null) {
+    return {};
+  }
+  if (!isPlainRecord(value)) {
+    return null;
+  }
+  const out: Record<string, string> = {};
+  for (const [key, entry] of Object.entries(value)) {
+    if (!/^[a-zA-Z0-9_-]{1,80}$/.test(key) || typeof entry !== "string" || entry.length > 1000) {
+      return null;
+    }
+    out[key] = entry;
+  }
+  return out;
+}
+
+async function callScopedAppToolProxy(input: {
+  url: string;
+  headers: Record<string, string>;
+  toolCallId: string;
+  toolName: string;
+  input: unknown;
+}): Promise<unknown> {
+  const timeout = AbortSignal.timeout(30_000);
+  const response = await fetch(input.url, {
+    method: "POST",
+    redirect: "error",
+    signal: timeout,
+    headers: {
+      "Content-Type": "application/json",
+      ...input.headers
+    },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: input.toolCallId,
+      method: "tools/call",
+      params: {
+        name: input.toolName,
+        arguments: input.input
+      }
+    })
+  });
+  const text = await response.text();
+  if (text.length > 1_000_000) {
+    throw new Error("scoped_app_tool_response_too_large");
+  }
+  if (!response.ok) {
+    throw new Error(`scoped_app_tool_proxy_http_${response.status}`);
+  }
+  let json: unknown;
+  try {
+    json = JSON.parse(text) as unknown;
+  } catch {
+    throw new Error("scoped_app_tool_proxy_invalid_jsonrpc");
+  }
+  if (!isPlainRecord(json) || json.jsonrpc !== "2.0" || json.id !== input.toolCallId) {
+    throw new Error("scoped_app_tool_proxy_invalid_jsonrpc");
+  }
+  const hasResult = Object.prototype.hasOwnProperty.call(json, "result");
+  const hasError = Object.prototype.hasOwnProperty.call(json, "error");
+  if (hasResult === hasError) {
+    throw new Error("scoped_app_tool_proxy_invalid_jsonrpc");
+  }
+  if (hasError) {
+    if (!isPlainRecord(json.error)) {
+      throw new Error("scoped_app_tool_proxy_invalid_jsonrpc");
+    }
+    throw new Error(stringField(json.error, "message") ?? "scoped_app_tool_proxy_error");
+  }
+  return parseScopedAppToolResult(json.result);
+}
+
+function parseScopedAppToolResult(result: unknown): unknown {
+  if (!isPlainRecord(result)) {
+    return result;
+  }
+  const content = result.content;
+  if (!Array.isArray(content) || content.length !== 1 || !isPlainRecord(content[0])) {
+    return result;
+  }
+  const text = content[0].text;
+  if (content[0].type !== "text" || typeof text !== "string") {
+    return result;
+  }
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    return text;
+  }
+}
+
+function stringField(value: Record<string, unknown>, key: string): string | undefined {
+  const field = value[key];
+  return typeof field === "string" ? field : undefined;
+}
+
+export interface CompactSessionRequestBody {
+  newSessionId?: string;
+  summaryText?: string;
+  summaryJson?: Record<string, unknown>;
+}
+
+export interface MemoryFactRequestBody {
+  scope?: string;
+  fact?: string;
+}
+
+export interface GatewayTurnRequestBody {
+  platform?: string;
+  actorId?: string;
+  channelId?: string;
+  message?: string;
+  sessionId?: string;
+  appTools?: unknown;
+}
+
+export interface ConnectorOAuthSessionRequestBody {
+  provider?: string;
+  clientId?: string;
+  clientSecret?: string;
+  redirectUri?: string;
+  authorizationBaseUrl?: string;
+  tokenUrl?: string;
+  scope?: string | string[];
+  extraParams?: Record<string, string>;
+}
+
+export interface ConnectorOAuthExchangeRequestBody {
+  propertyId?: string;
+  connectionName?: string;
+  clientSecret?: string;
+  tokenUrl?: string;
+  apiBaseUrl?: string;
+}
+
+export interface SetupSiteMetadataRequestBody {
+  url?: string;
+  repoPath?: string;
+  appDir?: string;
+  framework?: string;
+  businessType?: string;
+}
+
+interface ConnectorOAuthSession {
+  sessionId: string;
+  provider: string;
+  clientId: string;
+  workspaceId?: string;
+  oauthAppId?: string | null;
+  oauthAppPayload?: Record<string, unknown> | null;
+  authorizationBaseUrl: string;
+  scope: string;
+  state: string;
+  status: "pending" | "completed" | "failed";
+  authorizationUrl: string;
+  redirectUri: string;
+  createdAt: string;
+  expiresAt: string;
+  code?: string;
+  codeVerifier?: string;
+  // The exchanged OAuth token, held in-memory after the FIRST exchange so the list-properties step
+  // and the connect step can both use it (Google consumes the single-use auth code on first
+  // exchange). Never serialized out — redactConnectorOAuthSession whitelists fields and omits this.
+  token?: { accessToken: string; refreshToken?: string; expiresAt?: string };
+  error?: string;
+  completedAt?: string;
+}
+
+interface ResumeSetupRunResult {
+  ok: boolean;
+  resumed: boolean;
+  onboarding?: {
+    selectedProviders?: unknown;
+    recommendedProviders?: unknown;
+    completed?: unknown;
+    paused?: unknown;
+    failed?: unknown;
+    activeRuns?: unknown;
+    resolvedPublicArtifacts?: unknown;
+    installCommand?: unknown;
+    installArtifactsPath?: unknown;
+  };
+  notes?: unknown;
+}
+
+export function createApp(options: {
+  databaseUrl?: string;
+  database?: InfiniteOsDb;
+  modelClient?: InfiniteOsModelClient;
+  sessionStore?: ChatSessionStore;
+  // Identity + convergence surface for /health (daemon-discovery §3/§4/§10). The
+  // standalone daemon entrypoint computes these ONCE at boot and passes them in;
+  // in-process callers (tests, app.inject) omit them and get the public-only shape.
+  // databaseId/keyId are non-secret by construction (password-stripped DB hash /
+  // HMAC keyed by the secret) and are returned ONLY to loopback callers anyway.
+  convergence?: { nonce: string; databaseId?: string; keyId?: string };
+  resumeSetupRun?: (input: {
+    db: InfiniteOsDb;
+    workspaceId: string;
+    runId: string;
+    registry: ReturnType<typeof createInfiniteOsRegistry>;
+  }) => Promise<ResumeSetupRunResult>;
+} = {}) {
+  const app = Fastify({ logger: false });
+  const databaseUrl = options.databaseUrl ?? process.env.DATABASE_URL;
+  const createdDatabase = !options.database && databaseUrl ? createInfiniteOsDb(databaseUrl) : undefined;
+  const database = options.database ?? createdDatabase;
+  // The FULL handler map (kept in scope ONLY for the retired-metadata HTTP data
+  // routes below — /schema, /queryable/views, /metrics, /source-health). The
+  // registry the daemon advertises and executes is the DAEMON-SURFACE registry:
+  // createDaemonActionRegistry permanently excludes EMBEDDED_ONLY_READ_ACTIONS
+  // (local-store analytics readers + retired metadata family) from
+  // registry.list() (→ /mcp/tools, /capabilities, chat tool sets — union and
+  // plain) and registry.execute() (→ /tools/call, /mcp/tools/call). See the
+  // Phase-2 rationale on createDaemonActionRegistry in @infinite-os/runtime.
+  const actionHandlers = database ? createActionHandlers(database) : {};
+  const registry = createDaemonActionRegistry(actionHandlers);
+  const resumeSetupRun = options.resumeSetupRun ?? defaultResumeSetupRun;
+  const dbAdapter = database ? sessionStoreDb(database) : undefined;
+  const sessionStore = options.sessionStore ?? (dbAdapter ? createSessionStore(dbAdapter) : undefined);
+  const modelClient = options.modelClient ?? createConfiguredModelClient();
+  const queryAdvisor = createSourceAwareQueryAdvisor();
+  // Mirror the CLI in-process runtime (apps/cli/src/index.ts:9545) so the
+  // gateway turn gets curated memory load/review. dbAdapter is optional here
+  // (no DATABASE_URL -> undefined) unlike the CLI, so only build the manager
+  // when the db-backed adapter exists; createLlmController accepts an
+  // optional memoryManager.
+  const memoryManager = dbAdapter
+    ? createCuratedMemoryManager({
+        db: dbAdapter,
+        reviewer: createModelBackedMemoryReviewer(modelClient)
+      })
+    : undefined;
+  const llmController = createLlmController({
+    registry,
+    sessionStore,
+    modelClient,
+    memoryManager,
+    queryAdvisor
+  });
+  const oauthSessions = new Map<string, ConnectorOAuthSession>();
+  if (createdDatabase) {
+    app.addHook("onClose", async () => {
+      await createdDatabase.close();
+    });
+  }
+
+  const PUBLIC_ROUTES = new Set(["/health", "/oauth/callback/:provider"]);
+  app.addHook("onRequest", async (request, reply) => {
+    const route = request.routeOptions.url ?? request.url; // Fastify v5; NOT request.routerPath
+    if (route && PUBLIC_ROUTES.has(route)) {
+      return;
+    }
+    // loadInfiniteOsConfig() throws when DATABASE_URL / encryption key are absent.
+    // Auth should still honor explicitly provided operator/read tokens when only
+    // unrelated config like the encryption key is missing, while preserving a 401
+    // when no usable token config exists at all. (C3)
+    let cfg: ReturnType<typeof loadInfiniteOsConfig> | undefined;
+    try {
+      cfg = loadInfiniteOsConfig();
+    } catch {
+      cfg = undefined;
+    }
+    const token = request.headers.authorization?.replace(/^Bearer\s+/i, "");
+    const operatorToken = cfg?.operatorToken ?? process.env.GROWTH_OS_OPERATOR_TOKEN;
+    const readToken = cfg?.readToken ?? process.env.GROWTH_OS_READ_TOKEN;
+    let authority: Authority | undefined;
+    if (token && operatorToken && timingSafeEqualStr(token, operatorToken)) {
+      authority = "operator";
+    } else if (token && readToken && timingSafeEqualStr(token, readToken)) {
+      authority = "tool_agent";
+    }
+    if (!authority) {
+      reply.code(401);
+      return reply.send({ ok: false, error: { code: "unauthorized" } });
+    }
+    const header = requestedWorkspaceId(request.headers["x-growth-os-workspace"]);
+    let workspaceId: string | undefined;
+    if (header) {
+      if (!database) {
+        reply.code(503);
+        return reply.send({ ok: false, error: { code: "database_unavailable" } });
+      }
+      const exists = await database.one("select 1 as ok from workspaces where id = $1", [header]);
+      if (!exists) {
+        reply.code(400);
+        return reply.send({ ok: false, error: { code: "unknown_workspace" } });
+      }
+      workspaceId = header;
+    }
+    request.auth = { authority, workspaceId };
+  });
+
+  // /health is the unauthenticated discovery + convergence surface (daemon-discovery
+  // §3/§4/§10). LIVENESS fields (status/service/runtime/pid/version/nonce) are PUBLIC
+  // so a client can confirm "this is the Infinite OS daemon, alive, at this pid/boot".
+  // The CONVERGENCE fingerprints (databaseId/keyId) are non-secret by construction but
+  // are returned ONLY to loopback callers as defense-in-depth — never exposed LAN-wide.
+  //
+  // nonce: a per-PROCESS value minted once. The standalone daemon supplies the boot
+  // nonce via options.convergence; an in-process caller (tests) gets a per-app fallback
+  // so /health always carries one.
+  const healthNonce = options.convergence?.nonce ?? randomUUID();
+  const healthDatabaseId = options.convergence?.databaseId;
+  const healthKeyId = options.convergence?.keyId;
+  app.get("/health", async (request) => {
+    const body: {
+      status: string;
+      service: string;
+      runtime: string;
+      pid: number;
+      version: string;
+      nonce: string;
+      // PUBLIC feature-capability flags (see APP_CAPABILITIES) — additive/backward-
+      // compatible: a client that ignores it sees the unchanged liveness shape.
+      capabilities: string[];
+      databaseId?: string;
+      keyId?: string;
+    } = {
+      status: "ok",
+      service: "growth-os-app",
+      runtime: "app-api-mcp",
+      pid: process.pid,
+      version: appVersion(),
+      nonce: healthNonce,
+      capabilities: [...APP_CAPABILITIES]
+    };
+    // Loopback-gate the convergence fingerprints — a remote (LAN) caller gets liveness
+    // only. isLocalHost reuses the Host-header check used elsewhere (~L2200).
+    if (isLocalHost(request.headers.host)) {
+      if (healthDatabaseId !== undefined) body.databaseId = healthDatabaseId;
+      if (healthKeyId !== undefined) body.keyId = healthKeyId;
+    }
+    return body;
+  });
+
+  app.get("/schema", async (request, reply) => {
+    const ws = request.auth.workspaceId;
+    if (!ws) {
+      reply.code(400);
+      return { ok: false, error: { code: "unknown_workspace" } };
+    }
+    return retiredMetadataActionRequest("list_queryable_views", {}, "api", ws);
+  });
+  app.get("/queryable/views", async (request, reply) => {
+    const ws = request.auth.workspaceId;
+    if (!ws) {
+      reply.code(400);
+      return { ok: false, error: { code: "unknown_workspace" } };
+    }
+    return retiredMetadataActionRequest("list_queryable_views", {}, "api", ws);
+  });
+  app.get("/metrics", async (request, reply) => {
+    const ws = request.auth.workspaceId;
+    if (!ws) {
+      reply.code(400);
+      return { ok: false, error: { code: "unknown_workspace" } };
+    }
+    return retiredMetadataActionRequest("list_metrics", {}, "api", ws);
+  });
+  app.get("/sources", async (request, reply) => {
+    const ws = request.auth.workspaceId;
+    if (!ws) {
+      reply.code(400);
+      return { ok: false, error: { code: "unknown_workspace" } };
+    }
+    return actionRequest("list_sources", {}, "api", "tool_agent", undefined, ws);
+  });
+  app.get("/integrations", async (request, reply) => {
+    const ws = request.auth.workspaceId;
+    if (!ws) {
+      reply.code(400);
+      return { ok: false, error: { code: "unknown_workspace" } };
+    }
+    return actionRequest("list_sources", {}, "app", "tool_agent", undefined, ws);
+  });
+  app.get("/source-schedules", async (request, reply) => {
+    const ws = request.auth.workspaceId;
+    if (!ws) {
+      reply.code(400);
+      return { ok: false, error: { code: "unknown_workspace" } };
+    }
+    return actionRequest("list_source_schedules", {}, "api", "tool_agent", undefined, ws);
+  });
+  app.get("/sync/runs", async (request, reply) => {
+    const ws = request.auth.workspaceId;
+    if (!ws) {
+      reply.code(400);
+      return { ok: false, error: { code: "unknown_workspace" } };
+    }
+    return actionRequest("get_recent_sync_runs", request.query ?? {}, "api", "tool_agent", undefined, ws);
+  });
+  app.get<{ Params: { id: string } }>("/jobs/:id", async (request, reply) => {
+    if (!database) {
+      reply.code(503);
+      return { ok: false, error: { code: "database_unavailable" } };
+    }
+    const requestedWorkspace = request.auth.workspaceId;
+    if (!requestedWorkspace) {
+      reply.code(400);
+      return { ok: false, error: { code: "unknown_workspace" } };
+    }
+    const job = await database.one<Record<string, unknown>>(
+      `
+        select id, workspace_id, job_type, payload, status, attempt_count,
+               created_at, started_at, finished_at, error
+        from job_runs
+        where id = $1 and workspace_id = $2
+      `,
+      [request.params.id, requestedWorkspace]
+    );
+    if (!job) {
+      reply.code(404);
+      return { ok: false, error: { code: "job_not_found" } };
+    }
+    const sourceId = sourceIdFromJobPayload(job.payload);
+    const syncRuns = sourceId
+      ? await database.query<Record<string, unknown>>(
+        `
+          select id, workspace_id, source_id, status, started_at, finished_at,
+                 records_extracted, records_loaded, error
+          from sync_runs
+          where workspace_id = $1
+            and source_id = $2
+            and ($3::timestamptz is null or started_at >= $3::timestamptz - interval '5 seconds')
+          order by started_at desc nulls last, finished_at desc nulls last
+          limit 1
+        `,
+        [requestedWorkspace, sourceId, job.created_at ?? null]
+      )
+      : [];
+    return {
+      ok: true,
+      data: {
+        job,
+        syncRun: syncRuns[0] ?? null
+      }
+    };
+  });
+  app.get("/source-health", async (request, reply) => {
+    const ws = request.auth.workspaceId;
+    if (!ws) {
+      reply.code(400);
+      return { ok: false, error: { code: "unknown_workspace" } };
+    }
+    return retiredMetadataActionRequest("describe_queryable_view", { viewId: "queryable.vw_recent_sync_status" }, "app", ws);
+  });
+
+  app.post<{ Body: GatewayTurnRequestBody }>("/gateway/turn", async (request, reply) => {
+    if (request.auth.authority !== "operator") {
+      reply.code(403);
+      return { ok: false, error: { code: "operator_authority_required" } };
+    }
+    const ws = request.auth.workspaceId;
+    if (!ws) {
+      reply.code(400);
+      return { ok: false, error: { code: "unknown_workspace" } };
+    }
+    const message = typeof request.body?.message === "string" ? request.body.message.trim() : "";
+    if (!message) {
+      reply.code(400);
+      return { ok: false, error: { code: "gateway_message_required" } };
+    }
+    const platform = typeof request.body?.platform === "string" && request.body.platform.trim()
+      ? request.body.platform.trim()
+      : "gateway";
+    const actorId = typeof request.body?.actorId === "string" && request.body.actorId.trim()
+      ? request.body.actorId.trim()
+      : `${platform}:unknown`;
+    const channelId = typeof request.body?.channelId === "string" && request.body.channelId.trim()
+      ? request.body.channelId.trim()
+      : "default";
+    const conversationId = typeof request.body?.sessionId === "string" && request.body.sessionId.trim()
+      ? request.body.sessionId.trim()
+      : `${platform}:${channelId}:${actorId}`;
+    // Qualify the conversation id with the workspace, mirroring the CLI's
+    // deriveControllerSessionId (apps/cli/src/index.ts:9597). chat_sessions
+    // keys rows on (workspace_id, session_key) but inserts id = session_key =
+    // sessionId, so two workspaces sharing one conversation id would re-insert
+    // the same PK and collide. The `:${ws}` suffix keeps the row per-workspace.
+    const sessionId = `${conversationId}:${ws}`;
+    const scopedAppTools = parseScopedAppTools(request.body?.appTools);
+    if (scopedAppTools.error) {
+      reply.code(400);
+      return { ok: false, error: scopedAppTools.error };
+    }
+    const response = await llmController.chat({
+      message,
+      sessionId,
+      workspaceId: ws,
+      actorId,
+      surface: platformToSurface(platform),
+      ...(scopedAppTools.value ? { scopedAppTools: scopedAppTools.value } : {})
+    });
+    return {
+      ok: true,
+      platform,
+      channelId,
+      actorId,
+      // Hand back the UNqualified conversation id so the next turn round-trips to a value we
+      // re-qualify idempotently. response.sessionId is the workspace-qualified controller key
+      // (it may also have rotated via compaction); strip the `:<ws>` suffix either way.
+      sessionId: stripWorkspaceSuffix(response.sessionId, ws),
+      message: response.message,
+      provenance: response.provenance,
+      actionCalls: response.actionCalls
+    };
+  });
+
+  // Streaming sibling of /gateway/turn: forwards the controller's onProgress events (message.delta,
+  // message.start/complete, tool.*, subagent.*) to the client as Server-Sent Events, then a final
+  // "done" event carrying the same payload /gateway/turn returns. The desktop consumes this for live
+  // token streaming; the buffering /gateway/turn stays for non-streaming callers. Auth + session
+  // derivation are kept VERBATIM from /gateway/turn — only the response is a hijacked SSE stream.
+  app.post<{ Body: GatewayTurnRequestBody }>("/gateway/turn/stream", async (request, reply) => {
+    if (request.auth.authority !== "operator") {
+      reply.code(403);
+      return { ok: false, error: { code: "operator_authority_required" } };
+    }
+    const ws = request.auth.workspaceId;
+    if (!ws) {
+      reply.code(400);
+      return { ok: false, error: { code: "unknown_workspace" } };
+    }
+    const message = typeof request.body?.message === "string" ? request.body.message.trim() : "";
+    if (!message) {
+      reply.code(400);
+      return { ok: false, error: { code: "gateway_message_required" } };
+    }
+    const platform = typeof request.body?.platform === "string" && request.body.platform.trim()
+      ? request.body.platform.trim()
+      : "gateway";
+    const actorId = typeof request.body?.actorId === "string" && request.body.actorId.trim()
+      ? request.body.actorId.trim()
+      : `${platform}:unknown`;
+    const channelId = typeof request.body?.channelId === "string" && request.body.channelId.trim()
+      ? request.body.channelId.trim()
+      : "default";
+    const conversationId = typeof request.body?.sessionId === "string" && request.body.sessionId.trim()
+      ? request.body.sessionId.trim()
+      : `${platform}:${channelId}:${actorId}`;
+    const sessionId = `${conversationId}:${ws}`;
+
+    const scopedAppTools = parseScopedAppTools(request.body?.appTools);
+    if (scopedAppTools.error) {
+      reply.code(400);
+      return { ok: false, error: scopedAppTools.error };
+    }
+
+    // Hijack the socket and stream SSE. Fastify will not serialize a return value after hijack().
+    reply.hijack();
+    const raw = reply.raw;
+    raw.writeHead(200, {
+      "content-type": "text/event-stream",
+      "cache-control": "no-cache",
+      connection: "keep-alive",
+      "x-accel-buffering": "no"
+    });
+    const send = (event: string, data: unknown) => {
+      raw.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    };
+    try {
+      const response = await llmController.chat({
+        message,
+        sessionId,
+        workspaceId: ws,
+        actorId,
+        surface: platformToSurface(platform),
+        progressMode: "both",
+        ...(scopedAppTools.value ? { scopedAppTools: scopedAppTools.value } : {}),
+        onProgress: async (event) => {
+          send("progress", event);
+        }
+      });
+      send("done", {
+        ok: true,
+        platform,
+        channelId,
+        actorId,
+        sessionId: stripWorkspaceSuffix(response.sessionId, ws),
+        message: response.message,
+        provenance: response.provenance,
+        actionCalls: response.actionCalls
+      });
+    } catch (err) {
+      send("error", { code: "turn_failed", message: err instanceof Error ? err.message : String(err) });
+    } finally {
+      raw.end();
+    }
+  });
+
+  app.get<{ Params: { id: string } }>("/sources/:id", async (request, reply) => {
+    const ws = request.auth.workspaceId;
+    if (!ws) {
+      reply.code(400);
+      return { ok: false, error: { code: "unknown_workspace" } };
+    }
+    return actionRequest("describe_source", { sourceId: request.params.id }, "app", "tool_agent", undefined, ws);
+  });
+  app.get<{ Params: { id: string } }>("/sources/:id/credential-status", async (request) => ({
+    ok: true,
+    data: {
+      sourceId: request.params.id,
+      credentialState: "managed_by_growth_os",
+      credentialPayloadExposed: false,
+      reconnectRoute: `/sources/${request.params.id}/reconnect`,
+      revokeRoute: `/sources/${request.params.id}/revoke`
+    }
+  }));
+
+  app.post<{ Body: Record<string, unknown> }>("/sources/connect", async (request, reply) => {
+    const ws = request.auth.workspaceId;
+    if (!ws) {
+      reply.code(400);
+      return { ok: false, error: { code: "unknown_workspace" } };
+    }
+    return guardedAction(reply, request.auth.authority, "connect_source", request.body ?? {}, "api", ws);
+  });
+  app.post<{ Body: Record<string, unknown>; Params: { id: string } }>(
+    "/sources/:id/sync",
+    async (request, reply) => {
+      const ws = request.auth.workspaceId;
+      if (!ws) {
+        reply.code(400);
+        return { ok: false, error: { code: "unknown_workspace" } };
+      }
+      return guardedAction(reply, request.auth.authority, "start_source_sync", {
+        ...request.body,
+        sourceId: request.params.id
+      }, "api", ws);
+    }
+  );
+  app.post<{ Body: Record<string, unknown>; Params: { id: string } }>(
+    "/sources/:id/reconnect",
+    async (request, reply) => {
+      const ws = request.auth.workspaceId;
+      if (!ws) {
+        reply.code(400);
+        return { ok: false, error: { code: "unknown_workspace" } };
+      }
+      return guardedAction(reply, request.auth.authority, "reconnect_source", {
+        ...request.body,
+        sourceId: request.params.id
+      }, "api", ws);
+    }
+  );
+  app.post<{ Body: Record<string, unknown>; Params: { id: string } }>(
+    "/sources/:id/revoke",
+    async (request, reply) => {
+      const ws = request.auth.workspaceId;
+      if (!ws) {
+        reply.code(400);
+        return { ok: false, error: { code: "unknown_workspace" } };
+      }
+      return guardedAction(reply, request.auth.authority, "revoke_source", {
+        ...request.body,
+        sourceId: request.params.id
+      }, "api", ws);
+    }
+  );
+  app.patch<{ Body: Record<string, unknown>; Params: { id: string } }>(
+    "/sources/:id/schedule",
+    async (request, reply) => {
+      const ws = request.auth.workspaceId;
+      if (!ws) {
+        reply.code(400);
+        return { ok: false, error: { code: "unknown_workspace" } };
+      }
+      return guardedAction(reply, request.auth.authority, "update_source_schedule", {
+        ...request.body,
+        sourceId: request.params.id
+      }, "api", ws);
+    }
+  );
+  app.post<{ Body: Record<string, unknown>; Params: { id: string } }>(
+    "/sources/:id/schedule/pause",
+    async (request, reply) => {
+      const ws = request.auth.workspaceId;
+      if (!ws) {
+        reply.code(400);
+        return { ok: false, error: { code: "unknown_workspace" } };
+      }
+      return guardedAction(reply, request.auth.authority, "pause_source_schedule", {
+        ...request.body,
+        sourceId: request.params.id
+      }, "api", ws);
+    }
+  );
+  app.post<{ Body: Record<string, unknown>; Params: { id: string } }>(
+    "/sources/:id/schedule/resume",
+    async (request, reply) => {
+      const ws = request.auth.workspaceId;
+      if (!ws) {
+        reply.code(400);
+        return { ok: false, error: { code: "unknown_workspace" } };
+      }
+      return guardedAction(reply, request.auth.authority, "resume_source_schedule", {
+        ...request.body,
+        sourceId: request.params.id
+      }, "api", ws);
+    }
+  );
+
+  // Meta Ads WRITE/management — operator-only money mutations. Each route mirrors
+  // `/sources/:id/sync`: it goes through `guardedAction`, which denies non-operator
+  // authority with 403 (a tool_agent/LLM session can NEVER fire a Meta write). The
+  // create actions ALWAYS land PAUSED in the handler; `set_meta_entity_status` is
+  // the separate, gated go-live transition. The `/tools/call` route already exposes
+  // these same action ids; these named routes are the explicit, mirrored surface.
+  const META_WRITE_ROUTES: Array<{ path: string; actionId: string }> = [
+    { path: "/meta/campaigns", actionId: "create_meta_campaign" },
+    { path: "/meta/adsets", actionId: "create_meta_ad_set" },
+    { path: "/meta/creatives", actionId: "create_meta_creative" },
+    { path: "/meta/ads", actionId: "create_meta_ad" },
+    { path: "/meta/status", actionId: "set_meta_entity_status" },
+    // Budget scale/reduce/reallocate on an EXISTING campaign|adset. Same guardedAction
+    // gate as the siblings (operator-only: a tool_agent 403s before any Graph write).
+    { path: "/meta/budget", actionId: "update_meta_budget" }
+  ];
+  for (const { path, actionId } of META_WRITE_ROUTES) {
+    app.post<{ Body: Record<string, unknown> }>(path, async (request, reply) => {
+      const ws = request.auth.workspaceId;
+      if (!ws) {
+        reply.code(400);
+        return { ok: false, error: { code: "unknown_workspace" } };
+      }
+      return guardedAction(reply, request.auth.authority, actionId, request.body ?? {}, "api", ws);
+    });
+  }
+
+  app.get("/chat/sessions", async (request, reply) => {
+    if (!sessionStore) {
+      return { ok: true, sessions: [] };
+    }
+    const ws = request.auth.workspaceId;
+    if (!ws) {
+      reply.code(400);
+      return { ok: false, error: { code: "unknown_workspace" } };
+    }
+    return {
+      ok: true,
+      sessions: await sessionStore.listSessions(ws)
+    };
+  });
+
+  app.get<{ Querystring: { q?: string; excludeSessionId?: string } }>("/chat/sessions/search", async (request, reply) => {
+    if (!sessionStore) {
+      return { ok: true, sessions: [] };
+    }
+    const ws = request.auth.workspaceId;
+    if (!ws) {
+      reply.code(400);
+      return { ok: false, error: { code: "unknown_workspace" } };
+    }
+    const query = typeof request.query.q === "string" ? request.query.q.trim() : "";
+    const excludeSessionId =
+      typeof request.query.excludeSessionId === "string" && request.query.excludeSessionId.trim()
+        ? request.query.excludeSessionId.trim()
+        : undefined;
+    if (!query) {
+      return { ok: true, sessions: [] };
+    }
+    return {
+      ok: true,
+      sessions: await sessionStore.searchSessions(ws, query, { excludeSessionId })
+    };
+  });
+
+  app.get<{ Params: { id: string } }>("/chat/sessions/:id", async (request, reply) => {
+    if (!sessionStore) {
+      reply.code(404);
+      return { ok: false, error: { code: "session_store_unavailable" } };
+    }
+    const session = await sessionStore.getSession(request.params.id);
+    if (!session) {
+      reply.code(404);
+      return { ok: false, error: { code: "session_not_found" } };
+    }
+    return { ok: true, session };
+  });
+
+  app.get<{ Params: { id: string } }>("/chat/sessions/:id/memory", async (request, reply) => {
+    if (!dbAdapter) {
+      reply.code(404);
+      return { ok: false, error: { code: "memory_store_unavailable" } };
+    }
+    const ws = request.auth.workspaceId;
+    if (!ws) {
+      reply.code(400);
+      return { ok: false, error: { code: "unknown_workspace" } };
+    }
+    const memories = await dbAdapter.query(
+      `
+        select id, scope, fact, source_session_id as "sourceSessionId",
+          source_message_id as "sourceMessageId", created_at as "createdAt",
+          updated_at as "updatedAt", expires_at as "expiresAt", blocked_reason as "blockedReason"
+        from chat_memory_facts
+        where workspace_id = $1
+          and blocked_reason is null
+          and (source_session_id = $2 or source_session_id is null)
+        order by updated_at desc
+        limit 100
+      `,
+      [ws, request.params.id]
+    );
+    return { ok: true, sessionId: request.params.id, memories };
+  });
+
+  app.post<{ Body: MemoryFactRequestBody; Params: { id: string } }>(
+    "/chat/sessions/:id/memory",
+    async (request, reply) => {
+      if (request.auth.authority !== "operator") {
+        reply.code(403);
+        return { ok: false, error: { code: "operator_authority_required" } };
+      }
+      if (!dbAdapter) {
+        reply.code(404);
+        return { ok: false, error: { code: "memory_store_unavailable" } };
+      }
+      const ws = request.auth.workspaceId;
+      if (!ws) {
+        reply.code(400);
+        return { ok: false, error: { code: "unknown_workspace" } };
+      }
+      const [candidate] = filterCuratedMemoryCandidates([
+        {
+          scope: request.body?.scope ?? "",
+          fact: request.body?.fact ?? ""
+        }
+      ]);
+      if (!candidate) {
+        reply.code(400);
+        return {
+          ok: false,
+          error: { code: "memory_fact_rejected", message: "Memory fact is outside the curated Infinite OS policy." }
+        };
+      }
+      const memoryId = `mem_${randomUUID()}`;
+      await dbAdapter.query(
+        `
+          insert into chat_memory_facts (
+            id, workspace_id, actor_id, scope, fact, source_session_id
+          )
+          select $1, $2, $3, $4, $5, $6
+          where not exists (
+            select 1 from chat_memory_facts
+            where workspace_id = $2 and scope = $4 and lower(fact) = lower($5)
+              and blocked_reason is null
+          )
+        `,
+        [memoryId, ws, "operator", candidate.scope, candidate.fact, request.params.id]
+      );
+      return { ok: true, memory: { id: memoryId, scope: candidate.scope, fact: candidate.fact } };
+    }
+  );
+
+  app.delete<{ Params: { id: string; memoryId: string } }>(
+    "/chat/sessions/:id/memory/:memoryId",
+    async (request, reply) => {
+      if (request.auth.authority !== "operator") {
+        reply.code(403);
+        return { ok: false, error: { code: "operator_authority_required" } };
+      }
+      if (!dbAdapter) {
+        reply.code(404);
+        return { ok: false, error: { code: "memory_store_unavailable" } };
+      }
+      const ws = request.auth.workspaceId;
+      if (!ws) {
+        reply.code(400);
+        return { ok: false, error: { code: "unknown_workspace" } };
+      }
+      await dbAdapter.query(
+        `
+          update chat_memory_facts
+          set blocked_reason = 'operator_deleted', updated_at = now()
+          where id = $1 and workspace_id = $2
+            and (source_session_id = $3 or source_session_id is null)
+        `,
+        [request.params.memoryId, ws, request.params.id]
+      );
+      return { ok: true, sessionId: request.params.id, memoryId: request.params.memoryId };
+    }
+  );
+
+  app.post<{ Params: { id: string } }>("/chat/sessions/:id/resume", async (request) => {
+    await sessionStore?.resumeSession(request.params.id);
+    return { ok: true, sessionId: request.params.id };
+  });
+
+  app.post<{ Body: { reason?: string }; Params: { id: string } }>("/chat/sessions/:id/end", async (request) => {
+    await sessionStore?.endSession(request.params.id, request.body?.reason ?? "operator_request");
+    return { ok: true, sessionId: request.params.id };
+  });
+
+  app.post<{ Body: CompactSessionRequestBody; Params: { id: string } }>(
+    "/chat/sessions/:id/compact",
+    async (request, reply) => {
+      const suppliedSummary = typeof request.body?.summaryText === "string" ? request.body.summaryText.trim() : "";
+      const summaryText = suppliedSummary || (await generateCompactSummary(sessionStore, modelClient, request.params.id));
+      if (!summaryText) {
+        reply.code(400);
+        return {
+          ok: false,
+          error: { code: "summary_required", message: "compact requires summaryText" }
+        };
+      }
+      const compacted = await sessionStore?.compactSession({
+        sessionId: request.params.id,
+        newSessionId: request.body?.newSessionId,
+        summaryText,
+        summaryJson: request.body?.summaryJson
+      });
+      return {
+        ok: true,
+        sessionId: compacted?.sessionId ?? request.body?.newSessionId ?? request.params.id,
+        parentSessionId: compacted?.parentSessionId ?? request.params.id
+      };
+    }
+  );
+
+  // Read-only ROUTING IDENTITY for a pending confirmation — which action would run if this
+  // confirmationId were confirmed. Exists for the desktop's cloud-mode confirm gate (1bu-1
+  // daemon-http confirmAction): the desktop only ever holds an opaque confirmationId, and must
+  // never trust a client-supplied action name when deciding whether a cloud-mode workspace may
+  // confirm a paused write (only the permanent-local Meta allowlist may). Mirrors the confirm
+  // route below EXACTLY on authority + workspace scoping; returns ONLY the identity — never the
+  // stored input, credentials, or output — and executes nothing.
+  app.get<{ Params: { confirmationId: string } }>("/chat/actions/:confirmationId/pending", async (request, reply) => {
+    if (request.auth.authority !== "operator") {
+      reply.code(403);
+      return { ok: false, error: { code: "operator_authority_required" } };
+    }
+    const ws = request.auth.workspaceId;
+    if (!ws) {
+      reply.code(400);
+      return { ok: false, error: { code: "unknown_workspace" } };
+    }
+    if (!sessionStore?.getPendingActionCall) {
+      reply.code(404);
+      return { ok: false, error: { code: "confirmation_store_unavailable" } };
+    }
+    // P0-A: same scoped lookup as the confirm route — a confirmation authored by another
+    // workspace (or already confirmed/expired) is invisible and 404s as confirmation_not_found,
+    // leaking nothing about other brands' pending writes.
+    const pending = await sessionStore.getPendingActionCall(request.params.confirmationId, ws);
+    if (!pending) {
+      reply.code(404);
+      return { ok: false, error: { code: "confirmation_not_found" } };
+    }
+    return {
+      ok: true,
+      confirmationId: request.params.confirmationId,
+      actionId: pending.actionId
+    };
+  });
+
+  app.post<{ Params: { confirmationId: string } }>("/chat/actions/:confirmationId/confirm", async (request, reply) => {
+    if (request.auth.authority !== "operator") {
+      reply.code(403);
+      return { ok: false, error: { code: "operator_authority_required" } };
+    }
+    const ws = request.auth.workspaceId;
+    if (!ws) {
+      reply.code(400);
+      return { ok: false, error: { code: "unknown_workspace" } };
+    }
+    if (!sessionStore?.getPendingActionCall || !sessionStore.confirmActionCall) {
+      reply.code(404);
+      return { ok: false, error: { code: "confirmation_store_unavailable" } };
+    }
+    // P0-A: scope the lookup by the CONFIRMING workspace ($2). confirmation_id is not
+    // unique across workspaces, so an unscoped lookup could return another brand's row.
+    const pending = await sessionStore.getPendingActionCall(request.params.confirmationId, ws);
+    if (!pending) {
+      reply.code(404);
+      return { ok: false, error: { code: "confirmation_not_found" } };
+    }
+    // P0-A: the workspace-scoped getPendingActionCall(...,ws) above IS the cross-workspace
+    // control. A confirmation authored by another workspace is invisible to that lookup (its
+    // `where workspace_id = $2` returns null → the `if (!pending)` 404 above), so a
+    // cross-workspace confirm fails closed as `confirmation_not_found` with no info leak about
+    // another brand's pending writes. No explicit mismatch guard is needed; we always execute
+    // under the pending row's own authoring workspace.
+    try {
+      // Execute under the pending row's own authoring workspace.
+      const envelope = await actionRequest(
+        pending.actionId,
+        pending.input,
+        "api",
+        "operator",
+        pending.sessionId,
+        pending.workspaceId
+      );
+      await sessionStore.confirmActionCall({
+        confirmationId: request.params.confirmationId,
+        outputEnvelope: envelope,
+        status: envelope.status,
+        // P0-A: scope the confirm UPDATE to the pending row's workspace.
+        workspaceId: pending.workspaceId
+      });
+      return {
+        ok: true,
+        confirmationId: request.params.confirmationId,
+        sessionId: pending.sessionId,
+        actionId: pending.actionId,
+        inputHash: pending.inputHash ?? null,
+        envelope
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      reply.code(400);
+      return {
+        ok: false,
+        error: { code: "confirmation_execution_failed", message }
+      };
+    }
+  });
+
+  app.post<{ Body: ToolCallBody }>("/tools/call", async (request, reply) => {
+    const ws = request.auth.workspaceId;
+    if (!ws) {
+      reply.code(400);
+      return { ok: false, error: { code: "unknown_workspace" } };
+    }
+    return guardedAction(
+      reply,
+      request.auth.authority,
+      toolCallActionId(request.body),
+      toolCallInput(request.body),
+      "api",
+      ws
+    );
+  });
+
+  app.get("/mcp/resources", async () => ({
+    resources: [
+      "growth-os://schema",
+      "growth-os://metrics",
+      "growth-os://queryable-views",
+      "growth-os://sync-status",
+      "growth-os://capabilities"
+    ]
+  }));
+
+  app.get("/mcp/tools", async () => ({
+    tools: (registry?.list() ?? []).map((action) => ({
+      name: action.id,
+      title: action.title,
+      summary: action.summary,
+      category: action.category,
+      authority: action.authority,
+      provenancePolicy: action.provenancePolicy,
+      recommendedNextActions: action.recommendedNextActions,
+      recipeIds: action.recipeIds,
+      inputSchema: action.inputSchema,
+      outputSchema: action.outputSchema
+    }))
+  }));
+
+  app.get("/recipes", async () => ({
+    ok: true,
+    recipes: listRecipes()
+  }));
+
+  app.post<{ Body: ToolCallBody }>("/mcp/tools/call", async (request, reply) => {
+    const ws = request.auth.workspaceId;
+    if (!ws) {
+      reply.code(400);
+      return { ok: false, error: { code: "unknown_workspace" } };
+    }
+    return guardedAction(
+      reply,
+      request.auth.authority,
+      toolCallActionId(request.body),
+      toolCallInput(request.body),
+      "mcp",
+      ws
+    );
+  });
+
+  app.get("/capabilities", async () => ({
+      ok: true,
+      data: {
+      providers: ["google_analytics_4", "posthog", "stripe", "x", "shopify", "meta_ads"],
+      metrics: FIRST_PHASE_METRICS,
+      queryableViews: FIRST_PHASE_QUERYABLE_VIEWS,
+      actions: registry?.list().map((action) => ({
+        id: action.id,
+        title: action.title,
+        summary: action.summary,
+        category: action.category,
+        authority: action.authority,
+        provenancePolicy: action.provenancePolicy,
+        recommendedNextActions: action.recommendedNextActions,
+        recipeIds: action.recipeIds
+      })) ?? []
+    }
+  }));
+
+  app.get("/settings/project", async (request, reply) => {
+    const ws = request.auth.workspaceId;
+    if (!ws) {
+      reply.code(400);
+      return { ok: false, error: { code: "unknown_workspace" } };
+    }
+    return {
+      ok: true,
+      data: {
+        workspaceId: ws,
+        providers: ["google_analytics_4", "posthog", "stripe", "x", "shopify", "meta_ads"],
+        phase: "ga4-posthog-stripe-x-shopify-meta-ads",
+        deferred: ["content_items", "conversion_events", "attribution_models", "recurring_delivery"]
+      }
+    };
+  });
+
+  app.post<{ Body: { name?: string; id?: string } }>("/projects", async (request, reply) => {
+    if (request.auth.authority !== "operator") {
+      reply.code(403);
+      return { ok: false, error: { code: "operator_authority_required" } };
+    }
+    if (!database) {
+      reply.code(503);
+      return { ok: false, error: { code: "database_unavailable" } };
+    }
+    const name = typeof request.body?.name === "string" ? request.body.name.trim() : "";
+    if (!name) {
+      reply.code(400);
+      return { ok: false, error: { code: "project_name_required" } };
+    }
+    // Optional caller-supplied id — opaque text the caller may align with an external system's
+    // identifier (the engine stays agnostic about which). Shape-validated here, taken-or-not decided
+    // atomically in createProjectWithId. Callers feature-detect support by comparing the returned
+    // project.id to what they sent: an older engine ignores the field and mints its own.
+    const requestedId = typeof request.body?.id === "string" ? request.body.id.trim() : "";
+    if (requestedId) {
+      if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(requestedId)) {
+        reply.code(400);
+        return { ok: false, error: { code: "invalid_project_id" } };
+      }
+      const result = await createProjectWithId(database, requestedId, name);
+      if (result.status === "id_conflict") {
+        reply.code(409);
+        return { ok: false, error: { code: "project_id_conflict" } };
+      }
+      return { ok: true, project: result.project };
+    }
+    const project = await createProject(database, name);
+    return { ok: true, project };
+  });
+
+  app.get("/projects", async (request, reply) => {
+    if (request.auth.authority !== "operator") {
+      reply.code(403);
+      return { ok: false, error: { code: "operator_authority_required" } };
+    }
+    if (!database) {
+      reply.code(503);
+      return { ok: false, error: { code: "database_unavailable" } };
+    }
+    return { ok: true, projects: await listProjects(database) };
+  });
+
+  // Bind a local workspace to a cloud account (solo single-device v1). The DESKTOP verifies the
+  // cloud session (GET /api/auth/me) and posts the verified userId here; the engine records ownership
+  // (it stays cloud-agnostic — no JWT verification). Anti-theft is in claimWorkspace: a workspace
+  // already owned by a DIFFERENT account is refused (409), so a second account on this machine cannot
+  // claim the first account's projects. Operator-only, workspace-agnostic (no x-growth-os-workspace).
+  app.post<{ Params: { id: string }; Body: { userId?: string } }>(
+    "/projects/:id/claim",
+    async (request, reply) => {
+      if (request.auth.authority !== "operator") {
+        reply.code(403);
+        return { ok: false, error: { code: "operator_authority_required" } };
+      }
+      if (!database) {
+        reply.code(503);
+        return { ok: false, error: { code: "database_unavailable" } };
+      }
+      const userId = typeof request.body?.userId === "string" ? request.body.userId.trim() : "";
+      if (!userId) {
+        reply.code(400);
+        return { ok: false, error: { code: "user_id_required" } };
+      }
+      const result = await claimWorkspace(database, request.params.id, userId);
+      if (result.status === "not_found") {
+        reply.code(404);
+        return { ok: false, error: { code: "workspace_not_found" } };
+      }
+      if (result.status === "owned_by_other") {
+        reply.code(409);
+        return { ok: false, error: { code: "workspace_owned_by_other" } };
+      }
+      return { ok: true, project: result.project };
+    }
+  );
+
+  app.delete<{ Params: { id: string } }>("/projects/:id", async (request, reply) => {
+    if (request.auth.authority !== "operator") {
+      reply.code(403);
+      return { ok: false, error: { code: "operator_authority_required" } };
+    }
+    if (!database) {
+      reply.code(503);
+      return { ok: false, error: { code: "database_unavailable" } };
+    }
+    const { deleted } = await deleteProject(database, request.params.id);
+    if (!deleted) {
+      reply.code(404);
+      return { ok: false, error: { code: "project_not_found" } };
+    }
+    return { ok: true, deleted: true };
+  });
+
+  app.get("/external-connections", async () => ({
+    ok: true,
+    data: {
+      apiBaseUrl: process.env.GROWTH_OS_PUBLIC_API_URL ?? "http://localhost:3000",
+      mcpToolsUrl: "/mcp/tools",
+      mcpResourcesUrl: "/mcp/resources",
+      safeDataSurface: "queryable schema and shared Infinite OS actions",
+      genericSqlTool: false,
+      rawPayloadJsonByDefault: false
+    }
+  }));
+
+  app.post<{ Body: ConnectorOAuthSessionRequestBody }>("/oauth/sessions", async (request, reply) => {
+    if (request.auth.authority !== "operator") {
+      reply.code(403);
+      return { ok: false, error: { code: "operator_authority_required" } };
+    }
+    const provider = normalizeConnectorOAuthProvider(request.body?.provider);
+    if (!provider) {
+      reply.code(400);
+      return { ok: false, error: { code: "oauth_provider_required" } };
+    }
+    const clientId = stringBodyValue(request.body?.clientId);
+    if (!clientId) {
+      reply.code(400);
+      return { ok: false, error: { code: "oauth_client_id_required" } };
+    }
+    const session = createConnectorOAuthSession(provider, clientId, request.body ?? {});
+    session.workspaceId = request.auth.workspaceId;
+    if (database && request.auth.workspaceId) {
+      const binding = await bindConnectorOAuthSession(
+        database,
+        request.auth.workspaceId,
+        session,
+        request.body ?? {}
+      );
+      session.oauthAppId = binding.oauthAppId;
+      session.oauthAppPayload = binding.payload;
+    } else {
+      session.oauthAppId = null;
+      session.oauthAppPayload = buildSessionConnectorOAuthAppPayload(session, request.body ?? {}, null);
+    }
+    oauthSessions.set(session.sessionId, session);
+    return {
+      ok: true,
+      sessionId: session.sessionId,
+      provider: session.provider,
+      state: session.state,
+      status: session.status,
+      authorizationUrl: session.authorizationUrl,
+      redirectUri: session.redirectUri,
+      expiresAt: session.expiresAt
+    };
+  });
+
+  app.get<{ Params: { sessionId: string } }>("/oauth/sessions/:sessionId", async (request, reply) => {
+    if (request.auth.authority !== "operator") {
+      reply.code(403);
+      return { ok: false, error: { code: "operator_authority_required" } };
+    }
+    const ws = request.auth.workspaceId;
+    if (!ws) {
+      reply.code(400);
+      return { ok: false, error: { code: "unknown_workspace" } };
+    }
+    const session = oauthSessions.get(request.params.sessionId);
+    if (!session) {
+      reply.code(404);
+      return { ok: false, error: { code: "oauth_session_not_found" } };
+    }
+    if (session.status === "pending" && Date.parse(session.expiresAt) <= Date.now()) {
+      session.status = "failed";
+      session.error = "expired";
+    }
+    if (session.workspaceId !== ws) {
+      reply.code(400);
+      return { ok: false, error: { code: "oauth_workspace_mismatch" } };
+    }
+    return redactConnectorOAuthSession(session);
+  });
+
+  app.post<{
+    Params: { sessionId: string };
+    Body: ConnectorOAuthExchangeRequestBody;
+  }>("/oauth/sessions/:sessionId/exchange", async (request, reply) => {
+    if (request.auth.authority !== "operator") {
+      reply.code(403);
+      return { ok: false, error: { code: "operator_authority_required" } };
+    }
+    const ws = request.auth.workspaceId;
+    if (!ws) {
+      reply.code(400);
+      return { ok: false, error: { code: "unknown_workspace" } };
+    }
+    const session = oauthSessions.get(request.params.sessionId);
+    if (!session) {
+      reply.code(404);
+      return { ok: false, error: { code: "oauth_session_not_found" } };
+    }
+    if (session.status === "pending" && Date.parse(session.expiresAt) <= Date.now()) {
+      session.status = "failed";
+      session.error = "expired";
+    }
+    if (session.status !== "completed" || !session.code) {
+      reply.code(400);
+      return { ok: false, error: { code: "oauth_session_not_completed" } };
+    }
+    if (session.provider !== "google_analytics_4") {
+      reply.code(400);
+      return { ok: false, error: { code: "oauth_provider_not_supported" } };
+    }
+    if (session.workspaceId !== ws) {
+      reply.code(400);
+      return { ok: false, error: { code: "oauth_workspace_mismatch" } };
+    }
+    try {
+      const exchangeBody = mergeConnectorOAuthExchangeBodyWithStoredApp(
+        request.body ?? {},
+        session.oauthAppPayload ?? null
+      );
+      const token = await ensureConnectorOAuthSessionToken(session, exchangeBody);
+      const propertyId = stringBodyValue(request.body?.propertyId);
+      const persistedOauth =
+        database && (!propertyId || process.env.GROWTH_OS_ENCRYPTION_KEY)
+          ? await persistConnectorOAuthState(database, ws, session, exchangeBody, token)
+          : null;
+      if (!propertyId) {
+        session.error = undefined;
+        return {
+          ok: true,
+          sessionId: session.sessionId,
+          provider: session.provider,
+          status: "authorized",
+          oauthAppId: persistedOauth?.oauthAppId ?? null,
+          oauthTokenId: persistedOauth?.oauthTokenId ?? null
+        };
+      }
+      const envelope = await actionRequest(
+        "connect_source",
+        {
+          provider: session.provider,
+          connectionName: stringBodyValue(request.body?.connectionName) ?? "Google Analytics 4",
+          credentialKind: "oauth_access_token",
+          credentialPayload: {
+            mode: "live",
+            propertyId,
+            accessToken: token.accessToken,
+            refreshToken: token.refreshToken,
+            expiresAt: token.expiresAt,
+            apiBaseUrl: stringBodyValue(request.body?.apiBaseUrl)
+          }
+        },
+        "api",
+        "operator",
+        undefined,
+        ws
+      );
+      session.error = undefined;
+      return {
+        ok: true,
+        sessionId: session.sessionId,
+        provider: session.provider,
+        status: "connected",
+        oauthAppId: persistedOauth?.oauthAppId ?? null,
+        oauthTokenId: persistedOauth?.oauthTokenId ?? null,
+        envelope
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      reply.code(400);
+      return {
+        ok: false,
+        error: {
+          code: "oauth_token_exchange_failed",
+          message
+        }
+      };
+    }
+  });
+
+  // GA4 property picker: list the properties this OAuth grant can see, server-side (the token never
+  // leaves the engine), so the desktop/CLI can show a picker before connecting — the GA4 twin of the
+  // Meta asset picker (list_meta_assets). Exchanges + HOLDS the token on the session so the follow-up
+  // /exchange (with the chosen propertyId) reuses it instead of re-spending the single-use code.
+  app.get<{ Params: { sessionId: string } }>(
+    "/oauth/sessions/:sessionId/ga4-properties",
+    async (request, reply) => {
+      if (request.auth.authority !== "operator") {
+        reply.code(403);
+        return { ok: false, error: { code: "operator_authority_required" } };
+      }
+      const ws = request.auth.workspaceId;
+      if (!ws) {
+        reply.code(400);
+        return { ok: false, error: { code: "unknown_workspace" } };
+      }
+      const session = oauthSessions.get(request.params.sessionId);
+      if (!session) {
+        reply.code(404);
+        return { ok: false, error: { code: "oauth_session_not_found" } };
+      }
+      if (session.status === "pending" && Date.parse(session.expiresAt) <= Date.now()) {
+        session.status = "failed";
+        session.error = "expired";
+      }
+      if (session.status !== "completed" || !session.code) {
+        reply.code(400);
+        return { ok: false, error: { code: "oauth_session_not_completed" } };
+      }
+      if (session.provider !== "google_analytics_4") {
+        reply.code(400);
+        return { ok: false, error: { code: "oauth_provider_not_supported" } };
+      }
+      if (session.workspaceId !== ws) {
+        reply.code(400);
+        return { ok: false, error: { code: "oauth_workspace_mismatch" } };
+      }
+      try {
+        // Source clientSecret/tokenUrl ONLY from the stored OAuth app (empty per-request body) — the
+        // listing step has no client-supplied secret. This is safe with the held-token model: if this
+        // first exchange fails (e.g. missing secret) it throws BEFORE caching, so the code is NOT
+        // consumed and a later secret-bearing POST /exchange still succeeds. Do NOT "fix" this to read
+        // a per-request secret — there is none here, and the held token makes a second exchange a bug.
+        const exchangeBody = mergeConnectorOAuthExchangeBodyWithStoredApp(
+          {},
+          session.oauthAppPayload ?? null
+        );
+        const token = await ensureConnectorOAuthSessionToken(session, exchangeBody);
+        const properties = await listGa4PropertySummaries(token.accessToken);
+        session.error = undefined;
+        return {
+          ok: true,
+          sessionId: session.sessionId,
+          provider: session.provider,
+          properties
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        reply.code(400);
+        return { ok: false, error: { code: "ga4_property_list_failed", message } };
+      }
+    }
+  );
+
+  app.get<{
+    Params: { provider: string };
+    Querystring: { sessionId?: string; state?: string; code?: string; error?: string };
+  }>("/oauth/callback/:provider", async (request, reply) => {
+    // Real OAuth providers redirect a *browser* here. Serve a styled page so the
+    // founder sees a friendly "you're done" screen, but keep the JSON contract for
+    // programmatic/non-browser callers (the CLI poll path + tests rely on it).
+    const wantsHtml = request.headers.accept?.includes("text/html") === true;
+    // OAuth providers only round-trip `state` (not arbitrary auth-request params
+    // like sessionId), so locate the session by its unguessable `state` token —
+    // which also preserves CSRF protection (an unknown state finds no session).
+    const callbackState = typeof request.query.state === "string" ? request.query.state : "";
+    const session = callbackState
+      ? [...oauthSessions.values()].find(
+          (candidate) =>
+            candidate.state === callbackState && candidate.provider === request.params.provider
+        )
+      : undefined;
+    if (!session) {
+      reply.code(404);
+      if (wantsHtml) {
+        return reply
+          .type("text/html")
+          .send(oauthCallbackErrorPage("We couldn't find this authorization session."));
+      }
+      return { ok: false, error: { code: "oauth_session_not_found" } };
+    }
+    if (request.query.error) {
+      session.status = "failed";
+      session.error = request.query.error;
+      session.completedAt = new Date().toISOString();
+      if (wantsHtml) {
+        return reply
+          .type("text/html")
+          .send(oauthCallbackErrorPage("Google reported an authorization error."));
+      }
+      return { ok: false, status: session.status, provider: session.provider, error: { code: "oauth_provider_error" } };
+    }
+    if (!request.query.code) {
+      reply.code(400);
+      if (wantsHtml) {
+        return reply
+          .type("text/html")
+          .send(oauthCallbackErrorPage("This authorization response was missing its code."));
+      }
+      return { ok: false, error: { code: "oauth_code_required" } };
+    }
+    session.status = "completed";
+    session.code = request.query.code;
+    session.completedAt = new Date().toISOString();
+    if (wantsHtml) {
+      return reply.type("text/html").send(oauthCallbackSuccessPage());
+    }
+    return {
+      ok: true,
+      status: session.status,
+      provider: session.provider,
+      message: "OAuth connection received. You can close this tab and return to Infinite setup."
+    };
+  });
+
+  async function actionRequest(
+    actionId: string,
+    input: unknown,
+    surface: "api" | "app" | "mcp",
+    authority: Authority,
+    sessionId = `${surface}-http`,
+    workspaceId: string
+  ) {
+    const context = createSessionContext({
+      workspaceId,
+      sessionId,
+      actorId: authority,
+      authority,
+      surface
+    });
+    return registry.execute(actionId, input, context);
+  }
+
+  // The plain HTTP data routes /schema, /queryable/views, /metrics and
+  // /source-health predate the Phase-2 daemon-surface removal and remain part
+  // of the daemon's non-model data API (seeded metadata + sync status for
+  // human/tooling callers). Their backing actions are in
+  // EMBEDDED_ONLY_READ_ACTIONS, so the daemon registry no longer carries
+  // them — these routes dial the handler map directly instead. This helper is
+  // deliberately restricted to the three metadata action ids; model-facing
+  // surfaces (chat tool sets, /tools/call, /mcp/tools/call) have NO such
+  // bypass.
+  async function retiredMetadataActionRequest(
+    actionId: Extract<
+      InfiniteOsActionId,
+      "list_metrics" | "list_queryable_views" | "describe_queryable_view"
+    >,
+    input: unknown,
+    surface: "api" | "app",
+    workspaceId: string
+  ) {
+    const handler = actionHandlers[actionId];
+    if (!handler) {
+      // Parity with the pre-removal no-database behavior: the registry used to
+      // fall back to a not_implemented envelope when no handler was wired.
+      return createEnvelope({
+        actionId,
+        authority: "tool_agent",
+        status: "not_implemented",
+        data: {
+          firstPhaseProviders: FIRST_PHASE_PROVIDERS,
+          queryableViews: FIRST_PHASE_QUERYABLE_VIEWS,
+          metrics: FIRST_PHASE_METRICS
+        },
+        caveats: ["runtime_handler_not_wired"]
+      });
+    }
+    const context = createSessionContext({
+      workspaceId,
+      sessionId: `${surface}-http`,
+      actorId: "tool_agent",
+      authority: "tool_agent",
+      surface
+    });
+    return handler(input, context);
+  }
+
+  async function guardedAction(
+    reply: { code: (statusCode: number) => unknown },
+    authority: Authority,
+    actionId: string,
+    input: unknown,
+    surface: "api" | "app" | "mcp",
+    workspaceId: string
+  ) {
+    try {
+      return await actionRequest(actionId, input, surface, authority, undefined, workspaceId);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      reply.code(message.includes("operator authority") ? 403 : 400);
+      const typedError = typeof error === "object" && error !== null ? (error as Record<string, unknown>) : {};
+      const retryable = typeof typedError.retryable === "boolean" ? typedError.retryable : undefined;
+      const typedCode = retryable !== undefined && typeof typedError.code === "string" ? typedError.code : undefined;
+      return {
+        ok: false,
+        error: {
+          code: message.includes("operator authority")
+            ? "operator_authority_required"
+            : typedCode ?? "invalid_tool_input",
+          message,
+          ...(retryable === undefined ? {} : { retryable })
+        }
+      };
+    }
+  }
+
+  function requestedWorkspaceId(value: string | string[] | undefined): string | undefined {
+    const candidate = Array.isArray(value) ? value[0] : value;
+    if (!candidate) {
+      return undefined;
+    }
+    const trimmed = candidate.trim();
+    return trimmed ? trimmed : undefined;
+  }
+
+  app.get("/setup/resolved-ids", async (request, reply) => {
+    if (request.auth.authority !== "operator") {
+      return reply.code(403).send({ ok: false, error: { code: "operator_authority_required" } });
+    }
+    if (!isLocalHost(request.headers.host)) {
+      return reply.code(403).send({ ok: false, error: { code: "invalid_host" } });
+    }
+    if (!database) {
+      // `database` is `InfiniteOsDb | undefined`; strict mode requires this guard.
+      return reply.code(503).send({ ok: false, error: { code: "database_unavailable" } });
+    }
+    const ws = request.auth.workspaceId;
+    if (!ws) {
+      return reply.code(400).send({ ok: false, error: { code: "unknown_workspace" } });
+    }
+    const artifacts = await readLatestSetupPublicArtifacts(database, ws);
+    return {
+      ok: true,
+      data: artifacts
+    };
+  });
+
+  app.get("/setup/runs/active", async (request, reply) => {
+    if (!database) {
+      return reply.code(503).send({ ok: false, error: { code: "database_unavailable" } });
+    }
+    const ws = request.auth.workspaceId;
+    if (!ws) {
+      return reply.code(400).send({ ok: false, error: { code: "unknown_workspace" } });
+    }
+    const run = await readSetupRunSummary(database, ws);
+    return { ok: true, run };
+  });
+
+  app.get<{ Params: { runId: string } }>("/setup/runs/:runId", async (request, reply) => {
+    if (!database) {
+      return reply.code(503).send({ ok: false, error: { code: "database_unavailable" } });
+    }
+    const ws = request.auth.workspaceId;
+    if (!ws) {
+      return reply.code(400).send({ ok: false, error: { code: "unknown_workspace" } });
+    }
+    const run = await readSetupRunSummary(database, ws, request.params.runId);
+    if (!run) {
+      return reply.code(404).send({ ok: false, error: { code: "setup_run_not_found" } });
+    }
+    return { ok: true, run };
+  });
+
+  app.post<{ Params: { runId: string } }>("/setup/runs/:runId/resume", async (request, reply) => {
+    if (request.auth.authority !== "operator") {
+      return reply.code(403).send({ ok: false, error: { code: "operator_authority_required" } });
+    }
+    if (!database) {
+      return reply.code(503).send({ ok: false, error: { code: "database_unavailable" } });
+    }
+    const ws = request.auth.workspaceId;
+    if (!ws) {
+      return reply.code(400).send({ ok: false, error: { code: "unknown_workspace" } });
+    }
+    const existing = await readSetupRunSummary(database, ws, request.params.runId);
+    if (!existing) {
+      return reply.code(404).send({ ok: false, error: { code: "setup_run_not_found" } });
+    }
+    if (existing.status !== "running" && existing.status !== "paused_handoff") {
+      return reply.code(409).send({ ok: false, error: { code: "setup_run_not_resumable" } });
+    }
+    try {
+      const resumed = await resumeSetupRun({
+        db: database,
+        workspaceId: ws,
+        runId: request.params.runId,
+        registry
+      });
+      return {
+        ...sanitizeResumeSetupRunResult(resumed),
+        run: await readSetupRunSummary(database, ws, request.params.runId)
+      };
+    } catch (error) {
+      reply.code(400);
+      return {
+        ok: false,
+        error: {
+          code: "setup_run_resume_failed",
+          message: error instanceof Error ? error.message : String(error)
+        }
+      };
+    }
+  });
+
+  app.post<{ Body: SetupSiteMetadataRequestBody }>("/setup/site-metadata", async (request, reply) => {
+    if (request.auth.authority !== "operator") {
+      return reply.code(403).send({ ok: false, error: { code: "operator_authority_required" } });
+    }
+    if (!database) {
+      return reply.code(503).send({ ok: false, error: { code: "database_unavailable" } });
+    }
+    const ws = request.auth.workspaceId;
+    if (!ws) {
+      return reply.code(400).send({ ok: false, error: { code: "unknown_workspace" } });
+    }
+    const site = await upsertWorkspaceSite(database, {
+      workspaceId: ws,
+      url: stringBodyValue(request.body?.url),
+      repoPath: stringBodyValue(request.body?.repoPath),
+      appDir: stringBodyValue(request.body?.appDir),
+      framework: stringBodyValue(request.body?.framework),
+      businessType: stringBodyValue(request.body?.businessType)
+    });
+    return {
+      ok: true,
+      site: site
+        ? {
+            id: site.id,
+            url: stringBodyValue(request.body?.url) ?? null,
+            repoPath: stringBodyValue(request.body?.repoPath) ?? null,
+            appDir: stringBodyValue(request.body?.appDir) ?? null,
+            framework: stringBodyValue(request.body?.framework) ?? null,
+            businessType: stringBodyValue(request.body?.businessType) ?? null
+          }
+        : null
+    };
+  });
+
+  return app;
+}
+
+function oauthCallbackPage(input: {
+  title: string;
+  icon: string;
+  iconColor: string;
+  heading: string;
+  body: string;
+  autoClose: boolean;
+}): string {
+  return `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>${input.title}</title>
+    <style>
+      :root { color-scheme: light dark; }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        background: #0b0b0f;
+        color: #f4f4f5;
+      }
+      .card {
+        max-width: 420px;
+        padding: 40px 32px;
+        text-align: center;
+        background: #17171c;
+        border: 1px solid #26262d;
+        border-radius: 16px;
+        box-shadow: 0 20px 60px rgba(0, 0, 0, 0.45);
+      }
+      .icon {
+        font-size: 48px;
+        line-height: 1;
+        color: ${input.iconColor};
+      }
+      h1 { font-size: 20px; margin: 20px 0 8px; }
+      p { font-size: 15px; line-height: 1.5; color: #a1a1aa; margin: 0; }
+    </style>
+  </head>
+  <body>
+    <main class="card">
+      <div class="icon">${input.icon}</div>
+      <h1>${input.heading}</h1>
+      <p>${input.body}</p>
+    </main>
+    ${input.autoClose ? "<script>setTimeout(() => window.close(), 3000)</script>" : ""}
+  </body>
+</html>`;
+}
+
+function oauthCallbackSuccessPage(): string {
+  return oauthCallbackPage({
+    title: "Connected to Google Analytics",
+    icon: "✓",
+    iconColor: "#22c55e",
+    heading: "Connected to Google Analytics",
+    body: "You can close this tab and return to your terminal.",
+    autoClose: true
+  });
+}
+
+function oauthCallbackErrorPage(message: string): string {
+  return oauthCallbackPage({
+    title: "Authorization problem",
+    icon: "!",
+    iconColor: "#ef4444",
+    heading: "Authorization didn't complete",
+    body: `${message} You can close this tab and return to your terminal.`,
+    autoClose: false
+  });
+}
+
+/** base64url = standard base64 with +→-, /→_, and `=` padding stripped (RFC 4648 §5). */
+function toBase64Url(input: Buffer): string {
+  return input.toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function createConnectorOAuthSession(
+  provider: string,
+  clientId: string,
+  body: ConnectorOAuthSessionRequestBody
+): ConnectorOAuthSession {
+  const sessionId = `oauth_${randomUUID()}`;
+  const state = `state_${randomUUID()}`;
+  const redirectUri = stringBodyValue(body.redirectUri) ?? defaultConnectorOAuthRedirectUri(provider);
+  const authorizationBaseUrl =
+    stringBodyValue(body.authorizationBaseUrl) ?? defaultConnectorOAuthAuthorizationBaseUrl(provider);
+  const scope = Array.isArray(body.scope) ? body.scope.join(" ") : stringBodyValue(body.scope) ?? defaultConnectorOAuthScope(provider);
+  const params = new URLSearchParams({
+    response_type: "code",
+    client_id: clientId,
+    redirect_uri: redirectUri,
+    scope,
+    state,
+    ...(body.extraParams ?? {})
+  });
+  // PKCE (defense-in-depth) + offline access are GA4-specific so the generic
+  // connector-OAuth path is unchanged for any future provider. We still send the
+  // client_secret at exchange (Google requires it for installed apps); PKCE is additive.
+  let codeVerifier: string | undefined;
+  if (provider === "google_analytics_4") {
+    // 32 random bytes → 43-char base64url verifier (within RFC 7636's 43-128 range).
+    codeVerifier = toBase64Url(randomBytes(32));
+    const codeChallenge = toBase64Url(createHash("sha256").update(codeVerifier).digest());
+    params.set("code_challenge", codeChallenge);
+    params.set("code_challenge_method", "S256");
+    params.set("access_type", "offline");
+    params.set("prompt", "consent");
+  }
+  const now = Date.now();
+  return {
+    sessionId,
+    provider,
+    clientId,
+    authorizationBaseUrl,
+    scope,
+    state,
+    status: "pending",
+    authorizationUrl: `${authorizationBaseUrl}?${params.toString()}`,
+    redirectUri,
+    codeVerifier,
+    createdAt: new Date(now).toISOString(),
+    expiresAt: new Date(now + 10 * 60 * 1000).toISOString()
+  };
+}
+
+async function exchangeConnectorOAuthCode(
+  session: ConnectorOAuthSession,
+  body: ConnectorOAuthExchangeRequestBody
+): Promise<{ accessToken: string; refreshToken?: string; expiresAt?: string }> {
+  const tokenUrl = stringBodyValue(body.tokenUrl) ?? defaultConnectorOAuthTokenUrl(session.provider);
+  if (!tokenUrl) {
+    throw new Error(`No OAuth token URL is configured for ${session.provider}`);
+  }
+  const params = new URLSearchParams({
+    grant_type: "authorization_code",
+    code: session.code ?? "",
+    client_id: session.clientId,
+    redirect_uri: session.redirectUri
+  });
+  // PKCE proof — present only for providers where createConnectorOAuthSession set it (GA4).
+  if (session.codeVerifier) {
+    params.set("code_verifier", session.codeVerifier);
+  }
+  // Google requires client_secret at exchange even for "Desktop app" clients, so KEEP it.
+  const clientSecret = stringBodyValue(body.clientSecret);
+  if (clientSecret) {
+    params.set("client_secret", clientSecret);
+  }
+  const response = await fetch(tokenUrl, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: params.toString()
+  });
+  const payload = await response.json().catch(() => ({})) as Record<string, unknown>;
+  if (!response.ok) {
+    throw new Error(stringBodyValue(payload.error_description) ?? stringBodyValue(payload.error) ?? response.statusText);
+  }
+  const accessToken = stringBodyValue(payload.access_token);
+  if (!accessToken) {
+    throw new Error("OAuth token response did not include access_token");
+  }
+  const expiresIn = typeof payload.expires_in === "number" ? payload.expires_in : undefined;
+  return {
+    accessToken,
+    refreshToken: stringBodyValue(payload.refresh_token),
+    expiresAt: expiresIn ? new Date(Date.now() + expiresIn * 1000).toISOString() : undefined
+  };
+}
+
+// Exchange the single-use auth code at most ONCE per session and hold the result, so the
+// list-properties step and the connect step can both use the token (Google consumes the code on the
+// first exchange). The held token never leaves the engine — it is used only for server-side calls.
+async function ensureConnectorOAuthSessionToken(
+  session: ConnectorOAuthSession,
+  body: ConnectorOAuthExchangeRequestBody
+): Promise<{ accessToken: string; refreshToken?: string; expiresAt?: string }> {
+  if (session.token) {
+    return session.token;
+  }
+  const token = await exchangeConnectorOAuthCode(session, body);
+  session.token = token;
+  return token;
+}
+
+// Server-side GA4 property listing: the daemon calls the Admin API with the session's OAuth token,
+// exactly as the connectors call provider APIs server-side (the token NEVER leaves the engine). This
+// is the same `accountSummaries` call the `infinite setup` picker uses (packages/setup providers/ga4).
+async function listGa4PropertySummaries(
+  accessToken: string
+): Promise<Array<{ property: string; displayName: string; account: string; accountDisplayName: string }>> {
+  const base = "https://analyticsadmin.googleapis.com/v1beta";
+  const out: Array<{ property: string; displayName: string; account: string; accountDisplayName: string }> = [];
+  let pageToken: string | undefined;
+  do {
+    const url = new URL(`${base}/accountSummaries`);
+    url.searchParams.set("pageSize", "200");
+    if (pageToken) {
+      url.searchParams.set("pageToken", pageToken);
+    }
+    const response = await fetch(url, { headers: { authorization: `Bearer ${accessToken}` } });
+    if (!response.ok) {
+      throw new Error(`GA4 Admin API account list failed (${response.status})`);
+    }
+    const payload = (await response.json().catch(() => ({}))) as {
+      accountSummaries?: Array<{
+        account?: string;
+        displayName?: string;
+        propertySummaries?: Array<{ property?: string; displayName?: string }>;
+      }>;
+      nextPageToken?: string;
+    };
+    for (const account of payload.accountSummaries ?? []) {
+      for (const property of account.propertySummaries ?? []) {
+        if (property.property) {
+          out.push({
+            property: property.property,
+            displayName: property.displayName ?? property.property,
+            account: account.account ?? "",
+            accountDisplayName: account.displayName ?? ""
+          });
+        }
+      }
+    }
+    pageToken = payload.nextPageToken;
+  } while (pageToken);
+  return out;
+}
+
+async function readConnectorOAuthAppState(
+  database: InfiniteOsDb,
+  workspaceId: string,
+  provider: string
+): Promise<{ oauthAppId: string; payload: Record<string, unknown> } | null> {
+  const row = await database.one<{ id: string; encrypted_payload: string }>(
+    `
+      select id, encrypted_payload
+      from oauth_apps
+      where workspace_id = $1
+        and provider = $2
+        and revoked_at is null
+      limit 1
+    `,
+    [workspaceId, provider]
+  );
+  if (!row?.id || !row.encrypted_payload) {
+    return null;
+  }
+  return {
+    oauthAppId: row.id,
+    payload: decryptStoredConnectorOAuthPayload(row.encrypted_payload)
+  };
+}
+
+function buildSessionConnectorOAuthAppPayload(
+  session: ConnectorOAuthSession,
+  body: Pick<ConnectorOAuthSessionRequestBody, "clientSecret" | "tokenUrl">,
+  storedAppPayload: Record<string, unknown> | null
+): Record<string, unknown> | null {
+  const merged = mergeConnectorOAuthExchangeBodyWithStoredApp(body, storedAppPayload);
+  const payload = buildConnectorOAuthAppPayload(session, merged);
+  return stringBodyValue(payload.clientSecret) || stringBodyValue(payload.tokenUrl) ? payload : null;
+}
+
+async function bindConnectorOAuthSession(
+  database: InfiniteOsDb,
+  workspaceId: string,
+  session: ConnectorOAuthSession,
+  body: ConnectorOAuthSessionRequestBody
+): Promise<{ oauthAppId: string | null; payload: Record<string, unknown> | null }> {
+  const storedApp = await readConnectorOAuthAppState(database, workspaceId, session.provider);
+  const payload = buildSessionConnectorOAuthAppPayload(session, body, storedApp?.payload ?? null);
+  const clientSecret = stringBodyValue(body.clientSecret);
+  if (!clientSecret || !payload) {
+    return {
+      oauthAppId: storedApp?.oauthAppId ?? null,
+      payload
+    };
+  }
+  return {
+    oauthAppId: await upsertConnectorOAuthAppState(database, workspaceId, session, payload),
+    payload
+  };
+}
+
+function mergeConnectorOAuthExchangeBodyWithStoredApp(
+  body: ConnectorOAuthExchangeRequestBody,
+  storedAppPayload: Record<string, unknown> | null
+): ConnectorOAuthExchangeRequestBody {
+  return {
+    ...body,
+    clientSecret: stringBodyValue(body.clientSecret) ?? stringBodyValue(storedAppPayload?.clientSecret),
+    tokenUrl: stringBodyValue(body.tokenUrl) ?? stringBodyValue(storedAppPayload?.tokenUrl)
+  };
+}
+
+async function persistConnectorOAuthState(
+  database: InfiniteOsDb,
+  workspaceId: string,
+  session: ConnectorOAuthSession,
+  body: ConnectorOAuthExchangeRequestBody,
+  token: { accessToken: string; refreshToken?: string; expiresAt?: string }
+): Promise<{ oauthAppId: string; oauthTokenId: string }> {
+  const encryptionKey = requiredEncryptionKey();
+  const oauthAppId = `oauth_app_${randomUUID()}`;
+  const oauthTokenId = `oauth_token_${randomUUID()}`;
+  const tokenUrl = stringBodyValue(body.tokenUrl) ?? defaultConnectorOAuthTokenUrl(session.provider);
+  const appPayload = buildConnectorOAuthAppPayload(session, body);
+  const tokenPayload = {
+    accessToken: token.accessToken,
+    refreshToken: token.refreshToken,
+    expiresAt: token.expiresAt,
+    oauthApp: appPayload
+  };
+
+  await upsertConnectorOAuthAppState(database, workspaceId, session, appPayload, oauthAppId);
+  await database.query(
+    "update oauth_tokens set revoked_at = now() where workspace_id = $1 and provider = $2 and revoked_at is null",
+    [workspaceId, session.provider]
+  );
+  await database.query(
+    `
+      insert into oauth_tokens (
+        id, workspace_id, provider, source_id, encrypted_payload, expires_at, last_rotated_at
+      )
+      values ($1, $2, $3, null, $4, $5, now())
+    `,
+    [
+      oauthTokenId,
+      workspaceId,
+      session.provider,
+      encryptCredentialPayload(tokenPayload, encryptionKey),
+      token.expiresAt ?? null
+    ]
+  );
+
+  return { oauthAppId, oauthTokenId };
+}
+
+function buildConnectorOAuthAppPayload(
+  session: ConnectorOAuthSession,
+  body: Pick<ConnectorOAuthSessionRequestBody & ConnectorOAuthExchangeRequestBody, "clientSecret" | "tokenUrl">
+): Record<string, unknown> {
+  const tokenUrl = stringBodyValue(body.tokenUrl) ?? defaultConnectorOAuthTokenUrl(session.provider);
+  return {
+    clientId: session.clientId,
+    clientSecret: stringBodyValue(body.clientSecret),
+    redirectUri: session.redirectUri,
+    authorizationBaseUrl: session.authorizationBaseUrl,
+    tokenUrl: tokenUrl || undefined,
+    scope: session.scope
+  };
+}
+
+async function upsertConnectorOAuthAppState(
+  database: InfiniteOsDb,
+  workspaceId: string,
+  session: ConnectorOAuthSession,
+  appPayload: Record<string, unknown>,
+  oauthAppId = `oauth_app_${randomUUID()}`
+): Promise<string> {
+  await database.query(
+    `
+      insert into oauth_apps (id, workspace_id, provider, encrypted_payload, revoked_at)
+      values ($1, $2, $3, $4, null)
+      on conflict (workspace_id, provider) do update
+      set
+        id = excluded.id,
+        encrypted_payload = excluded.encrypted_payload,
+        revoked_at = null
+    `,
+    [
+      oauthAppId,
+      workspaceId,
+      session.provider,
+      encryptCredentialPayload(appPayload, requiredEncryptionKey())
+    ]
+  );
+  return oauthAppId;
+}
+
+function decryptStoredConnectorOAuthPayload(encryptedPayload: string): Record<string, unknown> {
+  return decryptCredentialPayload<Record<string, unknown>>(encryptedPayload, requiredEncryptionKey());
+}
+
+function redactConnectorOAuthSession(session: ConnectorOAuthSession) {
+  return {
+    ok: true,
+    sessionId: session.sessionId,
+    provider: session.provider,
+    status: session.status,
+    authorizationUrl: session.authorizationUrl,
+    redirectUri: session.redirectUri,
+    expiresAt: session.expiresAt,
+    hasAuthorizationCode: Boolean(session.code),
+    error: session.error ?? null
+  };
+}
+
+function normalizeConnectorOAuthProvider(value: unknown): string | null {
+  if (value === "google_analytics_4") {
+    return value;
+  }
+  return null;
+}
+
+function sourceIdFromJobPayload(payload: unknown): string | undefined {
+  const parsed = typeof payload === "string" ? parseJsonRecord(payload) : payload;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return undefined;
+  }
+  const value = (parsed as Record<string, unknown>).sourceId;
+  return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+function parseJsonRecord(value: string): Record<string, unknown> | undefined {
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function defaultConnectorOAuthRedirectUri(provider: string): string {
+  const apiBaseUrl = process.env.GROWTH_OS_PUBLIC_API_URL ?? process.env.GROWTH_OS_API_URL ?? "http://127.0.0.1:3000";
+  return `${apiBaseUrl.replace(/\/$/, "")}/oauth/callback/${provider}`;
+}
+
+function defaultConnectorOAuthAuthorizationBaseUrl(provider: string): string {
+  if (provider === "google_analytics_4") {
+    return "https://accounts.google.com/o/oauth2/v2/auth";
+  }
+  return "";
+}
+
+function defaultConnectorOAuthTokenUrl(provider: string): string {
+  if (provider === "google_analytics_4") {
+    return "https://oauth2.googleapis.com/token";
+  }
+  return "";
+}
+
+function defaultConnectorOAuthScope(provider: string): string {
+  if (provider === "google_analytics_4") {
+    return [
+      "https://www.googleapis.com/auth/analytics.edit",
+      "https://www.googleapis.com/auth/analytics.readonly"
+    ].join(" ");
+  }
+  return "";
+}
+
+function requiredEncryptionKey(): string {
+  const key = process.env.GROWTH_OS_ENCRYPTION_KEY;
+  if (!key) {
+    throw new Error("GROWTH_OS_ENCRYPTION_KEY is required to store OAuth credentials");
+  }
+  return key;
+}
+
+function stringBodyValue(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+async function generateCompactSummary(
+  sessionStore: ChatSessionStore | undefined,
+  modelClient: InfiniteOsModelClient,
+  sessionId: string
+): Promise<string> {
+  const session = await sessionStore?.getSession(sessionId);
+  if (!session) {
+    return "";
+  }
+  const response = await modelClient.complete({
+    systemPrompt: [
+      "Create a compact Infinite OS session summary for continuation.",
+      "Preserve user intent, selected sources, metrics/views, action IDs, bounded result summaries, caveats, unresolved questions, and next actions.",
+      "Do not preserve credentials, raw provider payloads, unbounded rows, or arbitrary SQL."
+    ].join("\n"),
+    userMessage: JSON.stringify({
+      messages: session.messages,
+      actionCalls: session.actionCalls
+    }),
+    tools: [],
+    toolResults: []
+  });
+  return (response.message ?? "").trim();
+}
+
+function sessionStoreDb(database: InfiniteOsDb) {
+  return {
+    async query<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T[]> {
+      return database.query(sql, params) as Promise<T[]>;
+    },
+    async one<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T | null> {
+      return database.one(sql, params) as Promise<T | null>;
+    }
+  };
+}
+
+interface SetupModuleApi {
+  resumeLiveSetupOnboarding(input: {
+    db: InfiniteOsDb;
+    workspaceId: string;
+    runId: string;
+    actions: {
+      execute(id: string, input: unknown, ctx: ReturnType<typeof createSessionContext>): Promise<unknown>;
+    };
+    prompt: {
+      ask(question: string, choices?: string[]): Promise<string>;
+      note(message: string): void;
+    };
+  }): Promise<{
+    selectedProviders: string[];
+    recommendedProviders: string[];
+    completed: string[];
+    paused: string[];
+    failed: string[];
+    activeRuns: Array<{ id: string; provider?: string; status?: string; pendingHandoff?: { url?: string; instructions?: string } | null }>;
+    resolvedPublicArtifacts: Record<string, unknown>;
+    installCommand: string | null;
+    installArtifactsPath: string | null;
+  }>;
+}
+
+async function loadSetupModule(): Promise<SetupModuleApi> {
+  return loadRuntimeSetupModule(import.meta.url) as Promise<SetupModuleApi>;
+}
+
+async function defaultResumeSetupRun(input: {
+  db: InfiniteOsDb;
+  workspaceId: string;
+  runId: string;
+  registry: ReturnType<typeof createInfiniteOsRegistry>;
+}): Promise<ResumeSetupRunResult> {
+  const setup = await loadSetupModule();
+  const notes: string[] = [];
+  const result = await setup.resumeLiveSetupOnboarding({
+    db: input.db,
+    workspaceId: input.workspaceId,
+    runId: input.runId,
+    actions: {
+      execute(id, payload, ctx) {
+        return input.registry.execute(id, payload, ctx);
+      }
+    },
+    prompt: {
+      async ask() {
+        return "";
+      },
+      note(message) {
+        notes.push(message);
+      }
+    }
+  });
+
+  return {
+    ok: result.failed.length === 0 && result.paused.length === 0,
+    resumed: true,
+    onboarding: {
+      selectedProviders: result.selectedProviders,
+      recommendedProviders: result.recommendedProviders,
+      completed: result.completed,
+      paused: result.paused,
+      failed: result.failed,
+      activeRuns: result.activeRuns,
+      resolvedPublicArtifacts: result.resolvedPublicArtifacts,
+      installCommand: result.installCommand ?? null,
+      installArtifactsPath: result.installArtifactsPath ?? null
+    },
+    notes
+  };
+}
+
+function sanitizeResumeSetupRunResult(result: ResumeSetupRunResult): Record<string, unknown> {
+  return {
+    ok: result.ok === true,
+    resumed: result.resumed === true,
+    onboarding: sanitizeResumedOnboarding(result.onboarding),
+    notes: stringArray(result.notes)
+  };
+}
+
+function sanitizeResumedOnboarding(value: ResumeSetupRunResult["onboarding"]): Record<string, unknown> {
+  const onboarding = isPlainRecord(value) ? value : {};
+  return {
+    selectedProviders: stringArray(onboarding.selectedProviders),
+    recommendedProviders: stringArray(onboarding.recommendedProviders),
+    completed: stringArray(onboarding.completed),
+    paused: stringArray(onboarding.paused),
+    failed: stringArray(onboarding.failed),
+    activeRuns: sanitizeResumedActiveRuns(onboarding.activeRuns),
+    resolvedPublicArtifacts: sanitizeResolvedPublicArtifacts(onboarding.resolvedPublicArtifacts),
+    // Built from public artifacts only; pass through as a plain string.
+    installCommand: typeof onboarding.installCommand === "string" ? onboarding.installCommand : null,
+    // Local path of the saved public-keys handoff file; a plain string, never an object.
+    installArtifactsPath:
+      typeof onboarding.installArtifactsPath === "string" ? onboarding.installArtifactsPath : null
+  };
+}
+
+function sanitizeResumedActiveRuns(value: unknown): Array<Record<string, unknown>> {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .filter(isPlainRecord)
+    .map((entry) => ({
+      id: stringOrNull(entry.id),
+      provider: stringOrNull(entry.provider),
+      status: stringOrNull(entry.status),
+      pendingHandoff: sanitizeSetupHandoff(entry.pendingHandoff),
+      browserProfile: stringOrNull(entry.browserProfile)
+    }));
+}
+
+function sanitizeResolvedPublicArtifacts(value: unknown): Record<string, unknown> {
+  const artifacts = isPlainRecord(value) ? value : {};
+  const ga4 = isPlainRecord(artifacts.ga4) ? artifacts.ga4 : {};
+  const posthog = isPlainRecord(artifacts.posthog) ? artifacts.posthog : {};
+  const x = isPlainRecord(artifacts.x) ? artifacts.x : {};
+  return {
+    ga4: {
+      measurementId: stringOrNull(ga4.measurementId),
+      propertyId: stringOrNull(ga4.propertyId)
+    },
+    posthog: {
+      projectId: stringOrNull(posthog.projectId),
+      projectKey: stringOrNull(posthog.projectKey),
+      apiHost: stringOrNull(posthog.apiHost)
+    },
+    x: {
+      pixelId: stringOrNull(x.pixelId),
+      eventTagIds: stringRecordOrNull(x.eventTagIds)
+    }
+  };
+}
+
+interface ToolCallBody {
+  actionId?: string;
+  input?: unknown;
+  name?: string;
+  arguments?: unknown;
+}
+
+function toolCallActionId(body: ToolCallBody): string {
+  return body.actionId ?? body.name ?? "";
+}
+
+function toolCallInput(body: ToolCallBody): unknown {
+  return body.input ?? body.arguments ?? {};
+}
+
+interface SetupRunSummaryRow {
+  id: string;
+  workspace_id?: string | null;
+  tool?: string | null;
+  provider?: string | null;
+  status?: string | null;
+  phase_state?: Record<string, unknown> | null;
+  pending_handoff?: Record<string, unknown> | null;
+  browser_profile?: string | null;
+  site_id?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+  finished_at?: string | null;
+  site_url?: string | null;
+  site_repo_path?: string | null;
+  site_app_dir?: string | null;
+  site_framework?: string | null;
+  site_business_type?: string | null;
+}
+
+const SETUP_RUN_SUMMARY_SELECT = `
+  select
+    r.id,
+    r.workspace_id,
+    r.tool,
+    r.provider,
+    r.status,
+    r.phase_state,
+    r.pending_handoff,
+    r.browser_profile,
+    r.site_id,
+    r.created_at,
+    r.updated_at,
+    r.finished_at,
+    s.url as site_url,
+    s.repo_path as site_repo_path,
+    s.app_dir as site_app_dir,
+    s.framework as site_framework,
+    s.business_type as site_business_type
+  from setup_runs r
+  left join workspace_sites s on s.id = r.site_id
+`;
+
+async function readSetupRunSummary(
+  database: InfiniteOsDb,
+  workspaceId: string,
+  runId?: string
+): Promise<Record<string, unknown> | null> {
+  const row = runId
+    ? await database.one<SetupRunSummaryRow>(
+      `
+        ${SETUP_RUN_SUMMARY_SELECT}
+        where r.workspace_id = $1 and r.id = $2
+      `,
+      [workspaceId, runId]
+    )
+    : await database.one<SetupRunSummaryRow>(
+      `
+        ${SETUP_RUN_SUMMARY_SELECT}
+        where r.workspace_id = $1 and r.status in ('running', 'paused_handoff')
+        order by r.updated_at desc, r.created_at desc
+        limit 1
+      `,
+      [workspaceId]
+    );
+  return sanitizeSetupRunSummary(row);
+}
+
+function sanitizeSetupRunSummary(row: SetupRunSummaryRow | null): Record<string, unknown> | null {
+  if (!row) {
+    return null;
+  }
+  const phaseState = isPlainRecord(row.phase_state) ? row.phase_state : {};
+  const providerEntries = isPlainRecord(phaseState.providers) ? Object.entries(phaseState.providers) : [];
+  const providers = Object.fromEntries(
+    providerEntries
+      .map(([provider, value]) => [provider, sanitizeSetupProviderRunSummary(value)])
+      .filter((entry): entry is [string, Record<string, unknown>] => Boolean(entry[1]))
+  );
+  return {
+    id: row.id,
+    workspaceId: stringOrNull(row.workspace_id),
+    tool: stringOrNull(row.tool),
+    provider: stringOrNull(row.provider),
+    status: stringOrNull(row.status),
+    createdAt: stringOrNull(row.created_at),
+    updatedAt: stringOrNull(row.updated_at),
+    finishedAt: stringOrNull(row.finished_at),
+    interview: sanitizeSetupInterview(phaseState.interview),
+    selectedProviders: stringArray(phaseState.selectedProviders),
+    recommendedProviders: stringArray(phaseState.recommendedProviders),
+    providers,
+    pendingHandoff: sanitizeSetupHandoff(row.pending_handoff),
+    browserProfile: stringOrNull(row.browser_profile),
+    site: sanitizeSetupSite(row)
+  };
+}
+
+function sanitizeSetupInterview(value: unknown): Record<string, unknown> | null {
+  if (!isPlainRecord(value)) {
+    return null;
+  }
+  const providerInventory = Array.isArray(value.providerInventory)
+    ? value.providerInventory
+      .filter(isPlainRecord)
+      .map((row) => ({
+        provider: stringOrNull(row.provider),
+        hasAccount: typeof row.hasAccount === "boolean" ? row.hasAccount : undefined,
+        installState: stringOrNull(row.installState),
+        selected: typeof row.selected === "boolean" ? row.selected : undefined,
+        recommended: typeof row.recommended === "boolean" ? row.recommended : undefined
+      }))
+    : [];
+  return {
+    projectName: stringOrNull(value.projectName),
+    websiteUrl: stringOrNull(value.websiteUrl),
+    productSurface: stringOrNull(value.productSurface),
+    providerInventory
+  };
+}
+
+function sanitizeSetupProviderRunSummary(value: unknown): Record<string, unknown> | null {
+  if (!isPlainRecord(value)) {
+    return null;
+  }
+  const phases = isPlainRecord(value.phases)
+    ? Object.fromEntries(
+      Object.entries(value.phases)
+        .filter(([, phase]) => isPlainRecord(phase))
+        .map(([phase, result]) => [phase, {
+          status: stringOrNull((result as Record<string, unknown>).status),
+          detail: stringOrNull((result as Record<string, unknown>).detail)
+        }])
+    )
+    : {};
+  const verification = isPlainRecord(value.verification)
+    ? {
+        installStatus: stringOrNull(value.verification.installStatus),
+        queryabilityStatus: stringOrNull(value.verification.queryabilityStatus),
+        lastCheckedAt: stringOrNull(value.verification.lastCheckedAt)
+      }
+    : null;
+  return {
+    inventory: isPlainRecord(value.inventory)
+      ? {
+          provider: stringOrNull(value.inventory.provider),
+          hasAccount: typeof value.inventory.hasAccount === "boolean" ? value.inventory.hasAccount : undefined,
+          installState: stringOrNull(value.inventory.installState),
+          selected: typeof value.inventory.selected === "boolean" ? value.inventory.selected : undefined,
+          recommended: typeof value.inventory.recommended === "boolean" ? value.inventory.recommended : undefined
+        }
+      : null,
+    phases,
+    verification
+  };
+}
+
+function sanitizeSetupHandoff(value: unknown): Record<string, unknown> | null {
+  if (!isPlainRecord(value)) {
+    return null;
+  }
+  return {
+    kind: stringOrNull(value.kind),
+    url: sanitizePublicSetupUrl(value.url),
+    instructions: stringOrNull(value.instructions)
+  };
+}
+
+function sanitizePublicSetupUrl(value: unknown): string | null {
+  const candidate = stringOrNull(value);
+  if (!candidate) {
+    return candidate;
+  }
+  try {
+    const parsed = new URL(candidate);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return candidate;
+    }
+    return `${parsed.origin}${parsed.pathname}`;
+  } catch {
+    return candidate;
+  }
+}
+
+function sanitizeSetupSite(row: SetupRunSummaryRow): Record<string, unknown> | null {
+  if (!row.site_id && !row.site_url && !row.site_repo_path && !row.site_app_dir && !row.site_framework && !row.site_business_type) {
+    return null;
+  }
+  return {
+    id: stringOrNull(row.site_id),
+    url: stringOrNull(row.site_url),
+    repoPath: stringOrNull(row.site_repo_path),
+    appDir: stringOrNull(row.site_app_dir),
+    framework: stringOrNull(row.site_framework),
+    businessType: stringOrNull(row.site_business_type)
+  };
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0) : [];
+}
+
+function stringOrNull(value: unknown): string | null {
+  return typeof value === "string" && value.trim().length > 0 ? value : null;
+}
+
+function stringRecordOrNull(value: unknown): Record<string, string> | null {
+  if (!isPlainRecord(value)) {
+    return null;
+  }
+  const entries = Object.entries(value).filter(
+    (entry): entry is [string, string] => typeof entry[1] === "string" && entry[1].trim().length > 0
+  );
+  return entries.length > 0 ? Object.fromEntries(entries) : null;
+}
+
+function isLocalHost(host: string | undefined): boolean {
+  if (!host) return false;
+  // Handle bracketed IPv6 ("[::1]:3000") as well as "host:port".
+  const h = host.replace(/^\[/, "").split(/[\]:]/)[0].toLowerCase();
+  return h === "127.0.0.1" || h === "localhost" || h === "::1";
+}
+
+// P0-G — Loopback-bind startup invariant. The install-wide operator token (which can
+// act on any workspace via a chosen `x-growth-os-workspace` header) is ONLY safe
+// because the daemon is reachable from localhost. `isLocalHost` above is a per-route
+// Host-header guard — it is NOT enforced on the LISTEN bind. So if `config.appHost`
+// is `0.0.0.0` (or `::`, or a routable LAN address) the operator token becomes
+// LAN-reachable. This pure, exported helper asserts the bind host resolves to a
+// loopback address and FAILS CLOSED (throws `daemon_must_bind_loopback`) otherwise,
+// and MUST be called BEFORE `app.listen`.
+//
+// Opt-out: `GROWTH_OS_ALLOW_NON_LOOPBACK_BIND=1` bypasses the assertion with a LOUD
+// warning. Anyone who can set the daemon's env already controls the operator token,
+// so this is a deliberate, supervised escape hatch — not a silent default.
+// Is `host` a loopback bind LITERAL we accept? This is a literal allowlist — NOT a DNS
+// resolver. We accept:
+//   - 'localhost'
+//   - the FULL IPv4 loopback block 127.0.0.0/8 (any valid dotted-quad whose first octet
+//     is 127), not just 127.0.0.1 — the whole 127/8 range binds loopback-only (RFC 5735)
+//   - IPv6 loopback '::1' (bare or bracketed)
+//   - IPv4-mapped IPv6 loopback '::ffff:127.x.x.x'
+// The input is trim()+toLowerCase()'d first so " 127.0.0.1 " / "LocalHost" are accepted.
+function isLoopbackBindLiteral(host: string): boolean {
+  const h = host.trim().toLowerCase();
+  if (h === "localhost" || h === "::1" || h === "[::1]") return true;
+
+  // IPv4-mapped IPv6 loopback: "::ffff:127.x.x.x" — strip the prefix and validate the quad.
+  const mapped = h.startsWith("::ffff:") ? h.slice("::ffff:".length) : null;
+  if (mapped) return isIpv4LoopbackQuad(mapped);
+
+  return isIpv4LoopbackQuad(h);
+}
+
+// Strict dotted-quad parse: exactly four octets, each a 0-255 integer with no leading-zero
+// trickery beyond a lone "0", and the FIRST octet === 127 (the entire 127.0.0.0/8 block).
+function isIpv4LoopbackQuad(value: string): boolean {
+  const parts = value.split(".");
+  if (parts.length !== 4) return false;
+  const octets: number[] = [];
+  for (const part of parts) {
+    if (!/^\d{1,3}$/.test(part)) return false; // digits only, 1-3 of them (rejects "256"-width too)
+    const n = Number(part);
+    if (n < 0 || n > 255) return false;
+    octets.push(n);
+  }
+  return octets[0] === 127;
+}
+
+export function assertLoopbackAppHost(
+  appHost: string,
+  env: NodeJS.ProcessEnv = process.env
+): void {
+  // Literal loopback allowlist (trimmed + case-insensitive). Covers 'localhost', the full
+  // 127.0.0.0/8 IPv4 block, '::1', and IPv4-mapped IPv6 loopback. NOT a DNS resolver.
+  if (isLoopbackBindLiteral(appHost)) return;
+  if (env.GROWTH_OS_ALLOW_NON_LOOPBACK_BIND === "1") {
+    console.warn(
+      `[growth-os] WARNING: daemon binding NON-LOOPBACK host "${appHost}" because ` +
+        `GROWTH_OS_ALLOW_NON_LOOPBACK_BIND=1. The install-wide operator token is now ` +
+        `LAN-reachable — anyone on the network who reaches this port can act on any ` +
+        `workspace. Only set this if you fully understand and accept that exposure.`
+    );
+    return;
+  }
+  throw new Error(
+    `daemon_must_bind_loopback: refusing to bind appHost "${appHost}" — it is not a ` +
+      `recognized loopback literal (localhost / 127.0.0.0/8 / ::1 / ::ffff:127.x.x.x). ` +
+      `This is a literal allowlist, not a DNS resolver. The install-wide operator token ` +
+      `would become LAN-reachable. Set GROWTH_OS_APP_HOST to a loopback address, or set ` +
+      `GROWTH_OS_ALLOW_NON_LOOPBACK_BIND=1 to override.`
+  );
+}
+
+// Is THIS module the process entrypoint (run directly, e.g. `node daemon.mjs` or `tsx index.ts`)?
+// A raw `import.meta.url === file://${process.argv[1]}` string compare is fragile: it breaks on
+// symlinked paths (macOS /tmp → /private/var/folders, app-bundle symlinks), on path encoding
+// (spaces → %20 in the URL but not in argv), and on the esbuild bundle run via node — any of which
+// silently skips the listen block. Compare symlink-resolved REAL paths instead.
+function isProcessEntrypoint(): boolean {
+  const argv1 = process.argv[1];
+  if (!argv1) return false;
+  try {
+    return realpathSync(fileURLToPath(import.meta.url)) === realpathSync(argv1);
+  } catch {
+    return false;
+  }
+}
+
+// A per-PROCESS boot nonce, minted ONCE when the standalone daemon module loads.
+// Published on /health + in the descriptor so a discovering client can prove it is
+// talking to THIS live process (not a recycled pid on a stale descriptor). It is a
+// random UUID — NOT derived from any secret (design §10: nonce stays safe/public).
+const BOOT_NONCE = randomUUID();
+
+if (isProcessEntrypoint()) {
+  const config = loadInfiniteOsConfig();
+  // Compute the convergence fingerprints ONCE at boot (not per /health request). Both
+  // are non-secret by construction (design §4/§10): databaseId hashes the
+  // password-stripped canonical DB identity; keyId is an HMAC keyed BY the encryption
+  // key under a fixed label (NEVER a bare hash of the key, which would BE the AES key).
+  const bootDatabaseId = databaseFingerprint(config.databaseUrl);
+  const bootKeyId = encryptionKeyFingerprint(config.encryptionKey);
+  // Create the daemon's db HERE and pass it in, so the after-listen X-source reconcile (below) can
+  // reuse this EXACT instance. A 2nd PGlite instance open on the same data dir concurrently with
+  // request handling would corrupt/lock the store — so the reconcile must never open its own db.
+  const bootDb = createInfiniteOsDb(config.databaseUrl);
+  const app = createApp({
+    database: bootDb,
+    databaseUrl: config.databaseUrl,
+    convergence: { nonce: BOOT_NONCE, databaseId: bootDatabaseId, keyId: bootKeyId }
+  });
+  // createApp only closes a db it created itself (createdDatabase), never a passed-in one, so the boot
+  // block owns bootDb's close. Register BEFORE listen — Fastify v5 forbids addHook once listening.
+  app.addHook("onClose", async () => {
+    await bootDb.close();
+  });
+
+  // C — Cross-process spawn lock: prevent two cold-starts (CLI + desktop) from
+  // both running migrations / binding the same port concurrently. Acquire BEFORE
+  // runMigrations; release AFTER writeDaemonDescriptor so a concurrent starter
+  // can re-check the descriptor and find a healthy daemon.
+  //
+  // If another live process holds the lock, poll for a healthy descriptor for up
+  // to 15 s and exit 0 to defer (the other starter will finish). If it never
+  // appears (the other start died without writing a descriptor), exit 0 anyway —
+  // a supervisor / desktop will retry and we'll reclaim the stale lock via TTL.
+  let spawnLock = acquireDaemonSpawnLock();
+  if (spawnLock === null) {
+    // Another process is mid-spawn. Poll for a healthy daemon descriptor.
+    const POLL_INTERVAL_MS = 500;
+    const POLL_TIMEOUT_MS = 15_000;
+    const pollStart = Date.now();
+    let healthy = false;
+    while (Date.now() - pollStart < POLL_TIMEOUT_MS) {
+      const desc = (await import("./daemon-descriptor.js")).readDaemonDescriptor();
+      if (desc) {
+        try {
+          const res = await fetch(`${desc.url}/health`, { signal: AbortSignal.timeout(2000) });
+          if (res.ok) {
+            healthy = true;
+            break;
+          }
+        } catch {
+          // not up yet — keep polling
+        }
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+    }
+    if (healthy) {
+      // C3: a peer is genuinely serving — this is the only correct exit(0) path.
+      console.log("another daemon is already starting on this home; deferring");
+      process.exit(0);
+    } else {
+      // C3: the holder died before writing a descriptor. Retry acquire once —
+      // the TTL/dead-pid reclaim should have freed the lock by now.
+      spawnLock = acquireDaemonSpawnLock();
+      if (spawnLock === null) {
+        // Still cannot acquire — fail loud so the supervisor surfaces the problem.
+        console.error(
+          "FATAL: spawn lock held but no healthy daemon appeared and lock could not be reclaimed; another process may be stuck"
+        );
+        process.exit(1);
+      }
+      console.log("spawn lock reclaimed after peer failed to finish; proceeding to boot");
+    }
+  }
+
+  // C4: register an exit handler immediately after acquiring the lock so it is
+  // released on every exit path — migration/seed catch exit(1), listen failure
+  // (EADDRINUSE), uncaught throw between acquire and descriptor-write, etc.
+  // release() is idempotent (released flag guards it) and unlinkSync is
+  // sync-safe inside a process "exit" handler.
+  process.once("exit", () => {
+    try { spawnLock!.release(); } catch { /* best-effort */ }
+  });
+
+  // Register lock release on SIGTERM/SIGINT/onClose so a crash before descriptor-
+  // write still frees the lock. The TTL is the ultimate backstop, but belt-and-
+  // suspenders keeps the average-case wait near zero.
+  const releaseLockOnShutdown = () => spawnLock!.release();
+  app.addHook("onClose", async () => {
+    releaseLockOnShutdown();
+  });
+
+  // A LOCAL daemon owns its schema. The desktop spawns this entrypoint against a freshly-created
+  // embedded PGlite data dir (DATABASE_URL=pglite://…) that has NO tables, so EVERY DB request would
+  // 500 with "relation … does not exist" until something migrates it. Bring the schema up to date on
+  // boot BEFORE we listen/announce. runMigrations is idempotent (re-applies 0 when current), so a
+  // CLI that already ran `infinite setup` just no-ops. NETWORK (prod) mode is intentionally NOT
+  // auto-migrated — there migrations stay a controlled deploy step against the shared Postgres.
+  if (config.runtimeMode === "local") {
+    // local mode covers BOTH embedded PGlite AND a local/dev real-Postgres DATABASE_URL — both are
+    // self-contained and idempotently re-migrated here; only NETWORK/prod is left to a deploy step.
+    try {
+      const applied = await runMigrations(config.databaseUrl);
+      if (applied.length > 0) {
+        app.log.info?.({ count: applied.length }, "applied pending migrations on boot (local mode)");
+      }
+      // Migrations create SCHEMA, not rows. A fresh EMBEDDED-PGlite DB has an EMPTY workspaces table,
+      // so the auth hook (select 1 from workspaces where id=$1) rejects every workspace-scoped
+      // request with unknown_workspace. Seed a default "Local" workspace (idempotent upsert) so a
+      // freshly-spawned daemon can serve immediately; a client discovers its id via GET /projects.
+      // The id is overridable via GROWTH_OS_WORKSPACE_ID.
+      //
+      // PGlite-ONLY gate: local mode also covers a local/dev REAL Postgres (DATABASE_URL=postgres://…),
+      // but that is a populated/shared DB that already owns its workspaces (the CLI's `infinite setup`
+      // creates a proj_<hex>). Seeding ws_local there just litters a stray workspace into someone's
+      // real data — observed live in this repo's own Postgres, had to be hand-deleted. Migrations stay
+      // unconditional (idempotent schema), but the SEED is scoped to the embedded desktop DB that is
+      // the only one that actually boots empty and needs it.
+      //
+      // This opens a short-lived db just for the seed (a separate, SEQUENTIAL PGlite open after
+      // runMigrations closed its own, before the app's lazy db opens on the first request — PGlite
+      // handles sequential opens of one data dir fine, live-verified). We deliberately do NOT share
+      // createApp's db: createApp only closes the db it creates itself (not a passed-in one), so
+      // sharing would force us to own that close lifecycle — more risk than the one-time cost.
+      if (isPgliteDatabaseUrl(config.databaseUrl)) {
+        const localWorkspaceId = process.env.GROWTH_OS_WORKSPACE_ID?.trim() || "ws_local";
+        const seedDb = createInfiniteOsDb(config.databaseUrl);
+        try {
+          await seedDb.ensureWorkspace(localWorkspaceId, "Local");
+        } finally {
+          await seedDb.close();
+        }
+      }
+    } catch (err) {
+      // A daemon with a broken/half-applied schema (or an unseedable DB) must NOT serve. Fail loud
+      // with a clear cause (not an opaque unhandled rejection) and exit so the desktop/supervisor
+      // surfaces it. Safe to exit here: this runs before listen + before the keystone descriptor.
+      // console.error too — app.log may be a no-op (default Fastify logger), and a FATAL that exits
+      // the process MUST be visible (an `app.log.error?.` alone silently swallowed it in the bundle).
+      console.error("FATAL: boot migration/seed failed; refusing to start:", err);
+      app.log.error?.({ err }, "FATAL: boot migration/seed failed; refusing to start");
+      process.exit(1);
+    }
+  }
+
+  // C2 keystone: announce the live daemon so the desktop can discover it instead of
+  // guessing the port. Register the cleanup hook BEFORE listen — Fastify v5 forbids
+  // addHook once the instance is listening — so app.close() (SIGTERM/SIGINT/graceful
+  // shutdown) removes the descriptor and never leaves a stale file pointing at a dead
+  // port. Removal is scoped to this standalone entrypoint, the only place a descriptor
+  // is written, so in-process app.inject() callers (tests) never touch the file.
+  app.addHook("onClose", async () => {
+    removeDaemonDescriptor();
+  });
+
+  // SIGTERM/SIGINT must run app.close() so the onClose hook fires. Fastify does NOT
+  // close itself on signals — a bare SIGTERM would terminate the process abruptly and
+  // leave a stale descriptor pointing at a now-dead port. Wire the handlers BEFORE
+  // listen so a signal during early startup is still handled. Guard against double
+  // invocation (SIGINT then SIGTERM) so close runs exactly once.
+  let closing = false;
+  const shutdown = (signal: NodeJS.Signals) => {
+    if (closing) return;
+    closing = true;
+    void app
+      .close()
+      .catch(() => {
+        // app.close() already ran the onClose descriptor cleanup; swallow so a
+        // teardown error never blocks exit.
+      })
+      .finally(() => {
+        // Belt-and-suspenders: if app.close() rejected BEFORE the onClose hook ran
+        // (e.g. it threw mid-teardown), the descriptor would survive. Remove it
+        // directly here too — removeDaemonDescriptor is idempotent (force + swallow),
+        // so a normal shutdown that already cleaned up just no-ops.
+        removeDaemonDescriptor();
+        // Belt-and-suspenders for the spawn lock too: the onClose hook already
+        // called release(); calling again is idempotent (released flag guards it).
+        releaseLockOnShutdown();
+        process.exit(signal === "SIGINT" ? 130 : 143);
+      });
+  };
+  process.once("SIGTERM", shutdown);
+  process.once("SIGINT", shutdown);
+
+  // Bind the configured host:port. If that exact port is already taken (EADDRINUSE
+  // — e.g. an unrelated `next dev` squatting :3000, or a previous daemon still
+  // closing), fall back to an OS-assigned ephemeral port (port:0) rather than
+  // crashing. The post-listen address() below reads the REAL bound port either way
+  // and the descriptor records it, so a discovering client still finds us. This is
+  // the host-side complement to the descriptor: ports can collide, discovery can't.
+  // P0-G — Fail closed BEFORE binding if the configured host is not loopback. The
+  // operator token is only safe because the daemon is localhost-only; a non-loopback
+  // bind would expose it to the LAN. Throws `daemon_must_bind_loopback` unless the
+  // explicit GROWTH_OS_ALLOW_NON_LOOPBACK_BIND=1 opt-out is set (loud warning).
+  assertLoopbackAppHost(config.appHost, process.env);
+
+  try {
+    await app.listen({ host: config.appHost, port: config.appPort });
+  } catch (err) {
+    if ((err as { code?: string }).code === "EADDRINUSE") {
+      console.error(
+        `port ${config.appPort} is in use; binding an ephemeral port instead (discover via the daemon descriptor)`
+      );
+      app.log.warn?.(
+        { host: config.appHost, port: config.appPort },
+        "configured port in use (EADDRINUSE); retrying on an ephemeral port"
+      );
+      await app.listen({ host: config.appHost, port: 0 });
+    } else {
+      throw err;
+    }
+  }
+
+  // config.appPort may be 0 (ephemeral) — OR the configured port was taken and we
+  // fell back to an ephemeral one above. Either way the OS-assigned port is only
+  // knowable AFTER listen resolves, via the bound socket address. The descriptor is
+  // discovery-only: NO tokens. It carries the convergence fingerprints + boot nonce
+  // computed once at boot (non-secret by construction — design §4/§10).
+  const bound = app.server.address();
+  const descriptor = buildDaemonDescriptor({
+    address: bound as BoundAddress | string | null,
+    nonce: BOOT_NONCE,
+    databaseId: bootDatabaseId,
+    keyId: bootKeyId
+  });
+  // Publishing the discovery descriptor must NEVER crash a daemon that has already
+  // bound and is serving. writeDaemonDescriptor does an atomic tmp+rename, which can
+  // throw on an unwritable/odd target (full disk, read-only mount, or a bind-mounted
+  // file whose rename can't cross the device boundary). Discovery is best-effort: log
+  // loud and keep serving rather than exit into a supervisor restart-loop. This write
+  // sits OUTSIDE the migration/seed try/catch above, so without this guard a throw
+  // here becomes an unhandled rejection that kills an otherwise-healthy process.
+  try {
+    const { path: descriptorPath } = writeDaemonDescriptor(descriptor);
+    app.log.info?.({ url: descriptor.url, descriptor: descriptorPath }, "daemon descriptor written");
+  } catch (err) {
+    console.error("daemon descriptor write failed; serving without a discovery descriptor:", err);
+    app.log.error?.({ err }, "daemon descriptor write failed; serving without a discovery descriptor");
+  }
+  // Release the spawn lock NOW — the daemon is listening either way, so a concurrent
+  // starter that was polling should stop waiting rather than hold the lock for the
+  // full TTL. (Release is idempotent.)
+  spawnLock.release();
+
+  if (config.runtimeMode === "local") {
+    // Sweep sources wedged at 'syncing' by a daemon killed mid-load (the chunked
+    // batch loader commits 'syncing' before loading; only its success/failure paths
+    // reset it — a crash resets nothing, and the desktop scheduler skips every
+    // non-'connected' source forever). Local mode only: this single process is the
+    // only sync runner, so any 'syncing' at boot is stale by definition. Pure SQL
+    // (one UPDATE) on the already-booted bootDb; fire-and-forget AFTER listen (never
+    // awaited) so it can never delay startup, and the scheduler's 15-min re-eval
+    // absorbs the tiny window before it lands.
+    void resetStuckSyncingSourcesOnBoot(bootDb).catch((err) => {
+      console.error("boot stuck-'syncing' source sweep failed (non-fatal):", err);
+    });
+  }
+}

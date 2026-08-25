@@ -1,0 +1,144 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://infinite.fast/contracts/browser-collect-v1.schema.json",
+  "title": "Infinite browser collect v1",
+  "description": "Public browser event envelope accepted by the Infinite cloud collect endpoint.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "siteSourceKey",
+    "eventId",
+    "eventName",
+    "occurredAt",
+    "anonymousId",
+    "sessionId",
+    "url"
+  ],
+  "properties": {
+    "siteSourceKey": {
+      "type": "string",
+      "pattern": "^site_[A-Za-z0-9_-]+$"
+    },
+    "eventId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160
+    },
+    "eventName": {
+      "type": "string",
+      "enum": ["site_page_view", "site_click", "app_download_click", "sign_up_click"]
+    },
+    "occurredAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "anonymousId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160
+    },
+    "sessionId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160
+    },
+    "url": {
+      "type": "string",
+      "maxLength": 2048,
+      "pattern": "^https?://[^@/?#\\s]+(?:/[^?#\\s]*)?$"
+    },
+    "referrer": {
+      "type": "string",
+      "maxLength": 253,
+      "pattern": "^[a-z0-9._:\\[\\]-]+$"
+    },
+    "properties": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 4,
+      "properties": {
+        "cta_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[A-Za-z0-9_-]{1,64}$"
+        },
+        "cta_location": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[A-Za-z0-9_-]{1,64}$"
+        },
+        "destination_path": {
+          "type": "string",
+          "maxLength": 256,
+          "pattern": "^/[^?#]*$"
+        },
+        "nav": {
+          "type": "string",
+          "enum": ["navigate", "history"]
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "eventName": { "const": "site_page_view" }
+        }
+      },
+      "then": {
+        "properties": {
+          "properties": {
+            "type": "object",
+            "maxProperties": 1,
+            "properties": {
+              "nav": { "$ref": "#/properties/properties/properties/nav" }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "eventName": { "const": "site_click" }
+        }
+      },
+      "then": {
+        "required": ["properties"],
+        "properties": {
+          "properties": {
+            "type": "object",
+            "required": ["cta_id", "cta_location"],
+            "properties": {
+              "cta_id": { "$ref": "#/properties/properties/properties/cta_id" },
+              "cta_location": { "$ref": "#/properties/properties/properties/cta_location" }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "eventName": { "const": "app_download_click" }
+        }
+      },
+      "then": {
+        "required": ["properties"],
+        "properties": {
+          "properties": {
+            "type": "object",
+            "required": ["destination_path"],
+            "properties": {
+              "destination_path": { "$ref": "#/properties/properties/properties/destination_path" }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$comment": "site_page_view properties.nav (infinite-tag 0.6.0): \"navigate\" for the initial document load, \"history\" for a History-API route change — a bounded enum so the cloud can count INITIAL browser page views; older tags omit it, so it is optional. app_download_click destination_path is per-source parameterized (analytics_site_sources.download_destination_path, default /download) — the schema bounds the shape; the ingest boundary enforces the workspace's configured destination. sign_up_click is browser INTENT (a click) with the same optional structural cta properties as site_click; the signup OUTCOME is server-only and never enters this contract."
+}
