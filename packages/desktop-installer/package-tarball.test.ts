@@ -80,4 +80,39 @@ describe("infinite-os npm artifact", () => {
       rmSync(tempRoot, { recursive: true, force: true });
     }
   }, 30_000);
+
+  it("derives validator package identity from the pack receipt version", () => {
+    const tempRoot = mkdtempSync(join(tmpdir(), "infinite-os-validator-"));
+    try {
+      const receiptPath = join(tempRoot, "receipt.json");
+      writeFileSync(
+        receiptPath,
+        JSON.stringify([
+          {
+            name: "infinite-os",
+            version: "9.8.7",
+            id: "infinite-os@9.8.7",
+            filename: "infinite-os-9.8.7.tgz",
+            size: 10_000,
+            unpackedSize: 20_000,
+            files: [
+              { path: "LICENSE" },
+              { path: "README.md" },
+              { path: "bin/infinite-os.mjs", mode: 0o755 },
+              { path: "install.sh", mode: 0o755 },
+              { path: "package.json" }
+            ]
+          }
+        ])
+      );
+
+      expect(
+        execFileSync(process.execPath, [validator, receiptPath], {
+          encoding: "utf8"
+        }).trim()
+      ).toBe("infinite-os-9.8.7.tgz");
+    } finally {
+      rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
 });

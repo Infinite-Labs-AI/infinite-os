@@ -15,7 +15,6 @@ const packageJson = JSON.parse(readFileSync(join(packageRoot, "package.json"), "
   engines: { node: string };
 };
 const installerVersion = packageJson.version;
-const expectedInstallerUserAgent = `Infinite-Installer/${installerVersion}`;
 
 function escapeRegExp(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -47,11 +46,6 @@ describe("scripts/install.sh (Infinite Desktop installer)", () => {
     expect(bundledInstaller).toBe(script);
     expect(script).not.toMatch(/curl[^\n]+(?:--head|\s-I(?:\s|$))/);
     expect(script).not.toMatch(/Content-Length|content-length|sleep[^\n]+%/i);
-    const publishedSmoke = readFileSync(
-      join(repoRoot, ".github", "workflows", "published-installer-smoke.yml"),
-      "utf8"
-    );
-    expect(publishedSmoke).toContain(`INSTALLER_USER_AGENT="${expectedInstallerUserAgent}"`);
   });
 
   it("classifies the npm caller before Bash stdin turns into the installer pipe", () => {
@@ -155,8 +149,10 @@ describe("scripts/install.sh (Infinite Desktop installer)", () => {
     expect(installSection).toContain(
       "[download the signed DMG directly](https://infinite.fast/download)"
     );
-    expect(installSection).toMatch(/signed(?: and notarized)? (?:Mac|macOS|Desktop)/i);
-    expect(installSection).toContain("infinite://onboarding");
+    expect(installSection).toMatch(/signed(?:\s+and\s+notarized)?\s+(?:Mac|macOS|Desktop)/i);
+    expect(installSection).toContain("infinite-os@1.0.1");
+    expect(installSection).toContain("release-gated");
+    expect(installSection).not.toContain("then opens");
     expect(installSection).toMatch(/sign in/i);
     expect(installSection).toMatch(/setup|set up/i);
     expect(installSection).toMatch(/workspace/i);
@@ -243,11 +239,25 @@ describe("infinite-os npm bootstrap package", () => {
     expect(ciWorkflow).toContain("packages/desktop-installer");
   });
 
+  it("published installer smoke verifies the immutable npm artifact, not mutable main", () => {
+    const workflow = readFileSync(
+      join(repoRoot, ".github", "workflows", "published-installer-smoke.yml"),
+      "utf8"
+    );
+
+    expect(workflow).toContain("scripts/ci/verify-published-infinite-os.mjs");
+    expect(workflow).not.toContain(
+      "raw.githubusercontent.com/Infinite-Labs-AI/infinite-os/main/scripts/install.sh"
+    );
+    expect(workflow).not.toContain('Infinite-Installer/1.0.1');
+  });
+
   it("documents setup through the app without trial, local-engine, or Docker fallback copy", () => {
     const readme = readFileSync(join(packageRoot, "README.md"), "utf8");
     expect(readme).toContain("npx infinite-os@latest");
-    expect(readme).toContain("infinite://onboarding");
-    expect(readme).toContain("open 'infinite://onboarding'");
+    expect(readme).toContain("infinite-os@1.0.1");
+    expect(readme).toContain("not promised by `@latest`");
+    expect(readme).not.toContain("open 'infinite://onboarding'");
     expect(readme).toContain("Press `⌘L`");
     expect(readme).toContain('Run `infinite "…"`');
     expect(readme).toContain("Same account. Same workspace. Same agent.");

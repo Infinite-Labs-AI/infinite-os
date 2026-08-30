@@ -1531,14 +1531,15 @@ async function desktopLiveBridgeReady(env: CliEnv): Promise<boolean> {
 }
 
 async function buildModeDeps(env: CliEnv): Promise<ModeDeps> {
-  // Pre-resolve the async probe once so `resolveMode` stays pure/sync. The
-  // durable seen.json marker is deliberately NOT wired: a historical marker
-  // must never route `cloud` (a stopped Desktop would then throw
-  // `desktop_not_running` instead of being launched via onboarding).
-  const liveBridge = await desktopLiveBridgeReady(env);
+  // Pre-resolve the async readiness check once so `resolveMode` stays pure/sync.
+  // Initial product cloud routing requires BOTH durable state.json ready and a
+  // fresh live bridge ready verdict. Either signal alone routes onboarding so
+  // the user gets app-owned setup guidance instead of a false cloud session.
+  const durableReady = readDesktopOnboardingState(env) === "ready";
+  const desktopReady = durableReady && (await desktopLiveBridgeReady(env));
   return {
     isMac: () => process.platform === "darwin",
-    liveBridgeAvailable: () => liveBridge
+    desktopReady: () => desktopReady
   };
 }
 

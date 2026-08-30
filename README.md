@@ -25,9 +25,11 @@ Install through npm:
 npx infinite-os@latest
 ```
 
-The npm bootstrap downloads and verifies the signed and notarized macOS Desktop app served by
-`infinite.fast/download`, installs or updates `Infinite.app` in `/Applications`, then opens
-`infinite://onboarding`.
+The currently published npm bootstrap (`infinite-os@1.0.1`) downloads and verifies the signed and
+notarized macOS Desktop app served by `infinite.fast/download`, then installs or updates
+`Infinite.app` in `/Applications`. The source branch contains the reviewed onboarding URI and
+Terminal wait handoff, but that behavior is release-gated until the matching Desktop and npm
+releases are live.
 
 You can also **[download the signed DMG directly](https://infinite.fast/download)**.
 
