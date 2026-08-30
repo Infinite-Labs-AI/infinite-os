@@ -46,6 +46,7 @@ jobs:
         run: |
           pnpm exec vitest run \
             apps/cli/src/install-script.test.ts \
+            packages/desktop-installer/npm-wrapper.test.ts \
             packages/desktop-installer/package-tarball.test.ts
           bash scripts/ci/install-smoke.sh
 

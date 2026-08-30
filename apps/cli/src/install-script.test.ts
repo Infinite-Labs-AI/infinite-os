@@ -33,7 +33,7 @@ describe("scripts/install.sh (Infinite Desktop installer)", () => {
     expect(script).not.toMatch(/Content-Length|content-length|sleep[^\n]+%/i);
     const publishedSmoke = readFileSync(
       join(repoRoot, ".github", "workflows", "published-installer-smoke.yml"),
-      "utf8",
+      "utf8"
     );
     expect(publishedSmoke).toContain(`INSTALLER_USER_AGENT="${expectedInstallerUserAgent}"`);
   });
@@ -89,7 +89,9 @@ describe("scripts/install.sh (Infinite Desktop installer)", () => {
   });
 
   it("verifies the signed, notarized production app identity before installing", () => {
-    expect(script).toContain('EXPECTED_BUNDLE_ID="inc.ultima.infiniteos-desktop"');
+    expect(script).toContain(
+      'EXPECTED_BUNDLE_ID="inc.ultima.infiniteos-desktop"'
+    );
     expect(script).toContain('EXPECTED_TEAM_ID="4659K3678P"');
     expect(script).toMatch(/codesign.*--verify.*--deep.*--strict/);
     expect(script).toMatch(/spctl.*--assess.*--type execute/);
@@ -99,7 +101,9 @@ describe("scripts/install.sh (Infinite Desktop installer)", () => {
   });
 
   it("only migrates the legacy installer-owned CLI wrapper", () => {
-    expect(script).toContain("# Infinite launcher shim — installed by scripts/install.sh.");
+    expect(script).toContain(
+      "# Infinite launcher shim — installed by scripts/install.sh."
+    );
     expect(script).toContain("legacy installer-owned");
     expect(script).toContain("preserving it");
   });
@@ -111,7 +115,9 @@ describe("scripts/install.sh (Infinite Desktop installer)", () => {
     expect(script).toContain("rollback_upgrade");
     expect(script).toContain("quit_running_infinite_apps");
     expect(script).toContain("Contents/Resources/daemon/daemon.mjs");
-    expect(script).toContain('if [ "$UPGRADE" = true ]; then quit_running_infinite_apps; fi');
+    expect(script).toContain(
+      'if [ "$UPGRADE" = true ]; then quit_running_infinite_apps; fi'
+    );
   });
 
   it("rejects source and destination symlinks and cleans up on every terminating signal", () => {
@@ -126,9 +132,11 @@ describe("scripts/install.sh (Infinite Desktop installer)", () => {
     const rootReadme = readFileSync(join(repoRoot, "README.md"), "utf8");
     expect(rootReadme).toContain("npx infinite-os@latest");
     expect(rootReadme).toContain(
-      "raw.githubusercontent.com/Infinite-Labs-AI/infinite-os/9dd4d59a9fe8c1c6f01e78a5213a20e5426efef3/scripts/install.sh",
+      "raw.githubusercontent.com/Infinite-Labs-AI/infinite-os/9dd4d59a9fe8c1c6f01e78a5213a20e5426efef3/scripts/install.sh"
     );
-    expect(rootReadme).not.toContain("raw.githubusercontent.com/Infinite-Labs-AI/infinite-os/main");
+    expect(rootReadme).not.toContain(
+      "raw.githubusercontent.com/Infinite-Labs-AI/infinite-os/main"
+    );
   });
 });
 
@@ -141,8 +149,15 @@ describe("infinite-os npm bootstrap package", () => {
     expect(packageJson.name).toBe("infinite-os");
     expect(packageJson.version).toMatch(/^1\.\d+\.\d+$/);
     expect(packageJson.bin).toEqual({ "infinite-os": "bin/infinite-os.mjs" });
-    expect(packageJson.files).toEqual(["bin", "README.md", "install.sh", "LICENSE"]);
+    expect(packageJson.files).toEqual([
+      "bin",
+      "README.md",
+      "install.sh",
+      "LICENSE"
+    ]);
     expect(packageJson.engines.node).toBe(">=18.0.0");
+    expect(packageJson).not.toHaveProperty("dependencies");
+    expect(packageJson).not.toHaveProperty("scripts");
   });
 
   it("runs the reviewed installer bundled in the npm artifact", () => {
@@ -150,18 +165,39 @@ describe("infinite-os npm bootstrap package", () => {
     expect(bin).not.toContain("raw.githubusercontent.com");
     expect(bin).not.toContain("fetch(");
     expect(bin).toContain("spawnSync");
+    expect(bin).toContain("INFINITE_INSTALL_INTERACTIVE");
+    expect(bin).toContain('INFINITE_INSTALL_SOURCE: "npm"');
+    expect(bin).toContain('join(app, "Contents", "MacOS", "Infinite")');
+    expect(bin).toContain(
+      'join(app, "Contents", "Resources", "cli", "infinite.mjs")'
+    );
+    expect(bin).toContain('ELECTRON_RUN_AS_NODE: "1"');
+    expect(bin).toContain("await startCli");
+    expect(bin).toContain("shouldStartEmbeddedCli");
+    expect(bin).toContain("resolveAppDirectory");
+    expect(bin).toContain("npx infinite-os@latest");
+    expect(bin).not.toMatch(/https?:\/\//);
+    expect(bin).not.toMatch(
+      /\bDOWNLOAD_URL\b|hdiutil|codesign|spctl|notarytool/
+    );
     expect(bundledInstaller).toBe(canonicalInstaller);
   });
 
   it("only publishes from main and runs the tarball test in both release gates", () => {
     const publishWorkflow = readFileSync(
       join(repoRoot, ".github", "workflows", "publish-infinite-os.yml"),
-      "utf8",
+      "utf8"
     );
-    const ciWorkflow = readFileSync(join(repoRoot, ".github", "workflows", "ci.yml"), "utf8");
+    const ciWorkflow = readFileSync(
+      join(repoRoot, ".github", "workflows", "ci.yml"),
+      "utf8"
+    );
     expect(publishWorkflow).toContain("github.ref != 'refs/heads/main'");
     expect(publishWorkflow).toContain(
-      "packages/desktop-installer/package-tarball.test.ts",
+      "packages/desktop-installer/npm-wrapper.test.ts"
+    );
+    expect(publishWorkflow).toContain(
+      "packages/desktop-installer/package-tarball.test.ts"
     );
     expect(ciWorkflow).toContain("packages/desktop-installer");
   });
