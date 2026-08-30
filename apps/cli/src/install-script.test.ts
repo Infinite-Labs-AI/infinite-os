@@ -17,6 +17,22 @@ const packageJson = JSON.parse(readFileSync(join(packageRoot, "package.json"), "
 const installerVersion = packageJson.version;
 const expectedInstallerUserAgent = `Infinite-Installer/${installerVersion}`;
 
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function markdownSection(markdown: string, heading: string): string {
+  const header = new RegExp(`^${escapeRegExp(heading)}\\s*$`, "m").exec(markdown);
+  if (!header) {
+    throw new Error(`Missing markdown section: ${heading}`);
+  }
+
+  const bodyStart = header.index + header[0].length;
+  const rest = markdown.slice(bodyStart);
+  const nextHeader = /^##\s+/m.exec(rest);
+  return nextHeader ? rest.slice(0, nextHeader.index) : rest;
+}
+
 describe("scripts/install.sh (Infinite Desktop installer)", () => {
   const script = readFileSync(installShPath, "utf8");
   const bundledInstaller = readFileSync(join(packageRoot, "install.sh"), "utf8");
@@ -128,14 +144,39 @@ describe("scripts/install.sh (Infinite Desktop installer)", () => {
     expect(script).toContain("trap 'exit 143' TERM");
   });
 
-  it("advertises only the published npm patch and immutable curl installer", () => {
+  it("documents npx as the sole customer install command in public repo surfaces", () => {
     const rootReadme = readFileSync(join(repoRoot, "README.md"), "utf8");
-    expect(rootReadme).toContain("npx infinite-os@latest");
-    expect(rootReadme).toContain(
-      "raw.githubusercontent.com/Infinite-Labs-AI/infinite-os/9dd4d59a9fe8c1c6f01e78a5213a20e5426efef3/scripts/install.sh"
+    const installSection = markdownSection(rootReadme, "## Install Infinite");
+    const commandBlocks = [
+      ...installSection.matchAll(/```(?:bash|sh)\n([\s\S]*?)```/g)
+    ].map((match) => match[1].trim());
+
+    expect(commandBlocks).toEqual(["npx infinite-os@latest"]);
+    expect(installSection).toContain(
+      "[download the signed DMG directly](https://infinite.fast/download)"
     );
-    expect(rootReadme).not.toContain(
-      "raw.githubusercontent.com/Infinite-Labs-AI/infinite-os/main"
+    expect(installSection).toMatch(/signed(?: and notarized)? (?:Mac|macOS|Desktop)/i);
+    expect(installSection).toContain("infinite://onboarding");
+    expect(installSection).toMatch(/sign in/i);
+    expect(installSection).toMatch(/setup|set up/i);
+    expect(installSection).toMatch(/workspace/i);
+    expect(installSection).toContain("⌘L");
+    expect(installSection).toMatch(/Terminal/i);
+    expect(installSection).toMatch(/`infinite(?: "[….]+"|`)/);
+    expect(installSection).toContain("Same account. Same workspace. Same agent.");
+    expect(installSection).not.toMatch(
+      /curl\s+-fsSL|raw\.githubusercontent\.com|npm install infinite|infinite local|local engine|Docker|self[- ]host|trial/i
+    );
+
+    const agents = readFileSync(join(repoRoot, "AGENTS.md"), "utf8");
+    const versioning = markdownSection(agents, "## Versioning & releases");
+    expect(versioning).toContain("npx infinite-os@latest");
+    expect(versioning).toMatch(/sole\s+customer\s+(?:install\s+)?command/i);
+    expect(versioning).toMatch(/canonical internal shell/i);
+    expect(versioning).toContain("scripts/install.sh");
+    expect(versioning).toContain("packages/desktop-installer");
+    expect(versioning).not.toMatch(
+      /two installer entrypoints|two customer entrypoints|curl\s+-fsSL|raw\.githubusercontent\.com|npm install infinite/i
     );
   });
 });
