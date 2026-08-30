@@ -1,10 +1,12 @@
 Infinite OS — third-party notices
 =================================
 
-Infinite OS is MIT-licensed (see LICENSE). One subtree in this repository is
-vendored third-party work carrying its own copyrights. This file records what
-it is, where it came from, and what we changed, so the notices travel with
-every copy — including the ones that ship inside a distributable.
+Infinite OS is MIT-licensed (see LICENSE). The root LICENSE intentionally
+contains only the canonical MIT text so automated license scanners detect it
+cleanly. One subtree in this repository is vendored third-party work carrying
+its own copyrights. This file records what it is, where it came from, and what
+we changed, so the notices travel with every copy — including the ones that
+ship inside a distributable.
 
 This matters practically, not just legally: `ui-tui/packages/ink/` is bundled
 into the CLI that ships in the Infinite desktop app

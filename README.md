@@ -12,7 +12,7 @@ Infinite OS is a self-hosted, local-first growth-analytics runtime. It connects 
   <b>Maker:</b> <a href="https://x.com/RiverKhan">@RiverKhan</a>
 </p>
 
-> It is **not** a broad agent runtime, skill platform, or generic SQL tool. For natural-language questions it forwards your prompt to your own Claude or Codex account using your own credentials. The model gets no arbitrary shell or code execution — it can only invoke Infinite's governed, typed tool catalog (metric/analytics reads and the defined operator actions). Live or destructive operator writes (e.g. ad changes, publishing) are confirmation-gated; reviewable drafts and background jobs may be created directly from your request. Your data never leaves your machine unless you send it somewhere.
+> It is **not** a broad agent runtime, skill platform, or generic SQL tool. For natural-language questions it forwards your prompt to your own Claude or Codex account using your own credentials. Infinite OS's built-in/native catalog does not give model output an arbitrary shell or code runner: native actions go through the typed registry with authority and policy checks, and live/destructive native actions require operator confirmation before execution. When an operator-authorized host supplies scoped app/MCP tools, Infinite OS advertises only that caller-described allowlist and calls the host's loopback handlers; those tools own their specific validation and confirmation contract, including confirmations that may be returned after a proposal/tool invocation before follow-up execution. Your data never leaves your machine unless you send it somewhere.
 
 ## How it works
 
@@ -34,6 +34,14 @@ The `infinite` command has two lanes:
 - **`infinite "<question>"`** — a turn-only companion to the **Infinite Desktop** app. It proxies your terminal turn through Desktop's Cmd+L bridge — the same agent as the in-app palette — so it's "Cmd+L in your shell." Desktop is the sole authority for account and workspace creation (email one-time-code sign-in); the CLI creates neither, and requires an active subscription. It never runs a silent local product turn: on an interactive macOS shell with no live bridge it launches Desktop and continues into the turn once you're signed in; from a pipe, or on a non-macOS host, it prints guidance and exits non-zero.
 
 Orchestration runs locally, but prompts and inference go to your own Codex/Anthropic account with your own credentials — Infinite OS is MIT open source.
+
+## Ecosystem
+
+- **Agents catalog:** [infinite.fast/agents](https://infinite.fast/agents/) lists local-first GTM agents built around the same public/open-core boundary.
+- **Infinite Skills:** [Infinite-Labs-AI/infinite-skills](https://github.com/Infinite-Labs-AI/infinite-skills) publishes Codex skills from Infinite Labs OS.
+- **Press Agent:** [Infinite-Labs-AI/infinite-press-agent](https://github.com/Infinite-Labs-AI/infinite-press-agent) is a MIT local-first media/PR agent.
+- **Desktop companion:** [Download Infinite for Mac](https://infinite.fast/download) to use the signed-in Cmd+L companion; the local engine and CLI remain self-hostable from this repo.
+- **Project safety:** read the root [security policy](SECURITY.md) and [contribution guide](CONTRIBUTING.md) before reporting vulnerabilities or sending patches.
 
 ## Example questions
 
