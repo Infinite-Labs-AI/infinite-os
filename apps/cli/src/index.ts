@@ -1459,6 +1459,8 @@ const DESKTOP_READY_HANDOFF =
   "  TERMINAL  You’re already here\n\n" +
   "Same account. Same workspace. Same agent.\n\n";
 
+type ProductReadyContinuation = () => Promise<void>;
+
 export async function runInteractiveEntry(
   env: CliEnv,
   onboardingDepsOverride?: OnboardingDeps
@@ -1824,13 +1826,21 @@ export async function runCli(
   }
 
   // `infinite contacts …` — the deterministic contacts-sync flow (design doc
-  // 2026-08-30-contacts-cli-sync-design.md, Phase 2). Intercepted BEFORE the
-  // reserved-command check and the unknown-text→turn fallthrough so the word
-  // "contacts" never becomes a chat turn. Deliberately NOT in
-  // RESERVED_LOCAL_COMMANDS: it is a product command backed by the Desktop
-  // bridge, not an engine command namespaced under `infinite local`.
+  // 2026-08-30-contacts-cli-sync-design.md, Phase 2). Usage is handled here
+  // before product preflight; the real sync subcommand then goes through the
+  // SAME Desktop readiness/onboarding gate as product turns before entering
+  // the contacts flow. Deliberately NOT in RESERVED_LOCAL_COMMANDS: it is a
+  // product command backed by the Desktop bridge, not an engine command
+  // namespaced under `infinite local`.
   if (normalizedArgs[0] === "contacts") {
-    await runContactsCommand(normalizedArgs.slice(1), env);
+    const contactArgs = normalizedArgs.slice(1);
+    if (contactArgs[0] !== "sync" || contactArgs.length > 1) {
+      await runContactsCommand(contactArgs, env);
+      return;
+    }
+    await runProductWithDesktopPreflight(env, () =>
+      runContactsCommand(contactArgs, env)
+    );
     return;
   }
 
@@ -1885,18 +1895,28 @@ function hasTopLevelProjectFlag(args: string[]): boolean {
 // guidance. The ONLY local escape is the explicit `infinite local` namespace;
 // an `onboarding` verdict NEVER degrades to a local product turn.
 async function runProductOneShot(dispatchArgs: string[], env: CliEnv): Promise<void> {
+  const message = dispatchArgs.join(" ");
+  await runProductWithDesktopPreflight(env, () =>
+    runDesktopAppCommand([message], env)
+  );
+}
+
+async function runProductWithDesktopPreflight(
+  env: CliEnv,
+  onReady: ProductReadyContinuation
+): Promise<void> {
   const io: ModeIo = {
     inputIsTTY: input.isTTY === true,
     outputIsTTY: output.isTTY === true
   };
   const deps = await buildModeDeps(env);
   const mode = resolveMode(env as NodeJS.ProcessEnv, io, deps);
-  const message = dispatchArgs.join(" ");
 
   if (mode === "cloud") {
-    // (5) The cloud one-shot reuses the Desktop app bridge; it writes its own
-    // output. A not-ready Desktop throws — never a silent local downgrade.
-    await runDesktopAppCommand([message], env);
+    // (5) A live ready bridge serves the product command immediately. The
+    // continuation owns command-specific work (turn dispatch, contacts sync,
+    // etc.) and may re-resolve the bridge for a fresh descriptor/token.
+    await onReady();
     return;
   }
 
@@ -1911,13 +1931,25 @@ async function runProductOneShot(dispatchArgs: string[], env: CliEnv): Promise<v
   // callers get guidance and a non-zero exit (§6.6 step 7) — runOnboarding's
   // oneShot path prints/throws guidance instead of blocking a pipe on a GUI.
   const interactive = io.inputIsTTY && io.outputIsTTY;
-  const { result } = await runOnboarding(
-    env,
-    buildOnboardingIo(),
-    buildOnboardingDeps(env, !interactive)
-  );
+  let result: Awaited<ReturnType<typeof runOnboarding>>["result"];
+  try {
+    ({ result } = await runOnboarding(
+      env,
+      buildOnboardingIo(),
+      buildOnboardingDeps(env, !interactive)
+    ));
+  } catch (error) {
+    if (error instanceof OnboardingError) {
+      if (error.code !== "desktop_bridge_absent") {
+        output.write(`${error.message}\n`);
+      }
+      process.exitCode = 1;
+      return;
+    }
+    throw error;
+  }
   if (result === "ready") {
-    await runDesktopAppCommand([message], env);
+    await onReady();
     return;
   }
   // Guidance was already printed for every non-ready outcome; never local.
