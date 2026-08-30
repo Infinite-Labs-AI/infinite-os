@@ -132,9 +132,10 @@ if [ -n "$matches" ]; then echo "$matches" >&2; fail "internal-style doc tracked
 #    A personal email (e.g. @protonmail) must never enter public history via
 #    commit METADATA — git grep (checks 1-5) cannot see authorship, so this is
 #    the metadata counterpart to check 5. Allowlist: @infinite.fast + GitHub
-#    noreply. PUBLIC-MODE-ONLY. Set repo-local `user.email` in the public clone.
+#    noreply (user noreply + synthetic PR merge noreply@github.com).
+#    PUBLIC-MODE-ONLY. Set repo-local `user.email` in the public clone.
 if [ "${PUBLIC_SURFACE:-0}" = "1" ]; then
-  bad_emails="$(git log --format='%ae%n%ce' | sort -u | grep -viE '(@infinite\.fast|@users\.noreply\.github\.com)$' || true)"
+  bad_emails="$(git log --format='%ae%n%ce' | sort -u | grep -viE '(@infinite\.fast|@users\.noreply\.github\.com|^noreply@github\.com)$' || true)"
   if [ -n "$bad_emails" ]; then
     echo "$bad_emails" >&2
     echo "::error::commit author/committer email(s) not on the public allowlist — set repo-local user.email to a public address"

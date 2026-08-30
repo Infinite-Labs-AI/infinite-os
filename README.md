@@ -51,16 +51,34 @@ Infinite figures out the right metric, runs it against your synced data, and ans
 
 ## Quickstart
 
-Install with one command (macOS / Linux). It checks you have git, Node ≥ 20, and pnpm (it won't install or change them for you), puts Infinite at `~/.infinite/app`, drops an `infinite` command on your PATH, and runs setup:
+Install with one command (macOS / Linux). It requires Git, Node >=20, and npm. If pnpm is not
+already available, the installer provisions the repository's pinned version privately under
+`~/.infinite/tooling`; it never changes your global npm prefix.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Infinite-Labs-AI/infinite-os/main/scripts/install.sh | bash
 ```
 
-Then:
+This README is the canonical install contract mirrored by `infinite.fast`. Website copy must use
+the exact same raw URL above and the same prerequisites: Git, Node >=20, and npm.
+
+When an interactive terminal is available, the installer runs `infinite local setup` at the end.
+In automation, CI, or another non-TTY context, setup is skipped cleanly; run it later from a real
+terminal:
 
 ```bash
 infinite local setup     # connect a data source + configure the model, and start the local stack
+```
+
+To install or update the checkout and launcher without running setup, pass `--skip-setup`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Infinite-Labs-AI/infinite-os/main/scripts/install.sh | bash -s -- --skip-setup
+```
+
+Then:
+
+```bash
 infinite local           # ask a question (interactive)
 infinite local "how many page views in the last 7 days"
 ```

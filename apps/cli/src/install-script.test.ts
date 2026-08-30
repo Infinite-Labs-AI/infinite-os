@@ -24,4 +24,24 @@ describe("scripts/install.sh (self-host bootstrap)", () => {
     expect(script).not.toContain("infinite setup");
     expect(script).not.toMatch(/"\$INSTALL_DIR\/infinite" setup/);
   });
+
+  it("privately provisions the package-manager pin when pnpm is absent", () => {
+    expect(script).toContain('PINNED_PNPM_VERSION="10.0.0"');
+    expect(script).toContain('TOOLING_ROOT="$HOME/.infinite/tooling"');
+    expect(script).toMatch(
+      /npm install --global --prefix "\$TOOLING_ROOT" "pnpm@\$PINNED_PNPM_VERSION"/,
+    );
+    expect(script).not.toContain("npm install -g pnpm");
+    expect(script).not.toContain("corepack enable pnpm");
+  });
+
+  it("opens the controlling terminal before selecting the interactive setup branch", () => {
+    expect(script).toMatch(/can_open_controlling_tty\(\)/);
+    expect(script).toMatch(/: < \/dev\/tty/);
+    expect(script).not.toMatch(/elif \[ -r \/dev\/tty \]/);
+  });
+
+  it("puts private tooling on the installed launcher's PATH", () => {
+    expect(script).toContain('export PATH="$TOOLING_BIN:$PATH"');
+  });
 });

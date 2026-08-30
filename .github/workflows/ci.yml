@@ -101,3 +101,6 @@ jobs:
           packages/runtime
           packages/setup
           tests
+
+      - name: Installer smoke
+        run: bash scripts/ci/install-smoke.sh
