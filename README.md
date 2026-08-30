@@ -19,9 +19,19 @@ open-core engine, an embedded PGlite database, its background daemon, governed t
 
 Infinite is a **macOS-only, Apple-silicon app** and requires macOS 12 or newer.
 
-The patched one-command installers are temporarily staged while `infinite-os@1.0.1` is published.
-For now, **[download the signed DMG directly](https://infinite.fast/download)**. The immutable curl
-command and npm command return as soon as the patch release is verified live.
+Install through npm:
+
+```bash
+npx infinite-os@latest
+```
+
+Or use the zero-Node curl installer, pinned to the reviewed 1.0.1 installer merge:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Infinite-Labs-AI/infinite-os/9dd4d59a9fe8c1c6f01e78a5213a20e5426efef3/scripts/install.sh | bash
+```
+
+You can also **[download the signed DMG directly](https://infinite.fast/download)**.
 
 Both command-line installers use the exact signed and notarized Desktop product served by
 `infinite.fast/download`. They verify the production
