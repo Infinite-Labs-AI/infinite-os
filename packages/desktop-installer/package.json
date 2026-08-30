@@ -1,0 +1,37 @@
+{
+  "name": "infinite-os",
+  "version": "1.0.0",
+  "description": "Install the signed Infinite AI marketing Desktop app for macOS.",
+  "keywords": [
+    "infinite",
+    "ai-marketing",
+    "macos",
+    "desktop",
+    "installer",
+    "ai-agents"
+  ],
+  "author": "Infinite (https://infinite.fast)",
+  "type": "module",
+  "bin": {
+    "infinite-os": "bin/infinite-os.mjs"
+  },
+  "files": [
+    "bin",
+    "README.md",
+    "install.sh",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Infinite-Labs-AI/infinite-os.git",
+    "directory": "packages/desktop-installer"
+  },
+  "homepage": "https://infinite.fast",
+  "bugs": {
+    "url": "https://github.com/Infinite-Labs-AI/infinite-os/issues"
+  },
+  "license": "MIT"
+}

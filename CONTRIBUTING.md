@@ -1,11 +1,11 @@
 # Contributing to Infinite OS
 
-Thanks for your interest in contributing! Infinite OS is a self-hosted, local-first growth-analytics runtime: it connects your data sources (Google Analytics 4, PostHog, Stripe, Shopify, Meta, X) into a database on your own machine and helps you understand what changed and why.
+Thanks for your interest in contributing! Infinite OS is the open-core engine bundled in the macOS-only Infinite Desktop app. The signed Desktop app is the supported customer product; this source topology is for maintainers and contributors.
 
 ## Prerequisites
 
 - **Node.js ≥ 20** and **pnpm** — the repo is a pnpm-workspace monorepo.
-- **Docker** — the local runtime (Postgres + the app daemon + the sync worker) runs via Docker Compose.
+- **Docker** — maintainers use Docker Compose to exercise the source engine topology. It is not an end-user installation path.
 
 ## Repo layout
 
