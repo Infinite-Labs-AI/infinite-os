@@ -25,11 +25,13 @@ Infinite OS is a **self-hosted, single-operator** system. It protects the operat
 - **Connector credentials** (provider API keys and OAuth tokens) are stored as encrypted `connection_credentials` rows in Postgres, keyed by `GROWTH_OS_ENCRYPTION_KEY`. That key is load-bearing: rotating it orphans existing connections and forces re-authentication. Do not place provider keys in queryable views, logs, or committed files.
 - The app and worker services are intended for local or private networks. Do not expose them to the public internet without a VPN, Tailscale, or firewall in front of them.
 
-### Model completions
+### Governed model tools
 
-For natural-language questions, the CLI forwards prompts to your configured model provider — your own Codex login or a Claude API key — for completions. Its boundary is narrow by design:
+For natural-language questions and operator turns, Infinite OS can send prompts to your configured model provider — your own Codex login or Claude API key — using your own credentials. The model is not given arbitrary model-path shell/code execution. It can only request Infinite OS's governed typed tools, and local Infinite OS code decides whether each request is valid.
 
-- It is a **completion proxy only** — it forwards prompts to your chosen LLM provider and returns the response. It executes no tools and runs no shell commands.
+- **Read tools** query the local metric layer, local Postgres cache, connector state, or explicitly configured provider APIs. Tool inputs are schema-checked and constrained to the connected source's scope.
+- **Operator tools** are defined actions with local policy gates. Live or destructive actions — for example publishing, ad changes, or connector mutations — require operator confirmation before execution.
+- **No arbitrary execution:** model output is data for the tool router, not a shell script, code patch, or free-form command runner.
 - It uses **your** provider credentials; Ultima AI never receives them. Prompt and response content goes only to the provider you authenticate with.
 
 ## Out of Scope

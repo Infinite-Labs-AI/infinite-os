@@ -35,6 +35,14 @@ The `infinite` command has two lanes:
 
 Orchestration runs locally, but prompts and inference go to your own Codex/Anthropic account with your own credentials — Infinite OS is MIT open source.
 
+## Ecosystem
+
+- **Agents catalog:** [infinite.fast/agents](https://infinite.fast/agents/) lists local-first GTM agents built around the same public/open-core boundary.
+- **Infinite Skills:** [Infinite-Labs-AI/infinite-skills](https://github.com/Infinite-Labs-AI/infinite-skills) publishes Codex skills from Infinite Labs OS.
+- **Press Agent:** [Infinite-Labs-AI/infinite-press-agent](https://github.com/Infinite-Labs-AI/infinite-press-agent) is a MIT local-first media/PR agent.
+- **Desktop companion:** [Download Infinite for Mac](https://infinite.fast/download) to use the signed-in Cmd+L companion; the local engine and CLI remain self-hostable from this repo.
+- **Project safety:** read the root [security policy](SECURITY.md) and [contribution guide](CONTRIBUTING.md) before reporting vulnerabilities or sending patches.
+
 ## Example questions
 
 Once a source is connected and synced, just ask — in plain English:
