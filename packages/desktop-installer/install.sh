@@ -12,7 +12,7 @@ log_warn() { printf "${YELLOW}⚠${NC} %s\n" "$1"; }
 log_error() { printf "${RED}✗${NC} %s\n" "$1" >&2; }
 
 DOWNLOAD_URL="https://infinite.fast/download"
-INSTALLER_USER_AGENT="Infinite-Installer/1.0.0"
+INSTALLER_USER_AGENT="Infinite-Installer/1.0.1"
 EXPECTED_BUNDLE_ID="inc.ultima.infiniteos-desktop"
 EXPECTED_TEAM_ID="4659K3678P"
 # 0.3.13 is the first release containing the no-clobber Desktop CLI launcher.
@@ -236,6 +236,7 @@ running_infinite_pids() { pgrep -x Infinite 2>/dev/null || true; }
 quit_running_infinite_apps() {
   pids="$(running_infinite_pids)"
   [ -n "$pids" ] || return 0
+  gui_found=false
   for pid in $pids; do
     executable="$(ps -p "$pid" -o command= 2>/dev/null || true)"
     case "$executable" in
@@ -245,10 +246,26 @@ quit_running_infinite_apps() {
           log_error "Refusing to quit unverified process $pid at $executable"
           return 1
         fi
+        gui_found=true
+        ;;
+      */Infinite.app/Contents/MacOS/Infinite\ */Infinite.app/Contents/Resources/daemon/daemon.mjs)
+        running_app="${executable%%/Contents/MacOS/Infinite *}"
+        expected_daemon_command="$running_app/Contents/MacOS/Infinite $running_app/Contents/Resources/daemon/daemon.mjs"
+        daemon_entry="$running_app/Contents/Resources/daemon/daemon.mjs"
+        if [ "$executable" != "$expected_daemon_command" ] \
+          || [ ! -f "$daemon_entry" ] || [ -L "$daemon_entry" ] \
+          || ! verify_infinite_app "$running_app"; then
+          log_error "Refusing unexpected or unverified Infinite child $pid: $executable"
+          return 1
+        fi
         ;;
       *) log_error "Refusing to quit unexpected process $pid named Infinite: $executable"; return 1 ;;
     esac
   done
+  if [ "$gui_found" != true ]; then
+    log_error "A verified Infinite daemon is running without its GUI. Quit it before retrying."
+    return 1
+  fi
   log_info "Asking the running Infinite app to quit…"
   osascript -e "tell application id \"$EXPECTED_BUNDLE_ID\" to quit" >/dev/null
   attempts=0
@@ -339,7 +356,7 @@ STAGED_VERSION="$(read_app_version "$STAGED_APP")" || exit 1
 [ "$STAGED_VERSION" = "$SOURCE_VERSION" ] || { log_error "Staged app version changed unexpectedly."; exit 1; }
 STAGED_FINGERPRINT="$(app_fingerprint "$STAGED_APP")" || exit 1
 
-quit_running_infinite_apps
+if [ "$UPGRADE" = true ]; then quit_running_infinite_apps; fi
 
 if [ "$UPGRADE" = true ]; then
   [ ! -L "$TARGET_APP" ] && verify_infinite_app "$TARGET_APP" || { log_error "Existing app changed before upgrade."; exit 1; }

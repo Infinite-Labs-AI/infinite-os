@@ -20,10 +20,10 @@ function validate(receipt) {
   }
   const entry = receipt[0];
   if (!entry || typeof entry !== "object" || Array.isArray(entry)) reject("invalid receipt entry");
-  if (entry.name !== "infinite-os" || entry.version !== "1.0.0" || entry.id !== "infinite-os@1.0.0") {
+  if (entry.name !== "infinite-os" || entry.version !== "1.0.1" || entry.id !== "infinite-os@1.0.1") {
     reject(`unexpected package identity: ${JSON.stringify(entry.id)}`);
   }
-  if (entry.filename !== "infinite-os-1.0.0.tgz") reject("unexpected tarball filename");
+  if (entry.filename !== "infinite-os-1.0.1.tgz") reject("unexpected tarball filename");
   if (!Array.isArray(entry.files)) reject("receipt files must be an array");
 
   const paths = entry.files.map((file) => file?.path);

@@ -127,18 +127,28 @@ EOF
 
   cat > "$fake_bin/pgrep" <<'EOF'
 #!/usr/bin/env bash
+[ -z "${FAKE_PROCESS_TABLE:-}" ] || { [ ! -s "$FAKE_PROCESS_TABLE" ] || cut -d '|' -f 1 "$FAKE_PROCESS_TABLE"; exit 0; }
 [ -n "${FAKE_RUNNING_FILE:-}" ] && [ -s "$FAKE_RUNNING_FILE" ] && cat "$FAKE_RUNNING_FILE"
 exit 0
 EOF
 
   cat > "$fake_bin/ps" <<'EOF'
 #!/usr/bin/env bash
+if [ -n "${FAKE_PROCESS_TABLE:-}" ]; then
+  pid=""
+  while [ $# -gt 0 ]; do
+    case "$1" in -p) pid="$2"; shift 2 ;; *) shift ;; esac
+  done
+  awk -F '|' -v wanted="$pid" '$1 == wanted { sub(/^[^|]*\|/, ""); print; exit }' "$FAKE_PROCESS_TABLE"
+  exit 0
+fi
 printf '%s\n' "${FAKE_RUNNING_APP:-}/Contents/MacOS/Infinite"
 EOF
 
   cat > "$fake_bin/osascript" <<'EOF'
 #!/usr/bin/env bash
 printf 'quit\n' >> "$FAKE_LOG"
+[ -z "${FAKE_PROCESS_TABLE:-}" ] || : > "$FAKE_PROCESS_TABLE"
 [ -z "${FAKE_RUNNING_FILE:-}" ] || : > "$FAKE_RUNNING_FILE"
 EOF
 
@@ -197,7 +207,7 @@ fixture_fingerprint() {
 # Fresh install: one truthful GET through /download, verified staging, mount cleanup, and launch.
 run_installer fresh env
 test -d "$test_root/fresh/apps/Infinite.app"
-grep -Fq 'GET https://infinite.fast/download?utm_source=github&utm_medium=cli&utm_campaign=infinite_os_install UA=Infinite-Installer/1.0.0' "$test_root/fresh/log"
+grep -Fq 'GET https://infinite.fast/download?utm_source=github&utm_medium=cli&utm_campaign=infinite_os_install UA=Infinite-Installer/1.0.1' "$test_root/fresh/log"
 grep -Fq 'verify ' "$test_root/fresh/log"
 grep -Fq 'detach ' "$test_root/fresh/log"
 grep -Fq "open $test_root/fresh/apps/Infinite.app" "$test_root/fresh/log"
@@ -228,6 +238,43 @@ env HOME="$test_root/other_running/home" PATH="$fake_bin:/usr/bin:/bin" FAKE_LOG
   bash "$repo_root/scripts/install.sh" --app-dir "$test_root/other_running/apps"
 grep -Fq quit "$test_root/other_running/log"
 grep -Fq "open $test_root/other_running/apps/Infinite.app" "$test_root/other_running/log"
+
+# Exact production shapes: a verified GUI main plus its bundled daemon are one legitimate app tree.
+mkdir -p "$test_root/gui_daemon/home" "$test_root/gui_daemon/apps"
+create_app "$test_root/gui_daemon/apps/Infinite.app" 0.3.13
+mkdir -p "$test_root/gui_daemon/apps/Infinite.app/Contents/Resources/daemon"
+: > "$test_root/gui_daemon/apps/Infinite.app/Contents/Resources/daemon/daemon.mjs"
+gui_daemon_exec="$test_root/gui_daemon/apps/Infinite.app/Contents/MacOS/Infinite"
+printf '6101|%s\n6102|%s %s\n' \
+  "$gui_daemon_exec" \
+  "$gui_daemon_exec" \
+  "$test_root/gui_daemon/apps/Infinite.app/Contents/Resources/daemon/daemon.mjs" \
+  > "$test_root/gui_daemon/processes"
+: > "$test_root/gui_daemon/log"
+env HOME="$test_root/gui_daemon/home" PATH="$fake_bin:/usr/bin:/bin" FAKE_LOG="$test_root/gui_daemon/log" INFINITE_PLIST_BUDDY="$fake_bin/PlistBuddy" \
+  FAKE_PROCESS_TABLE="$test_root/gui_daemon/processes" \
+  bash "$repo_root/scripts/install.sh" --app-dir "$test_root/gui_daemon/apps"
+grep -Fq quit "$test_root/gui_daemon/log"
+grep -Fq "open $test_root/gui_daemon/apps/Infinite.app" "$test_root/gui_daemon/log"
+
+# A fresh isolated --no-open install does not disturb an unrelated verified prod GUI/daemon pair.
+mkdir -p "$test_root/isolated_no_open/home" "$test_root/isolated_no_open/apps" "$test_root/isolated_no_open/prod"
+create_app "$test_root/isolated_no_open/prod/Infinite.app" 0.3.13
+mkdir -p "$test_root/isolated_no_open/prod/Infinite.app/Contents/Resources/daemon"
+: > "$test_root/isolated_no_open/prod/Infinite.app/Contents/Resources/daemon/daemon.mjs"
+isolated_prod_exec="$test_root/isolated_no_open/prod/Infinite.app/Contents/MacOS/Infinite"
+printf '6201|%s\n6202|%s %s\n' \
+  "$isolated_prod_exec" \
+  "$isolated_prod_exec" \
+  "$test_root/isolated_no_open/prod/Infinite.app/Contents/Resources/daemon/daemon.mjs" \
+  > "$test_root/isolated_no_open/processes"
+: > "$test_root/isolated_no_open/log"
+env HOME="$test_root/isolated_no_open/home" PATH="$fake_bin:/usr/bin:/bin" FAKE_LOG="$test_root/isolated_no_open/log" INFINITE_PLIST_BUDDY="$fake_bin/PlistBuddy" \
+  FAKE_PROCESS_TABLE="$test_root/isolated_no_open/processes" \
+  bash "$repo_root/scripts/install.sh" --app-dir "$test_root/isolated_no_open/apps" --no-open
+test -d "$test_root/isolated_no_open/apps/Infinite.app"
+test -s "$test_root/isolated_no_open/processes"
+! grep -q '^quit$' "$test_root/isolated_no_open/log"
 
 # The exact legacy installer wrapper is preserved for launcher-safe Desktop to migrate atomically.
 mkdir -p "$test_root/legacy/home/.local/bin" "$test_root/legacy/apps"
@@ -347,6 +394,40 @@ env HOME="$test_root/running/home" PATH="$fake_bin:/usr/bin:/bin" FAKE_LOG="$tes
   bash "$repo_root/scripts/install.sh" --app-dir "$test_root/running/apps" --no-open
 grep -Fq quit "$test_root/running/log"
 test "$(cat "$test_root/running/apps/Infinite.app/Contents/.version")" = 0.3.13
+
+# Normal upgrade accepts the target app's exact GUI + bundled daemon shapes, then quiesces both.
+mkdir -p "$test_root/running_pair/home" "$test_root/running_pair/apps"
+create_app "$test_root/running_pair/apps/Infinite.app" 0.3.12
+mkdir -p "$test_root/running_pair/apps/Infinite.app/Contents/Resources/daemon"
+: > "$test_root/running_pair/apps/Infinite.app/Contents/Resources/daemon/daemon.mjs"
+running_pair_exec="$test_root/running_pair/apps/Infinite.app/Contents/MacOS/Infinite"
+printf '6301|%s\n6302|%s %s\n' \
+  "$running_pair_exec" \
+  "$running_pair_exec" \
+  "$test_root/running_pair/apps/Infinite.app/Contents/Resources/daemon/daemon.mjs" \
+  > "$test_root/running_pair/processes"
+: > "$test_root/running_pair/log"
+env HOME="$test_root/running_pair/home" PATH="$fake_bin:/usr/bin:/bin" FAKE_LOG="$test_root/running_pair/log" INFINITE_PLIST_BUDDY="$fake_bin/PlistBuddy" \
+  FAKE_PROCESS_TABLE="$test_root/running_pair/processes" \
+  bash "$repo_root/scripts/install.sh" --app-dir "$test_root/running_pair/apps" --no-open
+grep -Fq quit "$test_root/running_pair/log"
+test ! -s "$test_root/running_pair/processes"
+test "$(cat "$test_root/running_pair/apps/Infinite.app/Contents/.version")" = 0.3.13
+
+# An unexpected same-name process remains a hard stop for an operation that replaces its target app.
+mkdir -p "$test_root/running_unexpected/home" "$test_root/running_unexpected/apps"
+create_app "$test_root/running_unexpected/apps/Infinite.app" 0.3.12
+unexpected_exec="$test_root/running_unexpected/apps/Infinite.app/Contents/MacOS/Infinite"
+printf '6401|%s --unexpected-child\n' "$unexpected_exec" > "$test_root/running_unexpected/processes"
+: > "$test_root/running_unexpected/log"
+if env HOME="$test_root/running_unexpected/home" PATH="$fake_bin:/usr/bin:/bin" FAKE_LOG="$test_root/running_unexpected/log" INFINITE_PLIST_BUDDY="$fake_bin/PlistBuddy" \
+  FAKE_PROCESS_TABLE="$test_root/running_unexpected/processes" \
+  bash "$repo_root/scripts/install.sh" --app-dir "$test_root/running_unexpected/apps" --no-open; then
+  printf 'unexpected same-name process did not block upgrade\n' >&2
+  exit 1
+fi
+test "$(cat "$test_root/running_unexpected/apps/Infinite.app/Contents/.version")" = 0.3.12
+test -s "$test_root/running_unexpected/processes"
 
 # Post-commit verification and open failures roll an upgrade back to the previous verified app.
 for failure_case in verify_rollback open_rollback; do

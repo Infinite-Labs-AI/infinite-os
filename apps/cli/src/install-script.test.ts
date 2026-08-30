@@ -14,7 +14,7 @@ describe("scripts/install.sh (Infinite Desktop installer)", () => {
     expect(script).toContain('DOWNLOAD_URL="https://infinite.fast/download"');
     expect(script).toContain('--user-agent "$INSTALLER_USER_AGENT"');
     expect(script).toContain('--output "$DMG_PATH" "$DOWNLOAD_REQUEST_URL"');
-    expect(script).toContain('INSTALLER_USER_AGENT="Infinite-Installer/1.0.0"');
+    expect(script).toContain('INSTALLER_USER_AGENT="Infinite-Installer/1.0.1"');
     expect(script).not.toMatch(/curl[^\n]+(?:--head|\s-I(?:\s|$))/);
   });
 
@@ -48,6 +48,8 @@ describe("scripts/install.sh (Infinite Desktop installer)", () => {
     expect(script).toContain('mv -n "$STAGED_APP" "$APP_DIR/"');
     expect(script).toContain("rollback_upgrade");
     expect(script).toContain("quit_running_infinite_apps");
+    expect(script).toContain("Contents/Resources/daemon/daemon.mjs");
+    expect(script).toContain('if [ "$UPGRADE" = true ]; then quit_running_infinite_apps; fi');
   });
 
   it("rejects source and destination symlinks and cleans up on every terminating signal", () => {
@@ -58,12 +60,10 @@ describe("scripts/install.sh (Infinite Desktop installer)", () => {
     expect(script).toContain("trap 'exit 143' TERM");
   });
 
-  it("advertises only the published npm package and immutable curl installer", () => {
+  it("does not advertise command installers while the patch release is staged", () => {
     const rootReadme = readFileSync(join(repoRoot, "README.md"), "utf8");
-    expect(rootReadme).toContain("npx infinite-os@latest");
-    expect(rootReadme).toContain(
-      "raw.githubusercontent.com/Infinite-Labs-AI/infinite-os/d1ae0becce6706098294a2103e76a1f1cf6c0375/scripts/install.sh",
-    );
+    expect(rootReadme).not.toContain("npx infinite-os@latest");
+    expect(rootReadme).not.toContain("raw.githubusercontent.com/Infinite-Labs-AI/infinite-os/");
     expect(rootReadme).not.toContain("raw.githubusercontent.com/Infinite-Labs-AI/infinite-os/main");
   });
 });
@@ -83,7 +83,7 @@ describe("infinite-os npm bootstrap package", () => {
 
   it("repurposes infinite-os at v1 with a single npx entrypoint", () => {
     expect(packageJson.name).toBe("infinite-os");
-    expect(packageJson.version).toBe("1.0.0");
+    expect(packageJson.version).toBe("1.0.1");
     expect(packageJson.bin).toEqual({ "infinite-os": "bin/infinite-os.mjs" });
     expect(packageJson.files).toEqual(["bin", "README.md", "install.sh", "LICENSE"]);
     expect(packageJson.engines.node).toBe(">=18.0.0");
