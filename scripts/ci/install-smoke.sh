@@ -255,6 +255,12 @@ if run_installer wrong_team env FAKE_TEAM_ID=WRONGTEAM; then
 fi
 test ! -e "$test_root/wrong_team/apps/Infinite.app"
 
+if run_installer wrong_bundle env FAKE_BUNDLE_ID=example.wrong.bundle; then
+  printf 'wrong bundle identity unexpectedly installed\n' >&2
+  exit 1
+fi
+test ! -e "$test_root/wrong_bundle/apps/Infinite.app"
+
 if run_installer wrong_signature env FAKE_BAD_SIGNATURE_PATH=mount; then
   printf 'bad signature unexpectedly installed\n' >&2
   exit 1
@@ -328,6 +334,12 @@ if env HOME="$test_root/open_rollback/home" PATH="$fake_bin:/usr/bin:/bin" FAKE_
 fi
 test "$(cat "$test_root/open_rollback/apps/Infinite.app/Contents/.version")" = 0.3.12
 ! find "$test_root/open_rollback/apps" -maxdepth 1 -name '.infinite-backup.*' | grep -q .
+
+if run_installer fresh_open_failure env FAKE_OPEN_FAIL=1; then
+  printf 'fresh open failure unexpectedly succeeded\n' >&2
+  exit 1
+fi
+test ! -e "$test_root/fresh_open_failure/apps/Infinite.app"
 
 # A terminating signal during staging leaves no app or staging directory.
 if run_installer signal env FAKE_SIGNAL_DURING_DITTO=1; then
