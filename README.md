@@ -12,7 +12,7 @@ Infinite OS is a self-hosted, local-first growth-analytics runtime. It connects 
   <b>Maker:</b> <a href="https://x.com/RiverKhan">@RiverKhan</a>
 </p>
 
-> It is **not** a broad agent runtime, skill platform, or generic SQL tool. For natural-language questions it forwards your prompt to your own Claude or Codex account using your own credentials. The model gets no arbitrary shell or code execution — it can only invoke Infinite's governed, typed tool catalog (metric/analytics reads and the defined operator actions). Live or destructive operator writes (e.g. ad changes, publishing) are confirmation-gated; reviewable drafts and background jobs may be created directly from your request. Your data never leaves your machine unless you send it somewhere.
+> It is **not** a broad agent runtime, skill platform, or generic SQL tool. For natural-language questions it forwards your prompt to your own Claude or Codex account using your own credentials. Infinite OS's built-in/native catalog does not give model output an arbitrary shell or code runner: native actions go through the typed registry with authority and policy checks, and live/destructive native actions require operator confirmation before execution. When an operator-authorized host supplies scoped app/MCP tools, Infinite OS advertises only that caller-described allowlist and calls the host's loopback handlers; those tools own their specific validation and confirmation contract, including confirmations that may be returned after a proposal/tool invocation before follow-up execution. Your data never leaves your machine unless you send it somewhere.
 
 ## How it works
 
