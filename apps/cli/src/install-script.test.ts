@@ -65,10 +65,12 @@ describe("scripts/install.sh (Infinite Desktop installer)", () => {
     expect(script).toContain("trap 'exit 143' TERM");
   });
 
-  it("does not advertise command installers while the patch release is staged", () => {
+  it("advertises only the published npm patch and immutable curl installer", () => {
     const rootReadme = readFileSync(join(repoRoot, "README.md"), "utf8");
-    expect(rootReadme).not.toContain("npx infinite-os@latest");
-    expect(rootReadme).not.toContain("raw.githubusercontent.com/Infinite-Labs-AI/infinite-os/");
+    expect(rootReadme).toContain("npx infinite-os@latest");
+    expect(rootReadme).toContain(
+      "raw.githubusercontent.com/Infinite-Labs-AI/infinite-os/9dd4d59a9fe8c1c6f01e78a5213a20e5426efef3/scripts/install.sh",
+    );
     expect(rootReadme).not.toContain("raw.githubusercontent.com/Infinite-Labs-AI/infinite-os/main");
   });
 });
