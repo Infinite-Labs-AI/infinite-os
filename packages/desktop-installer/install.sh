@@ -109,6 +109,7 @@ INSTALL_SUCCESS=false
 UPGRADE=false
 NEW_FINGERPRINT=""
 ORIGINAL_FINGERPRINT=""
+STAGED_FINGERPRINT=""
 
 path_exists_or_link() { [ -e "$1" ] || [ -L "$1" ]; }
 
@@ -191,6 +192,13 @@ rollback_upgrade() {
 cleanup() {
   exit_status=$?
   trap - EXIT HUP INT TERM
+  if [ "$INSTALL_COMMITTED" != true ] && [ -n "$STAGED_FINGERPRINT" ] \
+    && ! path_exists_or_link "$STAGED_APP" && path_exists_or_link "$TARGET_APP" \
+    && [ "$(app_fingerprint "$TARGET_APP" || true)" = "$STAGED_FINGERPRINT" ]; then
+    # A signal landed after the atomic no-replace rename but before the next shell assignment.
+    INSTALL_COMMITTED=true
+    NEW_FINGERPRINT="$STAGED_FINGERPRINT"
+  fi
   if [ "$INSTALL_SUCCESS" != true ]; then rollback_upgrade; fi
   if [ "$MOUNTED" = true ] && [ -n "$MOUNT_POINT" ]; then
     hdiutil detach "$MOUNT_POINT" -quiet >/dev/null 2>&1 \
@@ -260,6 +268,7 @@ launch_if_requested() {
     return 1
   fi
   log_info "Opening Infinite ${installed_version}…"
+  quit_running_infinite_apps
   open "$TARGET_APP"
 }
 
@@ -328,6 +337,7 @@ ditto "$SOURCE_APP" "$STAGED_APP"
 verify_infinite_app "$STAGED_APP" || { log_error "Staged app failed verification."; exit 1; }
 STAGED_VERSION="$(read_app_version "$STAGED_APP")" || exit 1
 [ "$STAGED_VERSION" = "$SOURCE_VERSION" ] || { log_error "Staged app version changed unexpectedly."; exit 1; }
+STAGED_FINGERPRINT="$(app_fingerprint "$STAGED_APP")" || exit 1
 
 quit_running_infinite_apps
 

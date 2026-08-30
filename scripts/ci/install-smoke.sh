@@ -142,6 +142,25 @@ printf 'quit\n' >> "$FAKE_LOG"
 [ -z "${FAKE_RUNNING_FILE:-}" ] || : > "$FAKE_RUNNING_FILE"
 EOF
 
+  cat > "$fake_bin/stat" <<'EOF'
+#!/usr/bin/env bash
+path="${*: -1}"
+inode="$(/bin/ls -di "$path" | /usr/bin/awk '{print $1}')"
+printf '1:%s\n' "$inode"
+EOF
+
+  cat > "$fake_bin/mv" <<'EOF'
+#!/usr/bin/env bash
+/bin/mv "$@"
+source_path="$2"
+destination_path="${*: -1}"
+if [ "${FAKE_SIGNAL_AFTER_COMMIT:-0}" = "1" ] \
+  && [[ "$source_path" == */.infinite-installer.*/Infinite.app ]] \
+  && [[ "$destination_path" == */apps/ ]]; then
+  kill -TERM "$PPID"
+fi
+EOF
+
   chmod +x "$fake_bin"/*
 }
 
@@ -193,6 +212,18 @@ env HOME="$test_root/existing/home" PATH="$fake_bin:/usr/bin:/bin" FAKE_LOG="$te
 existing_after="$(stat -f '%d:%i' "$test_root/existing/apps/Infinite.app")"
 test "$existing_before" = "$existing_after"
 grep -Fq "open $test_root/existing/apps/Infinite.app" "$test_root/existing/log"
+
+# A safe installed target still quits an older verified copy running from another path before open.
+mkdir -p "$test_root/other_running/home" "$test_root/other_running/apps" "$test_root/other_running/downloads"
+create_app "$test_root/other_running/apps/Infinite.app" 0.3.13
+create_app "$test_root/other_running/downloads/Infinite.app" 0.3.12
+printf '5252\n' > "$test_root/other_running/pids"
+: > "$test_root/other_running/log"
+env HOME="$test_root/other_running/home" PATH="$fake_bin:/usr/bin:/bin" FAKE_LOG="$test_root/other_running/log" INFINITE_PLIST_BUDDY="$fake_bin/PlistBuddy" \
+  FAKE_RUNNING_FILE="$test_root/other_running/pids" FAKE_RUNNING_APP="$test_root/other_running/downloads/Infinite.app" \
+  bash "$repo_root/scripts/install.sh" --app-dir "$test_root/other_running/apps"
+grep -Fq quit "$test_root/other_running/log"
+grep -Fq "open $test_root/other_running/apps/Infinite.app" "$test_root/other_running/log"
 
 # The exact legacy installer wrapper is preserved for launcher-safe Desktop to migrate atomically.
 mkdir -p "$test_root/legacy/home/.local/bin" "$test_root/legacy/apps"
@@ -349,6 +380,18 @@ fi
 test ! -e "$test_root/signal/apps/Infinite.app"
 ! find "$test_root/signal/apps" -maxdepth 1 -name '.infinite-installer.*' | grep -q .
 grep -Fq 'detach ' "$test_root/signal/log"
+
+# A signal in the rename→state-assignment window is inferred from the staged inode and rolled back.
+mkdir -p "$test_root/signal_commit/home" "$test_root/signal_commit/apps"
+create_app "$test_root/signal_commit/apps/Infinite.app" 0.3.12
+: > "$test_root/signal_commit/log"
+if env HOME="$test_root/signal_commit/home" PATH="$fake_bin:/usr/bin:/bin" FAKE_LOG="$test_root/signal_commit/log" INFINITE_PLIST_BUDDY="$fake_bin/PlistBuddy" \
+  FAKE_SIGNAL_AFTER_COMMIT=1 bash "$repo_root/scripts/install.sh" --app-dir "$test_root/signal_commit/apps" --no-open; then
+  printf 'commit-window signal unexpectedly succeeded\n' >&2
+  exit 1
+fi
+test "$(cat "$test_root/signal_commit/apps/Infinite.app/Contents/.version")" = 0.3.12
+! find "$test_root/signal_commit/apps" -maxdepth 1 \( -name '.infinite-installer.*' -o -name '.infinite-backup.*' \) | grep -q .
 
 # --no-open performs a valid fresh install without invoking LaunchServices.
 mkdir -p "$test_root/no_open/home" "$test_root/no_open/apps"
