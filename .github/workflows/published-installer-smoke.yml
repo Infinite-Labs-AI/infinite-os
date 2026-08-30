@@ -23,4 +23,4 @@ jobs:
           bash -n "$installer"
           bash "$installer" --help | grep -F 'Infinite for macOS installer'
           grep -F 'DOWNLOAD_URL="https://infinite.fast/download"' "$installer"
-          grep -F 'INSTALLER_USER_AGENT="Infinite-Installer/1.0.0"' "$installer"
+          grep -F 'INSTALLER_USER_AGENT="Infinite-Installer/1.0.1"' "$installer"

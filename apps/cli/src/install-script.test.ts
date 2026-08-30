@@ -16,6 +16,11 @@ describe("scripts/install.sh (Infinite Desktop installer)", () => {
     expect(script).toContain('--output "$DMG_PATH" "$DOWNLOAD_REQUEST_URL"');
     expect(script).toContain('INSTALLER_USER_AGENT="Infinite-Installer/1.0.1"');
     expect(script).not.toMatch(/curl[^\n]+(?:--head|\s-I(?:\s|$))/);
+    const publishedSmoke = readFileSync(
+      join(repoRoot, ".github", "workflows", "published-installer-smoke.yml"),
+      "utf8",
+    );
+    expect(publishedSmoke).toContain('INSTALLER_USER_AGENT="Infinite-Installer/1.0.1"');
   });
 
   it("is macOS-only and does not bootstrap the retired Docker lane", () => {
