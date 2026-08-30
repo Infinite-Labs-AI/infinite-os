@@ -67,4 +67,17 @@ describe("infinite-os npm bootstrap package", () => {
     expect(bin).toContain("spawnSync");
     expect(bundledInstaller).toBe(canonicalInstaller);
   });
+
+  it("only publishes from main and runs the tarball test in both release gates", () => {
+    const publishWorkflow = readFileSync(
+      join(repoRoot, ".github", "workflows", "publish-infinite-os.yml"),
+      "utf8",
+    );
+    const ciWorkflow = readFileSync(join(repoRoot, ".github", "workflows", "ci.yml"), "utf8");
+    expect(publishWorkflow).toContain("github.ref != 'refs/heads/main'");
+    expect(publishWorkflow).toContain(
+      "packages/desktop-installer/package-tarball.test.ts",
+    );
+    expect(ciWorkflow).toContain("packages/desktop-installer");
+  });
 });

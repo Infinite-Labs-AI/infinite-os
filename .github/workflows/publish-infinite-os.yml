@@ -22,6 +22,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Refuse a real publish outside main
+        if: ${{ !inputs.dry-run && github.ref != 'refs/heads/main' }}
+        run: |
+          echo "::error::infinite-os may only be published from refs/heads/main"
+          exit 1
+
       - uses: pnpm/action-setup@v4
 
       - uses: actions/setup-node@v4
@@ -38,7 +44,9 @@ jobs:
 
       - name: Verify installer behavior and package contract
         run: |
-          pnpm exec vitest run apps/cli/src/install-script.test.ts
+          pnpm exec vitest run \
+            apps/cli/src/install-script.test.ts \
+            packages/desktop-installer/package-tarball.test.ts
           bash scripts/ci/install-smoke.sh
 
       - name: Pack and validate the exact publication artifact
@@ -56,6 +64,6 @@ jobs:
           printf 'sha256=%s\n' "$sha256" >> "$GITHUB_OUTPUT"
 
       - name: Publish exact tarball with npm provenance
-        if: ${{ !inputs.dry-run }}
+        if: ${{ !inputs.dry-run && github.ref == 'refs/heads/main' }}
         working-directory: packages/desktop-installer
         run: npm publish "${{ steps.pack.outputs.tarball }}" --access public --provenance
