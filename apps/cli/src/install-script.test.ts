@@ -12,7 +12,8 @@ describe("scripts/install.sh (Infinite Desktop installer)", () => {
 
   it("downloads the canonical Desktop product through an analytics-counted GET", () => {
     expect(script).toContain('DOWNLOAD_URL="https://infinite.fast/download"');
-    expect(script).toContain('--user-agent "$INSTALLER_USER_AGENT" --output "$DMG_PATH" "$DOWNLOAD_REQUEST_URL"');
+    expect(script).toContain('--user-agent "$INSTALLER_USER_AGENT"');
+    expect(script).toContain('--output "$DMG_PATH" "$DOWNLOAD_REQUEST_URL"');
     expect(script).toContain('INSTALLER_USER_AGENT="Infinite-Installer/1.0.0"');
     expect(script).not.toMatch(/curl[^\n]+(?:--head|\s-I(?:\s|$))/);
   });
@@ -30,12 +31,37 @@ describe("scripts/install.sh (Infinite Desktop installer)", () => {
     expect(script).toContain('EXPECTED_TEAM_ID="4659K3678P"');
     expect(script).toMatch(/codesign.*--verify.*--deep.*--strict/);
     expect(script).toMatch(/spctl.*--assess.*--type execute/);
+    expect(script).toContain('hdiutil verify "$DMG_PATH"');
+    expect(script).toContain("--proto '=https'");
+    expect(script).toContain("--proto-redir '=https'");
   });
 
   it("only migrates the legacy installer-owned CLI wrapper", () => {
     expect(script).toContain("# Infinite launcher shim — installed by scripts/install.sh.");
-    expect(script).toContain("legacy-installer");
+    expect(script).toContain("legacy installer-owned");
     expect(script).toContain("preserving it");
+  });
+
+  it("upgrades only older verified apps with no-clobber commit and rollback", () => {
+    expect(script).toContain('MIN_SAFE_DESKTOP_VERSION="');
+    expect(script).toContain("CFBundleShortVersionString");
+    expect(script).toContain('mv -n "$STAGED_APP" "$APP_DIR/"');
+    expect(script).toContain("rollback_upgrade");
+    expect(script).toContain("quit_running_infinite_apps");
+  });
+
+  it("rejects source and destination symlinks and cleans up on every terminating signal", () => {
+    expect(script).toContain('[ -L "$SOURCE_APP" ]');
+    expect(script).toContain('[ -L "$TARGET_APP" ]');
+    expect(script).toContain("trap 'exit 129' HUP");
+    expect(script).toContain("trap 'exit 130' INT");
+    expect(script).toContain("trap 'exit 143' TERM");
+  });
+
+  it("does not advertise mutable or unpublished installer commands in the root README", () => {
+    const rootReadme = readFileSync(join(repoRoot, "README.md"), "utf8");
+    expect(rootReadme).not.toContain("npx infinite-os@latest");
+    expect(rootReadme).not.toContain("raw.githubusercontent.com/Infinite-Labs-AI/infinite-os/main");
   });
 });
 

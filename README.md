@@ -19,24 +19,18 @@ open-core engine, an embedded PGlite database, its background daemon, governed t
 
 Infinite is a **macOS-only, Apple-silicon app** and requires macOS 12 or newer.
 
-```bash
-npx infinite-os@latest
-```
+The hardened one-command installers are staged in this repository but are not advertised until the
+launcher-safe Desktop release and `infinite-os@1.0.0` npm package are both live. For now, use
+**[Download for Mac](https://infinite.fast/download)**.
 
-Or install without npm:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/Infinite-Labs-AI/infinite-os/main/scripts/install.sh | bash
-```
-
-Both commands install the exact signed and notarized Desktop product served by
-[`infinite.fast/download`](https://infinite.fast/download). The installer verifies the production
+The staged installers use the exact signed and notarized Desktop product served by
+`infinite.fast/download`. They verify the production
 bundle identity, Developer ID team, signature, and notarization before placing `Infinite.app` in
-`/Applications`, then opens it. A healthy existing app is opened without being replaced.
+`/Applications`, then open it. The installer keeps the same or a newer verified app, upgrades an
+older verified app, and restores the prior app if an upgrade cannot finish safely.
 
-The app installs its bundled `infinite` command on first launch. The curl path needs no Node, Docker,
-Git, package manager, or separate database. The npx path only needs Node to invoke this alternative
-installer; the installed app does not depend on it.
+The app installs its bundled `infinite` command on first launch and needs no Docker, Git, separately
+managed database, or second engine checkout.
 
 ### Installer safety
 
@@ -45,11 +39,9 @@ installer; the installed app does not depend on it.
 - Installation happens through a unique same-volume staging directory and becomes visible only after
   the staged app passes verification again.
 - An existing app that does not match Infinite's production signature is never overwritten.
-- The old installer-owned `~/.local/bin/infinite` wrapper is moved to a recoverable backup only when
-  its exact legacy marker and target match. Any unrelated command is preserved.
+- Existing `~/.local/bin/infinite` commands—including the exact legacy wrapper—are preserved. The
+  launcher-safe Desktop release owns their atomic migration without clobbering unrelated commands.
 - Temporary mounts, downloads, and staging directories are cleaned up on success or failure.
-
-Run `npx infinite-os@latest -- --help` or append `--help` to the curl script to see installer options.
 
 ## What ships in Desktop
 
