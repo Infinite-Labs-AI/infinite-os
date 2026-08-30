@@ -333,3 +333,43 @@ describe("canonical entry routing (§6.6)", () => {
     }
   });
 });
+
+// ── `infinite contacts` interception (contacts-cli-sync design, Phase 2) ─────
+// The word "contacts" must never fall through to a chat turn, and the sync
+// flow's first gates (desktop running, capability) run before ANY bridge data
+// call.
+describe("contacts command interception", () => {
+  it("bare `infinite contacts` prints usage and never becomes a turn", async () => {
+    const restoreTty = forceTty(true);
+    const restorePlatform = forcePlatform("darwin");
+    try {
+      const { stdout, code, sentToBridge } = await runCliCaptured(["contacts"]);
+      expect(stdout).toContain("Usage: infinite contacts sync");
+      expect(sentToBridge).toBe(false);
+      expect(code).not.toBe(0);
+    } finally {
+      restorePlatform();
+      restoreTty();
+    }
+  });
+
+  it("`infinite contacts sync` with no running desktop says to open the app — nothing crosses the bridge", async () => {
+    const restoreTty = forceTty(true);
+    const restorePlatform = forcePlatform("darwin");
+    try {
+      const { stderr, code, sentToBridge, sentTurn } = await runCliCaptured([
+        "contacts",
+        "sync"
+      ]);
+      expect(stderr).toContain(
+        "Open the Infinite app first — that's how your people reach your workspace."
+      );
+      expect(sentToBridge).toBe(false);
+      expect(sentTurn).toBe(false);
+      expect(code).not.toBe(0);
+    } finally {
+      restorePlatform();
+      restoreTty();
+    }
+  });
+});
