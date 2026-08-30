@@ -35,6 +35,7 @@ import {
   type SetupProviderId
 } from "./setup-prompts.js";
 import { localHelpText, productHelpText, productUpdateText } from "./help-text.js";
+import { runContactsCommand } from "./contacts/contacts-command.js";
 import { reservedCommandNotice } from "./desktop/reserved-commands.js";
 import { readReleaseGa4OAuthClient, type EmbeddedGa4OAuthClient } from "./ga4-oauth-client.js";
 import { prepareGa4ConnectConfig } from "./ga4-connect-config.js";
@@ -1770,6 +1771,17 @@ export async function runCli(
       );
     }
     await runDesktopAppCommand(desktopAppCommand.args, env);
+    return;
+  }
+
+  // `infinite contacts …` — the deterministic contacts-sync flow (design doc
+  // 2026-08-30-contacts-cli-sync-design.md, Phase 2). Intercepted BEFORE the
+  // reserved-command check and the unknown-text→turn fallthrough so the word
+  // "contacts" never becomes a chat turn. Deliberately NOT in
+  // RESERVED_LOCAL_COMMANDS: it is a product command backed by the Desktop
+  // bridge, not an engine command namespaced under `infinite local`.
+  if (normalizedArgs[0] === "contacts") {
+    await runContactsCommand(normalizedArgs.slice(1), env);
     return;
   }
 

@@ -17,6 +17,10 @@
  *                         the git/local-stack updater lives at
  *                         `infinite local update`.
  *   - `local`           — the explicit namespace itself.
+ *   - `contacts`        — the product's bridge-backed contacts-sync command,
+ *                         intercepted in `runCli` before reserved interception
+ *                         (not an engine command; `infinite local contacts`
+ *                         would be wrong guidance).
  */
 export const RESERVED_LOCAL_COMMANDS: ReadonlySet<string> = new Set([
   "init",
