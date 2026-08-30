@@ -1,7 +1,11 @@
-# Infinite OS — Local and Docker Quickstart
+# Infinite OS — Maintainer Engine Topology
 
-Infinite OS is a local-first, self-hosted growth-analytics runtime. The
-TypeScript workspace runs the topology: Postgres, the app daemon + HTTP
+This page documents the source engine topology used by maintainers and contributors. It is not a
+supported customer installation path and does not constitute Linux support. Customers install the
+signed macOS Desktop app using the command in the root README; Desktop already contains the engine,
+embedded database, daemon, and CLI.
+
+The engine source TypeScript workspace runs the topology: Postgres, the app daemon + HTTP
 API, the sync worker, migrations, typed actions, queryable views, and connector
 paths for Google Analytics 4, PostHog, Stripe, Meta, Shopify, and read-only X
 public post metrics.

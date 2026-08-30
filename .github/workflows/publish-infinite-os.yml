@@ -1,0 +1,69 @@
+name: Publish infinite-os
+
+# Publishes only the tiny macOS Desktop installer package. Before the first run, an npm owner must
+# configure infinite-os → Settings → Trusted Publisher for this repository and this exact workflow
+# filename. No long-lived npm token is used.
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: "Pack and validate only; do not publish"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Refuse a real publish outside main
+        if: ${{ !inputs.dry-run && github.ref != 'refs/heads/main' }}
+        run: |
+          echo "::error::infinite-os may only be published from refs/heads/main"
+          exit 1
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+          cache: pnpm
+
+      - name: Upgrade npm for trusted publishing
+        run: npm install --global npm@11
+
+      - name: Install workspace dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify installer behavior and package contract
+        run: |
+          pnpm exec vitest run \
+            apps/cli/src/install-script.test.ts \
+            packages/desktop-installer/package-tarball.test.ts
+          bash scripts/ci/install-smoke.sh
+
+      - name: Pack and validate the exact publication artifact
+        id: pack
+        working-directory: packages/desktop-installer
+        run: |
+          set -euo pipefail
+          receipt="${RUNNER_TEMP}/infinite-os-pack.json"
+          npm pack --json > "$receipt"
+          tgz="$(node ../../scripts/ci/validate-infinite-os-pack.mjs "$receipt")"
+          test -f "$tgz"
+          sha256="$(shasum -a 256 "$tgz" | awk '{print $1}')"
+          printf 'Tarball SHA256: %s\n' "$sha256"
+          printf 'tarball=%s\n' "$tgz" >> "$GITHUB_OUTPUT"
+          printf 'sha256=%s\n' "$sha256" >> "$GITHUB_OUTPUT"
+
+      - name: Publish exact tarball with npm provenance
+        if: ${{ !inputs.dry-run && github.ref == 'refs/heads/main' }}
+        working-directory: packages/desktop-installer
+        run: npm publish "${{ steps.pack.outputs.tarball }}" --access public --provenance

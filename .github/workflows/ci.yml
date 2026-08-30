@@ -96,6 +96,7 @@ jobs:
           packages/connectors
           packages/core
           packages/db
+          packages/desktop-installer
           packages/instrument
           packages/metadata
           packages/runtime
