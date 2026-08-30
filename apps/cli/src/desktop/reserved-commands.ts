@@ -57,14 +57,15 @@ export const RESERVED_LOCAL_COMMANDS: ReadonlySet<string> = new Set([
 /**
  * Guidance for a bare top-level invocation of a reserved engine command, or
  * null when the word is not reserved (and may therefore become a turn). The
- * caller's remaining argv rides along so the guidance is copy-pasteable
- * (`infinite setup resume r123` → `Use: infinite local setup resume r123`).
+ * caller's remaining argv rides along so it is clear what was intercepted.
  */
 export function reservedCommandNotice(
   command: string,
   rest: readonly string[] = []
 ): string | null {
   return RESERVED_LOCAL_COMMANDS.has(command)
-    ? `Use: infinite local ${[command, ...rest].join(" ")}`
+    ? `"${[command, ...rest].join(" ")}" is not a Terminal product command. ` +
+        "Open Infinite Desktop at infinite://onboarding and press ⌘L. " +
+        "App and Terminal use the same account, workspace, and agent."
     : null;
 }

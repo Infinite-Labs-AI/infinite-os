@@ -1,8 +1,18 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync
+} from "node:fs";
+import { createRequire, syncBuiltinESMExports } from "node:module";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { runCli } from "./index.js";
+import { runCli, runInteractiveEntry } from "./index.js";
+import type { OnboardingDeps } from "./desktop/onboarding.js";
 
 // ── §6.6 canonical entry routing (Phase 3) ───────────────────────────────────
 // The `infinite` entry dispatch, in order: (1) normalize aliases + detect
@@ -24,9 +34,29 @@ interface CapturedRun {
   sentTurn: boolean;
 }
 
+interface RunCliCapturedOptions {
+  fetchImpl?: (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+}
+
+const UNSUPPORTED_PRODUCT_PLATFORM =
+  "Infinite Desktop and its Terminal companion require an Apple-silicon Mac with macOS 12 or newer. No command was run.\n";
+const DESKTOP_SERVICE = "infinite-desktop-cmdl";
+const DESKTOP_CAPABILITIES = [
+  "status.v1",
+  "turn.ndjson.v1",
+  "confirm.v1",
+  "contacts.import.v1"
+];
+const mutableFs = createRequire(import.meta.url)("node:fs") as typeof import("node:fs");
+
 function forceTty(value: boolean): () => void {
-  const targets: Array<NodeJS.ReadStream | NodeJS.WriteStream> = [process.stdin, process.stdout];
-  const originals = targets.map((target) => Object.getOwnPropertyDescriptor(target, "isTTY"));
+  const targets: Array<NodeJS.ReadStream | NodeJS.WriteStream> = [
+    process.stdin,
+    process.stdout
+  ];
+  const originals = targets.map((target) =>
+    Object.getOwnPropertyDescriptor(target, "isTTY")
+  );
   for (const target of targets) {
     Object.defineProperty(target, "isTTY", { configurable: true, value });
   }
@@ -54,7 +84,8 @@ function forcePlatform(value: NodeJS.Platform): () => void {
 
 async function runCliCaptured(
   args: string[],
-  env: Record<string, string> = {}
+  env: Record<string, string> = {},
+  options: RunCliCapturedOptions = {}
 ): Promise<CapturedRun> {
   const growthHome = mkdtempSync(join(tmpdir(), "growth-os-entry-routing-"));
   const stdoutWrites: string[] = [];
@@ -71,7 +102,12 @@ async function runCliCaptured(
       stderrWrites.push(String(chunk));
       return true;
     });
-  const fetchSpy = vi.fn(async (_input: string | URL | Request) => new Response("{}", { status: 200 }));
+  const fetchSpy = vi.fn(
+    options.fetchImpl ??
+      (async (_input: string | URL | Request) =>
+      new Response("{}", { status: 200 })
+      )
+  );
   vi.stubGlobal("fetch", fetchSpy);
   const priorExitCode = process.exitCode;
   process.exitCode = 0;
@@ -81,8 +117,12 @@ async function runCliCaptured(
       stdout: stdoutWrites.join(""),
       stderr: stderrWrites.join(""),
       code: typeof process.exitCode === "number" ? process.exitCode : 0,
-      sentToBridge: fetchSpy.mock.calls.some(([url]) => String(url).includes("/v1/")),
-      sentTurn: fetchSpy.mock.calls.some(([url]) => String(url).endsWith("/v1/turn"))
+      sentToBridge: fetchSpy.mock.calls.some(([url]) =>
+        String(url).includes("/v1/")
+      ),
+      sentTurn: fetchSpy.mock.calls.some(([url]) =>
+        String(url).endsWith("/v1/turn")
+      )
     };
   } finally {
     process.exitCode = priorExitCode;
@@ -93,18 +133,122 @@ async function runCliCaptured(
   }
 }
 
+function createCanonicalDesktopHome() {
+  const root = mkdtempSync(join(tmpdir(), "growth-os-contacts-routing-"));
+  const userHome = join(root, "user");
+  const growthHome = join(userHome, ".growth-os");
+  mkdirSync(growthHome, { recursive: true });
+  return {
+    root,
+    userHome,
+    growthHome,
+    env: { HOME: userHome, GROWTH_OS_HOME: growthHome }
+  };
+}
+
+function createFakeDesktopApp(userHome: string): string {
+  const appPath = join(userHome, "Applications", "Infinite.app");
+  mkdirSync(appPath, { recursive: true });
+  return appPath;
+}
+
+function createFakeOpen(root: string, exitStatus = 0) {
+  const bin = join(root, "bin");
+  const logPath = join(root, "open.log");
+  const openPath = join(bin, "open");
+  mkdirSync(bin, { recursive: true });
+  writeFileSync(
+    openPath,
+    `#!/bin/sh\nprintf '%s\\n' "$@" >> ${JSON.stringify(logPath)}\nexit ${exitStatus}\n`
+  );
+  chmodSync(openPath, 0o755);
+  const originalPath = process.env.PATH;
+  process.env.PATH = `${bin}:${originalPath ?? ""}`;
+  return {
+    logPath,
+    restore: () => {
+      if (originalPath === undefined) {
+        delete process.env.PATH;
+      } else {
+        process.env.PATH = originalPath;
+      }
+    }
+  };
+}
+
+function writeDesktopBridge(
+  growthHome: string,
+  overrides: Record<string, unknown> = {}
+): void {
+  const bridgeDirectory = join(growthHome, "desktop-cmdl");
+  const descriptorPath = join(bridgeDirectory, "bridge.json");
+  mkdirSync(bridgeDirectory, { recursive: true, mode: 0o700 });
+  chmodSync(bridgeDirectory, 0o700);
+  writeFileSync(
+    descriptorPath,
+    JSON.stringify({
+      schemaVersion: 1,
+      service: DESKTOP_SERVICE,
+      protocol: { min: 1, max: 1 },
+      capabilities: DESKTOP_CAPABILITIES,
+      url: "http://127.0.0.1:54321",
+      pid: 12345,
+      bootId: "boot-contacts-routing",
+      desktopVersion: "0.3.15",
+      runtime: { variant: "prod", stateLabel: "Infinite" },
+      token: "owner-only-bearer-token",
+      startedAt: "2026-08-30T12:00:00.000Z",
+      ...overrides
+    }),
+    { mode: 0o600 }
+  );
+  chmodSync(descriptorPath, 0o600);
+}
+
+function writeDesktopState(growthHome: string, state: string): void {
+  const bridgeDirectory = join(growthHome, "desktop-cmdl");
+  mkdirSync(bridgeDirectory, { recursive: true, mode: 0o700 });
+  chmodSync(bridgeDirectory, 0o700);
+  writeFileSync(join(bridgeDirectory, "state.json"), JSON.stringify({ state }));
+}
+
+function desktopStatusResponse(
+  ready: boolean,
+  bootId = "boot-contacts-routing"
+): Response {
+  return new Response(
+    JSON.stringify({
+      service: DESKTOP_SERVICE,
+      bootId,
+      protocol: { min: 1, max: 1 },
+      capabilities: DESKTOP_CAPABILITIES,
+      ready,
+      contextRevision: "ctx-contacts-routing",
+      workspace: { id: "workspace_123", name: "Acme" }
+    }),
+    { status: 200, headers: { "content-type": "application/json" } }
+  );
+}
+
+function assertNoCustomerFallbackCopy(text: string): void {
+  expect(text).not.toMatch(/trial|infinite local|local engine|Docker|self[- ]host/i);
+}
+
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
 
 describe("canonical entry routing (§6.6)", () => {
-  it("a reserved command prints local guidance and does NOT become a turn", async () => {
+  it("a reserved command prints Desktop guidance and does NOT become a turn", async () => {
     const restoreTty = forceTty(true);
     const restorePlatform = forcePlatform("darwin");
     try {
       const { stdout, code, sentToBridge } = await runCliCaptured(["sources"]);
-      expect(stdout).toContain("Use: infinite local sources");
+      expect(stdout).toContain("Infinite Desktop");
+      expect(stdout).not.toMatch(
+        /infinite local|docker|self-host|local engine/i
+      );
       expect(sentToBridge).toBe(false);
       expect(code).not.toBe(0);
     } finally {
@@ -113,12 +257,17 @@ describe("canonical entry routing (§6.6)", () => {
     }
   });
 
-  it("a reserved command keeps its arguments in the local guidance", async () => {
+  it("a reserved command keeps its arguments in the Desktop guidance", async () => {
     const restoreTty = forceTty(true);
     const restorePlatform = forcePlatform("darwin");
     try {
-      const { stdout, code, sentToBridge } = await runCliCaptured(["setup", "resume", "r123"]);
-      expect(stdout).toContain("Use: infinite local setup resume r123");
+      const { stdout, code, sentToBridge } = await runCliCaptured([
+        "setup",
+        "resume",
+        "r123"
+      ]);
+      expect(stdout).toContain("setup resume r123");
+      expect(stdout).toContain("Infinite Desktop");
       expect(sentToBridge).toBe(false);
       expect(code).not.toBe(0);
     } finally {
@@ -131,9 +280,16 @@ describe("canonical entry routing (§6.6)", () => {
     const restoreTty = forceTty(true);
     const restorePlatform = forcePlatform("darwin");
     try {
-      const { code, stderr, sentToBridge } = await runCliCaptured(["--project", "x", "hello"]);
+      const { code, stderr, sentToBridge } = await runCliCaptured([
+        "--project",
+        "x",
+        "hello"
+      ]);
       expect(code).not.toBe(0);
-      expect(stderr).toContain("infinite local");
+      expect(stderr).toContain("Desktop's active workspace");
+      expect(stderr).not.toMatch(
+        /infinite local|docker|self-host|local engine/i
+      );
       expect(sentToBridge).toBe(false);
     } finally {
       restorePlatform();
@@ -143,7 +299,8 @@ describe("canonical entry routing (§6.6)", () => {
 
   it("product help prints the product surface, not the raw engine", async () => {
     const { stdout, code, sentToBridge } = await runCliCaptured(["help"]);
-    expect(stdout).toContain("infinite local");
+    expect(stdout).toContain("⌘L");
+    expect(stdout).toContain("infinite://onboarding");
     expect(stdout).not.toContain("docker");
     expect(stdout).not.toContain("Connect data:");
     expect(code).toBe(0);
@@ -152,7 +309,7 @@ describe("canonical entry routing (§6.6)", () => {
 
   it("--help is a product-help alias", async () => {
     const { stdout, code } = await runCliCaptured(["--help"]);
-    expect(stdout).toContain("infinite local");
+    expect(stdout).toContain("npx infinite-os@latest");
     expect(stdout).not.toContain("Connect data:");
     expect(code).toBe(0);
   });
@@ -173,10 +330,14 @@ describe("canonical entry routing (§6.6)", () => {
     try {
       const { stdout, code, sentTurn } = await runCliCaptured(
         ["How", "much", "revenue", "this", "month?"],
-        { GROWTH_OS_WORKSPACE_ID: "proj_test", GROWTH_OS_CLI_NONINTERACTIVE: "1" }
+        {
+          GROWTH_OS_WORKSPACE_ID: "proj_test",
+          GROWTH_OS_CLI_NONINTERACTIVE: "1"
+        }
       );
       expect(code).not.toBe(0);
-      expect(stdout).toContain("infinite local");
+      expect(stdout).toContain("infinite://onboarding");
+      expect(stdout).toContain("npx infinite-os@latest");
       // No silent local product turn: local chat's setup guidance never renders.
       expect(stdout).not.toContain("Infinite is not set up yet.");
       expect(sentTurn).toBe(false);
@@ -192,10 +353,13 @@ describe("canonical entry routing (§6.6)", () => {
     try {
       const { stdout, stderr, code, sentTurn } = await runCliCaptured(
         ["How", "much", "revenue", "this", "month?"],
-        { GROWTH_OS_WORKSPACE_ID: "proj_test", GROWTH_OS_CLI_NONINTERACTIVE: "1" }
+        {
+          GROWTH_OS_WORKSPACE_ID: "proj_test",
+          GROWTH_OS_CLI_NONINTERACTIVE: "1"
+        }
       );
       expect(code).not.toBe(0);
-      expect(`${stdout}${stderr}`).toContain("infinite local");
+      expect(`${stdout}${stderr}`).toBe(UNSUPPORTED_PRODUCT_PLATFORM);
       expect(stdout).not.toContain("Infinite is not set up yet.");
       expect(sentTurn).toBe(false);
     } finally {
@@ -204,23 +368,22 @@ describe("canonical entry routing (§6.6)", () => {
     }
   });
 
-  // `resolveMode` returns "local" for TWO different reasons — the explicit
-  // `GROWTH_OS_DEFAULT_TARGET=local` opt-in AND a non-mac host. Only the
-  // former may open the local product session. A bare `infinite` on a non-mac
-  // host with no opt-in must exit non-zero with guidance — the same contract
-  // as the one-shot path above — never a silent local session.
+  // Top-level product routing is Desktop-only. A configured local default is
+  // intentionally ignored here; only the explicit `infinite local` namespace
+  // may enter the developer engine lane.
   it("non-mac bare `infinite` with no explicit opt-in exits non-zero with guidance, never a local session", async () => {
     const restoreTty = forceTty(false);
     const restorePlatform = forcePlatform("linux");
-    const workspaceRoot = mkdtempSync(join(tmpdir(), "growth-os-entry-baremode-"));
+    const workspaceRoot = mkdtempSync(
+      join(tmpdir(), "growth-os-entry-baremode-")
+    );
     try {
       const { stdout, stderr, code, sentTurn } = await runCliCaptured([], {
         GROWTH_OS_WORKSPACE_ROOT: workspaceRoot,
         GROWTH_OS_CLI_NONINTERACTIVE: "1"
       });
       expect(code).not.toBe(0);
-      expect(stderr).toContain("macOS-only");
-      expect(stderr).toContain("infinite local");
+      expect(stderr).toBe(UNSUPPORTED_PRODUCT_PLATFORM);
       // The local session must never open: in noninteractive mode its
       // readiness preflight would have rendered the local setup guidance.
       expect(stdout).not.toContain("Infinite is not set up yet.");
@@ -232,21 +395,22 @@ describe("canonical entry routing (§6.6)", () => {
     }
   });
 
-  it("non-mac bare `infinite` with GROWTH_OS_DEFAULT_TARGET=local keeps the local session escape hatch", async () => {
+  it("non-mac bare `infinite` with GROWTH_OS_DEFAULT_TARGET=local remains unsupported", async () => {
     const restoreTty = forceTty(false);
     const restorePlatform = forcePlatform("linux");
-    const workspaceRoot = mkdtempSync(join(tmpdir(), "growth-os-entry-barelocal-"));
+    const workspaceRoot = mkdtempSync(
+      join(tmpdir(), "growth-os-entry-barelocal-")
+    );
     try {
-      const { stdout, code } = await runCliCaptured([], {
+      const { stdout, stderr, code, sentTurn } = await runCliCaptured([], {
         GROWTH_OS_WORKSPACE_ROOT: workspaceRoot,
         GROWTH_OS_DEFAULT_TARGET: "local",
         GROWTH_OS_CLI_NONINTERACTIVE: "1"
       });
-      // The explicit opt-in reaches today's local interactive session: in
-      // noninteractive mode its readiness preflight prints setup guidance and
-      // returns cleanly — proof `interactiveSession` ran.
-      expect(stdout).toContain("Infinite is not set up yet.");
-      expect(code).toBe(0);
+      expect(code).not.toBe(0);
+      expect(stderr).toBe(UNSUPPORTED_PRODUCT_PLATFORM);
+      expect(stdout).not.toContain("Infinite is not set up yet.");
+      expect(sentTurn).toBe(false);
     } finally {
       restorePlatform();
       restoreTty();
@@ -266,7 +430,10 @@ describe("canonical entry routing (§6.6)", () => {
       });
       expect(stdout).toMatch(/Infinite.*update/i);
       expect(stdout).toContain("Infinite Desktop");
-      expect(stdout).toContain("infinite local update");
+      expect(stdout).toContain("⌘L");
+      expect(stdout).not.toMatch(
+        /infinite local|docker|self-host|local engine/i
+      );
       // Never the git/local-stack updater: none of its envelope fields render.
       expect(stdout).not.toContain("not_a_git_install");
       expect(stdout).not.toContain("pulled");
@@ -304,32 +471,92 @@ describe("canonical entry routing (§6.6)", () => {
     expect(code).toBe(0);
   });
 
-  it("an explicit config local target keeps the local one-shot escape hatch", async () => {
-    const restoreTty = forceTty(true);
+  it("a config local target cannot route a product one-shot into the local pipeline", async () => {
+    const restoreTty = forceTty(false);
     const restorePlatform = forcePlatform("darwin");
-    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-entry-config-local-"));
-    const fetchSpy = vi.fn(async (_input: string | URL | Request) => new Response("{}", { status: 200 }));
-    vi.stubGlobal("fetch", fetchSpy);
-    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-    const stdoutSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const growthHome = mkdtempSync(
+      join(tmpdir(), "growth-os-entry-config-local-")
+    );
     try {
-      // The explicit opt-in reaches the LOCAL pipeline (here: it dies on the
-      // local active-project guard — proof it never touched the bridge).
-      await expect(
-        runCli(["hello", "there"], {
+      const { stdout, code, sentTurn } = await runCliCaptured(
+        ["hello", "there"],
+        {
           GROWTH_OS_HOME: growthHome,
           GROWTH_OS_DEFAULT_TARGET: "local",
           GROWTH_OS_CLI_NONINTERACTIVE: "1"
-        })
-      ).rejects.toThrow(/active project/i);
-      expect(fetchSpy.mock.calls.some(([url]) => String(url).includes("/v1/"))).toBe(false);
+        }
+      );
+      expect(code).not.toBe(0);
+      expect(stdout).not.toContain("Infinite is not set up yet.");
+      expect(sentTurn).toBe(false);
     } finally {
-      stdoutSpy.mockRestore();
-      stderrSpy.mockRestore();
-      vi.unstubAllGlobals();
       restorePlatform();
       restoreTty();
       rmSync(growthHome, { recursive: true, force: true });
+    }
+  });
+
+  it("a real SIGINT during interactive onboarding exits 130 without local or bridge dispatch", async () => {
+    const restoreTty = forceTty(true);
+    const restorePlatform = forcePlatform("darwin");
+    const stdoutWrites: string[] = [];
+    const stderrWrites: string[] = [];
+    const stdoutSpy = vi
+      .spyOn(process.stdout, "write")
+      .mockImplementation((chunk) => {
+        stdoutWrites.push(String(chunk));
+        return true;
+      });
+    const stderrSpy = vi
+      .spyOn(process.stderr, "write")
+      .mockImplementation((chunk) => {
+        stderrWrites.push(String(chunk));
+        return true;
+      });
+    const fetchSpy = vi.fn(
+      async (_input: string | URL | Request) =>
+        new Response("{}", { status: 200 })
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+    const priorExitCode = process.exitCode;
+    process.exitCode = 0;
+    let emitted = false;
+    const deps: OnboardingDeps = {
+      resolveAppPath: () => "/Applications/Infinite.app",
+      launch: () => undefined,
+      readState: () => "booting",
+      liveBridgeReady: () => false,
+      pollMs: 1,
+      timeoutMs: 60_000,
+      sleep: async () => {
+        if (!emitted) {
+          emitted = true;
+          process.emit("SIGINT");
+        }
+      }
+    };
+    try {
+      await runInteractiveEntry(
+        { HOME: "/Users/x", GROWTH_OS_HOME: "/Users/x/.growth-os" },
+        deps
+      );
+      expect(process.exitCode).toBe(130);
+      expect(stdoutWrites.join("")).not.toContain(
+        "Infinite is not set up yet."
+      );
+      expect(`${stdoutWrites.join("")}${stderrWrites.join("")}`).not.toMatch(
+        /infinite local|docker|self-host|local engine/i
+      );
+      expect(
+        fetchSpy.mock.calls.some(([url]) => String(url).endsWith("/v1/turn"))
+      ).toBe(false);
+    } finally {
+      process.exitCode = priorExitCode;
+      vi.unstubAllGlobals();
+      stdoutSpy.mockRestore();
+      stderrSpy.mockRestore();
+      restorePlatform();
+      restoreTty();
     }
   });
 });
@@ -353,23 +580,218 @@ describe("contacts command interception", () => {
     }
   });
 
-  it("`infinite contacts sync` with no running desktop says to open the app — nothing crosses the bridge", async () => {
+  it("`infinite contacts sync` with a live ready bridge reaches the contacts flow", async () => {
     const restoreTty = forceTty(true);
     const restorePlatform = forcePlatform("darwin");
+    const home = createCanonicalDesktopHome();
+    const bootId = "boot-contacts-ready";
+    writeDesktopBridge(home.growthHome, { bootId });
+    const statusRequests: string[] = [];
     try {
-      const { stderr, code, sentToBridge, sentTurn } = await runCliCaptured([
-        "contacts",
-        "sync"
-      ]);
-      expect(stderr).toContain(
-        "Open the Infinite app first — that's how your people reach your workspace."
+      const { stdout, stderr, code, sentTurn } = await runCliCaptured(
+        ["contacts", "sync"],
+        home.env,
+        {
+          fetchImpl: async (input) => {
+            const url = String(input);
+            if (url.endsWith("/v1/status")) {
+              statusRequests.push(url);
+              return desktopStatusResponse(true, bootId);
+            }
+            return new Response("{}", { status: 200 });
+          }
+        }
       );
-      expect(sentToBridge).toBe(false);
+
+      expect(statusRequests.length).toBeGreaterThan(0);
+      expect(stdout).toContain("no Supabase URL + service role key found");
+      expect(stderr).not.toContain("Open the Infinite app first");
       expect(sentTurn).toBe(false);
       expect(code).not.toBe(0);
+      assertNoCustomerFallbackCopy(`${stdout}${stderr}`);
     } finally {
       restorePlatform();
       restoreTty();
+      rmSync(home.root, { recursive: true, force: true });
+    }
+  });
+
+  it("`infinite contacts sync` on an interactive Mac launches onboarding and calls contacts only after Desktop is ready", async () => {
+    const restoreTty = forceTty(true);
+    const restorePlatform = forcePlatform("darwin");
+    const home = createCanonicalDesktopHome();
+    createFakeDesktopApp(home.userHome);
+    const bootId = "boot-contacts-onboarding";
+    writeDesktopBridge(home.growthHome, { bootId });
+    writeDesktopState(home.growthHome, "ready");
+    const fakeOpen = createFakeOpen(home.root);
+    let statusRequests = 0;
+    try {
+      const { stdout, stderr, code, sentTurn } = await runCliCaptured(
+        ["contacts", "sync"],
+        home.env,
+        {
+          fetchImpl: async (input) => {
+            if (String(input).endsWith("/v1/status")) {
+              statusRequests += 1;
+              return desktopStatusResponse(statusRequests > 1, bootId);
+            }
+            return new Response("{}", { status: 200 });
+          }
+        }
+      );
+
+      expect(statusRequests).toBeGreaterThanOrEqual(2);
+      expect(existsSync(fakeOpen.logPath)).toBe(true);
+      expect(readFileSync(fakeOpen.logPath, "utf8")).toContain(
+        "infinite://onboarding"
+      );
+      expect(stdout).toContain("Complete setup in the app");
+      expect(stdout.indexOf("Complete setup in the app")).toBeLessThan(
+        stdout.indexOf("no Supabase URL + service role key found")
+      );
+      expect(stderr).not.toContain("Open the Infinite app first");
+      expect(sentTurn).toBe(false);
+      expect(code).not.toBe(0);
+      assertNoCustomerFallbackCopy(`${stdout}${stderr}`);
+    } finally {
+      fakeOpen.restore();
+      restorePlatform();
+      restoreTty();
+      rmSync(home.root, { recursive: true, force: true });
+    }
+  });
+
+  it("`infinite contacts sync` with a missing app prints npx recovery instead of contacts bridge advice", async () => {
+    const restoreTty = forceTty(true);
+    const restorePlatform = forcePlatform("darwin");
+    const home = createCanonicalDesktopHome();
+    const realExistsSync = mutableFs.existsSync;
+    const existsSpy = vi
+      .spyOn(mutableFs, "existsSync")
+      .mockImplementation((path) => {
+        if (String(path) === "/Applications/Infinite.app") return false;
+        return realExistsSync(path);
+      });
+    syncBuiltinESMExports();
+    try {
+      const { stdout, stderr, code, sentToBridge, sentTurn } =
+        await runCliCaptured(["contacts", "sync"], home.env);
+
+      expect(stdout).toContain("Infinite Desktop is missing or moved.");
+      expect(stdout).toContain("npx infinite-os@latest");
+      expect(stdout).toContain("infinite://onboarding");
+      expect(stderr).not.toContain("Open the Infinite app first");
+      expect(stdout).not.toContain("no Supabase URL + service role key found");
+      expect(sentToBridge).toBe(false);
+      expect(sentTurn).toBe(false);
+      expect(code).not.toBe(0);
+      assertNoCustomerFallbackCopy(`${stdout}${stderr}`);
+    } finally {
+      existsSpy.mockRestore();
+      syncBuiltinESMExports();
+      restorePlatform();
+      restoreTty();
+      rmSync(home.root, { recursive: true, force: true });
+    }
+  });
+
+  it("`infinite contacts sync` surfaces Desktop launch failure instead of silently swallowing onboarding errors", async () => {
+    const restoreTty = forceTty(true);
+    const restorePlatform = forcePlatform("darwin");
+    const home = createCanonicalDesktopHome();
+    createFakeDesktopApp(home.userHome);
+    const fakeOpen = createFakeOpen(home.root, 1);
+    try {
+      const { stdout, stderr, code, sentToBridge, sentTurn } =
+        await runCliCaptured(["contacts", "sync"], home.env);
+
+      expect(existsSync(fakeOpen.logPath)).toBe(true);
+      expect(stdout).toContain("Could not open infinite://onboarding");
+      expect(stdout).toContain("open 'infinite://onboarding'");
+      expect(stdout).not.toContain("no Supabase URL + service role key found");
+      expect(stderr).not.toContain("Open the Infinite app first");
+      expect(sentToBridge).toBe(false);
+      expect(sentTurn).toBe(false);
+      expect(code).not.toBe(0);
+      assertNoCustomerFallbackCopy(`${stdout}${stderr}`);
+    } finally {
+      fakeOpen.restore();
+      restorePlatform();
+      restoreTty();
+      rmSync(home.root, { recursive: true, force: true });
+    }
+  });
+
+  it("`infinite contacts sync` treats stale ready state with a dead bridge as onboarding recovery, not ready contacts", async () => {
+    const restoreTty = forceTty(false);
+    const restorePlatform = forcePlatform("darwin");
+    const home = createCanonicalDesktopHome();
+    createFakeDesktopApp(home.userHome);
+    writeDesktopState(home.growthHome, "ready");
+    try {
+      const { stdout, stderr, code, sentToBridge, sentTurn } =
+        await runCliCaptured(["contacts", "sync"], home.env);
+
+      expect(stdout).toContain("infinite://onboarding");
+      expect(stdout).toContain("npx infinite-os@latest");
+      expect(stdout).not.toContain("no Supabase URL + service role key found");
+      expect(stderr).not.toContain("Open the Infinite app first");
+      expect(sentToBridge).toBe(false);
+      expect(sentTurn).toBe(false);
+      expect(code).not.toBe(0);
+      assertNoCustomerFallbackCopy(`${stdout}${stderr}`);
+    } finally {
+      restorePlatform();
+      restoreTty();
+      rmSync(home.root, { recursive: true, force: true });
+    }
+  });
+
+  it("`infinite contacts sync` from a non-TTY does not open the GUI and exits with URI plus npx recovery", async () => {
+    const restoreTty = forceTty(false);
+    const restorePlatform = forcePlatform("darwin");
+    const home = createCanonicalDesktopHome();
+    createFakeDesktopApp(home.userHome);
+    const fakeOpen = createFakeOpen(home.root);
+    try {
+      const { stdout, stderr, code, sentToBridge, sentTurn } =
+        await runCliCaptured(["contacts", "sync"], home.env);
+
+      expect(stdout).toContain("infinite://onboarding");
+      expect(stdout).toContain("npx infinite-os@latest");
+      expect(existsSync(fakeOpen.logPath)).toBe(false);
+      expect(stderr).not.toContain("Open the Infinite app first");
+      expect(stdout).not.toContain("no Supabase URL + service role key found");
+      expect(sentToBridge).toBe(false);
+      expect(sentTurn).toBe(false);
+      expect(code).not.toBe(0);
+      assertNoCustomerFallbackCopy(`${stdout}${stderr}`);
+    } finally {
+      fakeOpen.restore();
+      restorePlatform();
+      restoreTty();
+      rmSync(home.root, { recursive: true, force: true });
+    }
+  });
+
+  it("`infinite contacts sync` on non-mac uses the product unsupported guidance", async () => {
+    const restoreTty = forceTty(true);
+    const restorePlatform = forcePlatform("linux");
+    const home = createCanonicalDesktopHome();
+    try {
+      const { stdout, stderr, code, sentToBridge, sentTurn } =
+        await runCliCaptured(["contacts", "sync"], home.env);
+
+      expect(`${stdout}${stderr}`).toBe(UNSUPPORTED_PRODUCT_PLATFORM);
+      expect(sentToBridge).toBe(false);
+      expect(sentTurn).toBe(false);
+      expect(code).not.toBe(0);
+      assertNoCustomerFallbackCopy(`${stdout}${stderr}`);
+    } finally {
+      restorePlatform();
+      restoreTty();
+      rmSync(home.root, { recursive: true, force: true });
     }
   });
 });

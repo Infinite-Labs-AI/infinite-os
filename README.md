@@ -25,22 +25,26 @@ Install through npm:
 npx infinite-os@latest
 ```
 
-Or use the zero-Node curl installer, pinned to the reviewed 1.0.1 installer merge:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/Infinite-Labs-AI/infinite-os/9dd4d59a9fe8c1c6f01e78a5213a20e5426efef3/scripts/install.sh | bash
-```
+The npm bootstrap downloads and verifies the signed and notarized macOS Desktop app served by
+`infinite.fast/download`, installs or updates `Infinite.app` in `/Applications`, then opens
+`infinite://onboarding`.
 
 You can also **[download the signed DMG directly](https://infinite.fast/download)**.
 
-Both command-line installers use the exact signed and notarized Desktop product served by
-`infinite.fast/download`. They verify the production
-bundle identity, Developer ID team, signature, and notarization before placing `Infinite.app` in
-`/Applications`, then open it. The installer keeps the same or a newer verified app, upgrades an
-older verified app, and restores the prior app if an upgrade cannot finish safely.
+Finish setup in the app: sign in with an email code, tell Infinite about your business, create or
+connect your workspace, and connect Codex or Claude. The app owns setup and installs its bundled
+`infinite` command on first launch.
 
-The app installs its bundled `infinite` command on first launch and needs no Docker, Git, separately
-managed database, or second engine checkout.
+After setup, use the same agent in both places:
+
+- App: press `⌘L`
+- Terminal: run `infinite` or `infinite "..."`
+
+Same account. Same workspace. Same agent.
+
+The installer verifies the production bundle identity, Developer ID team, signature, and
+notarization before placing `Infinite.app` in `/Applications`. It keeps the same or a newer verified
+app, upgrades an older verified app, and restores the prior app if an upgrade cannot finish safely.
 
 ### Installer safety
 

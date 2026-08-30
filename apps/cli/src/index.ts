@@ -6,7 +6,7 @@ import { createInterface } from "node:readline/promises";
 import { emitKeypressEvents } from "node:readline";
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { isIP } from "node:net";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { stdin as input, stderr as errorOutput, stdout as output } from "node:process";
 import { setTimeout as delay } from "node:timers/promises";
@@ -53,10 +53,15 @@ import {
 } from "./desktop/desktop-interactive.js";
 import { boundedTerminalText } from "./desktop/confirm-in-session.js";
 import {
+  INFINITE_ONBOARDING_URI,
+  OnboardingError,
+  normalizeOnboardingState,
   runOnboarding,
+  type DesktopLaunchTarget,
   type OnboardingDeps,
   type OnboardingState
 } from "./desktop/onboarding.js";
+import type { CanonicalDesktopTarget } from "./desktop/canonical-home.js";
 import { renderInfiniteAppChrome } from "./tui/app/app-chrome.js";
 import { displayWidth } from "./tui/lib/display-width.js";
 import { buildToolTrailLine, compactPreview } from "./tui/lib/text.js";
@@ -1442,9 +1447,24 @@ export async function resolveProjectFlag(
 // The bare interactive invocation picks its brain UP FRONT via `resolveMode`
 // (Plan 2 Task 1): a cloud session must NEVER fall back to local mid-flight.
 //   cloud      → the desktop cloud-brain loop (Task 3)
-//   local      → today's local `interactiveSession`
 //   onboarding → the no-Desktop onboarding hand-off (Task 5)
-async function runInteractiveEntry(env: CliEnv): Promise<void> {
+//   unsupported → non-mac product invocation, no command run
+const UNSUPPORTED_PRODUCT_PLATFORM =
+  "Infinite Desktop and its Terminal companion require an Apple-silicon Mac with macOS 12 or newer. No command was run.\n";
+const DESKTOP_READY_HANDOFF =
+  "✓ Infinite Desktop is ready\n\n" +
+  "∞ Infinite is ready\n\n" +
+  "Use Infinite wherever you prefer:\n\n" +
+  "  APP       Press ⌘L\n" +
+  "  TERMINAL  You’re already here\n\n" +
+  "Same account. Same workspace. Same agent.\n\n";
+
+type ProductReadyContinuation = () => Promise<void>;
+
+export async function runInteractiveEntry(
+  env: CliEnv,
+  onboardingDepsOverride?: OnboardingDeps
+): Promise<void> {
   const io: ModeIo = {
     inputIsTTY: input.isTTY === true,
     outputIsTTY: output.isTTY === true
@@ -1452,6 +1472,7 @@ async function runInteractiveEntry(env: CliEnv): Promise<void> {
   const deps = await buildModeDeps(env);
   const mode = resolveMode(env as NodeJS.ProcessEnv, io, deps);
   if (mode === "cloud") {
+    output.write(DESKTOP_READY_HANDOFF);
     await runDesktopInteractiveEntry(env);
     return;
   }
@@ -1459,15 +1480,29 @@ async function runInteractiveEntry(env: CliEnv): Promise<void> {
     // A pipe can never drive the GUI launch + OTP wait — one-shot semantics
     // surface guidance (OnboardingError) instead of blocking on `open -a`.
     const interactive = io.inputIsTTY && io.outputIsTTY;
-    const { result } = await runOnboarding(
-      env,
-      buildOnboardingIo(),
-      buildOnboardingDeps(env, !interactive)
-    );
+    const controller = new AbortController();
+    const interrupt = () => controller.abort();
+    if (interactive) process.once("SIGINT", interrupt);
+    let result: Awaited<ReturnType<typeof runOnboarding>>["result"];
+    try {
+      const baseDeps =
+        onboardingDepsOverride ?? buildOnboardingDeps(env, !interactive);
+      ({ result } = await runOnboarding(env, buildOnboardingIo(), {
+        ...baseDeps,
+        signal: interactive ? controller.signal : baseDeps.signal
+      }));
+    } finally {
+      if (interactive) process.removeListener("SIGINT", interrupt);
+    }
     if (result === "ready") {
       // Onboarding completes INTO the session (spec §6.2): once Desktop is
       // ready, continue straight into the proxied chat — never dead-end.
+      output.write(DESKTOP_READY_HANDOFF);
       await runDesktopInteractiveEntry(env);
+      return;
+    }
+    if (result === "interrupted") {
+      process.exitCode = 130;
       return;
     }
     // Guidance was already printed for every non-ready outcome; exit non-zero
@@ -1475,20 +1510,7 @@ async function runInteractiveEntry(env: CliEnv): Promise<void> {
     process.exitCode = 1;
     return;
   }
-  // `mode === "local"` covers TWO cases (mode-router rules 1 and 2): the
-  // explicit `default_target: local` opt-in AND a non-mac host. Only the
-  // explicit opt-in may open the local product session — mirroring
-  // `runProductOneShot`, a non-mac bare `infinite` with no opt-in exits
-  // non-zero with guidance instead of silently falling back to local.
-  if (deps.readConfigTarget(env as NodeJS.ProcessEnv) === "local") {
-    await interactiveSession(env);
-    return;
-  }
-  errorOutput.write(
-    "Infinite turns run through the Infinite Desktop app, which is macOS-only. " +
-      'On this machine, use the local engine instead: infinite local "…" ' +
-      "(see `infinite local help`).\n"
-  );
+  errorOutput.write(UNSUPPORTED_PRODUCT_PLATFORM);
   process.exitCode = 1;
 }
 
@@ -1516,12 +1538,7 @@ async function buildModeDeps(env: CliEnv): Promise<ModeDeps> {
   const liveBridge = await desktopLiveBridgeReady(env);
   return {
     isMac: () => process.platform === "darwin",
-    liveBridgeAvailable: () => liveBridge,
-    // Explicit user opt-in/out. Env override today (config.yml key is Task 6).
-    readConfigTarget: (probeEnv) => {
-      const raw = (probeEnv.GROWTH_OS_DEFAULT_TARGET ?? "").trim().toLowerCase();
-      return raw === "local" || raw === "cloud" ? raw : undefined;
-    }
+    liveBridgeAvailable: () => liveBridge
   };
 }
 
@@ -1538,21 +1555,63 @@ function buildOnboardingIo() {
 
 function buildOnboardingDeps(env: CliEnv, oneShot: boolean): OnboardingDeps {
   return {
-    launch: (appName: string) => {
+    resolveAppPath: (target) => resolveDesktopAppPath(target, env),
+    launch: (target: DesktopLaunchTarget) => {
       // Local hand-off only — no network. NEVER forward GROWTH_OS_HOME (Electron
       // keys userData off productName, so `open -a` attaches to the app's own home).
-      spawnSync("open", ["-a", appName], { stdio: "ignore" });
+      const result = spawnSync(
+        "open",
+        ["-a", target.appPath, target.onboardingUri],
+        { stdio: "ignore" }
+      );
+      if (result.error || result.status !== 0) {
+        throw new OnboardingError(
+          "desktop_launch_failed",
+          `Could not open ${target.onboardingUri}. Run: open '${target.onboardingUri}'`
+        );
+      }
     },
     readState: () => readDesktopOnboardingState(env),
     // Fresh loopback probe per call (bridge.json + /v1/status ready) — the
     // poll loop needs a LIVE verdict each iteration, never a cached one, and
     // state.json alone must never conclude ready (spec §6.4).
     liveBridgeReady: () => desktopLiveBridgeReady(env),
-    appInstalled: () =>
-      existsSync("/Applications/Infinite.app") ||
-      existsSync(join(homedir(), "Applications", "Infinite.app")),
     oneShot
   };
+}
+
+export function currentDesktopAppPath(
+  execPath: string,
+  expectedAppName: string
+): string | null {
+  const executableName = basename(execPath);
+  if (executableName !== expectedAppName) return null;
+  const macosDir = dirname(execPath);
+  if (basename(macosDir) !== "MacOS") return null;
+  const contentsDir = dirname(macosDir);
+  if (basename(contentsDir) !== "Contents") return null;
+  const appPath = dirname(contentsDir);
+  if (basename(appPath) !== `${expectedAppName}.app`) return null;
+  return appPath;
+}
+
+function resolveDesktopAppPath(
+  target: CanonicalDesktopTarget,
+  env: CliEnv
+): string | null {
+  const currentApp = currentDesktopAppPath(process.execPath, target.appName);
+  if (
+    currentApp &&
+    existsSync(join(currentApp, "Contents", "Resources", "cli", "infinite.mjs"))
+  ) {
+    return currentApp;
+  }
+  const userHome = env.HOME && env.HOME.trim() !== "" ? env.HOME : homedir();
+  const candidates = [
+    join("/Applications", `${target.appName}.app`),
+    join(userHome, "Applications", `${target.appName}.app`)
+  ];
+  return candidates.find((candidate) => existsSync(candidate)) ?? null;
 }
 
 function readDesktopOnboardingState(env: CliEnv): OnboardingState | null {
@@ -1562,15 +1621,7 @@ function readDesktopOnboardingState(env: CliEnv): OnboardingState | null {
       "utf8"
     );
     const parsed = JSON.parse(raw) as { state?: unknown };
-    const state = parsed.state;
-    return state === "booting" ||
-      state === "signed_out" ||
-      state === "no_provider" ||
-      state === "no_linked_workspace" ||
-      state === "subscription_required" ||
-      state === "ready"
-      ? state
-      : null;
+    return normalizeOnboardingState(parsed.state);
   } catch {
     return null;
   }
@@ -1616,7 +1667,7 @@ async function runDesktopInteractiveEntry(env: CliEnv): Promise<void> {
       input,
       output,
       promptPlaceholder: "Type a message, /help, or /exit.",
-      title: "Infinite (cloud)",
+      title: "Infinite",
       status: () => (runner.sessionId() ? [`session ${runner.sessionId()}`] : []),
       // Approve/decline a `requires_confirmation` write in-session. The runner
       // resolves the handle against the client that ran the originating turn
@@ -1666,7 +1717,7 @@ async function runDesktopInteractiveEntry(env: CliEnv): Promise<void> {
       errorOutput.write(text);
     }
   };
-  output.write("Infinite (cloud brain). Type a message, /help, or /exit.\n");
+  output.write("❯ Type a message, /help, or /exit.\n");
   const rl = createInterface({ input, output, prompt: "infinite> " });
   try {
     await runDesktopInteractive(env as NodeJS.ProcessEnv, interactiveIo, {
@@ -1775,13 +1826,21 @@ export async function runCli(
   }
 
   // `infinite contacts …` — the deterministic contacts-sync flow (design doc
-  // 2026-08-30-contacts-cli-sync-design.md, Phase 2). Intercepted BEFORE the
-  // reserved-command check and the unknown-text→turn fallthrough so the word
-  // "contacts" never becomes a chat turn. Deliberately NOT in
-  // RESERVED_LOCAL_COMMANDS: it is a product command backed by the Desktop
-  // bridge, not an engine command namespaced under `infinite local`.
+  // 2026-08-30-contacts-cli-sync-design.md, Phase 2). Usage is handled here
+  // before product preflight; the real sync subcommand then goes through the
+  // SAME Desktop readiness/onboarding gate as product turns before entering
+  // the contacts flow. Deliberately NOT in RESERVED_LOCAL_COMMANDS: it is a
+  // product command backed by the Desktop bridge, not an engine command
+  // namespaced under `infinite local`.
   if (normalizedArgs[0] === "contacts") {
-    await runContactsCommand(normalizedArgs.slice(1), env);
+    const contactArgs = normalizedArgs.slice(1);
+    if (contactArgs[0] !== "sync" || contactArgs.length > 1) {
+      await runContactsCommand(contactArgs, env);
+      return;
+    }
+    await runProductWithDesktopPreflight(env, () =>
+      runContactsCommand(contactArgs, env)
+    );
     return;
   }
 
@@ -1808,7 +1867,7 @@ export async function runCli(
   if (hasTopLevelProjectFlag(normalizedArgs)) {
     errorOutput.write(
       "--project is not supported here: product turns follow Desktop's active workspace. " +
-        "For the local engine, use `infinite local --project <name> <command>`.\n"
+        "Switch workspaces in Infinite Desktop and retry without --project.\n"
     );
     process.exitCode = 1;
     return;
@@ -1833,40 +1892,36 @@ function hasTopLevelProjectFlag(args: string[]): boolean {
 // pick the brain up front. A ready bridge serves TTY and non-TTY turns alike;
 // with no live bridge, an interactive mac launches + polls Desktop and then
 // serves the turn, while non-TTY / non-mac invocations exit non-zero with
-// guidance. The ONLY local escapes are the explicit `infinite local` namespace
-// and the explicit config `default_target: local` opt-in — an `onboarding`
-// verdict NEVER degrades to a local product turn.
+// guidance. The ONLY local escape is the explicit `infinite local` namespace;
+// an `onboarding` verdict NEVER degrades to a local product turn.
 async function runProductOneShot(dispatchArgs: string[], env: CliEnv): Promise<void> {
+  const message = dispatchArgs.join(" ");
+  await runProductWithDesktopPreflight(env, () =>
+    runDesktopAppCommand([message], env)
+  );
+}
+
+async function runProductWithDesktopPreflight(
+  env: CliEnv,
+  onReady: ProductReadyContinuation
+): Promise<void> {
   const io: ModeIo = {
     inputIsTTY: input.isTTY === true,
     outputIsTTY: output.isTTY === true
   };
   const deps = await buildModeDeps(env);
   const mode = resolveMode(env as NodeJS.ProcessEnv, io, deps);
-  const message = dispatchArgs.join(" ");
 
   if (mode === "cloud") {
-    // (5) The cloud one-shot reuses the Desktop app bridge; it writes its own
-    // output. A not-ready Desktop throws — never a silent local downgrade.
-    await runDesktopAppCommand([message], env);
+    // (5) A live ready bridge serves the product command immediately. The
+    // continuation owns command-specific work (turn dispatch, contacts sync,
+    // etc.) and may re-resolve the bridge for a fresh descriptor/token.
+    await onReady();
     return;
   }
 
-  if (mode === "local") {
-    if (deps.readConfigTarget(env as NodeJS.ProcessEnv) === "local") {
-      // Explicit config opt-in → today's local one-shot pipeline (progress +
-      // render + local chat fallthrough). Explicit, so not a silent downgrade.
-      const [localCommand, ...rest] = dispatchArgs;
-      await dispatchCliCommand(localCommand, rest, env);
-      return;
-    }
-    // (7) Non-mac with no explicit opt-in: Desktop cannot be summoned here, and
-    // a product turn must never silently run against the local engine.
-    errorOutput.write(
-      "Infinite turns run through the Infinite Desktop app, which is macOS-only. " +
-        'On this machine, use the local engine instead: infinite local "…" ' +
-        "(see `infinite local help`).\n"
-    );
+  if (mode === "unsupported") {
+    errorOutput.write(UNSUPPORTED_PRODUCT_PLATFORM);
     process.exitCode = 1;
     return;
   }
@@ -1876,13 +1931,25 @@ async function runProductOneShot(dispatchArgs: string[], env: CliEnv): Promise<v
   // callers get guidance and a non-zero exit (§6.6 step 7) — runOnboarding's
   // oneShot path prints/throws guidance instead of blocking a pipe on a GUI.
   const interactive = io.inputIsTTY && io.outputIsTTY;
-  const { result } = await runOnboarding(
-    env,
-    buildOnboardingIo(),
-    buildOnboardingDeps(env, !interactive)
-  );
+  let result: Awaited<ReturnType<typeof runOnboarding>>["result"];
+  try {
+    ({ result } = await runOnboarding(
+      env,
+      buildOnboardingIo(),
+      buildOnboardingDeps(env, !interactive)
+    ));
+  } catch (error) {
+    if (error instanceof OnboardingError) {
+      if (error.code !== "desktop_bridge_absent") {
+        output.write(`${error.message}\n`);
+      }
+      process.exitCode = 1;
+      return;
+    }
+    throw error;
+  }
   if (result === "ready") {
-    await runDesktopAppCommand([message], env);
+    await onReady();
     return;
   }
   // Guidance was already printed for every non-ready outcome; never local.
@@ -6929,9 +6996,48 @@ export function maybeNotifyUpdateAvailable(env: CliEnv, options: MaybeNotifyUpda
 // suffix would only trigger one recreate per base commit). Outside a git
 // checkout (or with git unavailable) this degrades to the compose default
 // "dev": never a recreate trigger, never an error.
-// The product version, read from this package's package.json (single source of
-// truth). `../package.json` resolves correctly from both the compiled entry
-// (apps/cli/dist/index.js) and the tsx source entry (apps/cli/src/index.ts).
+interface BundledCliBuildInfo {
+  engineCommit: string;
+  engineDirty: boolean;
+  engineVersion: string;
+}
+
+const FULL_GIT_SHA_RE = /^[a-f0-9]{40}$/u;
+const STABLE_SEMVER_RE =
+  /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/u;
+
+function readBundledCliBuildInfo(): BundledCliBuildInfo | null {
+  try {
+    const buildInfoPath = join(
+      dirname(fileURLToPath(import.meta.url)),
+      "BUILD_INFO.json"
+    );
+    const parsed = JSON.parse(readFileSync(buildInfoPath, "utf8")) as {
+      engineCommit?: unknown;
+      engineDirty?: unknown;
+      engineVersion?: unknown;
+    };
+    if (
+      typeof parsed.engineCommit !== "string" ||
+      !FULL_GIT_SHA_RE.test(parsed.engineCommit) ||
+      typeof parsed.engineDirty !== "boolean" ||
+      typeof parsed.engineVersion !== "string" ||
+      !STABLE_SEMVER_RE.test(parsed.engineVersion)
+    ) {
+      return null;
+    }
+    return {
+      engineCommit: parsed.engineCommit,
+      engineDirty: parsed.engineDirty,
+      engineVersion: parsed.engineVersion
+    };
+  } catch {
+    return null;
+  }
+}
+
+// The product version comes from an adjacent bundle stamp when running inside a
+// signed Desktop bundle; source/tsx execution keeps the root package fallback.
 // Report the ROOT runtime version (package.json `name: "infinite-os-runtime"`),
 // which is the canonical version bumped by hand per release (AGENTS.md →
 // "Versioning & releases"). The previous impl read apps/cli/package.json, which
@@ -6939,8 +7045,12 @@ export function maybeNotifyUpdateAvailable(env: CliEnv, options: MaybeNotifyUpda
 // (e.g. 0.1.0) even after the runtime moved, which read as "the update didn't
 // land". Walk UP from this module to the nearest package.json named
 // "infinite-os-runtime"; fall back to the nearest package.json version, then
-// "0.0.0", so a relocated/packaged build still degrades gracefully.
+// "0.0.0", so a source checkout still degrades gracefully.
 export function cliVersion(): string {
+  const bundled = readBundledCliBuildInfo();
+  if (bundled) {
+    return bundled.engineVersion;
+  }
   try {
     let dir = dirname(fileURLToPath(import.meta.url));
     let nearest: string | undefined;
@@ -6970,6 +7080,13 @@ export function cliVersion(): string {
 // The commit reuses composeCodeVersion (git HEAD, with a -dirty marker when the
 // tracked tree differs); outside a git checkout it degrades to "dev".
 function versionText(env: CliEnv): string {
+  const bundled = readBundledCliBuildInfo();
+  if (bundled) {
+    return `Infinite OS ${bundled.engineVersion} (${bundled.engineCommit.slice(
+      0,
+      7
+    )}${bundled.engineDirty ? "-dirty" : ""})`;
+  }
   const version = cliVersion();
   const code = env.GROWTH_OS_CODE_VERSION ?? composeCodeVersion(workspaceRootFor(env));
   if (!code || code === "dev") {

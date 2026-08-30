@@ -3,32 +3,30 @@ import { resolveMode, type ModeDeps, type ModeIo } from "./mode-router.js";
 
 const D = (o: Partial<ModeDeps> = {}): ModeDeps => ({
   isMac: () => true,
-  markerExists: () => false,
   liveBridgeAvailable: () => false,
-  readConfigTarget: () => undefined,
   ...o
 });
 const TTY: ModeIo = { inputIsTTY: true, outputIsTTY: true };
 const PIPE: ModeIo = { inputIsTTY: false, outputIsTTY: false };
 
 describe("resolveMode", () => {
-  it("non-mac → local", () =>
-    expect(resolveMode({}, TTY, D({ isMac: () => false }))).toBe("local"));
+  it("non-mac product routing is unsupported", () => {
+    expect(resolveMode({}, TTY, D({ isMac: () => false }))).toBe("unsupported");
+  });
 
-  it("non-mac stays local even with a live bridge probe", () =>
+  it("non-mac stays unsupported even with a live bridge probe", () =>
     expect(
       resolveMode(
         {},
         TTY,
         D({ isMac: () => false, liveBridgeAvailable: () => true })
       )
-    ).toBe("local"));
+    ).toBe("unsupported"));
 
   it("routes cloud only when a LIVE bridge exists, not on a stale seen.json", () => {
     const mode = resolveMode({}, TTY, {
       ...D(),
       isMac: () => true,
-      markerExists: () => true,
       liveBridgeAvailable: () => false
     });
     expect(mode).toBe("onboarding"); // stale marker, dead bridge → onboard, not cloud
@@ -36,14 +34,18 @@ describe("resolveMode", () => {
 
   it("routes cloud when the bridge is live", () => {
     expect(
-      resolveMode({}, TTY, { ...D(), isMac: () => true, liveBridgeAvailable: () => true })
+      resolveMode({}, TTY, {
+        ...D(),
+        isMac: () => true,
+        liveBridgeAvailable: () => true
+      })
     ).toBe("cloud");
   });
 
-  it("a live bridge routes cloud for non-TTY (pipes/scripts) too", () =>
-    expect(
-      resolveMode({}, PIPE, D({ liveBridgeAvailable: () => true }))
-    ).toBe("cloud"));
+  it("a live bridge remains usable for a non-TTY one-shot", () =>
+    expect(resolveMode({}, PIPE, D({ liveBridgeAvailable: () => true }))).toBe(
+      "cloud"
+    ));
 
   it("non-interactive with no live bridge does not silently go local", () => {
     const mode = resolveMode({}, PIPE, {
@@ -55,27 +57,27 @@ describe("resolveMode", () => {
   });
 
   it("config cloud with no live bridge → onboarding (launch Desktop, never a dead cloud)", () =>
-    expect(
-      resolveMode({}, TTY, D({ readConfigTarget: () => "cloud" }))
-    ).toBe("onboarding"));
+    expect(resolveMode({ GROWTH_OS_DEFAULT_TARGET: "cloud" }, TTY, D())).toBe(
+      "onboarding"
+    ));
 
   it("config cloud with a live bridge → cloud", () =>
     expect(
       resolveMode(
-        {},
+        { GROWTH_OS_DEFAULT_TARGET: "cloud" },
         TTY,
-        D({ readConfigTarget: () => "cloud", liveBridgeAvailable: () => true })
+        D({ liveBridgeAvailable: () => true })
       )
     ).toBe("cloud"));
 
-  it("config local overrides even a live bridge → local", () =>
+  it("GROWTH_OS_DEFAULT_TARGET=local cannot silently turn a product invocation local", () =>
     expect(
       resolveMode(
-        {},
+        { GROWTH_OS_DEFAULT_TARGET: "local" },
         TTY,
-        D({ liveBridgeAvailable: () => true, readConfigTarget: () => "local" })
+        D({ liveBridgeAvailable: () => false })
       )
-    ).toBe("local"));
+    ).toBe("onboarding"));
 
   it("mac+TTY, no live bridge → onboarding", () =>
     expect(resolveMode({}, TTY, D())).toBe("onboarding"));

@@ -5,18 +5,18 @@ import {
 } from "./reserved-commands.js";
 
 describe("reservedCommandNotice", () => {
-  it("intercepts a moved command with local guidance", () => {
-    expect(reservedCommandNotice("sources")).toBe("Use: infinite local sources");
+  it("intercepts a moved command with Desktop guidance", () => {
+    expect(reservedCommandNotice("sources")).toContain("Infinite Desktop");
   });
   it("returns null for a non-reserved word (so it can become a turn)", () => {
     expect(reservedCommandNotice("summarise")).toBeNull();
   });
-  it("carries the remaining arguments into the guidance", () => {
-    expect(reservedCommandNotice("setup", ["resume", "r123"])).toBe(
-      "Use: infinite local setup resume r123"
+  it("carries the remaining arguments into the Desktop guidance", () => {
+    expect(reservedCommandNotice("setup", ["resume", "r123"])).toContain(
+      "setup resume r123"
     );
-    expect(reservedCommandNotice("sync", ["meta", "30_days"])).toBe(
-      "Use: infinite local sync meta 30_days"
+    expect(reservedCommandNotice("sync", ["meta", "30_days"])).toContain(
+      "sync meta 30_days"
     );
   });
   it("covers every top-level engine command surfaced by runCommand today", () => {
@@ -52,7 +52,7 @@ describe("reservedCommandNotice", () => {
       "call"
     ];
     for (const cmd of engineCommands) {
-      expect(reservedCommandNotice(cmd), cmd).toBe(`Use: infinite local ${cmd}`);
+      expect(reservedCommandNotice(cmd), cmd).toContain(cmd);
     }
   });
   it("leaves the product-level commands alone (help/version/app/update/local)", () => {
@@ -66,5 +66,11 @@ describe("reservedCommandNotice", () => {
   it("exposes the set itself for the entry router", () => {
     expect(RESERVED_LOCAL_COMMANDS.has("sync")).toBe(true);
     expect(RESERVED_LOCAL_COMMANDS.has("update")).toBe(false);
+  });
+
+  it("never exposes a customer local/Docker fallback", () => {
+    expect(reservedCommandNotice("sources") ?? "").not.toMatch(
+      /trial|infinite local|docker|self-host|local engine/i
+    );
   });
 });

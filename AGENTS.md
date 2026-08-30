@@ -68,12 +68,14 @@ secret-gated check can't run.
 
 ## Versioning & releases
 
-**Distribution model — signed macOS Desktop, with two installer entrypoints.** `scripts/install.sh`
-downloads the signed/notarized app through `GET https://infinite.fast/download`; the zero-dependency
-`packages/desktop-installer` package publishes the same behavior as `npx infinite-os@latest`.
-Desktop bundles the daemon, embedded database, and CLI. Never turn the public installer back into a
-source checkout, Docker bootstrap, or Linux lane. `infinite-tag` remains a separate website
-instrumentation package.
+**Distribution model — signed macOS Desktop, with one customer install command.** Customers run
+`npx infinite-os@latest`. That zero-dependency `packages/desktop-installer` package is the sole
+customer install command we advertise, and it delegates to the bundled copy of `scripts/install.sh`.
+`scripts/install.sh` is the canonical internal shell implementation and package payload, not a
+second customer entrypoint. It downloads the signed/notarized app through
+`GET https://infinite.fast/download`. Desktop bundles the daemon, embedded database, and CLI. Never
+turn the public installer back into a source checkout, Docker bootstrap, or Linux lane.
+`infinite-tag` remains a separate website instrumentation package.
 
 - **The engine source version lives in the root `package.json`** (`version`), single source of
   truth — `infinite version` reads it. It follows **SemVer** (`MAJOR.MINOR.PATCH`) and

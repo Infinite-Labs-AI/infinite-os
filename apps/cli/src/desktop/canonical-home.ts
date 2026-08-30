@@ -27,12 +27,17 @@ import { basename } from "node:path";
 
 export type CanonicalVariant = "prod" | "dev" | "clean" | `dev${number}`;
 
-export interface CanonicalHomeEntry {
-  /** Home directory basename, always directly under the user's HOME. */
-  home: string;
+export interface CanonicalDesktopTarget {
   /** The Desktop app's Electron `productName` (launchable via `open -a`). */
   appName: string;
+  /** The URL scheme registered by only this Desktop identity. */
+  scheme: string;
   variant: CanonicalVariant;
+}
+
+export interface CanonicalHomeEntry extends CanonicalDesktopTarget {
+  /** Home directory basename, always directly under the user's HOME. */
+  home: string;
 }
 
 /** Highest dev instance enumerated in the manifest. This is a LISTING cap only
@@ -45,6 +50,7 @@ function numberedDevEntries(): CanonicalHomeEntry[] {
     entries.push({
       home: `.growth-os-dev${n}`,
       appName: `Infinite Dev ${n}`,
+      scheme: `infinite-dev-${n}`,
       variant: `dev${n}` as CanonicalVariant
     });
   }
@@ -52,10 +58,25 @@ function numberedDevEntries(): CanonicalHomeEntry[] {
 }
 
 export const CANONICAL_HOMES: ReadonlyArray<CanonicalHomeEntry> = [
-  { home: ".growth-os", appName: "Infinite", variant: "prod" },
-  { home: ".growth-os-dev", appName: "Infinite Dev", variant: "dev" },
+  {
+    home: ".growth-os",
+    appName: "Infinite",
+    scheme: "infinite",
+    variant: "prod"
+  },
+  {
+    home: ".growth-os-dev",
+    appName: "Infinite Dev",
+    scheme: "infinite-dev",
+    variant: "dev"
+  },
   ...numberedDevEntries(),
-  { home: ".growth-os-clean", appName: "Infinite Clean", variant: "clean" }
+  {
+    home: ".growth-os-clean",
+    appName: "Infinite Clean",
+    scheme: "infinite-clean",
+    variant: "clean"
+  }
 ];
 
 // Group 1 (`clean`) captures the `-clean` suffix; group 2 (`devDigits`) captures
@@ -70,16 +91,37 @@ const CANONICAL_HOME_RE = /^\.growth-os(?:(-clean)|-dev(\d*))?$/u;
  * under the user's HOME (the launch path does — `open -a` attaches the app to
  * its DEFAULT home, never a custom one) must enforce that policy themselves.
  */
-export function appNameForHome(home: string): string | null {
+export function desktopTargetForHome(
+  home: string
+): CanonicalDesktopTarget | null {
   const match = CANONICAL_HOME_RE.exec(basename(home));
   if (!match) return null;
   const [, clean, devDigits] = match;
-  if (clean) return "Infinite Clean";
-  if (devDigits === undefined) return "Infinite"; // bare .growth-os (prod)
-  if (devDigits === "") return "Infinite Dev"; // bare .growth-os-dev (instance 1)
+  if (clean) {
+    return {
+      appName: "Infinite Clean",
+      scheme: "infinite-clean",
+      variant: "clean"
+    };
+  }
+  if (devDigits === undefined) {
+    return { appName: "Infinite", scheme: "infinite", variant: "prod" };
+  }
+  if (devDigits === "") {
+    return { appName: "Infinite Dev", scheme: "infinite-dev", variant: "dev" };
+  }
   // Padded digits ("02") never name a real home — reject rather than alias.
   if (devDigits.length > 1 && devDigits.startsWith("0")) return null;
   const instance = Number(devDigits);
-  // Only N ≥ 2 are real numbered dev installs; dev0/dev1 are not launchable.
-  return instance >= 2 ? `Infinite Dev ${instance}` : null;
+  // Desktop registers numbered handoff schemes only for N 2..999.
+  if (instance < 2 || instance > 999) return null;
+  return {
+    appName: `Infinite Dev ${instance}`,
+    scheme: `infinite-dev-${instance}`,
+    variant: `dev${instance}`
+  };
+}
+
+export function appNameForHome(home: string): string | null {
+  return desktopTargetForHome(home)?.appName ?? null;
 }

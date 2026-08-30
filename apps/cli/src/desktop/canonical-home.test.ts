@@ -1,5 +1,33 @@
 import { describe, expect, it } from "vitest";
-import { appNameForHome, CANONICAL_HOMES } from "./canonical-home.js";
+import {
+  appNameForHome,
+  CANONICAL_HOMES,
+  desktopTargetForHome
+} from "./canonical-home.js";
+
+describe("desktopTargetForHome", () => {
+  it("maps canonical homes to their exact app and URI schemes", () => {
+    expect(desktopTargetForHome("/Users/x/.growth-os")).toEqual({
+      appName: "Infinite",
+      scheme: "infinite",
+      variant: "prod"
+    });
+    expect(desktopTargetForHome("/Users/x/.growth-os-dev6")).toEqual({
+      appName: "Infinite Dev 6",
+      scheme: "infinite-dev-6",
+      variant: "dev6"
+    });
+    expect(desktopTargetForHome("/Users/x/.growth-os-clean")).toEqual({
+      appName: "Infinite Clean",
+      scheme: "infinite-clean",
+      variant: "clean"
+    });
+  });
+
+  it("does not invent an unregistered numbered Desktop scheme", () => {
+    expect(desktopTargetForHome("/Users/x/.growth-os-dev1000")).toBeNull();
+  });
+});
 
 describe("appNameForHome", () => {
   it("maps the prod home to Infinite", () => {
