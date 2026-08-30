@@ -95,6 +95,14 @@ function isPostgresUrl(databaseUrl: string): boolean {
   return /^postgres(ql)?:\/\//i.test(databaseUrl.trim());
 }
 
+function trimTrailingSlashes(value: string): string {
+  let end = value.length;
+  while (end > 0 && value.charCodeAt(end - 1) === 47) {
+    end -= 1;
+  }
+  return end === value.length ? value : value.slice(0, end);
+}
+
 // Resolve a PGlite-selecting URL (pglite://, file://, bare path, :memory:) to its
 // canonical absolute data-dir path. Inlined here (NOT imported from @infinite-os/db)
 // because db depends on config — importing db back into config would be a cycle.
@@ -162,7 +170,8 @@ export function databaseFingerprint(
     }
     const port = parsed.port && parsed.port !== "" ? parsed.port : "5432";
     // Strip the leading "/" from the path to get the bare dbname; drop any trailing slash.
-    const dbname = decodeURIComponent(parsed.pathname.replace(/^\//, "").replace(/\/+$/, ""));
+    const pathname = parsed.pathname.startsWith("/") ? parsed.pathname.slice(1) : parsed.pathname;
+    const dbname = decodeURIComponent(trimTrailingSlashes(pathname));
     // Password (parsed.password) is INTENTIONALLY never read.
     canonical = `${user}@${host}:${port}/${dbname}`;
   } else {
@@ -208,7 +217,7 @@ const DAEMON_SERVICE = "growth-os-app";
 
 // Strip a trailing slash so `${url}/health` never double-slashes.
 function normalizeBaseUrl(url: string): string {
-  return url.replace(/\/+$/, "");
+  return trimTrailingSlashes(url);
 }
 
 /**

@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -83,6 +83,28 @@ describe("databaseFingerprint", () => {
 });
 
 describe("probeDaemonIdentity", () => {
+  it("keeps trailing-slash normalization regex-free for CodeQL-safe linear probing", async () => {
+    const source = readFileSync(
+      new URL("../src/daemon-endpoint.ts", import.meta.url),
+      "utf8"
+    );
+    expect(source).not.toContain('replace(/\\/+$/, "")');
+
+    const seen: string[] = [];
+    const slashyUrl = `http://127.0.0.1:9${"/".repeat(20_000)}`;
+    const fetchImpl = (async (input: RequestInfo | URL) => {
+      seen.push(typeof input === "string" ? input : input.toString());
+      return new Response(JSON.stringify(DAEMON_BODY), {
+        status: 200,
+        headers: { "content-type": "application/json" }
+      });
+    }) as unknown as typeof fetch;
+
+    const id = await probeDaemonIdentity(slashyUrl, { fetchImpl });
+    expect(id?.service).toBe("growth-os-app");
+    expect(seen).toEqual(["http://127.0.0.1:9/health"]);
+  });
+
   it("accepts a body whose service is growth-os-app", async () => {
     const fetchImpl = makeFetch({ "http://127.0.0.1:9/health": { body: DAEMON_BODY } });
     const id = await probeDaemonIdentity("http://127.0.0.1:9", { fetchImpl });
