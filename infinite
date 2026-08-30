@@ -12,6 +12,11 @@ CLI_RUNTIME_DEPS=(
   "$ROOT/apps/cli/node_modules/unicode-animations"
 )
 
+PRIVATE_PNPM_BIN="${HOME:-}/.infinite/tooling/bin"
+if ! command -v pnpm >/dev/null 2>&1 && [[ -x "$PRIVATE_PNPM_BIN/pnpm" ]]; then
+  export PATH="$PRIVATE_PNPM_BIN:$PATH"
+fi
+
 build_is_stale() {
   if [[ ! -f "$ENTRY" ]]; then
     return 0

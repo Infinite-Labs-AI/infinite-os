@@ -7,9 +7,8 @@
 #   curl -fsSL https://raw.githubusercontent.com/Infinite-Labs-AI/infinite-os/main/scripts/install.sh | bash
 #
 # What it does:
-#   1. Checks prerequisites (git, Node >= 20, pnpm). It does NOT install or
-#      upgrade them for you — if something is missing it prints how to get it
-#      and stops.
+#   1. Checks prerequisites (git, Node >= 20, npm). If pnpm is missing, it
+#      installs Infinite's pinned pnpm privately under ~/.infinite/tooling.
 #   2. Clones (or updates) Infinite into a fixed home: ~/.infinite/app
 #   3. Drops a small `infinite` launcher on your PATH (~/.local/bin/infinite)
 #      so you can run `infinite` from anywhere.
@@ -44,16 +43,19 @@ COMMAND_LINK_DIR="$HOME/.local/bin"
 BRANCH="main"
 RUN_SETUP=true
 MIN_NODE_MAJOR=20
+PINNED_PNPM_VERSION="10.0.0"
+TOOLING_ROOT="$HOME/.infinite/tooling"
+TOOLING_BIN="$TOOLING_ROOT/bin"
 
 # A piped `curl | bash` has no terminal on stdin. We still want the interactive
 # `infinite local setup` to work, so detect whether a controlling terminal exists.
-if [ -t 0 ]; then
-  HAS_TTY=true
-elif [ -r /dev/tty ]; then
-  HAS_TTY=true
-else
-  HAS_TTY=false
-fi
+can_open_controlling_tty() {
+  if [ -t 0 ]; then return 0; fi
+  if [ -e /dev/tty ] && ( : < /dev/tty ) 2>/dev/null; then return 0; fi
+  return 1
+}
+
+if can_open_controlling_tty; then HAS_TTY=true; else HAS_TTY=false; fi
 
 # ── Argument parsing ──────────────────────────────────────────────────────────
 while [ $# -gt 0 ]; do
@@ -83,7 +85,7 @@ done
 
 printf "\n${BOLD}${CYAN}Infinite installer${NC}\n\n"
 
-# ── 1. Prerequisites (check only — never install or upgrade) ──────────────────
+# ── 1. Prerequisites ──────────────────────────────────────────────────────────
 OS="$(uname -s)"
 case "$OS" in
   Darwin) PLATFORM="macOS" ;;
@@ -93,6 +95,22 @@ esac
 log_success "Platform: $PLATFORM"
 
 missing=0
+
+ensure_pnpm() {
+  if command -v pnpm >/dev/null 2>&1; then
+    log_success "pnpm found ($(pnpm --version 2>/dev/null))"
+    return
+  fi
+  if ! command -v npm >/dev/null 2>&1; then
+    log_error "npm is required to provision pnpm@$PINNED_PNPM_VERSION privately."
+    missing=1
+    return
+  fi
+  log_info "Installing private pnpm@$PINNED_PNPM_VERSION into $TOOLING_ROOT..."
+  npm install --global --prefix "$TOOLING_ROOT" "pnpm@$PINNED_PNPM_VERSION"
+  export PATH="$TOOLING_BIN:$PATH"
+  log_success "Private pnpm found ($(pnpm --version 2>/dev/null))"
+}
 
 if command -v git >/dev/null 2>&1; then
   log_success "git found ($(git --version | awk '{print $3}'))"
@@ -125,13 +143,8 @@ else
   missing=1
 fi
 
-if command -v pnpm >/dev/null 2>&1; then
-  log_success "pnpm found ($(pnpm --version 2>/dev/null))"
-else
-  log_error "pnpm is required but not found."
-  log_info "Enable it (ships with Node 16.13+):  corepack enable pnpm"
-  log_info "Or install it directly:              npm install -g pnpm"
-  missing=1
+if [ "$missing" -eq 0 ]; then
+  ensure_pnpm
 fi
 
 if [ "$missing" -ne 0 ]; then
@@ -213,6 +226,7 @@ cat > "$COMMAND_LINK_DIR/infinite" <<EOF
 # Infinite launcher shim — installed by scripts/install.sh.
 # Runs Infinite from anywhere by handing off to the checkout below.
 # If you move the repo, update this path.
+export PATH="$TOOLING_BIN:\$PATH"
 exec "$INSTALL_DIR/infinite" "\$@"
 EOF
 chmod +x "$COMMAND_LINK_DIR/infinite"

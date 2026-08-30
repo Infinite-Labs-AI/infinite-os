@@ -1,0 +1,27 @@
+name: Published installer smoke
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "23 8 * * 2"
+
+permissions:
+  contents: read
+
+jobs:
+  published-installer:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Smoke the exact public command
+        shell: bash
+        run: |
+          install_home="$(mktemp -d)"
+          trap 'rm -rf "$install_home"' EXIT
+          curl -fsSL https://raw.githubusercontent.com/Infinite-Labs-AI/infinite-os/main/scripts/install.sh \
+            | env HOME="$install_home" SHELL=/bin/bash bash
+          test -x "$install_home/.local/bin/infinite"
+          HOME="$install_home" GROWTH_OS_CLI_NONINTERACTIVE=1 \
+            "$install_home/.local/bin/infinite" version
