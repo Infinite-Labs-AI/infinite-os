@@ -1,11 +1,15 @@
-import { INFINITE_DOWNLOAD_URL } from "./desktop/onboarding.js";
+import {
+  INFINITE_INSTALL_COMMAND,
+  INFINITE_ONBOARDING_URI
+} from "./desktop/onboarding.js";
 
 /**
  * Help text is SPLIT (design §6.6, round 5):
  *
  * - `productHelpText()` — the advertised product surface: natural-language
  *   turns proxied through the Infinite Desktop app, `infinite app`, and a
- *   pointer at `infinite local` for the self-host lane. No local-stack detail.
+ *   shared account/workspace/agent contract. Developer engine commands remain
+ *   intentionally absent from this product surface.
  * - `localHelpText()` — the full open-source engine surface, hosted under
  *   `infinite local` (namespace, don't delete).
  *
@@ -28,15 +32,10 @@ export function productHelpText(): string {
     "  infinite update                How to update (the agent ships with Infinite Desktop)",
     "",
     "Getting started:",
-    "  Turns run through the Infinite Desktop app on this Mac — it must be",
-    "  running and signed in. Without it, `infinite` walks you through launch",
-    "  and sign-in.",
-    `  New here? Download Infinite Desktop at ${INFINITE_DOWNLOAD_URL}`,
-    "",
-    "Self-host / local engine:",
-    "  infinite local <command>       Run the open-source local engine directly",
-    "                                 (setup, connect, sources, sync, ...)",
-    "  infinite local help            Full local engine command list",
+    "  Infinite Desktop owns sign-in, workspace, and provider setup.",
+    `  Run \`${INFINITE_INSTALL_COMMAND}\`, then open ${INFINITE_ONBOARDING_URI}.`,
+    "  In the app, press ⌘L. In Terminal, run `infinite`.",
+    "  Same account. Same workspace. Same agent.",
     "",
     "Orchestration runs locally; prompts run on your own Codex or Anthropic",
     "account, with your own credentials. Infinite OS is MIT open source."
@@ -51,11 +50,10 @@ export function productHelpText(): string {
 export function productUpdateText(): string {
   return [
     "The infinite agent ships with the Infinite Desktop app and updates with it.",
-    "Open Infinite Desktop to pick up the latest version — it keeps itself up to",
-    `date automatically. New install? Download it at ${INFINITE_DOWNLOAD_URL}`,
+    "Open Infinite Desktop and press ⌘L to use the updated agent.",
+    `Missing the app? Run \`${INFINITE_INSTALL_COMMAND}\`, then open ${INFINITE_ONBOARDING_URI}.`,
     "",
-    "Self-hosting the open-source engine? Run `infinite local update` to pull the",
-    "latest code and restart the local stack."
+    "App and Terminal use the same account, workspace, and agent."
   ].join("\n");
 }
 
@@ -65,7 +63,7 @@ export function localHelpText(): string {
     "",
     "Common:",
     "  infinite                       Start an interactive agent session",
-    "  infinite \"message\"             Ask one question and print the answer",
+    '  infinite "message"             Ask one question and print the answer',
     "  infinite local                 Force the local engine (skips the cloud brain)",
     "  infinite local <command>       Run any command against the local engine",
     "  version                        Print the Infinite OS version and commit",

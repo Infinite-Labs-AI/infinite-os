@@ -1,14 +1,19 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { productHelpText, localHelpText } from "./help-text.js";
+import {
+  productHelpText,
+  productUpdateText,
+  localHelpText
+} from "./help-text.js";
 
 describe("help text split", () => {
-  it("product help advertises turns + local pointer, not the raw engine", () => {
+  it("product help advertises the shared Desktop agent, not a local product lane", () => {
     const t = productHelpText();
-    expect(t).toContain("infinite local");
-    expect(t).not.toContain("docker"); // no raw local-stack detail in product help
-    expect(t.toLowerCase()).not.toContain("docker");
+    expect(t).toContain("⌘L");
+    expect(t).toContain("Same account. Same workspace. Same agent.");
+    expect(t).toContain("npx infinite-os@latest");
+    expect(t).toContain("infinite://onboarding");
   });
   it("local help retains the engine commands", () => {
     expect(localHelpText()).toContain("sources");
@@ -27,7 +32,14 @@ describe("help text split", () => {
     const t = productHelpText();
     expect(t).toContain('infinite "message"');
     expect(t).toContain("infinite app");
-    expect(t).toContain("https://infinite.fast/download");
+    expect(t).toContain("infinite://onboarding");
+  });
+
+  it("product help and update contain no customer local/Docker fallback copy", () => {
+    const forbidden = /trial|infinite local|docker|self-host|local engine/i;
+    for (const text of [productHelpText(), productUpdateText()]) {
+      expect(text).not.toMatch(forbidden);
+    }
   });
 });
 

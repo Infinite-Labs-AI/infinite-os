@@ -1,7 +1,10 @@
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { infiniteOsHome } from "@infinite-os/config";
-import { appNameForHome } from "./canonical-home.js";
+import {
+  desktopTargetForHome,
+  type CanonicalDesktopTarget
+} from "./canonical-home.js";
 
 /**
  * No-Desktop onboarding for the public `infinite` CLI.
@@ -23,7 +26,25 @@ export type OnboardingState =
   | "no_provider"
   | "no_linked_workspace"
   | "subscription_required"
+  | "other_not_ready"
   | "ready";
+
+export function normalizeOnboardingState(
+  value: unknown
+): OnboardingState | null {
+  if (typeof value !== "string" || value.length === 0) return null;
+  switch (value) {
+    case "booting":
+    case "signed_out":
+    case "no_provider":
+    case "no_linked_workspace":
+    case "subscription_required":
+    case "ready":
+      return value;
+    default:
+      return "other_not_ready";
+  }
+}
 
 /**
  * Structured onboarding outcome. On `ready` the CALLER continues straight into
@@ -32,7 +53,12 @@ export type OnboardingState =
  * and the caller exits non-zero.
  */
 export interface OnboardingResult {
-  result: "ready" | "not_installed" | "unsupported_home" | "timed_out";
+  result:
+    | "ready"
+    | "not_installed"
+    | "unsupported_home"
+    | "timed_out"
+    | "interrupted";
 }
 
 export interface OnboardingIo {
@@ -41,8 +67,10 @@ export interface OnboardingIo {
 }
 
 export interface OnboardingDeps {
-  /** Launch the matching macOS app by name (e.g. `open -a <appName>`). */
-  launch: (appName: string) => void;
+  /** Locate this exact Desktop identity's app bundle. */
+  resolveAppPath: (target: CanonicalDesktopTarget) => string | null;
+  /** Launch the exact app bundle and its registered onboarding URI. */
+  launch: (target: DesktopLaunchTarget) => void;
   /** Read <home>/desktop-cmdl/state.json .state, or null when absent. */
   readState: () => OnboardingState | null;
   /**
@@ -55,8 +83,6 @@ export interface OnboardingDeps {
    * the async status probe.
    */
   liveBridgeReady: () => boolean | Promise<boolean>;
-  /** Whether the matching Desktop app is installed on this machine. */
-  appInstalled: () => boolean;
   /** Poll interval while waiting for `ready` (ms). */
   pollMs?: number;
   /**
@@ -84,6 +110,13 @@ interface OnboardingEnv {
 
 /** Single source for the sign-up/download link (no site is served at the root). */
 export const INFINITE_DOWNLOAD_URL = "https://infinite.fast/download";
+export const INFINITE_INSTALL_COMMAND = "npx infinite-os@latest";
+export const INFINITE_ONBOARDING_URI = "infinite://onboarding";
+
+export interface DesktopLaunchTarget extends CanonicalDesktopTarget {
+  appPath: string;
+  onboardingUri: string;
+}
 
 const DEFAULT_POLL_MS = 500;
 /**
@@ -112,9 +145,12 @@ export class OnboardingError extends Error {
  * ONLY when the home sits directly under the user's HOME. A custom path
  * elsewhere is never canonical even if it happens to end in `.growth-os`.
  */
-function canonicalAppName(home: string, userHome: string): string | null {
+function canonicalDesktopTarget(
+  home: string,
+  userHome: string
+): CanonicalDesktopTarget | null {
   if (dirname(home) !== userHome) return null;
-  return appNameForHome(home);
+  return desktopTargetForHome(home);
 }
 
 export async function runOnboarding(
@@ -126,24 +162,25 @@ export async function runOnboarding(
   const userHome = resolve(
     env.HOME && env.HOME.trim() !== "" ? env.HOME : homedir()
   );
-  const appName = canonicalAppName(home, userHome);
+  const target = canonicalDesktopTarget(home, userHome);
 
   // Custom (non-canonical) GROWTH_OS_HOME → GUIDE ONLY, never launch. Electron
   // keys the Desktop's userData off `productName`, not our env, and we must
   // NEVER forward GROWTH_OS_HOME to the launched app — so `open -a` would attach
   // to the app's DEFAULT home, not this custom one. There is no app we can fill.
-  if (!appName) {
+  if (!target) {
     io.writeOut(
-      `GROWTH_OS_HOME ${home} is a custom home, not a standard Infinite install. ` +
-        "Open Infinite Desktop yourself, or run `infinite local` to use the local engine.\n"
+      `The requested Desktop identity for GROWTH_OS_HOME ${home} cannot be launched.\n` +
+        `Run \`${INFINITE_INSTALL_COMMAND}\`, then open ${INFINITE_ONBOARDING_URI}.\n`
     );
     return { result: "unsupported_home" };
   }
 
-  if (!deps.appInstalled()) {
+  const appPath = deps.resolveAppPath(target);
+  if (!appPath) {
     io.writeOut(
-      `Infinite Desktop is not installed. Sign up and download it at ${INFINITE_DOWNLOAD_URL}, ` +
-        "then run this command again. To work offline now, run `infinite local`.\n"
+      "Infinite Desktop is missing or moved.\n" +
+        `Run \`${INFINITE_INSTALL_COMMAND}\`, then open ${INFINITE_ONBOARDING_URI}.\n`
     );
     return { result: "not_installed" };
   }
@@ -154,16 +191,36 @@ export async function runOnboarding(
     if (deps.readState() === "ready" && (await deps.liveBridgeReady())) {
       return { result: "ready" };
     }
+    io.writeOut(
+      `Open ${INFINITE_ONBOARDING_URI}, or run \`${INFINITE_INSTALL_COMMAND}\`.\n`
+    );
     throw new OnboardingError(
       "desktop_bridge_absent",
-      "Infinite Desktop is not ready for this one-shot command. Start Infinite Desktop, " +
-        "or run `infinite local` to use the local engine."
+      `Infinite Desktop is not ready. Open ${INFINITE_ONBOARDING_URI}, or run \`${INFINITE_INSTALL_COMMAND}\`.`
     );
   }
 
   // Interactive: launch the matching app and wait for it to become ready.
   // NEVER pass GROWTH_OS_HOME to the launched app (see the custom-home note).
-  deps.launch(appName);
+  const launchTarget: DesktopLaunchTarget = {
+    ...target,
+    appPath,
+    onboardingUri: `${target.scheme}://onboarding`
+  };
+  try {
+    deps.launch(launchTarget);
+  } catch (error) {
+    if (error instanceof OnboardingError) throw error;
+    throw new OnboardingError(
+      "desktop_launch_failed",
+      `Could not open ${launchTarget.onboardingUri}. Run: open '${launchTarget.onboardingUri}'`
+    );
+  }
+  io.writeOut(
+    "Complete setup in the app\n\n" +
+      "This terminal will wait and become ready automatically.\n" +
+      "You can close it safely and run `infinite` again later.\n"
+  );
   return pollToReady(io, deps);
 }
 
@@ -185,7 +242,6 @@ async function pollToReady(
     // (or the deadline/abort ends the wait) — never a false ready that then
     // dies on ECONNREFUSED in the session.
     if (state === "ready" && (await deps.liveBridgeReady())) {
-      io.writeOut("Infinite Desktop is ready.\n");
       return { result: "ready" };
     }
     // Progress-aware wait: precise guidance for every distinct state, once per
@@ -197,13 +253,13 @@ async function pollToReady(
     }
     if (deps.signal?.aborted) {
       io.writeOut(
-        "Stopped waiting for Infinite Desktop. Run `infinite` again once it is ready, or `infinite local` to use the local engine.\n"
+        `Stopped waiting for Infinite Desktop. Open ${INFINITE_ONBOARDING_URI}, or run \`infinite\` again later.\n`
       );
-      return { result: "timed_out" };
+      return { result: "interrupted" };
     }
     if (now() >= deadline) {
       io.writeOut(
-        "Infinite Desktop did not become ready in time. Run `infinite local` to use the local engine.\n"
+        `Infinite Desktop did not become ready in time. Open ${INFINITE_ONBOARDING_URI}, or run \`${INFINITE_INSTALL_COMMAND}\`.\n`
       );
       return { result: "timed_out" };
     }
@@ -212,31 +268,19 @@ async function pollToReady(
 }
 
 function renderStateGuidance(io: OnboardingIo, state: OnboardingState): void {
-  switch (state) {
-    case "signed_out":
-      io.writeOut("Sign in to Infinite Desktop to continue.\n");
-      return;
-    case "no_provider":
-      io.writeOut(
-        "Connect a model provider (Claude or Codex) in Infinite Desktop to continue.\n"
-      );
-      return;
-    case "no_linked_workspace":
-      io.writeOut(
-        "Create or link a workspace in Infinite Desktop to continue.\n"
-      );
-      return;
-    case "subscription_required":
-      io.writeOut(
-        "An active Infinite subscription is required. Open Infinite Desktop to manage billing.\n"
-      );
-      return;
-    case "booting":
-      io.writeOut("Waiting for Infinite Desktop to start…\n");
-      return;
-    default:
-      return;
-  }
+  const line =
+    state === "signed_out"
+      ? "→ Sign in to Infinite Desktop to continue."
+      : state === "no_linked_workspace"
+        ? "→ Create or link your workspace in Infinite Desktop to continue."
+        : state === "no_provider"
+          ? "→ Connect Codex or Claude in Infinite Desktop to continue."
+          : state === "booting"
+            ? "◌ Waiting for Infinite…"
+            : state === "ready"
+              ? null
+              : "→ Finish setup in Infinite Desktop to continue.";
+  if (line) io.writeOut(`${line}\n`);
 }
 
 function defaultSleep(ms: number): Promise<void> {

@@ -3264,7 +3264,11 @@ describe("cli smoke", () => {
       });
 
       const outputText = writes.join("");
-      expect(outputText).toContain("infinite local");
+      expect(outputText).toContain("npx infinite-os@latest");
+      expect(outputText).toContain("infinite://onboarding");
+      expect(outputText).not.toMatch(
+        /trial|infinite local|docker|self-host|local engine/i
+      );
       expect(outputText).not.toContain("Infinite is not set up yet.");
       expect(process.exitCode).toBe(1);
       expect(fetchSpy.mock.calls.some(([url]) => String(url).includes("/v1/turn"))).toBe(false);
@@ -3427,7 +3431,11 @@ describe("cli smoke", () => {
 
       expect(fetchSpy.mock.calls.some(([url]) => String(url).endsWith("/v1/status"))).toBe(true);
       expect(fetchSpy.mock.calls.some(([url]) => String(url).endsWith("/v1/turn"))).toBe(false);
-      expect(writes.join("")).toContain("infinite local");
+      expect(writes.join("")).toContain("npx infinite-os@latest");
+      expect(writes.join("")).toContain("infinite://onboarding");
+      expect(writes.join("")).not.toMatch(
+        /trial|infinite local|docker|self-host|local engine/i
+      );
       expect(process.exitCode).toBe(1);
     } finally {
       process.exitCode = priorExitCode;
@@ -3609,7 +3617,7 @@ describe("cli smoke", () => {
     try {
       // mac + no live bridge → onboarding. Non-interactive, so no GUI launch:
       // this non-canonical temp home yields guide-only guidance pointing at
-      // `infinite local`, and the entry exits non-zero — the LOCAL interactive
+      // the canonical install/onboarding path, and the entry exits non-zero — the LOCAL interactive
       // shell must never open from a bare product invocation.
       await runCli([], {
         GROWTH_OS_WORKSPACE_ROOT: workspaceRoot,
@@ -3618,7 +3626,11 @@ describe("cli smoke", () => {
       });
 
       const outputText = writes.join("");
-      expect(outputText).toContain("infinite local");
+      expect(outputText).toContain("npx infinite-os@latest");
+      expect(outputText).toContain("infinite://onboarding");
+      expect(outputText).not.toMatch(
+        /trial|infinite local|docker|self-host|local engine/i
+      );
       expect(outputText).not.toContain("Infinite OS session. Type a message");
       expect(process.exitCode).toBe(1);
     } finally {
@@ -3646,9 +3658,8 @@ describe("cli smoke", () => {
     const restorePlatform = forcePlatform("linux");
     const priorExitCode = process.exitCode;
     try {
-      // Non-mac hosts without the explicit `GROWTH_OS_DEFAULT_TARGET=local`
-      // opt-in must NOT fall back to the local product session: bare
-      // `infinite` exits non-zero with guidance pointing at `infinite local`.
+      // Non-mac hosts must NOT fall back to the local product session: bare
+      // `infinite` exits non-zero with unsupported-platform guidance.
       await runCli([], {
         GROWTH_OS_WORKSPACE_ROOT: workspaceRoot,
         GROWTH_OS_HOME: growthHome,
@@ -3657,8 +3668,10 @@ describe("cli smoke", () => {
 
       const outputText = writes.join("");
       const errText = errWrites.join("");
-      expect(errText).toContain("macOS-only");
-      expect(errText).toContain("infinite local");
+      expect(errText).toContain("Apple-silicon Mac");
+      expect(errText).not.toMatch(
+        /trial|infinite local|docker|self-host|local engine/i
+      );
       expect(outputText).not.toContain("Infinite is not set up yet.");
       expect(outputText).not.toContain("Infinite OS session. Type a message");
       expect(process.exitCode).toBe(1);

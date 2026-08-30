@@ -13,7 +13,14 @@
 // See the RUNTIME CONTRACT in the CLI auto-install feature. Prereq: the workspace must be built
 // (@infinite-os/* resolve to dist/) — run after `pnpm -r build`.
 import { build } from "esbuild";
-import { cpSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import {
+  cpSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync
+} from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -57,11 +64,13 @@ const result = await build({
 // never touch the local engine DB. When it does (credential/db paths), the external import must
 // resolve at run time. PGlite is a TRANSITIVE dep (of @infinite-os/db), not directly resolvable from
 // apps/cli, so locate the real package in the pnpm store.
-const referencesPglite = Object.keys(result.metafile.inputs).some((f) =>
-  /@electric-sql[/+]pglite/.test(f)
-) || Object.values(result.metafile.outputs).some((o) =>
-  (o.imports ?? []).some((imp) => imp.path === "@electric-sql/pglite")
-);
+const referencesPglite =
+  Object.keys(result.metafile.inputs).some((f) =>
+    /@electric-sql[/+]pglite/.test(f)
+  ) ||
+  Object.values(result.metafile.outputs).some((o) =>
+    (o.imports ?? []).some((imp) => imp.path === "@electric-sql/pglite")
+  );
 
 // Ship the migration .sql files NEXT TO the bundle — loadMigrations() reads them at runtime via
 // readdirSync (they're not import-able, so esbuild can't inline them). migrationsDir() resolves them
@@ -71,7 +80,9 @@ const referencesPglite = Object.keys(result.metafile.inputs).some((f) =>
 // subcommand doesn't hard-crash with ENOENT on a machine with no engine checkout.
 const migrationsSrc = join(repoRoot, "packages", "db", "migrations");
 cpSync(migrationsSrc, join(outDir, "migrations"), { recursive: true });
-console.log("   + migrations sidecar (runtime migrations read .sql at run time)");
+console.log(
+  "   + migrations sidecar (runtime migrations read .sql at run time)"
+);
 
 if (referencesPglite) {
   const pnpmDir = join(repoRoot, "node_modules", ".pnpm");
@@ -92,19 +103,29 @@ if (referencesPglite) {
   cpSync(pgliteRoot, pgliteDst, { recursive: true, dereference: true });
   console.log("   + sidecar @electric-sql/pglite (CLI graph references it)");
 } else {
-  console.log("   (no PGlite in CLI graph — external marker is inert, no sidecar needed)");
+  console.log(
+    "   (no PGlite in CLI graph — external marker is inert, no sidecar needed)"
+  );
 }
 
 // Bind the provenance claim to the exact CLI bytes, same shape and same helper as the daemon
 // bundle above. The desktop's stage-cli-bundle.mjs freshness guard READS this stamp (an unstamped
 // bundle is treated as stale and hard-fails a local pack), and audit-distributable binds the
 // packaged copy to EXPECTED_ENGINE_COMMIT — so the stamp is a required build artifact, not decor.
-const provenance = createBundleProvenance({ daemonPath: cliPath, appRoot: cliRoot });
+const engineVersion = JSON.parse(
+  readFileSync(join(repoRoot, "package.json"), "utf8")
+).version;
+const provenance = {
+  ...createBundleProvenance({ daemonPath: cliPath, appRoot: cliRoot }),
+  engineVersion
+};
 writeFileSync(
   join(outDir, "BUILD_INFO.json"),
   `${JSON.stringify(provenance, null, 2)}\n`
 );
 
 console.log(`\n✅ CLI bundle → ${outDir}`);
-console.log(`   engine ${provenance.engineCommit.slice(0, 9)} → BUILD_INFO.json`);
+console.log(
+  `   engine ${provenance.engineCommit.slice(0, 9)} → BUILD_INFO.json`
+);
 console.log(`   entry infinite.mjs (run: node infinite.mjs --help)`);
