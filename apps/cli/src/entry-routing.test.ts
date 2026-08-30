@@ -230,9 +230,53 @@ function desktopStatusResponse(
   );
 }
 
+async function readyDesktopFetch(
+  bootId: string,
+  input: string | URL | Request,
+  init?: RequestInit
+): Promise<Response> {
+  const url = String(input);
+  if (url.endsWith("/v1/status")) {
+    return desktopStatusResponse(true, bootId);
+  }
+  if (url.endsWith("/v1/turn")) {
+    const request = JSON.parse(String(init?.body ?? "{}")) as {
+      requestId?: string;
+    };
+    return new Response(
+      `${JSON.stringify({
+        protocolVersion: 1,
+        requestId: request.requestId,
+        sequence: 1,
+        kind: "done",
+        data: {
+          message: "answer from Desktop",
+          actionCalls: []
+        }
+      })}\n`,
+      {
+        status: 200,
+        headers: { "content-type": "application/x-ndjson" }
+      }
+    );
+  }
+  return new Response("{}", {
+    status: 404,
+    headers: { "content-type": "application/json" }
+  });
+}
+
 function assertNoCustomerFallbackCopy(text: string): void {
   expect(text).not.toMatch(/trial|infinite local|local engine|Docker|self[- ]host/i);
 }
+
+const NOT_READY_STATES = [
+  ["missing", null],
+  ["signed_out", "signed_out"],
+  ["no_provider", "no_provider"],
+  ["no_workspace", "no_workspace"],
+  ["subscription_required", "subscription_required"]
+] as const;
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -496,6 +540,39 @@ describe("canonical entry routing (§6.6)", () => {
     }
   });
 
+  it.each(NOT_READY_STATES)(
+    "a product one-shot with live bridge ready but %s state exits with onboarding guidance, not a Desktop turn",
+    async (_label, state) => {
+      const restoreTty = forceTty(false);
+      const restorePlatform = forcePlatform("darwin");
+      const home = createCanonicalDesktopHome();
+      createFakeDesktopApp(home.userHome);
+      const bootId = `boot-one-shot-${_label}`;
+      writeDesktopBridge(home.growthHome, { bootId });
+      if (state) writeDesktopState(home.growthHome, state);
+      try {
+        const { stdout, code, sentTurn } = await runCliCaptured(
+          ["hello", "Desktop"],
+          home.env,
+          {
+            fetchImpl: (input, init) => readyDesktopFetch(bootId, input, init)
+          }
+        );
+
+        expect(code).not.toBe(0);
+        expect(stdout).toContain("infinite://onboarding");
+        expect(stdout).toContain("npx infinite-os@latest");
+        expect(stdout).not.toContain("answer from Desktop");
+        expect(sentTurn).toBe(false);
+        assertNoCustomerFallbackCopy(stdout);
+      } finally {
+        restorePlatform();
+        restoreTty();
+        rmSync(home.root, { recursive: true, force: true });
+      }
+    }
+  );
+
   it("a real SIGINT during interactive onboarding exits 130 without local or bridge dispatch", async () => {
     const restoreTty = forceTty(true);
     const restorePlatform = forcePlatform("darwin");
@@ -586,6 +663,7 @@ describe("contacts command interception", () => {
     const home = createCanonicalDesktopHome();
     const bootId = "boot-contacts-ready";
     writeDesktopBridge(home.growthHome, { bootId });
+    writeDesktopState(home.growthHome, "ready");
     const statusRequests: string[] = [];
     try {
       const { stdout, stderr, code, sentTurn } = await runCliCaptured(
@@ -615,6 +693,40 @@ describe("contacts command interception", () => {
       rmSync(home.root, { recursive: true, force: true });
     }
   });
+
+  it.each(NOT_READY_STATES)(
+    "`infinite contacts sync` with live bridge ready but %s state exits before contacts",
+    async (_label, state) => {
+      const restoreTty = forceTty(false);
+      const restorePlatform = forcePlatform("darwin");
+      const home = createCanonicalDesktopHome();
+      createFakeDesktopApp(home.userHome);
+      const bootId = `boot-contacts-${_label}`;
+      writeDesktopBridge(home.growthHome, { bootId });
+      if (state) writeDesktopState(home.growthHome, state);
+      try {
+        const { stdout, stderr, code, sentTurn } = await runCliCaptured(
+          ["contacts", "sync"],
+          home.env,
+          {
+            fetchImpl: (input, init) => readyDesktopFetch(bootId, input, init)
+          }
+        );
+
+        expect(code).not.toBe(0);
+        expect(stdout).toContain("infinite://onboarding");
+        expect(stdout).toContain("npx infinite-os@latest");
+        expect(stderr).not.toContain("infinite contacts sync is interactive");
+        expect(stdout).not.toContain("no Supabase URL + service role key found");
+        expect(sentTurn).toBe(false);
+        assertNoCustomerFallbackCopy(`${stdout}${stderr}`);
+      } finally {
+        restorePlatform();
+        restoreTty();
+        rmSync(home.root, { recursive: true, force: true });
+      }
+    }
+  );
 
   it("`infinite contacts sync` on an interactive Mac launches onboarding and calls contacts only after Desktop is ready", async () => {
     const restoreTty = forceTty(true);

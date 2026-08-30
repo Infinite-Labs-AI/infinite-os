@@ -285,7 +285,6 @@ function renderStateGuidance(io: OnboardingIo, state: OnboardingState): void {
 
 function defaultSleep(ms: number): Promise<void> {
   return new Promise((resolveSleep) => {
-    const timer = setTimeout(resolveSleep, ms);
-    timer.unref?.();
+    setTimeout(resolveSleep, ms);
   });
 }

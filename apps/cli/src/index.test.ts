@@ -3287,6 +3287,7 @@ describe("cli smoke", () => {
     const bridgeDirectory = join(growthHome, "desktop-cmdl");
     mkdirSync(bridgeDirectory, { mode: 0o700 });
     writeFileSync(join(bridgeDirectory, "seen.json"), "{}");
+    writeFileSync(join(bridgeDirectory, "state.json"), JSON.stringify({ state: "ready" }));
     writeFileSync(
       join(bridgeDirectory, "bridge.json"),
       JSON.stringify({
@@ -3346,9 +3347,9 @@ describe("cli smoke", () => {
     const restoreTty = forceTty(true);
     const restorePlatform = forcePlatform("darwin");
     try {
-      // A one-shot message with a LIVE ready bridge is routed to the Desktop
-      // cloud brain, NOT local chat: the live probe (descriptor + /v1/status
-      // ready) — never the seen.json marker alone — picks cloud, and the turn
+      // A one-shot message with BOTH durable ready state and a LIVE ready
+      // bridge is routed to the Desktop cloud brain, NOT local chat: the
+      // initial gate requires state.json plus /v1/status ready before the turn
       // is proxied over /v1/turn.
       await runCli(["How", "much", "revenue", "this", "month?"], {
         GROWTH_OS_WORKSPACE_ID: "proj_test",
@@ -3372,6 +3373,7 @@ describe("cli smoke", () => {
     const bridgeDirectory = join(growthHome, "desktop-cmdl");
     mkdirSync(bridgeDirectory, { mode: 0o700 });
     writeFileSync(join(bridgeDirectory, "seen.json"), "{}");
+    writeFileSync(join(bridgeDirectory, "state.json"), JSON.stringify({ state: "ready" }));
     writeFileSync(
       join(bridgeDirectory, "bridge.json"),
       JSON.stringify({
@@ -3419,8 +3421,8 @@ describe("cli smoke", () => {
     const restorePlatform = forcePlatform("darwin");
     const priorExitCode = process.exitCode;
     try {
-      // The live probe DOES reach /v1/status, sees not-ready, and resolveMode
-      // therefore routes to ONBOARDING (guide/launch Desktop) instead of the old
+      // The durable ready state lets the live probe reach /v1/status; the
+      // not-ready status then routes to ONBOARDING instead of the old
       // marker-driven cloud pick that died with `desktop_not_ready`. This temp
       // GROWTH_OS_HOME is non-canonical, so onboarding guides without launching
       // and the entry exits non-zero — never a silent local product turn.

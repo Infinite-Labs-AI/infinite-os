@@ -12,15 +12,15 @@ jobs:
   published-installer:
     runs-on: macos-14
     steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: Upgrade npm for trusted-publisher provenance checks
+        run: npm install --global npm@11
+
       - name: Verify the published macOS installer contract
-        shell: bash
-        run: |
-          installer="$(mktemp)"
-          trap 'rm -f "$installer"' EXIT
-          curl -fsSL \
-            https://raw.githubusercontent.com/Infinite-Labs-AI/infinite-os/main/scripts/install.sh \
-            -o "$installer"
-          bash -n "$installer"
-          bash "$installer" --help | grep -F 'Infinite for macOS installer'
-          grep -F 'DOWNLOAD_URL="https://infinite.fast/download"' "$installer"
-          grep -F 'INSTALLER_USER_AGENT="Infinite-Installer/1.0.1"' "$installer"
+        run: node scripts/ci/verify-published-infinite-os.mjs

@@ -7,12 +7,12 @@
  * engine is reachable only through the explicit `infinite local` namespace,
  * which bypasses this product router entirely.
  *
- * Cloud routing is LIVE-probe driven (spec §6.4): the caller probes the
- * `bridge.json` descriptor AND `/v1/status` (reachable + `ready`) and injects
- * the verdict as `liveBridgeAvailable`. The durable per-home `seen.json`
- * marker only proves a capable Desktop ONCE existed — it must never force
- * `cloud` on its own, or a stopped Desktop throws `desktop_not_running`
- * instead of being launched via onboarding.
+ * Cloud routing is readiness driven (spec §6.4): the caller injects a single
+ * `desktopReady` verdict that requires BOTH durable `state.json.state ===
+ * "ready"` and a fresh live `bridge.json` + `/v1/status.ready` probe. Neither
+ * signal can force `cloud` on its own: a stopped Desktop can leave stale ready
+ * state behind, and a live bridge can briefly report ready before the app has
+ * persisted the matching durable state.
  *
  * Pure function — all environment probing is injected via `deps`, so this file
  * performs no I/O and imports no Desktop code. Callers supply the fakes/real
@@ -31,8 +31,8 @@ export interface ModeIo {
 export interface ModeDeps {
   /** Running on macOS (Desktop cloud brain is macOS-only today). */
   isMac: () => boolean;
-  /** LIVE Desktop bridge probe: descriptor + reachable ready status. */
-  liveBridgeAvailable: () => boolean;
+  /** Durable state.json ready AND fresh live Desktop bridge ready. */
+  desktopReady: () => boolean;
 }
 
 /**
@@ -40,7 +40,7 @@ export interface ModeDeps {
  *
  * Decision table (first match wins):
  *  1. non-mac            → unsupported
- *  2. live ready bridge  → cloud  (BOTH TTY and non-TTY — a ready bridge
+ *  2. ready Desktop      → cloud  (BOTH TTY and non-TTY — a ready Desktop
  *                                  serves piped one-shots too)
  *  3. otherwise          → onboarding
  *     (mac with no live bridge: launch/guide toward Desktop. Interactive
@@ -55,5 +55,5 @@ export function resolveMode(
   deps: ModeDeps
 ): Mode {
   if (!deps.isMac()) return "unsupported";
-  return deps.liveBridgeAvailable() ? "cloud" : "onboarding";
+  return deps.desktopReady() ? "cloud" : "onboarding";
 }
