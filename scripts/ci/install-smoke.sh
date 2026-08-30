@@ -190,6 +190,10 @@ create_app() {
   printf '%s\n' "$version" > "$app/Contents/.version"
 }
 
+fixture_fingerprint() {
+  /bin/ls -di "$1" | /usr/bin/awk '{print $1}'
+}
+
 # Fresh install: one truthful GET through /download, verified staging, mount cleanup, and launch.
 run_installer fresh env
 test -d "$test_root/fresh/apps/Infinite.app"
@@ -206,10 +210,10 @@ fi
 mkdir -p "$test_root/existing/home" "$test_root/existing/apps"
 create_app "$test_root/existing/apps/Infinite.app" 0.3.13
 : > "$test_root/existing/log"
-existing_before="$(stat -f '%d:%i' "$test_root/existing/apps/Infinite.app")"
+existing_before="$(fixture_fingerprint "$test_root/existing/apps/Infinite.app")"
 env HOME="$test_root/existing/home" PATH="$fake_bin:/usr/bin:/bin" FAKE_LOG="$test_root/existing/log" INFINITE_PLIST_BUDDY="$fake_bin/PlistBuddy" \
   bash "$repo_root/scripts/install.sh" --app-dir "$test_root/existing/apps"
-existing_after="$(stat -f '%d:%i' "$test_root/existing/apps/Infinite.app")"
+existing_after="$(fixture_fingerprint "$test_root/existing/apps/Infinite.app")"
 test "$existing_before" = "$existing_after"
 grep -Fq "open $test_root/existing/apps/Infinite.app" "$test_root/existing/log"
 
@@ -265,11 +269,11 @@ test "$(cat "$test_root/older/apps/Infinite.app/Contents/.version")" = 0.3.13
 
 mkdir -p "$test_root/newer/home" "$test_root/newer/apps"
 create_app "$test_root/newer/apps/Infinite.app" 0.3.14
-newer_before="$(stat -f '%d:%i' "$test_root/newer/apps/Infinite.app")"
+newer_before="$(fixture_fingerprint "$test_root/newer/apps/Infinite.app")"
 : > "$test_root/newer/log"
 env HOME="$test_root/newer/home" PATH="$fake_bin:/usr/bin:/bin" FAKE_LOG="$test_root/newer/log" INFINITE_PLIST_BUDDY="$fake_bin/PlistBuddy" \
   bash "$repo_root/scripts/install.sh" --app-dir "$test_root/newer/apps" --no-open
-test "$newer_before" = "$(stat -f '%d:%i' "$test_root/newer/apps/Infinite.app")"
+test "$newer_before" = "$(fixture_fingerprint "$test_root/newer/apps/Infinite.app")"
 
 # A pre-safety public release is never installed or opened.
 if run_installer unsafe_source env FAKE_SOURCE_VERSION=0.3.12; then
