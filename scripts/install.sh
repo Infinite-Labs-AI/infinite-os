@@ -5,21 +5,42 @@
 set -euo pipefail
 set -f
 
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
+OPEN_APP=true
+case "${INFINITE_INSTALL_INTERACTIVE:-}" in
+  1) INTERACTIVE_OUTPUT=true ;;
+  0) INTERACTIVE_OUTPUT=false ;;
+  *)
+    if [ -t 0 ] && [ -t 1 ] && [ -t 2 ]; then
+      INTERACTIVE_OUTPUT=true
+    else
+      INTERACTIVE_OUTPUT=false
+    fi
+    ;;
+esac
+
+if [ "$INTERACTIVE_OUTPUT" = true ]; then
+  RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'
+  CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
+else
+  RED=''; GREEN=''; YELLOW=''; CYAN=''; BOLD=''; NC=''
+  OPEN_APP=false
+fi
+
 log_info() { printf "${CYAN}→${NC} %s\n" "$1"; }
 log_success() { printf "${GREEN}✓${NC} %s\n" "$1"; }
 log_warn() { printf "${YELLOW}⚠${NC} %s\n" "$1"; }
 log_error() { printf "${RED}✗${NC} %s\n" "$1" >&2; }
 
 DOWNLOAD_URL="https://infinite.fast/download"
-INSTALLER_USER_AGENT="Infinite-Installer/1.0.1"
+INSTALLER_VERSION="1.0.1"
+INSTALLER_USER_AGENT="Infinite-Installer/${INSTALLER_VERSION}"
+INFINITE_ONBOARDING_URI="infinite://onboarding"
 EXPECTED_BUNDLE_ID="inc.ultima.infiniteos-desktop"
 EXPECTED_TEAM_ID="4659K3678P"
 # 0.3.13 is the first release containing the no-clobber Desktop CLI launcher.
 MIN_SAFE_DESKTOP_VERSION="0.3.13"
 APP_DIR="${INFINITE_APPLICATIONS_DIR:-/Applications}"
 PLIST_BUDDY="${INFINITE_PLIST_BUDDY:-/usr/libexec/PlistBuddy}"
-OPEN_APP=true
 
 case "${INFINITE_INSTALL_SOURCE:-github}" in
   npm) DOWNLOAD_REQUEST_URL="${DOWNLOAD_URL}?utm_source=npm&utm_medium=cli&utm_campaign=infinite_os_install" ;;
@@ -33,7 +54,7 @@ Infinite for macOS installer
 Usage: install.sh [--app-dir PATH] [--no-open] [-h|--help]
 
 Downloads, verifies, installs or upgrades, and opens the signed Infinite Desktop app.
-The app includes its local engine, embedded database, and CLI.
+Finish setup in the app, then use the same Infinite agent from the app or Terminal.
 
 Options:
   --app-dir PATH  Install directory (default: /Applications)
@@ -51,7 +72,57 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-printf "\n${BOLD}${CYAN}Infinite for macOS installer${NC}\n\n"
+print_download_education() {
+  printf "\n${BOLD}${CYAN}∞ INFINITE${NC}\n\n"
+  printf "Installing the Infinite Mac app\n\n"
+  printf "While Infinite downloads\n\n"
+  printf "When it’s ready, we’ll open the app so you can:\n"
+  printf "  1. Tell Infinite about your business\n"
+  printf "  2. Sign in with an email code\n"
+  printf "  3. Create or connect your workspace\n"
+  printf "  4. Connect Codex or Claude\n\n"
+  printf "Then use the same Infinite agent either way:\n\n"
+  printf "  APP       Press ⌘L\n"
+  printf '  TERMINAL  Run infinite "…"\n\n'
+  printf "Same account. Same workspace. Same agent.\n\n"
+}
+
+supports_osc8() {
+  [ "$INTERACTIVE_OUTPUT" = true ] || return 1
+  [ "${TERM:-}" != "dumb" ] || return 1
+  [ -n "${TERM_PROGRAM:-}" ] || [ -n "${VTE_VERSION:-}" ] \
+    || [ -n "${WT_SESSION:-}" ] || [ -n "${KONSOLE_VERSION:-}" ]
+}
+
+print_onboarding_handoff() {
+  printf "\nFinish setup in the Infinite app\n\n"
+  if supports_osc8; then
+    printf "  \033]8;;%s\033\\%s\033]8;;\033\\ → %s\n\n" \
+      "$INFINITE_ONBOARDING_URI" "Open Infinite" "$INFINITE_ONBOARDING_URI"
+  else
+    printf "  Open Infinite → %s\n\n" "$INFINITE_ONBOARDING_URI"
+  fi
+  if [ "$OPEN_APP" = true ]; then
+    printf "Opening Infinite automatically…\n\n"
+  else
+    printf "Open it when you are ready.\n\n"
+  fi
+  printf "open 'infinite://onboarding'\n"
+}
+
+download_release() {
+  log_info "Downloading Infinite from infinite.fast…"
+  if [ "$INTERACTIVE_OUTPUT" = true ]; then
+    curl --fail --location --retry 3 --connect-timeout 20 \
+      --proto '=https' --proto-redir '=https' --user-agent "$INSTALLER_USER_AGENT" \
+      --output "$DMG_PATH" "$DOWNLOAD_REQUEST_URL"
+  else
+    curl --fail --location --silent --show-error --retry 3 --connect-timeout 20 \
+      --proto '=https' --proto-redir '=https' --user-agent "$INSTALLER_USER_AGENT" \
+      --output "$DMG_PATH" "$DOWNLOAD_REQUEST_URL"
+  fi
+  log_success "Download complete"
+}
 
 OS="$(uname -s)"
 if [ "$OS" != "Darwin" ]; then
@@ -124,7 +195,7 @@ safe_remove_tree() {
 
 app_fingerprint() { stat -f '%d:%i' "$1" 2>/dev/null; }
 
-verify_infinite_app() {
+verify_signature_identity() {
   app_path="$1"
   [ -d "$app_path" ] && [ ! -L "$app_path" ] || return 1
   codesign --verify --deep --strict "$app_path" >/dev/null 2>&1 || return 1
@@ -133,7 +204,15 @@ verify_infinite_app() {
   team_id="$(printf '%s\n' "$signature_details" | sed -n 's/^TeamIdentifier=//p' | head -n 1)"
   [ "$bundle_id" = "$EXPECTED_BUNDLE_ID" ] || return 1
   [ "$team_id" = "$EXPECTED_TEAM_ID" ] || return 1
+}
+
+verify_notarization() {
+  app_path="$1"
   spctl --assess --type execute "$app_path" >/dev/null 2>&1 || return 1
+}
+
+verify_infinite_app() {
+  verify_signature_identity "$1" && verify_notarization "$1"
 }
 
 read_app_version() {
@@ -286,7 +365,7 @@ launch_if_requested() {
   fi
   log_info "Opening Infinite ${installed_version}…"
   quit_running_infinite_apps
-  open "$TARGET_APP"
+  open -a "$TARGET_APP" "$INFINITE_ONBOARDING_URI"
 }
 
 if path_exists_or_link "$APP_DIR" && [ -L "$APP_DIR" ]; then
@@ -309,20 +388,24 @@ DMG_PATH="$TEMP_ROOT/Infinite.dmg"
 MOUNT_POINT="$TEMP_ROOT/mount"
 mkdir -p "$MOUNT_POINT"
 
-log_info "Downloading Infinite from infinite.fast…"
-curl --fail --location --silent --show-error --retry 3 --connect-timeout 20 \
-  --proto '=https' --proto-redir '=https' --user-agent "$INSTALLER_USER_AGENT" \
-  --output "$DMG_PATH" "$DOWNLOAD_REQUEST_URL"
+print_download_education
+download_release
 
 log_info "Verifying and mounting the release image…"
 hdiutil verify "$DMG_PATH" >/dev/null
 hdiutil attach "$DMG_PATH" -readonly -nobrowse -noautoopen -mountpoint "$MOUNT_POINT" >/dev/null
 MOUNTED=true
 SOURCE_APP="$MOUNT_POINT/Infinite.app"
-if [ -L "$SOURCE_APP" ] || ! verify_infinite_app "$SOURCE_APP"; then
-  log_error "Downloaded app failed source-path, identity, signature, or notarization verification."
+if [ -L "$SOURCE_APP" ] || ! verify_signature_identity "$SOURCE_APP"; then
+  log_error "Downloaded app failed source-path, identity, or signature verification."
   exit 1
 fi
+log_success "Apple signature verified"
+if ! verify_notarization "$SOURCE_APP"; then
+  log_error "Downloaded app failed notarization verification."
+  exit 1
+fi
+log_success "Notarization verified"
 SOURCE_VERSION="$(read_app_version "$SOURCE_APP")" || { log_error "Downloaded app has no valid version."; exit 1; }
 SAFE_COMPARISON="$(compare_versions "$SOURCE_VERSION" "$MIN_SAFE_DESKTOP_VERSION")" || { log_error "Invalid release version: $SOURCE_VERSION"; exit 1; }
 if [ "$SAFE_COMPARISON" -lt 0 ]; then
@@ -340,6 +423,7 @@ if path_exists_or_link "$TARGET_APP"; then
   if [ "$EXISTING_COMPARISON" -ge 0 ]; then
     log_success "Infinite $EXISTING_VERSION is already installed (downloaded release: $SOURCE_VERSION)."
     migrate_legacy_launcher
+    print_onboarding_handoff
     launch_if_requested
     INSTALL_SUCCESS=true
     exit 0
@@ -388,7 +472,11 @@ verify_infinite_app "$TARGET_APP" || { log_error "Committed app failed verificat
 [ "$(read_app_version "$TARGET_APP")" = "$SOURCE_VERSION" ] || { log_error "Committed version mismatch; rolling back."; exit 1; }
 
 migrate_legacy_launcher
+if [ "$APP_DIR" = "/Applications" ]; then
+  log_success "Infinite installed in Applications"
+else
+  log_success "Infinite installed at $TARGET_APP"
+fi
+print_onboarding_handoff
 launch_if_requested
 INSTALL_SUCCESS=true
-log_success "Installed Infinite $SOURCE_VERSION at $TARGET_APP"
-log_info "The bundled engine and CLI require no separate Docker, Node, or npm installation."
