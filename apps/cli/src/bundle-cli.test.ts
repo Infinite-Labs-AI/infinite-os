@@ -160,7 +160,7 @@ describe.runIf(workspaceBuilt)("CLI single-file bundle", () => {
     expect(run.stdout).toContain("infinite local connect x");
   }, 60_000);
 
-  it("a non-TTY one-shot with no live bridge exits with guidance, never a crash or local turn", () => {
+  it("a non-TTY one-shot exits with product guidance for the host platform, never a crash or local turn", () => {
     const run = spawnSync(process.execPath, [bundlePath, "ping-no-project"], {
       encoding: "utf8",
       timeout: 60_000,
@@ -169,14 +169,21 @@ describe.runIf(workspaceBuilt)("CLI single-file bundle", () => {
       env: { ...process.env, HOME: join(cliRoot, "dist", "bundle") }
     });
     // §6.6 step 7: a product one-shot with no live Desktop bridge must exit
-    // non-zero with Desktop onboarding/recovery guidance on macOS.
+    // non-zero with Desktop onboarding/recovery guidance on macOS. On Linux CI,
+    // the same real bundled child must take the product unsupported-platform
+    // route instead of trying to simulate macOS.
     // What must never happen is an unhandled throw, a module-resolution failure
     // (e.g. a missing sidecar), a bare stack trace — or a silent local turn.
     const combined = `${run.stdout}${run.stderr}`;
     expect(run.signal).toBeNull(); // not killed / no segfault
     expect(run.status).not.toBe(0);
-    expect(combined).toContain("npx infinite-os@latest");
-    expect(combined).toContain("infinite://onboarding");
+    if (process.platform === "darwin") {
+      expect(combined).toContain("npx infinite-os@latest");
+      expect(combined).toContain("infinite://onboarding");
+    } else {
+      expect(combined).toContain("Apple-silicon Mac with macOS 12 or newer");
+      expect(combined).toContain("No command was run.");
+    }
     expect(combined).not.toMatch(
       /trial|infinite local|docker|self-host|local engine/i
     );
