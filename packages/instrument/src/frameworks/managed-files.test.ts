@@ -9,6 +9,9 @@ import { afterEach, describe, expect, it } from "vitest"
 import { applyInstallation } from "../apply.js"
 import { inspectWorkspace } from "../inspect.js"
 import { planInstallation } from "../plan.js"
+import type { InstallPlan, WorkspaceInstallArtifacts } from "../types.js"
+
+import { buildAnalyticsModuleSource } from "./managed-files.js"
 
 const fixtureRoot = dirname(fileURLToPath(import.meta.url))
 const tempRoots: string[] = []
@@ -37,7 +40,14 @@ afterEach(() => {
   }
 })
 
-function generateManagedModule(fixture: string, modulePath: string): string {
+function generateManagedModule(
+  fixture: string,
+  modulePath: string,
+  artifacts: WorkspaceInstallArtifacts = {
+    productionHosts: ["example.com"],
+    ga4: { measurementId: "G-TEST123" }
+  }
+): string {
   const source = join(fixtureRoot, "../../test/fixtures", fixture)
   const tempRoot = mkdtempSync(join(tmpdir(), `instrument-managed-${fixture}-`))
   const root = join(tempRoot, fixture)
@@ -47,10 +57,7 @@ function generateManagedModule(fixture: string, modulePath: string): string {
   const plan = planInstallation({
     root,
     workspaceId: "ws_test",
-    artifacts: {
-      productionHosts: ["example.com"],
-      ga4: { measurementId: "G-TEST123" }
-    }
+    artifacts
   })
   expect(plan.blockers).toEqual([])
   applyInstallation({ root, workspaceId: "ws_test", plan, allowDirty: true })
@@ -191,7 +198,7 @@ describe.each(frameworks)("$name managed analytics wrapper", ({ fixture, moduleP
     const source = generateManagedModule(fixture, modulePath)
     expect(source.match(/googletagmanager\.com\/gtag\/js/g)).toHaveLength(1)
     expect(source).toContain("gtag('js', new Date())")
-    expect(source).toContain("gtag('config', \"G-TEST123\")")
+    expect(source).toContain("G-TEST123")
     expect(source).not.toContain("send_page_view")
     expect(source).not.toContain("data-infinite-runtime")
     expect(source).not.toContain("__infiniteGa4Consent")
@@ -216,4 +223,34 @@ describe.each(frameworks)("$name managed analytics wrapper", ({ fixture, moduleP
     runtime.grantConsent()
     expect(runtime.externalScripts).toHaveLength(1)
   })
+
+  it("keeps the generated wrapper parseable for an Infinite runtime install", () => {
+    const source = generateManagedModule(fixture, modulePath, {
+      productionHosts: ["example.com"],
+      infinite: {
+        siteSourceKey: "site_public_123",
+        collectPath: "/infinite/events/collect",
+        productionHosts: ["example.com"],
+        staticProxy: "vercel",
+        consentMode: "not_required"
+      }
+    })
+    expect(() => executeManagedModule(source, { consent: "granted" })).not.toThrow()
+  })
+})
+
+it("embeds bootstrap snippets as a JS string literal so backticks remain executable script text", () => {
+  const source = buildAnalyticsModuleSource({
+    instructions: [
+      {
+        path: "src/lib/infinite-analytics.ts",
+        action: "create",
+        provider: "infinite",
+        description: "test snippet",
+        snippet: "console.log(`tick`)"
+      }
+    ]
+  } as InstallPlan)
+
+  expect(() => executeManagedModule(source, { consent: "granted" })).not.toThrow()
 })

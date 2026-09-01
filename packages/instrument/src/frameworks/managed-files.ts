@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, rmSync } from "node:fs"
 import { join } from "node:path"
 
+import { jsLiteral } from "../providers/validate.js"
 import type { InstallPlan } from "../types.js"
 
 export const managedFileBanner = "// Managed by Infinite. Public install artifacts only."
@@ -58,9 +59,7 @@ export function buildAnalyticsModuleSource(plan: InstallPlan): string {
   return [
     managedFileBanner,
     "",
-    "const bootstrapSource = String.raw`",
-    bootstrapSnippets.join("\n\n"),
-    "`",
+    `const bootstrapSource = ${jsLiteral(bootstrapSnippets.join("\n\n"))}`,
     "",
     "export function installInfiniteInstrumentation(): void {",
     '  if (typeof document === "undefined") {',
