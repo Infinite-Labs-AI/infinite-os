@@ -109,6 +109,165 @@ function infiniteBrowserRuntime(config: InfiniteBrowserConfig): void {
   // cloud ingest normalizes to. Default: the platform's /download.
   const conversionDestinationPath = normalizePath(config.downloadDestinationPath || "/download")
 
+  function safeClosest(target: Element, selector: string): HTMLElement | null {
+    try {
+      return target.closest(selector) as HTMLElement | null
+    } catch {
+      return null
+    }
+  }
+
+  function structuralAttribute(element: Element | null | undefined, name: string): string | undefined {
+    if (!element || typeof (element as { getAttribute?: unknown }).getAttribute !== "function") {
+      return undefined
+    }
+    const value = (element as HTMLElement).getAttribute(name)
+    return value && structuralTokenPattern.test(value) ? value : undefined
+  }
+
+  function automaticToken(prefix: string, value: string): string {
+    const cleaned = value
+      .toLowerCase()
+      .replace(/[^a-z0-9_-]+/g, "_")
+      .replace(/^_+|_+$/g, "")
+    return (prefix + "_" + (cleaned || "link")).slice(0, 64).replace(/_+$/, "") || prefix + "_link"
+  }
+
+  function tokenFromPath(path: string): string {
+    const stem = path === "/" ? "home" : path.replace(/^\/+|\/+$/g, "")
+    return automaticToken("auto", stem)
+  }
+
+  function externalCtaId(destination: URL): string | null {
+    if (destination.protocol !== "https:" && destination.protocol !== "http:") return null
+    const host = destination.hostname.toLowerCase().replace(/^www\./, "")
+    if (host === "stripe.com" || host.endsWith(".stripe.com")) return "external_stripe"
+    if (host === "calendly.com" || host.endsWith(".calendly.com")) return "external_booking"
+    if (host === "cal.com" || host.endsWith(".cal.com")) return "external_booking"
+    return "external_link"
+  }
+
+  function automaticLocation(target: Element, preferred: Array<Element | null>): string {
+    for (const element of preferred) {
+      const explicit = structuralAttribute(element, "data-analytics-cta-location")
+      if (explicit) return explicit
+    }
+    const section = safeClosest(target, "header,nav,main,footer,aside")
+    const tag = String((section as { tagName?: unknown } | null)?.tagName ?? "").toLowerCase()
+    if (
+      tag === "header" ||
+      tag === "nav" ||
+      tag === "main" ||
+      tag === "footer" ||
+      tag === "aside"
+    ) {
+      return tag
+    }
+    return "page"
+  }
+
+  function markedCtaProperties(
+    marked: HTMLElement | null,
+    target: Element,
+    anchor: HTMLAnchorElement | null
+  ): Record<string, string> | null {
+    if (!marked) return null
+    const rawCtaId = marked.getAttribute("data-analytics-cta-id")
+    const rawCtaLocation = marked.getAttribute("data-analytics-cta-location")
+    const ctaId = structuralAttribute(marked, "data-analytics-cta-id")
+    const ctaLocation =
+      structuralAttribute(marked, "data-analytics-cta-location") ||
+      automaticLocation(target, [marked, anchor])
+    if (
+      (rawCtaId !== null && !ctaId) ||
+      (rawCtaLocation !== null && rawCtaLocation !== "" && !structuralAttribute(marked, "data-analytics-cta-location"))
+    ) {
+      return null
+    }
+    return { cta_id: ctaId ?? tokenFromPath("/"), cta_location: ctaLocation }
+  }
+
+  function isSignupDestination(path: string): boolean {
+    return [
+      "/signup/",
+      "/sign-up/",
+      "/register/",
+      "/join/",
+      "/get-started/",
+      "/start/",
+      "/trial/"
+    ].includes(path)
+  }
+
+  function destinationForAnchor(anchor: HTMLAnchorElement | null): URL | null {
+    if (!anchor) return null
+    try {
+      return new URL(anchor.href, location.href)
+    } catch {
+      return null
+    }
+  }
+
+  function automaticClickProperties(
+    target: Element,
+    anchor: HTMLAnchorElement | null,
+    destination: URL | null
+  ): Record<string, string> | null {
+    const marked = safeClosest(target, "[data-analytics-cta-id]")
+    const markedProperties = markedCtaProperties(marked, target, anchor)
+    if (marked && !markedProperties) return null
+
+    const properties: Record<string, string> = markedProperties ?? {
+      cta_id: "button",
+      cta_location: automaticLocation(target, [anchor])
+    }
+    if (destination) {
+      if (destination.origin === location.origin) {
+        const destinationPath = normalizePath(destination.href)
+        properties.cta_id = properties.cta_id === "button" ? tokenFromPath(destinationPath) : properties.cta_id
+        properties.destination_path = destinationPath
+        return properties
+      }
+      const externalId = externalCtaId(destination)
+      if (!externalId) return null
+      properties.cta_id = properties.cta_id === "button" ? externalId : properties.cta_id
+      return properties
+    }
+
+    const button = safeClosest(target, "button,input[type='button'],input[type='submit'],[role='button']")
+    if (!button && !marked) return null
+    if (!marked) {
+      const structuralId =
+        structuralAttribute(button, "id") ||
+        structuralAttribute(button, "name") ||
+        structuralAttribute(button, "data-testid") ||
+        structuralAttribute(button, "data-test-id")
+      properties.cta_id = structuralId ? automaticToken("button", structuralId) : "button"
+      properties.cta_location = automaticLocation(target, [button])
+    }
+    return properties
+  }
+
+  function downloadClickProperties(
+    target: Element,
+    anchor: HTMLAnchorElement,
+    destinationPath: string
+  ): Record<string, string> {
+    const marked = safeClosest(target, "[data-analytics-cta-id]")
+    const markedProperties = markedCtaProperties(marked, target, anchor)
+    const ctaId = markedProperties?.cta_id ?? tokenFromPath(destinationPath)
+    const ctaLocation = [
+      markedProperties?.cta_location,
+      structuralAttribute(anchor, "data-analytics-cta-location"),
+      structuralAttribute(anchor, "data-download-location")
+    ].find((value): value is string => typeof value === "string")
+    return {
+      cta_id: ctaId,
+      ...(ctaLocation ? { cta_location: ctaLocation } : {}),
+      destination_path: conversionDestinationPath
+    }
+  }
+
   function cleanReferrerHost(raw: string): string {
     if (!raw) return ""
     try {
@@ -289,27 +448,18 @@ function infiniteBrowserRuntime(config: InfiniteBrowserConfig): void {
       if (!target || !hasConsent()) return
       const anchor = target.closest("a[href]") as HTMLAnchorElement | null
       if (anchor) {
-        try {
-          const destination = new URL(anchor.href, location.href)
-          if (
-            destination.origin === location.origin &&
-            normalizePath(destination.href) === conversionDestinationPath
-          ) {
-            const ctaLocation = [
-              anchor.getAttribute("data-analytics-cta-location"),
-              anchor.getAttribute("data-download-location")
-            ].find(
-              (value): value is string =>
-                typeof value === "string" && structuralTokenPattern.test(value)
-            )
-            emit("app_download_click", normalizePath(location.href), {
-              ...(ctaLocation ? { cta_location: ctaLocation } : {}),
-              destination_path: conversionDestinationPath
-            })
-            return
-          }
-        } catch {
-          // Ignore malformed hrefs.
+        const destination = destinationForAnchor(anchor)
+        if (
+          destination &&
+          destination.origin === location.origin &&
+          normalizePath(destination.href) === conversionDestinationPath
+        ) {
+          emit(
+            "app_download_click",
+            normalizePath(location.href),
+            downloadClickProperties(target, anchor, normalizePath(destination.href))
+          )
+          return
         }
       }
 
@@ -323,27 +473,24 @@ function infiniteBrowserRuntime(config: InfiniteBrowserConfig): void {
         return
       }
 
-      const cta = target.closest("[data-analytics-cta-id]") as HTMLElement | null
-      if (!cta) return
-      const ctaId = cta.getAttribute("data-analytics-cta-id") ?? ""
-      const ctaLocation = cta.getAttribute("data-analytics-cta-location") ?? ""
-      if (!structuralTokenPattern.test(ctaId) || !structuralTokenPattern.test(ctaLocation)) {
-        return
-      }
-      const properties: Record<string, string> = {
-        cta_id: ctaId,
-        cta_location: ctaLocation
-      }
-      const ctaAnchor = cta.closest("a[href]") as HTMLAnchorElement | null
-      if (ctaAnchor) {
-        try {
-          const destination = new URL(ctaAnchor.href, location.href)
-          if (destination.origin === location.origin) {
-            properties.destination_path = normalizePath(destination.href)
-          }
-        } catch {
-          // A destination is optional; malformed values are omitted.
+      const destination = destinationForAnchor(anchor)
+      if (anchor && destination && destination.origin === location.origin) {
+        const destinationPath = normalizePath(destination.href)
+        if (isSignupDestination(destinationPath)) {
+          const properties = automaticClickProperties(target, anchor, destination) ?? {}
+          emit("sign_up_click", normalizePath(location.href), {
+            ...properties,
+            cta_id: properties.cta_id ?? tokenFromPath(destinationPath),
+            cta_location: properties.cta_location ?? automaticLocation(target, [anchor]),
+            destination_path: destinationPath
+          })
+          return
         }
+      }
+
+      const properties = automaticClickProperties(target, anchor, destination)
+      if (!properties) {
+        return
       }
       emit("site_click", normalizePath(location.href), properties)
     })

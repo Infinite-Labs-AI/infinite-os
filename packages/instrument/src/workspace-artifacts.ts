@@ -47,6 +47,7 @@ export interface WorkspaceArtifactOptions {
   infiniteProductionHosts?: string[]
   infiniteStaticProxy?: "vercel"
   infiniteConsentMode?: InfiniteConsentMode
+  infiniteDownloadDestinationPath?: string
   packageManager?: PackageManager
 }
 
@@ -323,7 +324,8 @@ export function resolveWorkspaceArtifacts(
     options.infiniteSiteSourceKey !== undefined ||
     options.infiniteCollectPath !== undefined ||
     options.infiniteStaticProxy !== undefined ||
-    options.infiniteConsentMode !== undefined
+    options.infiniteConsentMode !== undefined ||
+    options.infiniteDownloadDestinationPath !== undefined
   ) {
     artifacts.infinite = {
       siteSourceKey:
@@ -342,8 +344,12 @@ export function resolveWorkspaceArtifacts(
       ...(options.infiniteConsentMode ?? artifacts.infinite?.consentMode
         ? { consentMode: options.infiniteConsentMode ?? artifacts.infinite?.consentMode }
         : {}),
-      ...(artifacts.infinite?.downloadDestinationPath
-        ? { downloadDestinationPath: artifacts.infinite.downloadDestinationPath }
+      ...(options.infiniteDownloadDestinationPath ?? artifacts.infinite?.downloadDestinationPath
+        ? {
+            downloadDestinationPath:
+              options.infiniteDownloadDestinationPath ??
+              artifacts.infinite?.downloadDestinationPath
+          }
         : {})
     }
   }

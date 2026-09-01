@@ -616,7 +616,7 @@ describe("renderInfiniteBrowserTag", () => {
         eventName: "app_download_click",
         url: "https://example.com/privacy/",
         referrer: "referrer.example",
-        properties: { destination_path: "/download" }
+        properties: { cta_id: "auto_download", destination_path: "/download" }
       }),
       expect.objectContaining({
         eventName: "site_click",
@@ -657,6 +657,78 @@ describe("renderInfiniteBrowserTag", () => {
     expect(runtime.touchedProviders()).toBe(false)
   })
 
+  it("autocaptures same-origin link clicks without manual CTA markers", () => {
+    const runtime = executeTag({
+      siteSourceKey: "site_public_123",
+      consent: "granted"
+    })
+
+    runtime.click(
+      managedTarget({
+        href: "https://example.com/pricing?email=private#plans",
+        text: "Do not collect pricing text"
+      })
+    )
+
+    const clicks = runtime.requests.filter((request) => request.body.eventName === "site_click")
+    expect(clicks).toHaveLength(1)
+    expect(clicks[0]?.body.properties).toEqual({
+      cta_id: "auto_pricing",
+      cta_location: "page",
+      destination_path: "/pricing/"
+    })
+    expect(JSON.stringify(clicks[0]?.body)).not.toMatch(/email=|plans|Do not collect/)
+    expect(runtime.touchedProviders()).toBe(false)
+  })
+
+  it("autocaptures external commerce links without leaking the external URL", () => {
+    const runtime = executeTag({
+      siteSourceKey: "site_public_123",
+      consent: "granted"
+    })
+
+    runtime.click(
+      managedTarget({
+        href: "https://buy.stripe.com/test_checkout?prefilled_email=private@example.com",
+        text: "Buy now with private copy"
+      })
+    )
+
+    const clicks = runtime.requests.filter((request) => request.body.eventName === "site_click")
+    expect(clicks).toHaveLength(1)
+    expect(clicks[0]?.body.properties).toEqual({
+      cta_id: "external_stripe",
+      cta_location: "page"
+    })
+    expect(JSON.stringify(clicks[0]?.body)).not.toMatch(/buy\.stripe|prefilled_email|private copy/)
+    expect(runtime.touchedProviders()).toBe(false)
+  })
+
+  it("autocaptures obvious sign-up links as sign_up_click intent", () => {
+    const runtime = executeTag({
+      siteSourceKey: "site_public_123",
+      consent: "granted"
+    })
+
+    runtime.click(
+      managedTarget({
+        href: "https://example.com/signup?invite=private",
+        text: "Start privately"
+      })
+    )
+
+    const signups = runtime.requests.filter((request) => request.body.eventName === "sign_up_click")
+    expect(signups).toHaveLength(1)
+    expect(signups[0]?.body.properties).toEqual({
+      cta_id: "auto_signup",
+      cta_location: "page",
+      destination_path: "/signup/"
+    })
+    expect(runtime.requests.filter((request) => request.body.eventName === "site_click")).toEqual([])
+    expect(JSON.stringify(signups[0]?.body)).not.toMatch(/invite=|Start privately/)
+    expect(runtime.touchedProviders()).toBe(false)
+  })
+
   it.each(["navigation", "hero", "pricing", "final-cta", "x", "x".repeat(64)])(
     "preserves bounded download placement %s on one canonical event (Infinite only)",
     (ctaLocation) => {
@@ -679,6 +751,7 @@ describe("renderInfiniteBrowserTag", () => {
       )
       expect(downloadRequests).toHaveLength(1)
       expect(downloadRequests[0]?.body.properties).toEqual({
+        cta_id: "auto_download",
         cta_location: ctaLocation,
         destination_path: "/download"
       })
@@ -710,6 +783,7 @@ describe("renderInfiniteBrowserTag", () => {
       expect.objectContaining({
         body: expect.objectContaining({
           properties: {
+            cta_id: "auto_download",
             cta_location: "canonical",
             destination_path: "/download"
           }
@@ -743,7 +817,10 @@ describe("renderInfiniteBrowserTag", () => {
       (request) => request.body.eventName === "app_download_click"
     )
     expect(downloadRequests).toHaveLength(1)
-    expect(downloadRequests[0]?.body.properties).toEqual({ destination_path: "/download" })
+    expect(downloadRequests[0]?.body.properties).toEqual({
+      cta_id: "auto_download",
+      destination_path: "/download"
+    })
     expect(runtime.touchedProviders()).toBe(false)
   })
 
@@ -1011,7 +1088,7 @@ describe("parameterized download destination", () => {
   const downloadAnchor = (href: string) =>
     managedTarget({ href, downloadLocation: "hero" })
 
-  it("keeps the /download default byte-for-byte when unconfigured", () => {
+  it("keeps the /download default conversion destination when unconfigured", () => {
     const runtime = executeTag({ siteSourceKey: "site_public_123", consent: "granted" })
     runtime.click(downloadAnchor("https://example.com/download"))
     const downloads = runtime.requests.filter(
@@ -1019,6 +1096,7 @@ describe("parameterized download destination", () => {
     )
     expect(downloads).toHaveLength(1)
     expect(downloads[0]?.body.properties).toEqual({
+      cta_id: "auto_download",
       cta_location: "hero",
       destination_path: "/download"
     })
@@ -1036,8 +1114,47 @@ describe("parameterized download destination", () => {
     )
     expect(downloads).toHaveLength(1)
     expect(downloads[0]?.body.properties).toEqual({
+      cta_id: "auto_get-app",
       cta_location: "hero",
       destination_path: "/get-app/"
+    })
+  })
+
+  it("captures the configured destination with the explicit or synthesized CTA id", () => {
+    const marked = executeTag({
+      siteSourceKey: "site_public_123",
+      consent: "granted",
+      downloadDestinationPath: "/checkout"
+    })
+    marked.click(
+      managedTarget({
+        href: "https://example.com/checkout?plan=day-ones",
+        ctaId: "buy_day_ones",
+        ctaLocation: "pricing"
+      })
+    )
+    expect(
+      marked.requests.find((request) => request.body.eventName === "app_download_click")?.body
+        .properties
+    ).toEqual({
+      cta_id: "buy_day_ones",
+      cta_location: "pricing",
+      destination_path: "/checkout/"
+    })
+
+    const unmarked = executeTag({
+      siteSourceKey: "site_public_123",
+      consent: "granted",
+      downloadDestinationPath: "/checkout"
+    })
+    unmarked.click(downloadAnchor("https://example.com/checkout?plan=studio"))
+    expect(
+      unmarked.requests.find((request) => request.body.eventName === "app_download_click")?.body
+        .properties
+    ).toEqual({
+      cta_id: "auto_checkout",
+      cta_location: "hero",
+      destination_path: "/checkout/"
     })
   })
 

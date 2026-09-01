@@ -3,6 +3,18 @@
 All notable changes to the `infinite-tag` npm package (`packages/instrument`). Versions before
 0.5.0 are recorded in git history only (`git log -- packages/instrument`).
 
+## Unreleased
+
+- **Safe click autocapture.** The Infinite runtime now captures unmarked same-origin link clicks as
+  structural `site_click` events, buckets external links without storing external URLs, and treats
+  obvious same-origin sign-up routes as `sign_up_click` intent. It still never captures DOM text,
+  link text, form values, query strings, or fragments.
+- **Conversion path is a first-class CLI flag.** `--infinite-download-destination-path <path>` lets
+  agents install checkout-style funnels (`/checkout` before Stripe, for example) without hand-editing
+  the managed runtime.
+- **Package-install UX.** `npm i infinite-tag` now prints the next command so a dependency install is
+  not mistaken for completed instrumentation.
+
 ## 0.6.0 — 2026-08-19
 
 **The consolidated truth-train release: providers stay independent; the runtime tells the truth

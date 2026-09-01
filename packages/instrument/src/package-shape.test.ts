@@ -76,6 +76,14 @@ describe("package.json shape", () => {
     expect(scripts["prepack"]).toContain("tsconfig.build.json")
   })
 
+  it("postinstall explains that package install is not instrumentation yet", () => {
+    const pkg = readJson(packageJsonPath)
+    const scripts = pkg["scripts"] as Record<string, string>
+    expect(scripts["postinstall"]).toEqual(expect.any(String))
+    expect(scripts["postinstall"]).toContain("infinite-tag installed")
+    expect(scripts["postinstall"]).toContain("npx infinite-tag install")
+  })
+
   it('exports["."] starts with "./dist/"', () => {
     const pkg = readJson(packageJsonPath)
     const exports = pkg["exports"] as Record<string, string>

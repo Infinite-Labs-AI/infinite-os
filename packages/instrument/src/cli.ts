@@ -63,6 +63,7 @@ interface ParsedArgs {
   infiniteProductionHosts: string[]
   infiniteStaticProxy?: "vercel"
   infiniteConsentMode?: InfiniteConsentMode
+  infiniteDownloadDestinationPath?: string
   packageManager?: PackageManager
   /** `--server-lane` on plan/apply/install: add the lossless server lane. */
   serverLane: boolean
@@ -182,6 +183,10 @@ function parseArgs(argv: string[]): ParsedArgs {
         parsed.infiniteConsentMode = normalizeInfiniteConsentMode(requireValue(token, next))
         index += 1
         break
+      case "--infinite-download-destination-path":
+        parsed.infiniteDownloadDestinationPath = requireValue(token, next)
+        index += 1
+        break
       case "--infinite-base-url":
       case "--infinite-page-id":
         requireValue(token, next)
@@ -261,6 +266,7 @@ function printHelp(): void {
       "  --infinite-site-source-key <key>",
       "  --infinite-production-host <host>  Exact runtime allowlist; repeat for each verified production host",
       "  --infinite-collect-path <path>      Defaults to /infinite/events/collect",
+      "  --infinite-download-destination-path <path>  Same-origin conversion click path; defaults to /download",
       "  --infinite-static-proxy vercel      Required for static/Vite unless vercel.json exists",
       "  --infinite-consent-mode <required|not-required>  No default; required needs an external consent signal",
       "      required listens for infinite:analytics-consent-change; not-required still respects DNT/GPC",
@@ -498,7 +504,8 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
       infiniteProductionHosts:
         parsed.infiniteProductionHosts.length > 0 ? parsed.infiniteProductionHosts : undefined,
       infiniteStaticProxy: parsed.infiniteStaticProxy,
-      infiniteConsentMode: parsed.infiniteConsentMode
+      infiniteConsentMode: parsed.infiniteConsentMode,
+      infiniteDownloadDestinationPath: parsed.infiniteDownloadDestinationPath
     })
 
     // Same-machine flag-free install: with no artifact flags and no --artifact-file,
@@ -517,7 +524,8 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
       parsed.infiniteCollectPath !== undefined ||
       parsed.infiniteProductionHosts.length > 0 ||
       parsed.infiniteStaticProxy !== undefined ||
-      parsed.infiniteConsentMode !== undefined
+      parsed.infiniteConsentMode !== undefined ||
+      parsed.infiniteDownloadDestinationPath !== undefined
     const commandUsesArtifacts =
       parsed.command === "plan" || parsed.command === "apply" || parsed.command === "install"
     if (commandUsesArtifacts && !hasExplicitArtifacts) {

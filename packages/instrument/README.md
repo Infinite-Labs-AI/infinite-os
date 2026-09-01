@@ -11,6 +11,11 @@ Run it inside the website repository. It never provisions an Infinite source,
 calls a cloud control plane, or reads a desktop session. Verified source
 creation happens outside this open-core package.
 
+Installing the npm package is not the instrumentation step. After
+`npm i infinite-tag` / `pnpm add -D infinite-tag`, run
+`npx infinite-tag install ...` (or the matching package-manager command) from
+the website repo so the managed runtime, imports, and proxy rewrites are written.
+
 ## Quick Start
 
 Preview a GA4 + PostHog install (each provider installs natively and independently):
@@ -33,6 +38,20 @@ npx infinite-tag@latest install \
   --infinite-production-host www.example.com \
   --infinite-static-proxy vercel \
   --infinite-consent-mode required \
+  --yes
+```
+
+If the main conversion button goes through a first-party route before Stripe,
+booking, or another external checkout, set that route explicitly:
+
+```bash
+npx infinite-tag@latest install \
+  --workspace <workspace-id> \
+  --infinite-site-source-key site_xxxxxxxxxxxxxxxx \
+  --infinite-production-host example.com \
+  --infinite-static-proxy vercel \
+  --infinite-consent-mode not-required \
+  --infinite-download-destination-path /checkout \
   --yes
 ```
 
@@ -67,6 +86,7 @@ contract. Noninteractive `--yes` and `apply` runs fail on the same blocker.
 | `--infinite-site-source-key <site_...>` | Public, source-bound browser key created after domain verification. |
 | `--infinite-production-host <host>` | Verified hostname for the shared browser runtime; repeatable. Origins, paths, ports, queries, and fragments are rejected. |
 | `--infinite-collect-path <path>` | Same-origin browser route. Defaults to `/infinite/events/collect`. |
+| `--infinite-download-destination-path <path>` | Same-origin conversion click path for `app_download_click`. Defaults to `/download`; use `/checkout` when a visible "Download" button really starts checkout. |
 | `--infinite-static-proxy vercel` | Explicit proof that a static/Vite install may create Vercel rewrites. |
 | `--infinite-consent-mode <required\|not-required>` | Required for Infinite first-party collection. There is no default. `required` waits for the external consent event below; `not-required` collects Infinite events unless DNT/GPC blocks them. Neither mode touches GA4/PostHog consent. |
 | `--ga4-measurement-id <G-...>` | Public GA4 measurement ID. |
@@ -103,18 +123,26 @@ interface InfinitePublicArtifact {
   staticProxy?: "vercel"
   // Optional only for reading legacy files; planning blocks until this is explicit.
   consentMode?: "required" | "not_required"
+  // Optional; defaults to "/download".
+  downloadDestinationPath?: string
 }
 ```
 
 The runtime owns one logical initial website view and SPA route views. It
-normalizes canonical paths, removes query strings and fragments, tracks
-same-origin `/download` clicks, and accepts generic managed CTA metadata only
-from `data-analytics-cta-id` and `data-analytics-cta-location`. It never captures
-DOM or link text. Download anchors may additionally retain the
-backward-compatible `data-download-location` placement attribute; a valid
-`data-analytics-cta-location` takes precedence when both are present. Both use
-the same `^[A-Za-z0-9_-]{1,64}$` structural-token constraint, and one download
-click still emits only one `app_download_click` event.
+normalizes canonical paths, removes query strings and fragments, tracks the
+configured same-origin conversion destination, and autocaptures safe DOM clicks.
+Same-origin links are grouped by destination path (`auto_pricing`,
+`auto_checkout`, etc.); obvious sign-up routes emit `sign_up_click`; external
+links are bucketed by class (`external_stripe`, `external_booking`, or
+`external_link`) without storing the external URL. It never captures DOM text,
+link text, form values, query strings, or fragments.
+
+`data-analytics-cta-id` and `data-analytics-cta-location` are still supported as
+explicit overrides for cleaner reporting. Download anchors may additionally
+retain the backward-compatible `data-download-location` placement attribute; a
+valid `data-analytics-cta-location` takes precedence when both are present. Both
+use the same `^[A-Za-z0-9_-]{1,64}$` structural-token constraint, and one
+download click still emits only one `app_download_click` event.
 
 Every `site_page_view` carries one bounded property, `nav`: `"navigate"` for the
 initial document load and `"history"` for a History-API route change. The runtime

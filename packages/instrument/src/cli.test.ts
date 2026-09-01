@@ -217,6 +217,7 @@ describe("runCli", () => {
     const helpText = logMessages.join("\n")
     expect(helpText).toContain("uninstall")
     expect(helpText).toContain("Defaults to /infinite/events/collect")
+    expect(helpText).toContain("--infinite-download-destination-path <path>")
     expect(helpText).toContain("--infinite-consent-mode <required|not-required>")
     expect(helpText).toContain("No default")
     expect(helpText).toContain("infinite:analytics-consent-change")
@@ -258,6 +259,28 @@ describe("runCli", () => {
       (instruction: { provider?: string }) => instruction.provider === "infinite"
     )?.snippet
     expect(runtimeSnippet).toContain('"consent":{"mode":"not_required"}')
+  })
+
+  it("plan accepts an explicit Infinite conversion destination path", async () => {
+    const root = copyFixture("static-html-basic")
+    const code = await runCli([
+      "plan",
+      "--root", root,
+      "--json",
+      "--infinite-site-source-key", "site_public_123",
+      "--infinite-production-host", "example.com",
+      "--infinite-static-proxy", "vercel",
+      "--infinite-consent-mode", "not-required",
+      "--infinite-download-destination-path", "/checkout"
+    ])
+
+    expect(code).toBe(0)
+    const parsed = JSON.parse(stdoutText())
+    expect(parsed.artifacts.infinite.downloadDestinationPath).toBe("/checkout")
+    const runtimeSnippet = parsed.instructions.find(
+      (instruction: { provider?: string }) => instruction.provider === "infinite"
+    )?.snippet
+    expect(runtimeSnippet).toContain('"downloadDestinationPath":"/checkout"')
   })
 
   it("rejects unknown Infinite consent modes", async () => {
