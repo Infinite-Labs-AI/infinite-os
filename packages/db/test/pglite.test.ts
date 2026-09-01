@@ -58,6 +58,12 @@ describe("pglite url selection", () => {
   });
 });
 
+function recentTimestamptzIso(minutesAgo = 5): string {
+  const value = new Date(Date.now() - minutesAgo * 60_000);
+  value.setMilliseconds(0);
+  return value.toISOString();
+}
+
 describe("pglite migration + query path (real WASM Postgres)", () => {
   let dataDir: string;
   let url: string;
@@ -1814,6 +1820,7 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
 
   it("0057 exposes aggregate-only current trials with truthful value and mode diagnostics", async () => {
     const workspaceId = "ws_stripe_trial_current";
+    const currentSnapshotAsOf = recentTimestamptzIso();
     await db.withTransaction(async (tx) => {
       await tx.ensureWorkspace(workspaceId, "Stripe current trials");
       await tx.ensureFirstPhaseDatasets(workspaceId);
@@ -1824,8 +1831,8 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
     );
     await db.query(
       `insert into sources (id, workspace_id, dataset_id, provider, connection_name, account_external_id, status, last_synced_at)
-       values ('src_trial_current', $1, $2, 'stripe', 'Stripe', 'acct_trial_current', 'connected', '2026-08-04T00:01:00Z')`,
-      [workspaceId, ds[0]?.id],
+       values ('src_trial_current', $1, $2, 'stripe', 'Stripe', 'acct_trial_current', 'connected', $3::timestamptz)`,
+      [workspaceId, ds[0]?.id, currentSnapshotAsOf],
     );
     await db.query(
       `insert into stripe_trial_history_coverage
@@ -1887,7 +1894,7 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
       value_status: "partial",
       incomplete_value_count: "1",
     })]);
-    expect(new Date(rows[0]?.data_as_of ?? "").toISOString()).toBe("2026-08-04T00:01:00.000Z");
+    expect(new Date(rows[0]?.data_as_of ?? "").toISOString()).toBe(currentSnapshotAsOf);
 
     await db.query(
       `update stripe_subscriptions set livemode = null
@@ -1912,8 +1919,8 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
     );
     await db.query(
       `insert into sources (id, workspace_id, dataset_id, provider, connection_name, account_external_id, status, last_synced_at)
-       values ('src_trial_current_zero',$1,$2,'stripe','Stripe','acct_trial_current_zero','connected','2026-08-04T00:01:00Z')`,
-      [zeroWorkspace, zeroDs[0]?.id],
+       values ('src_trial_current_zero',$1,$2,'stripe','Stripe','acct_trial_current_zero','connected',$3::timestamptz)`,
+      [zeroWorkspace, zeroDs[0]?.id, currentSnapshotAsOf],
     );
     expect(await db.query<{
       current_trial_count: string;
