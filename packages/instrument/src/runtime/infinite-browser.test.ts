@@ -293,6 +293,36 @@ function managedTarget(input: {
   }
 }
 
+function buttonTarget(input: {
+  id?: string
+  name?: string
+  testId?: string
+  testIdAlt?: string
+  location?: string
+  text?: string
+}) {
+  const button = {
+    textContent: input.text ?? "private button text",
+    getAttribute(name: string) {
+      if (name === "id") return input.id ?? null
+      if (name === "name") return input.name ?? null
+      if (name === "data-testid") return input.testId ?? null
+      if (name === "data-test-id") return input.testIdAlt ?? null
+      if (name === "data-analytics-cta-location") return input.location ?? null
+      return null
+    }
+  }
+  return {
+    closest(selector: string) {
+      if (selector === "[data-analytics-cta-id]") return null
+      if (selector === "a[href]") return null
+      if (selector === "button,input[type='button'],input[type='submit'],[role='button']") return button
+      if (selector === "header,nav,main,footer,aside") return { tagName: "main" }
+      return null
+    }
+  }
+}
+
 /** A click target on/inside an element marked data-conversion="signup" — optionally an anchor,
  *  optionally ALSO a generic CTA (for the precedence test). Mirrors managedTarget's fake shape. */
 function signupTarget(input: {
@@ -701,6 +731,30 @@ describe("renderInfiniteBrowserTag", () => {
       cta_location: "page"
     })
     expect(JSON.stringify(clicks[0]?.body)).not.toMatch(/buy\.stripe|prefilled_email|private copy/)
+    expect(runtime.touchedProviders()).toBe(false)
+  })
+
+  it("autocaptures unmarked buttons using only structural attributes", () => {
+    const runtime = executeTag({
+      siteSourceKey: "site_public_123",
+      consent: "granted"
+    })
+
+    runtime.click(
+      buttonTarget({
+        id: "pricing_buy",
+        location: "pricing",
+        text: "Do not collect button text"
+      })
+    )
+
+    const clicks = runtime.requests.filter((request) => request.body.eventName === "site_click")
+    expect(clicks).toHaveLength(1)
+    expect(clicks[0]?.body.properties).toEqual({
+      cta_id: "button_pricing_buy",
+      cta_location: "pricing"
+    })
+    expect(JSON.stringify(clicks[0]?.body)).not.toContain("Do not collect button text")
     expect(runtime.touchedProviders()).toBe(false)
   })
 

@@ -5,10 +5,10 @@ All notable changes to the `infinite-tag` npm package (`packages/instrument`). V
 
 ## Unreleased
 
-- **Safe click autocapture.** The Infinite runtime now captures unmarked same-origin link clicks as
-  structural `site_click` events, buckets external links without storing external URLs, and treats
-  obvious same-origin sign-up routes as `sign_up_click` intent. It still never captures DOM text,
-  link text, form values, query strings, or fragments.
+- **Safe click autocapture.** The Infinite runtime now captures unmarked same-origin link and button
+  clicks as structural `site_click` events, buckets external links without storing external URLs, and
+  treats obvious same-origin sign-up routes as `sign_up_click` intent. It still never captures DOM
+  text, link text, button text, form values, query strings, or fragments.
 - **Conversion path is a first-class CLI flag.** `--infinite-download-destination-path <path>` lets
   agents install checkout-style funnels (`/checkout` before Stripe, for example) without hand-editing
   the managed runtime.

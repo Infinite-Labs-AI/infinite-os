@@ -111,6 +111,28 @@ describe("browser-collect-v1 public contract", () => {
     expect(referrerHost).toBe("referrer.example")
   })
 
+  it("app_download_click explicitly permits structural CTA fields plus destination_path", () => {
+    const schema = JSON.parse(readFileSync(schemaPath, "utf8")) as {
+      allOf: Array<{
+        if: { properties: { eventName: { const: string } } }
+        then: { properties: { properties: Record<string, unknown> } }
+      }>
+    }
+    const appDownload = schema.allOf.find(
+      (branch) => branch.if.properties.eventName.const === "app_download_click"
+    )
+
+    expect(appDownload?.then.properties.properties).toEqual({
+      type: "object",
+      required: ["destination_path"],
+      properties: {
+        cta_id: { $ref: "#/properties/properties/properties/cta_id" },
+        cta_location: { $ref: "#/properties/properties/properties/cta_location" },
+        destination_path: { $ref: "#/properties/properties/properties/destination_path" }
+      }
+    })
+  })
+
   it("site_page_view may carry ONLY the bounded nav enum (0.6.0: navigate | history), optional for older tags", () => {
     const schema = JSON.parse(readFileSync(schemaPath, "utf8")) as {
       properties: { properties: { properties: Record<string, unknown> } }

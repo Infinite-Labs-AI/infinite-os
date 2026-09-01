@@ -132,10 +132,11 @@ The runtime owns one logical initial website view and SPA route views. It
 normalizes canonical paths, removes query strings and fragments, tracks the
 configured same-origin conversion destination, and autocaptures safe DOM clicks.
 Same-origin links are grouped by destination path (`auto_pricing`,
-`auto_checkout`, etc.); obvious sign-up routes emit `sign_up_click`; external
-links are bucketed by class (`external_stripe`, `external_booking`, or
-`external_link`) without storing the external URL. It never captures DOM text,
-link text, form values, query strings, or fragments.
+`auto_checkout`, etc.); unmarked buttons are grouped by structural attributes
+when available; obvious sign-up routes emit `sign_up_click`; external links are
+bucketed by class (`external_stripe`, `external_booking`, or `external_link`)
+without storing the external URL. It never captures DOM text, link text, button
+text, form values, query strings, or fragments.
 
 `data-analytics-cta-id` and `data-analytics-cta-location` are still supported as
 explicit overrides for cleaner reporting. Download anchors may additionally

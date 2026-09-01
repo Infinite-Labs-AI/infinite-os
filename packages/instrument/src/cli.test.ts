@@ -642,6 +642,61 @@ describe("default artifact discovery", () => {
     expect(plan).not.toContain("G-AAAA111")
   })
 
+  it("layers a conversion destination override onto a discovered Infinite artifact", async () => {
+    const root = copyFixture("static-html-basic")
+    const filePath = saveArtifactsFile("ws_saved.json", {
+      workspaceId: "ws_saved",
+      infinite: {
+        siteSourceKey: "site_public_123",
+        collectPath: "/infinite/events/collect",
+        productionHosts: ["example.com"],
+        staticProxy: "vercel",
+        consentMode: "not_required"
+      }
+    })
+
+    const code = await runCli([
+      "plan",
+      "--root", root,
+      "--workspace", "ws_saved",
+      "--infinite-download-destination-path", "/checkout",
+      "--json"
+    ])
+
+    expect(code).toBe(0)
+    expect(stderrText()).toContain(`Discovered saved public artifacts: ${filePath}`)
+    const parsed = stdoutJson()
+    expect(
+      (parsed.artifacts as { infinite?: { downloadDestinationPath?: string } }).infinite
+        ?.downloadDestinationPath
+    ).toBe("/checkout")
+    const runtimeSnippet = (parsed.instructions as Array<{ provider?: string; snippet?: string }>).find(
+      (instruction) => instruction.provider === "infinite"
+    )?.snippet
+    expect(runtimeSnippet).toContain('"downloadDestinationPath":"/checkout"')
+  })
+
+  it("rejects an explicit empty Infinite conversion destination path", async () => {
+    const root = copyFixture("static-html-basic")
+
+    const code = await runCli([
+      "plan",
+      "--root", root,
+      "--json",
+      "--infinite-site-source-key", "site_public_123",
+      "--infinite-production-host", "example.com",
+      "--infinite-static-proxy", "vercel",
+      "--infinite-consent-mode", "not-required",
+      "--infinite-download-destination-path", ""
+    ])
+
+    expect(code).toBe(1)
+    const parsed = stdoutJson()
+    expect(parsed.blockers).toContain(
+      "Infinite downloadDestinationPath must be a root-relative path without query, hash, or whitespace (max 256 chars)."
+    )
+  })
+
   it("multiple saved files without --workspace are listed and never guessed", async () => {
     const root = copyFixture("static-html-basic")
     saveArtifactsFile("ws_a.json", { workspaceId: "ws_a", ga4: { measurementId: "G-AAAA111" } })

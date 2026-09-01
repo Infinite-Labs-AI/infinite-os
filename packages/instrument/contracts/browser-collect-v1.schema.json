@@ -133,6 +133,8 @@
             "type": "object",
             "required": ["destination_path"],
             "properties": {
+              "cta_id": { "$ref": "#/properties/properties/properties/cta_id" },
+              "cta_location": { "$ref": "#/properties/properties/properties/cta_location" },
               "destination_path": { "$ref": "#/properties/properties/properties/destination_path" }
             }
           }

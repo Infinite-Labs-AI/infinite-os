@@ -33,6 +33,7 @@ import type {
 } from "./types.js"
 import { uninstallInstallation } from "./uninstall.js"
 import {
+  applyInfiniteDownloadDestinationPath,
   applyPosthogProxy,
   defaultArtifactsDir,
   discoverWorkspaceArtifacts,
@@ -504,14 +505,14 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
       infiniteProductionHosts:
         parsed.infiniteProductionHosts.length > 0 ? parsed.infiniteProductionHosts : undefined,
       infiniteStaticProxy: parsed.infiniteStaticProxy,
-      infiniteConsentMode: parsed.infiniteConsentMode,
-      infiniteDownloadDestinationPath: parsed.infiniteDownloadDestinationPath
+      infiniteConsentMode: parsed.infiniteConsentMode
     })
 
     // Same-machine flag-free install: with no artifact flags and no --artifact-file,
     // fall back to the public artifacts `infinite setup` saved on this machine.
-    // Explicit artifact input always wins, and a workspace id adopted from the
-    // discovered file satisfies the `install --yes` workspace requirement.
+    // Explicit artifact input always wins, while pure modifiers still layer
+    // onto a discovered file. A workspace id adopted from the discovered file
+    // satisfies the `install --yes` workspace requirement.
     const hasExplicitArtifacts =
       parsed.artifactFile !== undefined ||
       parsed.ga4MeasurementId !== undefined ||
@@ -524,8 +525,7 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
       parsed.infiniteCollectPath !== undefined ||
       parsed.infiniteProductionHosts.length > 0 ||
       parsed.infiniteStaticProxy !== undefined ||
-      parsed.infiniteConsentMode !== undefined ||
-      parsed.infiniteDownloadDestinationPath !== undefined
+      parsed.infiniteConsentMode !== undefined
     const commandUsesArtifacts =
       parsed.command === "plan" || parsed.command === "apply" || parsed.command === "install"
     if (commandUsesArtifacts && !hasExplicitArtifacts) {
@@ -549,6 +549,13 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
     }
 
     if (commandUsesArtifacts) {
+      // `--infinite-download-destination-path` is a MODIFIER, not a standalone
+      // source artifact. Apply it AFTER discovery so checkout-style conversion
+      // paths can layer onto saved source keys/hosts/consent without re-prompting.
+      artifacts = applyInfiniteDownloadDestinationPath(artifacts, {
+        path: parsed.infiniteDownloadDestinationPath
+      })
+
       // --posthog-proxy is a MODIFIER, not a standalone artifact (deliberately excluded from
       // hasExplicitArtifacts). Apply it AFTER discovery so it layers onto a discovered posthog
       // project key; with no posthog artifact it is a no-op (never fabricates a keyless one).
