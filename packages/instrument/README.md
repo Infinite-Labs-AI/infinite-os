@@ -357,7 +357,12 @@ infinite analytics [--check | --plan | --apply | --verify-only] [flags]         
 
 `infinite analytics` adds only what the standalone tag cannot know — the Desktop's active
 workspace, the public keys `infinite setup` saved under `~/.infinite/artifacts/<workspaceId>.json`,
-and a cloud verification backend — then runs the same eleven steps. Three depths: `--check`
+and a cloud verification backend — then runs the same eleven steps. The `infinite` CLI is fully
+paid: every `infinite analytics` invocation except `--help` goes through the same Desktop readiness
+gate as the rest of the product (signed in, workspace linked, subscription active) and prints the
+standard onboarding guidance otherwise, touching nothing. The standalone `npx infinite-tag harness`
+is the open-source installer and stays ungated; its only cloud contact is the optional verify
+read-back, which reports `subscription required` honestly when the cloud answers 402. Three depths: `--check`
 (inspect + report, writes nothing), `--plan` (write the plan, the proposed conversions and
 `.infinite/REPORT.md`; apply nothing), and the default `--apply` (plan → confirm → apply → verify).
 

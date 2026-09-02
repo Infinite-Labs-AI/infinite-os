@@ -42,7 +42,10 @@ export const ANALYTICS_USAGE = [
   "  --json, --brief, --posthog-query-key, and the infinite-tag artifact flags are passed through.",
   "",
   "Verification reads receipts through the cloud when INFINITE_API_TOKEN is set (INFINITE_API_ORIGIN",
-  "overrides the host); otherwise providers print 'installed, not verifiable' and the report says why."
+  "overrides the host); otherwise providers print 'installed, not verifiable' and the report says why.",
+  "",
+  "Needs Infinite Desktop signed in with an active subscription (the standalone `npx infinite-tag",
+  "harness` does not)."
 ].join("\n");
 
 export const DEFAULT_INFINITE_API_ORIGIN = "https://api.ultima.inc";

@@ -28,6 +28,9 @@ All notable changes to the `infinite-tag` npm package (`packages/instrument`). V
   claimed verified at install time.
 - **`infinite analytics`** in the `infinite` CLI runs the same runbook with the Desktop's active workspace
   and the saved artifacts, wiring the cloud backend when `INFINITE_API_TOKEN` is set and saying so when not.
+  It sits behind the CLI's Desktop readiness gate (the `infinite` CLI is paid; `--help` is the only
+  ungated call); the standalone `infinite-tag harness` is not gated. A 402 from the cloud verify
+  route is `not verifiable (subscription required — complete onboarding in Infinite Desktop)`.
 - Every run that writes ends with `.infinite/REPORT.md` and the pasteable handoff line.
 
 - **The server lane is no longer Next.js-only.** `install --server-lane` now writes runnable,

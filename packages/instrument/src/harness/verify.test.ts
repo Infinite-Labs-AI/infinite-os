@@ -117,6 +117,10 @@ describe("InfiniteCloudBackend", () => {
       state: "not_verifiable",
       reason: "the cloud rejected this session (HTTP 401)"
     })
+    expect((await make(async () => jsonResponse(402, { error: "subscription_required", message: "Subscribe to continue." })).verify(input)).ga4).toEqual({
+      state: "not_verifiable",
+      reason: "subscription required — complete onboarding in Infinite Desktop"
+    })
     expect((await make(async () => new Response("", { status: 404 })).verify(input)).ga4).toEqual({
       state: "not_verifiable",
       reason: "the cloud verify route is not available yet (HTTP 404)"

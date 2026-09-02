@@ -37,6 +37,7 @@ export const VERIFY_POLL_INTERVAL_MS = 3_000
 export const NONE_BACKEND_REASON = "run infinite analytics from the desktop CLI to verify"
 export const META_NOT_VERIFIABLE_REASON = "Meta has no install-time read-back; open Events Manager → Test Events"
 export const NO_BACKEND_REASON = "no backend can read this lane back"
+export const SUBSCRIPTION_REQUIRED_REASON = "subscription required — complete onboarding in Infinite Desktop"
 
 interface Timing {
   now?: () => number
@@ -161,6 +162,11 @@ export class InfiniteCloudBackend implements VerificationBackend {
       }
       if (response.status === 401 || response.status === 403) {
         return failAll(`the cloud rejected this session (HTTP ${response.status})`)
+      }
+      if (response.status === 402) {
+        // requireActiveSubscriptionOr402: the founder can install, and nothing else runs until
+        // the subscription is active. Not a missing receipt — a gate, and it says so.
+        return failAll(SUBSCRIPTION_REQUIRED_REASON)
       }
       if (response.status === 404) {
         return failAll("the cloud verify route is not available yet (HTTP 404)")

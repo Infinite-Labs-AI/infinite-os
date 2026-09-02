@@ -1828,13 +1828,25 @@ export async function runCli(
   }
 
   // `infinite analytics …` — the analytics harness (one runbook: adopt → install → mark
-  // conversions → verify → report), shared with `npx infinite-tag harness`. A product command
-  // that runs LOCALLY against the current repo: it reads the Desktop's active workspace when
-  // Desktop is running but never needs the bridge, so it is handled here before product
-  // preflight and is deliberately NOT in RESERVED_LOCAL_COMMANDS.
+  // conversions → verify → report), shared with `npx infinite-tag harness`. The `infinite` CLI
+  // is fully paid: usage/help prints here, and EVERY other invocation (--check included) goes
+  // through the SAME Desktop readiness gate as product turns and `contacts sync` — a founder
+  // may install and complete onboarding, and nothing else runs until the subscription is
+  // active. Not ready → the standard onboarding guidance, non-zero exit, repo untouched.
+  // The standalone `npx infinite-tag harness` is the ungated open-source installer.
+  // Deliberately NOT in RESERVED_LOCAL_COMMANDS (not an engine command).
   if (normalizedArgs[0] === "analytics") {
-    const code = await runAnalyticsCommand(normalizedArgs.slice(1), env as Record<string, string | undefined>);
-    if (code !== 0) process.exitCode = code;
+    const analyticsArgs = normalizedArgs.slice(1);
+    const wantsHelp = analyticsArgs[0] === "help" || analyticsArgs[0] === "--help" || analyticsArgs[0] === "-h";
+    const analyticsEnv = env as Record<string, string | undefined>;
+    if (wantsHelp) {
+      await runAnalyticsCommand(analyticsArgs, analyticsEnv);
+      return;
+    }
+    await runProductWithDesktopPreflight(env, async () => {
+      const code = await runAnalyticsCommand(analyticsArgs, analyticsEnv);
+      if (code !== 0) process.exitCode = code;
+    });
     return;
   }
 
