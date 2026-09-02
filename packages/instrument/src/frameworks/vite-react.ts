@@ -521,25 +521,74 @@ function escapeIdentifierForRegExp(identifier: string): string {
 function hasRecognizedReactBootstrap(source: string): boolean {
   const { callableLocals, memberObjects } = analyzeReactDomBindings(source)
   // Detect the CALL in code only: comments AND strings blanked, so a bootstrap call quoted in a
-  // string or sitting in a comment never counts as a real bootstrap.
+  // string or sitting in a comment never counts as a real bootstrap. The same masked code is scanned
+  // for a local REBIND of the bootstrap identifier — see hasLocalRebind.
   const code = maskCommentsAndStrings(source, true)
   for (const local of callableLocals) {
     // A direct call `cr(` / `createRoot(` — but not `foo.createRoot(` (that is a member call).
-    if (new RegExp(`(^|[^.\\w$])${escapeIdentifierForRegExp(local)}\\s*\\(`, "m").test(code)) {
-      return true
-    }
+    if (!new RegExp(`(^|[^.\\w$])${escapeIdentifierForRegExp(local)}\\s*\\(`, "m").test(code)) continue
+    // Fail CLOSED if the runtime LOCAL (post-alias) is also declared locally: the call may bind to
+    // the shadow, not to react-dom, so wiring a pixel would be a silent no-op.
+    if (hasLocalRebind(code, local)) continue
+    return true
   }
   for (const object of memberObjects) {
     if (
-      new RegExp(
+      !new RegExp(
         `(^|[^.\\w$])${escapeIdentifierForRegExp(object)}\\s*\\.\\s*(createRoot|hydrateRoot|render)\\s*\\(`,
         "m"
       ).test(code)
     ) {
-      return true
+      continue
     }
+    if (hasLocalRebind(code, object)) continue
+    return true
   }
   return false
+}
+
+/**
+ * True when `id` (a react-dom binding's runtime LOCAL name — e.g. `cr` for `createRoot as cr`, or the
+ * namespace/default object) is ALSO declared locally in the module, scanned on the already-masked
+ * code so a shadow written in a comment/string/template never counts. Any local declaration —
+ * function/class, const/let/var (simple OR destructured, including renamed `{ key: id }`), or a
+ * function/arrow/catch parameter — means the bootstrap CALL could bind to the shadow rather than to
+ * react-dom, so we FAIL CLOSED to the manual path. Deliberately conservative: it only ever costs a
+ * real app that reuses the name its automatic wiring (it still gets the manual snippet), never a
+ * silent no-pixel install. The genuine `import … from "react-dom/…"` is not a local declaration, so
+ * the plain no-shadow case (October's real install) still auto-wires.
+ */
+function hasLocalRebind(maskedCode: string, id: string): boolean {
+  const escaped = escapeIdentifierForRegExp(id)
+  if (new RegExp(`\\b(?:function\\s*\\*?|class)\\s+${escaped}\\b`).test(maskedCode)) return true
+  if (new RegExp(`\\b(?:const|let|var)\\s+${escaped}\\b`).test(maskedCode)) return true
+  if (destructuresLocal(maskedCode, escaped)) return true
+  if (declaredAsParameter(maskedCode, escaped)) return true
+  return false
+}
+
+/** A const/let/var destructuring bind of `escaped` — shorthand `{ id }` / `[ id ]` or renamed `{ k: id }`. */
+function destructuresLocal(maskedCode: string, escaped: string): boolean {
+  const declRe = /\b(?:const|let|var)\s*([\{\[][\s\S]*?[\}\]])\s*=/g
+  let match: RegExpExecArray | null
+  while ((match = declRe.exec(maskedCode)) !== null) {
+    const pattern = match[1]
+    // Renamed target `{ key: id }` — the LOCAL is after the colon.
+    if (new RegExp(`:\\s*${escaped}\\b`).test(pattern)) return true
+    // Shorthand `{ id }` or array element `[ id ]` — `id` NOT used as a property key (`id:`).
+    if (new RegExp(`(^|[\\{\\[,\\s])${escaped}\\b(?!\\s*:)`).test(pattern)) return true
+  }
+  return false
+}
+
+/** `escaped` appearing as a function/arrow/catch parameter binding. */
+function declaredAsParameter(maskedCode: string, escaped: string): boolean {
+  const paramLists: string[] = []
+  for (const match of maskedCode.matchAll(/\bfunction\b[^(]*\(([^)]*)\)/g)) paramLists.push(match[1])
+  for (const match of maskedCode.matchAll(/\(([^)]*)\)\s*=>/g)) paramLists.push(match[1])
+  for (const match of maskedCode.matchAll(/\bcatch\s*\(([^)]*)\)/g)) paramLists.push(match[1])
+  const bindingRe = new RegExp(`(^|[\\{\\[,\\s:])${escaped}\\b`)
+  return paramLists.some((list) => bindingRe.test(list))
 }
 
 export type EntrypointWiring =

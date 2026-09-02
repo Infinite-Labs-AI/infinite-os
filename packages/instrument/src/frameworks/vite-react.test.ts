@@ -314,6 +314,100 @@ describe("vite-react binding-aware bootstrap recognition", () => {
     expect(readFileSync(join(root, "src/main.tsx"), "utf8")).toContain("installInfiniteInstrumentation()")
   })
 
+  describe("fail-closed on a local rebind of the bootstrap identifier", () => {
+    function mainWith(lines: string[]): string {
+      const root = copyFixture("vite-react-basic")
+      writeFileSync(join(root, "src/main.tsx"), lines.join("\n") + "\n")
+      return root
+    }
+    const isManual = (root: string): boolean => {
+      const plan = planFor(root)
+      expect(plan.blockers).toEqual([])
+      return plan.instructions.find((i) => i.action === "manual")?.path === "src/main.tsx"
+    }
+
+    it("a local `function createRoot` shadow → MANUAL (the blocker)", () => {
+      const root = mainWith([
+        'import { createRoot } from "react-dom/client"',
+        "function createRoot(n: number) { return { render() { console.log(n) } } }",
+        "createRoot(1).render()"
+      ])
+      expect(isManual(root)).toBe(true)
+      const apply = applyInstallation({ root, workspaceId: "ws-test", plan: planFor(root), allowDirty: true })
+      expect(apply.requiresManual?.[0]?.path).toBe("src/main.tsx")
+    })
+
+    it("a local `const createRoot =` shadow → MANUAL", () => {
+      const root = mainWith([
+        'import { createRoot } from "react-dom/client"',
+        "const createRoot = (n: number) => ({ render() { console.log(n) } })",
+        "createRoot(1).render()"
+      ])
+      expect(isManual(root)).toBe(true)
+    })
+
+    it("`import * as ReactDOM` with a local ReactDOM shadow → MANUAL", () => {
+      const root = mainWith([
+        'import * as ReactDOM from "react-dom/client"',
+        "const ReactDOM = { createRoot: (n: unknown) => ({ render() { void n } }) }",
+        'ReactDOM.createRoot(document.getElementById("root")).render(<App />)'
+      ])
+      expect(isManual(root)).toBe(true)
+    })
+
+    it("scans the ALIASED local (cr), not the imported name — local `const cr` → MANUAL", () => {
+      const root = mainWith([
+        'import { createRoot as cr } from "react-dom/client"',
+        "const cr = (n: number) => ({ render() { void n } })",
+        "cr(1).render()"
+      ])
+      expect(isManual(root)).toBe(true)
+    })
+
+    it("a destructuring rebind counts — shorthand `const { createRoot }` → MANUAL", () => {
+      const root = mainWith([
+        'import { createRoot } from "react-dom/client"',
+        "const { createRoot } = (globalThis as any).mine",
+        'createRoot(document.getElementById("root")).render(<App />)'
+      ])
+      expect(isManual(root)).toBe(true)
+    })
+
+    it("a RENAMED destructuring rebind counts — `const { cr: createRoot }` → MANUAL", () => {
+      const root = mainWith([
+        'import { createRoot } from "react-dom/client"',
+        "const { cr: createRoot } = (globalThis as any).mine",
+        'createRoot(document.getElementById("root")).render(<App />)'
+      ])
+      expect(isManual(root)).toBe(true)
+    })
+
+    it("still AUTO-wires the plain no-shadow case (October's real install)", () => {
+      const root = mainWith([
+        'import { createRoot } from "react-dom/client"',
+        'createRoot(document.getElementById("root")!).render(<App />)'
+      ])
+      const plan = planFor(root)
+      expect(plan.applyMode).toBe("supported")
+      applyInstallation({ root, workspaceId: "ws-test", plan, allowDirty: true })
+      expect(readFileSync(join(root, "src/main.tsx"), "utf8")).toContain("installInfiniteInstrumentation()")
+    })
+
+    it("a shadow written only in a comment or string does NOT fail closed (masked) → AUTO", () => {
+      const root = mainWith([
+        'import { createRoot } from "react-dom/client"',
+        'const note = "const createRoot = () => 0"',
+        "// const createRoot = () => 0",
+        'createRoot(document.getElementById("root")!).render(<App />)',
+        "void note"
+      ])
+      const plan = planFor(root)
+      expect(plan.applyMode).toBe("supported")
+      applyInstallation({ root, workspaceId: "ws-test", plan, allowDirty: true })
+      expect(readFileSync(join(root, "src/main.tsx"), "utf8")).toContain("installInfiniteInstrumentation()")
+    })
+  })
+
   it("does NOT match createRoot imported from the WRONG package — it falls back to manual", () => {
     const root = copyFixture("vite-react-basic")
     // `createRoot` here is imported from some-other-pkg, not react-dom. Binding-aware matching must
