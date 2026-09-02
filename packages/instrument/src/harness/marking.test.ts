@@ -7,9 +7,11 @@ import {
   CONVERSIONS_MANIFEST_RELATIVE_PATH,
   PROPOSED_CONVERSIONS_RELATIVE_PATH,
   applyConversions,
+  detectServerCheckout,
   ensureProposedIgnored,
   proposeConversions,
   readApprovedConversions,
+  renderServerCheckoutRecommendation,
   unmarkConversions,
   writeProposal
 } from "./marking.js"
@@ -309,5 +311,56 @@ describe("unmarkConversions", () => {
     expect(result.restored).toHaveLength(2)
     expect(read(root, "index.html")).toBe(INDEX_HTML)
     expect(existsSync(join(root, CONVERSIONS_MANIFEST_RELATIVE_PATH))).toBe(false)
+  })
+})
+
+describe("detectServerCheckout", () => {
+  it("returns null when there is no Stripe server checkout in the source", () => {
+    const root = makeRoot()
+    write(root, "pages/index.tsx", "export default function Page() { return null }")
+    expect(detectServerCheckout({ root, appRoot: "." })).toBeNull()
+  })
+
+  it("detects the server checkout entry and the verified webhook fulfillment as a pair", () => {
+    const root = makeRoot()
+    write(
+      root,
+      "pages/api/stripe-checkout.ts",
+      "export default async function handler() {\n  const session = await stripe.checkout.sessions.create({ mode: 'payment' })\n  return session\n}\n"
+    )
+    write(
+      root,
+      "pages/api/stripe-webhook.ts",
+      "export default function handler(req) {\n  const event = stripe.webhooks.constructEvent(req.body, sig, secret)\n  if (event.type === 'checkout.session.completed') fulfill(event)\n}\n"
+    )
+    const rec = detectServerCheckout({ root, appRoot: "." })
+    expect(rec?.code).toBe("INF_CHECKOUT_SERVER_SIDE")
+    expect(rec?.sessionCreate[0]).toMatchObject({
+      kind: "session_create",
+      file: "pages/api/stripe-checkout.ts",
+      line: 2,
+      evidence: "stripe.checkout.sessions.create"
+    })
+    expect(rec?.webhookFulfillment.some((signal) => signal.evidence === "stripe.webhooks.constructEvent")).toBe(true)
+
+    const lines = renderServerCheckoutRecommendation(rec!)
+    expect(lines.join("\n")).toContain("checkout_started")
+    expect(lines.join("\n")).toContain("purchase")
+    expect(lines.join("\n")).toContain("pages/api/stripe-checkout.ts:2")
+  })
+
+  it("recommends adding the missing half when only the checkout entry exists", () => {
+    const root = makeRoot()
+    write(
+      root,
+      "pages/api/checkout.ts",
+      "const session = await stripe.checkout.sessions.create({})\n"
+    )
+    const rec = detectServerCheckout({ root, appRoot: "." })
+    expect(rec?.sessionCreate).toHaveLength(1)
+    expect(rec?.webhookFulfillment).toHaveLength(0)
+    expect(renderServerCheckoutRecommendation(rec!).join("\n")).toContain(
+      "No verified Stripe webhook fulfillment handler was found"
+    )
   })
 })

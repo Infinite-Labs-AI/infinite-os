@@ -1,5 +1,9 @@
 import { renderInfiniteBrowserTag } from "../runtime/infinite-browser.js"
-import { DEFAULT_INFINITE_COLLECT_PATH, resolveInfiniteApiOrigin } from "../workspace-artifacts.js"
+import {
+  allowAutomationTargetError,
+  DEFAULT_INFINITE_COLLECT_PATH,
+  resolveInfiniteApiOrigin
+} from "../workspace-artifacts.js"
 import type {
   InfiniteBrowserConfig,
   InfinitePublicArtifact,
@@ -68,6 +72,14 @@ export const infiniteProviderAdapter: ProviderAdapter = {
       if ("error" in normalizedHosts) blockers.push(normalizedHosts.error)
       else productionHosts = normalizedHosts.hosts
     }
+    // Defense-in-depth: the synthetic/test-only allowAutomation flag must never reach the runtime on
+    // a production host — checked here against the FINAL resolved hosts so it holds no matter how the
+    // flag arrived (CLI flag, --artifact-file, or discovered ~/.infinite/artifacts). The CLI's own
+    // throw is a friendlier early error; this blocker is the entry-path-independent backstop.
+    if (infinite?.allowAutomation === true) {
+      const automationError = allowAutomationTargetError(productionHosts)
+      if (automationError) blockers.push(automationError)
+    }
     const ready = blockers.length === 0
     const config: InfiniteBrowserConfig = {
       ...(infinite ? { siteSourceKey: infinite.siteSourceKey } : {}),
@@ -80,7 +92,10 @@ export const infiniteProviderAdapter: ProviderAdapter = {
           : { mode: "required", storageKey: "infinite_analytics_consent" },
       ...(downloadDestinationPath !== undefined ? { downloadDestinationPath } : {}),
       // Only `false` is serialized — an absent flag keeps the runtime config byte-identical to 0.6.2.
-      ...(infinite?.autocapture === false ? { autocapture: false } : {})
+      ...(infinite?.autocapture === false ? { autocapture: false } : {}),
+      // Only `true` is serialized — an absent flag keeps the runtime config byte-identical (bots
+      // are never counted). Synthetic/test sandbox sources only; installer-gated to non-prod hosts.
+      ...(infinite?.allowAutomation === true ? { allowAutomation: true } : {})
     }
     return {
       assumptions: [

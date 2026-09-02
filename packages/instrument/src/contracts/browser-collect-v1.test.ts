@@ -131,9 +131,13 @@ describe("browser-collect-v1 public contract", () => {
       "sessionId",
       "url",
       "referrer",
-      "properties"
+      "properties",
+      "automation"
     ])
     expect(schemaProperties).not.toHaveProperty("path")
+    // automation is an OPTIONAL top-level marker (alongside referrer/properties): the pixel sets it
+    // true ONLY when it deliberately fired under navigator.webdriver for a synthetic sandbox source.
+    expect(schemaProperties.automation).toEqual({ type: "boolean" })
     expect(schemaProperties.url).toMatchObject({
       pattern: "^https?://[^@/?#\\s]+(?:/[^?#\\s]*)?$"
     })

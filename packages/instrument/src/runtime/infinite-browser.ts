@@ -85,7 +85,16 @@ function infiniteBrowserRuntime(config: InfiniteBrowserConfig): void {
   runtimeWindow.__infiniteAnalyticsRuntime = true
 
   // Automation-driven browsers declare themselves (WebDriver spec): never a visit, never an event.
-  if ((navigator as Navigator & { webdriver?: boolean }).webdriver === true) return
+  const underAutomation = (navigator as Navigator & { webdriver?: boolean }).webdriver === true
+  // `allowAutomation` is the synthetic/test-sandbox escape hatch (installer-gated to non-production
+  // hosts): it lets an automation browser (our own CI / verify harness) be COUNTED so click
+  // autocapture can be triggered and verified. Every event a WebDriver session produces is then
+  // stamped `automation: true` (see emit) so a non-synthetic cloud ingest can reject/quarantine it.
+  // It ALSO lifts the loopback-host exclusion below — a localhost sandbox is the canonical synthetic
+  // target — but the production-host allowlist STILL applies, so the runtime only ever emits on a
+  // host the source explicitly configured (a localhost sandbox must list "localhost"/"127.0.0.1").
+  const allowAutomation = config.allowAutomation === true
+  if (underAutomation && !allowAutomation) return
 
   const isLoopbackHost =
     location.hostname === "localhost" ||
@@ -95,7 +104,7 @@ function infiniteBrowserRuntime(config: InfiniteBrowserConfig): void {
   const isVerifiedProductionHost =
     config.productionHosts.length > 0 &&
     config.productionHosts.includes(location.hostname.toLowerCase())
-  if (isLoopbackHost || !isVerifiedProductionHost) return
+  if ((isLoopbackHost && !allowAutomation) || !isVerifiedProductionHost) return
 
   const structuralTokenPattern = /^[A-Za-z0-9_-]{1,64}$/
 
@@ -174,6 +183,35 @@ function infiniteBrowserRuntime(config: InfiniteBrowserConfig): void {
     return null
   }
 
+  // Normalize a free-form attribute (an id / aria-label / data-section) into the SAME bounded
+  // structural token the runtime uses everywhere else: lowercase, [a-z0-9_-] only, ≤64 chars,
+  // regex-validated. Returns null when nothing structural survives — never leaks the raw label.
+  function normalizeStructuralToken(raw: string | null | undefined): string | null {
+    if (!raw) return null
+    const cleaned = raw
+      .toLowerCase()
+      .replace(/[^a-z0-9_-]+/g, "_")
+      .replace(/^_+|_+$/g, "")
+      .slice(0, 64)
+      .replace(/_+$/g, "")
+    return cleaned && structuralTokenPattern.test(cleaned) ? cleaned : null
+  }
+
+  // A cta_location derived from the nearest structural region: an explicit data-section wins, then
+  // a section id, then an aria-label / role="region" label. Bounded + validated, so a plain
+  // <section> that carries any of these no longer collapses to the generic "page".
+  function regionLocationToken(region: Element | null): string | null {
+    if (!region || typeof (region as { getAttribute?: unknown }).getAttribute !== "function") {
+      return null
+    }
+    const element = region as HTMLElement
+    return (
+      normalizeStructuralToken(element.getAttribute("data-section")) ??
+      normalizeStructuralToken(element.getAttribute("id")) ??
+      normalizeStructuralToken(element.getAttribute("aria-label"))
+    )
+  }
+
   function automaticLocation(target: Element, preferred: Array<Element | null>): string {
     for (const element of preferred) {
       const explicit = structuralAttribute(element, "data-analytics-cta-location")
@@ -190,6 +228,12 @@ function infiniteBrowserRuntime(config: InfiniteBrowserConfig): void {
     ) {
       return tag
     }
+    // Before the generic fallback: honor the nearest semantic region (section[id]/[aria-label],
+    // role="region", or an explicit data-section) as a bounded structural token.
+    const region = regionLocationToken(
+      safeClosest(target, 'section[id],section[aria-label],[role="region"],[data-section]')
+    )
+    if (region) return region
     return "page"
   }
 
@@ -444,6 +488,9 @@ function infiniteBrowserRuntime(config: InfiniteBrowserConfig): void {
     }
     const referrer = cleanReferrerHost(document.referrer)
     if (referrer) payload.referrer = referrer
+    // Under `allowAutomation`, a WebDriver session's events are counted but marked so a
+    // non-synthetic ingest can quarantine them (exact field name `automation`, top-level boolean).
+    if (underAutomation) payload.automation = true
     if (properties && Object.keys(properties).length > 0) payload.properties = properties
     sendInfinite(payload)
   }

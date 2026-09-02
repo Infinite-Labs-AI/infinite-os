@@ -57,6 +57,106 @@ export interface ConversionProposal {
   appRoot: string
   rows: ProposedConversion[]
   skipped: SkippedElement[]
+  /** Server-side checkout recommendation, when a Stripe server checkout/fulfillment was detected. */
+  serverCheckout?: ServerCheckoutRecommendation
+}
+
+// ---------------------------------------------------------------------------------------------
+// Server-side checkout detection (teardown §4.1 addendum): a client-only `checkout_started`
+// mark MISSES a desktop-app / server checkout that hits the Stripe API directly, so it
+// systematically under-counts multi-surface funnels. This is a read-only DETECTION + a
+// propose-step RECOMMENDATION (never an automatic edit): find the server checkout ENTRY
+// (`stripe.checkout.sessions.create`) and its verified webhook FULFILLMENT
+// (`stripe.webhooks.constructEvent` / `checkout.session.completed`), and recommend emitting the
+// funnel's start (`checkout_started`) and end (`purchase`) server-side, as a pair.
+// ---------------------------------------------------------------------------------------------
+
+export type ServerCheckoutKind = "session_create" | "webhook_fulfillment"
+
+export interface ServerCheckoutSignal {
+  kind: ServerCheckoutKind
+  /** App-root-relative source file. */
+  file: string
+  /** 1-based line the signal was found on. */
+  line: number
+  /** The structural token matched (never surrounding code). */
+  evidence: string
+}
+
+export interface ServerCheckoutRecommendation {
+  code: "INF_CHECKOUT_SERVER_SIDE"
+  /** `stripe.checkout.sessions.create` sites → emit `checkout_started` server-side. */
+  sessionCreate: ServerCheckoutSignal[]
+  /** Verified webhook fulfillment sites → emit the `purchase` outcome server-side. */
+  webhookFulfillment: ServerCheckoutSignal[]
+}
+
+const SESSION_CREATE_PATTERN = /\bcheckout\s*\.\s*sessions\s*\.\s*create\b/
+const WEBHOOK_CONSTRUCT_PATTERN = /\bwebhooks\s*\.\s*constructEvent\b/
+const CHECKOUT_COMPLETED_PATTERN = /checkout\.session\.completed/
+export const MAX_SERVER_CHECKOUT_SIGNALS = 20
+
+export interface DetectServerCheckoutInput {
+  root: string
+  appRoot: string
+}
+
+/** Read-only: scan the app's source for the server checkout entry + webhook fulfillment. */
+export function detectServerCheckout(input: DetectServerCheckoutInput): ServerCheckoutRecommendation | null {
+  const appRootAbsolute = input.appRoot === "." ? input.root : join(input.root, input.appRoot)
+  const sessionCreate: ServerCheckoutSignal[] = []
+  const webhookFulfillment: ServerCheckoutSignal[] = []
+  const total = () => sessionCreate.length + webhookFulfillment.length
+  for (const file of walkSourceFiles(appRootAbsolute)) {
+    if (total() >= MAX_SERVER_CHECKOUT_SIGNALS) break
+    const contents = readSourceFile(appRootAbsolute, file)
+    if (contents === null) continue
+    const lines = splitLines(contents)
+    for (let index = 0; index < lines.length; index += 1) {
+      if (total() >= MAX_SERVER_CHECKOUT_SIGNALS) break
+      const text = lines[index]
+      if (SESSION_CREATE_PATTERN.test(text)) {
+        sessionCreate.push({ kind: "session_create", file, line: index + 1, evidence: "stripe.checkout.sessions.create" })
+      } else if (WEBHOOK_CONSTRUCT_PATTERN.test(text)) {
+        webhookFulfillment.push({ kind: "webhook_fulfillment", file, line: index + 1, evidence: "stripe.webhooks.constructEvent" })
+      } else if (CHECKOUT_COMPLETED_PATTERN.test(text)) {
+        webhookFulfillment.push({ kind: "webhook_fulfillment", file, line: index + 1, evidence: "checkout.session.completed" })
+      }
+    }
+  }
+  if (sessionCreate.length === 0 && webhookFulfillment.length === 0) return null
+  return { code: "INF_CHECKOUT_SERVER_SIDE", sessionCreate, webhookFulfillment }
+}
+
+/**
+ * The propose-step recommendation lines: the funnel's start + end belong together, so the entry
+ * and the fulfillment are always recommended as a pair (each naming the one that is missing).
+ */
+export function renderServerCheckoutRecommendation(rec: ServerCheckoutRecommendation): string[] {
+  const start = rec.sessionCreate[0]
+  const end = rec.webhookFulfillment[0]
+  const lines: string[] = []
+  if (start) {
+    lines.push(
+      `Server-side checkout detected at ${start.file}:${start.line} (${start.evidence}). Emit \`checkout_started\` server-side there so web + desktop-app + every surface is counted — a client-only button mark misses non-web checkouts.`
+    )
+  }
+  if (end) {
+    lines.push(
+      `Verified Stripe webhook fulfillment detected at ${end.file}:${end.line} (${end.evidence}). Emit the \`purchase\` outcome server-side there — the funnel's end pairs with the server-side \`checkout_started\` start above.`
+    )
+  }
+  if (start && !end) {
+    lines.push(
+      "No verified Stripe webhook fulfillment handler was found — add one (stripe.webhooks.constructEvent → checkout.session.completed) and emit `purchase` there so the payment funnel's end is counted too."
+    )
+  }
+  if (!start && end) {
+    lines.push(
+      "A Stripe webhook fulfillment handler was found but no stripe.checkout.sessions.create — emit `checkout_started` at your server checkout entry point to pair with the `purchase` outcome."
+    )
+  }
+  return lines
 }
 
 export interface ApprovedConversions {
