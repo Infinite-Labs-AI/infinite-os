@@ -184,6 +184,14 @@ export function extractApiTokenEnvFlag(args: readonly string[]): {
   return { rest, envVar };
 }
 
+/** Trim trailing "/" without a regex: the value is user-supplied, and `/\/+$/` on a long run of
+ *  slashes is a polynomial-backtracking hazard (CodeQL js/polynomial-redos). A scan is cheaper. */
+function stripTrailingSlashes(value: string): string {
+  let end = value.length;
+  while (end > 0 && value.charCodeAt(end - 1) === 47) end -= 1;
+  return value.slice(0, end);
+}
+
 export interface ChooseBackendInput {
   tag: TagHarnessModule;
   env: AnalyticsCommandEnv;
@@ -223,7 +231,7 @@ export function chooseBackend(input: ChooseBackendInput): {
   if (apiTokenEnvVar) {
     const token = env[apiTokenEnvVar]?.trim();
     if (token && workspaceId) {
-      const origin = (env.INFINITE_API_ORIGIN?.trim() || DEFAULT_INFINITE_API_ORIGIN).replace(/\/+$/, "");
+      const origin = stripTrailingSlashes(env.INFINITE_API_ORIGIN?.trim() || DEFAULT_INFINITE_API_ORIGIN);
       return {
         backend: new tag.InfiniteCloudBackend({ origin, token, engineProjectId: workspaceId, fetch: fetchImpl }),
         notice: `Verifying through the cloud at ${origin} for workspace ${workspaceId}.`

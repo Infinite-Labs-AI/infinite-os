@@ -201,6 +201,14 @@ const BRIDGE_COPY: VerifyPeerCopy = {
   badRequest: (code, reason) => `the Infinite app rejected the request: ${code}${reason ? ` — ${reason}` : ""}`
 }
 
+/** Trim trailing "/" without a regex: these origins are caller-supplied, and `/\/+$/` on a long
+ *  run of slashes is a polynomial-backtracking hazard (CodeQL js/polynomial-redos). */
+function stripTrailingSlashes(value: string): string {
+  let end = value.length
+  while (end > 0 && value.charCodeAt(end - 1) === 47) end -= 1
+  return value.slice(0, end)
+}
+
 /** Read a response body ONCE, leniently: a 429/503 with an empty body is normal, not an outage. */
 async function readPayload(response: Response): Promise<unknown> {
   const text = await response.text().catch(() => "")
@@ -323,7 +331,7 @@ export class InfiniteCloudBackend implements VerificationBackend {
   async verify(input: VerifyInput): Promise<LaneVerifications> {
     return pollVerifyEndpoint(input, {
       ...this.options,
-      endpoint: `${this.options.origin.replace(/\/+$/, "")}/api/analytics/verify`,
+      endpoint: `${stripTrailingSlashes(this.options.origin)}/api/analytics/verify`,
       headers: {
         authorization: `Bearer ${this.options.token}`,
         "content-type": "application/json",
@@ -366,7 +374,7 @@ export class DesktopBridgeBackend implements VerificationBackend {
   async verify(input: VerifyInput): Promise<LaneVerifications> {
     return pollVerifyEndpoint(input, {
       ...this.options,
-      endpoint: `${this.options.bridgeUrl.replace(/\/+$/, "")}/v1/analytics/verify`,
+      endpoint: `${stripTrailingSlashes(this.options.bridgeUrl)}/v1/analytics/verify`,
       headers: {
         authorization: `Bearer ${this.options.token}`,
         "content-type": "application/json",
