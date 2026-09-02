@@ -36,6 +36,7 @@ import type {
 } from "./types.js"
 import { uninstallInstallation } from "./uninstall.js"
 import {
+  applyInfiniteAllowAutomation,
   applyInfiniteApiOrigin,
   applyInfiniteAutocapture,
   applyInfiniteDownloadDestinationPath,
@@ -78,6 +79,8 @@ interface ParsedArgs {
   infiniteApiOrigin?: string
   /** `--infinite-autocapture on|off`: unmarked-click autocapture (absent = on). */
   infiniteAutocapture?: boolean
+  /** `--infinite-allow-automation`: count automation traffic — SYNTHETIC/TEST sandbox sources only (absent = off). */
+  infiniteAllowAutomation: boolean
   packageManager?: PackageManager
   /** `--server-lane` on plan/apply/install: add the lossless server lane. */
   serverLane: boolean
@@ -116,6 +119,7 @@ function parseArgs(argv: string[]): ParsedArgs {
     posthogProxy: false,
     xEventTagIds: [],
     infiniteProductionHosts: [],
+    infiniteAllowAutomation: false,
     serverLane: false,
     brief: false
   }
@@ -209,6 +213,9 @@ function parseArgs(argv: string[]): ParsedArgs {
         parsed.infiniteAutocapture = normalizeInfiniteAutocapture(requireValue(token, next))
         index += 1
         break
+      case "--infinite-allow-automation":
+        parsed.infiniteAllowAutomation = true
+        break
       case "--infinite-base-url":
       case "--infinite-page-id":
         requireValue(token, next)
@@ -294,6 +301,10 @@ function printHelp(): void {
       "  --infinite-download-destination-path <path>  Same-origin conversion click path; defaults to /download",
       "  --infinite-autocapture <on|off>     Capture unmarked link/button clicks (default on); marked CTAs,",
       "                                      the conversion path, Stripe checkout and sign-up intent always emit",
+      "  --infinite-allow-automation         SYNTHETIC/TEST SANDBOX SOURCES ONLY (default off). Counts automation",
+      "                                      (WebDriver) traffic so a CI/verify harness can trigger click autocapture,",
+      "                                      lifts the loopback-host exclusion, and stamps every event automation:true.",
+      "                                      Hard-refused on production hosts — use only on localhost/.local/*sandbox* hosts.",
       "  --infinite-static-proxy vercel      Required for static/Vite unless vercel.json exists",
       "  --infinite-consent-mode <required|not-required>  No default; required needs an external consent signal",
       "      required listens for infinite:analytics-consent-change; not-required still respects DNT/GPC",
@@ -612,6 +623,15 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
       // artifact and never fabricate one.
       artifacts = applyInfiniteApiOrigin(artifacts, { origin: infiniteApiOrigin })
       artifacts = applyInfiniteAutocapture(artifacts, { autocapture: parsed.infiniteAutocapture })
+
+      // --infinite-allow-automation is a synthetic/test-only MODIFIER (applied post-discovery so it
+      // can layer onto a discovered sandbox source). It hard-refuses production hosts by throwing.
+      if (parsed.infiniteAllowAutomation) {
+        artifacts = applyInfiniteAllowAutomation(artifacts, { allowAutomation: true })
+        console.error(
+          "--infinite-allow-automation is ON: this SYNTHETIC/TEST source will COUNT automation (WebDriver) traffic (each event stamped automation:true). Never use it on a production source."
+        )
+      }
 
       // --posthog-proxy is a MODIFIER, not a standalone artifact (deliberately excluded from
       // hasExplicitArtifacts). Apply it AFTER discovery so it layers onto a discovered posthog

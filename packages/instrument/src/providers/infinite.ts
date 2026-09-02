@@ -80,7 +80,10 @@ export const infiniteProviderAdapter: ProviderAdapter = {
           : { mode: "required", storageKey: "infinite_analytics_consent" },
       ...(downloadDestinationPath !== undefined ? { downloadDestinationPath } : {}),
       // Only `false` is serialized — an absent flag keeps the runtime config byte-identical to 0.6.2.
-      ...(infinite?.autocapture === false ? { autocapture: false } : {})
+      ...(infinite?.autocapture === false ? { autocapture: false } : {}),
+      // Only `true` is serialized — an absent flag keeps the runtime config byte-identical (bots
+      // are never counted). Synthetic/test sandbox sources only; installer-gated to non-prod hosts.
+      ...(infinite?.allowAutomation === true ? { allowAutomation: true } : {})
     }
     return {
       assumptions: [

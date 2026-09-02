@@ -673,6 +673,41 @@ describe("Infinite source handoff + meta providers", () => {
     expect(indexHtml(defaultRoot)).not.toContain('"autocapture"')
   })
 
+  it("--infinite-allow-automation is hard-refused on a production host and installs nothing", async () => {
+    const root = copyFixture("static-html-basic")
+    const code = await runCli([
+      "install",
+      "--root", root,
+      "--workspace", "ws_test",
+      "--yes",
+      "--infinite-site-source-key", "site_public_123",
+      "--infinite-production-host", "example.com",
+      "--infinite-static-proxy", "vercel",
+      "--infinite-consent-mode", "not-required",
+      "--infinite-allow-automation"
+    ])
+    expect(code).toBe(1)
+    expect(errorSpy.mock.calls.map((c) => String(c[0])).join("\n")).toContain("synthetic/test-only flag")
+    expect(existsSync(join(root, ".infinite", "install.json"))).toBe(false)
+  })
+
+  it("--infinite-allow-automation reaches the runtime on a localhost sandbox source", async () => {
+    const root = copyFixture("static-html-basic")
+    const code = await runCli([
+      "install",
+      "--root", root,
+      "--workspace", "ws_test",
+      "--yes",
+      "--infinite-site-source-key", "site_public_123",
+      "--infinite-production-host", "localhost",
+      "--infinite-static-proxy", "vercel",
+      "--infinite-consent-mode", "not-required",
+      "--infinite-allow-automation"
+    ])
+    expect(code).toBe(0)
+    expect(indexHtml(root)).toContain('"allowAutomation":true')
+  })
+
   it("rejects an --infinite-autocapture value other than on|off", async () => {
     const root = copyFixture("static-html-basic")
     const code = await runCli(["plan", "--root", root, "--infinite-site-source-key", "site_public_123", "--infinite-autocapture", "maybe"])

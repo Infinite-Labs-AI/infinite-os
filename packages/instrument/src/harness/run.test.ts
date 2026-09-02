@@ -443,3 +443,78 @@ describe("infinite-tag harness dispatch", () => {
     }
   })
 })
+
+describe("guided consent (Infinite)", () => {
+  const infiniteArgs = (root: string, mode: string) => [
+    mode, "--root", root, "--workspace", "ws_1",
+    "--infinite-site-source-key", "site_public_123",
+    "--infinite-production-host", "example.com",
+    "--infinite-static-proxy", "vercel"
+  ]
+
+  it("interactive plan ASKS a consent choice instead of dead-ending on a raw blocker", async () => {
+    const root = copyFixture("static-html-basic")
+    const io = fakeIo({ interactive: true, answers: [false] }) // not gated → not_required
+    const result = await runHarness(parseHarnessArgs(infiniteArgs(root, "--plan")), io, { discover: () => null })
+    expect(io.questions.some((q) => q.toLowerCase().includes("consent banner"))).toBe(true)
+    expect(result.report.steps.find((s) => s.id === "plan")?.status).toBe("ok")
+    expect(result.report.failures).toEqual([])
+  })
+
+  it("non-interactive guides with INF_CONSENT_REQUIRED naming both flags, and never silently collects", async () => {
+    const root = copyFixture("static-html-basic")
+    const io = fakeIo({ interactive: false })
+    const result = await runHarness(parseHarnessArgs(infiniteArgs(root, "--plan")), io, { discover: () => null })
+    expect(io.errLines.some((l) => l.includes("INF_CONSENT_REQUIRED"))).toBe(true)
+    expect(io.errLines.join("\n")).toContain("--infinite-consent-mode not-required")
+    expect(io.errLines.join("\n")).toContain("--infinite-consent-mode required")
+    // The plan still guards: with no decision it does not proceed to install.
+    expect(result.report.steps.find((s) => s.id === "plan")?.status).toBe("failed")
+  })
+
+  it("interactive apply records the chosen mode in the written runtime", async () => {
+    const root = copyFixture("static-html-basic")
+    const io = fakeIo({ interactive: true, answers: [true, true, false] }) // gate=required, install=yes, mark=no
+    const result = await runHarness(parseHarnessArgs([...infiniteArgs(root, "--apply"), "--url", "https://example.com/"]), io, {
+      discover: () => null,
+      fetch: (async () => new Response("<html></html>", { status: 200 })) as unknown as typeof fetch,
+      ...clock(),
+      budgetMs: 3_000,
+      pollIntervalMs: 3_000
+    })
+    expect(result.exitCode).toBe(0)
+    expect(readFileSync(join(root, "index.html"), "utf8")).toContain('"mode":"required"')
+  })
+
+  it("an explicit --infinite-consent-mode skips the prompt entirely", async () => {
+    const root = copyFixture("static-html-basic")
+    const io = fakeIo({ interactive: true, answers: [] })
+    const result = await runHarness(
+      parseHarnessArgs([...infiniteArgs(root, "--plan"), "--infinite-consent-mode", "not-required"]),
+      io,
+      { discover: () => null }
+    )
+    expect(io.questions.some((q) => q.toLowerCase().includes("consent banner"))).toBe(false)
+    expect(result.report.steps.find((s) => s.id === "plan")?.status).toBe("ok")
+  })
+})
+
+describe("server-side checkout detection (harness)", () => {
+  it("surfaces the checkout_started + purchase recommendation in --plan next steps and the proposal", async () => {
+    const root = copyFixture("next-pages-router-basic")
+    write(root, "pages/api/stripe-checkout.ts", "export default async function h(){ await stripe.checkout.sessions.create({}) }\n")
+    write(root, "pages/api/stripe-webhook.ts", "export default function h(req){ const e = stripe.webhooks.constructEvent(req.body, sig, sk); if(e.type==='checkout.session.completed'){} }\n")
+    const io = fakeIo({ interactive: false })
+    const result = await runHarness(
+      parseHarnessArgs(["--plan", "--root", root, "--workspace", "ws_1", "--ga4-measurement-id", "G-NEW00001"]),
+      io,
+      { discover: () => null }
+    )
+    const nextSteps = result.report.nextSteps.join("\n")
+    expect(nextSteps).toContain("checkout_started")
+    expect(nextSteps).toContain("purchase")
+    expect(nextSteps).toContain("pages/api/stripe-checkout.ts")
+    const proposal = JSON.parse(readFileSync(join(root, PROPOSED_CONVERSIONS_RELATIVE_PATH), "utf8"))
+    expect(proposal.serverCheckout?.code).toBe("INF_CHECKOUT_SERVER_SIDE")
+  })
+})

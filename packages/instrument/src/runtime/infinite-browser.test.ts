@@ -32,6 +32,8 @@ interface HarnessOptions {
   downloadDestinationPath?: string
   /** `false` turns unmarked-click autocapture off (absent = on, exactly as 0.6.2). */
   autocapture?: boolean
+  /** `true` counts automation (WebDriver) traffic + lifts loopback — synthetic sandbox only. */
+  allowAutomation?: boolean
 }
 
 function createStorage(initial: Record<string, string> = {}, failWrites = false) {
@@ -149,7 +151,8 @@ function executeTag(options: HarnessOptions = {}) {
     ...(options.downloadDestinationPath
       ? { downloadDestinationPath: options.downloadDestinationPath }
       : {}),
-    ...(options.autocapture === undefined ? {} : { autocapture: options.autocapture })
+    ...(options.autocapture === undefined ? {} : { autocapture: options.autocapture }),
+    ...(options.allowAutomation === undefined ? {} : { allowAutomation: options.allowAutomation })
   })
   const source = tag.replace(/^<script[^>]*>/, "").replace(/<\/script>$/, "")
 
@@ -369,6 +372,34 @@ function buttonTarget(input: {
   }
 }
 
+/** A bare button inside a semantic region (no landmark ancestor) — for the cta_location region
+ *  derivation. `target.closest` returns the region only for the region selector. */
+function regionButtonTarget(input: { id?: string; ariaLabel?: string; dataSection?: string }) {
+  const button = {
+    getAttribute() {
+      return null
+    }
+  }
+  const region = {
+    getAttribute(name: string) {
+      if (name === "id") return input.id ?? null
+      if (name === "aria-label") return input.ariaLabel ?? null
+      if (name === "data-section") return input.dataSection ?? null
+      return null
+    }
+  }
+  return {
+    closest(selector: string) {
+      if (selector === "[data-analytics-cta-id]") return null
+      if (selector === "a[href]") return null
+      if (selector === "button,input[type='button'],input[type='submit'],[role='button']") return button
+      if (selector === "header,nav,main,footer,aside") return null
+      if (selector === 'section[id],section[aria-label],[role="region"],[data-section]') return region
+      return null
+    }
+  }
+}
+
 /** A click target on/inside an element marked data-conversion="signup" — optionally an anchor,
  *  optionally ALSO a generic CTA (for the precedence test). Mirrors managedTarget's fake shape. */
 function signupTarget(input: {
@@ -568,6 +599,75 @@ describe("renderInfiniteBrowserTag", () => {
     expect(real.requests).toHaveLength(1)
   })
 
+  it("allowAutomation counts a WebDriver session and stamps automation:true on the payload", () => {
+    const driven = executeTag({
+      siteSourceKey: "site_public_123",
+      consent: "granted",
+      webdriver: true,
+      allowAutomation: true
+    })
+    // The early-return is skipped, so the page view fires and binds; a later click also fires.
+    expect(driven.requests).toHaveLength(1)
+    expect(driven.requests[0]?.body.eventName).toBe("site_page_view")
+    expect(driven.requests[0]?.body.automation).toBe(true)
+    driven.click(managedTarget({ href: "https://example.com/pricing" }))
+    const click = driven.requests.find((request) => request.body.eventName === "site_click")
+    expect(click?.body.automation).toBe(true)
+    expect(driven.touchedProviders()).toBe(false)
+  })
+
+  it("allowAutomation is the ONLY thing that lets a WebDriver session through — the guard is enforced otherwise", () => {
+    // Same source, WebDriver on, flag OFF: nothing emits (the production default is never counting bots).
+    const guarded = executeTag({ siteSourceKey: "site_public_123", consent: "granted", webdriver: true })
+    expect(guarded.requests).toEqual([])
+  })
+
+  it("does NOT stamp automation on a non-WebDriver visitor even when allowAutomation is set", () => {
+    // A real human hitting the synthetic sandbox is not automation, so its events are unmarked.
+    const human = executeTag({
+      siteSourceKey: "site_public_123",
+      consent: "granted",
+      webdriver: false,
+      allowAutomation: true
+    })
+    expect(human.requests).toHaveLength(1)
+    expect(human.requests[0]?.body.automation).toBeUndefined()
+  })
+
+  it("allowAutomation lifts the loopback-host exclusion, but the production-host allowlist still applies", () => {
+    // A localhost sandbox that explicitly lists localhost as its production host now emits.
+    const sandbox = executeTag({
+      siteSourceKey: "site_public_123",
+      consent: "granted",
+      webdriver: true,
+      allowAutomation: true,
+      href: "http://localhost/",
+      productionHosts: ["localhost"]
+    })
+    expect(sandbox.requests).toHaveLength(1)
+    expect(sandbox.requests[0]?.body.automation).toBe(true)
+
+    // Loopback is still excluded WITHOUT the flag, even with localhost allowlisted.
+    const blocked = executeTag({
+      siteSourceKey: "site_public_123",
+      consent: "granted",
+      href: "http://localhost/",
+      productionHosts: ["localhost"]
+    })
+    expect(blocked.requests).toEqual([])
+
+    // And the allowlist is NOT bypassed: a loopback host not on the list stays silent under the flag.
+    const notAllowlisted = executeTag({
+      siteSourceKey: "site_public_123",
+      consent: "granted",
+      webdriver: true,
+      allowAutomation: true,
+      href: "http://localhost/",
+      productionHosts: ["example.com"]
+    })
+    expect(notAllowlisted.requests).toEqual([])
+  })
+
   it("stamps nav:\"navigate\" on the initial view and nav:\"history\" on History-API route changes (bounded enum), keeping the path-change dedupe", () => {
     const runtime = executeTag({
       siteSourceKey: "site_public_123",
@@ -755,6 +855,29 @@ describe("renderInfiniteBrowserTag", () => {
     })
     expect(JSON.stringify(clicks[0]?.body)).not.toMatch(/email=|plans|Do not collect/)
     expect(runtime.touchedProviders()).toBe(false)
+  })
+
+  it.each([
+    ["section id", { id: "pricing" }, "pricing"],
+    ["section aria-label (normalized)", { ariaLabel: "Buy Now" }, "buy_now"],
+    ["data-section", { dataSection: "hero-section" }, "hero-section"],
+    ["data-section beats id", { dataSection: "checkout", id: "ignored" }, "checkout"],
+    ["role=region aria-label", { ariaLabel: "Feature grid" }, "feature_grid"]
+  ])(
+    "derives cta_location from the nearest semantic region (%s) instead of collapsing to page",
+    (_case, attrs, expected) => {
+      const runtime = executeTag({ siteSourceKey: "site_public_123", consent: "granted" })
+      runtime.click(regionButtonTarget(attrs))
+      const click = runtime.requests.find((request) => request.body.eventName === "site_click")
+      expect((click?.body.properties as { cta_location?: string }).cta_location).toBe(expected)
+    }
+  )
+
+  it("still falls back to page when a region carries no id/aria-label/data-section", () => {
+    const runtime = executeTag({ siteSourceKey: "site_public_123", consent: "granted" })
+    runtime.click(regionButtonTarget({}))
+    const click = runtime.requests.find((request) => request.body.eventName === "site_click")
+    expect((click?.body.properties as { cta_location?: string }).cta_location).toBe("page")
   })
 
   it.each([

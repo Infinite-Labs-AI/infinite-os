@@ -173,3 +173,18 @@ describe("autocapture threading", () => {
     expect(plan.instructions[0]!.snippet).toContain('"autocapture":false')
   })
 })
+
+describe("allowAutomation threading", () => {
+  it("omits the config key when the artifact says nothing (bots are never counted by default)", () => {
+    const plan = infiniteProviderAdapter.plan("static-html", validArtifact, context({ infinite: validArtifact }))
+    // The runtime source names an `allowAutomation` variable; only the serialized CONFIG key matters.
+    expect(plan.instructions[0]!.snippet).not.toContain('"allowAutomation"')
+  })
+
+  it("serializes allowAutomation:true only when the artifact set it", () => {
+    const artifact: InfinitePublicArtifact = { ...validArtifact, allowAutomation: true }
+    const plan = infiniteProviderAdapter.plan("static-html", artifact, context({ infinite: artifact }))
+    expect(plan.blockers).toEqual([])
+    expect(plan.instructions[0]!.snippet).toContain('"allowAutomation":true')
+  })
+})

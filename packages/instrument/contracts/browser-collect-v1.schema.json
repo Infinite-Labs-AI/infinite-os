@@ -113,6 +113,9 @@
         "has_ttclid": { "const": true },
         "has_msclkid": { "const": true }
       }
+    },
+    "automation": {
+      "type": "boolean"
     }
   },
   "allOf": [
@@ -185,5 +188,5 @@
       }
     }
   ],
-  "$comment": "site_page_view properties.nav (infinite-tag 0.6.0): \"navigate\" for the initial document load, \"history\" for a History-API route change — a bounded enum so the cloud can count INITIAL browser page views; older tags omit it, so it is optional. app_download_click destination_path is the per-source same-origin conversion destination (analytics_site_sources.download_destination_path, default /download); hosted external checkout intent stays in site_click with bounded structural destination buckets such as /external/stripe_payment_link, never external URLs. sign_up_click is browser INTENT (a click) with the same optional structural cta properties as site_click; the signup OUTCOME is server-only and never enters this contract."
+  "$comment": "site_page_view properties.nav (infinite-tag 0.6.0): \"navigate\" for the initial document load, \"history\" for a History-API route change — a bounded enum so the cloud can count INITIAL browser page views; older tags omit it, so it is optional. app_download_click destination_path is the per-source same-origin conversion destination (analytics_site_sources.download_destination_path, default /download); hosted external checkout intent stays in site_click with bounded structural destination buckets such as /external/stripe_payment_link, never external URLs. sign_up_click is browser INTENT (a click) with the same optional structural cta properties as site_click; the signup OUTCOME is server-only and never enters this contract. automation is an OPTIONAL client marker the pixel sets true ONLY when it deliberately fired under navigator.webdriver for a synthetic/test sandbox source (infinite-tag scoped --infinite-allow-automation); it is a hint, never trusted as truth — on a production source the ingest counts-and-flags the event as automation (is_bot), on a synthetic source it is a no-op."
 }

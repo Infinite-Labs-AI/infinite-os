@@ -129,6 +129,12 @@ export interface InfinitePublicArtifact {
   apiOrigin?: string
   /** `false` turns unmarked-click autocapture off. Absent = on (the 0.6.1+ default). */
   autocapture?: boolean
+  /**
+   * `true` lets automation-driven browsers (navigator.webdriver) be counted, for SYNTHETIC/TEST
+   * sandbox sources only — never a production source (the installer hard-refuses it on production
+   * hosts). Absent/false = the production default (bots are never counted). See the runtime.
+   */
+  allowAutomation?: boolean
 }
 
 export interface InfiniteBrowserConfig {
@@ -144,6 +150,10 @@ export interface InfiniteBrowserConfig {
   /** `false`: unmarked links/buttons emit nothing; marked CTAs, the conversion destination, Stripe
    *  checkout buckets, data-conversion markers and sign-up paths still emit. Absent = on. */
   autocapture?: boolean
+  /** `true`: count automation-driven browsers (navigator.webdriver) and lift the loopback-host
+   *  exclusion, for SYNTHETIC/TEST sandbox sources only. Every WebDriver event is stamped
+   *  `automation: true`. The installer hard-refuses this on production hosts. Absent = off. */
+  allowAutomation?: boolean
 }
 
 /**

@@ -112,6 +112,8 @@ export interface WorkspaceArtifactOptions {
   infiniteApiOrigin?: string
   /** `--infinite-autocapture on|off` (absent = on). */
   infiniteAutocapture?: boolean
+  /** `--infinite-allow-automation` (absent = off). Synthetic/test sandbox sources ONLY. */
+  infiniteAllowAutomation?: boolean
   packageManager?: PackageManager
 }
 
@@ -120,6 +122,51 @@ export function normalizeInfiniteAutocapture(value: string): boolean {
   if (normalized === "on") return true
   if (normalized === "off") return false
   throw new Error("--infinite-autocapture currently supports only: on, off")
+}
+
+/**
+ * `--infinite-allow-automation` is a SYNTHETIC/TEST-only escape hatch: it counts automation
+ * (WebDriver) traffic and lifts the loopback exclusion so a CI/verify harness can trigger and
+ * verify click autocapture. On a real production source that would silently count bots, so the
+ * installer HARD-REFUSES it unless every configured production host is recognizably a sandbox: a
+ * loopback host, a local/test TLD, or a host whose name marks it a sandbox/preview. This is a
+ * belt-and-suspenders gate — the cloud ingest also quarantines the `automation: true` events it
+ * produces — but the refusal keeps a production site from ever being configured this way.
+ */
+export function isNonProductionAutomationHost(host: string): boolean {
+  const normalized = host.trim().toLowerCase().replace(/^\[|\]$/g, "")
+  if (normalized === "") return false
+  if (
+    normalized === "localhost" ||
+    normalized === "127.0.0.1" ||
+    normalized === "::1" ||
+    normalized === "0.0.0.0"
+  ) {
+    return true
+  }
+  if (
+    /\.(local|localhost|test|example|invalid)$/.test(normalized) ||
+    /(^|[.-])sandbox([.-]|$)/.test(normalized)
+  ) {
+    return true
+  }
+  return false
+}
+
+export const INFINITE_ALLOW_AUTOMATION_NO_SOURCE_ERROR =
+  "--infinite-allow-automation needs an Infinite source (pass --infinite-site-source-key). It is a synthetic/test-only flag."
+
+export function allowAutomationTargetError(hosts: readonly string[]): string | null {
+  if (hosts.length === 0) {
+    return "--infinite-allow-automation requires at least one configured production host, and every one must be a synthetic/test sandbox host (localhost, a .local/.test host, or a *sandbox* host)."
+  }
+  const production = hosts.filter((host) => !isNonProductionAutomationHost(host))
+  if (production.length > 0) {
+    return `--infinite-allow-automation is a synthetic/test-only flag and was refused because ${production
+      .map((host) => JSON.stringify(host))
+      .join(", ")} ${production.length === 1 ? "looks" : "look"} like a PRODUCTION host. Use it only on a sandbox source (localhost, a .local/.test host, or a *sandbox* host) so automation traffic is never counted against a real site.`
+  }
+  return null
 }
 
 export function normalizeInfiniteConsentMode(value: string): InfiniteConsentMode {
@@ -199,7 +246,10 @@ export function coerceWorkspaceArtifacts(value: unknown): WorkspaceInstallArtifa
         ? { downloadDestinationPath: infinite.downloadDestinationPath }
         : {}),
       ...(typeof infinite.apiOrigin === "string" ? { apiOrigin: infinite.apiOrigin } : {}),
-      ...(typeof infinite.autocapture === "boolean" ? { autocapture: infinite.autocapture } : {})
+      ...(typeof infinite.autocapture === "boolean" ? { autocapture: infinite.autocapture } : {}),
+      ...(typeof infinite.allowAutomation === "boolean"
+        ? { allowAutomation: infinite.allowAutomation }
+        : {})
     }
   }
   const runtimeProductionHosts = topLevelProductionHosts ?? artifacts.infinite?.productionHosts
@@ -430,15 +480,21 @@ export function resolveWorkspaceArtifacts(
         : {}),
       ...(artifacts.infinite?.autocapture !== undefined
         ? { autocapture: artifacts.infinite.autocapture }
+        : {}),
+      ...(artifacts.infinite?.allowAutomation !== undefined
+        ? { allowAutomation: artifacts.infinite.allowAutomation }
         : {})
     }
   }
 
-  // Modifiers, not sources: the origin and the autocapture flag attach to an Infinite artifact
-  // that exists for another reason (flags or file) and never fabricate a keyless one.
-  const modified = applyInfiniteAutocapture(
-    applyInfiniteApiOrigin(artifacts, { origin: options.infiniteApiOrigin }),
-    { autocapture: options.infiniteAutocapture }
+  // Modifiers, not sources: the origin, autocapture and allow-automation flags attach to an
+  // Infinite artifact that exists for another reason (flags or file) and never fabricate a keyless one.
+  const modified = applyInfiniteAllowAutomation(
+    applyInfiniteAutocapture(
+      applyInfiniteApiOrigin(artifacts, { origin: options.infiniteApiOrigin }),
+      { autocapture: options.infiniteAutocapture }
+    ),
+    { allowAutomation: options.infiniteAllowAutomation }
   )
   if (modified.infinite !== undefined) artifacts.infinite = modified.infinite
 
@@ -513,6 +569,39 @@ export function applyInfiniteAutocapture(
     infinite: {
       ...artifacts.infinite,
       autocapture: options.autocapture
+    }
+  }
+}
+
+/**
+ * Layer `--infinite-allow-automation` onto a resolved/discovered Infinite artifact. Unlike the
+ * other modifiers this one is a SAFETY GATE: it is a synthetic/test-only flag, so it refuses to
+ * fabricate a keyless source (there is nothing to instrument) AND hard-refuses when any configured
+ * production host looks like a real production host. Only `true` is meaningful — off is the
+ * production default, so undefined/false is a no-op that never throws.
+ */
+export function applyInfiniteAllowAutomation(
+  artifacts: WorkspaceInstallArtifacts,
+  options: { allowAutomation?: boolean }
+): WorkspaceInstallArtifacts {
+  if (options.allowAutomation !== true) {
+    return artifacts
+  }
+  if (artifacts.infinite === undefined) {
+    throw new Error(INFINITE_ALLOW_AUTOMATION_NO_SOURCE_ERROR)
+  }
+  const hosts = [
+    ...new Set([...(artifacts.infinite.productionHosts ?? []), ...(artifacts.productionHosts ?? [])])
+  ]
+  const error = allowAutomationTargetError(hosts)
+  if (error) {
+    throw new Error(error)
+  }
+  return {
+    ...artifacts,
+    infinite: {
+      ...artifacts.infinite,
+      allowAutomation: true
     }
   }
 }

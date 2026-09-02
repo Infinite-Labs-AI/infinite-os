@@ -34,13 +34,16 @@ import {
 import {
   PROPOSED_CONVERSIONS_RELATIVE_PATH,
   applyConversions,
+  detectServerCheckout,
   ensureProposedIgnored,
   proposeConversions,
   readApprovedConversions,
+  renderServerCheckoutRecommendation,
   writeProposal,
   type ApplyConversionsResult,
   type ApprovedConversions,
-  type ConversionProposal
+  type ConversionProposal,
+  type ServerCheckoutRecommendation
 } from "./marking.js"
 import { recordHarnessFile } from "./outputs.js"
 import { REPORT_SENT_LINE, buildHarnessReportPayload, reportNotSentLine, type ReportSink } from "./report-sink.js"
@@ -129,6 +132,8 @@ interface Ctx {
   /** Preflight's verdict, ignoring the harness's own .infinite/ outputs and gitignore block. */
   treeCleanForHarness: boolean
   proposal?: ConversionProposal
+  /** Server-side checkout recommendation surfaced this run (detection only, never an edit). */
+  serverCheckout?: ServerCheckoutRecommendation
   marking?: ApplyConversionsResult
   verifyResult?: VerifyLanesResult
   /** Providers this run wrote (install/upgrade) — the lanes verification reads back. */
@@ -218,6 +223,9 @@ function renderProposalTable(proposal: ConversionProposal): string {
     `Proposed conversions (${proposal.rows.length}) — data-analytics-cta-id / location / element:`,
     ...rows,
     ...(proposal.skipped.length > 0 ? [`  (${proposal.skipped.length} element${proposal.skipped.length === 1 ? "" : "s"} skipped: already marked, download destination, Stripe host, or no destination)`] : []),
+    ...(proposal.serverCheckout
+      ? ["Server-side checkout (detection — not marked, emit these server-side):", ...renderServerCheckoutRecommendation(proposal.serverCheckout).map((line) => `  - ${line}`)]
+      : []),
     `Edit ${PROPOSED_CONVERSIONS_RELATIVE_PATH} to rename or drop rows, then re-run with --conversions ${PROPOSED_CONVERSIONS_RELATIVE_PATH}.`
   ].join("\n")
 }
@@ -380,11 +388,55 @@ const classify: RunbookStep<Ctx> = {
   failure: { code: "INF_PLAN_BLOCKED", message: () => "classification failed", next: "halt" }
 }
 
+// Consent is a GUIDED CHOICE, never a silent default and never a raw dead-end. When an Infinite
+// source will be installed with no consent decision, the provider would otherwise emit a plan
+// blocker; instead, in an interactive run we ASK (clear copy, both options, DNT/GPC explained) and
+// record the answer before planning; in a non-interactive run we print the same guidance naming
+// the exact flag to pass (never auto-picking a mode — not-required still collects by default).
+export const INFINITE_CONSENT_EXPLAINER = [
+  "Infinite first-party analytics needs one consent decision before it can collect:",
+  "  • not-required — collect by default; DNT/GPC visitors are still suppressed (most first-party sites).",
+  "  • required — collection stays OFF until your own consent banner grants it (DNT/GPC honored as the default)."
+].join("\n")
+export const INFINITE_CONSENT_PROMPT = "Gate Infinite analytics behind an explicit consent banner? [y/N] "
+export const INFINITE_CONSENT_NONINTERACTIVE =
+  "inf-guidance: INF_CONSENT_REQUIRED — Infinite analytics needs a consent decision. Re-run with --infinite-consent-mode not-required to collect by default (DNT/GPC still suppress), or --infinite-consent-mode required to gate collection on your own consent banner."
+
+async function resolveInfiniteConsent(ctx: Ctx): Promise<void> {
+  if (!ctx.keys) return
+  if (ctx.args.mode !== "plan" && ctx.args.mode !== "apply") return
+  if (ctx.args.brief) return
+  const infinite = ctx.keys.artifacts.infinite
+  if (!infinite?.siteSourceKey || infinite.consentMode !== undefined) return
+  // Only when Infinite will actually be INSTALLED: planning maps the artifact into the runtime for
+  // an install/upgrade only, which is the only case the provider's consent blocker fires.
+  const installing = ctx.classifications.some(
+    (entry) => entry.provider === "infinite" && (entry.action === "install" || entry.action === "upgrade")
+  )
+  if (!installing) return
+
+  if (ctx.io.interactive) {
+    narrate(ctx, INFINITE_CONSENT_EXPLAINER)
+    const gated = await ctx.io.confirm(INFINITE_CONSENT_PROMPT, false)
+    ctx.keys.artifacts.infinite = { ...infinite, consentMode: gated ? "required" : "not_required" }
+    narrate(
+      ctx,
+      gated
+        ? "Consent mode: required — collection stays off until your consent UI grants it. Pass --infinite-consent-mode required to skip this next time."
+        : "Consent mode: not-required — collecting by default; DNT/GPC visitors are still suppressed. Pass --infinite-consent-mode not-required to skip this next time."
+    )
+  } else {
+    // Never silently collect: leave consent unset (the plan blocker still guards it) but guide.
+    ctx.io.err(INFINITE_CONSENT_NONINTERACTIVE)
+  }
+}
+
 const plan: RunbookStep<Ctx> = {
   id: "plan",
   title: "Plan",
-  run(ctx) {
+  async run(ctx) {
     if (!ctx.inspect || !ctx.keys) throw new Error("inspect did not run")
+    await resolveInfiniteConsent(ctx)
     ctx.planResult = buildHarnessPlan({
       root: ctx.root,
       inspect: ctx.inspect,
@@ -542,6 +594,15 @@ const conversions: RunbookStep<Ctx> = {
     const appRoot = ctx.inspect?.appRoot ?? "."
     const downloadDestinationPath = ctx.keys?.artifacts.infinite?.downloadDestinationPath
 
+    // Detection-only: a server checkout entry (and its webhook fulfillment) can't be marked by a
+    // client button, so recommend emitting checkout_started + purchase server-side as a pair.
+    ctx.serverCheckout = detectServerCheckout({ root: ctx.root, appRoot }) ?? undefined
+    if (ctx.serverCheckout) {
+      for (const line of renderServerCheckoutRecommendation(ctx.serverCheckout)) {
+        if (!ctx.report.nextSteps.includes(line)) ctx.report.nextSteps.push(line)
+      }
+    }
+
     let approved: ApprovedConversions | null = null
     if (ctx.args.conversions) {
       approved = readApprovedConversions(ctx.root, ctx.args.conversions)
@@ -553,6 +614,7 @@ const conversions: RunbookStep<Ctx> = {
       if (ctx.declined) return { skipped: "install not approved; nothing marked" }
     } else {
       ctx.proposal = proposeConversions({ root: ctx.root, appRoot, downloadDestinationPath })
+      if (ctx.serverCheckout) ctx.proposal.serverCheckout = ctx.serverCheckout
       writeProposal(ctx.root, ctx.proposal)
       ensureProposedIgnored(ctx.root)
       ctx.report.conversions = { proposed: ctx.proposal.rows.length, marked: 0, skipped: ctx.proposal.skipped.length, stale: 0 }
