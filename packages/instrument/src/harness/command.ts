@@ -5,7 +5,7 @@
 import { stderr, stdin, stdout } from "node:process"
 import { createInterface } from "node:readline"
 
-import { parseHarnessArgs, type HarnessArgs } from "./args.js"
+import { HARNESS_HELP_LINES, parseHarnessArgs, type HarnessArgs } from "./args.js"
 import { runHarness, type HarnessDeps, type HarnessIo } from "./run.js"
 
 export const EXIT_OK = 0
@@ -68,6 +68,13 @@ export interface RunHarnessCommandOptions {
 export async function runHarnessCommand(argv: readonly string[], options: RunHarnessCommandOptions = {}): Promise<number> {
   const interactive = options.io?.interactive ?? isInteractiveTerminal(options.env)
   const io = options.io ?? terminalIo(interactive)
+  // The one flag every agent tries first.
+  if (argv[0] === "--help" || argv[0] === "-h" || argv[0] === "help") {
+    io.out("Usage: infinite-tag harness [--check | --plan | --apply | --verify-only] [flags]")
+    io.out("")
+    for (const line of HARNESS_HELP_LINES) io.out(line)
+    return EXIT_OK
+  }
   let args: HarnessArgs
   try {
     args = parseHarnessArgs(argv)

@@ -164,6 +164,11 @@ export {
   unmarkConversions
 } from "./harness/marking.js"
 export {
+  HARNESS_OUTPUTS_RELATIVE_PATH,
+  readHarnessOutputs,
+  removeHarnessOutputs
+} from "./harness/outputs.js"
+export {
   InfiniteCloudBackend,
   NoneBackend,
   PosthogQueryBackend,

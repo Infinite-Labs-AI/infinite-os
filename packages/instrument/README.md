@@ -415,7 +415,8 @@ marking step writes exactly those two attributes. It is three phases with a huma
 1. **Propose (read-only).** The app's source is scanned (same bounds as provider detection) for
    `<a>`, `<Link>` and `<button>` elements. Each gets a `cta_id` token (`^[A-Za-z0-9_-]{1,64}$`)
    derived from its visible text, then its href, then its tag, with evidence
-   `{ file, line, tag, hrefOrHandler, textSnippet, lineHash }` — the sha256 of the exact line.
+   `{ file, line, column, tag, hrefOrHandler, textSnippet, lineHash }` — the element's offset in
+   the line and the sha256 of the exact line, so two candidates on one line are two rows.
    Elements the runtime already counts are skipped and listed: the download destination,
    Stripe hosts, anything carrying `data-conversion` or already marked. The proposal is written to
    `.infinite/conversions.proposed.json` and **gitignored by the harness** inside a
@@ -425,9 +426,11 @@ marking step writes exactly those two attributes. It is three phases with a huma
    contract. The non-interactive path is `--conversions <file>`: edit the proposal (rename, drop
    rows) and pass it back. `--no-mark` skips the phase.
 3. **Apply.** Each row is located by its line hash (the recorded line number is a hint — the
-   installer's own `<head>` injection shifting lines never stales a mark), the attributes are
-   inserted right after the tag name and nothing else on the line is touched — no `id`, `class`,
-   `href` or handler. Every write is recorded with before/after hashes in
+   installer's own `<head>` injection shifting lines never stales a mark) and the proposed tag
+   must still sit at the recorded column; the attributes are inserted right after that tag name
+   and nothing else on the line is touched — no `id`, `class`, `href` or handler. Several rows on
+   one line are applied right-to-left and share the line's after-hash. Only `--apply` marks:
+   `--plan --conversions <file>` validates and counts the file and writes nothing. Every write is recorded with before/after hashes in
    `.infinite/conversions.json`; `unmarkConversions` (exported) removes exactly the inserted text,
    hash-gated on both sides. A changed line is reported as `INF_MARK_STALE_ELEMENT` for that row
    and the rest still apply; re-running with the same file is a no-op.
@@ -472,10 +475,22 @@ unreachable is reported as exactly that — never as a receipt, never as a failu
 | `--brief` | write `.infinite/harness-brief.json` and stop |
 | `--workspace`, `--root`, `--app-root`, `--package-manager`, the artifact flags | as for `install` |
 
+With `--json`, stdout carries exactly one JSON document (the report); every preview, proposal
+table and brief goes to stderr.
+
 Every run that writes ends with `.infinite/REPORT.md` — the table, the failures, the conversion
 counts, a "Verify before merging" checklist — and the pasteable line for your agent:
 
 > Open `.infinite/REPORT.md` and work through its 'Verify before merging' checklist: investigate each item, then list the changes you'd make and get my approval before applying any of them.
+
+### Uninstall
+
+`infinite-tag uninstall` reverses the managed install only. The harness's own writes are recorded
+separately and reversed by the exported functions: `.infinite/conversions.json` (every marked
+element, before/after hashes) → `unmarkConversions(root)`; `.infinite/harness.json` (REPORT.md, the
+proposal, the brief, conversions.json, and the `.gitignore` fenced block with whether the file was
+created) → `removeHarnessOutputs(root)`, which deletes only recorded `.infinite/` files and strips
+the block only when it is byte-identical. Wiring both into `uninstall` is a follow-up.
 
 ## Proxy Matrix
 
