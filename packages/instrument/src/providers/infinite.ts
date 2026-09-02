@@ -133,9 +133,11 @@ function runtimeInstruction(
     provider: "infinite",
     snippet: isHtmlInjectedFramework(framework)
       ? renderInfiniteBrowserTag(config)
-      : renderInfiniteBrowserTag(config)
-          .replace(/^<script[^>]*>/, "")
-          .replace(/<\/script>$/, "")
+      : // Case-insensitive so an uppercase <SCRIPT> is stripped too (defensive; our own renderer
+        // always emits lowercase). Runs only for the Next JS-module path, never HTML injection.
+        renderInfiniteBrowserTag(config)
+          .replace(/^<script[^>]*>/i, "")
+          .replace(/<\/script>$/i, "")
   }
 }
 

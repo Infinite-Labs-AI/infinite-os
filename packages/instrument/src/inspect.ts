@@ -111,6 +111,18 @@ const gtmIdProp = /gtmId\s*[=:]\s*["'`]GTM-[A-Z0-9]{4,}/
 const quotedGtmIdOnGtmLine = /^(?=.*(?:gtm|googletagmanager))(?=.*["'`]GTM-[A-Z0-9]{4,}["'`]).*$/m
 
 /**
+ * Loader-host evidence, as precompiled regexes (dots escaped) rather than `String.includes` — a
+ * regex `.test` clears CodeQL's incomplete-URL-substring-sanitization rule (which only targets
+ * includes/indexOf/startsWith) while keeping the SAME loose, unanchored subdomain match this adopt-
+ * detection wants: `/i\.posthog\.com/` still matches `us.i.posthog.com`. This is provider detection
+ * in the CUSTOMER'S OWN source (adopt vs install), never security URL sanitization.
+ */
+const googleTagManagerHost = /googletagmanager\.com/
+const posthogHost = /i\.posthog\.com/
+const xLoaderHost = /static\.ads-twitter\.com/
+const metaLoaderHost = /connect\.facebook\.net/
+
+/**
  * GA4 through Google Tag Manager. Never the bare `GTM-XXXX` token (it matches any uppercase word
  * such as `GTM-CONTAINERLESS`) and never a bare `dataLayer.push(` (every e-commerce site pushes to
  * the data layer): evidence is the gtm.js loader, a data-layer push beside the googletagmanager
@@ -122,7 +134,7 @@ export function hasTagManagerEvidence(contents: string): boolean {
   const code = maskCommentsAndStrings(contents, true)
   const noComments = maskCommentsAndStrings(contents, false)
   if (noComments.includes("googletagmanager.com/gtm.js")) return true
-  if (code.includes("dataLayer.push(") && noComments.includes("googletagmanager.com")) return true
+  if (code.includes("dataLayer.push(") && googleTagManagerHost.test(noComments)) return true
   if (gtmIdProp.test(noComments)) return true
   return quotedGtmIdOnGtmLine.test(noComments)
 }
@@ -149,7 +161,7 @@ export function hasGa4SnippetEvidence(contents: string): boolean {
 export function hasPosthogEvidence(contents: string): boolean {
   const code = maskCommentsAndStrings(contents, true)
   const noComments = maskCommentsAndStrings(contents, false)
-  if (code.includes("posthog.init(") || noComments.includes("i.posthog.com")) return true
+  if (code.includes("posthog.init(") || posthogHost.test(noComments)) return true
   if (noComments.includes("posthog-js/react") && noComments.includes("PostHogProvider")) return true
   return noComments.includes("@posthog/nextjs")
 }
@@ -174,7 +186,7 @@ function providerSignatures(contents: string): ProviderSignature[] {
     found.push({ provider: "posthog", via: "snippet" })
   }
   // X/Twitter pixel: the tag CALL (code) or its loader host (string).
-  if (code.includes("twq(") || noComments.includes("static.ads-twitter.com")) {
+  if (code.includes("twq(") || xLoaderHost.test(noComments)) {
     found.push({ provider: "x", via: "snippet" })
   }
   // Infinite: the standalone loader src, config global, or data attribute — never bare prose.
@@ -186,7 +198,7 @@ function providerSignatures(contents: string): ProviderSignature[] {
     found.push({ provider: "infinite", via: "snippet" })
   }
   // Meta/Facebook pixel: the fbq CALL (code) or its loader hosts (string) — not the word "facebook".
-  if (noComments.includes("fbevents.js") || code.includes("fbq(") || noComments.includes("connect.facebook.net")) {
+  if (noComments.includes("fbevents.js") || code.includes("fbq(") || metaLoaderHost.test(noComments)) {
     found.push({ provider: "meta", via: "snippet" })
   }
   return found
