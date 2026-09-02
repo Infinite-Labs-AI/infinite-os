@@ -1843,6 +1843,24 @@ export async function runCli(
       await runAnalyticsCommand(analyticsArgs, analyticsEnv);
       return;
     }
+    // `--check` is read-only: local, writes nothing, contacts no cloud. It runs WITHOUT the
+    // readiness gate so an unpaid founder can see the state table for their site — and when
+    // Desktop is not ready, the report ends with the onboarding prompt instead.
+    if (isReadOnlyAnalyticsInvocation(analyticsArgs)) {
+      const ready =
+        resolveMode(
+          env as NodeJS.ProcessEnv,
+          { inputIsTTY: input.isTTY === true, outputIsTTY: output.isTTY === true },
+          await buildModeDeps(env)
+        ) === "cloud";
+      const code = await runAnalyticsCommand(analyticsArgs, analyticsEnv);
+      if (!ready) {
+        // With --json stdout must stay one document, so the prompt rides on stderr there.
+        (analyticsArgs.includes("--json") ? errorOutput : output).write(`${ANALYTICS_ONBOARDING_PROMPT}\n`);
+      }
+      if (code !== 0) process.exitCode = code;
+      return;
+    }
     await runProductWithDesktopPreflight(env, async () => {
       const code = await runAnalyticsCommand(analyticsArgs, analyticsEnv);
       if (code !== 0) process.exitCode = code;
@@ -1906,6 +1924,23 @@ export async function runCli(
 
   // (4)–(8) Everything else is a product one-shot TURN.
   await runProductOneShot(normalizedArgs, env);
+}
+
+/** The line a not-ready Desktop appends to an ungated `infinite analytics --check` report. */
+export const ANALYTICS_ONBOARDING_PROMPT =
+  "Complete onboarding in Infinite Desktop to install, mark and verify: open infinite://onboarding (or run `npx infinite-os@latest`).";
+
+/**
+ * `infinite analytics --check` and nothing that writes or reaches the cloud: `--check` present
+ * and none of the other depth flags. (Two depth flags are rejected by the harness parser anyway.)
+ */
+export function isReadOnlyAnalyticsInvocation(args: readonly string[]): boolean {
+  return (
+    args.includes("--check") &&
+    !args.includes("--plan") &&
+    !args.includes("--apply") &&
+    !args.includes("--verify-only")
+  );
 }
 
 /** Top-level `--project` detection (`--project X` or `--project=X`), any position. */

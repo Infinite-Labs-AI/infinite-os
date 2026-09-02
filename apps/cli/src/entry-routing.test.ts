@@ -11,7 +11,7 @@ import {
 import { createRequire, syncBuiltinESMExports } from "node:module";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { runCli, runInteractiveEntry } from "./index.js";
+import { ANALYTICS_ONBOARDING_PROMPT, runCli, runInteractiveEntry } from "./index.js";
 import type { OnboardingDeps } from "./desktop/onboarding.js";
 
 // ── §6.6 canonical entry routing (Phase 3) ───────────────────────────────────
@@ -665,7 +665,7 @@ describe("analytics command interception", () => {
   });
 
   it.each(NOT_READY_STATES)(
-    "`infinite analytics --check` with live bridge but %s state prints onboarding guidance and touches nothing",
+    "`infinite analytics --plan` with live bridge but %s state prints onboarding guidance and touches nothing",
     async (_label, state) => {
       const restoreTty = forceTty(false);
       const restorePlatform = forcePlatform("darwin");
@@ -697,6 +697,40 @@ describe("analytics command interception", () => {
     }
   );
 
+  it.each(NOT_READY_STATES)(
+    "`infinite analytics --check` is ungated: with %s state it prints the state table and ends with the onboarding prompt",
+    async (_label, state) => {
+      const restoreTty = forceTty(false);
+      const restorePlatform = forcePlatform("darwin");
+      const home = createCanonicalDesktopHome();
+      createFakeDesktopApp(home.userHome);
+      const site = makeSiteRepo();
+      const bootId = `boot-analytics-check-${_label}`;
+      writeDesktopBridge(home.growthHome, { bootId });
+      if (state) writeDesktopState(home.growthHome, state);
+      try {
+        const { stdout, stderr, code, sentTurn } = await runCliCaptured(
+          ["analytics", "--check", "--root", site, "--ga4-measurement-id", "G-GATE0001"],
+          { ...home.env, INFINITE_ARTIFACTS_DIR: join(site, "no-artifacts") },
+          { fetchImpl: (input, init) => readyDesktopFetch(bootId, input, init) }
+        );
+        expect(code).toBe(0);
+        expect(stdout).toContain("Infinite analytics harness");
+        expect(stdout).toContain("server_lane");
+        expect(stdout.trimEnd().endsWith(ANALYTICS_ONBOARDING_PROMPT)).toBe(true);
+        expect(stdout).toContain("infinite://onboarding");
+        expect(sentTurn).toBe(false);
+        expect(existsSync(join(site, ".infinite"))).toBe(false);
+        assertNoCustomerFallbackCopy(`${stdout}${stderr}`);
+      } finally {
+        restorePlatform();
+        restoreTty();
+        rmSync(home.root, { recursive: true, force: true });
+        rmSync(site, { recursive: true, force: true });
+      }
+    }
+  );
+
   it("`infinite analytics --check` with a live ready bridge runs the harness", async () => {
     const restoreTty = forceTty(false);
     const restorePlatform = forcePlatform("darwin");
@@ -713,6 +747,7 @@ describe("analytics command interception", () => {
       );
       expect(stdout).toContain("Infinite analytics harness");
       expect(stdout).toContain("server_lane");
+      expect(stdout).not.toContain(ANALYTICS_ONBOARDING_PROMPT);
       expect(code).toBe(0);
     } finally {
       restorePlatform();

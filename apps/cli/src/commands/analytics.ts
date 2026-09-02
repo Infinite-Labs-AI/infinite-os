@@ -44,8 +44,8 @@ export const ANALYTICS_USAGE = [
   "Verification reads receipts through the cloud when INFINITE_API_TOKEN is set (INFINITE_API_ORIGIN",
   "overrides the host); otherwise providers print 'installed, not verifiable' and the report says why.",
   "",
-  "Needs Infinite Desktop signed in with an active subscription (the standalone `npx infinite-tag",
-  "harness` does not)."
+  "Everything but --help and the read-only --check needs Infinite Desktop signed in with an active",
+  "subscription (the standalone `npx infinite-tag harness` does not)."
 ].join("\n");
 
 export const DEFAULT_INFINITE_API_ORIGIN = "https://api.ultima.inc";
