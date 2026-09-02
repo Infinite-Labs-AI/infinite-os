@@ -416,7 +416,8 @@ infinite analytics [--check | --plan | --apply | --verify-only] [flags]         
 
 `infinite analytics` adds only what the standalone tag cannot know — the Desktop's active
 workspace, the public keys `infinite setup` saved under `~/.infinite/artifacts/<workspaceId>.json`,
-and a cloud verification backend — then runs the same eleven steps. The `infinite` CLI is fully
+and a verification backend that reads receipts back through the running Desktop (the CLI holds no
+cloud credential; the app makes the call with its own session) — then runs the same eleven steps. The `infinite` CLI is fully
 paid: `--plan`, the default apply, `--verify-only` — anything that writes or reaches the cloud —
 goes through the same Desktop readiness gate as the rest of the product (signed in, workspace
 linked, subscription active) and prints the standard onboarding guidance otherwise, touching
@@ -515,14 +516,34 @@ tags fire only when a real browser opens the page during the window; the CLI say
 
 | Provider | Standalone `infinite-tag harness` | `infinite analytics` |
 |---|---|---|
-| Infinite pixel, GA4, server lane | `installed, not verifiable (run infinite analytics from the desktop CLI to verify)` | read back through the cloud (`POST /api/analytics/verify`, bearer auth) when `INFINITE_API_TOKEN` is set |
+| Infinite pixel, GA4, server lane | `installed, not verifiable (run infinite analytics from the desktop CLI to verify)` | read back **through the running Infinite Desktop** — the CLI POSTs the app's loopback bridge (`analytics.verify.v1`) and the app calls `POST /api/analytics/verify` with its own session, so no token is ever handled here |
 | PostHog | with `--posthog-query-key <personal key with Query Read>`: one bounded HogQL poll for a `$pageview` since the load, on the region's app host; without it, `not verifiable (no query key)` | same, then the cloud |
 | Meta | never verifiable at install time: `open Events Manager → Test Events` | same |
 | adopted / GTM | `adopted, not ours to verify` | same |
 
+After the report step, `infinite analytics` sends the state table (state, one evidence clause,
+file path, verification word + receipt timestamp — never file contents, DOM text or keys; provider
+ids quoted in a conflict clause are redacted to `<id>`) to Infinite **through the running Desktop**
+(`analytics.report.v1` — the app POSTs `POST /api/analytics/harness-report` with its own session and
+its active workspace), so Site Settings › Analytics shows what the run found. The run ends with
+`Report sent to Infinite.` or `Report not sent (<reason>).` — an app that is not ready names its
+state, an app too old to carry the verb says update, no app says open it — and a failed send never
+fails the run. `--api-token-env` sends straight to the cloud instead; `--check` never reports, and
+the standalone `npx infinite-tag harness` has no session to report to.
+
 A backend answer of `verified` without a receipt timestamp is downgraded to `not verifiable` and
 says so. A cloud that rejects the session (401/403), has no verify route yet (404), or is
-unreachable is reported as exactly that — never as a receipt, never as a failure of your site.
+unreachable is reported as exactly that — never as a receipt, never as a failure of your site. The
+same honesty covers the app: a Desktop that is signed out, unlinked, unsubscribed or still booting
+answers `409 not_ready` **before** any cloud read, and the lane reads
+`not verifiable (Infinite Desktop is not ready (<state>) — complete onboarding)`; a Desktop too old
+to carry the verb says `update the Infinite app`.
+
+With no Desktop at all (CI, a server), `infinite analytics --api-token-env [NAME]` opts explicitly
+into the direct cloud backend, reading a bearer from `NAME` (default `INFINITE_API_TOKEN`);
+`INFINITE_API_ORIGIN` overrides the host. It is an advanced escape hatch: a token found in the
+environment is **never** used implicitly, because a stale one silently verifying against another
+account is worse than an honest "not verifiable".
 
 ### Flags
 

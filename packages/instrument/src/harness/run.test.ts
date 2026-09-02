@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it } from "vitest"
 import { parseHarnessArgs } from "./args.js"
 import { EXIT_ARGS, EXIT_FAILED, EXIT_OK, runHarnessCommand } from "./command.js"
 import { PROPOSED_CONVERSIONS_RELATIVE_PATH } from "./marking.js"
+import { REPORT_SENT_LINE, reportNotSentLine, type HarnessReportPayload, type ReportSink } from "./report-sink.js"
 import { runHarness, type HarnessIo } from "./run.js"
 import { HARNESS_REPORT_RELATIVE_PATH } from "./state.js"
 import type { VerificationBackend } from "./verify.js"
@@ -171,6 +172,56 @@ describe("runHarness --plan", () => {
     expect(existsSync(join(root, ".infinite/install.json"))).toBe(false)
     expect(readFileSync(join(root, "index.html"), "utf8")).not.toContain("data-analytics-cta-id")
     expect(io.outLines.join("\n")).toContain("Paste this to your agent:")
+  })
+})
+
+describe("runHarness reportSink", () => {
+  function captureSink(result: { sent: true } | { sent: false; reason: string } = { sent: true }) {
+    const payloads: HarnessReportPayload[] = []
+    const sink: ReportSink = { name: "capture", send: async (payload) => { payloads.push(payload); return result } }
+    return { sink, payloads }
+  }
+
+  it("sends the state table after the report step and prints the sent line", async () => {
+    const root = copyFixture("static-html-basic")
+    write(root, "index.html", `<!doctype html><html><head>${GTAG}</head><body><a href="/go">Go</a></body></html>`)
+    const { sink, payloads } = captureSink()
+    const io = fakeIo()
+    const result = await runHarness(parseHarnessArgs(["--plan", "--root", root, "--workspace", "proj_1"]), io, { discover: () => null, reportSink: sink })
+    expect(result.exitCode).toBe(0)
+    expect(payloads).toHaveLength(1)
+    expect(payloads[0]).toMatchObject({ engineProjectId: "proj_1", ranAt: result.report.startedAt, framework: "static-html", hosting: result.report.hosting })
+    expect(payloads[0].providers.ga4).toMatchObject({ state: "adopted", evidenceFile: "index.html", verification: { state: "adopted_not_ours" } })
+    expect(Object.keys(payloads[0].providers)).toHaveLength(7)
+    expect(JSON.stringify(payloads[0])).not.toContain(root)
+    expect(io.outLines).toContain(REPORT_SENT_LINE)
+  })
+
+  it("--check never reports, and a failed send never fails the run", async () => {
+    const root = copyFixture("static-html-basic")
+    const { sink, payloads } = captureSink({ sent: false, reason: "the cloud was unreachable" })
+    const checkIo = fakeIo()
+    const check = await runHarness(parseHarnessArgs(["--check", "--root", root, "--workspace", "proj_1"]), checkIo, { discover: () => null, reportSink: sink })
+    expect(check.exitCode).toBe(0)
+    expect(payloads).toHaveLength(0)
+    expect(checkIo.outLines.join("\n")).not.toContain("Report")
+
+    const planIo = fakeIo()
+    const plan = await runHarness(parseHarnessArgs(["--plan", "--root", root, "--workspace", "proj_1", "--json"]), planIo, { discover: () => null, reportSink: sink })
+    expect(plan.exitCode).toBe(0)
+    expect(payloads).toHaveLength(1)
+    // --json: stdout is still exactly one document; the not-sent line rides stderr.
+    expect(() => JSON.parse(planIo.outLines.join("\n"))).not.toThrow()
+    expect(planIo.errLines).toContain(reportNotSentLine("the cloud was unreachable"))
+  })
+
+  it("a run that halted before inspecting sends nothing — seven unobserved rows are not a report", async () => {
+    const root = copyFixture("unsupported-basic")
+    const { sink, payloads } = captureSink()
+    const io = fakeIo()
+    await runHarness(parseHarnessArgs(["--plan", "--root", root, "--workspace", "proj_1"]), io, { discover: () => null, reportSink: sink })
+    expect(payloads).toHaveLength(0)
+    expect(io.outLines).toContain(reportNotSentLine("the run did not reach the report step"))
   })
 })
 

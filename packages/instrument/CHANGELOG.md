@@ -53,12 +53,22 @@ All notable changes to the `infinite-tag` npm package (`packages/instrument`). V
   exact element after a line-hash pre-image check, recorded and reversible via
   `.infinite/conversions.json`. Elements the runtime already counts (download destination, Stripe hosts,
   `data-conversion`) are never double-marked.
-- **Verification backends.** `NoneBackend` (standalone: `installed, not verifiable`), `InfiniteCloudBackend`
+- **Verification backends.** `NoneBackend` (standalone: `installed, not verifiable`), `DesktopBridgeBackend`
+  (the running Infinite Desktop reads the receipts back on the CLI's behalf), `InfiniteCloudBackend`
   (`POST /api/analytics/verify`, 60 s / 3 s polling, honest states for 401/404/unreachable),
   `PosthogQueryBackend` (optional `--posthog-query-key`, one bounded HogQL `$pageview` poll). Meta is never
   claimed verified at install time.
+- **Verification rides the Desktop bridge — no tokens.** `DesktopBridgeBackend` POSTs the app's loopback
+  verb `analytics.verify.v1` (1bu-1 `apps/desktop/src/main/brain/agent/analytics-verify-bridge.ts`), and the
+  app — which holds the session and the active workspace — makes the cloud call and returns its status and
+  body verbatim, so every Wave 1 decoding still applies. Its one extra shape is `409 not_ready`: the app
+  refusing BEFORE it spends a cloud read, naming the exact blocker (`signed_out` / `no_linked_workspace` /
+  `subscription_required` / `no_provider` / `booting`). Requires a Desktop that advertises the capability;
+  an older one reads `update the Infinite app`.
 - **`infinite analytics`** in the `infinite` CLI runs the same runbook with the Desktop's active workspace
-  and the saved artifacts, wiring the cloud backend when `INFINITE_API_TOKEN` is set and saying so when not.
+  and the saved artifacts, verifying through the Desktop bridge by default and saying which backend answered.
+  A cloud bearer in the environment is never used implicitly: `--api-token-env [NAME]` (default
+  `INFINITE_API_TOKEN`) is an explicit, advanced escape hatch for machines with no Desktop.
   It sits behind the CLI's Desktop readiness gate (the `infinite` CLI is paid; only `--help` and the
   read-only `--check` are ungated, and a not-ready `--check` ends with the onboarding prompt); the
   standalone `infinite-tag harness` is not gated. A 402 from the cloud verify

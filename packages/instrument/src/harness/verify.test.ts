@@ -3,6 +3,8 @@ import { describe, expect, it, vi } from "vitest"
 import { VERIFY_USER_AGENT } from "../server-lane/verify.js"
 
 import {
+  DESKTOP_UPDATE_REQUIRED_REASON,
+  DesktopBridgeBackend,
   InfiniteCloudBackend,
   NoneBackend,
   PosthogQueryBackend,
@@ -203,6 +205,150 @@ describe("InfiniteCloudBackend entitlement gate (requireActiveSubscriptionOr402)
   it("a plain 503 with no body still reads as the route being unavailable", async () => {
     const result = await make(async () => new Response("", { status: 503 })).verify(input)
     expect(result.ga4).toEqual({ state: "not_verifiable", reason: "the cloud verify route was unavailable (HTTP 503)" })
+  })
+})
+
+describe("DesktopBridgeBackend", () => {
+  const input = { url: "https://example.com/", since: "2026-09-02T10:00:00.000Z", lanes: ["ga4", "infinite"] as VerifyLane[] }
+  function make(fetchImpl: () => Promise<Response>) {
+    return new DesktopBridgeBackend({
+      bridgeUrl: "http://127.0.0.1:54321",
+      token: "bridge_tok",
+      fetch: fetchImpl as unknown as typeof fetch,
+      ...clock()
+    })
+  }
+
+  it("polls the app's loopback bridge with the LOCAL bearer and no engineProjectId — the desktop supplies it", async () => {
+    const calls: Array<{ url: string; init: RequestInit }> = []
+    const responses = [
+      jsonResponse(200, { lanes: { ga4: { state: "no_receipt" }, infinite: { state: "no_receipt" } } }),
+      jsonResponse(200, {
+        lanes: {
+          ga4: { state: "verified", receiptAt: "2026-09-02T10:00:07.000Z" },
+          infinite: { state: "verified", receiptAt: "2026-09-02T10:00:06.000Z" }
+        }
+      })
+    ]
+    const fetchImpl = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      calls.push({ url: String(url), init: init ?? {} })
+      return responses.shift() ?? jsonResponse(200, { lanes: {} })
+    })
+    const time = clock()
+    const backend = new DesktopBridgeBackend({
+      bridgeUrl: "http://127.0.0.1:54321",
+      token: "bridge_tok",
+      fetch: fetchImpl as unknown as typeof fetch,
+      now: time.now,
+      sleep: time.sleep
+    })
+    const result = await backend.verify(input)
+    expect(result).toEqual({
+      ga4: { state: "verified", receiptAt: "2026-09-02T10:00:07.000Z" },
+      infinite: { state: "verified", receiptAt: "2026-09-02T10:00:06.000Z" }
+    })
+    expect(calls[0].url).toBe("http://127.0.0.1:54321/v1/analytics/verify")
+    expect((calls[0].init.headers as Record<string, string>).authorization).toBe("Bearer bridge_tok")
+    const body = JSON.parse(String(calls[0].init.body)) as Record<string, unknown>
+    expect(body).toEqual({
+      protocolVersion: 1,
+      url: "https://example.com/",
+      since: "2026-09-02T10:00:00.000Z",
+      lanes: ["ga4", "infinite"]
+    })
+    // The CLI never names a workspace on this route: the desktop's ACTIVE one is the only answer.
+    expect(body.engineProjectId).toBeUndefined()
+  })
+
+  it("409 not_ready names the exact blocker and never retries", async () => {
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse(409, { error: "not_ready", state: "subscription_required", message: "finish onboarding" })
+    )
+    const result = await make(fetchImpl).verify(input)
+    expect(result.ga4).toEqual({
+      state: "not_verifiable",
+      reason: "Infinite Desktop is not ready (subscription_required) — complete onboarding"
+    })
+    expect(result.infinite).toEqual(result.ga4)
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+  })
+
+  it("503 capability_unavailable says update the app; a FORWARDED 503 subscription_check_unavailable still retries", async () => {
+    const stale = vi.fn(async () => jsonResponse(503, { error: { code: "capability_unavailable", message: "update" } }))
+    expect((await make(stale).verify(input)).ga4).toEqual({
+      state: "not_verifiable",
+      reason: DESKTOP_UPDATE_REQUIRED_REASON
+    })
+    expect(stale).toHaveBeenCalledTimes(1)
+
+    const checkDown = vi.fn(async () => jsonResponse(503, { error: "subscription_check_unavailable", retryable: true }))
+    expect((await make(checkDown).verify(input)).ga4).toEqual({
+      state: "not_verifiable",
+      reason: "subscription check unavailable, try again"
+    })
+    expect(checkDown).toHaveBeenCalledTimes(3)
+  })
+
+  it("decodes the cloud shapes the bridge forwards verbatim: 402, typed 400s, and 429 Retry-After", async () => {
+    expect(
+      (await make(async () => jsonResponse(402, { error: "entitlement_required", code: "NO_PLATFORM_SUBSCRIPTION" })).verify(input)).ga4
+    ).toEqual({ state: "not_verifiable", reason: "subscription required — complete onboarding in Infinite Desktop" })
+
+    expect(
+      (await make(async () => jsonResponse(400, { error: "host_not_registered", reason: "example.com is not a production host of this workspace" })).verify(input)).ga4
+    ).toEqual({
+      state: "not_verifiable",
+      reason: "the Infinite app rejected the request: host_not_registered — example.com is not a production host of this workspace"
+    })
+
+    const time = clock()
+    const responses = [
+      new Response("", { status: 429, headers: { "retry-after": "10" } }),
+      jsonResponse(200, { lanes: { ga4: { state: "verified", receiptAt: "2026-09-02T10:00:20.000Z" }, infinite: { state: "verified", receiptAt: "2026-09-02T10:00:20.000Z" } } })
+    ]
+    const limited = vi.fn(async () => responses.shift() ?? jsonResponse(200, { lanes: {} }))
+    const start = time.now()
+    const rateLimited = await new DesktopBridgeBackend({
+      bridgeUrl: "http://127.0.0.1:54321",
+      token: "bridge_tok",
+      fetch: limited as unknown as typeof fetch,
+      now: time.now,
+      sleep: time.sleep
+    }).verify(input)
+    expect(rateLimited.ga4).toEqual({ state: "verified", receiptAt: "2026-09-02T10:00:20.000Z" })
+    expect(time.now() - start).toBe(10_000)
+  })
+
+  it("quotes a bridge PROTOCOL fault ({error:{code,message}}) and reports a rejected token / closed app honestly", async () => {
+    expect(
+      (await make(async () => jsonResponse(400, { error: { code: "invalid_request", message: "lanes must be a non-empty array." } })).verify(input)).ga4
+    ).toEqual({
+      state: "not_verifiable",
+      reason: "the Infinite app rejected the request: invalid_request — lanes must be a non-empty array."
+    })
+
+    expect((await make(async () => new Response("", { status: 401 })).verify(input)).ga4).toEqual({
+      state: "not_verifiable",
+      reason: "the Infinite app rejected this terminal's bridge credentials (HTTP 401) — restart the app and re-run"
+    })
+
+    expect((await make(async () => new Response("", { status: 404 })).verify(input)).ga4).toEqual({
+      state: "not_verifiable",
+      reason: DESKTOP_UPDATE_REQUIRED_REASON
+    })
+
+    expect(
+      (await make(async () => {
+        throw new Error("ECONNREFUSED")
+      }).verify(input)).ga4
+    ).toEqual({ state: "not_verifiable", reason: "the Infinite app was unreachable (ECONNREFUSED)" })
+  })
+
+  it("gives up with no_receipt — never a fake verified — when the lanes stay quiet", async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse(200, { lanes: { ga4: { state: "no_receipt" }, infinite: { state: "no_receipt" } } }))
+    const result = await make(fetchImpl).verify(input)
+    expect(result.ga4).toEqual({ state: "no_receipt", causes: expect.arrayContaining([expect.stringContaining("60")]) })
+    expect(fetchImpl.mock.calls.length).toBe(VERIFY_BUDGET_MS / VERIFY_POLL_INTERVAL_MS + 1)
   })
 })
 

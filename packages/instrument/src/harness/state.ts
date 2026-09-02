@@ -37,6 +37,7 @@ export function createHarnessReport(input: {
     finishedAt: null,
     framework: null,
     appRoot: null,
+    hosting: null,
     providers: initialProviderStates(),
     steps: [],
     conversions: null,
