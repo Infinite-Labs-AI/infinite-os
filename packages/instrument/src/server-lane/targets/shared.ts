@@ -484,9 +484,9 @@ export function outcomeHelperSource(input: TargetBuildInput): string {
       `//   import { ${OUTCOME_HELPER_EXPORT} } from "../lib/infinite-outcome"`,
       `//   await ${OUTCOME_HELPER_EXPORT}({ type: "purchase", path: "/checkout", accountKey: order.id, visitKeyInputs: request })`,
       "//",
-      "// Running Meta ads without PostHog? Add an `adMatch` block and turn the relay on in Infinite",
-      "// -> Site -> Settings; the outcome is forwarded to Meta's Conversions API and the match data",
-      "// is discarded, never stored. You hash the email, Infinite never sees it.",
+      "// Running Meta ads without PostHog? Add adMatch: adMatchFromRequest(request, { em }) and turn",
+      "// the relay on in Infinite -> Site -> Settings; the outcome is forwarded to Meta's Conversions",
+      "// API and the match data is discarded, never stored. You hash the email, Infinite never sees it.",
       "//",
       `// Secrets come from the environment only: ${SERVER_LANE_SECRET_ENV} + ${SERVER_LANE_SOURCE_KEY_ENV}.`
     ],
@@ -504,6 +504,10 @@ export interface InfiniteAdMatch {
   fbp?: string
   /** sha256 hex of your own account id. */
   external_id?: string
+  /** The BUYER'S BROWSER ip, from YOUR inbound request. Meta needs the browser's, not your server's. */
+  client_ip_address?: string
+  /** The BUYER'S BROWSER user agent, from the same request. Meta REQUIRES it for website events. */
+  client_user_agent?: string
 }
 
 export interface InfiniteVisitKeyInputs {
@@ -535,12 +539,17 @@ export interface InfiniteOutcomeInput {
    *   import { createHash } from "node:crypto"
    *   const em = createHash("sha256").update(email.trim().toLowerCase()).digest("hex")
    *
-   * fbc / fbp are Meta's own first-party cookies on your domain (the _fbc / _fbp values), which
-   * your server can read from the request:
+   * fbc / fbp are Meta's own first-party cookies on your domain (the _fbc / _fbp values), and
+   * client_ip_address / client_user_agent are the BUYER'S BROWSER's, from YOUR inbound request --
+   * adMatchFromRequest(request, { em }) fills all four for you. They cannot come from the call to
+   * Infinite: that call is server-to-server, so its ip is your host's egress address and its user
+   * agent is "node". Meta REQUIRES client_user_agent for a website event; without it the relay
+   * declines to send rather than post something Meta can never match.
    * https://developers.facebook.com/docs/marketing-api/conversions-api/parameters/fbp-and-fbc
    *
    * Never send a raw email here: a value that is not a 64-character hex digest is rejected with a
-   * 400 rather than forwarded.
+   * 400 rather than forwarded. A malformed cookie, ip or user agent is DROPPED instead, so a
+   * visitor who tampered with their own _fbc can never delete your conversion.
    */
   adMatch?: InfiniteAdMatch
   /**
@@ -589,6 +598,57 @@ function infiniteVisitKeyInputsOf(
     }
   }
   return input as InfiniteVisitKeyInputs
+}
+
+function infiniteCookie(header: string | null, name: string): string | undefined {
+  if (!header) return undefined
+  for (const part of header.split(";")) {
+    const index = part.indexOf("=")
+    if (index === -1) continue
+    if (part.slice(0, index).trim() !== name) continue
+    const value = part.slice(index + 1).trim()
+    return value === "" ? undefined : value
+  }
+  return undefined
+}
+
+/**
+ * Build an adMatch block from the BUYER'S OWN request — the browser request your route is handling.
+ *
+ * This is the only place the buyer's ip and user agent exist. Your call to Infinite is
+ * server-to-server: from Infinite's side its ip is your host's egress address and its user agent is
+ * "node", and Meta's spec wants "the IP address of the browser" and "the user agent for the browser
+ * … required for website events shared using the Conversions API". So read them here and pass them
+ * along; the relay declines to send an event with no client_user_agent rather than post one Meta can
+ * never match.
+ *
+ * PASS THE BROWSER'S REQUEST. In a webhook (Stripe, for example) the incoming request is the
+ * PROVIDER'S, not your buyer's — capture the block during the checkout request instead and carry it
+ * to the webhook, or report the outcome from the browser-facing route.
+ *
+ * You supply em / external_id yourself, already hashed:
+ *   adMatchFromRequest(request, { em: createHash("sha256").update(email.trim().toLowerCase()).digest("hex") })
+ */
+export function adMatchFromRequest(
+  request: { headers: Headers },
+  hashed: { em?: string; external_id?: string } = {}
+): InfiniteAdMatch {
+  const headers = request.headers
+  const cookie = headers.get("cookie")
+  const forwarded = headers.get("x-forwarded-for")?.split(",")[0]?.trim()
+  const clientIp =
+    forwarded || headers.get("cf-connecting-ip")?.trim() || headers.get("x-real-ip")?.trim() || ""
+  const userAgent = headers.get("user-agent") ?? ""
+  const fbc = infiniteCookie(cookie, "_fbc")
+  const fbp = infiniteCookie(cookie, "_fbp")
+  return {
+    ...(hashed.em ? { em: hashed.em } : {}),
+    ...(hashed.external_id ? { external_id: hashed.external_id } : {}),
+    ...(fbc ? { fbc } : {}),
+    ...(fbp ? { fbp } : {}),
+    ...(clientIp ? { client_ip_address: clientIp } : {}),
+    ...(userAgent ? { client_user_agent: userAgent } : {})
+  }
 }
 
 /**

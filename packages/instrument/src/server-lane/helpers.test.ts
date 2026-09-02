@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest"
 import { INFINITE_SERVER_EVENTS_DESTINATION } from "../workspace-artifacts.js"
 
 import {
+  AD_MATCH_KEYS,
   AUTOMATION_USER_AGENT_PATTERN,
   buildDocumentRequestEvent,
   buildSignedServerEventRequest,
@@ -258,6 +259,11 @@ describe("contracts/server-lane-v1.vectors.json (shared with the receiving side)
     }
     expect(parsed.adMatch.em).toBe(vectors.outcomeEmailHash)
     expect(parsed.adMatch.external_id).toBe(vectors.outcomeExternalIdHash)
+    // The BUYER'S browser pair travels in the block. It cannot come from the call to Infinite,
+    // which is server-to-server, so the vector pins that it is carried explicitly.
+    expect(parsed.adMatch.client_ip_address).toBe("203.0.113.9")
+    expect(parsed.adMatch.client_user_agent).toBe(VECTORS.userAgent)
+    expect(Object.keys(parsed.adMatch).every((key) => (AD_MATCH_KEYS as readonly string[]).includes(key))).toBe(true)
     // A raw address never appears in a signed body — the whole point of hashing on the customer side.
     expect(vectors.outcomeAdMatchBody).not.toContain(vectors.outcomeEmail)
   })
@@ -279,7 +285,10 @@ describe("hashInfiniteEmail", () => {
 describe("adMatch on a signed outcome", () => {
   const adMatch: InfiniteAdMatch = {
     em: hashInfiniteEmail("founder@example.com"),
-    fbp: "fb.1.1755500000123.987654321"
+    fbp: "fb.1.1755500000123.987654321",
+    // The buyer's browser, from the customer's OWN inbound request.
+    client_ip_address: VECTORS.clientIp,
+    client_user_agent: VECTORS.userAgent
   }
 
   it("is signed WITH the body, so it cannot be injected without the secret", () => {

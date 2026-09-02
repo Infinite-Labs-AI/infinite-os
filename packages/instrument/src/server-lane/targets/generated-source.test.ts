@@ -490,7 +490,9 @@ describe("the outcome helper, executed", () => {
     const adMatch = {
       em: hashInfiniteEmail("founder@example.com"),
       fbc: "fb.1.1755500000123.IwAR0abcDEF_-123",
-      fbp: "fb.1.1755500000123.987654321"
+      fbp: "fb.1.1755500000123.987654321",
+      client_ip_address: VECTORS.clientIp,
+      client_user_agent: VECTORS.userAgent
     }
     await helper.postInfiniteOutcome({
       type: "purchase",
@@ -508,6 +510,46 @@ describe("the outcome helper, executed", () => {
     )
     // The address itself never leaves the customer's process.
     expect(posted.body).not.toContain("founder@example.com")
+  })
+
+  it("adMatchFromRequest reads the BUYER'S cookies, ip and user agent from the customer's request", async () => {
+    const helper = (await loadGenerated(outcomeHelperSource(BUILD))) as {
+      adMatchFromRequest: (
+        request: { headers: Headers },
+        hashed?: { em?: string; external_id?: string }
+      ) => Record<string, string>
+      postInfiniteOutcome: (input: Record<string, unknown>) => Promise<boolean>
+    }
+    const em = hashInfiniteEmail("founder@example.com")
+    const block = helper.adMatchFromRequest(
+      documentRequest({
+        headers: {
+          cookie: "_ga=GA1.1.x; _fbp=fb.1.1755500000123.987654321; _fbc=fb.1.1755500000123.IwAR0abc; other=1"
+        }
+      }),
+      { em }
+    )
+    expect(block).toEqual({
+      em,
+      fbc: "fb.1.1755500000123.IwAR0abc",
+      fbp: "fb.1.1755500000123.987654321",
+      // First hop of x-forwarded-for — the buyer, not the proxy chain.
+      client_ip_address: VECTORS.clientIp,
+      client_user_agent: VECTORS.userAgent
+    })
+  })
+
+  it("adMatchFromRequest omits what the request did not carry, and never invents a value", async () => {
+    const helper = (await loadGenerated(outcomeHelperSource(BUILD))) as {
+      adMatchFromRequest: (request: { headers: Headers }) => Record<string, string>
+    }
+    const bare = helper.adMatchFromRequest({ headers: new Headers({ "user-agent": VECTORS.userAgent }) })
+    expect(bare).toEqual({ client_user_agent: VECTORS.userAgent })
+    // An empty cookie value is absent, not an empty string Meta would have to reject.
+    const emptyCookie = helper.adMatchFromRequest({
+      headers: new Headers({ cookie: "_fbp=; _fbc=fb.1.1.abc", "user-agent": "ua" })
+    })
+    expect(emptyCookie).toEqual({ fbc: "fb.1.1.abc", client_user_agent: "ua" })
   })
 
   it("omits adMatch entirely when the caller sends none — the block is opt-in per outcome", async () => {

@@ -288,7 +288,7 @@ where the site is **hosted** (`vercel.json` / `.vercel/project.json` / `@vercel/
 | No host signal | Writes the agent brief only; `server-lane --brief > INSTALL-SERVER-LANE.md` saves it anywhere. |
 
 Every target also writes **`lib/infinite-outcome`**, exporting `postInfiniteOutcome({ type, path,
-eventId, accountKey, visitKeyInputs, adMatch })`, so any server route — a Vercel `api/` function
+eventId, accountKey, visitKeyInputs, adMatch })` (plus `adMatchFromRequest`), so any server route — a Vercel `api/` function
 confirming a paid Stripe session, a webhook, a job — reports an outcome in three lines and carries
 the same `visitKey` as the page view that produced it. Report outcomes from where they become real
 (a committed row, a captured payment, a served file), never from a click.
@@ -305,17 +305,19 @@ never logged. Neither half works alone — no block, nothing to forward; no togg
 
 ```ts
 import { createHash } from "node:crypto"
-import { postInfiniteOutcome } from "../lib/infinite-outcome"
+import { adMatchFromRequest, postInfiniteOutcome } from "../lib/infinite-outcome"
 
 await postInfiniteOutcome({
   type: "purchase",
+  path: "/checkout",                 // Meta requires event_source_url
   eventId: "purchase:" + order.id,   // Meta gets the same event_id, so your browser pixel dedupes
+  properties: { value: order.total, currency: "USD" },   // required for a Purchase
   visitKeyInputs: request,
-  adMatch: {
-    em: createHash("sha256").update(email.trim().toLowerCase()).digest("hex"),
-    fbc: cookies.get("_fbc"),        // Meta's own first-party cookies, on YOUR domain
-    fbp: cookies.get("_fbp")
-  }
+  // `request` must be the BUYER'S browser request — it carries their _fbc/_fbp cookies AND the ip
+  // and user agent Meta needs. Your call to Infinite is server-to-server and carries neither.
+  adMatch: adMatchFromRequest(request, {
+    em: createHash("sha256").update(email.trim().toLowerCase()).digest("hex")
+  })
 })
 ```
 
@@ -323,12 +325,25 @@ await postInfiniteOutcome({
   value — a raw email never leaves your server. A value that is not a 64-character hex digest is
   rejected with a `400` instead of being forwarded, so a mistake shows up at integration time rather
   than as an empty match rate three months later. Never hash an already-hashed value.
-- **`fbc` / `fbp` are Meta's own cookies** on your domain, which your server reads from the request
+- **`fbc` / `fbp` are Meta's own cookies** on your domain
   ([fbp and fbc](https://developers.facebook.com/docs/marketing-api/conversions-api/parameters/fbp-and-fbc)).
-- **`eventId` becomes Meta's `event_id`**, so a browser pixel firing the same id deduplicates
-  instead of counting the conversion twice.
-- The client IP and user agent Meta wants for matching are read from the outcome request's own
-  headers at forwarding time and are never stored — this lane still writes neither to the ledger.
+  A visitor can set them to anything, so a malformed one is **dropped** and your outcome is still
+  recorded — a tampered cookie can never delete your purchase. The same holds for the ip and user
+  agent; only `em`/`external_id`, which your own code computes, are strict enough to reject.
+- **`client_ip_address` / `client_user_agent` are the BUYER'S BROWSER'S.** Meta's spec calls them
+  "the IP address of the browser" and "the user agent for the browser … **required** for website
+  events shared using the Conversions API". Your call to Infinite is server-to-server — its ip is
+  your host's egress address and its user agent is `node` — so `adMatchFromRequest` reads them from
+  *your* inbound request. In a webhook the incoming request is the provider's, not your buyer's:
+  capture the block during the checkout request and carry it, or report from the browser-facing route.
+- **`eventId` becomes Meta's `event_id`**, and Meta deduplicates on matching `event_id` +
+  `event_name` within **48 hours**. If you also fire the browser pixel for the same conversion, pass
+  the same id: `fbq('track', 'Purchase', { ... }, { eventID: "purchase:" + order.id })`.
+- **The relay declines rather than sending a broken event.** It skips — and says which, in Site
+  Settings — when there is no `event_source_url` (send `path`), no `client_user_agent`, a Purchase
+  with no `value` + `currency`, or an `occurredAt` older than Meta's 7-day `event_time` window. Your
+  site's domain must also be verified in Meta Events Manager, or Meta accepts the events and
+  discounts them.
 - `adMatch` rides inside the **signed** body, so nobody without your secret can inject one, and it is
   never valid on a document request.
 

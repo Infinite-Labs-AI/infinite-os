@@ -20,6 +20,18 @@ All notable changes to the `infinite-tag` npm package (`packages/instrument`). V
   deduplicates. Nothing is sent without the relay toggle in Infinite → Site → Settings. Documented in
   the agent brief, the README, and `contracts/server-lane-v1.vectors.json` (new `outcomeAdMatch*`
   vectors the receiving side proves against).
+  The block also carries the BUYER'S BROWSER `client_ip_address` and `client_user_agent`, and the
+  generated helper exports **`adMatchFromRequest(request, { em })`** to fill those plus `_fbc`/`_fbp`
+  from your own inbound request. They cannot be derived on Infinite's side: the call to Infinite is
+  server-to-server, so its ip is your host's egress address and its user agent is `node`, while
+  Meta's spec wants "the IP address of the browser" and "the user agent for the browser … required
+  for website events". Validation is split by whose mistake it is — a malformed `em`/`external_id`
+  (your own computation) is a 400, while a malformed cookie, ip or user agent is DROPPED and the
+  outcome is still recorded, so a visitor's tampered `_fbc` can never delete your conversion. The
+  brief and README also now state Meta's four required-parameter skips (no `event_source_url`, no
+  `client_user_agent`, an unpriced Purchase, an `event_time` outside the 7-day window), the 48-hour
+  `event_id` + `event_name` dedup window and the matching `fbq(..., { eventID })` argument, and the
+  verified-domain precondition in Events Manager.
 - **The harness names the relay.** When a Meta pixel is on file, every run (`--check` included) adds
   a "Meta relay" line to its next steps: `off` when no server lane reports outcomes, `on locally`
   when both halves are installed — stated as the LOCAL half only, because this command holds no

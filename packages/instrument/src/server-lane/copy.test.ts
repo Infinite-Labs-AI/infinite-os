@@ -70,9 +70,19 @@ describe("the agent brief", () => {
     expect(brief).toContain('createHash("sha256").update(email.trim().toLowerCase()).digest("hex")')
     expect(brief).toContain("discarded")
     expect(brief).toContain("64-character hex digest is rejected")
-    // The dedup promise and the privacy promise both appear.
-    expect(brief).toContain("so a browser pixel firing the same id deduplicates")
-    expect(brief).toContain("are read from the outcome request's own headers at forwarding time")
+    // The dedup promise, with the 48-hour window and the pixel's own eventID argument.
+    expect(brief).toContain("within **48 hours**")
+    expect(brief).toContain("eventID:")
+    // The buyer's browser pair, and WHY it cannot come from the call to Infinite.
+    expect(brief).toContain("the IP address of the browser")
+    expect(brief).toContain("server-to-server")
+    expect(brief).toContain("adMatchFromRequest(request")
+    // A visitor's tampered cookie must never be able to delete a founder's conversion.
+    expect(brief).toContain("a tampered cookie can never delete your purchase")
+    // Meta's four required-parameter skips, and the verified-domain precondition.
+    expect(brief).toContain("declines rather than sending a broken one")
+    expect(brief).toContain("7-day window")
+    expect(brief).toContain("verified in Meta Events Manager")
     // And the contract section lists it as an optional, outcome-only key.
     expect(brief).toContain("`adMatch` is OPTIONAL and outcome-only")
   })

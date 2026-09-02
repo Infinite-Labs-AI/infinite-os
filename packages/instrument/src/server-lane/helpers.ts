@@ -166,6 +166,19 @@ export interface DocumentRequestEventInput {
  * `fbc` and `fbp` are Meta's OWN first-party cookies on your domain, readable by your server:
  * https://developers.facebook.com/docs/marketing-api/conversions-api/parameters/fbp-and-fbc
  *
+ * ⚠ `client_ip_address` AND `client_user_agent` ARE THE BUYER'S BROWSER'S, AND ONLY YOU HAVE THEM.
+ * Meta's spec calls them "the IP address of the browser" and "the user agent for the browser …
+ * required for website events shared using the Conversions API". The call you make to Infinite is
+ * SERVER-TO-SERVER, so Infinite's view of it is your Vercel/Node egress ip and a `node` user agent —
+ * useless to Meta, and actively harmful (it scores an impossible ip/UA pair against your event). So
+ * copy them off YOUR OWN inbound browser request and put them in the block. `adMatchFromRequest`
+ * does exactly that. Without `client_user_agent` the relay declines to send the event at all.
+ *
+ * WHOSE MISTAKE COSTS WHAT. `em`/`external_id` are your own computation, so a malformed one is a
+ * 400 you should hear about. Everything else here is copied from a VISITOR-controlled request — a
+ * browser or extension can set `_fbc` to anything — so a malformed one is silently dropped and your
+ * outcome is still recorded. A stranger's cookie can never delete your purchase.
+ *
  * The block rides INSIDE the signed body, so nobody without your secret can inject one.
  */
 export interface InfiniteAdMatch {
@@ -177,10 +190,21 @@ export interface InfiniteAdMatch {
   fbp?: string
   /** sha256 hex of your own account id. */
   external_id?: string
+  /** The BUYER'S BROWSER ip, from YOUR inbound request. Never the ip of the call to Infinite. */
+  client_ip_address?: string
+  /** The BUYER'S BROWSER user agent, from the same request. Meta requires it for website events. */
+  client_user_agent?: string
 }
 
 /** The only keys an adMatch block may carry — anything else is rejected as a malformed envelope. */
-export const AD_MATCH_KEYS = ["em", "fbc", "fbp", "external_id"] as const
+export const AD_MATCH_KEYS = [
+  "em",
+  "fbc",
+  "fbp",
+  "external_id",
+  "client_ip_address",
+  "client_user_agent"
+] as const
 
 /**
  * The email hash Infinite (and Meta) expect: sha256 hex of the TRIMMED, LOWERCASED address.

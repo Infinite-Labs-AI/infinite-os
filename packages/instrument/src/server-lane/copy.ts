@@ -124,24 +124,28 @@ export const serverLaneCopy = {
   adMatchHeading: "Optional: forward the conversion to Meta",
   adMatch: [
     "Only if you run **Meta ads and do not use PostHog** — PostHog already ships its own Meta destination, and two senders for one conversion is a double count.",
-    "Add an `adMatch` block to the outcome and turn the relay on in Infinite → Site → Settings → “Send outcomes to Meta Conversions API”. The outcome is then forwarded to Meta's Conversions API as it is ingested, and the match data is **discarded**: Infinite never stores it, never writes it to your ledger, never logs it. Nothing happens without both the block and the toggle.",
+    "Add an `adMatch` block to the outcome and turn the relay on in Infinite → Site → Settings → \u201cSend outcomes to Meta Conversions API\u201d. The outcome is then forwarded to Meta's Conversions API as it is ingested, and the match data is **discarded**: Infinite never stores it, never writes it to your ledger, never logs it. Nothing happens without both the block and the toggle.",
     "```ts",
     'import { createHash } from "node:crypto"',
+    'import { adMatchFromRequest, postInfiniteOutcome } from "../lib/infinite-outcome"',
     "",
     "await postInfiniteOutcome({",
     '  type: "purchase",',
+    '  path: "/checkout",              // required by Meta as event_source_url',
     '  eventId: "purchase:" + order.id,   // Meta gets the same event_id, so your browser pixel dedupes',
-    "  adMatch: {",
-    '    em: createHash("sha256").update(email.trim().toLowerCase()).digest("hex"),',
-    '    fbc: cookies.get("_fbc"),        // Meta\u2019s own first-party cookies, on YOUR domain',
-    '    fbp: cookies.get("_fbp")',
-    "  }",
+    '  properties: { value: order.total, currency: "USD" },  // required for a Purchase',
+    "  // `request` must be the BUYER'S browser request: it carries their _fbc/_fbp cookies AND the",
+    "  // ip + user agent Meta needs. Your call to Infinite is server-to-server and carries neither.",
+    '  adMatch: adMatchFromRequest(request, {',
+    '    em: createHash("sha256").update(email.trim().toLowerCase()).digest("hex")',
+    "  })",
     "})",
     "```",
     "- **You hash; Infinite never does.** `em` and `external_id` are sha256 hex of the trimmed, lowercased value. A raw email never leaves your server, and a value that is not a 64-character hex digest is rejected with a `400` rather than forwarded — so a mistake shows up now, not as an empty match rate in three months.",
-    "- **`fbc` / `fbp` are Meta's own cookies** on your domain, which your server can read from the request ([fbp and fbc](https://developers.facebook.com/docs/marketing-api/conversions-api/parameters/fbp-and-fbc)).",
-    "- **`eventId` is passed to Meta as `event_id`**, so a browser pixel firing the same id deduplicates instead of counting the conversion twice.",
-    "- **The IP and user agent Meta wants** are read from the outcome request's own headers at forwarding time and are never stored — the lane's rule that neither ever reaches the ledger is unchanged.",
+    "- **`fbc` / `fbp` are Meta's own cookies** on your domain ([fbp and fbc](https://developers.facebook.com/docs/marketing-api/conversions-api/parameters/fbp-and-fbc)). A visitor can set them to anything, so a malformed one is **dropped** and your outcome is still recorded — a tampered cookie can never delete your purchase.",
+    "- **`client_ip_address` / `client_user_agent` are the BUYER'S BROWSER'S**, and only you have them. Meta's spec: \u201cthe IP address of the browser\u201d and \u201cthe user agent for the browser … required for website events shared using the Conversions API\u201d. The call to Infinite is server-to-server — its ip is your host's egress address and its user agent is `node` — so `adMatchFromRequest` reads them from YOUR inbound request. In a webhook the incoming request is the provider's, not your buyer's: capture the block during the checkout request and carry it, or report from the browser-facing route.",
+    "- **`eventId` becomes Meta's `event_id`**, and Meta deduplicates on matching `event_id` + `event_name` within **48 hours**. If you also fire the browser pixel for the same conversion, pass the same id: `fbq(\'track\', \'Purchase\', {...}, { eventID: \"purchase:\" + order.id })`.",
+    "- **Meta requires four things for a website event, and the relay declines rather than sending a broken one.** It skips (and tells you which, in Site Settings) when there is no `event_source_url` (send `path`), no `client_user_agent`, a Purchase with no `value` + `currency`, or an `occurredAt` older than Meta's 7-day window. Your site's domain must also be verified in Meta Events Manager, or Meta accepts the events and discounts them.",
     "- `adMatch` rides inside the SIGNED body, so nobody without your secret can inject one. It is never valid on a document request."
   ],
 
@@ -176,7 +180,7 @@ export const serverLaneCopy = {
       "- `accountKey` is optional and opaque (a user or order id); Infinite hashes it at rest and uses it for account-deduped outcomes.",
       "- Use a stable `eventId` per outcome (order id, signup id). Retries with the same eventId are safe; the server dedupes.",
       "- `properties` may hold up to 16 keys; keys are lowercase snake_case (`^[a-z][a-z0-9_]{0,63}$` — `visitKey` is the one camelCase exception); values are short whitespace-free tokens, numbers, or booleans — no free text.",
-      "- `adMatch` is OPTIONAL and outcome-only: `{ em?, fbc?, fbp?, external_id? }` where `em`/`external_id` are sha256 hex YOU computed and `fbc`/`fbp` are Meta's own first-party cookies. It is consumed by the Meta Conversions API relay at ingest and then discarded — never stored. Omit it entirely unless you run Meta ads without PostHog."
+      "- `adMatch` is OPTIONAL and outcome-only: `{ em?, fbc?, fbp?, external_id?, client_ip_address?, client_user_agent? }` where `em`/`external_id` are sha256 hex YOU computed, `fbc`/`fbp` are Meta's own first-party cookies, and the ip + user agent are the BUYER'S BROWSER'S, copied from your own inbound request (never from the call to Infinite, which is server-to-server). A malformed `em`/`external_id` is a 400; a malformed cookie, ip or user agent is dropped. It is consumed by the Meta Conversions API relay at ingest and then discarded — never stored. Omit it entirely unless you run Meta ads without PostHog."
     ],
     delivery: [
       `**Delivery.** Fire-and-forget; never block or fail the response. Timeout ${SERVER_LANE_DELIVERY_TIMEOUT_MS} ms. Never throw into the request path. Next.js middleware: \`event.waitUntil(fetch(...))\`; Cloudflare: \`ctx.waitUntil\`; Netlify Edge: \`context.waitUntil\`; Node/Express: fire the promise and \`.catch(() => {})\`.`,
@@ -215,7 +219,7 @@ export const serverLaneCopy = {
     "Skip assets, API routes, prefetches, and non-HTML requests, so a page counts once. Classify obvious bots as `automation` — Infinite never sees the user agent, so the family you send is what it records (automation rows are split out, never counted as visitors).",
     "Report outcomes from the moment they are real, never from intent (a click is intent; a committed row is an outcome). Use stable event ids so retries never double count.",
     "Local, loopback, and preview hosts are ignored on Infinite's side (only verified production hosts count); the generated Next.js module also stays dormant on loopback and off-list hosts.",
-    "The optional `adMatch` block is the ONE thing this lane forwards anywhere else, it goes only to Meta's Conversions API, only when you turn the relay on, and only from values your own server hashed. It is discarded after the send: Infinite never stores it, and the IP and user agent Meta is given come from the request itself and are never written down."
+    "The optional `adMatch` block is the ONE thing this lane forwards anywhere else, it goes only to Meta's Conversions API, only when you turn the relay on, and only from values your own server produced. It is discarded after the send: Infinite never stores it — including the buyer's ip and user agent, which exist only inside the outbound Meta request and are never written to your ledger."
   ],
 
   verifyHeading: "Verify",
