@@ -181,6 +181,68 @@ describe("applyConversions", () => {
   })
 })
 
+describe("applyConversions on a line with several candidates", () => {
+  const ONE_LINE = `<nav><a href="/pricing">Pricing</a> <button onClick={go}>Buy now</button> <a href="/docs">Docs</a></nav>\n`
+
+  it("records a column per element and marks ONLY the approved element", () => {
+    const root = makeRoot()
+    write(root, "index.html", ONE_LINE)
+    const proposal = proposeConversions({ root, appRoot: "." })
+    expect(proposal.rows.map((row) => [row.ctaId, row.column, row.tag])).toEqual([
+      ["pricing", 5, "a"],
+      ["buy_now", 36, "button"],
+      ["docs", 74, "a"]
+    ])
+    const buyNow = proposal.rows.filter((row) => row.ctaId === "buy_now")
+    const result = applyConversions({ root, appRoot: ".", approved: { rows: buyNow } })
+    expect(result.stale).toEqual([])
+    expect(result.marked.map((row) => [row.ctaId, row.column])).toEqual([["buy_now", 36]])
+    expect(read(root, "index.html")).toBe(
+      `<nav><a href="/pricing">Pricing</a> <button data-analytics-cta-id="buy_now" data-analytics-cta-location="nav" onClick={go}>Buy now</button> <a href="/docs">Docs</a></nav>\n`
+    )
+  })
+
+  it("applies several rows on one line right-to-left, shares the after-hash, and unmarks them all", () => {
+    const root = makeRoot()
+    write(root, "index.html", ONE_LINE)
+    const proposal = proposeConversions({ root, appRoot: "." })
+    const result = applyConversions({ root, appRoot: ".", approved: { rows: proposal.rows } })
+    expect(result.stale).toEqual([])
+    expect(result.marked.map((row) => row.ctaId)).toEqual(["pricing", "buy_now", "docs"])
+    expect(new Set(result.marked.map((row) => row.afterHash)).size).toBe(1)
+    expect(read(root, "index.html")).toBe(
+      `<nav><a data-analytics-cta-id="pricing" data-analytics-cta-location="nav" href="/pricing">Pricing</a> <button data-analytics-cta-id="buy_now" data-analytics-cta-location="nav" onClick={go}>Buy now</button> <a data-analytics-cta-id="docs" data-analytics-cta-location="nav" href="/docs">Docs</a></nav>\n`
+    )
+    // Idempotent, then fully reversible.
+    const again = applyConversions({ root, appRoot: ".", approved: { rows: proposal.rows } })
+    expect(again.marked).toEqual([])
+    expect(again.skipped.map((entry) => entry.reason)).toEqual(["already marked", "already marked", "already marked"])
+    const undone = unmarkConversions(root)
+    expect(undone.restored).toHaveLength(3)
+    expect(read(root, "index.html")).toBe(ONE_LINE)
+  })
+
+  it("a row whose tag is no longer at its column is stale, not written onto a neighbour", () => {
+    const root = makeRoot()
+    write(root, "index.html", ONE_LINE)
+    const proposal = proposeConversions({ root, appRoot: "." })
+    const buyNow = { ...proposal.rows[1], column: 5 } // points at the anchor now
+    const result = applyConversions({ root, appRoot: ".", approved: { rows: [buyNow] } })
+    expect(result.marked).toEqual([])
+    expect(result.stale).toHaveLength(1)
+    expect(read(root, "index.html")).toBe(ONE_LINE)
+  })
+
+  it("rejects an approval file without a column", () => {
+    const root = makeRoot()
+    write(root, "index.html", INDEX_HTML)
+    const proposal = proposeConversions({ root, appRoot: "." })
+    const { column: _column, ...noColumn } = proposal.rows[0]
+    write(root, "old.json", JSON.stringify({ rows: [noColumn] }))
+    expect(() => readApprovedConversions(root, "old.json")).toThrow(/column/)
+  })
+})
+
 describe("applyConversions relocation", () => {
   it("finds an unchanged element by its line hash after lines were inserted above it", () => {
     const root = makeRoot()

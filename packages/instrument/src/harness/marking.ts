@@ -12,6 +12,7 @@ import { basename, join } from "node:path"
 
 import { assertWriteTargetInsideRoot, writeFileAtomic } from "../frameworks/shared.js"
 
+import { GITIGNORE_FENCE_END, GITIGNORE_FENCE_START, recordGitignoreBlock, recordHarnessFile } from "./outputs.js"
 import { readSourceFile, splitLines, walkSourceFiles } from "./scan.js"
 
 export const PROPOSED_CONVERSIONS_RELATIVE_PATH = ".infinite/conversions.proposed.json"
@@ -19,8 +20,6 @@ export const CONVERSIONS_MANIFEST_RELATIVE_PATH = ".infinite/conversions.json"
 export const CTA_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/
 export const MAX_PROPOSED_ROWS = 200
 
-const GITIGNORE_FENCE_START = "# infinite:start"
-const GITIGNORE_FENCE_END = "# infinite:end"
 
 /** Hosts the runtime already buckets as checkout — marking them would double-count. */
 const STRIPE_HOSTS = new Set(["buy.stripe.com", "book.stripe.com", "donate.stripe.com", "checkout.stripe.com", "invoice.stripe.com"])
@@ -34,6 +33,8 @@ export interface ProposedConversion {
   file: string
   /** 1-based line the opening tag starts on. */
   line: number
+  /** 0-based offset of the `<` of THIS element within that line — two candidates on one line differ here. */
+  column: number
   tag: MarkableTag
   /** href for anchors, the handler attribute name (onClick, type=submit) for buttons. */
   hrefOrHandler: string
@@ -65,6 +66,8 @@ export interface ApprovedConversions {
 export interface MarkedConversion {
   file: string
   line: number
+  /** Offset of the element's `<` in the line as it stood BEFORE any insert on that line. */
+  column: number
   ctaId: string
   ctaLocation: string
   beforeHash: string
@@ -244,6 +247,7 @@ export function proposeConversions(input: ProposeConversionsInput): ConversionPr
       const openingTag = contents.slice(offset, end)
       OPENING_TAG_START.lastIndex = end
       const line = contents.slice(0, offset).split("\n").length
+      const column = offset - (contents.lastIndexOf("\n", offset - 1) + 1)
       const href = tag === "a" ? attribute(openingTag, "href") : undefined
       const reason = skipReason(tag, openingTag, href, downloadDestinationPath)
       if (reason) {
@@ -278,6 +282,7 @@ export function proposeConversions(input: ProposeConversionsInput): ConversionPr
         ctaLocation: locationFor(contents, offset, file),
         file,
         line,
+        column,
         tag,
         hrefOrHandler: handler,
         textSnippet: text,
@@ -299,6 +304,7 @@ export function writeProposal(root: string, proposal: ConversionProposal): strin
   const absolutePath = join(root, PROPOSED_CONVERSIONS_RELATIVE_PATH)
   assertWriteTargetInsideRoot(root, absolutePath)
   writeFileAtomic(absolutePath, `${JSON.stringify(proposal, null, 2)}\n`)
+  recordHarnessFile(root, PROPOSED_CONVERSIONS_RELATIVE_PATH)
   return absolutePath
 }
 
@@ -312,6 +318,7 @@ export function ensureProposedIgnored(root: string): "present" | "appended" | "c
   if (!existsSync(absolutePath)) {
     assertWriteTargetInsideRoot(root, absolutePath)
     writeFileAtomic(absolutePath, `${block}\n`)
+    recordGitignoreBlock(root, block, true)
     return "created"
   }
   const current = readFileSync(absolutePath, "utf8")
@@ -320,6 +327,7 @@ export function ensureProposedIgnored(root: string): "present" | "appended" | "c
   }
   const separator = current === "" || current.endsWith("\n") ? "" : "\n"
   writeFileAtomic(absolutePath, `${current}${separator}${block}\n`)
+  recordGitignoreBlock(root, block, false)
   return "appended"
 }
 
@@ -366,11 +374,15 @@ export function readApprovedConversions(root: string, filePath: string): Approve
     if (typeof raw.lineHash !== "string" || !/^[a-f0-9]{64}$/.test(raw.lineHash)) {
       throw new Error(`Conversions row ${index}: lineHash must be the sha256 hex from the proposal.`)
     }
+    if (typeof raw.column !== "number" || !Number.isInteger(raw.column) || raw.column < 0) {
+      throw new Error(`Conversions row ${index}: column must be the element's offset from the proposal (re-run --plan to re-propose).`)
+    }
     rows.push({
       ctaId,
       ctaLocation,
       file: raw.file,
       line: raw.line,
+      column: raw.column,
       tag: raw.tag === "button" ? "button" : "a",
       hrefOrHandler: typeof raw.hrefOrHandler === "string" ? raw.hrefOrHandler : "",
       textSnippet: typeof raw.textSnippet === "string" ? raw.textSnippet : "",
@@ -404,6 +416,7 @@ function writeConversionsManifest(root: string, manifest: ConversionsManifest): 
   const absolutePath = join(root, CONVERSIONS_MANIFEST_RELATIVE_PATH)
   assertWriteTargetInsideRoot(root, absolutePath)
   writeFileAtomic(absolutePath, `${JSON.stringify(manifest, null, 2)}\n`)
+  recordHarnessFile(root, CONVERSIONS_MANIFEST_RELATIVE_PATH)
   return absolutePath
 }
 
@@ -434,6 +447,20 @@ export function staleElementMessage(file: string, line: number): string {
  * Nothing else on the line — no id, class, href or handler — is touched. Stale rows are
  * reported per row (INF_MARK_STALE_ELEMENT) and the rest still apply.
  */
+/** The opening-tag regex the row's `tag` must match at its column. */
+function tagPatternFor(tag: MarkableTag): RegExp {
+  return tag === "button" ? /^<button\b/ : /^<(a|Link)\b/
+}
+
+/**
+ * For each approved row: assert the line still hashes to its pre-image, assert the proposed tag
+ * sits at the recorded column, then insert exactly
+ * ` data-analytics-cta-id="…" data-analytics-cta-location="…"` after that tag name. Rows on one
+ * line are applied right-to-left so earlier offsets stay valid; every row of a line shares the
+ * line's final after-hash. Nothing else on the line — no id, class, href or handler — is touched.
+ * Stale rows (line or element changed) are reported per row (INF_MARK_STALE_ELEMENT) and the
+ * rest still apply.
+ */
 export function applyConversions(input: ApplyConversionsInput): ApplyConversionsResult {
   const appRootAbsolute = input.appRoot === "." ? input.root : join(input.root, input.appRoot)
   const manifest: ConversionsManifest = readConversionsManifest(input.root) ?? {
@@ -447,56 +474,77 @@ export function applyConversions(input: ApplyConversionsInput): ApplyConversions
     stale: [],
     manifestPath: join(input.root, CONVERSIONS_MANIFEST_RELATIVE_PATH)
   }
+  const stale = (row: ProposedConversion): void => {
+    result.stale.push({ file: row.file, line: row.line, ctaId: row.ctaId, code: "INF_MARK_STALE_ELEMENT", message: staleElementMessage(row.file, row.line) })
+  }
 
+  // Group by the element's pre-image line so multi-element lines are edited once, right-to-left.
+  const groups = new Map<string, ProposedConversion[]>()
   for (const row of input.approved.rows) {
     if (!CTA_ID_PATTERN.test(row.ctaId) || !CTA_ID_PATTERN.test(row.ctaLocation)) {
       result.skipped.push({ file: row.file, line: row.line, ctaId: row.ctaId, reason: "invalid token" })
       continue
     }
-    const absolutePath = join(appRootAbsolute, row.file)
+    const key = `${row.file}\u0000${row.lineHash}`
+    groups.set(key, [...(groups.get(key) ?? []), row])
+  }
+
+  for (const rows of groups.values()) {
+    const { file, lineHash: beforeHash } = rows[0]
+    const absolutePath = join(appRootAbsolute, file)
     assertWriteTargetInsideRoot(input.root, absolutePath)
     const contents = existsSync(absolutePath) ? readFileSync(absolutePath, "utf8") : null
     const lines = contents === null ? null : splitLines(contents)
-    const inserted = ` data-analytics-cta-id="${row.ctaId}" data-analytics-cta-location="${row.ctaLocation}"`
-    // Idempotence first: a row already marked by an earlier run still hashes to its after-image.
-    const alreadyMarked = manifest.marked.find(
-      (entry) => entry.file === row.file && entry.beforeHash === row.lineHash && entry.ctaId === row.ctaId
-    )
-    if (alreadyMarked && lines && lines.some((line) => lineHash(line) === alreadyMarked.afterHash)) {
-      result.skipped.push({ file: row.file, line: row.line, ctaId: row.ctaId, reason: "already marked" })
+
+    // Idempotence first: a line this exact approval already marked still hashes to its after-image.
+    const priorForLine = manifest.marked.filter((entry) => entry.file === file && entry.beforeHash === beforeHash)
+    const priorAfterHash = priorForLine[0]?.afterHash
+    if (priorAfterHash && lines && lines.some((line) => lineHash(line) === priorAfterHash)) {
+      for (const row of rows) {
+        if (priorForLine.some((entry) => entry.ctaId === row.ctaId && entry.column === row.column)) {
+          result.skipped.push({ file, line: row.line, ctaId: row.ctaId, reason: "already marked" })
+        } else {
+          stale(row) // the line moved on after an earlier partial approval; re-propose to mark more
+        }
+      }
       continue
     }
-    const located = lines ? locateLine(lines, row) : null
+
+    const located = lines ? locateLine(lines, rows[0]) : null
     if (lines === null || located === null) {
-      result.stale.push({ file: row.file, line: row.line, ctaId: row.ctaId, code: "INF_MARK_STALE_ELEMENT", message: staleElementMessage(row.file, row.line) })
+      for (const row of rows) stale(row)
       continue
     }
-    const current = lines[located - 1]
-    if (/\bdata-analytics-cta-id\b|\bdata-conversion\b/.test(current)) {
-      result.skipped.push({ file: row.file, line: row.line, ctaId: row.ctaId, reason: "already marked" })
-      continue
+    const original = lines[located - 1]
+    let current = original
+    const applied: MarkedConversion[] = []
+    for (const row of [...rows].sort((a, b) => b.column - a.column)) {
+      const at = original.slice(row.column)
+      const tagMatch = tagPatternFor(row.tag).exec(at)
+      if (!tagMatch) {
+        stale(row)
+        continue
+      }
+      const tagEnd = openingTagEnd(original, row.column)
+      const openingTag = original.slice(row.column, tagEnd ?? original.length)
+      if (/\bdata-analytics-cta-id\b|\bdata-conversion\b/.test(openingTag)) {
+        result.skipped.push({ file, line: located, ctaId: row.ctaId, reason: "already marked" })
+        continue
+      }
+      const inserted = ` data-analytics-cta-id="${row.ctaId}" data-analytics-cta-location="${row.ctaLocation}"`
+      const cut = row.column + tagMatch[0].length
+      // Right-to-left: everything before `cut` is still in original coordinates.
+      current = `${current.slice(0, cut)}${inserted}${current.slice(cut)}`
+      applied.push({ file, line: located, column: row.column, ctaId: row.ctaId, ctaLocation: row.ctaLocation, beforeHash, afterHash: "", inserted })
     }
-    const tagMatch = /<(a|Link|button)\b/.exec(current)
-    if (!tagMatch || tagMatch.index === undefined) {
-      result.stale.push({ file: row.file, line: row.line, ctaId: row.ctaId, code: "INF_MARK_STALE_ELEMENT", message: staleElementMessage(row.file, row.line) })
-      continue
-    }
-    const cut = tagMatch.index + tagMatch[0].length
-    const nextLine = `${current.slice(0, cut)}${inserted}${current.slice(cut)}`
+    if (applied.length === 0) continue
     const nextLines = [...lines]
-    nextLines[located - 1] = nextLine
+    nextLines[located - 1] = current
     writeFileAtomic(absolutePath, nextLines.join("\n"))
-    const marked: MarkedConversion = {
-      file: row.file,
-      line: located,
-      ctaId: row.ctaId,
-      ctaLocation: row.ctaLocation,
-      beforeHash: row.lineHash,
-      afterHash: lineHash(nextLine),
-      inserted
-    }
-    manifest.marked = [...manifest.marked.filter((entry) => !(entry.file === row.file && entry.line === located)), marked]
-    result.marked.push(marked)
+    const afterHash = lineHash(current)
+    const marked = applied.map((entry) => ({ ...entry, afterHash })).sort((a, b) => a.column - b.column)
+    manifest.marked = [...manifest.marked.filter((entry) => !(entry.file === file && entry.line === located)), ...marked]
+    result.marked.push(...marked)
   }
 
   if (manifest.marked.length > 0) {
@@ -515,34 +563,52 @@ export interface UnmarkConversionsResult {
 }
 
 /** Removes exactly the inserted text from each recorded line, hash-gated on both sides. */
+/** Removes exactly the inserted text from each recorded line (right-to-left), hash-gated on both sides. */
 export function unmarkConversions(root: string): UnmarkConversionsResult {
   const manifest = readConversionsManifest(root)
   const result: UnmarkConversionsResult = { restored: [], skipped: [] }
   if (!manifest) return result
   const appRootAbsolute = manifest.appRoot === "." ? root : join(root, manifest.appRoot)
   const remaining: MarkedConversion[] = []
+  const groups = new Map<string, MarkedConversion[]>()
   for (const entry of manifest.marked) {
-    const absolutePath = join(appRootAbsolute, entry.file)
+    const key = `${entry.file}\u0000${entry.afterHash}`
+    groups.set(key, [...(groups.get(key) ?? []), entry])
+  }
+  for (const entries of groups.values()) {
+    const { file, afterHash, beforeHash } = entries[0]
+    const absolutePath = join(appRootAbsolute, file)
     assertWriteTargetInsideRoot(root, absolutePath)
     const contents = existsSync(absolutePath) ? readFileSync(absolutePath, "utf8") : null
     const lines = contents === null ? null : splitLines(contents)
-    const located = lines ? locateLine(lines, { line: entry.line, lineHash: entry.afterHash }) : null
-    const current = lines && located !== null ? lines[located - 1] : undefined
-    if (lines === null || located === null || current === undefined || !current.includes(entry.inserted)) {
-      result.skipped.push({ file: entry.file, line: entry.line, reason: "line changed since it was marked; left as is" })
-      remaining.push(entry)
+    const located = lines ? locateLine(lines, { line: entries[0].line, lineHash: afterHash }) : null
+    if (lines === null || located === null) {
+      for (const entry of entries) result.skipped.push({ file, line: entry.line, reason: "line changed since it was marked; left as is" })
+      remaining.push(...entries)
       continue
     }
-    const restoredLine = current.replace(entry.inserted, "")
-    if (lineHash(restoredLine) !== entry.beforeHash) {
-      result.skipped.push({ file: entry.file, line: entry.line, reason: "restored line would not match its pre-image; left as is" })
-      remaining.push(entry)
+    // The stored columns are pre-insert coordinates: removing left-to-right puts each next element
+    // back at its own recorded column just before its insert is removed.
+    let restored = lines[located - 1]
+    let intact = true
+    for (const entry of [...entries].sort((a, b) => a.column - b.column)) {
+      const tagMatch = /^<(a|Link|button)\b/.exec(restored.slice(entry.column))
+      const cut = tagMatch ? entry.column + tagMatch[0].length : -1
+      if (cut < 0 || !restored.startsWith(entry.inserted, cut)) {
+        intact = false
+        break
+      }
+      restored = `${restored.slice(0, cut)}${restored.slice(cut + entry.inserted.length)}`
+    }
+    if (!intact || lineHash(restored) !== beforeHash) {
+      for (const entry of entries) result.skipped.push({ file, line: entry.line, reason: "restored line would not match its pre-image; left as is" })
+      remaining.push(...entries)
       continue
     }
     const nextLines = [...lines]
-    nextLines[located - 1] = restoredLine
+    nextLines[located - 1] = restored
     writeFileAtomic(absolutePath, nextLines.join("\n"))
-    result.restored.push(entry)
+    result.restored.push(...entries)
   }
   if (remaining.length === 0) {
     rmSync(join(root, CONVERSIONS_MANIFEST_RELATIVE_PATH), { force: true })
