@@ -5,6 +5,9 @@ All notable changes to the `infinite-tag` npm package (`packages/instrument`). V
 
 ## Unreleased
 
+- **Meta pixel now installs with Automatic Configuration off:** `fbq('set', 'autoConfig',
+  'false', <id>)` precedes `fbq('init', <id>)`, so no button clicks or page metadata are sent to
+  Meta by default. The rest of the snippet is Meta's own native bootstrap, unchanged.
 - **Existing tags are adopted instead of refused.** A requested provider that already exists in
   the repo (hand-pasted `gtag`/`posthog.init`/`twq`/`fbq` snippet, or GA4 served through a Google
   Tag Manager container) is left byte-for-byte alone, dropped from the install set, and reported

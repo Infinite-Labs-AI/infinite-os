@@ -41,6 +41,22 @@ describe("meta provider plan", () => {
     expect(snippet).not.toContain("${")
   })
 
+  it("turns Meta's Automatic Configuration OFF before init so no button clicks or page metadata go to Meta", () => {
+    const snippet = buildMetaPixelSnippet("1234567890123456")
+    const setLine = `fbq('set', 'autoConfig', 'false', "1234567890123456");`
+    const initLine = `fbq('init', "1234567890123456");`
+    expect(snippet).toContain(setLine)
+    expect(snippet).toContain(initLine)
+    // Order is load-bearing: Meta only honours autoConfig when it is set BEFORE init.
+    expect(snippet.indexOf("fbevents.js")).toBeLessThan(snippet.indexOf(setLine))
+    expect(snippet.indexOf(setLine)).toBeLessThan(snippet.indexOf(initLine))
+    expect(snippet.indexOf(initLine)).toBeLessThan(snippet.indexOf("fbq('track', 'PageView')"))
+    // The id literal in the set call is the same escaped literal as init (no second path for escaping).
+    const hostile = buildMetaPixelSnippet("</script>")
+    expect(hostile).toContain(`fbq('set', 'autoConfig', 'false', "\\u003c/script>");`)
+    expect(hostile).not.toContain("</script>")
+  })
+
   it("records no env keys (the pixel id is an inlined public value)", () => {
     expect(metaProviderAdapter.envKeys("next-app-router")).toEqual([])
   })

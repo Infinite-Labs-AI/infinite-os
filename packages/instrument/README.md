@@ -97,7 +97,7 @@ contract. Noninteractive `--yes` and `apply` runs fail on the same blocker.
 | `--posthog-ui-host <https://...>` | Optional PostHog toolbar host when proxying. |
 | `--x-pixel-id <id>` | Public X pixel ID. |
 | `--x-event-tag-id <id>` | Public X event tag ID; repeatable. |
-| `--meta-pixel-id <id>` | Public Meta pixel ID. |
+| `--meta-pixel-id <id>` | Public Meta pixel ID. Installs with Meta's Automatic Configuration off (`fbq('set','autoConfig','false', id)` before `init`): no button clicks or page metadata are sent to Meta by default. |
 | `--artifact-file <path>` | Read the same public artifact shape from JSON. |
 | `--server-lane` | Add the lossless server lane (see below). Works alone or with the artifact flags. |
 | `--workspace <id>` | Install-manifest ownership; required for apply. |
