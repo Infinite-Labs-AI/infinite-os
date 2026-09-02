@@ -227,6 +227,21 @@ describe("vite-react binding-aware bootstrap recognition", () => {
     expect(readFileSync(join(root, "src/main.tsx"), "utf8")).not.toContain("installInfiniteInstrumentation")
   })
 
+  it("does NOT bind a react-dom import written inside a multiline template literal", () => {
+    // Negative fixture: the react-dom import lives inside a `...` template (documentation text), and
+    // the called createRoot is local. Import DISCOVERY must be string/template-aware, not just the
+    // call check — otherwise this is a silent false-supported / no-pixel install.
+    const root = copyFixture("vite-react-template-import")
+    const plan = planFor(root)
+    expect(plan.blockers).toEqual([])
+    expect(plan.instructions.find((instruction) => instruction.action === "manual")?.path).toBe("src/main.tsx")
+    expect(plan.files).not.toContain("src/main.tsx")
+
+    const apply = applyInstallation({ root, workspaceId: "ws-test", plan, allowDirty: true })
+    expect(apply.requiresManual?.[0]?.path).toBe("src/main.tsx")
+    expect(readFileSync(join(root, "src/main.tsx"), "utf8")).not.toContain("installInfiniteInstrumentation")
+  })
+
   it("does NOT count a bootstrap call that only appears inside a string or comment", () => {
     const root = copyFixture("vite-react-basic")
     // Real react-dom import IS present, but the only createRoot(...) usages are inside a string and a

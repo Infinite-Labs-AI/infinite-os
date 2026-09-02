@@ -462,15 +462,21 @@ function maskCommentsAndStrings(source: string, blankStrings: boolean): string {
 function analyzeReactDomBindings(source: string): ReactDomBindings {
   const callableLocals = new Set<string>()
   const memberObjects = new Set<string>()
-  // Comment-masked so a commented-out import never binds; line-anchored (`^…import`) so an
-  // import-looking STRING (e.g. `const s = 'import { createRoot } from "react-dom/client"'`) is not
-  // read as a real import. String bodies are kept here because the specifier itself is a string.
-  const scan = maskCommentsAndStrings(source, false)
-  const importRe = /^[ \t]*import\s+([^;]*?)\s+from\s+["']([^"']+)["']/gm
-  let match: RegExpExecArray | null
-  while ((match = importRe.exec(scan)) !== null) {
-    if (!REACT_DOM_SPECIFIERS.has(match[2])) continue
-    const clause = match[1]
+  // LOCATE import statements on the comment+string+template-masked source, so an import written
+  // inside a string or a multiline template literal is never treated as a real import (its whole line
+  // is blanked in the mask). The specifier is itself a string — blanked in the mask — so read the
+  // genuine clause + specifier from the ORIGINAL source at the match offset (masking preserves length,
+  // so offsets are 1:1). Line-anchored (`^…import`) as a second guard.
+  const masked = maskCommentsAndStrings(source, true)
+  const locateRe = /^[ \t]*import\s+[^;]*?\s+from\s+["'][^"']+["']/gm
+  const parseRe = /^[ \t]*import\s+([^;]*?)\s+from\s+["']([^"']+)["']/
+  let located: RegExpExecArray | null
+  while ((located = locateRe.exec(masked)) !== null) {
+    const statement = source.slice(located.index, located.index + located[0].length)
+    const parsed = parseRe.exec(statement)
+    if (!parsed) continue
+    if (!REACT_DOM_SPECIFIERS.has(parsed[2])) continue
+    const clause = parsed[1]
 
     const namedMatch = clause.match(/\{([^}]*)\}/)
     if (namedMatch) {
