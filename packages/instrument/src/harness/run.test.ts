@@ -8,7 +8,7 @@ import { parseHarnessArgs } from "./args.js"
 import { EXIT_ARGS, EXIT_FAILED, EXIT_OK, runHarnessCommand } from "./command.js"
 import { PROPOSED_CONVERSIONS_RELATIVE_PATH } from "./marking.js"
 import { REPORT_SENT_LINE, reportNotSentLine, type HarnessReportPayload, type ReportSink } from "./report-sink.js"
-import { runHarness, type HarnessIo } from "./run.js"
+import { INFINITE_PRIVACY_DISCLOSURE_NOTICE, runHarness, type HarnessIo } from "./run.js"
 import { HARNESS_REPORT_RELATIVE_PATH } from "./state.js"
 import type { VerificationBackend } from "./verify.js"
 
@@ -516,5 +516,60 @@ describe("server-side checkout detection (harness)", () => {
     expect(nextSteps).toContain("pages/api/stripe-checkout.ts")
     const proposal = JSON.parse(readFileSync(join(root, PROPOSED_CONVERSIONS_RELATIVE_PATH), "utf8"))
     expect(proposal.serverCheckout?.code).toBe("INF_CHECKOUT_SERVER_SIDE")
+  })
+
+  it("recommends the funnel identity merge and post-response capture on the detected checkout→webhook pair", async () => {
+    const root = copyFixture("next-pages-router-basic")
+    write(root, "pages/api/stripe-checkout.ts", "export default async function h(){ await stripe.checkout.sessions.create({}) }\n")
+    write(root, "pages/api/stripe-webhook.ts", "export default function h(req){ const e = stripe.webhooks.constructEvent(req.body, sig, sk); if(e.type==='checkout.session.completed'){} }\n")
+    const io = fakeIo({ interactive: false })
+    const result = await runHarness(
+      parseHarnessArgs(["--plan", "--root", root, "--workspace", "ws_1", "--ga4-measurement-id", "G-NEW00001"]),
+      io,
+      { discover: () => null }
+    )
+    const nextSteps = result.report.nextSteps.join("\n")
+    expect(nextSteps).toContain("INF_FUNNEL_IDENTITY_MERGE")
+    expect(nextSteps).toContain("$anon_distinct_id")
+    expect(nextSteps).toContain("INF_FUNNEL_CAPTURE_AFTER_RESPONSE")
+    // Surfaced in the written report too.
+    const report = readFileSync(join(root, HARNESS_REPORT_RELATIVE_PATH), "utf8")
+    expect(report).toContain("INF_FUNNEL_IDENTITY_MERGE")
+    expect(report).toContain("INF_FUNNEL_CAPTURE_AFTER_RESPONSE")
+  })
+})
+
+describe("privacy disclosure reminder (Infinite install)", () => {
+  const infiniteArgs = (root: string, mode: string) => [
+    mode, "--root", root, "--workspace", "ws_1",
+    "--infinite-site-source-key", "site_public_123",
+    "--infinite-production-host", "example.com",
+    "--infinite-static-proxy", "vercel",
+    "--infinite-consent-mode", "not-required"
+  ]
+
+  it("reminds the user to disclose Infinite in their privacy policy when Infinite is being installed", async () => {
+    const root = copyFixture("static-html-basic")
+    const io = fakeIo({ interactive: false })
+    const result = await runHarness(parseHarnessArgs(infiniteArgs(root, "--plan")), io, { discover: () => null })
+    expect(result.report.nextSteps).toContain(INFINITE_PRIVACY_DISCLOSURE_NOTICE)
+    expect(INFINITE_PRIVACY_DISCLOSURE_NOTICE).toContain("INF_PRIVACY_DISCLOSURE")
+    expect(INFINITE_PRIVACY_DISCLOSURE_NOTICE).toContain("visit key that rotates every 30 minutes")
+    expect(INFINITE_PRIVACY_DISCLOSURE_NOTICE).toContain("raw IP address and full user agent stay server-side")
+    // Surfaced in the written report's checklist.
+    const report = readFileSync(join(root, HARNESS_REPORT_RELATIVE_PATH), "utf8")
+    expect(report).toContain("INF_PRIVACY_DISCLOSURE")
+  })
+
+  it("does NOT remind about disclosure when no Infinite source is being installed", async () => {
+    const root = copyFixture("static-html-basic")
+    write(root, "index.html", `<!doctype html>\n<html>\n<head></head>\n<body>\n<a href="/signup">Start</a>\n</body>\n</html>\n`)
+    const io = fakeIo({ interactive: false })
+    const result = await runHarness(
+      parseHarnessArgs(["--plan", "--root", root, "--workspace", "ws_1", "--ga4-measurement-id", "G-NEW00001"]),
+      io,
+      { discover: () => null }
+    )
+    expect(result.report.nextSteps.some((step) => step.includes("INF_PRIVACY_DISCLOSURE"))).toBe(false)
   })
 })

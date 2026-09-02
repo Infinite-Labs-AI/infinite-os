@@ -96,6 +96,20 @@ const WEBHOOK_CONSTRUCT_PATTERN = /\bwebhooks\s*\.\s*constructEvent\b/
 const CHECKOUT_COMPLETED_PATTERN = /checkout\.session\.completed/
 export const MAX_SERVER_CHECKOUT_SIGNALS = 20
 
+/**
+ * The payment funnel's two halves are keyed differently by default — `checkout_started` on the
+ * browser/anon id, the webhook `purchase`/activation on the server-created buyer id — so without an
+ * explicit alias PostHog sees two unrelated identities and the funnel can't be read. Recommended
+ * only when BOTH the checkout entry and its verified webhook fulfillment are detected (the pair).
+ */
+export const FUNNEL_IDENTITY_MERGE_CODE = "INF_FUNNEL_IDENTITY_MERGE"
+/**
+ * An awaited `captureServerEvent` (3s abort) before the checkout route returns delays the web `url`
+ * response and the desktop 302 by up to 3s; the helper's own doc says await AFTER responding.
+ * Recommended whenever a server checkout ENTRY (`stripe.checkout.sessions.create`) is detected.
+ */
+export const FUNNEL_CAPTURE_AFTER_RESPONSE_CODE = "INF_FUNNEL_CAPTURE_AFTER_RESPONSE"
+
 export interface DetectServerCheckoutInput {
   root: string
   appRoot: string
@@ -154,6 +168,20 @@ export function renderServerCheckoutRecommendation(rec: ServerCheckoutRecommenda
   if (!start && end) {
     lines.push(
       "A Stripe webhook fulfillment handler was found but no stripe.checkout.sessions.create — emit `checkout_started` at your server checkout entry point to pair with the `purchase` outcome."
+    )
+  }
+  // Post-response capture (fires for any server checkout ENTRY): the checkout route must return
+  // its `url` / 302 first, then send — an awaited 3s capture before the response delays the client.
+  if (start) {
+    lines.push(
+      `${FUNNEL_CAPTURE_AFTER_RESPONSE_CODE} — At ${start.file}:${start.line}, don't await \`checkout_started\` before the checkout route returns: an awaited captureServerEvent (3s abort) delays the web \`url\` response and the desktop 302 by up to 3s. Return the event payload from the session-creation function and capture it AFTER res.json(...) / the 302 in the handler — the serverless instance stays alive to send it without delaying the client.`
+    )
+  }
+  // Identity merge (fires only on the detected checkout→webhook PAIR): the two halves are keyed
+  // differently, so alias them at fulfillment or PostHog reads two identities and the funnel splits.
+  if (start && end) {
+    lines.push(
+      `${FUNNEL_IDENTITY_MERGE_CODE} — \`checkout_started\` is keyed on the browser/anon id but the webhook \`purchase\`/activation at ${end.file}:${end.line} is keyed on the server-created buyer id, so PostHog sees two unrelated identities and the payment funnel can't be read. Send the browser's PostHog distinct id to the checkout route, stash it in the Stripe session \`metadata\` (e.g. posthog_distinct_id), and at fulfillment — BEFORE the activation event — alias them: captureServerEvent({ event: '$identify', distinctId: buyer.id, properties: { $anon_distinct_id: session.metadata?.posthog_distinct_id || buyer.email } }) ($create_alias with properties.alias is equivalent). This also survives a site running PostHog persistence:'memory', where a client-side identify() after login can't merge.`
     )
   }
   return lines

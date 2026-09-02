@@ -431,12 +431,31 @@ async function resolveInfiniteConsent(ctx: Ctx): Promise<void> {
   }
 }
 
+// Installing Infinite's first-party collection adds a new data processor. This is a NON-BLOCKING
+// reminder (it never fails the run), surfaced in the report + install output as an INF_ notice, that
+// prompts the user to disclose Infinite in their privacy policy BEFORE collection is enabled — and it
+// states exactly what is sent, so the disclosure can be accurate. It fires only when an Infinite
+// source is actually being installed or upgraded (nothing to disclose otherwise).
+export const INFINITE_PRIVACY_DISCLOSURE_NOTICE =
+  "INF_PRIVACY_DISCLOSURE — Installing Infinite adds a new data processor (Infinite / Ultima Inc.) that receives, per request: the path, the host, the referrer host, a browser/bot class, and a secret-keyed visit key that rotates every 30 minutes. The raw IP address and full user agent stay server-side and never leave your server. Disclose Infinite analytics in your privacy policy BEFORE enabling collection."
+
+function remindInfinitePrivacyDisclosure(ctx: Ctx): void {
+  const installing = ctx.classifications.some(
+    (entry) => entry.provider === "infinite" && (entry.action === "install" || entry.action === "upgrade")
+  )
+  if (!installing) return
+  if (!ctx.report.nextSteps.includes(INFINITE_PRIVACY_DISCLOSURE_NOTICE)) {
+    ctx.report.nextSteps.push(INFINITE_PRIVACY_DISCLOSURE_NOTICE)
+  }
+}
+
 const plan: RunbookStep<Ctx> = {
   id: "plan",
   title: "Plan",
   async run(ctx) {
     if (!ctx.inspect || !ctx.keys) throw new Error("inspect did not run")
     await resolveInfiniteConsent(ctx)
+    remindInfinitePrivacyDisclosure(ctx)
     ctx.planResult = buildHarnessPlan({
       root: ctx.root,
       inspect: ctx.inspect,

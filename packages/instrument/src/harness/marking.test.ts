@@ -5,6 +5,8 @@ import { afterEach, describe, expect, it } from "vitest"
 
 import {
   CONVERSIONS_MANIFEST_RELATIVE_PATH,
+  FUNNEL_CAPTURE_AFTER_RESPONSE_CODE,
+  FUNNEL_IDENTITY_MERGE_CODE,
   PROPOSED_CONVERSIONS_RELATIVE_PATH,
   applyConversions,
   detectServerCheckout,
@@ -362,5 +364,44 @@ describe("detectServerCheckout", () => {
     expect(renderServerCheckoutRecommendation(rec!).join("\n")).toContain(
       "No verified Stripe webhook fulfillment handler was found"
     )
+  })
+
+  it("recommends the funnel identity merge ONLY on the detected checkout→webhook pair", () => {
+    const root = makeRoot()
+    write(root, "pages/api/checkout.ts", "await stripe.checkout.sessions.create({ mode: 'payment' })\n")
+    write(
+      root,
+      "pages/api/webhook.ts",
+      "const e = stripe.webhooks.constructEvent(req.body, sig, sk)\nif (e.type === 'checkout.session.completed') fulfill(e)\n"
+    )
+    const rec = detectServerCheckout({ root, appRoot: "." })
+    const text = renderServerCheckoutRecommendation(rec!).join("\n")
+    expect(text).toContain(FUNNEL_IDENTITY_MERGE_CODE)
+    // The reviewer's exact merge shape must be spelled out.
+    expect(text).toContain("$identify")
+    expect(text).toContain("$anon_distinct_id")
+    expect(text).toContain("posthog_distinct_id")
+    // and it names the fulfillment site.
+    expect(text).toContain("pages/api/webhook.ts")
+  })
+
+  it("does NOT recommend the identity merge when only the checkout entry exists (no webhook to key on)", () => {
+    const root = makeRoot()
+    write(root, "pages/api/checkout.ts", "await stripe.checkout.sessions.create({})\n")
+    const rec = detectServerCheckout({ root, appRoot: "." })
+    const text = renderServerCheckoutRecommendation(rec!).join("\n")
+    expect(text).not.toContain(FUNNEL_IDENTITY_MERGE_CODE)
+    // …but the post-response capture recommendation still applies to the entry.
+    expect(text).toContain(FUNNEL_CAPTURE_AFTER_RESPONSE_CODE)
+  })
+
+  it("recommends capturing checkout_started AFTER the response wherever a server checkout entry exists", () => {
+    const root = makeRoot()
+    write(root, "app/checkout/route.ts", "const session = await stripe.checkout.sessions.create({})\n")
+    const rec = detectServerCheckout({ root, appRoot: "." })
+    const text = renderServerCheckoutRecommendation(rec!).join("\n")
+    expect(text).toContain(FUNNEL_CAPTURE_AFTER_RESPONSE_CODE)
+    expect(text).toContain("res.json")
+    expect(text).toContain("app/checkout/route.ts")
   })
 })
