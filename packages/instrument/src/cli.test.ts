@@ -1038,10 +1038,11 @@ describe("posthog reverse proxy (--posthog-proxy / --posthog-ui-host)", () => {
   })
 
   describe("manual-required install (pixel not yet live) — exit code + json", () => {
+    // The ONLY path that now reaches the exit-2 / requires_manual machinery: an index.html with no
+    // </head> to inject into. main.tsx is never consulted.
     function manualVite(): string {
       const root = copyFixture("vite-react-basic")
-      // No recognizable React bootstrap -> infinite-tag can't wire the entrypoint automatically.
-      writeFileSync(join(root, "src/main.tsx"), 'console.log("no imports")\n')
+      writeFileSync(join(root, "index.html"), '<html><body><div id="root"></div></body></html>\n')
       return root
     }
 
@@ -1061,8 +1062,8 @@ describe("posthog reverse proxy (--posthog-proxy / --posthog-ui-host)", () => {
       const result = JSON.parse(lastStdoutJson()) as {
         requiresManual?: Array<{ path: string; reason: string; snippet: string }>
       }
-      expect(result.requiresManual?.[0]?.path).toBe("src/main.tsx")
-      expect(result.requiresManual?.[0]?.snippet).toContain("installInfiniteInstrumentation()")
+      expect(result.requiresManual?.[0]?.path).toBe("index.html")
+      expect(result.requiresManual?.[0]?.snippet).toContain("<!-- infinite:start -->")
     })
 
     it("--allow-manual downgrades the same install to success (exit 0)", async () => {
@@ -1076,7 +1077,7 @@ describe("posthog reverse proxy (--posthog-proxy / --posthog-ui-host)", () => {
       const code = await runCli(["apply", ...flags(root)])
       expect(code).toBe(2)
       const result = JSON.parse(lastStdoutJson()) as { requiresManual?: Array<{ path: string }> }
-      expect(result.requiresManual?.[0]?.path).toBe("src/main.tsx")
+      expect(result.requiresManual?.[0]?.path).toBe("index.html")
     })
 
     it("verify after a manual-required install also reports non-green (exit 2)", async () => {
@@ -1085,21 +1086,17 @@ describe("posthog reverse proxy (--posthog-proxy / --posthog-ui-host)", () => {
       const code = await runCli(["verify", "--root", root, "--json"])
       expect(code).toBe(2)
       const result = JSON.parse(lastStdoutJson()) as { requiresManual?: Array<{ path: string }> }
-      expect(result.requiresManual?.[0]?.path).toBe("src/main.tsx")
+      expect(result.requiresManual?.[0]?.path).toBe("index.html")
     })
 
-    it("verify CLEARS to exit 0 once the user actually adds the wiring (BLOCKER 1)", async () => {
+    it("verify CLEARS to exit 0 once the user actually adds the block to index.html (BLOCKER 1)", async () => {
       const root = manualVite()
       expect(await runCli(["install", ...flags(root)])).toBe(2)
-      // The user adds the exact wiring by hand: the import + the boot call.
-      writeFileSync(
-        join(root, "src/main.tsx"),
-        [
-          'import { installInfiniteInstrumentation } from "./lib/infinite-analytics"',
-          'console.log("no imports")',
-          "installInfiniteInstrumentation()"
-        ].join("\n") + "\n"
-      )
+      const installed = JSON.parse(lastStdoutJson()) as { requiresManual?: Array<{ snippet: string }> }
+      const block = installed.requiresManual![0]!.snippet
+      // The user pastes the exact managed <script> block into index.html by hand.
+      writeFileSync(join(root, "index.html"), `<html><head>\n${block}\n</head><body></body></html>\n`)
+
       const code = await runCli(["verify", "--root", root, "--json"])
       expect(code).toBe(0)
       const result = JSON.parse(lastStdoutJson()) as { buildOk: boolean; requiresManual?: unknown[] }
@@ -1107,7 +1104,7 @@ describe("posthog reverse proxy (--posthog-proxy / --posthog-ui-host)", () => {
       expect(result.requiresManual ?? []).toEqual([])
     })
 
-    it("a normal auto-wired vite install stays exit 0 with no requiresManual", async () => {
+    it("a normal vite install (index.html has </head>) injects the tag and stays exit 0", async () => {
       const root = copyFixture("vite-react-basic")
       const code = await runCli(["install", ...flags(root)])
       expect(code).toBe(0)

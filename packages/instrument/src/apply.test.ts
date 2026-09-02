@@ -132,72 +132,35 @@ describe("applyInstallation", () => {
     expect(secondHtml.match(/infinite:start/g)).toHaveLength(1)
   })
 
-  it("creates a managed analytics module and boot call once for Vite React fixtures", () => {
+  it("injects the managed block into index.html once for Vite React fixtures, main.tsx untouched", () => {
     const root = copyFixture("vite-react-basic")
-    const inspectResult = inspectWorkspace(root)
-    const plan = planInstallation({
-      root,
-      inspect: inspectResult,
-      workspaceId: "ws_test",
-      artifacts: {
-        ga4: {
-          measurementId: "G-TEST123"
-        },
-        posthog: {
-          projectKey: "phc_test",
-          apiHost: "https://app.posthog.example"
-        }
-      }
-    })
+    const viteArtifacts = {
+      ga4: { measurementId: "G-TEST123" },
+      posthog: { projectKey: "phc_test", apiHost: "https://app.posthog.example" }
+    }
+    const mainBefore = readFileSync(join(root, "src/main.tsx"), "utf8")
+    const plan = planInstallation({ root, inspect: inspectWorkspace(root), workspaceId: "ws_test", artifacts: viteArtifacts })
 
-    const first = applyInstallation({
-      root,
-      workspaceId: "ws_test",
-      plan
-    })
+    const first = applyInstallation({ root, workspaceId: "ws_test", plan })
+    const indexPath = join(root, "index.html")
+    const firstHtml = readFileSync(indexPath, "utf8")
 
-    const mainPath = join(root, "src/main.tsx")
-    const analyticsPath = join(root, "src/lib/infinite-analytics.ts")
-    const firstMain = readFileSync(mainPath, "utf8")
-    const firstAnalytics = readFileSync(analyticsPath, "utf8")
+    expect(first.changedFiles).toEqual(["index.html", installManifestRelativePath])
+    expect(firstHtml).toContain("<!-- infinite:start -->")
+    expect(firstHtml).toContain("G-TEST123")
+    expect(firstHtml).toContain("phc_test")
+    expect(firstHtml).toContain("https://app.posthog.example")
+    // The React entrypoint is never read, edited, or created-alongside.
+    expect(readFileSync(join(root, "src/main.tsx"), "utf8")).toBe(mainBefore)
+    expect(existsSync(join(root, "src/lib/infinite-analytics.ts"))).toBe(false)
 
-    expect(first.changedFiles).toEqual([
-      "src/main.tsx",
-      "src/lib/infinite-analytics.ts",
-      installManifestRelativePath
-    ])
-    expect(firstMain).toContain('import { installInfiniteInstrumentation } from "./lib/infinite-analytics"')
-    expect(firstMain).toContain("installInfiniteInstrumentation()")
-    expect(firstAnalytics).toContain("G-TEST123")
-    expect(firstAnalytics).toContain("phc_test")
-    expect(firstAnalytics).toContain("https://app.posthog.example")
-
-    const rerunPlan = planInstallation({
-      root,
-      inspect: inspectWorkspace(root),
-      workspaceId: "ws_test",
-      artifacts: {
-        ga4: {
-          measurementId: "G-TEST123"
-        },
-        posthog: {
-          projectKey: "phc_test",
-          apiHost: "https://app.posthog.example"
-        }
-      }
-    })
-    const second = applyInstallation({
-      root,
-      workspaceId: "ws_test",
-      plan: rerunPlan
-    })
-    const secondMain = readFileSync(mainPath, "utf8")
-    const secondAnalytics = readFileSync(analyticsPath, "utf8")
+    const rerunPlan = planInstallation({ root, inspect: inspectWorkspace(root), workspaceId: "ws_test", artifacts: viteArtifacts })
+    const second = applyInstallation({ root, workspaceId: "ws_test", plan: rerunPlan })
+    const secondHtml = readFileSync(indexPath, "utf8")
 
     expect(second.changedFiles).toEqual([])
-    expect(secondMain).toBe(firstMain)
-    expect(secondAnalytics).toBe(firstAnalytics)
-    expect(secondMain.match(/installInfiniteInstrumentation\(\)/g)).toHaveLength(1)
+    expect(secondHtml).toBe(firstHtml)
+    expect(secondHtml.match(/infinite:start/g)).toHaveLength(1)
 
     const manifestPath = join(root, installManifestRelativePath)
     expect(existsSync(manifestPath)).toBe(true)
@@ -205,7 +168,8 @@ describe("applyInstallation", () => {
     expect(JSON.parse(readFileSync(manifestPath, "utf8"))).toMatchObject({
       workspaceId: "ws_test",
       framework: "vite-react",
-      providers: ["ga4", "posthog"]
+      providers: ["ga4", "posthog"],
+      files: ["index.html"]
     })
   })
 
@@ -363,104 +327,6 @@ describe("applyInstallation", () => {
     expect(secondApp.match(/<InfiniteAnalyticsClient \/>/g)).toHaveLength(1)
   })
 
-  it("keeps multi-line imports intact in Vite main entrypoints and round-trips uninstall", () => {
-    const root = copyFixture("vite-react-basic")
-    const mainPath = join(root, "src/main.tsx")
-    const multiLineImport = 'import {\n  StrictMode\n} from "react";'
-    const originalMain = [
-      "import {",
-      "  StrictMode",
-      '} from "react";',
-      'import ReactDOM from "react-dom/client";',
-      "",
-      "function App(): React.JSX.Element {",
-      "  return <h1>Vite fixture</h1>;",
-      "}",
-      "",
-      'const root = document.getElementById("root");',
-      "",
-      "if (!root) {",
-      '  throw new Error("Missing root element");',
-      "}",
-      "",
-      "ReactDOM.createRoot(root).render(",
-      "  <StrictMode>",
-      "    <App />",
-      "  </StrictMode>",
-      ");",
-      ""
-    ].join("\n")
-    writeFileSync(mainPath, originalMain)
-
-    const plan = planInstallation({
-      root,
-      inspect: inspectWorkspace(root),
-      workspaceId: "ws_test",
-      artifacts: {
-        ga4: {
-          measurementId: "G-TEST123"
-        }
-      }
-    })
-    expect(plan.blockers).toEqual([])
-
-    applyInstallation({
-      root,
-      workspaceId: "ws_test",
-      plan
-    })
-
-    const appliedMain = readFileSync(mainPath, "utf8")
-    // The multi-line import must survive byte-for-byte — nothing spliced inside it.
-    expect(appliedMain).toContain(multiLineImport)
-    // The managed wiring lands after the complete import section, never inside it.
-    expect(appliedMain).toContain(
-      'import ReactDOM from "react-dom/client";\n' +
-        'import { installInfiniteInstrumentation } from "./lib/infinite-analytics"\n' +
-        "\ninstallInfiniteInstrumentation()\n"
-    )
-    expect(appliedMain.match(/installInfiniteInstrumentation\(\)/g)).toHaveLength(1)
-
-    const uninstalled = uninstallInstallation({ root })
-    expect(uninstalled.restoredFiles).toContain("src/main.tsx")
-    expect(readFileSync(mainPath, "utf8")).toBe(originalMain)
-  })
-
-  it("preserves a leading comment line in Vite main entrypoints", () => {
-    const root = copyFixture("vite-react-basic")
-    const mainPath = join(root, "src/main.tsx")
-    const originalMain = `/* eslint-disable no-console */\n${readFileSync(mainPath, "utf8")}`
-    writeFileSync(mainPath, originalMain)
-
-    const plan = planInstallation({
-      root,
-      inspect: inspectWorkspace(root),
-      workspaceId: "ws_test",
-      artifacts: {
-        ga4: {
-          measurementId: "G-TEST123"
-        }
-      }
-    })
-    expect(plan.blockers).toEqual([])
-
-    applyInstallation({
-      root,
-      workspaceId: "ws_test",
-      plan
-    })
-
-    const appliedMain = readFileSync(mainPath, "utf8")
-    expect(appliedMain.startsWith("/* eslint-disable no-console */\n")).toBe(true)
-    expect(appliedMain).toContain('import React from "react";')
-    expect(appliedMain).toContain('import ReactDOM from "react-dom/client";')
-    expect(appliedMain).toContain("ReactDOM.createRoot(root).render(<App />);")
-    expect(appliedMain.match(/installInfiniteInstrumentation\(\)/g)).toHaveLength(1)
-
-    const uninstalled = uninstallInstallation({ root })
-    expect(uninstalled.restoredFiles).toContain("src/main.tsx")
-    expect(readFileSync(mainPath, "utf8")).toBe(originalMain)
-  })
 })
 
 const gitEnv = {
@@ -565,15 +431,16 @@ describe("applyInstallation rollback", () => {
   it("restores every touched file when a write fails mid-apply", () => {
     const root = copyFixture("vite-react-basic")
 
-    const decoyContents = "// Managed by Infinite. Public install artifacts only.\n"
-    const decoyPath = join(root, "decoy.ts")
+    // Poison index.html with a symlink so writeFileAtomic refuses to write through it (the decoy has
+    // a </head>, so the adapter considers it injectable and attempts the write).
+    const decoyContents = "<!doctype html><html><head></head><body></body></html>\n"
+    const decoyPath = join(root, "decoy.html")
     writeFileSync(decoyPath, decoyContents)
-    mkdirSync(join(root, "src/lib"), { recursive: true })
-    const analyticsPath = join(root, "src/lib/infinite-analytics.ts")
-    symlinkSync(decoyPath, analyticsPath)
+    const indexPath = join(root, "index.html")
+    rmSync(indexPath)
+    symlinkSync(decoyPath, indexPath)
 
     const originalMain = readFileSync(join(root, "src/main.tsx"), "utf8")
-    const originalHtml = readFileSync(join(root, "index.html"), "utf8")
 
     const plan = planInstallation({
       root,
@@ -591,9 +458,9 @@ describe("applyInstallation rollback", () => {
       applyInstallation({ root, workspaceId: "ws_test", plan })
     ).toThrow(/symlink/)
 
+    // The entrypoint is untouched, the symlink and its target are intact, and no manifest was written.
     expect(readFileSync(join(root, "src/main.tsx"), "utf8")).toBe(originalMain)
-    expect(readFileSync(join(root, "index.html"), "utf8")).toBe(originalHtml)
-    expect(lstatSync(analyticsPath).isSymbolicLink()).toBe(true)
+    expect(lstatSync(indexPath).isSymbolicLink()).toBe(true)
     expect(readFileSync(decoyPath, "utf8")).toBe(decoyContents)
     expect(existsSync(join(root, installManifestRelativePath))).toBe(false)
   })

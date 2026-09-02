@@ -1,4 +1,5 @@
 import type { ProviderAdapter, SupportedFramework } from "../types.js"
+import { isHtmlInjectedFramework } from "../types.js"
 import { jsLiteral, validateMetaPixelId } from "./validate.js"
 
 /**
@@ -37,16 +38,14 @@ export const metaProviderAdapter: ProviderAdapter = {
       instructions: [
         {
           path: frameworkInstructionPath(framework),
-          action: framework === "static-html" ? "modify" : "create",
-          description:
-            framework === "static-html"
-              ? "Inject the Meta Pixel bootstrap into index.html."
-              : "Add the Meta Pixel bootstrap to the managed analytics module.",
+          action: isHtmlInjectedFramework(framework) ? "modify" : "create",
+          description: isHtmlInjectedFramework(framework)
+            ? "Inject the Meta Pixel bootstrap into index.html."
+            : "Add the Meta Pixel bootstrap to the managed analytics module.",
           provider: "meta",
-          snippet:
-            framework === "static-html"
-              ? wrapHtmlSnippet(buildMetaPixelSnippet(pixelId!))
-              : buildMetaPixelSnippet(pixelId!)
+          snippet: isHtmlInjectedFramework(framework)
+            ? wrapHtmlSnippet(buildMetaPixelSnippet(pixelId!))
+            : buildMetaPixelSnippet(pixelId!)
         }
       ]
     }
@@ -56,9 +55,8 @@ export const metaProviderAdapter: ProviderAdapter = {
 function frameworkInstructionPath(framework: SupportedFramework): string {
   switch (framework) {
     case "static-html":
-      return "index.html"
     case "vite-react":
-      return "src/lib/infinite-analytics.ts"
+      return "index.html"
     case "next-app-router":
     case "next-pages-router":
       return "lib/infinite-analytics.ts"

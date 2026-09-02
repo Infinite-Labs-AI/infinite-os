@@ -420,27 +420,4 @@ describe("uninstallInstallation — FIX 1: wiring-removal failure gates managed-
     expect(existsSync(join(root, ".infinite/install.json"))).toBe(true)
   })
 
-  it("does not delete managed analytics module when main wiring cannot be stripped (vite-react)", () => {
-    const root = copyFixture("vite-react-basic")
-    applyFixture(root, {
-      ga4: { measurementId: "G-TEST123" },
-      posthog: { projectKey: "phc_test", apiHost: "https://app.posthog.example" }
-    })
-
-    // Reindent bootLine so the literal `\n${bootLine}\n` replace no longer matches
-    const mainPath = join(root, "src/main.tsx")
-    const mainSource = readFileSync(mainPath, "utf8")
-    const mutated = mainSource.replace(
-      /^installInfiniteInstrumentation\(\)$/m,
-      "  installInfiniteInstrumentation()"
-    )
-    expect(mutated).not.toBe(mainSource)
-    writeFileSync(mainPath, mutated)
-
-    const result = uninstallInstallation({ root })
-
-    expect(result.warnings.some((w) => w.includes("automatically"))).toBe(true)
-    expect(existsSync(join(root, "src/lib/infinite-analytics.ts"))).toBe(true)
-    expect(existsSync(join(root, ".infinite/install.json"))).toBe(true)
-  })
 })

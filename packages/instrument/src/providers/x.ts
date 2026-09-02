@@ -1,4 +1,5 @@
 import type { InstallInstruction, ProviderAdapter, SupportedFramework } from "../types.js"
+import { isHtmlInjectedFramework } from "../types.js"
 import { jsLiteral, validateXEventTagIds, validateXPixelId } from "./validate.js"
 
 function frameworkEnvKeys(framework: SupportedFramework): string[] {
@@ -6,8 +7,8 @@ function frameworkEnvKeys(framework: SupportedFramework): string[] {
     case "next-app-router":
     case "next-pages-router":
       return ["NEXT_PUBLIC_X_EVENT_TAG_IDS", "NEXT_PUBLIC_X_PIXEL_ID"]
+    // Vite bakes the resolved pixel/tag ids into the injected index.html <script> — no env var.
     case "vite-react":
-      return ["VITE_X_EVENT_TAG_IDS", "VITE_X_PIXEL_ID"]
     case "static-html":
       return []
   }
@@ -48,16 +49,14 @@ export const xProviderAdapter: ProviderAdapter = {
           ? [
               {
                 path: frameworkInstructionPath(framework),
-                action: framework === "static-html" ? "modify" : "create",
-                description:
-                  framework === "static-html"
-                    ? "Inject the X public pixel bootstrap into index.html."
-                    : "Add the X public pixel bootstrap to the managed analytics module.",
+                action: isHtmlInjectedFramework(framework) ? "modify" : "create",
+                description: isHtmlInjectedFramework(framework)
+                  ? "Inject the X public pixel bootstrap into index.html."
+                  : "Add the X public pixel bootstrap to the managed analytics module.",
                 provider: "x",
-                snippet:
-                  framework === "static-html"
-                    ? wrapHtmlSnippet(buildXBootstrapSnippet(pixelId!, eventTagIds!))
-                    : buildXBootstrapSnippet(pixelId!, eventTagIds!)
+                snippet: isHtmlInjectedFramework(framework)
+                  ? wrapHtmlSnippet(buildXBootstrapSnippet(pixelId!, eventTagIds!))
+                  : buildXBootstrapSnippet(pixelId!, eventTagIds!)
               }
             ]
           : []
@@ -68,9 +67,8 @@ export const xProviderAdapter: ProviderAdapter = {
 function frameworkInstructionPath(framework: SupportedFramework): string {
   switch (framework) {
     case "static-html":
-      return "index.html"
     case "vite-react":
-      return "src/lib/infinite-analytics.ts"
+      return "index.html"
     case "next-app-router":
     case "next-pages-router":
       return "lib/infinite-analytics.ts"

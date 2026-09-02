@@ -6,12 +6,12 @@ import { infiniteProxySpec } from "../workspace-artifacts.js"
 
 import {
   fileExists,
-  indentBlock,
   normalizeAppRelativePath,
   readRequiredFile,
   readWorkspacePackageJson,
   writeFileIfChanged
 } from "./shared.js"
+import { buildManagedHtmlBlock, stripManagedHtmlBlock, upsertManagedHtmlBlock } from "./managed-html.js"
 import {
   buildVercelJson,
   applyManagedVercelJson,
@@ -19,9 +19,6 @@ import {
   VERCEL_CONFIG_FILE,
   VERCEL_HOST_CAVEAT
 } from "./vercel-config.js"
-
-const managedStartMarker = "<!-- infinite:start -->"
-const managedEndMarker = "<!-- infinite:end -->"
 
 export const staticHtmlAdapter: FrameworkAdapter = {
   id: "static-html",
@@ -139,17 +136,7 @@ export const staticHtmlAdapter: FrameworkAdapter = {
       .map((instruction) => instruction.snippet.trim())
       .filter((snippet) => snippet.length > 0)
 
-    const managedBlock = [
-      managedStartMarker,
-      ...providerSnippets.flatMap((snippet) => ["", indentBlock(snippet, 2)]),
-      "",
-      managedEndMarker
-    ].join("\n")
-
-    const managedPattern = new RegExp(
-      `${escapeForRegExp(managedStartMarker)}[\\s\\S]*?${escapeForRegExp(managedEndMarker)}`,
-      "m"
-    )
+    const managedBlock = buildManagedHtmlBlock(providerSnippets)
 
     const changedFiles: string[] = []
     const configOwnership = {}
@@ -159,11 +146,7 @@ export const staticHtmlAdapter: FrameworkAdapter = {
         throw new Error(missingHeadMessage(page))
       }
 
-      // Function replacers so any `$` sequence inside the managed block is inserted
-      // verbatim — never interpreted as a replacement pattern (`$&`, `$1`, …).
-      const nextHtml = html.includes(managedStartMarker)
-        ? html.replace(managedPattern, () => managedBlock)
-        : html.replace("</head>", () => `${managedBlock}\n</head>`)
+      const nextHtml = upsertManagedHtmlBlock(html, managedBlock)
 
       if (writeFileIfChanged(appRoot, page, nextHtml)) {
         changedFiles.push(normalizeAppRelativePath(context.appRoot, page))
@@ -206,11 +189,6 @@ export const staticHtmlAdapter: FrameworkAdapter = {
     const restoredFiles: string[] = []
     const warnings: string[] = []
 
-    const managedPattern = new RegExp(
-      `${escapeForRegExp(managedStartMarker)}[\\s\\S]*?${escapeForRegExp(managedEndMarker)}\\n?`,
-      "m"
-    )
-
     for (const page of pages) {
       if (!fileExists(appRoot, page)) {
         warnings.push(`Managed file already absent: ${page}`)
@@ -218,7 +196,7 @@ export const staticHtmlAdapter: FrameworkAdapter = {
       }
 
       const html = readRequiredFile(appRoot, page)
-      const nextHtml = html.replace(managedPattern, "")
+      const nextHtml = stripManagedHtmlBlock(html)
       if (nextHtml === html) {
         warnings.push(`No managed Infinite block found in ${page}.`)
       } else {
@@ -339,9 +317,6 @@ function findHtmlPages(appRoot: string): string[] {
   return pages
 }
 
-function escapeForRegExp(source: string): string {
-  return source.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
-}
 
 // Framework-like dependency names that indicate the site is NOT a plain static
 // HTML project, making the static-html adapter a risky choice.

@@ -13,6 +13,16 @@ export const supportedFrameworks = [
 ] as const
 export type SupportedFramework = (typeof supportedFrameworks)[number]
 
+/**
+ * Frameworks whose analytics tag is injected as a managed `<script>` block into `index.html` (with
+ * the config baked in at install time), rather than wired through a JS module + framework entrypoint.
+ * Vite joins static-html here: the runtime self-installs its own SPA history hooks, so the React
+ * entrypoint (`src/main.*`) is never read or edited.
+ */
+export function isHtmlInjectedFramework(framework: SupportedFramework): boolean {
+  return framework === "static-html" || framework === "vite-react"
+}
+
 export const providerIds = ["infinite", "ga4", "posthog", "x", "meta"] as const
 export type ProviderId = (typeof providerIds)[number]
 

@@ -7,6 +7,7 @@ import type {
   ProviderAdapter,
   SupportedFramework
 } from "../types.js"
+import { isHtmlInjectedFramework } from "../types.js"
 import {
   normalizeInfiniteCollectPath,
   normalizeInfiniteDownloadDestinationPath,
@@ -110,26 +111,24 @@ function runtimeInstruction(
 ): InstallInstruction {
   return {
     path: frameworkInstructionPath(framework),
-    action: framework === "static-html" ? "modify" : "create",
+    action: isHtmlInjectedFramework(framework) ? "modify" : "create",
     description: config.siteSourceKey
       ? "Embed the shared Infinite browser runtime with same-origin collection."
       : "Embed the shared browser runtime with Infinite collection dormant.",
     provider: "infinite",
-    snippet:
-      framework === "static-html"
-        ? renderInfiniteBrowserTag(config)
-        : renderInfiniteBrowserTag(config)
-            .replace(/^<script[^>]*>/, "")
-            .replace(/<\/script>$/, "")
+    snippet: isHtmlInjectedFramework(framework)
+      ? renderInfiniteBrowserTag(config)
+      : renderInfiniteBrowserTag(config)
+          .replace(/^<script[^>]*>/, "")
+          .replace(/<\/script>$/, "")
   }
 }
 
 function frameworkInstructionPath(framework: SupportedFramework): string {
   switch (framework) {
     case "static-html":
-      return "index.html"
     case "vite-react":
-      return "src/lib/infinite-analytics.ts"
+      return "index.html"
     case "next-app-router":
     case "next-pages-router":
       return "lib/infinite-analytics.ts"

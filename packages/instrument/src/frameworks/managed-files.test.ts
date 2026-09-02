@@ -16,6 +16,8 @@ import { buildAnalyticsModuleSource } from "./managed-files.js"
 const fixtureRoot = dirname(fileURLToPath(import.meta.url))
 const tempRoots: string[] = []
 
+// The JS analytics MODULE wrapper is a Next-only mechanism now — Vite injects a <script> into
+// index.html (see vite-react.test.ts), so it is not exercised here.
 const frameworks = [
   {
     name: "Next App",
@@ -26,11 +28,6 @@ const frameworks = [
     name: "Next Pages",
     fixture: "next-pages-router-basic",
     modulePath: "lib/infinite-analytics.ts"
-  },
-  {
-    name: "Vite",
-    fixture: "vite-react-basic",
-    modulePath: "src/lib/infinite-analytics.ts"
   }
 ] as const
 

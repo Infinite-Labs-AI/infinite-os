@@ -130,15 +130,17 @@ describe("infinite provider plan", () => {
   })
 
   it("plans a dormant runtime without a source key (no collection) that carries no provider coupling", () => {
+    // A JS-module framework (Next) exercises the stripped, module-embedded snippet path. (Vite now
+    // injects the wrapped <script> into index.html like static-html.)
     const planned = infiniteProviderAdapter.plan(
-      "vite-react",
+      "next-app-router",
       undefined,
       context({ ga4: { measurementId: "G-ABC123XYZ" } })
     )
     const snippet = planned.instructions[0]!.snippet
 
     expect(planned.blockers).toEqual([])
-    expect(planned.instructions[0]!.path).toBe("src/lib/infinite-analytics.ts")
+    expect(planned.instructions[0]!.path).toBe("lib/infinite-analytics.ts")
     expect(snippet).not.toContain("mirrors")
     expect(snippet).not.toContain('"siteSourceKey":')
     expect(snippet).not.toContain("`")
