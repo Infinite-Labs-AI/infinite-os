@@ -9,6 +9,11 @@ import { jsLiteral, validateMetaPixelId } from "./validate.js"
  * the browser half of a Meta signal; it pairs with Infinite's server-side Conversions
  * API (CAPI) dispatch, which reads the `_fbp` / `_fbc` cookies the pixel drops to lift
  * event match quality and deduplicates browser + server events by shared event_id.
+ *
+ * Automatic Configuration is turned OFF (`fbq('set', 'autoConfig', 'false', id)` BEFORE
+ * `init` — Meta only honours it in that order). With it on, the pixel sends button clicks
+ * and page metadata to Meta on its own, which contradicts the installer's no-DOM-text
+ * posture. The provider is otherwise Meta's own native snippet, unchanged.
  */
 export const metaProviderAdapter: ProviderAdapter = {
   id: "meta",
@@ -70,6 +75,7 @@ export function buildMetaPixelSnippet(pixelId: string): string {
     "t.src=v;s=b.getElementsByTagName(e)[0];",
     "s.parentNode.insertBefore(t,s)}(window, document,'script',",
     "'https://connect.facebook.net/en_US/fbevents.js');",
+    `fbq('set', 'autoConfig', 'false', ${jsLiteral(pixelId)});`,
     `fbq('init', ${jsLiteral(pixelId)});`,
     "fbq('track', 'PageView');"
   ].join("\n")

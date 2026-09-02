@@ -15,6 +15,7 @@ import {
   renderBlocked,
   renderInspect,
   renderNoArtifacts,
+  renderNothingToInstall,
   renderPreview,
   renderUninstall,
   renderUnsupported,
@@ -33,11 +34,16 @@ import type {
 } from "./types.js"
 import { uninstallInstallation } from "./uninstall.js"
 import {
+  applyInfiniteApiOrigin,
+  applyInfiniteAutocapture,
   applyInfiniteDownloadDestinationPath,
   applyPosthogProxy,
+  DEFAULT_INFINITE_COLLECT_PATH,
   defaultArtifactsDir,
   discoverWorkspaceArtifacts,
+  normalizeInfiniteAutocapture,
   normalizeInfiniteConsentMode,
+  resolveInfiniteApiOrigin,
   resolveWorkspaceArtifacts
 } from "./workspace-artifacts.js"
 import { verifyInstallation } from "./verify.js"
@@ -65,6 +71,10 @@ interface ParsedArgs {
   infiniteStaticProxy?: "vercel"
   infiniteConsentMode?: InfiniteConsentMode
   infiniteDownloadDestinationPath?: string
+  /** `--infinite-api-origin`: the API host the same-origin route proxies to (INFINITE_API_ORIGIN env also works). */
+  infiniteApiOrigin?: string
+  /** `--infinite-autocapture on|off`: unmarked-click autocapture (absent = on). */
+  infiniteAutocapture?: boolean
   packageManager?: PackageManager
   /** `--server-lane` on plan/apply/install: add the lossless server lane. */
   serverLane: boolean
@@ -188,6 +198,14 @@ function parseArgs(argv: string[]): ParsedArgs {
         parsed.infiniteDownloadDestinationPath = requireValue(token, next)
         index += 1
         break
+      case "--infinite-api-origin":
+        parsed.infiniteApiOrigin = resolveInfiniteApiOrigin({ flag: requireValue(token, next) })
+        index += 1
+        break
+      case "--infinite-autocapture":
+        parsed.infiniteAutocapture = normalizeInfiniteAutocapture(requireValue(token, next))
+        index += 1
+        break
       case "--infinite-base-url":
       case "--infinite-page-id":
         requireValue(token, next)
@@ -266,8 +284,11 @@ function printHelp(): void {
       "Shared browser runtime and Infinite first-party collection:",
       "  --infinite-site-source-key <key>",
       "  --infinite-production-host <host>  Exact runtime allowlist; repeat for each verified production host",
-      "  --infinite-collect-path <path>      Defaults to /infinite/events/collect",
+      `  --infinite-collect-path <path>      Defaults to ${DEFAULT_INFINITE_COLLECT_PATH}`,
+      "  --infinite-api-origin <https://host>  API host the same-origin route proxies to (or INFINITE_API_ORIGIN env)",
       "  --infinite-download-destination-path <path>  Same-origin conversion click path; defaults to /download",
+      "  --infinite-autocapture <on|off>     Capture unmarked link/button clicks (default on); marked CTAs,",
+      "                                      the conversion path, Stripe checkout and sign-up intent always emit",
       "  --infinite-static-proxy vercel      Required for static/Vite unless vercel.json exists",
       "  --infinite-consent-mode <required|not-required>  No default; required needs an external consent signal",
       "      required listens for infinite:analytics-consent-change; not-required still respects DNT/GPC",
@@ -334,6 +355,11 @@ function planIssue(plan: InstallPlan): "unsupported" | "no-artifacts" | "blocked
     return "blocked"
   }
   return null
+}
+
+/** True when every requested provider already exists and no server lane was asked for. */
+function nothingToInstall(plan: InstallPlan): boolean {
+  return plan.blockers.length === 0 && plan.providers.length === 0 && !plan.serverLane && plan.adopted.length > 0
 }
 
 /** Renders the appropriate "can't install" message for human mode; null when the plan is clean. */
@@ -492,6 +518,13 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
       return 0
     }
 
+    // Explicit (flag or env) API-origin override only; absent means the artifact keeps its own
+    // recorded origin, or the default. Validated here so a bad env value fails before planning.
+    const infiniteApiOrigin =
+      parsed.infiniteApiOrigin !== undefined || process.env.INFINITE_API_ORIGIN?.trim()
+        ? resolveInfiniteApiOrigin({ flag: parsed.infiniteApiOrigin, env: process.env })
+        : undefined
+
     let artifacts = resolveWorkspaceArtifacts(root, {
       artifactFile: parsed.artifactFile,
       ga4MeasurementId: parsed.ga4MeasurementId,
@@ -505,7 +538,9 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
       infiniteProductionHosts:
         parsed.infiniteProductionHosts.length > 0 ? parsed.infiniteProductionHosts : undefined,
       infiniteStaticProxy: parsed.infiniteStaticProxy,
-      infiniteConsentMode: parsed.infiniteConsentMode
+      infiniteConsentMode: parsed.infiniteConsentMode,
+      infiniteApiOrigin,
+      infiniteAutocapture: parsed.infiniteAutocapture
     })
 
     // Same-machine flag-free install: with no artifact flags and no --artifact-file,
@@ -556,6 +591,11 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
         path: parsed.infiniteDownloadDestinationPath
       })
 
+      // Same shape: `--infinite-api-origin` / INFINITE_API_ORIGIN modify a discovered Infinite
+      // artifact and never fabricate one.
+      artifacts = applyInfiniteApiOrigin(artifacts, { origin: infiniteApiOrigin })
+      artifacts = applyInfiniteAutocapture(artifacts, { autocapture: parsed.infiniteAutocapture })
+
       // --posthog-proxy is a MODIFIER, not a standalone artifact (deliberately excluded from
       // hasExplicitArtifacts). Apply it AFTER discovery so it layers onto a discovered posthog
       // project key; with no posthog artifact it is a no-op (never fabricates a keyless one).
@@ -593,6 +633,10 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
           printUnappliedServerLaneBrief(plan)
           return plan.blockers.length === 0 ? 0 : 1
         }
+        if (nothingToInstall(plan)) {
+          console.log(renderNothingToInstall(plan))
+          return 0
+        }
         console.log(renderPreview(plan))
         console.log("This was a preview — nothing changed. To apply:  npx infinite-tag install --yes\n")
         return 0
@@ -626,6 +670,10 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
         if (issue) {
           console.log(issue)
           return 1
+        }
+        if (nothingToInstall(plan)) {
+          console.log(renderNothingToInstall(plan))
+          return 0
         }
         return applyAndRenderHuman({ root, inspect, plan, allowDirty: parsed.allowDirty })
       }
@@ -676,6 +724,10 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
           console.log(issue)
           printUnappliedServerLaneBrief(plan)
           return plan.blockers.length === 0 ? 0 : 1
+        }
+        if (nothingToInstall(plan)) {
+          console.log(renderNothingToInstall(plan))
+          return 0
         }
 
         if (parsed.yes) {

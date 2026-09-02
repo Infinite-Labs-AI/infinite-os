@@ -85,8 +85,10 @@ contract. Noninteractive `--yes` and `apply` runs fail on the same blocker.
 | --- | --- |
 | `--infinite-site-source-key <site_...>` | Public, source-bound browser key created after domain verification. |
 | `--infinite-production-host <host>` | Verified hostname for the shared browser runtime; repeatable. Origins, paths, ports, queries, and fragments are rejected. |
-| `--infinite-collect-path <path>` | Same-origin browser route. Defaults to `/infinite/events/collect`. |
+| `--infinite-collect-path <path>` | Same-origin browser route. Defaults to `/infinite/ledger` (an artifact that already records another path keeps it). |
+| `--infinite-api-origin <https://host>` | The API host the same-origin route proxies to. Defaults to `https://api.ultima.inc`; the `INFINITE_API_ORIGIN` env var is the same override. Must be an https origin with no path. |
 | `--infinite-download-destination-path <path>` | Same-origin conversion click path for `app_download_click`. Defaults to `/download`; use `/checkout` only when the site intentionally routes checkout through its own page first. Direct Stripe-hosted payment surfaces are detected automatically as structural checkout-intent `site_click` buckets. |
+| `--infinite-autocapture <on\|off>` | Unmarked-click autocapture (default `on`). `off` stops unmarked links and buttons from emitting; marked `data-analytics-cta-id` CTAs, the conversion destination, Stripe checkout buckets, `data-conversion` markers and sign-up paths still emit. |
 | `--infinite-static-proxy vercel` | Explicit proof that a static/Vite install may create Vercel rewrites. |
 | `--infinite-consent-mode <required\|not-required>` | Required for Infinite first-party collection. There is no default. `required` waits for the external consent event below; `not-required` collects Infinite events unless DNT/GPC blocks them. Neither mode touches GA4/PostHog consent. |
 | `--ga4-measurement-id <G-...>` | Public GA4 measurement ID. |
@@ -96,7 +98,7 @@ contract. Noninteractive `--yes` and `apply` runs fail on the same blocker.
 | `--posthog-ui-host <https://...>` | Optional PostHog toolbar host when proxying. |
 | `--x-pixel-id <id>` | Public X pixel ID. |
 | `--x-event-tag-id <id>` | Public X event tag ID; repeatable. |
-| `--meta-pixel-id <id>` | Public Meta pixel ID. |
+| `--meta-pixel-id <id>` | Public Meta pixel ID. Installs with Meta's Automatic Configuration off (`fbq('set','autoConfig','false', id)` before `init`): no button clicks or page metadata are sent to Meta by default. |
 | `--artifact-file <path>` | Read the same public artifact shape from JSON. |
 | `--server-lane` | Add the lossless server lane (see below). Works alone or with the artifact flags. |
 | `--workspace <id>` | Install-manifest ownership; required for apply. |
@@ -125,6 +127,8 @@ interface InfinitePublicArtifact {
   consentMode?: "required" | "not_required"
   // Optional; defaults to "/download".
   downloadDestinationPath?: string
+  // Optional; false turns unmarked-click autocapture off (absent = on).
+  autocapture?: boolean
 }
 ```
 
@@ -156,6 +160,25 @@ Every `site_page_view` carries one bounded property, `nav`: `"navigate"` for the
 initial document load and `"history"` for a History-API route change. The runtime
 emits nothing when `navigator.webdriver` is true (automation-driven browsers —
 Playwright, Puppeteer, Lighthouse — are not visitors).
+
+### What the pixel sends
+
+The event envelope is the public contract in `contracts/browser-collect-v1.schema.json`
+(the cloud pins the same file by hash): `siteSourceKey`, `eventId`, `eventName` (one of
+`site_page_view`, `site_click`, `app_download_click`, `sign_up_click`), `occurredAt`, the
+runtime's own random `anonymousId` / `sessionId`, `url` (origin + canonical path — the query
+string and fragment are stripped), an optional `referrer` reduced to its host, and a bounded
+`properties` object. On the **initial** page view (`nav: "navigate"`) the runtime also attaches
+an allowlisted campaign block read from the landing URL:
+
+| Property | Value |
+| --- | --- |
+| `utm_source`, `utm_medium`, `utm_campaign`, `utm_content`, `utm_term` | The parameter's value — trimmed, control characters stripped, truncated to 100 characters; absent when empty. |
+| `has_gclid`, `has_fbclid`, `has_ttclid`, `has_msclkid` | `true` when the click id is present. **The id value is never sent.** |
+
+Any other query parameter is dropped, History-API route views carry `nav: "history"` only,
+and click events never carry the block. Nothing else about the page — DOM text, link text,
+button text, form values — ever leaves the browser.
 
 **Providers are independent (0.6.0).** GA4 and PostHog install as fully native
 bootstraps — Google's own `gtag.js` snippet with its default `page_view`, and
@@ -222,7 +245,7 @@ explicitly listed. A source key with an empty allowlist is a planning blocker.
 
 ## Server lane (lossless analytics)
 
-> analytics that see 100% of your traffic, installed by your agent in ten minutes.
+> server-side analytics: every page your server serves and every outcome it confirms, counted where ad-blockers can't reach. A floor for people, never an exact share — installed by your agent in ten minutes.
 
 Browser tags see a fraction of real traffic behind ad-blockers and consent gates. The
 server lane counts on the other side of that wall: the customer's **server** records
@@ -276,6 +299,32 @@ recorded, because proving your middleware runs is the point, but it is classifie
 check never adds a visitor to your own numbers. Bot protection can refuse a self-identified monitor;
 when it answers 401/403/405/406/429 the failure names that first.
 
+## Existing tags are adopted, not replaced
+
+`plan` walks the whole app root for real provider signatures and **adopts** a requested provider
+that already exists: it is left byte-for-byte alone, dropped from the install set, listed under
+`adopted` in `--json` (`{ provider, via: "snippet" | "gtm", file }`) and under "Already on your
+site" in human output, and never installed a second time. When every requested provider already
+exists, nothing is written and no install record is created.
+
+What counts as evidence (a false positive would silently drop a provider from the install, so the
+rules are deliberately narrow):
+
+| Provider | `via: "snippet"` | `via: "gtm"` |
+| --- | --- | --- |
+| GA4 | the `gtag.js` loader or a `gtag(` call; `@next/third-parties/google` `<GoogleAnalytics>`; `react-ga4` / `ReactGA.initialize(`; `vue-gtag`; `nuxt-gtag`; `@analytics/google-analytics` | the `gtm.js` loader; `dataLayer.push(` beside `googletagmanager.com`; a `gtmId` prop (`<GoogleTagManager gtmId="GTM-…">`); a quoted `GTM-…` id on a line that mentions gtm. **Never** a bare `GTM-XXXX` token or a bare `dataLayer.push(`. A Tag Manager container proves GA4 only — a requested Meta or X pixel still installs beside it. |
+| PostHog | `posthog.init(`, the `i.posthog.com` host, `posthog-js/react` `<PostHogProvider>`, `@posthog/nextjs` | — |
+| X | `twq(` or `static.ads-twitter.com` | — |
+| Meta | `fbevents.js`, `fbq(` or `connect.facebook.net` | — |
+
+The walk reads `.html/.htm/.tsx/.jsx/.ts/.js/.mjs/.cjs/.astro/.vue/.svelte` files, capped at
+2,000 files and 512 KB per file. It skips `node_modules`, `.git`, `.next`, `dist`, `build`, `out`,
+`.vercel`, `coverage`, `public`, `static`, `__tests__`, `__mocks__`, `.storybook` and `emails`,
+plus `*.d.ts`, `*.test.*`, `*.spec.*`, `*.stories.*` and `*.min.js` files (type declarations,
+mocks and minified vendor bundles are not installs). Infinite's own managed files and
+`<!-- infinite:start -->` blocks are ignored, so a re-run never adopts itself. If a hit is wrong,
+delete the file it names (`file` in the `adopted` entry) or move it under a skipped directory.
+
 ## Proxy Matrix
 
 | Framework | Infinite same-origin route |
@@ -318,7 +367,7 @@ discard hand-edited generated configs or Vercel files.
 - Infinite uses a same-origin collection route with a source-bound public key.
 - Provider initialization order is GA4, PostHog, X, Meta, then Infinite — each native and independent; Infinite never forwards events into another provider.
 - Installs are idempotent, atomic, path-contained, and dirty-tree guarded.
-- Existing unmanaged analytics or configuration is not overwritten.
+- Existing unmanaged analytics is adopted (left untouched, never duplicated); existing configuration is not overwritten.
 
 ## License
 

@@ -16,6 +16,28 @@ export type SupportedFramework = (typeof supportedFrameworks)[number]
 export const providerIds = ["infinite", "ga4", "posthog", "x", "meta"] as const
 export type ProviderId = (typeof providerIds)[number]
 
+/** Founder-facing provider names (plan output, adoption notes). */
+export const providerLabels: Record<ProviderId, string> = {
+  infinite: "Infinite",
+  ga4: "Google Analytics",
+  posthog: "PostHog",
+  x: "X Pixel",
+  meta: "Meta Pixel"
+}
+
+/** How an existing, unmanaged provider install was recognised. */
+export type UnmanagedProviderVia = "snippet" | "gtm"
+
+export interface UnmanagedProvider {
+  provider: ProviderId
+  via: UnmanagedProviderVia
+  /** App-root-relative file the signature was found in (the first, in sorted walk order). */
+  file: string
+}
+
+/** A requested provider that already existed in the repo and was left byte-for-byte alone. */
+export type AdoptedProvider = UnmanagedProvider
+
 export interface PackageManagerDetection {
   kind: PackageManagerDetectionKind
   reason: "lockfile" | "multiple-lockfiles" | "no-lockfile" | "override"
@@ -56,6 +78,9 @@ export interface InstallPlan {
   repoStatus: RepoStatus
   workspaceId?: string
   artifacts: WorkspaceInstallArtifacts
+  /** Requested providers that already exist unmanaged in the repo; removed from `providers` and
+   *  from the instructions, never installed twice, never touched. */
+  adopted: AdoptedProvider[]
   /** Present when the plan was made with `--server-lane`. */
   serverLane?: ServerLanePlan
 }
@@ -91,7 +116,7 @@ export type InfiniteConsentMode = "required" | "not_required"
 
 export interface InfinitePublicArtifact {
   siteSourceKey: string
-  collectPath: "/infinite/events/collect" | string
+  collectPath: "/infinite/ledger" | string
   productionHosts: string[]
   staticProxy?: "vercel"
   /** Optional for legacy artifact decoding; plans with an Infinite source require an explicit value. */
@@ -99,6 +124,11 @@ export interface InfinitePublicArtifact {
   /** The workspace's conversion destination for download-intent clicks. Absent = the platform
    *  default "/download" — must match the source's cloud config or the collect boundary rejects. */
   downloadDestinationPath?: string
+  /** The API origin the same-origin route proxies to. Absent = INFINITE_API_ORIGIN. Never reaches
+   *  the browser runtime — it only shapes the Vercel/Next rewrite destination. */
+  apiOrigin?: string
+  /** `false` turns unmarked-click autocapture off. Absent = on (the 0.6.1+ default). */
+  autocapture?: boolean
 }
 
 export interface InfiniteBrowserConfig {
@@ -111,6 +141,9 @@ export interface InfiniteBrowserConfig {
     | { mode: "required"; storageKey: "infinite_analytics_consent" }
   /** Conversion destination for app_download_click detection. Absent = "/download". */
   downloadDestinationPath?: string
+  /** `false`: unmarked links/buttons emit nothing; marked CTAs, the conversion destination, Stripe
+   *  checkout buckets, data-conversion markers and sign-up paths still emit. Absent = on. */
+  autocapture?: boolean
 }
 
 /**

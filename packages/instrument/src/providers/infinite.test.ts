@@ -159,3 +159,17 @@ describe("infinite provider plan", () => {
     expect(infiniteProviderAdapter.envKeys("next-app-router")).toEqual([])
   })
 })
+
+describe("autocapture threading", () => {
+  it("omits the key when the artifact says nothing (0.6.2-identical runtime config)", () => {
+    const plan = infiniteProviderAdapter.plan("static-html", validArtifact, context({ infinite: validArtifact }))
+    expect(plan.instructions[0]!.snippet).not.toContain('"autocapture"')
+  })
+
+  it("threads autocapture:false from the artifact into the runtime config", () => {
+    const artifact: InfinitePublicArtifact = { ...validArtifact, autocapture: false }
+    const plan = infiniteProviderAdapter.plan("static-html", artifact, context({ infinite: artifact }))
+    expect(plan.blockers).toEqual([])
+    expect(plan.instructions[0]!.snippet).toContain('"autocapture":false')
+  })
+})

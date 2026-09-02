@@ -1,6 +1,8 @@
 // Human-readable terminal output for the founder-facing CLI. Pure string builders
 // (no I/O) so they are unit-testable; cli.ts decides stdout vs stderr and only uses
 // these when --json is NOT passed. --json keeps the machine-readable contract.
+import { nothingToInstallMessage } from "./apply.js"
+import { adoptedProviderLine } from "./plan.js"
 import { serverLaneCopy } from "./server-lane/copy.js"
 import type {
   ApplyResult,
@@ -82,6 +84,40 @@ function joinWithAnd(items: string[]): string {
   return `${items.slice(0, -1).join(", ")}, and ${items[items.length - 1]}`
 }
 
+/** The artifacts the plan will actually WRITE — adopted (already-present) providers removed. */
+function installedArtifacts(plan: InstallPlan): WorkspaceInstallArtifacts {
+  const artifacts: WorkspaceInstallArtifacts = { ...plan.artifacts }
+  for (const entry of plan.adopted) {
+    delete artifacts[entry.provider]
+  }
+  return artifacts
+}
+
+/** "Already on your site (left untouched):" block, empty when nothing was adopted. */
+function adoptedLines(plan: InstallPlan): string[] {
+  if (plan.adopted.length === 0) return []
+  return [
+    "",
+    "Already on your site (left untouched):",
+    ...plan.adopted.map((entry) => `  ✓ ${adoptedProviderLine(entry)}`)
+  ]
+}
+
+/** Shown when every requested provider already exists: nothing is written, nothing is recorded. */
+export function renderNothingToInstall(plan: InstallPlan): string {
+  return [
+    "",
+    HEADER,
+    "",
+    `  Project repo    ${repoLabel(plan)}  (${frameworkLabel(plan.framework)})`,
+    ...adoptedLines(plan),
+    "",
+    nothingToInstallMessage(plan),
+    "To install anyway, remove the existing tag and re-run.",
+    ""
+  ].join("\n")
+}
+
 function repoLabel(plan: InstallPlan): string {
   return plan.appRoot && plan.appRoot !== "." ? `this repo (app at ${plan.appRoot})` : "this repo"
 }
@@ -100,7 +136,8 @@ function actionByPath(plan: InstallPlan): Map<string, "create" | "modify"> {
 /** The "I'll make N changes" block shown before applying (preview). */
 export function renderPreview(plan: InstallPlan): string {
   const actions = actionByPath(plan)
-  const tagWord = providerNames(plan.artifacts) === "analytics" ? "analytics" : `${providerNames(plan.artifacts)}`
+  const installing = installedArtifacts(plan)
+  const tagWord = providerNames(installing) === "analytics" ? "analytics" : `${providerNames(installing)}`
   const laneFiles = new Set(plan.serverLane?.files ?? [])
   const pixelFiles = plan.files.filter((file) => !laneFiles.has(file))
   const changeLines = pixelFiles.map((file) => {
@@ -111,7 +148,7 @@ export function renderPreview(plan: InstallPlan): string {
   changeLines.push(...laneLines)
   changeLines.push(`  + ${pad(MANIFEST_REL)}install record (lets a later \`uninstall\` undo this cleanly)`)
 
-  const providerBlock = providerLines(plan.artifacts)
+  const providerBlock = providerLines(installing)
   const analyticsValue =
     providerBlock.length === 0
       ? "—"
@@ -129,6 +166,7 @@ export function renderPreview(plan: InstallPlan): string {
     HEADER,
     "",
     ...meta,
+    ...adoptedLines(plan),
     "",
     `I'll make ${changeLines.length} change${changeLines.length === 1 ? "" : "s"}:`,
     ...changeLines,
@@ -145,7 +183,8 @@ export function renderApplied(input: {
   verify: VerifyResult
 }): string {
   const { plan, apply, verify } = input
-  const names = providerNames(plan.artifacts)
+  const installing = installedArtifacts(plan)
+  const names = providerNames(installing)
   const codeFiles = apply.changedFiles.filter((file) => !file.endsWith("install.json"))
   const manifestWritten = apply.changedFiles.some((file) => file.endsWith("install.json"))
 
@@ -161,7 +200,7 @@ export function renderApplied(input: {
     steps.push(`  ✓ Verified ${n} file${n === 1 ? "" : "s"} against the recorded install`)
   }
 
-  const ids = providerLines(plan.artifacts).join(", ")
+  const ids = providerLines(installing).join(", ")
   const idSuffix = ids ? ` (${ids})` : ""
 
   const lines = [
@@ -170,6 +209,7 @@ export function renderApplied(input: {
     ...steps,
     "",
     `✅ Done — your site is now wired for ${names}${idSuffix}.`,
+    ...adoptedLines(plan),
     "",
     "Next steps:",
     "  1. Review the change:  git diff",

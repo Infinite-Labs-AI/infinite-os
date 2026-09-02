@@ -168,7 +168,7 @@ describe("detectUnmanagedProviders — FIX 3: tighter provider markers", () => {
       ].join("\n")
     )
 
-    const providers = detectUnmanagedProviders(root)
+    const providers = detectUnmanagedProviders(root).map((entry) => entry.provider)
 
     expect(providers).not.toContain("posthog")
   })
@@ -185,7 +185,7 @@ describe("detectUnmanagedProviders — FIX 3: tighter provider markers", () => {
       ].join("\n")
     )
 
-    const providers = detectUnmanagedProviders(root)
+    const providers = detectUnmanagedProviders(root).map((entry) => entry.provider)
 
     expect(providers).toContain("posthog")
   })
@@ -203,7 +203,7 @@ describe("detectUnmanagedProviders — FIX 3: tighter provider markers", () => {
       ].join("\n")
     )
 
-    const providers = detectUnmanagedProviders(root)
+    const providers = detectUnmanagedProviders(root).map((entry) => entry.provider)
 
     expect(providers).toContain("posthog")
   })
@@ -220,8 +220,184 @@ describe("detectUnmanagedProviders — FIX 3: tighter provider markers", () => {
       ].join("\n")
     )
 
-    const providers = detectUnmanagedProviders(root)
+    const providers = detectUnmanagedProviders(root).map((entry) => entry.provider)
 
     expect(providers).not.toContain("ga4")
+  })
+})
+
+describe("detectUnmanagedProviders — repo-wide walk + Tag Manager", () => {
+  it("finds a gtag( snippet in a component outside the legacy candidate list, with the file", () => {
+    const root = makeTempRoot("instrument-inspect-walk-")
+    mkdirSync(join(root, "src", "components"), { recursive: true })
+    writeFileSync(join(root, "index.html"), "<html><head></head><body></body></html>\n")
+    writeFileSync(
+      join(root, "src/components/Analytics.tsx"),
+      [
+        "export function Analytics() {",
+        "  gtag('config', 'G-EXISTING')",
+        "  return null",
+        "}",
+        ""
+      ].join("\n")
+    )
+
+    expect(detectUnmanagedProviders(root)).toEqual([
+      { provider: "ga4", via: "snippet", file: "src/components/Analytics.tsx" }
+    ])
+  })
+
+  it("reports a GA4 install managed through Google Tag Manager as via gtm", () => {
+    const root = makeTempRoot("instrument-inspect-gtm-")
+    writeFileSync(
+      join(root, "index.html"),
+      [
+        "<!doctype html><html><head>",
+        "<script>(function(w,d,s,l,i){w[l]=w[l]||[];w[l].push({'gtm.start':new Date().getTime(),event:'gtm.js'});",
+        "var f=d.getElementsByTagName(s)[0],j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;",
+        "j.src='https://www.googletagmanager.com/gtm.js?id='+i+dl;f.parentNode.insertBefore(j,f);})(window,document,'script','dataLayer','GTM-ABCD12');</script>",
+        "</head><body></body></html>",
+        ""
+      ].join("\n")
+    )
+
+    expect(detectUnmanagedProviders(root)).toEqual([
+      { provider: "ga4", via: "gtm", file: "index.html" }
+    ])
+  })
+
+  it("never adopts GA4 from a bare GTM-XXXX token or a bare dataLayer.push( — a false positive silently drops a provider", () => {
+    const tokenRoot = makeTempRoot("instrument-inspect-gtm-token-")
+    mkdirSync(join(tokenRoot, "app"), { recursive: true })
+    writeFileSync(join(tokenRoot, "app/layout.tsx"), "export const GTM_MODE = 'GTM-CONTAINERLESS'\nconst id = 'GTM-WXYZ99'\n")
+    expect(detectUnmanagedProviders(tokenRoot)).toEqual([])
+
+    const pushRoot = makeTempRoot("instrument-inspect-datalayer-push-")
+    writeFileSync(join(pushRoot, "index.html"), "<script>window.dataLayer = window.dataLayer || []; dataLayer.push({event: 'purchase'})</script>\n")
+    expect(detectUnmanagedProviders(pushRoot)).toEqual([])
+
+    const snippetRoot = makeTempRoot("instrument-inspect-gtag-push-")
+    writeFileSync(
+      join(snippetRoot, "index.html"),
+      "<script>window.dataLayer = window.dataLayer || []; function gtag(){dataLayer.push(arguments);} gtag('js', new Date());</script>\n"
+    )
+    expect(detectUnmanagedProviders(snippetRoot)).toEqual([
+      { provider: "ga4", via: "snippet", file: "index.html" }
+    ])
+  })
+
+  it("a GTM verdict needs evidence: gtm.js, dataLayer.push( beside googletagmanager.com, a gtmId prop, or a quoted GTM id on a gtm line", () => {
+    const pushWithHost = makeTempRoot("instrument-inspect-gtm-push-host-")
+    writeFileSync(
+      join(pushWithHost, "index.html"),
+      "<noscript><iframe src=\"https://www.googletagmanager.com/ns.html?id=GTM-ABCD12\"></iframe></noscript>\n<script>dataLayer.push({event:'x'})</script>\n"
+    )
+    expect(detectUnmanagedProviders(pushWithHost)).toEqual([{ provider: "ga4", via: "gtm", file: "index.html" }])
+
+    const nextGtm = makeTempRoot("instrument-inspect-next-gtm-")
+    mkdirSync(join(nextGtm, "app"), { recursive: true })
+    writeFileSync(
+      join(nextGtm, "app/layout.tsx"),
+      "import { GoogleTagManager } from '@next/third-parties/google'\nexport default function Layout() { return <GoogleTagManager gtmId=\"GTM-ABCD12\" /> }\n"
+    )
+    expect(detectUnmanagedProviders(nextGtm)).toEqual([{ provider: "ga4", via: "gtm", file: "app/layout.tsx" }])
+
+    const quotedOnGtmLine = makeTempRoot("instrument-inspect-gtm-quoted-")
+    writeFileSync(join(quotedOnGtmLine, "config.ts"), "export const gtmContainer = 'GTM-ABCD12'\n")
+    expect(detectUnmanagedProviders(quotedOnGtmLine)).toEqual([{ provider: "ga4", via: "gtm", file: "config.ts" }])
+  })
+
+  it.each([
+    ["@next/third-parties/google <GoogleAnalytics>", "app/layout.tsx", "import { GoogleAnalytics } from '@next/third-parties/google'\nexport default function Layout() { return <GoogleAnalytics gaId=\"G-ABC123\" /> }\n"],
+    ["react-ga4 ReactGA.initialize", "src/analytics.ts", "import ReactGA from 'react-ga4'\nReactGA.initialize('G-ABC123')\n"],
+    ["vue-gtag", "src/main.ts", "import VueGtag from 'vue-gtag'\napp.use(VueGtag, { config: { id: 'G-ABC123' } })\n"],
+    ["nuxt-gtag", "nuxt.config.ts", "export default defineNuxtConfig({ modules: ['nuxt-gtag'], gtag: { id: 'G-ABC123' } })\n"],
+    ["@analytics/google-analytics", "src/analytics.js", "import googleAnalytics from '@analytics/google-analytics'\n"]
+  ])("adopts GA4 installed through %s (else the site gets double-tagged)", (_label, file, contents) => {
+    const root = makeTempRoot("instrument-inspect-ga4-lib-")
+    mkdirSync(dirname(join(root, file)), { recursive: true })
+    writeFileSync(join(root, file), contents)
+    expect(detectUnmanagedProviders(root)).toEqual([{ provider: "ga4", via: "snippet", file }])
+  })
+
+  it.each([
+    ["posthog-js/react <PostHogProvider>", "app/providers.tsx", "import { PostHogProvider } from 'posthog-js/react'\nexport function Providers({ children }) { return <PostHogProvider apiKey=\"phc_abc\">{children}</PostHogProvider> }\n"],
+    ["@posthog/nextjs", "app/layout.tsx", "import { PostHogProvider } from '@posthog/nextjs'\n"]
+  ])("adopts PostHog installed through %s without an explicit api_host", (_label, file, contents) => {
+    const root = makeTempRoot("instrument-inspect-posthog-lib-")
+    mkdirSync(dirname(join(root, file)), { recursive: true })
+    writeFileSync(join(root, file), contents)
+    expect(detectUnmanagedProviders(root)).toEqual([{ provider: "posthog", via: "snippet", file }])
+  })
+
+  it("skips minified bundles, type declarations, tests, specs, stories, mocks, public/static and email templates", () => {
+    const root = makeTempRoot("instrument-inspect-noise-")
+    const noise: Array<[string, string]> = [
+      ["public/vendor.min.js", "gtag('config','G-1')"],
+      ["static/bundle.js", "gtag('config','G-1')"],
+      ["src/vendor.min.mjs", "gtag('config','G-1')"],
+      ["src/types/gtag.d.ts", "declare function gtag(...args: unknown[]): void"],
+      ["src/analytics.test.ts", "vi.mock('posthog-js'); posthog.init('phc_test')"],
+      ["src/analytics.spec.tsx", "posthog.init('phc_test')"],
+      ["src/Button.stories.tsx", "fbq('track','Lead')"],
+      ["src/__tests__/pixel.ts", "twq('config','o1')"],
+      ["src/__mocks__/gtag.js", "gtag('js')"],
+      [".storybook/preview.js", "gtag('js')"],
+      ["emails/welcome.html", "<script>fbq('init','1')</script>"]
+    ]
+    for (const [file, contents] of noise) {
+      mkdirSync(dirname(join(root, file)), { recursive: true })
+      writeFileSync(join(root, file), `${contents}\n`)
+    }
+    writeFileSync(join(root, "index.html"), "<html><head></head><body></body></html>\n")
+
+    expect(detectUnmanagedProviders(root)).toEqual([])
+  })
+
+  it("prefers a real snippet over a GTM hint when both exist in the repo", () => {
+    const root = makeTempRoot("instrument-inspect-gtm-and-snippet-")
+    writeFileSync(join(root, "a.html"), "<script>dataLayer.push({event:'x'})</script>\n")
+    writeFileSync(join(root, "b.html"), "<script>gtag('config','G-1')</script>\n")
+
+    expect(detectUnmanagedProviders(root)).toEqual([{ provider: "ga4", via: "snippet", file: "b.html" }])
+  })
+
+  it("skips node_modules, build output, dot-dirs, and oversized files", () => {
+    const root = makeTempRoot("instrument-inspect-skip-")
+    for (const dir of ["node_modules/foo", ".git", ".next", "dist", "build", "out", ".vercel", "coverage"]) {
+      mkdirSync(join(root, dir), { recursive: true })
+      writeFileSync(join(root, dir, "gtag.js"), "gtag('config','G-1')\n")
+    }
+    writeFileSync(join(root, "huge.js"), `${"//".padEnd(600 * 1024, "x")}\ngtag('config','G-1')\n`)
+    writeFileSync(join(root, "notes.md"), "gtag('config','G-1')\n")
+
+    expect(detectUnmanagedProviders(root)).toEqual([])
+  })
+
+  it("ignores managed Infinite files and managed HTML blocks", () => {
+    const root = makeTempRoot("instrument-inspect-managed-")
+    mkdirSync(join(root, "lib"), { recursive: true })
+    writeFileSync(
+      join(root, "lib/infinite-analytics.ts"),
+      "// Managed by Infinite. Public install artifacts only.\ngtag('config','G-1')\nposthog.init('phc_1')\n"
+    )
+    writeFileSync(
+      join(root, "index.html"),
+      "<html><head><!-- infinite:start -->\n<script>fbq('init','1')</script>\n<!-- infinite:end --></head><body></body></html>\n"
+    )
+
+    expect(detectUnmanagedProviders(root)).toEqual([])
+  })
+
+  it("reports every provider once, in a stable provider order", () => {
+    const root = makeTempRoot("instrument-inspect-multi-")
+    writeFileSync(join(root, "z.html"), "<script>fbq('init','1'); twq('config','o1'); posthog.init('phc_1')</script>\n")
+    writeFileSync(join(root, "a.html"), "<script>fbq('init','1')</script>\n")
+
+    expect(detectUnmanagedProviders(root)).toEqual([
+      { provider: "posthog", via: "snippet", file: "z.html" },
+      { provider: "x", via: "snippet", file: "z.html" },
+      { provider: "meta", via: "snippet", file: "a.html" }
+    ])
   })
 })

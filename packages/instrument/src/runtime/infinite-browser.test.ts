@@ -30,6 +30,8 @@ interface HarnessOptions {
   productionHosts?: string[]
   consentWriteFails?: boolean
   downloadDestinationPath?: string
+  /** `false` turns unmarked-click autocapture off (absent = on, exactly as 0.6.2). */
+  autocapture?: boolean
 }
 
 function createStorage(initial: Record<string, string> = {}, failWrites = false) {
@@ -85,6 +87,9 @@ function executeTag(options: HarnessOptions = {}) {
     },
     get pathname() {
       return currentUrl.pathname
+    },
+    get search() {
+      return currentUrl.search
     }
   }
 
@@ -143,7 +148,8 @@ function executeTag(options: HarnessOptions = {}) {
     productionHosts: options.productionHosts ?? ["example.com"],
     ...(options.downloadDestinationPath
       ? { downloadDestinationPath: options.downloadDestinationPath }
-      : {})
+      : {}),
+    ...(options.autocapture === undefined ? {} : { autocapture: options.autocapture })
   })
   const source = tag.replace(/^<script[^>]*>/, "").replace(/<\/script>$/, "")
 
@@ -192,6 +198,7 @@ function executeTag(options: HarnessOptions = {}) {
     },
     clearTimeout() {},
     URL,
+    URLSearchParams,
     Date,
     JSON,
     Math,
@@ -1353,6 +1360,186 @@ describe("sign_up_click — marked sign-up intent", () => {
     denied.click(signupTarget({ href: "https://example.com/signup" }))
     denied.submit(signupFormTarget({}))
     expect(denied.requests).toHaveLength(0)
+  })
+})
+
+describe("campaign capture on the initial page view (contract v1: +9 keys)", () => {
+  it("attaches allowlisted UTM values and click-id PRESENCE to the nav:navigate view — never the id value or the raw query", () => {
+    const runtime = executeTag({
+      siteSourceKey: "site_public_123",
+      consent: "granted",
+      href: "https://example.com/pricing?utm_source=x.com&utm_medium=social&utm_campaign=launch&fbclid=abc123"
+    })
+
+    expect(runtime.requests).toHaveLength(1)
+    const view = runtime.requests[0]!
+    expect(view.body.url).toBe("https://example.com/pricing/")
+    expect(view.body.properties).toEqual({
+      nav: "navigate",
+      utm_source: "x.com",
+      utm_medium: "social",
+      utm_campaign: "launch",
+      has_fbclid: true
+    })
+    expect(view.rawBody).not.toContain("abc123")
+    expect(view.rawBody).not.toContain("fbclid=")
+    expect(view.rawBody).not.toContain("?")
+  })
+
+  it("every click id becomes has_<name>: true and nothing else; unknown params are dropped", () => {
+    const runtime = executeTag({
+      siteSourceKey: "site_public_123",
+      consent: "granted",
+      href: "https://example.com/?gclid=gclidvalue&fbclid=fbclidvalue&ttclid=ttclidvalue&msclkid=msclkidvalue&ref=partner&email=p@x.com&utm_content=hero&utm_term=cmo"
+    })
+
+    const view = runtime.requests[0]!
+    expect(view.body.properties).toEqual({
+      nav: "navigate",
+      utm_content: "hero",
+      utm_term: "cmo",
+      has_gclid: true,
+      has_fbclid: true,
+      has_ttclid: true,
+      has_msclkid: true
+    })
+    expect(view.rawBody).not.toMatch(/gclidvalue|fbclidvalue|ttclidvalue|msclkidvalue|partner|p@x\.com|email/)
+  })
+
+  it("a History route change carries nav:history only, even when the new URL has UTM params", () => {
+    const runtime = executeTag({
+      siteSourceKey: "site_public_123",
+      consent: "granted",
+      href: "https://example.com/?utm_source=x.com"
+    })
+    runtime.history.pushState({}, "", "/tools?utm_source=newsletter&gclid=Z9")
+
+    expect(runtime.requests.map((request) => request.body.properties)).toEqual([
+      { nav: "navigate", utm_source: "x.com" },
+      { nav: "history" }
+    ])
+    expect(runtime.requests[1]!.rawBody).not.toMatch(/newsletter|Z9/)
+  })
+
+  it("bounds every UTM value: trimmed, control characters stripped, truncated to 100 chars; empty values yield no key", () => {
+    const long = "c".repeat(300)
+    const runtime = executeTag({
+      siteSourceKey: "site_public_123",
+      consent: "granted",
+      href: `https://example.com/?utm_source=&utm_medium=%20%20social%20%20&utm_campaign=${long}&utm_term=a%0Ab%01c&gclid=`
+    })
+
+    const properties = runtime.requests[0]!.body.properties as Record<string, unknown>
+    expect(properties).not.toHaveProperty("utm_source")
+    expect(properties).not.toHaveProperty("has_gclid")
+    expect(properties.utm_medium).toBe("social")
+    expect(properties.utm_campaign).toBe("c".repeat(100))
+    expect(properties.utm_term).toBe("abc")
+    expect(Object.keys(properties).sort()).toEqual(["nav", "utm_campaign", "utm_medium", "utm_term"])
+  })
+
+  it("a consent grant after the load (the first view the runtime may observe) also carries the campaign block", () => {
+    const runtime = executeTag({
+      siteSourceKey: "site_public_123",
+      consent: "denied",
+      href: "https://example.com/?utm_source=x.com&fbclid=abc"
+    })
+    expect(runtime.requests).toEqual([])
+    runtime.setConsent(true)
+    expect(runtime.requests[0]!.body.properties).toEqual({ nav: "navigate", utm_source: "x.com", has_fbclid: true })
+    expect(runtime.requests[0]!.rawBody).not.toContain("abc")
+  })
+
+  it("a landing page without campaign params is byte-identical to 0.6.2: properties = { nav }", () => {
+    const runtime = executeTag({ siteSourceKey: "site_public_123", consent: "granted" })
+    expect(runtime.requests[0]!.body.properties).toEqual({ nav: "navigate" })
+  })
+})
+
+describe("autocapture flag (default on)", () => {
+  const eventsAfterPageView = (runtime: ReturnType<typeof executeTag>) =>
+    runtime.requests.filter((request) => request.body.eventName !== "site_page_view")
+
+  it("with the flag absent the rendered config is byte-identical to 0.6.2 (no autocapture key)", () => {
+    const runtime = executeTag({ siteSourceKey: "site_public_123", consent: "granted" })
+    expect(runtime.tag).not.toContain('"autocapture"')
+  })
+
+  it("autocapture:false — an unmarked same-origin link emits nothing", () => {
+    const runtime = executeTag({ siteSourceKey: "site_public_123", consent: "granted", autocapture: false })
+    expect(runtime.tag).toContain('"autocapture":false')
+
+    runtime.click(managedTarget({ href: "https://example.com/pricing?email=private#plans" }))
+
+    expect(eventsAfterPageView(runtime)).toEqual([])
+  })
+
+  it("autocapture:false — an unmarked button and a non-checkout external link emit nothing", () => {
+    const runtime = executeTag({ siteSourceKey: "site_public_123", consent: "granted", autocapture: false })
+
+    runtime.click(buttonTarget({ id: "cta-hero" }))
+    runtime.click(managedTarget({ href: "https://calendly.com/founder/30min" }))
+
+    expect(eventsAfterPageView(runtime)).toEqual([])
+  })
+
+  it("autocapture:false — a MARKED CTA still emits site_click", () => {
+    const runtime = executeTag({ siteSourceKey: "site_public_123", consent: "granted", autocapture: false })
+
+    runtime.click(
+      managedTarget({ href: "https://example.com/pricing", ctaId: "hero_pricing", ctaLocation: "hero" })
+    )
+
+    const clicks = runtime.requests.filter((request) => request.body.eventName === "site_click")
+    expect(clicks).toHaveLength(1)
+    expect(clicks[0]?.body.properties).toEqual({
+      cta_id: "hero_pricing",
+      cta_location: "hero",
+      destination_path: "/pricing/"
+    })
+  })
+
+  it("autocapture:false — a Stripe Payment Link still emits the checkout bucket", () => {
+    const runtime = executeTag({ siteSourceKey: "site_public_123", consent: "granted", autocapture: false })
+
+    runtime.click(managedTarget({ href: "https://buy.stripe.com/test_checkout?prefilled_email=p@x.com" }))
+
+    const clicks = runtime.requests.filter((request) => request.body.eventName === "site_click")
+    expect(clicks).toHaveLength(1)
+    expect(clicks[0]?.body.properties).toEqual({
+      cta_id: "external_stripe_payment_link",
+      cta_location: "page",
+      destination_path: "/external/stripe_payment_link"
+    })
+    expect(JSON.stringify(clicks[0]?.body)).not.toMatch(/buy\.stripe|prefilled_email/)
+  })
+
+  it("autocapture:false — the /download conversion anchor, a data-conversion=checkout link, and sign-up intent still emit", () => {
+    const runtime = executeTag({ siteSourceKey: "site_public_123", consent: "granted", autocapture: false })
+
+    runtime.click(managedTarget({ href: "https://example.com/download", downloadLocation: "hero" }))
+    runtime.click(checkoutTarget({ href: "https://pay.example.net/checkout/abc" }))
+    runtime.click(signupTarget({ href: "https://example.com/signup" }))
+    runtime.click(managedTarget({ href: "https://example.com/get-started" }))
+
+    expect(eventsAfterPageView(runtime).map((request) => request.body.eventName)).toEqual([
+      "app_download_click",
+      "site_click",
+      "sign_up_click",
+      "sign_up_click"
+    ])
+    const checkout = runtime.requests.find((request) => request.body.eventName === "site_click")
+    expect(checkout?.body.properties).toMatchObject({ destination_path: "/external/marked_checkout" })
+  })
+
+  it("autocapture:true is the 0.6.2 behaviour (unmarked links still captured)", () => {
+    const runtime = executeTag({ siteSourceKey: "site_public_123", consent: "granted", autocapture: true })
+
+    runtime.click(managedTarget({ href: "https://example.com/pricing" }))
+
+    const clicks = runtime.requests.filter((request) => request.body.eventName === "site_click")
+    expect(clicks).toHaveLength(1)
+    expect(clicks[0]?.body.properties).toMatchObject({ cta_id: "auto_pricing" })
   })
 })
 

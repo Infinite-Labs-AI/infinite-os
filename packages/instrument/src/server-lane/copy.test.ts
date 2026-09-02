@@ -19,8 +19,10 @@ describe("the agent brief", () => {
     expect(brief.startsWith(`${SERVER_LANE_BRIEF_BANNER}\n# `)).toBe(true)
     expect(brief).toContain(`> ${SERVER_LANE_POSITIONING}`)
     expect(SERVER_LANE_POSITIONING).toBe(
-      "analytics that see 100% of your traffic, installed by your agent in ten minutes."
+      "server-side analytics: every page your server serves and every outcome it confirms, counted where ad-blockers can't reach. A floor for people, never an exact share — installed by your agent in ten minutes."
     )
+    expect(SERVER_LANE_POSITIONING).not.toContain("100%")
+    expect(brief).not.toContain("100%")
   })
 
   it("states the contract verbatim: endpoint, headers, env, both body shapes, recipes, delivery, skips, never-send", () => {

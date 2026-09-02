@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "vitest"
 
 import type { InfiniteProxySpec, PosthogProxySpec } from "../types.js"
 import { computeContentHash } from "../manifest.js"
+import { infiniteProxySpec } from "../workspace-artifacts.js"
 
 import {
   buildNextConfigSource,
@@ -84,6 +85,36 @@ describe("buildVercelJson", () => {
     expect(JSON.parse(buildVercelJson(mixedProxy))).toEqual({
       rewrites: [US_STATIC, US_ARRAY, US_INGEST, INFINITE_COLLECT]
     })
+  })
+
+  it("derives the Infinite rewrite from the artifact's resolved origin and collect path", () => {
+    const proxy = infiniteProxySpec({
+      siteSourceKey: "site_public_123",
+      collectPath: "/infinite/ledger",
+      productionHosts: ["example.com"],
+      consentMode: "not_required",
+      apiOrigin: "https://api.infinite.fast"
+    })
+    expect(JSON.parse(buildVercelJson({ infinite: proxy }))).toEqual({
+      rewrites: [
+        {
+          source: "/infinite/ledger",
+          destination: "https://api.infinite.fast/api/analytics/events/collect"
+        }
+      ]
+    })
+  })
+
+  it("falls back to the default api.ultima.inc origin when the artifact carries none", () => {
+    const proxy = infiniteProxySpec({
+      siteSourceKey: "site_public_123",
+      collectPath: "/infinite/ledger",
+      productionHosts: ["example.com"],
+      consentMode: "not_required"
+    })
+    expect(buildVercelJson({ infinite: proxy })).toContain(
+      '"destination": "https://api.ultima.inc/api/analytics/events/collect"'
+    )
   })
 })
 

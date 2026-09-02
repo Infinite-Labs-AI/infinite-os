@@ -11,14 +11,66 @@ import type {
 } from "./types.js"
 
 /**
- * The ONE place the Infinite API host lives. It is a known rebrand landmine
- * (api.ultima.inc → api.infinite.fast); every destination below derives from it.
+ * The DEFAULT Infinite API host. It is a known rebrand landmine (api.ultima.inc → api.infinite.fast,
+ * which is not live yet), so every destination below derives from it and an install can override
+ * it with `--infinite-api-origin` / `INFINITE_API_ORIGIN` (see `resolveInfiniteApiOrigin`).
  */
 export const INFINITE_API_ORIGIN = "https://api.ultima.inc"
 
-/** Browser-facing same-origin route and its Vercel-only upstream destination. */
-export const DEFAULT_INFINITE_COLLECT_PATH = "/infinite/events/collect"
-export const INFINITE_COLLECT_DESTINATION = `${INFINITE_API_ORIGIN}/api/analytics/events/collect`
+/**
+ * Browser-facing same-origin route. `/infinite/ledger` deliberately avoids the `events/collect`
+ * wording that privacy blocklists match. An artifact that already records another path keeps it —
+ * the default applies only when no path was recorded.
+ */
+export const DEFAULT_INFINITE_COLLECT_PATH = "/infinite/ledger"
+
+/** The Vercel-only upstream destination for `origin` (the browser never sees it). */
+export function infiniteCollectDestination(origin: string): string {
+  return `${origin}/api/analytics/events/collect`
+}
+
+/** The upstream destination at the DEFAULT origin. */
+export const INFINITE_COLLECT_DESTINATION = infiniteCollectDestination(INFINITE_API_ORIGIN)
+
+export const INFINITE_API_ORIGIN_ERROR = "--infinite-api-origin must be an https origin with no path"
+
+/**
+ * The API origin an install proxies to: the flag, else `INFINITE_API_ORIGIN` from the env, else
+ * the default. Only an https origin with a hostname is accepted — no path, query, hash, or
+ * credentials — because the collect route is appended to it verbatim.
+ */
+export function resolveInfiniteApiOrigin(
+  options: { flag?: string; env?: NodeJS.ProcessEnv } = {}
+): string {
+  const fromEnv = options.env?.INFINITE_API_ORIGIN?.trim()
+  const candidate = options.flag ?? (fromEnv ? fromEnv : undefined) ?? INFINITE_API_ORIGIN
+  return normalizeInfiniteApiOrigin(candidate)
+}
+
+function normalizeInfiniteApiOrigin(candidate: string): string {
+  const trimmed = candidate.trim()
+  if (!/^https:\/\/[^/?#]+\/?$/.test(trimmed)) {
+    throw new Error(INFINITE_API_ORIGIN_ERROR)
+  }
+  let parsed: URL
+  try {
+    parsed = new URL(trimmed)
+  } catch {
+    throw new Error(INFINITE_API_ORIGIN_ERROR)
+  }
+  if (
+    parsed.protocol !== "https:" ||
+    parsed.username !== "" ||
+    parsed.password !== "" ||
+    parsed.hostname === "" ||
+    parsed.search !== "" ||
+    parsed.hash !== "" ||
+    parsed.pathname !== "/"
+  ) {
+    throw new Error(INFINITE_API_ORIGIN_ERROR)
+  }
+  return parsed.origin
+}
 
 /**
  * Server lane (lossless analytics): the customer's SERVER posts signed document-request and
@@ -48,7 +100,18 @@ export interface WorkspaceArtifactOptions {
   infiniteStaticProxy?: "vercel"
   infiniteConsentMode?: InfiniteConsentMode
   infiniteDownloadDestinationPath?: string
+  /** Validated override of the API host the same-origin route proxies to (default INFINITE_API_ORIGIN). */
+  infiniteApiOrigin?: string
+  /** `--infinite-autocapture on|off` (absent = on). */
+  infiniteAutocapture?: boolean
   packageManager?: PackageManager
+}
+
+export function normalizeInfiniteAutocapture(value: string): boolean {
+  const normalized = value.trim().toLowerCase()
+  if (normalized === "on") return true
+  if (normalized === "off") return false
+  throw new Error("--infinite-autocapture currently supports only: on, off")
 }
 
 export function normalizeInfiniteConsentMode(value: string): InfiniteConsentMode {
@@ -126,7 +189,9 @@ export function coerceWorkspaceArtifacts(value: unknown): WorkspaceInstallArtifa
         : {}),
       ...(typeof infinite.downloadDestinationPath === "string"
         ? { downloadDestinationPath: infinite.downloadDestinationPath }
-        : {})
+        : {}),
+      ...(typeof infinite.apiOrigin === "string" ? { apiOrigin: infinite.apiOrigin } : {}),
+      ...(typeof infinite.autocapture === "boolean" ? { autocapture: infinite.autocapture } : {})
     }
   }
   const runtimeProductionHosts = topLevelProductionHosts ?? artifacts.infinite?.productionHosts
@@ -351,9 +416,23 @@ export function resolveWorkspaceArtifacts(
               options.infiniteDownloadDestinationPath ??
               artifacts.infinite?.downloadDestinationPath
           }
+        : {}),
+      ...(artifacts.infinite?.apiOrigin !== undefined
+        ? { apiOrigin: artifacts.infinite.apiOrigin }
+        : {}),
+      ...(artifacts.infinite?.autocapture !== undefined
+        ? { autocapture: artifacts.infinite.autocapture }
         : {})
     }
   }
+
+  // Modifiers, not sources: the origin and the autocapture flag attach to an Infinite artifact
+  // that exists for another reason (flags or file) and never fabricate a keyless one.
+  const modified = applyInfiniteAutocapture(
+    applyInfiniteApiOrigin(artifacts, { origin: options.infiniteApiOrigin }),
+    { autocapture: options.infiniteAutocapture }
+  )
+  if (modified.infinite !== undefined) artifacts.infinite = modified.infinite
 
   if (artifacts.infinite && options.infiniteProductionHosts !== undefined) {
     artifacts.infinite = {
@@ -383,6 +462,49 @@ export function applyInfiniteDownloadDestinationPath(
     infinite: {
       ...artifacts.infinite,
       downloadDestinationPath: options.path
+    }
+  }
+}
+
+/**
+ * Layer a resolved `--infinite-api-origin` / `INFINITE_API_ORIGIN` onto a resolved/discovered
+ * Infinite artifact. A modifier, not a source: with no Infinite artifact there is nothing to
+ * proxy, so it never fabricates one.
+ */
+export function applyInfiniteApiOrigin(
+  artifacts: WorkspaceInstallArtifacts,
+  options: { origin?: string }
+): WorkspaceInstallArtifacts {
+  if (options.origin === undefined || artifacts.infinite === undefined) {
+    return artifacts
+  }
+
+  return {
+    ...artifacts,
+    infinite: {
+      ...artifacts.infinite,
+      apiOrigin: options.origin
+    }
+  }
+}
+
+/**
+ * Layer `--infinite-autocapture on|off` onto a resolved/discovered Infinite artifact. A modifier:
+ * with no Infinite artifact there is no runtime to configure, so it never fabricates one.
+ */
+export function applyInfiniteAutocapture(
+  artifacts: WorkspaceInstallArtifacts,
+  options: { autocapture?: boolean }
+): WorkspaceInstallArtifacts {
+  if (options.autocapture === undefined || artifacts.infinite === undefined) {
+    return artifacts
+  }
+
+  return {
+    ...artifacts,
+    infinite: {
+      ...artifacts.infinite,
+      autocapture: options.autocapture
     }
   }
 }
@@ -428,6 +550,9 @@ export function infiniteProxySpec(
   artifact: WorkspaceInstallArtifacts["infinite"]
 ): InfiniteProxySpec | undefined {
   return artifact
-    ? { path: artifact.collectPath, destination: INFINITE_COLLECT_DESTINATION }
+    ? {
+        path: artifact.collectPath,
+        destination: infiniteCollectDestination(artifact.apiOrigin ?? INFINITE_API_ORIGIN)
+      }
     : undefined
 }

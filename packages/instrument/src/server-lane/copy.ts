@@ -30,7 +30,7 @@ import {
 } from "./snippets.js"
 
 export const SERVER_LANE_POSITIONING =
-  "analytics that see 100% of your traffic, installed by your agent in ten minutes."
+  "server-side analytics: every page your server serves and every outcome it confirms, counted where ad-blockers can't reach. A floor for people, never an exact share — installed by your agent in ten minutes."
 
 export const SERVER_LANE_BRIEF_FILE = "INSTALL-SERVER-LANE.md"
 

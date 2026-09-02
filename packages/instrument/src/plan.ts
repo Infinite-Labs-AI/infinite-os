@@ -8,6 +8,7 @@ import { infiniteProxySpec } from "./workspace-artifacts.js"
 import { readInstallManifest } from "./manifest.js"
 import { planServerLane } from "./server-lane/install.js"
 import type {
+  AdoptedProvider,
   ApplyMode,
   InspectResult,
   InstallPlan,
@@ -18,6 +19,7 @@ import type {
   ServerLanePlan,
   WorkspaceInstallArtifacts
 } from "./types.js"
+import { providerLabels } from "./types.js"
 
 const providerOrder: ProviderId[] = ["ga4", "posthog", "x", "meta", "infinite"]
 
@@ -35,13 +37,23 @@ function selectedProviders(artifacts: WorkspaceInstallArtifacts): ProviderId[] {
   return providerOrder.filter((providerId) => artifacts[providerId] !== undefined)
 }
 
+/** "existing snippet" / "Google Tag Manager" — how the adopted install was recognised. */
+export function adoptedViaLabel(via: AdoptedProvider["via"]): string {
+  return via === "gtm" ? "Google Tag Manager" : "existing snippet"
+}
+
+/** One founder-facing line per adopted provider: `Google Analytics — index.html (existing snippet)`. */
+export function adoptedProviderLine(entry: AdoptedProvider): string {
+  return `${providerLabels[entry.provider]} — ${entry.file} (${adoptedViaLabel(entry.via)})`
+}
+
 export function planInstallation(options: PlanInstallationOptions): InstallPlan {
   const inspectResult =
     options.inspect ??
     inspectWorkspace(options.root, {
       packageManager: options.packageManager
     })
-  const providers = selectedProviders(options.artifacts)
+  const requestedProviders = selectedProviders(options.artifacts)
   const assumptions = [...inspectResult.assumptions]
   const blockers = [...inspectResult.blockers]
 
@@ -62,7 +74,7 @@ export function planInstallation(options: PlanInstallationOptions): InstallPlan 
       : undefined
     return {
       framework: inspectResult.framework,
-      providers,
+      providers: requestedProviders,
       files: [],
       envKeys: unsupportedServerLane?.envKeys ?? [],
       applyMode: "plan-only",
@@ -75,19 +87,42 @@ export function planInstallation(options: PlanInstallationOptions): InstallPlan 
       repoStatus: inspectResult.repoStatus,
       workspaceId: options.workspaceId,
       artifacts: options.artifacts,
+      adopted: [],
       ...(unsupportedServerLane ? { serverLane: stripDraft(unsupportedServerLane) } : {})
     }
   }
 
-  // `--server-lane` alone is a complete install (the lane needs no browser artifact); the pixel
-  // wiring is only planned when at least one provider artifact was given.
-  const pixelWanted = providers.length > 0 || !options.serverLane
-  if (providers.length === 0 && !options.serverLane) {
+  if (requestedProviders.length === 0 && !options.serverLane) {
     blockers.push("No supported public install artifacts were provided.")
   }
 
   const appRootAbsolute =
     inspectResult.appRoot === "." ? options.root : join(options.root, inspectResult.appRoot)
+
+  // Harness rule: a requested provider that already exists in the repo (hand-pasted snippet, or
+  // GA4 through a Tag Manager container) is ADOPTED — left byte-for-byte alone and dropped from the
+  // install set — never refused and never installed a second time. A Tag Manager container only
+  // proves GA4; any other requested provider still installs.
+  const unmanagedProviders = detectUnmanagedProviders(appRootAbsolute)
+  const adopted: AdoptedProvider[] = []
+  const providers: ProviderId[] = []
+  for (const providerId of requestedProviders) {
+    const existing = unmanagedProviders.find((entry) => entry.provider === providerId)
+    if (existing) {
+      adopted.push(existing)
+      assumptions.push(
+        `Existing ${providerLabels[providerId]} found in ${existing.file} (${adoptedViaLabel(existing.via)}); left untouched. infinite-tag will not install a second copy.`
+      )
+    } else {
+      providers.push(providerId)
+    }
+  }
+
+  // `--server-lane` alone is a complete install (the lane needs no browser artifact); the pixel
+  // wiring is only planned when at least one provider remains to install. When everything
+  // requested was adopted there is nothing to write — the plan says so instead of injecting an
+  // empty managed block.
+  const pixelWanted = providers.length > 0 || (!options.serverLane && adopted.length === 0)
   const frameworkAdapter = getFrameworkAdapter(inspectResult.framework)
   const infiniteProxy = infiniteProxySpec(options.artifacts.infinite)
   const previousManifest = readInstallManifest(options.root)
@@ -123,16 +158,10 @@ export function planInstallation(options: PlanInstallationOptions): InstallPlan 
     blockers.push(...serverLaneDraft.blockers)
   }
 
-  const unmanagedProviders = detectUnmanagedProviders(appRootAbsolute)
   const envKeys: string[] = []
   const instructions: InstallInstruction[] = []
   for (const providerId of providers) {
     const adapter = getProviderAdapter(providerId)
-    if (unmanagedProviders.includes(providerId)) {
-      blockers.push(
-        `Existing ${adapter.displayName} analytics wiring was detected in this repo and is not managed by Infinite. Remove or migrate the existing ${adapter.displayName} tag before installing it with infinite-tag.`
-      )
-    }
     const providerPlan = adapter.plan(inspectResult.framework, options.artifacts[providerId], {
       artifacts: options.artifacts
     })
@@ -165,8 +194,10 @@ export function planInstallation(options: PlanInstallationOptions): InstallPlan 
     ...instruction,
     path: normalizeAppRelativePath(inspectResult.appRoot, instruction.path)
   }))
-  // A server-lane-only plan has no framework draft; the lane itself is always applicable.
-  const applyMode: ApplyMode = frameworkDraft?.applyMode ?? (serverLaneDraft ? "supported" : "plan-only")
+  // A server-lane-only plan has no framework draft; the lane itself is always applicable. An
+  // all-adopted plan has nothing to write and is trivially applicable (apply is a no-op).
+  const applyMode: ApplyMode =
+    frameworkDraft?.applyMode ?? (serverLaneDraft || adopted.length > 0 ? "supported" : "plan-only")
   let confidence = frameworkDraft?.confidence ?? inspectResult.confidence
   if (providers.length > 0) {
     confidence = Math.min(0.99, confidence + Math.min(providers.length, 3) * 0.03)
@@ -190,6 +221,7 @@ export function planInstallation(options: PlanInstallationOptions): InstallPlan 
     repoStatus: inspectResult.repoStatus,
     workspaceId: options.workspaceId,
     artifacts: options.artifacts,
+    adopted,
     ...(serverLaneDraft ? { serverLane: stripDraft(serverLaneDraft) } : {})
   }
 }

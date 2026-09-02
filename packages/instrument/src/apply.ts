@@ -5,6 +5,7 @@ import { writeFileAtomic } from "./frameworks/shared.js"
 import { getFrameworkAdapter } from "./frameworks/index.js"
 import {
   computeContentHashes,
+  installManifestPath,
   installManifestRelativePath,
   readInstallManifest,
   writeInstallManifestIfChanged
@@ -17,6 +18,7 @@ import type {
   ProviderId,
   SupportedFramework
 } from "./types.js"
+import { providerLabels } from "./types.js"
 
 const minimumApplyConfidence = 0.75
 
@@ -48,6 +50,16 @@ export function applyInstallation(options: ApplyInstallationOptions): ApplyResul
     throw new Error(
       `Refusing to apply a plan-only framework (${options.plan.framework}). Review the plan instructions and wire it manually for now.`
     )
+  }
+
+  // Every requested provider already exists (adopted) and no server lane was asked for: there is
+  // nothing to write, so nothing is written — no empty managed block, no manifest.
+  if (options.plan.providers.length === 0 && !options.plan.serverLane) {
+    return {
+      changedFiles: [],
+      manifestPath: installManifestPath(options.root),
+      warnings: [nothingToInstallMessage(options.plan)]
+    }
   }
 
   // A server-lane-only plan (no provider artifacts) skips the pixel adapter entirely.
@@ -128,6 +140,14 @@ export function applyInstallation(options: ApplyInstallationOptions): ApplyResul
     restoreSnapshot(options.root, snapshot)
     throw error
   }
+}
+
+/** "Nothing to install: Google Analytics already exists in index.html and was left untouched." */
+export function nothingToInstallMessage(plan: InstallPlan): string {
+  const existing = plan.adopted.map(
+    (entry) => `${providerLabels[entry.provider]} already exists in ${entry.file}`
+  )
+  return `Nothing to install: ${existing.join("; ")} and ${plan.adopted.length === 1 ? "was" : "were"} left untouched.`
 }
 
 export interface FileSnapshot {

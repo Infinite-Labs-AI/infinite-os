@@ -3,6 +3,54 @@
 All notable changes to the `infinite-tag` npm package (`packages/instrument`). Versions before
 0.5.0 are recorded in git history only (`git log -- packages/instrument`).
 
+## 0.7.0 — 2026-09-02
+
+- **Server-lane copy stops claiming 100% of traffic.** The positioning line (brief + README) now
+  reads: "server-side analytics: every page your server serves and every outcome it confirms,
+  counted where ad-blockers can't reach. A floor for people, never an exact share — installed by
+  your agent in ten minutes."
+**Minor bump: the browser contract changes** (`contracts/browser-collect-v1.schema.json`, mirrored
+byte-for-byte and hash-pinned in the cloud).
+
+- **Campaign capture on the initial page view.** The `nav: "navigate"` `site_page_view` now carries
+  an allowlisted campaign block read from the landing URL: `utm_source` / `utm_medium` /
+  `utm_campaign` / `utm_content` / `utm_term` as bounded values (trimmed, control characters
+  stripped, 100 chars, absent when empty) and `has_gclid` / `has_fbclid` / `has_ttclid` /
+  `has_msclkid` as presence-only `true`. The click-id VALUE and the raw query string are never
+  sent; every other parameter is dropped; History-API views carry `nav: "history"` only; click
+  events never carry the block. Contract v1 gains those nine keys (`maxProperties` 4 → 13; the
+  `site_page_view` branch allows `nav` + the nine).
+- **Autocapture is a flag (default on).** `--infinite-autocapture on|off` (artifact field
+  `infinite.autocapture: boolean`) — `off` stops unmarked links and buttons from emitting
+  `site_click`; marked `data-analytics-cta-id` CTAs, the conversion destination, Stripe checkout
+  buckets, `data-conversion="checkout|signup"` markers and sign-up paths still emit. With the flag
+  absent the runtime config is byte-identical to 0.6.2, and the `auto_` / `button` / `external_*`
+  cta ids are unchanged.
+- **Meta pixel now installs with Automatic Configuration off:** `fbq('set', 'autoConfig',
+  'false', <id>)` precedes `fbq('init', <id>)`, so no button clicks or page metadata are sent to
+  Meta by default. The rest of the snippet is Meta's own native bootstrap, unchanged.
+- **Existing tags are adopted instead of refused.** A requested provider that already exists in
+  the repo (hand-pasted `gtag`/`posthog.init`/`twq`/`fbq` snippet, or GA4 served through a Google
+  Tag Manager container) is left byte-for-byte alone, dropped from the install set, and reported
+  under `adopted` (`{ provider, via: "snippet" | "gtm", file }`) — it is no longer a blocker, and
+  `infinite-tag` never installs a second copy. Detection now walks the whole app root (bounded:
+  2,000 files / 512 KB each, skipping `node_modules`, build output and dot-directories) instead of
+  a fixed seven-file list — skipping `public`, `static`, `__tests__`, `__mocks__`, `.storybook`,
+  `emails` and `*.d.ts` / `*.test.*` / `*.spec.*` / `*.stories.*` / `*.min.js` files, since a false
+  positive silently drops a provider from the install. A Tag Manager verdict needs evidence (the
+  `gtm.js` loader, `dataLayer.push(` beside `googletagmanager.com`, a `gtmId` prop, or a quoted
+  `GTM-…` id on a line mentioning gtm) — never a bare token or a bare data-layer push. GA4 through
+  `@next/third-parties/google`, `react-ga4`, `vue-gtag`, `nuxt-gtag` and
+  `@analytics/google-analytics`, and PostHog through `posthog-js/react` / `@posthog/nextjs`, are
+  recognised so the site is not double-tagged. When everything requested already exists, `apply`
+  writes nothing and records nothing. `detectUnmanagedProviders` returns the object shape above
+  (was `string[]`).
+- **Default same-origin collect path is now `/infinite/ledger`.** The old `/infinite/events/collect`
+  wording matches privacy blocklists; an artifact or install that already records a path keeps it
+  (no silent migration). `--infinite-api-origin <https://host>` / `INFINITE_API_ORIGIN` override the
+  API host the route proxies to (default `https://api.ultima.inc`); the value is validated as an
+  https origin with no path and only ever shapes the Vercel/Next rewrite destination.
+
 ## 0.6.2 — 2026-09-02
 
 - **Precise Stripe checkout bucketing.** Hosted Stripe payment surfaces now emit structural

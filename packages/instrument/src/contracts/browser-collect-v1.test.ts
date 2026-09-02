@@ -10,6 +10,84 @@ const schemaPath = resolve(contractsRoot, "browser-collect-v1.schema.json")
 const fixturePath = resolve(contractsRoot, "browser-collect-v1.fixture.json")
 const structuralTokenPattern = "^[A-Za-z0-9_-]{1,64}$"
 
+const utmKeys = ["utm_source", "utm_medium", "utm_campaign", "utm_content", "utm_term"] as const
+const clickIdPresenceKeys = ["has_gclid", "has_fbclid", "has_ttclid", "has_msclkid"] as const
+const campaignKeys = [...utmKeys, ...clickIdPresenceKeys]
+
+type JsonSchema = boolean | Record<string, unknown>
+
+/**
+ * A deliberately small evaluator for the subset of JSON Schema 2020-12 this contract uses
+ * (type, properties incl. `false`, additionalProperties, maxProperties, required, enum, const,
+ * pattern, min/maxLength, local `$ref`, allOf/if/then, not). It exists so the tests can prove
+ * VALIDATION outcomes against the shipped file, not just its shape, without adding a dependency.
+ */
+function validateAgainstContract(root: Record<string, unknown>, value: unknown): boolean {
+  const resolve = (ref: string): JsonSchema =>
+    ref
+      .replace(/^#\//, "")
+      .split("/")
+      .reduce<unknown>((node, key) => (node as Record<string, unknown>)[key], root) as JsonSchema
+  const check = (schema: JsonSchema, node: unknown): boolean => {
+    if (schema === true) return true
+    if (schema === false) return false
+    if (typeof schema.$ref === "string") return check(resolve(schema.$ref), node)
+    if (schema.type === "object") {
+      if (node === null || typeof node !== "object" || Array.isArray(node)) return false
+    }
+    if (schema.type === "string" && typeof node !== "string") return false
+    if (typeof node === "string") {
+      if (typeof schema.minLength === "number" && node.length < schema.minLength) return false
+      if (typeof schema.maxLength === "number" && node.length > schema.maxLength) return false
+      if (typeof schema.pattern === "string" && !new RegExp(schema.pattern, "u").test(node)) return false
+    }
+    if (Array.isArray(schema.enum) && !schema.enum.includes(node)) return false
+    if ("const" in schema && schema.const !== node) return false
+    if (node !== null && typeof node === "object" && !Array.isArray(node)) {
+      const record = node as Record<string, unknown>
+      const keys = Object.keys(record)
+      if (typeof schema.maxProperties === "number" && keys.length > schema.maxProperties) return false
+      for (const key of (schema.required as string[] | undefined) ?? []) {
+        if (!(key in record)) return false
+      }
+      const properties = (schema.properties as Record<string, JsonSchema> | undefined) ?? {}
+      for (const key of keys) {
+        if (key in properties) {
+          if (!check(properties[key]!, record[key])) return false
+        } else if (schema.additionalProperties === false) {
+          return false
+        }
+      }
+    }
+    for (const sub of (schema.allOf as JsonSchema[] | undefined) ?? []) {
+      if (!check(sub, node)) return false
+    }
+    if (schema.if !== undefined) {
+      if (check(schema.if as JsonSchema, node)) {
+        if (schema.then !== undefined && !check(schema.then as JsonSchema, node)) return false
+      } else if (schema.else !== undefined && !check(schema.else as JsonSchema, node)) {
+        return false
+      }
+    }
+    if (schema.not !== undefined && check(schema.not as JsonSchema, node)) return false
+    return true
+  }
+  return check(root, value)
+}
+
+function pageView(properties: Record<string, unknown>): Record<string, unknown> {
+  return {
+    siteSourceKey: "site_public_fixture",
+    eventId: "00000000-0000-4000-8000-000000000003",
+    eventName: "site_page_view",
+    occurredAt: "2026-08-02T09:00:00.000Z",
+    anonymousId: "00000000-0000-4000-8000-000000000001",
+    sessionId: "00000000-0000-4000-8000-000000000002",
+    url: "https://example.com/pricing/",
+    properties
+  }
+}
+
 describe("browser-collect-v1 public contract", () => {
   it("ships a versioned schema and fixture with the exact cloud-safe shape", () => {
     expect(existsSync(schemaPath), schemaPath).toBe(true)
@@ -134,26 +212,112 @@ describe("browser-collect-v1 public contract", () => {
     })
   })
 
-  it("site_page_view may carry ONLY the bounded nav enum (0.6.0: navigate | history), optional for older tags", () => {
+  it("site_page_view may carry the bounded nav enum plus the allowlisted campaign block (0.7.0), all optional", () => {
     const schema = JSON.parse(readFileSync(schemaPath, "utf8")) as {
-      properties: { properties: { properties: Record<string, unknown> } }
+      properties: { properties: { maxProperties: number; properties: Record<string, unknown> } }
       allOf: Array<{
-        if: { properties: { eventName: { const: string } } }
+        if: { properties: { eventName: { const?: string; enum?: string[] } } }
         then: { properties: { properties: Record<string, unknown> } }
       }>
     }
-    expect(schema.properties.properties.properties.nav).toEqual({
-      type: "string",
-      enum: ["navigate", "history"]
-    })
+    const definitions = schema.properties.properties.properties
+    expect(definitions.nav).toEqual({ type: "string", enum: ["navigate", "history"] })
+    for (const key of utmKeys) {
+      expect(definitions[key], key).toEqual({
+        type: "string",
+        minLength: 1,
+        maxLength: 100,
+        pattern: "^[^\\u0000-\\u001f]+$"
+      })
+    }
+    for (const key of clickIdPresenceKeys) {
+      expect(definitions[key], key).toEqual({ const: true })
+    }
+    // 4 structural keys + 9 campaign keys — the cloud's PROPERTY_KEYS parity test pins the same count.
+    expect(Object.keys(definitions)).toHaveLength(13)
+    expect(schema.properties.properties.maxProperties).toBe(13)
+
     const pageView = schema.allOf.find((branch) => branch.if.properties.eventName.const === "site_page_view")
     expect(pageView?.then.properties.properties).toEqual({
       type: "object",
-      maxProperties: 1,
-      properties: { nav: { $ref: "#/properties/properties/properties/nav" } }
+      maxProperties: 10,
+      properties: Object.fromEntries(
+        ["nav", ...campaignKeys].map((key) => [key, { $ref: `#/properties/properties/properties/${key}` }])
+      )
     })
     // Not required: a 0.5.x tag sends no properties on a page view and must keep validating.
     expect(pageView?.then.properties.properties).not.toHaveProperty("required")
+
+    // The shared file has exactly the three event branches the cloud pins by hash — campaign keys on
+    // click events are rejected by the cloud INGEST, not by the schema (kept permissive so both
+    // repos' copies stay byte-identical).
+    expect(schema.allOf.map((branch) => branch.if.properties.eventName.const)).toEqual([
+      "site_page_view",
+      "site_click",
+      "app_download_click"
+    ])
+  })
+
+  it("validates the campaign rules against the shipped file: page views accept the block, click events reject it, presence is literal true", () => {
+    const schema = JSON.parse(readFileSync(schemaPath, "utf8")) as Record<string, unknown>
+    const fixture = JSON.parse(readFileSync(fixturePath, "utf8"))
+
+    expect(validateAgainstContract(schema, fixture)).toBe(true)
+    expect(validateAgainstContract(schema, pageView({ nav: "navigate" }))).toBe(true)
+    expect(
+      validateAgainstContract(
+        schema,
+        pageView({
+          nav: "navigate",
+          utm_source: "x.com",
+          utm_medium: "social",
+          utm_campaign: "launch",
+          utm_content: "hero",
+          utm_term: "cmo",
+          has_gclid: true,
+          has_fbclid: true,
+          has_ttclid: true,
+          has_msclkid: true
+        })
+      )
+    ).toBe(true)
+
+    // Bounds.
+    expect(validateAgainstContract(schema, pageView({ nav: "navigate", utm_source: "" }))).toBe(false)
+    expect(validateAgainstContract(schema, pageView({ nav: "navigate", utm_source: "a".repeat(101) }))).toBe(false)
+    expect(validateAgainstContract(schema, pageView({ nav: "navigate", utm_source: "a\u0001b" }))).toBe(false)
+    expect(validateAgainstContract(schema, pageView({ nav: "navigate", has_gclid: false }))).toBe(false)
+    expect(validateAgainstContract(schema, pageView({ nav: "navigate", has_gclid: "true" }))).toBe(false)
+    // The value of a click id never has a key to live in.
+    expect(validateAgainstContract(schema, pageView({ nav: "navigate", gclid: "abc123" }))).toBe(false)
+    expect(validateAgainstContract(schema, pageView({ nav: "navigate", campaign: "launch" }))).toBe(false)
+
+    // Click events keep validating with their structural properties.
+    for (const eventName of ["site_click", "app_download_click", "sign_up_click"]) {
+      expect(
+        validateAgainstContract(schema, {
+          ...fixture,
+          eventName,
+          properties: { cta_id: "pricing_primary", cta_location: "hero", destination_path: "/download" }
+        }),
+        eventName
+      ).toBe(true)
+    }
+  })
+
+  it("documents where the SHARED schema stays permissive: the cloud ingest, not the file, rejects a campaign block on a click event or a cta beside it", () => {
+    // Pinned on purpose (coordination decision 2026-09-02): both repos carry this file byte-for-byte
+    // and the cloud's ingest parser is the gate for these two cases. If either copy starts encoding
+    // them, the hash pin on the cloud side changes with it.
+    const schema = JSON.parse(readFileSync(schemaPath, "utf8")) as Record<string, unknown>
+    const fixture = JSON.parse(readFileSync(fixturePath, "utf8"))
+    expect(
+      validateAgainstContract(schema, {
+        ...fixture,
+        properties: { cta_id: "pricing_primary", cta_location: "hero", utm_source: "x.com" }
+      })
+    ).toBe(true)
+    expect(validateAgainstContract(schema, pageView({ nav: "navigate", cta_id: "hero" }))).toBe(true)
   })
 
   it("matches the runtime structural token contract for CTA properties", () => {

@@ -55,7 +55,7 @@
     "properties": {
       "type": "object",
       "additionalProperties": false,
-      "maxProperties": 4,
+      "maxProperties": 13,
       "properties": {
         "cta_id": {
           "type": "string",
@@ -77,7 +77,41 @@
         "nav": {
           "type": "string",
           "enum": ["navigate", "history"]
-        }
+        },
+        "utm_source": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "utm_medium": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "utm_campaign": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "utm_content": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "utm_term": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "has_gclid": { "const": true },
+        "has_fbclid": { "const": true },
+        "has_ttclid": { "const": true },
+        "has_msclkid": { "const": true }
       }
     }
   },
@@ -92,9 +126,18 @@
         "properties": {
           "properties": {
             "type": "object",
-            "maxProperties": 1,
+            "maxProperties": 10,
             "properties": {
-              "nav": { "$ref": "#/properties/properties/properties/nav" }
+              "nav": { "$ref": "#/properties/properties/properties/nav" },
+              "utm_source": { "$ref": "#/properties/properties/properties/utm_source" },
+              "utm_medium": { "$ref": "#/properties/properties/properties/utm_medium" },
+              "utm_campaign": { "$ref": "#/properties/properties/properties/utm_campaign" },
+              "utm_content": { "$ref": "#/properties/properties/properties/utm_content" },
+              "utm_term": { "$ref": "#/properties/properties/properties/utm_term" },
+              "has_gclid": { "$ref": "#/properties/properties/properties/has_gclid" },
+              "has_fbclid": { "$ref": "#/properties/properties/properties/has_fbclid" },
+              "has_ttclid": { "$ref": "#/properties/properties/properties/has_ttclid" },
+              "has_msclkid": { "$ref": "#/properties/properties/properties/has_msclkid" }
             }
           }
         }

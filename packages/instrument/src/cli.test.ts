@@ -38,6 +38,21 @@ function stdoutText(): string {
   return logSpy.mock.calls.map((c) => String(c[0])).join("\n")
 }
 
+/** The most recent JSON document printed to stdout (for tests that run the CLI more than once). */
+function lastStdoutJson(): string {
+  const parseable = logSpy.mock.calls
+    .map((c) => String(c[0]))
+    .filter((m) => {
+      try {
+        JSON.parse(m)
+        return true
+      } catch {
+        return false
+      }
+    })
+  return parseable[parseable.length - 1] ?? ""
+}
+
 describe("runCli", () => {
   it("apply without --yes returns 1 with approval message", async () => {
     const root = copyFixture("static-html-basic")
@@ -216,8 +231,10 @@ describe("runCli", () => {
     const logMessages = logSpy.mock.calls.map((c) => String(c[0]))
     const helpText = logMessages.join("\n")
     expect(helpText).toContain("uninstall")
-    expect(helpText).toContain("Defaults to /infinite/events/collect")
+    expect(helpText).toContain("Defaults to /infinite/ledger")
+    expect(helpText).toContain("--infinite-api-origin <https://host>")
     expect(helpText).toContain("--infinite-download-destination-path <path>")
+    expect(helpText).toContain("--infinite-autocapture <on|off>")
     expect(helpText).toContain("--infinite-consent-mode <required|not-required>")
     expect(helpText).toContain("No default")
     expect(helpText).toContain("infinite:analytics-consent-change")
@@ -493,13 +510,176 @@ describe("Infinite source handoff + meta providers", () => {
     expect(code).toBe(0)
     const html = indexHtml(root)
     expect(html).toContain('"siteSourceKey":"site_public_123"')
-    expect(html).toContain("/infinite/events/collect")
+    expect(html).toContain("/infinite/ledger")
+    expect(html).not.toContain("/infinite/events/collect")
     expect(html).not.toContain("app.ultima.inc")
     const vercel = JSON.parse(readFileSync(join(root, "vercel.json"), "utf8"))
     expect(vercel.rewrites).toContainEqual({
-      source: "/infinite/events/collect",
+      source: "/infinite/ledger",
       destination: "https://api.ultima.inc/api/analytics/events/collect"
     })
+  })
+
+  it("--infinite-api-origin points the Vercel rewrite at the override host", async () => {
+    const root = copyFixture("static-html-basic")
+    const code = await runCli([
+      "install",
+      "--root", root,
+      "--workspace", "ws_test",
+      "--yes",
+      "--infinite-site-source-key", "site_public_123",
+      "--infinite-production-host", "example.com",
+      "--infinite-static-proxy", "vercel",
+      "--infinite-consent-mode", "required",
+      "--infinite-api-origin", "https://api.infinite.fast"
+    ])
+    expect(code).toBe(0)
+    const vercel = JSON.parse(readFileSync(join(root, "vercel.json"), "utf8"))
+    expect(vercel.rewrites).toContainEqual({
+      source: "/infinite/ledger",
+      destination: "https://api.infinite.fast/api/analytics/events/collect"
+    })
+    expect(JSON.stringify(vercel)).not.toContain("api.ultima.inc")
+  })
+
+  it("INFINITE_API_ORIGIN in the env overrides the default and the flag beats it", async () => {
+    const previous = process.env.INFINITE_API_ORIGIN
+    process.env.INFINITE_API_ORIGIN = "https://env.example"
+    try {
+      const root = copyFixture("static-html-basic")
+      const code = await runCli([
+        "plan",
+        "--root", root,
+        "--json",
+        "--infinite-site-source-key", "site_public_123",
+        "--infinite-production-host", "example.com",
+        "--infinite-static-proxy", "vercel",
+        "--infinite-consent-mode", "required"
+      ])
+      expect(code).toBe(0)
+      expect(lastStdoutJson()).toContain("https://env.example/api/analytics/events/collect")
+
+      const flagged = await runCli([
+        "plan",
+        "--root", root,
+        "--json",
+        "--infinite-site-source-key", "site_public_123",
+        "--infinite-production-host", "example.com",
+        "--infinite-static-proxy", "vercel",
+        "--infinite-consent-mode", "required",
+        "--infinite-api-origin", "https://flag.example"
+      ])
+      expect(flagged).toBe(0)
+      const text = lastStdoutJson()
+      expect(text).toContain("https://flag.example/api/analytics/events/collect")
+      expect(text).not.toContain("env.example")
+    } finally {
+      if (previous === undefined) delete process.env.INFINITE_API_ORIGIN
+      else process.env.INFINITE_API_ORIGIN = previous
+    }
+  })
+
+  it("rejects an --infinite-api-origin that carries a path", async () => {
+    const root = copyFixture("static-html-basic")
+    const code = await runCli([
+      "plan",
+      "--root", root,
+      "--json",
+      "--infinite-site-source-key", "site_public_123",
+      "--infinite-api-origin", "https://api.infinite.fast/api"
+    ])
+    expect(code).toBe(1)
+    expect(errorSpy.mock.calls.map((c) => String(c[0]))).toContain(
+      "--infinite-api-origin must be an https origin with no path"
+    )
+  })
+
+  it("plan --json lists adopted providers and human mode says what was left alone", async () => {
+    const root = copyFixture("static-html-basic")
+    writeFileSync(
+      join(root, "index.html"),
+      '<!doctype html>\n<html lang="en">\n  <head>\n    <script>gtag("config", "G-EXISTING")</script>\n  </head>\n  <body></body>\n</html>\n'
+    )
+
+    const code = await runCli([
+      "plan",
+      "--root", root,
+      "--json",
+      "--ga4-measurement-id", "G-TEST123",
+      "--meta-pixel-id", "1234567890123456"
+    ])
+    expect(code).toBe(0)
+    const plan = JSON.parse(lastStdoutJson()) as { adopted: unknown; providers: string[]; blockers: string[] }
+    expect(plan.adopted).toEqual([{ provider: "ga4", via: "snippet", file: "index.html" }])
+    expect(plan.providers).toEqual(["meta"])
+    expect(plan.blockers).toEqual([])
+
+    logSpy.mockClear()
+    const human = await runCli([
+      "plan",
+      "--root", root,
+      "--ga4-measurement-id", "G-TEST123",
+      "--meta-pixel-id", "1234567890123456"
+    ])
+    expect(human).toBe(0)
+    expect(stdoutText()).toContain("Already on your site (left untouched):")
+    expect(stdoutText()).toContain("Google Analytics — index.html (existing snippet)")
+  })
+
+  it("install with only already-present providers changes nothing and says so", async () => {
+    const root = copyFixture("static-html-basic")
+    writeFileSync(
+      join(root, "index.html"),
+      '<!doctype html>\n<html lang="en">\n  <head>\n    <script>gtag("config", "G-EXISTING")</script>\n  </head>\n  <body></body>\n</html>\n'
+    )
+    const before = readFileSync(join(root, "index.html"), "utf8")
+
+    const code = await runCli([
+      "install",
+      "--root", root,
+      "--workspace", "ws_test",
+      "--yes",
+      "--ga4-measurement-id", "G-TEST123"
+    ])
+    expect(code).toBe(0)
+    expect(stdoutText()).toContain("Nothing to install")
+    expect(stdoutText()).toContain("Google Analytics — index.html (existing snippet)")
+    expect(readFileSync(join(root, "index.html"), "utf8")).toBe(before)
+    expect(existsSync(join(root, ".infinite", "install.json"))).toBe(false)
+  })
+
+  it("--infinite-autocapture off reaches the runtime; on (and absent) leave the 0.6.2 config", async () => {
+    const baseArgs = (root: string) => [
+      "install",
+      "--root", root,
+      "--workspace", "ws_test",
+      "--yes",
+      "--infinite-site-source-key", "site_public_123",
+      "--infinite-production-host", "example.com",
+      "--infinite-static-proxy", "vercel",
+      "--infinite-consent-mode", "not-required"
+    ]
+
+    const offRoot = copyFixture("static-html-basic")
+    expect(await runCli([...baseArgs(offRoot), "--infinite-autocapture", "off"])).toBe(0)
+    expect(indexHtml(offRoot)).toContain('"autocapture":false')
+
+    const onRoot = copyFixture("static-html-basic")
+    expect(await runCli([...baseArgs(onRoot), "--infinite-autocapture", "on"])).toBe(0)
+    expect(indexHtml(onRoot)).not.toContain('"autocapture"')
+
+    const defaultRoot = copyFixture("static-html-basic")
+    expect(await runCli(baseArgs(defaultRoot))).toBe(0)
+    expect(indexHtml(defaultRoot)).not.toContain('"autocapture"')
+  })
+
+  it("rejects an --infinite-autocapture value other than on|off", async () => {
+    const root = copyFixture("static-html-basic")
+    const code = await runCli(["plan", "--root", root, "--infinite-site-source-key", "site_public_123", "--infinite-autocapture", "maybe"])
+    expect(code).toBe(1)
+    expect(errorSpy.mock.calls.map((c) => String(c[0]))).toContain(
+      "--infinite-autocapture currently supports only: on, off"
+    )
   })
 
   it("explains the removed unsafe external-loader flags for one release", async () => {
