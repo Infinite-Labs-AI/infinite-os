@@ -281,7 +281,7 @@ where the site is **hosted** (`vercel.json` / `.vercel/project.json` / `@vercel/
 | Next.js, no middleware | Creates `middleware.ts` (`proxy.ts` on Next.js 16+) with the standard document matcher, wrapping nothing. |
 | Next.js, existing middleware | Inserts fenced `// infinite-tag:server-lane:start … :end` blocks that wrap the existing handler (its body is untouched) — only for shapes it recognizes and only when the matcher already lets every document through. Otherwise the file is left alone and the brief carries the exact addition. Recorded edits reverse byte-for-byte on `uninstall`. |
 | Any framework on **Vercel** (Vite, static, SvelteKit…) | Creates the root `middleware.ts` Vercel runs for [any framework](https://vercel.com/docs/routing-middleware), plus `lib/infinite-server-lane.ts`. The entry imports `@vercel/functions` (for `next()` and `waitUntil`), so the CLI and the brief name the one `npm install` to run. |
-| **Netlify** | Creates `netlify/edge-functions/infinite-server-lane.ts`, declared [in-file](https://docs.netlify.com/build/edge-functions/declarations/) with `export const config` — `netlify.toml` is never edited. |
+| **Netlify** | Creates `netlify/edge-functions/infinite-server-lane.ts`, declared [in-file](https://docs.netlify.com/build/edge-functions/declarations/) with `export const config` — `netlify.toml` is never edited. Assets are excluded per extension (Netlify's own `["/*.css", "/*.js"]` shape); a blanket `/*.*` would over-exclude, because URLPattern's wildcard is greedy across `/`. |
 | **Cloudflare Pages** | Creates [`functions/_middleware.ts`](https://developers.cloudflare.com/pages/functions/middleware/), reading its secret from `context.env`. A plain Worker (a `wrangler` config with a `main` entrypoint) gets the brief's Worker snippet instead — there is no file of ours to add safely. |
 | **Express / any Node server** | Creates `lib/infinite-server-lane.js`. Nothing auto-wires your server file: the brief names the exact `app.use(infiniteServerLane())` line and where it goes. |
 | No host signal | Writes the agent brief only; `server-lane --brief > INSTALL-SERVER-LANE.md` saves it anywhere. |
@@ -294,7 +294,12 @@ committed row, a captured payment, a served file), never from a click.
 
 If a file it would create already exists and Infinite does not manage it, that file is left alone
 and its exact content goes into the brief; an unmanaged `lib/infinite-server-lane.*` is a planning
-blocker rather than an overwrite.
+blocker rather than an overwrite. `uninstall` removes only the files it wrote and only the
+directories it had to create — a `netlify/` or `functions/` directory you already had stays.
+
+`--infinite-api-origin` (or `INFINITE_API_ORIGIN`) moves the **server** lane with the browser lane:
+the resolved origin is baked into every generated lane and outcome helper, printed in the brief, and
+used by `verify --server-lane` for the receipt route.
 
 Two environment variables, never written to files by infinite-tag: `INFINITE_SERVER_EVENT_SECRET`
 (minted once in the Infinite desktop → Site Analytics → Settings → Conversions → Server events) and

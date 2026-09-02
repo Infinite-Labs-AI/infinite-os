@@ -21,8 +21,24 @@ All notable changes to the `infinite-tag` npm package (`packages/instrument`). V
   exporting `postInfiniteOutcome({ type, path, eventId, accountKey, visitKeyInputs })`, so a Vercel
   `api/` function confirming a paid Stripe session reports a purchase in three lines, carrying the
   same `visitKey` as the page view. The brief gains a "Post a purchase from a server route" section.
-- **The pixel's collect path joins the skip list** in every generated lane and matcher, alongside
-  `/api/*`, `/_next/*`, `/_vercel/*`, prefetches, non-GETs, non-HTML and anything with an extension.
+- **The pixel's collect path joins the skip list** in every **non-Next** generated lane and matcher,
+  alongside `/api/*`, `/_next/*`, `/_vercel/*`, prefetches, non-GETs, non-HTML and anything with an
+  extension. The Next.js lane is unchanged and still byte-identical to earlier installs; adding the
+  collect path there would move bytes every Next customer already has, so it is a separate change.
+  The path is read from the artifact and defaults to `DEFAULT_INFINITE_COLLECT_PATH`, never a copy.
+- **`--infinite-api-origin` now moves the server lane too.** The override used to re-point only the
+  browser proxy, so a founder who set it would have had a browser lane on one host and a server lane
+  on the default one. The resolved origin now flows into every generated lane (Next included), both
+  outcome helpers, the brief's transport and verify sections, and `verify --server-lane`'s receipt
+  URL. With no override every generated file is byte-identical to before.
+- **Uninstall prunes only directories the lane created.** `serverLane.createdDirs` records them (and
+  carries across re-runs), so a `netlify/` or `functions/` directory the customer already had — for
+  `netlify/`, the very evidence that picked the host — is never removed.
+- **Netlify's asset exclusion is per-extension, not `/*.*`.** `excludedPath` takes URLPattern
+  expressions and its wildcard is greedy across `/`, so `/*.*` would have excluded any path with a
+  dot at any depth, silently dropping a real page like `/v1.0/pricing`. The declaration now lists the
+  extensions Netlify's own example uses; it can only under-exclude, and correctness stays in
+  `isInfiniteDocumentRequest`.
 - Next.js installs are byte-identical: hosting detection never changes that lane.
 - A file infinite-tag would create but does not manage is left alone, with its exact content in the
   brief; an unmanaged `lib/infinite-server-lane.*` is a planning blocker, never an overwrite.
