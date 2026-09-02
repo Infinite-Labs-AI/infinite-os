@@ -602,11 +602,11 @@ describe("live provider clients", () => {
       });
 
       expect(urls.some((url) => url.includes("starting_after=in_1"))).toBe(true);
-      expect(urls.some((url) => url.includes("/v1/subscriptions"))).toBe(true);
       // testConnection now runs the connect-time permission probe FIRST, which reads one page of
       // /v1/customers, /v1/events, /v1/invoices and /v1/subscriptions with no expands. The LIST
       // assertions below are about the EXTRACT's calls, so select the expanded ones.
       const listUrls = urls.filter((url) => url.includes("expand"));
+      expect(listUrls.some((url) => url.includes("/v1/subscriptions"))).toBe(true);
       const invoiceListUrl = new URL(listUrls.find((url) => url.includes("/v1/invoices?")) ?? "");
       expect(invoiceListUrl.searchParams.getAll("expand[]")).toEqual(["data.customer"]);
       const subscriptionListUrl = new URL(listUrls.find((url) => url.includes("/v1/subscriptions?")) ?? "");
