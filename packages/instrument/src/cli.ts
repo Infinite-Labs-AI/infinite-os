@@ -530,6 +530,13 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
       return 0
     }
 
+    // Explicit (flag or env) API-origin override only; absent means the artifact keeps its own
+    // recorded origin, or the default. Validated here so a bad env value fails before planning.
+    const infiniteApiOrigin =
+      parsed.infiniteApiOrigin !== undefined || process.env.INFINITE_API_ORIGIN?.trim()
+        ? resolveInfiniteApiOrigin({ flag: parsed.infiniteApiOrigin, env: process.env })
+        : undefined
+
     let artifacts = resolveWorkspaceArtifacts(root, {
       artifactFile: parsed.artifactFile,
       ga4MeasurementId: parsed.ga4MeasurementId,

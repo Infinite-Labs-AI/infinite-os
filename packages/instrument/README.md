@@ -326,17 +326,29 @@ when it answers 401/403/405/406/429 the failure names that first.
 
 ## Existing tags are adopted, not replaced
 
-`plan` walks the whole app root (every `.html/.tsx/.jsx/.ts/.js/.mjs/.cjs/.astro/.vue/.svelte`
-file outside `node_modules`, build output and dot-directories; capped at 2,000 files and 512 KB
-per file) for real provider signatures — the `gtag.js` loader or a `gtag(` call, `posthog.init(`,
-`twq(`, `fbq(` — and for Google Analytics served through a **Google Tag Manager** container
-(`gtm.js`, a `GTM-XXXXXX` id, or a bare `dataLayer.push(`). A requested provider that already
-exists is **adopted**: it is left byte-for-byte alone, dropped from the install set, listed under
+`plan` walks the whole app root for real provider signatures and **adopts** a requested provider
+that already exists: it is left byte-for-byte alone, dropped from the install set, listed under
 `adopted` in `--json` (`{ provider, via: "snippet" | "gtm", file }`) and under "Already on your
-site" in human output, and never installed a second time. A Tag Manager container only proves
-GA4 — a requested Meta or X pixel still installs beside it. When every requested provider already
-exists, nothing is written and no install record is created. Infinite's own managed files and
-`<!-- infinite:start -->` blocks are ignored by the scan, so a re-run never adopts itself.
+site" in human output, and never installed a second time. When every requested provider already
+exists, nothing is written and no install record is created.
+
+What counts as evidence (a false positive would silently drop a provider from the install, so the
+rules are deliberately narrow):
+
+| Provider | `via: "snippet"` | `via: "gtm"` |
+| --- | --- | --- |
+| GA4 | the `gtag.js` loader or a `gtag(` call; `@next/third-parties/google` `<GoogleAnalytics>`; `react-ga4` / `ReactGA.initialize(`; `vue-gtag`; `nuxt-gtag`; `@analytics/google-analytics` | the `gtm.js` loader; `dataLayer.push(` beside `googletagmanager.com`; a `gtmId` prop (`<GoogleTagManager gtmId="GTM-…">`); a quoted `GTM-…` id on a line that mentions gtm. **Never** a bare `GTM-XXXX` token or a bare `dataLayer.push(`. A Tag Manager container proves GA4 only — a requested Meta or X pixel still installs beside it. |
+| PostHog | `posthog.init(`, the `i.posthog.com` host, `posthog-js/react` `<PostHogProvider>`, `@posthog/nextjs` | — |
+| X | `twq(` or `static.ads-twitter.com` | — |
+| Meta | `fbevents.js`, `fbq(` or `connect.facebook.net` | — |
+
+The walk reads `.html/.htm/.tsx/.jsx/.ts/.js/.mjs/.cjs/.astro/.vue/.svelte` files, capped at
+2,000 files and 512 KB per file. It skips `node_modules`, `.git`, `.next`, `dist`, `build`, `out`,
+`.vercel`, `coverage`, `public`, `static`, `__tests__`, `__mocks__`, `.storybook` and `emails`,
+plus `*.d.ts`, `*.test.*`, `*.spec.*`, `*.stories.*` and `*.min.js` files (type declarations,
+mocks and minified vendor bundles are not installs). Infinite's own managed files and
+`<!-- infinite:start -->` blocks are ignored, so a re-run never adopts itself. If a hit is wrong,
+delete the file it names (`file` in the `adopted` entry) or move it under a skipped directory.
 
 ## Proxy Matrix
 
