@@ -9,14 +9,17 @@
 // Contract values (URL, header names, env names, bucket size, bot list, skip prefixes) are
 // interpolated from helpers.ts / workspace-artifacts.ts, exactly as runtime-source.ts and
 // snippets.ts do, so no generated file can drift from the Node recipe.
-import { readFileSync } from "node:fs"
+import { existsSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 
 import { isManagedInfiniteFile, managedFileBanner } from "../../frameworks/managed-files.js"
 import { fileExists } from "../../frameworks/shared.js"
 import { computeContentHash } from "../../manifest.js"
 import type { InstallManifest, ServerLaneMode } from "../../types.js"
-import { INFINITE_SERVER_EVENTS_DESTINATION } from "../../workspace-artifacts.js"
+import {
+  DEFAULT_INFINITE_COLLECT_PATH,
+  infiniteServerEventsDestination
+} from "../../workspace-artifacts.js"
 import {
   AUTOMATION_USER_AGENT_PATTERN,
   DOCUMENT_EVENT_ID_PREFIX,
@@ -68,6 +71,11 @@ export interface TargetBuildInput {
   productionHosts: string[]
   /** The Infinite pixel's same-origin collect path, excluded from the document lane. */
   collectPath?: string
+  /**
+   * The resolved `--infinite-api-origin` / `INFINITE_API_ORIGIN`. The generated lane posts here, so
+   * an override moves the SERVER lane with the browser lane instead of splitting them across hosts.
+   */
+  apiOrigin?: string
 }
 
 export interface ServerLaneTargetDefinition {
@@ -80,8 +88,6 @@ export interface ServerLaneTargetDefinition {
   build(input: TargetBuildInput, appRootAbsolute: string): Record<string, string>
   installPackages: string[]
 }
-
-export const DEFAULT_COLLECT_PATH = "/infinite/events/collect"
 
 /**
  * Decide create / keep / manual per file, exactly like the Next middleware planner:
@@ -160,6 +166,22 @@ export function planManagedFiles(
   return { files, assumptions, blockers }
 }
 
+/**
+ * The app-relative directories that do not exist yet but would have to, for `appRelativePath` to be
+ * written — shallowest first. Called BEFORE the write, so uninstall can prune exactly what the lane
+ * created and nothing the customer already had.
+ */
+export function missingAncestorDirectories(appRootAbsolute: string, appRelativePath: string): string[] {
+  const segments = appRelativePath.split("/").slice(0, -1)
+  const missing: string[] = []
+  let current = ""
+  for (const segment of segments) {
+    current = current === "" ? segment : `${current}/${segment}`
+    if (!existsSync(join(appRootAbsolute, current))) missing.push(current)
+  }
+  return missing
+}
+
 const SERVER_LANE_BRIEF_POINTER = "the brief carries the exact code to add by hand."
 
 function jsStringArray(values: string[]): string {
@@ -169,7 +191,7 @@ function jsStringArray(values: string[]): string {
 /** The skip list the generated lane uses: the shared non-document prefixes plus the pixel's collect path. */
 export function nonDocumentPrefixes(collectPath?: string): string[] {
   const prefixes: string[] = [...NON_DOCUMENT_PATH_PREFIXES]
-  const collect = (collectPath ?? DEFAULT_COLLECT_PATH).trim()
+  const collect = (collectPath ?? DEFAULT_INFINITE_COLLECT_PATH).trim()
   if (collect.startsWith("/") && !prefixes.some((prefix) => collect.startsWith(prefix))) {
     prefixes.push(collect)
   }
@@ -214,7 +236,7 @@ export function edgeLaneCoreSource(input: EdgeCoreInput): string {
   const bakedHosts = jsStringArray(
     input.productionHosts.map((host) => host.trim().toLowerCase()).filter(Boolean)
   )
-  return String.raw`const INFINITE_SERVER_EVENTS_URL = ${JSON.stringify(INFINITE_SERVER_EVENTS_DESTINATION)}
+  return String.raw`const INFINITE_SERVER_EVENTS_URL = ${JSON.stringify(infiniteServerEventsDestination(input.apiOrigin))}
 const INFINITE_SOURCE_KEY_FALLBACK = ${bakedSourceKey}
 const INFINITE_PRODUCTION_HOSTS: string[] = ${bakedHosts}
 const INFINITE_DELIVERY_TIMEOUT_MS = ${SERVER_LANE_DELIVERY_TIMEOUT_MS}
@@ -449,7 +471,7 @@ export function outcomeHelperSource(input: TargetBuildInput): string {
       "//",
       `// Secrets come from the environment only: ${SERVER_LANE_SECRET_ENV} + ${SERVER_LANE_SOURCE_KEY_ENV}.`
     ],
-    String.raw`const INFINITE_SERVER_EVENTS_URL = ${JSON.stringify(INFINITE_SERVER_EVENTS_DESTINATION)}
+    String.raw`const INFINITE_SERVER_EVENTS_URL = ${JSON.stringify(infiniteServerEventsDestination(input.apiOrigin))}
 const INFINITE_SOURCE_KEY_FALLBACK = ${bakedSourceKey}
 const INFINITE_DELIVERY_TIMEOUT_MS = ${SERVER_LANE_DELIVERY_TIMEOUT_MS}
 const INFINITE_VISIT_BUCKET_SECONDS = ${VISIT_BUCKET_SECONDS}

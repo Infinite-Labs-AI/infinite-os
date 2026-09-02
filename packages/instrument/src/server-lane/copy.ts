@@ -3,7 +3,10 @@
 // helpers.ts (recipe), runtime-source.ts (generated Next.js code), snippets.ts (reference
 // implementations), install.ts (files), verify.ts (network check).
 import type { ServerLaneMode } from "../types.js"
-import { INFINITE_SERVER_EVENTS_DESTINATION, INFINITE_SERVER_LANE_RECEIPT_URL } from "../workspace-artifacts.js"
+import {
+  infiniteServerEventsDestination,
+  infiniteServerLaneReceiptUrl
+} from "../workspace-artifacts.js"
 
 import {
   DOCUMENT_REQUEST_EVENT_NAME,
@@ -68,6 +71,8 @@ export interface ServerLaneBriefInput {
   productionHosts?: string[]
   /** Import specifier from the middleware to the managed module. */
   moduleImportPath?: string
+  /** The resolved `--infinite-api-origin`, so the brief's URLs match the code that was written. */
+  apiOrigin?: string
 }
 
 const DEFAULT_MODULE_IMPORT_PATH = "./lib/infinite-server-lane"
@@ -119,8 +124,8 @@ export const serverLaneCopy = {
 
   contractHeading: "The contract (implement exactly)",
   contract: {
-    transport: [
-      `**Transport.** Signed \`POST ${INFINITE_SERVER_EVENTS_DESTINATION}\` with \`content-type: application/json\`.`,
+    transport: (apiOrigin?: string) => [
+      `**Transport.** Signed \`POST ${infiniteServerEventsDestination(apiOrigin)}\` with \`content-type: application/json\`.`,
       `**Headers.** \`${SERVER_LANE_SOURCE_KEY_HEADER}: <site source key>\` and \`${SERVER_LANE_SIGNATURE_HEADER}: <lowercase hex HMAC-SHA256 of the RAW request body under the secret>\`. Sign the exact bytes you send.`,
       `**Environment.** \`${SERVER_LANE_SECRET_ENV}\` — the source's server-event secret, minted once in the Infinite desktop → Site Analytics → Settings → Conversions → Server events (shown once; store it only in your host's environment). \`${SERVER_LANE_SOURCE_KEY_ENV}\` — the public site source key (the same one the browser pixel uses).`
     ],
@@ -189,12 +194,12 @@ export const serverLaneCopy = {
   ],
 
   verifyHeading: "Verify",
-  verify: [
+  verify: (apiOrigin?: string) => [
     "Deploy with both environment variables set, then from any machine that has the secret:",
     "```",
     `${SERVER_LANE_SECRET_ENV}=<secret> ${SERVER_LANE_SOURCE_KEY_ENV}=site_… npx infinite-tag verify --server-lane https://<your-production-host>/`,
     "```",
-    `It loads the page once as \`infinite-tag-verify\` — a self-identified automation user agent, so the check records a flagged agent row and never a visitor in your own numbers — then polls Infinite's receipt endpoint (\`GET ${INFINITE_SERVER_LANE_RECEIPT_URL}?since=<iso>\`, same two source headers; the signature covers the raw query string, e.g. \`since=2026-08-18T20%3A00%3A00.000Z\`) for up to a minute and prints PASS with received / lastPath / lastReceivedAt, or FAIL with the most likely cause.`,
+    `It loads the page once as \`infinite-tag-verify\` — a self-identified automation user agent, so the check records a flagged agent row and never a visitor in your own numbers — then polls Infinite's receipt endpoint (\`GET ${infiniteServerLaneReceiptUrl(apiOrigin)}?since=<iso>\`, same two source headers; the signature covers the raw query string, e.g. \`since=2026-08-18T20%3A00%3A00.000Z\`) for up to a minute and prints PASS with received / lastPath / lastReceivedAt, or FAIL with the most likely cause.`,
     "That one request is real and is recorded — proving your middleware runs is the whole point — but it is filed as automation, so it stays out of visits and out of any human rate. If bot protection sits in front of the page it may refuse the check; allow the user agent, or load the page yourself while the check polls."
   ],
 
@@ -365,7 +370,7 @@ export function renderServerLaneBrief(input: ServerLaneBriefInput): string {
   lines.push(
     `## ${serverLaneCopy.contractHeading}`,
     "",
-    ...serverLaneCopy.contract.transport.flatMap((line) => [line, ""]),
+    ...serverLaneCopy.contract.transport(input.apiOrigin).flatMap((line) => [line, ""]),
     ...serverLaneCopy.contract.documentRequest,
     "",
     ...serverLaneCopy.contract.outcome,
@@ -381,7 +386,8 @@ export function renderServerLaneBrief(input: ServerLaneBriefInput): string {
       "ts",
       buildServerLaneModuleSource({
         siteSourceKey: input.siteSourceKey,
-        productionHosts: input.productionHosts
+        productionHosts: input.productionHosts,
+        ...(input.apiOrigin ? { apiOrigin: input.apiOrigin } : {})
       })
     ),
     "",
@@ -395,7 +401,7 @@ export function renderServerLaneBrief(input: ServerLaneBriefInput): string {
     "",
     `### ${serverLaneCopy.reference.node}`,
     "",
-    ...codeBlock("js", nodeHelperSnippet()),
+    ...codeBlock("js", nodeHelperSnippet(input.apiOrigin)),
     "",
     ...codeBlock("js", expressSnippet()),
     "",
@@ -405,7 +411,7 @@ export function renderServerLaneBrief(input: ServerLaneBriefInput): string {
     "",
     `### ${serverLaneCopy.reference.webCrypto}`,
     "",
-    ...codeBlock("js", webCryptoHelperSnippet()),
+    ...codeBlock("js", webCryptoHelperSnippet(input.apiOrigin)),
     "",
     `### ${serverLaneCopy.reference.cloudflare}`,
     "",
@@ -435,7 +441,7 @@ export function renderServerLaneBrief(input: ServerLaneBriefInput): string {
     "",
     `## ${serverLaneCopy.verifyHeading}`,
     "",
-    ...serverLaneCopy.verify,
+    ...serverLaneCopy.verify(input.apiOrigin),
     "",
     `## ${serverLaneCopy.doneHeading}`,
     "",

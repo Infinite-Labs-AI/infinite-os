@@ -77,8 +77,16 @@ function normalizeInfiniteApiOrigin(candidate: string): string {
  * outcome events here, and `verify --server-lane` reads the receipt from the sibling route.
  * Both ride the same source key + HMAC secret; neither is ever called from a browser.
  */
-export const INFINITE_SERVER_EVENTS_DESTINATION = `${INFINITE_API_ORIGIN}/api/analytics/events/server`
-export const INFINITE_SERVER_LANE_RECEIPT_URL = `${INFINITE_API_ORIGIN}/api/analytics/site/server-lane/receipt`
+export function infiniteServerEventsDestination(apiOrigin: string = INFINITE_API_ORIGIN): string {
+  return `${apiOrigin}/api/analytics/events/server`
+}
+
+export function infiniteServerLaneReceiptUrl(apiOrigin: string = INFINITE_API_ORIGIN): string {
+  return `${apiOrigin}/api/analytics/site/server-lane/receipt`
+}
+
+export const INFINITE_SERVER_EVENTS_DESTINATION = infiniteServerEventsDestination(INFINITE_API_ORIGIN)
+export const INFINITE_SERVER_LANE_RECEIPT_URL = infiniteServerLaneReceiptUrl(INFINITE_API_ORIGIN)
 
 /**
  * The browser-facing first-party path PostHog is served under when `--posthog-proxy` is on.

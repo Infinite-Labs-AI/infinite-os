@@ -80,9 +80,13 @@ export function uninstallInstallation(options: UninstallInstallationOptions): Un
     removeDirIfEmpty(dirname(manifestPath))
     // Also prune empty lib dirs left by adapter file removals
     const appRoot = manifest.appRoot === "." ? options.root : join(options.root, manifest.appRoot)
-    // Deepest first, so a directory the lane created only for its own file goes too.
-    for (const candidate of ["lib", "src/lib", "netlify/edge-functions", "netlify", "functions"]) {
+    for (const candidate of ["lib", "src/lib"]) {
       removeDirIfEmpty(join(appRoot, candidate))
+    }
+    // Deepest first, and ONLY directories the lane itself created: a `netlify/` or `functions/`
+    // directory the customer already had is their tree, not ours to remove.
+    for (const candidate of manifest.serverLane?.createdDirs ?? []) {
+      removeDirIfEmpty(join(options.root, candidate))
     }
   }
 

@@ -14,6 +14,7 @@ import { renderPreview } from "../../render.js"
 import type { WorkspaceInstallArtifacts } from "../../types.js"
 import { uninstallInstallation } from "../../uninstall.js"
 import { verifyInstallation } from "../../verify.js"
+import { INFINITE_SERVER_EVENTS_DESTINATION } from "../../workspace-artifacts.js"
 import { SERVER_LANE_BRIEF_FILE } from "../copy.js"
 
 import { CLOUDFLARE_MIDDLEWARE_PATH } from "./cloudflare.js"
@@ -130,6 +131,8 @@ describe("Vercel, any framework", () => {
     expect(apply.serverLane?.manifest).toEqual({
       mode: "vercel-middleware",
       created: [VERCEL_MODULE_PATH, VERCEL_OUTCOME_PATH, VERCEL_MIDDLEWARE_PATH],
+      // Only the directory the lane had to make; a `lib/` the repo already had would not be listed.
+      createdDirs: ["lib"],
       brief: SERVER_LANE_BRIEF_FILE
     })
 
@@ -284,6 +287,82 @@ describe("Netlify", () => {
       mode: "netlify-edge",
       targetEvidence: 'the "@netlify/functions" dependency'
     })
+  })
+})
+
+describe("directories the lane did not create", () => {
+  it("leaves a pre-existing empty netlify/ directory alone and prunes only netlify/edge-functions", () => {
+    // An empty `netlify/` IS the hosting evidence (hosting.ts), so deleting it on uninstall would
+    // both change a tree we never wrote and un-detect the host.
+    const root = copyFixture("vite-react-basic")
+    mkdirSync(join(root, "netlify"))
+    const original = snapshotTree(root)
+
+    const { apply } = planAndApply(root)
+    expect(apply.serverLane?.manifest.createdDirs).toEqual(["netlify/edge-functions", "lib"])
+
+    uninstallInstallation({ root, dryRun: false })
+    expectTreeEquals(root, original)
+    expect(existsSync(join(root, "netlify"))).toBe(true)
+    expect(existsSync(join(root, "netlify/edge-functions"))).toBe(false)
+  })
+
+  it("leaves a pre-existing empty functions/ directory alone", () => {
+    const root = viteOn({ "wrangler.toml": 'name = "app"\npages_build_output_dir = "dist"\n' })
+    mkdirSync(join(root, "functions"))
+    const { apply } = planAndApply(root)
+    expect(apply.serverLane?.manifest.createdDirs).not.toContain("functions")
+
+    uninstallInstallation({ root, dryRun: false })
+    expect(existsSync(join(root, "functions"))).toBe(true)
+    expect(existsSync(join(root, CLOUDFLARE_MIDDLEWARE_PATH))).toBe(false)
+  })
+
+  it("still prunes a functions/ directory it created itself", () => {
+    const root = viteOn({ "wrangler.toml": 'name = "app"\npages_build_output_dir = "dist"\n' })
+    const { apply } = planAndApply(root)
+    expect(apply.serverLane?.manifest.createdDirs).toContain("functions")
+    uninstallInstallation({ root, dryRun: false })
+    expect(existsSync(join(root, "functions"))).toBe(false)
+  })
+
+  it("remembers what it created across an idempotent re-run", () => {
+    const root = viteOn({ "netlify.toml": "[build]\n" })
+    planAndApply(root)
+    // Second run: the directories already exist, so only the carried-forward record can prune them.
+    const second = planAndApply(root)
+    expect(second.apply.changedFiles).toEqual([])
+    const createdDirs = readInstallManifest(root)?.serverLane?.createdDirs ?? []
+    expect([...createdDirs].sort()).toEqual(["lib", "netlify", "netlify/edge-functions"])
+    // Deepest first, or the parent is still non-empty when uninstall reaches it.
+    expect(createdDirs.indexOf("netlify/edge-functions")).toBeLessThan(createdDirs.indexOf("netlify"))
+    uninstallInstallation({ root, dryRun: false })
+    expect(existsSync(join(root, "netlify"))).toBe(false)
+  })
+})
+
+describe("--infinite-api-origin", () => {
+  it("moves the server lane, the outcome helper and the brief to the same host as the browser lane", () => {
+    const root = viteOn({ "vercel.json": "{}\n" })
+    const apiOrigin = "https://api.infinite.fast"
+    planAndApply(root, {
+      infinite: {
+        siteSourceKey: "site_public_test",
+        collectPath: "/infinite/ledger",
+        productionHosts: ["example.com"],
+        consentMode: "not_required",
+        apiOrigin
+      }
+    })
+    for (const path of [VERCEL_MODULE_PATH, VERCEL_OUTCOME_PATH]) {
+      const source = readFileSync(join(root, path), "utf8")
+      expect(source).toContain(`"${apiOrigin}/api/analytics/events/server"`)
+      expect(source).not.toContain(INFINITE_SERVER_EVENTS_DESTINATION)
+    }
+    const brief = readFileSync(join(root, SERVER_LANE_BRIEF_FILE), "utf8")
+    expect(brief).toContain(`POST ${apiOrigin}/api/analytics/events/server`)
+    expect(brief).toContain(`${apiOrigin}/api/analytics/site/server-lane/receipt`)
+    expect(brief).not.toContain(INFINITE_SERVER_EVENTS_DESTINATION)
   })
 })
 

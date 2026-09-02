@@ -57,7 +57,8 @@ function assertManifestConfined(root: string, manifest: InstallManifest): void {
     manifest.serverLane?.middleware,
     manifest.serverLane?.module,
     manifest.serverLane?.brief,
-    ...(manifest.serverLane?.created ?? [])
+    ...(manifest.serverLane?.created ?? []),
+    ...(manifest.serverLane?.createdDirs ?? [])
   ]) {
     if (relativePath !== undefined) {
       assertConfinedManifestFileEntry(root, relativePath)
@@ -98,11 +99,11 @@ function isServerLaneManifestShape(value: unknown): boolean {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false
   const candidate = value as Record<string, unknown>
   if (!SERVER_LANE_MODES.some((mode) => mode === candidate.mode)) return false
-  if (
-    candidate.created !== undefined &&
-    (!Array.isArray(candidate.created) || !candidate.created.every((entry) => typeof entry === "string"))
-  ) {
-    return false
+  for (const key of ["created", "createdDirs"] as const) {
+    const value = candidate[key]
+    if (value !== undefined && (!Array.isArray(value) || !value.every((entry) => typeof entry === "string"))) {
+      return false
+    }
   }
   return (["middleware", "module", "brief"] as const).every(
     (key) => candidate[key] === undefined || typeof candidate[key] === "string"
