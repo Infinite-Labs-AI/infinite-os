@@ -91,7 +91,7 @@ export type InfiniteConsentMode = "required" | "not_required"
 
 export interface InfinitePublicArtifact {
   siteSourceKey: string
-  collectPath: "/infinite/events/collect" | string
+  collectPath: "/infinite/ledger" | string
   productionHosts: string[]
   staticProxy?: "vercel"
   /** Optional for legacy artifact decoding; plans with an Infinite source require an explicit value. */
@@ -99,6 +99,9 @@ export interface InfinitePublicArtifact {
   /** The workspace's conversion destination for download-intent clicks. Absent = the platform
    *  default "/download" — must match the source's cloud config or the collect boundary rejects. */
   downloadDestinationPath?: string
+  /** The API origin the same-origin route proxies to. Absent = INFINITE_API_ORIGIN. Never reaches
+   *  the browser runtime — it only shapes the Vercel/Next rewrite destination. */
+  apiOrigin?: string
 }
 
 export interface InfiniteBrowserConfig {

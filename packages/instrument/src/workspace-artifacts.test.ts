@@ -8,9 +8,15 @@ import { applyInstallation } from "./apply.js"
 import { inspectWorkspace } from "./inspect.js"
 import { planInstallation } from "./plan.js"
 import {
+  applyInfiniteApiOrigin,
   applyPosthogProxy,
+  DEFAULT_INFINITE_COLLECT_PATH,
   DEFAULT_POSTHOG_PROXY_PATH,
   discoverWorkspaceArtifacts,
+  INFINITE_API_ORIGIN,
+  infiniteCollectDestination,
+  infiniteProxySpec,
+  resolveInfiniteApiOrigin,
   resolveWorkspaceArtifacts
 } from "./workspace-artifacts.js"
 
@@ -364,5 +370,117 @@ describe("applyPosthogProxy", () => {
     const result = applyPosthogProxy(onlyGa4, { proxy: true })
     expect(result).toEqual(onlyGa4)
     expect(result.posthog).toBeUndefined()
+  })
+})
+
+describe("Infinite API origin + default collect path", () => {
+  it("defaults the same-origin collect path to /infinite/ledger", () => {
+    expect(DEFAULT_INFINITE_COLLECT_PATH).toBe("/infinite/ledger")
+  })
+
+  it("resolves the default origin when neither flag nor env is set", () => {
+    expect(resolveInfiniteApiOrigin({})).toBe("https://api.ultima.inc")
+    expect(resolveInfiniteApiOrigin({ env: {} })).toBe(INFINITE_API_ORIGIN)
+  })
+
+  it("reads INFINITE_API_ORIGIN from the env", () => {
+    expect(
+      resolveInfiniteApiOrigin({ env: { INFINITE_API_ORIGIN: "https://api.infinite.fast" } })
+    ).toBe("https://api.infinite.fast")
+  })
+
+  it("lets the flag beat the env", () => {
+    expect(
+      resolveInfiniteApiOrigin({
+        flag: "https://flag.example",
+        env: { INFINITE_API_ORIGIN: "https://env.example" }
+      })
+    ).toBe("https://flag.example")
+  })
+
+  it("strips a trailing slash and ignores a blank env value", () => {
+    expect(resolveInfiniteApiOrigin({ flag: "https://api.infinite.fast/" })).toBe(
+      "https://api.infinite.fast"
+    )
+    expect(resolveInfiniteApiOrigin({ env: { INFINITE_API_ORIGIN: "   " } })).toBe(INFINITE_API_ORIGIN)
+  })
+
+  it.each([
+    ["a path", "https://x.test/path"],
+    ["a query", "https://x.test/?a=1"],
+    ["http", "http://x.test"],
+    ["credentials", "https://user:pw@x.test"],
+    ["garbage", "not a url"]
+  ])("rejects %s with the documented error", (_label, flag) => {
+    expect(() => resolveInfiniteApiOrigin({ flag })).toThrow(
+      "--infinite-api-origin must be an https origin with no path"
+    )
+  })
+
+  it("derives the collect destination from the origin", () => {
+    expect(infiniteCollectDestination("https://api.infinite.fast")).toBe(
+      "https://api.infinite.fast/api/analytics/events/collect"
+    )
+  })
+
+  it("threads --infinite-api-origin into the Infinite artifact as apiOrigin", () => {
+    const artifacts = resolveWorkspaceArtifacts(".", {
+      infiniteSiteSourceKey: "site_public_123",
+      infiniteProductionHosts: ["example.com"],
+      infiniteConsentMode: "not_required",
+      infiniteApiOrigin: "https://api.infinite.fast"
+    })
+    expect(artifacts.infinite).toEqual({
+      siteSourceKey: "site_public_123",
+      collectPath: "/infinite/ledger",
+      productionHosts: ["example.com"],
+      consentMode: "not_required",
+      apiOrigin: "https://api.infinite.fast"
+    })
+    expect(infiniteProxySpec(artifacts.infinite)).toEqual({
+      path: "/infinite/ledger",
+      destination: "https://api.infinite.fast/api/analytics/events/collect"
+    })
+  })
+
+  it("keeps the recorded collect path of an existing artifact file (no silent migration)", () => {
+    const root = makeTempDir("legacy-collect-path")
+    const artifactFile = join(root, "artifacts.json")
+    writeFileSync(
+      artifactFile,
+      JSON.stringify({
+        infinite: {
+          siteSourceKey: "site_public_123",
+          collectPath: "/infinite/events/collect",
+          productionHosts: ["example.com"],
+          consentMode: "not_required"
+        }
+      })
+    )
+    const artifacts = resolveWorkspaceArtifacts(root, { artifactFile })
+    expect(artifacts.infinite?.collectPath).toBe("/infinite/events/collect")
+    expect(artifacts.infinite?.apiOrigin).toBeUndefined()
+    expect(infiniteProxySpec(artifacts.infinite)).toEqual({
+      path: "/infinite/events/collect",
+      destination: "https://api.ultima.inc/api/analytics/events/collect"
+    })
+  })
+
+  it("applyInfiniteApiOrigin layers onto a discovered Infinite artifact and never fabricates one", () => {
+    const withInfinite = applyInfiniteApiOrigin(
+      {
+        infinite: {
+          siteSourceKey: "site_public_123",
+          collectPath: "/infinite/ledger",
+          productionHosts: ["example.com"],
+          consentMode: "not_required"
+        }
+      },
+      { origin: "https://api.infinite.fast" }
+    )
+    expect(withInfinite.infinite?.apiOrigin).toBe("https://api.infinite.fast")
+
+    const without = applyInfiniteApiOrigin({ ga4: { measurementId: "G-1" } }, { origin: "https://api.infinite.fast" })
+    expect(without.infinite).toBeUndefined()
   })
 })

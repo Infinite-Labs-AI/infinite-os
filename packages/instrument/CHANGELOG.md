@@ -3,6 +3,14 @@
 All notable changes to the `infinite-tag` npm package (`packages/instrument`). Versions before
 0.5.0 are recorded in git history only (`git log -- packages/instrument`).
 
+## Unreleased
+
+- **Default same-origin collect path is now `/infinite/ledger`.** The old `/infinite/events/collect`
+  wording matches privacy blocklists; an artifact or install that already records a path keeps it
+  (no silent migration). `--infinite-api-origin <https://host>` / `INFINITE_API_ORIGIN` override the
+  API host the route proxies to (default `https://api.ultima.inc`); the value is validated as an
+  https origin with no path and only ever shapes the Vercel/Next rewrite destination.
+
 ## 0.6.2 — 2026-09-02
 
 - **Precise Stripe checkout bucketing.** Hosted Stripe payment surfaces now emit structural

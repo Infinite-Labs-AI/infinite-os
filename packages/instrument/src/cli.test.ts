@@ -38,6 +38,21 @@ function stdoutText(): string {
   return logSpy.mock.calls.map((c) => String(c[0])).join("\n")
 }
 
+/** The most recent JSON document printed to stdout (for tests that run the CLI more than once). */
+function lastStdoutJson(): string {
+  const parseable = logSpy.mock.calls
+    .map((c) => String(c[0]))
+    .filter((m) => {
+      try {
+        JSON.parse(m)
+        return true
+      } catch {
+        return false
+      }
+    })
+  return parseable[parseable.length - 1] ?? ""
+}
+
 describe("runCli", () => {
   it("apply without --yes returns 1 with approval message", async () => {
     const root = copyFixture("static-html-basic")
@@ -216,7 +231,8 @@ describe("runCli", () => {
     const logMessages = logSpy.mock.calls.map((c) => String(c[0]))
     const helpText = logMessages.join("\n")
     expect(helpText).toContain("uninstall")
-    expect(helpText).toContain("Defaults to /infinite/events/collect")
+    expect(helpText).toContain("Defaults to /infinite/ledger")
+    expect(helpText).toContain("--infinite-api-origin <https://host>")
     expect(helpText).toContain("--infinite-download-destination-path <path>")
     expect(helpText).toContain("--infinite-consent-mode <required|not-required>")
     expect(helpText).toContain("No default")
@@ -493,13 +509,88 @@ describe("Infinite source handoff + meta providers", () => {
     expect(code).toBe(0)
     const html = indexHtml(root)
     expect(html).toContain('"siteSourceKey":"site_public_123"')
-    expect(html).toContain("/infinite/events/collect")
+    expect(html).toContain("/infinite/ledger")
+    expect(html).not.toContain("/infinite/events/collect")
     expect(html).not.toContain("app.ultima.inc")
     const vercel = JSON.parse(readFileSync(join(root, "vercel.json"), "utf8"))
     expect(vercel.rewrites).toContainEqual({
-      source: "/infinite/events/collect",
+      source: "/infinite/ledger",
       destination: "https://api.ultima.inc/api/analytics/events/collect"
     })
+  })
+
+  it("--infinite-api-origin points the Vercel rewrite at the override host", async () => {
+    const root = copyFixture("static-html-basic")
+    const code = await runCli([
+      "install",
+      "--root", root,
+      "--workspace", "ws_test",
+      "--yes",
+      "--infinite-site-source-key", "site_public_123",
+      "--infinite-production-host", "example.com",
+      "--infinite-static-proxy", "vercel",
+      "--infinite-consent-mode", "required",
+      "--infinite-api-origin", "https://api.infinite.fast"
+    ])
+    expect(code).toBe(0)
+    const vercel = JSON.parse(readFileSync(join(root, "vercel.json"), "utf8"))
+    expect(vercel.rewrites).toContainEqual({
+      source: "/infinite/ledger",
+      destination: "https://api.infinite.fast/api/analytics/events/collect"
+    })
+    expect(JSON.stringify(vercel)).not.toContain("api.ultima.inc")
+  })
+
+  it("INFINITE_API_ORIGIN in the env overrides the default and the flag beats it", async () => {
+    const previous = process.env.INFINITE_API_ORIGIN
+    process.env.INFINITE_API_ORIGIN = "https://env.example"
+    try {
+      const root = copyFixture("static-html-basic")
+      const code = await runCli([
+        "plan",
+        "--root", root,
+        "--json",
+        "--infinite-site-source-key", "site_public_123",
+        "--infinite-production-host", "example.com",
+        "--infinite-static-proxy", "vercel",
+        "--infinite-consent-mode", "required"
+      ])
+      expect(code).toBe(0)
+      expect(lastStdoutJson()).toContain("https://env.example/api/analytics/events/collect")
+
+      const flagged = await runCli([
+        "plan",
+        "--root", root,
+        "--json",
+        "--infinite-site-source-key", "site_public_123",
+        "--infinite-production-host", "example.com",
+        "--infinite-static-proxy", "vercel",
+        "--infinite-consent-mode", "required",
+        "--infinite-api-origin", "https://flag.example"
+      ])
+      expect(flagged).toBe(0)
+      const text = lastStdoutJson()
+      expect(text).toContain("https://flag.example/api/analytics/events/collect")
+      expect(text).not.toContain("env.example")
+    } finally {
+      if (previous === undefined) delete process.env.INFINITE_API_ORIGIN
+      else process.env.INFINITE_API_ORIGIN = previous
+    }
+  })
+
+  it("rejects an --infinite-api-origin that carries a path", async () => {
+    const root = copyFixture("static-html-basic")
+    const code = await runCli([
+      "plan",
+      "--root", root,
+      "--json",
+      "--infinite-site-source-key", "site_public_123",
+      "--infinite-api-origin", "https://api.infinite.fast/api"
+    ])
+    expect(code).toBe(1)
+    expect(errorSpy.mock.calls.map((c) => String(c[0]))).toContain(
+      "--infinite-api-origin must be an https origin with no path"
+    )
   })
 
   it("explains the removed unsafe external-loader flags for one release", async () => {

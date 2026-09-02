@@ -89,7 +89,7 @@ describe("built CLI e2e — multipage, all five providers", () => {
       // shared runtime — present on EVERY page, self-contained and source-bound
       expect(html).toContain("data-infinite-runtime")
       expect(html).toContain("site_public_e2e")
-      expect(html).toContain("/infinite/events/collect")
+      expect(html).toContain("/infinite/ledger")
       expect(html).not.toContain("app.ultima.inc")
       expect(html).not.toMatch(/\/tracking\/|\/sdk\//)
       // ga4 / posthog / x

@@ -1,4 +1,5 @@
 import { renderInfiniteBrowserTag } from "../runtime/infinite-browser.js"
+import { DEFAULT_INFINITE_COLLECT_PATH, resolveInfiniteApiOrigin } from "../workspace-artifacts.js"
 import type {
   InfiniteBrowserConfig,
   InfinitePublicArtifact,
@@ -27,7 +28,7 @@ export const infiniteProviderAdapter: ProviderAdapter = {
     // no longer consulted for provider coupling.
 
     const blockers: string[] = []
-    let collectPath = "/infinite/events/collect"
+    let collectPath: string = DEFAULT_INFINITE_COLLECT_PATH
     let downloadDestinationPath: string | undefined
     let productionHosts: string[] = []
     const configuredProductionHosts =
@@ -45,6 +46,14 @@ export const infiniteProviderAdapter: ProviderAdapter = {
       else collectPath = normalizedPath.path
       if (infinite.staticProxy !== undefined && infinite.staticProxy !== "vercel") {
         blockers.push("Infinite staticProxy must be vercel when supplied.")
+      }
+      if (infinite.apiOrigin !== undefined) {
+        // An artifact FILE can carry apiOrigin unvalidated; the CLI flag/env were validated at parse.
+        try {
+          resolveInfiniteApiOrigin({ flag: infinite.apiOrigin })
+        } catch (error) {
+          blockers.push(error instanceof Error ? error.message : String(error))
+        }
       }
       if (infinite.downloadDestinationPath !== undefined) {
         const normalizedDestination = normalizeInfiniteDownloadDestinationPath(
