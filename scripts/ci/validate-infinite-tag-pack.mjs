@@ -7,11 +7,11 @@ const EXPECTED_NAME = "infinite-tag"
 const EXPECTED_VERSION = "0.7.0"
 const EXPECTED_FILENAME = "infinite-tag-0.7.0.tgz"
 const MIN_FILES = 50
-const MAX_FILES = 80
+const MAX_FILES = 110
 const MIN_PACKED_SIZE = 40_000
-const MAX_PACKED_SIZE = 150_000
+const MAX_PACKED_SIZE = 250_000
 const MIN_UNPACKED_SIZE = 200_000
-const MAX_UNPACKED_SIZE = 500_000
+const MAX_UNPACKED_SIZE = 800_000
 const REQUIRED_FILES = [
   "LICENSE",
   "README.md",

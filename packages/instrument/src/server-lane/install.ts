@@ -27,7 +27,17 @@ import {
   type ServerLaneBriefStatus
 } from "./copy.js"
 import { SERVER_LANE_SECRET_ENV, SERVER_LANE_SOURCE_KEY_ENV } from "./helpers.js"
+import { detectHostingWithEvidence, isCloudflarePagesProject, type ServerLaneHosting } from "./hosting.js"
 import { patchExistingMiddleware } from "./middleware-patch.js"
+import { cloudflarePagesTarget } from "./targets/cloudflare.js"
+import { netlifyTarget } from "./targets/netlify.js"
+import { nodeMountSnippet, nodeTarget } from "./targets/node.js"
+import {
+  DEFAULT_COLLECT_PATH,
+  planManagedFiles,
+  type ServerLaneTargetDefinition
+} from "./targets/shared.js"
+import { vercelAnyTarget } from "./targets/vercel-any.js"
 import {
   SERVER_LANE_FENCE_START,
   buildCreatedMiddlewareSource,
@@ -79,6 +89,88 @@ export function nextMajorVersion(appRootAbsolute: string): number | null {
   return match ? Number(match[1]) : null
 }
 
+/**
+ * The lane target for a non-Next framework on a known host. Next.js keeps its own path (its
+ * middleware runs on every host), so this only ever answers for the other stacks.
+ */
+export function selectServerLaneTarget(
+  hosting: ServerLaneHosting,
+  appRootAbsolute: string
+): ServerLaneTargetDefinition | null {
+  switch (hosting) {
+    case "vercel":
+      return vercelAnyTarget
+    case "netlify":
+      return netlifyTarget
+    case "cloudflare":
+      // A plain Worker has no file of ours to write; the brief carries its snippet instead.
+      return isCloudflarePagesProject(appRootAbsolute) ? cloudflarePagesTarget : null
+    case "node":
+      return nodeTarget
+    default:
+      return null
+  }
+}
+
+export function serverLaneTargetForMode(mode: string): ServerLaneTargetDefinition | null {
+  for (const target of [vercelAnyTarget, netlifyTarget, cloudflarePagesTarget, nodeTarget]) {
+    if (target.mode === mode) return target
+  }
+  return null
+}
+
+/** Non-Next stacks: pick a target from the HOST, or fall back to the brief. */
+function planHostedServerLane(
+  input: PlanServerLaneInput,
+  base: { briefPath: string; envKeys: string[]; assumptions: string[]; blockers: string[] }
+): ServerLanePlanDraft {
+  const hosting = detectHostingWithEvidence(input.appRootAbsolute)
+  const target = selectServerLaneTarget(hosting.hosting, input.appRootAbsolute)
+  if (!target) {
+    return {
+      mode: "brief",
+      briefPath: base.briefPath,
+      envKeys: base.envKeys,
+      files: [],
+      assumptions: [
+        ...base.assumptions,
+        "The server lane is not patched automatically for this stack; the agent brief is the install."
+      ],
+      blockers: base.blockers
+    }
+  }
+
+  const planned = planManagedFiles(target.files(input.appRootAbsolute), {
+    appRootAbsolute: input.appRootAbsolute,
+    previousManifest: input.previousManifest,
+    toRootRelative: (appRelative) => normalizeAppRelativePath(input.appRoot, appRelative)
+  })
+  const created = planned.files.map((file) => ({
+    path: normalizeAppRelativePath(input.appRoot, file.path),
+    role: file.role,
+    action: file.action,
+    ...(file.reason ? { reason: file.reason } : {})
+  }))
+  const assumptions = [
+    ...base.assumptions,
+    `${target.label} was chosen${hosting.evidence ? ` because this repo has ${hosting.evidence}` : ""}.`,
+    ...planned.assumptions
+  ]
+
+  return {
+    mode: target.mode,
+    briefPath: base.briefPath,
+    created,
+    targetLabel: target.label,
+    ...(hosting.evidence ? { targetEvidence: hosting.evidence } : {}),
+    ...(target.installPackages.length > 0 ? { installPackages: [...target.installPackages] } : {}),
+    envKeys: base.envKeys,
+    files: created.filter((file) => file.action !== "manual").map((file) => file.path),
+    assumptions,
+    blockers: [...base.blockers, ...planned.blockers]
+  }
+}
+
 export function planServerLane(input: PlanServerLaneInput): ServerLanePlanDraft {
   const briefPath = normalizeAppRelativePath(input.appRoot, SERVER_LANE_BRIEF_FILE)
   const envKeys = [...SERVER_LANE_ENV_KEYS]
@@ -86,16 +178,7 @@ export function planServerLane(input: PlanServerLaneInput): ServerLanePlanDraft 
   const blockers: string[] = []
 
   if (!isNextFramework(input.framework)) {
-    return {
-      mode: "brief",
-      briefPath,
-      envKeys,
-      files: [],
-      assumptions: [
-        "The server lane is not patched automatically for this stack; the agent brief is the install."
-      ],
-      blockers
-    }
+    return planHostedServerLane(input, { briefPath, envKeys, assumptions, blockers })
   }
 
   const existingMiddleware = firstExistingPath(input.appRootAbsolute, [...NEXT_MIDDLEWARE_CANDIDATES])
@@ -306,6 +389,84 @@ export function applyServerLane(input: ApplyServerLaneInput): ApplyServerLaneRes
     }
   }
 
+  const target = serverLaneTargetForMode(input.plan.mode)
+  if (target && input.plan.created) {
+    const built = target.build(
+      {
+        siteSourceKey,
+        productionHosts,
+        collectPath: input.artifacts.infinite?.collectPath ?? DEFAULT_COLLECT_PATH
+      },
+      appRootAbsolute
+    )
+    const created: string[] = []
+    const manual: Array<{ path: string; reason: string; contents: string }> = []
+
+    for (const file of input.plan.created) {
+      const appRelative = toAppRelative(input.appRoot, file.path)
+      const contents = built[appRelative]
+      if (contents === undefined) {
+        throw new Error(`The ${input.plan.mode} server lane has no generated source for ${file.path}.`)
+      }
+
+      switch (file.action) {
+        case "create": {
+          if (hasExistingUnmanagedFile(appRootAbsolute, appRelative)) {
+            throw new Error(`Refusing to overwrite existing unmanaged ${file.path}.`)
+          }
+          const previous = input.previousManifest?.configOwnership?.[file.path]
+          const current = existsSync(join(appRootAbsolute, appRelative))
+            ? readFileSync(join(appRootAbsolute, appRelative), "utf8")
+            : null
+          if (
+            current !== null &&
+            previous?.kind === "created" &&
+            previous.installedHash !== computeContentHash(current)
+          ) {
+            throw new Error(
+              `Refusing to regenerate ${file.path} because it changed after Infinite recorded its ownership hash.`
+            )
+          }
+          if (writeFileIfChanged(appRootAbsolute, appRelative, contents)) {
+            changedFiles.push(file.path)
+          }
+          configOwnership[file.path] = { kind: "created", installedHash: computeContentHash(contents) }
+          created.push(file.path)
+          break
+        }
+        case "keep": {
+          const previous = input.previousManifest?.configOwnership?.[file.path]
+          if (previous) {
+            configOwnership[file.path] = previous
+            created.push(file.path)
+            warnings.push(
+              `${file.path} was edited after infinite-tag created it; uninstall will refuse to reverse it automatically.`
+            )
+          }
+          break
+        }
+        case "manual": {
+          warnings.push(
+            `${file.path} was left untouched: ${file.reason ?? "Infinite does not manage it"}. The brief carries the exact file to add.`
+          )
+          manual.push({ path: file.path, reason: file.reason ?? "Infinite does not manage it", contents })
+          break
+        }
+      }
+    }
+
+    if (created.length > 0) manifest.created = created
+    status = {
+      kind: "target",
+      mode: input.plan.mode,
+      label: target.label,
+      created,
+      manual,
+      installPackages: input.plan.installPackages ?? [],
+      ...(input.plan.mode === "node-module" ? { mount: nodeMountSnippet() } : {})
+    }
+  }
+
   const brief = renderServerLaneBrief({
     status,
     siteSourceKey,
@@ -379,6 +540,27 @@ export function reverseServerLane(input: ReverseServerLaneInput): ReverseServerL
         throw new Error(`Unexpected ownership kind for ${lane.middleware}.`)
       }
     }
+  }
+
+  for (const created of lane.created ?? []) {
+    const absolute = join(input.root, created)
+    const ownership = input.manifest.configOwnership?.[created]
+    if (!existsSync(absolute)) {
+      result.warnings.push(`Managed file already absent: ${created}`)
+      continue
+    }
+    if (!ownership || ownership.kind !== "created") {
+      throw new Error(
+        `Refusing to uninstall ${created} because the manifest has no ownership record for it.`
+      )
+    }
+    if (ownership.installedHash !== computeContentHash(readFileSync(absolute, "utf8"))) {
+      throw new Error(
+        `Refusing to uninstall ${created} because it changed after installation. Remove the infinite-tag file by hand.`
+      )
+    }
+    if (!input.dryRun) rmSync(absolute)
+    result.removedFiles.push(created)
   }
 
   if (lane.module) {

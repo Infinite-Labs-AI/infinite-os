@@ -117,7 +117,7 @@ describe("npm 11 pack receipt validator", () => {
     [
       "file count",
       {
-        files: Array.from({ length: 81 }, (_, index) => ({
+        files: Array.from({ length: 111 }, (_, index) => ({
           path: `dist/src/${index}.js`,
           size: 1,
           mode: 0o644

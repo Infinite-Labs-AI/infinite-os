@@ -30,6 +30,7 @@ const signatureHeader = JSON.stringify(SERVER_LANE_SIGNATURE_HEADER)
 // Snippet import lines live in constants so the package self-containment scanner
 // (package-shape.test.ts) never mistakes them for this package's own imports.
 const EXPRESS_IMPORT = 'import express from "express"'
+const OUTCOME_HELPER_IMPORT = 'import { postInfiniteOutcome } from "../lib/infinite-outcome"'
 
 /** infinite-server-lane.mjs — the generic Node helper (Express, Fastify, Koa, Hono-on-Node, plain http). */
 export function nodeHelperSnippet(): string {
@@ -308,6 +309,31 @@ void sendInfiniteServerEvent({
     visitKey: infiniteVisitKey({ clientIp: req.ip, userAgent: req.headers["user-agent"] }) // same-lane attribution
   }
 })
+`
+}
+
+/**
+ * Reporting an outcome from a serverless route with the generated `lib/infinite-outcome` helper —
+ * the three lines a Vercel `api/` function needs.
+ */
+export function outcomeRouteSnippet(): string {
+  return String.raw`// api/checkout-status.ts — a Vercel serverless function confirming a paid session.
+${OUTCOME_HELPER_IMPORT}
+
+export default async function handler(request: Request): Promise<Response> {
+  const session = await stripe.checkout.sessions.retrieve(new URL(request.url).searchParams.get("id"))
+  if (session.payment_status !== "paid") return Response.json({ paid: false })
+
+  await postInfiniteOutcome({
+    type: "purchase",              // the exact name from Infinite -> Conversions
+    path: "/checkout",             // pathname only
+    eventId: "purchase:" + session.id, // stable, so a retry dedupes
+    accountKey: session.customer,  // optional; hashed at rest by Infinite
+    visitKeyInputs: request        // same visitKey as the page view -> same-lane conversion rate
+  })
+
+  return Response.json({ paid: true })
+}
 `
 }
 
