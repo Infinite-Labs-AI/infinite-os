@@ -133,6 +133,8 @@
             "type": "object",
             "required": ["destination_path"],
             "properties": {
+              "cta_id": { "$ref": "#/properties/properties/properties/cta_id" },
+              "cta_location": { "$ref": "#/properties/properties/properties/cta_location" },
               "destination_path": { "$ref": "#/properties/properties/properties/destination_path" }
             }
           }
@@ -140,5 +142,5 @@
       }
     }
   ],
-  "$comment": "site_page_view properties.nav (infinite-tag 0.6.0): \"navigate\" for the initial document load, \"history\" for a History-API route change — a bounded enum so the cloud can count INITIAL browser page views; older tags omit it, so it is optional. app_download_click destination_path is per-source parameterized (analytics_site_sources.download_destination_path, default /download) — the schema bounds the shape; the ingest boundary enforces the workspace's configured destination. sign_up_click is browser INTENT (a click) with the same optional structural cta properties as site_click; the signup OUTCOME is server-only and never enters this contract."
+  "$comment": "site_page_view properties.nav (infinite-tag 0.6.0): \"navigate\" for the initial document load, \"history\" for a History-API route change — a bounded enum so the cloud can count INITIAL browser page views; older tags omit it, so it is optional. app_download_click destination_path is either the per-source same-origin conversion destination (analytics_site_sources.download_destination_path, default /download) or a bounded external conversion bucket such as /external/stripe for direct Stripe Payment Links; the schema bounds the shape and never admits external URLs. sign_up_click is browser INTENT (a click) with the same optional structural cta properties as site_click; the signup OUTCOME is server-only and never enters this contract."
 }

@@ -53,6 +53,7 @@
   "scripts": {
     "build": "tsc -b tsconfig.json",
     "prepack": "rm -rf dist && tsc -p tsconfig.build.json",
+    "postinstall": "node -e \"const msg='infinite-tag installed. Next: run npx infinite-tag install --workspace <workspace-id> from your website repo. Package install alone does not wire analytics.'; console.error(msg)\"",
     "test": "vitest run",
     "typecheck": "tsc --noEmit --pretty false"
   }

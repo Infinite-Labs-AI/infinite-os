@@ -217,6 +217,7 @@ describe("runCli", () => {
     const helpText = logMessages.join("\n")
     expect(helpText).toContain("uninstall")
     expect(helpText).toContain("Defaults to /infinite/events/collect")
+    expect(helpText).toContain("--infinite-download-destination-path <path>")
     expect(helpText).toContain("--infinite-consent-mode <required|not-required>")
     expect(helpText).toContain("No default")
     expect(helpText).toContain("infinite:analytics-consent-change")
@@ -258,6 +259,28 @@ describe("runCli", () => {
       (instruction: { provider?: string }) => instruction.provider === "infinite"
     )?.snippet
     expect(runtimeSnippet).toContain('"consent":{"mode":"not_required"}')
+  })
+
+  it("plan accepts an explicit Infinite conversion destination path", async () => {
+    const root = copyFixture("static-html-basic")
+    const code = await runCli([
+      "plan",
+      "--root", root,
+      "--json",
+      "--infinite-site-source-key", "site_public_123",
+      "--infinite-production-host", "example.com",
+      "--infinite-static-proxy", "vercel",
+      "--infinite-consent-mode", "not-required",
+      "--infinite-download-destination-path", "/checkout"
+    ])
+
+    expect(code).toBe(0)
+    const parsed = JSON.parse(stdoutText())
+    expect(parsed.artifacts.infinite.downloadDestinationPath).toBe("/checkout")
+    const runtimeSnippet = parsed.instructions.find(
+      (instruction: { provider?: string }) => instruction.provider === "infinite"
+    )?.snippet
+    expect(runtimeSnippet).toContain('"downloadDestinationPath":"/checkout"')
   })
 
   it("rejects unknown Infinite consent modes", async () => {
@@ -617,6 +640,61 @@ describe("default artifact discovery", () => {
     const plan = JSON.stringify(stdoutJson())
     expect(plan).toContain("G-BBBB222")
     expect(plan).not.toContain("G-AAAA111")
+  })
+
+  it("layers a conversion destination override onto a discovered Infinite artifact", async () => {
+    const root = copyFixture("static-html-basic")
+    const filePath = saveArtifactsFile("ws_saved.json", {
+      workspaceId: "ws_saved",
+      infinite: {
+        siteSourceKey: "site_public_123",
+        collectPath: "/infinite/events/collect",
+        productionHosts: ["example.com"],
+        staticProxy: "vercel",
+        consentMode: "not_required"
+      }
+    })
+
+    const code = await runCli([
+      "plan",
+      "--root", root,
+      "--workspace", "ws_saved",
+      "--infinite-download-destination-path", "/checkout",
+      "--json"
+    ])
+
+    expect(code).toBe(0)
+    expect(stderrText()).toContain(`Discovered saved public artifacts: ${filePath}`)
+    const parsed = stdoutJson()
+    expect(
+      (parsed.artifacts as { infinite?: { downloadDestinationPath?: string } }).infinite
+        ?.downloadDestinationPath
+    ).toBe("/checkout")
+    const runtimeSnippet = (parsed.instructions as Array<{ provider?: string; snippet?: string }>).find(
+      (instruction) => instruction.provider === "infinite"
+    )?.snippet
+    expect(runtimeSnippet).toContain('"downloadDestinationPath":"/checkout"')
+  })
+
+  it("rejects an explicit empty Infinite conversion destination path", async () => {
+    const root = copyFixture("static-html-basic")
+
+    const code = await runCli([
+      "plan",
+      "--root", root,
+      "--json",
+      "--infinite-site-source-key", "site_public_123",
+      "--infinite-production-host", "example.com",
+      "--infinite-static-proxy", "vercel",
+      "--infinite-consent-mode", "not-required",
+      "--infinite-download-destination-path", ""
+    ])
+
+    expect(code).toBe(1)
+    const parsed = stdoutJson()
+    expect(parsed.blockers).toContain(
+      "Infinite downloadDestinationPath must be a root-relative path without query, hash, or whitespace (max 256 chars)."
+    )
   })
 
   it("multiple saved files without --workspace are listed and never guessed", async () => {

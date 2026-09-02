@@ -47,6 +47,7 @@ export interface WorkspaceArtifactOptions {
   infiniteProductionHosts?: string[]
   infiniteStaticProxy?: "vercel"
   infiniteConsentMode?: InfiniteConsentMode
+  infiniteDownloadDestinationPath?: string
   packageManager?: PackageManager
 }
 
@@ -323,7 +324,8 @@ export function resolveWorkspaceArtifacts(
     options.infiniteSiteSourceKey !== undefined ||
     options.infiniteCollectPath !== undefined ||
     options.infiniteStaticProxy !== undefined ||
-    options.infiniteConsentMode !== undefined
+    options.infiniteConsentMode !== undefined ||
+    options.infiniteDownloadDestinationPath !== undefined
   ) {
     artifacts.infinite = {
       siteSourceKey:
@@ -342,8 +344,13 @@ export function resolveWorkspaceArtifacts(
       ...(options.infiniteConsentMode ?? artifacts.infinite?.consentMode
         ? { consentMode: options.infiniteConsentMode ?? artifacts.infinite?.consentMode }
         : {}),
-      ...(artifacts.infinite?.downloadDestinationPath
-        ? { downloadDestinationPath: artifacts.infinite.downloadDestinationPath }
+      ...((options.infiniteDownloadDestinationPath ??
+        artifacts.infinite?.downloadDestinationPath) !== undefined
+        ? {
+            downloadDestinationPath:
+              options.infiniteDownloadDestinationPath ??
+              artifacts.infinite?.downloadDestinationPath
+          }
         : {})
     }
   }
@@ -356,6 +363,28 @@ export function resolveWorkspaceArtifacts(
   }
 
   return artifacts
+}
+
+/**
+ * Layer `--infinite-download-destination-path` onto a resolved/discovered Infinite artifact.
+ * It is a modifier, not a source: without an Infinite source artifact there is nothing to
+ * instrument, so it must not fabricate a keyless source.
+ */
+export function applyInfiniteDownloadDestinationPath(
+  artifacts: WorkspaceInstallArtifacts,
+  options: { path?: string }
+): WorkspaceInstallArtifacts {
+  if (options.path === undefined || artifacts.infinite === undefined) {
+    return artifacts
+  }
+
+  return {
+    ...artifacts,
+    infinite: {
+      ...artifacts.infinite,
+      downloadDestinationPath: options.path
+    }
+  }
 }
 
 /**

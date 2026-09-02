@@ -254,6 +254,7 @@ describe("Infinite public artifacts", () => {
           productionHosts: ["www.example.com", "example.com"],
           staticProxy: "vercel",
           consentMode: "not_required",
+          downloadDestinationPath: "/checkout",
           cloudSession: "must-not-survive"
         }
       })
@@ -264,7 +265,8 @@ describe("Infinite public artifacts", () => {
       collectPath: "/infinite/events/collect",
       productionHosts: ["www.example.com", "example.com"],
       staticProxy: "vercel",
-      consentMode: "not_required"
+      consentMode: "not_required",
+      downloadDestinationPath: "/checkout"
     })
   })
 
@@ -275,14 +277,16 @@ describe("Infinite public artifacts", () => {
         infiniteCollectPath: "/infinite/events/collect",
         infiniteProductionHosts: ["Example.com", "www.example.com"],
         infiniteStaticProxy: "vercel",
-        infiniteConsentMode: "not_required"
+        infiniteConsentMode: "not_required",
+        infiniteDownloadDestinationPath: "/checkout"
       }).infinite
     ).toEqual({
       siteSourceKey: "site_public_123",
       collectPath: "/infinite/events/collect",
       productionHosts: ["Example.com", "www.example.com"],
       staticProxy: "vercel",
-      consentMode: "not_required"
+      consentMode: "not_required",
+      downloadDestinationPath: "/checkout"
     })
   })
 

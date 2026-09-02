@@ -40,8 +40,9 @@ describe("browser-collect-v1 public contract", () => {
     expect(
       (schemaProperties.eventName as { enum: string[] }).enum
     ).not.toContain("sign_up")
-    // app_download_click's destination is per-source parameterized (cloud-configured); the
-    // contract bounds the SHAPE and must not re-pin the platform default.
+    // app_download_click's destination is either per-source parameterized (cloud-configured) or a
+    // bounded external conversion bucket; the contract bounds the SHAPE and must not re-pin the
+    // platform default.
     expect(JSON.stringify(schema.allOf)).not.toContain('"const":"/download"')
     expect(Object.keys(schemaProperties)).toEqual([
       "siteSourceKey",
@@ -111,6 +112,28 @@ describe("browser-collect-v1 public contract", () => {
     expect(referrerHost).toBe("referrer.example")
   })
 
+  it("app_download_click explicitly permits structural CTA fields plus destination_path", () => {
+    const schema = JSON.parse(readFileSync(schemaPath, "utf8")) as {
+      allOf: Array<{
+        if: { properties: { eventName: { const: string } } }
+        then: { properties: { properties: Record<string, unknown> } }
+      }>
+    }
+    const appDownload = schema.allOf.find(
+      (branch) => branch.if.properties.eventName.const === "app_download_click"
+    )
+
+    expect(appDownload?.then.properties.properties).toEqual({
+      type: "object",
+      required: ["destination_path"],
+      properties: {
+        cta_id: { $ref: "#/properties/properties/properties/cta_id" },
+        cta_location: { $ref: "#/properties/properties/properties/cta_location" },
+        destination_path: { $ref: "#/properties/properties/properties/destination_path" }
+      }
+    })
+  })
+
   it("site_page_view may carry ONLY the bounded nav enum (0.6.0: navigate | history), optional for older tags", () => {
     const schema = JSON.parse(readFileSync(schemaPath, "utf8")) as {
       properties: { properties: { properties: Record<string, unknown> } }
@@ -145,6 +168,7 @@ describe("browser-collect-v1 public contract", () => {
 
     expect(propertySchemas.cta_id?.pattern).toBe(structuralTokenPattern)
     expect(propertySchemas.cta_location?.pattern).toBe(structuralTokenPattern)
+    expect(new RegExp(propertySchemas.destination_path?.pattern ?? "$^").test("/external/stripe")).toBe(true)
 
     const structuralToken = new RegExp(structuralTokenPattern)
     for (const value of ["a", "Hero_2-primary", "A".repeat(64)]) {
