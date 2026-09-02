@@ -460,12 +460,11 @@ export function classifyProviders(input: ClassifyProvidersInput): ProviderClassi
       continue
     }
     if (managed) {
-      out.push({
-        provider,
-        action: "upgrade",
-        reason: "managed by .infinite/install.json; re-planned against the current key",
-        ...(key ? { key } : {})
-      })
+      out.push(
+        key
+          ? { provider, action: "upgrade", reason: "already installed by infinite-tag (.infinite/install.json); re-planned against the current key", key }
+          : { provider, action: "skip", reason: "already installed by infinite-tag (.infinite/install.json); no key resolved to re-plan it", file: ".infinite/install.json" }
+      )
       continue
     }
     if (key) {

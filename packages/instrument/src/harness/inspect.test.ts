@@ -178,9 +178,11 @@ describe("classifyProviders", () => {
     const classes = classifyProviders({ manifest: null, detected, keys, adoptExisting: true, serverLane: false })
     expect(classes.find((entry) => entry.provider === "ga4")).toMatchObject({ action: "report", reason: expect.stringContaining("G-ONE") })
 
-    const manifest = { providers: ["ga4"], serverLane: undefined } as never
+    const manifest = { providers: ["ga4", "meta"], serverLane: undefined } as never
     const managed = classifyProviders({ manifest, detected: [], keys, adoptExisting: true, serverLane: true })
     expect(managed.find((entry) => entry.provider === "ga4")?.action).toBe("upgrade")
+    // Managed but no key this run: not re-planned, and not "absent" either — it is installed.
+    expect(managed.find((entry) => entry.provider === "meta")).toMatchObject({ action: "skip", file: ".infinite/install.json", reason: expect.stringContaining("already installed") })
     expect(managed.find((entry) => entry.provider === "server_lane")?.action).toBe("install")
   })
 })

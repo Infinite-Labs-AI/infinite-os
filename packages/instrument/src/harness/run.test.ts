@@ -138,6 +138,15 @@ describe("runHarness --check", () => {
     ])
   })
 
+  it("shows a provider infinite-tag already installed as installed, with the manifest as evidence", async () => {
+    const root = copyFixture("static-html-basic")
+    await runHarness(parseHarnessArgs(["--apply", "--yes", "--no-mark", "--root", root, "--ga4-measurement-id", "G-NEW00001", "--workspace", "ws_1"]), fakeIo(), { discover: () => null })
+    const io = fakeIo()
+    const result = await runHarness(parseHarnessArgs(["--check", "--root", root]), io, { discover: () => null })
+    expect(result.exitCode).toBe(0)
+    expect(io.outLines.join("\n")).toMatch(/ga4\s+installed\s+—\s+\.infinite\/install\.json/)
+  })
+
   it("halts with INF_DETECT_NO_FRAMEWORK on an unsupported repo and still prints the table", async () => {
     const root = copyFixture("unsupported-basic")
     const io = fakeIo()

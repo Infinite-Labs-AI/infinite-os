@@ -337,10 +337,15 @@ const classify: RunbookStep<Ctx> = {
           case "report":
             return transitionProvider(state, { to: "conflict", reason: entry.reason, key: keyFor(entry), evidence })
           case "skip":
-            return transitionProvider(state, { to: "skipped", reason: entry.reason })
+            // A provider infinite-tag already installed (manifest-backed) is installed, not absent,
+            // even when this run has no key to re-plan it with.
+            return entry.file === ".infinite/install.json"
+              ? transitionProvider(state, { to: "installed", reason: entry.reason, evidence: entry.file })
+              : transitionProvider(state, { to: "skipped", reason: entry.reason })
           case "install":
-          case "upgrade":
             return { ...state, reason: entry.reason, ...(entry.key ? { key: entry.key } : {}) }
+          case "upgrade":
+            return transitionProvider(state, { to: "installed", reason: entry.reason, key: entry.key, evidence: ".infinite/install.json" })
         }
       })
     }
