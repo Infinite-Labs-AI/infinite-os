@@ -188,9 +188,25 @@ export interface ExtractedRecord<T> {
   payload: T;
 }
 
+/**
+ * How much a connection test is allowed to spend.
+ *
+ * `"connect"` (the default) is the CONNECT-TIME GATE: it may read every endpoint the sync needs,
+ * because the user is standing in front of the dialog and a key admitted here is a key we promise
+ * can sync. `"liveness"` is the per-sync re-check `sync()` makes on every run — it stays at the
+ * single cheapest read, since a sync that is about to read the real endpoints anyway will fail
+ * loud on them a moment later, and Stripe bills API reads against a monthly allowance the
+ * 15-minute heartbeat already sits close to.
+ */
+export type ConnectionTestDepth = "connect" | "liveness";
+
 export interface GrowthConnector {
   provider: FirstPhaseProvider;
-  testConnection(db: InfiniteOsDb, request: SyncRequest): Promise<ConnectionTestResult>;
+  testConnection(
+    db: InfiniteOsDb,
+    request: SyncRequest,
+    depth?: ConnectionTestDepth
+  ): Promise<ConnectionTestResult>;
   planSync(db: InfiniteOsDb, request: SyncRequest): Promise<SyncPlan>;
   extract(db: InfiniteOsDb, request: SyncRequest, plan: SyncPlan): Promise<ExtractedRecord<unknown>[]>;
   sync(db: InfiniteOsDb, request: SyncRequest): Promise<SyncResult>;
@@ -1260,13 +1276,111 @@ const STRIPE_SUBSCRIPTION_RETRIEVE_EXPANDS = [
   "items.data.discounts"
 ] as const;
 
+// CONNECT-TIME PERMISSION GATE — every endpoint a Stripe sync reads, paired with the restricted-key
+// permission that unlocks it. A key is only sync-capable if it can read ALL of them, so the connect
+// probe reads all of them: a key that can list customers but not events used to be admitted, and
+// then 403'd on the very first call of the very first sync (`GET /v1/events`), leaving the source
+// parked in `error` with no rows and nothing the user could act on.
+//
+// `/v1/subscription_items` is intentionally absent: it is served by the same Subscriptions
+// permission as `/v1/subscriptions`, so probing it would spend a read to learn nothing.
+//
+// ORDER IS LOAD-BEARING TWICE: it is the order missing permissions are listed in, and `[0]`
+// (`/v1/customers`) is the endpoint the cheap liveness probe reads and the one whose failure is
+// re-thrown for a non-permission error — so a revoked key still reports exactly the endpoint and
+// message it reported before this gate existed.
+const STRIPE_SYNC_ENDPOINTS = [
+  { path: "/v1/customers", permission: "Customers: Read" },
+  { path: "/v1/events", permission: "Events: Read" },
+  { path: "/v1/invoices", permission: "Invoices: Read" },
+  { path: "/v1/subscriptions", permission: "Subscriptions: Read" }
+] as const;
+
+// Stripe's own code for "this restricted key lacks a permission this endpoint requires". It is a
+// 403, which `fetchJson` has already turned into a non-retryable provider_auth_failed carrying the
+// provider body — so the body is matched textually here rather than re-plumbed through the
+// transport, which branches on HTTP status only.
+const STRIPE_MISSING_PERMISSION_CODE = "more_permissions_required";
+
+// The fragment Stripe puts in that message: `Enabling Events Read ('event_read') permissions on
+// this key would allow this request to continue.`
+const STRIPE_MISSING_PERMISSION_NAME = /Enabling\s+(.+?)\s+Read\s+\('[a-z0-9_]+'\)/i;
+
+// Returns the human permission name when `error` is Stripe's missing-permission 403, else null.
+// The name Stripe used is preferred so the string matches the Dashboard checkbox the user has to
+// tick; `known` (our own endpoint→permission mapping) is used when Stripe rewords the sentence.
+// That is not a fallback masking a failure: both sources name the SAME permission, and the code
+// having already been matched is what proves this is a permission problem at all.
+function stripeMissingPermission(error: unknown, known: string): string | null {
+  if (!(error instanceof ConnectorError)) {
+    return null;
+  }
+  if (!error.message.includes(STRIPE_MISSING_PERMISSION_CODE)) {
+    return null;
+  }
+  const match = STRIPE_MISSING_PERMISSION_NAME.exec(error.message);
+  return match ? `${match[1]}: Read` : known;
+}
+
+// Probes every sync endpoint and COLLECTS the permission failures instead of stopping at the
+// first, so one connect attempt tells the user every checkbox they have to tick — three
+// paste-and-retry rounds for a key missing three permissions is not a fix, it is a maze.
+async function assertStripeKeyCoversSyncEndpoints(
+  credential: StripeCredential,
+  secretKey: string
+): Promise<void> {
+  const results = await Promise.allSettled(
+    STRIPE_SYNC_ENDPOINTS.map((endpoint) =>
+      stripeGet<{ data: unknown[] }>(credential, secretKey, endpoint.path, { limit: "1" })
+    )
+  );
+
+  const missing: string[] = [];
+  let otherFailure: unknown;
+  results.forEach((result, index) => {
+    if (result.status === "fulfilled") {
+      return;
+    }
+    const permission = stripeMissingPermission(result.reason, STRIPE_SYNC_ENDPOINTS[index].permission);
+    if (permission) {
+      missing.push(permission);
+      return;
+    }
+    // A revoked key, an outage, a rate limit: NOT a permission problem, and not something a
+    // permission message may paper over. Keep the first one (see the ORDER note above) and
+    // re-throw it untouched once we know no permission is missing.
+    otherFailure ??= result.reason;
+  });
+
+  if (missing.length > 0) {
+    throw new ConnectorError(
+      "provider_auth_failed",
+      `Stripe restricted key is missing ${missing.length === 1 ? "permission" : "permissions"}: `
+      + `${missing.join(", ")}. Edit the key in the Stripe Dashboard (Developers \u2192 API keys) `
+      + "and grant Events, Customers, Invoices and Subscriptions: Read.",
+      false
+    );
+  }
+  if (otherFailure !== undefined) {
+    throw otherFailure;
+  }
+}
+
 const stripeConnector = createConnector<StripeCredential, StripeSyncRow>({
   provider: "stripe",
   fixtureRows: () => STRIPE_INVOICES,
   fixtureObjectType: "stripe_invoice",
-  async testLive(_db, _request, credential) {
+  async testLive(_db, _request, credential, depth) {
     const secretKey = requireCredential(credential, "secretKey");
-    await stripeGet<{ data: unknown[] }>(credential, secretKey, "/v1/customers", { limit: "1" });
+    if (depth === "liveness") {
+      // Per-sync re-check: one read, the cheapest one. The extract that follows exercises the
+      // rest of the surface for real.
+      await stripeGet<{ data: unknown[] }>(
+        credential, secretKey, STRIPE_SYNC_ENDPOINTS[0].path, { limit: "1" }
+      );
+      return { ok: true, mode: "live", provider: "stripe" };
+    }
+    await assertStripeKeyCoversSyncEndpoints(credential, secretKey);
     return { ok: true, mode: "live", provider: "stripe" };
   },
   async planLive(db, request, credential) {
@@ -2283,7 +2397,12 @@ function createConnector<
   provider: FirstPhaseProvider;
   fixtureObjectType: string;
   fixtureRows: () => Row[];
-  testLive: (db: InfiniteOsDb, request: SyncRequest, credential: Credential) => Promise<ConnectionTestResult>;
+  testLive: (
+    db: InfiniteOsDb,
+    request: SyncRequest,
+    credential: Credential,
+    depth: ConnectionTestDepth
+  ) => Promise<ConnectionTestResult>;
   planLive: (db: InfiniteOsDb, request: SyncRequest, credential: Credential) => Promise<SyncPlan>;
   extractLive: (
     db: InfiniteOsDb,
@@ -2297,12 +2416,15 @@ function createConnector<
 }): GrowthConnector {
   return {
     provider: options.provider,
-    async testConnection(db, request) {
+    // Defaulting to the DEEP probe is deliberate: every caller that is a real connect (the CLI,
+    // the app HTTP route, the in-chat agent, `connect_source`/`reconnect_source`) gets the full
+    // gate without having to know it exists. Only `sync()` below opts down.
+    async testConnection(db, request, depth = "connect") {
       const credential = await sourceCredential<Credential>(db, request);
       if (isFixtureCredential(credential)) {
         return { ok: true, mode: "fixture", provider: options.provider };
       }
-      return options.testLive(db, request, credential.payload);
+      return options.testLive(db, request, credential.payload, depth);
     },
     async planSync(db, request) {
       const credential = await sourceCredential<Credential>(db, request);
@@ -2343,7 +2465,10 @@ function createConnector<
       let extracted: ExtractedRecord<unknown>[];
       try {
         plan = await this.planSync(db, request);
-        await this.testConnection(db, request);
+        // LIVENESS, not the connect gate: this runs every heartbeat, and the extract that follows
+        // reads the same endpoints for real. Paying the full permission probe here would multiply
+        // the sync's provider reads for information the next few lines produce anyway.
+        await this.testConnection(db, request, "liveness");
         extracted = await this.extract(db, request, plan);
       } catch (error) {
         await recordSyncFailure(db, request, plan, providerError(error));
