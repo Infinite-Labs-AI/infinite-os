@@ -71,9 +71,10 @@ export function classifyUserAgent(userAgent) {
   return AUTOMATION_USER_AGENT.test(value) ? "automation" : "browser"
 }
 
-/** GET + accepts text/html + not a prefetch + not an asset/API/Next-internal path. */
-export function isInfiniteDocumentRequest({ method, path, accept, prefetch = false }) {
+/** GET + accepts text/html + not a prefetch + not DNT/GPC + not an asset/API/Next-internal path. */
+export function isInfiniteDocumentRequest({ method, path, accept, prefetch = false, dnt = false }) {
   if (method !== "GET" || prefetch) return false
+  if (dnt) return false // Do-Not-Track / Global-Privacy-Control, honored like the client pixel does
   if (!String(accept ?? "").toLowerCase().includes("text/html")) return false
   if (NON_DOCUMENT_PREFIXES.some((prefix) => path.startsWith(prefix))) return false
   return !path.slice(path.lastIndexOf("/") + 1).includes(".")
@@ -146,7 +147,8 @@ app.use((req, res, next) => {
   try {
     const path = req.path // path only — never the query string
     const prefetch = Boolean(req.headers["purpose"] || req.headers["sec-purpose"])
-    if (isInfiniteDocumentRequest({ method: req.method, path, accept: req.headers.accept, prefetch })) {
+    const dnt = req.headers["dnt"] === "1" || req.headers["sec-gpc"] === "1"
+    if (isInfiniteDocumentRequest({ method: req.method, path, accept: req.headers.accept, prefetch, dnt })) {
       const event = buildInfiniteDocumentEvent({
         path,
         host: req.hostname,
@@ -203,6 +205,8 @@ export function isInfiniteDocumentRequest(request, path) {
   if (request.method !== "GET") return false
   const purpose = (request.headers.get("purpose") ?? request.headers.get("sec-purpose") ?? "").toLowerCase()
   if (purpose.includes("prefetch") || purpose.includes("prerender")) return false
+  // Honor Do-Not-Track / Global-Privacy-Control, like the client pixel does.
+  if (request.headers.get("dnt") === "1" || request.headers.get("sec-gpc") === "1") return false
   if (!(request.headers.get("accept") ?? "").toLowerCase().includes("text/html")) return false
   if (NON_DOCUMENT_PREFIXES.some((prefix) => path.startsWith(prefix))) return false
   return !path.slice(path.lastIndexOf("/") + 1).includes(".")

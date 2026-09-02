@@ -107,9 +107,10 @@ export function infiniteHostAllowed(host) {
   return INFINITE_PRODUCTION_HOSTS.length === 0 || INFINITE_PRODUCTION_HOSTS.includes(host)
 }
 
-/** GET + accepts text/html + not a prefetch + not an asset, API route, or platform internal. */
-export function isInfiniteDocumentRequest({ method, path, accept, prefetch = false }) {
+/** GET + accepts text/html + not a prefetch + not DNT/GPC + not an asset, API route, or platform internal. */
+export function isInfiniteDocumentRequest({ method, path, accept, prefetch = false, dnt = false }) {
   if (method !== "GET" || prefetch) return false
+  if (dnt) return false // Do-Not-Track / Global-Privacy-Control, honored like the client pixel does
   if (!String(accept ?? "").toLowerCase().includes("text/html")) return false
   if (INFINITE_NON_DOCUMENT_PREFIXES.some((prefix) => path.startsWith(prefix))) return false
   return !path.slice(path.lastIndexOf("/") + 1).includes(".")
@@ -165,6 +166,7 @@ export function ${NODE_MIDDLEWARE_EXPORT}() {
       const secret = infiniteSecret()
       const path = typeof req.path === "string" ? req.path : String(req.url ?? "").split("?")[0]
       const prefetch = Boolean(req.headers["purpose"] || req.headers["sec-purpose"])
+      const dnt = req.headers["dnt"] === "1" || req.headers["sec-gpc"] === "1"
       const host = String(req.headers["x-forwarded-host"] ?? req.headers.host ?? "")
         .split(",")[0]
         .trim()
@@ -173,7 +175,7 @@ export function ${NODE_MIDDLEWARE_EXPORT}() {
       if (
         secret &&
         infiniteHostAllowed(host) &&
-        isInfiniteDocumentRequest({ method: req.method, path, accept: req.headers.accept, prefetch })
+        isInfiniteDocumentRequest({ method: req.method, path, accept: req.headers.accept, prefetch, dnt })
       ) {
         const nowMs = Date.now()
         const userAgent = req.headers["user-agent"] ?? ""
