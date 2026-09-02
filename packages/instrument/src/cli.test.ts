@@ -593,6 +593,60 @@ describe("Infinite source handoff + meta providers", () => {
     )
   })
 
+  it("plan --json lists adopted providers and human mode says what was left alone", async () => {
+    const root = copyFixture("static-html-basic")
+    writeFileSync(
+      join(root, "index.html"),
+      '<!doctype html>\n<html lang="en">\n  <head>\n    <script>gtag("config", "G-EXISTING")</script>\n  </head>\n  <body></body>\n</html>\n'
+    )
+
+    const code = await runCli([
+      "plan",
+      "--root", root,
+      "--json",
+      "--ga4-measurement-id", "G-TEST123",
+      "--meta-pixel-id", "1234567890123456"
+    ])
+    expect(code).toBe(0)
+    const plan = JSON.parse(lastStdoutJson()) as { adopted: unknown; providers: string[]; blockers: string[] }
+    expect(plan.adopted).toEqual([{ provider: "ga4", via: "snippet", file: "index.html" }])
+    expect(plan.providers).toEqual(["meta"])
+    expect(plan.blockers).toEqual([])
+
+    logSpy.mockClear()
+    const human = await runCli([
+      "plan",
+      "--root", root,
+      "--ga4-measurement-id", "G-TEST123",
+      "--meta-pixel-id", "1234567890123456"
+    ])
+    expect(human).toBe(0)
+    expect(stdoutText()).toContain("Already on your site (left untouched):")
+    expect(stdoutText()).toContain("Google Analytics — index.html (existing snippet)")
+  })
+
+  it("install with only already-present providers changes nothing and says so", async () => {
+    const root = copyFixture("static-html-basic")
+    writeFileSync(
+      join(root, "index.html"),
+      '<!doctype html>\n<html lang="en">\n  <head>\n    <script>gtag("config", "G-EXISTING")</script>\n  </head>\n  <body></body>\n</html>\n'
+    )
+    const before = readFileSync(join(root, "index.html"), "utf8")
+
+    const code = await runCli([
+      "install",
+      "--root", root,
+      "--workspace", "ws_test",
+      "--yes",
+      "--ga4-measurement-id", "G-TEST123"
+    ])
+    expect(code).toBe(0)
+    expect(stdoutText()).toContain("Nothing to install")
+    expect(stdoutText()).toContain("Google Analytics — index.html (existing snippet)")
+    expect(readFileSync(join(root, "index.html"), "utf8")).toBe(before)
+    expect(existsSync(join(root, ".infinite", "install.json"))).toBe(false)
+  })
+
   it("explains the removed unsafe external-loader flags for one release", async () => {
     const root = copyFixture("static-html-basic")
     for (const flag of ["--infinite-base-url", "--infinite-page-id"]) {

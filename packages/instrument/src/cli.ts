@@ -15,6 +15,7 @@ import {
   renderBlocked,
   renderInspect,
   renderNoArtifacts,
+  renderNothingToInstall,
   renderPreview,
   renderUninstall,
   renderUnsupported,
@@ -346,6 +347,11 @@ function planIssue(plan: InstallPlan): "unsupported" | "no-artifacts" | "blocked
   return null
 }
 
+/** True when every requested provider already exists and no server lane was asked for. */
+function nothingToInstall(plan: InstallPlan): boolean {
+  return plan.blockers.length === 0 && plan.providers.length === 0 && !plan.serverLane && plan.adopted.length > 0
+}
+
 /** Renders the appropriate "can't install" message for human mode; null when the plan is clean. */
 function renderPlanIssue(plan: InstallPlan): string | null {
   switch (planIssue(plan)) {
@@ -615,6 +621,10 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
           printUnappliedServerLaneBrief(plan)
           return plan.blockers.length === 0 ? 0 : 1
         }
+        if (nothingToInstall(plan)) {
+          console.log(renderNothingToInstall(plan))
+          return 0
+        }
         console.log(renderPreview(plan))
         console.log("This was a preview — nothing changed. To apply:  npx infinite-tag install --yes\n")
         return 0
@@ -648,6 +658,10 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
         if (issue) {
           console.log(issue)
           return 1
+        }
+        if (nothingToInstall(plan)) {
+          console.log(renderNothingToInstall(plan))
+          return 0
         }
         return applyAndRenderHuman({ root, inspect, plan, allowDirty: parsed.allowDirty })
       }
@@ -698,6 +712,10 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
           console.log(issue)
           printUnappliedServerLaneBrief(plan)
           return plan.blockers.length === 0 ? 0 : 1
+        }
+        if (nothingToInstall(plan)) {
+          console.log(renderNothingToInstall(plan))
+          return 0
         }
 
         if (parsed.yes) {

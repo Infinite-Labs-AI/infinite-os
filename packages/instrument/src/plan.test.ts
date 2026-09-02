@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs"
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs"
 import { cpSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
@@ -410,7 +410,7 @@ describe("planInstallation", () => {
     expect(plan.applyMode).toBe("plan-only")
   })
 
-  it("blocks a GA4 install when a hand-rolled gtag tag already exists", async () => {
+  it("adopts a hand-rolled gtag tag instead of blocking: no second GA4 copy, Infinite still installs", async () => {
     const root = copyFixture("static-html-basic")
     writeFileSync(
       join(root, "index.html"),
@@ -440,15 +440,115 @@ describe("planInstallation", () => {
     const plan = await planInstallation({
       root,
       inspect: inspectResult,
+      workspaceId: "ws-test",
+      artifacts: {
+        ga4: { measurementId: "G-TEST123" },
+        infinite: {
+          siteSourceKey: "site_public_123",
+          collectPath: "/infinite/ledger",
+          productionHosts: ["example.com"],
+          staticProxy: "vercel",
+          consentMode: "not_required"
+        }
+      }
+    })
+
+    expect(plan.adopted).toEqual([{ provider: "ga4", via: "snippet", file: "index.html" }])
+    expect(plan.blockers).toEqual([])
+    expect(plan.providers).toEqual(["infinite"])
+    expect(plan.instructions.map((instruction) => instruction.provider).filter(Boolean)).toEqual(["infinite"])
+    expect(plan.instructions.some((instruction) => instruction.snippet.includes("G-TEST123"))).toBe(false)
+    expect(plan.assumptions).toContain(
+      "Existing Google Analytics found in index.html (existing snippet); left untouched. infinite-tag will not install a second copy."
+    )
+    expect(plan.confidence).toBeGreaterThan(0.45)
+    expect(plan.applyMode).toBe("supported")
+
+    const before = readFileSync(join(root, "index.html"), "utf8")
+    applyInstallation({ root, workspaceId: "ws-test", plan, allowDirty: true })
+    const after = readFileSync(join(root, "index.html"), "utf8")
+    expect(after).toContain('src="https://www.googletagmanager.com/gtag/js?id=G-EXISTING"')
+    expect(after).not.toContain("G-TEST123")
+    expect(after.indexOf("G-EXISTING")).toBe(before.indexOf("G-EXISTING"))
+    expect(after).toContain("site_public_123")
+  })
+
+  it("adopts a GA4 install managed through Tag Manager and names the container file", async () => {
+    const root = copyFixture("static-html-basic")
+    writeFileSync(
+      join(root, "index.html"),
+      [
+        "<!doctype html>",
+        '<html lang="en">',
+        "  <head>",
+        "    <script>(function(w,d,s,l,i){w[l]=w[l]||[];j=d.createElement(s);j.src='https://www.googletagmanager.com/gtm.js?id='+i;})(window,document,'script','dataLayer','GTM-ABCD12');</script>",
+        "  </head>",
+        "  <body></body>",
+        "</html>",
+        ""
+      ].join("\n")
+    )
+
+    const plan = await planInstallation({
+      root,
+      inspect: await inspectWorkspace(root),
+      artifacts: { ga4: { measurementId: "G-TEST123" }, meta: { pixelId: "1234567890123456" } }
+    })
+
+    expect(plan.adopted).toEqual([{ provider: "ga4", via: "gtm", file: "index.html" }])
+    expect(plan.providers).toEqual(["meta"])
+    expect(plan.blockers).toEqual([])
+    expect(plan.assumptions).toContain(
+      "Existing Google Analytics found in index.html (Google Tag Manager); left untouched. infinite-tag will not install a second copy."
+    )
+  })
+
+  it("a GTM container adopts GA4 only — a requested Meta pixel still installs", async () => {
+    const root = copyFixture("static-html-basic")
+    writeFileSync(
+      join(root, "index.html"),
+      '<!doctype html>\n<html lang="en">\n  <head>\n    <script>var id = "GTM-ABCD12"</script>\n  </head>\n  <body></body>\n</html>\n'
+    )
+
+    const plan = await planInstallation({
+      root,
+      inspect: await inspectWorkspace(root),
+      artifacts: { meta: { pixelId: "1234567890123456" } }
+    })
+
+    expect(plan.adopted).toEqual([])
+    expect(plan.providers).toEqual(["meta"])
+    expect(plan.blockers).toEqual([])
+  })
+
+  it("when every requested provider already exists, the plan has nothing to write and apply is a no-op", async () => {
+    const root = copyFixture("static-html-basic")
+    writeFileSync(
+      join(root, "index.html"),
+      '<!doctype html>\n<html lang="en">\n  <head>\n    <script>gtag("config", "G-EXISTING")</script>\n  </head>\n  <body></body>\n</html>\n'
+    )
+    const before = readFileSync(join(root, "index.html"), "utf8")
+
+    const plan = await planInstallation({
+      root,
+      inspect: await inspectWorkspace(root),
+      workspaceId: "ws-test",
       artifacts: { ga4: { measurementId: "G-TEST123" } }
     })
 
-    expect(plan.blockers).toContain(
-      "Existing GA4 analytics wiring was detected in this repo and is not managed by Infinite. Remove or migrate the existing GA4 tag before installing it with infinite-tag."
-    )
-    expect(() =>
-      applyInstallation({ root, workspaceId: "ws-test", plan, allowDirty: true })
-    ).toThrow(/Refusing to apply/)
+    expect(plan.adopted).toEqual([{ provider: "ga4", via: "snippet", file: "index.html" }])
+    expect(plan.providers).toEqual([])
+    expect(plan.blockers).toEqual([])
+    expect(plan.files).toEqual([])
+    expect(plan.instructions).toEqual([])
+
+    const result = applyInstallation({ root, workspaceId: "ws-test", plan, allowDirty: true })
+    expect(result.changedFiles).toEqual([])
+    expect(result.warnings).toEqual([
+      "Nothing to install: Google Analytics already exists in index.html and was left untouched."
+    ])
+    expect(readFileSync(join(root, "index.html"), "utf8")).toBe(before)
+    expect(existsSync(join(root, ".infinite", "install.json"))).toBe(false)
   })
 
   it("does not block installing a different provider next to a hand-rolled gtag", async () => {
@@ -468,6 +568,7 @@ describe("planInstallation", () => {
     })
 
     expect(plan.blockers).toEqual([])
+    expect(plan.adopted).toEqual([])
   })
 
   it("does not block our own managed re-apply", async () => {

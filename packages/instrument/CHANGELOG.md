@@ -5,6 +5,14 @@ All notable changes to the `infinite-tag` npm package (`packages/instrument`). V
 
 ## Unreleased
 
+- **Existing tags are adopted instead of refused.** A requested provider that already exists in
+  the repo (hand-pasted `gtag`/`posthog.init`/`twq`/`fbq` snippet, or GA4 served through a Google
+  Tag Manager container) is left byte-for-byte alone, dropped from the install set, and reported
+  under `adopted` (`{ provider, via: "snippet" | "gtm", file }`) — it is no longer a blocker, and
+  `infinite-tag` never installs a second copy. Detection now walks the whole app root (bounded:
+  2,000 files / 512 KB each, skipping `node_modules`, build output and dot-directories) instead of
+  a fixed seven-file list. When everything requested already exists, `apply` writes nothing and
+  records nothing. `detectUnmanagedProviders` returns the object shape above (was `string[]`).
 - **Default same-origin collect path is now `/infinite/ledger`.** The old `/infinite/events/collect`
   wording matches privacy blocklists; an artifact or install that already records a path keeps it
   (no silent migration). `--infinite-api-origin <https://host>` / `INFINITE_API_ORIGIN` override the

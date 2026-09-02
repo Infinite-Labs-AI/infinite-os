@@ -16,6 +16,28 @@ export type SupportedFramework = (typeof supportedFrameworks)[number]
 export const providerIds = ["infinite", "ga4", "posthog", "x", "meta"] as const
 export type ProviderId = (typeof providerIds)[number]
 
+/** Founder-facing provider names (plan output, adoption notes). */
+export const providerLabels: Record<ProviderId, string> = {
+  infinite: "Infinite",
+  ga4: "Google Analytics",
+  posthog: "PostHog",
+  x: "X Pixel",
+  meta: "Meta Pixel"
+}
+
+/** How an existing, unmanaged provider install was recognised. */
+export type UnmanagedProviderVia = "snippet" | "gtm"
+
+export interface UnmanagedProvider {
+  provider: ProviderId
+  via: UnmanagedProviderVia
+  /** App-root-relative file the signature was found in (the first, in sorted walk order). */
+  file: string
+}
+
+/** A requested provider that already existed in the repo and was left byte-for-byte alone. */
+export type AdoptedProvider = UnmanagedProvider
+
 export interface PackageManagerDetection {
   kind: PackageManagerDetectionKind
   reason: "lockfile" | "multiple-lockfiles" | "no-lockfile" | "override"
@@ -56,6 +78,9 @@ export interface InstallPlan {
   repoStatus: RepoStatus
   workspaceId?: string
   artifacts: WorkspaceInstallArtifacts
+  /** Requested providers that already exist unmanaged in the repo; removed from `providers` and
+   *  from the instructions, never installed twice, never touched. */
+  adopted: AdoptedProvider[]
   /** Present when the plan was made with `--server-lane`. */
   serverLane?: ServerLanePlan
 }

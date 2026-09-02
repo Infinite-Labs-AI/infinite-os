@@ -277,6 +277,20 @@ recorded, because proving your middleware runs is the point, but it is classifie
 check never adds a visitor to your own numbers. Bot protection can refuse a self-identified monitor;
 when it answers 401/403/405/406/429 the failure names that first.
 
+## Existing tags are adopted, not replaced
+
+`plan` walks the whole app root (every `.html/.tsx/.jsx/.ts/.js/.mjs/.cjs/.astro/.vue/.svelte`
+file outside `node_modules`, build output and dot-directories; capped at 2,000 files and 512 KB
+per file) for real provider signatures — the `gtag.js` loader or a `gtag(` call, `posthog.init(`,
+`twq(`, `fbq(` — and for Google Analytics served through a **Google Tag Manager** container
+(`gtm.js`, a `GTM-XXXXXX` id, or a bare `dataLayer.push(`). A requested provider that already
+exists is **adopted**: it is left byte-for-byte alone, dropped from the install set, listed under
+`adopted` in `--json` (`{ provider, via: "snippet" | "gtm", file }`) and under "Already on your
+site" in human output, and never installed a second time. A Tag Manager container only proves
+GA4 — a requested Meta or X pixel still installs beside it. When every requested provider already
+exists, nothing is written and no install record is created. Infinite's own managed files and
+`<!-- infinite:start -->` blocks are ignored by the scan, so a re-run never adopts itself.
+
 ## Proxy Matrix
 
 | Framework | Infinite same-origin route |
@@ -319,7 +333,7 @@ discard hand-edited generated configs or Vercel files.
 - Infinite uses a same-origin collection route with a source-bound public key.
 - Provider initialization order is GA4, PostHog, X, Meta, then Infinite — each native and independent; Infinite never forwards events into another provider.
 - Installs are idempotent, atomic, path-contained, and dirty-tree guarded.
-- Existing unmanaged analytics or configuration is not overwritten.
+- Existing unmanaged analytics is adopted (left untouched, never duplicated); existing configuration is not overwritten.
 
 ## License
 
