@@ -141,15 +141,29 @@ function infiniteBrowserRuntime(config: InfiniteBrowserConfig): void {
   function externalCtaId(destination: URL): string | null {
     if (destination.protocol !== "https:" && destination.protocol !== "http:") return null
     const host = destination.hostname.toLowerCase().replace(/^www\./, "")
-    if (host === "stripe.com" || host.endsWith(".stripe.com")) return "external_stripe"
     if (host === "calendly.com" || host.endsWith(".calendly.com")) return "external_booking"
     if (host === "cal.com" || host.endsWith(".cal.com")) return "external_booking"
     return "external_link"
   }
 
-  function externalConversionDestination(destination: URL): { ctaId: string; path: string } | null {
-    if (externalCtaId(destination) !== "external_stripe") return null
-    return { ctaId: "external_stripe", path: "/external/stripe" }
+  function externalPath(destination: URL): string {
+    return destination.pathname.replace(/\/{2,}/g, "/") || "/"
+  }
+
+  function externalCheckoutDestination(destination: URL): { ctaId: string; path: string } | null {
+    if (destination.protocol !== "https:" && destination.protocol !== "http:") return null
+    const host = destination.hostname.toLowerCase().replace(/^www\./, "")
+    const path = externalPath(destination)
+    if (host === "buy.stripe.com" || host === "book.stripe.com" || host === "donate.stripe.com") {
+      return { ctaId: "external_stripe_payment_link", path: "/external/stripe_payment_link" }
+    }
+    if (host === "checkout.stripe.com" && path.startsWith("/c/")) {
+      return { ctaId: "external_stripe_checkout", path: "/external/stripe_checkout" }
+    }
+    if (host === "invoice.stripe.com" && path.startsWith("/i/")) {
+      return { ctaId: "external_stripe_invoice", path: "/external/stripe_invoice" }
+    }
+    return null
   }
 
   function automaticLocation(target: Element, preferred: Array<Element | null>): string {
@@ -242,12 +256,7 @@ function infiniteBrowserRuntime(config: InfiniteBrowserConfig): void {
     const button = safeClosest(target, "button,input[type='button'],input[type='submit'],[role='button']")
     if (!button && !marked) return null
     if (!marked) {
-      const structuralId =
-        structuralAttribute(button, "id") ||
-        structuralAttribute(button, "name") ||
-        structuralAttribute(button, "data-testid") ||
-        structuralAttribute(button, "data-test-id")
-      properties.cta_id = structuralId ? automaticToken("button", structuralId) : "button"
+      properties.cta_id = "button"
       properties.cta_location = automaticLocation(target, [button])
     }
     return properties
@@ -272,6 +281,23 @@ function infiniteBrowserRuntime(config: InfiniteBrowserConfig): void {
     return {
       cta_id: ctaId,
       ...(ctaLocation ? { cta_location: ctaLocation } : {}),
+      destination_path: destinationPath
+    }
+  }
+
+  function checkoutClickProperties(
+    target: Element,
+    anchor: HTMLAnchorElement,
+    destinationPath: string,
+    fallbackCtaId: string,
+    fallbackCtaLocation: string
+  ): Record<string, string> | null {
+    const marked = safeClosest(target, "[data-analytics-cta-id]")
+    const markedProperties = markedCtaProperties(marked, target, anchor)
+    if (marked && !markedProperties) return null
+    return {
+      cta_id: markedProperties?.cta_id ?? fallbackCtaId,
+      cta_location: markedProperties?.cta_location ?? fallbackCtaLocation,
       destination_path: destinationPath
     }
   }
@@ -469,20 +495,30 @@ function infiniteBrowserRuntime(config: InfiniteBrowserConfig): void {
           )
           return
         }
-        if (destination) {
-          const externalConversion = externalConversionDestination(destination)
-          if (externalConversion) {
-            emit(
-              "app_download_click",
-              normalizePath(location.href),
-              downloadClickProperties(
-                target,
-                anchor,
-                externalConversion.path,
-                externalConversion.ctaId,
-                automaticLocation(target, [anchor])
-              )
+        if (destination && destination.origin !== location.origin) {
+          const externalCheckout = externalCheckoutDestination(destination)
+          if (externalCheckout) {
+            const properties = checkoutClickProperties(
+              target,
+              anchor,
+              externalCheckout.path,
+              externalCheckout.ctaId,
+              automaticLocation(target, [anchor])
             )
+            if (properties) emit("site_click", normalizePath(location.href), properties)
+            return
+          }
+
+          const markedCheckout = safeClosest(target, '[data-conversion="checkout"]')
+          if (markedCheckout) {
+            const properties = checkoutClickProperties(
+              target,
+              anchor,
+              "/external/marked_checkout",
+              "external_checkout",
+              automaticLocation(target, [markedCheckout, anchor])
+            )
+            if (properties) emit("site_click", normalizePath(location.href), properties)
             return
           }
         }

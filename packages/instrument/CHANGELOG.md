@@ -3,6 +3,19 @@
 All notable changes to the `infinite-tag` npm package (`packages/instrument`). Versions before
 0.5.0 are recorded in git history only (`git log -- packages/instrument`).
 
+## 0.6.2 — 2026-09-02
+
+- **Precise Stripe checkout bucketing.** Hosted Stripe payment surfaces now emit structural
+  `site_click` checkout-intent buckets instead of `app_download_click`: Payment Links
+  (`buy.stripe.com`, `book.stripe.com`, `donate.stripe.com`), Checkout Sessions
+  (`checkout.stripe.com/c/...`), and Hosted Invoice Pages (`invoice.stripe.com/i/...`). Other
+  Stripe hosts, including docs, dashboard, support, customer portal, and unmatched paths, stay in
+  the generic external-click lane. The runtime still never sends external URLs, query strings, or
+  link/button text.
+- **Safer unmarked button autocapture.** Standalone unmarked buttons now stay under the generic
+  `button` CTA id instead of promoting arbitrary DOM `id` / `name` / test ids. Use explicit
+  `data-analytics-cta-id` and `data-analytics-cta-location` markers for cleaner button reporting.
+
 ## 0.6.1 — 2026-09-02
 
 - **Safe click autocapture.** The Infinite runtime now captures unmarked same-origin link and button
