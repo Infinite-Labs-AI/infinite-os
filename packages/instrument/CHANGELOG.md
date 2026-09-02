@@ -3,7 +3,7 @@
 All notable changes to the `infinite-tag` npm package (`packages/instrument`). Versions before
 0.5.0 are recorded in git history only (`git log -- packages/instrument`).
 
-## Unreleased
+## 0.7.0 — 2026-09-02
 
 - **Server-lane copy stops claiming 100% of traffic.** The positioning line (brief + README) now
   reads: "server-side analytics: every page your server serves and every outcome it confirms,
