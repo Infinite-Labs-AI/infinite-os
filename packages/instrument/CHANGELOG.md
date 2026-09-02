@@ -3,7 +3,7 @@
 All notable changes to the `infinite-tag` npm package (`packages/instrument`). Versions before
 0.5.0 are recorded in git history only (`git log -- packages/instrument`).
 
-## Unreleased
+## 0.6.1 — 2026-09-02
 
 - **Safe click autocapture.** The Infinite runtime now captures unmarked same-origin link and button
   clicks as structural `site_click` events, detects direct Stripe Payment Links as
