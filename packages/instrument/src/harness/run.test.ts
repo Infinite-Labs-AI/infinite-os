@@ -231,6 +231,25 @@ describe("runHarness --apply", () => {
     expect(result.report.steps[1].status).toBe("not_run")
   })
 
+  it("--plan then --apply --conversions passes the clean-tree gate: the harness's own outputs are not 'dirty'", async () => {
+    const root = copyFixture("static-html-basic")
+    write(root, "index.html", `<!doctype html>\n<html>\n<head></head>\n<body>\n<a href="/signup">Start</a>\n</body>\n</html>\n`)
+    const { execSync } = await import("node:child_process")
+    execSync("git init -q && git add . && git -c user.email=t@t -c user.name=t commit -qm init", { cwd: root })
+    await runHarness(parseHarnessArgs(["--plan", "--root", root, "--ga4-measurement-id", "G-NEW00001", "--workspace", "ws_1"]), fakeIo(), { discover: () => null })
+    expect(execSync("git status --porcelain", { cwd: root, encoding: "utf8" })).toContain(".infinite/")
+
+    const io = fakeIo()
+    const result = await runHarness(
+      parseHarnessArgs(["--apply", "--yes", "--root", root, "--ga4-measurement-id", "G-NEW00001", "--workspace", "ws_1", "--conversions", PROPOSED_CONVERSIONS_RELATIVE_PATH]),
+      io,
+      { discover: () => null }
+    )
+    expect(result.report.failures).toEqual([])
+    expect(readFileSync(join(root, "index.html"), "utf8")).toContain('data-analytics-cta-id="start"')
+    expect(readFileSync(join(root, "index.html"), "utf8")).toContain("G-NEW00001")
+  })
+
   it("interactive apply asks for marking separately and never lets --yes approve it", async () => {
     const root = copyFixture("static-html-basic")
     write(root, "index.html", `<!doctype html>\n<html>\n<head></head>\n<body>\n<a href="/signup">Start</a>\n</body>\n</html>\n`)

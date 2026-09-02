@@ -1,6 +1,7 @@
 // The harness runbook, composed: teardown §5.2 steps 1–11 over the adapters in inspect.ts,
 // marking.ts and verify.ts, driven by runbook.ts. Every I/O seam is injectable so the whole run
 // is testable against fixture repos and stubbed backends.
+import { spawnSync } from "node:child_process"
 import { existsSync, readFileSync } from "node:fs"
 import { join, relative, resolve } from "node:path"
 
@@ -111,6 +112,8 @@ interface Ctx {
   applyResult?: ApplyResult
   staticVerify?: VerifyResult
   declined: boolean
+  /** Preflight's verdict, ignoring the harness's own .infinite/ outputs and gitignore block. */
+  treeCleanForHarness: boolean
   proposal?: ConversionProposal
   marking?: ApplyConversionsResult
   verifyResult?: VerifyLanesResult
@@ -124,6 +127,27 @@ const laneOf: Partial<Record<HarnessProviderId, VerifyLane>> = {
   posthog: "posthog",
   meta: "meta",
   server_lane: "server_lane"
+}
+
+/** Paths the harness itself writes between `--plan` and `--apply`; they never make a tree "dirty". */
+const HARNESS_OWN_PATHS = [".infinite/", ".gitignore"]
+
+/**
+ * The clean-tree gate, aware of the harness's own outputs: a `--plan` run leaves
+ * `.infinite/REPORT.md`, the proposal and the gitignore block behind by design, and the
+ * documented next step is `--apply --conversions <file>` — that must not trip the gate.
+ */
+export function harnessRepoStatus(root: string): "clean" | "dirty" | "not-a-git-repo" {
+  const status = detectRepoStatus(root)
+  if (status !== "dirty") return status
+  const porcelain = spawnSync("git", ["-C", root, "status", "--porcelain"], { encoding: "utf8" })
+  if (porcelain.status !== 0) return "dirty"
+  const foreign = porcelain.stdout
+    .split("\n")
+    .filter((line) => line.trim() !== "")
+    .map((line) => line.slice(3).trim().replace(/^"|"$/g, ""))
+    .filter((path) => !HARNESS_OWN_PATHS.some((own) => (own.endsWith("/") ? path.startsWith(own) : path === own)))
+  return foreign.length === 0 ? "clean" : "dirty"
 }
 
 function nodeMajor(version: string): number {
@@ -206,11 +230,12 @@ const preflight: RunbookStep<Ctx> = {
     if (nodeMajor(version) < MINIMUM_NODE_MAJOR) {
       throw new Error(`Node ${version} is too old; infinite-tag needs Node ${MINIMUM_NODE_MAJOR} or newer.`)
     }
-    const status = detectRepoStatus(ctx.root)
+    const status = harnessRepoStatus(ctx.root)
     const writes = ctx.args.mode === "apply"
     if (writes && status === "dirty" && !ctx.args.allowDirty) {
       return { note: "dirty" }
     }
+    ctx.treeCleanForHarness = status !== "dirty"
     return { note: `git tree ${status}; node ${version}` }
   },
   successCheck(ctx) {
@@ -416,11 +441,13 @@ const apply: RunbookStep<Ctx> = {
     if (ctx.declined) return { skipped: "not approved" }
     if (!ctx.planResult || ctx.planResult.nothingToInstall) return { skipped: "nothing to install" }
     const p = ctx.planResult.plan
+    // The installer's own gate reads raw `git status`; preflight already judged the tree with the
+    // harness's outputs excluded, so its verdict (or --allow-dirty) is what applies here.
     ctx.applyResult = applyInstallation({
       root: ctx.root,
       workspaceId: ctx.args.workspaceId as string,
       plan: p,
-      allowDirty: ctx.args.allowDirty
+      allowDirty: ctx.args.allowDirty || ctx.treeCleanForHarness
     })
     ctx.staticVerify = verifyInstallation({ root: ctx.root })
     if (ctx.staticVerify.buildOk) {
@@ -675,6 +702,7 @@ export async function runHarness(args: HarnessArgs, io: HarnessIo, deps: Harness
     manifest: null,
     classifications: [],
     declined: false,
+    treeCleanForHarness: false,
     writtenLanes: []
   }
 
