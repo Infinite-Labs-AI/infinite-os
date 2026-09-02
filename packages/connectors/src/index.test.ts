@@ -602,10 +602,14 @@ describe("live provider clients", () => {
       });
 
       expect(urls.some((url) => url.includes("starting_after=in_1"))).toBe(true);
-      expect(urls.some((url) => url.includes("/v1/subscriptions"))).toBe(true);
-      const invoiceListUrl = new URL(urls.find((url) => url.includes("/v1/invoices?")) ?? "");
+      // testConnection now runs the connect-time permission probe FIRST, which reads one page of
+      // /v1/customers, /v1/events, /v1/invoices and /v1/subscriptions with no expands. The LIST
+      // assertions below are about the EXTRACT's calls, so select the expanded ones.
+      const listUrls = urls.filter((url) => url.includes("expand"));
+      expect(listUrls.some((url) => url.includes("/v1/subscriptions"))).toBe(true);
+      const invoiceListUrl = new URL(listUrls.find((url) => url.includes("/v1/invoices?")) ?? "");
       expect(invoiceListUrl.searchParams.getAll("expand[]")).toEqual(["data.customer"]);
-      const subscriptionListUrl = new URL(urls.find((url) => url.includes("/v1/subscriptions?")) ?? "");
+      const subscriptionListUrl = new URL(listUrls.find((url) => url.includes("/v1/subscriptions?")) ?? "");
       expect(subscriptionListUrl.searchParams.getAll("expand[]")).toEqual([
         "data.customer",
         "data.items.data.price",
@@ -8256,5 +8260,138 @@ describe("listMetaAssets (asset discovery for the connect picker)", () => {
       { match: "/me/businesses", body: { error: { message: "bad token" } }, status: 401 } // throws
     ]);
     await expect(listMetaAssets("bogus")).rejects.toMatchObject({ code: "provider_auth_failed" });
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// Stripe connect-time permission gate.
+//
+// A restricted key that can read `/v1/customers` is NOT proof the sync can run: the very first
+// call the Stripe sync makes is `GET /v1/events`, and a key without Events: Read 403s there with
+// `more_permissions_required`. Probing only customers at connect time therefore admitted keys
+// that could never sync, leaving the source parked in `error` with zero rows and no explanation
+// the user could act on. The connect probe now reads EVERY endpoint the sync needs and reports
+// all of the missing permissions in one message.
+// ---------------------------------------------------------------------------------------------
+
+// The exact provider body Stripe returns for a mis-scoped restricted key (account id + key
+// fingerprint elided — the connector never needs either, it only reads code + message).
+function stripeMorePermissionsBody(permissionName: string, permissionCode: string) {
+  return {
+    error: {
+      code: "more_permissions_required",
+      message:
+        `Permission denied. The provided key does not have the required permissions for this `
+        + `endpoint. Enabling ${permissionName} Read ('${permissionCode}') permissions on this key `
+        + `would allow this request to continue.`,
+      type: "invalid_request_error"
+    }
+  };
+}
+
+function errorResponse(value: unknown, status: number): Response {
+  return new Response(JSON.stringify(value), {
+    status,
+    headers: { "Content-Type": "application/json" }
+  });
+}
+
+function stripeCredentialDb(): InfiniteOsDb {
+  return fakeDb({
+    credential: {
+      credential_kind: "api_key",
+      encrypted_payload: encryptedCredential({
+        mode: "live",
+        secretKey: "rk_test",
+        apiBaseUrl: "https://stripe.test"
+      })
+    }
+  });
+}
+
+describe("Stripe connect-time permission probe", () => {
+  it("probes every endpoint the sync reads and passes when the key covers them all", async () => {
+    const paths: string[] = [];
+    await withMockFetch(async (url) => {
+      paths.push(new URL(url).pathname);
+      return jsonResponse({ data: [], has_more: false });
+    }, async () => {
+      await expect(
+        connectorFor("stripe").testConnection(stripeCredentialDb(), request("stripe"))
+      ).resolves.toMatchObject({ ok: true, mode: "live", provider: "stripe" });
+    });
+    expect(paths.sort()).toEqual([
+      "/v1/customers",
+      "/v1/events",
+      "/v1/invoices",
+      "/v1/subscriptions"
+    ]);
+  });
+
+  it("rejects a key missing Events: Read with a clean, actionable message", async () => {
+    await withMockFetch(async (url) => {
+      if (url.includes("/v1/events")) {
+        return errorResponse(stripeMorePermissionsBody("Events", "event_read"), 403);
+      }
+      return jsonResponse({ data: [], has_more: false });
+    }, async () => {
+      const failure = await connectorFor("stripe")
+        .testConnection(stripeCredentialDb(), request("stripe"))
+        .then(() => null, (error: unknown) => error as Error & { code?: string });
+      expect(failure?.code).toBe("provider_auth_failed");
+      expect(failure?.message).toBe(
+        "Stripe restricted key is missing permission: Events: Read. Edit the key in the Stripe "
+        + "Dashboard (Developers → API keys) and grant Events, Customers, Invoices and "
+        + "Subscriptions: Read."
+      );
+      // The raw provider envelope never reaches the user-facing message.
+      expect(failure?.message).not.toContain("more_permissions_required");
+      expect(failure?.message).not.toContain("{");
+    });
+  });
+
+  it("names EVERY missing permission from one connect attempt", async () => {
+    await withMockFetch(async (url) => {
+      if (url.includes("/v1/events")) {
+        return errorResponse(stripeMorePermissionsBody("Events", "event_read"), 403);
+      }
+      if (url.includes("/v1/invoices")) {
+        return errorResponse(stripeMorePermissionsBody("Invoices", "invoice_read"), 403);
+      }
+      return jsonResponse({ data: [], has_more: false });
+    }, async () => {
+      await expect(
+        connectorFor("stripe").testConnection(stripeCredentialDb(), request("stripe"))
+      ).rejects.toThrow(
+        "Stripe restricted key is missing permissions: Events: Read, Invoices: Read."
+      );
+    });
+  });
+
+  it("keeps the provider auth-failed path for a revoked key (401)", async () => {
+    await withMockFetch(async () => errorResponse(
+      { error: { code: "api_key_expired", message: "Expired API Key provided", type: "invalid_request_error" } },
+      401
+    ), async () => {
+      const failure = await connectorFor("stripe")
+        .testConnection(stripeCredentialDb(), request("stripe"))
+        .then(() => null, (error: unknown) => error as Error & { code?: string });
+      expect(failure?.code).toBe("provider_auth_failed");
+      expect(failure?.message).toContain("provider auth failed 401 for https://stripe.test/v1/customers");
+      expect(failure?.message).not.toContain("missing permission");
+    });
+  });
+
+  it("does NOT spend the deep probe on every sync — the liveness depth reads one endpoint", async () => {
+    const paths: string[] = [];
+    await withMockFetch(async (url) => {
+      paths.push(new URL(url).pathname);
+      return jsonResponse({ data: [], has_more: false });
+    }, async () => {
+      await expect(
+        connectorFor("stripe").testConnection(stripeCredentialDb(), request("stripe"), "liveness")
+      ).resolves.toMatchObject({ ok: true, mode: "live" });
+    });
+    expect(paths).toEqual(["/v1/customers"]);
   });
 });
