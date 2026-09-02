@@ -142,6 +142,31 @@ describe("infinite analytics", () => {
     expect(io.err_).toContain("Workspace ws_desktop (Desktop's active workspace).");
   });
 
+  it("the Desktop's workspace.id is the engine project id and becomes engineProjectId in the cloud backend", async () => {
+    // The bridge's /v1/status `workspace.id` is `authority.snapshot.engineProjectId` (desktop
+    // cmdl-brain-service.ts) — the `proj_…` id artifacts are keyed by, not a cloud UUID.
+    const captured: Captured = { runs: [], loaded: 0 };
+    await runAnalyticsCommand(["--check"], { INFINITE_API_TOKEN: "tok_1" }, {
+      io: fakeIo(),
+      loadTag: async () => fakeTag(captured),
+      resolveBridge: () => ({
+        client: {
+          status: async () => ({
+            service: "infinite-desktop-cmdl",
+            bootId: "b",
+            protocol: { min: 1, max: 1 },
+            capabilities: [],
+            ready: true,
+            contextRevision: "r",
+            workspace: { id: "proj_engine01", name: "Site" }
+          })
+        }
+      })
+    });
+    expect(captured.runs[0].args.workspaceId).toBe("proj_engine01");
+    expect(captured.runs[0].backends).toEqual(["cloud:https://api.ultima.inc:proj_engine01:token-ok"]);
+  });
+
   it("an explicit --workspace wins over the Desktop", async () => {
     const captured: Captured = { runs: [], loaded: 0 };
     await runAnalyticsCommand(["--check", "--workspace", "ws_flag"], {}, {

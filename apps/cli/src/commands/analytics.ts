@@ -94,7 +94,17 @@ function defaultResolveBridge(env: AnalyticsCommandEnv): { client: Pick<DesktopA
   }
 }
 
-/** The Desktop's active workspace id, or null when Desktop is not running / not ready. */
+/**
+ * The Desktop's active workspace, or null when Desktop is not running / not ready.
+ *
+ * WHICH id this is: the bridge's `/v1/status` is built by the Cmd+L brain service
+ * (1bu-1 `apps/desktop/src/main/brain/agent/cmdl-brain-service.ts`, `status()`), whose
+ * `workspace.id` is `authority.snapshot.engineProjectId` — the ENGINE project id the desktop
+ * links (`proj_…`), the same id `infinite setup` keys `~/.infinite/artifacts/<id>.json` by and
+ * the same id every cloud route resolves through `linkedWorkspace(engineProjectId)`. It is NOT
+ * the cloud workspace UUID. That is why it is passed straight through as the harness's
+ * `--workspace` and as `engineProjectId` in the cloud verify body.
+ */
 export async function activeWorkspaceFromDesktop(
   env: AnalyticsCommandEnv,
   resolveBridge: NonNullable<AnalyticsCommandDeps["resolveBridge"]>
