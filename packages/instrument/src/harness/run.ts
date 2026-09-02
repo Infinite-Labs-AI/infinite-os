@@ -5,11 +5,11 @@ import { spawnSync } from "node:child_process"
 import { existsSync, readFileSync } from "node:fs"
 import { join, relative, resolve } from "node:path"
 
-import { applyInstallation } from "../apply.js"
+import { applyInstallation, restoreSnapshot, snapshotFiles, type FileSnapshot } from "../apply.js"
 import { isSupportedFramework } from "../frameworks/index.js"
 import { assertWriteTargetInsideRoot, writeFileAtomic } from "../frameworks/shared.js"
 import { detectRepoStatus, inspectWorkspace } from "../inspect.js"
-import { computeContentHashes, readInstallManifest, writeInstallManifest } from "../manifest.js"
+import { computeContentHashes, installManifestRelativePath, readInstallManifest, writeInstallManifest } from "../manifest.js"
 import { renderPreview } from "../render.js"
 import type { ApplyResult, InspectResult, InstallManifest, VerifyResult, WorkspaceInstallArtifacts } from "../types.js"
 import { verifyInstallation } from "../verify.js"
@@ -40,6 +40,7 @@ import {
   type ApprovedConversions,
   type ConversionProposal
 } from "./marking.js"
+import { recordHarnessFile } from "./outputs.js"
 import { errorText, runRunbook, type RunbookStep } from "./runbook.js"
 import {
   HARNESS_REPORT_RELATIVE_PATH,
@@ -111,6 +112,8 @@ interface Ctx {
   planResult?: HarnessPlanResult
   applyResult?: ApplyResult
   staticVerify?: VerifyResult
+  /** What the apply step did when static verification failed: rolled back, or left as written. */
+  applyOutcome?: "rolled_back" | "left_written"
   declined: boolean
   /** Preflight's verdict, ignoring the harness's own .infinite/ outputs and gitignore block. */
   treeCleanForHarness: boolean
@@ -119,6 +122,15 @@ interface Ctx {
   verifyResult?: VerifyLanesResult
   /** Providers this run wrote (install/upgrade) — the lanes verification reads back. */
   writtenLanes: VerifyLane[]
+}
+
+/**
+ * Human narration (preview, proposal table, brief echo). With --json stdout must carry exactly one
+ * JSON document — the report — so everything else goes to stderr.
+ */
+function narrate(ctx: Ctx, text: string): void {
+  if (ctx.args.json) ctx.io.err(text)
+  else ctx.io.out(text)
 }
 
 const laneOf: Partial<Record<HarnessProviderId, VerifyLane>> = {
@@ -185,6 +197,7 @@ function writeJson(root: string, relativePath: string, value: unknown): string {
   const absolutePath = join(root, relativePath)
   assertWriteTargetInsideRoot(root, absolutePath)
   writeFileAtomic(absolutePath, `${JSON.stringify(value, null, 2)}\n`)
+  recordHarnessFile(root, relativePath)
   return absolutePath
 }
 
@@ -418,17 +431,17 @@ const confirm: RunbookStep<Ctx> = {
     if (ctx.args.mode !== "apply") return { skipped: `${ctx.args.mode} mode writes no install` }
     if (ctx.args.brief) return { skipped: "--brief" }
     if (!ctx.planResult || ctx.planResult.nothingToInstall) return { skipped: "nothing to install" }
-    ctx.io.out(renderPreview(ctx.planResult.plan))
+    narrate(ctx, renderPreview(ctx.planResult.plan))
     if (ctx.args.yes) return { note: "approved with --yes" }
     if (!ctx.io.interactive) {
       ctx.declined = true
-      ctx.io.out("This was a preview — nothing changed. To apply:  npx infinite-tag harness --yes")
+      narrate(ctx, "This was a preview — nothing changed. To apply:  npx infinite-tag harness --yes")
       return { note: "non-interactive without --yes; nothing written" }
     }
     const approved = await ctx.io.confirm("Apply these changes? [Y/n] ", true)
     if (!approved) {
       ctx.declined = true
-      ctx.io.out("No changes made.")
+      narrate(ctx, "No changes made.")
       return { note: "declined; nothing written" }
     }
     return { note: "approved" }
@@ -448,6 +461,13 @@ const apply: RunbookStep<Ctx> = {
     const p = ctx.planResult.plan
     // The installer's own gate reads raw `git status`; preflight already judged the tree with the
     // harness's outputs excluded, so its verdict (or --allow-dirty) is what applies here.
+    // applyInstallation restores its own snapshot when it throws; a static-verification failure
+    // AFTER a successful write is ours to roll back, so the same pre-image is taken here.
+    const snapshot: FileSnapshot[] = snapshotFiles(ctx.root, [
+      ...p.files,
+      ...(p.serverLane ? [p.serverLane.briefPath] : []),
+      installManifestRelativePath
+    ])
     ctx.applyResult = applyInstallation({
       root: ctx.root,
       workspaceId: ctx.args.workspaceId as string,
@@ -455,6 +475,15 @@ const apply: RunbookStep<Ctx> = {
       allowDirty: ctx.args.allowDirty || ctx.treeCleanForHarness
     })
     ctx.staticVerify = verifyInstallation({ root: ctx.root })
+    if (!ctx.staticVerify.buildOk) {
+      try {
+        restoreSnapshot(ctx.root, snapshot)
+        ctx.applyOutcome = "rolled_back"
+        ctx.applyResult = undefined
+      } catch {
+        ctx.applyOutcome = "left_written"
+      }
+    }
     if (ctx.staticVerify.buildOk) {
       for (const provider of p.providers) {
         const lane = laneOf[provider as HarnessProviderId]
@@ -468,17 +497,23 @@ const apply: RunbookStep<Ctx> = {
         )
       }
     }
-    return { note: `${ctx.applyResult.changedFiles.length} file${ctx.applyResult.changedFiles.length === 1 ? "" : "s"} changed` }
+    const changed = ctx.applyResult?.changedFiles.length ?? 0
+    return { note: ctx.applyOutcome ? `static verification failed; ${ctx.applyOutcome === "rolled_back" ? "rolled back" : "left as written"}` : `${changed} file${changed === 1 ? "" : "s"} changed` }
   },
   successCheck(ctx) {
     return ctx.staticVerify?.buildOk === true
   },
   failure: {
     code: "INF_APPLY_ROLLED_BACK",
+    // "rolled back" is claimed only when a rollback actually ran: applyInstallation restores its
+    // snapshot when it throws, and the apply step restores its own when static verification fails.
     message: (ctx, error) => {
       const files = ctx.planResult?.plan.files.length ?? 0
       const drift = ctx.staticVerify?.routeChecks.filter((line) => /Missing|drifted|forbidden/.test(line)).join("; ")
-      return `Apply failed${error ? ` (${errorText(error)})` : drift ? ` — ${drift}` : ""}; rolled back ${files} file${files === 1 ? "" : "s"}. Nothing was left half-installed.`
+      if (error !== undefined || ctx.applyOutcome === "rolled_back") {
+        return `Apply failed${error ? ` (${errorText(error)})` : drift ? ` — ${drift}` : ""}; rolled back ${files} file${files === 1 ? "" : "s"}. Nothing was left half-installed.`
+      }
+      return `Apply wrote ${files} file${files === 1 ? "" : "s"} but static verification failed${drift ? ` — ${drift}` : ""}; the files were left as written (rollback failed) — review \`git diff\`.`
     },
     next: "halt"
   }
@@ -498,6 +533,12 @@ const conversions: RunbookStep<Ctx> = {
     let approved: ApprovedConversions | null = null
     if (ctx.args.conversions) {
       approved = readApprovedConversions(ctx.root, ctx.args.conversions)
+      // Only --apply marks. In plan mode the file is validated and counted, and nothing is written.
+      if (ctx.args.mode !== "apply") {
+        ctx.report.conversions = { proposed: approved.rows.length, marked: 0, skipped: 0, stale: 0 }
+        return { note: `${approved.rows.length} approved row${approved.rows.length === 1 ? "" : "s"} validated; nothing marked in ${ctx.args.mode} mode` }
+      }
+      if (ctx.declined) return { skipped: "install not approved; nothing marked" }
     } else {
       ctx.proposal = proposeConversions({ root: ctx.root, appRoot, downloadDestinationPath })
       writeProposal(ctx.root, ctx.proposal)
@@ -508,7 +549,7 @@ const conversions: RunbookStep<Ctx> = {
       }
       if (ctx.declined) return { skipped: "install not approved; proposal written only" }
       if (ctx.proposal.rows.length === 0) return { note: "nothing to propose" }
-      ctx.io.out(renderProposalTable(ctx.proposal))
+      narrate(ctx, renderProposalTable(ctx.proposal))
       // --yes never approves marking: renaming a company's conversion vocabulary is a data
       // contract change, so it is always an explicit answer (default No).
       const mark = ctx.io.interactive
@@ -558,11 +599,17 @@ const serverLane: RunbookStep<Ctx> = {
     const target = lane.targetLabel ?? (lane.mode === "next-middleware" ? "Next.js middleware" : lane.mode)
     const why = lane.targetEvidence ? ` (${lane.targetEvidence})` : ""
     const middlewareWritten = lane.mode === "next-middleware" && lane.middleware?.action !== "unpatchable"
-    const createdWritten = (lane.created ?? []).some((entry) => entry.action === "create" || entry.action === "keep")
-    const manual = (lane.created ?? []).filter((entry) => entry.action === "manual")
-    if (lane.mode !== "brief" && (middlewareWritten || createdWritten)) {
+    const created = lane.created ?? []
+    // "installed" for a lane means a file that RUNS was written: the entry (middleware, edge
+    // function, Pages middleware), or the Next middleware. Module-only writes with a manual entry
+    // record nothing until the founder mounts them.
+    const entryWritten = created.some((entry) => entry.role === "entry" && entry.action !== "manual")
+    const moduleWritten = created.some((entry) => entry.role === "module" && entry.action !== "manual")
+    const manualEntry = created.find((entry) => entry.role === "entry" && entry.action === "manual")
+    const manual = created.filter((entry) => entry.action === "manual")
+    if (lane.mode !== "brief" && (middlewareWritten || entryWritten)) {
       ctx.writtenLanes.push("server_lane")
-      const evidence = lane.middleware?.path ?? lane.created?.find((entry) => entry.action !== "manual")?.path ?? lane.modulePath
+      const evidence = lane.middleware?.path ?? created.find((entry) => entry.role === "entry" && entry.action !== "manual")?.path ?? lane.modulePath
       updateProvider(ctx.report, "server_lane", (state) =>
         transitionProvider(state, {
           to: "installed",
@@ -572,6 +619,27 @@ const serverLane: RunbookStep<Ctx> = {
       )
       return { note: `${target}${why}: ${lane.files.join(", ")}; ${lane.briefPath} ${applied.briefWritten ? "written" : "not written"}` }
     }
+    if (lane.mode === "node-module" && moduleWritten) {
+      // No entry by design: the customer mounts the module. Written, but not counting anything yet.
+      updateProvider(ctx.report, "server_lane", (state) =>
+        transitionProvider(state, {
+          to: "installed",
+          reason: `${target}${why}; not mounted yet — add the one-line mount from ${lane.briefPath}; nothing is recorded until then`,
+          evidence: created.find((entry) => entry.role === "module")?.path ?? lane.modulePath
+        })
+      )
+      return { note: `${target}: module written, mount is manual (${lane.briefPath})` }
+    }
+    if (lane.mode !== "brief" && moduleWritten && manualEntry) {
+      updateProvider(ctx.report, "server_lane", (state) =>
+        transitionProvider(state, {
+          to: "skipped",
+          reason: `entry manual — ${manualEntry.path} is not ours to edit${manualEntry.reason ? ` (${manualEntry.reason})` : ""}; the module was written but nothing runs until you add the lines from ${lane.briefPath}`,
+          evidence: manualEntry.path
+        })
+      )
+      return { note: `${target}: module written, entry ${manualEntry.path} left for you (${lane.briefPath})` }
+    }
     const reason = lane.middleware?.reason ?? manual[0]?.reason
     updateProvider(ctx.report, "server_lane", (state) =>
       transitionProvider(state, {
@@ -580,7 +648,7 @@ const serverLane: RunbookStep<Ctx> = {
         evidence: lane.briefPath
       })
     )
-    if (!applied.briefWritten) ctx.io.out(applied.brief)
+    if (!applied.briefWritten) narrate(ctx, applied.brief)
     return { note: `brief only (${lane.mode}${reason ? `: ${reason}` : ""})` }
   },
   successCheck: () => true,
@@ -605,9 +673,13 @@ const verify: RunbookStep<Ctx> = {
             : state
         )
       }
-      if (manifest.serverLane?.mode === "next-middleware") {
+      // Every lane mode a manifest can record (Next, Vercel-any, Netlify, Cloudflare Pages, Node
+      // module) is a lane to read back; only "brief" wrote nothing.
+      const recordedLane = manifest.serverLane
+      if (recordedLane && recordedLane.mode !== "brief") {
         ctx.writtenLanes.push("server_lane")
-        updateProvider(ctx.report, "server_lane", (state) => ({ ...state, state: "installed", reason: "recorded in .infinite/install.json", evidence: manifest.serverLane?.middleware }))
+        const evidence = recordedLane.middleware ?? recordedLane.created?.[0] ?? recordedLane.module ?? ".infinite/install.json"
+        updateProvider(ctx.report, "server_lane", (state) => ({ ...state, state: "installed", reason: `recorded in .infinite/install.json (${recordedLane.mode})`, evidence }))
       }
     } else if (ctx.declined) {
       return { skipped: "not applied" }
@@ -670,6 +742,7 @@ const reportStep: RunbookStep<Ctx> = {
     const absolutePath = join(ctx.root, HARNESS_REPORT_RELATIVE_PATH)
     assertWriteTargetInsideRoot(ctx.root, absolutePath)
     writeFileAtomic(absolutePath, renderReportMarkdown(ctx.report))
+    recordHarnessFile(ctx.root, HARNESS_REPORT_RELATIVE_PATH)
     return { note: `${HARNESS_REPORT_RELATIVE_PATH} written` }
   },
   successCheck: () => true,

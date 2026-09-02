@@ -174,6 +174,63 @@ describe("runHarness --plan", () => {
   })
 })
 
+describe("runHarness --plan --conversions", () => {
+  it("validates the file, marks nothing, and leaves the tree clean", async () => {
+    const root = copyFixture("static-html-basic")
+    write(root, "index.html", `<!doctype html>\n<html>\n<head></head>\n<body>\n<a href="/signup">Start</a>\n</body>\n</html>\n`)
+    const { execSync } = await import("node:child_process")
+    execSync("git init -q && git add . && git -c user.email=t@t -c user.name=t commit -qm init", { cwd: root })
+    await runHarness(parseHarnessArgs(["--plan", "--root", root, "--ga4-measurement-id", "G-NEW00001", "--workspace", "ws_1"]), fakeIo(), { discover: () => null })
+    const result = await runHarness(parseHarnessArgs(["--plan", "--root", root, "--ga4-measurement-id", "G-NEW00001", "--workspace", "ws_1", "--conversions", PROPOSED_CONVERSIONS_RELATIVE_PATH]), fakeIo(), { discover: () => null })
+    expect(result.exitCode).toBe(0)
+    expect(result.report.conversions).toEqual({ proposed: 1, marked: 0, skipped: 0, stale: 0 })
+    expect(readFileSync(join(root, "index.html"), "utf8")).not.toContain("data-analytics-cta-id")
+    const status = execSync("git status --porcelain", { cwd: root, encoding: "utf8" }).split("\n").filter(Boolean)
+    expect(status.every((line) => line.includes(".infinite/") || line.includes(".gitignore"))).toBe(true)
+  })
+})
+
+describe("runHarness --json", () => {
+  it("emits exactly one JSON document on stdout in apply mode; narration goes to stderr", async () => {
+    const root = copyFixture("static-html-basic")
+    write(root, "index.html", `<!doctype html>\n<html>\n<head></head>\n<body>\n<a href="/signup">Start</a>\n</body>\n</html>\n`)
+    const io = fakeIo({ interactive: true, answers: [false] })
+    const result = await runHarness(parseHarnessArgs(["--apply", "--yes", "--json", "--root", root, "--ga4-measurement-id", "G-NEW00001", "--workspace", "ws_1"]), io, { discover: () => null })
+    expect(result.exitCode).toBe(0)
+    const parsed = JSON.parse(io.outLines.join("\n")) as { providers: unknown[]; mode: string }
+    expect(parsed.mode).toBe("apply")
+    expect(parsed.providers).toHaveLength(7)
+    expect(io.errLines.join("\n")).toContain("Infinite OS · analytics installer")
+    expect(io.errLines.join("\n")).toContain("Proposed conversions")
+  })
+})
+
+describe("runHarness --verify-only", () => {
+  it("reads back every server-lane mode a manifest can record, not only Next middleware", async () => {
+    const root = copyFixture("vite-react-basic")
+    write(root, ".infinite/install.json", JSON.stringify({
+      workspaceId: "ws_1", appRoot: ".", framework: "vite-react", providers: ["ga4"], files: [], envKeys: [], contentHashes: {},
+      serverLane: { mode: "vercel-middleware", created: ["middleware.ts", "lib/infinite-server-lane.ts"], brief: "INSTALL-SERVER-LANE.md" },
+      wiringVersion: 1, verifiedAt: null
+    }))
+    const backend: VerificationBackend = {
+      name: "stub", lanes: ["ga4", "posthog", "infinite", "meta", "server_lane"],
+      verify: async (input) => Object.fromEntries(input.lanes.map((lane) => [lane, { state: "verified" as const, receiptAt: "2026-09-02T10:00:04.000Z" }]))
+    }
+    const io = fakeIo()
+    const result = await runHarness(
+      parseHarnessArgs(["--verify-only", "--root", root, "--url", "https://example.com/"]),
+      io,
+      { discover: () => null, backends: [backend], fetch: (async () => new Response("", { status: 200 })) as unknown as typeof fetch, ...clock(), budgetMs: 3_000, pollIntervalMs: 3_000 }
+    )
+    expect(result.report.failures).toEqual([])
+    const lane = result.report.providers.find((state) => state.provider === "server_lane")
+    expect(lane?.state).toBe("verified")
+    expect(lane?.evidence).toBe("middleware.ts")
+    expect(result.report.steps.find((step) => step.id === "verify")?.note).toContain("server_lane=verified")
+  })
+})
+
 describe("runHarness --apply", () => {
   it("installs, marks approved conversions, and reports installed / not verifiable with NoneBackend", async () => {
     const root = copyFixture("static-html-basic")
@@ -286,6 +343,20 @@ describe("runHarness --apply", () => {
     const siteLane = siteResult.report.providers.find((state) => state.provider === "server_lane")
     expect(siteLane?.state).toBe("skipped")
     expect(siteLane?.reason).toContain("brief only")
+  })
+
+  it("a lane whose entry is not ours to edit is not 'installed': module written, entry manual", async () => {
+    const root = copyFixture("vite-react-basic")
+    write(root, "vercel.json", `{}`)
+    write(root, "middleware.ts", `export default function middleware() {}\n`)
+    const io = fakeIo()
+    const result = await runHarness(parseHarnessArgs(["--apply", "--yes", "--no-mark", "--server-lane", "--root", root, "--ga4-measurement-id", "G-NEW00001", "--workspace", "ws_1", "--infinite-static-proxy", "vercel"]), io, { discover: () => null })
+    const lane = result.report.providers.find((state) => state.provider === "server_lane")
+    expect(lane?.state).not.toBe("installed")
+    expect(lane?.reason).toContain("entry manual")
+    expect(lane?.evidence).toBe("middleware.ts")
+    expect(readFileSync(join(root, "middleware.ts"), "utf8")).toBe(`export default function middleware() {}\n`)
+    expect(result.report.steps.find((step) => step.id === "verify")?.status).toBe("skipped")
   })
 
   it("runHarnessCommand maps a halting failure to exit 1 and an inf-error line", async () => {
