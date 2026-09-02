@@ -502,6 +502,7 @@ export function applyServerLane(input: ApplyServerLaneInput): ApplyServerLaneRes
   const brief = renderServerLaneBrief(briefInput)
   const guideRootRelative = normalizeAppRelativePath(input.appRoot, SERVER_LANE_GUIDE_FILE)
   const guideAppRelative = toAppRelative(input.appRoot, guideRootRelative)
+  let guideWritten = false
   if (hasExistingUnmanagedFile(appRootAbsolute, guideAppRelative)) {
     warnings.push(
       `${guideRootRelative} exists and is not managed by Infinite; the full guide was left unwritten (it is printed instead).`
@@ -511,14 +512,19 @@ export function applyServerLane(input: ApplyServerLaneInput): ApplyServerLaneRes
     // the guide is a doc the pointer links to, tracked here purely so uninstall can remove it.
     writeFileIfChanged(appRootAbsolute, guideAppRelative, brief)
     manifest.guide = guideRootRelative
+    guideWritten = true
   }
 
-  const pointer = renderServerLanePointer({ ...briefInput, guidePath: guideRootRelative })
+  // The pointer claims/links the guide ONLY when it was actually written + recorded — never a
+  // customer's own unmanaged docs file, and never a serverLane.guide record that does not exist.
+  const pointer = renderServerLanePointer({ ...briefInput, guidePath: guideWritten ? guideRootRelative : null })
   const briefAppRelative = toAppRelative(input.appRoot, input.plan.briefPath)
   let briefWritten = false
   if (hasExistingUnmanagedFile(appRootAbsolute, briefAppRelative)) {
     warnings.push(
-      `${input.plan.briefPath} exists and is not managed by Infinite; it was left untouched (the guide is at ${guideRootRelative}).`
+      `${input.plan.briefPath} exists and is not managed by Infinite; it was left untouched${
+        guideWritten ? ` (the guide is at ${guideRootRelative})` : " (the guide was printed instead)"
+      }.`
     )
   } else {
     if (writeFileIfChanged(appRootAbsolute, briefAppRelative, pointer)) {

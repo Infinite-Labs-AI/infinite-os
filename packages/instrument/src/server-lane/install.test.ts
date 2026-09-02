@@ -353,6 +353,31 @@ describe("install --server-lane on other stacks", () => {
     expectTreeEquals(root, original)
   })
 
+  it("does not overwrite an unmanaged docs guide, and the root pointer never lies about it", () => {
+    const root = copyFixture("vite-react-basic")
+    mkdirSync(join(root, "docs"))
+    writeFileSync(join(root, SERVER_LANE_GUIDE_FILE), "# our own docs\n")
+    const { apply } = planAndApply(root, {})
+
+    // The customer's file is untouched and NOT recorded — the manifest claim must be true.
+    expect(readFileSync(join(root, SERVER_LANE_GUIDE_FILE), "utf8")).toBe("# our own docs\n")
+    expect(readInstallManifest(root)?.serverLane).toEqual({ mode: "brief", brief: SERVER_LANE_BRIEF_FILE })
+    expect(apply.serverLane?.manifest.guide).toBeUndefined()
+    expect(apply.warnings.some((warning) => warning.includes("not managed by Infinite"))).toBe(true)
+
+    // The root pointer must NOT link to the customer's file or claim serverLane.guide.
+    const pointer = readFileSync(join(root, SERVER_LANE_BRIEF_FILE), "utf8")
+    expect(pointer).not.toContain(`(${SERVER_LANE_GUIDE_FILE})`)
+    expect(pointer).not.toContain("serverLane.guide")
+    expect(pointer).toContain("was NOT written")
+    expect(pointer).toContain("npx infinite-tag server-lane --brief")
+
+    // Uninstall removes only the pointer we wrote; the customer's docs file stays.
+    uninstallInstallation({ root, dryRun: false })
+    expect(existsSync(join(root, SERVER_LANE_BRIEF_FILE))).toBe(false)
+    expect(readFileSync(join(root, SERVER_LANE_GUIDE_FILE), "utf8")).toBe("# our own docs\n")
+  })
+
   it("does not overwrite an unmanaged INSTALL-SERVER-LANE.md; reports briefWritten=false", () => {
     const root = copyFixture("vite-react-basic")
     writeFileSync(join(root, SERVER_LANE_BRIEF_FILE), "# my own notes\n")

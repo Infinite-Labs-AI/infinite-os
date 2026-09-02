@@ -699,6 +699,35 @@ describe("the outcome helper, executed", () => {
     const body = JSON.parse(postedBody(fetchMock).body) as { properties: Record<string, string> }
     expect(body.properties).toEqual({ path: "/checkout", visitKey: VECTORS.visitKey })
   })
+
+  it("the Node twin derives the SAME visit key from a plain-object req as from explicit inputs", async () => {
+    // Regression: the Node outcome helper used to spread `{ ...visitKeyInputs, nowMs }`, so a Node
+    // `req` became `{ headers, nowMs }` — clientIp/userAgent empty — and it derived a DIFFERENT key,
+    // breaking same-lane attribution for Node users who followed the guide's `visitKeyInputs: req`.
+    const dir = mkdtempSync(join(tmpdir(), "instrument-lane-node-req-"))
+    tempRoots.push(dir)
+    writeFileSync(join(dir, "infinite-server-lane.js"), nodeLaneModuleSource(BUILD))
+    const outcomePath = join(dir, "infinite-outcome.js")
+    writeFileSync(outcomePath, nodeOutcomeHelperSource())
+    const helper = (await import(pathToFileURL(outcomePath).href)) as {
+      postInfiniteOutcome: (input: Record<string, unknown>) => Promise<boolean>
+    }
+
+    await expect(
+      helper.postInfiniteOutcome({
+        type: "purchase",
+        path: "/checkout",
+        eventId: "purchase:node_req",
+        occurredAt: new Date(VECTORS.nowMs),
+        // A Node request: .headers is a PLAIN OBJECT, exactly as Express / node:http hand it over.
+        visitKeyInputs: { headers: { "x-forwarded-for": `${VECTORS.clientIp}, 10.0.0.1`, "user-agent": VECTORS.userAgent } }
+      })
+    ).resolves.toBe(true)
+    const body = JSON.parse(postedBody(fetchMock).body) as { properties: Record<string, string> }
+    // The shared helper's vector — the Node twin must derive the identical key, and never leak the IP.
+    expect(body.properties.visitKey).toBe(VECTORS.visitKey)
+    expect(postedBody(fetchMock).body).not.toContain(VECTORS.clientIp)
+  })
 })
 
 describe("the generated files as text", () => {

@@ -519,8 +519,15 @@ export function renderServerLaneBrief(input: ServerLaneBriefInput): string {
  * The short pointer written to the repo ROOT (INSTALL-SERVER-LANE.md). It carries the status line,
  * a link to the full guide under docs/, and the two environment variables — so the root stays
  * uncluttered while the 700-line guide (and the .infinite/install.json record) hold the detail.
+ *
+ * `guidePath` is null when the guide could NOT be written (an unmanaged file already sits at docs/).
+ * The pointer must never link to the customer's own file or claim a `serverLane.guide` record that
+ * does not exist, so it points at the CLI instead.
  */
-export function renderServerLanePointer(input: ServerLaneBriefInput & { guidePath: string }): string {
+export function renderServerLanePointer(input: ServerLaneBriefInput & { guidePath: string | null }): string {
+  const guideLine = input.guidePath
+    ? `**The full install guide is in [\`${input.guidePath}\`](${input.guidePath})** — contract, reference implementations for every platform, the outcome + Meta relay recipes, and the verify steps. It is also recorded in \`.infinite/install.json\` (\`serverLane.guide\`).`
+    : "**The full install guide was NOT written** — a file Infinite does not manage already sits where it would go (docs/). It was printed during install; regenerate it any time with `npx infinite-tag server-lane --brief` (redirect it to a path of your choosing)."
   return [
     SERVER_LANE_BRIEF_BANNER,
     `# ${serverLaneCopy.title}`,
@@ -529,7 +536,7 @@ export function renderServerLanePointer(input: ServerLaneBriefInput & { guidePat
     "",
     renderStatusParagraph(input.status),
     "",
-    `**The full install guide is in [\`${input.guidePath}\`](${input.guidePath})** — contract, reference implementations for every platform, the outcome + Meta relay recipes, and the verify steps. It is also recorded in \`.infinite/install.json\` (\`serverLane.guide\`).`,
+    guideLine,
     "",
     "Two environment variables make the lane live (never written to a file by infinite-tag):",
     "```",

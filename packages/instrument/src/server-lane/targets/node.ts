@@ -212,10 +212,56 @@ export function nodeOutcomeHelperSource(): string {
       "// payment captured, file served). Never from a click: a click is intent, not an outcome.",
       "//",
       '//   import { postInfiniteOutcome } from "./lib/infinite-outcome.js"',
-      '//   await postInfiniteOutcome({ type: "purchase", path: "/checkout", accountKey: order.id,',
-      '//     visitKeyInputs: { clientIp: req.ip, userAgent: req.headers["user-agent"] } })'
+      "//",
+      "// visitKeyInputs accepts a Node request (req — .headers is a plain object, read correctly),",
+      "// a WHATWG Request, OR an explicit { clientIp, userAgent }:",
+      '//   await postInfiniteOutcome({ type: "purchase", path: "/checkout", accountKey: order.id, visitKeyInputs: req })',
+      "//",
+      "// In a WEBHOOK the request is the PROVIDER'S, not the buyer's — compute the key at checkout",
+      "// with infiniteVisitKey({ clientIp, userAgent }) from ./infinite-server-lane.js, carry it (e.g.",
+      "// Stripe metadata), and pass it as properties: { visitKey } so this skips its own derivation."
     ],
     String.raw`${NODE_LANE_IMPORT}
+
+/**
+ * One header value from EITHER a plain object (req.headers on Node/Express) OR a WHATWG Headers
+ * (.get). A plain object is the common case on a Node server, so read it correctly rather than
+ * dropping the visit key.
+ */
+function infiniteHeaderValue(headers, name) {
+  if (headers && typeof headers.get === "function") {
+    return headers.get(name) ?? ""
+  }
+  const bag = headers ?? {}
+  let value = bag[name]
+  if (value === undefined) {
+    const lower = name.toLowerCase()
+    for (const key of Object.keys(bag)) {
+      if (key.toLowerCase() === lower) {
+        value = bag[key]
+        break
+      }
+    }
+  }
+  if (Array.isArray(value)) return value[0] ?? ""
+  return typeof value === "string" ? value : ""
+}
+
+function infiniteClientIpFrom(headers) {
+  const forwarded = infiniteHeaderValue(headers, "x-forwarded-for").split(",")[0].trim()
+  if (forwarded) return forwarded
+  return infiniteHeaderValue(headers, "cf-connecting-ip").trim() || infiniteHeaderValue(headers, "x-real-ip").trim() || ""
+}
+
+/** Normalise a request (Node req with a plain-object .headers, or WHATWG) or the explicit shape. */
+function infiniteVisitKeyInputsOf(input) {
+  if (!input) return null
+  if ("headers" in input && input.headers) {
+    const headers = input.headers
+    return { clientIp: infiniteClientIpFrom(headers), userAgent: infiniteHeaderValue(headers, "user-agent") }
+  }
+  return input
+}
 
 /**
  * Sign and POST one outcome. Resolves true when Infinite acknowledged it; never throws, so a failed
@@ -225,7 +271,7 @@ export function nodeOutcomeHelperSource(): string {
  * path          the page path it belongs to (pathname only — no query string)
  * eventId       stable per outcome (order id, signup id) so retries dedupe
  * accountKey    opaque account or order id; Infinite hashes it at rest
- * visitKeyInputs { clientIp, userAgent } from the request, for same-lane attribution
+ * visitKeyInputs a Node/WHATWG request OR { clientIp, userAgent }, for same-lane attribution
  */
 export async function postInfiniteOutcome({
   type,
@@ -240,8 +286,9 @@ export async function postInfiniteOutcome({
   const nowMs = occurredAt ? occurredAt.getTime() : Date.now()
   const merged = { ...(properties ?? {}) }
   if (path) merged.path = path
-  if (visitKeyInputs && merged.visitKey === undefined) {
-    const visitKey = infiniteVisitKey({ ...visitKeyInputs, nowMs })
+  const visitInputs = infiniteVisitKeyInputsOf(visitKeyInputs)
+  if (visitInputs && merged.visitKey === undefined) {
+    const visitKey = infiniteVisitKey({ clientIp: visitInputs.clientIp, userAgent: visitInputs.userAgent, nowMs })
     if (visitKey) merged.visitKey = visitKey
   }
   return sendInfiniteServerEvent({
