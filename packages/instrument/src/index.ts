@@ -120,3 +120,55 @@ export {
   renderServerLaneVerify,
   verifyServerLane
 } from "./server-lane/verify.js"
+// The analytics harness: one runbook (adopt → install → mark → verify → report) shared by
+// `infinite-tag harness` and the desktop CLI's `infinite analytics`.
+export { parseHarnessArgs, hasExplicitArtifacts, HARNESS_HELP_LINES } from "./harness/args.js"
+export type { HarnessArgs } from "./harness/args.js"
+export {
+  CONVERSIONS_REQUIRED_MESSAGE,
+  EXIT_ARGS,
+  EXIT_FAILED,
+  EXIT_OK,
+  conversionsArgumentError,
+  infErrorLine,
+  isInteractiveTerminal,
+  runHarnessCommand,
+  terminalIo
+} from "./harness/command.js"
+export { HARNESS_BRIEF_RELATIVE_PATH, runHarness } from "./harness/run.js"
+export type { HarnessDeps, HarnessIo, HarnessRunResult } from "./harness/run.js"
+export {
+  HARNESS_HANDOFF_LINE,
+  HARNESS_PROVIDER_ORDER,
+  HARNESS_REPORT_RELATIVE_PATH,
+  renderReportMarkdown,
+  renderReportTable
+} from "./harness/state.js"
+export type {
+  HarnessFailure,
+  HarnessFailureCode,
+  HarnessMode,
+  HarnessProviderId,
+  HarnessReport,
+  ProviderState,
+  ProviderStateKind,
+  VerificationOutcome
+} from "./harness/types.js"
+export { HARNESS_FAILURE_CODES } from "./harness/types.js"
+export {
+  CONVERSIONS_MANIFEST_RELATIVE_PATH,
+  PROPOSED_CONVERSIONS_RELATIVE_PATH,
+  applyConversions,
+  proposeConversions,
+  readApprovedConversions,
+  unmarkConversions
+} from "./harness/marking.js"
+export {
+  InfiniteCloudBackend,
+  NoneBackend,
+  PosthogQueryBackend,
+  VERIFY_BUDGET_MS,
+  VERIFY_POLL_INTERVAL_MS,
+  verifyLanes
+} from "./harness/verify.js"
+export type { LaneVerification, VerificationBackend, VerifyLane } from "./harness/verify.js"

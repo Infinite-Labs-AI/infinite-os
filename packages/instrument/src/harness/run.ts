@@ -520,19 +520,36 @@ const serverLane: RunbookStep<Ctx> = {
     const lane = ctx.planResult?.plan.serverLane
     const applied = ctx.applyResult?.serverLane
     if (!lane || !applied) return { skipped: "no server lane in the plan" }
-    const patched = lane.mode === "next-middleware" && lane.middleware?.action !== "unpatchable"
-    if (patched) {
+    // The plan picked a target by framework + hosting (Next middleware, Vercel root middleware,
+    // Netlify edge, Cloudflare Pages, Node module) or fell back to the brief. It is "installed"
+    // only when a file the lane manages was actually written or kept this run.
+    const target = lane.targetLabel ?? (lane.mode === "next-middleware" ? "Next.js middleware" : lane.mode)
+    const why = lane.targetEvidence ? ` (${lane.targetEvidence})` : ""
+    const middlewareWritten = lane.mode === "next-middleware" && lane.middleware?.action !== "unpatchable"
+    const createdWritten = (lane.created ?? []).some((entry) => entry.action === "create" || entry.action === "keep")
+    const manual = (lane.created ?? []).filter((entry) => entry.action === "manual")
+    if (lane.mode !== "brief" && (middlewareWritten || createdWritten)) {
       ctx.writtenLanes.push("server_lane")
+      const evidence = lane.middleware?.path ?? lane.created?.find((entry) => entry.action !== "manual")?.path ?? lane.modulePath
       updateProvider(ctx.report, "server_lane", (state) =>
-        transitionProvider(state, { to: "installed", reason: `middleware ${lane.middleware?.action ?? "created"}; brief ${applied.briefWritten ? "written" : "printed"}`, evidence: lane.middleware?.path ?? lane.modulePath })
+        transitionProvider(state, {
+          to: "installed",
+          reason: `${target}${why}; brief ${applied.briefWritten ? "written" : "printed"}${manual.length > 0 ? `; ${manual.length} file${manual.length === 1 ? "" : "s"} left for you (see the brief)` : ""}`,
+          evidence
+        })
       )
-      return { note: `middleware ${lane.middleware?.action}; ${lane.briefPath} ${applied.briefWritten ? "written" : "not written"}` }
+      return { note: `${target}${why}: ${lane.files.join(", ")}; ${lane.briefPath} ${applied.briefWritten ? "written" : "not written"}` }
     }
+    const reason = lane.middleware?.reason ?? manual[0]?.reason
     updateProvider(ctx.report, "server_lane", (state) =>
-      transitionProvider(state, { to: "skipped", reason: `this stack has no patchable server here; the agent brief ${applied.briefWritten ? `was written to ${lane.briefPath}` : "was printed"}`, evidence: lane.briefPath })
+      transitionProvider(state, {
+        to: "skipped",
+        reason: `brief only — ${lane.mode === "brief" ? "no server this harness can patch here" : `${target} left untouched${reason ? `: ${reason}` : ""}`}; the agent brief ${applied.briefWritten ? `is at ${lane.briefPath}` : "was printed"}`,
+        evidence: lane.briefPath
+      })
     )
     if (!applied.briefWritten) ctx.io.out(applied.brief)
-    return { note: `brief only (${lane.mode}${lane.middleware?.reason ? `: ${lane.middleware.reason}` : ""})` }
+    return { note: `brief only (${lane.mode}${reason ? `: ${reason}` : ""})` }
   },
   successCheck: () => true,
   failure: { code: "INF_PLAN_BLOCKED", message: () => "server lane failed", next: "continue" }

@@ -242,10 +242,54 @@ describe("runHarness --apply", () => {
     expect(readFileSync(join(root, "index.html"), "utf8")).toContain("G-NEW00001")
   })
 
+  it("--server-lane on Next reports the chosen target as installed; on a static site it is brief only", async () => {
+    const next = copyFixture("next-app-router-basic")
+    const nextIo = fakeIo()
+    const nextResult = await runHarness(parseHarnessArgs(["--apply", "--yes", "--no-mark", "--server-lane", "--root", next, "--ga4-measurement-id", "G-NEW00001", "--workspace", "ws_1"]), nextIo, { discover: () => null })
+    expect(nextResult.report.failures).toEqual([])
+    const lane = nextResult.report.providers.find((state) => state.provider === "server_lane")
+    expect(lane?.state).toBe("installed")
+    expect(lane?.reason).toContain("Next.js")
+    expect(existsSync(join(next, "INSTALL-SERVER-LANE.md"))).toBe(true)
+
+    const site = copyFixture("static-html-basic")
+    const siteIo = fakeIo()
+    const siteResult = await runHarness(parseHarnessArgs(["--apply", "--yes", "--no-mark", "--server-lane", "--root", site, "--ga4-measurement-id", "G-NEW00001", "--workspace", "ws_1"]), siteIo, { discover: () => null })
+    const siteLane = siteResult.report.providers.find((state) => state.provider === "server_lane")
+    expect(siteLane?.state).toBe("skipped")
+    expect(siteLane?.reason).toContain("brief only")
+  })
+
   it("runHarnessCommand maps a halting failure to exit 1 and an inf-error line", async () => {
     const root = copyFixture("unsupported-basic")
     const io = fakeIo()
     expect(await runHarnessCommand(["--apply", "--no-mark", "--root", root], { io, deps: { discover: () => null } })).toBe(EXIT_FAILED)
     expect(io.errLines.at(-1)).toContain("inf-error: INF_DETECT_NO_FRAMEWORK")
+  })
+})
+
+describe("infinite-tag harness dispatch", () => {
+  it("routes `harness` through the harness parser and help mentions it", async () => {
+    const { runCli } = await import("../cli.js")
+    const logSpy = (await import("vitest")).vi.spyOn(console, "log").mockImplementation(() => {})
+    const errSpy = (await import("vitest")).vi.spyOn(console, "error").mockImplementation(() => {})
+    try {
+      await runCli(["help"])
+      const help = logSpy.mock.calls.map((call) => String(call[0])).join("\n")
+      expect(help).toContain("harness")
+      expect(help).toContain("--conversions <file>")
+      expect(help).toContain("INF_ARGS_CONVERSIONS_REQUIRED")
+    } finally {
+      logSpy.mockRestore()
+      errSpy.mockRestore()
+    }
+    // Unknown harness flags exit 2 through the harness parser, not the installer's.
+    const originalWrite = process.stderr.write
+    process.stderr.write = (() => true) as typeof process.stderr.write
+    try {
+      expect(await runCli(["harness", "--bogus"])).toBe(EXIT_ARGS)
+    } finally {
+      process.stderr.write = originalWrite
+    }
   })
 })

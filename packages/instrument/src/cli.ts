@@ -5,6 +5,8 @@ import { resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 
 import { applyInstallation } from "./apply.js"
+import { HARNESS_HELP_LINES } from "./harness/args.js"
+import { runHarnessCommand } from "./harness/command.js"
 import { isSupportedFramework } from "./frameworks/index.js"
 import { inspectWorkspace } from "./inspect.js"
 import { buildPackageManagerCommands, INSTRUMENT_VERSION } from "./package-manager.js"
@@ -252,7 +254,7 @@ function printResult(_parsed: ParsedArgs, value: unknown): void {
 function printHelp(): void {
   console.log(
     [
-      "Usage: infinite-tag <inspect|plan|apply|verify|install|uninstall|server-lane> [options]",
+      "Usage: infinite-tag <inspect|plan|apply|verify|install|uninstall|server-lane|harness> [options]",
       "",
       "Commands:",
       "  inspect       Detect framework, app root, package manager, and existing providers",
@@ -263,6 +265,8 @@ function printHelp(): void {
       "  uninstall     Remove the managed install recorded in .infinite/install.json",
       "                (dry run without --yes; destructive with --yes)",
       `  ${serverLaneCopy.cli.briefHelp}`,
+      "  harness       One runbook: adopt existing tags, install what is missing, mark conversions,",
+      "                verify receipts, report per provider (see the Harness section below)",
       "",
       "Common flags:",
       "  --root <path>",
@@ -304,7 +308,9 @@ function printHelp(): void {
       "When no artifact flags and no --artifact-file are given, plan/apply/install",
       "auto-discover the file `infinite setup` saved under ~/.infinite/artifacts/",
       "(<workspace>.json with --workspace; a single saved file otherwise, adopting",
-      "its workspace id). Explicit flags always win."
+      "its workspace id). Explicit flags always win.",
+      "",
+      ...HARNESS_HELP_LINES
     ].join("\n")
   )
 }
@@ -460,6 +466,12 @@ function renderStandaloneBrief(framework: string): string {
 }
 
 export async function runCli(argv = process.argv.slice(2)): Promise<number> {
+  // The harness has its own flag surface (teardown §5.1) and exit-code contract, so it is
+  // dispatched before the installer's parser sees the argv.
+  switch (argv[0]) {
+    case "harness":
+      return runHarnessCommand(argv.slice(1))
+  }
   try {
     const parsed = parseArgs(argv)
     if (parsed.command === "help" || parsed.command === "--help" || parsed.command === "-h") {
