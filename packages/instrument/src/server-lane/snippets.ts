@@ -29,7 +29,7 @@ const signatureHeader = JSON.stringify(SERVER_LANE_SIGNATURE_HEADER)
 // Snippet import lines live in constants so the package self-containment scanner
 // (package-shape.test.ts) never mistakes them for this package's own imports.
 const EXPRESS_IMPORT = 'import express from "express"'
-const OUTCOME_HELPER_IMPORT = 'import { postInfiniteOutcome } from "../lib/infinite-outcome"'
+const OUTCOME_HELPER_IMPORT = 'import { adMatchFromRequest, postInfiniteOutcome } from "../lib/infinite-outcome"'
 
 /** infinite-server-lane.mjs — the generic Node helper (Express, Fastify, Koa, Hono-on-Node, plain http). */
 export function nodeHelperSnippet(apiOrigin?: string): string {
@@ -108,7 +108,10 @@ export function sendInfiniteServerEvent(event) {
     eventName: event.eventName,
     occurredAt: event.occurredAt ?? new Date().toISOString(),
     ...(event.accountKey ? { accountKey: event.accountKey } : {}),
-    properties: event.properties ?? {}
+    properties: event.properties ?? {},
+    // OUTCOMES ONLY, and inside the SIGNED body: { em, fbc, fbp, external_id } forwarded to Meta's
+    // Conversions API when you turn the relay on in Infinite, then discarded. You hash the email.
+    ...(event.adMatch ? { adMatch: event.adMatch } : {})
   })
   return fetch(INFINITE_SERVER_EVENTS_URL, {
     method: "POST",
@@ -320,6 +323,7 @@ void sendInfiniteServerEvent({
 export function outcomeRouteSnippet(): string {
   return String.raw`// api/checkout-status.ts — a Vercel serverless function confirming a paid session.
 ${OUTCOME_HELPER_IMPORT}
+import { createHash } from "node:crypto"   // only needed for the optional adMatch block below
 
 export default async function handler(request: Request): Promise<Response> {
   const session = await stripe.checkout.sessions.retrieve(new URL(request.url).searchParams.get("id"))
@@ -330,7 +334,14 @@ export default async function handler(request: Request): Promise<Response> {
     path: "/checkout",             // pathname only
     eventId: "purchase:" + session.id, // stable, so a retry dedupes
     accountKey: session.customer,  // optional; hashed at rest by Infinite
-    visitKeyInputs: request        // same visitKey as the page view -> same-lane conversion rate
+    visitKeyInputs: request,       // same visitKey as the page view -> same-lane conversion rate
+    // OPTIONAL - only if you run Meta ads and have no PostHog. Forwarded to Meta's Conversions API
+    // when you turn the relay on in Infinite -> Site -> Settings, then discarded: never stored.
+    // NOTE: request here is the BUYER'S browser request, so this picks up their _fbc/_fbp cookies AND
+    // their ip + user agent - which Meta requires and which your call to Infinite cannot carry.
+    adMatch: adMatchFromRequest(request, {
+      em: createHash("sha256").update(session.customer_email.trim().toLowerCase()).digest("hex")
+    })
   })
 
   return Response.json({ paid: true })

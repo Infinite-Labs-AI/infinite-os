@@ -95,6 +95,14 @@ export interface InfiniteServerEventInput {
   /** Opaque account identifier for account-deduped outcomes; hashed at rest by Infinite. */
   accountKey?: string
   properties?: Record<string, string | number | boolean>
+  /**
+   * OPTIONAL ad-match block, for founders who run Meta ads and have no PostHog. When the relay is
+   * on in Infinite, this outcome is forwarded to Meta's Conversions API and the block is then
+   * DISCARDED - never stored. YOUR server hashes: em and external_id are sha256 hex
+   * (crypto.subtle / node:crypto), so a raw email never leaves this process. fbc and fbp are
+   * Meta's own first-party cookies on your domain.
+   */
+  adMatch?: { em?: string; fbc?: string; fbp?: string; external_id?: string }
   /** Pass the incoming request (or its headers) so the outcome carries the same visitKey as the page view. */
   request?: { headers: Headers }
 }
@@ -144,7 +152,9 @@ export async function sendInfiniteServerEvent(input: InfiniteServerEventInput): 
       eventName: input.eventName,
       occurredAt: (input.occurredAt ?? new Date()).toISOString(),
       ...(input.accountKey ? { accountKey: input.accountKey } : {}),
-      properties
+      properties,
+      // Inside the SIGNED body: nobody without the secret can inject a match block.
+      ...(input.adMatch ? { adMatch: input.adMatch } : {})
     }
     return await postSigned(secret, JSON.stringify(event))
   } catch {

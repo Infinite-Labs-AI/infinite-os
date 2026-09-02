@@ -4,6 +4,7 @@ import {
   HARNESS_PROVIDER_ORDER,
   createHarnessReport,
   initialProviderStates,
+  metaRelayNote,
   renderReportMarkdown,
   renderReportTable,
   setProviderState,
@@ -171,5 +172,46 @@ describe("renderReportMarkdown", () => {
     expect(metaRow).toBeDefined()
     expect(metaRow).not.toMatch(/\bverified\b/)
     expect(metaRow).toContain("installed, not verifiable (Meta has no install-time read-back)")
+  })
+})
+
+describe("metaRelayNote", () => {
+  function report(states: Array<{ provider: string; state: string; key?: string }>): HarnessReport {
+    const base = createHarnessReport({ mode: "check", root: "/tmp/x" })
+    for (const entry of states) {
+      const target = base.providers.find((provider) => provider.provider === entry.provider)
+      if (target) {
+        target.state = entry.state as (typeof target)["state"]
+        if (entry.key) target.key = entry.key
+      }
+    }
+    return base
+  }
+
+  it("says nothing at all when there is no Meta pixel — the line would be noise", () => {
+    expect(metaRelayNote(report([{ provider: "server_lane", state: "installed" }]))).toBeNull()
+    // A pixel row with no key is a provider we could not resolve, not a pixel on file.
+    expect(metaRelayNote(report([{ provider: "meta", state: "skipped" }]))).toBeNull()
+  })
+
+  it("reports OFF when a pixel exists but nothing reports outcomes", () => {
+    const note = metaRelayNote(report([{ provider: "meta", state: "installed", key: "1234567890123" }]))
+    expect(note).toContain("Meta relay: off")
+    expect(note).toContain("no server lane reports outcomes")
+  })
+
+  it("reports the LOCAL half only, and never claims the cloud toggle it cannot read", () => {
+    const note = metaRelayNote(
+      report([
+        { provider: "meta", state: "adopted", key: "1234567890123" },
+        { provider: "server_lane", state: "installed" }
+      ])
+    )
+    expect(note).toContain("Meta relay: on locally")
+    expect(note).toContain("cannot read or set")
+    // The audience gate travels with the offer: the wrong founder double-counts by turning it on.
+    expect(note).toContain("do NOT use PostHog")
+    // It must never assert the cloud state as a bare fact.
+    expect(note).not.toMatch(/relay is (on|enabled)\b/)
   })
 })

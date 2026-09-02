@@ -1,5 +1,5 @@
 {
-  "$comment": "Server lane (lossless analytics) recipe vectors, shared with the receiving side. Every hex value is lowercase HMAC-SHA256 under `secret`. visitKey message = \"visit:\" + clientIp + \"|\" + userAgent + \"|\" + floor(epochSeconds / 1800); documentEventId = \"doc:\" + HMAC(visitKey + \"|\" + path + \"|\" + occurredAtMs); the body signature is HMAC over the exact JSON bytes of `documentEventBody`; the receipt request (GET …/server-lane/receipt?since=<iso>) signature is HMAC over the RAW QUERY STRING as sent (`receiptQuery`).",
+  "$comment": "Server lane (lossless analytics) recipe vectors, shared with the receiving side. Every hex value is lowercase HMAC-SHA256 under `secret`. visitKey message = \"visit:\" + clientIp + \"|\" + userAgent + \"|\" + floor(epochSeconds / 1800); documentEventId = \"doc:\" + HMAC(visitKey + \"|\" + path + \"|\" + occurredAtMs); the body signature is HMAC over the exact JSON bytes of `documentEventBody`; the receipt request (GET \u2026/server-lane/receipt?since=<iso>) signature is HMAC over the RAW QUERY STRING as sent (`receiptQuery`). The OUTCOME vectors cover the optional `adMatch` block (the Meta Conversions API relay): `outcomeEmail` hashed with sha256 of the TRIMMED, LOWERCASED address gives `outcomeEmailHash`, and the signature is HMAC over the exact JSON bytes of `outcomeAdMatchBody` \u2014 key order included, since the signature is over bytes, not over a parsed object. The block also carries the BUYER'S BROWSER `client_ip_address` and `client_user_agent`, copied by the customer's server from ITS OWN inbound request \u2014 never from the (server-to-server) call to Infinite, whose ip and user agent describe the customer's host. adMatch is consumed by the relay at ingest and never stored.",
   "secret": "test-secret",
   "clientIp": "203.0.113.9",
   "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
@@ -17,6 +17,12 @@
   "receiptSince": "2026-08-18T20:00:00.000Z",
   "receiptQuery": "since=2026-08-18T20%3A00%3A00.000Z",
   "receiptSignature": "2d07572d2a6385584160e88deda6acab37233af2e6ec497b4340572d41aa9b16",
+  "outcomeEmail": "founder@example.com",
+  "outcomeEmailHash": "fb72704240c3527ba45904a8705865922f70a9c4f3c11bfa93c839f939945884",
+  "outcomeExternalId": "acct_991",
+  "outcomeExternalIdHash": "1f2550b834705a7afb32da4e783f532d6ca62bf9f380884ed2dcb7c7d6a82f39",
+  "outcomeAdMatchBody": "{\"eventId\":\"purchase:cs_test_123\",\"eventName\":\"purchase\",\"occurredAt\":\"2025-08-18T06:53:20.123Z\",\"accountKey\":\"acct_991\",\"properties\":{\"path\":\"/checkout\",\"visitKey\":\"b16eaccc3fc131a1fc6428105bf366164c1f8fff3e0de56d0da7bbfa1712005e\",\"value\":\"49.50\",\"currency\":\"USD\"},\"adMatch\":{\"em\":\"fb72704240c3527ba45904a8705865922f70a9c4f3c11bfa93c839f939945884\",\"fbc\":\"fb.1.1755500000123.IwAR0abcDEF_-123\",\"fbp\":\"fb.1.1755500000123.987654321\",\"external_id\":\"1f2550b834705a7afb32da4e783f532d6ca62bf9f380884ed2dcb7c7d6a82f39\",\"client_ip_address\":\"203.0.113.9\",\"client_user_agent\":\"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36\"}}",
+  "outcomeAdMatchBodySignature": "fa3bf05dada4371bbdca04ad582832d83f3675191777835123ee3259e8ac748a",
   "headers": {
     "sourceKey": "x-infinite-source-key",
     "signature": "x-infinite-signature"
@@ -32,6 +38,8 @@
       "python-requests/2.31.0",
       "Mozilla/5.0 (X11; Linux x86_64) HeadlessChrome/124.0.0.0 Safari/537.36"
     ],
-    "unknown": [""]
+    "unknown": [
+      ""
+    ]
   }
 }

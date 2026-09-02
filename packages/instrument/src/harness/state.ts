@@ -182,6 +182,34 @@ export function renderReportTable(report: HarnessReport): string {
   ].join("\n")
 }
 
+/**
+ * The Meta relay line, or null when the founder has no Meta pixel (then it is noise).
+ *
+ * WHAT THIS TOOL CAN AND CANNOT SEE. The relay has two halves. The LOCAL half — a Meta pixel plus a
+ * server lane that actually reports outcomes — is in this repo and readable here. The CLOUD half —
+ * the per-source toggle in Infinite → Site → Settings — is not: this command holds no session and
+ * must never claim a state it did not read. So the line reports the LOCAL half by name and says
+ * plainly that the toggle is elsewhere. Anything else would be a fabricated "on".
+ *
+ * WHY IT IS WORTH A LINE AT ALL. A founder running Meta ads without PostHog has no server-side
+ * conversion path: Meta's optimiser never learns about the purchase their own server confirmed. The
+ * pieces are already installed at this point; all that is missing is one switch nobody mentioned.
+ */
+export function metaRelayNote(report: HarnessReport): string | null {
+  const meta = report.providers.find((state) => state.provider === "meta")
+  // No pixel, no relay to talk about. (A `key` is only ever set once a pixel id was resolved.)
+  if (!meta || !meta.key || meta.state === "absent" || meta.state === "skipped") return null
+
+  const lane = report.providers.find((state) => state.provider === "server_lane")
+  const laneReady =
+    lane !== undefined && (lane.state === "installed" || lane.state === "adopted" || lane.state === "verified")
+
+  if (!laneReady) {
+    return "Meta relay: off — a Meta pixel is installed but no server lane reports outcomes, so there is nothing to forward. Install the server lane first (`--server-lane`)."
+  }
+  return "Meta relay: on locally — a Meta pixel is installed and the server lane can carry outcomes. Forwarding still needs the cloud toggle (Infinite → Site → Settings → “Send outcomes to Meta Conversions API”), which this command cannot read or set. Only turn it on if you do NOT use PostHog: PostHog ships its own Meta destination, and two senders for one conversion is a double count."
+}
+
 function markdownCell(value: string): string {
   return value.replace(/\|/g, "\\|").replace(/\n/g, " ")
 }

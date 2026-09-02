@@ -61,6 +61,32 @@ describe("the agent brief", () => {
     expect(brief).toContain("- [ ] ")
   })
 
+  it("documents adMatch as OPT-IN, customer-hashed, and never stored", () => {
+    expect(brief).toContain(`### ${serverLaneCopy.adMatchHeading}`)
+    // The audience gate is stated first, because the wrong founder double-counts by adding it.
+    expect(brief).toContain("Meta ads and do not use PostHog")
+    expect(brief).toContain("Send outcomes to Meta Conversions API")
+    // The hashing recipe is spelled out, so nobody has to guess Meta's normalisation.
+    expect(brief).toContain('createHash("sha256").update(email.trim().toLowerCase()).digest("hex")')
+    expect(brief).toContain("discarded")
+    expect(brief).toContain("64-character hex digest is rejected")
+    // The dedup promise, with the 48-hour window and the pixel's own eventID argument.
+    expect(brief).toContain("within **48 hours**")
+    expect(brief).toContain("eventID:")
+    // The buyer's browser pair, and WHY it cannot come from the call to Infinite.
+    expect(brief).toContain("the IP address of the browser")
+    expect(brief).toContain("server-to-server")
+    expect(brief).toContain("adMatchFromRequest(request")
+    // A visitor's tampered cookie must never be able to delete a founder's conversion.
+    expect(brief).toContain("a tampered cookie can never delete your purchase")
+    // Meta's four required-parameter skips, and the verified-domain precondition.
+    expect(brief).toContain("declines rather than sending a broken one")
+    expect(brief).toContain("7-day window")
+    expect(brief).toContain("verified in Meta Events Manager")
+    // And the contract section lists it as an optional, outcome-only key.
+    expect(brief).toContain("`adMatch` is OPTIONAL and outcome-only")
+  })
+
   it("never contains a secret value or a raw-IP field", () => {
     expect(brief).not.toMatch(/INFINITE_SERVER_EVENT_SECRET\s*=\s*"[^<]/)
     expect(brief).not.toContain('"clientIp"')

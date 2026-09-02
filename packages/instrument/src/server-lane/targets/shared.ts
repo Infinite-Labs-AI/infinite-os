@@ -246,6 +246,17 @@ const INFINITE_AUTOMATION_USER_AGENT = /${AUTOMATION_USER_AGENT_PATTERN.source}/
 const INFINITE_NON_DOCUMENT_PREFIXES = ${jsStringArray(nonDocumentPrefixes(input.collectPath))}
 const INFINITE_REFERRER_HOST = /${REFERRER_HOST_PATTERN.source}/
 
+${exported}interface InfiniteAdMatch {
+  /** sha256 hex of the lowercased, trimmed email — hashed by YOUR server, never by Infinite. */
+  em?: string
+  /** Meta's own _fbc first-party cookie on your domain, verbatim. */
+  fbc?: string
+  /** Meta's own _fbp first-party cookie on your domain, verbatim. */
+  fbp?: string
+  /** sha256 hex of your own account id. */
+  external_id?: string
+}
+
 ${exported}interface InfiniteServerEvent {
   eventId?: string
   eventName: string
@@ -253,6 +264,8 @@ ${exported}interface InfiniteServerEvent {
   /** Opaque account or order id; Infinite hashes it at rest. */
   accountKey?: string
   properties?: Record<string, string | number | boolean>
+  /** OUTCOMES ONLY. Forwarded to Meta's Conversions API when you turn the relay on, then discarded. */
+  adMatch?: InfiniteAdMatch
 }
 
 ${exported}interface InfiniteLaneCredentials {
@@ -383,7 +396,9 @@ ${exported}async function sendInfiniteServerEvent(
       eventName: event.eventName,
       occurredAt: event.occurredAt ?? new Date().toISOString(),
       ...(event.accountKey ? { accountKey: event.accountKey } : {}),
-      properties: event.properties ?? {}
+      properties: event.properties ?? {},
+      // Inside the SIGNED body, so it cannot be injected without the secret.
+      ...(event.adMatch ? { adMatch: event.adMatch } : {})
     })
     const response = await fetch(INFINITE_SERVER_EVENTS_URL, {
       method: "POST",
@@ -469,12 +484,31 @@ export function outcomeHelperSource(input: TargetBuildInput): string {
       `//   import { ${OUTCOME_HELPER_EXPORT} } from "../lib/infinite-outcome"`,
       `//   await ${OUTCOME_HELPER_EXPORT}({ type: "purchase", path: "/checkout", accountKey: order.id, visitKeyInputs: request })`,
       "//",
+      "// Running Meta ads without PostHog? Add adMatch: adMatchFromRequest(request, { em }) and turn",
+      "// the relay on in Infinite -> Site -> Settings; the outcome is forwarded to Meta's Conversions",
+      "// API and the match data is discarded, never stored. You hash the email, Infinite never sees it.",
+      "//",
       `// Secrets come from the environment only: ${SERVER_LANE_SECRET_ENV} + ${SERVER_LANE_SOURCE_KEY_ENV}.`
     ],
     String.raw`const INFINITE_SERVER_EVENTS_URL = ${JSON.stringify(infiniteServerEventsDestination(input.apiOrigin))}
 const INFINITE_SOURCE_KEY_FALLBACK = ${bakedSourceKey}
 const INFINITE_DELIVERY_TIMEOUT_MS = ${SERVER_LANE_DELIVERY_TIMEOUT_MS}
 const INFINITE_VISIT_BUCKET_SECONDS = ${VISIT_BUCKET_SECONDS}
+
+export interface InfiniteAdMatch {
+  /** sha256 hex of the lowercased, trimmed email. */
+  em?: string
+  /** Meta's _fbc cookie, verbatim. */
+  fbc?: string
+  /** Meta's _fbp cookie, verbatim. */
+  fbp?: string
+  /** sha256 hex of your own account id. */
+  external_id?: string
+  /** The BUYER'S BROWSER ip, from YOUR inbound request. Meta needs the browser's, not your server's. */
+  client_ip_address?: string
+  /** The BUYER'S BROWSER user agent, from the same request. Meta REQUIRES it for website events. */
+  client_user_agent?: string
+}
 
 export interface InfiniteVisitKeyInputs {
   /** The client IP as your server sees it. Hashed here; it never leaves this process. */
@@ -494,6 +528,30 @@ export interface InfiniteOutcomeInput {
   occurredAt?: Date
   /** Up to 16 extra properties: snake_case keys, short token / number / boolean values. */
   properties?: Record<string, string | number | boolean>
+  /**
+   * OPTIONAL ad-match block — for founders who run Meta ads and have NO PostHog. Turn the relay on
+   * in Infinite -> Site -> Settings and an outcome carrying this is forwarded to Meta's Conversions
+   * API at ingest, then the block is DISCARDED: Infinite never stores it.
+   *
+   * YOUR server hashes; Infinite never does. em / external_id are sha256 HEX, so a raw email never
+   * leaves this process:
+   *
+   *   import { createHash } from "node:crypto"
+   *   const em = createHash("sha256").update(email.trim().toLowerCase()).digest("hex")
+   *
+   * fbc / fbp are Meta's own first-party cookies on your domain (the _fbc / _fbp values), and
+   * client_ip_address / client_user_agent are the BUYER'S BROWSER's, from YOUR inbound request --
+   * adMatchFromRequest(request, { em }) fills all four for you. They cannot come from the call to
+   * Infinite: that call is server-to-server, so its ip is your host's egress address and its user
+   * agent is "node". Meta REQUIRES client_user_agent for a website event; without it the relay
+   * declines to send rather than post something Meta can never match.
+   * https://developers.facebook.com/docs/marketing-api/conversions-api/parameters/fbp-and-fbc
+   *
+   * Never send a raw email here: a value that is not a 64-character hex digest is rejected with a
+   * 400 rather than forwarded. A malformed cookie, ip or user agent is DROPPED instead, so a
+   * visitor who tampered with their own _fbc can never delete your conversion.
+   */
+  adMatch?: InfiniteAdMatch
   /**
    * Same-lane attribution: the incoming request (or its headers, or the raw ip + user agent) so the
    * outcome carries the same visitKey as the page view that produced it.
@@ -542,6 +600,57 @@ function infiniteVisitKeyInputsOf(
   return input as InfiniteVisitKeyInputs
 }
 
+function infiniteCookie(header: string | null, name: string): string | undefined {
+  if (!header) return undefined
+  for (const part of header.split(";")) {
+    const index = part.indexOf("=")
+    if (index === -1) continue
+    if (part.slice(0, index).trim() !== name) continue
+    const value = part.slice(index + 1).trim()
+    return value === "" ? undefined : value
+  }
+  return undefined
+}
+
+/**
+ * Build an adMatch block from the BUYER'S OWN request — the browser request your route is handling.
+ *
+ * This is the only place the buyer's ip and user agent exist. Your call to Infinite is
+ * server-to-server: from Infinite's side its ip is your host's egress address and its user agent is
+ * "node", and Meta's spec wants "the IP address of the browser" and "the user agent for the browser
+ * … required for website events shared using the Conversions API". So read them here and pass them
+ * along; the relay declines to send an event with no client_user_agent rather than post one Meta can
+ * never match.
+ *
+ * PASS THE BROWSER'S REQUEST. In a webhook (Stripe, for example) the incoming request is the
+ * PROVIDER'S, not your buyer's — capture the block during the checkout request instead and carry it
+ * to the webhook, or report the outcome from the browser-facing route.
+ *
+ * You supply em / external_id yourself, already hashed:
+ *   adMatchFromRequest(request, { em: createHash("sha256").update(email.trim().toLowerCase()).digest("hex") })
+ */
+export function adMatchFromRequest(
+  request: { headers: Headers },
+  hashed: { em?: string; external_id?: string } = {}
+): InfiniteAdMatch {
+  const headers = request.headers
+  const cookie = headers.get("cookie")
+  const forwarded = headers.get("x-forwarded-for")?.split(",")[0]?.trim()
+  const clientIp =
+    forwarded || headers.get("cf-connecting-ip")?.trim() || headers.get("x-real-ip")?.trim() || ""
+  const userAgent = headers.get("user-agent") ?? ""
+  const fbc = infiniteCookie(cookie, "_fbc")
+  const fbp = infiniteCookie(cookie, "_fbp")
+  return {
+    ...(hashed.em ? { em: hashed.em } : {}),
+    ...(hashed.external_id ? { external_id: hashed.external_id } : {}),
+    ...(fbc ? { fbc } : {}),
+    ...(fbp ? { fbp } : {}),
+    ...(clientIp ? { client_ip_address: clientIp } : {}),
+    ...(userAgent ? { client_user_agent: userAgent } : {})
+  }
+}
+
 /**
  * Sign and POST one outcome. Resolves true when Infinite acknowledged it; never throws, so a
  * failed report can never fail the checkout, sign-up, or download it describes.
@@ -580,7 +689,9 @@ export async function ${OUTCOME_HELPER_EXPORT}(input: InfiniteOutcomeInput): Pro
       eventName: input.type,
       occurredAt: new Date(nowMs).toISOString(),
       ...(input.accountKey ? { accountKey: input.accountKey } : {}),
-      properties
+      properties,
+      // Signed with everything else, so a match block cannot be injected by a third party.
+      ...(input.adMatch ? { adMatch: input.adMatch } : {})
     })
     const response = await fetch(INFINITE_SERVER_EVENTS_URL, {
       method: "POST",

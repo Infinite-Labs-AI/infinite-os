@@ -6,12 +6,28 @@ import { posix } from "node:path"
 const EXPECTED_NAME = "infinite-tag"
 const EXPECTED_VERSION = "0.7.0"
 const EXPECTED_FILENAME = "infinite-tag-0.7.0.tgz"
+// SUPPLY-CHAIN TRIPWIRE BOUNDS, not a budget. They exist to catch a tarball that suddenly contains
+// something it should not — a node_modules tree, a stray build directory, a leaked archive — which
+// shows up as an order-of-magnitude jump, never as a few percent. They are NOT a size target: the
+// package is expected to grow as infinite-tag grows, and the ceilings are re-based when it does.
+//
+// Measured on this commit (npm 11 pack of packages/instrument): 114 files, 219,189 packed,
+// 807,699 unpacked. The unpacked figure crossed the previous 800,000 ceiling once #16/#17/#18/#19
+// landed on main, which is what turned CI red — not any one PR's content.
+//
+// Re-based to ~1.5x the measured size, matching how these moved together before
+// (150k→250k packed and 500k→800k unpacked in one commit): enough headroom for the next few
+// features, still one to two orders of magnitude below anything an accidental directory would add.
+//
+// MAX_FILES is deliberately NOT raised. It has moved on its own schedule (80 → 110 → 130) because
+// it measures a different accident — a whole directory getting included — and 114/130 is honest
+// headroom for source growth. The relay work added bytes to existing files and no new files at all.
 const MIN_FILES = 50
 const MAX_FILES = 130
 const MIN_PACKED_SIZE = 40_000
-const MAX_PACKED_SIZE = 250_000
+const MAX_PACKED_SIZE = 350_000
 const MIN_UNPACKED_SIZE = 200_000
-const MAX_UNPACKED_SIZE = 800_000
+const MAX_UNPACKED_SIZE = 1_200_000
 const REQUIRED_FILES = [
   "LICENSE",
   "README.md",
