@@ -222,6 +222,31 @@ describe("applyConversions on a line with several candidates", () => {
     expect(read(root, "index.html")).toBe(ONE_LINE)
   })
 
+  it("two approval rounds on one line keep both records and unmark reverses both", () => {
+    const root = makeRoot()
+    write(root, "index.html", ONE_LINE)
+    const first = proposeConversions({ root, appRoot: "." })
+    const round1 = applyConversions({ root, appRoot: ".", approved: { rows: first.rows.filter((row) => row.ctaId === "buy_now") } })
+    expect(round1.marked.map((row) => row.ctaId)).toEqual(["buy_now"])
+    // Re-propose against the now-marked line and approve a different element.
+    const second = proposeConversions({ root, appRoot: "." })
+    expect(second.rows.map((row) => row.ctaId)).toEqual(["pricing", "docs"])
+    const round2 = applyConversions({ root, appRoot: ".", approved: { rows: second.rows.filter((row) => row.ctaId === "docs") } })
+    expect(round2.marked.map((row) => row.ctaId)).toEqual(["docs"])
+    expect(round2.stale).toEqual([])
+    const manifest = JSON.parse(read(root, CONVERSIONS_MANIFEST_RELATIVE_PATH)) as { marked: Array<{ ctaId: string; afterHash: string }> }
+    expect(manifest.marked.map((entry) => entry.ctaId).sort()).toEqual(["buy_now", "docs"])
+    expect(new Set(manifest.marked.map((entry) => entry.afterHash)).size).toBe(1)
+    expect(read(root, "index.html")).toContain('data-analytics-cta-id="buy_now"')
+    expect(read(root, "index.html")).toContain('data-analytics-cta-id="docs"')
+
+    const undone = unmarkConversions(root)
+    expect(undone.restored.map((entry) => entry.ctaId).sort()).toEqual(["buy_now", "docs"])
+    expect(undone.skipped).toEqual([])
+    expect(read(root, "index.html")).toBe(ONE_LINE)
+    expect(existsSync(join(root, CONVERSIONS_MANIFEST_RELATIVE_PATH))).toBe(false)
+  })
+
   it("a row whose tag is no longer at its column is stale, not written onto a neighbour", () => {
     const root = makeRoot()
     write(root, "index.html", ONE_LINE)

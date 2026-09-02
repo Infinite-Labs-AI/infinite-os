@@ -496,29 +496,30 @@ export function applyConversions(input: ApplyConversionsInput): ApplyConversions
     const contents = existsSync(absolutePath) ? readFileSync(absolutePath, "utf8") : null
     const lines = contents === null ? null : splitLines(contents)
 
-    // Idempotence first: a line this exact approval already marked still hashes to its after-image.
-    const priorForLine = manifest.marked.filter((entry) => entry.file === file && entry.beforeHash === beforeHash)
-    const priorAfterHash = priorForLine[0]?.afterHash
-    if (priorAfterHash && lines && lines.some((line) => lineHash(line) === priorAfterHash)) {
-      for (const row of rows) {
-        if (priorForLine.some((entry) => entry.ctaId === row.ctaId && entry.column === row.column)) {
-          result.skipped.push({ file, line: row.line, ctaId: row.ctaId, reason: "already marked" })
-        } else {
-          stale(row) // the line moved on after an earlier partial approval; re-propose to mark more
-        }
+    // Idempotence first: a row already marked (same file, column, cta id) whose line still hashes
+    // to the recorded after-image is skipped; the others go on to be applied.
+    const pending: ProposedConversion[] = []
+    for (const row of rows) {
+      const prior = manifest.marked.find(
+        (entry) => entry.file === file && entry.column === row.column && entry.ctaId === row.ctaId
+      )
+      if (prior && lines && lines.some((line) => lineHash(line) === prior.afterHash)) {
+        result.skipped.push({ file, line: row.line, ctaId: row.ctaId, reason: "already marked" })
+      } else {
+        pending.push(row)
       }
-      continue
     }
+    if (pending.length === 0) continue
 
-    const located = lines ? locateLine(lines, rows[0]) : null
+    const located = lines ? locateLine(lines, pending[0]) : null
     if (lines === null || located === null) {
-      for (const row of rows) stale(row)
+      for (const row of pending) stale(row)
       continue
     }
     const original = lines[located - 1]
     let current = original
     const applied: MarkedConversion[] = []
-    for (const row of [...rows].sort((a, b) => b.column - a.column)) {
+    for (const row of [...pending].sort((a, b) => b.column - a.column)) {
       const at = original.slice(row.column)
       const tagMatch = tagPatternFor(row.tag).exec(at)
       if (!tagMatch) {
@@ -542,8 +543,26 @@ export function applyConversions(input: ApplyConversionsInput): ApplyConversions
     nextLines[located - 1] = current
     writeFileAtomic(absolutePath, nextLines.join("\n"))
     const afterHash = lineHash(current)
-    const marked = applied.map((entry) => ({ ...entry, afterHash })).sort((a, b) => a.column - b.column)
-    manifest.marked = [...manifest.marked.filter((entry) => !(entry.file === file && entry.line === located)), ...marked]
+    // Merge, never replace: an earlier round's marks on this line (their after-image is this
+    // round's pre-image) keep their records, keyed by file + column + cta id. Every record of a
+    // line then shares ONE pair — beforeHash = the line before ANY mark, afterHash = the line
+    // after ALL marks — so unmark can reverse every round and check the original pre-image.
+    const carried = manifest.marked
+      .filter((entry) => entry.file === file && entry.afterHash === beforeHash)
+      .map((entry) => ({ ...entry, line: located, afterHash }))
+    const originalBefore = carried[0]?.beforeHash ?? beforeHash
+    const marked = applied
+      .map((entry) => ({ ...entry, beforeHash: originalBefore, afterHash }))
+      .sort((a, b) => a.column - b.column)
+    const sameMark = (a: MarkedConversion, b: MarkedConversion): boolean =>
+      a.file === b.file && a.column === b.column && a.ctaId === b.ctaId
+    manifest.marked = [
+      ...manifest.marked.filter(
+        (entry) => !(entry.file === file && entry.afterHash === beforeHash) && !marked.some((mark) => sameMark(mark, entry))
+      ),
+      ...carried.filter((entry) => !marked.some((mark) => sameMark(mark, entry))),
+      ...marked
+    ]
     result.marked.push(...marked)
   }
 
@@ -576,7 +595,7 @@ export function unmarkConversions(root: string): UnmarkConversionsResult {
     groups.set(key, [...(groups.get(key) ?? []), entry])
   }
   for (const entries of groups.values()) {
-    const { file, afterHash, beforeHash } = entries[0]
+    const { file, afterHash } = entries[0]
     const absolutePath = join(appRootAbsolute, file)
     assertWriteTargetInsideRoot(root, absolutePath)
     const contents = existsSync(absolutePath) ? readFileSync(absolutePath, "utf8") : null
@@ -587,20 +606,22 @@ export function unmarkConversions(root: string): UnmarkConversionsResult {
       remaining.push(...entries)
       continue
     }
-    // The stored columns are pre-insert coordinates: removing left-to-right puts each next element
-    // back at its own recorded column just before its insert is removed.
+    // Right-to-left over the CURRENT line: each record's insert is found by its exact text right
+    // after a tag name, searching from the end so the rightmost mark comes off first and earlier
+    // offsets never move. Records may come from several approval rounds.
     let restored = lines[located - 1]
     let intact = true
-    for (const entry of [...entries].sort((a, b) => a.column - b.column)) {
-      const tagMatch = /^<(a|Link|button)\b/.exec(restored.slice(entry.column))
-      const cut = tagMatch ? entry.column + tagMatch[0].length : -1
-      if (cut < 0 || !restored.startsWith(entry.inserted, cut)) {
+    for (const entry of [...entries].sort((a, b) => b.column - a.column)) {
+      const at = restored.lastIndexOf(entry.inserted)
+      const tagBefore = at > 0 ? /<(a|Link|button)$/.exec(restored.slice(0, at)) : null
+      if (at < 0 || !tagBefore) {
         intact = false
         break
       }
-      restored = `${restored.slice(0, cut)}${restored.slice(cut + entry.inserted.length)}`
+      restored = `${restored.slice(0, at)}${restored.slice(at + entry.inserted.length)}`
     }
-    if (!intact || lineHash(restored) !== beforeHash) {
+    // Every record of a line shares its original pre-image (see applyConversions' merge).
+    if (!intact || lineHash(restored) !== entries[0].beforeHash) {
       for (const entry of entries) result.skipped.push({ file, line: entry.line, reason: "restored line would not match its pre-image; left as is" })
       remaining.push(...entries)
       continue
