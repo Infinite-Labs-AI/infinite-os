@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { HarnessArgs, HarnessIo, VerificationBackend } from "infinite-tag";
 
 import {
@@ -211,14 +211,19 @@ describe("infinite analytics", () => {
     expect(captured.runs[0].backends).toEqual(["cloud:https://api.ultima.inc:proj_engine01:token-ok"]);
   });
 
-  it("an explicit --workspace wins over the Desktop", async () => {
+  it("an explicit --workspace wins over the Desktop — which still answers the verification", async () => {
     const captured: Captured = { runs: [], loaded: 0 };
+    const io = fakeIo();
+    const status = vi.fn(fakeBridge().client.status);
     await runAnalyticsCommand(["--check", "--workspace", "ws_flag"], {}, {
-      io: fakeIo(),
+      io,
       loadTag: async () => fakeTag(captured),
-      resolveBridge: () => null
+      resolveBridge: () => ({ ...fakeBridge(), client: { status } })
     });
     expect(captured.runs[0].args.workspaceId).toBe("ws_flag");
+    // The flag settles the workspace WITHOUT a round trip, but the app still reads the receipts.
+    expect(status).not.toHaveBeenCalled();
+    expect(captured.runs[0].backends).toEqual(["bridge:http://127.0.0.1:54321:bridge_tok"]);
   });
 
   it("non-interactive apply without --conversions or --no-mark exits 2 with INF_ARGS_CONVERSIONS_REQUIRED", async () => {
