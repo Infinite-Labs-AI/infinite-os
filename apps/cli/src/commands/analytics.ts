@@ -7,13 +7,22 @@
  *    existing bridge client), else the harness's own single-saved-artifacts discovery;
  *  - the saved public keys: the file `infinite setup` wrote to
  *    `~/.infinite/artifacts/<workspaceId>.json`, which the harness discovers by workspace id;
- *  - a verification backend: the cloud one when a cloud session token is available, else
- *    NoneBackend — and it SAYS which, because `verified` is only ever printed with a receipt.
+ *  - a verification backend: the running Desktop, which reads the receipts back on this CLI's
+ *    behalf — and it SAYS which backend answered, because `verified` is only ever printed with
+ *    a receipt.
  *
- * Cloud session honesty: this CLI talks to the Desktop bridge (localhost bearer), not to the
- * cloud API, so there is no ambient cloud session to reuse. The cloud backend is wired only
- * when `INFINITE_API_TOKEN` (a bearer for `POST /api/analytics/verify`) is present in the
- * environment; `INFINITE_API_ORIGIN` overrides the default origin.
+ * NO TOKENS. This CLI holds no cloud session by design (the companion train): it POSTs to the
+ * Desktop's loopback bridge verb `analytics.verify.v1`, and the Desktop — which holds the session
+ * and knows the active workspace — makes the cloud call itself. The founder never handles a
+ * bearer. Selection order:
+ *
+ *   1. DesktopBridgeBackend — the Desktop is running and advertises `analytics.verify.v1`.
+ *   2. InfiniteCloudBackend — ADVANCED escape hatch, only with an explicit `--api-token-env`
+ *      (CI / a machine with no Desktop). `INFINITE_API_ORIGIN` overrides the origin.
+ *   3. NoneBackend — nothing can read receipts back, and the report says exactly that.
+ *
+ * A token in the environment is NEVER used implicitly: an unnoticed stale `INFINITE_API_TOKEN`
+ * silently verifying against another account is worse than an honest "not verifiable".
  */
 import type {
   HarnessArgs,
@@ -22,7 +31,11 @@ import type {
   VerificationBackend
 } from "infinite-tag";
 
-import { resolveLiveBridge, type DesktopAppClient } from "../desktop-app-client.js";
+import {
+  resolveLiveBridge,
+  type DesktopAppClient,
+  type DesktopBridgeDescriptor
+} from "../desktop-app-client.js";
 
 export const ANALYTICS_USAGE = [
   "Usage: infinite analytics [--check | --plan | --apply | --verify-only] [flags]",
@@ -41,17 +54,30 @@ export const ANALYTICS_USAGE = [
   "  --providers, --adopt-existing/--no-adopt-existing, --server-lane, --url, --yes, --allow-dirty,",
   "  --json, --brief, --posthog-query-key, and the infinite-tag artifact flags are passed through.",
   "",
-  "Verification reads receipts through the cloud when INFINITE_API_TOKEN is set (INFINITE_API_ORIGIN",
-  "overrides the host); otherwise providers print 'installed, not verifiable' and the report says why.",
+  "Verification runs through Infinite Desktop: the app reads the receipts back with its own session,",
+  "so no API token is ever needed here. With the app closed (or too old to carry the verify verb),",
+  "providers print 'installed, not verifiable' and the report says why.",
+  "",
+  "  --api-token-env [NAME]  ADVANCED. No Desktop (CI, a server): read a bearer for the Infinite API",
+  "                          from NAME (default INFINITE_API_TOKEN) and verify against the cloud",
+  "                          directly. INFINITE_API_ORIGIN overrides the host. The Desktop wins",
+  "                          whenever it is running — a token is never used implicitly.",
   "",
   "Everything but --help and the read-only --check needs Infinite Desktop signed in with an active",
   "subscription (the standalone `npx infinite-tag harness` does not)."
 ].join("\n");
 
 export const DEFAULT_INFINITE_API_ORIGIN = "https://api.ultima.inc";
+export const DEFAULT_API_TOKEN_ENV_VAR = "INFINITE_API_TOKEN";
+export const ANALYTICS_VERIFY_CAPABILITY = "analytics.verify.v1";
 export const NO_CLOUD_SESSION_NOTICE =
-  "No cloud session in this CLI: receipts cannot be read back, so providers will print 'installed, not verifiable'. " +
-  "Set INFINITE_API_TOKEN (a bearer for the Infinite API) to verify through the cloud.";
+  "Infinite Desktop is not running, so receipts cannot be read back: providers will print " +
+  "'installed, not verifiable'. Open the Infinite app and re-run to verify.";
+export const DESKTOP_TOO_OLD_NOTICE =
+  "This Infinite Desktop version cannot verify from the CLI: providers will print " +
+  "'installed, not verifiable'. Update the Infinite app and re-run.";
+export const BRIDGE_BACKEND_NOTICE =
+  "Verifying through Infinite Desktop — the app reads the receipts back with its own session; no token needed.";
 
 /** The slice of `infinite-tag` this command uses — injectable so tests never need the built package. */
 export interface TagHarnessModule {
@@ -63,6 +89,7 @@ export interface TagHarnessModule {
   runHarness(args: HarnessArgs, io: HarnessIo, deps?: HarnessDeps): Promise<{ exitCode: number; report: { failure: { code: string; message: string } | null } }>;
   NoneBackend: new () => VerificationBackend;
   InfiniteCloudBackend: new (options: { origin: string; token: string; engineProjectId: string; fetch?: typeof fetch }) => VerificationBackend;
+  DesktopBridgeBackend: new (options: { bridgeUrl: string; token: string; fetch?: typeof fetch }) => VerificationBackend;
   EXIT_ARGS: number;
   EXIT_FAILED: number;
   EXIT_OK: number;
@@ -77,10 +104,16 @@ export interface AnalyticsCommandEnv {
   [key: string]: string | undefined;
 }
 
+/** The live bridge: the descriptor carries the loopback url + LOCAL bearer + capability list. */
+export type ResolvedBridge = {
+  client: Pick<DesktopAppClient, "status">;
+  descriptor?: Pick<DesktopBridgeDescriptor, "url" | "token" | "capabilities">;
+};
+
 export interface AnalyticsCommandDeps {
   loadTag?: () => Promise<TagHarnessModule>;
   /** Test seam over the Desktop bridge; returns null when Desktop is not running. */
-  resolveBridge?: (env: AnalyticsCommandEnv) => { client: Pick<DesktopAppClient, "status"> } | null;
+  resolveBridge?: (env: AnalyticsCommandEnv) => ResolvedBridge | null;
   io?: HarnessIo;
   fetch?: typeof fetch;
 }
@@ -89,7 +122,7 @@ async function defaultLoadTag(): Promise<TagHarnessModule> {
   return (await import("infinite-tag")) as unknown as TagHarnessModule;
 }
 
-function defaultResolveBridge(env: AnalyticsCommandEnv): { client: Pick<DesktopAppClient, "status"> } | null {
+function defaultResolveBridge(env: AnalyticsCommandEnv): ResolvedBridge | null {
   try {
     return resolveLiveBridge(env as Parameters<typeof resolveLiveBridge>[0]);
   } catch {
@@ -108,11 +141,7 @@ function defaultResolveBridge(env: AnalyticsCommandEnv): { client: Pick<DesktopA
  * the cloud workspace UUID. That is why it is passed straight through as the harness's
  * `--workspace` and as `engineProjectId` in the cloud verify body.
  */
-export async function activeWorkspaceFromDesktop(
-  env: AnalyticsCommandEnv,
-  resolveBridge: NonNullable<AnalyticsCommandDeps["resolveBridge"]>
-): Promise<string | null> {
-  const bridge = resolveBridge(env);
+export async function activeWorkspaceFromDesktop(bridge: ResolvedBridge | null): Promise<string | null> {
   if (!bridge) return null;
   try {
     const status = await bridge.client.status();
@@ -123,25 +152,97 @@ export async function activeWorkspaceFromDesktop(
   }
 }
 
-export function chooseBackend(
-  tag: TagHarnessModule,
-  env: AnalyticsCommandEnv,
-  workspaceId: string | undefined,
-  fetchImpl?: typeof fetch
-): { backend: VerificationBackend; notice: string | null } {
-  const token = env.INFINITE_API_TOKEN?.trim();
-  if (token && workspaceId) {
-    const origin = (env.INFINITE_API_ORIGIN?.trim() || DEFAULT_INFINITE_API_ORIGIN).replace(/\/+$/, "");
+/**
+ * `--api-token-env [NAME]` is a CLI-only flag: the harness parser would reject it, so it is
+ * removed from argv here. Bare, it means the default `INFINITE_API_TOKEN`; a following token that
+ * is not itself a flag names a different variable. The VALUE never appears on the command line —
+ * a token in shell history is exactly what this design avoids.
+ */
+export function extractApiTokenEnvFlag(args: readonly string[]): {
+  rest: string[];
+  envVar: string | null;
+} {
+  const rest: string[] = [];
+  let envVar: string | null = null;
+  for (let index = 0; index < args.length; index += 1) {
+    const token = args[index];
+    if (token === "--api-token-env") {
+      const next = args[index + 1];
+      if (next !== undefined && !next.startsWith("-")) {
+        envVar = next;
+        index += 1;
+      } else {
+        envVar = DEFAULT_API_TOKEN_ENV_VAR;
+      }
+      continue;
+    }
+    if (token.startsWith("--api-token-env=")) {
+      envVar = token.slice("--api-token-env=".length) || DEFAULT_API_TOKEN_ENV_VAR;
+      continue;
+    }
+    rest.push(token);
+  }
+  return { rest, envVar };
+}
+
+export interface ChooseBackendInput {
+  tag: TagHarnessModule;
+  env: AnalyticsCommandEnv;
+  /** The live bridge, or null when Desktop is not running. */
+  bridge: ResolvedBridge | null;
+  /** The env var named by `--api-token-env`, or null when the flag was not passed. */
+  apiTokenEnvVar: string | null;
+  workspaceId: string | undefined;
+  fetchImpl?: typeof fetch;
+}
+
+/**
+ * Which backend reads the receipts back — and the one line that tells the founder which, because
+ * a report may only print `verified` next to a receipt someone actually produced.
+ *
+ * The Desktop wins whenever it can serve the verb. The cloud backend is reachable ONLY through the
+ * explicit `--api-token-env` escape hatch: a token sitting in the environment must never silently
+ * verify a run (it can belong to another account, or be long expired).
+ */
+export function chooseBackend(input: ChooseBackendInput): {
+  backend: VerificationBackend;
+  notice: string | null;
+} {
+  const { env, bridge, apiTokenEnvVar, workspaceId, fetchImpl } = input;
+  const tag = input.tag;
+  const descriptor = bridge?.descriptor;
+  if (descriptor?.capabilities?.includes(ANALYTICS_VERIFY_CAPABILITY)) {
     return {
-      backend: new tag.InfiniteCloudBackend({ origin, token, engineProjectId: workspaceId, fetch: fetchImpl }),
-      notice: `Verifying through the cloud at ${origin} for workspace ${workspaceId}.`
+      backend: new tag.DesktopBridgeBackend({
+        bridgeUrl: descriptor.url,
+        token: descriptor.token,
+        fetch: fetchImpl
+      }),
+      notice: BRIDGE_BACKEND_NOTICE
     };
   }
+
+  if (apiTokenEnvVar) {
+    const token = env[apiTokenEnvVar]?.trim();
+    if (token && workspaceId) {
+      const origin = (env.INFINITE_API_ORIGIN?.trim() || DEFAULT_INFINITE_API_ORIGIN).replace(/\/+$/, "");
+      return {
+        backend: new tag.InfiniteCloudBackend({ origin, token, engineProjectId: workspaceId, fetch: fetchImpl }),
+        notice: `Verifying through the cloud at ${origin} for workspace ${workspaceId}.`
+      };
+    }
+    return {
+      backend: new tag.NoneBackend(),
+      notice: token
+        ? `${NO_CLOUD_SESSION_NOTICE} (${apiTokenEnvVar} is set but no workspace id was resolved — pass --workspace.)`
+        : `${NO_CLOUD_SESSION_NOTICE} (--api-token-env named ${apiTokenEnvVar}, which is empty.)`
+    };
+  }
+
   return {
     backend: new tag.NoneBackend(),
-    notice: token && !workspaceId
-      ? `${NO_CLOUD_SESSION_NOTICE} (INFINITE_API_TOKEN is set but no workspace id was resolved — pass --workspace.)`
-      : NO_CLOUD_SESSION_NOTICE
+    // Desktop running but too old to carry the verb is a DIFFERENT fix from Desktop not running.
+    notice: bridge ? DESKTOP_TOO_OLD_NOTICE : NO_CLOUD_SESSION_NOTICE
   };
 }
 
@@ -158,17 +259,22 @@ export async function runAnalyticsCommand(
   const interactive = deps.io?.interactive ?? tag.isInteractiveTerminal(env as NodeJS.ProcessEnv);
   const io = deps.io ?? tag.terminalIo(interactive);
 
+  // `--api-token-env` is ours, not the harness's — strip it before the harness parser sees it.
+  const { rest: harnessArgs, envVar: apiTokenEnvVar } = extractApiTokenEnvFlag(args);
+
   let parsed: HarnessArgs;
   try {
-    parsed = tag.parseHarnessArgs(args);
+    parsed = tag.parseHarnessArgs(harnessArgs);
   } catch (error) {
     io.err(error instanceof Error ? error.message : String(error));
     io.err(ANALYTICS_USAGE.split("\n")[0]);
     return tag.EXIT_ARGS;
   }
 
+  // ONE bridge resolution for the whole run: it names the workspace AND carries the verify verb.
+  const bridge = (deps.resolveBridge ?? defaultResolveBridge)(env);
   if (parsed.workspaceId === undefined) {
-    const fromDesktop = await activeWorkspaceFromDesktop(env, deps.resolveBridge ?? defaultResolveBridge);
+    const fromDesktop = await activeWorkspaceFromDesktop(bridge);
     if (fromDesktop) {
       parsed = { ...parsed, workspaceId: fromDesktop };
       io.err(`Workspace ${fromDesktop} (Desktop's active workspace).`);
@@ -181,7 +287,14 @@ export async function runAnalyticsCommand(
     return tag.EXIT_ARGS;
   }
 
-  const { backend, notice } = chooseBackend(tag, env, parsed.workspaceId, deps.fetch);
+  const { backend, notice } = chooseBackend({
+    tag,
+    env,
+    bridge,
+    apiTokenEnvVar,
+    workspaceId: parsed.workspaceId,
+    fetchImpl: deps.fetch
+  });
   if (notice) io.err(notice);
 
   try {
