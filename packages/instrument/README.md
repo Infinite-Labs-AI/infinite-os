@@ -161,6 +161,25 @@ initial document load and `"history"` for a History-API route change. The runtim
 emits nothing when `navigator.webdriver` is true (automation-driven browsers —
 Playwright, Puppeteer, Lighthouse — are not visitors).
 
+### What the pixel sends
+
+The event envelope is the public contract in `contracts/browser-collect-v1.schema.json`
+(the cloud pins the same file by hash): `siteSourceKey`, `eventId`, `eventName` (one of
+`site_page_view`, `site_click`, `app_download_click`, `sign_up_click`), `occurredAt`, the
+runtime's own random `anonymousId` / `sessionId`, `url` (origin + canonical path — the query
+string and fragment are stripped), an optional `referrer` reduced to its host, and a bounded
+`properties` object. On the **initial** page view (`nav: "navigate"`) the runtime also attaches
+an allowlisted campaign block read from the landing URL:
+
+| Property | Value |
+| --- | --- |
+| `utm_source`, `utm_medium`, `utm_campaign`, `utm_content`, `utm_term` | The parameter's value — trimmed, control characters stripped, truncated to 100 characters; absent when empty. |
+| `has_gclid`, `has_fbclid`, `has_ttclid`, `has_msclkid` | `true` when the click id is present. **The id value is never sent.** |
+
+Any other query parameter is dropped, History-API route views carry `nav: "history"` only,
+and click events never carry the block. Nothing else about the page — DOM text, link text,
+button text, form values — ever leaves the browser.
+
 **Providers are independent (0.6.0).** GA4 and PostHog install as fully native
 bootstraps — Google's own `gtag.js` snippet with its default `page_view`, and
 PostHog's own `posthog.init` with PostHog's defaults (`defaults: '2025-05-24'`:

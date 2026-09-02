@@ -5,6 +5,17 @@ All notable changes to the `infinite-tag` npm package (`packages/instrument`). V
 
 ## Unreleased
 
+**Minor bump: the browser contract changes** (`contracts/browser-collect-v1.schema.json`, mirrored
+byte-for-byte and hash-pinned in the cloud).
+
+- **Campaign capture on the initial page view.** The `nav: "navigate"` `site_page_view` now carries
+  an allowlisted campaign block read from the landing URL: `utm_source` / `utm_medium` /
+  `utm_campaign` / `utm_content` / `utm_term` as bounded values (trimmed, control characters
+  stripped, 100 chars, absent when empty) and `has_gclid` / `has_fbclid` / `has_ttclid` /
+  `has_msclkid` as presence-only `true`. The click-id VALUE and the raw query string are never
+  sent; every other parameter is dropped; History-API views carry `nav: "history"` only; click
+  events never carry the block. Contract v1 gains those nine keys (`maxProperties` 4 → 13; the
+  `site_page_view` branch allows `nav` + the nine).
 - **Autocapture is a flag (default on).** `--infinite-autocapture on|off` (artifact field
   `infinite.autocapture: boolean`) — `off` stops unmarked links and buttons from emitting
   `site_click`; marked `data-analytics-cta-id` CTAs, the conversion destination, Stripe checkout

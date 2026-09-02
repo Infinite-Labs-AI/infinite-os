@@ -68,6 +68,9 @@ export function renderInfiniteBrowserTag(config: InfiniteBrowserConfig): string 
 //     for History-API route changes (pushState / replaceState / popstate). The bounded enum lets the
 //     cloud count INITIAL browser page views (the only numerator that can honestly be compared with
 //     server document requests) while keeping the pathname-only dedupe exactly as before.
+//   • (0.7.0) attaches an ALLOWLISTED campaign block to the nav:"navigate" page view only:
+//     utm_source/medium/campaign/content/term as bounded strings, and gclid/fbclid/ttclid/msclkid
+//     as PRESENCE booleans (`has_<name>: true`) — never the id value, never the raw query string.
 //   The consent contract is UNCHANGED: DNT/GPC suppress by default; the site's explicit decision
 //   (the infinite:analytics-consent-change event, gesture-gated) overrides it in either direction;
 //   `required` mode stays dormant until granted.
@@ -307,6 +310,30 @@ function infiniteBrowserRuntime(config: InfiniteBrowserConfig): void {
     }
   }
 
+  // The campaign allowlist (privacy rules P22/P39): UTM VALUES are bounded strings; click ids are
+  // reported as presence only — `has_gclid: true` — so an identifier never enters the ledger. Any
+  // other parameter is dropped. Attached ONLY to the initial (nav:"navigate") page view.
+  function campaignProperties(search: string): Record<string, string | boolean> {
+    const properties: Record<string, string | boolean> = {}
+    let params: URLSearchParams
+    try {
+      params = new URLSearchParams(search)
+    } catch {
+      return properties
+    }
+    for (const key of ["utm_source", "utm_medium", "utm_campaign", "utm_content", "utm_term"]) {
+      const raw = params.get(key)
+      if (raw === null) continue
+      const value = raw.replace(/[\u0000-\u001f]/g, "").trim().slice(0, 100)
+      if (value) properties[key] = value
+    }
+    for (const key of ["gclid", "fbclid", "ttclid", "msclkid"]) {
+      const raw = params.get(key)
+      if (raw !== null && raw.trim() !== "") properties["has_" + key] = true
+    }
+    return properties
+  }
+
   function cleanReferrerHost(raw: string): string {
     if (!raw) return ""
     try {
@@ -401,7 +428,7 @@ function infiniteBrowserRuntime(config: InfiniteBrowserConfig): void {
   function emit(
     eventName: "site_page_view" | "site_click" | "app_download_click" | "sign_up_click",
     path: string,
-    properties?: Record<string, string>
+    properties?: Record<string, string | boolean>
   ): void {
     if (!hasConsent()) return
     const canonicalPath = normalizePath(path)
@@ -434,7 +461,11 @@ function infiniteBrowserRuntime(config: InfiniteBrowserConfig): void {
     lastPageViewPath = path
     const nav: "navigate" | "history" = initialView ? "navigate" : "history"
     initialView = false
-    emit("site_page_view", path, { nav })
+    emit(
+      "site_page_view",
+      path,
+      nav === "navigate" ? { nav, ...campaignProperties(location.search) } : { nav }
+    )
   }
 
   // Bounded properties for a marked sign-up element: the optional structural cta markers, plus a
