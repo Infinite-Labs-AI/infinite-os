@@ -4,8 +4,8 @@ import { readFileSync } from "node:fs"
 import { posix } from "node:path"
 
 const EXPECTED_NAME = "infinite-tag"
-const EXPECTED_VERSION = "0.6.0"
-const EXPECTED_FILENAME = "infinite-tag-0.6.0.tgz"
+const EXPECTED_VERSION = "0.6.1"
+const EXPECTED_FILENAME = "infinite-tag-0.6.1.tgz"
 const MIN_FILES = 50
 const MAX_FILES = 80
 const MIN_PACKED_SIZE = 40_000
