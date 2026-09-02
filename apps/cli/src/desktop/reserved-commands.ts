@@ -21,6 +21,9 @@
  *                         intercepted in `runCli` before reserved interception
  *                         (not an engine command; `infinite local contacts`
  *                         would be wrong guidance).
+ *   - `analytics`       — the analytics harness (`infinite analytics`), a
+ *                         product command that runs locally against the
+ *                         current repo; intercepted in `runCli` the same way.
  */
 export const RESERVED_LOCAL_COMMANDS: ReadonlySet<string> = new Set([
   "init",

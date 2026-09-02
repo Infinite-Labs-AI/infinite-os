@@ -36,6 +36,7 @@ import {
 } from "./setup-prompts.js";
 import { localHelpText, productHelpText, productUpdateText } from "./help-text.js";
 import { runContactsCommand } from "./contacts/contacts-command.js";
+import { runAnalyticsCommand } from "./commands/analytics.js";
 import { reservedCommandNotice } from "./desktop/reserved-commands.js";
 import { readReleaseGa4OAuthClient, type EmbeddedGa4OAuthClient } from "./ga4-oauth-client.js";
 import { prepareGa4ConnectConfig } from "./ga4-connect-config.js";
@@ -1823,6 +1824,17 @@ export async function runCli(
       );
     }
     await runDesktopAppCommand(desktopAppCommand.args, env);
+    return;
+  }
+
+  // `infinite analytics …` — the analytics harness (one runbook: adopt → install → mark
+  // conversions → verify → report), shared with `npx infinite-tag harness`. A product command
+  // that runs LOCALLY against the current repo: it reads the Desktop's active workspace when
+  // Desktop is running but never needs the bridge, so it is handled here before product
+  // preflight and is deliberately NOT in RESERVED_LOCAL_COMMANDS.
+  if (normalizedArgs[0] === "analytics") {
+    const code = await runAnalyticsCommand(normalizedArgs.slice(1), env as Record<string, string | undefined>);
+    if (code !== 0) process.exitCode = code;
     return;
   }
 

@@ -27,6 +27,8 @@ export function productHelpText(): string {
     '  infinite "message"             Ask one question and print the answer',
     "  infinite app                   Desktop bridge status and one-shot messages",
     "  infinite contacts sync         Connect your Supabase users to the email brain",
+    "  infinite analytics             Set up analytics in the current repo: adopt what exists,",
+    "                                 install what is missing, mark conversions, verify, report",
     "  infinite help                  Show this help",
     "  infinite version               Print the Infinite OS version and commit",
     "  infinite update                How to update (the agent ships with Infinite Desktop)",
