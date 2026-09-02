@@ -39,9 +39,52 @@ export const NETLIFY_EDGE_FUNCTION_NAME = "infinite-server-lane"
 export const NETLIFY_EDGE_FUNCTION_PATH = `netlify/edge-functions/${NETLIFY_EDGE_FUNCTION_NAME}.ts`
 export const NETLIFY_OUTCOME_PATH = "lib/infinite-outcome.ts"
 
+/**
+ * Static extensions the edge function never needs to see. Deliberately an explicit list rather than
+ * a single catch-all:
+ *
+ *   `path`/`excludedPath` take "[`URLPattern`] expression[s]" and the docs' own asset example is
+ *   `excludedPath: ["/*.css", "/*.js"]` — https://docs.netlify.com/build/edge-functions/declarations/
+ *   URLPattern's wildcard is greedy and crosses "/": "The wildcard token (`*`) is a shorthand for an
+ *   unnamed capturing group that matches all characters zero or more times… The wildcard is greedy"
+ *   — https://developer.mozilla.org/en-US/docs/Web/API/URL_Pattern_API
+ *
+ * So the tempting `"/*.*"` does NOT mean "the last segment has a dot": it excludes any path with a
+ * dot anywhere at any depth, which would silently drop a real page like `/v1.0/pricing`. This list
+ * can only ever UNDER-exclude, and under-exclusion is free — `isInfiniteDocumentRequest` rejects
+ * every extension exactly, so the declaration is a cold-start saving, never the correctness gate.
+ */
+export const NETLIFY_EXCLUDED_ASSET_EXTENSIONS = [
+  "css",
+  "js",
+  "mjs",
+  "map",
+  "json",
+  "xml",
+  "txt",
+  "ico",
+  "svg",
+  "png",
+  "jpg",
+  "jpeg",
+  "gif",
+  "webp",
+  "avif",
+  "woff",
+  "woff2",
+  "ttf",
+  "otf",
+  "mp4",
+  "webm",
+  "pdf"
+] as const
+
 /** The in-file declaration: every path except assets and the prefixes the lane already skips. */
 export function netlifyExcludedPaths(collectPath?: string): string[] {
-  return [...nonDocumentPrefixes(collectPath).map((prefix) => `${prefix}*`), "/*.*"]
+  return [
+    ...nonDocumentPrefixes(collectPath).map((prefix) => `${prefix}*`),
+    ...NETLIFY_EXCLUDED_ASSET_EXTENSIONS.map((extension) => `/*.${extension}`)
+  ]
 }
 
 /**

@@ -43,6 +43,7 @@ import {
   discoverWorkspaceArtifacts,
   normalizeInfiniteAutocapture,
   normalizeInfiniteConsentMode,
+  infiniteServerLaneReceiptUrl,
   resolveInfiniteApiOrigin,
   resolveWorkspaceArtifacts
 } from "./workspace-artifacts.js"
@@ -443,10 +444,11 @@ function printUnappliedServerLaneBrief(plan: InstallPlan): void {
   console.log(renderStandaloneBrief(plan.framework))
 }
 
-function renderStandaloneBrief(framework: string): string {
+function renderStandaloneBrief(framework: string, apiOrigin?: string): string {
   if (isNextFramework(framework)) {
     return renderServerLaneBrief({
       status: { kind: "next-manual", modulePath: SERVER_LANE_MODULE_PATH },
+      ...(apiOrigin ? { apiOrigin } : {}),
       moduleImportPath: SERVER_LANE_MODULE_IMPORT_PATH
     })
   }
@@ -455,6 +457,7 @@ function renderStandaloneBrief(framework: string): string {
       kind: "other-stack",
       framework: framework === "unsupported" ? "a stack infinite-tag does not recognize" : frameworkLabel(framework)
     },
+    ...(apiOrigin ? { apiOrigin } : {}),
     moduleImportPath: SERVER_LANE_MODULE_IMPORT_PATH
   })
 }
@@ -468,6 +471,14 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
     }
 
     const root = resolve(parsed.root ?? process.cwd())
+
+    // Explicit (flag or env) API-origin override only; absent means the artifact keeps its own
+    // recorded origin, or the default. Validated here so a bad env value fails before planning —
+    // and resolved before `verify` and the standalone brief, which both name Infinite's URLs.
+    const infiniteApiOrigin =
+      parsed.infiniteApiOrigin !== undefined || process.env.INFINITE_API_ORIGIN?.trim()
+        ? resolveInfiniteApiOrigin({ flag: parsed.infiniteApiOrigin, env: process.env })
+        : undefined
 
     if (parsed.command === "uninstall") {
       const result = uninstallInstallation({
@@ -491,6 +502,7 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
         url: parsed.serverLaneUrl,
         secret: process.env[SERVER_LANE_SECRET_ENV],
         sourceKey: parsed.infiniteSiteSourceKey ?? process.env[SERVER_LANE_SOURCE_KEY_ENV],
+        ...(infiniteApiOrigin ? { receiptUrl: infiniteServerLaneReceiptUrl(infiniteApiOrigin) } : {}),
         log: (line) => console.error(line)
       })
       if (parsed.json) {
@@ -509,7 +521,7 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
     if (parsed.command === "server-lane") {
       // `server-lane` / `server-lane --brief`: print the agent brief for THIS repo's stack without
       // installing anything (an agent can pull it before deciding). Install with `install --server-lane`.
-      const brief = renderStandaloneBrief(inspect.framework)
+      const brief = renderStandaloneBrief(inspect.framework, infiniteApiOrigin)
       if (parsed.json) {
         printResult(parsed, { framework: inspect.framework, brief })
       } else {
@@ -517,13 +529,6 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
       }
       return 0
     }
-
-    // Explicit (flag or env) API-origin override only; absent means the artifact keeps its own
-    // recorded origin, or the default. Validated here so a bad env value fails before planning.
-    const infiniteApiOrigin =
-      parsed.infiniteApiOrigin !== undefined || process.env.INFINITE_API_ORIGIN?.trim()
-        ? resolveInfiniteApiOrigin({ flag: parsed.infiniteApiOrigin, env: process.env })
-        : undefined
 
     let artifacts = resolveWorkspaceArtifacts(root, {
       artifactFile: parsed.artifactFile,

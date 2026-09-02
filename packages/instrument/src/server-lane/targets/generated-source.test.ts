@@ -8,14 +8,19 @@ import { join } from "node:path"
 import { pathToFileURL } from "node:url"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
-import { INFINITE_SERVER_EVENTS_DESTINATION } from "../../workspace-artifacts.js"
+import {
+  DEFAULT_INFINITE_COLLECT_PATH,
+  INFINITE_SERVER_EVENTS_DESTINATION,
+  infiniteServerEventsDestination
+} from "../../workspace-artifacts.js"
 import { VECTORS } from "../helpers.test.js"
+import { buildServerLaneModuleSource } from "../runtime-source.js"
 import { SERVER_LANE_SIGNATURE_HEADER, SERVER_LANE_SOURCE_KEY_HEADER } from "../helpers.js"
 
 import { cloudflarePagesMiddlewareSource } from "./cloudflare.js"
-import { netlifyEdgeFunctionSource } from "./netlify.js"
+import { NETLIFY_EXCLUDED_ASSET_EXTENSIONS, netlifyEdgeFunctionSource } from "./netlify.js"
 import { nodeLaneModuleSource, nodeOutcomeHelperSource } from "./node.js"
-import { outcomeHelperSource } from "./shared.js"
+import { nonDocumentPrefixes, outcomeHelperSource } from "./shared.js"
 import { vercelLaneModuleSource, vercelMiddlewareSource } from "./vercel-any.js"
 
 const tempRoots: string[] = []
@@ -121,7 +126,7 @@ describe("the shared edge core, executed", () => {
       ["an API route", { url: `https://${VECTORS.host}/api/checkout` }, false],
       ["a Vercel internal", { url: `https://${VECTORS.host}/_vercel/insights/view` }, false],
       ["a Next internal", { url: `https://${VECTORS.host}/_next/static/chunk.js` }, false],
-      ["the Infinite pixel's collect path", { url: `https://${VECTORS.host}/infinite/events/collect` }, false],
+      ["the Infinite pixel's collect path", { url: `https://${VECTORS.host}${DEFAULT_INFINITE_COLLECT_PATH}` }, false],
       ["a file with an extension", { url: `https://${VECTORS.host}/logo.svg` }, false],
       ["a dotted path segment", { url: `https://${VECTORS.host}/assets/app.min.css` }, false]
     ]
@@ -235,9 +240,12 @@ describe("the Netlify edge function, executed", () => {
       "/api/*",
       "/_next/*",
       "/_vercel/*",
-      "/infinite/events/collect*",
-      "/*.*"
+      `${DEFAULT_INFINITE_COLLECT_PATH}*`,
+      ...NETLIFY_EXCLUDED_ASSET_EXTENSIONS.map((extension) => `/*.${extension}`)
     ])
+    // Never a blanket "/*.*": URLPattern's wildcard is greedy across "/", so it would also exclude a
+    // real page like /v1.0/pricing. https://developer.mozilla.org/en-US/docs/Web/API/URL_Pattern_API
+    expect(fn.config.excludedPath).not.toContain("/*.*")
   })
 
   it("does nothing on an asset request", async () => {
@@ -543,8 +551,66 @@ describe("the generated files as text", () => {
     expect(source).toContain('from "./lib/infinite-server-lane"')
     expect(source).toContain("export default function middleware")
     expect(source).toContain(
-      'matcher: ["/((?!api/|_next/|_vercel/|infinite/events/collect|.*\\\\..*).*)"]'
+      `matcher: ["/((?!api/|_next/|_vercel/|${DEFAULT_INFINITE_COLLECT_PATH.slice(1)}|.*\\\\..*).*)"]`
     )
+  })
+
+  it("takes the collect-path default from the one place it is defined", () => {
+    // The default moved to /infinite/ledger; a second copy of the old string here would be exactly
+    // the drift the "interpolated from one place" design exists to prevent.
+    expect(nonDocumentPrefixes(undefined)).toEqual(["/api/", "/_next/", "/_vercel/", DEFAULT_INFINITE_COLLECT_PATH])
+    expect(DEFAULT_INFINITE_COLLECT_PATH).toBe("/infinite/ledger")
+  })
+
+  it("posts to the resolved --infinite-api-origin, and to the default when there is no override", () => {
+    const origin = "https://api.infinite.fast"
+    const overridden = { ...BUILD, apiOrigin: origin }
+    for (const source of [
+      vercelLaneModuleSource(overridden),
+      netlifyEdgeFunctionSource(overridden),
+      cloudflarePagesMiddlewareSource(overridden),
+      nodeLaneModuleSource(overridden),
+      outcomeHelperSource(overridden)
+    ]) {
+      expect(source).toContain(`"${infiniteServerEventsDestination(origin)}"`)
+      expect(source).not.toContain(INFINITE_SERVER_EVENTS_DESTINATION)
+    }
+    for (const source of [
+      vercelLaneModuleSource(BUILD),
+      netlifyEdgeFunctionSource(BUILD),
+      cloudflarePagesMiddlewareSource(BUILD),
+      nodeLaneModuleSource(BUILD),
+      outcomeHelperSource(BUILD)
+    ]) {
+      expect(source).toContain(`"${INFINITE_SERVER_EVENTS_DESTINATION}"`)
+    }
+  })
+
+  it("the Next.js module follows the override too, and is byte-identical without one", () => {
+    const origin = "https://api.infinite.fast"
+    const withoutOverride = buildServerLaneModuleSource(BUILD)
+    expect(withoutOverride).toBe(buildServerLaneModuleSource({ ...BUILD, apiOrigin: undefined }))
+    expect(withoutOverride).toContain(`"${INFINITE_SERVER_EVENTS_DESTINATION}"`)
+    expect(buildServerLaneModuleSource({ ...BUILD, apiOrigin: origin })).toContain(
+      `"${infiniteServerEventsDestination(origin)}"`
+    )
+  })
+
+  it("an overridden origin actually reaches the wire", async () => {
+    const origin = "https://api.infinite.fast"
+    const lane = (await loadGenerated(vercelLaneModuleSource({ ...BUILD, apiOrigin: origin }))) as {
+      recordInfiniteDocumentRequest: (request: Request, credentials: unknown) => Promise<boolean>
+    }
+    const fetchMock = vi.fn(async () => new Response("{}", { status: 202 }))
+    vi.stubGlobal("fetch", fetchMock)
+    vi.spyOn(Date, "now").mockReturnValue(VECTORS.nowMs)
+    try {
+      await lane.recordInfiniteDocumentRequest(documentRequest(), { secret: VECTORS.secret, sourceKey: "site_test" })
+      expect(postedBody(fetchMock).url).toBe(infiniteServerEventsDestination(origin))
+    } finally {
+      vi.unstubAllGlobals()
+      vi.restoreAllMocks()
+    }
   })
 
   it("honours a custom Infinite collect path in every skip list", () => {

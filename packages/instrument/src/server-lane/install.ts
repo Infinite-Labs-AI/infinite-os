@@ -33,7 +33,7 @@ import { cloudflarePagesTarget } from "./targets/cloudflare.js"
 import { netlifyTarget } from "./targets/netlify.js"
 import { nodeMountSnippet, nodeTarget } from "./targets/node.js"
 import {
-  DEFAULT_COLLECT_PATH,
+  missingAncestorDirectories,
   planManagedFiles,
   type ServerLaneTargetDefinition
 } from "./targets/shared.js"
@@ -290,6 +290,8 @@ export function applyServerLane(input: ApplyServerLaneInput): ApplyServerLaneRes
   const configOwnership: Record<string, ManagedConfigOwnership> = {}
   const manifest: ServerLaneManifest = { mode: input.plan.mode }
   const siteSourceKey = input.artifacts.infinite?.siteSourceKey || undefined
+  // `--infinite-api-origin` moves the SERVER lane with the browser lane; absent, both stay on the default.
+  const apiOrigin = input.artifacts.infinite?.apiOrigin || undefined
   const productionHosts =
     input.artifacts.infinite?.productionHosts ?? input.artifacts.productionHosts ?? []
 
@@ -300,7 +302,11 @@ export function applyServerLane(input: ApplyServerLaneInput): ApplyServerLaneRes
     if (hasExistingUnmanagedFile(appRootAbsolute, moduleAppRelative)) {
       throw new Error(`Refusing to overwrite existing unmanaged module at ${input.plan.modulePath}.`)
     }
-    const moduleSource = buildServerLaneModuleSource({ siteSourceKey, productionHosts })
+    const moduleSource = buildServerLaneModuleSource({
+      siteSourceKey,
+      productionHosts,
+      ...(apiOrigin ? { apiOrigin } : {})
+    })
     if (writeFileIfChanged(appRootAbsolute, moduleAppRelative, moduleSource)) {
       changedFiles.push(input.plan.modulePath)
     }
@@ -395,12 +401,18 @@ export function applyServerLane(input: ApplyServerLaneInput): ApplyServerLaneRes
       {
         siteSourceKey,
         productionHosts,
-        collectPath: input.artifacts.infinite?.collectPath ?? DEFAULT_COLLECT_PATH
+        ...(input.artifacts.infinite?.collectPath
+          ? { collectPath: input.artifacts.infinite.collectPath }
+          : {}),
+        ...(apiOrigin ? { apiOrigin } : {})
       },
       appRootAbsolute
     )
     const created: string[] = []
     const manual: Array<{ path: string; reason: string; contents: string }> = []
+    // Directories we had to make, so uninstall prunes ours and leaves the customer's alone. Carried
+    // forward from the previous manifest: on an idempotent re-run they already exist.
+    const createdDirs = new Set<string>(input.previousManifest?.serverLane?.createdDirs ?? [])
 
     for (const file of input.plan.created) {
       const appRelative = toAppRelative(input.appRoot, file.path)
@@ -426,6 +438,9 @@ export function applyServerLane(input: ApplyServerLaneInput): ApplyServerLaneRes
             throw new Error(
               `Refusing to regenerate ${file.path} because it changed after Infinite recorded its ownership hash.`
             )
+          }
+          for (const directory of missingAncestorDirectories(appRootAbsolute, appRelative)) {
+            createdDirs.add(normalizeAppRelativePath(input.appRoot, directory))
           }
           if (writeFileIfChanged(appRootAbsolute, appRelative, contents)) {
             changedFiles.push(file.path)
@@ -456,6 +471,12 @@ export function applyServerLane(input: ApplyServerLaneInput): ApplyServerLaneRes
     }
 
     if (created.length > 0) manifest.created = created
+    // Deepest first: netlify/edge-functions has to go before netlify.
+    if (createdDirs.size > 0) {
+      manifest.createdDirs = [...createdDirs].sort(
+        (left, right) => right.split("/").length - left.split("/").length
+      )
+    }
     status = {
       kind: "target",
       mode: input.plan.mode,
@@ -471,6 +492,7 @@ export function applyServerLane(input: ApplyServerLaneInput): ApplyServerLaneRes
     status,
     siteSourceKey,
     productionHosts,
+    ...(apiOrigin ? { apiOrigin } : {}),
     moduleImportPath: SERVER_LANE_MODULE_IMPORT_PATH
   })
   const briefAppRelative = toAppRelative(input.appRoot, input.plan.briefPath)

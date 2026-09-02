@@ -17,7 +17,7 @@ import {
   VISIT_BUCKET_SECONDS,
   VISIT_KEY_MESSAGE_PREFIX
 } from "../helpers.js"
-import { INFINITE_SERVER_EVENTS_DESTINATION } from "../../workspace-artifacts.js"
+import { infiniteServerEventsDestination } from "../../workspace-artifacts.js"
 
 import {
   managedGeneratedFile,
@@ -66,7 +66,7 @@ export function nodeLaneModuleSource(input: TargetBuildInput): string {
     ],
     String.raw`${NODE_CRYPTO_IMPORT}
 
-const INFINITE_SERVER_EVENTS_URL = ${JSON.stringify(INFINITE_SERVER_EVENTS_DESTINATION)}
+const INFINITE_SERVER_EVENTS_URL = ${JSON.stringify(infiniteServerEventsDestination(input.apiOrigin))}
 const INFINITE_SOURCE_KEY_FALLBACK = ${JSON.stringify(input.siteSourceKey ?? "")}
 const INFINITE_PRODUCTION_HOSTS = ${bakedHosts}
 const INFINITE_DELIVERY_TIMEOUT_MS = ${SERVER_LANE_DELIVERY_TIMEOUT_MS}

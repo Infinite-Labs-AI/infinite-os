@@ -1,7 +1,7 @@
 // Reference implementations for stacks infinite-tag does not patch automatically. Code only —
 // every sentence of prose lives in copy.ts. Contract values are interpolated from helpers.ts and
 // workspace-artifacts.ts so the snippets can never disagree with the Node recipe.
-import { INFINITE_SERVER_EVENTS_DESTINATION } from "../workspace-artifacts.js"
+import { infiniteServerEventsDestination } from "../workspace-artifacts.js"
 
 import {
   AUTOMATION_USER_AGENT_PATTERN,
@@ -21,7 +21,6 @@ import {
 const prefixes = JSON.stringify([...NON_DOCUMENT_PATH_PREFIXES])
 const automation = `/${AUTOMATION_USER_AGENT_PATTERN.source}/i`
 const referrerHostPattern = `/${REFERRER_HOST_PATTERN.source}/`
-const url = JSON.stringify(INFINITE_SERVER_EVENTS_DESTINATION)
 const docEvent = JSON.stringify(DOCUMENT_REQUEST_EVENT_NAME)
 const docPrefix = JSON.stringify(DOCUMENT_EVENT_ID_PREFIX)
 const visitPrefix = JSON.stringify(VISIT_KEY_MESSAGE_PREFIX)
@@ -33,7 +32,8 @@ const EXPRESS_IMPORT = 'import express from "express"'
 const OUTCOME_HELPER_IMPORT = 'import { postInfiniteOutcome } from "../lib/infinite-outcome"'
 
 /** infinite-server-lane.mjs — the generic Node helper (Express, Fastify, Koa, Hono-on-Node, plain http). */
-export function nodeHelperSnippet(): string {
+export function nodeHelperSnippet(apiOrigin?: string): string {
+  const url = JSON.stringify(infiniteServerEventsDestination(apiOrigin))
   return String.raw`// infinite-server-lane.mjs — generic Node helper. Node >= 18 (global fetch).
 import { createHmac, randomUUID } from "node:crypto"
 
@@ -162,7 +162,8 @@ app.use((req, res, next) => {
 }
 
 /** The WebCrypto twin of the Node helper, for edge runtimes (Cloudflare Workers, Netlify Edge, Deno, Bun). */
-export function webCryptoHelperSnippet(): string {
+export function webCryptoHelperSnippet(apiOrigin?: string): string {
+  const url = JSON.stringify(infiniteServerEventsDestination(apiOrigin))
   return String.raw`// infinite-server-lane-edge.js — WebCrypto helper for edge runtimes (no Node imports).
 const INFINITE_SERVER_EVENTS_URL = ${url}
 const DELIVERY_TIMEOUT_MS = ${SERVER_LANE_DELIVERY_TIMEOUT_MS}

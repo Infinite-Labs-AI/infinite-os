@@ -236,6 +236,12 @@ export interface ServerLaneManifest {
    * record in configOwnership so uninstall deletes it only when it is byte-identical.
    */
   created?: string[]
+  /**
+   * Directories the lane itself had to create, root-relative and deepest-first. Uninstall prunes
+   * ONLY these, and only while empty — a `netlify/` or `functions/` directory the customer already
+   * had is part of their tree (and, for `netlify/`, is the hosting evidence), never ours to delete.
+   */
+  createdDirs?: string[]
 }
 
 export interface ManagedConfigInsertion {
