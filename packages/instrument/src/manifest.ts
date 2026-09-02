@@ -57,6 +57,7 @@ function assertManifestConfined(root: string, manifest: InstallManifest): void {
     manifest.serverLane?.middleware,
     manifest.serverLane?.module,
     manifest.serverLane?.brief,
+    manifest.serverLane?.guide,
     ...(manifest.serverLane?.created ?? []),
     ...(manifest.serverLane?.createdDirs ?? [])
   ]) {

@@ -122,6 +122,47 @@ describe("infinite-tag install --server-lane", () => {
     expect(out).not.toContain("## The contract (implement exactly)")
   })
 
+  it("a server-lane-only install does not claim a browser pixel and counts runtime files honestly", async () => {
+    const root = copyFixture("next-app-router-basic")
+    const code = await runCli(["install", "--root", root, "--workspace", "ws_test", "--server-lane", "--yes"])
+    expect(code).toBe(0)
+    const out = stdoutText()
+    // Task 1: no overclaim — server lane only, pixel explicitly not installed.
+    expect(out).toContain("✅ Done — server lane wired (lossless server-side counting).")
+    expect(out).toContain("Browser pixel NOT installed.")
+    expect(out).not.toContain("your site is now wired for analytics")
+    // Task 2: runtime file count is separated from the manifest + brief artifacts.
+    expect(out).toContain("managed runtime file")
+    expect(out).toContain("wrote manifest + brief")
+    // The pixel "Installed" step must not attribute the middleware/module/brief to a pixel.
+    expect(out).not.toContain("Installed analytics →")
+  })
+
+  it("a pixel + server-lane install keeps the pixel wording and still counts runtime files", async () => {
+    const root = copyFixture("next-app-router-basic")
+    const code = await runCli([
+      "install",
+      "--root",
+      root,
+      "--workspace",
+      "ws_test",
+      "--server-lane",
+      "--infinite-site-source-key",
+      "site_public_test",
+      "--infinite-production-host",
+      "example.com",
+      "--infinite-consent-mode",
+      "not-required",
+      "--yes"
+    ])
+    expect(code).toBe(0)
+    const out = stdoutText()
+    // Task 1: a real pixel is present, so the pixel wording stays.
+    expect(out).toContain("your site is now wired for Infinite")
+    expect(out).not.toContain("Browser pixel NOT installed.")
+    expect(out).toContain("managed runtime file")
+  })
+
   it("human mode on Vite writes the brief AND prints it (the brief is the install)", async () => {
     const root = copyFixture("vite-react-basic")
     const code = await runCli(["install", "--root", root, "--workspace", "ws_test", "--server-lane", "--yes"])

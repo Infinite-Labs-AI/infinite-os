@@ -164,6 +164,10 @@ describe("the shared edge core, executed", () => {
       ["a purpose:prefetch", { headers: { purpose: "prefetch" } }, false],
       ["a sec-purpose prerender", { headers: { "sec-purpose": "prefetch;prerender" } }, false],
       ["a Next router prefetch", { headers: { "next-router-prefetch": "1" } }, false],
+      // Privacy: DNT / Global-Privacy-Control are honored like the client pixel does.
+      ["a Do-Not-Track signal", { headers: { dnt: "1" } }, false],
+      ["a Sec-GPC signal", { headers: { "sec-gpc": "1" } }, false],
+      ["DNT explicitly disabled", { headers: { dnt: "0" } }, true],
       ["an API route", { url: `https://${VECTORS.host}/api/checkout` }, false],
       ["a Vercel internal", { url: `https://${VECTORS.host}/_vercel/insights/view` }, false],
       ["a Next internal", { url: `https://${VECTORS.host}/_next/static/chunk.js` }, false],
@@ -579,6 +583,70 @@ describe("the outcome helper, executed", () => {
     expect(body.properties.visitKey).toBe(VECTORS.visitKey)
   })
 
+  it("reads a PLAIN-OBJECT request (Vercel Node function / Express req.headers), not just a WHATWG Request", async () => {
+    // Regression: req.headers on a Vercel Node function is a plain object, so headers.get(...) threw
+    // and the whole outcome was swallowed as false — no visit key, no purchase posted.
+    const helper = (await loadGenerated(outcomeHelperSource(BUILD))) as {
+      postInfiniteOutcome: (input: Record<string, unknown>) => Promise<boolean>
+    }
+    const nodeReq = {
+      headers: {
+        "x-forwarded-for": `${VECTORS.clientIp}, 10.0.0.1`,
+        "user-agent": VECTORS.userAgent
+      }
+    }
+    await expect(
+      helper.postInfiniteOutcome({
+        type: "purchase",
+        eventId: "purchase:node_1",
+        occurredAt: new Date(VECTORS.nowMs),
+        visitKeyInputs: nodeReq
+      })
+    ).resolves.toBe(true)
+    const body = JSON.parse(postedBody(fetchMock).body) as { properties: Record<string, string> }
+    // A real key from the plain object — never false/empty, and the IP itself still never leaves.
+    expect(body.properties.visitKey).toBe(VECTORS.visitKey)
+    expect(postedBody(fetchMock).body).not.toContain(VECTORS.clientIp)
+  })
+
+  it("exports infiniteVisitKey so a checkout can compute the key and a webhook can carry it", async () => {
+    const helper = (await loadGenerated(outcomeHelperSource(BUILD))) as {
+      infiniteVisitKey: (inputs: { clientIp?: string; userAgent?: string; nowMs?: number }) => Promise<string>
+      postInfiniteOutcome: (input: Record<string, unknown>) => Promise<boolean>
+    }
+    // 1. At CHECKOUT, from the buyer's request — same recipe as the page-view lane.
+    const visitKey = await helper.infiniteVisitKey({
+      clientIp: VECTORS.clientIp,
+      userAgent: VECTORS.userAgent,
+      nowMs: VECTORS.nowMs
+    })
+    expect(visitKey).toBe(VECTORS.visitKey)
+    // 2. In the WEBHOOK, carried via properties.visitKey (the request there is the provider's) — the
+    //    helper skips its own derivation and keeps the carried key verbatim.
+    await helper.postInfiniteOutcome({
+      type: "purchase",
+      eventId: "purchase:cs_1",
+      occurredAt: new Date(VECTORS.nowMs),
+      properties: { visitKey }
+    })
+    expect(JSON.parse(postedBody(fetchMock).body).properties.visitKey).toBe(VECTORS.visitKey)
+  })
+
+  it("a carried properties.visitKey wins over visitKeyInputs — no re-derivation", async () => {
+    const helper = (await loadGenerated(outcomeHelperSource(BUILD))) as {
+      postInfiniteOutcome: (input: Record<string, unknown>) => Promise<boolean>
+    }
+    await helper.postInfiniteOutcome({
+      type: "purchase",
+      eventId: "purchase:cs_2",
+      occurredAt: new Date(VECTORS.nowMs),
+      properties: { visitKey: "carried_from_checkout" },
+      // A different request that WOULD derive a different key — it must be ignored.
+      visitKeyInputs: { clientIp: "198.51.100.7", userAgent: "someone-else" }
+    })
+    expect(JSON.parse(postedBody(fetchMock).body).properties.visitKey).toBe("carried_from_checkout")
+  })
+
   it("falls back to the baked source key, takes explicit credentials, and stays silent with no secret", async () => {
     const helper = (await loadGenerated(outcomeHelperSource(BUILD))) as {
       postInfiniteOutcome: (input: Record<string, unknown>) => Promise<boolean>
@@ -636,6 +704,35 @@ describe("the outcome helper, executed", () => {
     ).resolves.toBe(true)
     const body = JSON.parse(postedBody(fetchMock).body) as { properties: Record<string, string> }
     expect(body.properties).toEqual({ path: "/checkout", visitKey: VECTORS.visitKey })
+  })
+
+  it("the Node twin derives the SAME visit key from a plain-object req as from explicit inputs", async () => {
+    // Regression: the Node outcome helper used to spread `{ ...visitKeyInputs, nowMs }`, so a Node
+    // `req` became `{ headers, nowMs }` — clientIp/userAgent empty — and it derived a DIFFERENT key,
+    // breaking same-lane attribution for Node users who followed the guide's `visitKeyInputs: req`.
+    const dir = mkdtempSync(join(tmpdir(), "instrument-lane-node-req-"))
+    tempRoots.push(dir)
+    writeFileSync(join(dir, "infinite-server-lane.js"), nodeLaneModuleSource(BUILD))
+    const outcomePath = join(dir, "infinite-outcome.js")
+    writeFileSync(outcomePath, nodeOutcomeHelperSource())
+    const helper = (await import(pathToFileURL(outcomePath).href)) as {
+      postInfiniteOutcome: (input: Record<string, unknown>) => Promise<boolean>
+    }
+
+    await expect(
+      helper.postInfiniteOutcome({
+        type: "purchase",
+        path: "/checkout",
+        eventId: "purchase:node_req",
+        occurredAt: new Date(VECTORS.nowMs),
+        // A Node request: .headers is a PLAIN OBJECT, exactly as Express / node:http hand it over.
+        visitKeyInputs: { headers: { "x-forwarded-for": `${VECTORS.clientIp}, 10.0.0.1`, "user-agent": VECTORS.userAgent } }
+      })
+    ).resolves.toBe(true)
+    const body = JSON.parse(postedBody(fetchMock).body) as { properties: Record<string, string> }
+    // The shared helper's vector — the Node twin must derive the identical key, and never leak the IP.
+    expect(body.properties.visitKey).toBe(VECTORS.visitKey)
+    expect(postedBody(fetchMock).body).not.toContain(VECTORS.clientIp)
   })
 })
 

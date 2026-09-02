@@ -8,9 +8,13 @@ import { applyInstallation } from "./apply.js"
 import { inspectWorkspace } from "./inspect.js"
 import { planInstallation } from "./plan.js"
 import {
+  allowAutomationTargetError,
+  applyInfiniteAllowAutomation,
   applyInfiniteApiOrigin,
   applyInfiniteAutocapture,
   applyPosthogProxy,
+  INFINITE_ALLOW_AUTOMATION_NO_SOURCE_ERROR,
+  isNonProductionAutomationHost,
   DEFAULT_INFINITE_COLLECT_PATH,
   DEFAULT_POSTHOG_PROXY_PATH,
   discoverWorkspaceArtifacts,
@@ -545,5 +549,48 @@ describe("Infinite autocapture flag", () => {
     expect(applyInfiniteAutocapture({ ga4: { measurementId: "G-1" } }, { autocapture: false }).infinite).toBeUndefined()
     const untouched = { infinite: layered.infinite! }
     expect(applyInfiniteAutocapture(untouched, {})).toBe(untouched)
+  })
+})
+
+describe("applyInfiniteAllowAutomation (synthetic/test-only safety gate)", () => {
+  const sandbox = {
+    infinite: {
+      siteSourceKey: "site_public_123",
+      collectPath: DEFAULT_INFINITE_COLLECT_PATH,
+      productionHosts: ["localhost"]
+    }
+  }
+
+  it("classifies loopback / sandbox / local hosts as non-production, real hosts as production", () => {
+    for (const host of ["localhost", "127.0.0.1", "::1", "my.local", "app.test", "1bu-1-dev2-sandbox.vercel.app"]) {
+      expect(isNonProductionAutomationHost(host), host).toBe(true)
+    }
+    for (const host of ["example.com", "grandlumber.com", "www.acme.io"]) {
+      expect(isNonProductionAutomationHost(host), host).toBe(false)
+    }
+  })
+
+  it("allowAutomationTargetError refuses a production host and passes a sandbox host", () => {
+    expect(allowAutomationTargetError(["example.com"])).toContain("PRODUCTION host")
+    expect(allowAutomationTargetError(["localhost"])).toBeNull()
+    expect(allowAutomationTargetError([])).toContain("at least one configured production host")
+  })
+
+  it("sets allowAutomation:true on a sandbox source and is a no-op when off", () => {
+    expect(applyInfiniteAllowAutomation(sandbox, { allowAutomation: true }).infinite?.allowAutomation).toBe(true)
+    expect(applyInfiniteAllowAutomation(sandbox, { allowAutomation: false })).toEqual(sandbox)
+    expect(applyInfiniteAllowAutomation(sandbox, {})).toEqual(sandbox)
+  })
+
+  it("throws on a production host and when there is no Infinite source", () => {
+    expect(() =>
+      applyInfiniteAllowAutomation(
+        { infinite: { siteSourceKey: "site_x", collectPath: "/i", productionHosts: ["example.com"] } },
+        { allowAutomation: true }
+      )
+    ).toThrow(/synthetic\/test-only flag/)
+    expect(() => applyInfiniteAllowAutomation({ ga4: { measurementId: "G-1" } }, { allowAutomation: true })).toThrow(
+      INFINITE_ALLOW_AUTOMATION_NO_SOURCE_ERROR
+    )
   })
 })

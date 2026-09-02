@@ -24,7 +24,9 @@ import type {
 
 import {
   SERVER_LANE_BRIEF_FILE,
+  SERVER_LANE_GUIDE_FILE,
   renderServerLaneBrief,
+  renderServerLanePointer,
   type ServerLaneBriefStatus
 } from "./copy.js"
 import { SERVER_LANE_SECRET_ENV, SERVER_LANE_SOURCE_KEY_ENV } from "./helpers.js"
@@ -505,7 +507,7 @@ export function applyServerLane(input: ApplyServerLaneInput): ApplyServerLaneRes
   }
 
   // For the host-chosen targets that emit the self-contained outcome helper, the brief's examples
-  // must import it exactly as the customer's routes will — with the extension when it is JS.
+  // must import it exactly as the customer's routes will — with the extension when it is JS (#24).
   const outcomeEmittingModes = new Set(["vercel-middleware", "netlify-edge", "cloudflare-pages"])
   const outcomeBrief = outcomeEmittingModes.has(input.plan.mode)
     ? (() => {
@@ -517,22 +519,45 @@ export function applyServerLane(input: ApplyServerLaneInput): ApplyServerLaneRes
       })()
     : {}
 
-  const brief = renderServerLaneBrief({
+  const briefInput = {
     status,
     siteSourceKey,
     productionHosts,
     ...(apiOrigin ? { apiOrigin } : {}),
     moduleImportPath: SERVER_LANE_MODULE_IMPORT_PATH,
     ...outcomeBrief
-  })
+  }
+  // The full guide lives under docs/ so the repo root is not buried under 700 lines; the root file
+  // is a short pointer at it. `brief` (returned + printed by the CLI) is the full guide.
+  const brief = renderServerLaneBrief(briefInput)
+  const guideRootRelative = normalizeAppRelativePath(input.appRoot, SERVER_LANE_GUIDE_FILE)
+  const guideAppRelative = toAppRelative(input.appRoot, guideRootRelative)
+  let guideWritten = false
+  if (hasExistingUnmanagedFile(appRootAbsolute, guideAppRelative)) {
+    warnings.push(
+      `${guideRootRelative} exists and is not managed by Infinite; the full guide was left unwritten (it is printed instead).`
+    )
+  } else {
+    // Written but kept out of changedFiles: the CLI narrates the runtime files + the root pointer;
+    // the guide is a doc the pointer links to, tracked here purely so uninstall can remove it.
+    writeFileIfChanged(appRootAbsolute, guideAppRelative, brief)
+    manifest.guide = guideRootRelative
+    guideWritten = true
+  }
+
+  // The pointer claims/links the guide ONLY when it was actually written + recorded — never a
+  // customer's own unmanaged docs file, and never a serverLane.guide record that does not exist.
+  const pointer = renderServerLanePointer({ ...briefInput, guidePath: guideWritten ? guideRootRelative : null })
   const briefAppRelative = toAppRelative(input.appRoot, input.plan.briefPath)
   let briefWritten = false
   if (hasExistingUnmanagedFile(appRootAbsolute, briefAppRelative)) {
     warnings.push(
-      `${input.plan.briefPath} exists and is not managed by Infinite; it was left untouched (the brief is printed instead).`
+      `${input.plan.briefPath} exists and is not managed by Infinite; it was left untouched${
+        guideWritten ? ` (the guide is at ${guideRootRelative})` : " (the guide was printed instead)"
+      }.`
     )
   } else {
-    if (writeFileIfChanged(appRootAbsolute, briefAppRelative, brief)) {
+    if (writeFileIfChanged(appRootAbsolute, briefAppRelative, pointer)) {
       changedFiles.push(input.plan.briefPath)
     }
     manifest.brief = input.plan.briefPath
@@ -621,14 +646,15 @@ export function reverseServerLane(input: ReverseServerLaneInput): ReverseServerL
     if (removal.warning) result.warnings.push(removal.warning)
   }
 
-  if (lane.brief) {
-    if (!fileExists(input.root, lane.brief)) {
-      result.warnings.push(`Managed file already absent: ${lane.brief}`)
-    } else if (hasExistingUnmanagedFile(input.root, lane.brief)) {
-      result.warnings.push(`${lane.brief} no longer carries the Infinite banner; left in place.`)
+  for (const doc of [lane.brief, lane.guide]) {
+    if (!doc) continue
+    if (!fileExists(input.root, doc)) {
+      result.warnings.push(`Managed file already absent: ${doc}`)
+    } else if (hasExistingUnmanagedFile(input.root, doc)) {
+      result.warnings.push(`${doc} no longer carries the Infinite banner; left in place.`)
     } else {
-      if (!input.dryRun) rmSync(join(input.root, lane.brief))
-      result.removedFiles.push(lane.brief)
+      if (!input.dryRun) rmSync(join(input.root, doc))
+      result.removedFiles.push(doc)
     }
   }
 

@@ -5,11 +5,15 @@ import { afterEach, describe, expect, it } from "vitest"
 
 import {
   CONVERSIONS_MANIFEST_RELATIVE_PATH,
+  FUNNEL_CAPTURE_AFTER_RESPONSE_CODE,
+  FUNNEL_IDENTITY_MERGE_CODE,
   PROPOSED_CONVERSIONS_RELATIVE_PATH,
   applyConversions,
+  detectServerCheckout,
   ensureProposedIgnored,
   proposeConversions,
   readApprovedConversions,
+  renderServerCheckoutRecommendation,
   unmarkConversions,
   writeProposal
 } from "./marking.js"
@@ -309,5 +313,104 @@ describe("unmarkConversions", () => {
     expect(result.restored).toHaveLength(2)
     expect(read(root, "index.html")).toBe(INDEX_HTML)
     expect(existsSync(join(root, CONVERSIONS_MANIFEST_RELATIVE_PATH))).toBe(false)
+  })
+})
+
+describe("detectServerCheckout", () => {
+  it("returns null when there is no Stripe server checkout in the source", () => {
+    const root = makeRoot()
+    write(root, "pages/index.tsx", "export default function Page() { return null }")
+    expect(detectServerCheckout({ root, appRoot: "." })).toBeNull()
+  })
+
+  it("detects the server checkout entry and the verified webhook fulfillment as a pair", () => {
+    const root = makeRoot()
+    write(
+      root,
+      "pages/api/stripe-checkout.ts",
+      "export default async function handler() {\n  const session = await stripe.checkout.sessions.create({ mode: 'payment' })\n  return session\n}\n"
+    )
+    write(
+      root,
+      "pages/api/stripe-webhook.ts",
+      "export default function handler(req) {\n  const event = stripe.webhooks.constructEvent(req.body, sig, secret)\n  if (event.type === 'checkout.session.completed') fulfill(event)\n}\n"
+    )
+    const rec = detectServerCheckout({ root, appRoot: "." })
+    expect(rec?.code).toBe("INF_CHECKOUT_SERVER_SIDE")
+    expect(rec?.sessionCreate[0]).toMatchObject({
+      kind: "session_create",
+      file: "pages/api/stripe-checkout.ts",
+      line: 2,
+      evidence: "stripe.checkout.sessions.create"
+    })
+    expect(rec?.webhookFulfillment.some((signal) => signal.evidence === "stripe.webhooks.constructEvent")).toBe(true)
+
+    const lines = renderServerCheckoutRecommendation(rec!)
+    expect(lines.join("\n")).toContain("checkout_started")
+    expect(lines.join("\n")).toContain("purchase")
+    expect(lines.join("\n")).toContain("pages/api/stripe-checkout.ts:2")
+  })
+
+  it("recommends adding the missing half when only the checkout entry exists", () => {
+    const root = makeRoot()
+    write(
+      root,
+      "pages/api/checkout.ts",
+      "const session = await stripe.checkout.sessions.create({})\n"
+    )
+    const rec = detectServerCheckout({ root, appRoot: "." })
+    expect(rec?.sessionCreate).toHaveLength(1)
+    expect(rec?.webhookFulfillment).toHaveLength(0)
+    expect(renderServerCheckoutRecommendation(rec!).join("\n")).toContain(
+      "No verified Stripe webhook fulfillment handler was found"
+    )
+  })
+
+  it("recommends the funnel identity merge ONLY on the detected checkout→webhook pair", () => {
+    const root = makeRoot()
+    write(root, "pages/api/checkout.ts", "await stripe.checkout.sessions.create({ mode: 'payment' })\n")
+    write(
+      root,
+      "pages/api/webhook.ts",
+      "const e = stripe.webhooks.constructEvent(req.body, sig, sk)\nif (e.type === 'checkout.session.completed') fulfill(e)\n"
+    )
+    const rec = detectServerCheckout({ root, appRoot: "." })
+    const text = renderServerCheckoutRecommendation(rec!).join("\n")
+    expect(text).toContain(FUNNEL_IDENTITY_MERGE_CODE)
+    // The reviewer's exact merge shape must be spelled out.
+    expect(text).toContain("$identify")
+    expect(text).toContain("$anon_distinct_id")
+    expect(text).toContain("posthog_distinct_id")
+    // and it names the fulfillment site.
+    expect(text).toContain("pages/api/webhook.ts")
+    // Accuracy: metadata.posthog_distinct_id is REQUIRED (the same id checkout_started used); the
+    // merge is refused when the anon id was already identified; `|| buyer.email` is NOT presented as
+    // a blanket-safe default.
+    expect(text).toContain("REFUSES the merge")
+    expect(text).toContain("do not use bare `|| buyer.email` as a blanket default")
+    // $create_alias direction + constraint spelled out, not left as a bare aside.
+    expect(text).toContain("$create_alias")
+    expect(text).toContain("the backend buyer id is properties.alias")
+    expect(text).toContain("must not have been previously identified/aliased")
+  })
+
+  it("does NOT recommend the identity merge when only the checkout entry exists (no webhook to key on)", () => {
+    const root = makeRoot()
+    write(root, "pages/api/checkout.ts", "await stripe.checkout.sessions.create({})\n")
+    const rec = detectServerCheckout({ root, appRoot: "." })
+    const text = renderServerCheckoutRecommendation(rec!).join("\n")
+    expect(text).not.toContain(FUNNEL_IDENTITY_MERGE_CODE)
+    // …but the post-response capture recommendation still applies to the entry.
+    expect(text).toContain(FUNNEL_CAPTURE_AFTER_RESPONSE_CODE)
+  })
+
+  it("recommends capturing checkout_started AFTER the response wherever a server checkout entry exists", () => {
+    const root = makeRoot()
+    write(root, "app/checkout/route.ts", "const session = await stripe.checkout.sessions.create({})\n")
+    const rec = detectServerCheckout({ root, appRoot: "." })
+    const text = renderServerCheckoutRecommendation(rec!).join("\n")
+    expect(text).toContain(FUNNEL_CAPTURE_AFTER_RESPONSE_CODE)
+    expect(text).toContain("res.json")
+    expect(text).toContain("app/checkout/route.ts")
   })
 })

@@ -8,7 +8,14 @@ import { parseHarnessArgs } from "./args.js"
 import { EXIT_ARGS, EXIT_FAILED, EXIT_OK, runHarnessCommand } from "./command.js"
 import { PROPOSED_CONVERSIONS_RELATIVE_PATH } from "./marking.js"
 import { REPORT_SENT_LINE, reportNotSentLine, type HarnessReportPayload, type ReportSink } from "./report-sink.js"
-import { runHarness, type HarnessIo } from "./run.js"
+import {
+  buildPrivacyDisclosureNotice,
+  PIXEL_DISCLOSURE_FIELDS,
+  PRIVACY_DISCLOSURE_CODE,
+  runHarness,
+  SERVER_LANE_DISCLOSURE_FIELDS,
+  type HarnessIo
+} from "./run.js"
 import { HARNESS_REPORT_RELATIVE_PATH } from "./state.js"
 import type { VerificationBackend } from "./verify.js"
 
@@ -441,5 +448,187 @@ describe("infinite-tag harness dispatch", () => {
     } finally {
       process.stderr.write = originalWrite
     }
+  })
+})
+
+describe("guided consent (Infinite)", () => {
+  const infiniteArgs = (root: string, mode: string) => [
+    mode, "--root", root, "--workspace", "ws_1",
+    "--infinite-site-source-key", "site_public_123",
+    "--infinite-production-host", "example.com",
+    "--infinite-static-proxy", "vercel"
+  ]
+
+  it("interactive plan ASKS a consent choice instead of dead-ending on a raw blocker", async () => {
+    const root = copyFixture("static-html-basic")
+    const io = fakeIo({ interactive: true, answers: [false] }) // not gated → not_required
+    const result = await runHarness(parseHarnessArgs(infiniteArgs(root, "--plan")), io, { discover: () => null })
+    expect(io.questions.some((q) => q.toLowerCase().includes("consent banner"))).toBe(true)
+    expect(result.report.steps.find((s) => s.id === "plan")?.status).toBe("ok")
+    expect(result.report.failures).toEqual([])
+  })
+
+  it("non-interactive guides with INF_CONSENT_REQUIRED naming both flags, and never silently collects", async () => {
+    const root = copyFixture("static-html-basic")
+    const io = fakeIo({ interactive: false })
+    const result = await runHarness(parseHarnessArgs(infiniteArgs(root, "--plan")), io, { discover: () => null })
+    expect(io.errLines.some((l) => l.includes("INF_CONSENT_REQUIRED"))).toBe(true)
+    expect(io.errLines.join("\n")).toContain("--infinite-consent-mode not-required")
+    expect(io.errLines.join("\n")).toContain("--infinite-consent-mode required")
+    // The plan still guards: with no decision it does not proceed to install.
+    expect(result.report.steps.find((s) => s.id === "plan")?.status).toBe("failed")
+  })
+
+  it("interactive apply records the chosen mode in the written runtime", async () => {
+    const root = copyFixture("static-html-basic")
+    const io = fakeIo({ interactive: true, answers: [true, true, false] }) // gate=required, install=yes, mark=no
+    const result = await runHarness(parseHarnessArgs([...infiniteArgs(root, "--apply"), "--url", "https://example.com/"]), io, {
+      discover: () => null,
+      fetch: (async () => new Response("<html></html>", { status: 200 })) as unknown as typeof fetch,
+      ...clock(),
+      budgetMs: 3_000,
+      pollIntervalMs: 3_000
+    })
+    expect(result.exitCode).toBe(0)
+    expect(readFileSync(join(root, "index.html"), "utf8")).toContain('"mode":"required"')
+  })
+
+  it("an explicit --infinite-consent-mode skips the prompt entirely", async () => {
+    const root = copyFixture("static-html-basic")
+    const io = fakeIo({ interactive: true, answers: [] })
+    const result = await runHarness(
+      parseHarnessArgs([...infiniteArgs(root, "--plan"), "--infinite-consent-mode", "not-required"]),
+      io,
+      { discover: () => null }
+    )
+    expect(io.questions.some((q) => q.toLowerCase().includes("consent banner"))).toBe(false)
+    expect(result.report.steps.find((s) => s.id === "plan")?.status).toBe("ok")
+  })
+})
+
+describe("server-side checkout detection (harness)", () => {
+  it("surfaces the checkout_started + purchase recommendation in --plan next steps and the proposal", async () => {
+    const root = copyFixture("next-pages-router-basic")
+    write(root, "pages/api/stripe-checkout.ts", "export default async function h(){ await stripe.checkout.sessions.create({}) }\n")
+    write(root, "pages/api/stripe-webhook.ts", "export default function h(req){ const e = stripe.webhooks.constructEvent(req.body, sig, sk); if(e.type==='checkout.session.completed'){} }\n")
+    const io = fakeIo({ interactive: false })
+    const result = await runHarness(
+      parseHarnessArgs(["--plan", "--root", root, "--workspace", "ws_1", "--ga4-measurement-id", "G-NEW00001"]),
+      io,
+      { discover: () => null }
+    )
+    const nextSteps = result.report.nextSteps.join("\n")
+    expect(nextSteps).toContain("checkout_started")
+    expect(nextSteps).toContain("purchase")
+    expect(nextSteps).toContain("pages/api/stripe-checkout.ts")
+    const proposal = JSON.parse(readFileSync(join(root, PROPOSED_CONVERSIONS_RELATIVE_PATH), "utf8"))
+    expect(proposal.serverCheckout?.code).toBe("INF_CHECKOUT_SERVER_SIDE")
+  })
+
+  it("recommends the funnel identity merge and post-response capture on the detected checkout→webhook pair", async () => {
+    const root = copyFixture("next-pages-router-basic")
+    write(root, "pages/api/stripe-checkout.ts", "export default async function h(){ await stripe.checkout.sessions.create({}) }\n")
+    write(root, "pages/api/stripe-webhook.ts", "export default function h(req){ const e = stripe.webhooks.constructEvent(req.body, sig, sk); if(e.type==='checkout.session.completed'){} }\n")
+    const io = fakeIo({ interactive: false })
+    const result = await runHarness(
+      parseHarnessArgs(["--plan", "--root", root, "--workspace", "ws_1", "--ga4-measurement-id", "G-NEW00001"]),
+      io,
+      { discover: () => null }
+    )
+    const nextSteps = result.report.nextSteps.join("\n")
+    expect(nextSteps).toContain("INF_FUNNEL_IDENTITY_MERGE")
+    expect(nextSteps).toContain("$anon_distinct_id")
+    expect(nextSteps).toContain("INF_FUNNEL_CAPTURE_AFTER_RESPONSE")
+    // Surfaced in the written report too.
+    const report = readFileSync(join(root, HARNESS_REPORT_RELATIVE_PATH), "utf8")
+    expect(report).toContain("INF_FUNNEL_IDENTITY_MERGE")
+    expect(report).toContain("INF_FUNNEL_CAPTURE_AFTER_RESPONSE")
+  })
+})
+
+describe("buildPrivacyDisclosureNotice (per-lane accuracy)", () => {
+  it("returns null when neither lane is installed", () => {
+    expect(buildPrivacyDisclosureNotice({ pixel: false, serverLane: false })).toBeNull()
+  })
+
+  it("browser-pixel notice does NOT claim IP/UA stay on your server (Infinite is the HTTP endpoint)", () => {
+    const notice = buildPrivacyDisclosureNotice({ pixel: true, serverLane: false })!
+    expect(notice).toContain(PRIVACY_DISCLOSURE_CODE)
+    expect(notice).toContain("api.ultima.inc")
+    expect(notice).toContain(PIXEL_DISCLOSURE_FIELDS)
+    // The pixel POSTs (via rewrite) straight to Infinite, so IP + UA reach the endpoint.
+    expect(notice).toContain("INCLUDING the visitor's IP address and User-Agent")
+    // …and the pixel body has no visit key / UA class, so those must not appear.
+    expect(notice).not.toContain("visit key")
+    expect(notice).not.toContain("userAgentFamily")
+    // The false "stays on your server" claim must NOT appear for a pixel-only install.
+    expect(notice).not.toContain(SERVER_LANE_DISCLOSURE_FIELDS)
+  })
+
+  it("server-lane notice lists the derived fields and correctly says the raw IP/UA never leave the server", () => {
+    const notice = buildPrivacyDisclosureNotice({ pixel: false, serverLane: true })!
+    expect(notice).toContain(SERVER_LANE_DISCLOSURE_FIELDS)
+    expect(notice).toContain("visit key that rotates every 30 minutes")
+    expect(notice).toContain("userAgentFamily")
+    expect(notice).toContain("never leave it")
+    // Server lane sends no pixel-only anonymousId/sessionId body.
+    expect(notice).not.toContain(PIXEL_DISCLOSURE_FIELDS)
+  })
+
+  it("both lanes → both blocks, each naming Ultima Inc. / api.ultima.inc", () => {
+    const notice = buildPrivacyDisclosureNotice({ pixel: true, serverLane: true })!
+    expect(notice).toContain(PIXEL_DISCLOSURE_FIELDS)
+    expect(notice).toContain(SERVER_LANE_DISCLOSURE_FIELDS)
+    expect(notice).toContain("Ultima Inc.")
+  })
+})
+
+describe("privacy disclosure reminder (wired into the run)", () => {
+  const infiniteArgs = (root: string, mode: string) => [
+    mode, "--root", root, "--workspace", "ws_1",
+    "--infinite-site-source-key", "site_public_123",
+    "--infinite-production-host", "example.com",
+    "--infinite-static-proxy", "vercel",
+    "--infinite-consent-mode", "not-required"
+  ]
+
+  it("fires the browser-pixel disclosure when only the Infinite pixel is being installed", async () => {
+    const root = copyFixture("static-html-basic")
+    const io = fakeIo({ interactive: false })
+    const result = await runHarness(parseHarnessArgs(infiniteArgs(root, "--plan")), io, { discover: () => null })
+    const notice = result.report.nextSteps.find((step) => step.includes(PRIVACY_DISCLOSURE_CODE))
+    expect(notice).toBeDefined()
+    expect(notice).toContain(PIXEL_DISCLOSURE_FIELDS)
+    // No server lane requested → no server-lane block.
+    expect(notice).not.toContain(SERVER_LANE_DISCLOSURE_FIELDS)
+    // Surfaced in the written report's checklist.
+    const report = readFileSync(join(root, HARNESS_REPORT_RELATIVE_PATH), "utf8")
+    expect(report).toContain(PRIVACY_DISCLOSURE_CODE)
+  })
+
+  it("fires BOTH lane blocks when the Infinite pixel and the server lane are both installed", async () => {
+    const root = copyFixture("next-app-router-basic")
+    const io = fakeIo({ interactive: false })
+    const result = await runHarness(
+      parseHarnessArgs([...infiniteArgs(root, "--plan"), "--server-lane"]),
+      io,
+      { discover: () => null }
+    )
+    const notice = result.report.nextSteps.find((step) => step.includes(PRIVACY_DISCLOSURE_CODE))
+    expect(notice).toBeDefined()
+    expect(notice).toContain(PIXEL_DISCLOSURE_FIELDS)
+    expect(notice).toContain(SERVER_LANE_DISCLOSURE_FIELDS)
+  })
+
+  it("does NOT remind about disclosure when no Infinite source is being installed", async () => {
+    const root = copyFixture("static-html-basic")
+    write(root, "index.html", `<!doctype html>\n<html>\n<head></head>\n<body>\n<a href="/signup">Start</a>\n</body>\n</html>\n`)
+    const io = fakeIo({ interactive: false })
+    const result = await runHarness(
+      parseHarnessArgs(["--plan", "--root", root, "--workspace", "ws_1", "--ga4-measurement-id", "G-NEW00001"]),
+      io,
+      { discover: () => null }
+    )
+    expect(result.report.nextSteps.some((step) => step.includes(PRIVACY_DISCLOSURE_CODE))).toBe(false)
   })
 })

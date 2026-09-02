@@ -15,7 +15,7 @@ import type { WorkspaceInstallArtifacts } from "../../types.js"
 import { uninstallInstallation } from "../../uninstall.js"
 import { verifyInstallation } from "../../verify.js"
 import { INFINITE_SERVER_EVENTS_DESTINATION } from "../../workspace-artifacts.js"
-import { SERVER_LANE_BRIEF_FILE } from "../copy.js"
+import { SERVER_LANE_BRIEF_FILE, SERVER_LANE_GUIDE_FILE } from "../copy.js"
 
 import { CLOUDFLARE_MIDDLEWARE_PATH } from "./cloudflare.js"
 import { NETLIFY_EDGE_FUNCTION_PATH } from "./netlify.js"
@@ -133,7 +133,8 @@ describe("Vercel, any framework", () => {
       created: [VERCEL_MODULE_PATH, VERCEL_OUTCOME_PATH, VERCEL_MIDDLEWARE_PATH],
       // Only the directory the lane had to make; a `lib/` the repo already had would not be listed.
       createdDirs: ["lib"],
-      brief: SERVER_LANE_BRIEF_FILE
+      brief: SERVER_LANE_BRIEF_FILE,
+      guide: SERVER_LANE_GUIDE_FILE
     })
 
     const middleware = readFileSync(join(root, VERCEL_MIDDLEWARE_PATH), "utf8")
@@ -148,8 +149,9 @@ describe("Vercel, any framework", () => {
     }
     expect(verifyInstallation({ root }).buildOk).toBe(true)
 
-    // The brief tells the agent the one thing infinite-tag cannot do itself.
-    const brief = readFileSync(join(root, SERVER_LANE_BRIEF_FILE), "utf8")
+    // The guide tells the agent the one thing infinite-tag cannot do itself; the root is a pointer.
+    expect(readFileSync(join(root, SERVER_LANE_BRIEF_FILE), "utf8")).toContain(SERVER_LANE_GUIDE_FILE)
+    const brief = readFileSync(join(root, SERVER_LANE_GUIDE_FILE), "utf8")
     expect(brief).toContain("npm install @vercel/functions")
     expect(brief).toContain("Post a purchase from a server route")
     expect(brief).toContain("postInfiniteOutcome")
@@ -180,7 +182,9 @@ describe("Vercel, any framework", () => {
     expect(helper).not.toMatch(/: Promise<|Record<string/)
     expect(helper).toContain('from "../lib/infinite-outcome.js"')
 
-    const brief = readFileSync(join(root, SERVER_LANE_BRIEF_FILE), "utf8")
+    // The full guide (with the outcome-import example) lives in the guide doc since #26; the root
+    // INSTALL-SERVER-LANE.md is a short pointer at it.
+    const brief = readFileSync(join(root, SERVER_LANE_GUIDE_FILE), "utf8")
     expect(brief).toContain('from "../lib/infinite-outcome.js"')
     expect(brief).toContain("api/checkout-status.js")
 
@@ -224,7 +228,7 @@ describe("Vercel, any framework", () => {
     expect(readFileSync(join(root, VERCEL_MIDDLEWARE_PATH), "utf8")).toBe(EXISTING_MIDDLEWARE)
     expect(apply.warnings.some((warning) => warning.includes("left untouched"))).toBe(true)
 
-    const brief = readFileSync(join(root, SERVER_LANE_BRIEF_FILE), "utf8")
+    const brief = readFileSync(join(root, SERVER_LANE_GUIDE_FILE), "utf8")
     expect(brief).toContain("Files to add by hand")
     expect(brief).toContain("`middleware.ts` was NOT written")
     expect(brief).toContain("export default function middleware")
@@ -392,7 +396,7 @@ describe("--infinite-api-origin", () => {
       expect(source).toContain(`"${apiOrigin}/api/analytics/events/server"`)
       expect(source).not.toContain(INFINITE_SERVER_EVENTS_DESTINATION)
     }
-    const brief = readFileSync(join(root, SERVER_LANE_BRIEF_FILE), "utf8")
+    const brief = readFileSync(join(root, SERVER_LANE_GUIDE_FILE), "utf8")
     expect(brief).toContain(`POST ${apiOrigin}/api/analytics/events/server`)
     expect(brief).toContain(`${apiOrigin}/api/analytics/site/server-lane/receipt`)
     expect(brief).not.toContain(INFINITE_SERVER_EVENTS_DESTINATION)
@@ -453,7 +457,7 @@ describe("Express / any Node server", () => {
     })
     expect(readFileSync(join(root, "server.js"), "utf8")).toBe(serverBefore)
 
-    const brief = readFileSync(join(root, SERVER_LANE_BRIEF_FILE), "utf8")
+    const brief = readFileSync(join(root, SERVER_LANE_GUIDE_FILE), "utf8")
     expect(brief).toContain("Mount it in your server")
     expect(brief).toContain("app.use(infiniteServerLane())")
     expect(brief).toContain('import { infiniteServerLane } from "./lib/infinite-server-lane.js"')
@@ -469,7 +473,7 @@ describe("no host signal", () => {
     const original = snapshotTree(root)
     const { plan: installPlan, apply } = planAndApply(root)
     expect(installPlan.serverLane).toMatchObject({ mode: "brief", files: [] })
-    expect(apply.serverLane?.manifest).toEqual({ mode: "brief", brief: SERVER_LANE_BRIEF_FILE })
+    expect(apply.serverLane?.manifest).toEqual({ mode: "brief", brief: SERVER_LANE_BRIEF_FILE, guide: SERVER_LANE_GUIDE_FILE })
     uninstallInstallation({ root, dryRun: false })
     expectTreeEquals(root, original)
   })

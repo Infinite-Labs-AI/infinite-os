@@ -91,6 +91,7 @@ export function uninstallInstallation(options: UninstallInstallationOptions): Un
   const snapshot = snapshotFiles(options.root, [
     ...manifest.files,
     ...(manifest.serverLane?.brief ? [manifest.serverLane.brief] : []),
+    ...(manifest.serverLane?.guide ? [manifest.serverLane.guide] : []),
     installManifestRelativePath
   ])
 

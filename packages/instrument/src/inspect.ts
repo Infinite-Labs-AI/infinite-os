@@ -11,6 +11,7 @@ import { detectPackageManager } from "./package-manager.js"
 import type {
   InspectResult,
   PackageManager,
+  PosthogConfigSummary,
   ProviderId,
   RepoStatus,
   UnmanagedProvider,
@@ -269,6 +270,58 @@ export function detectUnmanagedProviders(appRoot: string): UnmanagedProvider[] {
   return scanProviders(appRoot, { skipManaged: true })
 }
 
+/**
+ * Statically reads one option value out of a PostHog init config (`posthog.init(key, { … })` or a
+ * `<PostHogProvider options={{ … }}>`). Returns the value exactly as written (quotes stripped),
+ * or undefined when the key is absent or its value can't be read statically (an expression, a
+ * spread, a variable). Never guesses — undefined surfaces as "not detected" to the founder.
+ */
+export function readPosthogOption(contents: string, key: string): string | undefined {
+  // key: <value>  — value runs to the next comma, newline, or closing brace.
+  const match = new RegExp(`(?:^|[\\s,{(])${key}\\s*:\\s*([^,\\n}]+)`, "m").exec(contents)
+  if (!match) return undefined
+  let raw = match[1].trim()
+  if (raw.length === 0) return undefined
+  // A quoted string literal: take exactly the quoted content. URLs contain "//", so this must run
+  // before any inline-comment stripping or the host value would be truncated at the scheme.
+  const quoted = /^(['"`])(.*?)\1/.exec(raw)
+  if (quoted) return quoted[2].length > 0 ? quoted[2] : undefined
+  // Unquoted (boolean / number / object / expression): drop a trailing line comment.
+  raw = raw.replace(/\/\/.*$/, "").trim()
+  if (raw.length === 0) return undefined
+  // A nested object (e.g. `autocapture: { … }`) or an expression is not a plain literal.
+  if (raw.startsWith("{")) return "custom (object)"
+  return raw
+}
+
+/**
+ * The cost/privacy-relevant PostHog options a founder needs to audit — session replay and
+ * autocapture drive billing. Reads them from the first scanned file that carries PostHog evidence.
+ * Read-only; returns undefined when no PostHog init is found.
+ */
+export function detectPosthogConfig(appRoot: string): PosthogConfigSummary | undefined {
+  for (const file of walkProviderScanFiles(appRoot)) {
+    let contents: string
+    try {
+      contents = readFileSync(join(appRoot, file), "utf8")
+    } catch {
+      continue
+    }
+    if (!hasPosthogEvidence(contents)) continue
+    return {
+      file,
+      autocapture: readPosthogOption(contents, "autocapture"),
+      disableSessionRecording: readPosthogOption(contents, "disable_session_recording"),
+      capturePageview: readPosthogOption(contents, "capture_pageview"),
+      capturePageleave: readPosthogOption(contents, "capture_pageleave"),
+      persistence: readPosthogOption(contents, "persistence"),
+      apiHost: readPosthogOption(contents, "api_host"),
+      uiHost: readPosthogOption(contents, "ui_host")
+    }
+  }
+  return undefined
+}
+
 function detectExistingProviders(root: string, appRoot: string): string[] {
   const manifest = readInstallManifest(root)
   if (manifest) {
@@ -323,6 +376,11 @@ export function inspectWorkspace(root: string, options: InspectOptions = {}): In
 
   const relativeAppRoot = relative(root, bestMatch.root) || "."
   const existingProviders = detectExistingProviders(root, bestMatch.root)
+  // Surface the cost/privacy-relevant PostHog options whenever a PostHog install is present, so a
+  // founder can audit session replay + autocapture (both drive billing) from `inspect` alone.
+  const posthogConfig = existingProviders.includes("posthog")
+    ? detectPosthogConfig(bestMatch.root)
+    : undefined
   const assumptions = [...bestMatch.result.assumptions]
   if (packageManagerDetection.kind === "ambiguous") {
     assumptions.push("Multiple lockfiles were detected. Founder choice is required before printing install commands.")
@@ -337,6 +395,7 @@ export function inspectWorkspace(root: string, options: InspectOptions = {}): In
     repoStatus,
     assumptions,
     blockers: [],
-    detectedFiles: bestMatch.result.files
+    detectedFiles: bestMatch.result.files,
+    ...(posthogConfig ? { posthogConfig } : {})
   }
 }

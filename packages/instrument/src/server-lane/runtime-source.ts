@@ -226,6 +226,8 @@ function isDocumentRequest(request: NextRequest): boolean {
   const purpose = (headers.get("purpose") ?? headers.get("sec-purpose") ?? "").toLowerCase()
   if (purpose.includes("prefetch") || purpose.includes("prerender")) return false
   if (headers.get("next-router-prefetch") || headers.get("x-middleware-prefetch")) return false
+  // Honor Do-Not-Track / Global-Privacy-Control, like the client pixel does.
+  if (headers.get("dnt") === "1" || headers.get("sec-gpc") === "1") return false
   const accept = (headers.get("accept") ?? "").toLowerCase()
   if (!accept.includes("text/html")) return false
   const path = request.nextUrl.pathname

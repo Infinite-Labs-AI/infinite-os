@@ -61,6 +61,24 @@ export interface PackageManagerCommands {
   repeatableRun: string
 }
 
+/**
+ * The cost/privacy-relevant PostHog config surfaced by `inspect` when an existing PostHog
+ * install is detected. Each value is the statically-read config value as written in the source,
+ * or undefined when it is not statically determinable (rendered as "not detected"). This is
+ * read-only reporting — inspect never changes the founder's config.
+ */
+export interface PosthogConfigSummary {
+  /** App-root-relative file the PostHog init was read from. */
+  file: string
+  autocapture?: string
+  disableSessionRecording?: string
+  capturePageview?: string
+  capturePageleave?: string
+  persistence?: string
+  apiHost?: string
+  uiHost?: string
+}
+
 export interface InspectResult {
   framework: string
   appRoot: string
@@ -71,6 +89,8 @@ export interface InspectResult {
   assumptions: string[]
   blockers: string[]
   detectedFiles: string[]
+  /** Present when an existing PostHog install is detected — its cost/privacy-relevant options. */
+  posthogConfig?: PosthogConfigSummary
 }
 
 export interface InstallPlan {
@@ -157,6 +177,12 @@ export interface InfinitePublicArtifact {
   apiOrigin?: string
   /** `false` turns unmarked-click autocapture off. Absent = on (the 0.6.1+ default). */
   autocapture?: boolean
+  /**
+   * `true` lets automation-driven browsers (navigator.webdriver) be counted, for SYNTHETIC/TEST
+   * sandbox sources only — never a production source (the installer hard-refuses it on production
+   * hosts). Absent/false = the production default (bots are never counted). See the runtime.
+   */
+  allowAutomation?: boolean
 }
 
 export interface InfiniteBrowserConfig {
@@ -172,6 +198,10 @@ export interface InfiniteBrowserConfig {
   /** `false`: unmarked links/buttons emit nothing; marked CTAs, the conversion destination, Stripe
    *  checkout buckets, data-conversion markers and sign-up paths still emit. Absent = on. */
   autocapture?: boolean
+  /** `true`: count automation-driven browsers (navigator.webdriver) and lift the loopback-host
+   *  exclusion, for SYNTHETIC/TEST sandbox sources only. Every WebDriver event is stamped
+   *  `automation: true`. The installer hard-refuses this on production hosts. Absent = off. */
+  allowAutomation?: boolean
 }
 
 /**
@@ -263,8 +293,10 @@ export interface ServerLaneManifest {
   middleware?: string
   /** The managed lib/infinite-server-lane.ts module. */
   module?: string
-  /** The written INSTALL-SERVER-LANE.md agent brief (banner-gated removal, never hash-verified). */
+  /** The written INSTALL-SERVER-LANE.md root pointer (banner-gated removal, never hash-verified). */
   brief?: string
+  /** The full agent guide under docs/ (docs/infinite-server-lane.md); banner-gated removal like brief. */
+  guide?: string
   /**
    * Non-Next targets: every whole file the lane created, root-relative, each with a "created"
    * record in configOwnership so uninstall deletes it only when it is byte-identical.

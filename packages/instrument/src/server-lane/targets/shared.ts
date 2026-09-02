@@ -358,6 +358,8 @@ ${exported}function isInfiniteDocumentRequest(request: Request, path: string): b
   const purpose = (headers.get("purpose") ?? headers.get("sec-purpose") ?? "").toLowerCase()
   if (purpose.includes("prefetch") || purpose.includes("prerender")) return false
   if (headers.get("next-router-prefetch") || headers.get("x-middleware-prefetch")) return false
+  // Honor Do-Not-Track / Global-Privacy-Control, like the client pixel does.
+  if (headers.get("dnt") === "1" || headers.get("sec-gpc") === "1") return false
   if (!(headers.get("accept") ?? "").toLowerCase().includes("text/html")) return false
   if (INFINITE_NON_DOCUMENT_PREFIXES.some((prefix) => path.startsWith(prefix))) return false
   return !path.slice(path.lastIndexOf("/") + 1).includes(".")
@@ -612,6 +614,14 @@ export interface InfiniteVisitKeyInputs {
   userAgent?: string
 }
 
+/**
+ * A request-like value whose headers may be a WHATWG \`Headers\` (edge / newer Vercel) OR a plain
+ * object (\`req.headers\` on a Vercel Node function, Express, Node http). Both are read correctly.
+ */
+export interface InfiniteVisitKeyRequest {
+  headers: Headers | Record<string, string | string[] | undefined>
+}
+
 export interface InfiniteOutcomeInput {
   /** The exact outcome name from Infinite -> Conversions ("sign_up", "purchase", "download"). */
   type: string
@@ -649,10 +659,12 @@ export interface InfiniteOutcomeInput {
    */
   adMatch?: InfiniteAdMatch
   /**
-   * Same-lane attribution: the incoming request (or its headers, or the raw ip + user agent) so the
-   * outcome carries the same visitKey as the page view that produced it.
+   * Same-lane attribution: the incoming request (WHATWG \`Request\` OR a Node request with a plain
+   * \`headers\` object), or an explicit { clientIp, userAgent }, so the outcome carries the same
+   * visitKey as the page view that produced it. A plain-object request is read correctly, never
+   * swallowed. In a webhook, pass \`properties.visitKey\` instead (see the header for the carry pattern).
    */
-  visitKeyInputs?: InfiniteVisitKeyInputs | { headers: Headers }
+  visitKeyInputs?: InfiniteVisitKeyInputs | InfiniteVisitKeyRequest
   /** Runtimes without process.env (Cloudflare Workers) pass the values from their own env here. */
   credentials?: { secret?: string; sourceKey?: string }
 }`
@@ -661,8 +673,28 @@ export interface InfiniteOutcomeInput {
       "// Infinite server lane — report an outcome the moment it becomes REAL (row committed,",
       "// payment captured, file served). Never from a click: a click is intent, not an outcome.",
       "//",
-      `//   import { ${OUTCOME_HELPER_EXPORT} } from "${importExample}"`,
-      `//   await ${OUTCOME_HELPER_EXPORT}({ type: "purchase", path: "/checkout", accountKey: order.id, visitKeyInputs: request })`,
+      `//   import { ${OUTCOME_HELPER_EXPORT}, infiniteVisitKey } from "${importExample}"`,
+      "//",
+      "// ATTRIBUTION — carry the buyer's visit key from the page view to the outcome. `visitKeyInputs`",
+      "// accepts a WHATWG `Request`, a Node request whose `.headers` is a PLAIN OBJECT (Vercel Node",
+      "// functions, Express), OR an explicit { clientIp, userAgent }. On a browser-facing route you",
+      "// can just pass the request:",
+      "//",
+      `//   await ${OUTCOME_HELPER_EXPORT}({ type: "purchase", path: "/checkout", accountKey: order.id, visitKeyInputs: req })`,
+      "//",
+      "// In a WEBHOOK the request is the PROVIDER'S, not the buyer's, so compute the key at CHECKOUT",
+      "// from the buyer's request, stash it, and carry it to the webhook:",
+      "//",
+      "//   // 1. In the checkout route, from the BUYER'S request:",
+      "//   const infinite_visit_key = await infiniteVisitKey({",
+      "//     clientIp: String(req.headers['x-forwarded-for'] || '').split(',')[0].trim(),",
+      "//     userAgent: req.headers['user-agent'] || ''",
+      "//   })",
+      "//   // 2. Stash it where the outcome can read it later (e.g. Stripe checkout metadata):",
+      "//   await stripe.checkout.sessions.create({ /* … */ metadata: { infinite_visit_key } })",
+      "//   // 3. In the webhook, once the payment is REAL, pass it straight through:",
+      `//   await ${OUTCOME_HELPER_EXPORT}({ type: "purchase", path: "/checkout", accountKey: order.id,`,
+      "//     properties: { visitKey: session.metadata.infinite_visit_key } })",
       "//",
       "// Running Meta ads without PostHog? Add adMatch: adMatchFromRequest(request, { em }) and turn",
       "// the relay on in Infinite -> Site -> Settings; the outcome is forwarded to Meta's Conversions",
@@ -699,16 +731,79 @@ async function infiniteHmacHex(secret${t(": string")}, message${t(": string")})$
     .join("")
 }
 
-function infiniteVisitKeyInputsOf(input${t(': InfiniteOutcomeInput["visitKeyInputs"]')})${t(": InfiniteVisitKeyInputs | null")} {
-  if (!input) return null
-  if ("headers" in input && input.headers) {
-    const headers = input.headers
-    const forwarded = headers.get("x-forwarded-for")?.split(",")[0]?.trim()
-    return {
-      clientIp: forwarded || headers.get("cf-connecting-ip")?.trim() || headers.get("x-real-ip")?.trim() || "",
-      userAgent: headers.get("user-agent") ?? ""
+/**
+ * The 30-minute visit key for a request, as a hex string — the same recipe the page-view lane uses.
+ * Compute it at CHECKOUT from the BUYER'S request and carry it (e.g. in Stripe checkout metadata) so
+ * a later webhook can attribute the outcome to the same visit. The IP is hashed here and never
+ * leaves this process. Returns "" only when no secret is available.
+ */
+export async function infiniteVisitKey(inputs${t(`: {
+  clientIp?: string
+  userAgent?: string
+  nowMs?: number
+  /** Runtimes without process.env (Cloudflare Workers) pass the secret here. */
+  secret?: string
+}`)})${t(": Promise<string>")} {
+  const secret = inputs.secret || infiniteEnv(${JSON.stringify(SERVER_LANE_SECRET_ENV)})
+  if (!secret) return ""
+  const nowMs = inputs.nowMs ?? Date.now()
+  const bucket = Math.floor(Math.floor(nowMs / 1000) / INFINITE_VISIT_BUCKET_SECONDS)
+  return infiniteHmacHex(
+    secret,
+    ${JSON.stringify(VISIT_KEY_MESSAGE_PREFIX)} +
+      (inputs.clientIp ?? "") +
+      "|" +
+      (inputs.userAgent ?? "") +
+      "|" +
+      bucket
+  )
+}
+
+/**
+ * One header value from EITHER a WHATWG \`Headers\` (\`.get\`) OR a plain object (\`req.headers\` on a
+ * Vercel Node function / Express). A plain object silently returned undefined from \`.get\` before,
+ * which threw and swallowed the whole outcome as false — the bug this handles.
+ */
+function infiniteHeaderValue(headers${t(": Headers | Record<string, string | string[] | undefined>")}, name${t(": string")})${t(": string")} {
+  if (headers && typeof (headers${t(" as Headers")}).get === "function") {
+    return (headers${t(" as Headers")}).get(name) ?? ""
+  }
+  const bag = (headers ?? {})${t(" as Record<string, string | string[] | undefined>")}
+  let value = bag[name]
+  if (value === undefined) {
+    const lower = name.toLowerCase()
+    for (const key of Object.keys(bag)) {
+      if (key.toLowerCase() === lower) {
+        value = bag[key]
+        break
+      }
     }
   }
+  if (Array.isArray(value)) return value[0] ?? ""
+  return typeof value === "string" ? value : ""
+}
+
+function infiniteClientIpFrom(headers${t(": Headers | Record<string, string | string[] | undefined>")})${t(": string")} {
+  const forwarded = infiniteHeaderValue(headers, "x-forwarded-for").split(",")[0].trim()
+  if (forwarded) return forwarded
+  return (
+    infiniteHeaderValue(headers, "cf-connecting-ip").trim() ||
+    infiniteHeaderValue(headers, "x-real-ip").trim() ||
+    ""
+  )
+}
+
+function infiniteVisitKeyInputsOf(input${t(': InfiniteOutcomeInput["visitKeyInputs"]')})${t(": InfiniteVisitKeyInputs | null")} {
+  if (!input) return null
+  // A request-like value: WHATWG Request, OR a Node request whose .headers is a plain object.
+  if ("headers" in input && input.headers) {
+    const headers = input.headers${t(" as Headers | Record<string, string | string[] | undefined>")}
+    return {
+      clientIp: infiniteClientIpFrom(headers),
+      userAgent: infiniteHeaderValue(headers, "user-agent")
+    }
+  }
+  // The explicit { clientIp, userAgent } shape — never throws, never silently false.
   return input${t(" as InfiniteVisitKeyInputs")}
 }
 
@@ -779,18 +874,17 @@ export async function ${OUTCOME_HELPER_EXPORT}(input${t(": InfiniteOutcomeInput"
     const nowMs = input.occurredAt ? input.occurredAt.getTime() : Date.now()
     const properties${t(": Record<string, string | number | boolean>")} = { ...(input.properties ?? {}) }
     if (input.path) properties.path = input.path
+    // Skip our own derivation when the caller already carried a visitKey (the webhook path); drop
+    // nothing when there is neither. One shared recipe with the exported infiniteVisitKey, so a key
+    // computed at checkout and one derived here for the same request are byte-identical.
     const visitInputs = infiniteVisitKeyInputsOf(input.visitKeyInputs)
     if (visitInputs && properties.visitKey === undefined) {
-      const bucket = Math.floor(Math.floor(nowMs / 1000) / INFINITE_VISIT_BUCKET_SECONDS)
-      properties.visitKey = await infiniteHmacHex(
-        secret,
-        ${JSON.stringify(VISIT_KEY_MESSAGE_PREFIX)} +
-          (visitInputs.clientIp ?? "") +
-          "|" +
-          (visitInputs.userAgent ?? "") +
-          "|" +
-          bucket
-      )
+      properties.visitKey = await infiniteVisitKey({
+        clientIp: visitInputs.clientIp,
+        userAgent: visitInputs.userAgent,
+        nowMs,
+        secret
+      })
     }
 
     const body = JSON.stringify({
