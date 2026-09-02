@@ -156,6 +156,18 @@ function manualStepLines(plan: InstallPlan): string[] {
   return lines
 }
 
+/** Applied-output block for the manual requirements an apply actually returned (path + reason + snippet). */
+function requiresManualLines(requirements: NonNullable<ApplyResult["requiresManual"]>): string[] {
+  const lines: string[] = []
+  for (const requirement of requirements) {
+    lines.push("", `  Add to ${requirement.path} by hand (${requirement.reason}):`)
+    for (const snippetLine of requirement.snippet.split("\n")) {
+      lines.push(snippetLine.length > 0 ? `      ${snippetLine}` : "")
+    }
+  }
+  return lines
+}
+
 /** The "I'll make N changes" block shown before applying (preview). */
 export function renderPreview(plan: InstallPlan): string {
   const actions = actionByPath(plan)
@@ -227,19 +239,36 @@ export function renderApplied(input: {
   const ids = providerLines(installing).join(", ")
   const idSuffix = ids ? ` (${ids})` : ""
 
-  const lines = [
-    "",
-    "Installing analytics into your site…",
-    ...steps,
-    "",
-    `✅ Done — your site is now wired for ${names}${idSuffix}.`,
-    ...adoptedLines(plan),
-    "",
-    "Next steps:",
-    "  1. Review the change:  git diff",
-    "  2. Commit & deploy your site so the tag goes live.",
-    `  3. Confirm it's working: ${confirmHint(plan.artifacts)}`
-  ]
+  // An unsatisfied manual step means the pixel is NOT live yet — never render this as a clean "Done".
+  const requiresManual = apply.requiresManual ?? []
+  const lines = requiresManual.length > 0
+    ? [
+        "",
+        "Installing analytics into your site…",
+        ...steps,
+        "",
+        `⚠ ACTION REQUIRED — pixel not yet live. infinite-tag wrote the managed module for ${names}${idSuffix} but could not finish wiring your entrypoint, so nothing loads until you add the step below.`,
+        ...requiresManualLines(requiresManual),
+        ...adoptedLines(plan),
+        "",
+        "Then:",
+        "  1. Review the change:  git diff",
+        "  2. Commit & deploy your site so the tag goes live.",
+        `  3. Confirm it's working: ${confirmHint(plan.artifacts)}`
+      ]
+    : [
+        "",
+        "Installing analytics into your site…",
+        ...steps,
+        "",
+        `✅ Done — your site is now wired for ${names}${idSuffix}.`,
+        ...adoptedLines(plan),
+        "",
+        "Next steps:",
+        "  1. Review the change:  git diff",
+        "  2. Commit & deploy your site so the tag goes live.",
+        `  3. Confirm it's working: ${confirmHint(plan.artifacts)}`
+      ]
 
   const consentLines = consentGuidance(plan.artifacts)
   if (consentLines.length > 0) {
@@ -370,7 +399,15 @@ export function renderInspect(inspect: InspectResult): string {
 
 export function renderVerify(verify: VerifyResult): string {
   const lines = ["", HEADER, ""]
-  if (verify.buildOk) {
+  const pending = verify.requiresManual ?? []
+  if (pending.length > 0) {
+    // Files can match the manifest while the pixel is not live — say so, never a clean ✅.
+    lines.push("⚠ ACTION REQUIRED — the pixel is not live yet. A manual wiring step is outstanding:")
+    for (const item of pending) {
+      lines.push(`  • ${item.path} — ${item.reason}`)
+    }
+    lines.push("", "The managed files themselves are intact; add the wiring line, then re-run verify.")
+  } else if (verify.buildOk) {
     lines.push("✅ Verified — the managed analytics files match the recorded install.")
   } else {
     lines.push("❌ Verification failed:")
@@ -457,7 +494,7 @@ export function renderServerLaneLines(plan: InstallPlan, apply?: ApplyResult): s
         lines.push(`  ${serverLaneCopy.cli.targetManualFile(file.path)}`)
       } else if (file.action === "keep") {
         lines.push(`  ${serverLaneCopy.cli.targetKeptFile(file.path)}`)
-      } else if (/infinite-outcome\.[jt]s$/.test(file.path)) {
+      } else if (/infinite-outcome\.(mjs|cjs|[jt]s)$/.test(file.path)) {
         lines.push(`  ${serverLaneCopy.cli.targetOutcomeFile(file.path)}`)
       } else {
         lines.push(`  ${serverLaneCopy.cli.targetFile(file.path)}`)

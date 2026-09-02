@@ -71,6 +71,15 @@ export function verifyInstallation(options: VerifyInstallationOptions): VerifyRe
     routeChecks.push(...failures)
   }
 
+  // A recorded manual step means the managed files can verify while the pixel is NOT live yet — the
+  // exact gap the entrypoint-left-unmanaged design opens. Surface it so verify never reads as "done".
+  const requiresManual = manifest.requiresManual ?? []
+  for (const pending of requiresManual) {
+    routeChecks.push(
+      `ACTION REQUIRED: ${pending.path} still needs the manual wiring line (${pending.reason}) — the pixel is not live until it is added.`
+    )
+  }
+
   const beaconChecks = manifest.providers.map(
     (provider) => `${provider}: manifest-backed wiring is present in the managed install files.`
   )
@@ -86,6 +95,7 @@ export function verifyInstallation(options: VerifyInstallationOptions): VerifyRe
     beaconChecks,
     warnings: [
       "Static verification only. Runtime beacon delivery still requires a browser/network check."
-    ]
+    ],
+    ...(requiresManual.length > 0 ? { requiresManual } : {})
   }
 }

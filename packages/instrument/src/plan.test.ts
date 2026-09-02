@@ -393,14 +393,24 @@ describe("planInstallation", () => {
     expect(plan.files).not.toContain("src/main.tsx")
     expect(plan.files).toContain("src/lib/infinite-analytics.ts")
 
-    // Apply writes the managed module and warns loudly — it never edits the unmanageable entry, and
-    // never throws.
+    // Apply writes the managed module and returns a STRUCTURED requiresManual — never edits the
+    // unmanageable entry, and never throws.
     const apply = applyInstallation({ root, workspaceId: "ws-test", plan, allowDirty: true })
     expect(readFileSync(join(root, "src/main.tsx"), "utf8")).toBe('console.log("no imports")\n')
     expect(readFileSync(join(root, "src/lib/infinite-analytics.ts"), "utf8")).toContain(
       "installInfiniteInstrumentation"
     )
-    expect(apply.warnings.some((w) => w.includes("ACTION REQUIRED"))).toBe(true)
+    expect(apply.requiresManual).toEqual([
+      expect.objectContaining({
+        path: "src/main.tsx",
+        snippet: expect.stringContaining("installInfiniteInstrumentation()")
+      })
+    ])
+    // The `requires_manual_snippet` state is recorded so verify/status see the pixel is not live.
+    const manifest = JSON.parse(readFileSync(join(root, ".infinite/install.json"), "utf8")) as {
+      requiresManual?: Array<{ path: string }>
+    }
+    expect(manifest.requiresManual?.[0]?.path).toBe("src/main.tsx")
   })
 
   it("blocks vite-react plan when an unmanaged infinite-analytics.ts already exists", async () => {

@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 
-import type { FrameworkAdapter, InstallInstruction } from "../types.js"
+import type { FrameworkAdapter, InstallInstruction, InstallManifest, ManualRequirement } from "../types.js"
 import { infiniteProxySpec } from "../workspace-artifacts.js"
 
 import {
@@ -72,7 +72,12 @@ export const viteReactAdapter: FrameworkAdapter = {
     const wiring: EntrypointWiring = fileExists(root, mainFile)
       ? classifyEntrypointWiring(readRequiredFile(root, mainFile))
       : { kind: "manual", reason: `no ${mainFile} entrypoint was found` }
-    const managesEntrypoint = wiring.kind === "auto" || wiring.kind === "already-wired"
+    // The entrypoint is a managed file only when infinite-tag actually wired it. "already-wired" is
+    // kept managed ONLY when a prior manifest recorded it as ours (an idempotent re-run) — a boot line
+    // the USER added by hand stays user-owned, so a later legit edit of it never trips verify.
+    const previouslyManagedEntry = previousManagedFiles(options?.previousManifest).includes(mainFile)
+    const managesEntrypoint =
+      wiring.kind === "auto" || (wiring.kind === "already-wired" && previouslyManagedEntry)
 
     if (hasExistingUnmanagedFile(root, analyticsModulePath)) {
       blockers.push(
@@ -159,10 +164,13 @@ export const viteReactAdapter: FrameworkAdapter = {
 
     const changedFiles: string[] = []
     const warnings: string[] = []
+    const requiresManual: ManualRequirement[] = []
     const configOwnership = {}
 
     // Wire the entrypoint when we safely can; otherwise leave it to the user with the exact snippet.
     // The managed module is written either way, so a manual wiring only needs the two import/boot lines.
+    // A manual requirement is a STRUCTURED, non-green signal (not just a warning): the install is
+    // incomplete until the user adds the lines, so apply/install/verify must not report success.
     const mainFile = mainFileOrNull(appRoot, context.plan.files, context.appRoot)
     if (mainFile) {
       const currentMain = readRequiredFile(appRoot, mainFile)
@@ -174,16 +182,19 @@ export const viteReactAdapter: FrameworkAdapter = {
           changedFiles.push(rootRelativeMainFile)
         }
       } else if (wiring.kind === "manual") {
-        warnings.push(manualWiringWarning(rootRelativeMainFile, wiring.reason))
+        requiresManual.push({
+          path: rootRelativeMainFile,
+          reason: wiring.reason,
+          snippet: manualWiringSnippet()
+        })
       }
       // "already-wired": nothing to change.
     } else {
-      warnings.push(
-        manualWiringWarning(
-          normalizeAppRelativePath(context.appRoot, mainCandidates[0]),
-          "no src/main.* entrypoint was found"
-        )
-      )
+      requiresManual.push({
+        path: normalizeAppRelativePath(context.appRoot, mainCandidates[0]),
+        reason: "no src/main.* entrypoint was found",
+        snippet: manualWiringSnippet()
+      })
     }
 
     const nextAnalyticsModule = buildAnalyticsModuleSource(context.plan)
@@ -214,7 +225,8 @@ export const viteReactAdapter: FrameworkAdapter = {
     return {
       changedFiles,
       warnings,
-      configOwnership
+      configOwnership,
+      ...(requiresManual.length > 0 ? { requiresManual } : {})
     }
   },
   uninstall(context) {
@@ -299,16 +311,6 @@ function mainFileOrNull(root: string, planFiles: string[], appRoot: string): str
     return matched
   }
   return firstExistingPath(root, mainCandidates)
-}
-
-/** The loud, actionable note shown when infinite-tag could not wire the entrypoint itself. */
-function manualWiringWarning(mainFile: string, reason: string): string {
-  return (
-    `ACTION REQUIRED: infinite-tag could not wire ${mainFile} automatically (${reason}). ` +
-    `The managed analytics module was written; complete the install by adding these two lines to ` +
-    `${mainFile} by hand, right after your imports (or add the runtime to index.html):\n\n` +
-    `${manualWiringSnippet()}`
-  )
 }
 
 function selectMainFile(root: string, planFiles: string[], appRoot: string): string {
@@ -473,6 +475,18 @@ export function classifyEntrypointWiring(mainSource: string): EntrypointWiring {
 /** The exact lines a user adds by hand when infinite-tag cannot wire the entrypoint automatically. */
 export function manualWiringSnippet(): string {
   return `${importLine}\n\n${bootLine}`
+}
+
+/** Prior manifest's managed files as app-relative paths (stripping its recorded appRoot prefix). */
+function previousManagedFiles(previousManifest: InstallManifest | null | undefined): string[] {
+  if (!previousManifest) return []
+  const prefix =
+    previousManifest.appRoot === "." || previousManifest.appRoot.length === 0
+      ? ""
+      : `${previousManifest.appRoot}/`
+  return previousManifest.files.map((file) =>
+    prefix && file.startsWith(prefix) ? file.slice(prefix.length) : file
+  )
 }
 
 // Finds the end offset of the first contiguous import section, treating each

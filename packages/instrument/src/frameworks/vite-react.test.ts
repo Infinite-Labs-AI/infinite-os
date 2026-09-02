@@ -208,7 +208,24 @@ describe("vite-react binding-aware bootstrap recognition", () => {
     // The unmanageable entrypoint is left byte-for-byte; the managed module is still written.
     expect(readFileSync(join(root, "src/main.tsx"), "utf8")).not.toContain("installInfiniteInstrumentation")
     expect(existsSync(join(root, "src/lib/infinite-analytics.ts"))).toBe(true)
-    expect(apply.warnings.some((w) => w.includes("ACTION REQUIRED"))).toBe(true)
+    expect(apply.requiresManual?.[0]?.path).toBe("src/main.tsx")
+  })
+
+  it("does NOT match createRoot imported from the WRONG package — it falls back to manual", () => {
+    const root = copyFixture("vite-react-basic")
+    // `createRoot` here is imported from some-other-pkg, not react-dom. Binding-aware matching must
+    // reject it: it is a different function that merely shares the name.
+    writeFileSync(
+      join(root, "src/main.tsx"),
+      'import { createRoot } from "some-other-pkg"\n\nconst el = document.getElementById("root")!\ncreateRoot(el).render(<App />)\n'
+    )
+    const plan = planFor(root)
+    expect(plan.blockers).toEqual([])
+    expect(plan.instructions.find((instruction) => instruction.action === "manual")?.path).toBe("src/main.tsx")
+    expect(plan.files).not.toContain("src/main.tsx")
+    const apply = applyInstallation({ root, workspaceId: "ws-test", plan, allowDirty: true })
+    expect(apply.requiresManual?.[0]?.path).toBe("src/main.tsx")
+    expect(readFileSync(join(root, "src/main.tsx"), "utf8")).not.toContain("installInfiniteInstrumentation")
   })
 
   it("is idempotent after a manual wiring: a hand-added boot line is not flagged again", () => {
@@ -221,6 +238,30 @@ describe("vite-react binding-aware bootstrap recognition", () => {
     const plan = planFor(root)
     expect(plan.instructions.some((instruction) => instruction.action === "manual")).toBe(false)
     expect(plan.applyMode).toBe("supported")
+  })
+
+  it("keeps a HAND-wired entrypoint user-owned (out of managed files), so a later edit never trips verify", () => {
+    const root = copyFixture("vite-react-basic")
+    // Already-wired but NEVER auto-wired by infinite-tag (no prior manifest records it). It must stay
+    // out of managed `files` — P3: the user owns their entrypoint.
+    writeFileSync(
+      join(root, "src/main.tsx"),
+      'import { installInfiniteInstrumentation } from "./lib/infinite-analytics"\nimport { boot } from "./boot"\n\ninstallInfiniteInstrumentation()\nboot()\n'
+    )
+    const plan = planFor(root)
+    expect(plan.files).not.toContain("src/main.tsx")
+    expect(plan.files).toContain("src/lib/infinite-analytics.ts")
+  })
+
+  it("keeps the entrypoint MANAGED across an idempotent re-run (auto -> already-wired stays ours)", () => {
+    const root = copyFixture("vite-react-named-createroot")
+    const first = applyInstallation({ root, workspaceId: "ws-test", plan: planFor(root), allowDirty: true })
+    expect(first.changedFiles).toContain("src/main.tsx")
+    // Second run: the boot line is present (already-wired), but the manifest recorded it as ours, so
+    // it is still a managed file and nothing changes.
+    const second = applyInstallation({ root, workspaceId: "ws-test", plan: planFor(root), allowDirty: true })
+    expect(second.changedFiles).toEqual([])
+    expect(second.requiresManual).toBeUndefined()
   })
 })
 

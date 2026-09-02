@@ -1036,4 +1036,64 @@ describe("posthog reverse proxy (--posthog-proxy / --posthog-ui-host)", () => {
     expect(code).toBe(0)
     expect(existsSync(join(root, "vercel.json"))).toBe(false)
   })
+
+  describe("manual-required install (pixel not yet live) — exit code + json", () => {
+    function manualVite(): string {
+      const root = copyFixture("vite-react-basic")
+      // No recognizable React bootstrap -> infinite-tag can't wire the entrypoint automatically.
+      writeFileSync(join(root, "src/main.tsx"), 'console.log("no imports")\n')
+      return root
+    }
+
+    const flags = (root: string): string[] => [
+      "--root", root,
+      "--workspace", "ws_test",
+      "--yes",
+      "--json",
+      "--allow-dirty",
+      "--ga4-measurement-id", "G-TEST123"
+    ]
+
+    it("install --yes --json exits 2 (needs_action), not 0, and reports requiresManual in the json", async () => {
+      const root = manualVite()
+      const code = await runCli(["install", ...flags(root)])
+      expect(code).toBe(2)
+      const result = JSON.parse(lastStdoutJson()) as {
+        requiresManual?: Array<{ path: string; reason: string; snippet: string }>
+      }
+      expect(result.requiresManual?.[0]?.path).toBe("src/main.tsx")
+      expect(result.requiresManual?.[0]?.snippet).toContain("installInfiniteInstrumentation()")
+    })
+
+    it("--allow-manual downgrades the same install to success (exit 0)", async () => {
+      const root = manualVite()
+      const code = await runCli(["install", ...flags(root), "--allow-manual"])
+      expect(code).toBe(0)
+    })
+
+    it("apply --yes --json exits 2 and carries requiresManual at the top level of ApplyResult", async () => {
+      const root = manualVite()
+      const code = await runCli(["apply", ...flags(root)])
+      expect(code).toBe(2)
+      const result = JSON.parse(lastStdoutJson()) as { requiresManual?: Array<{ path: string }> }
+      expect(result.requiresManual?.[0]?.path).toBe("src/main.tsx")
+    })
+
+    it("verify after a manual-required install also reports non-green (exit 2)", async () => {
+      const root = manualVite()
+      await runCli(["install", ...flags(root)])
+      const code = await runCli(["verify", "--root", root, "--json"])
+      expect(code).toBe(2)
+      const result = JSON.parse(lastStdoutJson()) as { requiresManual?: Array<{ path: string }> }
+      expect(result.requiresManual?.[0]?.path).toBe("src/main.tsx")
+    })
+
+    it("a normal auto-wired vite install stays exit 0 with no requiresManual", async () => {
+      const root = copyFixture("vite-react-basic")
+      const code = await runCli(["install", ...flags(root)])
+      expect(code).toBe(0)
+      const result = JSON.parse(lastStdoutJson()) as { requiresManual?: unknown[] }
+      expect(result.requiresManual ?? []).toEqual([])
+    })
+  })
 })
