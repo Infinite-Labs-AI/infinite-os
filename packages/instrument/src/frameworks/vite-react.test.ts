@@ -211,6 +211,40 @@ describe("vite-react binding-aware bootstrap recognition", () => {
     expect(apply.requiresManual?.[0]?.path).toBe("src/main.tsx")
   })
 
+  it("does NOT bind a COMMENTED-OUT react-dom import (detection is comment/string-aware)", () => {
+    // Negative fixture: the only `import { createRoot } from "react-dom/client"` is commented out, and
+    // the called createRoot is a local function. Raw-regex matching would false-positive here.
+    const root = copyFixture("vite-react-commented-import")
+    const plan = planFor(root)
+    expect(plan.blockers).toEqual([])
+    const manual = plan.instructions.find((instruction) => instruction.action === "manual")
+    expect(manual?.path).toBe("src/main.tsx")
+    expect(plan.files).not.toContain("src/main.tsx")
+
+    const apply = applyInstallation({ root, workspaceId: "ws-test", plan, allowDirty: true })
+    expect(apply.requiresManual?.[0]?.path).toBe("src/main.tsx")
+    // The user's entrypoint is never touched, and no wrong wiring is injected.
+    expect(readFileSync(join(root, "src/main.tsx"), "utf8")).not.toContain("installInfiniteInstrumentation")
+  })
+
+  it("does NOT count a bootstrap call that only appears inside a string or comment", () => {
+    const root = copyFixture("vite-react-basic")
+    // Real react-dom import IS present, but the only createRoot(...) usages are inside a string and a
+    // comment — never executed. String/comment-aware detection must treat this as manual.
+    writeFileSync(
+      join(root, "src/main.tsx"),
+      [
+        'import { createRoot } from "react-dom/client"',
+        'const doc = "createRoot(x).render(y)"',
+        '// createRoot(document.getElementById("root")).render(<App />)',
+        "console.log(doc)"
+      ].join("\n") + "\n"
+    )
+    const plan = planFor(root)
+    expect(plan.instructions.find((instruction) => instruction.action === "manual")?.path).toBe("src/main.tsx")
+    expect(plan.files).not.toContain("src/main.tsx")
+  })
+
   it("does NOT match createRoot imported from the WRONG package — it falls back to manual", () => {
     const root = copyFixture("vite-react-basic")
     // `createRoot` here is imported from some-other-pkg, not react-dom. Binding-aware matching must

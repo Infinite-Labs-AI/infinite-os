@@ -1088,6 +1088,25 @@ describe("posthog reverse proxy (--posthog-proxy / --posthog-ui-host)", () => {
       expect(result.requiresManual?.[0]?.path).toBe("src/main.tsx")
     })
 
+    it("verify CLEARS to exit 0 once the user actually adds the wiring (BLOCKER 1)", async () => {
+      const root = manualVite()
+      expect(await runCli(["install", ...flags(root)])).toBe(2)
+      // The user adds the exact wiring by hand: the import + the boot call.
+      writeFileSync(
+        join(root, "src/main.tsx"),
+        [
+          'import { installInfiniteInstrumentation } from "./lib/infinite-analytics"',
+          'console.log("no imports")',
+          "installInfiniteInstrumentation()"
+        ].join("\n") + "\n"
+      )
+      const code = await runCli(["verify", "--root", root, "--json"])
+      expect(code).toBe(0)
+      const result = JSON.parse(lastStdoutJson()) as { buildOk: boolean; requiresManual?: unknown[] }
+      expect(result.buildOk).toBe(true)
+      expect(result.requiresManual ?? []).toEqual([])
+    })
+
     it("a normal auto-wired vite install stays exit 0 with no requiresManual", async () => {
       const root = copyFixture("vite-react-basic")
       const code = await runCli(["install", ...flags(root)])

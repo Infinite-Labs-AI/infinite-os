@@ -238,10 +238,11 @@ export interface InstallManifest {
   /** Present when `--server-lane` installed the lossless server lane; root-relative paths. */
   serverLane?: ServerLaneManifest
   /**
-   * Manual steps recorded at apply time that are still the user's to complete (the
-   * `requires_manual_snippet` state). Its presence marks the install as incomplete for verify/status.
+   * Manual steps recorded at apply time (the `requires_manual_snippet` state). The snippet is stored
+   * so verify can check the target file against on-disk reality — a requirement is SATISFIED once the
+   * file actually contains the wiring, not merely because it was recorded here.
    */
-  requiresManual?: Array<{ path: string; reason: string }>
+  requiresManual?: ManualRequirement[]
   wiringVersion: number
   verifiedAt: string | null
 }

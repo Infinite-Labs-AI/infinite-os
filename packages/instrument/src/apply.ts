@@ -113,11 +113,9 @@ export function applyInstallation(options: ApplyInstallationOptions): ApplyResul
       contentHashes: computeContentHashes(options.root, options.plan.files),
       ...(Object.keys(configOwnership).length > 0 ? { configOwnership } : {}),
       ...(serverLaneResult ? { serverLane: serverLaneResult.manifest } : {}),
-      // The `requires_manual_snippet` state: recorded so verify/status can tell an incomplete install
-      // (pixel not live) from a complete one.
-      ...(requiresManual.length > 0
-        ? { requiresManual: requiresManual.map(({ path, reason }) => ({ path, reason })) }
-        : {}),
+      // The `requires_manual_snippet` state: recorded WITH the snippet so verify can later confirm the
+      // wiring is actually present on disk (satisfied) instead of replaying a stale requirement.
+      ...(requiresManual.length > 0 ? { requiresManual } : {}),
       wiringVersion: 1,
       verifiedAt: null
     }

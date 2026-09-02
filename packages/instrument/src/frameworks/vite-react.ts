@@ -376,12 +376,99 @@ interface ReactDomBindings {
   memberObjects: Set<string>
 }
 
+/**
+ * Replace comment bodies (always) and — when `blankStrings` — string/template bodies with spaces,
+ * preserving every character offset and newline. This is what makes import + bootstrap detection
+ * comment/string-aware: a commented-out `// import { createRoot } from "react-dom/client"` is blanked
+ * so it never binds, and a call hidden in a comment or string never counts. Not a full JS parser (no
+ * parser dependency, so the self-contained tarball is untouched), but it tracks line comments, block
+ * comments and ' " ` strings with escapes — everything a React entrypoint actually contains.
+ */
+function maskCommentsAndStrings(source: string, blankStrings: boolean): string {
+  const out: string[] = []
+  let index = 0
+  let state: "code" | "line" | "block" | "single" | "double" | "template" = "code"
+  while (index < source.length) {
+    const ch = source[index]
+    const next = source[index + 1]
+    if (state === "code") {
+      if (ch === "/" && next === "/") {
+        out.push("  ")
+        index += 2
+        state = "line"
+      } else if (ch === "/" && next === "*") {
+        out.push("  ")
+        index += 2
+        state = "block"
+      } else if (ch === "'") {
+        out.push("'")
+        index += 1
+        state = "single"
+      } else if (ch === '"') {
+        out.push('"')
+        index += 1
+        state = "double"
+      } else if (ch === "`") {
+        out.push("`")
+        index += 1
+        state = "template"
+      } else {
+        out.push(ch)
+        index += 1
+      }
+      continue
+    }
+    if (state === "line") {
+      if (ch === "\n") {
+        out.push("\n")
+        state = "code"
+      } else {
+        out.push(" ")
+      }
+      index += 1
+      continue
+    }
+    if (state === "block") {
+      if (ch === "*" && next === "/") {
+        out.push("  ")
+        index += 2
+        state = "code"
+      } else {
+        out.push(ch === "\n" ? "\n" : " ")
+        index += 1
+      }
+      continue
+    }
+    // Inside a string / template literal.
+    const closer = state === "single" ? "'" : state === "double" ? '"' : "`"
+    if (ch === "\\") {
+      out.push(blankStrings ? " " : ch)
+      if (next !== undefined) out.push(blankStrings ? " " : next)
+      index += 2
+      continue
+    }
+    if (ch === closer) {
+      out.push(closer)
+      index += 1
+      state = "code"
+      continue
+    }
+    out.push(ch === "\n" ? "\n" : blankStrings ? " " : ch)
+    index += 1
+  }
+  return out.join("")
+}
+
 function analyzeReactDomBindings(source: string): ReactDomBindings {
   const callableLocals = new Set<string>()
   const memberObjects = new Set<string>()
-  const importRe = /import\s+([^;]*?)\s+from\s+["']([^"']+)["']/g
+  // Comment-masked so a commented-out import never binds; line-anchored (`^…import`) so an
+  // import-looking STRING (e.g. `const s = 'import { createRoot } from "react-dom/client"'`) is not
+  // read as a real import. String bodies are kept here because the specifier itself is a string.
+  const scan = maskCommentsAndStrings(source, false)
+  const importRe = /^[ \t]*import\s+([^;]*?)\s+from\s+["']([^"']+)["']/gm
   let match: RegExpExecArray | null
-  while ((match = importRe.exec(source)) !== null) {
+  while ((match = importRe.exec(scan)) !== null) {
     if (!REACT_DOM_SPECIFIERS.has(match[2])) continue
     const clause = match[1]
 
@@ -420,9 +507,12 @@ function escapeIdentifierForRegExp(identifier: string): string {
 /** True when `source` calls a React bootstrap through an identifier actually imported from react-dom. */
 function hasRecognizedReactBootstrap(source: string): boolean {
   const { callableLocals, memberObjects } = analyzeReactDomBindings(source)
+  // Detect the CALL in code only: comments AND strings blanked, so a bootstrap call quoted in a
+  // string or sitting in a comment never counts as a real bootstrap.
+  const code = maskCommentsAndStrings(source, true)
   for (const local of callableLocals) {
     // A direct call `cr(` / `createRoot(` — but not `foo.createRoot(` (that is a member call).
-    if (new RegExp(`(^|[^.\\w$])${escapeIdentifierForRegExp(local)}\\s*\\(`, "m").test(source)) {
+    if (new RegExp(`(^|[^.\\w$])${escapeIdentifierForRegExp(local)}\\s*\\(`, "m").test(code)) {
       return true
     }
   }
@@ -431,7 +521,7 @@ function hasRecognizedReactBootstrap(source: string): boolean {
       new RegExp(
         `(^|[^.\\w$])${escapeIdentifierForRegExp(object)}\\s*\\.\\s*(createRoot|hydrateRoot|render)\\s*\\(`,
         "m"
-      ).test(source)
+      ).test(code)
     ) {
       return true
     }

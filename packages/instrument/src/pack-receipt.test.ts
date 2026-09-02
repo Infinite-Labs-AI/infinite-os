@@ -1,10 +1,14 @@
 import { spawnSync } from "node:child_process"
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join, resolve } from "node:path"
+import { dirname, join, resolve } from "node:path"
+import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "vitest"
 
-const validator = resolve("scripts/ci/validate-infinite-tag-pack.mjs")
+// Resolve the validator from THIS file's location, not process.cwd(), so the suite runs identically
+// from the repo root (CI) and from the package dir (`pnpm --filter infinite-tag test`).
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..")
+const validator = join(repoRoot, "scripts/ci/validate-infinite-tag-pack.mjs")
 
 interface PackFile {
   path: string
