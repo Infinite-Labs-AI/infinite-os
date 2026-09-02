@@ -141,6 +141,39 @@ describe("InfiniteCloudBackend", () => {
   })
 })
 
+describe("InfiniteCloudBackend entitlement gate (requireActiveSubscriptionOr402)", () => {
+  const input = { url: "https://example.com/", since: "s", lanes: ["ga4", "infinite"] as VerifyLane[] }
+  function make(fetchImpl: () => Promise<Response>) {
+    return new InfiniteCloudBackend({ origin: "https://api.ultima.inc", token: "tok", engineProjectId: "proj_1", fetch: fetchImpl as unknown as typeof fetch, ...clock() })
+  }
+
+  it("402 entitlement_required → not_verifiable 'subscription required', no retries, never no_receipt", async () => {
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse(402, { error: "entitlement_required", code: "NO_PLATFORM_SUBSCRIPTION", feature: "platform", action: { type: "upgrade" } })
+    )
+    const result = await make(fetchImpl).verify(input)
+    expect(result).toEqual({
+      ga4: { state: "not_verifiable", reason: "subscription required — complete onboarding in Infinite Desktop" },
+      infinite: { state: "not_verifiable", reason: "subscription required — complete onboarding in Infinite Desktop" }
+    })
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+  })
+
+  it("503 subscription_check_unavailable keeps the retry loop, then says 'subscription check unavailable, try again'", async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse(503, { error: "subscription_check_unavailable", retryable: true }))
+    const result = await make(fetchImpl).verify(input)
+    expect(result.ga4).toEqual({ state: "not_verifiable", reason: "subscription check unavailable, try again" })
+    expect(result.infinite).toEqual({ state: "not_verifiable", reason: "subscription check unavailable, try again" })
+    expect(fetchImpl).toHaveBeenCalledTimes(3)
+    expect(JSON.stringify(result)).not.toContain("route was unavailable")
+  })
+
+  it("a plain 503 with no body still reads as the route being unavailable", async () => {
+    const result = await make(async () => new Response("", { status: 503 })).verify(input)
+    expect(result.ga4).toEqual({ state: "not_verifiable", reason: "the cloud verify route was unavailable (HTTP 503)" })
+  })
+})
+
 describe("PosthogQueryBackend", () => {
   it("is not verifiable without a query key", async () => {
     const backend = new PosthogQueryBackend({ apiHost: "https://us.i.posthog.com", queryKey: undefined, ...clock() })

@@ -38,6 +38,7 @@ export const NONE_BACKEND_REASON = "run infinite analytics from the desktop CLI 
 export const META_NOT_VERIFIABLE_REASON = "Meta has no install-time read-back; open Events Manager → Test Events"
 export const NO_BACKEND_REASON = "no backend can read this lane back"
 export const SUBSCRIPTION_REQUIRED_REASON = "subscription required — complete onboarding in Infinite Desktop"
+export const SUBSCRIPTION_CHECK_UNAVAILABLE_REASON = "subscription check unavailable, try again"
 
 interface Timing {
   now?: () => number
@@ -164,16 +165,30 @@ export class InfiniteCloudBackend implements VerificationBackend {
         return failAll(`the cloud rejected this session (HTTP ${response.status})`)
       }
       if (response.status === 402) {
-        // requireActiveSubscriptionOr402: the founder can install, and nothing else runs until
-        // the subscription is active. Not a missing receipt — a gate, and it says so.
+        // requireActiveSubscriptionOr402 — body `{ error: "entitlement_required",
+        // code: "NO_PLATFORM_SUBSCRIPTION", feature: "platform", action: { type: "upgrade" } }`.
+        // The founder can install, and nothing else runs until the subscription is active. Not a
+        // missing receipt and never retried — a gate, and it says so.
+        await response.text().catch(() => "")
         return failAll(SUBSCRIPTION_REQUIRED_REASON)
       }
       if (response.status === 404) {
         return failAll("the cloud verify route is not available yet (HTTP 404)")
       }
       if (!response.ok) {
+        // `subscription_check_unavailable` (503, retryable: true) is the entitlement check being
+        // down, not the route: it stays on the retry loop and then names itself.
+        const payload: unknown = await response.json().catch(() => null)
+        const subscriptionCheckDown =
+          isRecord(payload) && payload.error === "subscription_check_unavailable"
         unavailableStreak += 1
-        if (unavailableStreak >= 3) return failAll(`the cloud verify route was unavailable (HTTP ${response.status})`)
+        if (unavailableStreak >= 3) {
+          return failAll(
+            subscriptionCheckDown
+              ? SUBSCRIPTION_CHECK_UNAVAILABLE_REASON
+              : `the cloud verify route was unavailable (HTTP ${response.status})`
+          )
+        }
       } else {
         unavailableStreak = 0
         const payload: unknown = await response.json().catch(() => null)
