@@ -168,6 +168,38 @@ describe("InfiniteCloudBackend entitlement gate (requireActiveSubscriptionOr402)
     expect(JSON.stringify(result)).not.toContain("route was unavailable")
   })
 
+  it("typed 400s are quoted verbatim and never retried", async () => {
+    const hostFetch = vi.fn(async () => jsonResponse(400, { error: "host_not_registered", reason: "example.com is not a production host of this workspace" }))
+    const host = await make(hostFetch).verify(input)
+    expect(host.ga4).toEqual({ state: "not_verifiable", reason: "the cloud rejected the request: host_not_registered — example.com is not a production host of this workspace" })
+    expect(hostFetch).toHaveBeenCalledTimes(1)
+    const invalid = await make(async () => jsonResponse(400, { error: "invalid_request", reason: "lanes must be non-empty" })).verify(input)
+    expect(invalid.infinite).toEqual({ state: "not_verifiable", reason: "the cloud rejected the request: invalid_request — lanes must be non-empty" })
+  })
+
+  it("429 honours Retry-After (capped at 30 s) within the budget, then reads 'rate limited'", async () => {
+    const time = clock()
+    const responses = [
+      new Response("", { status: 429, headers: { "retry-after": "10" } }),
+      jsonResponse(200, { lanes: { ga4: { state: "verified", receiptAt: "2026-09-02T10:00:20.000Z" }, infinite: { state: "verified", receiptAt: "2026-09-02T10:00:20.000Z" } } })
+    ]
+    const fetchImpl = vi.fn(async () => responses.shift() ?? new Response("", { status: 429, headers: { "retry-after": "10" } }))
+    const backend = new InfiniteCloudBackend({ origin: "https://api.ultima.inc", token: "tok", engineProjectId: "proj_1", fetch: fetchImpl as unknown as typeof fetch, now: time.now, sleep: time.sleep })
+    const start = time.now()
+    const result = await backend.verify(input)
+    expect(result.ga4).toEqual({ state: "verified", receiptAt: "2026-09-02T10:00:20.000Z" })
+    expect(time.now() - start).toBe(10_000)
+    expect(fetchImpl).toHaveBeenCalledTimes(2)
+
+    const forever = clock()
+    const always = vi.fn(async () => new Response("", { status: 429, headers: { "retry-after": "120" } }))
+    const limited = await new InfiniteCloudBackend({ origin: "https://api.ultima.inc", token: "tok", engineProjectId: "proj_1", fetch: always as unknown as typeof fetch, now: forever.now, sleep: forever.sleep }).verify(input)
+    expect(limited.ga4).toEqual({ state: "not_verifiable", reason: "rate limited by the cloud; try again in a minute" })
+    // 120 s is capped to 30 s per wait, and the 60 s budget ends the loop after two waits.
+    expect(always.mock.calls.length).toBeLessThanOrEqual(3)
+    expect(forever.now() - 1_000_000).toBeLessThanOrEqual(60_000)
+  })
+
   it("a plain 503 with no body still reads as the route being unavailable", async () => {
     const result = await make(async () => new Response("", { status: 503 })).verify(input)
     expect(result.ga4).toEqual({ state: "not_verifiable", reason: "the cloud verify route was unavailable (HTTP 503)" })

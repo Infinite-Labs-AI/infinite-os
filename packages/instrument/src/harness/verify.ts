@@ -39,6 +39,17 @@ export const META_NOT_VERIFIABLE_REASON = "Meta has no install-time read-back; o
 export const NO_BACKEND_REASON = "no backend can read this lane back"
 export const SUBSCRIPTION_REQUIRED_REASON = "subscription required — complete onboarding in Infinite Desktop"
 export const SUBSCRIPTION_CHECK_UNAVAILABLE_REASON = "subscription check unavailable, try again"
+export const RATE_LIMITED_REASON = "rate limited by the cloud; try again in a minute"
+export const RETRY_AFTER_CAP_MS = 30_000
+
+/** `Retry-After` as delay-seconds or an HTTP date, in ms from `nowMs`; null when absent/unparseable. */
+export function retryAfterMs(header: string | null, nowMs: number): number | null {
+  if (!header) return null
+  const trimmed = header.trim()
+  if (/^\d+$/.test(trimmed)) return Number.parseInt(trimmed, 10) * 1000
+  const date = Date.parse(trimmed)
+  return Number.isFinite(date) ? Math.max(0, date - nowMs) : null
+}
 
 interface Timing {
   now?: () => number
@@ -174,6 +185,23 @@ export class InfiniteCloudBackend implements VerificationBackend {
       }
       if (response.status === 404) {
         return failAll("the cloud verify route is not available yet (HTTP 404)")
+      }
+      if (response.status === 400) {
+        // The route's typed 400s (`host_not_registered`, `invalid_request` + reason) are
+        // answers, not outages: quoted verbatim, never retried.
+        const payload: unknown = await response.json().catch(() => null)
+        const error = isRecord(payload) && typeof payload.error === "string" ? payload.error : "invalid_request"
+        const reason = isRecord(payload) && typeof payload.reason === "string" ? payload.reason : undefined
+        return failAll(`the cloud rejected the request: ${error}${reason ? ` — ${reason}` : ""}`)
+      }
+      if (response.status === 429) {
+        // Rate limited: honour Retry-After (capped at 30 s) inside the same 60 s budget, then say so.
+        await response.text().catch(() => "")
+        const retryAfter = retryAfterMs(response.headers.get("retry-after"), now())
+        const wait = Math.min(retryAfter ?? pollIntervalMs, RETRY_AFTER_CAP_MS)
+        if (now() - startedAt + wait > budgetMs) return failAll(RATE_LIMITED_REASON)
+        await sleep(wait)
+        continue
       }
       if (!response.ok) {
         // `subscription_check_unavailable` (503, retryable: true) is the entitlement check being
