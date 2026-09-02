@@ -70,9 +70,9 @@ const providerScanExtensions = /\.(html|htm|tsx|jsx|ts|js|mjs|cjs|astro|vue|svel
  * declarations (`declare function gtag(`), tests/specs/stories/mocks (`posthog.init('phc_test')`).
  * A false positive here silently drops a provider from the install as "adopted" — the worse failure.
  */
-const providerScanSkippedFiles = /\.(d\.ts|test\.[jt]sx?|spec\.[jt]sx?|stories\.[jt]sx?|min\.[cm]?js)$/
+export const providerScanSkippedFiles = /\.(d\.ts|test\.[jt]sx?|spec\.[jt]sx?|stories\.[jt]sx?|min\.[cm]?js)$/
 /** Directories the walk never enters: dependencies, build output, VCS, coverage, static assets, tests, mocks, email templates. */
-const providerScanSkippedDirectories = new Set([
+export const providerScanSkippedDirectories = new Set([
   "node_modules",
   ".git",
   ".next",
@@ -115,7 +115,7 @@ const quotedGtmIdOnGtmLine = /^(?=.*(?:gtm|googletagmanager))(?=.*["'`]GTM-[A-Z0
  * the data layer): evidence is the gtm.js loader, a data-layer push beside the googletagmanager
  * host, the `gtmId` prop of `@next/third-parties/google`, or a quoted id on a line mentioning gtm.
  */
-function hasTagManagerEvidence(contents: string): boolean {
+export function hasTagManagerEvidence(contents: string): boolean {
   if (contents.includes("googletagmanager.com/gtm.js")) return true
   if (contents.includes("dataLayer.push(") && contents.includes("googletagmanager.com")) return true
   if (gtmIdProp.test(contents)) return true
@@ -127,7 +127,7 @@ function hasTagManagerEvidence(contents: string): boolean {
  * that install it without either string (`@next/third-parties/google` `<GoogleAnalytics>`,
  * `react-ga4`, `vue-gtag`, `nuxt-gtag`, `@analytics/google-analytics`).
  */
-function hasGa4SnippetEvidence(contents: string): boolean {
+export function hasGa4SnippetEvidence(contents: string): boolean {
   if (contents.includes("googletagmanager.com/gtag") || contents.includes("gtag(")) return true
   if (contents.includes("@next/third-parties/google") && contents.includes("GoogleAnalytics")) return true
   if (contents.includes("react-ga4") || contents.includes("ReactGA.initialize(")) return true
@@ -139,7 +139,7 @@ function hasGa4SnippetEvidence(contents: string): boolean {
  * PostHog: the initialisation call, the CDN host, or the React/Next wrappers that take the key as
  * a prop and default the host (`posthog-js/react` `<PostHogProvider>`, `@posthog/nextjs`).
  */
-function hasPosthogEvidence(contents: string): boolean {
+export function hasPosthogEvidence(contents: string): boolean {
   if (contents.includes("posthog.init(") || contents.includes("i.posthog.com")) return true
   if (contents.includes("posthog-js/react") && contents.includes("PostHogProvider")) return true
   return contents.includes("@posthog/nextjs")

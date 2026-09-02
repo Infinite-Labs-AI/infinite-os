@@ -36,6 +36,7 @@ import {
 } from "./setup-prompts.js";
 import { localHelpText, productHelpText, productUpdateText } from "./help-text.js";
 import { runContactsCommand } from "./contacts/contacts-command.js";
+import { runAnalyticsCommand } from "./commands/analytics.js";
 import { reservedCommandNotice } from "./desktop/reserved-commands.js";
 import { readReleaseGa4OAuthClient, type EmbeddedGa4OAuthClient } from "./ga4-oauth-client.js";
 import { prepareGa4ConnectConfig } from "./ga4-connect-config.js";
@@ -1826,6 +1827,47 @@ export async function runCli(
     return;
   }
 
+  // `infinite analytics …` — the analytics harness (one runbook: adopt → install → mark
+  // conversions → verify → report), shared with `npx infinite-tag harness`. The `infinite` CLI
+  // is fully paid: usage/help prints here, and EVERY other invocation (--check included) goes
+  // through the SAME Desktop readiness gate as product turns and `contacts sync` — a founder
+  // may install and complete onboarding, and nothing else runs until the subscription is
+  // active. Not ready → the standard onboarding guidance, non-zero exit, repo untouched.
+  // The standalone `npx infinite-tag harness` is the ungated open-source installer.
+  // Deliberately NOT in RESERVED_LOCAL_COMMANDS (not an engine command).
+  if (normalizedArgs[0] === "analytics") {
+    const analyticsArgs = normalizedArgs.slice(1);
+    const wantsHelp = analyticsArgs[0] === "help" || analyticsArgs[0] === "--help" || analyticsArgs[0] === "-h";
+    const analyticsEnv = env as Record<string, string | undefined>;
+    if (wantsHelp) {
+      await runAnalyticsCommand(analyticsArgs, analyticsEnv);
+      return;
+    }
+    // `--check` is read-only: local, writes nothing, contacts no cloud. It runs WITHOUT the
+    // readiness gate so an unpaid founder can see the state table for their site — and when
+    // Desktop is not ready, the report ends with the onboarding prompt instead.
+    if (isReadOnlyAnalyticsInvocation(analyticsArgs)) {
+      const ready =
+        resolveMode(
+          env as NodeJS.ProcessEnv,
+          { inputIsTTY: input.isTTY === true, outputIsTTY: output.isTTY === true },
+          await buildModeDeps(env)
+        ) === "cloud";
+      const code = await runAnalyticsCommand(analyticsArgs, analyticsEnv);
+      if (!ready) {
+        // With --json stdout must stay one document, so the prompt rides on stderr there.
+        (analyticsArgs.includes("--json") ? errorOutput : output).write(`${ANALYTICS_ONBOARDING_PROMPT}\n`);
+      }
+      if (code !== 0) process.exitCode = code;
+      return;
+    }
+    await runProductWithDesktopPreflight(env, async () => {
+      const code = await runAnalyticsCommand(analyticsArgs, analyticsEnv);
+      if (code !== 0) process.exitCode = code;
+    });
+    return;
+  }
+
   // `infinite contacts …` — the deterministic contacts-sync flow (design doc
   // 2026-08-30-contacts-cli-sync-design.md, Phase 2). Usage is handled here
   // before product preflight; the real sync subcommand then goes through the
@@ -1882,6 +1924,23 @@ export async function runCli(
 
   // (4)–(8) Everything else is a product one-shot TURN.
   await runProductOneShot(normalizedArgs, env);
+}
+
+/** The line a not-ready Desktop appends to an ungated `infinite analytics --check` report. */
+export const ANALYTICS_ONBOARDING_PROMPT =
+  "Complete onboarding in Infinite Desktop to install, mark and verify: open infinite://onboarding (or run `npx infinite-os@latest`).";
+
+/**
+ * `infinite analytics --check` and nothing that writes or reaches the cloud: `--check` present
+ * and none of the other depth flags. (Two depth flags are rejected by the harness parser anyway.)
+ */
+export function isReadOnlyAnalyticsInvocation(args: readonly string[]): boolean {
+  return (
+    args.includes("--check") &&
+    !args.includes("--plan") &&
+    !args.includes("--apply") &&
+    !args.includes("--verify-only")
+  );
 }
 
 /** Top-level `--project` detection (`--project X` or `--project=X`), any position. */

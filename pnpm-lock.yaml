@@ -78,6 +78,9 @@ importers:
       '@infinite-os/runtime':
         specifier: workspace:*
         version: link:../../packages/runtime
+      infinite-tag:
+        specifier: workspace:*
+        version: link:../../packages/instrument
       ink:
         specifier: ^6.8.0
         version: 6.8.0(@types/react@19.2.16)(react@19.2.7)
