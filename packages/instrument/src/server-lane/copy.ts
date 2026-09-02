@@ -37,7 +37,14 @@ import {
 export const SERVER_LANE_POSITIONING =
   "server-side analytics: every page your server serves and every outcome it confirms, counted where ad-blockers can't reach. A floor for people, never an exact share — installed by your agent in ten minutes."
 
+/**
+ * The short pointer at the repo ROOT. The full multi-platform guide is 700+ lines, so it lives under
+ * docs/ (SERVER_LANE_GUIDE_FILE) instead of dumping it here; this file just points at it.
+ */
 export const SERVER_LANE_BRIEF_FILE = "INSTALL-SERVER-LANE.md"
+
+/** The full agent brief, kept out of the repo root under docs/. */
+export const SERVER_LANE_GUIDE_FILE = "docs/infinite-server-lane.md"
 
 /** First line of the written brief; `removeManagedFile` keys off "Managed by Infinite". */
 export const SERVER_LANE_BRIEF_BANNER =
@@ -82,7 +89,8 @@ export const serverLaneCopy = {
 
   whatAndWhy: [
     "Client-side tags (GA4, PostHog, pixels) see well under half of real traffic — ad-blockers, consent gates, and privacy browsers drop them before the first byte. The Infinite server lane counts on the other side of that wall: your server records every HTML document it serves and every conversion it confirms, signs each record, and posts it to Infinite. The board you get back — Visitors, your outcome (downloads, sign-ups, purchases), and the rate between them — matches your server logs, not a sample.",
-    "It is private by construction. Your server hashes the visitor identity itself (IP + user agent + a 30-minute window, keyed by a secret only you hold) and sends the hash; the raw IP and full user agent never leave your infrastructure. No cookies, no query strings, no request bodies. Delivery is fire-and-forget with a two-second ceiling, so it can never slow down or break a page."
+    "It is private by construction. Your server hashes the visitor identity itself (IP + user agent + a 30-minute window, keyed by a secret only you hold) and sends the hash; the raw IP and full user agent never leave your infrastructure. No cookies, no query strings, no request bodies. Delivery is fire-and-forget with a two-second ceiling, so it can never slow down or break a page. It also honors Do-Not-Track and Global-Privacy-Control (`DNT: 1` / `Sec-GPC: 1`) — a request carrying either is not recorded — exactly as the client pixel does.",
+    "It counts DOCUMENT REQUESTS, not client-side page views. On a multi-page site that is one row per page. On a single-page app (SPA) it is one row per real document load — the first entry and every hard reload — NOT the in-app route changes your client router makes after that. So these numbers will NOT match PostHog's `$pageview` count (PostHog fires one per client-router navigation), and the gap is expected: it is the difference between documents your server served and views your JS rendered, not a bug to chase. To count SPA route changes too, keep the client pixel; the server lane is the ad-block-proof floor of real document loads."
   ],
 
   statusHeading: "Where you are",
@@ -120,7 +128,29 @@ export const serverLaneCopy = {
   outcomeRouteVercel:
     "A Vercel serverless function (`api/checkout-status.ts`) confirming a paid session:",
   outcomeRouteNote:
-    "`type` is the exact name from Infinite → Conversions. Pass the incoming request as `visitKeyInputs` and the outcome carries the same `visitKey` as the page view that produced it, which is what makes the same-lane conversion rate real. Give each outcome a stable `eventId` (an order id) so a retry never double counts. It resolves `false` instead of throwing, so a failed report can never fail the checkout.",
+    "`type` is the exact name from Infinite → Conversions. Pass the incoming request as `visitKeyInputs` and the outcome carries the same `visitKey` as the page view that produced it, which is what makes the same-lane conversion rate real. `visitKeyInputs` accepts a WHATWG `Request`, a Node request whose `req.headers` is a plain object (Vercel Node functions, Express), or an explicit `{ clientIp, userAgent }` — a plain-object request is read correctly, never swallowed. Give each outcome a stable `eventId` (an order id) so a retry never double counts. It resolves `false` instead of throwing, so a failed report can never fail the checkout.",
+  outcomeWebhookNote:
+    "Reporting from a WEBHOOK (Stripe, a queue worker)? The incoming request there is the PROVIDER'S, not the buyer's, so its ip and user agent would derive the wrong `visitKey`. Compute the key at CHECKOUT from the buyer's request with the exported `infiniteVisitKey`, carry it (e.g. Stripe `metadata.infinite_visit_key`), and in the webhook pass it straight through as `properties.visitKey` — the helper then skips its own derivation:",
+  outcomeWebhookExample: [
+    "```ts",
+    'import { infiniteVisitKey, postInfiniteOutcome } from "../lib/infinite-outcome"',
+    "",
+    "// 1. In the checkout route, from the BUYER'S request (works on WHATWG Request AND Node req):",
+    "const infinite_visit_key = await infiniteVisitKey({",
+    "  clientIp: String(req.headers['x-forwarded-for'] || '').split(',')[0].trim(),",
+    "  userAgent: req.headers['user-agent'] || ''",
+    "})",
+    "const session = await stripe.checkout.sessions.create({ /* … */ metadata: { infinite_visit_key } })",
+    "",
+    "// 2. In the Stripe webhook, once the payment is REAL:",
+    "await postInfiniteOutcome({",
+    '  type: "purchase",',
+    '  path: "/checkout",',
+    '  eventId: "purchase:" + session.id,',
+    "  properties: { visitKey: session.metadata.infinite_visit_key }  // carried from checkout; derivation is skipped",
+    "})",
+    "```"
+  ],
   adMatchHeading: "Optional: forward the conversion to Meta",
   adMatch: [
     "Only if you run **Meta ads and do not use PostHog** — PostHog already ships its own Meta destination, and two senders for one conversion is a double count.",
@@ -344,10 +374,7 @@ export function renderServerLaneBrief(input: ServerLaneBriefInput): string {
     "",
     "## What this is (and why)",
     "",
-    serverLaneCopy.whatAndWhy[0],
-    "",
-    serverLaneCopy.whatAndWhy[1],
-    "",
+    ...serverLaneCopy.whatAndWhy.flatMap((paragraph) => [paragraph, ""]),
     `## ${serverLaneCopy.statusHeading}`,
     "",
     renderStatusParagraph(input.status),
@@ -460,6 +487,10 @@ export function renderServerLaneBrief(input: ServerLaneBriefInput): string {
     "",
     serverLaneCopy.outcomeRouteNote,
     "",
+    serverLaneCopy.outcomeWebhookNote,
+    "",
+    ...serverLaneCopy.outcomeWebhookExample,
+    "",
     `### ${serverLaneCopy.adMatchHeading}`,
     "",
     ...serverLaneCopy.adMatch,
@@ -482,4 +513,38 @@ export function renderServerLaneBrief(input: ServerLaneBriefInput): string {
     ""
   )
   return lines.join("\n")
+}
+
+/**
+ * The short pointer written to the repo ROOT (INSTALL-SERVER-LANE.md). It carries the status line,
+ * a link to the full guide under docs/, and the two environment variables — so the root stays
+ * uncluttered while the 700-line guide (and the .infinite/install.json record) hold the detail.
+ *
+ * `guidePath` is null when the guide could NOT be written (an unmanaged file already sits at docs/).
+ * The pointer must never link to the customer's own file or claim a `serverLane.guide` record that
+ * does not exist, so it points at the CLI instead.
+ */
+export function renderServerLanePointer(input: ServerLaneBriefInput & { guidePath: string | null }): string {
+  const guideLine = input.guidePath
+    ? `**The full install guide is in [\`${input.guidePath}\`](${input.guidePath})** — contract, reference implementations for every platform, the outcome + Meta relay recipes, and the verify steps. It is also recorded in \`.infinite/install.json\` (\`serverLane.guide\`).`
+    : "**The full install guide was NOT written** — a file Infinite does not manage already sits where it would go (docs/). It was printed during install; regenerate it any time with `npx infinite-tag server-lane --brief` (redirect it to a path of your choosing)."
+  return [
+    SERVER_LANE_BRIEF_BANNER,
+    `# ${serverLaneCopy.title}`,
+    "",
+    `> ${SERVER_LANE_POSITIONING}`,
+    "",
+    renderStatusParagraph(input.status),
+    "",
+    guideLine,
+    "",
+    "Two environment variables make the lane live (never written to a file by infinite-tag):",
+    "```",
+    `${SERVER_LANE_SOURCE_KEY_ENV}=site_xxxxxxxxxxxxxxxx`,
+    `${SERVER_LANE_SECRET_ENV}=<paste the secret shown once in Infinite → Site Analytics → Settings → Conversions → Server events>`,
+    "```",
+    "",
+    `Then deploy and confirm receipts: \`${SERVER_LANE_SECRET_ENV}=… npx infinite-tag verify --server-lane https://<your-production-host>/\``,
+    ""
+  ].join("\n")
 }

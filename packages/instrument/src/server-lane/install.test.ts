@@ -12,7 +12,7 @@ import type { WorkspaceInstallArtifacts } from "../types.js"
 import { uninstallInstallation } from "../uninstall.js"
 import { verifyInstallation } from "../verify.js"
 
-import { SERVER_LANE_BRIEF_FILE, serverLaneCopy } from "./copy.js"
+import { SERVER_LANE_BRIEF_FILE, SERVER_LANE_GUIDE_FILE, serverLaneCopy } from "./copy.js"
 import { UNPATCHABLE_REASONS } from "./middleware-patch.js"
 import { SERVER_LANE_FENCE_START } from "./runtime-source.js"
 
@@ -114,7 +114,8 @@ describe("install --server-lane on Next.js (App Router)", () => {
       mode: "next-middleware",
       middleware: "middleware.ts",
       module: "lib/infinite-server-lane.ts",
-      brief: SERVER_LANE_BRIEF_FILE
+      brief: SERVER_LANE_BRIEF_FILE,
+      guide: SERVER_LANE_GUIDE_FILE
     })
 
     const middleware = readFileSync(join(root, "middleware.ts"), "utf8")
@@ -125,9 +126,14 @@ describe("install --server-lane on Next.js (App Router)", () => {
     expect(module).toContain('process.env.INFINITE_SITE_SOURCE_KEY || "site_public_test"')
     expect(module).toContain('const PRODUCTION_HOSTS: string[] = ["example.com", "www.example.com"]')
     expect(module).not.toMatch(/INFINITE_SERVER_EVENT_SECRET\s*=\s*"/)
+    // The repo root holds a short pointer; the full guide lives under docs/.
     const brief = readFileSync(join(root, SERVER_LANE_BRIEF_FILE), "utf8")
     expect(brief.startsWith("<!-- Managed by Infinite")).toBe(true)
     expect(brief).toContain("infinite-tag CREATED `middleware.ts`")
+    expect(brief).toContain(SERVER_LANE_GUIDE_FILE)
+    expect(brief.split("\n").length).toBeLessThan(40) // a pointer, not the 700-line guide
+    const guide = readFileSync(join(root, SERVER_LANE_GUIDE_FILE), "utf8")
+    expect(guide).toContain("## The contract (implement exactly)")
 
     const manifest = readInstallManifest(root)!
     expect(manifest.serverLane).toEqual(apply.serverLane?.manifest)
@@ -151,13 +157,13 @@ describe("install --server-lane on Next.js (App Router)", () => {
 
     const preview = uninstallInstallation({ root, dryRun: true })
     expect(preview.removedFiles).toEqual(
-      expect.arrayContaining(["middleware.ts", "lib/infinite-server-lane.ts", SERVER_LANE_BRIEF_FILE])
+      expect.arrayContaining(["middleware.ts", "lib/infinite-server-lane.ts", SERVER_LANE_BRIEF_FILE, SERVER_LANE_GUIDE_FILE])
     )
     expect(existsSync(join(root, "middleware.ts"))).toBe(true)
 
     const result = uninstallInstallation({ root, dryRun: false })
     expect(result.removedFiles).toEqual(
-      expect.arrayContaining(["middleware.ts", "lib/infinite-server-lane.ts", SERVER_LANE_BRIEF_FILE, ".infinite/install.json"])
+      expect.arrayContaining(["middleware.ts", "lib/infinite-server-lane.ts", SERVER_LANE_BRIEF_FILE, SERVER_LANE_GUIDE_FILE, ".infinite/install.json"])
     )
     expectTreeEquals(root, original)
   })
@@ -233,10 +239,12 @@ describe("install --server-lane on Next.js (App Router)", () => {
     expect(readFileSync(join(root, "middleware.ts"), "utf8")).toBe(narrow)
     expect(apply.warnings.some((warning) => warning.includes("left untouched"))).toBe(true)
     expect(existsSync(join(root, "lib/infinite-server-lane.ts"))).toBe(true)
+    // The root pointer carries the status; the exact hand-addition lives in the full guide.
     const brief = readFileSync(join(root, SERVER_LANE_BRIEF_FILE), "utf8")
     expect(brief).toContain("infinite-tag did NOT touch your existing `middleware.ts`")
-    expect(brief).toContain(`### ${serverLaneCopy.exactAdditionHeading}`)
-    expect(brief).toContain("export default withInfiniteServerLane(middleware)")
+    const guide = readFileSync(join(root, SERVER_LANE_GUIDE_FILE), "utf8")
+    expect(guide).toContain(`### ${serverLaneCopy.exactAdditionHeading}`)
+    expect(guide).toContain("export default withInfiniteServerLane(middleware)")
 
     const manifest = readInstallManifest(root)!
     expect(manifest.serverLane?.middleware).toBeUndefined()
@@ -322,12 +330,15 @@ describe("install --server-lane on other stacks", () => {
     const original = snapshotTree(root)
     const { plan, apply } = planAndApply(root, { ga4: { measurementId: "G-TEST123" } })
     expect(plan.serverLane).toMatchObject({ mode: "brief", briefPath: SERVER_LANE_BRIEF_FILE, files: [] })
-    expect(apply.serverLane?.manifest).toEqual({ mode: "brief", brief: SERVER_LANE_BRIEF_FILE })
+    expect(apply.serverLane?.manifest).toEqual({ mode: "brief", brief: SERVER_LANE_BRIEF_FILE, guide: SERVER_LANE_GUIDE_FILE })
+    // `brief` (returned + printed) is the full guide; the guide file matches it, the root a pointer.
     expect(apply.serverLane?.brief).toContain('This project was detected as "vite-react"')
-    expect(readFileSync(join(root, SERVER_LANE_BRIEF_FILE), "utf8")).toBe(apply.serverLane?.brief)
-    expect(readInstallManifest(root)?.serverLane).toEqual({ mode: "brief", brief: SERVER_LANE_BRIEF_FILE })
+    expect(readFileSync(join(root, SERVER_LANE_GUIDE_FILE), "utf8")).toBe(apply.serverLane?.brief)
+    expect(readFileSync(join(root, SERVER_LANE_BRIEF_FILE), "utf8")).toContain(SERVER_LANE_GUIDE_FILE)
+    expect(readInstallManifest(root)?.serverLane).toEqual({ mode: "brief", brief: SERVER_LANE_BRIEF_FILE, guide: SERVER_LANE_GUIDE_FILE })
     const result = uninstallInstallation({ root, dryRun: false })
     expect(result.removedFiles).toContain(SERVER_LANE_BRIEF_FILE)
+    expect(result.removedFiles).toContain(SERVER_LANE_GUIDE_FILE)
     expectTreeEquals(root, original)
   })
 
@@ -342,6 +353,31 @@ describe("install --server-lane on other stacks", () => {
     expectTreeEquals(root, original)
   })
 
+  it("does not overwrite an unmanaged docs guide, and the root pointer never lies about it", () => {
+    const root = copyFixture("vite-react-basic")
+    mkdirSync(join(root, "docs"))
+    writeFileSync(join(root, SERVER_LANE_GUIDE_FILE), "# our own docs\n")
+    const { apply } = planAndApply(root, {})
+
+    // The customer's file is untouched and NOT recorded — the manifest claim must be true.
+    expect(readFileSync(join(root, SERVER_LANE_GUIDE_FILE), "utf8")).toBe("# our own docs\n")
+    expect(readInstallManifest(root)?.serverLane).toEqual({ mode: "brief", brief: SERVER_LANE_BRIEF_FILE })
+    expect(apply.serverLane?.manifest.guide).toBeUndefined()
+    expect(apply.warnings.some((warning) => warning.includes("not managed by Infinite"))).toBe(true)
+
+    // The root pointer must NOT link to the customer's file or claim serverLane.guide.
+    const pointer = readFileSync(join(root, SERVER_LANE_BRIEF_FILE), "utf8")
+    expect(pointer).not.toContain(`(${SERVER_LANE_GUIDE_FILE})`)
+    expect(pointer).not.toContain("serverLane.guide")
+    expect(pointer).toContain("was NOT written")
+    expect(pointer).toContain("npx infinite-tag server-lane --brief")
+
+    // Uninstall removes only the pointer we wrote; the customer's docs file stays.
+    uninstallInstallation({ root, dryRun: false })
+    expect(existsSync(join(root, SERVER_LANE_BRIEF_FILE))).toBe(false)
+    expect(readFileSync(join(root, SERVER_LANE_GUIDE_FILE), "utf8")).toBe("# our own docs\n")
+  })
+
   it("does not overwrite an unmanaged INSTALL-SERVER-LANE.md; reports briefWritten=false", () => {
     const root = copyFixture("vite-react-basic")
     writeFileSync(join(root, SERVER_LANE_BRIEF_FILE), "# my own notes\n")
@@ -349,7 +385,8 @@ describe("install --server-lane on other stacks", () => {
     expect(apply.serverLane?.briefWritten).toBe(false)
     expect(readFileSync(join(root, SERVER_LANE_BRIEF_FILE), "utf8")).toBe("# my own notes\n")
     expect(apply.warnings.some((warning) => warning.includes("not managed by Infinite"))).toBe(true)
-    expect(readInstallManifest(root)?.serverLane).toEqual({ mode: "brief" })
+    // The root pointer was blocked, but the full guide (a different path) is still written + tracked.
+    expect(readInstallManifest(root)?.serverLane).toEqual({ mode: "brief", guide: SERVER_LANE_GUIDE_FILE })
   })
 
   it("Unsupported: the plan is blocked but carries the brief-mode lane for printing", () => {

@@ -259,8 +259,10 @@ export interface ServerLaneManifest {
   middleware?: string
   /** The managed lib/infinite-server-lane.ts module. */
   module?: string
-  /** The written INSTALL-SERVER-LANE.md agent brief (banner-gated removal, never hash-verified). */
+  /** The written INSTALL-SERVER-LANE.md root pointer (banner-gated removal, never hash-verified). */
   brief?: string
+  /** The full agent guide under docs/ (docs/infinite-server-lane.md); banner-gated removal like brief. */
+  guide?: string
   /**
    * Non-Next targets: every whole file the lane created, root-relative, each with a "created"
    * record in configOwnership so uninstall deletes it only when it is byte-identical.

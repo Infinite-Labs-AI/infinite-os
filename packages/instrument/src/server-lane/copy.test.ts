@@ -87,6 +87,22 @@ describe("the agent brief", () => {
     expect(brief).toContain("`adMatch` is OPTIONAL and outcome-only")
   })
 
+  it("sets the SPA expectation, states DNT/GPC is honored, and shows the checkout→webhook carry", () => {
+    // Task G: the SPA vs client-router-pageview expectation, and why it won't match PostHog.
+    expect(brief).toContain("DOCUMENT REQUESTS")
+    expect(brief).toContain("single-page app")
+    expect(brief).toContain("$pageview")
+    // Task C: DNT / Global-Privacy-Control are documented as honored.
+    expect(brief).toContain("Do-Not-Track")
+    expect(brief).toContain("Global-Privacy-Control")
+    // Task A: the webhook carry pattern (compute at checkout, carry via metadata, pass properties.visitKey).
+    expect(brief).toContain("infiniteVisitKey")
+    expect(brief).toContain("metadata: { infinite_visit_key }")
+    expect(brief).toContain("properties: { visitKey: session.metadata.infinite_visit_key }")
+    // Task A: plain-object requests are read, not swallowed.
+    expect(brief).toContain("plain object")
+  })
+
   it("never contains a secret value or a raw-IP field", () => {
     expect(brief).not.toMatch(/INFINITE_SERVER_EVENT_SECRET\s*=\s*"[^<]/)
     expect(brief).not.toContain('"clientIp"')

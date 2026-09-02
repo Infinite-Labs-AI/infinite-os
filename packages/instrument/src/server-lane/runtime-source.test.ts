@@ -131,6 +131,9 @@ describe("generated Next.js module (executed with WebCrypto)", () => {
     ["RSC accept", fakeRequest({ headers: { accept: "text/x-component" } })],
     ["prefetch purpose", fakeRequest({ headers: { purpose: "prefetch" } })],
     ["next-router-prefetch", fakeRequest({ headers: { "next-router-prefetch": "1" } })],
+    // Privacy: DNT / Global-Privacy-Control are honored like the client pixel does.
+    ["Do-Not-Track", fakeRequest({ headers: { dnt: "1" } })],
+    ["Sec-GPC", fakeRequest({ headers: { "sec-gpc": "1" } })],
     ["localhost", fakeRequest({ host: "localhost:3000" })],
     ["loopback", fakeRequest({ host: "127.0.0.1" })]
   ])("skips %s", async (_label, request) => {
@@ -139,6 +142,14 @@ describe("generated Next.js module (executed with WebCrypto)", () => {
     mod.recordInfiniteDocumentRequest(request, event)
     await Promise.all(event.tasks)
     expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it("records a normal document request when DNT/GPC are absent or explicitly disabled", async () => {
+    const mod = await loadGeneratedModule()
+    const event = fakeEvent()
+    mod.recordInfiniteDocumentRequest(fakeRequest({ headers: { dnt: "0" } }), event)
+    await Promise.all(event.tasks)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 
   it("stays dormant without the secret and never throws", async () => {
