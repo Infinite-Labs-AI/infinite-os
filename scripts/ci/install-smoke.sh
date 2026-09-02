@@ -2,6 +2,10 @@
 set -euo pipefail
 
 repo_root="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+installer_version="$(PACKAGE_JSON="$repo_root/packages/desktop-installer/package.json" node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(process.env.PACKAGE_JSON, "utf8")).version)')"
+min_desktop_version="$(awk -F'"' '/^MIN_SAFE_DESKTOP_VERSION=/ { print $2; exit }' "$repo_root/scripts/install.sh")"
+previous_desktop_version="$(MIN_DESKTOP_VERSION="$min_desktop_version" node -e 'const parts = process.env.MIN_DESKTOP_VERSION.split(".").map(Number); parts[2] -= 1; process.stdout.write(parts.join("."));')"
+newer_desktop_version="$(MIN_DESKTOP_VERSION="$min_desktop_version" node -e 'const parts = process.env.MIN_DESKTOP_VERSION.split(".").map(Number); parts[2] += 1; process.stdout.write(parts.join("."));')"
 test_root="$(mktemp -d "${TMPDIR:-/tmp}/infinite-desktop-installer-smoke.XXXXXX")"
 fake_bin="$test_root/bin"
 mkdir -p "$fake_bin"
@@ -83,7 +87,7 @@ case "$operation" in
     mkdir -p "$source_app/Contents/MacOS"
     : > "$source_app/Contents/MacOS/Infinite"
     : > "$source_app/Contents/Info.plist"
-    printf '%s\n' "${FAKE_SOURCE_VERSION:-0.3.13}" > "$source_app/Contents/.version"
+    printf '%s\n' "${FAKE_SOURCE_VERSION:-$FAKE_MIN_SAFE_DESKTOP_VERSION}" > "$source_app/Contents/.version"
     [ "${FAKE_SOURCE_SYMLINK:-0}" != "1" ] || ln -s "$source_app" "$mount_point/Infinite.app"
     printf 'attach %s\n' "$mount_point" >> "$FAKE_LOG"
     ;;
@@ -99,7 +103,7 @@ EOF
 app_path="${*: -1}"
 if [ -n "${FAKE_BAD_SIGNATURE_PATH:-}" ] && [[ "$app_path" == *"$FAKE_BAD_SIGNATURE_PATH"* ]]; then exit 1; fi
 if [ "${FAKE_FAIL_NEW_TARGET:-0}" = "1" ] && [[ "$app_path" == */apps/Infinite.app ]] \
-  && [ "$(cat "$app_path/Contents/.version" 2>/dev/null || true)" = "0.3.13" ]; then exit 1; fi
+  && [ "$(cat "$app_path/Contents/.version" 2>/dev/null || true)" = "$FAKE_MIN_SAFE_DESKTOP_VERSION" ]; then exit 1; fi
 case " $* " in
   *" --verify "*) exit 0 ;;
 esac
@@ -194,12 +198,14 @@ run_installer() {
     HOME="$case_root/home" \
     PATH="$fake_bin:/usr/bin:/bin" \
     FAKE_LOG="$case_root/log" \
+    FAKE_MIN_SAFE_DESKTOP_VERSION="$min_desktop_version" \
     INFINITE_PLIST_BUDDY="$fake_bin/PlistBuddy" \
     "$@" \
     bash "$repo_root/scripts/install.sh" --app-dir "$case_root/apps" > "$case_root/output" 2>&1
 }
 
 write_fake_commands
+export FAKE_MIN_SAFE_DESKTOP_VERSION="$min_desktop_version"
 
 create_app() {
   app="$1"
@@ -243,7 +249,7 @@ assert_no_ansi() {
 # Fresh install: one truthful GET through /download, verified staging, mount cleanup, and launch.
 run_installer fresh env INFINITE_INSTALL_INTERACTIVE=1
 test -d "$test_root/fresh/apps/Infinite.app"
-grep -Fq 'curl method=GET url=<https://infinite.fast/download?utm_source=github&utm_medium=cli&utm_campaign=infinite_os_install> ua=<Infinite-Installer/1.0.1> silent=0 show_error=0' "$test_root/fresh/log"
+grep -Fq "curl method=GET url=<https://infinite.fast/download?utm_source=github&utm_medium=cli&utm_campaign=infinite_os_install> ua=<Infinite-Installer/${installer_version}> silent=0 show_error=0" "$test_root/fresh/log"
 assert_one_get_zero_head "$test_root/fresh/log"
 grep -Fq 'verify ' "$test_root/fresh/log"
 grep -Fq 'detach ' "$test_root/fresh/log"
@@ -264,7 +270,7 @@ fi
 # A non-interactive caller still installs deterministically but emits no ANSI and opens no GUI.
 run_installer noninteractive env INFINITE_INSTALL_INTERACTIVE=0
 test -d "$test_root/noninteractive/apps/Infinite.app"
-grep -Fq 'curl method=GET url=<https://infinite.fast/download?utm_source=github&utm_medium=cli&utm_campaign=infinite_os_install> ua=<Infinite-Installer/1.0.1> silent=1 show_error=1' "$test_root/noninteractive/log"
+grep -Fq "curl method=GET url=<https://infinite.fast/download?utm_source=github&utm_medium=cli&utm_campaign=infinite_os_install> ua=<Infinite-Installer/${installer_version}> silent=1 show_error=1" "$test_root/noninteractive/log"
 assert_one_get_zero_head "$test_root/noninteractive/log"
 assert_no_open "$test_root/noninteractive/log"
 assert_no_ansi "$test_root/noninteractive/output"
@@ -310,7 +316,7 @@ assert_opened_onboarding "$test_root/spaces/Applications With Spaces/Infinite.ap
 
 # An existing same-version verified app is opened without replacement.
 mkdir -p "$test_root/existing/home" "$test_root/existing/apps"
-create_app "$test_root/existing/apps/Infinite.app" 0.3.13
+create_app "$test_root/existing/apps/Infinite.app" "$min_desktop_version"
 : > "$test_root/existing/log"
 existing_before="$(fixture_fingerprint "$test_root/existing/apps/Infinite.app")"
 env HOME="$test_root/existing/home" PATH="$fake_bin:/usr/bin:/bin" FAKE_LOG="$test_root/existing/log" INFINITE_PLIST_BUDDY="$fake_bin/PlistBuddy" \
@@ -323,8 +329,8 @@ grep -Fq 'Finish setup in the Infinite app' "$test_root/existing/output"
 
 # A safe installed target still quits an older verified copy running from another path before open.
 mkdir -p "$test_root/other_running/home" "$test_root/other_running/apps" "$test_root/other_running/downloads"
-create_app "$test_root/other_running/apps/Infinite.app" 0.3.13
-create_app "$test_root/other_running/downloads/Infinite.app" 0.3.12
+create_app "$test_root/other_running/apps/Infinite.app" "$min_desktop_version"
+create_app "$test_root/other_running/downloads/Infinite.app" "$previous_desktop_version"
 printf '5252\n' > "$test_root/other_running/pids"
 : > "$test_root/other_running/log"
 env HOME="$test_root/other_running/home" PATH="$fake_bin:/usr/bin:/bin" FAKE_LOG="$test_root/other_running/log" INFINITE_PLIST_BUDDY="$fake_bin/PlistBuddy" \
@@ -336,7 +342,7 @@ assert_opened_onboarding "$test_root/other_running/apps/Infinite.app" "$test_roo
 
 # Exact production shapes: a verified GUI main plus its bundled daemon are one legitimate app tree.
 mkdir -p "$test_root/gui_daemon/home" "$test_root/gui_daemon/apps"
-create_app "$test_root/gui_daemon/apps/Infinite.app" 0.3.13
+create_app "$test_root/gui_daemon/apps/Infinite.app" "$min_desktop_version"
 mkdir -p "$test_root/gui_daemon/apps/Infinite.app/Contents/Resources/daemon"
 : > "$test_root/gui_daemon/apps/Infinite.app/Contents/Resources/daemon/daemon.mjs"
 gui_daemon_exec="$test_root/gui_daemon/apps/Infinite.app/Contents/MacOS/Infinite"
@@ -355,7 +361,7 @@ assert_opened_onboarding "$test_root/gui_daemon/apps/Infinite.app" "$test_root/g
 
 # A fresh isolated --no-open install does not disturb an unrelated verified prod GUI/daemon pair.
 mkdir -p "$test_root/isolated_no_open/home" "$test_root/isolated_no_open/apps" "$test_root/isolated_no_open/prod"
-create_app "$test_root/isolated_no_open/prod/Infinite.app" 0.3.13
+create_app "$test_root/isolated_no_open/prod/Infinite.app" "$min_desktop_version"
 mkdir -p "$test_root/isolated_no_open/prod/Infinite.app/Contents/Resources/daemon"
 : > "$test_root/isolated_no_open/prod/Infinite.app/Contents/Resources/daemon/daemon.mjs"
 isolated_prod_exec="$test_root/isolated_no_open/prod/Infinite.app/Contents/MacOS/Infinite"
@@ -376,7 +382,7 @@ grep -Fq "open 'infinite://onboarding'" "$test_root/isolated_no_open/output"
 
 # The exact legacy installer wrapper is preserved for launcher-safe Desktop to migrate atomically.
 mkdir -p "$test_root/legacy/home/.local/bin" "$test_root/legacy/apps"
-create_app "$test_root/legacy/apps/Infinite.app" 0.3.13
+create_app "$test_root/legacy/apps/Infinite.app" "$min_desktop_version"
 : > "$test_root/legacy/log"
 cat > "$test_root/legacy/home/.local/bin/infinite" <<'EOF'
 #!/usr/bin/env bash
@@ -406,16 +412,16 @@ assert_opened_onboarding "$test_root/foreign/apps/Infinite.app" "$test_root/fore
 
 # Older installs are upgraded; newer installs are retained.
 mkdir -p "$test_root/older/home" "$test_root/older/apps"
-create_app "$test_root/older/apps/Infinite.app" 0.3.12
+create_app "$test_root/older/apps/Infinite.app" "$previous_desktop_version"
 : > "$test_root/older/log"
 env HOME="$test_root/older/home" PATH="$fake_bin:/usr/bin:/bin" FAKE_LOG="$test_root/older/log" INFINITE_PLIST_BUDDY="$fake_bin/PlistBuddy" \
   bash "$repo_root/scripts/install.sh" --app-dir "$test_root/older/apps" --no-open > "$test_root/older/output" 2>&1
-test "$(cat "$test_root/older/apps/Infinite.app/Contents/.version")" = 0.3.13
+test "$(cat "$test_root/older/apps/Infinite.app/Contents/.version")" = "$min_desktop_version"
 ! find "$test_root/older/apps" -maxdepth 1 -name '.infinite-backup.*' | grep -q .
 grep -Fq "open 'infinite://onboarding'" "$test_root/older/output"
 
 mkdir -p "$test_root/newer/home" "$test_root/newer/apps"
-create_app "$test_root/newer/apps/Infinite.app" 0.3.14
+create_app "$test_root/newer/apps/Infinite.app" "$newer_desktop_version"
 newer_before="$(fixture_fingerprint "$test_root/newer/apps/Infinite.app")"
 : > "$test_root/newer/log"
 env HOME="$test_root/newer/home" PATH="$fake_bin:/usr/bin:/bin" FAKE_LOG="$test_root/newer/log" INFINITE_PLIST_BUDDY="$fake_bin/PlistBuddy" \
@@ -425,7 +431,7 @@ assert_no_open "$test_root/newer/log"
 grep -Fq "open 'infinite://onboarding'" "$test_root/newer/output"
 
 # A pre-safety public release is never installed or opened.
-if run_installer unsafe_source env FAKE_SOURCE_VERSION=0.3.12; then
+if run_installer unsafe_source env FAKE_SOURCE_VERSION="$previous_desktop_version"; then
   printf 'unsafe source release unexpectedly installed\n' >&2
   exit 1
 fi
@@ -488,19 +494,19 @@ test ! -e "$test_root/race/apps/Infinite.app/Contents/.version"
 
 # A running verified copy is asked to quit gracefully before upgrade.
 mkdir -p "$test_root/running/home" "$test_root/running/apps"
-create_app "$test_root/running/apps/Infinite.app" 0.3.12
+create_app "$test_root/running/apps/Infinite.app" "$previous_desktop_version"
 printf '4242\n' > "$test_root/running/pids"
 : > "$test_root/running/log"
 env HOME="$test_root/running/home" PATH="$fake_bin:/usr/bin:/bin" FAKE_LOG="$test_root/running/log" INFINITE_PLIST_BUDDY="$fake_bin/PlistBuddy" \
   FAKE_RUNNING_FILE="$test_root/running/pids" FAKE_RUNNING_APP="$test_root/running/apps/Infinite.app" \
   bash "$repo_root/scripts/install.sh" --app-dir "$test_root/running/apps" --no-open > "$test_root/running/output" 2>&1
 grep -Fq quit "$test_root/running/log"
-test "$(cat "$test_root/running/apps/Infinite.app/Contents/.version")" = 0.3.13
+test "$(cat "$test_root/running/apps/Infinite.app/Contents/.version")" = "$min_desktop_version"
 grep -Fq "open 'infinite://onboarding'" "$test_root/running/output"
 
 # Normal upgrade accepts the target app's exact GUI + bundled daemon shapes, then quiesces both.
 mkdir -p "$test_root/running_pair/home" "$test_root/running_pair/apps"
-create_app "$test_root/running_pair/apps/Infinite.app" 0.3.12
+create_app "$test_root/running_pair/apps/Infinite.app" "$previous_desktop_version"
 mkdir -p "$test_root/running_pair/apps/Infinite.app/Contents/Resources/daemon"
 : > "$test_root/running_pair/apps/Infinite.app/Contents/Resources/daemon/daemon.mjs"
 running_pair_exec="$test_root/running_pair/apps/Infinite.app/Contents/MacOS/Infinite"
@@ -515,11 +521,11 @@ env HOME="$test_root/running_pair/home" PATH="$fake_bin:/usr/bin:/bin" FAKE_LOG=
   bash "$repo_root/scripts/install.sh" --app-dir "$test_root/running_pair/apps" --no-open > "$test_root/running_pair/output" 2>&1
 grep -Fq quit "$test_root/running_pair/log"
 test ! -s "$test_root/running_pair/processes"
-test "$(cat "$test_root/running_pair/apps/Infinite.app/Contents/.version")" = 0.3.13
+test "$(cat "$test_root/running_pair/apps/Infinite.app/Contents/.version")" = "$min_desktop_version"
 
 # An unexpected same-name process remains a hard stop for an operation that replaces its target app.
 mkdir -p "$test_root/running_unexpected/home" "$test_root/running_unexpected/apps"
-create_app "$test_root/running_unexpected/apps/Infinite.app" 0.3.12
+create_app "$test_root/running_unexpected/apps/Infinite.app" "$previous_desktop_version"
 unexpected_exec="$test_root/running_unexpected/apps/Infinite.app/Contents/MacOS/Infinite"
 printf '6401|%s --unexpected-child\n' "$unexpected_exec" > "$test_root/running_unexpected/processes"
 : > "$test_root/running_unexpected/log"
@@ -529,13 +535,13 @@ if env HOME="$test_root/running_unexpected/home" PATH="$fake_bin:/usr/bin:/bin" 
   printf 'unexpected same-name process did not block upgrade\n' >&2
   exit 1
 fi
-test "$(cat "$test_root/running_unexpected/apps/Infinite.app/Contents/.version")" = 0.3.12
+test "$(cat "$test_root/running_unexpected/apps/Infinite.app/Contents/.version")" = "$previous_desktop_version"
 test -s "$test_root/running_unexpected/processes"
 
 # Post-commit verification and open failures roll an upgrade back to the previous verified app.
 for failure_case in verify_rollback open_rollback; do
   mkdir -p "$test_root/$failure_case/home" "$test_root/$failure_case/apps"
-  create_app "$test_root/$failure_case/apps/Infinite.app" 0.3.12
+  create_app "$test_root/$failure_case/apps/Infinite.app" "$previous_desktop_version"
   : > "$test_root/$failure_case/log"
 done
 if env HOME="$test_root/verify_rollback/home" PATH="$fake_bin:/usr/bin:/bin" FAKE_LOG="$test_root/verify_rollback/log" INFINITE_PLIST_BUDDY="$fake_bin/PlistBuddy" \
@@ -543,7 +549,7 @@ if env HOME="$test_root/verify_rollback/home" PATH="$fake_bin:/usr/bin:/bin" FAK
   printf 'post-commit verification failure unexpectedly succeeded\n' >&2
   exit 1
 fi
-test "$(cat "$test_root/verify_rollback/apps/Infinite.app/Contents/.version")" = 0.3.12
+test "$(cat "$test_root/verify_rollback/apps/Infinite.app/Contents/.version")" = "$previous_desktop_version"
 ! find "$test_root/verify_rollback/apps" -maxdepth 1 -name '.infinite-backup.*' | grep -q .
 
 if env HOME="$test_root/open_rollback/home" PATH="$fake_bin:/usr/bin:/bin" FAKE_LOG="$test_root/open_rollback/log" INFINITE_PLIST_BUDDY="$fake_bin/PlistBuddy" \
@@ -552,7 +558,7 @@ if env HOME="$test_root/open_rollback/home" PATH="$fake_bin:/usr/bin:/bin" FAKE_
   printf 'open failure unexpectedly succeeded\n' >&2
   exit 1
 fi
-test "$(cat "$test_root/open_rollback/apps/Infinite.app/Contents/.version")" = 0.3.12
+test "$(cat "$test_root/open_rollback/apps/Infinite.app/Contents/.version")" = "$previous_desktop_version"
 ! find "$test_root/open_rollback/apps" -maxdepth 1 -name '.infinite-backup.*' | grep -q .
 
 if run_installer fresh_open_failure env INFINITE_INSTALL_INTERACTIVE=1 FAKE_OPEN_FAIL=1; then
@@ -572,14 +578,14 @@ grep -Fq 'detach ' "$test_root/signal/log"
 
 # A signal in the rename→state-assignment window is inferred from the staged inode and rolled back.
 mkdir -p "$test_root/signal_commit/home" "$test_root/signal_commit/apps"
-create_app "$test_root/signal_commit/apps/Infinite.app" 0.3.12
+create_app "$test_root/signal_commit/apps/Infinite.app" "$previous_desktop_version"
 : > "$test_root/signal_commit/log"
 if env HOME="$test_root/signal_commit/home" PATH="$fake_bin:/usr/bin:/bin" FAKE_LOG="$test_root/signal_commit/log" INFINITE_PLIST_BUDDY="$fake_bin/PlistBuddy" \
   FAKE_SIGNAL_AFTER_COMMIT=1 bash "$repo_root/scripts/install.sh" --app-dir "$test_root/signal_commit/apps" --no-open > "$test_root/signal_commit/output" 2>&1; then
   printf 'commit-window signal unexpectedly succeeded\n' >&2
   exit 1
 fi
-test "$(cat "$test_root/signal_commit/apps/Infinite.app/Contents/.version")" = 0.3.12
+test "$(cat "$test_root/signal_commit/apps/Infinite.app/Contents/.version")" = "$previous_desktop_version"
 ! find "$test_root/signal_commit/apps" -maxdepth 1 \( -name '.infinite-installer.*' -o -name '.infinite-backup.*' \) | grep -q .
 
 # --no-open performs a valid fresh install without invoking LaunchServices.
