@@ -210,7 +210,7 @@ describe("runHarness --verify-only", () => {
     const root = copyFixture("vite-react-basic")
     write(root, ".infinite/install.json", JSON.stringify({
       workspaceId: "ws_1", appRoot: ".", framework: "vite-react", providers: ["ga4"], files: [], envKeys: [], contentHashes: {},
-      serverLane: { mode: "vercel-middleware", created: ["middleware.ts", "lib/infinite-server-lane.ts"], brief: "INSTALL-SERVER-LANE.md" },
+      serverLane: { mode: "vercel-middleware", created: ["lib/infinite-server-lane.ts", "lib/infinite-outcome.ts", "middleware.ts"], brief: "INSTALL-SERVER-LANE.md" },
       wiringVersion: 1, verifiedAt: null
     }))
     const backend: VerificationBackend = {

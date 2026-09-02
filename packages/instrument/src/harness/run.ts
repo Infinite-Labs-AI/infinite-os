@@ -678,7 +678,11 @@ const verify: RunbookStep<Ctx> = {
       const recordedLane = manifest.serverLane
       if (recordedLane && recordedLane.mode !== "brief") {
         ctx.writtenLanes.push("server_lane")
-        const evidence = recordedLane.middleware ?? recordedLane.created?.[0] ?? recordedLane.module ?? ".infinite/install.json"
+        // Evidence is the file that RUNS: the middleware, else the created entry (never the
+        // lib/ module), else the module for a node-module lane.
+        const created = recordedLane.created ?? []
+        const entry = created.find((file) => !/(^|\/)lib\//.test(file)) ?? created[0]
+        const evidence = recordedLane.middleware ?? entry ?? recordedLane.module ?? ".infinite/install.json"
         updateProvider(ctx.report, "server_lane", (state) => ({ ...state, state: "installed", reason: `recorded in .infinite/install.json (${recordedLane.mode})`, evidence }))
       }
     } else if (ctx.declined) {
