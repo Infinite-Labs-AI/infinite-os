@@ -5,6 +5,10 @@ All notable changes to the `infinite-tag` npm package (`packages/instrument`). V
 
 ## Unreleased
 
+- **Server-lane copy stops claiming 100% of traffic.** The positioning line (brief + README) now
+  reads: "server-side analytics: every page your server serves and every outcome it confirms,
+  counted where ad-blockers can't reach. A floor for people, never an exact share — installed by
+  your agent in ten minutes."
 **Minor bump: the browser contract changes** (`contracts/browser-collect-v1.schema.json`, mirrored
 byte-for-byte and hash-pinned in the cloud).
 

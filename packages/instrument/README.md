@@ -245,7 +245,7 @@ explicitly listed. A source key with an empty allowlist is a planning blocker.
 
 ## Server lane (lossless analytics)
 
-> analytics that see 100% of your traffic, installed by your agent in ten minutes.
+> server-side analytics: every page your server serves and every outcome it confirms, counted where ad-blockers can't reach. A floor for people, never an exact share — installed by your agent in ten minutes.
 
 Browser tags see a fraction of real traffic behind ad-blockers and consent gates. The
 server lane counts on the other side of that wall: the customer's **server** records
