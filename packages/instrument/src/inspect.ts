@@ -65,7 +65,13 @@ function discoverCandidateRoots(root: string, appRoot?: string): string[] {
 
 /** Source files the provider walk reads. Anything else (markdown, JSON, images) is never opened. */
 const providerScanExtensions = /\.(html|htm|tsx|jsx|ts|js|mjs|cjs|astro|vue|svelte)$/
-/** Directories the walk never enters: dependencies, build output, VCS, coverage. */
+/**
+ * Files that carry provider signatures WITHOUT being an install: minified vendor bundles, type
+ * declarations (`declare function gtag(`), tests/specs/stories/mocks (`posthog.init('phc_test')`).
+ * A false positive here silently drops a provider from the install as "adopted" — the worse failure.
+ */
+const providerScanSkippedFiles = /\.(d\.ts|test\.[jt]sx?|spec\.[jt]sx?|stories\.[jt]sx?|min\.[cm]?js)$/
+/** Directories the walk never enters: dependencies, build output, VCS, coverage, static assets, tests, mocks, email templates. */
 const providerScanSkippedDirectories = new Set([
   "node_modules",
   ".git",
@@ -74,7 +80,13 @@ const providerScanSkippedDirectories = new Set([
   "build",
   "out",
   ".vercel",
-  "coverage"
+  "coverage",
+  "public",
+  "static",
+  "__tests__",
+  "__mocks__",
+  ".storybook",
+  "emails"
 ])
 /** Bounded so a huge monorepo cannot turn `inspect` into a minutes-long crawl. */
 const providerScanMaxFiles = 2_000
@@ -88,27 +100,63 @@ interface ProviderSignature {
   via: UnmanagedProviderVia
 }
 
+/** `<GoogleTagManager gtmId="GTM-…">` / `gtmId: "GTM-…"` — a Tag Manager container id bound to a prop. */
+const gtmIdProp = /gtmId\s*[=:]\s*["'`]GTM-[A-Z0-9]{4,}/
 /**
- * Which providers one file's contents prove. Every signature is a real loader URL or call site —
- * bare product names in prose ("we evaluated posthog") never match.
+ * A quoted container id on a line that also talks about Tag Manager (`gtmContainer = 'GTM-…'`).
+ * The mention is case-sensitive lowercase on purpose: the uppercase `GTM-` of the token itself
+ * (or a constant like `GTM_MODE = 'GTM-CONTAINERLESS'`) must never count as the mention.
+ */
+const quotedGtmIdOnGtmLine = /^(?=.*(?:gtm|googletagmanager))(?=.*["'`]GTM-[A-Z0-9]{4,}["'`]).*$/m
+
+/**
+ * GA4 through Google Tag Manager. Never the bare `GTM-XXXX` token (it matches any uppercase word
+ * such as `GTM-CONTAINERLESS`) and never a bare `dataLayer.push(` (every e-commerce site pushes to
+ * the data layer): evidence is the gtm.js loader, a data-layer push beside the googletagmanager
+ * host, the `gtmId` prop of `@next/third-parties/google`, or a quoted id on a line mentioning gtm.
+ */
+function hasTagManagerEvidence(contents: string): boolean {
+  if (contents.includes("googletagmanager.com/gtm.js")) return true
+  if (contents.includes("dataLayer.push(") && contents.includes("googletagmanager.com")) return true
+  if (gtmIdProp.test(contents)) return true
+  return quotedGtmIdOnGtmLine.test(contents)
+}
+
+/**
+ * GA4 installed directly: Google's own gtag loader / `gtag(` call, or one of the library wrappers
+ * that install it without either string (`@next/third-parties/google` `<GoogleAnalytics>`,
+ * `react-ga4`, `vue-gtag`, `nuxt-gtag`, `@analytics/google-analytics`).
+ */
+function hasGa4SnippetEvidence(contents: string): boolean {
+  if (contents.includes("googletagmanager.com/gtag") || contents.includes("gtag(")) return true
+  if (contents.includes("@next/third-parties/google") && contents.includes("GoogleAnalytics")) return true
+  if (contents.includes("react-ga4") || contents.includes("ReactGA.initialize(")) return true
+  if (contents.includes("vue-gtag") || contents.includes("nuxt-gtag")) return true
+  return contents.includes("@analytics/google-analytics")
+}
+
+/**
+ * PostHog: the initialisation call, the CDN host, or the React/Next wrappers that take the key as
+ * a prop and default the host (`posthog-js/react` `<PostHogProvider>`, `@posthog/nextjs`).
+ */
+function hasPosthogEvidence(contents: string): boolean {
+  if (contents.includes("posthog.init(") || contents.includes("i.posthog.com")) return true
+  if (contents.includes("posthog-js/react") && contents.includes("PostHogProvider")) return true
+  return contents.includes("@posthog/nextjs")
+}
+
+/**
+ * Which providers one file's contents prove. Every signature is a real loader URL, call site,
+ * or install-library import — bare product names in prose ("we evaluated posthog") never match.
  */
 function providerSignatures(contents: string): ProviderSignature[] {
   const found: ProviderSignature[] = []
-  // GA4 direct: the gtag loader URL or the gtag() call signature.
-  const hasGtag = contents.includes("googletagmanager.com/gtag") || contents.includes("gtag(")
-  if (hasGtag) {
+  if (hasGa4SnippetEvidence(contents)) {
     found.push({ provider: "ga4", via: "snippet" })
-  } else if (
-    // GA4 through Google Tag Manager: the gtm.js loader, a container id, or a bare dataLayer.push
-    // with no gtag() beside it (a gtag snippet defines its own dataLayer.push).
-    contents.includes("googletagmanager.com/gtm.js") ||
-    /GTM-[A-Z0-9]{4,}/.test(contents) ||
-    contents.includes("dataLayer.push(")
-  ) {
+  } else if (hasTagManagerEvidence(contents)) {
     found.push({ provider: "ga4", via: "gtm" })
   }
-  // PostHog: the initialisation call or the CDN host, not the bare product name.
-  if (contents.includes("posthog.init(") || contents.includes("i.posthog.com")) {
+  if (hasPosthogEvidence(contents)) {
     found.push({ provider: "posthog", via: "snippet" })
   }
   // X/Twitter pixel: its actual tag signatures only.
@@ -161,6 +209,7 @@ function walkProviderScanFiles(appRoot: string): string[] {
         continue
       }
       if (!entry.isFile() || !providerScanExtensions.test(entry.name)) continue
+      if (providerScanSkippedFiles.test(entry.name)) continue
       try {
         if (statSync(join(appRoot, relativePath)).size > providerScanMaxFileBytes) continue
       } catch {

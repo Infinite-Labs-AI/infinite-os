@@ -507,7 +507,7 @@ describe("planInstallation", () => {
     const root = copyFixture("static-html-basic")
     writeFileSync(
       join(root, "index.html"),
-      '<!doctype html>\n<html lang="en">\n  <head>\n    <script>var id = "GTM-ABCD12"</script>\n  </head>\n  <body></body>\n</html>\n'
+      '<!doctype html>\n<html lang="en">\n  <head>\n    <script src="https://www.googletagmanager.com/gtm.js?id=GTM-ABCD12"></script>\n  </head>\n  <body></body>\n</html>\n'
     )
 
     const plan = await planInstallation({

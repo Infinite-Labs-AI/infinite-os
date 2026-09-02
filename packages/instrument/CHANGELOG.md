@@ -35,8 +35,16 @@ byte-for-byte and hash-pinned in the cloud).
   under `adopted` (`{ provider, via: "snippet" | "gtm", file }`) — it is no longer a blocker, and
   `infinite-tag` never installs a second copy. Detection now walks the whole app root (bounded:
   2,000 files / 512 KB each, skipping `node_modules`, build output and dot-directories) instead of
-  a fixed seven-file list. When everything requested already exists, `apply` writes nothing and
-  records nothing. `detectUnmanagedProviders` returns the object shape above (was `string[]`).
+  a fixed seven-file list — skipping `public`, `static`, `__tests__`, `__mocks__`, `.storybook`,
+  `emails` and `*.d.ts` / `*.test.*` / `*.spec.*` / `*.stories.*` / `*.min.js` files, since a false
+  positive silently drops a provider from the install. A Tag Manager verdict needs evidence (the
+  `gtm.js` loader, `dataLayer.push(` beside `googletagmanager.com`, a `gtmId` prop, or a quoted
+  `GTM-…` id on a line mentioning gtm) — never a bare token or a bare data-layer push. GA4 through
+  `@next/third-parties/google`, `react-ga4`, `vue-gtag`, `nuxt-gtag` and
+  `@analytics/google-analytics`, and PostHog through `posthog-js/react` / `@posthog/nextjs`, are
+  recognised so the site is not double-tagged. When everything requested already exists, `apply`
+  writes nothing and records nothing. `detectUnmanagedProviders` returns the object shape above
+  (was `string[]`).
 - **Default same-origin collect path is now `/infinite/ledger`.** The old `/infinite/events/collect`
   wording matches privacy blocklists; an artifact or install that already records a path keeps it
   (no silent migration). `--infinite-api-origin <https://host>` / `INFINITE_API_ORIGIN` override the
