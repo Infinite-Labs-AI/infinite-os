@@ -407,6 +407,23 @@ function writeConversionsManifest(root: string, manifest: ConversionsManifest): 
   return absolutePath
 }
 
+/**
+ * The pre-image is the LINE HASH, not the line number: an install that injects lines above the
+ * element (the tag's own <head> block, an import) shifts numbers without changing the element.
+ * The recorded line is the first candidate; otherwise the nearest line with the same hash wins.
+ */
+export function locateLine(lines: readonly string[], row: Pick<ProposedConversion, "line" | "lineHash">): number | null {
+  const recorded = lines[row.line - 1]
+  if (recorded !== undefined && lineHash(recorded) === row.lineHash) return row.line
+  let best: number | null = null
+  for (let index = 0; index < lines.length; index += 1) {
+    if (lineHash(lines[index]) !== row.lineHash) continue
+    const candidate = index + 1
+    if (best === null || Math.abs(candidate - row.line) < Math.abs(best - row.line)) best = candidate
+  }
+  return best
+}
+
 export function staleElementMessage(file: string, line: number): string {
   return `Could not mark ${file}:${line} — the element changed since it was proposed. Re-run infinite analytics --plan to re-propose.`
 }
@@ -440,21 +457,21 @@ export function applyConversions(input: ApplyConversionsInput): ApplyConversions
     assertWriteTargetInsideRoot(input.root, absolutePath)
     const contents = existsSync(absolutePath) ? readFileSync(absolutePath, "utf8") : null
     const lines = contents === null ? null : splitLines(contents)
-    const current = lines?.[row.line - 1]
-    if (current === undefined) {
-      result.stale.push({ file: row.file, line: row.line, ctaId: row.ctaId, code: "INF_MARK_STALE_ELEMENT", message: staleElementMessage(row.file, row.line) })
-      continue
-    }
     const inserted = ` data-analytics-cta-id="${row.ctaId}" data-analytics-cta-location="${row.ctaLocation}"`
-    const alreadyMarked = manifest.marked.find((entry) => entry.file === row.file && entry.line === row.line)
-    if (alreadyMarked && lineHash(current) === alreadyMarked.afterHash) {
+    // Idempotence first: a row already marked by an earlier run still hashes to its after-image.
+    const alreadyMarked = manifest.marked.find(
+      (entry) => entry.file === row.file && entry.beforeHash === row.lineHash && entry.ctaId === row.ctaId
+    )
+    if (alreadyMarked && lines && lines.some((line) => lineHash(line) === alreadyMarked.afterHash)) {
       result.skipped.push({ file: row.file, line: row.line, ctaId: row.ctaId, reason: "already marked" })
       continue
     }
-    if (lineHash(current) !== row.lineHash) {
+    const located = lines ? locateLine(lines, row) : null
+    if (lines === null || located === null) {
       result.stale.push({ file: row.file, line: row.line, ctaId: row.ctaId, code: "INF_MARK_STALE_ELEMENT", message: staleElementMessage(row.file, row.line) })
       continue
     }
+    const current = lines[located - 1]
     if (/\bdata-analytics-cta-id\b|\bdata-conversion\b/.test(current)) {
       result.skipped.push({ file: row.file, line: row.line, ctaId: row.ctaId, reason: "already marked" })
       continue
@@ -466,19 +483,19 @@ export function applyConversions(input: ApplyConversionsInput): ApplyConversions
     }
     const cut = tagMatch.index + tagMatch[0].length
     const nextLine = `${current.slice(0, cut)}${inserted}${current.slice(cut)}`
-    const nextLines = [...(lines as string[])]
-    nextLines[row.line - 1] = nextLine
+    const nextLines = [...lines]
+    nextLines[located - 1] = nextLine
     writeFileAtomic(absolutePath, nextLines.join("\n"))
     const marked: MarkedConversion = {
       file: row.file,
-      line: row.line,
+      line: located,
       ctaId: row.ctaId,
       ctaLocation: row.ctaLocation,
       beforeHash: row.lineHash,
       afterHash: lineHash(nextLine),
       inserted
     }
-    manifest.marked = [...manifest.marked.filter((entry) => !(entry.file === row.file && entry.line === row.line)), marked]
+    manifest.marked = [...manifest.marked.filter((entry) => !(entry.file === row.file && entry.line === located)), marked]
     result.marked.push(marked)
   }
 
@@ -509,8 +526,9 @@ export function unmarkConversions(root: string): UnmarkConversionsResult {
     assertWriteTargetInsideRoot(root, absolutePath)
     const contents = existsSync(absolutePath) ? readFileSync(absolutePath, "utf8") : null
     const lines = contents === null ? null : splitLines(contents)
-    const current = lines?.[entry.line - 1]
-    if (current === undefined || lineHash(current) !== entry.afterHash || !current.includes(entry.inserted)) {
+    const located = lines ? locateLine(lines, { line: entry.line, lineHash: entry.afterHash }) : null
+    const current = lines && located !== null ? lines[located - 1] : undefined
+    if (lines === null || located === null || current === undefined || !current.includes(entry.inserted)) {
       result.skipped.push({ file: entry.file, line: entry.line, reason: "line changed since it was marked; left as is" })
       remaining.push(entry)
       continue
@@ -521,8 +539,8 @@ export function unmarkConversions(root: string): UnmarkConversionsResult {
       remaining.push(entry)
       continue
     }
-    const nextLines = [...(lines as string[])]
-    nextLines[entry.line - 1] = restoredLine
+    const nextLines = [...lines]
+    nextLines[located - 1] = restoredLine
     writeFileAtomic(absolutePath, nextLines.join("\n"))
     result.restored.push(entry)
   }

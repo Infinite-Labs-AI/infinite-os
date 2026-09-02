@@ -181,6 +181,19 @@ describe("applyConversions", () => {
   })
 })
 
+describe("applyConversions relocation", () => {
+  it("finds an unchanged element by its line hash after lines were inserted above it", () => {
+    const root = makeRoot()
+    write(root, "index.html", INDEX_HTML)
+    const proposal = proposeConversions({ root, appRoot: "." })
+    write(root, "index.html", INDEX_HTML.replace("<body>", "<head>\n<!-- injected -->\n<!-- by the installer -->\n</head>\n<body>"))
+    const result = applyConversions({ root, appRoot: ".", approved: { rows: proposal.rows } })
+    expect(result.stale).toEqual([])
+    expect(result.marked.map((row) => row.line)).toEqual([9, 10])
+    expect(read(root, "index.html")).toContain('<a data-analytics-cta-id="email_us" data-analytics-cta-location="footer" href="mailto:hi@example.com">')
+  })
+})
+
 describe("readApprovedConversions", () => {
   it("accepts the proposed file's shape and rejects a bad token", () => {
     const root = makeRoot()
