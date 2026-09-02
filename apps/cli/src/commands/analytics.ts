@@ -23,11 +23,17 @@
  *
  * A token in the environment is NEVER used implicitly: an unnoticed stale `INFINITE_API_TOKEN`
  * silently verifying against another account is worse than an honest "not verifiable".
+ *
+ * THE REPORT RIDES THE SAME LADDER. After the runbook's report step the state table is sent to
+ * Infinite so Site Settings › Analytics can show it: DesktopBridgeReportSink (`analytics.report.v1`,
+ * the app POSTs the cloud with its own session and ACTIVE workspace) → CloudReportSink only behind
+ * `--api-token-env` → NoneReportSink with the real reason. `--check` never reports.
  */
 import type {
   HarnessArgs,
   HarnessDeps,
   HarnessIo,
+  ReportSink,
   VerificationBackend
 } from "infinite-tag";
 
@@ -58,6 +64,10 @@ export const ANALYTICS_USAGE = [
   "so no API token is ever needed here. With the app closed (or too old to carry the verify verb),",
   "providers print 'installed, not verifiable' and the report says why.",
   "",
+  "The finished state table is sent to Infinite the same way, so Site Settings › Analytics shows",
+  "what this run found; the run ends with 'Report sent to Infinite.' or 'Report not sent (<reason>).'",
+  "--check never reports.",
+  "",
   "  --api-token-env [NAME]  ADVANCED. No Desktop (CI, a server): read a bearer for the Infinite API",
   "                          from NAME (default INFINITE_API_TOKEN) and verify against the cloud",
   "                          directly. INFINITE_API_ORIGIN overrides the host. The Desktop wins",
@@ -70,6 +80,10 @@ export const ANALYTICS_USAGE = [
 export const DEFAULT_INFINITE_API_ORIGIN = "https://api.ultima.inc";
 export const DEFAULT_API_TOKEN_ENV_VAR = "INFINITE_API_TOKEN";
 export const ANALYTICS_VERIFY_CAPABILITY = "analytics.verify.v1";
+export const ANALYTICS_REPORT_CAPABILITY = "analytics.report.v1";
+/** "Report not sent (…)" reasons that are the CLI's to know, not the sink's. */
+export const NO_DESKTOP_REPORT_REASON = "open the Infinite app and re-run to report";
+export const DESKTOP_TOO_OLD_REPORT_REASON = "this Infinite app cannot receive the report yet — update it and re-run";
 /** Every "nothing can read the receipts" line starts here, then names the ONE thing to change. */
 export const NOT_VERIFIABLE_PREFIX =
   "Receipts cannot be read back, so providers will print 'installed, not verifiable'.";
@@ -89,6 +103,9 @@ export interface TagHarnessModule {
   NoneBackend: new () => VerificationBackend;
   InfiniteCloudBackend: new (options: { origin: string; token: string; engineProjectId: string; fetch?: typeof fetch }) => VerificationBackend;
   DesktopBridgeBackend: new (options: { bridgeUrl: string; token: string; fetch?: typeof fetch }) => VerificationBackend;
+  NoneReportSink: new (reason?: string) => ReportSink;
+  CloudReportSink: new (options: { origin: string; token: string; fetch?: typeof fetch }) => ReportSink;
+  DesktopBridgeReportSink: new (options: { bridgeUrl: string; token: string; fetch?: typeof fetch }) => ReportSink;
   EXIT_ARGS: number;
   EXIT_FAILED: number;
   EXIT_OK: number;
@@ -252,6 +269,39 @@ export function chooseBackend(input: ChooseBackendInput): {
   };
 }
 
+export interface ChooseReportSinkInput {
+  tag: TagHarnessModule;
+  env: AnalyticsCommandEnv;
+  bridge: ResolvedBridge | null;
+  apiTokenEnvVar: string | null;
+  fetchImpl?: typeof fetch;
+}
+
+/**
+ * Where the finished report goes — the same ladder as {@link chooseBackend}, for the same reason:
+ * the Desktop wins whenever it carries the verb; the cloud sink is reachable ONLY through the
+ * explicit `--api-token-env` escape hatch; otherwise nothing is sent and the reason names the one
+ * thing to change. The workspace id travels in the payload for the cloud sink (the harness stamps
+ * `args.workspaceId`); the bridge ignores it and reports to the app's ACTIVE workspace.
+ */
+export function chooseReportSink(input: ChooseReportSinkInput): ReportSink {
+  const { tag, env, bridge, apiTokenEnvVar, fetchImpl } = input;
+  const descriptor = bridge?.descriptor;
+  if (descriptor?.capabilities?.includes(ANALYTICS_REPORT_CAPABILITY)) {
+    return new tag.DesktopBridgeReportSink({ bridgeUrl: descriptor.url, token: descriptor.token, fetch: fetchImpl });
+  }
+  if (apiTokenEnvVar) {
+    const token = env[apiTokenEnvVar]?.trim();
+    if (token) {
+      const origin = stripTrailingSlashes(env.INFINITE_API_ORIGIN?.trim() || DEFAULT_INFINITE_API_ORIGIN);
+      return new tag.CloudReportSink({ origin, token, fetch: fetchImpl });
+    }
+    return new tag.NoneReportSink(`--api-token-env named ${apiTokenEnvVar}, which is empty`);
+  }
+  // Desktop running but too old to carry the verb is a DIFFERENT fix from Desktop not running.
+  return new tag.NoneReportSink(bridge ? DESKTOP_TOO_OLD_REPORT_REASON : NO_DESKTOP_REPORT_REASON);
+}
+
 export async function runAnalyticsCommand(
   args: readonly string[],
   env: AnalyticsCommandEnv,
@@ -304,7 +354,11 @@ export async function runAnalyticsCommand(
   if (notice) io.err(notice);
 
   try {
-    const result = await tag.runHarness(parsed, io, { backends: [backend], fetch: deps.fetch });
+    const result = await tag.runHarness(parsed, io, {
+      backends: [backend],
+      fetch: deps.fetch,
+      reportSink: chooseReportSink({ tag, env, bridge, apiTokenEnvVar, fetchImpl: deps.fetch })
+    });
     if (result.report.failure) {
       io.err(tag.infErrorLine(result.report.failure.code, result.report.failure.message));
     }
