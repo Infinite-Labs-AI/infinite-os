@@ -226,6 +226,83 @@ describe("detectUnmanagedProviders — FIX 3: tighter provider markers", () => {
   })
 })
 
+describe("detectUnmanagedProviders — comment/string-safe provider evidence", () => {
+  // A commented-out or in-string provider snippet must NOT be counted as an existing install — that
+  // false ADOPTION would silently suppress the provider (no pixel installed anywhere).
+  function mainTsx(root: string, body: string): void {
+    mkdirSync(join(root, "src"), { recursive: true })
+    writeFileSync(join(root, "src/main.tsx"), body)
+  }
+
+  it("ignores a COMMENTED posthog.init( (the live repro)", () => {
+    const root = makeTempRoot("instrument-inspect-posthog-comment-")
+    mainTsx(
+      root,
+      [
+        'import { createRoot } from "react-dom/client"',
+        '// posthog.init("phc_example", { api_host: "https://us.i.posthog.com" })',
+        "createRoot(document.getElementById(\"root\")!).render(null)",
+        ""
+      ].join("\n")
+    )
+    expect(detectUnmanagedProviders(root).map((entry) => entry.provider)).not.toContain("posthog")
+  })
+
+  it("ignores a posthog.init( that only appears inside a string literal", () => {
+    const root = makeTempRoot("instrument-inspect-posthog-string-")
+    mainTsx(root, 'const doc = "call posthog.init(key) to start"\nconsole.log(doc)\n')
+    expect(detectUnmanagedProviders(root).map((entry) => entry.provider)).not.toContain("posthog")
+  })
+
+  it("ignores commented AND in-string gtag( / fbq( / twq( call sites", () => {
+    const root = makeTempRoot("instrument-inspect-calls-")
+    mainTsx(
+      root,
+      [
+        "// gtag('config', 'G-XXXX')",
+        "// fbq('init', '123')",
+        'const notes = "twq(\'init\',\'abc\'); fbq(\'track\'); gtag(\'js\')"',
+        "console.log(notes)",
+        ""
+      ].join("\n")
+    )
+    const providers = detectUnmanagedProviders(root).map((entry) => entry.provider)
+    expect(providers).not.toContain("ga4")
+    expect(providers).not.toContain("meta")
+    expect(providers).not.toContain("x")
+  })
+
+  it("ignores a COMMENTED Infinite snippet", () => {
+    const root = makeTempRoot("instrument-inspect-infinite-comment-")
+    mainTsx(
+      root,
+      [
+        "/* window._1BU_CONFIG = { workspaceId: 'ws' }",
+        '   loader src = "https://app.ultima.inc/tracking/standalone.js" */',
+        "export {}",
+        ""
+      ].join("\n")
+    )
+    expect(detectUnmanagedProviders(root).map((entry) => entry.provider)).not.toContain("infinite")
+  })
+
+  it("STILL flags a real call in code (regression): gtag( / posthog.init( / fbq( / twq(", () => {
+    const root = makeTempRoot("instrument-inspect-real-calls-")
+    mainTsx(
+      root,
+      [
+        "gtag('js', new Date())",
+        'posthog.init("phc_real", { api_host: "https://us.i.posthog.com" })',
+        "fbq('init', '123456')",
+        "twq('init', 'abcde')",
+        ""
+      ].join("\n")
+    )
+    const providers = detectUnmanagedProviders(root).map((entry) => entry.provider)
+    expect(providers).toEqual(expect.arrayContaining(["ga4", "posthog", "x", "meta"]))
+  })
+})
+
 describe("detectUnmanagedProviders — repo-wide walk + Tag Manager", () => {
   it("finds a gtag( snippet in a component outside the legacy candidate list, with the file", () => {
     const root = makeTempRoot("instrument-inspect-walk-")

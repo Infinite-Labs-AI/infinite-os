@@ -247,7 +247,7 @@ export function renderApplied(input: {
         "Installing analytics into your site…",
         ...steps,
         "",
-        `⚠ ACTION REQUIRED — pixel not yet live. infinite-tag wrote the managed module for ${names}${idSuffix} but could not finish wiring your entrypoint, so nothing loads until you add the step below.`,
+        `⚠ ACTION REQUIRED — pixel not yet live. infinite-tag could not finish the ${names}${idSuffix} install automatically, so nothing loads until you add the step below by hand.`,
         ...requiresManualLines(requiresManual),
         ...adoptedLines(plan),
         "",

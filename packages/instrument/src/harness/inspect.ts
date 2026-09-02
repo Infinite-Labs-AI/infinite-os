@@ -5,6 +5,7 @@ import { existsSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 
 import { isManagedInfiniteFile } from "../frameworks/managed-files.js"
+import { maskCommentsAndStrings } from "../frameworks/shared.js"
 import { hasGa4SnippetEvidence, hasPosthogEvidence, hasTagManagerEvidence } from "../inspect.js"
 import { planInstallation } from "../plan.js"
 import {
@@ -53,6 +54,15 @@ function firstIndex(contents: string, needles: Array<string | RegExp>): number {
   return best
 }
 
+/** The earliest non-negative offset among the given candidates, or -1. */
+function earliest(...offsets: number[]): number {
+  let best = -1
+  for (const offset of offsets) {
+    if (offset >= 0 && (best < 0 || offset < best)) best = offset
+  }
+  return best
+}
+
 function firstMatch(contents: string, pattern: RegExp): string | undefined {
   const match = pattern.exec(contents)
   return match ? (match[1] ?? match[0]) : undefined
@@ -71,59 +81,70 @@ function evidenceOffset(contents: string, needles: Array<string | RegExp>): numb
  * adds the line and the public id read from the snippet.
  */
 function signaturesIn(contents: string): Array<Omit<DetectedProviderEvidence, "file" | "line"> & { offset: number }> {
+  // Same comment/string safety as inspect.ts: `code` blanks comments AND strings (CALL sites);
+  // `noComments` blanks comments only (host URLs / import specifiers / ids that live in strings).
+  // Offsets come from the masked text (masking preserves length, so the line number still maps to
+  // the real source), and keys are read from `noComments` so a commented id is never harvested.
+  const code = maskCommentsAndStrings(contents, true)
+  const noComments = maskCommentsAndStrings(contents, false)
+
   const found: Array<Omit<DetectedProviderEvidence, "file" | "line"> & { offset: number }> = []
   if (hasGa4SnippetEvidence(contents)) {
     found.push({
       provider: "ga4",
       via: "snippet",
-      offset: evidenceOffset(contents, [
-        "googletagmanager.com/gtag",
-        "gtag(",
-        "GoogleAnalytics",
-        "react-ga4",
-        "ReactGA.initialize(",
-        "vue-gtag",
-        "nuxt-gtag",
-        "@analytics/google-analytics"
-      ]),
-      key: firstMatch(contents, /\b(G-[A-Z0-9]{4,})\b/)
+      offset: earliest(
+        firstIndex(noComments, [
+          "googletagmanager.com/gtag",
+          "GoogleAnalytics",
+          "react-ga4",
+          "vue-gtag",
+          "nuxt-gtag",
+          "@analytics/google-analytics"
+        ]),
+        firstIndex(code, ["gtag(", "ReactGA.initialize("])
+      ),
+      key: firstMatch(noComments, /\b(G-[A-Z0-9]{4,})\b/)
     })
   } else if (hasTagManagerEvidence(contents)) {
     found.push({
       provider: "ga4",
       via: "gtm",
-      offset: evidenceOffset(contents, ["googletagmanager.com/gtm.js", "googletagmanager.com", /gtmId\s*[=:]/, /["'`]GTM-[A-Z0-9]{4,}["'`]/]),
-      key: firstMatch(contents, /["'`](GTM-[A-Z0-9]{4,})["'`]/) ?? firstMatch(contents, /gtm\.js\?id=(GTM-[A-Z0-9]{4,})/)
+      offset: evidenceOffset(noComments, ["googletagmanager.com/gtm.js", "googletagmanager.com", /gtmId\s*[=:]/, /["'`]GTM-[A-Z0-9]{4,}["'`]/]),
+      key: firstMatch(noComments, /["'`](GTM-[A-Z0-9]{4,})["'`]/) ?? firstMatch(noComments, /gtm\.js\?id=(GTM-[A-Z0-9]{4,})/)
     })
   }
   if (hasPosthogEvidence(contents)) {
     found.push({
       provider: "posthog",
       via: "snippet",
-      offset: evidenceOffset(contents, ["posthog.init(", "i.posthog.com", "PostHogProvider", "@posthog/nextjs"]),
-      key: firstMatch(contents, /\b(phc_[A-Za-z0-9]+)\b/)
+      offset: earliest(
+        firstIndex(code, ["posthog.init("]),
+        firstIndex(noComments, ["i.posthog.com", "PostHogProvider", "@posthog/nextjs"])
+      ),
+      key: firstMatch(noComments, /\b(phc_[A-Za-z0-9]+)\b/)
     })
   }
-  const xAt = firstIndex(contents, ["twq(", "static.ads-twitter.com"])
+  const xAt = earliest(firstIndex(code, ["twq("]), firstIndex(noComments, ["static.ads-twitter.com"]))
   if (xAt >= 0) {
     found.push({
       provider: "x",
       via: "snippet",
       offset: xAt,
-      key: firstMatch(contents, /twq\(\s*['"]config['"]\s*,\s*['"]([a-z0-9]+)['"]/)
+      key: firstMatch(noComments, /twq\(\s*['"]config['"]\s*,\s*['"]([a-z0-9]+)['"]/)
     })
   }
-  const infiniteAt = firstIndex(contents, ["tracking/standalone.js", "_1BU_CONFIG", "data-1bu-workspace-id"])
+  const infiniteAt = firstIndex(noComments, ["tracking/standalone.js", "_1BU_CONFIG", "data-1bu-workspace-id"])
   if (infiniteAt >= 0) {
     found.push({ provider: "infinite", via: "snippet", offset: infiniteAt })
   }
-  const metaAt = firstIndex(contents, ["fbevents.js", "fbq(", "connect.facebook.net"])
+  const metaAt = earliest(firstIndex(code, ["fbq("]), firstIndex(noComments, ["fbevents.js", "connect.facebook.net"]))
   if (metaAt >= 0) {
     found.push({
       provider: "meta",
       via: "snippet",
       offset: metaAt,
-      key: firstMatch(contents, /fbq\(\s*['"]init['"]\s*,\s*['"](\d{5,})['"]/)
+      key: firstMatch(noComments, /fbq\(\s*['"]init['"]\s*,\s*['"](\d{5,})['"]/)
     })
   }
   return found

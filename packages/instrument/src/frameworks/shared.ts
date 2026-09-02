@@ -191,3 +191,89 @@ export function normalizeAppRelativePath(appRoot: string, relativePath: string):
 
   return `${appRoot}/${relativePath}`
 }
+
+/**
+ * Replace comment bodies (always) and — when `blankStrings` — string/template bodies with spaces,
+ * preserving every character offset and newline. A bounded scanner for "is this token really in
+ * CODE, not a comment or a string?" — it tracks line comments, block comments and ' " ` strings with
+ * escapes. It does NO binding/scope analysis, so it is not the tarpit the bootstrap scanner was.
+ *
+ * Used by the provider-evidence scan so a commented-out or in-string `posthog.init(` / `gtag(` /
+ * `fbq(` / `twq(` is not mistaken for a real install (which would silently ADOPT — and suppress —
+ * the provider). Pass `blankStrings: false` to blank only comments (keep string bodies) when the
+ * evidence legitimately lives in a string, e.g. a host URL or an import specifier.
+ */
+export function maskCommentsAndStrings(source: string, blankStrings: boolean): string {
+  const out: string[] = []
+  let index = 0
+  let state: "code" | "line" | "block" | "single" | "double" | "template" = "code"
+  while (index < source.length) {
+    const ch = source[index]
+    const next = source[index + 1]
+    if (state === "code") {
+      if (ch === "/" && next === "/") {
+        out.push("  ")
+        index += 2
+        state = "line"
+      } else if (ch === "/" && next === "*") {
+        out.push("  ")
+        index += 2
+        state = "block"
+      } else if (ch === "'") {
+        out.push("'")
+        index += 1
+        state = "single"
+      } else if (ch === '"') {
+        out.push('"')
+        index += 1
+        state = "double"
+      } else if (ch === "`") {
+        out.push("`")
+        index += 1
+        state = "template"
+      } else {
+        out.push(ch)
+        index += 1
+      }
+      continue
+    }
+    if (state === "line") {
+      if (ch === "\n") {
+        out.push("\n")
+        state = "code"
+      } else {
+        out.push(" ")
+      }
+      index += 1
+      continue
+    }
+    if (state === "block") {
+      if (ch === "*" && next === "/") {
+        out.push("  ")
+        index += 2
+        state = "code"
+      } else {
+        out.push(ch === "\n" ? "\n" : " ")
+        index += 1
+      }
+      continue
+    }
+    // Inside a string / template literal.
+    const closer = state === "single" ? "'" : state === "double" ? '"' : "`"
+    if (ch === "\\") {
+      out.push(blankStrings ? " " : ch)
+      if (next !== undefined) out.push(blankStrings ? " " : next)
+      index += 2
+      continue
+    }
+    if (ch === closer) {
+      out.push(closer)
+      index += 1
+      state = "code"
+      continue
+    }
+    out.push(ch === "\n" ? "\n" : blankStrings ? " " : ch)
+    index += 1
+  }
+  return out.join("")
+}

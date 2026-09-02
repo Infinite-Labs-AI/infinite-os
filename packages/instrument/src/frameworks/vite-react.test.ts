@@ -87,6 +87,35 @@ describe("vite-react index.html injection", () => {
     expect(readFileSync(join(root, "src/main.tsx"), "utf8")).toBe(adversarial)
   })
 
+  it("a COMMENTED provider snippet in main.tsx does NOT suppress the install (false-adoption guard)", () => {
+    // The live iter7 P0: a commented posthog.init( in main.tsx made detectUnmanagedProviders ADOPT
+    // posthog, dropping it from the install -> green exit, no pixel. It must still be INSTALLED.
+    const root = copyFixture("vite-react-basic")
+    writeFileSync(
+      join(root, "src/main.tsx"),
+      [
+        'import { createRoot } from "react-dom/client"',
+        '// posthog.init("phc_example", { api_host: "https://us.i.posthog.com" })',
+        "const s = \"gtag('config')\"",
+        'createRoot(document.getElementById("root")!).render(null)',
+        "void s",
+        ""
+      ].join("\n")
+    )
+
+    const plan = planFor(root, { posthog: { projectKey: "phc_test", apiHost: "https://us.i.posthog.com" } })
+    // Installed, not adopted.
+    expect(plan.providers).toContain("posthog")
+    expect(plan.adopted.map((entry) => entry.provider)).not.toContain("posthog")
+    expect(plan.files).toContain("index.html")
+
+    const apply = applyInstallation({ root, workspaceId: "ws_test", plan, allowDirty: true })
+    expect(apply.changedFiles).toContain("index.html")
+    const html = readFileSync(join(root, "index.html"), "utf8")
+    expect(html).toContain(MANAGED_START)
+    expect(html).toContain("phc_test")
+  })
+
   it("uninstall removes the managed block from index.html, restoring it exactly", () => {
     const root = copyFixture("vite-react-basic")
     const original = readFileSync(join(root, "index.html"), "utf8")
