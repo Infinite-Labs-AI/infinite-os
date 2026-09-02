@@ -1,21 +1,19 @@
 // The bounded source walk shared by provider detection (inspect.ts) and conversion proposal
-// (marking.ts). Same rules as the tag's repo-wide provider scan: source extensions only, skip
-// dependency/build/VCS directories, 2,000 files, 512 KB per file, never follow symlinks.
+// (marking.ts). Same rules as the tag's repo-wide provider scan — its skip lists are imported,
+// not copied: source extensions only, skip dependency/build/VCS/static/test directories and
+// vendor/declaration/test files, 2,000 files, 512 KB per file, never follow symlinks.
 import { readFileSync, readdirSync, statSync } from "node:fs"
 import { join } from "node:path"
 
+import { providerScanSkippedDirectories, providerScanSkippedFiles } from "../inspect.js"
+
 export const SCAN_EXTENSIONS = /\.(html|htm|tsx|jsx|ts|js|mjs|cjs|astro|vue|svelte)$/
-export const SCAN_SKIPPED_DIRECTORIES: ReadonlySet<string> = new Set([
-  "node_modules",
-  ".git",
-  ".next",
-  "dist",
-  "build",
-  "out",
-  ".vercel",
-  "coverage",
-  ".infinite"
-])
+/**
+ * The skip lists are the tag's own (inspect.ts) so provider detection and conversion proposal can
+ * never disagree with the installer's scan; the harness only adds its own `.infinite/` output dir.
+ */
+export const SCAN_SKIPPED_FILES = providerScanSkippedFiles
+export const SCAN_SKIPPED_DIRECTORIES: ReadonlySet<string> = new Set([...providerScanSkippedDirectories, ".infinite"])
 export const SCAN_MAX_FILES = 2_000
 export const SCAN_MAX_FILE_BYTES = 512 * 1024
 
@@ -39,7 +37,7 @@ export function walkSourceFiles(appRoot: string): string[] {
         if (!SCAN_SKIPPED_DIRECTORIES.has(entry.name)) visit(relativePath)
         continue
       }
-      if (!entry.isFile() || !SCAN_EXTENSIONS.test(entry.name)) continue
+      if (!entry.isFile() || !SCAN_EXTENSIONS.test(entry.name) || SCAN_SKIPPED_FILES.test(entry.name)) continue
       try {
         if (statSync(join(appRoot, relativePath)).size > SCAN_MAX_FILE_BYTES) continue
       } catch {

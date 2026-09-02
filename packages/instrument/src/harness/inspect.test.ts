@@ -82,6 +82,37 @@ describe("detectProvidersWithEvidence", () => {
   })
 })
 
+describe("detectProvidersWithEvidence uses the tag's own signatures and skip lists", () => {
+  it("ignores vendor bundles, declarations, tests and uppercase GTM-looking tokens", () => {
+    const root = copyFixture("vite-react-basic")
+    write(root, "public/vendor.min.js", `function gtag(){};gtag('config','G-VENDOR01')`)
+    write(root, "src/types/gtag.d.ts", `declare function gtag(...args: unknown[]): void`)
+    write(root, "src/analytics.test.ts", `posthog.init('phc_test')`)
+    write(root, "src/__mocks__/posthog.ts", `posthog.init('phc_mock')`)
+    write(root, "src/config.ts", `export const GTM_MODE = 'GTM-CONTAINERLESS'\nwindow.dataLayer.push({ event: 'x' })`)
+    expect(detectProvidersWithEvidence(root)).toEqual([])
+  })
+
+  it("adopts GA4 installed through @next/third-parties and react-ga4, and PostHog through its React provider", () => {
+    const root = copyFixture("next-app-router-basic")
+    write(root, "app/ga.tsx", `import { GoogleAnalytics } from "@next/third-parties/google"\nexport const GA = () => <GoogleAnalytics gaId="G-THIRD001" />`)
+    write(root, "app/legacy.tsx", `import ReactGA from "react-ga4"\nReactGA.initialize("G-LEGACY01")`)
+    write(root, "app/ph.tsx", `import { PostHogProvider } from "posthog-js/react"\nexport const P = () => <PostHogProvider apiKey="phc_provider01" />`)
+    const detected = detectProvidersWithEvidence(root)
+    expect(detected.map((entry) => [entry.provider, entry.via, entry.file, entry.key])).toEqual([
+      ["ga4", "snippet", "app/ga.tsx", "G-THIRD001"],
+      ["ga4", "snippet", "app/legacy.tsx", "G-LEGACY01"],
+      ["posthog", "snippet", "app/ph.tsx", "phc_provider01"]
+    ])
+  })
+
+  it("needs real Tag Manager evidence for a container: the gtm.js loader or a gtmId prop", () => {
+    const root = copyFixture("static-html-basic")
+    write(root, "index.html", `<html><head><script src="https://www.googletagmanager.com/gtm.js?id=GTM-REAL001"></script></head><body></body></html>`)
+    expect(detectProvidersWithEvidence(root)).toEqual([{ provider: "ga4", via: "gtm", file: "index.html", line: 1, key: "GTM-REAL001" }])
+  })
+})
+
 describe("normalizeDetected", () => {
   it("accepts main's string[] and the sibling's object shape", () => {
     expect(normalizeDetected(["ga4", "posthog"])).toEqual([

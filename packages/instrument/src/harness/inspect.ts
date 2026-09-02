@@ -5,6 +5,7 @@ import { existsSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 
 import { isManagedInfiniteFile } from "../frameworks/managed-files.js"
+import { hasGa4SnippetEvidence, hasPosthogEvidence, hasTagManagerEvidence } from "../inspect.js"
 import { planInstallation } from "../plan.js"
 import {
   validateGa4MeasurementId,
@@ -57,31 +58,51 @@ function firstMatch(contents: string, pattern: RegExp): string | undefined {
   return match ? (match[1] ?? match[0]) : undefined
 }
 
-/** Every provider signature one file proves, with evidence. Prose never matches (real loader URLs / call sites only). */
+/** First offset of any of the needles, for the evidence line number. */
+function evidenceOffset(contents: string, needles: Array<string | RegExp>): number {
+  const index = firstIndex(contents, needles)
+  return index >= 0 ? index : 0
+}
+
+/**
+ * Every provider signature one file proves, with evidence. WHETHER a file proves a provider is
+ * the tag's own call (`hasGa4SnippetEvidence` / `hasTagManagerEvidence` / `hasPosthogEvidence`
+ * in inspect.ts) so the harness can never disagree with the installer's adoption; this layer only
+ * adds the line and the public id read from the snippet.
+ */
 function signaturesIn(contents: string): Array<Omit<DetectedProviderEvidence, "file" | "line"> & { offset: number }> {
   const found: Array<Omit<DetectedProviderEvidence, "file" | "line"> & { offset: number }> = []
-  const gtagAt = firstIndex(contents, ["googletagmanager.com/gtag", "gtag("])
-  if (gtagAt >= 0) {
+  if (hasGa4SnippetEvidence(contents)) {
     found.push({
       provider: "ga4",
       via: "snippet",
-      offset: gtagAt,
+      offset: evidenceOffset(contents, [
+        "googletagmanager.com/gtag",
+        "gtag(",
+        "GoogleAnalytics",
+        "react-ga4",
+        "ReactGA.initialize(",
+        "vue-gtag",
+        "nuxt-gtag",
+        "@analytics/google-analytics"
+      ]),
       key: firstMatch(contents, /\b(G-[A-Z0-9]{4,})\b/)
     })
-  } else {
-    const gtmAt = firstIndex(contents, ["googletagmanager.com/gtm.js", /GTM-[A-Z0-9]{4,}/, "dataLayer.push("])
-    if (gtmAt >= 0) {
-      found.push({
-        provider: "ga4",
-        via: "gtm",
-        offset: gtmAt,
-        key: firstMatch(contents, /\b(GTM-[A-Z0-9]{4,})\b/)
-      })
-    }
+  } else if (hasTagManagerEvidence(contents)) {
+    found.push({
+      provider: "ga4",
+      via: "gtm",
+      offset: evidenceOffset(contents, ["googletagmanager.com/gtm.js", "googletagmanager.com", /gtmId\s*[=:]/, /["'`]GTM-[A-Z0-9]{4,}["'`]/]),
+      key: firstMatch(contents, /["'`](GTM-[A-Z0-9]{4,})["'`]/) ?? firstMatch(contents, /gtm\.js\?id=(GTM-[A-Z0-9]{4,})/)
+    })
   }
-  const posthogAt = firstIndex(contents, ["posthog.init(", "i.posthog.com"])
-  if (posthogAt >= 0) {
-    found.push({ provider: "posthog", via: "snippet", offset: posthogAt, key: firstMatch(contents, /\b(phc_[A-Za-z0-9]+)\b/) })
+  if (hasPosthogEvidence(contents)) {
+    found.push({
+      provider: "posthog",
+      via: "snippet",
+      offset: evidenceOffset(contents, ["posthog.init(", "i.posthog.com", "PostHogProvider", "@posthog/nextjs"]),
+      key: firstMatch(contents, /\b(phc_[A-Za-z0-9]+)\b/)
+    })
   }
   const xAt = firstIndex(contents, ["twq(", "static.ads-twitter.com"])
   if (xAt >= 0) {
