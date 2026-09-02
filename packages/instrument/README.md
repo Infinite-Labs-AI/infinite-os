@@ -257,11 +257,13 @@ server: it hashes the visit identity itself (`visitKey` = HMAC of IP + UA + a 30
 window under the secret) and sends only the hash, the path, the host, and the UA family.
 
 ```bash
-# Next.js: creates middleware.ts (or patches an existing one with a fenced block) + the
-# managed lib/infinite-server-lane.ts module + INSTALL-SERVER-LANE.md, all manifest-tracked.
+# Writes a runnable lane for the framework AND the host: Next.js middleware, Vercel's
+# framework-agnostic root middleware, a Netlify Edge Function, a Cloudflare Pages
+# functions/_middleware.ts, or a Node module — plus lib/infinite-outcome and
+# INSTALL-SERVER-LANE.md. Every file is manifest-tracked and reverses byte-for-byte.
 npx infinite-tag@latest install --server-lane --workspace <workspace-id> --yes
 
-# Any other stack: writes + prints INSTALL-SERVER-LANE.md — the agent brief that IS the install.
+# No host signal in the repo: writes + prints INSTALL-SERVER-LANE.md — the agent brief IS the install.
 npx infinite-tag@latest server-lane --brief
 
 # After deploying with the two env vars set, prove receipts arrive:
@@ -269,22 +271,40 @@ INFINITE_SERVER_EVENT_SECRET=… INFINITE_SITE_SOURCE_KEY=site_… \
   npx infinite-tag@latest verify --server-lane https://example.com/
 ```
 
-What `--server-lane` does per stack:
+Next.js keeps its own lane on every host. For every **other** framework the target comes from
+where the site is **hosted** (`vercel.json` / `.vercel/project.json` / `@vercel/*` → Vercel;
+`netlify.toml` / `netlify/` / `@netlify/*` → Netlify; `wrangler.*` / `functions/_middleware` /
+`@cloudflare/*` → Cloudflare; an `express` dependency → Node. `vercel.json` wins every tie):
 
 | Stack | Behavior |
 | --- | --- |
 | Next.js, no middleware | Creates `middleware.ts` (`proxy.ts` on Next.js 16+) with the standard document matcher, wrapping nothing. |
 | Next.js, existing middleware | Inserts fenced `// infinite-tag:server-lane:start … :end` blocks that wrap the existing handler (its body is untouched) — only for shapes it recognizes and only when the matcher already lets every document through. Otherwise the file is left alone and the brief carries the exact addition. Recorded edits reverse byte-for-byte on `uninstall`. |
-| Vite / static | Writes the agent brief only. |
-| Unrecognized | Prints the brief (nothing is written); `server-lane --brief > INSTALL-SERVER-LANE.md` saves it. |
+| Any framework on **Vercel** (Vite, static, SvelteKit…) | Creates the root `middleware.ts` Vercel runs for [any framework](https://vercel.com/docs/routing-middleware), plus `lib/infinite-server-lane.ts`. The entry imports `@vercel/functions` (for `next()` and `waitUntil`), so the CLI and the brief name the one `npm install` to run. |
+| **Netlify** | Creates `netlify/edge-functions/infinite-server-lane.ts`, declared [in-file](https://docs.netlify.com/build/edge-functions/declarations/) with `export const config` — `netlify.toml` is never edited. |
+| **Cloudflare Pages** | Creates [`functions/_middleware.ts`](https://developers.cloudflare.com/pages/functions/middleware/), reading its secret from `context.env`. A plain Worker (a `wrangler` config with a `main` entrypoint) gets the brief's Worker snippet instead — there is no file of ours to add safely. |
+| **Express / any Node server** | Creates `lib/infinite-server-lane.js`. Nothing auto-wires your server file: the brief names the exact `app.use(infiniteServerLane())` line and where it goes. |
+| No host signal | Writes the agent brief only; `server-lane --brief > INSTALL-SERVER-LANE.md` saves it anywhere. |
+
+Every target also writes **`lib/infinite-outcome`**, exporting `postInfiniteOutcome({ type, path,
+eventId, accountKey, visitKeyInputs })`, so any server route — a Vercel `api/` function confirming a
+paid Stripe session, a webhook, a job — reports an outcome in three lines and carries the same
+`visitKey` as the page view that produced it. Report outcomes from where they become real (a
+committed row, a captured payment, a served file), never from a click.
+
+If a file it would create already exists and Infinite does not manage it, that file is left alone
+and its exact content goes into the brief; an unmanaged `lib/infinite-server-lane.*` is a planning
+blocker rather than an overwrite.
 
 Two environment variables, never written to files by infinite-tag: `INFINITE_SERVER_EVENT_SECRET`
 (minted once in the Infinite desktop → Site Analytics → Settings → Conversions → Server events) and
 `INFINITE_SITE_SOURCE_KEY` (the public source key; the generated Next.js module falls back to the
 key baked at install time). Without the secret the lane stays dormant — it never throws into a
 request. Delivery is fire-and-forget (`event.waitUntil`, 2 s cap); assets, `/api/*`, non-GET,
-prefetch, and non-HTML requests are skipped; the raw IP, full UA, cookies, query strings, and
-bodies are never sent.
+prefetch, non-HTML requests, and the pixel's own collect path are skipped; the raw IP, full UA,
+cookies, query strings, and bodies are never sent. What it produces is **a floor for real people,
+never an exact share** — it counts every page your server serves, and the obvious bots it can name
+are filed as `automation`, not as visitors.
 
 The contract (endpoint, headers, both body shapes, recipes) and reference implementations for
 Express / any Node server, Cloudflare Workers, and Netlify Edge live in the brief. Every sentence

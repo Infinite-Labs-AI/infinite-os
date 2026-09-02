@@ -3,6 +3,30 @@
 All notable changes to the `infinite-tag` npm package (`packages/instrument`). Versions before
 0.5.0 are recorded in git history only (`git log -- packages/instrument`).
 
+## Unreleased
+
+- **The server lane is no longer Next.js-only.** `install --server-lane` now writes runnable,
+  manifest-managed, byte-exact reversible files for the host a site actually deploys to, chosen from
+  file and dependency evidence in the repo (`vercel.json` wins every tie):
+  - **Vercel, any framework** — the root `middleware.ts` Vercel runs framework-agnostically, plus
+    `lib/infinite-server-lane.ts`. A Vite/React or static site on Vercel finally gets a real lane.
+    The entry imports `@vercel/functions`; the CLI and the brief name the one `npm install` to run.
+  - **Netlify** — `netlify/edge-functions/infinite-server-lane.ts`, declared in-file with
+    `export const config`, so `netlify.toml` is never edited.
+  - **Cloudflare Pages** — `functions/_middleware.ts`, reading its secret from `context.env`. A plain
+    Worker still gets the brief's snippet: there is no file of ours to add safely.
+  - **Express / any Node server** — `lib/infinite-server-lane.js` plus the exact one-line mount the
+    brief names. No server file is edited automatically.
+- **An outcome helper every server route can import.** Each target also writes `lib/infinite-outcome`
+  exporting `postInfiniteOutcome({ type, path, eventId, accountKey, visitKeyInputs })`, so a Vercel
+  `api/` function confirming a paid Stripe session reports a purchase in three lines, carrying the
+  same `visitKey` as the page view. The brief gains a "Post a purchase from a server route" section.
+- **The pixel's collect path joins the skip list** in every generated lane and matcher, alongside
+  `/api/*`, `/_next/*`, `/_vercel/*`, prefetches, non-GETs, non-HTML and anything with an extension.
+- Next.js installs are byte-identical: hosting detection never changes that lane.
+- A file infinite-tag would create but does not manage is left alone, with its exact content in the
+  brief; an unmanaged `lib/infinite-server-lane.*` is a planning blocker, never an overwrite.
+
 ## 0.7.0 — 2026-09-02
 
 - **Server-lane copy stops claiming 100% of traffic.** The positioning line (brief + README) now
