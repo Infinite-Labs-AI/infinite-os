@@ -393,6 +393,43 @@ describe("human-readable output (default, no --json)", () => {
     expect(out).toContain("couldn't recognize this project's framework")
     expect(out).toContain("googletagmanager.com/gtag/js?id=G-HUMAN4")
   })
+
+  it("inspect surfaces the key PostHog config a founder needs to audit for cost/privacy", async () => {
+    const root = copyFixture("static-html-basic")
+    writeFileSync(
+      join(root, "analytics.js"),
+      "import posthog from 'posthog-js'\n" +
+        "posthog.init('phc_live', {\n" +
+        "  api_host: 'https://us.i.posthog.com',\n" +
+        "  autocapture: false,\n" +
+        "  disable_session_recording: true\n" +
+        "})\n"
+    )
+    const code = await runCli(["inspect", "--root", root])
+    expect(code).toBe(0)
+    const out = stdoutText()
+    expect(out).toContain("PostHog config (from analytics.js):")
+    expect(out).toContain("autocapture")
+    expect(out).toContain("disable_session_recording")
+    expect(out).toContain("https://us.i.posthog.com")
+    // Options that are not statically present are reported, never guessed.
+    expect(out).toContain("not detected")
+  })
+
+  it("inspect --json includes posthogConfig for machine audit", async () => {
+    const root = copyFixture("static-html-basic")
+    writeFileSync(
+      join(root, "ph.js"),
+      "posthog.init('phc_x', { api_host: 'https://eu.i.posthog.com', capture_pageview: false })\n"
+    )
+    const code = await runCli(["inspect", "--root", root, "--json"])
+    expect(code).toBe(0)
+    const parsed = JSON.parse(stdoutText()) as {
+      posthogConfig?: { apiHost?: string; capturePageview?: string }
+    }
+    expect(parsed.posthogConfig?.apiHost).toBe("https://eu.i.posthog.com")
+    expect(parsed.posthogConfig?.capturePageview).toBe("false")
+  })
 })
 
 describe("Infinite source handoff + meta providers", () => {

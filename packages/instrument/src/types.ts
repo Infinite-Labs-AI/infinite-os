@@ -51,6 +51,24 @@ export interface PackageManagerCommands {
   repeatableRun: string
 }
 
+/**
+ * The cost/privacy-relevant PostHog config surfaced by `inspect` when an existing PostHog
+ * install is detected. Each value is the statically-read config value as written in the source,
+ * or undefined when it is not statically determinable (rendered as "not detected"). This is
+ * read-only reporting — inspect never changes the founder's config.
+ */
+export interface PosthogConfigSummary {
+  /** App-root-relative file the PostHog init was read from. */
+  file: string
+  autocapture?: string
+  disableSessionRecording?: string
+  capturePageview?: string
+  capturePageleave?: string
+  persistence?: string
+  apiHost?: string
+  uiHost?: string
+}
+
 export interface InspectResult {
   framework: string
   appRoot: string
@@ -61,6 +79,8 @@ export interface InspectResult {
   assumptions: string[]
   blockers: string[]
   detectedFiles: string[]
+  /** Present when an existing PostHog install is detected — its cost/privacy-relevant options. */
+  posthogConfig?: PosthogConfigSummary
 }
 
 export interface InstallPlan {
