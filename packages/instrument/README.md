@@ -467,6 +467,16 @@ tags fire only when a real browser opens the page during the window; the CLI say
 | Meta | never verifiable at install time: `open Events Manager → Test Events` | same |
 | adopted / GTM | `adopted, not ours to verify` | same |
 
+After the report step, `infinite analytics` sends the state table (state, one evidence clause,
+file path, verification word + receipt timestamp — never file contents, DOM text or keys; provider
+ids quoted in a conflict clause are redacted to `<id>`) to Infinite **through the running Desktop**
+(`analytics.report.v1` — the app POSTs `POST /api/analytics/harness-report` with its own session and
+its active workspace), so Site Settings › Analytics shows what the run found. The run ends with
+`Report sent to Infinite.` or `Report not sent (<reason>).` — an app that is not ready names its
+state, an app too old to carry the verb says update, no app says open it — and a failed send never
+fails the run. `--api-token-env` sends straight to the cloud instead; `--check` never reports, and
+the standalone `npx infinite-tag harness` has no session to report to.
+
 A backend answer of `verified` without a receipt timestamp is downgraded to `not verifiable` and
 says so. A cloud that rejects the session (401/403), has no verify route yet (404), or is
 unreachable is reported as exactly that — never as a receipt, never as a failure of your site. The

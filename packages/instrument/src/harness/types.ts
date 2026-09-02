@@ -97,6 +97,8 @@ export interface HarnessReport {
   finishedAt: string | null
   framework: string | null
   appRoot: string | null
+  /** Hosting the server-lane detector saw (vercel / netlify / cloudflare / node / unknown); null before inspect. */
+  hosting: string | null
   /** Always all seven, in HARNESS_PROVIDER_ORDER. */
   providers: ProviderState[]
   steps: StepOutcome[]

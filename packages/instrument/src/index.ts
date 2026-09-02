@@ -169,6 +169,24 @@ export {
   removeHarnessOutputs
 } from "./harness/outputs.js"
 export {
+  CloudReportSink,
+  DesktopBridgeReportSink,
+  NO_DESKTOP_REPORT_REASON,
+  NoneReportSink,
+  REPORT_SENT_LINE,
+  buildHarnessReportPayload,
+  redactProviderIds,
+  reportNotSentLine
+} from "./harness/report-sink.js"
+export type {
+  CloudReportSinkOptions,
+  DesktopBridgeReportSinkOptions,
+  HarnessReportPayload,
+  HarnessReportProviderPayload,
+  ReportSendResult,
+  ReportSink
+} from "./harness/report-sink.js"
+export {
   DESKTOP_UPDATE_REQUIRED_REASON,
   DesktopBridgeBackend,
   InfiniteCloudBackend,

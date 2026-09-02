@@ -1,12 +1,15 @@
 import { describe, expect, it, vi } from "vitest";
-import type { HarnessArgs, HarnessIo, VerificationBackend } from "infinite-tag";
+import type { HarnessArgs, HarnessIo, ReportSink, VerificationBackend } from "infinite-tag";
 
 import {
   ANALYTICS_USAGE,
   BRIDGE_BACKEND_NOTICE,
   DESKTOP_TOO_OLD_NOTICE,
+  DESKTOP_TOO_OLD_REPORT_REASON,
   NO_CLOUD_SESSION_NOTICE,
+  NO_DESKTOP_REPORT_REASON,
   chooseBackend,
+  chooseReportSink,
   extractApiTokenEnvFlag,
   runAnalyticsCommand,
   type ResolvedBridge,
@@ -14,7 +17,7 @@ import {
 } from "./analytics.js";
 
 interface Captured {
-  runs: Array<{ args: HarnessArgs; backends: string[] }>;
+  runs: Array<{ args: HarnessArgs; backends: string[]; reportSink: string | null }>;
   loaded: number;
 }
 
@@ -65,7 +68,11 @@ function fakeTag(captured: Captured, options: { failure?: { code: string; messag
     isInteractiveTerminal: () => false,
     terminalIo: (interactive) => ({ interactive, out: () => {}, err: () => {}, confirm: async () => false }),
     async runHarness(args, _io, deps) {
-      captured.runs.push({ args, backends: (deps?.backends ?? []).map((backend) => backend.name) });
+      captured.runs.push({
+        args,
+        backends: (deps?.backends ?? []).map((backend) => backend.name),
+        reportSink: deps?.reportSink?.name ?? null
+      });
       return { exitCode: options.failure ? 1 : 0, report: { failure: options.failure ?? null } };
     },
     NoneBackend: class implements VerificationBackend {
@@ -93,6 +100,33 @@ function fakeTag(captured: Captured, options: { failure?: { code: string; messag
       }
       async verify() {
         return {};
+      }
+    },
+    NoneReportSink: class implements ReportSink {
+      name: string;
+      constructor(reason?: string) {
+        this.name = `none-sink:${reason ?? "default"}`;
+      }
+      async send() {
+        return { sent: false as const, reason: "none" };
+      }
+    },
+    CloudReportSink: class implements ReportSink {
+      name: string;
+      constructor(options: { origin: string; token: string }) {
+        this.name = `cloud-sink:${options.origin}:${options.token === "tok_1" ? "token-ok" : "token-bad"}`;
+      }
+      async send() {
+        return { sent: true as const };
+      }
+    },
+    DesktopBridgeReportSink: class implements ReportSink {
+      name: string;
+      constructor(options: { bridgeUrl: string; token: string }) {
+        this.name = `bridge-sink:${options.bridgeUrl}:${options.token}`;
+      }
+      async send() {
+        return { sent: true as const };
       }
     },
     EXIT_ARGS: 2,
@@ -309,6 +343,29 @@ describe("infinite analytics", () => {
     });
     expect(empty.backend.name).toBe("none");
     expect(empty.notice).toContain("CI_INFINITE_TOKEN");
+  });
+
+  it("reports through the Desktop bridge when the app carries analytics.report.v1 — no token involved", async () => {
+    const captured: Captured = { runs: [], loaded: 0 };
+    await runAnalyticsCommand(["--plan"], { INFINITE_API_TOKEN: "tok_1" }, {
+      io: fakeIo(),
+      loadTag: async () => fakeTag(captured),
+      resolveBridge: () => fakeBridge({ capabilities: ["status.v1", "analytics.verify.v1", "analytics.report.v1"] })
+    });
+    expect(captured.runs[0].reportSink).toBe("bridge-sink:http://127.0.0.1:54321:bridge_tok");
+  });
+
+  it("report sink ladder: old app → update; no app → open; --api-token-env → cloud; empty var → says so; a bare env token is never used", () => {
+    const captured: Captured = { runs: [], loaded: 0 };
+    const tag = fakeTag(captured);
+    expect(chooseReportSink({ tag, env: { INFINITE_API_TOKEN: "tok_1" }, bridge: fakeBridge(), apiTokenEnvVar: null }).name)
+      .toBe(`none-sink:${DESKTOP_TOO_OLD_REPORT_REASON}`);
+    expect(chooseReportSink({ tag, env: { INFINITE_API_TOKEN: "tok_1" }, bridge: null, apiTokenEnvVar: null }).name)
+      .toBe(`none-sink:${NO_DESKTOP_REPORT_REASON}`);
+    expect(chooseReportSink({ tag, env: { INFINITE_API_TOKEN: "tok_1", INFINITE_API_ORIGIN: "https://api.infinite.fast/" }, bridge: null, apiTokenEnvVar: "INFINITE_API_TOKEN" }).name)
+      .toBe("cloud-sink:https://api.infinite.fast:token-ok");
+    expect(chooseReportSink({ tag, env: {}, bridge: null, apiTokenEnvVar: "MY_TOKEN" }).name)
+      .toBe("none-sink:--api-token-env named MY_TOKEN, which is empty");
   });
 
   it("maps a harness failure to exit 1 and an inf-error line; unknown flags to exit 2", async () => {

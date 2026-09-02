@@ -3,14 +3,16 @@
 // is testable against fixture repos and stubbed backends.
 import { spawnSync } from "node:child_process"
 import { existsSync, readFileSync } from "node:fs"
-import { join, relative, resolve } from "node:path"
+import { basename, join, relative, resolve } from "node:path"
 
 import { applyInstallation, restoreSnapshot, snapshotFiles, type FileSnapshot } from "../apply.js"
 import { isSupportedFramework } from "../frameworks/index.js"
 import { assertWriteTargetInsideRoot, writeFileAtomic } from "../frameworks/shared.js"
 import { detectRepoStatus, inspectWorkspace } from "../inspect.js"
 import { computeContentHashes, installManifestRelativePath, readInstallManifest, writeInstallManifest } from "../manifest.js"
+import { INSTRUMENT_VERSION } from "../package-manager.js"
 import { renderPreview } from "../render.js"
+import { detectHosting } from "../server-lane/hosting.js"
 import type { ApplyResult, InspectResult, InstallManifest, VerifyResult, WorkspaceInstallArtifacts } from "../types.js"
 import { verifyInstallation } from "../verify.js"
 import {
@@ -41,6 +43,7 @@ import {
   type ConversionProposal
 } from "./marking.js"
 import { recordHarnessFile } from "./outputs.js"
+import { REPORT_SENT_LINE, buildHarnessReportPayload, reportNotSentLine, type ReportSink } from "./report-sink.js"
 import { errorText, runRunbook, type RunbookStep } from "./runbook.js"
 import {
   HARNESS_REPORT_RELATIVE_PATH,
@@ -90,6 +93,13 @@ export interface HarnessDeps {
   nodeVersion?: string
   budgetMs?: number
   pollIntervalMs?: number
+  /**
+   * Where the finished report is sent (the desktop's stack-health strip reads it back). Absent
+   * = never sent: the standalone `infinite-tag harness` has no Infinite session. Only
+   * `infinite analytics` wires one, and only a run that wrote a report is sent — `--check`
+   * (read-only, ungated) reports nothing, and a send that fails never fails the run.
+   */
+  reportSink?: ReportSink
 }
 
 export interface HarnessRunResult {
@@ -270,6 +280,7 @@ const inspect: RunbookStep<Ctx> = {
     ctx.appRootAbsolute = ctx.inspect.appRoot === "." ? ctx.root : join(ctx.root, ctx.inspect.appRoot)
     ctx.report.framework = ctx.inspect.framework
     ctx.report.appRoot = ctx.inspect.appRoot
+    ctx.report.hosting = detectHosting(ctx.appRootAbsolute)
     ctx.detected = detectProvidersWithEvidence(ctx.appRootAbsolute)
     ctx.manifest = readInstallManifest(ctx.root)
     return {
@@ -824,8 +835,43 @@ export async function runHarness(args: HarnessArgs, io: HarnessIo, deps: Harness
     }
   })
 
+  await sendReport(report, args, io, deps)
+
   const exitCode = report.failures.length === 0 ? 0 : 1
   return { exitCode, report }
+}
+
+/**
+ * After the report step: hand the state table to the sink, print one line either way. Gated on
+ * the report step having RUN OK — a run that halted before inspecting (dirty tree, no framework)
+ * has seven `absent` rows that were never observed, and sending those would render as a stack
+ * the harness did not look at. `--check` writes no report and sends none (it is the ungated,
+ * read-only path). With --json the line rides stderr so stdout stays one document.
+ */
+async function sendReport(report: HarnessReport, args: HarnessArgs, io: HarnessIo, deps: HarnessDeps): Promise<void> {
+  const sink = deps.reportSink
+  if (!sink || args.mode === "check") return
+  const say = (line: string) => (args.json ? io.err(line) : io.out(line))
+  if (report.steps.find((step) => step.id === "report")?.status !== "ok") {
+    say(reportNotSentLine("the run did not reach the report step"))
+    return
+  }
+  if (!args.workspaceId) {
+    say(reportNotSentLine("no workspace id — pass --workspace"))
+    return
+  }
+  const payload = buildHarnessReportPayload(report, {
+    engineProjectId: args.workspaceId,
+    tagVersion: INSTRUMENT_VERSION,
+    repoLabel: basename(report.root)
+  })
+  let result: Awaited<ReturnType<ReportSink["send"]>>
+  try {
+    result = await sink.send(payload)
+  } catch (error) {
+    result = { sent: false, reason: errorText(error) }
+  }
+  say(result.sent ? REPORT_SENT_LINE : reportNotSentLine(result.reason))
 }
 
 /** The .infinite/REPORT.md text of the last run, for the CLI's `--brief` echo and tests. */
