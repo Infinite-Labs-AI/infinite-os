@@ -70,12 +70,11 @@ export const ANALYTICS_USAGE = [
 export const DEFAULT_INFINITE_API_ORIGIN = "https://api.ultima.inc";
 export const DEFAULT_API_TOKEN_ENV_VAR = "INFINITE_API_TOKEN";
 export const ANALYTICS_VERIFY_CAPABILITY = "analytics.verify.v1";
-export const NO_CLOUD_SESSION_NOTICE =
-  "Infinite Desktop is not running, so receipts cannot be read back: providers will print " +
-  "'installed, not verifiable'. Open the Infinite app and re-run to verify.";
-export const DESKTOP_TOO_OLD_NOTICE =
-  "This Infinite Desktop version cannot verify from the CLI: providers will print " +
-  "'installed, not verifiable'. Update the Infinite app and re-run.";
+/** Every "nothing can read the receipts" line starts here, then names the ONE thing to change. */
+export const NOT_VERIFIABLE_PREFIX =
+  "Receipts cannot be read back, so providers will print 'installed, not verifiable'.";
+export const NO_CLOUD_SESSION_NOTICE = `${NOT_VERIFIABLE_PREFIX} Open the Infinite app and re-run to verify.`;
+export const DESKTOP_TOO_OLD_NOTICE = `${NOT_VERIFIABLE_PREFIX} This Infinite app cannot verify from the CLI yet — update it and re-run.`;
 export const BRIDGE_BACKEND_NOTICE =
   "Verifying through Infinite Desktop — the app reads the receipts back with its own session; no token needed.";
 
@@ -208,8 +207,7 @@ export function chooseBackend(input: ChooseBackendInput): {
   backend: VerificationBackend;
   notice: string | null;
 } {
-  const { env, bridge, apiTokenEnvVar, workspaceId, fetchImpl } = input;
-  const tag = input.tag;
+  const { tag, env, bridge, apiTokenEnvVar, workspaceId, fetchImpl } = input;
   const descriptor = bridge?.descriptor;
   if (descriptor?.capabilities?.includes(ANALYTICS_VERIFY_CAPABILITY)) {
     return {
@@ -234,8 +232,8 @@ export function chooseBackend(input: ChooseBackendInput): {
     return {
       backend: new tag.NoneBackend(),
       notice: token
-        ? `${NO_CLOUD_SESSION_NOTICE} (${apiTokenEnvVar} is set but no workspace id was resolved — pass --workspace.)`
-        : `${NO_CLOUD_SESSION_NOTICE} (--api-token-env named ${apiTokenEnvVar}, which is empty.)`
+        ? `${NOT_VERIFIABLE_PREFIX} ${apiTokenEnvVar} is set but no workspace id was resolved — pass --workspace.`
+        : `${NOT_VERIFIABLE_PREFIX} --api-token-env named ${apiTokenEnvVar}, which is empty.`
     };
   }
 
