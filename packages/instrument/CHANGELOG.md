@@ -3,6 +3,47 @@
 All notable changes to the `infinite-tag` npm package (`packages/instrument`). Versions before
 0.5.0 are recorded in git history only (`git log -- packages/instrument`).
 
+## 0.9.0 — 2026-09-02
+
+Harness hardening: the Vite lane stops editing entrypoints, the outcome helper carries the visit key
+end-to-end (including a checkout → Stripe metadata → webhook round trip), the server lane honours
+DNT/GPC, and the runbook reports honestly and recommends the funnel work an install can't do for you.
+
+- **The Vite adapter injects into `index.html`, never the entrypoint.** The browser tag is added via
+  an `index.html` snippet (Vite serves it verbatim) instead of editing `main.tsx`/`main.jsx`, so a
+  named or aliased `createRoot` import is no longer a blocker and there is no risk of mangling an
+  entrypoint. When there is no `index.html` to own, the adapter falls back to the manual brief with
+  the exact snippet rather than guessing at the entry file. The managed HTML lives in
+  `frameworks/managed-html.ts` (new file → the packed file count moves to 116).
+- **The outcome helper is emitted in the right module format and exports the visit key.** Each target
+  writes `lib/infinite-outcome` as `.js` or `.mjs` to match the host's module system, exports
+  **`infiniteVisitKey`** so a server route can compute the SAME `visitKey` the page view carried, and
+  the Vercel-Node helper builds its signed request with a **plain-object header** map (the previous
+  `Headers`-instance shape dropped on some Node runtimes). The brief's checkout example threads the
+  visit key **checkout → Stripe session metadata → webhook**, so a purchase confirmed in a Stripe
+  webhook is attributed to the same visit as the click that started it.
+- **The server lane honours Do-Not-Track / Global Privacy Control.** Every generated server lane now
+  skips a request whose `DNT: 1` or `Sec-GPC: 1` header is set, matching the browser runtime's
+  consent posture — no page or outcome is counted for a visitor who has signalled opt-out.
+- **`--infinite-allow-automation`.** The runtime drops automation-driven browsers
+  (`navigator.webdriver`) by default; the new flag opts a site back in for its own end-to-end and
+  verification runs, where the driven browser IS the thing under test.
+- **Richer `cta_location`.** Autocaptured clicks now carry a more specific structural
+  `cta_location`, so reporting can tell a nav click from a hero or footer click without ever storing
+  DOM text.
+- **The harness recommends the funnel work it can't install.** `--check`/`harness` next-steps now
+  surface four recommendations an install alone can't wire: funnel identity-merge, post-response
+  capture, a privacy disclosure, and the server-side checkout pair (mark the checkout intent AND post
+  the server-confirmed purchase). They are advice with evidence, never silent edits.
+- **Honest install summaries + a `--check` PostHog audit.** The run summary states exactly what was
+  adopted, installed, skipped, or blocked — never an optimistic claim — and `--check` reports what
+  PostHog is actually configured to capture so a customer can see gaps before trusting the numbers.
+- **Comment- and string-safe provider detection.** Adoption detection no longer treats a provider
+  token inside a comment or a string literal as an installed tag, so a mention of `posthog.init` in
+  prose can't make the installer skip a real install.
+- **The server-lane guide moved to `docs/`.** The long server-lane explainer now lives under `docs/`
+  rather than beside the package sources; the install brief still links it.
+
 ## 0.8.0 — 2026-09-02
 
 The harness release. One command adopts what a site already has, installs what is missing, marks
