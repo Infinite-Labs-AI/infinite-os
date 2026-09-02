@@ -30,6 +30,8 @@ interface HarnessOptions {
   productionHosts?: string[]
   consentWriteFails?: boolean
   downloadDestinationPath?: string
+  /** `false` turns unmarked-click autocapture off (absent = on, exactly as 0.6.2). */
+  autocapture?: boolean
 }
 
 function createStorage(initial: Record<string, string> = {}, failWrites = false) {
@@ -143,7 +145,8 @@ function executeTag(options: HarnessOptions = {}) {
     productionHosts: options.productionHosts ?? ["example.com"],
     ...(options.downloadDestinationPath
       ? { downloadDestinationPath: options.downloadDestinationPath }
-      : {})
+      : {}),
+    ...(options.autocapture === undefined ? {} : { autocapture: options.autocapture })
   })
   const source = tag.replace(/^<script[^>]*>/, "").replace(/<\/script>$/, "")
 
@@ -1353,6 +1356,93 @@ describe("sign_up_click — marked sign-up intent", () => {
     denied.click(signupTarget({ href: "https://example.com/signup" }))
     denied.submit(signupFormTarget({}))
     expect(denied.requests).toHaveLength(0)
+  })
+})
+
+describe("autocapture flag (default on)", () => {
+  const eventsAfterPageView = (runtime: ReturnType<typeof executeTag>) =>
+    runtime.requests.filter((request) => request.body.eventName !== "site_page_view")
+
+  it("with the flag absent the rendered config is byte-identical to 0.6.2 (no autocapture key)", () => {
+    const runtime = executeTag({ siteSourceKey: "site_public_123", consent: "granted" })
+    expect(runtime.tag).not.toContain('"autocapture"')
+  })
+
+  it("autocapture:false — an unmarked same-origin link emits nothing", () => {
+    const runtime = executeTag({ siteSourceKey: "site_public_123", consent: "granted", autocapture: false })
+    expect(runtime.tag).toContain('"autocapture":false')
+
+    runtime.click(managedTarget({ href: "https://example.com/pricing?email=private#plans" }))
+
+    expect(eventsAfterPageView(runtime)).toEqual([])
+  })
+
+  it("autocapture:false — an unmarked button and a non-checkout external link emit nothing", () => {
+    const runtime = executeTag({ siteSourceKey: "site_public_123", consent: "granted", autocapture: false })
+
+    runtime.click(buttonTarget({ id: "cta-hero" }))
+    runtime.click(managedTarget({ href: "https://calendly.com/founder/30min" }))
+
+    expect(eventsAfterPageView(runtime)).toEqual([])
+  })
+
+  it("autocapture:false — a MARKED CTA still emits site_click", () => {
+    const runtime = executeTag({ siteSourceKey: "site_public_123", consent: "granted", autocapture: false })
+
+    runtime.click(
+      managedTarget({ href: "https://example.com/pricing", ctaId: "hero_pricing", ctaLocation: "hero" })
+    )
+
+    const clicks = runtime.requests.filter((request) => request.body.eventName === "site_click")
+    expect(clicks).toHaveLength(1)
+    expect(clicks[0]?.body.properties).toEqual({
+      cta_id: "hero_pricing",
+      cta_location: "hero",
+      destination_path: "/pricing/"
+    })
+  })
+
+  it("autocapture:false — a Stripe Payment Link still emits the checkout bucket", () => {
+    const runtime = executeTag({ siteSourceKey: "site_public_123", consent: "granted", autocapture: false })
+
+    runtime.click(managedTarget({ href: "https://buy.stripe.com/test_checkout?prefilled_email=p@x.com" }))
+
+    const clicks = runtime.requests.filter((request) => request.body.eventName === "site_click")
+    expect(clicks).toHaveLength(1)
+    expect(clicks[0]?.body.properties).toEqual({
+      cta_id: "external_stripe_payment_link",
+      cta_location: "page",
+      destination_path: "/external/stripe_payment_link"
+    })
+    expect(JSON.stringify(clicks[0]?.body)).not.toMatch(/buy\.stripe|prefilled_email/)
+  })
+
+  it("autocapture:false — the /download conversion anchor, a data-conversion=checkout link, and sign-up intent still emit", () => {
+    const runtime = executeTag({ siteSourceKey: "site_public_123", consent: "granted", autocapture: false })
+
+    runtime.click(managedTarget({ href: "https://example.com/download", downloadLocation: "hero" }))
+    runtime.click(checkoutTarget({ href: "https://pay.example.net/checkout/abc" }))
+    runtime.click(signupTarget({ href: "https://example.com/signup" }))
+    runtime.click(managedTarget({ href: "https://example.com/get-started" }))
+
+    expect(eventsAfterPageView(runtime).map((request) => request.body.eventName)).toEqual([
+      "app_download_click",
+      "site_click",
+      "sign_up_click",
+      "sign_up_click"
+    ])
+    const checkout = runtime.requests.find((request) => request.body.eventName === "site_click")
+    expect(checkout?.body.properties).toMatchObject({ destination_path: "/external/marked_checkout" })
+  })
+
+  it("autocapture:true is the 0.6.2 behaviour (unmarked links still captured)", () => {
+    const runtime = executeTag({ siteSourceKey: "site_public_123", consent: "granted", autocapture: true })
+
+    runtime.click(managedTarget({ href: "https://example.com/pricing" }))
+
+    const clicks = runtime.requests.filter((request) => request.body.eventName === "site_click")
+    expect(clicks).toHaveLength(1)
+    expect(clicks[0]?.body.properties).toMatchObject({ cta_id: "auto_pricing" })
   })
 })
 

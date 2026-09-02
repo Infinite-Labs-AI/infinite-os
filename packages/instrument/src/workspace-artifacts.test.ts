@@ -9,6 +9,7 @@ import { inspectWorkspace } from "./inspect.js"
 import { planInstallation } from "./plan.js"
 import {
   applyInfiniteApiOrigin,
+  applyInfiniteAutocapture,
   applyPosthogProxy,
   DEFAULT_INFINITE_COLLECT_PATH,
   DEFAULT_POSTHOG_PROXY_PATH,
@@ -482,5 +483,67 @@ describe("Infinite API origin + default collect path", () => {
 
     const without = applyInfiniteApiOrigin({ ga4: { measurementId: "G-1" } }, { origin: "https://api.infinite.fast" })
     expect(without.infinite).toBeUndefined()
+  })
+})
+
+describe("Infinite autocapture flag", () => {
+  it("threads infiniteAutocapture:false into the artifact and keeps the key absent otherwise", () => {
+    const off = resolveWorkspaceArtifacts(".", {
+      infiniteSiteSourceKey: "site_public_123",
+      infiniteProductionHosts: ["example.com"],
+      infiniteConsentMode: "not_required",
+      infiniteAutocapture: false
+    })
+    expect(off.infinite?.autocapture).toBe(false)
+
+    const unspecified = resolveWorkspaceArtifacts(".", {
+      infiniteSiteSourceKey: "site_public_123",
+      infiniteProductionHosts: ["example.com"],
+      infiniteConsentMode: "not_required"
+    })
+    expect(unspecified.infinite).not.toHaveProperty("autocapture")
+  })
+
+  it("reads a boolean autocapture from an artifact file and ignores non-booleans", () => {
+    const root = makeTempDir("autocapture-file")
+    const artifactFile = join(root, "artifacts.json")
+    writeFileSync(
+      artifactFile,
+      JSON.stringify({
+        infinite: {
+          siteSourceKey: "site_public_123",
+          productionHosts: ["example.com"],
+          consentMode: "not_required",
+          autocapture: false
+        }
+      })
+    )
+    expect(resolveWorkspaceArtifacts(root, { artifactFile }).infinite?.autocapture).toBe(false)
+
+    writeFileSync(
+      artifactFile,
+      JSON.stringify({
+        infinite: { siteSourceKey: "site_public_123", productionHosts: ["example.com"], autocapture: "off" }
+      })
+    )
+    expect(resolveWorkspaceArtifacts(root, { artifactFile }).infinite).not.toHaveProperty("autocapture")
+  })
+
+  it("applyInfiniteAutocapture is a modifier: layers onto an Infinite artifact, never fabricates one", () => {
+    const layered = applyInfiniteAutocapture(
+      {
+        infinite: {
+          siteSourceKey: "site_public_123",
+          collectPath: "/infinite/ledger",
+          productionHosts: ["example.com"],
+          consentMode: "not_required"
+        }
+      },
+      { autocapture: false }
+    )
+    expect(layered.infinite?.autocapture).toBe(false)
+    expect(applyInfiniteAutocapture({ ga4: { measurementId: "G-1" } }, { autocapture: false }).infinite).toBeUndefined()
+    const untouched = { infinite: layered.infinite! }
+    expect(applyInfiniteAutocapture(untouched, {})).toBe(untouched)
   })
 })

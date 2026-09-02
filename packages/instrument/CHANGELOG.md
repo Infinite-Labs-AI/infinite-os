@@ -5,6 +5,12 @@ All notable changes to the `infinite-tag` npm package (`packages/instrument`). V
 
 ## Unreleased
 
+- **Autocapture is a flag (default on).** `--infinite-autocapture on|off` (artifact field
+  `infinite.autocapture: boolean`) — `off` stops unmarked links and buttons from emitting
+  `site_click`; marked `data-analytics-cta-id` CTAs, the conversion destination, Stripe checkout
+  buckets, `data-conversion="checkout|signup"` markers and sign-up paths still emit. With the flag
+  absent the runtime config is byte-identical to 0.6.2, and the `auto_` / `button` / `external_*`
+  cta ids are unchanged.
 - **Meta pixel now installs with Automatic Configuration off:** `fbq('set', 'autoConfig',
   'false', <id>)` precedes `fbq('init', <id>)`, so no button clicks or page metadata are sent to
   Meta by default. The rest of the snippet is Meta's own native bootstrap, unchanged.

@@ -66,6 +66,7 @@ export {
   INFINITE_SERVER_EVENTS_DESTINATION,
   INFINITE_SERVER_LANE_RECEIPT_URL,
   applyInfiniteApiOrigin,
+  applyInfiniteAutocapture,
   infiniteCollectDestination,
   resolveInfiniteApiOrigin,
   resolveWorkspaceArtifacts

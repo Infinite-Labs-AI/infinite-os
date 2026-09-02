@@ -109,6 +109,11 @@ function infiniteBrowserRuntime(config: InfiniteBrowserConfig): void {
   // cloud ingest normalizes to. Default: the platform's /download.
   const conversionDestinationPath = normalizePath(config.downloadDestinationPath || "/download")
 
+  // `--infinite-autocapture off`: unmarked links and buttons emit nothing. Everything a founder
+  // asked for by marking or configuring still emits — data-analytics-cta-id CTAs, the conversion
+  // destination, Stripe checkout buckets, data-conversion="checkout|signup", sign-up paths.
+  const autocapture = config.autocapture !== false
+
   function safeClosest(target: Element, selector: string): HTMLElement | null {
     try {
       return target.closest(selector) as HTMLElement | null
@@ -549,6 +554,7 @@ function infiniteBrowserRuntime(config: InfiniteBrowserConfig): void {
         }
       }
 
+      if (!autocapture && !safeClosest(target, "[data-analytics-cta-id]")) return
       const properties = automaticClickProperties(target, anchor, destination)
       if (!properties) {
         return

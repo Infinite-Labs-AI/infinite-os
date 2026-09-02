@@ -127,6 +127,8 @@ export interface InfinitePublicArtifact {
   /** The API origin the same-origin route proxies to. Absent = INFINITE_API_ORIGIN. Never reaches
    *  the browser runtime — it only shapes the Vercel/Next rewrite destination. */
   apiOrigin?: string
+  /** `false` turns unmarked-click autocapture off. Absent = on (the 0.6.1+ default). */
+  autocapture?: boolean
 }
 
 export interface InfiniteBrowserConfig {
@@ -139,6 +141,9 @@ export interface InfiniteBrowserConfig {
     | { mode: "required"; storageKey: "infinite_analytics_consent" }
   /** Conversion destination for app_download_click detection. Absent = "/download". */
   downloadDestinationPath?: string
+  /** `false`: unmarked links/buttons emit nothing; marked CTAs, the conversion destination, Stripe
+   *  checkout buckets, data-conversion markers and sign-up paths still emit. Absent = on. */
+  autocapture?: boolean
 }
 
 /**

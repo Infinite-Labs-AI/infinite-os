@@ -88,6 +88,7 @@ contract. Noninteractive `--yes` and `apply` runs fail on the same blocker.
 | `--infinite-collect-path <path>` | Same-origin browser route. Defaults to `/infinite/ledger` (an artifact that already records another path keeps it). |
 | `--infinite-api-origin <https://host>` | The API host the same-origin route proxies to. Defaults to `https://api.ultima.inc`; the `INFINITE_API_ORIGIN` env var is the same override. Must be an https origin with no path. |
 | `--infinite-download-destination-path <path>` | Same-origin conversion click path for `app_download_click`. Defaults to `/download`; use `/checkout` only when the site intentionally routes checkout through its own page first. Direct Stripe-hosted payment surfaces are detected automatically as structural checkout-intent `site_click` buckets. |
+| `--infinite-autocapture <on\|off>` | Unmarked-click autocapture (default `on`). `off` stops unmarked links and buttons from emitting; marked `data-analytics-cta-id` CTAs, the conversion destination, Stripe checkout buckets, `data-conversion` markers and sign-up paths still emit. |
 | `--infinite-static-proxy vercel` | Explicit proof that a static/Vite install may create Vercel rewrites. |
 | `--infinite-consent-mode <required\|not-required>` | Required for Infinite first-party collection. There is no default. `required` waits for the external consent event below; `not-required` collects Infinite events unless DNT/GPC blocks them. Neither mode touches GA4/PostHog consent. |
 | `--ga4-measurement-id <G-...>` | Public GA4 measurement ID. |
@@ -126,6 +127,8 @@ interface InfinitePublicArtifact {
   consentMode?: "required" | "not_required"
   // Optional; defaults to "/download".
   downloadDestinationPath?: string
+  // Optional; false turns unmarked-click autocapture off (absent = on).
+  autocapture?: boolean
 }
 ```
 

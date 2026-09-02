@@ -102,7 +102,16 @@ export interface WorkspaceArtifactOptions {
   infiniteDownloadDestinationPath?: string
   /** Validated override of the API host the same-origin route proxies to (default INFINITE_API_ORIGIN). */
   infiniteApiOrigin?: string
+  /** `--infinite-autocapture on|off` (absent = on). */
+  infiniteAutocapture?: boolean
   packageManager?: PackageManager
+}
+
+export function normalizeInfiniteAutocapture(value: string): boolean {
+  const normalized = value.trim().toLowerCase()
+  if (normalized === "on") return true
+  if (normalized === "off") return false
+  throw new Error("--infinite-autocapture currently supports only: on, off")
 }
 
 export function normalizeInfiniteConsentMode(value: string): InfiniteConsentMode {
@@ -181,7 +190,8 @@ export function coerceWorkspaceArtifacts(value: unknown): WorkspaceInstallArtifa
       ...(typeof infinite.downloadDestinationPath === "string"
         ? { downloadDestinationPath: infinite.downloadDestinationPath }
         : {}),
-      ...(typeof infinite.apiOrigin === "string" ? { apiOrigin: infinite.apiOrigin } : {})
+      ...(typeof infinite.apiOrigin === "string" ? { apiOrigin: infinite.apiOrigin } : {}),
+      ...(typeof infinite.autocapture === "boolean" ? { autocapture: infinite.autocapture } : {})
     }
   }
   const runtimeProductionHosts = topLevelProductionHosts ?? artifacts.infinite?.productionHosts
@@ -409,14 +419,20 @@ export function resolveWorkspaceArtifacts(
         : {}),
       ...(artifacts.infinite?.apiOrigin !== undefined
         ? { apiOrigin: artifacts.infinite.apiOrigin }
+        : {}),
+      ...(artifacts.infinite?.autocapture !== undefined
+        ? { autocapture: artifacts.infinite.autocapture }
         : {})
     }
   }
 
-  // A modifier, not a source: the origin attaches to an Infinite artifact that exists for another
-  // reason (flags or file) and never fabricates a keyless one.
-  artifacts.infinite = applyInfiniteApiOrigin(artifacts, { origin: options.infiniteApiOrigin }).infinite
-  if (artifacts.infinite === undefined) delete artifacts.infinite
+  // Modifiers, not sources: the origin and the autocapture flag attach to an Infinite artifact
+  // that exists for another reason (flags or file) and never fabricate a keyless one.
+  const modified = applyInfiniteAutocapture(
+    applyInfiniteApiOrigin(artifacts, { origin: options.infiniteApiOrigin }),
+    { autocapture: options.infiniteAutocapture }
+  )
+  if (modified.infinite !== undefined) artifacts.infinite = modified.infinite
 
   if (artifacts.infinite && options.infiniteProductionHosts !== undefined) {
     artifacts.infinite = {
@@ -468,6 +484,27 @@ export function applyInfiniteApiOrigin(
     infinite: {
       ...artifacts.infinite,
       apiOrigin: options.origin
+    }
+  }
+}
+
+/**
+ * Layer `--infinite-autocapture on|off` onto a resolved/discovered Infinite artifact. A modifier:
+ * with no Infinite artifact there is no runtime to configure, so it never fabricates one.
+ */
+export function applyInfiniteAutocapture(
+  artifacts: WorkspaceInstallArtifacts,
+  options: { autocapture?: boolean }
+): WorkspaceInstallArtifacts {
+  if (options.autocapture === undefined || artifacts.infinite === undefined) {
+    return artifacts
+  }
+
+  return {
+    ...artifacts,
+    infinite: {
+      ...artifacts.infinite,
+      autocapture: options.autocapture
     }
   }
 }

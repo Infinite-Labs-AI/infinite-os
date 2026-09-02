@@ -234,6 +234,7 @@ describe("runCli", () => {
     expect(helpText).toContain("Defaults to /infinite/ledger")
     expect(helpText).toContain("--infinite-api-origin <https://host>")
     expect(helpText).toContain("--infinite-download-destination-path <path>")
+    expect(helpText).toContain("--infinite-autocapture <on|off>")
     expect(helpText).toContain("--infinite-consent-mode <required|not-required>")
     expect(helpText).toContain("No default")
     expect(helpText).toContain("infinite:analytics-consent-change")
@@ -645,6 +646,40 @@ describe("Infinite source handoff + meta providers", () => {
     expect(stdoutText()).toContain("Google Analytics — index.html (existing snippet)")
     expect(readFileSync(join(root, "index.html"), "utf8")).toBe(before)
     expect(existsSync(join(root, ".infinite", "install.json"))).toBe(false)
+  })
+
+  it("--infinite-autocapture off reaches the runtime; on (and absent) leave the 0.6.2 config", async () => {
+    const baseArgs = (root: string) => [
+      "install",
+      "--root", root,
+      "--workspace", "ws_test",
+      "--yes",
+      "--infinite-site-source-key", "site_public_123",
+      "--infinite-production-host", "example.com",
+      "--infinite-static-proxy", "vercel",
+      "--infinite-consent-mode", "not-required"
+    ]
+
+    const offRoot = copyFixture("static-html-basic")
+    expect(await runCli([...baseArgs(offRoot), "--infinite-autocapture", "off"])).toBe(0)
+    expect(indexHtml(offRoot)).toContain('"autocapture":false')
+
+    const onRoot = copyFixture("static-html-basic")
+    expect(await runCli([...baseArgs(onRoot), "--infinite-autocapture", "on"])).toBe(0)
+    expect(indexHtml(onRoot)).not.toContain('"autocapture"')
+
+    const defaultRoot = copyFixture("static-html-basic")
+    expect(await runCli(baseArgs(defaultRoot))).toBe(0)
+    expect(indexHtml(defaultRoot)).not.toContain('"autocapture"')
+  })
+
+  it("rejects an --infinite-autocapture value other than on|off", async () => {
+    const root = copyFixture("static-html-basic")
+    const code = await runCli(["plan", "--root", root, "--infinite-site-source-key", "site_public_123", "--infinite-autocapture", "maybe"])
+    expect(code).toBe(1)
+    expect(errorSpy.mock.calls.map((c) => String(c[0]))).toContain(
+      "--infinite-autocapture currently supports only: on, off"
+    )
   })
 
   it("explains the removed unsafe external-loader flags for one release", async () => {

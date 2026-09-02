@@ -78,7 +78,9 @@ export const infiniteProviderAdapter: ProviderAdapter = {
         consentMode === "not_required"
           ? { mode: "not_required" }
           : { mode: "required", storageKey: "infinite_analytics_consent" },
-      ...(downloadDestinationPath !== undefined ? { downloadDestinationPath } : {})
+      ...(downloadDestinationPath !== undefined ? { downloadDestinationPath } : {}),
+      // Only `false` is serialized — an absent flag keeps the runtime config byte-identical to 0.6.2.
+      ...(infinite?.autocapture === false ? { autocapture: false } : {})
     }
     return {
       assumptions: [
