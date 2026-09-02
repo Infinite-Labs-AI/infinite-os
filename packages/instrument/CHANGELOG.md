@@ -5,6 +5,31 @@ All notable changes to the `infinite-tag` npm package (`packages/instrument`). V
 
 ## Unreleased
 
+- **`infinite-tag harness` — one runbook that adopts, installs, marks conversions, verifies and
+  reports.** `npx infinite-tag harness [--check | --plan | --apply | --verify-only]` runs the eleven
+  steps from the PostHog-wizard teardown in order, each with its own failure code (`INF_ENV_DIRTY_TREE`,
+  `INF_DETECT_NO_FRAMEWORK`, `INF_POSTHOG_NO_KEY`, `INF_PLAN_UNMANAGED_TARGET`, `INF_APPLY_ROLLED_BACK`,
+  `INF_MARK_STALE_ELEMENT`, `INF_VERIFY_NO_RECEIPT`, `INF_ARGS_CONVERSIONS_REQUIRED`) and a halt/continue
+  rule, and always ends with the seven-row state table (`ga4, gtm, posthog, meta, x, infinite,
+  server_lane` × `absent / adopted / installed / verified / conflict / skipped`). `verified` is printed
+  only with a receipt timestamp. Keys resolve from flags → saved artifacts → real `.env` files, never a
+  template; existing snippets and Tag Manager containers are adopted with file + line evidence and their
+  public id; conflicts (two ids, managed + unmanaged) install nothing and say why.
+- **Conversion marking (propose → confirm → apply).** The harness proposes `data-analytics-cta-id` /
+  `data-analytics-cta-location` for the site's anchors and buttons into a gitignored
+  `.infinite/conversions.proposed.json`, asks separately (`--yes` never approves it; `--conversions
+  <file>` is the non-interactive path, `--no-mark` skips), then writes only those two attributes on the
+  exact element after a line-hash pre-image check, recorded and reversible via
+  `.infinite/conversions.json`. Elements the runtime already counts (download destination, Stripe hosts,
+  `data-conversion`) are never double-marked.
+- **Verification backends.** `NoneBackend` (standalone: `installed, not verifiable`), `InfiniteCloudBackend`
+  (`POST /api/analytics/verify`, 60 s / 3 s polling, honest states for 401/404/unreachable),
+  `PosthogQueryBackend` (optional `--posthog-query-key`, one bounded HogQL `$pageview` poll). Meta is never
+  claimed verified at install time.
+- **`infinite analytics`** in the `infinite` CLI runs the same runbook with the Desktop's active workspace
+  and the saved artifacts, wiring the cloud backend when `INFINITE_API_TOKEN` is set and saying so when not.
+- Every run that writes ends with `.infinite/REPORT.md` and the pasteable handoff line.
+
 - **The server lane is no longer Next.js-only.** `install --server-lane` now writes runnable,
   manifest-managed, byte-exact reversible files for the host a site actually deploys to, chosen from
   file and dependency evidence in the repo (`vercel.json` wins every tie):

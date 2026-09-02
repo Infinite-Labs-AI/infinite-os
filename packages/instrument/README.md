@@ -78,6 +78,7 @@ contract. Noninteractive `--yes` and `apply` runs fail on the same blocker.
 | `verify` | Check managed hashes and forbidden external-loader routes. |
 | `uninstall` | Preview removal, or reverse it with `--yes`. |
 | `server-lane --brief` | Print the server-lane agent brief for this repo's stack (no install). |
+| `harness` | One runbook: adopt existing tags, install what is missing, mark conversions, verify receipts, report per provider. See [The harness](#the-harness-infinite-tag-harness--infinite-analytics). |
 
 ## Public Artifact Flags
 
@@ -332,6 +333,137 @@ site" in human output, and never installed a second time. A Tag Manager containe
 GA4 — a requested Meta or X pixel still installs beside it. When every requested provider already
 exists, nothing is written and no install record is created. Infinite's own managed files and
 `<!-- infinite:start -->` blocks are ignored by the scan, so a re-run never adopts itself.
+
+## The harness: `infinite-tag harness` / `infinite analytics`
+
+One command that knows its job and gets it done. Two front doors, one runbook:
+
+```bash
+npx infinite-tag harness [--check | --plan | --apply | --verify-only] [flags]   # standalone
+infinite analytics [--check | --plan | --apply | --verify-only] [flags]          # desktop CLI
+```
+
+`infinite analytics` adds only what the standalone tag cannot know — the Desktop's active
+workspace, the public keys `infinite setup` saved under `~/.infinite/artifacts/<workspaceId>.json`,
+and a cloud verification backend — then runs the same eleven steps. Three depths: `--check`
+(inspect + report, writes nothing), `--plan` (write the plan, the proposed conversions and
+`.infinite/REPORT.md`; apply nothing), and the default `--apply` (plan → confirm → apply → verify).
+
+### The runbook
+
+Every step names its own failure code and whether the run **halts** or **continues degraded**;
+either way the run ends with all seven provider rows.
+
+| # | Step | Success | Failure code (next) |
+|---|---|---|---|
+| 1 | Preflight | Node ≥ 18; git tree clean for `--apply` | `INF_ENV_DIRTY_TREE` (halt; `--allow-dirty` overrides) |
+| 2 | Inspect | one supported framework; every existing provider (incl. Tag Manager) with file + line | `INF_DETECT_NO_FRAMEWORK` (halt; `--brief` writes the agent brief instead) |
+| 3 | Resolve keys | flags → saved artifacts → real `.env` files (a key found only in `.env.example` is missing, and that file is never written) | `INF_POSTHOG_NO_KEY` (continue; only when PostHog was explicitly requested) |
+| 4 | Classify | one action per provider: `absent → install`, `unmanaged → adopt`, `managed → upgrade`, `gtm → manual`, `conflict → report` | never fatal |
+| 5 | Plan | deterministic file plan for install/upgrade providers | `INF_PLAN_UNMANAGED_TARGET` / `INF_PLAN_BLOCKED` (halt) |
+| 6 | Confirm | explicit yes (`--yes` skips this one) | clean exit, nothing written |
+| 7 | Apply | managed files written and hash-verified | `INF_APPLY_ROLLED_BACK` (halt; every file restored) |
+| 8 | Conversions | proposed → confirmed → marked (below) | `INF_MARK_STALE_ELEMENT` (continue, per row) |
+| 9 | Server lane | the target the plan chose was written, or the brief only | never fatal |
+| 10 | Verify | a receipt read back per provider | `INF_VERIFY_NO_RECEIPT` (continue) |
+| 11 | Report + handoff | `.infinite/REPORT.md` and the pasteable line | never fatal |
+
+A non-interactive `--apply` with neither `--conversions <file>` nor `--no-mark` exits `2` with
+`INF_ARGS_CONVERSIONS_REQUIRED` rather than guess. Failures are also printed on stderr as one
+line — `inf-error: <CODE> — <message>` — for headless callers.
+
+### The state table
+
+A provider is a state machine, not a boolean. All seven rows print every run, including the ones
+the run did nothing to — a silent provider is the bug:
+
+```
+provider     state                                                       key         evidence
+ga4          adopted, not ours to verify                                 G-ABC123    index.html
+gtm          skipped                                                     —           no Tag Manager container found
+posthog      installed, not verifiable (no query key — pass --posthog-query-key, or run infinite analytics from the desktop CLI)  phc_…  index.html
+meta         installed, not verifiable (Meta has no install-time read-back; open Events Manager → Test Events)  1234567890  index.html
+x            skipped                                                     —           no key resolved (flags, saved artifacts, or .env)
+infinite     verified (receipt at 2026-09-02T10:01:03.000Z)              site_…      index.html
+server_lane  installed, no receipt                                       —           middleware.ts
+```
+
+States: `absent` / `adopted` / `installed` / `verified` / `conflict` / `skipped`. **`verified` is
+printed only with a receipt timestamp read back from the provider.** `installed` means a file was
+written; `adopted` means an existing tag (a hand-pasted snippet, or GA4 through a Tag Manager
+container) was found and left byte-for-byte alone — never reduced, never installed twice, and
+never claimed as verified by us. Two different ids for one provider, or a managed install beside
+an unmanaged snippet, is a `conflict`: nothing is installed for it and the report names both.
+
+### Conversion marking
+
+The runtime already reads `data-analytics-cta-id` and `data-analytics-cta-location`, so the
+marking step writes exactly those two attributes. It is three phases with a human gate:
+
+1. **Propose (read-only).** The app's source is scanned (same bounds as provider detection) for
+   `<a>`, `<Link>` and `<button>` elements. Each gets a `cta_id` token (`^[A-Za-z0-9_-]{1,64}$`)
+   derived from its visible text, then its href, then its tag, with evidence
+   `{ file, line, tag, hrefOrHandler, textSnippet, lineHash }` — the sha256 of the exact line.
+   Elements the runtime already counts are skipped and listed: the download destination,
+   Stripe hosts, anything carrying `data-conversion` or already marked. The proposal is written to
+   `.infinite/conversions.proposed.json` and **gitignored by the harness** inside a
+   `# infinite:start … # infinite:end` block: it quotes link text and hrefs and never leaves the machine.
+2. **Confirm.** Interactive runs ask `Mark these N elements now? [y/N]` — a separate answer,
+   default No; `--yes` never approves marking, because a company's conversion vocabulary is a data
+   contract. The non-interactive path is `--conversions <file>`: edit the proposal (rename, drop
+   rows) and pass it back. `--no-mark` skips the phase.
+3. **Apply.** Each row is located by its line hash (the recorded line number is a hint — the
+   installer's own `<head>` injection shifting lines never stales a mark), the attributes are
+   inserted right after the tag name and nothing else on the line is touched — no `id`, `class`,
+   `href` or handler. Every write is recorded with before/after hashes in
+   `.infinite/conversions.json`; `unmarkConversions` (exported) removes exactly the inserted text,
+   hash-gated on both sides. A changed line is reported as `INF_MARK_STALE_ELEMENT` for that row
+   and the rest still apply; re-running with the same file is a no-op.
+
+Out of scope for the harness, and said so in the report's next steps: GA4 key events (the cloud
+designates them from the desktop) and PostHog actions (they need a write key).
+
+### Verification, honestly
+
+Step 10 loads `--url` (or `https://<first production host>/`) **once**, as
+`infinite-tag-verify/<version> (+https://infinite.fast; server-lane monitor)` — a self-identified
+automation agent, so your own numbers record a flagged agent row, never a visitor — then polls each
+provider's read-back for up to 60 s at 3 s intervals. The loader runs no JavaScript, so browser
+tags fire only when a real browser opens the page during the window; the CLI says so before it polls.
+
+| Provider | Standalone `infinite-tag harness` | `infinite analytics` |
+|---|---|---|
+| Infinite pixel, GA4, server lane | `installed, not verifiable (run infinite analytics from the desktop CLI to verify)` | read back through the cloud (`POST /api/analytics/verify`, bearer auth) when `INFINITE_API_TOKEN` is set |
+| PostHog | with `--posthog-query-key <personal key with Query Read>`: one bounded HogQL poll for a `$pageview` since the load, on the region's app host; without it, `not verifiable (no query key)` | same, then the cloud |
+| Meta | never verifiable at install time: `open Events Manager → Test Events` | same |
+| adopted / GTM | `adopted, not ours to verify` | same |
+
+A backend answer of `verified` without a receipt timestamp is downgraded to `not verifiable` and
+says so. A cloud that rejects the session (401/403), has no verify route yet (404), or is
+unreachable is reported as exactly that — never as a receipt, never as a failure of your site.
+
+### Flags
+
+| Flag | Meaning |
+|---|---|
+| `--check` / `--plan` / `--apply` (default) / `--verify-only` | the depth |
+| `--providers ga4,posthog,meta,x,infinite` | restrict the set; default = every resolvable provider |
+| `--adopt-existing` (default) / `--no-adopt-existing` | adopt an unmanaged tag, or refuse to install beside it (`conflict`) |
+| `--conversions <file>` | pre-approved conversions (the non-interactive marking path) |
+| `--no-mark` | skip conversion marking |
+| `--server-lane` | add the lossless server lane for the detected host (or the brief) |
+| `--url <prod-url>` | the URL verification loads; defaults to the first production host |
+| `--posthog-query-key <key>` | optional personal API key with Query Read, to read PostHog back |
+| `--yes` | skip the **install** confirmation only |
+| `--allow-dirty` | override the clean-git-tree gate |
+| `--json` | print the report as JSON |
+| `--brief` | write `.infinite/harness-brief.json` and stop |
+| `--workspace`, `--root`, `--app-root`, `--package-manager`, the artifact flags | as for `install` |
+
+Every run that writes ends with `.infinite/REPORT.md` — the table, the failures, the conversion
+counts, a "Verify before merging" checklist — and the pasteable line for your agent:
+
+> Open `.infinite/REPORT.md` and work through its 'Verify before merging' checklist: investigate each item, then list the changes you'd make and get my approval before applying any of them.
 
 ## Proxy Matrix
 
