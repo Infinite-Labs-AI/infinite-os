@@ -260,6 +260,60 @@ describe("vite-react binding-aware bootstrap recognition", () => {
     expect(plan.files).not.toContain("src/main.tsx")
   })
 
+  it("does NOT bind a clause-level `import type { createRoot }` (type-only, erased at runtime)", () => {
+    const root = copyFixture("vite-react-basic")
+    // Typechecks clean; the type import is erased at runtime and the local createRoot is block-scoped
+    // so there is no name clash. There is NO real react-dom binding.
+    writeFileSync(
+      join(root, "src/main.tsx"),
+      [
+        'import type { createRoot } from "react-dom/client"',
+        'import { setup } from "./setup"',
+        "{ const createRoot = (n: number) => ({ render() { setup(n) } }); createRoot(1).render() }"
+      ].join("\n") + "\n"
+    )
+    const plan = planFor(root)
+    expect(plan.blockers).toEqual([])
+    expect(plan.instructions.find((instruction) => instruction.action === "manual")?.path).toBe("src/main.tsx")
+    expect(plan.files).not.toContain("src/main.tsx")
+    const apply = applyInstallation({ root, workspaceId: "ws-test", plan, allowDirty: true })
+    expect(apply.requiresManual?.[0]?.path).toBe("src/main.tsx")
+    expect(readFileSync(join(root, "src/main.tsx"), "utf8")).not.toContain("installInfiniteInstrumentation")
+  })
+
+  it("does NOT bind an inline `import { type createRoot }` (type-only modifier)", () => {
+    const root = copyFixture("vite-react-basic")
+    writeFileSync(
+      join(root, "src/main.tsx"),
+      [
+        'import { type createRoot } from "react-dom/client"',
+        'import { setup } from "./setup"',
+        "{ const createRoot = (n: number) => ({ render() { setup(n) } }); createRoot(1).render() }"
+      ].join("\n") + "\n"
+    )
+    const plan = planFor(root)
+    expect(plan.instructions.find((instruction) => instruction.action === "manual")?.path).toBe("src/main.tsx")
+    expect(plan.files).not.toContain("src/main.tsx")
+  })
+
+  it("DOES bind a real value in a mixed clause `import { createRoot, type Root }` (auto-wire)", () => {
+    const root = copyFixture("vite-react-basic")
+    writeFileSync(
+      join(root, "src/main.tsx"),
+      [
+        'import { createRoot, type Root } from "react-dom/client"',
+        'const el = document.getElementById("root")!',
+        "const root: Root = createRoot(el)",
+        "root.render(<App />)"
+      ].join("\n") + "\n"
+    )
+    const plan = planFor(root)
+    expect(plan.blockers).toEqual([])
+    expect(plan.applyMode).toBe("supported")
+    applyInstallation({ root, workspaceId: "ws-test", plan, allowDirty: true })
+    expect(readFileSync(join(root, "src/main.tsx"), "utf8")).toContain("installInfiniteInstrumentation()")
+  })
+
   it("does NOT match createRoot imported from the WRONG package — it falls back to manual", () => {
     const root = copyFixture("vite-react-basic")
     // `createRoot` here is imported from some-other-pkg, not react-dom. Binding-aware matching must

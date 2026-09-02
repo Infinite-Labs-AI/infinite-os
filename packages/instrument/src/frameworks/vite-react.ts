@@ -476,13 +476,20 @@ function analyzeReactDomBindings(source: string): ReactDomBindings {
     const parsed = parseRe.exec(statement)
     if (!parsed) continue
     if (!REACT_DOM_SPECIFIERS.has(parsed[2])) continue
-    const clause = parsed[1]
+    const clause = parsed[1].trimStart()
+
+    // `import type { … }` / `import type Default` / `import type * as NS` are ERASED at runtime —
+    // they contribute no binding, so a local of the same name is not a React bootstrap.
+    if (/^type\b/.test(clause)) continue
 
     const namedMatch = clause.match(/\{([^}]*)\}/)
     if (namedMatch) {
       for (const raw of namedMatch[1].split(",")) {
         const specifier = raw.trim()
         if (!specifier) continue
+        // Inline type-only modifier (`type createRoot`, `type createRoot as cr`) is erased too; a
+        // real value in the same clause (`createRoot, type Root`) still binds.
+        if (/^type\s+/.test(specifier)) continue
         const [imported, local] = specifier.split(/\s+as\s+/).map((part) => part.trim())
         if (BOOTSTRAP_EXPORTS.has(imported)) {
           callableLocals.add(local || imported)
