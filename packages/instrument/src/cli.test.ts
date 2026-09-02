@@ -708,6 +708,36 @@ describe("Infinite source handoff + meta providers", () => {
     expect(indexHtml(root)).toContain('"allowAutomation":true')
   })
 
+  it("blocks a PERSISTED artifact-file allowAutomation:true on a production host (no CLI flag involved)", async () => {
+    const root = copyFixture("static-html-basic")
+    writeFileSync(
+      join(root, "infinite-artifact.json"),
+      JSON.stringify({
+        infinite: {
+          siteSourceKey: "site_public_123",
+          collectPath: "/infinite/ledger",
+          productionHosts: ["example.com"],
+          consentMode: "not_required",
+          staticProxy: "vercel",
+          allowAutomation: true
+        }
+      })
+    )
+    const code = await runCli(["plan", "--root", root, "--artifact-file", "infinite-artifact.json", "--json"])
+    expect(code).toBe(1)
+    const jsonOutput = logSpy.mock.calls
+      .map((c) => String(c[0]))
+      .find((m: string) => {
+        try {
+          return typeof JSON.parse(m) === "object"
+        } catch {
+          return false
+        }
+      })
+    const parsed = JSON.parse(jsonOutput!)
+    expect(parsed.blockers.some((b: string) => /synthetic\/test-only flag/.test(b))).toBe(true)
+  })
+
   it("rejects an --infinite-autocapture value other than on|off", async () => {
     const root = copyFixture("static-html-basic")
     const code = await runCli(["plan", "--root", root, "--infinite-site-source-key", "site_public_123", "--infinite-autocapture", "maybe"])

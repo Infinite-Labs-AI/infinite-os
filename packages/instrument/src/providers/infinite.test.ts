@@ -181,10 +181,24 @@ describe("allowAutomation threading", () => {
     expect(plan.instructions[0]!.snippet).not.toContain('"allowAutomation"')
   })
 
-  it("serializes allowAutomation:true only when the artifact set it", () => {
-    const artifact: InfinitePublicArtifact = { ...validArtifact, allowAutomation: true }
+  it("serializes allowAutomation:true only when the artifact set it (on a sandbox host)", () => {
+    const artifact: InfinitePublicArtifact = {
+      ...validArtifact,
+      productionHosts: ["localhost"],
+      allowAutomation: true
+    }
     const plan = infiniteProviderAdapter.plan("static-html", artifact, context({ infinite: artifact }))
     expect(plan.blockers).toEqual([])
     expect(plan.instructions[0]!.snippet).toContain('"allowAutomation":true')
+  })
+
+  it("BLOCKS allowAutomation on a production host regardless of how the flag arrived (defense-in-depth)", () => {
+    // validArtifact's hosts (example.com/www.example.com) are production — a persisted/discovered
+    // artifact carrying allowAutomation:true would otherwise skip the CLI-only refusal.
+    const artifact: InfinitePublicArtifact = { ...validArtifact, allowAutomation: true }
+    const plan = infiniteProviderAdapter.plan("static-html", artifact, context({ infinite: artifact }))
+    expect(plan.blockers.some((blocker) => /synthetic\/test-only flag/.test(blocker))).toBe(true)
+    // No runtime instruction is emitted, so allowAutomation:true never reaches a production runtime.
+    expect(plan.instructions).toEqual([])
   })
 })
