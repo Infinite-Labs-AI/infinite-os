@@ -715,6 +715,7 @@ describe("implementProviderTagsContract (#9 provider-neutral combined install)",
       repoStatus: "clean",
       workspaceId: "ws_1",
       artifacts: {},
+      adopted: [],
       ...overrides
     };
   }
@@ -1259,7 +1260,8 @@ function buildInstallPlan(
     packageManager: "pnpm",
     repoStatus: overrides.repoStatus ?? "clean",
     workspaceId: "ws_1",
-    artifacts: { ga4: { measurementId: overrides.measurementId } }
+    artifacts: { ga4: { measurementId: overrides.measurementId } },
+    adopted: []
   };
 }
 

@@ -266,11 +266,15 @@ describe("detectUnmanagedProviders — repo-wide walk + Tag Manager", () => {
     ])
   })
 
-  it("treats a bare GTM container id as Tag Manager, but a dataLayer.push next to gtag( as a snippet", () => {
-    const root = makeTempRoot("instrument-inspect-gtm-id-")
-    mkdirSync(join(root, "app"), { recursive: true })
-    writeFileSync(join(root, "app/layout.tsx"), "export const container = 'GTM-WXYZ99'\n")
-    expect(detectUnmanagedProviders(root)).toEqual([{ provider: "ga4", via: "gtm", file: "app/layout.tsx" }])
+  it("never adopts GA4 from a bare GTM-XXXX token or a bare dataLayer.push( — a false positive silently drops a provider", () => {
+    const tokenRoot = makeTempRoot("instrument-inspect-gtm-token-")
+    mkdirSync(join(tokenRoot, "app"), { recursive: true })
+    writeFileSync(join(tokenRoot, "app/layout.tsx"), "export const GTM_MODE = 'GTM-CONTAINERLESS'\nconst id = 'GTM-WXYZ99'\n")
+    expect(detectUnmanagedProviders(tokenRoot)).toEqual([])
+
+    const pushRoot = makeTempRoot("instrument-inspect-datalayer-push-")
+    writeFileSync(join(pushRoot, "index.html"), "<script>window.dataLayer = window.dataLayer || []; dataLayer.push({event: 'purchase'})</script>\n")
+    expect(detectUnmanagedProviders(pushRoot)).toEqual([])
 
     const snippetRoot = makeTempRoot("instrument-inspect-gtag-push-")
     writeFileSync(
@@ -280,6 +284,74 @@ describe("detectUnmanagedProviders — repo-wide walk + Tag Manager", () => {
     expect(detectUnmanagedProviders(snippetRoot)).toEqual([
       { provider: "ga4", via: "snippet", file: "index.html" }
     ])
+  })
+
+  it("a GTM verdict needs evidence: gtm.js, dataLayer.push( beside googletagmanager.com, a gtmId prop, or a quoted GTM id on a gtm line", () => {
+    const pushWithHost = makeTempRoot("instrument-inspect-gtm-push-host-")
+    writeFileSync(
+      join(pushWithHost, "index.html"),
+      "<noscript><iframe src=\"https://www.googletagmanager.com/ns.html?id=GTM-ABCD12\"></iframe></noscript>\n<script>dataLayer.push({event:'x'})</script>\n"
+    )
+    expect(detectUnmanagedProviders(pushWithHost)).toEqual([{ provider: "ga4", via: "gtm", file: "index.html" }])
+
+    const nextGtm = makeTempRoot("instrument-inspect-next-gtm-")
+    mkdirSync(join(nextGtm, "app"), { recursive: true })
+    writeFileSync(
+      join(nextGtm, "app/layout.tsx"),
+      "import { GoogleTagManager } from '@next/third-parties/google'\nexport default function Layout() { return <GoogleTagManager gtmId=\"GTM-ABCD12\" /> }\n"
+    )
+    expect(detectUnmanagedProviders(nextGtm)).toEqual([{ provider: "ga4", via: "gtm", file: "app/layout.tsx" }])
+
+    const quotedOnGtmLine = makeTempRoot("instrument-inspect-gtm-quoted-")
+    writeFileSync(join(quotedOnGtmLine, "config.ts"), "export const gtmContainer = 'GTM-ABCD12'\n")
+    expect(detectUnmanagedProviders(quotedOnGtmLine)).toEqual([{ provider: "ga4", via: "gtm", file: "config.ts" }])
+  })
+
+  it.each([
+    ["@next/third-parties/google <GoogleAnalytics>", "app/layout.tsx", "import { GoogleAnalytics } from '@next/third-parties/google'\nexport default function Layout() { return <GoogleAnalytics gaId=\"G-ABC123\" /> }\n"],
+    ["react-ga4 ReactGA.initialize", "src/analytics.ts", "import ReactGA from 'react-ga4'\nReactGA.initialize('G-ABC123')\n"],
+    ["vue-gtag", "src/main.ts", "import VueGtag from 'vue-gtag'\napp.use(VueGtag, { config: { id: 'G-ABC123' } })\n"],
+    ["nuxt-gtag", "nuxt.config.ts", "export default defineNuxtConfig({ modules: ['nuxt-gtag'], gtag: { id: 'G-ABC123' } })\n"],
+    ["@analytics/google-analytics", "src/analytics.js", "import googleAnalytics from '@analytics/google-analytics'\n"]
+  ])("adopts GA4 installed through %s (else the site gets double-tagged)", (_label, file, contents) => {
+    const root = makeTempRoot("instrument-inspect-ga4-lib-")
+    mkdirSync(dirname(join(root, file)), { recursive: true })
+    writeFileSync(join(root, file), contents)
+    expect(detectUnmanagedProviders(root)).toEqual([{ provider: "ga4", via: "snippet", file }])
+  })
+
+  it.each([
+    ["posthog-js/react <PostHogProvider>", "app/providers.tsx", "import { PostHogProvider } from 'posthog-js/react'\nexport function Providers({ children }) { return <PostHogProvider apiKey=\"phc_abc\">{children}</PostHogProvider> }\n"],
+    ["@posthog/nextjs", "app/layout.tsx", "import { PostHogProvider } from '@posthog/nextjs'\n"]
+  ])("adopts PostHog installed through %s without an explicit api_host", (_label, file, contents) => {
+    const root = makeTempRoot("instrument-inspect-posthog-lib-")
+    mkdirSync(dirname(join(root, file)), { recursive: true })
+    writeFileSync(join(root, file), contents)
+    expect(detectUnmanagedProviders(root)).toEqual([{ provider: "posthog", via: "snippet", file }])
+  })
+
+  it("skips minified bundles, type declarations, tests, specs, stories, mocks, public/static and email templates", () => {
+    const root = makeTempRoot("instrument-inspect-noise-")
+    const noise: Array<[string, string]> = [
+      ["public/vendor.min.js", "gtag('config','G-1')"],
+      ["static/bundle.js", "gtag('config','G-1')"],
+      ["src/vendor.min.mjs", "gtag('config','G-1')"],
+      ["src/types/gtag.d.ts", "declare function gtag(...args: unknown[]): void"],
+      ["src/analytics.test.ts", "vi.mock('posthog-js'); posthog.init('phc_test')"],
+      ["src/analytics.spec.tsx", "posthog.init('phc_test')"],
+      ["src/Button.stories.tsx", "fbq('track','Lead')"],
+      ["src/__tests__/pixel.ts", "twq('config','o1')"],
+      ["src/__mocks__/gtag.js", "gtag('js')"],
+      [".storybook/preview.js", "gtag('js')"],
+      ["emails/welcome.html", "<script>fbq('init','1')</script>"]
+    ]
+    for (const [file, contents] of noise) {
+      mkdirSync(dirname(join(root, file)), { recursive: true })
+      writeFileSync(join(root, file), `${contents}\n`)
+    }
+    writeFileSync(join(root, "index.html"), "<html><head></head><body></body></html>\n")
+
+    expect(detectUnmanagedProviders(root)).toEqual([])
   })
 
   it("prefers a real snippet over a GTM hint when both exist in the repo", () => {
