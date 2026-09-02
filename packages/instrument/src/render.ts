@@ -125,12 +125,35 @@ function repoLabel(plan: InstallPlan): string {
 function actionByPath(plan: InstallPlan): Map<string, "create" | "modify"> {
   const map = new Map<string, "create" | "modify">()
   for (const instruction of plan.instructions) {
+    // "manual" instructions are surfaced separately (the user edits them); never a preview change line.
+    if (instruction.action === "manual") {
+      continue
+    }
     // "create" only wins when no "modify" already claimed the path.
     if (!map.has(instruction.path) || instruction.action === "modify") {
       map.set(instruction.path, instruction.action)
     }
   }
   return map
+}
+
+/** The "you must add this by hand" instructions, surfaced verbatim in preview and applied output. */
+function manualInstructions(plan: InstallPlan): InstallPlan["instructions"] {
+  return plan.instructions.filter((instruction) => instruction.action === "manual")
+}
+
+/** Preview/applied block for manual steps: the description then the exact snippet, per instruction. */
+function manualStepLines(plan: InstallPlan): string[] {
+  const manual = manualInstructions(plan)
+  if (manual.length === 0) return []
+  const lines = ["", "Manual step (infinite-tag can't do this part safely):"]
+  for (const instruction of manual) {
+    lines.push(`  • ${instruction.description}`)
+    for (const snippetLine of instruction.snippet.split("\n")) {
+      lines.push(snippetLine.length > 0 ? `      ${snippetLine}` : "")
+    }
+  }
+  return lines
 }
 
 /** The "I'll make N changes" block shown before applying (preview). */
@@ -170,6 +193,7 @@ export function renderPreview(plan: InstallPlan): string {
     "",
     `I'll make ${changeLines.length} change${changeLines.length === 1 ? "" : "s"}:`,
     ...changeLines,
+    ...manualStepLines(plan),
     ...(consentLines.length > 0 ? ["", "Consent integration:", ...consentLines.map((line) => `  ${line}`)] : []),
     ""
   ].join("\n")

@@ -29,7 +29,6 @@ const signatureHeader = JSON.stringify(SERVER_LANE_SIGNATURE_HEADER)
 // Snippet import lines live in constants so the package self-containment scanner
 // (package-shape.test.ts) never mistakes them for this package's own imports.
 const EXPRESS_IMPORT = 'import express from "express"'
-const OUTCOME_HELPER_IMPORT = 'import { adMatchFromRequest, postInfiniteOutcome } from "../lib/infinite-outcome"'
 
 /** infinite-server-lane.mjs — the generic Node helper (Express, Fastify, Koa, Hono-on-Node, plain http). */
 export function nodeHelperSnippet(apiOrigin?: string): string {
@@ -319,13 +318,26 @@ void sendInfiniteServerEvent({
 /**
  * Reporting an outcome from a serverless route with the generated `lib/infinite-outcome` helper —
  * the three lines a Vercel `api/` function needs.
+ *
+ * The import specifier and the example route's extension follow the emitted helper: a TS project
+ * imports `../lib/infinite-outcome` (bundler-resolved), while a JS project imports it WITH the
+ * extension (`.js`/`.mjs`) — the exact resolution the module-format fix exists to guarantee.
  */
-export function outcomeRouteSnippet(): string {
-  return String.raw`// api/checkout-status.ts — a Vercel serverless function confirming a paid session.
-${OUTCOME_HELPER_IMPORT}
+export function outcomeRouteSnippet(
+  options: { importSpecifier?: string; language?: "ts" | "js" } = {}
+): string {
+  const specifier = options.importSpecifier ?? "../lib/infinite-outcome"
+  const js = options.language === "js"
+  const routeExtension = js ? "js" : "ts"
+  const outcomeImportLine = `import { adMatchFromRequest, postInfiniteOutcome } from "${specifier}"`
+  const handlerSignature = js
+    ? "export default async function handler(request) {"
+    : "export default async function handler(request: Request): Promise<Response> {"
+  return String.raw`// api/checkout-status.${routeExtension} — a Vercel serverless function confirming a paid session.
+${outcomeImportLine}
 import { createHash } from "node:crypto"   // only needed for the optional adMatch block below
 
-export default async function handler(request: Request): Promise<Response> {
+${handlerSignature}
   const session = await stripe.checkout.sessions.retrieve(new URL(request.url).searchParams.get("id"))
   if (session.payment_status !== "paid") return Response.json({ paid: false })
 

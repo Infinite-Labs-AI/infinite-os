@@ -8,6 +8,7 @@ import { hasExistingUnmanagedFile, isManagedInfiniteFile, removeManagedFile } fr
 import {
   fileExists,
   firstExistingPath,
+  hasDependency,
   normalizeAppRelativePath,
   readWorkspacePackageJson,
   writeFileIfChanged
@@ -34,6 +35,7 @@ import { netlifyTarget } from "./targets/netlify.js"
 import { nodeMountSnippet, nodeTarget } from "./targets/node.js"
 import {
   missingAncestorDirectories,
+  outcomeHelperTarget,
   planManagedFiles,
   type ServerLaneTargetDefinition
 } from "./targets/shared.js"
@@ -151,10 +153,24 @@ function planHostedServerLane(
     action: file.action,
     ...(file.reason ? { reason: file.reason } : {})
   }))
+  // Only name packages the repo does NOT already depend on. Printing "npm install @vercel/functions"
+  // when it is already in package.json (a real report from the first install) is noise at best and,
+  // to an agent following the brief literally, a needless second install.
+  const missingPackages = target.installPackages.filter(
+    (pkg) => !hasDependency(input.appRootAbsolute, pkg)
+  )
+  const presentPackages = target.installPackages.filter((pkg) =>
+    hasDependency(input.appRootAbsolute, pkg)
+  )
   const assumptions = [
     ...base.assumptions,
     `${target.label} was chosen${hosting.evidence ? ` because this repo has ${hosting.evidence}` : ""}.`,
-    ...planned.assumptions
+    ...planned.assumptions,
+    ...(presentPackages.length > 0
+      ? [
+          `${presentPackages.join(", ")} already in package.json; no install needed.`
+        ]
+      : [])
   ]
 
   return {
@@ -163,7 +179,7 @@ function planHostedServerLane(
     created,
     targetLabel: target.label,
     ...(hosting.evidence ? { targetEvidence: hosting.evidence } : {}),
-    ...(target.installPackages.length > 0 ? { installPackages: [...target.installPackages] } : {}),
+    ...(missingPackages.length > 0 ? { installPackages: missingPackages } : {}),
     envKeys: base.envKeys,
     files: created.filter((file) => file.action !== "manual").map((file) => file.path),
     assumptions,
@@ -488,12 +504,26 @@ export function applyServerLane(input: ApplyServerLaneInput): ApplyServerLaneRes
     }
   }
 
+  // For the host-chosen targets that emit the self-contained outcome helper, the brief's examples
+  // must import it exactly as the customer's routes will — with the extension when it is JS.
+  const outcomeEmittingModes = new Set(["vercel-middleware", "netlify-edge", "cloudflare-pages"])
+  const outcomeBrief = outcomeEmittingModes.has(input.plan.mode)
+    ? (() => {
+        const outcome = outcomeHelperTarget(appRootAbsolute)
+        return {
+          outcomeImportSpecifier: `../lib/infinite-outcome${outcome.language === "ts" ? "" : `.${outcome.extension}`}`,
+          outcomeLanguage: outcome.language
+        }
+      })()
+    : {}
+
   const brief = renderServerLaneBrief({
     status,
     siteSourceKey,
     productionHosts,
     ...(apiOrigin ? { apiOrigin } : {}),
-    moduleImportPath: SERVER_LANE_MODULE_IMPORT_PATH
+    moduleImportPath: SERVER_LANE_MODULE_IMPORT_PATH,
+    ...outcomeBrief
   })
   const briefAppRelative = toAppRelative(input.appRoot, input.plan.briefPath)
   let briefWritten = false

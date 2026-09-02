@@ -355,7 +355,7 @@ describe("planInstallation", () => {
     expect(plan.confidence).toBeLessThan(0.5)
   })
 
-  it("blocks vite-react plan when main.tsx uses hydrateRoot instead of createRoot", async () => {
+  it("supports a vite-react plan that boots with ReactDOM.hydrateRoot (SSR entrypoint)", async () => {
     const root = copyFixture("vite-react-basic")
     writeFileSync(
       join(root, "src/main.tsx"),
@@ -368,17 +368,13 @@ describe("planInstallation", () => {
       artifacts: { ga4: { measurementId: "G-TEST123" } }
     })
 
-    expect(plan.blockers).toContain(
-      "Vite React apply only supports simple main entrypoints with ReactDOM.createRoot()."
-    )
-    expect(plan.applyMode).toBe("plan-only")
-    expect(plan.confidence).toBeLessThanOrEqual(0.45)
-    expect(() =>
-      applyInstallation({ root, workspaceId: "ws-test", plan, allowDirty: true })
-    ).toThrow(/Refusing to apply/)
+    expect(plan.blockers).toEqual([])
+    expect(plan.applyMode).toBe("supported")
+    applyInstallation({ root, workspaceId: "ws-test", plan, allowDirty: true })
+    expect(readFileSync(join(root, "src/main.tsx"), "utf8")).toContain("installInfiniteInstrumentation()")
   })
 
-  it("blocks vite-react plan when main.tsx has no import block", async () => {
+  it("falls back to a manual step (not a bare abort) when main.tsx has no recognizable bootstrap", async () => {
     const root = copyFixture("vite-react-basic")
     writeFileSync(join(root, "src/main.tsx"), 'console.log("no imports")\n')
     const inspectResult = await inspectWorkspace(root)
@@ -388,9 +384,23 @@ describe("planInstallation", () => {
       artifacts: { ga4: { measurementId: "G-TEST123" } }
     })
 
-    expect(plan.blockers).toContain(
-      "Vite React apply requires a simple import block at the top of src/main.*."
+    // No hard blocker; the entrypoint is surfaced as a manual instruction instead.
+    expect(plan.blockers).toEqual([])
+    const manual = plan.instructions.find((instruction) => instruction.action === "manual")
+    expect(manual?.path).toBe("src/main.tsx")
+    expect(manual?.snippet).toContain("installInfiniteInstrumentation()")
+    // The entrypoint is left for the user, so it is NOT a managed file.
+    expect(plan.files).not.toContain("src/main.tsx")
+    expect(plan.files).toContain("src/lib/infinite-analytics.ts")
+
+    // Apply writes the managed module and warns loudly — it never edits the unmanageable entry, and
+    // never throws.
+    const apply = applyInstallation({ root, workspaceId: "ws-test", plan, allowDirty: true })
+    expect(readFileSync(join(root, "src/main.tsx"), "utf8")).toBe('console.log("no imports")\n')
+    expect(readFileSync(join(root, "src/lib/infinite-analytics.ts"), "utf8")).toContain(
+      "installInfiniteInstrumentation"
     )
+    expect(apply.warnings.some((w) => w.includes("ACTION REQUIRED"))).toBe(true)
   })
 
   it("blocks vite-react plan when an unmanaged infinite-analytics.ts already exists", async () => {

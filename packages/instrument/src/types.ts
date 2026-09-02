@@ -347,7 +347,8 @@ export interface FrameworkPlanDraft {
 
 export interface InstallInstruction {
   path: string
-  action: "create" | "modify"
+  /** "manual" = infinite-tag will NOT edit this file; the snippet is what the user adds by hand. */
+  action: "create" | "modify" | "manual"
   description: string
   snippet: string
   provider?: ProviderId

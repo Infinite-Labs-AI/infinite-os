@@ -164,6 +164,39 @@ describe("Vercel, any framework", () => {
     expectTreeEquals(root, original)
   })
 
+  it("emits the outcome helper as .js for a JS api dir, and the brief imports it with the extension", () => {
+    // The real bug: a Vite+React app on Vercel whose api/* functions are plain JS. A .ts helper does
+    // not resolve when imported from a .js function, so the helper must be emitted as .js.
+    const root = viteOn({ "vercel.json": "{}\n", "api/checkout-status.js": "export default () => {}\n" })
+    const original = snapshotTree(root)
+
+    const { plan: installPlan } = planAndApply(root)
+    expect(installPlan.serverLane?.files).toEqual([VERCEL_MODULE_PATH, "lib/infinite-outcome.js", VERCEL_MIDDLEWARE_PATH])
+    expect(existsSync(join(root, "lib/infinite-outcome.js"))).toBe(true)
+    expect(existsSync(join(root, VERCEL_OUTCOME_PATH))).toBe(false)
+
+    const helper = readFileSync(join(root, "lib/infinite-outcome.js"), "utf8")
+    expect(helper).not.toMatch(/\binterface\b/)
+    expect(helper).not.toMatch(/: Promise<|Record<string/)
+    expect(helper).toContain('from "../lib/infinite-outcome.js"')
+
+    const brief = readFileSync(join(root, SERVER_LANE_BRIEF_FILE), "utf8")
+    expect(brief).toContain('from "../lib/infinite-outcome.js"')
+    expect(brief).toContain("api/checkout-status.js")
+
+    uninstallInstallation({ root, dryRun: false })
+    expectTreeEquals(root, original)
+  })
+
+  it("does not tell you to install @vercel/functions when it is already a dependency", () => {
+    const root = viteOn({ "vercel.json": "{}\n" })
+    withDependency(root, "@vercel/functions", "^1.0.0")
+    const installPlan = plan(root)
+    expect(installPlan.serverLane?.installPackages).toBeUndefined()
+    expect(installPlan.serverLane?.assumptions.some((a) => a.includes("already in package.json"))).toBe(true)
+    expect(renderPreview(installPlan)).not.toContain("npm install @vercel/functions")
+  })
+
   it("is chosen by a linked .vercel/project.json too, and by vercel.json over every other signal", () => {
     expect(plan(viteOn({ ".vercel/project.json": '{"projectId":"p"}\n' })).serverLane?.mode).toBe(
       "vercel-middleware"

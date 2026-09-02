@@ -31,6 +31,7 @@ import {
   managedGeneratedFile,
   nonDocumentPrefixes,
   outcomeHelperSource,
+  outcomeHelperTarget,
   type ServerLaneTargetDefinition,
   type TargetBuildInput
 } from "./shared.js"
@@ -148,12 +149,15 @@ export const netlifyTarget: ServerLaneTargetDefinition = {
   mode: "netlify-edge",
   label: "Netlify Edge Function",
   installPackages: [],
-  files: () => [
-    { path: NETLIFY_OUTCOME_PATH, role: "module" },
+  files: (appRootAbsolute) => [
+    { path: outcomeHelperTarget(appRootAbsolute).path, role: "module" },
     { path: NETLIFY_EDGE_FUNCTION_PATH, role: "entry" }
   ],
-  build: (input) => ({
-    [NETLIFY_OUTCOME_PATH]: outcomeHelperSource(input),
-    [NETLIFY_EDGE_FUNCTION_PATH]: netlifyEdgeFunctionSource(input)
-  })
+  build: (input, appRootAbsolute) => {
+    const outcome = outcomeHelperTarget(appRootAbsolute)
+    return {
+      [outcome.path]: outcomeHelperSource(input, outcome),
+      [NETLIFY_EDGE_FUNCTION_PATH]: netlifyEdgeFunctionSource(input)
+    }
+  }
 }

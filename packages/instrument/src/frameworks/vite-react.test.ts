@@ -18,7 +18,7 @@ import { describe, expect, it } from "vitest"
 //            and the wiring is injected BEFORE the non-import line.
 //   FIX 2 — a file with a stray `{` inside a line comment is accepted and wired.
 
-import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs"
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach } from "vitest"
@@ -63,6 +63,7 @@ describe("vite-react import scanner — FIX 1: word-boundary check", () => {
     writeFileSync(
       join(root, "src/main.tsx"),
       [
+        'import ReactDOM from "react-dom/client"',
         'import "./styles.css"',
         "importantSetup()",
         REACT_DOM_BOOT,
@@ -99,6 +100,7 @@ describe("vite-react import scanner — FIX 2: comment/string delimiter skipping
     writeFileSync(
       join(root, "src/main.tsx"),
       [
+        'import ReactDOM from "react-dom/client"',
         'import x from "./x" // a comment with a stray {',
         'import y from "./y"',
         REACT_DOM_BOOT,
@@ -131,6 +133,7 @@ describe("vite-react import scanner — FIX 2: comment/string delimiter skipping
     writeFileSync(
       join(root, "src/main.tsx"),
       [
+        'import ReactDOM from "react-dom/client"',
         'import x from "./path{with}braces"',
         'import y from "./y"',
         REACT_DOM_BOOT,
@@ -145,6 +148,79 @@ describe("vite-react import scanner — FIX 2: comment/string delimiter skipping
     expect(plan.blockers).not.toContain(
       "Vite React apply requires a simple import block at the top of src/main.*."
     )
+  })
+})
+
+describe("vite-react binding-aware bootstrap recognition", () => {
+  function planFor(root: string) {
+    const inspect = inspectWorkspace(root)
+    return planInstallation({ root, inspect, artifacts: BASE_ARTIFACTS })
+  }
+
+  it("installs cleanly for a named `createRoot` import (the real customer entrypoint)", () => {
+    const root = copyFixture("vite-react-named-createroot")
+    const plan = planFor(root)
+    expect(plan.blockers).toEqual([])
+    expect(plan.applyMode).toBe("supported")
+    applyInstallation({ root, workspaceId: "ws-test", plan, allowDirty: true })
+    const main = readFileSync(join(root, "src/main.tsx"), "utf8")
+    expect(main).toContain('import { installInfiniteInstrumentation } from "./lib/infinite-analytics"')
+    expect(main).toContain("installInfiniteInstrumentation()")
+    expect(main).toContain("createRoot(root).render(<App />)")
+  })
+
+  const IMPORTS_TAIL = 'const el = document.getElementById("root")!\n'
+  const recognized: Array<[string, string]> = [
+    ["aliased named createRoot", 'import { createRoot as cr } from "react-dom/client"\n' + IMPORTS_TAIL + "cr(el).render(<App />)\n"],
+    ["namespace import", 'import * as ReactDOMClient from "react-dom/client"\n' + IMPORTS_TAIL + "ReactDOMClient.createRoot(el).render(<App />)\n"],
+    ["default member createRoot", 'import ReactDOM from "react-dom/client"\n' + IMPORTS_TAIL + "ReactDOM.createRoot(el).render(<App />)\n"],
+    ["hydrateRoot", 'import { hydrateRoot } from "react-dom/client"\n' + IMPORTS_TAIL + "hydrateRoot(el, <App />)\n"],
+    ["legacy ReactDOM.render", 'import ReactDOM from "react-dom"\n' + IMPORTS_TAIL + "ReactDOM.render(<App />, el)\n"],
+    ["legacy named render", 'import { render } from "react-dom"\n' + IMPORTS_TAIL + "render(<App />, el)\n"]
+  ]
+
+  it.each(recognized)("wires an entrypoint that boots via %s", (_label, mainSource) => {
+    const root = copyFixture("vite-react-basic")
+    writeFileSync(join(root, "src/main.tsx"), mainSource)
+    const plan = planFor(root)
+    expect(plan.blockers).toEqual([])
+    expect(plan.applyMode).toBe("supported")
+    applyInstallation({ root, workspaceId: "ws-test", plan, allowDirty: true })
+    expect(readFileSync(join(root, "src/main.tsx"), "utf8")).toContain("installInfiniteInstrumentation()")
+  })
+
+  it("does NOT match a shadowed local createRoot — it falls back to a manual step, never a wrong wire", () => {
+    const root = copyFixture("vite-react-basic")
+    // A local function named createRoot, never imported from react-dom. Matching the bare name would
+    // wire the wrong file; binding-aware matching rejects it.
+    writeFileSync(
+      join(root, "src/main.tsx"),
+      'import { setup } from "./setup"\n\nfunction createRoot(n: number) {\n  return n + 1\n}\n\nsetup(createRoot(1))\n'
+    )
+    const plan = planFor(root)
+    expect(plan.blockers).toEqual([])
+    const manual = plan.instructions.find((instruction) => instruction.action === "manual")
+    expect(manual?.path).toBe("src/main.tsx")
+    expect(manual?.snippet).toContain("installInfiniteInstrumentation()")
+    expect(plan.files).not.toContain("src/main.tsx")
+
+    const apply = applyInstallation({ root, workspaceId: "ws-test", plan, allowDirty: true })
+    // The unmanageable entrypoint is left byte-for-byte; the managed module is still written.
+    expect(readFileSync(join(root, "src/main.tsx"), "utf8")).not.toContain("installInfiniteInstrumentation")
+    expect(existsSync(join(root, "src/lib/infinite-analytics.ts"))).toBe(true)
+    expect(apply.warnings.some((w) => w.includes("ACTION REQUIRED"))).toBe(true)
+  })
+
+  it("is idempotent after a manual wiring: a hand-added boot line is not flagged again", () => {
+    const root = copyFixture("vite-react-basic")
+    // No recognizable bootstrap, but the user has already pasted the boot line by hand.
+    writeFileSync(
+      join(root, "src/main.tsx"),
+      'import { installInfiniteInstrumentation } from "./lib/infinite-analytics"\nimport { boot } from "./boot"\n\ninstallInfiniteInstrumentation()\nboot()\n'
+    )
+    const plan = planFor(root)
+    expect(plan.instructions.some((instruction) => instruction.action === "manual")).toBe(false)
+    expect(plan.applyMode).toBe("supported")
   })
 })
 

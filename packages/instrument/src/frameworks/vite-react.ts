@@ -65,19 +65,15 @@ export const viteReactAdapter: FrameworkAdapter = {
     const hasManagedProxy = Boolean(proxy.posthog || proxy.infinite)
 
     const blockers: string[] = []
-    if (!fileExists(root, mainFile)) {
-      blockers.push("Vite React apply requires a src/main.* entrypoint.")
-    } else {
-      const mainSource = readRequiredFile(root, mainFile)
-      if (!mainSource.includes("ReactDOM.createRoot(")) {
-        blockers.push(
-          "Vite React apply only supports simple main entrypoints with ReactDOM.createRoot()."
-        )
-      }
-      if (findImportSectionEnd(mainSource) === null) {
-        blockers.push("Vite React apply requires a simple import block at the top of src/main.*.")
-      }
-    }
+    const assumptions: string[] = []
+    // The entrypoint edit is broadened + binding-aware, and it never HARD-fails: an entrypoint we
+    // cannot safely wire becomes an explicit manual step (the managed module is still written), never
+    // a bare abort. Only genuinely unsafe overwrites and the proxy precondition stay hard blockers.
+    const wiring: EntrypointWiring = fileExists(root, mainFile)
+      ? classifyEntrypointWiring(readRequiredFile(root, mainFile))
+      : { kind: "manual", reason: `no ${mainFile} entrypoint was found` }
+    const managesEntrypoint = wiring.kind === "auto" || wiring.kind === "already-wired"
+
     if (hasExistingUnmanagedFile(root, analyticsModulePath)) {
       blockers.push(
         "Vite React apply will not overwrite an existing unmanaged src/lib/infinite-analytics.ts file."
@@ -93,19 +89,34 @@ export const viteReactAdapter: FrameworkAdapter = {
       )
     }
 
-    const files = ["index.html", mainFile, analyticsModulePath]
-    const instructions: InstallInstruction[] =
-      blockers.length === 0
-        ? [
-            {
-              path: mainFile,
-              action: "modify",
-              description:
-                "Import and invoke installInfiniteInstrumentation() once before the React app bootstraps.",
-              snippet: `${importLine}\n\n${bootLine}`
-            }
-          ]
-        : []
+    // The entrypoint is a MANAGED, hash-verified file only when infinite-tag wired it; in the manual
+    // case the user owns it, so it is left out of `files` (or verify would flag the lines they add).
+    const files = managesEntrypoint
+      ? ["index.html", mainFile, analyticsModulePath]
+      : ["index.html", analyticsModulePath]
+    const instructions: InstallInstruction[] = []
+    if (managesEntrypoint) {
+      instructions.push({
+        path: mainFile,
+        action: "modify",
+        description:
+          "Import and invoke installInfiniteInstrumentation() once before the React app bootstraps.",
+        snippet: `${importLine}\n\n${bootLine}`
+      })
+    } else if (wiring.kind === "manual") {
+      // Not a blocker: apply still writes the managed module, then surfaces this exact snippet so the
+      // user completes the install by hand. Distinct from a normal edit only in that infinite-tag does
+      // not perform it — the boot line itself is the idempotency marker on any re-run.
+      instructions.push({
+        path: mainFile,
+        action: "manual",
+        description: `infinite-tag could not safely wire ${mainFile} (${wiring.reason}). Add these two lines by hand, right after your imports (or add the runtime to index.html):`,
+        snippet: manualWiringSnippet()
+      })
+      assumptions.push(
+        `${mainFile} could not be wired automatically (${wiring.reason}); the managed module is written and the two wiring lines are surfaced for a manual step.`
+      )
+    }
 
     if (hasManagedProxy) {
       const vercelExists = fileExists(root, VERCEL_CONFIG_FILE)
@@ -125,7 +136,8 @@ export const viteReactAdapter: FrameworkAdapter = {
       applyMode: blockers.length === 0 ? "supported" : "plan-only",
       instructions,
       assumptions: [
-        "Vite React public IDs can be surfaced through VITE_* environment variables or direct public wiring."
+        "Vite React public IDs can be surfaced through VITE_* environment variables or direct public wiring.",
+        ...assumptions
       ],
       blockers,
       confidence: detected?.confidence ?? 0.88
@@ -133,14 +145,7 @@ export const viteReactAdapter: FrameworkAdapter = {
   },
   apply(context) {
     const appRoot = context.appRoot === "." ? context.root : join(context.root, context.appRoot)
-    const mainFile = selectMainFile(appRoot, context.plan.files, context.appRoot)
-    const rootRelativeMainFile = normalizeAppRelativePath(context.appRoot, mainFile)
     const rootRelativeAnalyticsFile = normalizeAppRelativePath(context.appRoot, analyticsModulePath)
-
-    const currentMain = readRequiredFile(appRoot, mainFile)
-    if (!currentMain.includes("ReactDOM.createRoot(")) {
-      throw new Error("Vite React apply only supports simple main entrypoints with ReactDOM.createRoot().")
-    }
 
     const analyticsModuleAbsolutePath = join(appRoot, analyticsModulePath)
     if (
@@ -152,19 +157,40 @@ export const viteReactAdapter: FrameworkAdapter = {
       )
     }
 
-    const nextMain = upsertMainEntrypoint(currentMain)
-    const nextAnalyticsModule = buildAnalyticsModuleSource(context.plan)
-
     const changedFiles: string[] = []
+    const warnings: string[] = []
     const configOwnership = {}
-    if (writeFileIfChanged(appRoot, mainFile, nextMain)) {
-      changedFiles.push(rootRelativeMainFile)
+
+    // Wire the entrypoint when we safely can; otherwise leave it to the user with the exact snippet.
+    // The managed module is written either way, so a manual wiring only needs the two import/boot lines.
+    const mainFile = mainFileOrNull(appRoot, context.plan.files, context.appRoot)
+    if (mainFile) {
+      const currentMain = readRequiredFile(appRoot, mainFile)
+      const wiring = classifyEntrypointWiring(currentMain)
+      const rootRelativeMainFile = normalizeAppRelativePath(context.appRoot, mainFile)
+      if (wiring.kind === "auto") {
+        const nextMain = upsertMainEntrypoint(currentMain)
+        if (writeFileIfChanged(appRoot, mainFile, nextMain)) {
+          changedFiles.push(rootRelativeMainFile)
+        }
+      } else if (wiring.kind === "manual") {
+        warnings.push(manualWiringWarning(rootRelativeMainFile, wiring.reason))
+      }
+      // "already-wired": nothing to change.
+    } else {
+      warnings.push(
+        manualWiringWarning(
+          normalizeAppRelativePath(context.appRoot, mainCandidates[0]),
+          "no src/main.* entrypoint was found"
+        )
+      )
     }
+
+    const nextAnalyticsModule = buildAnalyticsModuleSource(context.plan)
     if (writeFileIfChanged(appRoot, analyticsModulePath, nextAnalyticsModule)) {
       changedFiles.push(rootRelativeAnalyticsFile)
     }
 
-    const warnings: string[] = []
     const proxy = {
       posthog: context.plan.artifacts.posthog?.proxy,
       infinite: infiniteProxySpec(context.plan.artifacts.infinite)
@@ -260,6 +286,31 @@ function removeMainWiring(source: string): string {
   return next
 }
 
+/**
+ * The main entrypoint to touch, or null when none exists. Unlike selectMainFile it never throws:
+ * apply must still write the managed module (and surface a manual step) even with no entrypoint.
+ */
+function mainFileOrNull(root: string, planFiles: string[], appRoot: string): string | null {
+  const appRelativeFiles = planFiles.map((file) =>
+    appRoot === "." ? file : file.replace(`${appRoot}/`, "")
+  )
+  const matched = appRelativeFiles.find((file) => mainCandidates.includes(file))
+  if (matched) {
+    return matched
+  }
+  return firstExistingPath(root, mainCandidates)
+}
+
+/** The loud, actionable note shown when infinite-tag could not wire the entrypoint itself. */
+function manualWiringWarning(mainFile: string, reason: string): string {
+  return (
+    `ACTION REQUIRED: infinite-tag could not wire ${mainFile} automatically (${reason}). ` +
+    `The managed analytics module was written; complete the install by adding these two lines to ` +
+    `${mainFile} by hand, right after your imports (or add the runtime to index.html):\n\n` +
+    `${manualWiringSnippet()}`
+  )
+}
+
 function selectMainFile(root: string, planFiles: string[], appRoot: string): string {
   const appRelativeFiles = planFiles.map((file) =>
     appRoot === "." ? file : file.replace(`${appRoot}/`, "")
@@ -299,6 +350,129 @@ function upsertMainEntrypoint(source: string): string {
   }
 
   return next
+}
+
+// ---------------------------------------------------------------------------
+// React bootstrap recognition (binding-aware).
+//
+// The injected boot call is inserted right after the import block, INDEPENDENT of how the root is
+// created — so recognizing the bootstrap is only a safety gate ("this really is a React entry we can
+// wire"), never a positioning input. We accept every real React bootstrap idiom: createRoot (named,
+// aliased, default-member, or namespace-member), hydrateRoot, and legacy ReactDOM.render / .render.
+//
+// It is BINDING-AWARE on purpose: we prove the identifier actually came from an import of
+// `react-dom/client` or `react-dom`, so a shadowed local `function createRoot()` or a custom wrapper
+// named `render` is NOT mistaken for a React bootstrap. Matching on the bare name would wire the
+// wrong file.
+const REACT_DOM_SPECIFIERS = new Set(["react-dom/client", "react-dom"])
+const BOOTSTRAP_EXPORTS = new Set(["createRoot", "hydrateRoot", "render"])
+
+interface ReactDomBindings {
+  /** Locals bound to createRoot/hydrateRoot/render — recognized when called directly (`cr(`). */
+  callableLocals: Set<string>
+  /** Default or namespace bindings — recognized as `Obj.createRoot(` / `.hydrateRoot(` / `.render(`. */
+  memberObjects: Set<string>
+}
+
+function analyzeReactDomBindings(source: string): ReactDomBindings {
+  const callableLocals = new Set<string>()
+  const memberObjects = new Set<string>()
+  const importRe = /import\s+([^;]*?)\s+from\s+["']([^"']+)["']/g
+  let match: RegExpExecArray | null
+  while ((match = importRe.exec(source)) !== null) {
+    if (!REACT_DOM_SPECIFIERS.has(match[2])) continue
+    const clause = match[1]
+
+    const namedMatch = clause.match(/\{([^}]*)\}/)
+    if (namedMatch) {
+      for (const raw of namedMatch[1].split(",")) {
+        const specifier = raw.trim()
+        if (!specifier) continue
+        const [imported, local] = specifier.split(/\s+as\s+/).map((part) => part.trim())
+        if (BOOTSTRAP_EXPORTS.has(imported)) {
+          callableLocals.add(local || imported)
+        }
+      }
+    }
+
+    // Whatever remains once the { … } group is removed is the default and/or namespace binding.
+    const rest = clause.replace(/\{[^}]*\}/, "").replace(/^,|,$/g, "")
+    for (const raw of rest.split(",")) {
+      const part = raw.trim()
+      if (!part) continue
+      const namespaceMatch = part.match(/^\*\s+as\s+([A-Za-z_$][\w$]*)$/)
+      if (namespaceMatch) {
+        memberObjects.add(namespaceMatch[1])
+      } else if (/^[A-Za-z_$][\w$]*$/.test(part)) {
+        memberObjects.add(part)
+      }
+    }
+  }
+  return { callableLocals, memberObjects }
+}
+
+function escapeIdentifierForRegExp(identifier: string): string {
+  return identifier.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+}
+
+/** True when `source` calls a React bootstrap through an identifier actually imported from react-dom. */
+function hasRecognizedReactBootstrap(source: string): boolean {
+  const { callableLocals, memberObjects } = analyzeReactDomBindings(source)
+  for (const local of callableLocals) {
+    // A direct call `cr(` / `createRoot(` — but not `foo.createRoot(` (that is a member call).
+    if (new RegExp(`(^|[^.\\w$])${escapeIdentifierForRegExp(local)}\\s*\\(`, "m").test(source)) {
+      return true
+    }
+  }
+  for (const object of memberObjects) {
+    if (
+      new RegExp(
+        `(^|[^.\\w$])${escapeIdentifierForRegExp(object)}\\s*\\.\\s*(createRoot|hydrateRoot|render)\\s*\\(`,
+        "m"
+      ).test(source)
+    ) {
+      return true
+    }
+  }
+  return false
+}
+
+export type EntrypointWiring =
+  | { kind: "auto" }
+  | { kind: "already-wired" }
+  | { kind: "manual"; reason: string }
+
+/**
+ * Whether infinite-tag can safely inject the two wiring lines into `mainSource`, or must hand them to
+ * the user. Manageable requires BOTH a recognizable React bootstrap and a simple top-of-file import
+ * block (the insertion point). Anything else is a manual install, never a silent skip.
+ */
+export function classifyEntrypointWiring(mainSource: string): EntrypointWiring {
+  if (mainSource.includes(bootLine)) {
+    return { kind: "already-wired" }
+  }
+  const hasBootstrap = hasRecognizedReactBootstrap(mainSource)
+  const hasImportBlock = findImportSectionEnd(mainSource) !== null
+  if (hasBootstrap && hasImportBlock) {
+    return { kind: "auto" }
+  }
+  if (!hasBootstrap && !hasImportBlock) {
+    return {
+      kind: "manual",
+      reason: "no recognizable React bootstrap (createRoot/hydrateRoot/render from react-dom) and no simple import block were found"
+    }
+  }
+  return {
+    kind: "manual",
+    reason: hasBootstrap
+      ? "the imports at the top are not a simple block infinite-tag can insert after"
+      : "no recognizable React bootstrap (createRoot/hydrateRoot/render imported from react-dom) was found"
+  }
+}
+
+/** The exact lines a user adds by hand when infinite-tag cannot wire the entrypoint automatically. */
+export function manualWiringSnippet(): string {
+  return `${importLine}\n\n${bootLine}`
 }
 
 // Finds the end offset of the first contiguous import section, treating each
