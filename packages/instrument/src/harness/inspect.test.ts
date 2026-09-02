@@ -41,11 +41,22 @@ const GTAG = `<script async src="https://www.googletagmanager.com/gtag/js?id=G-A
 describe("detectProvidersWithEvidence", () => {
   it("finds a gtag snippet anywhere in the app with file, line and the measurement id", () => {
     const root = copyFixture("vite-react-basic")
-    write(root, "src/components/Analytics.tsx", `export function A(){\n  // ${GTAG.replace(/\n/g, " ")}\n}`)
+    // A real gtag call in CODE (not a comment — a commented snippet is not an install, see below).
+    write(root, "src/components/Analytics.tsx", `export function A(){\n  gtag('config', 'G-ABC123')\n}`)
     const detected = detectProvidersWithEvidence(root)
     expect(detected).toEqual([
       { provider: "ga4", via: "snippet", file: "src/components/Analytics.tsx", line: 2, key: "G-ABC123" }
     ])
+  })
+
+  it("does NOT detect a gtag/posthog snippet that lives only in a comment", () => {
+    const root = copyFixture("vite-react-basic")
+    write(
+      root,
+      "src/components/Analytics.tsx",
+      `export function A(){\n  // gtag('config', 'G-ABC123')\n  // posthog.init('phc_x')\n  return null\n}`
+    )
+    expect(detectProvidersWithEvidence(root)).toEqual([])
   })
 
   it("recognises a Tag Manager container as gtm, with its container id, and not as a gtag snippet", () => {

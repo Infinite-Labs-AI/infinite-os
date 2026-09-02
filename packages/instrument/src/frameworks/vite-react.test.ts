@@ -1,30 +1,12 @@
-import { describe, expect, it } from "vitest"
-
-// Access the internal helpers via the exported adapter's plan logic indirectly,
-// but for unit-testing the scanner we inline-test via upsertMainEntrypoint
-// behaviour (which is the only consumer of findImportSectionEnd /
-// consumeImportStatement). We do this by importing the adapter and driving it
-// through planInstallation-style inputs, avoiding the need to export internals.
-
-// The functions under test are not exported, so we test them through the
-// public surface: upsertMainEntrypoint is exercised via the adapter's apply()
-// path, but findImportSectionEnd / consumeImportStatement are more directly
-// exercised by calling them inline. Since they are not exported, we test their
-// effects through plan() (which calls findImportSectionEnd and returns a blocker
-// when it returns null) and through a small inline reimport trick.
-//
-// Rather than re-export internals, we test the observable outcomes:
-//   FIX 1 — a file with `importantSetup()` does NOT get a "no import block" blocker
-//            and the wiring is injected BEFORE the non-import line.
-//   FIX 2 — a file with a stray `{` inside a line comment is accepted and wired.
-
-import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs"
+// The Vite adapter injects the analytics tag into index.html (like static-html) and NEVER reads or
+// edits the React entrypoint. These tests prove: the block lands in index.html, main.tsx is untouched
+// regardless of its contents (even an old "false-supported" shape), uninstall reverses it, re-install
+// is idempotent, and a genuinely-unwritable index.html (no </head>) falls closed to the manual step.
+import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
-import { afterEach } from "vitest"
-import { cpSync } from "node:fs"
-import { dirname } from "node:path"
+import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
+import { afterEach, describe, expect, it } from "vitest"
 
 import { planInstallation } from "../plan.js"
 import { inspectWorkspace } from "../inspect.js"
@@ -52,99 +34,132 @@ afterEach(() => {
   }
 })
 
-const REACT_DOM_BOOT = 'ReactDOM.createRoot(document.getElementById("root")!).render(<App />)'
 const BASE_ARTIFACTS = { ga4: { measurementId: "G-TEST123" } }
+const MANAGED_START = "<!-- infinite:start -->"
 
-describe("vite-react import scanner — FIX 1: word-boundary check", () => {
-  it("does not consume importantSetup() as an import statement", async () => {
+function planFor(root: string, artifacts: WorkspaceInstallArtifacts = BASE_ARTIFACTS) {
+  return planInstallation({ root, inspect: inspectWorkspace(root), workspaceId: "ws_test", artifacts })
+}
+
+describe("vite-react index.html injection", () => {
+  it("injects the managed <script> into index.html and NEVER touches src/main.tsx", () => {
     const root = copyFixture("vite-react-basic")
-    // Write a main.tsx where an identifier starting with "import" (importantSetup)
-    // appears immediately after the real import block.
-    writeFileSync(
-      join(root, "src/main.tsx"),
-      [
-        'import "./styles.css"',
-        "importantSetup()",
-        REACT_DOM_BOOT,
-        ""
-      ].join("\n")
-    )
+    const mainBefore = readFileSync(join(root, "src/main.tsx"), "utf8")
 
-    const inspect = await inspectWorkspace(root)
-    const plan = await planInstallation({ root, inspect, artifacts: BASE_ARTIFACTS })
-
-    // The plan should succeed (no blocker about import block)
-    expect(plan.blockers).not.toContain(
-      "Vite React apply requires a simple import block at the top of src/main.*."
-    )
+    const plan = planFor(root)
+    expect(plan.blockers).toEqual([])
     expect(plan.applyMode).toBe("supported")
+    expect(plan.files).toContain("index.html")
+    expect(plan.files).not.toContain("src/main.tsx")
+    expect(plan.files).not.toContain("src/lib/infinite-analytics.ts")
 
-    // Apply and verify the injected wiring lands before importantSetup(), not after
-    applyInstallation({ root, workspaceId: "ws-test", plan, allowDirty: true })
+    const apply = applyInstallation({ root, workspaceId: "ws_test", plan, allowDirty: true })
+    expect(apply.changedFiles).toContain("index.html")
+    expect(apply.requiresManual).toBeUndefined()
 
-    const { readFileSync } = await import("node:fs")
-    const result = readFileSync(join(root, "src/main.tsx"), "utf8")
-
-    const importLinePos = result.indexOf('import { installInfiniteInstrumentation }')
-    const importantSetupPos = result.indexOf("importantSetup()")
-    expect(importLinePos).toBeGreaterThanOrEqual(0)
-    expect(importantSetupPos).toBeGreaterThan(importLinePos)
-  })
-})
-
-describe("vite-react import scanner — FIX 2: comment/string delimiter skipping", () => {
-  it("accepts a main.tsx with a stray { inside a line comment and is not forced to plan-only", async () => {
-    const root = copyFixture("vite-react-basic")
-    // A line comment containing an unbalanced `{` must not confuse the depth counter.
-    writeFileSync(
-      join(root, "src/main.tsx"),
-      [
-        'import x from "./x" // a comment with a stray {',
-        'import y from "./y"',
-        REACT_DOM_BOOT,
-        ""
-      ].join("\n")
-    )
-
-    const inspect = await inspectWorkspace(root)
-    const plan = await planInstallation({ root, inspect, artifacts: BASE_ARTIFACTS })
-
-    // Must NOT be refused to plan-only due to a null findImportSectionEnd
-    expect(plan.blockers).not.toContain(
-      "Vite React apply requires a simple import block at the top of src/main.*."
-    )
-    expect(plan.applyMode).toBe("supported")
-
-    // Apply must succeed and inject wiring
-    expect(() =>
-      applyInstallation({ root, workspaceId: "ws-test", plan, allowDirty: true })
-    ).not.toThrow()
-
-    const { readFileSync } = await import("node:fs")
-    const result = readFileSync(join(root, "src/main.tsx"), "utf8")
-    expect(result).toContain("installInfiniteInstrumentation()")
+    const html = readFileSync(join(root, "index.html"), "utf8")
+    expect(html).toContain(MANAGED_START)
+    expect(html).toContain("G-TEST123")
+    // The entrypoint is untouched and NO analytics module was created.
+    expect(readFileSync(join(root, "src/main.tsx"), "utf8")).toBe(mainBefore)
+    expect(existsSync(join(root, "src/lib/infinite-analytics.ts"))).toBe(false)
+    expect(verifyInstallation({ root }).buildOk).toBe(true)
   })
 
-  it("accepts a main.tsx with a stray { inside an import path string", async () => {
+  it("installs regardless of main.tsx contents — an adversarial entrypoint is simply IGNORED", () => {
+    // An old false-"supported" shape: a real react-dom import shadowed by a local createRoot. The
+    // adapter no longer reads main.tsx at all, so it installs cleanly by injecting into index.html.
     const root = copyFixture("vite-react-basic")
-    // An import path string containing `{` must not throw off the depth counter.
+    const adversarial =
+      [
+        'import { createRoot } from "react-dom/client"',
+        "function createRoot(n: number) { return { render() { void n } } }",
+        "createRoot(1).render()"
+      ].join("\n") + "\n"
+    writeFileSync(join(root, "src/main.tsx"), adversarial)
+
+    const plan = planFor(root)
+    expect(plan.applyMode).toBe("supported")
+    const apply = applyInstallation({ root, workspaceId: "ws_test", plan, allowDirty: true })
+    expect(apply.requiresManual).toBeUndefined()
+    expect(readFileSync(join(root, "index.html"), "utf8")).toContain(MANAGED_START)
+    // The entrypoint is left byte-for-byte — never read, never edited.
+    expect(readFileSync(join(root, "src/main.tsx"), "utf8")).toBe(adversarial)
+  })
+
+  it("a COMMENTED provider snippet in main.tsx does NOT suppress the install (false-adoption guard)", () => {
+    // The live iter7 P0: a commented posthog.init( in main.tsx made detectUnmanagedProviders ADOPT
+    // posthog, dropping it from the install -> green exit, no pixel. It must still be INSTALLED.
+    const root = copyFixture("vite-react-basic")
     writeFileSync(
       join(root, "src/main.tsx"),
       [
-        'import x from "./path{with}braces"',
-        'import y from "./y"',
-        REACT_DOM_BOOT,
+        'import { createRoot } from "react-dom/client"',
+        '// posthog.init("phc_example", { api_host: "https://us.i.posthog.com" })',
+        "const s = \"gtag('config')\"",
+        'createRoot(document.getElementById("root")!).render(null)',
+        "void s",
         ""
       ].join("\n")
     )
 
-    const inspect = await inspectWorkspace(root)
-    const plan = await planInstallation({ root, inspect, artifacts: BASE_ARTIFACTS })
+    const plan = planFor(root, { posthog: { projectKey: "phc_test", apiHost: "https://us.i.posthog.com" } })
+    // Installed, not adopted.
+    expect(plan.providers).toContain("posthog")
+    expect(plan.adopted.map((entry) => entry.provider)).not.toContain("posthog")
+    expect(plan.files).toContain("index.html")
 
+    const apply = applyInstallation({ root, workspaceId: "ws_test", plan, allowDirty: true })
+    expect(apply.changedFiles).toContain("index.html")
+    const html = readFileSync(join(root, "index.html"), "utf8")
+    expect(html).toContain(MANAGED_START)
+    expect(html).toContain("phc_test")
+  })
+
+  it("uninstall removes the managed block from index.html, restoring it exactly", () => {
+    const root = copyFixture("vite-react-basic")
+    const original = readFileSync(join(root, "index.html"), "utf8")
+    applyInstallation({ root, workspaceId: "ws_test", plan: planFor(root), allowDirty: true })
+    expect(readFileSync(join(root, "index.html"), "utf8")).toContain(MANAGED_START)
+
+    uninstallInstallation({ root, allowDirty: true })
+    const after = readFileSync(join(root, "index.html"), "utf8")
+    expect(after).not.toContain(MANAGED_START)
+    expect(after).toBe(original)
+  })
+
+  it("full cycle: install -> reinstall (idempotent) -> verify -> uninstall", () => {
+    const root = copyFixture("vite-react-basic")
+    const original = readFileSync(join(root, "index.html"), "utf8")
+
+    const first = applyInstallation({ root, workspaceId: "ws_test", plan: planFor(root), allowDirty: true })
+    expect(first.changedFiles).toContain("index.html")
+    const afterFirst = readFileSync(join(root, "index.html"), "utf8")
+
+    const second = applyInstallation({ root, workspaceId: "ws_test", plan: planFor(root), allowDirty: true })
+    expect(second.changedFiles).toEqual([])
+    expect(readFileSync(join(root, "index.html"), "utf8")).toBe(afterFirst)
+    expect(afterFirst.match(/infinite:start/g)).toHaveLength(1)
+
+    expect(verifyInstallation({ root }).buildOk).toBe(true)
+
+    uninstallInstallation({ root, allowDirty: true })
+    expect(readFileSync(join(root, "index.html"), "utf8")).toBe(original)
+  })
+
+  it("falls closed to the manual step (exit-2 machinery) when index.html has no </head>", () => {
+    const root = copyFixture("vite-react-basic")
+    writeFileSync(join(root, "index.html"), "<html><body><div id=\"root\"></div></body></html>\n")
+
+    const plan = planFor(root)
+    // Not a hard block; index.html is simply NOT a managed file, and apply surfaces the manual step.
     expect(plan.applyMode).toBe("supported")
-    expect(plan.blockers).not.toContain(
-      "Vite React apply requires a simple import block at the top of src/main.*."
-    )
+    expect(plan.files).not.toContain("index.html")
+
+    const apply = applyInstallation({ root, workspaceId: "ws_test", plan, allowDirty: true })
+    expect(apply.requiresManual?.[0]?.path).toBe("index.html")
+    expect(apply.requiresManual?.[0]?.snippet).toContain(MANAGED_START)
+    expect(readFileSync(join(root, "index.html"), "utf8")).not.toContain(MANAGED_START)
   })
 })
 
@@ -163,7 +178,6 @@ describe("vite-react posthog reverse proxy (vercel.json)", () => {
     const applied = applyInstallation({ root, workspaceId: "ws_test", plan, allowDirty: true })
     expect(applied.changedFiles).toContain("vercel.json")
 
-    const { readFileSync, existsSync } = await import("node:fs")
     const vercel = JSON.parse(readFileSync(join(root, "vercel.json"), "utf8"))
     expect(vercel.rewrites).toEqual([
       { source: "/ingest/static/:path(.*)", destination: "https://eu-assets.i.posthog.com/static/:path" },

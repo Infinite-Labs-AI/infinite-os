@@ -2,9 +2,9 @@
 // imported for real (vitest transforms the .ts on the way in), then driven against the fixed
 // vectors in helpers.test.ts — the same vectors the receiving side proves. A lane that would post
 // a different envelope than the Node recipe fails here, not in a customer's production traffic.
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 import { pathToFileURL } from "node:url"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
@@ -25,7 +25,13 @@ import {
 import { cloudflarePagesMiddlewareSource } from "./cloudflare.js"
 import { NETLIFY_EXCLUDED_ASSET_EXTENSIONS, netlifyEdgeFunctionSource } from "./netlify.js"
 import { nodeLaneModuleSource, nodeOutcomeHelperSource } from "./node.js"
-import { edgeLaneCoreSource, nonDocumentPrefixes, outcomeHelperSource } from "./shared.js"
+import {
+  detectServerLaneHelperLanguage,
+  edgeLaneCoreSource,
+  nonDocumentPrefixes,
+  outcomeHelperSource,
+  outcomeHelperTarget
+} from "./shared.js"
 import { vercelLaneModuleSource, vercelMiddlewareSource } from "./vercel-any.js"
 
 const tempRoots: string[] = []
@@ -828,5 +834,113 @@ describe("the generated files as text", () => {
     expect(vercelLaneModuleSource(custom)).toContain('"/metrics/collect"')
     expect(netlifyEdgeFunctionSource(custom)).toContain('"/metrics/collect*"')
     expect(nodeLaneModuleSource(custom)).toContain('"/metrics/collect"')
+  })
+})
+
+describe("the outcome helper module format (TS vs JS)", () => {
+  function makeProject(files: Record<string, string>): string {
+    const root = mkdtempSync(join(tmpdir(), "instrument-outcome-lang-"))
+    tempRoots.push(root)
+    for (const [relativePath, contents] of Object.entries(files)) {
+      const absolute = join(root, relativePath)
+      mkdirSync(dirname(absolute), { recursive: true })
+      writeFileSync(absolute, contents)
+    }
+    return root
+  }
+
+  it("keeps .ts for a TypeScript project (tsconfig, TS api dir, or a top-level *.ts)", () => {
+    expect(outcomeHelperTarget(makeProject({ "tsconfig.json": "{}" }))).toEqual({
+      path: "lib/infinite-outcome.ts",
+      language: "ts",
+      extension: "ts"
+    })
+    expect(detectServerLaneHelperLanguage(makeProject({ "api/pay.ts": "export default 1" }))).toBe("ts")
+    expect(detectServerLaneHelperLanguage(makeProject({ "vite.config.ts": "export default {}" }))).toBe("ts")
+  })
+
+  it("emits .js for a JS api dir under \"type\":\"module\", and .mjs when it is not ESM", () => {
+    const esm = makeProject({
+      "package.json": '{"type":"module"}',
+      "api/checkout-status.js": "export default () => {}"
+    })
+    expect(outcomeHelperTarget(esm)).toEqual({ path: "lib/infinite-outcome.js", language: "js", extension: "js" })
+
+    const cjs = makeProject({
+      "package.json": "{}",
+      "api/checkout-status.js": "module.exports = () => {}"
+    })
+    expect(outcomeHelperTarget(cjs)).toEqual({ path: "lib/infinite-outcome.mjs", language: "js", extension: "mjs" })
+  })
+
+  it("a JS api dir wins even when the frontend is TypeScript (the real Vite+React-on-Vercel bug)", () => {
+    // Vite frontend is TS (vite.config.ts, tsconfig) but the Vercel serverless functions are plain JS,
+    // and they are what import the helper — so the helper must be JS or it will not resolve at runtime.
+    const project = makeProject({
+      "package.json": '{"type":"module"}',
+      "tsconfig.json": "{}",
+      "vite.config.ts": "export default {}",
+      "src/main.tsx": "createRoot()",
+      "api/checkout-status.js": "export default () => {}"
+    })
+    expect(outcomeHelperTarget(project)).toMatchObject({ path: "lib/infinite-outcome.js", language: "js" })
+  })
+
+  it("the emitted JS helper carries no TypeScript syntax and names its own extension in the example", () => {
+    const source = outcomeHelperSource(BUILD, { language: "js", extension: "mjs" })
+    expect(source).not.toMatch(/\binterface\b/)
+    expect(source).not.toMatch(/: Promise<|Record<string|as InfiniteVisitKeyInputs|: InfiniteAdMatch/)
+    expect(source).toContain('from "../lib/infinite-outcome.mjs"')
+    // The TS helper still shows the extensionless import (bundler-resolved).
+    expect(outcomeHelperSource(BUILD)).toContain('from "../lib/infinite-outcome"')
+  })
+
+  describe("the JS helper, executed", () => {
+    const originalEnv = { ...process.env }
+    let fetchMock: ReturnType<typeof vi.fn>
+
+    beforeEach(() => {
+      process.env.INFINITE_SERVER_EVENT_SECRET = VECTORS.secret
+      process.env.INFINITE_SITE_SOURCE_KEY = "site_test"
+      fetchMock = vi.fn(async () => new Response("{}", { status: 202 }))
+      vi.stubGlobal("fetch", fetchMock)
+      vi.spyOn(Date, "now").mockReturnValue(VECTORS.nowMs)
+    })
+
+    afterEach(() => {
+      vi.unstubAllGlobals()
+      vi.restoreAllMocks()
+      process.env = { ...originalEnv }
+    })
+
+    it("posts the SAME envelope as the TS helper — the strip changed types, never behavior", async () => {
+      const helper = (await loadGenerated(
+        outcomeHelperSource(BUILD, { language: "js", extension: "js" }),
+        "js"
+      )) as {
+        postInfiniteOutcome: (input: Record<string, unknown>) => Promise<boolean>
+        adMatchFromRequest: (request: { headers: Headers }, hashed?: { em?: string }) => Record<string, string>
+      }
+      await expect(
+        helper.postInfiniteOutcome({
+          type: "purchase",
+          path: "/checkout",
+          eventId: "purchase:cs_test_123",
+          accountKey: "cus_123",
+          occurredAt: new Date(VECTORS.nowMs),
+          visitKeyInputs: documentRequest()
+        })
+      ).resolves.toBe(true)
+      const posted = postedBody(fetchMock)
+      const body = JSON.parse(posted.body) as { properties: Record<string, string> }
+      expect(body.properties).toEqual({ path: "/checkout", visitKey: VECTORS.visitKey })
+      expect(posted.headers.get(SERVER_LANE_SOURCE_KEY_HEADER)).toBe("site_test")
+
+      const block = helper.adMatchFromRequest(
+        documentRequest({ headers: { cookie: "_fbp=fb.1.1.987; _fbc=fb.1.1.abc" } }),
+        { em: hashInfiniteEmail("founder@example.com") }
+      )
+      expect(block).toMatchObject({ fbc: "fb.1.1.abc", fbp: "fb.1.1.987", client_user_agent: VECTORS.userAgent })
+    })
   })
 })

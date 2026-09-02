@@ -27,12 +27,14 @@ import {
   edgeLaneCoreSource,
   managedGeneratedFile,
   outcomeHelperSource,
+  outcomeHelperTarget,
   type ServerLaneTargetDefinition,
   type TargetBuildInput
 } from "./shared.js"
 
 export const VERCEL_MIDDLEWARE_PATH = "middleware.ts"
 export const VERCEL_MODULE_PATH = "lib/infinite-server-lane.ts"
+/** Default path for a TypeScript project; the emitted extension follows the api dir's language. */
 export const VERCEL_OUTCOME_PATH = "lib/infinite-outcome.ts"
 export const VERCEL_MIDDLEWARE_PACKAGE = "@vercel/functions"
 
@@ -99,14 +101,17 @@ export const vercelAnyTarget: ServerLaneTargetDefinition = {
   mode: "vercel-middleware",
   label: "Vercel root middleware (any framework)",
   installPackages: [VERCEL_MIDDLEWARE_PACKAGE],
-  files: () => [
+  files: (appRootAbsolute) => [
     { path: VERCEL_MODULE_PATH, role: "module" },
-    { path: VERCEL_OUTCOME_PATH, role: "module" },
+    { path: outcomeHelperTarget(appRootAbsolute).path, role: "module" },
     { path: VERCEL_MIDDLEWARE_PATH, role: "entry" }
   ],
-  build: (input) => ({
-    [VERCEL_MODULE_PATH]: vercelLaneModuleSource(input),
-    [VERCEL_OUTCOME_PATH]: outcomeHelperSource(input),
-    [VERCEL_MIDDLEWARE_PATH]: vercelMiddlewareSource(input)
-  })
+  build: (input, appRootAbsolute) => {
+    const outcome = outcomeHelperTarget(appRootAbsolute)
+    return {
+      [VERCEL_MODULE_PATH]: vercelLaneModuleSource(input),
+      [outcome.path]: outcomeHelperSource(input, outcome),
+      [VERCEL_MIDDLEWARE_PATH]: vercelMiddlewareSource(input)
+    }
+  }
 }

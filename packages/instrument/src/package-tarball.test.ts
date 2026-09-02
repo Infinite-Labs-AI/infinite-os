@@ -28,7 +28,7 @@ function runNpm11(args: string[], cwd: string): string {
 }
 
 describe("npm 11 package tarball", () => {
-  it("validates the real 114-file receipt and runs the installed bin", () => {
+  it("validates the real 116-file receipt and runs the installed bin", () => {
     const tempRoot = mkdtempSync(join(tmpdir(), "infinite-tag-tarball-"))
 
     try {
@@ -54,7 +54,7 @@ describe("npm 11 package tarball", () => {
         filename: string
       }>
       expect(receipt).toHaveLength(1)
-      expect(receipt[0]?.files).toHaveLength(114)
+      expect(receipt[0]?.files).toHaveLength(116)
 
       const tarballName = execFileSync(process.execPath, [receiptValidator, receiptPath], {
         encoding: "utf8"

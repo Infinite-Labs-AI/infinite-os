@@ -80,6 +80,14 @@ export interface ServerLaneBriefInput {
   moduleImportPath?: string
   /** The resolved `--infinite-api-origin`, so the brief's URLs match the code that was written. */
   apiOrigin?: string
+  /**
+   * The import specifier for the emitted outcome helper — extensionless for a TS project, WITH the
+   * extension (`../lib/infinite-outcome.js` / `.mjs`) for a JS one, so every example in the brief
+   * resolves the same way the file on disk does. Defaults to the TS form.
+   */
+  outcomeImportSpecifier?: string
+  /** The emitted outcome helper's language, so example routes are shown in the matching syntax. */
+  outcomeLanguage?: "ts" | "js"
 }
 
 const DEFAULT_MODULE_IMPORT_PATH = "./lib/infinite-server-lane"
@@ -129,6 +137,13 @@ export const serverLaneCopy = {
     "A Vercel serverless function (`api/checkout-status.ts`) confirming a paid session:",
   outcomeRouteNote:
     "`type` is the exact name from Infinite → Conversions. Pass the incoming request as `visitKeyInputs` and the outcome carries the same `visitKey` as the page view that produced it, which is what makes the same-lane conversion rate real. `visitKeyInputs` accepts a WHATWG `Request`, a Node request whose `req.headers` is a plain object (Vercel Node functions, Express), or an explicit `{ clientIp, userAgent }` — a plain-object request is read correctly, never swallowed. Give each outcome a stable `eventId` (an order id) so a retry never double counts. It resolves `false` instead of throwing, so a failed report can never fail the checkout.",
+  outcomeContextsHeading: "await it, or fire it — pick by where you call it",
+  outcomeContexts: [
+    "The right call differs by context, because only some places can safely wait for the network:",
+    "- **Middleware / edge document lane** — never `await`. The document recorder is fire-and-forget inside the host's `waitUntil` (`event.waitUntil` on Next.js, `ctx.waitUntil` on Cloudflare, `context.waitUntil` on Netlify) so it can never hold or fail a page response.",
+    "- **Webhooks and background jobs** (Stripe `checkout.session.completed`, a queue worker) — **`await postInfiniteOutcome(...)`**. There is no user waiting on this response, the helper is already bounded by a 2 s timeout and resolves `false` instead of throwing, and awaiting it means a serverless function is not frozen before the send completes.",
+    "- **UI-facing routes** (an API route that answers the buyer's own request) — a deliberate choice. `await` it only if the ~sub-second send is acceptable in that response's latency budget; otherwise report the outcome from a webhook or a `waitUntil` instead, so the shopper never waits on analytics."
+  ],
   outcomeWebhookNote:
     "Reporting from a WEBHOOK (Stripe, a queue worker)? The incoming request there is the PROVIDER'S, not the buyer's, so its ip and user agent would derive the wrong `visitKey`. Compute the key at CHECKOUT from the buyer's request with the exported `infiniteVisitKey`, carry it (e.g. Stripe `metadata.infinite_visit_key`), and in the webhook pass it straight through as `properties.visitKey` — the helper then skips its own derivation:",
   outcomeWebhookExample: [
@@ -152,12 +167,12 @@ export const serverLaneCopy = {
     "```"
   ],
   adMatchHeading: "Optional: forward the conversion to Meta",
-  adMatch: [
+  adMatch: (importSpecifier = "../lib/infinite-outcome", language: "ts" | "js" = "ts"): string[] => [
     "Only if you run **Meta ads and do not use PostHog** — PostHog already ships its own Meta destination, and two senders for one conversion is a double count.",
     "Add an `adMatch` block to the outcome and turn the relay on in Infinite → Site → Settings → \u201cSend outcomes to Meta Conversions API\u201d. The outcome is then forwarded to Meta's Conversions API as it is ingested, and the match data is **discarded**: Infinite never stores it, never writes it to your ledger, never logs it. Nothing happens without both the block and the toggle.",
-    "```ts",
+    "```" + language,
     'import { createHash } from "node:crypto"',
-    'import { adMatchFromRequest, postInfiniteOutcome } from "../lib/infinite-outcome"',
+    `import { adMatchFromRequest, postInfiniteOutcome } from "${importSpecifier}"`,
     "",
     "await postInfiniteOutcome({",
     '  type: "purchase",',
@@ -366,6 +381,8 @@ export function renderStatusParagraph(status: ServerLaneBriefStatus): string {
 /** The complete brief as Markdown. Pure; deterministic for a given input. */
 export function renderServerLaneBrief(input: ServerLaneBriefInput): string {
   const moduleImportPath = input.moduleImportPath ?? DEFAULT_MODULE_IMPORT_PATH
+  const outcomeImportSpecifier = input.outcomeImportSpecifier ?? "../lib/infinite-outcome"
+  const outcomeLanguage = input.outcomeLanguage ?? "ts"
   const lines: string[] = [
     SERVER_LANE_BRIEF_BANNER,
     `# ${serverLaneCopy.title}`,
@@ -483,9 +500,16 @@ export function renderServerLaneBrief(input: ServerLaneBriefInput): string {
     "",
     serverLaneCopy.outcomeRouteVercel,
     "",
-    ...codeBlock("ts", outcomeRouteSnippet()),
+    ...codeBlock(
+      outcomeLanguage,
+      outcomeRouteSnippet({ importSpecifier: outcomeImportSpecifier, language: outcomeLanguage })
+    ),
     "",
     serverLaneCopy.outcomeRouteNote,
+    "",
+    `### ${serverLaneCopy.outcomeContextsHeading}`,
+    "",
+    ...serverLaneCopy.outcomeContexts,
     "",
     serverLaneCopy.outcomeWebhookNote,
     "",
@@ -493,7 +517,7 @@ export function renderServerLaneBrief(input: ServerLaneBriefInput): string {
     "",
     `### ${serverLaneCopy.adMatchHeading}`,
     "",
-    ...serverLaneCopy.adMatch,
+    ...serverLaneCopy.adMatch(outcomeImportSpecifier, outcomeLanguage),
     "",
     `## ${serverLaneCopy.envHeading}`,
     "",

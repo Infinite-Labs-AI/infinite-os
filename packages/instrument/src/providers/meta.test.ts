@@ -30,9 +30,10 @@ describe("meta provider plan", () => {
     expect(snippet.trimEnd().endsWith("</script>")).toBe(true)
   })
 
-  it("emits a raw (unwrapped) snippet for JS frameworks folded into the module", () => {
-    const ok = metaProviderAdapter.plan("vite-react", { pixelId: "1234567890123456" })
-    expect(ok.instructions[0]!.path).toBe("src/lib/infinite-analytics.ts")
+  it("emits a raw (unwrapped) snippet for JS-module frameworks folded into the module", () => {
+    // Next uses the JS module; Vite now injects the wrapped <script> into index.html like static-html.
+    const ok = metaProviderAdapter.plan("next-app-router", { pixelId: "1234567890123456" })
+    expect(ok.instructions[0]!.path).toBe("lib/infinite-analytics.ts")
     const snippet = ok.instructions[0]!.snippet
     expect(snippet.startsWith("<script>")).toBe(false)
     expect(snippet).toContain("fbevents.js")

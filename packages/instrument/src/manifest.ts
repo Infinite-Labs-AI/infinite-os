@@ -65,6 +65,10 @@ function assertManifestConfined(root: string, manifest: InstallManifest): void {
       assertConfinedManifestFileEntry(root, relativePath)
     }
   }
+  // verify joins requiresManual[].path to read the target file, so it must stay inside the root too.
+  for (const requirement of manifest.requiresManual ?? []) {
+    assertConfinedManifestFileEntry(root, requirement.path)
+  }
 }
 
 function isInstallManifestShape(value: unknown): value is InstallManifest {

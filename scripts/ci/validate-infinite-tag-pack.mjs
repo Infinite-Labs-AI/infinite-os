@@ -11,9 +11,9 @@ const EXPECTED_FILENAME = "infinite-tag-0.8.0.tgz"
 // shows up as an order-of-magnitude jump, never as a few percent. They are NOT a size target: the
 // package is expected to grow as infinite-tag grows, and the ceilings are re-based when it does.
 //
-// Measured on this commit (npm 11 pack of packages/instrument): 114 files, 219,189 packed,
-// 807,699 unpacked. The unpacked figure crossed the previous 800,000 ceiling once #16/#17/#18/#19
-// landed on main, which is what turned CI red — not any one PR's content.
+// Measured after the Vite index.html-injection pivot (npm 11 pack of packages/instrument): 116 files
+// (the new frameworks/managed-html.ts adds a .js + .d.ts). The unpacked figure crossed the previous
+// 800,000 ceiling once #16/#17/#18/#19 landed on main, which is what turned CI red — not any one PR.
 //
 // Re-based to ~1.5x the measured size, matching how these moved together before
 // (150k→250k packed and 500k→800k unpacked in one commit): enough headroom for the next few

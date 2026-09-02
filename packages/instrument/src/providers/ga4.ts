@@ -1,4 +1,5 @@
 import type { InstallInstruction, ProviderAdapter, SupportedFramework } from "../types.js"
+import { isHtmlInjectedFramework } from "../types.js"
 import { jsLiteral, urlQueryValue, validateGa4MeasurementId } from "./validate.js"
 
 function frameworkEnvKeys(framework: SupportedFramework): string[] {
@@ -6,8 +7,8 @@ function frameworkEnvKeys(framework: SupportedFramework): string[] {
     case "next-app-router":
     case "next-pages-router":
       return ["NEXT_PUBLIC_GA4_MEASUREMENT_ID"]
+    // Vite bakes the resolved id into the injected index.html <script> at install time — no env var.
     case "vite-react":
-      return ["VITE_GA4_MEASUREMENT_ID"]
     case "static-html":
       return []
   }
@@ -33,16 +34,14 @@ export const ga4ProviderAdapter: ProviderAdapter = {
     const instructions: InstallInstruction[] = [
       {
         path: frameworkInstructionPath(framework),
-        action: framework === "static-html" ? "modify" : "create",
-        description:
-          framework === "static-html"
-            ? "Inject the GA4 public loader and gtag bootstrap into index.html."
-            : "Add the GA4 public loader and gtag bootstrap to the managed analytics module.",
+        action: isHtmlInjectedFramework(framework) ? "modify" : "create",
+        description: isHtmlInjectedFramework(framework)
+          ? "Inject the GA4 public loader and gtag bootstrap into index.html."
+          : "Add the GA4 public loader and gtag bootstrap to the managed analytics module.",
         provider: "ga4",
-        snippet:
-          framework === "static-html"
-            ? buildHtmlSnippet(measurementId!)
-            : buildBootstrapSnippet(measurementId!)
+        snippet: isHtmlInjectedFramework(framework)
+          ? buildHtmlSnippet(measurementId!)
+          : buildBootstrapSnippet(measurementId!)
       }
     ]
 
@@ -57,9 +56,8 @@ export const ga4ProviderAdapter: ProviderAdapter = {
 function frameworkInstructionPath(framework: SupportedFramework): string {
   switch (framework) {
     case "static-html":
-      return "index.html"
     case "vite-react":
-      return "src/lib/infinite-analytics.ts"
+      return "index.html"
     case "next-app-router":
     case "next-pages-router":
       return "lib/infinite-analytics.ts"

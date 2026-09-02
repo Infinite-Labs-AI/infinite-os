@@ -26,6 +26,7 @@ import {
   edgeLaneCoreSource,
   managedGeneratedFile,
   outcomeHelperSource,
+  outcomeHelperTarget,
   type ServerLaneTargetDefinition,
   type TargetBuildInput
 } from "./shared.js"
@@ -80,12 +81,15 @@ export const cloudflarePagesTarget: ServerLaneTargetDefinition = {
   mode: "cloudflare-pages",
   label: "Cloudflare Pages functions/_middleware.ts",
   installPackages: [],
-  files: () => [
-    { path: CLOUDFLARE_OUTCOME_PATH, role: "module" },
+  files: (appRootAbsolute) => [
+    { path: outcomeHelperTarget(appRootAbsolute).path, role: "module" },
     { path: CLOUDFLARE_MIDDLEWARE_PATH, role: "entry" }
   ],
-  build: (input) => ({
-    [CLOUDFLARE_OUTCOME_PATH]: outcomeHelperSource(input),
-    [CLOUDFLARE_MIDDLEWARE_PATH]: cloudflarePagesMiddlewareSource(input)
-  })
+  build: (input, appRootAbsolute) => {
+    const outcome = outcomeHelperTarget(appRootAbsolute)
+    return {
+      [outcome.path]: outcomeHelperSource(input, outcome),
+      [CLOUDFLARE_MIDDLEWARE_PATH]: cloudflarePagesMiddlewareSource(input)
+    }
+  }
 }

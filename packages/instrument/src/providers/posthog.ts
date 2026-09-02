@@ -1,4 +1,5 @@
 import type { InstallInstruction, ProviderAdapter, SupportedFramework } from "../types.js"
+import { isHtmlInjectedFramework } from "../types.js"
 import {
   jsLiteral,
   normalizePosthogApiHost,
@@ -11,8 +12,8 @@ function frameworkEnvKeys(framework: SupportedFramework): string[] {
     case "next-app-router":
     case "next-pages-router":
       return ["NEXT_PUBLIC_POSTHOG_API_HOST", "NEXT_PUBLIC_POSTHOG_KEY"]
+    // Vite bakes the resolved key/host into the injected index.html <script> — no env var.
     case "vite-react":
-      return ["VITE_POSTHOG_API_HOST", "VITE_POSTHOG_KEY"]
     case "static-html":
       return []
   }
@@ -66,18 +67,14 @@ export const posthogProviderAdapter: ProviderAdapter = {
         ? [
             {
               path: frameworkInstructionPath(framework),
-              action: framework === "static-html" ? "modify" : "create",
-              description:
-                framework === "static-html"
-                  ? "Inject the PostHog public bootstrap snippet into index.html."
-                  : "Add the PostHog public bootstrap snippet to the managed analytics module.",
+              action: isHtmlInjectedFramework(framework) ? "modify" : "create",
+              description: isHtmlInjectedFramework(framework)
+                ? "Inject the PostHog public bootstrap snippet into index.html."
+                : "Add the PostHog public bootstrap snippet to the managed analytics module.",
               provider: "posthog",
-              snippet:
-                framework === "static-html"
-                  ? wrapHtmlSnippet(
-                      buildPostHogBootstrapSnippet(projectKey!, apiHostOrigin!, uiHostOrigin)
-                    )
-                  : buildPostHogBootstrapSnippet(projectKey!, apiHostOrigin!, uiHostOrigin)
+              snippet: isHtmlInjectedFramework(framework)
+                ? wrapHtmlSnippet(buildPostHogBootstrapSnippet(projectKey!, apiHostOrigin!, uiHostOrigin))
+                : buildPostHogBootstrapSnippet(projectKey!, apiHostOrigin!, uiHostOrigin)
             }
           ]
         : []
@@ -88,9 +85,8 @@ export const posthogProviderAdapter: ProviderAdapter = {
 function frameworkInstructionPath(framework: SupportedFramework): string {
   switch (framework) {
     case "static-html":
-      return "index.html"
     case "vite-react":
-      return "src/lib/infinite-analytics.ts"
+      return "index.html"
     case "next-app-router":
     case "next-pages-router":
       return "lib/infinite-analytics.ts"

@@ -1138,4 +1138,80 @@ describe("posthog reverse proxy (--posthog-proxy / --posthog-ui-host)", () => {
     expect(code).toBe(0)
     expect(existsSync(join(root, "vercel.json"))).toBe(false)
   })
+
+  describe("manual-required install (pixel not yet live) — exit code + json", () => {
+    // The ONLY path that now reaches the exit-2 / requires_manual machinery: an index.html with no
+    // </head> to inject into. main.tsx is never consulted.
+    function manualVite(): string {
+      const root = copyFixture("vite-react-basic")
+      writeFileSync(join(root, "index.html"), '<html><body><div id="root"></div></body></html>\n')
+      return root
+    }
+
+    const flags = (root: string): string[] => [
+      "--root", root,
+      "--workspace", "ws_test",
+      "--yes",
+      "--json",
+      "--allow-dirty",
+      "--ga4-measurement-id", "G-TEST123"
+    ]
+
+    it("install --yes --json exits 2 (needs_action), not 0, and reports requiresManual in the json", async () => {
+      const root = manualVite()
+      const code = await runCli(["install", ...flags(root)])
+      expect(code).toBe(2)
+      const result = JSON.parse(lastStdoutJson()) as {
+        requiresManual?: Array<{ path: string; reason: string; snippet: string }>
+      }
+      expect(result.requiresManual?.[0]?.path).toBe("index.html")
+      expect(result.requiresManual?.[0]?.snippet).toContain("<!-- infinite:start -->")
+    })
+
+    it("--allow-manual downgrades the same install to success (exit 0)", async () => {
+      const root = manualVite()
+      const code = await runCli(["install", ...flags(root), "--allow-manual"])
+      expect(code).toBe(0)
+    })
+
+    it("apply --yes --json exits 2 and carries requiresManual at the top level of ApplyResult", async () => {
+      const root = manualVite()
+      const code = await runCli(["apply", ...flags(root)])
+      expect(code).toBe(2)
+      const result = JSON.parse(lastStdoutJson()) as { requiresManual?: Array<{ path: string }> }
+      expect(result.requiresManual?.[0]?.path).toBe("index.html")
+    })
+
+    it("verify after a manual-required install also reports non-green (exit 2)", async () => {
+      const root = manualVite()
+      await runCli(["install", ...flags(root)])
+      const code = await runCli(["verify", "--root", root, "--json"])
+      expect(code).toBe(2)
+      const result = JSON.parse(lastStdoutJson()) as { requiresManual?: Array<{ path: string }> }
+      expect(result.requiresManual?.[0]?.path).toBe("index.html")
+    })
+
+    it("verify CLEARS to exit 0 once the user actually adds the block to index.html (BLOCKER 1)", async () => {
+      const root = manualVite()
+      expect(await runCli(["install", ...flags(root)])).toBe(2)
+      const installed = JSON.parse(lastStdoutJson()) as { requiresManual?: Array<{ snippet: string }> }
+      const block = installed.requiresManual![0]!.snippet
+      // The user pastes the exact managed <script> block into index.html by hand.
+      writeFileSync(join(root, "index.html"), `<html><head>\n${block}\n</head><body></body></html>\n`)
+
+      const code = await runCli(["verify", "--root", root, "--json"])
+      expect(code).toBe(0)
+      const result = JSON.parse(lastStdoutJson()) as { buildOk: boolean; requiresManual?: unknown[] }
+      expect(result.buildOk).toBe(true)
+      expect(result.requiresManual ?? []).toEqual([])
+    })
+
+    it("a normal vite install (index.html has </head>) injects the tag and stays exit 0", async () => {
+      const root = copyFixture("vite-react-basic")
+      const code = await runCli(["install", ...flags(root)])
+      expect(code).toBe(0)
+      const result = JSON.parse(lastStdoutJson()) as { requiresManual?: unknown[] }
+      expect(result.requiresManual ?? []).toEqual([])
+    })
+  })
 })

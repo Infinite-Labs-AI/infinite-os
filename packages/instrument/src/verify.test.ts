@@ -117,31 +117,27 @@ describe("verifyInstallation", () => {
     const root = copyFixture("vite-react-basic")
     installViteFixture(root)
 
-    const analyticsPath = join(root, "src/lib/infinite-analytics.ts")
-    writeFileSync(analyticsPath, `${readFileSync(analyticsPath, "utf8")}\n// drifted after install\n`)
+    const indexPath = join(root, "index.html")
+    writeFileSync(indexPath, `${readFileSync(indexPath, "utf8")}\n<!-- drifted after install -->\n`)
 
     const result = verifyInstallation({ root })
 
     expect(result.buildOk).toBe(false)
-    expect(result.routeChecks).toContain(
-      "Managed file content drifted from manifest: src/lib/infinite-analytics.ts"
-    )
+    expect(result.routeChecks).toContain("Managed file content drifted from manifest: index.html")
   })
 
   it("rejects a forbidden external Infinite loader even when its hash is recorded", () => {
     const root = copyFixture("vite-react-basic")
     installViteFixture(root)
-    const analyticsPath = join(root, "src/lib/infinite-analytics.ts")
-    const forbidden = `${readFileSync(analyticsPath, "utf8")}\nconst oldLoader = "https://app.ultima.inc/tracking/standalone.js"\n`
-    writeFileSync(analyticsPath, forbidden)
+    const indexPath = join(root, "index.html")
+    const forbidden = `${readFileSync(indexPath, "utf8")}\n<script src="https://app.ultima.inc/tracking/standalone.js"></script>\n`
+    writeFileSync(indexPath, forbidden)
 
     const manifestPath = join(root, ".infinite/install.json")
     const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as {
       contentHashes: Record<string, string>
     }
-    manifest.contentHashes["src/lib/infinite-analytics.ts"] = createHash("sha256")
-      .update(forbidden)
-      .digest("hex")
+    manifest.contentHashes["index.html"] = createHash("sha256").update(forbidden).digest("hex")
     writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`)
 
     const result = verifyInstallation({ root })

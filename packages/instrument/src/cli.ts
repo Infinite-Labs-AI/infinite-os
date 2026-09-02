@@ -60,6 +60,8 @@ interface ParsedArgs {
   json: boolean
   yes: boolean
   allowDirty: boolean
+  /** `--allow-manual` / `--allow-partial`: accept an install that still needs a hand-added step as success. */
+  allowManual: boolean
   artifactFile?: string
   ga4MeasurementId?: string
   posthogProjectKey?: string
@@ -116,6 +118,7 @@ function parseArgs(argv: string[]): ParsedArgs {
     json: false,
     yes: false,
     allowDirty: false,
+    allowManual: false,
     posthogProxy: false,
     xEventTagIds: [],
     infiniteProductionHosts: [],
@@ -247,6 +250,10 @@ function parseArgs(argv: string[]): ParsedArgs {
       case "--allow-dirty":
         parsed.allowDirty = true
         break
+      case "--allow-manual":
+      case "--allow-partial":
+        parsed.allowManual = true
+        break
       default:
         throw new Error(`Unknown argument: ${token}. Run infinite-tag help for usage.`)
     }
@@ -280,6 +287,8 @@ function printHelp(): void {
       "  --root <path>",
       "  --yes             Apply without the interactive confirmation",
       "  --allow-dirty     Skip the clean-git-tree safety gate",
+      "  --allow-manual    Treat an install that still needs a hand-added wiring step as success",
+      "                    (default: such an install exits 2 / needs-action, not 0)",
       "  --json            Output machine-readable JSON instead of human text",
       "",
       "Artifact flags:",
@@ -408,11 +417,34 @@ async function confirmApply(): Promise<boolean> {
   }
 }
 
+/** Distinct exit code for "installed, but a hand-added step is still needed" — never 0, never 1. */
+const NEEDS_ACTION_EXIT = 2
+
+function manualPending(items?: { length: number }): boolean {
+  return (items?.length ?? 0) > 0
+}
+
+/**
+ * Exit code once files are written: a still-outstanding manual step is `needs_action` (2) unless the
+ * caller opted into partial success with --allow-manual; otherwise the usual verify pass/fail (0/1).
+ */
+function completionExitCode(
+  requiresManual: { length: number } | undefined,
+  verify: { buildOk: boolean },
+  allowManual: boolean
+): number {
+  if (manualPending(requiresManual)) {
+    return allowManual ? 0 : NEEDS_ACTION_EXIT
+  }
+  return verify.buildOk ? 0 : 1
+}
+
 interface ApplyContext {
   root: string
   inspect: ReturnType<typeof inspectWorkspace>
   plan: InstallPlan
   allowDirty: boolean
+  allowManual: boolean
 }
 
 /** Applies + verifies, then prints the human narration/success block. Returns the exit code. */
@@ -434,7 +466,7 @@ function applyAndRenderHuman(ctx: ApplyContext): number {
   const verifyResult = verifyInstallation({ root: ctx.root })
   console.log(renderApplied({ inspect: ctx.inspect, plan: ctx.plan, apply: applyResult, verify: verifyResult }))
   printAppliedServerLaneBrief(ctx.plan, applyResult)
-  return verifyResult.buildOk ? 0 : 1
+  return completionExitCode(applyResult.requiresManual, verifyResult, ctx.allowManual)
 }
 
 /**
@@ -700,8 +732,9 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
             plan,
             allowDirty: parsed.allowDirty
           })
+          // `requiresManual` is a top-level structured field of ApplyResult, so it is in the JSON.
           printResult(parsed, result)
-          return 0
+          return manualPending(result.requiresManual) && !parsed.allowManual ? NEEDS_ACTION_EXIT : 0
         }
         const issue = renderPlanIssue(plan)
         if (issue) {
@@ -712,7 +745,7 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
           console.log(renderNothingToInstall(plan))
           return 0
         }
-        return applyAndRenderHuman({ root, inspect, plan, allowDirty: parsed.allowDirty })
+        return applyAndRenderHuman({ root, inspect, plan, allowDirty: parsed.allowDirty, allowManual: parsed.allowManual })
       }
       case "verify": {
         const result = verifyInstallation({ root })
@@ -721,7 +754,7 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
         } else {
           console.log(renderVerify(result))
         }
-        return result.buildOk ? 0 : 1
+        return completionExitCode(result.requiresManual, result, parsed.allowManual)
       }
       case "install": {
         const plan = planInstallation({
@@ -751,8 +784,15 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
             allowDirty: parsed.allowDirty
           })
           const verifyResult = verifyInstallation({ root })
-          printResult(parsed, { inspect, plan, apply: applyResult, verify: verifyResult })
-          return verifyResult.buildOk ? 0 : 1
+          printResult(parsed, {
+            inspect,
+            plan,
+            apply: applyResult,
+            verify: verifyResult,
+            // Surfaced top-level too, so a CI consumer never has to dig into apply.* to see it.
+            requiresManual: applyResult.requiresManual ?? []
+          })
+          return completionExitCode(applyResult.requiresManual, verifyResult, parsed.allowManual)
         }
 
         // Human mode.
@@ -771,7 +811,7 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
           if (!parsed.workspaceId) {
             throw new Error("install requires --workspace <workspace-id> when --yes is used.")
           }
-          return applyAndRenderHuman({ root, inspect, plan, allowDirty: parsed.allowDirty })
+          return applyAndRenderHuman({ root, inspect, plan, allowDirty: parsed.allowDirty, allowManual: parsed.allowManual })
         }
 
         // Preview, then either confirm interactively (TTY) or print how to apply.
@@ -783,7 +823,7 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
             console.log("\nNo changes made. Run it later with:  npx infinite-tag install --yes\n")
             return 0
           }
-          return applyAndRenderHuman({ root, inspect, plan, allowDirty: parsed.allowDirty })
+          return applyAndRenderHuman({ root, inspect, plan, allowDirty: parsed.allowDirty, allowManual: parsed.allowManual })
         }
 
         const applyCommand = canApplyNow

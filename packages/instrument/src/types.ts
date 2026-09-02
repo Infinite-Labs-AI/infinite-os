@@ -13,6 +13,16 @@ export const supportedFrameworks = [
 ] as const
 export type SupportedFramework = (typeof supportedFrameworks)[number]
 
+/**
+ * Frameworks whose analytics tag is injected as a managed `<script>` block into `index.html` (with
+ * the config baked in at install time), rather than wired through a JS module + framework entrypoint.
+ * Vite joins static-html here: the runtime self-installs its own SPA history hooks, so the React
+ * entrypoint (`src/main.*`) is never read or edited.
+ */
+export function isHtmlInjectedFramework(framework: SupportedFramework): boolean {
+  return framework === "static-html" || framework === "vite-react"
+}
+
 export const providerIds = ["infinite", "ga4", "posthog", "x", "meta"] as const
 export type ProviderId = (typeof providerIds)[number]
 
@@ -105,10 +115,26 @@ export interface InstallPlan {
   serverLane?: ServerLanePlan
 }
 
+/**
+ * A file infinite-tag could NOT safely edit itself, and the exact snippet the user must add. Its
+ * presence means the install is INCOMPLETE — the pixel is not live until the snippet is added — so
+ * apply/install/verify treat it as a distinct "needs action" state, never as a completed install.
+ */
+export interface ManualRequirement {
+  /** App/root-relative file the snippet belongs in. */
+  path: string
+  /** Why infinite-tag could not do it automatically. */
+  reason: string
+  /** The exact lines to add by hand. */
+  snippet: string
+}
+
 export interface ApplyResult {
   changedFiles: string[]
   manifestPath: string
   warnings: string[]
+  /** Present and non-empty when the install completed only partially and needs a manual step. */
+  requiresManual?: ManualRequirement[]
   /** Present when the plan carried `--server-lane`. */
   serverLane?: {
     manifest: ServerLaneManifest
@@ -130,6 +156,8 @@ export interface VerifyResult {
   routeChecks: string[]
   beaconChecks: string[]
   warnings: string[]
+  /** Recorded manual steps still outstanding — the managed files can verify while the pixel is not live. */
+  requiresManual?: Array<{ path: string; reason: string }>
 }
 
 export type InfiniteConsentMode = "required" | "not_required"
@@ -249,6 +277,12 @@ export interface InstallManifest {
   configOwnership?: Record<string, ManagedConfigOwnership>
   /** Present when `--server-lane` installed the lossless server lane; root-relative paths. */
   serverLane?: ServerLaneManifest
+  /**
+   * Manual steps recorded at apply time (the `requires_manual_snippet` state). The snippet is stored
+   * so verify can check the target file against on-disk reality — a requirement is SATISFIED once the
+   * file actually contains the wiring, not merely because it was recorded here.
+   */
+  requiresManual?: ManualRequirement[]
   wiringVersion: number
   verifiedAt: string | null
 }
@@ -379,7 +413,8 @@ export interface FrameworkPlanDraft {
 
 export interface InstallInstruction {
   path: string
-  action: "create" | "modify"
+  /** "manual" = infinite-tag will NOT edit this file; the snippet is what the user adds by hand. */
+  action: "create" | "modify" | "manual"
   description: string
   snippet: string
   provider?: ProviderId
@@ -391,6 +426,8 @@ export interface FrameworkPlanOptions {
   infiniteProxy?: InfiniteProxySpec
   allowStaticVercelProxy?: boolean
   configOwnership?: Record<string, ManagedConfigOwnership>
+  /** The manifest from a prior install, so an adapter can tell files IT wired from ones the user owns. */
+  previousManifest?: InstallManifest | null
 }
 
 export interface InfiniteProxySpec {
@@ -424,6 +461,8 @@ export interface FrameworkApplyResult {
   changedFiles: string[]
   warnings: string[]
   configOwnership?: Record<string, ManagedConfigOwnership>
+  /** Entrypoints the adapter could not safely wire; the install is incomplete until these are added. */
+  requiresManual?: ManualRequirement[]
 }
 
 export interface FrameworkUninstallContext {

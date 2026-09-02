@@ -135,7 +135,8 @@ export function planInstallation(options: PlanInstallationOptions): InstallPlan 
         posthogProxy: options.artifacts.posthog?.proxy,
         infiniteProxy,
         allowStaticVercelProxy: options.artifacts.infinite?.staticProxy === "vercel",
-        configOwnership
+        configOwnership,
+        previousManifest
       })
     : undefined
 

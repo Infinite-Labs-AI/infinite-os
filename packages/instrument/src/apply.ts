@@ -102,6 +102,7 @@ export function applyInstallation(options: ApplyInstallationOptions): ApplyResul
       ...(frameworkResult.configOwnership ?? {}),
       ...(serverLaneResult?.configOwnership ?? {})
     }
+    const requiresManual = frameworkResult.requiresManual ?? []
     const manifest: InstallManifest = {
       workspaceId: options.workspaceId,
       appRoot: options.plan.appRoot,
@@ -112,6 +113,9 @@ export function applyInstallation(options: ApplyInstallationOptions): ApplyResul
       contentHashes: computeContentHashes(options.root, options.plan.files),
       ...(Object.keys(configOwnership).length > 0 ? { configOwnership } : {}),
       ...(serverLaneResult ? { serverLane: serverLaneResult.manifest } : {}),
+      // The `requires_manual_snippet` state: recorded WITH the snippet so verify can later confirm the
+      // wiring is actually present on disk (satisfied) instead of replaying a stale requirement.
+      ...(requiresManual.length > 0 ? { requiresManual } : {}),
       wiringVersion: 1,
       verifiedAt: null
     }
@@ -126,6 +130,7 @@ export function applyInstallation(options: ApplyInstallationOptions): ApplyResul
       changedFiles,
       manifestPath: manifestWrite.manifestPath,
       warnings: [...frameworkResult.warnings, ...(serverLaneResult?.warnings ?? [])],
+      ...(requiresManual.length > 0 ? { requiresManual } : {}),
       ...(serverLaneResult
         ? {
             serverLane: {

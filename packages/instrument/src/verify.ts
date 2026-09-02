@@ -71,6 +71,19 @@ export function verifyInstallation(options: VerifyInstallationOptions): VerifyRe
     routeChecks.push(...failures)
   }
 
+  // A recorded manual step means the managed files can verify while the pixel is NOT live yet — the
+  // exact gap the entrypoint-left-unmanaged design opens. But verify reflects ON-DISK reality: once
+  // the user adds the wiring the requirement is SATISFIED and clears, so "add it, then re-run verify"
+  // actually succeeds. Only wiring genuinely still absent stays pending.
+  const stillPending = (manifest.requiresManual ?? []).filter(
+    (requirement) => !manualRequirementSatisfied(options.root, requirement)
+  )
+  for (const pending of stillPending) {
+    routeChecks.push(
+      `ACTION REQUIRED: ${pending.path} still needs the manual wiring line (${pending.reason}) — the pixel is not live until it is added.`
+    )
+  }
+
   const beaconChecks = manifest.providers.map(
     (provider) => `${provider}: manifest-backed wiring is present in the managed install files.`
   )
@@ -86,6 +99,28 @@ export function verifyInstallation(options: VerifyInstallationOptions): VerifyRe
     beaconChecks,
     warnings: [
       "Static verification only. Runtime beacon delivery still requires a browser/network check."
-    ]
+    ],
+    ...(stillPending.length > 0
+      ? { requiresManual: stillPending.map(({ path, reason }) => ({ path, reason })) }
+      : {})
   }
+}
+
+/**
+ * A recorded manual requirement is satisfied once its target file actually contains the wiring —
+ * every non-blank line of the recorded snippet (the import + the boot call) present in the file.
+ * Whitespace/blank-line reformatting is tolerated; a missing import OR missing boot call is not.
+ */
+function manualRequirementSatisfied(
+  root: string,
+  requirement: { path: string; snippet: string }
+): boolean {
+  const absolutePath = join(root, requirement.path)
+  if (!existsSync(absolutePath)) return false
+  const contents = readFileSync(absolutePath, "utf8")
+  const requiredLines = requirement.snippet
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+  return requiredLines.length > 0 && requiredLines.every((line) => contents.includes(line))
 }

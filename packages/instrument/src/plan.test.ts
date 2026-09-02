@@ -154,27 +154,29 @@ describe("planInstallation", () => {
     expect(plan).toMatchObject({
       framework: "vite-react",
       providers: ["ga4", "posthog"],
-      envKeys: ["VITE_GA4_MEASUREMENT_ID", "VITE_POSTHOG_API_HOST", "VITE_POSTHOG_KEY"],
+      // Config is baked into the injected index.html <script>, so there are no VITE_* env keys.
+      envKeys: [],
       applyMode: "supported"
     })
-    expect(plan.files).toEqual(["index.html", "src/main.tsx", "src/lib/infinite-analytics.ts"])
-    expect(plan.assumptions).toContain("Vite React public IDs can be surfaced through VITE_* environment variables or direct public wiring.")
+    // The only managed file is index.html — never the React entrypoint, never a JS analytics module.
+    expect(plan.files).toEqual(["index.html"])
+    expect(plan.files).not.toContain("src/main.tsx")
+    expect(plan.assumptions).toContain(
+      "Vite React public IDs are baked into the injected index.html <script> at install time."
+    )
     expect(plan.blockers).toEqual([])
     expect(plan.confidence).toBeGreaterThanOrEqual(0.75)
+    // Provider snippets are full <script> blocks targeting index.html, and there is no main.tsx edit.
+    expect(plan.instructions.some((instruction) => instruction.path === "src/main.tsx")).toBe(false)
     expect(plan.instructions).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
-          path: "src/main.tsx",
-          action: "modify",
-          description: expect.stringContaining("installInfiniteInstrumentation")
-        }),
-        expect.objectContaining({
-          path: "src/lib/infinite-analytics.ts",
+          path: "index.html",
           provider: "ga4",
           snippet: expect.stringContaining("G-TEST123")
         }),
         expect.objectContaining({
-          path: "src/lib/infinite-analytics.ts",
+          path: "index.html",
           provider: "posthog",
           snippet: expect.stringContaining("phc_test")
         })
@@ -355,12 +357,12 @@ describe("planInstallation", () => {
     expect(plan.confidence).toBeLessThan(0.5)
   })
 
-  it("blocks vite-react plan when main.tsx uses hydrateRoot instead of createRoot", async () => {
+  it("plans a vite-react install by injecting into index.html no matter what main.tsx contains", async () => {
+    // The adapter never reads the React entrypoint, so even a wild main.tsx is irrelevant: the plan
+    // targets index.html and applying it leaves main.tsx byte-for-byte.
     const root = copyFixture("vite-react-basic")
-    writeFileSync(
-      join(root, "src/main.tsx"),
-      'import React from "react";\nimport ReactDOM from "react-dom/client";\n\nfunction App(): React.JSX.Element {\n  return <h1>Vite fixture</h1>;\n}\n\nconst root = document.getElementById("root");\nif (!root) { throw new Error("Missing root element"); }\nReactDOM.hydrateRoot(root, <App />);\n'
-    )
+    const adversarialMain = 'export {}\nconst createRoot = 1; void createRoot\n'
+    writeFileSync(join(root, "src/main.tsx"), adversarialMain)
     const inspectResult = await inspectWorkspace(root)
     const plan = await planInstallation({
       root,
@@ -368,46 +370,17 @@ describe("planInstallation", () => {
       artifacts: { ga4: { measurementId: "G-TEST123" } }
     })
 
-    expect(plan.blockers).toContain(
-      "Vite React apply only supports simple main entrypoints with ReactDOM.createRoot()."
-    )
-    expect(plan.applyMode).toBe("plan-only")
-    expect(plan.confidence).toBeLessThanOrEqual(0.45)
-    expect(() =>
-      applyInstallation({ root, workspaceId: "ws-test", plan, allowDirty: true })
-    ).toThrow(/Refusing to apply/)
-  })
+    expect(plan.blockers).toEqual([])
+    expect(plan.applyMode).toBe("supported")
+    expect(plan.files).toEqual(["index.html"])
+    expect(plan.instructions.some((instruction) => instruction.action === "manual")).toBe(false)
 
-  it("blocks vite-react plan when main.tsx has no import block", async () => {
-    const root = copyFixture("vite-react-basic")
-    writeFileSync(join(root, "src/main.tsx"), 'console.log("no imports")\n')
-    const inspectResult = await inspectWorkspace(root)
-    const plan = await planInstallation({
-      root,
-      inspect: inspectResult,
-      artifacts: { ga4: { measurementId: "G-TEST123" } }
-    })
-
-    expect(plan.blockers).toContain(
-      "Vite React apply requires a simple import block at the top of src/main.*."
-    )
-  })
-
-  it("blocks vite-react plan when an unmanaged infinite-analytics.ts already exists", async () => {
-    const root = copyFixture("vite-react-basic")
-    mkdirSync(join(root, "src/lib"), { recursive: true })
-    writeFileSync(join(root, "src/lib/infinite-analytics.ts"), "export const custom = true\n")
-    const inspectResult = await inspectWorkspace(root)
-    const plan = await planInstallation({
-      root,
-      inspect: inspectResult,
-      artifacts: { ga4: { measurementId: "G-TEST123" } }
-    })
-
-    expect(plan.blockers).toContain(
-      "Vite React apply will not overwrite an existing unmanaged src/lib/infinite-analytics.ts file."
-    )
-    expect(plan.applyMode).toBe("plan-only")
+    const apply = applyInstallation({ root, workspaceId: "ws-test", plan, allowDirty: true })
+    expect(apply.requiresManual).toBeUndefined()
+    expect(readFileSync(join(root, "index.html"), "utf8")).toContain("<!-- infinite:start -->")
+    // main.tsx is untouched and no analytics module was created.
+    expect(readFileSync(join(root, "src/main.tsx"), "utf8")).toBe(adversarialMain)
+    expect(existsSync(join(root, "src/lib/infinite-analytics.ts"))).toBe(false)
   })
 
   it("adopts a hand-rolled gtag tag instead of blocking: no second GA4 copy, Infinite still installs", async () => {

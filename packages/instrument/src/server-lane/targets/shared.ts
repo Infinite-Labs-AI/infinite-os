@@ -9,11 +9,11 @@
 // Contract values (URL, header names, env names, bucket size, bot list, skip prefixes) are
 // interpolated from helpers.ts / workspace-artifacts.ts, exactly as runtime-source.ts and
 // snippets.ts do, so no generated file can drift from the Node recipe.
-import { existsSync, readFileSync } from "node:fs"
-import { join } from "node:path"
+import { existsSync, readFileSync, readdirSync, type Dirent } from "node:fs"
+import { extname, join } from "node:path"
 
 import { isManagedInfiniteFile, managedFileBanner } from "../../frameworks/managed-files.js"
-import { fileExists } from "../../frameworks/shared.js"
+import { fileExists, readWorkspacePackageJson } from "../../frameworks/shared.js"
 import { computeContentHash } from "../../manifest.js"
 import type { InstallManifest, ServerLaneMode } from "../../types.js"
 import {
@@ -469,6 +469,113 @@ export function managedGeneratedFile(header: string[], body: string): string {
 
 export const OUTCOME_HELPER_EXPORT = "postInfiniteOutcome"
 
+/** The language the generated outcome helper is authored in. */
+export type OutcomeHelperLanguage = "ts" | "js"
+
+const TS_SOURCE_EXTENSIONS = new Set([".ts", ".tsx", ".mts", ".cts"])
+const JS_SOURCE_EXTENSIONS = new Set([".js", ".jsx", ".mjs", ".cjs"])
+
+/** package.json `"type": "module"` — decides whether an emitted JS helper is `.js` (ESM) or `.mjs`. */
+function projectIsEsm(appRootAbsolute: string): boolean {
+  try {
+    const raw = readFileSync(join(appRootAbsolute, "package.json"), "utf8")
+    return (JSON.parse(raw) as { type?: string }).type === "module"
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Classify a directory as TS or JS by the source files it holds. `ts` the moment any TypeScript file
+ * is seen (mixed dirs are TS projects that happen to have a JS file), `js` when only JS files are
+ * present, `null` when the directory is absent or holds no recognizable source.
+ */
+function directoryLanguage(directoryAbsolute: string): OutcomeHelperLanguage | null {
+  let sawJavaScript = false
+  const walk = (current: string, depth: number): boolean => {
+    let entries: Dirent[]
+    try {
+      entries = readdirSync(current, { withFileTypes: true })
+    } catch {
+      return false
+    }
+    for (const entry of entries) {
+      if (entry.name.startsWith(".") || entry.name === "node_modules") continue
+      if (entry.isDirectory()) {
+        if (depth < 4 && walk(join(current, entry.name), depth + 1)) return true
+        continue
+      }
+      if (!entry.isFile()) continue
+      const ext = extname(entry.name).toLowerCase()
+      if (TS_SOURCE_EXTENSIONS.has(ext)) return true
+      if (JS_SOURCE_EXTENSIONS.has(ext)) sawJavaScript = true
+    }
+    return false
+  }
+  if (walk(directoryAbsolute, 0)) return "ts"
+  return sawJavaScript ? "js" : null
+}
+
+/**
+ * Which language the outcome helper should be authored in.
+ *
+ * The helper is imported by the customer's OWN server routes — on Vercel, the `api/` functions — and
+ * a `.ts` helper imported from a `.js` function silently fails to resolve at runtime (the exact bug
+ * this fixes: a Vite+React app on Vercel with JS `api/*` functions). So the api directory's language
+ * wins; only when there is no api directory do we fall back to a whole-project TypeScript signal.
+ */
+export function detectServerLaneHelperLanguage(appRootAbsolute: string): OutcomeHelperLanguage {
+  for (const apiDir of ["api", "src/api"]) {
+    const language = directoryLanguage(join(appRootAbsolute, apiDir))
+    if (language) return language
+  }
+  if (existsSync(join(appRootAbsolute, "tsconfig.json"))) return "ts"
+  const packageJson = readWorkspacePackageJson(appRootAbsolute)
+  if (packageJson?.dependencies?.typescript || packageJson?.devDependencies?.typescript) return "ts"
+  if (directoryLanguageTopLevel(appRootAbsolute) === "ts") return "ts"
+  return "js"
+}
+
+/** Top-level source files only (e.g. `vite.config.ts`) — a shallow TS signal for the fallback. */
+function directoryLanguageTopLevel(appRootAbsolute: string): OutcomeHelperLanguage | null {
+  let sawJavaScript = false
+  let entries: Dirent[]
+  try {
+    entries = readdirSync(appRootAbsolute, { withFileTypes: true })
+  } catch {
+    return null
+  }
+  for (const entry of entries) {
+    if (!entry.isFile()) continue
+    const ext = extname(entry.name).toLowerCase()
+    if (TS_SOURCE_EXTENSIONS.has(ext)) return "ts"
+    if (JS_SOURCE_EXTENSIONS.has(ext)) sawJavaScript = true
+  }
+  return sawJavaScript ? "js" : null
+}
+
+export interface OutcomeHelperTarget {
+  /** App-relative path with the language-correct extension (`.ts`, `.js`, or `.mjs`). */
+  path: string
+  language: OutcomeHelperLanguage
+  /** The bare extension, for building matching import examples. */
+  extension: "ts" | "js" | "mjs"
+}
+
+/**
+ * The outcome helper's file path AND language for this project. TS projects keep `lib/infinite-outcome.ts`;
+ * JS projects get `.js` under `"type":"module"`, else `.mjs`, so the ESM `export`s resolve either way.
+ */
+export function outcomeHelperTarget(
+  appRootAbsolute: string,
+  basename = "lib/infinite-outcome"
+): OutcomeHelperTarget {
+  const language = detectServerLaneHelperLanguage(appRootAbsolute)
+  if (language === "ts") return { path: `${basename}.ts`, language, extension: "ts" }
+  const extension = projectIsEsm(appRootAbsolute) ? "js" : "mjs"
+  return { path: `${basename}.${extension}`, language, extension }
+}
+
 /**
  * lib/infinite-outcome.ts — the outcome poster any server route can import.
  *
@@ -476,48 +583,17 @@ export const OUTCOME_HELPER_EXPORT = "postInfiniteOutcome"
  * edge function, a Netlify function, and a Worker (pass `credentials` there, since Workers hand
  * environment variables to the handler rather than exposing process.env).
  */
-export function outcomeHelperSource(input: TargetBuildInput): string {
+export function outcomeHelperSource(
+  input: TargetBuildInput,
+  options: { language?: OutcomeHelperLanguage; extension?: OutcomeHelperTarget["extension"] } = {}
+): string {
   const bakedSourceKey = JSON.stringify(input.siteSourceKey ?? "")
-  return managedGeneratedFile(
-    [
-      "// Infinite server lane — report an outcome the moment it becomes REAL (row committed,",
-      "// payment captured, file served). Never from a click: a click is intent, not an outcome.",
-      "//",
-      `//   import { ${OUTCOME_HELPER_EXPORT}, infiniteVisitKey } from "../lib/infinite-outcome"`,
-      "//",
-      "// ATTRIBUTION — carry the buyer's visit key from the page view to the outcome. `visitKeyInputs`",
-      "// accepts a WHATWG `Request`, a Node request whose `.headers` is a PLAIN OBJECT (Vercel Node",
-      "// functions, Express), OR an explicit { clientIp, userAgent }. On a browser-facing route you",
-      "// can just pass the request:",
-      "//",
-      `//   await ${OUTCOME_HELPER_EXPORT}({ type: "purchase", path: "/checkout", accountKey: order.id, visitKeyInputs: req })`,
-      "//",
-      "// In a WEBHOOK the request is the PROVIDER'S, not the buyer's, so compute the key at CHECKOUT",
-      "// from the buyer's request, stash it, and carry it to the webhook:",
-      "//",
-      "//   // 1. In the checkout route, from the BUYER'S request:",
-      "//   const infinite_visit_key = await infiniteVisitKey({",
-      "//     clientIp: String(req.headers['x-forwarded-for'] || '').split(',')[0].trim(),",
-      "//     userAgent: req.headers['user-agent'] || ''",
-      "//   })",
-      "//   // 2. Stash it where the outcome can read it later (e.g. Stripe checkout metadata):",
-      "//   await stripe.checkout.sessions.create({ /* … */ metadata: { infinite_visit_key } })",
-      "//   // 3. In the webhook, once the payment is REAL, pass it straight through:",
-      `//   await ${OUTCOME_HELPER_EXPORT}({ type: "purchase", path: "/checkout", accountKey: order.id,`,
-      "//     properties: { visitKey: session.metadata.infinite_visit_key } })",
-      "//",
-      "// Running Meta ads without PostHog? Add adMatch: adMatchFromRequest(request, { em }) and turn",
-      "// the relay on in Infinite -> Site -> Settings; the outcome is forwarded to Meta's Conversions",
-      "// API and the match data is discarded, never stored. You hash the email, Infinite never sees it.",
-      "//",
-      `// Secrets come from the environment only: ${SERVER_LANE_SECRET_ENV} + ${SERVER_LANE_SOURCE_KEY_ENV}.`
-    ],
-    String.raw`const INFINITE_SERVER_EVENTS_URL = ${JSON.stringify(infiniteServerEventsDestination(input.apiOrigin))}
-const INFINITE_SOURCE_KEY_FALLBACK = ${bakedSourceKey}
-const INFINITE_DELIVERY_TIMEOUT_MS = ${SERVER_LANE_DELIVERY_TIMEOUT_MS}
-const INFINITE_VISIT_BUCKET_SECONDS = ${VISIT_BUCKET_SECONDS}
-
-export interface InfiniteAdMatch {
+  const ts = (options.language ?? "ts") === "ts"
+  // Type-only text: present in the .ts helper, stripped from the .js/.mjs helper so it runs verbatim
+  // when a JS server route imports it (a .ts helper does not resolve from a .js Vercel function).
+  const t = (typeText: string): string => (ts ? typeText : "")
+  const importExample = `../lib/infinite-outcome${ts ? "" : `.${options.extension ?? "js"}`}`
+  const interfaceBlock = String.raw`export interface InfiniteAdMatch {
   /** sha256 hex of the lowercased, trimmed email. */
   em?: string
   /** Meta's _fbc cookie, verbatim. */
@@ -591,18 +667,56 @@ export interface InfiniteOutcomeInput {
   visitKeyInputs?: InfiniteVisitKeyInputs | InfiniteVisitKeyRequest
   /** Runtimes without process.env (Cloudflare Workers) pass the values from their own env here. */
   credentials?: { secret?: string; sourceKey?: string }
-}
+}`
+  return managedGeneratedFile(
+    [
+      "// Infinite server lane — report an outcome the moment it becomes REAL (row committed,",
+      "// payment captured, file served). Never from a click: a click is intent, not an outcome.",
+      "//",
+      `//   import { ${OUTCOME_HELPER_EXPORT}, infiniteVisitKey } from "${importExample}"`,
+      "//",
+      "// ATTRIBUTION — carry the buyer's visit key from the page view to the outcome. `visitKeyInputs`",
+      "// accepts a WHATWG `Request`, a Node request whose `.headers` is a PLAIN OBJECT (Vercel Node",
+      "// functions, Express), OR an explicit { clientIp, userAgent }. On a browser-facing route you",
+      "// can just pass the request:",
+      "//",
+      `//   await ${OUTCOME_HELPER_EXPORT}({ type: "purchase", path: "/checkout", accountKey: order.id, visitKeyInputs: req })`,
+      "//",
+      "// In a WEBHOOK the request is the PROVIDER'S, not the buyer's, so compute the key at CHECKOUT",
+      "// from the buyer's request, stash it, and carry it to the webhook:",
+      "//",
+      "//   // 1. In the checkout route, from the BUYER'S request:",
+      "//   const infinite_visit_key = await infiniteVisitKey({",
+      "//     clientIp: String(req.headers['x-forwarded-for'] || '').split(',')[0].trim(),",
+      "//     userAgent: req.headers['user-agent'] || ''",
+      "//   })",
+      "//   // 2. Stash it where the outcome can read it later (e.g. Stripe checkout metadata):",
+      "//   await stripe.checkout.sessions.create({ /* … */ metadata: { infinite_visit_key } })",
+      "//   // 3. In the webhook, once the payment is REAL, pass it straight through:",
+      `//   await ${OUTCOME_HELPER_EXPORT}({ type: "purchase", path: "/checkout", accountKey: order.id,`,
+      "//     properties: { visitKey: session.metadata.infinite_visit_key } })",
+      "//",
+      "// Running Meta ads without PostHog? Add adMatch: adMatchFromRequest(request, { em }) and turn",
+      "// the relay on in Infinite -> Site -> Settings; the outcome is forwarded to Meta's Conversions",
+      "// API and the match data is discarded, never stored. You hash the email, Infinite never sees it.",
+      "//",
+      `// Secrets come from the environment only: ${SERVER_LANE_SECRET_ENV} + ${SERVER_LANE_SOURCE_KEY_ENV}.`
+    ],
+    String.raw`const INFINITE_SERVER_EVENTS_URL = ${JSON.stringify(infiniteServerEventsDestination(input.apiOrigin))}
+const INFINITE_SOURCE_KEY_FALLBACK = ${bakedSourceKey}
+const INFINITE_DELIVERY_TIMEOUT_MS = ${SERVER_LANE_DELIVERY_TIMEOUT_MS}
+const INFINITE_VISIT_BUCKET_SECONDS = ${VISIT_BUCKET_SECONDS}
 
-function infiniteEnv(name: string): string {
-  const scope = globalThis as {
+${ts ? interfaceBlock + "\n\n" : ""}function infiniteEnv(name${t(": string")})${t(": string")} {
+  const scope = globalThis${t(` as {
     process?: { env?: Record<string, string | undefined> }
     Netlify?: { env?: { get(name: string): string | undefined } }
     Deno?: { env?: { get(name: string): string | undefined } }
-  }
+  }`)}
   return scope.process?.env?.[name] ?? scope.Netlify?.env?.get(name) ?? scope.Deno?.env?.get(name) ?? ""
 }
 
-async function infiniteHmacHex(secret: string, message: string): Promise<string> {
+async function infiniteHmacHex(secret${t(": string")}, message${t(": string")})${t(": Promise<string>")} {
   const encoder = new TextEncoder()
   const key = await crypto.subtle.importKey(
     "raw",
@@ -623,13 +737,13 @@ async function infiniteHmacHex(secret: string, message: string): Promise<string>
  * a later webhook can attribute the outcome to the same visit. The IP is hashed here and never
  * leaves this process. Returns "" only when no secret is available.
  */
-export async function infiniteVisitKey(inputs: {
+export async function infiniteVisitKey(inputs${t(`: {
   clientIp?: string
   userAgent?: string
   nowMs?: number
   /** Runtimes without process.env (Cloudflare Workers) pass the secret here. */
   secret?: string
-}): Promise<string> {
+}`)})${t(": Promise<string>")} {
   const secret = inputs.secret || infiniteEnv(${JSON.stringify(SERVER_LANE_SECRET_ENV)})
   if (!secret) return ""
   const nowMs = inputs.nowMs ?? Date.now()
@@ -650,14 +764,11 @@ export async function infiniteVisitKey(inputs: {
  * Vercel Node function / Express). A plain object silently returned undefined from \`.get\` before,
  * which threw and swallowed the whole outcome as false — the bug this handles.
  */
-function infiniteHeaderValue(
-  headers: Headers | Record<string, string | string[] | undefined>,
-  name: string
-): string {
-  if (headers && typeof (headers as Headers).get === "function") {
-    return (headers as Headers).get(name) ?? ""
+function infiniteHeaderValue(headers${t(": Headers | Record<string, string | string[] | undefined>")}, name${t(": string")})${t(": string")} {
+  if (headers && typeof (headers${t(" as Headers")}).get === "function") {
+    return (headers${t(" as Headers")}).get(name) ?? ""
   }
-  const bag = (headers ?? {}) as Record<string, string | string[] | undefined>
+  const bag = (headers ?? {})${t(" as Record<string, string | string[] | undefined>")}
   let value = bag[name]
   if (value === undefined) {
     const lower = name.toLowerCase()
@@ -672,7 +783,7 @@ function infiniteHeaderValue(
   return typeof value === "string" ? value : ""
 }
 
-function infiniteClientIpFrom(headers: Headers | Record<string, string | string[] | undefined>): string {
+function infiniteClientIpFrom(headers${t(": Headers | Record<string, string | string[] | undefined>")})${t(": string")} {
   const forwarded = infiniteHeaderValue(headers, "x-forwarded-for").split(",")[0].trim()
   if (forwarded) return forwarded
   return (
@@ -682,23 +793,21 @@ function infiniteClientIpFrom(headers: Headers | Record<string, string | string[
   )
 }
 
-function infiniteVisitKeyInputsOf(
-  input: InfiniteOutcomeInput["visitKeyInputs"]
-): InfiniteVisitKeyInputs | null {
+function infiniteVisitKeyInputsOf(input${t(': InfiniteOutcomeInput["visitKeyInputs"]')})${t(": InfiniteVisitKeyInputs | null")} {
   if (!input) return null
   // A request-like value: WHATWG Request, OR a Node request whose .headers is a plain object.
   if ("headers" in input && input.headers) {
-    const headers = input.headers as Headers | Record<string, string | string[] | undefined>
+    const headers = input.headers${t(" as Headers | Record<string, string | string[] | undefined>")}
     return {
       clientIp: infiniteClientIpFrom(headers),
       userAgent: infiniteHeaderValue(headers, "user-agent")
     }
   }
   // The explicit { clientIp, userAgent } shape — never throws, never silently false.
-  return input as InfiniteVisitKeyInputs
+  return input${t(" as InfiniteVisitKeyInputs")}
 }
 
-function infiniteCookie(header: string | null, name: string): string | undefined {
+function infiniteCookie(header${t(": string | null")}, name${t(": string")})${t(": string | undefined")} {
   if (!header) return undefined
   for (const part of header.split(";")) {
     const index = part.indexOf("=")
@@ -727,10 +836,7 @@ function infiniteCookie(header: string | null, name: string): string | undefined
  * You supply em / external_id yourself, already hashed:
  *   adMatchFromRequest(request, { em: createHash("sha256").update(email.trim().toLowerCase()).digest("hex") })
  */
-export function adMatchFromRequest(
-  request: { headers: Headers },
-  hashed: { em?: string; external_id?: string } = {}
-): InfiniteAdMatch {
+export function adMatchFromRequest(request${t(": { headers: Headers }")}, hashed${t(": { em?: string; external_id?: string }")} = {})${t(": InfiniteAdMatch")} {
   const headers = request.headers
   const cookie = headers.get("cookie")
   const forwarded = headers.get("x-forwarded-for")?.split(",")[0]?.trim()
@@ -753,7 +859,7 @@ export function adMatchFromRequest(
  * Sign and POST one outcome. Resolves true when Infinite acknowledged it; never throws, so a
  * failed report can never fail the checkout, sign-up, or download it describes.
  */
-export async function ${OUTCOME_HELPER_EXPORT}(input: InfiniteOutcomeInput): Promise<boolean> {
+export async function ${OUTCOME_HELPER_EXPORT}(input${t(": InfiniteOutcomeInput")})${t(": Promise<boolean>")} {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), INFINITE_DELIVERY_TIMEOUT_MS)
   try {
@@ -766,7 +872,7 @@ export async function ${OUTCOME_HELPER_EXPORT}(input: InfiniteOutcomeInput): Pro
 
     // One clock for the whole call: the event time and the visit-key bucket must agree.
     const nowMs = input.occurredAt ? input.occurredAt.getTime() : Date.now()
-    const properties: Record<string, string | number | boolean> = { ...(input.properties ?? {}) }
+    const properties${t(": Record<string, string | number | boolean>")} = { ...(input.properties ?? {}) }
     if (input.path) properties.path = input.path
     // Skip our own derivation when the caller already carried a visitKey (the webhook path); drop
     // nothing when there is neither. One shared recipe with the exported infiniteVisitKey, so a key

@@ -1,18 +1,25 @@
-import { existsSync, readFileSync } from "node:fs"
+// Vite + React adapter.
+//
+// The analytics tag is injected as a managed `<script>` block into index.html — exactly like the
+// static-html adapter — with the provider config BAKED in at install time. The React entrypoint
+// (`src/main.*`) is NEVER read, parsed, or edited on ANY code path: the injected runtime installs its
+// own SPA history hooks (pushState/replaceState + popstate), so page + click capture works without
+// touching bootstrap. This is deliberate — entrypoint bootstrap-detection was an un-winnable scanner
+// tarpit (comments, templates, type-only imports, aliases, lexical shadows), and index.html injection
+// has no entrypoint surface to get wrong.
 import { join } from "node:path"
 
-import type { FrameworkAdapter, InstallInstruction } from "../types.js"
+import type { FrameworkAdapter, InstallInstruction, ManualRequirement } from "../types.js"
 import { infiniteProxySpec } from "../workspace-artifacts.js"
 
 import {
-  buildAnalyticsModuleSource,
-  hasExistingUnmanagedFile,
-  isManagedInfiniteFile,
-  removeManagedFile
-} from "./managed-files.js"
+  buildManagedHtmlBlock,
+  hasManagedHtmlBlock,
+  stripManagedHtmlBlock,
+  upsertManagedHtmlBlock
+} from "./managed-html.js"
 import {
   fileExists,
-  firstExistingPath,
   hasDependency,
   normalizeAppRelativePath,
   readRequiredFile,
@@ -26,38 +33,44 @@ import {
   VERCEL_HOST_CAVEAT
 } from "./vercel-config.js"
 
-const mainCandidates = ["src/main.tsx", "src/main.jsx", "src/main.ts", "src/main.js"]
-const analyticsModulePath = "src/lib/infinite-analytics.ts"
-const importLine = 'import { installInfiniteInstrumentation } from "./lib/infinite-analytics"'
-const bootLine = "installInfiniteInstrumentation()"
+const INDEX_HTML = "index.html"
+
+/** index.html can take the managed block when it has a </head>, or already carries our block. */
+function indexHtmlCanInject(html: string): boolean {
+  return html.includes("</head>") || hasManagedHtmlBlock(html)
+}
+
+/** The provider `<script>…</script>` snippets targeting index.html, assembled into the managed block. */
+function managedBlockFor(instructions: InstallInstruction[]): string {
+  const providerSnippets = instructions
+    .filter((instruction) => instruction.provider && instruction.path.endsWith(INDEX_HTML))
+    .map((instruction) => instruction.snippet.trim())
+    .filter((snippet) => snippet.length > 0)
+  return buildManagedHtmlBlock(providerSnippets)
+}
 
 export const viteReactAdapter: FrameworkAdapter = {
   id: "vite-react",
   displayName: "Vite React",
   detect(root) {
+    // Metadata + file existence ONLY. The React entrypoint source never influences detection.
     if (!hasDependency(root, "vite") || !hasDependency(root, "react")) {
       return null
     }
-
-    if (!fileExists(root, "index.html")) {
+    if (!fileExists(root, INDEX_HTML)) {
       return null
     }
-
-    const mainFile = firstExistingPath(root, mainCandidates)
-    if (!mainFile) {
-      return null
-    }
-
     return {
       framework: "vite-react",
       confidence: 0.92,
-      files: ["index.html", mainFile, analyticsModulePath],
-      assumptions: ["Vite React wiring will target the main entrypoint and index.html."]
+      files: [INDEX_HTML],
+      assumptions: [
+        "Vite React wiring injects the managed analytics <script> into index.html; the React entrypoint (src/main.*) is never read or edited."
+      ]
     }
   },
   plan(root, options) {
     const detected = this.detect(root)
-    const mainFile = detected?.files[1] ?? "src/main.tsx"
     const proxy = {
       posthog: options?.posthogProxy,
       infinite: options?.infiniteProxy
@@ -65,23 +78,11 @@ export const viteReactAdapter: FrameworkAdapter = {
     const hasManagedProxy = Boolean(proxy.posthog || proxy.infinite)
 
     const blockers: string[] = []
-    if (!fileExists(root, mainFile)) {
-      blockers.push("Vite React apply requires a src/main.* entrypoint.")
-    } else {
-      const mainSource = readRequiredFile(root, mainFile)
-      if (!mainSource.includes("ReactDOM.createRoot(")) {
-        blockers.push(
-          "Vite React apply only supports simple main entrypoints with ReactDOM.createRoot()."
-        )
-      }
-      if (findImportSectionEnd(mainSource) === null) {
-        blockers.push("Vite React apply requires a simple import block at the top of src/main.*.")
-      }
-    }
-    if (hasExistingUnmanagedFile(root, analyticsModulePath)) {
-      blockers.push(
-        "Vite React apply will not overwrite an existing unmanaged src/lib/infinite-analytics.ts file."
-      )
+    const assumptions = [
+      "Vite React public IDs are baked into the injected index.html <script> at install time."
+    ]
+    if (!fileExists(root, INDEX_HTML)) {
+      blockers.push("Vite React apply requires an index.html file.")
     }
     if (
       proxy.infinite &&
@@ -93,20 +94,19 @@ export const viteReactAdapter: FrameworkAdapter = {
       )
     }
 
-    const files = ["index.html", mainFile, analyticsModulePath]
-    const instructions: InstallInstruction[] =
-      blockers.length === 0
-        ? [
-            {
-              path: mainFile,
-              action: "modify",
-              description:
-                "Import and invoke installInfiniteInstrumentation() once before the React app bootstraps.",
-              snippet: `${importLine}\n\n${bootLine}`
-            }
-          ]
-        : []
+    // index.html is a MANAGED file only when it can actually take the block. When it exists but has no
+    // </head>, apply() falls CLOSED to the manual path: exit 2 + the exact <script> to paste. This is
+    // the only path on which the exit-2 / requires_manual machinery is now reachable.
+    const injectable =
+      fileExists(root, INDEX_HTML) && indexHtmlCanInject(readRequiredFile(root, INDEX_HTML))
+    if (fileExists(root, INDEX_HTML) && !injectable) {
+      assumptions.push(
+        "index.html has no </head> to inject into; the managed <script> is surfaced as a manual step."
+      )
+    }
 
+    const files: string[] = injectable ? [INDEX_HTML] : []
+    const instructions: InstallInstruction[] = []
     if (hasManagedProxy) {
       const vercelExists = fileExists(root, VERCEL_CONFIG_FILE)
       files.push(VERCEL_CONFIG_FILE)
@@ -124,47 +124,45 @@ export const viteReactAdapter: FrameworkAdapter = {
       files,
       applyMode: blockers.length === 0 ? "supported" : "plan-only",
       instructions,
-      assumptions: [
-        "Vite React public IDs can be surfaced through VITE_* environment variables or direct public wiring."
-      ],
+      assumptions,
       blockers,
       confidence: detected?.confidence ?? 0.88
     }
   },
   apply(context) {
     const appRoot = context.appRoot === "." ? context.root : join(context.root, context.appRoot)
-    const mainFile = selectMainFile(appRoot, context.plan.files, context.appRoot)
-    const rootRelativeMainFile = normalizeAppRelativePath(context.appRoot, mainFile)
-    const rootRelativeAnalyticsFile = normalizeAppRelativePath(context.appRoot, analyticsModulePath)
-
-    const currentMain = readRequiredFile(appRoot, mainFile)
-    if (!currentMain.includes("ReactDOM.createRoot(")) {
-      throw new Error("Vite React apply only supports simple main entrypoints with ReactDOM.createRoot().")
-    }
-
-    const analyticsModuleAbsolutePath = join(appRoot, analyticsModulePath)
-    if (
-      existsSync(analyticsModuleAbsolutePath) &&
-      !isManagedInfiniteFile(readFileSync(analyticsModuleAbsolutePath, "utf8"))
-    ) {
-      throw new Error(
-        `Refusing to overwrite existing unmanaged analytics module at ${rootRelativeAnalyticsFile}.`
-      )
-    }
-
-    const nextMain = upsertMainEntrypoint(currentMain)
-    const nextAnalyticsModule = buildAnalyticsModuleSource(context.plan)
-
     const changedFiles: string[] = []
+    const warnings: string[] = []
+    const requiresManual: ManualRequirement[] = []
     const configOwnership = {}
-    if (writeFileIfChanged(appRoot, mainFile, nextMain)) {
-      changedFiles.push(rootRelativeMainFile)
-    }
-    if (writeFileIfChanged(appRoot, analyticsModulePath, nextAnalyticsModule)) {
-      changedFiles.push(rootRelativeAnalyticsFile)
+
+    const managedBlock = managedBlockFor(context.plan.instructions)
+    const indexRootRelative = normalizeAppRelativePath(context.appRoot, INDEX_HTML)
+
+    if (!fileExists(appRoot, INDEX_HTML)) {
+      requiresManual.push({
+        path: indexRootRelative,
+        reason: "index.html was not found",
+        snippet: managedBlock
+      })
+    } else {
+      const html = readRequiredFile(appRoot, INDEX_HTML)
+      if (indexHtmlCanInject(html)) {
+        const nextHtml = upsertManagedHtmlBlock(html, managedBlock)
+        if (writeFileIfChanged(appRoot, INDEX_HTML, nextHtml)) {
+          changedFiles.push(indexRootRelative)
+        }
+      } else {
+        // Genuine edge: no </head> to inject into. Fail closed with the exact block to add by hand.
+        requiresManual.push({
+          path: indexRootRelative,
+          reason: "index.html has no </head> to inject into",
+          snippet: managedBlock
+        })
+      }
     }
 
-    const warnings: string[] = []
+    // vercel.json proxy is written exactly ONCE, same as static-html.
     const proxy = {
       posthog: context.plan.artifacts.posthog?.proxy,
       infinite: infiniteProxySpec(context.plan.artifacts.infinite)
@@ -188,51 +186,30 @@ export const viteReactAdapter: FrameworkAdapter = {
     return {
       changedFiles,
       warnings,
-      configOwnership
+      configOwnership,
+      ...(requiresManual.length > 0 ? { requiresManual } : {})
     }
   },
   uninstall(context) {
     const appRoot = context.appRoot === "." ? context.root : join(context.root, context.appRoot)
-    const removedFiles: string[] = []
     const restoredFiles: string[] = []
     const warnings: string[] = []
 
-    if (hasExistingUnmanagedFile(appRoot, analyticsModulePath)) {
-      throw new Error(
-        `Refusing to remove ${analyticsModulePath} because it no longer looks managed by Infinite. Remove it manually if it should go.`
-      )
-    }
-
-    let wiringFullyRemoved = true
-
-    const mainFile = selectMainFile(appRoot, context.manifest.files, context.appRoot)
-    const mainAbsolutePath = join(appRoot, mainFile)
-    if (!existsSync(mainAbsolutePath)) {
-      warnings.push(`Managed main entrypoint already absent: ${mainFile}`)
-    } else {
-      const currentMain = readFileSync(mainAbsolutePath, "utf8")
-      const nextMain = removeMainWiring(currentMain)
-      if (nextMain !== currentMain) {
-        if (!context.dryRun) {
-          writeFileIfChanged(appRoot, mainFile, nextMain)
+    const indexRootRelative = normalizeAppRelativePath(context.appRoot, INDEX_HTML)
+    if (context.manifest.files.includes(indexRootRelative)) {
+      if (!fileExists(appRoot, INDEX_HTML)) {
+        warnings.push(`Managed file already absent: ${indexRootRelative}`)
+      } else {
+        const html = readRequiredFile(appRoot, INDEX_HTML)
+        const nextHtml = stripManagedHtmlBlock(html)
+        if (nextHtml === html) {
+          warnings.push(`No managed Infinite block found in ${indexRootRelative}.`)
+        } else {
+          if (!context.dryRun) {
+            writeFileIfChanged(appRoot, INDEX_HTML, nextHtml)
+          }
+          restoredFiles.push(indexRootRelative)
         }
-        restoredFiles.push(normalizeAppRelativePath(context.appRoot, mainFile))
-      }
-      if (nextMain.includes(importLine) || nextMain.includes(bootLine)) {
-        wiringFullyRemoved = false
-        warnings.push(
-          `Could not remove all instrumentation wiring from ${mainFile} automatically. Remove the leftover lines manually.`
-        )
-      }
-    }
-
-    if (wiringFullyRemoved) {
-      const removal = removeManagedFile(appRoot, analyticsModulePath, context.dryRun)
-      if (removal.removed) {
-        removedFiles.push(normalizeAppRelativePath(context.appRoot, analyticsModulePath))
-      }
-      if (removal.warning) {
-        warnings.push(removal.warning)
       }
     }
 
@@ -246,172 +223,11 @@ export const viteReactAdapter: FrameworkAdapter = {
       appRootRelative: context.appRoot,
       dryRun: context.dryRun
     })
-    removedFiles.push(...vercelReversal.removedFiles)
-    restoredFiles.push(...vercelReversal.restoredFiles)
-    warnings.push(...vercelReversal.warnings)
 
-    return { removedFiles, restoredFiles, warnings }
-  }
-}
-
-function removeMainWiring(source: string): string {
-  let next = source.replace(`${importLine}\n`, "")
-  next = next.replace(`\n${bootLine}\n`, "")
-  return next
-}
-
-function selectMainFile(root: string, planFiles: string[], appRoot: string): string {
-  const appRelativeFiles = planFiles.map((file) =>
-    appRoot === "." ? file : file.replace(`${appRoot}/`, "")
-  )
-
-  const matched = appRelativeFiles.find((file) => mainCandidates.includes(file))
-  if (matched) {
-    return matched
-  }
-
-  const fallback = firstExistingPath(root, mainCandidates)
-  if (!fallback) {
-    throw new Error("Unable to resolve the Vite React main entrypoint.")
-  }
-
-  return fallback
-}
-
-function upsertMainEntrypoint(source: string): string {
-  const importSectionEnd = findImportSectionEnd(source)
-  if (importSectionEnd === null) {
-    throw new Error("Vite React apply requires a simple import block at the top of src/main.*.")
-  }
-
-  let next = source
-  if (!next.includes(importLine)) {
-    next = `${next.slice(0, importSectionEnd)}${importLine}\n${next.slice(importSectionEnd)}`
-  }
-
-  if (!next.includes(bootLine)) {
-    const refreshedImportSectionEnd = findImportSectionEnd(next)
-    if (refreshedImportSectionEnd === null) {
-      throw new Error("Unable to refresh the Vite React import block after inserting analytics wiring.")
+    return {
+      removedFiles: vercelReversal.removedFiles,
+      restoredFiles: [...restoredFiles, ...vercelReversal.restoredFiles],
+      warnings: [...warnings, ...vercelReversal.warnings]
     }
-
-    next = `${next.slice(0, refreshedImportSectionEnd)}\n${bootLine}\n${next.slice(refreshedImportSectionEnd)}`
   }
-
-  return next
-}
-
-// Finds the end offset of the first contiguous import section, treating each
-// import statement as complete only once its brackets balance — so multi-line
-// imports (`import {\n  a,\n  b\n} from "x"`) are never split mid-statement.
-function findImportSectionEnd(source: string): number | null {
-  const firstImport = source.match(/^import\b/m)
-  if (!firstImport || firstImport.index === undefined) {
-    return null
-  }
-
-  let position = firstImport.index
-  while (isImportKeywordAt(source, position)) {
-    const statementEnd = consumeImportStatement(source, position)
-    if (statementEnd === null) {
-      return null
-    }
-    position = statementEnd
-  }
-
-  return position
-}
-
-// Returns true only when "import" at `pos` is a keyword — i.e. not followed
-// by an identifier character. This prevents `importantSetup()` from being
-// mistaken for an import statement.
-function isImportKeywordAt(source: string, pos: number): boolean {
-  if (!source.startsWith("import", pos)) {
-    return false
-  }
-  // The character immediately after "import" must not be an identifier char.
-  const charAfter = source[pos + 6]
-  if (charAfter === undefined) {
-    // "import" at end-of-string — not a real import, stop scanning
-    return false
-  }
-  return !/[A-Za-z0-9_$]/.test(charAfter)
-}
-
-function consumeImportStatement(source: string, start: number): number | null {
-  // Scan character-by-character from the start of the statement, tracking string
-  // and comment state so delimiters inside them never affect the bracket depth.
-  // The statement ends at the first newline reached with balanced brackets
-  // (outside any string/comment), matching multi-line imports like
-  // `import {\n  a,\n  b\n} from "x"`. Returns the offset just past that newline,
-  // or null if the brackets never balance / a block comment is left unclosed.
-  let depth = 0
-  let index = start
-  let stringQuote: string | null = null
-  let inBlockComment = false
-
-  while (index < source.length) {
-    const ch = source[index]
-    const next = source[index + 1]
-
-    if (inBlockComment) {
-      if (ch === "*" && next === "/") {
-        inBlockComment = false
-        index += 2
-        continue
-      }
-      index += 1
-      continue
-    }
-
-    if (stringQuote !== null) {
-      if (ch === "\\") {
-        index += 2 // skip the escaped character
-        continue
-      }
-      if (ch === stringQuote) {
-        stringQuote = null
-      }
-      index += 1
-      continue
-    }
-
-    if (ch === "/" && next === "/") {
-      // Line comment: jump to the newline, which the newline branch handles.
-      const newlineIndex = source.indexOf("\n", index)
-      if (newlineIndex === -1) {
-        return depth <= 0 ? source.length : null
-      }
-      index = newlineIndex
-      continue
-    }
-
-    if (ch === "/" && next === "*") {
-      inBlockComment = true
-      index += 2
-      continue
-    }
-
-    if (ch === '"' || ch === "'" || ch === "`") {
-      stringQuote = ch
-      index += 1
-      continue
-    }
-
-    if (ch === "{" || ch === "(") {
-      depth += 1
-    } else if (ch === "}" || ch === ")") {
-      depth -= 1
-    } else if (ch === "\n" && depth <= 0) {
-      return index + 1
-    }
-
-    index += 1
-  }
-
-  // End of source with no trailing newline.
-  if (inBlockComment) {
-    return null
-  }
-  return depth <= 0 ? source.length : null
 }
