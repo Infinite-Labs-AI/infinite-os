@@ -3,7 +3,10 @@
 All notable changes to the `infinite-tag` npm package (`packages/instrument`). Versions before
 0.5.0 are recorded in git history only (`git log -- packages/instrument`).
 
-## Unreleased
+## 0.8.0 — 2026-09-02
+
+The harness release. One command adopts what a site already has, installs what is missing, marks
+conversions, installs a server lane on any stack, verifies each provider with a receipt, and reports.
 
 - **`adMatch` on `postInfiniteOutcome` — the Meta Conversions API relay.** The outcome envelope gains
   an OPTIONAL `adMatch` block (`{ em?, fbc?, fbp?, external_id? }`), carried verbatim inside the

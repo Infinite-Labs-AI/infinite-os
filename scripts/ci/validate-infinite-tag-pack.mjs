@@ -4,8 +4,8 @@ import { readFileSync } from "node:fs"
 import { posix } from "node:path"
 
 const EXPECTED_NAME = "infinite-tag"
-const EXPECTED_VERSION = "0.7.0"
-const EXPECTED_FILENAME = "infinite-tag-0.7.0.tgz"
+const EXPECTED_VERSION = "0.8.0"
+const EXPECTED_FILENAME = "infinite-tag-0.8.0.tgz"
 // SUPPLY-CHAIN TRIPWIRE BOUNDS, not a budget. They exist to catch a tarball that suddenly contains
 // something it should not — a node_modules tree, a stray build directory, a leaked archive — which
 // shows up as an order-of-magnitude jump, never as a few percent. They are NOT a size target: the
