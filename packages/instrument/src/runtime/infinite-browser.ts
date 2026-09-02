@@ -147,6 +147,11 @@ function infiniteBrowserRuntime(config: InfiniteBrowserConfig): void {
     return "external_link"
   }
 
+  function externalConversionDestination(destination: URL): { ctaId: string; path: string } | null {
+    if (externalCtaId(destination) !== "external_stripe") return null
+    return { ctaId: "external_stripe", path: "/external/stripe" }
+  }
+
   function automaticLocation(target: Element, preferred: Array<Element | null>): string {
     for (const element of preferred) {
       const explicit = structuralAttribute(element, "data-analytics-cta-location")
@@ -251,20 +256,23 @@ function infiniteBrowserRuntime(config: InfiniteBrowserConfig): void {
   function downloadClickProperties(
     target: Element,
     anchor: HTMLAnchorElement,
-    destinationPath: string
+    destinationPath: string,
+    fallbackCtaId?: string,
+    fallbackCtaLocation?: string
   ): Record<string, string> {
     const marked = safeClosest(target, "[data-analytics-cta-id]")
     const markedProperties = markedCtaProperties(marked, target, anchor)
-    const ctaId = markedProperties?.cta_id ?? tokenFromPath(destinationPath)
+    const ctaId = markedProperties?.cta_id ?? fallbackCtaId ?? tokenFromPath(destinationPath)
     const ctaLocation = [
       markedProperties?.cta_location,
       structuralAttribute(anchor, "data-analytics-cta-location"),
-      structuralAttribute(anchor, "data-download-location")
+      structuralAttribute(anchor, "data-download-location"),
+      fallbackCtaLocation
     ].find((value): value is string => typeof value === "string")
     return {
       cta_id: ctaId,
       ...(ctaLocation ? { cta_location: ctaLocation } : {}),
-      destination_path: conversionDestinationPath
+      destination_path: destinationPath
     }
   }
 
@@ -460,6 +468,23 @@ function infiniteBrowserRuntime(config: InfiniteBrowserConfig): void {
             downloadClickProperties(target, anchor, normalizePath(destination.href))
           )
           return
+        }
+        if (destination) {
+          const externalConversion = externalConversionDestination(destination)
+          if (externalConversion) {
+            emit(
+              "app_download_click",
+              normalizePath(location.href),
+              downloadClickProperties(
+                target,
+                anchor,
+                externalConversion.path,
+                externalConversion.ctaId,
+                automaticLocation(target, [anchor])
+              )
+            )
+            return
+          }
         }
       }
 

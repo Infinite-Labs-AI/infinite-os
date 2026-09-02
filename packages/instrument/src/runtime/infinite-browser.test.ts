@@ -711,7 +711,7 @@ describe("renderInfiniteBrowserTag", () => {
     expect(runtime.touchedProviders()).toBe(false)
   })
 
-  it("autocaptures external commerce links without leaking the external URL", () => {
+  it("autocaptures external Stripe checkout links as conversion intent without leaking the external URL", () => {
     const runtime = executeTag({
       siteSourceKey: "site_public_123",
       consent: "granted"
@@ -724,13 +724,71 @@ describe("renderInfiniteBrowserTag", () => {
       })
     )
 
+    const checkoutClicks = runtime.requests.filter(
+      (request) => request.body.eventName === "app_download_click"
+    )
+    expect(checkoutClicks).toHaveLength(1)
+    expect(checkoutClicks[0]?.body.properties).toEqual({
+      cta_id: "external_stripe",
+      cta_location: "page",
+      destination_path: "/external/stripe"
+    })
+    expect(runtime.requests.filter((request) => request.body.eventName === "site_click")).toEqual([])
+    expect(JSON.stringify(checkoutClicks[0]?.body)).not.toMatch(
+      /buy\.stripe|prefilled_email|private copy/
+    )
+    expect(runtime.touchedProviders()).toBe(false)
+  })
+
+  it("preserves explicit CTA markers on external Stripe checkout links", () => {
+    const runtime = executeTag({
+      siteSourceKey: "site_public_123",
+      consent: "granted"
+    })
+
+    runtime.click(
+      managedTarget({
+        href: "https://buy.stripe.com/test_checkout?prefilled_email=private@example.com",
+        ctaId: "buy_day_ones",
+        ctaLocation: "pricing_day_ones",
+        text: "Buy Kinara"
+      })
+    )
+
+    const checkoutClick = runtime.requests.find(
+      (request) => request.body.eventName === "app_download_click"
+    )
+    expect(checkoutClick?.body.properties).toEqual({
+      cta_id: "buy_day_ones",
+      cta_location: "pricing_day_ones",
+      destination_path: "/external/stripe"
+    })
+    expect(runtime.requests.filter((request) => request.body.eventName === "site_click")).toEqual([])
+    expect(JSON.stringify(checkoutClick?.body)).not.toMatch(/buy\.stripe|prefilled_email|Buy Kinara/)
+    expect(runtime.touchedProviders()).toBe(false)
+  })
+
+  it("keeps non-checkout external links in the generic site click lane", () => {
+    const runtime = executeTag({
+      siteSourceKey: "site_public_123",
+      consent: "granted"
+    })
+
+    runtime.click(
+      managedTarget({
+        href: "https://docs.example.net/guide?email=private",
+        text: "Read docs"
+      })
+    )
+
     const clicks = runtime.requests.filter((request) => request.body.eventName === "site_click")
     expect(clicks).toHaveLength(1)
     expect(clicks[0]?.body.properties).toEqual({
-      cta_id: "external_stripe",
+      cta_id: "external_link",
       cta_location: "page"
     })
-    expect(JSON.stringify(clicks[0]?.body)).not.toMatch(/buy\.stripe|prefilled_email|private copy/)
+    expect(runtime.requests.filter((request) => request.body.eventName === "app_download_click")).toEqual([])
+    expect(JSON.stringify(clicks[0]?.body)).not.toMatch(/docs\.example|email=|Read docs/)
     expect(runtime.touchedProviders()).toBe(false)
   })
 
