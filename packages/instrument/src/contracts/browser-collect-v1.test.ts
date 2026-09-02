@@ -40,9 +40,9 @@ describe("browser-collect-v1 public contract", () => {
     expect(
       (schemaProperties.eventName as { enum: string[] }).enum
     ).not.toContain("sign_up")
-    // app_download_click's destination is either per-source parameterized (cloud-configured) or a
-    // bounded external conversion bucket; the contract bounds the SHAPE and must not re-pin the
-    // platform default.
+    // app_download_click's destination is per-source parameterized (cloud-configured); hosted
+    // external checkout intent stays in site_click with bounded destination buckets. The contract
+    // bounds the SHAPE and must not re-pin the platform default.
     expect(JSON.stringify(schema.allOf)).not.toContain('"const":"/download"')
     expect(Object.keys(schemaProperties)).toEqual([
       "siteSourceKey",
@@ -168,7 +168,7 @@ describe("browser-collect-v1 public contract", () => {
 
     expect(propertySchemas.cta_id?.pattern).toBe(structuralTokenPattern)
     expect(propertySchemas.cta_location?.pattern).toBe(structuralTokenPattern)
-    expect(new RegExp(propertySchemas.destination_path?.pattern ?? "$^").test("/external/stripe")).toBe(true)
+    expect(new RegExp(propertySchemas.destination_path?.pattern ?? "$^").test("/external/stripe_payment_link")).toBe(true)
 
     const structuralToken = new RegExp(structuralTokenPattern)
     for (const value of ["a", "Hero_2-primary", "A".repeat(64)]) {

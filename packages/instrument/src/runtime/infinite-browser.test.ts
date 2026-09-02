@@ -293,6 +293,45 @@ function managedTarget(input: {
   }
 }
 
+function checkoutTarget(input: {
+  href: string
+  conversion?: string
+  ctaId?: string
+  ctaLocation?: string
+  text?: string
+}) {
+  const anchor = {
+    href: input.href,
+    textContent: input.text ?? "private checkout text",
+    getAttribute(name: string) {
+      return name === "href" ? input.href : null
+    }
+  }
+  const checkout = {
+    textContent: input.text ?? "private checkout text",
+    getAttribute(name: string) {
+      if (name === "data-conversion") return input.conversion ?? "checkout"
+      if (name === "data-analytics-cta-id") return input.ctaId ?? null
+      if (name === "data-analytics-cta-location") return input.ctaLocation ?? null
+      return null
+    },
+    closest(selector: string) {
+      return selector === "a[href]" ? anchor : null
+    }
+  }
+  return {
+    closest(selector: string) {
+      if (selector === '[data-conversion="checkout"]' && (input.conversion ?? "checkout") === "checkout") {
+        return checkout
+      }
+      if (selector === '[data-conversion="signup"]') return null
+      if (selector === "[data-analytics-cta-id]") return input.ctaId ? checkout : null
+      if (selector === "a[href]") return anchor
+      return null
+    }
+  }
+}
+
 function buttonTarget(input: {
   id?: string
   name?: string
@@ -711,34 +750,68 @@ describe("renderInfiniteBrowserTag", () => {
     expect(runtime.touchedProviders()).toBe(false)
   })
 
-  it("autocaptures external Stripe checkout links as conversion intent without leaking the external URL", () => {
-    const runtime = executeTag({
-      siteSourceKey: "site_public_123",
-      consent: "granted"
-    })
-
-    runtime.click(
-      managedTarget({
-        href: "https://buy.stripe.com/test_checkout?prefilled_email=private@example.com",
-        text: "Buy now with private copy"
+  it.each([
+    [
+      "payment link",
+      "https://buy.stripe.com/test_checkout?prefilled_email=private@example.com",
+      "external_stripe_payment_link",
+      "/external/stripe_payment_link"
+    ],
+    [
+      "book payment link",
+      "https://book.stripe.com/test_checkout?prefilled_email=private@example.com",
+      "external_stripe_payment_link",
+      "/external/stripe_payment_link"
+    ],
+    [
+      "donation payment link",
+      "https://donate.stripe.com/test_checkout?prefilled_email=private@example.com",
+      "external_stripe_payment_link",
+      "/external/stripe_payment_link"
+    ],
+    [
+      "hosted checkout",
+      "https://checkout.stripe.com/c/pay/cs_test_secret?prefilled_email=private@example.com",
+      "external_stripe_checkout",
+      "/external/stripe_checkout"
+    ],
+    [
+      "hosted invoice",
+      "https://invoice.stripe.com/i/acct_test/invst_secret?prefilled_email=private@example.com",
+      "external_stripe_invoice",
+      "/external/stripe_invoice"
+    ]
+  ])(
+    "autocaptures Stripe %s as structural site click checkout intent without leaking the external URL",
+    (_case, href, ctaId, destinationPath) => {
+      const runtime = executeTag({
+        siteSourceKey: "site_public_123",
+        consent: "granted"
       })
-    )
 
-    const checkoutClicks = runtime.requests.filter(
-      (request) => request.body.eventName === "app_download_click"
-    )
-    expect(checkoutClicks).toHaveLength(1)
-    expect(checkoutClicks[0]?.body.properties).toEqual({
-      cta_id: "external_stripe",
-      cta_location: "page",
-      destination_path: "/external/stripe"
-    })
-    expect(runtime.requests.filter((request) => request.body.eventName === "site_click")).toEqual([])
-    expect(JSON.stringify(checkoutClicks[0]?.body)).not.toMatch(
-      /buy\.stripe|prefilled_email|private copy/
-    )
-    expect(runtime.touchedProviders()).toBe(false)
-  })
+      runtime.click(
+        managedTarget({
+          href,
+          text: "Buy now with private copy"
+        })
+      )
+
+      const checkoutClicks = runtime.requests.filter(
+        (request) => request.body.eventName === "site_click"
+      )
+      expect(checkoutClicks).toHaveLength(1)
+      expect(checkoutClicks[0]?.body.properties).toEqual({
+        cta_id: ctaId,
+        cta_location: "page",
+        destination_path: destinationPath
+      })
+      expect(runtime.requests.filter((request) => request.body.eventName === "app_download_click")).toEqual([])
+      expect(JSON.stringify(checkoutClicks[0]?.body)).not.toMatch(
+        /buy\.stripe|book\.stripe|donate\.stripe|checkout\.stripe|invoice\.stripe|prefilled_email|private@example|private copy|cs_test|invst_secret/
+      )
+      expect(runtime.touchedProviders()).toBe(false)
+    }
+  )
 
   it("preserves explicit CTA markers on external Stripe checkout links", () => {
     const runtime = executeTag({
@@ -756,16 +829,101 @@ describe("renderInfiniteBrowserTag", () => {
     )
 
     const checkoutClick = runtime.requests.find(
-      (request) => request.body.eventName === "app_download_click"
+      (request) => request.body.eventName === "site_click"
     )
     expect(checkoutClick?.body.properties).toEqual({
       cta_id: "buy_day_ones",
       cta_location: "pricing_day_ones",
-      destination_path: "/external/stripe"
+      destination_path: "/external/stripe_payment_link"
     })
-    expect(runtime.requests.filter((request) => request.body.eventName === "site_click")).toEqual([])
+    expect(runtime.requests.filter((request) => request.body.eventName === "app_download_click")).toEqual([])
     expect(JSON.stringify(checkoutClick?.body)).not.toMatch(/buy\.stripe|prefilled_email|Buy Kinara/)
     expect(runtime.touchedProviders()).toBe(false)
+  })
+
+  it.each([
+    ["root", "https://stripe.com/payments?email=private@example.com"],
+    ["docs", "https://docs.stripe.com/payments/checkout?email=private@example.com"],
+    ["dashboard", "https://dashboard.stripe.com/test/payments/pi_secret"],
+    ["support", "https://support.stripe.com/questions/private"],
+    ["customer portal", "https://billing.stripe.com/p/login/test_secret"],
+    ["unmatched checkout path", "https://checkout.stripe.com/pay/cs_test_secret"],
+    ["unmatched invoice path", "https://invoice.stripe.com/pay/invst_secret"],
+    ["lookalike", "https://buy.stripe.com.evil.example/test_checkout?email=private@example.com"]
+  ])("keeps Stripe %s links in the generic site click lane", (_case, href) => {
+    const runtime = executeTag({
+      siteSourceKey: "site_public_123",
+      consent: "granted"
+    })
+
+    runtime.click(
+      managedTarget({
+        href,
+        text: "Private Stripe link"
+      })
+    )
+
+    const clicks = runtime.requests.filter((request) => request.body.eventName === "site_click")
+    expect(clicks).toHaveLength(1)
+    expect(clicks[0]?.body.properties).toEqual({
+      cta_id: "external_link",
+      cta_location: "page"
+    })
+    expect(runtime.requests.filter((request) => request.body.eventName === "app_download_click")).toEqual([])
+    expect(JSON.stringify(clicks[0]?.body)).not.toMatch(/stripe\.com|private|cs_test|invst_secret/)
+    expect(runtime.touchedProviders()).toBe(false)
+  })
+
+  it("lets sites explicitly mark custom external checkout domains without trusting the hostname", () => {
+    const unmarked = executeTag({
+      siteSourceKey: "site_public_123",
+      consent: "granted"
+    })
+    unmarked.click(
+      managedTarget({
+        href: "https://pay.customer.example/session/secret?email=private@example.com",
+        text: "Private checkout"
+      })
+    )
+    expect(unmarked.requests.find((request) => request.body.eventName === "site_click")?.body.properties).toEqual({
+      cta_id: "external_link",
+      cta_location: "page"
+    })
+
+    const marked = executeTag({
+      siteSourceKey: "site_public_123",
+      consent: "granted"
+    })
+    marked.click(
+      checkoutTarget({
+        href: "https://pay.customer.example/session/secret?email=private@example.com",
+        ctaId: "buy_custom",
+        ctaLocation: "pricing",
+        text: "Private checkout"
+      })
+    )
+    expect(marked.requests.find((request) => request.body.eventName === "site_click")?.body.properties).toEqual({
+      cta_id: "buy_custom",
+      cta_location: "pricing",
+      destination_path: "/external/marked_checkout"
+    })
+    expect(marked.requests.filter((request) => request.body.eventName === "app_download_click")).toEqual([])
+    expect(JSON.stringify(marked.requests)).not.toMatch(/pay\.customer|email=|Private checkout/)
+
+    const invalid = executeTag({
+      siteSourceKey: "site_public_123",
+      consent: "granted"
+    })
+    invalid.click(
+      checkoutTarget({
+        href: "https://pay.customer.example/session/secret?email=private@example.com",
+        conversion: "payment"
+      })
+    )
+    expect(invalid.requests.find((request) => request.body.eventName === "site_click")?.body.properties).toEqual({
+      cta_id: "external_link",
+      cta_location: "page"
+    })
   })
 
   it("keeps non-checkout external links in the generic site click lane", () => {
@@ -792,7 +950,7 @@ describe("renderInfiniteBrowserTag", () => {
     expect(runtime.touchedProviders()).toBe(false)
   })
 
-  it("autocaptures unmarked buttons using only structural attributes", () => {
+  it("keeps unmarked standalone buttons generic instead of promoting arbitrary DOM attributes", () => {
     const runtime = executeTag({
       siteSourceKey: "site_public_123",
       consent: "granted"
@@ -800,7 +958,9 @@ describe("renderInfiniteBrowserTag", () => {
 
     runtime.click(
       buttonTarget({
-        id: "pricing_buy",
+        id: "customer_alice_123",
+        name: "checkout_secret",
+        testId: "pricing_buy",
         location: "pricing",
         text: "Do not collect button text"
       })
@@ -809,10 +969,10 @@ describe("renderInfiniteBrowserTag", () => {
     const clicks = runtime.requests.filter((request) => request.body.eventName === "site_click")
     expect(clicks).toHaveLength(1)
     expect(clicks[0]?.body.properties).toEqual({
-      cta_id: "button_pricing_buy",
+      cta_id: "button",
       cta_location: "pricing"
     })
-    expect(JSON.stringify(clicks[0]?.body)).not.toContain("Do not collect button text")
+    expect(JSON.stringify(clicks[0]?.body)).not.toMatch(/customer_alice|checkout_secret|pricing_buy|Do not collect button text/)
     expect(runtime.touchedProviders()).toBe(false)
   })
 

@@ -86,7 +86,7 @@ contract. Noninteractive `--yes` and `apply` runs fail on the same blocker.
 | `--infinite-site-source-key <site_...>` | Public, source-bound browser key created after domain verification. |
 | `--infinite-production-host <host>` | Verified hostname for the shared browser runtime; repeatable. Origins, paths, ports, queries, and fragments are rejected. |
 | `--infinite-collect-path <path>` | Same-origin browser route. Defaults to `/infinite/events/collect`. |
-| `--infinite-download-destination-path <path>` | Same-origin conversion click path for `app_download_click`. Defaults to `/download`; use `/checkout` only when the site intentionally routes checkout through its own page first. Direct Stripe Payment Links are detected automatically. |
+| `--infinite-download-destination-path <path>` | Same-origin conversion click path for `app_download_click`. Defaults to `/download`; use `/checkout` only when the site intentionally routes checkout through its own page first. Direct Stripe-hosted payment surfaces are detected automatically as structural checkout-intent `site_click` buckets. |
 | `--infinite-static-proxy vercel` | Explicit proof that a static/Vite install may create Vercel rewrites. |
 | `--infinite-consent-mode <required\|not-required>` | Required for Infinite first-party collection. There is no default. `required` waits for the external consent event below; `not-required` collects Infinite events unless DNT/GPC blocks them. Neither mode touches GA4/PostHog consent. |
 | `--ga4-measurement-id <G-...>` | Public GA4 measurement ID. |
@@ -130,23 +130,27 @@ interface InfinitePublicArtifact {
 
 The runtime owns one logical initial website view and SPA route views. It
 normalizes canonical paths, removes query strings and fragments, tracks the
-configured same-origin conversion destination, detects direct Stripe Payment
-Links as `app_download_click` conversion intent, and autocaptures safe DOM
-clicks. Same-origin links are grouped by destination path (`auto_pricing`,
-`auto_checkout`, etc.); unmarked buttons are grouped by structural attributes
-when available; obvious sign-up routes emit `sign_up_click`; non-checkout
-external links are bucketed by class (`external_booking` or `external_link`)
-without storing the external URL. It never captures DOM text, link text, button
-text, form values, query strings, or fragments.
+configured same-origin conversion destination, detects hosted Stripe payment
+surfaces as structural checkout-intent `site_click` buckets, and autocaptures
+safe DOM clicks. Same-origin links are grouped by destination path
+(`auto_pricing`, `auto_checkout`, etc.); standalone unmarked buttons stay under
+the generic `button` CTA id plus structural location; obvious sign-up routes
+emit `sign_up_click`; non-checkout external links are bucketed by class
+(`external_booking` or `external_link`) without storing the external URL. It
+never captures DOM text, link text, button text, form values, query strings, or
+fragments.
 
 `data-analytics-cta-id` and `data-analytics-cta-location` are still supported as
-explicit overrides for cleaner reporting. Stripe Payment Link clicks use the
-structural destination bucket `/external/stripe`; the actual checkout URL and
-its query string are never sent to Infinite. Download anchors may additionally
-retain the backward-compatible `data-download-location` placement attribute; a
-valid `data-analytics-cta-location` takes precedence when both are present. Both
-use the same `^[A-Za-z0-9_-]{1,64}$` structural-token constraint, and one
-conversion click still emits only one `app_download_click` event.
+explicit overrides for cleaner reporting. Stripe-hosted payment surfaces use
+structural destination buckets (`/external/stripe_payment_link`,
+`/external/stripe_checkout`, `/external/stripe_invoice`); custom external
+checkout domains can opt in with `data-conversion="checkout"`, which emits
+`/external/marked_checkout`. The actual checkout URL and query string are never
+sent to Infinite. Download anchors may additionally retain the
+backward-compatible `data-download-location` placement attribute; a valid
+`data-analytics-cta-location` takes precedence when both are present. Both use
+the same `^[A-Za-z0-9_-]{1,64}$` structural-token constraint, and one click
+still emits only one browser event.
 
 Every `site_page_view` carries one bounded property, `nav`: `"navigate"` for the
 initial document load and `"history"` for a History-API route change. The runtime
