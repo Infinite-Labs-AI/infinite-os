@@ -431,22 +431,48 @@ async function resolveInfiniteConsent(ctx: Ctx): Promise<void> {
   }
 }
 
-// Installing Infinite's first-party collection adds a new data processor. This is a NON-BLOCKING
-// reminder (it never fails the run), surfaced in the report + install output as an INF_ notice, that
-// prompts the user to disclose Infinite in their privacy policy BEFORE collection is enabled — and it
-// states exactly what is sent, so the disclosure can be accurate. It fires only when an Infinite
-// source is actually being installed or upgraded (nothing to disclose otherwise).
-export const INFINITE_PRIVACY_DISCLOSURE_NOTICE =
-  "INF_PRIVACY_DISCLOSURE — Installing Infinite adds a new data processor (Infinite / Ultima Inc.) that receives, per request: the path, the host, the referrer host, a browser/bot class, and a secret-keyed visit key that rotates every 30 minutes. The raw IP address and full user agent stay server-side and never leave your server. Disclose Infinite analytics in your privacy policy BEFORE enabling collection."
+// Installing Infinite's first-party collection adds a new data processor (Infinite / Ultima Inc.,
+// api.ultima.inc). This is a NON-BLOCKING reminder (it never fails the run), surfaced in the report +
+// install output as an INF_ notice, that prompts the user to disclose Infinite in their privacy policy
+// BEFORE collection is enabled — and it states exactly what each installed lane sends, so the
+// disclosure can be accurate. The two lanes send DIFFERENT payloads, so the notice is split by lane:
+//
+//   • Browser pixel (runtime/infinite-browser.ts) — the page POSTs each event to a same-origin
+//     collectPath that the framework rewrite forwards to Infinite at api.ultima.inc, so Infinite is
+//     the HTTP endpoint that receives the request: the visitor's IP and User-Agent arrive as request
+//     headers there. The JSON body carries a random anonymousId + sessionId, the URL (origin + path;
+//     query string and fragment stripped), an optional referrer reduced to its host, the event name,
+//     and bounded properties. It sends NO visit key and NO UA class. So this lane must NOT claim the
+//     IP / user agent stay on your server.
+//   • Server lane (server-lane/runtime-source.ts) — your server's edge middleware derives the fields
+//     and POSTs them to Infinite at api.ultima.inc: path, host, referrer host, a User-Agent CLASS
+//     (userAgentFamily), and a secret-keyed visit key that rotates every 30 minutes. The raw IP and
+//     full User-Agent are processed ON your server to derive the class + key and never leave it.
+export const PRIVACY_DISCLOSURE_CODE = "INF_PRIVACY_DISCLOSURE"
+
+export const PIXEL_DISCLOSURE_FIELDS =
+  "Browser pixel — each event is POSTed to Infinite (Ultima Inc.) at api.ultima.inc via a same-origin rewrite, so Infinite receives the request headers, INCLUDING the visitor's IP address and User-Agent, plus a JSON body of: a random anonymousId + sessionId, the page URL (origin + path; query string and fragment stripped), an optional referrer reduced to its host, the event name, and bounded event properties (no DOM text, form values, or click ids)."
+
+export const SERVER_LANE_DISCLOSURE_FIELDS =
+  "Server lane — your edge middleware sends to Infinite (Ultima Inc.) at api.ultima.inc: the path, the host, the referrer host, a User-Agent CLASS (userAgentFamily, not the raw UA), and a secret-keyed visit key that rotates every 30 minutes. The raw IP address and full User-Agent are processed on your server to derive the class and key and never leave it."
+
+/** Builds the disclosure notice for exactly the lanes being installed, or null if neither is. */
+export function buildPrivacyDisclosureNotice(lanes: { pixel: boolean; serverLane: boolean }): string | null {
+  const parts: string[] = []
+  if (lanes.pixel) parts.push(PIXEL_DISCLOSURE_FIELDS)
+  if (lanes.serverLane) parts.push(SERVER_LANE_DISCLOSURE_FIELDS)
+  if (parts.length === 0) return null
+  return `${PRIVACY_DISCLOSURE_CODE} — Installing Infinite adds a new data processor (Infinite / Ultima Inc., api.ultima.inc). Disclose it in your privacy policy BEFORE enabling collection. What is sent: ${parts.join(" ")}`
+}
 
 function remindInfinitePrivacyDisclosure(ctx: Ctx): void {
-  const installing = ctx.classifications.some(
+  const pixel = ctx.classifications.some(
     (entry) => entry.provider === "infinite" && (entry.action === "install" || entry.action === "upgrade")
   )
-  if (!installing) return
-  if (!ctx.report.nextSteps.includes(INFINITE_PRIVACY_DISCLOSURE_NOTICE)) {
-    ctx.report.nextSteps.push(INFINITE_PRIVACY_DISCLOSURE_NOTICE)
-  }
+  const serverLane = Boolean(ctx.planResult?.plan.serverLane)
+  const notice = buildPrivacyDisclosureNotice({ pixel, serverLane })
+  if (!notice) return
+  if (!ctx.report.nextSteps.includes(notice)) ctx.report.nextSteps.push(notice)
 }
 
 const plan: RunbookStep<Ctx> = {
@@ -455,7 +481,6 @@ const plan: RunbookStep<Ctx> = {
   async run(ctx) {
     if (!ctx.inspect || !ctx.keys) throw new Error("inspect did not run")
     await resolveInfiniteConsent(ctx)
-    remindInfinitePrivacyDisclosure(ctx)
     ctx.planResult = buildHarnessPlan({
       root: ctx.root,
       inspect: ctx.inspect,
@@ -464,6 +489,8 @@ const plan: RunbookStep<Ctx> = {
       workspaceId: ctx.args.workspaceId,
       serverLane: ctx.args.serverLane
     })
+    // After the plan is built so the server-lane presence (ctx.planResult.plan.serverLane) is known.
+    remindInfinitePrivacyDisclosure(ctx)
     if (ctx.args.brief) {
       writeJson(ctx.root, HARNESS_BRIEF_RELATIVE_PATH, {
         version: 1,

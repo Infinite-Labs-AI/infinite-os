@@ -8,7 +8,14 @@ import { parseHarnessArgs } from "./args.js"
 import { EXIT_ARGS, EXIT_FAILED, EXIT_OK, runHarnessCommand } from "./command.js"
 import { PROPOSED_CONVERSIONS_RELATIVE_PATH } from "./marking.js"
 import { REPORT_SENT_LINE, reportNotSentLine, type HarnessReportPayload, type ReportSink } from "./report-sink.js"
-import { INFINITE_PRIVACY_DISCLOSURE_NOTICE, runHarness, type HarnessIo } from "./run.js"
+import {
+  buildPrivacyDisclosureNotice,
+  PIXEL_DISCLOSURE_FIELDS,
+  PRIVACY_DISCLOSURE_CODE,
+  runHarness,
+  SERVER_LANE_DISCLOSURE_FIELDS,
+  type HarnessIo
+} from "./run.js"
 import { HARNESS_REPORT_RELATIVE_PATH } from "./state.js"
 import type { VerificationBackend } from "./verify.js"
 
@@ -539,7 +546,44 @@ describe("server-side checkout detection (harness)", () => {
   })
 })
 
-describe("privacy disclosure reminder (Infinite install)", () => {
+describe("buildPrivacyDisclosureNotice (per-lane accuracy)", () => {
+  it("returns null when neither lane is installed", () => {
+    expect(buildPrivacyDisclosureNotice({ pixel: false, serverLane: false })).toBeNull()
+  })
+
+  it("browser-pixel notice does NOT claim IP/UA stay on your server (Infinite is the HTTP endpoint)", () => {
+    const notice = buildPrivacyDisclosureNotice({ pixel: true, serverLane: false })!
+    expect(notice).toContain(PRIVACY_DISCLOSURE_CODE)
+    expect(notice).toContain("api.ultima.inc")
+    expect(notice).toContain(PIXEL_DISCLOSURE_FIELDS)
+    // The pixel POSTs (via rewrite) straight to Infinite, so IP + UA reach the endpoint.
+    expect(notice).toContain("INCLUDING the visitor's IP address and User-Agent")
+    // …and the pixel body has no visit key / UA class, so those must not appear.
+    expect(notice).not.toContain("visit key")
+    expect(notice).not.toContain("userAgentFamily")
+    // The false "stays on your server" claim must NOT appear for a pixel-only install.
+    expect(notice).not.toContain(SERVER_LANE_DISCLOSURE_FIELDS)
+  })
+
+  it("server-lane notice lists the derived fields and correctly says the raw IP/UA never leave the server", () => {
+    const notice = buildPrivacyDisclosureNotice({ pixel: false, serverLane: true })!
+    expect(notice).toContain(SERVER_LANE_DISCLOSURE_FIELDS)
+    expect(notice).toContain("visit key that rotates every 30 minutes")
+    expect(notice).toContain("userAgentFamily")
+    expect(notice).toContain("never leave it")
+    // Server lane sends no pixel-only anonymousId/sessionId body.
+    expect(notice).not.toContain(PIXEL_DISCLOSURE_FIELDS)
+  })
+
+  it("both lanes → both blocks, each naming Ultima Inc. / api.ultima.inc", () => {
+    const notice = buildPrivacyDisclosureNotice({ pixel: true, serverLane: true })!
+    expect(notice).toContain(PIXEL_DISCLOSURE_FIELDS)
+    expect(notice).toContain(SERVER_LANE_DISCLOSURE_FIELDS)
+    expect(notice).toContain("Ultima Inc.")
+  })
+})
+
+describe("privacy disclosure reminder (wired into the run)", () => {
   const infiniteArgs = (root: string, mode: string) => [
     mode, "--root", root, "--workspace", "ws_1",
     "--infinite-site-source-key", "site_public_123",
@@ -548,17 +592,32 @@ describe("privacy disclosure reminder (Infinite install)", () => {
     "--infinite-consent-mode", "not-required"
   ]
 
-  it("reminds the user to disclose Infinite in their privacy policy when Infinite is being installed", async () => {
+  it("fires the browser-pixel disclosure when only the Infinite pixel is being installed", async () => {
     const root = copyFixture("static-html-basic")
     const io = fakeIo({ interactive: false })
     const result = await runHarness(parseHarnessArgs(infiniteArgs(root, "--plan")), io, { discover: () => null })
-    expect(result.report.nextSteps).toContain(INFINITE_PRIVACY_DISCLOSURE_NOTICE)
-    expect(INFINITE_PRIVACY_DISCLOSURE_NOTICE).toContain("INF_PRIVACY_DISCLOSURE")
-    expect(INFINITE_PRIVACY_DISCLOSURE_NOTICE).toContain("visit key that rotates every 30 minutes")
-    expect(INFINITE_PRIVACY_DISCLOSURE_NOTICE).toContain("raw IP address and full user agent stay server-side")
+    const notice = result.report.nextSteps.find((step) => step.includes(PRIVACY_DISCLOSURE_CODE))
+    expect(notice).toBeDefined()
+    expect(notice).toContain(PIXEL_DISCLOSURE_FIELDS)
+    // No server lane requested → no server-lane block.
+    expect(notice).not.toContain(SERVER_LANE_DISCLOSURE_FIELDS)
     // Surfaced in the written report's checklist.
     const report = readFileSync(join(root, HARNESS_REPORT_RELATIVE_PATH), "utf8")
-    expect(report).toContain("INF_PRIVACY_DISCLOSURE")
+    expect(report).toContain(PRIVACY_DISCLOSURE_CODE)
+  })
+
+  it("fires BOTH lane blocks when the Infinite pixel and the server lane are both installed", async () => {
+    const root = copyFixture("next-app-router-basic")
+    const io = fakeIo({ interactive: false })
+    const result = await runHarness(
+      parseHarnessArgs([...infiniteArgs(root, "--plan"), "--server-lane"]),
+      io,
+      { discover: () => null }
+    )
+    const notice = result.report.nextSteps.find((step) => step.includes(PRIVACY_DISCLOSURE_CODE))
+    expect(notice).toBeDefined()
+    expect(notice).toContain(PIXEL_DISCLOSURE_FIELDS)
+    expect(notice).toContain(SERVER_LANE_DISCLOSURE_FIELDS)
   })
 
   it("does NOT remind about disclosure when no Infinite source is being installed", async () => {
@@ -570,6 +629,6 @@ describe("privacy disclosure reminder (Infinite install)", () => {
       io,
       { discover: () => null }
     )
-    expect(result.report.nextSteps.some((step) => step.includes("INF_PRIVACY_DISCLOSURE"))).toBe(false)
+    expect(result.report.nextSteps.some((step) => step.includes(PRIVACY_DISCLOSURE_CODE))).toBe(false)
   })
 })
