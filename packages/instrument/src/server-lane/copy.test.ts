@@ -61,6 +61,22 @@ describe("the agent brief", () => {
     expect(brief).toContain("- [ ] ")
   })
 
+  it("documents adMatch as OPT-IN, customer-hashed, and never stored", () => {
+    expect(brief).toContain(`### ${serverLaneCopy.adMatchHeading}`)
+    // The audience gate is stated first, because the wrong founder double-counts by adding it.
+    expect(brief).toContain("Meta ads and do not use PostHog")
+    expect(brief).toContain("Send outcomes to Meta Conversions API")
+    // The hashing recipe is spelled out, so nobody has to guess Meta's normalisation.
+    expect(brief).toContain('createHash("sha256").update(email.trim().toLowerCase()).digest("hex")')
+    expect(brief).toContain("discarded")
+    expect(brief).toContain("64-character hex digest is rejected")
+    // The dedup promise and the privacy promise both appear.
+    expect(brief).toContain("so a browser pixel firing the same id deduplicates")
+    expect(brief).toContain("are read from the outcome request's own headers at forwarding time")
+    // And the contract section lists it as an optional, outcome-only key.
+    expect(brief).toContain("`adMatch` is OPTIONAL and outcome-only")
+  })
+
   it("never contains a secret value or a raw-IP field", () => {
     expect(brief).not.toMatch(/INFINITE_SERVER_EVENT_SECRET\s*=\s*"[^<]/)
     expect(brief).not.toContain('"clientIp"')

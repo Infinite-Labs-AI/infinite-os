@@ -10,11 +10,13 @@ import {
   clientIpFrom,
   computeDocumentEventId,
   computeVisitKey,
+  hashInfiniteEmail,
   hmacHex,
   isDocumentPath,
   referrerHostOf,
   shouldRecordDocumentRequest,
-  signServerEventBody
+  signServerEventBody,
+  type InfiniteAdMatch
 } from "./helpers.js"
 
 /**
@@ -244,5 +246,76 @@ describe("contracts/server-lane-v1.vectors.json (shared with the receiving side)
         expect(classifyUserAgent(sample)).toBe(family)
       }
     }
+
+    // The Meta CAPI relay's adMatch vectors: the receiving side must reproduce the same hashes and
+    // the same body signature, byte for byte.
+    expect(hashInfiniteEmail(vectors.outcomeEmail as string)).toBe(vectors.outcomeEmailHash)
+    expect(signServerEventBody(VECTORS.secret, vectors.outcomeAdMatchBody as string)).toBe(
+      vectors.outcomeAdMatchBodySignature
+    )
+    const parsed = JSON.parse(vectors.outcomeAdMatchBody as string) as {
+      adMatch: Record<string, string>
+    }
+    expect(parsed.adMatch.em).toBe(vectors.outcomeEmailHash)
+    expect(parsed.adMatch.external_id).toBe(vectors.outcomeExternalIdHash)
+    // A raw address never appears in a signed body — the whole point of hashing on the customer side.
+    expect(vectors.outcomeAdMatchBody).not.toContain(vectors.outcomeEmail)
+  })
+})
+
+describe("hashInfiniteEmail", () => {
+  it("normalises exactly as Meta specifies: trimmed, lowercased, then sha256 hex", () => {
+    const canonical = hashInfiniteEmail("founder@example.com")
+    expect(canonical).toMatch(/^[a-f0-9]{64}$/)
+    expect(hashInfiniteEmail("  Founder@Example.COM  ")).toBe(canonical)
+  })
+
+  it("is not idempotent — hashing a hash gives a different value (never do it twice)", () => {
+    const once = hashInfiniteEmail("founder@example.com")
+    expect(hashInfiniteEmail(once)).not.toBe(once)
+  })
+})
+
+describe("adMatch on a signed outcome", () => {
+  const adMatch: InfiniteAdMatch = {
+    em: hashInfiniteEmail("founder@example.com"),
+    fbp: "fb.1.1755500000123.987654321"
+  }
+
+  it("is signed WITH the body, so it cannot be injected without the secret", () => {
+    const signed = buildSignedServerEventRequest({
+      sourceKey: "site_public_fixture",
+      secret: VECTORS.secret,
+      event: {
+        eventId: "purchase:1",
+        eventName: "purchase",
+        occurredAt: "2025-08-18T06:53:20.123Z",
+        properties: {},
+        adMatch
+      }
+    })
+    expect(JSON.parse(signed.body).adMatch).toEqual(adMatch)
+    // Strip the block and the signature no longer matches: it is inside the signed bytes.
+    const withoutBlock = JSON.stringify({
+      eventId: "purchase:1",
+      eventName: "purchase",
+      occurredAt: "2025-08-18T06:53:20.123Z",
+      properties: {}
+    })
+    expect(signServerEventBody(VECTORS.secret, withoutBlock)).not.toBe(
+      signed.headers["x-infinite-signature"]
+    )
+  })
+
+  it("never rides a document request — buildDocumentRequestEvent emits no adMatch", () => {
+    const event = buildDocumentRequestEvent({
+      secret: VECTORS.secret,
+      path: "/pricing",
+      host: "example.com",
+      clientIp: VECTORS.clientIp,
+      userAgent: VECTORS.userAgent,
+      nowMs: VECTORS.nowMs
+    })
+    expect(event).not.toHaveProperty("adMatch")
   })
 })

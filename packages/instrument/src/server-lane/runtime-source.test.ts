@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { INFINITE_SERVER_EVENTS_DESTINATION } from "../workspace-artifacts.js"
 
 import { VECTORS } from "./helpers.test.js"
-import { signServerEventBody } from "./helpers.js"
+import { hashInfiniteEmail, signServerEventBody } from "./helpers.js"
 import {
   NEXT_DOCUMENT_MATCHER,
   SERVER_LANE_FENCE_END,
@@ -194,6 +194,27 @@ describe("generated Next.js module (executed with WebCrypto)", () => {
       properties: { visitKey: VECTORS.visitKey }
     })
     expect(init.headers["x-infinite-signature"]).toBe(signServerEventBody(VECTORS.secret, init.body))
+  })
+
+  it("carries an adMatch block verbatim inside the signed body, and omits it when absent", async () => {
+    const mod = await loadGeneratedModule()
+    const adMatch = { em: hashInfiniteEmail("founder@example.com"), fbp: "fb.1.1755500000123.987654321" }
+    await mod.sendInfiniteServerEvent({
+      eventName: "purchase",
+      eventId: "purchase:1",
+      occurredAt: new Date(VECTORS.nowMs),
+      adMatch
+    })
+    const [, init] = fetchMock.mock.calls[0] as [string, { body: string; headers: Record<string, string> }]
+    expect((JSON.parse(init.body) as { adMatch: unknown }).adMatch).toEqual(adMatch)
+    // Signed with the rest of the body — the relay can trust it because the secret signed it.
+    expect(init.headers["x-infinite-signature"]).toBe(signServerEventBody(VECTORS.secret, init.body))
+    expect(init.body).not.toContain("founder@example.com")
+
+    fetchMock.mockClear()
+    await mod.sendInfiniteServerEvent({ eventName: "sign_up", eventId: "signup:1" })
+    const [, plain] = fetchMock.mock.calls[0] as [string, { body: string }]
+    expect(plain.body).not.toContain("adMatch")
   })
 
   it("infiniteVisitKey matches the Node recipe vector", async () => {

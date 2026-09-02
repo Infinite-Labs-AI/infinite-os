@@ -6,7 +6,7 @@
 // re-implements the same recipe with WebCrypto for the Edge runtime; its constants are interpolated
 // from here so the two cannot drift, and runtime-source.test.ts executes the generated code against
 // these vectors.
-import { createHmac } from "node:crypto"
+import { createHash, createHmac } from "node:crypto"
 
 import { INFINITE_SERVER_EVENTS_DESTINATION } from "../workspace-artifacts.js"
 
@@ -147,12 +147,60 @@ export interface DocumentRequestEventInput {
   nowMs: number
 }
 
+/**
+ * The OPTIONAL ad-match block on an OUTCOME (never on a document request).
+ *
+ * WHY IT EXISTS: a founder who runs Meta ads and has no PostHog otherwise has no server-side
+ * conversion path — Meta's optimiser never learns about a purchase their server confirmed, because
+ * a browser pixel cannot see a server-side truth. When the founder turns the relay on in Infinite,
+ * an outcome carrying this block is forwarded to Meta's Conversions API at ingest and the block is
+ * then DISCARDED: it is never stored, never written to the ledger, never logged. A PostHog customer
+ * needs none of it — PostHog ships its own Meta destination, and two senders for one conversion is
+ * a double count.
+ *
+ * YOUR SERVER HASHES; INFINITE NEVER DOES. `em` and `external_id` are sha256 hex you compute
+ * (`hashInfiniteEmail` below is exactly that recipe), so a raw email never leaves your process. A
+ * value that is not a 64-character hex digest is REJECTED at ingest with a 400 — deliberately, so
+ * an integration mistake surfaces now rather than as a mysteriously empty match rate later.
+ *
+ * `fbc` and `fbp` are Meta's OWN first-party cookies on your domain, readable by your server:
+ * https://developers.facebook.com/docs/marketing-api/conversions-api/parameters/fbp-and-fbc
+ *
+ * The block rides INSIDE the signed body, so nobody without your secret can inject one.
+ */
+export interface InfiniteAdMatch {
+  /** sha256 hex of the lowercased, trimmed email. Use `hashInfiniteEmail`. */
+  em?: string
+  /** Meta's `_fbc` cookie, verbatim. */
+  fbc?: string
+  /** Meta's `_fbp` cookie, verbatim. */
+  fbp?: string
+  /** sha256 hex of your own account id. */
+  external_id?: string
+}
+
+/** The only keys an adMatch block may carry — anything else is rejected as a malformed envelope. */
+export const AD_MATCH_KEYS = ["em", "fbc", "fbp", "external_id"] as const
+
+/**
+ * The email hash Infinite (and Meta) expect: sha256 hex of the TRIMMED, LOWERCASED address.
+ *
+ * Meta's normalisation for the `em` parameter. Call it on your server; the address itself never
+ * leaves it. Never hash an already-hashed value — that is the single most common way to produce a
+ * match key that matches nothing.
+ */
+export function hashInfiniteEmail(email: string): string {
+  return createHash("sha256").update(email.trim().toLowerCase()).digest("hex")
+}
+
 export interface ServerLaneEvent {
   eventId: string
   eventName: string
   occurredAt: string
   accountKey?: string
   properties: Record<string, string | number | boolean>
+  /** OPTIONAL, OUTCOMES ONLY. Consumed by the Meta CAPI relay at ingest, then discarded. */
+  adMatch?: InfiniteAdMatch
 }
 
 /** The full site_document_request envelope for one document request. */

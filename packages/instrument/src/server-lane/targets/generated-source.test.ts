@@ -15,12 +15,17 @@ import {
 } from "../../workspace-artifacts.js"
 import { VECTORS } from "../helpers.test.js"
 import { buildServerLaneModuleSource } from "../runtime-source.js"
-import { SERVER_LANE_SIGNATURE_HEADER, SERVER_LANE_SOURCE_KEY_HEADER } from "../helpers.js"
+import {
+  hashInfiniteEmail,
+  signServerEventBody,
+  SERVER_LANE_SIGNATURE_HEADER,
+  SERVER_LANE_SOURCE_KEY_HEADER
+} from "../helpers.js"
 
 import { cloudflarePagesMiddlewareSource } from "./cloudflare.js"
 import { NETLIFY_EXCLUDED_ASSET_EXTENSIONS, netlifyEdgeFunctionSource } from "./netlify.js"
 import { nodeLaneModuleSource, nodeOutcomeHelperSource } from "./node.js"
-import { nonDocumentPrefixes, outcomeHelperSource } from "./shared.js"
+import { edgeLaneCoreSource, nonDocumentPrefixes, outcomeHelperSource } from "./shared.js"
 import { vercelLaneModuleSource, vercelMiddlewareSource } from "./vercel-any.js"
 
 const tempRoots: string[] = []
@@ -94,6 +99,36 @@ describe("the shared edge core, executed", () => {
     expect(posted.body).not.toContain(VECTORS.clientIp)
     expect(posted.body).not.toContain("Mozilla")
     expect(posted.body).not.toContain("q=infinite")
+  })
+
+  it("passes an outcome's adMatch block through the shared sender, unchanged and signed", async () => {
+    const lane = (await loadGenerated(edgeLaneCoreSource({ ...BUILD, exported: true }))) as {
+      sendInfiniteServerEvent: (
+        event: Record<string, unknown>,
+        credentials: { secret: string; sourceKey?: string }
+      ) => Promise<boolean>
+    }
+    const adMatch = { em: hashInfiniteEmail("founder@example.com") }
+    await lane.sendInfiniteServerEvent(
+      { eventId: "purchase:1", eventName: "purchase", occurredAt: "2025-08-18T06:53:20.123Z", adMatch },
+      { secret: VECTORS.secret }
+    )
+    const posted = postedBody(fetchMock)
+    expect(JSON.parse(posted.body).adMatch).toEqual(adMatch)
+    expect(posted.headers.get(SERVER_LANE_SIGNATURE_HEADER)).toBe(
+      signServerEventBody(VECTORS.secret, posted.body)
+    )
+  })
+
+  it("never puts an adMatch on a document request — a page load is not a conversion", async () => {
+    const lane = (await loadGenerated(edgeLaneCoreSource({ ...BUILD, exported: true }))) as {
+      recordInfiniteDocumentRequest: (
+        request: Request,
+        credentials: { secret: string; sourceKey?: string }
+      ) => Promise<boolean>
+    }
+    await lane.recordInfiniteDocumentRequest(documentRequest(), { secret: VECTORS.secret })
+    expect(postedBody(fetchMock).body).not.toContain("adMatch")
   })
 
   it("derives the same 30-minute visitKey as the Node recipe", async () => {
@@ -446,6 +481,41 @@ describe("the outcome helper, executed", () => {
     expect(body.properties).toEqual({ path: "/checkout", visitKey: VECTORS.visitKey })
     expect(posted.headers.get(SERVER_LANE_SOURCE_KEY_HEADER)).toBe("site_test")
     expect(posted.body).not.toContain(VECTORS.clientIp)
+  })
+
+  it("carries an adMatch block VERBATIM inside the signed body (the Meta CAPI relay)", async () => {
+    const helper = (await loadGenerated(outcomeHelperSource(BUILD))) as {
+      postInfiniteOutcome: (input: Record<string, unknown>) => Promise<boolean>
+    }
+    const adMatch = {
+      em: hashInfiniteEmail("founder@example.com"),
+      fbc: "fb.1.1755500000123.IwAR0abcDEF_-123",
+      fbp: "fb.1.1755500000123.987654321"
+    }
+    await helper.postInfiniteOutcome({
+      type: "purchase",
+      path: "/checkout",
+      eventId: "purchase:cs_test_123",
+      occurredAt: new Date(VECTORS.nowMs),
+      adMatch
+    })
+    const posted = postedBody(fetchMock)
+    // Verbatim: the helper hashes nothing and rewrites nothing — the customer already did.
+    expect(JSON.parse(posted.body).adMatch).toEqual(adMatch)
+    // Inside the SIGNED bytes, so it cannot be injected without the secret.
+    expect(posted.headers.get(SERVER_LANE_SIGNATURE_HEADER)).toBe(
+      signServerEventBody(VECTORS.secret, posted.body)
+    )
+    // The address itself never leaves the customer's process.
+    expect(posted.body).not.toContain("founder@example.com")
+  })
+
+  it("omits adMatch entirely when the caller sends none — the block is opt-in per outcome", async () => {
+    const helper = (await loadGenerated(outcomeHelperSource(BUILD))) as {
+      postInfiniteOutcome: (input: Record<string, unknown>) => Promise<boolean>
+    }
+    await helper.postInfiniteOutcome({ type: "sign_up", eventId: "signup:1" })
+    expect(postedBody(fetchMock).body).not.toContain("adMatch")
   })
 
   it("accepts raw visit-key inputs, and mints a random event id when none is given", async () => {

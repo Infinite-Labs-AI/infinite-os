@@ -121,6 +121,29 @@ export const serverLaneCopy = {
     "A Vercel serverless function (`api/checkout-status.ts`) confirming a paid session:",
   outcomeRouteNote:
     "`type` is the exact name from Infinite → Conversions. Pass the incoming request as `visitKeyInputs` and the outcome carries the same `visitKey` as the page view that produced it, which is what makes the same-lane conversion rate real. Give each outcome a stable `eventId` (an order id) so a retry never double counts. It resolves `false` instead of throwing, so a failed report can never fail the checkout.",
+  adMatchHeading: "Optional: forward the conversion to Meta",
+  adMatch: [
+    "Only if you run **Meta ads and do not use PostHog** — PostHog already ships its own Meta destination, and two senders for one conversion is a double count.",
+    "Add an `adMatch` block to the outcome and turn the relay on in Infinite → Site → Settings → “Send outcomes to Meta Conversions API”. The outcome is then forwarded to Meta's Conversions API as it is ingested, and the match data is **discarded**: Infinite never stores it, never writes it to your ledger, never logs it. Nothing happens without both the block and the toggle.",
+    "```ts",
+    'import { createHash } from "node:crypto"',
+    "",
+    "await postInfiniteOutcome({",
+    '  type: "purchase",',
+    '  eventId: "purchase:" + order.id,   // Meta gets the same event_id, so your browser pixel dedupes',
+    "  adMatch: {",
+    '    em: createHash("sha256").update(email.trim().toLowerCase()).digest("hex"),',
+    '    fbc: cookies.get("_fbc"),        // Meta\u2019s own first-party cookies, on YOUR domain',
+    '    fbp: cookies.get("_fbp")',
+    "  }",
+    "})",
+    "```",
+    "- **You hash; Infinite never does.** `em` and `external_id` are sha256 hex of the trimmed, lowercased value. A raw email never leaves your server, and a value that is not a 64-character hex digest is rejected with a `400` rather than forwarded — so a mistake shows up now, not as an empty match rate in three months.",
+    "- **`fbc` / `fbp` are Meta's own cookies** on your domain, which your server can read from the request ([fbp and fbc](https://developers.facebook.com/docs/marketing-api/conversions-api/parameters/fbp-and-fbc)).",
+    "- **`eventId` is passed to Meta as `event_id`**, so a browser pixel firing the same id deduplicates instead of counting the conversion twice.",
+    "- **The IP and user agent Meta wants** are read from the outcome request's own headers at forwarding time and are never stored — the lane's rule that neither ever reaches the ledger is unchanged.",
+    "- `adMatch` rides inside the SIGNED body, so nobody without your secret can inject one. It is never valid on a document request."
+  ],
 
   contractHeading: "The contract (implement exactly)",
   contract: {
@@ -152,7 +175,8 @@ export const serverLaneCopy = {
       "- `properties.visitKey`: include it when you can compute it for that request (same recipe) — it is what lets Infinite show the same-lane conversion rate.",
       "- `accountKey` is optional and opaque (a user or order id); Infinite hashes it at rest and uses it for account-deduped outcomes.",
       "- Use a stable `eventId` per outcome (order id, signup id). Retries with the same eventId are safe; the server dedupes.",
-      "- `properties` may hold up to 16 keys; keys are lowercase snake_case (`^[a-z][a-z0-9_]{0,63}$` — `visitKey` is the one camelCase exception); values are short whitespace-free tokens, numbers, or booleans — no free text."
+      "- `properties` may hold up to 16 keys; keys are lowercase snake_case (`^[a-z][a-z0-9_]{0,63}$` — `visitKey` is the one camelCase exception); values are short whitespace-free tokens, numbers, or booleans — no free text.",
+      "- `adMatch` is OPTIONAL and outcome-only: `{ em?, fbc?, fbp?, external_id? }` where `em`/`external_id` are sha256 hex YOU computed and `fbc`/`fbp` are Meta's own first-party cookies. It is consumed by the Meta Conversions API relay at ingest and then discarded — never stored. Omit it entirely unless you run Meta ads without PostHog."
     ],
     delivery: [
       `**Delivery.** Fire-and-forget; never block or fail the response. Timeout ${SERVER_LANE_DELIVERY_TIMEOUT_MS} ms. Never throw into the request path. Next.js middleware: \`event.waitUntil(fetch(...))\`; Cloudflare: \`ctx.waitUntil\`; Netlify Edge: \`context.waitUntil\`; Node/Express: fire the promise and \`.catch(() => {})\`.`,
@@ -190,7 +214,8 @@ export const serverLaneCopy = {
     "Never send the raw IP, the full user agent, cookies, query strings, or bodies. Path and host only.",
     "Skip assets, API routes, prefetches, and non-HTML requests, so a page counts once. Classify obvious bots as `automation` — Infinite never sees the user agent, so the family you send is what it records (automation rows are split out, never counted as visitors).",
     "Report outcomes from the moment they are real, never from intent (a click is intent; a committed row is an outcome). Use stable event ids so retries never double count.",
-    "Local, loopback, and preview hosts are ignored on Infinite's side (only verified production hosts count); the generated Next.js module also stays dormant on loopback and off-list hosts."
+    "Local, loopback, and preview hosts are ignored on Infinite's side (only verified production hosts count); the generated Next.js module also stays dormant on loopback and off-list hosts.",
+    "The optional `adMatch` block is the ONE thing this lane forwards anywhere else, it goes only to Meta's Conversions API, only when you turn the relay on, and only from values your own server hashed. It is discarded after the send: Infinite never stores it, and the IP and user agent Meta is given come from the request itself and are never written down."
   ],
 
   verifyHeading: "Verify",
@@ -430,6 +455,10 @@ export function renderServerLaneBrief(input: ServerLaneBriefInput): string {
     ...codeBlock("ts", outcomeRouteSnippet()),
     "",
     serverLaneCopy.outcomeRouteNote,
+    "",
+    `### ${serverLaneCopy.adMatchHeading}`,
+    "",
+    ...serverLaneCopy.adMatch,
     "",
     `## ${serverLaneCopy.envHeading}`,
     "",

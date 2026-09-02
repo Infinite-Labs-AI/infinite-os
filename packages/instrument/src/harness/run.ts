@@ -46,6 +46,7 @@ import {
   HARNESS_REPORT_RELATIVE_PATH,
   createHarnessReport,
   findProvider,
+  metaRelayNote,
   renderReportMarkdown,
   renderReportTable,
   transitionProvider,
@@ -741,6 +742,10 @@ const reportStep: RunbookStep<Ctx> = {
   id: "report",
   title: "Report + handoff",
   run(ctx) {
+    // BEFORE the check-mode return: `--check` prints nextSteps too, and the relay line is exactly
+    // the kind of thing a dry run should surface (it changes nothing and costs nothing to say).
+    const relay = metaRelayNote(ctx.report)
+    if (relay && !ctx.report.nextSteps.includes(relay)) ctx.report.nextSteps.push(relay)
     if (ctx.args.mode === "check") return { note: "check mode: printed only, nothing written" }
     ctx.report.finishedAt = new Date(ctx.deps.now?.() ?? Date.now()).toISOString()
     const absolutePath = join(ctx.root, HARNESS_REPORT_RELATIVE_PATH)

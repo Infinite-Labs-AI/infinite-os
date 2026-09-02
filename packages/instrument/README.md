@@ -288,10 +288,49 @@ where the site is **hosted** (`vercel.json` / `.vercel/project.json` / `@vercel/
 | No host signal | Writes the agent brief only; `server-lane --brief > INSTALL-SERVER-LANE.md` saves it anywhere. |
 
 Every target also writes **`lib/infinite-outcome`**, exporting `postInfiniteOutcome({ type, path,
-eventId, accountKey, visitKeyInputs })`, so any server route — a Vercel `api/` function confirming a
-paid Stripe session, a webhook, a job — reports an outcome in three lines and carries the same
-`visitKey` as the page view that produced it. Report outcomes from where they become real (a
-committed row, a captured payment, a served file), never from a click.
+eventId, accountKey, visitKeyInputs, adMatch })`, so any server route — a Vercel `api/` function
+confirming a paid Stripe session, a webhook, a job — reports an outcome in three lines and carries
+the same `visitKey` as the page view that produced it. Report outcomes from where they become real
+(a committed row, a captured payment, a served file), never from a click.
+
+#### `adMatch` — forwarding the conversion to Meta
+
+Only for founders who **run Meta ads and do not use PostHog**. PostHog already ships its own Meta
+destination, and two senders for one conversion is a double count.
+
+Add an `adMatch` block to the outcome and turn the relay on in Infinite → Site → Settings → *Send
+outcomes to Meta Conversions API*. Infinite then forwards that outcome to Meta's Conversions API as
+it is ingested and **discards the match data**: it is never stored, never written to your ledger,
+never logged. Neither half works alone — no block, nothing to forward; no toggle, nothing is sent.
+
+```ts
+import { createHash } from "node:crypto"
+import { postInfiniteOutcome } from "../lib/infinite-outcome"
+
+await postInfiniteOutcome({
+  type: "purchase",
+  eventId: "purchase:" + order.id,   // Meta gets the same event_id, so your browser pixel dedupes
+  visitKeyInputs: request,
+  adMatch: {
+    em: createHash("sha256").update(email.trim().toLowerCase()).digest("hex"),
+    fbc: cookies.get("_fbc"),        // Meta's own first-party cookies, on YOUR domain
+    fbp: cookies.get("_fbp")
+  }
+})
+```
+
+- **You hash; Infinite never does.** `em` and `external_id` are sha256 hex of the trimmed, lowercased
+  value — a raw email never leaves your server. A value that is not a 64-character hex digest is
+  rejected with a `400` instead of being forwarded, so a mistake shows up at integration time rather
+  than as an empty match rate three months later. Never hash an already-hashed value.
+- **`fbc` / `fbp` are Meta's own cookies** on your domain, which your server reads from the request
+  ([fbp and fbc](https://developers.facebook.com/docs/marketing-api/conversions-api/parameters/fbp-and-fbc)).
+- **`eventId` becomes Meta's `event_id`**, so a browser pixel firing the same id deduplicates
+  instead of counting the conversion twice.
+- The client IP and user agent Meta wants for matching are read from the outcome request's own
+  headers at forwarding time and are never stored — this lane still writes neither to the ledger.
+- `adMatch` rides inside the **signed** body, so nobody without your secret can inject one, and it is
+  never valid on a document request.
 
 If a file it would create already exists and Infinite does not manage it, that file is left alone
 and its exact content goes into the brief; an unmanaged `lib/infinite-server-lane.*` is a planning
