@@ -1,11 +1,15 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { HarnessArgs, HarnessIo, VerificationBackend } from "infinite-tag";
 
 import {
   ANALYTICS_USAGE,
+  BRIDGE_BACKEND_NOTICE,
+  DESKTOP_TOO_OLD_NOTICE,
   NO_CLOUD_SESSION_NOTICE,
   chooseBackend,
+  extractApiTokenEnvFlag,
   runAnalyticsCommand,
+  type ResolvedBridge,
   type TagHarnessModule
 } from "./analytics.js";
 
@@ -38,6 +42,9 @@ function fakeTag(captured: Captured, options: { failure?: { code: string; messag
   return {
     parseHarnessArgs(argv) {
       if (argv.includes("--bogus")) throw new Error("Unknown argument: --bogus. Run infinite-tag help for usage.");
+      // The real parser rejects anything it does not know — including our CLI-only flag.
+      const ours = argv.find((token) => token.startsWith("--api-token-env"));
+      if (ours) throw new Error(`Unknown argument: ${ours}. Run infinite-tag help for usage.`);
       const args = baseArgs();
       for (let index = 0; index < argv.length; index += 1) {
         const token = argv[index];
@@ -78,9 +85,43 @@ function fakeTag(captured: Captured, options: { failure?: { code: string; messag
         return {};
       }
     },
+    DesktopBridgeBackend: class implements VerificationBackend {
+      name: string;
+      lanes: VerificationBackend["lanes"] = ["ga4"];
+      constructor(options: { bridgeUrl: string; token: string }) {
+        this.name = `bridge:${options.bridgeUrl}:${options.token}`;
+      }
+      async verify() {
+        return {};
+      }
+    },
     EXIT_ARGS: 2,
     EXIT_FAILED: 1,
     EXIT_OK: 0
+  };
+}
+
+/** A running Desktop: the descriptor carries the loopback url, the LOCAL bearer, and the verbs. */
+function fakeBridge(
+  options: { workspaceId?: string; capabilities?: string[] } = {}
+): ResolvedBridge {
+  return {
+    client: {
+      status: async () => ({
+        service: "infinite-desktop-cmdl" as const,
+        bootId: "b",
+        protocol: { min: 1, max: 1 },
+        capabilities: [],
+        ready: true,
+        contextRevision: "r",
+        workspace: { id: options.workspaceId ?? "proj_engine01", name: "Site" }
+      })
+    },
+    descriptor: {
+      url: "http://127.0.0.1:54321",
+      token: "bridge_tok",
+      capabilities: options.capabilities ?? ["status.v1", "analytics.verify.v1"]
+    }
   };
 }
 
@@ -123,60 +164,66 @@ describe("infinite analytics", () => {
     const code = await runAnalyticsCommand(["--check"], {}, {
       io,
       loadTag: async () => fakeTag(captured),
-      resolveBridge: () => ({
-        client: {
-          status: async () => ({
-            service: "infinite-desktop-cmdl",
-            bootId: "b",
-            protocol: { min: 1, max: 1 },
-            capabilities: [],
-            ready: true,
-            contextRevision: "r",
-            workspace: { id: "ws_desktop", name: "Site" }
-          })
-        }
-      })
+      resolveBridge: () => fakeBridge({ workspaceId: "ws_desktop" })
     });
     expect(code).toBe(0);
     expect(captured.runs[0].args).toMatchObject({ mode: "check", workspaceId: "ws_desktop" });
     expect(io.err_).toContain("Workspace ws_desktop (Desktop's active workspace).");
   });
 
+  it("verifies through the Desktop bridge by default — the CLI never holds a cloud token", async () => {
+    const captured: Captured = { runs: [], loaded: 0 };
+    const io = fakeIo();
+    // A stale token in the environment must NOT be used: the running app wins, silently and safely.
+    const code = await runAnalyticsCommand(["--check"], { INFINITE_API_TOKEN: "tok_1" }, {
+      io,
+      loadTag: async () => fakeTag(captured),
+      resolveBridge: () => fakeBridge()
+    });
+    expect(code).toBe(0);
+    expect(captured.runs[0].backends).toEqual(["bridge:http://127.0.0.1:54321:bridge_tok"]);
+    expect(io.err_).toContain(BRIDGE_BACKEND_NOTICE);
+  });
+
+  it("a Desktop too old to carry analytics.verify.v1 says UPDATE, not 'open the app'", async () => {
+    const captured: Captured = { runs: [], loaded: 0 };
+    const io = fakeIo();
+    await runAnalyticsCommand(["--check"], {}, {
+      io,
+      loadTag: async () => fakeTag(captured),
+      resolveBridge: () => fakeBridge({ capabilities: ["status.v1", "turn.ndjson.v1"] })
+    });
+    expect(captured.runs[0].backends).toEqual(["none"]);
+    expect(io.err_).toContain(DESKTOP_TOO_OLD_NOTICE);
+  });
+
   it("the Desktop's workspace.id is the engine project id and becomes engineProjectId in the cloud backend", async () => {
     // The bridge's /v1/status `workspace.id` is `authority.snapshot.engineProjectId` (desktop
     // cmdl-brain-service.ts) — the `proj_…` id artifacts are keyed by, not a cloud UUID.
     const captured: Captured = { runs: [], loaded: 0 };
-    await runAnalyticsCommand(["--check"], { INFINITE_API_TOKEN: "tok_1" }, {
+    await runAnalyticsCommand(["--check", "--api-token-env"], { INFINITE_API_TOKEN: "tok_1" }, {
       io: fakeIo(),
       loadTag: async () => fakeTag(captured),
-      resolveBridge: () => ({
-        client: {
-          status: async () => ({
-            service: "infinite-desktop-cmdl",
-            bootId: "b",
-            protocol: { min: 1, max: 1 },
-            capabilities: [],
-            ready: true,
-            contextRevision: "r",
-            workspace: { id: "proj_engine01", name: "Site" }
-          })
-        }
-      })
+      // An app that cannot verify — so the escape hatch is the one that answers.
+      resolveBridge: () => fakeBridge({ workspaceId: "proj_engine01", capabilities: ["status.v1"] })
     });
     expect(captured.runs[0].args.workspaceId).toBe("proj_engine01");
     expect(captured.runs[0].backends).toEqual(["cloud:https://api.ultima.inc:proj_engine01:token-ok"]);
   });
 
-  it("an explicit --workspace wins over the Desktop", async () => {
+  it("an explicit --workspace wins over the Desktop — which still answers the verification", async () => {
     const captured: Captured = { runs: [], loaded: 0 };
+    const io = fakeIo();
+    const status = vi.fn(fakeBridge().client.status);
     await runAnalyticsCommand(["--check", "--workspace", "ws_flag"], {}, {
-      io: fakeIo(),
+      io,
       loadTag: async () => fakeTag(captured),
-      resolveBridge: () => {
-        throw new Error("must not be consulted");
-      }
+      resolveBridge: () => ({ ...fakeBridge(), client: { status } })
     });
     expect(captured.runs[0].args.workspaceId).toBe("ws_flag");
+    // The flag settles the workspace WITHOUT a round trip, but the app still reads the receipts.
+    expect(status).not.toHaveBeenCalled();
+    expect(captured.runs[0].backends).toEqual(["bridge:http://127.0.0.1:54321:bridge_tok"]);
   });
 
   it("non-interactive apply without --conversions or --no-mark exits 2 with INF_ARGS_CONVERSIONS_REQUIRED", async () => {
@@ -188,28 +235,80 @@ describe("infinite analytics", () => {
     expect(captured.runs).toHaveLength(0);
   });
 
-  it("uses NoneBackend and says so when there is no cloud session; the cloud backend when INFINITE_API_TOKEN is set", async () => {
+  it("with no Desktop: NoneBackend and 'open the app' — a bare env token is never used implicitly", async () => {
     const captured: Captured = { runs: [], loaded: 0 };
     const io = fakeIo();
     await runAnalyticsCommand(["--check", "--workspace", "ws_1"], {}, { io, loadTag: async () => fakeTag(captured), resolveBridge: () => null });
     expect(captured.runs[0].backends).toEqual(["none"]);
     expect(io.err_).toContain(NO_CLOUD_SESSION_NOTICE);
 
-    const cloudIo = fakeIo();
+    const implicitIo = fakeIo();
     await runAnalyticsCommand(
       ["--check", "--workspace", "ws_1"],
+      { INFINITE_API_TOKEN: "tok_1" },
+      { io: implicitIo, loadTag: async () => fakeTag(captured), resolveBridge: () => null }
+    );
+    expect(captured.runs[1].backends).toEqual(["none"]);
+    expect(implicitIo.err_).toContain(NO_CLOUD_SESSION_NOTICE);
+  });
+
+  it("--api-token-env opts into the cloud escape hatch, honours INFINITE_API_ORIGIN, and never reaches the harness parser", async () => {
+    const captured: Captured = { runs: [], loaded: 0 };
+    const cloudIo = fakeIo();
+    await runAnalyticsCommand(
+      ["--check", "--workspace", "ws_1", "--api-token-env"],
       { INFINITE_API_TOKEN: "tok_1", INFINITE_API_ORIGIN: "https://api.infinite.fast/" },
       { io: cloudIo, loadTag: async () => fakeTag(captured), resolveBridge: () => null }
     );
-    expect(captured.runs[1].backends).toEqual(["cloud:https://api.infinite.fast:ws_1:token-ok"]);
+    expect(captured.runs[0].backends).toEqual(["cloud:https://api.infinite.fast:ws_1:token-ok"]);
+    expect(captured.runs[0].args.mode).toBe("check");
     expect(cloudIo.err_).toContain("Verifying through the cloud at https://api.infinite.fast for workspace ws_1.");
+
+    // A named variable, and the `=` form.
+    const namedIo = fakeIo();
+    await runAnalyticsCommand(
+      ["--check", "--workspace", "ws_1", "--api-token-env", "CI_INFINITE_TOKEN"],
+      { CI_INFINITE_TOKEN: "tok_1" },
+      { io: namedIo, loadTag: async () => fakeTag(captured), resolveBridge: () => null }
+    );
+    expect(captured.runs[1].backends).toEqual(["cloud:https://api.ultima.inc:ws_1:token-ok"]);
+    await runAnalyticsCommand(
+      ["--check", "--workspace", "ws_1", "--api-token-env=CI_INFINITE_TOKEN"],
+      { CI_INFINITE_TOKEN: "tok_1" },
+      { io: fakeIo(), loadTag: async () => fakeTag(captured), resolveBridge: () => null }
+    );
+    expect(captured.runs[2].backends).toEqual(["cloud:https://api.ultima.inc:ws_1:token-ok"]);
   });
 
-  it("a token without a workspace still falls back to NoneBackend and asks for --workspace", () => {
+  it("extractApiTokenEnvFlag: bare, named, =form, absent — and it never swallows the next FLAG", () => {
+    expect(extractApiTokenEnvFlag(["--check"])).toEqual({ rest: ["--check"], envVar: null });
+    expect(extractApiTokenEnvFlag(["--api-token-env", "--check"])).toEqual({ rest: ["--check"], envVar: "INFINITE_API_TOKEN" });
+    expect(extractApiTokenEnvFlag(["--api-token-env", "MY_VAR", "--check"])).toEqual({ rest: ["--check"], envVar: "MY_VAR" });
+    expect(extractApiTokenEnvFlag(["--api-token-env=MY_VAR"])).toEqual({ rest: [], envVar: "MY_VAR" });
+    expect(extractApiTokenEnvFlag(["--api-token-env="])).toEqual({ rest: [], envVar: "INFINITE_API_TOKEN" });
+  });
+
+  it("a named-but-empty variable, and a token without a workspace, both fall back to NoneBackend honestly", () => {
     const captured: Captured = { runs: [], loaded: 0 };
-    const { backend, notice } = chooseBackend(fakeTag(captured), { INFINITE_API_TOKEN: "tok_1" }, undefined);
-    expect(backend.name).toBe("none");
-    expect(notice).toContain("pass --workspace");
+    const noWorkspace = chooseBackend({
+      tag: fakeTag(captured),
+      env: { INFINITE_API_TOKEN: "tok_1" },
+      bridge: null,
+      apiTokenEnvVar: "INFINITE_API_TOKEN",
+      workspaceId: undefined
+    });
+    expect(noWorkspace.backend.name).toBe("none");
+    expect(noWorkspace.notice).toContain("pass --workspace");
+
+    const empty = chooseBackend({
+      tag: fakeTag(captured),
+      env: {},
+      bridge: null,
+      apiTokenEnvVar: "CI_INFINITE_TOKEN",
+      workspaceId: "ws_1"
+    });
+    expect(empty.backend.name).toBe("none");
+    expect(empty.notice).toContain("CI_INFINITE_TOKEN");
   });
 
   it("maps a harness failure to exit 1 and an inf-error line; unknown flags to exit 2", async () => {

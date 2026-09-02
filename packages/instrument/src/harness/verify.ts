@@ -41,6 +41,15 @@ export const SUBSCRIPTION_REQUIRED_REASON = "subscription required — complete 
 export const SUBSCRIPTION_CHECK_UNAVAILABLE_REASON = "subscription check unavailable, try again"
 export const RATE_LIMITED_REASON = "rate limited by the cloud; try again in a minute"
 export const RETRY_AFTER_CAP_MS = 30_000
+/** The running app is too old to carry `analytics.verify.v1` — a version skew, not a failure. */
+export const DESKTOP_UPDATE_REQUIRED_REASON =
+  "this Infinite Desktop version cannot verify — update the Infinite app"
+
+/** 409 `not_ready`: the desktop refused BEFORE spending a cloud read, and named the exact blocker
+ *  (`signed_out` / `no_linked_workspace` / `subscription_required` / `no_provider` / `booting`). */
+export function desktopNotReadyReason(state: string): string {
+  return `Infinite Desktop is not ready (${state}) — complete onboarding`
+}
 
 /** `Retry-After` as delay-seconds or an HTTP date, in ms from `nowMs`; null when absent/unparseable. */
 export function retryAfterMs(header: string | null, nowMs: number): number | null {
@@ -102,6 +111,14 @@ export interface InfiniteCloudBackendOptions extends Timing {
   fetch?: typeof fetch
 }
 
+export interface DesktopBridgeBackendOptions extends Timing {
+  /** The running desktop's loopback bridge origin, from `bridge.json` (never a public host). */
+  bridgeUrl: string
+  /** The descriptor's LOCAL bridge bearer — not a cloud credential. Never logged, never written. */
+  token: string
+  fetch?: typeof fetch
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
 }
@@ -124,10 +141,183 @@ function decodeCloudLane(raw: unknown): LaneVerification | null {
 }
 
 /**
+ * The error CODE across the shapes this endpoint family answers with: the cloud route's
+ * `{ error: "host_not_registered" }`, the desktop bridge's protocol fault `{ error: { code } }`,
+ * and the bridge's own service refusals `{ error: "cloud_unavailable", message }`.
+ */
+function errorCodeOf(payload: unknown): string | undefined {
+  if (!isRecord(payload)) return undefined
+  const error = payload.error
+  if (typeof error === "string" && error) return error
+  if (isRecord(error) && typeof error.code === "string" && error.code) return error.code
+  return undefined
+}
+
+function errorReasonOf(payload: unknown): string | undefined {
+  if (!isRecord(payload)) return undefined
+  if (typeof payload.reason === "string" && payload.reason) return payload.reason
+  const error = payload.error
+  if (isRecord(error) && typeof error.message === "string" && error.message) return error.message
+  if (typeof payload.message === "string" && payload.message) return payload.message
+  return undefined
+}
+
+/** Per-peer wording. Every string a founder reads names WHO refused, so the next move is obvious. */
+interface VerifyPeerCopy {
+  unreachable(detail: string): string
+  rejected(status: number): string
+  routeMissing: string
+  unexpectedShape: string
+  unavailable(status: number): string
+  badRequest(code: string, reason: string | undefined): string
+}
+
+interface VerifyPollConfig extends Timing {
+  endpoint: string
+  headers: Record<string, string>
+  body(lanes: VerifyLane[]): Record<string, unknown>
+  copy: VerifyPeerCopy
+  fetch?: typeof fetch
+  /** Peer-specific TERMINAL answers, consulted before the shared ladder (the bridge's 409/503s). */
+  terminal?(status: number, payload: unknown): string | null
+}
+
+const CLOUD_COPY: VerifyPeerCopy = {
+  unreachable: (detail) => `the cloud was unreachable (${detail})`,
+  rejected: (status) => `the cloud rejected this session (HTTP ${status})`,
+  routeMissing: "the cloud verify route is not available yet (HTTP 404)",
+  unexpectedShape: "the cloud verify route answered with an unexpected shape",
+  unavailable: (status) => `the cloud verify route was unavailable (HTTP ${status})`,
+  badRequest: (code, reason) => `the cloud rejected the request: ${code}${reason ? ` — ${reason}` : ""}`
+}
+
+const BRIDGE_COPY: VerifyPeerCopy = {
+  unreachable: (detail) => `the Infinite app was unreachable (${detail})`,
+  rejected: (status) =>
+    `the Infinite app rejected this terminal's bridge credentials (HTTP ${status}) — restart the app and re-run`,
+  routeMissing: DESKTOP_UPDATE_REQUIRED_REASON,
+  unexpectedShape: "the Infinite app answered with an unexpected shape",
+  unavailable: (status) => `the Infinite app could not serve verification (HTTP ${status})`,
+  badRequest: (code, reason) => `the Infinite app rejected the request: ${code}${reason ? ` — ${reason}` : ""}`
+}
+
+/** Trim trailing "/" without a regex: these origins are caller-supplied, and `/\/+$/` on a long
+ *  run of slashes is a polynomial-backtracking hazard (CodeQL js/polynomial-redos). */
+function stripTrailingSlashes(value: string): string {
+  let end = value.length
+  while (end > 0 && value.charCodeAt(end - 1) === 47) end -= 1
+  return value.slice(0, end)
+}
+
+/** Read a response body ONCE, leniently: a 429/503 with an empty body is normal, not an outage. */
+async function readPayload(response: Response): Promise<unknown> {
+  const text = await response.text().catch(() => "")
+  if (!text) return null
+  try {
+    return JSON.parse(text) as unknown
+  } catch {
+    return null
+  }
+}
+
+/**
+ * The one poll loop both backends ride: POST the lanes still pending, decode each answer, and keep
+ * asking until every lane settles or the budget runs out. The wire contract is the CLOUD's
+ * (`{lanes: Record<lane, {state, receiptAt?, reason?}>}`) whichever peer answers it, because the
+ * desktop bridge forwards the cloud's status and body verbatim.
+ */
+async function pollVerifyEndpoint(input: VerifyInput, config: VerifyPollConfig): Promise<LaneVerifications> {
+  const fetchImpl = config.fetch ?? globalThis.fetch
+  const { now, sleep, budgetMs, pollIntervalMs } = timing(config)
+  const settled: LaneVerifications = {}
+  const pending = new Set<VerifyLane>(input.lanes)
+  const startedAt = now()
+  let unavailableStreak = 0
+
+  const failAll = (reason: string): LaneVerifications => {
+    for (const lane of pending) settled[lane] = { state: "not_verifiable", reason }
+    return settled
+  }
+
+  for (;;) {
+    let response: Response
+    try {
+      response = await fetchImpl(config.endpoint, {
+        method: "POST",
+        headers: config.headers,
+        body: JSON.stringify(config.body([...pending]))
+      })
+    } catch (error) {
+      return failAll(config.copy.unreachable(errorText(error)))
+    }
+    const payload = await readPayload(response)
+
+    const terminal = config.terminal?.(response.status, payload)
+    if (terminal) return failAll(terminal)
+
+    if (response.status === 401 || response.status === 403) {
+      return failAll(config.copy.rejected(response.status))
+    }
+    if (response.status === 402) {
+      // requireActiveSubscriptionOr402 — body `{ error: "entitlement_required",
+      // code: "NO_PLATFORM_SUBSCRIPTION", feature: "platform", action: { type: "upgrade" } }`.
+      // The founder can install, and nothing else runs until the subscription is active. Not a
+      // missing receipt and never retried — a gate, and it says so.
+      return failAll(SUBSCRIPTION_REQUIRED_REASON)
+    }
+    if (response.status === 404) {
+      return failAll(config.copy.routeMissing)
+    }
+    if (response.status === 400) {
+      // The typed 400s (`host_not_registered`, `invalid_request` + reason) are answers, not
+      // outages: quoted verbatim, never retried.
+      return failAll(config.copy.badRequest(errorCodeOf(payload) ?? "invalid_request", errorReasonOf(payload)))
+    }
+    if (response.status === 429) {
+      // Rate limited: honour Retry-After (capped at 30 s) inside the same 60 s budget, then say so.
+      const retryAfter = retryAfterMs(response.headers.get("retry-after"), now())
+      const wait = Math.min(retryAfter ?? pollIntervalMs, RETRY_AFTER_CAP_MS)
+      if (now() - startedAt + wait > budgetMs) return failAll(RATE_LIMITED_REASON)
+      await sleep(wait)
+      continue
+    }
+    if (!response.ok) {
+      // `subscription_check_unavailable` (503, retryable: true) is the entitlement check being
+      // down, not the route: it stays on the retry loop and then names itself.
+      const subscriptionCheckDown = errorCodeOf(payload) === "subscription_check_unavailable"
+      unavailableStreak += 1
+      if (unavailableStreak >= 3) {
+        return failAll(
+          subscriptionCheckDown ? SUBSCRIPTION_CHECK_UNAVAILABLE_REASON : config.copy.unavailable(response.status)
+        )
+      }
+    } else {
+      unavailableStreak = 0
+      const lanes = isRecord(payload) && isRecord(payload.lanes) ? payload.lanes : null
+      if (!lanes) return failAll(config.copy.unexpectedShape)
+      for (const lane of [...pending]) {
+        const decoded = decodeCloudLane(lanes[lane])
+        if (decoded && decoded.state !== "no_receipt") {
+          settled[lane] = decoded
+          pending.delete(lane)
+        }
+      }
+    }
+    if (pending.size === 0) return settled
+    if (now() - startedAt + pollIntervalMs > budgetMs) break
+    await sleep(pollIntervalMs)
+  }
+  for (const lane of pending) settled[lane] = { state: "no_receipt", causes: budgetCauses(budgetMs, lane) }
+  return settled
+}
+
+/**
  * Client for the cloud's `POST /api/analytics/verify` (contract: bearer auth; body
  * `{engineProjectId, url, since, lanes}`; response `{lanes: Record<lane, {state, receiptAt?, reason?}>}`).
- * Polls until every asked lane is settled or the budget runs out. The route does not exist
- * yet at the time of writing — every failure shape maps to an honest `not_verifiable`.
+ *
+ * ADVANCED / ESCAPE HATCH: it needs a cloud bearer in the CLI's own hands, which the companion
+ * design deliberately avoids. Prefer {@link DesktopBridgeBackend} — the running app makes this same
+ * call with its own session and no token ever reaches the terminal.
  */
 export class InfiniteCloudBackend implements VerificationBackend {
   readonly name = "infinite-cloud"
@@ -139,103 +329,77 @@ export class InfiniteCloudBackend implements VerificationBackend {
   }
 
   async verify(input: VerifyInput): Promise<LaneVerifications> {
-    const fetchImpl = this.options.fetch ?? globalThis.fetch
-    const { now, sleep, budgetMs, pollIntervalMs } = timing(this.options)
-    const endpoint = `${this.options.origin.replace(/\/+$/, "")}/api/analytics/verify`
-    const settled: LaneVerifications = {}
-    const pending = new Set<VerifyLane>(input.lanes)
-    const startedAt = now()
-    let unavailableStreak = 0
+    return pollVerifyEndpoint(input, {
+      ...this.options,
+      endpoint: `${stripTrailingSlashes(this.options.origin)}/api/analytics/verify`,
+      headers: {
+        authorization: `Bearer ${this.options.token}`,
+        "content-type": "application/json",
+        accept: "application/json"
+      },
+      body: (lanes) => ({
+        engineProjectId: this.options.engineProjectId,
+        url: input.url,
+        since: input.since,
+        lanes
+      }),
+      copy: CLOUD_COPY
+    })
+  }
+}
 
-    const failAll = (reason: string): LaneVerifications => {
-      for (const lane of pending) settled[lane] = { state: "not_verifiable", reason }
-      return settled
-    }
+/**
+ * Verification through the RUNNING DESKTOP — the default for `infinite analytics`.
+ *
+ * The CLI holds no cloud session by design (the companion train): it POSTs to the desktop's
+ * loopback bridge (`analytics.verify.v1`, 1bu-1
+ * apps/desktop/src/main/brain/agent/analytics-verify-bridge.ts), and the desktop — which holds the
+ * session and knows the ACTIVE workspace — makes the cloud call and returns its status and body
+ * verbatim. The founder never handles a token, and this class never sees one: `token` here is the
+ * LOCAL bridge bearer from `bridge.json`, useless anywhere but this machine's loopback port.
+ *
+ * The one shape the cloud cannot produce is 409 `not_ready`: the desktop refusing BEFORE it spends
+ * a cloud read, because it is signed out / unlinked / unsubscribed / still booting. That is a
+ * gate, not a missing receipt, and it names the exact state so the founder knows what to fix.
+ */
+export class DesktopBridgeBackend implements VerificationBackend {
+  readonly name = "infinite-desktop"
+  readonly lanes: VerifyLane[] = ["infinite", "ga4", "posthog", "meta", "server_lane"]
+  private readonly options: DesktopBridgeBackendOptions
 
-    for (;;) {
-      let response: Response
-      try {
-        response = await fetchImpl(endpoint, {
-          method: "POST",
-          headers: {
-            authorization: `Bearer ${this.options.token}`,
-            "content-type": "application/json",
-            accept: "application/json"
-          },
-          body: JSON.stringify({
-            engineProjectId: this.options.engineProjectId,
-            url: input.url,
-            since: input.since,
-            lanes: [...pending]
-          })
-        })
-      } catch (error) {
-        return failAll(`the cloud was unreachable (${errorText(error)})`)
-      }
-      if (response.status === 401 || response.status === 403) {
-        return failAll(`the cloud rejected this session (HTTP ${response.status})`)
-      }
-      if (response.status === 402) {
-        // requireActiveSubscriptionOr402 — body `{ error: "entitlement_required",
-        // code: "NO_PLATFORM_SUBSCRIPTION", feature: "platform", action: { type: "upgrade" } }`.
-        // The founder can install, and nothing else runs until the subscription is active. Not a
-        // missing receipt and never retried — a gate, and it says so.
-        await response.text().catch(() => "")
-        return failAll(SUBSCRIPTION_REQUIRED_REASON)
-      }
-      if (response.status === 404) {
-        return failAll("the cloud verify route is not available yet (HTTP 404)")
-      }
-      if (response.status === 400) {
-        // The route's typed 400s (`host_not_registered`, `invalid_request` + reason) are
-        // answers, not outages: quoted verbatim, never retried.
-        const payload: unknown = await response.json().catch(() => null)
-        const error = isRecord(payload) && typeof payload.error === "string" ? payload.error : "invalid_request"
-        const reason = isRecord(payload) && typeof payload.reason === "string" ? payload.reason : undefined
-        return failAll(`the cloud rejected the request: ${error}${reason ? ` — ${reason}` : ""}`)
-      }
-      if (response.status === 429) {
-        // Rate limited: honour Retry-After (capped at 30 s) inside the same 60 s budget, then say so.
-        await response.text().catch(() => "")
-        const retryAfter = retryAfterMs(response.headers.get("retry-after"), now())
-        const wait = Math.min(retryAfter ?? pollIntervalMs, RETRY_AFTER_CAP_MS)
-        if (now() - startedAt + wait > budgetMs) return failAll(RATE_LIMITED_REASON)
-        await sleep(wait)
-        continue
-      }
-      if (!response.ok) {
-        // `subscription_check_unavailable` (503, retryable: true) is the entitlement check being
-        // down, not the route: it stays on the retry loop and then names itself.
-        const payload: unknown = await response.json().catch(() => null)
-        const subscriptionCheckDown =
-          isRecord(payload) && payload.error === "subscription_check_unavailable"
-        unavailableStreak += 1
-        if (unavailableStreak >= 3) {
-          return failAll(
-            subscriptionCheckDown
-              ? SUBSCRIPTION_CHECK_UNAVAILABLE_REASON
-              : `the cloud verify route was unavailable (HTTP ${response.status})`
-          )
+  constructor(options: DesktopBridgeBackendOptions) {
+    this.options = options
+  }
+
+  async verify(input: VerifyInput): Promise<LaneVerifications> {
+    return pollVerifyEndpoint(input, {
+      ...this.options,
+      endpoint: `${stripTrailingSlashes(this.options.bridgeUrl)}/v1/analytics/verify`,
+      headers: {
+        authorization: `Bearer ${this.options.token}`,
+        "content-type": "application/json",
+        accept: "application/json"
+      },
+      body: (lanes) => ({ protocolVersion: 1, url: input.url, since: input.since, lanes }),
+      copy: BRIDGE_COPY,
+      terminal: (status, payload) => {
+        if (status === 409) {
+          const state = isRecord(payload) && typeof payload.state === "string" && payload.state ? payload.state : "not ready"
+          return desktopNotReadyReason(state)
         }
-      } else {
-        unavailableStreak = 0
-        const payload: unknown = await response.json().catch(() => null)
-        const lanes = isRecord(payload) && isRecord(payload.lanes) ? payload.lanes : null
-        if (!lanes) return failAll("the cloud verify route answered with an unexpected shape")
-        for (const lane of [...pending]) {
-          const decoded = decodeCloudLane(lanes[lane])
-          if (decoded && decoded.state !== "no_receipt") {
-            settled[lane] = decoded
-            pending.delete(lane)
+        if (status === 503) {
+          const code = errorCodeOf(payload)
+          if (code === "capability_unavailable") return DESKTOP_UPDATE_REQUIRED_REASON
+          // The bridge's OWN refusals are terminal — retrying cannot change a signed-out app or an
+          // unlinked workspace. A FORWARDED cloud 503 (subscription_check_unavailable) is not
+          // handled here, so it keeps the shared retry ladder.
+          if (code === "cloud_unavailable" || code === "no_linked_workspace" || code === "service_unavailable") {
+            return errorReasonOf(payload) ?? BRIDGE_COPY.unavailable(status)
           }
         }
+        return null
       }
-      if (pending.size === 0) return settled
-      if (now() - startedAt + pollIntervalMs > budgetMs) break
-      await sleep(pollIntervalMs)
-    }
-    for (const lane of pending) settled[lane] = { state: "no_receipt", causes: budgetCauses(budgetMs, lane) }
-    return settled
+    })
   }
 }
 

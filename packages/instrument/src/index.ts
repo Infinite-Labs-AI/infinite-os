@@ -169,11 +169,14 @@ export {
   removeHarnessOutputs
 } from "./harness/outputs.js"
 export {
+  DESKTOP_UPDATE_REQUIRED_REASON,
+  DesktopBridgeBackend,
   InfiniteCloudBackend,
   NoneBackend,
   PosthogQueryBackend,
   VERIFY_BUDGET_MS,
   VERIFY_POLL_INTERVAL_MS,
+  desktopNotReadyReason,
   verifyLanes
 } from "./harness/verify.js"
 export type { LaneVerification, VerificationBackend, VerifyLane } from "./harness/verify.js"
