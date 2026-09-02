@@ -1,6 +1,6 @@
 {
   "name": "infinite-tag",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "Founder-run installer that adds analytics (the Infinite first-party pixel, Google Analytics 4, PostHog, X/Twitter Pixel, Meta Pixel) to your web app — public keys only, idempotent, and reversible. --server-lane adds the lossless server lane: every HTML document request and every confirmed outcome, counted server-side, installed by your agent. By Infinite — https://infinite.fast",
   "keywords": [
     "analytics",
