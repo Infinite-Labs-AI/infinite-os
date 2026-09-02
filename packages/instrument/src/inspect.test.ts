@@ -12,7 +12,7 @@ import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { afterEach, describe, expect, it } from "vitest"
 
-import { detectUnmanagedProviders, inspectWorkspace } from "./inspect.js"
+import { detectPosthogConfig, detectUnmanagedProviders, inspectWorkspace, readPosthogOption } from "./inspect.js"
 
 const tempRoots: string[] = []
 const fixtureRoot = dirname(fileURLToPath(import.meta.url))
@@ -399,5 +399,78 @@ describe("detectUnmanagedProviders — repo-wide walk + Tag Manager", () => {
       { provider: "x", via: "snippet", file: "z.html" },
       { provider: "meta", via: "snippet", file: "a.html" }
     ])
+  })
+})
+
+describe("readPosthogOption — static config reading for --check/inspect", () => {
+  const config =
+    'posthog.init("phc_abc", {\n' +
+    '  api_host: "https://us.i.posthog.com",\n' +
+    "  ui_host: 'https://us.posthog.com',\n" +
+    "  autocapture: false,\n" +
+    "  disable_session_recording: true,\n" +
+    "  capture_pageview: false, // SPA handles it\n" +
+    "  persistence: 'localStorage+cookie'\n" +
+    "})\n"
+
+  it("reads booleans, quoted strings, and hosts as written", () => {
+    expect(readPosthogOption(config, "autocapture")).toBe("false")
+    expect(readPosthogOption(config, "disable_session_recording")).toBe("true")
+    expect(readPosthogOption(config, "capture_pageview")).toBe("false")
+    expect(readPosthogOption(config, "persistence")).toBe("localStorage+cookie")
+    expect(readPosthogOption(config, "api_host")).toBe("https://us.i.posthog.com")
+    expect(readPosthogOption(config, "ui_host")).toBe("https://us.posthog.com")
+  })
+
+  it("returns undefined for an absent key (surfaced as 'not detected'), never a guess", () => {
+    expect(readPosthogOption(config, "capture_pageleave")).toBeUndefined()
+  })
+
+  it("reports a nested-object value as custom rather than a literal", () => {
+    expect(readPosthogOption("posthog.init('k', { autocapture: { dom_event_allowlist: ['click'] } })", "autocapture")).toBe(
+      "custom (object)"
+    )
+  })
+})
+
+describe("detectPosthogConfig + inspectWorkspace surface PostHog config", () => {
+  it("extracts the cost/privacy-relevant options from a real posthog.init", () => {
+    const root = copyFixture("static-html-basic")
+    writeFileSync(
+      join(root, "analytics.js"),
+      "import posthog from 'posthog-js'\n" +
+        "posthog.init('phc_live', {\n" +
+        "  api_host: 'https://eu.i.posthog.com',\n" +
+        "  autocapture: true,\n" +
+        "  disable_session_recording: false,\n" +
+        "  capture_pageleave: true,\n" +
+        "  persistence: 'memory'\n" +
+        "})\n"
+    )
+
+    const config = detectPosthogConfig(root)
+    expect(config?.file).toBe("analytics.js")
+    expect(config?.apiHost).toBe("https://eu.i.posthog.com")
+    expect(config?.autocapture).toBe("true")
+    expect(config?.disableSessionRecording).toBe("false")
+    expect(config?.capturePageleave).toBe("true")
+    expect(config?.persistence).toBe("memory")
+    expect(config?.capturePageview).toBeUndefined()
+    expect(config?.uiHost).toBeUndefined()
+  })
+
+  it("inspectWorkspace attaches posthogConfig only when PostHog is present", () => {
+    const withPosthog = copyFixture("static-html-basic")
+    writeFileSync(
+      join(withPosthog, "ph.js"),
+      "posthog.init('phc_x', { api_host: 'https://us.i.posthog.com', autocapture: false })\n"
+    )
+    const withResult = inspectWorkspace(withPosthog)
+    expect(withResult.existingProviders).toContain("posthog")
+    expect(withResult.posthogConfig?.autocapture).toBe("false")
+    expect(withResult.posthogConfig?.apiHost).toBe("https://us.i.posthog.com")
+
+    const clean = copyFixture("static-html-basic")
+    expect(inspectWorkspace(clean).posthogConfig).toBeUndefined()
   })
 })

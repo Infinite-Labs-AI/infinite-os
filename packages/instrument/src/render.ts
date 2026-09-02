@@ -8,6 +8,7 @@ import type {
   ApplyResult,
   InspectResult,
   InstallPlan,
+  PosthogConfigSummary,
   UninstallResult,
   VerifyResult,
   WorkspaceInstallArtifacts
@@ -185,30 +186,56 @@ export function renderApplied(input: {
   const { plan, apply, verify } = input
   const installing = installedArtifacts(plan)
   const names = providerNames(installing)
+  const hasPixel = Boolean(
+    installing.infinite || installing.ga4 || installing.posthog || installing.x || installing.meta
+  )
+  const hasServerLane = Boolean(plan.serverLane)
+  const laneFiles = new Set(plan.serverLane?.files ?? [])
+  const briefPath = plan.serverLane?.briefPath
+  const briefWritten = hasServerLane && Boolean(apply.serverLane?.briefWritten)
   const codeFiles = apply.changedFiles.filter((file) => !file.endsWith("install.json"))
+  // The browser-pixel runtime files only — server-lane files and the brief are narrated in the
+  // server-lane section below, so the "Installed <providers>" line never attributes them to a pixel.
+  const pixelFiles = codeFiles.filter((file) => !laneFiles.has(file) && file !== briefPath)
   const manifestWritten = apply.changedFiles.some((file) => file.endsWith("install.json"))
 
   const steps: string[] = [`  ✓ Detected ${frameworkLabel(plan.framework)} at ${plan.appRoot}`]
-  if (codeFiles.length > 0) {
-    steps.push(`  ✓ Installed ${names} → ${codeFiles.join(", ")}`)
+  if (hasPixel && pixelFiles.length > 0) {
+    steps.push(`  ✓ Installed ${names} → ${pixelFiles.join(", ")}`)
   }
   if (manifestWritten) {
     steps.push(`  ✓ Recorded the install → ${MANIFEST_REL}`)
   }
   if (verify.buildOk) {
+    // The count is the managed RUNTIME files (plan.files) only; the manifest and the server-lane
+    // brief are separate visible artifacts, called out so the number matches the change set.
     const n = plan.files.length
-    steps.push(`  ✓ Verified ${n} file${n === 1 ? "" : "s"} against the recorded install`)
+    const wrote: string[] = []
+    if (manifestWritten) wrote.push("manifest")
+    if (briefWritten) wrote.push("brief")
+    const wroteSuffix = wrote.length > 0 ? `; wrote ${wrote.join(" + ")}` : ""
+    steps.push(
+      `  ✓ Verified ${n} managed runtime file${n === 1 ? "" : "s"} against the recorded install${wroteSuffix}`
+    )
   }
 
   const ids = providerLines(installing).join(", ")
   const idSuffix = ids ? ` (${ids})` : ""
+
+  // Honest completion line: only claim the browser pixel when one was actually installed. A
+  // server-lane-only install counts server-side but ships no pixel, and says so explicitly.
+  const doneLine =
+    hasPixel || !hasServerLane
+      ? `✅ Done — your site is now wired for ${names}${idSuffix}.`
+      : "✅ Done — server lane wired (lossless server-side counting)."
 
   const lines = [
     "",
     "Installing analytics into your site…",
     ...steps,
     "",
-    `✅ Done — your site is now wired for ${names}${idSuffix}.`,
+    doneLine,
+    ...(!hasPixel && hasServerLane ? ["   Browser pixel NOT installed."] : []),
     ...adoptedLines(plan),
     "",
     "Next steps:",
@@ -337,11 +364,33 @@ export function renderInspect(inspect: InspectResult): string {
   if (inspect.existingProviders.length > 0) {
     lines.push(`  Existing tags   ${inspect.existingProviders.join(", ")}`)
   }
+  if (inspect.posthogConfig) {
+    lines.push("", ...renderPosthogConfigLines(inspect.posthogConfig))
+  }
   if (inspect.blockers.length > 0) {
     lines.push("", "Blockers:", ...inspect.blockers.map((b) => `  • ${b}`))
   }
   lines.push("")
   return lines.join("\n")
+}
+
+/**
+ * The read-only "PostHog config:" audit block for `inspect`. Surfaces the options that drive
+ * cost/privacy (session replay + autocapture especially); anything not statically determinable
+ * is reported as "not detected" rather than guessed.
+ */
+export function renderPosthogConfigLines(config: PosthogConfigSummary): string[] {
+  const value = (raw: string | undefined): string => raw ?? "not detected"
+  return [
+    `PostHog config (from ${config.file}):`,
+    `  autocapture                 ${value(config.autocapture)}`,
+    `  disable_session_recording   ${value(config.disableSessionRecording)}`,
+    `  capture_pageview            ${value(config.capturePageview)}`,
+    `  capture_pageleave           ${value(config.capturePageleave)}`,
+    `  persistence                 ${value(config.persistence)}`,
+    `  api_host                    ${value(config.apiHost)}`,
+    `  ui_host                     ${value(config.uiHost)}`
+  ]
 }
 
 export function renderVerify(verify: VerifyResult): string {
