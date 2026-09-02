@@ -425,6 +425,27 @@ export function renderServerLaneLines(plan: InstallPlan, apply?: ApplyResult): s
     }
     lines.push(`  ${serverLaneCopy.cli.module(lane.modulePath)}`)
     lines.push(`  ${serverLaneCopy.cli.brief(lane.briefPath)}`)
+  } else if (lane.created && lane.created.length > 0) {
+    // A host-chosen target: say WHICH lane and WHY before listing its files.
+    lines.push(`  ${serverLaneCopy.cli.targetChosen(lane.targetLabel ?? lane.mode, lane.targetEvidence)}`)
+    for (const file of lane.created) {
+      if (file.action === "manual") {
+        lines.push(`  ${serverLaneCopy.cli.targetManualFile(file.path)}`)
+      } else if (file.action === "keep") {
+        lines.push(`  ${serverLaneCopy.cli.targetKeptFile(file.path)}`)
+      } else if (/infinite-outcome\.[jt]s$/.test(file.path)) {
+        lines.push(`  ${serverLaneCopy.cli.targetOutcomeFile(file.path)}`)
+      } else {
+        lines.push(`  ${serverLaneCopy.cli.targetFile(file.path)}`)
+      }
+    }
+    lines.push(`  ${serverLaneCopy.cli.brief(lane.briefPath)}`)
+    if (lane.installPackages && lane.installPackages.length > 0) {
+      lines.push(`  ${serverLaneCopy.cli.targetInstall(lane.installPackages)}`)
+    }
+    if (lane.mode === "node-module") {
+      lines.push(`  ${serverLaneCopy.cli.targetMount(lane.briefPath)}`)
+    }
   } else {
     lines.push(`  ${serverLaneCopy.cli.briefOnly(lane.briefPath)}`)
   }

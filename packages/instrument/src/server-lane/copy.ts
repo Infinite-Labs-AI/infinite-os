@@ -2,7 +2,11 @@
 // the CLI narration, and the verify PASS/FAIL wording. Edit words here; code lives in
 // helpers.ts (recipe), runtime-source.ts (generated Next.js code), snippets.ts (reference
 // implementations), install.ts (files), verify.ts (network check).
-import { INFINITE_SERVER_EVENTS_DESTINATION, INFINITE_SERVER_LANE_RECEIPT_URL } from "../workspace-artifacts.js"
+import type { ServerLaneMode } from "../types.js"
+import {
+  infiniteServerEventsDestination,
+  infiniteServerLaneReceiptUrl
+} from "../workspace-artifacts.js"
 
 import {
   DOCUMENT_REQUEST_EVENT_NAME,
@@ -25,6 +29,7 @@ import {
   netlifyEdgeSnippet,
   nextOutcomeSnippet,
   nodeHelperSnippet,
+  outcomeRouteSnippet,
   outcomeSnippet,
   webCryptoHelperSnippet
 } from "./snippets.js"
@@ -44,6 +49,20 @@ export type ServerLaneBriefStatus =
   | { kind: "kept"; middlewarePath: string; modulePath: string }
   | { kind: "unpatchable"; middlewarePath: string; modulePath: string; reason: string }
   | { kind: "next-manual"; modulePath: string }
+  | {
+      /** A non-Next target (Vercel / Netlify / Cloudflare Pages / Node) that wrote real files. */
+      kind: "target"
+      mode: ServerLaneMode
+      label: string
+      /** Root-relative files written, in write order. */
+      created: string[]
+      /** Files that could not be written, with the exact contents to add by hand. */
+      manual: Array<{ path: string; reason: string; contents: string }>
+      /** Packages the generated entry imports that the repo may not depend on yet. */
+      installPackages: string[]
+      /** The node target's exact mount lines; absent for every other target. */
+      mount?: string
+    }
   | { kind: "other-stack"; framework: string }
 
 export interface ServerLaneBriefInput {
@@ -52,6 +71,8 @@ export interface ServerLaneBriefInput {
   productionHosts?: string[]
   /** Import specifier from the middleware to the managed module. */
   moduleImportPath?: string
+  /** The resolved `--infinite-api-origin`, so the brief's URLs match the code that was written. */
+  apiOrigin?: string
 }
 
 const DEFAULT_MODULE_IMPORT_PATH = "./lib/infinite-server-lane"
@@ -76,15 +97,35 @@ export const serverLaneCopy = {
       `infinite-tag did NOT touch your existing \`${middlewarePath}\` — ${reason} It DID create \`${modulePath}\` (the managed module). Your job: wire the module into the middleware by hand using the exact addition below, keep your own logic scoped by path, and make sure the matcher lets every HTML document through.`,
     nextManual: (modulePath: string) =>
       `This is a Next.js project. Create \`${modulePath}\` from the "Next.js" reference below (or run \`npx infinite-tag install --server-lane\` in the repo), then wire the middleware as shown.`,
+    target: (label: string, created: string[]) =>
+      created.length > 0
+        ? `infinite-tag installed the ${label} server lane and wrote ${created.map((path) => `\`${path}\``).join(", ")}. Everything below is already in the repo — review \`git diff\`, then set the two environment variables, deploy, and run the verify command.`
+        : `infinite-tag chose the ${label} server lane but wrote nothing this run (see the notes below). Add the files by hand from the code in this brief, set the two environment variables, deploy, then run the verify command.`,
+    targetPackages: (packages: string[]) =>
+      `The generated entry imports ${packages.map((name) => `\`${name}\``).join(", ")}. infinite-tag never installs packages, so add it yourself: \`npm install ${packages.join(" ")}\` (or your package manager's equivalent). Without it the build fails at the import.`,
+    targetMount:
+      "Nothing was wired into your server file: there is no safe, reversible place to guess. Add these two lines yourself, BEFORE your routes and your static handler.",
+    targetManual: (path: string, reason: string) =>
+      `\`${path}\` was NOT written — ${reason}. Create it with exactly this content:`,
     otherStack: (framework: string) =>
       `This project was detected as "${framework}" — infinite-tag does not patch it automatically. Pick the reference implementation below that matches your runtime (Express / any Node server, Cloudflare Workers, Netlify Edge; anything else follows the generic Node helper), add it in front of your HTML routes, then report outcomes from wherever they become real.`
   },
   exactAdditionHeading: "Exactly what to add to your middleware",
+  targetPackagesHeading: "One package to install",
+  targetMountHeading: "Mount it in your server",
+  targetManualHeading: "Files to add by hand",
+  outcomeRouteHeading: "Post a purchase from a server route",
+  outcomeRouteIntro:
+    "The lane counts page views on its own. Outcomes are yours to report, from the moment they become REAL — a committed row, a captured payment, a served file — never from a click. The generated `lib/infinite-outcome` helper does the signing, the visit-key derivation, and the timeout, so a route needs three lines:",
+  outcomeRouteVercel:
+    "A Vercel serverless function (`api/checkout-status.ts`) confirming a paid session:",
+  outcomeRouteNote:
+    "`type` is the exact name from Infinite → Conversions. Pass the incoming request as `visitKeyInputs` and the outcome carries the same `visitKey` as the page view that produced it, which is what makes the same-lane conversion rate real. Give each outcome a stable `eventId` (an order id) so a retry never double counts. It resolves `false` instead of throwing, so a failed report can never fail the checkout.",
 
   contractHeading: "The contract (implement exactly)",
   contract: {
-    transport: [
-      `**Transport.** Signed \`POST ${INFINITE_SERVER_EVENTS_DESTINATION}\` with \`content-type: application/json\`.`,
+    transport: (apiOrigin?: string) => [
+      `**Transport.** Signed \`POST ${infiniteServerEventsDestination(apiOrigin)}\` with \`content-type: application/json\`.`,
       `**Headers.** \`${SERVER_LANE_SOURCE_KEY_HEADER}: <site source key>\` and \`${SERVER_LANE_SIGNATURE_HEADER}: <lowercase hex HMAC-SHA256 of the RAW request body under the secret>\`. Sign the exact bytes you send.`,
       `**Environment.** \`${SERVER_LANE_SECRET_ENV}\` — the source's server-event secret, minted once in the Infinite desktop → Site Analytics → Settings → Conversions → Server events (shown once; store it only in your host's environment). \`${SERVER_LANE_SOURCE_KEY_ENV}\` — the public site source key (the same one the browser pixel uses).`
     ],
@@ -153,12 +194,12 @@ export const serverLaneCopy = {
   ],
 
   verifyHeading: "Verify",
-  verify: [
+  verify: (apiOrigin?: string) => [
     "Deploy with both environment variables set, then from any machine that has the secret:",
     "```",
     `${SERVER_LANE_SECRET_ENV}=<secret> ${SERVER_LANE_SOURCE_KEY_ENV}=site_… npx infinite-tag verify --server-lane https://<your-production-host>/`,
     "```",
-    `It loads the page once as \`infinite-tag-verify\` — a self-identified automation user agent, so the check records a flagged agent row and never a visitor in your own numbers — then polls Infinite's receipt endpoint (\`GET ${INFINITE_SERVER_LANE_RECEIPT_URL}?since=<iso>\`, same two source headers; the signature covers the raw query string, e.g. \`since=2026-08-18T20%3A00%3A00.000Z\`) for up to a minute and prints PASS with received / lastPath / lastReceivedAt, or FAIL with the most likely cause.`,
+    `It loads the page once as \`infinite-tag-verify\` — a self-identified automation user agent, so the check records a flagged agent row and never a visitor in your own numbers — then polls Infinite's receipt endpoint (\`GET ${infiniteServerLaneReceiptUrl(apiOrigin)}?since=<iso>\`, same two source headers; the signature covers the raw query string, e.g. \`since=2026-08-18T20%3A00%3A00.000Z\`) for up to a minute and prints PASS with received / lastPath / lastReceivedAt, or FAIL with the most likely cause.`,
     "That one request is real and is recorded — proving your middleware runs is the whole point — but it is filed as automation, so it stays out of visits and out of any human rate. If bot protection sits in front of the page it may refuse the check; allow the user agent, or load the page yourself while the check polls."
   ],
 
@@ -182,6 +223,17 @@ export const serverLaneCopy = {
     brief: (path: string) => `+ ${path}  the agent brief (contract + reference code + verify)`,
     briefOnly: (path: string) =>
       `+ ${path}  this stack is not patched automatically — the brief below is the install`,
+    targetChosen: (label: string, evidence?: string) =>
+      `→ ${label}${evidence ? `  (chosen because this repo has ${evidence})` : ""}`,
+    targetFile: (path: string) => `+ ${path}  records every HTML document request (fire-and-forget)`,
+    targetOutcomeFile: (path: string) => `+ ${path}  postInfiniteOutcome() for your server routes`,
+    targetKeptFile: (path: string) => `= ${path}  edited since infinite-tag wrote it; left as is`,
+    targetManualFile: (path: string) =>
+      `! ${path}  left untouched — ${SERVER_LANE_BRIEF_FILE} carries the exact file to add`,
+    targetInstall: (packages: string[]) =>
+      `→ then run: npm install ${packages.join(" ")}   (the generated entry imports it)`,
+    targetMount: (path: string) =>
+      `→ then add one line to your server: see "Mount it in your server" in ${SERVER_LANE_BRIEF_FILE} (${path})`,
     envIntro: "Set two environment variables (never written to files by infinite-tag):",
     envLines: [
       `  ${SERVER_LANE_SOURCE_KEY_ENV}=site_…              your public site source key`,
@@ -245,6 +297,8 @@ export function renderStatusParagraph(status: ServerLaneBriefStatus): string {
       return serverLaneCopy.status.unpatchable(status.middlewarePath, status.modulePath, status.reason)
     case "next-manual":
       return serverLaneCopy.status.nextManual(status.modulePath)
+    case "target":
+      return serverLaneCopy.status.target(status.label, status.created)
     case "other-stack":
       return serverLaneCopy.status.otherStack(status.framework)
   }
@@ -271,6 +325,39 @@ export function renderServerLaneBrief(input: ServerLaneBriefInput): string {
     ""
   ]
 
+  if (input.status.kind === "target") {
+    const status = input.status
+    if (status.installPackages.length > 0) {
+      lines.push(
+        `### ${serverLaneCopy.targetPackagesHeading}`,
+        "",
+        serverLaneCopy.status.targetPackages(status.installPackages),
+        ""
+      )
+    }
+    if (status.mount) {
+      lines.push(
+        `### ${serverLaneCopy.targetMountHeading}`,
+        "",
+        serverLaneCopy.status.targetMount,
+        "",
+        ...codeBlock("js", status.mount),
+        ""
+      )
+    }
+    if (status.manual.length > 0) {
+      lines.push(`### ${serverLaneCopy.targetManualHeading}`, "")
+      for (const file of status.manual) {
+        lines.push(
+          serverLaneCopy.status.targetManual(file.path, file.reason),
+          "",
+          ...codeBlock(file.path.endsWith(".js") ? "js" : "ts", file.contents),
+          ""
+        )
+      }
+    }
+  }
+
   if (input.status.kind === "unpatchable" || input.status.kind === "next-manual") {
     lines.push(
       `### ${serverLaneCopy.exactAdditionHeading}`,
@@ -283,7 +370,7 @@ export function renderServerLaneBrief(input: ServerLaneBriefInput): string {
   lines.push(
     `## ${serverLaneCopy.contractHeading}`,
     "",
-    ...serverLaneCopy.contract.transport.flatMap((line) => [line, ""]),
+    ...serverLaneCopy.contract.transport(input.apiOrigin).flatMap((line) => [line, ""]),
     ...serverLaneCopy.contract.documentRequest,
     "",
     ...serverLaneCopy.contract.outcome,
@@ -299,7 +386,8 @@ export function renderServerLaneBrief(input: ServerLaneBriefInput): string {
       "ts",
       buildServerLaneModuleSource({
         siteSourceKey: input.siteSourceKey,
-        productionHosts: input.productionHosts
+        productionHosts: input.productionHosts,
+        ...(input.apiOrigin ? { apiOrigin: input.apiOrigin } : {})
       })
     ),
     "",
@@ -313,7 +401,7 @@ export function renderServerLaneBrief(input: ServerLaneBriefInput): string {
     "",
     `### ${serverLaneCopy.reference.node}`,
     "",
-    ...codeBlock("js", nodeHelperSnippet()),
+    ...codeBlock("js", nodeHelperSnippet(input.apiOrigin)),
     "",
     ...codeBlock("js", expressSnippet()),
     "",
@@ -323,7 +411,7 @@ export function renderServerLaneBrief(input: ServerLaneBriefInput): string {
     "",
     `### ${serverLaneCopy.reference.webCrypto}`,
     "",
-    ...codeBlock("js", webCryptoHelperSnippet()),
+    ...codeBlock("js", webCryptoHelperSnippet(input.apiOrigin)),
     "",
     `### ${serverLaneCopy.reference.cloudflare}`,
     "",
@@ -332,6 +420,16 @@ export function renderServerLaneBrief(input: ServerLaneBriefInput): string {
     `### ${serverLaneCopy.reference.netlify}`,
     "",
     ...codeBlock("js", netlifyEdgeSnippet()),
+    "",
+    `## ${serverLaneCopy.outcomeRouteHeading}`,
+    "",
+    serverLaneCopy.outcomeRouteIntro,
+    "",
+    serverLaneCopy.outcomeRouteVercel,
+    "",
+    ...codeBlock("ts", outcomeRouteSnippet()),
+    "",
+    serverLaneCopy.outcomeRouteNote,
     "",
     `## ${serverLaneCopy.envHeading}`,
     "",
@@ -343,7 +441,7 @@ export function renderServerLaneBrief(input: ServerLaneBriefInput): string {
     "",
     `## ${serverLaneCopy.verifyHeading}`,
     "",
-    ...serverLaneCopy.verify,
+    ...serverLaneCopy.verify(input.apiOrigin),
     "",
     `## ${serverLaneCopy.doneHeading}`,
     "",

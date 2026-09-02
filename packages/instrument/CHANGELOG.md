@@ -3,6 +3,46 @@
 All notable changes to the `infinite-tag` npm package (`packages/instrument`). Versions before
 0.5.0 are recorded in git history only (`git log -- packages/instrument`).
 
+## Unreleased
+
+- **The server lane is no longer Next.js-only.** `install --server-lane` now writes runnable,
+  manifest-managed, byte-exact reversible files for the host a site actually deploys to, chosen from
+  file and dependency evidence in the repo (`vercel.json` wins every tie):
+  - **Vercel, any framework** — the root `middleware.ts` Vercel runs framework-agnostically, plus
+    `lib/infinite-server-lane.ts`. A Vite/React or static site on Vercel finally gets a real lane.
+    The entry imports `@vercel/functions`; the CLI and the brief name the one `npm install` to run.
+  - **Netlify** — `netlify/edge-functions/infinite-server-lane.ts`, declared in-file with
+    `export const config`, so `netlify.toml` is never edited.
+  - **Cloudflare Pages** — `functions/_middleware.ts`, reading its secret from `context.env`. A plain
+    Worker still gets the brief's snippet: there is no file of ours to add safely.
+  - **Express / any Node server** — `lib/infinite-server-lane.js` plus the exact one-line mount the
+    brief names. No server file is edited automatically.
+- **An outcome helper every server route can import.** Each target also writes `lib/infinite-outcome`
+  exporting `postInfiniteOutcome({ type, path, eventId, accountKey, visitKeyInputs })`, so a Vercel
+  `api/` function confirming a paid Stripe session reports a purchase in three lines, carrying the
+  same `visitKey` as the page view. The brief gains a "Post a purchase from a server route" section.
+- **The pixel's collect path joins the skip list** in every **non-Next** generated lane and matcher,
+  alongside `/api/*`, `/_next/*`, `/_vercel/*`, prefetches, non-GETs, non-HTML and anything with an
+  extension. The Next.js lane is unchanged and still byte-identical to earlier installs; adding the
+  collect path there would move bytes every Next customer already has, so it is a separate change.
+  The path is read from the artifact and defaults to `DEFAULT_INFINITE_COLLECT_PATH`, never a copy.
+- **`--infinite-api-origin` now moves the server lane too.** The override used to re-point only the
+  browser proxy, so a founder who set it would have had a browser lane on one host and a server lane
+  on the default one. The resolved origin now flows into every generated lane (Next included), both
+  outcome helpers, the brief's transport and verify sections, and `verify --server-lane`'s receipt
+  URL. With no override every generated file is byte-identical to before.
+- **Uninstall prunes only directories the lane created.** `serverLane.createdDirs` records them (and
+  carries across re-runs), so a `netlify/` or `functions/` directory the customer already had — for
+  `netlify/`, the very evidence that picked the host — is never removed.
+- **Netlify's asset exclusion is per-extension, not `/*.*`.** `excludedPath` takes URLPattern
+  expressions and its wildcard is greedy across `/`, so `/*.*` would have excluded any path with a
+  dot at any depth, silently dropping a real page like `/v1.0/pricing`. The declaration now lists the
+  extensions Netlify's own example uses; it can only under-exclude, and correctness stays in
+  `isInfiniteDocumentRequest`.
+- Next.js installs are byte-identical: hosting detection never changes that lane.
+- A file infinite-tag would create but does not manage is left alone, with its exact content in the
+  brief; an unmanaged `lib/infinite-server-lane.*` is a planning blocker, never an overwrite.
+
 ## 0.7.0 — 2026-09-02
 
 - **Server-lane copy stops claiming 100% of traffic.** The positioning line (brief + README) now

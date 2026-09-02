@@ -83,6 +83,11 @@ export function uninstallInstallation(options: UninstallInstallationOptions): Un
     for (const candidate of ["lib", "src/lib"]) {
       removeDirIfEmpty(join(appRoot, candidate))
     }
+    // Deepest first, and ONLY directories the lane itself created: a `netlify/` or `functions/`
+    // directory the customer already had is their tree, not ours to remove.
+    for (const candidate of manifest.serverLane?.createdDirs ?? []) {
+      removeDirIfEmpty(join(options.root, candidate))
+    }
   }
 
   return {

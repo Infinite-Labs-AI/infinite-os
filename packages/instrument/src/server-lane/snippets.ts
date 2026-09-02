@@ -1,7 +1,7 @@
 // Reference implementations for stacks infinite-tag does not patch automatically. Code only —
 // every sentence of prose lives in copy.ts. Contract values are interpolated from helpers.ts and
 // workspace-artifacts.ts so the snippets can never disagree with the Node recipe.
-import { INFINITE_SERVER_EVENTS_DESTINATION } from "../workspace-artifacts.js"
+import { infiniteServerEventsDestination } from "../workspace-artifacts.js"
 
 import {
   AUTOMATION_USER_AGENT_PATTERN,
@@ -21,7 +21,6 @@ import {
 const prefixes = JSON.stringify([...NON_DOCUMENT_PATH_PREFIXES])
 const automation = `/${AUTOMATION_USER_AGENT_PATTERN.source}/i`
 const referrerHostPattern = `/${REFERRER_HOST_PATTERN.source}/`
-const url = JSON.stringify(INFINITE_SERVER_EVENTS_DESTINATION)
 const docEvent = JSON.stringify(DOCUMENT_REQUEST_EVENT_NAME)
 const docPrefix = JSON.stringify(DOCUMENT_EVENT_ID_PREFIX)
 const visitPrefix = JSON.stringify(VISIT_KEY_MESSAGE_PREFIX)
@@ -30,9 +29,11 @@ const signatureHeader = JSON.stringify(SERVER_LANE_SIGNATURE_HEADER)
 // Snippet import lines live in constants so the package self-containment scanner
 // (package-shape.test.ts) never mistakes them for this package's own imports.
 const EXPRESS_IMPORT = 'import express from "express"'
+const OUTCOME_HELPER_IMPORT = 'import { postInfiniteOutcome } from "../lib/infinite-outcome"'
 
 /** infinite-server-lane.mjs — the generic Node helper (Express, Fastify, Koa, Hono-on-Node, plain http). */
-export function nodeHelperSnippet(): string {
+export function nodeHelperSnippet(apiOrigin?: string): string {
+  const url = JSON.stringify(infiniteServerEventsDestination(apiOrigin))
   return String.raw`// infinite-server-lane.mjs — generic Node helper. Node >= 18 (global fetch).
 import { createHmac, randomUUID } from "node:crypto"
 
@@ -161,7 +162,8 @@ app.use((req, res, next) => {
 }
 
 /** The WebCrypto twin of the Node helper, for edge runtimes (Cloudflare Workers, Netlify Edge, Deno, Bun). */
-export function webCryptoHelperSnippet(): string {
+export function webCryptoHelperSnippet(apiOrigin?: string): string {
+  const url = JSON.stringify(infiniteServerEventsDestination(apiOrigin))
   return String.raw`// infinite-server-lane-edge.js — WebCrypto helper for edge runtimes (no Node imports).
 const INFINITE_SERVER_EVENTS_URL = ${url}
 const DELIVERY_TIMEOUT_MS = ${SERVER_LANE_DELIVERY_TIMEOUT_MS}
@@ -308,6 +310,31 @@ void sendInfiniteServerEvent({
     visitKey: infiniteVisitKey({ clientIp: req.ip, userAgent: req.headers["user-agent"] }) // same-lane attribution
   }
 })
+`
+}
+
+/**
+ * Reporting an outcome from a serverless route with the generated `lib/infinite-outcome` helper —
+ * the three lines a Vercel `api/` function needs.
+ */
+export function outcomeRouteSnippet(): string {
+  return String.raw`// api/checkout-status.ts — a Vercel serverless function confirming a paid session.
+${OUTCOME_HELPER_IMPORT}
+
+export default async function handler(request: Request): Promise<Response> {
+  const session = await stripe.checkout.sessions.retrieve(new URL(request.url).searchParams.get("id"))
+  if (session.payment_status !== "paid") return Response.json({ paid: false })
+
+  await postInfiniteOutcome({
+    type: "purchase",              // the exact name from Infinite -> Conversions
+    path: "/checkout",             // pathname only
+    eventId: "purchase:" + session.id, // stable, so a retry dedupes
+    accountKey: session.customer,  // optional; hashed at rest by Infinite
+    visitKeyInputs: request        // same visitKey as the page view -> same-lane conversion rate
+  })
+
+  return Response.json({ paid: true })
+}
 `
 }
 

@@ -105,7 +105,15 @@ export {
   renderServerLaneBrief,
   serverLaneCopy
 } from "./server-lane/copy.js"
-export { planServerLane, applyServerLane, reverseServerLane } from "./server-lane/install.js"
+export {
+  planServerLane,
+  applyServerLane,
+  reverseServerLane,
+  selectServerLaneTarget,
+  serverLaneTargetForMode
+} from "./server-lane/install.js"
+export { detectHosting, detectHostingWithEvidence, isCloudflarePagesProject } from "./server-lane/hosting.js"
+export type { ServerLaneHosting } from "./server-lane/hosting.js"
 export {
   parseReceipt,
   receiptRequestSignature,

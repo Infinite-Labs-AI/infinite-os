@@ -231,6 +231,17 @@ export interface ServerLaneManifest {
   module?: string
   /** The written INSTALL-SERVER-LANE.md agent brief (banner-gated removal, never hash-verified). */
   brief?: string
+  /**
+   * Non-Next targets: every whole file the lane created, root-relative, each with a "created"
+   * record in configOwnership so uninstall deletes it only when it is byte-identical.
+   */
+  created?: string[]
+  /**
+   * Directories the lane itself had to create, root-relative and deepest-first. Uninstall prunes
+   * ONLY these, and only while empty — a `netlify/` or `functions/` directory the customer already
+   * had is part of their tree (and, for `netlify/`, is the hosting evidence), never ours to delete.
+   */
+  createdDirs?: string[]
 }
 
 export interface ManagedConfigInsertion {
@@ -263,8 +274,22 @@ export type ManagedConfigOwnership =
       edits: ManagedTextEdit[]
     }
 
-/** "next-middleware": middleware + module + brief; "brief": the agent brief only. */
-export type ServerLaneMode = "next-middleware" | "brief"
+/**
+ * Which server lane was installed — the target name, so a manifest says what runs where.
+ *   next-middleware   Next.js middleware.ts / proxy.ts + the managed module (any host).
+ *   vercel-middleware Vercel's framework-agnostic root middleware.ts, for a non-Next framework.
+ *   netlify-edge      A Netlify Edge Function under netlify/edge-functions/.
+ *   cloudflare-pages  A Cloudflare Pages functions/_middleware.ts.
+ *   node-module       A generated Node module the customer mounts (`app.use(...)`) themselves.
+ *   brief             No file was written: the agent brief IS the install.
+ */
+export type ServerLaneMode =
+  | "next-middleware"
+  | "vercel-middleware"
+  | "netlify-edge"
+  | "cloudflare-pages"
+  | "node-module"
+  | "brief"
 
 export type ServerLaneMiddlewareAction = "create" | "patch" | "keep" | "unpatchable"
 
@@ -281,8 +306,25 @@ export interface ServerLanePlan {
     /** Why an existing file was left untouched (action "unpatchable"). */
     reason?: string
   }
+  /**
+   * Non-Next targets: the whole files the lane writes, root-relative and in write order.
+   * "create" writes it, "keep" leaves an edited copy of ours alone, "manual" leaves someone
+   * else's file alone and puts the exact addition in the brief.
+   */
+  created?: Array<{
+    path: string
+    role: "entry" | "module"
+    action: "create" | "keep" | "manual"
+    reason?: string
+  }>
+  /** Packages the generated entry imports that the repo may not depend on yet (Vercel: @vercel/functions). */
+  installPackages?: string[]
+  /** Human name of the chosen target, for the CLI ("Vercel root middleware (any framework)"). */
+  targetLabel?: string
+  /** The file or dependency that picked it ("vercel.json"), for the CLI's "why". */
+  targetEvidence?: string
   envKeys: string[]
-  /** Root-relative files the lane manages (hash-verified): middleware + module. */
+  /** Root-relative files the lane manages (hash-verified): middleware + module, or the target's files. */
   files: string[]
   assumptions: string[]
 }

@@ -56,7 +56,9 @@ function assertManifestConfined(root: string, manifest: InstallManifest): void {
   for (const relativePath of [
     manifest.serverLane?.middleware,
     manifest.serverLane?.module,
-    manifest.serverLane?.brief
+    manifest.serverLane?.brief,
+    ...(manifest.serverLane?.created ?? []),
+    ...(manifest.serverLane?.createdDirs ?? [])
   ]) {
     if (relativePath !== undefined) {
       assertConfinedManifestFileEntry(root, relativePath)
@@ -84,10 +86,25 @@ function isInstallManifestShape(value: unknown): value is InstallManifest {
   )
 }
 
+const SERVER_LANE_MODES = [
+  "next-middleware",
+  "vercel-middleware",
+  "netlify-edge",
+  "cloudflare-pages",
+  "node-module",
+  "brief"
+] as const
+
 function isServerLaneManifestShape(value: unknown): boolean {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false
   const candidate = value as Record<string, unknown>
-  if (candidate.mode !== "next-middleware" && candidate.mode !== "brief") return false
+  if (!SERVER_LANE_MODES.some((mode) => mode === candidate.mode)) return false
+  for (const key of ["created", "createdDirs"] as const) {
+    const value = candidate[key]
+    if (value !== undefined && (!Array.isArray(value) || !value.every((entry) => typeof entry === "string"))) {
+      return false
+    }
+  }
   return (["middleware", "module", "brief"] as const).every(
     (key) => candidate[key] === undefined || typeof candidate[key] === "string"
   )

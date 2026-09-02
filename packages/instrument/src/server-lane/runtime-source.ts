@@ -10,7 +10,7 @@
 // prefixes) is interpolated from helpers.ts / workspace-artifacts.ts so it cannot drift from the
 // Node recipe; runtime-source.test.ts executes this generated module against the same vectors.
 import { managedFileBanner } from "../frameworks/managed-files.js"
-import { INFINITE_SERVER_EVENTS_DESTINATION } from "../workspace-artifacts.js"
+import { infiniteServerEventsDestination } from "../workspace-artifacts.js"
 
 import {
   AUTOMATION_USER_AGENT_PATTERN,
@@ -48,6 +48,11 @@ export interface ServerLaneModuleInput {
   siteSourceKey?: string
   /** Verified production hosts; when non-empty the lane is dormant on every other host. */
   productionHosts?: string[]
+  /**
+   * The resolved `--infinite-api-origin`. Absent (the normal case) the module is byte-identical to
+   * every earlier install; set, the server lane follows the browser lane to the same host.
+   */
+  apiOrigin?: string
 }
 
 function jsStringArray(values: string[]): string {
@@ -68,7 +73,7 @@ export function buildServerLaneModuleSource(input: ServerLaneModuleInput = {}): 
 ${SERVER_LANE_FENCE_START}
 ${NEXT_SERVER_IMPORTS}
 
-const INFINITE_SERVER_EVENTS_URL = ${JSON.stringify(INFINITE_SERVER_EVENTS_DESTINATION)}
+const INFINITE_SERVER_EVENTS_URL = ${JSON.stringify(infiniteServerEventsDestination(input.apiOrigin))}
 const SOURCE_KEY = process.env.${SERVER_LANE_SOURCE_KEY_ENV} || ${bakedSourceKey}
 const PRODUCTION_HOSTS: string[] = ${bakedHosts}
 const DELIVERY_TIMEOUT_MS = ${SERVER_LANE_DELIVERY_TIMEOUT_MS}
