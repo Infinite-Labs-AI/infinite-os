@@ -247,7 +247,7 @@ describe("capability gate", () => {
     const code = await runContactsSync(harness.deps);
     expect(code).toBe(1);
     expect(harness.fake.errLines.join("\n")).toContain(
-      "Open the Infinite app first — that's how your people reach your workspace."
+      "Open the Infinite app first — that's how your contacts reach your workspace."
     );
     expect(harness.postImport).not.toHaveBeenCalled();
   });
@@ -330,13 +330,13 @@ describe("the two-confirm state machine", () => {
 
     const output = harness.fake.outLines.join("\n");
     expect(output).toContain(
-      "Done. Unsubscribed or suppressed people were NOT resurrected — that is permanent."
+      "Done. Unsubscribed or suppressed contacts were NOT resurrected — that is permanent."
     );
     expect(output).toContain(
       "Re-run this command any time: re-imports merge and never clobber consent."
     );
     // The unconfirmed-but-kept count is its own line.
-    expect(output).toContain("1 person hasn't confirmed their email yet");
+    expect(output).toContain("1 contact hasn't confirmed their email yet");
   });
 
   it("confirm 1 gates transmission: a decline sends NOTHING over the bridge", async () => {
@@ -361,15 +361,15 @@ describe("the two-confirm state machine", () => {
     await runContactsSync(harness.deps);
     // At confirm 1 (and every prompt before it) ZERO imports have been posted;
     // by confirm 2 exactly the single dry run has.
-    const confirm1 = callsAtPrompt.find((entry) => entry.prompt.includes("Send 2 people"));
+    const confirm1 = callsAtPrompt.find((entry) => entry.prompt.includes("Send 2 contacts"));
     expect(confirm1).toBeDefined();
     expect(confirm1?.importCalls).toBe(0);
     for (const entry of callsAtPrompt) {
-      if (!entry.prompt.includes("Import 2 people now?")) {
+      if (!entry.prompt.includes("Import 2 contacts now?")) {
         expect(entry.importCalls).toBe(0);
       }
     }
-    const confirm2 = callsAtPrompt.find((entry) => entry.prompt.includes("Import 2 people now?"));
+    const confirm2 = callsAtPrompt.find((entry) => entry.prompt.includes("Import 2 contacts now?"));
     expect(confirm2?.importCalls).toBe(1);
   });
 
@@ -385,12 +385,12 @@ describe("the two-confirm state machine", () => {
   it("names the destination workspace from status.v1 in confirm 1", async () => {
     const harness = makeHarness({ status: readyStatus("October") });
     await runContactsSync(harness.deps);
-    const confirm = harness.fake.prompts.find((prompt) => prompt.includes("Send 2 people"));
+    const confirm = harness.fake.prompts.find((prompt) => prompt.includes("Send 2 contacts"));
     expect(confirm).toContain('to workspace "October" as product signups?');
   });
 
   it("maps the provenance answers to the wire vocabulary", async () => {
-    const harness = makeHarness({ answers: ["paying customers", "y", "y"] });
+    const harness = makeHarness({ answers: ["customers", "y", "y"] });
     await runContactsSync(harness.deps);
     expect(harness.postImport.mock.calls[0][0].provenance).toBe("customers");
   });
@@ -432,7 +432,7 @@ describe("caps and failures", () => {
     const code = await runContactsSync(harness.deps);
     expect(code).toBe(1);
     const output = harness.fake.outLines.join("\n");
-    expect(output).toContain("25,001 people — more than the 25,000 one sync can carry");
+    expect(output).toContain("25,001 contacts — more than the 25,000 one sync can carry");
     expect(output).toContain("Split by created_at");
     expect(harness.postImport).not.toHaveBeenCalled();
   });
