@@ -77,7 +77,7 @@ export interface ContactsSyncDeps {
 
 const PROVENANCE_LABELS: Record<string, string> = {
   signups: "product signups",
-  customers: "paying customers",
+  customers: "customers",
   other: "something else"
 };
 
@@ -108,8 +108,8 @@ function isYes(answer: string): boolean {
   return normalized === "y" || normalized === "yes";
 }
 
-function peopleWord(count: number): string {
-  return count === 1 ? "person" : "people";
+function contactsWord(count: number): string {
+  return count === 1 ? "contact" : "contacts";
 }
 
 function numberField(body: Record<string, unknown>, key: string): number {
@@ -154,7 +154,7 @@ function renderScanReport(io: ContactsSyncIo, scan: AuthScanResult): void {
     io.writeOut(`  Left out: ${droppedParts.join(", ")}.`);
   }
   if (scan.unconfirmedKept > 0) {
-    const verb = scan.unconfirmedKept === 1 ? "person hasn't" : "people haven't";
+    const verb = scan.unconfirmedKept === 1 ? "contact hasn't" : "contacts haven't";
     io.writeOut(
       `  ${formatCount(scan.unconfirmedKept)} ${verb} confirmed their email yet — kept, and counted so you know.`
     );
@@ -185,7 +185,7 @@ export async function runContactsSync(deps: ContactsSyncDeps): Promise<number> {
     return fail(error instanceof Error ? error.message : String(error));
   }
   if (!descriptor) {
-    return fail("Open the Infinite app first — that's how your people reach your workspace.");
+    return fail("Open the Infinite app first — that's how your contacts reach your workspace.");
   }
   if (!descriptor.capabilities.includes(CONTACTS_IMPORT_CAPABILITY)) {
     return fail("Your Infinite app is too old for contacts sync — update the app first.");
@@ -252,17 +252,17 @@ export async function runContactsSync(deps: ContactsSyncDeps): Promise<number> {
   }
 
   out(
-    `  Looking at your database … found auth.users (${formatCount(scan.totalListed)} ${peopleWord(
+    `  Looking at your database … found auth.users (${formatCount(scan.totalListed)} ${contactsWord(
       scan.totalListed
     )})${discovery.table ? ` and public.${discovery.table}` : ""}.`
   );
   renderScanReport(io, scan);
   if (scan.kept.length === 0) {
-    return fail("  No importable people were found in auth.users — nothing to sync.");
+    return fail("  No importable contacts were found in auth.users — nothing to sync.");
   }
   if (scan.kept.length > MAX_SYNC_ROWS) {
     out(
-      `  That's ${formatCount(scan.kept.length)} people — more than the ${formatCount(MAX_SYNC_ROWS)} one sync can carry.`
+      `  That's ${formatCount(scan.kept.length)} contacts — more than the ${formatCount(MAX_SYNC_ROWS)} one sync can carry.`
     );
     out(
       "  Split by created_at (import your oldest cohort first, then the rest) and re-run."
@@ -323,7 +323,7 @@ export async function runContactsSync(deps: ContactsSyncDeps): Promise<number> {
   let provenance: { provenance: "signups" | "customers" | "other"; label: string } | undefined;
   for (let attempt = 0; attempt < 3 && !provenance; attempt += 1) {
     const answer = await io.prompt(
-      "  Are these people product signups, paying customers, or something else? "
+      "  Are these contacts product signups, customers, or something else? "
     );
     provenance = parseProvenanceAnswer(answer);
     if (!provenance) out("  Please answer: signups, customers, or other.");
@@ -349,7 +349,7 @@ export async function runContactsSync(deps: ContactsSyncDeps): Promise<number> {
 
   out("");
   const confirm1 = await io.prompt(
-    `  ▸ Send ${formatCount(scan.kept.length)} ${peopleWord(scan.kept.length)} to workspace "${workspaceName}" as ${provenance.label}? [y/N] `
+    `  ▸ Send ${formatCount(scan.kept.length)} ${contactsWord(scan.kept.length)} to workspace "${workspaceName}" as ${provenance.label}? [y/N] `
   );
   if (!isYes(confirm1)) {
     out("  Nothing was sent.");
@@ -412,7 +412,7 @@ export async function runContactsSync(deps: ContactsSyncDeps): Promise<number> {
 
   // ── Confirm 2 commits, pinned to the dry run's workspace. ─────────────────
   const confirm2 = await io.prompt(
-    `  Import ${formatCount(importable)} ${peopleWord(importable)} now? [y/N] `
+    `  Import ${formatCount(importable)} ${contactsWord(importable)} now? [y/N] `
   );
   if (!isYes(confirm2)) {
     out("  Nothing was imported.");
@@ -450,11 +450,11 @@ export async function runContactsSync(deps: ContactsSyncDeps): Promise<number> {
   }
   if (keptSuppressed > 0) {
     out(
-      `  ${formatCount(keptSuppressed)} previously unsubscribed or suppressed ${peopleWord(keptSuppressed)} stayed that way.`
+      `  ${formatCount(keptSuppressed)} previously unsubscribed or suppressed ${contactsWord(keptSuppressed)} stayed that way.`
     );
   }
   out("");
-  out("  Done. Unsubscribed or suppressed people were NOT resurrected — that is permanent.");
+  out("  Done. Unsubscribed or suppressed contacts were NOT resurrected — that is permanent.");
   out("  Re-run this command any time: re-imports merge and never clobber consent.");
   return 0;
 }

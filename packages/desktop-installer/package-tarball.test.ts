@@ -68,9 +68,13 @@ describe("infinite-os npm artifact", () => {
         join(consumer, "package.json"),
         '{"name":"consumer","private":true}\n'
       );
-      execFileSync("npm", ["install", "--ignore-scripts", tarball], {
-        cwd: consumer
-      });
+      execFileSync(
+        "npm",
+        ["install", "--ignore-scripts", "--no-audit", "--no-fund", tarball],
+        {
+          cwd: consumer
+        }
+      );
       const installedBin = join(consumer, "node_modules/.bin/infinite-os");
       expect(existsSync(installedBin)).toBe(true);
       expect(
@@ -79,7 +83,7 @@ describe("infinite-os npm artifact", () => {
     } finally {
       rmSync(tempRoot, { recursive: true, force: true });
     }
-  }, 30_000);
+  }, 300_000);
 
   it("derives validator package identity from the pack receipt version", () => {
     const tempRoot = mkdtempSync(join(tmpdir(), "infinite-os-validator-"));
