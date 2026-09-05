@@ -22,7 +22,7 @@ export function providerInstallEvidence(source: string): ProviderInstallEvidence
   if (/^\s*(?:<!doctype\s+html|<html\b|<script\b)/i.test(raw)) {
     // HTML body text is not executable JavaScript. Keep script elements and offsets only.
     const original = raw
-    const regions = [...original.matchAll(/<script\b[^>]*>[\s\S]*?<\/script>/gi)]
+    const regions = [...original.matchAll(/<script\b[^>]*>[\s\S]*?<\/script\s*>/gi)]
     const masked: string[] = original.split("").map((char) => (char === "\n" ? char : " "))
     for (const region of regions) {
       for (let i = 0; i < region[0].length; i++) masked[region.index + i] = region[0][i]
@@ -186,7 +186,7 @@ export function providerInstallEvidence(source: string): ProviderInstallEvidence
     if (/^[A-Za-z_$][\w$]*\.src\s*=/.test(code.slice(match.index))) loader(match[1], match.index)
   }
   for (const match of text.matchAll(
-    /<script\b[^>]*data-infinite-runtime=["']managed["'][^>]*>([\s\S]*?)<\/script>/gi
+    /<script\b[^>]*data-infinite-runtime=["']managed["'][^>]*>([\s\S]*?)<\/script\s*>/gi
   )) {
     if (code.slice(match.index, match.index + 7).toLowerCase() !== "<script") continue
     const config = match[1].match(/\}\)\((\{[\s\S]*\})\);?\s*$/)

@@ -93,6 +93,15 @@ describe("detectProvidersWithEvidence", () => {
     expect(detectProvidersWithEvidence(root)).toEqual([expect.objectContaining({provider:"posthog",key:"phc_real"})])
   })
 
+  it("recognizes HTML script closing tags with whitespace", () => {
+    const root=copyFixture("static-html-basic")
+    write(root,"index.html",`<html><head><script>fbq('init','123456')</script ></head></html>`)
+    expect(detectProvidersWithEvidence(root).map(row=>row.provider)).toEqual(["meta"])
+    const runtime=renderInfiniteBrowserTag({siteSourceKey:"site_whitespace",collectPath:"/ledger",productionHosts:["example.com"],respectDnt:true,consent:{mode:"not_required"}})
+    write(root,"index.html",runtime.replace("</script>","</script >"))
+    expect(detectProvidersWithEvidence(root).map(row=>row.provider)).toEqual(["infinite"])
+  })
+
   it("recognizes spaced initialization calls consistently", () => {
     const root = copyFixture("static-html-basic")
     write(root, "pixels.js", `window.gtag ('config', 'G-REAL123'); posthog.init ('phc_real'); window.fbq ('init', '123456'); twq ('config', 'abc')`)
