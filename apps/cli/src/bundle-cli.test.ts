@@ -8,6 +8,7 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  symlinkSync,
   writeFileSync
 } from "node:fs";
 import { createServer, type Server } from "node:http";
@@ -304,6 +305,35 @@ describe.runIf(workspaceBuilt)("CLI single-file bundle", () => {
   it("builds infinite.mjs via the build:bundle script", () => {
     buildBundle();
   }, 120_000);
+
+  it("runs analytics from a relocated installed-command symlink without a checkout", () => {
+    const temporary = mkdtempSync(join(tmpdir(), "infinite-installed-analytics-"));
+    try {
+      const installed = join(temporary, "application", "cli");
+      cpSync(dirname(bundlePath), installed, { recursive: true });
+      const site = join(temporary, "site");
+      mkdirSync(site);
+      writeFileSync(join(site, "index.html"), "<!doctype html><html><head></head><body><button>Start</button></body></html>");
+      const binary = join(installed, "infinite.mjs");
+      chmodSync(binary, 0o755);
+      const command = join(temporary, "infinite");
+      symlinkSync(binary, command);
+      const result = spawnSync(command, ["analytics", "--check", "--json", "--workspace", "bundle-test", "--root", site], {
+        cwd: site,
+        encoding: "utf8",
+        timeout: 30_000,
+        env: { ...process.env, GROWTH_OS_HOME: join(temporary, "growth-home"), INFINITE_ARTIFACTS_DIR: join(temporary, "artifacts"), PATH: `${dirname(process.execPath)}:${process.env.PATH ?? ""}` }
+      });
+      expect(result.status, result.stdout + result.stderr).toBe(0);
+      const report = JSON.parse(result.stdout);
+      expect(report.framework).toBe("static-html");
+      expect(report.failure).toBeNull();
+      expect(report.providers).toHaveLength(7);
+      expect(existsSync(join(site, ".infinite"))).toBe(false);
+    } finally {
+      rmSync(temporary, { recursive: true, force: true });
+    }
+  });
 
   it("ships the migrations sidecar next to the bundle", () => {
     // `infinite setup runtime --mode external_postgres|supabase` → runRuntimeMigrations →
