@@ -9331,6 +9331,17 @@ describe("per-turn usage receipts", () => {
     expect(requests.every(request => request.promptCacheKey === "stable" && request.model?.modelId === "gpt-5.5")).toBe(true);
   });
 
+  it.each(["response.failed", "response.incomplete"])("retains measured tokens on %s without treating it as success", async type => {
+    const growthHome = mkdtempSync(join(tmpdir(), "usage-failure-"));
+    try {
+      const env = { GROWTH_OS_HOME: growthHome };
+      writeInfiniteOsModelSelection({ provider: "codex", model: "gpt-5.5" }, env);
+      writeInfiniteOsAuthRecord({ provider: "codex", source: "codex-cli", authMode: "device-code", token: "test-token" }, env);
+      const client = createConfiguredModelClient({ env, fetch: async () => new Response(`event: ${type}\ndata: ${JSON.stringify({ type, response: { usage: { input_tokens: 12, output_tokens: 2 }, error: { message: "provider interrupted" } } })}\n\n`, { headers: { "content-type": "text/event-stream" } }) });
+      await expect(client.complete({ systemPrompt: "s", userMessage: "u", tools: [], toolResults: [] })).rejects.toMatchObject({ message: "provider interrupted", usage: { promptTokens: 12, completionTokens: 2 } });
+    } finally { rmSync(growthHome, { recursive: true, force: true }); }
+  });
+
   it("preserves provider cache/reasoning and the accepted model even when config selects another model", async () => {
     const growthHome = mkdtempSync(join(tmpdir(), "usage-model-"));
     try {
