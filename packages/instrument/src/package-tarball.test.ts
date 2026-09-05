@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process"
+import { execFileSync, spawnSync } from "node:child_process"
 import {
   cpSync,
   existsSync,
@@ -95,6 +95,15 @@ describe("npm 11 package tarball", () => {
       expect(execFileSync(installedBin, ["help"], { cwd: consumer, encoding: "utf8" })).toContain(
         "Usage: infinite-tag"
       )
+      writeFileSync(join(consumer, "index.html"), "<html><head><script>if(window.fbq)fbq('track','Lead')</script></head></html>")
+      const env = { ...process.env, INFINITE_ARTIFACTS_DIR: join(tempRoot, "empty-artifacts") }
+      const check = spawnSync(installedBin, ["harness", "--check", "--json", "--root", consumer], {cwd:consumer,encoding:"utf8",env})
+      expect(check.status, check.stderr).toBe(0)
+      expect(JSON.parse(check.stdout).providers.find((row: {provider:string}) => row.provider === "meta").state).not.toBe("adopted")
+      const verify = spawnSync(installedBin, ["harness", "--verify-only", "--json", "--url", "https://example.com", "--root", consumer], {cwd:consumer,encoding:"utf8",env})
+      expect(verify.status, verify.stderr).toBe(1)
+      expect(JSON.parse(verify.stdout).failure.code).toBe("INF_VERIFY_INCOMPLETE")
+
     } finally {
       rmSync(tempRoot, { recursive: true, force: true })
     }
