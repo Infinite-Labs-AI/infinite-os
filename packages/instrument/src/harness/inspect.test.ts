@@ -93,12 +93,12 @@ describe("detectProvidersWithEvidence", () => {
     expect(detectProvidersWithEvidence(root)).toEqual([expect.objectContaining({provider:"posthog",key:"phc_real"})])
   })
 
-  it("recognizes HTML script closing tags with whitespace", () => {
+  it.each(["</script >", "</script\t\n bar>"])("recognizes HTML script closing tags: %s", close => {
     const root=copyFixture("static-html-basic")
-    write(root,"index.html",`<html><head><script>fbq('init','123456')</script ></head></html>`)
+    write(root,"index.html",`<html><head><script>fbq('init','123456')${close}</head></html>`)
     expect(detectProvidersWithEvidence(root).map(row=>row.provider)).toEqual(["meta"])
     const runtime=renderInfiniteBrowserTag({siteSourceKey:"site_whitespace",collectPath:"/ledger",productionHosts:["example.com"],respectDnt:true,consent:{mode:"not_required"}})
-    write(root,"index.html",runtime.replace("</script>","</script >"))
+    write(root,"index.html",runtime.replace("</script>",close))
     expect(detectProvidersWithEvidence(root).map(row=>row.provider)).toEqual(["infinite"])
   })
 

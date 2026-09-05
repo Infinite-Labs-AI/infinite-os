@@ -14,8 +14,8 @@ All notable changes to the `infinite-tag` npm package (`packages/instrument`). V
   cannot run or complete. Preserve `INF_VERIFY_NO_RECEIPT` for actual unsuccessful polling.
 - Include a source-to-deployment and per-action test checklist in reports and agent briefs;
   adopted/installed providers are not described as a completed coverage audit.
-- Exercise these regressions in the npm tarball and packaged CLI tests. Four runtime/type files
-  are added; the reviewed tarball now contains 120 files within unchanged supply-chain bounds.
+- Exercise these regressions in the npm tarball and packaged CLI tests. Six runtime/type files
+  are added; the reviewed tarball now contains 122 files within unchanged supply-chain bounds.
 
 ## 0.9.0 — 2026-09-02
 

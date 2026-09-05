@@ -1,3 +1,4 @@
+import { htmlScripts } from "./html-scripts.js"
 import { maskCommentsAndStrings } from "./frameworks/shared.js"
 import type { ProviderId } from "./types.js"
 
@@ -19,13 +20,18 @@ export function installationSource(source: string): string {
 /** Installation evidence, not proof of execution or receipt. Event calls alone never qualify. */
 export function providerInstallEvidence(source: string): ProviderInstallEvidence[] {
   let raw = installationSource(source)
-  if (/^\s*(?:<!doctype\s+html|<html\b|<script\b)/i.test(raw)) {
-    // HTML body text is not executable JavaScript. Keep script elements and offsets only.
+  const html = /^\s*</.test(raw)
+  const baseCode = html ? "" : maskCommentsAndStrings(raw, true)
+  const scripts = htmlScripts(
+    raw,
+    html,
+    (start) => html || baseCode.slice(start, start + 7).toLowerCase() === "<script"
+  )
+  if (html) {
     const original = raw
-    const regions = [...original.matchAll(/<script\b[^>]*>[\s\S]*?<\/script\s*>/gi)]
     const masked: string[] = original.split("").map((char) => (char === "\n" ? char : " "))
-    for (const region of regions) {
-      for (let i = 0; i < region[0].length; i++) masked[region.index + i] = region[0][i]
+    for (const script of scripts) {
+      for (let i = script.start; i < script.end; i++) masked[i] = original[i]
     }
     raw = masked.join("")
   }
@@ -179,18 +185,16 @@ export function providerInstallEvidence(source: string): ProviderInstallEvidence
     if (path.endsWith("/tracking/standalone.js")) add("infinite", offset)
   }
 
-  for (const match of text.matchAll(/<script\b[^>]*\bsrc\s*=\s*["']([^"']+)["'][^>]*>/gi)) {
-    if (code.slice(match.index, match.index + 7).toLowerCase() === "<script")
-      loader(match[1], match.index)
+  for (const script of scripts) {
+    const src = script.attributes.get("src")
+    if (src) loader(src, script.start)
   }
   for (const match of text.matchAll(/\b[A-Za-z_$][\w$]*\.src\s*=\s*["']([^"']+)["']/g)) {
     if (/^[A-Za-z_$][\w$]*\.src\s*=/.test(code.slice(match.index))) loader(match[1], match.index)
   }
-  for (const match of text.matchAll(
-    /<script\b[^>]*data-infinite-runtime=["']managed["'][^>]*>([\s\S]*?)<\/script\s*>/gi
-  )) {
-    if (code.slice(match.index, match.index + 7).toLowerCase() !== "<script") continue
-    const config = match[1].match(/\}\)\((\{[\s\S]*\})\);?\s*$/)
+  for (const script of scripts) {
+    if (script.attributes.get("data-infinite-runtime") !== "managed") continue
+    const config = text.slice(script.bodyStart, script.bodyEnd).match(/\}\)\((\{[\s\S]*\})\);?\s*$/)
     if (!config) continue
     try {
       const parsed = JSON.parse(config[1]) as { siteSourceKey?: unknown }
@@ -198,9 +202,9 @@ export function providerInstallEvidence(source: string): ProviderInstallEvidence
         typeof parsed.siteSourceKey === "string" &&
         /^site_[A-Za-z0-9_-]+$/.test(parsed.siteSourceKey)
       )
-        add("infinite", match.index, parsed.siteSourceKey)
+        add("infinite", script.start, parsed.siteSourceKey)
     } catch {
-      /* An example or malformed script cannot prove an installed runtime. */
+      /* A malformed script cannot prove an installed runtime. */
     }
   }
   if (/\b(?:window\.)?_1BU_CONFIG\s*=/.test(code))
