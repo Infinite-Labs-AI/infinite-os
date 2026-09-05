@@ -88,6 +88,7 @@ export function providerInstallEvidence(source: string): ProviderInstallEvidence
       if (names.includes(match[1])) {
         const defaultBinding =
           match[0].match(/^import\s+([A-Za-z_$][\w$]*)\s*(?:,|from)/)?.[1] ??
+          match[0].match(/^import\s+\*\s+as\s+([A-Za-z_$][\w$]*)/)?.[1] ??
           code.slice(0, match.index).match(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*$/)?.[1]
         const escape = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
         const mounted = (exported: string) => {
@@ -111,7 +112,7 @@ export function providerInstallEvidence(source: string): ProviderInstallEvidence
         if (
           match[1] === "react-ga4" &&
           (!defaultBinding ||
-            !new RegExp(`\\b${escape(defaultBinding)}\\.initialize\\s*\\(`).test(code))
+            !new RegExp(`(?<![\\w$])${escape(defaultBinding)}\\.initialize\\s*\\(`).test(code))
         )
           continue
         if (
@@ -128,7 +129,7 @@ export function providerInstallEvidence(source: string): ProviderInstallEvidence
           continue
         if (
           match[1] === "@analytics/google-analytics" &&
-          (!defaultBinding || !new RegExp(`\\b${escape(defaultBinding)}\\s*\\(`).test(code))
+          (!defaultBinding || !new RegExp(`(?<![\\w$])${escape(defaultBinding)}\\s*\\(`).test(code))
         )
           continue
         if (match[1] === "@next/third-parties/google") {

@@ -102,6 +102,12 @@ describe("detectProvidersWithEvidence", () => {
     expect(detectProvidersWithEvidence(root).map(row=>row.provider)).toEqual(["infinite"])
   })
 
+  it.each(["import $ga from 'react-ga4'; $ga.initialize('G-REAL123')", "import * as ga from 'react-ga4'; ga.initialize('G-REAL123')"])("recognizes configured GA aliases: %s", source => {
+    const root=copyFixture("vite-react-basic")
+    write(root,"src/analytics.ts",source)
+    expect(detectProvidersWithEvidence(root).map(row=>row.provider)).toEqual(["ga4"])
+  })
+
   it("recognizes spaced initialization calls consistently", () => {
     const root = copyFixture("static-html-basic")
     write(root, "pixels.js", `window.gtag ('config', 'G-REAL123'); posthog.init ('phc_real'); window.fbq ('init', '123456'); twq ('config', 'abc')`)
