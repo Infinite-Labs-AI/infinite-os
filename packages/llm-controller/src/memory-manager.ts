@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { ChatActionCall } from "./index.js";
+import type { ChatActionCall, ModelUsage, TurnModel } from "./index.js";
 
 export type CuratedMemoryScope =
   | "workspace_preference"
@@ -18,6 +18,7 @@ export interface CuratedMemoryFact extends CuratedMemoryCandidate {
 }
 
 export interface MemoryReviewInput {
+  model?: TurnModel;
   workspaceId: string;
   actorId: string;
   sessionId: string;
@@ -48,11 +49,13 @@ export interface CreateCuratedMemoryManagerOptions {
 
 export interface MemoryReviewModelClient {
   complete(request: {
+    model?: TurnModel;
+    promptCacheKey?: string;
     systemPrompt: string;
     userMessage: string;
     tools: [];
     toolResults: [];
-  }): Promise<{ message?: string }>;
+  }): Promise<{ message?: string; usage?: ModelUsage }>;
 }
 
 const ALLOWED_SCOPES = new Set<CuratedMemoryScope>([
@@ -185,6 +188,8 @@ export function createModelBackedMemoryReviewer(
 ): (input: MemoryReviewInput) => Promise<CuratedMemoryCandidate[]> {
   return async (input) => {
     const response = await modelClient.complete({
+      model: input.model,
+      promptCacheKey: `memory:${input.workspaceId}`,
       systemPrompt: memoryReviewPrompt(),
       userMessage: JSON.stringify({
         userMessage: input.userMessage,

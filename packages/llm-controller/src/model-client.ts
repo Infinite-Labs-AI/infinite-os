@@ -10,7 +10,8 @@ import type {
   InfiniteOsToolSchema,
   ModelRequest,
   ModelResponse,
-  ModelToolCall
+  ModelToolCall,
+  TurnModel
 } from "./index.js";
 import {
   DEFAULT_CODEX_BASE_URL,
@@ -59,8 +60,8 @@ export function createConfiguredModelClient(
   const env = options.env ?? process.env;
   const fetchImpl = options.fetch ?? globalThis.fetch;
   return {
-    modelMetadata() {
-      const selection = readInfiniteOsModelSelection(env);
+    modelMetadata(model?: TurnModel) {
+      const selection = model ? { provider: "codex" as const, model: model.modelId } : readInfiniteOsModelSelection(env);
       if (!selection.provider || !selection.model) {
         return {};
       }
@@ -71,6 +72,8 @@ export function createConfiguredModelClient(
       };
     },
     async complete(request) {
+      // An accepted Codex override is independent of later changes to the persisted default.
+      if (request.model) return completeForProvider("codex", request.model.modelId, request, env, fetchImpl);
       const selection = readInfiniteOsModelSelection(env);
       if (!selection.provider || !selection.model) {
         return unconfiguredModelResponse();
@@ -123,6 +126,7 @@ async function completeWithCodex(
   const responseUrl = `${baseUrl.replace(/\/$/, "")}/responses`;
   const responseBody = JSON.stringify({
     model,
+    ...(request.model?.effort ? { reasoning: { effort: request.model.effort } } : {}),
     store: false,
     stream: true,
     // The upstream codex CLI sends a stable prompt_cache_key (its thread id) on
@@ -1004,6 +1008,7 @@ interface CodexEventStreamState {
   outputText: string;
   outputItems: Array<Record<string, unknown>>;
   usage: unknown;
+  failure?: string;
 }
 
 async function parseCodexEventStreamFromReader(
@@ -1014,9 +1019,13 @@ async function parseCodexEventStreamFromReader(
   callbacks: ModelStreamCallbacks
 ): Promise<Record<string, unknown>> {
   const state: CodexEventStreamState = { outputText: "", outputItems: [], usage: undefined };
-  await consumeEventStreamReader(reader, decoder, seed, done, (chunk) =>
-    consumeCodexEventStreamChunk(chunk, state, callbacks)
-  );
+  try {
+    await consumeEventStreamReader(reader, decoder, seed, done, (chunk) =>
+      consumeCodexEventStreamChunk(chunk, state, callbacks)
+    );
+  } catch (error) {
+    throw withMeasuredUsage(error, usageFromCodex(state.usage));
+  }
   return codexEventStreamResult(state);
 }
 
@@ -1063,12 +1072,18 @@ async function consumeCodexEventStreamChunk(
     state.outputItems.push(event.item);
     return;
   }
-  if (type === "response.completed" && isRecord(event.response)) {
+  if ((type === "response.completed" || type === "response.failed" || type === "response.incomplete") && isRecord(event.response)) {
     state.usage = event.response.usage;
+    if (type !== "response.completed") {
+      const error = isRecord(event.response.error) ? event.response.error : {};
+      state.failure = stringValue(error.message) ?? `Codex ${type}`;
+    }
   }
+  if (type === "error") state.failure = stringValue(event.message) ?? "Codex stream failed";
 }
 
 function codexEventStreamResult(state: CodexEventStreamState): Record<string, unknown> {
+  if (state.failure) throw Object.assign(new Error(state.failure), { usage: usageFromCodex(state.usage) });
   return {
     output_text: state.outputText,
     output: state.outputItems,
@@ -1097,9 +1112,13 @@ async function parseClaudeEventStreamFromReader(
   callbacks: ModelStreamCallbacks
 ): Promise<Record<string, unknown>> {
   const state: ClaudeEventStreamState = { blocks: new Map(), usage: undefined };
-  await consumeEventStreamReader(reader, decoder, seed, done, (chunk) =>
-    consumeClaudeEventStreamChunk(chunk, state, callbacks)
-  );
+  try {
+    await consumeEventStreamReader(reader, decoder, seed, done, (chunk) =>
+      consumeClaudeEventStreamChunk(chunk, state, callbacks)
+    );
+  } catch (error) {
+    throw withMeasuredUsage(error, usageFromClaude(state.usage));
+  }
   return claudeEventStreamResult(state);
 }
 
@@ -1166,9 +1185,14 @@ async function consumeClaudeEventStreamChunk(
       return;
     }
   }
-  if (type === "message_delta" && isRecord(event.delta)) {
-    state.usage = event.delta.usage ?? state.usage;
-  }
+  // Anthropic reports initial input/cache counters on message_start.message.usage,
+  // and cumulative output on the top-level message_delta.usage. Merge snapshots.
+  const reportedUsage = type === "message_start" && isRecord(event.message)
+    ? event.message.usage
+    : type === "message_delta"
+      ? event.usage ?? (isRecord(event.delta) ? event.delta.usage : undefined)
+      : undefined;
+  if (isRecord(reportedUsage)) state.usage = { ...(isRecord(state.usage) ? state.usage : {}), ...reportedUsage };
 }
 
 function claudeEventStreamResult(state: ClaudeEventStreamState): Record<string, unknown> {
@@ -1327,7 +1351,9 @@ function usageFromCodex(value: unknown): ModelResponse["usage"] {
   }
   return compactUsage({
     promptTokens: numberValue(value.input_tokens) ?? numberValue(value.prompt_tokens),
-    completionTokens: numberValue(value.output_tokens) ?? numberValue(value.completion_tokens)
+    completionTokens: numberValue(value.output_tokens) ?? numberValue(value.completion_tokens),
+    cacheReadTokens: isRecord(value.input_tokens_details) ? numberValue(value.input_tokens_details.cached_tokens) : undefined,
+    reasoningTokens: isRecord(value.output_tokens_details) ? numberValue(value.output_tokens_details.reasoning_tokens) : undefined
   });
 }
 
@@ -1337,12 +1363,14 @@ function usageFromClaude(value: unknown): ModelResponse["usage"] {
   }
   return compactUsage({
     promptTokens: numberValue(value.input_tokens),
-    completionTokens: numberValue(value.output_tokens)
+    completionTokens: numberValue(value.output_tokens),
+    cacheReadTokens: numberValue(value.cache_read_input_tokens),
+    cacheCreationTokens: numberValue(value.cache_creation_input_tokens)
   });
 }
 
 function compactUsage(usage: NonNullable<ModelResponse["usage"]>): ModelResponse["usage"] {
-  if (!usage.promptTokens && !usage.completionTokens) {
+  if (!Object.values(usage).some(value => typeof value === "number")) {
     return undefined;
   }
   return usage;
@@ -1406,4 +1434,9 @@ function expiresAtFromMilliseconds(value: unknown): string | undefined {
 
 function stringValue(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
+}
+
+function withMeasuredUsage(error: unknown, usage: ModelResponse["usage"]): Error {
+  const failure = error instanceof Error ? error : new Error(String(error));
+  return usage ? Object.assign(failure, { usage }) : failure;
 }

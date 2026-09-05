@@ -10,6 +10,7 @@ import {
   createCuratedMemoryManager,
   createLlmController,
   filterCuratedMemoryCandidates,
+  mergeUsage,
   type ChatProgressEvent,
   type ModelRequest
 } from "../src/index.js";
@@ -9310,3 +9311,120 @@ function createRecordingSessionStore(): ChatSessionStore & { events: string[][] 
     }
   };
 }
+
+
+describe("per-turn usage receipts", () => {
+  it("adds distinct tool rounds, retains zero cache hits, and exposes cumulative snapshots before a later failure", async () => {
+    const snapshots: unknown[] = [];
+    const requests: ModelRequest[] = [];
+    const registry = createInfiniteOsRegistry({ list_metrics: (_input, context) => createEnvelope({ actionId: "list_metrics", authority: context.authority, data: {}, provenance: [], nextActions: [] }) });
+    const failure = new Error("upstream disconnected");
+    const complete = vi.fn(async (request: ModelRequest) => {
+      requests.push(request);
+      if (requests.length === 3) throw failure;
+      return { toolCalls: [{ id: `call-${requests.length}`, name: "list_metrics", input: {} }], usage: { promptTokens: 10, completionTokens: 3, cacheReadTokens: requests.length === 1 ? 0 : 5, reasoningTokens: 1 } };
+    });
+    const controller = createLlmController({ registry, modelClient: { complete } });
+    await expect(controller.chat({ message: "metrics", sessionId: "stable", workspaceId: "ws", actorId: "a", surface: "desktop", model: { modelId: "gpt-5.5", effort: "medium" }, onUsage: usage => { snapshots.push(usage); } })).rejects.toMatchObject({
+      message: "upstream disconnected", usage: { promptTokens: 20, completionTokens: 6, cacheReadTokens: 5, reasoningTokens: 2 }
+    });
+    expect(snapshots).toEqual([{ promptTokens: 10, completionTokens: 3, cacheReadTokens: 0, reasoningTokens: 1 }, { promptTokens: 20, completionTokens: 6, cacheReadTokens: 5, reasoningTokens: 2 }]);
+    expect(requests.every(request => request.promptCacheKey === "stable" && request.model?.modelId === "gpt-5.5")).toBe(true);
+  });
+
+  it.each(["response.failed", "response.incomplete"])("retains measured tokens on %s without treating it as success", async type => {
+    const growthHome = mkdtempSync(join(tmpdir(), "usage-failure-"));
+    try {
+      const env = { GROWTH_OS_HOME: growthHome };
+      writeInfiniteOsModelSelection({ provider: "codex", model: "gpt-5.5" }, env);
+      writeInfiniteOsAuthRecord({ provider: "codex", source: "codex-cli", authMode: "device-code", token: "test-token" }, env);
+      const client = createConfiguredModelClient({ env, fetch: async () => new Response(`event: ${type}\ndata: ${JSON.stringify({ type, response: { usage: { input_tokens: 12, output_tokens: 2 }, error: { message: "provider interrupted" } } })}\n\n`, { headers: { "content-type": "text/event-stream" } }) });
+      await expect(client.complete({ systemPrompt: "s", userMessage: "u", tools: [], toolResults: [] })).rejects.toMatchObject({ message: "provider interrupted", usage: { promptTokens: 12, completionTokens: 2 } });
+    } finally { rmSync(growthHome, { recursive: true, force: true }); }
+  });
+
+  it("preserves provider cache/reasoning and the accepted model even when config selects another model", async () => {
+    const growthHome = mkdtempSync(join(tmpdir(), "usage-model-"));
+    try {
+      const env = { GROWTH_OS_HOME: growthHome };
+      writeInfiniteOsModelSelection({ provider: "codex", model: "gpt-5.4" }, env);
+      writeInfiniteOsAuthRecord({ provider: "codex", source: "codex-cli", authMode: "device-code", token: "test-token" }, env);
+      const bodies: unknown[] = [];
+      const client = createConfiguredModelClient({ env, fetch: async (_url, init) => {
+        bodies.push(JSON.parse(String(init?.body)));
+        return new Response(JSON.stringify({ output_text: "ok", usage: { input_tokens: 20, output_tokens: 5, input_tokens_details: { cached_tokens: 0 }, output_tokens_details: { reasoning_tokens: 2 } } }));
+      } });
+      const response = await client.complete({ systemPrompt: "s", userMessage: "u", tools: [], toolResults: [], model: { modelId: "gpt-5.5", effort: "medium" }, promptCacheKey: "stable" });
+      expect(response.usage).toEqual({ promptTokens: 20, completionTokens: 5, cacheReadTokens: 0, reasoningTokens: 2 });
+      expect(bodies[0]).toMatchObject({ model: "gpt-5.5", reasoning: { effort: "medium" }, prompt_cache_key: "stable" });
+    } finally { rmSync(growthHome, { recursive: true, force: true }); }
+  });
+});
+
+describe("provider usage review regressions", () => {
+  const request: ModelRequest = { systemPrompt: "system", userMessage: "user", tools: [], toolResults: [] };
+  const claudeFrames = [
+    { type: "message_start", message: { usage: { input_tokens: 17, cache_read_input_tokens: 40, cache_creation_input_tokens: 8, output_tokens: 0 } } },
+    { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 6 } },
+  ];
+  function stream(frames: unknown[], fail: boolean): Response {
+    const bytes = new TextEncoder().encode(frames.map(frame => `event: message\ndata: ${JSON.stringify(frame)}\n\n`).join(""));
+    let delivered = false;
+    return { ok: true, status: 200, headers: new Headers({ "content-type": "text/event-stream" }), body: { getReader: () => ({ read: async () => {
+      if (!delivered) { delivered = true; return { done: false, value: bytes }; }
+      if (fail) throw new Error("reader disconnected");
+      return { done: true, value: undefined };
+    } }) } } as unknown as Response;
+  }
+
+  it.each([false, true])("reads native Claude usage and preserves it when the reader throws=%s", async fail => {
+    const home = mkdtempSync(join(tmpdir(), "claude-real-usage-"));
+    try {
+      const env = { GROWTH_OS_HOME: home, HOME: home, ANTHROPIC_API_KEY: "test-key" };
+      writeInfiniteOsModelSelection({ provider: "claude", model: "claude-sonnet-4-6" }, env);
+      const client = createConfiguredModelClient({ env, fetch: async () => stream(claudeFrames, fail) });
+      const usage = { promptTokens: 17, cacheReadTokens: 40, cacheCreationTokens: 8, completionTokens: 6 };
+      if (fail) await expect(client.complete(request)).rejects.toMatchObject({ message: "reader disconnected", usage });
+      else expect((await client.complete(request)).usage).toEqual(usage);
+    } finally { rmSync(home, { recursive: true, force: true }); }
+  });
+
+  it.each([false, true])("uses the captured Codex provider/model without a saved default, reader throws=%s", async fail => {
+    const home = mkdtempSync(join(tmpdir(), "codex-no-default-"));
+    try {
+      const env = { GROWTH_OS_HOME: home, HOME: home };
+      writeInfiniteOsAuthRecord({ provider: "codex", source: "codex-cli", authMode: "device-code", token: "test-token" }, env);
+      const fetch = vi.fn(async () => stream([{ type: "response.completed", response: { usage: { input_tokens: 23, output_tokens: 9, input_tokens_details: { cached_tokens: 12 } } } }], fail));
+      const client = createConfiguredModelClient({ env, fetch });
+      const turn = { ...request, model: { modelId: "gpt-5.5", effort: "medium" as const } };
+      const usage = { promptTokens: 23, completionTokens: 9, cacheReadTokens: 12 };
+      if (fail) await expect(client.complete(turn)).rejects.toMatchObject({ message: "reader disconnected", usage });
+      else expect((await client.complete(turn)).usage).toMatchObject(usage);
+      expect(fetch).toHaveBeenCalledTimes(1);
+    } finally { rmSync(home, { recursive: true, force: true }); }
+  });
+
+  it("resolves metadata for the effective provider and omits a legacy client's stale auth source", async () => {
+    const home = mkdtempSync(join(tmpdir(), "effective-model-metadata-"));
+    try {
+      const env = { GROWTH_OS_HOME: home, HOME: home, ANTHROPIC_API_KEY: "test-key" };
+      writeInfiniteOsModelSelection({ provider: "claude", model: "claude-sonnet-4-6" }, env);
+      writeInfiniteOsAuthRecord({ provider: "codex", source: "codex-cli", authMode: "device-code", token: "test-token" }, env);
+      const client = createConfiguredModelClient({ env, fetch: async () => new Response(JSON.stringify({ output_text: "answer" })) });
+      expect(client.modelMetadata?.({ modelId: "gpt-5.5" })).toMatchObject({ provider: "codex", model: "gpt-5.5", authSource: "codex-cli" });
+      const result = await createLlmController({ registry: createInfiniteOsRegistry({}), modelClient: { complete: client.complete, modelMetadata: () => ({ provider: "claude", model: "claude-sonnet-4-6", authSource: "anthropic-api-key" }) } }).chat({ message: "hello", workspaceId: "ws", actorId: "a", surface: "desktop", model: { modelId: "gpt-5.5" } });
+      expect(result).toMatchObject({ modelProvider: "codex", modelName: "gpt-5.5" });
+      expect(result.modelAuthSource).toBeUndefined();
+    } finally { rmSync(home, { recursive: true, force: true }); }
+  });
+});
+
+
+describe("usage completeness across successful invocations", () => {
+  it("invalidates missing counters while preserving totals reported in every invocation", () => {
+    expect(mergeUsage({ promptTokens: 10, completionTokens: 3, cacheReadTokens: 0 }, { completionTokens: 2 })).toEqual({ completionTokens: 5 });
+    expect(mergeUsage({ promptTokens: 10 }, undefined)).toEqual({});
+    expect(mergeUsage(undefined, { promptTokens: 10 })).toEqual({});
+    expect(mergeUsage({ promptTokens: 0 }, { promptTokens: 0 })).toEqual({ promptTokens: 0 });
+  });
+});
