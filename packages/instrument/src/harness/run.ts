@@ -1,3 +1,5 @@
+import { IMPLEMENTATION_CHECKLIST, verificationSummary } from "./state.js"
+import { inspectSourceLayout, type SourceLayout } from "./source-layout.js"
 // The harness runbook, composed: teardown §5.2 steps 1–11 over the adapters in inspect.ts,
 // marking.ts and verify.ts, driven by runbook.ts. Every I/O seam is injectable so the whole run
 // is testable against fixture repos and stubbed backends.
@@ -13,7 +15,7 @@ import { computeContentHashes, installManifestRelativePath, readInstallManifest,
 import { INSTRUMENT_VERSION } from "../package-manager.js"
 import { renderPreview } from "../render.js"
 import { detectHosting } from "../server-lane/hosting.js"
-import type { ApplyResult, InspectResult, InstallManifest, VerifyResult, WorkspaceInstallArtifacts } from "../types.js"
+import type { ApplyResult, InspectResult, InstallManifest, ProviderId, VerifyResult, WorkspaceInstallArtifacts } from "../types.js"
 import { verifyInstallation } from "../verify.js"
 import {
   applyInfiniteDownloadDestinationPath,
@@ -119,6 +121,9 @@ interface Ctx {
   root: string
   appRootAbsolute: string
   inspect?: InspectResult
+  sourceLayout?: SourceLayout
+  manualBriefWritten?: boolean
+  manualBuildOwner?: boolean
   detected: DetectedProviderEvidence[]
   manifest: InstallManifest | null
   keys?: ResolvedKeys
@@ -136,6 +141,7 @@ interface Ctx {
   serverCheckout?: ServerCheckoutRecommendation
   marking?: ApplyConversionsResult
   verifyResult?: VerifyLanesResult
+  verifyIncomplete?: string
   /** Providers this run wrote (install/upgrade) — the lanes verification reads back. */
   writtenLanes: VerifyLane[]
 }
@@ -263,7 +269,7 @@ const preflight: RunbookStep<Ctx> = {
       throw new Error(`Node ${version} is too old; infinite-tag needs Node ${MINIMUM_NODE_MAJOR} or newer.`)
     }
     const status = harnessRepoStatus(ctx.root)
-    const writes = ctx.args.mode === "apply"
+    const writes = ctx.args.mode === "apply" && !ctx.args.brief
     if (writes && status === "dirty" && !ctx.args.allowDirty) {
       return { note: "dirty" }
     }
@@ -290,18 +296,39 @@ const inspect: RunbookStep<Ctx> = {
     ctx.report.framework = ctx.inspect.framework
     ctx.report.appRoot = ctx.inspect.appRoot
     ctx.report.hosting = detectHosting(ctx.appRootAbsolute)
+    ctx.sourceLayout = inspectSourceLayout(ctx.root, ctx.inspect.appRoot, INSTRUMENT_VERSION)
+    ctx.manualBuildOwner = Boolean(ctx.sourceLayout.outputDirectory && ctx.inspect.appRoot !== "." && !isSupportedFramework(inspectWorkspace(ctx.root).framework))
+    if (ctx.manualBuildOwner) ctx.sourceLayout.notes.push("The selected subdirectory does not identify the parent custom build's analytics owner. Inspect the built output and integrate with the parent builder; installing a second SDK into this subdirectory could duplicate tracking.")
+    ctx.report.nextSteps.push(...ctx.sourceLayout.notes)
     ctx.detected = detectProvidersWithEvidence(ctx.appRootAbsolute)
     ctx.manifest = readInstallManifest(ctx.root)
+    if (ctx.args.brief && ctx.args.mode !== "check" && (!isSupportedFramework(ctx.inspect.framework) || ctx.manualBuildOwner)) {
+      writeJson(ctx.root, HARNESS_BRIEF_RELATIVE_PATH, {
+        version: 1, coverageStatus: "not_established", framework: ctx.inspect.framework,
+        appRoot: ctx.inspect.appRoot, sourceLayout: ctx.sourceLayout,
+        observedProviders: ctx.detected, implementationChecklist: IMPLEMENTATION_CHECKLIST,
+        handoff: "Map the source/build owner and deployed routes, then implement and test the missing coverage without duplicating existing providers. No installation was performed."
+      })
+      ctx.manualBriefWritten = true
+      ctx.report.nextSteps.push(`Manual implementation guidance was written to ${HARNESS_BRIEF_RELATIVE_PATH}; automatic installation remains unsupported for this source layout.`)
+    }
     return {
       note: `${ctx.inspect.framework} at ${ctx.inspect.appRoot}; existing: ${ctx.detected.length === 0 ? "none" : ctx.detected.map((entry) => `${entry.provider}${entry.via === "gtm" ? "(gtm)" : ""} in ${entry.file}:${entry.line}`).join(", ")}`
     }
   },
   successCheck(ctx) {
+    if ((ctx.sourceLayout?.generatedTarget || ctx.manualBuildOwner) && (ctx.args.mode === "apply" || ctx.args.mode === "plan")) return false
     return ctx.inspect !== undefined && isSupportedFramework(ctx.inspect.framework)
   },
   failure: {
-    code: "INF_DETECT_NO_FRAMEWORK",
-    message: () => "Could not identify a web app in this repo. Run with --root pointing at the app, or use --brief to get an agent brief instead.",
+    code: (ctx) => ctx.sourceLayout?.generatedTarget || ctx.manualBuildOwner ? "INF_SOURCE_OUTPUT_OWNERSHIP" : "INF_DETECT_NO_FRAMEWORK",
+    message: (ctx) => ctx.manualBuildOwner
+      ? "The selected subdirectory is part of a custom parent build whose analytics injection owner is unresolved. No installation or marking was performed. Audit the generated output and modify its existing source/build owner; --brief supplies manual guidance."
+      : ctx.sourceLayout?.generatedTarget
+      ? "The selected app root is generated build output. No installation or marking was performed. Select editable source with --app-root, or integrate with the existing builder and audit the rebuilt/deployed pages."
+      : ctx.sourceLayout?.outputDirectory
+        ? "This repo has a custom source/build-output layout; a source app could not be identified. Follow INF_SOURCE_OUTPUT_SPLIT in next steps. Do not point the installer at generated output just to get a passing result."
+        : "Could not identify a source web app in this repo. Use --root/--app-root to select its editable source. No provider coverage was established.",
     next: "halt"
   }
 }
@@ -491,7 +518,7 @@ const plan: RunbookStep<Ctx> = {
     })
     // After the plan is built so the server-lane presence (ctx.planResult.plan.serverLane) is known.
     remindInfinitePrivacyDisclosure(ctx)
-    if (ctx.args.brief) {
+    if (ctx.args.brief && ctx.args.mode !== "check") {
       writeJson(ctx.root, HARNESS_BRIEF_RELATIVE_PATH, {
         version: 1,
         generatedAt: new Date(ctx.deps.now?.() ?? Date.now()).toISOString(),
@@ -506,6 +533,8 @@ const plan: RunbookStep<Ctx> = {
           assumptions: ctx.planResult.plan.assumptions,
           blockers: ctx.planResult.plan.blockers
         },
+        implementationChecklist: IMPLEMENTATION_CHECKLIST,
+        sourceLayout: ctx.sourceLayout,
         handoff: ctx.report.handoff
       })
     }
@@ -781,9 +810,15 @@ const verify: RunbookStep<Ctx> = {
   async run(ctx) {
     if (ctx.args.mode === "check" || ctx.args.mode === "plan") return { skipped: `${ctx.args.mode} mode` }
     if (ctx.args.brief) return { skipped: "--brief" }
+    const incomplete = (reason: string) => {
+      ctx.verifyIncomplete = reason
+      return { note: reason }
+    }
     if (ctx.args.mode === "verify-only") {
       const manifest = ctx.manifest
-      if (!manifest) return { skipped: "no .infinite/install.json to verify against" }
+      if (!manifest) return incomplete("Verification was not attempted: no .infinite/install.json manifest identifies the owned installation. Audit the existing build and provider receipts manually; do not fabricate a manifest or install duplicate tags.")
+      const ambiguous = ctx.report.providers.filter(row => manifest.providers.includes(row.provider as ProviderId) && (row.state === "adopted" || row.state === "conflict"))
+      if (ambiguous.length) return incomplete(`Verification ownership is ambiguous for ${ambiguous.map(row => row.provider).join(", ")}. Reconcile the existing installation and manifest before verifying; no tags were changed.`)
       for (const provider of manifest.providers) {
         const lane = laneOf[provider as HarnessProviderId]
         if (lane) ctx.writtenLanes.push(lane)
@@ -809,9 +844,13 @@ const verify: RunbookStep<Ctx> = {
       return { skipped: "not applied" }
     }
     const lanes = [...new Set(ctx.writtenLanes)]
-    if (lanes.length === 0) return { skipped: "nothing installed by this run to read back" }
+    if (lanes.length === 0) return ctx.args.mode === "verify-only"
+      ? incomplete("Verification was not attempted: the manifest contains no verifiable lanes.")
+      : { skipped: "nothing installed by this run to read back" }
     const url = productionUrl(ctx)
-    if (!url) return { skipped: "no --url and no production host to load" }
+    if (!url) return ctx.args.mode === "verify-only"
+      ? incomplete("Verification was not attempted: provide --url or a configured production host.")
+      : { skipped: "no --url and no production host to load" }
 
     const backends: VerificationBackend[] = []
     const posthogHost = ctx.keys?.artifacts.posthog?.apiHost || "https://us.i.posthog.com"
@@ -838,16 +877,27 @@ const verify: RunbookStep<Ctx> = {
         return { ...state, verification: { kind: "no_receipt", causes: answer.causes } }
       })
     }
+    if (ctx.verifyResult.siteStatus === null || ctx.verifyResult.siteStatus >= 400) {
+      ctx.verifyIncomplete = "The site could not be loaded; receipt polling was not performed. Check the URL, deployment and access restrictions, then rerun verification."
+    } else if (ctx.args.mode === "verify-only") {
+      const unavailable = lanes.filter(lane => ctx.verifyResult?.lanes[lane].state === "not_verifiable")
+      if (unavailable.length) ctx.verifyIncomplete = `Receipt verification is incomplete: ${unavailable.map(lane => {
+        const answer = ctx.verifyResult!.lanes[lane]
+        return `${lane}: ${answer.state === "not_verifiable" ? answer.reason : "not verified"}`
+      }).join("; ")}. Complete the named provider checks; installed is not verified.`
+    }
     const summary = lanes.map((lane) => `${lane}=${ctx.verifyResult?.lanes[lane].state}`).join(" ")
     return { note: `${url} (HTTP ${ctx.verifyResult.siteStatus ?? "—"}) ${summary}` }
   },
   successCheck(ctx) {
+    if (ctx.verifyIncomplete) return false
     if (!ctx.verifyResult) return true
     return !Object.values(ctx.verifyResult.lanes).some((answer) => answer.state === "no_receipt")
   },
   failure: {
-    code: "INF_VERIFY_NO_RECEIPT",
+    code: (ctx) => ctx.verifyIncomplete ? "INF_VERIFY_INCOMPLETE" : "INF_VERIFY_NO_RECEIPT",
     message: (ctx) => {
+      if (ctx.verifyIncomplete) return ctx.verifyIncomplete
       const missing = Object.entries(ctx.verifyResult?.lanes ?? {}).filter(([, answer]) => answer.state === "no_receipt")
       const budget = Math.round((ctx.deps.budgetMs ?? 60_000) / 1000)
       const causes = missing[0]?.[1].state === "no_receipt" ? missing[0][1].causes : []
@@ -922,6 +972,7 @@ export async function runHarness(args: HarnessArgs, io: HarnessIo, deps: Harness
       io.out("")
       io.out(`Infinite analytics harness · ${finished.mode} · ${finished.framework ?? "no framework"}${finished.appRoot && finished.appRoot !== "." ? ` (app at ${finished.appRoot})` : ""}`)
       io.out("")
+      io.out(verificationSummary(finished))
       io.out(renderReportTable(finished))
       if (finished.conversions) {
         const c = finished.conversions
@@ -938,13 +989,14 @@ export async function runHarness(args: HarnessArgs, io: HarnessIo, deps: Harness
         for (const next of finished.nextSteps) io.out(`  - ${next}`)
       }
       io.out("")
-      if (finished.mode !== "check") {
+      if (finished.mode !== "check" && finished.steps.find(step => step.id === "report")?.status === "ok") {
         io.out(`Report: ${HARNESS_REPORT_RELATIVE_PATH}`)
         io.out("")
         io.out("Paste this to your agent:")
         io.out(`  ${finished.handoff}`)
         io.out("")
       }
+      if (ctx.manualBriefWritten) io.out(`Manual agent brief: ${HARNESS_BRIEF_RELATIVE_PATH} (no installation performed).`)
     }
   })
 

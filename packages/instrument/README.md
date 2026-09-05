@@ -392,10 +392,10 @@ rules are deliberately narrow):
 
 | Provider | `via: "snippet"` | `via: "gtm"` |
 | --- | --- | --- |
-| GA4 | the `gtag.js` loader or a `gtag(` call; `@next/third-parties/google` `<GoogleAnalytics>`; `react-ga4` / `ReactGA.initialize(`; `vue-gtag`; `nuxt-gtag`; `@analytics/google-analytics` | the `gtm.js` loader; `dataLayer.push(` beside `googletagmanager.com`; a `gtmId` prop (`<GoogleTagManager gtmId="GTM-…">`); a quoted `GTM-…` id on a line that mentions gtm. **Never** a bare `GTM-XXXX` token or a bare `dataLayer.push(`. A Tag Manager container proves GA4 only — a requested Meta or X pixel still installs beside it. |
-| PostHog | `posthog.init(`, the `i.posthog.com` host, `posthog-js/react` `<PostHogProvider>`, `@posthog/nextjs` | — |
-| X | `twq(` or `static.ads-twitter.com` | — |
-| Meta | `fbevents.js`, `fbq(` or `connect.facebook.net` | — |
+| GA4 | the `gtag.js` loader or `gtag("config", …)` / `gtag("js", …)` initialization; `@next/third-parties/google` `<GoogleAnalytics>`; `react-ga4` / `ReactGA.initialize(`; `vue-gtag`; `nuxt-gtag`; `@analytics/google-analytics` | the `gtm.js` loader or an imported official `<GoogleTagManager>` integration. A fallback iframe, an unused container-id constant, and an ordinary `dataLayer.push` event are not installation evidence. A Tag Manager container proves GA4 only — a requested Meta or X pixel still installs beside it. |
+| PostHog | `posthog.init(`, an actual PostHog loader, `posthog-js/react` `<PostHogProvider>`, `@posthog/nextjs` | — |
+| X | `twq("config", …)` / `twq("init", …)` or the actual `uwt.js` loader | — |
+| Meta | `fbq("init", …)` or an actual `fbevents.js` loader | — |
 
 The walk reads `.html/.htm/.tsx/.jsx/.ts/.js/.mjs/.cjs/.astro/.vue/.svelte` files, capped at
 2,000 files and 512 KB per file. It skips `node_modules`, `.git`, `.next`, `dist`, `build`, `out`,
@@ -403,7 +403,7 @@ The walk reads `.html/.htm/.tsx/.jsx/.ts/.js/.mjs/.cjs/.astro/.vue/.svelte` file
 plus `*.d.ts`, `*.test.*`, `*.spec.*`, `*.stories.*` and `*.min.js` files (type declarations,
 mocks and minified vendor bundles are not installs). Infinite's own managed files and
 `<!-- infinite:start -->` blocks are ignored, so a re-run never adopts itself. If a hit is wrong,
-delete the file it names (`file` in the `adopted` entry) or move it under a skipped directory.
+review the evidence and correct the detector/source ownership before installation. Do not delete valid application code just to suppress an adoption result.
 
 ## The harness: `infinite-tag harness` / `infinite analytics`
 
@@ -437,7 +437,7 @@ either way the run ends with all seven provider rows.
 | # | Step | Success | Failure code (next) |
 |---|---|---|---|
 | 1 | Preflight | Node ≥ 18; git tree clean for `--apply` | `INF_ENV_DIRTY_TREE` (halt; `--allow-dirty` overrides) |
-| 2 | Inspect | one supported framework; every existing provider (incl. Tag Manager) with file + line | `INF_DETECT_NO_FRAMEWORK` (halt; `--brief` writes the agent brief instead) |
+| 2 | Inspect | one supported framework; every existing provider (incl. Tag Manager) with file + line | `INF_DETECT_NO_FRAMEWORK` / `INF_SOURCE_OUTPUT_OWNERSHIP` (halt; `--brief` can supply manual guidance) |
 | 3 | Resolve keys | flags → saved artifacts → real `.env` files (a key found only in `.env.example` is missing, and that file is never written) | `INF_POSTHOG_NO_KEY` (continue; only when PostHog was explicitly requested) |
 | 4 | Classify | one action per provider: `absent → install`, `unmanaged → adopt`, `managed → upgrade`, `gtm → manual`, `conflict → report` | never fatal |
 | 5 | Plan | deterministic file plan for install/upgrade providers | `INF_PLAN_UNMANAGED_TARGET` / `INF_PLAN_BLOCKED` (halt) |
@@ -445,7 +445,7 @@ either way the run ends with all seven provider rows.
 | 7 | Apply | managed files written and hash-verified | `INF_APPLY_ROLLED_BACK` (halt; every file restored) |
 | 8 | Conversions | proposed → confirmed → marked (below) | `INF_MARK_STALE_ELEMENT` (continue, per row) |
 | 9 | Server lane | the target the plan chose was written, or the brief only | never fatal |
-| 10 | Verify | a receipt read back per provider | `INF_VERIFY_NO_RECEIPT` (continue) |
+| 10 | Verify | a receipt read back per provider | `INF_VERIFY_NO_RECEIPT` / `INF_VERIFY_INCOMPLETE` (continue) |
 | 11 | Report + handoff | `.infinite/REPORT.md` and the pasteable line | never fatal |
 
 A non-interactive `--apply` with neither `--conversions <file>` nor `--no-mark` exits `2` with
@@ -634,3 +634,37 @@ MIT. See [LICENSE](./LICENSE).
 - Product + docs: https://infinite.fast
 - Server lane guide (`infinite-tag server-lane --brief`) and the desktop app: https://infinite.fast
 - Source, issues, changelog: https://github.com/Infinite-Labs-AI/infinite-os/tree/main/packages/instrument
+
+
+### Coverage checks for existing and custom-built sites (0.9.1)
+
+A provider event call is not proof that its SDK is installed. The installer and harness now share
+initialization/loader evidence, including the modern Infinite inline runtime. Existing unmanaged
+providers are still adopted without replacement; manifest-owned code remains managed and can be
+upgraded normally. Inspect the public source key and file evidence before resolving conflicts.
+
+Running a newer CLI does not upgrade an exact older tag dependency inside an existing custom
+builder. `INF_TAG_VERSION_DRIFT` calls this out. Review the package and provider configuration
+changes, update the existing owner, rebuild, and compare the generated/deployed output.
+
+When `vercel.json` specifies an output directory and a build, `INF_SOURCE_OUTPUT_SPLIT` explains
+the source/output distinction. Selecting that generated directory for `--check` is an inventory
+operation only; `--plan` and `--apply` refuse installation/marking there with
+`INF_SOURCE_OUTPUT_OWNERSHIP`. Choose editable source or integrate the change into the builder. Selecting one subdirectory of an otherwise unsupported custom parent build does not establish injection ownership; automatic installation there is refused too.
+An unsupported custom source with `--brief` writes `.infinite/harness-brief.json` containing
+manual implementation guidance and still exits nonzero because automatic installation is unsupported.
+A subdirectory scan is never a whole-site coverage guarantee.
+
+Reports and briefs include an implementation checklist: map source and output, review adopted
+provider settings, enumerate views/attempts/successes/failures/retries, test real handlers and identity
+correlation, check consent and provider-added URL metadata, rebuild/deploy, trigger representative
+browser actions, and read back provider receipts. A generic click, a played animation, or an HTTP
+page fetch cannot prove an authenticated outcome or a complete funnel.
+
+`--verify-only` now returns nonzero with `INF_VERIFY_INCOMPLETE` if there is no installation manifest,
+no URL, no verifiable lanes, ambiguous ownership, or a provider/backend that cannot supply receipts.
+It does not fabricate a manifest or claim that an unattempted poll found no events.
+`INF_VERIFY_NO_RECEIPT` remains the result of actual receipt polling with no matching event.
+`--check` and `--plan` may succeed without credentials because they are inspections/plans;
+`--apply` may finish installation with manual verification outstanding. The report names that
+incompleteness, including adopted providers, rather than saying nothing is outstanding.

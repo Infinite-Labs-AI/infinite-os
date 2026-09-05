@@ -264,6 +264,24 @@ describe("runHarness --json", () => {
 })
 
 describe("runHarness --verify-only", () => {
+  it("fails honestly without an installation manifest instead of returning a green skipped check", async () => {
+    const root = copyFixture("static-html-basic")
+    const result = await runHarness(parseHarnessArgs(["--verify-only", "--root", root, "--url", "https://example.com/"]), fakeIo(), {discover: () => null})
+    expect(result.exitCode).toBe(1)
+    expect(result.report.failure?.code).toBe("INF_VERIFY_INCOMPLETE")
+    expect(result.report.failure?.message).toContain("manifest")
+  })
+
+  it.each(["missing-url", "missing-backend", "no-lanes"])("does not call %s verified", async kind => {
+    const root = copyFixture("static-html-basic")
+    write(root, ".infinite/install.json", JSON.stringify({workspaceId:"ws_1",appRoot:".",framework:"static-html",providers:kind === "no-lanes" ? [] : ["ga4"],files:[],envKeys:[],contentHashes:{},wiringVersion:1,verifiedAt:null}))
+    const args=["--verify-only", "--root", root, ...(kind === "missing-url" ? [] : ["--url","https://example.com/"])]
+    const result=await runHarness(parseHarnessArgs(args),fakeIo(),{discover:()=>null,fetch:(async()=>new Response("",{status:200})) as typeof fetch,...clock(),budgetMs:1})
+    expect(result.exitCode).toBe(1)
+    expect(result.report.failure?.code).toBe("INF_VERIFY_INCOMPLETE")
+    expect(result.report.providers.some(row=>row.state === "verified")).toBe(false)
+  })
+
   it("reads back every server-lane mode a manifest can record, not only Next middleware", async () => {
     const root = copyFixture("vite-react-basic")
     write(root, ".infinite/install.json", JSON.stringify({
@@ -631,4 +649,54 @@ describe("privacy disclosure reminder (wired into the run)", () => {
     )
     expect(result.report.nextSteps.some((step) => step.includes(PRIVACY_DISCLOSURE_CODE))).toBe(false)
   })
+})
+
+
+describe("custom build ownership", () => {
+  it("allows inspecting generated output but refuses installing into it", async () => {
+    const root=copyFixture("static-html-basic")
+    write(root,"vercel.json",JSON.stringify({buildCommand:"node build.cjs",outputDirectory:"dist"}))
+    const html="<!doctype html><html><head></head><body>Generated</body></html>"
+    write(root,"dist/index.html",html)
+    const check=await runHarness(parseHarnessArgs(["--check","--root",root,"--app-root","dist"]),fakeIo(),{discover:()=>null})
+    expect(check.exitCode).toBe(0)
+    expect(check.report.nextSteps.join(" ")).toContain("generated")
+    const apply=await runHarness(parseHarnessArgs(["--apply","--yes","--no-mark","--allow-dirty","--workspace","ws_1","--root",root,"--app-root","dist"]),fakeIo(),{discover:()=>null})
+    expect(apply.exitCode).toBe(1)
+    expect(apply.report.failure?.message).toContain("generated build output")
+    expect(readFileSync(join(root,"dist/index.html"),"utf8")).toBe(html)
+    expect(existsSync(join(root,".infinite/install.json"))).toBe(false)
+  })
+  it("writes an actionable manual brief for unsupported custom builds without claiming installation", async () => {
+    const root=copyFixture("unsupported-basic")
+    write(root,"vercel.json",JSON.stringify({buildCommand:"node build.cjs",outputDirectory:"dist"}))
+    const io=fakeIo()
+    const result=await runHarness(parseHarnessArgs(["--brief","--root",root]),io,{discover:()=>null})
+    expect(result.exitCode).toBe(1)
+    const brief=JSON.parse(readFileSync(join(root,".infinite/harness-brief.json"),"utf8"))
+    expect(brief.coverageStatus).toBe("not_established")
+    expect(brief.implementationChecklist.join(" ")).toContain("provider-added URL")
+    expect(brief.sourceLayout.outputDirectory).toBe("dist")
+    expect(existsSync(join(root,".infinite/install.json"))).toBe(false)
+    expect(io.outLines.join(" ")).not.toContain("Report: .infinite/REPORT.md")
+  })
+})
+
+it("--check remains read-only even when --brief is also requested", async () => {
+  const root = copyFixture("static-html-basic")
+  const result = await runHarness(parseHarnessArgs(["--check", "--brief", "--root", root]), fakeIo(), {discover:()=>null})
+  expect(result.exitCode).toBe(0)
+  expect(existsSync(join(root,".infinite"))).toBe(false)
+})
+
+it("cannot bypass custom build ownership by selecting one source subdirectory", async () => {
+  const root=copyFixture("unsupported-basic")
+  write(root,"vercel.json",JSON.stringify({buildCommand:"node build.cjs",outputDirectory:"dist"}))
+  const html="<!doctype html><html><head></head><body>Auth</body></html>"
+  write(root,"get-started/index.html",html)
+  const result=await runHarness(parseHarnessArgs(["--plan","--root",root,"--app-root","get-started"]),fakeIo(),{discover:()=>null})
+  expect(result.exitCode).toBe(1)
+  expect(result.report.failure?.code).toBe("INF_SOURCE_OUTPUT_OWNERSHIP")
+  expect(readFileSync(join(root,"get-started/index.html"),"utf8")).toBe(html)
+  expect(existsSync(join(root,".infinite/install.json"))).toBe(false)
 })

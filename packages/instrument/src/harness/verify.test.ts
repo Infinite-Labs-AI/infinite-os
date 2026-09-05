@@ -452,6 +452,6 @@ describe("verifyLanes", () => {
       ...clock()
     })
     expect(result.siteStatus).toBeNull()
-    expect(result.lanes.ga4).toEqual({ state: "no_receipt", causes: [expect.stringContaining("ENOTFOUND")] })
+    expect(result.lanes.ga4).toEqual({ state: "not_verifiable", reason: expect.stringContaining("ENOTFOUND") })
   })
 })

@@ -363,13 +363,13 @@ describe("detectUnmanagedProviders — repo-wide walk + Tag Manager", () => {
     ])
   })
 
-  it("a GTM verdict needs evidence: gtm.js, dataLayer.push( beside googletagmanager.com, a gtmId prop, or a quoted GTM id on a gtm line", () => {
+  it("requires an actual GTM integration rather than a fallback or unused configuration", () => {
     const pushWithHost = makeTempRoot("instrument-inspect-gtm-push-host-")
     writeFileSync(
       join(pushWithHost, "index.html"),
       "<noscript><iframe src=\"https://www.googletagmanager.com/ns.html?id=GTM-ABCD12\"></iframe></noscript>\n<script>dataLayer.push({event:'x'})</script>\n"
     )
-    expect(detectUnmanagedProviders(pushWithHost)).toEqual([{ provider: "ga4", via: "gtm", file: "index.html" }])
+    expect(detectUnmanagedProviders(pushWithHost)).toEqual([])
 
     const nextGtm = makeTempRoot("instrument-inspect-next-gtm-")
     mkdirSync(join(nextGtm, "app"), { recursive: true })
@@ -381,7 +381,7 @@ describe("detectUnmanagedProviders — repo-wide walk + Tag Manager", () => {
 
     const quotedOnGtmLine = makeTempRoot("instrument-inspect-gtm-quoted-")
     writeFileSync(join(quotedOnGtmLine, "config.ts"), "export const gtmContainer = 'GTM-ABCD12'\n")
-    expect(detectUnmanagedProviders(quotedOnGtmLine)).toEqual([{ provider: "ga4", via: "gtm", file: "config.ts" }])
+    expect(detectUnmanagedProviders(quotedOnGtmLine)).toEqual([])
   })
 
   it.each([
@@ -389,7 +389,7 @@ describe("detectUnmanagedProviders — repo-wide walk + Tag Manager", () => {
     ["react-ga4 ReactGA.initialize", "src/analytics.ts", "import ReactGA from 'react-ga4'\nReactGA.initialize('G-ABC123')\n"],
     ["vue-gtag", "src/main.ts", "import VueGtag from 'vue-gtag'\napp.use(VueGtag, { config: { id: 'G-ABC123' } })\n"],
     ["nuxt-gtag", "nuxt.config.ts", "export default defineNuxtConfig({ modules: ['nuxt-gtag'], gtag: { id: 'G-ABC123' } })\n"],
-    ["@analytics/google-analytics", "src/analytics.js", "import googleAnalytics from '@analytics/google-analytics'\n"]
+    ["@analytics/google-analytics", "src/analytics.js", "import googleAnalytics from '@analytics/google-analytics'\nconst analytics = Analytics({ plugins: [googleAnalytics({measurementIds: ['G-ABC123']})] })\n"]
   ])("adopts GA4 installed through %s (else the site gets double-tagged)", (_label, file, contents) => {
     const root = makeTempRoot("instrument-inspect-ga4-lib-")
     mkdirSync(dirname(join(root, file)), { recursive: true })
@@ -399,7 +399,7 @@ describe("detectUnmanagedProviders — repo-wide walk + Tag Manager", () => {
 
   it.each([
     ["posthog-js/react <PostHogProvider>", "app/providers.tsx", "import { PostHogProvider } from 'posthog-js/react'\nexport function Providers({ children }) { return <PostHogProvider apiKey=\"phc_abc\">{children}</PostHogProvider> }\n"],
-    ["@posthog/nextjs", "app/layout.tsx", "import { PostHogProvider } from '@posthog/nextjs'\n"]
+    ["@posthog/nextjs", "app/layout.tsx", "import { PostHogProvider } from '@posthog/nextjs'\nexport const P = () => <PostHogProvider apiKey=\"phc_abc\" />\n"]
   ])("adopts PostHog installed through %s without an explicit api_host", (_label, file, contents) => {
     const root = makeTempRoot("instrument-inspect-posthog-lib-")
     mkdirSync(dirname(join(root, file)), { recursive: true })

@@ -4,9 +4,9 @@
 import { existsSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 
+import { providerInstallEvidence } from "../provider-evidence.js"
+
 import { isManagedInfiniteFile } from "../frameworks/managed-files.js"
-import { maskCommentsAndStrings } from "../frameworks/shared.js"
-import { hasGa4SnippetEvidence, hasPosthogEvidence, hasTagManagerEvidence } from "../inspect.js"
 import { planInstallation } from "../plan.js"
 import {
   validateGa4MeasurementId,
@@ -44,110 +44,9 @@ export interface DetectedProviderEvidence extends DetectedProvider {
 
 const managedHtmlBlock = /<!-- infinite:start -->[\s\S]*?<!-- infinite:end -->/g
 
-function firstIndex(contents: string, needles: Array<string | RegExp>): number {
-  let best = -1
-  for (const needle of needles) {
-    const index =
-      typeof needle === "string" ? contents.indexOf(needle) : (needle.exec(contents)?.index ?? -1)
-    if (index >= 0 && (best < 0 || index < best)) best = index
-  }
-  return best
-}
-
-/** The earliest non-negative offset among the given candidates, or -1. */
-function earliest(...offsets: number[]): number {
-  let best = -1
-  for (const offset of offsets) {
-    if (offset >= 0 && (best < 0 || offset < best)) best = offset
-  }
-  return best
-}
-
-function firstMatch(contents: string, pattern: RegExp): string | undefined {
-  const match = pattern.exec(contents)
-  return match ? (match[1] ?? match[0]) : undefined
-}
-
-/** First offset of any of the needles, for the evidence line number. */
-function evidenceOffset(contents: string, needles: Array<string | RegExp>): number {
-  const index = firstIndex(contents, needles)
-  return index >= 0 ? index : 0
-}
-
-/**
- * Every provider signature one file proves, with evidence. WHETHER a file proves a provider is
- * the tag's own call (`hasGa4SnippetEvidence` / `hasTagManagerEvidence` / `hasPosthogEvidence`
- * in inspect.ts) so the harness can never disagree with the installer's adoption; this layer only
- * adds the line and the public id read from the snippet.
- */
+/** The installer and harness share the same evidence rules and offsets. */
 function signaturesIn(contents: string): Array<Omit<DetectedProviderEvidence, "file" | "line"> & { offset: number }> {
-  // Same comment/string safety as inspect.ts: `code` blanks comments AND strings (CALL sites);
-  // `noComments` blanks comments only (host URLs / import specifiers / ids that live in strings).
-  // Offsets come from the masked text (masking preserves length, so the line number still maps to
-  // the real source), and keys are read from `noComments` so a commented id is never harvested.
-  const code = maskCommentsAndStrings(contents, true)
-  const noComments = maskCommentsAndStrings(contents, false)
-
-  const found: Array<Omit<DetectedProviderEvidence, "file" | "line"> & { offset: number }> = []
-  if (hasGa4SnippetEvidence(contents)) {
-    found.push({
-      provider: "ga4",
-      via: "snippet",
-      offset: earliest(
-        firstIndex(noComments, [
-          "googletagmanager.com/gtag",
-          "GoogleAnalytics",
-          "react-ga4",
-          "vue-gtag",
-          "nuxt-gtag",
-          "@analytics/google-analytics"
-        ]),
-        firstIndex(code, ["gtag(", "ReactGA.initialize("])
-      ),
-      key: firstMatch(noComments, /\b(G-[A-Z0-9]{4,})\b/)
-    })
-  } else if (hasTagManagerEvidence(contents)) {
-    found.push({
-      provider: "ga4",
-      via: "gtm",
-      offset: evidenceOffset(noComments, ["googletagmanager.com/gtm.js", "googletagmanager.com", /gtmId\s*[=:]/, /["'`]GTM-[A-Z0-9]{4,}["'`]/]),
-      key: firstMatch(noComments, /["'`](GTM-[A-Z0-9]{4,})["'`]/) ?? firstMatch(noComments, /gtm\.js\?id=(GTM-[A-Z0-9]{4,})/)
-    })
-  }
-  if (hasPosthogEvidence(contents)) {
-    found.push({
-      provider: "posthog",
-      via: "snippet",
-      offset: earliest(
-        firstIndex(code, ["posthog.init("]),
-        firstIndex(noComments, ["i.posthog.com", "PostHogProvider", "@posthog/nextjs"])
-      ),
-      key: firstMatch(noComments, /\b(phc_[A-Za-z0-9]+)\b/)
-    })
-  }
-  const xAt = earliest(firstIndex(code, ["twq("]), firstIndex(noComments, ["static.ads-twitter.com"]))
-  if (xAt >= 0) {
-    found.push({
-      provider: "x",
-      via: "snippet",
-      offset: xAt,
-      key: firstMatch(noComments, /twq\(\s*['"]config['"]\s*,\s*['"]([a-z0-9]+)['"]/)
-    })
-  }
-  const infiniteAt = firstIndex(noComments, ["tracking/standalone.js", "_1BU_CONFIG", "data-1bu-workspace-id"])
-  if (infiniteAt >= 0) {
-    found.push({ provider: "infinite", via: "snippet", offset: infiniteAt })
-  }
-  const metaAt = earliest(firstIndex(code, ["fbq("]), firstIndex(noComments, ["fbevents.js", "connect.facebook.net"]))
-  if (metaAt >= 0) {
-    found.push({
-      provider: "meta",
-      via: "snippet",
-      offset: metaAt,
-      key: firstMatch(noComments, /fbq\(\s*['"]init['"]\s*,\s*['"](\d{5,})['"]/)
-    })
-  }
-  return found
+  return providerInstallEvidence(contents)
 }
 
 /**
@@ -162,7 +61,7 @@ export function detectProvidersWithEvidence(appRootAbsolute: string): DetectedPr
   for (const file of walkSourceFiles(appRootAbsolute)) {
     const raw = readSourceFile(appRootAbsolute, file)
     if (raw === null || isManagedInfiniteFile(raw)) continue
-    const contents = raw.replace(managedHtmlBlock, "")
+    const contents = raw.replace(managedHtmlBlock, block => block.replace(/[^\n]/g, " "))
     for (const signature of signaturesIn(contents)) {
       const identity = `${signature.provider}:${signature.via}:${signature.key ?? ""}`
       if (seen.has(identity)) continue

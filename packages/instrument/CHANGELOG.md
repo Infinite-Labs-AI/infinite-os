@@ -3,6 +3,20 @@
 All notable changes to the `infinite-tag` npm package (`packages/instrument`). Versions before
 0.5.0 are recorded in git history only (`git log -- packages/instrument`).
 
+## 0.9.1 — 2026-09-05
+
+- Share installation-evidence rules across the installer and harness. Recognize the current
+  Infinite runtime and real SDK initialization/loaders; ignore ordinary event calls, HTML prose,
+  commented examples, unused provider-name strings and conventional test runners.
+- Report custom source/build-output ownership and older exact tag pins. Refuse to install or
+  mark conversions in configured generated output; unsupported builds can request a manual brief.
+- Make explicit `--verify-only` requests fail with `INF_VERIFY_INCOMPLETE` when receipt checks
+  cannot run or complete. Preserve `INF_VERIFY_NO_RECEIPT` for actual unsuccessful polling.
+- Include a source-to-deployment and per-action test checklist in reports and agent briefs;
+  adopted/installed providers are not described as a completed coverage audit.
+- Exercise these regressions in the npm tarball and packaged CLI tests. Four runtime/type files
+  are added; the reviewed tarball now contains 120 files within unchanged supply-chain bounds.
+
 ## 0.9.0 — 2026-09-02
 
 Harness hardening: the Vite lane stops editing entrypoints, the outcome helper carries the visit key

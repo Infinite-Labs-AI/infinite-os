@@ -215,3 +215,14 @@ describe("metaRelayNote", () => {
     expect(note).not.toMatch(/relay is (on|enabled)\b/)
   })
 })
+
+it("does not present adopted providers as a completed coverage audit", () => {
+  const current=report()
+  current.providers[0]=transitionProvider(current.providers[0],{to:"adopted",reason:"existing bootstrap"})
+  const markdown=renderReportMarkdown(current)
+  expect(markdown).not.toContain("Nothing outstanding")
+  expect(markdown).toContain("adopted, not verified")
+  expect(markdown).toContain("provider-added URL")
+  expect(markdown).toContain("attempt")
+  expect(markdown).toContain("generated")
+})

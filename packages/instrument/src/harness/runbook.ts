@@ -29,7 +29,7 @@ export interface RunbookStep<Ctx extends { report: HarnessReport }> {
   /** Evaluated after `run` unless the step skipped itself. False → the step's failure fires. */
   successCheck(ctx: Ctx): Promise<boolean> | boolean
   failure: {
-    code: HarnessFailureCode
+    code: HarnessFailureCode | ((ctx: Ctx) => HarnessFailureCode)
     /** Built after the fact so the message can quote what the step saw. */
     message: (ctx: Ctx, error?: unknown) => string
     next: FailureNext
@@ -114,7 +114,7 @@ export async function runRunbook<Ctx extends { report: HarnessReport }>(
     }
     const failure: HarnessFailure = {
       step: step.id,
-      code: step.failure.code,
+      code: typeof step.failure.code === "function" ? step.failure.code(ctx) : step.failure.code,
       message,
       next: step.failure.next
     }

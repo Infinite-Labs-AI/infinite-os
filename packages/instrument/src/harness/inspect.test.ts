@@ -4,7 +4,8 @@ import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { afterEach, describe, expect, it } from "vitest"
 
-import { inspectWorkspace } from "../inspect.js"
+import { detectUnmanagedProviders, inspectWorkspace } from "../inspect.js"
+import { renderInfiniteBrowserTag } from "../runtime/infinite-browser.js"
 import {
   buildHarnessPlan,
   classifyProviders,
@@ -39,6 +40,66 @@ const GTAG = `<script async src="https://www.googletagmanager.com/gtag/js?id=G-A
 <script>window.dataLayer=window.dataLayer||[];function gtag(){dataLayer.push(arguments)};gtag('js',new Date());gtag('config','G-ABC123');</script>`
 
 describe("detectProvidersWithEvidence", () => {
+  it.each([
+    `import { PostHogProvider } from '@posthog/nextjs'; export const noop=()=>null`,
+    `import { usePostHog } from 'posthog-js/react'; const ph=usePostHog(); ph?.capture('click')`,
+    `import { PostHogProvider } from 'posthog-js/react'; export const helper=()=>null`,
+    `import ReactGA from 'react-ga4'; ReactGA.event('download')`,
+    `<html><body>gtag('config','G-FAKE123'); fbq('init','123456')</body></html>`,
+    `if (window.gtag) window.gtag('event', 'download'); fbq('track', 'Lead'); twq('event', 'abc'); posthog.capture('click')`,
+    `const docs = "gtag('config', 'G-FAKE123'); fbq('init', '123456'); twq('config','abc')";`,
+    `const docs = '<script src="https://www.googletagmanager.com/gtag/js?id=G-FAKE123"></script>'; const host = 'https://connect.facebook.net/en_US/fbevents.js'; const lib = 'react-ga4';`,
+    `<!-- <script>gtag('config', 'G-FAKE123'); posthog.init('phc_fake'); fbq('init','123456'); twq('config','abc')</script> -->`
+  ])("ignores event-only calls and documentation in both detectors: %s", (source) => {
+    const root = copyFixture("static-html-basic")
+    write(root, "example.html", source)
+    expect(detectUnmanagedProviders(root)).toEqual([])
+    expect(detectProvidersWithEvidence(root)).toEqual([])
+  })
+
+  it("ignores conventional test runners including mjs/cjs in both detectors", () => {
+    const root = copyFixture("static-html-basic")
+    for (const file of ["scripts/test-events.mjs", "scripts/test-pixels.cjs", "pixel.test.mjs", "pixel.spec.cjs"]) {
+      write(root, file, `gtag('config','G-TEST123'); fbq('init','123456'); twq('config','abc')`)
+    }
+    expect(detectUnmanagedProviders(root)).toEqual([])
+    expect(detectProvidersWithEvidence(root)).toEqual([])
+  })
+
+  it("recognizes a freshly rendered Infinite runtime with its public source key, but excludes installer-owned blocks", () => {
+    const root = copyFixture("static-html-basic")
+    const runtime = renderInfiniteBrowserTag({siteSourceKey: "site_customer123", collectPath: "/ledger", productionHosts: ["example.com"], respectDnt: true, consent: {mode: "not_required"}})
+    write(root, "index.html", `<html><head>\n${runtime}\n</head></html>`)
+    expect(detectUnmanagedProviders(root)).toEqual([{provider: "infinite", via: "snippet", file: "index.html"}])
+    expect(detectProvidersWithEvidence(root)).toEqual([{provider: "infinite", via: "snippet", file: "index.html", line: 2, key: "site_customer123"}])
+    write(root, "index.html", `<!-- infinite:start -->${runtime}<!-- infinite:end -->`)
+    expect(detectUnmanagedProviders(root)).toEqual([])
+    expect(detectProvidersWithEvidence(root)).toEqual([])
+  })
+
+  it.each([
+    ["posthog", `import {\n PostHogProvider as PH\n} from 'posthog-js/react'; export const P=()=> <PH apiKey="phc_real"/>`],
+    ["ga4", `import {\n GoogleAnalytics as GA\n} from '@next/third-parties/google'; export const P=()=> <GA gaId="G-REAL123"/>`],
+  ])("recognizes multiline mounted %s imports", (provider, source) => {
+    const root=copyFixture("next-app-router-basic")
+    write(root,"app/providers.tsx",source)
+    expect(detectProvidersWithEvidence(root).map(row=>row.provider)).toEqual([provider])
+    expect(detectUnmanagedProviders(root).map(row=>row.provider)).toEqual([provider])
+  })
+
+  it("recognizes mounted aliased provider components", () => {
+    const root=copyFixture("next-app-router-basic")
+    write(root,"app/providers.tsx",`import { PostHogProvider as PH } from 'posthog-js/react'; export const P=()=> <PH apiKey="phc_real"/>`)
+    expect(detectProvidersWithEvidence(root)).toEqual([expect.objectContaining({provider:"posthog",key:"phc_real"})])
+  })
+
+  it("recognizes spaced initialization calls consistently", () => {
+    const root = copyFixture("static-html-basic")
+    write(root, "pixels.js", `window.gtag ('config', 'G-REAL123'); posthog.init ('phc_real'); window.fbq ('init', '123456'); twq ('config', 'abc')`)
+    expect(detectUnmanagedProviders(root).map(x => x.provider)).toEqual(["ga4", "posthog", "x", "meta"])
+    expect(detectProvidersWithEvidence(root).map(x => x.provider)).toEqual(["ga4", "posthog", "x", "meta"])
+  })
+
   it("finds a gtag snippet anywhere in the app with file, line and the measurement id", () => {
     const root = copyFixture("vite-react-basic")
     // A real gtag call in CODE (not a comment — a commented snippet is not an install, see below).
@@ -68,7 +129,7 @@ describe("detectProvidersWithEvidence", () => {
     )
     const detected = detectProvidersWithEvidence(root)
     expect(detected).toEqual([
-      { provider: "ga4", via: "gtm", file: "index.html", line: 1, key: "GTM-ABCD12" }
+      { provider: "ga4", via: "gtm", file: "index.html", line: 2, key: "GTM-ABCD12" }
     ])
   })
 
