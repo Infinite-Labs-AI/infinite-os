@@ -311,4 +311,7 @@ export interface ChatActionCall {
 export interface ModelUsage {
   promptTokens?: number;
   completionTokens?: number;
+  cacheReadTokens?: number;
+  cacheCreationTokens?: number;
+  reasoningTokens?: number;
 }

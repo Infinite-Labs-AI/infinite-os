@@ -355,6 +355,7 @@ export interface MemoryFactRequestBody {
 }
 
 export interface GatewayTurnRequestBody {
+  model?: { modelId: string; effort?: "minimal" | "low" | "medium" | "high" | "xhigh" };
   platform?: string;
   actorId?: string;
   channelId?: string;
@@ -728,32 +729,44 @@ export function createApp(options: {
     // sessionId, so two workspaces sharing one conversation id would re-insert
     // the same PK and collide. The `:${ws}` suffix keeps the row per-workspace.
     const sessionId = `${conversationId}:${ws}`;
+    const model = request.body?.model;
+    if (model !== undefined && (!model || typeof model.modelId !== "string" || !/^gpt-[a-zA-Z0-9.-]+$/.test(model.modelId) || (model.effort !== undefined && !["minimal", "low", "medium", "high", "xhigh"].includes(model.effort)))) {
+      reply.code(400);
+      return { ok: false, error: { code: "invalid_turn_model" } };
+    }
     const scopedAppTools = parseScopedAppTools(request.body?.appTools);
     if (scopedAppTools.error) {
       reply.code(400);
       return { ok: false, error: scopedAppTools.error };
     }
-    const response = await llmController.chat({
-      message,
-      sessionId,
-      workspaceId: ws,
-      actorId,
-      surface: platformToSurface(platform),
-      ...(scopedAppTools.value ? { scopedAppTools: scopedAppTools.value } : {})
-    });
-    return {
-      ok: true,
-      platform,
-      channelId,
-      actorId,
-      // Hand back the UNqualified conversation id so the next turn round-trips to a value we
-      // re-qualify idempotently. response.sessionId is the workspace-qualified controller key
-      // (it may also have rotated via compaction); strip the `:<ws>` suffix either way.
-      sessionId: stripWorkspaceSuffix(response.sessionId, ws),
-      message: response.message,
-      provenance: response.provenance,
-      actionCalls: response.actionCalls
-    };
+    try {
+      const response = await llmController.chat({
+        model,
+        message,
+        sessionId,
+        workspaceId: ws,
+        actorId,
+        surface: platformToSurface(platform),
+        ...(scopedAppTools.value ? { scopedAppTools: scopedAppTools.value } : {})
+      });
+      return {
+        ok: true,
+        platform,
+        channelId,
+        actorId,
+        // Hand back the UNqualified conversation id so the next turn round-trips to a value we
+        // re-qualify idempotently. response.sessionId is the workspace-qualified controller key
+        // (it may also have rotated via compaction); strip the `:<ws>` suffix either way.
+        sessionId: stripWorkspaceSuffix(response.sessionId, ws),
+        message: response.message,
+        provenance: response.provenance,
+        actionCalls: response.actionCalls,
+        usage: response.usage
+      };
+    } catch (err) {
+      reply.code(500);
+      return { ok: false, error: { code: "turn_failed", message: err instanceof Error ? err.message : String(err), usage: (err as { usage?: unknown })?.usage } };
+    }
   });
 
   // Streaming sibling of /gateway/turn: forwards the controller's onProgress events (message.delta,
@@ -790,6 +803,11 @@ export function createApp(options: {
       : `${platform}:${channelId}:${actorId}`;
     const sessionId = `${conversationId}:${ws}`;
 
+    const model = request.body?.model;
+    if (model !== undefined && (!model || typeof model.modelId !== "string" || !/^gpt-[a-zA-Z0-9.-]+$/.test(model.modelId) || (model.effort !== undefined && !["minimal", "low", "medium", "high", "xhigh"].includes(model.effort)))) {
+      reply.code(400);
+      return { ok: false, error: { code: "invalid_turn_model" } };
+    }
     const scopedAppTools = parseScopedAppTools(request.body?.appTools);
     if (scopedAppTools.error) {
       reply.code(400);
@@ -810,12 +828,14 @@ export function createApp(options: {
     };
     try {
       const response = await llmController.chat({
+        model,
         message,
         sessionId,
         workspaceId: ws,
         actorId,
         surface: platformToSurface(platform),
         progressMode: "both",
+        onUsage: async (usage) => { send("progress", { type: "usage.update", usage }); },
         ...(scopedAppTools.value ? { scopedAppTools: scopedAppTools.value } : {}),
         onProgress: async (event) => {
           send("progress", event);
@@ -829,10 +849,11 @@ export function createApp(options: {
         sessionId: stripWorkspaceSuffix(response.sessionId, ws),
         message: response.message,
         provenance: response.provenance,
-        actionCalls: response.actionCalls
+        actionCalls: response.actionCalls,
+        usage: response.usage
       });
     } catch (err) {
-      send("error", { code: "turn_failed", message: err instanceof Error ? err.message : String(err) });
+      send("error", { code: "turn_failed", message: err instanceof Error ? err.message : String(err), usage: (err as { usage?: unknown })?.usage });
     } finally {
       raw.end();
     }

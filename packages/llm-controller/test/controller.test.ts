@@ -793,7 +793,7 @@ describe("Infinite OS LLM controller", () => {
         stage: "message",
         message: "Assistant message complete.",
         text: "Recognized revenue is available.",
-        usage: {}
+        usage: undefined
       }
     ]);
     expect(events).not.toContainEqual({ stage: "tool", message: "Running revenue total lookup." });
@@ -9310,3 +9310,41 @@ function createRecordingSessionStore(): ChatSessionStore & { events: string[][] 
     }
   };
 }
+
+
+describe("per-turn usage receipts", () => {
+  it("adds distinct tool rounds, retains zero cache hits, and exposes cumulative snapshots before a later failure", async () => {
+    const snapshots: unknown[] = [];
+    const requests: ModelRequest[] = [];
+    const registry = createInfiniteOsRegistry({ list_metrics: (_input, context) => createEnvelope({ actionId: "list_metrics", authority: context.authority, data: {}, provenance: [], nextActions: [] }) });
+    const failure = new Error("upstream disconnected");
+    const complete = vi.fn(async (request: ModelRequest) => {
+      requests.push(request);
+      if (requests.length === 3) throw failure;
+      return { toolCalls: [{ id: `call-${requests.length}`, name: "list_metrics", input: {} }], usage: { promptTokens: 10, completionTokens: 3, cacheReadTokens: requests.length === 1 ? 0 : 5, reasoningTokens: 1 } };
+    });
+    const controller = createLlmController({ registry, modelClient: { complete } });
+    await expect(controller.chat({ message: "metrics", sessionId: "stable", workspaceId: "ws", actorId: "a", surface: "desktop", model: { modelId: "gpt-5.5", effort: "medium" }, onUsage: usage => { snapshots.push(usage); } })).rejects.toMatchObject({
+      message: "upstream disconnected", usage: { promptTokens: 20, completionTokens: 6, cacheReadTokens: 5, reasoningTokens: 2 }
+    });
+    expect(snapshots).toEqual([{ promptTokens: 10, completionTokens: 3, cacheReadTokens: 0, reasoningTokens: 1 }, { promptTokens: 20, completionTokens: 6, cacheReadTokens: 5, reasoningTokens: 2 }]);
+    expect(requests.every(request => request.promptCacheKey === "stable" && request.model?.modelId === "gpt-5.5")).toBe(true);
+  });
+
+  it("preserves provider cache/reasoning and the accepted model even when config selects another model", async () => {
+    const growthHome = mkdtempSync(join(tmpdir(), "usage-model-"));
+    try {
+      const env = { GROWTH_OS_HOME: growthHome };
+      writeInfiniteOsModelSelection({ provider: "codex", model: "gpt-5.4" }, env);
+      writeInfiniteOsAuthRecord({ provider: "codex", source: "codex-cli", authMode: "device-code", token: "test-token" }, env);
+      const bodies: unknown[] = [];
+      const client = createConfiguredModelClient({ env, fetch: async (_url, init) => {
+        bodies.push(JSON.parse(String(init?.body)));
+        return new Response(JSON.stringify({ output_text: "ok", usage: { input_tokens: 20, output_tokens: 5, input_tokens_details: { cached_tokens: 0 }, output_tokens_details: { reasoning_tokens: 2 } } }));
+      } });
+      const response = await client.complete({ systemPrompt: "s", userMessage: "u", tools: [], toolResults: [], model: { modelId: "gpt-5.5", effort: "medium" }, promptCacheKey: "stable" });
+      expect(response.usage).toEqual({ promptTokens: 20, completionTokens: 5, cacheReadTokens: 0, reasoningTokens: 2 });
+      expect(bodies[0]).toMatchObject({ model: "gpt-5.5", reasoning: { effort: "medium" }, prompt_cache_key: "stable" });
+    } finally { rmSync(growthHome, { recursive: true, force: true }); }
+  });
+});

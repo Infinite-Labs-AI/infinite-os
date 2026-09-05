@@ -3600,3 +3600,29 @@ function workspaceProbeDb(
     close: async () => {}
   } as unknown as InfiniteOsDb;
 }
+
+
+describe("gateway usage delivery", () => {
+  beforeEach(() => { vi.stubEnv("GROWTH_OS_OPERATOR_TOKEN", OPERATOR_TOKEN); vi.stubEnv("GROWTH_OS_READ_TOKEN", READ_TOKEN); });
+  afterEach(() => vi.unstubAllEnvs());
+  it.each(["/gateway/turn", "/gateway/turn/stream"])("delivers usage and the captured model through %s", async (url) => {
+    const complete = vi.fn(async () => ({ message: "ok", usage: { promptTokens: 12, completionTokens: 3, cacheReadTokens: 0, reasoningTokens: 1 } }));
+    const app = createApp({ database: workspaceProbeDb(), modelClient: { complete } });
+    try {
+      const result = await app.inject({ method: "POST", url, headers: OPERATOR_HEADERS, payload: { message: "hello", model: { modelId: "gpt-5.5", effort: "medium" } } });
+      expect(result.statusCode).toBe(200);
+      expect(result.body).toContain('"cacheReadTokens":0');
+      expect(result.body).toContain('"reasoningTokens":1');
+      expect(complete).toHaveBeenCalledWith(expect.objectContaining({ model: { modelId: "gpt-5.5", effort: "medium" } }));
+      if (url.endsWith("stream")) expect(result.body).toContain('"type":"usage.update"');
+    } finally { await app.close(); }
+  });
+  it.each(["/gateway/turn", "/gateway/turn/stream"])("delivers measured usage on failures through %s", async (url) => {
+    const app = createApp({ database: workspaceProbeDb(), modelClient: { complete: async () => { throw Object.assign(new Error("failed"), { usage: { promptTokens: 12, cacheReadTokens: 4 } }); } } });
+    try {
+      const result = await app.inject({ method: "POST", url, headers: OPERATOR_HEADERS, payload: { message: "hello" } });
+      expect(result.body).toContain('"code":"turn_failed"');
+      expect(result.body).toContain('"usage":{"promptTokens":12,"cacheReadTokens":4}');
+    } finally { await app.close(); }
+  });
+});

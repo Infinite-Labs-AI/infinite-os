@@ -292,7 +292,13 @@ export interface ModelToolResult {
       };
 }
 
+export interface TurnModel {
+  modelId: string;
+  effort?: "minimal" | "low" | "medium" | "high" | "xhigh";
+}
+
 export interface ModelRequest {
+  model?: TurnModel;
   systemPrompt: string;
   userMessage: string;
   tools: InfiniteOsToolSchema[];
@@ -310,6 +316,9 @@ export interface ModelRequest {
 export interface ModelUsage {
   promptTokens?: number;
   completionTokens?: number;
+  cacheReadTokens?: number;
+  cacheCreationTokens?: number;
+  reasoningTokens?: number;
 }
 
 export interface ModelResponse {
@@ -324,6 +333,9 @@ export interface InfiniteOsModelClient {
 }
 
 export interface ChatInput {
+  /** Cumulative measured usage, emitted once per completed model invocation. */
+  onUsage?: (usage: ModelUsage) => Promise<void> | void;
+  model?: TurnModel;
   message: string;
   sessionId?: string;
   workspaceId: string;
@@ -468,7 +480,7 @@ export function createLlmController(options: {
       };
       const sessionId = input.sessionId ?? `${input.surface}_${randomUUID()}`;
       const scopedInput = { ...input, sessionId };
-      const modelMetadata = modelClient.modelMetadata?.();
+      const modelMetadata = { ...modelClient.modelMetadata?.(), ...(input.model ? { provider: "codex" as const, model: input.model.modelId } : {}) };
       const scopedAppTools = normalizeScopedAppTools(input.scopedAppTools);
       // A plain chat turn (no scoped app tools) persists. A scoped turn persists ONLY
       // in "union" mode — Codex chat needs session memory + recall + advisor exactly
@@ -477,7 +489,7 @@ export function createLlmController(options: {
       // gated on this so union turns get the full chat lifecycle and exclusive turns none.
       const persistTurn = !scopedAppTools || scopedAppTools.mode === "union";
       const responseMetadata = (usage?: ModelUsage) => ({
-        ...(usage?.promptTokens || usage?.completionTokens ? { usage } : {}),
+        ...(usage ? { usage } : {}),
         ...(input.modelProvider ?? modelMetadata?.provider ? { modelProvider: input.modelProvider ?? modelMetadata?.provider } : {}),
         ...(input.modelName ?? modelMetadata?.model ? { modelName: input.modelName ?? modelMetadata?.model } : {}),
         ...(input.modelAuthSource ?? modelMetadata?.authSource ? { modelAuthSource: input.modelAuthSource ?? modelMetadata?.authSource } : {})
@@ -584,171 +596,178 @@ export function createLlmController(options: {
       const actionCalls: ChatActionCall[] = [];
       const toolResults: ModelToolResult[] = [];
       let usage: ModelResponse["usage"];
-      for (let iteration = 0; iteration < maxToolIterations; iteration += 1) {
-        const refinementSections = buildQueryRefinementSections(effectiveMessage, toolResults);
-        const synthesisSections = buildQuerySynthesisSections(effectiveMessage, toolResults);
-        if (iteration > 0 && refinementSections.length > 0) {
-          await emitStatus("resolve", refinementProgressMessage(refinementSections));
-        }
-        const prompt = assembleInfiniteOsPrompt({
-          actions,
-          workspaceId: input.workspaceId,
-          surface: input.surface,
-          currentDate: now().toISOString().slice(0, 10),
-          modelProvider: input.modelProvider ?? modelMetadata?.provider,
-          recentMessages: priorSession?.messages,
-          compactedSummaries: priorSession?.summaries,
-          recalledSessions,
-          curatedMemory: memoryContext,
-          advisories: [...(advisory?.promptSections ?? []), ...refinementSections, ...synthesisSections]
-        });
-        const streamState = { messageStarted: false };
-        const response = await modelClient.complete({
-          systemPrompt: prompt,
-          userMessage: effectiveMessage,
-          tools,
-          toolResults,
-          // Stable across every turn of this session → lets the provider reuse its
-          // cached prompt prefix instead of re-processing it each turn.
-          promptCacheKey: sessionId,
-          onMessageDelta: async (delta) => {
-            if (!delta) {
-              return;
-            }
-            if (!streamState.messageStarted) {
-              streamState.messageStarted = true;
-              await emitAssistantMessageStart();
-            }
-            await emitAssistantMessageDelta(delta);
-          },
-          onProgress: async (event) => emitInfinite(event),
-          onReasoningDelta: async (delta) => {
-            if (!delta) {
-              return;
-            }
-            await emitInfinite({
-              type: "reasoning.delta",
-              stage: "thinking",
-              message: delta,
-              text: delta
-            });
+      try {
+        for (let iteration = 0; iteration < maxToolIterations; iteration += 1) {
+          const refinementSections = buildQueryRefinementSections(effectiveMessage, toolResults);
+          const synthesisSections = buildQuerySynthesisSections(effectiveMessage, toolResults);
+          if (iteration > 0 && refinementSections.length > 0) {
+            await emitStatus("resolve", refinementProgressMessage(refinementSections));
           }
-        });
-        usage = mergeUsage(usage, response.usage);
-        if (!response.toolCalls?.length) {
-          const message = response.message ??
-            "I need more information before I can answer.";
-          if (persistTurn) {
-            await sessionStore?.appendMessage({
-              sessionId,
-              role: "assistant",
-              content: message,
-              tokenCount: usage?.completionTokens
-            });
-            await recordTokenUsage(sessionStore, sessionId, usage);
-          }
-          await emitAssistantMessage(message, usage, { alreadyStreamed: streamState.messageStarted });
-          if (persistTurn) {
-            await scheduleMemoryReview(message, actionCalls);
-          }
-          return {
-            ok: true,
-            sessionId,
-            message,
-            provenance: unique(actionCalls.flatMap((call) => call.envelope?.provenance ?? [])),
-            actionCalls,
-            ...responseMetadata(usage)
-          };
-        }
-        const progressLabels = new Map<string, string>();
-        for (const call of response.toolCalls) {
-          const actionId = normalizeToolCallName(call.name, options.registry, scopedAppTools);
-          const message = toolCallProgressMessage(effectiveMessage, call, options.registry, scopedAppTools);
-          progressLabels.set(call.id, message);
-          await emitLegacy({ stage: "tool", message });
-          await emitInfinite({
-            type: "tool.generating",
-            stage: "tool",
-            message: `Drafting ${actionId}.`,
-            name: actionId
+          const prompt = assembleInfiniteOsPrompt({
+            actions,
+            workspaceId: input.workspaceId,
+            surface: input.surface,
+            currentDate: now().toISOString().slice(0, 10),
+            modelProvider: input.modelProvider ?? modelMetadata?.provider,
+            recentMessages: priorSession?.messages,
+            compactedSummaries: priorSession?.summaries,
+            recalledSessions,
+            curatedMemory: memoryContext,
+            advisories: [...(advisory?.promptSections ?? []), ...refinementSections, ...synthesisSections]
           });
-        }
-        const nextCalls = await executeToolCalls(options.registry, response.toolCalls, scopedInput, {
-          scopedAppTools,
-          progressLabels,
-          nowMs: () => now().getTime(),
-          emitToolStart: async (event) => emitInfinite(event),
-          emitToolProgress: async (event) => emitInfinite(event),
-          emitToolComplete: async (event) => emitInfinite(event)
-        });
-        for (const call of nextCalls) {
-          if (persistTurn) {
-            await sessionStore?.recordActionCall({
+          const streamState = { messageStarted: false };
+          const response = await modelClient.complete({
+            model: input.model,
+            systemPrompt: prompt,
+            userMessage: effectiveMessage,
+            tools,
+            toolResults,
+            // Stable across every turn of this session → lets the provider reuse its
+            // cached prompt prefix instead of re-processing it each turn.
+            promptCacheKey: sessionId,
+            onMessageDelta: async (delta) => {
+              if (!delta) {
+                return;
+              }
+              if (!streamState.messageStarted) {
+                streamState.messageStarted = true;
+                await emitAssistantMessageStart();
+              }
+              await emitAssistantMessageDelta(delta);
+            },
+            onProgress: async (event) => emitInfinite(event),
+            onReasoningDelta: async (delta) => {
+              if (!delta) {
+                return;
+              }
+              await emitInfinite({
+                type: "reasoning.delta",
+                stage: "thinking",
+                message: delta,
+                text: delta
+              });
+            }
+          });
+          usage = mergeUsage(usage, response.usage);
+          if (usage) await input.onUsage?.(usage);
+          if (!response.toolCalls?.length) {
+            const message = response.message ??
+              "I need more information before I can answer.";
+            if (persistTurn) {
+              await sessionStore?.appendMessage({
+                sessionId,
+                role: "assistant",
+                content: message,
+                tokenCount: usage?.completionTokens
+              });
+              await recordTokenUsage(sessionStore, sessionId, usage);
+            }
+            await emitAssistantMessage(message, usage, { alreadyStreamed: streamState.messageStarted });
+            if (persistTurn) {
+              await scheduleMemoryReview(message, actionCalls);
+            }
+            return {
+              ok: true,
               sessionId,
-              providerToolCallId: call.id,
-              actionId: call.actionId,
-              authority: call.requiresConfirmation ? "operator" : "tool_agent",
-              input: call.input,
-              outputEnvelope: call.envelope,
-              status: call.status,
-              requiresConfirmation: call.requiresConfirmation,
-              confirmationId: call.confirmationId,
-              inputHash: call.inputHash,
-              // P0-A: pin the action call to the authoring workspace so the confirm
-              // path can fail closed on a cross-workspace confirmation.
-              workspaceId: input.workspaceId
+              message,
+              provenance: unique(actionCalls.flatMap((call) => call.envelope?.provenance ?? [])),
+              actionCalls,
+              ...responseMetadata(usage)
+            };
+          }
+          const progressLabels = new Map<string, string>();
+          for (const call of response.toolCalls) {
+            const actionId = normalizeToolCallName(call.name, options.registry, scopedAppTools);
+            const message = toolCallProgressMessage(effectiveMessage, call, options.registry, scopedAppTools);
+            progressLabels.set(call.id, message);
+            await emitLegacy({ stage: "tool", message });
+            await emitInfinite({
+              type: "tool.generating",
+              stage: "tool",
+              message: `Drafting ${actionId}.`,
+              name: actionId
             });
           }
-          actionCalls.push(call);
-          toolResults.push(modelToolResult(call));
-        }
-        if (nextCalls.some((call) => call.requiresConfirmation)) {
-          const message = "This request includes an operator action that requires confirmation before execution.";
-          if (persistTurn) {
-            await sessionStore?.appendMessage({
+          const nextCalls = await executeToolCalls(options.registry, response.toolCalls, scopedInput, {
+            scopedAppTools,
+            progressLabels,
+            nowMs: () => now().getTime(),
+            emitToolStart: async (event) => emitInfinite(event),
+            emitToolProgress: async (event) => emitInfinite(event),
+            emitToolComplete: async (event) => emitInfinite(event)
+          });
+          for (const call of nextCalls) {
+            if (persistTurn) {
+              await sessionStore?.recordActionCall({
+                sessionId,
+                providerToolCallId: call.id,
+                actionId: call.actionId,
+                authority: call.requiresConfirmation ? "operator" : "tool_agent",
+                input: call.input,
+                outputEnvelope: call.envelope,
+                status: call.status,
+                requiresConfirmation: call.requiresConfirmation,
+                confirmationId: call.confirmationId,
+                inputHash: call.inputHash,
+                // P0-A: pin the action call to the authoring workspace so the confirm
+                // path can fail closed on a cross-workspace confirmation.
+                workspaceId: input.workspaceId
+              });
+            }
+            actionCalls.push(call);
+            toolResults.push(modelToolResult(call));
+          }
+          if (nextCalls.some((call) => call.requiresConfirmation)) {
+            const message = "This request includes an operator action that requires confirmation before execution.";
+            if (persistTurn) {
+              await sessionStore?.appendMessage({
+                sessionId,
+                role: "assistant",
+                content: message,
+                tokenCount: usage?.completionTokens
+              });
+              await recordTokenUsage(sessionStore, sessionId, usage);
+            }
+            await emitAssistantMessage(message, usage);
+            if (persistTurn) {
+              await scheduleMemoryReview(message, actionCalls);
+            }
+            return {
+              ok: true,
               sessionId,
-              role: "assistant",
-              content: message,
-              tokenCount: usage?.completionTokens
-            });
-            await recordTokenUsage(sessionStore, sessionId, usage);
+              message,
+              provenance: [],
+              actionCalls,
+              ...responseMetadata(usage)
+            };
           }
-          await emitAssistantMessage(message, usage);
-          if (persistTurn) {
-            await scheduleMemoryReview(message, actionCalls);
-          }
-          return {
-            ok: true,
+        }
+        const message = "I reached the Infinite OS typed-action iteration limit before I could finish the answer.";
+        if (persistTurn) {
+          await sessionStore?.appendMessage({
             sessionId,
-            message,
-            provenance: [],
-            actionCalls,
-            ...responseMetadata(usage)
-          };
+            role: "assistant",
+            content: message,
+            tokenCount: usage?.completionTokens
+          });
+          await recordTokenUsage(sessionStore, sessionId, usage);
         }
-      }
-      const message = "I reached the Infinite OS typed-action iteration limit before I could finish the answer.";
-      if (persistTurn) {
-        await sessionStore?.appendMessage({
+        await emitAssistantMessage(message, usage);
+        if (persistTurn) {
+          await scheduleMemoryReview(message, actionCalls);
+        }
+        return {
+          ok: true,
           sessionId,
-          role: "assistant",
-          content: message,
-          tokenCount: usage?.completionTokens
-        });
-        await recordTokenUsage(sessionStore, sessionId, usage);
+          message,
+          provenance: unique(actionCalls.flatMap((call) => call.envelope?.provenance ?? [])),
+          actionCalls,
+          ...responseMetadata(usage)
+        };
+      } catch (error) {
+        // Preserve measured work from completed model invocations when a later round fails.
+        throw Object.assign(error instanceof Error ? error : new Error(String(error)), { usage: mergeUsage(usage, (error as { usage?: ModelUsage } | null)?.usage) });
       }
-      await emitAssistantMessage(message, usage);
-      if (persistTurn) {
-        await scheduleMemoryReview(message, actionCalls);
-      }
-      return {
-        ok: true,
-        sessionId,
-        message,
-        provenance: unique(actionCalls.flatMap((call) => call.envelope?.provenance ?? [])),
-        actionCalls,
-        ...responseMetadata(usage)
-      };
     }
   };
 }
@@ -797,13 +816,13 @@ async function recordTokenUsage(
   });
 }
 
-function mergeUsage(...usages: Array<ModelResponse["usage"]>): ModelResponse["usage"] {
-  const promptTokens = usages.reduce((sum, usage) => sum + (usage?.promptTokens ?? 0), 0);
-  const completionTokens = usages.reduce((sum, usage) => sum + (usage?.completionTokens ?? 0), 0);
-  return {
-    ...(promptTokens ? { promptTokens } : {}),
-    ...(completionTokens ? { completionTokens } : {})
-  };
+export function mergeUsage(...usages: Array<ModelResponse["usage"]>): ModelResponse["usage"] {
+  const result: ModelUsage = {};
+  for (const key of ["promptTokens", "completionTokens", "cacheReadTokens", "cacheCreationTokens", "reasoningTokens"] as const) {
+    const measured = usages.flatMap(usage => typeof usage?.[key] === "number" ? [usage[key]!] : []);
+    if (measured.length) result[key] = measured.reduce((sum, value) => sum + value, 0);
+  }
+  return Object.keys(result).length ? result : undefined;
 }
 
 async function reviewMemory(
