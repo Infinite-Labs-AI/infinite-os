@@ -322,7 +322,7 @@ describe.runIf(workspaceBuilt)("CLI single-file bundle", () => {
         cwd: site,
         encoding: "utf8",
         timeout: 30_000,
-        env: { ...process.env, GROWTH_OS_HOME: join(temporary, "growth-home"), PATH: `${dirname(process.execPath)}:${process.env.PATH ?? ""}` }
+        env: { ...process.env, GROWTH_OS_HOME: join(temporary, "growth-home"), INFINITE_ARTIFACTS_DIR: join(temporary, "artifacts"), PATH: `${dirname(process.execPath)}:${process.env.PATH ?? ""}` }
       });
       expect(result.status, result.stdout + result.stderr).toBe(0);
       const report = JSON.parse(result.stdout);
