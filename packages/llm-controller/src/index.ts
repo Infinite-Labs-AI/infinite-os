@@ -653,7 +653,7 @@ export function createLlmController(options: {
               });
             }
           });
-          usage = mergeUsage(usage, response.usage);
+          usage = iteration === 0 ? mergeUsage(response.usage) : mergeUsage(usage, response.usage);
           if (usage) await input.onUsage?.(usage);
           if (!response.toolCalls?.length) {
             const message = response.message ??
@@ -771,7 +771,12 @@ export function createLlmController(options: {
         };
       } catch (error) {
         // Preserve measured work from completed model invocations when a later round fails.
-        throw Object.assign(error instanceof Error ? error : new Error(String(error)), { usage: mergeUsage(usage, (error as { usage?: ModelUsage } | null)?.usage) });
+        const failedUsage = (error as { usage?: ModelUsage } | null)?.usage;
+        // A failed call without counters adds no measurable work; preserve completed rounds.
+        // If the provider reports the failed call's counters, include it as a distinct invocation.
+        const reportedUsage = failedUsage === undefined ? usage
+          : usage === undefined ? mergeUsage(failedUsage) : mergeUsage(usage, failedUsage);
+        throw Object.assign(error instanceof Error ? error : new Error(String(error)), { usage: reportedUsage });
       }
     }
   };
@@ -822,12 +827,16 @@ async function recordTokenUsage(
 }
 
 export function mergeUsage(...usages: Array<ModelResponse["usage"]>): ModelResponse["usage"] {
+  if (!usages.length) return undefined;
   const result: ModelUsage = {};
   for (const key of ["promptTokens", "completionTokens", "cacheReadTokens", "cacheCreationTokens", "reasoningTokens"] as const) {
-    const measured = usages.flatMap(usage => typeof usage?.[key] === "number" ? [usage[key]!] : []);
-    if (measured.length) result[key] = measured.reduce((sum, value) => sum + value, 0);
+    // A successful invocation without this counter makes the whole-turn total unknown.
+    if (usages.every(usage => typeof usage?.[key] === "number")) {
+      result[key] = usages.reduce((sum, usage) => sum + usage![key]!, 0);
+    }
   }
-  return Object.keys(result).length ? result : undefined;
+  // An explicit empty snapshot invalidates previously known totals; undefined means no invocation.
+  return result;
 }
 
 async function reviewMemory(

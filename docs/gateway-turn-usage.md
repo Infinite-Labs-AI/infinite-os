@@ -1,6 +1,6 @@
 # Gateway turn usage
 
-`POST /gateway/turn` and `/gateway/turn/stream` return optional `usage` on successful turns. Failed turns return measured usage inside the JSON `error`, or on the SSE `error` event. Counters sum distinct model invocations in a tool loop, including completed rounds before a later failure. Unreported counters are omitted; reported zero is preserved.
+`POST /gateway/turn` and `/gateway/turn/stream` return optional `usage` on successful turns. Failed turns return measured usage inside the JSON `error`, or on the SSE `error` event. Counters sum distinct model invocations in a tool loop, including completed rounds before a later failure. A successful invocation that omits a counter makes that counter unknown for the cumulative turn; reported zero is preserved. An explicit empty snapshot invalidates all earlier known totals. On a failed call with no usage, counts from completed rounds remain available as partial reported work, not a claim about the full cost of the failed call.
 
 The optional counters are `promptTokens`, `completionTokens`, `cacheReadTokens`, `cacheCreationTokens`, and `reasoningTokens`. They preserve provider semantics: Codex cached input is included in prompt tokens and reasoning is included in completion tokens. Do not add those subsets to the totals.
 

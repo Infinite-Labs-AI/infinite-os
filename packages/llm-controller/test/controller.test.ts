@@ -10,6 +10,7 @@ import {
   createCuratedMemoryManager,
   createLlmController,
   filterCuratedMemoryCandidates,
+  mergeUsage,
   type ChatProgressEvent,
   type ModelRequest
 } from "../src/index.js";
@@ -793,7 +794,7 @@ describe("Infinite OS LLM controller", () => {
         stage: "message",
         message: "Assistant message complete.",
         text: "Recognized revenue is available.",
-        usage: undefined
+        usage: {}
       }
     ]);
     expect(events).not.toContainEqual({ stage: "tool", message: "Running revenue total lookup." });
@@ -9415,5 +9416,15 @@ describe("provider usage review regressions", () => {
       expect(result).toMatchObject({ modelProvider: "codex", modelName: "gpt-5.5" });
       expect(result.modelAuthSource).toBeUndefined();
     } finally { rmSync(home, { recursive: true, force: true }); }
+  });
+});
+
+
+describe("usage completeness across successful invocations", () => {
+  it("invalidates missing counters while preserving totals reported in every invocation", () => {
+    expect(mergeUsage({ promptTokens: 10, completionTokens: 3, cacheReadTokens: 0 }, { completionTokens: 2 })).toEqual({ completionTokens: 5 });
+    expect(mergeUsage({ promptTokens: 10 }, undefined)).toEqual({});
+    expect(mergeUsage(undefined, { promptTokens: 10 })).toEqual({});
+    expect(mergeUsage({ promptTokens: 0 }, { promptTokens: 0 })).toEqual({ promptTokens: 0 });
   });
 });
