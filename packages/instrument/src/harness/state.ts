@@ -16,6 +16,26 @@ export const HARNESS_HANDOFF_LINE =
 
 export const HARNESS_REPORT_RELATIVE_PATH = ".infinite/REPORT.md"
 
+export const IMPLEMENTATION_CHECKLIST = [
+  "Map editable source, build-time injection, generated output and deployed routes before editing. Update the existing owner; never patch generated output or install a second bootstrap just to get a green check.",
+  "Compare the project's pinned tag and adopted custom bootstraps with the running installer. Adoption does not upgrade dependencies or apply newer provider settings; preserve existing consent and sensitive-page exclusions.",
+  "Write an event matrix for each relevant view, attempt, confirmed success, failure, retry and exit. Use bounded names and properties in each independent provider; a click or animation is not a server-confirmed conversion. Keep outcomes on the server that owns them.",
+  "Test the real handlers: one observation per action, keyboard and pointer submission, async errors, retries, consent denial/revocation, and navigation before delivery. Preserve identity correlation across browser, authentication and server outcomes without logging identifiers or secrets.",
+  "Inspect provider-added URL metadata as well as custom properties. OAuth callbacks, emails, verification codes and handoff secrets must not leak through page URLs, DOM autocapture or replay. Exercise success and failure callbacks.",
+  "Build and inspect every affected deployed route for the intended runtime/configuration and duplicate bootstraps. Then trigger representative actions in a real browser and read back a receipt per provider. Static HTTP inspection does not run JavaScript; record manual or unavailable checks as incomplete.",
+  "When a CLI or app is distributed, repeat the audit using the actual packaged executable outside the checkout and through its installed launcher. Source tests alone do not prove the shipped package layout works."
+] as const
+
+export function verificationSummary(report: HarnessReport): string {
+  if (report.steps.find(step => step.id === "classify")?.status !== "ok") return "Coverage not established: inspection/classification did not complete."
+  const verify = report.steps.find(step => step.id === "verify")
+  if (!verify || verify.status === "skipped" || verify.status === "not_run") return "Receipt verification was not run; installation evidence is not delivery evidence."
+  const verified = report.providers.filter(row => row.verification.kind === "verified").length
+  if (verify.status === "failed") return `Receipt verification incomplete (${verified} provider receipts verified).`
+  return `${verified} provider receipts verified. Per-action funnel coverage still requires the test matrix below.`
+}
+
+
 export function initialProviderStates(): ProviderState[] {
   return HARNESS_PROVIDER_ORDER.map((provider) => ({
     provider,
@@ -222,6 +242,7 @@ export function renderReportMarkdown(report: HarnessReport): string {
     `- Mode: \`${report.mode}\``,
     `- Started: ${report.startedAt}`,
     `- Finished: ${report.finishedAt ?? "—"}`,
+    `- Verification: ${verificationSummary(report)}`,
     `- Framework: ${report.framework ?? "not identified"}${report.appRoot && report.appRoot !== "." ? ` (app at ${report.appRoot})` : ""}`,
     "",
     "## Providers",
@@ -276,6 +297,10 @@ export function renderReportMarkdown(report: HarnessReport): string {
       )
     } else if (state.verification.kind === "not_verifiable" && state.state === "installed") {
       checklist.push(`${state.provider}: installed but not read back (${state.verification.reason}). Confirm an event in the provider's own live view before merging.`)
+    } else if (state.state === "adopted") {
+      checklist.push(`${state.provider}: adopted, not verified. Confirm the current deployed bootstrap, configuration and action receipts with its existing owner; do not install a duplicate.`)
+    } else if (state.state === "installed" && state.verification.kind === "not_run") {
+      checklist.push(`${state.provider}: installed, but no receipt check ran. Deploy and perform delivery verification before claiming coverage.`)
     } else if (state.state === "conflict") {
       checklist.push(`${state.provider}: conflict — ${state.reason ?? "see evidence"}. Nothing was installed for it.`)
     }
@@ -283,9 +308,7 @@ export function renderReportMarkdown(report: HarnessReport): string {
   for (const next of report.nextSteps) {
     checklist.push(next)
   }
-  if (checklist.length === 0) {
-    checklist.push("Nothing outstanding from this run.")
-  }
+  checklist.push(...IMPLEMENTATION_CHECKLIST)
   for (const item of checklist) {
     lines.push(`- [ ] ${item}`)
   }

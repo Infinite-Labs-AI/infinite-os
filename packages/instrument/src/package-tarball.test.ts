@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process"
+import { execFileSync, spawnSync } from "node:child_process"
 import {
   cpSync,
   existsSync,
@@ -28,7 +28,7 @@ function runNpm11(args: string[], cwd: string): string {
 }
 
 describe("npm 11 package tarball", () => {
-  it("validates the real 116-file receipt and runs the installed bin", () => {
+  it("validates the real 122-file receipt and runs the installed bin", () => {
     const tempRoot = mkdtempSync(join(tmpdir(), "infinite-tag-tarball-"))
 
     try {
@@ -54,7 +54,7 @@ describe("npm 11 package tarball", () => {
         filename: string
       }>
       expect(receipt).toHaveLength(1)
-      expect(receipt[0]?.files).toHaveLength(116)
+      expect(receipt[0]?.files).toHaveLength(122)
 
       const tarballName = execFileSync(process.execPath, [receiptValidator, receiptPath], {
         encoding: "utf8"
@@ -95,6 +95,15 @@ describe("npm 11 package tarball", () => {
       expect(execFileSync(installedBin, ["help"], { cwd: consumer, encoding: "utf8" })).toContain(
         "Usage: infinite-tag"
       )
+      writeFileSync(join(consumer, "index.html"), "<html><head><script>if(window.fbq)fbq('track','Lead')</script></head></html>")
+      const env = { ...process.env, INFINITE_ARTIFACTS_DIR: join(tempRoot, "empty-artifacts") }
+      const check = spawnSync(installedBin, ["harness", "--check", "--json", "--root", consumer], {cwd:consumer,encoding:"utf8",env})
+      expect(check.status, check.stderr).toBe(0)
+      expect(JSON.parse(check.stdout).providers.find((row: {provider:string}) => row.provider === "meta").state).not.toBe("adopted")
+      const verify = spawnSync(installedBin, ["harness", "--verify-only", "--json", "--url", "https://example.com", "--root", consumer], {cwd:consumer,encoding:"utf8",env})
+      expect(verify.status, verify.stderr).toBe(1)
+      expect(JSON.parse(verify.stdout).failure.code).toBe("INF_VERIFY_INCOMPLETE")
+
     } finally {
       rmSync(tempRoot, { recursive: true, force: true })
     }

@@ -542,7 +542,7 @@ export async function verifyLanes(input: VerifyLanesInput): Promise<VerifyLanesR
 
   if (loadError !== null) {
     for (const lane of input.lanes) {
-      lanes[lane] = { state: "no_receipt", causes: [`the site could not be loaded (${loadError})`] }
+      lanes[lane] = { state: "not_verifiable", reason: `the site could not be loaded (${loadError}); receipt polling was not performed` }
     }
     return { url: input.url, since, siteStatus, lanes }
   }
