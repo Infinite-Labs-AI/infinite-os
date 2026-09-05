@@ -88,9 +88,9 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
     rmSync(dataDir, { recursive: true, force: true });
   });
 
-  it("applied ALL 65 migrations on first boot and is idempotent on a re-run", async () => {
-    expect(loadMigrations().length).toBe(65);
-    expect(firstRun).toHaveLength(65);
+  it("applied ALL 66 migrations on first boot and is idempotent on a re-run", async () => {
+    expect(loadMigrations().length).toBe(66);
+    expect(firstRun).toHaveLength(66);
     expect(firstRun).toContain("0001_control_plane.sql");
     expect(firstRun).toContain("0006_security_roles.sql");
     expect(firstRun).toContain("0036_chat_sessions_desktop_surface.sql");
@@ -123,6 +123,7 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
     expect(firstRun).toContain("0063_posthog_daily_rollups.sql");
     expect(firstRun).toContain("0064_posthog_raw_retention.sql");
     expect(firstRun).toContain("0065_prune_rolls_up_before_deleting.sql");
+    expect(firstRun).toContain("0066_auxiliary_brain_usage_outbox.sql");
 
     // Idempotent: a second boot re-applies zero (the `rows.length` gate, not the pg `rowCount`
     // gate, makes this true on PGlite).
@@ -130,13 +131,13 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
     expect(secondRun).toEqual([]);
   });
 
-  it("created the schema_migrations ledger with all 65 rows", async () => {
+  it("created the schema_migrations ledger with all 66 rows", async () => {
     const ledger = await db.query<{ id: string }>(
       "select id from schema_migrations order by id"
     );
-    expect(ledger).toHaveLength(65);
+    expect(ledger).toHaveLength(66);
     expect(ledger[0]?.id).toBe("0001_control_plane.sql");
-    expect(ledger.at(-1)?.id).toBe("0065_prune_rolls_up_before_deleting.sql");
+    expect(ledger.at(-1)?.id).toBe("0066_auxiliary_brain_usage_outbox.sql");
   });
 
   it("0063 serves both PostHog views from per-(workspace, source, day) rollups — refresh, is_internal, idempotency, grain key, grants", async () => {

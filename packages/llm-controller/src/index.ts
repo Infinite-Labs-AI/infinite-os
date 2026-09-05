@@ -333,6 +333,7 @@ export interface InfiniteOsModelClient {
 }
 
 export interface ChatInput {
+  memoryModel?: TurnModel;
   /** Cumulative measured usage, emitted once per completed model invocation. */
   onUsage?: (usage: ModelUsage) => Promise<void> | void;
   model?: TurnModel;
@@ -835,6 +836,7 @@ async function reviewMemory(
 ): Promise<void> {
   try {
     await memoryManager?.reviewTurn({
+      model: input.memoryModel,
       workspaceId: input.workspaceId,
       actorId: input.actorId,
       sessionId,

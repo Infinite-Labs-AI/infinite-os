@@ -2104,6 +2104,7 @@ describe("Infinite OS app-hosted API/MCP skeleton", () => {
         events.push(["getSession", sessionId]);
         return {
           id: sessionId,
+          workspaceId: WORKSPACE,
           messages: [{ role: "user", content: "Revenue?" }],
           actionCalls: [{ actionId: "list_metrics", status: "ok" }]
         };
@@ -2173,6 +2174,7 @@ describe("Infinite OS app-hosted API/MCP skeleton", () => {
       ["getSession", "session-1"],
       ["resumeSession", "session-1"],
       ["endSession", "session-1", "operator_request"],
+      ["getSession", "session-1"],
       ["compactSession", "session-1", "session-2"]
     ]);
   });
@@ -2191,6 +2193,7 @@ describe("Infinite OS app-hosted API/MCP skeleton", () => {
         events.push(["getSession", sessionId]);
         return {
           id: sessionId,
+          workspaceId: WORKSPACE,
           messages: [
             { role: "user", content: "Which source drove revenue?" },
             { role: "assistant", content: "Stripe drove recognized revenue." }
@@ -2212,6 +2215,7 @@ describe("Infinite OS app-hosted API/MCP skeleton", () => {
       }
     };
     const app = createApp({
+      database: workspaceProbeDb(),
       sessionStore,
       modelClient: {
         complete: async (request) => {
@@ -2224,7 +2228,7 @@ describe("Infinite OS app-hosted API/MCP skeleton", () => {
     const compact = await app.inject({
       method: "POST",
       url: "/chat/sessions/session-1/compact",
-      headers: { authorization: `Bearer ${READ_TOKEN}` },
+      headers: OPERATOR_HEADERS,
       payload: { newSessionId: "session-2" }
     });
 

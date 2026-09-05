@@ -1,3 +1,4 @@
+import { acknowledgeAuxiliaryBrainUsage, completeAuxiliaryModel, listAuxiliaryBrainUsage } from "./brain-usage-outbox.js";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -43,7 +44,8 @@ import {
   filterCuratedMemoryCandidates,
   type InfiniteOsModelClient,
   type ScopedAppTools,
-  type ChatSessionStore
+  type ChatSessionStore,
+  type TurnModel
 } from "@infinite-os/llm-controller";
 import {
   FIRST_PHASE_METRICS,
@@ -77,6 +79,13 @@ function timingSafeEqualStr(a: string, b: string): boolean {
 // sends platform "desktop". Unknown/missing platforms fall back to "api"
 // (the historical hardcode) so legacy gateway callers are unchanged.
 type GatewayControllerSurface = Extract<RuntimeSurface, "api" | "app" | "cli" | "desktop">;
+function validTurnModel(value: unknown): value is TurnModel {
+  if (!value || typeof value !== "object") return false;
+  const model = value as Record<string, unknown>;
+  return typeof model.modelId === "string" && /^gpt-[a-zA-Z0-9.-]+$/.test(model.modelId)
+    && (model.effort === undefined || (typeof model.effort === "string" && ["minimal", "low", "medium", "high", "xhigh"].includes(model.effort)));
+}
+
 function platformToSurface(platform: string): GatewayControllerSurface {
   switch (platform) {
     case "desktop":
@@ -108,6 +117,7 @@ function stripWorkspaceSuffix(id: string, workspaceId: string): string {
 // secrets). ADD-ONLY: append new capabilities as the engine gains them; never rename or
 // remove one a shipped desktop already gates on (that would silently mis-gate it).
 export const APP_CAPABILITIES = [
+  "auxiliary_brain_usage_outbox",
   // PR #76 — the scoped app-tool bridge for desktop Ads local-brain sessions.
   "scoped_app_tools",
   // Codex chat keystone — the scoped app-tool bridge also supports mode:"union", which
@@ -344,6 +354,7 @@ function stringField(value: Record<string, unknown>, key: string): string | unde
 }
 
 export interface CompactSessionRequestBody {
+  model?: TurnModel;
   newSessionId?: string;
   summaryText?: string;
   summaryJson?: Record<string, unknown>;
@@ -355,7 +366,8 @@ export interface MemoryFactRequestBody {
 }
 
 export interface GatewayTurnRequestBody {
-  model?: { modelId: string; effort?: "minimal" | "low" | "medium" | "high" | "xhigh" };
+  memoryModel?: TurnModel;
+  model?: TurnModel;
   platform?: string;
   actorId?: string;
   channelId?: string;
@@ -478,7 +490,9 @@ export function createApp(options: {
   const memoryManager = dbAdapter
     ? createCuratedMemoryManager({
         db: dbAdapter,
-        reviewer: createModelBackedMemoryReviewer(modelClient)
+        reviewer: input => createModelBackedMemoryReviewer({
+          complete: request => completeAuxiliaryModel(database!, modelClient, "memory_review", input.workspaceId, request)
+        })(input)
       })
     : undefined;
   const llmController = createLlmController({
@@ -696,6 +710,32 @@ export function createApp(options: {
     return retiredMetadataActionRequest("describe_queryable_view", { viewId: "queryable.vw_recent_sync_status" }, "app", ws);
   });
 
+  // Install operators can read all local projects' content-free pending receipts; ACK is scoped.
+  app.get("/brain/usage/pending", async (request, reply) => {
+    if (request.auth.authority !== "operator") {
+      reply.code(403); return { ok: false, error: { code: "operator_authority_required" } };
+    }
+    if (!database) {
+      reply.code(503); return { ok: false, error: { code: "database_unavailable" } };
+    }
+    return { ok: true, receipts: await listAuxiliaryBrainUsage(database, request.auth.workspaceId) };
+  });
+  app.post<{ Body: { receiptIds?: unknown } }>("/brain/usage/ack", async (request, reply) => {
+    if (request.auth.authority !== "operator") {
+      reply.code(403); return { ok: false, error: { code: "operator_authority_required" } };
+    }
+    const ws = request.auth.workspaceId;
+    if (!ws || !database) {
+      reply.code(400); return { ok: false, error: { code: "unknown_workspace" } };
+    }
+    const ids = request.body?.receiptIds;
+    if (!Array.isArray(ids) || ids.length > 100 || ids.some(id => typeof id !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id))) {
+      reply.code(400); return { ok: false, error: { code: "invalid_receipt_ids" } };
+    }
+    await acknowledgeAuxiliaryBrainUsage(database, ws, ids);
+    return { ok: true };
+  });
+
   app.post<{ Body: GatewayTurnRequestBody }>("/gateway/turn", async (request, reply) => {
     if (request.auth.authority !== "operator") {
       reply.code(403);
@@ -730,7 +770,12 @@ export function createApp(options: {
     // the same PK and collide. The `:${ws}` suffix keeps the row per-workspace.
     const sessionId = `${conversationId}:${ws}`;
     const model = request.body?.model;
-    if (model !== undefined && (!model || typeof model.modelId !== "string" || !/^gpt-[a-zA-Z0-9.-]+$/.test(model.modelId) || (model.effort !== undefined && !["minimal", "low", "medium", "high", "xhigh"].includes(model.effort)))) {
+    const memoryModel = request.body?.memoryModel;
+    if (memoryModel !== undefined && !validTurnModel(memoryModel)) {
+      reply.code(400);
+      return { ok: false, error: { code: "invalid_memory_model" } };
+    }
+    if (model !== undefined && !validTurnModel(model)) {
       reply.code(400);
       return { ok: false, error: { code: "invalid_turn_model" } };
     }
@@ -742,6 +787,7 @@ export function createApp(options: {
     try {
       const response = await llmController.chat({
         model,
+        memoryModel,
         message,
         sessionId,
         workspaceId: ws,
@@ -804,7 +850,12 @@ export function createApp(options: {
     const sessionId = `${conversationId}:${ws}`;
 
     const model = request.body?.model;
-    if (model !== undefined && (!model || typeof model.modelId !== "string" || !/^gpt-[a-zA-Z0-9.-]+$/.test(model.modelId) || (model.effort !== undefined && !["minimal", "low", "medium", "high", "xhigh"].includes(model.effort)))) {
+    const memoryModel = request.body?.memoryModel;
+    if (memoryModel !== undefined && !validTurnModel(memoryModel)) {
+      reply.code(400);
+      return { ok: false, error: { code: "invalid_memory_model" } };
+    }
+    if (model !== undefined && !validTurnModel(model)) {
       reply.code(400);
       return { ok: false, error: { code: "invalid_turn_model" } };
     }
@@ -829,6 +880,7 @@ export function createApp(options: {
     try {
       const response = await llmController.chat({
         model,
+        memoryModel,
         message,
         sessionId,
         workspaceId: ws,
@@ -1166,8 +1218,25 @@ export function createApp(options: {
   app.post<{ Body: CompactSessionRequestBody; Params: { id: string } }>(
     "/chat/sessions/:id/compact",
     async (request, reply) => {
+      if (request.auth.authority !== "operator") {
+        reply.code(403); return { ok: false, error: { code: "operator_authority_required" } };
+      }
+      const ws = request.auth.workspaceId;
+      const session = await sessionStore?.getSession(request.params.id);
+      if (!ws || !session || session.workspaceId !== ws) {
+        reply.code(404); return { ok: false, error: { code: "session_not_found" } };
+      }
+      if (request.body?.model !== undefined && !validTurnModel(request.body.model)) {
+        reply.code(400); return { ok: false, error: { code: "invalid_turn_model" } };
+      }
       const suppliedSummary = typeof request.body?.summaryText === "string" ? request.body.summaryText.trim() : "";
-      const summaryText = suppliedSummary || (await generateCompactSummary(sessionStore, modelClient, request.params.id));
+      if (!suppliedSummary && !database) {
+        reply.code(503); return { ok: false, error: { code: "database_unavailable" } };
+      }
+      const compactModel = request.body?.model;
+      const summaryText = suppliedSummary || (await generateCompactSummary(sessionStore, {
+        complete: request => completeAuxiliaryModel(database!, modelClient, "compaction", ws, { ...request, model: compactModel })
+      }, request.params.id, session));
       if (!summaryText) {
         reply.code(400);
         return {
@@ -2490,9 +2559,10 @@ function stringBodyValue(value: unknown): string | undefined {
 async function generateCompactSummary(
   sessionStore: ChatSessionStore | undefined,
   modelClient: InfiniteOsModelClient,
-  sessionId: string
+  sessionId: string,
+  loadedSession?: Awaited<ReturnType<ChatSessionStore["getSession"]>>
 ): Promise<string> {
-  const session = await sessionStore?.getSession(sessionId);
+  const session = loadedSession ?? await sessionStore?.getSession(sessionId);
   if (!session) {
     return "";
   }
