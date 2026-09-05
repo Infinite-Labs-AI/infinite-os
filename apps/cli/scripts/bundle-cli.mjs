@@ -4,6 +4,7 @@
 //
 //   dist/bundle/infinite.mjs                        ← the whole CLI (entrypoint + @infinite-os/* +
 //                                                     ink/react), one file
+//   dist/bundle/infinite-tag/                      ← the published tag package layout (metadata + runtime)
 //   dist/bundle/node_modules/@electric-sql/pglite   ← PGlite (JS + WASM) kept EXTERNAL + side-car'd
 //                                                     ONLY IF the CLI graph references it, so its
 //                                                     runtime WASM loading still resolves
@@ -53,12 +54,45 @@ const result = await build({
   // node_modules so its runtime WASM loading (relative to its own dist) keeps working. Everything
   // else — including the @infinite-os/ink fork (native-TS yoga, no WASM) and react — is inlined.
   external: ["@electric-sql/pglite"],
+  // The tag reads package metadata relative to import.meta.url. Inlining it destroys that
+  // layout; preserve a zero-dependency package sidecar instead. Keep it outside node_modules:
+  // desktop staging intentionally strips the CLI's duplicate PGlite node_modules directory.
+  plugins: [{
+    name: "infinite-tag-sidecar",
+    setup(bundler) {
+      bundler.onResolve({ filter: /^infinite-tag$/ }, () => ({
+        path: "./infinite-tag/dist/src/index.js",
+        external: true
+      }));
+    }
+  }],
   // An ESM bundle of a Node app can still emit require() for CJS-interop deps — provide the shim.
   banner: {
     js: "import { createRequire as ___cr } from 'node:module'; const require = ___cr(import.meta.url);"
   },
   logLevel: "info"
 });
+
+// Preserve exactly the runtime package layout, including the version metadata and public
+// contracts used by the installer. No engine checkout or npm install is needed on the user's Mac.
+const tagRoot = join(repoRoot, "packages", "instrument");
+const tagMetadata = JSON.parse(readFileSync(join(tagRoot, "package.json"), "utf8"));
+if (Object.keys(tagMetadata.dependencies ?? {}).length > 0) {
+  throw new Error("infinite-tag gained runtime dependencies: stage them before shipping the CLI sidecar");
+}
+if (!readdirSync(join(tagRoot, "dist", "src")).includes("index.js")) {
+  throw new Error("Build infinite-tag before bundling the CLI: pnpm --filter infinite-tag build");
+}
+const tagTarget = join(outDir, "infinite-tag");
+mkdirSync(tagTarget, { recursive: true });
+for (const entry of ["package.json", "LICENSE", "dist/src", "contracts"]) {
+  cpSync(join(tagRoot, entry), join(tagTarget, entry), {
+    recursive: true,
+    // Workspace builds also emit test files; they are not part of the shipped runtime.
+    filter: (file) => !/\.test\./.test(file)
+  });
+}
+console.log(`   + infinite-tag ${tagMetadata.version} package sidecar`);
 
 // Only side-car PGlite if the CLI graph actually imports it — the CLI is a daemon *client* and may
 // never touch the local engine DB. When it does (credential/db paths), the external import must
