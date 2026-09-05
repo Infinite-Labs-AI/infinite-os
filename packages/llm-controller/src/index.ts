@@ -329,7 +329,7 @@ export interface ModelResponse {
 
 export interface InfiniteOsModelClient {
   complete: (request: ModelRequest) => Promise<ModelResponse>;
-  modelMetadata?: () => { provider?: "codex" | "claude"; model?: string; authSource?: string };
+  modelMetadata?: (model?: TurnModel) => { provider?: "codex" | "claude"; model?: string; authSource?: string };
 }
 
 export interface ChatInput {
@@ -481,7 +481,11 @@ export function createLlmController(options: {
       };
       const sessionId = input.sessionId ?? `${input.surface}_${randomUUID()}`;
       const scopedInput = { ...input, sessionId };
-      const modelMetadata = { ...modelClient.modelMetadata?.(), ...(input.model ? { provider: "codex" as const, model: input.model.modelId } : {}) };
+      const selectedMetadata = modelClient.modelMetadata?.(input.model);
+      const modelMetadata = input.model
+        ? { provider: "codex" as const, model: input.model.modelId,
+            ...(selectedMetadata?.provider === "codex" ? { authSource: selectedMetadata.authSource } : {}) }
+        : selectedMetadata;
       const scopedAppTools = normalizeScopedAppTools(input.scopedAppTools);
       // A plain chat turn (no scoped app tools) persists. A scoped turn persists ONLY
       // in "union" mode — Codex chat needs session memory + recall + advisor exactly

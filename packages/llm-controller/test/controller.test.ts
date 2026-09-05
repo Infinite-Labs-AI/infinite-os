@@ -9359,3 +9359,61 @@ describe("per-turn usage receipts", () => {
     } finally { rmSync(growthHome, { recursive: true, force: true }); }
   });
 });
+
+describe("provider usage review regressions", () => {
+  const request: ModelRequest = { systemPrompt: "system", userMessage: "user", tools: [], toolResults: [] };
+  const claudeFrames = [
+    { type: "message_start", message: { usage: { input_tokens: 17, cache_read_input_tokens: 40, cache_creation_input_tokens: 8, output_tokens: 0 } } },
+    { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 6 } },
+  ];
+  function stream(frames: unknown[], fail: boolean): Response {
+    const bytes = new TextEncoder().encode(frames.map(frame => `event: message\ndata: ${JSON.stringify(frame)}\n\n`).join(""));
+    let delivered = false;
+    return { ok: true, status: 200, headers: new Headers({ "content-type": "text/event-stream" }), body: { getReader: () => ({ read: async () => {
+      if (!delivered) { delivered = true; return { done: false, value: bytes }; }
+      if (fail) throw new Error("reader disconnected");
+      return { done: true, value: undefined };
+    } }) } } as unknown as Response;
+  }
+
+  it.each([false, true])("reads native Claude usage and preserves it when the reader throws=%s", async fail => {
+    const home = mkdtempSync(join(tmpdir(), "claude-real-usage-"));
+    try {
+      const env = { GROWTH_OS_HOME: home, HOME: home, ANTHROPIC_API_KEY: "test-key" };
+      writeInfiniteOsModelSelection({ provider: "claude", model: "claude-sonnet-4-6" }, env);
+      const client = createConfiguredModelClient({ env, fetch: async () => stream(claudeFrames, fail) });
+      const usage = { promptTokens: 17, cacheReadTokens: 40, cacheCreationTokens: 8, completionTokens: 6 };
+      if (fail) await expect(client.complete(request)).rejects.toMatchObject({ message: "reader disconnected", usage });
+      else expect((await client.complete(request)).usage).toEqual(usage);
+    } finally { rmSync(home, { recursive: true, force: true }); }
+  });
+
+  it.each([false, true])("uses the captured Codex provider/model without a saved default, reader throws=%s", async fail => {
+    const home = mkdtempSync(join(tmpdir(), "codex-no-default-"));
+    try {
+      const env = { GROWTH_OS_HOME: home, HOME: home };
+      writeInfiniteOsAuthRecord({ provider: "codex", source: "codex-cli", authMode: "device-code", token: "test-token" }, env);
+      const fetch = vi.fn(async () => stream([{ type: "response.completed", response: { usage: { input_tokens: 23, output_tokens: 9, input_tokens_details: { cached_tokens: 12 } } } }], fail));
+      const client = createConfiguredModelClient({ env, fetch });
+      const turn = { ...request, model: { modelId: "gpt-5.5", effort: "medium" as const } };
+      const usage = { promptTokens: 23, completionTokens: 9, cacheReadTokens: 12 };
+      if (fail) await expect(client.complete(turn)).rejects.toMatchObject({ message: "reader disconnected", usage });
+      else expect((await client.complete(turn)).usage).toMatchObject(usage);
+      expect(fetch).toHaveBeenCalledTimes(1);
+    } finally { rmSync(home, { recursive: true, force: true }); }
+  });
+
+  it("resolves metadata for the effective provider and omits a legacy client's stale auth source", async () => {
+    const home = mkdtempSync(join(tmpdir(), "effective-model-metadata-"));
+    try {
+      const env = { GROWTH_OS_HOME: home, HOME: home, ANTHROPIC_API_KEY: "test-key" };
+      writeInfiniteOsModelSelection({ provider: "claude", model: "claude-sonnet-4-6" }, env);
+      writeInfiniteOsAuthRecord({ provider: "codex", source: "codex-cli", authMode: "device-code", token: "test-token" }, env);
+      const client = createConfiguredModelClient({ env, fetch: async () => new Response(JSON.stringify({ output_text: "answer" })) });
+      expect(client.modelMetadata?.({ modelId: "gpt-5.5" })).toMatchObject({ provider: "codex", model: "gpt-5.5", authSource: "codex-cli" });
+      const result = await createLlmController({ registry: createInfiniteOsRegistry({}), modelClient: { complete: client.complete, modelMetadata: () => ({ provider: "claude", model: "claude-sonnet-4-6", authSource: "anthropic-api-key" }) } }).chat({ message: "hello", workspaceId: "ws", actorId: "a", surface: "desktop", model: { modelId: "gpt-5.5" } });
+      expect(result).toMatchObject({ modelProvider: "codex", modelName: "gpt-5.5" });
+      expect(result.modelAuthSource).toBeUndefined();
+    } finally { rmSync(home, { recursive: true, force: true }); }
+  });
+});
