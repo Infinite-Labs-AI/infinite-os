@@ -80,7 +80,8 @@ describe("Infinite OS migration stack", () => {
       "0063_posthog_daily_rollups.sql",
       "0064_posthog_raw_retention.sql",
       "0065_prune_rolls_up_before_deleting.sql",
-      "0066_auxiliary_brain_usage_outbox.sql"
+      "0066_auxiliary_brain_usage_outbox.sql",
+      "0067_signup_event_metric_semantics.sql"
     ]);
   });
 
@@ -1076,7 +1077,8 @@ describe("Infinite OS migration stack", () => {
       "0063_posthog_daily_rollups.sql",
       "0064_posthog_raw_retention.sql",
       "0065_prune_rolls_up_before_deleting.sql",
-      "0066_auxiliary_brain_usage_outbox.sql"
+      "0066_auxiliary_brain_usage_outbox.sql",
+      "0067_signup_event_metric_semantics.sql"
     ]);
   });
 

@@ -5133,6 +5133,10 @@ function appendAllowedDimensions(value: unknown, dimensions: string[]): unknown 
 
 // Exported (DEDUP single-source-of-truth): consumed by apps/worker runSavedReport.
 export function caveatsForMetric(metric: string): string[] {
+  if (metric === "signup_count") return [
+    "PostHog signup event occurrences, not verified account registrations",
+    "source_native_attribution_only", "content_linkage_not_implemented",
+  ];
   if (metric === "recognized_revenue") return ["content_linkage_not_implemented"];
   if (metric === "stripe_current_paid_subscribers") {
     return ["current_snapshot", "positive_recurring_value_only", "trialing_excluded"];
@@ -5335,7 +5339,7 @@ function sourceAuthorityForMetric(metric: string): string {
   if (metric === "x_post_count") return "X authored posts in the synced timeline are the first-phase posting authority";
   if (metric === "x_comment_count") return "X authored replies in the synced timeline are the first-phase comment authority";
   if (metric === "x_follower_count") return "X public profile metrics are the first-phase follower authority";
-  return "PostHog signup events are the first-phase signup authority";
+  return "PostHog event occurrences, not verified account registrations";
 }
 
 function drilldownForMetric(metric: string): string {
