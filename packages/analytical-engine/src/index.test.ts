@@ -2780,6 +2780,8 @@ describe("analytical engine smoke", () => {
 
     // Same-lane rule: the metric no longer touches the (retired cross-provider) conversion view.
     expect(result?.data).toMatchObject({ metric: "signup_count", view: "queryable.vw_posthog_events" });
+    expect(JSON.stringify(result)).not.toContain("first-phase signup authority");
+    expect(JSON.stringify(result)).toContain("not verified account registrations");
     const aggregateQuery = queries.find((entry) => entry.sql.includes("from queryable.vw_posthog_events"));
     // COALESCE keeps the blended view's measured-zero shape: traffic-without-signups grains rank as
     // 0 in `order by signup_count desc`, never as NULL above every real count.

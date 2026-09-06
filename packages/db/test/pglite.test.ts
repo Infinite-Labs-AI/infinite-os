@@ -88,9 +88,9 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
     rmSync(dataDir, { recursive: true, force: true });
   });
 
-  it("applied ALL 66 migrations on first boot and is idempotent on a re-run", async () => {
-    expect(loadMigrations().length).toBe(66);
-    expect(firstRun).toHaveLength(66);
+  it("applied ALL 67 migrations on first boot and is idempotent on a re-run", async () => {
+    expect(loadMigrations().length).toBe(67);
+    expect(firstRun).toHaveLength(67);
     expect(firstRun).toContain("0001_control_plane.sql");
     expect(firstRun).toContain("0006_security_roles.sql");
     expect(firstRun).toContain("0036_chat_sessions_desktop_surface.sql");
@@ -131,13 +131,13 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
     expect(secondRun).toEqual([]);
   });
 
-  it("created the schema_migrations ledger with all 66 rows", async () => {
+  it("created the schema_migrations ledger with all 67 rows", async () => {
     const ledger = await db.query<{ id: string }>(
       "select id from schema_migrations order by id"
     );
-    expect(ledger).toHaveLength(66);
+    expect(ledger).toHaveLength(67);
     expect(ledger[0]?.id).toBe("0001_control_plane.sql");
-    expect(ledger.at(-1)?.id).toBe("0066_auxiliary_brain_usage_outbox.sql");
+    expect(ledger.at(-1)?.id).toBe("0067_signup_event_metric_semantics.sql");
   });
 
   it("0063 serves both PostHog views from per-(workspace, source, day) rollups — refresh, is_internal, idempotency, grain key, grants", async () => {
@@ -949,6 +949,12 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
       "select source_view from metric_definitions where id = 'signup_count'"
     );
     expect(signupSeed[0]?.source_view).toBe("queryable.vw_posthog_events");
+    const signupMetadata = await db.query<{ name: string; unit: string; caveats: string }>(
+      "select name, unit, caveats from metric_definitions where id = 'signup_count'"
+    );
+    expect(signupMetadata[0]?.name).toBe("PostHog signup events");
+    expect(signupMetadata[0]?.unit).toBe("events");
+    expect(signupMetadata[0]?.caveats).toContain("not verified account registrations");
   });
 
   it("materialized the Stripe delta + reconciliation objects with WORKING grants", async () => {
