@@ -9,13 +9,20 @@ import type {
  *
  * Both provider planes flow through this one shape (Plan 1's contract):
  *   - Codex: `data` is ALREADY a typed `ChatProgressEvent` → passed through.
- *   - Claude: `progress` carries streamed text; `tool_result` / `action`
- *     carry a tool-trail step that we map into a `ChatProgressEvent`.
+ *   - Claude: `progress` carries streamed text, plus typed `tool.complete`
+ *     frames the desktop bridge maps from the transport's tool activity.
  *   - `done` / `error` are terminal; `done` carries the `sessionId` the caller
  *     resends on the next turn (either top-level or inside `data`).
  */
 export interface BridgeFrame {
-  kind: "progress" | "tool_result" | "action" | "done" | "error";
+  // ONLY these three exist on the wire: `writeFrame` in the desktop bridge is
+  // typed to them, and `readTurnStream` throws `desktop_stream_invalid` on
+  // anything else. Earlier revisions also declared `tool_result` and `action`
+  // with mapping cases that were unreachable — and those cases forwarded a
+  // tool's raw `summary` and a fabricated `durationMs: 0`, the two defects the
+  // bridge fix exists to avoid. Deleted so they cannot be re-wired by accident:
+  // Claude's tool activity now arrives as a TYPED `tool.complete` on `progress`.
+  kind: "progress" | "done" | "error";
   data?: unknown;
   message?: string;
   actionCalls?: unknown[];
@@ -98,38 +105,29 @@ export function bridgeFrameToChatEvent(
       if (text === undefined) return null;
       return { type: "message.delta", stage: "message", message: text, text };
     }
-    case "tool_result": {
-      const name = frameToolName(frame);
-      const summary = firstString(
-        isRecord(frame.data) ? frame.data.summary : undefined,
+    case "done": {
+      // The terminal frame carries the finished answer (`publicDoneData` puts
+      // it there). On the CLAUDE plane this is the ONLY carrier: that transport
+      // emits text-only progress, so nothing upstream ever produces a typed
+      // `message.complete`. Dropping this frame left the answer living solely in
+      // the live streaming region, which `turnController.reset()` wipes the
+      // instant the turn ends — the answer rendered, then vanished.
+      //
+      // Codex DOES send its own typed `message.complete` mid-stream, so this
+      // would be a SECOND one; `createDesktopTurnSource` keeps only the first
+      // per turn (see `completionEmitted`).
+      const text = firstString(
+        isRecord(frame.data) ? frame.data.message : undefined,
         frame.message
       );
+      if (text === undefined) return null;
       return {
-        type: "tool.complete",
-        stage: "tool",
-        message: name,
-        toolId: frameToolId(frame),
-        name,
-        durationMs: 0,
-        ...(summary !== undefined ? { summary } : {})
+        type: "message.complete",
+        stage: "message",
+        message: "Assistant message complete.",
+        text
       };
     }
-    case "action": {
-      const name = frameToolName(frame);
-      const context = firstString(
-        isRecord(frame.data) ? frame.data.context : undefined,
-        frame.message
-      );
-      return {
-        type: "tool.start",
-        stage: "tool",
-        message: name,
-        toolId: frameToolId(frame),
-        name,
-        context: context ?? ""
-      };
-    }
-    case "done":
     case "error":
       return null;
   }
@@ -148,6 +146,14 @@ export function createDesktopTurnSource(
     async runTurn(message, sessionId, onEvent, signal) {
       let terminalSessionId = extractSessionId(undefined);
       let pendingConfirmations: InSessionConfirmationAction[] = [];
+      // At most ONE `message.complete` per turn, first one wins. Both planes can
+      // now produce one — Codex as a typed mid-stream progress frame, Claude only
+      // via the terminal `done` frame — and the shell COMMITS the answer to its
+      // transcript on every one it sees, so a second would append the answer twice.
+      // First-wins keeps the Codex path exactly as it was before `done` started
+      // mapping, while Claude (which has no mid-stream completion) still gets its
+      // one from `done`.
+      let completionEmitted = false;
       const outcome = await client.turn(
         {
           message,
@@ -170,7 +176,12 @@ export function createDesktopTurnSource(
             );
           }
           const event = bridgeFrameToChatEvent(frame);
-          if (event) onEvent(event);
+          if (!event) return;
+          if ("type" in event && event.type === "message.complete") {
+            if (completionEmitted) return;
+            completionEmitted = true;
+          }
+          onEvent(event);
         }
       );
       const finalSessionId =
@@ -202,25 +213,6 @@ function isTypedEvent(value: unknown): boolean {
     isRecord(value) &&
     typeof value.type === "string" &&
     value.type.length > 0
-  );
-}
-
-function frameToolName(frame: BridgeFrame): string {
-  return (
-    firstString(
-      isRecord(frame.data) ? frame.data.name : undefined,
-      isRecord(frame.data) ? frame.data.tool : undefined,
-      frame.message
-    ) ?? "tool"
-  );
-}
-
-function frameToolId(frame: BridgeFrame): string {
-  return (
-    firstString(
-      isRecord(frame.data) ? frame.data.toolId : undefined,
-      isRecord(frame.data) ? frame.data.id : undefined
-    ) ?? ""
   );
 }
 

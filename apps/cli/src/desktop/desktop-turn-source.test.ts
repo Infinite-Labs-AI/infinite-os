@@ -34,7 +34,60 @@ function fakeClient(opts: {
   return client;
 }
 
+const completions = (events: ChatProgressEvent[]) =>
+  events.filter((e) => (e as { type?: string }).type === "message.complete");
+
 describe("createDesktopTurnSource", () => {
+  // Regression: the CLAUDE plane streams text-only progress and produces NO
+  // typed `message.complete`, so the terminal `done` frame is the answer's only
+  // carrier. While `done` mapped to null the shell committed nothing, and the
+  // answer — rendered live from the streaming region — was erased by
+  // `turnController.reset()` a split second after the turn ended.
+  it("emits exactly one message.complete for a Claude text-only turn", async () => {
+    const client = fakeClient({
+      sessionCapable: true,
+      frames: [
+        { kind: "progress", data: { delta: "GA4 and PostHog " } },
+        { kind: "progress", data: { delta: "answer different questions." } },
+        { kind: "done", message: "FULL ANSWER", actionCalls: [] }
+      ]
+    });
+    const events: ChatProgressEvent[] = [];
+    await createDesktopTurnSource(client).runTurn(
+      "why both?",
+      undefined,
+      (e) => events.push(e),
+      new AbortController().signal
+    );
+    expect(completions(events)).toHaveLength(1);
+    expect(completions(events)[0]).toMatchObject({ text: "FULL ANSWER" });
+  });
+
+  // The other half of the same guard: Codex ALREADY sends a typed
+  // `message.complete` mid-stream and the `done` frame repeats the text. The
+  // shell commits on every completion it sees, so without first-wins the Codex
+  // answer would be appended to the transcript twice.
+  it("does not double-commit when Codex already sent a typed completion", async () => {
+    const client = fakeClient({
+      sessionCapable: true,
+      frames: [
+        {
+          kind: "progress",
+          data: { type: "message.complete", text: "FULL ANSWER" }
+        },
+        { kind: "done", message: "FULL ANSWER", actionCalls: [] }
+      ]
+    });
+    const events: ChatProgressEvent[] = [];
+    await createDesktopTurnSource(client).runTurn(
+      "why both?",
+      undefined,
+      (e) => events.push(e),
+      new AbortController().signal
+    );
+    expect(completions(events)).toHaveLength(1);
+  });
+
   it("passes typed Codex frames through as ChatProgressEvents", async () => {
     const client = fakeClient({
       sessionCapable: true,
@@ -238,32 +291,32 @@ describe("bridgeFrameToChatEvent", () => {
     });
   });
 
-  it("maps a Claude tool_result frame to a tool.complete trail event", () => {
-    const frame: BridgeFrame = {
-      kind: "tool_result",
-      data: { name: "list_sources", toolId: "t1" }
-    };
-    expect(bridgeFrameToChatEvent(frame)).toMatchObject({
-      type: "tool.complete",
-      stage: "tool",
-      name: "list_sources"
+
+
+  it("commits the done frame's answer as message.complete", () => {
+    expect(
+      bridgeFrameToChatEvent({
+        kind: "done",
+        sessionId: "s1",
+        message: "the answer"
+      })
+    ).toMatchObject({
+      type: "message.complete",
+      stage: "message",
+      text: "the answer"
     });
   });
 
-  it("maps a Claude action frame to a tool.start trail event", () => {
-    const frame: BridgeFrame = {
-      kind: "action",
-      data: { name: "publish_page", toolId: "t2" }
-    };
-    expect(bridgeFrameToChatEvent(frame)).toMatchObject({
-      type: "tool.start",
-      stage: "tool",
-      name: "publish_page"
-    });
-  });
-
-  it("returns null for terminal frames (done/error)", () => {
+  it("returns null for a done frame carrying no answer", () => {
+    // A tool-only turn (or an empty terminal message) must not commit a blank
+    // assistant bubble.
     expect(bridgeFrameToChatEvent({ kind: "done", sessionId: "s1" })).toBeNull();
+    expect(
+      bridgeFrameToChatEvent({ kind: "done", message: "" })
+    ).toBeNull();
+  });
+
+  it("returns null for terminal error frames", () => {
     expect(
       bridgeFrameToChatEvent({ kind: "error", message: "boom" })
     ).toBeNull();
