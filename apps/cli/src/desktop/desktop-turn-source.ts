@@ -129,7 +129,29 @@ export function bridgeFrameToChatEvent(
         context: context ?? ""
       };
     }
-    case "done":
+    case "done": {
+      // The terminal frame carries the finished answer (`publicDoneData` puts
+      // it there). On the CLAUDE plane this is the ONLY carrier: that transport
+      // emits text-only progress, so nothing upstream ever produces a typed
+      // `message.complete`. Dropping this frame left the answer living solely in
+      // the live streaming region, which `turnController.reset()` wipes the
+      // instant the turn ends — the answer rendered, then vanished.
+      //
+      // Codex DOES send its own typed `message.complete` mid-stream, so this
+      // would be a SECOND one; `createDesktopTurnSource` keeps only the first
+      // per turn (see `completionEmitted`).
+      const text = firstString(
+        isRecord(frame.data) ? frame.data.message : undefined,
+        frame.message
+      );
+      if (text === undefined) return null;
+      return {
+        type: "message.complete",
+        stage: "message",
+        message: "Assistant message complete.",
+        text
+      };
+    }
     case "error":
       return null;
   }
@@ -148,6 +170,14 @@ export function createDesktopTurnSource(
     async runTurn(message, sessionId, onEvent, signal) {
       let terminalSessionId = extractSessionId(undefined);
       let pendingConfirmations: InSessionConfirmationAction[] = [];
+      // At most ONE `message.complete` per turn, first one wins. Both planes can
+      // now produce one — Codex as a typed mid-stream progress frame, Claude only
+      // via the terminal `done` frame — and the shell COMMITS the answer to its
+      // transcript on every one it sees, so a second would append the answer twice.
+      // First-wins keeps the Codex path exactly as it was before `done` started
+      // mapping, while Claude (which has no mid-stream completion) still gets its
+      // one from `done`.
+      let completionEmitted = false;
       const outcome = await client.turn(
         {
           message,
@@ -170,7 +200,12 @@ export function createDesktopTurnSource(
             );
           }
           const event = bridgeFrameToChatEvent(frame);
-          if (event) onEvent(event);
+          if (!event) return;
+          if ("type" in event && event.type === "message.complete") {
+            if (completionEmitted) return;
+            completionEmitted = true;
+          }
+          onEvent(event);
         }
       );
       const finalSessionId =
