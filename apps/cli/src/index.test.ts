@@ -1320,6 +1320,33 @@ describe("cli smoke", () => {
     }));
   });
 
+  // Regression: `durationMs` was typed as required, so this reporter divided it
+  // unguarded. A transport that does not time its tool calls (the desktop Cmd+L
+  // bridge's Claude plane) omits it, `undefined / 1000` is NaN, and NaN is not
+  // `undefined` — so the trail printed a literal "(NaNs)" on the raw terminal.
+  it("renders an untimed tool.complete with no duration, never NaN", () => {
+    const line = formatInteractiveProgress({
+      type: "tool.complete",
+      stage: "tool",
+      message: "get_x_inspiration_playbook",
+      toolId: "",
+      name: "get_x_inspiration_playbook",
+      status: "ok",
+    }, 1000);
+    expect(line).not.toContain("NaN");
+    expect(line).toContain("Get X Inspiration Playbook");
+    // A measured tool still shows its timing.
+    expect(formatInteractiveProgress({
+      type: "tool.complete",
+      stage: "tool",
+      message: "run_breakdown_query",
+      toolId: "t1",
+      name: "run_breakdown_query",
+      durationMs: 2500,
+      status: "ok",
+    }, 1000)).toContain("(2.5s)");
+  });
+
   it("renders interactive progress lines with Hermes-style tool formatting", () => {
     expect(
       formatInteractiveProgress({ stage: "resolve", message: "Preparing X engagement breakdown." }, 3400)

@@ -390,7 +390,10 @@ class RawTerminalProgressReporter implements InteractiveProgressReporter {
     }
     if ("type" in event && event.type === "tool.complete") {
       this.clearTransientRow();
-      this.stream.write(`${formatInteractiveProgress(event, event.durationMs)}\n`);
+      // `elapsedMs` is unused by the tool.complete branch — that line's timing
+      // comes from `event.durationMs`, which an untimed transport omits. Passing
+      // 0 states the argument is inert here rather than inventing an elapsed.
+      this.stream.write(`${formatInteractiveProgress(event, 0)}\n`);
       return;
     }
     this.current = liveMessage(event);
