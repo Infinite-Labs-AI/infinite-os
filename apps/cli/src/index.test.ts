@@ -1320,6 +1320,88 @@ describe("cli smoke", () => {
     }));
   });
 
+  // A transport may report failure as status:"error" with no error STRING (the
+  // desktop bridge does — a tool's error text is raw provider output it must not
+  // forward). Marking only from the string rendered a failed tool as "✓".
+  it("marks a tool.complete failure from status alone", () => {
+    const line = formatInteractiveProgress({
+      type: "tool.complete",
+      stage: "tool",
+      message: "bash",
+      toolId: "",
+      name: "bash",
+      status: "error",
+    }, 0);
+    expect(line).toContain("✗");
+    expect(line).not.toContain("✓");
+  });
+
+  // A provider-chosen tool NAME must not forge the trail's own structure: a
+  // "(9.9s)" run reads as a measured duration this transport never recorded, and
+  // " :: " forges the detail separator that parseToolTrailResultLine splits on.
+  it("defuses a tool name that forges a duration or the detail separator", () => {
+    const line = formatInteractiveProgress({
+      type: "tool.complete",
+      stage: "tool",
+      message: "x",
+      toolId: "",
+      name: "evil (9.9s) :: pwned",
+      status: "ok",
+    }, 0);
+    expect(line).not.toContain("(9.9s)");
+    expect(line).not.toContain(" :: ");
+  });
+
+  // Security regression: a tool NAME or result summary is provider-controlled
+  // (an MCP server picks the name; the result is arbitrary text) and the trail
+  // line goes straight to a TTY. `stripAnsi` matches SGR only, so an OSC 52
+  // clipboard-write sequence used to survive to the terminal — and
+  // `displayWidth` measures it as ~0 cells, so truncation never trimmed it.
+  it("neutralizes terminal control sequences in tool trail lines", () => {
+    const ESC = String.fromCharCode(27);
+    const BEL = String.fromCharCode(7);
+    const line = formatInteractiveProgress({
+      type: "tool.complete",
+      stage: "tool",
+      message: "x",
+      toolId: "",
+      name: `evil${ESC}]52;c;ZXZpbA==${BEL}tool`,
+      summary: `ok${ESC}[2J${ESC}[H wiped`,
+      status: "ok",
+    }, 0);
+    expect(line).not.toContain(ESC);
+    expect(line).not.toContain(BEL);
+    expect(line).not.toContain("52;c;");
+    expect(line).not.toContain("[2J");
+  });
+
+  // Regression: `durationMs` was typed as required, so this reporter divided it
+  // unguarded. A transport that does not time its tool calls (the desktop Cmd+L
+  // bridge's Claude plane) omits it, `undefined / 1000` is NaN, and NaN is not
+  // `undefined` — so the trail printed a literal "(NaNs)" on the raw terminal.
+  it("renders an untimed tool.complete with no duration, never NaN", () => {
+    const line = formatInteractiveProgress({
+      type: "tool.complete",
+      stage: "tool",
+      message: "get_x_inspiration_playbook",
+      toolId: "",
+      name: "get_x_inspiration_playbook",
+      status: "ok",
+    }, 1000);
+    expect(line).not.toContain("NaN");
+    expect(line).toContain("Get X Inspiration Playbook");
+    // A measured tool still shows its timing.
+    expect(formatInteractiveProgress({
+      type: "tool.complete",
+      stage: "tool",
+      message: "run_breakdown_query",
+      toolId: "t1",
+      name: "run_breakdown_query",
+      durationMs: 2500,
+      status: "ok",
+    }, 1000)).toContain("(2.5s)");
+  });
+
   it("renders interactive progress lines with Hermes-style tool formatting", () => {
     expect(
       formatInteractiveProgress({ stage: "resolve", message: "Preparing X engagement breakdown." }, 3400)

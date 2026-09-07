@@ -96,7 +96,10 @@ export interface ToolCompleteProgressEvent {
   message: string;
   toolId: string;
   name: string;
-  durationMs: number;
+  // OPTIONAL: not every transport measures tool calls. The desktop Cmd+L
+  // bridge's Claude plane reports a completed tool with no timing rather than
+  // fabricating a zero, which would render as a measured-looking "(0.0s)".
+  durationMs?: number;
   summary?: string;
   error?: string;
   status?: ActionEnvelope["status"] | "requires_confirmation" | "error";

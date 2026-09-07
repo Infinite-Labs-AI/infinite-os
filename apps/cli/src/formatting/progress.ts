@@ -33,7 +33,9 @@ function formatInfiniteProgress(event: Extract<ChatProgressEvent, { type: string
       "",
       Boolean(event.error || event.status === "error"),
       event.error || event.summary,
-      event.durationMs / 1000
+      // Untimed tools carry no duration. Dividing `undefined` yields NaN, which
+      // is NOT `undefined`, so buildToolTrailLine would print "(NaNs)".
+      event.durationMs !== undefined ? event.durationMs / 1000 : undefined
     );
     return `┊ ${mark} ${label.padEnd(10)}${trail}`;
   }
