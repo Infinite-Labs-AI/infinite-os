@@ -24,7 +24,14 @@ export const hasAnsi = (s: string) => s.includes(`${ESC}[`) || s.includes(`${ESC
  * (`ESC[…m`), so an OSC sequence like `ESC]52;c;<b64>BEL` (clipboard write,
  * honoured by iTerm2/kitty/wezterm) passes straight through it to the terminal.
  * `displayWidth` measures such a payload as ~0 cells, so width-based truncation
- * never trims it either. Everything reaching a TTY must come through here.
+ * never trims it either.
+ *
+ * SCOPE — this currently guards the TOOL TRAIL only. Other surfaces still write
+ * provider-controlled bytes to the terminal unscrubbed: the assistant answer
+ * body, reasoning text, the active-tool `context`/`preview` widget, status and
+ * subagent lines, and todo content. Closing those belongs at event ingress (one
+ * scrub for every reporter) rather than at each renderer; do NOT read this
+ * helper as proof the terminal boundary is closed.
  *
  * This is the RENDER-layer defense and is deliberately separate from the
  * confirmation-card redactor in the desktop client, which additionally strips
@@ -240,8 +247,16 @@ export const toolTrailLabel = (name: string) =>
     .map((p) => p[0]!.toUpperCase() + p.slice(1))
     .join(" ") || name;
 
+// A tool NAME is provider-chosen, and the trail line it lands in is structured:
+// `label (1.2s) :: detail ✓`. A name containing " :: " or a "(9.9s)"-shaped run
+// forges a detail separator or a MEASURED duration this transport never recorded
+// — and `parseToolTrailResultLine`/`splitToolDuration` then parse the forgery back
+// out as real. Defuse both shapes; they carry no meaning inside a name anyway.
+const defuseTrailStructure = (value: string) =>
+  value.replace(/ :: /g, " ").replace(/\((\d+(?:\.\d+)?)s\)/g, "$1s");
+
 export const formatToolCall = (name: string, context = "") => {
-  const label = toolTrailLabel(name);
+  const label = defuseTrailStructure(toolTrailLabel(name));
   const preview = compactPreview(context, 64);
 
   return preview ? `${label}("${preview}")` : label;

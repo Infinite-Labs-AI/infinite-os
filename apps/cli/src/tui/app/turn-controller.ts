@@ -529,14 +529,25 @@ export class InfiniteTurnController {
     todos?: unknown
   ) {
     this.recordTodos(todos);
-    const line = this.completeTool(toolId, fallbackName, error || (status === "error" ? summary : undefined), summary, durationMs);
+    // A transport may report failure as `status:"error"` with NO error string —
+    // the desktop bridge does exactly that, because a tool's error text is raw
+    // provider output it must not forward. Mark the trail from the STATUS too,
+    // or a failed tool renders "✓".
+    const line = this.completeTool(
+      toolId,
+      fallbackName,
+      error || (status === "error" ? summary : undefined),
+      summary,
+      durationMs,
+      Boolean(error) || status === "error"
+    );
 
     this.pendingSegmentTools = [...this.pendingSegmentTools, line];
     this.flushPendingToolsIntoLastSegment();
     this.publishToolState();
   }
 
-  private completeTool(toolId: string, fallbackName?: string, error?: string, summary?: string, durationMs?: number) {
+  private completeTool(toolId: string, fallbackName?: string, error?: string, summary?: string, durationMs?: number, failed?: boolean) {
     const done = this.activeTools.find((tool) => tool.id === toolId);
     const name = done?.name ?? fallbackName ?? "tool";
     const label = toolTrailLabel(name);
@@ -545,7 +556,7 @@ export class InfiniteTurnController {
     const line = buildToolTrailLine(
       name,
       done?.latestPreview || done?.context || "",
-      Boolean(error),
+      failed ?? Boolean(error),
       error || summary || "",
       durationMs !== undefined ? durationMs / 1000 : fallbackDuration
     );

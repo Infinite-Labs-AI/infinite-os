@@ -1320,6 +1320,38 @@ describe("cli smoke", () => {
     }));
   });
 
+  // A transport may report failure as status:"error" with no error STRING (the
+  // desktop bridge does — a tool's error text is raw provider output it must not
+  // forward). Marking only from the string rendered a failed tool as "✓".
+  it("marks a tool.complete failure from status alone", () => {
+    const line = formatInteractiveProgress({
+      type: "tool.complete",
+      stage: "tool",
+      message: "bash",
+      toolId: "",
+      name: "bash",
+      status: "error",
+    }, 0);
+    expect(line).toContain("✗");
+    expect(line).not.toContain("✓");
+  });
+
+  // A provider-chosen tool NAME must not forge the trail's own structure: a
+  // "(9.9s)" run reads as a measured duration this transport never recorded, and
+  // " :: " forges the detail separator that parseToolTrailResultLine splits on.
+  it("defuses a tool name that forges a duration or the detail separator", () => {
+    const line = formatInteractiveProgress({
+      type: "tool.complete",
+      stage: "tool",
+      message: "x",
+      toolId: "",
+      name: "evil (9.9s) :: pwned",
+      status: "ok",
+    }, 0);
+    expect(line).not.toContain("(9.9s)");
+    expect(line).not.toContain(" :: ");
+  });
+
   // Security regression: a tool NAME or result summary is provider-controlled
   // (an MCP server picks the name; the result is arbitrary text) and the trail
   // line goes straight to a TTY. `stripAnsi` matches SGR only, so an OSC 52
