@@ -16,6 +16,75 @@ export const stripAnsi = (s: string) => s.replace(ANSI_RE, "");
 
 export const hasAnsi = (s: string) => s.includes(`${ESC}[`) || s.includes(`${ESC}]`);
 
+/**
+ * Neutralize terminal control sequences in text that came from OUTSIDE this CLI
+ * — a tool's name, a tool's result, anything a provider or an MCP server chose.
+ *
+ * `stripAnsi` above is a LAYOUT helper: it matches SGR colour codes only
+ * (`ESC[…m`), so an OSC sequence like `ESC]52;c;<b64>BEL` (clipboard write,
+ * honoured by iTerm2/kitty/wezterm) passes straight through it to the terminal.
+ * `displayWidth` measures such a payload as ~0 cells, so width-based truncation
+ * never trims it either. Everything reaching a TTY must come through here.
+ *
+ * This is the RENDER-layer defense and is deliberately separate from the
+ * confirmation-card redactor in the desktop client, which additionally strips
+ * URI credentials for a different threat. Producers do not escape their own
+ * output; the layer that owns the terminal does it once, for every provider.
+ */
+export const neutralizeControlSequences = (value: string): string => {
+  let out = "";
+  let i = 0;
+  while (i < value.length) {
+    const code = value.charCodeAt(i);
+    if (code === 0x1b) {
+      const next = value.charCodeAt(i + 1);
+      if (next === 0x5b) { i = skipUntilFinalByte(value, i + 2); continue; }      // CSI
+      if (next === 0x5d || next === 0x50 || next === 0x58 || next === 0x5e || next === 0x5f) {
+        i = skipUntilStringTerminator(value, i + 2); continue;                     // OSC/DCS/SOS/PM/APC
+      }
+      i += Number.isNaN(next) ? 1 : 2;                                            // lone ESC + intermediate
+      continue;
+    }
+    if (code === 0x9b) { i = skipUntilFinalByte(value, i + 1); continue; }        // 8-bit CSI
+    if (code === 0x90 || code === 0x98 || code === 0x9d || code === 0x9e || code === 0x9f) {
+      i = skipUntilStringTerminator(value, i + 1); continue;                       // 8-bit string introducers
+    }
+    // Remaining C0/C1 controls (and bidi overrides) become spaces so they can
+    // neither move the cursor nor reorder the line.
+    if (code <= 0x1f || (code >= 0x7f && code <= 0x9f)
+      || code === 0x061c || code === 0x200e || code === 0x200f
+      || (code >= 0x202a && code <= 0x202e) || (code >= 0x2066 && code <= 0x2069)) {
+      out += " ";
+      i += 1;
+      continue;
+    }
+    out += value[i];
+    i += 1;
+  }
+  return out;
+};
+
+function skipUntilFinalByte(value: string, start: number): number {
+  let i = start;
+  while (i < value.length) {
+    const code = value.charCodeAt(i);
+    i += 1;
+    if (code >= 0x40 && code <= 0x7e) return i;
+  }
+  return value.length;
+}
+
+function skipUntilStringTerminator(value: string, start: number): number {
+  let i = start;
+  while (i < value.length) {
+    const code = value.charCodeAt(i);
+    if (code === 0x07 || code === 0x9c) return i + 1;
+    if (code === 0x1b && value.charCodeAt(i + 1) === 0x5c) return i + 2;
+    i += 1;
+  }
+  return value.length;
+}
+
 const renderEstimateLine = (line: string) => {
   const trimmed = line.trim();
 
@@ -185,10 +254,12 @@ export const buildToolTrailLine = (
   note?: string,
   duration?: number
 ) => {
-  const detail = compactPreview(note ?? "", 72);
+  // `name` and `note` are provider-controlled (a tool's name, a tool's result
+  // summary) and this line goes straight to a TTY. Scrub before any of it renders.
+  const detail = compactPreview(neutralizeControlSequences(note ?? ""), 72);
   const took = duration !== undefined ? ` (${duration.toFixed(1)}s)` : "";
 
-  return `${formatToolCall(name, context)}${took}${detail ? ` :: ${detail}` : ""} ${error ? "✗" : "✓"}`;
+  return `${formatToolCall(neutralizeControlSequences(name), neutralizeControlSequences(context))}${took}${detail ? ` :: ${detail}` : ""} ${error ? "✗" : "✓"}`;
 };
 
 export const isToolTrailResultLine = (line: string) => line.endsWith(" ✓") || line.endsWith(" ✗");

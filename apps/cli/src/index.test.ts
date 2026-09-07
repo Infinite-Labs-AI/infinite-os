@@ -1320,6 +1320,29 @@ describe("cli smoke", () => {
     }));
   });
 
+  // Security regression: a tool NAME or result summary is provider-controlled
+  // (an MCP server picks the name; the result is arbitrary text) and the trail
+  // line goes straight to a TTY. `stripAnsi` matches SGR only, so an OSC 52
+  // clipboard-write sequence used to survive to the terminal — and
+  // `displayWidth` measures it as ~0 cells, so truncation never trimmed it.
+  it("neutralizes terminal control sequences in tool trail lines", () => {
+    const ESC = String.fromCharCode(27);
+    const BEL = String.fromCharCode(7);
+    const line = formatInteractiveProgress({
+      type: "tool.complete",
+      stage: "tool",
+      message: "x",
+      toolId: "",
+      name: `evil${ESC}]52;c;ZXZpbA==${BEL}tool`,
+      summary: `ok${ESC}[2J${ESC}[H wiped`,
+      status: "ok",
+    }, 0);
+    expect(line).not.toContain(ESC);
+    expect(line).not.toContain(BEL);
+    expect(line).not.toContain("52;c;");
+    expect(line).not.toContain("[2J");
+  });
+
   // Regression: `durationMs` was typed as required, so this reporter divided it
   // unguarded. A transport that does not time its tool calls (the desktop Cmd+L
   // bridge's Claude plane) omits it, `undefined / 1000` is NaN, and NaN is not
