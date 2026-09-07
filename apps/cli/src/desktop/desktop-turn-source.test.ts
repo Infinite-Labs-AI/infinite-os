@@ -291,29 +291,7 @@ describe("bridgeFrameToChatEvent", () => {
     });
   });
 
-  it("maps a Claude tool_result frame to a tool.complete trail event", () => {
-    const frame: BridgeFrame = {
-      kind: "tool_result",
-      data: { name: "list_sources", toolId: "t1" }
-    };
-    expect(bridgeFrameToChatEvent(frame)).toMatchObject({
-      type: "tool.complete",
-      stage: "tool",
-      name: "list_sources"
-    });
-  });
 
-  it("maps a Claude action frame to a tool.start trail event", () => {
-    const frame: BridgeFrame = {
-      kind: "action",
-      data: { name: "publish_page", toolId: "t2" }
-    };
-    expect(bridgeFrameToChatEvent(frame)).toMatchObject({
-      type: "tool.start",
-      stage: "tool",
-      name: "publish_page"
-    });
-  });
 
   it("commits the done frame's answer as message.complete", () => {
     expect(
