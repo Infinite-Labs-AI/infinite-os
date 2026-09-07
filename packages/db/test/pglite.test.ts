@@ -2039,27 +2039,6 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
   });
 
   it("0057 cohort daily honors coverage cutoffs, acquisition exclusion, maturity, and [end,end+30d) attribution", async () => {
-    // The invoice-sync freshness gate in vw_stripe_invoice_link_quality (0054)
-    // accepts `latest_successful_stripe_cutoff` only within 28 days of now(), so a
-    // fixture pinned to calendar dates silently expires. This one did — 28 days
-    // after its 2026-08-10 cutoff — and the failure read as a cohort-rollup
-    // regression rather than an aged fixture.
-    //
-    // Offsets below are DAYS FROM SOURCE A'S INVOICE CUTOFF and keep the original
-    // spacing exactly, so every RELATIVE comparison these views make is unchanged:
-    // 30d attribution, maturity (`end + 30d <= data_as_of`), and
-    // least(lifecycle, invoice). Only the one ABSOLUTE relation — the 28d gate —
-    // moves. Offset 0 sits 6 days back so the latest fixture date (+5) stays past.
-    const DAY_MS = 86_400_000;
-    const today = new Date();
-    const cohortEpoch =
-      Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()) -
-      6 * DAY_MS;
-    const at = (dayOffset: number) =>
-      new Date(cohortEpoch + dayOffset * DAY_MS).toISOString();
-    const onDate = (dayOffset: number) => at(dayOffset).slice(0, 10);
-    const windowFrom = onDate(-40);
-    const windowTo = onDate(-9);
     const workspaceId = "ws_stripe_trial_cohort";
     const sourceId = "src_stripe_trial_cohort";
     await db.withTransaction(async (tx) => {
@@ -2079,26 +2058,26 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
       `insert into stripe_trial_history_coverage
         (id, workspace_id, source_id, continuous_coverage_from, closed_through_exclusive,
          incomplete_event_count, incomplete_reasons, parser_version)
-       values ('coverage_trial_cohort',$1,$2,$3::timestamptz,$4::timestamptz,
+       values ('coverage_trial_cohort',$1,$2,'2026-06-01T00:00:00Z','2026-08-15T00:00:00Z',
                0,array[]::text[],'stripe-trial-events-v1')`,
-      [workspaceId, sourceId, at(-70), at(5)],
+      [workspaceId, sourceId],
     );
     await db.query(
       `insert into stripe_invoice_sync_state
         (id, workspace_id, source_id, backfill_state, latest_successful_stripe_cutoff)
-       values ('invoice_state_trial_cohort',$1,$2,'complete',$3::timestamptz)`,
-      [workspaceId, sourceId, at(0)],
+       values ('invoice_state_trial_cohort',$1,$2,'complete','2026-08-10T00:00:00Z')`,
+      [workspaceId, sourceId],
     );
     const spells = [
-      ["converted", at(-40), at(-36), "usd", 5000],
-      ["boundary", at(-39), at(-36), "usd", 4000],
-      ["acquisition", at(-38), at(-36), "usd", 7000],
-      ["immature", at(-37), at(-16), "gbp", 3000],
-      ["zero", at(-36), at(-35), "usd", 0],
-      ["novalue", at(-35), at(-34), null, null],
+      ["converted", "2026-07-01", "2026-07-05", "usd", 5000],
+      ["boundary", "2026-07-02", "2026-07-05", "usd", 4000],
+      ["acquisition", "2026-07-03", "2026-07-05", "usd", 7000],
+      ["immature", "2026-07-04", "2026-07-25", "gbp", 3000],
+      ["zero", "2026-07-05", "2026-07-06", "usd", 0],
+      ["novalue", "2026-07-06", "2026-07-07", null, null],
       // An EXISTING paying customer trialing a SECOND subscription (upsell). The prior payment sits
       // on a different subscription, so only a customer-scoped exclusion catches it.
-      ["upsell", at(-32), at(-31), "usd", 2000],
+      ["upsell", "2026-07-09", "2026-07-10", "usd", 2000],
     ] as const;
     for (const [name, start, end, currency, value] of spells) {
       await db.query(
@@ -2111,19 +2090,19 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
            classifier_version)
          values ($1,$2,$3,$4,$5,$6,$7::timestamptz,$8::timestamptz,$8::timestamptz,
                  $9,'observed_trial_transition','active',true,true,$10,$11,
-                 case when $11::numeric is null then null else $12::timestamptz end,
+                 case when $11::numeric is null then null else '2026-07-01T00:00:00Z'::timestamptz end,
                  case when $11::numeric is null then null else 'first_complete_current_observation_v1' end,
                  case when $11::numeric is null then array['frozen_value_not_observed']::text[] else array[]::text[] end,
                  'stripe-trial-spells-v1')`,
         [`spell_${name}`, workspaceId, sourceId, `sub_${name}`, `cus_${name}`,
-          `evt_start_${name}`, start, end, `evt_end_${name}`, currency, value, at(-40)],
+          `evt_start_${name}`, start, end, `evt_end_${name}`, currency, value],
       );
     }
     await db.query(
       `insert into stripe_customers
         (id, workspace_id, source_id, stripe_customer_id, metrics_classification, created_at_source)
-       values ('customer_trial_internal',$1,$2,'cus_internal','internal_test',$3::timestamptz)`,
-      [workspaceId, sourceId, at(-40)],
+       values ('customer_trial_internal',$1,$2,'cus_internal','internal_test','2026-07-01T00:00:00Z')`,
+      [workspaceId, sourceId],
     );
     await db.query(
       `insert into stripe_trial_spells
@@ -2132,18 +2111,18 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
          livemode, business_eligible_at_capture, classifier_version)
        values
         ('spell_internal',$1,$2,'sub_internal','cus_internal','evt_start_internal',
-         $3::timestamptz,$4::timestamptz,'observed_trial_transition','active',
+         '2026-07-07T00:00:00Z','2026-07-08T00:00:00Z','observed_trial_transition','active',
          true,true,'stripe-trial-spells-v1'),
         ('spell_capture_ineligible',$1,$2,'sub_capture_ineligible','cus_capture_ineligible',
-         'evt_start_capture_ineligible',$5::timestamptz,$6::timestamptz,
+         'evt_start_capture_ineligible','2026-07-08T00:00:00Z','2026-07-09T00:00:00Z',
          'observed_trial_transition','active',true,false,'stripe-trial-spells-v1')`,
-      [workspaceId, sourceId, at(-34), at(-33), at(-33), at(-32)],
+      [workspaceId, sourceId],
     );
     const invoices = [
-      ["converted", "sub_converted", at(-36)],
-      ["boundary", "sub_boundary", at(-6)],
-      ["acquisition", "sub_acquisition", at(-40)],
-      ["upsell", "sub_upsell_original", at(-40)],
+      ["converted", "sub_converted", "2026-07-05T00:00:00Z"],
+      ["boundary", "sub_boundary", "2026-08-04T00:00:00Z"],
+      ["acquisition", "sub_acquisition", "2026-07-01T00:00:00Z"],
+      ["upsell", "sub_upsell_original", "2026-07-01T00:00:00Z"],
     ] as const;
     for (const [name, subscriptionId, paidAt] of invoices) {
       await db.query(
@@ -2169,9 +2148,9 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
               sum(acquisition_excluded_count)::text as acquisition_excluded,
               sum(incomplete_value_count)::text as incomplete_value
          from queryable.vw_stripe_trial_start_cohort_daily
-        where workspace_id = $1 and start_cohort_date >= $2::date
-          and start_cohort_date < $3::date`,
-      [workspaceId, windowFrom, windowTo],
+        where workspace_id = $1 and start_cohort_date >= date '2026-07-01'
+          and start_cohort_date < date '2026-08-01'`,
+      [workspaceId],
     );
     expect(startSummary).toEqual([{
       new_trials: "5",
@@ -2185,21 +2164,21 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
     expect(await db.query<{ new_trial_count: string; acquisition_excluded_count: string }>(
       `select new_trial_count::text, acquisition_excluded_count::text
          from queryable.vw_stripe_trial_start_cohort_daily
-        where workspace_id = $1 and start_cohort_date = $2::date`,
-      [workspaceId, onDate(-32)],
+        where workspace_id = $1 and start_cohort_date = date '2026-07-09'`,
+      [workspaceId],
     )).toEqual([{ new_trial_count: "0", acquisition_excluded_count: "1" }]);
     expect(await db.query<{ completed_trial_count: string; acquisition_excluded_count: string }>(
       `select completed_trial_count::text, acquisition_excluded_count::text
          from queryable.vw_stripe_trial_conversion_daily
-        where workspace_id = $1 and end_cohort_date = $2::date`,
-      [workspaceId, onDate(-31)],
+        where workspace_id = $1 and end_cohort_date = date '2026-07-10'`,
+      [workspaceId],
     )).toEqual([{ completed_trial_count: "0", acquisition_excluded_count: "1" }]);
     expect(await db.query<{ statuses: string[] }>(
       `select array_agg(distinct daily_status order by daily_status) as statuses
          from queryable.vw_stripe_trial_start_cohort_daily
-        where workspace_id = $1 and start_cohort_date >= $2::date
-          and start_cohort_date < $3::date`,
-      [workspaceId, windowFrom, windowTo],
+        where workspace_id = $1 and start_cohort_date >= date '2026-07-01'
+          and start_cohort_date < date '2026-08-01'`,
+      [workspaceId],
     )).toEqual([{ statuses: ["complete", "value_incomplete"] }]);
     const conversionSummary = await db.query<{
       mature: string;
@@ -2212,9 +2191,9 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
               sum(late_payment_count)::text as late,
               array_agg(distinct conversion_status order by conversion_status) as statuses
          from queryable.vw_stripe_trial_conversion_daily
-        where workspace_id = $1 and end_cohort_date >= $2::date
-          and end_cohort_date < $3::date`,
-      [workspaceId, windowFrom, windowTo],
+        where workspace_id = $1 and end_cohort_date >= date '2026-07-01'
+          and end_cohort_date < date '2026-08-01'`,
+      [workspaceId],
     );
     expect(conversionSummary).toEqual([{
       mature: "4",
@@ -2234,9 +2213,9 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
          from queryable.vw_stripe_trial_coverage where workspace_id = $1`,
       [workspaceId],
     );
-    expect(new Date(coverage[0]!.lifecycle_data_as_of).toISOString()).toBe(at(5));
-    expect(new Date(coverage[0]!.invoice_data_as_of).toISOString()).toBe(at(0));
-    expect(new Date(coverage[0]!.conversion_data_as_of).toISOString()).toBe(at(0));
+    expect(new Date(coverage[0]!.lifecycle_data_as_of).toISOString()).toBe("2026-08-15T00:00:00.000Z");
+    expect(new Date(coverage[0]!.invoice_data_as_of).toISOString()).toBe("2026-08-10T00:00:00.000Z");
+    expect(new Date(coverage[0]!.conversion_data_as_of).toISOString()).toBe("2026-08-10T00:00:00.000Z");
     expect(coverage[0]).toMatchObject({ conversion_status: "complete", attribution_days: 30 });
 
     const secondSourceId = "src_stripe_trial_cohort_b";
@@ -2249,15 +2228,15 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
       `insert into stripe_trial_history_coverage
         (id, workspace_id, source_id, continuous_coverage_from, closed_through_exclusive,
          incomplete_event_count, incomplete_reasons, parser_version)
-       values ('coverage_trial_cohort_b',$1,$2,$3::timestamptz,$4::timestamptz,
+       values ('coverage_trial_cohort_b',$1,$2,'2026-07-01T00:00:00Z','2026-08-12T00:00:00Z',
                0,array[]::text[],'stripe-trial-events-v1')`,
-      [workspaceId, secondSourceId, at(-40), at(2)],
+      [workspaceId, secondSourceId],
     );
     await db.query(
       `insert into stripe_invoice_sync_state
         (id, workspace_id, source_id, backfill_state, latest_successful_stripe_cutoff)
-       values ('invoice_state_trial_cohort_b',$1,$2,'complete',$3::timestamptz)`,
-      [workspaceId, secondSourceId, at(-1)],
+       values ('invoice_state_trial_cohort_b',$1,$2,'complete','2026-08-09T00:00:00Z')`,
+      [workspaceId, secondSourceId],
     );
     const intersection = await db.query<{
       continuous_coverage_from: string | Date;
@@ -2269,10 +2248,10 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
          from queryable.vw_stripe_trial_coverage where workspace_id = $1`,
       [workspaceId],
     );
-    expect(new Date(intersection[0]!.continuous_coverage_from).toISOString()).toBe(at(-40));
-    expect(new Date(intersection[0]!.lifecycle_data_as_of).toISOString()).toBe(at(2));
-    expect(new Date(intersection[0]!.invoice_data_as_of).toISOString()).toBe(at(-1));
-    expect(new Date(intersection[0]!.conversion_data_as_of).toISOString()).toBe(at(-1));
+    expect(new Date(intersection[0]!.continuous_coverage_from).toISOString()).toBe("2026-07-01T00:00:00.000Z");
+    expect(new Date(intersection[0]!.lifecycle_data_as_of).toISOString()).toBe("2026-08-12T00:00:00.000Z");
+    expect(new Date(intersection[0]!.invoice_data_as_of).toISOString()).toBe("2026-08-09T00:00:00.000Z");
+    expect(new Date(intersection[0]!.conversion_data_as_of).toISOString()).toBe("2026-08-09T00:00:00.000Z");
 
     await db.query(
       `update stripe_invoice_sync_state set backfill_state = 'in_progress'
