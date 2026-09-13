@@ -611,6 +611,53 @@ describe("Infinite OS app-hosted API/MCP skeleton", () => {
     expect(advertised).toContain("list_sources");
   });
 
+  it("accepts the current Desktop chat-union catalog size instead of rejecting above 64 tools", async () => {
+    const scopedTools = Array.from({ length: 66 }, (_, index) => {
+      const name = `desktop_tool_${index}`;
+      return {
+        name,
+        description: `Desktop tool ${index}.`,
+        inputSchema: { type: "object", additionalProperties: false }
+      };
+    });
+    const modelRequests: Array<{ tools: Array<{ name: string }> }> = [];
+    const app = createApp({
+      database: workspaceProbeDb(),
+      modelClient: {
+        complete: async (request) => {
+          modelRequests.push(request as { tools: Array<{ name: string }> });
+          return { message: "ok" };
+        }
+      }
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/gateway/turn",
+      headers: OPERATOR_HEADERS,
+      payload: {
+        platform: "desktop",
+        message: "hello",
+        appTools: {
+          serverName: "infinite_app",
+          allowedTools: scopedTools.map((tool) => `mcp__infinite_app__${tool.name}`),
+          tools: scopedTools,
+          proxy: {
+            type: "mcp-jsonrpc-http",
+            url: "http://127.0.0.1:4321/mcp",
+            headers: { "x-infinite-brain-mcp-token": "tok" }
+          },
+          mode: "union"
+        }
+      }
+    });
+
+    expect(response.statusCode).toBe(200);
+    const advertised = modelRequests[0]?.tools.map((tool) => tool.name) ?? [];
+    expect(advertised).toContain("mcp__infinite_app__desktop_tool_65");
+    expect(advertised).toContain("list_sources");
+  });
+
   it("passes validated scoped app tools to gateway turns and proxies matching calls over loopback JSON-RPC", async () => {
     const originalFetch = globalThis.fetch;
     const fetchCalls: Array<{ url: string; body: unknown; headers: Record<string, string> }> = [];

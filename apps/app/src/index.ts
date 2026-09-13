@@ -156,6 +156,8 @@ type ScopedAppToolsParseResult =
   | { value?: ScopedAppTools; error?: undefined }
   | { value?: undefined; error: { code: "invalid_scoped_app_tools"; message: string } };
 
+const MAX_SCOPED_APP_TOOLS = 128;
+
 function parseScopedAppTools(value: unknown): ScopedAppToolsParseResult {
   if (value === undefined || value === null) {
     return {};
@@ -181,8 +183,11 @@ function parseScopedAppTools(value: unknown): ScopedAppToolsParseResult {
     mode = modeRaw;
   }
   const allowedToolsRaw = value.allowedTools;
-  if (!Array.isArray(allowedToolsRaw) || allowedToolsRaw.length === 0 || allowedToolsRaw.length > 64) {
+  if (!Array.isArray(allowedToolsRaw) || allowedToolsRaw.length === 0) {
     return invalidScopedAppTools("Scoped app tools require a non-empty allowlist.");
+  }
+  if (allowedToolsRaw.length > MAX_SCOPED_APP_TOOLS) {
+    return invalidScopedAppTools(`Scoped app tool allowlist cannot exceed ${MAX_SCOPED_APP_TOOLS} entries.`);
   }
   const allowedTools: string[] = [];
   for (const entry of allowedToolsRaw) {
@@ -192,8 +197,11 @@ function parseScopedAppTools(value: unknown): ScopedAppToolsParseResult {
     allowedTools.push(entry);
   }
   const toolsRaw = value.tools;
-  if (!Array.isArray(toolsRaw) || toolsRaw.length === 0 || toolsRaw.length > 64) {
+  if (!Array.isArray(toolsRaw) || toolsRaw.length === 0) {
     return invalidScopedAppTools("Scoped app tools require a non-empty catalog.");
+  }
+  if (toolsRaw.length > MAX_SCOPED_APP_TOOLS) {
+    return invalidScopedAppTools(`Scoped app tool catalog cannot exceed ${MAX_SCOPED_APP_TOOLS} entries.`);
   }
   const seenTools = new Set<string>();
   const tools: ScopedAppTools["tools"] = [];
