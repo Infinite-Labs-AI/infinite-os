@@ -8680,6 +8680,130 @@ describe("listMetaAssets (asset discovery for the connect picker)", () => {
     ]);
     await expect(listMetaAssets("bogus")).rejects.toMatchObject({ code: "provider_auth_failed" });
   });
+
+  // ── Posting Pages ──────────────────────────────────────────────────────────────
+  // Every Meta ad is posted FROM a Facebook Page (create_meta_creative's object_story_spec.page_id),
+  // so the connect picker must be able to offer one. Page discovery is BEST-EFFORT like the account
+  // edges: a token lacking pages_show_list / business_management yields an EMPTY list, never a throw.
+
+  it("OAuth-user token: Pages come from /me/accounts with id,name,category,instagram_business_account{id}", async () => {
+    const calls = stubGraph([
+      { match: "/me/adaccounts", body: { data: [{ id: "act_1", account_id: "1", name: "My Ads", currency: "USD" }] } },
+      { match: "/act_1/adspixels", body: { data: [] } },
+      { match: "/me/businesses", body: { data: [] } },
+      {
+        match: "/me/accounts",
+        body: {
+          data: [
+            { id: "pg_1", name: "Acme Page", category: "Product/Service", instagram_business_account: { id: "ig_1" } },
+            { id: "pg_2", name: "Acme Second" } // no IG link, no category → optional keys absent
+          ]
+        }
+      }
+    ]);
+
+    const snap = await listMetaAssets("oauth-user-token");
+
+    expect(snap.pages).toEqual([
+      { id: "pg_1", name: "Acme Page", category: "Product/Service", instagramBusinessAccountId: "ig_1" },
+      { id: "pg_2", name: "Acme Second" }
+    ]);
+    const accountsCall = calls.find((u) => u.includes("/me/accounts?"));
+    expect(accountsCall).toBeDefined();
+    expect(decodeURIComponent(accountsCall ?? "")).toContain("fields=id,name,category,instagram_business_account{id}");
+    // A user token owns no business → no business page edges, no system-user edge.
+    expect(calls.some((u) => u.includes("owned_pages") || u.includes("client_pages") || u.includes("assigned_pages"))).toBe(false);
+  });
+
+  it("SYSTEM-USER token: Pages come from /me/assigned_pages + /{biz}/owned_pages + /{biz}/client_pages, de-duplicated, grouped by business", async () => {
+    const calls = stubGraph([
+      { match: "/me/adaccounts", body: { data: [] } },
+      { match: "/me/businesses", body: { data: [{ id: "biz_1", name: "Acme" }] } },
+      { match: "/biz_1/owned_ad_accounts", body: { data: [{ id: "act_99", account_id: "99", name: "Acme Ads", currency: "USD" }] } },
+      { match: "/act_99/adspixels", body: { data: [] } },
+      { match: "/me/accounts", body: { data: [] } }, // a system user owns no personal Pages
+      { match: "/me/assigned_pages", body: { data: [{ id: "pg_a", name: "Assigned Page", category: "Brand" }] } },
+      { match: "/biz_1/owned_pages", body: { data: [{ id: "pg_a", name: "Assigned Page", category: "Brand" }, { id: "pg_b", name: "Owned Page" }] } },
+      { match: "/biz_1/client_pages", body: { data: [{ id: "pg_c", name: "Client Page", instagram_business_account: { id: "ig_c" } }] } }
+    ]);
+
+    const snap = await listMetaAssets("sys-user-token");
+
+    expect(snap.tokenKind).toBe("system_user_token");
+    // pg_a appears on BOTH assigned_pages and owned_pages → exactly once, first-seen order kept.
+    expect(snap.pages).toEqual([
+      { id: "pg_a", name: "Assigned Page", category: "Brand" },
+      { id: "pg_b", name: "Owned Page" },
+      { id: "pg_c", name: "Client Page", instagramBusinessAccountId: "ig_c" }
+    ]);
+    expect(snap.pagesByBusiness).toEqual({
+      biz_1: [
+        { id: "pg_a", name: "Assigned Page", category: "Brand" },
+        { id: "pg_b", name: "Owned Page" },
+        { id: "pg_c", name: "Client Page", instagramBusinessAccountId: "ig_c" }
+      ]
+    });
+    expect(calls.some((u) => u.includes("/me/assigned_pages"))).toBe(true);
+    expect(calls.some((u) => u.includes("/biz_1/owned_pages"))).toBe(true);
+    expect(calls.some((u) => u.includes("/biz_1/client_pages"))).toBe(true);
+    expect(calls.every((u) => !u.includes("sys-user-token"))).toBe(true);
+  });
+
+  it("a 400 on one Page edge is swallowed — the other edges still populate and the snapshot survives", async () => {
+    stubGraph([
+      { match: "/me/adaccounts", body: { data: [] } },
+      { match: "/me/businesses", body: { data: [{ id: "biz_1", name: "Acme" }] } },
+      { match: "/biz_1/owned_ad_accounts", body: { data: [{ id: "act_99", account_id: "99", name: "Acme Ads", currency: "USD" }] } },
+      { match: "/act_99/adspixels", body: { data: [] } },
+      { match: "/me/accounts", body: { error: { message: "(#100) Missing pages_show_list", code: 100 } }, status: 400 },
+      { match: "/me/assigned_pages", body: { error: { message: "(#100) Unsupported get request", code: 100 } }, status: 400 },
+      { match: "/biz_1/owned_pages", body: { data: [{ id: "pg_b", name: "Owned Page" }] } },
+      { match: "/biz_1/client_pages", body: { error: { message: "(#200) Permissions error", code: 200 } }, status: 400 }
+    ]);
+
+    const snap = await listMetaAssets("sys-user-token");
+
+    expect(snap.adAccounts).toHaveLength(1); // accounts unaffected by Page failures
+    expect(snap.pages).toEqual([{ id: "pg_b", name: "Owned Page" }]);
+    expect(snap.pagesByBusiness).toEqual({ biz_1: [{ id: "pg_b", name: "Owned Page" }] });
+  });
+
+  it("every Page edge failing yields an EMPTY pages list, never a throw (a token may lack pages_show_list)", async () => {
+    stubGraph([
+      { match: "/me/adaccounts", body: { data: [{ id: "act_1", account_id: "1", name: "My Ads", currency: "USD" }] } },
+      { match: "/act_1/adspixels", body: { data: [] } },
+      { match: "/me/businesses", body: { data: [{ id: "biz_1", name: "Acme" }] } },
+      { match: "/me/accounts", body: { error: { message: "(#100) Missing pages_show_list", code: 100 } }, status: 400 },
+      { match: "/biz_1/owned_pages", body: { error: { message: "(#200) Permissions error", code: 200 } }, status: 400 },
+      { match: "/biz_1/client_pages", body: { error: { message: "(#200) Permissions error", code: 200 } }, status: 400 }
+    ]);
+
+    const snap = await listMetaAssets("oauth-user-token");
+
+    expect(snap.adAccounts).toHaveLength(1);
+    expect(snap.pages).toEqual([]);
+    expect(snap.pagesByBusiness).toEqual({});
+  });
+
+  it("an edge that rejects the instagram_business_account field is retried with id,name,category only", async () => {
+    const calls = stubGraph([
+      { match: "/me/adaccounts", body: { data: [{ id: "act_1", account_id: "1", name: "My Ads", currency: "USD" }] } },
+      { match: "/act_1/adspixels", body: { data: [] } },
+      { match: "/me/businesses", body: { data: [] } },
+      // The FULL field set 400s (e.g. instagram_basic not granted); the minimal set succeeds.
+      { match: "instagram_business_account", body: { error: { message: "(#100) Tried accessing nonexisting field", code: 100 } }, status: 400 },
+      { match: "/me/accounts", body: { data: [{ id: "pg_1", name: "Acme Page", category: "Brand" }] } }
+    ]);
+
+    const snap = await listMetaAssets("oauth-user-token");
+
+    expect(snap.pages).toEqual([{ id: "pg_1", name: "Acme Page", category: "Brand" }]);
+    const accountsCalls = calls.filter((u) => u.includes("/me/accounts?")).map((u) => decodeURIComponent(u));
+    expect(accountsCalls).toHaveLength(2);
+    expect(accountsCalls[0]).toContain("instagram_business_account{id}");
+    expect(accountsCalls[1]).toContain("fields=id,name,category&");
+    expect(accountsCalls[1]).not.toContain("instagram_business_account");
+  });
 });
 
 // ---------------------------------------------------------------------------------------------

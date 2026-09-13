@@ -2515,7 +2515,11 @@ async function listMetaAssetsHandler(
       adAccounts: assets.adAccounts,
       pixels: assets.pixels,
       businesses: assets.businesses,
-      pixelsByAccount: assets.pixelsByAccount
+      pixelsByAccount: assets.pixelsByAccount,
+      // Posting Pages for the picker's "Posting Page" select (persisted via connect_source.selectedPageId).
+      // Best-effort upstream: EMPTY when the token lacks pages_show_list / business_management.
+      pages: assets.pages,
+      pagesByBusiness: assets.pagesByBusiness
     },
     ["provider_truth"],
     "ok"

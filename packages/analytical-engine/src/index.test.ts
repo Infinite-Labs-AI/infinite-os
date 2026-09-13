@@ -8247,6 +8247,44 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
       }
     );
   });
+
+  // ── Posting Page (migration 0068) ───────────────────────────────────────────
+  // Every Meta ad is posted FROM a Facebook Page. The connect picker lists Pages via
+  // list_meta_assets, stores the choice as connection_credentials.selected_page_id, and
+  // create_meta_creative defaults its pageId to it so nobody has to type a 15-digit id.
+  describe("Posting Page — discovery, stored selection, creative default", () => {
+    it("list_meta_assets passes the discovered Pages (+ pagesByBusiness) through to the picker", async () => {
+      await withGraph(
+        (call) => {
+          if (call.url.includes("/me/adaccounts")) {
+            return jsonResponse({ data: [{ id: "act_1", account_id: "1", name: "Ads", currency: "USD" }] });
+          }
+          if (call.url.includes("/me/businesses")) {
+            return jsonResponse({ data: [{ id: "biz_1", name: "Acme" }] });
+          }
+          if (call.url.includes("/me/accounts")) {
+            return jsonResponse({ data: [{ id: "pg_1", name: "Acme Page", category: "Brand", instagram_business_account: { id: "ig_1" } }] });
+          }
+          if (call.url.includes("/biz_1/owned_pages")) {
+            return jsonResponse({ data: [{ id: "pg_2", name: "Owned Page" }] });
+          }
+          return jsonResponse({ data: [] });
+        },
+        async () => {
+          const handlers = createActionHandlers(metaWriteTestDb({ audits: [] }));
+          const result = await handlers.list_meta_assets?.({ accessToken: "raw-user-token" }, operatorContext);
+          expect(result?.data).toMatchObject({
+            tokenKind: "user_token",
+            pages: [
+              { id: "pg_1", name: "Acme Page", category: "Brand", instagramBusinessAccountId: "ig_1" },
+              { id: "pg_2", name: "Owned Page" }
+            ],
+            pagesByBusiness: { biz_1: [{ id: "pg_2", name: "Owned Page" }] }
+          });
+        }
+      );
+    });
+  });
 });
 
 function journeyTestDb(): InfiniteOsDb {
