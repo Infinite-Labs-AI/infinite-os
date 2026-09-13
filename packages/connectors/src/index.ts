@@ -9896,19 +9896,60 @@ export async function listMetaAssets(
     snapshot.adAccounts = [];
   }
 
-  // 2. SYSTEM-USER path: enumerate business-owned accounts. An explicit businessId skips discovery.
+  // 2a. SYSTEM-USER path, ASSIGNED accounts first. A Business Manager system user only reaches the
+  //     ad accounts explicitly assigned to it (Business Settings → System Users → Add Assets), and
+  //     Meta exposes exactly that set on `/{system_user_id}/assigned_ad_accounts` (`/me` resolves to
+  //     the system user for its own token). This edge needs NO business_management scope, so a
+  //     token minted with only the ads scopes still resolves its accounts here. Best-effort: an
+  //     OAuth-user token 400s on it, and that must not stop the business walk below.
   if (snapshot.adAccounts.length === 0) {
     snapshot.tokenKind = "system_user_token";
+    try {
+      snapshot.adAccounts = await paginateMetaGraph<MetaAdAccount>(
+        `${base}/me/assigned_ad_accounts?fields=id,account_id,name,currency&limit=100`,
+        accessToken
+      );
+    } catch {
+      snapshot.adAccounts = [];
+    }
+  }
+
+  // 2b. SYSTEM-USER path, business walk: accounts the business OWNS plus accounts shared INTO it as
+  //     a CLIENT/partner asset (an agency-managed account, or one created on a personal profile
+  //     and shared to the BM — the common small-brand shape). `owned_ad_accounts` alone missed the
+  //     client set entirely (2026-09-13, a live advertiser saw "no ad accounts"). Client reads are
+  //     best-effort per business: a business the token cannot read clients for must not sink the
+  //     owned set. De-duplicated by id — an account can appear on both edges.
+  if (snapshot.adAccounts.length === 0) {
     const businesses = options.businessId
       ? [{ id: options.businessId, name: options.businessId }]
       : await paginateMetaGraph<MetaBusiness>(`${base}/me/businesses?fields=id,name`, accessToken);
     snapshot.businesses = businesses;
+    const seen = new Set<string>();
+    const pushUnique = (rows: MetaAdAccount[]) => {
+      for (const row of rows) {
+        if (seen.has(row.id)) continue;
+        seen.add(row.id);
+        snapshot.adAccounts.push(row);
+      }
+    };
     for (const biz of businesses) {
-      const owned = await paginateMetaGraph<MetaAdAccount>(
-        `${base}/${biz.id}/owned_ad_accounts?fields=id,account_id,name,currency&limit=100`,
-        accessToken
+      pushUnique(
+        await paginateMetaGraph<MetaAdAccount>(
+          `${base}/${biz.id}/owned_ad_accounts?fields=id,account_id,name,currency&limit=100`,
+          accessToken
+        )
       );
-      snapshot.adAccounts.push(...owned);
+      try {
+        pushUnique(
+          await paginateMetaGraph<MetaAdAccount>(
+            `${base}/${biz.id}/client_ad_accounts?fields=id,account_id,name,currency&limit=100`,
+            accessToken
+          )
+        );
+      } catch {
+        // best-effort per business
+      }
     }
   }
 
@@ -11137,7 +11178,20 @@ const TERMINAL_SYNC_ERROR_CODES = new Set(["provider_auth_failed", "credential_u
 // the bare type string would re-create exactly the blip-parks-a-healthy-source bug this
 // classifier exists to fix. responseSafeDetail embeds the (redacted) raw body in the message,
 // so the JSON keys appear verbatim.
-const META_OAUTH_TERMINAL_BODY = /"code"\s*:\s*(190|102|200)\b/;
+const META_OAUTH_TERMINAL_BODY = /"code"\s*:\s*(190|102|200|10)\b/;
+
+// Meta's PERMISSION-class rejections that do NOT carry the OAuthException 190/102/200 shape but are
+// equally credential-grade — retrying the same token can never succeed:
+//   - code 10  ("(#10) You do not have sufficient permissions") — folded into the OAuthException
+//     regex above (Meta labels it OAuthException).
+//   - code 100 + error_subcode 33 ("Unsupported get request. Object with ID 'act_…' does not exist,
+//     cannot be loaded due to missing permissions") — type GraphMethodException, so the
+//     OAuthException gate above never sees it. This is EXACTLY what a system-user token that was
+//     never ASSIGNED the ad account gets on `act_<id>/insights` at connect time; classified
+//     transient, the fresh source sat at `connected` while the connect form showed the error
+//     (2026-09-13). A bare code 100 (no subcode 33) is an invalid-parameter request-shape error
+//     and stays transient — matching it would re-park healthy sources on our own request bugs.
+const META_GRAPH_MISSING_OBJECT_BODY = /"code"\s*:\s*100\b[^}]*"error_subcode"\s*:\s*33\b/;
 
 // Classify a sync failure for STATUS ESCALATION (not for run bookkeeping — sync_runs/sync_errors
 // record every failure identically). "terminal" = retrying with the stored credential can never
@@ -11163,6 +11217,9 @@ export function classifySyncFailure(error: {
     return "terminal";
   }
   if (error.message.includes("OAuthException") && META_OAUTH_TERMINAL_BODY.test(error.message)) {
+    return "terminal";
+  }
+  if (META_GRAPH_MISSING_OBJECT_BODY.test(error.message)) {
     return "terminal";
   }
   return "transient";
