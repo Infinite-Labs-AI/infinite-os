@@ -2562,12 +2562,8 @@ async function listMetaAssetsHandler(
     ...(businessId ? { businessId } : {}),
     ...(apiVersion ? { apiVersion } : {})
   });
-  if (assets.adAccounts.length === 0) {
-    throw new Error(
-      "no_meta_ad_accounts: the token sees no ad accounts. For a system-user token, confirm it has " +
-        "the ads_management + business_management scopes and is assigned the ad account in Business Settings."
-    );
-  }
+  // A token that reaches no ad account is rejected INSIDE listMetaAssets as a typed
+  // `no_meta_ad_accounts` ConnectorError (code forwarded on the wire); nothing to re-check here.
   return envelope(
     "list_meta_assets",
     context.authority,

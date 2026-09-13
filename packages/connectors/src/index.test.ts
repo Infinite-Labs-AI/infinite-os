@@ -5601,6 +5601,63 @@ describe("classifySyncFailure (status-escalation classifier)", () => {
     ).toBe("terminal");
   });
 
+  it("classifies Meta PERMISSION-class rejections as terminal: code 10 (insufficient permission) and code 100 + error_subcode 33 (object missing / no permission)", () => {
+    const bodies = [
+      '{"error":{"message":"(#10) You do not have sufficient permissions to perform this action","type":"OAuthException","code":10,"fbtrace_id":"AbC"}}',
+      '{"error":{"message":"Unsupported get request. Object with ID \'act_1\' does not exist, cannot be loaded due to missing permissions, or does not support this operation","type":"GraphMethodException","code":100,"error_subcode":33,"fbtrace_id":"AbC"}}'
+    ];
+    for (const body of bodies) {
+      expect(
+        classifySyncFailure({
+          code: "provider_api_error",
+          message: `provider request failed 400 for https://graph.facebook.com/v25.0/act_1/insights: ${body}`,
+          retryable: true
+        }),
+        body
+      ).toBe("terminal");
+    }
+  });
+
+  it("classifies Meta codes 3 (capability), 294 (requires ads_management) and 270 (access-tier restriction) as terminal, type-agnostic", () => {
+    for (const body of [
+      '{"error":{"message":"(#3) Application does not have the capability to make this API call.","type":"OAuthException","code":3}}',
+      '{"error":{"message":"(#294) Managing advertisements requires an access token with the extended permission for ads_management","type":"GraphMethodException","code":294}}',
+      '{"error":{"message":"(#270) This Ads API request is not allowed for apps in development mode","type":"FacebookApiException","code":270}}'
+    ]) {
+      expect(
+        classifySyncFailure({ code: "provider_api_error", message: `provider request failed 400 for https://graph.facebook.com/v25.0/act_1/insights: ${body}`, retryable: true }),
+        body
+      ).toBe("terminal");
+    }
+  });
+
+  it("code 100 + error_subcode 33 is terminal even with an error_data object between the two keys", () => {
+    const body =
+      '{"error":{"message":"Unsupported get request.","type":"GraphMethodException","code":100,"error_data":{"blame_field_specs":[["x"]]},"error_subcode":33}}';
+    expect(
+      classifySyncFailure({ code: "provider_api_error", message: `provider request failed 400 for https://graph.facebook.com/v25.0/act_1/insights: ${body}`, retryable: true })
+    ).toBe("terminal");
+    // and 3300 / 33xx subcodes do not false-match 33
+    expect(
+      classifySyncFailure({
+        code: "provider_api_error",
+        message: 'provider request failed 400: {"error":{"message":"x","type":"OAuthException","code":100,"error_subcode":3300}}',
+        retryable: true
+      })
+    ).toBe("transient");
+  });
+
+  it("a bare Meta code 100 (invalid parameter, no subcode 33) stays transient — it is a request-shape problem, not a credential one", () => {
+    expect(
+      classifySyncFailure({
+        code: "provider_api_error",
+        message:
+          'provider request failed 400 for https://graph.facebook.com/v25.0/act_1/insights: {"error":{"message":"(#100) Invalid parameter","type":"OAuthException","code":100,"fbtrace_id":"AbC"}}',
+        retryable: true
+      })
+    ).toBe("transient");
+  });
+
   it("classifies Meta OAuthException 190/102/200 bodies as terminal despite their retryable HTTP-400 shape", () => {
     // Meta ships credential-grade OAuth rejections as HTTP 400, which the status taxonomy
     // types retryable provider_api_error — the body sniff must catch them anyway.
@@ -8662,6 +8719,61 @@ describe("listMetaAssets (asset discovery for the connect picker)", () => {
     expect(spy).not.toHaveBeenCalled();
   });
 
+  it("SYSTEM-USER token: /me/adaccounts empty -> /me/assigned_ad_accounts lists the accounts ASSIGNED to the system user", async () => {
+    const calls = stubGraph([
+      { match: "/me/adaccounts", body: { data: [] } },
+      { match: "/me/assigned_ad_accounts", body: { data: [{ id: "act_7", account_id: "7", name: "Assigned Ads", currency: "USD" }] } },
+      { match: "/act_7/adspixels", body: { data: [] } },
+      { match: "/me/businesses", body: { data: [] } }
+    ]);
+
+    const snap = await listMetaAssets("sys-user-token");
+
+    expect(snap.tokenKind).toBe("system_user_token");
+    expect(snap.adAccounts).toEqual([{ id: "act_7", account_id: "7", name: "Assigned Ads", currency: "USD" }]);
+    // Assigned accounts resolve WITHOUT the business walk (no business_management needed).
+    expect(calls.some((u) => u.includes("owned_ad_accounts"))).toBe(false);
+  });
+
+  it("SYSTEM-USER token: business CLIENT ad accounts (partner-shared) are discovered alongside owned ones, de-duplicated", async () => {
+    const calls = stubGraph([
+      { match: "/me/adaccounts", body: { data: [] } },
+      { match: "/me/assigned_ad_accounts", body: { data: [] } },
+      { match: "/me/businesses", body: { data: [{ id: "biz_1", name: "Acme" }] } },
+      { match: "/biz_1/owned_ad_accounts", body: { data: [{ id: "act_o", account_id: "o", name: "Owned", currency: "USD" }] } },
+      {
+        match: "/biz_1/client_ad_accounts",
+        body: {
+          data: [
+            { id: "act_c", account_id: "c", name: "Client", currency: "USD" },
+            { id: "act_o", account_id: "o", name: "Owned", currency: "USD" }
+          ]
+        }
+      },
+      { match: "/adspixels", body: { data: [] } }
+    ]);
+
+    const snap = await listMetaAssets("sys-user-token");
+
+    expect(snap.adAccounts.map((a) => a.id)).toEqual(["act_o", "act_c"]);
+    expect(calls.some((u) => u.includes("/biz_1/client_ad_accounts"))).toBe(true);
+  });
+
+  it("a failing client_ad_accounts edge is best-effort: owned accounts still resolve", async () => {
+    stubGraph([
+      { match: "/me/adaccounts", body: { data: [] } },
+      { match: "/me/assigned_ad_accounts", body: { error: { message: "no" } }, status: 400 },
+      { match: "/me/businesses", body: { data: [{ id: "biz_1", name: "Acme" }] } },
+      { match: "/biz_1/owned_ad_accounts", body: { data: [{ id: "act_o", account_id: "o", name: "Owned", currency: "USD" }] } },
+      { match: "/biz_1/client_ad_accounts", body: { error: { message: "(#100) no client edge" } }, status: 400 },
+      { match: "/adspixels", body: { data: [] } }
+    ]);
+
+    const snap = await listMetaAssets("sys-user-token");
+
+    expect(snap.adAccounts.map((a) => a.id)).toEqual(["act_o"]);
+  });
+
   it("an explicit businessId skips /me/businesses discovery", async () => {
     const calls = stubGraph([
       { match: "/me/adaccounts", body: { data: [] } },
@@ -8673,12 +8785,31 @@ describe("listMetaAssets (asset discovery for the connect picker)", () => {
     expect(calls.some((u) => u.includes("/me/businesses"))).toBe(false);
   });
 
-  it("an invalid token surfaces provider_auth_failed (validate-before-bind)", async () => {
-    stubGraph([
-      { match: "/me/adaccounts", body: { error: { message: "bad token" } }, status: 401 }, // swallowed -> business path
-      { match: "/me/businesses", body: { error: { message: "bad token" } }, status: 401 } // throws
-    ]);
+  it("an invalid token surfaces provider_auth_failed from the identity probe (validate-before-bind)", async () => {
+    stubGraph([{ match: "/me?fields=id", body: { error: { message: "bad token" } }, status: 401 }]);
     await expect(listMetaAssets("bogus")).rejects.toMatchObject({ code: "provider_auth_failed" });
+  });
+
+  it("Meta's HTTP-400 OAuthException 190 on the identity probe is re-typed as provider_auth_failed (not a retryable api error)", async () => {
+    stubGraph([
+      {
+        match: "/me?fields=id",
+        body: { error: { message: "Error validating access token: Session has expired", type: "OAuthException", code: 190 } },
+        status: 400
+      }
+    ]);
+    await expect(listMetaAssets("expired")).rejects.toMatchObject({ code: "provider_auth_failed", retryable: false });
+  });
+
+  it("a VALID token that reaches no ad account (unassigned system user, no business_management) throws the typed no_meta_ad_accounts — never a raw Graph error", async () => {
+    stubGraph([
+      { match: "/me?fields=id", body: { id: "su_1" } },
+      { match: "/me/adaccounts", body: { data: [] } },
+      { match: "/me/assigned_ad_accounts", body: { error: { message: "(#200) no scope" } }, status: 400 },
+      { match: "/me/businesses", body: { error: { message: "(#200) Requires business_management" } }, status: 400 }
+    ]);
+    await expect(listMetaAssets("unassigned")).rejects.toMatchObject({ code: "no_meta_ad_accounts", retryable: false });
+    await expect(listMetaAssets("unassigned")).rejects.toThrow(/Add assets → Ad accounts/);
   });
 
   // ── Posting Pages ──────────────────────────────────────────────────────────────
