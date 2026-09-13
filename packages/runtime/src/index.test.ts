@@ -254,7 +254,8 @@ describe("Meta Ads management action authority (money-safety)", () => {
       create_meta_campaign: ["name", "objective"],
       create_meta_ad_set: ["campaignId", "name", "optimizationGoal", "billingEvent"],
       create_meta_ad: ["adsetId", "name", "creativeId"],
-      create_meta_creative: ["name", "pageId"]
+      // pageId is OPTIONAL too: it defaults to the connection's stored posting Page (0068).
+      create_meta_creative: ["name"]
     };
     for (const id of META_CREATE_IDS) {
       const card = ACTION_CATALOG.find((action) => action.id === id);

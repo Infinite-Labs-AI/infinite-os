@@ -889,7 +889,7 @@ function metadataFor(id: InfiniteOsActionId): {
     create_meta_creative: {
       title: "Create Meta Ads creative",
       summary:
-        "Operator-only. Create a STANDARD single-image/video Meta Ads creative. Creatives have no go-live status.",
+        "Operator-only. Create a STANDARD single-image/video Meta Ads creative posted FROM the connection's stored posting Page (pageId overrides). Creatives have no go-live status.",
       category: "operator",
       recommendedNextActions: ["create_meta_ad"],
       recipeIds: []
@@ -1301,7 +1301,10 @@ function inputSchemaFor(id: InfiniteOsActionId): Record<string, unknown> {
         clientToken: { type: "string" }
       },
       // sourceId OPTIONAL — auto-resolved server-side (see create_meta_campaign.sourceId).
-      ["name", "pageId"]
+      // pageId OPTIONAL (migration 0068) — defaults to the connection's stored posting Page
+      // (connection_credentials.selected_page_id); the handler fails typed
+      // `meta_page_not_selected` when neither is present.
+      ["name"]
     ),
     create_meta_ad: requiredObject(
       {

@@ -8387,7 +8387,9 @@ async function metaCreateCommand(
     };
   } else if (object === "creative") {
     const name = requireMetaFlag(rest, "--name", "creative create");
-    const pageId = requireMetaFlag(rest, "--page-id", "creative create");
+    // OPTIONAL since migration 0068: the engine defaults to the connection's stored posting Page
+    // and fails typed `meta_page_not_selected` when neither is present.
+    const pageId = optionValue(rest, "--page-id");
     const linkUrl = optionValue(rest, "--link-url");
     const body = optionValue(rest, "--body");
     const title = optionValue(rest, "--title");
@@ -8401,7 +8403,7 @@ async function metaCreateCommand(
     toolInput = {
       sourceId: ctx.sourceId,
       name,
-      pageId,
+      ...(pageId ? { pageId } : {}),
       ...(imageHash ? { imageHash } : {}),
       ...(instagramUserId ? { instagramUserId } : {}),
       ...(linkUrl ? { linkUrl } : {}),

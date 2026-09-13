@@ -212,7 +212,24 @@ async function listSources(db: InfiniteOsDb, context: SessionContext): Promise<A
           where cc.source_id = s.id and cc.revoked_at is null
           order by cc.created_at desc
           limit 1
-        ) as credential_kind
+        ) as credential_kind,
+        -- Non-secret Meta selections (migrations 0039 / 0068) so the desktop's Connections list can
+        -- tell whether a pixel / posting Page is set without a second round-trip. NULL for other
+        -- providers and until chosen.
+        (
+          select cc.selected_pixel_id
+          from connection_credentials cc
+          where cc.source_id = s.id and cc.revoked_at is null
+          order by cc.created_at desc
+          limit 1
+        ) as selected_pixel_id,
+        (
+          select cc.selected_page_id
+          from connection_credentials cc
+          where cc.source_id = s.id and cc.revoked_at is null
+          order by cc.created_at desc
+          limit 1
+        ) as selected_page_id
       from sources s
       join datasets d on d.id = s.dataset_id
       where s.workspace_id = $1
@@ -2247,14 +2264,45 @@ function metaAdSetTargetingInput(input: unknown): MetaAdSetTargeting | undefined
   return spec;
 }
 
+// The Facebook Page a creative is posted FROM (object_story_spec.page_id). An explicit pageId
+// wins; otherwise the connection's stored posting Page (connection_credentials.selected_page_id,
+// migration 0068 — chosen in the desktop connect picker) is used, so ⌘L / the Create sheet never
+// ask the founder for a 15-digit id. Resolved BEFORE the dedup claim / any Graph call, and fails
+// TYPED (non-retryable) so the desktop can route the user to Connections instead of retrying.
+async function resolveMetaPostingPageId(
+  db: InfiniteOsDb,
+  context: SessionContext,
+  sourceId: string,
+  input: unknown
+): Promise<string> {
+  const explicit = optionalString(input, "pageId");
+  if (explicit) {
+    return explicit;
+  }
+  const rows = await db.query(
+    `select selected_page_id from connection_credentials
+       where workspace_id = $1 and source_id = $2 and revoked_at is null
+       order by created_at desc limit 1`,
+    [context.workspaceId, sourceId]
+  );
+  const stored = (rows[0] as Record<string, unknown> | undefined)?.selected_page_id;
+  if (typeof stored === "string" && stored.trim() !== "") {
+    return stored;
+  }
+  throw metaTypedError(
+    "meta_page_not_selected",
+    "meta_page_not_selected: no posting Page is set for this Meta Ads connection — pick a posting Page in Connections (or pass pageId)"
+  );
+}
+
 async function createMetaCreativeHandler(
   db: InfiniteOsDb,
   context: SessionContext,
   input: unknown
 ): Promise<ActionEnvelope> {
   const name = requiredString(input, "name");
-  const pageId = requiredString(input, "pageId");
   const sourceId = await resolveMetaWriteSourceId(db, context, input);
+  const pageId = await resolveMetaPostingPageId(db, context, sourceId, input);
   return runMetaCreate(db, context, input, sourceId, "create_meta_creative", "creative", (credential) =>
     createMetaCreative(credential, {
       name,
