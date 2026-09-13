@@ -8037,6 +8037,147 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
       }
     );
   });
+
+  // ── v2 (meta_live_insights_v2) — the desktop Meta Ads surface's ONE read ──────────────────
+  it("run_meta_live_insights v2: timeIncrement:1 → per-day rows + edge status, window/currency on the envelope", async () => {
+    const db = metaWriteTestDb({ audits: [] });
+    await withGraph(
+      (call) => {
+        const url = new URL(call.url);
+        if (url.pathname.endsWith("/act_999/campaigns")) {
+          return jsonResponse({
+            data: [{ id: "cmp_1", effective_status: "ACTIVE", status: "ACTIVE", objective: "OUTCOME_SALES" }],
+            paging: {}
+          });
+        }
+        return jsonResponse({
+          data: [
+            liveAdRow({ campaign_id: "cmp_1", date_start: "2026-09-01", date_stop: "2026-09-01", spend: "20" }),
+            liveAdRow({ campaign_id: "cmp_1", date_start: "2026-09-02", date_stop: "2026-09-02", spend: "30" })
+          ]
+        });
+      },
+      async (calls) => {
+        const handlers = createActionHandlers(db);
+        const result = await handlers.run_meta_live_insights?.(
+          { sourceId: "src_meta", level: "campaign", since: "2026-09-01", until: "2026-09-02", timeIncrement: 1 },
+          { ...operatorContext, authority: "tool_agent" }
+        );
+        const insights = calls.map((c) => new URL(c.url)).find((u) => u.pathname.endsWith("/insights"));
+        expect(insights?.searchParams.get("time_increment")).toBe("1");
+        // Exactly one extra GET: the campaigns edge for effective_status. Never the CLI, never a POST.
+        expect(calls).toHaveLength(2);
+        expect(calls.every((c) => c.method === "GET")).toBe(true);
+        expect(calls.some((c) => new URL(c.url).pathname.endsWith("/act_999/campaigns"))).toBe(true);
+        expect(result?.ok).toBe(true);
+        const data = result?.data as {
+          rows: Array<Record<string, unknown>>;
+          window: { since: string; until: string };
+          currency: string | null;
+          timeIncrement: number | null;
+          count: number;
+          totalEntities: number;
+        };
+        expect(data).toMatchObject({
+          window: { since: "2026-09-01", until: "2026-09-02" },
+          currency: "USD",
+          timeIncrement: 1,
+          count: 2,
+          totalEntities: 1
+        });
+        expect(data.rows.map((row) => row.dateStart)).toEqual(["2026-09-01", "2026-09-02"]);
+        expect(data.rows[0]).toMatchObject({
+          entityId: "cmp_1",
+          entityName: "Prospecting",
+          level: "campaign",
+          effectiveStatus: "ACTIVE",
+          purchases: 5,
+          purchaseValue: 482.5,
+          leads: 0,
+          spend: 20,
+          cpa: 4
+        });
+        expect(data.rows[0].roas).toBeCloseTo(482.5 / 20, 6);
+        expect(JSON.stringify(result)).not.toContain("secret-meta-token");
+      }
+    );
+  });
+
+  it("run_meta_live_insights v2: the aggregate read (no timeIncrement) is byte-identical and still carries window/currency", async () => {
+    const db = metaWriteTestDb({ audits: [] });
+    await withGraph(
+      () => jsonResponse({ data: [liveAdRow({ date_start: "2026-08-14", date_stop: "2026-09-12" })] }),
+      async (calls) => {
+        const handlers = createActionHandlers(db);
+        const result = await handlers.run_meta_live_insights?.(
+          { sourceId: "src_meta" },
+          { ...operatorContext, authority: "tool_agent" }
+        );
+        // ONE request, no edge read, no time_increment — the ⌘L path's request is unchanged.
+        expect(calls).toHaveLength(1);
+        expect(new URL(calls[0].url).searchParams.get("time_increment")).toBeNull();
+        expect(result?.data).toMatchObject({
+          window: { datePreset: "last_30d", since: "2026-08-14", until: "2026-09-12" },
+          currency: "USD",
+          timeIncrement: null
+        });
+        const row = (result?.data as { rows: Array<Record<string, unknown>> }).rows[0];
+        expect(row).toMatchObject({ entityId: "ad_1", entityName: "Blue Hero", level: "ad", effectiveStatus: null });
+      }
+    );
+  });
+
+  // A2 — typed errors. The daemon forwards `error.code` ONLY when the thrown error carries a
+  // boolean `retryable` (apps/app guardedAction); a plain Error collapses to invalid_tool_input
+  // and the desktop cannot tell "not connected" from a bad input.
+  it("run_meta_live_insights throws TYPED errors (code + retryable=false) for not-connected / ambiguous / bad level / bad increment", async () => {
+    const base = metaWriteTestDb({ audits: [] });
+    const withSources = (rows: Array<{ id: string }>): InfiniteOsDb => ({
+      ...base,
+      async query<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T[]> {
+        if (sql.includes("from sources") && sql.includes("provider = 'meta_ads'")) {
+          return rows as T[];
+        }
+        return base.query(sql, params) as Promise<T[]>;
+      }
+    });
+    const ctx = { ...operatorContext, authority: "tool_agent" as const };
+    async function typedFailure(promise: unknown): Promise<{ code: unknown; retryable: unknown; message: string }> {
+      try {
+        await promise;
+      } catch (error) {
+        const typed = error as { code?: unknown; retryable?: unknown; message: string };
+        return { code: typed.code, retryable: typed.retryable, message: typed.message };
+      }
+      throw new Error("expected a rejection");
+    }
+    await withGraph(
+      () => jsonResponse({ data: [] }),
+      async (calls) => {
+        expect(await typedFailure(createActionHandlers(withSources([])).run_meta_live_insights?.({}, ctx))).toMatchObject({
+          code: "meta_ads_not_connected",
+          retryable: false
+        });
+        expect(
+          await typedFailure(createActionHandlers(withSources([{ id: "a" }, { id: "b" }])).run_meta_live_insights?.({}, ctx))
+        ).toMatchObject({ code: "meta_ads_source_ambiguous", retryable: false });
+        const handlers = createActionHandlers(base);
+        expect(await typedFailure(handlers.run_meta_live_insights?.({ sourceId: "src_meta", level: "creative" }, ctx))).toMatchObject({
+          code: "unsupported_meta_level",
+          retryable: false
+        });
+        expect(await typedFailure(handlers.run_meta_live_insights?.({ sourceId: "src_meta", timeIncrement: 7 }, ctx))).toMatchObject({
+          code: "unsupported_time_increment",
+          retryable: false
+        });
+        // The write-side resolver shares the codes (the Create sheet maps the same prefixes).
+        expect(
+          await typedFailure(createActionHandlers(withSources([])).create_meta_campaign?.({ name: "P", objective: "OUTCOME_SALES" }, operatorContext))
+        ).toMatchObject({ code: "meta_ads_not_connected", retryable: false });
+        expect(calls).toHaveLength(0);
+      }
+    );
+  });
 });
 
 function journeyTestDb(): InfiniteOsDb {

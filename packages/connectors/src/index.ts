@@ -9674,6 +9674,18 @@ export interface MetaLiveInsightsRow {
   adsetName: string | null;
   adId: string | null;
   adName: string | null;
+  // ── v2 (meta_live_insights_v2) identity — the entity at the REQUESTED level, so a consumer
+  // never has to pick campaignId/adsetId/adId by level itself. Names come off the insights row.
+  entityId: string | null;
+  entityName: string | null;
+  level: "campaign" | "adset" | "ad";
+  /** Graph effective_status off the level's edge (ACTIVE/PAUSED/CAMPAIGN_PAUSED/ARCHIVED/…);
+   *  null when status enrichment did not run (aggregate reads without includeStatus, or a
+   *  transport with no stored token — see `caveats`). */
+  effectiveStatus: string | null;
+  /** YYYY-MM-DD bounds Meta echoed on the row: one day when timeIncrement=1, else the window. */
+  dateStart: string | null;
+  dateStop: string | null;
   spend: number;
   impressions: number | null;
   clicks: number | null;
@@ -9688,10 +9700,53 @@ export interface MetaLiveInsightsRow {
   results: number | null;
   /** Purchase-only conversion value from the SAME canonical action_type; null otherwise. */
   conversionValue: number | null;
-  /** conversionValue / spend when both exist and spend > 0 — matches the warehouse ROAS definition. */
-  roas: number | null;
+  // ── v2 purchase/lead fields — objective-INDEPENDENT (a lead campaign that incidentally sells
+  // still reports its purchases). FIRST present action_type in precedence order, headline window
+  // (7d_click + 1d_view), never a sum across variants.
+  purchases: number;
+  purchaseValue: number;
+  leads: number;
+  /** purchaseValue / spend; 0 when either is 0 (never NaN/Infinity/null). */
+  roas: number;
+  /** spend / purchases; 0 when there are no purchases. */
+  cpa: number;
   costPerResult: number | null;
   currency: string | null;
+}
+
+// v2 purchase/lead precedence lists. `purchase` is Meta's cross-channel purchase (pixel + app +
+// offline + onsite); `omni_purchase` is the older omni alias; the pixel-only variant is last so an
+// account whose payload carries only the pixel event still reports its purchases.
+const META_LIVE_PURCHASE_ACTION_TYPES = ["purchase", "omni_purchase", "offsite_conversion.fb_pixel_purchase"];
+const META_LIVE_LEAD_ACTION_TYPES = ["lead", "onsite_conversion.lead_grouped", "offsite_conversion.fb_pixel_lead"];
+
+function metaLiveHeadlineFor(elements: MetaActionElement[] | null, actionTypes: string[]): number {
+  const element = metaPickCanonicalAction(elements, actionTypes);
+  return element ? metaHeadlineWindowValue(element) : 0;
+}
+
+// v2 status enrichment — ONE edge read per request, the level's own edge, through the SAME
+// readers the sync path uses (archived/paused included via META_ADS_EDGE_STATUS_FILTER). Returns
+// effective_status keyed by entity id.
+async function metaAdsReadLevelEffectiveStatus(
+  credential: MetaAdsCredential,
+  level: "campaign" | "adset" | "ad"
+): Promise<Map<string, string | null>> {
+  const statuses = new Map<string, string | null>();
+  if (level === "campaign") {
+    for (const [id, status] of await metaAdsReadCampaignStatus(credential)) {
+      statuses.set(id, status.effectiveStatus);
+    }
+  } else if (level === "adset") {
+    for (const [id, dim] of await metaAdsReadAdsetDims(credential)) {
+      statuses.set(id, dim.effectiveStatus);
+    }
+  } else {
+    for (const [id, dim] of await metaAdsReadAdAdims(credential)) {
+      statuses.set(id, dim.effectiveStatus);
+    }
+  }
+  return statuses;
 }
 
 export async function fetchMetaLiveInsights(
@@ -9700,20 +9755,48 @@ export async function fetchMetaLiveInsights(
     level: "campaign" | "adset" | "ad";
     datePreset?: string;
     timeRange?: { since: string; until: string };
-    /** Max rows RETURNED (after spend-desc sort); fetch itself is uncapped within the page guard. */
+    /** Max rows RETURNED (after spend-desc sort); fetch itself is uncapped within the page guard.
+     *  In per-day mode (timeIncrement=1) it caps ENTITIES (ranked by total spend), never day rows. */
     limit: number;
+    /** v2 — 1 sends time_increment=1: one row per entity per day (sparks). Omitted → the
+     *  whole-window aggregate request, byte-identical to before v2. */
+    timeIncrement?: 1;
+    /** v2 — enrich rows with effective_status from the level's Graph edge. Defaults to
+     *  `timeIncrement === 1`; pass true to get status on an aggregate read too. */
+    includeStatus?: boolean;
   }
-): Promise<{ rows: MetaLiveInsightsRow[]; totalRows: number; truncated: boolean }> {
-  // Window options in the exact shape every transport builder already takes; no timeIncrement
-  // anywhere → whole-window aggregate (see the header note).
+): Promise<{
+  rows: MetaLiveInsightsRow[];
+  totalRows: number;
+  totalEntities: number;
+  truncated: boolean;
+  /** Concrete YYYY-MM-DD bounds: the explicit timeRange, else the bounds Meta echoed on the
+   *  returned rows; null for a preset window that returned no rows. */
+  window: { since: string; until: string } | null;
+  currency: string | null;
+  caveats: string[];
+}> {
+  const perDay = options.timeIncrement === 1;
+  const includeStatus = options.includeStatus ?? perDay;
+  const caveats: string[] = [];
+  // Window options in the exact shape every transport builder already takes. No timeIncrement
+  // unless the caller opted into per-day rows (see the header note) — the aggregate request is
+  // byte-identical to the pre-v2 read.
   const windowOptions = options.timeRange
     ? { timeRange: options.timeRange }
     : { datePreset: options.datePreset ?? "last_30d" };
-  const fields = metaAdsInsightsFieldsForLevel(options.level);
+  // v2 at ad grain also carries the parent adset_name (the desktop row shows it); the aggregate
+  // pre-v2 request keeps the shared field list untouched.
+  const fields =
+    (perDay || includeStatus) && options.level === "ad"
+      ? `${metaAdsInsightsFieldsForLevel(options.level)},adset_name`
+      : metaAdsInsightsFieldsForLevel(options.level);
   const raw: MetaAdsInsightsRow[] = [];
 
   // The SAME three-way transport selection as testLive/extractLive — reused, not reimplemented.
-  if (isMetaAdsMcpTransport(credential)) {
+  const mcpTransport = isMetaAdsMcpTransport(credential);
+  const ambientCli = !mcpTransport && metaAdsReadsViaCli(credential);
+  if (mcpTransport) {
     const adAccountId = metaAdsAccountId(credential);
     let after: string | undefined;
     let exhausted = true;
@@ -9725,6 +9808,7 @@ export async function fetchMetaLiveInsights(
         limit: "100",
         attributionWindows: META_ADS_ATTRIBUTION_WINDOWS,
         ...windowOptions,
+        ...(perDay ? { timeIncrement: "1" } : {}),
         after
       });
       raw.push(...(response.data ?? []));
@@ -9738,7 +9822,7 @@ export async function fetchMetaLiveInsights(
     if (exhausted) {
       throw new ConnectorError("provider_api_error", "Meta Ads MCP pagination exceeded the page limit", true);
     }
-  } else if (metaAdsReadsViaCli(credential)) {
+  } else if (ambientCli) {
     // Ambient-auth CLI credential (no stored token) — only the local CLI can authenticate.
     // The shipped CLI read carries no level flag (campaign grain only this slice), so a
     // finer-grain request fails typed rather than silently answering at the wrong grain.
@@ -9753,7 +9837,8 @@ export async function fetchMetaLiveInsights(
       fields,
       limit: "100",
       attributionWindows: META_ADS_ATTRIBUTION_WINDOWS,
-      ...windowOptions
+      ...windowOptions,
+      ...(perDay ? { timeIncrement: "daily" as const } : {})
     });
     raw.push(...(response.data ?? []));
   } else {
@@ -9767,9 +9852,22 @@ export async function fetchMetaLiveInsights(
       level: options.level,
       limit: "500",
       attributionWindows: META_ADS_ATTRIBUTION_WINDOWS,
-      ...windowOptions
+      ...windowOptions,
+      ...(perDay ? { timeIncrement: "1" } : {})
     });
     await metaAdsFetchInsightsPages(accessToken, url, (row) => raw.push(row));
+  }
+  // v2 status: the level's edge, direct Graph only (the edge readers need a stored token). On
+  // MCP / ambient-CLI transports status stays null with an explicit caveat — never guessed.
+  let statusById: Map<string, string | null> | null = null;
+  if (includeStatus) {
+    if (mcpTransport || ambientCli) {
+      caveats.push(
+        "effective_status unavailable on this transport (the Graph edge read needs a stored access token); effectiveStatus is null."
+      );
+    } else {
+      statusById = await metaAdsReadLevelEffectiveStatus(credential, options.level);
+    }
   }
   const context: MetaAdsInsightsContext = {
     apiVersion: metaAdsApiVersion(credential),
@@ -9780,13 +9878,33 @@ export async function fetchMetaLiveInsights(
     const spend = numberOrNull(row.spend) ?? 0;
     const conversionValue = conversion?.conversionValue ?? null;
     const results = conversion?.results ?? null;
+    const campaignId = stringOrNull(row.campaign_id);
+    const adsetId = stringOrNull(row.adset_id);
+    const adId = stringOrNull(row.ad_id);
+    const entityId = options.level === "campaign" ? campaignId : options.level === "adset" ? adsetId : adId;
+    const entityName =
+      options.level === "campaign"
+        ? stringOrNull(row.campaign_name)
+        : options.level === "adset"
+          ? stringOrNull(row.adset_name)
+          : stringOrNull(row.ad_name);
+    const actions = metaInsightsActions(row);
+    const purchases = metaLiveHeadlineFor(actions, META_LIVE_PURCHASE_ACTION_TYPES);
+    const purchaseValue = metaLiveHeadlineFor(metaInsightsActionValues(row), META_LIVE_PURCHASE_ACTION_TYPES);
+    const leads = metaLiveHeadlineFor(actions, META_LIVE_LEAD_ACTION_TYPES);
     return {
-      campaignId: stringOrNull(row.campaign_id),
+      campaignId,
       campaignName: stringOrNull(row.campaign_name),
-      adsetId: stringOrNull(row.adset_id),
+      adsetId,
       adsetName: stringOrNull(row.adset_name),
-      adId: stringOrNull(row.ad_id),
+      adId,
       adName: stringOrNull(row.ad_name),
+      entityId,
+      entityName,
+      level: options.level,
+      effectiveStatus: statusById && entityId ? (statusById.get(entityId) ?? null) : null,
+      dateStart: stringOrNull(row.date_start),
+      dateStop: stringOrNull(row.date_stop),
       spend,
       impressions: numberOrNull(row.impressions),
       clicks: numberOrNull(row.clicks),
@@ -9799,14 +9917,64 @@ export async function fetchMetaLiveInsights(
       resultType: conversion?.resultType ?? null,
       results,
       conversionValue,
-      roas: conversionValue !== null && spend > 0 ? conversionValue / spend : null,
+      purchases,
+      purchaseValue,
+      leads,
+      roas: purchaseValue > 0 && spend > 0 ? purchaseValue / spend : 0,
+      cpa: purchases > 0 ? spend / purchases : 0,
       costPerResult: results !== null && results > 0 ? spend / results : null,
       currency: stringOrNull(row.account_currency)
     };
   });
-  mapped.sort((a, b) => b.spend - a.spend);
-  const rows = mapped.slice(0, options.limit);
-  return { rows, totalRows: mapped.length, truncated: mapped.length > rows.length };
+  // Concrete window bounds: the explicit range, else what Meta echoed on the rows.
+  let window: { since: string; until: string } | null = options.timeRange ?? null;
+  if (!window) {
+    const starts = mapped.map((row) => row.dateStart).filter((value): value is string => value !== null);
+    const stops = mapped.map((row) => row.dateStop).filter((value): value is string => value !== null);
+    if (starts.length > 0 && stops.length > 0) {
+      window = { since: starts.reduce((a, b) => (a < b ? a : b)), until: stops.reduce((a, b) => (a > b ? a : b)) };
+    }
+  }
+  const currency = mapped.find((row) => row.currency !== null)?.currency ?? null;
+
+  if (!perDay) {
+    mapped.sort((a, b) => b.spend - a.spend);
+    const rows = mapped.slice(0, options.limit);
+    return {
+      rows,
+      totalRows: mapped.length,
+      totalEntities: mapped.length,
+      truncated: mapped.length > rows.length,
+      window,
+      currency,
+      caveats
+    };
+  }
+  // Per-day mode: rank ENTITIES by total spend, keep the top `limit` whole (all their day rows),
+  // days ascending within an entity — a spark is useless with its days truncated.
+  const spendByEntity = new Map<string, number>();
+  for (const row of mapped) {
+    const key = row.entityId ?? "";
+    spendByEntity.set(key, (spendByEntity.get(key) ?? 0) + row.spend);
+  }
+  const ranked = [...spendByEntity.entries()].sort((a, b) => b[1] - a[1]).map(([id]) => id);
+  const kept = new Map(ranked.slice(0, options.limit).map((id, index) => [id, index]));
+  const rows = mapped
+    .filter((row) => kept.has(row.entityId ?? ""))
+    .sort((a, b) => {
+      const rank = kept.get(a.entityId ?? "")! - kept.get(b.entityId ?? "")!;
+      if (rank !== 0) return rank;
+      return (a.dateStart ?? "") < (b.dateStart ?? "") ? -1 : (a.dateStart ?? "") > (b.dateStart ?? "") ? 1 : 0;
+    });
+  return {
+    rows,
+    totalRows: mapped.length,
+    totalEntities: ranked.length,
+    truncated: ranked.length > kept.size,
+    window,
+    currency,
+    caveats
+  };
 }
 
 // ── Asset discovery (list_meta_assets) ───────────────────────────────────────
@@ -11062,7 +11230,9 @@ function safeUrlForLogs(url: string): string {
   }
 }
 
-class ConnectorError extends Error {
+// Exported so the analytical engine can throw the SAME typed shape (code + retryable) for its
+// own pre-fetch failures — the daemon forwards `error.code` only when `retryable` is a boolean.
+export class ConnectorError extends Error {
   constructor(
     public readonly code: string,
     message: string,
@@ -11504,6 +11674,8 @@ interface MetaAdsInsightsRow {
   ad_id?: string | null;
   ad_name?: string | null;
   date_start?: string | null;
+  // Always echoed by /insights alongside date_start (per-day rows when time_increment=1).
+  date_stop?: string | null;
   spend?: string | number | null;
   clicks?: string | number | null;
   inline_link_clicks?: string | number | null;

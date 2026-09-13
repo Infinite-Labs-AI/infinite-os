@@ -1176,6 +1176,17 @@ function inputSchemaFor(id: InfiniteOsActionId): Record<string, unknown> {
         },
         since: { type: "string", description: "YYYY-MM-DD window start (requires until; overrides datePreset)." },
         until: { type: "string", description: "YYYY-MM-DD window end, inclusive (requires since)." },
+        // v2 (meta_live_insights_v2). timeIncrement:1 → one row per entity per day (Meta
+        // time_increment=1) with effective_status from the level's edge; limit then caps
+        // ENTITIES (ranked by total spend), never day rows. Omit for the whole-window aggregate.
+        timeIncrement: {
+          enum: [1],
+          description: "1 = one row per entity per day (sparks) + effectiveStatus; omit for one aggregate row per entity."
+        },
+        includeStatus: {
+          type: "boolean",
+          description: "Enrich rows with effective_status from the Graph edge (defaults to true when timeIncrement=1)."
+        },
         limit: { type: "number", minimum: 1, maximum: 200 }
       },
       []

@@ -143,7 +143,13 @@ export const APP_CAPABILITIES = [
   // on THIS daemon (Meta is permanently local). The desktop fails CLOSED on this flag — an
   // older daemon without it gets an honest meta_live_engine_outdated error, never a
   // confusing invalid_tool_input from a registry that lacks the action.
-  "meta_live_insights"
+  "meta_live_insights",
+  // v2 of that read (2026-09-13, the desktop Meta Ads surface's ONE engine read): timeIncrement:1
+  // per-day rows, effectiveStatus off the level's edge, purchases/purchaseValue/leads/roas/cpa,
+  // window+currency on the envelope, and TYPED error codes (meta_ads_not_connected …) forwarded
+  // by guardedAction. The desktop fails CLOSED on this flag (daemon_capability_missing → "update
+  // Infinite") — an older bundle must never answer the v2 request with the v1 shape.
+  "meta_live_insights_v2"
 ] as const;
 
 type ScopedAppToolsParseResult =

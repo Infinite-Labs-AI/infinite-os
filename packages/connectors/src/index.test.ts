@@ -4136,6 +4136,255 @@ console.log(JSON.stringify({ data: [
     });
   });
 
+  // ── fetchMetaLiveInsights v2 (meta_live_insights_v2) ── per-day rows, status, purchase fields.
+  // The desktop Meta Ads surface (Cards/Table + sparks) reads THIS shape. timeIncrement:1 is the
+  // opt-in: without it (and without includeStatus) the request above stays byte-identical.
+  it("fetchMetaLiveInsights v2: timeIncrement:1 sends time_increment=1, returns one row per entity per day with status + purchase fields", async () => {
+    const requests: Array<{ url: string }> = [];
+    await withMockFetch(async (url) => {
+      requests.push({ url });
+      const parsed = new URL(url);
+      if (parsed.pathname === "/v25.0/act_777/ads") {
+        return new Response(
+          JSON.stringify({
+            data: [
+              { id: "a1", name: "Big", effective_status: "ACTIVE", status: "ACTIVE", adset_id: "as1", campaign_id: "c1" },
+              { id: "a2", name: "Mid", effective_status: "PAUSED", status: "PAUSED", adset_id: "as1", campaign_id: "c1" }
+            ],
+            paging: {}
+          }),
+          { status: 200 }
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          data: [
+            {
+              ad_id: "a2", ad_name: "Mid", adset_id: "as1", adset_name: "Prospecting US", campaign_id: "c1", campaign_name: "Launch",
+              date_start: "2026-09-01", date_stop: "2026-09-01",
+              spend: "50", impressions: "1000", reach: "800", frequency: "1.25", clicks: "40", ctr: "4", cpc: "1.25", cpm: "50",
+              account_currency: "USD", objective: "OUTCOME_LEADS",
+              // leads: `lead` absent → onsite_conversion.lead_grouped is the next precedence (never summed).
+              actions: [{ action_type: "onsite_conversion.lead_grouped", value: "3", "7d_click": "3", "1d_view": "1" }]
+            },
+            {
+              ad_id: "a1", ad_name: "Big", adset_id: "as1", adset_name: "Prospecting US", campaign_id: "c1", campaign_name: "Launch",
+              date_start: "2026-09-01", date_stop: "2026-09-01",
+              spend: "100", impressions: "5000", reach: "4000", frequency: "1.25", clicks: "200", ctr: "4", cpc: "0.5", cpm: "20",
+              account_currency: "USD", objective: "OUTCOME_SALES",
+              // purchases: `purchase` wins over omni_purchase + the pixel variant — FIRST present, never a sum.
+              actions: [
+                { action_type: "omni_purchase", value: "9", "7d_click": "9", "1d_view": "9" },
+                { action_type: "purchase", value: "4", "7d_click": "4", "1d_view": "1" },
+                { action_type: "offsite_conversion.fb_pixel_purchase", value: "4", "7d_click": "4", "1d_view": "1" }
+              ],
+              action_values: [
+                { action_type: "omni_purchase", value: "999", "7d_click": "999", "1d_view": "999" },
+                { action_type: "purchase", value: "400", "7d_click": "400", "1d_view": "100" }
+              ]
+            },
+            {
+              ad_id: "a1", ad_name: "Big", adset_id: "as1", adset_name: "Prospecting US", campaign_id: "c1", campaign_name: "Launch",
+              date_start: "2026-09-02", date_stop: "2026-09-02",
+              spend: "0", impressions: "0", clicks: "0", account_currency: "USD", objective: "OUTCOME_SALES"
+            }
+          ],
+          paging: {}
+        }),
+        { status: 200 }
+      );
+    }, async () => {
+      const credential: MetaAdsCredential = {
+        mode: "live",
+        transport: "marketing_api",
+        adAccountId: "777",
+        accessToken: "live-read-token"
+      };
+      const result = await fetchMetaLiveInsights(credential, {
+        level: "ad",
+        timeRange: { since: "2026-09-01", until: "2026-09-02" },
+        timeIncrement: 1,
+        limit: 10
+      });
+      const insights = requests.map((r) => new URL(r.url)).find((u) => u.pathname === "/v25.0/act_777/insights");
+      expect(insights).toBeDefined();
+      expect(insights!.searchParams.get("time_increment")).toBe("1");
+      expect(insights!.searchParams.get("level")).toBe("ad");
+      // v2 at ad grain also asks for the parent adset_name (the desktop row carries adsetName).
+      expect(insights!.searchParams.get("fields")).toContain("adset_name");
+      // Status rides the level's edge (the SAME reader the sync path uses), archived/paused included.
+      const edge = requests.map((r) => new URL(r.url)).find((u) => u.pathname === "/v25.0/act_777/ads");
+      expect(edge).toBeDefined();
+      expect(edge!.searchParams.get("fields")).toContain("effective_status");
+      for (const seen of requests) expect(seen.url).not.toContain("live-read-token");
+
+      // One row per entity per date_start; entities ranked by TOTAL spend, days ascending within.
+      expect(result.rows.map((row) => [row.entityId, row.dateStart])).toEqual([
+        ["a1", "2026-09-01"],
+        ["a1", "2026-09-02"],
+        ["a2", "2026-09-01"]
+      ]);
+      expect(result).toMatchObject({
+        totalRows: 3,
+        totalEntities: 2,
+        truncated: false,
+        window: { since: "2026-09-01", until: "2026-09-02" },
+        currency: "USD"
+      });
+      const big = result.rows[0];
+      expect(big).toMatchObject({
+        entityId: "a1",
+        entityName: "Big",
+        level: "ad",
+        campaignId: "c1",
+        campaignName: "Launch",
+        adsetId: "as1",
+        adsetName: "Prospecting US",
+        effectiveStatus: "ACTIVE",
+        dateStart: "2026-09-01",
+        dateStop: "2026-09-01",
+        spend: 100,
+        impressions: 5000,
+        reach: 4000,
+        frequency: 1.25,
+        clicks: 200,
+        ctr: 4,
+        cpc: 0.5,
+        cpm: 20,
+        // headline window (7d_click + 1d_view) of the FIRST present purchase action_type.
+        purchases: 5,
+        purchaseValue: 500,
+        leads: 0,
+        roas: 5,
+        cpa: 20,
+        currency: "USD"
+      });
+      // Zero-spend day: ratios are 0, never NaN/Infinity/null.
+      expect(result.rows[1]).toMatchObject({ purchases: 0, purchaseValue: 0, roas: 0, cpa: 0, spend: 0 });
+      const mid = result.rows[2];
+      expect(mid).toMatchObject({ entityName: "Mid", effectiveStatus: "PAUSED", leads: 4, purchases: 0, roas: 0, cpa: 0 });
+      // Adding the v2 fields did NOT change the pre-existing canonical fields the ⌘L path reads:
+      // OUTCOME_SALES still maps the pixel purchase (results = 7d_click + 1d_view), and the
+      // OUTCOME_LEADS rule still recognises only `lead` (lead_grouped is a v2-only precedence).
+      expect(big).toMatchObject({ adId: "a1", adName: "Big", resultType: "purchase", results: 5 });
+      expect(mid).toMatchObject({ adId: "a2", adName: "Mid", resultType: null, results: null });
+    });
+  });
+
+  it("fetchMetaLiveInsights v2: limit caps ENTITIES (not day rows) in per-day mode and reports honest truncation", async () => {
+    await withMockFetch(async (url) => {
+      const parsed = new URL(url);
+      if (parsed.pathname.endsWith("/campaigns")) {
+        return new Response(JSON.stringify({ data: [{ id: "c1", effective_status: "ACTIVE", status: "ACTIVE" }], paging: {} }), { status: 200 });
+      }
+      return new Response(
+        JSON.stringify({
+          data: [
+            { campaign_id: "c1", campaign_name: "One", date_start: "2026-09-01", date_stop: "2026-09-01", spend: "1" },
+            { campaign_id: "c1", campaign_name: "One", date_start: "2026-09-02", date_stop: "2026-09-02", spend: "1" },
+            { campaign_id: "c2", campaign_name: "Two", date_start: "2026-09-01", date_stop: "2026-09-01", spend: "90" },
+            { campaign_id: "c3", campaign_name: "Three", date_start: "2026-09-01", date_stop: "2026-09-01", spend: "5" }
+          ],
+          paging: {}
+        }),
+        { status: 200 }
+      );
+    }, async () => {
+      const credential: MetaAdsCredential = { mode: "live", transport: "marketing_api", adAccountId: "777", accessToken: "t" };
+      const result = await fetchMetaLiveInsights(credential, { level: "campaign", datePreset: "last_7d", timeIncrement: 1, limit: 2 });
+      // Top 2 entities by total spend (c2=90, c3=5); c1 (2 rows, 2 spend) is dropped WHOLE.
+      expect(result.rows.map((row) => row.entityId)).toEqual(["c2", "c3"]);
+      expect(result).toMatchObject({ totalRows: 4, totalEntities: 3, truncated: true });
+      // A preset window still reports the concrete bounds Meta echoed on the rows.
+      expect(result.window).toEqual({ since: "2026-09-01", until: "2026-09-02" });
+      // Campaign-level status came from the /campaigns edge; unknown ids stay null (never guessed).
+      expect(result.rows[0].effectiveStatus).toBeNull();
+    });
+  });
+
+  it("fetchMetaLiveInsights v2: includeStatus:true enriches the AGGREGATE read with the edge status without time_increment", async () => {
+    const requests: string[] = [];
+    await withMockFetch(async (url) => {
+      requests.push(url);
+      const parsed = new URL(url);
+      if (parsed.pathname.endsWith("/adsets")) {
+        return new Response(
+          JSON.stringify({ data: [{ id: "as1", name: "Prospecting", effective_status: "CAMPAIGN_PAUSED", status: "ACTIVE", campaign_id: "c1" }], paging: {} }),
+          { status: 200 }
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          data: [{ adset_id: "as1", adset_name: "Prospecting", campaign_id: "c1", campaign_name: "Launch", date_start: "2026-09-01", date_stop: "2026-09-07", spend: "10" }],
+          paging: {}
+        }),
+        { status: 200 }
+      );
+    }, async () => {
+      const credential: MetaAdsCredential = { mode: "live", transport: "marketing_api", adAccountId: "777", accessToken: "t" };
+      const result = await fetchMetaLiveInsights(credential, { level: "adset", datePreset: "last_7d", includeStatus: true, limit: 10 });
+      const insights = new URL(requests.find((u) => u.includes("/insights"))!);
+      expect(insights.searchParams.get("time_increment")).toBeNull();
+      expect(requests.some((u) => u.includes("/act_777/adsets"))).toBe(true);
+      expect(result.rows[0]).toMatchObject({
+        entityId: "as1",
+        entityName: "Prospecting",
+        level: "adset",
+        effectiveStatus: "CAMPAIGN_PAUSED",
+        dateStart: "2026-09-01",
+        dateStop: "2026-09-07"
+      });
+      expect(result.window).toEqual({ since: "2026-09-01", until: "2026-09-07" });
+    });
+  });
+
+  it("fetchMetaLiveInsights v2: the ambient-auth CLI read passes --time-increment daily and reports status as unavailable (no edge read without a token)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "growth-os-meta-live-cli-v2-"));
+    const script = join(dir, "meta-cli.mjs");
+    writeFileSync(
+      script,
+      `
+import process from "node:process";
+const args = process.argv.slice(2);
+function argValue(name) {
+  const index = args.indexOf(name);
+  return index === -1 ? undefined : args[index + 1];
+}
+if (argValue("--time-increment") !== "daily") process.exit(7);
+console.log(JSON.stringify({ data: [
+  { campaign_id: "c9", campaign_name: "CLI Live", date_start: "2026-09-01", date_stop: "2026-09-01", spend: "12.5" },
+  { campaign_id: "c9", campaign_name: "CLI Live", date_start: "2026-09-02", date_stop: "2026-09-02", spend: "1" }
+] }));
+      `.trim(),
+      "utf8"
+    );
+    const previousToken = process.env.ACCESS_TOKEN;
+    process.env.ACCESS_TOKEN = "ambient-live-token";
+    let fetched = 0;
+    try {
+      await withMockFetch(async () => {
+        fetched += 1;
+        return new Response("{}", { status: 200 });
+      }, async () => {
+        const credential: MetaAdsCredential = {
+          mode: "live",
+          transport: "meta_ads_cli",
+          adAccountId: "1234567890",
+          cliCommand: `${JSON.stringify(process.execPath)} ${JSON.stringify(script)}`
+        };
+        const result = await fetchMetaLiveInsights(credential, { level: "campaign", datePreset: "last_7d", timeIncrement: 1, limit: 10 });
+        expect(result.rows.map((row) => row.dateStart)).toEqual(["2026-09-01", "2026-09-02"]);
+        expect(result.rows[0].effectiveStatus).toBeNull();
+        expect(result.caveats.join(" ")).toContain("effective_status");
+        expect(fetched).toBe(0);
+      });
+    } finally {
+      if (previousToken === undefined) delete process.env.ACCESS_TOKEN;
+      else process.env.ACCESS_TOKEN = previousToken;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   // ── Steady-state window regression (2026-07-11 zero-loop incident) ── the harness CLOSE step
   // ratchets the cursor forward on EVERY succeeded run (records or not), so cursor-driven windows
   // degenerate to the inter-sync gap after one legitimately-empty answer and never recover —
