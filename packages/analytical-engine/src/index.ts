@@ -2564,8 +2564,9 @@ async function listMetaAssetsHandler(
   });
   if (assets.adAccounts.length === 0) {
     throw new Error(
-      "no_meta_ad_accounts: the token sees no ad accounts. For a system-user token, confirm it has " +
-        "the ads_management + business_management scopes and is assigned the ad account in Business Settings."
+      "no_meta_ad_accounts: this token can't see any ad account. In Business Settings → Users → System users, " +
+        "open the system user, click Add assets → Ad accounts, assign your ad account with full control, then " +
+        "generate a new token with the ads_management, ads_read, business_management and read_insights scopes and paste it here."
     );
   }
   return envelope(
