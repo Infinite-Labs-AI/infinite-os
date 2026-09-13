@@ -8247,6 +8247,258 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
       }
     );
   });
+
+  // ── Posting Page (migration 0068) ───────────────────────────────────────────
+  // Every Meta ad is posted FROM a Facebook Page. The connect picker lists Pages via
+  // list_meta_assets, stores the choice as connection_credentials.selected_page_id, and
+  // create_meta_creative defaults its pageId to it so nobody has to type a 15-digit id.
+  describe("Posting Page — discovery, stored selection, creative default", () => {
+    it("list_meta_assets passes the discovered Pages (+ pagesByBusiness) through to the picker", async () => {
+      await withGraph(
+        (call) => {
+          if (call.url.includes("/me/adaccounts")) {
+            return jsonResponse({ data: [{ id: "act_1", account_id: "1", name: "Ads", currency: "USD" }] });
+          }
+          if (call.url.includes("/me/businesses")) {
+            return jsonResponse({ data: [{ id: "biz_1", name: "Acme" }] });
+          }
+          if (call.url.includes("/me/accounts")) {
+            return jsonResponse({ data: [{ id: "pg_1", name: "Acme Page", category: "Brand", instagram_business_account: { id: "ig_1" } }] });
+          }
+          if (call.url.includes("/biz_1/owned_pages")) {
+            return jsonResponse({ data: [{ id: "pg_2", name: "Owned Page" }] });
+          }
+          return jsonResponse({ data: [] });
+        },
+        async () => {
+          const handlers = createActionHandlers(metaWriteTestDb({ audits: [] }));
+          const result = await handlers.list_meta_assets?.({ accessToken: "raw-user-token" }, operatorContext);
+          expect(result?.data).toMatchObject({
+            tokenKind: "user_token",
+            pages: [
+              { id: "pg_1", name: "Acme Page", category: "Brand", instagramBusinessAccountId: "ig_1" },
+              { id: "pg_2", name: "Owned Page" }
+            ],
+            pagesByBusiness: { biz_1: [{ id: "pg_2", name: "Owned Page" }] }
+          });
+        }
+      );
+    });
+
+    // A Meta credential the connect/reconnect test-connection step accepts (marketing_api mode
+    // "live" hits /act_x?fields=… which the withGraph responder answers).
+    const metaPayload = {
+      mode: "live",
+      transport: "marketing_api",
+      adAccountId: "act_999",
+      accessToken: "secret-meta-token",
+      apiVersion: "v25.0"
+    };
+
+    function connectCaptureDb(captured: { input?: Record<string, unknown> }): InfiniteOsDb {
+      const base = metaWriteTestDb({ audits: [] });
+      return {
+        ...base,
+        async connectSource(input) {
+          captured.input = input as unknown as Record<string, unknown>;
+          return { id: "src_meta_new", provider: "meta_ads", status: "connected" };
+        },
+        async withTransaction(fn) {
+          return fn(this);
+        }
+      };
+    }
+
+    it("connect_source stores selectedPageId beside selectedPixelId (db.connectSource input)", async () => {
+      const captured: { input?: Record<string, unknown> } = {};
+      await withGraph(
+        () => jsonResponse({ id: "act_999", account_id: "999", name: "Ads", currency: "USD" }),
+        async () => {
+          const handlers = createActionHandlers(connectCaptureDb(captured));
+          await handlers.connect_source?.(
+            {
+              provider: "meta_ads",
+              connectionName: "Meta",
+              credentialPayload: metaPayload,
+              selectedPixelId: "px_1",
+              selectedPageId: "pg_1"
+            },
+            operatorContext
+          );
+          expect(captured.input).toMatchObject({ selectedPixelId: "px_1", selectedPageId: "pg_1" });
+        }
+      );
+    });
+
+    it("connect_source without a Page leaves selectedPageId OFF the db input (byte-identical legacy connect)", async () => {
+      const captured: { input?: Record<string, unknown> } = {};
+      await withGraph(
+        () => jsonResponse({ id: "act_999", account_id: "999", name: "Ads", currency: "USD" }),
+        async () => {
+          const handlers = createActionHandlers(connectCaptureDb(captured));
+          await handlers.connect_source?.(
+            { provider: "meta_ads", connectionName: "Meta", credentialPayload: metaPayload },
+            operatorContext
+          );
+          expect(captured.input).toBeDefined();
+          expect("selectedPageId" in (captured.input ?? {})).toBe(false);
+          expect("selectedPixelId" in (captured.input ?? {})).toBe(false);
+        }
+      );
+    });
+
+    function reconnectDb(prior: { selected_pixel_id: string | null; selected_page_id: string | null }, inserted: unknown[][]): InfiniteOsDb {
+      const base = metaWriteTestDb({ audits: [] });
+      return {
+        ...base,
+        async query<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T[]> {
+          if (sql.includes("select selected_pixel_id, selected_page_id from connection_credentials")) {
+            return [prior] as T[];
+          }
+          if (sql.includes("insert into connection_credentials")) {
+            inserted.push(params ?? []);
+            return [];
+          }
+          return base.query(sql, params) as Promise<T[]>;
+        },
+        async withTransaction(fn) {
+          return fn(this);
+        }
+      };
+    }
+
+    it("reconnect_source carries the prior selected_page_id (and pixel) onto the fresh credential row", async () => {
+      const inserted: unknown[][] = [];
+      await withGraph(
+        () => jsonResponse({ id: "act_999", account_id: "999", name: "Ads", currency: "USD" }),
+        async () => {
+          const handlers = createActionHandlers(reconnectDb({ selected_pixel_id: "px_old", selected_page_id: "pg_old" }, inserted));
+          await handlers.reconnect_source?.({ sourceId: "src_meta", credentialPayload: metaPayload }, operatorContext);
+          expect(inserted).toHaveLength(1);
+          // Positional params: … $7 = selected_pixel_id, $8 = selected_page_id.
+          expect(inserted[0]?.[6]).toBe("px_old");
+          expect(inserted[0]?.[7]).toBe("pg_old");
+        }
+      );
+    });
+
+    it("reconnect_source: an explicit selectedPageId overrides the carried one", async () => {
+      const inserted: unknown[][] = [];
+      await withGraph(
+        () => jsonResponse({ id: "act_999", account_id: "999", name: "Ads", currency: "USD" }),
+        async () => {
+          const handlers = createActionHandlers(reconnectDb({ selected_pixel_id: null, selected_page_id: "pg_old" }, inserted));
+          await handlers.reconnect_source?.(
+            { sourceId: "src_meta", credentialPayload: metaPayload, selectedPageId: "pg_new" },
+            operatorContext
+          );
+          expect(inserted[0]?.[6]).toBeNull();
+          expect(inserted[0]?.[7]).toBe("pg_new");
+        }
+      );
+    });
+
+    function creativeDb(storedPageId: string | null, audits: AuditRow[] = []): InfiniteOsDb {
+      const base = metaWriteTestDb({ audits });
+      return {
+        ...base,
+        async query<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T[]> {
+          if (sql.includes("select selected_page_id from connection_credentials")) {
+            return [{ selected_page_id: storedPageId }] as T[];
+          }
+          return base.query(sql, params) as Promise<T[]>;
+        },
+        async withTransaction(fn) {
+          return fn(this);
+        }
+      };
+    }
+
+    it("create_meta_creative defaults pageId to the connection's stored selected_page_id", async () => {
+      await withGraph(
+        () => jsonResponse({ id: "23850000000001" }),
+        async (calls) => {
+          const handlers = createActionHandlers(creativeDb("pg_stored"));
+          const result = await handlers.create_meta_creative?.(
+            { sourceId: "src_meta", name: "Default Page creative", linkUrl: "https://example.com", imageHash: "abc" },
+            operatorContext
+          );
+          expect(result?.data).toMatchObject({ id: "23850000000001", entity: "creative" });
+          const post = calls.find((c) => c.method === "POST");
+          expect(post?.body?.object_story_spec).toMatchObject({ page_id: "pg_stored" });
+        }
+      );
+    });
+
+    it("create_meta_creative: an explicit pageId overrides the stored Page and never reads the credential row for it", async () => {
+      const reads: string[] = [];
+      const base = creativeDb("pg_stored");
+      const db: InfiniteOsDb = {
+        ...base,
+        async query<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T[]> {
+          if (sql.includes("select selected_page_id")) reads.push(sql);
+          return base.query(sql, params) as Promise<T[]>;
+        },
+        async withTransaction(fn) {
+          return fn(this);
+        }
+      };
+      await withGraph(
+        () => jsonResponse({ id: "23850000000002" }),
+        async (calls) => {
+          const handlers = createActionHandlers(db);
+          await handlers.create_meta_creative?.(
+            { sourceId: "src_meta", name: "Explicit", pageId: "pg_explicit", imageHash: "abc" },
+            operatorContext
+          );
+          const post = calls.find((c) => c.method === "POST");
+          expect(post?.body?.object_story_spec).toMatchObject({ page_id: "pg_explicit" });
+          expect(reads).toHaveLength(0);
+        }
+      );
+    });
+
+    it("create_meta_creative fails TYPED meta_page_not_selected (non-retryable) before any Graph call when no Page is set", async () => {
+      const audits: AuditRow[] = [];
+      await withGraph(
+        () => jsonResponse({ id: "never" }),
+        async (calls) => {
+          const handlers = createActionHandlers(creativeDb(null, audits));
+          await expect(
+            handlers.create_meta_creative?.({ sourceId: "src_meta", name: "No page", imageHash: "abc", clientToken: "tok_np" }, operatorContext)
+          ).rejects.toMatchObject({ code: "meta_page_not_selected", retryable: false });
+          expect(calls).toHaveLength(0);
+          expect(audits).toHaveLength(0);
+        }
+      );
+    });
+
+    it("list_sources rows expose selected_pixel_id + selected_page_id so the desktop can tell whether a Page is set", async () => {
+      const rows = [
+        { id: "src_meta", provider: "meta_ads", status: "connected", credential_kind: "system_user_token", selected_pixel_id: "px_1", selected_page_id: "pg_1" },
+        { id: "src_ph", provider: "posthog", status: "connected", credential_kind: "api_key", selected_pixel_id: null, selected_page_id: null }
+      ];
+      const seen: string[] = [];
+      const base = metaWriteTestDb({ audits: [] });
+      const db: InfiniteOsDb = {
+        ...base,
+        async query<T = Record<string, unknown>>(sql: string): Promise<T[]> {
+          seen.push(sql);
+          return rows as T[];
+        },
+        async withTransaction(fn) {
+          return fn(this);
+        }
+      };
+      const handlers = createActionHandlers(db);
+      const result = await handlers.list_sources?.({}, operatorContext);
+      expect(result?.data).toEqual({ sources: rows });
+      // The SQL itself selects both columns off the live credential row (the desktop reads raw rows).
+      expect(seen[0]).toMatch(/select cc\.selected_pixel_id[\s\S]*as selected_pixel_id/);
+      expect(seen[0]).toMatch(/select cc\.selected_page_id[\s\S]*as selected_page_id/);
+      expect(seen[0]).toContain("cc.revoked_at is null");
+    });
+  });
 });
 
 function journeyTestDb(): InfiniteOsDb {

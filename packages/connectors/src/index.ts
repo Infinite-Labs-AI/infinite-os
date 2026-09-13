@@ -10041,6 +10041,19 @@ export interface MetaBusiness {
   id: string;
   name: string;
 }
+/**
+ * A Facebook Page the token can post ads FROM. Every Meta ad creative carries
+ * `object_story_spec.page_id`, so the connect picker offers these as the "Posting Page" and the
+ * chosen id is persisted as `connection_credentials.selected_page_id` (migration 0068).
+ */
+export interface MetaPage {
+  id: string;
+  name: string;
+  /** Page category, e.g. "Product/Service" (Graph `category`). Absent when Graph omits it. */
+  category?: string;
+  /** The Instagram business account linked to the Page (Graph `instagram_business_account{id}`), when readable. */
+  instagramBusinessAccountId?: string;
+}
 export interface MetaAssetsSnapshot {
   /** Which token class resolved the accounts — drives the desktop's wording. */
   tokenKind: "user_token" | "system_user_token";
@@ -10048,6 +10061,10 @@ export interface MetaAssetsSnapshot {
   pixels: MetaPixel[];
   businesses: MetaBusiness[];
   pixelsByAccount: Record<string, MetaPixel[]>;
+  /** Posting Pages, de-duplicated across every edge (first-seen order). EMPTY when no edge is readable. */
+  pages: MetaPage[];
+  /** Pages grouped by the business they were discovered under (owned + client edges); user-level Pages are not here. */
+  pagesByBusiness: Record<string, MetaPage[]>;
 }
 
 interface MetaGraphList<T> {
@@ -10085,7 +10102,9 @@ export async function listMetaAssets(
     adAccounts: [],
     pixels: [],
     businesses: [],
-    pixelsByAccount: {}
+    pixelsByAccount: {},
+    pages: [],
+    pagesByBusiness: {}
   };
 
   // 1. OAuth-user path. A system-user token returns 200-empty here (it owns no personal accounts);
@@ -10144,7 +10163,80 @@ export async function listMetaAssets(
     }
   }
 
+  // 5. Posting Pages. Runs AFTER steps 1-4 so the account/pixel/business requests above are
+  //    byte-identical to before Pages existed. Every edge is best-effort: a token may lack
+  //    `pages_show_list` / `business_management`, and an EMPTY Pages list must never sink the
+  //    snapshot (the desktop still needs the accounts to bind the credential).
+  //    Edges (all return Page nodes — verified against Meta's reference docs, 2026-09-13):
+  //      • `/me/accounts` — "The Facebook Pages that a person owns or is able to perform tasks on"
+  //        (graph-api/reference/user/accounts). User-token path; requires `pages_show_list`
+  //        (graph-api/reference/page lists it as the Page-read permission for user tokens).
+  //      • `/me/assigned_pages` — system-user path. Documented as `/{system-user-id}/assigned_pages`
+  //        (marketing-api/reference/system-user/assigned_pages); INFERRED: `/me` resolves to the
+  //        system user when the bearer is a system-user token, exactly as `/me/businesses` does above.
+  //      • `/{business_id}/owned_pages` + `/{business_id}/client_pages` — Pages the business owns /
+  //        has client access to (marketing-api/reference/business/owned_pages, …/client_pages).
+  //        INFERRED: these need `business_management` (the docs list no scope explicitly).
+  //    De-duplicated by Page id across all edges, first-seen order.
+  const seenPages = new Set<string>();
+  const addPages = (pages: MetaPage[], businessId?: string): void => {
+    for (const page of pages) {
+      if (businessId) {
+        const bucket = (snapshot.pagesByBusiness[businessId] ??= []);
+        if (!bucket.some((x) => x.id === page.id)) bucket.push(page);
+      }
+      if (seenPages.has(page.id)) continue;
+      seenPages.add(page.id);
+      snapshot.pages.push(page);
+    }
+  };
+  addPages(await listMetaPagesEdge(`${base}/me/accounts`, accessToken));
+  if (snapshot.tokenKind === "system_user_token") {
+    addPages(await listMetaPagesEdge(`${base}/me/assigned_pages`, accessToken));
+  }
+  for (const biz of snapshot.businesses) {
+    addPages(await listMetaPagesEdge(`${base}/${biz.id}/owned_pages`, accessToken), biz.id);
+    addPages(await listMetaPagesEdge(`${base}/${biz.id}/client_pages`, accessToken), biz.id);
+  }
+
   return snapshot;
+}
+
+interface MetaGraphPageNode {
+  id: string;
+  name?: string;
+  category?: string;
+  instagram_business_account?: { id?: string } | null;
+}
+
+// Page fields the picker shows. `instagram_business_account{id}` is a nested read that a token
+// without the Instagram scopes can be refused on (Graph rejects the WHOLE request on an
+// unreadable field), so a failure with the full set is retried once with the plain trio before
+// giving up — the Page id + name are what creatives actually need. Both failures → [] (best-effort).
+const META_PAGE_FIELDS_FULL = "id,name,category,instagram_business_account{id}";
+const META_PAGE_FIELDS_MINIMAL = "id,name,category";
+
+async function listMetaPagesEdge(edgeUrl: string, accessToken: string): Promise<MetaPage[]> {
+  for (const fields of [META_PAGE_FIELDS_FULL, META_PAGE_FIELDS_MINIMAL]) {
+    try {
+      const nodes = await paginateMetaGraph<MetaGraphPageNode>(
+        `${edgeUrl}?fields=${encodeURIComponent(fields)}&limit=100`,
+        accessToken
+      );
+      return nodes
+        .filter((node) => typeof node.id === "string" && node.id !== "")
+        .map((node) => {
+          const page: MetaPage = { id: node.id, name: typeof node.name === "string" ? node.name : node.id };
+          if (typeof node.category === "string" && node.category !== "") page.category = node.category;
+          const igId = node.instagram_business_account?.id;
+          if (typeof igId === "string" && igId !== "") page.instagramBusinessAccountId = igId;
+          return page;
+        });
+    } catch {
+      // fall through to the minimal field set, then to []
+    }
+  }
+  return [];
 }
 
 // ── Lightweight dedup helper (idempotency) ────────────────────────────────────

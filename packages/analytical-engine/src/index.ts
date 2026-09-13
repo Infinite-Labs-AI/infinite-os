@@ -212,7 +212,24 @@ async function listSources(db: InfiniteOsDb, context: SessionContext): Promise<A
           where cc.source_id = s.id and cc.revoked_at is null
           order by cc.created_at desc
           limit 1
-        ) as credential_kind
+        ) as credential_kind,
+        -- Non-secret Meta selections (migrations 0039 / 0068) so the desktop's Connections list can
+        -- tell whether a pixel / posting Page is set without a second round-trip. NULL for other
+        -- providers and until chosen.
+        (
+          select cc.selected_pixel_id
+          from connection_credentials cc
+          where cc.source_id = s.id and cc.revoked_at is null
+          order by cc.created_at desc
+          limit 1
+        ) as selected_pixel_id,
+        (
+          select cc.selected_page_id
+          from connection_credentials cc
+          where cc.source_id = s.id and cc.revoked_at is null
+          order by cc.created_at desc
+          limit 1
+        ) as selected_page_id
       from sources s
       join datasets d on d.id = s.dataset_id
       where s.workspace_id = $1
@@ -1474,6 +1491,9 @@ async function connectSource(
     // P1-2: the Meta account/pixel picker passes the chosen pixel here so CAPI dispatch has a target.
     // db.connectSource COALESCEs it on re-connect, so rotating the token never nulls a prior pixel.
     ...(optionalString(input, "selectedPixelId") ? { selectedPixelId: optionalString(input, "selectedPixelId") } : {}),
+    // Migration 0068: the picker's "Posting Page" — the Facebook Page ads are posted FROM.
+    // create_meta_creative defaults its pageId to it. COALESCEd on re-connect like the pixel.
+    ...(optionalString(input, "selectedPageId") ? { selectedPageId: optionalString(input, "selectedPageId") } : {}),
     actorType: context.authority
   });
   const connectionTest = await testConnectionForSource(db, context, provider, String(source.id), encryptionKey);
@@ -1493,19 +1513,27 @@ async function reconnectSource(
   const oauthTokenId = optionalString(input, "oauthTokenId");
   if (credentialKind || objectField(input, "credentialPayload") || optionalString(input, "encryptedPayload")) {
     const resolvedKind = credentialKind ?? defaultCredentialKind(provider);
-    // Carry the Meta CAPI pixel forward across a token rotation: reconnect REVOKES the old row and
-    // INSERTs a fresh one, so without this the prior selected_pixel_id would be silently wiped and
-    // CAPI dispatch would lose its target. An explicit selectedPixelId in the input overrides.
-    const priorPixel = await db.query(
-      `select selected_pixel_id from connection_credentials
+    // Carry the Meta CAPI pixel AND the posting Page (migration 0068) forward across a token
+    // rotation: reconnect REVOKES the old row and INSERTs a fresh one, so without this the prior
+    // selected_pixel_id / selected_page_id would be silently wiped — CAPI dispatch would lose its
+    // target and create_meta_creative its default Page. An explicit selectedPixelId /
+    // selectedPageId in the input overrides.
+    const prior = await db.query(
+      `select selected_pixel_id, selected_page_id from connection_credentials
          where workspace_id = $1 and source_id = $2 and revoked_at is null
          order by created_at desc limit 1`,
       [context.workspaceId, sourceId]
     );
-    const priorPixelVal = (priorPixel[0] as Record<string, unknown> | undefined)?.selected_pixel_id;
-    const carriedPixelId =
-      optionalString(input, "selectedPixelId") ??
-      (typeof priorPixelVal === "string" && priorPixelVal !== "" ? priorPixelVal : undefined);
+    const priorRow = prior[0] as Record<string, unknown> | undefined;
+    const carried = (inputKey: string, column: string): string | undefined => {
+      const priorVal = priorRow?.[column];
+      return (
+        optionalString(input, inputKey) ??
+        (typeof priorVal === "string" && priorVal !== "" ? priorVal : undefined)
+      );
+    };
+    const carriedPixelId = carried("selectedPixelId", "selected_pixel_id");
+    const carriedPageId = carried("selectedPageId", "selected_page_id");
     await db.query(
       "update connection_credentials set revoked_at = now() where workspace_id = $1 and source_id = $2 and revoked_at is null",
       [context.workspaceId, sourceId]
@@ -1513,9 +1541,10 @@ async function reconnectSource(
     await db.query(
       `
         insert into connection_credentials (
-          id, workspace_id, source_id, credential_kind, encrypted_payload, oauth_token_id, selected_pixel_id
+          id, workspace_id, source_id, credential_kind, encrypted_payload, oauth_token_id, selected_pixel_id,
+          selected_page_id
         )
-        values ($1,$2,$3,$4,$5,$6,$7)
+        values ($1,$2,$3,$4,$5,$6,$7,$8)
       `,
       [
         `cred_${randomUUID()}`,
@@ -1524,7 +1553,8 @@ async function reconnectSource(
         resolvedKind,
         credentialPayloadForStorage(input, resolvedKind, oauthTokenId, encryptionKey),
         oauthTokenId ?? null,
-        carriedPixelId ?? null
+        carriedPixelId ?? null,
+        carriedPageId ?? null
       ]
     );
   }
@@ -2234,14 +2264,45 @@ function metaAdSetTargetingInput(input: unknown): MetaAdSetTargeting | undefined
   return spec;
 }
 
+// The Facebook Page a creative is posted FROM (object_story_spec.page_id). An explicit pageId
+// wins; otherwise the connection's stored posting Page (connection_credentials.selected_page_id,
+// migration 0068 — chosen in the desktop connect picker) is used, so ⌘L / the Create sheet never
+// ask the founder for a 15-digit id. Resolved BEFORE the dedup claim / any Graph call, and fails
+// TYPED (non-retryable) so the desktop can route the user to Connections instead of retrying.
+async function resolveMetaPostingPageId(
+  db: InfiniteOsDb,
+  context: SessionContext,
+  sourceId: string,
+  input: unknown
+): Promise<string> {
+  const explicit = optionalString(input, "pageId");
+  if (explicit) {
+    return explicit;
+  }
+  const rows = await db.query(
+    `select selected_page_id from connection_credentials
+       where workspace_id = $1 and source_id = $2 and revoked_at is null
+       order by created_at desc limit 1`,
+    [context.workspaceId, sourceId]
+  );
+  const stored = (rows[0] as Record<string, unknown> | undefined)?.selected_page_id;
+  if (typeof stored === "string" && stored.trim() !== "") {
+    return stored;
+  }
+  throw metaTypedError(
+    "meta_page_not_selected",
+    "meta_page_not_selected: no posting Page is set for this Meta Ads connection — pick a posting Page in Connections (or pass pageId)"
+  );
+}
+
 async function createMetaCreativeHandler(
   db: InfiniteOsDb,
   context: SessionContext,
   input: unknown
 ): Promise<ActionEnvelope> {
   const name = requiredString(input, "name");
-  const pageId = requiredString(input, "pageId");
   const sourceId = await resolveMetaWriteSourceId(db, context, input);
+  const pageId = await resolveMetaPostingPageId(db, context, sourceId, input);
   return runMetaCreate(db, context, input, sourceId, "create_meta_creative", "creative", (credential) =>
     createMetaCreative(credential, {
       name,
@@ -2515,7 +2576,11 @@ async function listMetaAssetsHandler(
       adAccounts: assets.adAccounts,
       pixels: assets.pixels,
       businesses: assets.businesses,
-      pixelsByAccount: assets.pixelsByAccount
+      pixelsByAccount: assets.pixelsByAccount,
+      // Posting Pages for the picker's "Posting Page" select (persisted via connect_source.selectedPageId).
+      // Best-effort upstream: EMPTY when the token lacks pages_show_list / business_management.
+      pages: assets.pages,
+      pagesByBusiness: assets.pagesByBusiness
     },
     ["provider_truth"],
     "ok"

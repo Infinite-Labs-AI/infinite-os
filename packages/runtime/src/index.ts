@@ -889,7 +889,7 @@ function metadataFor(id: InfiniteOsActionId): {
     create_meta_creative: {
       title: "Create Meta Ads creative",
       summary:
-        "Operator-only. Create a STANDARD single-image/video Meta Ads creative. Creatives have no go-live status.",
+        "Operator-only. Create a STANDARD single-image/video Meta Ads creative posted FROM the connection's stored posting Page (pageId overrides). Creatives have no go-live status.",
       category: "operator",
       recommendedNextActions: ["create_meta_ad"],
       recipeIds: []
@@ -942,7 +942,10 @@ function inputSchemaFor(id: InfiniteOsActionId): Record<string, unknown> {
         encryptedPayload: { type: "string" },
         // P1-2: the Meta account/pixel picker passes the chosen pixel so CAPI dispatch has a target.
         // Schema is additionalProperties:false, so this MUST be declared or the connect is rejected.
-        selectedPixelId: { type: "string" }
+        selectedPixelId: { type: "string" },
+        // Migration 0068: the picker's "Posting Page" (the Facebook Page ads are posted FROM);
+        // create_meta_creative defaults its pageId to it.
+        selectedPageId: { type: "string" }
       },
       ["provider"]
     ),
@@ -960,7 +963,9 @@ function inputSchemaFor(id: InfiniteOsActionId): Record<string, unknown> {
         oauthTokenId: { type: "string" },
         // P1-2: an explicit pixel override on reconnect; absent, the prior pixel is carried forward
         // (the handler reads the old selected_pixel_id before revoking). additionalProperties:false.
-        selectedPixelId: { type: "string" }
+        selectedPixelId: { type: "string" },
+        // Migration 0068: same carry-forward / override rule for the posting Page.
+        selectedPageId: { type: "string" }
       },
       ["sourceId"]
     ),
@@ -1296,7 +1301,10 @@ function inputSchemaFor(id: InfiniteOsActionId): Record<string, unknown> {
         clientToken: { type: "string" }
       },
       // sourceId OPTIONAL — auto-resolved server-side (see create_meta_campaign.sourceId).
-      ["name", "pageId"]
+      // pageId OPTIONAL (migration 0068) — defaults to the connection's stored posting Page
+      // (connection_credentials.selected_page_id); the handler fails typed
+      // `meta_page_not_selected` when neither is present.
+      ["name"]
     ),
     create_meta_ad: requiredObject(
       {

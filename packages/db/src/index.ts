@@ -251,6 +251,9 @@ export interface ConnectSourceInput {
   // Non-secret operational metadata (migration 0039) the engine queries WITHOUT decrypting
   // encrypted_payload. All optional → existing callers compile unchanged.
   selectedPixelId?: string; // Meta CAPI pixel selection (NULL until chosen)
+  // Meta posting Page (migration 0068) — the Facebook Page ads are posted FROM; create_meta_creative
+  // defaults its pageId to it. NULL until chosen; COALESCEd on re-connect like the pixel.
+  selectedPageId?: string;
   // system-user token vs OAuth user token. Nullable end-to-end (P0-B2): omitting it on a
   // re-connect must NOT flip a prior `true` back to false — the conflict clause coalesces this
   // raw value onto the existing row, and a genuinely-new row defaults to false (INSERT coalesce).
@@ -283,6 +286,8 @@ export interface ConnectionCredentialRow {
   // Migration 0039 operational metadata (non-secret):
   selected_pixel_id: string | null;
   is_system_user: boolean;
+  // Migration 0068: the Meta posting Page (NULL until chosen).
+  selected_page_id: string | null;
   last_dispatch_at: string | null;
   last_dispatch_status: string | null;
   last_error: string | null;
@@ -956,12 +961,12 @@ async function connectSource(
       insert into connection_credentials (
         id, workspace_id, source_id, credential_kind, encrypted_payload, oauth_token_id,
         selected_pixel_id, is_system_user, expires_at, last_dispatch_at,
-        last_dispatch_status, last_error
+        last_dispatch_status, last_error, selected_page_id
       )
       values (
         $1, $2, $3, $4, $5, $6,
         $7, coalesce($8, false), $9::timestamptz, $10::timestamptz,
-        $11, $12
+        $11, $12, $13
       )
       -- Restate the partial-index predicate (migration 0039's
       -- connection_credentials_source_kind_uq is partial on revoked_at is null) so Postgres
@@ -985,6 +990,8 @@ async function connectSource(
         last_dispatch_at = coalesce(excluded.last_dispatch_at, connection_credentials.last_dispatch_at),
         last_dispatch_status = coalesce(excluded.last_dispatch_status, connection_credentials.last_dispatch_status),
         last_error = coalesce(excluded.last_error, connection_credentials.last_error),
+        -- Migration 0068: the posting Page survives a token rotation exactly like the pixel.
+        selected_page_id = coalesce(excluded.selected_page_id, connection_credentials.selected_page_id),
         updated_at = now()
     `,
     [
@@ -1002,7 +1009,8 @@ async function connectSource(
       input.expiresAt ?? null,
       input.lastDispatchAt ?? null,
       input.lastDispatchStatus ?? null,
-      input.lastError ?? null
+      input.lastError ?? null,
+      input.selectedPageId ?? null
     ]
   );
   await client.query(

@@ -88,9 +88,9 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
     rmSync(dataDir, { recursive: true, force: true });
   });
 
-  it("applied ALL 67 migrations on first boot and is idempotent on a re-run", async () => {
-    expect(loadMigrations().length).toBe(67);
-    expect(firstRun).toHaveLength(67);
+  it("applied ALL 68 migrations on first boot and is idempotent on a re-run", async () => {
+    expect(loadMigrations().length).toBe(68);
+    expect(firstRun).toHaveLength(68);
     expect(firstRun).toContain("0001_control_plane.sql");
     expect(firstRun).toContain("0006_security_roles.sql");
     expect(firstRun).toContain("0036_chat_sessions_desktop_surface.sql");
@@ -124,6 +124,8 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
     expect(firstRun).toContain("0064_posthog_raw_retention.sql");
     expect(firstRun).toContain("0065_prune_rolls_up_before_deleting.sql");
     expect(firstRun).toContain("0066_auxiliary_brain_usage_outbox.sql");
+    expect(firstRun).toContain("0067_signup_event_metric_semantics.sql");
+    expect(firstRun).toContain("0068_connection_credentials_selected_page.sql");
 
     // Idempotent: a second boot re-applies zero (the `rows.length` gate, not the pg `rowCount`
     // gate, makes this true on PGlite).
@@ -131,13 +133,13 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
     expect(secondRun).toEqual([]);
   });
 
-  it("created the schema_migrations ledger with all 67 rows", async () => {
+  it("created the schema_migrations ledger with all 68 rows", async () => {
     const ledger = await db.query<{ id: string }>(
       "select id from schema_migrations order by id"
     );
-    expect(ledger).toHaveLength(67);
+    expect(ledger).toHaveLength(68);
     expect(ledger[0]?.id).toBe("0001_control_plane.sql");
-    expect(ledger.at(-1)?.id).toBe("0067_signup_event_metric_semantics.sql");
+    expect(ledger.at(-1)?.id).toBe("0068_connection_credentials_selected_page.sql");
   });
 
   it("0063 serves both PostHog views from per-(workspace, source, day) rollups — refresh, is_internal, idempotency, grain key, grants", async () => {
@@ -3054,6 +3056,50 @@ describe("connectSource writes the 0039 operational metadata + upserts on re-con
     expect(new Date(rows[0]?.last_dispatch_at ?? "").toISOString()).toBe("2026-06-22T10:00:00.000Z");
     expect(rows[0]?.last_dispatch_status).toBe("succeeded");
     expect(rows[0]?.last_error).toBe("prior transient error");
+  });
+
+  it("0068: persists selectedPageId, preserves it on an omitting re-connect, and lets an explicit value override", async () => {
+    const base = {
+      workspaceId: "ws_cs_page",
+      provider: "meta_ads" as const,
+      connectionName: "Meta Page",
+      accountExternalId: "act_page",
+      credentialKind: "access_token"
+    };
+    const read = () =>
+      db.query<{ selected_page_id: string | null; selected_pixel_id: string | null; encrypted_payload: string }>(
+        `select cc.selected_page_id, cc.selected_pixel_id, cc.encrypted_payload
+           from connection_credentials cc
+           join sources s on s.id = cc.source_id
+          where s.workspace_id = 'ws_cs_page'
+            and cc.credential_kind = 'access_token'
+            and cc.revoked_at is null`
+      );
+
+    // Omitted → NULL (existing callers unchanged).
+    await db.connectSource({ ...base, encryptedPayload: "enc-0" });
+    expect((await read())[0]?.selected_page_id).toBeNull();
+
+    // Chosen in the picker → stored beside the pixel.
+    await db.connectSource({ ...base, encryptedPayload: "enc-1", selectedPixelId: "px_1", selectedPageId: "pg_1" });
+    let rows = await read();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.selected_page_id).toBe("pg_1");
+    expect(rows[0]?.selected_pixel_id).toBe("px_1");
+
+    // A token rotation that OMITS the Page must NOT wipe it (COALESCE), while the token updates.
+    await db.connectSource({ ...base, encryptedPayload: "enc-rotated" });
+    rows = await read();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.encrypted_payload).toBe("enc-rotated");
+    expect(rows[0]?.selected_page_id).toBe("pg_1");
+
+    // An explicit new Page overrides.
+    await db.connectSource({ ...base, encryptedPayload: "enc-2", selectedPageId: "pg_2" });
+    rows = await read();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.selected_page_id).toBe("pg_2");
+    expect(rows[0]?.selected_pixel_id).toBe("px_1"); // untouched by a Page-only update
   });
 
   it("defaults the new columns (NULL / is_system_user=false) when omitted — existing callers unchanged", async () => {
