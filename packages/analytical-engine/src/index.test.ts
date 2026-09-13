@@ -7193,6 +7193,75 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
         }
       );
     });
+
+    // A3 (2026-09-13) — the desktop Create sheet's manual targeting + placements JSON passes
+    // through to the connector (bounded keys only), and a malformed shape fails TYPED before
+    // any POST.
+    it("create_meta_ad_set passes the bounded `targeting` JSON through (Advantage+ audience OFF) and rejects a bad shape typed", async () => {
+      const db = metaWriteTestDb({ audits: [], metaSources: [{ id: "src_meta_sole" }] });
+      await withGraph(
+        () => jsonResponse({ id: "adset_targeted", status: "PAUSED" }),
+        async (calls) => {
+          const handlers = createActionHandlers(db);
+          const targeting = {
+            age_min: 25,
+            age_max: 54,
+            geo_locations: { countries: ["US"] },
+            publisher_platforms: ["facebook", "instagram"],
+            facebook_positions: ["feed", "story", "facebook_reels"],
+            instagram_positions: ["stream", "story", "reels"]
+          };
+          const result = await handlers.create_meta_ad_set?.(
+            {
+              campaignId: "120000000000001",
+              name: "Targeted",
+              optimizationGoal: "OFFSITE_CONVERSIONS",
+              billingEvent: "IMPRESSIONS",
+              targeting,
+              clientToken: "tok_adset_targeted"
+            },
+            operatorContext
+          );
+          expect(result?.ok).toBe(true);
+          expect(calls).toHaveLength(1);
+          expect(calls[0].body).toMatchObject({
+            status: "PAUSED",
+            targeting: { ...targeting, targeting_automation: { advantage_audience: 0 } }
+          });
+          // Unknown keys are NOT forwarded (bounded vocabulary — no free-form Graph targeting).
+          const stripped = await handlers.create_meta_ad_set?.(
+            {
+              campaignId: "120000000000001",
+              name: "Stripped",
+              optimizationGoal: "OFFSITE_CONVERSIONS",
+              billingEvent: "IMPRESSIONS",
+              targeting: { age_min: 18, flexible_spec: [{ interests: [{ id: "1" }] }] },
+              clientToken: "tok_adset_stripped"
+            },
+            operatorContext
+          );
+          expect(stripped?.ok).toBe(true);
+          expect((calls[1].body as { targeting: Record<string, unknown> }).targeting).toEqual({
+            age_min: 18,
+            targeting_automation: { advantage_audience: 0 }
+          });
+          // Wrong types fail typed, before any POST.
+          await expect(
+            handlers.create_meta_ad_set?.(
+              {
+                campaignId: "120000000000001",
+                name: "Bad",
+                optimizationGoal: "OFFSITE_CONVERSIONS",
+                billingEvent: "IMPRESSIONS",
+                targeting: { age_min: "25", geo_locations: { countries: "US" } }
+              },
+              operatorContext
+            )
+          ).rejects.toMatchObject({ code: "invalid_targeting", retryable: false });
+          expect(calls).toHaveLength(2);
+        }
+      );
+    });
   });
 
   it("REMEDIATES an unexpected ACTIVE create: best-effort PAUSE + entity id in the audit, still throws", async () => {
@@ -8034,6 +8103,147 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
         );
         expect(url.searchParams.get("date_preset")).toBeNull();
         expect(url.searchParams.get("level")).toBe("campaign");
+      }
+    );
+  });
+
+  // ── v2 (meta_live_insights_v2) — the desktop Meta Ads surface's ONE read ──────────────────
+  it("run_meta_live_insights v2: timeIncrement:1 → per-day rows + edge status, window/currency on the envelope", async () => {
+    const db = metaWriteTestDb({ audits: [] });
+    await withGraph(
+      (call) => {
+        const url = new URL(call.url);
+        if (url.pathname.endsWith("/act_999/campaigns")) {
+          return jsonResponse({
+            data: [{ id: "cmp_1", effective_status: "ACTIVE", status: "ACTIVE", objective: "OUTCOME_SALES" }],
+            paging: {}
+          });
+        }
+        return jsonResponse({
+          data: [
+            liveAdRow({ campaign_id: "cmp_1", date_start: "2026-09-01", date_stop: "2026-09-01", spend: "20" }),
+            liveAdRow({ campaign_id: "cmp_1", date_start: "2026-09-02", date_stop: "2026-09-02", spend: "30" })
+          ]
+        });
+      },
+      async (calls) => {
+        const handlers = createActionHandlers(db);
+        const result = await handlers.run_meta_live_insights?.(
+          { sourceId: "src_meta", level: "campaign", since: "2026-09-01", until: "2026-09-02", timeIncrement: 1 },
+          { ...operatorContext, authority: "tool_agent" }
+        );
+        const insights = calls.map((c) => new URL(c.url)).find((u) => u.pathname.endsWith("/insights"));
+        expect(insights?.searchParams.get("time_increment")).toBe("1");
+        // Exactly one extra GET: the campaigns edge for effective_status. Never the CLI, never a POST.
+        expect(calls).toHaveLength(2);
+        expect(calls.every((c) => c.method === "GET")).toBe(true);
+        expect(calls.some((c) => new URL(c.url).pathname.endsWith("/act_999/campaigns"))).toBe(true);
+        expect(result?.ok).toBe(true);
+        const data = result?.data as {
+          rows: Array<Record<string, unknown>>;
+          window: { since: string; until: string };
+          currency: string | null;
+          timeIncrement: number | null;
+          count: number;
+          totalEntities: number;
+        };
+        expect(data).toMatchObject({
+          window: { since: "2026-09-01", until: "2026-09-02" },
+          currency: "USD",
+          timeIncrement: 1,
+          count: 2,
+          totalEntities: 1
+        });
+        expect(data.rows.map((row) => row.dateStart)).toEqual(["2026-09-01", "2026-09-02"]);
+        expect(data.rows[0]).toMatchObject({
+          entityId: "cmp_1",
+          entityName: "Prospecting",
+          level: "campaign",
+          effectiveStatus: "ACTIVE",
+          purchases: 5,
+          purchaseValue: 482.5,
+          leads: 0,
+          spend: 20,
+          cpa: 4
+        });
+        expect(data.rows[0].roas).toBeCloseTo(482.5 / 20, 6);
+        expect(JSON.stringify(result)).not.toContain("secret-meta-token");
+      }
+    );
+  });
+
+  it("run_meta_live_insights v2: the aggregate read (no timeIncrement) is byte-identical and still carries window/currency", async () => {
+    const db = metaWriteTestDb({ audits: [] });
+    await withGraph(
+      () => jsonResponse({ data: [liveAdRow({ date_start: "2026-08-14", date_stop: "2026-09-12" })] }),
+      async (calls) => {
+        const handlers = createActionHandlers(db);
+        const result = await handlers.run_meta_live_insights?.(
+          { sourceId: "src_meta" },
+          { ...operatorContext, authority: "tool_agent" }
+        );
+        // ONE request, no edge read, no time_increment — the ⌘L path's request is unchanged.
+        expect(calls).toHaveLength(1);
+        expect(new URL(calls[0].url).searchParams.get("time_increment")).toBeNull();
+        expect(result?.data).toMatchObject({
+          window: { datePreset: "last_30d", since: "2026-08-14", until: "2026-09-12" },
+          currency: "USD",
+          timeIncrement: null
+        });
+        const row = (result?.data as { rows: Array<Record<string, unknown>> }).rows[0];
+        expect(row).toMatchObject({ entityId: "ad_1", entityName: "Blue Hero", level: "ad", effectiveStatus: null });
+      }
+    );
+  });
+
+  // A2 — typed errors. The daemon forwards `error.code` ONLY when the thrown error carries a
+  // boolean `retryable` (apps/app guardedAction); a plain Error collapses to invalid_tool_input
+  // and the desktop cannot tell "not connected" from a bad input.
+  it("run_meta_live_insights throws TYPED errors (code + retryable=false) for not-connected / ambiguous / bad level / bad increment", async () => {
+    const base = metaWriteTestDb({ audits: [] });
+    const withSources = (rows: Array<{ id: string }>): InfiniteOsDb => ({
+      ...base,
+      async query<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T[]> {
+        if (sql.includes("from sources") && sql.includes("provider = 'meta_ads'")) {
+          return rows as T[];
+        }
+        return base.query(sql, params) as Promise<T[]>;
+      }
+    });
+    const ctx = { ...operatorContext, authority: "tool_agent" as const };
+    async function typedFailure(promise: unknown): Promise<{ code: unknown; retryable: unknown; message: string }> {
+      try {
+        await promise;
+      } catch (error) {
+        const typed = error as { code?: unknown; retryable?: unknown; message: string };
+        return { code: typed.code, retryable: typed.retryable, message: typed.message };
+      }
+      throw new Error("expected a rejection");
+    }
+    await withGraph(
+      () => jsonResponse({ data: [] }),
+      async (calls) => {
+        expect(await typedFailure(createActionHandlers(withSources([])).run_meta_live_insights?.({}, ctx))).toMatchObject({
+          code: "meta_ads_not_connected",
+          retryable: false
+        });
+        expect(
+          await typedFailure(createActionHandlers(withSources([{ id: "a" }, { id: "b" }])).run_meta_live_insights?.({}, ctx))
+        ).toMatchObject({ code: "meta_ads_source_ambiguous", retryable: false });
+        const handlers = createActionHandlers(base);
+        expect(await typedFailure(handlers.run_meta_live_insights?.({ sourceId: "src_meta", level: "creative" }, ctx))).toMatchObject({
+          code: "unsupported_meta_level",
+          retryable: false
+        });
+        expect(await typedFailure(handlers.run_meta_live_insights?.({ sourceId: "src_meta", timeIncrement: 7 }, ctx))).toMatchObject({
+          code: "unsupported_time_increment",
+          retryable: false
+        });
+        // The write-side resolver shares the codes (the Create sheet maps the same prefixes).
+        expect(
+          await typedFailure(createActionHandlers(withSources([])).create_meta_campaign?.({ name: "P", objective: "OUTCOME_SALES" }, operatorContext))
+        ).toMatchObject({ code: "meta_ads_not_connected", retryable: false });
+        expect(calls).toHaveLength(0);
       }
     );
   });

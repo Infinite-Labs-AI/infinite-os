@@ -1176,6 +1176,17 @@ function inputSchemaFor(id: InfiniteOsActionId): Record<string, unknown> {
         },
         since: { type: "string", description: "YYYY-MM-DD window start (requires until; overrides datePreset)." },
         until: { type: "string", description: "YYYY-MM-DD window end, inclusive (requires since)." },
+        // v2 (meta_live_insights_v2). timeIncrement:1 → one row per entity per day (Meta
+        // time_increment=1) with effective_status from the level's edge; limit then caps
+        // ENTITIES (ranked by total spend), never day rows. Omit for the whole-window aggregate.
+        timeIncrement: {
+          enum: [1],
+          description: "1 = one row per entity per day (sparks) + effectiveStatus; omit for one aggregate row per entity."
+        },
+        includeStatus: {
+          type: "boolean",
+          description: "Enrich rows with effective_status from the Graph edge (defaults to true when timeIncrement=1)."
+        },
         limit: { type: "number", minimum: 1, maximum: 200 }
       },
       []
@@ -1225,6 +1236,39 @@ function inputSchemaFor(id: InfiniteOsActionId): Record<string, unknown> {
         startTime: { type: "string" },
         endTime: { type: "string" },
         targetingCountries: { type: "array", items: { type: "string" } },
+        // A3 (2026-09-13) — manual audience + placements. REPLACES targetingCountries when both are
+        // sent (countries fold into geo_locations only when the JSON has none). Advantage+ audience
+        // is ALWAYS off on every ad set the engine creates; naming platforms/positions makes
+        // placements manual. Bounded keys only — no free-form Graph targeting from here.
+        targeting: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            age_min: { type: "integer", minimum: 13, maximum: 65 },
+            age_max: { type: "integer", minimum: 13, maximum: 65 },
+            geo_locations: {
+              type: "object",
+              additionalProperties: false,
+              properties: { countries: { type: "array", items: { type: "string" } } },
+              required: ["countries"]
+            },
+            publisher_platforms: {
+              type: "array",
+              items: { type: "string" },
+              description: "e.g. facebook, instagram, audience_network, messenger"
+            },
+            facebook_positions: {
+              type: "array",
+              items: { type: "string" },
+              description: "e.g. feed, story, facebook_reels, video_feeds, marketplace"
+            },
+            instagram_positions: {
+              type: "array",
+              items: { type: "string" },
+              description: "e.g. stream, story, reels, explore, profile_feed"
+            }
+          }
+        },
         pixelId: { type: "string" },
         customEventType: { type: "string" },
         clientToken: { type: "string" }

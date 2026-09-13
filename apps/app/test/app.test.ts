@@ -94,7 +94,11 @@ describe("Infinite OS app-hosted API/MCP skeleton", () => {
         "native_analytics_removed",
         // Live Meta insights read — the desktop fails CLOSED on this flag before
         // dispatching run_meta_live_insights to a daemon.
-        "meta_live_insights"
+        "meta_live_insights",
+        // v2 of that read (per-day rows via timeIncrement:1, effectiveStatus, purchase/lead
+        // fields, window+currency, typed error codes). The desktop Meta Ads surface gates on
+        // THIS flag and keeps the old one for the ⌘L path — both must be published.
+        "meta_live_insights_v2"
       ])
     );
   });

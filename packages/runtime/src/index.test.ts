@@ -291,7 +291,7 @@ describe("Meta Ads management action authority (money-safety)", () => {
     expect(card?.provenancePolicy).toBe("bounded_provider_truth");
     const schema = card?.inputSchema as {
       required?: string[];
-      properties?: Record<string, { enum?: string[] }>;
+      properties?: Record<string, { enum?: Array<string | number> }>;
       additionalProperties?: boolean;
     };
     expect(schema?.required).toEqual([]);
@@ -299,9 +299,27 @@ describe("Meta Ads management action authority (money-safety)", () => {
     // Bounded vocabularies: no free-form Graph edge/fields are expressible from this schema.
     expect(schema?.properties?.level?.enum).toEqual(["campaign", "adset", "ad"]);
     expect(schema?.properties?.datePreset?.enum).toContain("last_30d");
+    // v2 (meta_live_insights_v2): timeIncrement is bounded to the single value 1 (per-day rows);
+    // includeStatus opts an aggregate read into the edge status enrichment.
+    expect(schema?.properties?.timeIncrement?.enum).toEqual([1]);
     expect(Object.keys(schema?.properties ?? {}).sort()).toEqual(
-      ["datePreset", "level", "limit", "since", "sourceId", "until"]
+      ["datePreset", "includeStatus", "level", "limit", "since", "sourceId", "timeIncrement", "until"]
     );
+  });
+
+  it("create_meta_ad_set exposes a BOUNDED `targeting` object (manual audience + placements; no free-form Graph targeting)", () => {
+    const card = ACTION_CATALOG.find((action) => action.id === "create_meta_ad_set");
+    const schema = card?.inputSchema as {
+      properties?: Record<string, { type?: string; additionalProperties?: boolean; properties?: Record<string, unknown> }>;
+    };
+    const targeting = schema?.properties?.targeting;
+    expect(targeting?.type).toBe("object");
+    expect(targeting?.additionalProperties).toBe(false);
+    expect(Object.keys(targeting?.properties ?? {}).sort()).toEqual(
+      ["age_max", "age_min", "facebook_positions", "geo_locations", "instagram_positions", "publisher_platforms"]
+    );
+    // targetingCountries stays for back-compat; targeting REPLACES it when both are sent.
+    expect(schema?.properties?.targetingCountries).toBeDefined();
   });
 
   it("exposes videoUrl on the Meta creative create schema for desktop uploaded video assets", () => {

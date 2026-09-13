@@ -15,7 +15,9 @@ import {
   resolveMetaAdsCredential,
   setMetaEntityStatus,
   updateMetaBudget,
+  ConnectorError,
   type ConnectionTestResult,
+  type MetaAdSetTargeting,
   type MetaAdsCredential,
   type MetaEntityStatus,
   type MetaWriteEntity,
@@ -2156,6 +2158,7 @@ async function createMetaAdSetHandler(
   const budgets = await resolveMetaCreateBudgets(db, context, sourceId, input);
   const bidAmount = numberOrNull(input, "bidAmount");
   const targetingCountries = stringArray(input, "targetingCountries");
+  const targeting = metaAdSetTargetingInput(input);
   return runMetaCreate(
     db,
     context,
@@ -2175,11 +2178,60 @@ async function createMetaAdSetHandler(
         ...(optionalString(input, "startTime") ? { startTime: optionalString(input, "startTime") } : {}),
         ...(optionalString(input, "endTime") ? { endTime: optionalString(input, "endTime") } : {}),
         ...(targetingCountries.length > 0 ? { targetingCountries } : {}),
+        ...(targeting ? { targeting } : {}),
         ...(optionalString(input, "pixelId") ? { pixelId: optionalString(input, "pixelId") } : {}),
         ...(optionalString(input, "customEventType") ? { customEventType: optionalString(input, "customEventType") } : {})
       }),
     budgets.budgetCurrency ? { budgetCurrency: budgets.budgetCurrency } : undefined
   );
+}
+
+// A3 — read the BOUNDED manual-targeting object off an ad-set create input. Only the six known
+// keys are forwarded (a free-form Graph targeting spec is not expressible from here); a wrong
+// type fails TYPED (`invalid_targeting`, non-retryable) before any credential is decrypted or
+// POST is made. Returns undefined when the input carries no `targeting` at all.
+function metaAdSetTargetingInput(input: unknown): MetaAdSetTargeting | undefined {
+  const raw = objectField(input, "targeting");
+  if (raw === undefined || raw === null) {
+    return undefined;
+  }
+  if (!isRecord(raw)) {
+    throw metaTypedError("invalid_targeting", "invalid_targeting: targeting must be an object");
+  }
+  const spec: MetaAdSetTargeting = {};
+  const age = (key: "age_min" | "age_max"): void => {
+    const value = raw[key];
+    if (value === undefined || value === null) return;
+    if (typeof value !== "number" || !Number.isInteger(value) || value < 13 || value > 65) {
+      throw metaTypedError("invalid_targeting", `invalid_targeting: ${key} must be an integer between 13 and 65`);
+    }
+    spec[key] = value;
+  };
+  age("age_min");
+  age("age_max");
+  if (spec.age_min !== undefined && spec.age_max !== undefined && spec.age_min > spec.age_max) {
+    throw metaTypedError("invalid_targeting", "invalid_targeting: age_min is greater than age_max");
+  }
+  const strings = (key: "publisher_platforms" | "facebook_positions" | "instagram_positions"): void => {
+    const value = raw[key];
+    if (value === undefined || value === null) return;
+    if (!Array.isArray(value) || !value.every((item) => typeof item === "string" && item.trim() !== "")) {
+      throw metaTypedError("invalid_targeting", `invalid_targeting: ${key} must be an array of non-empty strings`);
+    }
+    spec[key] = [...(value as string[])];
+  };
+  strings("publisher_platforms");
+  strings("facebook_positions");
+  strings("instagram_positions");
+  const geo = raw.geo_locations;
+  if (geo !== undefined && geo !== null) {
+    const countries = isRecord(geo) ? geo.countries : undefined;
+    if (!Array.isArray(countries) || !countries.every((item) => typeof item === "string" && item.trim() !== "")) {
+      throw metaTypedError("invalid_targeting", "invalid_targeting: geo_locations.countries must be an array of country codes");
+    }
+    spec.geo_locations = { countries: [...(countries as string[])] };
+  }
+  return spec;
 }
 
 async function createMetaCreativeHandler(
@@ -2563,16 +2615,25 @@ async function resolveSoleConnectedMetaSourceId(
     [context.workspaceId]
   );
   if (rows.length === 0) {
-    throw new Error("meta_ads_not_connected: no connected Meta Ads source in this workspace");
+    throw metaTypedError("meta_ads_not_connected", "meta_ads_not_connected: no connected Meta Ads source in this workspace");
   }
   if (rows.length > 1) {
-    throw new Error(
+    throw metaTypedError(
+      "meta_ads_source_ambiguous",
       `meta_ads_source_ambiguous: multiple connected Meta Ads sources (${rows
         .map((row) => row.id)
         .join(", ")}); pass sourceId`
     );
   }
   return rows[0].id;
+}
+
+// Typed, NON-retryable pre-fetch failure. The daemon's guardedAction forwards `error.code` only
+// when the thrown error carries a boolean `retryable`; a plain Error collapses to
+// invalid_tool_input and a desktop cannot tell "not connected" from a malformed request. The
+// message keeps the `code: detail` prefix convention so existing string matchers still work.
+function metaTypedError(code: string, message: string): ConnectorError {
+  return new ConnectorError(code, message, false);
 }
 
 async function runMetaLiveInsightsHandler(
@@ -2584,27 +2645,39 @@ async function runMetaLiveInsightsHandler(
     optionalString(input, "sourceId") ?? (await resolveSoleConnectedMetaSourceId(db, context));
   const level = optionalString(input, "level") ?? "ad";
   if (!META_LIVE_INSIGHTS_LEVELS.has(level)) {
-    throw new Error(`unsupported_meta_level:${level}`);
+    throw metaTypedError("unsupported_meta_level", `unsupported_meta_level:${level}`);
   }
+  // v2 — per-day rows. Bounded to the single value 1 (Meta's time_increment=1); anything else is
+  // refused typed rather than passed through to an arbitrary Graph aggregation.
+  const timeIncrementRaw = objectField(input, "timeIncrement");
+  let timeIncrement: 1 | undefined;
+  if (timeIncrementRaw !== undefined && timeIncrementRaw !== null) {
+    if (timeIncrementRaw !== 1) {
+      throw metaTypedError("unsupported_time_increment", `unsupported_time_increment:${String(timeIncrementRaw)} (only 1 is supported)`);
+    }
+    timeIncrement = 1;
+  }
+  const includeStatusRaw = objectField(input, "includeStatus");
+  const includeStatus = typeof includeStatusRaw === "boolean" ? includeStatusRaw : undefined;
   const since = optionalString(input, "since");
   const until = optionalString(input, "until");
   if ((since === undefined) !== (until === undefined)) {
-    throw new Error("invalid_date_range: since and until must be provided together");
+    throw metaTypedError("invalid_date_range", "invalid_date_range: since and until must be provided together");
   }
   let timeRange: { since: string; until: string } | undefined;
   let datePreset: string | undefined;
   if (since !== undefined && until !== undefined) {
     if (!META_LIVE_INSIGHTS_ISO_DAY.test(since) || !META_LIVE_INSIGHTS_ISO_DAY.test(until)) {
-      throw new Error("invalid_date_range: since/until must be YYYY-MM-DD");
+      throw metaTypedError("invalid_date_range", "invalid_date_range: since/until must be YYYY-MM-DD");
     }
     if (since > until) {
-      throw new Error(`invalid_date_range: since ${since} is after until ${until}`);
+      throw metaTypedError("invalid_date_range", `invalid_date_range: since ${since} is after until ${until}`);
     }
     timeRange = { since, until };
   } else {
     datePreset = optionalString(input, "datePreset") ?? "last_30d";
     if (!META_LIVE_INSIGHTS_DATE_PRESETS.has(datePreset)) {
-      throw new Error(`unsupported_meta_date_preset:${datePreset}`);
+      throw metaTypedError("unsupported_meta_date_preset", `unsupported_meta_date_preset:${datePreset}`);
     }
   }
   const requestedLimit = numberOrNull(input, "limit");
@@ -2615,10 +2688,12 @@ async function runMetaLiveInsightsHandler(
   // Same resolver as every meta read/write: pins provider === meta_ads inside the workspace,
   // then decrypts the stored credential. (Despite the name it is the READ resolver too.)
   const credential = await resolveMetaCredentialForWrite(db, context, sourceId);
-  const { rows, totalRows, truncated } = await fetchMetaLiveInsights(credential, {
+  const { rows, totalRows, totalEntities, truncated, window, currency, caveats } = await fetchMetaLiveInsights(credential, {
     level: level as "campaign" | "adset" | "ad",
     ...(timeRange ? { timeRange } : { datePreset }),
-    limit
+    limit,
+    ...(timeIncrement === undefined ? {} : { timeIncrement }),
+    ...(includeStatus === undefined ? {} : { includeStatus })
   });
   // A read: no integration_audit_log row, normal retryable taxonomy (same stance as list/get).
   return envelope(
@@ -2626,17 +2701,27 @@ async function runMetaLiveInsightsHandler(
     context.authority,
     {
       level,
-      window: timeRange ?? { datePreset },
+      // v2: concrete YYYY-MM-DD bounds ride `window.since/until` (the explicit range, else the
+      // bounds Meta echoed on the rows); a preset window keeps its `datePreset` key beside them.
+      window: { ...(timeRange ? {} : { datePreset }), ...(window ?? {}) },
+      currency,
+      timeIncrement: timeIncrement ?? null,
       rows,
       count: rows.length,
-      totalRows
+      totalRows,
+      totalEntities
     },
     ["provider_truth"],
     "ok",
     [
-      "Live Graph API read (provider truth, not the synced warehouse); rows are whole-window aggregates sorted by spend desc.",
+      timeIncrement === 1
+        ? "Live Graph API read (provider truth, not the synced warehouse); one row per entity per day (time_increment=1), entities ranked by total spend desc, days ascending."
+        : "Live Graph API read (provider truth, not the synced warehouse); rows are whole-window aggregates sorted by spend desc.",
+      ...caveats,
       ...(truncated
-        ? [`Truncated to the top ${rows.length} of ${totalRows} rows by spend; raise limit or narrow the window for the rest.`]
+        ? timeIncrement === 1
+          ? [`Truncated to the top ${totalEntities > limit ? limit : totalEntities} of ${totalEntities} entities by spend (${rows.length} of ${totalRows} rows); raise limit or narrow the window for the rest.`]
+          : [`Truncated to the top ${rows.length} of ${totalRows} rows by spend; raise limit or narrow the window for the rest.`]
         : [])
     ]
   );
