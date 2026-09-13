@@ -81,7 +81,8 @@ describe("Infinite OS migration stack", () => {
       "0064_posthog_raw_retention.sql",
       "0065_prune_rolls_up_before_deleting.sql",
       "0066_auxiliary_brain_usage_outbox.sql",
-      "0067_signup_event_metric_semantics.sql"
+      "0067_signup_event_metric_semantics.sql",
+      "0068_connection_credentials_selected_page.sql"
     ]);
   });
 
@@ -1078,8 +1079,21 @@ describe("Infinite OS migration stack", () => {
       "0064_posthog_raw_retention.sql",
       "0065_prune_rolls_up_before_deleting.sql",
       "0066_auxiliary_brain_usage_outbox.sql",
-      "0067_signup_event_metric_semantics.sql"
+      "0067_signup_event_metric_semantics.sql",
+      "0068_connection_credentials_selected_page.sql"
     ]);
+  });
+
+  it("adds the nullable Meta posting Page column beside the pixel (0068)", () => {
+    const migration = loadMigrations().find(
+      (m) => m.id === "0068_connection_credentials_selected_page.sql"
+    );
+    const sql = (migration?.sql ?? "").toLowerCase();
+    expect(sql).toContain("alter table connection_credentials");
+    expect(sql).toMatch(/add column if not exists selected_page_id\s+text/);
+    // Nullable, no default: existing rows stay NULL until a Page is chosen.
+    expect(sql).not.toMatch(/selected_page_id[^;]*not null/);
+    expect(sql).not.toMatch(/selected_page_id[^;]*default/);
   });
 
   it("adds connection_credentials operational metadata + partial-unique index (0039)", () => {

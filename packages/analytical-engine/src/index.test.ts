@@ -8284,6 +8284,119 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
         }
       );
     });
+
+    // A Meta credential the connect/reconnect test-connection step accepts (marketing_api mode
+    // "live" hits /act_x?fields=… which the withGraph responder answers).
+    const metaPayload = {
+      mode: "live",
+      transport: "marketing_api",
+      adAccountId: "act_999",
+      accessToken: "secret-meta-token",
+      apiVersion: "v25.0"
+    };
+
+    function connectCaptureDb(captured: { input?: Record<string, unknown> }): InfiniteOsDb {
+      const base = metaWriteTestDb({ audits: [] });
+      return {
+        ...base,
+        async connectSource(input) {
+          captured.input = input as unknown as Record<string, unknown>;
+          return { id: "src_meta_new", provider: "meta_ads", status: "connected" };
+        },
+        async withTransaction(fn) {
+          return fn(this);
+        }
+      };
+    }
+
+    it("connect_source stores selectedPageId beside selectedPixelId (db.connectSource input)", async () => {
+      const captured: { input?: Record<string, unknown> } = {};
+      await withGraph(
+        () => jsonResponse({ id: "act_999", account_id: "999", name: "Ads", currency: "USD" }),
+        async () => {
+          const handlers = createActionHandlers(connectCaptureDb(captured));
+          await handlers.connect_source?.(
+            {
+              provider: "meta_ads",
+              connectionName: "Meta",
+              credentialPayload: metaPayload,
+              selectedPixelId: "px_1",
+              selectedPageId: "pg_1"
+            },
+            operatorContext
+          );
+          expect(captured.input).toMatchObject({ selectedPixelId: "px_1", selectedPageId: "pg_1" });
+        }
+      );
+    });
+
+    it("connect_source without a Page leaves selectedPageId OFF the db input (byte-identical legacy connect)", async () => {
+      const captured: { input?: Record<string, unknown> } = {};
+      await withGraph(
+        () => jsonResponse({ id: "act_999", account_id: "999", name: "Ads", currency: "USD" }),
+        async () => {
+          const handlers = createActionHandlers(connectCaptureDb(captured));
+          await handlers.connect_source?.(
+            { provider: "meta_ads", connectionName: "Meta", credentialPayload: metaPayload },
+            operatorContext
+          );
+          expect(captured.input).toBeDefined();
+          expect("selectedPageId" in (captured.input ?? {})).toBe(false);
+          expect("selectedPixelId" in (captured.input ?? {})).toBe(false);
+        }
+      );
+    });
+
+    function reconnectDb(prior: { selected_pixel_id: string | null; selected_page_id: string | null }, inserted: unknown[][]): InfiniteOsDb {
+      const base = metaWriteTestDb({ audits: [] });
+      return {
+        ...base,
+        async query<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T[]> {
+          if (sql.includes("select selected_pixel_id, selected_page_id from connection_credentials")) {
+            return [prior] as T[];
+          }
+          if (sql.includes("insert into connection_credentials")) {
+            inserted.push(params ?? []);
+            return [];
+          }
+          return base.query(sql, params) as Promise<T[]>;
+        },
+        async withTransaction(fn) {
+          return fn(this);
+        }
+      };
+    }
+
+    it("reconnect_source carries the prior selected_page_id (and pixel) onto the fresh credential row", async () => {
+      const inserted: unknown[][] = [];
+      await withGraph(
+        () => jsonResponse({ id: "act_999", account_id: "999", name: "Ads", currency: "USD" }),
+        async () => {
+          const handlers = createActionHandlers(reconnectDb({ selected_pixel_id: "px_old", selected_page_id: "pg_old" }, inserted));
+          await handlers.reconnect_source?.({ sourceId: "src_meta", credentialPayload: metaPayload }, operatorContext);
+          expect(inserted).toHaveLength(1);
+          // Positional params: … $7 = selected_pixel_id, $8 = selected_page_id.
+          expect(inserted[0]?.[6]).toBe("px_old");
+          expect(inserted[0]?.[7]).toBe("pg_old");
+        }
+      );
+    });
+
+    it("reconnect_source: an explicit selectedPageId overrides the carried one", async () => {
+      const inserted: unknown[][] = [];
+      await withGraph(
+        () => jsonResponse({ id: "act_999", account_id: "999", name: "Ads", currency: "USD" }),
+        async () => {
+          const handlers = createActionHandlers(reconnectDb({ selected_pixel_id: null, selected_page_id: "pg_old" }, inserted));
+          await handlers.reconnect_source?.(
+            { sourceId: "src_meta", credentialPayload: metaPayload, selectedPageId: "pg_new" },
+            operatorContext
+          );
+          expect(inserted[0]?.[6]).toBeNull();
+          expect(inserted[0]?.[7]).toBe("pg_new");
+        }
+      );
+    });
   });
 });
 

@@ -942,7 +942,10 @@ function inputSchemaFor(id: InfiniteOsActionId): Record<string, unknown> {
         encryptedPayload: { type: "string" },
         // P1-2: the Meta account/pixel picker passes the chosen pixel so CAPI dispatch has a target.
         // Schema is additionalProperties:false, so this MUST be declared or the connect is rejected.
-        selectedPixelId: { type: "string" }
+        selectedPixelId: { type: "string" },
+        // Migration 0068: the picker's "Posting Page" (the Facebook Page ads are posted FROM);
+        // create_meta_creative defaults its pageId to it.
+        selectedPageId: { type: "string" }
       },
       ["provider"]
     ),
@@ -960,7 +963,9 @@ function inputSchemaFor(id: InfiniteOsActionId): Record<string, unknown> {
         oauthTokenId: { type: "string" },
         // P1-2: an explicit pixel override on reconnect; absent, the prior pixel is carried forward
         // (the handler reads the old selected_pixel_id before revoking). additionalProperties:false.
-        selectedPixelId: { type: "string" }
+        selectedPixelId: { type: "string" },
+        // Migration 0068: same carry-forward / override rule for the posting Page.
+        selectedPageId: { type: "string" }
       },
       ["sourceId"]
     ),
