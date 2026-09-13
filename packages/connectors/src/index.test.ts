@@ -5368,6 +5368,35 @@ describe("classifySyncFailure (status-escalation classifier)", () => {
     }
   });
 
+  it("classifies Meta codes 3 (capability), 294 (requires ads_management) and 270 (access-tier restriction) as terminal, type-agnostic", () => {
+    for (const body of [
+      '{"error":{"message":"(#3) Application does not have the capability to make this API call.","type":"OAuthException","code":3}}',
+      '{"error":{"message":"(#294) Managing advertisements requires an access token with the extended permission for ads_management","type":"GraphMethodException","code":294}}',
+      '{"error":{"message":"(#270) This Ads API request is not allowed for apps in development mode","type":"FacebookApiException","code":270}}'
+    ]) {
+      expect(
+        classifySyncFailure({ code: "provider_api_error", message: `provider request failed 400 for https://graph.facebook.com/v25.0/act_1/insights: ${body}`, retryable: true }),
+        body
+      ).toBe("terminal");
+    }
+  });
+
+  it("code 100 + error_subcode 33 is terminal even with an error_data object between the two keys", () => {
+    const body =
+      '{"error":{"message":"Unsupported get request.","type":"GraphMethodException","code":100,"error_data":{"blame_field_specs":[["x"]]},"error_subcode":33}}';
+    expect(
+      classifySyncFailure({ code: "provider_api_error", message: `provider request failed 400 for https://graph.facebook.com/v25.0/act_1/insights: ${body}`, retryable: true })
+    ).toBe("terminal");
+    // and 3300 / 33xx subcodes do not false-match 33
+    expect(
+      classifySyncFailure({
+        code: "provider_api_error",
+        message: 'provider request failed 400: {"error":{"message":"x","type":"OAuthException","code":100,"error_subcode":3300}}',
+        retryable: true
+      })
+    ).toBe("transient");
+  });
+
   it("a bare Meta code 100 (invalid parameter, no subcode 33) stays transient — it is a request-shape problem, not a credential one", () => {
     expect(
       classifySyncFailure({
@@ -8337,12 +8366,31 @@ describe("listMetaAssets (asset discovery for the connect picker)", () => {
     expect(calls.some((u) => u.includes("/me/businesses"))).toBe(false);
   });
 
-  it("an invalid token surfaces provider_auth_failed (validate-before-bind)", async () => {
-    stubGraph([
-      { match: "/me/adaccounts", body: { error: { message: "bad token" } }, status: 401 }, // swallowed -> business path
-      { match: "/me/businesses", body: { error: { message: "bad token" } }, status: 401 } // throws
-    ]);
+  it("an invalid token surfaces provider_auth_failed from the identity probe (validate-before-bind)", async () => {
+    stubGraph([{ match: "/me?fields=id", body: { error: { message: "bad token" } }, status: 401 }]);
     await expect(listMetaAssets("bogus")).rejects.toMatchObject({ code: "provider_auth_failed" });
+  });
+
+  it("Meta's HTTP-400 OAuthException 190 on the identity probe is re-typed as provider_auth_failed (not a retryable api error)", async () => {
+    stubGraph([
+      {
+        match: "/me?fields=id",
+        body: { error: { message: "Error validating access token: Session has expired", type: "OAuthException", code: 190 } },
+        status: 400
+      }
+    ]);
+    await expect(listMetaAssets("expired")).rejects.toMatchObject({ code: "provider_auth_failed", retryable: false });
+  });
+
+  it("a VALID token that reaches no ad account (unassigned system user, no business_management) throws the typed no_meta_ad_accounts — never a raw Graph error", async () => {
+    stubGraph([
+      { match: "/me?fields=id", body: { id: "su_1" } },
+      { match: "/me/adaccounts", body: { data: [] } },
+      { match: "/me/assigned_ad_accounts", body: { error: { message: "(#200) no scope" } }, status: 400 },
+      { match: "/me/businesses", body: { error: { message: "(#200) Requires business_management" } }, status: 400 }
+    ]);
+    await expect(listMetaAssets("unassigned")).rejects.toMatchObject({ code: "no_meta_ad_accounts", retryable: false });
+    await expect(listMetaAssets("unassigned")).rejects.toThrow(/Add assets → Ad accounts/);
   });
 });
 

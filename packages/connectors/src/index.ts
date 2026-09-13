@@ -9884,9 +9884,29 @@ export async function listMetaAssets(
     pixelsByAccount: {}
   };
 
-  // 1. OAuth-user path. A system-user token returns 200-empty here (it owns no personal accounts);
-  //    an auth error is swallowed so we still try the system-user path below — an actually-invalid
-  //    token then throws on `/me/businesses`/owned_ad_accounts and surfaces as provider_auth_failed.
+  // 0. Identity probe. Every discovery edge below is BEST-EFFORT (a token can legitimately lack the
+  //    scope for any one of them), so this single `/me` read is what separates "the token is
+  //    invalid/expired" (a credential error the user must fix by re-minting) from "the token is fine
+  //    but reaches no ad account" (an ASSIGNMENT problem, surfaced as no_meta_ad_accounts below).
+  //    Meta returns its credential rejections as HTTP 400 OAuthException bodies (code 190/102),
+  //    which fetchJson types as a retryable provider_api_error — re-typed here as the terminal
+  //    provider_auth_failed so the picker can say "invalid token" instead of echoing a Graph body.
+  try {
+    await fetchJson<{ id?: string }>(`${base}/me?fields=id`, { method: "GET", headers: bearerHeaders(accessToken) });
+  } catch (error) {
+    if (error instanceof ConnectorError && error.code === "provider_auth_failed") throw error;
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.includes("OAuthException") && META_OAUTH_TERMINAL_BODY.test(message)) {
+      throw new ConnectorError("provider_auth_failed", message, false);
+    }
+    throw error;
+  }
+
+  // 1. `/me/adaccounts` — the accounts the token's user can use. VERIFIED 2026-09-13 with a real
+  //    system-user token: a system user that has been ASSIGNED an ad account gets it HERE (no
+  //    business_management needed); an unassigned one gets an empty list. An OAuth user token gets
+  //    its personal accounts. Errors are swallowed so a token that lacks this edge's scope still
+  //    falls through to the discovery edges below.
   try {
     snapshot.adAccounts = await paginateMetaGraph<MetaAdAccount>(
       `${base}/me/adaccounts?fields=id,account_id,name,currency&limit=100`,
@@ -9896,12 +9916,12 @@ export async function listMetaAssets(
     snapshot.adAccounts = [];
   }
 
-  // 2a. SYSTEM-USER path, ASSIGNED accounts first. A Business Manager system user only reaches the
-  //     ad accounts explicitly assigned to it (Business Settings → System Users → Add Assets), and
-  //     Meta exposes exactly that set on `/{system_user_id}/assigned_ad_accounts` (`/me` resolves to
-  //     the system user for its own token). This edge needs NO business_management scope, so a
-  //     token minted with only the ads scopes still resolves its accounts here. Best-effort: an
-  //     OAuth-user token 400s on it, and that must not stop the business walk below.
+  // 2a. Speculative coverage: `/{system_user_id}/assigned_ad_accounts`, Meta's canonical "what is
+  //     this system user assigned" edge, tried as `/me/assigned_ad_accounts`. In the verified case
+  //     above `/me/adaccounts` already carried the assigned set, so this is a FALLBACK for a token
+  //     whose `/me/adaccounts` read failed (scope gap) rather than a second source of truth. Whether
+  //     `/me` resolves to the system user on this edge and which scope it wants is NOT verified
+  //     against Meta docs — hence best-effort: any failure falls through to the business walk.
   if (snapshot.adAccounts.length === 0) {
     snapshot.tokenKind = "system_user_token";
     try {
@@ -9914,16 +9934,25 @@ export async function listMetaAssets(
     }
   }
 
-  // 2b. SYSTEM-USER path, business walk: accounts the business OWNS plus accounts shared INTO it as
-  //     a CLIENT/partner asset (an agency-managed account, or one created on a personal profile
-  //     and shared to the BM — the common small-brand shape). `owned_ad_accounts` alone missed the
-  //     client set entirely (2026-09-13, a live advertiser saw "no ad accounts"). Client reads are
-  //     best-effort per business: a business the token cannot read clients for must not sink the
-  //     owned set. De-duplicated by id — an account can appear on both edges.
+  // 2b. Business walk (needs business_management): accounts the business OWNS plus accounts shared
+  //     INTO it as a CLIENT/partner asset (agency-managed, or created elsewhere and shared to the
+  //     BM). Speculative coverage too: with a real system-user token `/me/businesses` came back
+  //     EMPTY (2026-09-13 probe), so for that token class this walk contributes nothing unless the
+  //     caller passes an explicit businessId; it does serve user tokens with business_management.
+  //     `/me/businesses` is best-effort (a token without business_management must reach the
+  //     no_meta_ad_accounts guidance, not echo a raw Graph error); an explicit businessId is
+  //     trusted as given. Client reads are best-effort per business; de-duplicated by id.
   if (snapshot.adAccounts.length === 0) {
-    const businesses = options.businessId
-      ? [{ id: options.businessId, name: options.businessId }]
-      : await paginateMetaGraph<MetaBusiness>(`${base}/me/businesses?fields=id,name`, accessToken);
+    let businesses: MetaBusiness[] = [];
+    if (options.businessId) {
+      businesses = [{ id: options.businessId, name: options.businessId }];
+    } else {
+      try {
+        businesses = await paginateMetaGraph<MetaBusiness>(`${base}/me/businesses?fields=id,name`, accessToken);
+      } catch {
+        businesses = [];
+      }
+    }
     snapshot.businesses = businesses;
     const seen = new Set<string>();
     const pushUnique = (rows: MetaAdAccount[]) => {
@@ -9934,12 +9963,18 @@ export async function listMetaAssets(
       }
     };
     for (const biz of businesses) {
-      pushUnique(
-        await paginateMetaGraph<MetaAdAccount>(
-          `${base}/${biz.id}/owned_ad_accounts?fields=id,account_id,name,currency&limit=100`,
-          accessToken
-        )
-      );
+      try {
+        pushUnique(
+          await paginateMetaGraph<MetaAdAccount>(
+            `${base}/${biz.id}/owned_ad_accounts?fields=id,account_id,name,currency&limit=100`,
+            accessToken
+          )
+        );
+      } catch (error) {
+        // An explicit businessId is a caller assertion — surface its failure. Discovered
+        // businesses are best-effort like every other edge here.
+        if (options.businessId) throw error;
+      }
       try {
         pushUnique(
           await paginateMetaGraph<MetaAdAccount>(
@@ -9981,8 +10016,21 @@ export async function listMetaAssets(
     }
   }
 
+  // 5. A valid token that reaches NO ad account is an assignment problem, typed so every transport
+  //    (local daemon, cloud tools-call) forwards the CODE — a plain Error collapses to
+  //    invalid_tool_input on the wire and the desktop can only prefix-sniff the message.
+  if (snapshot.adAccounts.length === 0) {
+    throw new ConnectorError("no_meta_ad_accounts", META_NO_AD_ACCOUNTS_MESSAGE, false);
+  }
+
   return snapshot;
 }
+
+/** The fix, stated for the user: the token is fine, the ad account is not assigned to its system user.
+ *  Assignment is a Business Manager change — the EXISTING token starts seeing the account once it
+ *  is assigned, so no re-mint is asked for. */
+export const META_NO_AD_ACCOUNTS_MESSAGE =
+  "no_meta_ad_accounts: this token can't see any ad account. In Business Settings → Accounts → Ad accounts, make sure the ad account is in your business portfolio; then under Users → System users, open the system user, choose Add assets → Ad accounts and assign it (Manage campaigns, or Full control). Then load accounts again — the same token will now see it.";
 
 // ── Lightweight dedup helper (idempotency) ────────────────────────────────────
 // INVARIANT 4: dedup is keyed by (workspace_id, source_id, client_token). The
@@ -11191,7 +11239,14 @@ const META_OAUTH_TERMINAL_BODY = /"code"\s*:\s*(190|102|200|10)\b/;
 //     transient, the fresh source sat at `connected` while the connect form showed the error
 //     (2026-09-13). A bare code 100 (no subcode 33) is an invalid-parameter request-shape error
 //     and stays transient — matching it would re-park healthy sources on our own request bugs.
-const META_GRAPH_MISSING_OBJECT_BODY = /"code"\s*:\s*100\b[^}]*"error_subcode"\s*:\s*33\b/;
+const META_GRAPH_CODE_100 = /"code"\s*:\s*100\b/;
+const META_GRAPH_SUBCODE_33 = /"error_subcode"\s*:\s*33\b/;
+// Further credential/app-configuration-grade Marketing API codes (Meta's error reference): 3 = the
+// app lacks the capability/permission for the method, 294 = "requires ads_management", 270 = a
+// dev-mode / access-tier restriction. None is fixed by retrying with the same token, and none of
+// Meta's transient throttles (4 / 17 / 32 / 80000-range) shares these numbers. Type-agnostic on
+// purpose: Meta labels these bodies inconsistently. `\b` keeps 3 from matching 33 / 3300.
+const META_GRAPH_PERMISSION_CODES_BODY = /"code"\s*:\s*(3|294|270)\b/;
 
 // Classify a sync failure for STATUS ESCALATION (not for run bookkeeping — sync_runs/sync_errors
 // record every failure identically). "terminal" = retrying with the stored credential can never
@@ -11219,7 +11274,10 @@ export function classifySyncFailure(error: {
   if (error.message.includes("OAuthException") && META_OAUTH_TERMINAL_BODY.test(error.message)) {
     return "terminal";
   }
-  if (META_GRAPH_MISSING_OBJECT_BODY.test(error.message)) {
+  if (META_GRAPH_CODE_100.test(error.message) && META_GRAPH_SUBCODE_33.test(error.message)) {
+    return "terminal";
+  }
+  if (META_GRAPH_PERMISSION_CODES_BODY.test(error.message)) {
     return "terminal";
   }
   return "transient";
