@@ -17,6 +17,7 @@ import {
   updateMetaBudget,
   ConnectorError,
   type ConnectionTestResult,
+  type MetaAdSetTargeting,
   type MetaAdsCredential,
   type MetaEntityStatus,
   type MetaWriteEntity,
@@ -2157,6 +2158,7 @@ async function createMetaAdSetHandler(
   const budgets = await resolveMetaCreateBudgets(db, context, sourceId, input);
   const bidAmount = numberOrNull(input, "bidAmount");
   const targetingCountries = stringArray(input, "targetingCountries");
+  const targeting = metaAdSetTargetingInput(input);
   return runMetaCreate(
     db,
     context,
@@ -2176,11 +2178,60 @@ async function createMetaAdSetHandler(
         ...(optionalString(input, "startTime") ? { startTime: optionalString(input, "startTime") } : {}),
         ...(optionalString(input, "endTime") ? { endTime: optionalString(input, "endTime") } : {}),
         ...(targetingCountries.length > 0 ? { targetingCountries } : {}),
+        ...(targeting ? { targeting } : {}),
         ...(optionalString(input, "pixelId") ? { pixelId: optionalString(input, "pixelId") } : {}),
         ...(optionalString(input, "customEventType") ? { customEventType: optionalString(input, "customEventType") } : {})
       }),
     budgets.budgetCurrency ? { budgetCurrency: budgets.budgetCurrency } : undefined
   );
+}
+
+// A3 — read the BOUNDED manual-targeting object off an ad-set create input. Only the six known
+// keys are forwarded (a free-form Graph targeting spec is not expressible from here); a wrong
+// type fails TYPED (`invalid_targeting`, non-retryable) before any credential is decrypted or
+// POST is made. Returns undefined when the input carries no `targeting` at all.
+function metaAdSetTargetingInput(input: unknown): MetaAdSetTargeting | undefined {
+  const raw = objectField(input, "targeting");
+  if (raw === undefined || raw === null) {
+    return undefined;
+  }
+  if (!isRecord(raw)) {
+    throw metaTypedError("invalid_targeting", "invalid_targeting: targeting must be an object");
+  }
+  const spec: MetaAdSetTargeting = {};
+  const age = (key: "age_min" | "age_max"): void => {
+    const value = raw[key];
+    if (value === undefined || value === null) return;
+    if (typeof value !== "number" || !Number.isInteger(value) || value < 13 || value > 65) {
+      throw metaTypedError("invalid_targeting", `invalid_targeting: ${key} must be an integer between 13 and 65`);
+    }
+    spec[key] = value;
+  };
+  age("age_min");
+  age("age_max");
+  if (spec.age_min !== undefined && spec.age_max !== undefined && spec.age_min > spec.age_max) {
+    throw metaTypedError("invalid_targeting", "invalid_targeting: age_min is greater than age_max");
+  }
+  const strings = (key: "publisher_platforms" | "facebook_positions" | "instagram_positions"): void => {
+    const value = raw[key];
+    if (value === undefined || value === null) return;
+    if (!Array.isArray(value) || !value.every((item) => typeof item === "string" && item.trim() !== "")) {
+      throw metaTypedError("invalid_targeting", `invalid_targeting: ${key} must be an array of non-empty strings`);
+    }
+    spec[key] = [...(value as string[])];
+  };
+  strings("publisher_platforms");
+  strings("facebook_positions");
+  strings("instagram_positions");
+  const geo = raw.geo_locations;
+  if (geo !== undefined && geo !== null) {
+    const countries = isRecord(geo) ? geo.countries : undefined;
+    if (!Array.isArray(countries) || !countries.every((item) => typeof item === "string" && item.trim() !== "")) {
+      throw metaTypedError("invalid_targeting", "invalid_targeting: geo_locations.countries must be an array of country codes");
+    }
+    spec.geo_locations = { countries: [...(countries as string[])] };
+  }
+  return spec;
 }
 
 async function createMetaCreativeHandler(

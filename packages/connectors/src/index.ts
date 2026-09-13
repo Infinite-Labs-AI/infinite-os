@@ -8794,6 +8794,22 @@ export interface MetaCampaignCreateInput {
   lifetimeBudget?: number;
 }
 
+// A3 (2026-09-13) — manual audience + placements. The BOUNDED subset of Meta's targeting spec
+// the desktop Create sheet can express (no flexible_spec/custom_audiences/free-form keys). On the
+// wire it is the CLI's `--targeting <json>` escape hatch (which REPLACES --targeting-countries —
+// geo_locations lives inside) or the Graph `targeting` param, ALWAYS with Advantage+ audience
+// off: `--no-advantage-audience` on the CLI, `targeting_automation.advantage_audience = 0` on
+// Graph. Placements are manual by construction: naming publisher_platforms/positions turns
+// Advantage+ placements off on Meta's side.
+export interface MetaAdSetTargeting {
+  age_min?: number;
+  age_max?: number;
+  geo_locations?: { countries: string[] };
+  publisher_platforms?: string[];
+  facebook_positions?: string[];
+  instagram_positions?: string[];
+}
+
 export interface MetaAdSetCreateInput {
   name: string;
   campaignId: string;
@@ -8805,8 +8821,24 @@ export interface MetaAdSetCreateInput {
   startTime?: string;
   endTime?: string;
   targetingCountries?: string[];
+  /** Manual targeting JSON; when present it REPLACES targetingCountries (which is folded into
+   *  geo_locations only when the JSON carries none, so a country is never dropped silently). */
+  targeting?: MetaAdSetTargeting;
   pixelId?: string;
   customEventType?: string;
+}
+
+// Resolve the effective manual-targeting object for an ad-set create, or undefined when the
+// caller sent only the legacy countries shape (which keeps its pre-A3 wire form untouched).
+function metaAdSetTargetingSpec(input: MetaAdSetCreateInput): MetaAdSetTargeting | undefined {
+  if (!input.targeting) {
+    return undefined;
+  }
+  const spec: MetaAdSetTargeting = { ...input.targeting };
+  if (!spec.geo_locations && input.targetingCountries && input.targetingCountries.length > 0) {
+    spec.geo_locations = { countries: [...input.targetingCountries] };
+  }
+  return spec;
 }
 
 export interface MetaCreativeCreateInput {
@@ -9369,7 +9401,11 @@ export async function createMetaAdSet(
   //   `targeting` minimum shape — Graph usually demands at least geo_locations.
   //   The inner key geo_locations.countries is [CONFIRMED-SDK]; whether the CLI
   //   adds default targeting_automation/placements is [INFERRED].
-  if (input.targetingCountries && input.targetingCountries.length > 0) {
+  const manualTargeting = metaAdSetTargetingSpec(input);
+  if (manualTargeting) {
+    // A3: the manual spec verbatim + Advantage+ audience OFF (product rule: never on).
+    params.targeting = { ...manualTargeting, targeting_automation: { advantage_audience: 0 } };
+  } else if (input.targetingCountries && input.targetingCountries.length > 0) {
     params.targeting = { geo_locations: { countries: input.targetingCountries } }; // VERIFY against a real Meta sandbox capture before live use
   }
   if (input.pixelId) {
@@ -10718,9 +10754,17 @@ async function createMetaAdSetViaCli(
   pushCentsFlag(args, "--bid-amount", input.bidAmount);
   if (input.startTime) args.push("--start-time", input.startTime);
   if (input.endTime) args.push("--end-time", input.endTime);
-  if (input.targetingCountries && input.targetingCountries.length > 0) {
+  const manualTargeting = metaAdSetTargetingSpec(input);
+  if (manualTargeting) {
+    // A3: the CLI's raw-JSON escape hatch. Per `meta ads adset create --help` it REPLACES
+    // --targeting-countries (geo_locations rides inside the JSON) — never send both.
+    args.push("--targeting", JSON.stringify(manualTargeting));
+  } else if (input.targetingCountries && input.targetingCountries.length > 0) {
     args.push("--targeting-countries", input.targetingCountries.join(","));
   }
+  // Product rule (2026-09-13): Advantage+ audience is OFF on every ad set. Explicit, because
+  // with the flag absent the CLI fills targeting_automation.advantage_audience itself.
+  args.push("--no-advantage-audience");
   if (input.pixelId) {
     args.push("--pixel-id", input.pixelId);
     // Mirror the Graph path: default the conversion event to PURCHASE when a pixel

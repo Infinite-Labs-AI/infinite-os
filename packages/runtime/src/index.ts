@@ -1236,6 +1236,39 @@ function inputSchemaFor(id: InfiniteOsActionId): Record<string, unknown> {
         startTime: { type: "string" },
         endTime: { type: "string" },
         targetingCountries: { type: "array", items: { type: "string" } },
+        // A3 (2026-09-13) — manual audience + placements. REPLACES targetingCountries when both are
+        // sent (countries fold into geo_locations only when the JSON has none). Advantage+ audience
+        // is ALWAYS off on every ad set the engine creates; naming platforms/positions makes
+        // placements manual. Bounded keys only — no free-form Graph targeting from here.
+        targeting: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            age_min: { type: "integer", minimum: 13, maximum: 65 },
+            age_max: { type: "integer", minimum: 13, maximum: 65 },
+            geo_locations: {
+              type: "object",
+              additionalProperties: false,
+              properties: { countries: { type: "array", items: { type: "string" } } },
+              required: ["countries"]
+            },
+            publisher_platforms: {
+              type: "array",
+              items: { type: "string" },
+              description: "e.g. facebook, instagram, audience_network, messenger"
+            },
+            facebook_positions: {
+              type: "array",
+              items: { type: "string" },
+              description: "e.g. feed, story, facebook_reels, video_feeds, marketplace"
+            },
+            instagram_positions: {
+              type: "array",
+              items: { type: "string" },
+              description: "e.g. stream, story, reels, explore, profile_feed"
+            }
+          }
+        },
         pixelId: { type: "string" },
         customEventType: { type: "string" },
         clientToken: { type: "string" }

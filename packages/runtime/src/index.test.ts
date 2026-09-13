@@ -307,6 +307,21 @@ describe("Meta Ads management action authority (money-safety)", () => {
     );
   });
 
+  it("create_meta_ad_set exposes a BOUNDED `targeting` object (manual audience + placements; no free-form Graph targeting)", () => {
+    const card = ACTION_CATALOG.find((action) => action.id === "create_meta_ad_set");
+    const schema = card?.inputSchema as {
+      properties?: Record<string, { type?: string; additionalProperties?: boolean; properties?: Record<string, unknown> }>;
+    };
+    const targeting = schema?.properties?.targeting;
+    expect(targeting?.type).toBe("object");
+    expect(targeting?.additionalProperties).toBe(false);
+    expect(Object.keys(targeting?.properties ?? {}).sort()).toEqual(
+      ["age_max", "age_min", "facebook_positions", "geo_locations", "instagram_positions", "publisher_platforms"]
+    );
+    // targetingCountries stays for back-compat; targeting REPLACES it when both are sent.
+    expect(schema?.properties?.targetingCountries).toBeDefined();
+  });
+
   it("exposes videoUrl on the Meta creative create schema for desktop uploaded video assets", () => {
     const card = ACTION_CATALOG.find((action) => action.id === "create_meta_creative");
     const schema = card?.inputSchema as { properties?: Record<string, unknown> } | undefined;

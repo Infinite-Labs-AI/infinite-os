@@ -6519,6 +6519,41 @@ describe("Meta Ads WRITE helpers", () => {
       }
     );
 
+    // A3 — the direct-Graph path carries the manual `targeting` JSON verbatim and pins
+    // Advantage+ audience OFF (targeting_automation.advantage_audience = 0); the countries-only
+    // shape above is unchanged.
+    await captureWrites(
+      () => jsonResponse({ id: "as2", status: "PAUSED" }),
+      async (captured) => {
+        await createMetaAdSet(metaWriteCredential, {
+          name: "Manual",
+          campaignId: "c1",
+          optimizationGoal: "OFFSITE_CONVERSIONS",
+          billingEvent: "IMPRESSIONS",
+          targeting: {
+            age_min: 25,
+            age_max: 54,
+            geo_locations: { countries: ["US"] },
+            publisher_platforms: ["facebook", "instagram"],
+            facebook_positions: ["feed"],
+            instagram_positions: ["stream", "reels"]
+          }
+        });
+        expect(captured[0].body).toMatchObject({
+          status: "PAUSED",
+          targeting: {
+            age_min: 25,
+            age_max: 54,
+            geo_locations: { countries: ["US"] },
+            publisher_platforms: ["facebook", "instagram"],
+            facebook_positions: ["feed"],
+            instagram_positions: ["stream", "reels"],
+            targeting_automation: { advantage_audience: 0 }
+          }
+        });
+      }
+    );
+
     // Link creative → object_story_spec.link_data (headline key is "name").
     await captureWrites(
       () => jsonResponse({ id: "cr1" }),
@@ -7369,6 +7404,65 @@ console.log(${JSON.stringify(serialized)});
         // pixel ⇒ default conversion event PURCHASE.
         expect(argv[argv.indexOf("--custom-event-type") + 1]).toBe("PURCHASE");
         expect(argv[argv.indexOf("--status") + 1]).toBe("paused");
+        // Product rule: Advantage+ audience is OFF on every ad set, even the countries-only shape.
+        expect(argv).toContain("--no-advantage-audience");
+        expect(argv).not.toContain("--advantage-audience");
+        expect(argv).not.toContain("--targeting");
+      });
+    });
+
+    // A3 (2026-09-13) — manual targeting + placements. `targeting` rides the CLI's raw-JSON escape
+    // hatch (`--targeting <json>`), which per `meta ads adset create --help` REPLACES
+    // --targeting-countries (geo_locations lives inside the JSON); Advantage+ audience is always
+    // explicitly off (`--no-advantage-audience`) so the CLI never fills advantage_audience=1.
+    it("adset create with `targeting` JSON → --targeting <json> + --no-advantage-audience, never --targeting-countries", async () => {
+      await withTmp(async (dir) => {
+        const targeting = {
+          age_min: 25,
+          age_max: 54,
+          geo_locations: { countries: ["US"] },
+          publisher_platforms: ["facebook", "instagram"],
+          facebook_positions: ["feed", "story", "facebook_reels"],
+          instagram_positions: ["stream", "story", "reels"]
+        };
+        const result = await createMetaAdSet(cliCredential(dir, { id: "120000000000021", status: "PAUSED" }), {
+          name: "Manual placements",
+          campaignId: "120000000000010",
+          optimizationGoal: "OFFSITE_CONVERSIONS",
+          billingEvent: "IMPRESSIONS",
+          dailyBudget: 3000,
+          targeting,
+          pixelId: "px_1"
+        });
+        expect(result).toMatchObject({ ok: true, id: "120000000000021", status: "PAUSED" });
+        const argv = recordedArgv(dir);
+        expect(argv).not.toContain("--targeting-countries");
+        expect(argv[argv.indexOf("--targeting") + 1]).toBe(JSON.stringify(targeting));
+        expect(argv).toContain("--no-advantage-audience");
+        expect(argv).not.toContain("--advantage-audience");
+        expect(argv[argv.indexOf("--status") + 1]).toBe("paused");
+        // The positional campaign id is still LAST, after `--`.
+        expect(argv.slice(-2)).toEqual(["--", "120000000000010"]);
+      });
+    });
+
+    it("adset create folds targetingCountries into targeting.geo_locations when the JSON lacks it (never drops a country silently)", async () => {
+      await withTmp(async (dir) => {
+        await createMetaAdSet(cliCredential(dir, { id: "120000000000022", status: "PAUSED" }), {
+          name: "Fold",
+          campaignId: "120000000000010",
+          optimizationGoal: "LINK_CLICKS",
+          billingEvent: "IMPRESSIONS",
+          targetingCountries: ["GB"],
+          targeting: { age_min: 30, publisher_platforms: ["instagram"] }
+        });
+        const argv = recordedArgv(dir);
+        expect(argv).not.toContain("--targeting-countries");
+        expect(JSON.parse(argv[argv.indexOf("--targeting") + 1])).toEqual({
+          age_min: 30,
+          publisher_platforms: ["instagram"],
+          geo_locations: { countries: ["GB"] }
+        });
       });
     });
 

@@ -7193,6 +7193,75 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
         }
       );
     });
+
+    // A3 (2026-09-13) — the desktop Create sheet's manual targeting + placements JSON passes
+    // through to the connector (bounded keys only), and a malformed shape fails TYPED before
+    // any POST.
+    it("create_meta_ad_set passes the bounded `targeting` JSON through (Advantage+ audience OFF) and rejects a bad shape typed", async () => {
+      const db = metaWriteTestDb({ audits: [], metaSources: [{ id: "src_meta_sole" }] });
+      await withGraph(
+        () => jsonResponse({ id: "adset_targeted", status: "PAUSED" }),
+        async (calls) => {
+          const handlers = createActionHandlers(db);
+          const targeting = {
+            age_min: 25,
+            age_max: 54,
+            geo_locations: { countries: ["US"] },
+            publisher_platforms: ["facebook", "instagram"],
+            facebook_positions: ["feed", "story", "facebook_reels"],
+            instagram_positions: ["stream", "story", "reels"]
+          };
+          const result = await handlers.create_meta_ad_set?.(
+            {
+              campaignId: "120000000000001",
+              name: "Targeted",
+              optimizationGoal: "OFFSITE_CONVERSIONS",
+              billingEvent: "IMPRESSIONS",
+              targeting,
+              clientToken: "tok_adset_targeted"
+            },
+            operatorContext
+          );
+          expect(result?.ok).toBe(true);
+          expect(calls).toHaveLength(1);
+          expect(calls[0].body).toMatchObject({
+            status: "PAUSED",
+            targeting: { ...targeting, targeting_automation: { advantage_audience: 0 } }
+          });
+          // Unknown keys are NOT forwarded (bounded vocabulary — no free-form Graph targeting).
+          const stripped = await handlers.create_meta_ad_set?.(
+            {
+              campaignId: "120000000000001",
+              name: "Stripped",
+              optimizationGoal: "OFFSITE_CONVERSIONS",
+              billingEvent: "IMPRESSIONS",
+              targeting: { age_min: 18, flexible_spec: [{ interests: [{ id: "1" }] }] },
+              clientToken: "tok_adset_stripped"
+            },
+            operatorContext
+          );
+          expect(stripped?.ok).toBe(true);
+          expect((calls[1].body as { targeting: Record<string, unknown> }).targeting).toEqual({
+            age_min: 18,
+            targeting_automation: { advantage_audience: 0 }
+          });
+          // Wrong types fail typed, before any POST.
+          await expect(
+            handlers.create_meta_ad_set?.(
+              {
+                campaignId: "120000000000001",
+                name: "Bad",
+                optimizationGoal: "OFFSITE_CONVERSIONS",
+                billingEvent: "IMPRESSIONS",
+                targeting: { age_min: "25", geo_locations: { countries: "US" } }
+              },
+              operatorContext
+            )
+          ).rejects.toMatchObject({ code: "invalid_targeting", retryable: false });
+          expect(calls).toHaveLength(2);
+        }
+      );
+    });
   });
 
   it("REMEDIATES an unexpected ACTIVE create: best-effort PAUSE + entity id in the audit, still throws", async () => {
