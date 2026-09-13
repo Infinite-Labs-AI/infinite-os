@@ -10399,7 +10399,24 @@ function stableMetaCliCwd(): string {
   return "/";
 }
 
-async function callMetaAdsCliJson(credential: MetaAdsCredential, args: string[]): Promise<unknown> {
+// A4 (2026-09-13) — per-action CLI kill timers. The default covers reads and metadata writes;
+// creative creates are budgeted per media kind because the CLI UPLOADS the file itself and
+// waits for Meta's server-side processing (a video routinely exceeds 30 s, and the kill left
+// real creatives half-made on Meta's side while the engine reported a timeout).
+const META_CLI_DEFAULT_TIMEOUT_MS = 30_000;
+const META_CLI_IMAGE_CREATIVE_TIMEOUT_MS = 120_000;
+const META_CLI_VIDEO_CREATIVE_TIMEOUT_MS = 600_000;
+
+interface MetaCliCallOptions {
+  /** Kill timer for this ONE invocation; defaults to META_CLI_DEFAULT_TIMEOUT_MS. */
+  timeoutMs?: number;
+}
+
+async function callMetaAdsCliJson(
+  credential: MetaAdsCredential,
+  args: string[],
+  options: MetaCliCallOptions = {}
+): Promise<unknown> {
   const rawCliCommand =
     typeof credential.cliCommand === "string" && credential.cliCommand.trim() ? credential.cliCommand.trim() : "meta";
   // An ABSOLUTE path that exists as a file (the desktop stores exactly this) is used VERBATIM as the
@@ -10442,7 +10459,7 @@ async function callMetaAdsCliJson(credential: MetaAdsCredential, args: string[])
   });
   let stdoutBuffer = "";
   let stderrBuffer = "";
-  const CLI_TIMEOUT_MS = 30_000;
+  const CLI_TIMEOUT_MS = options.timeoutMs ?? META_CLI_DEFAULT_TIMEOUT_MS;
   const CLI_MAX_STDOUT_BYTES = 1_000_000;
   const CLI_MAX_STDERR_BYTES = 4_096;
 
@@ -10631,10 +10648,14 @@ function lastBalancedJsonBlock(text: string): string | null {
 // Run a CLI write argv and return the parsed Graph response. Wraps
 // `callMetaAdsCliJson` so that ANY error (timeout, non-zero exit, invalid JSON,
 // missing binary) surfaces as a NON-retryable ConnectorError — INVARIANT 3.
-async function metaAdsCliWrite(credential: MetaAdsCredential, args: string[]): Promise<MetaGraphWritePayload> {
+async function metaAdsCliWrite(
+  credential: MetaAdsCredential,
+  args: string[],
+  options: MetaCliCallOptions = {}
+): Promise<MetaGraphWritePayload> {
   let raw: unknown;
   try {
-    raw = await callMetaAdsCliJson(credential, args);
+    raw = await callMetaAdsCliJson(credential, args, options);
   } catch (error) {
     if (error instanceof ConnectorError) {
       // Re-stamp as non-retryable: a create/status/delete must never auto-retry.
@@ -10832,13 +10853,18 @@ async function createMetaCreativeViaCli(
       "--page-id",
       input.pageId
     ];
-    if (input.instagramUserId) args.push("--instagram-actor-id", input.instagramUserId);
+    // meta CLI 1.1.0 names the Instagram identity flag --instagram-user-id (there is NO
+    // --instagram-actor-id; Click rejects the unknown option and the create never runs).
+    if (input.instagramUserId) args.push("--instagram-user-id", input.instagramUserId);
     if (input.linkUrl) args.push("--link-url", input.linkUrl);
     if (input.body) args.push("--body", input.body);
     if (input.title) args.push("--title", input.title);
     if (input.description) args.push("--description", input.description);
     if (callToAction) args.push("--call-to-action", callToAction);
-    const response = await metaAdsCliWrite(credential, args);
+    // A4: budget the kill timer for the upload + Meta-side processing the CLI waits on.
+    const response = await metaAdsCliWrite(credential, args, {
+      timeoutMs: mediaKind === "video" ? META_CLI_VIDEO_CREATIVE_TIMEOUT_MS : META_CLI_IMAGE_CREATIVE_TIMEOUT_MS
+    });
     const id = requireGraphId("creative", response);
     // Creatives have no status; report null (no PAUSE/ACTIVE concept).
     return { ok: true, id, status: null };

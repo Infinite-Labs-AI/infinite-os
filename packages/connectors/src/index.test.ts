@@ -1,5 +1,6 @@
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+const setTimeoutOriginal = globalThis.setTimeout;
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -7515,6 +7516,81 @@ console.log(${JSON.stringify(serialized)});
         // Temp file cleaned up in the finally.
         expect(existsSync(imagePathArg as string)).toBe(false);
         void imageFileContents;
+      });
+    });
+
+    // A4 (2026-09-13) — the CLI uploads the media itself, so a creative create is NOT a 30 s
+    // operation: a video upload + Meta's server-side processing routinely exceeds it and the
+    // engine was killing real creates mid-flight. Budget the kill timer per media kind; every
+    // other CLI call keeps the 30 s default.
+    it("creative create budgets the CLI kill timer per media kind: 600 000 ms for --video, 120 000 ms for --image, 30 000 ms elsewhere", async () => {
+      // Observe the kill timer through the global setTimeout the connector schedules it on. The
+      // media DOWNLOAD has its own 120 000 ms abort timer (META_CREATIVE_MEDIA_DOWNLOAD_TIMEOUT_MS),
+      // so the counts below distinguish it from the CLI kill timer.
+      const delays: number[] = [];
+      const spy = vi.spyOn(globalThis, "setTimeout").mockImplementation(((handler: () => void, delay?: number, ...rest: unknown[]) => {
+        if (typeof delay === "number") delays.push(delay);
+        return setTimeoutOriginal(handler, delay, ...rest);
+      }) as typeof setTimeout);
+      const count = (delay: number): number => delays.filter((seen) => seen === delay).length;
+      try {
+        await withTmp(async (dir) => {
+          await withMockFetch(
+            () => new Response(Buffer.from("bytes"), { status: 200 }),
+            async () => {
+              delays.length = 0;
+              await createMetaCreative(cliCredential(dir, { id: "120000000000070" }), {
+                name: "Video budget",
+                pageId: "page_1",
+                videoUrl: "https://cdn.example.com/promo.mp4"
+              });
+              // download abort timer (120 000) + CLI kill timer (600 000); never the 30 s default.
+              expect(count(600_000)).toBe(1);
+              expect(count(120_000)).toBe(1);
+              expect(count(30_000)).toBe(0);
+
+              delays.length = 0;
+              await createMetaCreative(cliCredential(dir, { id: "120000000000071" }), {
+                name: "Image budget",
+                pageId: "page_1",
+                imageUrl: "https://cdn.example.com/banner.png"
+              });
+              // download abort timer (120 000) + CLI kill timer (120 000); never 30 s, never 600 s.
+              expect(count(120_000)).toBe(2);
+              expect(count(600_000)).toBe(0);
+              expect(count(30_000)).toBe(0);
+            }
+          );
+          delays.length = 0;
+          await createMetaCampaign(cliCredential(dir, { id: "120000000000072", status: "PAUSED" }), {
+            name: "Default budget",
+            objective: "OUTCOME_TRAFFIC"
+          });
+          expect(count(30_000)).toBe(1);
+          expect(count(120_000)).toBe(0);
+          expect(count(600_000)).toBe(0);
+        });
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it("creative create passes the Instagram identity as --instagram-user-id (meta CLI 1.1.0), never --instagram-actor-id", async () => {
+      await withTmp(async (dir) => {
+        await withMockFetch(
+          () => new Response(Buffer.from("bytes"), { status: 200 }),
+          async () => {
+            await createMetaCreative(cliCredential(dir, { id: "120000000000073" }), {
+              name: "IG identity",
+              pageId: "page_1",
+              imageUrl: "https://cdn.example.com/banner.png",
+              instagramUserId: "1784000000000001"
+            });
+            const argv = recordedArgv(dir);
+            expect(argv[argv.indexOf("--instagram-user-id") + 1]).toBe("1784000000000001");
+            expect(argv).not.toContain("--instagram-actor-id");
+          }
+        );
       });
     });
 
