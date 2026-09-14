@@ -14,6 +14,7 @@ import { detectRepoStatus, inspectWorkspace } from "../inspect.js"
 import { computeContentHashes, installManifestRelativePath, readInstallManifest, writeInstallManifest } from "../manifest.js"
 import { INSTRUMENT_VERSION } from "../package-manager.js"
 import { renderPreview } from "../render.js"
+import { serverLaneCopy } from "../server-lane/copy.js"
 import { detectHosting } from "../server-lane/hosting.js"
 import type { ApplyResult, InspectResult, InstallManifest, ProviderId, VerifyResult, WorkspaceInstallArtifacts } from "../types.js"
 import { verifyInstallation } from "../verify.js"
@@ -51,6 +52,14 @@ import { recordHarnessFile } from "./outputs.js"
 import { REPORT_SENT_LINE, buildHarnessReportPayload, reportNotSentLine, type ReportSink } from "./report-sink.js"
 import { errorText, runRunbook, type RunbookStep } from "./runbook.js"
 import {
+  SERVER_LANE_FIRST_EVENT_BUDGET_MS,
+  runServerLaneEnvStep,
+  waitForFirstServerLaneEvent,
+  type CommandRunner,
+  type ServerLaneBridge,
+  type ServerLaneStatus
+} from "./server-lane-env.js"
+import {
   HARNESS_REPORT_RELATIVE_PATH,
   createHarnessReport,
   findProvider,
@@ -64,12 +73,15 @@ import type {
   HarnessProviderId,
   HarnessReport,
   ProviderClassification,
-  ResolvedKeys
+  ResolvedKeys,
+  ServerLaneEnvReport
 } from "./types.js"
 import {
   NONE_BACKEND_REASON,
   NoneBackend,
   PosthogQueryBackend,
+  VERIFY_BUDGET_MS,
+  VERIFY_POLL_INTERVAL_MS,
   verifyLanes,
   type VerificationBackend,
   type VerifyLane,
@@ -106,6 +118,12 @@ export interface HarnessDeps {
    * (read-only, ungated) reports nothing, and a send that fails never fails the run.
    */
   reportSink?: ReportSink
+  /**
+   * The server-lane env seam. `bridge` is the running desktop's loopback bridge (status /
+   * provision-env / mint on the app's ACTIVE workspace) — only `infinite analytics` wires it; without
+   * it the env step prints the manual instructions. `runner` is the test seam for the local `vercel`.
+   */
+  serverLaneEnv?: { bridge?: ServerLaneBridge; runner?: CommandRunner }
 }
 
 export interface HarnessRunResult {
@@ -144,6 +162,9 @@ interface Ctx {
   verifyIncomplete?: string
   /** Providers this run wrote (install/upgrade) — the lanes verification reads back. */
   writtenLanes: VerifyLane[]
+  /** The env step's outcome and the Infinite status it decided on (the first-event baseline). */
+  serverLaneEnv?: ServerLaneEnvReport
+  serverLaneStatus?: ServerLaneStatus | null
 }
 
 /**
@@ -804,6 +825,126 @@ const serverLane: RunbookStep<Ctx> = {
   failure: { code: "INF_PLAN_BLOCKED", message: () => "server lane failed", next: "continue" }
 }
 
+/**
+ * The server-lane ENV step (see server-lane-env.ts). Runs after a lane was installed this run, or is
+ * recorded by an earlier one — a merged middleware whose deployment lacks the two env vars records
+ * nothing, and no install state can tell. Never prints the secret; its outcome rides the report.
+ */
+const serverLaneEnv: RunbookStep<Ctx> = {
+  id: "server-lane-env",
+  title: "Server lane env",
+  async run(ctx) {
+    if (ctx.args.brief) return { skipped: "--brief" }
+    if (ctx.args.mode !== "apply" && ctx.args.mode !== "verify-only") return { skipped: `${ctx.args.mode} mode` }
+    if (ctx.declined) return { skipped: "not applied" }
+    const recorded = ctx.manifest?.serverLane
+    const installed =
+      findProvider(ctx.report, "server_lane").state === "installed" ||
+      (ctx.args.mode === "verify-only" && recorded !== undefined && recorded.mode !== "brief")
+    if (!installed) return { skipped: "no server lane installed" }
+    const copy = serverLaneCopy.envStep
+    narrate(ctx, "")
+    narrate(ctx, `${copy.title}:`)
+    const result = await runServerLaneEnvStep({
+      mode: ctx.args.mode,
+      interactive: ctx.io.interactive,
+      yes: ctx.args.yes,
+      replaceLiveSecret: ctx.args.replaceLiveSecret === true,
+      redeploy: ctx.args.redeploy === true,
+      allowDirty: ctx.args.allowDirty,
+      root: ctx.root,
+      appRootAbsolute: ctx.appRootAbsolute,
+      knownPublicKey: ctx.keys?.artifacts.infinite?.siteSourceKey,
+      bridge: ctx.deps.serverLaneEnv?.bridge,
+      runner: ctx.deps.serverLaneEnv?.runner,
+      say: (line) => narrate(ctx, line),
+      confirm: (question, defaultYes) => ctx.io.confirm(question, defaultYes)
+    })
+    ctx.serverLaneEnv = result.report
+    ctx.serverLaneStatus = result.status
+    ctx.report.serverLaneEnv = result.report
+    const env = result.report
+    const pushNext = (line: string) => {
+      if (!ctx.report.nextSteps.includes(line)) ctx.report.nextSteps.push(line)
+    }
+    if (env.envSet !== "yes") pushNext(copy.manualNextStep(env.publicKey))
+    if (env.path === "local_vercel" && (env.redeploy.state === "skipped" || env.redeploy.state === "failed")) pushNext(copy.redeployNeeded)
+    if (env.path === "infinite_vercel" && env.redeploy.state === "skipped") pushNext(copy.redeploySkipped(env.redeploy.reason).trim())
+    if (env.path === "infinite_vercel" && env.redeploy.state === "unconfirmed") pushNext(copy.redeployUnconfirmed(env.redeploy.reason).trim())
+    if (env.path === "infinite_vercel" && env.redeploy.state === "unknown") pushNext(copy.redeployUnknown.trim())
+    return {
+      note: `${env.path}; env set: ${env.envSet}${env.written.length > 0 ? `; wrote ${env.written.join(", ")}` : ""}${env.statusRefusal ? `; status: ${env.statusRefusal.code}` : ""}`
+    }
+  },
+  successCheck: () => true,
+  failure: { code: "INF_PLAN_BLOCKED", message: () => "server lane env step failed", next: "continue" }
+}
+
+/**
+ * The server lane's receipt, read from Infinite's server-lane STATUS instead of the verify backends
+ * whenever the env step could read that status. Why this seam and not `/v1/analytics/verify`: the
+ * verify backends load the URL ONCE at the start and poll for a receipt newer than that load, but a
+ * lane whose env was just set is not live until the redeploy finishes — minutes later, after that
+ * one load. The status answers "has Infinite ever received a server-lane event" with no page load
+ * and no secret, which is exactly "working". A timestamp the baseline already had never counts.
+ *
+ * Returns the step note, or null when the status seam is unavailable (no app, old app): then the
+ * lane keeps riding the verify backends exactly as before.
+ */
+async function verifyServerLaneViaStatus(ctx: Ctx): Promise<string | null> {
+  const env = ctx.serverLaneEnv
+  const baseline = ctx.serverLaneStatus
+  const bridge = ctx.deps.serverLaneEnv?.bridge
+  if (!env || !baseline || !bridge) return null
+  if (findProvider(ctx.report, "server_lane").state !== "installed") return null
+  const copy = serverLaneCopy.envStep
+  const verified = (at: string) => {
+    env.firstEvent = { state: "received", at }
+    updateProvider(ctx.report, "server_lane", (state) => transitionProvider(state, { to: "verified", receiptAt: at }))
+  }
+  const awaiting = (reason: string) => {
+    env.firstEvent = { state: "waiting" }
+    updateProvider(ctx.report, "server_lane", (state) => ({ ...state, verification: { kind: "awaiting_first_event", envSet: env.envSet, reason } }))
+  }
+
+  if (env.path === "already_receiving") {
+    // "receiving" = a SERVER-LANE receipt at/after the current secretSetAt (pixel traffic never
+    // counts). The decoder refuses a receiving status without serverLaneLastReceivedAt.
+    const at = baseline.serverLaneLastReceivedAt
+    if (at === null) throw new Error("server-lane status said receiving without serverLaneLastReceivedAt")
+    verified(at)
+    return "server_lane=verified (receiving with the current secret)"
+  }
+  const url = productionUrl(ctx)
+  const poll = env.envSet === "yes" || ctx.args.mode === "verify-only"
+  if (!poll) {
+    awaiting(copy.awaitingReason(env.envSet, false))
+    if (ctx.args.mode === "apply") ctx.report.nextSteps.push(copy.awaitingNextStep(url))
+    return `server_lane=awaiting_first_event (env set: ${env.envSet}; not polled)`
+  }
+  const redeploying = env.redeploy.state === "started" || env.redeploy.state === "deployed" || env.redeploy.state === "unconfirmed"
+  const budgetMs = ctx.deps.budgetMs ?? (redeploying ? SERVER_LANE_FIRST_EVENT_BUDGET_MS : VERIFY_BUDGET_MS)
+  ctx.io.err(copy.waiting(Math.round(budgetMs / 1000), url))
+  const answer = await waitForFirstServerLaneEvent({
+    bridge,
+    runStartedAt: ctx.report.startedAt,
+    now: ctx.deps.now ?? (() => Date.now()),
+    sleep: ctx.deps.sleep ?? ((ms) => new Promise<void>((resolveSleep) => setTimeout(resolveSleep, ms))),
+    budgetMs,
+    pollIntervalMs: ctx.deps.pollIntervalMs ?? VERIFY_POLL_INTERVAL_MS
+  })
+  if (answer.state === "received") {
+    verified(answer.at)
+    ctx.io.err(copy.firstEvent(answer.at))
+    return "server_lane=verified"
+  }
+  const reason = answer.state === "refused" ? copy.awaitingRefused(answer.message) : copy.awaitingReason(env.envSet, true)
+  awaiting(reason)
+  if (ctx.args.mode === "verify-only") ctx.verifyIncomplete = copy.verifyOnlyIncomplete(reason)
+  else ctx.report.nextSteps.push(copy.awaitingNextStep(url))
+  return `server_lane=awaiting_first_event (env set: ${env.envSet})`
+}
+
 const verify: RunbookStep<Ctx> = {
   id: "verify",
   title: "Verify receipts",
@@ -843,14 +984,22 @@ const verify: RunbookStep<Ctx> = {
     } else if (ctx.declined) {
       return { skipped: "not applied" }
     }
-    const lanes = [...new Set(ctx.writtenLanes)]
-    if (lanes.length === 0) return ctx.args.mode === "verify-only"
-      ? incomplete("Verification was not attempted: the manifest contains no verifiable lanes.")
-      : { skipped: "nothing installed by this run to read back" }
+    const laneNote = await verifyServerLaneViaStatus(ctx)
+    const lanes = [...new Set(ctx.writtenLanes)].filter((lane) => !(laneNote !== null && lane === "server_lane"))
+    if (lanes.length === 0) {
+      if (laneNote !== null) return { note: laneNote }
+      return ctx.args.mode === "verify-only"
+        ? incomplete("Verification was not attempted: the manifest contains no verifiable lanes.")
+        : { skipped: "nothing installed by this run to read back" }
+    }
     const url = productionUrl(ctx)
-    if (!url) return ctx.args.mode === "verify-only"
-      ? incomplete("Verification was not attempted: provide --url or a configured production host.")
-      : { skipped: "no --url and no production host to load" }
+    if (!url) {
+      if (ctx.args.mode === "verify-only") return incomplete(`${ctx.verifyIncomplete ? `${ctx.verifyIncomplete} ` : ""}Verification was not attempted: provide --url or a configured production host.`)
+      return laneNote !== null
+        ? { note: `${laneNote}; ${lanes.join(", ")} not read back: no --url and no production host to load` }
+        : { skipped: "no --url and no production host to load" }
+    }
+    const serverLaneIncomplete = ctx.verifyIncomplete
 
     const backends: VerificationBackend[] = []
     const posthogHost = ctx.keys?.artifacts.posthog?.apiHost || "https://us.i.posthog.com"
@@ -886,8 +1035,11 @@ const verify: RunbookStep<Ctx> = {
         return `${lane}: ${answer.state === "not_verifiable" ? answer.reason : "not verified"}`
       }).join("; ")}. Complete the named provider checks; installed is not verified.`
     }
+    if (serverLaneIncomplete && ctx.verifyIncomplete !== serverLaneIncomplete) {
+      ctx.verifyIncomplete = ctx.verifyIncomplete ? `${serverLaneIncomplete} ${ctx.verifyIncomplete}` : serverLaneIncomplete
+    }
     const summary = lanes.map((lane) => `${lane}=${ctx.verifyResult?.lanes[lane].state}`).join(" ")
-    return { note: `${url} (HTTP ${ctx.verifyResult.siteStatus ?? "—"}) ${summary}` }
+    return { note: `${url} (HTTP ${ctx.verifyResult.siteStatus ?? "—"}) ${summary}${laneNote !== null ? ` ${laneNote}` : ""}` }
   },
   successCheck(ctx) {
     if (ctx.verifyIncomplete) return false
@@ -911,6 +1063,16 @@ const reportStep: RunbookStep<Ctx> = {
   id: "report",
   title: "Report + handoff",
   run(ctx) {
+    // The overclaim guard: a server lane whose env step ran but whose receipt was never read (verify
+    // skipped, declined, no URL) must not print a bare "installed" — that reads as done.
+    const lane = findProvider(ctx.report, "server_lane")
+    if (ctx.serverLaneEnv && lane.state === "installed" && lane.verification.kind === "not_run") {
+      const envSet = ctx.serverLaneEnv.envSet
+      updateProvider(ctx.report, "server_lane", (state) => ({
+        ...state,
+        verification: { kind: "awaiting_first_event", envSet, reason: serverLaneCopy.envStep.awaitingReason(envSet, false) }
+      }))
+    }
     // BEFORE the check-mode return: `--check` prints nextSteps too, and the relay line is exactly
     // the kind of thing a dry run should surface (it changes nothing and costs nothing to say).
     const relay = metaRelayNote(ctx.report)
@@ -937,6 +1099,7 @@ export const HARNESS_STEPS: ReadonlyArray<RunbookStep<Ctx>> = [
   apply,
   conversions,
   serverLane,
+  serverLaneEnv,
   verify,
   reportStep
 ]

@@ -102,6 +102,8 @@ export { patchExistingMiddleware } from "./server-lane/middleware-patch.js"
 export {
   SERVER_LANE_BRIEF_FILE,
   SERVER_LANE_POSITIONING,
+  SERVER_LANE_SECRET_LOCATION,
+  SERVER_LANE_SECRET_PASTE_WARNING,
   renderServerLaneBrief,
   serverLaneCopy
 } from "./server-lane/copy.js"
@@ -198,3 +200,29 @@ export {
   verifyLanes
 } from "./harness/verify.js"
 export type { LaneVerification, VerificationBackend, VerifyLane } from "./harness/verify.js"
+// The server-lane env step: get INFINITE_SITE_SOURCE_KEY + INFINITE_SERVER_EVENT_SECRET onto the
+// production deployment (Infinite's Vercel connection → the linked vercel CLI → manual), via the desktop bridge.
+export {
+  DesktopServerLaneBridge,
+  SERVER_LANE_ENV_NAMES,
+  SERVER_LANE_FIRST_EVENT_BUDGET_MS,
+  SERVER_LANE_UPDATE_REQUIRED_REASON,
+  inspectDeployTree,
+  isFreshServerLaneReceipt,
+  redeployWithLocalVercel,
+  runServerLaneEnvStep,
+  serverLaneBridgeRefusal,
+  waitForFirstServerLaneEvent
+} from "./harness/server-lane-env.js"
+export type {
+  CommandResult,
+  CommandRunner,
+  DesktopServerLaneBridgeOptions,
+  ServerLaneBridge,
+  ServerLaneBridgeAnswer,
+  ServerLaneBridgeRefusal,
+  ServerLaneMintResult,
+  ServerLaneProvisionResult,
+  ServerLaneStatus
+} from "./harness/server-lane-env.js"
+export type { ServerLaneEnvReport, ServerLaneEnvSet, ServerLaneEnvPath } from "./harness/types.js"

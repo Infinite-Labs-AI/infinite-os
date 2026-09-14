@@ -10,6 +10,7 @@ import {
   NO_DESKTOP_REPORT_REASON,
   chooseBackend,
   chooseReportSink,
+  chooseServerLaneEnv,
   extractApiTokenEnvFlag,
   runAnalyticsCommand,
   type ResolvedBridge,
@@ -17,7 +18,7 @@ import {
 } from "./analytics.js";
 
 interface Captured {
-  runs: Array<{ args: HarnessArgs; backends: string[]; reportSink: string | null }>;
+  runs: Array<{ args: HarnessArgs; backends: string[]; reportSink: string | null; serverLaneBridge: string | null }>;
   loaded: number;
 }
 
@@ -71,7 +72,8 @@ function fakeTag(captured: Captured, options: { failure?: { code: string; messag
       captured.runs.push({
         args,
         backends: (deps?.backends ?? []).map((backend) => backend.name),
-        reportSink: deps?.reportSink?.name ?? null
+        reportSink: deps?.reportSink?.name ?? null,
+        serverLaneBridge: (deps?.serverLaneEnv?.bridge as { name?: string } | undefined)?.name ?? null
       });
       return { exitCode: options.failure ? 1 : 0, report: { failure: options.failure ?? null } };
     },
@@ -127,6 +129,21 @@ function fakeTag(captured: Captured, options: { failure?: { code: string; messag
       }
       async send() {
         return { sent: true as const };
+      }
+    },
+    DesktopServerLaneBridge: class {
+      name: string;
+      constructor(options: { bridgeUrl: string; token: string }) {
+        this.name = `lane-bridge:${options.bridgeUrl}:${options.token}`;
+      }
+      async status() {
+        return { ok: false as const, code: "desktop_update_required", message: "update", httpStatus: 404 };
+      }
+      async provisionEnv() {
+        return { ok: false as const, code: "desktop_update_required", message: "update", httpStatus: 404 };
+      }
+      async mint() {
+        return { ok: false as const, code: "desktop_update_required", message: "update", httpStatus: 404 };
       }
     },
     EXIT_ARGS: 2,
@@ -383,5 +400,23 @@ describe("infinite analytics", () => {
     expect(await runAnalyticsCommand(["--bogus"], {}, { io: argsIo, loadTag: async () => fakeTag(captured), resolveBridge: () => null })).toBe(2);
     expect(argsIo.err_[0]).toContain("Unknown argument: --bogus");
     expect(fakeBackend("x").name).toBe("x");
+  });
+
+  it("hands the server-lane env step the Desktop bridge whenever the app runs — no capability gate, no token; no app → none", async () => {
+    const captured: Captured = { runs: [], loaded: 0 };
+    const tag = fakeTag(captured);
+    const io = fakeIo();
+    await runAnalyticsCommand(["--no-mark"], {}, { loadTag: async () => tag, resolveBridge: () => fakeBridge({ capabilities: ["status.v1"] }), io });
+    expect(captured.runs[0]?.serverLaneBridge).toBe("lane-bridge:http://127.0.0.1:54321:bridge_tok");
+
+    await runAnalyticsCommand(["--no-mark"], { INFINITE_API_TOKEN: "tok_1" }, { loadTag: async () => tag, resolveBridge: () => null, io });
+    expect(captured.runs[1]?.serverLaneBridge).toBeNull();
+    expect(chooseServerLaneEnv({ tag, bridge: null })).toBeUndefined();
+  });
+
+  it("usage names both env vars, the three paths, and the two server-lane flags", () => {
+    expect(ANALYTICS_USAGE).toContain("INFINITE_SITE_SOURCE_KEY and INFINITE_SERVER_EVENT_SECRET");
+    expect(ANALYTICS_USAGE).toContain("--replace-live-secret");
+    expect(ANALYTICS_USAGE).toContain("--redeploy");
   });
 });

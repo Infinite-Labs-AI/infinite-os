@@ -24,6 +24,13 @@
  * A token in the environment is NEVER used implicitly: an unnoticed stale `INFINITE_API_TOKEN`
  * silently verifying against another account is worse than an honest "not verifiable".
  *
+ * THE SERVER-LANE ENV STEP RIDES THE BRIDGE TOO. When the run installs (or finds) a server lane, the
+ * harness asks the Desktop for the lane's status and gets INFINITE_SITE_SOURCE_KEY +
+ * INFINITE_SERVER_EVENT_SECRET onto the production deployment: Infinite writes them through its
+ * Vercel connection and redeploys (the secret never reaches this terminal), else the founder's own
+ * linked `vercel` CLI sets them after an interactive yes, else the exact manual steps are printed.
+ * The lane only reads "verified" once Infinite has received its first event. No Desktop → manual.
+ *
  * THE REPORT RIDES THE SAME LADDER. After the runbook's report step the state table is sent to
  * Infinite so Site Settings › Analytics can show it: DesktopBridgeReportSink (`analytics.report.v1`,
  * the app POSTs the cloud with its own session and ACTIVE workspace) → CloudReportSink only behind
@@ -34,6 +41,7 @@ import type {
   HarnessDeps,
   HarnessIo,
   ReportSink,
+  ServerLaneBridge,
   VerificationBackend
 } from "infinite-tag";
 
@@ -60,6 +68,17 @@ export const ANALYTICS_USAGE = [
   "  --no-mark               Skip conversion marking",
   "  --providers, --adopt-existing/--no-adopt-existing, --server-lane, --url, --yes, --allow-dirty,",
   "  --json, --brief, --posthog-query-key, and the infinite-tag artifact flags are passed through.",
+  "",
+  "Server lane env: the lane records NOTHING until INFINITE_SITE_SOURCE_KEY and INFINITE_SERVER_EVENT_SECRET",
+  "are on your PRODUCTION deployment. After installing (or finding) a lane this command sets them:",
+  "  1. Infinite has a Vercel connection → Infinite writes both to production and redeploys (--yes approves);",
+  "  2. this repo is linked to Vercel (.vercel/project.json) → your vercel CLI sets both after you confirm",
+  "     (values on stdin, never printed; interactive only);",
+  "  3. otherwise it prints exactly what to set and where the secret lives.",
+  "  --replace-live-secret   Allow minting over a secret that is already receiving events (breaks that install)",
+  "  --redeploy              After path 2, run `vercel --prod` without asking — only on a clean, pushed tree",
+  "                          (it deploys your LOCAL files); add --allow-dirty to ship uncommitted/unpushed changes",
+  "The lane reads 'verified' only once Infinite has received its first event, never from the install.",
   "",
   "Verification runs through Infinite Desktop: the app reads the receipts back with its own session,",
   "so no API token is ever needed here. With the app closed (or too old to carry the verify verb),",
@@ -107,6 +126,7 @@ export interface TagHarnessModule {
   NoneReportSink: new (reason?: string) => ReportSink;
   CloudReportSink: new (options: { origin: string; token: string; fetch?: typeof fetch }) => ReportSink;
   DesktopBridgeReportSink: new (options: { bridgeUrl: string; token: string; fetch?: typeof fetch }) => ReportSink;
+  DesktopServerLaneBridge: new (options: { bridgeUrl: string; token: string; fetch?: typeof fetch }) => ServerLaneBridge;
   EXIT_ARGS: number;
   EXIT_FAILED: number;
   EXIT_OK: number;
@@ -303,6 +323,24 @@ export function chooseReportSink(input: ChooseReportSinkInput): ReportSink {
   return new tag.NoneReportSink(bridge ? DESKTOP_TOO_OLD_REPORT_REASON : NO_DESKTOP_REPORT_REASON);
 }
 
+/**
+ * The server-lane env seam: whenever the Desktop is running its bridge is handed over, with NO
+ * capability gate — the contract names none, and an app too old to carry the routes answers 404,
+ * which the harness turns into "update the Infinite app" plus the manual instructions. There is no
+ * cloud-token variant: provisioning and minting only ever happen through the app's own session.
+ */
+export function chooseServerLaneEnv(input: {
+  tag: TagHarnessModule;
+  bridge: ResolvedBridge | null;
+  fetchImpl?: typeof fetch;
+}): HarnessDeps["serverLaneEnv"] {
+  const descriptor = input.bridge?.descriptor;
+  if (!descriptor) return undefined;
+  return {
+    bridge: new input.tag.DesktopServerLaneBridge({ bridgeUrl: descriptor.url, token: descriptor.token, fetch: input.fetchImpl })
+  };
+}
+
 export async function runAnalyticsCommand(
   args: readonly string[],
   env: AnalyticsCommandEnv,
@@ -358,7 +396,8 @@ export async function runAnalyticsCommand(
     const result = await tag.runHarness(parsed, io, {
       backends: [backend],
       fetch: deps.fetch,
-      reportSink: chooseReportSink({ tag, env, bridge, apiTokenEnvVar, fetchImpl: deps.fetch })
+      reportSink: chooseReportSink({ tag, env, bridge, apiTokenEnvVar, fetchImpl: deps.fetch }),
+      serverLaneEnv: chooseServerLaneEnv({ tag, bridge, fetchImpl: deps.fetch })
     });
     if (result.report.failure) {
       io.err(tag.infErrorLine(result.report.failure.code, result.report.failure.message));

@@ -14,6 +14,7 @@ export const RUNBOOK_STEP_IDS = [
   "apply",
   "conversions",
   "server-lane",
+  "server-lane-env",
   "verify",
   "report"
 ] as const

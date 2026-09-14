@@ -46,6 +46,7 @@ describe("runRunbook", () => {
       "apply",
       "conversions",
       "server-lane",
+      "server-lane-env",
       "verify",
       "report"
     ])

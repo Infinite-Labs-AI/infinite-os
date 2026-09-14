@@ -329,7 +329,12 @@ export function classifyProviders(input: ClassifyProvidersInput): ProviderClassi
       continue
     }
     if (provider === "server_lane") {
-      if (!input.serverLane) {
+      const recorded = input.manifest?.serverLane
+      if (!input.serverLane && recorded && recorded.mode !== "brief") {
+        // Installed by an earlier run: that is "installed", not "skipped" — the env step and the
+        // receipt check still apply to it (a merged middleware with no env vars records nothing).
+        out.push({ provider, action: "skip", reason: `recorded in .infinite/install.json (${recorded.mode}); pass --server-lane to re-plan it`, file: ".infinite/install.json" })
+      } else if (!input.serverLane) {
         out.push({ provider, action: "skip", reason: "not requested (pass --server-lane)" })
       } else if (input.manifest?.serverLane) {
         out.push({ provider, action: "upgrade", reason: "server lane already recorded in .infinite/install.json" })

@@ -121,6 +121,13 @@ function providerPayload(state: ProviderState): HarnessReportProviderPayload {
     case "adopted_not_ours":
       out.verification = { state: "adopted_not_ours" }
       break
+    case "awaiting_first_event":
+      // Not a cloud vocabulary word: it travels as not_verifiable with the env state in the reason.
+      out.verification = {
+        state: "not_verifiable",
+        reason: boundClause(`waiting for the first event (env set: ${verification.envSet})`) ?? "waiting for the first event"
+      }
+      break
     case "not_run":
       out.verification = { state: "not_run" }
       break

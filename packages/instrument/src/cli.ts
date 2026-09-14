@@ -23,7 +23,7 @@ import {
   renderUnsupported,
   renderVerify
 } from "./render.js"
-import { renderServerLaneBrief, serverLaneCopy } from "./server-lane/copy.js"
+import { SERVER_LANE_SECRET_LOCATION, renderServerLaneBrief, serverLaneCopy } from "./server-lane/copy.js"
 import { SERVER_LANE_SECRET_ENV, SERVER_LANE_SOURCE_KEY_ENV } from "./server-lane/helpers.js"
 import { SERVER_LANE_MODULE_IMPORT_PATH, SERVER_LANE_MODULE_PATH, isNextFramework } from "./server-lane/install.js"
 import { renderServerLaneVerify, verifyServerLane } from "./server-lane/verify.js"
@@ -323,6 +323,11 @@ function printHelp(): void {
       "  --server-lane                       plan/apply/install: create or patch the Next.js middleware",
       "                                      and write INSTALL-SERVER-LANE.md (the agent brief); other",
       "                                      stacks get the brief. Works alone or with the artifact flags.",
+      `  REQUIRED after install: ${SERVER_LANE_SOURCE_KEY_ENV} and ${SERVER_LANE_SECRET_ENV} on your PRODUCTION`,
+      "                                      deployment, then a redeploy. Without both the lane silently records nothing.",
+      "                                      Automatic: run `infinite analytics` in the repo with the Infinite app open —",
+      "                                      it writes both to Vercel (Infinite's Vercel connection, or your linked vercel CLI).",
+      `                                      Manual: the secret is in ${SERVER_LANE_SECRET_LOCATION}.`,
       "  verify --server-lane <url>          Load <url> once, then confirm Infinite received the receipt.",
       `                                      Needs ${SERVER_LANE_SECRET_ENV} in the env (+ ${SERVER_LANE_SOURCE_KEY_ENV} or --infinite-site-source-key).`,
       "",

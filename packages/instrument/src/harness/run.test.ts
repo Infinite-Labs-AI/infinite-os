@@ -142,7 +142,7 @@ describe("runHarness --check", () => {
     expect(readFileSync(join(root, "index.html"), "utf8")).toContain(GTAG)
     expect(result.report.steps.map((step) => [step.id, step.status])).toEqual([
       ["preflight", "ok"], ["inspect", "ok"], ["resolve-keys", "ok"], ["classify", "ok"], ["plan", "ok"],
-      ["confirm", "skipped"], ["apply", "skipped"], ["conversions", "skipped"], ["server-lane", "skipped"], ["verify", "skipped"], ["report", "ok"]
+      ["confirm", "skipped"], ["apply", "skipped"], ["conversions", "skipped"], ["server-lane", "skipped"], ["server-lane-env", "skipped"], ["verify", "skipped"], ["report", "ok"]
     ])
   })
 
