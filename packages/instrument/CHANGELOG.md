@@ -3,6 +3,27 @@
 All notable changes to the `infinite-tag` npm package (`packages/instrument`). Versions before
 0.5.0 are recorded in git history only (`git log -- packages/instrument`).
 
+## 0.10.0 — 2026-09-14
+
+`infinite analytics` now gets the server lane's two environment variables onto the production
+deployment, and only calls the lane verified once Infinite has actually received an event.
+
+- **Env step before verify.** After installing or adopting a server lane, the harness sets
+  `INFINITE_SITE_SOURCE_KEY` + `INFINITE_SERVER_EVENT_SECRET`: through the Infinite desktop app
+  (Infinite writes them to the connected Vercel project and redeploys — the secret never reaches
+  the terminal); else with your own linked `vercel` CLI (source key first, then a freshly minted
+  secret on stdin — never argv, files or output); else it prints both names, where to get the
+  secret, and "env var only — never paste the secret into chat, messages, or your repo".
+- **Verified means received.** `server_lane` is `verified` only when a server-lane receipt arrives
+  under the current secret; otherwise `installed — waiting for the first event (env set: …)`. A lane
+  already recorded in `.infinite/install.json` is no longer reported as not requested.
+- **Safer secrets and deploys.** Replacing a secret that is already receiving events needs an
+  explicit yes (or `--replace-live-secret`); a concurrent secret change is refused, never retried.
+  `vercel --prod` refuses a dirty or unpushed tree unless `--allow-dirty`.
+- **Honest outcomes.** Every redeploy result (started / skipped / unconfirmed / unknown) and its
+  reason is reported in plain words and in `--json`; Vercel read failures are not reported as missing
+  permissions; the server-lane brief and help text lead with the env step.
+
 ## 0.9.1 — 2026-09-05
 
 - Share installation-evidence rules across the installer and harness. Recognize the current
