@@ -87,7 +87,7 @@ function budgetCauses(budgetMs: number, lane: string): string[] {
   ]
 }
 
-function errorText(error: unknown): string {
+export function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
@@ -119,7 +119,7 @@ export interface DesktopBridgeBackendOptions extends Timing {
   fetch?: typeof fetch
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
+export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
 }
 
@@ -145,7 +145,7 @@ function decodeCloudLane(raw: unknown): LaneVerification | null {
  * `{ error: "host_not_registered" }`, the desktop bridge's protocol fault `{ error: { code } }`,
  * and the bridge's own service refusals `{ error: "cloud_unavailable", message }`.
  */
-function errorCodeOf(payload: unknown): string | undefined {
+export function errorCodeOf(payload: unknown): string | undefined {
   if (!isRecord(payload)) return undefined
   const error = payload.error
   if (typeof error === "string" && error) return error
@@ -153,7 +153,7 @@ function errorCodeOf(payload: unknown): string | undefined {
   return undefined
 }
 
-function errorReasonOf(payload: unknown): string | undefined {
+export function errorReasonOf(payload: unknown): string | undefined {
   if (!isRecord(payload)) return undefined
   if (typeof payload.reason === "string" && payload.reason) return payload.reason
   const error = payload.error
@@ -203,14 +203,14 @@ const BRIDGE_COPY: VerifyPeerCopy = {
 
 /** Trim trailing "/" without a regex: these origins are caller-supplied, and `/\/+$/` on a long
  *  run of slashes is a polynomial-backtracking hazard (CodeQL js/polynomial-redos). */
-function stripTrailingSlashes(value: string): string {
+export function stripTrailingSlashes(value: string): string {
   let end = value.length
   while (end > 0 && value.charCodeAt(end - 1) === 47) end -= 1
   return value.slice(0, end)
 }
 
 /** Read a response body ONCE, leniently: a 429/503 with an empty body is normal, not an outage. */
-async function readPayload(response: Response): Promise<unknown> {
+export async function readPayload(response: Response): Promise<unknown> {
   const text = await response.text().catch(() => "")
   if (!text) return null
   try {

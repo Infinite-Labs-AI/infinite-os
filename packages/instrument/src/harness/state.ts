@@ -64,7 +64,8 @@ export function createHarnessReport(input: {
     failure: null,
     failures: [],
     nextSteps: [],
-    handoff: HARNESS_HANDOFF_LINE
+    handoff: HARNESS_HANDOFF_LINE,
+    serverLaneEnv: null
   }
 }
 
@@ -157,6 +158,8 @@ export function describeState(state: ProviderState): string {
       return `${state.state}, no receipt`
     case "adopted_not_ours":
       return "adopted, not ours to verify"
+    case "awaiting_first_event":
+      return `${state.state} — waiting for the first event (env set: ${verification.envSet})`
     case "not_run":
       return state.state
   }
@@ -172,6 +175,8 @@ export function describeVerification(verification: VerificationOutcome): string 
       return `no receipt${verification.causes.length > 0 ? ` — ${verification.causes[0]}` : ""}`
     case "adopted_not_ours":
       return "not ours to verify"
+    case "awaiting_first_event":
+      return `waiting for the first event (env set: ${verification.envSet}) — ${verification.reason}`
     case "not_run":
       return "not run"
   }
@@ -295,6 +300,8 @@ export function renderReportMarkdown(report: HarnessReport): string {
       checklist.push(
         `${state.provider}: no receipt arrived. ${state.verification.causes.length > 0 ? `Check: ${state.verification.causes.join(" · ")}` : ""}`.trim()
       )
+    } else if (state.verification.kind === "awaiting_first_event") {
+      checklist.push(`${state.provider}: installed, but Infinite has not received its first event (env set: ${state.verification.envSet}). ${state.verification.reason}`)
     } else if (state.verification.kind === "not_verifiable" && state.state === "installed") {
       checklist.push(`${state.provider}: installed but not read back (${state.verification.reason}). Confirm an event in the provider's own live view before merging.`)
     } else if (state.state === "adopted") {

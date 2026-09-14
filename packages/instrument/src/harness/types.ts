@@ -33,6 +33,12 @@ export type VerificationOutcome =
   | { kind: "not_verifiable"; reason: string }
   | { kind: "no_receipt"; causes: string[] }
   | { kind: "adopted_not_ours" }
+  /**
+   * The server lane only: installed, but Infinite has not seen its first server-side event yet.
+   * `envSet` says whether this run KNOWS both env vars are on the production deployment — the
+   * middleware records nothing without them, so "installed" alone must never read as working.
+   */
+  | { kind: "awaiting_first_event"; envSet: ServerLaneEnvSet; reason: string }
 
 export interface ProviderState {
   provider: HarnessProviderId
@@ -113,6 +119,56 @@ export interface HarnessReport {
   nextSteps: string[]
   /** The pasteable two-sided handoff line. */
   handoff: string
+  /** The server-lane env step's outcome (never the secret); null/absent when the step did not run. */
+  serverLaneEnv?: ServerLaneEnvReport | null
+}
+
+/** Whether this run knows both server-lane env vars are on the production deployment. */
+export type ServerLaneEnvSet = "yes" | "no" | "unknown"
+
+/**
+ * Where the server-lane env vars ended up this run: already proven by receipts, written by
+ * Infinite into its Vercel connection, written with the founder's own `vercel` CLI, or left to
+ * the founder (the printed manual instructions).
+ */
+export type ServerLaneEnvPath = "already_receiving" | "infinite_vercel" | "local_vercel" | "manual"
+
+export type ServerLaneRedeployOutcome =
+  | { state: "not_run" }
+  | { state: "started"; deploymentId: string }
+  | { state: "deployed"; url: string | null }
+  | { state: "skipped"; reason: string }
+  /** Infinite submitted a redeploy but could not read it back — never reported as skipped. */
+  | { state: "unconfirmed"; reason: string }
+  /** The app answered with a redeploy shape this CLI does not know; no reason is invented. */
+  | { state: "unknown" }
+  | { state: "failed"; detail: string }
+
+export interface ServerLaneEnvAttempt {
+  path: "infinite_vercel" | "local_vercel"
+  outcome: "ok" | "declined" | "refused" | "failed" | "unavailable"
+  code?: string
+  message?: string
+}
+
+/** The env step in `--json` / the report. Carries env var NAMES and the public key — never the secret. */
+export interface ServerLaneEnvReport {
+  path: ServerLaneEnvPath
+  envSet: ServerLaneEnvSet
+  envNames: { sourceKey: string; secret: string }
+  /** The PUBLIC site source key (`site_…`), when known. */
+  publicKey: string | null
+  laneState: "no_secret" | "awaiting_first_event" | "receiving" | null
+  /** Why the Infinite status could not be read (no app, old app, signed out …); null when it was. */
+  statusRefusal: { code: string; message: string } | null
+  hosting: { connected: boolean; provider: "vercel" | null; projectName: string | null; envWriteGranted: boolean; error: string | null } | null
+  /** Env var names written this run. */
+  written: string[]
+  mintedNewSecret: boolean
+  redeploy: ServerLaneRedeployOutcome
+  attempts: ServerLaneEnvAttempt[]
+  /** Filled by verification: only a server-seen receipt makes the lane "working". */
+  firstEvent: { state: "not_checked" } | { state: "received"; at: string } | { state: "waiting" }
 }
 
 /** How the harness classified one provider before planning. */

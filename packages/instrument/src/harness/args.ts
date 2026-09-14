@@ -20,6 +20,15 @@ export interface HarnessArgs {
   /** `--no-mark` — skip the conversion-marking phase entirely. */
   noMark: boolean
   serverLane: boolean
+  /**
+   * `--replace-live-secret`: the server-lane env step may mint over a secret that is already
+   * receiving events (it breaks that live install until the new value is deployed). Without it,
+   * that mint needs an explicit interactive yes; --yes never approves it.
+   */
+  replaceLiveSecret?: boolean
+  /** `--redeploy`: after setting the server-lane env with the local vercel CLI, run `vercel --prod` without asking —
+   *  only on a clean, pushed tree; `--allow-dirty` is required to deploy uncommitted/unpushed changes. */
+  redeploy?: boolean
   /** `--url <prod-url>` — the URL verification loads (defaults to the first production host). */
   url?: string
   /** Skips the INSTALL confirmation only. Never approves conversion marking. */
@@ -132,6 +141,12 @@ export function parseHarnessArgs(argv: readonly string[]): HarnessArgs {
         break
       case "--server-lane":
         parsed.serverLane = true
+        break
+      case "--replace-live-secret":
+        parsed.replaceLiveSecret = true
+        break
+      case "--redeploy":
+        parsed.redeploy = true
         break
       case "--url":
         parsed.url = requireValue(token, next)
@@ -255,6 +270,13 @@ export const HARNESS_HELP_LINES = [
   "  --url <prod-url>                          The URL verification loads (defaults to the first production host)",
   "  --posthog-query-key <key>                 Optional personal key with Query Read, to read PostHog back",
   "  --brief                                   Write .infinite/harness-brief.json (manual guidance for unsupported sources)",
+  "  --replace-live-secret                     Server lane: allow minting over a secret that is already receiving events",
+  "  --redeploy                                Server lane: after setting env with your vercel CLI, run `vercel --prod` without asking —",
+  "                                            only on a clean, pushed tree (it deploys your LOCAL files); add --allow-dirty to ship local changes",
+  "  Server lane env: the lane records NOTHING until INFINITE_SITE_SOURCE_KEY and INFINITE_SERVER_EVENT_SECRET",
+  "  are on the PRODUCTION deployment. After installing (or finding) a lane, the run sets them: through Infinite's",
+  "  Vercel connection (--yes approves), else with your linked vercel CLI (interactive yes only), else it prints",
+  "  exactly what to set. It reads 'verified' only once Infinite has received the first event.",
   "  --verify-only exits nonzero when receipt verification is incomplete; installed/adopted is not verified.",
   "  Generated build output is inspection-only; installation must modify its source/build owner.",
   "  --yes skips the install confirmation only — it never approves conversion marking;",

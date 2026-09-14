@@ -92,6 +92,44 @@ export interface ServerLaneBriefInput {
 
 const DEFAULT_MODULE_IMPORT_PATH = "./lib/infinite-server-lane"
 
+/** Where a founder finds (mints/rotates) the server-event secret in the Infinite app. One string, used everywhere. */
+export const SERVER_LANE_SECRET_LOCATION =
+  "Infinite → Connections → Website → Set them yourself → Reveal secret (or Infinite → Site Analytics → Settings → Conversions → Server events)"
+
+/** Said wherever a founder is told to handle the secret by hand. */
+export const SERVER_LANE_SECRET_PASTE_WARNING = "env var only — never paste the secret into chat, messages, or your repo"
+
+const REDEPLOY_IN_VERCEL = "redeploy production in Vercel so the new variables take effect."
+const RECONNECT_AND_RERUN = "reconnect Vercel in Infinite → Connections → Website, then re-run `infinite analytics`."
+
+/** Unknown skip codes: the code stays visible, the step is the generic one. */
+const REDEPLOY_GENERIC = (code: string) => `Redeploy didn't run (${code}). Redeploy production in Vercel so the new variables take effect.`
+
+/** The cloud's redeploy `skipped` reason codes → plain copy, code in parentheses, unblock step last. */
+export const REDEPLOY_SKIPPED_COPY: Record<string, (code: string) => string> = {
+  no_production_deployment: (code) => `Redeploy didn't run (${code}): there is no production deployment yet — deploy production in Vercel so the new variables take effect.`,
+  serving_deployment_unknown: (code) => `Redeploy didn't run (${code}): Infinite couldn't tell which deployment production serves — ${REDEPLOY_IN_VERCEL}`,
+  serving_deployment_not_ready: (code) => `Redeploy didn't run (${code}): production's current deployment isn't ready yet — redeploy production in Vercel once it is.`,
+  serving_deployment_mismatch: (code) => `Redeploy didn't run (${code}): production serves a deployment from a different repository — ${REDEPLOY_IN_VERCEL}`,
+  serving_deployment_no_git_source: (code) => `Redeploy didn't run (${code}): production's deployment wasn't built from Git — ${REDEPLOY_IN_VERCEL}`,
+  production_build_in_progress: (code) => `Redeploy not needed (${code}): a newer production build is already running — the new variables apply when it finishes.`,
+  access_denied: (code) => `Redeploy didn't run (${code}): Infinite's Vercel connection was refused — ${RECONNECT_AND_RERUN}`,
+  connection_unavailable: (code) => `Redeploy didn't run (${code}): Infinite's Vercel connection is unavailable — ${RECONNECT_AND_RERUN}`,
+  project_mismatch: (code) => `Redeploy didn't run (${code}): the connected Vercel project doesn't match this site — ${RECONNECT_AND_RERUN}`,
+  provider_unavailable: (code) => `Redeploy didn't run (${code}): Vercel was unreachable — re-run \`infinite analytics\` shortly.`,
+  provider_rejected: (code) => `Redeploy didn't run (${code}): Vercel rejected the redeploy — ${REDEPLOY_IN_VERCEL}`
+}
+
+/** The cloud's redeploy `unconfirmed` reason codes. Something may be building: check before redeploying. */
+export const REDEPLOY_UNCONFIRMED_COPY: Record<string, (code: string) => string> = {
+  redeploy_submission_unknown: (code) => `Redeploy submitted, not confirmed (${code}) — check Vercel's latest production deployment before redeploying again.`,
+  deployment_mismatch: (code) => `A deployment was created but didn't match production's commit (${code}) — check Vercel's latest production deployment before redeploying again.`
+}
+
+/** Both env var names, in the order a founder sets them. */
+const SOURCE_ENV = SERVER_LANE_SOURCE_KEY_ENV
+const SECRET_ENV = SERVER_LANE_SECRET_ENV
+
 export const serverLaneCopy = {
   title: "Infinite server lane — install brief for your coding agent",
 
@@ -102,6 +140,15 @@ export const serverLaneCopy = {
   ],
 
   statusHeading: "Where you are",
+
+  /** The env gate, right under the status: a merged middleware with no env vars records NOTHING. */
+  envGateHeading: "Before anything records: two environment variables in PRODUCTION",
+  envGate: [
+    `The server lane reads \`${SOURCE_ENV}\` and \`${SECRET_ENV}\` from your deployment's environment. **If either is missing it silently records nothing** — no error, no event, an empty board. Merging this code is not enough.`,
+    "**Automatic:** run `infinite analytics` in this repo with the Infinite app open. If Infinite has a Vercel connection for your site, it writes both variables to your production environment and redeploys. If this repo is linked to Vercel locally (`.vercel/project.json`), it can set both with your own `vercel` CLI after you confirm.",
+    `**Manual:** add both to your host's PRODUCTION environment — the source key is your public \`site_…\` key, the secret is in ${SERVER_LANE_SECRET_LOCATION} (${SERVER_LANE_SECRET_PASTE_WARNING}) — then **redeploy**: a running deployment does not pick up new variables.`,
+    "**Working** means Infinite has received the first event from your production site (`infinite analytics --verify-only`, or `npx infinite-tag verify --server-lane`) — never that the files were installed."
+  ],
   status: {
     created: (middlewarePath: string, modulePath: string) =>
       `infinite-tag CREATED \`${middlewarePath}\` and \`${modulePath}\`. Nothing else to write. Set the two environment variables below, deploy, then run the verify command.`,
@@ -199,7 +246,7 @@ export const serverLaneCopy = {
     transport: (apiOrigin?: string) => [
       `**Transport.** Signed \`POST ${infiniteServerEventsDestination(apiOrigin)}\` with \`content-type: application/json\`.`,
       `**Headers.** \`${SERVER_LANE_SOURCE_KEY_HEADER}: <site source key>\` and \`${SERVER_LANE_SIGNATURE_HEADER}: <lowercase hex HMAC-SHA256 of the RAW request body under the secret>\`. Sign the exact bytes you send.`,
-      `**Environment.** \`${SERVER_LANE_SECRET_ENV}\` — the source's server-event secret, minted once in the Infinite desktop → Site Analytics → Settings → Conversions → Server events (shown once; store it only in your host's environment). \`${SERVER_LANE_SOURCE_KEY_ENV}\` — the public site source key (the same one the browser pixel uses).`
+      `**Environment.** \`${SERVER_LANE_SECRET_ENV}\` — the source's server-event secret, minted once in ${SERVER_LANE_SECRET_LOCATION} (shown once; store it only in your host's PRODUCTION environment). \`${SERVER_LANE_SOURCE_KEY_ENV}\` — the public site source key (the same one the browser pixel uses). Both must be set on the production deployment, which must be redeployed after they are added.`
     ],
     documentRequest: [
       `**1. Document request** — one per HTML page load (GET, non-asset, non-API):`,
@@ -247,8 +294,11 @@ export const serverLaneCopy = {
 
   envHeading: "Environment variables",
   env: [
-    `- \`${SERVER_LANE_SECRET_ENV}\` — server-event secret. Mint it in the Infinite desktop → Site Analytics → Settings → Conversions → Server events. It is shown once. Put it in \`.env.local\` for local runs and in your host's environment for production (Vercel: \`vercel env add ${SERVER_LANE_SECRET_ENV} production\`, or Project → Settings → Environment Variables). Never commit it; infinite-tag never writes it to a file.`,
+    "Fastest path: run `infinite analytics` in this repo with the Infinite app open — it sets both in your Vercel production environment for you (through Infinite's Vercel connection, or your own linked `vercel` CLI after you confirm). Otherwise:",
+    "",
+    `- \`${SERVER_LANE_SECRET_ENV}\` — server-event secret. Mint it in ${SERVER_LANE_SECRET_LOCATION}. It is shown once. Put it in your host's PRODUCTION environment (Vercel: \`vercel env add ${SERVER_LANE_SECRET_ENV} production\`, or Project → Settings → Environment Variables), and in \`.env.local\` only for local runs. It is an ${SERVER_LANE_SECRET_PASTE_WARNING}; infinite-tag never writes it to a file.`,
     `- \`${SERVER_LANE_SOURCE_KEY_ENV}\` — the public site source key (\`site_…\`). Same places. (The Next.js module falls back to the key baked at install time when this is unset.)`,
+    "- **Redeploy production after adding them.** Without both variables on the running deployment the lane records nothing, silently.",
     "",
     "Example `.env.local`:",
     "```",
@@ -269,7 +319,7 @@ export const serverLaneCopy = {
 
   verifyHeading: "Verify",
   verify: (apiOrigin?: string) => [
-    "Deploy with both environment variables set, then from any machine that has the secret:",
+    "With the Infinite app open, `infinite analytics --verify-only` waits for Infinite to receive the first event — no secret needed in your shell. Or, after deploying with both environment variables set in production, from any machine that has the secret:",
     "```",
     `${SERVER_LANE_SECRET_ENV}=<secret> ${SERVER_LANE_SOURCE_KEY_ENV}=site_… npx infinite-tag verify --server-lane https://<your-production-host>/`,
     "```",
@@ -281,7 +331,8 @@ export const serverLaneCopy = {
   done: [
     "Every HTML document request on a production host produces one signed `site_document_request` (check: `verify --server-lane` prints PASS).",
     "Each declared outcome (`sign_up`, `purchase`, `download`, …) is reported from your server at the moment it becomes real, with a stable eventId and, where possible, `properties.visitKey`.",
-    "The two environment variables are set in production; the secret is not committed anywhere.",
+    "The two environment variables are set in PRODUCTION and production was redeployed after they were added; the secret is not committed anywhere.",
+    "Infinite has received the first server-lane event from production (installed is not working until then).",
     "No page is slower or breaks when Infinite is unreachable (delivery is fire-and-forget with a 2 s cap).",
     "In Infinite → Site Analytics the server-side Visitors / outcome / rate board is filling from your site."
   ],
@@ -308,11 +359,13 @@ export const serverLaneCopy = {
       `→ then run: npm install ${packages.join(" ")}   (the generated entry imports it)`,
     targetMount: (path: string) =>
       `→ then add one line to your server: see "Mount it in your server" in ${SERVER_LANE_BRIEF_FILE} (${path})`,
-    envIntro: "Set two environment variables (never written to files by infinite-tag):",
+    envIntro:
+      "REQUIRED — set two environment variables on your PRODUCTION deployment, then redeploy. Without both, the server lane records nothing (never written to files by infinite-tag):",
     envLines: [
       `  ${SERVER_LANE_SOURCE_KEY_ENV}=site_…              your public site source key`,
-      `  ${SERVER_LANE_SECRET_ENV}=…              Infinite → Site Analytics → Settings → Conversions → Server events (shown once)`,
-      `  .env.local for local runs; production: vercel env add ${SERVER_LANE_SECRET_ENV} production (or your host's env settings)`
+      `  ${SERVER_LANE_SECRET_ENV}=…              ${SERVER_LANE_SECRET_LOCATION} (shown once)`,
+      "  Automatic: run `infinite analytics` here with the Infinite app open — it writes both to Vercel production for you.",
+      `  Manual: vercel env add ${SERVER_LANE_SECRET_ENV} production (or your host's env settings), then redeploy; .env.local is for local runs only`
     ],
     verifyHint: (host: string) =>
       `Then deploy and confirm receipts:  ${SERVER_LANE_SECRET_ENV}=… npx infinite-tag verify --server-lane https://${host}/`,
@@ -320,6 +373,118 @@ export const serverLaneCopy = {
     briefPrintedNoWrite:
       "The full agent brief follows. Save it with:  npx infinite-tag server-lane --brief > INSTALL-SERVER-LANE.md",
     briefHelp: "server-lane --brief   Print the agent brief for the lossless server lane (no install)"
+  },
+
+  /** The harness's env step (`infinite analytics` / `infinite-tag harness`). Never interpolates a secret. */
+  envStep: {
+    title: "Server lane environment",
+    receiving: (lastServerLaneEventAt: string) =>
+      `✓ The server lane is receiving events with its current secret (last server-lane event at ${lastServerLaneEventAt}) — both environment variables are in place on production.`,
+    statusRefused: (message: string) => `Infinite could not report this site's server lane: ${message}.`,
+    noDesktop:
+      "The Infinite app is not running, so the variables cannot be set for you. Open it and re-run `infinite analytics` to set them automatically.",
+    updateRequired: "this Infinite app cannot manage server-lane environment variables yet — update the Infinite app",
+    verifyOnlyNoWrites: "--verify-only writes nothing, so the variables are not set by this run.",
+    infiniteWillWrite: (projectName: string | null) =>
+      `Infinite will add ${SOURCE_ENV} and ${SECRET_ENV} to ${projectName ? `the Vercel project "${projectName}"` : "your connected Vercel project"} (production) and redeploy it. The secret goes from Infinite straight to Vercel; it never reaches this terminal.`,
+    infiniteConfirm: "Add both variables and redeploy? [Y/n] ",
+    nonInteractiveNoYes:
+      "Non-interactive run without --yes: nothing was written to Vercel. Re-run with --yes to let Infinite add both variables.",
+    declined: "Nothing was written to Vercel.",
+    written: (names: string[], projectName: string | null) =>
+      `✓ Infinite wrote ${names.join(" and ")} to ${projectName ? `"${projectName}"` : "your Vercel project"} (production).`,
+    partialWrite: (missing: string[]) =>
+      `! Infinite did not report writing ${missing.join(" and ")} — check the project's Environment Variables in Vercel.`,
+    mintedNewSecret: "  This site had no server-event secret yet, so Infinite minted one and wrote it straight to Vercel.",
+    redeployStarted: (deploymentId: string) =>
+      `  Redeploy started (${deploymentId}). The variables take effect when it finishes.`,
+    /** `redeploy: { skipped, reason }` — nothing was submitted. Every line ends with the unblock step. */
+    redeploySkipped: (code: string) => `  ${REDEPLOY_SKIPPED_COPY[code]?.(code) ?? REDEPLOY_GENERIC(code)}`,
+    /** `redeploy: { unconfirmed, reason }` — something may have been submitted; never "redeploy again" blind. */
+    redeployUnconfirmed: (code: string) =>
+      `  ${REDEPLOY_UNCONFIRMED_COPY[code]?.(code) ?? `Redeploy submitted, not confirmed (${code}) — check Vercel's latest production deployment before redeploying again.`}`,
+    redeployUnknown:
+      "  Redeploy status unknown — the Infinite app did not say whether a redeploy ran. Check Vercel's latest production deployment; the variables only take effect on a new deployment.",
+    hostingReadFailed: (code: string) =>
+      `Infinite couldn't read its Vercel connection (${code}) — this is not a permission problem. Re-run \`infinite analytics\` in a minute to let Infinite set the variables.`,
+    multipleHostingConnections: (host: string | null) =>
+      `More than one Vercel project is connected to this workspace in Infinite, so it can't pick which one to write. Set the variables on the project serving ${host ?? "your production site"}.`,
+    reconnectVercel: "Reconnect Vercel in Infinite → Connections → Website to allow environment variables.",
+    noHostingConnection: "Infinite has no Vercel hosting connection for this workspace.",
+    connectHostingHint:
+      "  Tip: connect Vercel in Infinite → Connections → Website and re-run `infinite analytics` — Infinite then sets both variables and redeploys for you.",
+    envWriteUnknown: (message: string) =>
+      `! Infinite could not confirm the write to Vercel (${message}). Check Project → Settings → Environment Variables in Vercel before re-running.`,
+    providerRefused: (message: string) => `Infinite could not write the variables: ${message}.`,
+    localExplain: (projectName: string | null, replacingSecretSetAt: string | null): string[] => [
+      `This repo is linked to Vercel${projectName ? ` (project "${projectName}")` : ""} and the vercel CLI is installed.`,
+      `It can set both variables with YOUR vercel CLI: first \`vercel env add ${SOURCE_ENV} production\` (the public key — nothing is minted yet), then Infinite mints this site's server-event secret and \`vercel env add ${SECRET_ENV} production\` stores it. Each value goes on stdin — never on the command line, never in a file, never printed.`,
+      ...(replacingSecretSetAt
+        ? [`This MINTS A NEW secret: the current one (set ${replacingSecretSetAt}) stops being accepted immediately, wherever it is configured.`]
+        : [])
+    ],
+    localConfirm: "Mint the secret and set both variables in Vercel production now? [Y/n] ",
+    localNeedsInteractive:
+      "Setting them with your vercel CLI mints a new secret, so it needs an interactive yes (--yes does not approve it). Run `infinite analytics` in a terminal to do it.",
+    liveSecretWarning: (secretSetAt: string | null) =>
+      `! This site's current server-event secret${secretSetAt ? ` (set ${secretSetAt})` : ""} has already received server-lane events since it was set. Minting a new one stops that install from being accepted immediately, until the new value is deployed.`,
+    liveSecretConfirm: "Replace that secret anyway? [y/N] ",
+    liveSecretNonInteractive:
+      "Refused: the current secret has received server-lane events since it was set, and minting a new one would break that install. Pass --replace-live-secret to replace it anyway.",
+    liveSecretKept: "Kept the current secret — it was not replaced.",
+    sourceKeyFailedNothingMinted: "Nothing was minted: this site's server-event secret is unchanged.",
+    sourceChanged: (publicKey: string) =>
+      `! This site's source key changed during the run; setting ${SOURCE_ENV} again to ${publicKey}.`,
+    mintRefused: (message: string) => `Infinite did not mint a secret: ${message}.`,
+    mintChangedConcurrently: "Another secret change happened at the same moment — nothing was replaced. Re-run `infinite analytics`.",
+    localVarSet: (name: string, replaced: boolean) =>
+      `✓ ${name} set in Vercel production${replaced ? " (replaced the existing value)" : ""}.`,
+    localVarFailed: (name: string, detail: string) => `✗ vercel env add ${name} production failed: ${detail}`,
+    secretActiveNotSet: [
+      `✗ A NEW server-event secret is now ACTIVE for this site (minted just now), and it is NOT in Vercel. The server lane records nothing until ${SECRET_ENV} is set to it in production.`,
+      `  It is shown nowhere else. To fix: reveal a new secret in Infinite → Connections → Website → Set them yourself → Reveal secret, run \`vercel env add ${SECRET_ENV} production\` and paste it at that prompt (${SERVER_LANE_SECRET_PASTE_WARNING}), then redeploy — or re-run \`infinite analytics\`.`
+    ],
+    redeployNeeded: "Redeploy production so the variables take effect (for example: vercel --prod).",
+    redeployConfirm:
+      "Run `vercel --prod` now? It deploys this LOCAL working tree (including uncommitted changes) to production. [y/N] ",
+    redeployTreeUnsafe: (reason: "dirty_working_tree" | "unpushed_commits" | "git_state_unknown", ahead: number) =>
+      reason === "dirty_working_tree"
+        ? "Your working tree has uncommitted changes — `vercel --prod` would deploy them to production"
+        : reason === "unpushed_commits"
+          ? `This branch has ${ahead} commit${ahead === 1 ? "" : "s"} not pushed to its upstream — \`vercel --prod\` would deploy ${ahead === 1 ? "it" : "them"} to production`
+          : "This folder's git state couldn't be read (is it a git repository?) — `vercel --prod` would deploy whatever is in it to production, unchecked",
+    redeployUnsafeConfirm: (why: string) => `${why}. Run it anyway? [y/N] `,
+    redeployRefusedUnsafe: (why: string) =>
+      `Refused to run \`vercel --prod\`: ${why}. Commit and push, then redeploy — or pass --allow-dirty with --redeploy to deploy it anyway.`,
+    redeployAllowDirty: (why: string) => `! ${why}. Deploying anyway (--redeploy --allow-dirty).`,
+    redeployRan: (url: string | null) => `✓ Production deploy finished${url ? `: ${url}` : ""}.`,
+    redeployFailed: (detail: string) => `✗ vercel --prod failed: ${detail}`,
+    manualHeading:
+      "Set the server-lane environment variables on your PRODUCTION deployment — the middleware records nothing until both are set:",
+    manualLines: (publicKey: string | null): string[] => [
+      `  ${SOURCE_ENV}=${publicKey ?? "site_…"}   ${publicKey ? "your site's public source key" : "your site's public source key (the same site_… key your browser pixel uses)"}`,
+      `  ${SECRET_ENV}=<secret>   get it in ${SERVER_LANE_SECRET_LOCATION}; or run \`infinite analytics\` with a linked Vercel project to set it automatically`,
+      `  The secret is an ${SERVER_LANE_SECRET_PASTE_WARNING}.`,
+      "  Add both to your PRODUCTION environment, then redeploy."
+    ],
+    manualNextStep: (publicKey: string | null) =>
+      `Server lane: set ${SOURCE_ENV}${publicKey ? `=${publicKey}` : ""} and ${SECRET_ENV} (from ${SERVER_LANE_SECRET_LOCATION}) on your PRODUCTION deployment, then redeploy — nothing is recorded until both are set.`,
+    waiting: (seconds: number, url: string | undefined) =>
+      `Waiting up to ${seconds}s for Infinite to receive the first server-lane event${url ? ` — open ${url} once the deploy is live` : ""} …`,
+    firstEvent: (at: string) => `✓ Infinite received the first server-lane event at ${at}.`,
+    awaitingReason: (envSet: "yes" | "no" | "unknown", polled: boolean) =>
+      envSet === "yes"
+        ? polled
+          ? "both variables are set; no event arrived yet — wait for the redeploy to finish and load a page"
+          : "both variables are set; no receipt check ran"
+        : envSet === "no"
+          ? `${SOURCE_ENV} and ${SECRET_ENV} are not both set on production — set them, then redeploy`
+          : `this run could not confirm ${SOURCE_ENV} and ${SECRET_ENV} are set on production — set them, then redeploy`,
+    awaitingRefused: (message: string) => `the first-event check could not complete: ${message}`,
+    awaitingNextStep: (url: string | undefined) =>
+      `Server lane: installed, not yet working — once production has both variables and a fresh deploy, ${url ? `open ${url}, then ` : ""}run \`infinite analytics --verify-only\` to confirm Infinite receives the first event.`,
+    verifyOnlyIncomplete: (reason: string) =>
+      `Server lane: Infinite has not received its first event (${reason}). Installed is not working.`
   },
 
   /** `verify --server-lane` wording. */
@@ -395,7 +560,10 @@ export function renderServerLaneBrief(input: ServerLaneBriefInput): string {
     `## ${serverLaneCopy.statusHeading}`,
     "",
     renderStatusParagraph(input.status),
-    ""
+    "",
+    `### ${serverLaneCopy.envGateHeading}`,
+    "",
+    ...serverLaneCopy.envGate.flatMap((line) => [line, ""])
   ]
 
   if (input.status.kind === "target") {
@@ -562,10 +730,12 @@ export function renderServerLanePointer(input: ServerLaneBriefInput & { guidePat
     "",
     guideLine,
     "",
-    "Two environment variables make the lane live (never written to a file by infinite-tag):",
+    `## ${serverLaneCopy.envGateHeading}`,
+    "",
+    ...serverLaneCopy.envGate.flatMap((line) => [line, ""]),
     "```",
     `${SERVER_LANE_SOURCE_KEY_ENV}=site_xxxxxxxxxxxxxxxx`,
-    `${SERVER_LANE_SECRET_ENV}=<paste the secret shown once in Infinite → Site Analytics → Settings → Conversions → Server events>`,
+    `${SERVER_LANE_SECRET_ENV}=<paste the secret shown once in ${SERVER_LANE_SECRET_LOCATION}>`,
     "```",
     "",
     `Then deploy and confirm receipts: \`${SERVER_LANE_SECRET_ENV}=… npx infinite-tag verify --server-lane https://<your-production-host>/\``,
