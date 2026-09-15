@@ -147,6 +147,7 @@ interface MetaAdsAssetDescriptor {
   slotKey: string;
   kind: "image" | "video" | "thumbnail";
   providerAssetId: string | null;
+  providerAssetType: "image_hash" | "video_id" | null;
   slotFingerprint: string | null;
   sourceUrl: string | null;
   sourceLocator: { host: string; path: string } | null;
@@ -9740,10 +9741,11 @@ function metaAdsSlotFingerprint(
   slotKey: string,
   kind: MetaAdsAssetDescriptor["kind"],
   providerAssetId: string | null,
+  providerAssetType: MetaAdsAssetDescriptor["providerAssetType"],
   sourceLocator: { host: string; path: string } | null,
 ): string | null {
   const identity = providerAssetId
-    ? `provider:${providerAssetId}`
+    ? `provider:${providerAssetType ?? "unknown"}:${providerAssetId}`
     : sourceLocator
       ? `url:${sourceLocator.host}${sourceLocator.path}`
       : null;
@@ -9758,6 +9760,7 @@ function metaAdsCreativeAssetDescriptors(creative: Record<string, unknown>): Met
     slotKey: string,
     kind: MetaAdsAssetDescriptor["kind"],
     providerAssetId: unknown,
+    providerAssetType: MetaAdsAssetDescriptor["providerAssetType"],
     sourceUrl: unknown,
   ): void => {
     const providerAssetIdText = stringOrNull(providerAssetId);
@@ -9766,7 +9769,8 @@ function metaAdsCreativeAssetDescriptors(creative: Record<string, unknown>): Met
       slotKey,
       kind,
       providerAssetId: providerAssetIdText,
-      slotFingerprint: metaAdsSlotFingerprint(slotKey, kind, providerAssetIdText, sourceLocator),
+      providerAssetType: providerAssetIdText ? providerAssetType : null,
+      slotFingerprint: metaAdsSlotFingerprint(slotKey, kind, providerAssetIdText, providerAssetType, sourceLocator),
       // Provider media URLs are signed, expiring capabilities. Never persist them in a readable
       // descriptor; the archive worker refetches a fresh URL by creative id + slot under credential.
       sourceUrl: null,
@@ -9782,33 +9786,44 @@ function metaAdsCreativeAssetDescriptors(creative: Record<string, unknown>): Met
     }
   };
 
-  add("creative.image", "image", creative.image_hash, creative.image_url);
-  add("creative.video", "video", creative.video_id, null);
-  add("creative.thumbnail", "thumbnail", creative.video_id ?? creative.image_hash, creative.thumbnail_url);
+  const creativeImageHash = stringOrNull(creative.image_hash);
+  const creativeVideoId = stringOrNull(creative.video_id);
+  add("creative.image", "image", creativeImageHash, "image_hash", creative.image_url);
+  add("creative.video", "video", creativeVideoId, "video_id", null);
+  add(
+    "creative.thumbnail",
+    "thumbnail",
+    creativeVideoId ?? creativeImageHash,
+    creativeVideoId ? "video_id" : creativeImageHash ? "image_hash" : null,
+    creative.thumbnail_url,
+  );
 
   const feed = isRecord(creative.asset_feed_spec) ? creative.asset_feed_spec : null;
   for (const [index, item] of (Array.isArray(feed?.images) ? feed.images : []).entries()) {
     if (!isRecord(item)) continue;
-    add(`asset_feed.images.${index}`, "image", item.hash ?? item.image_hash, item.url ?? item.image_url);
+    const imageHash = stringOrNull(item.hash) ?? stringOrNull(item.image_hash);
+    add(`asset_feed.images.${index}`, "image", imageHash, "image_hash", item.url ?? item.image_url);
   }
   for (const [index, item] of (Array.isArray(feed?.videos) ? feed.videos : []).entries()) {
     if (!isRecord(item)) continue;
-    add(`asset_feed.videos.${index}`, "video", item.video_id, item.url ?? item.video_url);
-    add(`asset_feed.videos.${index}.thumbnail`, "thumbnail", item.video_id, item.thumbnail_url);
+    const videoId = stringOrNull(item.video_id);
+    add(`asset_feed.videos.${index}`, "video", videoId, "video_id", item.url ?? item.video_url);
+    add(`asset_feed.videos.${index}.thumbnail`, "thumbnail", videoId, "video_id", item.thumbnail_url);
   }
 
   const story = isRecord(creative.object_story_spec) ? creative.object_story_spec : null;
   const linkData = isRecord(story?.link_data) ? story.link_data : null;
-  add("object_story.link", "image", linkData?.image_hash, linkData?.picture);
-  add("object_story.link.video", "video", linkData?.video_id, null);
+  add("object_story.link", "image", stringOrNull(linkData?.image_hash), "image_hash", linkData?.picture);
+  add("object_story.link.video", "video", stringOrNull(linkData?.video_id), "video_id", null);
   for (const [index, item] of (Array.isArray(linkData?.child_attachments) ? linkData.child_attachments : []).entries()) {
     if (!isRecord(item)) continue;
-    add(`object_story.carousel.${index}`, "image", item.image_hash, item.picture);
-    add(`object_story.carousel.${index}.video`, "video", item.video_id, item.video_url);
+    add(`object_story.carousel.${index}`, "image", stringOrNull(item.image_hash), "image_hash", item.picture);
+    add(`object_story.carousel.${index}.video`, "video", stringOrNull(item.video_id), "video_id", item.video_url);
   }
   const videoData = isRecord(story?.video_data) ? story.video_data : null;
-  add("object_story.video", "video", videoData?.video_id, videoData?.video_url);
-  add("object_story.video.thumbnail", "thumbnail", videoData?.video_id, videoData?.image_url);
+  const storyVideoId = stringOrNull(videoData?.video_id);
+  add("object_story.video", "video", storyVideoId, "video_id", videoData?.video_url);
+  add("object_story.video.thumbnail", "thumbnail", storyVideoId, "video_id", videoData?.image_url);
 
   if (descriptors.length > 1_000) {
     throw new ConnectorError(

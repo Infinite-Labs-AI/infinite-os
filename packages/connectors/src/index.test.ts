@@ -8482,7 +8482,7 @@ describe("Meta Ads durable daily history", () => {
           id: "cr1", name: "Creator cut", title: "Stop scrolling", body: "The body", image_hash: "img-hash",
           image_url: "https://scontent.xx.fbcdn.net/original.jpg?oh=signed-secret&oe=123",
           thumbnail_url: "https://scontent.xx.fbcdn.net/thumb.jpg?oh=thumb-secret",
-          video_id: "vid1", call_to_action_type: "SHOP_NOW",
+          video_id: "123456789012345678", call_to_action_type: "SHOP_NOW",
           access_token: "meta-history-token",
           object_story_spec: { link_data: { link: "https://example.com/buy?utm_source=meta", child_attachments: [
             { picture: "https://scontent.xx.fbcdn.net/carousel.jpg?oh=carousel-secret" },
@@ -8512,7 +8512,7 @@ describe("Meta Ads durable daily history", () => {
         creativeId: "cr1",
         metadata: {
           creative: {
-            video_id: "vid1",
+            video_id: "123456789012345678",
             asset_feed_spec: {
               videos: [
                 { video_id: "vid2" },
@@ -8526,8 +8526,9 @@ describe("Meta Ads durable daily history", () => {
       expect(creative?.payload).toMatchObject({
         entityId: "cr1",
         assetDescriptors: expect.arrayContaining([
-          expect.objectContaining({ slotKey: "creative.image", kind: "image", providerAssetId: "img-hash", sourceUrl: null, slotFingerprint: expect.stringMatching(/^sha256:[a-f0-9]{64}$/) }),
-          expect.objectContaining({ slotKey: "asset_feed.videos.0", kind: "video", providerAssetId: "vid2", sourceUrl: null, slotFingerprint: expect.stringMatching(/^sha256:[a-f0-9]{64}$/) }),
+          expect.objectContaining({ slotKey: "creative.image", kind: "image", providerAssetId: "img-hash", providerAssetType: "image_hash", sourceUrl: null, slotFingerprint: expect.stringMatching(/^sha256:[a-f0-9]{64}$/) }),
+          expect.objectContaining({ slotKey: "creative.thumbnail", kind: "thumbnail", providerAssetId: "123456789012345678", providerAssetType: "video_id", sourceUrl: null, slotFingerprint: expect.stringMatching(/^sha256:[a-f0-9]{64}$/), sourceLocator: { host: "scontent.xx.fbcdn.net", path: "/thumb.jpg" } }),
+          expect.objectContaining({ slotKey: "asset_feed.videos.0", kind: "video", providerAssetId: "vid2", providerAssetType: "video_id", sourceUrl: null, slotFingerprint: expect.stringMatching(/^sha256:[a-f0-9]{64}$/) }),
           expect.objectContaining({ slotKey: "asset_feed.images.1", kind: "image", providerAssetId: null, sourceUrl: null, slotFingerprint: expect.stringMatching(/^sha256:[a-f0-9]{64}$/), sourceLocator: { host: "scontent.xx.fbcdn.net", path: "/url-only.jpg" } }),
           expect.objectContaining({ slotKey: "asset_feed.videos.1.thumbnail", kind: "thumbnail", providerAssetId: null, sourceUrl: null, slotFingerprint: expect.stringMatching(/^sha256:[a-f0-9]{64}$/), sourceLocator: { host: "scontent.xx.fbcdn.net", path: "/video-thumb.jpg" } }),
           expect.objectContaining({ slotKey: "object_story.carousel.0", kind: "image", providerAssetId: null, sourceUrl: null, slotFingerprint: expect.stringMatching(/^sha256:[a-f0-9]{64}$/), sourceLocator: { host: "scontent.xx.fbcdn.net", path: "/carousel.jpg" } }),
