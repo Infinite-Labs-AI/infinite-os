@@ -8260,6 +8260,52 @@ function metaAdsInsightsGrain(request: SyncRequest): {
   };
 }
 
+function metaAdsProviderDay(asOfIso: string, timeZone: string): string {
+  const instant = new Date(asOfIso);
+  if (Number.isNaN(instant.getTime())) {
+    throw new ConnectorError("provider_api_error", "Meta history received an invalid as-of instant", false);
+  }
+  try {
+    const parts = new Intl.DateTimeFormat("en-CA", {
+      timeZone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).formatToParts(instant);
+    const part = (type: "year" | "month" | "day") => parts.find((entry) => entry.type === type)?.value;
+    const year = part("year");
+    const month = part("month");
+    const day = part("day");
+    if (!year || !month || !day) throw new Error("missing calendar part");
+    return `${year}-${month}-${day}`;
+  } catch {
+    throw new ConnectorError(
+      "provider_api_error",
+      `Meta history received an invalid account timezone: ${timeZone}`,
+      false,
+    );
+  }
+}
+
+function metaAdsShiftDay(day: string, deltaDays: number): string {
+  const date = new Date(`${day}T00:00:00.000Z`);
+  date.setUTCDate(date.getUTCDate() + deltaDays);
+  return date.toISOString().slice(0, 10);
+}
+
+/** Inclusive settled provider-local range ending yesterday in the Meta account timezone. */
+export function metaAdsSettledWindow(
+  asOfIso: string,
+  timeZone: string,
+  days: number,
+): { since: string; until: string } {
+  if (!Number.isInteger(days) || days < 1 || days > 366) {
+    throw new ConnectorError("provider_api_error", "Meta history settled-window days must be 1..366", false);
+  }
+  const until = metaAdsShiftDay(metaAdsProviderDay(asOfIso, timeZone), -1);
+  return { since: metaAdsShiftDay(until, -(days - 1)), until };
+}
+
 // Meta date window — TWO regimes, keyed off whether an EXPLICIT backfill window was requested
 // (request.windowSince/windowUntil), NOT off the plan cursor. This is GA4's #83 fix applied to
 // its un-fixed twin (2026-07-11 zero-loop incident): defaultPlan sets cursorStart = windowSince
@@ -8291,6 +8337,15 @@ function metaAdsTimeOptions(request: SyncRequest, plan: SyncPlan): {
         since: cursorStartIso(plan).slice(0, 10),
         until: plan.cursorEnd.slice(0, 10)
       }
+    };
+  }
+  if (plan.metaAdsAccountMetadata?.timezoneName) {
+    return {
+      timeRange: metaAdsSettledWindow(
+        plan.cursorEnd,
+        plan.metaAdsAccountMetadata.timezoneName,
+        plan.refreshWindowDays,
+      ),
     };
   }
   return {

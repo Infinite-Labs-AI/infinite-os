@@ -23,6 +23,7 @@ import {
   getMetaEntity,
   listMetaAssets,
   listMetaEntities,
+  metaAdsSettledWindow,
   metaDedupKey,
   posthogConnectSourceFromSetup,
   resolveMetaAdsCredential,
@@ -8366,6 +8367,17 @@ describe("resolveMetaAdsCredential (operator write credential resolver)", () => 
 });
 
 describe("Meta Ads durable daily history", () => {
+  it("resolves settled ranges in the account timezone across DST boundaries", () => {
+    expect(metaAdsSettledWindow("2026-03-29T00:30:00.000Z", "Europe/London", 7)).toEqual({
+      since: "2026-03-22",
+      until: "2026-03-28",
+    });
+    expect(metaAdsSettledWindow("2026-11-01T03:30:00.000Z", "America/New_York", 7)).toEqual({
+      since: "2026-10-24",
+      until: "2026-10-30",
+    });
+  });
+
   function historyCredentialDb(queryLog?: Array<{ sql: string; params?: unknown[] }>): InfiniteOsDb {
     return fakeDb({
       queryLog,
