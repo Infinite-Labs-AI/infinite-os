@@ -245,6 +245,89 @@ describe("Meta Ads history CLOSE against real PGlite", () => {
     )).map((row) => row.row_count)).toEqual([0, 0, 0]);
   }, 120_000);
 
+  it("preserves sub-millisecond credential timestamps across a node-postgres sync claim", async () => {
+    const workspaceId = `ws_meta_timestamp_${randomUUID()}`;
+    const sourceId = `src_meta_timestamp_${randomUUID()}`;
+    await seedSource(workspaceId, sourceId);
+    await db.query(
+      "update connection_credentials set updated_at='2026-09-15T17:26:35.839418Z'::timestamptz where source_id=$1",
+      [sourceId],
+    );
+
+    // node-postgres decodes a raw timestamptz as a JavaScript Date, which truncates Postgres'
+    // microseconds to milliseconds. Text-cast timestamps retain the complete credential version.
+    const nodePostgresLikeDb: InfiniteOsDb = {
+      ...db,
+      async withTransaction<T>(fn: (tx: InfiniteOsDb) => Promise<T>): Promise<T> {
+        return db.withTransaction(async (tx) => fn({
+          ...tx,
+          async one<R>(sql: string, params?: unknown[]): Promise<R | null> {
+            const row = await tx.one<Record<string, unknown>>(sql, params);
+            if (
+              row
+              && sql.includes("select id, updated_at")
+              && !sql.includes("to_char(updated_at")
+              && row.updated_at
+            ) {
+              return {
+                ...row,
+                updated_at: row.updated_at instanceof Date ? row.updated_at : new Date(String(row.updated_at)),
+              } as R;
+            }
+            return row as R | null;
+          },
+        } as InfiniteOsDb));
+      },
+    };
+
+    await expect(withMetaFetch(fixture("2026-09-04"), () =>
+      connectorFor("meta_ads").sync(
+        nodePostgresLikeDb,
+        syncRequest(workspaceId, sourceId, "2026-09-04", "2026-09-04"),
+      )
+    )).resolves.toMatchObject({ provider: "meta_ads", recordsLoaded: expect.any(Number) });
+    expect(await db.query(
+      "select occurred_on from meta_ads_coverage_daily where source_id=$1",
+      [sourceId],
+    )).toHaveLength(3);
+  }, 120_000);
+
+  it("rejects an updated-at-only credential change after the sync claim", async () => {
+    const workspaceId = `ws_meta_timestamp_change_${randomUUID()}`;
+    const sourceId = `src_meta_timestamp_change_${randomUUID()}`;
+    await seedSource(workspaceId, sourceId);
+    await db.query(
+      "update connection_credentials set updated_at='2026-09-15T17:26:35.839418Z'::timestamptz where source_id=$1",
+      [sourceId],
+    );
+
+    let transaction = 0;
+    const racingDb: InfiniteOsDb = {
+      ...db,
+      async withTransaction<T>(fn: (tx: InfiniteOsDb) => Promise<T>): Promise<T> {
+        transaction += 1;
+        if (transaction === 2) {
+          await db.query(
+            "update connection_credentials set updated_at='2026-09-15T17:26:35.839419Z'::timestamptz where source_id=$1",
+            [sourceId],
+          );
+        }
+        return db.withTransaction(fn);
+      },
+    };
+
+    await expect(withMetaFetch(fixture("2026-09-05"), () =>
+      connectorFor("meta_ads").sync(
+        racingDb,
+        syncRequest(workspaceId, sourceId, "2026-09-05", "2026-09-05"),
+      )
+    )).rejects.toMatchObject({ code: "sync_claim_lost" });
+    expect(await db.query(
+      "select occurred_on from meta_ads_coverage_daily where source_id=$1",
+      [sourceId],
+    )).toEqual([]);
+  }, 120_000);
+
   it("records failed request spend but leaves facts, coverage, and cursor unchanged", async () => {
     const workspaceId = `ws_meta_failure_${randomUUID()}`;
     const sourceId = `src_meta_failure_${randomUUID()}`;

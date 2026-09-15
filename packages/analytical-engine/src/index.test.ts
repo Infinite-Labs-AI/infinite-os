@@ -2373,8 +2373,11 @@ describe("analytical engine smoke", () => {
         if (sql.includes("provider from sources")) {
           return { provider: "x" } as T;
         }
-        if (sql.includes("select id, updated_at") && sql.includes("connection_credentials")) {
+        if (sql.includes("to_char(updated_at") && sql.includes("connection_credentials")) {
           return { id: "cred_x", updated_at: credentialUpdatedAt } as T;
+        }
+        if (sql.includes("updated_at is not distinct from") && sql.includes("connection_credentials")) {
+          return { id: "cred_x" } as T;
         }
         if (sql.includes("connection_credentials")) {
           return { credential_kind: "fixture", encrypted_payload: "fixture-encrypted" } as T;
