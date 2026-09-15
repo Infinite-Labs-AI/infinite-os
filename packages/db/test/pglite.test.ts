@@ -134,7 +134,7 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
     expect(secondRun).toEqual([]);
   });
 
-  it("created the schema_migrations ledger with all 68 rows", async () => {
+  it("created the schema_migrations ledger with all 69 rows", async () => {
     const ledger = await db.query<{ id: string }>(
       "select id from schema_migrations order by id"
     );
