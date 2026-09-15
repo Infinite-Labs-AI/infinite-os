@@ -8714,7 +8714,7 @@ function fakeDb(options: {
   return {
     async one<T>(sql: string, params?: unknown[]): Promise<T | null> {
       record(sql, params);
-      if (sql.includes("select id, updated_at") && sql.includes("connection_credentials")) {
+      if (sql.includes("to_char(updated_at") && sql.includes("connection_credentials")) {
         return { id: "cred_test", updated_at: "2026-01-01T00:00:00Z" } as T;
       }
       if (sql.includes("from connection_credentials") && sql.includes("updated_at is not distinct from")) {

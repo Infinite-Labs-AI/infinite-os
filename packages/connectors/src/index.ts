@@ -156,7 +156,7 @@ interface MetaAdsAssetDescriptor {
 interface SyncClaimSnapshot {
   sourceAccountExternalId: string | null;
   credentialId: string | null;
-  credentialUpdatedAt: string | Date | null;
+  credentialUpdatedAt: string | null;
 }
 
 export interface MetaAdsSnapshotReplacementState {
@@ -2825,10 +2825,11 @@ function syncClaimLost(message = "source sync claim is no longer active"): Conne
 async function readActiveCredentialVersion(
   tx: InfiniteOsDb,
   request: Pick<SyncRequest, "workspaceId" | "sourceId">,
-): Promise<{ id: string; updated_at: string | Date } | null> {
-  return tx.one<{ id: string; updated_at: string | Date }>(
+): Promise<{ id: string; updated_at: string } | null> {
+  return tx.one<{ id: string; updated_at: string }>(
     `
-      select id, updated_at
+      select id,
+        to_char(updated_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as updated_at
       from connection_credentials
       where workspace_id = $1 and source_id = $2 and revoked_at is null
       order by created_at desc
