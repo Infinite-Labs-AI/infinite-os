@@ -110,6 +110,16 @@ export function createActionHandlers(
   const encryptionKey = options?.encryptionKey;
   const metaAdsCliExecution = options?.metaAdsCliExecution;
   const expectedMetaCredential = options?.expectedMetaCredential;
+  // A frozen credential version is a hosted-mutation contract, not a general credential hint.
+  // Requiring the trusted process-only runner here prevents an incomplete server setup from
+  // silently falling back to a persisted transport, executable, or ambient local authentication.
+  if (expectedMetaCredential && metaAdsCliExecution?.mode !== "isolated_server") {
+    throw new ConnectorError(
+      "provider_unsupported",
+      "Expected Meta credential execution requires trusted isolated-server CLI mode",
+      false
+    );
+  }
   return {
     list_sources: (_input, context) => listSources(db, context),
     describe_source: (input, context) => describeSource(db, context, input),
@@ -2077,6 +2087,7 @@ async function resolveMetaCredentialForWrite(
         where s.workspace_id = $1 and s.id = $2
           and s.provider = 'meta_ads' and s.status = 'connected'
           and cc.revoked_at is null
+          and (cc.expires_at is null or cc.expires_at > now())
         order by cc.created_at desc
         limit 1`,
       [context.workspaceId, sourceId]

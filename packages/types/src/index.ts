@@ -52,6 +52,12 @@ export interface SessionContext {
  */
 export interface CreateActionHandlersOptions {
   encryptionKey?: string;
+  /** Trusted process-only Meta CLI runner. Executable/path never come from stored credentials. */
+  metaAdsCliExecution?: {
+    mode: "isolated_server";
+    executable: string;
+    path?: string;
+  };
   /** Server-frozen Meta source/credential version. Checked from one row before a mutation. */
   expectedMetaCredential?: {
     sourceId: string;
