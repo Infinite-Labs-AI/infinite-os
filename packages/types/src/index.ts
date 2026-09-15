@@ -52,6 +52,13 @@ export interface SessionContext {
  */
 export interface CreateActionHandlersOptions {
   encryptionKey?: string;
+  /** Server-frozen Meta source/credential version. Checked from one row before a mutation. */
+  expectedMetaCredential?: {
+    sourceId: string;
+    credentialId: string;
+    credentialUpdatedAt: string;
+    selectedPageId?: string;
+  };
 }
 
 export type AnswerabilityStatus =

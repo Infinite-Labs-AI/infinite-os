@@ -6989,6 +6989,154 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
     }
   });
 
+  describe("trusted Meta credential version snapshot", () => {
+    const credentialUpdatedAt = "2026-09-15T12:00:00.123Z";
+
+    function snapshotDb(options?: {
+      updatedAt?: string | Date;
+      selectedPageId?: string | null;
+      encryptionKey?: string;
+    }) {
+      const base = metaWriteTestDb({
+        audits: [],
+        credential: {
+          mode: "live",
+          transport: "meta_ads_cli",
+          adAccountId: "act_999",
+          accessToken: "snapshot-token"
+        }
+      });
+      let snapshotReads = 0;
+      const db: InfiniteOsDb = {
+        ...base,
+        async one<T extends Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T | null> {
+          if (sql.includes("join connection_credentials")) {
+            snapshotReads += 1;
+            return {
+              account_external_id: "act_999",
+              credential_id: "cred_snapshot",
+              credential_updated_at: options?.updatedAt ?? credentialUpdatedAt,
+              credential_kind: "marketing_api_access_token",
+              encrypted_payload: encryptCredentialPayload({
+                mode: "live",
+                transport: "meta_ads_cli",
+                adAccountId: "act_999",
+                accessToken: "snapshot-token"
+              }, options?.encryptionKey ?? "analytical-test-encryption-key"),
+              oauth_token_id: null,
+              selected_page_id: options?.selectedPageId ?? "page_frozen"
+            } as unknown as T;
+          }
+          return base.one<T>(sql, params);
+        }
+      };
+      return { db, snapshotReads: () => snapshotReads };
+    }
+
+    const expected = {
+      sourceId: "src_meta",
+      credentialId: "cred_snapshot",
+      credentialUpdatedAt,
+      selectedPageId: "page_frozen"
+    };
+
+    it("rejects a credential version changed after worker preflight before every mutation", async () => {
+      const dir = mkdtempSync(join(tmpdir(), "meta-version-guard-"));
+      const marker = join(dir, "spawned");
+      const executable = join(dir, "meta-server.mjs");
+      writeFileSync(executable, `#!${process.execPath}\nimport { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(marker)}, "yes");\nconsole.log(JSON.stringify({id:"should-not-run",status:"PAUSED"}));\n`);
+      chmodSync(executable, 0o700);
+      const prior = process.env.GROWTH_OS_ENCRYPTION_KEY;
+      process.env.GROWTH_OS_ENCRYPTION_KEY = "analytical-test-encryption-key";
+      try {
+        const { db } = snapshotDb({ updatedAt: "2026-09-15T12:00:01.123Z" });
+        const cases = [
+          ["create_meta_campaign", { sourceId: "src_meta", name: "Stale", objective: "OUTCOME_TRAFFIC" }],
+          ["create_meta_ad_set", { sourceId: "src_meta", campaignId: "campaign_1", name: "Stale", optimizationGoal: "LINK_CLICKS", billingEvent: "IMPRESSIONS" }],
+          ["create_meta_creative", { sourceId: "src_meta", name: "Stale", imageUrl: "https://assets.example.test/stale.png" }],
+          ["create_meta_ad", { sourceId: "src_meta", adsetId: "adset_1", creativeId: "creative_1", name: "Stale" }],
+          ["set_meta_entity_status", { sourceId: "src_meta", entityId: "campaign_1", entity: "campaign", status: "PAUSED" }],
+          ["update_meta_budget", { sourceId: "src_meta", entityId: "campaign_1", entity: "campaign", dailyBudget: 100 }],
+          ["delete_meta_entity", { sourceId: "src_meta", entityId: "campaign_1", entity: "campaign" }]
+        ] as const;
+        for (const [actionId, input] of cases) {
+          const handlers = createActionHandlers(db, {
+            metaAdsCliExecution: { mode: "isolated_server", executable },
+            expectedMetaCredential: expected
+          });
+          const handler = handlers[actionId];
+          await expect(handler?.(input, operatorContext)).rejects.toMatchObject({
+            code: "credential_binding_changed",
+            retryable: false
+          });
+        }
+        expect(existsSync(marker)).toBe(false);
+      } finally {
+        if (prior === undefined) delete process.env.GROWTH_OS_ENCRYPTION_KEY; else process.env.GROWTH_OS_ENCRYPTION_KEY = prior;
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("uses one unchanged credential snapshot for the provider mutation", async () => {
+      const dir = mkdtempSync(join(tmpdir(), "meta-version-guard-"));
+      const executable = join(dir, "meta-server.mjs");
+      writeFileSync(executable, `#!${process.execPath}\nconsole.log(JSON.stringify({id:"snapshot-campaign",status:"PAUSED"}));\n`);
+      chmodSync(executable, 0o700);
+      const prior = process.env.GROWTH_OS_ENCRYPTION_KEY;
+      process.env.GROWTH_OS_ENCRYPTION_KEY = "wrong-ambient-snapshot-key";
+      try {
+        const requestKey = "expected-snapshot-per-workspace-key-2026";
+        const snapshot = snapshotDb({ updatedAt: new Date(credentialUpdatedAt), encryptionKey: requestKey });
+        const handlers = createActionHandlers(snapshot.db, {
+          encryptionKey: requestKey,
+          metaAdsCliExecution: { mode: "isolated_server", executable },
+          expectedMetaCredential: expected
+        });
+        await expect(handlers.create_meta_campaign?.(
+          { sourceId: "src_meta", name: "Current", objective: "OUTCOME_TRAFFIC" },
+          operatorContext
+        )).resolves.toMatchObject({ data: { id: "snapshot-campaign" } });
+        expect(snapshot.snapshotReads()).toBe(1);
+      } finally {
+        if (prior === undefined) delete process.env.GROWTH_OS_ENCRYPTION_KEY; else process.env.GROWTH_OS_ENCRYPTION_KEY = prior;
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("defaults a strict creative to the Page frozen on the same credential snapshot", async () => {
+      const dir = mkdtempSync(join(tmpdir(), "meta-version-page-"));
+      const executable = join(dir, "meta-server.mjs");
+      const argvFile = join(dir, "argv.json");
+      writeFileSync(executable, `#!${process.execPath}\nimport { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(argvFile)}, JSON.stringify(process.argv.slice(2)));\nconsole.log(JSON.stringify({id:"snapshot-creative"}));\n`);
+      chmodSync(executable, 0o700);
+      const prior = process.env.GROWTH_OS_ENCRYPTION_KEY;
+      process.env.GROWTH_OS_ENCRYPTION_KEY = "analytical-test-encryption-key";
+      vi.stubGlobal("fetch", vi.fn(async () => new Response(new Uint8Array([1, 2, 3]), {
+        status: 200,
+        headers: { "Content-Type": "image/png", "Content-Length": "3" }
+      })));
+      try {
+        const snapshot = snapshotDb();
+        const handlers = createActionHandlers(snapshot.db, {
+          metaAdsCliExecution: { mode: "isolated_server", executable },
+          expectedMetaCredential: expected
+        });
+        await expect(handlers.create_meta_creative?.({
+          sourceId: "src_meta",
+          name: "Frozen Page",
+          imageUrl: "https://assets.example.test/frozen.png"
+        }, operatorContext)).resolves.toMatchObject({ data: { id: "snapshot-creative" } });
+        const argv = JSON.parse(readFileSync(argvFile, "utf8")) as string[];
+        expect(argv[argv.indexOf("--page-id") + 1]).toBe("page_frozen");
+        expect(snapshot.snapshotReads()).toBe(1);
+      } finally {
+        vi.unstubAllGlobals();
+        if (prior === undefined) delete process.env.GROWTH_OS_ENCRYPTION_KEY; else process.env.GROWTH_OS_ENCRYPTION_KEY = prior;
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+  });
+
   it("keeps the previous Meta source and credential usable when a CLI-token reconnect probe fails", async () => {
     const state = {
       credential: { mode: "live", transport: "meta_ads_cli", adAccountId: "act_999", accessToken: "working-token" },

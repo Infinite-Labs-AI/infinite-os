@@ -85,6 +85,14 @@ export function createAnalyticalRegistry(databaseUrl: string) {
   return createInfiniteOsRegistry(createActionHandlers(db));
 }
 
+/** Trusted, process-only binding frozen by a server before it invokes a Meta mutation. */
+export interface ExpectedMetaCredential {
+  sourceId: string;
+  credentialId: string;
+  credentialUpdatedAt: string;
+  selectedPageId?: string;
+}
+
 // `options.encryptionKey` is the per-workspace credential-custody key (structurally the
 // `CreateActionHandlersOptions` shape canonicalized in @infinite-os/types; kept inline here so
 // this package need not depend on that leaf). When set, the connect/reconnect/sync/test paths
@@ -93,10 +101,15 @@ export function createAnalyticalRegistry(databaseUrl: string) {
 // identical prior behavior. Backward-compatible.
 export function createActionHandlers(
   db: InfiniteOsDb,
-  options?: { encryptionKey?: string; metaAdsCliExecution?: MetaAdsCliExecution }
+  options?: {
+    encryptionKey?: string;
+    metaAdsCliExecution?: MetaAdsCliExecution;
+    expectedMetaCredential?: ExpectedMetaCredential;
+  }
 ): Partial<Record<InfiniteOsActionId, ActionHandler>> {
   const encryptionKey = options?.encryptionKey;
   const metaAdsCliExecution = options?.metaAdsCliExecution;
+  const expectedMetaCredential = options?.expectedMetaCredential;
   return {
     list_sources: (_input, context) => listSources(db, context),
     describe_source: (input, context) => describeSource(db, context, input),
@@ -133,13 +146,13 @@ export function createActionHandlers(
     list_meta_entities: (input, context) => listMetaEntitiesHandler(db, context, input, metaAdsCliExecution, encryptionKey),
     get_meta_entity: (input, context) => getMetaEntityHandler(db, context, input, metaAdsCliExecution, encryptionKey),
     run_meta_live_insights: (input, context) => runMetaLiveInsightsHandler(db, context, input, metaAdsCliExecution, encryptionKey),
-    create_meta_campaign: (input, context) => createMetaCampaignHandler(db, context, input, metaAdsCliExecution, encryptionKey),
-    create_meta_ad_set: (input, context) => createMetaAdSetHandler(db, context, input, metaAdsCliExecution, encryptionKey),
-    create_meta_creative: (input, context) => createMetaCreativeHandler(db, context, input, metaAdsCliExecution, encryptionKey),
-    create_meta_ad: (input, context) => createMetaAdHandler(db, context, input, metaAdsCliExecution, encryptionKey),
-    set_meta_entity_status: (input, context) => setMetaEntityStatusHandler(db, context, input, metaAdsCliExecution, encryptionKey),
-    update_meta_budget: (input, context) => updateMetaBudgetHandler(db, context, input, metaAdsCliExecution, encryptionKey),
-    delete_meta_entity: (input, context) => deleteMetaEntityHandler(db, context, input, metaAdsCliExecution, encryptionKey)
+    create_meta_campaign: (input, context) => createMetaCampaignHandler(db, context, input, metaAdsCliExecution, encryptionKey, expectedMetaCredential),
+    create_meta_ad_set: (input, context) => createMetaAdSetHandler(db, context, input, metaAdsCliExecution, encryptionKey, expectedMetaCredential),
+    create_meta_creative: (input, context) => createMetaCreativeHandler(db, context, input, metaAdsCliExecution, encryptionKey, expectedMetaCredential),
+    create_meta_ad: (input, context) => createMetaAdHandler(db, context, input, metaAdsCliExecution, encryptionKey, expectedMetaCredential),
+    set_meta_entity_status: (input, context) => setMetaEntityStatusHandler(db, context, input, metaAdsCliExecution, encryptionKey, expectedMetaCredential),
+    update_meta_budget: (input, context) => updateMetaBudgetHandler(db, context, input, metaAdsCliExecution, encryptionKey, expectedMetaCredential),
+    delete_meta_entity: (input, context) => deleteMetaEntityHandler(db, context, input, metaAdsCliExecution, encryptionKey, expectedMetaCredential)
   };
 }
 
@@ -2038,8 +2051,79 @@ async function resolveMetaCredentialForWrite(
   context: SessionContext,
   sourceId: string,
   cliExecution?: MetaAdsCliExecution,
-  encryptionKey?: string
+  encryptionKey?: string,
+  expectedCredential?: ExpectedMetaCredential
 ): Promise<MetaAdsCredential> {
+  if (expectedCredential) {
+    if (expectedCredential.sourceId !== sourceId) {
+      throw metaCredentialBindingChanged("expected source does not match the requested source");
+    }
+    const snapshot = await db.one<{
+      account_external_id: string | null;
+      credential_id: string;
+      credential_updated_at: string | Date;
+      credential_kind: string;
+      encrypted_payload: string;
+      oauth_token_id: string | null;
+      selected_page_id: string | null;
+    }>(
+      `select s.account_external_id,
+              cc.id as credential_id, cc.updated_at as credential_updated_at,
+              cc.credential_kind, cc.encrypted_payload, cc.oauth_token_id,
+              cc.selected_page_id
+         from sources s
+         join connection_credentials cc
+           on cc.workspace_id = s.workspace_id and cc.source_id = s.id
+        where s.workspace_id = $1 and s.id = $2
+          and s.provider = 'meta_ads' and s.status = 'connected'
+          and cc.revoked_at is null
+        order by cc.created_at desc
+        limit 1`,
+      [context.workspaceId, sourceId]
+    );
+    if (!snapshot) {
+      throw metaCredentialBindingChanged("expected Meta credential is no longer active");
+    }
+    const currentUpdatedAt = normalizedCredentialTimestamp(snapshot.credential_updated_at);
+    const expectedUpdatedAt = normalizedCredentialTimestamp(expectedCredential.credentialUpdatedAt);
+    const currentPageId = typeof snapshot.selected_page_id === "string" && snapshot.selected_page_id !== ""
+      ? snapshot.selected_page_id
+      : undefined;
+    if (
+      snapshot.credential_id !== expectedCredential.credentialId
+      || currentUpdatedAt !== expectedUpdatedAt
+      || currentPageId !== expectedCredential.selectedPageId
+    ) {
+      throw metaCredentialBindingChanged("Meta credential binding changed after confirmation");
+    }
+    // Hosted Meta credentials are direct encrypted system-user tokens. Following an OAuth FK
+    // here would resolve mutable token state outside the versioned row and reopen the TOCTOU gap.
+    if (snapshot.oauth_token_id) {
+      throw metaCredentialBindingChanged("versioned Meta execution does not accept an OAuth token reference");
+    }
+    const snapshotOne: InfiniteOsDb["one"] = async <T extends Record<string, unknown>>(
+      sql: string,
+      params?: unknown[]
+    ): Promise<T | null> => {
+      if (sql.includes("from connection_credentials")) {
+        return {
+          credential_kind: snapshot.credential_kind,
+          encrypted_payload: snapshot.encrypted_payload,
+          oauth_token_id: null
+        } as unknown as T;
+      }
+      return db.one<T>(sql, params);
+    };
+    const snapshotDb: InfiniteOsDb = { ...db, one: snapshotOne };
+    const credential = await resolveMetaAdsCredential(snapshotDb, {
+      workspaceId: context.workspaceId,
+      sourceId,
+      ...(encryptionKey ? { encryptionKey } : {})
+    });
+    validateStrictMetaCredential(snapshot.account_external_id, credential, cliExecution);
+    return cliExecution ? bindMetaAdsCliExecution(credential, cliExecution) : credential;
+  }
+
   // Pin the source to meta_ads before touching the Graph API (a non-Meta source
   // id must never reach the write transport).
   const provider = await sourceProvider(db, context.workspaceId, sourceId);
@@ -2064,21 +2148,41 @@ async function resolveMetaCredentialForWrite(
     ...(encryptionKey ? { encryptionKey } : {})
   });
   if (cliExecution) {
-    if (credential.transport !== "meta_ads_cli" && credential.transport !== "cli") {
-      throw new ConnectorError("provider_unsupported", "Meta Ads CLI server execution requires a CLI transport", false);
-    }
     const source = await db.one<{ account_external_id: string | null }>(
       `select account_external_id from sources
          where workspace_id = $1 and id = $2 and provider = 'meta_ads' and status = 'connected'`,
       [context.workspaceId, sourceId]
     );
-    const boundAccount = source?.account_external_id?.replace(/^act_/i, "");
-    const credentialAccount = credential.adAccountId?.replace(/^act_/i, "");
-    if (!boundAccount || !credentialAccount || boundAccount !== credentialAccount) {
-      throw new ConnectorError("provider_auth_failed", "Meta Ads CLI server account does not match the source binding", false);
-    }
+    validateStrictMetaCredential(source?.account_external_id ?? null, credential, cliExecution);
   }
   return cliExecution ? bindMetaAdsCliExecution(credential, cliExecution) : credential;
+}
+
+function normalizedCredentialTimestamp(value: string | Date): string {
+  const timestamp = value instanceof Date ? value : new Date(value);
+  if (!Number.isFinite(timestamp.getTime())) {
+    throw metaCredentialBindingChanged("Meta credential version timestamp is invalid");
+  }
+  return timestamp.toISOString();
+}
+
+function metaCredentialBindingChanged(message: string): ConnectorError {
+  return new ConnectorError("credential_binding_changed", message, false);
+}
+
+function validateStrictMetaCredential(
+  accountExternalId: string | null,
+  credential: MetaAdsCredential,
+  cliExecution?: MetaAdsCliExecution
+): void {
+  if (cliExecution && credential.transport !== "meta_ads_cli" && credential.transport !== "cli") {
+    throw new ConnectorError("provider_unsupported", "Meta Ads CLI server execution requires a CLI transport", false);
+  }
+  const boundAccount = accountExternalId?.replace(/^act_/i, "");
+  const credentialAccount = credential.adAccountId?.replace(/^act_/i, "");
+  if (!boundAccount || !credentialAccount || boundAccount !== credentialAccount) {
+    throw new ConnectorError("provider_auth_failed", "Meta Ads CLI server account does not match the source binding", false);
+  }
 }
 
 // Shared create flow: dedup-check → INLINE connector POST → audit. The connector
@@ -2098,7 +2202,8 @@ async function runMetaCreate(
   // { budgetCurrency } so the caller can confirm "$500/day (USD)" back to the user.
   extra?: Record<string, unknown>,
   cliExecution?: MetaAdsCliExecution,
-  encryptionKey?: string
+  encryptionKey?: string,
+  expectedCredential?: ExpectedMetaCredential
 ): Promise<ActionEnvelope> {
   const clientToken = optionalString(input, "clientToken");
   const presence = metaBudgetPresence(input);
@@ -2130,7 +2235,14 @@ async function runMetaCreate(
   let credential: MetaAdsCredential | undefined;
   let result: MetaWriteResult;
   try {
-    credential = await resolveMetaCredentialForWrite(db, context, sourceId, cliExecution, encryptionKey);
+    credential = await resolveMetaCredentialForWrite(
+      db,
+      context,
+      sourceId,
+      cliExecution,
+      encryptionKey,
+      expectedCredential
+    );
     result = await write(credential);
   } catch (error) {
     // Release the un-resolved claim so a transient failure does not poison the
@@ -2211,7 +2323,8 @@ async function createMetaCampaignHandler(
   context: SessionContext,
   input: unknown,
   cliExecution?: MetaAdsCliExecution,
-  encryptionKey?: string
+  encryptionKey?: string,
+  expectedCredential?: ExpectedMetaCredential
 ): Promise<ActionEnvelope> {
   const name = requiredString(input, "name");
   const objective = requiredString(input, "objective");
@@ -2233,7 +2346,8 @@ async function createMetaCampaignHandler(
       }),
     budgets.budgetCurrency ? { budgetCurrency: budgets.budgetCurrency } : undefined,
     cliExecution,
-    encryptionKey
+    encryptionKey,
+    expectedCredential
   );
 }
 
@@ -2242,7 +2356,8 @@ async function createMetaAdSetHandler(
   context: SessionContext,
   input: unknown,
   cliExecution?: MetaAdsCliExecution,
-  encryptionKey?: string
+  encryptionKey?: string,
+  expectedCredential?: ExpectedMetaCredential
 ): Promise<ActionEnvelope> {
   const campaignId = requiredString(input, "campaignId");
   const name = requiredString(input, "name");
@@ -2278,7 +2393,8 @@ async function createMetaAdSetHandler(
       }),
     budgets.budgetCurrency ? { budgetCurrency: budgets.budgetCurrency } : undefined,
     cliExecution,
-    encryptionKey
+    encryptionKey,
+    expectedCredential
   );
 }
 
@@ -2339,9 +2455,27 @@ async function resolveMetaPostingPageId(
   db: InfiniteOsDb,
   context: SessionContext,
   sourceId: string,
-  input: unknown
+  input: unknown,
+  expectedCredential?: ExpectedMetaCredential
 ): Promise<string> {
   const explicit = optionalString(input, "pageId");
+  if (expectedCredential) {
+    if (expectedCredential.sourceId !== sourceId) {
+      throw metaCredentialBindingChanged("expected source does not match the creative source");
+    }
+    if (!expectedCredential.selectedPageId) {
+      throw metaTypedError(
+        "meta_page_not_selected",
+        "meta_page_not_selected: the confirmed Meta credential snapshot has no posting Page"
+      );
+    }
+    if (explicit && explicit !== expectedCredential.selectedPageId) {
+      throw metaCredentialBindingChanged("creative Page does not match the confirmed credential snapshot");
+    }
+    // The credential resolver later verifies this trusted Page against the same joined row whose
+    // encrypted payload it returns. No second live credential/Page lookup occurs before mutation.
+    return expectedCredential.selectedPageId;
+  }
   if (explicit) {
     return explicit;
   }
@@ -2366,11 +2500,12 @@ async function createMetaCreativeHandler(
   context: SessionContext,
   input: unknown,
   cliExecution?: MetaAdsCliExecution,
-  encryptionKey?: string
+  encryptionKey?: string,
+  expectedCredential?: ExpectedMetaCredential
 ): Promise<ActionEnvelope> {
   const name = requiredString(input, "name");
   const sourceId = await resolveMetaWriteSourceId(db, context, input);
-  const pageId = await resolveMetaPostingPageId(db, context, sourceId, input);
+  const pageId = await resolveMetaPostingPageId(db, context, sourceId, input, expectedCredential);
   return runMetaCreate(db, context, input, sourceId, "create_meta_creative", "creative", (credential) =>
     createMetaCreative(credential, {
       name,
@@ -2384,7 +2519,7 @@ async function createMetaCreativeHandler(
       ...(optionalString(input, "title") ? { title: optionalString(input, "title") } : {}),
       ...(optionalString(input, "description") ? { description: optionalString(input, "description") } : {}),
       ...(optionalString(input, "callToAction") ? { callToAction: optionalString(input, "callToAction") } : {})
-    }), undefined, cliExecution, encryptionKey
+    }), undefined, cliExecution, encryptionKey, expectedCredential
   );
 }
 
@@ -2393,14 +2528,15 @@ async function createMetaAdHandler(
   context: SessionContext,
   input: unknown,
   cliExecution?: MetaAdsCliExecution,
-  encryptionKey?: string
+  encryptionKey?: string,
+  expectedCredential?: ExpectedMetaCredential
 ): Promise<ActionEnvelope> {
   const adsetId = requiredString(input, "adsetId");
   const name = requiredString(input, "name");
   const creativeId = requiredString(input, "creativeId");
   const sourceId = await resolveMetaWriteSourceId(db, context, input);
   return runMetaCreate(db, context, input, sourceId, "create_meta_ad", "ad", (credential) =>
-    createMetaAd(credential, { adsetId, name, creativeId }), undefined, cliExecution, encryptionKey
+    createMetaAd(credential, { adsetId, name, creativeId }), undefined, cliExecution, encryptionKey, expectedCredential
   );
 }
 
@@ -2468,7 +2604,8 @@ async function setMetaEntityStatusHandler(
   context: SessionContext,
   input: unknown,
   cliExecution?: MetaAdsCliExecution,
-  encryptionKey?: string
+  encryptionKey?: string,
+  expectedCredential?: ExpectedMetaCredential
 ): Promise<ActionEnvelope> {
   const sourceId = requiredString(input, "sourceId");
   const entityId = requiredString(input, "entityId");
@@ -2489,7 +2626,14 @@ async function setMetaEntityStatusHandler(
     throw new Error(`activation_requires_confirmation:${entityId}`);
   }
   const action: InfiniteOsActionId = "set_meta_entity_status";
-  const credential = await resolveMetaCredentialForWrite(db, context, sourceId, cliExecution, encryptionKey);
+  const credential = await resolveMetaCredentialForWrite(
+    db,
+    context,
+    sourceId,
+    cliExecution,
+    encryptionKey,
+    expectedCredential
+  );
   let result;
   try {
     result = await setMetaEntityStatus(credential, entityId, status as MetaEntityStatus, entity);
@@ -2532,7 +2676,8 @@ async function updateMetaBudgetHandler(
   context: SessionContext,
   input: unknown,
   cliExecution?: MetaAdsCliExecution,
-  encryptionKey?: string
+  encryptionKey?: string,
+  expectedCredential?: ExpectedMetaCredential
 ): Promise<ActionEnvelope> {
   const sourceId = requiredString(input, "sourceId");
   const entityId = requiredString(input, "entityId");
@@ -2541,7 +2686,14 @@ async function updateMetaBudgetHandler(
   // POSITIVE integer cents, validated before any credential resolve or POST.
   const dailyBudget = requiredPositiveBudgetCents(input);
   const action: InfiniteOsActionId = "update_meta_budget";
-  const credential = await resolveMetaCredentialForWrite(db, context, sourceId, cliExecution, encryptionKey);
+  const credential = await resolveMetaCredentialForWrite(
+    db,
+    context,
+    sourceId,
+    cliExecution,
+    encryptionKey,
+    expectedCredential
+  );
   let result;
   try {
     result = await updateMetaBudget(credential, entityId, dailyBudget, entity);
@@ -2583,7 +2735,8 @@ async function deleteMetaEntityHandler(
   context: SessionContext,
   input: unknown,
   cliExecution?: MetaAdsCliExecution,
-  encryptionKey?: string
+  encryptionKey?: string,
+  expectedCredential?: ExpectedMetaCredential
 ): Promise<ActionEnvelope> {
   const sourceId = requiredString(input, "sourceId");
   const entityId = requiredString(input, "entityId");
@@ -2592,7 +2745,14 @@ async function deleteMetaEntityHandler(
   // so the failure is early + transport-agnostic.
   const entity = requiredMetaWriteEntity(input);
   const action: InfiniteOsActionId = "delete_meta_entity";
-  const credential = await resolveMetaCredentialForWrite(db, context, sourceId, cliExecution, encryptionKey);
+  const credential = await resolveMetaCredentialForWrite(
+    db,
+    context,
+    sourceId,
+    cliExecution,
+    encryptionKey,
+    expectedCredential
+  );
   let result;
   try {
     result = await deleteMetaEntity(credential, entityId, entity);
