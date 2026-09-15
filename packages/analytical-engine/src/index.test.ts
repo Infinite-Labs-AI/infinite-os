@@ -2345,20 +2345,36 @@ describe("analytical engine smoke", () => {
     const statuses: Array<{ sourceId: string; status: string; lastSyncedAt?: string }> = [];
     let rawRecordIndex = 0;
     let sourceStatus = "connected";
+    const credentialUpdatedAt = "2026-09-15T12:00:00.000Z";
     const db: InfiniteOsDb = {
       async query<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T[]> {
         queries.push({ sql, params });
         if (sql.includes("select provider, status") && sql.includes("for update")) {
-          return [{ provider: "x", status: sourceStatus }] as T[];
+          return [{ provider: "x", status: sourceStatus, account_external_id: null }] as T[];
         }
-        if (sql.includes("select id from sync_runs")) {
+        if (sql.includes("from sources") && sql.includes("status = 'syncing'") && sql.includes("for update")) {
+          return params?.[0] === "src_x" && params?.[1] === "workspace" && params?.[2] === "x" && sourceStatus === "syncing"
+            ? [{ id: "src_x" }] as T[]
+            : [];
+        }
+        if (sql.includes("from sync_runs") && sql.includes("status = 'running'")) {
           return [{ id: String(params?.[0] ?? "sync_x") }] as T[];
+        }
+        if (sql.includes("update sources") && sql.includes("set status = 'connected'") && sql.includes("status = 'syncing'")) {
+          if (params?.[0] === "src_x" && params?.[1] === "workspace" && params?.[2] === "x" && sourceStatus === "syncing") {
+            sourceStatus = "connected";
+            statuses.push({ sourceId: "src_x", status: "connected", ...(typeof params?.[4] === "string" ? { lastSyncedAt: params[4] } : {}) });
+          }
+          return [] as T[];
         }
         return [];
       },
       async one<T>(sql: string): Promise<T | null> {
         if (sql.includes("provider from sources")) {
           return { provider: "x" } as T;
+        }
+        if (sql.includes("select id, updated_at") && sql.includes("connection_credentials")) {
+          return { id: "cred_x", updated_at: credentialUpdatedAt } as T;
         }
         if (sql.includes("connection_credentials")) {
           return { credential_kind: "fixture", encrypted_payload: "fixture-encrypted" } as T;
