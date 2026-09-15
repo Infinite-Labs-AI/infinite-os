@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { createWriteStream, existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { createWriteStream, existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join, resolve } from "node:path";
 import {
@@ -417,6 +417,27 @@ export interface MetaAdsCredential {
   cliCommand?: string;
   mcpCommand?: string;
   mcpToolName?: string;
+}
+
+/** Trusted process-only execution policy. Never serialize this into a source credential. */
+export interface MetaAdsCliExecution {
+  mode: "isolated_server";
+  /** Fixed absolute path selected by the server image, not a request or credential. */
+  executable: string;
+  /** Optional fixed child PATH selected by the server image. */
+  path?: string;
+}
+
+const metaAdsCliExecutionByCredential = new WeakMap<MetaAdsCredential, MetaAdsCliExecution>();
+
+/** Bind trusted handler configuration after decrypt; JSON credential fields cannot select this mode. */
+export function bindMetaAdsCliExecution(
+  credential: MetaAdsCredential,
+  execution: MetaAdsCliExecution
+): MetaAdsCredential {
+  const bound = { ...credential };
+  metaAdsCliExecutionByCredential.set(bound, execution);
+  return bound;
 }
 
 interface ShopifyOrderRow {
@@ -10600,6 +10621,10 @@ async function callMetaAdsCliJson(
   args: string[],
   options: MetaCliCallOptions = {}
 ): Promise<unknown> {
+  const isolatedExecution = metaAdsCliExecutionByCredential.get(credential);
+  if (isolatedExecution) {
+    return callIsolatedMetaAdsCliJson(credential, args, options, isolatedExecution);
+  }
   const rawCliCommand =
     typeof credential.cliCommand === "string" && credential.cliCommand.trim() ? credential.cliCommand.trim() : "meta";
   // An ABSOLUTE path that exists as a file (the desktop stores exactly this) is used VERBATIM as the
@@ -10710,6 +10735,86 @@ async function callMetaAdsCliJson(
       });
     });
   });
+}
+
+async function callIsolatedMetaAdsCliJson(
+  credential: MetaAdsCredential,
+  args: string[],
+  options: MetaCliCallOptions,
+  execution: MetaAdsCliExecution
+): Promise<unknown> {
+  const token = metaAdsCliAccessToken(credential);
+  if (!token) {
+    throw new ConnectorError("provider_auth_failed", "Meta Ads CLI server execution requires a stored access token", false);
+  }
+  if (!execution.executable.startsWith("/") || !existsSync(execution.executable)) {
+    throw new ConnectorError("provider_unsupported", "Meta Ads CLI server executable is unavailable", false);
+  }
+  const home = mkdtempSync(join(tmpdir(), "meta-cli-server-"));
+  let stdout = Buffer.alloc(0);
+  let stderrBytes = 0;
+  let failed: ConnectorError | null = null;
+  try {
+    const child = spawn(execution.executable, ["--no-color", "--no-input", ...args], {
+      stdio: ["ignore", "pipe", "pipe"],
+      shell: false,
+      cwd: home,
+      env: {
+        ACCESS_TOKEN: token,
+        AD_ACCOUNT_ID: metaAdsCliAccountId(credential),
+        PATH: execution.path ?? "/usr/bin:/bin",
+        HOME: home,
+        XDG_CONFIG_HOME: home,
+        XDG_CACHE_HOME: home,
+        PYTHON_DOTENV_DISABLED: "1",
+        PYTHONUNBUFFERED: "1"
+      }
+    });
+    const timeout = setTimeout(() => {
+      failed = new ConnectorError("provider_api_error", "Meta Ads CLI server command timed out", false);
+      child.kill();
+    }, options.timeoutMs ?? META_CLI_DEFAULT_TIMEOUT_MS);
+    try {
+      child.stdout.on("data", (chunk: Buffer) => {
+        if (failed) return;
+        if (stdout.length + chunk.length > 128 * 1024) {
+          failed = new ConnectorError("provider_api_error", "Meta Ads CLI server output exceeded the limit", false);
+          child.kill();
+          return;
+        }
+        stdout = Buffer.concat([stdout, chunk]);
+      });
+      child.stderr.on("data", (chunk: Buffer) => {
+        stderrBytes += chunk.length;
+        if (stderrBytes > 8 * 1024 && !failed) {
+          failed = new ConnectorError("provider_api_error", "Meta Ads CLI server error output exceeded the limit", false);
+          child.kill();
+        }
+      });
+      const result = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolveClose) => {
+        child.on("error", () => {
+          failed ??= new ConnectorError("provider_api_error", "Meta Ads CLI server command failed to start", false);
+        });
+        child.on("close", (code, signal) => resolveClose({ code, signal }));
+      });
+      if (failed) throw failed;
+      if (result.code !== 0 || result.signal) {
+        // Provider stderr can echo arbitrary credentials. Never return its raw body.
+        throw new ConnectorError("provider_api_error", "Meta Ads CLI server command failed", false);
+      }
+      const output = stdout.toString("utf8");
+      if (!output.trim()) return { success: true };
+      try {
+        return JSON.parse(stripJsonPrefix(output)) as unknown;
+      } catch {
+        throw new ConnectorError("provider_api_error", "Meta Ads CLI server command returned invalid JSON", false);
+      }
+    } finally {
+      clearTimeout(timeout);
+    }
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
 }
 
 // Extract the `--output json` payload the `meta` CLI prints, tolerating human prefix

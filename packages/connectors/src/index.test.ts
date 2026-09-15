@@ -28,6 +28,7 @@ import {
   resolveMetaAdsCredential,
   setMetaEntityStatus,
   updateMetaBudget,
+  bindMetaAdsCliExecution,
   xCredentialFromSetup,
   xConnectSourceFromSetup,
   type ExtractedRecord,
@@ -36,6 +37,119 @@ import {
   type SyncPlan,
   type SyncRequest
 } from "./index.js";
+
+describe("trusted server Meta CLI isolation", () => {
+  function fakeExecutable(dir: string, body: string): string {
+    const script = join(dir, "meta-server.mjs");
+    writeFileSync(script, `#!${process.execPath}\n${body}\n`, "utf8");
+    chmodSync(script, 0o700);
+    return script;
+  }
+
+  const campaign = { name: "Server proof", objective: "OUTCOME_TRAFFIC" } as const;
+
+  it("rejects a missing stored token before spawning even with ambient auth", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "meta-server-test-"));
+    const marker = join(dir, "spawned");
+    const executable = fakeExecutable(dir, `import { writeFileSync } from "node:fs"; writeFileSync(${JSON.stringify(marker)}, "yes");`);
+    const prior = process.env.ACCESS_TOKEN;
+    process.env.ACCESS_TOKEN = "ambient-secret";
+    try {
+      const credential = bindMetaAdsCliExecution(
+        { mode: "live", transport: "meta_ads_cli", adAccountId: "123", cliCommand: "ignored" },
+        { mode: "isolated_server", executable }
+      );
+      await expect(createMetaCampaign(credential, campaign)).rejects.toMatchObject({ retryable: false });
+      expect(existsSync(marker)).toBe(false);
+    } finally {
+      if (prior === undefined) delete process.env.ACCESS_TOKEN; else process.env.ACCESS_TOKEN = prior;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("uses only the bound executable, token, account, and a private child home", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "meta-server-test-"));
+    const executable = fakeExecutable(dir, `
+import { writeFileSync } from "node:fs";
+writeFileSync(${JSON.stringify(join(dir, "observation.json"))}, JSON.stringify({
+  token: process.env.ACCESS_TOKEN, account: process.env.AD_ACCOUNT_ID,
+  home: process.env.HOME, config: process.env.XDG_CONFIG_HOME, cache: process.env.XDG_CACHE_HOME,
+  cwd: process.cwd(), inherited: process.env.CROSS_TENANT_SECRET ?? null,
+  dotenvDisabled: process.env.PYTHON_DOTENV_DISABLED
+}));
+console.log(JSON.stringify({ id: "1234", status: "PAUSED" }));`);
+    const prior = process.env.CROSS_TENANT_SECRET;
+    process.env.CROSS_TENANT_SECRET = "parent-secret";
+    try {
+      const credential = bindMetaAdsCliExecution(
+        { mode: "live", transport: "meta_ads_cli", adAccountId: "act_123", accessToken: "stored-secret", cliCommand: "/missing/wrong/meta" },
+        { mode: "isolated_server", executable }
+      );
+      expect(await createMetaCampaign(credential, campaign)).toEqual({ ok: true, id: "1234", status: "PAUSED" });
+      const observed = JSON.parse(readFileSync(join(dir, "observation.json"), "utf8")) as Record<string, string | undefined>;
+      expect(observed).toMatchObject({ token: "stored-secret", account: "123", inherited: null, dotenvDisabled: "1" });
+      expect(observed.cwd).toContain("meta-cli-server-");
+      expect(observed.config).toBe(observed.home);
+      expect(observed.cache).toBe(observed.home);
+      expect(existsSync(observed.home!)).toBe(false);
+    } finally {
+      if (prior === undefined) delete process.env.CROSS_TENANT_SECRET; else process.env.CROSS_TENANT_SECRET = prior;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps concurrent account credentials and homes separate", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "meta-server-test-"));
+    const executable = fakeExecutable(dir, `
+import { writeFileSync } from "node:fs";
+await new Promise((resolve) => setTimeout(resolve, 80));
+const id = process.env.ACCESS_TOKEN === "token-a" ? "a" : "b";
+writeFileSync(${JSON.stringify(dir)} + "/seen-" + id + ".json", JSON.stringify({
+  token: process.env.ACCESS_TOKEN, account: process.env.AD_ACCOUNT_ID, home: process.env.HOME
+}));
+console.log(JSON.stringify({ id, status: "PAUSED" }));`);
+    try {
+      const config = { mode: "isolated_server", executable } as const;
+      const a = bindMetaAdsCliExecution({ mode: "live", transport: "meta_ads_cli", adAccountId: "111", accessToken: "token-a" }, config);
+      const b = bindMetaAdsCliExecution({ mode: "live", transport: "meta_ads_cli", adAccountId: "222", accessToken: "token-b" }, config);
+      expect(await Promise.all([createMetaCampaign(a, campaign), createMetaCampaign(b, campaign)])).toEqual([
+        { ok: true, id: "a", status: "PAUSED" }, { ok: true, id: "b", status: "PAUSED" }
+      ]);
+      const seenA = JSON.parse(readFileSync(join(dir, "seen-a.json"), "utf8")) as Record<string, string>;
+      const seenB = JSON.parse(readFileSync(join(dir, "seen-b.json"), "utf8")) as Record<string, string>;
+      expect(seenA).toMatchObject({ token: "token-a", account: "111" });
+      expect(seenB).toMatchObject({ token: "token-b", account: "222" });
+      expect(seenA.home).not.toBe(seenB.home);
+      expect(existsSync(seenA.home)).toBe(false);
+      expect(existsSync(seenB.home)).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("closes and cleans up on failure without exposing the echoed token", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "meta-server-test-"));
+    const executable = fakeExecutable(dir, `
+import { writeFileSync } from "node:fs";
+writeFileSync(${JSON.stringify(join(dir, "failed-home"))}, process.env.HOME ?? "");
+process.stderr.write("auth failed for " + process.env.ACCESS_TOKEN + " EAAabcdef123456");
+process.exit(2);`);
+    try {
+      const credential = bindMetaAdsCliExecution(
+        { mode: "live", transport: "meta_ads_cli", adAccountId: "333", accessToken: "private-token" },
+        { mode: "isolated_server", executable }
+      );
+      let failure: unknown;
+      try { await createMetaCampaign(credential, campaign); } catch (error) { failure = error; }
+      expect(failure).toMatchObject({ retryable: false });
+      expect(String(failure)).not.toContain("private-token");
+      expect(String(failure)).not.toContain("EAAabcdef123456");
+      expect(existsSync(readFileSync(join(dir, "failed-home"), "utf8"))).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
 
 const TEST_ENCRYPTION_KEY = "connector-test-encryption-key";
 

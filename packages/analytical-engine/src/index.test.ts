@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -6838,7 +6838,7 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
       },
       async one<T>(sql: string, params?: unknown[]): Promise<T | null> {
         if (sql.includes("from sources")) {
-          return { provider: "meta_ads" } as T;
+          return { provider: "meta_ads", account_external_id: "act_999" } as T;
         }
         if (sql.includes("from connection_credentials")) {
           return {
@@ -6895,6 +6895,52 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
       }
     };
   }
+
+  it("binds isolated CLI execution from trusted handler options after credential decrypt", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "meta-handler-server-"));
+    const executable = join(dir, "meta-server.mjs");
+    writeFileSync(executable, `#!${process.execPath}\nimport { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(join(dir, "seen-token"))}, process.env.ACCESS_TOKEN ?? "");\nconsole.log(JSON.stringify({id:"server-campaign",status:"PAUSED"}));\n`);
+    chmodSync(executable, 0o700);
+    const prior = process.env.GROWTH_OS_ENCRYPTION_KEY;
+    process.env.GROWTH_OS_ENCRYPTION_KEY = "analytical-test-encryption-key";
+    try {
+      const db = metaWriteTestDb({
+        audits: [],
+        credential: { mode: "live", transport: "meta_ads_cli", adAccountId: "act_999", accessToken: "stored-server-token", cliCommand: "/missing/meta" }
+      });
+      const handlers = createActionHandlers(db, { metaAdsCliExecution: { mode: "isolated_server", executable } });
+      const result = await handlers.create_meta_campaign?.(
+        { sourceId: "src_meta", name: "Server", objective: "OUTCOME_TRAFFIC" },
+        operatorContext
+      );
+      expect(result?.data).toMatchObject({ id: "server-campaign", status: "PAUSED" });
+      expect(readFileSync(join(dir, "seen-token"), "utf8")).toBe("stored-server-token");
+    } finally {
+      if (prior === undefined) delete process.env.GROWTH_OS_ENCRYPTION_KEY; else process.env.GROWTH_OS_ENCRYPTION_KEY = prior;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a strict server write when decrypted account differs from the source binding", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "meta-handler-server-"));
+    const marker = join(dir, "spawned");
+    const executable = join(dir, "meta-server.mjs");
+    writeFileSync(executable, `#!${process.execPath}\nimport { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(marker)}, "yes");\nconsole.log(JSON.stringify({id:"wrong",status:"PAUSED"}));\n`);
+    chmodSync(executable, 0o700);
+    const prior = process.env.GROWTH_OS_ENCRYPTION_KEY;
+    process.env.GROWTH_OS_ENCRYPTION_KEY = "analytical-test-encryption-key";
+    try {
+      const dedupRows: DedupRow[] = [];
+      const db = metaWriteTestDb({ audits: [], dedupRows, credential: { mode: "live", transport: "meta_ads_cli", adAccountId: "act_123", accessToken: "wrong-account-token" } });
+      const handlers = createActionHandlers(db, { metaAdsCliExecution: { mode: "isolated_server", executable } });
+      await expect(handlers.create_meta_campaign?.({ sourceId: "src_meta", name: "Wrong", objective: "OUTCOME_TRAFFIC", clientToken: "strict-mismatch" }, operatorContext)).rejects.toThrow(/account.*binding/i);
+      expect(existsSync(marker)).toBe(false);
+      expect(dedupRows).toHaveLength(0);
+    } finally {
+      if (prior === undefined) delete process.env.GROWTH_OS_ENCRYPTION_KEY; else process.env.GROWTH_OS_ENCRYPTION_KEY = prior;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 
   // Decode a Meta WRITE POST body. WRITE POSTs are form-encoded
   // (application/x-www-form-urlencoded): each nested object/array field is a JSON

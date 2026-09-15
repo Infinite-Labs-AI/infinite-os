@@ -7,6 +7,7 @@ import {
   createMetaAdSet,
   createMetaCampaign,
   createMetaCreative,
+  bindMetaAdsCliExecution,
   deleteMetaEntity,
   fetchMetaLiveInsights,
   getMetaEntity,
@@ -19,6 +20,7 @@ import {
   type ConnectionTestResult,
   type MetaAdSetTargeting,
   type MetaAdsCredential,
+  type MetaAdsCliExecution,
   type MetaEntityStatus,
   type MetaWriteEntity,
   type MetaWriteResult
@@ -91,9 +93,10 @@ export function createAnalyticalRegistry(databaseUrl: string) {
 // identical prior behavior. Backward-compatible.
 export function createActionHandlers(
   db: InfiniteOsDb,
-  options?: { encryptionKey?: string }
+  options?: { encryptionKey?: string; metaAdsCliExecution?: MetaAdsCliExecution }
 ): Partial<Record<InfiniteOsActionId, ActionHandler>> {
   const encryptionKey = options?.encryptionKey;
+  const metaAdsCliExecution = options?.metaAdsCliExecution;
   return {
     list_sources: (_input, context) => listSources(db, context),
     describe_source: (input, context) => describeSource(db, context, input),
@@ -127,16 +130,16 @@ export function createActionHandlers(
     run_saved_report: (input, context) => runSavedReport(db, context, input),
     export_saved_report: (input, context) => exportSavedReport(db, context, input),
     list_meta_assets: (input, context) => listMetaAssetsHandler(db, context, input),
-    list_meta_entities: (input, context) => listMetaEntitiesHandler(db, context, input),
-    get_meta_entity: (input, context) => getMetaEntityHandler(db, context, input),
-    run_meta_live_insights: (input, context) => runMetaLiveInsightsHandler(db, context, input),
-    create_meta_campaign: (input, context) => createMetaCampaignHandler(db, context, input),
-    create_meta_ad_set: (input, context) => createMetaAdSetHandler(db, context, input),
-    create_meta_creative: (input, context) => createMetaCreativeHandler(db, context, input),
-    create_meta_ad: (input, context) => createMetaAdHandler(db, context, input),
-    set_meta_entity_status: (input, context) => setMetaEntityStatusHandler(db, context, input),
-    update_meta_budget: (input, context) => updateMetaBudgetHandler(db, context, input),
-    delete_meta_entity: (input, context) => deleteMetaEntityHandler(db, context, input)
+    list_meta_entities: (input, context) => listMetaEntitiesHandler(db, context, input, metaAdsCliExecution),
+    get_meta_entity: (input, context) => getMetaEntityHandler(db, context, input, metaAdsCliExecution),
+    run_meta_live_insights: (input, context) => runMetaLiveInsightsHandler(db, context, input, metaAdsCliExecution),
+    create_meta_campaign: (input, context) => createMetaCampaignHandler(db, context, input, metaAdsCliExecution),
+    create_meta_ad_set: (input, context) => createMetaAdSetHandler(db, context, input, metaAdsCliExecution),
+    create_meta_creative: (input, context) => createMetaCreativeHandler(db, context, input, metaAdsCliExecution),
+    create_meta_ad: (input, context) => createMetaAdHandler(db, context, input, metaAdsCliExecution),
+    set_meta_entity_status: (input, context) => setMetaEntityStatusHandler(db, context, input, metaAdsCliExecution),
+    update_meta_budget: (input, context) => updateMetaBudgetHandler(db, context, input, metaAdsCliExecution),
+    delete_meta_entity: (input, context) => deleteMetaEntityHandler(db, context, input, metaAdsCliExecution)
   };
 }
 
@@ -2000,7 +2003,8 @@ async function resolveMetaCreateBudgets(
 async function resolveMetaCredentialForWrite(
   db: InfiniteOsDb,
   context: SessionContext,
-  sourceId: string
+  sourceId: string,
+  cliExecution?: MetaAdsCliExecution
 ): Promise<MetaAdsCredential> {
   // Pin the source to meta_ads before touching the Graph API (a non-Meta source
   // id must never reach the write transport).
@@ -2020,10 +2024,23 @@ async function resolveMetaCredentialForWrite(
   // context.workspaceId, so this is left as a documented invariant rather than a tested
   // violation path (its acceptance test would be structurally unreachable). The pinning
   // that actually closes the hole is enforced upstream at confirmation time.
-  return resolveMetaAdsCredential(db, {
+  const credential = await resolveMetaAdsCredential(db, {
     workspaceId: context.workspaceId,
     sourceId
   });
+  if (cliExecution) {
+    const source = await db.one<{ account_external_id: string | null }>(
+      `select account_external_id from sources
+         where workspace_id = $1 and id = $2 and provider = 'meta_ads' and status = 'connected'`,
+      [context.workspaceId, sourceId]
+    );
+    const boundAccount = source?.account_external_id?.replace(/^act_/i, "");
+    const credentialAccount = credential.adAccountId?.replace(/^act_/i, "");
+    if (!boundAccount || !credentialAccount || boundAccount !== credentialAccount) {
+      throw new ConnectorError("provider_auth_failed", "Meta Ads CLI server account does not match the source binding", false);
+    }
+  }
+  return cliExecution ? bindMetaAdsCliExecution(credential, cliExecution) : credential;
 }
 
 // Shared create flow: dedup-check → INLINE connector POST → audit. The connector
@@ -2041,7 +2058,8 @@ async function runMetaCreate(
   write: (credential: MetaAdsCredential) => Promise<MetaWriteResult>,
   // Optional extra fields merged into the SUCCESS envelope data (never the audit) — e.g.
   // { budgetCurrency } so the caller can confirm "$500/day (USD)" back to the user.
-  extra?: Record<string, unknown>
+  extra?: Record<string, unknown>,
+  cliExecution?: MetaAdsCliExecution
 ): Promise<ActionEnvelope> {
   const clientToken = optionalString(input, "clientToken");
   const presence = metaBudgetPresence(input);
@@ -2070,9 +2088,10 @@ async function runMetaCreate(
     );
   }
 
-  const credential = await resolveMetaCredentialForWrite(db, context, sourceId);
+  let credential: MetaAdsCredential | undefined;
   let result: MetaWriteResult;
   try {
+    credential = await resolveMetaCredentialForWrite(db, context, sourceId, cliExecution);
     result = await write(credential);
   } catch (error) {
     // Release the un-resolved claim so a transient failure does not poison the
@@ -2091,7 +2110,7 @@ async function runMetaCreate(
             : undefined)
         : undefined;
     let remediationPaused: boolean | undefined;
-    if (violatedId) {
+    if (violatedId && credential) {
       try {
         await setMetaEntityStatus(credential, violatedId, "PAUSED", entity);
         remediationPaused = true;
@@ -2151,7 +2170,8 @@ function metaErrorCode(error: unknown): string {
 async function createMetaCampaignHandler(
   db: InfiniteOsDb,
   context: SessionContext,
-  input: unknown
+  input: unknown,
+  cliExecution?: MetaAdsCliExecution
 ): Promise<ActionEnvelope> {
   const name = requiredString(input, "name");
   const objective = requiredString(input, "objective");
@@ -2171,14 +2191,16 @@ async function createMetaCampaignHandler(
         ...(budgets.dailyBudget === null ? {} : { dailyBudget: budgets.dailyBudget }),
         ...(budgets.lifetimeBudget === null ? {} : { lifetimeBudget: budgets.lifetimeBudget })
       }),
-    budgets.budgetCurrency ? { budgetCurrency: budgets.budgetCurrency } : undefined
+    budgets.budgetCurrency ? { budgetCurrency: budgets.budgetCurrency } : undefined,
+    cliExecution
   );
 }
 
 async function createMetaAdSetHandler(
   db: InfiniteOsDb,
   context: SessionContext,
-  input: unknown
+  input: unknown,
+  cliExecution?: MetaAdsCliExecution
 ): Promise<ActionEnvelope> {
   const campaignId = requiredString(input, "campaignId");
   const name = requiredString(input, "name");
@@ -2212,7 +2234,8 @@ async function createMetaAdSetHandler(
         ...(optionalString(input, "pixelId") ? { pixelId: optionalString(input, "pixelId") } : {}),
         ...(optionalString(input, "customEventType") ? { customEventType: optionalString(input, "customEventType") } : {})
       }),
-    budgets.budgetCurrency ? { budgetCurrency: budgets.budgetCurrency } : undefined
+    budgets.budgetCurrency ? { budgetCurrency: budgets.budgetCurrency } : undefined,
+    cliExecution
   );
 }
 
@@ -2298,7 +2321,8 @@ async function resolveMetaPostingPageId(
 async function createMetaCreativeHandler(
   db: InfiniteOsDb,
   context: SessionContext,
-  input: unknown
+  input: unknown,
+  cliExecution?: MetaAdsCliExecution
 ): Promise<ActionEnvelope> {
   const name = requiredString(input, "name");
   const sourceId = await resolveMetaWriteSourceId(db, context, input);
@@ -2316,21 +2340,22 @@ async function createMetaCreativeHandler(
       ...(optionalString(input, "title") ? { title: optionalString(input, "title") } : {}),
       ...(optionalString(input, "description") ? { description: optionalString(input, "description") } : {}),
       ...(optionalString(input, "callToAction") ? { callToAction: optionalString(input, "callToAction") } : {})
-    })
+    }), undefined, cliExecution
   );
 }
 
 async function createMetaAdHandler(
   db: InfiniteOsDb,
   context: SessionContext,
-  input: unknown
+  input: unknown,
+  cliExecution?: MetaAdsCliExecution
 ): Promise<ActionEnvelope> {
   const adsetId = requiredString(input, "adsetId");
   const name = requiredString(input, "name");
   const creativeId = requiredString(input, "creativeId");
   const sourceId = await resolveMetaWriteSourceId(db, context, input);
   return runMetaCreate(db, context, input, sourceId, "create_meta_ad", "ad", (credential) =>
-    createMetaAd(credential, { adsetId, name, creativeId })
+    createMetaAd(credential, { adsetId, name, creativeId }), undefined, cliExecution
   );
 }
 
@@ -2396,7 +2421,8 @@ function requiredPositiveBudgetCents(input: unknown): number {
 async function setMetaEntityStatusHandler(
   db: InfiniteOsDb,
   context: SessionContext,
-  input: unknown
+  input: unknown,
+  cliExecution?: MetaAdsCliExecution
 ): Promise<ActionEnvelope> {
   const sourceId = requiredString(input, "sourceId");
   const entityId = requiredString(input, "entityId");
@@ -2417,7 +2443,7 @@ async function setMetaEntityStatusHandler(
     throw new Error(`activation_requires_confirmation:${entityId}`);
   }
   const action: InfiniteOsActionId = "set_meta_entity_status";
-  const credential = await resolveMetaCredentialForWrite(db, context, sourceId);
+  const credential = await resolveMetaCredentialForWrite(db, context, sourceId, cliExecution);
   let result;
   try {
     result = await setMetaEntityStatus(credential, entityId, status as MetaEntityStatus, entity);
@@ -2458,7 +2484,8 @@ async function setMetaEntityStatusHandler(
 async function updateMetaBudgetHandler(
   db: InfiniteOsDb,
   context: SessionContext,
-  input: unknown
+  input: unknown,
+  cliExecution?: MetaAdsCliExecution
 ): Promise<ActionEnvelope> {
   const sourceId = requiredString(input, "sourceId");
   const entityId = requiredString(input, "entityId");
@@ -2467,7 +2494,7 @@ async function updateMetaBudgetHandler(
   // POSITIVE integer cents, validated before any credential resolve or POST.
   const dailyBudget = requiredPositiveBudgetCents(input);
   const action: InfiniteOsActionId = "update_meta_budget";
-  const credential = await resolveMetaCredentialForWrite(db, context, sourceId);
+  const credential = await resolveMetaCredentialForWrite(db, context, sourceId, cliExecution);
   let result;
   try {
     result = await updateMetaBudget(credential, entityId, dailyBudget, entity);
@@ -2507,7 +2534,8 @@ async function updateMetaBudgetHandler(
 async function deleteMetaEntityHandler(
   db: InfiniteOsDb,
   context: SessionContext,
-  input: unknown
+  input: unknown,
+  cliExecution?: MetaAdsCliExecution
 ): Promise<ActionEnvelope> {
   const sourceId = requiredString(input, "sourceId");
   const entityId = requiredString(input, "entityId");
@@ -2516,7 +2544,7 @@ async function deleteMetaEntityHandler(
   // so the failure is early + transport-agnostic.
   const entity = requiredMetaWriteEntity(input);
   const action: InfiniteOsActionId = "delete_meta_entity";
-  const credential = await resolveMetaCredentialForWrite(db, context, sourceId);
+  const credential = await resolveMetaCredentialForWrite(db, context, sourceId, cliExecution);
   let result;
   try {
     result = await deleteMetaEntity(credential, entityId, entity);
@@ -2586,14 +2614,15 @@ async function listMetaAssetsHandler(
 async function listMetaEntitiesHandler(
   db: InfiniteOsDb,
   context: SessionContext,
-  input: unknown
+  input: unknown,
+  cliExecution?: MetaAdsCliExecution
 ): Promise<ActionEnvelope> {
   const sourceId = requiredString(input, "sourceId");
   const entity = requiredString(input, "entity") as MetaWriteEntity;
   if (!["campaign", "adset", "ad", "creative"].includes(entity)) {
     throw new Error(`unsupported_meta_entity:${entity}`);
   }
-  const credential = await resolveMetaCredentialForWrite(db, context, sourceId);
+  const credential = await resolveMetaCredentialForWrite(db, context, sourceId, cliExecution);
   const limit = numberOrNull(input, "limit") ?? undefined;
   const fields = optionalString(input, "fields");
   const entities = await listMetaEntities(credential, entity, {
@@ -2612,11 +2641,12 @@ async function listMetaEntitiesHandler(
 async function getMetaEntityHandler(
   db: InfiniteOsDb,
   context: SessionContext,
-  input: unknown
+  input: unknown,
+  cliExecution?: MetaAdsCliExecution
 ): Promise<ActionEnvelope> {
   const sourceId = requiredString(input, "sourceId");
   const entityId = requiredString(input, "entityId");
-  const credential = await resolveMetaCredentialForWrite(db, context, sourceId);
+  const credential = await resolveMetaCredentialForWrite(db, context, sourceId, cliExecution);
   const fields = optionalString(input, "fields");
   // FIX 1: thread the entity-kind hint so `get` requests the SAME full field set
   // as `list` for the object type (campaign/adset/ad/creative) instead of
@@ -2700,7 +2730,8 @@ function metaTypedError(code: string, message: string): ConnectorError {
 async function runMetaLiveInsightsHandler(
   db: InfiniteOsDb,
   context: SessionContext,
-  input: unknown
+  input: unknown,
+  cliExecution?: MetaAdsCliExecution
 ): Promise<ActionEnvelope> {
   const sourceId =
     optionalString(input, "sourceId") ?? (await resolveSoleConnectedMetaSourceId(db, context));
@@ -2748,7 +2779,7 @@ async function runMetaLiveInsightsHandler(
   );
   // Same resolver as every meta read/write: pins provider === meta_ads inside the workspace,
   // then decrypts the stored credential. (Despite the name it is the READ resolver too.)
-  const credential = await resolveMetaCredentialForWrite(db, context, sourceId);
+  const credential = await resolveMetaCredentialForWrite(db, context, sourceId, cliExecution);
   const { rows, totalRows, totalEntities, truncated, window, currency, caveats } = await fetchMetaLiveInsights(credential, {
     level: level as "campaign" | "adset" | "ad",
     ...(timeRange ? { timeRange } : { datePreset }),
