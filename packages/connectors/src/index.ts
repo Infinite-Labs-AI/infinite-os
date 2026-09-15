@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { createWriteStream, existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { createWriteStream, existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join, resolve } from "node:path";
 import {
@@ -13,6 +13,12 @@ import {
 } from "@infinite-os/core";
 import { type FirstPhaseProvider, type InfiniteOsDb, assertFirstPhaseProvider } from "@infinite-os/db";
 import { writeStripeMrrMovementsAtClose } from "./stripe-mrr-movements.js";
+import {
+  META_ADS_DEFAULT_REQUEST_BUDGET,
+  MetaAdsRequestTelemetry,
+  type MetaAdsRequestKind,
+  type MetaAdsRequestTelemetrySnapshot,
+} from "./meta-telemetry.js";
 import {
   STRIPE_DELTA_MAX_PAGES,
   STRIPE_DELTA_MAX_REFETCH_PER_RUN,
@@ -69,12 +75,19 @@ export interface SyncRequest {
   // can set these to request adset/ad level or a different time_increment.
   metaAdsInsightsLevel?: string;
   metaAdsInsightsTimeIncrement?: string;
+  // Hard per-run Graph request allowance. Checked immediately before every Meta fetch, including
+  // pagination and retries. Omitted callers get a bounded engine default; hosted scheduling may
+  // pass a smaller admitted remainder from its workspace/source rate budget.
+  metaAdsRequestBudget?: number;
   // Cloud-default credential custody: an explicit per-workspace encryption key. Server-side
   // (multi-tenant Trigger/Vercel) callers derive one key per workspace and pass it here so the
   // decrypt/re-encrypt path never touches process.env — see requiredEncryptionKey(override).
   // UNSET on desktop (single-tenant), where the process.env / .growth-os default is used, so
   // this is fully backward-compatible. Cloud-agnostic: it is just an opaque string.
   encryptionKey?: string;
+  // Optional caller-owned cancellation for bounded provider probes. Ordinary sync callers omit
+  // it; hosted connect validation uses it to keep a request deadline from hanging on Graph.
+  signal?: AbortSignal;
   // Cloud-default windowed backfill: an explicit [windowSince, windowUntil] time window (ISO
   // 8601 or YYYY-MM-DD). Set by the cloud orchestrator to drive MANY bounded-window sync runs
   // so a mature Meta/GA4 history persists+advances the cursor without a 900s wall; each run is
@@ -111,6 +124,10 @@ export interface SyncPlan {
   stripeDeletedInvoiceIds?: string[];
   // Per-run provider request accounting, persisted to sync_runs.request_telemetry at CLOSE.
   requestTelemetry?: StripeRequestTelemetry;
+  // Meta's equivalent request/page/retry/usage receipt. Separate from Stripe's rich telemetry type
+  // so provider-specific methods cannot be called across lanes by accident.
+  metaAdsRequestTelemetry?: MetaAdsRequestTelemetry;
+  metaAdsAccountMetadata?: MetaAdsAccountMetadata;
   // GA4-only. Snapshot-replacement state, carried from EXTRACT into CLOSE (the Stripe checkpoint
   // pattern): EXTRACT records the exact refreshed [start, end] date window, how many rows each
   // report staged, and the response's property metadata; CLOSE prunes fact rows inside that window
@@ -118,6 +135,43 @@ export interface SyncPlan {
   // must go, or totals double-count) and persists the provider time zone / data-through date.
   // ABSENT on fixture syncs and on a failed/empty extract path → CLOSE prunes nothing (fail closed).
   ga4SnapshotReplacement?: Ga4SnapshotReplacementState;
+  // Meta-only exact-window replacement contract. Present only after the complete direct-Graph
+  // extract has succeeded; CLOSE uses this plus staged DB keys to prune and publish daily coverage.
+  metaAdsSnapshotReplacement?: MetaAdsSnapshotReplacementState;
+}
+
+export type MetaAdsHistoryGrain = "campaign" | "adset" | "ad";
+type MetaAdsEntityType = MetaAdsHistoryGrain | "creative";
+
+interface MetaAdsAssetDescriptor {
+  slotKey: string;
+  kind: "image" | "video" | "thumbnail";
+  providerAssetId: string | null;
+  providerAssetType: "image_hash" | "video_id" | null;
+  slotFingerprint: string | null;
+  sourceUrl: string | null;
+  sourceLocator: { host: string; path: string } | null;
+}
+
+interface SyncClaimSnapshot {
+  sourceAccountExternalId: string | null;
+  credentialId: string | null;
+  credentialUpdatedAt: string | Date | null;
+}
+
+export interface MetaAdsSnapshotReplacementState {
+  adAccountId: string;
+  windowStartDate: string;
+  windowEndDate: string;
+  grains: MetaAdsHistoryGrain[];
+  currency: string | null;
+  timezoneName: string | null;
+}
+
+interface MetaAdsAccountMetadata {
+  adAccountId: string;
+  currency: string | null;
+  timezoneName: string | null;
 }
 
 /**
@@ -205,7 +259,8 @@ export interface GrowthConnector {
   testConnection(
     db: InfiniteOsDb,
     request: SyncRequest,
-    depth?: ConnectionTestDepth
+    depth?: ConnectionTestDepth,
+    plan?: SyncPlan,
   ): Promise<ConnectionTestResult>;
   planSync(db: InfiniteOsDb, request: SyncRequest): Promise<SyncPlan>;
   extract(db: InfiniteOsDb, request: SyncRequest, plan: SyncPlan): Promise<ExtractedRecord<unknown>[]>;
@@ -217,6 +272,8 @@ export interface ConnectionTestResult {
   mode: "fixture" | "live";
   provider: FirstPhaseProvider;
   accountExternalId?: string;
+  accountCurrency?: string;
+  accountTimeZone?: string;
 }
 
 export type SetupProviderId = "ga4" | "posthog" | "x";
@@ -419,6 +476,27 @@ export interface MetaAdsCredential {
   mcpToolName?: string;
 }
 
+/** Trusted process-only execution policy. Never serialize this into a source credential. */
+export interface MetaAdsCliExecution {
+  mode: "isolated_server";
+  /** Fixed absolute path selected by the server image, not a request or credential. */
+  executable: string;
+  /** Optional fixed child PATH selected by the server image. */
+  path?: string;
+}
+
+const metaAdsCliExecutionByCredential = new WeakMap<MetaAdsCredential, MetaAdsCliExecution>();
+
+/** Bind trusted handler configuration after decrypt; JSON credential fields cannot select this mode. */
+export function bindMetaAdsCliExecution(
+  credential: MetaAdsCredential,
+  execution: MetaAdsCliExecution
+): MetaAdsCredential {
+  const bound = { ...credential };
+  metaAdsCliExecutionByCredential.set(bound, execution);
+  return bound;
+}
+
 interface ShopifyOrderRow {
   kind: "order";
   externalId: string;
@@ -600,10 +678,36 @@ interface MetaAdsAdDailyRow {
   conversions: MetaAdsConversionRow[];
 }
 
+/** One bounded entity-edge observation, retained only when its metadata changes. */
+interface MetaAdsEntitySnapshotRow {
+  grain: "entity";
+  externalId: string;
+  adAccountId: string;
+  entityType: MetaAdsEntityType;
+  entityId: string;
+  campaignId: string | null;
+  adsetId: string | null;
+  adId: string | null;
+  creativeId: string | null;
+  name: string | null;
+  effectiveStatus: string | null;
+  configuredStatus: string | null;
+  objective: string | null;
+  optimizationGoal: string | null;
+  billingEvent: string | null;
+  dailyBudget: number | null;
+  lifetimeBudget: number | null;
+  bidAmount: number | null;
+  observedAt: string;
+  apiVersion: string;
+  metadata: Record<string, unknown>;
+  assetDescriptors: MetaAdsAssetDescriptor[];
+}
+
 // §4c — the grain-tagged extract union. extractLive emits a flat array of all three grains;
 // the dispatching writeMetaAdsTruth routes each row to its grain's dim+daily+conversions
 // writer. Every member carries `externalId` (the factory's Row constraint) + `grain`.
-type MetaAdsSyncRow = MetaAdsCampaignDailyRow | MetaAdsAdsetDailyRow | MetaAdsAdDailyRow;
+type MetaAdsSyncRow = MetaAdsCampaignDailyRow | MetaAdsAdsetDailyRow | MetaAdsAdDailyRow | MetaAdsEntitySnapshotRow;
 
 export interface XProfileSnapshot {
   userId: string;
@@ -1948,7 +2052,7 @@ const xConnector = createConnector<XCredential, XPostRow>({
     return { ok: true, mode: "live", provider: "x", accountExternalId: user.id };
   },
   async planLive(db, request, credential) {
-    return defaultPlan(
+    const plan = await defaultPlan(
       db,
       request,
       "x_user_timeline",
@@ -1957,6 +2061,7 @@ const xConnector = createConnector<XCredential, XPostRow>({
       undefined,
       { ignoreCursor: request.refreshWindowDays !== undefined }
     );
+    return plan;
   },
   async extractLive(_db, _request, plan, credential) {
     const bearerToken = requireCredential(credential, "bearerToken");
@@ -2166,7 +2271,9 @@ const metaAdsConnector = createConnector<MetaAdsCredential, MetaAdsSyncRow>({
     // §4c — objectType tracks grain (campaign | adset | ad) so raw_records/extracted records
     // are grain-tagged; each grain's externalId is re-keyed on its id, keeping rows distinct.
     objectType:
-      row.grain === "ad"
+      row.grain === "entity"
+        ? `meta_ads_entity_${row.entityType}`
+        : row.grain === "ad"
         ? "meta_ads_ad_daily"
         : row.grain === "adset"
           ? "meta_ads_adset_daily"
@@ -2175,8 +2282,12 @@ const metaAdsConnector = createConnector<MetaAdsCredential, MetaAdsSyncRow>({
     sourceUpdatedAt: plan.mode === "fixture" ? null : plan.cursorEnd,
     payload: row
   }),
-  async testLive(_db, _request, credential) {
+  async testLive(_db, request, credential, depth, plan) {
     const adAccountId = metaAdsAccountId(credential);
+    let accountMetadata: MetaAdsAccountMetadata | null = null;
+    if (depth === "liveness") {
+      await assertMetaAdsSourceAccountBinding(_db, request, adAccountId);
+    }
     if (isMetaAdsMcpTransport(credential)) {
       await metaAdsMcpInsights(credential, {
         adAccountId,
@@ -2192,6 +2303,15 @@ const metaAdsConnector = createConnector<MetaAdsCredential, MetaAdsSyncRow>({
         limit: "1",
         datePreset: "today"
       });
+    } else if (depth === "liveness") {
+      // The one per-sync liveness request also captures the account reporting calendar and currency,
+      // keeping the complete three-grain no-pagination floor at seven Graph calls.
+      accountMetadata = await metaAdsReadAccountMetadata(
+        credential,
+        request.signal,
+        plan?.metaAdsRequestTelemetry,
+      );
+      if (plan) plan.metaAdsAccountMetadata = accountMetadata;
     } else {
       // Primary direct-Graph probe. Also taken by transport=meta_ads_cli credentials that
       // store their own accessToken (see metaAdsReadsViaCli) so the test reflects CREDENTIAL
@@ -2207,7 +2327,8 @@ const metaAdsConnector = createConnector<MetaAdsCredential, MetaAdsSyncRow>({
         }),
         {
           method: "GET",
-          headers: bearerHeaders(accessToken)
+          headers: bearerHeaders(accessToken),
+          ...(request.signal ? { signal: request.signal } : {})
         }
       );
     }
@@ -2215,11 +2336,13 @@ const metaAdsConnector = createConnector<MetaAdsCredential, MetaAdsSyncRow>({
       ok: true,
       mode: "live",
       provider: "meta_ads",
-      accountExternalId: adAccountId
+      accountExternalId: adAccountId,
+      ...(accountMetadata?.currency ? { accountCurrency: accountMetadata.currency } : {}),
+      ...(accountMetadata?.timezoneName ? { accountTimeZone: accountMetadata.timezoneName } : {}),
     };
   },
   async planLive(db, request, credential) {
-    return defaultPlan(
+    const plan = await defaultPlan(
       db,
       request,
       "meta_ads_campaign_daily",
@@ -2228,6 +2351,11 @@ const metaAdsConnector = createConnector<MetaAdsCredential, MetaAdsSyncRow>({
       request.backfillWindow,
       { ignoreCursor: request.mode === "backfill" || Boolean(request.backfillWindow) }
     );
+    plan.metaAdsRequestTelemetry = new MetaAdsRequestTelemetry(
+      request.metaAdsRequestBudget ?? META_ADS_DEFAULT_REQUEST_BUDGET,
+      (snapshot) => persistMetaAdsRequestReservation(db, request, snapshot),
+    );
+    return plan;
   },
   async extractLive(_db, request, plan, credential) {
     const adAccountId = metaAdsAccountId(credential);
@@ -2287,21 +2415,28 @@ const metaAdsConnector = createConnector<MetaAdsCredential, MetaAdsSyncRow>({
     // (status-enriched) PLUS an internal adset pass (the worker never sets the grain flag),
     // each with the §4d fail-loud page cap.
     const accessToken = requireCredential(credential, "accessToken");
+    const telemetry = plan.metaAdsRequestTelemetry;
 
     // §4a — net-new edge reads. The adset dim map (status + optimization_goal) drives the
     // adset rows; the campaign status map backfills the campaign dim's NULL-status gap; the
     // ad dim map (status + creative_id + parent ids) drives the ad rows (§4c). All header-
     // aware GETs (§4b) — no ad-account mutation anywhere.
-    const adsetDims = await metaAdsReadAdsetDims(credential);
-    const campaignStatus = await metaAdsReadCampaignStatus(credential);
-    const adDims = await metaAdsReadAdAdims(credential);
+    const campaignNodes: MetaAdsEdgeNode[] = [];
+    const adsetNodes: MetaAdsEdgeNode[] = [];
+    const adNodes: MetaAdsEdgeNode[] = [];
+    const adsetDims = await metaAdsReadAdsetDims(credential, telemetry, adsetNodes);
+    const campaignStatus = await metaAdsReadCampaignStatus(credential, telemetry, campaignNodes);
+    const adDims = await metaAdsReadAdAdims(credential, telemetry, adNodes);
 
     const rows: MetaAdsSyncRow[] = [];
+    const requestedGrains: MetaAdsHistoryGrain[] = request.metaAdsInsightsLevel
+      ? [level as MetaAdsHistoryGrain]
+      : ["campaign", "adset", "ad"];
 
     // The campaign insights pass runs unless the caller EXPLICITLY pinned a finer grain (the
     // Phase-0 plumbing override level=adset/ad). With no override (the worker's path) level is
     // campaign and all three passes run (§4f: 3 passes/sync is deliberate — no roll-up).
-    if (level !== "adset" && level !== "ad") {
+    if (requestedGrains.includes("campaign")) {
       await metaAdsFetchInsightsPages(
         accessToken,
         metaAdsInsightsUrl(credential, {
@@ -2313,14 +2448,16 @@ const metaAdsConnector = createConnector<MetaAdsCredential, MetaAdsSyncRow>({
           attributionWindows: META_ADS_ATTRIBUTION_WINDOWS,
           ...timeOptions
         }),
-        (row) => rows.push(metaAdsCampaignDailyRow(adAccountId, row, context, campaignStatus))
+        (row) => rows.push(metaAdsCampaignDailyRow(adAccountId, row, context, campaignStatus)),
+        telemetry,
+        "campaign_insights",
       );
     }
 
     // §4b/§4c — the adset insights pass. Runs on the primary transport unless the caller
     // EXPLICITLY pinned level=ad (then only the ad pass runs). The worker does not request a
     // finer grain via the flag, so the adset fan-out lives here alongside campaign + ad.
-    if (level !== "ad") {
+    if (requestedGrains.includes("adset")) {
       await metaAdsFetchInsightsPages(
         accessToken,
         metaAdsInsightsUrl(credential, {
@@ -2332,7 +2469,9 @@ const metaAdsConnector = createConnector<MetaAdsCredential, MetaAdsSyncRow>({
           attributionWindows: META_ADS_ATTRIBUTION_WINDOWS,
           ...timeOptions
         }),
-        (row) => rows.push(metaAdsAdsetDailyRow(adAccountId, row, context, adsetDims))
+        (row) => rows.push(metaAdsAdsetDailyRow(adAccountId, row, context, adsetDims)),
+        telemetry,
+        "adset_insights",
       );
     }
 
@@ -2345,49 +2484,69 @@ const metaAdsConnector = createConnector<MetaAdsCredential, MetaAdsSyncRow>({
     // sentinel: a bounded multi-month backfill is exactly the wide level=ad request that trips
     // 1487534, so it MUST chunk too. Only a genuinely-small trailing incremental refresh (no
     // backfillWindow, ≤ one month) stays a SINGLE request.
-    const adRowSink = (row: MetaAdsInsightsRow) =>
-      rows.push(metaAdsAdDailyRow(adAccountId, row, context, adDims, adsetDims));
-    const adUrlFor = (range: { since: string; until: string }) =>
-      metaAdsInsightsUrl(credential, {
-        adAccountId,
-        fields: metaAdsInsightsFieldsForLevel("ad"),
-        level: "ad",
-        limit: "100",
-        timeIncrement,
-        timeRange: range,
-        attributionWindows: META_ADS_ATTRIBUTION_WINDOWS
-      });
-    // The chunked windows are resolved from the plan (all_time → no timeRange; bounded backfill
-    // → a finite timeRange). For the single-request path we need a concrete trailing window: use
-    // timeOptions.timeRange when present, else the plan's resolved span (the all_time case never
-    // reaches the single-request branch because plan.backfillWindow forces chunking).
-    const adTrailingRange = timeOptions.timeRange ?? {
-      since: cursorStartIso(plan).slice(0, 10),
-      until: plan.cursorEnd.slice(0, 10)
-    };
-    if (metaAdsAdPassNeedsChunking(plan, adTrailingRange)) {
-      // §4d — month-by-month backfill (or a defensively-wide incremental window). Clamp the
-      // start to the 37-month retention floor; iterate calendar months; one metaAdsFetchInsights
-      // Pages call per window, narrowing to weeks on a 1487534 data-volume error.
-      for (const window of metaAdsAdBackfillWindows(plan)) {
-        await metaAdsFetchAdInsightsChunked(accessToken, window, adUrlFor, adRowSink);
+    if (requestedGrains.includes("ad")) {
+      const adRowSink = (row: MetaAdsInsightsRow) =>
+        rows.push(metaAdsAdDailyRow(adAccountId, row, context, adDims, adsetDims));
+      const adUrlFor = (range: { since: string; until: string }) =>
+        metaAdsInsightsUrl(credential, {
+          adAccountId,
+          fields: metaAdsInsightsFieldsForLevel("ad"),
+          level: "ad",
+          limit: "100",
+          timeIncrement,
+          timeRange: range,
+          attributionWindows: META_ADS_ATTRIBUTION_WINDOWS
+        });
+      // The chunked windows are resolved from the plan (all_time → no timeRange; bounded backfill
+      // → a finite timeRange). For the single-request path we need a concrete trailing window.
+      const adTrailingRange = timeOptions.timeRange ?? {
+        since: cursorStartIso(plan).slice(0, 10),
+        until: plan.cursorEnd.slice(0, 10)
+      };
+      if (metaAdsAdPassNeedsChunking(plan, adTrailingRange)) {
+        for (const window of metaAdsAdBackfillWindows(plan)) {
+          await metaAdsFetchAdInsightsChunked(accessToken, window, adUrlFor, adRowSink, telemetry);
+        }
+      } else {
+        await metaAdsFetchAdInsightsChunked(
+          accessToken,
+          adTrailingRange,
+          adUrlFor,
+          adRowSink,
+          telemetry,
+        );
       }
-    } else {
-      // Incremental trailing window — single request (the rolling sync is small enough). Still
-      // wrapped in the chunk helper so a surprise 1487534 narrows to weeks instead of failing.
-      await metaAdsFetchAdInsightsChunked(
-        accessToken,
-        adTrailingRange,
-        adUrlFor,
-        adRowSink
+    }
+
+    // Entity edges describe current provider state even when this run backfills an old performance
+    // window. Stamp the observation wall clock, never the historical window end.
+    const observedAt = new Date().toISOString();
+    rows.push(
+      ...metaAdsEntitySnapshotRows(adAccountId, "campaign", campaignNodes, observedAt, context.apiVersion, accessToken),
+      ...metaAdsEntitySnapshotRows(adAccountId, "adset", adsetNodes, observedAt, context.apiVersion, accessToken),
+      ...metaAdsEntitySnapshotRows(adAccountId, "ad", adNodes, observedAt, context.apiVersion, accessToken),
+    );
+    if (timeOptions.timeRange && plan.metaAdsRequestTelemetry) {
+      const insightRows = rows.filter(
+        (row): row is MetaAdsCampaignDailyRow | MetaAdsAdsetDailyRow | MetaAdsAdDailyRow => row.grain !== "entity",
       );
+      const currency = insightRows.find((row) => row.currency)?.currency ?? plan.metaAdsAccountMetadata?.currency ?? null;
+      plan.metaAdsSnapshotReplacement = {
+        adAccountId,
+        windowStartDate: timeOptions.timeRange.since,
+        windowEndDate: timeOptions.timeRange.until,
+        grains: requestedGrains,
+        currency,
+        timezoneName: plan.metaAdsAccountMetadata?.timezoneName ?? null,
+      };
     }
 
     return rows;
   },
   async writeTruth(tx, request, rows, rawIds) {
     await writeMetaAdsTruth(tx, request, rows, rawIds);
-  }
+  },
+  closeSuccess: metaAdsCloseSuccess,
 });
 
 function createConnector<
@@ -2401,7 +2560,8 @@ function createConnector<
     db: InfiniteOsDb,
     request: SyncRequest,
     credential: Credential,
-    depth: ConnectionTestDepth
+    depth: ConnectionTestDepth,
+    plan?: SyncPlan,
   ) => Promise<ConnectionTestResult>;
   planLive: (db: InfiniteOsDb, request: SyncRequest, credential: Credential) => Promise<SyncPlan>;
   extractLive: (
@@ -2419,12 +2579,12 @@ function createConnector<
     // Defaulting to the DEEP probe is deliberate: every caller that is a real connect (the CLI,
     // the app HTTP route, the in-chat agent, `connect_source`/`reconnect_source`) gets the full
     // gate without having to know it exists. Only `sync()` below opts down.
-    async testConnection(db, request, depth = "connect") {
+    async testConnection(db, request, depth = "connect", plan) {
       const credential = await sourceCredential<Credential>(db, request);
       if (isFixtureCredential(credential)) {
         return { ok: true, mode: "fixture", provider: options.provider };
       }
-      return options.testLive(db, request, credential.payload, depth);
+      return options.testLive(db, request, credential.payload, depth, plan);
     },
     async planSync(db, request) {
       const credential = await sourceCredential<Credential>(db, request);
@@ -2456,7 +2616,7 @@ function createConnector<
       // opens would allow a competitor to fetch stale truth while the first run is loading.
       // Admission errors intentionally sit outside the failure recorder: a rejected competitor
       // did not own the source and must not mutate the owner's run or failure streak.
-      await claimSourceSync(db, request);
+      const claim = await claimSourceSync(db, request);
       // planSync resolves (and DECRYPTS) the credential, so it MUST run inside the try: a decrypt
       // failure here (key mismatch) used to throw before recordSyncFailure could run, leaving the
       // source `connected` forever while the worker silently re-enqueued the doomed sync. `plan` is
@@ -2468,15 +2628,16 @@ function createConnector<
         // LIVENESS, not the connect gate: this runs every heartbeat, and the extract that follows
         // reads the same endpoints for real. Paying the full permission probe here would multiply
         // the sync's provider reads for information the next few lines produce anyway.
-        await this.testConnection(db, request, "liveness");
+        await this.testConnection(db, request, "liveness", plan);
         extracted = await this.extract(db, request, plan);
       } catch (error) {
-        await recordSyncFailure(db, request, plan, providerError(error));
+        await recordSyncFailure(db, request, claim, plan, providerError(error));
         throw error;
       }
       return syncExtractedBatch(
         db,
         request,
+        claim,
         plan,
         extracted,
         (tx, records, rawIds) =>
@@ -2657,10 +2818,139 @@ async function insertSyncBatchRecordsChunk(
   );
 }
 
-async function claimSourceSync(db: InfiniteOsDb, request: SyncRequest): Promise<void> {
-  await db.withTransaction(async (tx) => {
-    const sources = await tx.query<{ provider: string; status: string }>(
+function syncClaimLost(message = "source sync claim is no longer active"): ConnectorError {
+  return new ConnectorError("sync_claim_lost", message, true);
+}
+
+async function readActiveCredentialVersion(
+  tx: InfiniteOsDb,
+  request: Pick<SyncRequest, "workspaceId" | "sourceId">,
+): Promise<{ id: string; updated_at: string | Date } | null> {
+  return tx.one<{ id: string; updated_at: string | Date }>(
+    `
+      select id, updated_at
+      from connection_credentials
+      where workspace_id = $1 and source_id = $2 and revoked_at is null
+      order by created_at desc
+      limit 1
+      for update
+    `,
+    [request.workspaceId, request.sourceId],
+  );
+}
+
+async function syncClaimStillOwnsSource(
+  tx: InfiniteOsDb,
+  request: SyncRequest,
+  claim: SyncClaimSnapshot,
+): Promise<boolean> {
+  const sources = await tx.query<{ id: string }>(
+    `
+      select id
+      from sources
+      where id = $1
+        and workspace_id = $2
+        and provider = $3
+        and status = 'syncing'
+        and account_external_id is not distinct from $4
+      for update
+    `,
+    [request.sourceId, request.workspaceId, request.provider, claim.sourceAccountExternalId],
+  );
+  const source = sources[0];
+  if (!source) return false;
+
+  if (claim.credentialId) {
+    const credential = await tx.one<{ id: string }>(
+      `
+        select id
+        from connection_credentials
+        where id = $1
+          and workspace_id = $2
+          and source_id = $3
+          and revoked_at is null
+          and updated_at is not distinct from $4::timestamptz
+        for update
+      `,
+      [claim.credentialId, request.workspaceId, request.sourceId, claim.credentialUpdatedAt],
+    );
+    return Boolean(credential);
+  }
+
+  const credential = await readActiveCredentialVersion(tx, request);
+  return !credential;
+}
+
+async function assertSyncClaimStillOwnsRun(
+  tx: InfiniteOsDb,
+  request: SyncRequest,
+  claim: SyncClaimSnapshot,
+): Promise<void> {
+  if (!(await syncClaimStillOwnsSource(tx, request, claim))) {
+    throw syncClaimLost();
+  }
+  const owningRuns = await tx.query<{ id: string }>(
+    `
+      select id
+      from sync_runs
+      where id = $1 and workspace_id = $2 and source_id = $3 and status = 'running'
+      for update
+    `,
+    [request.syncRunId, request.workspaceId, request.sourceId],
+  );
+  const owningRun = owningRuns[0];
+  if (!owningRun) {
+    throw syncClaimLost("source sync claim belongs to another run");
+  }
+}
+
+async function markClaimedSourceSucceeded(
+  tx: InfiniteOsDb,
+  request: SyncRequest,
+  claim: SyncClaimSnapshot,
+  cursorEnd: string,
+): Promise<void> {
+  await tx.query(
+    `
+      update sources
+      set status = 'connected',
+          last_synced_at = coalesce($5::timestamptz, last_synced_at),
+          consecutive_sync_failures = 0,
+          last_counted_sync_failure_at = null
+      where id = $1
+        and workspace_id = $2
+        and provider = $3
+        and status = 'syncing'
+        and account_external_id is not distinct from $4
+    `,
+    [request.sourceId, request.workspaceId, request.provider, claim.sourceAccountExternalId, cursorEnd],
+  );
+}
+
+async function restoreClaimedSourceAfterFailure(
+  tx: InfiniteOsDb,
+  request: SyncRequest,
+  claim: SyncClaimSnapshot,
+): Promise<void> {
+  await tx.query(
+    `
+      update sources
+      set status = 'connected'
+      where id = $1
+        and workspace_id = $2
+        and provider = $3
+        and status = 'syncing'
+        and account_external_id is not distinct from $4
+    `,
+    [request.sourceId, request.workspaceId, request.provider, claim.sourceAccountExternalId],
+  );
+}
+
+async function claimSourceSync(db: InfiniteOsDb, request: SyncRequest): Promise<SyncClaimSnapshot> {
+  return db.withTransaction(async (tx) => {
+    const sources = await tx.query<{ provider: string; status: string; account_external_id: string | null }>(
       `select provider, status
+              , account_external_id
          from sources
         where id = $1 and workspace_id = $2
         for update`,
@@ -2677,6 +2967,8 @@ async function claimSourceSync(db: InfiniteOsDb, request: SyncRequest): Promise<
     if (source.status === "syncing") {
       throw new ConnectorError("sync_in_progress", "source is already syncing", true);
     }
+
+    const credential = await readActiveCredentialVersion(tx, request);
 
     // Boot recovery deliberately repairs a crashed owner's source status without replaying
     // historical run bookkeeping. Retire any such stale `running` row as part of the next
@@ -2705,12 +2997,18 @@ async function claimSourceSync(db: InfiniteOsDb, request: SyncRequest): Promise<
        values ($1, $2, $3, 'running')`,
       [request.syncRunId, request.workspaceId, request.sourceId]
     );
+    return {
+      sourceAccountExternalId: source.account_external_id ?? null,
+      credentialId: credential?.id ?? null,
+      credentialUpdatedAt: credential?.updated_at ?? null,
+    };
   });
 }
 
 async function syncExtractedBatch(
   db: InfiniteOsDb,
   request: SyncRequest,
+  claim: SyncClaimSnapshot,
   plan: SyncPlan,
   records: ExtractedRecord<unknown>[],
   // NOTE: writeTruth now receives the CHUNK's records (aligned with the chunk's
@@ -2727,36 +3025,7 @@ async function syncExtractedBatch(
     //    own brief transaction, so the batch row is committed before the (potentially
     //    large) record load and the mutex is NOT held across the whole batch.
     await db.withTransaction(async (tx) => {
-      const admittedSources = await tx.query<{ provider: string; status: string }>(
-        `select provider, status
-           from sources
-          where id = $1 and workspace_id = $2
-          for update`,
-        [request.sourceId, request.workspaceId]
-      );
-      const admittedSource = admittedSources[0];
-      if (!admittedSource || admittedSource.provider !== request.provider) {
-        throw new ConnectorError(
-          "source_scope_mismatch",
-          "source is outside the requested workspace or provider scope",
-          false
-        );
-      }
-      if (admittedSource.status !== "syncing") {
-        throw new ConnectorError(
-          "sync_claim_lost",
-          "source sync claim is no longer active",
-          true
-        );
-      }
-      const owningRuns = await tx.query<{ id: string }>(
-        `select id from sync_runs
-          where id = $1 and workspace_id = $2 and source_id = $3 and status = 'running'`,
-        [request.syncRunId, request.workspaceId, request.sourceId]
-      );
-      if (!owningRuns[0]) {
-        throw new ConnectorError("sync_claim_lost", "source sync claim belongs to another run", true);
-      }
+      await assertSyncClaimStillOwnsRun(tx, request, claim);
       await tx.query(
         `
           insert into sync_batches (
@@ -2818,6 +3087,7 @@ async function syncExtractedBatch(
     }
     // 3. CLOSE — finalize bookkeeping, advance the cursor, mark the source connected.
     await db.withTransaction(async (tx) => {
+      await assertSyncClaimStillOwnsRun(tx, request, claim);
       // Provider-specific durable checkpoints are intentionally part of CLOSE.
       // If this transaction fails, neither the generic cursor nor the Stripe
       // reconciliation cursor can outrun normalized truth.
@@ -2848,14 +3118,14 @@ async function syncExtractedBatch(
         `,
         [`cursor_${randomUUID()}`, request.workspaceId, request.sourceId, plan.cursorKey, plan.cursorEnd]
       );
-      await tx.updateSourceStatus(request.sourceId, "connected", plan.cursorEnd);
+      await markClaimedSourceSucceeded(tx, request, claim, plan.cursorEnd);
     });
   } catch (error) {
     // OPEN, LOAD, and CLOSE all happen after the durable claim committed. Their
     // cleanup must therefore be shared: mark only the exact still-running owner,
     // record one error, restore/park the source proportionately, and always rethrow
     // the ORIGINAL phase error even if best-effort cleanup itself fails.
-    await recordClaimedBatchFailure(db, request, batchId, error);
+    await recordClaimedBatchFailure(db, request, claim, plan, batchId, error);
     throw error;
   }
 
@@ -2875,17 +3145,33 @@ async function syncExtractedBatch(
  * error from the sync itself still propagates untouched.
  */
 function serializedRequestTelemetry(plan: SyncPlan): string | null {
-  if (!plan.requestTelemetry) return null;
+  const telemetry = plan.requestTelemetry ?? plan.metaAdsRequestTelemetry;
+  if (!telemetry) return null;
   try {
-    return JSON.stringify(plan.requestTelemetry.snapshot());
+    return JSON.stringify(telemetry.snapshot());
   } catch {
     return null;
   }
 }
 
+async function persistMetaAdsRequestReservation(
+  db: InfiniteOsDb,
+  request: SyncRequest,
+  snapshot: MetaAdsRequestTelemetrySnapshot,
+): Promise<void> {
+  await db.query(
+    `update sync_runs
+        set request_telemetry = $4::jsonb
+      where id = $1 and workspace_id = $2 and source_id = $3 and status = 'running'`,
+    [request.syncRunId, request.workspaceId, request.sourceId, JSON.stringify(snapshot)],
+  );
+}
+
 async function recordClaimedBatchFailure(
   db: InfiniteOsDb,
   request: SyncRequest,
+  claim: SyncClaimSnapshot,
+  plan: SyncPlan,
   batchId: string,
   error: unknown
 ): Promise<void> {
@@ -2894,10 +3180,11 @@ async function recordClaimedBatchFailure(
     await db.withTransaction(async (tx) => {
       const owners = await tx.query<{ id: string }>(
         `update sync_runs
-            set status = 'failed', finished_at = now(), error = $4
+            set status = 'failed', finished_at = now(), error = $4,
+                request_telemetry = $5::jsonb
           where id = $1 and workspace_id = $2 and source_id = $3 and status = 'running'
           returning id`,
-        [request.syncRunId, request.workspaceId, request.sourceId, perr.message]
+        [request.syncRunId, request.workspaceId, request.sourceId, perr.message, serializedRequestTelemetry(plan)]
       );
       // A lost/stale caller must never record or escalate a failure against the new owner.
       if (!owners[0]) return;
@@ -2920,13 +3207,15 @@ async function recordClaimedBatchFailure(
           perr.retryable
         ]
       );
+      await tx.query(
+        "delete from meta_ads_snapshot_keys where sync_run_id = $1 and workspace_id = $2 and source_id = $3",
+        [request.syncRunId, request.workspaceId, request.sourceId],
+      );
+      if (!(await syncClaimStillOwnsSource(tx, request, claim))) return;
       const parked = await escalateSourceOnSyncFailure(tx, request.sourceId, perr);
       if (!parked) {
         // Preserve the counted streak; updateSourceStatus('connected') intentionally resets it.
-        await tx.query(
-          "update sources set status = 'connected' where id = $1 and status = 'syncing'",
-          [request.sourceId]
-        );
+        await restoreClaimedSourceAfterFailure(tx, request, claim);
       }
     });
   } catch (markError) {
@@ -2945,8 +3234,8 @@ export async function __testOnlySyncExtractedBatch(
   writeTruth: (tx: InfiniteOsDb, records: ExtractedRecord<unknown>[], rawIds: string[]) => Promise<void>,
   closeSuccess?: (tx: InfiniteOsDb, request: SyncRequest, plan: SyncPlan) => Promise<void>
 ): Promise<SyncResult> {
-  await claimSourceSync(db, request);
-  return syncExtractedBatch(db, request, plan, records, writeTruth, closeSuccess);
+  const claim = await claimSourceSync(db, request);
+  return syncExtractedBatch(db, request, claim, plan, records, writeTruth, closeSuccess);
 }
 
 async function recordSyncFailure(
@@ -2954,18 +3243,27 @@ async function recordSyncFailure(
   // `plan` is null when the failure happened DURING planning (e.g. an undecryptable credential), so
   // there is no cursor to preserve — the cursor write is skipped in that case.
   request: SyncRequest,
+  claim: SyncClaimSnapshot,
   plan: SyncPlan | null,
   error: { code: string; message: string; retryable: boolean }
 ): Promise<void> {
   await db.withTransaction(async (tx) => {
-    await tx.query(
+    const owners = await tx.query<{ id: string }>(
       `
-        insert into sync_runs (id, workspace_id, source_id, status, finished_at, error)
-        values ($1, $2, $3, 'failed', now(), $4)
-        on conflict (id) do update set status = 'failed', finished_at = now(), error = excluded.error
+        update sync_runs
+           set status = 'failed', finished_at = now(), error = $4, request_telemetry = $5::jsonb
+         where id = $1 and workspace_id = $2 and source_id = $3 and status = 'running'
+         returning id
       `,
-      [request.syncRunId, request.workspaceId, request.sourceId, error.message]
+      [
+        request.syncRunId,
+        request.workspaceId,
+        request.sourceId,
+        error.message,
+        plan ? serializedRequestTelemetry(plan) : null,
+      ]
     );
+    if (!owners[0]) return;
     await tx.query(
       `
         insert into sync_errors (
@@ -2987,15 +3285,13 @@ async function recordSyncFailure(
     }
     // PROPORTIONATE STATUS ESCALATION — every failure is already recorded in sync_runs +
     // sync_errors above; escalateSourceOnSyncFailure gates ONLY the terminal `error` transition.
+    if (!(await syncClaimStillOwnsSource(tx, request, claim))) return;
     const parked = await escalateSourceOnSyncFailure(tx, request.sourceId, error);
     if (!parked) {
       // The claim moved this source to `syncing` before planning. A transient failure below
       // the parking threshold must return it to scheduler rotation while preserving the
       // newly-counted failure streak; updateSourceStatus('connected') would erase that streak.
-      await tx.query(
-        "update sources set status = 'connected' where id = $1 and status = 'syncing'",
-        [request.sourceId]
-      );
+      await restoreClaimedSourceAfterFailure(tx, request, claim);
     }
   });
 }
@@ -3382,6 +3678,149 @@ async function ga4CloseSuccess(
             provider_data_through_date = coalesce($3::date, provider_data_through_date)
       where id = $1`,
     [request.sourceId, replacement.propertyTimeZone, replacement.dataThroughDate]
+  );
+}
+
+const META_ADS_HISTORY_TABLES: Record<
+  MetaAdsHistoryGrain,
+  { delivery: string; conversion: string; entityColumn: string }
+> = {
+  campaign: {
+    delivery: "meta_ads_campaign_daily",
+    conversion: "meta_ads_campaign_conversions_daily",
+    entityColumn: "campaign_id",
+  },
+  adset: {
+    delivery: "meta_ads_adset_daily",
+    conversion: "meta_ads_adset_conversions_daily",
+    entityColumn: "adset_id",
+  },
+  ad: {
+    delivery: "meta_ads_ad_daily",
+    conversion: "meta_ads_ad_conversions_daily",
+    entityColumn: "ad_id",
+  },
+};
+
+/** Successful-close replacement and coverage publication for a complete Meta provider window. */
+async function metaAdsCloseSuccess(
+  tx: InfiniteOsDb,
+  request: SyncRequest,
+  plan: SyncPlan,
+): Promise<void> {
+  const replacement = plan.metaAdsSnapshotReplacement;
+  if (!replacement) return;
+
+  await tx.query(
+    `insert into meta_ads_accounts (
+       workspace_id, source_id, ad_account_id, currency, timezone_name
+     ) values ($1,$2,$3,$4,$5)
+     on conflict (workspace_id, source_id, ad_account_id) do update set
+       currency = coalesce(excluded.currency, meta_ads_accounts.currency),
+       timezone_name = coalesce(excluded.timezone_name, meta_ads_accounts.timezone_name),
+       updated_at = now()`,
+    [
+      request.workspaceId,
+      request.sourceId,
+      replacement.adAccountId,
+      replacement.currency,
+      replacement.timezoneName,
+    ],
+  );
+
+  for (const grain of replacement.grains) {
+    const tables = META_ADS_HISTORY_TABLES[grain];
+    await tx.query(
+      `delete from ${tables.delivery} f
+        where f.workspace_id = $1 and f.source_id = $2 and f.ad_account_id = $3
+          and f.occurred_on >= $4::date and f.occurred_on <= $5::date
+          and not exists (
+            select 1 from meta_ads_snapshot_keys k
+             where k.sync_run_id = $6 and k.workspace_id = $1 and k.source_id = $2
+               and k.ad_account_id = $3 and k.grain = $7 and k.key_kind = 'delivery'
+               and k.occurred_on = f.occurred_on and k.entity_id = f.${tables.entityColumn}
+          )`,
+      [
+        request.workspaceId,
+        request.sourceId,
+        replacement.adAccountId,
+        replacement.windowStartDate,
+        replacement.windowEndDate,
+        request.syncRunId,
+        grain,
+      ],
+    );
+    await tx.query(
+      `delete from ${tables.conversion} f
+        where f.workspace_id = $1 and f.source_id = $2 and f.ad_account_id = $3
+          and f.occurred_on >= $4::date and f.occurred_on <= $5::date
+          and not exists (
+            select 1 from meta_ads_snapshot_keys k
+             where k.sync_run_id = $6 and k.workspace_id = $1 and k.source_id = $2
+               and k.ad_account_id = $3 and k.grain = $7 and k.key_kind = 'conversion'
+               and k.occurred_on = f.occurred_on and k.entity_id = f.${tables.entityColumn}
+               and k.result_type = f.result_type
+          )`,
+      [
+        request.workspaceId,
+        request.sourceId,
+        replacement.adAccountId,
+        replacement.windowStartDate,
+        replacement.windowEndDate,
+        request.syncRunId,
+        grain,
+      ],
+    );
+    // Generate one receipt for every provider-local calendar day, including days with no fact row.
+    // The count is taken after replacement inside this same CLOSE transaction.
+    await tx.query(
+      `insert into meta_ads_coverage_daily (
+         workspace_id, source_id, ad_account_id, grain, occurred_on, sync_run_id, row_count, closed_at
+       )
+       select $1, $2, $3, $6, d.day::date, $7, count(f.id)::integer, now()
+         from generate_series($4::date, $5::date, interval '1 day') as d(day)
+         left join ${tables.delivery} f
+           on f.workspace_id = $1 and f.source_id = $2 and f.ad_account_id = $3
+          and f.occurred_on = d.day::date
+        group by d.day
+       on conflict (workspace_id, source_id, ad_account_id, grain, occurred_on) do update set
+         sync_run_id = excluded.sync_run_id,
+         row_count = excluded.row_count,
+         closed_at = excluded.closed_at`,
+      [
+        request.workspaceId,
+        request.sourceId,
+        replacement.adAccountId,
+        replacement.windowStartDate,
+        replacement.windowEndDate,
+        grain,
+        request.syncRunId,
+      ],
+    );
+  }
+
+  // Every direct-Graph history sync fully pages all three entity edges before it earns the snapshot
+  // contract. An entity absent from that complete account snapshot is closed, never deleted; prior
+  // names/status/targeting/creative descriptors remain available for pattern analysis.
+  for (const entityType of ["campaign", "adset", "ad", "creative"] as const) {
+    await tx.query(
+      `update meta_ads_entity_versions v
+          set valid_to = now(), last_observed_at = greatest(last_observed_at, now())
+        where v.workspace_id = $1 and v.source_id = $2 and v.ad_account_id = $3
+          and v.entity_type = $4 and v.valid_to is null
+          and not exists (
+            select 1 from meta_ads_snapshot_keys k
+             where k.sync_run_id = $5 and k.workspace_id = $1 and k.source_id = $2
+               and k.ad_account_id = $3 and k.grain = $4 and k.key_kind = 'entity'
+               and k.entity_id = v.entity_id
+          )`,
+      [request.workspaceId, request.sourceId, replacement.adAccountId, entityType, request.syncRunId],
+    );
+  }
+
+  await tx.query(
+    "delete from meta_ads_snapshot_keys where sync_run_id = $1 and workspace_id = $2 and source_id = $3",
+    [request.syncRunId, request.workspaceId, request.sourceId],
   );
 }
 
@@ -4831,6 +5270,138 @@ function metaAdsAdDimensionRows(rows: MetaAdsAdDailyRow[]): Map<string, MetaAdsA
   return dims;
 }
 
+async function stageMetaAdsSnapshotKey(
+  tx: InfiniteOsDb,
+  request: SyncRequest,
+  key: {
+    adAccountId: string;
+    grain: MetaAdsEntityType;
+    occurredOn: string;
+    entityId: string;
+    keyKind: "delivery" | "conversion" | "entity";
+    resultType?: string;
+  },
+): Promise<void> {
+  await tx.query(
+    `insert into meta_ads_snapshot_keys (
+       sync_run_id, workspace_id, source_id, ad_account_id, grain, occurred_on,
+       entity_id, key_kind, result_type
+     ) values ($1,$2,$3,$4,$5,$6::date,$7,$8,$9)
+     on conflict (sync_run_id, grain, occurred_on, entity_id, key_kind, result_type) do nothing`,
+    [
+      request.syncRunId,
+      request.workspaceId,
+      request.sourceId,
+      key.adAccountId,
+      key.grain,
+      key.occurredOn,
+      key.entityId,
+      key.keyKind,
+      key.resultType ?? "",
+    ],
+  );
+}
+
+async function writeMetaAdsEntityVersions(
+  tx: InfiniteOsDb,
+  request: SyncRequest,
+  rows: MetaAdsEntitySnapshotRow[],
+  rawIds: string[],
+): Promise<void> {
+  for (let index = 0; index < rows.length; index += 1) {
+    const row = rows[index];
+    const payloadHash = createHash("sha256").update(canonicalMetaAdsJson(row.metadata)).digest("hex");
+    await stageMetaAdsSnapshotKey(tx, request, {
+      adAccountId: row.adAccountId,
+      grain: row.entityType,
+      occurredOn: row.observedAt.slice(0, 10),
+      entityId: row.entityId,
+      keyKind: "entity",
+    });
+    const current = await tx.one<{ id: string; payload_hash: string }>(
+      `select id, payload_hash from meta_ads_entity_versions
+        where workspace_id = $1 and source_id = $2 and ad_account_id = $3
+          and entity_type = $4 and entity_id = $5 and valid_to is null
+        for update`,
+      [request.workspaceId, request.sourceId, row.adAccountId, row.entityType, row.entityId],
+    );
+    if (current?.payload_hash === payloadHash) {
+      await tx.query(
+        `update meta_ads_entity_versions
+            set raw_record_id = $2, last_observed_at = greatest(last_observed_at, $3::timestamptz)
+          where id = $1`,
+        [current.id, rawIds[index], row.observedAt],
+      );
+      continue;
+    }
+    if (current) {
+      await tx.query(
+        `update meta_ads_entity_versions
+            set valid_to = greatest(first_observed_at, $2::timestamptz),
+                last_observed_at = greatest(last_observed_at, $2::timestamptz)
+          where id = $1 and valid_to is null`,
+        [current.id, row.observedAt],
+      );
+    }
+    await tx.query(
+      `insert into meta_ads_entity_versions (
+         id, workspace_id, source_id, raw_record_id, ad_account_id, entity_type, entity_id,
+         campaign_id, adset_id, ad_id, creative_id, name, effective_status, configured_status,
+         objective, optimization_goal, billing_event, daily_budget, lifetime_budget, bid_amount,
+         payload_hash, metadata_json, asset_descriptors, api_version, first_observed_at, last_observed_at
+       ) values (
+         $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22::jsonb,$23::jsonb,$24,$25::timestamptz,$25::timestamptz
+       )`,
+      [
+        `maev_${randomUUID()}`,
+        request.workspaceId,
+        request.sourceId,
+        rawIds[index],
+        row.adAccountId,
+        row.entityType,
+        row.entityId,
+        row.campaignId,
+        row.adsetId,
+        row.adId,
+        row.creativeId,
+        row.name,
+        row.effectiveStatus,
+        row.configuredStatus,
+        row.objective,
+        row.optimizationGoal,
+        row.billingEvent,
+        row.dailyBudget,
+        row.lifetimeBudget,
+        row.bidAmount,
+        payloadHash,
+        JSON.stringify(row.metadata),
+        JSON.stringify(row.assetDescriptors),
+        row.apiVersion,
+        row.observedAt,
+      ],
+    );
+    await writeLineage(
+      tx,
+      request,
+      "meta_ads_entity_versions",
+      `${row.adAccountId}:${row.entityType}:${row.entityId}:${payloadHash}`,
+      rawIds[index],
+    );
+  }
+}
+
+function canonicalMetaAdsJson(value: unknown): string {
+  if (value === null || value === undefined) return "null";
+  if (Array.isArray(value)) return `[${value.map((entry) => canonicalMetaAdsJson(entry)).join(",")}]`;
+  if (typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .filter(([, entry]) => entry !== undefined)
+      .sort(([left], [right]) => left.localeCompare(right));
+    return `{${entries.map(([key, entry]) => `${JSON.stringify(key)}:${canonicalMetaAdsJson(entry)}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
 async function writeMetaAdsCampaignDimension(
   tx: InfiniteOsDb,
   request: SyncRequest,
@@ -4900,9 +5471,14 @@ async function writeMetaAdsTruth(
   const adsetRawIds: string[] = [];
   const adRows: MetaAdsAdDailyRow[] = [];
   const adRawIds: string[] = [];
+  const entityRows: MetaAdsEntitySnapshotRow[] = [];
+  const entityRawIds: string[] = [];
   for (let index = 0; index < rows.length; index += 1) {
     const row = rows[index];
-    if (row.grain === "ad") {
+    if (row.grain === "entity") {
+      entityRows.push(row);
+      entityRawIds.push(rawIds[index]);
+    } else if (row.grain === "ad") {
       adRows.push(row);
       adRawIds.push(rawIds[index]);
     } else if (row.grain === "adset") {
@@ -4918,6 +5494,7 @@ async function writeMetaAdsTruth(
   await writeMetaAdsCampaignTruth(tx, request, campaignRows, campaignRawIds);
   await writeMetaAdsAdsetTruth(tx, request, adsetRows, adsetRawIds);
   await writeMetaAdsAdTruth(tx, request, adRows, adRawIds);
+  await writeMetaAdsEntityVersions(tx, request, entityRows, entityRawIds);
 }
 
 async function writeMetaAdsCampaignTruth(
@@ -4987,6 +5564,13 @@ async function writeMetaAdsCampaignTruth(
         row.apiVersion
       ]
     );
+    await stageMetaAdsSnapshotKey(tx, request, {
+      adAccountId: row.adAccountId,
+      grain: "campaign",
+      occurredOn: row.occurredOn,
+      entityId: row.campaignId,
+      keyKind: "delivery",
+    });
     await writeLineage(
       tx,
       request,
@@ -5044,6 +5628,14 @@ async function writeMetaAdsConversionRows(
         conversion.resultsSource
       ]
     );
+    await stageMetaAdsSnapshotKey(tx, request, {
+      adAccountId: row.adAccountId,
+      grain: "campaign",
+      occurredOn: row.occurredOn,
+      entityId: row.campaignId,
+      keyKind: "conversion",
+      resultType: conversion.resultType,
+    });
     await writeLineage(
       tx,
       request,
@@ -5181,6 +5773,13 @@ async function writeMetaAdsAdsetTruth(
         row.apiVersion
       ]
     );
+    await stageMetaAdsSnapshotKey(tx, request, {
+      adAccountId: row.adAccountId,
+      grain: "adset",
+      occurredOn: row.occurredOn,
+      entityId: row.adsetId,
+      keyKind: "delivery",
+    });
     await writeLineage(
       tx,
       request,
@@ -5238,6 +5837,14 @@ async function writeMetaAdsAdsetConversionRows(
         conversion.resultsSource
       ]
     );
+    await stageMetaAdsSnapshotKey(tx, request, {
+      adAccountId: row.adAccountId,
+      grain: "adset",
+      occurredOn: row.occurredOn,
+      entityId: row.adsetId,
+      keyKind: "conversion",
+      resultType: conversion.resultType,
+    });
     await writeLineage(
       tx,
       request,
@@ -5376,6 +5983,13 @@ async function writeMetaAdsAdTruth(
         row.apiVersion
       ]
     );
+    await stageMetaAdsSnapshotKey(tx, request, {
+      adAccountId: row.adAccountId,
+      grain: "ad",
+      occurredOn: row.occurredOn,
+      entityId: row.adId,
+      keyKind: "delivery",
+    });
     await writeLineage(
       tx,
       request,
@@ -5435,6 +6049,14 @@ async function writeMetaAdsAdConversionRows(
         conversion.resultsSource
       ]
     );
+    await stageMetaAdsSnapshotKey(tx, request, {
+      adAccountId: row.adAccountId,
+      grain: "ad",
+      occurredOn: row.occurredOn,
+      entityId: row.adId,
+      keyKind: "conversion",
+      resultType: conversion.resultType,
+    });
     await writeLineage(
       tx,
       request,
@@ -7531,6 +8153,22 @@ const META_ADS_ATTRIBUTION_WINDOWS = ["1d_click", "7d_click", "1d_view"] as cons
 // not a lever). Matches the windows we send.
 const META_ADS_ATTRIBUTION_SETTING = META_ADS_ATTRIBUTION_WINDOWS.join(",");
 
+// Objective-independent headline rows retained for the Ads surface and future pattern analysis.
+// Ordered aliases describe alternatives for the same requested result; the FIRST present alias
+// wins and its count/value stay on the same action_type. Never sum aliases.
+const META_HEADLINE_RESULT_RULES: Record<"purchase" | "lead", MetaCanonicalEventRule> = {
+  purchase: {
+    resultType: "purchase",
+    actionTypes: ["purchase", "omni_purchase", "offsite_conversion.fb_pixel_purchase", "onsite_web_purchase"],
+    value: true,
+  },
+  lead: {
+    resultType: "lead",
+    actionTypes: ["lead", "onsite_conversion.lead_grouped", "offsite_conversion.fb_pixel_lead", "onsite_web_lead"],
+    value: false,
+  },
+};
+
 // ──────────────────────────────────────────────────────────────────────────────────
 // §4b — Objective → canonical-event mapping (the load-bearing artifact).
 //
@@ -7755,6 +8393,52 @@ function metaAdsInsightsGrain(request: SyncRequest): {
   };
 }
 
+function metaAdsProviderDay(asOfIso: string, timeZone: string): string {
+  const instant = new Date(asOfIso);
+  if (Number.isNaN(instant.getTime())) {
+    throw new ConnectorError("provider_api_error", "Meta history received an invalid as-of instant", false);
+  }
+  try {
+    const parts = new Intl.DateTimeFormat("en-CA", {
+      timeZone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).formatToParts(instant);
+    const part = (type: "year" | "month" | "day") => parts.find((entry) => entry.type === type)?.value;
+    const year = part("year");
+    const month = part("month");
+    const day = part("day");
+    if (!year || !month || !day) throw new Error("missing calendar part");
+    return `${year}-${month}-${day}`;
+  } catch {
+    throw new ConnectorError(
+      "provider_api_error",
+      `Meta history received an invalid account timezone: ${timeZone}`,
+      false,
+    );
+  }
+}
+
+function metaAdsShiftDay(day: string, deltaDays: number): string {
+  const date = new Date(`${day}T00:00:00.000Z`);
+  date.setUTCDate(date.getUTCDate() + deltaDays);
+  return date.toISOString().slice(0, 10);
+}
+
+/** Inclusive settled provider-local range ending yesterday in the Meta account timezone. */
+export function metaAdsSettledWindow(
+  asOfIso: string,
+  timeZone: string,
+  days: number,
+): { since: string; until: string } {
+  if (!Number.isInteger(days) || days < 1 || days > 366) {
+    throw new ConnectorError("provider_api_error", "Meta history settled-window days must be 1..366", false);
+  }
+  const until = metaAdsShiftDay(metaAdsProviderDay(asOfIso, timeZone), -1);
+  return { since: metaAdsShiftDay(until, -(days - 1)), until };
+}
+
 // Meta date window — TWO regimes, keyed off whether an EXPLICIT backfill window was requested
 // (request.windowSince/windowUntil), NOT off the plan cursor. This is GA4's #83 fix applied to
 // its un-fixed twin (2026-07-11 zero-loop incident): defaultPlan sets cursorStart = windowSince
@@ -7786,6 +8470,15 @@ function metaAdsTimeOptions(request: SyncRequest, plan: SyncPlan): {
         since: cursorStartIso(plan).slice(0, 10),
         until: plan.cursorEnd.slice(0, 10)
       }
+    };
+  }
+  if (plan.metaAdsAccountMetadata?.timezoneName) {
+    return {
+      timeRange: metaAdsSettledWindow(
+        plan.cursorEnd,
+        plan.metaAdsAccountMetadata.timezoneName,
+        plan.refreshWindowDays,
+      ),
     };
   }
   return {
@@ -8012,6 +8705,39 @@ function metaAdsThrottleUtilization(header: string | null): number | null {
   }
 }
 
+function metaAdsBusinessUsageUtilization(header: string | null): number | null {
+  if (!header) return null;
+  try {
+    const values: number[] = [];
+    const visit = (value: unknown): void => {
+      if (!value || typeof value !== "object") return;
+      if (Array.isArray(value)) {
+        for (const item of value) visit(item);
+        return;
+      }
+      for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+        if (["call_count", "total_cputime", "total_time"].includes(key) && typeof item === "number") {
+          values.push(item);
+        } else {
+          visit(item);
+        }
+      }
+    };
+    visit(JSON.parse(header));
+    return values.length > 0 ? Math.max(...values) : null;
+  } catch {
+    return null;
+  }
+}
+
+function metaAdsResponseUtilization(response: Response): number | null {
+  const values = [
+    metaAdsThrottleUtilization(response.headers.get("x-fb-ads-insights-throttle")),
+    metaAdsBusinessUsageUtilization(response.headers.get("x-business-use-case-usage")),
+  ].filter((value): value is number => value !== null);
+  return values.length > 0 ? Math.max(...values) : null;
+}
+
 // §4d — does this thrown error carry Meta's "reduce the amount of data" subcode (1487534)?
 // The subcode is preserved in the ConnectorError.message (responseSafeDetail keeps the JSON
 // error body; redactProviderErrorDetail only strips tokens), so we match it textually — the
@@ -8030,11 +8756,19 @@ function isMetaAdsDataVolumeError(error: unknown): boolean {
 // taxonomy for the status branches (401/403 non-retryable auth, 429 retryable, other non-2xx
 // retryable). Returns the OK Response with its body still unread so the caller can json() it.
 // Used by BOTH the edge reader (§4b) and the insights pager (§4e). 429s also back off here.
-async function metaAdsFetchWithThrottleBackoff(url: string, init: RequestInit): Promise<Response> {
+async function metaAdsFetchWithThrottleBackoff(
+  url: string,
+  init: RequestInit,
+  telemetry?: MetaAdsRequestTelemetry,
+  requestKind?: MetaAdsRequestKind,
+): Promise<Response> {
   const safeUrl = safeUrlForLogs(url);
   for (let attempt = 0; ; attempt += 1) {
+    if (telemetry && requestKind) await telemetry.beforeRequest(requestKind, attempt > 0);
     const response = await fetch(url, init);
+    const utilization = metaAdsResponseUtilization(response);
     if (response.status === 401 || response.status === 403) {
+      telemetry?.recordRejectedResponse(utilization);
       throw new ConnectorError(
         "provider_auth_failed",
         providerHttpErrorMessage("provider auth failed", response.status, safeUrl, await responseSafeDetail(response)),
@@ -8044,6 +8778,7 @@ async function metaAdsFetchWithThrottleBackoff(url: string, init: RequestInit): 
     // §4e — a 429 (hard rate limit) backs off and retries like a high-utilization response;
     // only after the retry budget is exhausted does it surface as the retryable error.
     if (response.status === 429) {
+      telemetry?.recordRejectedResponse(utilization);
       if (attempt < META_ADS_THROTTLE_MAX_RETRIES) {
         await metaAdsSleep(META_ADS_THROTTLE_BACKOFF_BASE_MS * 2 ** attempt);
         continue;
@@ -8055,6 +8790,7 @@ async function metaAdsFetchWithThrottleBackoff(url: string, init: RequestInit): 
       );
     }
     if (!response.ok) {
+      telemetry?.recordRejectedResponse(utilization);
       throw new ConnectorError(
         "provider_api_error",
         providerHttpErrorMessage("provider request failed", response.status, safeUrl, await responseSafeDetail(response)),
@@ -8063,8 +8799,8 @@ async function metaAdsFetchWithThrottleBackoff(url: string, init: RequestInit): 
     }
     // §4e — back off on high account utilization BEFORE consuming the window. Sleep + retry
     // the same request; fail loud only once the retry budget is spent (refusing to truncate).
-    const utilization = metaAdsThrottleUtilization(response.headers.get("x-fb-ads-insights-throttle"));
     if (utilization !== null && utilization >= META_ADS_THROTTLE_CEILING_PCT) {
+      telemetry?.recordRejectedResponse(utilization);
       if (attempt < META_ADS_THROTTLE_MAX_RETRIES) {
         await metaAdsSleep(META_ADS_THROTTLE_BACKOFF_BASE_MS * 2 ** attempt);
         continue;
@@ -8075,7 +8811,69 @@ async function metaAdsFetchWithThrottleBackoff(url: string, init: RequestInit): 
         true
       );
     }
+    telemetry?.recordPage(utilization);
     return response;
+  }
+}
+
+async function metaAdsReadAccountMetadata(
+  credential: MetaAdsCredential,
+  signal?: AbortSignal,
+  telemetry?: MetaAdsRequestTelemetry,
+): Promise<MetaAdsAccountMetadata> {
+  const adAccountId = metaAdsAccountId(credential);
+  const url = new URL(`https://graph.facebook.com/${metaAdsApiVersion(credential)}/${adAccountId}`);
+  url.searchParams.set("fields", "id,account_id,currency,timezone_name");
+  const response = await metaAdsFetchWithThrottleBackoff(
+    url.toString(),
+    {
+      method: "GET",
+      headers: { "Content-Type": "application/json", ...bearerHeaders(requireCredential(credential, "accessToken")) },
+      ...(signal ? { signal } : {}),
+    },
+    telemetry,
+    "account_liveness",
+  );
+  const body = (await response.json()) as Record<string, unknown>;
+  const returnedId = stringOrNull(body.id);
+  const returnedAccountId = stringOrNull(body.account_id);
+  const normalizedReturned = returnedId?.startsWith("act_")
+    ? returnedId
+    : returnedAccountId
+      ? `act_${returnedAccountId.replace(/^act_/, "")}`
+      : null;
+  if (normalizedReturned !== adAccountId) {
+    throw new ConnectorError(
+      "source_scope_mismatch",
+      "Meta Ads account liveness response did not match the connected source",
+      false,
+    );
+  }
+  return {
+    adAccountId,
+    currency: stringOrNull(body.currency)?.toLowerCase() ?? null,
+    timezoneName: stringOrNull(body.timezone_name),
+  };
+}
+
+async function assertMetaAdsSourceAccountBinding(
+  db: InfiniteOsDb,
+  request: SyncRequest,
+  credentialAccountId: string,
+): Promise<void> {
+  const source = await db.one<{ account_external_id: string | null }>(
+    `select account_external_id from sources
+      where id = $1 and workspace_id = $2 and provider = 'meta_ads'`,
+    [request.sourceId, request.workspaceId],
+  );
+  const raw = source?.account_external_id?.trim() ?? "";
+  const normalized = /^act_\d+$/.test(raw) ? raw : /^\d+$/.test(raw) ? `act_${raw}` : null;
+  if (!normalized || normalized !== credentialAccountId) {
+    throw new ConnectorError(
+      "source_scope_mismatch",
+      "Meta Ads source account does not match its stored credential",
+      false,
+    );
   }
 }
 
@@ -8086,7 +8884,9 @@ async function metaAdsFetchWithThrottleBackoff(url: string, init: RequestInit): 
 async function metaAdsFetchInsightsPages(
   accessToken: string,
   firstUrl: string,
-  onRow: (row: MetaAdsInsightsRow) => void
+  onRow: (row: MetaAdsInsightsRow) => void,
+  telemetry?: MetaAdsRequestTelemetry,
+  requestKind?: Extract<MetaAdsRequestKind, "campaign_insights" | "adset_insights" | "ad_insights">,
 ): Promise<void> {
   let nextUrl: string | null = firstUrl;
   for (let page = 0; page < META_ADS_INSIGHTS_PAGE_LIMIT; page += 1) {
@@ -8100,7 +8900,7 @@ async function metaAdsFetchInsightsPages(
     const response = await metaAdsFetchWithThrottleBackoff(nextUrl, {
       method: "GET",
       headers: { "Content-Type": "application/json", ...bearerHeaders(accessToken) }
-    });
+    }, telemetry, requestKind);
     const body = (await response.json()) as MetaAdsInsightsResponse;
     for (const row of body.data ?? []) {
       onRow(row);
@@ -8126,10 +8926,11 @@ async function metaAdsFetchAdInsightsChunked(
   accessToken: string,
   window: MetaAdsDateWindow,
   urlFor: (range: MetaAdsDateWindow) => string,
-  onRow: (row: MetaAdsInsightsRow) => void
+  onRow: (row: MetaAdsInsightsRow) => void,
+  telemetry?: MetaAdsRequestTelemetry,
 ): Promise<void> {
   try {
-    await metaAdsFetchInsightsPages(accessToken, urlFor(window), onRow);
+    await metaAdsFetchInsightsPages(accessToken, urlFor(window), onRow, telemetry, "ad_insights");
   } catch (error) {
     // §4d — ONLY a data-volume (1487534) error triggers the narrower retry; everything else
     // (auth/rate-limit-after-retries/page-cap) is a real failure and re-throws.
@@ -8138,7 +8939,7 @@ async function metaAdsFetchAdInsightsChunked(
     }
     // The month window is still too wide — split it into weeks and retry each sub-window.
     for (const week of metaAdsWeekWindows(window)) {
-      await metaAdsFetchInsightsPages(accessToken, urlFor(week), onRow);
+      await metaAdsFetchInsightsPages(accessToken, urlFor(week), onRow, telemetry, "ad_insights");
     }
   }
 }
@@ -8154,45 +8955,39 @@ async function metaAdsFetchAdInsightsChunked(
 //
 // conversion_value is populated ONLY when the rule is value-bearing (purchase-type),
 // per the §2.3 guard — a configured lead value is never stored as revenue.
-function metaAdsConversionRows(
+function metaAdsConversionForRule(
   row: MetaAdsInsightsRow,
-  context: MetaAdsInsightsContext
-): MetaAdsConversionRow[] {
-  const rule = metaCanonicalEventRule(
-    stringOrNull(row.optimization_goal),
-    stringOrNull(row.objective)
-  );
-  if (!rule) {
-    // Awareness / unmapped objective: no conversion result for this row.
-    return [];
-  }
+  context: MetaAdsInsightsContext,
+  rule: MetaCanonicalEventRule,
+  isPrimary: boolean,
+  allowMetaResultsFallback: boolean,
+): MetaAdsConversionRow | null {
   const actions = metaInsightsActions(row);
   const canonicalAction = metaPickCanonicalAction(actions, rule.actionTypes);
   if (!canonicalAction || !canonicalAction.action_type) {
+    if (!allowMetaResultsFallback) return null;
     // The canonical event did not fire for this campaign-day; Meta's own results
     // field is the fallback so a blank actions[] does not null the headline.
     const metaResults = metaInsightsResultsValue(row);
     if (metaResults === null) {
-      return [];
+      return null;
     }
     // Keep the result_type label consistent with the canonical mapping (clean labels
     // like 'lead'/'purchase'). Meta's result_values_performance_indicator is used only
     // as a cross-check (metaResultTypeMatchesRule), never as the stored label — mixing
     // raw action_type strings into result_type would fracture the REQUIRED partition.
-    return [
-      {
-        resultType: rule.resultType,
-        results: metaResults,
-        conversionValue: null,
-        attributionSetting: context.attributionSetting,
-        isPrimary: true,
-        // Distinguish a clean cross-check match from a type-mismatched fallback so a
-        // reconciliation drift is visible in results_source.
-        resultsSource: metaResultTypeMatchesRule(row, rule)
-          ? "meta_results"
-          : "meta_results_unverified_type"
-      }
-    ];
+    return {
+      resultType: rule.resultType,
+      results: metaResults,
+      conversionValue: null,
+      attributionSetting: context.attributionSetting,
+      isPrimary,
+      // Distinguish a clean cross-check match from a type-mismatched fallback so a
+      // reconciliation drift is visible in results_source.
+      resultsSource: metaResultTypeMatchesRule(row, rule)
+        ? "meta_results"
+        : "meta_results_unverified_type"
+    };
   }
   // Count from the SAME canonical channel (headline window = 7d_click + 1d_view).
   const results = metaHeadlineWindowValue(canonicalAction);
@@ -8205,16 +9000,56 @@ function metaAdsConversionRows(
     );
     conversionValue = valueElement ? metaHeadlineWindowValue(valueElement) : 0;
   }
-  return [
-    {
-      resultType: rule.resultType,
-      results,
-      conversionValue,
-      attributionSetting: context.attributionSetting,
-      isPrimary: true,
-      resultsSource: "derived_from_canonical_mapping"
+  return {
+    resultType: rule.resultType,
+    results,
+    conversionValue,
+    attributionSetting: context.attributionSetting,
+    isPrimary,
+    resultsSource: "derived_from_canonical_mapping"
+  };
+}
+
+function metaAdsConversionRows(
+  row: MetaAdsInsightsRow,
+  context: MetaAdsInsightsContext
+): MetaAdsConversionRow[] {
+  const objectiveRule = metaCanonicalEventRule(
+    stringOrNull(row.optimization_goal),
+    stringOrNull(row.objective)
+  );
+  const out: MetaAdsConversionRow[] = [];
+  const seen = new Set<string>();
+
+  if (objectiveRule) {
+    // Purchase/lead primary rows use the same objective-independent alias rule the live surface
+    // uses. That makes Today and stored history byte-for-byte comparable while `isPrimary` keeps
+    // the objective's headline distinct from incidental outcomes.
+    const primaryRule = objectiveRule.resultType === "purchase" || objectiveRule.resultType === "lead"
+      ? META_HEADLINE_RESULT_RULES[objectiveRule.resultType]
+      : objectiveRule;
+    const primary = metaAdsConversionForRule(row, context, primaryRule, true, true);
+    if (primary) {
+      out.push(primary);
+      seen.add(primary.resultType);
     }
-  ];
+  }
+
+  for (const resultType of ["purchase", "lead"] as const) {
+    if (seen.has(resultType)) continue;
+    const supplemental = metaAdsConversionForRule(
+      row,
+      context,
+      META_HEADLINE_RESULT_RULES[resultType],
+      false,
+      false,
+    );
+    if (supplemental) {
+      out.push(supplemental);
+      seen.add(resultType);
+    }
+  }
+  return out;
 }
 
 function metaAdsCampaignDailyRow(
@@ -8573,12 +9408,39 @@ interface MetaAdsEdgeNode {
   objective?: string | null;
   optimization_goal?: string | null;
   billing_event?: string | null;
+  daily_budget?: string | number | null;
+  lifetime_budget?: string | number | null;
+  bid_amount?: string | number | null;
+  bid_strategy?: string | null;
+  buying_type?: string | null;
+  special_ad_categories?: unknown;
+  start_time?: string | null;
+  stop_time?: string | null;
+  end_time?: string | null;
+  destination_type?: string | null;
+  attribution_spec?: unknown;
+  targeting?: unknown;
+  promoted_object?: unknown;
+  tracking_specs?: unknown;
+  conversion_specs?: unknown;
   campaign_id?: string | null;
   // §4a — the parent adset id, echoed on the /ads edge (carried onto the ad dim/facts).
   adset_id?: string | null;
   // §4a — the creative{id} field-expansion on the /ads edge: a nested object carrying only
   // the creative id (NO body is requested). creative?.id ?? null becomes the ad's creative_id.
-  creative?: { id?: string | null } | null;
+  creative?: {
+    id?: string | null;
+    name?: string | null;
+    title?: string | null;
+    body?: string | null;
+    thumbnail_url?: string | null;
+    image_url?: string | null;
+    image_hash?: string | null;
+    video_id?: string | null;
+    call_to_action_type?: string | null;
+    object_story_spec?: unknown;
+    asset_feed_spec?: unknown;
+  } | null;
 }
 
 interface MetaAdsEdgeResponse {
@@ -8611,7 +9473,8 @@ function metaAdsEdgeNodeStatus(node: MetaAdsEdgeNode): MetaAdsEntityStatus {
 async function metaAdsReadEdge(
   credential: MetaAdsCredential,
   edge: "adsets" | "campaigns" | "ads",
-  fields: string
+  fields: string,
+  telemetry?: MetaAdsRequestTelemetry,
 ): Promise<MetaAdsEdgeNode[]> {
   const accessToken = requireCredential(credential, "accessToken");
   const adAccountId = metaAdsAccountId(credential);
@@ -8633,7 +9496,7 @@ async function metaAdsReadEdge(
     const response = await metaAdsFetchWithThrottleBackoff(url.toString(), {
       method: "GET",
       headers: { "Content-Type": "application/json", ...bearerHeaders(accessToken) }
-    });
+    }, telemetry, edge === "campaigns" ? "campaign_edge" : edge === "adsets" ? "adset_edge" : "ad_edge");
     const body = (await response.json()) as MetaAdsEdgeResponse;
     nodes.push(...(body.data ?? []));
     const nextAfter = metaAdsPagingAfter(body as MetaAdsInsightsResponse);
@@ -8653,12 +9516,18 @@ async function metaAdsReadEdge(
 
 // §4a — read /act_<id>/adsets and build the adset dim map keyed by adset_id. Status comes
 // from here (it is not on insights); optimization_goal/billing_event/campaign_id too.
-async function metaAdsReadAdsetDims(credential: MetaAdsCredential): Promise<Map<string, MetaAdsAdsetDim>> {
+async function metaAdsReadAdsetDims(
+  credential: MetaAdsCredential,
+  telemetry?: MetaAdsRequestTelemetry,
+  snapshotSink?: MetaAdsEdgeNode[],
+): Promise<Map<string, MetaAdsAdsetDim>> {
   const nodes = await metaAdsReadEdge(
     credential,
     "adsets",
-    "id,name,optimization_goal,billing_event,effective_status,status,campaign_id"
+    "id,name,optimization_goal,billing_event,effective_status,status,campaign_id,daily_budget,lifetime_budget,bid_amount,bid_strategy,targeting,promoted_object,destination_type,attribution_spec,start_time,end_time",
+    telemetry,
   );
+  snapshotSink?.push(...nodes);
   const dims = new Map<string, MetaAdsAdsetDim>();
   for (const node of nodes) {
     const adsetId = stringOrNull(node.id);
@@ -8684,12 +9553,18 @@ async function metaAdsReadAdsetDims(credential: MetaAdsCredential): Promise<Map<
 // creative_id, and the parent adset_id/campaign_id come from here (none are on insights). The
 // field set requests creative{id} (the field-expansion, NO body). optimization_goal is NOT
 // read here — it is an ADSET property the §4b mapping carries from the adset-dim map (§4e).
-async function metaAdsReadAdAdims(credential: MetaAdsCredential): Promise<Map<string, MetaAdsAdDim>> {
+async function metaAdsReadAdAdims(
+  credential: MetaAdsCredential,
+  telemetry?: MetaAdsRequestTelemetry,
+  snapshotSink?: MetaAdsEdgeNode[],
+): Promise<Map<string, MetaAdsAdDim>> {
   const nodes = await metaAdsReadEdge(
     credential,
     "ads",
-    "id,name,creative{id},adset_id,campaign_id,effective_status,status"
+    "id,name,creative{id,name,title,body,thumbnail_url,image_url,image_hash,video_id,call_to_action_type,object_story_spec,asset_feed_spec},adset_id,campaign_id,effective_status,status,bid_amount,tracking_specs,conversion_specs",
+    telemetry,
   );
+  snapshotSink?.push(...nodes);
   const dims = new Map<string, MetaAdsAdDim>();
   for (const node of nodes) {
     const adId = stringOrNull(node.id);
@@ -8716,8 +9591,18 @@ async function metaAdsReadAdAdims(credential: MetaAdsCredential): Promise<Map<st
 // gap). Keyed by campaign_id; only the status pair is consumed (objective is refreshed via
 // insights). The writer coalesces this into the existing campaign dim WITHOUT disturbing
 // name/objective/currency.
-async function metaAdsReadCampaignStatus(credential: MetaAdsCredential): Promise<Map<string, MetaAdsEntityStatus>> {
-  const nodes = await metaAdsReadEdge(credential, "campaigns", "id,effective_status,status,objective");
+async function metaAdsReadCampaignStatus(
+  credential: MetaAdsCredential,
+  telemetry?: MetaAdsRequestTelemetry,
+  snapshotSink?: MetaAdsEdgeNode[],
+): Promise<Map<string, MetaAdsEntityStatus>> {
+  const nodes = await metaAdsReadEdge(
+    credential,
+    "campaigns",
+    "id,name,effective_status,status,objective,daily_budget,lifetime_budget,bid_strategy,buying_type,special_ad_categories,start_time,stop_time",
+    telemetry,
+  );
+  snapshotSink?.push(...nodes);
   const statuses = new Map<string, MetaAdsEntityStatus>();
   for (const node of nodes) {
     const campaignId = stringOrNull(node.id);
@@ -8727,6 +9612,244 @@ async function metaAdsReadCampaignStatus(credential: MetaAdsCredential): Promise
     statuses.set(campaignId, metaAdsEdgeNodeStatus(node));
   }
   return statuses;
+}
+
+function metaAdsEntitySnapshotRows(
+  adAccountId: string,
+  entityType: MetaAdsHistoryGrain,
+  nodes: MetaAdsEdgeNode[],
+  observedAt: string,
+  apiVersion: string,
+  accessToken: string,
+): MetaAdsEntitySnapshotRow[] {
+  const rows: MetaAdsEntitySnapshotRow[] = [];
+  for (const node of nodes) {
+    const safeNode = scrubMetaAdsProviderMetadata(node, accessToken) as MetaAdsEdgeNode;
+    const entityId = stringOrNull(node.id);
+    if (!entityId) continue;
+    const status = metaAdsEdgeNodeStatus(node);
+    const creativeId = stringOrNull(node.creative?.id);
+    rows.push({
+      grain: "entity",
+      externalId: `meta_ads:entity:${entityType}:${adAccountId}:${entityId}:${observedAt}`,
+      adAccountId,
+      entityType,
+      entityId,
+      campaignId: entityType === "campaign" ? entityId : stringOrNull(node.campaign_id),
+      adsetId: entityType === "adset" ? entityId : stringOrNull(node.adset_id),
+      adId: entityType === "ad" ? entityId : null,
+      creativeId,
+      name: stringOrNull(node.name),
+      effectiveStatus: status.effectiveStatus,
+      configuredStatus: status.configuredStatus,
+      objective: stringOrNull(node.objective),
+      optimizationGoal: stringOrNull(node.optimization_goal),
+      billingEvent: stringOrNull(node.billing_event),
+      dailyBudget: numberOrNull(node.daily_budget),
+      lifetimeBudget: numberOrNull(node.lifetime_budget),
+      bidAmount: numberOrNull(node.bid_amount),
+      observedAt,
+      apiVersion,
+      // Exact bounded field set returned by the entity edge, including targeting/placements and
+      // creative asset descriptors. JSON serialization later strips undefined without inventing data.
+      metadata: safeNode as Record<string, unknown>,
+      assetDescriptors: [],
+    });
+    if (entityType === "ad" && creativeId && safeNode.creative) {
+      const creativeMetadata = safeNode.creative as Record<string, unknown>;
+      rows.push({
+        grain: "entity",
+        externalId: `meta_ads:entity:creative:${adAccountId}:${creativeId}:${observedAt}`,
+        adAccountId,
+        entityType: "creative",
+        entityId: creativeId,
+        campaignId: stringOrNull(node.campaign_id),
+        adsetId: stringOrNull(node.adset_id),
+        adId: entityId,
+        creativeId,
+        name: stringOrNull(safeNode.creative.name),
+        effectiveStatus: null,
+        configuredStatus: null,
+        objective: null,
+        optimizationGoal: null,
+        billingEvent: null,
+        dailyBudget: null,
+        lifetimeBudget: null,
+        bidAmount: null,
+        observedAt,
+        apiVersion,
+        metadata: creativeMetadata,
+        assetDescriptors: metaAdsCreativeAssetDescriptors(creativeMetadata),
+      });
+    }
+  }
+  return rows;
+}
+
+function scrubMetaAdsProviderMetadata(value: unknown, accessToken: string, depth = 0): unknown {
+  if (depth > 20) throw new ConnectorError("provider_api_error", "Meta entity metadata exceeded the nesting limit", false);
+  if (typeof value === "string") {
+    const redacted = value.split(accessToken).join("[redacted]").replace(/EAA[A-Za-z0-9_-]{10,}/g, "[redacted]");
+    try {
+      const url = new URL(redacted);
+      const providerCapabilityHost = /(^|\.)(fbcdn\.net|facebook\.com|fbsbx\.com|cdninstagram\.com|instagram\.com)$/i.test(url.hostname);
+      if (providerCapabilityHost) {
+        // Meta media query strings are bearer-like signed capabilities. Host/path is sufficient
+        // provenance; H5 resolves a fresh URL from the stable image hash/video id under credential.
+        url.search = "";
+        url.hash = "";
+        return url.toString();
+      }
+      for (const key of [...url.searchParams.keys()]) {
+        if (/(access.?token|authorization|sig(nature)?|secret|password|cookie)/i.test(key)) {
+          url.searchParams.delete(key);
+        }
+      }
+      return url.toString();
+    } catch {
+      return redacted;
+    }
+  }
+  if (value === null || typeof value === "number" || typeof value === "boolean") return value;
+  if (Array.isArray(value)) return value.map((item) => scrubMetaAdsProviderMetadata(item, accessToken, depth + 1));
+  if (!isRecord(value)) return null;
+  const out: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (/(access.?token|authorization|app.?secret|client.?secret|password|cookie)/i.test(key)) continue;
+    out[key] = scrubMetaAdsProviderMetadata(item, accessToken, depth + 1);
+  }
+  return out;
+}
+
+function metaAdsDescriptorSourceLocator(value: unknown): { host: string; path: string } | null {
+  const raw = stringOrNull(value);
+  if (!raw) return null;
+  try {
+    const url = new URL(raw);
+    if (url.protocol !== "https:" && url.protocol !== "http:") return null;
+    if (url.username || url.password) return null;
+    const host = url.hostname.toLowerCase();
+    const path = url.pathname || "/";
+    if (!host) return null;
+    return { host, path };
+  } catch {
+    return null;
+  }
+}
+
+function metaAdsSlotFingerprint(
+  slotKey: string,
+  kind: MetaAdsAssetDescriptor["kind"],
+  providerAssetId: string | null,
+  providerAssetType: MetaAdsAssetDescriptor["providerAssetType"],
+  sourceLocator: { host: string; path: string } | null,
+): string | null {
+  const identity = providerAssetId
+    ? `provider:${providerAssetType ?? "unknown"}:${providerAssetId}`
+    : sourceLocator
+      ? `url:${sourceLocator.host}${sourceLocator.path}`
+      : null;
+  if (!identity) return null;
+  return `sha256:${createHash("sha256").update(`${slotKey}\0${kind}\0${identity}`).digest("hex")}`;
+}
+
+function metaAdsCreativeAssetDescriptors(creative: Record<string, unknown>): MetaAdsAssetDescriptor[] {
+  const descriptors: MetaAdsAssetDescriptor[] = [];
+  const seen = new Set<string>();
+  const add = (
+    slotKey: string,
+    kind: MetaAdsAssetDescriptor["kind"],
+    providerAssetId: unknown,
+    providerAssetType: MetaAdsAssetDescriptor["providerAssetType"],
+    sourceUrl: unknown,
+  ): void => {
+    const providerAssetIdText = stringOrNull(providerAssetId);
+    const sourceLocator = metaAdsDescriptorSourceLocator(sourceUrl);
+    const descriptor = {
+      slotKey,
+      kind,
+      providerAssetId: providerAssetIdText,
+      providerAssetType: providerAssetIdText ? providerAssetType : null,
+      slotFingerprint: metaAdsSlotFingerprint(slotKey, kind, providerAssetIdText, providerAssetType, sourceLocator),
+      // Provider media URLs are signed, expiring capabilities. Never persist them in a readable
+      // descriptor; the archive worker refetches a fresh URL by creative id + slot under credential.
+      sourceUrl: null,
+      // Host/path only, with query/hash/userinfo stripped. This gives H5 enough stable context to
+      // match URL-only slots after a creative refresh without persisting a bearer-like media URL.
+      sourceLocator,
+    } satisfies MetaAdsAssetDescriptor;
+    if (!descriptor.providerAssetId && !descriptor.slotFingerprint) return;
+    const key = JSON.stringify(descriptor);
+    if (!seen.has(key)) {
+      seen.add(key);
+      descriptors.push(descriptor);
+    }
+  };
+
+  const creativeImageHash = stringOrNull(creative.image_hash);
+  const creativeVideoId = stringOrNull(creative.video_id);
+  add("creative.image", "image", creativeImageHash, "image_hash", creative.image_url);
+  add("creative.video", "video", creativeVideoId, "video_id", null);
+  add(
+    "creative.thumbnail",
+    "thumbnail",
+    creativeVideoId ?? creativeImageHash,
+    creativeVideoId ? "video_id" : creativeImageHash ? "image_hash" : null,
+    creative.thumbnail_url,
+  );
+
+  const feed = isRecord(creative.asset_feed_spec) ? creative.asset_feed_spec : null;
+  for (const [index, item] of (Array.isArray(feed?.images) ? feed.images : []).entries()) {
+    if (!isRecord(item)) continue;
+    const imageHash = stringOrNull(item.hash) ?? stringOrNull(item.image_hash);
+    add(`asset_feed.images.${index}`, "image", imageHash, "image_hash", item.url ?? item.image_url);
+  }
+  for (const [index, item] of (Array.isArray(feed?.videos) ? feed.videos : []).entries()) {
+    if (!isRecord(item)) continue;
+    const videoId = stringOrNull(item.video_id);
+    add(`asset_feed.videos.${index}`, "video", videoId, "video_id", item.url ?? item.video_url);
+    add(`asset_feed.videos.${index}.thumbnail`, "thumbnail", videoId, "video_id", item.thumbnail_url);
+  }
+
+  const story = isRecord(creative.object_story_spec) ? creative.object_story_spec : null;
+  const knownImageSource = (item: Record<string, unknown> | null): string | null =>
+    stringOrNull(item?.picture) ?? stringOrNull(item?.image_url);
+  const addKnownImage = (slotKey: string, item: Record<string, unknown> | null): void => {
+    add(slotKey, "image", stringOrNull(item?.image_hash), "image_hash", knownImageSource(item));
+  };
+
+  const linkData = isRecord(story?.link_data) ? story.link_data : null;
+  addKnownImage("object_story.link", linkData);
+  add("object_story.link.video", "video", stringOrNull(linkData?.video_id), "video_id", null);
+  for (const [index, item] of (Array.isArray(linkData?.child_attachments) ? linkData.child_attachments : []).entries()) {
+    if (!isRecord(item)) continue;
+    addKnownImage(`object_story.carousel.${index}`, item);
+    add(`object_story.carousel.${index}.video`, "video", stringOrNull(item.video_id), "video_id", item.video_url);
+  }
+
+  const photoData = isRecord(story?.photo_data) ? story.photo_data : null;
+  addKnownImage("object_story.photo", photoData);
+
+  const templateData = isRecord(story?.template_data) ? story.template_data : null;
+  addKnownImage("object_story.template", templateData);
+  for (const [index, item] of (Array.isArray(templateData?.child_attachments) ? templateData.child_attachments : []).entries()) {
+    if (!isRecord(item)) continue;
+    addKnownImage(`object_story.template.carousel.${index}`, item);
+  }
+
+  const videoData = isRecord(story?.video_data) ? story.video_data : null;
+  const storyVideoId = stringOrNull(videoData?.video_id);
+  add("object_story.video", "video", storyVideoId, "video_id", videoData?.video_url);
+  add("object_story.video.thumbnail", "thumbnail", storyVideoId, "video_id", videoData?.image_url);
+
+  if (descriptors.length > 1_000) {
+    throw new ConnectorError(
+      "provider_api_error",
+      "Meta creative exposed more than 1000 media asset descriptors; refusing to truncate the archive manifest",
+      false,
+    );
+  }
+  return descriptors;
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -9750,17 +10873,6 @@ export interface MetaLiveInsightsRow {
   currency: string | null;
 }
 
-// v2 purchase/lead precedence lists. `purchase` is Meta's cross-channel purchase (pixel + app +
-// offline + onsite); `omni_purchase` is the older omni alias; the pixel-only variant is last so an
-// account whose payload carries only the pixel event still reports its purchases.
-const META_LIVE_PURCHASE_ACTION_TYPES = ["purchase", "omni_purchase", "offsite_conversion.fb_pixel_purchase"];
-const META_LIVE_LEAD_ACTION_TYPES = ["lead", "onsite_conversion.lead_grouped", "offsite_conversion.fb_pixel_lead"];
-
-function metaLiveHeadlineFor(elements: MetaActionElement[] | null, actionTypes: string[]): number {
-  const element = metaPickCanonicalAction(elements, actionTypes);
-  return element ? metaHeadlineWindowValue(element) : 0;
-}
-
 // v2 status enrichment — ONE edge read per request, the level's own edge, through the SAME
 // readers the sync path uses (archived/paused included via META_ADS_EDGE_STATUS_FILTER). Returns
 // effective_status keyed by entity id.
@@ -9925,9 +11037,15 @@ export async function fetchMetaLiveInsights(
           ? stringOrNull(row.adset_name)
           : stringOrNull(row.ad_name);
     const actions = metaInsightsActions(row);
-    const purchases = metaLiveHeadlineFor(actions, META_LIVE_PURCHASE_ACTION_TYPES);
-    const purchaseValue = metaLiveHeadlineFor(metaInsightsActionValues(row), META_LIVE_PURCHASE_ACTION_TYPES);
-    const leads = metaLiveHeadlineFor(actions, META_LIVE_LEAD_ACTION_TYPES);
+    const purchase = metaAdsConversionForRule(
+      row, context, META_HEADLINE_RESULT_RULES.purchase, false, false,
+    );
+    const lead = metaAdsConversionForRule(
+      row, context, META_HEADLINE_RESULT_RULES.lead, false, false,
+    );
+    const purchases = purchase?.results ?? 0;
+    const purchaseValue = purchase?.conversionValue ?? 0;
+    const leads = lead?.results ?? 0;
     return {
       campaignId,
       campaignName: stringOrNull(row.campaign_name),
@@ -10366,13 +11484,14 @@ export function findMetaDedupHit(
 // the same live-token bridge a Meta read/sync does.
 export async function resolveMetaAdsCredential(
   db: InfiniteOsDb,
-  request: { workspaceId: string; sourceId: string }
+  request: { workspaceId: string; sourceId: string; encryptionKey?: string }
 ): Promise<MetaAdsCredential> {
   const credential = await sourceCredential<MetaAdsCredential>(db, {
     workspaceId: request.workspaceId,
     sourceId: request.sourceId,
     provider: "meta_ads",
-    syncRunId: `write_${Date.now()}`
+    syncRunId: `write_${Date.now()}`,
+    ...(request.encryptionKey ? { encryptionKey: request.encryptionKey } : {})
   });
   return credential.payload;
 }
@@ -10600,6 +11719,10 @@ async function callMetaAdsCliJson(
   args: string[],
   options: MetaCliCallOptions = {}
 ): Promise<unknown> {
+  const isolatedExecution = metaAdsCliExecutionByCredential.get(credential);
+  if (isolatedExecution) {
+    return callIsolatedMetaAdsCliJson(credential, args, options, isolatedExecution);
+  }
   const rawCliCommand =
     typeof credential.cliCommand === "string" && credential.cliCommand.trim() ? credential.cliCommand.trim() : "meta";
   // An ABSOLUTE path that exists as a file (the desktop stores exactly this) is used VERBATIM as the
@@ -10710,6 +11833,112 @@ async function callMetaAdsCliJson(
       });
     });
   });
+}
+
+async function callIsolatedMetaAdsCliJson(
+  credential: MetaAdsCredential,
+  args: string[],
+  options: MetaCliCallOptions,
+  execution: MetaAdsCliExecution
+): Promise<unknown> {
+  const token = metaAdsCliAccessToken(credential);
+  if (!token) {
+    throw new ConnectorError("provider_auth_failed", "Meta Ads CLI server execution requires a stored access token", false);
+  }
+  if (!execution.executable.startsWith("/") || !existsSync(execution.executable)) {
+    throw new ConnectorError("provider_unsupported", "Meta Ads CLI server executable is unavailable", false);
+  }
+  const home = mkdtempSync(join(tmpdir(), "meta-cli-server-"));
+  let stdout = Buffer.alloc(0);
+  let stderrBytes = 0;
+  let failed: ConnectorError | null = null;
+  try {
+    const child = spawn(execution.executable, ["--no-color", "--no-input", ...args], {
+      stdio: ["ignore", "pipe", "pipe"],
+      shell: false,
+      detached: process.platform !== "win32",
+      cwd: home,
+      env: {
+        ACCESS_TOKEN: token,
+        AD_ACCOUNT_ID: metaAdsCliAccountId(credential),
+        PATH: execution.path ?? "/usr/bin:/bin",
+        HOME: home,
+        XDG_CONFIG_HOME: home,
+        XDG_CACHE_HOME: home,
+        PYTHON_DOTENV_DISABLED: "1",
+        PYTHONUNBUFFERED: "1"
+      }
+    });
+    let resolveClose!: (value: { code: number | null; signal: NodeJS.Signals | null }) => void;
+    const close = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
+      resolveClose = resolve;
+      child.on("close", (code, signal) => resolve({ code, signal }));
+    });
+    let forceCloseTimer: NodeJS.Timeout | undefined;
+    const hardStop = () => {
+      if (forceCloseTimer) return;
+      // A CLI can spawn descendants holding stdout/stderr open or ignore SIGTERM.
+      // Kill the entire process group on Unix; use the direct child on Windows.
+      try {
+        if (process.platform !== "win32" && child.pid) process.kill(-child.pid, "SIGKILL");
+        else child.kill("SIGKILL");
+      } catch {
+        child.kill("SIGKILL");
+      }
+      forceCloseTimer = setTimeout(() => {
+        child.stdout.destroy();
+        child.stderr.destroy();
+        resolveClose({ code: null, signal: "SIGKILL" });
+      }, 2_000);
+    };
+    const timeout = setTimeout(() => {
+      failed = new ConnectorError("provider_api_error", "Meta Ads CLI server command timed out", false);
+      hardStop();
+    }, options.timeoutMs ?? META_CLI_DEFAULT_TIMEOUT_MS);
+    try {
+      child.stdout.on("data", (chunk: Buffer) => {
+        if (failed) return;
+        if (stdout.length + chunk.length > 128 * 1024) {
+          failed = new ConnectorError("provider_api_error", "Meta Ads CLI server output exceeded the limit", false);
+          hardStop();
+          return;
+        }
+        stdout = Buffer.concat([stdout, chunk]);
+      });
+      child.stderr.on("data", (chunk: Buffer) => {
+        stderrBytes += chunk.length;
+        if (stderrBytes > 8 * 1024 && !failed) {
+          failed = new ConnectorError("provider_api_error", "Meta Ads CLI server error output exceeded the limit", false);
+          hardStop();
+        }
+      });
+      child.on("error", () => {
+        failed ??= new ConnectorError("provider_api_error", "Meta Ads CLI server command failed to start", false);
+        hardStop();
+      });
+      const result = await close;
+      if (failed) throw failed;
+      if (result.code !== 0 || result.signal) {
+        // Provider stderr can echo arbitrary credentials. Never return its raw body.
+        throw new ConnectorError("provider_api_error", "Meta Ads CLI server command failed", false);
+      }
+      const output = stdout.toString("utf8");
+      if (scrubMetaToken(output, token) !== output) {
+        throw new ConnectorError("provider_api_error", "Meta Ads CLI server response contained credential material", false);
+      }
+      if (!output.trim()) return { success: true };
+      try {
+        return JSON.parse(stripJsonPrefix(output)) as unknown;
+      } catch {
+        throw new ConnectorError("provider_api_error", "Meta Ads CLI server command returned invalid JSON", false);
+      }
+    } finally {
+      clearTimeout(timeout);
+      if (forceCloseTimer) clearTimeout(forceCloseTimer);
+    }
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
 }
 
 // Extract the `--output json` payload the `meta` CLI prints, tolerating human prefix
@@ -11479,9 +12708,12 @@ function safeUrlForLogs(url: string): string {
     parsed.hash = "";
     return parsed.toString();
   } catch {
-    return url.replace(/\?.*$/, "");
+    const queryStart = url.indexOf("?");
+    return queryStart === -1 ? url : url.slice(0, queryStart);
   }
 }
+
+export const __testOnlySafeUrlForLogs = safeUrlForLogs;
 
 // Exported so the analytical engine can throw the SAME typed shape (code + retryable) for its
 // own pre-fetch failures — the daemon forwards `error.code` only when `retryable` is a boolean.

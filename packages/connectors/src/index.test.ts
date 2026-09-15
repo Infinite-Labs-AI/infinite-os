@@ -8,6 +8,7 @@ import { decryptCredentialPayload, encryptCredentialPayload } from "@infinite-os
 import { type InfiniteOsDb } from "@infinite-os/db";
 
 import {
+  __testOnlySafeUrlForLogs,
   __testOnlySyncExtractedBatch,
   classifySyncFailure,
   connectorFor,
@@ -23,11 +24,13 @@ import {
   getMetaEntity,
   listMetaAssets,
   listMetaEntities,
+  metaAdsSettledWindow,
   metaDedupKey,
   posthogConnectSourceFromSetup,
   resolveMetaAdsCredential,
   setMetaEntityStatus,
   updateMetaBudget,
+  bindMetaAdsCliExecution,
   xCredentialFromSetup,
   xConnectSourceFromSetup,
   type ExtractedRecord,
@@ -36,6 +39,167 @@ import {
   type SyncPlan,
   type SyncRequest
 } from "./index.js";
+
+
+describe("provider URL log redaction", () => {
+  it("strips query strings from malformed URLs without regex backtracking", () => {
+    const hostile = `not a url${"?".repeat(10000)}secret=token`;
+    expect(__testOnlySafeUrlForLogs(hostile)).toBe("not a url");
+  });
+
+  it("strips credentials, query, and hash from valid URLs", () => {
+    expect(__testOnlySafeUrlForLogs("https://user:pass@example.com/path?access_token=secret#frag")).toBe("https://example.com/path");
+  });
+});
+
+describe("trusted server Meta CLI isolation", () => {
+  function fakeExecutable(dir: string, body: string): string {
+    const script = join(dir, "meta-server.mjs");
+    writeFileSync(script, `#!${process.execPath}\n${body}\n`, "utf8");
+    chmodSync(script, 0o700);
+    return script;
+  }
+
+  const campaign = { name: "Server proof", objective: "OUTCOME_TRAFFIC" } as const;
+
+  it("rejects a missing stored token before spawning even with ambient auth", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "meta-server-test-"));
+    const marker = join(dir, "spawned");
+    const executable = fakeExecutable(dir, `import { writeFileSync } from "node:fs"; writeFileSync(${JSON.stringify(marker)}, "yes");`);
+    const prior = process.env.ACCESS_TOKEN;
+    process.env.ACCESS_TOKEN = "ambient-secret";
+    try {
+      const credential = bindMetaAdsCliExecution(
+        { mode: "live", transport: "meta_ads_cli", adAccountId: "123", cliCommand: "ignored" },
+        { mode: "isolated_server", executable }
+      );
+      await expect(createMetaCampaign(credential, campaign)).rejects.toMatchObject({ retryable: false });
+      expect(existsSync(marker)).toBe(false);
+    } finally {
+      if (prior === undefined) delete process.env.ACCESS_TOKEN; else process.env.ACCESS_TOKEN = prior;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("uses only the bound executable, token, account, and a private child home", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "meta-server-test-"));
+    const executable = fakeExecutable(dir, `
+import { writeFileSync } from "node:fs";
+writeFileSync(${JSON.stringify(join(dir, "observation.json"))}, JSON.stringify({
+  token: process.env.ACCESS_TOKEN, account: process.env.AD_ACCOUNT_ID,
+  home: process.env.HOME, config: process.env.XDG_CONFIG_HOME, cache: process.env.XDG_CACHE_HOME,
+  cwd: process.cwd(), inherited: process.env.CROSS_TENANT_SECRET ?? null,
+  dotenvDisabled: process.env.PYTHON_DOTENV_DISABLED
+}));
+console.log(JSON.stringify({ id: "1234", status: "PAUSED" }));`);
+    const prior = process.env.CROSS_TENANT_SECRET;
+    process.env.CROSS_TENANT_SECRET = "parent-secret";
+    try {
+      const credential = bindMetaAdsCliExecution(
+        { mode: "live", transport: "meta_ads_cli", adAccountId: "act_123", accessToken: "stored-secret", cliCommand: "/missing/wrong/meta" },
+        { mode: "isolated_server", executable }
+      );
+      expect(await createMetaCampaign(credential, campaign)).toEqual({ ok: true, id: "1234", status: "PAUSED" });
+      const observed = JSON.parse(readFileSync(join(dir, "observation.json"), "utf8")) as Record<string, string | undefined>;
+      expect(observed).toMatchObject({ token: "stored-secret", account: "123", inherited: null, dotenvDisabled: "1" });
+      expect(observed.cwd).toContain("meta-cli-server-");
+      expect(observed.config).toBe(observed.home);
+      expect(observed.cache).toBe(observed.home);
+      expect(existsSync(observed.home!)).toBe(false);
+    } finally {
+      if (prior === undefined) delete process.env.CROSS_TENANT_SECRET; else process.env.CROSS_TENANT_SECRET = prior;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps concurrent account credentials and homes separate", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "meta-server-test-"));
+    const executable = fakeExecutable(dir, `
+import { writeFileSync } from "node:fs";
+await new Promise((resolve) => setTimeout(resolve, 80));
+const id = process.env.ACCESS_TOKEN === "token-a" ? "a" : "b";
+writeFileSync(${JSON.stringify(dir)} + "/seen-" + id + ".json", JSON.stringify({
+  token: process.env.ACCESS_TOKEN, account: process.env.AD_ACCOUNT_ID, home: process.env.HOME
+}));
+console.log(JSON.stringify({ id, status: "PAUSED" }));`);
+    try {
+      const config = { mode: "isolated_server", executable } as const;
+      const a = bindMetaAdsCliExecution({ mode: "live", transport: "meta_ads_cli", adAccountId: "111", accessToken: "token-a" }, config);
+      const b = bindMetaAdsCliExecution({ mode: "live", transport: "meta_ads_cli", adAccountId: "222", accessToken: "token-b" }, config);
+      expect(await Promise.all([createMetaCampaign(a, campaign), createMetaCampaign(b, campaign)])).toEqual([
+        { ok: true, id: "a", status: "PAUSED" }, { ok: true, id: "b", status: "PAUSED" }
+      ]);
+      const seenA = JSON.parse(readFileSync(join(dir, "seen-a.json"), "utf8")) as Record<string, string>;
+      const seenB = JSON.parse(readFileSync(join(dir, "seen-b.json"), "utf8")) as Record<string, string>;
+      expect(seenA).toMatchObject({ token: "token-a", account: "111" });
+      expect(seenB).toMatchObject({ token: "token-b", account: "222" });
+      expect(seenA.home).not.toBe(seenB.home);
+      expect(existsSync(seenA.home)).toBe(false);
+      expect(existsSync(seenB.home)).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("closes and cleans up on failure without exposing the echoed token", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "meta-server-test-"));
+    const executable = fakeExecutable(dir, `
+import { writeFileSync } from "node:fs";
+writeFileSync(${JSON.stringify(join(dir, "failed-home"))}, process.env.HOME ?? "");
+process.stderr.write("auth failed for " + process.env.ACCESS_TOKEN + " EAAabcdef123456");
+process.exit(2);`);
+    try {
+      const credential = bindMetaAdsCliExecution(
+        { mode: "live", transport: "meta_ads_cli", adAccountId: "333", accessToken: "private-token" },
+        { mode: "isolated_server", executable }
+      );
+      let failure: unknown;
+      try { await createMetaCampaign(credential, campaign); } catch (error) { failure = error; }
+      expect(failure).toMatchObject({ retryable: false });
+      expect(String(failure)).not.toContain("private-token");
+      expect(String(failure)).not.toContain("EAAabcdef123456");
+      expect(existsSync(readFileSync(join(dir, "failed-home"), "utf8"))).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects successful stdout that echoes the stored token", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "meta-server-test-"));
+    const executable = fakeExecutable(dir, `console.log(JSON.stringify({ id: process.env.ACCESS_TOKEN, status: "PAUSED" }));`);
+    try {
+      const credential = bindMetaAdsCliExecution(
+        { mode: "live", transport: "meta_ads_cli", adAccountId: "444", accessToken: "private-success-token" },
+        { mode: "isolated_server", executable }
+      );
+      let failure: unknown;
+      try { await createMetaCampaign(credential, campaign); } catch (error) { failure = error; }
+      expect(failure).toMatchObject({ retryable: false });
+      expect(String(failure)).not.toContain("private-success-token");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("hard-stops an overflowing CLI that ignores SIGTERM", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "meta-server-test-"));
+    const executable = fakeExecutable(dir, `
+process.on("SIGTERM", () => {});
+process.stdout.write("x".repeat(129 * 1024));
+setTimeout(() => process.exit(0), 900);`);
+    try {
+      const credential = bindMetaAdsCliExecution(
+        { mode: "live", transport: "meta_ads_cli", adAccountId: "555", accessToken: "overflow-token" },
+        { mode: "isolated_server", executable }
+      );
+      const started = Date.now();
+      await expect(createMetaCampaign(credential, campaign)).rejects.toMatchObject({ retryable: false });
+      expect(Date.now() - started).toBeLessThan(600);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
 
 const TEST_ENCRYPTION_KEY = "connector-test-encryption-key";
 
@@ -2693,6 +2857,7 @@ describe("live provider clients", () => {
   // rows; the adset insights pass returns the two adset rows; the campaign insights pass
   // returns empty (this fixture exercises the adset grain).
   function adsetProbeRouter(url: string): Response {
+    if (isMetaAccountRootRequest(url)) return metaAccountLivenessResponse(url);
     if (url.includes("/adsets")) {
       return jsonResponse(ADSET_PROBE.adsetsEdge);
     }
@@ -2807,6 +2972,7 @@ describe("live provider clients", () => {
     const edgeUrls: string[] = [];
     await withMockFetch(
       async (url) => {
+        if (isMetaAccountRootRequest(url)) return metaAccountLivenessResponse(url);
         if (url.includes("/adsets") || url.includes("/campaigns")) {
           edgeUrls.push(url);
         }
@@ -2943,6 +3109,7 @@ describe("live provider clients", () => {
     const queries: Array<{ sql: string; params?: unknown[] }> = [];
     await withMockFetch(
       async (url) => {
+        if (isMetaAccountRootRequest(url)) return metaAccountLivenessResponse(url);
         // This run includes a campaign insights row so the campaign dim is written + the
         // /campaigns edge status backfills onto it.
         if (url.includes("/adsets")) return jsonResponse(ADSET_PROBE.adsetsEdge);
@@ -3108,6 +3275,7 @@ describe("live provider clients", () => {
   // passes return empty (this fixture exercises the ad grain). Pin level=ad via the
   // SyncRequest override so ONLY the ad pass runs (single time_range, not the backfill loop).
   function adProbeRouter(url: string): Response {
+    if (isMetaAccountRootRequest(url)) return metaAccountLivenessResponse(url);
     if (isMetaAdsEdgeRequest(url)) {
       return jsonResponse(AD_PROBE.adsEdge);
     }
@@ -3195,11 +3363,12 @@ describe("live provider clients", () => {
     expect(adInsightsUrl.searchParams.get("fields")).toBe(
       "ad_id,ad_name,adset_id,campaign_id,campaign_name,date_start,spend,clicks,inline_link_clicks,impressions,reach,frequency,cpm,cpc,ctr,actions,action_values,results,cost_per_result,result_values_performance_indicator,objective,optimization_goal,account_currency"
     );
-    // The /ads edge requests creative{id} (the field-expansion, NO body) + the parent ids.
+    // The /ads edge requests the creative id plus bounded metadata needed for durable pattern/media
+    // archival, together with the parent ids.
     const adsEdgeRequest = requests.find((url) => isMetaAdsEdgeRequest(url));
     expect(adsEdgeRequest).toBeDefined();
     const adsEdgeUrl = new URL(adsEdgeRequest ?? "");
-    expect(adsEdgeUrl.searchParams.get("fields")).toContain("creative{id}");
+    expect(adsEdgeUrl.searchParams.get("fields")).toContain("creative{id,");
     expect(adsEdgeUrl.searchParams.get("fields")).toContain("adset_id");
     expect(adsEdgeUrl.searchParams.get("fields")).toContain("campaign_id");
   });
@@ -4265,10 +4434,10 @@ console.log(JSON.stringify({ data: [
       const mid = result.rows[2];
       expect(mid).toMatchObject({ entityName: "Mid", effectiveStatus: "PAUSED", leads: 4, purchases: 0, roas: 0, cpa: 0 });
       // Adding the v2 fields did NOT change the pre-existing canonical fields the ⌘L path reads:
-      // OUTCOME_SALES still maps the pixel purchase (results = 7d_click + 1d_view), and the
-      // OUTCOME_LEADS rule still recognises only `lead` (lead_grouped is a v2-only precedence).
+      // Canonical fields now share the same objective-independent alias precedence as v2/live
+      // headline fields, so stored and live results cannot disagree on lead_grouped.
       expect(big).toMatchObject({ adId: "a1", adName: "Big", resultType: "purchase", results: 5 });
-      expect(mid).toMatchObject({ adId: "a2", adName: "Mid", resultType: null, results: null });
+      expect(mid).toMatchObject({ adId: "a2", adName: "Mid", resultType: "lead", results: 4 });
     });
   });
 
@@ -5044,7 +5213,10 @@ console.log(JSON.stringify({ data: [] }));
         if (sql.includes("select provider, status") && sql.includes("for update")) {
           return [{ provider: "posthog", status: sourceStatus }];
         }
-        if (sql.includes("select id from sync_runs")) {
+        if (sql.includes("from sources") && sql.includes("for update")) {
+          return [{ id: "s" }];
+        }
+        if (sql.includes("from sync_runs") && sql.includes("status = 'running'")) {
           return [{ id: "r" }];
         }
         return [];
@@ -5114,7 +5286,10 @@ console.log(JSON.stringify({ data: [] }));
         if (sql.includes("select provider, status") && sql.includes("for update")) {
           return [{ provider: "posthog", status: sourceStatus }];
         }
-        if (sql.includes("select id from sync_runs")) {
+        if (sql.includes("from sources") && sql.includes("for update")) {
+          return [{ id: "s" }];
+        }
+        if (sql.includes("from sync_runs") && sql.includes("status = 'running'")) {
           return [{ id: "r" }];
         }
         if (sql.includes("update sync_runs") && sql.includes("returning id")) {
@@ -5298,7 +5473,7 @@ console.log(JSON.stringify({ data: [] }));
       ],
       paging: {}
     });
-    await withMockFetch(async (url) => router(url), async () => {
+    await withMockFetch(async (url) => isMetaAccountRootRequest(url) ? metaAccountLivenessResponse(url) : router(url), async () => {
       const result = await connectorFor("meta_ads").sync(
         fakeDb({
           queryLog: queries,
@@ -5721,7 +5896,7 @@ describe("proportionate sync-failure status escalation", () => {
     );
 
     // The failure stays visible — run + error rows are recorded honestly...
-    expect(queryLog.some((q) => q.sql.includes("insert into sync_runs") && q.sql.includes("'failed'"))).toBe(true);
+    expect(queryLog.some((q) => q.sql.includes("update sync_runs") && q.sql.includes("status = 'failed'"))).toBe(true);
     expect(queryLog.some((q) => q.sql.includes("insert into sync_errors"))).toBe(true);
     // ...and the consecutive-failure counter advances through the TIME-GATED update (0045):
     // the increment stamps last_counted_sync_failure_at and only matches when the previous
@@ -5768,7 +5943,7 @@ describe("proportionate sync-failure status escalation", () => {
     );
 
     // Still recorded honestly — the gate is not a masking fallback...
-    expect(queryLog.some((q) => q.sql.includes("insert into sync_runs") && q.sql.includes("'failed'"))).toBe(true);
+    expect(queryLog.some((q) => q.sql.includes("update sync_runs") && q.sql.includes("status = 'failed'"))).toBe(true);
     expect(queryLog.some((q) => q.sql.includes("insert into sync_errors"))).toBe(true);
     // ...but no strike counted → no park. Only the pre-provider claim is visible through
     // updateSourceStatus; the direct connected restore preserves streak state.
@@ -8210,6 +8385,274 @@ describe("resolveMetaAdsCredential (operator write credential resolver)", () => 
   });
 });
 
+describe("Meta Ads durable daily history", () => {
+  it("resolves settled ranges in the account timezone across DST boundaries", () => {
+    expect(metaAdsSettledWindow("2026-03-29T00:30:00.000Z", "Europe/London", 7)).toEqual({
+      since: "2026-03-22",
+      until: "2026-03-28",
+    });
+    expect(metaAdsSettledWindow("2026-11-01T03:30:00.000Z", "America/New_York", 7)).toEqual({
+      since: "2026-10-24",
+      until: "2026-10-30",
+    });
+  });
+
+  function historyCredentialDb(queryLog?: Array<{ sql: string; params?: unknown[] }>): InfiniteOsDb {
+    return fakeDb({
+      queryLog,
+      credential: {
+        credential_kind: "marketing_api_access_token",
+        encrypted_payload: encryptedCredential({
+          mode: "live",
+          transport: "meta_ads_cli",
+          adAccountId: "act_123",
+          accessToken: "meta-history-token",
+          apiVersion: "v25.0",
+        }),
+      },
+    });
+  }
+
+  function historyResponse(value: unknown, utilization = 12): Response {
+    return new Response(JSON.stringify(value), {
+      status: 200,
+      headers: {
+        "Content-Type": "application/json",
+        "x-fb-ads-insights-throttle": JSON.stringify({ acc_id_util_pct: utilization }),
+      },
+    });
+  }
+
+  it("persists objective-independent purchase and lead rows without summing aliases", async () => {
+    const insight = {
+      campaign_id: "c1",
+      campaign_name: "Lead campaign",
+      date_start: "2026-09-01",
+      spend: "50",
+      objective: "OUTCOME_LEADS",
+      optimization_goal: "LEAD_GENERATION",
+      account_currency: "GBP",
+      actions: [
+        { action_type: "lead", "7d_click": "2", "1d_view": "1" },
+        { action_type: "offsite_conversion.fb_pixel_lead", "7d_click": "2", "1d_view": "1" },
+        { action_type: "purchase", "7d_click": "1", "1d_view": "1" },
+        { action_type: "omni_purchase", "7d_click": "50", "1d_view": "50" },
+      ],
+      action_values: [
+        { action_type: "purchase", "7d_click": "120", "1d_view": "30" },
+        { action_type: "omni_purchase", "7d_click": "999", "1d_view": "999" },
+      ],
+    };
+    await withMockFetch((url) => {
+      if (url.includes("/campaigns") || url.includes("/adsets") || isMetaAdsEdgeRequest(url)) {
+        return historyResponse({ data: [], paging: {} });
+      }
+      if (isMetaAdsetInsightsRequest(url) || isMetaAdInsightsRequest(url)) {
+        return historyResponse({ data: [], paging: {} });
+      }
+      return historyResponse({ data: [insight], paging: {} });
+    }, async () => {
+      const extracted = await connectorFor("meta_ads").extract(
+        historyCredentialDb(),
+        request("meta_ads"),
+        {
+          cursorKey: "meta_ads_campaign_daily",
+          cursorStart: "2026-09-01T00:00:00.000Z",
+          cursorEnd: "2026-09-01T23:59:59.000Z",
+          refreshWindowDays: 30,
+          mode: "live",
+        },
+      );
+      const campaign = extracted.find((row) => row.objectType === "meta_ads_campaign_daily");
+      const conversions = (campaign?.payload as { conversions: Array<Record<string, unknown>> }).conversions;
+      expect(conversions).toEqual([
+        expect.objectContaining({ resultType: "lead", results: 3, conversionValue: null, isPrimary: true }),
+        expect.objectContaining({ resultType: "purchase", results: 2, conversionValue: 150, isPrimary: false }),
+      ]);
+      expect(conversions.reduce((sum, row) => sum + Number(row.results), 0)).toBe(5);
+    });
+  });
+
+  it("emits change-snapshot records for zero-delivery entities with targeting and creative descriptors", async () => {
+    const seen: string[] = [];
+    await withMockFetch((url) => {
+      seen.push(url);
+      if (url.includes("/campaigns")) return historyResponse({ data: [{
+        id: "c1", name: "Campaign", status: "PAUSED", effective_status: "PAUSED",
+        objective: "OUTCOME_SALES", daily_budget: "10000", buying_type: "AUCTION",
+      }], paging: {} });
+      if (url.includes("/adsets")) return historyResponse({ data: [{
+        id: "s1", campaign_id: "c1", name: "Broad UK", status: "ACTIVE", effective_status: "ACTIVE",
+        optimization_goal: "OFFSITE_CONVERSIONS", billing_event: "IMPRESSIONS",
+        targeting: { geo_locations: { countries: ["GB"] }, publisher_platforms: ["facebook", "instagram"] },
+        promoted_object: { pixel_id: "px1", custom_event_type: "PURCHASE" },
+        attribution_spec: [{ event_type: "CLICK_THROUGH", window_days: 7 }],
+      }], paging: {} });
+      if (isMetaAdsEdgeRequest(url)) return historyResponse({ data: [{
+        id: "a1", campaign_id: "c1", adset_id: "s1", name: "UGC winner", status: "ACTIVE",
+        effective_status: "ACTIVE", tracking_specs: [{ "action.type": ["offsite_conversion"] }],
+        creative: {
+          id: "cr1", name: "Creator cut", title: "Stop scrolling", body: "The body", image_hash: "img-hash",
+          image_url: "https://scontent.xx.fbcdn.net/original.jpg?oh=signed-secret&oe=123",
+          thumbnail_url: "https://scontent.xx.fbcdn.net/thumb.jpg?oh=thumb-secret",
+          video_id: "123456789012345678", call_to_action_type: "SHOP_NOW",
+          access_token: "meta-history-token",
+          object_story_spec: { link_data: { link: "https://example.com/buy?utm_source=meta", child_attachments: [
+            { picture: "https://scontent.xx.fbcdn.net/carousel.jpg?oh=carousel-secret" },
+          ] } },
+          asset_feed_spec: {
+            images: [{ hash: "variant-hash" }, { url: "https://scontent.xx.fbcdn.net/url-only.jpg?oh=image-secret" }],
+            videos: [{ video_id: "vid2" }, { thumbnail_url: "https://scontent.xx.fbcdn.net/video-thumb.jpg?oh=video-thumb-secret" }],
+          },
+        },
+      }], paging: {} });
+      return historyResponse({ data: [], paging: {} });
+    }, async () => {
+      const extracted = await connectorFor("meta_ads").extract(
+        historyCredentialDb(), request("meta_ads"), {
+          cursorKey: "meta_ads_campaign_daily", cursorStart: null,
+          cursorEnd: "2026-09-15T12:00:00.000Z", refreshWindowDays: 30, mode: "live",
+        },
+      );
+      const snapshots = extracted.filter((row) => row.objectType.startsWith("meta_ads_entity_"));
+      expect(snapshots).toHaveLength(4);
+      expect(snapshots.map((row) => (row.payload as { entityType: string }).entityType).sort())
+        .toEqual(["ad", "adset", "campaign", "creative"]);
+      const adset = snapshots.find((row) => (row.payload as { entityType: string }).entityType === "adset");
+      expect(adset?.payload).toMatchObject({ metadata: { targeting: { geo_locations: { countries: ["GB"] } } } });
+      const ad = snapshots.find((row) => (row.payload as { entityType: string }).entityType === "ad");
+      expect(ad?.payload).toMatchObject({
+        creativeId: "cr1",
+        metadata: {
+          creative: {
+            video_id: "123456789012345678",
+            asset_feed_spec: {
+              videos: [
+                { video_id: "vid2" },
+                { thumbnail_url: "https://scontent.xx.fbcdn.net/video-thumb.jpg" },
+              ],
+            },
+          },
+        },
+      });
+      const creative = snapshots.find((row) => (row.payload as { entityType: string }).entityType === "creative");
+      expect(creative?.payload).toMatchObject({
+        entityId: "cr1",
+        assetDescriptors: expect.arrayContaining([
+          expect.objectContaining({ slotKey: "creative.image", kind: "image", providerAssetId: "img-hash", providerAssetType: "image_hash", sourceUrl: null, slotFingerprint: expect.stringMatching(/^sha256:[a-f0-9]{64}$/) }),
+          expect.objectContaining({ slotKey: "creative.thumbnail", kind: "thumbnail", providerAssetId: "123456789012345678", providerAssetType: "video_id", sourceUrl: null, slotFingerprint: expect.stringMatching(/^sha256:[a-f0-9]{64}$/), sourceLocator: { host: "scontent.xx.fbcdn.net", path: "/thumb.jpg" } }),
+          expect.objectContaining({ slotKey: "asset_feed.videos.0", kind: "video", providerAssetId: "vid2", providerAssetType: "video_id", sourceUrl: null, slotFingerprint: expect.stringMatching(/^sha256:[a-f0-9]{64}$/) }),
+          expect.objectContaining({ slotKey: "asset_feed.images.1", kind: "image", providerAssetId: null, sourceUrl: null, slotFingerprint: expect.stringMatching(/^sha256:[a-f0-9]{64}$/), sourceLocator: { host: "scontent.xx.fbcdn.net", path: "/url-only.jpg" } }),
+          expect.objectContaining({ slotKey: "asset_feed.videos.1.thumbnail", kind: "thumbnail", providerAssetId: null, sourceUrl: null, slotFingerprint: expect.stringMatching(/^sha256:[a-f0-9]{64}$/), sourceLocator: { host: "scontent.xx.fbcdn.net", path: "/video-thumb.jpg" } }),
+          expect.objectContaining({ slotKey: "object_story.carousel.0", kind: "image", providerAssetId: null, sourceUrl: null, slotFingerprint: expect.stringMatching(/^sha256:[a-f0-9]{64}$/), sourceLocator: { host: "scontent.xx.fbcdn.net", path: "/carousel.jpg" } }),
+        ]),
+      });
+      expect(JSON.stringify(snapshots)).not.toContain("meta-history-token");
+      expect(JSON.stringify(snapshots)).not.toContain("signed-secret");
+      expect(JSON.stringify(snapshots)).not.toContain("thumb-secret");
+      expect(JSON.stringify(snapshots)).not.toContain("?oh=");
+      expect(JSON.stringify(snapshots)).not.toContain("carousel-secret");
+      expect(JSON.stringify(snapshots)).not.toContain("image-secret");
+      expect(JSON.stringify(snapshots)).not.toContain("video-thumb-secret");
+      expect((ad?.payload as { metadata: { creative: { object_story_spec: { link_data: { link: string } } } } }).metadata.creative.object_story_spec.link_data.link)
+        .toBe("https://example.com/buy?utm_source=meta");
+      expect((creative?.payload as { metadata: Record<string, unknown> }).metadata).not.toHaveProperty("access_token");
+      const adsFields = new URL(seen.find((url) => isMetaAdsEdgeRequest(url)) ?? "").searchParams.get("fields") ?? "";
+      expect(adsFields).toContain("asset_feed_spec");
+      expect(adsFields).toContain("object_story_spec");
+      expect(adsFields).toContain("tracking_specs");
+    });
+  });
+
+  it("records the seven-request no-pagination floor, account timezone, and successful coverage CLOSE", async () => {
+    const queries: Array<{ sql: string; params?: unknown[] }> = [];
+    let calls = 0;
+    await withMockFetch((url) => {
+      calls += 1;
+      const parsed = new URL(url);
+      if (parsed.pathname.endsWith("/act_123")) {
+        return historyResponse({ id: "act_123", account_id: "123", currency: "GBP", timezone_name: "Europe/London" });
+      }
+      return historyResponse({ data: [], paging: {} });
+    }, async () => {
+      await connectorFor("meta_ads").sync(historyCredentialDb(queries), {
+        ...request("meta_ads"), sourceId: "source_meta_ads", windowSince: "2026-09-01",
+        windowUntil: "2026-09-03", metaAdsRequestBudget: 20,
+      });
+    });
+    expect(calls).toBe(7);
+    expect(queries.filter((entry) => entry.sql.includes("set request_telemetry = $4::jsonb") && entry.sql.includes("status = 'running'")))
+      .toHaveLength(7);
+    const close = queries.find((entry) => entry.sql.includes("request_telemetry = $3::jsonb"));
+    const telemetry = JSON.parse(String(close?.params?.[2])) as Record<string, unknown>;
+    expect(telemetry).toMatchObject({
+      provider: "meta_ads", schemaVersion: 1, requestCount: 7, pageCount: 7, retryCount: 0,
+      budget: { limit: 20, remaining: 13, exhausted: false },
+      utilization: { maxPercent: 12 },
+    });
+    expect(queries.some((entry) => entry.sql.includes("insert into meta_ads_accounts") && entry.params?.includes("Europe/London"))).toBe(true);
+    expect(queries.some((entry) => entry.sql.includes("insert into meta_ads_coverage_daily"))).toBe(true);
+  });
+
+  it("counts a real throttle retry without counting its discarded response as a completed page", async () => {
+    const queries: Array<{ sql: string; params?: unknown[] }> = [];
+    let campaignEdgeAttempts = 0;
+    let calls = 0;
+    await withMockFetch((url) => {
+      calls += 1;
+      const parsed = new URL(url);
+      if (parsed.pathname.endsWith("/act_123")) {
+        return historyResponse({ id: "act_123", account_id: "123", currency: "GBP", timezone_name: "Europe/London" });
+      }
+      if (parsed.pathname.endsWith("/campaigns")) {
+        campaignEdgeAttempts += 1;
+        return historyResponse({ data: [], paging: {} }, campaignEdgeAttempts === 1 ? 95 : 20);
+      }
+      return historyResponse({ data: [], paging: {} }, 20);
+    }, async () => {
+      await connectorFor("meta_ads").sync(historyCredentialDb(queries), {
+        ...request("meta_ads"), sourceId: "source_meta_ads", windowSince: "2026-09-01",
+        windowUntil: "2026-09-03", metaAdsRequestBudget: 20,
+      });
+    });
+    expect(calls).toBe(8);
+    const close = queries.find((entry) => entry.sql.includes("request_telemetry = $3::jsonb"));
+    expect(JSON.parse(String(close?.params?.[2]))).toMatchObject({
+      requestCount: 8,
+      pageCount: 7,
+      retryCount: 1,
+      byKind: { campaign_edge: 2 },
+      utilization: { maxPercent: 95, highWatermarkResponses: 1 },
+    });
+  });
+
+  it("stops before exceeding the request budget and publishes no coverage or snapshot deletion", async () => {
+    const queries: Array<{ sql: string; params?: unknown[] }> = [];
+    let calls = 0;
+    await withMockFetch((url) => {
+      calls += 1;
+      const parsed = new URL(url);
+      if (parsed.pathname.endsWith("/act_123")) {
+        return historyResponse({ id: "act_123", account_id: "123", currency: "GBP", timezone_name: "Europe/London" });
+      }
+      return historyResponse({ data: [], paging: {} });
+    }, async () => {
+      await expect(connectorFor("meta_ads").sync(historyCredentialDb(queries), {
+        ...request("meta_ads"), sourceId: "source_meta_ads", windowSince: "2026-09-01",
+        windowUntil: "2026-09-03", metaAdsRequestBudget: 6,
+      })).rejects.toMatchObject({ code: "provider_rate_budget_exhausted" });
+    });
+    expect(calls).toBe(6);
+    expect(queries.some((entry) => entry.sql.includes("insert into meta_ads_coverage_daily"))).toBe(false);
+    expect(queries.some((entry) => entry.sql.includes("delete from meta_ads_ad_daily"))).toBe(false);
+    const failedRun = queries.find((entry) => entry.sql.includes("request_telemetry") && entry.sql.includes("status = 'failed'"));
+    expect(failedRun).toBeDefined();
+    expect(JSON.parse(String(failedRun?.params?.at(-1)))).toMatchObject({
+      provider: "meta_ads", requestCount: 6, budget: { limit: 6, remaining: 0, exhausted: true },
+    });
+  });
+});
+
 function request(provider: "google_analytics_4" | "posthog" | "stripe" | "x" | "shopify" | "meta_ads") {
   return {
     workspaceId: "workspace",
@@ -8250,8 +8693,20 @@ function fakeDb(options: {
   failureStreakGateBlocked?: boolean;
   sourceProvider?: string;
   sourceStatus?: string;
+  sourceAccountExternalId?: string;
 }): InfiniteOsDb {
   let currentSourceStatus = options.sourceStatus ?? "connected";
+  let inferredAccountExternalId: string | null = null;
+  try {
+    const payload = decryptCredentialPayload<Record<string, unknown>>(
+      options.credential.encrypted_payload,
+      process.env.GROWTH_OS_ENCRYPTION_KEY ?? TEST_ENCRYPTION_KEY,
+    );
+    const raw = typeof payload.adAccountId === "string" ? payload.adAccountId : null;
+    inferredAccountExternalId = raw ? (raw.startsWith("act_") ? raw : `act_${raw}`) : null;
+  } catch {
+    // Individual tests may deliberately supply malformed credentials; the source lookup stays null.
+  }
   const record = (sql: string, params?: unknown[]) => {
     options.queries?.push(sql);
     options.queryLog?.push({ sql, params });
@@ -8259,8 +8714,27 @@ function fakeDb(options: {
   return {
     async one<T>(sql: string, params?: unknown[]): Promise<T | null> {
       record(sql, params);
+      if (sql.includes("select id, updated_at") && sql.includes("connection_credentials")) {
+        return { id: "cred_test", updated_at: "2026-01-01T00:00:00Z" } as T;
+      }
+      if (sql.includes("from connection_credentials") && sql.includes("updated_at is not distinct from")) {
+        return { id: String(params?.[0] ?? "cred_test") } as T;
+      }
       if (sql.includes("connection_credentials")) {
         return options.credential as T;
+      }
+      if (sql.includes("account_external_id from sources")) {
+        return {
+          account_external_id: options.sourceAccountExternalId ?? inferredAccountExternalId,
+        } as T;
+      }
+      if (sql.includes("from sources") && sql.includes("status = 'syncing'")) {
+        return currentSourceStatus === "syncing"
+          ? ({ id: String(params?.[0] ?? "src_1") } as T)
+          : null;
+      }
+      if (sql.includes("from sync_runs") && sql.includes("status = 'running'")) {
+        return { id: String(params?.[0] ?? "sync_run") } as T;
       }
       if (sql.includes("sync_cursors") && options.cursorValue) {
         return { cursor_value: options.cursorValue } as T;
@@ -8292,7 +8766,10 @@ function fakeDb(options: {
           status: currentSourceStatus
         }];
       }
-      if (sql.includes("select id from sync_runs")) {
+      if (sql.includes("from sources") && sql.includes("for update")) {
+        return [{ id: String(params?.[0] ?? "src_1") }];
+      }
+      if (sql.includes("from sync_runs") && sql.includes("status = 'running'")) {
         return [{ id: String(params?.[0] ?? "sync_run") }];
       }
       if (sql.includes("update sync_runs") && sql.includes("returning id")) {
@@ -8303,9 +8780,6 @@ function fakeDb(options: {
       }
       if (sql.includes("update sources set status = 'connected'") && sql.includes("status = 'syncing'")) {
         currentSourceStatus = "connected";
-      }
-      if (sql.includes("select id from sources") && sql.includes("for update")) {
-        return [{ id: String(params?.[0] ?? "src_1") }];
       }
       return [];
     }) as InfiniteOsDb["query"],
@@ -8400,6 +8874,15 @@ function jsonResponse(value: unknown): Response {
     status: 200,
     headers: { "Content-Type": "application/json" }
   });
+}
+
+function isMetaAccountRootRequest(url: string): boolean {
+  return /^\/v\d+\.\d+\/act_\d+$/.test(new URL(url).pathname);
+}
+
+function metaAccountLivenessResponse(url: string): Response {
+  const id = new URL(url).pathname.split("/").at(-1) ?? "";
+  return jsonResponse({ id, account_id: id.replace(/^act_/, ""), currency: "USD", timezone_name: "America/New_York" });
 }
 
 // Phase-2 slice-1a/1b — the Meta direct-Graph extract now issues, per run: the /ads +

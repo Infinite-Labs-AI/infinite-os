@@ -7,6 +7,7 @@ import {
   createMetaAdSet,
   createMetaCampaign,
   createMetaCreative,
+  bindMetaAdsCliExecution,
   deleteMetaEntity,
   fetchMetaLiveInsights,
   getMetaEntity,
@@ -19,6 +20,7 @@ import {
   type ConnectionTestResult,
   type MetaAdSetTargeting,
   type MetaAdsCredential,
+  type MetaAdsCliExecution,
   type MetaEntityStatus,
   type MetaWriteEntity,
   type MetaWriteResult
@@ -83,6 +85,14 @@ export function createAnalyticalRegistry(databaseUrl: string) {
   return createInfiniteOsRegistry(createActionHandlers(db));
 }
 
+/** Trusted, process-only binding frozen by a server before it invokes a Meta mutation. */
+export interface ExpectedMetaCredential {
+  sourceId: string;
+  credentialId: string;
+  credentialUpdatedAt: string;
+  selectedPageId?: string;
+}
+
 // `options.encryptionKey` is the per-workspace credential-custody key (structurally the
 // `CreateActionHandlersOptions` shape canonicalized in @infinite-os/types; kept inline here so
 // this package need not depend on that leaf). When set, the connect/reconnect/sync/test paths
@@ -91,9 +101,25 @@ export function createAnalyticalRegistry(databaseUrl: string) {
 // identical prior behavior. Backward-compatible.
 export function createActionHandlers(
   db: InfiniteOsDb,
-  options?: { encryptionKey?: string }
+  options?: {
+    encryptionKey?: string;
+    metaAdsCliExecution?: MetaAdsCliExecution;
+    expectedMetaCredential?: ExpectedMetaCredential;
+  }
 ): Partial<Record<InfiniteOsActionId, ActionHandler>> {
   const encryptionKey = options?.encryptionKey;
+  const metaAdsCliExecution = options?.metaAdsCliExecution;
+  const expectedMetaCredential = options?.expectedMetaCredential;
+  // A frozen credential version is a hosted-mutation contract, not a general credential hint.
+  // Requiring the trusted process-only runner here prevents an incomplete server setup from
+  // silently falling back to a persisted transport, executable, or ambient local authentication.
+  if (expectedMetaCredential && metaAdsCliExecution?.mode !== "isolated_server") {
+    throw new ConnectorError(
+      "provider_unsupported",
+      "Expected Meta credential execution requires trusted isolated-server CLI mode",
+      false
+    );
+  }
   return {
     list_sources: (_input, context) => listSources(db, context),
     describe_source: (input, context) => describeSource(db, context, input),
@@ -127,16 +153,16 @@ export function createActionHandlers(
     run_saved_report: (input, context) => runSavedReport(db, context, input),
     export_saved_report: (input, context) => exportSavedReport(db, context, input),
     list_meta_assets: (input, context) => listMetaAssetsHandler(db, context, input),
-    list_meta_entities: (input, context) => listMetaEntitiesHandler(db, context, input),
-    get_meta_entity: (input, context) => getMetaEntityHandler(db, context, input),
-    run_meta_live_insights: (input, context) => runMetaLiveInsightsHandler(db, context, input),
-    create_meta_campaign: (input, context) => createMetaCampaignHandler(db, context, input),
-    create_meta_ad_set: (input, context) => createMetaAdSetHandler(db, context, input),
-    create_meta_creative: (input, context) => createMetaCreativeHandler(db, context, input),
-    create_meta_ad: (input, context) => createMetaAdHandler(db, context, input),
-    set_meta_entity_status: (input, context) => setMetaEntityStatusHandler(db, context, input),
-    update_meta_budget: (input, context) => updateMetaBudgetHandler(db, context, input),
-    delete_meta_entity: (input, context) => deleteMetaEntityHandler(db, context, input)
+    list_meta_entities: (input, context) => listMetaEntitiesHandler(db, context, input, metaAdsCliExecution, encryptionKey),
+    get_meta_entity: (input, context) => getMetaEntityHandler(db, context, input, metaAdsCliExecution, encryptionKey),
+    run_meta_live_insights: (input, context) => runMetaLiveInsightsHandler(db, context, input, metaAdsCliExecution, encryptionKey),
+    create_meta_campaign: (input, context) => createMetaCampaignHandler(db, context, input, metaAdsCliExecution, encryptionKey, expectedMetaCredential),
+    create_meta_ad_set: (input, context) => createMetaAdSetHandler(db, context, input, metaAdsCliExecution, encryptionKey, expectedMetaCredential),
+    create_meta_creative: (input, context) => createMetaCreativeHandler(db, context, input, metaAdsCliExecution, encryptionKey, expectedMetaCredential),
+    create_meta_ad: (input, context) => createMetaAdHandler(db, context, input, metaAdsCliExecution, encryptionKey, expectedMetaCredential),
+    set_meta_entity_status: (input, context) => setMetaEntityStatusHandler(db, context, input, metaAdsCliExecution, encryptionKey, expectedMetaCredential),
+    update_meta_budget: (input, context) => updateMetaBudgetHandler(db, context, input, metaAdsCliExecution, encryptionKey, expectedMetaCredential),
+    delete_meta_entity: (input, context) => deleteMetaEntityHandler(db, context, input, metaAdsCliExecution, encryptionKey, expectedMetaCredential)
   };
 }
 
@@ -1480,13 +1506,23 @@ async function connectSource(
   const provider = requiredProvider(input);
   const credentialKind = optionalString(input, "credentialKind") ?? defaultCredentialKind(provider);
   const oauthTokenId = optionalString(input, "oauthTokenId");
-  const source = await db.connectSource({
+  const encryptedPayload = credentialPayloadForStorage(input, credentialKind, oauthTokenId, encryptionKey);
+  const candidate = { credentialKind, encryptedPayload, oauthTokenId };
+  // Meta reconnects can target an already-working source because connectSource upserts on the
+  // account binding. Probe the exact candidate row before that upsert: a rejected replacement must
+  // never overwrite the working credential or park its source. The candidate adapter feeds the
+  // normal typed connector resolver (including the per-request workspace key and OAuth bridge)
+  // without writing tenant state or process.env.
+  const candidateTest = provider === "meta_ads"
+    ? await testMetaConnectionCandidate(db, context, candidate, encryptionKey)
+    : undefined;
+  const connectInput = {
     workspaceId: context.workspaceId,
     provider,
     connectionName: optionalString(input, "connectionName") ?? provider,
     accountExternalId: optionalString(input, "accountExternalId") ?? accountExternalIdFromPayload(provider, input),
     credentialKind,
-    encryptedPayload: credentialPayloadForStorage(input, credentialKind, oauthTokenId, encryptionKey),
+    encryptedPayload,
     oauthTokenId,
     // P1-2: the Meta account/pixel picker passes the chosen pixel here so CAPI dispatch has a target.
     // db.connectSource COALESCEs it on re-connect, so rotating the token never nulls a prior pixel.
@@ -1495,8 +1531,13 @@ async function connectSource(
     // create_meta_creative defaults its pageId to it. COALESCEd on re-connect like the pixel.
     ...(optionalString(input, "selectedPageId") ? { selectedPageId: optionalString(input, "selectedPageId") } : {}),
     actorType: context.authority
-  });
-  const connectionTest = await testConnectionForSource(db, context, provider, String(source.id), encryptionKey);
+  };
+  // connectSource writes the source, credential, schedule and audit row. Keep that unit atomic so
+  // a storage failure cannot leave a half-connected source, and concurrent successful replacements
+  // serialize at the database boundary.
+  const source = await db.withTransaction((tx) => tx.connectSource(connectInput));
+  const connectionTest = candidateTest
+    ?? await testConnectionForSource(db, context, provider, String(source.id), encryptionKey);
   const initialSync = await queueInitialSyncOnConnect(db, context, provider, String(source.id));
   return envelope("connect_source", context.authority, { source, connectionTest, initialSync }, ["sources"], "queued");
 }
@@ -1511,85 +1552,103 @@ async function reconnectSource(
   const provider = await sourceProvider(db, context.workspaceId, sourceId);
   const credentialKind = optionalString(input, "credentialKind");
   const oauthTokenId = optionalString(input, "oauthTokenId");
-  if (credentialKind || objectField(input, "credentialPayload") || optionalString(input, "encryptedPayload")) {
-    const resolvedKind = credentialKind ?? defaultCredentialKind(provider);
-    // Carry the Meta CAPI pixel AND the posting Page (migration 0068) forward across a token
-    // rotation: reconnect REVOKES the old row and INSERTs a fresh one, so without this the prior
-    // selected_pixel_id / selected_page_id would be silently wiped — CAPI dispatch would lose its
-    // target and create_meta_creative its default Page. An explicit selectedPixelId /
-    // selectedPageId in the input overrides.
-    const prior = await db.query(
-      `select selected_pixel_id, selected_page_id from connection_credentials
-         where workspace_id = $1 and source_id = $2 and revoked_at is null
-         order by created_at desc limit 1`,
-      [context.workspaceId, sourceId]
-    );
-    const priorRow = prior[0] as Record<string, unknown> | undefined;
-    const carried = (inputKey: string, column: string): string | undefined => {
-      const priorVal = priorRow?.[column];
-      return (
-        optionalString(input, inputKey) ??
-        (typeof priorVal === "string" && priorVal !== "" ? priorVal : undefined)
+  const replacesCredential = Boolean(
+    credentialKind || objectField(input, "credentialPayload") || optionalString(input, "encryptedPayload")
+  );
+  const resolvedKind = credentialKind ?? defaultCredentialKind(provider);
+  const candidate = replacesCredential
+    ? {
+        credentialKind: resolvedKind,
+        encryptedPayload: credentialPayloadForStorage(input, resolvedKind, oauthTokenId, encryptionKey),
+        oauthTokenId
+      }
+    : undefined;
+  const candidateTest = provider === "meta_ads" && candidate
+    ? await testMetaConnectionCandidate(db, context, candidate, encryptionKey)
+    : undefined;
+
+  await db.withTransaction(async (tx) => {
+    if (candidate) {
+      // Carry the Meta CAPI pixel AND the posting Page (migration 0068) forward across a token
+      // rotation: reconnect REVOKES the old row and INSERTs a fresh one, so without this the prior
+      // selected_pixel_id / selected_page_id would be silently wiped — CAPI dispatch would lose its
+      // target and create_meta_creative its default Page. An explicit selectedPixelId /
+      // selectedPageId in the input overrides.
+      const prior = await tx.query(
+        `select selected_pixel_id, selected_page_id from connection_credentials
+           where workspace_id = $1 and source_id = $2 and revoked_at is null
+           order by created_at desc limit 1`,
+        [context.workspaceId, sourceId]
       );
-    };
-    const carriedPixelId = carried("selectedPixelId", "selected_pixel_id");
-    const carriedPageId = carried("selectedPageId", "selected_page_id");
-    await db.query(
-      "update connection_credentials set revoked_at = now() where workspace_id = $1 and source_id = $2 and revoked_at is null",
+      const priorRow = prior[0] as Record<string, unknown> | undefined;
+      const carried = (inputKey: string, column: string): string | undefined => {
+        const priorVal = priorRow?.[column];
+        return (
+          optionalString(input, inputKey) ??
+          (typeof priorVal === "string" && priorVal !== "" ? priorVal : undefined)
+        );
+      };
+      const carriedPixelId = carried("selectedPixelId", "selected_pixel_id");
+      const carriedPageId = carried("selectedPageId", "selected_page_id");
+      await tx.query(
+        "update connection_credentials set revoked_at = now() where workspace_id = $1 and source_id = $2 and revoked_at is null",
+        [context.workspaceId, sourceId]
+      );
+      await tx.query(
+        `
+          insert into connection_credentials (
+            id, workspace_id, source_id, credential_kind, encrypted_payload, oauth_token_id, selected_pixel_id,
+            selected_page_id
+          )
+          values ($1,$2,$3,$4,$5,$6,$7,$8)
+        `,
+        [
+          `cred_${randomUUID()}`,
+          context.workspaceId,
+          sourceId,
+          resolvedKind,
+          candidate.encryptedPayload,
+          oauthTokenId ?? null,
+          carriedPixelId ?? null,
+          carriedPageId ?? null
+        ]
+      );
+    }
+    await tx.query(
+      `
+        update sources
+        set status = 'connected', connected_at = now(),
+          -- Reconnect restores health, so the transient-sync-failure streak (the counter that
+          -- escalates a repeatedly-failing source to 'error' — migration 0044) starts over,
+          -- including its time gate (migration 0045) so the next genuine failure episode
+          -- counts its first strike instead of being swallowed by a stale timestamp.
+          consecutive_sync_failures = 0,
+          last_counted_sync_failure_at = null
+        where workspace_id = $1 and id = $2
+      `,
       [context.workspaceId, sourceId]
     );
+  });
+  const connectionTest = candidateTest
+    ?? await testConnectionForSource(db, context, provider, sourceId, encryptionKey);
+  // A candidate-tested Meta replacement sets connected only after the probe, inside the atomic
+  // swap above. Other providers retain their post-mutation probe and race-closing re-assert.
+  if (!candidateTest) {
+    // RE-ASSERT `connected` AFTER a successful test. testConnectionForSource only returns on
+    // success, so reaching here means the stored credential is good. A sync already in flight when
+    // reconnect began could otherwise write a terminal `error` while the test was completing.
+    // connected_at is intentionally NOT bumped again.
     await db.query(
       `
-        insert into connection_credentials (
-          id, workspace_id, source_id, credential_kind, encrypted_payload, oauth_token_id, selected_pixel_id,
-          selected_page_id
-        )
-        values ($1,$2,$3,$4,$5,$6,$7,$8)
+        update sources
+        set status = 'connected',
+          consecutive_sync_failures = 0,
+          last_counted_sync_failure_at = null
+        where workspace_id = $1 and id = $2
       `,
-      [
-        `cred_${randomUUID()}`,
-        context.workspaceId,
-        sourceId,
-        resolvedKind,
-        credentialPayloadForStorage(input, resolvedKind, oauthTokenId, encryptionKey),
-        oauthTokenId ?? null,
-        carriedPixelId ?? null,
-        carriedPageId ?? null
-      ]
+      [context.workspaceId, sourceId]
     );
   }
-  await db.query(
-    `
-      update sources
-      set status = 'connected', connected_at = now(),
-        -- Reconnect restores health, so the transient-sync-failure streak (the counter that
-        -- escalates a repeatedly-failing source to 'error' — migration 0044) starts over,
-        -- including its time gate (migration 0045) so the next genuine failure episode
-        -- counts its first strike instead of being swallowed by a stale timestamp.
-        consecutive_sync_failures = 0,
-        last_counted_sync_failure_at = null
-      where workspace_id = $1 and id = $2
-    `,
-    [context.workspaceId, sourceId]
-  );
-  const connectionTest = await testConnectionForSource(db, context, provider, sourceId, encryptionKey);
-  // RE-ASSERT `connected` AFTER a successful test. testConnectionForSource only returns on success
-  // (it throws on any failure), so reaching here means the credential is good. The pre-test update
-  // above already set `connected`, but a sync that was ALREADY in flight for this source when the
-  // reconnect began could have finished and written a terminal `error` in the window between that
-  // update and this test completing — leaving a genuinely-successful reconnect parked. This
-  // idempotent re-assert lets the successful reconnect win that race (and re-clears the streak the
-  // concurrent failure may have bumped). connected_at is intentionally NOT bumped again.
-  await db.query(
-    `
-      update sources
-      set status = 'connected',
-        consecutive_sync_failures = 0,
-        last_counted_sync_failure_at = null
-      where workspace_id = $1 and id = $2
-    `,
-    [context.workspaceId, sourceId]
-  );
   const initialSync = await queueInitialSyncOnConnect(db, context, provider, sourceId);
   return envelope(
     "reconnect_source",
@@ -2000,8 +2059,82 @@ async function resolveMetaCreateBudgets(
 async function resolveMetaCredentialForWrite(
   db: InfiniteOsDb,
   context: SessionContext,
-  sourceId: string
+  sourceId: string,
+  cliExecution?: MetaAdsCliExecution,
+  encryptionKey?: string,
+  expectedCredential?: ExpectedMetaCredential
 ): Promise<MetaAdsCredential> {
+  if (expectedCredential) {
+    if (expectedCredential.sourceId !== sourceId) {
+      throw metaCredentialBindingChanged("expected source does not match the requested source");
+    }
+    const snapshot = await db.one<{
+      account_external_id: string | null;
+      credential_id: string;
+      credential_updated_at: string | Date;
+      credential_kind: string;
+      encrypted_payload: string;
+      oauth_token_id: string | null;
+      selected_page_id: string | null;
+    }>(
+      `select s.account_external_id,
+              cc.id as credential_id, cc.updated_at as credential_updated_at,
+              cc.credential_kind, cc.encrypted_payload, cc.oauth_token_id,
+              cc.selected_page_id
+         from sources s
+         join connection_credentials cc
+           on cc.workspace_id = s.workspace_id and cc.source_id = s.id
+        where s.workspace_id = $1 and s.id = $2
+          and s.provider = 'meta_ads' and s.status = 'connected'
+          and cc.revoked_at is null
+          and (cc.expires_at is null or cc.expires_at > now())
+        order by cc.created_at desc
+        limit 1`,
+      [context.workspaceId, sourceId]
+    );
+    if (!snapshot) {
+      throw metaCredentialBindingChanged("expected Meta credential is no longer active");
+    }
+    const currentUpdatedAt = normalizedCredentialTimestamp(snapshot.credential_updated_at);
+    const expectedUpdatedAt = normalizedCredentialTimestamp(expectedCredential.credentialUpdatedAt);
+    const currentPageId = typeof snapshot.selected_page_id === "string" && snapshot.selected_page_id !== ""
+      ? snapshot.selected_page_id
+      : undefined;
+    if (
+      snapshot.credential_id !== expectedCredential.credentialId
+      || currentUpdatedAt !== expectedUpdatedAt
+      || currentPageId !== expectedCredential.selectedPageId
+    ) {
+      throw metaCredentialBindingChanged("Meta credential binding changed after confirmation");
+    }
+    // Hosted Meta credentials are direct encrypted system-user tokens. Following an OAuth FK
+    // here would resolve mutable token state outside the versioned row and reopen the TOCTOU gap.
+    if (snapshot.oauth_token_id) {
+      throw metaCredentialBindingChanged("versioned Meta execution does not accept an OAuth token reference");
+    }
+    const snapshotOne: InfiniteOsDb["one"] = async <T extends Record<string, unknown>>(
+      sql: string,
+      params?: unknown[]
+    ): Promise<T | null> => {
+      if (sql.includes("from connection_credentials")) {
+        return {
+          credential_kind: snapshot.credential_kind,
+          encrypted_payload: snapshot.encrypted_payload,
+          oauth_token_id: null
+        } as unknown as T;
+      }
+      return db.one<T>(sql, params);
+    };
+    const snapshotDb: InfiniteOsDb = { ...db, one: snapshotOne };
+    const credential = await resolveMetaAdsCredential(snapshotDb, {
+      workspaceId: context.workspaceId,
+      sourceId,
+      ...(encryptionKey ? { encryptionKey } : {})
+    });
+    validateStrictMetaCredential(snapshot.account_external_id, credential, cliExecution);
+    return cliExecution ? bindMetaAdsCliExecution(credential, cliExecution) : credential;
+  }
+
   // Pin the source to meta_ads before touching the Graph API (a non-Meta source
   // id must never reach the write transport).
   const provider = await sourceProvider(db, context.workspaceId, sourceId);
@@ -2020,10 +2153,47 @@ async function resolveMetaCredentialForWrite(
   // context.workspaceId, so this is left as a documented invariant rather than a tested
   // violation path (its acceptance test would be structurally unreachable). The pinning
   // that actually closes the hole is enforced upstream at confirmation time.
-  return resolveMetaAdsCredential(db, {
+  const credential = await resolveMetaAdsCredential(db, {
     workspaceId: context.workspaceId,
-    sourceId
+    sourceId,
+    ...(encryptionKey ? { encryptionKey } : {})
   });
+  if (cliExecution) {
+    const source = await db.one<{ account_external_id: string | null }>(
+      `select account_external_id from sources
+         where workspace_id = $1 and id = $2 and provider = 'meta_ads' and status = 'connected'`,
+      [context.workspaceId, sourceId]
+    );
+    validateStrictMetaCredential(source?.account_external_id ?? null, credential, cliExecution);
+  }
+  return cliExecution ? bindMetaAdsCliExecution(credential, cliExecution) : credential;
+}
+
+function normalizedCredentialTimestamp(value: string | Date): string {
+  const timestamp = value instanceof Date ? value : new Date(value);
+  if (!Number.isFinite(timestamp.getTime())) {
+    throw metaCredentialBindingChanged("Meta credential version timestamp is invalid");
+  }
+  return timestamp.toISOString();
+}
+
+function metaCredentialBindingChanged(message: string): ConnectorError {
+  return new ConnectorError("credential_binding_changed", message, false);
+}
+
+function validateStrictMetaCredential(
+  accountExternalId: string | null,
+  credential: MetaAdsCredential,
+  cliExecution?: MetaAdsCliExecution
+): void {
+  if (cliExecution && credential.transport !== "meta_ads_cli" && credential.transport !== "cli") {
+    throw new ConnectorError("provider_unsupported", "Meta Ads CLI server execution requires a CLI transport", false);
+  }
+  const boundAccount = accountExternalId?.replace(/^act_/i, "");
+  const credentialAccount = credential.adAccountId?.replace(/^act_/i, "");
+  if (!boundAccount || !credentialAccount || boundAccount !== credentialAccount) {
+    throw new ConnectorError("provider_auth_failed", "Meta Ads CLI server account does not match the source binding", false);
+  }
 }
 
 // Shared create flow: dedup-check → INLINE connector POST → audit. The connector
@@ -2041,7 +2211,10 @@ async function runMetaCreate(
   write: (credential: MetaAdsCredential) => Promise<MetaWriteResult>,
   // Optional extra fields merged into the SUCCESS envelope data (never the audit) — e.g.
   // { budgetCurrency } so the caller can confirm "$500/day (USD)" back to the user.
-  extra?: Record<string, unknown>
+  extra?: Record<string, unknown>,
+  cliExecution?: MetaAdsCliExecution,
+  encryptionKey?: string,
+  expectedCredential?: ExpectedMetaCredential
 ): Promise<ActionEnvelope> {
   const clientToken = optionalString(input, "clientToken");
   const presence = metaBudgetPresence(input);
@@ -2070,9 +2243,17 @@ async function runMetaCreate(
     );
   }
 
-  const credential = await resolveMetaCredentialForWrite(db, context, sourceId);
+  let credential: MetaAdsCredential | undefined;
   let result: MetaWriteResult;
   try {
+    credential = await resolveMetaCredentialForWrite(
+      db,
+      context,
+      sourceId,
+      cliExecution,
+      encryptionKey,
+      expectedCredential
+    );
     result = await write(credential);
   } catch (error) {
     // Release the un-resolved claim so a transient failure does not poison the
@@ -2091,7 +2272,7 @@ async function runMetaCreate(
             : undefined)
         : undefined;
     let remediationPaused: boolean | undefined;
-    if (violatedId) {
+    if (violatedId && credential) {
       try {
         await setMetaEntityStatus(credential, violatedId, "PAUSED", entity);
         remediationPaused = true;
@@ -2151,7 +2332,10 @@ function metaErrorCode(error: unknown): string {
 async function createMetaCampaignHandler(
   db: InfiniteOsDb,
   context: SessionContext,
-  input: unknown
+  input: unknown,
+  cliExecution?: MetaAdsCliExecution,
+  encryptionKey?: string,
+  expectedCredential?: ExpectedMetaCredential
 ): Promise<ActionEnvelope> {
   const name = requiredString(input, "name");
   const objective = requiredString(input, "objective");
@@ -2171,14 +2355,20 @@ async function createMetaCampaignHandler(
         ...(budgets.dailyBudget === null ? {} : { dailyBudget: budgets.dailyBudget }),
         ...(budgets.lifetimeBudget === null ? {} : { lifetimeBudget: budgets.lifetimeBudget })
       }),
-    budgets.budgetCurrency ? { budgetCurrency: budgets.budgetCurrency } : undefined
+    budgets.budgetCurrency ? { budgetCurrency: budgets.budgetCurrency } : undefined,
+    cliExecution,
+    encryptionKey,
+    expectedCredential
   );
 }
 
 async function createMetaAdSetHandler(
   db: InfiniteOsDb,
   context: SessionContext,
-  input: unknown
+  input: unknown,
+  cliExecution?: MetaAdsCliExecution,
+  encryptionKey?: string,
+  expectedCredential?: ExpectedMetaCredential
 ): Promise<ActionEnvelope> {
   const campaignId = requiredString(input, "campaignId");
   const name = requiredString(input, "name");
@@ -2212,7 +2402,10 @@ async function createMetaAdSetHandler(
         ...(optionalString(input, "pixelId") ? { pixelId: optionalString(input, "pixelId") } : {}),
         ...(optionalString(input, "customEventType") ? { customEventType: optionalString(input, "customEventType") } : {})
       }),
-    budgets.budgetCurrency ? { budgetCurrency: budgets.budgetCurrency } : undefined
+    budgets.budgetCurrency ? { budgetCurrency: budgets.budgetCurrency } : undefined,
+    cliExecution,
+    encryptionKey,
+    expectedCredential
   );
 }
 
@@ -2273,9 +2466,27 @@ async function resolveMetaPostingPageId(
   db: InfiniteOsDb,
   context: SessionContext,
   sourceId: string,
-  input: unknown
+  input: unknown,
+  expectedCredential?: ExpectedMetaCredential
 ): Promise<string> {
   const explicit = optionalString(input, "pageId");
+  if (expectedCredential) {
+    if (expectedCredential.sourceId !== sourceId) {
+      throw metaCredentialBindingChanged("expected source does not match the creative source");
+    }
+    if (!expectedCredential.selectedPageId) {
+      throw metaTypedError(
+        "meta_page_not_selected",
+        "meta_page_not_selected: the confirmed Meta credential snapshot has no posting Page"
+      );
+    }
+    if (explicit && explicit !== expectedCredential.selectedPageId) {
+      throw metaCredentialBindingChanged("creative Page does not match the confirmed credential snapshot");
+    }
+    // The credential resolver later verifies this trusted Page against the same joined row whose
+    // encrypted payload it returns. No second live credential/Page lookup occurs before mutation.
+    return expectedCredential.selectedPageId;
+  }
   if (explicit) {
     return explicit;
   }
@@ -2298,11 +2509,14 @@ async function resolveMetaPostingPageId(
 async function createMetaCreativeHandler(
   db: InfiniteOsDb,
   context: SessionContext,
-  input: unknown
+  input: unknown,
+  cliExecution?: MetaAdsCliExecution,
+  encryptionKey?: string,
+  expectedCredential?: ExpectedMetaCredential
 ): Promise<ActionEnvelope> {
   const name = requiredString(input, "name");
   const sourceId = await resolveMetaWriteSourceId(db, context, input);
-  const pageId = await resolveMetaPostingPageId(db, context, sourceId, input);
+  const pageId = await resolveMetaPostingPageId(db, context, sourceId, input, expectedCredential);
   return runMetaCreate(db, context, input, sourceId, "create_meta_creative", "creative", (credential) =>
     createMetaCreative(credential, {
       name,
@@ -2316,21 +2530,24 @@ async function createMetaCreativeHandler(
       ...(optionalString(input, "title") ? { title: optionalString(input, "title") } : {}),
       ...(optionalString(input, "description") ? { description: optionalString(input, "description") } : {}),
       ...(optionalString(input, "callToAction") ? { callToAction: optionalString(input, "callToAction") } : {})
-    })
+    }), undefined, cliExecution, encryptionKey, expectedCredential
   );
 }
 
 async function createMetaAdHandler(
   db: InfiniteOsDb,
   context: SessionContext,
-  input: unknown
+  input: unknown,
+  cliExecution?: MetaAdsCliExecution,
+  encryptionKey?: string,
+  expectedCredential?: ExpectedMetaCredential
 ): Promise<ActionEnvelope> {
   const adsetId = requiredString(input, "adsetId");
   const name = requiredString(input, "name");
   const creativeId = requiredString(input, "creativeId");
   const sourceId = await resolveMetaWriteSourceId(db, context, input);
   return runMetaCreate(db, context, input, sourceId, "create_meta_ad", "ad", (credential) =>
-    createMetaAd(credential, { adsetId, name, creativeId })
+    createMetaAd(credential, { adsetId, name, creativeId }), undefined, cliExecution, encryptionKey, expectedCredential
   );
 }
 
@@ -2396,7 +2613,10 @@ function requiredPositiveBudgetCents(input: unknown): number {
 async function setMetaEntityStatusHandler(
   db: InfiniteOsDb,
   context: SessionContext,
-  input: unknown
+  input: unknown,
+  cliExecution?: MetaAdsCliExecution,
+  encryptionKey?: string,
+  expectedCredential?: ExpectedMetaCredential
 ): Promise<ActionEnvelope> {
   const sourceId = requiredString(input, "sourceId");
   const entityId = requiredString(input, "entityId");
@@ -2417,7 +2637,14 @@ async function setMetaEntityStatusHandler(
     throw new Error(`activation_requires_confirmation:${entityId}`);
   }
   const action: InfiniteOsActionId = "set_meta_entity_status";
-  const credential = await resolveMetaCredentialForWrite(db, context, sourceId);
+  const credential = await resolveMetaCredentialForWrite(
+    db,
+    context,
+    sourceId,
+    cliExecution,
+    encryptionKey,
+    expectedCredential
+  );
   let result;
   try {
     result = await setMetaEntityStatus(credential, entityId, status as MetaEntityStatus, entity);
@@ -2458,7 +2685,10 @@ async function setMetaEntityStatusHandler(
 async function updateMetaBudgetHandler(
   db: InfiniteOsDb,
   context: SessionContext,
-  input: unknown
+  input: unknown,
+  cliExecution?: MetaAdsCliExecution,
+  encryptionKey?: string,
+  expectedCredential?: ExpectedMetaCredential
 ): Promise<ActionEnvelope> {
   const sourceId = requiredString(input, "sourceId");
   const entityId = requiredString(input, "entityId");
@@ -2467,7 +2697,14 @@ async function updateMetaBudgetHandler(
   // POSITIVE integer cents, validated before any credential resolve or POST.
   const dailyBudget = requiredPositiveBudgetCents(input);
   const action: InfiniteOsActionId = "update_meta_budget";
-  const credential = await resolveMetaCredentialForWrite(db, context, sourceId);
+  const credential = await resolveMetaCredentialForWrite(
+    db,
+    context,
+    sourceId,
+    cliExecution,
+    encryptionKey,
+    expectedCredential
+  );
   let result;
   try {
     result = await updateMetaBudget(credential, entityId, dailyBudget, entity);
@@ -2507,7 +2744,10 @@ async function updateMetaBudgetHandler(
 async function deleteMetaEntityHandler(
   db: InfiniteOsDb,
   context: SessionContext,
-  input: unknown
+  input: unknown,
+  cliExecution?: MetaAdsCliExecution,
+  encryptionKey?: string,
+  expectedCredential?: ExpectedMetaCredential
 ): Promise<ActionEnvelope> {
   const sourceId = requiredString(input, "sourceId");
   const entityId = requiredString(input, "entityId");
@@ -2516,7 +2756,14 @@ async function deleteMetaEntityHandler(
   // so the failure is early + transport-agnostic.
   const entity = requiredMetaWriteEntity(input);
   const action: InfiniteOsActionId = "delete_meta_entity";
-  const credential = await resolveMetaCredentialForWrite(db, context, sourceId);
+  const credential = await resolveMetaCredentialForWrite(
+    db,
+    context,
+    sourceId,
+    cliExecution,
+    encryptionKey,
+    expectedCredential
+  );
   let result;
   try {
     result = await deleteMetaEntity(credential, entityId, entity);
@@ -2586,14 +2833,16 @@ async function listMetaAssetsHandler(
 async function listMetaEntitiesHandler(
   db: InfiniteOsDb,
   context: SessionContext,
-  input: unknown
+  input: unknown,
+  cliExecution?: MetaAdsCliExecution,
+  encryptionKey?: string
 ): Promise<ActionEnvelope> {
   const sourceId = requiredString(input, "sourceId");
   const entity = requiredString(input, "entity") as MetaWriteEntity;
   if (!["campaign", "adset", "ad", "creative"].includes(entity)) {
     throw new Error(`unsupported_meta_entity:${entity}`);
   }
-  const credential = await resolveMetaCredentialForWrite(db, context, sourceId);
+  const credential = await resolveMetaCredentialForWrite(db, context, sourceId, cliExecution, encryptionKey);
   const limit = numberOrNull(input, "limit") ?? undefined;
   const fields = optionalString(input, "fields");
   const entities = await listMetaEntities(credential, entity, {
@@ -2612,11 +2861,13 @@ async function listMetaEntitiesHandler(
 async function getMetaEntityHandler(
   db: InfiniteOsDb,
   context: SessionContext,
-  input: unknown
+  input: unknown,
+  cliExecution?: MetaAdsCliExecution,
+  encryptionKey?: string
 ): Promise<ActionEnvelope> {
   const sourceId = requiredString(input, "sourceId");
   const entityId = requiredString(input, "entityId");
-  const credential = await resolveMetaCredentialForWrite(db, context, sourceId);
+  const credential = await resolveMetaCredentialForWrite(db, context, sourceId, cliExecution, encryptionKey);
   const fields = optionalString(input, "fields");
   // FIX 1: thread the entity-kind hint so `get` requests the SAME full field set
   // as `list` for the object type (campaign/adset/ad/creative) instead of
@@ -2700,7 +2951,9 @@ function metaTypedError(code: string, message: string): ConnectorError {
 async function runMetaLiveInsightsHandler(
   db: InfiniteOsDb,
   context: SessionContext,
-  input: unknown
+  input: unknown,
+  cliExecution?: MetaAdsCliExecution,
+  encryptionKey?: string
 ): Promise<ActionEnvelope> {
   const sourceId =
     optionalString(input, "sourceId") ?? (await resolveSoleConnectedMetaSourceId(db, context));
@@ -2748,7 +3001,7 @@ async function runMetaLiveInsightsHandler(
   );
   // Same resolver as every meta read/write: pins provider === meta_ads inside the workspace,
   // then decrypts the stored credential. (Despite the name it is the READ resolver too.)
-  const credential = await resolveMetaCredentialForWrite(db, context, sourceId);
+  const credential = await resolveMetaCredentialForWrite(db, context, sourceId, cliExecution, encryptionKey);
   const { rows, totalRows, totalEntities, truncated, window, currency, caveats } = await fetchMetaLiveInsights(credential, {
     level: level as "campaign" | "adset" | "ad",
     ...(timeRange ? { timeRange } : { datePreset }),
@@ -5638,6 +5891,76 @@ async function testConnectionForSource(
       await db.updateSourceStatus(sourceId, "error");
     }
     throw error;
+  }
+}
+
+interface ConnectionCredentialCandidate {
+  credentialKind: string;
+  encryptedPayload: string;
+  oauthTokenId?: string;
+}
+
+const META_CONNECTION_CANDIDATE_TIMEOUT_MS = 8_000;
+
+/**
+ * Exercise the normal Meta connector against an uncommitted credential candidate.
+ *
+ * The connector owns credential parsing, OAuth-token resolution and its direct Graph liveness
+ * probe. Replacing only the credential-row lookup lets it validate the exact encrypted bytes that
+ * would be stored while every other lookup still uses the caller's database. No candidate can be
+ * observed by another request, and a failed probe has no source status to mutate.
+ */
+async function testMetaConnectionCandidate(
+  db: InfiniteOsDb,
+  context: SessionContext,
+  candidate: ConnectionCredentialCandidate,
+  encryptionKey?: string
+): Promise<ConnectionTestResult> {
+  const candidateOne: InfiniteOsDb["one"] = async <T extends Record<string, unknown>>(
+    sql: string,
+    params?: unknown[]
+  ): Promise<T | null> => {
+    if (sql.includes("from connection_credentials")) {
+      return {
+        credential_kind: candidate.credentialKind,
+        encrypted_payload: candidate.encryptedPayload,
+        oauth_token_id: candidate.oauthTokenId ?? null
+      } as unknown as T;
+    }
+    return db.one<T>(sql, params);
+  };
+  const candidateDb: InfiniteOsDb = { ...db, one: candidateOne };
+  const abortController = new AbortController();
+  const timeoutError = () => new ConnectorError(
+    "provider_api_error",
+    "Meta connection candidate probe timed out",
+    true
+  );
+  let timeout: ReturnType<typeof setTimeout>;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timeout = setTimeout(() => {
+      abortController.abort();
+      reject(timeoutError());
+    }, META_CONNECTION_CANDIDATE_TIMEOUT_MS);
+    timeout.unref?.();
+  });
+  const probe = connectorFor("meta_ads").testConnection(candidateDb, {
+    workspaceId: context.workspaceId,
+    sourceId: `candidate_${randomUUID()}`,
+    provider: "meta_ads",
+    syncRunId: `test_${randomUUID()}`,
+    signal: abortController.signal,
+    ...(encryptionKey ? { encryptionKey } : {})
+  }).catch((error: unknown) => {
+    if (abortController.signal.aborted) {
+      throw timeoutError();
+    }
+    throw error;
+  });
+  try {
+    return await Promise.race([probe, deadline]);
+  } finally {
+    clearTimeout(timeout!);
   }
 }
 

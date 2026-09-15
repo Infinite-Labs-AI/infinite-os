@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -2345,20 +2345,36 @@ describe("analytical engine smoke", () => {
     const statuses: Array<{ sourceId: string; status: string; lastSyncedAt?: string }> = [];
     let rawRecordIndex = 0;
     let sourceStatus = "connected";
+    const credentialUpdatedAt = "2026-09-15T12:00:00.000Z";
     const db: InfiniteOsDb = {
       async query<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T[]> {
         queries.push({ sql, params });
         if (sql.includes("select provider, status") && sql.includes("for update")) {
-          return [{ provider: "x", status: sourceStatus }] as T[];
+          return [{ provider: "x", status: sourceStatus, account_external_id: null }] as T[];
         }
-        if (sql.includes("select id from sync_runs")) {
+        if (sql.includes("from sources") && sql.includes("status = 'syncing'") && sql.includes("for update")) {
+          return params?.[0] === "src_x" && params?.[1] === "workspace" && params?.[2] === "x" && sourceStatus === "syncing"
+            ? [{ id: "src_x" }] as T[]
+            : [];
+        }
+        if (sql.includes("from sync_runs") && sql.includes("status = 'running'")) {
           return [{ id: String(params?.[0] ?? "sync_x") }] as T[];
+        }
+        if (sql.includes("update sources") && sql.includes("set status = 'connected'") && sql.includes("status = 'syncing'")) {
+          if (params?.[0] === "src_x" && params?.[1] === "workspace" && params?.[2] === "x" && sourceStatus === "syncing") {
+            sourceStatus = "connected";
+            statuses.push({ sourceId: "src_x", status: "connected", ...(typeof params?.[4] === "string" ? { lastSyncedAt: params[4] } : {}) });
+          }
+          return [] as T[];
         }
         return [];
       },
       async one<T>(sql: string): Promise<T | null> {
         if (sql.includes("provider from sources")) {
           return { provider: "x" } as T;
+        }
+        if (sql.includes("select id, updated_at") && sql.includes("connection_credentials")) {
+          return { id: "cred_x", updated_at: credentialUpdatedAt } as T;
         }
         if (sql.includes("connection_credentials")) {
           return { credential_kind: "fixture", encrypted_payload: "fixture-encrypted" } as T;
@@ -6783,6 +6799,7 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
     dedup?: { clientToken: string; entityId: string };
     dedupRows?: DedupRow[];
     credential?: Record<string, unknown>;
+    credentialEncryptionKey?: string;
     // Rows returned by resolveSoleConnectedMetaSourceId's `select id from sources … provider='meta_ads'
     // … status='connected'` query. Defaults to a single sole source so the auto-resolve path works;
     // set [] for the zero-source case or 2+ ids for the ambiguity case.
@@ -6838,18 +6855,18 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
       },
       async one<T>(sql: string, params?: unknown[]): Promise<T | null> {
         if (sql.includes("from sources")) {
-          return { provider: "meta_ads" } as T;
+          return { provider: "meta_ads", account_external_id: "act_999" } as T;
         }
         if (sql.includes("from connection_credentials")) {
           return {
             credential_kind: "system_user_token",
-            encrypted_payload: encryptForTest(options.credential ?? {
+            encrypted_payload: encryptCredentialPayload(options.credential ?? {
               mode: "live",
               transport: "marketing_api",
               adAccountId: "act_999",
               accessToken: "secret-meta-token",
               apiVersion: "v25.0"
-            }),
+            }, options.credentialEncryptionKey ?? "analytical-test-encryption-key"),
             oauth_token_id: null
           } as T;
         }
@@ -6895,6 +6912,510 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
       }
     };
   }
+
+  it("binds isolated CLI execution from trusted handler options after credential decrypt", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "meta-handler-server-"));
+    const executable = join(dir, "meta-server.mjs");
+    writeFileSync(executable, `#!${process.execPath}\nimport { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(join(dir, "seen-token"))}, process.env.ACCESS_TOKEN ?? "");\nconsole.log(JSON.stringify({id:"server-campaign",status:"PAUSED"}));\n`);
+    chmodSync(executable, 0o700);
+    const prior = process.env.GROWTH_OS_ENCRYPTION_KEY;
+    process.env.GROWTH_OS_ENCRYPTION_KEY = "analytical-test-encryption-key";
+    try {
+      const db = metaWriteTestDb({
+        audits: [],
+        credential: { mode: "live", transport: "meta_ads_cli", adAccountId: "act_999", accessToken: "stored-server-token", cliCommand: "/missing/meta" }
+      });
+      const handlers = createActionHandlers(db, { metaAdsCliExecution: { mode: "isolated_server", executable } });
+      const result = await handlers.create_meta_campaign?.(
+        { sourceId: "src_meta", name: "Server", objective: "OUTCOME_TRAFFIC" },
+        operatorContext
+      );
+      expect(result?.data).toMatchObject({ id: "server-campaign", status: "PAUSED" });
+      expect(readFileSync(join(dir, "seen-token"), "utf8")).toBe("stored-server-token");
+    } finally {
+      if (prior === undefined) delete process.env.GROWTH_OS_ENCRYPTION_KEY; else process.env.GROWTH_OS_ENCRYPTION_KEY = prior;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a strict server write when decrypted account differs from the source binding", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "meta-handler-server-"));
+    const marker = join(dir, "spawned");
+    const executable = join(dir, "meta-server.mjs");
+    writeFileSync(executable, `#!${process.execPath}\nimport { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(marker)}, "yes");\nconsole.log(JSON.stringify({id:"wrong",status:"PAUSED"}));\n`);
+    chmodSync(executable, 0o700);
+    const prior = process.env.GROWTH_OS_ENCRYPTION_KEY;
+    process.env.GROWTH_OS_ENCRYPTION_KEY = "analytical-test-encryption-key";
+    try {
+      const dedupRows: DedupRow[] = [];
+      const db = metaWriteTestDb({ audits: [], dedupRows, credential: { mode: "live", transport: "meta_ads_cli", adAccountId: "act_123", accessToken: "wrong-account-token" } });
+      const handlers = createActionHandlers(db, { metaAdsCliExecution: { mode: "isolated_server", executable } });
+      await expect(handlers.create_meta_campaign?.({ sourceId: "src_meta", name: "Wrong", objective: "OUTCOME_TRAFFIC", clientToken: "strict-mismatch" }, operatorContext)).rejects.toThrow(/account.*binding/i);
+      expect(existsSync(marker)).toBe(false);
+      expect(dedupRows).toHaveLength(0);
+    } finally {
+      if (prior === undefined) delete process.env.GROWTH_OS_ENCRYPTION_KEY; else process.env.GROWTH_OS_ENCRYPTION_KEY = prior;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a strict server mutation on a direct-Graph credential before any provider call", async () => {
+    const db = metaWriteTestDb({ audits: [], credential: { mode: "live", transport: "marketing_api", adAccountId: "act_999", accessToken: "graph-token" } });
+    const providerFetch = vi.fn(() => { throw new Error("Graph was invoked"); });
+    vi.stubGlobal("fetch", providerFetch);
+    const prior = process.env.GROWTH_OS_ENCRYPTION_KEY;
+    process.env.GROWTH_OS_ENCRYPTION_KEY = "analytical-test-encryption-key";
+    try {
+      const handlers = createActionHandlers(db, { metaAdsCliExecution: { mode: "isolated_server", executable: "/missing/meta" } });
+      await expect(handlers.create_meta_campaign?.({ sourceId: "src_meta", name: "Strict", objective: "OUTCOME_TRAFFIC" }, operatorContext)).rejects.toThrow(/CLI transport/i);
+      expect(providerFetch).not.toHaveBeenCalled();
+    } finally {
+      if (prior === undefined) delete process.env.GROWTH_OS_ENCRYPTION_KEY; else process.env.GROWTH_OS_ENCRYPTION_KEY = prior;
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("decrypts concurrent Meta write and read credentials with distinct request keys", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "meta-keyed-handler-"));
+    const executable = join(dir, "meta-server.mjs");
+    writeFileSync(executable, `#!${process.execPath}\nimport { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(join(dir, "write-token"))}, process.env.ACCESS_TOKEN ?? "");\nconsole.log(JSON.stringify({id:"write-a",status:"PAUSED"}));\n`);
+    chmodSync(executable, 0o700);
+    const prior = process.env.GROWTH_OS_ENCRYPTION_KEY;
+    process.env.GROWTH_OS_ENCRYPTION_KEY = "wrong-ambient-key";
+    vi.stubGlobal("fetch", vi.fn((_url: unknown, init?: RequestInit) => {
+      const bearer = new Headers(init?.headers).get("Authorization");
+      return Promise.resolve(new Response(JSON.stringify({ data: [{ id: bearer === "Bearer token-b" ? "read-b" : "wrong-token" }] }), { status: 200 }));
+    }));
+    try {
+      const writeDb = metaWriteTestDb({ audits: [], credentialEncryptionKey: "workspace-key-a-long-2026", credential: { mode: "live", transport: "meta_ads_cli", adAccountId: "act_999", accessToken: "token-a" } });
+      const readDb = metaWriteTestDb({ audits: [], credentialEncryptionKey: "workspace-key-b-long-2026", credential: { mode: "live", transport: "meta_ads_cli", adAccountId: "act_999", accessToken: "token-b" } });
+      const writeHandlers = createActionHandlers(writeDb, { encryptionKey: "workspace-key-a-long-2026", metaAdsCliExecution: { mode: "isolated_server", executable } });
+      const readHandlers = createActionHandlers(readDb, { encryptionKey: "workspace-key-b-long-2026" });
+      const [writeResult, readResult] = await Promise.all([
+        writeHandlers.create_meta_campaign?.({ sourceId: "src_meta", name: "A", objective: "OUTCOME_TRAFFIC" }, { ...operatorContext, workspaceId: "workspace-a" }),
+        readHandlers.list_meta_entities?.({ sourceId: "src_meta", entity: "campaign" }, { ...operatorContext, workspaceId: "workspace-b" })
+      ]);
+      expect(writeResult?.data).toMatchObject({ id: "write-a" });
+      expect(readResult?.data).toMatchObject({ entities: [{ id: "read-b" }] });
+      expect(readFileSync(join(dir, "write-token"), "utf8")).toBe("token-a");
+    } finally {
+      if (prior === undefined) delete process.env.GROWTH_OS_ENCRYPTION_KEY; else process.env.GROWTH_OS_ENCRYPTION_KEY = prior;
+      vi.unstubAllGlobals();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  describe("trusted Meta credential version snapshot", () => {
+    const credentialUpdatedAt = "2026-09-15T12:00:00.123Z";
+
+    function snapshotDb(options?: {
+      updatedAt?: string | Date;
+      selectedPageId?: string | null;
+      encryptionKey?: string;
+      transport?: "meta_ads_cli" | "marketing_api";
+      expiresAt?: string | null;
+    }) {
+      const base = metaWriteTestDb({
+        audits: [],
+        credential: {
+          mode: "live",
+          transport: options?.transport ?? "meta_ads_cli",
+          adAccountId: "act_999",
+          accessToken: "snapshot-token"
+        }
+      });
+      let snapshotReads = 0;
+      const db: InfiniteOsDb = {
+        ...base,
+        async one<T extends Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T | null> {
+          if (sql.includes("join connection_credentials")) {
+            snapshotReads += 1;
+            const expired = typeof options?.expiresAt === "string"
+              && new Date(options.expiresAt).getTime() <= Date.now();
+            if (expired && sql.includes("cc.expires_at is null or cc.expires_at > now()")) {
+              return null;
+            }
+            return {
+              account_external_id: "act_999",
+              credential_id: "cred_snapshot",
+              credential_updated_at: options?.updatedAt ?? credentialUpdatedAt,
+              credential_kind: "marketing_api_access_token",
+              encrypted_payload: encryptCredentialPayload({
+                mode: "live",
+                transport: options?.transport ?? "meta_ads_cli",
+                adAccountId: "act_999",
+                accessToken: "snapshot-token"
+              }, options?.encryptionKey ?? "analytical-test-encryption-key"),
+              oauth_token_id: null,
+              expires_at: options?.expiresAt ?? null,
+              selected_page_id: options?.selectedPageId ?? "page_frozen"
+            } as unknown as T;
+          }
+          return base.one<T>(sql, params);
+        }
+      };
+      return { db, snapshotReads: () => snapshotReads };
+    }
+
+    const expected = {
+      sourceId: "src_meta",
+      credentialId: "cred_snapshot",
+      credentialUpdatedAt,
+      selectedPageId: "page_frozen"
+    };
+
+    it("rejects an expected credential without trusted isolated-server execution", () => {
+      const providerCall = vi.fn();
+      vi.stubGlobal("fetch", providerCall);
+      try {
+        const { db } = snapshotDb({ transport: "marketing_api" });
+        let failure: unknown;
+        try {
+          createActionHandlers(db, { expectedMetaCredential: expected });
+        } catch (error) {
+          failure = error;
+        }
+        expect(failure).toMatchObject({ code: "provider_unsupported", retryable: false });
+        expect(providerCall).not.toHaveBeenCalled();
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+
+    it("rejects a non-CLI snapshot in isolated-server mode before spawning", async () => {
+      const dir = mkdtempSync(join(tmpdir(), "meta-version-transport-"));
+      const marker = join(dir, "spawned");
+      const executable = join(dir, "meta-server.mjs");
+      writeFileSync(executable, `#!${process.execPath}\nimport { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(marker)}, "yes");\n`);
+      chmodSync(executable, 0o700);
+      const prior = process.env.GROWTH_OS_ENCRYPTION_KEY;
+      process.env.GROWTH_OS_ENCRYPTION_KEY = "analytical-test-encryption-key";
+      const providerCall = vi.fn();
+      vi.stubGlobal("fetch", providerCall);
+      try {
+        const { db } = snapshotDb({ transport: "marketing_api" });
+        const handlers = createActionHandlers(db, {
+          metaAdsCliExecution: { mode: "isolated_server", executable },
+          expectedMetaCredential: expected
+        });
+        await expect(handlers.create_meta_campaign?.(
+          { sourceId: "src_meta", name: "Wrong transport", objective: "OUTCOME_TRAFFIC" },
+          operatorContext
+        )).rejects.toMatchObject({ code: "provider_unsupported", retryable: false });
+        expect(providerCall).not.toHaveBeenCalled();
+        expect(existsSync(marker)).toBe(false);
+      } finally {
+        vi.unstubAllGlobals();
+        if (prior === undefined) delete process.env.GROWTH_OS_ENCRYPTION_KEY; else process.env.GROWTH_OS_ENCRYPTION_KEY = prior;
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("rejects an expired credential snapshot before spawning", async () => {
+      const dir = mkdtempSync(join(tmpdir(), "meta-version-expired-"));
+      const marker = join(dir, "spawned");
+      const executable = join(dir, "meta-server.mjs");
+      writeFileSync(executable, `#!${process.execPath}\nimport { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(marker)}, "yes");\nconsole.log(JSON.stringify({id:"expired",status:"PAUSED"}));\n`);
+      chmodSync(executable, 0o700);
+      const prior = process.env.GROWTH_OS_ENCRYPTION_KEY;
+      process.env.GROWTH_OS_ENCRYPTION_KEY = "analytical-test-encryption-key";
+      try {
+        const { db } = snapshotDb({ expiresAt: "2000-01-01T00:00:00.000Z" });
+        const handlers = createActionHandlers(db, {
+          metaAdsCliExecution: { mode: "isolated_server", executable },
+          expectedMetaCredential: expected
+        });
+        await expect(handlers.create_meta_campaign?.(
+          { sourceId: "src_meta", name: "Expired", objective: "OUTCOME_TRAFFIC" },
+          operatorContext
+        )).rejects.toMatchObject({ code: "credential_binding_changed", retryable: false });
+        expect(existsSync(marker)).toBe(false);
+      } finally {
+        if (prior === undefined) delete process.env.GROWTH_OS_ENCRYPTION_KEY; else process.env.GROWTH_OS_ENCRYPTION_KEY = prior;
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("rejects a credential version changed after worker preflight before every mutation", async () => {
+      const dir = mkdtempSync(join(tmpdir(), "meta-version-guard-"));
+      const marker = join(dir, "spawned");
+      const executable = join(dir, "meta-server.mjs");
+      writeFileSync(executable, `#!${process.execPath}\nimport { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(marker)}, "yes");\nconsole.log(JSON.stringify({id:"should-not-run",status:"PAUSED"}));\n`);
+      chmodSync(executable, 0o700);
+      const prior = process.env.GROWTH_OS_ENCRYPTION_KEY;
+      process.env.GROWTH_OS_ENCRYPTION_KEY = "analytical-test-encryption-key";
+      try {
+        const { db } = snapshotDb({ updatedAt: "2026-09-15T12:00:01.123Z" });
+        const cases = [
+          ["create_meta_campaign", { sourceId: "src_meta", name: "Stale", objective: "OUTCOME_TRAFFIC" }],
+          ["create_meta_ad_set", { sourceId: "src_meta", campaignId: "campaign_1", name: "Stale", optimizationGoal: "LINK_CLICKS", billingEvent: "IMPRESSIONS" }],
+          ["create_meta_creative", { sourceId: "src_meta", name: "Stale", imageUrl: "https://assets.example.test/stale.png" }],
+          ["create_meta_ad", { sourceId: "src_meta", adsetId: "adset_1", creativeId: "creative_1", name: "Stale" }],
+          ["set_meta_entity_status", { sourceId: "src_meta", entityId: "campaign_1", entity: "campaign", status: "PAUSED" }],
+          ["update_meta_budget", { sourceId: "src_meta", entityId: "campaign_1", entity: "campaign", dailyBudget: 100 }],
+          ["delete_meta_entity", { sourceId: "src_meta", entityId: "campaign_1", entity: "campaign" }]
+        ] as const;
+        for (const [actionId, input] of cases) {
+          const handlers = createActionHandlers(db, {
+            metaAdsCliExecution: { mode: "isolated_server", executable },
+            expectedMetaCredential: expected
+          });
+          const handler = handlers[actionId];
+          await expect(handler?.(input, operatorContext)).rejects.toMatchObject({
+            code: "credential_binding_changed",
+            retryable: false
+          });
+        }
+        expect(existsSync(marker)).toBe(false);
+      } finally {
+        if (prior === undefined) delete process.env.GROWTH_OS_ENCRYPTION_KEY; else process.env.GROWTH_OS_ENCRYPTION_KEY = prior;
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("uses one unchanged credential snapshot for the provider mutation", async () => {
+      const dir = mkdtempSync(join(tmpdir(), "meta-version-guard-"));
+      const executable = join(dir, "meta-server.mjs");
+      writeFileSync(executable, `#!${process.execPath}\nconsole.log(JSON.stringify({id:"snapshot-campaign",status:"PAUSED"}));\n`);
+      chmodSync(executable, 0o700);
+      const prior = process.env.GROWTH_OS_ENCRYPTION_KEY;
+      process.env.GROWTH_OS_ENCRYPTION_KEY = "wrong-ambient-snapshot-key";
+      try {
+        const requestKey = "expected-snapshot-per-workspace-key-2026";
+        const snapshot = snapshotDb({ updatedAt: new Date(credentialUpdatedAt), encryptionKey: requestKey });
+        const handlers = createActionHandlers(snapshot.db, {
+          encryptionKey: requestKey,
+          metaAdsCliExecution: { mode: "isolated_server", executable },
+          expectedMetaCredential: expected
+        });
+        await expect(handlers.create_meta_campaign?.(
+          { sourceId: "src_meta", name: "Current", objective: "OUTCOME_TRAFFIC" },
+          operatorContext
+        )).resolves.toMatchObject({ data: { id: "snapshot-campaign" } });
+        expect(snapshot.snapshotReads()).toBe(1);
+      } finally {
+        if (prior === undefined) delete process.env.GROWTH_OS_ENCRYPTION_KEY; else process.env.GROWTH_OS_ENCRYPTION_KEY = prior;
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("defaults a strict creative to the Page frozen on the same credential snapshot", async () => {
+      const dir = mkdtempSync(join(tmpdir(), "meta-version-page-"));
+      const executable = join(dir, "meta-server.mjs");
+      const argvFile = join(dir, "argv.json");
+      writeFileSync(executable, `#!${process.execPath}\nimport { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(argvFile)}, JSON.stringify(process.argv.slice(2)));\nconsole.log(JSON.stringify({id:"snapshot-creative"}));\n`);
+      chmodSync(executable, 0o700);
+      const prior = process.env.GROWTH_OS_ENCRYPTION_KEY;
+      process.env.GROWTH_OS_ENCRYPTION_KEY = "analytical-test-encryption-key";
+      vi.stubGlobal("fetch", vi.fn(async () => new Response(new Uint8Array([1, 2, 3]), {
+        status: 200,
+        headers: { "Content-Type": "image/png", "Content-Length": "3" }
+      })));
+      try {
+        const snapshot = snapshotDb();
+        const handlers = createActionHandlers(snapshot.db, {
+          metaAdsCliExecution: { mode: "isolated_server", executable },
+          expectedMetaCredential: expected
+        });
+        await expect(handlers.create_meta_creative?.({
+          sourceId: "src_meta",
+          name: "Frozen Page",
+          imageUrl: "https://assets.example.test/frozen.png"
+        }, operatorContext)).resolves.toMatchObject({ data: { id: "snapshot-creative" } });
+        const argv = JSON.parse(readFileSync(argvFile, "utf8")) as string[];
+        expect(argv[argv.indexOf("--page-id") + 1]).toBe("page_frozen");
+        expect(snapshot.snapshotReads()).toBe(1);
+      } finally {
+        vi.unstubAllGlobals();
+        if (prior === undefined) delete process.env.GROWTH_OS_ENCRYPTION_KEY; else process.env.GROWTH_OS_ENCRYPTION_KEY = prior;
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  it("keeps the previous Meta source and credential usable when a CLI-token reconnect probe fails", async () => {
+    const state = {
+      credential: { mode: "live", transport: "meta_ads_cli", adAccountId: "act_999", accessToken: "working-token" },
+      status: "connected"
+    };
+    const db = metaWriteTestDb({ audits: [] });
+    const baseOne = db.one.bind(db);
+    db.one = async <T extends Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T | null> => {
+      if (sql.includes("from connection_credentials")) {
+        return { credential_kind: "marketing_api_access_token", encrypted_payload: encryptForTest(state.credential), oauth_token_id: null } as unknown as T;
+      }
+      return baseOne<T>(sql, params);
+    };
+    db.connectSource = async (input) => {
+      state.credential = input.encryptedPayload
+        ? decryptCredentialPayload(input.encryptedPayload, "analytical-test-encryption-key") as typeof state.credential
+        : state.credential;
+      state.status = "connected";
+      return { id: "src_meta", status: state.status };
+    };
+    db.updateSourceStatus = async (_id, status) => { state.status = status; };
+    const prior = process.env.GROWTH_OS_ENCRYPTION_KEY;
+    process.env.GROWTH_OS_ENCRYPTION_KEY = "analytical-test-encryption-key";
+    vi.stubGlobal("fetch", vi.fn((_url: unknown, init?: RequestInit) => {
+      const bearer = new Headers(init?.headers).get("Authorization");
+      return Promise.resolve(bearer === "Bearer bad-token"
+        ? new Response("bad token", { status: 401 })
+        : new Response(JSON.stringify({ data: [{ id: "existing-campaign" }] }), { status: 200 }));
+    }));
+    try {
+      const handlers = createActionHandlers(db);
+      await expect(handlers.connect_source?.({
+        provider: "meta_ads", accountExternalId: "act_999", connectionName: "Existing",
+        credentialKind: "marketing_api_access_token",
+        credentialPayload: { mode: "live", transport: "meta_ads_cli", adAccountId: "act_999", accessToken: "bad-token" }
+      }, operatorContext)).rejects.toMatchObject({ code: "provider_auth_failed" });
+      expect(state).toEqual({ credential: { mode: "live", transport: "meta_ads_cli", adAccountId: "act_999", accessToken: "working-token" }, status: "connected" });
+      const list = await handlers.list_meta_entities?.({ sourceId: "src_meta", entity: "campaign" }, operatorContext);
+      expect(list?.data).toMatchObject({ entities: [{ id: "existing-campaign" }] });
+    } finally {
+      if (prior === undefined) delete process.env.GROWTH_OS_ENCRYPTION_KEY; else process.env.GROWTH_OS_ENCRYPTION_KEY = prior;
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("does not let a late failed Meta reconnect undo a newer valid credential", async () => {
+    const state = {
+      credential: { mode: "live", transport: "meta_ads_cli", adAccountId: "act_999", accessToken: "working-token" },
+      status: "connected"
+    };
+    let inTransaction = false;
+    let mutationOutsideTransaction = false;
+    let releaseBadProbe!: () => void;
+    let markBadProbeStarted!: () => void;
+    const badProbeStarted = new Promise<void>((resolve) => { markBadProbeStarted = resolve; });
+    const badProbeRelease = new Promise<void>((resolve) => { releaseBadProbe = resolve; });
+    const db = metaWriteTestDb({ audits: [] });
+    const baseOne = db.one.bind(db);
+    db.one = async <T extends Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T | null> => {
+      if (sql.includes("from connection_credentials")) {
+        return { credential_kind: "marketing_api_access_token", encrypted_payload: encryptForTest(state.credential), oauth_token_id: null } as unknown as T;
+      }
+      return baseOne<T>(sql, params);
+    };
+    db.connectSource = async (input) => {
+      mutationOutsideTransaction ||= !inTransaction;
+      state.credential = decryptCredentialPayload(input.encryptedPayload ?? "", "analytical-test-encryption-key") as typeof state.credential;
+      state.status = "connected";
+      return { id: "src_meta", status: state.status };
+    };
+    db.updateSourceStatus = async (_id, status) => { state.status = status; };
+    db.withTransaction = async (fn) => {
+      inTransaction = true;
+      try {
+        return await fn(db);
+      } finally {
+        inTransaction = false;
+      }
+    };
+    const prior = process.env.GROWTH_OS_ENCRYPTION_KEY;
+    process.env.GROWTH_OS_ENCRYPTION_KEY = "analytical-test-encryption-key";
+    vi.stubGlobal("fetch", vi.fn(async (_url: unknown, init?: RequestInit) => {
+      const bearer = new Headers(init?.headers).get("Authorization");
+      if (bearer === "Bearer bad-token") {
+        markBadProbeStarted();
+        await badProbeRelease;
+        return new Response("bad token", { status: 401 });
+      }
+      return new Response(JSON.stringify({ data: [] }), { status: 200 });
+    }));
+    const inputFor = (accessToken: string) => ({
+      provider: "meta_ads",
+      accountExternalId: "act_999",
+      connectionName: "Existing",
+      credentialKind: "marketing_api_access_token",
+      credentialPayload: { mode: "live", transport: "meta_ads_cli", adAccountId: "act_999", accessToken }
+    });
+    try {
+      const handlers = createActionHandlers(db);
+      const bad = handlers.connect_source?.(inputFor("bad-token"), operatorContext);
+      await badProbeStarted;
+      await expect(handlers.connect_source?.(inputFor("new-working-token"), operatorContext)).resolves.toBeDefined();
+      releaseBadProbe();
+      await expect(bad).rejects.toMatchObject({ code: "provider_auth_failed" });
+      expect(state).toEqual({
+        credential: { mode: "live", transport: "meta_ads_cli", adAccountId: "act_999", accessToken: "new-working-token" },
+        status: "connected"
+      });
+      expect(mutationOutsideTransaction).toBe(false);
+    } finally {
+      releaseBadProbe?.();
+      if (prior === undefined) delete process.env.GROWTH_OS_ENCRYPTION_KEY; else process.env.GROWTH_OS_ENCRYPTION_KEY = prior;
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("bounds the pre-mutation Meta candidate probe at eight seconds", async () => {
+    const state = {
+      credential: { mode: "live", transport: "meta_ads_cli", adAccountId: "act_999", accessToken: "working-token" },
+      status: "connected"
+    };
+    const db = metaWriteTestDb({ audits: [] });
+    const baseOne = db.one.bind(db);
+    db.one = async <T extends Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T | null> => {
+      if (sql.includes("from connection_credentials")) {
+        return {
+          credential_kind: "marketing_api_access_token",
+          encrypted_payload: encryptForTest(state.credential),
+          oauth_token_id: null
+        } as unknown as T;
+      }
+      return baseOne<T>(sql, params);
+    };
+    db.connectSource = async () => {
+      throw new Error("candidate timeout must happen before mutation");
+    };
+    db.updateSourceStatus = async (_id, status) => { state.status = status; };
+    const prior = process.env.GROWTH_OS_ENCRYPTION_KEY;
+    process.env.GROWTH_OS_ENCRYPTION_KEY = "analytical-test-encryption-key";
+    const nativeSetTimeout = globalThis.setTimeout;
+    const timeoutSpy = vi.spyOn(globalThis, "setTimeout").mockImplementation(((callback: (...args: unknown[]) => void, delay?: number, ...args: unknown[]) => {
+      if (delay === 8_000) {
+        queueMicrotask(() => callback(...args));
+        return { unref() {} } as unknown as ReturnType<typeof setTimeout>;
+      }
+      return nativeSetTimeout(callback, delay, ...args);
+    }) as typeof setTimeout);
+    vi.stubGlobal("fetch", vi.fn((_url: unknown, init?: RequestInit) => {
+      const signal = init?.signal;
+      if (!signal) {
+        throw new Error("candidate probe did not receive an abort signal");
+      }
+      return new Promise<Response>((_resolve, reject) => {
+        const rejectAborted = () => reject(Object.assign(new Error("aborted"), { name: "AbortError" }));
+        if (signal.aborted) rejectAborted();
+        else signal.addEventListener("abort", rejectAborted, { once: true });
+      });
+    }));
+    try {
+      const handlers = createActionHandlers(db);
+      await expect(handlers.connect_source?.({
+        provider: "meta_ads",
+        accountExternalId: "act_999",
+        connectionName: "Existing",
+        credentialKind: "marketing_api_access_token",
+        credentialPayload: {
+          mode: "live",
+          transport: "meta_ads_cli",
+          adAccountId: "act_999",
+          accessToken: "hanging-token"
+        }
+      }, operatorContext)).rejects.toMatchObject({ code: "provider_api_error", retryable: true });
+      expect(timeoutSpy.mock.calls.some((call) => call[1] === 8_000)).toBe(true);
+      expect(state).toEqual({
+        credential: { mode: "live", transport: "meta_ads_cli", adAccountId: "act_999", accessToken: "working-token" },
+        status: "connected"
+      });
+    } finally {
+      timeoutSpy.mockRestore();
+      if (prior === undefined) delete process.env.GROWTH_OS_ENCRYPTION_KEY; else process.env.GROWTH_OS_ENCRYPTION_KEY = prior;
+      vi.unstubAllGlobals();
+    }
+  });
 
   // Decode a Meta WRITE POST body. WRITE POSTs are form-encoded
   // (application/x-www-form-urlencoded): each nested object/array field is a JSON

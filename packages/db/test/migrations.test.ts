@@ -82,7 +82,8 @@ describe("Infinite OS migration stack", () => {
       "0065_prune_rolls_up_before_deleting.sql",
       "0066_auxiliary_brain_usage_outbox.sql",
       "0067_signup_event_metric_semantics.sql",
-      "0068_connection_credentials_selected_page.sql"
+      "0068_connection_credentials_selected_page.sql",
+      "0069_meta_ads_history_integrity.sql"
     ]);
   });
 
@@ -1080,7 +1081,8 @@ describe("Infinite OS migration stack", () => {
       "0065_prune_rolls_up_before_deleting.sql",
       "0066_auxiliary_brain_usage_outbox.sql",
       "0067_signup_event_metric_semantics.sql",
-      "0068_connection_credentials_selected_page.sql"
+      "0068_connection_credentials_selected_page.sql",
+      "0069_meta_ads_history_integrity.sql"
     ]);
   });
 
@@ -1094,6 +1096,56 @@ describe("Infinite OS migration stack", () => {
     // Nullable, no default: existing rows stay NULL until a Page is chosen.
     expect(sql).not.toMatch(/selected_page_id[^;]*not null/);
     expect(sql).not.toMatch(/selected_page_id[^;]*default/);
+  });
+
+  it("adds durable Meta account, daily coverage, staged replacement keys, and covering indexes (0069)", () => {
+    const migration = loadMigrations().find(
+      (candidate) => candidate.id === "0069_meta_ads_history_integrity.sql"
+    );
+    const sql = (migration?.sql ?? "").toLowerCase().replace(/\s+/g, " ");
+
+    expect(sql).toContain("create table meta_ads_accounts");
+    expect(sql).toContain("primary key (workspace_id, source_id, ad_account_id)");
+    expect(sql).toContain("timezone_name text");
+    expect(sql).toContain("currency text");
+
+    expect(sql).toContain("create table meta_ads_coverage_daily");
+    expect(sql).toContain("grain text not null check (grain in ('campaign', 'adset', 'ad'))");
+    expect(sql).toContain("row_count integer not null check (row_count >= 0)");
+    expect(sql).toContain("primary key (workspace_id, source_id, ad_account_id, grain, occurred_on)");
+
+    expect(sql).toContain("create table meta_ads_snapshot_keys");
+    expect(sql).toContain("grain text not null check (grain in ('campaign', 'adset', 'ad', 'creative'))");
+    expect(sql).toContain("key_kind text not null check (key_kind in ('delivery', 'conversion', 'entity'))");
+    expect(sql).toContain("check ((key_kind in ('delivery', 'entity') and result_type = '') or (key_kind = 'conversion' and result_type <> ''))");
+
+    expect(sql).toContain("create table meta_ads_entity_versions");
+    expect(sql).toContain("entity_type text not null check (entity_type in ('campaign', 'adset', 'ad', 'creative'))");
+    expect(sql).toContain("payload_hash text not null");
+    expect(sql).toContain("metadata_json jsonb not null");
+    expect(sql).toContain("asset_descriptors jsonb not null default '[]'::jsonb");
+    expect(sql).toContain("ad_id text");
+    expect(sql).toContain("first_observed_at timestamptz not null");
+    expect(sql).toContain("last_observed_at timestamptz not null");
+    expect(sql).toContain("valid_to timestamptz");
+    expect(sql).toContain("where valid_to is null");
+    expect(sql).toContain("meta_ads_entity_versions_current_uq");
+
+    for (const index of [
+      "meta_ads_campaign_daily_history_idx",
+      "meta_ads_adset_daily_history_idx",
+      "meta_ads_ad_daily_history_idx",
+      "meta_ads_campaign_conversions_daily_history_idx",
+      "meta_ads_adset_conversions_daily_history_idx",
+      "meta_ads_ad_conversions_daily_history_idx",
+    ]) {
+      expect(sql).toContain(`create index ${index}`);
+    }
+
+    expect(sql).toContain("grant delete on meta_ads_campaign_daily, meta_ads_adset_daily, meta_ads_ad_daily");
+    expect(sql).toContain("grant delete on meta_ads_campaign_conversions_daily, meta_ads_adset_conversions_daily, meta_ads_ad_conversions_daily");
+    expect(sql).not.toContain("delete from meta_ads_campaign_daily");
+    expect(sql).not.toContain("drop table");
   });
 
   it("adds connection_credentials operational metadata + partial-unique index (0039)", () => {
