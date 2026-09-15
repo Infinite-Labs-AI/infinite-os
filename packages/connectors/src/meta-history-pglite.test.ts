@@ -129,7 +129,7 @@ describe("Meta Ads history CLOSE against real PGlite", () => {
       campaigns: [{ id: "c1", name: "Campaign", objective: "OUTCOME_LEADS", status: "ACTIVE", effective_status: "ACTIVE", daily_budget: "10000" }],
       adsets: [{ id: "s1", campaign_id: "c1", name: "UK buyers", optimization_goal: "LEAD_GENERATION", billing_event: "IMPRESSIONS", status: "ACTIVE", effective_status: "ACTIVE", targeting: { geo_locations: { countries: ["GB"] }, publisher_platforms: ["facebook", "instagram"] } }],
       ads: [
-        { id: "a1", campaign_id: "c1", adset_id: "s1", name: "Ad one", status: options.changedStatus ? "PAUSED" : "ACTIVE", effective_status: options.changedStatus ? "PAUSED" : "ACTIVE", creative: { id: "cr1", title: "Hook", body: "Copy", image_hash: "img1", image_url: "https://cdn.example/img1.jpg", asset_feed_spec: { videos: [{ video_id: "v2" }] } } },
+        { id: "a1", campaign_id: "c1", adset_id: "s1", name: "Ad one", status: options.changedStatus ? "PAUSED" : "ACTIVE", effective_status: options.changedStatus ? "PAUSED" : "ACTIVE", creative: { id: "cr1", title: "Hook", body: "Copy", image_hash: "img1", image_url: "https://scontent.xx.fbcdn.net/img1.jpg?oh=raw-signed-secret&oe=123", asset_feed_spec: { videos: [{ video_id: "v2" }] } } },
         ...(options.includeSecondAd ? [{ id: "a2", campaign_id: "c1", adset_id: "s1", name: "Ad two", status: "ACTIVE", effective_status: "ACTIVE", creative: { id: "cr2", video_id: "v1" } }] : []),
       ],
       campaignInsights: options.empty ? [] : [{ ...base, campaign_id: "c1", campaign_name: "Campaign", objective: "OUTCOME_LEADS", optimization_goal: "LEAD_GENERATION" }],
@@ -165,6 +165,18 @@ describe("Meta Ads history CLOSE against real PGlite", () => {
       "select currency, timezone_name from meta_ads_accounts where workspace_id = $1 and source_id = $2",
       [workspaceId, sourceId],
     )).toEqual([{ currency: "gbp", timezone_name: "Europe/London" }]);
+    expect(await db.query(
+      "select id from raw_records where source_id = $1 and payload::text like '%raw-signed-secret%'",
+      [sourceId],
+    )).toEqual([]);
+    const creativeVersion = await db.query<{ metadata_json: unknown; asset_descriptors: unknown }>(
+      "select metadata_json,asset_descriptors from meta_ads_entity_versions where source_id=$1 and entity_type='creative' and valid_to is null",
+      [sourceId],
+    );
+    expect(JSON.stringify(creativeVersion)).not.toContain("raw-signed-secret");
+    expect(creativeVersion[0]?.asset_descriptors).toEqual(expect.arrayContaining([
+      expect.objectContaining({ slotKey: "creative.image", providerAssetId: "img1", sourceUrl: null }),
+    ]));
     const coverage = await db.query<{ grain: string; occurred_on: string; row_count: number }>(
       "select grain, occurred_on::text, row_count from meta_ads_coverage_daily where source_id = $1 order by grain, occurred_on",
       [sourceId],

@@ -9535,7 +9535,26 @@ function metaAdsEntitySnapshotRows(
 function scrubMetaAdsProviderMetadata(value: unknown, accessToken: string, depth = 0): unknown {
   if (depth > 20) throw new ConnectorError("provider_api_error", "Meta entity metadata exceeded the nesting limit", false);
   if (typeof value === "string") {
-    return value.split(accessToken).join("[redacted]").replace(/EAA[A-Za-z0-9_-]{10,}/g, "[redacted]");
+    const redacted = value.split(accessToken).join("[redacted]").replace(/EAA[A-Za-z0-9_-]{10,}/g, "[redacted]");
+    try {
+      const url = new URL(redacted);
+      const providerCapabilityHost = /(^|\.)(fbcdn\.net|facebook\.com|fbsbx\.com|cdninstagram\.com|instagram\.com)$/i.test(url.hostname);
+      if (providerCapabilityHost) {
+        // Meta media query strings are bearer-like signed capabilities. Host/path is sufficient
+        // provenance; H5 resolves a fresh URL from the stable image hash/video id under credential.
+        url.search = "";
+        url.hash = "";
+        return url.toString();
+      }
+      for (const key of [...url.searchParams.keys()]) {
+        if (/(access.?token|authorization|sig(nature)?|secret|password|cookie)/i.test(key)) {
+          url.searchParams.delete(key);
+        }
+      }
+      return url.toString();
+    } catch {
+      return redacted;
+    }
   }
   if (value === null || typeof value === "number" || typeof value === "boolean") return value;
   if (Array.isArray(value)) return value.map((item) => scrubMetaAdsProviderMetadata(item, accessToken, depth + 1));
@@ -9561,7 +9580,9 @@ function metaAdsCreativeAssetDescriptors(creative: Record<string, unknown>): Met
       slotKey,
       kind,
       providerAssetId: stringOrNull(providerAssetId),
-      sourceUrl: stringOrNull(sourceUrl),
+      // Provider media URLs are signed, expiring capabilities. Never persist them in a readable
+      // descriptor; the archive worker refetches a fresh URL from providerAssetId under credential.
+      sourceUrl: null,
     } satisfies MetaAdsAssetDescriptor;
     if (!descriptor.providerAssetId && !descriptor.sourceUrl) return;
     const key = JSON.stringify(descriptor);

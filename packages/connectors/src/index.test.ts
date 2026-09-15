@@ -8474,7 +8474,8 @@ describe("Meta Ads durable daily history", () => {
         effective_status: "ACTIVE", tracking_specs: [{ "action.type": ["offsite_conversion"] }],
         creative: {
           id: "cr1", name: "Creator cut", title: "Stop scrolling", body: "The body", image_hash: "img-hash",
-          image_url: "https://cdn.example/original.jpg", thumbnail_url: "https://cdn.example/thumb.jpg",
+          image_url: "https://scontent.xx.fbcdn.net/original.jpg?oh=signed-secret&oe=123",
+          thumbnail_url: "https://scontent.xx.fbcdn.net/thumb.jpg?oh=thumb-secret",
           video_id: "vid1", call_to_action_type: "SHOP_NOW",
           access_token: "meta-history-token",
           object_story_spec: { link_data: { link: "https://example.com/buy" } },
@@ -8504,11 +8505,14 @@ describe("Meta Ads durable daily history", () => {
       expect(creative?.payload).toMatchObject({
         entityId: "cr1",
         assetDescriptors: expect.arrayContaining([
-          { slotKey: "creative.image", kind: "image", providerAssetId: "img-hash", sourceUrl: "https://cdn.example/original.jpg" },
+          { slotKey: "creative.image", kind: "image", providerAssetId: "img-hash", sourceUrl: null },
           { slotKey: "asset_feed.videos.0", kind: "video", providerAssetId: "vid2", sourceUrl: null },
         ]),
       });
       expect(JSON.stringify(snapshots)).not.toContain("meta-history-token");
+      expect(JSON.stringify(snapshots)).not.toContain("signed-secret");
+      expect(JSON.stringify(snapshots)).not.toContain("thumb-secret");
+      expect(JSON.stringify(snapshots)).not.toContain("?oh=");
       expect((creative?.payload as { metadata: Record<string, unknown> }).metadata).not.toHaveProperty("access_token");
       const adsFields = new URL(seen.find((url) => isMetaAdsEdgeRequest(url)) ?? "").searchParams.get("fields") ?? "";
       expect(adsFields).toContain("asset_feed_spec");
