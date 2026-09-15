@@ -6989,6 +6989,190 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
     }
   });
 
+  it("keeps the previous Meta source and credential usable when a CLI-token reconnect probe fails", async () => {
+    const state = {
+      credential: { mode: "live", transport: "meta_ads_cli", adAccountId: "act_999", accessToken: "working-token" },
+      status: "connected"
+    };
+    const db = metaWriteTestDb({ audits: [] });
+    const baseOne = db.one.bind(db);
+    db.one = async <T extends Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T | null> => {
+      if (sql.includes("from connection_credentials")) {
+        return { credential_kind: "marketing_api_access_token", encrypted_payload: encryptForTest(state.credential), oauth_token_id: null } as unknown as T;
+      }
+      return baseOne<T>(sql, params);
+    };
+    db.connectSource = async (input) => {
+      state.credential = input.encryptedPayload
+        ? decryptCredentialPayload(input.encryptedPayload, "analytical-test-encryption-key") as typeof state.credential
+        : state.credential;
+      state.status = "connected";
+      return { id: "src_meta", status: state.status };
+    };
+    db.updateSourceStatus = async (_id, status) => { state.status = status; };
+    const prior = process.env.GROWTH_OS_ENCRYPTION_KEY;
+    process.env.GROWTH_OS_ENCRYPTION_KEY = "analytical-test-encryption-key";
+    vi.stubGlobal("fetch", vi.fn((_url: unknown, init?: RequestInit) => {
+      const bearer = new Headers(init?.headers).get("Authorization");
+      return Promise.resolve(bearer === "Bearer bad-token"
+        ? new Response("bad token", { status: 401 })
+        : new Response(JSON.stringify({ data: [{ id: "existing-campaign" }] }), { status: 200 }));
+    }));
+    try {
+      const handlers = createActionHandlers(db);
+      await expect(handlers.connect_source?.({
+        provider: "meta_ads", accountExternalId: "act_999", connectionName: "Existing",
+        credentialKind: "marketing_api_access_token",
+        credentialPayload: { mode: "live", transport: "meta_ads_cli", adAccountId: "act_999", accessToken: "bad-token" }
+      }, operatorContext)).rejects.toMatchObject({ code: "provider_auth_failed" });
+      expect(state).toEqual({ credential: { mode: "live", transport: "meta_ads_cli", adAccountId: "act_999", accessToken: "working-token" }, status: "connected" });
+      const list = await handlers.list_meta_entities?.({ sourceId: "src_meta", entity: "campaign" }, operatorContext);
+      expect(list?.data).toMatchObject({ entities: [{ id: "existing-campaign" }] });
+    } finally {
+      if (prior === undefined) delete process.env.GROWTH_OS_ENCRYPTION_KEY; else process.env.GROWTH_OS_ENCRYPTION_KEY = prior;
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("does not let a late failed Meta reconnect undo a newer valid credential", async () => {
+    const state = {
+      credential: { mode: "live", transport: "meta_ads_cli", adAccountId: "act_999", accessToken: "working-token" },
+      status: "connected"
+    };
+    let inTransaction = false;
+    let mutationOutsideTransaction = false;
+    let releaseBadProbe!: () => void;
+    let markBadProbeStarted!: () => void;
+    const badProbeStarted = new Promise<void>((resolve) => { markBadProbeStarted = resolve; });
+    const badProbeRelease = new Promise<void>((resolve) => { releaseBadProbe = resolve; });
+    const db = metaWriteTestDb({ audits: [] });
+    const baseOne = db.one.bind(db);
+    db.one = async <T extends Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T | null> => {
+      if (sql.includes("from connection_credentials")) {
+        return { credential_kind: "marketing_api_access_token", encrypted_payload: encryptForTest(state.credential), oauth_token_id: null } as unknown as T;
+      }
+      return baseOne<T>(sql, params);
+    };
+    db.connectSource = async (input) => {
+      mutationOutsideTransaction ||= !inTransaction;
+      state.credential = decryptCredentialPayload(input.encryptedPayload ?? "", "analytical-test-encryption-key") as typeof state.credential;
+      state.status = "connected";
+      return { id: "src_meta", status: state.status };
+    };
+    db.updateSourceStatus = async (_id, status) => { state.status = status; };
+    db.withTransaction = async (fn) => {
+      inTransaction = true;
+      try {
+        return await fn(db);
+      } finally {
+        inTransaction = false;
+      }
+    };
+    const prior = process.env.GROWTH_OS_ENCRYPTION_KEY;
+    process.env.GROWTH_OS_ENCRYPTION_KEY = "analytical-test-encryption-key";
+    vi.stubGlobal("fetch", vi.fn(async (_url: unknown, init?: RequestInit) => {
+      const bearer = new Headers(init?.headers).get("Authorization");
+      if (bearer === "Bearer bad-token") {
+        markBadProbeStarted();
+        await badProbeRelease;
+        return new Response("bad token", { status: 401 });
+      }
+      return new Response(JSON.stringify({ data: [] }), { status: 200 });
+    }));
+    const inputFor = (accessToken: string) => ({
+      provider: "meta_ads",
+      accountExternalId: "act_999",
+      connectionName: "Existing",
+      credentialKind: "marketing_api_access_token",
+      credentialPayload: { mode: "live", transport: "meta_ads_cli", adAccountId: "act_999", accessToken }
+    });
+    try {
+      const handlers = createActionHandlers(db);
+      const bad = handlers.connect_source?.(inputFor("bad-token"), operatorContext);
+      await badProbeStarted;
+      await expect(handlers.connect_source?.(inputFor("new-working-token"), operatorContext)).resolves.toBeDefined();
+      releaseBadProbe();
+      await expect(bad).rejects.toMatchObject({ code: "provider_auth_failed" });
+      expect(state).toEqual({
+        credential: { mode: "live", transport: "meta_ads_cli", adAccountId: "act_999", accessToken: "new-working-token" },
+        status: "connected"
+      });
+      expect(mutationOutsideTransaction).toBe(false);
+    } finally {
+      releaseBadProbe?.();
+      if (prior === undefined) delete process.env.GROWTH_OS_ENCRYPTION_KEY; else process.env.GROWTH_OS_ENCRYPTION_KEY = prior;
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("bounds the pre-mutation Meta candidate probe at eight seconds", async () => {
+    const state = {
+      credential: { mode: "live", transport: "meta_ads_cli", adAccountId: "act_999", accessToken: "working-token" },
+      status: "connected"
+    };
+    const db = metaWriteTestDb({ audits: [] });
+    const baseOne = db.one.bind(db);
+    db.one = async <T extends Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T | null> => {
+      if (sql.includes("from connection_credentials")) {
+        return {
+          credential_kind: "marketing_api_access_token",
+          encrypted_payload: encryptForTest(state.credential),
+          oauth_token_id: null
+        } as unknown as T;
+      }
+      return baseOne<T>(sql, params);
+    };
+    db.connectSource = async () => {
+      throw new Error("candidate timeout must happen before mutation");
+    };
+    db.updateSourceStatus = async (_id, status) => { state.status = status; };
+    const prior = process.env.GROWTH_OS_ENCRYPTION_KEY;
+    process.env.GROWTH_OS_ENCRYPTION_KEY = "analytical-test-encryption-key";
+    const nativeSetTimeout = globalThis.setTimeout;
+    const timeoutSpy = vi.spyOn(globalThis, "setTimeout").mockImplementation(((callback: (...args: unknown[]) => void, delay?: number, ...args: unknown[]) => {
+      if (delay === 8_000) {
+        queueMicrotask(() => callback(...args));
+        return { unref() {} } as unknown as ReturnType<typeof setTimeout>;
+      }
+      return nativeSetTimeout(callback, delay, ...args);
+    }) as typeof setTimeout);
+    vi.stubGlobal("fetch", vi.fn((_url: unknown, init?: RequestInit) => {
+      const signal = init?.signal;
+      if (!signal) {
+        throw new Error("candidate probe did not receive an abort signal");
+      }
+      return new Promise<Response>((_resolve, reject) => {
+        const rejectAborted = () => reject(Object.assign(new Error("aborted"), { name: "AbortError" }));
+        if (signal.aborted) rejectAborted();
+        else signal.addEventListener("abort", rejectAborted, { once: true });
+      });
+    }));
+    try {
+      const handlers = createActionHandlers(db);
+      await expect(handlers.connect_source?.({
+        provider: "meta_ads",
+        accountExternalId: "act_999",
+        connectionName: "Existing",
+        credentialKind: "marketing_api_access_token",
+        credentialPayload: {
+          mode: "live",
+          transport: "meta_ads_cli",
+          adAccountId: "act_999",
+          accessToken: "hanging-token"
+        }
+      }, operatorContext)).rejects.toMatchObject({ code: "provider_api_error", retryable: true });
+      expect(timeoutSpy.mock.calls.some((call) => call[1] === 8_000)).toBe(true);
+      expect(state).toEqual({
+        credential: { mode: "live", transport: "meta_ads_cli", adAccountId: "act_999", accessToken: "working-token" },
+        status: "connected"
+      });
+    } finally {
+      timeoutSpy.mockRestore();
+      if (prior === undefined) delete process.env.GROWTH_OS_ENCRYPTION_KEY; else process.env.GROWTH_OS_ENCRYPTION_KEY = prior;
+      vi.unstubAllGlobals();
+    }
+  });
+
   // Decode a Meta WRITE POST body. WRITE POSTs are form-encoded
   // (application/x-www-form-urlencoded): each nested object/array field is a JSON
   // STRING, which we parse back so shape assertions read naturally. Scalars stay

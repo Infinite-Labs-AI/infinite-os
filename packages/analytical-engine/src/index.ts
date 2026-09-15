@@ -1483,13 +1483,23 @@ async function connectSource(
   const provider = requiredProvider(input);
   const credentialKind = optionalString(input, "credentialKind") ?? defaultCredentialKind(provider);
   const oauthTokenId = optionalString(input, "oauthTokenId");
-  const source = await db.connectSource({
+  const encryptedPayload = credentialPayloadForStorage(input, credentialKind, oauthTokenId, encryptionKey);
+  const candidate = { credentialKind, encryptedPayload, oauthTokenId };
+  // Meta reconnects can target an already-working source because connectSource upserts on the
+  // account binding. Probe the exact candidate row before that upsert: a rejected replacement must
+  // never overwrite the working credential or park its source. The candidate adapter feeds the
+  // normal typed connector resolver (including the per-request workspace key and OAuth bridge)
+  // without writing tenant state or process.env.
+  const candidateTest = provider === "meta_ads"
+    ? await testMetaConnectionCandidate(db, context, candidate, encryptionKey)
+    : undefined;
+  const connectInput = {
     workspaceId: context.workspaceId,
     provider,
     connectionName: optionalString(input, "connectionName") ?? provider,
     accountExternalId: optionalString(input, "accountExternalId") ?? accountExternalIdFromPayload(provider, input),
     credentialKind,
-    encryptedPayload: credentialPayloadForStorage(input, credentialKind, oauthTokenId, encryptionKey),
+    encryptedPayload,
     oauthTokenId,
     // P1-2: the Meta account/pixel picker passes the chosen pixel here so CAPI dispatch has a target.
     // db.connectSource COALESCEs it on re-connect, so rotating the token never nulls a prior pixel.
@@ -1498,8 +1508,13 @@ async function connectSource(
     // create_meta_creative defaults its pageId to it. COALESCEd on re-connect like the pixel.
     ...(optionalString(input, "selectedPageId") ? { selectedPageId: optionalString(input, "selectedPageId") } : {}),
     actorType: context.authority
-  });
-  const connectionTest = await testConnectionForSource(db, context, provider, String(source.id), encryptionKey);
+  };
+  // connectSource writes the source, credential, schedule and audit row. Keep that unit atomic so
+  // a storage failure cannot leave a half-connected source, and concurrent successful replacements
+  // serialize at the database boundary.
+  const source = await db.withTransaction((tx) => tx.connectSource(connectInput));
+  const connectionTest = candidateTest
+    ?? await testConnectionForSource(db, context, provider, String(source.id), encryptionKey);
   const initialSync = await queueInitialSyncOnConnect(db, context, provider, String(source.id));
   return envelope("connect_source", context.authority, { source, connectionTest, initialSync }, ["sources"], "queued");
 }
@@ -1514,85 +1529,103 @@ async function reconnectSource(
   const provider = await sourceProvider(db, context.workspaceId, sourceId);
   const credentialKind = optionalString(input, "credentialKind");
   const oauthTokenId = optionalString(input, "oauthTokenId");
-  if (credentialKind || objectField(input, "credentialPayload") || optionalString(input, "encryptedPayload")) {
-    const resolvedKind = credentialKind ?? defaultCredentialKind(provider);
-    // Carry the Meta CAPI pixel AND the posting Page (migration 0068) forward across a token
-    // rotation: reconnect REVOKES the old row and INSERTs a fresh one, so without this the prior
-    // selected_pixel_id / selected_page_id would be silently wiped — CAPI dispatch would lose its
-    // target and create_meta_creative its default Page. An explicit selectedPixelId /
-    // selectedPageId in the input overrides.
-    const prior = await db.query(
-      `select selected_pixel_id, selected_page_id from connection_credentials
-         where workspace_id = $1 and source_id = $2 and revoked_at is null
-         order by created_at desc limit 1`,
-      [context.workspaceId, sourceId]
-    );
-    const priorRow = prior[0] as Record<string, unknown> | undefined;
-    const carried = (inputKey: string, column: string): string | undefined => {
-      const priorVal = priorRow?.[column];
-      return (
-        optionalString(input, inputKey) ??
-        (typeof priorVal === "string" && priorVal !== "" ? priorVal : undefined)
+  const replacesCredential = Boolean(
+    credentialKind || objectField(input, "credentialPayload") || optionalString(input, "encryptedPayload")
+  );
+  const resolvedKind = credentialKind ?? defaultCredentialKind(provider);
+  const candidate = replacesCredential
+    ? {
+        credentialKind: resolvedKind,
+        encryptedPayload: credentialPayloadForStorage(input, resolvedKind, oauthTokenId, encryptionKey),
+        oauthTokenId
+      }
+    : undefined;
+  const candidateTest = provider === "meta_ads" && candidate
+    ? await testMetaConnectionCandidate(db, context, candidate, encryptionKey)
+    : undefined;
+
+  await db.withTransaction(async (tx) => {
+    if (candidate) {
+      // Carry the Meta CAPI pixel AND the posting Page (migration 0068) forward across a token
+      // rotation: reconnect REVOKES the old row and INSERTs a fresh one, so without this the prior
+      // selected_pixel_id / selected_page_id would be silently wiped — CAPI dispatch would lose its
+      // target and create_meta_creative its default Page. An explicit selectedPixelId /
+      // selectedPageId in the input overrides.
+      const prior = await tx.query(
+        `select selected_pixel_id, selected_page_id from connection_credentials
+           where workspace_id = $1 and source_id = $2 and revoked_at is null
+           order by created_at desc limit 1`,
+        [context.workspaceId, sourceId]
       );
-    };
-    const carriedPixelId = carried("selectedPixelId", "selected_pixel_id");
-    const carriedPageId = carried("selectedPageId", "selected_page_id");
-    await db.query(
-      "update connection_credentials set revoked_at = now() where workspace_id = $1 and source_id = $2 and revoked_at is null",
+      const priorRow = prior[0] as Record<string, unknown> | undefined;
+      const carried = (inputKey: string, column: string): string | undefined => {
+        const priorVal = priorRow?.[column];
+        return (
+          optionalString(input, inputKey) ??
+          (typeof priorVal === "string" && priorVal !== "" ? priorVal : undefined)
+        );
+      };
+      const carriedPixelId = carried("selectedPixelId", "selected_pixel_id");
+      const carriedPageId = carried("selectedPageId", "selected_page_id");
+      await tx.query(
+        "update connection_credentials set revoked_at = now() where workspace_id = $1 and source_id = $2 and revoked_at is null",
+        [context.workspaceId, sourceId]
+      );
+      await tx.query(
+        `
+          insert into connection_credentials (
+            id, workspace_id, source_id, credential_kind, encrypted_payload, oauth_token_id, selected_pixel_id,
+            selected_page_id
+          )
+          values ($1,$2,$3,$4,$5,$6,$7,$8)
+        `,
+        [
+          `cred_${randomUUID()}`,
+          context.workspaceId,
+          sourceId,
+          resolvedKind,
+          candidate.encryptedPayload,
+          oauthTokenId ?? null,
+          carriedPixelId ?? null,
+          carriedPageId ?? null
+        ]
+      );
+    }
+    await tx.query(
+      `
+        update sources
+        set status = 'connected', connected_at = now(),
+          -- Reconnect restores health, so the transient-sync-failure streak (the counter that
+          -- escalates a repeatedly-failing source to 'error' — migration 0044) starts over,
+          -- including its time gate (migration 0045) so the next genuine failure episode
+          -- counts its first strike instead of being swallowed by a stale timestamp.
+          consecutive_sync_failures = 0,
+          last_counted_sync_failure_at = null
+        where workspace_id = $1 and id = $2
+      `,
       [context.workspaceId, sourceId]
     );
+  });
+  const connectionTest = candidateTest
+    ?? await testConnectionForSource(db, context, provider, sourceId, encryptionKey);
+  // A candidate-tested Meta replacement sets connected only after the probe, inside the atomic
+  // swap above. Other providers retain their post-mutation probe and race-closing re-assert.
+  if (!candidateTest) {
+    // RE-ASSERT `connected` AFTER a successful test. testConnectionForSource only returns on
+    // success, so reaching here means the stored credential is good. A sync already in flight when
+    // reconnect began could otherwise write a terminal `error` while the test was completing.
+    // connected_at is intentionally NOT bumped again.
     await db.query(
       `
-        insert into connection_credentials (
-          id, workspace_id, source_id, credential_kind, encrypted_payload, oauth_token_id, selected_pixel_id,
-          selected_page_id
-        )
-        values ($1,$2,$3,$4,$5,$6,$7,$8)
+        update sources
+        set status = 'connected',
+          consecutive_sync_failures = 0,
+          last_counted_sync_failure_at = null
+        where workspace_id = $1 and id = $2
       `,
-      [
-        `cred_${randomUUID()}`,
-        context.workspaceId,
-        sourceId,
-        resolvedKind,
-        credentialPayloadForStorage(input, resolvedKind, oauthTokenId, encryptionKey),
-        oauthTokenId ?? null,
-        carriedPixelId ?? null,
-        carriedPageId ?? null
-      ]
+      [context.workspaceId, sourceId]
     );
   }
-  await db.query(
-    `
-      update sources
-      set status = 'connected', connected_at = now(),
-        -- Reconnect restores health, so the transient-sync-failure streak (the counter that
-        -- escalates a repeatedly-failing source to 'error' — migration 0044) starts over,
-        -- including its time gate (migration 0045) so the next genuine failure episode
-        -- counts its first strike instead of being swallowed by a stale timestamp.
-        consecutive_sync_failures = 0,
-        last_counted_sync_failure_at = null
-      where workspace_id = $1 and id = $2
-    `,
-    [context.workspaceId, sourceId]
-  );
-  const connectionTest = await testConnectionForSource(db, context, provider, sourceId, encryptionKey);
-  // RE-ASSERT `connected` AFTER a successful test. testConnectionForSource only returns on success
-  // (it throws on any failure), so reaching here means the credential is good. The pre-test update
-  // above already set `connected`, but a sync that was ALREADY in flight for this source when the
-  // reconnect began could have finished and written a terminal `error` in the window between that
-  // update and this test completing — leaving a genuinely-successful reconnect parked. This
-  // idempotent re-assert lets the successful reconnect win that race (and re-clears the streak the
-  // concurrent failure may have bumped). connected_at is intentionally NOT bumped again.
-  await db.query(
-    `
-      update sources
-      set status = 'connected',
-        consecutive_sync_failures = 0,
-        last_counted_sync_failure_at = null
-      where workspace_id = $1 and id = $2
-    `,
-    [context.workspaceId, sourceId]
-  );
   const initialSync = await queueInitialSyncOnConnect(db, context, provider, sourceId);
   return envelope(
     "reconnect_source",
@@ -5687,6 +5720,76 @@ async function testConnectionForSource(
       await db.updateSourceStatus(sourceId, "error");
     }
     throw error;
+  }
+}
+
+interface ConnectionCredentialCandidate {
+  credentialKind: string;
+  encryptedPayload: string;
+  oauthTokenId?: string;
+}
+
+const META_CONNECTION_CANDIDATE_TIMEOUT_MS = 8_000;
+
+/**
+ * Exercise the normal Meta connector against an uncommitted credential candidate.
+ *
+ * The connector owns credential parsing, OAuth-token resolution and its direct Graph liveness
+ * probe. Replacing only the credential-row lookup lets it validate the exact encrypted bytes that
+ * would be stored while every other lookup still uses the caller's database. No candidate can be
+ * observed by another request, and a failed probe has no source status to mutate.
+ */
+async function testMetaConnectionCandidate(
+  db: InfiniteOsDb,
+  context: SessionContext,
+  candidate: ConnectionCredentialCandidate,
+  encryptionKey?: string
+): Promise<ConnectionTestResult> {
+  const candidateOne: InfiniteOsDb["one"] = async <T extends Record<string, unknown>>(
+    sql: string,
+    params?: unknown[]
+  ): Promise<T | null> => {
+    if (sql.includes("from connection_credentials")) {
+      return {
+        credential_kind: candidate.credentialKind,
+        encrypted_payload: candidate.encryptedPayload,
+        oauth_token_id: candidate.oauthTokenId ?? null
+      } as unknown as T;
+    }
+    return db.one<T>(sql, params);
+  };
+  const candidateDb: InfiniteOsDb = { ...db, one: candidateOne };
+  const abortController = new AbortController();
+  const timeoutError = () => new ConnectorError(
+    "provider_api_error",
+    "Meta connection candidate probe timed out",
+    true
+  );
+  let timeout: ReturnType<typeof setTimeout>;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timeout = setTimeout(() => {
+      abortController.abort();
+      reject(timeoutError());
+    }, META_CONNECTION_CANDIDATE_TIMEOUT_MS);
+    timeout.unref?.();
+  });
+  const probe = connectorFor("meta_ads").testConnection(candidateDb, {
+    workspaceId: context.workspaceId,
+    sourceId: `candidate_${randomUUID()}`,
+    provider: "meta_ads",
+    syncRunId: `test_${randomUUID()}`,
+    signal: abortController.signal,
+    ...(encryptionKey ? { encryptionKey } : {})
+  }).catch((error: unknown) => {
+    if (abortController.signal.aborted) {
+      throw timeoutError();
+    }
+    throw error;
+  });
+  try {
+    return await Promise.race([probe, deadline]);
+  } finally {
+    clearTimeout(timeout!);
   }
 }
 

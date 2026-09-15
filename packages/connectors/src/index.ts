@@ -75,6 +75,9 @@ export interface SyncRequest {
   // UNSET on desktop (single-tenant), where the process.env / .growth-os default is used, so
   // this is fully backward-compatible. Cloud-agnostic: it is just an opaque string.
   encryptionKey?: string;
+  // Optional caller-owned cancellation for bounded provider probes. Ordinary sync callers omit
+  // it; hosted connect validation uses it to keep a request deadline from hanging on Graph.
+  signal?: AbortSignal;
   // Cloud-default windowed backfill: an explicit [windowSince, windowUntil] time window (ISO
   // 8601 or YYYY-MM-DD). Set by the cloud orchestrator to drive MANY bounded-window sync runs
   // so a mature Meta/GA4 history persists+advances the cursor without a 900s wall; each run is
@@ -2196,7 +2199,7 @@ const metaAdsConnector = createConnector<MetaAdsCredential, MetaAdsSyncRow>({
     sourceUpdatedAt: plan.mode === "fixture" ? null : plan.cursorEnd,
     payload: row
   }),
-  async testLive(_db, _request, credential) {
+  async testLive(_db, request, credential) {
     const adAccountId = metaAdsAccountId(credential);
     if (isMetaAdsMcpTransport(credential)) {
       await metaAdsMcpInsights(credential, {
@@ -2228,7 +2231,8 @@ const metaAdsConnector = createConnector<MetaAdsCredential, MetaAdsSyncRow>({
         }),
         {
           method: "GET",
-          headers: bearerHeaders(accessToken)
+          headers: bearerHeaders(accessToken),
+          ...(request.signal ? { signal: request.signal } : {})
         }
       );
     }
