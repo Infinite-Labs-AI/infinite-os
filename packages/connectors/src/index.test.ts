@@ -8,6 +8,7 @@ import { decryptCredentialPayload, encryptCredentialPayload } from "@infinite-os
 import { type InfiniteOsDb } from "@infinite-os/db";
 
 import {
+  __testOnlySafeUrlForLogs,
   __testOnlySyncExtractedBatch,
   classifySyncFailure,
   connectorFor,
@@ -38,6 +39,18 @@ import {
   type SyncPlan,
   type SyncRequest
 } from "./index.js";
+
+
+describe("provider URL log redaction", () => {
+  it("strips query strings from malformed URLs without regex backtracking", () => {
+    const hostile = `not a url${"?".repeat(10000)}secret=token`;
+    expect(__testOnlySafeUrlForLogs(hostile)).toBe("not a url");
+  });
+
+  it("strips credentials, query, and hash from valid URLs", () => {
+    expect(__testOnlySafeUrlForLogs("https://user:pass@example.com/path?access_token=secret#frag")).toBe("https://example.com/path");
+  });
+});
 
 describe("trusted server Meta CLI isolation", () => {
   function fakeExecutable(dir: string, body: string): string {

@@ -12708,9 +12708,12 @@ function safeUrlForLogs(url: string): string {
     parsed.hash = "";
     return parsed.toString();
   } catch {
-    return url.replace(/\?.*$/, "");
+    const queryStart = url.indexOf("?");
+    return queryStart === -1 ? url : url.slice(0, queryStart);
   }
 }
+
+export const __testOnlySafeUrlForLogs = safeUrlForLogs;
 
 // Exported so the analytical engine can throw the SAME typed shape (code + retryable) for its
 // own pre-fetch failures — the daemon forwards `error.code` only when `retryable` is a boolean.
