@@ -10387,13 +10387,14 @@ export function findMetaDedupHit(
 // the same live-token bridge a Meta read/sync does.
 export async function resolveMetaAdsCredential(
   db: InfiniteOsDb,
-  request: { workspaceId: string; sourceId: string }
+  request: { workspaceId: string; sourceId: string; encryptionKey?: string }
 ): Promise<MetaAdsCredential> {
   const credential = await sourceCredential<MetaAdsCredential>(db, {
     workspaceId: request.workspaceId,
     sourceId: request.sourceId,
     provider: "meta_ads",
-    syncRunId: `write_${Date.now()}`
+    syncRunId: `write_${Date.now()}`,
+    ...(request.encryptionKey ? { encryptionKey: request.encryptionKey } : {})
   });
   return credential.payload;
 }
@@ -10758,6 +10759,7 @@ async function callIsolatedMetaAdsCliJson(
     const child = spawn(execution.executable, ["--no-color", "--no-input", ...args], {
       stdio: ["ignore", "pipe", "pipe"],
       shell: false,
+      detached: process.platform !== "win32",
       cwd: home,
       env: {
         ACCESS_TOKEN: token,
@@ -10770,16 +10772,38 @@ async function callIsolatedMetaAdsCliJson(
         PYTHONUNBUFFERED: "1"
       }
     });
+    let resolveClose!: (value: { code: number | null; signal: NodeJS.Signals | null }) => void;
+    const close = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
+      resolveClose = resolve;
+      child.on("close", (code, signal) => resolve({ code, signal }));
+    });
+    let forceCloseTimer: NodeJS.Timeout | undefined;
+    const hardStop = () => {
+      if (forceCloseTimer) return;
+      // A CLI can spawn descendants holding stdout/stderr open or ignore SIGTERM.
+      // Kill the entire process group on Unix; use the direct child on Windows.
+      try {
+        if (process.platform !== "win32" && child.pid) process.kill(-child.pid, "SIGKILL");
+        else child.kill("SIGKILL");
+      } catch {
+        child.kill("SIGKILL");
+      }
+      forceCloseTimer = setTimeout(() => {
+        child.stdout.destroy();
+        child.stderr.destroy();
+        resolveClose({ code: null, signal: "SIGKILL" });
+      }, 2_000);
+    };
     const timeout = setTimeout(() => {
       failed = new ConnectorError("provider_api_error", "Meta Ads CLI server command timed out", false);
-      child.kill();
+      hardStop();
     }, options.timeoutMs ?? META_CLI_DEFAULT_TIMEOUT_MS);
     try {
       child.stdout.on("data", (chunk: Buffer) => {
         if (failed) return;
         if (stdout.length + chunk.length > 128 * 1024) {
           failed = new ConnectorError("provider_api_error", "Meta Ads CLI server output exceeded the limit", false);
-          child.kill();
+          hardStop();
           return;
         }
         stdout = Buffer.concat([stdout, chunk]);
@@ -10788,21 +10812,23 @@ async function callIsolatedMetaAdsCliJson(
         stderrBytes += chunk.length;
         if (stderrBytes > 8 * 1024 && !failed) {
           failed = new ConnectorError("provider_api_error", "Meta Ads CLI server error output exceeded the limit", false);
-          child.kill();
+          hardStop();
         }
       });
-      const result = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolveClose) => {
-        child.on("error", () => {
-          failed ??= new ConnectorError("provider_api_error", "Meta Ads CLI server command failed to start", false);
-        });
-        child.on("close", (code, signal) => resolveClose({ code, signal }));
+      child.on("error", () => {
+        failed ??= new ConnectorError("provider_api_error", "Meta Ads CLI server command failed to start", false);
+        hardStop();
       });
+      const result = await close;
       if (failed) throw failed;
       if (result.code !== 0 || result.signal) {
         // Provider stderr can echo arbitrary credentials. Never return its raw body.
         throw new ConnectorError("provider_api_error", "Meta Ads CLI server command failed", false);
       }
       const output = stdout.toString("utf8");
+      if (scrubMetaToken(output, token) !== output) {
+        throw new ConnectorError("provider_api_error", "Meta Ads CLI server response contained credential material", false);
+      }
       if (!output.trim()) return { success: true };
       try {
         return JSON.parse(stripJsonPrefix(output)) as unknown;
@@ -10811,6 +10837,7 @@ async function callIsolatedMetaAdsCliJson(
       }
     } finally {
       clearTimeout(timeout);
+      if (forceCloseTimer) clearTimeout(forceCloseTimer);
     }
   } finally {
     rmSync(home, { recursive: true, force: true });

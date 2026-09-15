@@ -6783,6 +6783,7 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
     dedup?: { clientToken: string; entityId: string };
     dedupRows?: DedupRow[];
     credential?: Record<string, unknown>;
+    credentialEncryptionKey?: string;
     // Rows returned by resolveSoleConnectedMetaSourceId's `select id from sources … provider='meta_ads'
     // … status='connected'` query. Defaults to a single sole source so the auto-resolve path works;
     // set [] for the zero-source case or 2+ ids for the ambiguity case.
@@ -6843,13 +6844,13 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
         if (sql.includes("from connection_credentials")) {
           return {
             credential_kind: "system_user_token",
-            encrypted_payload: encryptForTest(options.credential ?? {
+            encrypted_payload: encryptCredentialPayload(options.credential ?? {
               mode: "live",
               transport: "marketing_api",
               adAccountId: "act_999",
               accessToken: "secret-meta-token",
               apiVersion: "v25.0"
-            }),
+            }, options.credentialEncryptionKey ?? "analytical-test-encryption-key"),
             oauth_token_id: null
           } as T;
         }
@@ -6938,6 +6939,52 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
       expect(dedupRows).toHaveLength(0);
     } finally {
       if (prior === undefined) delete process.env.GROWTH_OS_ENCRYPTION_KEY; else process.env.GROWTH_OS_ENCRYPTION_KEY = prior;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a strict server mutation on a direct-Graph credential before any provider call", async () => {
+    const db = metaWriteTestDb({ audits: [], credential: { mode: "live", transport: "marketing_api", adAccountId: "act_999", accessToken: "graph-token" } });
+    const providerFetch = vi.fn(() => { throw new Error("Graph was invoked"); });
+    vi.stubGlobal("fetch", providerFetch);
+    const prior = process.env.GROWTH_OS_ENCRYPTION_KEY;
+    process.env.GROWTH_OS_ENCRYPTION_KEY = "analytical-test-encryption-key";
+    try {
+      const handlers = createActionHandlers(db, { metaAdsCliExecution: { mode: "isolated_server", executable: "/missing/meta" } });
+      await expect(handlers.create_meta_campaign?.({ sourceId: "src_meta", name: "Strict", objective: "OUTCOME_TRAFFIC" }, operatorContext)).rejects.toThrow(/CLI transport/i);
+      expect(providerFetch).not.toHaveBeenCalled();
+    } finally {
+      if (prior === undefined) delete process.env.GROWTH_OS_ENCRYPTION_KEY; else process.env.GROWTH_OS_ENCRYPTION_KEY = prior;
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("decrypts concurrent Meta write and read credentials with distinct request keys", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "meta-keyed-handler-"));
+    const executable = join(dir, "meta-server.mjs");
+    writeFileSync(executable, `#!${process.execPath}\nimport { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(join(dir, "write-token"))}, process.env.ACCESS_TOKEN ?? "");\nconsole.log(JSON.stringify({id:"write-a",status:"PAUSED"}));\n`);
+    chmodSync(executable, 0o700);
+    const prior = process.env.GROWTH_OS_ENCRYPTION_KEY;
+    process.env.GROWTH_OS_ENCRYPTION_KEY = "wrong-ambient-key";
+    vi.stubGlobal("fetch", vi.fn((_url: unknown, init?: RequestInit) => {
+      const bearer = new Headers(init?.headers).get("Authorization");
+      return Promise.resolve(new Response(JSON.stringify({ data: [{ id: bearer === "Bearer token-b" ? "read-b" : "wrong-token" }] }), { status: 200 }));
+    }));
+    try {
+      const writeDb = metaWriteTestDb({ audits: [], credentialEncryptionKey: "workspace-key-a-long-2026", credential: { mode: "live", transport: "meta_ads_cli", adAccountId: "act_999", accessToken: "token-a" } });
+      const readDb = metaWriteTestDb({ audits: [], credentialEncryptionKey: "workspace-key-b-long-2026", credential: { mode: "live", transport: "meta_ads_cli", adAccountId: "act_999", accessToken: "token-b" } });
+      const writeHandlers = createActionHandlers(writeDb, { encryptionKey: "workspace-key-a-long-2026", metaAdsCliExecution: { mode: "isolated_server", executable } });
+      const readHandlers = createActionHandlers(readDb, { encryptionKey: "workspace-key-b-long-2026" });
+      const [writeResult, readResult] = await Promise.all([
+        writeHandlers.create_meta_campaign?.({ sourceId: "src_meta", name: "A", objective: "OUTCOME_TRAFFIC" }, { ...operatorContext, workspaceId: "workspace-a" }),
+        readHandlers.list_meta_entities?.({ sourceId: "src_meta", entity: "campaign" }, { ...operatorContext, workspaceId: "workspace-b" })
+      ]);
+      expect(writeResult?.data).toMatchObject({ id: "write-a" });
+      expect(readResult?.data).toMatchObject({ entities: [{ id: "read-b" }] });
+      expect(readFileSync(join(dir, "write-token"), "utf8")).toBe("token-a");
+    } finally {
+      if (prior === undefined) delete process.env.GROWTH_OS_ENCRYPTION_KEY; else process.env.GROWTH_OS_ENCRYPTION_KEY = prior;
+      vi.unstubAllGlobals();
       rmSync(dir, { recursive: true, force: true });
     }
   });

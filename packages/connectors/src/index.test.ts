@@ -149,6 +149,42 @@ process.exit(2);`);
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it("rejects successful stdout that echoes the stored token", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "meta-server-test-"));
+    const executable = fakeExecutable(dir, `console.log(JSON.stringify({ id: process.env.ACCESS_TOKEN, status: "PAUSED" }));`);
+    try {
+      const credential = bindMetaAdsCliExecution(
+        { mode: "live", transport: "meta_ads_cli", adAccountId: "444", accessToken: "private-success-token" },
+        { mode: "isolated_server", executable }
+      );
+      let failure: unknown;
+      try { await createMetaCampaign(credential, campaign); } catch (error) { failure = error; }
+      expect(failure).toMatchObject({ retryable: false });
+      expect(String(failure)).not.toContain("private-success-token");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("hard-stops an overflowing CLI that ignores SIGTERM", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "meta-server-test-"));
+    const executable = fakeExecutable(dir, `
+process.on("SIGTERM", () => {});
+process.stdout.write("x".repeat(129 * 1024));
+setTimeout(() => process.exit(0), 900);`);
+    try {
+      const credential = bindMetaAdsCliExecution(
+        { mode: "live", transport: "meta_ads_cli", adAccountId: "555", accessToken: "overflow-token" },
+        { mode: "isolated_server", executable }
+      );
+      const started = Date.now();
+      await expect(createMetaCampaign(credential, campaign)).rejects.toMatchObject({ retryable: false });
+      expect(Date.now() - started).toBeLessThan(600);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 const TEST_ENCRYPTION_KEY = "connector-test-encryption-key";
