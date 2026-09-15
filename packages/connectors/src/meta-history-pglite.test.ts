@@ -323,6 +323,16 @@ describe("Meta Ads history CLOSE against real PGlite", () => {
               { picture: "https://scontent.xx.fbcdn.net/v/carousel-0.jpg?stp=signed-carousel" },
             ],
           },
+          photo_data: {
+            id: "photo_123",
+            picture: "https://scontent.xx.fbcdn.net/v/story-photo.jpg?oh=signed-story-photo",
+          },
+          template_data: {
+            image_url: "https://scontent.xx.fbcdn.net/v/template-top.jpg?oh=signed-template-top",
+            child_attachments: [
+              { image_url: "https://scontent.xx.fbcdn.net/v/template-card.jpg?oh=signed-template-card" },
+            ],
+          },
         },
       },
     }];
@@ -375,15 +385,93 @@ describe("Meta Ads history CLOSE against real PGlite", () => {
         slotFingerprint: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
         sourceLocator: { host: "scontent.xx.fbcdn.net", path: "/v/carousel-0.jpg" },
       }),
+      expect.objectContaining({
+        slotKey: "object_story.photo",
+        kind: "image",
+        providerAssetId: null,
+        sourceUrl: null,
+        slotFingerprint: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
+        sourceLocator: { host: "scontent.xx.fbcdn.net", path: "/v/story-photo.jpg" },
+      }),
+      expect.objectContaining({
+        slotKey: "object_story.template",
+        kind: "image",
+        providerAssetId: null,
+        sourceUrl: null,
+        slotFingerprint: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
+        sourceLocator: { host: "scontent.xx.fbcdn.net", path: "/v/template-top.jpg" },
+      }),
+      expect.objectContaining({
+        slotKey: "object_story.template.carousel.0",
+        kind: "image",
+        providerAssetId: null,
+        sourceUrl: null,
+        slotFingerprint: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
+        sourceLocator: { host: "scontent.xx.fbcdn.net", path: "/v/template-card.jpg" },
+      }),
     ]));
     const stored = JSON.stringify(rows[0]);
     expect(stored).not.toContain("signed-image");
     expect(stored).not.toContain("signed-thumb");
     expect(stored).not.toContain("signed-asset");
     expect(stored).not.toContain("signed-carousel");
+    expect(stored).not.toContain("signed-story-photo");
+    expect(stored).not.toContain("signed-template-top");
+    expect(stored).not.toContain("signed-template-card");
     expect(stored).not.toContain("?oh=");
     expect(stored).not.toContain("?token=");
     expect(stored).not.toContain("?stp=");
+  }, 120_000);
+
+  it("persists object_story photo_data image hashes as creative asset descriptors", async () => {
+    const workspaceId = `ws_meta_photo_data_${randomUUID()}`;
+    const sourceId = `src_meta_photo_data_${randomUUID()}`;
+    await seedSource(workspaceId, sourceId);
+
+    const photoFixture = fixture("2026-09-14");
+    photoFixture.ads = [{
+      id: "a_photo",
+      campaign_id: "c1",
+      adset_id: "s1",
+      name: "Photo ad",
+      status: "ACTIVE",
+      effective_status: "ACTIVE",
+      creative: {
+        id: "crphoto",
+        title: "Photo creative",
+        body: "Copy",
+        image_hash: null,
+        object_story_spec: {
+          photo_data: { image_hash: "realhash" },
+        },
+      },
+    }];
+    photoFixture.adInsights = [{
+      ...photoFixture.adInsights[0],
+      ad_id: "a_photo",
+      ad_name: "Photo ad",
+    }];
+
+    await withMetaFetch(photoFixture, () =>
+      connectorFor("meta_ads").sync(db, syncRequest(workspaceId, sourceId, "2026-09-14", "2026-09-14"))
+    );
+
+    const rows = await db.query<{ asset_descriptors: Array<Record<string, unknown>> }>(
+      "select asset_descriptors from meta_ads_entity_versions where source_id=$1 and entity_type='creative' and entity_id='crphoto' and valid_to is null",
+      [sourceId],
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.asset_descriptors).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        slotKey: "object_story.photo",
+        kind: "image",
+        providerAssetId: "realhash",
+        providerAssetType: "image_hash",
+        sourceUrl: null,
+        sourceLocator: null,
+        slotFingerprint: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
+      }),
+    ]));
   }, 120_000);
 
   it("a partial 500-row chunk load never deletes stale facts or publishes coverage", async () => {

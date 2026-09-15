@@ -9812,14 +9812,31 @@ function metaAdsCreativeAssetDescriptors(creative: Record<string, unknown>): Met
   }
 
   const story = isRecord(creative.object_story_spec) ? creative.object_story_spec : null;
+  const knownImageSource = (item: Record<string, unknown> | null): string | null =>
+    stringOrNull(item?.picture) ?? stringOrNull(item?.image_url);
+  const addKnownImage = (slotKey: string, item: Record<string, unknown> | null): void => {
+    add(slotKey, "image", stringOrNull(item?.image_hash), "image_hash", knownImageSource(item));
+  };
+
   const linkData = isRecord(story?.link_data) ? story.link_data : null;
-  add("object_story.link", "image", stringOrNull(linkData?.image_hash), "image_hash", linkData?.picture);
+  addKnownImage("object_story.link", linkData);
   add("object_story.link.video", "video", stringOrNull(linkData?.video_id), "video_id", null);
   for (const [index, item] of (Array.isArray(linkData?.child_attachments) ? linkData.child_attachments : []).entries()) {
     if (!isRecord(item)) continue;
-    add(`object_story.carousel.${index}`, "image", stringOrNull(item.image_hash), "image_hash", item.picture);
+    addKnownImage(`object_story.carousel.${index}`, item);
     add(`object_story.carousel.${index}.video`, "video", stringOrNull(item.video_id), "video_id", item.video_url);
   }
+
+  const photoData = isRecord(story?.photo_data) ? story.photo_data : null;
+  addKnownImage("object_story.photo", photoData);
+
+  const templateData = isRecord(story?.template_data) ? story.template_data : null;
+  addKnownImage("object_story.template", templateData);
+  for (const [index, item] of (Array.isArray(templateData?.child_attachments) ? templateData.child_attachments : []).entries()) {
+    if (!isRecord(item)) continue;
+    addKnownImage(`object_story.template.carousel.${index}`, item);
+  }
+
   const videoData = isRecord(story?.video_data) ? story.video_data : null;
   const storyVideoId = stringOrNull(videoData?.video_id);
   add("object_story.video", "video", storyVideoId, "video_id", videoData?.video_url);
