@@ -147,7 +147,15 @@ interface MetaAdsAssetDescriptor {
   slotKey: string;
   kind: "image" | "video" | "thumbnail";
   providerAssetId: string | null;
+  slotFingerprint: string | null;
   sourceUrl: string | null;
+  sourceLocator: { host: string; path: string } | null;
+}
+
+interface SyncClaimSnapshot {
+  sourceAccountExternalId: string | null;
+  credentialId: string | null;
+  credentialUpdatedAt: string | Date | null;
 }
 
 export interface MetaAdsSnapshotReplacementState {
@@ -2607,7 +2615,7 @@ function createConnector<
       // opens would allow a competitor to fetch stale truth while the first run is loading.
       // Admission errors intentionally sit outside the failure recorder: a rejected competitor
       // did not own the source and must not mutate the owner's run or failure streak.
-      await claimSourceSync(db, request);
+      const claim = await claimSourceSync(db, request);
       // planSync resolves (and DECRYPTS) the credential, so it MUST run inside the try: a decrypt
       // failure here (key mismatch) used to throw before recordSyncFailure could run, leaving the
       // source `connected` forever while the worker silently re-enqueued the doomed sync. `plan` is
@@ -2622,12 +2630,13 @@ function createConnector<
         await this.testConnection(db, request, "liveness", plan);
         extracted = await this.extract(db, request, plan);
       } catch (error) {
-        await recordSyncFailure(db, request, plan, providerError(error));
+        await recordSyncFailure(db, request, claim, plan, providerError(error));
         throw error;
       }
       return syncExtractedBatch(
         db,
         request,
+        claim,
         plan,
         extracted,
         (tx, records, rawIds) =>
@@ -2808,10 +2817,139 @@ async function insertSyncBatchRecordsChunk(
   );
 }
 
-async function claimSourceSync(db: InfiniteOsDb, request: SyncRequest): Promise<void> {
-  await db.withTransaction(async (tx) => {
-    const sources = await tx.query<{ provider: string; status: string }>(
+function syncClaimLost(message = "source sync claim is no longer active"): ConnectorError {
+  return new ConnectorError("sync_claim_lost", message, true);
+}
+
+async function readActiveCredentialVersion(
+  tx: InfiniteOsDb,
+  request: Pick<SyncRequest, "workspaceId" | "sourceId">,
+): Promise<{ id: string; updated_at: string | Date } | null> {
+  return tx.one<{ id: string; updated_at: string | Date }>(
+    `
+      select id, updated_at
+      from connection_credentials
+      where workspace_id = $1 and source_id = $2 and revoked_at is null
+      order by created_at desc
+      limit 1
+      for update
+    `,
+    [request.workspaceId, request.sourceId],
+  );
+}
+
+async function syncClaimStillOwnsSource(
+  tx: InfiniteOsDb,
+  request: SyncRequest,
+  claim: SyncClaimSnapshot,
+): Promise<boolean> {
+  const sources = await tx.query<{ id: string }>(
+    `
+      select id
+      from sources
+      where id = $1
+        and workspace_id = $2
+        and provider = $3
+        and status = 'syncing'
+        and account_external_id is not distinct from $4
+      for update
+    `,
+    [request.sourceId, request.workspaceId, request.provider, claim.sourceAccountExternalId],
+  );
+  const source = sources[0];
+  if (!source) return false;
+
+  if (claim.credentialId) {
+    const credential = await tx.one<{ id: string }>(
+      `
+        select id
+        from connection_credentials
+        where id = $1
+          and workspace_id = $2
+          and source_id = $3
+          and revoked_at is null
+          and updated_at is not distinct from $4::timestamptz
+        for update
+      `,
+      [claim.credentialId, request.workspaceId, request.sourceId, claim.credentialUpdatedAt],
+    );
+    return Boolean(credential);
+  }
+
+  const credential = await readActiveCredentialVersion(tx, request);
+  return !credential;
+}
+
+async function assertSyncClaimStillOwnsRun(
+  tx: InfiniteOsDb,
+  request: SyncRequest,
+  claim: SyncClaimSnapshot,
+): Promise<void> {
+  if (!(await syncClaimStillOwnsSource(tx, request, claim))) {
+    throw syncClaimLost();
+  }
+  const owningRuns = await tx.query<{ id: string }>(
+    `
+      select id
+      from sync_runs
+      where id = $1 and workspace_id = $2 and source_id = $3 and status = 'running'
+      for update
+    `,
+    [request.syncRunId, request.workspaceId, request.sourceId],
+  );
+  const owningRun = owningRuns[0];
+  if (!owningRun) {
+    throw syncClaimLost("source sync claim belongs to another run");
+  }
+}
+
+async function markClaimedSourceSucceeded(
+  tx: InfiniteOsDb,
+  request: SyncRequest,
+  claim: SyncClaimSnapshot,
+  cursorEnd: string,
+): Promise<void> {
+  await tx.query(
+    `
+      update sources
+      set status = 'connected',
+          last_synced_at = coalesce($5::timestamptz, last_synced_at),
+          consecutive_sync_failures = 0,
+          last_counted_sync_failure_at = null
+      where id = $1
+        and workspace_id = $2
+        and provider = $3
+        and status = 'syncing'
+        and account_external_id is not distinct from $4
+    `,
+    [request.sourceId, request.workspaceId, request.provider, claim.sourceAccountExternalId, cursorEnd],
+  );
+}
+
+async function restoreClaimedSourceAfterFailure(
+  tx: InfiniteOsDb,
+  request: SyncRequest,
+  claim: SyncClaimSnapshot,
+): Promise<void> {
+  await tx.query(
+    `
+      update sources
+      set status = 'connected'
+      where id = $1
+        and workspace_id = $2
+        and provider = $3
+        and status = 'syncing'
+        and account_external_id is not distinct from $4
+    `,
+    [request.sourceId, request.workspaceId, request.provider, claim.sourceAccountExternalId],
+  );
+}
+
+async function claimSourceSync(db: InfiniteOsDb, request: SyncRequest): Promise<SyncClaimSnapshot> {
+  return db.withTransaction(async (tx) => {
+    const sources = await tx.query<{ provider: string; status: string; account_external_id: string | null }>(
       `select provider, status
+              , account_external_id
          from sources
         where id = $1 and workspace_id = $2
         for update`,
@@ -2828,6 +2966,8 @@ async function claimSourceSync(db: InfiniteOsDb, request: SyncRequest): Promise<
     if (source.status === "syncing") {
       throw new ConnectorError("sync_in_progress", "source is already syncing", true);
     }
+
+    const credential = await readActiveCredentialVersion(tx, request);
 
     // Boot recovery deliberately repairs a crashed owner's source status without replaying
     // historical run bookkeeping. Retire any such stale `running` row as part of the next
@@ -2856,12 +2996,18 @@ async function claimSourceSync(db: InfiniteOsDb, request: SyncRequest): Promise<
        values ($1, $2, $3, 'running')`,
       [request.syncRunId, request.workspaceId, request.sourceId]
     );
+    return {
+      sourceAccountExternalId: source.account_external_id ?? null,
+      credentialId: credential?.id ?? null,
+      credentialUpdatedAt: credential?.updated_at ?? null,
+    };
   });
 }
 
 async function syncExtractedBatch(
   db: InfiniteOsDb,
   request: SyncRequest,
+  claim: SyncClaimSnapshot,
   plan: SyncPlan,
   records: ExtractedRecord<unknown>[],
   // NOTE: writeTruth now receives the CHUNK's records (aligned with the chunk's
@@ -2878,36 +3024,7 @@ async function syncExtractedBatch(
     //    own brief transaction, so the batch row is committed before the (potentially
     //    large) record load and the mutex is NOT held across the whole batch.
     await db.withTransaction(async (tx) => {
-      const admittedSources = await tx.query<{ provider: string; status: string }>(
-        `select provider, status
-           from sources
-          where id = $1 and workspace_id = $2
-          for update`,
-        [request.sourceId, request.workspaceId]
-      );
-      const admittedSource = admittedSources[0];
-      if (!admittedSource || admittedSource.provider !== request.provider) {
-        throw new ConnectorError(
-          "source_scope_mismatch",
-          "source is outside the requested workspace or provider scope",
-          false
-        );
-      }
-      if (admittedSource.status !== "syncing") {
-        throw new ConnectorError(
-          "sync_claim_lost",
-          "source sync claim is no longer active",
-          true
-        );
-      }
-      const owningRuns = await tx.query<{ id: string }>(
-        `select id from sync_runs
-          where id = $1 and workspace_id = $2 and source_id = $3 and status = 'running'`,
-        [request.syncRunId, request.workspaceId, request.sourceId]
-      );
-      if (!owningRuns[0]) {
-        throw new ConnectorError("sync_claim_lost", "source sync claim belongs to another run", true);
-      }
+      await assertSyncClaimStillOwnsRun(tx, request, claim);
       await tx.query(
         `
           insert into sync_batches (
@@ -2969,6 +3086,7 @@ async function syncExtractedBatch(
     }
     // 3. CLOSE — finalize bookkeeping, advance the cursor, mark the source connected.
     await db.withTransaction(async (tx) => {
+      await assertSyncClaimStillOwnsRun(tx, request, claim);
       // Provider-specific durable checkpoints are intentionally part of CLOSE.
       // If this transaction fails, neither the generic cursor nor the Stripe
       // reconciliation cursor can outrun normalized truth.
@@ -2999,14 +3117,14 @@ async function syncExtractedBatch(
         `,
         [`cursor_${randomUUID()}`, request.workspaceId, request.sourceId, plan.cursorKey, plan.cursorEnd]
       );
-      await tx.updateSourceStatus(request.sourceId, "connected", plan.cursorEnd);
+      await markClaimedSourceSucceeded(tx, request, claim, plan.cursorEnd);
     });
   } catch (error) {
     // OPEN, LOAD, and CLOSE all happen after the durable claim committed. Their
     // cleanup must therefore be shared: mark only the exact still-running owner,
     // record one error, restore/park the source proportionately, and always rethrow
     // the ORIGINAL phase error even if best-effort cleanup itself fails.
-    await recordClaimedBatchFailure(db, request, plan, batchId, error);
+    await recordClaimedBatchFailure(db, request, claim, plan, batchId, error);
     throw error;
   }
 
@@ -3051,6 +3169,7 @@ async function persistMetaAdsRequestReservation(
 async function recordClaimedBatchFailure(
   db: InfiniteOsDb,
   request: SyncRequest,
+  claim: SyncClaimSnapshot,
   plan: SyncPlan,
   batchId: string,
   error: unknown
@@ -3091,13 +3210,11 @@ async function recordClaimedBatchFailure(
         "delete from meta_ads_snapshot_keys where sync_run_id = $1 and workspace_id = $2 and source_id = $3",
         [request.syncRunId, request.workspaceId, request.sourceId],
       );
+      if (!(await syncClaimStillOwnsSource(tx, request, claim))) return;
       const parked = await escalateSourceOnSyncFailure(tx, request.sourceId, perr);
       if (!parked) {
         // Preserve the counted streak; updateSourceStatus('connected') intentionally resets it.
-        await tx.query(
-          "update sources set status = 'connected' where id = $1 and status = 'syncing'",
-          [request.sourceId]
-        );
+        await restoreClaimedSourceAfterFailure(tx, request, claim);
       }
     });
   } catch (markError) {
@@ -3116,8 +3233,8 @@ export async function __testOnlySyncExtractedBatch(
   writeTruth: (tx: InfiniteOsDb, records: ExtractedRecord<unknown>[], rawIds: string[]) => Promise<void>,
   closeSuccess?: (tx: InfiniteOsDb, request: SyncRequest, plan: SyncPlan) => Promise<void>
 ): Promise<SyncResult> {
-  await claimSourceSync(db, request);
-  return syncExtractedBatch(db, request, plan, records, writeTruth, closeSuccess);
+  const claim = await claimSourceSync(db, request);
+  return syncExtractedBatch(db, request, claim, plan, records, writeTruth, closeSuccess);
 }
 
 async function recordSyncFailure(
@@ -3125,16 +3242,17 @@ async function recordSyncFailure(
   // `plan` is null when the failure happened DURING planning (e.g. an undecryptable credential), so
   // there is no cursor to preserve — the cursor write is skipped in that case.
   request: SyncRequest,
+  claim: SyncClaimSnapshot,
   plan: SyncPlan | null,
   error: { code: string; message: string; retryable: boolean }
 ): Promise<void> {
   await db.withTransaction(async (tx) => {
-    await tx.query(
+    const owners = await tx.query<{ id: string }>(
       `
-        insert into sync_runs (id, workspace_id, source_id, status, finished_at, error, request_telemetry)
-        values ($1, $2, $3, 'failed', now(), $4, $5::jsonb)
-        on conflict (id) do update set status = 'failed', finished_at = now(),
-          error = excluded.error, request_telemetry = excluded.request_telemetry
+        update sync_runs
+           set status = 'failed', finished_at = now(), error = $4, request_telemetry = $5::jsonb
+         where id = $1 and workspace_id = $2 and source_id = $3 and status = 'running'
+         returning id
       `,
       [
         request.syncRunId,
@@ -3144,6 +3262,7 @@ async function recordSyncFailure(
         plan ? serializedRequestTelemetry(plan) : null,
       ]
     );
+    if (!owners[0]) return;
     await tx.query(
       `
         insert into sync_errors (
@@ -3165,15 +3284,13 @@ async function recordSyncFailure(
     }
     // PROPORTIONATE STATUS ESCALATION — every failure is already recorded in sync_runs +
     // sync_errors above; escalateSourceOnSyncFailure gates ONLY the terminal `error` transition.
+    if (!(await syncClaimStillOwnsSource(tx, request, claim))) return;
     const parked = await escalateSourceOnSyncFailure(tx, request.sourceId, error);
     if (!parked) {
       // The claim moved this source to `syncing` before planning. A transient failure below
       // the parking threshold must return it to scheduler rotation while preserving the
       // newly-counted failure streak; updateSourceStatus('connected') would erase that streak.
-      await tx.query(
-        "update sources set status = 'connected' where id = $1 and status = 'syncing'",
-        [request.sourceId]
-      );
+      await restoreClaimedSourceAfterFailure(tx, request, claim);
     }
   });
 }
@@ -9603,6 +9720,37 @@ function scrubMetaAdsProviderMetadata(value: unknown, accessToken: string, depth
   return out;
 }
 
+function metaAdsDescriptorSourceLocator(value: unknown): { host: string; path: string } | null {
+  const raw = stringOrNull(value);
+  if (!raw) return null;
+  try {
+    const url = new URL(raw);
+    if (url.protocol !== "https:" && url.protocol !== "http:") return null;
+    if (url.username || url.password) return null;
+    const host = url.hostname.toLowerCase();
+    const path = url.pathname || "/";
+    if (!host) return null;
+    return { host, path };
+  } catch {
+    return null;
+  }
+}
+
+function metaAdsSlotFingerprint(
+  slotKey: string,
+  kind: MetaAdsAssetDescriptor["kind"],
+  providerAssetId: string | null,
+  sourceLocator: { host: string; path: string } | null,
+): string | null {
+  const identity = providerAssetId
+    ? `provider:${providerAssetId}`
+    : sourceLocator
+      ? `url:${sourceLocator.host}${sourceLocator.path}`
+      : null;
+  if (!identity) return null;
+  return `sha256:${createHash("sha256").update(`${slotKey}\0${kind}\0${identity}`).digest("hex")}`;
+}
+
 function metaAdsCreativeAssetDescriptors(creative: Record<string, unknown>): MetaAdsAssetDescriptor[] {
   const descriptors: MetaAdsAssetDescriptor[] = [];
   const seen = new Set<string>();
@@ -9612,15 +9760,21 @@ function metaAdsCreativeAssetDescriptors(creative: Record<string, unknown>): Met
     providerAssetId: unknown,
     sourceUrl: unknown,
   ): void => {
+    const providerAssetIdText = stringOrNull(providerAssetId);
+    const sourceLocator = metaAdsDescriptorSourceLocator(sourceUrl);
     const descriptor = {
       slotKey,
       kind,
-      providerAssetId: stringOrNull(providerAssetId),
+      providerAssetId: providerAssetIdText,
+      slotFingerprint: metaAdsSlotFingerprint(slotKey, kind, providerAssetIdText, sourceLocator),
       // Provider media URLs are signed, expiring capabilities. Never persist them in a readable
-      // descriptor; the archive worker refetches a fresh URL from providerAssetId under credential.
+      // descriptor; the archive worker refetches a fresh URL by creative id + slot under credential.
       sourceUrl: null,
+      // Host/path only, with query/hash/userinfo stripped. This gives H5 enough stable context to
+      // match URL-only slots after a creative refresh without persisting a bearer-like media URL.
+      sourceLocator,
     } satisfies MetaAdsAssetDescriptor;
-    if (!descriptor.providerAssetId && !descriptor.sourceUrl) return;
+    if (!descriptor.providerAssetId && !descriptor.slotFingerprint) return;
     const key = JSON.stringify(descriptor);
     if (!seen.has(key)) {
       seen.add(key);

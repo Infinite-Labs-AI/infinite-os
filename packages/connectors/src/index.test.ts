@@ -5200,7 +5200,10 @@ console.log(JSON.stringify({ data: [] }));
         if (sql.includes("select provider, status") && sql.includes("for update")) {
           return [{ provider: "posthog", status: sourceStatus }];
         }
-        if (sql.includes("select id from sync_runs")) {
+        if (sql.includes("from sources") && sql.includes("for update")) {
+          return [{ id: "s" }];
+        }
+        if (sql.includes("from sync_runs") && sql.includes("status = 'running'")) {
           return [{ id: "r" }];
         }
         return [];
@@ -5270,7 +5273,10 @@ console.log(JSON.stringify({ data: [] }));
         if (sql.includes("select provider, status") && sql.includes("for update")) {
           return [{ provider: "posthog", status: sourceStatus }];
         }
-        if (sql.includes("select id from sync_runs")) {
+        if (sql.includes("from sources") && sql.includes("for update")) {
+          return [{ id: "s" }];
+        }
+        if (sql.includes("from sync_runs") && sql.includes("status = 'running'")) {
           return [{ id: "r" }];
         }
         if (sql.includes("update sync_runs") && sql.includes("returning id")) {
@@ -5877,7 +5883,7 @@ describe("proportionate sync-failure status escalation", () => {
     );
 
     // The failure stays visible — run + error rows are recorded honestly...
-    expect(queryLog.some((q) => q.sql.includes("insert into sync_runs") && q.sql.includes("'failed'"))).toBe(true);
+    expect(queryLog.some((q) => q.sql.includes("update sync_runs") && q.sql.includes("status = 'failed'"))).toBe(true);
     expect(queryLog.some((q) => q.sql.includes("insert into sync_errors"))).toBe(true);
     // ...and the consecutive-failure counter advances through the TIME-GATED update (0045):
     // the increment stamps last_counted_sync_failure_at and only matches when the previous
@@ -5924,7 +5930,7 @@ describe("proportionate sync-failure status escalation", () => {
     );
 
     // Still recorded honestly — the gate is not a masking fallback...
-    expect(queryLog.some((q) => q.sql.includes("insert into sync_runs") && q.sql.includes("'failed'"))).toBe(true);
+    expect(queryLog.some((q) => q.sql.includes("update sync_runs") && q.sql.includes("status = 'failed'"))).toBe(true);
     expect(queryLog.some((q) => q.sql.includes("insert into sync_errors"))).toBe(true);
     // ...but no strike counted → no park. Only the pre-provider claim is visible through
     // updateSourceStatus; the direct connected restore preserves streak state.
@@ -8504,17 +8510,27 @@ describe("Meta Ads durable daily history", () => {
       const ad = snapshots.find((row) => (row.payload as { entityType: string }).entityType === "ad");
       expect(ad?.payload).toMatchObject({
         creativeId: "cr1",
-        metadata: { creative: { video_id: "vid1", asset_feed_spec: { videos: [{ video_id: "vid2" }] } } },
+        metadata: {
+          creative: {
+            video_id: "vid1",
+            asset_feed_spec: {
+              videos: [
+                { video_id: "vid2" },
+                { thumbnail_url: "https://scontent.xx.fbcdn.net/video-thumb.jpg" },
+              ],
+            },
+          },
+        },
       });
       const creative = snapshots.find((row) => (row.payload as { entityType: string }).entityType === "creative");
       expect(creative?.payload).toMatchObject({
         entityId: "cr1",
         assetDescriptors: expect.arrayContaining([
-          { slotKey: "creative.image", kind: "image", providerAssetId: "img-hash", sourceUrl: null },
-          { slotKey: "asset_feed.videos.0", kind: "video", providerAssetId: "vid2", sourceUrl: null },
-          { slotKey: "asset_feed.images.1", kind: "image", providerAssetId: null, sourceUrl: null, sourceFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/) },
-          { slotKey: "asset_feed.videos.1.thumbnail", kind: "thumbnail", providerAssetId: null, sourceUrl: null, sourceFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/) },
-          { slotKey: "object_story.carousel.0", kind: "image", providerAssetId: null, sourceUrl: null, sourceFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/) },
+          expect.objectContaining({ slotKey: "creative.image", kind: "image", providerAssetId: "img-hash", sourceUrl: null, slotFingerprint: expect.stringMatching(/^sha256:[a-f0-9]{64}$/) }),
+          expect.objectContaining({ slotKey: "asset_feed.videos.0", kind: "video", providerAssetId: "vid2", sourceUrl: null, slotFingerprint: expect.stringMatching(/^sha256:[a-f0-9]{64}$/) }),
+          expect.objectContaining({ slotKey: "asset_feed.images.1", kind: "image", providerAssetId: null, sourceUrl: null, slotFingerprint: expect.stringMatching(/^sha256:[a-f0-9]{64}$/), sourceLocator: { host: "scontent.xx.fbcdn.net", path: "/url-only.jpg" } }),
+          expect.objectContaining({ slotKey: "asset_feed.videos.1.thumbnail", kind: "thumbnail", providerAssetId: null, sourceUrl: null, slotFingerprint: expect.stringMatching(/^sha256:[a-f0-9]{64}$/), sourceLocator: { host: "scontent.xx.fbcdn.net", path: "/video-thumb.jpg" } }),
+          expect.objectContaining({ slotKey: "object_story.carousel.0", kind: "image", providerAssetId: null, sourceUrl: null, slotFingerprint: expect.stringMatching(/^sha256:[a-f0-9]{64}$/), sourceLocator: { host: "scontent.xx.fbcdn.net", path: "/carousel.jpg" } }),
         ]),
       });
       expect(JSON.stringify(snapshots)).not.toContain("meta-history-token");
@@ -8684,6 +8700,12 @@ function fakeDb(options: {
   return {
     async one<T>(sql: string, params?: unknown[]): Promise<T | null> {
       record(sql, params);
+      if (sql.includes("select id, updated_at") && sql.includes("connection_credentials")) {
+        return { id: "cred_test", updated_at: "2026-01-01T00:00:00Z" } as T;
+      }
+      if (sql.includes("from connection_credentials") && sql.includes("updated_at is not distinct from")) {
+        return { id: String(params?.[0] ?? "cred_test") } as T;
+      }
       if (sql.includes("connection_credentials")) {
         return options.credential as T;
       }
@@ -8691,6 +8713,14 @@ function fakeDb(options: {
         return {
           account_external_id: options.sourceAccountExternalId ?? inferredAccountExternalId,
         } as T;
+      }
+      if (sql.includes("from sources") && sql.includes("status = 'syncing'")) {
+        return currentSourceStatus === "syncing"
+          ? ({ id: String(params?.[0] ?? "src_1") } as T)
+          : null;
+      }
+      if (sql.includes("from sync_runs") && sql.includes("status = 'running'")) {
+        return { id: String(params?.[0] ?? "sync_run") } as T;
       }
       if (sql.includes("sync_cursors") && options.cursorValue) {
         return { cursor_value: options.cursorValue } as T;
@@ -8722,7 +8752,10 @@ function fakeDb(options: {
           status: currentSourceStatus
         }];
       }
-      if (sql.includes("select id from sync_runs")) {
+      if (sql.includes("from sources") && sql.includes("for update")) {
+        return [{ id: String(params?.[0] ?? "src_1") }];
+      }
+      if (sql.includes("from sync_runs") && sql.includes("status = 'running'")) {
         return [{ id: String(params?.[0] ?? "sync_run") }];
       }
       if (sql.includes("update sync_runs") && sql.includes("returning id")) {
@@ -8733,9 +8766,6 @@ function fakeDb(options: {
       }
       if (sql.includes("update sources set status = 'connected'") && sql.includes("status = 'syncing'")) {
         currentSourceStatus = "connected";
-      }
-      if (sql.includes("select id from sources") && sql.includes("for update")) {
-        return [{ id: String(params?.[0] ?? "src_1") }];
       }
       return [];
     }) as InfiniteOsDb["query"],

@@ -17,8 +17,12 @@ cannot hide provider spend. A budget stop fails the run and writes no coverage o
 `meta_ads_entity_versions` records metadata changes for campaigns, ad sets, ads and creatives.
 Targeting, placement selections, promoted objects, copy and creative descriptors live in bounded
 JSON; media bytes do not. Creative rows expose `asset_descriptors` entries shaped as
-`{slotKey, kind, providerAssetId, sourceUrl}` for a closed cloud worker to archive into workspace-owned
-object storage. Provider tokens and authorization fields are removed before raw/normalized storage.
+`{slotKey, kind, providerAssetId, slotFingerprint, sourceUrl, sourceLocator}` for a closed cloud
+worker to archive into workspace-owned object storage. `sourceUrl` is always `null` for provider
+media. URL-only slots keep a stable `slotFingerprint` plus a query-free `sourceLocator` of
+`{host, path}` so the archive worker can refresh by creative id + slot without storing Meta's signed
+media URL. Provider tokens, authorization fields and media query strings are removed before
+raw/normalized storage.
 
 Reporting dates are Meta account-local calendar dates. `meta_ads_accounts.timezone_name` and
 `currency` are the sole Meta account metadata authority. Optional demographic, placement and device

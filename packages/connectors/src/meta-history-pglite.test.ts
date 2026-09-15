@@ -294,6 +294,97 @@ describe("Meta Ads history CLOSE against real PGlite", () => {
     expect(await db.query("select occurred_on from meta_ads_coverage_daily where source_id=$1", [sourceId])).toEqual([]);
   }, 120_000);
 
+  it("keeps URL-only creative slots without retaining capability URLs", async () => {
+    const workspaceId = `ws_meta_url_slots_${randomUUID()}`;
+    const sourceId = `src_meta_url_slots_${randomUUID()}`;
+    await seedSource(workspaceId, sourceId);
+
+    const urlFixture = fixture("2026-09-13");
+    urlFixture.ads = [{
+      id: "a_url",
+      campaign_id: "c1",
+      adset_id: "s1",
+      name: "URL-only ad",
+      status: "ACTIVE",
+      effective_status: "ACTIVE",
+      creative: {
+        id: "cr_url",
+        title: "URL-only creative",
+        body: "Copy",
+        image_url: "https://scontent.xx.fbcdn.net/v/t39.30808-6/url-only.jpg?oh=signed-image&oe=123#frag",
+        thumbnail_url: "https://lookaside.fbsbx.com/v/t39/thumb.jpg?token=signed-thumb",
+        asset_feed_spec: {
+          images: [{ url: "https://scontent.xx.fbcdn.net/v/asset-feed.jpg?oh=signed-asset" }],
+        },
+        object_story_spec: {
+          link_data: {
+            child_attachments: [
+              { picture: "https://scontent.xx.fbcdn.net/v/carousel-0.jpg?stp=signed-carousel" },
+            ],
+          },
+        },
+      },
+    }];
+    urlFixture.adInsights = [{
+      ...urlFixture.adInsights[0],
+      ad_id: "a_url",
+      ad_name: "URL-only ad",
+    }];
+
+    await withMetaFetch(urlFixture, () =>
+      connectorFor("meta_ads").sync(db, syncRequest(workspaceId, sourceId, "2026-09-13", "2026-09-13"))
+    );
+
+    const rows = await db.query<{ metadata_json: unknown; asset_descriptors: Array<Record<string, unknown>> }>(
+      "select metadata_json,asset_descriptors from meta_ads_entity_versions where source_id=$1 and entity_type='creative' and entity_id='cr_url' and valid_to is null",
+      [sourceId],
+    );
+    expect(rows).toHaveLength(1);
+    const descriptors = rows[0]!.asset_descriptors;
+    expect(descriptors).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        slotKey: "creative.image",
+        kind: "image",
+        providerAssetId: null,
+        sourceUrl: null,
+        slotFingerprint: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
+        sourceLocator: { host: "scontent.xx.fbcdn.net", path: "/v/t39.30808-6/url-only.jpg" },
+      }),
+      expect.objectContaining({
+        slotKey: "creative.thumbnail",
+        kind: "thumbnail",
+        providerAssetId: null,
+        sourceUrl: null,
+        slotFingerprint: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
+        sourceLocator: { host: "lookaside.fbsbx.com", path: "/v/t39/thumb.jpg" },
+      }),
+      expect.objectContaining({
+        slotKey: "asset_feed.images.0",
+        kind: "image",
+        providerAssetId: null,
+        sourceUrl: null,
+        slotFingerprint: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
+        sourceLocator: { host: "scontent.xx.fbcdn.net", path: "/v/asset-feed.jpg" },
+      }),
+      expect.objectContaining({
+        slotKey: "object_story.carousel.0",
+        kind: "image",
+        providerAssetId: null,
+        sourceUrl: null,
+        slotFingerprint: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
+        sourceLocator: { host: "scontent.xx.fbcdn.net", path: "/v/carousel-0.jpg" },
+      }),
+    ]));
+    const stored = JSON.stringify(rows[0]);
+    expect(stored).not.toContain("signed-image");
+    expect(stored).not.toContain("signed-thumb");
+    expect(stored).not.toContain("signed-asset");
+    expect(stored).not.toContain("signed-carousel");
+    expect(stored).not.toContain("?oh=");
+    expect(stored).not.toContain("?token=");
+    expect(stored).not.toContain("?stp=");
+  }, 120_000);
+
   it("a partial 500-row chunk load never deletes stale facts or publishes coverage", async () => {
     const workspaceId = `ws_meta_partial_${randomUUID()}`;
     const sourceId = `src_meta_partial_${randomUUID()}`;
@@ -334,5 +425,124 @@ describe("Meta Ads history CLOSE against real PGlite", () => {
     expect(await db.query("select occurred_on from meta_ads_coverage_daily where source_id = $1", [sourceId])).toEqual([]);
     expect(await db.query("select id from sync_cursors where source_id = $1", [sourceId])).toEqual([]);
     expect(await db.query("select entity_id from meta_ads_snapshot_keys where source_id = $1", [sourceId])).toEqual([]);
+  }, 120_000);
+
+  it("does not close, prune, publish coverage, or resurrect a source revoked after load", async () => {
+    const workspaceId = `ws_meta_revoke_close_${randomUUID()}`;
+    const sourceId = `src_meta_revoke_close_${randomUUID()}`;
+    await seedSource(workspaceId, sourceId);
+    await db.query(
+      `insert into meta_ads_ad_daily
+        (id,workspace_id,source_id,ad_account_id,campaign_id,adset_id,ad_id,ad_name,occurred_on,spend)
+       values ('stale-revoke-close',$1,$2,$3,'c1','s1','stale-close','Stale close','2026-09-21',1)`,
+      [workspaceId, sourceId, ACCOUNT],
+    );
+
+    const inner = db;
+    let transaction = 0;
+    let revoked = false;
+    const racingDb: InfiniteOsDb = {
+      ...inner,
+      withTransaction: async (fn) => {
+        transaction += 1;
+        if (transaction === 4 && !revoked) {
+          revoked = true;
+          await inner.query("update sources set status='revoked' where id = $1", [sourceId]);
+          await inner.query(
+            "update connection_credentials set revoked_at=now(), updated_at='2030-01-01T00:00:00Z'::timestamptz where source_id = $1 and revoked_at is null",
+            [sourceId],
+          );
+        }
+        return inner.withTransaction(fn);
+      },
+    };
+
+    const request = syncRequest(workspaceId, sourceId, "2026-09-21", "2026-09-21");
+    await expect(withMetaFetch(fixture("2026-09-21"), () =>
+      connectorFor("meta_ads").sync(racingDb, request)
+    )).rejects.toMatchObject({ code: "sync_claim_lost" });
+
+    expect(await db.query(
+      "select id from meta_ads_ad_daily where source_id = $1 and ad_id = 'stale-close'",
+      [sourceId],
+    )).toHaveLength(1);
+    expect(await db.query("select occurred_on from meta_ads_coverage_daily where source_id = $1", [sourceId])).toEqual([]);
+    expect(await db.query("select id from sync_cursors where source_id = $1", [sourceId])).toEqual([]);
+    expect(await db.query("select entity_id from meta_ads_snapshot_keys where source_id = $1", [sourceId])).toEqual([]);
+    expect(await db.query<{ status: string }>("select status from sources where id = $1", [sourceId])).toEqual([{ status: "revoked" }]);
+  }, 120_000);
+
+  it("does not count stale chunk failures against a source that reconnected during the run", async () => {
+    const workspaceId = `ws_meta_reconnect_partial_${randomUUID()}`;
+    const sourceId = `src_meta_reconnect_partial_${randomUUID()}`;
+    await seedSource(workspaceId, sourceId);
+    await db.query(
+      `insert into meta_ads_campaign_daily
+        (id,workspace_id,source_id,ad_account_id,campaign_id,campaign_name,occurred_on,spend)
+       values ('stale-reconnect-partial',$1,$2,$3,'stale','Stale','2026-09-22',1)`,
+      [workspaceId, sourceId, ACCOUNT],
+    );
+    const rows = Array.from({ length: 501 }, (_, index) => ({
+      campaign_id: `rc${index}`,
+      campaign_name: `Reconnect Campaign ${index}`,
+      date_start: "2026-09-22",
+      spend: "1",
+      account_currency: "GBP",
+      objective: "OUTCOME_AWARENESS",
+    }));
+
+    const inner = db;
+    let transaction = 0;
+    let reconnected = false;
+    const failingDb: InfiniteOsDb = {
+      ...inner,
+      withTransaction: async (fn) => {
+        transaction += 1;
+        if (transaction === 4 && !reconnected) {
+          reconnected = true;
+          await inner.query(
+            `update sources
+             set status='connected', consecutive_sync_failures=0, last_counted_sync_failure_at=null
+             where id = $1`,
+            [sourceId],
+          );
+          await inner.query(
+            `update connection_credentials
+             set encrypted_payload=$2, updated_at='2030-01-01T00:00:00Z'::timestamptz
+             where source_id=$1 and revoked_at is null`,
+            [
+              sourceId,
+              encryptCredentialPayload(
+                { mode: "live", transport: "meta_ads_cli", adAccountId: ACCOUNT, accessToken: "new-token", apiVersion: "v25.0" },
+                KEY,
+              ),
+            ],
+          );
+          throw new Error("forced second history chunk failure after reconnect");
+        }
+        return inner.withTransaction(fn);
+      },
+    };
+
+    const request = syncRequest(workspaceId, sourceId, "2026-09-22", "2026-09-22");
+    await expect(withMetaFetch({
+      campaigns: [], adsets: [], ads: [], campaignInsights: rows, adsetInsights: [], adInsights: [],
+    }, () => connectorFor("meta_ads").sync(failingDb, request))).rejects.toThrow(/forced second history chunk failure after reconnect/);
+
+    expect(await db.query(
+      "select id from meta_ads_campaign_daily where source_id = $1 and campaign_id = 'stale'",
+      [sourceId],
+    )).toHaveLength(1);
+    expect(await db.query("select occurred_on from meta_ads_coverage_daily where source_id = $1", [sourceId])).toEqual([]);
+    expect(await db.query("select id from sync_cursors where source_id = $1", [sourceId])).toEqual([]);
+    const sourceRows = await db.query<{
+      status: string;
+      consecutive_sync_failures: number;
+      last_counted_sync_failure_at: string | Date | null;
+    }>(
+      "select status, consecutive_sync_failures, last_counted_sync_failure_at from sources where id = $1",
+      [sourceId],
+    );
+    expect(sourceRows).toEqual([{ status: "connected", consecutive_sync_failures: 0, last_counted_sync_failure_at: null }]);
   }, 120_000);
 });
