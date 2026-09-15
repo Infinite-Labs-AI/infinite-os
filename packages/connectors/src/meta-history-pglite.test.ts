@@ -39,7 +39,13 @@ describe("Meta Ads history CLOSE against real PGlite", () => {
     rmSync(dataDir, { recursive: true, force: true });
   });
 
-  async function seedSource(workspaceId: string, sourceId: string): Promise<void> {
+  async function seedSource(
+    workspaceId: string,
+    sourceId: string,
+    options: { sourceAccount?: string; credentialAccount?: string } = {},
+  ): Promise<void> {
+    const sourceAccount = options.sourceAccount ?? ACCOUNT;
+    const credentialAccount = options.credentialAccount ?? ACCOUNT;
     await db.withTransaction(async (tx) => {
       await tx.ensureWorkspace(workspaceId, workspaceId);
       await tx.ensureFirstPhaseDatasets(workspaceId);
@@ -51,7 +57,7 @@ describe("Meta Ads history CLOSE against real PGlite", () => {
     await db.query(
       `insert into sources (id, workspace_id, dataset_id, provider, connection_name, account_external_id, status)
        values ($1,$2,$3,'meta_ads','Meta history',$4,'connected')`,
-      [sourceId, workspaceId, datasets[0]!.id, ACCOUNT],
+      [sourceId, workspaceId, datasets[0]!.id, sourceAccount],
     );
     await db.query(
       `insert into connection_credentials
@@ -62,7 +68,7 @@ describe("Meta Ads history CLOSE against real PGlite", () => {
         workspaceId,
         sourceId,
         encryptCredentialPayload(
-          { mode: "live", transport: "meta_ads_cli", adAccountId: ACCOUNT, accessToken: "test-token", apiVersion: "v25.0" },
+          { mode: "live", transport: "meta_ads_cli", adAccountId: credentialAccount, accessToken: "test-token", apiVersion: "v25.0" },
           KEY,
         ),
       ],
@@ -141,6 +147,14 @@ describe("Meta Ads history CLOSE against real PGlite", () => {
     };
   }
 
+  function reversedObjectKeys(value: unknown): unknown {
+    if (Array.isArray(value)) return value.map(reversedObjectKeys);
+    if (!value || typeof value !== "object") return value;
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>).reverse().map(([key, entry]) => [key, reversedObjectKeys(entry)]),
+    );
+  }
+
   it("stores every ad-day, restates exact windows, publishes measured-zero coverage, and versions metadata", async () => {
     const workspaceId = `ws_meta_history_${randomUUID()}`;
     const sourceId = `src_meta_history_${randomUUID()}`;
@@ -185,6 +199,15 @@ describe("Meta Ads history CLOSE against real PGlite", () => {
     expect(coverage.find((row) => row.grain === "ad" && row.occurred_on === "2026-09-01")?.row_count).toBe(2);
     expect(coverage.find((row) => row.grain === "ad" && row.occurred_on === "2026-09-02")?.row_count).toBe(0);
     expect((await db.query("select entity_id from meta_ads_snapshot_keys where source_id = $1", [sourceId]))).toEqual([]);
+
+    const reordered = reversedObjectKeys(fixture("2026-09-01", { includeSecondAd: true })) as MetaFixture;
+    await withMetaFetch(reordered, () =>
+      connectorFor("meta_ads").sync(db, syncRequest(workspaceId, sourceId, "2026-09-01", "2026-09-03"))
+    );
+    expect(await db.query(
+      "select id from meta_ads_entity_versions where source_id=$1",
+      [sourceId],
+    )).toHaveLength(6);
 
     await db.query(
       `insert into meta_ads_ad_daily
@@ -247,6 +270,28 @@ describe("Meta Ads history CLOSE against real PGlite", () => {
       [failed.syncRunId],
     );
     expect(telemetry[0]?.request_telemetry).toMatchObject({ provider: "meta_ads", requestCount: 5 });
+  }, 120_000);
+
+  it("rejects a source/account credential mismatch before any provider request or history write", async () => {
+    const workspaceId = `ws_meta_binding_${randomUUID()}`;
+    const sourceId = `src_meta_binding_${randomUUID()}`;
+    await seedSource(workspaceId, sourceId, { sourceAccount: "act_999", credentialAccount: ACCOUNT });
+    let providerCalls = 0;
+    await expect(withMetaFetch(fixture("2026-09-12"), async () => {
+      const original = globalThis.fetch;
+      globalThis.fetch = (async (...args: Parameters<typeof fetch>) => {
+        providerCalls += 1;
+        return original(...args);
+      }) as typeof fetch;
+      try {
+        return await connectorFor("meta_ads").sync(db, syncRequest(workspaceId, sourceId, "2026-09-12", "2026-09-12"));
+      } finally {
+        globalThis.fetch = original;
+      }
+    })).rejects.toMatchObject({ code: "source_scope_mismatch" });
+    expect(providerCalls).toBe(0);
+    expect(await db.query("select id from meta_ads_ad_daily where source_id=$1", [sourceId])).toEqual([]);
+    expect(await db.query("select occurred_on from meta_ads_coverage_daily where source_id=$1", [sourceId])).toEqual([]);
   }, 120_000);
 
   it("a partial 500-row chunk load never deletes stale facts or publishes coverage", async () => {

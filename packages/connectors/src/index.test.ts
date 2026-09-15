@@ -8478,8 +8478,13 @@ describe("Meta Ads durable daily history", () => {
           thumbnail_url: "https://scontent.xx.fbcdn.net/thumb.jpg?oh=thumb-secret",
           video_id: "vid1", call_to_action_type: "SHOP_NOW",
           access_token: "meta-history-token",
-          object_story_spec: { link_data: { link: "https://example.com/buy" } },
-          asset_feed_spec: { images: [{ hash: "variant-hash" }], videos: [{ video_id: "vid2" }] },
+          object_story_spec: { link_data: { link: "https://example.com/buy?utm_source=meta", child_attachments: [
+            { picture: "https://scontent.xx.fbcdn.net/carousel.jpg?oh=carousel-secret" },
+          ] } },
+          asset_feed_spec: {
+            images: [{ hash: "variant-hash" }, { url: "https://scontent.xx.fbcdn.net/url-only.jpg?oh=image-secret" }],
+            videos: [{ video_id: "vid2" }, { thumbnail_url: "https://scontent.xx.fbcdn.net/video-thumb.jpg?oh=video-thumb-secret" }],
+          },
         },
       }], paging: {} });
       return historyResponse({ data: [], paging: {} });
@@ -8507,12 +8512,20 @@ describe("Meta Ads durable daily history", () => {
         assetDescriptors: expect.arrayContaining([
           { slotKey: "creative.image", kind: "image", providerAssetId: "img-hash", sourceUrl: null },
           { slotKey: "asset_feed.videos.0", kind: "video", providerAssetId: "vid2", sourceUrl: null },
+          { slotKey: "asset_feed.images.1", kind: "image", providerAssetId: null, sourceUrl: null, sourceFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/) },
+          { slotKey: "asset_feed.videos.1.thumbnail", kind: "thumbnail", providerAssetId: null, sourceUrl: null, sourceFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/) },
+          { slotKey: "object_story.carousel.0", kind: "image", providerAssetId: null, sourceUrl: null, sourceFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/) },
         ]),
       });
       expect(JSON.stringify(snapshots)).not.toContain("meta-history-token");
       expect(JSON.stringify(snapshots)).not.toContain("signed-secret");
       expect(JSON.stringify(snapshots)).not.toContain("thumb-secret");
       expect(JSON.stringify(snapshots)).not.toContain("?oh=");
+      expect(JSON.stringify(snapshots)).not.toContain("carousel-secret");
+      expect(JSON.stringify(snapshots)).not.toContain("image-secret");
+      expect(JSON.stringify(snapshots)).not.toContain("video-thumb-secret");
+      expect((ad?.payload as { metadata: { creative: { object_story_spec: { link_data: { link: string } } } } }).metadata.creative.object_story_spec.link_data.link)
+        .toBe("https://example.com/buy?utm_source=meta");
       expect((creative?.payload as { metadata: Record<string, unknown> }).metadata).not.toHaveProperty("access_token");
       const adsFields = new URL(seen.find((url) => isMetaAdsEdgeRequest(url)) ?? "").searchParams.get("fields") ?? "";
       expect(adsFields).toContain("asset_feed_spec");
@@ -8650,8 +8663,20 @@ function fakeDb(options: {
   failureStreakGateBlocked?: boolean;
   sourceProvider?: string;
   sourceStatus?: string;
+  sourceAccountExternalId?: string;
 }): InfiniteOsDb {
   let currentSourceStatus = options.sourceStatus ?? "connected";
+  let inferredAccountExternalId: string | null = null;
+  try {
+    const payload = decryptCredentialPayload<Record<string, unknown>>(
+      options.credential.encrypted_payload,
+      process.env.GROWTH_OS_ENCRYPTION_KEY ?? TEST_ENCRYPTION_KEY,
+    );
+    const raw = typeof payload.adAccountId === "string" ? payload.adAccountId : null;
+    inferredAccountExternalId = raw ? (raw.startsWith("act_") ? raw : `act_${raw}`) : null;
+  } catch {
+    // Individual tests may deliberately supply malformed credentials; the source lookup stays null.
+  }
   const record = (sql: string, params?: unknown[]) => {
     options.queries?.push(sql);
     options.queryLog?.push({ sql, params });
@@ -8661,6 +8686,11 @@ function fakeDb(options: {
       record(sql, params);
       if (sql.includes("connection_credentials")) {
         return options.credential as T;
+      }
+      if (sql.includes("account_external_id from sources")) {
+        return {
+          account_external_id: options.sourceAccountExternalId ?? inferredAccountExternalId,
+        } as T;
       }
       if (sql.includes("sync_cursors") && options.cursorValue) {
         return { cursor_value: options.cursorValue } as T;

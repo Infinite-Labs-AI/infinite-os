@@ -2276,6 +2276,9 @@ const metaAdsConnector = createConnector<MetaAdsCredential, MetaAdsSyncRow>({
   async testLive(_db, request, credential, depth, plan) {
     const adAccountId = metaAdsAccountId(credential);
     let accountMetadata: MetaAdsAccountMetadata | null = null;
+    if (depth === "liveness") {
+      await assertMetaAdsSourceAccountBinding(_db, request, adAccountId);
+    }
     if (isMetaAdsMcpTransport(credential)) {
       await metaAdsMcpInsights(credential, {
         adAccountId,
@@ -5189,7 +5192,7 @@ async function writeMetaAdsEntityVersions(
 ): Promise<void> {
   for (let index = 0; index < rows.length; index += 1) {
     const row = rows[index];
-    const payloadHash = hashRecord(row.metadata);
+    const payloadHash = createHash("sha256").update(canonicalMetaAdsJson(row.metadata)).digest("hex");
     await stageMetaAdsSnapshotKey(tx, request, {
       adAccountId: row.adAccountId,
       grain: row.entityType,
@@ -5267,6 +5270,18 @@ async function writeMetaAdsEntityVersions(
       rawIds[index],
     );
   }
+}
+
+function canonicalMetaAdsJson(value: unknown): string {
+  if (value === null || value === undefined) return "null";
+  if (Array.isArray(value)) return `[${value.map((entry) => canonicalMetaAdsJson(entry)).join(",")}]`;
+  if (typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .filter(([, entry]) => entry !== undefined)
+      .sort(([left], [right]) => left.localeCompare(right));
+    return `{${entries.map(([key, entry]) => `${JSON.stringify(key)}:${canonicalMetaAdsJson(entry)}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
 }
 
 async function writeMetaAdsCampaignDimension(
@@ -8721,6 +8736,27 @@ async function metaAdsReadAccountMetadata(
     currency: stringOrNull(body.currency)?.toLowerCase() ?? null,
     timezoneName: stringOrNull(body.timezone_name),
   };
+}
+
+async function assertMetaAdsSourceAccountBinding(
+  db: InfiniteOsDb,
+  request: SyncRequest,
+  credentialAccountId: string,
+): Promise<void> {
+  const source = await db.one<{ account_external_id: string | null }>(
+    `select account_external_id from sources
+      where id = $1 and workspace_id = $2 and provider = 'meta_ads'`,
+    [request.sourceId, request.workspaceId],
+  );
+  const raw = source?.account_external_id?.trim() ?? "";
+  const normalized = /^act_\d+$/.test(raw) ? raw : /^\d+$/.test(raw) ? `act_${raw}` : null;
+  if (!normalized || normalized !== credentialAccountId) {
+    throw new ConnectorError(
+      "source_scope_mismatch",
+      "Meta Ads source account does not match its stored credential",
+      false,
+    );
+  }
 }
 
 // §4d — page through a direct-Graph /insights URL, invoking `onRow` for every row, with the
