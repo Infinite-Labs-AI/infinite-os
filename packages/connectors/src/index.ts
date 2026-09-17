@@ -8834,6 +8834,26 @@ const META_ADS_THROTTLE_BACKOFF_BASE_MS = 1000;
 // NARROWER (month → week) rather than failing the whole backfill.
 const META_ADS_DATA_VOLUME_ERROR_SUBCODE = 1487534;
 
+// §4f — the CUMULATIVE ad-account throttle taxonomy. Meta returns these as HTTP 400 (NOT 429),
+// with the signal ONLY in the JSON error body, so the status branches in the safe fetch never
+// catch them and a code-17 lands in the generic `!response.ok` throw as a fatal-looking error
+// that never backs off (the Chargerless prod incident: code 17 / subcode 2446079 "Ad Account
+// Has Too Many API Calls", clearing on a ~1h timer). Replicated (NOT imported — the engine is
+// open-core and cannot reach 1bu-1) from the canonical taxonomy in 1bu-1
+// src/lib/igc/meta-api/rate-limit.ts (isMetaRateLimitResponse). A throttle can surface on the
+// top-level error.code OR error.error_subcode depending on the endpoint, so both fields are
+// checked against BOTH sets below.
+const META_ADS_RATE_LIMIT_CODES = [17, 4, 32, 80004, 613] as const;
+const META_ADS_RATE_LIMIT_SUBCODES = [
+  2446079, 80000, 80001, 80002, 80003, 80004, 80005, 80006, 80008, 80009, 80014,
+] as const;
+
+// Ceiling for a throttle-informed sleep. When Meta's body carries
+// `estimated_time_to_regain_access` (documented in SECONDS) we honor it as a lower bound but CAP
+// the wait here so a single retry never hangs the run — the caller's own time budget covers a
+// longer wait (the account throttle clears on a ~1h timer, far beyond any in-run backoff).
+const META_ADS_RATE_LIMIT_MAX_SLEEP_MS = 60_000;
+
 // Sleep helper for the throttle backoff. Resolves after `ms` milliseconds. Under vitest the
 // delay is collapsed to a microtask so the retry control-flow is exercised without real
 // wall-clock waits (the retry COUNT/sequence is asserted, not the literal sleep duration).
@@ -8905,6 +8925,75 @@ function isMetaAdsDataVolumeError(error: unknown): boolean {
   return error.message.includes(String(META_ADS_DATA_VOLUME_ERROR_SUBCODE));
 }
 
+// §4f — structured throttle classifier for the safe fetch, mirroring 1bu-1's
+// isMetaRateLimitResponse: an HTTP 429 is always a throttle, and a 400 body's numeric code or
+// error_subcode is matched against BOTH taxonomy sets (a throttle can ride EITHER field). Unlike
+// isMetaAdsDataVolumeError (a textual message sniff for the narrower-retry path) this reads the
+// PARSED code/subcode off the response body, so it catches the keyword-free "Ad Account Has Too
+// Many API Calls" (code 17 / subcode 2446079) that no message heuristic would.
+function isMetaAdsRateLimitResponse(input: {
+  status?: number;
+  code?: number | null;
+  subcode?: number | null;
+}): boolean {
+  if (input.status === 429) return true;
+  const isCode = (n: number | null | undefined): boolean =>
+    typeof n === "number" && (META_ADS_RATE_LIMIT_CODES as readonly number[]).includes(n);
+  const isSubcode = (n: number | null | undefined): boolean =>
+    typeof n === "number" && (META_ADS_RATE_LIMIT_SUBCODES as readonly number[]).includes(n);
+  return isCode(input.code) || isSubcode(input.subcode) || isSubcode(input.code) || isCode(input.subcode);
+}
+
+// §4f — defensively parse a Meta Graph error BODY (a string already read off the response, since a
+// body can be read only once) into its structured throttle signals. The body may not be JSON, may
+// not carry an `error` object, and may omit any field — every path returns nulls rather than
+// throwing (a parse failure must never mask the real HTTP error we are about to raise).
+interface MetaAdsErrorEnvelope {
+  code: number | null;
+  subcode: number | null;
+  // Meta's throttle bodies sometimes hint how long access is gone, documented in SECONDS. Read it
+  // (top-level or nested under error_data) only to INFORM the backoff sleep; it is never required.
+  estimatedRegainSeconds: number | null;
+}
+
+function metaAdsPositiveNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : null;
+}
+
+function parseMetaAdsErrorBody(body: string): MetaAdsErrorEnvelope {
+  const empty: MetaAdsErrorEnvelope = { code: null, subcode: null, estimatedRegainSeconds: null };
+  if (!body || body.trim() === "") return empty;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return empty;
+  }
+  if (!parsed || typeof parsed !== "object") return empty;
+  const error = (parsed as { error?: unknown }).error;
+  if (!error || typeof error !== "object") return empty;
+  const err = error as Record<string, unknown>;
+  const code = typeof err.code === "number" ? err.code : null;
+  const subcode = typeof err.error_subcode === "number" ? err.error_subcode : null;
+  let estimatedRegainSeconds = metaAdsPositiveNumber(err.estimated_time_to_regain_access);
+  if (estimatedRegainSeconds === null && err.error_data && typeof err.error_data === "object") {
+    estimatedRegainSeconds = metaAdsPositiveNumber(
+      (err.error_data as Record<string, unknown>).estimated_time_to_regain_access
+    );
+  }
+  return { code, subcode, estimatedRegainSeconds };
+}
+
+// §4f — the backoff sleep for a classified throttle. Exponential base * 2^attempt (identical to the
+// 429 branch), raised to Meta's estimated-regain hint when present, then CAPPED so a retry never
+// hangs the run (META_ADS_RATE_LIMIT_MAX_SLEEP_MS). The retry COUNT stays bounded by the caller's
+// attempt budget; this only shapes the DELAY.
+function metaAdsRateLimitBackoffMs(attempt: number, estimatedRegainSeconds: number | null): number {
+  const exponential = META_ADS_THROTTLE_BACKOFF_BASE_MS * 2 ** attempt;
+  if (estimatedRegainSeconds === null) return exponential;
+  return Math.min(Math.max(exponential, estimatedRegainSeconds * 1000), META_ADS_RATE_LIMIT_MAX_SLEEP_MS);
+}
+
 // §4b/§4e — a single header-aware GET with throttle backoff-with-retry. Reads the
 // x-fb-ads-insights-throttle header (which fetchJson discards) and, on high acc_id_util_pct,
 // sleeps + retries the SAME request rather than failing loud. Mirrors fetchJson's retryable
@@ -8946,9 +9035,35 @@ async function metaAdsFetchWithThrottleBackoff(
     }
     if (!response.ok) {
       telemetry?.recordRejectedResponse(utilization);
+      // §4f — read the body ONCE (a Response body is single-use) and defensively parse Meta's
+      // structured error. A cumulative ACCOUNT throttle (code 17 / subcode 2446079 "Ad Account Has
+      // Too Many API Calls", plus the BUC 80000-series) arrives as HTTP 400 — NOT 429 — carrying
+      // the signal only in the JSON body, so the 429 branch above never catches it. When it IS a
+      // throttle, back off exactly like the 429 branch (sleep + retry the SAME request up to the
+      // retry budget, then fail loud as retryable provider_rate_limited). Otherwise re-throw the
+      // SAME generic provider_api_error as before, reusing the already-read body for the detail —
+      // NEVER re-reading the consumed body (responseSafeDetail would throw on it).
+      let rawErrorBody = "";
+      try {
+        rawErrorBody = await response.text();
+      } catch {
+        rawErrorBody = "";
+      }
+      const parsedError = parseMetaAdsErrorBody(rawErrorBody);
+      if (isMetaAdsRateLimitResponse({ status: response.status, code: parsedError.code, subcode: parsedError.subcode })) {
+        if (attempt < META_ADS_THROTTLE_MAX_RETRIES) {
+          await metaAdsSleep(metaAdsRateLimitBackoffMs(attempt, parsedError.estimatedRegainSeconds));
+          continue;
+        }
+        throw new ConnectorError(
+          "provider_rate_limited",
+          providerHttpErrorMessage("provider rate limited", response.status, safeUrl, redactedResponseDetail(rawErrorBody)),
+          true
+        );
+      }
       throw new ConnectorError(
         "provider_api_error",
-        providerHttpErrorMessage("provider request failed", response.status, safeUrl, await responseSafeDetail(response)),
+        providerHttpErrorMessage("provider request failed", response.status, safeUrl, redactedResponseDetail(rawErrorBody)),
         true
       );
     }
@@ -10942,10 +11057,15 @@ export async function listMetaEntities(
     if (after) {
       url.searchParams.set("after", after);
     }
-    const response = await fetchJson<MetaListResponse>(url.toString(), {
+    // §4f — route the account-scoped edge read through the ONE header-aware backoff path so a
+    // cumulative code-17 throttle (HTTP 400) backs off instead of failing loud. Mirrors fetchJson's
+    // contract: 401/403 → non-retryable provider_auth_failed, 429/throttle → retryable
+    // provider_rate_limited, other non-2xx → retryable provider_api_error, else .json() the OK body.
+    const httpResponse = await metaAdsFetchWithThrottleBackoff(url.toString(), {
       method: "GET",
-      headers: bearerHeaders(accessToken)
+      headers: { "Content-Type": "application/json", ...bearerHeaders(accessToken) }
     });
+    const response = (await httpResponse.json()) as MetaListResponse;
     rows.push(...(response.data ?? []));
     const nextAfter = metaAdsPagingAfter({ paging: response.paging });
     if (!nextAfter) {
@@ -10977,10 +11097,14 @@ export async function getMetaEntity(
   const accessToken = requireCredential(credential, "accessToken");
   const url = new URL(`https://graph.facebook.com/${metaAdsApiVersion(credential)}/${entityId}`);
   url.searchParams.set("fields", options.fields ?? metaDefaultReadFields(options.entity ?? "campaign"));
-  return fetchJson<Record<string, unknown>>(url.toString(), {
+  // §4f — route the single account-scoped GET through the header-aware backoff path (same reason
+  // as listMetaEntities): a code-17 cumulative throttle arrives as HTTP 400 and must back off, not
+  // fail loud. Preserves fetchJson's retryable taxonomy and .json() typing.
+  const response = await metaAdsFetchWithThrottleBackoff(url.toString(), {
     method: "GET",
-    headers: bearerHeaders(accessToken)
+    headers: { "Content-Type": "application/json", ...bearerHeaders(accessToken) }
   });
+  return (await response.json()) as Record<string, unknown>;
 }
 
 function metaDefaultReadFields(entity: MetaWriteEntity): string {
@@ -11523,6 +11647,15 @@ export async function listMetaAssets(
 
   // 3. Pixels per account. One account's failure must not sink the whole snapshot (it may simply
   //    lack pixel-read on that account), so per-account fetches are best-effort.
+  //    §4f NOTE: this is the ONLY ad-account-scoped read in listMetaAssets, and it is DELIBERATELY
+  //    left on the fetchJson/paginateMetaGraph discovery path (NOT the header-aware backoff). It is
+  //    a one-shot best-effort read on the CONNECT/discovery flow — a code-17 here already degrades
+  //    to an empty pixel list, never a fatal error, and it does not accumulate the way the repeated
+  //    heavy SYNC/insights reads (which the safe fetch guards) do. The rest of listMetaAssets reads
+  //    user/business-scoped edges (/me/*, /{business}/*) that the per-AD-ACCOUNT throttle does not
+  //    govern, and they share paginateMetaGraph — so routing this one read alone would fork that
+  //    helper for no throttle benefit. If pixel discovery ever starts tripping code-17, promote
+  //    paginateMetaGraph (not just this call site) onto metaAdsFetchWithThrottleBackoff.
   for (const account of snapshot.adAccounts) {
     try {
       const pixels = await paginateMetaGraph<MetaPixel>(
@@ -12861,14 +12994,20 @@ async function fetchJson<T>(
   return response.json() as Promise<T>;
 }
 
+// Trim + token-redact an ALREADY-READ response body into a safe error detail (undefined when
+// empty). Extracted so a caller that has already consumed the single-use body (the safe fetch's
+// throttle branch) can build the SAME detail without re-reading the response.
+function redactedResponseDetail(body: string): string | undefined {
+  const trimmed = body.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  return redactProviderErrorDetail(trimmed);
+}
+
 async function responseSafeDetail(response: Response): Promise<string | undefined> {
   try {
-    const body = await response.text();
-    const trimmed = body.trim();
-    if (!trimmed) {
-      return undefined;
-    }
-    return redactProviderErrorDetail(trimmed);
+    return redactedResponseDetail(await response.text());
   } catch {
     return undefined;
   }
