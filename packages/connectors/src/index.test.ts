@@ -7241,6 +7241,74 @@ describe("Meta Ads WRITE helpers", () => {
       );
     });
 
+    it("paginates the /ads edge and returns EVERY ad across pages (never a single limit=500 page)", async () => {
+      // Repro of the customer defect: a single GET with limit=500 + creative{…} field-
+      // expansion is rejected by Meta as too-complex. The fix walks paging.next at a safe
+      // page size (100) and returns the FULL set. Two mocked pages: 100 + 98 = 198 ads.
+      const page1 = Array.from({ length: 100 }, (_, i) => ({ id: `ad_${i}`, name: `Ad ${i}` }));
+      const page2 = Array.from({ length: 98 }, (_, i) => ({ id: `ad_${i + 100}`, name: `Ad ${i + 100}` }));
+      await captureWrites(
+        (capture) => {
+          if (capture.url.includes("after=CURSOR_1")) {
+            // Terminal page: no further cursor → pagination stops.
+            return jsonResponse({ data: page2, paging: {} });
+          }
+          return jsonResponse({
+            data: page1,
+            paging: {
+              cursors: { after: "CURSOR_1" },
+              // A full `next` URL is also present in real responses; the reader must extract
+              // the `after` token rather than follow the token-bearing URL verbatim.
+              next: "https://graph.facebook.com/v25.0/act_1234567890/ads?after=CURSOR_1&access_token=meta-write-token"
+            }
+          });
+        },
+        async (captured) => {
+          // Caller asks for limit=500 (the failing shape); the reader must clamp the page
+          // size to 100 and paginate, NOT send limit=500 in one shot.
+          const rows = await listMetaEntities(metaWriteCredential, "ad", { limit: 500 });
+          expect(rows).toHaveLength(198);
+          expect(rows[0]).toEqual({ id: "ad_0", name: "Ad 0" });
+          expect(rows[197]).toEqual({ id: "ad_197", name: "Ad 197" });
+          // Exactly two GET requests: page one, then the cursor follow.
+          expect(captured).toHaveLength(2);
+          expect(captured[0].method).toBe("GET");
+          expect(captured[0].url).toContain("https://graph.facebook.com/v25.0/act_1234567890/ads");
+          // The complexity fix: the outgoing page size is the safe 100, never the 500 asked.
+          expect(captured[0].url).toContain("limit=100");
+          expect(captured[0].url).not.toContain("limit=500");
+          expect(captured[0].url).not.toContain("after=");
+          // The second request follows the cursor via the `after` token only — the token
+          // stays in the Authorization header, never the URL.
+          expect(captured[1].url).toContain("after=CURSOR_1");
+          expect(captured[1].url).toContain("limit=100");
+          for (const cap of captured) {
+            expect(cap.authorization).toBe("Bearer meta-write-token");
+            expect(cap.url).not.toContain("meta-write-token");
+            expect(cap.url).not.toContain("access_token");
+          }
+        }
+      );
+    });
+
+    it("fails LOUD when the list cursor never terminates (no silent truncation)", async () => {
+      // A cursor that always returns a fresh `after` must throw at the page cap rather than
+      // loop forever or return a truncated set. Mirrors metaAdsReadEdge §4d fail-loud.
+      await captureWrites(
+        () =>
+          jsonResponse({
+            data: [{ id: "ad_x" }],
+            paging: { cursors: { after: "NEVER_ENDING" } }
+          }),
+        async () => {
+          await expect(listMetaEntities(metaWriteCredential, "ad")).rejects.toMatchObject({
+            code: "provider_api_error",
+            retryable: true
+          });
+        }
+      );
+    });
+
     it("gets a single entity by node id with an explicit field set", async () => {
       await captureWrites(
         () => jsonResponse({ id: "c1", name: "Launch", status: "PAUSED" }),
