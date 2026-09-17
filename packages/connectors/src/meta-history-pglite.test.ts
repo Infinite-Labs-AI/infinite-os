@@ -717,4 +717,120 @@ describe("Meta Ads history CLOSE against real PGlite", () => {
     );
     expect(sourceRows).toEqual([{ status: "connected", consecutive_sync_failures: 0, last_counted_sync_failure_at: null }]);
   }, 120_000);
+
+  // §5 Test A (durable Meta history sync) — proves the finer-window CLOSE is composable and
+  // all-or-nothing, and that a graceful soft-time-budget interruption leaves a RESUMABLE gap the
+  // next run closes (never a stranded `syncing`).
+  it("closes a 7-day window and composes an adjacent window without double-counting", async () => {
+    const workspaceId = `ws_meta_compose_${randomUUID()}`;
+    const sourceId = `src_meta_compose_${randomUUID()}`;
+    await seedSource(workspaceId, sourceId);
+
+    // (A.1) A 7-day window [D1,D7] closes: coverage = 7 days × 3 grains, source connected, cursor at D7.
+    await withMetaFetch(fixture("2026-10-01"), () =>
+      connectorFor("meta_ads").sync(db, syncRequest(workspaceId, sourceId, "2026-10-01", "2026-10-07"))
+    );
+    const afterFirst = await db.query<{ total: number; days: number; grains: number; lo: string; hi: string }>(
+      `select count(*)::int as total, count(distinct occurred_on)::int as days,
+              count(distinct grain)::int as grains, min(occurred_on)::text as lo, max(occurred_on)::text as hi
+         from meta_ads_coverage_daily where source_id = $1`,
+      [sourceId],
+    );
+    expect(afterFirst).toEqual([{ total: 21, days: 7, grains: 3, lo: "2026-10-01", hi: "2026-10-07" }]);
+    expect(await db.query<{ status: string }>("select status from sources where id = $1", [sourceId]))
+      .toEqual([{ status: "connected" }]);
+    expect(await db.query<{ cursor_value: string }>(
+      "select cursor_value from sync_cursors where source_id = $1 and cursor_key = 'meta_ads_campaign_daily'",
+      [sourceId],
+    )).toEqual([{ cursor_value: "2026-10-07" }]);
+
+    // (A.2) The adjacent window [D8,D14] composes: coverage now spans [D1,D14] with NO double count
+    // in the *_daily tables (the fixture emits one row per grain per window's D1, so exactly two
+    // day-rows per entity survive — one at 2026-10-01, one at 2026-10-08 — not four).
+    await withMetaFetch(fixture("2026-10-08"), () =>
+      connectorFor("meta_ads").sync(db, syncRequest(workspaceId, sourceId, "2026-10-08", "2026-10-14"))
+    );
+    const afterSecond = await db.query<{ total: number; days: number; grains: number; lo: string; hi: string }>(
+      `select count(*)::int as total, count(distinct occurred_on)::int as days,
+              count(distinct grain)::int as grains, min(occurred_on)::text as lo, max(occurred_on)::text as hi
+         from meta_ads_coverage_daily where source_id = $1`,
+      [sourceId],
+    );
+    expect(afterSecond).toEqual([{ total: 42, days: 14, grains: 3, lo: "2026-10-01", hi: "2026-10-14" }]);
+    // No double-count: one campaign/adset/ad day-row per populated day (2026-10-01 and 2026-10-08).
+    expect(await db.query<{ occurred_on: string }>(
+      "select occurred_on::text as occurred_on from meta_ads_campaign_daily where source_id = $1 and campaign_id = 'c1' order by occurred_on",
+      [sourceId],
+    )).toEqual([{ occurred_on: "2026-10-01" }, { occurred_on: "2026-10-08" }]);
+    expect(await db.query<{ occurred_on: string }>(
+      "select occurred_on::text as occurred_on from meta_ads_ad_daily where source_id = $1 and ad_id = 'a1' order by occurred_on",
+      [sourceId],
+    )).toEqual([{ occurred_on: "2026-10-01" }, { occurred_on: "2026-10-08" }]);
+    expect(await db.query<{ occurred_on: string }>(
+      "select occurred_on::text as occurred_on from meta_ads_adset_daily where source_id = $1 and adset_id = 's1' order by occurred_on",
+      [sourceId],
+    )).toEqual([{ occurred_on: "2026-10-01" }, { occurred_on: "2026-10-08" }]);
+    expect(await db.query<{ cursor_value: string }>(
+      "select cursor_value from sync_cursors where source_id = $1 and cursor_key = 'meta_ads_campaign_daily'",
+      [sourceId],
+    )).toEqual([{ cursor_value: "2026-10-14" }]);
+  }, 120_000);
+
+  it("a soft-time-budget interruption leaves a resumable gap the next run CLOSEs, never stranded syncing", async () => {
+    const workspaceId = `ws_meta_deadline_${randomUUID()}`;
+    const sourceId = `src_meta_deadline_${randomUUID()}`;
+    await seedSource(workspaceId, sourceId);
+
+    // A wall-clock deadline already in the past → the FIRST Meta fetch's telemetry chokepoint throws
+    // MetaAdsTimeBudgetError, INSIDE extract, before any LOAD or CLOSE. This is the graceful stop that
+    // replaces a hosted maxDuration hard-kill: it flows through the connector's catch → recordSyncFailure.
+    const interrupted = {
+      ...syncRequest(workspaceId, sourceId, "2026-11-01", "2026-11-07"),
+      softDeadlineAtMs: Date.now() - 1,
+    };
+    await expect(withMetaFetch(fixture("2026-11-01"), () =>
+      connectorFor("meta_ads").sync(db, interrupted)
+    )).rejects.toMatchObject({ code: "provider_time_budget_exhausted" });
+
+    // ZERO coverage for the window: the CLOSE (the sole coverage writer) never ran.
+    expect(await db.query("select occurred_on from meta_ads_coverage_daily where source_id = $1", [sourceId])).toEqual([]);
+    // The run is FAILED and the source is NOT left `syncing` — the strand that a hard kill produces is
+    // gone. A single retryable time-budget stop is a PROPORTIONATE transient: the source is restored to
+    // `connected` (streak bumped) and stays in scheduler rotation, so the next tick can retry it.
+    expect(await db.query<{ status: string }>("select status from sync_runs where id = $1", [interrupted.syncRunId]))
+      .toEqual([{ status: "failed" }]);
+    expect(await db.query<{ status: string; consecutive_sync_failures: number }>(
+      "select status, consecutive_sync_failures from sources where id = $1",
+      [sourceId],
+    )).toEqual([{ status: "connected", consecutive_sync_failures: 1 }]);
+    expect(await db.query<{ error_code: string; retryable: boolean }>(
+      "select error_code, retryable from sync_errors where sync_run_id = $1",
+      [interrupted.syncRunId],
+    )).toEqual([{ error_code: "provider_time_budget_exhausted", retryable: true }]);
+    // The cursor was NOT advanced to the window end. (recordSyncFailure seeds a placeholder cursor at
+    // plan.cursorStart with `on conflict do nothing`, so a row may exist — but never at D7.)
+    expect((await db.query<{ cursor_value: string }>(
+      "select cursor_value from sync_cursors where source_id = $1 and cursor_key = 'meta_ads_campaign_daily'",
+      [sourceId],
+    )).every((row) => row.cursor_value !== "2026-11-07")).toBe(true);
+
+    // Re-run the SAME window with no deadline → the gap closes fully (7 days × 3 grains), the source
+    // reconnects with a reset streak, and the cursor advances. "interrupted → gap → next run CLOSEs".
+    await withMetaFetch(fixture("2026-11-01"), () =>
+      connectorFor("meta_ads").sync(db, syncRequest(workspaceId, sourceId, "2026-11-01", "2026-11-07"))
+    );
+    expect(await db.query<{ total: number; days: number; grains: number }>(
+      `select count(*)::int as total, count(distinct occurred_on)::int as days, count(distinct grain)::int as grains
+         from meta_ads_coverage_daily where source_id = $1`,
+      [sourceId],
+    )).toEqual([{ total: 21, days: 7, grains: 3 }]);
+    expect(await db.query<{ status: string; consecutive_sync_failures: number }>(
+      "select status, consecutive_sync_failures from sources where id = $1",
+      [sourceId],
+    )).toEqual([{ status: "connected", consecutive_sync_failures: 0 }]);
+    expect(await db.query<{ cursor_value: string }>(
+      "select cursor_value from sync_cursors where source_id = $1 and cursor_key = 'meta_ads_campaign_daily'",
+      [sourceId],
+    )).toEqual([{ cursor_value: "2026-11-07" }]);
+  }, 120_000);
 });

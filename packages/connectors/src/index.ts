@@ -95,6 +95,13 @@ export interface SyncRequest {
   // behavior is identical. Honored at the single planning chokepoint (defaultPlan).
   windowSince?: string;
   windowUntil?: string;
+  // Cloud-default graceful soft-time budget: an optional wall-clock deadline (ms since epoch) for
+  // the Meta extract. When set, the Meta telemetry throws a RETRYABLE MetaAdsTimeBudgetError at the
+  // first fetch attempted at/after it, so a long-running hosted backfill fails through
+  // recordSyncFailure (source not left `syncing`) BEFORE a Trigger maxDuration hard-kill can strand
+  // it mid-CLOSE. It is a bare number owned by the caller — the engine imports nothing cloud/Supabase
+  // to honor it. UNSET on desktop → today's behavior is identical.
+  softDeadlineAtMs?: number;
 }
 
 export interface SyncPlan {
@@ -2354,6 +2361,8 @@ const metaAdsConnector = createConnector<MetaAdsCredential, MetaAdsSyncRow>({
     plan.metaAdsRequestTelemetry = new MetaAdsRequestTelemetry(
       request.metaAdsRequestBudget ?? META_ADS_DEFAULT_REQUEST_BUDGET,
       (snapshot) => persistMetaAdsRequestReservation(db, request, snapshot),
+      // Optional graceful soft-time budget (cloud only). Desktop omits it → unchanged behaviour.
+      request.softDeadlineAtMs,
     );
     return plan;
   },
@@ -2424,9 +2433,19 @@ const metaAdsConnector = createConnector<MetaAdsCredential, MetaAdsSyncRow>({
     const campaignNodes: MetaAdsEdgeNode[] = [];
     const adsetNodes: MetaAdsEdgeNode[] = [];
     const adNodes: MetaAdsEdgeNode[] = [];
-    const adsetDims = await metaAdsReadAdsetDims(credential, telemetry, adsetNodes);
-    const campaignStatus = await metaAdsReadCampaignStatus(credential, telemetry, campaignNodes);
-    const adDims = await metaAdsReadAdAdims(credential, telemetry, adNodes);
+    // §4 — the three account-level edge-dimension reads are mutually independent (distinct edges,
+    // each fills its OWN *Nodes sink and returns its OWN map; no read consumes another's output), so
+    // they run concurrently with a FIXED ceiling of 3 (one paginated loop per edge; each loop stays
+    // serial internally). This is the ONLY parallelized step: the insights passes below and the ad
+    // pass's month chunks stay strictly serial (budget-heavy, rate-limit-sensitive) and therefore run
+    // AFTER this block, preserving account → campaign → adset → ad dependency order. The telemetry's
+    // requestCount is mutated without a lock, so 3 concurrent beforeRequest calls can overshoot the
+    // budget by at most 2 — inside the margin and far below any throttle.
+    const [adsetDims, campaignStatus, adDims] = await Promise.all([
+      metaAdsReadAdsetDims(credential, telemetry, adsetNodes),
+      metaAdsReadCampaignStatus(credential, telemetry, campaignNodes),
+      metaAdsReadAdAdims(credential, telemetry, adNodes),
+    ]);
 
     const rows: MetaAdsSyncRow[] = [];
     const requestedGrains: MetaAdsHistoryGrain[] = request.metaAdsInsightsLevel
@@ -5271,6 +5290,128 @@ function metaAdsAdDimensionRows(rows: MetaAdsAdDailyRow[]): Map<string, MetaAdsA
   return dims;
 }
 
+// Conservative bound-param ceiling for the batched Meta LOAD upserts. Postgres/PGlite cap a single
+// statement at 65535 bound parameters; staying at 60000 leaves headroom while keeping ~2800 campaign
+// rows (21 params) per statement — well above one ≤7-day window's volume, so the LOAD is one round
+// trip per table per chunk instead of the §2 per-row loop.
+const META_ADS_BULK_PARAM_CEILING = 60_000;
+
+// Multi-row upsert helper for the Meta LOAD writers. Emits ONE
+// `insert ... values (...),(...) on conflict ...` per chunk instead of a per-row remote round trip
+// (the ~9-min LOAD in §2), with BYTE-IDENTICAL semantics: same natural key, same conflict target,
+// same do-update column list. Rows sharing a conflict target are de-duped BEFORE the statement — a
+// multi-row `do update` throws "cannot affect row a second time" on a duplicate target, and the old
+// sequential loop resolved a duplicate by letting the LAST write win (facts) or the FIRST insert
+// stand (do-nothing / constant updates); `keepLast` selects the matching survivor. Chunked under the
+// bound-param ceiling. `paramsOf` may return the SAME value more than once when the SQL reuses a
+// placeholder — `rowValuesSql` owns the tuple layout, so reused/positional/literal columns work.
+async function bulkUpsertRows<T>(
+  tx: InfiniteOsDb,
+  rows: readonly T[],
+  opts: {
+    conflictKey: (row: T) => string;
+    keepLast: boolean;
+    paramsPerRow: number;
+    rowValuesSql: (baseIndex: number) => string;
+    paramsOf: (row: T) => unknown[];
+    buildSql: (valuesSql: string) => string;
+  },
+): Promise<void> {
+  if (rows.length === 0) return;
+  const deduped = new Map<string, T>();
+  for (const row of rows) {
+    const key = opts.conflictKey(row);
+    if (opts.keepLast || !deduped.has(key)) deduped.set(key, row);
+  }
+  const unique = [...deduped.values()];
+  const rowsPerChunk = Math.max(1, Math.floor(META_ADS_BULK_PARAM_CEILING / opts.paramsPerRow));
+  for (let offset = 0; offset < unique.length; offset += rowsPerChunk) {
+    const chunk = unique.slice(offset, offset + rowsPerChunk);
+    const valuesSql = chunk.map((_, i) => opts.rowValuesSql(i * opts.paramsPerRow)).join(",");
+    const params: unknown[] = [];
+    for (const row of chunk) params.push(...opts.paramsOf(row));
+    await tx.query(opts.buildSql(valuesSql), params);
+  }
+}
+
+interface MetaAdsSnapshotKeyStage {
+  adAccountId: string;
+  grain: MetaAdsEntityType;
+  occurredOn: string;
+  entityId: string;
+  keyKind: "delivery" | "conversion" | "entity";
+  resultType?: string;
+}
+
+// Batched form of stageMetaAdsSnapshotKey — same INSERT, same
+// `on conflict (sync_run_id, grain, occurred_on, entity_id, key_kind, result_type) do nothing`, one
+// statement per chunk. Duplicate keys collapse to the first (do-nothing already ignores a repeat).
+async function stageMetaAdsSnapshotKeys(
+  tx: InfiniteOsDb,
+  request: SyncRequest,
+  keys: readonly MetaAdsSnapshotKeyStage[],
+): Promise<void> {
+  await bulkUpsertRows(tx, keys, {
+    conflictKey: (key) => `${key.grain}${key.occurredOn}${key.entityId}${key.keyKind}${key.resultType ?? ""}`,
+    keepLast: false,
+    paramsPerRow: 9,
+    rowValuesSql: (b) => `($${b + 1},$${b + 2},$${b + 3},$${b + 4},$${b + 5},$${b + 6}::date,$${b + 7},$${b + 8},$${b + 9})`,
+    paramsOf: (key) => [
+      request.syncRunId,
+      request.workspaceId,
+      request.sourceId,
+      key.adAccountId,
+      key.grain,
+      key.occurredOn,
+      key.entityId,
+      key.keyKind,
+      key.resultType ?? "",
+    ],
+    buildSql: (valuesSql) =>
+      `insert into meta_ads_snapshot_keys (
+         sync_run_id, workspace_id, source_id, ad_account_id, grain, occurred_on,
+         entity_id, key_kind, result_type
+       ) values ${valuesSql}
+       on conflict (sync_run_id, grain, occurred_on, entity_id, key_kind, result_type) do nothing`,
+  });
+}
+
+// Batched form of writeLineage — same INSERT, same
+// `on conflict (workspace_id, provider_table, provider_row_id, raw_record_id)` target and constant
+// `normalization_version = 'live-v1'`. All entries share one provider_table; each carries its own
+// provider_row_id + raw_record_id.
+async function writeLineageRows(
+  tx: InfiniteOsDb,
+  request: SyncRequest,
+  providerTable: string,
+  entries: ReadonlyArray<{ providerRowId: string; rawRecordId: string }>,
+): Promise<void> {
+  await bulkUpsertRows(tx, entries, {
+    conflictKey: (entry) => `${entry.providerRowId}${entry.rawRecordId}`,
+    keepLast: false,
+    paramsPerRow: 6,
+    // Positions 6 and 7 reuse $3 (provider_table) and $4 (provider_row_id); normalization_version is
+    // the literal 'live-v1' — mirroring the per-row writeLineage tuple exactly.
+    rowValuesSql: (b) => `($${b + 1},$${b + 2},$${b + 3},$${b + 4},$${b + 5},$${b + 3},$${b + 4},$${b + 6},'live-v1')`,
+    paramsOf: (entry) => [
+      `lineage_${randomUUID()}`,
+      request.workspaceId,
+      providerTable,
+      entry.providerRowId,
+      request.provider,
+      entry.rawRecordId,
+    ],
+    buildSql: (valuesSql) =>
+      `insert into record_lineage (
+         id, workspace_id, canonical_table, canonical_id, provider,
+         provider_table, provider_row_id, raw_record_id, normalization_version
+       )
+       values ${valuesSql}
+       on conflict (workspace_id, provider_table, provider_row_id, raw_record_id)
+       do update set normalization_version = excluded.normalization_version`,
+  });
+}
+
 async function stageMetaAdsSnapshotKey(
   tx: InfiniteOsDb,
   request: SyncRequest,
@@ -5412,14 +5553,31 @@ async function writeMetaAdsCampaignDimension(
   // A raw_record_id for provenance (any row from this run; the dimension is a fold, not a
   // single source row). Use the first row's raw id when present.
   const rawRecordId = rawIds[0] ?? null;
-  for (const dim of metaAdsDimensionRows(rows).values()) {
-    await tx.query(
-      `
-        insert into meta_ads_campaigns (
+  const dims = [...metaAdsDimensionRows(rows).values()];
+  await bulkUpsertRows(tx, dims, {
+    conflictKey: (dim) => `${dim.adAccountId}${dim.campaignId}`,
+    keepLast: true,
+    paramsPerRow: 11,
+    rowValuesSql: (b) => `($${b + 1},$${b + 2},$${b + 3},$${b + 4},$${b + 5},$${b + 6},$${b + 7},$${b + 8},$${b + 9},$${b + 10},$${b + 11})`,
+    paramsOf: (dim) => [
+      `madm_${randomUUID()}`,
+      request.workspaceId,
+      request.sourceId,
+      rawRecordId,
+      dim.adAccountId,
+      dim.campaignId,
+      dim.name,
+      dim.objective,
+      dim.currency,
+      dim.effectiveStatus,
+      dim.configuredStatus,
+    ],
+    buildSql: (valuesSql) =>
+      `insert into meta_ads_campaigns (
           id, workspace_id, source_id, raw_record_id, ad_account_id, campaign_id,
           name, objective, currency, effective_status, configured_status
         )
-        values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+        values ${valuesSql}
         on conflict (source_id, ad_account_id, campaign_id)
         do update set
           raw_record_id = excluded.raw_record_id,
@@ -5432,27 +5590,17 @@ async function writeMetaAdsCampaignDimension(
           -- status null) never erases a previously-read status.
           effective_status = coalesce(excluded.effective_status, meta_ads_campaigns.effective_status),
           configured_status = coalesce(excluded.configured_status, meta_ads_campaigns.configured_status),
-          updated_at = now()
-      `,
-      [
-        `madm_${randomUUID()}`,
-        request.workspaceId,
-        request.sourceId,
-        rawRecordId,
-        dim.adAccountId,
-        dim.campaignId,
-        dim.name,
-        dim.objective,
-        dim.currency,
-        dim.effectiveStatus,
-        dim.configuredStatus
-      ]
+          updated_at = now()`,
+  });
+  // Lineage carries an FK to raw_records, so only write it when a real raw id exists for
+  // this run (the dimension is a fold of the day rows; a fabricated id would break the FK).
+  if (rawRecordId) {
+    await writeLineageRows(
+      tx,
+      request,
+      "meta_ads_campaigns",
+      dims.map((dim) => ({ providerRowId: `${dim.adAccountId}:${dim.campaignId}`, rawRecordId })),
     );
-    // Lineage carries an FK to raw_records, so only write it when a real raw id exists for
-    // this run (the dimension is a fold of the day rows; a fabricated id would break the FK).
-    if (rawRecordId) {
-      await writeLineage(tx, request, "meta_ads_campaigns", `${dim.adAccountId}:${dim.campaignId}`, rawRecordId);
-    }
   }
 }
 
@@ -5506,22 +5654,48 @@ async function writeMetaAdsCampaignTruth(
 ): Promise<void> {
   // §2.1 — populate the campaign dimension first so the §5 join views have currency/objective.
   await writeMetaAdsCampaignDimension(tx, request, rows, rawIds);
-  for (let index = 0; index < rows.length; index += 1) {
-    const row = rows[index];
-    // §4c restatement — the unique key (source_id, ad_account_id, campaign_id,
-    // occurred_on) makes this last-write-wins. Re-syncing the rolling 28-day window
-    // overwrites spend/clicks/conversion columns/actions_raw so late-attributed
-    // conversions restate history without drift.
-    await tx.query(
-      `
-        insert into meta_ads_campaign_daily (
+  // §4c restatement — the unique key (source_id, ad_account_id, campaign_id, occurred_on) makes this
+  // last-write-wins. Re-syncing the rolling window overwrites spend/clicks/conversion columns/
+  // actions_raw so late-attributed conversions restate history without drift. Batched into one
+  // multi-row upsert per chunk (was a per-row remote round trip, §2); `keepLast` keeps the sequential
+  // loop's last-write-wins collapse for any duplicate natural key in the batch.
+  const items = rows.map((row, index) => ({ row, rawId: rawIds[index] }));
+  await bulkUpsertRows(tx, items, {
+    conflictKey: ({ row }) => `${row.adAccountId}${row.campaignId}${row.occurredOn}`,
+    keepLast: true,
+    paramsPerRow: 21,
+    rowValuesSql: (b) =>
+      `($${b + 1},$${b + 2},$${b + 3},$${b + 4},$${b + 5},$${b + 6},$${b + 7},$${b + 8},$${b + 9},$${b + 10},$${b + 11},$${b + 12},$${b + 13},$${b + 14},$${b + 15},$${b + 16},$${b + 17},$${b + 18},$${b + 19},$${b + 20}::jsonb,$${b + 21})`,
+    paramsOf: ({ row, rawId }) => [
+      `mad_${randomUUID()}`,
+      request.workspaceId,
+      request.sourceId,
+      rawId,
+      row.adAccountId,
+      row.campaignId,
+      row.campaignName,
+      row.occurredOn,
+      row.spend,
+      row.clicks,
+      row.inlineLinkClicks,
+      row.landingPageViews,
+      row.impressions,
+      row.reach,
+      row.cpm,
+      row.cpc,
+      row.ctr,
+      row.currency,
+      row.attributionSetting,
+      JSON.stringify(row.actionsRaw ?? {}),
+      row.apiVersion,
+    ],
+    buildSql: (valuesSql) =>
+      `insert into meta_ads_campaign_daily (
           id, workspace_id, source_id, raw_record_id, ad_account_id, campaign_id, campaign_name,
           occurred_on, spend, clicks, inline_link_clicks, landing_page_views, impressions, reach,
           cpm, cpc, ctr, currency, attribution_setting, actions_raw, api_version
         )
-        values (
-          $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20::jsonb,$21
-        )
+        values ${valuesSql}
         on conflict (source_id, ad_account_id, campaign_id, occurred_on)
         do update set
           raw_record_id = excluded.raw_record_id,
@@ -5539,48 +5713,20 @@ async function writeMetaAdsCampaignTruth(
           attribution_setting = excluded.attribution_setting,
           actions_raw = excluded.actions_raw,
           api_version = excluded.api_version,
-          updated_at = now()
-      `,
-      [
-        `mad_${randomUUID()}`,
-        request.workspaceId,
-        request.sourceId,
-        rawIds[index],
-        row.adAccountId,
-        row.campaignId,
-        row.campaignName,
-        row.occurredOn,
-        row.spend,
-        row.clicks,
-        row.inlineLinkClicks,
-        row.landingPageViews,
-        row.impressions,
-        row.reach,
-        row.cpm,
-        row.cpc,
-        row.ctr,
-        row.currency,
-        row.attributionSetting,
-        JSON.stringify(row.actionsRaw ?? {}),
-        row.apiVersion
-      ]
-    );
-    await stageMetaAdsSnapshotKey(tx, request, {
-      adAccountId: row.adAccountId,
-      grain: "campaign",
-      occurredOn: row.occurredOn,
-      entityId: row.campaignId,
-      keyKind: "delivery",
-    });
-    await writeLineage(
-      tx,
-      request,
-      "meta_ads_campaign_daily",
-      `${row.adAccountId}:${row.campaignId}:${row.occurredOn}`,
-      rawIds[index]
-    );
-    await writeMetaAdsConversionRows(tx, request, row, rawIds[index]);
-  }
+          updated_at = now()`,
+  });
+  await stageMetaAdsSnapshotKeys(tx, request, rows.map((row) => ({
+    adAccountId: row.adAccountId,
+    grain: "campaign",
+    occurredOn: row.occurredOn,
+    entityId: row.campaignId,
+    keyKind: "delivery",
+  })));
+  await writeLineageRows(tx, request, "meta_ads_campaign_daily", items.map(({ row, rawId }) => ({
+    providerRowId: `${row.adAccountId}:${row.campaignId}:${row.occurredOn}`,
+    rawRecordId: rawId,
+  })));
+  await writeMetaAdsConversionRows(tx, request, items);
 }
 
 // §2.3 / §4c — fan the derived child conversion rows into
@@ -5591,18 +5737,38 @@ async function writeMetaAdsCampaignTruth(
 async function writeMetaAdsConversionRows(
   tx: InfiniteOsDb,
   request: SyncRequest,
-  row: MetaAdsCampaignDailyRow,
-  rawRecordId: string
+  items: ReadonlyArray<{ row: MetaAdsCampaignDailyRow; rawId: string }>,
 ): Promise<void> {
-  for (const conversion of row.conversions) {
-    await tx.query(
-      `
-        insert into meta_ads_campaign_conversions_daily (
+  const flat = items.flatMap(({ row, rawId }) =>
+    row.conversions.map((conversion) => ({ row, rawId, conversion })));
+  await bulkUpsertRows(tx, flat, {
+    conflictKey: ({ row, conversion }) =>
+      `${row.adAccountId}${row.campaignId}${row.occurredOn}${conversion.resultType}`,
+    keepLast: true,
+    paramsPerRow: 13,
+    rowValuesSql: (b) => `($${b + 1},$${b + 2},$${b + 3},$${b + 4},$${b + 5},$${b + 6},$${b + 7},$${b + 8},$${b + 9},$${b + 10},$${b + 11},$${b + 12},$${b + 13})`,
+    paramsOf: ({ row, rawId, conversion }) => [
+      `madc_${randomUUID()}`,
+      request.workspaceId,
+      request.sourceId,
+      rawId,
+      row.adAccountId,
+      row.campaignId,
+      row.occurredOn,
+      conversion.resultType,
+      conversion.results,
+      conversion.conversionValue,
+      conversion.attributionSetting,
+      conversion.isPrimary,
+      conversion.resultsSource,
+    ],
+    buildSql: (valuesSql) =>
+      `insert into meta_ads_campaign_conversions_daily (
           id, workspace_id, source_id, raw_record_id, ad_account_id, campaign_id,
           occurred_on, result_type, results, conversion_value, attribution_setting,
           is_primary, results_source
         )
-        values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+        values ${valuesSql}
         on conflict (source_id, ad_account_id, campaign_id, occurred_on, result_type)
         do update set
           raw_record_id = excluded.raw_record_id,
@@ -5611,40 +5777,20 @@ async function writeMetaAdsConversionRows(
           attribution_setting = excluded.attribution_setting,
           is_primary = excluded.is_primary,
           results_source = excluded.results_source,
-          updated_at = now()
-      `,
-      [
-        `madc_${randomUUID()}`,
-        request.workspaceId,
-        request.sourceId,
-        rawRecordId,
-        row.adAccountId,
-        row.campaignId,
-        row.occurredOn,
-        conversion.resultType,
-        conversion.results,
-        conversion.conversionValue,
-        conversion.attributionSetting,
-        conversion.isPrimary,
-        conversion.resultsSource
-      ]
-    );
-    await stageMetaAdsSnapshotKey(tx, request, {
-      adAccountId: row.adAccountId,
-      grain: "campaign",
-      occurredOn: row.occurredOn,
-      entityId: row.campaignId,
-      keyKind: "conversion",
-      resultType: conversion.resultType,
-    });
-    await writeLineage(
-      tx,
-      request,
-      "meta_ads_campaign_conversions_daily",
-      `${row.adAccountId}:${row.campaignId}:${row.occurredOn}:${conversion.resultType}`,
-      rawRecordId
-    );
-  }
+          updated_at = now()`,
+  });
+  await stageMetaAdsSnapshotKeys(tx, request, flat.map(({ row, conversion }) => ({
+    adAccountId: row.adAccountId,
+    grain: "campaign",
+    occurredOn: row.occurredOn,
+    entityId: row.campaignId,
+    keyKind: "conversion",
+    resultType: conversion.resultType,
+  })));
+  await writeLineageRows(tx, request, "meta_ads_campaign_conversions_daily", flat.map(({ row, rawId, conversion }) => ({
+    providerRowId: `${row.adAccountId}:${row.campaignId}:${row.occurredOn}:${conversion.resultType}`,
+    rawRecordId: rawId,
+  })));
 }
 
 // ──────────────────────────────────────────────────────────────────────────────────
@@ -5661,14 +5807,33 @@ async function writeMetaAdsAdsetDimension(
   rawIds: string[]
 ): Promise<void> {
   const rawRecordId = rawIds[0] ?? null;
-  for (const dim of metaAdsAdsetDimensionRows(rows).values()) {
-    await tx.query(
-      `
-        insert into meta_ads_adsets (
+  const dims = [...metaAdsAdsetDimensionRows(rows).values()];
+  await bulkUpsertRows(tx, dims, {
+    conflictKey: (dim) => `${dim.adAccountId}${dim.adsetId}`,
+    keepLast: true,
+    paramsPerRow: 13,
+    rowValuesSql: (b) => `($${b + 1},$${b + 2},$${b + 3},$${b + 4},$${b + 5},$${b + 6},$${b + 7},$${b + 8},$${b + 9},$${b + 10},$${b + 11},$${b + 12},$${b + 13})`,
+    paramsOf: (dim) => [
+      `mada_${randomUUID()}`,
+      request.workspaceId,
+      request.sourceId,
+      rawRecordId,
+      dim.adAccountId,
+      dim.campaignId,
+      dim.adsetId,
+      dim.name,
+      dim.optimizationGoal,
+      dim.billingEvent,
+      dim.effectiveStatus,
+      dim.configuredStatus,
+      dim.currency,
+    ],
+    buildSql: (valuesSql) =>
+      `insert into meta_ads_adsets (
           id, workspace_id, source_id, raw_record_id, ad_account_id, campaign_id, adset_id,
           name, optimization_goal, billing_event, effective_status, configured_status, currency
         )
-        values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+        values ${valuesSql}
         on conflict (source_id, ad_account_id, adset_id)
         do update set
           raw_record_id = excluded.raw_record_id,
@@ -5682,27 +5847,15 @@ async function writeMetaAdsAdsetDimension(
           effective_status = coalesce(excluded.effective_status, meta_ads_adsets.effective_status),
           configured_status = coalesce(excluded.configured_status, meta_ads_adsets.configured_status),
           currency = coalesce(excluded.currency, meta_ads_adsets.currency),
-          updated_at = now()
-      `,
-      [
-        `mada_${randomUUID()}`,
-        request.workspaceId,
-        request.sourceId,
-        rawRecordId,
-        dim.adAccountId,
-        dim.campaignId,
-        dim.adsetId,
-        dim.name,
-        dim.optimizationGoal,
-        dim.billingEvent,
-        dim.effectiveStatus,
-        dim.configuredStatus,
-        dim.currency
-      ]
+          updated_at = now()`,
+  });
+  if (rawRecordId) {
+    await writeLineageRows(
+      tx,
+      request,
+      "meta_ads_adsets",
+      dims.map((dim) => ({ providerRowId: `${dim.adAccountId}:${dim.adsetId}`, rawRecordId })),
     );
-    if (rawRecordId) {
-      await writeLineage(tx, request, "meta_ads_adsets", `${dim.adAccountId}:${dim.adsetId}`, rawRecordId);
-    }
   }
 }
 
@@ -5714,21 +5867,47 @@ async function writeMetaAdsAdsetTruth(
 ): Promise<void> {
   // §7a — upsert the adset dim BEFORE the adset facts (so status/optimization_goal exist).
   await writeMetaAdsAdsetDimension(tx, request, rows, rawIds);
-  for (let index = 0; index < rows.length; index += 1) {
-    const row = rows[index];
-    // §4c restatement — unique key (source_id, ad_account_id, adset_id, occurred_on) is
-    // RE-KEYED on adset_id, so each adset's day row is distinct (no campaign-keyed collapse)
-    // and a re-sync of the rolling window is last-write-wins.
-    await tx.query(
-      `
-        insert into meta_ads_adset_daily (
+  // §4c restatement — unique key (source_id, ad_account_id, adset_id, occurred_on) is RE-KEYED on
+  // adset_id, so each adset's day row is distinct (no campaign-keyed collapse) and a re-sync of the
+  // rolling window is last-write-wins. Batched into one multi-row upsert per chunk (§2).
+  const items = rows.map((row, index) => ({ row, rawId: rawIds[index] }));
+  await bulkUpsertRows(tx, items, {
+    conflictKey: ({ row }) => `${row.adAccountId}${row.adsetId}${row.occurredOn}`,
+    keepLast: true,
+    paramsPerRow: 22,
+    rowValuesSql: (b) =>
+      `($${b + 1},$${b + 2},$${b + 3},$${b + 4},$${b + 5},$${b + 6},$${b + 7},$${b + 8},$${b + 9},$${b + 10},$${b + 11},$${b + 12},$${b + 13},$${b + 14},$${b + 15},$${b + 16},$${b + 17},$${b + 18},$${b + 19},$${b + 20},$${b + 21}::jsonb,$${b + 22})`,
+    paramsOf: ({ row, rawId }) => [
+      `madd_${randomUUID()}`,
+      request.workspaceId,
+      request.sourceId,
+      rawId,
+      row.adAccountId,
+      row.campaignId,
+      row.adsetId,
+      row.adsetName,
+      row.occurredOn,
+      row.spend,
+      row.clicks,
+      row.inlineLinkClicks,
+      row.landingPageViews,
+      row.impressions,
+      row.reach,
+      row.cpm,
+      row.cpc,
+      row.ctr,
+      row.currency,
+      row.attributionSetting,
+      JSON.stringify(row.actionsRaw ?? {}),
+      row.apiVersion,
+    ],
+    buildSql: (valuesSql) =>
+      `insert into meta_ads_adset_daily (
           id, workspace_id, source_id, raw_record_id, ad_account_id, campaign_id, adset_id,
           adset_name, occurred_on, spend, clicks, inline_link_clicks, landing_page_views,
           impressions, reach, cpm, cpc, ctr, currency, attribution_setting, actions_raw, api_version
         )
-        values (
-          $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21::jsonb,$22
-        )
+        values ${valuesSql}
         on conflict (source_id, ad_account_id, adset_id, occurred_on)
         do update set
           raw_record_id = excluded.raw_record_id,
@@ -5747,49 +5926,20 @@ async function writeMetaAdsAdsetTruth(
           attribution_setting = excluded.attribution_setting,
           actions_raw = excluded.actions_raw,
           api_version = excluded.api_version,
-          updated_at = now()
-      `,
-      [
-        `madd_${randomUUID()}`,
-        request.workspaceId,
-        request.sourceId,
-        rawIds[index],
-        row.adAccountId,
-        row.campaignId,
-        row.adsetId,
-        row.adsetName,
-        row.occurredOn,
-        row.spend,
-        row.clicks,
-        row.inlineLinkClicks,
-        row.landingPageViews,
-        row.impressions,
-        row.reach,
-        row.cpm,
-        row.cpc,
-        row.ctr,
-        row.currency,
-        row.attributionSetting,
-        JSON.stringify(row.actionsRaw ?? {}),
-        row.apiVersion
-      ]
-    );
-    await stageMetaAdsSnapshotKey(tx, request, {
-      adAccountId: row.adAccountId,
-      grain: "adset",
-      occurredOn: row.occurredOn,
-      entityId: row.adsetId,
-      keyKind: "delivery",
-    });
-    await writeLineage(
-      tx,
-      request,
-      "meta_ads_adset_daily",
-      `${row.adAccountId}:${row.adsetId}:${row.occurredOn}`,
-      rawIds[index]
-    );
-    await writeMetaAdsAdsetConversionRows(tx, request, row, rawIds[index]);
-  }
+          updated_at = now()`,
+  });
+  await stageMetaAdsSnapshotKeys(tx, request, rows.map((row) => ({
+    adAccountId: row.adAccountId,
+    grain: "adset",
+    occurredOn: row.occurredOn,
+    entityId: row.adsetId,
+    keyKind: "delivery",
+  })));
+  await writeLineageRows(tx, request, "meta_ads_adset_daily", items.map(({ row, rawId }) => ({
+    providerRowId: `${row.adAccountId}:${row.adsetId}:${row.occurredOn}`,
+    rawRecordId: rawId,
+  })));
+  await writeMetaAdsAdsetConversionRows(tx, request, items);
 }
 
 // §2.3 / §4c — fan the adset day's typed child conversions into
@@ -5798,18 +5948,39 @@ async function writeMetaAdsAdsetTruth(
 async function writeMetaAdsAdsetConversionRows(
   tx: InfiniteOsDb,
   request: SyncRequest,
-  row: MetaAdsAdsetDailyRow,
-  rawRecordId: string
+  items: ReadonlyArray<{ row: MetaAdsAdsetDailyRow; rawId: string }>,
 ): Promise<void> {
-  for (const conversion of row.conversions) {
-    await tx.query(
-      `
-        insert into meta_ads_adset_conversions_daily (
+  const flat = items.flatMap(({ row, rawId }) =>
+    row.conversions.map((conversion) => ({ row, rawId, conversion })));
+  await bulkUpsertRows(tx, flat, {
+    conflictKey: ({ row, conversion }) =>
+      `${row.adAccountId}${row.adsetId}${row.occurredOn}${conversion.resultType}`,
+    keepLast: true,
+    paramsPerRow: 14,
+    rowValuesSql: (b) => `($${b + 1},$${b + 2},$${b + 3},$${b + 4},$${b + 5},$${b + 6},$${b + 7},$${b + 8},$${b + 9},$${b + 10},$${b + 11},$${b + 12},$${b + 13},$${b + 14})`,
+    paramsOf: ({ row, rawId, conversion }) => [
+      `madac_${randomUUID()}`,
+      request.workspaceId,
+      request.sourceId,
+      rawId,
+      row.adAccountId,
+      row.campaignId,
+      row.adsetId,
+      row.occurredOn,
+      conversion.resultType,
+      conversion.results,
+      conversion.conversionValue,
+      conversion.attributionSetting,
+      conversion.isPrimary,
+      conversion.resultsSource,
+    ],
+    buildSql: (valuesSql) =>
+      `insert into meta_ads_adset_conversions_daily (
           id, workspace_id, source_id, raw_record_id, ad_account_id, campaign_id, adset_id,
           occurred_on, result_type, results, conversion_value, attribution_setting,
           is_primary, results_source
         )
-        values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+        values ${valuesSql}
         on conflict (source_id, ad_account_id, adset_id, occurred_on, result_type)
         do update set
           raw_record_id = excluded.raw_record_id,
@@ -5819,41 +5990,20 @@ async function writeMetaAdsAdsetConversionRows(
           attribution_setting = excluded.attribution_setting,
           is_primary = excluded.is_primary,
           results_source = excluded.results_source,
-          updated_at = now()
-      `,
-      [
-        `madac_${randomUUID()}`,
-        request.workspaceId,
-        request.sourceId,
-        rawRecordId,
-        row.adAccountId,
-        row.campaignId,
-        row.adsetId,
-        row.occurredOn,
-        conversion.resultType,
-        conversion.results,
-        conversion.conversionValue,
-        conversion.attributionSetting,
-        conversion.isPrimary,
-        conversion.resultsSource
-      ]
-    );
-    await stageMetaAdsSnapshotKey(tx, request, {
-      adAccountId: row.adAccountId,
-      grain: "adset",
-      occurredOn: row.occurredOn,
-      entityId: row.adsetId,
-      keyKind: "conversion",
-      resultType: conversion.resultType,
-    });
-    await writeLineage(
-      tx,
-      request,
-      "meta_ads_adset_conversions_daily",
-      `${row.adAccountId}:${row.adsetId}:${row.occurredOn}:${conversion.resultType}`,
-      rawRecordId
-    );
-  }
+          updated_at = now()`,
+  });
+  await stageMetaAdsSnapshotKeys(tx, request, flat.map(({ row, conversion }) => ({
+    adAccountId: row.adAccountId,
+    grain: "adset",
+    occurredOn: row.occurredOn,
+    entityId: row.adsetId,
+    keyKind: "conversion",
+    resultType: conversion.resultType,
+  })));
+  await writeLineageRows(tx, request, "meta_ads_adset_conversions_daily", flat.map(({ row, rawId, conversion }) => ({
+    providerRowId: `${row.adAccountId}:${row.adsetId}:${row.occurredOn}:${conversion.resultType}`,
+    rawRecordId: rawId,
+  })));
 }
 
 // ──────────────────────────────────────────────────────────────────────────────────
@@ -5870,14 +6020,32 @@ async function writeMetaAdsAdDimension(
   rawIds: string[]
 ): Promise<void> {
   const rawRecordId = rawIds[0] ?? null;
-  for (const dim of metaAdsAdDimensionRows(rows).values()) {
-    await tx.query(
-      `
-        insert into meta_ads_ads (
+  const dims = [...metaAdsAdDimensionRows(rows).values()];
+  await bulkUpsertRows(tx, dims, {
+    conflictKey: (dim) => `${dim.adAccountId}${dim.adId}`,
+    keepLast: true,
+    paramsPerRow: 12,
+    rowValuesSql: (b) => `($${b + 1},$${b + 2},$${b + 3},$${b + 4},$${b + 5},$${b + 6},$${b + 7},$${b + 8},$${b + 9},$${b + 10},$${b + 11},$${b + 12})`,
+    paramsOf: (dim) => [
+      `madx_${randomUUID()}`,
+      request.workspaceId,
+      request.sourceId,
+      rawRecordId,
+      dim.adAccountId,
+      dim.campaignId,
+      dim.adsetId,
+      dim.adId,
+      dim.name,
+      dim.creativeId,
+      dim.effectiveStatus,
+      dim.configuredStatus,
+    ],
+    buildSql: (valuesSql) =>
+      `insert into meta_ads_ads (
           id, workspace_id, source_id, raw_record_id, ad_account_id, campaign_id, adset_id,
           ad_id, name, creative_id, effective_status, configured_status
         )
-        values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+        values ${valuesSql}
         on conflict (source_id, ad_account_id, ad_id)
         do update set
           raw_record_id = excluded.raw_record_id,
@@ -5891,26 +6059,15 @@ async function writeMetaAdsAdDimension(
           creative_id = coalesce(excluded.creative_id, meta_ads_ads.creative_id),
           effective_status = coalesce(excluded.effective_status, meta_ads_ads.effective_status),
           configured_status = coalesce(excluded.configured_status, meta_ads_ads.configured_status),
-          updated_at = now()
-      `,
-      [
-        `madx_${randomUUID()}`,
-        request.workspaceId,
-        request.sourceId,
-        rawRecordId,
-        dim.adAccountId,
-        dim.campaignId,
-        dim.adsetId,
-        dim.adId,
-        dim.name,
-        dim.creativeId,
-        dim.effectiveStatus,
-        dim.configuredStatus
-      ]
+          updated_at = now()`,
+  });
+  if (rawRecordId) {
+    await writeLineageRows(
+      tx,
+      request,
+      "meta_ads_ads",
+      dims.map((dim) => ({ providerRowId: `${dim.adAccountId}:${dim.adId}`, rawRecordId })),
     );
-    if (rawRecordId) {
-      await writeLineage(tx, request, "meta_ads_ads", `${dim.adAccountId}:${dim.adId}`, rawRecordId);
-    }
   }
 }
 
@@ -5922,21 +6079,48 @@ async function writeMetaAdsAdTruth(
 ): Promise<void> {
   // §7a — upsert the ad dim BEFORE the ad facts (so creative_id/status exist).
   await writeMetaAdsAdDimension(tx, request, rows, rawIds);
-  for (let index = 0; index < rows.length; index += 1) {
-    const row = rows[index];
-    // §4c restatement — unique key (source_id, ad_account_id, ad_id, occurred_on) is RE-KEYED
-    // on ad_id, so each ad's day row is distinct (no adset/campaign-keyed collapse) and a
-    // re-sync of the rolling window is last-write-wins.
-    await tx.query(
-      `
-        insert into meta_ads_ad_daily (
+  // §4c restatement — unique key (source_id, ad_account_id, ad_id, occurred_on) is RE-KEYED on ad_id,
+  // so each ad's day row is distinct (no adset/campaign-keyed collapse) and a re-sync of the rolling
+  // window is last-write-wins. Batched into one multi-row upsert per chunk (§2).
+  const items = rows.map((row, index) => ({ row, rawId: rawIds[index] }));
+  await bulkUpsertRows(tx, items, {
+    conflictKey: ({ row }) => `${row.adAccountId}${row.adId}${row.occurredOn}`,
+    keepLast: true,
+    paramsPerRow: 23,
+    rowValuesSql: (b) =>
+      `($${b + 1},$${b + 2},$${b + 3},$${b + 4},$${b + 5},$${b + 6},$${b + 7},$${b + 8},$${b + 9},$${b + 10},$${b + 11},$${b + 12},$${b + 13},$${b + 14},$${b + 15},$${b + 16},$${b + 17},$${b + 18},$${b + 19},$${b + 20},$${b + 21},$${b + 22}::jsonb,$${b + 23})`,
+    paramsOf: ({ row, rawId }) => [
+      `madad_${randomUUID()}`,
+      request.workspaceId,
+      request.sourceId,
+      rawId,
+      row.adAccountId,
+      row.campaignId,
+      row.adsetId,
+      row.adId,
+      row.adName,
+      row.occurredOn,
+      row.spend,
+      row.clicks,
+      row.inlineLinkClicks,
+      row.landingPageViews,
+      row.impressions,
+      row.reach,
+      row.cpm,
+      row.cpc,
+      row.ctr,
+      row.currency,
+      row.attributionSetting,
+      JSON.stringify(row.actionsRaw ?? {}),
+      row.apiVersion,
+    ],
+    buildSql: (valuesSql) =>
+      `insert into meta_ads_ad_daily (
           id, workspace_id, source_id, raw_record_id, ad_account_id, campaign_id, adset_id,
           ad_id, ad_name, occurred_on, spend, clicks, inline_link_clicks, landing_page_views,
           impressions, reach, cpm, cpc, ctr, currency, attribution_setting, actions_raw, api_version
         )
-        values (
-          $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22::jsonb,$23
-        )
+        values ${valuesSql}
         on conflict (source_id, ad_account_id, ad_id, occurred_on)
         do update set
           raw_record_id = excluded.raw_record_id,
@@ -5956,50 +6140,20 @@ async function writeMetaAdsAdTruth(
           attribution_setting = excluded.attribution_setting,
           actions_raw = excluded.actions_raw,
           api_version = excluded.api_version,
-          updated_at = now()
-      `,
-      [
-        `madad_${randomUUID()}`,
-        request.workspaceId,
-        request.sourceId,
-        rawIds[index],
-        row.adAccountId,
-        row.campaignId,
-        row.adsetId,
-        row.adId,
-        row.adName,
-        row.occurredOn,
-        row.spend,
-        row.clicks,
-        row.inlineLinkClicks,
-        row.landingPageViews,
-        row.impressions,
-        row.reach,
-        row.cpm,
-        row.cpc,
-        row.ctr,
-        row.currency,
-        row.attributionSetting,
-        JSON.stringify(row.actionsRaw ?? {}),
-        row.apiVersion
-      ]
-    );
-    await stageMetaAdsSnapshotKey(tx, request, {
-      adAccountId: row.adAccountId,
-      grain: "ad",
-      occurredOn: row.occurredOn,
-      entityId: row.adId,
-      keyKind: "delivery",
-    });
-    await writeLineage(
-      tx,
-      request,
-      "meta_ads_ad_daily",
-      `${row.adAccountId}:${row.adId}:${row.occurredOn}`,
-      rawIds[index]
-    );
-    await writeMetaAdsAdConversionRows(tx, request, row, rawIds[index]);
-  }
+          updated_at = now()`,
+  });
+  await stageMetaAdsSnapshotKeys(tx, request, rows.map((row) => ({
+    adAccountId: row.adAccountId,
+    grain: "ad",
+    occurredOn: row.occurredOn,
+    entityId: row.adId,
+    keyKind: "delivery",
+  })));
+  await writeLineageRows(tx, request, "meta_ads_ad_daily", items.map(({ row, rawId }) => ({
+    providerRowId: `${row.adAccountId}:${row.adId}:${row.occurredOn}`,
+    rawRecordId: rawId,
+  })));
+  await writeMetaAdsAdConversionRows(tx, request, items);
 }
 
 // §2.3 / §4c — fan the ad day's typed child conversions into meta_ads_ad_conversions_daily.
@@ -6008,18 +6162,40 @@ async function writeMetaAdsAdTruth(
 async function writeMetaAdsAdConversionRows(
   tx: InfiniteOsDb,
   request: SyncRequest,
-  row: MetaAdsAdDailyRow,
-  rawRecordId: string
+  items: ReadonlyArray<{ row: MetaAdsAdDailyRow; rawId: string }>,
 ): Promise<void> {
-  for (const conversion of row.conversions) {
-    await tx.query(
-      `
-        insert into meta_ads_ad_conversions_daily (
+  const flat = items.flatMap(({ row, rawId }) =>
+    row.conversions.map((conversion) => ({ row, rawId, conversion })));
+  await bulkUpsertRows(tx, flat, {
+    conflictKey: ({ row, conversion }) =>
+      `${row.adAccountId}${row.adId}${row.occurredOn}${conversion.resultType}`,
+    keepLast: true,
+    paramsPerRow: 15,
+    rowValuesSql: (b) => `($${b + 1},$${b + 2},$${b + 3},$${b + 4},$${b + 5},$${b + 6},$${b + 7},$${b + 8},$${b + 9},$${b + 10},$${b + 11},$${b + 12},$${b + 13},$${b + 14},$${b + 15})`,
+    paramsOf: ({ row, rawId, conversion }) => [
+      `madadc_${randomUUID()}`,
+      request.workspaceId,
+      request.sourceId,
+      rawId,
+      row.adAccountId,
+      row.campaignId,
+      row.adsetId,
+      row.adId,
+      row.occurredOn,
+      conversion.resultType,
+      conversion.results,
+      conversion.conversionValue,
+      conversion.attributionSetting,
+      conversion.isPrimary,
+      conversion.resultsSource,
+    ],
+    buildSql: (valuesSql) =>
+      `insert into meta_ads_ad_conversions_daily (
           id, workspace_id, source_id, raw_record_id, ad_account_id, campaign_id, adset_id,
           ad_id, occurred_on, result_type, results, conversion_value, attribution_setting,
           is_primary, results_source
         )
-        values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+        values ${valuesSql}
         on conflict (source_id, ad_account_id, ad_id, occurred_on, result_type)
         do update set
           raw_record_id = excluded.raw_record_id,
@@ -6030,42 +6206,20 @@ async function writeMetaAdsAdConversionRows(
           attribution_setting = excluded.attribution_setting,
           is_primary = excluded.is_primary,
           results_source = excluded.results_source,
-          updated_at = now()
-      `,
-      [
-        `madadc_${randomUUID()}`,
-        request.workspaceId,
-        request.sourceId,
-        rawRecordId,
-        row.adAccountId,
-        row.campaignId,
-        row.adsetId,
-        row.adId,
-        row.occurredOn,
-        conversion.resultType,
-        conversion.results,
-        conversion.conversionValue,
-        conversion.attributionSetting,
-        conversion.isPrimary,
-        conversion.resultsSource
-      ]
-    );
-    await stageMetaAdsSnapshotKey(tx, request, {
-      adAccountId: row.adAccountId,
-      grain: "ad",
-      occurredOn: row.occurredOn,
-      entityId: row.adId,
-      keyKind: "conversion",
-      resultType: conversion.resultType,
-    });
-    await writeLineage(
-      tx,
-      request,
-      "meta_ads_ad_conversions_daily",
-      `${row.adAccountId}:${row.adId}:${row.occurredOn}:${conversion.resultType}`,
-      rawRecordId
-    );
-  }
+          updated_at = now()`,
+  });
+  await stageMetaAdsSnapshotKeys(tx, request, flat.map(({ row, conversion }) => ({
+    adAccountId: row.adAccountId,
+    grain: "ad",
+    occurredOn: row.occurredOn,
+    entityId: row.adId,
+    keyKind: "conversion",
+    resultType: conversion.resultType,
+  })));
+  await writeLineageRows(tx, request, "meta_ads_ad_conversions_daily", flat.map(({ row, rawId, conversion }) => ({
+    providerRowId: `${row.adAccountId}:${row.adId}:${row.occurredOn}:${conversion.resultType}`,
+    rawRecordId: rawId,
+  })));
 }
 
 async function writeLineage(
