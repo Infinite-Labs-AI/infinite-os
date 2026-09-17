@@ -7405,6 +7405,115 @@ describe("Meta Ads WRITE helpers", () => {
         }
       );
     });
+
+    // §4f — the cumulative ad-account throttle. Meta returns code 17 / subcode 2446079 ("Ad
+    // Account Has Too Many API Calls") as HTTP 400, NOT 429, with the signal only in the JSON
+    // body. Now that listMetaEntities/getMetaEntity route through metaAdsFetchWithThrottleBackoff,
+    // the safe fetch classifies the body and backs off exactly like a 429 (sleeps collapse under
+    // vitest, so the retry COUNT/sequence is what we assert).
+    function metaGraphErrorResponse(error: Record<string, unknown>): Response {
+      return new Response(JSON.stringify({ error }), {
+        status: 400,
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+
+    it("§4f a code-17/400 account throttle (subcode 2446079) backs off, retries, then fails RETRYABLE", async () => {
+      // 1 initial GET + META_ADS_THROTTLE_MAX_RETRIES(4) retries = 5 GETs, then a retryable
+      // provider_rate_limited — never the fatal-looking provider_api_error that never backs off.
+      await captureWrites(
+        () =>
+          metaGraphErrorResponse({
+            message: "Ad Account Has Too Many API Calls",
+            type: "OAuthException",
+            code: 17,
+            error_subcode: 2446079,
+            is_transient: true
+          }),
+        async (captured) => {
+          await expect(listMetaEntities(metaWriteCredential, "campaign")).rejects.toMatchObject({
+            retryable: true,
+            code: "provider_rate_limited"
+          });
+          expect(captured.length).toBe(5);
+        }
+      );
+    });
+
+    it("§4f a throttle riding the TOP-LEVEL code only (code 4, no subcode) also backs off + retries", async () => {
+      // The taxonomy matches code OR subcode against BOTH sets, so a bare application-request-limit
+      // (#4) with no error_subcode still classifies as a throttle and retries the full budget.
+      await captureWrites(
+        () => metaGraphErrorResponse({ message: "(#4) Application request limit reached", type: "OAuthException", code: 4 }),
+        async (captured) => {
+          await expect(getMetaEntity(metaWriteCredential, "c1", { entity: "campaign" })).rejects.toMatchObject({
+            retryable: true,
+            code: "provider_rate_limited"
+          });
+          expect(captured.length).toBe(5);
+        }
+      );
+    });
+
+    it("§4f a NON-throttle 400 (code 100 permission) still throws provider_api_error, no retry, body preserved", async () => {
+      await captureWrites(
+        () => metaGraphErrorResponse({ message: "(#100) Permissions error", type: "OAuthException", code: 100 }),
+        async (captured) => {
+          await expect(getMetaEntity(metaWriteCredential, "c1", { entity: "campaign" })).rejects.toMatchObject({
+            retryable: true,
+            code: "provider_api_error",
+            // The body is reused (redacted) for the detail so the downstream classifySyncFailure
+            // body-sniff (and isMetaAdsDataVolumeError) still see the code — regression guard.
+            message: expect.stringContaining('"code":100')
+          });
+          // A non-throttle error is NOT retried in the safe fetch — a single GET, then throw.
+          expect(captured.length).toBe(1);
+        }
+      );
+    });
+
+    it("§4f a data-volume 400 (code 100 / subcode 1487534) is NOT treated as a throttle (no backoff)", async () => {
+      // 1487534 drives the NARROWER-window retry in the chunk loop, not a throttle backoff, so it
+      // must fall through to provider_api_error with the subcode intact for the textual classifier.
+      await captureWrites(
+        () =>
+          metaGraphErrorResponse({
+            message: "Please reduce the amount of data you're asking for",
+            code: 100,
+            error_subcode: 1487534
+          }),
+        async (captured) => {
+          await expect(listMetaEntities(metaWriteCredential, "ad")).rejects.toMatchObject({
+            retryable: true,
+            code: "provider_api_error",
+            message: expect.stringContaining("1487534")
+          });
+          expect(captured.length).toBe(1);
+        }
+      );
+    });
+
+    it("§4f a code-17/400 that CLEARS on retry returns the OK body", async () => {
+      let attempts = 0;
+      await captureWrites(
+        () => {
+          attempts += 1;
+          if (attempts === 1) {
+            return metaGraphErrorResponse({
+              message: "Ad Account Has Too Many API Calls",
+              code: 17,
+              error_subcode: 2446079
+            });
+          }
+          return jsonResponse({ data: [{ id: "c1", name: "Launch" }] });
+        },
+        async () => {
+          const rows = await listMetaEntities(metaWriteCredential, "campaign");
+          expect(rows).toEqual([{ id: "c1", name: "Launch" }]);
+          expect(attempts).toBe(2);
+        }
+      );
+    });
   });
 
   describe("MCP write transport is still refused (out of scope)", () => {
