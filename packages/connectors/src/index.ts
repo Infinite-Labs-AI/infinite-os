@@ -10903,8 +10903,20 @@ export async function deleteMetaEntity(
 // ── Reads: list / get ── normal retryable taxonomy via fetchJson ──────────────
 interface MetaListResponse {
   data?: Array<Record<string, unknown>>;
-  paging?: { next?: string | null } | null;
+  paging?: {
+    next?: string | null;
+    cursors?: { after?: string | null } | null;
+  } | null;
 }
+
+// Safe per-request page size for the list edge reads. The old single GET set
+// `limit` up to 500 on ONE page WITH the `creative{…}` field-expansion, which Meta
+// rejects as too-complex ("reduce the amount of data", ~HTTP 500 code 1 subcode 99).
+// 100 matches the proven metaAdsReadEdge page size — that reader hits the SAME /ads
+// edge with an even LARGER field set and succeeds precisely because it paginates at
+// 100 instead of asking for a giant page. A caller `limit` still bounds the PAGE size
+// (its original meaning — it set the Graph `limit` param), clamped to this ceiling.
+const META_LIST_PAGE_SIZE = 100;
 
 export async function listMetaEntities(
   credential: MetaAdsCredential,
@@ -10913,16 +10925,41 @@ export async function listMetaEntities(
 ): Promise<Array<Record<string, unknown>>> {
   const accessToken = requireCredential(credential, "accessToken");
   const adAccountId = metaAdsAccountId(credential);
-  const url = new URL(`https://graph.facebook.com/${metaAdsApiVersion(credential)}/${adAccountId}/${META_READ_EDGE[entity]}`);
-  url.searchParams.set("fields", options.fields ?? metaDefaultReadFields(entity));
-  if (options.limit) {
-    url.searchParams.set("limit", String(options.limit));
+  const fields = options.fields ?? metaDefaultReadFields(entity);
+  const pageSize = Math.min(options.limit ?? META_LIST_PAGE_SIZE, META_LIST_PAGE_SIZE);
+  // PAGINATE (mirrors metaAdsReadEdge §4d): walk paging.next to exhaustion at a safe
+  // page size and return the FULL set. Never a single limit=500 page (Meta rejects the
+  // field-expansion at that volume), and never a silently-truncated result — a runaway
+  // cursor fails LOUD via the page cap below rather than returning page one.
+  const rows: Array<Record<string, unknown>> = [];
+  let after: string | undefined;
+  for (let page = 0; page < META_ADS_EDGE_PAGE_LIMIT; page += 1) {
+    const url = new URL(`https://graph.facebook.com/${metaAdsApiVersion(credential)}/${adAccountId}/${META_READ_EDGE[entity]}`);
+    url.searchParams.set("fields", fields);
+    url.searchParams.set("limit", String(pageSize));
+    // Follow the cursor via the `after` token (kept out of a full `next` URL so the
+    // access token stays in the Authorization header, never the query string).
+    if (after) {
+      url.searchParams.set("after", after);
+    }
+    const response = await fetchJson<MetaListResponse>(url.toString(), {
+      method: "GET",
+      headers: bearerHeaders(accessToken)
+    });
+    rows.push(...(response.data ?? []));
+    const nextAfter = metaAdsPagingAfter({ paging: response.paging });
+    if (!nextAfter) {
+      return rows;
+    }
+    after = nextAfter;
   }
-  const response = await fetchJson<MetaListResponse>(url.toString(), {
-    method: "GET",
-    headers: bearerHeaders(accessToken)
-  });
-  return response.data ?? [];
+  // The cursor never terminated within the page cap — fail LOUD (retryable) rather than
+  // return a silently-truncated set. Mirrors metaAdsReadEdge §4d.
+  throw new ConnectorError(
+    "provider_api_error",
+    `Meta Ads /${META_READ_EDGE[entity]} list pagination exceeded the ${META_ADS_EDGE_PAGE_LIMIT}-page limit (refusing to truncate)`,
+    true
+  );
 }
 
 export async function getMetaEntity(
