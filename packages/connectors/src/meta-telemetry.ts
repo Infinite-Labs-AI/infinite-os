@@ -50,6 +50,22 @@ export class MetaAdsRequestBudgetError extends Error {
   }
 }
 
+// Graceful wall-time stop. Checked at the same beforeRequest chokepoint the request budget uses, so
+// an extract that runs long throws a RETRYABLE error BEFORE a hosted maxDuration hard-kill can fire.
+// The throw lands inside extract → the connector's catch runs recordSyncFailure (source not left
+// `syncing`, run marked `failed`), making a time overrun the same benign, resumable outcome as a
+// request-budget stop instead of a mid-CLOSE SIGKILL that strands the source. The deadline is an
+// opaque wall-clock millisecond value owned by the CALLER (SyncRequest.softDeadlineAtMs); the engine
+// imports nothing cloud/Supabase to honor it.
+export class MetaAdsTimeBudgetError extends Error {
+  readonly code = "provider_time_budget_exhausted";
+  readonly retryable = true;
+
+  constructor(deadlineAtMs: number) {
+    super(`Meta Ads soft time budget exhausted at ${new Date(deadlineAtMs).toISOString()}; the reporting window remains incomplete`);
+  }
+}
+
 /** Bounded, payload-free accounting for one Meta sync. */
 export class MetaAdsRequestTelemetry {
   private requestCount = 0;
@@ -66,6 +82,9 @@ export class MetaAdsRequestTelemetry {
   constructor(
     readonly limit: number,
     private readonly persistReservation?: (snapshot: MetaAdsRequestTelemetrySnapshot) => Promise<void>,
+    // Optional wall-clock deadline (ms since epoch). Omitted on desktop → behaviour unchanged.
+    // When set (hosted), the first fetch attempted at or after it throws MetaAdsTimeBudgetError.
+    private readonly deadlineAtMs?: number,
   ) {
     if (!Number.isInteger(limit) || limit < 1 || limit > META_ADS_MAX_REQUEST_BUDGET) {
       throw new MetaAdsRequestBudgetError(Math.max(0, Number.isFinite(limit) ? limit : 0));
@@ -74,6 +93,14 @@ export class MetaAdsRequestTelemetry {
 
   /** Must run immediately before fetch. No request can cross the admitted limit. */
   async beforeRequest(kind: MetaAdsRequestKind, retry: boolean): Promise<void> {
+    // Soft time budget FIRST: a run that has already overrun its wall-time deadline stops here,
+    // BEFORE consuming another request, so the graceful stop pre-empts a hosted hard-kill. Checked
+    // at the fetch boundary only, so it never interrupts a half-written LOAD (LOAD does no fetches).
+    if (this.deadlineAtMs !== undefined && Date.now() >= this.deadlineAtMs) {
+      this.exhausted = true;
+      await this.persistReservation?.(this.snapshot());
+      throw new MetaAdsTimeBudgetError(this.deadlineAtMs);
+    }
     if (this.requestCount >= this.limit) {
       this.exhausted = true;
       await this.persistReservation?.(this.snapshot());
