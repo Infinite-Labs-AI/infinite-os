@@ -9223,9 +9223,10 @@ function metaAdsConversionForRule(
     // `results` is the ad's configured outcome and must not be relabeled into this typed
     // partition. Preserve unknown only when actions itself was absent, or when positive
     // value evidence contradicts the missing count.
-    const valueOnlyEvidence = rule.value
-      ? metaPickCanonicalAction(metaInsightsActionValues(row), rule.actionTypes)
-      : null;
+    const valueOnlyEvidence = metaPickCanonicalAction(
+      metaInsightsActionValues(row),
+      rule.actionTypes,
+    );
     const hasPositiveValueOnlyEvidence = valueOnlyEvidence !== null
       && metaHeadlineWindowValue(valueOnlyEvidence) > 0;
     if (actions !== null && !hasPositiveValueOnlyEvidence) return null;

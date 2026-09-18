@@ -8782,6 +8782,14 @@ describe("Meta Ads durable daily history", () => {
       optimization_goal: "CUSTOM_UNKNOWN",
       action_values: undefined,
     };
+    const leadValueWithoutCount = {
+      ...observedActions,
+      campaign_id: "c_lead_value_without_count",
+      objective: "OUTCOME_LEADS",
+      optimization_goal: "LEAD_GENERATION",
+      actions: [{ action_type: "link_click", "7d_click": "2" }],
+      action_values: [{ action_type: "lead", "7d_click": "50" }],
+    };
     await withMockFetch((url) => {
       if (url.includes("/campaigns") || url.includes("/adsets") || isMetaAdsEdgeRequest(url)) {
         return historyResponse({ data: [], paging: {} });
@@ -8789,7 +8797,7 @@ describe("Meta Ads durable daily history", () => {
       if (isMetaAdsetInsightsRequest(url) || isMetaAdInsightsRequest(url)) {
         return historyResponse({ data: [], paging: {} });
       }
-      return historyResponse({ data: [observedActions, { ...missingActions, campaign_id: "c_actions_missing" }, valueWithoutCount, unmappedMissingActions], paging: {} });
+      return historyResponse({ data: [observedActions, { ...missingActions, campaign_id: "c_actions_missing" }, valueWithoutCount, unmappedMissingActions, leadValueWithoutCount], paging: {} });
     }, async () => {
       const extracted = await connectorFor("meta_ads").extract(
         historyCredentialDb(),
@@ -8844,6 +8852,9 @@ describe("Meta Ads durable daily history", () => {
       expect(campaigns.get("c_unmapped_actions_missing")?.conversions).toEqual(expect.arrayContaining([
         expect.objectContaining({ resultType: "purchase", resultsSource: "meta_results_unverified_type" }),
         expect.objectContaining({ resultType: "lead", resultsSource: "meta_results_unverified_type" }),
+      ]));
+      expect(campaigns.get("c_lead_value_without_count")?.conversions).toEqual(expect.arrayContaining([
+        expect.objectContaining({ resultType: "lead", conversionValue: null, resultsSource: "meta_results_unverified_type" }),
       ]));
     });
   });
