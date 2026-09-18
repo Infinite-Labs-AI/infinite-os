@@ -8,6 +8,7 @@ import {
   isEncryptedCredentialPayload
 } from "@infinite-os/core";
 import { type InfiniteOsDb } from "@infinite-os/db";
+import { MetaAdsRequestTelemetry } from "@infinite-os/connectors";
 import { FIRST_PHASE_METRICS, createInfiniteOsRegistry } from "@infinite-os/runtime";
 
 import {
@@ -8651,11 +8652,13 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
         });
       },
       async (calls) => {
-        const handlers = createActionHandlers(db);
+        const telemetry = new MetaAdsRequestTelemetry(5);
+        const handlers = createActionHandlers(db, { metaAdsRequestTelemetry: telemetry });
         const result = await handlers.run_meta_live_insights?.(
           { sourceId: "src_meta", level: "campaign", since: "2026-09-01", until: "2026-09-02", timeIncrement: 1 },
           { ...operatorContext, authority: "tool_agent" }
         );
+        expect(telemetry.snapshot()).toMatchObject({ requestCount: 2, pageCount: 2 });
         const insights = calls.map((c) => new URL(c.url)).find((u) => u.pathname.endsWith("/insights"));
         expect(insights?.searchParams.get("time_increment")).toBe("1");
         // Exactly one extra GET: the campaigns edge for effective_status. Never the CLI, never a POST.
