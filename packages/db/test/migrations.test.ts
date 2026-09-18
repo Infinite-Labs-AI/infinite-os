@@ -83,7 +83,8 @@ describe("Infinite OS migration stack", () => {
       "0066_auxiliary_brain_usage_outbox.sql",
       "0067_signup_event_metric_semantics.sql",
       "0068_connection_credentials_selected_page.sql",
-      "0069_meta_ads_history_integrity.sql"
+      "0069_meta_ads_history_integrity.sql",
+      "0070_meta_ads_nullable_reach.sql"
     ]);
   });
 
@@ -1082,7 +1083,8 @@ describe("Infinite OS migration stack", () => {
       "0066_auxiliary_brain_usage_outbox.sql",
       "0067_signup_event_metric_semantics.sql",
       "0068_connection_credentials_selected_page.sql",
-      "0069_meta_ads_history_integrity.sql"
+      "0069_meta_ads_history_integrity.sql",
+      "0070_meta_ads_nullable_reach.sql"
     ]);
   });
 

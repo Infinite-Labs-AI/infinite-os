@@ -586,7 +586,7 @@ interface MetaAdsCampaignDailyRow {
   inlineLinkClicks: number;
   landingPageViews: number;
   impressions: number;
-  reach: number;
+  reach: number | null;
   cpm: number | null;
   cpc: number | null;
   ctr: number | null;
@@ -627,7 +627,7 @@ interface MetaAdsAdsetDailyRow {
   inlineLinkClicks: number;
   landingPageViews: number;
   impressions: number;
-  reach: number;
+  reach: number | null;
   cpm: number | null;
   cpc: number | null;
   ctr: number | null;
@@ -672,7 +672,7 @@ interface MetaAdsAdDailyRow {
   inlineLinkClicks: number;
   landingPageViews: number;
   impressions: number;
-  reach: number;
+  reach: number | null;
   cpm: number | null;
   cpc: number | null;
   ctr: number | null;
@@ -9340,7 +9340,7 @@ function metaAdsCampaignDailyRow(
     inlineLinkClicks: integerOrZero(row.inline_link_clicks),
     landingPageViews,
     impressions: integerOrZero(row.impressions),
-    reach: integerOrZero(row.reach),
+    reach: integerOrNull(row.reach),
     cpm: numberOrNull(row.cpm),
     cpc: numberOrNull(row.cpc),
     ctr: numberOrNull(row.ctr),
@@ -9397,7 +9397,7 @@ function metaAdsAdsetDailyRow(
     inlineLinkClicks: integerOrZero(row.inline_link_clicks),
     landingPageViews,
     impressions: integerOrZero(row.impressions),
-    reach: integerOrZero(row.reach),
+    reach: integerOrNull(row.reach),
     cpm: numberOrNull(row.cpm),
     cpc: numberOrNull(row.cpc),
     ctr: numberOrNull(row.ctr),
@@ -9464,7 +9464,7 @@ function metaAdsAdDailyRow(
     inlineLinkClicks: integerOrZero(row.inline_link_clicks),
     landingPageViews,
     impressions: integerOrZero(row.impressions),
-    reach: integerOrZero(row.reach),
+    reach: integerOrNull(row.reach),
     cpm: numberOrNull(row.cpm),
     cpc: numberOrNull(row.cpc),
     ctr: numberOrNull(row.ctr),
@@ -13207,6 +13207,11 @@ function nullableNumber(value: unknown): number | null {
 
 function numberOrZero(value: unknown): number {
   return numberOrNull(value) ?? 0;
+}
+
+function integerOrNull(value: unknown): number | null {
+  const parsed = numberOrNull(value);
+  return parsed === null ? null : Math.round(parsed);
 }
 
 function integerOrZero(value: unknown): number {
