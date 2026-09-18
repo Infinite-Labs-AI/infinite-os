@@ -1,3 +1,11 @@
+export interface MetaAdsResponseSignal {
+  maxPercent: number | null;
+  estimatedRegainSeconds: number | null;
+  resetSeconds: number | null;
+  accessTier: string | null;
+  throttled?: boolean;
+}
+
 export type MetaAdsRequestKind =
   | "account_liveness"
   | "campaign_edge"
@@ -68,6 +76,7 @@ export class MetaAdsTimeBudgetError extends Error {
 
 /** Bounded, payload-free accounting for one Meta sync. */
 export class MetaAdsRequestTelemetry {
+  private cooldownUntil = 0;
   private requestCount = 0;
   private pageCount = 0;
   private retryCount = 0;
@@ -85,6 +94,7 @@ export class MetaAdsRequestTelemetry {
     // Optional wall-clock deadline (ms since epoch). Omitted on desktop → behaviour unchanged.
     // When set (hosted), the first fetch attempted at or after it throws MetaAdsTimeBudgetError.
     private readonly deadlineAtMs?: number,
+    private readonly onResponse?: (signal: MetaAdsResponseSignal) => Promise<void>,
   ) {
     if (!Number.isInteger(limit) || limit < 1 || limit > META_ADS_MAX_REQUEST_BUDGET) {
       throw new MetaAdsRequestBudgetError(Math.max(0, Number.isFinite(limit) ? limit : 0));
@@ -93,6 +103,9 @@ export class MetaAdsRequestTelemetry {
 
   /** Must run immediately before fetch. No request can cross the admitted limit. */
   async beforeRequest(kind: MetaAdsRequestKind, retry: boolean): Promise<void> {
+    if (Date.now() < this.cooldownUntil) {
+      throw Object.assign(new Error("Meta Ads provider cooldown active"), { code: "provider_rate_limited", retryable: true });
+    }
     // Soft time budget FIRST: a run that has already overrun its wall-time deadline stops here,
     // BEFORE consuming another request, so the graceful stop pre-empts a hosted hard-kill. Checked
     // at the fetch boundary only, so it never interrupts a half-written LOAD (LOAD does no fetches).
@@ -112,6 +125,13 @@ export class MetaAdsRequestTelemetry {
     // Reserve durably before the provider call. A hard kill between this write and fetch can
     // conservatively over-count one request; it can never hide spend from the scheduler.
     await this.persistReservation?.(this.snapshot());
+  }
+
+  async observeResponse(signal: MetaAdsResponseSignal): Promise<void> {
+    if (signal.throttled || (signal.maxPercent ?? 0) >= META_ADS_UTILIZATION_HIGH_WATERMARK || (signal.estimatedRegainSeconds ?? 0) > 0) {
+      this.cooldownUntil = Math.max(this.cooldownUntil, Date.now() + Math.max(signal.estimatedRegainSeconds ?? 0, signal.resetSeconds ?? 0, 60) * 1000);
+    }
+    await this.onResponse?.(signal);
   }
 
   /** One accepted response page. Retried high-utilization responses are not counted as pages. */
@@ -155,3 +175,6 @@ export class MetaAdsRequestTelemetry {
     if (bounded >= META_ADS_UTILIZATION_HIGH_WATERMARK) this.highWatermarkResponses += 1;
   }
 }
+
+/** Structural transport hook, suitable for process-local handler options. */
+export type MetaAdsRequestObserver = Pick<MetaAdsRequestTelemetry, "beforeRequest" | "recordPage" | "recordRejectedResponse" | "observeResponse">;

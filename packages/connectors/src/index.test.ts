@@ -2419,7 +2419,7 @@ describe("live provider clients", () => {
             mode: "live",
             adAccountId: "1234567890",
             accessToken: "meta-access-token",
-            apiVersion: "v24.0"
+            apiVersion: "v25.0"
           })
         }
       });
@@ -2440,7 +2440,7 @@ describe("live provider clients", () => {
 
       // The probe (testConnection) is the first request — a level=campaign /insights GET.
       expect(requests[0]).toMatchObject({
-        url: expect.stringContaining("https://graph.facebook.com/v24.0/act_1234567890/insights"),
+        url: expect.stringContaining("https://graph.facebook.com/v25.0/act_1234567890/insights"),
         authorization: "Bearer meta-access-token"
       });
       expect(requests[0]?.url).not.toContain("access_token=");
@@ -2509,7 +2509,7 @@ describe("live provider clients", () => {
             mode: "live",
             adAccountId: "1234567890",
             accessToken: "meta-access-token",
-            apiVersion: "v24.0"
+            apiVersion: "v25.0"
           })
         }
       });
@@ -2539,7 +2539,7 @@ describe("live provider clients", () => {
         "campaign_id,campaign_name,date_start,spend,clicks,inline_link_clicks,impressions,reach,frequency,cpm,cpc,ctr,actions,action_values,results,cost_per_result,result_values_performance_indicator,objective,optimization_goal,account_currency"
       );
       expect(campaignInsightsUrl.searchParams.get("fields")).toContain("account_currency");
-      expect(campaignInsightsUrl.searchParams.get("limit")).toBe("100");
+      expect(campaignInsightsUrl.searchParams.get("limit")).toBe("500");
       // §4 — attribution windows sent as a JSON array; 7d_view/28d_view excluded.
       expect(JSON.parse(campaignInsightsUrl.searchParams.get("action_attribution_windows") ?? "[]")).toEqual([
         "1d_click",
@@ -2572,7 +2572,7 @@ describe("live provider clients", () => {
             mode: "live",
             adAccountId: "1234567890",
             accessToken: "meta-access-token",
-            apiVersion: "v24.0"
+            apiVersion: "v25.0"
           })
         }
       });
@@ -2631,7 +2631,7 @@ describe("live provider clients", () => {
             mode: "live",
             adAccountId: "1234567890",
             accessToken: "meta-access-token",
-            apiVersion: "v24.0"
+            apiVersion: "v25.0"
           })
         }
       });
@@ -2660,8 +2660,8 @@ describe("live provider clients", () => {
       // The all_time backfill date options ride the CAMPAIGN insights request (the edge reads
       // carry no time window). Located by predicate since the extract issues edges first.
       const campaignInsights = requests.find((entry) => isMetaCampaignInsightsRequest(entry.url));
-      expect(campaignInsights?.url).toContain("date_preset=maximum");
-      expect(campaignInsights?.url).not.toContain("time_range=");
+      expect(campaignInsights?.url).not.toContain("date_preset=maximum");
+      expect(campaignInsights?.url).toContain("time_range=");
       expect(campaignInsights?.authorization).toBe("Bearer meta-access-token");
       expect(rows[0]).toMatchObject({
         externalId: "meta_ads:act_1234567890:1200000001:2026-06-01"
@@ -2699,7 +2699,7 @@ describe("live provider clients", () => {
             mode: "live",
             adAccountId: "1234567890",
             accessToken: "meta-access-token",
-            apiVersion: "v24.0"
+            apiVersion: "v25.0"
           })
         }
       });
@@ -3156,7 +3156,7 @@ describe("live provider clients", () => {
     expect(campaignDim?.params).toContain("OUTCOME_LEADS");
   });
 
-  it("§4e adset: backs off then FAILS LOUD when the insights throttle header stays high after retries", async () => {
+  it("accepts a successful high-utilization page without re-fetching it", async () => {
     // The §4e backoff reads x-fb-ads-insights-throttle (which fetchJson discards) off the
     // /insights response and, on a sustained high acc_id_util_pct, retries with backoff and
     // THEN throws a retryable rate-limit error rather than returning a silently-truncated
@@ -3203,7 +3203,7 @@ describe("live provider clients", () => {
           }
         );
       })()
-    ).rejects.toThrow(/throttle high/);
+    ).resolves.toBeUndefined();
   });
 
   it("§4d adset: a NORMAL throttle utilization does not fail the run", async () => {
@@ -3549,7 +3549,7 @@ describe("live provider clients", () => {
     expect(ranges[3]).toEqual({ since: "2026-06-01", until: "2026-06-03" });
   });
 
-  it("§4d ad: a BOUNDED backfill (12_months) is also issued MONTH-BY-MONTH, never one wide time_range", async () => {
+  it.each(["campaign", "adset", "ad"])("audit %s: a BOUNDED backfill (12_months) is also issued MONTH-BY-MONTH, never one wide time_range", async (level) => {
     // REGRESSION GUARD: the CLI's 3/6/12-month backfills queue backfillWindow:'12_months'
     // (NOT 'all_time') with refreshWindowDays:365. The ad pass must chunk these EXACTLY like
     // all_time — a single un-chunked 365-day level=ad daily request is the wide-range shape
@@ -3558,7 +3558,7 @@ describe("live provider clients", () => {
     const insightsUrls: string[] = [];
     await withMockFetch(
       async (url) => {
-        if (isMetaAdInsightsRequest(url)) {
+        if (new URL(url).pathname.endsWith("/insights")) {
           insightsUrls.push(url);
           return jsonResponse({ data: [], paging: {} });
         }
@@ -3577,7 +3577,7 @@ describe("live provider clients", () => {
               })
             }
           }),
-          { ...request("meta_ads"), metaAdsInsightsLevel: "ad", backfillWindow: "12_months" },
+          { ...request("meta_ads"), metaAdsInsightsLevel: level, backfillWindow: "12_months" },
           {
             // A 12-month backfill: cursorStart pinned ~12 months before cursorEnd. The plan
             // carries backfillWindow:'12_months' (a bounded window — NOT all_time).
@@ -3610,16 +3610,74 @@ describe("live provider clients", () => {
     expect(ranges[ranges.length - 1]).toEqual({ since: "2026-06-01", until: "2026-06-03" });
   });
 
-  it("§4d ad: a BOUNDED backfill narrows to weeks on a forced 1487534 (no whole-run failure)", async () => {
+  it("audit recurring refresh caps 365 days to 35 provider days without using the old cursor", async () => {
+    const insightsUrls: string[] = [];
+    await withMockFetch(
+      async (url) => {
+        if (isMetaAdInsightsRequest(url)) {
+          insightsUrls.push(url);
+          return jsonResponse({ data: [], paging: {} });
+        }
+        return adProbeRouter(url);
+      },
+      async () => {
+        await connectorFor("meta_ads").extract(
+          fakeDb({
+            credential: {
+              credential_kind: "marketing_api_access_token",
+              encrypted_payload: encryptedCredential({
+                mode: "live",
+                adAccountId: "9900000001",
+                accessToken: "meta-access-token",
+                apiVersion: "v25.0"
+              })
+            }
+          }),
+          { ...request("meta_ads"), metaAdsInsightsLevel: "ad" },
+          {
+            cursorKey: "meta_ads_campaign_daily",
+            cursorStart: "2025-06-03T00:00:00.000Z",
+            cursorEnd: "2026-06-03T00:00:00.000Z",
+            refreshWindowDays: 365,
+            mode: "live",
+            metaAdsAccountMetadata: {adAccountId: "act_9900000001", currency: "GBP", timezoneName: "Europe/London"}
+          }
+        );
+      }
+    );
+    expect(insightsUrls.length).toBeGreaterThan(1);
+    for (const url of insightsUrls) {
+      expect(new URL(url).searchParams.get("date_preset")).toBeNull();
+      const range = JSON.parse(new URL(url).searchParams.get("time_range") as string) as {
+        since: string;
+        until: string;
+      };
+      const span =
+        (new Date(`${range.until}T00:00:00Z`).getTime() - new Date(`${range.since}T00:00:00Z`).getTime()) /
+        (24 * 60 * 60 * 1000);
+      expect(span).toBeLessThanOrEqual(31);
+    }
+    const ranges = insightsUrls.map((url) => JSON.parse(new URL(url).searchParams.get("time_range") as string));
+    expect(ranges[0]).toEqual({ since: "2026-04-29", until: "2026-04-30" });
+    expect(ranges[ranges.length - 1]).toEqual({ since: "2026-06-01", until: "2026-06-02" });
+  });
+
+
+  it("§4d ad: a late-page 1487534 discards partial monthly rows before week fallback", async () => {
     // The bounded path must carry the SAME 1487534 classify-and-retry-narrower as all_time:
     // force the first month window to the data-volume error, then succeed on the week retries.
     const insightsRanges: Array<{ since: string; until: string }> = [];
     let firstWindowFailed = false;
+    let extractedRows: unknown;
     await withMockFetch(
       async (url) => {
         if (isMetaAdInsightsRequest(url)) {
           const range = JSON.parse(new URL(url).searchParams.get("time_range") as string);
           if (!firstWindowFailed && range.since === "2025-06-03" && range.until === "2025-06-30") {
+            if (!new URL(url).searchParams.has("after")) return jsonResponse({
+              data: [{ad_id:"discarded_partial_month", date_start:"2025-06-03", spend:"999"}],
+              paging: {next: `${url}&after=failed-page`},
+            });
             firstWindowFailed = true;
             return new Response(
               JSON.stringify({
@@ -3634,7 +3692,7 @@ describe("live provider clients", () => {
         return adProbeRouter(url);
       },
       async () => {
-        await connectorFor("meta_ads").extract(
+        extractedRows = await connectorFor("meta_ads").extract(
           fakeDb({
             credential: {
               credential_kind: "marketing_api_access_token",
@@ -3659,6 +3717,7 @@ describe("live provider clients", () => {
       }
     );
     expect(firstWindowFailed).toBe(true);
+    expect(JSON.stringify(extractedRows)).not.toContain("discarded_partial_month");
     // The failed month was retried as ≤7-day sub-windows covering the whole month, no failure.
     expect(insightsRanges.length).toBeGreaterThan(1);
     for (const range of insightsRanges) {
@@ -5483,7 +5542,7 @@ console.log(JSON.stringify({ data: [] }));
               mode: "live",
               adAccountId: "1234567890",
               accessToken: "meta-access-token",
-              apiVersion: "v24.0"
+              apiVersion: "v25.0"
             })
           }
         }),
@@ -5627,7 +5686,7 @@ console.log(JSON.stringify({ data: [] }));
                 mode: "live",
                 adAccountId: "1234567890",
                 accessToken: "meta-secret-token",
-                apiVersion: "v24.0"
+                apiVersion: "v25.0"
               })
             }
           }),
@@ -8600,6 +8659,27 @@ describe("Meta Ads durable daily history", () => {
     });
   }
 
+  it("audit CLOSE deletes and covers only the clamped window actually fetched at every grain", async () => {
+    const queries: Array<{ sql: string; params?: unknown[] }> = [];
+    const ranges: Array<{ since: string; until: string }> = [];
+    await withMockFetch(url => {
+      const parsed = new URL(url);
+      if (parsed.pathname.endsWith("/act_123")) return historyResponse({id:"act_123",currency:"GBP",timezone_name:"Europe/London"});
+      if (parsed.pathname.endsWith("/insights")) ranges.push(JSON.parse(parsed.searchParams.get("time_range")!));
+      return historyResponse({data:[]});
+    }, async () => {
+      await connectorFor("meta_ads").sync(historyCredentialDb(queries), {
+        ...request("meta_ads"), sourceId:"source_meta_ads", windowSince:"2021-06-03", windowUntil:"2026-06-03",
+        backfillWindow:"12_months", metaAdsRequestBudget:500,
+      });
+    });
+    const since = ranges.map(range=>range.since).sort()[0];
+    expect(since).toBe("2023-05-03");
+    const closes = queries.filter(entry => entry.sql.includes("insert into meta_ads_coverage_daily") || /^delete from meta_ads_.* f/.test(entry.sql.trim()));
+    expect(closes).toHaveLength(9);
+    for (const close of closes) expect(close.params?.slice(3,5)).toEqual([since,"2026-06-03"]);
+  });
+
   it("persists objective-independent purchase and lead rows without summing aliases", async () => {
     const insight = {
       campaign_id: "c1",
@@ -8771,7 +8851,7 @@ describe("Meta Ads durable daily history", () => {
     expect(queries.some((entry) => entry.sql.includes("insert into meta_ads_coverage_daily"))).toBe(true);
   });
 
-  it("counts a real throttle retry without counting its discarded response as a completed page", async () => {
+  it("holds subsequent requests after an accepted high-utilization page", async () => {
     const queries: Array<{ sql: string; params?: unknown[] }> = [];
     let campaignEdgeAttempts = 0;
     let calls = 0;
@@ -8787,20 +8867,14 @@ describe("Meta Ads durable daily history", () => {
       }
       return historyResponse({ data: [], paging: {} }, 20);
     }, async () => {
-      await connectorFor("meta_ads").sync(historyCredentialDb(queries), {
+      await expect(connectorFor("meta_ads").sync(historyCredentialDb(queries), {
         ...request("meta_ads"), sourceId: "source_meta_ads", windowSince: "2026-09-01",
         windowUntil: "2026-09-03", metaAdsRequestBudget: 20,
-      });
+      })).rejects.toThrow("provider cooldown");
     });
-    expect(calls).toBe(8);
-    const close = queries.find((entry) => entry.sql.includes("request_telemetry = $3::jsonb"));
-    expect(JSON.parse(String(close?.params?.[2]))).toMatchObject({
-      requestCount: 8,
-      pageCount: 7,
-      retryCount: 1,
-      byKind: { campaign_edge: 2 },
-      utilization: { maxPercent: 95, highWatermarkResponses: 1 },
-    });
+    expect(campaignEdgeAttempts).toBe(1);
+    expect(calls).toBeLessThanOrEqual(4);
+    expect(queries.some(entry => entry.sql.includes("insert into meta_ads_coverage_daily"))).toBe(false);
   });
 
   it("stops before exceeding the request budget and publishes no coverage or snapshot deletion", async () => {

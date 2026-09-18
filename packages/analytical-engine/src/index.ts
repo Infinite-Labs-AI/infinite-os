@@ -10,6 +10,7 @@ import {
   bindMetaAdsCliExecution,
   deleteMetaEntity,
   fetchMetaLiveInsights,
+  type MetaAdsRequestObserver,
   getMetaEntity,
   listMetaAssets,
   listMetaEntities,
@@ -103,6 +104,7 @@ export function createActionHandlers(
   db: InfiniteOsDb,
   options?: {
     encryptionKey?: string;
+    metaAdsRequestTelemetry?: MetaAdsRequestObserver;
     metaAdsCliExecution?: MetaAdsCliExecution;
     expectedMetaCredential?: ExpectedMetaCredential;
   }
@@ -153,9 +155,9 @@ export function createActionHandlers(
     run_saved_report: (input, context) => runSavedReport(db, context, input),
     export_saved_report: (input, context) => exportSavedReport(db, context, input),
     list_meta_assets: (input, context) => listMetaAssetsHandler(db, context, input),
-    list_meta_entities: (input, context) => listMetaEntitiesHandler(db, context, input, metaAdsCliExecution, encryptionKey),
-    get_meta_entity: (input, context) => getMetaEntityHandler(db, context, input, metaAdsCliExecution, encryptionKey),
-    run_meta_live_insights: (input, context) => runMetaLiveInsightsHandler(db, context, input, metaAdsCliExecution, encryptionKey),
+    list_meta_entities: (input, context) => listMetaEntitiesHandler(db, context, input, metaAdsCliExecution, encryptionKey, options?.metaAdsRequestTelemetry),
+    get_meta_entity: (input, context) => getMetaEntityHandler(db, context, input, metaAdsCliExecution, encryptionKey, options?.metaAdsRequestTelemetry),
+    run_meta_live_insights: (input, context) => runMetaLiveInsightsHandler(db, context, input, metaAdsCliExecution, encryptionKey, options?.metaAdsRequestTelemetry),
     create_meta_campaign: (input, context) => createMetaCampaignHandler(db, context, input, metaAdsCliExecution, encryptionKey, expectedMetaCredential),
     create_meta_ad_set: (input, context) => createMetaAdSetHandler(db, context, input, metaAdsCliExecution, encryptionKey, expectedMetaCredential),
     create_meta_creative: (input, context) => createMetaCreativeHandler(db, context, input, metaAdsCliExecution, encryptionKey, expectedMetaCredential),
@@ -2835,7 +2837,8 @@ async function listMetaEntitiesHandler(
   context: SessionContext,
   input: unknown,
   cliExecution?: MetaAdsCliExecution,
-  encryptionKey?: string
+  encryptionKey?: string,
+  telemetry?: MetaAdsRequestObserver,
 ): Promise<ActionEnvelope> {
   const sourceId = requiredString(input, "sourceId");
   const entity = requiredString(input, "entity") as MetaWriteEntity;
@@ -2848,7 +2851,7 @@ async function listMetaEntitiesHandler(
   const entities = await listMetaEntities(credential, entity, {
     ...(limit === undefined ? {} : { limit }),
     ...(fields ? { fields } : {})
-  });
+  }, telemetry);
   return envelope(
     "list_meta_entities",
     context.authority,
@@ -2863,7 +2866,8 @@ async function getMetaEntityHandler(
   context: SessionContext,
   input: unknown,
   cliExecution?: MetaAdsCliExecution,
-  encryptionKey?: string
+  encryptionKey?: string,
+  telemetry?: MetaAdsRequestObserver,
 ): Promise<ActionEnvelope> {
   const sourceId = requiredString(input, "sourceId");
   const entityId = requiredString(input, "entityId");
@@ -2876,7 +2880,7 @@ async function getMetaEntityHandler(
   const entity = await getMetaEntity(credential, entityId, {
     ...(fields ? { fields } : {}),
     ...(entityKind ? { entity: entityKind } : {})
-  });
+  }, telemetry);
   return envelope(
     "get_meta_entity",
     context.authority,
@@ -2953,7 +2957,8 @@ async function runMetaLiveInsightsHandler(
   context: SessionContext,
   input: unknown,
   cliExecution?: MetaAdsCliExecution,
-  encryptionKey?: string
+  encryptionKey?: string,
+  telemetry?: MetaAdsRequestObserver,
 ): Promise<ActionEnvelope> {
   const sourceId =
     optionalString(input, "sourceId") ?? (await resolveSoleConnectedMetaSourceId(db, context));
@@ -3008,7 +3013,7 @@ async function runMetaLiveInsightsHandler(
     limit,
     ...(timeIncrement === undefined ? {} : { timeIncrement }),
     ...(includeStatus === undefined ? {} : { includeStatus })
-  });
+  }, telemetry);
   // A read: no integration_audit_log row, normal retryable taxonomy (same stance as list/get).
   return envelope(
     "run_meta_live_insights",

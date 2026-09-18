@@ -50,7 +50,16 @@ export interface SessionContext {
  * the env / `.growth-os` default is used, so it is fully backward-compatible. The engine keeps
  * this typing inline (it cannot depend on this leaf package); the two shapes are structural.
  */
+export interface MetaAdsRequestObserver {
+  beforeRequest(kind: "account_liveness" | "campaign_edge" | "adset_edge" | "ad_edge" | "campaign_insights" | "adset_insights" | "ad_insights", retry: boolean): Promise<void>;
+  recordPage(utilizationPercent: number | null): void;
+  recordRejectedResponse(utilizationPercent: number | null): void;
+  observeResponse(signal: { maxPercent: number | null; estimatedRegainSeconds: number | null; resetSeconds: number | null; accessTier: string | null; throttled?: boolean }): Promise<void>;
+}
+
 export interface CreateActionHandlersOptions {
+  /** Trusted process-only per-request admission and response observer for explicit live reads. */
+  metaAdsRequestTelemetry?: MetaAdsRequestObserver;
   encryptionKey?: string;
   /** Trusted process-only Meta CLI runner. Executable/path never come from stored credentials. */
   metaAdsCliExecution?: {
