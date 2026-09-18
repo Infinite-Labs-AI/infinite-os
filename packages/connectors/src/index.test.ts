@@ -8748,9 +8748,9 @@ describe("Meta Ads durable daily history", () => {
     });
   });
 
-  it("keeps a results fallback unverified without an affirmative indicator and preserves its provider evidence", async () => {
-    const insight = {
-      campaign_id: "c_missing_indicator",
+  it("treats an observed action set without a purchase alias as zero while missing actions remains unknown", async () => {
+    const observedActions = {
+      campaign_id: "c_observed_zero",
       campaign_name: "Sales campaign",
       date_start: "2026-09-17",
       spend: "2.80",
@@ -8769,6 +8769,12 @@ describe("Meta Ads durable daily history", () => {
       // Intentionally omitted: result_values_performance_indicator. A missing type is
       // absence of proof, not affirmative agreement with the purchase rule.
     };
+    const { actions: _omitted, ...missingActions } = observedActions;
+    const valueWithoutCount = {
+      ...observedActions,
+      campaign_id: "c_value_without_count",
+      action_values: [{ action_type: "offsite_conversion.fb_pixel_purchase", "7d_click": "219" }],
+    };
     await withMockFetch((url) => {
       if (url.includes("/campaigns") || url.includes("/adsets") || isMetaAdsEdgeRequest(url)) {
         return historyResponse({ data: [], paging: {} });
@@ -8776,7 +8782,7 @@ describe("Meta Ads durable daily history", () => {
       if (isMetaAdsetInsightsRequest(url) || isMetaAdInsightsRequest(url)) {
         return historyResponse({ data: [], paging: {} });
       }
-      return historyResponse({ data: [insight], paging: {} });
+      return historyResponse({ data: [observedActions, { ...missingActions, campaign_id: "c_actions_missing" }, valueWithoutCount], paging: {} });
     }, async () => {
       const extracted = await connectorFor("meta_ads").extract(
         historyCredentialDb(),
@@ -8789,16 +8795,9 @@ describe("Meta Ads durable daily history", () => {
           mode: "live",
         },
       );
-      const campaign = extracted.find((row) => row.objectType === "meta_ads_campaign_daily");
-      const payload = campaign?.payload as Record<string, unknown>;
-      expect(payload.conversions).toEqual([
-        expect.objectContaining({
-          resultType: "purchase",
-          results: 3,
-          conversionValue: null,
-          isPrimary: true,
-          resultsSource: "meta_results_unverified_type",
-        }),
+      const campaigns = new Map(extracted.filter((row) => row.objectType === "meta_ads_campaign_daily")
+        .map((row) => [(row.payload as { campaignId: string }).campaignId, row.payload as Record<string, unknown>]));
+      expect(campaigns.get("c_observed_zero")?.conversions).toEqual([
         expect.objectContaining({
           resultType: "lead",
           results: 1,
@@ -8806,15 +8805,69 @@ describe("Meta Ads durable daily history", () => {
           resultsSource: "derived_from_canonical_mapping",
         }),
       ]);
-      expect(payload.actionsRaw).toMatchObject({
+      expect(campaigns.get("c_observed_zero")?.actionsRaw).toMatchObject({
         provider_result_evidence: {
-          results: insight.results,
-          cost_per_result: insight.cost_per_result,
+          actions_present: true,
+          results: observedActions.results,
+          cost_per_result: observedActions.cost_per_result,
           result_values_performance_indicator: null,
           objective: "OUTCOME_SALES",
           optimization_goal: "OFFSITE_CONVERSIONS",
           resolved_optimization_goal: "OFFSITE_CONVERSIONS",
         },
+      });
+      expect(campaigns.get("c_actions_missing")?.conversions).toEqual([
+        expect.objectContaining({
+          resultType: "purchase",
+          results: 0,
+          conversionValue: null,
+          isPrimary: true,
+          resultsSource: "meta_results_unverified_type",
+        }),
+      ]);
+      expect(campaigns.get("c_actions_missing")?.actionsRaw).toMatchObject({
+        provider_result_evidence: { actions_present: false },
+      });
+      // Positive purchase value with no purchase count alias is contradictory evidence,
+      // not a measured zero. Keep the partition unresolved rather than inventing zero.
+      expect(campaigns.get("c_value_without_count")?.conversions).toEqual(expect.arrayContaining([
+        expect.objectContaining({ resultType: "purchase", resultsSource: "meta_results_unverified_type" }),
+      ]));
+    });
+  });
+
+  it("uses the adset promoted custom event to classify OFFSITE_CONVERSIONS instead of assuming purchase", async () => {
+    await withMockFetch((url) => {
+      if (url.includes("/adsets")) return historyResponse({ data: [{
+        id: "s_lead", campaign_id: "c_sales", name: "Lead adset", status: "ACTIVE", effective_status: "ACTIVE",
+        optimization_goal: "OFFSITE_CONVERSIONS", billing_event: "IMPRESSIONS",
+        promoted_object: { pixel_id: "px1", custom_event_type: "LEAD" },
+      }], paging: {} });
+      if (url.includes("/campaigns")) return historyResponse({ data: [{
+        id: "c_sales", name: "Campaign", objective: "OUTCOME_SALES", status: "ACTIVE", effective_status: "ACTIVE",
+      }], paging: {} });
+      if (isMetaAdsEdgeRequest(url)) return historyResponse({ data: [{
+        id: "a_lead", adset_id: "s_lead", campaign_id: "c_sales", name: "Lead ad", status: "ACTIVE", effective_status: "ACTIVE",
+      }], paging: {} });
+      if (isMetaAdInsightsRequest(url)) return historyResponse({ data: [{
+        ad_id: "a_lead", adset_id: "s_lead", campaign_id: "c_sales", ad_name: "Lead ad", date_start: "2026-09-17",
+        objective: "OUTCOME_SALES", spend: "2.80", account_currency: "GBP",
+        actions: [{ action_type: "lead", "7d_click": "1" }], action_values: [],
+        results: [{ values: [{ value: "3" }] }], result_values_performance_indicator: "actions:lead",
+      }], paging: {} });
+      return historyResponse({ data: [], paging: {} });
+    }, async () => {
+      const extracted = await connectorFor("meta_ads").extract(
+        historyCredentialDb(),
+        { ...request("meta_ads"), metaAdsInsightsLevel: "ad" },
+        { cursorKey: "meta_ads_campaign_daily", cursorStart: "2026-09-17T00:00:00.000Z", cursorEnd: "2026-09-17T23:59:59.000Z", refreshWindowDays: 30, mode: "live" },
+      );
+      const payload = extracted.find((row) => row.objectType === "meta_ads_ad_daily")?.payload as Record<string, unknown>;
+      expect(payload.conversions).toEqual([
+        expect.objectContaining({ resultType: "lead", results: 1, isPrimary: true, resultsSource: "derived_from_canonical_mapping" }),
+      ]);
+      expect(payload.actionsRaw).toMatchObject({
+        provider_result_evidence: { resolved_promoted_custom_event_type: "LEAD" },
       });
     });
   });

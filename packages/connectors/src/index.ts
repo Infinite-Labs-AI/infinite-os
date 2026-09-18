@@ -566,7 +566,7 @@ interface MetaAdsConversionRow {
   conversionValue: number | null;
   attributionSetting: string;
   isPrimary: boolean;
-  // 'derived_from_canonical_mapping' | 'meta_results' | 'meta_results_unverified_type'
+  // 'derived_from_canonical_mapping' | 'meta_results_unverified_type'
   resultsSource: string;
 }
 
@@ -8355,13 +8355,6 @@ const META_OPTIMIZATION_GOAL_RULES: Record<string, MetaCanonicalEventRule> = {
     actionTypes: ["lead", "offsite_conversion.fb_pixel_lead", "onsite_web_lead"],
     value: false
   },
-  // OFFSITE_CONVERSIONS with custom_event=PURCHASE → pixel purchase. Count AND value come
-  // from offsite_conversion.fb_pixel_purchase (same channel). NEVER omni_purchase.
-  OFFSITE_CONVERSIONS: {
-    resultType: "purchase",
-    actionTypes: ["offsite_conversion.fb_pixel_purchase", "onsite_web_purchase"],
-    value: true
-  },
   LANDING_PAGE_VIEWS: {
     resultType: "landing_page_view",
     // Non-omni: omni_landing_page_view is a broader population, excluded.
@@ -8373,6 +8366,14 @@ const META_OPTIMIZATION_GOAL_RULES: Record<string, MetaCanonicalEventRule> = {
     actionTypes: ["link_click"],
     value: false
   }
+};
+
+// OFFSITE_CONVERSIONS is generic: the promoted_object custom_event_type decides what the
+// adset is actually optimizing for. Treating every such adset as purchase mislabeled live
+// LEAD campaigns and let their opaque `results` fallback poison the purchase partition.
+const META_PROMOTED_CUSTOM_EVENT_RULES: Record<string, MetaCanonicalEventRule> = {
+  PURCHASE: META_HEADLINE_RESULT_RULES.purchase,
+  LEAD: META_HEADLINE_RESULT_RULES.lead,
 };
 
 // Coarse fallback keyed by campaign objective (ODAX, 6 outcomes) when optimization_goal
@@ -8404,9 +8405,18 @@ const META_OBJECTIVE_RULES: Record<string, MetaCanonicalEventRule | null> = {
 // nothing matches.
 function metaCanonicalEventRule(
   optimizationGoal: string | null,
-  objective: string | null
+  objective: string | null,
+  promotedCustomEventType: string | null = null,
 ): MetaCanonicalEventRule | null {
   const goalKey = optimizationGoal?.toUpperCase();
+  if (goalKey === "OFFSITE_CONVERSIONS") {
+    const eventKey = promotedCustomEventType?.toUpperCase();
+    if (eventKey && eventKey in META_PROMOTED_CUSTOM_EVENT_RULES) {
+      return META_PROMOTED_CUSTOM_EVENT_RULES[eventKey];
+    }
+    // No proven promoted event: fall through to the campaign objective. Never assume
+    // OFFSITE_CONVERSIONS means purchase by itself.
+  }
   if (goalKey && goalKey in META_OPTIMIZATION_GOAL_RULES) {
     return META_OPTIMIZATION_GOAL_RULES[goalKey];
   }
@@ -8497,64 +8507,23 @@ function metaInsightsActionValues(row: MetaAdsInsightsRow): MetaActionElement[] 
 function metaAdsActionsRaw(
   row: MetaAdsInsightsRow,
   resolvedOptimizationGoal: string | null = stringOrNull(row.optimization_goal),
+  resolvedPromotedCustomEventType: string | null = null,
 ): Record<string, unknown> {
   return {
     actions: metaInsightsActions(row) ?? [],
     action_values: metaInsightsActionValues(row) ?? [],
     provider_result_evidence: {
+      actions_present: Array.isArray(row.actions),
+      action_values_present: Array.isArray(row.action_values),
       results: row.results ?? null,
       cost_per_result: row.cost_per_result ?? null,
       result_values_performance_indicator: stringOrNull(row.result_values_performance_indicator),
       objective: stringOrNull(row.objective),
       optimization_goal: stringOrNull(row.optimization_goal),
       resolved_optimization_goal: resolvedOptimizationGoal,
+      resolved_promoted_custom_event_type: resolvedPromotedCustomEventType,
     },
   };
-}
-
-function metaInsightsResultsValue(row: MetaAdsInsightsRow): number | null {
-  // Meta's `results` field is an array of objects, each with a `values` array of
-  // { value } entries — the parallel "objective_results" family. We sum the values of
-  // the first result element as the reconciliation cross-check count.
-  const results = row.results;
-  if (!Array.isArray(results) || results.length === 0) {
-    return null;
-  }
-  const first = results[0] as { values?: Array<{ value?: string | number | null }> };
-  if (!Array.isArray(first.values)) {
-    return null;
-  }
-  const total = first.values.reduce((sum, entry) => sum + numberOrZero(entry?.value), 0);
-  return Number.isFinite(total) ? total : null;
-}
-
-function metaInsightsReportedResultType(row: MetaAdsInsightsRow): string | null {
-  // result_values_performance_indicator is Meta's own result_type source-of-truth
-  // string (e.g. 'actions:offsite_conversion.fb_pixel_purchase'); strip the 'actions:'
-  // prefix to get the bare action_type.
-  const indicator = stringOrNull(
-    row.result_values_performance_indicator as string | null | undefined
-  );
-  if (!indicator) {
-    return null;
-  }
-  return indicator.replace(/^actions:/, "");
-}
-
-// Cross-check: does Meta's reported result indicator name an action_type that belongs
-// to OUR canonical rule for this row? Used only to flag a meta_results fallback whose
-// type we could NOT verify (so reconciliation drift is visible), never to relabel the
-// stored result_type. A missing indicator is absence of proof, so only an affirmative
-// indicator match verifies a fallback.
-function metaResultTypeMatchesRule(
-  row: MetaAdsInsightsRow,
-  rule: MetaCanonicalEventRule
-): boolean {
-  const reported = metaInsightsReportedResultType(row);
-  if (!reported) {
-    return false;
-  }
-  return rule.actionTypes.includes(reported);
 }
 
 function metaAdsInsightsGrain(request: SyncRequest): {
@@ -9230,8 +9199,9 @@ async function metaAdsFetchAdInsightsChunked(
 // §4 — derive the typed child conversion rows for one campaign-day from the raw
 // actions[]/action_values[] arrays, using the §4b objective→canonical-event mapping.
 //
-// DETERMINISTIC, NEVER SUM VARIANTS: we resolve ONE canonical rule (optimization_goal
-// first, then objective), pick the FIRST present action_type from its precedence list,
+// DETERMINISTIC, NEVER SUM VARIANTS: we resolve ONE canonical rule (promoted custom event
+// inside OFFSITE_CONVERSIONS, then optimization_goal, then objective), pick the FIRST
+// present action_type from its precedence list,
 // and take the COUNT (from actions[]) and VALUE (from action_values[]) from that SAME
 // action_type — the same pixel channel. This is what collapses the §0 Ultima 4
 // action_types to a single result (2 leads, not 8).
@@ -9243,33 +9213,33 @@ function metaAdsConversionForRule(
   context: MetaAdsInsightsContext,
   rule: MetaCanonicalEventRule,
   isPrimary: boolean,
-  allowMetaResultsFallback: boolean,
+  allowUnknownMarker: boolean,
 ): MetaAdsConversionRow | null {
   const actions = metaInsightsActions(row);
   const canonicalAction = metaPickCanonicalAction(actions, rule.actionTypes);
   if (!canonicalAction || !canonicalAction.action_type) {
-    if (!allowMetaResultsFallback) return null;
-    // The canonical event did not fire for this campaign-day; Meta's own results
-    // field is the fallback so a blank actions[] does not null the headline.
-    const metaResults = metaInsightsResultsValue(row);
-    if (metaResults === null) {
-      return null;
-    }
-    // Keep the result_type label consistent with the canonical mapping (clean labels
-    // like 'lead'/'purchase'). Meta's result_values_performance_indicator is used only
-    // as a cross-check (metaResultTypeMatchesRule), never as the stored label — mixing
-    // raw action_type strings into result_type would fracture the REQUIRED partition.
+    // A returned actions array is the action_type-grouped observation for this insights
+    // row. If it contains no canonical alias, that event is measured zero. Generic
+    // `results` is the ad's configured outcome and must not be relabeled into this typed
+    // partition. Preserve unknown only when actions itself was absent, or when positive
+    // value evidence contradicts the missing count.
+    const valueOnlyEvidence = rule.value
+      ? metaPickCanonicalAction(metaInsightsActionValues(row), rule.actionTypes)
+      : null;
+    const hasPositiveValueOnlyEvidence = valueOnlyEvidence !== null
+      && metaHeadlineWindowValue(valueOnlyEvidence) > 0;
+    if (actions !== null && !hasPositiveValueOnlyEvidence) return null;
+    if (!allowUnknownMarker) return null;
+    // `results` is an opaque list<Object> describing the configured outcome, not a typed
+    // purchase/lead fact. Preserve it in actions_raw, and write only an uncertainty marker
+    // here so readers keep this partition null instead of displaying an invented count.
     return {
       resultType: rule.resultType,
-      results: metaResults,
+      results: 0,
       conversionValue: null,
       attributionSetting: context.attributionSetting,
       isPrimary,
-      // Distinguish a clean cross-check match from a type-mismatched fallback so a
-      // reconciliation drift is visible in results_source.
-      resultsSource: metaResultTypeMatchesRule(row, rule)
-        ? "meta_results"
-        : "meta_results_unverified_type"
+      resultsSource: "meta_results_unverified_type"
     };
   }
   // Count from the SAME canonical channel (headline window = 7d_click + 1d_view).
@@ -9295,11 +9265,13 @@ function metaAdsConversionForRule(
 
 function metaAdsConversionRows(
   row: MetaAdsInsightsRow,
-  context: MetaAdsInsightsContext
+  context: MetaAdsInsightsContext,
+  promotedCustomEventType: string | null = null,
 ): MetaAdsConversionRow[] {
   const objectiveRule = metaCanonicalEventRule(
     stringOrNull(row.optimization_goal),
-    stringOrNull(row.objective)
+    stringOrNull(row.objective),
+    promotedCustomEventType,
   );
   const out: MetaAdsConversionRow[] = [];
   const seen = new Set<string>();
@@ -9424,12 +9396,12 @@ function metaAdsAdsetDailyRow(
     currency: stringOrNull(row.account_currency)?.toLowerCase() ?? dim?.currency ?? null,
     attributionSetting: context.attributionSetting,
     apiVersion: context.apiVersion,
-    actionsRaw: metaAdsActionsRaw(row, optimizationGoal),
+    actionsRaw: metaAdsActionsRaw(row, optimizationGoal, dim?.promotedCustomEventType ?? null),
     optimizationGoal,
     billingEvent: dim?.billingEvent ?? null,
     effectiveStatus: dim?.effectiveStatus ?? null,
     configuredStatus: dim?.configuredStatus ?? null,
-    conversions: metaAdsConversionRows(conversionRow, context)
+    conversions: metaAdsConversionRows(conversionRow, context, dim?.promotedCustomEventType ?? null)
   };
 }
 
@@ -9488,10 +9460,10 @@ function metaAdsAdDailyRow(
     currency: stringOrNull(row.account_currency)?.toLowerCase() ?? null,
     attributionSetting: context.attributionSetting,
     apiVersion: context.apiVersion,
-    actionsRaw: metaAdsActionsRaw(row, optimizationGoal),
+    actionsRaw: metaAdsActionsRaw(row, optimizationGoal, adsetDim?.promotedCustomEventType ?? null),
     effectiveStatus: dim?.effectiveStatus ?? null,
     configuredStatus: dim?.configuredStatus ?? null,
-    conversions: metaAdsConversionRows(conversionRow, context)
+    conversions: metaAdsConversionRows(conversionRow, context, adsetDim?.promotedCustomEventType ?? null)
   };
 }
 
@@ -9651,6 +9623,7 @@ interface MetaAdsAdsetDim extends MetaAdsEntityStatus {
   campaignId: string | null;
   name: string | null;
   optimizationGoal: string | null;
+  promotedCustomEventType: string | null;
   billingEvent: string | null;
   currency: string | null;
 }
@@ -9723,6 +9696,11 @@ interface MetaAdsEdgeResponse {
     next?: string | null;
     cursors?: { after?: string | null } | null;
   } | null;
+}
+
+function metaAdsPromotedCustomEventType(value: unknown): string | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  return stringOrNull((value as Record<string, unknown>).custom_event_type)?.toUpperCase() ?? null;
 }
 
 // Map a Graph node's status fields into our pair. configured_status falls back to the
@@ -9814,6 +9792,7 @@ async function metaAdsReadAdsetDims(
       campaignId: stringOrNull(node.campaign_id),
       name: stringOrNull(node.name),
       optimizationGoal: stringOrNull(node.optimization_goal),
+      promotedCustomEventType: metaAdsPromotedCustomEventType(node.promoted_object),
       billingEvent: stringOrNull(node.billing_event),
       currency: null,
       effectiveStatus: status.effectiveStatus,
@@ -13539,11 +13518,11 @@ interface MetaAdsInsightsRow {
   // ('1d_click','7d_click','1d_view') alongside the element-level `value` (7d_click only).
   actions?: MetaActionElement[] | null;
   action_values?: MetaActionElement[] | null;
-  // Meta's own results family (reconciliation cross-check). Array of result objects,
-  // each with a `values` array of { value } entries.
+  // Meta's opaque configured-outcome family, retained verbatim for audit only. It is
+  // never reclassified as a typed purchase/lead count.
   results?: Array<{ values?: Array<{ value?: string | number | null }> }> | null;
   cost_per_result?: Array<{ values?: Array<{ value?: string | number | null }> }> | null;
-  // The result_type source-of-truth string (e.g. 'actions:offsite_conversion.fb_pixel_purchase').
+  // Meta's reported performance indicator, retained as provider evidence.
   result_values_performance_indicator?: string | null;
   // Campaign objective (coarse key) + adset optimization_goal (the real result driver).
   objective?: string | null;
