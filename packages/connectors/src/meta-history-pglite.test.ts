@@ -883,4 +883,17 @@ describe("Meta Ads history CLOSE against real PGlite", () => {
     expect(await db.query("select cursor_key,cursor_value from sync_cursors where source_id=$1 and cursor_key like 'meta_ads_entities_%' order by cursor_key",[sourceId])).toEqual(before);
   },120_000);
 
+  it("hands fresh signed media to the caller without persisting URL capabilities",async()=>{
+    const workspaceId=`ws_media_${randomUUID()}`,sourceId=`src_media_${randomUUID()}`;
+    await seedSource(workspaceId,sourceId);
+    const seen:Array<{creativeId:string;slotKey:string;url:string}>=[];
+    const request=syncRequest(workspaceId,sourceId,'2026-09-01','2026-09-01');
+    request.metaAdsOnMedia=async media=>{seen.push(...media);};
+    await withMetaFetch(fixture('2026-09-01'),()=>connectorFor('meta_ads').sync(db,request));
+    expect(seen.some(item=>item.creativeId==='cr1'&&item.slotKey==='creative.image'&&item.url.includes('raw-signed-secret'))).toBe(true);
+    expect(seen.some(item=>item.slotKey==='creative.thumbnail'&&item.url.includes('thumb-secret'))).toBe(true);
+    const rows=await db.query("select metadata_json,asset_descriptors from meta_ads_entity_versions where source_id=$1",[sourceId]);
+    expect(JSON.stringify(rows)).not.toContain('raw-signed-secret');expect(JSON.stringify(rows)).not.toContain('thumb-secret');
+  },120_000);
+
 });

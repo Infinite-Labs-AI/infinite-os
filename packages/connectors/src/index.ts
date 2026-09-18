@@ -66,6 +66,11 @@ import {
 } from "./stripe-reconcile.js";
 import { classifyStripeTrialEvents } from "./stripe-trial-spells.js";
 
+export interface MetaAdsFreshMedia {
+  accountId:string;creativeId:string;slotKey:string;kind:"image"|"thumbnail";
+  providerAssetId:string|null;providerAssetType:"image_hash"|"video_id"|null;slotFingerprint:string;url:string;
+}
+
 export interface SyncRequest {
   workspaceId: string;
   sourceId: string;
@@ -84,6 +89,8 @@ export interface SyncRequest {
   // pass a smaller admitted remainder from its workspace/source rate budget.
   metaAdsRequestBudget?: number;
   metaAdsOnResponse?: (signal: MetaAdsResponseSignal) => Promise<void>;
+  /** Optional bounded caller-owned media sink. Signed URLs exist only in this callback, never truth rows. */
+  metaAdsOnMedia?: (media:MetaAdsFreshMedia[]) => Promise<void>;
   // Cloud-default credential custody: an explicit per-workspace encryption key. Server-side
   // (multi-tenant Trigger/Vercel) callers derive one key per workspace and pass it here so the
   // decrypt/re-encrypt path never touches process.env — see requiredEncryptionKey(override).
@@ -2466,7 +2473,7 @@ const metaAdsConnector = createConnector<MetaAdsCredential, MetaAdsSyncRow>({
       metaAdsReadAdsetDims(credential, telemetry, adsetNodes, entityScan.updatedSince, cached.filter(row=>row.entity_type==='adset').map(row=>row.metadata_json as MetaAdsEdgeNode)),
       // Campaigns have no documented updated_since parameter; retain their bounded full read.
       metaAdsReadCampaignStatus(credential, telemetry, campaignNodes),
-      metaAdsReadAdAdims(credential, telemetry, adNodes, entityScan.updatedSince, cached.filter(row=>row.entity_type==='ad').map(row=>row.metadata_json as MetaAdsEdgeNode)),
+      metaAdsReadAdAdims(credential, telemetry, adNodes, entityScan.updatedSince, cached.filter(row=>row.entity_type==='ad').map(row=>row.metadata_json as MetaAdsEdgeNode), request.metaAdsOnMedia),
     ]);
 
     const rows: MetaAdsSyncRow[] = [];
@@ -9760,6 +9767,7 @@ async function metaAdsReadEdge(
   fields: string,
   telemetry?: MetaAdsRequestObserver,
   updatedSince?: number,
+  onPage?: (nodes:MetaAdsEdgeNode[])=>Promise<void>,
 ): Promise<MetaAdsEdgeNode[]> {
   const accessToken = requireCredential(credential, "accessToken");
   const adAccountId = metaAdsAccountId(credential);
@@ -9784,6 +9792,7 @@ async function metaAdsReadEdge(
       headers: { "Content-Type": "application/json", ...bearerHeaders(accessToken) }
     }, telemetry, edge === "campaigns" ? "campaign_edge" : edge === "adsets" ? "adset_edge" : "ad_edge");
     const body = (await response.json()) as MetaAdsEdgeResponse;
+    if(onPage)await onPage(body.data ?? []);
     nodes.push(...(body.data ?? []));
     const nextAfter = metaAdsPagingAfter(body as MetaAdsInsightsResponse);
     if (!nextAfter) {
@@ -9849,6 +9858,7 @@ async function metaAdsReadAdAdims(
   snapshotSink?: MetaAdsEdgeNode[],
   updatedSince?: number,
   cachedNodes: MetaAdsEdgeNode[] = [],
+  onMedia?: SyncRequest["metaAdsOnMedia"],
 ): Promise<Map<string, MetaAdsAdDim>> {
   const nodes = await metaAdsReadEdge(
     credential,
@@ -9856,6 +9866,20 @@ async function metaAdsReadAdAdims(
     "id,name,creative{id,name,title,body,thumbnail_url,image_url,image_hash,video_id,call_to_action_type,object_story_spec,asset_feed_spec},adset_id,campaign_id,effective_status,status,bid_amount,tracking_specs,conversion_specs",
     telemetry,
     updatedSince,
+    onMedia ? async page => {
+      const media:MetaAdsFreshMedia[]=[];
+      for(const node of page){
+        const creative=node.creative;
+        if(!creative?.id)continue;
+        metaAdsCreativeAssetDescriptors(creative as Record<string,unknown>,(descriptor,url)=>{
+          if(descriptor.kind==='video'||!descriptor.slotFingerprint)return;
+          media.push({accountId:metaAdsAccountId(credential),creativeId:String(creative.id),slotKey:descriptor.slotKey,
+            kind:descriptor.kind,providerAssetId:descriptor.providerAssetId,providerAssetType:descriptor.providerAssetType,slotFingerprint:descriptor.slotFingerprint,url});
+        });
+      }
+      // Media failure cannot fail an otherwise valid metrics read; caller records retryable outcomes.
+      if(media.length)try{await onMedia(media);}catch{ /* Caller-owned best-effort cache; canonical metadata remains retryable. */ }
+    } : undefined,
   );
   snapshotSink?.push(...nodes);
   const dims = new Map<string, MetaAdsAdDim>();
@@ -10046,7 +10070,7 @@ function metaAdsSlotFingerprint(
   return `sha256:${createHash("sha256").update(`${slotKey}\0${kind}\0${identity}`).digest("hex")}`;
 }
 
-function metaAdsCreativeAssetDescriptors(creative: Record<string, unknown>): MetaAdsAssetDescriptor[] {
+function metaAdsCreativeAssetDescriptors(creative: Record<string, unknown>, onFresh?:(descriptor:MetaAdsAssetDescriptor,url:string)=>void): MetaAdsAssetDescriptor[] {
   const descriptors: MetaAdsAssetDescriptor[] = [];
   const seen = new Set<string>();
   const add = (
@@ -10076,6 +10100,7 @@ function metaAdsCreativeAssetDescriptors(creative: Record<string, unknown>): Met
     if (!seen.has(key)) {
       seen.add(key);
       descriptors.push(descriptor);
+      if(typeof sourceUrl === "string" && sourceUrl.trim())onFresh?.(descriptor,sourceUrl);
     }
   };
 
