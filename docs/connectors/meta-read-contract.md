@@ -3,7 +3,9 @@
 Meta reporting preserves provider-grain aggregates and the explicit attribution windows recorded
 with the data. Campaign/adset values are not reconstructed by summing ads: reach and frequency
 are not additive. Archived entities remain in dimension reads because historical delivery and
-creative provenance can still reference them. Missing reach/frequency remain null.
+creative provenance can still reference them. Live insight reads preserve missing reach/frequency
+as null. The legacy daily schema still requires reach (default zero) and does not persist frequency;
+preserving missing reach in stored daily rows requires a coordinated nullable-column migration.
 
 Recurring refresh reconciles at most 35 settled provider days. Explicit date ranges and backfills
 keep their requested bounds (subject to the existing 37-month backfill retention floor). A
