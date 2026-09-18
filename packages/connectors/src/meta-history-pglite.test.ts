@@ -159,16 +159,16 @@ describe("Meta Ads history CLOSE against real PGlite", () => {
     const workspaceId = `ws_meta_reach_${randomUUID()}`;
     const sourceId = `src_meta_reach_${randomUUID()}`;
     await seedSource(workspaceId, sourceId);
-    for (const day of ["2026-09-01", "2026-09-02"]) {
+    for (const [day, reach] of [["2026-09-01", undefined], ["2026-09-02", null], ["2026-09-03", ""], ["2026-09-04", "0"], ["2026-09-05", "  "]] as const) {
       const data = fixture(day);
-      if (day.endsWith("02")) for (const rows of [data.campaignInsights, data.adsetInsights, data.adInsights]) {
-        for (const row of rows) row.reach = "0";
+      if (reach !== undefined) for (const rows of [data.campaignInsights, data.adsetInsights, data.adInsights]) {
+        for (const row of rows) row.reach = reach;
       }
       await withMetaFetch(data, () => connectorFor("meta_ads").sync(db, syncRequest(workspaceId, sourceId, day, day)));
     }
     for (const table of ["meta_ads_campaign_daily", "meta_ads_adset_daily", "meta_ads_ad_daily"]) {
       const rows = await db.query<{ reach: string | null }>(`select reach::text from ${table} where source_id=$1 order by occurred_on`, [sourceId]);
-      expect(rows.map(row => row.reach)).toEqual([null, "0"]);
+      expect(rows.map(row => row.reach)).toEqual([null, null, null, "0", null]);
       const columns = await db.query<{is_nullable:string; column_default:string|null}>(
         "select is_nullable,column_default from information_schema.columns where table_name=$1 and column_name='reach'", [table]);
       expect(columns).toEqual([{is_nullable:"YES",column_default:null}]);

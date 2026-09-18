@@ -13210,7 +13210,7 @@ function numberOrZero(value: unknown): number {
 }
 
 function integerOrNull(value: unknown): number | null {
-  const parsed = numberOrNull(value);
+  const parsed = nullableNumber(typeof value === "string" ? value.trim() : value);
   return parsed === null ? null : Math.round(parsed);
 }
 
