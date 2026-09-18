@@ -2946,6 +2946,14 @@ describe("live provider clients", () => {
       expect(conversions[0].results).toBe(2);
       expect(conversions[0].conversionValue).toBeNull();
       expect(conversions[0].resultsSource).toBe("derived_from_canonical_mapping");
+      expect(payload.actionsRaw).toMatchObject({
+        provider_result_evidence: {
+          result_values_performance_indicator: "actions:lead",
+          objective: "OUTCOME_LEADS",
+          optimization_goal: "LEAD_GENERATION",
+          resolved_optimization_goal: "LEAD_GENERATION",
+        },
+      });
     }
   });
 
@@ -3438,6 +3446,16 @@ describe("live provider clients", () => {
       expect(conversions[0].results).toBe(2);
       expect(conversions[0].conversionValue).toBeNull();
       expect(conversions[0].resultsSource).toBe("derived_from_canonical_mapping");
+      expect(payload.actionsRaw).toMatchObject({
+        provider_result_evidence: {
+          result_values_performance_indicator: "actions:lead",
+          objective: "OUTCOME_LEADS",
+          // Ad insights did not echo this field; the exact classification input came
+          // from the parent adset dimension and must remain distinguishable.
+          optimization_goal: null,
+          resolved_optimization_goal: "LEAD_GENERATION",
+        },
+      });
     }
   });
 
@@ -8727,6 +8745,77 @@ describe("Meta Ads durable daily history", () => {
         expect.objectContaining({ resultType: "purchase", results: 2, conversionValue: 150, isPrimary: false }),
       ]);
       expect(conversions.reduce((sum, row) => sum + Number(row.results), 0)).toBe(5);
+    });
+  });
+
+  it("keeps a results fallback unverified without an affirmative indicator and preserves its provider evidence", async () => {
+    const insight = {
+      campaign_id: "c_missing_indicator",
+      campaign_name: "Sales campaign",
+      date_start: "2026-09-17",
+      spend: "2.80",
+      objective: "OUTCOME_SALES",
+      optimization_goal: "OFFSITE_CONVERSIONS",
+      account_currency: "GBP",
+      actions: [
+        { action_type: "lead", "7d_click": "1" },
+        { action_type: "offsite_conversion.fb_pixel_initiate_checkout", "7d_click": "2" },
+      ],
+      action_values: [
+        { action_type: "offsite_conversion.fb_pixel_initiate_checkout", "7d_click": "468" },
+      ],
+      results: [{ values: [{ value: "3" }] }],
+      cost_per_result: [{ values: [{ value: "0.933333" }] }],
+      // Intentionally omitted: result_values_performance_indicator. A missing type is
+      // absence of proof, not affirmative agreement with the purchase rule.
+    };
+    await withMockFetch((url) => {
+      if (url.includes("/campaigns") || url.includes("/adsets") || isMetaAdsEdgeRequest(url)) {
+        return historyResponse({ data: [], paging: {} });
+      }
+      if (isMetaAdsetInsightsRequest(url) || isMetaAdInsightsRequest(url)) {
+        return historyResponse({ data: [], paging: {} });
+      }
+      return historyResponse({ data: [insight], paging: {} });
+    }, async () => {
+      const extracted = await connectorFor("meta_ads").extract(
+        historyCredentialDb(),
+        request("meta_ads"),
+        {
+          cursorKey: "meta_ads_campaign_daily",
+          cursorStart: "2026-09-17T00:00:00.000Z",
+          cursorEnd: "2026-09-17T23:59:59.000Z",
+          refreshWindowDays: 30,
+          mode: "live",
+        },
+      );
+      const campaign = extracted.find((row) => row.objectType === "meta_ads_campaign_daily");
+      const payload = campaign?.payload as Record<string, unknown>;
+      expect(payload.conversions).toEqual([
+        expect.objectContaining({
+          resultType: "purchase",
+          results: 3,
+          conversionValue: null,
+          isPrimary: true,
+          resultsSource: "meta_results_unverified_type",
+        }),
+        expect.objectContaining({
+          resultType: "lead",
+          results: 1,
+          isPrimary: false,
+          resultsSource: "derived_from_canonical_mapping",
+        }),
+      ]);
+      expect(payload.actionsRaw).toMatchObject({
+        provider_result_evidence: {
+          results: insight.results,
+          cost_per_result: insight.cost_per_result,
+          result_values_performance_indicator: null,
+          objective: "OUTCOME_SALES",
+          optimization_goal: "OFFSITE_CONVERSIONS",
+          resolved_optimization_goal: "OFFSITE_CONVERSIONS",
+        },
+      });
     });
   });
 

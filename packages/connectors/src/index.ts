@@ -566,7 +566,7 @@ interface MetaAdsConversionRow {
   conversionValue: number | null;
   attributionSetting: string;
   isPrimary: boolean;
-  // 'derived_from_canonical_mapping' | 'meta_results'
+  // 'derived_from_canonical_mapping' | 'meta_results' | 'meta_results_unverified_type'
   resultsSource: string;
 }
 
@@ -593,7 +593,7 @@ interface MetaAdsCampaignDailyRow {
   currency: string | null;
   attributionSetting: string;
   apiVersion: string;
-  // Full actions[] + action_values[] (with per-window subvalues), persisted as jsonb.
+  // Full actions[] + action_values[] plus provider result/type evidence, persisted as jsonb.
   actionsRaw: unknown;
   // Coarse objective + adset optimization_goal (drive the §4b mapping).
   objective: string | null;
@@ -8489,6 +8489,29 @@ function metaInsightsActionValues(row: MetaAdsInsightsRow): MetaActionElement[] 
   return Array.isArray(row.action_values) ? (row.action_values as MetaActionElement[]) : null;
 }
 
+// Keep the exact provider evidence that controls results fallback classification beside
+// actions/action_values in the existing audit JSON. This avoids a schema split while ensuring a
+// future investigator can distinguish Meta's reported result from our resolved objective rule.
+// `resolved_optimization_goal` may come from the adset dimension at ad/adset grain; the unprefixed
+// `optimization_goal` remains the value Meta returned on this specific insights row.
+function metaAdsActionsRaw(
+  row: MetaAdsInsightsRow,
+  resolvedOptimizationGoal: string | null = stringOrNull(row.optimization_goal),
+): Record<string, unknown> {
+  return {
+    actions: metaInsightsActions(row) ?? [],
+    action_values: metaInsightsActionValues(row) ?? [],
+    provider_result_evidence: {
+      results: row.results ?? null,
+      cost_per_result: row.cost_per_result ?? null,
+      result_values_performance_indicator: stringOrNull(row.result_values_performance_indicator),
+      objective: stringOrNull(row.objective),
+      optimization_goal: stringOrNull(row.optimization_goal),
+      resolved_optimization_goal: resolvedOptimizationGoal,
+    },
+  };
+}
+
 function metaInsightsResultsValue(row: MetaAdsInsightsRow): number | null {
   // Meta's `results` field is an array of objects, each with a `values` array of
   // { value } entries — the parallel "objective_results" family. We sum the values of
@@ -8521,15 +8544,15 @@ function metaInsightsReportedResultType(row: MetaAdsInsightsRow): string | null 
 // Cross-check: does Meta's reported result indicator name an action_type that belongs
 // to OUR canonical rule for this row? Used only to flag a meta_results fallback whose
 // type we could NOT verify (so reconciliation drift is visible), never to relabel the
-// stored result_type. When Meta reports no indicator we treat it as verified (nothing
-// to contradict).
+// stored result_type. A missing indicator is absence of proof, so only an affirmative
+// indicator match verifies a fallback.
 function metaResultTypeMatchesRule(
   row: MetaAdsInsightsRow,
   rule: MetaCanonicalEventRule
 ): boolean {
   const reported = metaInsightsReportedResultType(row);
   if (!reported) {
-    return true;
+    return false;
   }
   return rule.actionTypes.includes(reported);
 }
@@ -9347,11 +9370,8 @@ function metaAdsCampaignDailyRow(
     currency: stringOrNull(row.account_currency)?.toLowerCase() ?? null,
     attributionSetting: context.attributionSetting,
     apiVersion: context.apiVersion,
-    // Persist the full actions[] + action_values[] for audit/recompute.
-    actionsRaw: {
-      actions: actions ?? [],
-      action_values: metaInsightsActionValues(row) ?? []
-    },
+    // Persist actions plus the provider result evidence for audit/recompute.
+    actionsRaw: metaAdsActionsRaw(row),
     objective: stringOrNull(row.objective),
     optimizationGoal: stringOrNull(row.optimization_goal),
     effectiveStatus: status?.effectiveStatus ?? null,
@@ -9404,10 +9424,7 @@ function metaAdsAdsetDailyRow(
     currency: stringOrNull(row.account_currency)?.toLowerCase() ?? dim?.currency ?? null,
     attributionSetting: context.attributionSetting,
     apiVersion: context.apiVersion,
-    actionsRaw: {
-      actions: actions ?? [],
-      action_values: metaInsightsActionValues(row) ?? []
-    },
+    actionsRaw: metaAdsActionsRaw(row, optimizationGoal),
     optimizationGoal,
     billingEvent: dim?.billingEvent ?? null,
     effectiveStatus: dim?.effectiveStatus ?? null,
@@ -9471,10 +9488,7 @@ function metaAdsAdDailyRow(
     currency: stringOrNull(row.account_currency)?.toLowerCase() ?? null,
     attributionSetting: context.attributionSetting,
     apiVersion: context.apiVersion,
-    actionsRaw: {
-      actions: actions ?? [],
-      action_values: metaInsightsActionValues(row) ?? []
-    },
+    actionsRaw: metaAdsActionsRaw(row, optimizationGoal),
     effectiveStatus: dim?.effectiveStatus ?? null,
     configuredStatus: dim?.configuredStatus ?? null,
     conversions: metaAdsConversionRows(conversionRow, context)
