@@ -11996,6 +11996,25 @@ function scrubMetaToken(text: string, accessToken: string | undefined): string {
   return scrubbed;
 }
 
+function safeMetaCliClickUsageDiagnostic(
+  stderr: string,
+  accessToken: string | undefined,
+  prefix: string,
+  exitCode: number | null
+): { code: "meta_cli_invalid_arguments"; message: string } | null {
+  if (exitCode !== 2) return null;
+  const scrubbed = scrubMetaToken(stderr, accessToken).trim();
+  if (!scrubbed.startsWith("Usage:")) return null;
+  const errorLine = scrubbed.split(/\r?\n/).map((line) => line.trim()).find((line) => line.startsWith("Error: "));
+  if (!errorLine) return null;
+  let detail = errorLine.slice("Error: ".length).trim();
+  if (!detail.startsWith("Invalid value for ") && !detail.startsWith("No such option")) return null;
+  detail = detail.replace(/(Invalid value for '[^']+': )'[^']*'/, "$1'<redacted>'");
+  detail = scrubMetaToken(detail, accessToken).slice(0, 1_000);
+  const exit = typeof exitCode === "number" ? ` (exit ${exitCode})` : "";
+  return { code: "meta_cli_invalid_arguments", message: `${prefix}${exit}: ${detail}` };
+}
+
 // The daemon can be spawned with a cwd that is later removed (e.g. a temp build dir). Node's
 // `spawn` throws if the child's cwd no longer exists, so pin the Meta CLI to a stable, existing
 // directory instead of inheriting the daemon's (possibly-gone) cwd.
@@ -12115,6 +12134,19 @@ async function callMetaAdsCliJson(
         // ACCESS_TOKEN value the CLI uses — explicit OR ambient/inherited) from stderr
         // BEFORE embedding it in the error message, so a CLI that echoes the token in a
         // diagnostic never leaks it.
+        const diagnostic = safeMetaCliClickUsageDiagnostic(
+          stderrBuffer,
+          tokenForScrub,
+          "Meta Ads CLI command failed",
+          code
+        );
+        if (diagnostic) {
+          finish(() => {
+            child.kill();
+            reject(new ConnectorError(diagnostic.code, diagnostic.message, false));
+          });
+          return;
+        }
         const scrubbed = scrubMetaToken(stderrBuffer.trim(), tokenForScrub);
         const detail = scrubbed ? `: ${scrubbed}` : "";
         fail(`Meta Ads CLI command failed${detail}`);
@@ -12158,6 +12190,7 @@ async function callIsolatedMetaAdsCliJson(
   }
   const home = mkdtempSync(join(tmpdir(), "meta-cli-server-"));
   let stdout = Buffer.alloc(0);
+  let stderr = Buffer.alloc(0);
   let stderrBytes = 0;
   let failed: ConnectorError | null = null;
   try {
@@ -12215,6 +12248,9 @@ async function callIsolatedMetaAdsCliJson(
       });
       child.stderr.on("data", (chunk: Buffer) => {
         stderrBytes += chunk.length;
+        if (stderr.length < 8 * 1024) {
+          stderr = Buffer.concat([stderr, chunk]).subarray(0, 8 * 1024);
+        }
         if (stderrBytes > 8 * 1024 && !failed) {
           failed = new ConnectorError("provider_api_error", "Meta Ads CLI server error output exceeded the limit", false);
           hardStop();
@@ -12227,7 +12263,17 @@ async function callIsolatedMetaAdsCliJson(
       const result = await close;
       if (failed) throw failed;
       if (result.code !== 0 || result.signal) {
-        // Provider stderr can echo arbitrary credentials. Never return its raw body.
+        // Provider stderr can echo arbitrary credentials. Only expose Click's local
+        // argument parser errors after scrubbing and narrowing to its safe one-line detail.
+        const diagnostic = safeMetaCliClickUsageDiagnostic(
+          stderr.toString("utf8"),
+          token,
+          "Meta Ads CLI server command failed",
+          result.code
+        );
+        if (diagnostic) {
+          throw new ConnectorError(diagnostic.code, diagnostic.message, false);
+        }
         throw new ConnectorError("provider_api_error", "Meta Ads CLI server command failed", false);
       }
       const output = stdout.toString("utf8");
@@ -12351,11 +12397,11 @@ function lastBalancedJsonBlock(text: string): string | null {
 // echoed status) out of the `--output json` body.
 //
 // MONEY-SAFETY parity with the direct Graph path is enforced HERE too:
-//  • creates pass `--status paused` (and the CLI also defaults PAUSED) — INVARIANT 1.
+//  • creates pass `--status PAUSED` (and the CLI also defaults PAUSED) — INVARIANT 1.
 //    THIS FLAG is what GUARANTEES the create lands PAUSED. The `assertCreateNotActive`
 //    echo check below is a best-effort SECONDARY guard ONLY: the CLI's `--output json`
 //    body may OMIT `status`, in which case the echo guard is a NO-OP (status comes back
-//    null) — so the PAUSED guarantee rests on `--status paused`, not on the echo.
+//    null) — so the PAUSED guarantee rests on `--status PAUSED`, not on the echo.
 //  • the parsed response is run through `assertCreateNotActive` — a Graph echo of
 //    ACTIVE throws a non-retryable `money_safety_violation` exactly as on the
 //    direct path (a no-op when the CLI omits status — see above).
@@ -12451,7 +12497,7 @@ async function createMetaCampaignViaCli(
     objective,
     // INVARIANT 1: hard-code PAUSED (the CLI also defaults PAUSED). NEVER `active`.
     "--status",
-    "paused"
+    "PAUSED"
   ];
   pushCentsFlag(args, "--daily-budget", input.dailyBudget);
   pushCentsFlag(args, "--lifetime-budget", input.lifetimeBudget);
@@ -12488,7 +12534,7 @@ async function createMetaAdSetViaCli(
     billingEvent,
     // INVARIANT 1: hard-code PAUSED.
     "--status",
-    "paused"
+    "PAUSED"
   ];
   pushCentsFlag(args, "--daily-budget", input.dailyBudget);
   pushCentsFlag(args, "--lifetime-budget", input.lifetimeBudget);
@@ -12752,7 +12798,7 @@ async function createMetaAdViaCli(
     input.creativeId,
     // INVARIANT 1: hard-code PAUSED.
     "--status",
-    "paused",
+    "PAUSED",
     // POSITIONAL hardening (review): "--" ends option parsing; the ADSET_ID positional
     // goes LAST so a leading-dash id can never be misparsed as an option.
     "--",
@@ -12782,7 +12828,7 @@ async function setMetaEntityStatusViaCli(
     metaCliEntityToken(entity),
     "update",
     "--status",
-    status.toLowerCase(),
+    status,
     // POSITIONAL hardening (review): "--" ends option parsing; the entity ID positional
     // goes LAST so a leading-dash id can never be misparsed as an option.
     "--",

@@ -1,7 +1,8 @@
+import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 const setTimeoutOriginal = globalThis.setTimeout;
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { decryptCredentialPayload, encryptCredentialPayload } from "@infinite-os/core";
@@ -155,10 +156,52 @@ process.exit(2);`);
       );
       let failure: unknown;
       try { await createMetaCampaign(credential, campaign); } catch (error) { failure = error; }
-      expect(failure).toMatchObject({ retryable: false });
+      expect(failure).toMatchObject({ code: "provider_api_error", retryable: false });
       expect(String(failure)).not.toContain("private-token");
       expect(String(failure)).not.toContain("EAAabcdef123456");
       expect(existsSync(readFileSync(join(dir, "failed-home"), "utf8"))).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("surfaces whitelisted Click usage errors without raw stderr or secrets", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "meta-server-test-"));
+    const executable = fakeExecutable(dir, `
+process.stderr.write("Usage: meta ads campaign create [OPTIONS]\\nTry 'meta ads campaign create --help' for help.\\n\\nError: Invalid value for '--status': 'paused' is not one of 'ACTIVE', 'PAUSED'.\\nauth failed for " + process.env.ACCESS_TOKEN + " EAAabcdef123456");
+process.exit(2);`);
+    try {
+      const credential = bindMetaAdsCliExecution(
+        { mode: "live", transport: "meta_ads_cli", adAccountId: "333", accessToken: "private-token" },
+        { mode: "isolated_server", executable }
+      );
+      let failure: unknown;
+      try { await createMetaCampaign(credential, campaign); } catch (error) { failure = error; }
+      expect(failure).toMatchObject({ code: "meta_cli_invalid_arguments", retryable: false });
+      expect(String(failure)).toContain("Meta Ads CLI server command failed (exit 2): Invalid value for '--status': '<redacted>' is not one of 'ACTIVE', 'PAUSED'.");
+      expect(String(failure)).not.toContain("private-token");
+      expect(String(failure)).not.toContain("EAAabcdef123456");
+      expect(String(failure)).not.toContain("auth failed");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps Click-shaped stderr generic unless the CLI exits with Click usage code 2", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "meta-server-test-"));
+    const executable = fakeExecutable(dir, `
+process.stderr.write("Usage: meta ads campaign create [OPTIONS]\\n\\nError: Invalid value for '--status': 'paused' is not one of 'ACTIVE', 'PAUSED'.");
+process.exit(1);`);
+    try {
+      const credential = bindMetaAdsCliExecution(
+        { mode: "live", transport: "meta_ads_cli", adAccountId: "333", accessToken: "private-token" },
+        { mode: "isolated_server", executable }
+      );
+      let failure: unknown;
+      try { await createMetaCampaign(credential, campaign); } catch (error) { failure = error; }
+      expect(failure).toMatchObject({ code: "provider_api_error", retryable: false });
+      expect(String(failure)).toContain("Meta Ads CLI server command failed");
+      expect(String(failure)).not.toContain("Invalid value for '--status'");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -7632,6 +7675,15 @@ describe("Meta Ads WRITE helpers", () => {
 import process from "node:process";
 import { writeFileSync } from "node:fs";
 const args = process.argv.slice(2);
+const statusIndex = args.indexOf("--status");
+if (statusIndex !== -1) {
+  const status = args[statusIndex + 1] ?? "";
+  const allowed = args.includes("update") ? ["ACTIVE", "PAUSED", "ARCHIVED"] : ["ACTIVE", "PAUSED"];
+  if (!allowed.includes(status)) {
+    process.stderr.write("Usage: meta ads command [OPTIONS]\\n\\nError: Invalid value for '--status': '" + status + "' is not one of " + allowed.map((value) => "'" + value + "'").join(", ") + ".\\n");
+    process.exit(2);
+  }
+}
 writeFileSync(${JSON.stringify(join(dir, "argv.json"))}, JSON.stringify(args));
 writeFileSync(${JSON.stringify(join(dir, "env-token.json"))}, JSON.stringify(process.env.ACCESS_TOKEN ?? null));
 writeFileSync(${JSON.stringify(join(dir, "cwd.json"))}, JSON.stringify(process.cwd()));
@@ -7714,7 +7766,61 @@ console.log(${JSON.stringify(serialized)});
       return fn(dir).finally(() => rmSync(dir, { recursive: true, force: true }));
     }
 
-    it("creates a campaign via `meta ads campaign create` with --status paused (NEVER active)", async () => {
+    it("installed meta-ads 1.1.0 rejects lowercase status before any network and accepts uppercase parsing", () => {
+      const configuredMetaBin = process.env.META_ADS_CLI_CONTRACT_BIN;
+      const metaBin = configuredMetaBin && existsSync(configuredMetaBin)
+        ? configuredMetaBin
+        : (process.env.PATH ?? "").split(delimiter).map((entry) => join(entry, "meta")).find((candidate) => existsSync(candidate));
+      if (!metaBin) return;
+      const envHome = mkdtempSync(join(tmpdir(), "meta-cli-parser-home-"));
+      const envConfig = mkdtempSync(join(tmpdir(), "meta-cli-parser-config-"));
+      const envCache = mkdtempSync(join(tmpdir(), "meta-cli-parser-cache-"));
+      try {
+        const run = (status: string) => spawnSync(metaBin, [
+          "--no-color", "--no-input", "--output", "json",
+          "ads", "--ad-account-id", "act_1234567890",
+          "campaign", "create",
+          "--name", "Offline parser contract",
+          "--objective", "OUTCOME_TRAFFIC",
+          "--status", status
+        ], {
+          encoding: "utf8",
+          timeout: 7_000,
+          env: {
+            ACCESS_TOKEN: "fake-token",
+            AD_ACCOUNT_ID: "act_1234567890",
+            PATH: "/usr/bin:/bin",
+            HOME: envHome,
+            XDG_CONFIG_HOME: envConfig,
+            XDG_CACHE_HOME: envCache,
+            PYTHON_DOTENV_DISABLED: "1",
+            PYTHONUNBUFFERED: "1",
+            HTTPS_PROXY: "http://127.0.0.1:9",
+            HTTP_PROXY: "http://127.0.0.1:9",
+            ALL_PROXY: "http://127.0.0.1:9",
+            https_proxy: "http://127.0.0.1:9",
+            http_proxy: "http://127.0.0.1:9",
+            all_proxy: "http://127.0.0.1:9",
+            NO_PROXY: "",
+            no_proxy: ""
+          }
+        });
+
+        const lower = run("paused");
+        expect(lower.status).toBe(2);
+        expect(lower.stderr).toContain("Invalid value for '--status': 'paused'");
+
+        const upper = run("PAUSED");
+        expect(upper.stderr).not.toContain("Invalid value for '--status'");
+        expect(upper.stderr).toMatch(/ConnectionRefusedError|ProxyError|MaxRetryError|Failed to establish a new connection/);
+      } finally {
+        rmSync(envHome, { recursive: true, force: true });
+        rmSync(envConfig, { recursive: true, force: true });
+        rmSync(envCache, { recursive: true, force: true });
+      }
+    });
+
+    it("creates a campaign via `meta ads campaign create` with --status PAUSED (NEVER active)", async () => {
       await withTmp(async (dir) => {
         const result = await createMetaCampaign(
           cliCredential(dir, { id: "120000000000010", status: "PAUSED" }),
@@ -7729,8 +7835,8 @@ console.log(${JSON.stringify(serialized)});
         expect(argv[argv.indexOf("--objective") + 1]).toBe("OUTCOME_TRAFFIC");
         // Budget passed as integer cents.
         expect(argv[argv.indexOf("--daily-budget") + 1]).toBe("5000");
-        // MONEY-SAFETY: --status paused, NEVER active.
-        expect(argv[argv.indexOf("--status") + 1]).toBe("paused");
+        // MONEY-SAFETY: --status PAUSED, NEVER ACTIVE.
+        expect(argv[argv.indexOf("--status") + 1]).toBe("PAUSED");
         expect(argv).not.toContain("active");
         // POSITIVE injection assertion: the stored credential token reached the CLI as
         // ACCESS_TOKEN (writes rely on this; prod has no ambient ACCESS_TOKEN).
@@ -7890,7 +7996,7 @@ console.log(${JSON.stringify(serialized)});
         expect(argv[argv.indexOf("--pixel-id") + 1]).toBe("px_1");
         // pixel ⇒ default conversion event PURCHASE.
         expect(argv[argv.indexOf("--custom-event-type") + 1]).toBe("PURCHASE");
-        expect(argv[argv.indexOf("--status") + 1]).toBe("paused");
+        expect(argv[argv.indexOf("--status") + 1]).toBe("PAUSED");
         // Product rule: Advantage+ audience is OFF on every ad set, even the countries-only shape.
         expect(argv).toContain("--no-advantage-audience");
         expect(argv).not.toContain("--advantage-audience");
@@ -7927,7 +8033,7 @@ console.log(${JSON.stringify(serialized)});
         expect(argv[argv.indexOf("--targeting") + 1]).toBe(JSON.stringify(targeting));
         expect(argv).toContain("--no-advantage-audience");
         expect(argv).not.toContain("--advantage-audience");
-        expect(argv[argv.indexOf("--status") + 1]).toBe("paused");
+        expect(argv[argv.indexOf("--status") + 1]).toBe("PAUSED");
         // The positional campaign id is still LAST, after `--`.
         expect(argv.slice(-2)).toEqual(["--", "120000000000010"]);
       });
@@ -8259,7 +8365,7 @@ console.log(${JSON.stringify(serialized)});
       });
     });
 
-    it("creates an ad via `meta ads ad create <ADSET_ID>` with --status paused", async () => {
+    it("creates an ad via `meta ads ad create <ADSET_ID>` with --status PAUSED", async () => {
       await withTmp(async (dir) => {
         const result = await createMetaAd(cliCredential(dir, { id: "120000000000040", status: "PAUSED" }), {
           name: "CLI Ad",
@@ -8273,7 +8379,7 @@ console.log(${JSON.stringify(serialized)});
         expect(argv[argv.length - 1]).toBe("120000000000020"); // positional adset id
         expect(argv[argv.length - 2]).toBe("--");
         expect(argv[argv.indexOf("--creative-id") + 1]).toBe("120000000000030");
-        expect(argv[argv.indexOf("--status") + 1]).toBe("paused");
+        expect(argv[argv.indexOf("--status") + 1]).toBe("PAUSED");
         expect(argv).not.toContain("active");
       });
     });
@@ -8310,7 +8416,7 @@ console.log(${JSON.stringify(serialized)});
           "campaign",
           "update",
           "--status",
-          "active",
+          "ACTIVE",
           // POSITIONAL hardening: the entity id is LAST, preceded by `--`.
           "--",
           "120000000000010"
