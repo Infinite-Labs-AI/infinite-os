@@ -20,6 +20,7 @@ type MetaFixture = {
   adsetInsights: Array<Record<string, unknown>>;
   adInsights: Array<Record<string, unknown>>;
   failLevel?: "campaign" | "adset" | "ad";
+  edgeResponse?: (edge:string,url:URL)=>Response|undefined;
 };
 
 describe("Meta Ads history CLOSE against real PGlite", () => {
@@ -100,6 +101,8 @@ describe("Meta Ads history CLOSE against real PGlite", () => {
         return new Response(JSON.stringify({ id: ACCOUNT, account_id: "123", currency: "GBP", timezone_name: "Europe/London" }), { status: 200, headers });
       }
       const edge = requestUrl.pathname.split("/").at(-1);
+      const custom=fixture.edgeResponse?.(edge ?? "",requestUrl);
+      if(custom)return custom;
       if (edge === "campaigns") return new Response(JSON.stringify({ data: fixture.campaigns, paging: {} }), { status: 200, headers });
       if (edge === "adsets") return new Response(JSON.stringify({ data: fixture.adsets, paging: {} }), { status: 200, headers });
       if (edge === "ads") return new Response(JSON.stringify({ data: fixture.ads, paging: {} }), { status: 200, headers });
@@ -237,6 +240,8 @@ describe("Meta Ads history CLOSE against real PGlite", () => {
       [workspaceId, sourceId, ACCOUNT],
     );
 
+    // Only a complete reconciliation may infer removal from absence.
+    await db.query("update sync_cursors set cursor_value='2020-01-01T00:00:00.000Z' where source_id=$1 and cursor_key like 'meta_ads_entities_full:%'",[sourceId]);
     await withMetaFetch(fixture("2026-09-01", { changedStatus: true }), () =>
       connectorFor("meta_ads").sync(db, syncRequest(workspaceId, sourceId, "2026-09-01", "2026-09-03"))
     );
@@ -853,4 +858,29 @@ describe("Meta Ads history CLOSE against real PGlite", () => {
       [sourceId],
     )).toEqual([{ cursor_value: "2026-11-07" }]);
   }, 120_000);
+  it("pages only changed ads, preserves unchanged entities and commits the checkpoint only on success", async()=>{
+    const workspaceId=`ws_delta_${randomUUID()}`,sourceId=`src_delta_${randomUUID()}`;
+    await seedSource(workspaceId,sourceId);
+    await withMetaFetch(fixture('2026-09-01',{includeSecondAd:true}),()=>connectorFor('meta_ads').sync(db,syncRequest(workspaceId,sourceId,'2026-09-01','2026-09-01')));
+    const urls:URL[]=[];
+    const changes=Array.from({length:10},(_,i)=>({id:`new${i}`,campaign_id:'c1',adset_id:'s1',name:`New ${i}`,status:'PAUSED',effective_status:'PAUSED'}));
+    const delta=fixture('2026-09-01',{changedStatus:true});delta.adsets=[];
+    delta.edgeResponse=(edge,url)=>{
+      urls.push(url);
+      if(edge!=='ads')return undefined;
+      return new Response(JSON.stringify(url.searchParams.has('after')?{data:changes.slice(5)}:{data:[delta.ads[0],...changes.slice(0,5)],paging:{cursors:{after:'page2'},next:'https://graph.facebook.com/page2'}}),{status:200,headers:{'content-type':'application/json'}});
+    };
+    await withMetaFetch(delta,()=>connectorFor('meta_ads').sync(db,syncRequest(workspaceId,sourceId,'2026-09-01','2026-09-01')));
+    const ads=await db.query<{entity_id:string;configured_status:string}>("select entity_id,configured_status from meta_ads_entity_versions where source_id=$1 and entity_type='ad' and valid_to is null",[sourceId]);
+    expect(ads).toHaveLength(12);expect(ads.find(ad=>ad.entity_id==='a1')?.configured_status).toBe('PAUSED');expect(ads.some(ad=>ad.entity_id==='a2')).toBe(true);
+    expect(urls.filter(url=>url.pathname.endsWith('/ads'))).toHaveLength(2);
+    expect(urls.filter(url=>/\/(ads|adsets)$/.test(url.pathname)).every(url=>Number(url.searchParams.get('updated_since'))>0)).toBe(true);
+    expect(urls.find(url=>url.pathname.endsWith('/campaigns'))?.searchParams.has('updated_since')).toBe(false);
+    const before=await db.query("select cursor_key,cursor_value from sync_cursors where source_id=$1 and cursor_key like 'meta_ads_entities_%' order by cursor_key",[sourceId]);
+    expect(before).toHaveLength(2);
+    delta.edgeResponse=(edge,url)=>edge==='ads'?new Response(JSON.stringify(url.searchParams.has('after')?{error:{code:100,message:'failed second page'}}:{data:[],paging:{cursors:{after:'page2'},next:'https://graph.facebook.com/page2'}}),{status:url.searchParams.has('after')?400:200,headers:{'content-type':'application/json'}}):undefined;
+    await expect(withMetaFetch(delta,()=>connectorFor('meta_ads').sync(db,syncRequest(workspaceId,sourceId,'2026-09-01','2026-09-01')))).rejects.toThrow();
+    expect(await db.query("select cursor_key,cursor_value from sync_cursors where source_id=$1 and cursor_key like 'meta_ads_entities_%' order by cursor_key",[sourceId])).toEqual(before);
+  },120_000);
+
 });
