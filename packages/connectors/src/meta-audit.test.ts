@@ -4,6 +4,21 @@ import { MetaAdsRequestTelemetry } from './meta-telemetry.js';
 
 afterEach(() => vi.unstubAllGlobals());
 const credential = { mode: 'live', transport: 'marketing_api', adAccountId: '123', accessToken: 'test-token' } as const;
+it('persists the sync operation and reservation timestamp before a provider request', async () => {
+  const snapshots: Array<Record<string, unknown>> = [];
+  const Telemetry = MetaAdsRequestTelemetry as unknown as new (
+    limit: number,
+    persist: (snapshot: Record<string, unknown>) => Promise<void>,
+    deadline?: number,
+    onResponse?: unknown,
+    operation?: 'inventory_sync' | 'history_sync',
+  ) => MetaAdsRequestTelemetry;
+  const telemetry = new Telemetry(6, async snapshot => { snapshots.push(snapshot); }, undefined, undefined, 'inventory_sync');
+  await telemetry.beforeRequest('account_liveness', false);
+  expect(snapshots).toHaveLength(1);
+  expect(snapshots[0]).toMatchObject({ operation: 'inventory_sync', requestCount: 1 });
+  expect(Date.parse(String(snapshots[0]?.lastReservedAt))).not.toBeNaN();
+});
 it('accounts every live insight and narrow status page before dispatch', async () => {
   const snapshots: number[] = [];
   const telemetry = new MetaAdsRequestTelemetry(4, async s => { snapshots.push(s.requestCount); });
