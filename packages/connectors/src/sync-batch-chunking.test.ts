@@ -68,7 +68,7 @@ describe("chunked syncExtractedBatch against real PGlite", () => {
   async function seedSource(
     workspaceId: string,
     sourceId: string,
-    provider: "posthog" | "stripe" = "posthog"
+    provider: "posthog" | "stripe" | "meta_ads" = "posthog"
   ): Promise<void> {
     await db.withTransaction(async (tx) => {
       await tx.ensureWorkspace(workspaceId, workspaceId);
@@ -1225,6 +1225,22 @@ describe("chunked syncExtractedBatch against real PGlite", () => {
       rejected_runs: "0"
     }]);
   });
+
+  for(const phase of ["load","close"] as const)it(`inventory-only restores exact source state after ${phase} failure`,async()=>{
+    const workspaceId=`ws_inventory_${phase}_${randomUUID()}`,sourceId=`src_inventory_${phase}_${randomUUID()}`;await seedSource(workspaceId,sourceId,"meta_ads");
+    await db.query("update sources set status='error',last_synced_at='2026-09-01T10:00:00.123456Z',consecutive_sync_failures=4,last_counted_sync_failure_at='2026-09-01T11:00:00.654321Z' where id=$1",[sourceId]);
+    const before=(await db.query("select status,last_synced_at::text,consecutive_sync_failures,last_counted_sync_failure_at::text from sources where id=$1",[sourceId]))[0];
+    await expect(__testOnlySyncExtractedBatch(db,{workspaceId,sourceId,provider:"meta_ads",syncRunId:`run_${randomUUID()}`,metaAdsSyncMode:"inventory_only"},makePlan("2026-09-02T00:00:00.000Z"),phase==="load"?makeRecords(1,phase):[],async()=>{if(phase==="load")throw new Error("forced inventory load failure");},async()=>{if(phase==="close")throw new Error("forced inventory close failure");})).rejects.toThrow(`forced inventory ${phase} failure`);
+    expect((await db.query("select status,last_synced_at::text,consecutive_sync_failures,last_counted_sync_failure_at::text from sources where id=$1",[sourceId]))[0]).toEqual(before);
+    expect(await db.query("select id from sync_cursors where source_id=$1",[sourceId])).toEqual([]);
+  },120_000);
+
+  it("inventory-only does not restore over a source revoked after its claim",async()=>{
+    const workspaceId=`ws_inventory_revoke_${randomUUID()}`,sourceId=`src_inventory_revoke_${randomUUID()}`;await seedSource(workspaceId,sourceId,"meta_ads");
+    const inner=db;let transaction=0;const racingDb:InfiniteOsDb={...inner,withTransaction:async fn=>{transaction+=1;if(transaction===3)await inner.query("update sources set status='revoked' where id=$1",[sourceId]);return inner.withTransaction(fn);}};
+    await expect(__testOnlySyncExtractedBatch(racingDb,{workspaceId,sourceId,provider:"meta_ads",syncRunId:`run_${randomUUID()}`,metaAdsSyncMode:"inventory_only"},makePlan("2026-09-02T00:00:00.000Z"),[],async()=>{})).rejects.toMatchObject({code:"sync_claim_lost"});
+    expect(await db.query("select status from sources where id=$1",[sourceId])).toEqual([{status:"revoked"}]);
+  },120_000);
 
   it("cleans up the exact claim when batch OPEN fails before a batch row commits", async () => {
     const workspaceId = "ws_open_failure_cleanup";
