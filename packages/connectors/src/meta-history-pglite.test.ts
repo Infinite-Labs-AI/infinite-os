@@ -883,6 +883,117 @@ describe("Meta Ads history CLOSE against real PGlite", () => {
     expect(await db.query("select cursor_key,cursor_value from sync_cursors where source_id=$1 and cursor_key like 'meta_ads_entities_%' order by cursor_key",[sourceId])).toEqual(before);
   },120_000);
 
+  it("inventory-only sync updates entity truth without insights, history cursor movement, or history-health reset", async () => {
+    const workspaceId = `ws_meta_inventory_only_${randomUUID()}`;
+    const sourceId = `src_meta_inventory_only_${randomUUID()}`;
+    await seedSource(workspaceId, sourceId);
+    await withMetaFetch(fixture("2026-09-01"), () =>
+      connectorFor("meta_ads").sync(db, syncRequest(workspaceId, sourceId, "2026-09-01", "2026-09-01"))
+    );
+    await db.query(
+      `update sources set status='error',last_synced_at='2026-09-01T11:00:00.123456Z',consecutive_sync_failures=2,
+         last_counted_sync_failure_at='2026-09-01T12:00:00.654321Z'
+       where id=$1`,
+      [sourceId],
+    );
+    const genericBefore = await db.query<{cursor_key:string;cursor_value:string}>(
+      "select cursor_key,cursor_value from sync_cursors where source_id=$1 and cursor_key not like 'meta_ads_entities_%' order by cursor_key",
+      [sourceId],
+    );
+    const sourceBefore = (await db.query("select status,last_synced_at::text,consecutive_sync_failures,last_counted_sync_failure_at::text from sources where id=$1",[sourceId]))[0];
+    let insightCalls = 0;
+    const changed = fixture("2026-09-02", { changedStatus: true });
+    changed.edgeResponse = edge => { if (edge === "insights") insightCalls += 1; return undefined; };
+    const request = Object.assign(syncRequest(workspaceId, sourceId, "2026-09-02", "2026-09-02"), {
+      metaAdsSyncMode: "inventory_only" as const,
+    }) as SyncRequest;
+    await withMetaFetch(changed, () => connectorFor("meta_ads").sync(db, request));
+    expect(insightCalls).toBe(0);
+    expect((await db.query<{configured_status:string;effective_status:string}>(
+      "select configured_status,effective_status from meta_ads_entity_versions where source_id=$1 and entity_type='ad' and entity_id='a1' and valid_to is null",
+      [sourceId],
+    ))[0]).toEqual({ configured_status: "PAUSED", effective_status: "PAUSED" });
+    expect(await db.query("select id from meta_ads_ad_daily where source_id=$1 and occurred_on='2026-09-02'",[sourceId])).toEqual([]);
+    expect(await db.query("select occurred_on from meta_ads_coverage_daily where source_id=$1 and occurred_on='2026-09-02'",[sourceId])).toEqual([]);
+    expect(await db.query("select cursor_key,cursor_value from sync_cursors where source_id=$1 and cursor_key not like 'meta_ads_entities_%' order by cursor_key",[sourceId])).toEqual(genericBefore);
+    expect((await db.query("select status,last_synced_at::text,consecutive_sync_failures,last_counted_sync_failure_at::text from sources where id=$1",[sourceId]))[0]).toEqual(sourceBefore);
+  }, 120_000);
+
+  it("inventory-only rejects an ambient CLI before provider work",async()=>{
+    const workspaceId=`ws_inventory_transport_${randomUUID()}`,sourceId=`src_inventory_transport_${randomUUID()}`;await seedSource(workspaceId,sourceId);
+    await db.query("update connection_credentials set encrypted_payload=$2 where source_id=$1",[sourceId,encryptCredentialPayload({mode:"live",transport:"meta_ads_cli",adAccountId:ACCOUNT,apiVersion:"v25.0"},KEY)]);
+    let calls=0;const original=globalThis.fetch;globalThis.fetch=(async()=>{calls+=1;throw new Error("must not call provider");}) as typeof fetch;
+    try{await expect(connectorFor("meta_ads").sync(db,{...syncRequest(workspaceId,sourceId,"2026-09-02","2026-09-02"),metaAdsSyncMode:"inventory_only"})).rejects.toMatchObject({code:"provider_unsupported",retryable:false});}
+    finally{globalThis.fetch=original;}
+    expect(calls).toBe(0);expect(await db.query("select id from meta_ads_campaign_daily where source_id=$1",[sourceId])).toEqual([]);
+  },120_000);
+
+  it("rejects split modes for fixture credentials",async()=>{
+    const workspaceId=`ws_fixture_mode_${randomUUID()}`,sourceId=`src_fixture_mode_${randomUUID()}`;await seedSource(workspaceId,sourceId);
+    await db.query("update connection_credentials set encrypted_payload='fixture-encrypted' where source_id=$1",[sourceId]);
+    await expect(connectorFor("meta_ads").sync(db,{...syncRequest(workspaceId,sourceId,"2026-09-02","2026-09-02"),metaAdsSyncMode:"insights_only"})).rejects.toMatchObject({code:"provider_unsupported",retryable:false});
+  },120_000);
+
+  it("inventory-only extraction failure restores source health and cursors exactly",async()=>{
+    const workspaceId=`ws_inventory_extract_${randomUUID()}`,sourceId=`src_inventory_extract_${randomUUID()}`;await seedSource(workspaceId,sourceId);
+    await withMetaFetch(fixture("2026-09-01"),()=>connectorFor("meta_ads").sync(db,syncRequest(workspaceId,sourceId,"2026-09-01","2026-09-01")));
+    await db.query("update sources set status='error',last_synced_at='2026-09-01T11:00:00.123456Z',consecutive_sync_failures=3,last_counted_sync_failure_at='2026-09-01T12:00:00.654321Z' where id=$1",[sourceId]);
+    const before=(await db.query("select status,last_synced_at::text,consecutive_sync_failures,last_counted_sync_failure_at::text from sources where id=$1",[sourceId]))[0];
+    const cursors=await db.query("select cursor_key,cursor_value from sync_cursors where source_id=$1 order by cursor_key",[sourceId]);
+    const broken=fixture("2026-09-02");broken.edgeResponse=edge=>edge==="campaigns"?new Response(JSON.stringify({error:{message:"inventory edge failed"}}),{status:500,headers:{"content-type":"application/json"}}):undefined;
+    await expect(withMetaFetch(broken,()=>connectorFor("meta_ads").sync(db,{...syncRequest(workspaceId,sourceId,"2026-09-02","2026-09-02"),metaAdsSyncMode:"inventory_only"}))).rejects.toThrow(/inventory edge failed/);
+    expect((await db.query("select status,last_synced_at::text,consecutive_sync_failures,last_counted_sync_failure_at::text from sources where id=$1",[sourceId]))[0]).toEqual(before);
+    expect(await db.query("select cursor_key,cursor_value from sync_cursors where source_id=$1 order by cursor_key",[sourceId])).toEqual(cursors);
+  },120_000);
+
+  it("insights-only sync writes facts without re-reading entity edges or advancing the entity checkpoint", async () => {
+    const workspaceId = `ws_meta_insights_only_${randomUUID()}`;
+    const sourceId = `src_meta_insights_only_${randomUUID()}`;
+    await seedSource(workspaceId, sourceId);
+    await withMetaFetch(fixture("2026-09-01"), () =>
+      connectorFor("meta_ads").sync(db, syncRequest(workspaceId, sourceId, "2026-09-01", "2026-09-01"))
+    );
+    const entityCursorBefore = await db.query<{cursor_key:string;cursor_value:string}>(
+      "select cursor_key,cursor_value from sync_cursors where source_id=$1 and cursor_key like 'meta_ads_entities_%' order by cursor_key",
+      [sourceId],
+    );
+    const entityObservedBefore = await db.query<{entity_id:string;last_observed_at:string}>(
+      "select entity_id,last_observed_at::text from meta_ads_entity_versions where source_id=$1 and entity_type='ad' and valid_to is null order by entity_id",
+      [sourceId],
+    );
+    let edgeCalls = 0;
+    const next = fixture("2026-09-02");
+    next.edgeResponse = edge => { if (["campaigns","adsets","ads"].includes(edge)) edgeCalls += 1; return undefined; };
+    const request = Object.assign(syncRequest(workspaceId, sourceId, "2026-09-02", "2026-09-02"), {
+      metaAdsSyncMode: "insights_only" as const,
+    }) as SyncRequest;
+    await withMetaFetch(next, () => connectorFor("meta_ads").sync(db, request));
+    expect(edgeCalls).toBe(0);
+    expect(await db.query("select ad_id from meta_ads_ad_daily where source_id=$1 and occurred_on='2026-09-02'",[sourceId])).toEqual([{ad_id:"a1"}]);
+    expect(await db.query("select cursor_key,cursor_value from sync_cursors where source_id=$1 and cursor_key like 'meta_ads_entities_%' order by cursor_key",[sourceId])).toEqual(entityCursorBefore);
+    expect(await db.query("select entity_id,last_observed_at::text from meta_ads_entity_versions where source_id=$1 and entity_type='ad' and valid_to is null order by entity_id",[sourceId])).toEqual(entityObservedBefore);
+  }, 120_000);
+
+  it("insights-only accepts a completed snapshot with zero entities",async()=>{
+    const workspaceId=`ws_empty_snapshot_${randomUUID()}`,sourceId=`src_empty_snapshot_${randomUUID()}`;await seedSource(workspaceId,sourceId);
+    const empty=fixture("2026-09-01",{empty:true});empty.campaigns=[];empty.adsets=[];empty.ads=[];
+    await withMetaFetch(empty,()=>connectorFor("meta_ads").sync(db,syncRequest(workspaceId,sourceId,"2026-09-01","2026-09-01")));
+    let edges=0;const next=fixture("2026-09-02",{empty:true});next.edgeResponse=edge=>{if(["campaigns","adsets","ads"].includes(edge))edges+=1;return undefined;};
+    await withMetaFetch(next,()=>connectorFor("meta_ads").sync(db,{...syncRequest(workspaceId,sourceId,"2026-09-02","2026-09-02"),metaAdsSyncMode:"insights_only"}));
+    expect(edges).toBe(0);expect(await db.query("select cursor_value from sync_cursors where source_id=$1 and cursor_key=$2",[sourceId,`meta_ads_entities_scan:${ACCOUNT}`])).toHaveLength(1);
+  },120_000);
+
+  it("a Meta-only mode cannot suppress another provider's cursor or health",async()=>{
+    const workspaceId=`ws_non_meta_${randomUUID()}`,sourceId=`src_non_meta_${randomUUID()}`;
+    await db.withTransaction(async tx=>{await tx.ensureWorkspace(workspaceId,workspaceId);await tx.ensureFirstPhaseDatasets(workspaceId);});
+    const dataset=(await db.query<{id:string}>("select id from datasets where workspace_id=$1 and key='web'",[workspaceId]))[0]!;
+    await db.query("insert into sources(id,workspace_id,dataset_id,provider,connection_name,account_external_id,status) values($1,$2,$3,'stripe','fixture','acct_fixture','connected')",[sourceId,workspaceId,dataset.id]);
+    await db.query("insert into connection_credentials(id,workspace_id,source_id,credential_kind,encrypted_payload) values($1,$2,$3,'fixture','fixture-encrypted')",[`cred_${randomUUID()}`,workspaceId,sourceId]);
+    await connectorFor("stripe").sync(db,{workspaceId,sourceId,provider:"stripe",syncRunId:`sync_${randomUUID()}`,encryptionKey:KEY,windowSince:"2026-09-01",windowUntil:"2026-09-02",metaAdsSyncMode:"inventory_only"});
+    expect(await db.query("select cursor_value from sync_cursors where source_id=$1 and cursor_key='stripe_invoice'",[sourceId])).toEqual([{cursor_value:"2026-09-02"}]);
+    expect((await db.query("select status,last_synced_at is not null as advanced from sources where id=$1",[sourceId]))[0]).toEqual({status:"connected",advanced:true});
+  },120_000);
+
   it("hands fresh signed media to the caller without persisting URL capabilities",async()=>{
     const workspaceId=`ws_media_${randomUUID()}`,sourceId=`src_media_${randomUUID()}`;
     await seedSource(workspaceId,sourceId);

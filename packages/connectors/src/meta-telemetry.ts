@@ -33,6 +33,8 @@ export const META_ADS_UTILIZATION_HIGH_WATERMARK = 95;
 export interface MetaAdsRequestTelemetrySnapshot {
   provider: "meta_ads";
   schemaVersion: 1;
+  operation: "inventory_sync" | "history_sync";
+  lastReservedAt: string | null;
   requestCount: number;
   pageCount: number;
   retryCount: number;
@@ -83,6 +85,7 @@ export class MetaAdsRequestTelemetry {
   private maxUtilizationPercent: number | null = null;
   private highWatermarkResponses = 0;
   private exhausted = false;
+  private lastReservedAt: string | null = null;
   private readonly samples: number[] = [];
   private readonly byKind = Object.fromEntries(
     META_ADS_REQUEST_KINDS.map((kind) => [kind, 0]),
@@ -95,6 +98,7 @@ export class MetaAdsRequestTelemetry {
     // When set (hosted), the first fetch attempted at or after it throws MetaAdsTimeBudgetError.
     private readonly deadlineAtMs?: number,
     private readonly onResponse?: (signal: MetaAdsResponseSignal) => Promise<void>,
+    private readonly operation: "inventory_sync" | "history_sync" = "history_sync",
   ) {
     if (!Number.isInteger(limit) || limit < 1 || limit > META_ADS_MAX_REQUEST_BUDGET) {
       throw new MetaAdsRequestBudgetError(Math.max(0, Number.isFinite(limit) ? limit : 0));
@@ -122,6 +126,7 @@ export class MetaAdsRequestTelemetry {
     this.requestCount += 1;
     this.byKind[kind] += 1;
     if (retry) this.retryCount += 1;
+    this.lastReservedAt = new Date().toISOString();
     // Reserve durably before the provider call. A hard kill between this write and fetch can
     // conservatively over-count one request; it can never hide spend from the scheduler.
     await this.persistReservation?.(this.snapshot());
@@ -148,6 +153,8 @@ export class MetaAdsRequestTelemetry {
     return {
       provider: "meta_ads",
       schemaVersion: 1,
+      operation: this.operation,
+      lastReservedAt: this.lastReservedAt,
       requestCount: this.requestCount,
       pageCount: this.pageCount,
       retryCount: this.retryCount,
