@@ -84,6 +84,9 @@ export interface SyncRequest {
   // can set these to request adset/ad level or a different time_increment.
   metaAdsInsightsLevel?: string;
   metaAdsInsightsTimeIncrement?: string;
+  /** Default/full preserves historical behavior; inventory_only skips insights; insights_only
+   * consumes stored dimensions and skips current-entity edges. */
+  metaAdsSyncMode?: "full" | "inventory_only" | "insights_only";
   // Hard per-run Graph request allowance. Checked immediately before every Meta fetch, including
   // pagination and retries. Omitted callers get a bounded engine default; hosted scheduling may
   // pass a smaller admitted remainder from its workspace/source rate budget.
@@ -157,6 +160,7 @@ export interface SyncPlan {
   // Meta-only exact-window replacement contract. Present only after the complete direct-Graph
   // extract has succeeded; CLOSE uses this plus staged DB keys to prune and publish daily coverage.
   metaAdsSnapshotReplacement?: MetaAdsSnapshotReplacementState;
+  metaAdsEntitySnapshot?: MetaAdsEntitySnapshotState;
 }
 
 export type MetaAdsHistoryGrain = "campaign" | "adset" | "ad";
@@ -176,6 +180,15 @@ interface SyncClaimSnapshot {
   sourceAccountExternalId: string | null;
   credentialId: string | null;
   credentialUpdatedAt: string | null;
+  sourceStatus: string;
+  lastSyncedAt: string | null;
+  consecutiveSyncFailures: number;
+  lastCountedSyncFailureAt: string | null;
+}
+
+interface MetaAdsEntitySnapshotState {
+  entityScan: ReturnType<typeof metaEntityReadMode>;
+  adAccountId: string;
 }
 
 export interface MetaAdsSnapshotReplacementState {
@@ -2377,6 +2390,7 @@ const metaAdsConnector = createConnector<MetaAdsCredential, MetaAdsSyncRow>({
       // Optional graceful soft-time budget (cloud only). Desktop omits it → unchanged behaviour.
       request.softDeadlineAtMs,
       request.metaAdsOnResponse,
+      request.metaAdsSyncMode === "inventory_only" ? "inventory_sync" : "history_sync",
     );
     return plan;
   },
@@ -2447,6 +2461,8 @@ const metaAdsConnector = createConnector<MetaAdsCredential, MetaAdsSyncRow>({
     const campaignNodes: MetaAdsEdgeNode[] = [];
     const adsetNodes: MetaAdsEdgeNode[] = [];
     const adNodes: MetaAdsEdgeNode[] = [];
+    const syncMode = request.metaAdsSyncMode ?? "full";
+    const readsEntities = syncMode !== "insights_only";
     // §4 — the three account-level edge-dimension reads are mutually independent (distinct edges,
     // each fills its OWN *Nodes sink and returns its OWN map; no read consumes another's output), so
     // they run concurrently with a FIXED ceiling of 3 (one paginated loop per edge; each loop stays
@@ -2459,24 +2475,41 @@ const metaAdsConnector = createConnector<MetaAdsCredential, MetaAdsSyncRow>({
     // updated_since filters at Meta; paging walks only that changed set, never stops at a known ID.
     const checkpointKey = `meta_ads_entities_scan:${adAccountId}`;
     const fullCheckpointKey = `meta_ads_entities_full:${adAccountId}`;
-    const checkpoints = await _db.query<{cursor_key:string;cursor_value:string}>(
+    const checkpoints = readsEntities ? await _db.query<{cursor_key:string;cursor_value:string}>(
       "select cursor_key,cursor_value from sync_cursors where workspace_id=$1 and source_id=$2 and cursor_key in ($3,$4)",
       [request.workspaceId,request.sourceId,checkpointKey,fullCheckpointKey],
-    );
-    const entityScan = metaEntityReadMode(checkpoints.find(row=>row.cursor_key===checkpointKey)?.cursor_value??null,
-      checkpoints.find(row=>row.cursor_key===fullCheckpointKey)?.cursor_value??null,new Date());
-    const cached = entityScan.mode === "incremental" ? await _db.query<{entity_type:string;metadata_json:Record<string,unknown>}>(
-      "select entity_type,metadata_json from meta_ads_entity_versions where workspace_id=$1 and source_id=$2 and ad_account_id=$3 and valid_to is null and entity_type in ('adset','ad')",
-      [request.workspaceId,request.sourceId,adAccountId],
     ) : [];
+    const entityScan = readsEntities ? metaEntityReadMode(
+      checkpoints.find(row=>row.cursor_key===checkpointKey)?.cursor_value??null,
+      checkpoints.find(row=>row.cursor_key===fullCheckpointKey)?.cursor_value??null,
+      new Date(),
+    ) : null;
+    const cached = syncMode === "insights_only" || entityScan?.mode === "incremental"
+      ? await _db.query<{entity_type:string;metadata_json:Record<string,unknown>}>(
+        "select entity_type,metadata_json from meta_ads_entity_versions where workspace_id=$1 and source_id=$2 and ad_account_id=$3 and valid_to is null and entity_type in ('campaign','adset','ad')",
+        [request.workspaceId,request.sourceId,adAccountId],
+      ) : [];
+    if (syncMode === "insights_only" && !["campaign","adset","ad"].every(kind => cached.some(row => row.entity_type === kind))) {
+      throw new ConnectorError("provider_api_error", "Meta Ads insights-only sync requires a completed current-entity snapshot", true);
+    }
     const [adsetDims, campaignStatus, adDims] = await Promise.all([
-      metaAdsReadAdsetDims(credential, telemetry, adsetNodes, entityScan.updatedSince, cached.filter(row=>row.entity_type==='adset').map(row=>row.metadata_json as MetaAdsEdgeNode)),
+      metaAdsReadAdsetDims(credential, telemetry, adsetNodes, entityScan?.updatedSince, cached.filter(row=>row.entity_type==='adset').map(row=>row.metadata_json as MetaAdsEdgeNode), readsEntities),
       // Campaigns have no documented updated_since parameter; retain their bounded full read.
-      metaAdsReadCampaignStatus(credential, telemetry, campaignNodes),
-      metaAdsReadAdAdims(credential, telemetry, adNodes, entityScan.updatedSince, cached.filter(row=>row.entity_type==='ad').map(row=>row.metadata_json as MetaAdsEdgeNode), request.metaAdsOnMedia),
+      metaAdsReadCampaignStatus(credential, telemetry, campaignNodes, cached.filter(row=>row.entity_type==='campaign').map(row=>row.metadata_json as MetaAdsEdgeNode), readsEntities),
+      metaAdsReadAdAdims(credential, telemetry, adNodes, entityScan?.updatedSince, cached.filter(row=>row.entity_type==='ad').map(row=>row.metadata_json as MetaAdsEdgeNode), request.metaAdsOnMedia, readsEntities),
     ]);
 
     const rows: MetaAdsSyncRow[] = [];
+    if (readsEntities && entityScan) {
+      const observedAt = new Date().toISOString();
+      rows.push(
+        ...metaAdsEntitySnapshotRows(adAccountId, "campaign", campaignNodes, observedAt, context.apiVersion, accessToken),
+        ...metaAdsEntitySnapshotRows(adAccountId, "adset", adsetNodes, observedAt, context.apiVersion, accessToken),
+        ...metaAdsEntitySnapshotRows(adAccountId, "ad", adNodes, observedAt, context.apiVersion, accessToken),
+      );
+      plan.metaAdsEntitySnapshot = { entityScan, adAccountId };
+    }
+    if (syncMode === "inventory_only") return rows;
     const requestedGrains: MetaAdsHistoryGrain[] = request.metaAdsInsightsLevel
       ? [level as MetaAdsHistoryGrain]
       : ["campaign", "adset", "ad"];
@@ -2544,14 +2577,6 @@ const metaAdsConnector = createConnector<MetaAdsCredential, MetaAdsSyncRow>({
       }
     }
 
-    // Entity edges describe current provider state even when this run backfills an old performance
-    // window. Stamp the observation wall clock, never the historical window end.
-    const observedAt = new Date().toISOString();
-    rows.push(
-      ...metaAdsEntitySnapshotRows(adAccountId, "campaign", campaignNodes, observedAt, context.apiVersion, accessToken),
-      ...metaAdsEntitySnapshotRows(adAccountId, "adset", adsetNodes, observedAt, context.apiVersion, accessToken),
-      ...metaAdsEntitySnapshotRows(adAccountId, "ad", adNodes, observedAt, context.apiVersion, accessToken),
-    );
     if (timeOptions.timeRange && plan.metaAdsRequestTelemetry) {
       // Retention-clamped backfills may request fewer dates than the caller supplied.
       // CLOSE must never delete or certify coverage outside the actual fetched window.
@@ -2564,7 +2589,7 @@ const metaAdsConnector = createConnector<MetaAdsCredential, MetaAdsSyncRow>({
       );
       const currency = insightRows.find((row) => row.currency)?.currency ?? plan.metaAdsAccountMetadata?.currency ?? null;
       plan.metaAdsSnapshotReplacement = {
-        entityScan,
+        ...(entityScan ? { entityScan } : {}),
         adAccountId,
         windowStartDate: firstWindow.since,
         windowEndDate: lastWindow.until,
@@ -2980,11 +3005,27 @@ async function restoreClaimedSourceAfterFailure(
   );
 }
 
+async function restoreInventoryClaimSourceState(
+  tx: InfiniteOsDb,
+  request: SyncRequest,
+  claim: SyncClaimSnapshot,
+): Promise<void> {
+  await tx.query(
+    `update sources set status=$5,last_synced_at=$6::timestamptz,
+       consecutive_sync_failures=$7,last_counted_sync_failure_at=$8::timestamptz
+     where id=$1 and workspace_id=$2 and provider=$3 and status='syncing'
+       and account_external_id is not distinct from $4`,
+    [request.sourceId,request.workspaceId,request.provider,claim.sourceAccountExternalId,
+      claim.sourceStatus,claim.lastSyncedAt,claim.consecutiveSyncFailures,claim.lastCountedSyncFailureAt],
+  );
+}
+
 async function claimSourceSync(db: InfiniteOsDb, request: SyncRequest): Promise<SyncClaimSnapshot> {
   return db.withTransaction(async (tx) => {
-    const sources = await tx.query<{ provider: string; status: string; account_external_id: string | null }>(
+    const sources = await tx.query<{ provider: string; status: string; account_external_id: string | null;
+      last_synced_at:string|Date|null;consecutive_sync_failures:number;last_counted_sync_failure_at:string|Date|null }>(
       `select provider, status
-              , account_external_id
+              , account_external_id,last_synced_at,consecutive_sync_failures,last_counted_sync_failure_at
          from sources
         where id = $1 and workspace_id = $2
         for update`,
@@ -3035,6 +3076,11 @@ async function claimSourceSync(db: InfiniteOsDb, request: SyncRequest): Promise<
       sourceAccountExternalId: source.account_external_id ?? null,
       credentialId: credential?.id ?? null,
       credentialUpdatedAt: credential?.updated_at ?? null,
+      sourceStatus: source.status,
+      lastSyncedAt: source.last_synced_at instanceof Date ? source.last_synced_at.toISOString() : source.last_synced_at,
+      consecutiveSyncFailures: Number(source.consecutive_sync_failures ?? 0),
+      lastCountedSyncFailureAt: source.last_counted_sync_failure_at instanceof Date
+        ? source.last_counted_sync_failure_at.toISOString() : source.last_counted_sync_failure_at,
     };
   });
 }
@@ -3140,19 +3186,20 @@ async function syncExtractedBatch(
         `,
         [request.syncRunId, records.length, serializedRequestTelemetry(plan)]
       );
-      await tx.query(
-        `
-          insert into sync_cursors (id, workspace_id, source_id, cursor_key, cursor_value)
-          values ($1,$2,$3,$4,$5)
-          on conflict (source_id, cursor_key)
-          -- MONOTONIC: cursor_value is sortable ISO-8601 text, so greatest() never regresses the
-          -- cursor when bounded backfill windows land out-of-order or a window run is retried. The
-          -- incremental path is unaffected (excluded is always >= the existing value there).
-          do update set cursor_value = greatest(sync_cursors.cursor_value, excluded.cursor_value), updated_at = now()
-        `,
-        [`cursor_${randomUUID()}`, request.workspaceId, request.sourceId, plan.cursorKey, plan.cursorEnd]
-      );
-      await markClaimedSourceSucceeded(tx, request, claim, plan.cursorEnd);
+      if (request.metaAdsSyncMode !== "inventory_only") {
+        await tx.query(
+          `
+            insert into sync_cursors (id, workspace_id, source_id, cursor_key, cursor_value)
+            values ($1,$2,$3,$4,$5)
+            on conflict (source_id, cursor_key)
+            do update set cursor_value = greatest(sync_cursors.cursor_value, excluded.cursor_value), updated_at = now()
+          `,
+          [`cursor_${randomUUID()}`, request.workspaceId, request.sourceId, plan.cursorKey, plan.cursorEnd]
+        );
+        await markClaimedSourceSucceeded(tx, request, claim, plan.cursorEnd);
+      } else {
+        await restoreInventoryClaimSourceState(tx, request, claim);
+      }
     });
   } catch (error) {
     // OPEN, LOAD, and CLOSE all happen after the durable claim committed. Their
@@ -3246,6 +3293,10 @@ async function recordClaimedBatchFailure(
         [request.syncRunId, request.workspaceId, request.sourceId],
       );
       if (!(await syncClaimStillOwnsSource(tx, request, claim))) return;
+      if (request.metaAdsSyncMode === "inventory_only") {
+        await restoreInventoryClaimSourceState(tx, request, claim);
+        return;
+      }
       const parked = await escalateSourceOnSyncFailure(tx, request.sourceId, perr);
       if (!parked) {
         // Preserve the counted streak; updateSourceStatus('connected') intentionally resets it.
@@ -3307,7 +3358,7 @@ async function recordSyncFailure(
       `,
       [`err_${randomUUID()}`, request.workspaceId, request.sourceId, request.syncRunId, error.code, error.message, error.retryable]
     );
-    if (plan) {
+    if (plan && request.metaAdsSyncMode !== "inventory_only") {
       await tx.query(
         `
           insert into sync_cursors (id, workspace_id, source_id, cursor_key, cursor_value)
@@ -3320,6 +3371,10 @@ async function recordSyncFailure(
     // PROPORTIONATE STATUS ESCALATION — every failure is already recorded in sync_runs +
     // sync_errors above; escalateSourceOnSyncFailure gates ONLY the terminal `error` transition.
     if (!(await syncClaimStillOwnsSource(tx, request, claim))) return;
+    if (request.metaAdsSyncMode === "inventory_only") {
+      await restoreInventoryClaimSourceState(tx, request, claim);
+      return;
+    }
     const parked = await escalateSourceOnSyncFailure(tx, request.sourceId, error);
     if (!parked) {
       // The claim moved this source to `syncing` before planning. A transient failure below
@@ -3743,8 +3798,10 @@ async function metaAdsCloseSuccess(
   plan: SyncPlan,
 ): Promise<void> {
   const replacement = plan.metaAdsSnapshotReplacement;
-  if (!replacement) return;
+  const entitySnapshot = plan.metaAdsEntitySnapshot;
+  if (!replacement && !entitySnapshot) return;
 
+  if (replacement) {
   await tx.query(
     `insert into meta_ads_accounts (
        workspace_id, source_id, ad_account_id, currency, timezone_name
@@ -3832,13 +3889,14 @@ async function metaAdsCloseSuccess(
       ],
     );
   }
+  }
 
   // A full metadata reconciliation pages every entity edge before it earns the snapshot
   // contract. Incremental reads retain untouched entities and never infer absence as removal.
   // Missing entities in a full snapshot are closed, never deleted; prior metadata is preserved.
-  for (const entityType of ["campaign", "adset", "ad", "creative"] as const) {
+  if (entitySnapshot) for (const entityType of ["campaign", "adset", "ad", "creative"] as const) {
     // Absence in a delta is not removal. Only the campaign edge remains a complete snapshot.
-    if (replacement.entityScan?.mode === "incremental" && entityType !== "campaign") continue;
+    if (entitySnapshot.entityScan.mode === "incremental" && entityType !== "campaign") continue;
     await tx.query(
       `update meta_ads_entity_versions v
           set valid_to = now(), last_observed_at = greatest(last_observed_at, now())
@@ -3850,14 +3908,14 @@ async function metaAdsCloseSuccess(
                and k.ad_account_id = $3 and k.grain = $4 and k.key_kind = 'entity'
                and k.entity_id = v.entity_id
           )`,
-      [request.workspaceId, request.sourceId, replacement.adAccountId, entityType, request.syncRunId],
+      [request.workspaceId, request.sourceId, entitySnapshot.adAccountId, entityType, request.syncRunId],
     );
   }
 
-  if (replacement.entityScan) {
-    const scan = replacement.entityScan;
-    const keys = [`meta_ads_entities_scan:${replacement.adAccountId}`,
-      ...(scan.mode === "full" ? [`meta_ads_entities_full:${replacement.adAccountId}`] : [])];
+  if (entitySnapshot) {
+    const scan = entitySnapshot.entityScan;
+    const keys = [`meta_ads_entities_scan:${entitySnapshot.adAccountId}`,
+      ...(scan.mode === "full" ? [`meta_ads_entities_full:${entitySnapshot.adAccountId}`] : [])];
     for (const key of keys) await tx.query(
       `insert into sync_cursors(id,workspace_id,source_id,cursor_key,cursor_value) values($1,$2,$3,$4,$5)
        on conflict(source_id,cursor_key) do update set cursor_value=greatest(sync_cursors.cursor_value,excluded.cursor_value),updated_at=now()`,
@@ -9817,14 +9875,15 @@ async function metaAdsReadAdsetDims(
   snapshotSink?: MetaAdsEdgeNode[],
   updatedSince?: number,
   cachedNodes: MetaAdsEdgeNode[] = [],
+  readProvider = true,
 ): Promise<Map<string, MetaAdsAdsetDim>> {
-  const nodes = await metaAdsReadEdge(
+  const nodes = readProvider ? await metaAdsReadEdge(
     credential,
     "adsets",
     "id,name,optimization_goal,billing_event,effective_status,status,campaign_id,daily_budget,lifetime_budget,bid_amount,bid_strategy,targeting,promoted_object,destination_type,attribution_spec,start_time,end_time",
     telemetry,
     updatedSince,
-  );
+  ) : [];
   snapshotSink?.push(...nodes);
   const dims = new Map<string, MetaAdsAdsetDim>();
   for (const node of [...cachedNodes, ...nodes]) {
@@ -9859,8 +9918,9 @@ async function metaAdsReadAdAdims(
   updatedSince?: number,
   cachedNodes: MetaAdsEdgeNode[] = [],
   onMedia?: SyncRequest["metaAdsOnMedia"],
+  readProvider = true,
 ): Promise<Map<string, MetaAdsAdDim>> {
-  const nodes = await metaAdsReadEdge(
+  const nodes = readProvider ? await metaAdsReadEdge(
     credential,
     "ads",
     "id,name,creative{id,name,title,body,thumbnail_url,image_url,image_hash,video_id,call_to_action_type,object_story_spec,asset_feed_spec},adset_id,campaign_id,effective_status,status,bid_amount,tracking_specs,conversion_specs",
@@ -9880,7 +9940,7 @@ async function metaAdsReadAdAdims(
       // Media failure cannot fail an otherwise valid metrics read; caller records retryable outcomes.
       if(media.length)try{await onMedia(media);}catch{ /* Caller-owned best-effort cache; canonical metadata remains retryable. */ }
     } : undefined,
-  );
+  ) : [];
   snapshotSink?.push(...nodes);
   const dims = new Map<string, MetaAdsAdDim>();
   for (const node of [...cachedNodes, ...nodes]) {
@@ -9912,16 +9972,18 @@ async function metaAdsReadCampaignStatus(
   credential: MetaAdsCredential,
   telemetry?: MetaAdsRequestObserver,
   snapshotSink?: MetaAdsEdgeNode[],
+  cachedNodes: MetaAdsEdgeNode[] = [],
+  readProvider = true,
 ): Promise<Map<string, MetaAdsEntityStatus>> {
-  const nodes = await metaAdsReadEdge(
+  const nodes = readProvider ? await metaAdsReadEdge(
     credential,
     "campaigns",
     "id,name,effective_status,status,objective,daily_budget,lifetime_budget,bid_strategy,buying_type,special_ad_categories,start_time,stop_time",
     telemetry,
-  );
+  ) : [];
   snapshotSink?.push(...nodes);
   const statuses = new Map<string, MetaAdsEntityStatus>();
-  for (const node of nodes) {
+  for (const node of [...cachedNodes, ...nodes]) {
     const campaignId = stringOrNull(node.id);
     if (!campaignId) {
       continue;
