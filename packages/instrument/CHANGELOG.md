@@ -3,7 +3,7 @@
 All notable changes to the `infinite-tag` npm package (`packages/instrument`). Versions before
 0.5.0 are recorded in git history only (`git log -- packages/instrument`).
 
-## Unreleased
+## 0.11.0 — 2026-09-21
 
 The Meta pixel's `verify` lane now checks DELIVERY, not just that a snippet is on the page.
 
