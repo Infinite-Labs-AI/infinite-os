@@ -433,12 +433,48 @@ describe("verifyLanes", () => {
     expect(result.since).toBe("2026-09-02T09:59:55.000Z")
     expect(result.lanes.infinite).toEqual({ state: "verified", receiptAt: "2026-09-02T10:00:05.000Z" })
     expect(result.lanes.ga4).toEqual({ state: "no_receipt", causes: ["not deployed yet"] })
+    // The Meta lane is no longer a flat stub: it runs the credential-free delivery check against
+    // the page body this step already fetched. That body carries no `fbq('init', …)`, so the honest
+    // answer is "there is no pixel here to check" — and, crucially, no probe was fired for one.
     expect(result.lanes.meta).toEqual({
       state: "not_verifiable",
-      reason: "Meta has no install-time read-back; open Events Manager → Test Events"
+      reason: "no fbq('init', …) was found on the loaded page, so there is no Meta pixel to check"
     })
     expect(result.lanes.posthog).toEqual({ state: "not_verifiable", reason: "no backend can read this lane back" })
     expect(result.lanes.server_lane).toEqual({ state: "not_verifiable", reason: "no backend can read this lane back" })
+  })
+
+  it("reports a traffic-permissions block through the meta lane, from the page it already loaded", async () => {
+    // The 2026-09-20 incident, end to end: the page carries a perfectly good pixel bootstrap and
+    // Meta answers 200 — with a veto inside the domain-scoped config. Every other lane is quiet;
+    // the meta lane must be the one that speaks.
+    const pixel = "914812061724377"
+    const blocked = [
+      `config.set("${pixel}", "prohibitedPixels", {"lockWebpage":false,"blockReason":"traffic_permissions"});`,
+      `instance.configLoaded("${pixel}");`
+    ].join("\n")
+    const fetchImpl = (async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.startsWith("https://connect.facebook.net/")) {
+        // Without `&domain=` Meta serves the generic config and the block is invisible.
+        expect(url).toContain("domain=shop.example")
+        return new Response(blocked, { status: 200 })
+      }
+      return new Response(`<script>fbq('init', '${pixel}');</script>`, { status: 200 })
+    }) as unknown as typeof fetch
+
+    const result = await verifyLanes({
+      url: "https://shop.example/",
+      lanes: ["meta"],
+      backends: [],
+      fetch: fetchImpl
+    })
+
+    expect(result.lanes.meta.state).toBe("no_receipt")
+    const causes = result.lanes.meta.state === "no_receipt" ? result.lanes.meta.causes : []
+    expect(causes[0]).toContain("BLOCKED FROM TRANSMITTING on shop.example")
+    expect(causes[0]).toContain("Traffic permissions")
+    expect(causes[0]).toContain("_fbp/_fbc")
   })
 
   it("names an unreachable site instead of polling", async () => {
