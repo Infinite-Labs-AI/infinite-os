@@ -2503,12 +2503,16 @@ describe("live provider clients", () => {
       expect(extractCampaignInsights?.url).toContain(
         "campaign_id%2Ccampaign_name%2Cdate_start%2Cspend%2Cclicks%2Cinline_link_clicks%2Cimpressions%2Creach%2Cfrequency%2Ccpm%2Ccpc%2Cctr%2Cactions%2Caction_values%2Cresults%2Ccost_per_result%2Cresult_values_performance_indicator%2Cobjective%2Coptimization_goal"
       );
-      // §4 — per-window attribution requested (1d_click,7d_click,1d_view); the
-      // headline 7d_click+1d_view is computed from the subvalues. 7d_view/28d_view
-      // are hard-excluded and use_unified_attribution_setting is NOT sent (a no-op).
+      // §4 — per-window attribution requested (1d_click,7d_click,1d_ev,1d_view); the
+      // headline 7d_click+1d_ev+1d_view is computed from the subvalues. `1d_ev` is
+      // ENGAGE-THROUGH (Meta's March-2026 rename + the narrowing of click-through to
+      // link clicks only); without it the headline under-counts by the displaced
+      // engagement conversions. 7d_view/28d_view are hard-excluded and
+      // use_unified_attribution_setting is NOT sent (a no-op).
       expect(extractCampaignInsights?.url).toContain("action_attribution_windows=");
       expect(extractCampaignInsights?.url).toContain("1d_click");
       expect(extractCampaignInsights?.url).toContain("7d_click");
+      expect(extractCampaignInsights?.url).toContain("1d_ev");
       expect(extractCampaignInsights?.url).toContain("1d_view");
       expect(extractCampaignInsights?.url).not.toContain("7d_view");
       expect(extractCampaignInsights?.url).not.toContain("28d_view");
@@ -2587,6 +2591,7 @@ describe("live provider clients", () => {
       expect(JSON.parse(campaignInsightsUrl.searchParams.get("action_attribution_windows") ?? "[]")).toEqual([
         "1d_click",
         "7d_click",
+        "1d_ev",
         "1d_view"
       ]);
       // §4b — the internal adset insights pass adds adset_id,adset_name to the field list.
@@ -2780,10 +2785,12 @@ describe("live provider clients", () => {
     )
   ) as { data: Array<Record<string, unknown>>; paging: Record<string, unknown> };
 
-  async function extractUltimaRow(): Promise<Record<string, unknown>> {
+  async function extractUltimaRow(
+    data: Array<Record<string, unknown>> = ULTIMA_PROBE.data
+  ): Promise<Record<string, unknown>> {
     let payload: Record<string, unknown> = {};
     await withMockFetch(
-      async () => jsonResponse({ data: ULTIMA_PROBE.data, paging: ULTIMA_PROBE.paging }),
+      async () => jsonResponse({ data, paging: ULTIMA_PROBE.paging }),
       async () => {
         const db = fakeDb({
           credential: {
@@ -2833,7 +2840,58 @@ describe("live provider clients", () => {
     // canonical action fired.
     expect(lead.resultsSource).toBe("derived_from_canonical_mapping");
     expect(lead.isPrimary).toBe(true);
-    expect(lead.attributionSetting).toBe("1d_click,7d_click,1d_view");
+    expect(lead.attributionSetting).toBe("1d_click,7d_click,1d_ev,1d_view");
+  });
+
+  /**
+   * ENGAGE-THROUGH (Meta's `1d_ev`), added 2026-09-20.
+   *
+   * Meta's 2026-03-03 announcement narrowed click-through attribution to link clicks ONLY and
+   * renamed engaged-view to ENGAGE-THROUGH. The conversions that used to land in 7d_click on a
+   * non-link click now land in a separate 1-day bucket we never requested — so our headline read
+   * LOW against Ads Manager. These tests are the teeth: drop `1d_ev` from the requested windows or
+   * from the sum and the first one goes red.
+   */
+  describe("§4 engage-through (1d_ev)", () => {
+    /** The Ultima fixture with an engage-through subvalue on the canonical lead action. */
+    function withEngageThrough(engageThrough: string): Array<Record<string, unknown>> {
+      const row = { ...ULTIMA_PROBE.data[0] };
+      row.actions = (ULTIMA_PROBE.data[0].actions as Array<Record<string, unknown>>).map((action) =>
+        action.action_type === "lead" ? { ...action, "1d_ev": engageThrough } : action
+      );
+      return [row, ...ULTIMA_PROBE.data.slice(1)];
+    }
+
+    it("SUMS the engage-through window into the headline — this is the under-count being fixed", async () => {
+      // Baseline: 7d_click(1) + 1d_view(1) = 2, the number we reported before this change.
+      expect(((await extractUltimaRow()).conversions as Array<Record<string, unknown>>)[0].results).toBe(2);
+
+      // With 3 engage-through conversions Meta would show 5; we must now agree.
+      const payload = await extractUltimaRow(withEngageThrough("3"));
+      const lead = (payload.conversions as Array<Record<string, unknown>>)[0];
+      expect(lead.results).toBe(5);
+      expect(lead.results).not.toBe(2); // the pre-March-2026 under-count
+    });
+
+    it("records the requested window set as provenance, engage-through included", async () => {
+      const payload = await extractUltimaRow(withEngageThrough("3"));
+      expect(payload.attributionSetting).toBe("1d_click,7d_click,1d_ev,1d_view");
+    });
+
+    it("an account that reports NO 1d_ev is unchanged — a missing window contributes 0, never nulls the row", async () => {
+      // Meta's help centre says engage-through may not appear at all for image-only campaigns.
+      // The absence must read as "this window contributed nothing", not as a lost conversion.
+      const payload = await extractUltimaRow();
+      expect((payload.conversions as Array<Record<string, unknown>>)[0].results).toBe(2);
+      expect(payload.landingPageViews).toBe(200); // 7d_click(188) + 1d_view(12), unchanged
+    });
+
+    it("engage-through does NOT leak into the 1d_click double-count trap", async () => {
+      // 1d_click is NESTED inside 7d_click and is requested but never summed. Adding a third
+      // window must not change that: 1d_click(1) stays excluded even when 1d_ev is present.
+      const payload = await extractUltimaRow(withEngageThrough("0"));
+      expect((payload.conversions as Array<Record<string, unknown>>)[0].results).toBe(2);
+    });
   });
 
   it("§9: regression — naively summing every lead action_type would yield 8, proving dedup is load-bearing", async () => {
@@ -2870,7 +2928,7 @@ describe("live provider clients", () => {
     expect(payload.inlineLinkClicks).toBe(274);
     expect(payload.currency).toBe("usd");
     expect(payload.apiVersion).toBe("v25.0");
-    expect(payload.attributionSetting).toBe("1d_click,7d_click,1d_view");
+    expect(payload.attributionSetting).toBe("1d_click,7d_click,1d_ev,1d_view");
     // actions_raw preserves the full arrays for audit/recompute.
     const actionsRaw = payload.actionsRaw as { actions?: unknown[]; action_values?: unknown[] };
     expect(Array.isArray(actionsRaw.actions)).toBe(true);
