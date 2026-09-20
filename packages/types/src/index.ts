@@ -42,6 +42,8 @@ export type InteractiveFeature =
   | "actions.confirmation.v1"
   | "actions.continuation.v1";
 
+export * from "./interactive-task.js";
+
 /** Client request metadata. Cwd does not grant filesystem access. */
 export interface InteractiveWorkspaceRequestV1 {
   profile: InteractiveAgentProfile;
