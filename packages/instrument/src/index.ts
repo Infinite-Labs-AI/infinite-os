@@ -122,6 +122,22 @@ export {
   renderServerLaneVerify,
   verifyServerLane
 } from "./server-lane/verify.js"
+
+// The Meta pixel DELIVERY check: credential-free, not a Graph call, and the only thing that catches
+// a pixel Meta has silently stopped accepting sends from. See meta-live/config-probe.ts.
+export {
+  META_SIGNALS_BASE_URL,
+  META_SIGNALS_CONFIG_VERSION,
+  META_TRAFFIC_PERMISSIONS_HELP,
+  extractMetaPixelIds,
+  metaSignalsConfigUrl,
+  parseMetaConfigEntry,
+  probeMetaDelivery
+} from "./meta-live/config-probe.js"
+export type { MetaConfigEntry, MetaDeliveryFinding } from "./meta-live/config-probe.js"
+export { isMetaDeliveryFailure, maskPixelId, metaDeliveryHeadline } from "./meta-live/copy.js"
+export { checkMetaLane } from "./meta-live/lane.js"
+export type { CheckMetaLaneOptions, MetaLaneResult } from "./meta-live/lane.js"
 // The analytics harness: one runbook (adopt → install → mark → verify → report) shared by
 // `infinite-tag harness` and the desktop CLI's `infinite analytics`.
 export { parseHarnessArgs, hasExplicitArtifacts, HARNESS_HELP_LINES } from "./harness/args.js"

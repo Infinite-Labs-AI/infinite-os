@@ -4,6 +4,8 @@
 // Standalone `infinite-tag harness` cannot read the cloud, so it runs with NoneBackend and says
 // so; `infinite analytics` wires InfiniteCloudBackend; PosthogQueryBackend needs a founder-
 // supplied personal key with Query Read and is optional.
+import { checkMetaLane } from "../meta-live/lane.js"
+import { INSTRUMENT_VERSION } from "../package-manager.js"
 import { derivePosthogRegionHosts } from "../providers/validate.js"
 import { DEFAULT_SITE_FETCH_TIMEOUT_MS, SINCE_SKEW_MS, VERIFY_USER_AGENT } from "../server-lane/verify.js"
 
@@ -35,6 +37,12 @@ export const VERIFY_BUDGET_MS = 60_000
 export const VERIFY_POLL_INTERVAL_MS = 3_000
 
 export const NONE_BACKEND_REASON = "run infinite analytics from the desktop CLI to verify"
+/**
+ * RETIRED as the Meta lane's answer. The lane no longer returns a flat "nothing to see here": it
+ * runs the credential-free delivery check in ../meta-live/. The sentence survives only as the
+ * closing clause of `metaAllowedReason`, which still tells the customer to open Test Events.
+ * @deprecated use the `meta-live` lane; kept so an external importer does not break.
+ */
 export const META_NOT_VERIFIABLE_REASON = "Meta has no install-time read-back; open Events Manager → Test Events"
 export const NO_BACKEND_REASON = "no backend can read this lane back"
 export const SUBSCRIPTION_REQUIRED_REASON = "subscription required — complete onboarding in Infinite Desktop"
@@ -517,6 +525,7 @@ export async function verifyLanes(input: VerifyLanesInput): Promise<VerifyLanesR
   log(`Loading ${input.url} once as ${VERIFY_USER_AGENT} …`)
   let siteStatus: number | null = null
   let loadError: string | null = null
+  let siteHtml = ""
   try {
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), DEFAULT_SITE_FETCH_TIMEOUT_MS)
@@ -532,7 +541,9 @@ export async function verifyLanes(input: VerifyLanesInput): Promise<VerifyLanesR
         signal: controller.signal
       })
       siteStatus = response.status
-      await response.text().catch(() => "")
+      // The body is KEPT: the Meta lane reads the pixel ids off it, so the delivery check costs no
+      // second page load. Every other lane still only needs the status.
+      siteHtml = await response.text().catch(() => "")
     } finally {
       clearTimeout(timer)
     }
@@ -547,8 +558,25 @@ export async function verifyLanes(input: VerifyLanesInput): Promise<VerifyLanesR
     return { url: input.url, since, siteStatus, lanes }
   }
 
-  for (const lane of input.lanes) {
-    if (lane === "meta") lanes[lane] = { state: "not_verifiable", reason: META_NOT_VERIFIABLE_REASON }
+  if (input.lanes.includes("meta")) {
+    // Meta still has no receipt to read back — but the one thing we CAN read is whether Meta is
+    // accepting sends from this domain at all, from its own public domain-scoped config. See
+    // ../meta-live/config-probe.ts for the incident this replaced the flat stub with.
+    log("Checking Meta pixel delivery against Meta's domain-scoped config …")
+    try {
+      const meta = await checkMetaLane({
+        html: siteHtml,
+        url: input.url,
+        version: INSTRUMENT_VERSION,
+        ...(input.fetch ? { fetch: input.fetch } : {})
+      })
+      lanes.meta = meta.verification
+    } catch (error) {
+      lanes.meta = {
+        state: "not_verifiable",
+        reason: `the Meta delivery check could not run (${errorText(error)}); this is not a pass`
+      }
+    }
   }
   const remaining = input.lanes.filter((lane) => lane !== "meta")
   for (const backend of input.backends) {
