@@ -10373,6 +10373,11 @@ export interface MetaCreativeCreateInput {
   title?: string;
   description?: string;
   callToAction?: string;
+  // AdCreative.url_tags — query params Meta APPENDS to the destination link at delivery time. Unlike
+  // every other field here the value may contain Meta's dynamic macros ({{campaign.id}}, {{ad.id}},
+  // {{adset.id}}, {{placement}}), which Meta expands per impression. It is passed through VERBATIM:
+  // percent-encoding the braces would leave the customer with a literal "%7B%7Bplacement%7D%7D".
+  urlTags?: string;
 }
 
 export interface MetaAdCreateInput {
@@ -11000,7 +11005,10 @@ export async function createMetaCreative(
 
   const response = await metaAdsGraphPost(credential, `${adAccountId}/${META_CREATE_EDGE.creative}`, {
     name: input.name,
-    object_story_spec: objectStorySpec
+    object_story_spec: objectStorySpec,
+    // url_tags is a TOP-LEVEL AdCreative field, not part of object_story_spec — [CONFIRMED-SDK]
+    // (facebook_business AdCreative.Field.url_tags). Omitted entirely when unset.
+    ...(input.urlTags ? { url_tags: input.urlTags } : {})
   });
   const id = requireGraphId("creative", response);
   // Creatives have no status; report null (no PAUSE/ACTIVE concept).
@@ -12762,6 +12770,10 @@ async function createMetaCreativeViaCli(
     if (input.title) args.push("--title", input.title);
     if (input.description) args.push("--description", input.description);
     if (callToAction) args.push("--call-to-action", callToAction);
+    // `meta ads creative create --url-tags` (meta-ads 1.1.0). NOTE: the CLI exposes --url-tags on
+    // `creative create` ONLY — `ad create` has no such flag — which is why tracking parameters are
+    // set at the CREATIVE level on both transports.
+    if (input.urlTags) args.push("--url-tags", input.urlTags);
     // A4: budget the kill timer for the upload + Meta-side processing the CLI waits on.
     const response = await metaAdsCliWrite(credential, args, {
       timeoutMs: mediaKind === "video" ? META_CLI_VIDEO_CREATIVE_TIMEOUT_MS : META_CLI_IMAGE_CREATIVE_TIMEOUT_MS
