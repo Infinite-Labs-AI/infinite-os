@@ -299,6 +299,60 @@ describe("desktop bridge HTTP client", () => {
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
+  it.each([
+    ["desktop_signed_out", "Infinite Desktop is signed out."],
+    ["subscription_required", "An active subscription is required."],
+  ])("preserves a not-ready %s response without requiring interactive metadata", async (code, message) => {
+    const capabilities = [...CAPABILITIES, INTERACTIVE_WORKSPACE_CAPABILITY];
+    const fixture = createBridgeHome(descriptor({ capabilities }));
+    roots.push(fixture.root);
+    const fetchImpl = vi.fn(async () => jsonResponse(status({
+      capabilities,
+      ready: false,
+      error: { code, message },
+      interactive: undefined,
+    }))) as typeof fetch;
+    const client = createDesktopAppClient(fixture.env, { fetchImpl });
+
+    await expect(client.status()).resolves.toMatchObject({
+      ready: false,
+      error: { code, message },
+    });
+    expect(client.interactiveWorkspace).toBeUndefined();
+  });
+
+  it("clears previously negotiated interactive state when Desktop becomes not ready", async () => {
+    const capabilities = [...CAPABILITIES, INTERACTIVE_WORKSPACE_CAPABILITY];
+    const fixture = createBridgeHome(descriptor({ capabilities }));
+    roots.push(fixture.root);
+    let ready = true;
+    const fetchImpl = vi.fn(async () => jsonResponse(status({
+      capabilities,
+      ready,
+      ...(ready
+        ? {
+            interactive: {
+              supportedProfiles: [GENERAL_MARKETING_PROFILE],
+              availableFeatures: [],
+              workspaceAccess: "metadata-only",
+            },
+          }
+        : {
+            error: {
+              code: "desktop_signed_out",
+              message: "Infinite Desktop is signed out.",
+            },
+          }),
+    }))) as typeof fetch;
+    const client = createDesktopAppClient(fixture.env, { fetchImpl });
+
+    await client.status();
+    expect(client.interactiveWorkspace).toBeDefined();
+    ready = false;
+    await client.status();
+    expect(client.interactiveWorkspace).toBeUndefined();
+  });
+
   it("authenticates status and validates desktop identity and boot", async () => {
     const fixture = createBridgeHome();
     roots.push(fixture.root);

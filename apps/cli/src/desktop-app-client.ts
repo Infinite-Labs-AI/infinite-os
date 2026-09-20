@@ -361,6 +361,7 @@ function createClientFromDescriptor(
           descriptor.capabilities.includes(TURN_SESSION_CAPABILITY) &&
           status.capabilities.includes(TURN_SESSION_CAPABILITY);
         if (
+          status.ready &&
           descriptor.capabilities.includes(INTERACTIVE_WORKSPACE_CAPABILITY) &&
           status.capabilities.includes(INTERACTIVE_WORKSPACE_CAPABILITY)
         ) {
