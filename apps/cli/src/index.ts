@@ -8,7 +8,7 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from
 import { isIP } from "node:net";
 import { basename, dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
-import { stdin as input, stderr as errorOutput, stdout as output } from "node:process";
+import { cwd as processCwd, stdin as input, stderr as errorOutput, stdout as output } from "node:process";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import {
@@ -53,6 +53,7 @@ import {
   type DesktopTurnControllerLike
 } from "./desktop/desktop-interactive.js";
 import { boundedTerminalText } from "./desktop/confirm-in-session.js";
+import { interactiveWorkspaceForCli } from "./desktop/interactive-protocol.js";
 import {
   INFINITE_ONBOARDING_URI,
   OnboardingError,
@@ -218,6 +219,8 @@ export interface CliEnv {
   GROWTH_OS_GA4_OAUTH_REDIRECT_URI?: string;
   INFINITE_RENDER_SURFACE?: string;
   INFINITE_PLAIN_OUTPUT?: string;
+  /** Internal paired Desktop/CLI rollout for the general marketing profile. */
+  INFINITE_GENERAL_MARKETING_PROFILE?: string;
   INFINITE_CLI_SKIN?: string;
   INFINITE_SKIN?: string;
   INFINITE_SKIN_DIR?: string;
@@ -1633,6 +1636,7 @@ function readDesktopOnboardingState(env: CliEnv): OnboardingState | null {
 // (Ink chrome + turnController) with a STRIPPED desktop `onSubmitLine` fork — no
 // `@`-pins, `/project`, or `/resume`. One `sessionId` is threaded across turns.
 async function runDesktopInteractiveEntry(env: CliEnv): Promise<void> {
+  const interactiveWorkspace = interactiveWorkspaceForCli(env, processCwd());
   // Initial gate: a live ready bridge is required before the shell opens (this
   // also yields the workspace name for the banner). It is NOT trusted for the
   // session's lifetime — every submitted line re-resolves the bridge and
@@ -1656,7 +1660,15 @@ async function runDesktopInteractiveEntry(env: CliEnv): Promise<void> {
   // change (boot/contextRevision/workspace/provider), guards concurrent turns
   // with a `busy` result, and NEVER auto-replays a failed turn.
   const runner = createDesktopSessionTurnRunner({
-    resolveBridge: () => resolveLiveBridge(env)
+    resolveBridge: () => resolveLiveBridge(env),
+    ...(interactiveWorkspace
+      ? {
+          interactiveWorkspace: {
+            profile: interactiveWorkspace.profile,
+            cwd: () => interactiveWorkspace.cwd ?? processCwd(),
+          },
+        }
+      : {}),
   });
   const turnAbort = new AbortController();
 

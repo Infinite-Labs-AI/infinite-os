@@ -12,6 +12,14 @@ import { dirname, join } from "node:path";
 import { stdin, stdout, stderr } from "node:process";
 import { createInterface } from "node:readline/promises";
 import { infiniteOsHome } from "@infinite-os/config";
+import {
+  GENERAL_MARKETING_PROFILE,
+  INTERACTIVE_WORKSPACE_CAPABILITY,
+  LEGACY_GROWTH_OPERATOR_PROFILE,
+  type InteractiveWorkspaceRequestV1,
+  type InteractiveWorkspaceStatusV1,
+} from "@infinite-os/types";
+import { negotiateInteractiveWorkspace } from "./desktop/interactive-protocol.js";
 
 const PROTOCOL_VERSION = 1;
 const DESCRIPTOR_SCHEMA_VERSION = 1;
@@ -88,6 +96,7 @@ export interface DesktopStatus {
   provider?: { id: string; model?: string };
   workspace?: { id?: string; name: string };
   error?: { code: string; message: string };
+  interactive?: InteractiveWorkspaceStatusV1;
 }
 
 export interface DesktopProgressFrame {
@@ -114,6 +123,8 @@ export interface DesktopAppClient {
    * a single-turn degrade, NOT a typed error.
    */
   readonly sessionCapable: boolean;
+  /** Negotiated only when descriptor and status both advertise the v1 contract. */
+  readonly interactiveWorkspace: InteractiveWorkspaceStatusV1 | undefined;
   status(): Promise<DesktopStatus>;
   turn(
     input: {
@@ -122,6 +133,7 @@ export interface DesktopAppClient {
       /** Prior session to continue; sent only when the Desktop is capable. */
       sessionId?: string;
       signal?: AbortSignal;
+      interactive?: InteractiveWorkspaceRequestV1;
     },
     onProgress?: (frame: DesktopProgressFrame) => void
   ): Promise<DesktopTurnResult>;
@@ -310,15 +322,22 @@ function createClientFromDescriptor(
   );
   let confirmationReplaySafe = false;
   let sessionCapable = false;
+  let interactiveWorkspace: InteractiveWorkspaceStatusV1 | undefined;
+  let statusCapabilities: string[] = [];
 
   return {
     get sessionCapable() {
       return sessionCapable;
     },
+    get interactiveWorkspace() {
+      return interactiveWorkspace;
+    },
 
     async status() {
       confirmationReplaySafe = false;
       sessionCapable = false;
+      interactiveWorkspace = undefined;
+      statusCapabilities = [];
       const deadline = createRequestDeadline(undefined, requestTimeoutMs);
       try {
         const response = await authenticatedFetch(
@@ -334,12 +353,20 @@ function createClientFromDescriptor(
         );
         const payload = await deadline.race(readJsonResponse(response));
         const status = parseStatus(unwrapData(payload), descriptor);
+        statusCapabilities = status.capabilities;
         confirmationReplaySafe =
           descriptor.capabilities.includes(CONFIRM_IDEMPOTENCY_CAPABILITY) &&
           status.capabilities.includes(CONFIRM_IDEMPOTENCY_CAPABILITY);
         sessionCapable =
           descriptor.capabilities.includes(TURN_SESSION_CAPABILITY) &&
           status.capabilities.includes(TURN_SESSION_CAPABILITY);
+        if (
+          descriptor.capabilities.includes(INTERACTIVE_WORKSPACE_CAPABILITY) &&
+          status.capabilities.includes(INTERACTIVE_WORKSPACE_CAPABILITY)
+        ) {
+          if (!status.interactive) throw invalidResponse();
+          interactiveWorkspace = status.interactive;
+        }
         return status;
       } catch (error) {
         throw mapDeadlineError(error, deadline);
@@ -363,6 +390,24 @@ function createClientFromDescriptor(
         );
       }
       const requestId = randomId();
+      if (input.interactive) {
+        const negotiation = negotiateInteractiveWorkspace({
+          descriptorCapabilities: descriptor.capabilities,
+          statusCapabilities,
+          status: interactiveWorkspace,
+          requestedProfile: input.interactive.profile,
+        });
+        if (!negotiation.ok) {
+          throw new DesktopAppClientError(
+            negotiation.reason === "profile_unsupported"
+              ? "interactive_profile_unsupported"
+              : "interactive_capability_unavailable",
+            negotiation.reason === "profile_unsupported"
+              ? "Infinite Desktop does not support the requested interactive profile."
+              : "Infinite Desktop did not negotiate interactive workspace metadata.",
+          );
+        }
+      }
       const deadline = createRequestDeadline(input.signal, requestTimeoutMs);
       try {
         const response = await authenticatedFetch(
@@ -383,7 +428,8 @@ function createClientFromDescriptor(
               expectedContextRevision: input.expectedContextRevision,
               ...(nonEmptyString(input.sessionId)
                 ? { sessionId: nonEmptyString(input.sessionId) }
-                : {})
+                : {}),
+              ...(input.interactive ? { interactive: input.interactive } : {})
             })
           },
           deadline
@@ -659,6 +705,7 @@ function parseStatus(
   const provider = parseProvider(value.provider);
   const workspace = parseWorkspace(value.workspace);
   const error = parseRemoteError(value.error);
+  const interactive = parseInteractiveWorkspaceStatus(value.interactive);
   return {
     service: DESKTOP_SERVICE,
     bootId: descriptor.bootId,
@@ -668,7 +715,33 @@ function parseStatus(
     contextRevision: nonEmptyString(value.contextRevision)!,
     ...(provider ? { provider } : {}),
     ...(workspace ? { workspace } : {}),
-    ...(error ? { error } : {})
+    ...(error ? { error } : {}),
+    ...(interactive ? { interactive } : {})
+  };
+}
+
+function parseInteractiveWorkspaceStatus(
+  value: unknown,
+): InteractiveWorkspaceStatusV1 | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!isRecord(value)) throw invalidResponse();
+  if (
+    !Array.isArray(value.supportedProfiles) ||
+    !value.supportedProfiles.every((profile) =>
+      profile === GENERAL_MARKETING_PROFILE ||
+      profile === LEGACY_GROWTH_OPERATOR_PROFILE) ||
+    !Array.isArray(value.availableFeatures) ||
+    !value.availableFeatures.every((feature) => typeof feature === "string") ||
+    value.workspaceAccess !== "metadata-only"
+  ) {
+    throw invalidResponse();
+  }
+  return {
+    supportedProfiles: [...value.supportedProfiles],
+    availableFeatures: [
+      ...value.availableFeatures
+    ] as InteractiveWorkspaceStatusV1["availableFeatures"],
+    workspaceAccess: "metadata-only"
   };
 }
 

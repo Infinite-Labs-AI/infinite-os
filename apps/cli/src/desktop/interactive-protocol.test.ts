@@ -7,6 +7,7 @@ import {
 } from "@infinite-os/types";
 import {
   negotiateInteractiveWorkspace,
+  interactiveWorkspaceForCli,
   requestedInteractiveWorkspace,
 } from "./interactive-protocol.js";
 
@@ -21,6 +22,15 @@ const available: InteractiveWorkspaceStatusV1 = {
 };
 
 describe("interactive workspace protocol", () => {
+  it("keeps the CLI legacy by default and enables only the exact host rollout", () => {
+    expect(interactiveWorkspaceForCli({}, "/Users/example/project")).toBeUndefined();
+    expect(interactiveWorkspaceForCli({ INFINITE_GENERAL_MARKETING_PROFILE: "false" }, "/Users/example/project")).toBeUndefined();
+    expect(interactiveWorkspaceForCli({ INFINITE_GENERAL_MARKETING_PROFILE: "true" }, "/Users/example/project")).toEqual({
+      profile: GENERAL_MARKETING_PROFILE,
+      cwd: "/Users/example/project",
+    });
+  });
+
   it("requires descriptor and status capability agreement", () => {
     expect(negotiateInteractiveWorkspace({
       descriptorCapabilities: [INTERACTIVE_WORKSPACE_CAPABILITY],

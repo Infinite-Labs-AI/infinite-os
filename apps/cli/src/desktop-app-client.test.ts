@@ -18,6 +18,10 @@ import {
   runDesktopAppCommand,
   type DesktopBridgeDescriptor
 } from "./desktop-app-client.js";
+import {
+  GENERAL_MARKETING_PROFILE,
+  INTERACTIVE_WORKSPACE_CAPABILITY,
+} from "@infinite-os/types";
 
 const SERVICE = "infinite-desktop-cmdl";
 const CONFIRM_IDEMPOTENCY_CAPABILITY = "confirm.idempotency.v1";
@@ -207,6 +211,94 @@ describe("desktop bridge discovery", () => {
 });
 
 describe("desktop bridge HTTP client", () => {
+  it("negotiates interactive workspace metadata and sends it on a supported turn", async () => {
+    const capabilities = [...CAPABILITIES, INTERACTIVE_WORKSPACE_CAPABILITY];
+    const fixture = createBridgeHome(descriptor({ capabilities }));
+    roots.push(fixture.root);
+    const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      if (String(input).endsWith("/v1/status")) {
+        return jsonResponse(status({
+          capabilities,
+          interactive: {
+            supportedProfiles: [GENERAL_MARKETING_PROFILE],
+            availableFeatures: ["workspace.app-tools.v1"],
+            workspaceAccess: "metadata-only",
+          },
+        }));
+      }
+      const body = JSON.parse(String(init?.body));
+      expect(body.interactive).toEqual({
+        profile: GENERAL_MARKETING_PROFILE,
+        cwd: "/Users/example/project",
+      });
+      return ndjsonResponse([
+        JSON.stringify({
+          protocolVersion: 1,
+          requestId: "interactive-turn",
+          sequence: 1,
+          kind: "done",
+          data: { message: "ok", actionCalls: [] },
+        }),
+      ]);
+    }) as typeof fetch;
+    const client = createDesktopAppClient(fixture.env, {
+      fetchImpl,
+      randomId: () => "interactive-turn",
+    });
+
+    await client.status();
+    expect(client.interactiveWorkspace).toMatchObject({
+      supportedProfiles: [GENERAL_MARKETING_PROFILE],
+      workspaceAccess: "metadata-only",
+    });
+    await expect(client.turn({
+      message: "hello",
+      expectedContextRevision: "context-1",
+      interactive: {
+        profile: GENERAL_MARKETING_PROFILE,
+        cwd: "/Users/example/project",
+      },
+    })).resolves.toMatchObject({ message: "ok" });
+  });
+
+  it("fails an explicit interactive request when descriptor/status negotiation is absent", async () => {
+    const fixture = createBridgeHome();
+    roots.push(fixture.root);
+    const fetchImpl = vi.fn(async () => jsonResponse(status())) as typeof fetch;
+    const client = createDesktopAppClient(fixture.env, { fetchImpl });
+    await client.status();
+
+    await expect(client.turn({
+      message: "hello",
+      expectedContextRevision: "context-1",
+      interactive: { profile: GENERAL_MARKETING_PROFILE },
+    })).rejects.toMatchObject({ code: "interactive_capability_unavailable" });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails an explicit profile missing from negotiated Desktop status", async () => {
+    const capabilities = [...CAPABILITIES, INTERACTIVE_WORKSPACE_CAPABILITY];
+    const fixture = createBridgeHome(descriptor({ capabilities }));
+    roots.push(fixture.root);
+    const fetchImpl = vi.fn(async () => jsonResponse(status({
+      capabilities,
+      interactive: {
+        supportedProfiles: [],
+        availableFeatures: [],
+        workspaceAccess: "metadata-only",
+      },
+    }))) as typeof fetch;
+    const client = createDesktopAppClient(fixture.env, { fetchImpl });
+    await client.status();
+
+    await expect(client.turn({
+      message: "hello",
+      expectedContextRevision: "context-1",
+      interactive: { profile: GENERAL_MARKETING_PROFILE },
+    })).rejects.toMatchObject({ code: "interactive_profile_unsupported" });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
   it("authenticates status and validates desktop identity and boot", async () => {
     const fixture = createBridgeHome();
     roots.push(fixture.root);
