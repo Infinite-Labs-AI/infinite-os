@@ -2531,7 +2531,10 @@ async function createMetaCreativeHandler(
       ...(optionalString(input, "body") ? { body: optionalString(input, "body") } : {}),
       ...(optionalString(input, "title") ? { title: optionalString(input, "title") } : {}),
       ...(optionalString(input, "description") ? { description: optionalString(input, "description") } : {}),
-      ...(optionalString(input, "callToAction") ? { callToAction: optionalString(input, "callToAction") } : {})
+      ...(optionalString(input, "callToAction") ? { callToAction: optionalString(input, "callToAction") } : {}),
+      // Tracking parameters Meta appends to the destination link at delivery. Carries dynamic macros
+      // verbatim — see MetaCreativeCreateInput.urlTags.
+      ...(optionalString(input, "urlTags") ? { urlTags: optionalString(input, "urlTags") } : {})
     }), undefined, cliExecution, encryptionKey, expectedCredential
   );
 }

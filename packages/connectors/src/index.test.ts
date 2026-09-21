@@ -6919,11 +6919,15 @@ describe("Meta Ads WRITE helpers", () => {
           body: "50% off everything!",
           title: "Shop Now",
           description: "Limited time offer",
-          callToAction: "SHOP_NOW"
+          callToAction: "SHOP_NOW",
+          // Tracking params Meta appends at delivery. Macros MUST survive unencoded.
+          urlTags: "utm_campaign={{campaign.id}}&utm_content={{ad.id}}&placement={{placement}}"
         });
         expect(captured[0].contentType).toBe("application/x-www-form-urlencoded");
         expect(captured[0].body).toEqual({
           name: "LinkCreative",
+          // TOP-LEVEL AdCreative field — never inside object_story_spec.
+          url_tags: "utm_campaign={{campaign.id}}&utm_content={{ad.id}}&placement={{placement}}",
           object_story_spec: {
             page_id: "page_1",
             link_data: {
@@ -8080,7 +8084,8 @@ console.log(${JSON.stringify(serialized)});
               linkUrl: "https://example.com",
               body: "Buy now",
               title: "Headline",
-              callToAction: "shop_now"
+              callToAction: "shop_now",
+              urlTags: "utm_campaign={{campaign.id}}&utm_content={{ad.id}}&placement={{placement}}"
             });
             expect(result).toEqual({ ok: true, id: "120000000000050", status: null });
             const argv = recordedArgv(dir);
@@ -8095,6 +8100,9 @@ console.log(${JSON.stringify(serialized)});
             expect(argv[argv.indexOf("--title") + 1]).toBe("Headline");
             // CTA normalized to UPPERCASE before the CLI.
             expect(argv[argv.indexOf("--call-to-action") + 1]).toBe("SHOP_NOW");
+            // --url-tags exists on `creative create` only (meta-ads 1.1.0); `ad create` has no such
+            // flag. The macros must reach the CLI verbatim — a percent-encoded brace never expands.
+            expect(argv[argv.indexOf("--url-tags") + 1]).toBe("utm_campaign={{campaign.id}}&utm_content={{ad.id}}&placement={{placement}}");
           }
         );
         expect(fetchedUrl).toBe("https://cdn.example.com/banner.png");
