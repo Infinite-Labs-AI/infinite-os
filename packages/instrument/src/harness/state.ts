@@ -64,6 +64,7 @@ export function createHarnessReport(input: {
     failure: null,
     failures: [],
     nextSteps: [],
+    setupChecks: null,
     handoff: HARNESS_HANDOFF_LINE,
     serverLaneEnv: null
   }
