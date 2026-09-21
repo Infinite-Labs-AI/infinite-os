@@ -3,6 +3,8 @@ import { join } from "node:path"
 
 import { describe, expect, it } from "vitest"
 
+import { buildMetaPixelSnippet } from "../providers/meta.js"
+
 import {
   META_SIGNALS_CONFIG_VERSION,
   extractMetaPixelIds,
@@ -309,5 +311,17 @@ describe("checkMetaLane", () => {
     })
     expect(verification.state).toBe("not_verifiable")
     expect(verification.state === "not_verifiable" && verification.reason).toContain("Could not check")
+  })
+})
+
+describe("extractMetaPixelIds against the snippet we actually install", () => {
+  it("finds the pixel id whether or not Manual Advanced Matching is installed", () => {
+    // The advanced-matching accessor adds a SECOND fbq('init', …) call — one with user data, made
+    // only when the customer's code calls it. The bootstrap init must stay exactly as it was or the
+    // delivery probe stops recognising the pixel it is meant to be checking.
+    for (const advancedMatching of [false, true]) {
+      const html = `<html><head><script>${buildMetaPixelSnippet("1234567890123456", { advancedMatching })}</script></head></html>`
+      expect(extractMetaPixelIds(html)).toEqual(["1234567890123456"])
+    }
   })
 })

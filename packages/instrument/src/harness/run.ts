@@ -227,6 +227,7 @@ function flagArtifacts(root: string, args: HarnessArgs): WorkspaceInstallArtifac
     xPixelId: args.xPixelId,
     xEventTagIds: args.xEventTagIds,
     metaPixelId: args.metaPixelId,
+    metaAdvancedMatching: args.metaAdvancedMatching,
     infiniteSiteSourceKey: args.infiniteSiteSourceKey,
     infiniteCollectPath: args.infiniteCollectPath,
     infiniteProductionHosts: args.infiniteProductionHosts.length > 0 ? args.infiniteProductionHosts : undefined,
@@ -510,14 +511,25 @@ export const PRIVACY_DISCLOSURE_CODE = "INF_PRIVACY_DISCLOSURE"
 export const PIXEL_DISCLOSURE_FIELDS =
   "Browser pixel — each event is POSTed to Infinite (Ultima Inc.) at api.ultima.inc via a same-origin rewrite, so Infinite receives the request headers, INCLUDING the visitor's IP address and User-Agent, plus a JSON body of: a random anonymousId + sessionId, the page URL (origin + path; query string and fragment stripped), an optional referrer reduced to its host, the event name, and bounded event properties (no DOM text, form values, or click ids)."
 
+// Manual Advanced Matching is OFF unless the customer asked for it, so this line is added to the
+// disclosure only when it is actually installed. It is the one lane that can carry a visitor's
+// contact details, so it says so plainly rather than hiding behind "hashed".
+export const META_ADVANCED_MATCHING_DISCLOSURE_FIELDS =
+  "Meta Manual Advanced Matching (you turned this on with --meta-advanced-matching on) — when YOUR code calls window.infiniteMetaAdvancedMatch(), the page sends Meta a sha256 hash of the email address and/or the account id you passed it, alongside the event. The raw values are hashed in the browser and never transmitted, and the page never reads them from your forms or your DOM by itself; it sends only what your code hands it, when your code hands it over. Disclose that hashed contact details are shared with Meta for ad measurement."
+
 export const SERVER_LANE_DISCLOSURE_FIELDS =
   "Server lane — your edge middleware sends to Infinite (Ultima Inc.) at api.ultima.inc: the path, the host, the referrer host, a User-Agent CLASS (userAgentFamily, not the raw UA), and a secret-keyed visit key that rotates every 30 minutes. The raw IP address and full User-Agent are processed on your server to derive the class and key and never leave it."
 
 /** Builds the disclosure notice for exactly the lanes being installed, or null if neither is. */
-export function buildPrivacyDisclosureNotice(lanes: { pixel: boolean; serverLane: boolean }): string | null {
+export function buildPrivacyDisclosureNotice(lanes: {
+  pixel: boolean
+  serverLane: boolean
+  metaAdvancedMatching?: boolean
+}): string | null {
   const parts: string[] = []
   if (lanes.pixel) parts.push(PIXEL_DISCLOSURE_FIELDS)
   if (lanes.serverLane) parts.push(SERVER_LANE_DISCLOSURE_FIELDS)
+  if (lanes.metaAdvancedMatching) parts.push(META_ADVANCED_MATCHING_DISCLOSURE_FIELDS)
   if (parts.length === 0) return null
   return `${PRIVACY_DISCLOSURE_CODE} — Installing Infinite adds a new data processor (Infinite / Ultima Inc., api.ultima.inc). Disclose it in your privacy policy BEFORE enabling collection. What is sent: ${parts.join(" ")}`
 }
@@ -527,7 +539,15 @@ function remindInfinitePrivacyDisclosure(ctx: Ctx): void {
     (entry) => entry.provider === "infinite" && (entry.action === "install" || entry.action === "upgrade")
   )
   const serverLane = Boolean(ctx.planResult?.plan.serverLane)
-  const notice = buildPrivacyDisclosureNotice({ pixel, serverLane })
+  // Only when Meta is actually being installed AND the customer opted in — a discovered artifact
+  // that merely records the flag while Meta is skipped must not produce a disclosure for a lane
+  // that is not there.
+  const metaAdvancedMatching =
+    ctx.keys?.artifacts.meta?.advancedMatching === true &&
+    ctx.classifications.some(
+      (entry) => entry.provider === "meta" && (entry.action === "install" || entry.action === "upgrade")
+    )
+  const notice = buildPrivacyDisclosureNotice({ pixel, serverLane, metaAdvancedMatching })
   if (!notice) return
   if (!ctx.report.nextSteps.includes(notice)) ctx.report.nextSteps.push(notice)
 }

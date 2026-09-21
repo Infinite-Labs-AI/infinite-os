@@ -102,6 +102,8 @@ export interface WorkspaceArtifactOptions {
   xPixelId?: string
   xEventTagIds?: string[]
   metaPixelId?: string
+  /** `--meta-advanced-matching on|off` (absent = off). Manual Advanced Matching, opt-in only. */
+  metaAdvancedMatching?: boolean
   infiniteSiteSourceKey?: string
   infiniteCollectPath?: string
   infiniteProductionHosts?: string[]
@@ -115,6 +117,13 @@ export interface WorkspaceArtifactOptions {
   /** `--infinite-allow-automation` (absent = off). Synthetic/test sandbox sources ONLY. */
   infiniteAllowAutomation?: boolean
   packageManager?: PackageManager
+}
+
+export function normalizeMetaAdvancedMatching(value: string): boolean {
+  const normalized = value.trim().toLowerCase()
+  if (normalized === "on") return true
+  if (normalized === "off") return false
+  throw new Error("--meta-advanced-matching currently supports only: on, off")
 }
 
 export function normalizeInfiniteAutocapture(value: string): boolean {
@@ -285,7 +294,12 @@ export function coerceWorkspaceArtifacts(value: unknown): WorkspaceInstallArtifa
 
   const meta = asRecord(record.meta)
   if (meta && typeof meta.pixelId === "string") {
-    artifacts.meta = { pixelId: meta.pixelId }
+    artifacts.meta = {
+      pixelId: meta.pixelId,
+      // Only a real boolean `true` survives. A truthy string ("on", "1") is NOT an opt-in: this
+      // switches on sending visitor contact details, so it takes an unambiguous value or nothing.
+      ...(meta.advancedMatching === true ? { advancedMatching: true } : {})
+    }
   }
 
   return artifacts
@@ -440,7 +454,10 @@ export function resolveWorkspaceArtifacts(
   }
 
   if (options.metaPixelId) {
-    artifacts.meta = { pixelId: options.metaPixelId }
+    artifacts.meta = {
+      pixelId: options.metaPixelId,
+      ...(artifacts.meta?.advancedMatching === true ? { advancedMatching: true } : {})
+    }
   }
 
   if (
@@ -489,6 +506,11 @@ export function resolveWorkspaceArtifacts(
 
   // Modifiers, not sources: the origin, autocapture and allow-automation flags attach to an
   // Infinite artifact that exists for another reason (flags or file) and never fabricate a keyless one.
+  const withMetaAdvancedMatching = applyMetaAdvancedMatching(artifacts, {
+    advancedMatching: options.metaAdvancedMatching
+  })
+  if (withMetaAdvancedMatching.meta !== undefined) artifacts.meta = withMetaAdvancedMatching.meta
+
   const modified = applyInfiniteAllowAutomation(
     applyInfiniteAutocapture(
       applyInfiniteApiOrigin(artifacts, { origin: options.infiniteApiOrigin }),
@@ -549,6 +571,29 @@ export function applyInfiniteApiOrigin(
       ...artifacts.infinite,
       apiOrigin: options.origin
     }
+  }
+}
+
+/**
+ * Layer `--meta-advanced-matching on|off` onto a resolved/discovered Meta artifact. A modifier:
+ * with no Meta pixel there is nothing to attach identity to, so it never fabricates an artifact.
+ *
+ * `off` and absent are the same thing on the wire — the flag is recorded only when it is `true`,
+ * so the installed snippet has no accessor at all rather than a disabled one. Explicitly passing
+ * `off` therefore also UNDOES a previously discovered opt-in, which is what a customer asking to
+ * turn it back off means.
+ */
+export function applyMetaAdvancedMatching(
+  artifacts: WorkspaceInstallArtifacts,
+  options: { advancedMatching?: boolean }
+): WorkspaceInstallArtifacts {
+  if (options.advancedMatching === undefined || artifacts.meta === undefined) {
+    return artifacts
+  }
+  const { advancedMatching: _previous, ...meta } = artifacts.meta
+  return {
+    ...artifacts,
+    meta: options.advancedMatching ? { ...meta, advancedMatching: true } : meta
   }
 }
 

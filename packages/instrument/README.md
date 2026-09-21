@@ -100,6 +100,7 @@ contract. Noninteractive `--yes` and `apply` runs fail on the same blocker.
 | `--x-pixel-id <id>` | Public X pixel ID. |
 | `--x-event-tag-id <id>` | Public X event tag ID; repeatable. |
 | `--meta-pixel-id <id>` | Public Meta pixel ID. Installs with Meta's Automatic Configuration off (`fbq('set','autoConfig','false', id)` before `init`): no button clicks or page metadata are sent to Meta by default. |
+| `--meta-advanced-matching <on\|off>` | **Default off.** Manual Advanced Matching — see below. On, the page defines `window.infiniteMetaAdvancedMatch({ email, externalId })` for **your** code to call once a visitor identifies themselves; it hashes those values before anything reaches Meta. It never reads your pages and never fires on its own. |
 | `--artifact-file <path>` | Read the same public artifact shape from JSON. |
 | `--server-lane` | Add the lossless server lane (see below). Works alone or with the artifact flags. |
 | `--workspace <id>` | Install-manifest ownership; required for apply. |
@@ -108,6 +109,63 @@ contract. Noninteractive `--yes` and `apply` runs fail on the same blocker.
 | `--yes` | Approve writes. |
 | `--allow-dirty` | Bypass the clean-tree gate. |
 | `--json` | Machine-readable output. |
+
+#### `--meta-advanced-matching` — helping Meta match a conversion to the click that caused it
+
+**Off unless you turn it on.** Leave it off and nothing changes: the pixel reports the event and
+Meta matches it as best it can from the `_fbc` / `_fbp` cookies it already sets.
+
+**What it improves.** When someone clicks your Meta ad and buys three days later on a different
+device, Meta often cannot tell that those were the same person, so the sale is never credited to the
+ad that caused it — and Meta's optimiser, which learns from exactly those credited conversions,
+learns from a partial picture and spends your budget worse. Handing Meta a hashed email or account
+id alongside the event lets it join the two with certainty instead of guessing. Meta scores this as
+"Event Match Quality"; a higher score means more of your real conversions get attributed, and
+cheaper results from the same spend.
+
+**What it means for your visitors.** With this on, when your code calls the accessor, their email
+address (or the account id you pass) is turned into a SHA-256 hash in their browser and sent to Meta
+with the event. Meta uses it to look for a matching account on its side. The raw value is hashed
+before it is transmitted and is never sent in the clear — but a hash of an email is still a stable
+identifier for that person, so this is genuinely data about your visitor going to Meta for ad
+measurement. **Disclose it in your privacy policy**, and check it against your consent rules, before
+you turn it on. The installer reminds you at install time.
+
+**We will not do it behind your back.** Meta also offers *Automatic* Advanced Matching, where the
+pixel scrapes your forms for these values by itself. `infinite-tag` keeps that switched off
+(`fbq('set','autoConfig','false', id)`), on every install, opted in or not — deciding to harvest
+your visitors' form fields is not ours to make on your behalf. This flag is the manual alternative:
+values reach Meta only because **your** code handed them over, at a moment you chose.
+
+**How to turn it on**
+
+```bash
+npx infinite-tag install --meta-pixel-id <id> --meta-advanced-matching on --workspace <id> --yes
+```
+
+Then call the accessor from your own code, where you already know who the visitor is — after a
+sign-up completes, or on an order-confirmation page:
+
+```js
+// Pass RAW values. The tag hashes them; you must not hash them first.
+await window.infiniteMetaAdvancedMatch({
+  email: user.email,        // normalised (trimmed + lowercased) and SHA-256'd for you
+  externalId: user.id       // your own stable account id; hashed the same way
+})
+fbq("track", "Purchase", { value: 49, currency: "USD" })
+```
+
+**The contract, so nothing is ambiguous:**
+
+- **Raw in, always.** The tag is the only thing that hashes. If you pass a value that is already a
+  64-character hex digest it is **refused**, not hashed a second time — a double-hashed value is
+  accepted by Meta and matches nobody, which quietly makes your score *worse*.
+- **Both fields are optional.** Pass what you have. Nothing usable ⇒ nothing is sent.
+- **Call it before the event** you want enriched; it returns a promise, so `await` it. The identity
+  then rides along with every subsequent event on that page.
+- **It never reads your page.** No form fields, no DOM, no timers, no automatic calls.
+- Needs a secure origin (HTTPS), because the hashing uses the browser's WebCrypto. On an insecure
+  origin it sends nothing rather than sending a raw value.
 
 The removed external-loader flags fail with a migration error and are not
 reinterpreted.
