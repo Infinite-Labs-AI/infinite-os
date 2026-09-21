@@ -7770,6 +7770,23 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
             age_min: 18,
             targeting_automation: { advantage_audience: 0 }
           });
+          const advantage = await handlers.create_meta_ad_set?.(
+            {
+              campaignId: "120000000000001",
+              name: "Advantage+",
+              optimizationGoal: "OFFSITE_CONVERSIONS",
+              billingEvent: "IMPRESSIONS",
+              advantageAudience: true,
+              targeting: { geo_locations: { countries: ["US"] } },
+              clientToken: "tok_adset_advantage"
+            },
+            operatorContext
+          );
+          expect(advantage?.ok).toBe(true);
+          expect((calls[2].body as { targeting: Record<string, unknown> }).targeting).toEqual({
+            geo_locations: { countries: ["US"] },
+            targeting_automation: { advantage_audience: 1 }
+          });
           // Wrong types fail typed, before any POST.
           await expect(
             handlers.create_meta_ad_set?.(
@@ -7783,7 +7800,7 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
               operatorContext
             )
           ).rejects.toMatchObject({ code: "invalid_targeting", retryable: false });
-          expect(calls).toHaveLength(2);
+          expect(calls).toHaveLength(3);
         }
       );
     });

@@ -10309,10 +10309,8 @@ export interface MetaCampaignCreateInput {
 // A3 (2026-09-13) — manual audience + placements. The BOUNDED subset of Meta's targeting spec
 // the desktop Create sheet can express (no flexible_spec/custom_audiences/free-form keys). On the
 // wire it is the CLI's `--targeting <json>` escape hatch (which REPLACES --targeting-countries —
-// geo_locations lives inside) or the Graph `targeting` param, ALWAYS with Advantage+ audience
-// off: `--no-advantage-audience` on the CLI, `targeting_automation.advantage_audience = 0` on
-// Graph. Placements are manual by construction: naming publisher_platforms/positions turns
-// Advantage+ placements off on Meta's side.
+// geo_locations lives inside) or the Graph `targeting` param. `advantageAudience` controls the
+// targeting-automation bit; placement automation remains structural (omit position restrictions).
 export interface MetaAdSetTargeting {
   age_min?: number;
   age_max?: number;
@@ -10336,6 +10334,8 @@ export interface MetaAdSetCreateInput {
   /** Manual targeting JSON; when present it REPLACES targetingCountries (which is folded into
    *  geo_locations only when the JSON carries none, so a country is never dropped silently). */
   targeting?: MetaAdSetTargeting;
+  /** Meta Advantage+ audience. Omitted preserves the historical manual/off behavior. */
+  advantageAudience?: boolean;
   pixelId?: string;
   customEventType?: string;
 }
@@ -10920,8 +10920,10 @@ export async function createMetaAdSet(
   //   adds default targeting_automation/placements is [INFERRED].
   const manualTargeting = metaAdSetTargetingSpec(input);
   if (manualTargeting) {
-    // A3: the manual spec verbatim + Advantage+ audience OFF (product rule: never on).
-    params.targeting = { ...manualTargeting, targeting_automation: { advantage_audience: 0 } };
+    params.targeting = {
+      ...manualTargeting,
+      targeting_automation: { advantage_audience: input.advantageAudience === true ? 1 : 0 }
+    };
   } else if (input.targetingCountries && input.targetingCountries.length > 0) {
     params.targeting = { geo_locations: { countries: input.targetingCountries } }; // VERIFY against a real Meta sandbox capture before live use
   }
@@ -12692,9 +12694,9 @@ async function createMetaAdSetViaCli(
   } else if (input.targetingCountries && input.targetingCountries.length > 0) {
     args.push("--targeting-countries", input.targetingCountries.join(","));
   }
-  // Product rule (2026-09-13): Advantage+ audience is OFF on every ad set. Explicit, because
-  // with the flag absent the CLI fills targeting_automation.advantage_audience itself.
-  args.push("--no-advantage-audience");
+  // Explicit on/off: omission lets the CLI choose a default, which is not an acceptable product
+  // contract. Undefined remains OFF for callers that predate this field.
+  args.push(input.advantageAudience === true ? "--advantage-audience" : "--no-advantage-audience");
   if (input.pixelId) {
     args.push("--pixel-id", input.pixelId);
     // Mirror the Graph path: default the conversion event to PURCHASE when a pixel

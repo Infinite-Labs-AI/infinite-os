@@ -6907,6 +6907,27 @@ describe("Meta Ads WRITE helpers", () => {
       }
     );
 
+    await captureWrites(
+      () => jsonResponse({ id: "as_advantage", status: "PAUSED" }),
+      async (captured) => {
+        await createMetaAdSet(metaWriteCredential, {
+          name: "Advantage+",
+          campaignId: "c1",
+          optimizationGoal: "OFFSITE_CONVERSIONS",
+          billingEvent: "IMPRESSIONS",
+          advantageAudience: true,
+          targeting: { geo_locations: { countries: ["US"] } }
+        });
+        expect(captured[0].body).toMatchObject({
+          status: "PAUSED",
+          targeting: {
+            geo_locations: { countries: ["US"] },
+            targeting_automation: { advantage_audience: 1 }
+          }
+        });
+      }
+    );
+
     // Link creative → object_story_spec.link_data (headline key is "name").
     await captureWrites(
       () => jsonResponse({ id: "cr1" }),
@@ -8040,6 +8061,25 @@ console.log(${JSON.stringify(serialized)});
         expect(argv[argv.indexOf("--status") + 1]).toBe("PAUSED");
         // The positional campaign id is still LAST, after `--`.
         expect(argv.slice(-2)).toEqual(["--", "120000000000010"]);
+      });
+    });
+
+    it("adset create maps advantageAudience=true to --advantage-audience with unrestricted placements", async () => {
+      await withTmp(async (dir) => {
+        const targeting = { geo_locations: { countries: ["US"] } };
+        await createMetaAdSet(cliCredential(dir, { id: "120000000000023", status: "PAUSED" }), {
+          name: "Advantage+",
+          campaignId: "120000000000010",
+          optimizationGoal: "OFFSITE_CONVERSIONS",
+          billingEvent: "IMPRESSIONS",
+          advantageAudience: true,
+          targeting
+        });
+        const argv = recordedArgv(dir);
+        expect(argv[argv.indexOf("--targeting") + 1]).toBe(JSON.stringify(targeting));
+        expect(argv).toContain("--advantage-audience");
+        expect(argv).not.toContain("--no-advantage-audience");
+        expect(argv.join(" ")).not.toMatch(/facebook_positions|instagram_positions|publisher_platforms/);
       });
     });
 

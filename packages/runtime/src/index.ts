@@ -1241,10 +1241,13 @@ function inputSchemaFor(id: InfiniteOsActionId): Record<string, unknown> {
         startTime: { type: "string" },
         endTime: { type: "string" },
         targetingCountries: { type: "array", items: { type: "string" } },
+        advantageAudience: {
+          type: "boolean",
+          description: "Enable Meta Advantage+ audience. Automatic placements require omitting manual position fields from targeting."
+        },
         // A3 (2026-09-13) — manual audience + placements. REPLACES targetingCountries when both are
-        // sent (countries fold into geo_locations only when the JSON has none). Advantage+ audience
-        // is ALWAYS off on every ad set the engine creates; naming platforms/positions makes
-        // placements manual. Bounded keys only — no free-form Graph targeting from here.
+        // sent (countries fold into geo_locations only when the JSON has none). Bounded keys only —
+        // no free-form Graph targeting from here. Position keys make placements manual.
         targeting: {
           type: "object",
           additionalProperties: false,
