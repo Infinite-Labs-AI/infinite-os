@@ -317,10 +317,26 @@ describe("Meta Ads management action authority (money-safety)", () => {
     expect(targeting?.type).toBe("object");
     expect(targeting?.additionalProperties).toBe(false);
     expect(Object.keys(targeting?.properties ?? {}).sort()).toEqual(
-      ["age_max", "age_min", "facebook_positions", "geo_locations", "instagram_positions", "publisher_platforms"]
+      [
+        "age_max",
+        "age_min",
+        "custom_audiences",
+        "excluded_custom_audiences",
+        "exclusions",
+        "facebook_positions",
+        "flexible_spec",
+        "geo_locations",
+        "instagram_positions",
+        "publisher_platforms",
+        "targeting_automation"
+      ]
     );
     // targetingCountries stays for back-compat; targeting REPLACES it when both are sent.
     expect(schema?.properties?.targetingCountries).toBeDefined();
+    expect(schema?.properties).toMatchObject({
+      customConversionId: { type: "string" },
+      attributionSpec: { type: "array" }
+    });
     expect(schema?.properties?.advantageAudience).toMatchObject({ type: "boolean" });
   });
 

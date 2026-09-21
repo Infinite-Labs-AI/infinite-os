@@ -12524,6 +12524,53 @@ describe("meta command (CLI write surface + confirm gates)", () => {
     });
   });
 
+  it("adset create parses bounded targeting JSON, Advantage audience, custom conversion, and attribution spec", async () => {
+    const api = stubToolsApi();
+    const targeting = {
+      flexible_spec: [{ interests: [{ id: "6003139266461", name: "Entrepreneurship" }] }],
+      custom_audiences: [{ id: "238500000000001" }],
+      exclusions: { interests: [{ id: "6003584161467" }] }
+    };
+    const attributionSpec = [{ event_type: "CLICK_THROUGH", window_days: 7 }];
+    await metaCommand(
+      [
+        "adset",
+        "create",
+        "120555",
+        "--source-id",
+        "src_meta",
+        "--name",
+        "AS",
+        "--optimization-goal",
+        "OFFSITE_CONVERSIONS",
+        "--billing-event",
+        "IMPRESSIONS",
+        "--targeting",
+        JSON.stringify(targeting),
+        "--advantage-audience",
+        "--custom-conversion-id",
+        "123456789012345",
+        "--attribution-spec",
+        JSON.stringify(attributionSpec),
+        "--yes"
+      ],
+      ENV,
+      { confirmMutation: vi.fn(async () => true) }
+    );
+    expect(toolCalls(api)[0]?.body).toMatchObject({
+      actionId: "create_meta_ad_set",
+      input: {
+        campaignId: "120555",
+        targeting: {
+          ...targeting,
+          targeting_automation: { advantage_audience: 1 }
+        },
+        customConversionId: "123456789012345",
+        attributionSpec
+      }
+    });
+  });
+
   it("create without --yes: a NO returns cancelled and issues NO /tools/call", async () => {
     const api = stubToolsApi();
     const confirmMutation = vi.fn(async () => false);

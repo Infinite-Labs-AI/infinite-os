@@ -10584,11 +10584,29 @@ export interface MetaCampaignCreateInput {
   lifetimeBudget?: number;
 }
 
-// A3 (2026-09-13) — manual audience + placements. The BOUNDED subset of Meta's targeting spec
-// the desktop Create sheet can express (no flexible_spec/custom_audiences/free-form keys). On the
-// wire it is the CLI's `--targeting <json>` escape hatch (which REPLACES --targeting-countries —
-// geo_locations lives inside) or the Graph `targeting` param. `advantageAudience` controls the
-// targeting-automation bit; placement automation remains structural (omit position restrictions).
+// A3 (2026-09-13) — manual audience + placements. 2026-09-21 extends this bounded
+// surface to preserve detailed targeting config the founder explicitly asks for.
+// This is still NOT a free-form Graph targeting escape hatch: only the typed keys
+// below pass through the action boundary. When `targeting_automation` is omitted,
+// the legacy default remains Advantage audience OFF; when it is explicitly present
+// the requested value survives.
+export interface MetaTargetingIdName {
+  id: string;
+  name?: string;
+}
+
+export interface MetaAdSetFlexibleSpec {
+  interests?: MetaTargetingIdName[];
+}
+
+export interface MetaAdSetTargetingExclusions {
+  interests?: MetaTargetingIdName[];
+  custom_audiences?: MetaTargetingIdName[];
+}
+
+export interface MetaAdSetTargetingAutomation {
+  advantage_audience: 0 | 1;
+}
 export interface MetaAdSetTargeting {
   age_min?: number;
   age_max?: number;
@@ -10596,6 +10614,16 @@ export interface MetaAdSetTargeting {
   publisher_platforms?: string[];
   facebook_positions?: string[];
   instagram_positions?: string[];
+  flexible_spec?: MetaAdSetFlexibleSpec[];
+  custom_audiences?: MetaTargetingIdName[];
+  excluded_custom_audiences?: MetaTargetingIdName[];
+  exclusions?: MetaAdSetTargetingExclusions;
+  targeting_automation?: MetaAdSetTargetingAutomation;
+}
+
+export interface MetaAdSetAttributionSpec {
+  event_type: string;
+  window_days: number;
 }
 
 export interface MetaAdSetCreateInput {
@@ -10618,6 +10646,9 @@ export interface MetaAdSetCreateInput {
   dsaPayor?: string;
   pixelId?: string;
   customEventType?: string;
+  customConversionId?: string;
+  attributionSpec?: MetaAdSetAttributionSpec[];
+  incrementalAttribution?: boolean;
 }
 
 // Resolve the effective manual-targeting object for an ad-set create, or undefined when the
@@ -10631,6 +10662,40 @@ function metaAdSetTargetingSpec(input: MetaAdSetCreateInput): MetaAdSetTargeting
     spec.geo_locations = { countries: [...input.targetingCountries] };
   }
   return spec;
+}
+
+function assertMetaAdSetPromotedObjectInput(input: MetaAdSetCreateInput): void {
+  if (input.customConversionId && (input.pixelId || input.customEventType)) {
+    throw new ConnectorError(
+      "provider_api_error",
+      "Meta Ads ad set create accepts either customConversionId OR pixelId/customEventType, not both",
+      false
+    );
+  }
+  if (input.customEventType && !input.pixelId) {
+    throw new ConnectorError(
+      "provider_api_error",
+      "Meta Ads ad set create customEventType requires pixelId",
+      false
+    );
+  }
+}
+
+function assertMetaAdSetAttributionInput(input: MetaAdSetCreateInput): void {
+  if (input.incrementalAttribution) {
+    throw new ConnectorError(
+      "provider_unsupported",
+      "Meta Ads ad set create does not yet support incremental_attribution; use attributionSpec or omit incrementalAttribution",
+      false
+    );
+  }
+  if (input.attributionSpec && input.attributionSpec.length === 0) {
+    throw new ConnectorError(
+      "provider_api_error",
+      "Meta Ads ad set create attributionSpec must not be empty",
+      false
+    );
+  }
 }
 
 export interface MetaCreativeCreateInput {
@@ -11181,6 +11246,8 @@ export async function createMetaAdSet(
   credential: MetaAdsCredential,
   input: MetaAdSetCreateInput
 ): Promise<MetaWriteResult> {
+  assertMetaAdSetPromotedObjectInput(input);
+  assertMetaAdSetAttributionInput(input);
   if (isMetaAdsCliTransport(credential)) {
     return createMetaAdSetViaCli(credential, input);
   }
@@ -11215,12 +11282,16 @@ export async function createMetaAdSet(
   if (manualTargeting) {
     params.targeting = {
       ...manualTargeting,
-      targeting_automation: { advantage_audience: input.advantageAudience === true ? 1 : 0 }
+      targeting_automation: { advantage_audience: input.advantageAudience === undefined ? (manualTargeting.targeting_automation?.advantage_audience ?? 0) : (input.advantageAudience ? 1 : 0) }
     };
   } else if (input.targetingCountries && input.targetingCountries.length > 0) {
     params.targeting = { geo_locations: { countries: input.targetingCountries } }; // VERIFY against a real Meta sandbox capture before live use
   }
-  if (input.pixelId) {
+  if (input.customConversionId) {
+    params.promoted_object = {
+      custom_conversion_id: input.customConversionId
+    };
+  } else if (input.pixelId) {
     // promoted_object only when a pixel is supplied (conversion adsets).
     // FIX 3: custom_event_type is an enum → normalize+validate before the POST.
     const customEventType =
@@ -11229,6 +11300,9 @@ export async function createMetaAdSet(
       pixel_id: input.pixelId,
       custom_event_type: customEventType
     };
+  }
+  if (input.attributionSpec) {
+    params.attribution_spec = input.attributionSpec;
   }
 
   const response = await metaAdsGraphPost(credential, `${adAccountId}/${META_CREATE_EDGE.adset}`, params);
@@ -13041,10 +13115,16 @@ async function createMetaAdSetViaCli(
   } else if (input.targetingCountries && input.targetingCountries.length > 0) {
     args.push("--targeting-countries", input.targetingCountries.join(","));
   }
-  // Explicit on/off: omission lets the CLI choose a default, which is not an acceptable product
-  // contract. Undefined remains OFF for callers that predate this field.
-  args.push(input.advantageAudience === true ? "--advantage-audience" : "--no-advantage-audience");
-  if (input.pixelId) {
+  // Legacy default is explicit-off because the CLI fills targeting_automation itself when absent.
+  // If the caller explicitly requested Advantage audience on, use the CLI's supported flag.
+  if ((input.advantageAudience ?? (manualTargeting?.targeting_automation?.advantage_audience === 1))) {
+    args.push("--advantage-audience");
+  } else {
+    args.push("--no-advantage-audience");
+  }
+  if (input.customConversionId) {
+    args.push("--promoted-object", JSON.stringify({ custom_conversion_id: input.customConversionId }));
+  } else if (input.pixelId) {
     args.push("--pixel-id", input.pixelId);
     // Mirror the Graph path: default the conversion event to PURCHASE when a pixel
     // is supplied. Validate/normalize first so a bad enum throws non-retryably.
@@ -13054,6 +13134,9 @@ async function createMetaAdSetViaCli(
     // Click choice set does NOT accept, BEFORE spawning. (PURCHASE default is in-set.)
     assertMetaCliEnum(customEventType, META_CLI_CUSTOM_EVENT_TYPE_VALUES, "custom event type");
     args.push("--custom-event-type", customEventType);
+  }
+  if (input.attributionSpec) {
+    args.push("--attribution-spec", JSON.stringify(input.attributionSpec));
   }
   // POSITIONAL hardening (review): "--" ends option parsing; everything after it is a
   // positional, so the CAMPAIGN_ID goes LAST (after all flags) and a leading-dash id can

@@ -7782,10 +7782,10 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
       );
     });
 
-    // A3 (2026-09-13) — the desktop Create sheet's manual targeting + placements JSON passes
-    // through to the connector (bounded keys only), and a malformed shape fails TYPED before
-    // any POST.
-    it("create_meta_ad_set passes the bounded `targeting` JSON through (Advantage+ audience OFF) and rejects a bad shape typed", async () => {
+    // A3 (2026-09-13) + config preservation (2026-09-21) — the desktop/Create action's bounded
+    // targeting JSON passes through to the connector. Omitted Advantage+ audience keeps the legacy
+    // explicit-off default, but an explicit requested value survives.
+    it("create_meta_ad_set preserves bounded targeting, conversion, and attribution config and rejects bad shapes typed", async () => {
       const db = metaWriteTestDb({ audits: [], metaSources: [{ id: "src_meta_sole" }] });
       await withGraph(
         () => jsonResponse({ id: "adset_targeted", status: "PAUSED" }),
@@ -7816,21 +7816,23 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
             status: "PAUSED",
             targeting: { ...targeting, targeting_automation: { advantage_audience: 0 } }
           });
-          // Unknown keys are NOT forwarded (bounded vocabulary — no free-form Graph targeting).
-          const stripped = await handlers.create_meta_ad_set?.(
+          // Newly supported bounded detailed targeting is forwarded, with the legacy omitted
+          // Advantage+ default still pinned off.
+          const detailed = await handlers.create_meta_ad_set?.(
             {
               campaignId: "120000000000001",
-              name: "Stripped",
+              name: "Detailed",
               optimizationGoal: "OFFSITE_CONVERSIONS",
               billingEvent: "IMPRESSIONS",
               targeting: { age_min: 18, flexible_spec: [{ interests: [{ id: "1" }] }] },
-              clientToken: "tok_adset_stripped"
+              clientToken: "tok_adset_detailed"
             },
             operatorContext
           );
-          expect(stripped?.ok).toBe(true);
+          expect(detailed?.ok).toBe(true);
           expect((calls[1].body as { targeting: Record<string, unknown> }).targeting).toEqual({
             age_min: 18,
+            flexible_spec: [{ interests: [{ id: "1" }] }],
             targeting_automation: { advantage_audience: 0 }
           });
           const advantage = await handlers.create_meta_ad_set?.(
@@ -7850,6 +7852,45 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
             geo_locations: { countries: ["US"] },
             targeting_automation: { advantage_audience: 1 }
           });
+          const preservedTargeting = {
+            age_min: 25,
+            age_max: 54,
+            flexible_spec: [{ interests: [{ id: "6003139266461", name: "Entrepreneurship" }] }],
+            custom_audiences: [{ id: "238500000000001" }],
+            excluded_custom_audiences: [{ id: "238500000000002" }],
+            exclusions: { interests: [{ id: "6003584161467" }] },
+            targeting_automation: { advantage_audience: 1 }
+          };
+          const attributionSpec = [
+            { event_type: "CLICK_THROUGH", window_days: 7 },
+            { event_type: "VIEW_THROUGH", window_days: 1 }
+          ];
+          await expect(
+            handlers.create_meta_ad_set?.(
+              {
+                campaignId: "120000000000001",
+                name: "Preserved",
+                optimizationGoal: "OFFSITE_CONVERSIONS",
+                billingEvent: "IMPRESSIONS",
+                targetingCountries: ["US"],
+                targeting: preservedTargeting,
+                customConversionId: "123456789012345",
+                attributionSpec,
+                clientToken: "tok_adset_preserved"
+              },
+              operatorContext
+            )
+          ).resolves.toMatchObject({ ok: true });
+          expect(calls[3].body).toMatchObject({
+            status: "PAUSED",
+            targeting: {
+              ...preservedTargeting,
+              geo_locations: { countries: ["US"] }
+            },
+            promoted_object: { custom_conversion_id: "123456789012345" },
+            attribution_spec: attributionSpec
+          });
+          expect(JSON.stringify((calls[3].body as Record<string, unknown>).promoted_object)).not.toContain("pixel_id");
           // Wrong types fail typed, before any POST.
           await expect(
             handlers.create_meta_ad_set?.(
@@ -7863,7 +7904,32 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
               operatorContext
             )
           ).rejects.toMatchObject({ code: "invalid_targeting", retryable: false });
-          expect(calls).toHaveLength(3);
+          await expect(
+            handlers.create_meta_ad_set?.(
+              {
+                campaignId: "120000000000001",
+                name: "Unsupported",
+                optimizationGoal: "OFFSITE_CONVERSIONS",
+                billingEvent: "IMPRESSIONS",
+                targeting: { age_min: 18, behaviors: [{ id: "1" }] }
+              },
+              operatorContext
+            )
+          ).rejects.toMatchObject({ code: "invalid_targeting", retryable: false });
+          await expect(
+            handlers.create_meta_ad_set?.(
+              {
+                campaignId: "120000000000001",
+                name: "Conflict",
+                optimizationGoal: "OFFSITE_CONVERSIONS",
+                billingEvent: "IMPRESSIONS",
+                pixelId: "px_1",
+                customConversionId: "123456789012345"
+              },
+              operatorContext
+            )
+          ).rejects.toMatchObject({ code: "invalid_promoted_object", retryable: false });
+          expect(calls).toHaveLength(4);
         }
       );
     });

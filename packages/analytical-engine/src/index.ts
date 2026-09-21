@@ -19,7 +19,9 @@ import {
   updateMetaBudget,
   ConnectorError,
   type ConnectionTestResult,
+  type MetaAdSetAttributionSpec,
   type MetaAdSetTargeting,
+  type MetaTargetingIdName,
   type MetaAdsCredential,
   type MetaAdsCliExecution,
   type MetaEntityStatus,
@@ -2388,6 +2390,22 @@ async function createMetaAdSetHandler(
     ?? optionalBoundedString(expectedCredential, "defaultDsaBeneficiary", 512);
   const dsaPayor = optionalBoundedString(input, "dsaPayor", 512)
     ?? optionalBoundedString(expectedCredential, "defaultDsaPayor", 512);
+  const pixelId = optionalString(input, "pixelId");
+  const customEventType = optionalString(input, "customEventType");
+  const customConversionId = optionalString(input, "customConversionId");
+  const attributionSpec = metaAdSetAttributionSpecInput(input);
+  if (customConversionId && (pixelId || customEventType)) {
+    throw metaTypedError(
+      "invalid_promoted_object",
+      "invalid_promoted_object: pass either customConversionId OR pixelId/customEventType, not both"
+    );
+  }
+  if (customEventType && !pixelId) {
+    throw metaTypedError(
+      "invalid_promoted_object",
+      "invalid_promoted_object: customEventType requires pixelId"
+    );
+  }
   return runMetaCreate(
     db,
     context,
@@ -2411,8 +2429,10 @@ async function createMetaAdSetHandler(
         ...(advantageAudience === undefined ? {} : { advantageAudience }),
         ...(dsaBeneficiary ? { dsaBeneficiary } : {}),
         ...(dsaPayor ? { dsaPayor } : {}),
-        ...(optionalString(input, "pixelId") ? { pixelId: optionalString(input, "pixelId") } : {}),
-        ...(optionalString(input, "customEventType") ? { customEventType: optionalString(input, "customEventType") } : {})
+        ...(pixelId ? { pixelId } : {}),
+        ...(customEventType ? { customEventType } : {}),
+        ...(customConversionId ? { customConversionId } : {}),
+        ...(attributionSpec ? { attributionSpec } : {})
       }),
     budgets.budgetCurrency ? { budgetCurrency: budgets.budgetCurrency } : undefined,
     cliExecution,
@@ -2421,10 +2441,150 @@ async function createMetaAdSetHandler(
   );
 }
 
-// A3 — read the BOUNDED manual-targeting object off an ad-set create input. Only the six known
-// keys are forwarded (a free-form Graph targeting spec is not expressible from here); a wrong
-// type fails TYPED (`invalid_targeting`, non-retryable) before any credential is decrypted or
-// POST is made. Returns undefined when the input carries no `targeting` at all.
+const META_AD_SET_TARGETING_KEYS = new Set([
+  "age_min",
+  "age_max",
+  "geo_locations",
+  "publisher_platforms",
+  "facebook_positions",
+  "instagram_positions",
+  "flexible_spec",
+  "custom_audiences",
+  "excluded_custom_audiences",
+  "exclusions",
+  "targeting_automation"
+]);
+const META_TARGETING_ID_NAME_KEYS = new Set(["id", "name"]);
+const META_FLEXIBLE_SPEC_KEYS = new Set(["interests"]);
+const META_EXCLUSIONS_KEYS = new Set(["interests", "custom_audiences"]);
+const META_TARGETING_AUTOMATION_KEYS = new Set(["advantage_audience"]);
+const META_ATTRIBUTION_SPEC_KEYS = new Set(["event_type", "window_days"]);
+
+function assertMetaKnownKeys(
+  raw: Record<string, unknown>,
+  allowed: Set<string>,
+  code: string,
+  label: string
+): void {
+  for (const key of Object.keys(raw)) {
+    if (!allowed.has(key)) {
+      throw metaTypedError(code, `${code}: unsupported ${label} key ${key}`);
+    }
+  }
+}
+
+function metaTargetingIdName(raw: unknown, path: string): MetaTargetingIdName {
+  if (!isRecord(raw)) {
+    throw metaTypedError("invalid_targeting", `invalid_targeting: ${path} must be an object`);
+  }
+  assertMetaKnownKeys(raw, META_TARGETING_ID_NAME_KEYS, "invalid_targeting", path);
+  const id = raw.id;
+  if (typeof id !== "string" || id.trim() === "") {
+    throw metaTypedError("invalid_targeting", `invalid_targeting: ${path}.id must be a non-empty string`);
+  }
+  const result: MetaTargetingIdName = { id: id.trim() };
+  if (raw.name !== undefined && raw.name !== null) {
+    if (typeof raw.name !== "string" || raw.name.trim() === "") {
+      throw metaTypedError("invalid_targeting", `invalid_targeting: ${path}.name must be a non-empty string`);
+    }
+    result.name = raw.name.trim();
+  }
+  return result;
+}
+
+function metaTargetingIdNameArray(raw: unknown, path: string): MetaTargetingIdName[] {
+  if (!Array.isArray(raw) || raw.length === 0) {
+    throw metaTypedError("invalid_targeting", `invalid_targeting: ${path} must be a non-empty array`);
+  }
+  return raw.map((item, index) => metaTargetingIdName(item, `${path}[${index}]`));
+}
+
+function metaFlexibleSpecInput(raw: unknown): NonNullable<MetaAdSetTargeting["flexible_spec"]> {
+  if (!Array.isArray(raw) || raw.length === 0) {
+    throw metaTypedError("invalid_targeting", "invalid_targeting: flexible_spec must be a non-empty array");
+  }
+  return raw.map((item, index) => {
+    if (!isRecord(item)) {
+      throw metaTypedError("invalid_targeting", `invalid_targeting: flexible_spec[${index}] must be an object`);
+    }
+    assertMetaKnownKeys(item, META_FLEXIBLE_SPEC_KEYS, "invalid_targeting", `flexible_spec[${index}]`);
+    const spec: NonNullable<MetaAdSetTargeting["flexible_spec"]>[number] = {};
+    if (item.interests !== undefined && item.interests !== null) {
+      spec.interests = metaTargetingIdNameArray(item.interests, `flexible_spec[${index}].interests`);
+    }
+    if (!spec.interests) {
+      throw metaTypedError("invalid_targeting", `invalid_targeting: flexible_spec[${index}] must include interests`);
+    }
+    return spec;
+  });
+}
+
+function metaTargetingExclusionsInput(raw: unknown): NonNullable<MetaAdSetTargeting["exclusions"]> {
+  if (!isRecord(raw)) {
+    throw metaTypedError("invalid_targeting", "invalid_targeting: exclusions must be an object");
+  }
+  assertMetaKnownKeys(raw, META_EXCLUSIONS_KEYS, "invalid_targeting", "exclusions");
+  const exclusions: NonNullable<MetaAdSetTargeting["exclusions"]> = {};
+  if (raw.interests !== undefined && raw.interests !== null) {
+    exclusions.interests = metaTargetingIdNameArray(raw.interests, "exclusions.interests");
+  }
+  if (raw.custom_audiences !== undefined && raw.custom_audiences !== null) {
+    exclusions.custom_audiences = metaTargetingIdNameArray(raw.custom_audiences, "exclusions.custom_audiences");
+  }
+  if (!exclusions.interests && !exclusions.custom_audiences) {
+    throw metaTypedError("invalid_targeting", "invalid_targeting: exclusions must include interests or custom_audiences");
+  }
+  return exclusions;
+}
+
+function metaTargetingAutomationInput(raw: unknown): NonNullable<MetaAdSetTargeting["targeting_automation"]> {
+  if (!isRecord(raw)) {
+    throw metaTypedError("invalid_targeting", "invalid_targeting: targeting_automation must be an object");
+  }
+  assertMetaKnownKeys(raw, META_TARGETING_AUTOMATION_KEYS, "invalid_targeting", "targeting_automation");
+  const value = raw.advantage_audience;
+  if (value !== 0 && value !== 1) {
+    throw metaTypedError(
+      "invalid_targeting",
+      "invalid_targeting: targeting_automation.advantage_audience must be 0 or 1"
+    );
+  }
+  return { advantage_audience: value };
+}
+
+function metaAdSetAttributionSpecInput(input: unknown): MetaAdSetAttributionSpec[] | undefined {
+  const raw = objectField(input, "attributionSpec");
+  if (raw === undefined || raw === null) {
+    return undefined;
+  }
+  if (!Array.isArray(raw) || raw.length === 0) {
+    throw metaTypedError("invalid_attribution_spec", "invalid_attribution_spec: attributionSpec must be a non-empty array");
+  }
+  return raw.map((item, index) => {
+    if (!isRecord(item)) {
+      throw metaTypedError("invalid_attribution_spec", `invalid_attribution_spec: attributionSpec[${index}] must be an object`);
+    }
+    assertMetaKnownKeys(item, META_ATTRIBUTION_SPEC_KEYS, "invalid_attribution_spec", `attributionSpec[${index}]`);
+    if (typeof item.event_type !== "string" || item.event_type.trim() === "") {
+      throw metaTypedError(
+        "invalid_attribution_spec",
+        `invalid_attribution_spec: attributionSpec[${index}].event_type must be a non-empty string`
+      );
+    }
+    if (typeof item.window_days !== "number" || !Number.isInteger(item.window_days) || item.window_days <= 0) {
+      throw metaTypedError(
+        "invalid_attribution_spec",
+        `invalid_attribution_spec: attributionSpec[${index}].window_days must be a positive integer`
+      );
+    }
+    return { event_type: item.event_type.trim(), window_days: item.window_days };
+  });
+}
+
+// A3 — read the BOUNDED manual-targeting object off an ad-set create input. The supported
+// set now covers the founder-approved detailed targeting controls (interests, custom audiences,
+// exclusions, and explicit Advantage audience). Unsupported keys fail TYPED instead of being
+// dropped silently before any credential is decrypted or POST is made.
 function metaAdSetTargetingInput(input: unknown): MetaAdSetTargeting | undefined {
   const raw = objectField(input, "targeting");
   if (raw === undefined || raw === null) {
@@ -2433,6 +2593,7 @@ function metaAdSetTargetingInput(input: unknown): MetaAdSetTargeting | undefined
   if (!isRecord(raw)) {
     throw metaTypedError("invalid_targeting", "invalid_targeting: targeting must be an object");
   }
+  assertMetaKnownKeys(raw, META_AD_SET_TARGETING_KEYS, "invalid_targeting", "targeting");
   const spec: MetaAdSetTargeting = {};
   const age = (key: "age_min" | "age_max"): void => {
     const value = raw[key];
@@ -2461,10 +2622,28 @@ function metaAdSetTargetingInput(input: unknown): MetaAdSetTargeting | undefined
   const geo = raw.geo_locations;
   if (geo !== undefined && geo !== null) {
     const countries = isRecord(geo) ? geo.countries : undefined;
+    if (isRecord(geo)) {
+      assertMetaKnownKeys(geo, new Set(["countries"]), "invalid_targeting", "geo_locations");
+    }
     if (!Array.isArray(countries) || !countries.every((item) => typeof item === "string" && item.trim() !== "")) {
       throw metaTypedError("invalid_targeting", "invalid_targeting: geo_locations.countries must be an array of country codes");
     }
     spec.geo_locations = { countries: [...(countries as string[])] };
+  }
+  if (raw.flexible_spec !== undefined && raw.flexible_spec !== null) {
+    spec.flexible_spec = metaFlexibleSpecInput(raw.flexible_spec);
+  }
+  if (raw.custom_audiences !== undefined && raw.custom_audiences !== null) {
+    spec.custom_audiences = metaTargetingIdNameArray(raw.custom_audiences, "custom_audiences");
+  }
+  if (raw.excluded_custom_audiences !== undefined && raw.excluded_custom_audiences !== null) {
+    spec.excluded_custom_audiences = metaTargetingIdNameArray(raw.excluded_custom_audiences, "excluded_custom_audiences");
+  }
+  if (raw.exclusions !== undefined && raw.exclusions !== null) {
+    spec.exclusions = metaTargetingExclusionsInput(raw.exclusions);
+  }
+  if (raw.targeting_automation !== undefined && raw.targeting_automation !== null) {
+    spec.targeting_automation = metaTargetingAutomationInput(raw.targeting_automation);
   }
   return spec;
 }

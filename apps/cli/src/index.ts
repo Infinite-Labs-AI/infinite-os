@@ -8052,8 +8052,11 @@ const META_VALUE_FLAGS = new Set<string>([
   "--optimization-goal",
   "--billing-event",
   "--targeting-countries",
+  "--targeting",
   "--pixel-id",
   "--custom-event-type",
+  "--custom-conversion-id",
+  "--attribution-spec",
   "--start-time",
   "--end-time",
   "--creative-id",
@@ -8123,6 +8126,18 @@ function metaCsvFlag(args: string[], flag: string): string[] | undefined {
     .split(",")
     .map((part) => part.trim())
     .filter(Boolean);
+}
+
+function metaJsonFlag(args: string[], flag: string): unknown {
+  const raw = optionValue(args, flag);
+  if (raw === undefined) {
+    return undefined;
+  }
+  try {
+    return JSON.parse(raw);
+  } catch (error) {
+    throw new Error(`${flag} must be valid JSON: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }
 
 // Render the budget line shown on the write confirmation. The amount is integer
@@ -8364,8 +8379,34 @@ async function metaCreateCommand(
     const lifetimeBudget = metaCentsFlag(rest, "--lifetime-budget");
     const bidAmount = metaCentsFlag(rest, "--bid-amount");
     const targetingCountries = metaCsvFlag(rest, "--targeting-countries");
+    const targetingRaw = metaJsonFlag(rest, "--targeting");
+    if (targetingRaw !== undefined && !isRecord(targetingRaw)) {
+      throw new Error("--targeting must be a JSON object");
+    }
+    const advantageAudienceOn = hasFlag(rest, "--advantage-audience");
+    const advantageAudienceOff = hasFlag(rest, "--no-advantage-audience");
+    if (advantageAudienceOn && advantageAudienceOff) {
+      throw new Error("pass either --advantage-audience or --no-advantage-audience, not both");
+    }
+    const targeting =
+      targetingRaw !== undefined || advantageAudienceOn
+        ? {
+            ...(isRecord(targetingRaw) ? targetingRaw : {}),
+            ...(advantageAudienceOn || advantageAudienceOff
+              ? { targeting_automation: { advantage_audience: advantageAudienceOn ? 1 : 0 } }
+              : {})
+          }
+        : undefined;
     const pixelId = optionValue(rest, "--pixel-id");
     const customEventType = optionValue(rest, "--custom-event-type");
+    const customConversionId = optionValue(rest, "--custom-conversion-id");
+    if (customConversionId && (pixelId || customEventType)) {
+      throw new Error("meta adset create accepts either --custom-conversion-id OR --pixel-id/--custom-event-type, not both");
+    }
+    const attributionSpec = metaJsonFlag(rest, "--attribution-spec");
+    if (attributionSpec !== undefined && !Array.isArray(attributionSpec)) {
+      throw new Error("--attribution-spec must be a JSON array");
+    }
     const startTime = optionValue(rest, "--start-time");
     const endTime = optionValue(rest, "--end-time");
     actionId = "create_meta_ad_set";
@@ -8381,8 +8422,11 @@ async function metaCreateCommand(
       ...(startTime ? { startTime } : {}),
       ...(endTime ? { endTime } : {}),
       ...(targetingCountries ? { targetingCountries } : {}),
+      ...(targeting ? { targeting } : {}),
       ...(pixelId ? { pixelId } : {}),
       ...(customEventType ? { customEventType } : {}),
+      ...(customConversionId ? { customConversionId } : {}),
+      ...(attributionSpec ? { attributionSpec } : {}),
       ...(clientToken ? { clientToken } : {})
     };
   } else if (object === "creative") {

@@ -6975,6 +6975,52 @@ describe("Meta Ads WRITE helpers", () => {
       }
     );
 
+    await captureWrites(
+      () => jsonResponse({ id: "as3", status: "PAUSED" }),
+      async (captured) => {
+        await createMetaAdSet(metaWriteCredential, {
+          name: "Preserved config",
+          campaignId: "c1",
+          optimizationGoal: "OFFSITE_CONVERSIONS",
+          billingEvent: "IMPRESSIONS",
+          targetingCountries: ["US"],
+          targeting: {
+            age_min: 25,
+            age_max: 54,
+            flexible_spec: [{ interests: [{ id: "6003139266461", name: "Entrepreneurship" }] }],
+            custom_audiences: [{ id: "238500000000001", name: "Newsletter buyers" }],
+            excluded_custom_audiences: [{ id: "238500000000002" }],
+            exclusions: { interests: [{ id: "6003584161467", name: "Freebie seekers" }] },
+            targeting_automation: { advantage_audience: 1 }
+          },
+          customConversionId: "123456789012345",
+          attributionSpec: [
+            { event_type: "CLICK_THROUGH", window_days: 7 },
+            { event_type: "VIEW_THROUGH", window_days: 1 }
+          ]
+        } as Parameters<typeof createMetaAdSet>[1]);
+        expect(captured[0].body).toMatchObject({
+          status: "PAUSED",
+          targeting: {
+            age_min: 25,
+            age_max: 54,
+            geo_locations: { countries: ["US"] },
+            flexible_spec: [{ interests: [{ id: "6003139266461", name: "Entrepreneurship" }] }],
+            custom_audiences: [{ id: "238500000000001", name: "Newsletter buyers" }],
+            excluded_custom_audiences: [{ id: "238500000000002" }],
+            exclusions: { interests: [{ id: "6003584161467", name: "Freebie seekers" }] },
+            targeting_automation: { advantage_audience: 1 }
+          },
+          promoted_object: { custom_conversion_id: "123456789012345" },
+          attribution_spec: [
+            { event_type: "CLICK_THROUGH", window_days: 7 },
+            { event_type: "VIEW_THROUGH", window_days: 1 }
+          ]
+        });
+        expect(JSON.stringify(captured[0].body?.promoted_object)).not.toContain("pixel_id");
+      }
+    );
+
     // Link creative → object_story_spec.link_data (headline key is "name").
     await captureWrites(
       () => jsonResponse({ id: "cr1" }),
@@ -7191,6 +7237,36 @@ describe("Meta Ads WRITE helpers", () => {
               callToAction: "NOT_A_CTA"
             })
           ).rejects.toMatchObject({ code: "provider_api_error", retryable: false });
+        }
+      );
+    });
+
+    it("rejects conflicting ad-set conversion and attribution controls before any provider write", async () => {
+      await withMockFetch(
+        () => {
+          throw new Error("provider write must not be called");
+        },
+        async () => {
+          await expect(
+            createMetaAdSet(metaWriteCredential, {
+              name: "Conflict",
+              campaignId: "c1",
+              optimizationGoal: "OFFSITE_CONVERSIONS",
+              billingEvent: "IMPRESSIONS",
+              pixelId: "px_1",
+              customConversionId: "123456789012345"
+            } as Parameters<typeof createMetaAdSet>[1])
+          ).rejects.toMatchObject({ code: "provider_api_error", retryable: false });
+          await expect(
+            createMetaAdSet(metaWriteCredential, {
+              name: "Bad attribution",
+              campaignId: "c1",
+              optimizationGoal: "OFFSITE_CONVERSIONS",
+              billingEvent: "IMPRESSIONS",
+              attributionSpec: [{ event_type: "CLICK_THROUGH", window_days: 7 }],
+              incrementalAttribution: true
+            } as Parameters<typeof createMetaAdSet>[1])
+          ).rejects.toMatchObject({ code: "provider_unsupported", retryable: false });
         }
       );
     });
@@ -8097,8 +8173,8 @@ console.log(${JSON.stringify(serialized)});
 
     // A3 (2026-09-13) — manual targeting + placements. `targeting` rides the CLI's raw-JSON escape
     // hatch (`--targeting <json>`), which per `meta ads adset create --help` REPLACES
-    // --targeting-countries (geo_locations lives inside the JSON); Advantage+ audience is always
-    // explicitly off (`--no-advantage-audience`) so the CLI never fills advantage_audience=1.
+    // --targeting-countries (geo_locations lives inside the JSON); omitted Advantage+ audience
+    // keeps the legacy explicit-off default.
     it("adset create with `targeting` JSON → --targeting <json> + --no-advantage-audience, never --targeting-countries", async () => {
       await withTmp(async (dir) => {
         const targeting = {
@@ -8166,6 +8242,42 @@ console.log(${JSON.stringify(serialized)});
           publisher_platforms: ["instagram"],
           geo_locations: { countries: ["GB"] }
         });
+      });
+    });
+
+    it("adset create via CLI preserves explicit Advantage audience, custom conversion, attribution, and bounded audience JSON", async () => {
+      await withTmp(async (dir) => {
+        const targeting = {
+          flexible_spec: [{ interests: [{ id: "6003139266461", name: "Entrepreneurship" }] }],
+          custom_audiences: [{ id: "238500000000001" }],
+          excluded_custom_audiences: [{ id: "238500000000002" }],
+          exclusions: { interests: [{ id: "6003584161467" }] },
+          targeting_automation: { advantage_audience: 1 }
+        };
+        const attributionSpec = [{ event_type: "CLICK_THROUGH", window_days: 7 }];
+        await createMetaAdSet(cliCredential(dir, { id: "120000000000023", status: "PAUSED" }), {
+          name: "Preserved CLI",
+          campaignId: "120000000000010",
+          optimizationGoal: "OFFSITE_CONVERSIONS",
+          billingEvent: "IMPRESSIONS",
+          targetingCountries: ["US"],
+          targeting,
+          customConversionId: "123456789012345",
+          attributionSpec
+        } as Parameters<typeof createMetaAdSet>[1]);
+        const argv = recordedArgv(dir);
+        expect(argv[argv.indexOf("--targeting") + 1]).toBe(JSON.stringify({
+          ...targeting,
+          geo_locations: { countries: ["US"] }
+        }));
+        expect(argv).toContain("--advantage-audience");
+        expect(argv).not.toContain("--no-advantage-audience");
+        expect(argv[argv.indexOf("--promoted-object") + 1]).toBe(JSON.stringify({
+          custom_conversion_id: "123456789012345"
+        }));
+        expect(argv[argv.indexOf("--attribution-spec") + 1]).toBe(JSON.stringify(attributionSpec));
+        expect(argv).not.toContain("--pixel-id");
+        expect(argv.slice(-2)).toEqual(["--", "120000000000010"]);
       });
     });
 

@@ -1246,8 +1246,9 @@ function inputSchemaFor(id: InfiniteOsActionId): Record<string, unknown> {
           description: "Enable Meta Advantage+ audience. Automatic placements require omitting manual position fields from targeting."
         },
         // A3 (2026-09-13) — manual audience + placements. REPLACES targetingCountries when both are
-        // sent (countries fold into geo_locations only when the JSON has none). Bounded keys only —
-        // no free-form Graph targeting from here. Position keys make placements manual.
+        // sent (countries fold into geo_locations only when the JSON has none). Omitted Advantage+
+        // audience keeps the legacy explicit-off default; an explicit targeting_automation value is
+        // preserved. Bounded keys only — no free-form Graph targeting from here.
         targeting: {
           type: "object",
           additionalProperties: false,
@@ -1274,6 +1275,93 @@ function inputSchemaFor(id: InfiniteOsActionId): Record<string, unknown> {
               type: "array",
               items: { type: "string" },
               description: "e.g. stream, story, reels, explore, profile_feed"
+            },
+            flexible_spec: {
+              type: "array",
+              items: {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  interests: {
+                    type: "array",
+                    items: {
+                      type: "object",
+                      additionalProperties: false,
+                      properties: {
+                        id: { type: "string" },
+                        name: { type: "string" }
+                      },
+                      required: ["id"]
+                    }
+                  }
+                }
+              },
+              description: "Bounded detailed targeting: flexible_spec entries may include interests by id/name."
+            },
+            custom_audiences: {
+              type: "array",
+              items: {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  id: { type: "string" },
+                  name: { type: "string" }
+                },
+                required: ["id"]
+              }
+            },
+            excluded_custom_audiences: {
+              type: "array",
+              items: {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  id: { type: "string" },
+                  name: { type: "string" }
+                },
+                required: ["id"]
+              }
+            },
+            exclusions: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                interests: {
+                  type: "array",
+                  items: {
+                    type: "object",
+                    additionalProperties: false,
+                    properties: {
+                      id: { type: "string" },
+                      name: { type: "string" }
+                    },
+                    required: ["id"]
+                  }
+                },
+                custom_audiences: {
+                  type: "array",
+                  items: {
+                    type: "object",
+                    additionalProperties: false,
+                    properties: {
+                      id: { type: "string" },
+                      name: { type: "string" }
+                    },
+                    required: ["id"]
+                  }
+                }
+              }
+            },
+            targeting_automation: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                advantage_audience: {
+                  enum: [0, 1],
+                  description: "0 = legacy manual/off default, 1 = explicit Advantage audience on."
+                }
+              },
+              required: ["advantage_audience"]
             }
           }
         },
@@ -1289,6 +1377,19 @@ function inputSchemaFor(id: InfiniteOsActionId): Record<string, unknown> {
         },
         pixelId: { type: "string" },
         customEventType: { type: "string" },
+        customConversionId: { type: "string" },
+        attributionSpec: {
+          type: "array",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              event_type: { type: "string" },
+              window_days: { type: "integer", minimum: 1 }
+            },
+            required: ["event_type", "window_days"]
+          }
+        },
         clientToken: { type: "string" }
       },
       ["campaignId", "name", "optimizationGoal", "billingEvent"]
