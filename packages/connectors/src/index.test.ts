@@ -82,6 +82,33 @@ describe("trusted server Meta CLI isolation", () => {
     }
   });
 
+  it("surfaces sanitized structured Meta provider rejection from isolated CLI stderr", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "meta-server-test-"));
+    const secret = "EAA_REAL_ACTIVE_TOKEN_123";
+    const tokenLike = "EAA_TOKEN_SHAPED_VALUE_456";
+    const executable = fakeExecutable(
+      dir,
+      `const body = { error: { message: "DSA beneficiary required ${secret} ${tokenLike}", code: 100, error_subcode: 2446394, error_user_title: "Missing DSA defaults", error_user_msg: "Set the beneficiary and payor in Ads Manager." } };
+process.stderr.write("provider request failed 400 for https://graph.facebook.com/v25.0/act_123/adsets?access_token=${secret}: " + JSON.stringify(body));
+process.exit(1);`
+    );
+    try {
+      const credential = bindMetaAdsCliExecution(
+        { mode: "live", transport: "meta_ads_cli", adAccountId: "123", accessToken: secret },
+        { mode: "isolated_server", executable }
+      );
+      await expect(createMetaCampaign(credential, campaign)).rejects.toMatchObject({
+        code: "meta_provider_rejection",
+        retryable: false,
+        message: expect.stringContaining("Missing DSA defaults")
+      });
+      await expect(createMetaCampaign(credential, campaign)).rejects.not.toThrow(secret);
+      await expect(createMetaCampaign(credential, campaign)).rejects.not.toThrow(tokenLike);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("uses only the bound executable, token, account, and a private child home", async () => {
     const dir = mkdtempSync(join(tmpdir(), "meta-server-test-"));
     const executable = fakeExecutable(dir, `
@@ -6788,6 +6815,26 @@ describe("Meta Ads WRITE helpers", () => {
       }
     );
 
+    await captureWrites(
+      () => jsonResponse({ id: "120000000000222", status: "PAUSED" }),
+      async (captured) => {
+        await createMetaAdSet(metaWriteCredential, {
+          name: "EU AdSet",
+          campaignId: "120000000000001",
+          optimizationGoal: "OFFSITE_CONVERSIONS",
+          billingEvent: "IMPRESSIONS",
+          targeting: { geo_locations: { countries: ["DE"] } },
+          dsaBeneficiary: "Acme GmbH",
+          dsaPayor: "Acme Inc"
+        });
+        expect(captured[0].body).toMatchObject({
+          status: "PAUSED",
+          dsa_beneficiary: "Acme GmbH",
+          dsa_payor: "Acme Inc"
+        });
+      }
+    );
+
     // Creative → /adcreatives
     await captureWrites(
       () => jsonResponse({ id: "120000000000003" }),
@@ -8026,6 +8073,25 @@ console.log(${JSON.stringify(serialized)});
         expect(argv).toContain("--no-advantage-audience");
         expect(argv).not.toContain("--advantage-audience");
         expect(argv).not.toContain("--targeting");
+      });
+    });
+
+    it("adset create maps DSA defaults to CLI flags while preserving PAUSED", async () => {
+      await withTmp(async (dir) => {
+        await createMetaAdSet(cliCredential(dir, { id: "120000000000024", status: "PAUSED" }), {
+          name: "EU proof",
+          campaignId: "120000000000010",
+          optimizationGoal: "OFFSITE_CONVERSIONS",
+          billingEvent: "IMPRESSIONS",
+          targeting: { geo_locations: { countries: ["US", "GB", "DE", "CA"] } },
+          dsaBeneficiary: "Acme GmbH",
+          dsaPayor: "Acme Inc"
+        });
+        const argv = recordedArgv(dir);
+        expect(argv[argv.indexOf("--dsa-beneficiary") + 1]).toBe("Acme GmbH");
+        expect(argv[argv.indexOf("--dsa-payor") + 1]).toBe("Acme Inc");
+        expect(argv[argv.indexOf("--status") + 1]).toBe("PAUSED");
+        expect(argv.slice(-2)).toEqual(["--", "120000000000010"]);
       });
     });
 

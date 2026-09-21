@@ -92,6 +92,8 @@ export interface ExpectedMetaCredential {
   credentialId: string;
   credentialUpdatedAt: string;
   selectedPageId?: string;
+  defaultDsaBeneficiary?: string;
+  defaultDsaPayor?: string;
 }
 
 // `options.encryptionKey` is the per-workspace credential-custody key (structurally the
@@ -2382,6 +2384,8 @@ async function createMetaAdSetHandler(
   const targetingCountries = stringArray(input, "targetingCountries");
   const targeting = metaAdSetTargetingInput(input);
   const advantageAudience = optionalBoolean(input, "advantageAudience");
+  const dsaBeneficiary = optionalBoundedString(input, "dsaBeneficiary", 512);
+  const dsaPayor = optionalBoundedString(input, "dsaPayor", 512);
   return runMetaCreate(
     db,
     context,
@@ -2403,6 +2407,8 @@ async function createMetaAdSetHandler(
         ...(targetingCountries.length > 0 ? { targetingCountries } : {}),
         ...(targeting ? { targeting } : {}),
         ...(advantageAudience === undefined ? {} : { advantageAudience }),
+        ...(dsaBeneficiary ? { dsaBeneficiary } : {}),
+        ...(dsaPayor ? { dsaPayor } : {}),
         ...(optionalString(input, "pixelId") ? { pixelId: optionalString(input, "pixelId") } : {}),
         ...(optionalString(input, "customEventType") ? { customEventType: optionalString(input, "customEventType") } : {})
       }),
@@ -6195,6 +6201,16 @@ function numberValue(value: unknown): number | undefined {
 function optionalString(input: unknown, key: string): string | undefined {
   const value = objectField(input, key);
   return typeof value === "string" && value.trim() !== "" ? value : undefined;
+}
+
+function optionalBoundedString(input: unknown, key: string, maxLength: number): string | undefined {
+  const value = optionalString(input, key);
+  if (value === undefined) return undefined;
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.length > maxLength) {
+    throw metaTypedError("invalid_input", `invalid_input: ${key} must be a non-empty string no longer than ${maxLength} characters`);
+  }
+  return trimmed;
 }
 
 function optionalBoolean(input: unknown, key: string): boolean | undefined {

@@ -7719,6 +7719,34 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
       );
     });
 
+    it("create_meta_ad_set forwards bounded DSA defaults to the connector while staying PAUSED", async () => {
+      const db = metaWriteTestDb({ audits: [], metaSources: [{ id: "src_meta_sole" }] });
+      await withGraph(
+        () => jsonResponse({ id: "adset_dsa", status: "PAUSED" }),
+        async (calls) => {
+          const handlers = createActionHandlers(db);
+          await handlers.create_meta_ad_set?.(
+            {
+              campaignId: "120000000000001",
+              name: "EU proof",
+              optimizationGoal: "OFFSITE_CONVERSIONS",
+              billingEvent: "IMPRESSIONS",
+              targeting: { geo_locations: { countries: ["DE"] } },
+              dsaBeneficiary: "Acme GmbH",
+              dsaPayor: "Acme Inc",
+              clientToken: "tok_adset_dsa"
+            },
+            operatorContext
+          );
+          expect(calls[0].body).toMatchObject({
+            status: "PAUSED",
+            dsa_beneficiary: "Acme GmbH",
+            dsa_payor: "Acme Inc"
+          });
+        }
+      );
+    });
+
     // A3 (2026-09-13) — the desktop Create sheet's manual targeting + placements JSON passes
     // through to the connector (bounded keys only), and a malformed shape fails TYPED before
     // any POST.

@@ -1277,6 +1277,16 @@ function inputSchemaFor(id: InfiniteOsActionId): Record<string, unknown> {
             }
           }
         },
+        dsaBeneficiary: {
+          type: "string",
+          maxLength: 512,
+          description: "Server-bound EU DSA beneficiary. Omit unless the trusted Meta account binding supplies it."
+        },
+        dsaPayor: {
+          type: "string",
+          maxLength: 512,
+          description: "Server-bound EU DSA payor. Omit unless the trusted Meta account binding supplies it."
+        },
         pixelId: { type: "string" },
         customEventType: { type: "string" },
         clientToken: { type: "string" }

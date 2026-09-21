@@ -10336,6 +10336,8 @@ export interface MetaAdSetCreateInput {
   targeting?: MetaAdSetTargeting;
   /** Meta Advantage+ audience. Omitted preserves the historical manual/off behavior. */
   advantageAudience?: boolean;
+  dsaBeneficiary?: string;
+  dsaPayor?: string;
   pixelId?: string;
   customEventType?: string;
 }
@@ -10603,6 +10605,15 @@ function metaCents(value: number | undefined): number | undefined {
     throw new ConnectorError("provider_api_error", "Meta Ads budgets/bids must be non-negative integer cents", false);
   }
   return value;
+}
+
+function metaDsaString(value: string | undefined, field: string): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.length > 512) {
+    throw new ConnectorError("provider_api_error", `Meta Ads ${field} must be a non-empty string no longer than 512 characters`, false);
+  }
+  return trimmed;
 }
 
 // A budget UPDATE requires a strictly-POSITIVE integer-cents amount. Unlike a create
@@ -10914,6 +10925,10 @@ export async function createMetaAdSet(
   if (bidAmount !== undefined) params.bid_amount = bidAmount;
   if (input.startTime) params.start_time = input.startTime;
   if (input.endTime) params.end_time = input.endTime;
+  const dsaBeneficiary = metaDsaString(input.dsaBeneficiary, "DSA beneficiary");
+  const dsaPayor = metaDsaString(input.dsaPayor, "DSA payor");
+  if (dsaBeneficiary !== undefined) params.dsa_beneficiary = dsaBeneficiary;
+  if (dsaPayor !== undefined) params.dsa_payor = dsaPayor;
   // VERIFY against a real Meta sandbox capture before live use:
   //   `targeting` minimum shape — Graph usually demands at least geo_locations.
   //   The inner key geo_locations.countries is [CONFIRMED-SDK]; whether the CLI
@@ -12160,6 +12175,48 @@ function safeMetaCliClickUsageDiagnostic(
   return { code: "meta_cli_invalid_arguments", message: `${prefix}${exit}: ${detail}` };
 }
 
+function safeBoundedMetaErrorText(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const compact = value.replace(/\s+/g, " ").trim();
+  if (!compact) return undefined;
+  return compact.slice(0, 500);
+}
+
+function safeMetaProviderRejectionDiagnostic(
+  stderr: string,
+  accessToken: string | undefined,
+  prefix: string
+): { message: string; status?: number } | null {
+  const scrubbed = scrubMetaToken(stderr, accessToken);
+  const json = lastBalancedJsonBlock(scrubbed);
+  if (!json) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(json);
+  } catch {
+    return null;
+  }
+  const envelope = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
+  const rawError = envelope.error;
+  if (!rawError || typeof rawError !== "object" || Array.isArray(rawError)) return null;
+  const error = rawError as Record<string, unknown>;
+  const parts: string[] = [];
+  const title = safeBoundedMetaErrorText(error.error_user_title);
+  const userMsg = safeBoundedMetaErrorText(error.error_user_msg);
+  const message = safeBoundedMetaErrorText(error.message);
+  if (title) parts.push(title);
+  if (userMsg && userMsg !== title) parts.push(userMsg);
+  if (message && message !== title && message !== userMsg) parts.push(message);
+  const numeric: string[] = [];
+  if (typeof error.code === "number" && Number.isSafeInteger(error.code)) numeric.push(`code=${error.code}`);
+  if (typeof error.error_subcode === "number" && Number.isSafeInteger(error.error_subcode)) numeric.push(`subcode=${error.error_subcode}`);
+  if (parts.length === 0 && numeric.length === 0) return null;
+  const statusMatch = scrubbed.match(/\b(?:failed|request failed)\s+(\d{3})\b/i);
+  const status = statusMatch ? Number(statusMatch[1]) : undefined;
+  const detail = `${parts.join(": ")}${numeric.length > 0 ? ` [${numeric.join(", ")}]` : ""}`.slice(0, 1_000);
+  return { message: `${prefix}: ${detail}`, ...(status ? { status } : {}) };
+}
+
 // The daemon can be spawned with a cwd that is later removed (e.g. a temp build dir). Node's
 // `spawn` throws if the child's cwd no longer exists, so pin the Meta CLI to a stable, existing
 // directory instead of inheriting the daemon's (possibly-gone) cwd.
@@ -12418,6 +12475,14 @@ async function callIsolatedMetaAdsCliJson(
         );
         if (diagnostic) {
           throw new ConnectorError(diagnostic.code, diagnostic.message, false);
+        }
+        const providerRejection = safeMetaProviderRejectionDiagnostic(
+          stderr.toString("utf8"),
+          token,
+          "Meta provider rejected the request"
+        );
+        if (providerRejection) {
+          throw new ConnectorError("meta_provider_rejection", providerRejection.message, false, undefined, providerRejection.status);
         }
         throw new ConnectorError("provider_api_error", "Meta Ads CLI server command failed", false);
       }
@@ -12686,6 +12751,10 @@ async function createMetaAdSetViaCli(
   pushCentsFlag(args, "--bid-amount", input.bidAmount);
   if (input.startTime) args.push("--start-time", input.startTime);
   if (input.endTime) args.push("--end-time", input.endTime);
+  const dsaBeneficiary = metaDsaString(input.dsaBeneficiary, "DSA beneficiary");
+  const dsaPayor = metaDsaString(input.dsaPayor, "DSA payor");
+  if (dsaBeneficiary !== undefined) args.push("--dsa-beneficiary", dsaBeneficiary);
+  if (dsaPayor !== undefined) args.push("--dsa-payor", dsaPayor);
   const manualTargeting = metaAdSetTargetingSpec(input);
   if (manualTargeting) {
     // A3: the CLI's raw-JSON escape hatch. Per `meta ads adset create --help` it REPLACES

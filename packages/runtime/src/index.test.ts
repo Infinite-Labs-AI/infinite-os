@@ -324,6 +324,15 @@ describe("Meta Ads management action authority (money-safety)", () => {
     expect(schema?.properties?.advantageAudience).toMatchObject({ type: "boolean" });
   });
 
+  it("create_meta_ad_set exposes bounded optional DSA beneficiary/payor fields", () => {
+    const card = ACTION_CATALOG.find((action) => action.id === "create_meta_ad_set");
+    const schema = card?.inputSchema as { properties?: Record<string, { type?: string; maxLength?: number }> } | undefined;
+    expect(schema?.properties?.dsaBeneficiary).toMatchObject({ type: "string", maxLength: 512 });
+    expect(schema?.properties?.dsaPayor).toMatchObject({ type: "string", maxLength: 512 });
+    expect(schema?.properties?.dsaBeneficiary).not.toHaveProperty("enum");
+    expect(schema?.properties?.dsaPayor).not.toHaveProperty("enum");
+  });
+
   it("exposes videoUrl on the Meta creative create schema for desktop uploaded video assets", () => {
     const card = ACTION_CATALOG.find((action) => action.id === "create_meta_creative");
     const schema = card?.inputSchema as { properties?: Record<string, unknown> } | undefined;
