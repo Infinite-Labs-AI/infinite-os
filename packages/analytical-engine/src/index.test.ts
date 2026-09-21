@@ -7235,6 +7235,41 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
         rmSync(dir, { recursive: true, force: true });
       }
     });
+
+    it("defaults an ad set to DSA values frozen on the same credential snapshot", async () => {
+      const dir = mkdtempSync(join(tmpdir(), "meta-version-dsa-"));
+      const executable = join(dir, "meta-server.mjs");
+      const argvFile = join(dir, "argv.json");
+      writeFileSync(executable, `#!${process.execPath}\nimport { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(argvFile)}, JSON.stringify(process.argv.slice(2)));\nconsole.log(JSON.stringify({id:"snapshot-adset",status:"PAUSED"}));\n`);
+      chmodSync(executable, 0o700);
+      const prior = process.env.GROWTH_OS_ENCRYPTION_KEY;
+      process.env.GROWTH_OS_ENCRYPTION_KEY = "analytical-test-encryption-key";
+      try {
+        const snapshot = snapshotDb();
+        const handlers = createActionHandlers(snapshot.db, {
+          metaAdsCliExecution: { mode: "isolated_server", executable },
+          expectedMetaCredential: {
+            ...expected,
+            defaultDsaBeneficiary: "Acme GmbH",
+            defaultDsaPayor: "Acme Inc"
+          }
+        });
+        await expect(handlers.create_meta_ad_set?.({
+          sourceId: "src_meta",
+          campaignId: "campaign_1",
+          name: "EU proof",
+          optimizationGoal: "OFFSITE_CONVERSIONS",
+          billingEvent: "IMPRESSIONS"
+        }, operatorContext)).resolves.toMatchObject({ data: { id: "snapshot-adset" } });
+        const argv = JSON.parse(readFileSync(argvFile, "utf8")) as string[];
+        expect(argv[argv.indexOf("--dsa-beneficiary") + 1]).toBe("Acme GmbH");
+        expect(argv[argv.indexOf("--dsa-payor") + 1]).toBe("Acme Inc");
+        expect(snapshot.snapshotReads()).toBe(1);
+      } finally {
+        if (prior === undefined) delete process.env.GROWTH_OS_ENCRYPTION_KEY; else process.env.GROWTH_OS_ENCRYPTION_KEY = prior;
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
   });
 
   it("keeps the previous Meta source and credential usable when a CLI-token reconnect probe fails", async () => {
@@ -7715,6 +7750,34 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
           );
           expect(calls[0].body).toMatchObject({ status: "PAUSED", daily_budget: "5000" });
           expect(result?.data).toMatchObject({ budgetCurrency: "USD" });
+        }
+      );
+    });
+
+    it("create_meta_ad_set forwards bounded DSA defaults to the connector while staying PAUSED", async () => {
+      const db = metaWriteTestDb({ audits: [], metaSources: [{ id: "src_meta_sole" }] });
+      await withGraph(
+        () => jsonResponse({ id: "adset_dsa", status: "PAUSED" }),
+        async (calls) => {
+          const handlers = createActionHandlers(db);
+          await handlers.create_meta_ad_set?.(
+            {
+              campaignId: "120000000000001",
+              name: "EU proof",
+              optimizationGoal: "OFFSITE_CONVERSIONS",
+              billingEvent: "IMPRESSIONS",
+              targeting: { geo_locations: { countries: ["DE"] } },
+              dsaBeneficiary: "Acme GmbH",
+              dsaPayor: "Acme Inc",
+              clientToken: "tok_adset_dsa"
+            },
+            operatorContext
+          );
+          expect(calls[0].body).toMatchObject({
+            status: "PAUSED",
+            dsa_beneficiary: "Acme GmbH",
+            dsa_payor: "Acme Inc"
+          });
         }
       );
     });
