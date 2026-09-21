@@ -2381,6 +2381,7 @@ async function createMetaAdSetHandler(
   const bidAmount = numberOrNull(input, "bidAmount");
   const targetingCountries = stringArray(input, "targetingCountries");
   const targeting = metaAdSetTargetingInput(input);
+  const advantageAudience = optionalBoolean(input, "advantageAudience");
   return runMetaCreate(
     db,
     context,
@@ -2401,6 +2402,7 @@ async function createMetaAdSetHandler(
         ...(optionalString(input, "endTime") ? { endTime: optionalString(input, "endTime") } : {}),
         ...(targetingCountries.length > 0 ? { targetingCountries } : {}),
         ...(targeting ? { targeting } : {}),
+        ...(advantageAudience === undefined ? {} : { advantageAudience }),
         ...(optionalString(input, "pixelId") ? { pixelId: optionalString(input, "pixelId") } : {}),
         ...(optionalString(input, "customEventType") ? { customEventType: optionalString(input, "customEventType") } : {})
       }),
@@ -6193,6 +6195,11 @@ function numberValue(value: unknown): number | undefined {
 function optionalString(input: unknown, key: string): string | undefined {
   const value = objectField(input, key);
   return typeof value === "string" && value.trim() !== "" ? value : undefined;
+}
+
+function optionalBoolean(input: unknown, key: string): boolean | undefined {
+  const value = objectField(input, key);
+  return typeof value === "boolean" ? value : undefined;
 }
 
 function stringArray(input: unknown, key: string): string[] {

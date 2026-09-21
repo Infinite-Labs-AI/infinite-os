@@ -321,6 +321,7 @@ describe("Meta Ads management action authority (money-safety)", () => {
     );
     // targetingCountries stays for back-compat; targeting REPLACES it when both are sent.
     expect(schema?.properties?.targetingCountries).toBeDefined();
+    expect(schema?.properties?.advantageAudience).toMatchObject({ type: "boolean" });
   });
 
   it("exposes videoUrl on the Meta creative create schema for desktop uploaded video assets", () => {
