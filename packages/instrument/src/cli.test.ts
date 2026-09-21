@@ -504,6 +504,50 @@ describe("Infinite source handoff + meta providers", () => {
     expect(stdoutText()).toContain("couldn't find any analytics to install")
   })
 
+  it("installs Manual Advanced Matching only on an explicit --meta-advanced-matching on", async () => {
+    // The customer decides. Sending their visitors' hashed contact details from their own pages is
+    // their call, not ours — the same reasoning that keeps Meta's autoConfig scraping switched off.
+    const off = copyFixture("static-html-basic")
+    expect(
+      await runCli(["install", "--root", off, "--workspace", "ws_test", "--yes", "--meta-pixel-id", "1234567890123456"])
+    ).toBe(0)
+    expect(indexHtml(off)).not.toContain("infiniteMetaAdvancedMatch")
+
+    const explicitlyOff = copyFixture("static-html-basic")
+    expect(
+      await runCli([
+        "install", "--root", explicitlyOff, "--workspace", "ws_test", "--yes",
+        "--meta-pixel-id", "1234567890123456",
+        "--meta-advanced-matching", "off"
+      ])
+    ).toBe(0)
+    expect(indexHtml(explicitlyOff)).not.toContain("infiniteMetaAdvancedMatch")
+
+    const on = copyFixture("static-html-basic")
+    expect(
+      await runCli([
+        "install", "--root", on, "--workspace", "ws_test", "--yes",
+        "--meta-pixel-id", "1234567890123456",
+        "--meta-advanced-matching", "on"
+      ])
+    ).toBe(0)
+    const onHtml = indexHtml(on)
+    expect(onHtml).toContain("window.infiniteMetaAdvancedMatch = function (identity)")
+    // Meta's page-scraping mode stays off in BOTH cases; manual matching is unaffected by it.
+    expect(onHtml).toContain(`fbq('set', 'autoConfig', 'false', "1234567890123456");`)
+
+    // Anything but on/off is refused rather than guessed at — no truthiness on this switch.
+    const ambiguous = copyFixture("static-html-basic")
+    expect(
+      await runCli([
+        "install", "--root", ambiguous, "--workspace", "ws_test", "--yes",
+        "--meta-pixel-id", "1234567890123456",
+        "--meta-advanced-matching", "true"
+      ])
+    ).toBe(1)
+    expect(indexHtml(ambiguous)).not.toContain("infiniteMetaAdvancedMatch")
+  })
+
   it("adds the Meta pixel only when --meta-pixel-id is given", async () => {
     const withMeta = copyFixture("static-html-basic")
     expect(

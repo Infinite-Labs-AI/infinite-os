@@ -149,6 +149,49 @@ describe("resolveWorkspaceArtifacts", () => {
     expect(fromFile.meta).toEqual({ pixelId: "9876543210" })
   })
 
+  it("leaves Manual Advanced Matching OFF unless the customer asks, and takes only a real boolean", () => {
+    // Off is the DEFAULT and it is recorded as ABSENT, not as `false`: the installed snippet then
+    // has no accessor at all rather than a disabled one. This flag decides whether a customer's
+    // visitors' hashed contact details go to Meta, so it is unambiguous or it is nothing.
+    expect(resolveWorkspaceArtifacts(".", { metaPixelId: "1234567890123456" }).meta).toEqual({
+      pixelId: "1234567890123456"
+    })
+    expect(
+      resolveWorkspaceArtifacts(".", {
+        metaPixelId: "1234567890123456",
+        metaAdvancedMatching: false
+      }).meta
+    ).toEqual({ pixelId: "1234567890123456" })
+    expect(
+      resolveWorkspaceArtifacts(".", {
+        metaPixelId: "1234567890123456",
+        metaAdvancedMatching: true
+      }).meta
+    ).toEqual({ pixelId: "1234567890123456", advancedMatching: true })
+
+    // A modifier, never a source: with no Meta pixel there is nothing to attach identity to.
+    expect(resolveWorkspaceArtifacts(".", { metaAdvancedMatching: true }).meta).toBeUndefined()
+
+    const root = makeTempDir("meta-advanced-matching-file")
+    const artifactFile = join(root, "artifacts.json")
+    writeFileSync(
+      artifactFile,
+      JSON.stringify({ meta: { pixelId: "9876543210", advancedMatching: "on" } })
+    )
+    expect(resolveWorkspaceArtifacts(root, { artifactFile }).meta).toEqual({ pixelId: "9876543210" })
+
+    const optedIn = join(root, "opted-in.json")
+    writeFileSync(optedIn, JSON.stringify({ meta: { pixelId: "9876543210", advancedMatching: true } }))
+    expect(resolveWorkspaceArtifacts(root, { artifactFile: optedIn }).meta).toEqual({
+      pixelId: "9876543210",
+      advancedMatching: true
+    })
+    // An explicit `off` turns a saved opt-in back off — which is what asking to stop means.
+    expect(
+      resolveWorkspaceArtifacts(root, { artifactFile: optedIn, metaAdvancedMatching: false }).meta
+    ).toEqual({ pixelId: "9876543210" })
+  })
+
   it("partial x artifacts (only eventTagIds) surface a pixelId blocker and refuse to apply", () => {
     const artifacts = resolveWorkspaceArtifacts(".", {
       xEventTagIds: ["tw-event-1"]

@@ -39,12 +39,14 @@ import {
   applyInfiniteAllowAutomation,
   applyInfiniteApiOrigin,
   applyInfiniteAutocapture,
+  applyMetaAdvancedMatching,
   applyInfiniteDownloadDestinationPath,
   applyPosthogProxy,
   DEFAULT_INFINITE_COLLECT_PATH,
   defaultArtifactsDir,
   discoverWorkspaceArtifacts,
   normalizeInfiniteAutocapture,
+  normalizeMetaAdvancedMatching,
   normalizeInfiniteConsentMode,
   infiniteServerLaneReceiptUrl,
   resolveInfiniteApiOrigin,
@@ -81,6 +83,8 @@ interface ParsedArgs {
   infiniteApiOrigin?: string
   /** `--infinite-autocapture on|off`: unmarked-click autocapture (absent = on). */
   infiniteAutocapture?: boolean
+  /** `--meta-advanced-matching on|off`: Manual Advanced Matching (absent = OFF). */
+  metaAdvancedMatching?: boolean
   /** `--infinite-allow-automation`: count automation traffic — SYNTHETIC/TEST sandbox sources only (absent = off). */
   infiniteAllowAutomation: boolean
   packageManager?: PackageManager
@@ -177,6 +181,10 @@ function parseArgs(argv: string[]): ParsedArgs {
         break
       case "--meta-pixel-id":
         parsed.metaPixelId = requireValue(token, next)
+        index += 1
+        break
+      case "--meta-advanced-matching":
+        parsed.metaAdvancedMatching = normalizeMetaAdvancedMatching(requireValue(token, next))
         index += 1
         break
       case "--infinite-site-source-key":
@@ -300,6 +308,14 @@ function printHelp(): void {
       "  --x-pixel-id <id>",
       "  --x-event-tag-id <id>  (repeatable)",
       "  --meta-pixel-id <id>       Opt in to the Meta browser Pixel",
+      "  --meta-advanced-matching <on|off>  Manual Advanced Matching, DEFAULT OFF. On, the page defines",
+      "                             window.infiniteMetaAdvancedMatch({ email, externalId }) for YOUR code to call",
+      "                             once a visitor identifies themselves (sign-up, checkout). It hashes those raw",
+      "                             values (sha256, once) before anything reaches Meta, so Meta can match the",
+      "                             conversion to the ad click that caused it instead of guessing. It never reads",
+      "                             your pages and never fires on its own — Meta's page-scraping Automatic Advanced",
+      "                             Matching stays off either way. Leave it off unless you have decided that sending",
+      "                             your visitors' hashed contact details to Meta is something you want to do.",
       "  --artifact-file <path>",
       "",
       "Shared browser runtime and Infinite first-party collection:",
@@ -605,7 +621,8 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
       infiniteStaticProxy: parsed.infiniteStaticProxy,
       infiniteConsentMode: parsed.infiniteConsentMode,
       infiniteApiOrigin,
-      infiniteAutocapture: parsed.infiniteAutocapture
+      infiniteAutocapture: parsed.infiniteAutocapture,
+      metaAdvancedMatching: parsed.metaAdvancedMatching
     })
 
     // Same-machine flag-free install: with no artifact flags and no --artifact-file,
@@ -660,6 +677,10 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
       // artifact and never fabricate one.
       artifacts = applyInfiniteApiOrigin(artifacts, { origin: infiniteApiOrigin })
       artifacts = applyInfiniteAutocapture(artifacts, { autocapture: parsed.infiniteAutocapture })
+      // Same shape for Meta: the flag layers onto a discovered pixel and never fabricates one.
+      artifacts = applyMetaAdvancedMatching(artifacts, {
+        advancedMatching: parsed.metaAdvancedMatching
+      })
 
       // --infinite-allow-automation is a synthetic/test-only MODIFIER (applied post-discovery so it
       // can layer onto a discovered sandbox source). It hard-refuses production hosts by throwing.

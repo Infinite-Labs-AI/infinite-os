@@ -2,7 +2,7 @@
 // artifact flags so a run can carry explicit public keys. Parsing is pure and throws on anything
 // unknown; the CLI turns the throw into exit code 2 with the usage line.
 import type { InfiniteConsentMode, PackageManager } from "../types.js"
-import { normalizeInfiniteConsentMode } from "../workspace-artifacts.js"
+import { normalizeInfiniteConsentMode, normalizeMetaAdvancedMatching } from "../workspace-artifacts.js"
 
 import { HARNESS_PROVIDER_ORDER, type HarnessMode, type HarnessProviderId } from "./types.js"
 
@@ -47,6 +47,8 @@ export interface HarnessArgs {
   xPixelId?: string
   xEventTagIds: string[]
   metaPixelId?: string
+  /** `--meta-advanced-matching on|off`: Manual Advanced Matching (absent = OFF). */
+  metaAdvancedMatching?: boolean
   infiniteSiteSourceKey?: string
   infiniteCollectPath?: string
   infiniteProductionHosts: string[]
@@ -205,6 +207,10 @@ export function parseHarnessArgs(argv: readonly string[]): HarnessArgs {
         parsed.metaPixelId = requireValue(token, next)
         index += 1
         break
+      case "--meta-advanced-matching":
+        parsed.metaAdvancedMatching = normalizeMetaAdvancedMatching(requireValue(token, next))
+        index += 1
+        break
       case "--infinite-site-source-key":
         parsed.infiniteSiteSourceKey = requireValue(token, next)
         index += 1
@@ -252,6 +258,7 @@ export function hasExplicitArtifacts(args: HarnessArgs): boolean {
     args.xPixelId !== undefined ||
     args.xEventTagIds.length > 0 ||
     args.metaPixelId !== undefined ||
+    args.metaAdvancedMatching !== undefined ||
     args.infiniteSiteSourceKey !== undefined ||
     args.infiniteCollectPath !== undefined ||
     args.infiniteProductionHosts.length > 0 ||
@@ -269,6 +276,10 @@ export const HARNESS_HELP_LINES = [
   "  --no-mark                                 Skip conversion marking entirely",
   "  --url <prod-url>                          The URL verification loads (defaults to the first production host)",
   "  --posthog-query-key <key>                 Optional personal key with Query Read, to read PostHog back",
+  "  --meta-advanced-matching <on|off>         Manual Advanced Matching, DEFAULT OFF. On, the Meta snippet defines",
+  "                                            window.infiniteMetaAdvancedMatch({ email, externalId }) for YOUR code to",
+  "                                            call after a visitor identifies themselves; it hashes those raw values",
+  "                                            (sha256, once) before anything reaches Meta. It never reads your pages.",
   "  --brief                                   Write .infinite/harness-brief.json (manual guidance for unsupported sources)",
   "  --replace-live-secret                     Server lane: allow minting over a secret that is already receiving events",
   "  --redeploy                                Server lane: after setting env with your vercel CLI, run `vercel --prod` without asking —",

@@ -3,6 +3,26 @@
 All notable changes to the `infinite-tag` npm package (`packages/instrument`). Versions before
 0.5.0 are recorded in git history only (`git log -- packages/instrument`).
 
+## Unreleased
+
+Meta Manual Advanced Matching, as a customer-controlled option that is OFF by default.
+
+- **`--meta-advanced-matching on|off` (default off).** On, the Meta snippet defines
+  `window.infiniteMetaAdvancedMatch({ email, externalId })` for the site's OWN code to call once a
+  visitor identifies themselves. It hashes those raw values (sha256, lowercase hex, exactly once,
+  Meta's normalisation) before anything reaches Meta, so a conversion can be matched to the ad click
+  that caused it instead of guessed at. It reads no DOM, binds no listeners and never fires on its
+  own.
+- **Off by default, deliberately.** Sending a visitor's contact details — even hashed — from a
+  customer's pages is the customer's decision, the same reasoning behind the `autoConfig` opt-out it
+  sits beside. Absent means absent: with the flag off, the accessor is not on the page at all.
+  Automatic Advanced Matching (Meta scraping the customer's forms) stays off on every install.
+- **Raw in, always — one hashing contract.** An input that is already a 64-character hex digest is
+  refused rather than hashed again, because "sometimes hashed" is how double-hashing ships, and a
+  double-hashed value is accepted by Meta and matches nobody. Nothing raw is ever transmitted, and a
+  value that is not a digest never reaches `fbq`.
+- **The privacy disclosure notice names the lane** when, and only when, it was actually installed.
+
 ## 0.11.0 — 2026-09-21
 
 The Meta pixel's `verify` lane now checks DELIVERY, not just that a snippet is on the page.
