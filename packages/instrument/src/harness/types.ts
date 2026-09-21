@@ -1,6 +1,7 @@
 // The harness's own vocabulary. It deliberately does NOT import the sibling branches' shapes
 // (`adopted`, `UnmanagedProvider`, hosting targets): those are adapted at the boundary in
 // inspect.ts so this module compiles against main today and against those branches tomorrow.
+import type { SetupChecksReport } from "../setup-checks/index.js"
 import type { ProviderId, WorkspaceInstallArtifacts } from "../types.js"
 
 /** The seven rows every run prints, in this order. `gtm` is a container, not an install target. */
@@ -62,6 +63,7 @@ export const HARNESS_FAILURE_CODES = [
   "INF_PLAN_BLOCKED",
   "INF_APPLY_ROLLED_BACK",
   "INF_MARK_STALE_ELEMENT",
+  "INF_SETUP_MISWIRED",
   "INF_VERIFY_NO_RECEIPT",
   "INF_VERIFY_INCOMPLETE",
   "INF_ARGS_CONVERSIONS_REQUIRED"
@@ -121,6 +123,13 @@ export interface HarnessReport {
   handoff: string
   /** The server-lane env step's outcome (never the secret); null/absent when the step did not run. */
   serverLaneEnv?: ServerLaneEnvReport | null
+  /**
+   * SETUP-CORRECTNESS findings — a class of defect the receipt lanes structurally cannot produce
+   * (see setup-checks/types.ts). Deliberately separate from `providers`: a lane is a backend
+   * answering whether an event arrived, and nothing here may mint or deny a receipt. Local only —
+   * `buildHarnessReportPayload` does not send it.
+   */
+  setupChecks?: SetupChecksReport | null
 }
 
 /** Whether this run knows both server-lane env vars are on the production deployment. */

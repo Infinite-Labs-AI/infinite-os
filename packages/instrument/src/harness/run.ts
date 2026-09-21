@@ -48,6 +48,13 @@ import {
   type ConversionProposal,
   type ServerCheckoutRecommendation
 } from "./marking.js"
+import {
+  runSetupChecks,
+  setupChecksNote,
+  setupFindingLines,
+  type SetupChecksReport
+} from "../setup-checks/index.js"
+
 import { recordHarnessFile } from "./outputs.js"
 import { REPORT_SENT_LINE, buildHarnessReportPayload, reportNotSentLine, type ReportSink } from "./report-sink.js"
 import { errorText, runRunbook, type RunbookStep } from "./runbook.js"
@@ -158,6 +165,8 @@ interface Ctx {
   /** Server-side checkout recommendation surfaced this run (detection only, never an edit). */
   serverCheckout?: ServerCheckoutRecommendation
   marking?: ApplyConversionsResult
+  /** Setup-correctness findings from the source scan; never a verification lane. */
+  setupChecks?: SetupChecksReport
   verifyResult?: VerifyLanesResult
   verifyIncomplete?: string
   /** Providers this run wrote (install/upgrade) — the lanes verification reads back. */
@@ -774,6 +783,45 @@ const conversions: RunbookStep<Ctx> = {
   }
 }
 
+/**
+ * SETUP CORRECTNESS — the checks that ask whether something SHOULD have fired.
+ *
+ * Placed immediately after `mark` and run in EVERY mode, `--check` included: it reads source only,
+ * so it needs no deploy, no browser and no receipt window, and `mark` is both the step that writes
+ * `data-conversion` and the step whose "already marked" skip hid the original defect. It never
+ * touches the verification contract — the five receipt lanes stay exactly what they are, and this
+ * step can neither mint nor deny one.
+ *
+ * Its failure is `continue`: a miswired conversion is worth stopping a human for, never worth
+ * abandoning a half-finished install over.
+ */
+const setupChecks: RunbookStep<Ctx> = {
+  id: "setup-checks",
+  title: "Setup correctness",
+  run(ctx) {
+    if (ctx.args.brief) return { skipped: "--brief" }
+    const report = runSetupChecks(ctx.appRootAbsolute)
+    ctx.setupChecks = report
+    ctx.report.setupChecks = report
+    for (const line of setupFindingLines(report)) {
+      if (!ctx.report.nextSteps.includes(line)) ctx.report.nextSteps.push(line)
+    }
+    return { note: setupChecksNote(report) }
+  },
+  successCheck(ctx) {
+    return !(ctx.setupChecks?.findings ?? []).some((finding) => finding.state === "problem")
+  },
+  failure: {
+    code: "INF_SETUP_MISWIRED",
+    message: (ctx) =>
+      (ctx.setupChecks?.findings ?? [])
+        .filter((finding) => finding.state === "problem")
+        .map((finding) => finding.message)
+        .join(" "),
+    next: "continue"
+  }
+}
+
 const serverLane: RunbookStep<Ctx> = {
   id: "server-lane",
   title: "Server lane",
@@ -1118,6 +1166,7 @@ export const HARNESS_STEPS: ReadonlyArray<RunbookStep<Ctx>> = [
   confirm,
   apply,
   conversions,
+  setupChecks,
   serverLane,
   serverLaneEnv,
   verify,
