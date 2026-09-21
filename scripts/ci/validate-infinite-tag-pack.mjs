@@ -19,11 +19,12 @@ const EXPECTED_FILENAME = "infinite-tag-0.11.0.tgz"
 // (150k→250k packed and 500k→800k unpacked in one commit): enough headroom for the next few
 // features, still one to two orders of magnitude below anything an accidental directory would add.
 //
-// MAX_FILES is deliberately NOT raised. It has moved on its own schedule (80 → 110 → 130) because
-// it measures a different accident — a whole directory getting included — and 114/130 is honest
-// headroom for source growth. The relay work added bytes to existing files and no new files at all.
+// MAX_FILES has moved on its own schedule (80 → 110 → 130 → 170) because it measures a different
+// accident — a whole directory getting included. The setup checks (src/setup-checks/) add eight
+// published modules, .js + .d.ts each: 130 → 146 measured, so the ceiling goes to 170 to keep the
+// same ~1.15x headroom for source growth rather than sitting on the measurement.
 const MIN_FILES = 50
-const MAX_FILES = 130
+const MAX_FILES = 170
 const MIN_PACKED_SIZE = 40_000
 const MAX_PACKED_SIZE = 350_000
 const MIN_UNPACKED_SIZE = 200_000
