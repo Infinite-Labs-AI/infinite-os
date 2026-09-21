@@ -7021,6 +7021,23 @@ describe("Meta Ads WRITE helpers", () => {
       }
     );
 
+    await captureWrites(
+      () => jsonResponse({ id: "as4", status: "PAUSED" }),
+      async (captured) => {
+        await createMetaAdSet(metaWriteCredential, {
+          name: "Explicit opt out",
+          campaignId: "c1",
+          optimizationGoal: "OFFSITE_CONVERSIONS",
+          billingEvent: "IMPRESSIONS",
+          targeting: { targeting_automation: { advantage_audience: 0 } }
+        });
+        expect(captured[0].body).toMatchObject({
+          status: "PAUSED",
+          targeting: { targeting_automation: { advantage_audience: 0 } }
+        });
+      }
+    );
+
     // Link creative → object_story_spec.link_data (headline key is "name").
     await captureWrites(
       () => jsonResponse({ id: "cr1" }),
@@ -8277,6 +8294,25 @@ console.log(${JSON.stringify(serialized)});
         }));
         expect(argv[argv.indexOf("--attribution-spec") + 1]).toBe(JSON.stringify(attributionSpec));
         expect(argv).not.toContain("--pixel-id");
+        expect(argv.slice(-2)).toEqual(["--", "120000000000010"]);
+      });
+    });
+
+    it("adset create via CLI preserves explicit Advantage audience opt-out even without other targeting JSON", async () => {
+      await withTmp(async (dir) => {
+        await createMetaAdSet(cliCredential(dir, { id: "120000000000024", status: "PAUSED" }), {
+          name: "Explicit off CLI",
+          campaignId: "120000000000010",
+          optimizationGoal: "OFFSITE_CONVERSIONS",
+          billingEvent: "IMPRESSIONS",
+          targeting: { targeting_automation: { advantage_audience: 0 } }
+        });
+        const argv = recordedArgv(dir);
+        expect(argv[argv.indexOf("--targeting") + 1]).toBe(JSON.stringify({
+          targeting_automation: { advantage_audience: 0 }
+        }));
+        expect(argv).toContain("--no-advantage-audience");
+        expect(argv).not.toContain("--advantage-audience");
         expect(argv.slice(-2)).toEqual(["--", "120000000000010"]);
       });
     });

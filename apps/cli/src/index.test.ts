@@ -12571,6 +12571,36 @@ describe("meta command (CLI write surface + confirm gates)", () => {
     });
   });
 
+  it("adset create preserves an explicit Advantage audience opt-out even without targeting JSON", async () => {
+    const api = stubToolsApi();
+    await metaCommand(
+      [
+        "adset",
+        "create",
+        "120555",
+        "--source-id",
+        "src_meta",
+        "--name",
+        "Manual off",
+        "--optimization-goal",
+        "OFFSITE_CONVERSIONS",
+        "--billing-event",
+        "IMPRESSIONS",
+        "--no-advantage-audience",
+        "--yes"
+      ],
+      ENV,
+      { confirmMutation: vi.fn(async () => true) }
+    );
+    expect(toolCalls(api)[0]?.body).toMatchObject({
+      actionId: "create_meta_ad_set",
+      input: {
+        campaignId: "120555",
+        targeting: { targeting_automation: { advantage_audience: 0 } }
+      }
+    });
+  });
+
   it("create without --yes: a NO returns cancelled and issues NO /tools/call", async () => {
     const api = stubToolsApi();
     const confirmMutation = vi.fn(async () => false);

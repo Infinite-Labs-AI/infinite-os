@@ -8389,7 +8389,7 @@ async function metaCreateCommand(
       throw new Error("pass either --advantage-audience or --no-advantage-audience, not both");
     }
     const targeting =
-      targetingRaw !== undefined || advantageAudienceOn
+      targetingRaw !== undefined || advantageAudienceOn || advantageAudienceOff
         ? {
             ...(isRecord(targetingRaw) ? targetingRaw : {}),
             ...(advantageAudienceOn || advantageAudienceOff
