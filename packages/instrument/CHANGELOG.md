@@ -3,6 +3,28 @@
 All notable changes to the `infinite-tag` npm package (`packages/instrument`). Versions before
 0.5.0 are recorded in git history only (`git log -- packages/instrument`).
 
+## 0.11.0 — 2026-09-21
+
+The Meta pixel's `verify` lane now checks DELIVERY, not just that a snippet is on the page.
+
+- **Traffic-permissions detection.** `verify` / `harness` / `infinite analytics` ask Meta's own
+  public, domain-scoped pixel config (`connect.facebook.net/signals/config/<pixel>?…&domain=<host>`)
+  whether the pixel is allowed to transmit from the site's host, and report the exact remedy when it
+  is not. This catches a pixel that loads, registers, increments `eventCount` and shows "Active" in
+  Meta Pixel Helper while Meta silently drops every send — the state infinite.fast was in on
+  2026-09-20, because the pixel's allow list still named the pre-rebrand domain. The block is
+  invisible by design (`lockWebpage:false`), and while it stands no `_fbp`/`_fbc` cookie is written,
+  so ad clicks cannot be attributed.
+- **No credentials, no Graph call, no rate-limit cost.** The config endpoint is an unauthenticated
+  CDN, so the check runs for any pixel on any domain — before or without a Meta connection — and
+  spends nothing from the per-ad-account Graph request budget.
+- **It never fabricates a pass.** A pixel that is not blocked is reported as "delivery is not
+  blocked", never `verified` — Meta offers no install-time read-back. A probe that could not run
+  says "could not check", and a config body the parser does not understand is an explicit unknown,
+  never a healthy result.
+- **The explicit block list too.** A host on the pixel's `prohibitedSources` list (matched on the
+  sha256 of the hostname) is reported with its own remedy.
+
 ## 0.10.0 — 2026-09-14
 
 `infinite analytics` now gets the server lane's two environment variables onto the production
