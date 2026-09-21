@@ -11,7 +11,7 @@ import {
   writeFileSync
 } from "node:fs"
 import { tmpdir } from "node:os"
-import { dirname, join, relative } from "node:path"
+import { dirname, join, relative, sep } from "node:path"
 import { fileURLToPath } from "node:url"
 import { afterEach, describe, expect, it } from "vitest"
 
@@ -33,6 +33,24 @@ function copyFixture(name: string): string {
   return target
 }
 
+// `.git/` IS part of the snapshot on purpose: byte-exactness over the object store,
+// refs and index is what proves uninstall never stages, commits or otherwise rewrites
+// git state behind the founder's back. Git's own bookkeeping, however, writes files in
+// there that are NOT state and whose existence at any given instant is a race with a
+// DETACHED background process: `git commit` spawns `git maintenance run --auto --detach`,
+// which takes `.git/objects/maintenance.lock` for as long as it runs, and `.git/gc.log`
+// records a maintenance complaint. A snapshot that caught the lock mid-flight failed the
+// publish workflow's test step (infinite-tag 0.11.0, first attempt) with a 26-vs-27 key
+// diff. `initFixtureRepo` below stops those processes being spawned at all; this filter is
+// the second line of defence, so a future git version inventing a new transient file
+// cannot block a release. A lock file is never meaningful project state.
+function isTransientGitArtifact(relativePath: string): boolean {
+  const segments = relativePath.split(sep)
+  if (segments[0] !== ".git") return false
+  const name = segments[segments.length - 1]
+  return name.endsWith(".lock") || name === "gc.log"
+}
+
 function snapshotTree(root: string): Map<string, string> {
   const snapshot = new Map<string, string>()
   const walk = (current: string): void => {
@@ -42,7 +60,9 @@ function snapshotTree(root: string): Map<string, string> {
         walk(absolutePath)
         continue
       }
-      snapshot.set(relative(root, absolutePath), readFileSync(absolutePath, "utf8"))
+      const relativePath = relative(root, absolutePath)
+      if (isTransientGitArtifact(relativePath)) continue
+      snapshot.set(relativePath, readFileSync(absolutePath, "utf8"))
     }
   }
   walk(root)
@@ -57,8 +77,15 @@ function expectTreeEquals(root: string, expected: Map<string, string>): void {
   }
 }
 
+// Every git invocation in this file is pinned away from the ambient environment:
+// `GIT_CONFIG_*=/dev/null` ignores the machine's global/system config, and
+// `maintenance.auto=false` + `gc.auto=0` stop git spawning its detached background
+// maintenance process, which is what writes the transient files above into a tree we
+// are about to assert is byte-identical.
+const noBackgroundMaintenance = ["-c", "maintenance.auto=false", "-c", "gc.auto=0"]
+
 function gitRun(root: string, args: string[]): void {
-  const result = spawnSync("git", ["-C", root, ...args], {
+  const result = spawnSync("git", ["-C", root, ...noBackgroundMaintenance, ...args], {
     encoding: "utf8",
     env: {
       ...process.env,
@@ -69,6 +96,27 @@ function gitRun(root: string, args: string[]): void {
   if (result.status !== 0) {
     throw new Error(`git ${args.join(" ")} failed: ${result.stderr}`)
   }
+}
+
+// Initialise + commit a fixture repo with background maintenance disabled in the repo's
+// OWN config as well as on the command line — the production code under test shells out
+// to git itself (`detectRepoStatus`), and those invocations inherit the ambient
+// environment, so the setting has to live in `.git/config` to cover them too. The config
+// is written before the snapshot is taken, so it is stable, asserted state like any other.
+function initFixtureRepo(root: string): void {
+  gitRun(root, ["init"])
+  gitRun(root, ["config", "maintenance.auto", "false"])
+  gitRun(root, ["config", "gc.auto", "0"])
+  gitRun(root, ["add", "-A"])
+  gitRun(root, [
+    "-c",
+    "user.email=test@example.com",
+    "-c",
+    "user.name=Test",
+    "commit",
+    "-m",
+    "init"
+  ])
 }
 
 function applyFixture(root: string, artifacts: WorkspaceInstallArtifacts): void {
@@ -248,17 +296,7 @@ describe("uninstallInstallation", () => {
 
   it("gates uninstall on a dirty git tree unless allow-dirty or dry-run", () => {
     const root = copyFixture("static-html-basic")
-    gitRun(root, ["init"])
-    gitRun(root, ["add", "-A"])
-    gitRun(root, [
-      "-c",
-      "user.email=test@example.com",
-      "-c",
-      "user.name=Test",
-      "commit",
-      "-m",
-      "init"
-    ])
+    initFixtureRepo(root)
 
     const committed = snapshotTree(root)
 
@@ -277,6 +315,35 @@ describe("uninstallInstallation", () => {
 
     expectTreeEquals(root, committed)
     expect(existsSync(join(root, ".infinite"))).toBe(false)
+  })
+
+  // Regression guard for the flake that failed the infinite-tag 0.11.0 publish run: git's
+  // detached background maintenance can drop a lock file inside .git/ at any instant, so
+  // the byte-exactness snapshot must not see it — while still catching anything real,
+  // inside .git/ or out. A snapshot that cannot fail would be worse than the flake.
+  it("ignores git's transient maintenance artefacts without blunting the assertion", () => {
+    const root = copyFixture("static-html-basic")
+    initFixtureRepo(root)
+
+    const committed = snapshotTree(root)
+
+    applyFixture(root, { ga4: { measurementId: "G-TEST123" } })
+    uninstallInstallation({ root, allowDirty: true })
+
+    // Exactly what `git maintenance run --auto --detach` leaves behind mid-flight.
+    writeFileSync(join(root, ".git/objects/maintenance.lock"), "")
+    writeFileSync(join(root, ".git/gc.log"), "warning: too many unreachable loose objects\n")
+    expectTreeEquals(root, committed)
+
+    // A real mutation of git state is still caught — that is why .git/ is snapshotted.
+    const sneakyRef = join(root, ".git/refs/heads/sneaky")
+    writeFileSync(sneakyRef, "0000000000000000000000000000000000000000\n")
+    expect(() => expectTreeEquals(root, committed)).toThrow()
+    rmSync(sneakyRef)
+
+    // ...and so is a stray file left behind in the project itself.
+    writeFileSync(join(root, "stray.txt"), "left behind\n")
+    expect(() => expectTreeEquals(root, committed)).toThrow()
   })
 })
 
