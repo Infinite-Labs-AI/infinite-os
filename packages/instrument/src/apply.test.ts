@@ -335,8 +335,14 @@ const gitEnv = {
   GIT_CONFIG_SYSTEM: "/dev/null"
 }
 
+// `maintenance.auto=false` / `gc.auto=0`: `git commit` otherwise spawns a DETACHED
+// `git maintenance run --auto` that keeps writing into a temp fixture this suite is about
+// to delete. The same setting is load-bearing in uninstall.test.ts, where the lock file
+// that process creates raced a byte-exactness assertion and failed a publish run.
 function initGitRepo(root: string): void {
   spawnSync("git", ["init"], { cwd: root, env: gitEnv })
+  spawnSync("git", ["config", "maintenance.auto", "false"], { cwd: root, env: gitEnv })
+  spawnSync("git", ["config", "gc.auto", "0"], { cwd: root, env: gitEnv })
   spawnSync("git", ["add", "-A"], { cwd: root, env: gitEnv })
   spawnSync(
     "git",
