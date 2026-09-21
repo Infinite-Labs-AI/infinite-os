@@ -2384,8 +2384,10 @@ async function createMetaAdSetHandler(
   const targetingCountries = stringArray(input, "targetingCountries");
   const targeting = metaAdSetTargetingInput(input);
   const advantageAudience = optionalBoolean(input, "advantageAudience");
-  const dsaBeneficiary = optionalBoundedString(input, "dsaBeneficiary", 512);
-  const dsaPayor = optionalBoundedString(input, "dsaPayor", 512);
+  const dsaBeneficiary = optionalBoundedString(input, "dsaBeneficiary", 512)
+    ?? optionalBoundedString(expectedCredential, "defaultDsaBeneficiary", 512);
+  const dsaPayor = optionalBoundedString(input, "dsaPayor", 512)
+    ?? optionalBoundedString(expectedCredential, "defaultDsaPayor", 512);
   return runMetaCreate(
     db,
     context,

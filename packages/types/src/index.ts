@@ -73,6 +73,8 @@ export interface CreateActionHandlersOptions {
     credentialId: string;
     credentialUpdatedAt: string;
     selectedPageId?: string;
+    defaultDsaBeneficiary?: string;
+    defaultDsaPayor?: string;
   };
 }
 
