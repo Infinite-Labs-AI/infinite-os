@@ -127,10 +127,14 @@ async function readOuterBody(response: Response): Promise<string> {
     }
   } catch (error) {
     if (error instanceof MetaGraphBatchTransportError) throw error;
+    const aborted = error instanceof DOMException
+      ? error.name === "AbortError"
+      : error instanceof Error && error.name === "AbortError";
     throw new MetaGraphBatchTransportError({
-      message: "Meta Graph batch response stream failed",
+      message: aborted ? "Meta Graph batch response stream was aborted" : "Meta Graph batch response stream failed",
       status: response.status,
       headers: response.headers,
+      aborted,
     });
   } finally {
     reader.releaseLock();
@@ -205,8 +209,11 @@ export async function executeMetaGraphReadBatch(input: {
       throw new MetaGraphBatchTransportError({ message: "Meta Graph batch item was malformed", status: response.status, headers: response.headers });
     }
     const record = item as Record<string, unknown>;
-    const status = numericField(record.code) ?? 0;
-    const bodyText = typeof record.body === "string" ? record.body : "";
+    const status = numericField(record.code);
+    const bodyText = typeof record.body === "string" ? record.body : null;
+    if (status === null || bodyText === null) {
+      throw new MetaGraphBatchTransportError({ message: "Meta Graph batch item was malformed", status: response.status, headers: response.headers });
+    }
     if (byteLength(bodyText) > META_GRAPH_BATCH_ITEM_MAX_BYTES) {
       throw new MetaGraphBatchTransportError({ message: "Meta Graph batch item exceeded the byte limit", status: response.status, headers: response.headers });
     }

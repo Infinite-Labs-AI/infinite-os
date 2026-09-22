@@ -85,6 +85,19 @@ describe("executeMetaGraphReadBatch", () => {
     })).rejects.toBeInstanceOf(MetaGraphBatchTransportError);
   });
 
+  it.each([
+    [{ body: "{}" }],
+    [{ code: "200", body: "{}" }],
+    [{ code: 200 }],
+  ])("rejects malformed item code and body shapes", async (items) => {
+    await expect(executeMetaGraphReadBatch({
+      apiVersion: "v25.0",
+      accessToken: token,
+      reads: [{ key: "campaign", relativeUrl: "act_1/insights" }],
+      fetcher: (async () => response(items)) as typeof fetch,
+    })).rejects.toBeInstanceOf(MetaGraphBatchTransportError);
+  });
+
   it("rejects an oversized item body even when its item status is 200", async () => {
     const oversized = "x".repeat(8 * 1024 * 1024 + 1);
     await expect(executeMetaGraphReadBatch({
