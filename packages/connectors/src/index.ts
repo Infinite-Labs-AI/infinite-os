@@ -2424,7 +2424,7 @@ const metaAdsConnector = createConnector<MetaAdsCredential, MetaAdsSyncRow>({
       { ignoreCursor: request.mode === "backfill" || Boolean(request.backfillWindow) }
     );
     plan.metaAdsRequestTelemetry = new MetaAdsRequestTelemetry(
-      request.metaAdsSyncMode === "insights_only" && request.windowSince === request.windowUntil
+      metaAdsUsesHotOneDayRequestLimit(request, plan)
         ? Math.min(request.metaAdsRequestBudget ?? META_HOT_RUN_LIMIT_UNITS, META_HOT_RUN_LIMIT_UNITS)
         : request.metaAdsRequestBudget ?? META_ADS_DEFAULT_REQUEST_BUDGET,
       (snapshot) => persistMetaAdsRequestReservation(db, request, snapshot),
@@ -8826,6 +8826,19 @@ function metaAdsTimeOptions(request: SyncRequest, plan: SyncPlan): {
       until: plan.cursorEnd.slice(0, 10)
     }
   };
+}
+
+function metaAdsUsesHotOneDayRequestLimit(request: SyncRequest, plan: SyncPlan): boolean {
+  if (request.metaAdsSyncMode !== "insights_only") return false;
+  const hasExplicitWindow = request.windowSince !== undefined || request.windowUntil !== undefined;
+  if (!hasExplicitWindow && request.mode !== "backfill" && !plan.backfillWindow) {
+    // Liveness hydrates the account timezone after planning. A recurring one-day request resolves
+    // to exactly account-local yesterday once that metadata is present; wider implicit windows
+    // must retain the caller/default allowance for the existing serial path.
+    return plan.refreshWindowDays === 1;
+  }
+  const range = metaAdsTimeOptions(request, plan).timeRange;
+  return range !== undefined && range.since === range.until;
 }
 
 function metaAdsInsightsUrl(

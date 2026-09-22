@@ -1084,6 +1084,40 @@ describe("Meta Ads history CLOSE against real PGlite", () => {
     expect(telemetry).toMatchObject({ schemaVersion: 2, lane: "settled_history", requestCount: 4, pageCount: 4 });
   }, 120_000);
 
+  it("allows an implicit 30-day insights refresh to read beyond twelve serial pages", async () => {
+    const workspaceId = `ws_meta_implicit_wide_budget_${randomUUID()}`;
+    const sourceId = `src_meta_implicit_wide_budget_${randomUUID()}`;
+    await seedSource(workspaceId, sourceId);
+    await withMetaFetch(fixture("2026-09-05"), () =>
+      connectorFor("meta_ads").sync(db, syncRequest(workspaceId, sourceId, "2026-09-05", "2026-09-05"))
+    );
+    const next = fixture("2026-09-06", { empty: true });
+    let insightCalls = 0;
+    next.edgeResponse = (edge, url) => {
+      if (edge !== "insights") return undefined;
+      insightCalls += 1;
+      const level = url.searchParams.get("level");
+      const page = Number(url.searchParams.get("after") ?? "0");
+      const paging = level === "campaign" && page < 12
+        ? { next: `https://graph.facebook.com/v25.0/${ACCOUNT}/insights?level=campaign&after=${page + 1}` }
+        : {};
+      return new Response(JSON.stringify({ data: [], paging }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    };
+    const request: SyncRequest = {
+      workspaceId,sourceId,provider:"meta_ads",syncRunId:`sync_${randomUUID()}`,encryptionKey:KEY,
+      refreshWindowDays:30,metaAdsSyncMode:"insights_only",metaAdsRequestLane:"settled_history",metaAdsRequestBudget:20,
+    };
+    await withMetaFetch(next, () => connectorFor("meta_ads").sync(db, request));
+    expect(insightCalls).toBe(15);
+    expect(await db.query(
+      "select (request_telemetry->'budget'->>'limit')::integer as limit,(request_telemetry->>'requestCount')::integer as requests from sync_runs where id=$1",
+      [request.syncRunId],
+    )).toEqual([{limit:20,requests:15}]);
+  },120_000);
+
   it("rejects an 11-used plus 2-continuation batch without phantom spend or another outer POST", async () => {
     const workspaceId = `ws_meta_batch_budget_${randomUUID()}`;
     const sourceId = `src_meta_batch_budget_${randomUUID()}`;
