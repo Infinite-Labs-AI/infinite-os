@@ -141,6 +141,12 @@ export class MetaAdsRequestTelemetry {
 
   /** Must run immediately before fetch. No request can cross the admitted limit. */
   async beforeRequest(kind: MetaAdsRequestKind, retry: boolean): Promise<void> {
+    await this.beforeRequests([kind], retry);
+  }
+
+  /** Atomically reserves every logical request carried by one outer provider batch. */
+  async beforeRequests(kinds: readonly MetaAdsRequestKind[], retry: boolean): Promise<void> {
+    if (kinds.length === 0) return;
     if (Date.now() < this.cooldownUntil) {
       throw Object.assign(new Error("Meta Ads provider cooldown active"), { code: "provider_rate_limited", retryable: true });
     }
@@ -152,14 +158,14 @@ export class MetaAdsRequestTelemetry {
       await this.persistReservation?.(this.snapshot());
       throw new MetaAdsTimeBudgetError(this.deadlineAtMs);
     }
-    if (this.requestCount >= this.limit) {
+    if (this.requestCount + kinds.length > this.limit) {
       this.exhausted = true;
       await this.persistReservation?.(this.snapshot());
       throw new MetaAdsRequestBudgetError(this.limit);
     }
-    this.requestCount += 1;
-    this.byKind[kind] += 1;
-    if (retry) this.retryCount += 1;
+    this.requestCount += kinds.length;
+    for (const kind of kinds) this.byKind[kind] += 1;
+    if (retry) this.retryCount += kinds.length;
     this.lastReservedAt = new Date().toISOString();
     // Reserve durably before the provider call. A hard kill between this write and fetch can
     // conservatively over-count one request; it can never hide spend from the scheduler.
@@ -220,4 +226,4 @@ export class MetaAdsRequestTelemetry {
 }
 
 /** Structural transport hook, suitable for process-local handler options. */
-export type MetaAdsRequestObserver = Pick<MetaAdsRequestTelemetry, "beforeRequest" | "recordPage" | "recordRejectedResponse" | "observeResponse">;
+export type MetaAdsRequestObserver = Pick<MetaAdsRequestTelemetry, "beforeRequest" | "beforeRequests" | "recordPage" | "recordRejectedResponse" | "observeResponse">;

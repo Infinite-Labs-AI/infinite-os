@@ -52,6 +52,17 @@ it('does not dispatch another page when the durable reservation fails', async ()
   await expect(fetchMetaLiveInsights(credential,{level:'ad',limit:10},telemetry)).rejects.toThrow('receipt unavailable');
   expect(fetcher).toHaveBeenCalledTimes(1);
 });
+it('reserves a logical batch atomically without phantom request units', async () => {
+  const snapshots: Array<{requestCount:number;exhausted:boolean}> = [];
+  const telemetry = new MetaAdsRequestTelemetry(12, async snapshot => {
+    snapshots.push({requestCount:snapshot.requestCount,exhausted:snapshot.budget.exhausted});
+  });
+  await telemetry.beforeRequests(Array.from({length:11},()=> 'campaign_insights'), false);
+  await expect(telemetry.beforeRequests(['campaign_insights','adset_insights'], false))
+    .rejects.toMatchObject({code:'provider_rate_budget_exhausted',retryable:true});
+  expect(telemetry.snapshot()).toMatchObject({requestCount:11,budget:{remaining:1,exhausted:true}});
+  expect(snapshots.at(-1)).toEqual({requestCount:11,exhausted:true});
+});
 it('accepts a successful hot page once and prevents a subsequent page', async () => {
   const telemetry = new MetaAdsRequestTelemetry(10);
   const fetcher = vi.fn(async () => Response.json({data:[], paging:{next:'https://graph.facebook.com/v25.0/act_123/insights?after=next'}}, {headers:{'x-app-usage':'{"call_count":99}'}}));

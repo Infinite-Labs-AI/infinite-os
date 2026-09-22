@@ -98,6 +98,27 @@ describe("executeMetaGraphReadBatch", () => {
     })).rejects.toBeInstanceOf(MetaGraphBatchTransportError);
   });
 
+  it("retains safe sibling response observations when strict item validation fails", async () => {
+    const error = await executeMetaGraphReadBatch({
+      apiVersion: "v25.0",
+      accessToken: token,
+      reads: [
+        { key: "campaign", relativeUrl: "act_1/insights?level=campaign" },
+        { key: "adset", relativeUrl: "act_1/insights?level=adset" },
+      ],
+      fetcher: (async () => response([
+        { code: 500, headers: [{ name: "x-app-usage", value: "{\"call_count\":10}" }] },
+        { code: 400, headers: [{ name: "x-app-usage", value: "{\"call_count\":55}" }], body: "{\"error\":{\"code\":17}}" },
+      ])) as typeof fetch,
+    }).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(MetaGraphBatchTransportError);
+    expect((error as MetaGraphBatchTransportError).itemObservations).toEqual([
+      expect.objectContaining({ key: "campaign", status: 500, providerCode: null }),
+      expect.objectContaining({ key: "adset", status: 400, providerCode: 17 }),
+    ]);
+    expect((error as MetaGraphBatchTransportError).itemObservations[1]?.headers.get("x-app-usage")).toContain("55");
+  });
+
   it("rejects an oversized item body even when its item status is 200", async () => {
     const oversized = "x".repeat(8 * 1024 * 1024 + 1);
     await expect(executeMetaGraphReadBatch({

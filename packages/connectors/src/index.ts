@@ -176,6 +176,8 @@ export interface SyncPlan {
   // Meta-only exact-window replacement contract. Present only after the complete direct-Graph
   // extract has succeeded; CLOSE uses this plus staged DB keys to prune and publish daily coverage.
   metaAdsSnapshotReplacement?: MetaAdsSnapshotReplacementState;
+  /** Effective normalized provider window selected the bounded atomic one-day batch path. */
+  metaAdsAtomicOneDaySnapshot?: boolean;
   metaAdsEntitySnapshot?: MetaAdsEntitySnapshotState;
 }
 
@@ -2557,6 +2559,7 @@ const metaAdsConnector = createConnector<MetaAdsCredential, MetaAdsSyncRow>({
     const usesOneDayBatch = syncMode === "insights_only"
       && requestedGrains.length === 3
       && timeOptions.timeRange?.since === timeOptions.timeRange?.until;
+    plan.metaAdsAtomicOneDaySnapshot = usesOneDayBatch;
     if (usesOneDayBatch) {
       await metaAdsFetchOneDayInsightsBatch({
         credential,
@@ -3164,13 +3167,13 @@ async function syncExtractedBatch(
   closeSuccess?: (tx: InfiniteOsDb, request: SyncRequest, plan: SyncPlan) => Promise<void>
 ): Promise<SyncResult> {
   const batchId = `batch_${randomUUID()}`;
+  const metaReplacement = plan.metaAdsSnapshotReplacement;
   const atomicMetaOneDay = request.provider === "meta_ads"
     && request.metaAdsSyncMode === "insights_only"
-    && request.windowSince !== undefined
-    && request.windowSince === request.windowUntil
-    && plan.metaAdsSnapshotReplacement?.windowStartDate === request.windowSince
-    && plan.metaAdsSnapshotReplacement?.windowEndDate === request.windowUntil
-    && plan.metaAdsSnapshotReplacement.grains.length === 3;
+    && plan.metaAdsAtomicOneDaySnapshot === true
+    && metaReplacement !== undefined
+    && metaReplacement.windowStartDate === metaReplacement.windowEndDate
+    && metaReplacement.grains.length === 3;
   const atomicMetaRecordLimit = META_HOT_RUN_LIMIT_UNITS * 500;
 
   try {
@@ -9444,7 +9447,10 @@ async function metaAdsFetchOneDayInsightsBatch(input: {
   }));
 
   for (let page = 0; pending.length > 0 && page < META_HOT_RUN_LIMIT_UNITS; page += 1) {
-    for (const item of pending) await input.telemetry?.beforeRequest(`${item.grain}_insights`, false);
+    await input.telemetry?.beforeRequests(
+      pending.map(item => `${item.grain}_insights` as MetaAdsRequestKind),
+      false,
+    );
     const signals: MetaAdsResponseSignal[] = [];
     let envelope;
     try {
@@ -9465,9 +9471,20 @@ async function metaAdsFetchOneDayInsightsBatch(input: {
           code: error.providerCode,
           subcode: error.providerSubcode,
         });
-        await input.telemetry?.observeResponse(mergeMetaAdsResponseSignals([outer]));
-        input.telemetry?.recordRejectedResponse(outer.maxPercent);
-        if (outer.throttled) throw new ConnectorError("provider_rate_limited", "Meta Ads provider rate limited; retry after the recorded cooldown", true);
+        for (const observation of error.itemObservations) {
+          const signal = metaAdsBatchResultSignal({
+            status: observation.status ?? 500,
+            headers: observation.headers,
+            body: observation.providerCode === null && observation.providerSubcode === null
+              ? null
+              : { error: { code: observation.providerCode, error_subcode: observation.providerSubcode } },
+          });
+          signals.push(signal);
+        }
+        const aggregate = mergeMetaAdsResponseSignals(signals.length > 0 ? signals : [outer]);
+        await input.telemetry?.observeResponse(aggregate);
+        input.telemetry?.recordRejectedResponse(aggregate.maxPercent);
+        if (aggregate.throttled) throw new ConnectorError("provider_rate_limited", "Meta Ads provider rate limited; retry after the recorded cooldown", true);
         if (error.status === 401 || error.status === 403) throw new ConnectorError("provider_auth_failed", "Meta Ads batch authentication failed", false);
         throw new ConnectorError("provider_api_error", "Meta Ads batch transport failed", true);
       }
@@ -9484,9 +9501,11 @@ async function metaAdsFetchOneDayInsightsBatch(input: {
       const body = result.body && typeof result.body === "object" ? result.body as Record<string, unknown> : null;
       if (result.status < 200 || result.status >= 300 || !body || !Array.isArray(body.data)) {
         input.telemetry?.recordRejectedResponse(signal.maxPercent);
-        failure ??= signal.throttled
-          ? new ConnectorError("provider_rate_limited", "Meta Ads provider rate limited; retry after the recorded cooldown", true)
-          : new ConnectorError("provider_api_error", "Meta Ads batch returned an incomplete required grain", true);
+        if (signal.throttled) {
+          failure = new ConnectorError("provider_rate_limited", "Meta Ads provider rate limited; retry after the recorded cooldown", true);
+        } else {
+          failure ??= new ConnectorError("provider_api_error", "Meta Ads batch returned an incomplete required grain", true);
+        }
         continue;
       }
       input.telemetry?.recordPage(signal.maxPercent);

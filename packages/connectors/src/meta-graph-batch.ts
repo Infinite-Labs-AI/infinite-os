@@ -20,12 +20,21 @@ export interface MetaGraphBatchEnvelope {
   results: MetaGraphBatchResult[];
 }
 
+export interface MetaGraphBatchItemObservation {
+  key: string;
+  status: number | null;
+  headers: Headers;
+  providerCode: number | null;
+  providerSubcode: number | null;
+}
+
 export class MetaGraphBatchTransportError extends Error {
   readonly status: number | null;
   readonly headers: Headers;
   readonly providerCode: number | null;
   readonly providerSubcode: number | null;
   readonly aborted: boolean;
+  readonly itemObservations: MetaGraphBatchItemObservation[];
 
   constructor(input: {
     message: string;
@@ -34,6 +43,7 @@ export class MetaGraphBatchTransportError extends Error {
     providerCode?: number | null;
     providerSubcode?: number | null;
     aborted?: boolean;
+    itemObservations?: readonly MetaGraphBatchItemObservation[];
   }) {
     super(input.message);
     this.name = "MetaGraphBatchTransportError";
@@ -42,6 +52,10 @@ export class MetaGraphBatchTransportError extends Error {
     this.providerCode = input.providerCode ?? null;
     this.providerSubcode = input.providerSubcode ?? null;
     this.aborted = input.aborted ?? false;
+    this.itemObservations = (input.itemObservations ?? []).map(observation => ({
+      ...observation,
+      headers: new Headers(observation.headers),
+    }));
   }
 }
 
@@ -81,6 +95,29 @@ function itemHeaders(value: unknown): Headers {
     if (typeof name === "string" && typeof headerValue === "string") headers.append(name, headerValue);
   }
   return headers;
+}
+
+function safeObservationHeaders(headers: Headers): Headers {
+  const safe = new Headers();
+  for (const name of ["x-business-use-case-usage", "x-fb-ads-insights-throttle", "x-ad-account-usage", "x-app-usage"]) {
+    const value = headers.get(name);
+    if (value !== null) safe.set(name, value);
+  }
+  return safe;
+}
+
+function itemObservation(item: unknown, key: string): MetaGraphBatchItemObservation {
+  if (!item || typeof item !== "object") {
+    return { key, status: null, headers: new Headers(), providerCode: null, providerSubcode: null };
+  }
+  const record = item as Record<string, unknown>;
+  const codes = providerCodes(typeof record.body === "string" ? parseJson(record.body) : null);
+  return {
+    key,
+    status: numericField(record.code),
+    headers: safeObservationHeaders(itemHeaders(record.headers)),
+    ...codes,
+  };
 }
 
 function validateReads(reads: readonly MetaGraphBatchRead[]): void {
@@ -199,23 +236,32 @@ export async function executeMetaGraphReadBatch(input: {
       ...providerCodes(parsed),
     });
   }
-  if (!Array.isArray(parsed) || parsed.length !== input.reads.length) {
+  if (!Array.isArray(parsed)) {
     throw new MetaGraphBatchTransportError({ message: "Meta Graph batch response was malformed", status: response.status, headers: response.headers });
+  }
+  const observations = parsed.map((item, index) => itemObservation(item, input.reads[index]?.key ?? `unexpected_${index}`));
+  if (parsed.length !== input.reads.length) {
+    throw new MetaGraphBatchTransportError({
+      message: "Meta Graph batch response was malformed",
+      status: response.status,
+      headers: response.headers,
+      itemObservations: observations,
+    });
   }
 
   const results = input.reads.map((read, index): MetaGraphBatchResult => {
     const item = parsed[index];
     if (!item || typeof item !== "object") {
-      throw new MetaGraphBatchTransportError({ message: "Meta Graph batch item was malformed", status: response.status, headers: response.headers });
+      throw new MetaGraphBatchTransportError({ message: "Meta Graph batch item was malformed", status: response.status, headers: response.headers, itemObservations: observations });
     }
     const record = item as Record<string, unknown>;
     const status = numericField(record.code);
     const bodyText = typeof record.body === "string" ? record.body : null;
     if (status === null || bodyText === null) {
-      throw new MetaGraphBatchTransportError({ message: "Meta Graph batch item was malformed", status: response.status, headers: response.headers });
+      throw new MetaGraphBatchTransportError({ message: "Meta Graph batch item was malformed", status: response.status, headers: response.headers, itemObservations: observations });
     }
     if (byteLength(bodyText) > META_GRAPH_BATCH_ITEM_MAX_BYTES) {
-      throw new MetaGraphBatchTransportError({ message: "Meta Graph batch item exceeded the byte limit", status: response.status, headers: response.headers });
+      throw new MetaGraphBatchTransportError({ message: "Meta Graph batch item exceeded the byte limit", status: response.status, headers: response.headers, itemObservations: observations });
     }
     return {
       key: read.key,
