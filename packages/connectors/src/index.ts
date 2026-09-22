@@ -1,4 +1,9 @@
 import { metaEntityReadMode } from "./meta-entity-checkpoint.js";
+import {
+  MetaGraphBatchTransportError,
+  executeMetaGraphReadBatch,
+  type MetaGraphBatchResult,
+} from "./meta-graph-batch.js";
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
@@ -21,8 +26,10 @@ import {
   type MetaAdsRequestObserver,
   type MetaAdsRequestKind,
   type MetaAdsRequestTelemetrySnapshot,
+  type MetaRequestLane,
+  isMetaRequestLane,
 } from "./meta-telemetry.js";
-export { MetaAdsRequestTelemetry, type MetaAdsResponseSignal, type MetaAdsRequestObserver } from "./meta-telemetry.js";
+export { MetaAdsRequestTelemetry, type MetaAdsResponseSignal, type MetaAdsRequestObserver, type MetaRequestLane } from "./meta-telemetry.js";
 import {
   STRIPE_DELTA_MAX_PAGES,
   STRIPE_DELTA_MAX_REFETCH_PER_RUN,
@@ -91,6 +98,8 @@ export interface SyncRequest {
   // pagination and retries. Omitted callers get a bounded engine default; hosted scheduling may
   // pass a smaller admitted remainder from its workspace/source rate budget.
   metaAdsRequestBudget?: number;
+  /** Exact caller-owned allocation lane. Optional for local and legacy callers. */
+  metaAdsRequestLane?: MetaRequestLane;
   metaAdsOnResponse?: (signal: MetaAdsResponseSignal) => Promise<void>;
   /** Optional bounded caller-owned media sink. Signed URLs exist only in this callback, never truth rows. */
   metaAdsOnMedia?: (media:MetaAdsFreshMedia[]) => Promise<void>;
@@ -118,6 +127,9 @@ export interface SyncRequest {
   // to honor it. UNSET on desktop → today's behavior is identical.
   softDeadlineAtMs?: number;
 }
+
+export const META_HOT_COMMON_ESTIMATE_UNITS = 3;
+export const META_HOT_RUN_LIMIT_UNITS = 12;
 
 function isMetaInventoryOnly(request:SyncRequest):boolean{
   return request.provider==="meta_ads"&&request.metaAdsSyncMode==="inventory_only";
@@ -164,6 +176,8 @@ export interface SyncPlan {
   // Meta-only exact-window replacement contract. Present only after the complete direct-Graph
   // extract has succeeded; CLOSE uses this plus staged DB keys to prune and publish daily coverage.
   metaAdsSnapshotReplacement?: MetaAdsSnapshotReplacementState;
+  /** Effective normalized provider window selected the bounded atomic one-day batch path. */
+  metaAdsAtomicOneDaySnapshot?: boolean;
   metaAdsEntitySnapshot?: MetaAdsEntitySnapshotState;
 }
 
@@ -2325,7 +2339,22 @@ const metaAdsConnector = createConnector<MetaAdsCredential, MetaAdsSyncRow>({
     if (depth === "liveness") {
       await assertMetaAdsSourceAccountBinding(_db, request, adAccountId);
     }
-    if (isMetaAdsMcpTransport(credential)) {
+    if (depth === "liveness" && request.metaAdsSyncMode === "insights_only" && !isMetaAdsMcpTransport(credential) && !metaAdsReadsViaCli(credential)) {
+      const stored = await _db.one<{ currency: string | null; timezone_name: string | null }>(
+        `select currency, timezone_name from meta_ads_accounts
+          where workspace_id = $1 and source_id = $2 and ad_account_id = $3`,
+        [request.workspaceId, request.sourceId, adAccountId],
+      );
+      if (!stored?.currency || !stored.timezone_name) {
+        throw new ConnectorError(
+          "provider_api_error",
+          "Meta Ads insights-only sync requires stored account currency and timezone metadata",
+          true,
+        );
+      }
+      accountMetadata = { adAccountId, currency: stored.currency, timezoneName: stored.timezone_name };
+      if (plan) plan.metaAdsAccountMetadata = accountMetadata;
+    } else if (isMetaAdsMcpTransport(credential)) {
       await metaAdsMcpInsights(credential, {
         adAccountId,
         fields: META_ADS_INSIGHTS_PROBE_FIELDS,
@@ -2382,6 +2411,9 @@ const metaAdsConnector = createConnector<MetaAdsCredential, MetaAdsSyncRow>({
     const syncMode=request.metaAdsSyncMode??"full";
     if(syncMode!=="full"&&(isMetaAdsMcpTransport(credential)||metaAdsReadsViaCli(credential)))
       throw new ConnectorError("provider_unsupported",`Meta Ads ${syncMode} sync requires a stored-token direct Graph credential`,false);
+    if (request.metaAdsRequestLane !== undefined && !isMetaRequestLane(request.metaAdsRequestLane)) {
+      throw new ConnectorError("provider_api_error", "Meta Ads request lane is invalid", false);
+    }
     const plan = await defaultPlan(
       db,
       request,
@@ -2392,12 +2424,15 @@ const metaAdsConnector = createConnector<MetaAdsCredential, MetaAdsSyncRow>({
       { ignoreCursor: request.mode === "backfill" || Boolean(request.backfillWindow) }
     );
     plan.metaAdsRequestTelemetry = new MetaAdsRequestTelemetry(
-      request.metaAdsRequestBudget ?? META_ADS_DEFAULT_REQUEST_BUDGET,
+      request.metaAdsSyncMode === "insights_only" && request.windowSince === request.windowUntil
+        ? Math.min(request.metaAdsRequestBudget ?? META_HOT_RUN_LIMIT_UNITS, META_HOT_RUN_LIMIT_UNITS)
+        : request.metaAdsRequestBudget ?? META_ADS_DEFAULT_REQUEST_BUDGET,
       (snapshot) => persistMetaAdsRequestReservation(db, request, snapshot),
       // Optional graceful soft-time budget (cloud only). Desktop omits it → unchanged behaviour.
       request.softDeadlineAtMs,
       request.metaAdsOnResponse,
       request.metaAdsSyncMode === "inventory_only" ? "inventory_sync" : "history_sync",
+      request.metaAdsRequestLane,
     );
     return plan;
   },
@@ -2521,9 +2556,33 @@ const metaAdsConnector = createConnector<MetaAdsCredential, MetaAdsSyncRow>({
       ? [level as MetaAdsHistoryGrain]
       : ["campaign", "adset", "ad"];
 
+    const usesOneDayBatch = syncMode === "insights_only"
+      && requestedGrains.length === 3
+      && timeOptions.timeRange?.since === timeOptions.timeRange?.until;
+    plan.metaAdsAtomicOneDaySnapshot = usesOneDayBatch;
+    if (usesOneDayBatch) {
+      await metaAdsFetchOneDayInsightsBatch({
+        credential,
+        accessToken,
+        adAccountId,
+        range: timeOptions.timeRange!,
+        timeIncrement,
+        telemetry,
+        signal: request.signal,
+        onRow(grain, row) {
+          rows.push(grain === "campaign"
+            ? metaAdsCampaignDailyRow(adAccountId, row, context, campaignStatus)
+            : grain === "adset"
+              ? metaAdsAdsetDailyRow(adAccountId, row, context, adsetDims)
+              : metaAdsAdDailyRow(adAccountId, row, context, adDims, adsetDims));
+        },
+      });
+    }
+
     // Every grain uses bounded calendar windows for backfills. Preserve provider
     // campaign/adset aggregates: reach and frequency cannot be summed from ads.
     for (const grain of ["campaign", "adset"] as const) {
+      if (usesOneDayBatch) continue;
       if (!requestedGrains.includes(grain)) continue;
       const urlFor = (range: MetaAdsDateWindow) => metaAdsInsightsUrl(credential, {
         adAccountId, fields: metaAdsInsightsFieldsForLevel(grain), level: grain,
@@ -2550,7 +2609,7 @@ const metaAdsConnector = createConnector<MetaAdsCredential, MetaAdsSyncRow>({
     // sentinel: a bounded multi-month backfill is exactly the wide level=ad request that trips
     // 1487534, so it MUST chunk too. Only a genuinely-small trailing incremental refresh (no
     // backfillWindow, ≤ one month) stays a SINGLE request.
-    if (requestedGrains.includes("ad")) {
+    if (!usesOneDayBatch && requestedGrains.includes("ad")) {
       const adRowSink = (row: MetaAdsInsightsRow) =>
         rows.push(metaAdsAdDailyRow(adAccountId, row, context, adDims, adsetDims));
       const adUrlFor = (range: { since: string; until: string }) =>
@@ -3108,8 +3167,23 @@ async function syncExtractedBatch(
   closeSuccess?: (tx: InfiniteOsDb, request: SyncRequest, plan: SyncPlan) => Promise<void>
 ): Promise<SyncResult> {
   const batchId = `batch_${randomUUID()}`;
+  const metaReplacement = plan.metaAdsSnapshotReplacement;
+  const atomicMetaOneDay = request.provider === "meta_ads"
+    && request.metaAdsSyncMode === "insights_only"
+    && plan.metaAdsAtomicOneDaySnapshot === true
+    && metaReplacement !== undefined
+    && metaReplacement.windowStartDate === metaReplacement.windowEndDate
+    && metaReplacement.grains.length === 3;
+  const atomicMetaRecordLimit = META_HOT_RUN_LIMIT_UNITS * 500;
 
   try {
+    if (atomicMetaOneDay && records.length > atomicMetaRecordLimit) {
+      throw new ConnectorError(
+        "provider_api_error",
+        `Meta Ads one-day snapshot exceeded the ${atomicMetaRecordLimit}-record atomic publication limit`,
+        true,
+      );
+    }
     // 1. OPEN — verify the pre-provider-work claim and create batch bookkeeping in its
     //    own brief transaction, so the batch row is committed before the (potentially
     //    large) record load and the mutex is NOT held across the whole batch.
@@ -3160,9 +3234,7 @@ async function syncExtractedBatch(
     //    are intentionally dropped (not silently skipped-as-success). A CRASH mid-load
     //    (no failure tx at all) leaves the source 'syncing'; the boot-time sweep
     //    (analytical-engine resetStuckSyncingSourcesOnBoot) repairs that case.
-    for (let offset = 0; offset < records.length; offset += SYNC_BATCH_CHUNK_SIZE) {
-      const chunk = records.slice(offset, offset + SYNC_BATCH_CHUNK_SIZE);
-      await db.withTransaction(async (tx) => {
+    const loadChunk = async (tx: InfiniteOsDb, chunk: ExtractedRecord<unknown>[]): Promise<void> => {
         const rawIds = await upsertRawRecordsChunk(tx, request, batchId, chunk);
         await insertSyncBatchRecordsChunk(tx, batchId, rawIds);
         await writeTruth(tx, chunk, rawIds);
@@ -3172,10 +3244,8 @@ async function syncExtractedBatch(
           "update sync_batch_records set record_status = 'provider_truth_written' where sync_batch_id = $1 and record_status = 'raw_written'",
           [batchId]
         );
-      });
-    }
-    // 3. CLOSE — finalize bookkeeping, advance the cursor, mark the source connected.
-    await db.withTransaction(async (tx) => {
+    };
+    const closeBatch = async (tx: InfiniteOsDb): Promise<void> => {
       await assertSyncClaimStillOwnsRun(tx, request, claim);
       // Provider-specific durable checkpoints are intentionally part of CLOSE.
       // If this transaction fails, neither the generic cursor nor the Stripe
@@ -3209,7 +3279,27 @@ async function syncExtractedBatch(
       } else {
         await restoreInventoryClaimSourceState(tx, request, claim);
       }
-    });
+    };
+
+    if (atomicMetaOneDay) {
+      // Bounded hot/one-day publication: every normalized write and CLOSE receipt commits
+      // together. Raw rows share the transaction so a mid-load/CLOSE failure retains the
+      // complete prior snapshot. Wide history and other providers keep chunked commits below.
+      await db.withTransaction(async (tx) => {
+        await assertSyncClaimStillOwnsRun(tx, request, claim);
+        for (let offset = 0; offset < records.length; offset += SYNC_BATCH_CHUNK_SIZE) {
+          await loadChunk(tx, records.slice(offset, offset + SYNC_BATCH_CHUNK_SIZE));
+        }
+        await closeBatch(tx);
+      });
+    } else {
+      for (let offset = 0; offset < records.length; offset += SYNC_BATCH_CHUNK_SIZE) {
+        const chunk = records.slice(offset, offset + SYNC_BATCH_CHUNK_SIZE);
+        await db.withTransaction(async (tx) => loadChunk(tx, chunk));
+      }
+      // 3. CLOSE — finalize bookkeeping, advance the cursor, mark the source connected.
+      await db.withTransaction(closeBatch);
+    }
   } catch (error) {
     // OPEN, LOAD, and CLOSE all happen after the durable claim committed. Their
     // cleanup must therefore be shared: mark only the exact still-running owner,
@@ -9267,6 +9357,181 @@ async function metaAdsFetchInsightsPages(
     `Meta Ads insights pagination exceeded the ${META_ADS_INSIGHTS_PAGE_LIMIT}-page limit (refusing to truncate)`,
     true
   );
+}
+
+function mergeMetaAdsResponseSignals(signals: readonly MetaAdsResponseSignal[]): MetaAdsResponseSignal {
+  const max = (field: "maxPercent" | "estimatedRegainSeconds" | "resetSeconds"): number | null => {
+    const values = signals.map(signal => signal[field]).filter((value): value is number => typeof value === "number");
+    return values.length > 0 ? Math.max(...values) : null;
+  };
+  let accessTier: string | null = null;
+  for (const signal of signals) if (signal.accessTier !== null) accessTier = signal.accessTier;
+  return {
+    maxPercent: max("maxPercent"),
+    estimatedRegainSeconds: max("estimatedRegainSeconds"),
+    resetSeconds: max("resetSeconds"),
+    accessTier,
+    throttled: signals.some(signal => signal.throttled === true),
+  };
+}
+
+function metaAdsBatchResultSignal(result: Pick<MetaGraphBatchResult, "status" | "headers" | "body">): MetaAdsResponseSignal {
+  const signal = metaAdsResponseSignal(new Response(null, {
+    status: result.status >= 200 && result.status <= 599 ? result.status : 500,
+    headers: result.headers,
+  }));
+  const error = result.body && typeof result.body === "object"
+    ? (result.body as { error?: Record<string, unknown> }).error
+    : undefined;
+  const code = typeof error?.code === "number" ? error.code : null;
+  const subcode = typeof error?.error_subcode === "number" ? error.error_subcode : null;
+  signal.throttled = isMetaAdsRateLimitResponse({ status: result.status, code, subcode });
+  const regainMinutes = metaAdsPositiveNumber(error?.estimated_time_to_regain_access)
+    ?? metaAdsPositiveNumber(error?.error_data && typeof error.error_data === "object"
+      ? (error.error_data as Record<string, unknown>).estimated_time_to_regain_access
+      : null);
+  if (regainMinutes !== null) signal.estimatedRegainSeconds = Math.max(signal.estimatedRegainSeconds ?? 0, regainMinutes * 60);
+  return signal;
+}
+
+function metaAdsBatchRelativeUrl(absoluteUrl: string, apiVersion: string, adAccountId: string): string {
+  const url = new URL(absoluteUrl);
+  const prefix = `/${apiVersion}/${adAccountId}/insights`;
+  if (url.protocol !== "https:" || url.hostname !== "graph.facebook.com" || url.pathname !== prefix || url.searchParams.has("access_token")) {
+    throw new ConnectorError("provider_api_error", "Meta Ads batch produced an unsafe insights URL", false);
+  }
+  return `${adAccountId}/insights${url.search}`;
+}
+
+function metaAdsBatchContinuation(relativeUrl: string, body: Record<string, unknown>): string | null {
+  const paging = body.paging;
+  if (!paging || typeof paging !== "object") return null;
+  const next = (paging as Record<string, unknown>).next;
+  if (next === undefined || next === null || next === "") return null;
+  const cursors = (paging as Record<string, unknown>).cursors;
+  const after = cursors && typeof cursors === "object" ? (cursors as Record<string, unknown>).after : null;
+  if (typeof after !== "string" || after.length === 0 || typeof next !== "string") {
+    throw new ConnectorError("provider_api_error", "Meta Ads batch returned an unknown continuation cursor", true);
+  }
+  const nextUrl = new URL(next);
+  if (nextUrl.protocol !== "https:" || nextUrl.hostname !== "graph.facebook.com" || nextUrl.searchParams.get("after") !== after) {
+    throw new ConnectorError("provider_api_error", "Meta Ads batch returned an unsafe continuation cursor", true);
+  }
+  const relative = new URL(relativeUrl, "https://graph.facebook.com/");
+  relative.searchParams.set("after", after);
+  return `${relative.pathname.replace(/^\//, "")}${relative.search}`;
+}
+
+async function metaAdsFetchOneDayInsightsBatch(input: {
+  credential: MetaAdsCredential;
+  accessToken: string;
+  adAccountId: string;
+  range: MetaAdsDateWindow;
+  timeIncrement: string;
+  telemetry?: MetaAdsRequestObserver;
+  signal?: AbortSignal;
+  onRow: (grain: MetaAdsHistoryGrain, row: MetaAdsInsightsRow) => void;
+}): Promise<void> {
+  const apiVersion = metaAdsApiVersion(input.credential);
+  let pending = (["campaign", "adset", "ad"] as const).map(grain => ({
+    grain,
+    relativeUrl: metaAdsBatchRelativeUrl(metaAdsInsightsUrl(input.credential, {
+      adAccountId: input.adAccountId,
+      fields: metaAdsInsightsFieldsForLevel(grain),
+      level: grain,
+      limit: "500",
+      timeIncrement: input.timeIncrement,
+      attributionWindows: META_ADS_ATTRIBUTION_WINDOWS,
+      timeRange: input.range,
+    }), apiVersion, input.adAccountId),
+  }));
+
+  for (let page = 0; pending.length > 0 && page < META_HOT_RUN_LIMIT_UNITS; page += 1) {
+    await input.telemetry?.beforeRequests(
+      pending.map(item => `${item.grain}_insights` as MetaAdsRequestKind),
+      false,
+    );
+    const signals: MetaAdsResponseSignal[] = [];
+    let envelope;
+    try {
+      envelope = await executeMetaGraphReadBatch({
+        apiVersion,
+        accessToken: input.accessToken,
+        reads: pending.map(item => ({ key: item.grain, relativeUrl: item.relativeUrl })),
+        signal: input.signal,
+        onOuterResponse: ({ status, headers }) => {
+          signals.push(metaAdsBatchResultSignal({ status, headers, body: null }));
+        },
+      });
+    } catch (error) {
+      if (error instanceof MetaGraphBatchTransportError) {
+        const outer = signals[0] ?? { maxPercent: null, estimatedRegainSeconds: null, resetSeconds: null, accessTier: null };
+        outer.throttled = isMetaAdsRateLimitResponse({
+          status: error.status ?? undefined,
+          code: error.providerCode,
+          subcode: error.providerSubcode,
+        });
+        for (const observation of error.itemObservations) {
+          const signal = metaAdsBatchResultSignal({
+            status: observation.status ?? 500,
+            headers: observation.headers,
+            body: observation.providerCode === null && observation.providerSubcode === null
+              ? null
+              : { error: { code: observation.providerCode, error_subcode: observation.providerSubcode } },
+          });
+          signals.push(signal);
+        }
+        const aggregate = mergeMetaAdsResponseSignals(signals.length > 0 ? signals : [outer]);
+        await input.telemetry?.observeResponse(aggregate);
+        input.telemetry?.recordRejectedResponse(aggregate.maxPercent);
+        if (aggregate.throttled) throw new ConnectorError("provider_rate_limited", "Meta Ads provider rate limited; retry after the recorded cooldown", true);
+        if (error.status === 401 || error.status === 403) throw new ConnectorError("provider_auth_failed", "Meta Ads batch authentication failed", false);
+        throw new ConnectorError("provider_api_error", "Meta Ads batch transport failed", true);
+      }
+      throw error;
+    }
+
+    const next: typeof pending = [];
+    let failure: ConnectorError | null = null;
+    for (let index = 0; index < pending.length; index += 1) {
+      const item = pending[index]!;
+      const result = envelope.results[index]!;
+      const signal = metaAdsBatchResultSignal(result);
+      signals.push(signal);
+      const body = result.body && typeof result.body === "object" ? result.body as Record<string, unknown> : null;
+      if (result.status < 200 || result.status >= 300 || !body || !Array.isArray(body.data)) {
+        input.telemetry?.recordRejectedResponse(signal.maxPercent);
+        if (signal.throttled) {
+          failure = new ConnectorError("provider_rate_limited", "Meta Ads provider rate limited; retry after the recorded cooldown", true);
+        } else {
+          failure ??= new ConnectorError("provider_api_error", "Meta Ads batch returned an incomplete required grain", true);
+        }
+        continue;
+      }
+      input.telemetry?.recordPage(signal.maxPercent);
+      for (const row of body.data) {
+        if (!row || typeof row !== "object") {
+          failure ??= new ConnectorError("provider_api_error", "Meta Ads batch returned a malformed insight row", true);
+          continue;
+        }
+        input.onRow(item.grain, row as MetaAdsInsightsRow);
+      }
+      try {
+        const continuation = metaAdsBatchContinuation(item.relativeUrl, body);
+        if (continuation) next.push({ grain: item.grain, relativeUrl: continuation });
+      } catch (error) {
+        failure ??= error instanceof ConnectorError
+          ? error
+          : new ConnectorError("provider_api_error", "Meta Ads batch continuation failed", true);
+      }
+    }
+    await input.telemetry?.observeResponse(mergeMetaAdsResponseSignals(signals));
+    if (failure) throw failure;
+    pending = next;
+  }
+  if (pending.length > 0) {
+    throw new ConnectorError("provider_api_error", "Meta Ads batch pagination exceeded the admitted run limit", true);
+  }
 }
 
 // Phase-2 slice-1b §4d — run the level=ad BACKFILL over MONTH-sized windows. For each month

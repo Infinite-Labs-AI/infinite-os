@@ -8897,6 +8897,20 @@ describe("Meta Ads durable daily history", () => {
     });
   }
 
+  it("rejects an invalid explicit Meta request lane before provider work", async () => {
+    let calls = 0;
+    await withMockFetch(() => {
+      calls += 1;
+      return historyResponse({ data: [] });
+    }, async () => {
+      await expect(connectorFor("meta_ads").planSync(historyCredentialDb(), {
+        ...request("meta_ads"),
+        metaAdsRequestLane: "unknown_lane" as never,
+      })).rejects.toMatchObject({ code: "provider_api_error", retryable: false });
+    });
+    expect(calls).toBe(0);
+  });
+
   it("audit CLOSE deletes and covers only the clamped window actually fetched at every grain", async () => {
     const queries: Array<{ sql: string; params?: unknown[] }> = [];
     const ranges: Array<{ since: string; until: string }> = [];
