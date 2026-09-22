@@ -7038,6 +7038,15 @@ describe("Meta Ads WRITE helpers", () => {
       }
     );
 
+    await expect(createMetaAdSet(metaWriteCredential, {
+      name: "Conflicting audience",
+      campaignId: "c1",
+      optimizationGoal: "OFFSITE_CONVERSIONS",
+      billingEvent: "IMPRESSIONS",
+      advantageAudience: false,
+      targeting: { targeting_automation: { advantage_audience: 1 } }
+    })).rejects.toThrow("conflicting advantageAudience");
+
     // Link creative → object_story_spec.link_data (headline key is "name").
     await captureWrites(
       () => jsonResponse({ id: "cr1" }),

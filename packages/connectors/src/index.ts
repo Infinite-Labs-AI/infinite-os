@@ -10654,6 +10654,15 @@ export interface MetaAdSetCreateInput {
 // Resolve the effective manual-targeting object for an ad-set create, or undefined when the
 // caller sent only the legacy countries shape (which keeps its pre-A3 wire form untouched).
 function metaAdSetTargetingSpec(input: MetaAdSetCreateInput): MetaAdSetTargeting | undefined {
+  const nestedAdvantage = input.targeting?.targeting_automation?.advantage_audience;
+  if (input.advantageAudience !== undefined && nestedAdvantage !== undefined
+      && Number(input.advantageAudience) !== nestedAdvantage) {
+    throw new ConnectorError(
+      "provider_api_error",
+      "Meta Ads ad set create has conflicting advantageAudience and targeting_automation values",
+      false
+    );
+  }
   if (!input.targeting) {
     return undefined;
   }
