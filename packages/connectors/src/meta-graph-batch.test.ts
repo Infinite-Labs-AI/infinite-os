@@ -120,13 +120,17 @@ describe("executeMetaGraphReadBatch", () => {
   });
 
   it("rejects an oversized item body even when its item status is 200", async () => {
-    const oversized = "x".repeat(8 * 1024 * 1024 + 1);
-    await expect(executeMetaGraphReadBatch({
+    const oversized = JSON.stringify({ error: { code: 17 }, padding: "x".repeat(8 * 1024 * 1024) });
+    const error = await executeMetaGraphReadBatch({
       apiVersion: "v25.0",
       accessToken: token,
       reads: [{ key: "campaign", relativeUrl: "act_1/insights" }],
       fetcher: (async () => response([{ code: 200, body: oversized }])) as typeof fetch,
-    })).rejects.toBeInstanceOf(MetaGraphBatchTransportError);
+    }).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(MetaGraphBatchTransportError);
+    expect((error as MetaGraphBatchTransportError).itemObservations).toEqual([
+      expect.objectContaining({ key: "campaign", status: 200, providerCode: null, providerSubcode: null }),
+    ]);
   });
 
   it("observes and safely classifies outer failures without retaining secrets", async () => {

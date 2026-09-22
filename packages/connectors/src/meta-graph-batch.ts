@@ -106,17 +106,34 @@ function safeObservationHeaders(headers: Headers): Headers {
   return safe;
 }
 
-function itemObservation(item: unknown, key: string): MetaGraphBatchItemObservation {
-  if (!item || typeof item !== "object") {
-    return { key, status: null, headers: new Headers(), providerCode: null, providerSubcode: null };
-  }
-  const record = item as Record<string, unknown>;
-  const codes = providerCodes(typeof record.body === "string" ? parseJson(record.body) : null);
+interface InspectedBatchItem {
+  status: number | null;
+  headers: Headers;
+  bodyText: string | null;
+  body: unknown;
+  oversized: boolean;
+  observation: MetaGraphBatchItemObservation;
+}
+
+function inspectBatchItem(item: unknown, key: string): InspectedBatchItem {
+  const record = item && typeof item === "object" ? item as Record<string, unknown> : null;
+  const status = numericField(record?.code);
+  const headers = itemHeaders(record?.headers);
+  const bodyText = typeof record?.body === "string" ? record.body : null;
+  const oversized = bodyText !== null && byteLength(bodyText) > META_GRAPH_BATCH_ITEM_MAX_BYTES;
+  const body = bodyText !== null && !oversized ? parseJson(bodyText) : null;
   return {
-    key,
-    status: numericField(record.code),
-    headers: safeObservationHeaders(itemHeaders(record.headers)),
-    ...codes,
+    status,
+    headers,
+    bodyText,
+    body,
+    oversized,
+    observation: {
+      key,
+      status,
+      headers: safeObservationHeaders(headers),
+      ...providerCodes(body),
+    },
   };
 }
 
@@ -239,7 +256,8 @@ export async function executeMetaGraphReadBatch(input: {
   if (!Array.isArray(parsed)) {
     throw new MetaGraphBatchTransportError({ message: "Meta Graph batch response was malformed", status: response.status, headers: response.headers });
   }
-  const observations = parsed.map((item, index) => itemObservation(item, input.reads[index]?.key ?? `unexpected_${index}`));
+  const inspected = parsed.map((item, index) => inspectBatchItem(item, input.reads[index]?.key ?? `unexpected_${index}`));
+  const observations = inspected.map(item => item.observation);
   if (parsed.length !== input.reads.length) {
     throw new MetaGraphBatchTransportError({
       message: "Meta Graph batch response was malformed",
@@ -250,24 +268,18 @@ export async function executeMetaGraphReadBatch(input: {
   }
 
   const results = input.reads.map((read, index): MetaGraphBatchResult => {
-    const item = parsed[index];
-    if (!item || typeof item !== "object") {
+    const item = inspected[index]!;
+    if (item.status === null || item.bodyText === null) {
       throw new MetaGraphBatchTransportError({ message: "Meta Graph batch item was malformed", status: response.status, headers: response.headers, itemObservations: observations });
     }
-    const record = item as Record<string, unknown>;
-    const status = numericField(record.code);
-    const bodyText = typeof record.body === "string" ? record.body : null;
-    if (status === null || bodyText === null) {
-      throw new MetaGraphBatchTransportError({ message: "Meta Graph batch item was malformed", status: response.status, headers: response.headers, itemObservations: observations });
-    }
-    if (byteLength(bodyText) > META_GRAPH_BATCH_ITEM_MAX_BYTES) {
+    if (item.oversized) {
       throw new MetaGraphBatchTransportError({ message: "Meta Graph batch item exceeded the byte limit", status: response.status, headers: response.headers, itemObservations: observations });
     }
     return {
       key: read.key,
-      status,
-      headers: itemHeaders(record.headers),
-      body: parseJson(bodyText),
+      status: item.status,
+      headers: item.headers,
+      body: item.body,
     };
   });
 
