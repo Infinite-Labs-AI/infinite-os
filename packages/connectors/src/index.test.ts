@@ -8911,6 +8911,21 @@ describe("Meta Ads durable daily history", () => {
     expect(calls).toBe(0);
   });
 
+  it.each([
+    ["implicit 30-day recurring", { refreshWindowDays: 30 }, 20],
+    ["explicit date", { windowSince: "2026-09-20", windowUntil: "2026-09-20" }, 12],
+    ["normalized ISO day", { windowSince: "2026-09-20T00:01:00.000Z", windowUntil: "2026-09-20T23:59:00.000Z" }, 12],
+    ["implicit one-day recurring", { refreshWindowDays: 1 }, 12],
+  ])("sets the insights-only request limit from the effective window: %s", async (_label, window, expectedLimit) => {
+    const plan = await connectorFor("meta_ads").planSync(historyCredentialDb(), {
+      ...request("meta_ads"),
+      metaAdsSyncMode: "insights_only",
+      metaAdsRequestBudget: 20,
+      ...window,
+    });
+    expect(plan.metaAdsRequestTelemetry?.snapshot().budget.limit).toBe(expectedLimit);
+  });
+
   it("audit CLOSE deletes and covers only the clamped window actually fetched at every grain", async () => {
     const queries: Array<{ sql: string; params?: unknown[] }> = [];
     const ranges: Array<{ since: string; until: string }> = [];
