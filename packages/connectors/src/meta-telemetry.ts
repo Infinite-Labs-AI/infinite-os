@@ -15,6 +15,27 @@ export type MetaAdsRequestKind =
   | "adset_insights"
   | "ad_insights";
 
+export type MetaRequestLane =
+  | "hot_insights"
+  | "inventory_sync"
+  | "settled_history"
+  | "history_backfill"
+  | "attended_refresh"
+  | "media_archive";
+
+export const META_REQUEST_LANES: readonly MetaRequestLane[] = [
+  "hot_insights",
+  "inventory_sync",
+  "settled_history",
+  "history_backfill",
+  "attended_refresh",
+  "media_archive",
+];
+
+export function isMetaRequestLane(value: unknown): value is MetaRequestLane {
+  return typeof value === "string" && (META_REQUEST_LANES as readonly string[]).includes(value);
+}
+
 const META_ADS_REQUEST_KINDS: readonly MetaAdsRequestKind[] = [
   "account_liveness",
   "campaign_edge",
@@ -30,9 +51,8 @@ export const META_ADS_MAX_REQUEST_BUDGET = 5_000;
 const META_ADS_UTILIZATION_SAMPLE_LIMIT = 32;
 export const META_ADS_UTILIZATION_HIGH_WATERMARK = 95;
 
-export interface MetaAdsRequestTelemetrySnapshot {
+interface MetaAdsRequestTelemetrySnapshotBase {
   provider: "meta_ads";
-  schemaVersion: 1;
   operation: "inventory_sync" | "history_sync";
   lastReservedAt: string | null;
   requestCount: number;
@@ -50,6 +70,19 @@ export interface MetaAdsRequestTelemetrySnapshot {
     exhausted: boolean;
   };
 }
+
+export interface MetaAdsRequestTelemetrySnapshotV1 extends MetaAdsRequestTelemetrySnapshotBase {
+  schemaVersion: 1;
+}
+
+export interface MetaAdsRequestTelemetrySnapshotV2 extends MetaAdsRequestTelemetrySnapshotBase {
+  schemaVersion: 2;
+  lane: MetaRequestLane;
+}
+
+export type MetaAdsRequestTelemetrySnapshot =
+  | MetaAdsRequestTelemetrySnapshotV1
+  | MetaAdsRequestTelemetrySnapshotV2;
 
 export class MetaAdsRequestBudgetError extends Error {
   readonly code = "provider_rate_budget_exhausted";
@@ -99,6 +132,7 @@ export class MetaAdsRequestTelemetry {
     private readonly deadlineAtMs?: number,
     private readonly onResponse?: (signal: MetaAdsResponseSignal) => Promise<void>,
     private readonly operation: "inventory_sync" | "history_sync" = "history_sync",
+    private readonly lane?: MetaRequestLane,
   ) {
     if (!Number.isInteger(limit) || limit < 1 || limit > META_ADS_MAX_REQUEST_BUDGET) {
       throw new MetaAdsRequestBudgetError(Math.max(0, Number.isFinite(limit) ? limit : 0));
@@ -150,9 +184,8 @@ export class MetaAdsRequestTelemetry {
   }
 
   snapshot(): MetaAdsRequestTelemetrySnapshot {
-    return {
+    const common: MetaAdsRequestTelemetrySnapshotBase = {
       provider: "meta_ads",
-      schemaVersion: 1,
       operation: this.operation,
       lastReservedAt: this.lastReservedAt,
       requestCount: this.requestCount,
@@ -170,6 +203,9 @@ export class MetaAdsRequestTelemetry {
         exhausted: this.exhausted,
       },
     };
+    return this.lane
+      ? { ...common, schemaVersion: 2, lane: this.lane }
+      : { ...common, schemaVersion: 1 };
   }
 
   private recordUtilization(value: number | null): void {
