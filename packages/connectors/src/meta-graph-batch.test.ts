@@ -65,7 +65,10 @@ describe("executeMetaGraphReadBatch", () => {
       Array.from({ length: META_GRAPH_BATCH_MAX + 1 }, (_, index) => ({ key: String(index), relativeUrl: `act_1/${index}` })),
       [{ key: "write", relativeUrl: "https://graph.facebook.com/v25.0/act_1" }],
       [{ key: "token", relativeUrl: "act_1/insights?access_token=leak" }],
+      [{ key: "encoded-token", relativeUrl: "act_1/insights?access%5Ftoken=leak" }],
+      [{ key: "control", relativeUrl: "act_1/insights?x=ok\u0000bad" }],
       [{ key: "empty", relativeUrl: "" }],
+      [{ key: "duplicate", relativeUrl: "act_1/a" }, { key: "duplicate", relativeUrl: "act_1/b" }],
     ]) {
       await expect(executeMetaGraphReadBatch({ apiVersion: "v25.0", accessToken: token, reads, fetcher: fetcher as typeof fetch }))
         .rejects.toBeInstanceOf(MetaGraphBatchTransportError);
@@ -73,17 +76,23 @@ describe("executeMetaGraphReadBatch", () => {
     expect(fetcher).not.toHaveBeenCalled();
   });
 
-  it("keeps malformed subresponses keyed instead of fabricating success", async () => {
-    const result = await executeMetaGraphReadBatch({
+  it("rejects missing subresponses instead of synthesizing status zero", async () => {
+    await expect(executeMetaGraphReadBatch({
       apiVersion: "v25.0",
       accessToken: token,
       reads: [{ key: "campaign", relativeUrl: "act_1/insights" }, { key: "ad", relativeUrl: "act_1/insights?level=ad" }],
-      fetcher: (async () => response([{ code: 200, body: "not-json" }])) as typeof fetch,
-    });
-    expect(result.results).toEqual([
-      expect.objectContaining({ key: "campaign", status: 200, body: null }),
-      expect.objectContaining({ key: "ad", status: 0, body: null }),
-    ]);
+      fetcher: (async () => response([{ code: 200, body: "{}" }])) as typeof fetch,
+    })).rejects.toBeInstanceOf(MetaGraphBatchTransportError);
+  });
+
+  it("rejects an oversized item body even when its item status is 200", async () => {
+    const oversized = "x".repeat(8 * 1024 * 1024 + 1);
+    await expect(executeMetaGraphReadBatch({
+      apiVersion: "v25.0",
+      accessToken: token,
+      reads: [{ key: "campaign", relativeUrl: "act_1/insights" }],
+      fetcher: (async () => response([{ code: 200, body: oversized }])) as typeof fetch,
+    })).rejects.toBeInstanceOf(MetaGraphBatchTransportError);
   });
 
   it("observes and safely classifies outer failures without retaining secrets", async () => {
@@ -119,5 +128,38 @@ describe("executeMetaGraphReadBatch", () => {
       expect(error).toBeInstanceOf(MetaGraphBatchTransportError);
       expect((error as Error).message).not.toContain(token);
     }
+  });
+
+  it("marks an aborted fetch without retaining the abort reason", async () => {
+    const error = await executeMetaGraphReadBatch({
+      apiVersion: "v25.0",
+      accessToken: token,
+      reads: [{ key: "campaign", relativeUrl: "act_1/insights" }],
+      fetcher: (async () => { throw new DOMException(`aborted ${token}`, "AbortError"); }) as typeof fetch,
+    }).catch((caught: unknown) => caught);
+    expect(error).toMatchObject({ aborted: true, status: null });
+    expect((error as Error).message).toBe("Meta Graph batch transport was aborted");
+  });
+
+  it("cancels an outer response stream as soon as the byte cap is crossed", async () => {
+    let cancelled = false;
+    let pulls = 0;
+    const chunk = new Uint8Array(9 * 1024 * 1024);
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulls += 1;
+        if (pulls <= 2) controller.enqueue(chunk);
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    await expect(executeMetaGraphReadBatch({
+      apiVersion: "v25.0",
+      accessToken: token,
+      reads: [{ key: "campaign", relativeUrl: "act_1/insights" }],
+      fetcher: (async () => new Response(body, { status: 200 })) as typeof fetch,
+    })).rejects.toBeInstanceOf(MetaGraphBatchTransportError);
+    expect(cancelled).toBe(true);
   });
 });

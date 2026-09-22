@@ -25,6 +25,7 @@ export class MetaGraphBatchTransportError extends Error {
   readonly headers: Headers;
   readonly providerCode: number | null;
   readonly providerSubcode: number | null;
+  readonly aborted: boolean;
 
   constructor(input: {
     message: string;
@@ -32,6 +33,7 @@ export class MetaGraphBatchTransportError extends Error {
     headers?: Headers;
     providerCode?: number | null;
     providerSubcode?: number | null;
+    aborted?: boolean;
   }) {
     super(input.message);
     this.name = "MetaGraphBatchTransportError";
@@ -39,6 +41,7 @@ export class MetaGraphBatchTransportError extends Error {
     this.headers = new Headers(input.headers);
     this.providerCode = input.providerCode ?? null;
     this.providerSubcode = input.providerSubcode ?? null;
+    this.aborted = input.aborted ?? false;
   }
 }
 
@@ -84,12 +87,61 @@ function validateReads(reads: readonly MetaGraphBatchRead[]): void {
   if (reads.length < 1 || reads.length > META_GRAPH_BATCH_MAX) {
     throw new MetaGraphBatchTransportError({ message: `Meta Graph batch requires 1-${META_GRAPH_BATCH_MAX} GET reads` });
   }
+  const keys = new Set<string>();
   for (const read of reads) {
     const relativeUrl = read.relativeUrl.trim();
-    if (!read.key || !relativeUrl || /^(?:[a-z][a-z\d+.-]*:)?\/\//i.test(relativeUrl) || /(?:^|[?&])access_token=/i.test(relativeUrl)) {
+    let parsed: URL;
+    try {
+      parsed = new URL(relativeUrl, "https://graph.facebook.com/");
+    } catch {
       throw new MetaGraphBatchTransportError({ message: "Meta Graph batch contains an unsafe relative GET URL" });
     }
+    const hasAccessToken = [...parsed.searchParams.keys()].some(key => key.toLowerCase() === "access_token");
+    if (!read.key || keys.has(read.key) || !relativeUrl || /[\u0000-\u001f\u007f]/.test(read.relativeUrl)
+      || parsed.origin !== "https://graph.facebook.com" || /^(?:[a-z][a-z\d+.-]*:)?\/\//i.test(relativeUrl) || hasAccessToken) {
+      throw new MetaGraphBatchTransportError({ message: "Meta Graph batch contains an unsafe relative GET URL" });
+    }
+    keys.add(read.key);
   }
+}
+
+async function readOuterBody(response: Response): Promise<string> {
+  if (!response.body) return "";
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > META_GRAPH_BATCH_OUTER_MAX_BYTES) {
+        await reader.cancel();
+        throw new MetaGraphBatchTransportError({
+          message: "Meta Graph batch response exceeded the byte limit",
+          status: response.status,
+          headers: response.headers,
+        });
+      }
+      chunks.push(value);
+    }
+  } catch (error) {
+    if (error instanceof MetaGraphBatchTransportError) throw error;
+    throw new MetaGraphBatchTransportError({
+      message: "Meta Graph batch response stream failed",
+      status: response.status,
+      headers: response.headers,
+    });
+  } finally {
+    reader.releaseLock();
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(bytes);
 }
 
 export async function executeMetaGraphReadBatch(input: {
@@ -117,8 +169,14 @@ export async function executeMetaGraphReadBatch(input: {
       body: form.toString(),
       signal: input.signal,
     });
-  } catch {
-    throw new MetaGraphBatchTransportError({ message: "Meta Graph batch transport failed before a response" });
+  } catch (error) {
+    const aborted = error instanceof DOMException
+      ? error.name === "AbortError"
+      : error instanceof Error && error.name === "AbortError";
+    throw new MetaGraphBatchTransportError({
+      message: aborted ? "Meta Graph batch transport was aborted" : "Meta Graph batch transport failed before a response",
+      aborted,
+    });
   }
 
   await input.onOuterResponse?.({ status: response.status, headers: response.headers });
@@ -126,10 +184,7 @@ export async function executeMetaGraphReadBatch(input: {
   if (Number.isFinite(declaredLength) && declaredLength > META_GRAPH_BATCH_OUTER_MAX_BYTES) {
     throw new MetaGraphBatchTransportError({ message: "Meta Graph batch response exceeded the byte limit", status: response.status, headers: response.headers });
   }
-  const text = await response.text();
-  if (byteLength(text) > META_GRAPH_BATCH_OUTER_MAX_BYTES) {
-    throw new MetaGraphBatchTransportError({ message: "Meta Graph batch response exceeded the byte limit", status: response.status, headers: response.headers });
-  }
+  const text = await readOuterBody(response);
   const parsed = parseJson(text);
 
   if (!response.ok) {
@@ -140,21 +195,26 @@ export async function executeMetaGraphReadBatch(input: {
       ...providerCodes(parsed),
     });
   }
-  if (!Array.isArray(parsed) || parsed.length > input.reads.length) {
+  if (!Array.isArray(parsed) || parsed.length !== input.reads.length) {
     throw new MetaGraphBatchTransportError({ message: "Meta Graph batch response was malformed", status: response.status, headers: response.headers });
   }
 
   const results = input.reads.map((read, index): MetaGraphBatchResult => {
     const item = parsed[index];
-    if (!item || typeof item !== "object") return { key: read.key, status: 0, headers: new Headers(), body: null };
+    if (!item || typeof item !== "object") {
+      throw new MetaGraphBatchTransportError({ message: "Meta Graph batch item was malformed", status: response.status, headers: response.headers });
+    }
     const record = item as Record<string, unknown>;
     const status = numericField(record.code) ?? 0;
     const bodyText = typeof record.body === "string" ? record.body : "";
+    if (byteLength(bodyText) > META_GRAPH_BATCH_ITEM_MAX_BYTES) {
+      throw new MetaGraphBatchTransportError({ message: "Meta Graph batch item exceeded the byte limit", status: response.status, headers: response.headers });
+    }
     return {
       key: read.key,
       status,
       headers: itemHeaders(record.headers),
-      body: byteLength(bodyText) <= META_GRAPH_BATCH_ITEM_MAX_BYTES ? parseJson(bodyText) : null,
+      body: parseJson(bodyText),
     };
   });
 
