@@ -903,6 +903,19 @@ describe("Stripe delta evidence reach-back (pure)", () => {
     for (const bad of poison) {
       expect(() => stripeDeltaFanout([{ ...bad, created: after }], { fanoutFromMs })).toThrow();
     }
+    // EXACTLY at the bound is the normal window's first instant (the suppression is strictly
+    // `created < fanoutFromMs`), so a malformed event there still fails the run.
+    expect(fanoutFromMs % 1000).toBe(0);
+    for (const bad of poison) {
+      expect(() => stripeDeltaFanout([{ ...bad, created: fanoutFromMs / 1000 }], { fanoutFromMs }))
+        .toThrow();
+    }
+    // One second earlier is the reach-back part: counted, not thrown.
+    const lastReachBackSecond = stripeDeltaFanout(
+      [{ ...poison[0]!, created: fanoutFromMs / 1000 - 1 }],
+      { fanoutFromMs },
+    );
+    expect(lastReachBackSecond.unparseableReachBackEventTypes).toEqual({ "charge.succeeded": 1 });
     // …and one with no usable `created` cannot be placed in either part, so it throws too.
     expect(() => stripeDeltaFanout([
       { ...poison[0]!, created: Number.NaN },
