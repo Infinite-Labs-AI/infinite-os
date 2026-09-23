@@ -32,6 +32,7 @@ import {
   selectStripeSyncLane,
   stripeDeltaFanout,
   stripeDeltaMapBounded,
+  stripeDeltaLeavesEventHole,
   stripeDeltaMergeEventPages,
   stripeEndpointClass,
   stripeEventObjectKind,
@@ -800,6 +801,141 @@ describe("Stripe payment evidence (evidence only, minimised)", () => {
     const fanout = stripeDeltaFanout([refund, structuredClone(refund)]);
     expect(fanout.evidence).toHaveLength(1);
     expect(fanout.paymentEvidenceEventTypes).toEqual({ "refund.created": 1 });
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// EVIDENCE REACH-BACK over a full run. A full run advances every cutoff but never reads the
+// unfiltered stream, so the next delta window reaches back to the last CLOSED delta segment — and
+// treats that reached-back part as evidence only.
+// ---------------------------------------------------------------------------------------------
+
+describe("Stripe delta evidence reach-back (pure)", () => {
+  const MIN = 60 * 1000;
+  const cursorEndMs = NOW_MS;
+  const toMs = NOW_MS - STRIPE_EVENT_SAFETY_LAG_MS;
+
+  it("reaches back to the last closed segment and keeps the NORMAL start as the fan-out bound", () => {
+    const fullBoundMs = NOW_MS - 35 * MIN;
+    const lastClosedEndMs = NOW_MS - 50 * MIN;
+    const plan = planStripeDeltaSegment({
+      cursorEndMs,
+      fromCandidatesMs: [fullBoundMs, fullBoundMs, fullBoundMs],
+      openSegment: null,
+      reachBackToMs: lastClosedEndMs,
+    });
+    expect(plan.segmentFromMs).toBe(lastClosedEndMs - STRIPE_EVENT_OVERLAP_MS);
+    expect(plan.fanoutFromMs).toBe(fullBoundMs - STRIPE_EVENT_OVERLAP_MS);
+    expect(plan.segmentToExclusiveMs).toBe(toMs);
+  });
+
+  it("changes NOTHING in the usual case: delta after delta, or nothing closed yet", () => {
+    const watermarkMs = NOW_MS - 20 * MIN;
+    const without = planStripeDeltaSegment({
+      cursorEndMs, fromCandidatesMs: [watermarkMs], openSegment: null,
+    });
+    for (const reachBackToMs of [watermarkMs, watermarkMs + 5 * MIN, null]) {
+      expect(planStripeDeltaSegment({
+        cursorEndMs, fromCandidatesMs: [watermarkMs], openSegment: null, reachBackToMs,
+      })).toEqual(without);
+    }
+    expect(without.fanoutFromMs).toBe(without.segmentFromMs);
+  });
+
+  it("never reaches back past the safe retention floor", () => {
+    const plan = planStripeDeltaSegment({
+      cursorEndMs,
+      fromCandidatesMs: [NOW_MS - 20 * MIN],
+      openSegment: null,
+      reachBackToMs: NOW_MS - 29 * 24 * 60 * MIN,
+    });
+    expect(plan.segmentFromMs).toBe(toMs - 28 * 24 * 60 * MIN);
+    expect(plan.fanoutFromMs).toBe(NOW_MS - 25 * MIN);
+  });
+
+  it("recovers the fan-out bound of a RESUMED reach-back segment from the unchanged cutoffs", () => {
+    const fullBoundMs = NOW_MS - 35 * MIN;
+    const segmentFromMs = NOW_MS - 55 * MIN;
+    const plan = planStripeDeltaSegment({
+      cursorEndMs,
+      fromCandidatesMs: [fullBoundMs],
+      openSegment: {
+        id: "seg_resume",
+        segment_from: iso(segmentFromMs),
+        segment_to_exclusive: iso(NOW_MS - 20 * MIN),
+        pagination_cursor: "evt_cursor",
+        status: "open",
+      },
+      reachBackToMs: NOW_MS - 50 * MIN,
+    });
+    expect(plan.resumedSegmentId).toBe("seg_resume");
+    expect(plan.segmentFromMs).toBe(segmentFromMs);
+    expect(plan.fanoutFromMs).toBe(fullBoundMs - STRIPE_EVENT_OVERLAP_MS);
+  });
+
+  it("treats reached-back ENTITY events as evidence only; payments and products are unaffected", () => {
+    const fanoutFromMs = NOW_MS - 40 * MIN;
+    const before = Math.floor((fanoutFromMs - MIN) / 1000);
+    const after = Math.floor((fanoutFromMs + MIN) / 1000);
+    const charge = PAYMENT_FIXTURE.kept.find((e) => e.type === "charge.succeeded")!;
+    const fanout = stripeDeltaFanout([
+      event({ type: "customer.subscription.updated", id: "evt_old_sub", created: before, data: { object: { id: "sub_old" } } }),
+      event({ type: "price.updated", id: "evt_old_price", created: before, data: { object: { id: "price_old" } } }),
+      event({ type: "customer.updated", id: "evt_old_cus", created: before, data: { object: { id: "cus_old" } } }),
+      // A credit note before the bound names no invoice: evidence only, so nothing to refuse.
+      event({ type: "credit_note.created", id: "evt_old_cn", created: before, data: { object: { id: "cn_old" } } }),
+      event({ type: "product.updated", id: "evt_old_prod", created: before, data: { object: { id: "prod_old" } } }),
+      { ...charge, id: "evt_old_charge", created: before },
+      // Exactly AT the bound is inside the normal window.
+      event({ type: "invoice.paid", id: "evt_at_inv", created: fanoutFromMs / 1000, data: { object: { id: "in_at" } } }),
+      event({ type: "customer.subscription.updated", id: "evt_new_sub", created: after, data: { object: { id: "sub_new" } } }),
+    ], { fanoutFromMs });
+
+    expect(fanout.subscriptionIds).toEqual(["sub_new"]);
+    expect(fanout.priceIds).toEqual([]);
+    expect(fanout.customerIds).toEqual([]);
+    expect(fanout.invoiceIds).toEqual(["in_at"]);
+    expect(fanout.productIds).toEqual(["prod_old"]);
+    expect(fanout.reachBackEvidenceOnlyEventTypes).toEqual({
+      "customer.subscription.updated": 1,
+      "price.updated": 1,
+      "customer.updated": 1,
+      "credit_note.created": 1,
+    });
+    expect(fanout.paymentEvidenceEventTypes).toEqual({ "charge.succeeded": 1 });
+    // Every event is still evidence.
+    expect(fanout.evidence.map((row) => row.stripeEventId)).toEqual([
+      "evt_old_sub", "evt_old_price", "evt_old_cus", "evt_old_cn", "evt_old_prod",
+      "evt_old_charge", "evt_at_inv", "evt_new_sub",
+    ]);
+    // Without the option nothing is suppressed — today's behaviour.
+    expect(stripeDeltaFanout([
+      event({ type: "customer.subscription.updated", id: "evt_x", created: before, data: { object: { id: "sub_old" } } }),
+    ]).subscriptionIds).toEqual(["sub_old"]);
+  });
+
+  it("flags an event-record HOLE only when the window starts after the observed tail", () => {
+    const at = (m: number) => NOW_MS - m * MIN;
+    // Usual delta, and a reach-back over a full run: the window starts at or before the tail.
+    expect(stripeDeltaLeavesEventHole({
+      segmentFromMs: at(25), lastClosedSegmentEndMs: at(20), continuousCoverageFromMs: at(600),
+    })).toBe(false);
+    expect(stripeDeltaLeavesEventHole({
+      segmentFromMs: at(55), lastClosedSegmentEndMs: at(50), continuousCoverageFromMs: at(600),
+    })).toBe(false);
+    // First delta after a bootstrap: nothing closed yet, coverage starts at the full run's bound.
+    expect(stripeDeltaLeavesEventHole({
+      segmentFromMs: at(40), lastClosedSegmentEndMs: null, continuousCoverageFromMs: at(35),
+    })).toBe(false);
+    // Reach-back clamped by retention: the window starts after the tail.
+    expect(stripeDeltaLeavesEventHole({
+      segmentFromMs: at(28 * 24 * 60), lastClosedSegmentEndMs: at(29 * 24 * 60),
+      continuousCoverageFromMs: at(30 * 24 * 60),
+    })).toBe(true);
+    // Nothing known at all: nothing to reset against.
+    expect(stripeDeltaLeavesEventHole({
+      segmentFromMs: at(25), lastClosedSegmentEndMs: null, continuousCoverageFromMs: null,
+    })).toBe(false);
   });
 });
 
@@ -3260,5 +3396,289 @@ describe("Stripe delta lane against real PGlite", () => {
         previousAttributes: row.previous_attributes,
       }, row.stripe_event_id).toEqual(EXPECTED_PAYMENT_EVIDENCE[row.stripe_event_id]);
     }
+  }, 180_000);
+
+  // -------------------------------------------------------------------------------------------
+  // EVIDENCE REACH-BACK through real `sync()` sequences. A full run never reads the unfiltered
+  // stream; these pin that the NEXT delta window recovers the events created just before it,
+  // without re-fetching anything the full run already re-derived and without looping the full lane.
+  // -------------------------------------------------------------------------------------------
+
+  const MINUTE_MS = 60 * 1000;
+  const at = (minutesBeforeCursorEnd: number) => CURSOR_END_MS - minutesBeforeCursorEnd * MINUTE_MS;
+  const atS = (minutesBeforeCursorEnd: number) => Math.floor(at(minutesBeforeCursorEnd) / 1000);
+
+  async function runSyncAt(
+    workspaceId: string,
+    sourceId: string,
+    untilMs: number,
+    handler: FetchHandler,
+  ): Promise<void> {
+    const syncRequest = { ...request(workspaceId, sourceId), windowUntil: iso(untilMs) };
+    await withMockStripe(handler, () => connectorFor("stripe").sync(db, syncRequest));
+  }
+
+  async function laneAt(workspaceId: string, sourceId: string, untilMs: number) {
+    const plan = await connectorFor("stripe").planSync(
+      db,
+      { ...request(workspaceId, sourceId), windowUntil: iso(untilMs) },
+    );
+    return plan.stripeSyncLane;
+  }
+
+  /**
+   * A DELTA router that honours the half-open `created` window the way Stripe does — the whole
+   * point of these tests is WHICH events a window can see, so the mock must not hand every event
+   * to every window.
+   */
+  function windowedDeltaRouter(options: {
+    events: Array<{ created: number } & Record<string, unknown>>;
+    subscriptions?: Record<string, Record<string, unknown>>;
+    customers?: Record<string, Record<string, unknown>>;
+    onUrl?: (url: URL) => void;
+  }): FetchHandler {
+    const inner = deltaRouter({
+      events: [],
+      subscriptions: options.subscriptions,
+      customers: options.customers,
+    });
+    return (url) => {
+      options.onUrl?.(url);
+      if (url.pathname === "/v1/events") {
+        expect(url.searchParams.getAll("types[]")).toEqual([]);
+        const gte = Number(url.searchParams.get("created[gte]"));
+        const lt = Number(url.searchParams.get("created[lt]"));
+        return {
+          data: options.events.filter((event) => event.created >= gte && event.created < lt),
+          has_more: false,
+        };
+      }
+      return inner(url);
+    };
+  }
+
+  function forceFullDue(workspaceId: string, sourceId: string, runAtMs: number) {
+    return db.query(
+      `update stripe_sync_watermarks set last_full_refresh_at = $3
+        where workspace_id = $1 and source_id = $2`,
+      [workspaceId, sourceId, iso(runAtMs - 25 * 60 * MINUTE_MS)],
+    );
+  }
+
+  function readWatermark(workspaceId: string, sourceId: string) {
+    return db.one<{
+      delta_data_as_of: Date; continuous_coverage_from: Date;
+      pending_full_refresh_reason: string | null;
+    }>(
+      `select delta_data_as_of, continuous_coverage_from, pending_full_refresh_reason
+         from stripe_sync_watermarks where workspace_id = $1 and source_id = $2`,
+      [workspaceId, sourceId],
+    );
+  }
+
+  it("full run then delta: stores the event created in the full run's hole, fetching nothing extra", async () => {
+    const workspaceId = `ws_${randomUUID()}`;
+    const sourceId = `src_${randomUUID()}`;
+    await seedSource(workspaceId, sourceId);
+
+    const sale = PAYMENT_FIXTURE.kept.find((e) => e.type === "charge.succeeded")!;
+    const refund = PAYMENT_FIXTURE.kept.find((e) => e.type === "refund.created")!;
+    // The whole account's event stream. Each delta window only sees its own [gte, lt) slice.
+    const stream = [
+      // In the HOLE [-50m, -40m): after the last closed delta segment, before the full run's
+      // lagged bound minus the overlap. No window polled this before the reach-back.
+      { ...structuredClone(sale), id: "evt_hole_sale", created: atS(45) },
+      subscriptionEvent("evt_hole_sub", subscriptionApi({ id: "sub_hole" }), 0),
+      // In the normal window of the post-full delta.
+      { ...structuredClone(refund), id: "evt_after_refund", created: atS(20) },
+      subscriptionEvent("evt_after_sub", subscriptionApi(), 0),
+    ];
+    stream[1]!.created = atS(45);
+    stream[3]!.created = atS(10);
+
+    // T0 = -60m: bootstrap FULL import.
+    await runSyncAt(workspaceId, sourceId, at(60), fullRouter());
+    const bootstrap = await readWatermark(workspaceId, sourceId);
+    const coverageFrom = new Date(bootstrap!.continuous_coverage_from).toISOString();
+
+    // T1 = -45m: a healthy DELTA, closed at -50m. The usual case — no reach-back.
+    expect(await laneAt(workspaceId, sourceId, at(45))).toMatchObject({ lane: "delta" });
+    const t1Urls: URL[] = [];
+    await runSyncAt(workspaceId, sourceId, at(45), windowedDeltaRouter({
+      events: stream,
+      onUrl: (url) => t1Urls.push(url),
+    }));
+    const t1Events = t1Urls.find((url) => url.pathname === "/v1/events")!;
+    expect(t1Events.searchParams.get("created[gte]")).toBe(String(atS(70)));
+    expect(t1Events.searchParams.get("created[lt]")).toBe(String(atS(50)));
+
+    // T2 = -30m: the daily FULL run. It stamps every cutoff at -35m and reads no unfiltered events.
+    await forceFullDue(workspaceId, sourceId, at(30));
+    expect(await laneAt(workspaceId, sourceId, at(30))).toMatchObject({ lane: "full" });
+    await runSyncAt(workspaceId, sourceId, at(30), fullRouter());
+
+    // T3 = now: DELTA. Normal start would be -40m (full bound -35m minus overlap); the reach-back
+    // pulls the window to -55m (last closed end -50m minus overlap), covering the hole.
+    expect(await laneAt(workspaceId, sourceId, CURSOR_END_MS)).toMatchObject({ lane: "delta" });
+    const t3Urls: URL[] = [];
+    await runSyncAt(workspaceId, sourceId, CURSOR_END_MS, windowedDeltaRouter({
+      events: stream,
+      // ONLY the normal-window subscription is retrievable: re-fetching `sub_hole` would throw.
+      subscriptions: { sub_delta: subscriptionApi() },
+      onUrl: (url) => t3Urls.push(url),
+    }));
+    const t3Events = t3Urls.filter((url) => url.pathname === "/v1/events");
+    expect(t3Events).toHaveLength(1);
+    expect(t3Events[0]!.searchParams.get("created[gte]")).toBe(String(atS(55)));
+    expect(t3Events[0]!.searchParams.get("created[lt]")).toBe(String(atS(5)));
+    // Retrieves are exactly the normal window's fan-out.
+    expect(t3Urls.map((url) => url.pathname)
+      .filter((path) => !["/v1/customers", "/v1/events", "/v1/subscription_items"].includes(path)))
+      .toEqual(["/v1/subscriptions/sub_delta"]);
+
+    const evidence = await db.query<{
+      stripe_event_id: string; object_kind: string; payload: Record<string, unknown>;
+    }>(
+      `select stripe_event_id, object_kind, payload from stripe_event_evidence
+        where workspace_id = $1 and source_id = $2 order by stripe_event_id`,
+      [workspaceId, sourceId],
+    );
+    expect(evidence.map((row) => [row.stripe_event_id, row.object_kind])).toEqual([
+      ["evt_after_refund", "refund"],
+      ["evt_after_sub", "subscription"],
+      ["evt_hole_sale", "charge"],
+      ["evt_hole_sub", "subscription"],
+    ]);
+    expect(evidence.find((row) => row.stripe_event_id === "evt_hole_sale")?.payload)
+      .toEqual(EXPECTED_PAYMENT_EVIDENCE[sale.id]!.payload);
+
+    const segments = await db.query<{
+      segment_from: Date; status: string; refetch_count: number;
+    }>(
+      `select segment_from, status, refetch_count from stripe_event_segments
+        where workspace_id = $1 and source_id = $2 order by segment_from`,
+      [workspaceId, sourceId],
+    );
+    expect(segments.map((row) => [new Date(row.segment_from).toISOString(), row.status, row.refetch_count]))
+      .toEqual([[iso(at(70)), "closed", 0], [iso(at(55)), "closed", 1]]);
+
+    // The trial lane rode the window from its NORMAL start, exactly as before the reach-back.
+    const trialSegments = await db.query<{ segment_from: Date }>(
+      `select segment_from from stripe_trial_history_segments
+        where workspace_id = $1 and source_id = $2 and segment_to_exclusive = $3`,
+      [workspaceId, sourceId, iso(at(5))],
+    );
+    expect(trialSegments.map((row) => new Date(row.segment_from).toISOString())).toEqual([iso(at(40))]);
+
+    // Continuity held across the full run — the reach-back covered it — so nothing was reset.
+    const after = await readWatermark(workspaceId, sourceId);
+    expect(new Date(after!.continuous_coverage_from).toISOString()).toBe(coverageFrom);
+    expect(new Date(after!.delta_data_as_of).toISOString()).toBe(iso(at(5)));
+    expect(after?.pending_full_refresh_reason).toBeNull();
+  }, 180_000);
+
+  it("a refused window re-read by the reach-back does NOT re-trip the budget or loop the full lane", async () => {
+    const workspaceId = `ws_${randomUUID()}`;
+    const sourceId = `src_${randomUUID()}`;
+    await seedSource(workspaceId, sourceId);
+
+    // One past the refetch budget, all inside T2's window [-75m, -55m).
+    const burst = Array.from({ length: STRIPE_DELTA_MAX_REFETCH_PER_RUN + 1 }, (_, index) => ({
+      id: `evt_burst_${index}`,
+      type: "customer.updated",
+      created: atS(60),
+      api_version: "2025-06-30.basil",
+      livemode: true,
+      data: { object: { id: `cus_burst_${index}`, metadata: {} } },
+    }));
+    const retrieved: string[] = [];
+    const router = (url: URL) => {
+      if (url.pathname.startsWith("/v1/customers/")) retrieved.push(url.pathname);
+      return windowedDeltaRouter({ events: burst })(url);
+    };
+
+    await runSyncAt(workspaceId, sourceId, at(80), fullRouter()); // T0: bootstrap
+    await runSyncAt(workspaceId, sourceId, at(65), router); // T1: healthy delta, closes at -70m
+    const t2Urls: URL[] = [];
+    await runSyncAt(workspaceId, sourceId, at(50), (url) => {
+      t2Urls.push(url);
+      return router(url);
+    }); // T2: the burst -> refused
+    // Delta after delta: the window is the normal one, reach-back or not.
+    expect(t2Urls.find((url) => url.pathname === "/v1/events")?.searchParams.get("created[gte]"))
+      .toBe(String(atS(75)));
+    expect((await readWatermark(workspaceId, sourceId))?.pending_full_refresh_reason)
+      .toBe("delta_fanout_exceeded");
+    expect(retrieved).toEqual([]);
+
+    // T3: the parked demand takes the FULL lane, which supersedes the refused open segment.
+    expect(await laneAt(workspaceId, sourceId, at(35)))
+      .toMatchObject({ lane: "full", reason: "delta_fanout_exceeded" });
+    await runSyncAt(workspaceId, sourceId, at(35), fullRouter());
+
+    // T4: DELTA reaches back to -75m (last CLOSED end -70m minus overlap), so it re-reads the burst
+    // — as evidence only. Without the fan-out bound this would refuse again, forever.
+    expect(await laneAt(workspaceId, sourceId, CURSOR_END_MS)).toMatchObject({ lane: "delta" });
+    const t4Urls: URL[] = [];
+    await runSyncAt(workspaceId, sourceId, CURSOR_END_MS, (url) => {
+      t4Urls.push(url);
+      return router(url);
+    });
+    expect(t4Urls.find((url) => url.pathname === "/v1/events")?.searchParams.get("created[gte]"))
+      .toBe(String(atS(75)));
+    expect(retrieved).toEqual([]);
+    const watermark = await readWatermark(workspaceId, sourceId);
+    expect(watermark?.pending_full_refresh_reason).toBeNull();
+    expect(new Date(watermark!.delta_data_as_of).toISOString()).toBe(iso(at(5)));
+
+    // Insert-only evidence: the burst was stored once, at T2, and the re-read added nothing.
+    const evidence = await db.query<{ count: string }>(
+      `select count(*)::text as count from stripe_event_evidence
+        where workspace_id = $1 and source_id = $2`,
+      [workspaceId, sourceId],
+    );
+    expect(evidence[0]?.count).toBe(String(STRIPE_DELTA_MAX_REFETCH_PER_RUN + 1));
+
+    // The loop is broken: the next tick is a healthy delta, not the full lane.
+    expect(await laneAt(workspaceId, sourceId, CURSOR_END_MS + 15 * MINUTE_MS)).toEqual({
+      lane: "delta",
+      reason: "delta_healthy",
+      coverageGapReason: null,
+    });
+  }, 180_000);
+
+  it("RESETS continuous coverage when the reach-back cannot cover the hole (retention floor)", async () => {
+    const workspaceId = `ws_${randomUUID()}`;
+    const sourceId = `src_${randomUUID()}`;
+    await seedSource(workspaceId, sourceId);
+    await seedHealthyWatermark(workspaceId, sourceId);
+    const DAY = 24 * 60;
+    // The delta lane last CLOSED a window 29 days ago (full runs kept the snapshot fresh since),
+    // and coverage is claimed from 30 days ago. The stream between -29d and the 28-day safe floor
+    // has aged out of Stripe's retention: that part of the event record is gone for good.
+    await db.query(
+      `update stripe_sync_watermarks set continuous_coverage_from = $3
+        where workspace_id = $1 and source_id = $2`,
+      [workspaceId, sourceId, iso(at(30 * DAY))],
+    );
+    await db.query(
+      `insert into stripe_event_segments (
+         id, workspace_id, source_id, segment_from, segment_to_exclusive, status, closed_at,
+         parser_version
+       ) values ($1,$2,$3,$4,$5,'closed',$5,'stripe-delta-events-v2')`,
+      [`seg_${randomUUID()}`, workspaceId, sourceId, iso(at(29 * DAY + 20)), iso(at(29 * DAY))],
+    );
+
+    const urls: URL[] = [];
+    await runSyncAt(workspaceId, sourceId, CURSOR_END_MS, windowedDeltaRouter({
+      events: [],
+      onUrl: (url) => urls.push(url),
+    }));
+    const safeFloor = Date.parse(SEGMENT_TO) - 28 * DAY * MINUTE_MS;
+    expect(urls.find((url) => url.pathname === "/v1/events")?.searchParams.get("created[gte]"))
+      .toBe(String(safeFloor / 1000));
+    // Continuity restarts at the window: it may not be claimed across the aged-out stretch.
+    const watermark = await readWatermark(workspaceId, sourceId);
+    expect(new Date(watermark!.continuous_coverage_from).toISOString()).toBe(iso(safeFloor));
   }, 180_000);
 });
