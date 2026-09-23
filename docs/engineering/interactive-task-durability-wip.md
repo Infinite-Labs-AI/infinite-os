@@ -66,21 +66,31 @@ effects already in flight can still be recorded.
 
 **Errors.** Every database error leaves the store as a typed `InteractiveTaskConflictError`.
 
+## Daemon routes
+
+`apps/app/src/interactive-task-routes.ts`, registered in `createApp`, published as the
+`interactive_tasks_v1` capability on `/health`. All routes are operator-only and scoped to the
+validated `x-growth-os-workspace`; the actor is derived from that workspace row (its opaque owner
+id when claimed, else `local`), never from the body.
+
+| Route | Store call |
+|---|---|
+| `POST /interactive/tasks` | `createTask` (201; 200 on replay) |
+| `GET /interactive/tasks` | `listActiveTasks` |
+| `GET /interactive/tasks/:id` | `getTask` |
+| `GET /interactive/tasks/:id/events?after=&limit=` | `listEvents` |
+| `POST /interactive/tasks/:id/transitions` | `transition` |
+| `GET /interactive/proposals` | `listLiveProposals` |
+| `GET /interactive/recovery?states=` | `listRecoverableActions` (across actors) |
+
+Typed errors map to HTTP: not found is 404; expired task or grant authority is 410; bad input,
+origin violations and a missing typed approval are 422; every other conflict is 409. A create body
+is bounded to 256 KiB and a transition to 1 MiB (413 above). Any untyped fault is a generic 500.
+
 ## Not built yet
 
-1. Operator-only daemon routes, with route-level tests for:
-   - workspace and actor scope;
-   - idempotency;
-   - CAS;
-   - body bounds.
-
-   Only the host may create an automatic task. Its origin and provenance come from the claimed
-   cloud turn, never from model output.
-2. Capability negotiation for task events, only after the routes exist.
-3. Desktop use: a write-ahead record at dispatch, and a boot pass that ends every `authorized`
-   grant with `host_restart` and reports `dispatching` or `unknown` actions for verification. The
-   boot pass never re-dispatches.
-4. An independent review before any desktop dependency.
+1. Negotiating `task.events.v1` on the Cmd+L bridge.
+2. An independent review before any desktop release depends on these routes.
 
 Cloud service journals remain authoritative. A missing service-journal row is not proof that a
 dispatch did not happen, unless an owning adapter proves non-dispatch or supplies a valid

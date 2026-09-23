@@ -16,6 +16,7 @@ import {
   type BoundAddress
 } from "./daemon-descriptor.js";
 import { acquireDaemonSpawnLock } from "./daemon-spawn-lock.js";
+import { INTERACTIVE_TASKS_CAPABILITY, registerInteractiveTaskRoutes } from "./interactive-task-routes.js";
 import {
   decryptCredentialPayload,
   encryptCredentialPayload,
@@ -149,7 +150,11 @@ export const APP_CAPABILITIES = [
   // window+currency on the envelope, and TYPED error codes (meta_ads_not_connected …) forwarded
   // by guardedAction. The desktop fails CLOSED on this flag (daemon_capability_missing → "update
   // Infinite") — an older bundle must never answer the v2 request with the v1 shape.
-  "meta_live_insights_v2"
+  "meta_live_insights_v2",
+  // The local interactive task ledger's operator routes (/interactive/*, migration 0072). The
+  // desktop records Cmd+L tasks, proposals and approvals here only when this flag is present;
+  // an older bundle without the routes keeps the desktop on its in-memory confirmation path.
+  INTERACTIVE_TASKS_CAPABILITY
 ] as const;
 
 type ScopedAppToolsParseResult =
@@ -723,6 +728,8 @@ export function createApp(options: {
     }
     return retiredMetadataActionRequest("describe_queryable_view", { viewId: "queryable.vw_recent_sync_status" }, "app", ws);
   });
+
+  registerInteractiveTaskRoutes(app, { database });
 
   // Install operators can read all local projects' content-free pending receipts; ACK is scoped.
   app.get("/brain/usage/pending", async (request, reply) => {
