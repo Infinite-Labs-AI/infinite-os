@@ -3,6 +3,82 @@
 All notable changes to the `infinite-tag` npm package (`packages/instrument`). Versions before
 0.5.0 are recorded in git history only (`git log -- packages/instrument`).
 
+## Unreleased
+
+Setup-correctness checks: the harness now catches wiring that was never going to fire, not only
+deliveries that failed.
+
+Verification is receipt-based — each lane asks a backend whether an event arrived. That question can
+only be asked about an event something TRIED to send, so a page that was never wired up correctly
+verifies exactly as quietly as a page with no conversions at all. A new `Setup correctness` step
+runs straight after `mark`, in every mode including `--check`, and asks the other question: from the
+markup, should something have fired?
+
+- **`data-conversion` placement.** Catches the attribute on an element the runtime will not treat
+  the way the author meant — most sharply a `<button data-conversion="signup">` inside a `<form>`,
+  which the click lane counts the moment the button is pressed instead of when the form submits, and
+  which `mark` then skips forever as "already marked". Also catches a value the runtime does not
+  read at all. The rule is DERIVED from `runtime/infinite-browser.ts` (parsed from the runtime's own
+  source, which cannot import a shared constant because it ships via `toString()`), so a selector
+  change in the runtime changes what the check says. A second copy of the rule is how the original
+  bug survived.
+- **A submitting form with no conversion event.** Flags a form that submits, looks like a lead
+  capture (an email input, or its own name), and emits nothing. Deliberately conservative: it
+  requires a positive lead signal, excludes search / filter / login / newsletter / comment / cart /
+  GET forms, reports `undetermined` rather than a problem when the file already calls an analytics
+  API directly, and is worded as "Worth checking", never as an accusation.
+- **`_fbc` not captured at the landing page.** Catches a Meta pixel that initialises only in
+  page-scoped files, or only on some of a multi-page site's pages. `fbclid` exists on the landing
+  URL and nowhere else, so a pixel that boots later has no click id to save and the conversions it
+  sends cannot be attributed to the ad that paid for them.
+
+Every check has a third state. `undetermined` — a computed attribute value, a pixel that may live in
+a tag manager, a runtime contract this build could not read — is reported as a check that did not
+run, never folded into a pass. The five verification lanes are unchanged; this is a separate class
+of finding printed alongside them, and it can neither mint nor deny a receipt. The findings are
+local: they carry a file and a line, never an attribute value, never a field's contents, and
+`buildHarnessReportPayload` does not send them anywhere.
+
+Meta Manual Advanced Matching, as a customer-controlled option that is OFF by default.
+
+- **`--meta-advanced-matching on|off` (default off).** On, the Meta snippet defines
+  `window.infiniteMetaAdvancedMatch({ email, externalId })` for the site's OWN code to call once a
+  visitor identifies themselves. It hashes those raw values (sha256, lowercase hex, exactly once,
+  Meta's normalisation) before anything reaches Meta, so a conversion can be matched to the ad click
+  that caused it instead of guessed at. It reads no DOM, binds no listeners and never fires on its
+  own.
+- **Off by default, deliberately.** Sending a visitor's contact details — even hashed — from a
+  customer's pages is the customer's decision, the same reasoning behind the `autoConfig` opt-out it
+  sits beside. Absent means absent: with the flag off, the accessor is not on the page at all.
+  Automatic Advanced Matching (Meta scraping the customer's forms) stays off on every install.
+- **Raw in, always — one hashing contract.** An input that is already a 64-character hex digest is
+  refused rather than hashed again, because "sometimes hashed" is how double-hashing ships, and a
+  double-hashed value is accepted by Meta and matches nobody. Nothing raw is ever transmitted, and a
+  value that is not a digest never reaches `fbq`.
+- **The privacy disclosure notice names the lane** when, and only when, it was actually installed.
+
+## 0.11.0 — 2026-09-21
+
+The Meta pixel's `verify` lane now checks DELIVERY, not just that a snippet is on the page.
+
+- **Traffic-permissions detection.** `verify` / `harness` / `infinite analytics` ask Meta's own
+  public, domain-scoped pixel config (`connect.facebook.net/signals/config/<pixel>?…&domain=<host>`)
+  whether the pixel is allowed to transmit from the site's host, and report the exact remedy when it
+  is not. This catches a pixel that loads, registers, increments `eventCount` and shows "Active" in
+  Meta Pixel Helper while Meta silently drops every send — the state infinite.fast was in on
+  2026-09-20, because the pixel's allow list still named the pre-rebrand domain. The block is
+  invisible by design (`lockWebpage:false`), and while it stands no `_fbp`/`_fbc` cookie is written,
+  so ad clicks cannot be attributed.
+- **No credentials, no Graph call, no rate-limit cost.** The config endpoint is an unauthenticated
+  CDN, so the check runs for any pixel on any domain — before or without a Meta connection — and
+  spends nothing from the per-ad-account Graph request budget.
+- **It never fabricates a pass.** A pixel that is not blocked is reported as "delivery is not
+  blocked", never `verified` — Meta offers no install-time read-back. A probe that could not run
+  says "could not check", and a config body the parser does not understand is an explicit unknown,
+  never a healthy result.
+- **The explicit block list too.** A host on the pixel's `prohibitedSources` list (matched on the
+  sha256 of the hostname) is reported with its own remedy.
+
 ## 0.10.0 — 2026-09-14
 
 `infinite analytics` now gets the server lane's two environment variables onto the production

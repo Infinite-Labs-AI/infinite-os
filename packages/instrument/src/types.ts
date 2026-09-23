@@ -223,6 +223,17 @@ export interface InfiniteHandoffContext {
 
 export interface MetaPublicArtifact {
   pixelId: string
+  /**
+   * `--meta-advanced-matching on|off`. ABSENT = OFF, and only an explicit `true` installs it.
+   *
+   * Manual Advanced Matching: the page defines `window.infiniteMetaAdvancedMatch`, which the
+   * CUSTOMER's own code calls with a raw email / external id once it knows who the visitor is.
+   * The accessor hashes them (sha256, once) before anything reaches Meta, and never reads the
+   * page — scraping is Meta's AUTOMATIC Advanced Matching, which this installer refuses. Off by
+   * default because sending a visitor's contact details from a customer's own pages is the
+   * customer's decision, exactly like the `autoConfig` opt-out it sits beside.
+   */
+  advancedMatching?: boolean
 }
 
 export interface Ga4PublicArtifact {

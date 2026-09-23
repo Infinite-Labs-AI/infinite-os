@@ -28,7 +28,7 @@ function runNpm11(args: string[], cwd: string): string {
 }
 
 describe("npm 11 package tarball", () => {
-  it("validates the real 124-file receipt and runs the installed bin", () => {
+  it("validates the real 130-file receipt and runs the installed bin", () => {
     const tempRoot = mkdtempSync(join(tmpdir(), "infinite-tag-tarball-"))
 
     try {
@@ -54,7 +54,13 @@ describe("npm 11 package tarball", () => {
         filename: string
       }>
       expect(receipt).toHaveLength(1)
-      expect(receipt[0]?.files).toHaveLength(124)
+      // 124 → 130: the meta-live delivery check adds three PUBLISHED modules (config-probe, copy,
+      // lane), each shipping a .js and a .d.ts. Its test and its captured Meta fixture are NOT
+      // packed — tsconfig.build.json excludes tests — which is why this is +6 and not +8.
+      // 130 → 146: the setup checks add eight PUBLISHED modules (types, contract, markup, copy,
+      // conversion-placement, silent-form, click-id-capture, index), again .js + .d.ts each and
+      // again with their tests excluded from the pack.
+      expect(receipt[0]?.files).toHaveLength(146)
 
       const tarballName = execFileSync(process.execPath, [receiptValidator, receiptPath], {
         encoding: "utf8"

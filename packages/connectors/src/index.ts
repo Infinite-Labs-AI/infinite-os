@@ -1,4 +1,36 @@
+import {
+  META_ADS_HOT_ROLLUP_DERIVATION,
+  MetaAdsRollupError,
+  metaAdsAllStatusAdFiltering,
+  metaAdsAllStatusFiltering,
+  metaAdsHotLaneRollsUpFromAds,
+  rollUpMetaAdsAdInsights,
+} from "./meta-ads-hot-rollup.js";
+import { metaAdsAccountLivenessCursorKey, metaAdsAccountLivenessDue } from "./meta-account-liveness.js";
 import { metaEntityReadMode } from "./meta-entity-checkpoint.js";
+import { planMetaChildStatusRefresh, runMetaChildStatusRefresh } from "./meta-child-status-refresh.js";
+import { metaAdsEntityVersionFingerprint } from "./meta-entity-fingerprint.js";
+import {
+  metaAdsFetchInsightsWindowWithNarrowing,
+  metaAdsRunAsyncInsightsJob,
+  type MetaAdsAsyncInsightsStep,
+} from "./meta-async-insights.js";
+import {
+  META_ADS_AD_FULL_FIELDS,
+  type MetaAdsFullAdReadFallback,
+  type MetaAdsFullAdReadPlan,
+  metaAdsFullAdReadPlan,
+  metaAdsHeavyAdFieldsKey,
+  metaAdsHeavyCursorKey,
+  metaAdsHeavyCursorValue,
+  metaGraphNextPage,
+  readMetaAdsFullAdSnapshot,
+} from "./meta-lean-inventory.js";
+import {
+  MetaGraphBatchTransportError,
+  executeMetaGraphReadBatch,
+  type MetaGraphBatchResult,
+} from "./meta-graph-batch.js";
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
@@ -16,13 +48,16 @@ import { type FirstPhaseProvider, type InfiniteOsDb, assertFirstPhaseProvider } 
 import { writeStripeMrrMovementsAtClose } from "./stripe-mrr-movements.js";
 import {
   META_ADS_DEFAULT_REQUEST_BUDGET,
+  MetaAdsRequestBudgetError,
   MetaAdsRequestTelemetry,
   type MetaAdsResponseSignal,
   type MetaAdsRequestObserver,
   type MetaAdsRequestKind,
   type MetaAdsRequestTelemetrySnapshot,
+  type MetaRequestLane,
+  isMetaRequestLane,
 } from "./meta-telemetry.js";
-export { MetaAdsRequestTelemetry, type MetaAdsResponseSignal, type MetaAdsRequestObserver } from "./meta-telemetry.js";
+export { MetaAdsRequestTelemetry, type MetaAdsResponseSignal, type MetaAdsRequestObserver, type MetaRequestLane } from "./meta-telemetry.js";
 import {
   STRIPE_DELTA_MAX_PAGES,
   STRIPE_DELTA_MAX_REFETCH_PER_RUN,
@@ -91,6 +126,8 @@ export interface SyncRequest {
   // pagination and retries. Omitted callers get a bounded engine default; hosted scheduling may
   // pass a smaller admitted remainder from its workspace/source rate budget.
   metaAdsRequestBudget?: number;
+  /** Exact caller-owned allocation lane. Optional for local and legacy callers. */
+  metaAdsRequestLane?: MetaRequestLane;
   metaAdsOnResponse?: (signal: MetaAdsResponseSignal) => Promise<void>;
   /** Optional bounded caller-owned media sink. Signed URLs exist only in this callback, never truth rows. */
   metaAdsOnMedia?: (media:MetaAdsFreshMedia[]) => Promise<void>;
@@ -118,6 +155,9 @@ export interface SyncRequest {
   // to honor it. UNSET on desktop → today's behavior is identical.
   softDeadlineAtMs?: number;
 }
+
+export const META_HOT_COMMON_ESTIMATE_UNITS = 3;
+export const META_HOT_RUN_LIMIT_UNITS = 12;
 
 function isMetaInventoryOnly(request:SyncRequest):boolean{
   return request.provider==="meta_ads"&&request.metaAdsSyncMode==="inventory_only";
@@ -154,6 +194,9 @@ export interface SyncPlan {
   // so provider-specific methods cannot be called across lanes by accident.
   metaAdsRequestTelemetry?: MetaAdsRequestTelemetry;
   metaAdsAccountMetadata?: MetaAdsAccountMetadata;
+  // Set only when THIS run read the account node over Graph; committed at CLOSE as the inventory
+  // lane's once-per-24h liveness cursor (meta-account-liveness.ts).
+  metaAdsAccountLivenessReadAt?: string;
   // GA4-only. Snapshot-replacement state, carried from EXTRACT into CLOSE (the Stripe checkpoint
   // pattern): EXTRACT records the exact refreshed [start, end] date window, how many rows each
   // report staged, and the response's property metadata; CLOSE prunes fact rows inside that window
@@ -164,6 +207,8 @@ export interface SyncPlan {
   // Meta-only exact-window replacement contract. Present only after the complete direct-Graph
   // extract has succeeded; CLOSE uses this plus staged DB keys to prune and publish daily coverage.
   metaAdsSnapshotReplacement?: MetaAdsSnapshotReplacementState;
+  /** Effective normalized provider window selected the bounded atomic one-day batch path. */
+  metaAdsAtomicOneDaySnapshot?: boolean;
   metaAdsEntitySnapshot?: MetaAdsEntitySnapshotState;
 }
 
@@ -2325,7 +2370,22 @@ const metaAdsConnector = createConnector<MetaAdsCredential, MetaAdsSyncRow>({
     if (depth === "liveness") {
       await assertMetaAdsSourceAccountBinding(_db, request, adAccountId);
     }
-    if (isMetaAdsMcpTransport(credential)) {
+    if (depth === "liveness" && request.metaAdsSyncMode === "insights_only" && !isMetaAdsMcpTransport(credential) && !metaAdsReadsViaCli(credential)) {
+      const stored = await _db.one<{ currency: string | null; timezone_name: string | null }>(
+        `select currency, timezone_name from meta_ads_accounts
+          where workspace_id = $1 and source_id = $2 and ad_account_id = $3`,
+        [request.workspaceId, request.sourceId, adAccountId],
+      );
+      if (!stored?.currency || !stored.timezone_name) {
+        throw new ConnectorError(
+          "provider_api_error",
+          "Meta Ads insights-only sync requires stored account currency and timezone metadata",
+          true,
+        );
+      }
+      accountMetadata = { adAccountId, currency: stored.currency, timezoneName: stored.timezone_name };
+      if (plan) plan.metaAdsAccountMetadata = accountMetadata;
+    } else if (isMetaAdsMcpTransport(credential)) {
       await metaAdsMcpInsights(credential, {
         adAccountId,
         fields: META_ADS_INSIGHTS_PROBE_FIELDS,
@@ -2342,13 +2402,22 @@ const metaAdsConnector = createConnector<MetaAdsCredential, MetaAdsSyncRow>({
       });
     } else if (depth === "liveness") {
       // The one per-sync liveness request also captures the account reporting calendar and currency,
-      // keeping the complete three-grain no-pagination floor at seven Graph calls.
-      accountMetadata = await metaAdsReadAccountMetadata(
-        credential,
-        request.signal,
-        plan?.metaAdsRequestTelemetry,
-      );
-      if (plan) plan.metaAdsAccountMetadata = accountMetadata;
+      // keeping the complete three-grain no-pagination floor at seven Graph calls. An INVENTORY scan
+      // consumes neither, and its own entity reads surface a revoked token in the same run, so it
+      // re-reads the account node at most once per 24h (see meta-account-liveness.ts).
+      const inventorySkipsRead = request.metaAdsSyncMode === "inventory_only"
+        && !metaAdsAccountLivenessDue(await metaAdsAccountLivenessReadAt(_db, request, adAccountId), new Date());
+      if (!inventorySkipsRead) {
+        accountMetadata = await metaAdsReadAccountMetadata(
+          credential,
+          request.signal,
+          plan?.metaAdsRequestTelemetry,
+        );
+        if (plan) {
+          plan.metaAdsAccountMetadata = accountMetadata;
+          plan.metaAdsAccountLivenessReadAt = new Date().toISOString();
+        }
+      }
     } else {
       // Primary direct-Graph probe. Also taken by transport=meta_ads_cli credentials that
       // store their own accessToken (see metaAdsReadsViaCli) so the test reflects CREDENTIAL
@@ -2382,6 +2451,9 @@ const metaAdsConnector = createConnector<MetaAdsCredential, MetaAdsSyncRow>({
     const syncMode=request.metaAdsSyncMode??"full";
     if(syncMode!=="full"&&(isMetaAdsMcpTransport(credential)||metaAdsReadsViaCli(credential)))
       throw new ConnectorError("provider_unsupported",`Meta Ads ${syncMode} sync requires a stored-token direct Graph credential`,false);
+    if (request.metaAdsRequestLane !== undefined && !isMetaRequestLane(request.metaAdsRequestLane)) {
+      throw new ConnectorError("provider_api_error", "Meta Ads request lane is invalid", false);
+    }
     const plan = await defaultPlan(
       db,
       request,
@@ -2392,12 +2464,15 @@ const metaAdsConnector = createConnector<MetaAdsCredential, MetaAdsSyncRow>({
       { ignoreCursor: request.mode === "backfill" || Boolean(request.backfillWindow) }
     );
     plan.metaAdsRequestTelemetry = new MetaAdsRequestTelemetry(
-      request.metaAdsRequestBudget ?? META_ADS_DEFAULT_REQUEST_BUDGET,
+      metaAdsUsesHotOneDayRequestLimit(request, plan)
+        ? Math.min(request.metaAdsRequestBudget ?? META_HOT_RUN_LIMIT_UNITS, META_HOT_RUN_LIMIT_UNITS)
+        : request.metaAdsRequestBudget ?? META_ADS_DEFAULT_REQUEST_BUDGET,
       (snapshot) => persistMetaAdsRequestReservation(db, request, snapshot),
       // Optional graceful soft-time budget (cloud only). Desktop omits it → unchanged behaviour.
       request.softDeadlineAtMs,
       request.metaAdsOnResponse,
       request.metaAdsSyncMode === "inventory_only" ? "inventory_sync" : "history_sync",
+      request.metaAdsRequestLane,
     );
     return plan;
   },
@@ -2482,15 +2557,42 @@ const metaAdsConnector = createConnector<MetaAdsCredential, MetaAdsSyncRow>({
     // updated_since filters at Meta; paging walks only that changed set, never stops at a known ID.
     const checkpointKey = `meta_ads_entities_scan:${adAccountId}`;
     const fullCheckpointKey = `meta_ads_entities_full:${adAccountId}`;
+    const heavyCheckpointKey = metaAdsHeavyCursorKey(adAccountId);
     const checkpoints = await _db.query<{cursor_key:string;cursor_value:string}>(
-      "select cursor_key,cursor_value from sync_cursors where workspace_id=$1 and source_id=$2 and cursor_key in ($3,$4)",
-      [request.workspaceId,request.sourceId,checkpointKey,fullCheckpointKey],
+      "select cursor_key,cursor_value from sync_cursors where workspace_id=$1 and source_id=$2 and cursor_key in ($3,$4,$5)",
+      [request.workspaceId,request.sourceId,checkpointKey,fullCheckpointKey,heavyCheckpointKey],
     );
+    const scanStart = new Date();
     const entityScan = readsEntities ? metaEntityReadMode(
       checkpoints.find(row=>row.cursor_key===checkpointKey)?.cursor_value??null,
       checkpoints.find(row=>row.cursor_key===fullCheckpointKey)?.cursor_value??null,
-      new Date(),
+      scanStart,
     ) : null;
+    // A FULL scan reads the ad edge lean (no creative expansion) when storage + a heavy delta can
+    // supply the expansion; see meta-lean-inventory.ts. Status and membership stay a complete read.
+    const fullAdSnapshot = entityScan?.mode === "full" ? {
+      plan: metaAdsFullAdReadPlan({
+        scanCheckpoint: checkpoints.find(row=>row.cursor_key===checkpointKey)?.cursor_value??null,
+        heavyCheckpoint: checkpoints.find(row=>row.cursor_key===heavyCheckpointKey)?.cursor_value??null,
+        apiVersion: context.apiVersion,
+        now: scanStart,
+      }),
+      loadStored: async () => {
+        const stored = await _db.query<{entity_type:string;metadata_json:Record<string,unknown>}>(
+          "select entity_type,metadata_json from meta_ads_entity_versions where workspace_id=$1 and source_id=$2 and ad_account_id=$3 and valid_to is null and entity_type in ('ad','creative')",
+          [request.workspaceId,request.sourceId,adAccountId],
+        );
+        return {
+          ads: stored.filter(row=>row.entity_type==='ad').map(row=>row.metadata_json as MetaAdsEdgeNode),
+          creatives: stored.filter(row=>row.entity_type==='creative').map(row=>row.metadata_json),
+        };
+      },
+      onRead: (outcome: { heavy: boolean; fallback?: MetaAdsFullAdReadFallback }) => {
+        if (outcome.heavy) entityScan.heavyAdFieldsKey = metaAdsHeavyAdFieldsKey(context.apiVersion);
+        // Ops visibility: how often, and why, the lean full read falls back to the heavy one.
+        telemetry?.noteFullAdRead(outcome.heavy ? "heavy" : "lean", outcome.fallback ?? null);
+      },
+    } : undefined;
     const cached = syncMode === "insights_only" || entityScan?.mode === "incremental"
       ? await _db.query<{entity_type:string;metadata_json:Record<string,unknown>}>(
         "select entity_type,metadata_json from meta_ads_entity_versions where workspace_id=$1 and source_id=$2 and ad_account_id=$3 and valid_to is null and entity_type in ('campaign','adset','ad')",
@@ -2503,8 +2605,22 @@ const metaAdsConnector = createConnector<MetaAdsCredential, MetaAdsSyncRow>({
       metaAdsReadAdsetDims(credential, telemetry, adsetNodes, entityScan?.updatedSince, cached.filter(row=>row.entity_type==='adset').map(row=>row.metadata_json as MetaAdsEdgeNode), readsEntities),
       // Campaigns have no documented updated_since parameter; retain their bounded full read.
       metaAdsReadCampaignStatus(credential, telemetry, campaignNodes, cached.filter(row=>row.entity_type==='campaign').map(row=>row.metadata_json as MetaAdsEdgeNode), readsEntities),
-      metaAdsReadAdAdims(credential, telemetry, adNodes, entityScan?.updatedSince, cached.filter(row=>row.entity_type==='ad').map(row=>row.metadata_json as MetaAdsEdgeNode), request.metaAdsOnMedia, readsEntities),
+      metaAdsReadAdAdims(credential, telemetry, adNodes, entityScan?.updatedSince, cached.filter(row=>row.entity_type==='ad').map(row=>row.metadata_json as MetaAdsEdgeNode), request.metaAdsOnMedia, readsEntities, fullAdSnapshot),
     ]);
+
+    if (readsEntities && entityScan?.mode === "incremental") {
+      // A parent pause/resume changes its children's inherited effective_status without moving
+      // their updated_time, so the delta above cannot see it. Re-read those children's status now.
+      await metaAdsRefreshChildStatuses({
+        credential, telemetry, entityScan, accessToken,
+        campaignNodes, adsetNodes, adNodes, adsetDims, adDims,
+        stored: (entityType) => cached.filter(row=>row.entity_type===entityType).map(row=>row.metadata_json as MetaAdsEdgeNode),
+        loadStoredCreatives: async () => (await _db.query<{metadata_json:Record<string,unknown>}>(
+          "select metadata_json from meta_ads_entity_versions where workspace_id=$1 and source_id=$2 and ad_account_id=$3 and valid_to is null and entity_type='creative'",
+          [request.workspaceId,request.sourceId,adAccountId],
+        )).map(row=>row.metadata_json),
+      });
+    }
 
     const rows: MetaAdsSyncRow[] = [];
     if (readsEntities && entityScan) {
@@ -2521,14 +2637,63 @@ const metaAdsConnector = createConnector<MetaAdsCredential, MetaAdsSyncRow>({
       ? [level as MetaAdsHistoryGrain]
       : ["campaign", "adset", "ad"];
 
+    const usesOneDayBatch = syncMode === "insights_only"
+      && requestedGrains.length === 3
+      && timeOptions.timeRange?.since === timeOptions.timeRange?.until;
+    plan.metaAdsAtomicOneDaySnapshot = usesOneDayBatch;
+    // HOT open-day lane ONLY: one all-status ad-grain read, parents derived by summation (see
+    // meta-ads-hot-rollup.ts). Every other lane keeps Meta's own three grains, so each settled day
+    // is replaced by Meta's campaign/ad set numbers (reach included) — read in every status too, so
+    // a deleted ad's day survives settlement instead of being pruned.
+    const rollsUpFromAds = usesOneDayBatch && metaAdsHotLaneRollsUpFromAds(request.metaAdsRequestLane);
+    if (rollsUpFromAds) {
+      const adRows: MetaAdsInsightsRow[] = [];
+      await metaAdsFetchOneDayInsightsBatch({
+        credential,
+        accessToken,
+        adAccountId,
+        range: timeOptions.timeRange!,
+        timeIncrement,
+        telemetry,
+        signal: request.signal,
+        grains: ["ad"],
+        adRead: {
+          fields: metaAdsHotRollupAdFields(),
+          filtering: metaAdsAllStatusAdFiltering(),
+        },
+        onRow(_grain, row) {
+          adRows.push(row);
+        },
+      });
+      rows.push(...metaAdsHotRollupRows(adAccountId, adRows, context, campaignStatus, adsetDims, adDims));
+    } else if (usesOneDayBatch) {
+      await metaAdsFetchOneDayInsightsBatch({
+        credential,
+        accessToken,
+        adAccountId,
+        range: timeOptions.timeRange!,
+        timeIncrement,
+        telemetry,
+        signal: request.signal,
+        onRow(grain, row) {
+          rows.push(grain === "campaign"
+            ? metaAdsCampaignDailyRow(adAccountId, row, context, campaignStatus)
+            : grain === "adset"
+              ? metaAdsAdsetDailyRow(adAccountId, row, context, adsetDims)
+              : metaAdsAdDailyRow(adAccountId, row, context, adDims, adsetDims));
+        },
+      });
+    }
+
     // Every grain uses bounded calendar windows for backfills. Preserve provider
     // campaign/adset aggregates: reach and frequency cannot be summed from ads.
     for (const grain of ["campaign", "adset"] as const) {
+      if (usesOneDayBatch) continue;
       if (!requestedGrains.includes(grain)) continue;
       const urlFor = (range: MetaAdsDateWindow) => metaAdsInsightsUrl(credential, {
         adAccountId, fields: metaAdsInsightsFieldsForLevel(grain), level: grain,
         limit: "500", timeIncrement, attributionWindows: META_ADS_ATTRIBUTION_WINDOWS,
-        timeRange: range,
+        timeRange: range, filtering: metaAdsAllStatusFiltering(grain),
       });
       const trailing = timeOptions.timeRange ?? {
         since: cursorStartIso(plan).slice(0, 10), until: plan.cursorEnd.slice(0, 10),
@@ -2550,7 +2715,7 @@ const metaAdsConnector = createConnector<MetaAdsCredential, MetaAdsSyncRow>({
     // sentinel: a bounded multi-month backfill is exactly the wide level=ad request that trips
     // 1487534, so it MUST chunk too. Only a genuinely-small trailing incremental refresh (no
     // backfillWindow, ≤ one month) stays a SINGLE request.
-    if (requestedGrains.includes("ad")) {
+    if (!usesOneDayBatch && requestedGrains.includes("ad")) {
       const adRowSink = (row: MetaAdsInsightsRow) =>
         rows.push(metaAdsAdDailyRow(adAccountId, row, context, adDims, adsetDims));
       const adUrlFor = (range: { since: string; until: string }) =>
@@ -2561,7 +2726,9 @@ const metaAdsConnector = createConnector<MetaAdsCredential, MetaAdsSyncRow>({
           limit: "500",
           timeIncrement,
           timeRange: range,
-          attributionWindows: META_ADS_ATTRIBUTION_WINDOWS
+          attributionWindows: META_ADS_ATTRIBUTION_WINDOWS,
+          // Deleted/archived ads' stats are omitted from level=ad results unless filtered for.
+          filtering: metaAdsAllStatusFiltering("ad"),
         });
       // The chunked windows are resolved from the plan (all_time → no timeRange; bounded backfill
       // → a finite timeRange). For the single-request path we need a concrete trailing window.
@@ -3108,8 +3275,23 @@ async function syncExtractedBatch(
   closeSuccess?: (tx: InfiniteOsDb, request: SyncRequest, plan: SyncPlan) => Promise<void>
 ): Promise<SyncResult> {
   const batchId = `batch_${randomUUID()}`;
+  const metaReplacement = plan.metaAdsSnapshotReplacement;
+  const atomicMetaOneDay = request.provider === "meta_ads"
+    && request.metaAdsSyncMode === "insights_only"
+    && plan.metaAdsAtomicOneDaySnapshot === true
+    && metaReplacement !== undefined
+    && metaReplacement.windowStartDate === metaReplacement.windowEndDate
+    && metaReplacement.grains.length === 3;
+  const atomicMetaRecordLimit = META_HOT_RUN_LIMIT_UNITS * 500;
 
   try {
+    if (atomicMetaOneDay && records.length > atomicMetaRecordLimit) {
+      throw new ConnectorError(
+        "provider_api_error",
+        `Meta Ads one-day snapshot exceeded the ${atomicMetaRecordLimit}-record atomic publication limit`,
+        true,
+      );
+    }
     // 1. OPEN — verify the pre-provider-work claim and create batch bookkeeping in its
     //    own brief transaction, so the batch row is committed before the (potentially
     //    large) record load and the mutex is NOT held across the whole batch.
@@ -3160,9 +3342,7 @@ async function syncExtractedBatch(
     //    are intentionally dropped (not silently skipped-as-success). A CRASH mid-load
     //    (no failure tx at all) leaves the source 'syncing'; the boot-time sweep
     //    (analytical-engine resetStuckSyncingSourcesOnBoot) repairs that case.
-    for (let offset = 0; offset < records.length; offset += SYNC_BATCH_CHUNK_SIZE) {
-      const chunk = records.slice(offset, offset + SYNC_BATCH_CHUNK_SIZE);
-      await db.withTransaction(async (tx) => {
+    const loadChunk = async (tx: InfiniteOsDb, chunk: ExtractedRecord<unknown>[]): Promise<void> => {
         const rawIds = await upsertRawRecordsChunk(tx, request, batchId, chunk);
         await insertSyncBatchRecordsChunk(tx, batchId, rawIds);
         await writeTruth(tx, chunk, rawIds);
@@ -3172,10 +3352,8 @@ async function syncExtractedBatch(
           "update sync_batch_records set record_status = 'provider_truth_written' where sync_batch_id = $1 and record_status = 'raw_written'",
           [batchId]
         );
-      });
-    }
-    // 3. CLOSE — finalize bookkeeping, advance the cursor, mark the source connected.
-    await db.withTransaction(async (tx) => {
+    };
+    const closeBatch = async (tx: InfiniteOsDb): Promise<void> => {
       await assertSyncClaimStillOwnsRun(tx, request, claim);
       // Provider-specific durable checkpoints are intentionally part of CLOSE.
       // If this transaction fails, neither the generic cursor nor the Stripe
@@ -3209,7 +3387,27 @@ async function syncExtractedBatch(
       } else {
         await restoreInventoryClaimSourceState(tx, request, claim);
       }
-    });
+    };
+
+    if (atomicMetaOneDay) {
+      // Bounded hot/one-day publication: every normalized write and CLOSE receipt commits
+      // together. Raw rows share the transaction so a mid-load/CLOSE failure retains the
+      // complete prior snapshot. Wide history and other providers keep chunked commits below.
+      await db.withTransaction(async (tx) => {
+        await assertSyncClaimStillOwnsRun(tx, request, claim);
+        for (let offset = 0; offset < records.length; offset += SYNC_BATCH_CHUNK_SIZE) {
+          await loadChunk(tx, records.slice(offset, offset + SYNC_BATCH_CHUNK_SIZE));
+        }
+        await closeBatch(tx);
+      });
+    } else {
+      for (let offset = 0; offset < records.length; offset += SYNC_BATCH_CHUNK_SIZE) {
+        const chunk = records.slice(offset, offset + SYNC_BATCH_CHUNK_SIZE);
+        await db.withTransaction(async (tx) => loadChunk(tx, chunk));
+      }
+      // 3. CLOSE — finalize bookkeeping, advance the cursor, mark the source connected.
+      await db.withTransaction(closeBatch);
+    }
   } catch (error) {
     // OPEN, LOAD, and CLOSE all happen after the durable claim committed. Their
     // cleanup must therefore be shared: mark only the exact still-running owner,
@@ -3808,6 +4006,20 @@ async function metaAdsCloseSuccess(
 ): Promise<void> {
   const replacement = plan.metaAdsSnapshotReplacement;
   const entitySnapshot = plan.metaAdsEntitySnapshot;
+  // Committed only on a successful CLOSE, so a failed run never suppresses the next account read.
+  if (plan.metaAdsAccountLivenessReadAt && plan.metaAdsAccountMetadata) {
+    await tx.query(
+      `insert into sync_cursors(id,workspace_id,source_id,cursor_key,cursor_value) values($1,$2,$3,$4,$5)
+       on conflict(source_id,cursor_key) do update set cursor_value=greatest(sync_cursors.cursor_value,excluded.cursor_value),updated_at=now()`,
+      [
+        `cursor_${randomUUID()}`,
+        request.workspaceId,
+        request.sourceId,
+        metaAdsAccountLivenessCursorKey(plan.metaAdsAccountMetadata.adAccountId),
+        plan.metaAdsAccountLivenessReadAt,
+      ],
+    );
+  }
   if (!replacement && !entitySnapshot) return;
 
   if (replacement) {
@@ -3923,12 +4135,25 @@ async function metaAdsCloseSuccess(
 
   if (entitySnapshot) {
     const scan = entitySnapshot.entityScan;
-    const keys = [`meta_ads_entities_scan:${entitySnapshot.adAccountId}`,
-      ...(scan.mode === "full" ? [`meta_ads_entities_full:${entitySnapshot.adAccountId}`] : [])];
-    for (const key of keys) await tx.query(
+    const keys: Array<[string, string]> = [[`meta_ads_entities_scan:${entitySnapshot.adAccountId}`, scan.startedAt],
+      ...(scan.mode === "full" ? [[`meta_ads_entities_full:${entitySnapshot.adAccountId}`, scan.startedAt] as [string, string]] : []),
+      // A heavy (creative-expansion) full ad read restarts the lean read's reconcile clock.
+      ...(scan.mode === "full" && scan.heavyAdFieldsKey
+        ? [[metaAdsHeavyCursorKey(entitySnapshot.adAccountId), metaAdsHeavyCursorValue(scan.startedAt, scan.heavyAdFieldsKey)] as [string, string]]
+        : [])];
+    for (const [key, value] of keys) await tx.query(
       `insert into sync_cursors(id,workspace_id,source_id,cursor_key,cursor_value) values($1,$2,$3,$4,$5)
        on conflict(source_id,cursor_key) do update set cursor_value=greatest(sync_cursors.cursor_value,excluded.cursor_value),updated_at=now()`,
-      [`cursor_${randomUUID()}`,request.workspaceId,request.sourceId,key,scan.startedAt],
+      [`cursor_${randomUUID()}`,request.workspaceId,request.sourceId,key,value],
+    );
+    // An incremental scan saw a parent status change it could not carry to the children (budget,
+    // or a child it could not explain). Age the full-read checkpoint so the NEXT scan is the daily
+    // full read, which re-reads every child's status. A full read that committed after this scan
+    // started already did that work, so it is left alone.
+    if (scan.mode === "incremental" && scan.fullReadRequested) await tx.query(
+      `update sync_cursors set cursor_value=$4, updated_at=now()
+        where workspace_id=$1 and source_id=$2 and cursor_key=$3 and cursor_value<=$5`,
+      [request.workspaceId,request.sourceId,`meta_ads_entities_full:${entitySnapshot.adAccountId}`,META_ADS_FULL_READ_REQUESTED_CURSOR,scan.startedAt],
     );
   }
 
@@ -5546,7 +5771,7 @@ async function writeMetaAdsEntityVersions(
 ): Promise<void> {
   for (let index = 0; index < rows.length; index += 1) {
     const row = rows[index];
-    const payloadHash = createHash("sha256").update(canonicalMetaAdsJson(row.metadata)).digest("hex");
+    const payloadHash = metaAdsEntityVersionFingerprint(row.metadata);
     await stageMetaAdsSnapshotKey(tx, request, {
       adAccountId: row.adAccountId,
       grain: row.entityType,
@@ -5569,6 +5794,28 @@ async function writeMetaAdsEntityVersions(
         [current.id, rawIds[index], row.observedAt],
       );
       continue;
+    }
+    if (current) {
+      // A stored hash can be stale without the entity having changed: rows written before rendered
+      // media URLs were excluded carry sha256 over the FULL metadata (rotating thumbnail_url
+      // included). Re-fingerprint the stored snapshot under the current definition; if it matches,
+      // this is the same version — re-key its hash in place (so later syncs take the fast path
+      // above) instead of minting one extra version per entity, which would re-queue every
+      // creative's media downstream. Paid only on a hash mismatch; stored metadata is untouched.
+      const stored = await tx.one<{ metadata_json: Record<string, unknown> }>(
+        "select metadata_json from meta_ads_entity_versions where id = $1",
+        [current.id],
+      );
+      if (stored && metaAdsEntityVersionFingerprint(stored.metadata_json) === payloadHash) {
+        await tx.query(
+          `update meta_ads_entity_versions
+              set payload_hash = $2, raw_record_id = $3,
+                  last_observed_at = greatest(last_observed_at, $4::timestamptz)
+            where id = $1`,
+          [current.id, payloadHash, rawIds[index], row.observedAt],
+        );
+        continue;
+      }
     }
     if (current) {
       await tx.query(
@@ -5624,18 +5871,6 @@ async function writeMetaAdsEntityVersions(
       rawIds[index],
     );
   }
-}
-
-function canonicalMetaAdsJson(value: unknown): string {
-  if (value === null || value === undefined) return "null";
-  if (Array.isArray(value)) return `[${value.map((entry) => canonicalMetaAdsJson(entry)).join(",")}]`;
-  if (typeof value === "object") {
-    const entries = Object.entries(value as Record<string, unknown>)
-      .filter(([, entry]) => entry !== undefined)
-      .sort(([left], [right]) => left.localeCompare(right));
-    return `{${entries.map(([key, entry]) => `${JSON.stringify(key)}:${canonicalMetaAdsJson(entry)}`).join(",")}}`;
-  }
-  return JSON.stringify(value);
 }
 
 async function writeMetaAdsCampaignDimension(
@@ -8738,6 +8973,19 @@ function metaAdsTimeOptions(request: SyncRequest, plan: SyncPlan): {
   };
 }
 
+function metaAdsUsesHotOneDayRequestLimit(request: SyncRequest, plan: SyncPlan): boolean {
+  if (request.metaAdsSyncMode !== "insights_only") return false;
+  const hasExplicitWindow = request.windowSince !== undefined || request.windowUntil !== undefined;
+  if (!hasExplicitWindow && request.mode !== "backfill" && !plan.backfillWindow) {
+    // Liveness hydrates the account timezone after planning. A recurring one-day request resolves
+    // to exactly account-local yesterday once that metadata is present; wider implicit windows
+    // must retain the caller/default allowance for the existing serial path.
+    return plan.refreshWindowDays === 1;
+  }
+  const range = metaAdsTimeOptions(request, plan).timeRange;
+  return range !== undefined && range.since === range.until;
+}
+
 function metaAdsInsightsUrl(
   credential: MetaAdsCredential,
   options: {
@@ -8750,6 +8998,9 @@ function metaAdsInsightsUrl(
     timeRange?: { since: string; until: string };
     // §4 — request per-window subvalues so the headline 7d_click+1d_view is computable.
     attributionWindows?: readonly string[];
+    // Insights `filtering` JSON. Every direct-Graph history read sets the all-status filter for its
+    // own level (metaAdsAllStatusFiltering); only the connect-time probe leaves it unset.
+    filtering?: string;
   }
 ): string {
   const url = new URL(`https://graph.facebook.com/${metaAdsApiVersion(credential)}/${options.adAccountId}/insights`);
@@ -8769,6 +9020,9 @@ function metaAdsInsightsUrl(
     // 7d_view / 28d_view are hard-excluded (removed Jan 2026); use_unified_attribution_setting
     // and action_report_time are no-ops post-2026-01-12 and deliberately NOT sent.
     url.searchParams.set("action_attribution_windows", JSON.stringify([...options.attributionWindows]));
+  }
+  if (options.filtering) {
+    url.searchParams.set("filtering", options.filtering);
   }
   return url.toString();
 }
@@ -8835,22 +9089,6 @@ function metaAdsMonthWindows(sinceDay: string, untilDay: string): MetaAdsDateWin
     windows.push({ since: metaAdsIsoDay(cursor), until: metaAdsIsoDay(windowUntil) });
     // Advance to the first day of the next month.
     cursor = new Date(Date.UTC(windowUntil.getUTCFullYear(), windowUntil.getUTCMonth() + 1, 1));
-  }
-  return windows;
-}
-
-// Split one window into WEEK-sized sub-windows (the narrower retry when a month 1487534s).
-function metaAdsWeekWindows(window: MetaAdsDateWindow): MetaAdsDateWindow[] {
-  const windows: MetaAdsDateWindow[] = [];
-  let cursor = new Date(`${window.since}T00:00:00.000Z`);
-  const until = new Date(`${window.until}T00:00:00.000Z`);
-  while (cursor <= until) {
-    const weekEnd = new Date(cursor);
-    weekEnd.setUTCDate(weekEnd.getUTCDate() + 6);
-    const windowUntil = weekEnd < until ? weekEnd : until;
-    windows.push({ since: metaAdsIsoDay(cursor), until: metaAdsIsoDay(windowUntil) });
-    cursor = new Date(windowUntil);
-    cursor.setUTCDate(cursor.getUTCDate() + 1);
   }
   return windows;
 }
@@ -9006,7 +9244,11 @@ function isMetaAdsDataVolumeError(error: unknown): boolean {
   if (!(error instanceof ConnectorError)) {
     return false;
   }
-  return error.message.includes(String(META_ADS_DATA_VOLUME_ERROR_SUBCODE));
+  // Meta also answers an over-large insights query with code 1 carrying the same "Please reduce the
+  // amount of data you're asking for" message (no 1487534 subcode). Match the message, not bare
+  // code 1 — code 1 alone is Meta's generic unknown error and must not trigger narrowing.
+  return error.message.includes(String(META_ADS_DATA_VOLUME_ERROR_SUBCODE))
+    || /reduce the amount of data/i.test(error.message);
 }
 
 // §4f — structured throttle classifier for the safe fetch, mirroring 1bu-1's
@@ -9209,6 +9451,18 @@ async function metaAdsReadAccountMetadata(
   };
 }
 
+async function metaAdsAccountLivenessReadAt(
+  db: InfiniteOsDb,
+  request: SyncRequest,
+  adAccountId: string,
+): Promise<string | null> {
+  const row = await db.one<{ cursor_value: string }>(
+    "select cursor_value from sync_cursors where workspace_id = $1 and source_id = $2 and cursor_key = $3",
+    [request.workspaceId, request.sourceId, metaAdsAccountLivenessCursorKey(adAccountId)],
+  );
+  return row?.cursor_value ?? null;
+}
+
 async function assertMetaAdsSourceAccountBinding(
   db: InfiniteOsDb,
   request: SyncRequest,
@@ -9269,12 +9523,236 @@ async function metaAdsFetchInsightsPages(
   );
 }
 
-// Phase-2 slice-1b §4d — run the level=ad BACKFILL over MONTH-sized windows. For each month
-// window we issue one metaAdsFetchInsightsPages call; if Meta answers a window with subcode
-// 1487534 ("reduce the amount of data") we DO NOT fail the backfill — we retry that ONE
-// window split into WEEK sub-windows. Any error that is NOT a data-volume error (auth, a
-// genuine 5xx after retries, the page-cap throw) propagates unchanged. `urlFor` builds the
-// /insights URL for a given time_range so the loop owns only the windowing, not the field set.
+function mergeMetaAdsResponseSignals(signals: readonly MetaAdsResponseSignal[]): MetaAdsResponseSignal {
+  const max = (field: "maxPercent" | "estimatedRegainSeconds" | "resetSeconds"): number | null => {
+    const values = signals.map(signal => signal[field]).filter((value): value is number => typeof value === "number");
+    return values.length > 0 ? Math.max(...values) : null;
+  };
+  let accessTier: string | null = null;
+  for (const signal of signals) if (signal.accessTier !== null) accessTier = signal.accessTier;
+  return {
+    maxPercent: max("maxPercent"),
+    estimatedRegainSeconds: max("estimatedRegainSeconds"),
+    resetSeconds: max("resetSeconds"),
+    accessTier,
+    throttled: signals.some(signal => signal.throttled === true),
+  };
+}
+
+function metaAdsBatchResultSignal(result: Pick<MetaGraphBatchResult, "status" | "headers" | "body">): MetaAdsResponseSignal {
+  const signal = metaAdsResponseSignal(new Response(null, {
+    status: result.status >= 200 && result.status <= 599 ? result.status : 500,
+    headers: result.headers,
+  }));
+  const error = result.body && typeof result.body === "object"
+    ? (result.body as { error?: Record<string, unknown> }).error
+    : undefined;
+  const code = typeof error?.code === "number" ? error.code : null;
+  const subcode = typeof error?.error_subcode === "number" ? error.error_subcode : null;
+  signal.throttled = isMetaAdsRateLimitResponse({ status: result.status, code, subcode });
+  const regainMinutes = metaAdsPositiveNumber(error?.estimated_time_to_regain_access)
+    ?? metaAdsPositiveNumber(error?.error_data && typeof error.error_data === "object"
+      ? (error.error_data as Record<string, unknown>).estimated_time_to_regain_access
+      : null);
+  if (regainMinutes !== null) signal.estimatedRegainSeconds = Math.max(signal.estimatedRegainSeconds ?? 0, regainMinutes * 60);
+  return signal;
+}
+
+function metaAdsBatchRelativeUrl(absoluteUrl: string, apiVersion: string, adAccountId: string): string {
+  const url = new URL(absoluteUrl);
+  const prefix = `/${apiVersion}/${adAccountId}/insights`;
+  if (url.protocol !== "https:" || url.hostname !== "graph.facebook.com" || url.pathname !== prefix || url.searchParams.has("access_token")) {
+    throw new ConnectorError("provider_api_error", "Meta Ads batch produced an unsafe insights URL", false);
+  }
+  return `${adAccountId}/insights${url.search}`;
+}
+
+function metaAdsBatchContinuation(relativeUrl: string, body: Record<string, unknown>): string | null {
+  const paging = body.paging;
+  if (!paging || typeof paging !== "object") return null;
+  const next = (paging as Record<string, unknown>).next;
+  if (next === undefined || next === null || next === "") return null;
+  const cursors = (paging as Record<string, unknown>).cursors;
+  const after = cursors && typeof cursors === "object" ? (cursors as Record<string, unknown>).after : null;
+  if (typeof after !== "string" || after.length === 0 || typeof next !== "string") {
+    throw new ConnectorError("provider_api_error", "Meta Ads batch returned an unknown continuation cursor", true);
+  }
+  const nextUrl = new URL(next);
+  if (nextUrl.protocol !== "https:" || nextUrl.hostname !== "graph.facebook.com" || nextUrl.searchParams.get("after") !== after) {
+    throw new ConnectorError("provider_api_error", "Meta Ads batch returned an unsafe continuation cursor", true);
+  }
+  const relative = new URL(relativeUrl, "https://graph.facebook.com/");
+  relative.searchParams.set("after", after);
+  return `${relative.pathname.replace(/^\//, "")}${relative.search}`;
+}
+
+// Hot open-day ad read: the standard ad field list plus adset_name, so derived ad set rows carry
+// the name Meta reported today (the ad set dimension map remains the fallback).
+function metaAdsHotRollupAdFields(): string {
+  return `adset_name,${metaAdsInsightsFieldsForLevel("ad")}`;
+}
+
+// Build the hot lane's rows: Meta's ad rows as-is, plus campaign and ad set rows DERIVED from them
+// through the same builders (status maps, optimization_goal precedence and the canonical conversion
+// mapping all apply unchanged). Derived rows carry reach NULL and an `actions_raw.derivation` marker.
+function metaAdsHotRollupRows(
+  adAccountId: string,
+  adRows: readonly MetaAdsInsightsRow[],
+  context: MetaAdsInsightsContext,
+  campaignStatus: Map<string, MetaAdsEntityStatus>,
+  adsetDims: Map<string, MetaAdsAdsetDim>,
+  adDims: Map<string, MetaAdsAdDim>,
+): MetaAdsSyncRow[] {
+  let rollup: ReturnType<typeof rollUpMetaAdsAdInsights>;
+  try {
+    rollup = rollUpMetaAdsAdInsights(adRows);
+  } catch (error) {
+    if (error instanceof MetaAdsRollupError) throw new ConnectorError("provider_api_error", error.message, true);
+    throw error;
+  }
+  const derived = (adRowCount: number, actionsRaw: unknown) => ({
+    ...(actionsRaw as Record<string, unknown>),
+    derivation: { ...META_ADS_HOT_ROLLUP_DERIVATION, ad_rows: adRowCount },
+  });
+  return [
+    ...rollup.campaigns.map(({ row, adRowCount }) => {
+      const built = metaAdsCampaignDailyRow(adAccountId, row as MetaAdsInsightsRow, context, campaignStatus);
+      return { ...built, actionsRaw: derived(adRowCount, built.actionsRaw) };
+    }),
+    ...rollup.adsets.map(({ row, adRowCount }) => {
+      const built = metaAdsAdsetDailyRow(adAccountId, row as MetaAdsInsightsRow, context, adsetDims);
+      return { ...built, actionsRaw: derived(adRowCount, built.actionsRaw) };
+    }),
+    ...adRows.map(row => metaAdsAdDailyRow(adAccountId, row, context, adDims, adsetDims)),
+  ];
+}
+
+async function metaAdsFetchOneDayInsightsBatch(input: {
+  credential: MetaAdsCredential;
+  accessToken: string;
+  adAccountId: string;
+  range: MetaAdsDateWindow;
+  timeIncrement: string;
+  telemetry?: MetaAdsRequestObserver;
+  signal?: AbortSignal;
+  /** Grains read in this batch. Defaults to all three; the hot open-day lane reads only "ad". */
+  grains?: readonly MetaAdsHistoryGrain[];
+  /** Hot-lane ad read shape: extra parent-name fields and its (all-status) ad filter. */
+  adRead?: { fields: string; filtering: string };
+  onRow: (grain: MetaAdsHistoryGrain, row: MetaAdsInsightsRow) => void;
+}): Promise<void> {
+  const apiVersion = metaAdsApiVersion(input.credential);
+  let pending = (input.grains ?? (["campaign", "adset", "ad"] as const)).map(grain => ({
+    grain,
+    relativeUrl: metaAdsBatchRelativeUrl(metaAdsInsightsUrl(input.credential, {
+      adAccountId: input.adAccountId,
+      fields: grain === "ad" && input.adRead ? input.adRead.fields : metaAdsInsightsFieldsForLevel(grain),
+      level: grain,
+      limit: "500",
+      timeIncrement: input.timeIncrement,
+      attributionWindows: META_ADS_ATTRIBUTION_WINDOWS,
+      timeRange: input.range,
+      // Every grain reads its objects in EVERY status (Meta omits archived/deleted objects' stats
+      // from level=<grain> results by default); the hot lane's adRead carries the same ad filter.
+      filtering: grain === "ad" && input.adRead ? input.adRead.filtering : metaAdsAllStatusFiltering(grain),
+    }), apiVersion, input.adAccountId),
+  }));
+
+  for (let page = 0; pending.length > 0 && page < META_HOT_RUN_LIMIT_UNITS; page += 1) {
+    await input.telemetry?.beforeRequests(
+      pending.map(item => `${item.grain}_insights` as MetaAdsRequestKind),
+      false,
+    );
+    const signals: MetaAdsResponseSignal[] = [];
+    let envelope;
+    try {
+      envelope = await executeMetaGraphReadBatch({
+        apiVersion,
+        accessToken: input.accessToken,
+        reads: pending.map(item => ({ key: item.grain, relativeUrl: item.relativeUrl })),
+        signal: input.signal,
+        onOuterResponse: ({ status, headers }) => {
+          signals.push(metaAdsBatchResultSignal({ status, headers, body: null }));
+        },
+      });
+    } catch (error) {
+      if (error instanceof MetaGraphBatchTransportError) {
+        const outer = signals[0] ?? { maxPercent: null, estimatedRegainSeconds: null, resetSeconds: null, accessTier: null };
+        outer.throttled = isMetaAdsRateLimitResponse({
+          status: error.status ?? undefined,
+          code: error.providerCode,
+          subcode: error.providerSubcode,
+        });
+        for (const observation of error.itemObservations) {
+          const signal = metaAdsBatchResultSignal({
+            status: observation.status ?? 500,
+            headers: observation.headers,
+            body: observation.providerCode === null && observation.providerSubcode === null
+              ? null
+              : { error: { code: observation.providerCode, error_subcode: observation.providerSubcode } },
+          });
+          signals.push(signal);
+        }
+        const aggregate = mergeMetaAdsResponseSignals(signals.length > 0 ? signals : [outer]);
+        await input.telemetry?.observeResponse(aggregate);
+        input.telemetry?.recordRejectedResponse(aggregate.maxPercent);
+        if (aggregate.throttled) throw new ConnectorError("provider_rate_limited", "Meta Ads provider rate limited; retry after the recorded cooldown", true);
+        if (error.status === 401 || error.status === 403) throw new ConnectorError("provider_auth_failed", "Meta Ads batch authentication failed", false);
+        throw new ConnectorError("provider_api_error", "Meta Ads batch transport failed", true);
+      }
+      throw error;
+    }
+
+    const next: typeof pending = [];
+    let failure: ConnectorError | null = null;
+    for (let index = 0; index < pending.length; index += 1) {
+      const item = pending[index]!;
+      const result = envelope.results[index]!;
+      const signal = metaAdsBatchResultSignal(result);
+      signals.push(signal);
+      const body = result.body && typeof result.body === "object" ? result.body as Record<string, unknown> : null;
+      if (result.status < 200 || result.status >= 300 || !body || !Array.isArray(body.data)) {
+        input.telemetry?.recordRejectedResponse(signal.maxPercent);
+        if (signal.throttled) {
+          failure = new ConnectorError("provider_rate_limited", "Meta Ads provider rate limited; retry after the recorded cooldown", true);
+        } else {
+          failure ??= new ConnectorError("provider_api_error", "Meta Ads batch returned an incomplete required grain", true);
+        }
+        continue;
+      }
+      input.telemetry?.recordPage(signal.maxPercent);
+      for (const row of body.data) {
+        if (!row || typeof row !== "object") {
+          failure ??= new ConnectorError("provider_api_error", "Meta Ads batch returned a malformed insight row", true);
+          continue;
+        }
+        input.onRow(item.grain, row as MetaAdsInsightsRow);
+      }
+      try {
+        const continuation = metaAdsBatchContinuation(item.relativeUrl, body);
+        if (continuation) next.push({ grain: item.grain, relativeUrl: continuation });
+      } catch (error) {
+        failure ??= error instanceof ConnectorError
+          ? error
+          : new ConnectorError("provider_api_error", "Meta Ads batch continuation failed", true);
+      }
+    }
+    await input.telemetry?.observeResponse(mergeMetaAdsResponseSignals(signals));
+    if (failure) throw failure;
+    pending = next;
+  }
+  if (pending.length > 0) {
+    throw new ConnectorError("provider_api_error", "Meta Ads batch pagination exceeded the admitted run limit", true);
+  }
+}
+
+// Phase-2 slice-1b §4d — fetch ONE insights window (any grain) with the data-volume ladder. The
+// window is issued synchronously; on Meta 100/1487534 ("reduce the amount of data") it narrows
+// month → 7-day weeks → single days, and a single day that STILL trips the error runs as a Meta
+// async report job (the only remaining remedy — see meta-async-insights.ts for why async is the
+// last rung and never chosen by window size). Any error that is NOT a data-volume error (auth,
+// rate-limit-after-retries, budget, page cap) propagates unchanged. `urlFor` builds the /insights
+// URL for a given time_range so the ladder owns only the windowing, not the field set.
 async function metaAdsFetchAdInsightsChunked(
   accessToken: string,
   window: MetaAdsDateWindow,
@@ -9283,22 +9761,27 @@ async function metaAdsFetchAdInsightsChunked(
   telemetry?: MetaAdsRequestObserver,
   requestKind: "campaign_insights" | "adset_insights" | "ad_insights" = "ad_insights",
 ): Promise<void> {
-  try {
-    // Commit a window only after all pages succeed; narrower retry must not duplicate earlier pages.
-    const pending: MetaAdsInsightsRow[] = [];
-    await metaAdsFetchInsightsPages(accessToken, urlFor(window), row => pending.push(row), telemetry, requestKind);
-    pending.forEach(onRow);
-  } catch (error) {
-    // §4d — ONLY a data-volume (1487534) error triggers the narrower retry; everything else
-    // (auth/rate-limit-after-retries/page-cap) is a real failure and re-throws.
-    if (!isMetaAdsDataVolumeError(error)) {
-      throw error;
-    }
-    // The month window is still too wide — split it into weeks and retry each sub-window.
-    for (const week of metaAdsWeekWindows(window)) {
-      await metaAdsFetchInsightsPages(accessToken, urlFor(week), onRow, telemetry, requestKind);
-    }
-  }
+  const asyncKinds: Record<MetaAdsAsyncInsightsStep, MetaAdsRequestKind> = {
+    submit: "insights_async_submit",
+    poll: "insights_async_poll",
+    results: requestKind,
+  };
+  await metaAdsFetchInsightsWindowWithNarrowing<MetaAdsInsightsRow>({
+    window,
+    urlFor,
+    onRow,
+    isDataVolumeError: isMetaAdsDataVolumeError,
+    fetchPages: (url, sink) => metaAdsFetchInsightsPages(accessToken, url, sink, telemetry, requestKind),
+    finalRung: (_range, url) => metaAdsRunAsyncInsightsJob<MetaAdsInsightsRow>(url, {
+      fetch: (target, init, step) => metaAdsFetchWithThrottleBackoff(target, {
+        ...init,
+        headers: { ...(init.headers as Record<string, string> | undefined), ...bearerHeaders(accessToken) },
+      }, telemetry, asyncKinds[step]),
+      sleep: metaAdsSleep,
+      now: () => Date.now(),
+      fail: (message) => new ConnectorError("provider_api_error", message, true),
+    }),
+  });
 }
 
 // §4 — derive the typed child conversion rows for one campaign-day from the raw
@@ -9835,13 +10318,15 @@ async function metaAdsReadEdge(
   telemetry?: MetaAdsRequestObserver,
   updatedSince?: number,
   onPage?: (nodes:MetaAdsEdgeNode[])=>Promise<void>,
+  // Read a campaign's or ad set's own child edge instead of the account's (meta-child-status-refresh.ts).
+  parentId?: string,
 ): Promise<MetaAdsEdgeNode[]> {
   const accessToken = requireCredential(credential, "accessToken");
   const adAccountId = metaAdsAccountId(credential);
   const nodes: MetaAdsEdgeNode[] = [];
   let after: string | undefined;
   for (let page = 0; page < META_ADS_EDGE_PAGE_LIMIT; page += 1) {
-    const url = new URL(`https://graph.facebook.com/${metaAdsApiVersion(credential)}/${adAccountId}/${edge}`);
+    const url = new URL(`https://graph.facebook.com/${metaAdsApiVersion(credential)}/${parentId ?? adAccountId}/${edge}`);
     url.searchParams.set("fields", fields);
     url.searchParams.set("limit", fields.includes("{") ? "100" : "500");
     if (updatedSince !== undefined) url.searchParams.set("updated_since", String(updatedSince));
@@ -9861,11 +10346,16 @@ async function metaAdsReadEdge(
     const body = (await response.json()) as MetaAdsEdgeResponse;
     if(onPage)await onPage(body.data ?? []);
     nodes.push(...(body.data ?? []));
-    const nextAfter = metaAdsPagingAfter(body as MetaAdsInsightsResponse);
-    if (!nextAfter) {
+    // Only `paging.next` means another page: Meta sends cursors.after on the LAST page too, and
+    // following it cost one extra, empty request per edge read (see meta-lean-inventory.ts).
+    const nextPage = metaGraphNextPage(body.paging);
+    if (nextPage.kind === "malformed") {
+      throw new ConnectorError("provider_api_error", `Meta Ads /${edge} edge returned a next page without a cursor (refusing to truncate status)`, true);
+    }
+    if (nextPage.kind === "last") {
       return nodes;
     }
-    after = nextAfter;
+    after = nextPage.after;
   }
   // §4d — the cursor never terminated within the cap. Fail LOUD (retryable) rather than
   // returning a silently-truncated status set that would label live entities as unknown.
@@ -9928,14 +10418,14 @@ async function metaAdsReadAdAdims(
   cachedNodes: MetaAdsEdgeNode[] = [],
   onMedia?: SyncRequest["metaAdsOnMedia"],
   readProvider = true,
+  // FULL scans only: the complete ad snapshot, read lean when possible (meta-lean-inventory.ts).
+  fullSnapshot?: {
+    plan: MetaAdsFullAdReadPlan;
+    loadStored: () => Promise<{ ads: MetaAdsEdgeNode[]; creatives: Array<Record<string, unknown>> }>;
+    onRead: (outcome: { heavy: boolean; fallback?: MetaAdsFullAdReadFallback }) => void;
+  },
 ): Promise<Map<string, MetaAdsAdDim>> {
-  const nodes = readProvider ? await metaAdsReadEdge(
-    credential,
-    "ads",
-    "id,name,creative{id,name,title,body,thumbnail_url,image_url,image_hash,video_id,call_to_action_type,object_story_spec,asset_feed_spec},adset_id,campaign_id,effective_status,status,bid_amount,tracking_specs,conversion_specs",
-    telemetry,
-    updatedSince,
-    onMedia ? async page => {
+  const onMediaPage = onMedia ? async (page: MetaAdsEdgeNode[]) => {
       const media:MetaAdsFreshMedia[]=[];
       for(const node of page){
         const creative=node.creative;
@@ -9948,8 +10438,25 @@ async function metaAdsReadAdAdims(
       }
       // Media failure cannot fail an otherwise valid metrics read; caller records retryable outcomes.
       if(media.length)try{await onMedia(media);}catch{ /* Caller-owned best-effort cache; canonical metadata remains retryable. */ }
-    } : undefined,
-  ) : [];
+    } : undefined;
+  // Only expansion-bearing reads carry fresh media URLs for the caller's media hand-off.
+  const readAds = (fields: string, since: number | undefined, withMedia: boolean) =>
+    metaAdsReadEdge(credential, "ads", fields, telemetry, since, withMedia ? onMediaPage : undefined);
+  let nodes: MetaAdsEdgeNode[] = [];
+  if (readProvider && fullSnapshot) {
+    const accessToken = requireCredential(credential, "accessToken");
+    const snapshot = await readMetaAdsFullAdSnapshot<MetaAdsEdgeNode>({
+      plan: fullSnapshot.plan,
+      loadStored: fullSnapshot.loadStored,
+      readEdge: readAds,
+      // Stored metadata is scrubbed; compare and merge fresh nodes in the same form.
+      normalize: node => scrubMetaAdsProviderMetadata(node, accessToken) as MetaAdsEdgeNode,
+    });
+    fullSnapshot.onRead(snapshot);
+    nodes = snapshot.nodes;
+  } else if (readProvider) {
+    nodes = await readAds(META_ADS_AD_FULL_FIELDS, updatedSince, true);
+  }
   snapshotSink?.push(...nodes);
   const dims = new Map<string, MetaAdsAdDim>();
   for (const node of [...cachedNodes, ...nodes]) {
@@ -10000,6 +10507,90 @@ async function metaAdsReadCampaignStatus(
     statuses.set(campaignId, metaAdsEdgeNodeStatus(node));
   }
   return statuses;
+}
+
+/** The full-read checkpoint value that makes the next scan a full read (any age >= 24h does). */
+const META_ADS_FULL_READ_REQUESTED_CURSOR = "1970-01-01T00:00:00.000Z";
+
+/**
+ * Incremental scans only: carry a campaign/ad set status change to its children in the same run
+ * (meta-child-status-refresh.ts). Children whose status changed are merged into the snapshot sinks
+ * (a delta node is replaced, a stored-based one appended, so no entity gets two rows) and into the
+ * dim maps the insights rows read. When the refresh cannot run completely, nothing from it is
+ * applied and CLOSE ages the full-read checkpoint instead.
+ */
+async function metaAdsRefreshChildStatuses(input: {
+  credential: MetaAdsCredential;
+  telemetry: MetaAdsRequestTelemetry | undefined;
+  entityScan: ReturnType<typeof metaEntityReadMode>;
+  accessToken: string;
+  campaignNodes: MetaAdsEdgeNode[];
+  adsetNodes: MetaAdsEdgeNode[];
+  adNodes: MetaAdsEdgeNode[];
+  adsetDims: Map<string, MetaAdsAdsetDim>;
+  adDims: Map<string, MetaAdsAdDim>;
+  stored: (entityType: "campaign" | "adset" | "ad") => MetaAdsEdgeNode[];
+  loadStoredCreatives: () => Promise<Array<Record<string, unknown>>>;
+}): Promise<void> {
+  const storedAdsets = input.stored("adset"), storedAds = input.stored("ad");
+  const plan = planMetaChildStatusRefresh({
+    campaigns: input.campaignNodes,
+    adsets: input.adsetNodes,
+    storedCampaigns: input.stored("campaign"),
+    storedAdsets,
+    storedAds,
+  });
+  const summary = { outcome: "none" as "none" | "applied" | "full_read_requested", changedCampaigns: 0, changedAdsets: 0,
+    refreshes: 0, requests: 0, adsetsUpdated: 0, adsUpdated: 0, fullReadReason: null as string | null };
+  if (!plan) {
+    input.telemetry?.noteChildStatusRefresh(summary);
+    return;
+  }
+  summary.changedCampaigns = plan.changedCampaignIds.length;
+  summary.changedAdsets = plan.changedAdsetIds.length;
+  const requestsBefore = input.telemetry?.snapshot().requestCount ?? 0;
+  const outcome = await runMetaChildStatusRefresh<MetaAdsEdgeNode>({
+    plan,
+    remainingRequests: input.telemetry?.remainingRequests() ?? Number.POSITIVE_INFINITY,
+    readChildren: (read) => {
+      summary.refreshes += 1;
+      return metaAdsReadEdge(input.credential, read.edge, read.fields, input.telemetry, undefined, undefined, read.parentId);
+    },
+    loadStoredCreatives: input.loadStoredCreatives,
+    // Stored metadata is scrubbed; compare and merge fresh nodes in the same form.
+    normalize: (node) => scrubMetaAdsProviderMetadata(node, input.accessToken) as MetaAdsEdgeNode,
+    deltaAdsets: input.adsetNodes,
+    deltaAds: input.adNodes,
+    storedAdsets,
+    storedAds,
+    isBudgetError: (error) => error instanceof MetaAdsRequestBudgetError,
+  });
+  summary.requests = (input.telemetry?.snapshot().requestCount ?? 0) - requestsBefore;
+  if (outcome.kind === "full_read_required") {
+    input.entityScan.fullReadRequested = outcome.reason;
+    input.telemetry?.noteChildStatusRefresh({ ...summary, outcome: "full_read_requested", fullReadReason: outcome.reason });
+    return;
+  }
+  const upsert = (sink: MetaAdsEdgeNode[], nodes: MetaAdsEdgeNode[]) => {
+    const index = new Map<string, number>();
+    sink.forEach((node, position) => { const id = stringOrNull(node.id); if (id) index.set(id, position); });
+    for (const node of nodes) {
+      const position = index.get(stringOrNull(node.id) ?? "");
+      if (position === undefined) sink.push(node);
+      else sink[position] = node;
+    }
+  };
+  upsert(input.adsetNodes, outcome.adsets);
+  upsert(input.adNodes, outcome.ads);
+  const patchDims = (dims: Map<string, MetaAdsEntityStatus>, nodes: MetaAdsEdgeNode[]) => {
+    for (const node of nodes) {
+      const dim = dims.get(stringOrNull(node.id) ?? "");
+      if (dim) Object.assign(dim, metaAdsEdgeNodeStatus(node));
+    }
+  };
+  patchDims(input.adsetDims, outcome.adsets);
+  patchDims(input.adDims, outcome.ads);
+  input.telemetry?.noteChildStatusRefresh({ ...summary, outcome: "applied", adsetsUpdated: outcome.adsets.length, adsUpdated: outcome.ads.length });
 }
 
 function metaAdsEntitySnapshotRows(
@@ -10309,10 +10900,8 @@ export interface MetaCampaignCreateInput {
 // A3 (2026-09-13) — manual audience + placements. The BOUNDED subset of Meta's targeting spec
 // the desktop Create sheet can express (no flexible_spec/custom_audiences/free-form keys). On the
 // wire it is the CLI's `--targeting <json>` escape hatch (which REPLACES --targeting-countries —
-// geo_locations lives inside) or the Graph `targeting` param, ALWAYS with Advantage+ audience
-// off: `--no-advantage-audience` on the CLI, `targeting_automation.advantage_audience = 0` on
-// Graph. Placements are manual by construction: naming publisher_platforms/positions turns
-// Advantage+ placements off on Meta's side.
+// geo_locations lives inside) or the Graph `targeting` param. `advantageAudience` controls the
+// targeting-automation bit; placement automation remains structural (omit position restrictions).
 export interface MetaAdSetTargeting {
   age_min?: number;
   age_max?: number;
@@ -10336,6 +10925,10 @@ export interface MetaAdSetCreateInput {
   /** Manual targeting JSON; when present it REPLACES targetingCountries (which is folded into
    *  geo_locations only when the JSON carries none, so a country is never dropped silently). */
   targeting?: MetaAdSetTargeting;
+  /** Meta Advantage+ audience. Omitted preserves the historical manual/off behavior. */
+  advantageAudience?: boolean;
+  dsaBeneficiary?: string;
+  dsaPayor?: string;
   pixelId?: string;
   customEventType?: string;
 }
@@ -10373,6 +10966,11 @@ export interface MetaCreativeCreateInput {
   title?: string;
   description?: string;
   callToAction?: string;
+  // AdCreative.url_tags — query params Meta APPENDS to the destination link at delivery time. Unlike
+  // every other field here the value may contain Meta's dynamic macros ({{campaign.id}}, {{ad.id}},
+  // {{adset.id}}, {{placement}}), which Meta expands per impression. It is passed through VERBATIM:
+  // percent-encoding the braces would leave the customer with a literal "%7B%7Bplacement%7D%7D".
+  urlTags?: string;
 }
 
 export interface MetaAdCreateInput {
@@ -10598,6 +11196,15 @@ function metaCents(value: number | undefined): number | undefined {
     throw new ConnectorError("provider_api_error", "Meta Ads budgets/bids must be non-negative integer cents", false);
   }
   return value;
+}
+
+function metaDsaString(value: string | undefined, field: string): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.length > 512) {
+    throw new ConnectorError("provider_api_error", `Meta Ads ${field} must be a non-empty string no longer than 512 characters`, false);
+  }
+  return trimmed;
 }
 
 // A budget UPDATE requires a strictly-POSITIVE integer-cents amount. Unlike a create
@@ -10909,14 +11516,20 @@ export async function createMetaAdSet(
   if (bidAmount !== undefined) params.bid_amount = bidAmount;
   if (input.startTime) params.start_time = input.startTime;
   if (input.endTime) params.end_time = input.endTime;
+  const dsaBeneficiary = metaDsaString(input.dsaBeneficiary, "DSA beneficiary");
+  const dsaPayor = metaDsaString(input.dsaPayor, "DSA payor");
+  if (dsaBeneficiary !== undefined) params.dsa_beneficiary = dsaBeneficiary;
+  if (dsaPayor !== undefined) params.dsa_payor = dsaPayor;
   // VERIFY against a real Meta sandbox capture before live use:
   //   `targeting` minimum shape — Graph usually demands at least geo_locations.
   //   The inner key geo_locations.countries is [CONFIRMED-SDK]; whether the CLI
   //   adds default targeting_automation/placements is [INFERRED].
   const manualTargeting = metaAdSetTargetingSpec(input);
   if (manualTargeting) {
-    // A3: the manual spec verbatim + Advantage+ audience OFF (product rule: never on).
-    params.targeting = { ...manualTargeting, targeting_automation: { advantage_audience: 0 } };
+    params.targeting = {
+      ...manualTargeting,
+      targeting_automation: { advantage_audience: input.advantageAudience === true ? 1 : 0 }
+    };
   } else if (input.targetingCountries && input.targetingCountries.length > 0) {
     params.targeting = { geo_locations: { countries: input.targetingCountries } }; // VERIFY against a real Meta sandbox capture before live use
   }
@@ -11000,7 +11613,10 @@ export async function createMetaCreative(
 
   const response = await metaAdsGraphPost(credential, `${adAccountId}/${META_CREATE_EDGE.creative}`, {
     name: input.name,
-    object_story_spec: objectStorySpec
+    object_story_spec: objectStorySpec,
+    // url_tags is a TOP-LEVEL AdCreative field, not part of object_story_spec — [CONFIRMED-SDK]
+    // (facebook_business AdCreative.Field.url_tags). Omitted entirely when unset.
+    ...(input.urlTags ? { url_tags: input.urlTags } : {})
   });
   const id = requireGraphId("creative", response);
   // Creatives have no status; report null (no PAUSE/ACTIVE concept).
@@ -11187,11 +11803,15 @@ export async function listMetaEntities(
     }, telemetry, entity === "campaign" ? "campaign_edge" : entity === "adset" ? "adset_edge" : "ad_edge");
     const response = (await httpResponse.json()) as MetaListResponse;
     rows.push(...(response.data ?? []));
-    const nextAfter = metaAdsPagingAfter({ paging: response.paging });
-    if (!nextAfter) {
+    // Same last-page rule as metaAdsReadEdge: continue only when `paging.next` is present.
+    const nextPage = metaGraphNextPage(response.paging);
+    if (nextPage.kind === "malformed") {
+      throw new ConnectorError("provider_api_error", `Meta Ads /${META_READ_EDGE[entity]} list returned a next page without a cursor (refusing to truncate)`, true);
+    }
+    if (nextPage.kind === "last") {
       return rows;
     }
-    after = nextAfter;
+    after = nextPage.after;
   }
   // The cursor never terminated within the page cap — fail LOUD (retryable) rather than
   // return a silently-truncated set. Mirrors metaAdsReadEdge §4d.
@@ -12150,6 +12770,48 @@ function safeMetaCliClickUsageDiagnostic(
   return { code: "meta_cli_invalid_arguments", message: `${prefix}${exit}: ${detail}` };
 }
 
+function safeBoundedMetaErrorText(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const compact = value.replace(/\s+/g, " ").trim();
+  if (!compact) return undefined;
+  return compact.slice(0, 500);
+}
+
+function safeMetaProviderRejectionDiagnostic(
+  stderr: string,
+  accessToken: string | undefined,
+  prefix: string
+): { message: string; status?: number } | null {
+  const scrubbed = scrubMetaToken(stderr, accessToken);
+  const json = lastBalancedJsonBlock(scrubbed);
+  if (!json) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(json);
+  } catch {
+    return null;
+  }
+  const envelope = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
+  const rawError = envelope.error;
+  if (!rawError || typeof rawError !== "object" || Array.isArray(rawError)) return null;
+  const error = rawError as Record<string, unknown>;
+  const parts: string[] = [];
+  const title = safeBoundedMetaErrorText(error.error_user_title);
+  const userMsg = safeBoundedMetaErrorText(error.error_user_msg);
+  const message = safeBoundedMetaErrorText(error.message);
+  if (title) parts.push(title);
+  if (userMsg && userMsg !== title) parts.push(userMsg);
+  if (message && message !== title && message !== userMsg) parts.push(message);
+  const numeric: string[] = [];
+  if (typeof error.code === "number" && Number.isSafeInteger(error.code)) numeric.push(`code=${error.code}`);
+  if (typeof error.error_subcode === "number" && Number.isSafeInteger(error.error_subcode)) numeric.push(`subcode=${error.error_subcode}`);
+  if (parts.length === 0 && numeric.length === 0) return null;
+  const statusMatch = scrubbed.match(/\b(?:failed|request failed)\s+(\d{3})\b/i);
+  const status = statusMatch ? Number(statusMatch[1]) : undefined;
+  const detail = `${parts.join(": ")}${numeric.length > 0 ? ` [${numeric.join(", ")}]` : ""}`.slice(0, 1_000);
+  return { message: `${prefix}: ${detail}`, ...(status ? { status } : {}) };
+}
+
 // The daemon can be spawned with a cwd that is later removed (e.g. a temp build dir). Node's
 // `spawn` throws if the child's cwd no longer exists, so pin the Meta CLI to a stable, existing
 // directory instead of inheriting the daemon's (possibly-gone) cwd.
@@ -12408,6 +13070,14 @@ async function callIsolatedMetaAdsCliJson(
         );
         if (diagnostic) {
           throw new ConnectorError(diagnostic.code, diagnostic.message, false);
+        }
+        const providerRejection = safeMetaProviderRejectionDiagnostic(
+          stderr.toString("utf8"),
+          token,
+          "Meta provider rejected the request"
+        );
+        if (providerRejection) {
+          throw new ConnectorError("meta_provider_rejection", providerRejection.message, false, undefined, providerRejection.status);
         }
         throw new ConnectorError("provider_api_error", "Meta Ads CLI server command failed", false);
       }
@@ -12676,6 +13346,10 @@ async function createMetaAdSetViaCli(
   pushCentsFlag(args, "--bid-amount", input.bidAmount);
   if (input.startTime) args.push("--start-time", input.startTime);
   if (input.endTime) args.push("--end-time", input.endTime);
+  const dsaBeneficiary = metaDsaString(input.dsaBeneficiary, "DSA beneficiary");
+  const dsaPayor = metaDsaString(input.dsaPayor, "DSA payor");
+  if (dsaBeneficiary !== undefined) args.push("--dsa-beneficiary", dsaBeneficiary);
+  if (dsaPayor !== undefined) args.push("--dsa-payor", dsaPayor);
   const manualTargeting = metaAdSetTargetingSpec(input);
   if (manualTargeting) {
     // A3: the CLI's raw-JSON escape hatch. Per `meta ads adset create --help` it REPLACES
@@ -12684,9 +13358,9 @@ async function createMetaAdSetViaCli(
   } else if (input.targetingCountries && input.targetingCountries.length > 0) {
     args.push("--targeting-countries", input.targetingCountries.join(","));
   }
-  // Product rule (2026-09-13): Advantage+ audience is OFF on every ad set. Explicit, because
-  // with the flag absent the CLI fills targeting_automation.advantage_audience itself.
-  args.push("--no-advantage-audience");
+  // Explicit on/off: omission lets the CLI choose a default, which is not an acceptable product
+  // contract. Undefined remains OFF for callers that predate this field.
+  args.push(input.advantageAudience === true ? "--advantage-audience" : "--no-advantage-audience");
   if (input.pixelId) {
     args.push("--pixel-id", input.pixelId);
     // Mirror the Graph path: default the conversion event to PURCHASE when a pixel
@@ -12762,6 +13436,10 @@ async function createMetaCreativeViaCli(
     if (input.title) args.push("--title", input.title);
     if (input.description) args.push("--description", input.description);
     if (callToAction) args.push("--call-to-action", callToAction);
+    // `meta ads creative create --url-tags` (meta-ads 1.1.0). NOTE: the CLI exposes --url-tags on
+    // `creative create` ONLY — `ad create` has no such flag — which is why tracking parameters are
+    // set at the CREATIVE level on both transports.
+    if (input.urlTags) args.push("--url-tags", input.urlTags);
     // A4: budget the kill timer for the upload + Meta-side processing the CLI waits on.
     const response = await metaAdsCliWrite(credential, args, {
       timeoutMs: mediaKind === "video" ? META_CLI_VIDEO_CREATIVE_TIMEOUT_MS : META_CLI_IMAGE_CREATIVE_TIMEOUT_MS

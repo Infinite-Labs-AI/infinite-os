@@ -728,3 +728,18 @@ function infiniteBrowserRuntime(config: InfiniteBrowserConfig): void {
   // Bind immediately: the runtime waits on no provider global (there is nothing to wait for).
   bindRuntime()
 }
+
+/**
+ * The runtime's own source text, exported so the setup checks can DERIVE what `data-conversion`
+ * means instead of restating it.
+ *
+ * The runtime is serialized into the page with `.toString()`, so it cannot import a shared
+ * constant — anything it referenced from module scope would be `undefined` in the browser. That
+ * rules out the usual "one exported selector both sides use". Reading the source text back is the
+ * only seam that cannot drift: change a selector in `bindRuntime` and the checks change with it.
+ *
+ * A second, independent copy of the rule is exactly how the wrong-element bug survived — the
+ * marking step believed `data-conversion` meant "already handled" while the runtime believed it
+ * meant two different lanes depending on the tag. Nothing here is a copy.
+ */
+export const INFINITE_BROWSER_RUNTIME_SOURCE: string = infiniteBrowserRuntime.toString()

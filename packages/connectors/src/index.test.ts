@@ -40,6 +40,7 @@ import {
   type SyncPlan,
   type SyncRequest
 } from "./index.js";
+import { MetaAdsRequestBudgetError, MetaAdsRequestTelemetry } from "./meta-telemetry.js";
 
 
 describe("provider URL log redaction", () => {
@@ -78,6 +79,33 @@ describe("trusted server Meta CLI isolation", () => {
       expect(existsSync(marker)).toBe(false);
     } finally {
       if (prior === undefined) delete process.env.ACCESS_TOKEN; else process.env.ACCESS_TOKEN = prior;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("surfaces sanitized structured Meta provider rejection from isolated CLI stderr", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "meta-server-test-"));
+    const secret = "EAA_REAL_ACTIVE_TOKEN_123";
+    const tokenLike = "EAA_TOKEN_SHAPED_VALUE_456";
+    const executable = fakeExecutable(
+      dir,
+      `const body = { error: { message: "DSA beneficiary required ${secret} ${tokenLike}", code: 100, error_subcode: 2446394, error_user_title: "Missing DSA defaults", error_user_msg: "Set the beneficiary and payor in Ads Manager." } };
+process.stderr.write("provider request failed 400 for https://graph.facebook.com/v25.0/act_123/adsets?access_token=${secret}: " + JSON.stringify(body));
+process.exit(1);`
+    );
+    try {
+      const credential = bindMetaAdsCliExecution(
+        { mode: "live", transport: "meta_ads_cli", adAccountId: "123", accessToken: secret },
+        { mode: "isolated_server", executable }
+      );
+      await expect(createMetaCampaign(credential, campaign)).rejects.toMatchObject({
+        code: "meta_provider_rejection",
+        retryable: false,
+        message: expect.stringContaining("Missing DSA defaults")
+      });
+      await expect(createMetaCampaign(credential, campaign)).rejects.not.toThrow(secret);
+      await expect(createMetaCampaign(credential, campaign)).rejects.not.toThrow(tokenLike);
+    } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
@@ -3897,6 +3925,155 @@ describe("live provider clients", () => {
     expect(insightsRanges[insightsRanges.length - 1].until).toBe("2026-03-31");
   });
 
+  // ── Data-volume ladder: day rung + async-report last rung (meta-async-insights.ts) ──────────
+  const metaLiveDb = () => fakeDb({
+    credential: {
+      credential_kind: "marketing_api_access_token",
+      encrypted_payload: encryptedCredential({
+        mode: "live",
+        adAccountId: "9900000001",
+        accessToken: "meta-access-token",
+        apiVersion: "v25.0"
+      })
+    }
+  });
+  const volumeError = () => new Response(
+    JSON.stringify({ error: { message: "Please reduce the amount of data you're asking for, then retry your request", code: 100, error_subcode: 1487534 } }),
+    { status: 400, headers: { "Content-Type": "application/json" } }
+  );
+  async function extractAdWindow(since: string, until: string, handler: (url: string, init: RequestInit) => Response, telemetry?: MetaAdsRequestTelemetry) {
+    let rows: Array<Record<string, unknown>> = [];
+    await withMockFetch(async (url, init) => handler(url, init), async () => {
+      rows = await connectorFor("meta_ads").extract(
+        metaLiveDb(),
+        { ...request("meta_ads"), metaAdsInsightsLevel: "ad", windowSince: since, windowUntil: until },
+        {
+          cursorKey: "meta_ads_campaign_daily",
+          cursorStart: `${since}T00:00:00.000Z`,
+          cursorEnd: `${until}T00:00:00.000Z`,
+          refreshWindowDays: 30,
+          mode: "live",
+          ...(telemetry ? { metaAdsRequestTelemetry: telemetry } : {}),
+        }
+      ) as unknown as Array<Record<string, unknown>>;
+    });
+    return rows;
+  }
+
+  it("§4d ad: a 7-day settled slice that trips 1487534 narrows to DAYS instead of re-issuing the same week", async () => {
+    // FAIL-BEFORE: the ladder bottomed out at weeks, and the week split of a 7-day slice IS the
+    // slice — a second identical 1487534 then failed the run (the settled-history lane only ever
+    // sends 7-day slices, so a heavy account could never finish its history).
+    const insightsRanges: string[] = [];
+    const rows = await extractAdWindow("2026-06-01", "2026-06-07", (url) => {
+      if (!isMetaAdInsightsRequest(url)) return adProbeRouter(url);
+      const range = JSON.parse(new URL(url).searchParams.get("time_range") as string);
+      insightsRanges.push(`${range.since}..${range.until}`);
+      if (range.since !== range.until) return volumeError();
+      return jsonResponse({ data: range.since === "2026-06-01" ? AD_PROBE.insights : [], paging: {} });
+    });
+    expect(insightsRanges.filter((r) => r === "2026-06-01..2026-06-07")).toHaveLength(1);
+    expect(insightsRanges.slice(1)).toEqual(["01", "02", "03", "04", "05", "06", "07"].map((d) => `2026-06-${d}..2026-06-${d}`));
+    expect(rows.filter((row) => row.objectType === "meta_ads_ad_daily")).toHaveLength(AD_PROBE.insights.length);
+  });
+
+  it("§4d ad: code 1 with Meta's 'reduce the amount of data' message narrows too (bare code 1 does not)", async () => {
+    const insightsRanges: string[] = [];
+    await extractAdWindow("2026-06-01", "2026-06-02", (url) => {
+      if (!isMetaAdInsightsRequest(url)) return adProbeRouter(url);
+      const range = JSON.parse(new URL(url).searchParams.get("time_range") as string);
+      insightsRanges.push(`${range.since}..${range.until}`);
+      if (range.since !== range.until) return new Response(JSON.stringify({ error: { message: "Please reduce the amount of data you're asking for, then retry your request", code: 1 } }), { status: 500 });
+      return jsonResponse({ data: [], paging: {} });
+    });
+    expect(insightsRanges).toEqual(["2026-06-01..2026-06-02", "2026-06-01..2026-06-01", "2026-06-02..2026-06-02"]);
+    const bare: string[] = [];
+    await expect(extractAdWindow("2026-06-01", "2026-06-02", (url) => {
+      if (!isMetaAdInsightsRequest(url)) return adProbeRouter(url);
+      bare.push(url);
+      return new Response(JSON.stringify({ error: { message: "An unknown error has occurred.", code: 1 } }), { status: 500 });
+    })).rejects.toThrow(/provider request failed/);
+    expect(bare).toHaveLength(1);
+  });
+
+  it("§4d ad: a single day that still trips 1487534 runs as an async report job — rows identical to the sync path, every call budgeted", async () => {
+    const day = "2026-06-01";
+    const methods: string[] = [];
+    const syncTelemetry = new MetaAdsRequestTelemetry(100);
+    const syncRows = await extractAdWindow(day, day, (url, init) => {
+      methods.push((init.method ?? "GET").toUpperCase());
+      return adProbeRouter(url);
+    }, syncTelemetry);
+    // Small windows stay synchronous: no report job, no POST.
+    expect(methods.every((m) => m === "GET")).toBe(true);
+    expect(syncTelemetry.snapshot().byKind.insights_async_submit).toBe(0);
+
+    const asyncCalls: string[] = [];
+    let polls = 0;
+    const router = (url: string, init: RequestInit): Response => {
+      const parsed = new URL(url);
+      const method = (init.method ?? "GET").toUpperCase();
+      if (parsed.pathname === "/v25.0/act_9900000001/insights" && method === "POST") {
+        asyncCalls.push("submit");
+        expect(headerValue(init.headers, "Authorization")).toBe("Bearer meta-access-token");
+        expect(parsed.searchParams.get("level")).toBe("ad");
+        return jsonResponse({ report_run_id: "6021000000001" });
+      }
+      if (isMetaAdInsightsRequest(url)) return volumeError();
+      if (parsed.pathname === "/v25.0/6021000000001") {
+        asyncCalls.push("poll");
+        polls += 1;
+        return jsonResponse(polls === 1
+          ? { async_status: "Job Running", async_percent_completion: 30 }
+          : { async_status: "Job Completed", async_percent_completion: 100 });
+      }
+      if (parsed.pathname === "/v25.0/6021000000001/insights") {
+        asyncCalls.push("results");
+        return parsed.searchParams.get("after") === "p2"
+          ? jsonResponse({ data: AD_PROBE.insights.slice(2), paging: {} })
+          : jsonResponse({ data: AD_PROBE.insights.slice(0, 2), paging: { next: `${url}&after=p2` } });
+      }
+      return adProbeRouter(url);
+    };
+    const asyncTelemetry = new MetaAdsRequestTelemetry(100);
+    const asyncRows = await extractAdWindow(day, day, router, asyncTelemetry);
+    expect(asyncCalls).toEqual(["submit", "poll", "poll", "results", "results"]);
+    // Entity snapshots carry a wall-clock observedAt; the insights fact records are what must match.
+    const facts = (rows: Array<Record<string, unknown>>) => rows.filter((row) => row.objectType === "meta_ads_ad_daily");
+    expect(facts(asyncRows)).toHaveLength(AD_PROBE.insights.length);
+    expect(facts(asyncRows)).toEqual(facts(syncRows));
+
+    const syncSnap = syncTelemetry.snapshot();
+    const asyncSnap = asyncTelemetry.snapshot();
+    expect(asyncSnap.byKind.insights_async_submit).toBe(1);
+    expect(asyncSnap.byKind.insights_async_poll).toBe(2);
+    expect(asyncSnap.byKind.ad_insights).toBe(1 + 2); // the refused sync call + 2 result pages
+    // Same non-insights overhead either way. Sync spent 1 ad page; the async day spent the refused
+    // sync call + POST + 2 polls + 2 result pages = 6, i.e. 5 more calls for the same 3 rows.
+    expect(syncSnap.byKind.ad_insights).toBe(1);
+    expect(asyncSnap.requestCount - syncSnap.requestCount).toBe(1 + 1 + 2 + 2 - 1);
+
+    // Fail closed: one request short of the async job's needs → a budget stop, never an overrun,
+    // and no partial rows escape (extract throws).
+    const tight = new MetaAdsRequestTelemetry(asyncSnap.requestCount - 1);
+    polls = 0;
+    await expect(extractAdWindow(day, day, router, tight)).rejects.toBeInstanceOf(MetaAdsRequestBudgetError);
+    expect(tight.snapshot().requestCount).toBe(asyncSnap.requestCount - 1);
+    expect(tight.snapshot().budget.exhausted).toBe(true);
+  });
+
+  it("§4d ad: an async job that ends Job Failed fails the window retryably (no sync retry of the refused day)", async () => {
+    const insightsGets: string[] = [];
+    await expect(extractAdWindow("2026-06-01", "2026-06-01", (url, init) => {
+      const parsed = new URL(url);
+      if ((init.method ?? "GET").toUpperCase() === "POST") return jsonResponse({ report_run_id: "6021000000002" });
+      if (isMetaAdInsightsRequest(url)) { insightsGets.push(url); return volumeError(); }
+      if (parsed.pathname === "/v25.0/6021000000002") return jsonResponse({ async_status: "Job Failed", async_percent_completion: 0, error_code: 1 });
+      return adProbeRouter(url);
+    })).rejects.toMatchObject({ code: "provider_api_error", retryable: true, message: expect.stringContaining("Job Failed") });
+    expect(insightsGets).toHaveLength(1);
+  });
+
   it("§4d ad: the backfill start is CLAMPED to the 37-month retention floor (older windows not requested)", async () => {
     const insightsRanges: Array<{ since: string; until: string }> = [];
     await withMockFetch(
@@ -6788,6 +6965,26 @@ describe("Meta Ads WRITE helpers", () => {
       }
     );
 
+    await captureWrites(
+      () => jsonResponse({ id: "120000000000222", status: "PAUSED" }),
+      async (captured) => {
+        await createMetaAdSet(metaWriteCredential, {
+          name: "EU AdSet",
+          campaignId: "120000000000001",
+          optimizationGoal: "OFFSITE_CONVERSIONS",
+          billingEvent: "IMPRESSIONS",
+          targeting: { geo_locations: { countries: ["DE"] } },
+          dsaBeneficiary: "Acme GmbH",
+          dsaPayor: "Acme Inc"
+        });
+        expect(captured[0].body).toMatchObject({
+          status: "PAUSED",
+          dsa_beneficiary: "Acme GmbH",
+          dsa_payor: "Acme Inc"
+        });
+      }
+    );
+
     // Creative → /adcreatives
     await captureWrites(
       () => jsonResponse({ id: "120000000000003" }),
@@ -6907,6 +7104,27 @@ describe("Meta Ads WRITE helpers", () => {
       }
     );
 
+    await captureWrites(
+      () => jsonResponse({ id: "as_advantage", status: "PAUSED" }),
+      async (captured) => {
+        await createMetaAdSet(metaWriteCredential, {
+          name: "Advantage+",
+          campaignId: "c1",
+          optimizationGoal: "OFFSITE_CONVERSIONS",
+          billingEvent: "IMPRESSIONS",
+          advantageAudience: true,
+          targeting: { geo_locations: { countries: ["US"] } }
+        });
+        expect(captured[0].body).toMatchObject({
+          status: "PAUSED",
+          targeting: {
+            geo_locations: { countries: ["US"] },
+            targeting_automation: { advantage_audience: 1 }
+          }
+        });
+      }
+    );
+
     // Link creative → object_story_spec.link_data (headline key is "name").
     await captureWrites(
       () => jsonResponse({ id: "cr1" }),
@@ -6919,11 +7137,15 @@ describe("Meta Ads WRITE helpers", () => {
           body: "50% off everything!",
           title: "Shop Now",
           description: "Limited time offer",
-          callToAction: "SHOP_NOW"
+          callToAction: "SHOP_NOW",
+          // Tracking params Meta appends at delivery. Macros MUST survive unencoded.
+          urlTags: "utm_campaign={{campaign.id}}&utm_content={{ad.id}}&placement={{placement}}"
         });
         expect(captured[0].contentType).toBe("application/x-www-form-urlencoded");
         expect(captured[0].body).toEqual({
           name: "LinkCreative",
+          // TOP-LEVEL AdCreative field — never inside object_story_spec.
+          url_tags: "utm_campaign={{campaign.id}}&utm_content={{ad.id}}&placement={{placement}}",
           object_story_spec: {
             page_id: "page_1",
             link_data: {
@@ -7411,6 +7633,31 @@ describe("Meta Ads WRITE helpers", () => {
       );
     });
 
+    it("stops at a page without a next link even though Meta still sends cursors.after on it", async () => {
+      // Meta returns paging.cursors.after on EVERY non-empty page, the last one included; only
+      // paging.next says more data exists. Following the cursor cost one extra, empty request.
+      await captureWrites(
+        () => jsonResponse({ data: [{ id: "c1" }, { id: "c2" }], paging: { cursors: { before: "B", after: "LAST_PAGE_CURSOR" } } }),
+        async (captured) => {
+          const rows = await listMetaEntities(metaWriteCredential, "campaign");
+          expect(rows).toEqual([{ id: "c1" }, { id: "c2" }]);
+          expect(captured).toHaveLength(1);
+        }
+      );
+    });
+
+    it("fails LOUD when a next link arrives without any continuation cursor", async () => {
+      await captureWrites(
+        () => jsonResponse({ data: [{ id: "c1" }], paging: { next: "https://graph.facebook.com/v25.0/act_1234567890/campaigns" } }),
+        async () => {
+          await expect(listMetaEntities(metaWriteCredential, "campaign")).rejects.toMatchObject({
+            code: "provider_api_error",
+            retryable: true
+          });
+        }
+      );
+    });
+
     it("fails LOUD when the list cursor never terminates (no silent truncation)", async () => {
       // A cursor that always returns a fresh `after` must throw at the page cap rather than
       // loop forever or return a truncated set. Mirrors metaAdsReadEdge §4d fail-loud.
@@ -7418,7 +7665,10 @@ describe("Meta Ads WRITE helpers", () => {
         () =>
           jsonResponse({
             data: [{ id: "ad_x" }],
-            paging: { cursors: { after: "NEVER_ENDING" } }
+            paging: {
+              cursors: { after: "NEVER_ENDING" },
+              next: "https://graph.facebook.com/v25.0/act_1234567890/ads?after=NEVER_ENDING"
+            }
           }),
         async () => {
           await expect(listMetaEntities(metaWriteCredential, "ad")).rejects.toMatchObject({
@@ -8004,6 +8254,25 @@ console.log(${JSON.stringify(serialized)});
       });
     });
 
+    it("adset create maps DSA defaults to CLI flags while preserving PAUSED", async () => {
+      await withTmp(async (dir) => {
+        await createMetaAdSet(cliCredential(dir, { id: "120000000000024", status: "PAUSED" }), {
+          name: "EU proof",
+          campaignId: "120000000000010",
+          optimizationGoal: "OFFSITE_CONVERSIONS",
+          billingEvent: "IMPRESSIONS",
+          targeting: { geo_locations: { countries: ["US", "GB", "DE", "CA"] } },
+          dsaBeneficiary: "Acme GmbH",
+          dsaPayor: "Acme Inc"
+        });
+        const argv = recordedArgv(dir);
+        expect(argv[argv.indexOf("--dsa-beneficiary") + 1]).toBe("Acme GmbH");
+        expect(argv[argv.indexOf("--dsa-payor") + 1]).toBe("Acme Inc");
+        expect(argv[argv.indexOf("--status") + 1]).toBe("PAUSED");
+        expect(argv.slice(-2)).toEqual(["--", "120000000000010"]);
+      });
+    });
+
     // A3 (2026-09-13) — manual targeting + placements. `targeting` rides the CLI's raw-JSON escape
     // hatch (`--targeting <json>`), which per `meta ads adset create --help` REPLACES
     // --targeting-countries (geo_locations lives inside the JSON); Advantage+ audience is always
@@ -8036,6 +8305,25 @@ console.log(${JSON.stringify(serialized)});
         expect(argv[argv.indexOf("--status") + 1]).toBe("PAUSED");
         // The positional campaign id is still LAST, after `--`.
         expect(argv.slice(-2)).toEqual(["--", "120000000000010"]);
+      });
+    });
+
+    it("adset create maps advantageAudience=true to --advantage-audience with unrestricted placements", async () => {
+      await withTmp(async (dir) => {
+        const targeting = { geo_locations: { countries: ["US"] } };
+        await createMetaAdSet(cliCredential(dir, { id: "120000000000023", status: "PAUSED" }), {
+          name: "Advantage+",
+          campaignId: "120000000000010",
+          optimizationGoal: "OFFSITE_CONVERSIONS",
+          billingEvent: "IMPRESSIONS",
+          advantageAudience: true,
+          targeting
+        });
+        const argv = recordedArgv(dir);
+        expect(argv[argv.indexOf("--targeting") + 1]).toBe(JSON.stringify(targeting));
+        expect(argv).toContain("--advantage-audience");
+        expect(argv).not.toContain("--no-advantage-audience");
+        expect(argv.join(" ")).not.toMatch(/facebook_positions|instagram_positions|publisher_platforms/);
       });
     });
 
@@ -8080,7 +8368,8 @@ console.log(${JSON.stringify(serialized)});
               linkUrl: "https://example.com",
               body: "Buy now",
               title: "Headline",
-              callToAction: "shop_now"
+              callToAction: "shop_now",
+              urlTags: "utm_campaign={{campaign.id}}&utm_content={{ad.id}}&placement={{placement}}"
             });
             expect(result).toEqual({ ok: true, id: "120000000000050", status: null });
             const argv = recordedArgv(dir);
@@ -8095,6 +8384,9 @@ console.log(${JSON.stringify(serialized)});
             expect(argv[argv.indexOf("--title") + 1]).toBe("Headline");
             // CTA normalized to UPPERCASE before the CLI.
             expect(argv[argv.indexOf("--call-to-action") + 1]).toBe("SHOP_NOW");
+            // --url-tags exists on `creative create` only (meta-ads 1.1.0); `ad create` has no such
+            // flag. The macros must reach the CLI verbatim — a percent-encoded brace never expands.
+            expect(argv[argv.indexOf("--url-tags") + 1]).toBe("utm_campaign={{campaign.id}}&utm_content={{ad.id}}&placement={{placement}}");
           }
         );
         expect(fetchedUrl).toBe("https://cdn.example.com/banner.png");
@@ -8782,6 +9074,35 @@ describe("Meta Ads durable daily history", () => {
       },
     });
   }
+
+  it("rejects an invalid explicit Meta request lane before provider work", async () => {
+    let calls = 0;
+    await withMockFetch(() => {
+      calls += 1;
+      return historyResponse({ data: [] });
+    }, async () => {
+      await expect(connectorFor("meta_ads").planSync(historyCredentialDb(), {
+        ...request("meta_ads"),
+        metaAdsRequestLane: "unknown_lane" as never,
+      })).rejects.toMatchObject({ code: "provider_api_error", retryable: false });
+    });
+    expect(calls).toBe(0);
+  });
+
+  it.each([
+    ["implicit 30-day recurring", { refreshWindowDays: 30 }, 20],
+    ["explicit date", { windowSince: "2026-09-20", windowUntil: "2026-09-20" }, 12],
+    ["normalized ISO day", { windowSince: "2026-09-20T00:01:00.000Z", windowUntil: "2026-09-20T23:59:00.000Z" }, 12],
+    ["implicit one-day recurring", { refreshWindowDays: 1 }, 12],
+  ])("sets the insights-only request limit from the effective window: %s", async (_label, window, expectedLimit) => {
+    const plan = await connectorFor("meta_ads").planSync(historyCredentialDb(), {
+      ...request("meta_ads"),
+      metaAdsSyncMode: "insights_only",
+      metaAdsRequestBudget: 20,
+      ...window,
+    });
+    expect(plan.metaAdsRequestTelemetry?.snapshot().budget.limit).toBe(expectedLimit);
+  });
 
   it("audit CLOSE deletes and covers only the clamped window actually fetched at every grain", async () => {
     const queries: Array<{ sql: string; params?: unknown[] }> = [];

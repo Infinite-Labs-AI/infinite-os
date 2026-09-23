@@ -161,7 +161,8 @@ describe("analytical engine smoke", () => {
       expect(roas).not.toContain("avg(");
 
       const freq = aggregateExpression("frequency", metricColumn("frequency"));
-      expect(freq).toBe("sum(impressions) / nullif(sum(reach), 0)");
+      // Both bases over the rows whose reach was MEASURED (NULL reach = unmeasured, 0070).
+      expect(freq).toBe("sum(impressions) filter (where reach is not null) / nullif(sum(reach), 0)");
       expect(freq).not.toContain("avg(");
 
       const stripeRoas = aggregateExpression("roas_from_stripe", metricColumn("roas_from_stripe"));
@@ -3768,6 +3769,10 @@ describe("analytical engine smoke", () => {
       return {
         async query<T = Record<string, unknown>>(sql: string): Promise<T[]> {
           queries.push({ sql });
+          // The unmeasured-reach probe: every fixture row carries a measured reach.
+          if (sql.includes("unmeasured_reach_rows")) {
+            return [{ unmeasured_reach_rows: 0 }] as T[];
+          }
           if (sql.includes("from queryable.vw_meta_ads_campaign_daily")) {
             return [{ [metric]: evalAggregate(metric, sql) }] as T[];
           }
@@ -3851,6 +3856,8 @@ describe("analytical engine smoke", () => {
         "reach_is_approximate_summed_daily_reach_overcounts_unique_people"
       );
       expect(result?.caveats).toContain("read_only_marketing_api_reporting");
+      // Every fixture row is measured, so nothing was excluded and nothing is flagged.
+      expect(result?.caveats).not.toContain("reach_excludes_unmeasured_days");
     });
   });
 
@@ -6075,7 +6082,7 @@ describe("Phase-2 §9 acceptance — adset grain + on/off status (Stage-3)", () 
           metric: "frequency",
           groupBy: ["adset_id"],
           view: "queryable.vw_meta_ads_adset_daily",
-          expr: "sum(impressions) / nullif(sum(reach), 0) as frequency"
+          expr: "sum(impressions) filter (where reach is not null) / nullif(sum(reach), 0) as frequency"
         },
         {
           metric: "cost_per_result",
@@ -7235,6 +7242,41 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
         rmSync(dir, { recursive: true, force: true });
       }
     });
+
+    it("defaults an ad set to DSA values frozen on the same credential snapshot", async () => {
+      const dir = mkdtempSync(join(tmpdir(), "meta-version-dsa-"));
+      const executable = join(dir, "meta-server.mjs");
+      const argvFile = join(dir, "argv.json");
+      writeFileSync(executable, `#!${process.execPath}\nimport { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(argvFile)}, JSON.stringify(process.argv.slice(2)));\nconsole.log(JSON.stringify({id:"snapshot-adset",status:"PAUSED"}));\n`);
+      chmodSync(executable, 0o700);
+      const prior = process.env.GROWTH_OS_ENCRYPTION_KEY;
+      process.env.GROWTH_OS_ENCRYPTION_KEY = "analytical-test-encryption-key";
+      try {
+        const snapshot = snapshotDb();
+        const handlers = createActionHandlers(snapshot.db, {
+          metaAdsCliExecution: { mode: "isolated_server", executable },
+          expectedMetaCredential: {
+            ...expected,
+            defaultDsaBeneficiary: "Acme GmbH",
+            defaultDsaPayor: "Acme Inc"
+          }
+        });
+        await expect(handlers.create_meta_ad_set?.({
+          sourceId: "src_meta",
+          campaignId: "campaign_1",
+          name: "EU proof",
+          optimizationGoal: "OFFSITE_CONVERSIONS",
+          billingEvent: "IMPRESSIONS"
+        }, operatorContext)).resolves.toMatchObject({ data: { id: "snapshot-adset" } });
+        const argv = JSON.parse(readFileSync(argvFile, "utf8")) as string[];
+        expect(argv[argv.indexOf("--dsa-beneficiary") + 1]).toBe("Acme GmbH");
+        expect(argv[argv.indexOf("--dsa-payor") + 1]).toBe("Acme Inc");
+        expect(snapshot.snapshotReads()).toBe(1);
+      } finally {
+        if (prior === undefined) delete process.env.GROWTH_OS_ENCRYPTION_KEY; else process.env.GROWTH_OS_ENCRYPTION_KEY = prior;
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
   });
 
   it("keeps the previous Meta source and credential usable when a CLI-token reconnect probe fails", async () => {
@@ -7719,6 +7761,34 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
       );
     });
 
+    it("create_meta_ad_set forwards bounded DSA defaults to the connector while staying PAUSED", async () => {
+      const db = metaWriteTestDb({ audits: [], metaSources: [{ id: "src_meta_sole" }] });
+      await withGraph(
+        () => jsonResponse({ id: "adset_dsa", status: "PAUSED" }),
+        async (calls) => {
+          const handlers = createActionHandlers(db);
+          await handlers.create_meta_ad_set?.(
+            {
+              campaignId: "120000000000001",
+              name: "EU proof",
+              optimizationGoal: "OFFSITE_CONVERSIONS",
+              billingEvent: "IMPRESSIONS",
+              targeting: { geo_locations: { countries: ["DE"] } },
+              dsaBeneficiary: "Acme GmbH",
+              dsaPayor: "Acme Inc",
+              clientToken: "tok_adset_dsa"
+            },
+            operatorContext
+          );
+          expect(calls[0].body).toMatchObject({
+            status: "PAUSED",
+            dsa_beneficiary: "Acme GmbH",
+            dsa_payor: "Acme Inc"
+          });
+        }
+      );
+    });
+
     // A3 (2026-09-13) — the desktop Create sheet's manual targeting + placements JSON passes
     // through to the connector (bounded keys only), and a malformed shape fails TYPED before
     // any POST.
@@ -7770,6 +7840,23 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
             age_min: 18,
             targeting_automation: { advantage_audience: 0 }
           });
+          const advantage = await handlers.create_meta_ad_set?.(
+            {
+              campaignId: "120000000000001",
+              name: "Advantage+",
+              optimizationGoal: "OFFSITE_CONVERSIONS",
+              billingEvent: "IMPRESSIONS",
+              advantageAudience: true,
+              targeting: { geo_locations: { countries: ["US"] } },
+              clientToken: "tok_adset_advantage"
+            },
+            operatorContext
+          );
+          expect(advantage?.ok).toBe(true);
+          expect((calls[2].body as { targeting: Record<string, unknown> }).targeting).toEqual({
+            geo_locations: { countries: ["US"] },
+            targeting_automation: { advantage_audience: 1 }
+          });
           // Wrong types fail typed, before any POST.
           await expect(
             handlers.create_meta_ad_set?.(
@@ -7783,7 +7870,7 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
               operatorContext
             )
           ).rejects.toMatchObject({ code: "invalid_targeting", retryable: false });
-          expect(calls).toHaveLength(2);
+          expect(calls).toHaveLength(3);
         }
       );
     });

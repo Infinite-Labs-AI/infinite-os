@@ -13,7 +13,32 @@ export type MetaAdsRequestKind =
   | "ad_edge"
   | "campaign_insights"
   | "adset_insights"
-  | "ad_insights";
+  | "ad_insights"
+  // Meta async report jobs (the data-volume ladder's last rung): the job POST and each status
+  // poll are real budgeted calls; their result pages count under the grain's *_insights kind.
+  | "insights_async_submit"
+  | "insights_async_poll";
+
+export type MetaRequestLane =
+  | "hot_insights"
+  | "inventory_sync"
+  | "settled_history"
+  | "history_backfill"
+  | "attended_refresh"
+  | "media_archive";
+
+export const META_REQUEST_LANES: readonly MetaRequestLane[] = [
+  "hot_insights",
+  "inventory_sync",
+  "settled_history",
+  "history_backfill",
+  "attended_refresh",
+  "media_archive",
+];
+
+export function isMetaRequestLane(value: unknown): value is MetaRequestLane {
+  return typeof value === "string" && (META_REQUEST_LANES as readonly string[]).includes(value);
+}
 
 const META_ADS_REQUEST_KINDS: readonly MetaAdsRequestKind[] = [
   "account_liveness",
@@ -23,6 +48,8 @@ const META_ADS_REQUEST_KINDS: readonly MetaAdsRequestKind[] = [
   "campaign_insights",
   "adset_insights",
   "ad_insights",
+  "insights_async_submit",
+  "insights_async_poll",
 ];
 
 export const META_ADS_DEFAULT_REQUEST_BUDGET = 500;
@@ -30,15 +57,18 @@ export const META_ADS_MAX_REQUEST_BUDGET = 5_000;
 const META_ADS_UTILIZATION_SAMPLE_LIMIT = 32;
 export const META_ADS_UTILIZATION_HIGH_WATERMARK = 95;
 
-export interface MetaAdsRequestTelemetrySnapshot {
+interface MetaAdsRequestTelemetrySnapshotBase {
   provider: "meta_ads";
-  schemaVersion: 1;
   operation: "inventory_sync" | "history_sync";
   lastReservedAt: string | null;
   requestCount: number;
   pageCount: number;
   retryCount: number;
   byKind: Record<MetaAdsRequestKind, number>;
+  /** Present on FULL inventory scans only: how the ad edge was read, and why it fell back to heavy. */
+  fullAdRead?: { mode: "lean" | "heavy"; fallback: string | null };
+  /** Present on INCREMENTAL inventory scans only: parent-transition child status refreshes. */
+  childStatusRefresh?: MetaAdsChildStatusRefreshTelemetry;
   utilization: {
     maxPercent: number | null;
     samples: number[];
@@ -50,6 +80,36 @@ export interface MetaAdsRequestTelemetrySnapshot {
     exhausted: boolean;
   };
 }
+
+/**
+ * What an incremental scan did about parents whose own status changed (meta-child-status-refresh.ts).
+ * `refreshes` is the number of parent-edge child reads that ran and `requests` the Graph calls they
+ * cost. With no parent change, everything is 0 and `outcome` is "none".
+ */
+export interface MetaAdsChildStatusRefreshTelemetry {
+  outcome: "none" | "applied" | "full_read_requested";
+  changedCampaigns: number;
+  changedAdsets: number;
+  refreshes: number;
+  requests: number;
+  adsetsUpdated: number;
+  adsUpdated: number;
+  /** Why the refresh was not applied and the next scan was switched to a full read. */
+  fullReadReason: string | null;
+}
+
+export interface MetaAdsRequestTelemetrySnapshotV1 extends MetaAdsRequestTelemetrySnapshotBase {
+  schemaVersion: 1;
+}
+
+export interface MetaAdsRequestTelemetrySnapshotV2 extends MetaAdsRequestTelemetrySnapshotBase {
+  schemaVersion: 2;
+  lane: MetaRequestLane;
+}
+
+export type MetaAdsRequestTelemetrySnapshot =
+  | MetaAdsRequestTelemetrySnapshotV1
+  | MetaAdsRequestTelemetrySnapshotV2;
 
 export class MetaAdsRequestBudgetError extends Error {
   readonly code = "provider_rate_budget_exhausted";
@@ -87,6 +147,8 @@ export class MetaAdsRequestTelemetry {
   private exhausted = false;
   private lastReservedAt: string | null = null;
   private readonly samples: number[] = [];
+  private fullAdRead: { mode: "lean" | "heavy"; fallback: string | null } | null = null;
+  private childStatusRefresh: MetaAdsChildStatusRefreshTelemetry | null = null;
   private readonly byKind = Object.fromEntries(
     META_ADS_REQUEST_KINDS.map((kind) => [kind, 0]),
   ) as Record<MetaAdsRequestKind, number>;
@@ -99,6 +161,7 @@ export class MetaAdsRequestTelemetry {
     private readonly deadlineAtMs?: number,
     private readonly onResponse?: (signal: MetaAdsResponseSignal) => Promise<void>,
     private readonly operation: "inventory_sync" | "history_sync" = "history_sync",
+    private readonly lane?: MetaRequestLane,
   ) {
     if (!Number.isInteger(limit) || limit < 1 || limit > META_ADS_MAX_REQUEST_BUDGET) {
       throw new MetaAdsRequestBudgetError(Math.max(0, Number.isFinite(limit) ? limit : 0));
@@ -107,6 +170,12 @@ export class MetaAdsRequestTelemetry {
 
   /** Must run immediately before fetch. No request can cross the admitted limit. */
   async beforeRequest(kind: MetaAdsRequestKind, retry: boolean): Promise<void> {
+    await this.beforeRequests([kind], retry);
+  }
+
+  /** Atomically reserves every logical request carried by one outer provider batch. */
+  async beforeRequests(kinds: readonly MetaAdsRequestKind[], retry: boolean): Promise<void> {
+    if (kinds.length === 0) return;
     if (Date.now() < this.cooldownUntil) {
       throw Object.assign(new Error("Meta Ads provider cooldown active"), { code: "provider_rate_limited", retryable: true });
     }
@@ -118,14 +187,14 @@ export class MetaAdsRequestTelemetry {
       await this.persistReservation?.(this.snapshot());
       throw new MetaAdsTimeBudgetError(this.deadlineAtMs);
     }
-    if (this.requestCount >= this.limit) {
+    if (this.requestCount + kinds.length > this.limit) {
       this.exhausted = true;
       await this.persistReservation?.(this.snapshot());
       throw new MetaAdsRequestBudgetError(this.limit);
     }
-    this.requestCount += 1;
-    this.byKind[kind] += 1;
-    if (retry) this.retryCount += 1;
+    this.requestCount += kinds.length;
+    for (const kind of kinds) this.byKind[kind] += 1;
+    if (retry) this.retryCount += kinds.length;
     this.lastReservedAt = new Date().toISOString();
     // Reserve durably before the provider call. A hard kill between this write and fetch can
     // conservatively over-count one request; it can never hide spend from the scheduler.
@@ -149,16 +218,32 @@ export class MetaAdsRequestTelemetry {
     this.recordUtilization(utilizationPercent);
   }
 
+  /** Records how a FULL inventory scan read the ad edge (meta-lean-inventory.ts). */
+  noteFullAdRead(mode: "lean" | "heavy", fallback: string | null): void {
+    this.fullAdRead = { mode, fallback };
+  }
+
+  /** Records the incremental scan's parent-transition child refresh (meta-child-status-refresh.ts). */
+  noteChildStatusRefresh(summary: MetaAdsChildStatusRefreshTelemetry): void {
+    this.childStatusRefresh = { ...summary };
+  }
+
+  /** Requests this run can still admit before the budget refuses one. */
+  remainingRequests(): number {
+    return Math.max(0, this.limit - this.requestCount);
+  }
+
   snapshot(): MetaAdsRequestTelemetrySnapshot {
-    return {
+    const common: MetaAdsRequestTelemetrySnapshotBase = {
       provider: "meta_ads",
-      schemaVersion: 1,
       operation: this.operation,
       lastReservedAt: this.lastReservedAt,
       requestCount: this.requestCount,
       pageCount: this.pageCount,
       retryCount: this.retryCount,
       byKind: { ...this.byKind },
+      ...(this.fullAdRead ? { fullAdRead: { ...this.fullAdRead } } : {}),
+      ...(this.childStatusRefresh ? { childStatusRefresh: { ...this.childStatusRefresh } } : {}),
       utilization: {
         maxPercent: this.maxUtilizationPercent,
         samples: [...this.samples],
@@ -170,6 +255,9 @@ export class MetaAdsRequestTelemetry {
         exhausted: this.exhausted,
       },
     };
+    return this.lane
+      ? { ...common, schemaVersion: 2, lane: this.lane }
+      : { ...common, schemaVersion: 1 };
   }
 
   private recordUtilization(value: number | null): void {
@@ -184,4 +272,4 @@ export class MetaAdsRequestTelemetry {
 }
 
 /** Structural transport hook, suitable for process-local handler options. */
-export type MetaAdsRequestObserver = Pick<MetaAdsRequestTelemetry, "beforeRequest" | "recordPage" | "recordRejectedResponse" | "observeResponse">;
+export type MetaAdsRequestObserver = Pick<MetaAdsRequestTelemetry, "beforeRequest" | "beforeRequests" | "recordPage" | "recordRejectedResponse" | "observeResponse">;

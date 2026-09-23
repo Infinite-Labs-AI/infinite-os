@@ -10,6 +10,7 @@ import { PROPOSED_CONVERSIONS_RELATIVE_PATH } from "./marking.js"
 import { REPORT_SENT_LINE, reportNotSentLine, type HarnessReportPayload, type ReportSink } from "./report-sink.js"
 import {
   buildPrivacyDisclosureNotice,
+  META_ADVANCED_MATCHING_DISCLOSURE_FIELDS,
   PIXEL_DISCLOSURE_FIELDS,
   PRIVACY_DISCLOSURE_CODE,
   runHarness,
@@ -142,7 +143,7 @@ describe("runHarness --check", () => {
     expect(readFileSync(join(root, "index.html"), "utf8")).toContain(GTAG)
     expect(result.report.steps.map((step) => [step.id, step.status])).toEqual([
       ["preflight", "ok"], ["inspect", "ok"], ["resolve-keys", "ok"], ["classify", "ok"], ["plan", "ok"],
-      ["confirm", "skipped"], ["apply", "skipped"], ["conversions", "skipped"], ["server-lane", "skipped"], ["server-lane-env", "skipped"], ["verify", "skipped"], ["report", "ok"]
+      ["confirm", "skipped"], ["apply", "skipped"], ["conversions", "skipped"], ["setup-checks", "ok"], ["server-lane", "skipped"], ["server-lane-env", "skipped"], ["verify", "skipped"], ["report", "ok"]
     ])
   })
 
@@ -598,6 +599,20 @@ describe("buildPrivacyDisclosureNotice (per-lane accuracy)", () => {
     expect(notice).toContain(PIXEL_DISCLOSURE_FIELDS)
     expect(notice).toContain(SERVER_LANE_DISCLOSURE_FIELDS)
     expect(notice).toContain("Ultima Inc.")
+  })
+
+  it("names Meta Manual Advanced Matching only when it was actually turned on", () => {
+    // It is off by default, so it must not appear in a disclosure describing an install that does
+    // not have it — a privacy notice that overstates is as wrong as one that understates.
+    expect(buildPrivacyDisclosureNotice({ pixel: true, serverLane: false })).not.toContain(
+      META_ADVANCED_MATCHING_DISCLOSURE_FIELDS
+    )
+    expect(buildPrivacyDisclosureNotice({ pixel: false, serverLane: false, metaAdvancedMatching: true })).toContain(
+      META_ADVANCED_MATCHING_DISCLOSURE_FIELDS
+    )
+    // It says plainly what is shared, rather than hiding behind the word "hashed".
+    expect(META_ADVANCED_MATCHING_DISCLOSURE_FIELDS).toContain("hashed contact details are shared with Meta")
+    expect(META_ADVANCED_MATCHING_DISCLOSURE_FIELDS).toContain("never reads them from your forms")
   })
 })
 

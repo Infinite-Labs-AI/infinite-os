@@ -8,6 +8,25 @@ as null. Migration 0070 makes stored daily reach nullable and drops the zero def
 values remain null; measured zero remains zero. Historical zero rows are not rewritten because
 the original missing-versus-zero provenance is unknown. Frequency is not persisted in daily tables.
 
+Meta omits archived and deleted objects' stats from `/<PARENT>/insights?level=<OBJECT_LEVEL>`
+results by default ("Manage Your Ad Object's Status",
+https://developers.facebook.com/docs/marketing-api/best-practices/storing_adobjects). Every
+direct-Graph history insight read therefore filters `<level>.effective_status` IN every documented
+status of that object (`metaAdsAllStatusFiltering`): the hot lane's ad read and the settled,
+restatement, backfill and attended-refresh reads at all three grains. Without it a deleted ad's
+day is missing from settled ad rows, ad rows stop summing to Meta's campaign row, and the settled
+CLOSE prunes the hot lane's row for that ad.
+
+The open-day hot lane is the one place parent rows ARE derived by summing ads; those rows carry
+`reach = NULL` (unmeasured). The engine's reach metric sums measured rows only, frequency divides
+measured rows' impressions by their reach, and both answers carry `reach_excludes_unmeasured_days`
+when the queried scope held an unmeasured row (migration 0071 records this in the catalog).
+
+Inventory scans (`inventory_only`) read the ad account node (`account_liveness`) at most once per
+24h, tracked by the `meta_ads_account_liveness:<act>` cursor committed at CLOSE. The scan's own
+entity reads fail with the same credential-grade error on a revoked token, so skipping the read
+does not delay detection.
+
 Recurring refresh reconciles at most 35 settled provider days. Explicit date ranges and backfills
 keep their requested bounds (subject to the existing 37-month backfill retention floor). A
 YYYY-MM-DD input denotes a provider date, not an instant to convert into another timezone.

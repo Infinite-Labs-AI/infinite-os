@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,7 +7,8 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { encryptCredentialPayload } from "@infinite-os/core";
 import { createInfiniteOsDb, runMigrations, type InfiniteOsDb } from "@infinite-os/db";
 
-import { connectorFor, type SyncRequest } from "./index.js";
+import { connectorFor, metaAdsSettledWindow, type SyncRequest } from "./index.js";
+import { canonicalMetaAdsJson, metaAdsEntityVersionFingerprint } from "./meta-entity-fingerprint.js";
 
 const KEY = "meta-history-pglite-encryption-key";
 const ACCOUNT = "act_123";
@@ -21,7 +22,35 @@ type MetaFixture = {
   adInsights: Array<Record<string, unknown>>;
   failLevel?: "campaign" | "adset" | "ad";
   edgeResponse?: (edge:string,url:URL)=>Response|undefined;
+  onBatch?: (relativeUrls: string[]) => void;
+  batchItem?: (level: "campaign" | "adset" | "ad", url: URL, rows: Array<Record<string, unknown>>) => {
+    code?: number;
+    body?: unknown;
+    utilization?: number;
+  };
+  outerBatchResponse?: Response;
+  onRequest?: (url: URL, init?: RequestInit) => void;
+  /**
+   * Model Meta's documented insights behaviour for archived/deleted objects: a row carrying
+   * `__status` ARCHIVED or DELETED is omitted from `level=<grain>` results unless the request
+   * filters `<grain>.effective_status` IN a list naming that status ("Manage Your Ad Object's
+   * Status"). `__status` is stripped from every returned row.
+   */
+  metaStatusSemantics?: boolean;
 };
+
+/** Apply Meta's archived/deleted omission to insights rows at `level` for the request `url`. */
+function metaVisibleInsightRows(fixture: MetaFixture, level: string, url: URL, rows: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
+  if (!fixture.metaStatusSemantics) return rows;
+  const filters = JSON.parse(url.searchParams.get("filtering") ?? "[]") as Array<{ field: string; operator: string; value: string[] }>;
+  const included = new Set(filters.find(filter => filter.field === `${level}.effective_status` && filter.operator === "IN")?.value ?? []);
+  return rows
+    .filter(row => {
+      const status = typeof row.__status === "string" ? row.__status : "ACTIVE";
+      return (status !== "ARCHIVED" && status !== "DELETED") || included.has(status);
+    })
+    .map(({ __status: _status, ...row }) => row);
+}
 
 describe("Meta Ads history CLOSE against real PGlite", () => {
   let dataDir: string;
@@ -91,12 +120,38 @@ describe("Meta Ads history CLOSE against real PGlite", () => {
 
   async function withMetaFetch<T>(fixture: MetaFixture, run: () => Promise<T>): Promise<T> {
     const original = globalThis.fetch;
-    globalThis.fetch = (async (input: string | URL | Request) => {
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
       const requestUrl = new URL(typeof input === "string" || input instanceof URL ? input.toString() : input.url);
+      fixture.onRequest?.(requestUrl, init);
       const headers = {
         "content-type": "application/json",
         "x-fb-ads-insights-throttle": JSON.stringify({ acc_id_util_pct: 11 }),
       };
+      if (init?.method === "POST" && requestUrl.pathname === "/v25.0/") {
+        if (fixture.outerBatchResponse) return fixture.outerBatchResponse;
+        const form = new URLSearchParams(String(init.body));
+        const reads = JSON.parse(form.get("batch") ?? "[]") as Array<{ method: string; relative_url: string }>;
+        fixture.onBatch?.(reads.map((read) => read.relative_url));
+        const items = reads.map((read) => {
+          const url = new URL(read.relative_url, "https://graph.facebook.com/v25.0/");
+          const level = url.searchParams.get("level") as "campaign" | "adset" | "ad";
+          if (fixture.failLevel === level) {
+            return { code: 500, headers: [], body: JSON.stringify({ error: { message: "fixture failure" } }) };
+          }
+          const rows = metaVisibleInsightRows(fixture, level, url, level === "campaign"
+            ? fixture.campaignInsights
+            : level === "adset"
+              ? fixture.adsetInsights
+              : fixture.adInsights);
+          const custom = fixture.batchItem?.(level, url, rows);
+          return {
+            code: custom?.code ?? 200,
+            headers: [{ name: "x-fb-ads-insights-throttle", value: JSON.stringify({ acc_id_util_pct: custom?.utilization ?? 11 }) }],
+            body: JSON.stringify(custom?.body ?? { data: rows, paging: {} }),
+          };
+        });
+        return new Response(JSON.stringify(items), { status: 200, headers });
+      }
       if (requestUrl.pathname.endsWith(`/${ACCOUNT}`)) {
         return new Response(JSON.stringify({ id: ACCOUNT, account_id: "123", currency: "GBP", timezone_name: "Europe/London" }), { status: 200, headers });
       }
@@ -111,11 +166,11 @@ describe("Meta Ads history CLOSE against real PGlite", () => {
         if (fixture.failLevel === level) {
           return new Response(JSON.stringify({ error: { message: "fixture failure" } }), { status: 500, headers });
         }
-        const rows = level === "campaign"
+        const rows = metaVisibleInsightRows(fixture, level, requestUrl, level === "campaign"
           ? fixture.campaignInsights
           : level === "adset"
             ? fixture.adsetInsights
-            : fixture.adInsights;
+            : fixture.adInsights);
         return new Response(JSON.stringify({ data: rows, paging: {} }), { status: 200, headers });
       }
       throw new Error(`unexpected Meta fixture URL ${requestUrl.toString()}`);
@@ -877,7 +932,8 @@ describe("Meta Ads history CLOSE against real PGlite", () => {
     expect(urls.filter(url=>/\/(ads|adsets)$/.test(url.pathname)).every(url=>Number(url.searchParams.get('updated_since'))>0)).toBe(true);
     expect(urls.find(url=>url.pathname.endsWith('/campaigns'))?.searchParams.has('updated_since')).toBe(false);
     const before=await db.query("select cursor_key,cursor_value from sync_cursors where source_id=$1 and cursor_key like 'meta_ads_entities_%' order by cursor_key",[sourceId]);
-    expect(before).toHaveLength(2);
+    // scan + full + heavy (the first full read was heavy, see meta-lean-inventory.ts).
+    expect(before.map(row=>String((row as {cursor_key:string}).cursor_key).split(':')[0])).toEqual(['meta_ads_entities_full','meta_ads_entities_heavy','meta_ads_entities_scan']);
     delta.edgeResponse=(edge,url)=>edge==='ads'?new Response(JSON.stringify(url.searchParams.has('after')?{error:{code:100,message:'failed second page'}}:{data:[],paging:{cursors:{after:'page2'},next:'https://graph.facebook.com/page2'}}),{status:url.searchParams.has('after')?400:200,headers:{'content-type':'application/json'}}):undefined;
     await expect(withMetaFetch(delta,()=>connectorFor('meta_ads').sync(db,syncRequest(workspaceId,sourceId,'2026-09-01','2026-09-01')))).rejects.toThrow();
     expect(await db.query("select cursor_key,cursor_value from sync_cursors where source_id=$1 and cursor_key like 'meta_ads_entities_%' order by cursor_key",[sourceId])).toEqual(before);
@@ -962,17 +1018,643 @@ describe("Meta Ads history CLOSE against real PGlite", () => {
       [sourceId],
     );
     let edgeCalls = 0;
+    const batches: string[][] = [];
+    const providerRequests: Array<{pathname:string;method:string}> = [];
     const next = fixture("2026-09-02");
+    next.onBatch = urls => batches.push(urls);
+    next.onRequest = (url, init) => providerRequests.push({pathname:url.pathname,method:init?.method ?? "GET"});
     next.edgeResponse = edge => { if (["campaigns","adsets","ads"].includes(edge)) edgeCalls += 1; return undefined; };
     const request = Object.assign(syncRequest(workspaceId, sourceId, "2026-09-02", "2026-09-02"), {
       metaAdsSyncMode: "insights_only" as const,
+      metaAdsRequestLane: "hot_insights" as const,
+      metaAdsRequestBudget: 12,
     }) as SyncRequest;
     await withMetaFetch(next, () => connectorFor("meta_ads").sync(db, request));
     expect(edgeCalls).toBe(0);
+    expect(providerRequests).toEqual([{pathname:"/v25.0/",method:"POST"}]);
+    expect(batches).toHaveLength(1);
+    expect(batches[0]?.map(url => new URL(url, "https://graph.facebook.com/v25.0/").searchParams.get("level"))).toEqual(["ad"]);
     expect(await db.query("select ad_id from meta_ads_ad_daily where source_id=$1 and occurred_on='2026-09-02'",[sourceId])).toEqual([{ad_id:"a1"}]);
     expect(await db.query("select cursor_key,cursor_value from sync_cursors where source_id=$1 and cursor_key like 'meta_ads_entities_%' order by cursor_key",[sourceId])).toEqual(entityCursorBefore);
     expect(await db.query("select entity_id,last_observed_at::text from meta_ads_entity_versions where source_id=$1 and entity_type='ad' and valid_to is null order by entity_id",[sourceId])).toEqual(entityObservedBefore);
+    const telemetry = (await db.query<{request_telemetry: Record<string, unknown>}>(
+      "select request_telemetry from sync_runs where id=$1",
+      [request.syncRunId],
+    ))[0]?.request_telemetry;
+    expect(telemetry).toMatchObject({
+      schemaVersion: 2,
+      lane: "hot_insights",
+      requestCount: 1,
+      pageCount: 1,
+      budget: { limit: 12, remaining: 11, exhausted: false },
+    });
   }, 120_000);
+
+  it("hot lane reads TODAY with ONE all-status ad request and derives campaign + ad set rows from it", async () => {
+    const workspaceId = `ws_meta_hot_rollup_${randomUUID()}`;
+    const sourceId = `src_meta_hot_rollup_${randomUUID()}`;
+    await seedSource(workspaceId, sourceId);
+    await withMetaFetch(fixture("2026-09-01"), () =>
+      connectorFor("meta_ads").sync(db, syncRequest(workspaceId, sourceId, "2026-09-01", "2026-09-01"))
+    );
+    const day = "2026-09-02";
+    const next = fixture(day);
+    // Meta's own campaign/ad set rows are poisoned: the hot lane must never read them.
+    next.campaignInsights[0]!.spend = "999";
+    next.adsetInsights[0]!.spend = "999";
+    next.adInsights[0]!.reach = "800";
+    next.adInsights.push({
+      // An ad deleted today: absent from the /ads edge, present only because the read asks for
+      // every ad.effective_status. Its spend must reach the rolled-up campaign and ad set.
+      date_start: day, spend: "20", clicks: "5", impressions: "500", reach: "400", account_currency: "GBP",
+      inline_link_clicks: "3", campaign_id: "c1", campaign_name: "Campaign", adset_id: "s1", adset_name: "UK buyers",
+      ad_id: "a_deleted", ad_name: "Deleted ad", objective: "OUTCOME_LEADS",
+      actions: [{ action_type: "lead", "7d_click": "1" }, { action_type: "landing_page_view", "7d_click": "4" }],
+      action_values: [],
+    });
+    const batches: string[][] = [];
+    next.onBatch = urls => batches.push(urls);
+    const request: SyncRequest = {
+      ...syncRequest(workspaceId, sourceId, day, day),
+      metaAdsSyncMode: "insights_only",
+      metaAdsRequestLane: "hot_insights",
+      metaAdsRequestBudget: 12,
+    };
+    await withMetaFetch(next, () => connectorFor("meta_ads").sync(db, request));
+
+    expect(batches).toHaveLength(1);
+    expect(batches[0]).toHaveLength(1);
+    const read = new URL(batches[0]![0]!, "https://graph.facebook.com/v25.0/");
+    expect(read.searchParams.get("level")).toBe("ad");
+    expect(read.searchParams.get("fields")?.split(",")).toEqual(expect.arrayContaining(["ad_id", "adset_id", "adset_name", "campaign_id", "campaign_name"]));
+    expect(JSON.parse(read.searchParams.get("filtering") ?? "null")).toEqual([{
+      field: "ad.effective_status",
+      operator: "IN",
+      value: ["ACTIVE", "PAUSED", "DELETED", "PENDING_REVIEW", "DISAPPROVED", "PREAPPROVED", "PENDING_BILLING_INFO", "CAMPAIGN_PAUSED", "ARCHIVED", "ADSET_PAUSED", "IN_PROCESS", "WITH_ISSUES"],
+    }]);
+
+    const telemetry = (await db.query<{ request_telemetry: Record<string, unknown> }>(
+      "select request_telemetry from sync_runs where id=$1", [request.syncRunId],
+    ))[0]?.request_telemetry;
+    expect(telemetry).toMatchObject({
+      lane: "hot_insights", requestCount: 1, pageCount: 1, budget: { limit: 12, remaining: 11, exhausted: false },
+    });
+
+    expect(await db.query("select ad_id,spend::float8 as spend from meta_ads_ad_daily where source_id=$1 and occurred_on=$2 order by ad_id", [sourceId, day]))
+      .toEqual([{ ad_id: "a1", spend: 50 }, { ad_id: "a_deleted", spend: 20 }]);
+    for (const [table, key] of [["meta_ads_campaign_daily", "campaign_id"], ["meta_ads_adset_daily", "adset_id"]] as const) {
+      const rows = await db.query<Record<string, unknown>>(
+        `select ${key} as id,spend::float8 as spend,clicks,impressions,inline_link_clicks,landing_page_views,reach,
+                ctr::float8 as ctr,cpc::float8 as cpc,cpm::float8 as cpm,actions_raw->'derivation' as derivation
+           from ${table} where source_id=$1 and occurred_on=$2`,
+        [sourceId, day],
+      );
+      expect(rows).toHaveLength(1);
+      const row = rows[0]!;
+      expect(row).toMatchObject({ spend: 70, reach: null, derivation: { method: "sum_of_ad_insights", version: 1, source_grain: "ad", ad_rows: 2 } });
+      expect(Number(row.clicks)).toBe(15);
+      expect(Number(row.impressions)).toBe(1500);
+      expect(Number(row.inline_link_clicks)).toBe(3);
+      expect(Number(row.landing_page_views)).toBe(4);
+      expect(row.ctr as number).toBeCloseTo(1, 5);
+      expect(row.cpc as number).toBeCloseTo(70 / 15, 5);
+      expect(row.cpm as number).toBeCloseTo(70 / 1500 * 1000, 5);
+    }
+    expect(await db.query("select actions_raw->'derivation' as derivation from meta_ads_ad_daily where source_id=$1 and occurred_on=$2 and ad_id='a1'", [sourceId, day]))
+      .toEqual([{ derivation: null }]);
+    for (const table of ["meta_ads_campaign_conversions_daily", "meta_ads_adset_conversions_daily"]) {
+      expect(await db.query(
+        `select result_type,results::float8 as results,conversion_value::float8 as conversion_value,is_primary,results_source
+           from ${table} where source_id=$1 and occurred_on=$2 order by result_type`,
+        [sourceId, day],
+      )).toEqual([
+        { result_type: "lead", results: 4, conversion_value: null, is_primary: true, results_source: "derived_from_canonical_mapping" },
+        { result_type: "purchase", results: 2, conversion_value: 125, is_primary: false, results_source: "derived_from_canonical_mapping" },
+      ]);
+    }
+    expect(await db.query("select grain,row_count from meta_ads_coverage_daily where source_id=$1 and occurred_on=$2 order by grain", [sourceId, day]))
+      .toEqual([{ grain: "ad", row_count: 2 }, { grain: "adset", row_count: 1 }, { grain: "campaign", row_count: 1 }]);
+  }, 120_000);
+
+  it("hot lane rolls up across every ad page and counts one request per page", async () => {
+    const workspaceId = `ws_meta_hot_rollup_pages_${randomUUID()}`;
+    const sourceId = `src_meta_hot_rollup_pages_${randomUUID()}`;
+    await seedSource(workspaceId, sourceId);
+    await withMetaFetch(fixture("2026-09-01"), () =>
+      connectorFor("meta_ads").sync(db, syncRequest(workspaceId, sourceId, "2026-09-01", "2026-09-01"))
+    );
+    const day = "2026-09-02";
+    const next = fixture(day, { includeSecondAd: true });
+    const [first, second] = next.adInsights;
+    const batches: string[][] = [];
+    next.onBatch = urls => batches.push(urls);
+    next.batchItem = (_level, url) => url.searchParams.has("after")
+      ? { body: { data: [second], paging: {} } }
+      : { body: { data: [first], paging: { cursors: { after: "ad-page-2" }, next: `https://graph.facebook.com/v25.0/${ACCOUNT}/insights?level=ad&after=ad-page-2` } } };
+    const request: SyncRequest = { ...syncRequest(workspaceId, sourceId, day, day), metaAdsSyncMode: "insights_only", metaAdsRequestLane: "hot_insights", metaAdsRequestBudget: 12 };
+    await withMetaFetch(next, () => connectorFor("meta_ads").sync(db, request));
+    expect(batches.map(batch => batch.length)).toEqual([1, 1]);
+    const continuation = new URL(batches[1]![0]!, "https://graph.facebook.com/v25.0/");
+    expect(continuation.searchParams.get("after")).toBe("ad-page-2");
+    expect(continuation.searchParams.get("filtering")).toContain("DELETED");
+    expect(await db.query("select spend::float8 as spend from meta_ads_campaign_daily where source_id=$1 and occurred_on=$2", [sourceId, day]))
+      .toEqual([{ spend: 70 }]);
+    expect((await db.query<{ requests: number }>("select (request_telemetry->>'requestCount')::integer as requests from sync_runs where id=$1", [request.syncRunId]))[0]?.requests).toBe(2);
+  }, 120_000);
+
+  it.each(["settled_history", "attended_refresh"] as const)("%s one-day insights still reads all three grains from Meta (reach included)", async (lane) => {
+    const workspaceId = `ws_meta_three_grain_${lane}_${randomUUID()}`;
+    const sourceId = `src_meta_three_grain_${lane}_${randomUUID()}`;
+    await seedSource(workspaceId, sourceId);
+    await withMetaFetch(fixture("2026-09-01"), () =>
+      connectorFor("meta_ads").sync(db, syncRequest(workspaceId, sourceId, "2026-09-01", "2026-09-01"))
+    );
+    const day = "2026-09-02";
+    const next = fixture(day);
+    next.campaignInsights[0]!.reach = "777";
+    next.campaignInsights[0]!.spend = "61";
+    const batches: string[][] = [];
+    next.onBatch = urls => batches.push(urls);
+    const request: SyncRequest = { ...syncRequest(workspaceId, sourceId, day, day), metaAdsSyncMode: "insights_only", metaAdsRequestLane: lane, metaAdsRequestBudget: 12 };
+    await withMetaFetch(next, () => connectorFor("meta_ads").sync(db, request));
+    expect(batches.map(batch => batch.map(url => new URL(url, "https://graph.facebook.com/v25.0/").searchParams.get("level")))).toEqual([["campaign", "adset", "ad"]]);
+    // Each grain asks for its objects in EVERY status at its own level (archived/deleted included).
+    expect(batches[0]!.map(url => {
+      const filters = JSON.parse(new URL(url, "https://graph.facebook.com/v25.0/").searchParams.get("filtering") ?? "null") as Array<{ field: string; value: string[] }>;
+      return [filters[0]!.field, filters[0]!.value.includes("DELETED") && filters[0]!.value.includes("ARCHIVED")];
+    })).toEqual([["campaign.effective_status", true], ["adset.effective_status", true], ["ad.effective_status", true]]);
+    expect(await db.query("select spend::float8 as spend,reach,actions_raw->'derivation' as derivation from meta_ads_campaign_daily where source_id=$1 and occurred_on=$2", [sourceId, day]))
+      .toEqual([{ spend: 61, reach: expect.anything(), derivation: null }]);
+    expect(Number((await db.query<{ reach: unknown }>("select reach from meta_ads_campaign_daily where source_id=$1 and occurred_on=$2", [sourceId, day]))[0]?.reach)).toBe(777);
+    expect((await db.query<{ requests: number }>("select (request_telemetry->>'requestCount')::integer as requests from sync_runs where id=$1", [request.syncRunId]))[0]?.requests).toBe(3);
+  }, 120_000);
+
+  /** Day D as Meta reports it once ad a_deleted (spend 20) and ad set s_deleted (spend 5) are deleted. */
+  function deletedObjectsDay(day: string): MetaFixture {
+    const next = fixture(day);
+    next.metaStatusSemantics = true;
+    const deletedAd = {
+      date_start: day, spend: "20", clicks: "5", impressions: "500", reach: "400", account_currency: "GBP",
+      campaign_id: "c1", campaign_name: "Campaign", adset_id: "s1", adset_name: "UK buyers",
+      ad_id: "a_deleted", ad_name: "Deleted ad", objective: "OUTCOME_LEADS", actions: [], action_values: [], __status: "DELETED",
+    };
+    const deletedAdsetAd = {
+      ...deletedAd, spend: "5", clicks: "1", impressions: "100", reach: "90",
+      adset_id: "s_deleted", adset_name: "Deleted set", ad_id: "a_in_deleted_set", ad_name: "Ad in deleted set",
+    };
+    next.adInsights.push(deletedAd, deletedAdsetAd);
+    // A live ad set's own row includes its deleted ads' stats (the doc's example); the deleted ad set
+    // row, like any deleted object, is returned only when asked for.
+    next.adsetInsights[0]!.spend = "70";
+    next.adsetInsights.push({ ...next.adsetInsights[0]!, spend: "5", adset_id: "s_deleted", adset_name: "Deleted set", __status: "DELETED" });
+    // The live campaign's row already includes every deleted child's stats.
+    next.campaignInsights[0]!.spend = "75";
+    return next;
+  }
+
+  async function spendByGrain(sourceId: string, day: string): Promise<Record<"campaign" | "adset" | "ad", number>> {
+    const total = async (table: string) => Number((await db.query<{ spend: number | null }>(
+      `select sum(spend)::float8 as spend from ${table} where source_id=$1 and occurred_on=$2`, [sourceId, day]))[0]?.spend ?? 0);
+    return { campaign: await total("meta_ads_campaign_daily"), adset: await total("meta_ads_adset_daily"), ad: await total("meta_ads_ad_daily") };
+  }
+
+  it("settled one-day read keeps deleted ads' and ad sets' stats, so the hot lane's rows survive settlement at parity", async () => {
+    const workspaceId = `ws_meta_settled_deleted_${randomUUID()}`;
+    const sourceId = `src_meta_settled_deleted_${randomUUID()}`;
+    await seedSource(workspaceId, sourceId);
+    await withMetaFetch(fixture("2026-09-01"), () =>
+      connectorFor("meta_ads").sync(db, syncRequest(workspaceId, sourceId, "2026-09-01", "2026-09-01"))
+    );
+    const day = "2026-09-02";
+    const oneDay = (lane: "hot_insights" | "settled_history"): SyncRequest => ({
+      ...syncRequest(workspaceId, sourceId, day, day), metaAdsSyncMode: "insights_only", metaAdsRequestLane: lane, metaAdsRequestBudget: 12,
+    });
+    // Open day: the hot lane's all-status ad read sees every ad and derives the parents from them.
+    await withMetaFetch(deletedObjectsDay(day), () => connectorFor("meta_ads").sync(db, oneDay("hot_insights")));
+    expect(await spendByGrain(sourceId, day)).toEqual({ campaign: 75, adset: 75, ad: 75 });
+
+    // Settlement replaces the day with Meta's own three grains. Without the all-status filters Meta
+    // omits a_deleted / a_in_deleted_set / s_deleted, and CLOSE prunes the hot lane's rows for them.
+    await withMetaFetch(deletedObjectsDay(day), () => connectorFor("meta_ads").sync(db, oneDay("settled_history")));
+    expect(await spendByGrain(sourceId, day)).toEqual({ campaign: 75, adset: 75, ad: 75 });
+    expect((await db.query<{ ad_id: string }>("select ad_id from meta_ads_ad_daily where source_id=$1 and occurred_on=$2 order by ad_id", [sourceId, day]))
+      .map(row => row.ad_id)).toEqual(["a1", "a_deleted", "a_in_deleted_set"]);
+    expect((await db.query<{ adset_id: string }>("select adset_id from meta_ads_adset_daily where source_id=$1 and occurred_on=$2 order by adset_id", [sourceId, day]))
+      .map(row => row.adset_id)).toEqual(["s1", "s_deleted"]);
+    // Settled rows are Meta's own (reach measured), never the derivation.
+    expect(await db.query("select actions_raw->'derivation' as derivation from meta_ads_campaign_daily where source_id=$1 and occurred_on=$2", [sourceId, day]))
+      .toEqual([{ derivation: null }]);
+  }, 120_000);
+
+  it("multi-day restatement/backfill reads keep deleted ads' and ad sets' stats at every grain", async () => {
+    const workspaceId = `ws_meta_restate_deleted_${randomUUID()}`;
+    const sourceId = `src_meta_restate_deleted_${randomUUID()}`;
+    await seedSource(workspaceId, sourceId);
+    const requests: URL[] = [];
+    const data = deletedObjectsDay("2026-09-02");
+    data.onRequest = url => { if (url.pathname.endsWith("/insights")) requests.push(url); };
+    await withMetaFetch(data, () => connectorFor("meta_ads").sync(db, syncRequest(workspaceId, sourceId, "2026-09-01", "2026-09-03")));
+    expect(await spendByGrain(sourceId, "2026-09-02")).toEqual({ campaign: 75, adset: 75, ad: 75 });
+    expect(requests.map(url => [url.searchParams.get("level"), JSON.parse(url.searchParams.get("filtering") ?? "[]")[0]?.field]))
+      .toEqual([["campaign", "campaign.effective_status"], ["adset", "adset.effective_status"], ["ad", "ad.effective_status"]]);
+  }, 120_000);
+
+  it("a failed one-day insights batch retains the complete last-good snapshot", async () => {
+    const workspaceId = `ws_meta_batch_last_good_${randomUUID()}`;
+    const sourceId = `src_meta_batch_last_good_${randomUUID()}`;
+    await seedSource(workspaceId, sourceId);
+    await withMetaFetch(fixture("2026-09-03"), () =>
+      connectorFor("meta_ads").sync(db, syncRequest(workspaceId, sourceId, "2026-09-03", "2026-09-03"))
+    );
+    const before = await db.query(
+      "select spend::text, updated_at::text from meta_ads_campaign_daily where source_id=$1 and occurred_on='2026-09-03'",
+      [sourceId],
+    );
+    const broken = fixture("2026-09-03");
+    broken.adInsights[0]!.spend = "999";
+    // The hot lane reads only the ad grain; its failure must keep the last-good snapshot of all three.
+    broken.failLevel = "ad";
+    await expect(withMetaFetch(broken, () => connectorFor("meta_ads").sync(db, {
+      ...syncRequest(workspaceId, sourceId, "2026-09-03", "2026-09-03"),
+      metaAdsSyncMode: "insights_only",
+      metaAdsRequestLane: "hot_insights",
+      metaAdsRequestBudget: 12,
+    }))).rejects.toThrow();
+    expect(await db.query(
+      "select spend::text, updated_at::text from meta_ads_campaign_daily where source_id=$1 and occurred_on='2026-09-03'",
+      [sourceId],
+    )).toEqual(before);
+    expect(await db.query(
+      "select count(distinct grain)::integer as grains from meta_ads_coverage_daily where source_id=$1 and occurred_on='2026-09-03'",
+      [sourceId],
+    )).toEqual([{ grains: 3 }]);
+  }, 120_000);
+
+  it("batches known continuation cursors and accounts each logical page", async () => {
+    const workspaceId = `ws_meta_batch_pages_${randomUUID()}`;
+    const sourceId = `src_meta_batch_pages_${randomUUID()}`;
+    await seedSource(workspaceId, sourceId);
+    await withMetaFetch(fixture("2026-09-04"), () =>
+      connectorFor("meta_ads").sync(db, syncRequest(workspaceId, sourceId, "2026-09-04", "2026-09-04"))
+    );
+    const next = fixture("2026-09-05");
+    const batches: string[][] = [];
+    next.onBatch = urls => batches.push(urls);
+    next.batchItem = (level, url, rows) => level === "campaign" && !url.searchParams.has("after")
+      ? { body: { data: rows, paging: { cursors: { after: "campaign-page-2" }, next: "https://graph.facebook.com/v25.0/act_123/insights?level=campaign&after=campaign-page-2" } } }
+      : { body: { data: url.searchParams.has("after") ? [] : rows, paging: {} } };
+    const request: SyncRequest = {
+      ...syncRequest(workspaceId, sourceId, "2026-09-05", "2026-09-05"),
+      metaAdsSyncMode: "insights_only",
+      metaAdsRequestLane: "settled_history",
+      metaAdsRequestBudget: 12,
+    };
+    await withMetaFetch(next, () => connectorFor("meta_ads").sync(db, request));
+    expect(batches.map(batch => batch.length)).toEqual([3, 1]);
+    expect(batches[1]?.[0]).toContain("after=campaign-page-2");
+    const telemetry = (await db.query<{request_telemetry: Record<string, unknown>}>("select request_telemetry from sync_runs where id=$1", [request.syncRunId]))[0]?.request_telemetry;
+    expect(telemetry).toMatchObject({ schemaVersion: 2, lane: "settled_history", requestCount: 4, pageCount: 4 });
+  }, 120_000);
+
+  it("allows an implicit 30-day insights refresh to read beyond twelve serial pages", async () => {
+    const workspaceId = `ws_meta_implicit_wide_budget_${randomUUID()}`;
+    const sourceId = `src_meta_implicit_wide_budget_${randomUUID()}`;
+    await seedSource(workspaceId, sourceId);
+    await withMetaFetch(fixture("2026-09-05"), () =>
+      connectorFor("meta_ads").sync(db, syncRequest(workspaceId, sourceId, "2026-09-05", "2026-09-05"))
+    );
+    const next = fixture("2026-09-06", { empty: true });
+    let insightCalls = 0;
+    next.edgeResponse = (edge, url) => {
+      if (edge !== "insights") return undefined;
+      insightCalls += 1;
+      const level = url.searchParams.get("level");
+      const page = Number(url.searchParams.get("after") ?? "0");
+      const paging = level === "campaign" && page < 12
+        ? { next: `https://graph.facebook.com/v25.0/${ACCOUNT}/insights?level=campaign&after=${page + 1}` }
+        : {};
+      return new Response(JSON.stringify({ data: [], paging }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    };
+    const request: SyncRequest = {
+      workspaceId,sourceId,provider:"meta_ads",syncRunId:`sync_${randomUUID()}`,encryptionKey:KEY,
+      refreshWindowDays:30,metaAdsSyncMode:"insights_only",metaAdsRequestLane:"settled_history",metaAdsRequestBudget:20,
+    };
+    await withMetaFetch(next, () => connectorFor("meta_ads").sync(db, request));
+    expect(insightCalls).toBe(15);
+    expect(await db.query(
+      "select (request_telemetry->'budget'->>'limit')::integer as limit,(request_telemetry->>'requestCount')::integer as requests from sync_runs where id=$1",
+      [request.syncRunId],
+    )).toEqual([{limit:20,requests:15}]);
+  },120_000);
+
+  it("rejects an 11-used plus 2-continuation batch without phantom spend or another outer POST", async () => {
+    const workspaceId = `ws_meta_batch_budget_${randomUUID()}`;
+    const sourceId = `src_meta_batch_budget_${randomUUID()}`;
+    await seedSource(workspaceId, sourceId);
+    await withMetaFetch(fixture("2026-09-05"), () =>
+      connectorFor("meta_ads").sync(db, syncRequest(workspaceId, sourceId, "2026-09-05", "2026-09-05"))
+    );
+    const next = fixture("2026-09-06", { empty: true });
+    let batches = 0;
+    next.onBatch = () => { batches += 1; };
+    next.batchItem = (level, url) => {
+      const page = Number(url.searchParams.get("after") ?? "0");
+      const continues = level !== "ad" || page < 2;
+      return { body: { data: [], paging: continues
+        ? { cursors: { after: String(page + 1) }, next: `https://graph.facebook.com/v25.0/act_123/insights?level=${level}&after=${page + 1}` }
+        : {} } };
+    };
+    const request: SyncRequest = {
+      ...syncRequest(workspaceId, sourceId, "2026-09-06", "2026-09-06"),
+      metaAdsSyncMode: "insights_only",
+      metaAdsRequestLane: "settled_history",
+      metaAdsRequestBudget: 12,
+    };
+    await expect(withMetaFetch(next, () => connectorFor("meta_ads").sync(db, request)))
+      .rejects.toMatchObject({ code: "provider_rate_budget_exhausted" });
+    expect(batches).toBe(4);
+    expect(await db.query(
+      "select (request_telemetry->>'requestCount')::integer as requests,(request_telemetry->'budget'->>'remaining')::integer as remaining from sync_runs where id=$1",
+      [request.syncRunId],
+    )).toEqual([{requests:11,remaining:1}]);
+  }, 120_000);
+
+  it.each([false, true])("retains malformed sibling pressure and lets code 17 win regardless of order (%s)", async (reverse) => {
+    const workspaceId = `ws_meta_batch_malformed_pressure_${randomUUID()}`;
+    const sourceId = `src_meta_batch_malformed_pressure_${randomUUID()}`;
+    await seedSource(workspaceId, sourceId);
+    await withMetaFetch(fixture("2026-09-06"), () =>
+      connectorFor("meta_ads").sync(db, syncRequest(workspaceId, sourceId, "2026-09-06", "2026-09-06"))
+    );
+    const malformed = { code: 500, headers: [{name:"x-app-usage",value:JSON.stringify({call_count:10})}] };
+    const throttled = { code: 400, headers: [{name:"x-app-usage",value:JSON.stringify({call_count:55})}], body: JSON.stringify({error:{code:17}}) };
+    const valid = { code: 200, headers: [], body: JSON.stringify({data:[],paging:{}}) };
+    const next = fixture("2026-09-07", { empty: true });
+    next.outerBatchResponse = new Response(JSON.stringify(reverse ? [throttled,malformed,valid] : [malformed,throttled,valid]), {
+      status: 200,
+      headers: {"content-type":"application/json"},
+    });
+    const signals: Array<{maxPercent:number|null;throttled?:boolean}> = [];
+    await expect(withMetaFetch(next, () => connectorFor("meta_ads").sync(db, {
+      ...syncRequest(workspaceId, sourceId, "2026-09-07", "2026-09-07"),
+      metaAdsSyncMode: "insights_only",
+      metaAdsRequestLane: "settled_history",
+      metaAdsOnResponse: async signal => { signals.push(signal); },
+    }))).rejects.toMatchObject({code:"provider_rate_limited",retryable:true});
+    expect(signals).toEqual([expect.objectContaining({maxPercent:55,throttled:true})]);
+  },120_000);
+
+  it("aggregates sibling pressure before publishing one cadence sample", async () => {
+    const workspaceId = `ws_meta_batch_pressure_${randomUUID()}`;
+    const sourceId = `src_meta_batch_pressure_${randomUUID()}`;
+    await seedSource(workspaceId, sourceId);
+    await withMetaFetch(fixture("2026-09-06"), () =>
+      connectorFor("meta_ads").sync(db, syncRequest(workspaceId, sourceId, "2026-09-06", "2026-09-06"))
+    );
+    const next = fixture("2026-09-07", { empty: true });
+    next.batchItem = level => ({ utilization: level === "campaign" ? 10 : level === "adset" ? 55 : 30 });
+    const signals: Array<{maxPercent:number|null}> = [];
+    await withMetaFetch(next, () => connectorFor("meta_ads").sync(db, {
+      ...syncRequest(workspaceId, sourceId, "2026-09-07", "2026-09-07"),
+      metaAdsSyncMode: "insights_only",
+      metaAdsRequestLane: "settled_history",
+      metaAdsOnResponse: async signal => { signals.push(signal); },
+    }));
+    expect(signals).toEqual([expect.objectContaining({ maxPercent: 55 })]);
+  }, 120_000);
+
+  it("publishes code-17 sibling pressure before failing the required snapshot", async () => {
+    const workspaceId = `ws_meta_batch_code17_${randomUUID()}`;
+    const sourceId = `src_meta_batch_code17_${randomUUID()}`;
+    await seedSource(workspaceId, sourceId);
+    await withMetaFetch(fixture("2026-09-07"), () =>
+      connectorFor("meta_ads").sync(db, syncRequest(workspaceId, sourceId, "2026-09-07", "2026-09-07"))
+    );
+    const next = fixture("2026-09-08", { empty: true });
+    next.batchItem = level => level === "adset"
+      ? { code: 400, utilization: 47, body: { error: { code: 17, message: "rate limited" } } }
+      : { utilization: 9 };
+    const signals: Array<{maxPercent:number|null;throttled?:boolean}> = [];
+    await expect(withMetaFetch(next, () => connectorFor("meta_ads").sync(db, {
+      ...syncRequest(workspaceId, sourceId, "2026-09-08", "2026-09-08"),
+      metaAdsSyncMode: "insights_only",
+      metaAdsRequestLane: "settled_history",
+      metaAdsOnResponse: async signal => { signals.push(signal); },
+    }))).rejects.toMatchObject({ code: "provider_rate_limited", retryable: true });
+    expect(signals).toEqual([expect.objectContaining({ maxPercent: 47, throttled: true })]);
+    expect(await db.query("select id from meta_ads_campaign_daily where source_id=$1 and occurred_on='2026-09-08'", [sourceId])).toEqual([]);
+  }, 120_000);
+
+  it("lets a later code-17 sibling win over an earlier generic 500", async () => {
+    const workspaceId = `ws_meta_batch_error_precedence_${randomUUID()}`;
+    const sourceId = `src_meta_batch_error_precedence_${randomUUID()}`;
+    await seedSource(workspaceId, sourceId);
+    await withMetaFetch(fixture("2026-09-07"), () =>
+      connectorFor("meta_ads").sync(db, syncRequest(workspaceId, sourceId, "2026-09-07", "2026-09-07"))
+    );
+    const next = fixture("2026-09-08", { empty: true });
+    next.batchItem = level => level === "campaign"
+      ? {code:500,body:{error:{code:2}}}
+      : level === "adset"
+        ? {code:400,body:{error:{code:17}}}
+        : {};
+    await expect(withMetaFetch(next, () => connectorFor("meta_ads").sync(db, {
+      ...syncRequest(workspaceId, sourceId, "2026-09-08", "2026-09-08"),
+      metaAdsSyncMode:"insights_only",metaAdsRequestLane:"settled_history",
+    }))).rejects.toMatchObject({code:"provider_rate_limited",retryable:true});
+  },120_000);
+
+  it("publishes outer batch pressure before classifying a non-2xx transport failure", async () => {
+    const workspaceId = `ws_meta_batch_outer_pressure_${randomUUID()}`;
+    const sourceId = `src_meta_batch_outer_pressure_${randomUUID()}`;
+    await seedSource(workspaceId, sourceId);
+    await withMetaFetch(fixture("2026-09-08"), () =>
+      connectorFor("meta_ads").sync(db, syncRequest(workspaceId, sourceId, "2026-09-08", "2026-09-08"))
+    );
+    const next = fixture("2026-09-09", { empty: true });
+    next.outerBatchResponse = new Response(JSON.stringify({ error: { code: 17 } }), {
+      status: 429,
+      headers: {
+        "content-type": "application/json",
+        "x-app-usage": JSON.stringify({ call_count: 88 }),
+      },
+    });
+    const signals: Array<{maxPercent:number|null;throttled?:boolean}> = [];
+    await expect(withMetaFetch(next, () => connectorFor("meta_ads").sync(db, {
+      ...syncRequest(workspaceId, sourceId, "2026-09-09", "2026-09-09"),
+      metaAdsSyncMode: "insights_only",
+      metaAdsRequestLane: "hot_insights",
+      metaAdsOnResponse: async signal => { signals.push(signal); },
+    }))).rejects.toMatchObject({ code: "provider_rate_limited", retryable: true });
+    expect(signals).toEqual([expect.objectContaining({ maxPercent: 88, throttled: true })]);
+  }, 120_000);
+
+  it("fails before provider work when stored account metadata is incomplete", async () => {
+    const workspaceId = `ws_meta_batch_metadata_${randomUUID()}`;
+    const sourceId = `src_meta_batch_metadata_${randomUUID()}`;
+    await seedSource(workspaceId, sourceId);
+    await withMetaFetch(fixture("2026-09-08"), () =>
+      connectorFor("meta_ads").sync(db, syncRequest(workspaceId, sourceId, "2026-09-08", "2026-09-08"))
+    );
+    await db.query("update meta_ads_accounts set timezone_name=null where workspace_id=$1 and source_id=$2", [workspaceId, sourceId]);
+    let batches = 0;
+    const next = fixture("2026-09-09", { empty: true });
+    next.onBatch = () => { batches += 1; };
+    await expect(withMetaFetch(next, () => connectorFor("meta_ads").sync(db, {
+      ...syncRequest(workspaceId, sourceId, "2026-09-09", "2026-09-09"),
+      metaAdsSyncMode: "insights_only",
+      metaAdsRequestLane: "hot_insights",
+    }))).rejects.toMatchObject({ code: "provider_api_error", retryable: true });
+    expect(batches).toBe(0);
+  }, 120_000);
+
+  it.each([
+    ["mid-load", "insert into meta_ads_adset_daily", "2026-09-08", "2026-09-08"],
+    ["CLOSE", "insert into meta_ads_coverage_daily", "2026-09-08", "2026-09-08"],
+    ["ISO-bound CLOSE", "insert into meta_ads_coverage_daily", "2026-09-08T12:00:00.000Z", "2026-09-08T12:00:00.000Z"],
+  ])("rolls back one-day atomic publication on %s failure", async (_phase, failingSql, since, until) => {
+    const workspaceId = `ws_meta_atomic_${randomUUID()}`;
+    const sourceId = `src_meta_atomic_${randomUUID()}`;
+    await seedSource(workspaceId, sourceId);
+    await withMetaFetch(fixture("2026-09-08"), () =>
+      connectorFor("meta_ads").sync(db, syncRequest(workspaceId, sourceId, "2026-09-08", "2026-09-08"))
+    );
+    const beforeFacts = await Promise.all(["campaign", "adset", "ad"].map(grain => db.query(
+      `select spend::text,updated_at::text from meta_ads_${grain}_daily where source_id=$1 and occurred_on='2026-09-08' order by id`,
+      [sourceId],
+    )));
+    const beforeCoverage = await db.query(
+      "select grain,row_count,sync_run_id,closed_at::text from meta_ads_coverage_daily where source_id=$1 and occurred_on='2026-09-08' order by grain",
+      [sourceId],
+    );
+    const failingDb: InfiniteOsDb = {
+      ...db,
+      withTransaction: async fn => db.withTransaction(tx => fn({
+        ...tx,
+        query: (async (sql: string, params?: unknown[]) => {
+          if (sql.includes(failingSql)) throw new Error(`forced ${_phase} publication failure`);
+          return tx.query(sql, params);
+        }) as InfiniteOsDb["query"],
+      })),
+    };
+    const changed = fixture("2026-09-08");
+    for (const rows of [changed.campaignInsights, changed.adsetInsights, changed.adInsights]) rows[0]!.spend = "999";
+    const request: SyncRequest = {
+      ...syncRequest(workspaceId, sourceId, since, until),
+      metaAdsSyncMode: "insights_only",
+      metaAdsRequestLane: "hot_insights",
+    };
+    await expect(withMetaFetch(changed, () => connectorFor("meta_ads").sync(failingDb, request)))
+      .rejects.toThrow(`forced ${_phase} publication failure`);
+    expect(await Promise.all(["campaign", "adset", "ad"].map(grain => db.query(
+      `select spend::text,updated_at::text from meta_ads_${grain}_daily where source_id=$1 and occurred_on='2026-09-08' order by id`,
+      [sourceId],
+    )))).toEqual(beforeFacts);
+    expect(await db.query(
+      "select grain,row_count,sync_run_id,closed_at::text from meta_ads_coverage_daily where source_id=$1 and occurred_on='2026-09-08' order by grain",
+      [sourceId],
+    )).toEqual(beforeCoverage);
+    expect(await db.query(
+      "select status,request_telemetry->>'lane' as lane,(request_telemetry->>'requestCount')::integer as requests from sync_runs where id=$1",
+      [request.syncRunId],
+    )).toEqual([{status:"failed",lane:"hot_insights",requests:1}]);
+  }, 120_000);
+
+  it("uses atomic publication for an effective one-day hot window without explicit bounds", async () => {
+    const workspaceId = `ws_meta_atomic_implicit_${randomUUID()}`;
+    const sourceId = `src_meta_atomic_implicit_${randomUUID()}`;
+    const day = metaAdsSettledWindow(new Date().toISOString(), "Europe/London", 1).since;
+    await seedSource(workspaceId, sourceId);
+    await withMetaFetch(fixture(day), () => connectorFor("meta_ads").sync(db, syncRequest(workspaceId, sourceId, day, day)));
+    const before = await db.query("select spend::text,updated_at::text from meta_ads_campaign_daily where source_id=$1 and occurred_on=$2",[sourceId,day]);
+    const failingDb: InfiniteOsDb = {
+      ...db,
+      withTransaction: async fn => db.withTransaction(tx => fn({
+        ...tx,
+        query: (async (sql: string, params?: unknown[]) => {
+          if (sql.includes("insert into meta_ads_coverage_daily")) throw new Error("forced implicit CLOSE failure");
+          return tx.query(sql, params);
+        }) as InfiniteOsDb["query"],
+      })),
+    };
+    const changed = fixture(day);
+    changed.campaignInsights[0]!.spend = "999";
+    await expect(withMetaFetch(changed, () => connectorFor("meta_ads").sync(failingDb, {
+      workspaceId,sourceId,provider:"meta_ads",syncRunId:`sync_${randomUUID()}`,encryptionKey:KEY,
+      refreshWindowDays:1,metaAdsSyncMode:"insights_only",metaAdsRequestLane:"hot_insights",metaAdsRequestBudget:12,
+    }))).rejects.toThrow("forced implicit CLOSE failure");
+    expect(await db.query("select spend::text,updated_at::text from meta_ads_campaign_daily where source_id=$1 and occurred_on=$2",[sourceId,day])).toEqual(before);
+  },120_000);
+
+  it("queues a concurrent reader until the atomic three-grain publication commits", async () => {
+    const workspaceId = `ws_meta_atomic_reader_${randomUUID()}`;
+    const sourceId = `src_meta_atomic_reader_${randomUUID()}`;
+    const day = "2026-09-10";
+    await seedSource(workspaceId, sourceId);
+    await withMetaFetch(fixture(day), () => connectorFor("meta_ads").sync(db, syncRequest(workspaceId, sourceId, day, day)));
+    let readerSettled = false;
+    let readerWasBlocked = false;
+    let reader: Promise<Array<{grain:string;spend:string}>> | null = null;
+    const observingDb: InfiniteOsDb = {
+      ...db,
+      withTransaction: async fn => db.withTransaction(tx => fn({
+        ...tx,
+        query: (async (sql: string, params?: unknown[]) => {
+          const result = await tx.query(sql, params);
+          if (!reader && sql.includes("insert into meta_ads_campaign_daily")) {
+            reader = db.query<{grain:string;spend:string}>(
+              `select 'campaign' as grain,spend::text from meta_ads_campaign_daily where source_id=$1 and occurred_on=$2
+               union all select 'adset',spend::text from meta_ads_adset_daily where source_id=$1 and occurred_on=$2
+               union all select 'ad',spend::text from meta_ads_ad_daily where source_id=$1 and occurred_on=$2
+               order by grain`,
+              [sourceId,day],
+            );
+            void reader.then(() => { readerSettled = true; });
+            await new Promise(resolve => setTimeout(resolve, 0));
+            readerWasBlocked = !readerSettled;
+          }
+          return result;
+        }) as InfiniteOsDb["query"],
+      })),
+    };
+    const changed = fixture(day);
+    for (const rows of [changed.campaignInsights,changed.adsetInsights,changed.adInsights]) rows[0]!.spend="999";
+    await withMetaFetch(changed,()=>connectorFor("meta_ads").sync(observingDb,{
+      ...syncRequest(workspaceId,sourceId,day,day),metaAdsSyncMode:"insights_only",metaAdsRequestLane:"hot_insights",
+    }));
+    expect(readerWasBlocked).toBe(true);
+    expect(await reader).toEqual([
+      {grain:"ad",spend:"999.000000"},{grain:"adset",spend:"999.000000"},{grain:"campaign",spend:"999.000000"},
+    ]);
+  },120_000);
+
+  it("publishes the 6000-record atomic bound within the worker deadline and rejects 6001", async () => {
+    const workspaceId = `ws_meta_atomic_bound_${randomUUID()}`;
+    const sourceId = `src_meta_atomic_bound_${randomUUID()}`;
+    const day = "2026-09-11";
+    await seedSource(workspaceId, sourceId);
+    await withMetaFetch(fixture(day), () => connectorFor("meta_ads").sync(db, syncRequest(workspaceId, sourceId, day, day)));
+    const bounded = fixture(day,{empty:true});
+    bounded.campaignInsights = Array.from({length:6000},(_,index)=>({
+      campaign_id:`bound_${index}`,campaign_name:`Bound ${index}`,date_start:day,spend:"1",clicks:"0",impressions:"1",
+      account_currency:"GBP",objective:"OUTCOME_AWARENESS",actions:[],action_values:[],
+    }));
+    const started = Date.now();
+    await withMetaFetch(bounded,()=>connectorFor("meta_ads").sync(db,{
+      ...syncRequest(workspaceId,sourceId,day,day),metaAdsSyncMode:"insights_only",metaAdsRequestLane:"settled_history",
+    }));
+    expect(Date.now()-started).toBeLessThan(60_000);
+    expect(await db.query("select count(*)::integer as rows from meta_ads_campaign_daily where source_id=$1 and occurred_on=$2",[sourceId,day])).toEqual([{rows:6000}]);
+    const oversized = fixture(day,{empty:true});
+    oversized.campaignInsights = [...bounded.campaignInsights,{...bounded.campaignInsights[0],campaign_id:"bound_6000",campaign_name:"Bound 6000"}];
+    await expect(withMetaFetch(oversized,()=>connectorFor("meta_ads").sync(db,{
+      ...syncRequest(workspaceId,sourceId,day,day),metaAdsSyncMode:"insights_only",metaAdsRequestLane:"settled_history",
+    }))).rejects.toThrow("6000-record atomic publication limit");
+    expect(await db.query("select count(*)::integer as rows from meta_ads_campaign_daily where source_id=$1 and occurred_on=$2",[sourceId,day])).toEqual([{rows:6000}]);
+  },120_000);
 
   it("insights-only accepts a completed snapshot with zero entities",async()=>{
     const workspaceId=`ws_empty_snapshot_${randomUUID()}`,sourceId=`src_empty_snapshot_${randomUUID()}`;await seedSource(workspaceId,sourceId);
@@ -981,6 +1663,9 @@ describe("Meta Ads history CLOSE against real PGlite", () => {
     let edges=0;const next=fixture("2026-09-02",{empty:true});next.edgeResponse=edge=>{if(["campaigns","adsets","ads"].includes(edge))edges+=1;return undefined;};
     await withMetaFetch(next,()=>connectorFor("meta_ads").sync(db,{...syncRequest(workspaceId,sourceId,"2026-09-02","2026-09-02"),metaAdsSyncMode:"insights_only"}));
     expect(edges).toBe(0);expect(await db.query("select cursor_value from sync_cursors where source_id=$1 and cursor_key=$2",[sourceId,`meta_ads_entities_scan:${ACCOUNT}`])).toHaveLength(1);
+    expect(await db.query("select grain,row_count from meta_ads_coverage_daily where source_id=$1 and occurred_on='2026-09-02' order by grain",[sourceId])).toEqual([
+      {grain:"ad",row_count:0},{grain:"adset",row_count:0},{grain:"campaign",row_count:0},
+    ]);
   },120_000);
 
   it("a Meta-only mode cannot suppress another provider's cursor or health",async()=>{
@@ -1006,5 +1691,77 @@ describe("Meta Ads history CLOSE against real PGlite", () => {
     const rows=await db.query("select metadata_json,asset_descriptors from meta_ads_entity_versions where source_id=$1",[sourceId]);
     expect(JSON.stringify(rows)).not.toContain('raw-signed-secret');expect(JSON.stringify(rows)).not.toContain('thumb-secret');
   },120_000);
+
+  // Meta returns a freshly minted `emg1` preview URL for dynamic video creatives on nearly every
+  // read. Those rotations must not mint creative or ad versions (each fake version re-queues the
+  // creative's media downstream and replaces the version the Ads screen is showing).
+  function rotatedThumbnailFixture(path: string, body = "Copy"): MetaFixture {
+    const data = fixture("2026-09-01");
+    const ad = data.ads[0] as { creative: Record<string, unknown> };
+    ad.creative = { ...ad.creative, body, thumbnail_url: `https://external-dub4-1.xx.fbcdn.net/emg1/v/t13/${path}` };
+    return data;
+  }
+
+  async function currentVersionCounts(sourceId: string): Promise<Record<string, number>> {
+    const rows = await db.query<{ entity_type: string; entity_id: string; versions: number }>(
+      `select entity_type, entity_id, count(*)::int as versions from meta_ads_entity_versions
+        where source_id = $1 and entity_type in ('ad','creative') group by entity_type, entity_id`,
+      [sourceId],
+    );
+    return Object.fromEntries(rows.map((row) => [`${row.entity_type}:${row.entity_id}`, row.versions]));
+  }
+
+  it("does not re-version an ad or creative when only Meta's rendered thumbnail_url rotates", async () => {
+    const workspaceId = `ws_meta_thumb_${randomUUID()}`;
+    const sourceId = `src_meta_thumb_${randomUUID()}`;
+    await seedSource(workspaceId, sourceId);
+    for (const path of ["8893140978873974957", "15505404890301949775", "4411223344556677889"]) {
+      await withMetaFetch(rotatedThumbnailFixture(path), () =>
+        connectorFor("meta_ads").sync(db, syncRequest(workspaceId, sourceId, "2026-09-01", "2026-09-01"))
+      );
+    }
+    expect(await currentVersionCounts(sourceId)).toEqual({ "ad:a1": 1, "creative:cr1": 1 });
+    // The stored snapshot is still what Meta returned (first observation), not a rewritten copy.
+    const [creative] = await db.query<{ metadata_json: { thumbnail_url: string } }>(
+      "select metadata_json from meta_ads_entity_versions where source_id=$1 and entity_type='creative' and valid_to is null",
+      [sourceId],
+    );
+    expect(creative?.metadata_json.thumbnail_url).toBe("https://external-dub4-1.xx.fbcdn.net/emg1/v/t13/8893140978873974957");
+
+    // A real edit still versions both the creative and the ad that embeds it.
+    await withMetaFetch(rotatedThumbnailFixture("9999999999999999999", "New copy"), () =>
+      connectorFor("meta_ads").sync(db, syncRequest(workspaceId, sourceId, "2026-09-01", "2026-09-01"))
+    );
+    expect(await currentVersionCounts(sourceId)).toEqual({ "ad:a1": 2, "creative:cr1": 2 });
+  }, 120_000);
+
+  it("adopts a legacy full-metadata payload_hash in place instead of minting a one-time version", async () => {
+    const workspaceId = `ws_meta_legacy_${randomUUID()}`;
+    const sourceId = `src_meta_legacy_${randomUUID()}`;
+    await seedSource(workspaceId, sourceId);
+    await withMetaFetch(rotatedThumbnailFixture("8893140978873974957"), () =>
+      connectorFor("meta_ads").sync(db, syncRequest(workspaceId, sourceId, "2026-09-01", "2026-09-01"))
+    );
+    // Rows written before this fix carry sha256 over the FULL metadata, rotating URLs included.
+    const stored = await db.query<{ id: string; metadata_json: Record<string, unknown> }>(
+      "select id, metadata_json from meta_ads_entity_versions where source_id=$1 and valid_to is null",
+      [sourceId],
+    );
+    for (const row of stored) {
+      const legacyHash = createHash("sha256").update(canonicalMetaAdsJson(row.metadata_json)).digest("hex");
+      await db.query("update meta_ads_entity_versions set payload_hash=$2 where id=$1", [row.id, legacyHash]);
+    }
+
+    await withMetaFetch(rotatedThumbnailFixture("15505404890301949775"), () =>
+      connectorFor("meta_ads").sync(db, syncRequest(workspaceId, sourceId, "2026-09-01", "2026-09-01"))
+    );
+    expect(await currentVersionCounts(sourceId)).toEqual({ "ad:a1": 1, "creative:cr1": 1 });
+    const rekeyed = await db.query<{ payload_hash: string; metadata_json: Record<string, unknown> }>(
+      "select payload_hash, metadata_json from meta_ads_entity_versions where source_id=$1 and valid_to is null",
+      [sourceId],
+    );
+    expect(rekeyed.length).toBe(stored.length);
+    for (const row of rekeyed) expect(row.payload_hash).toBe(metaAdsEntityVersionFingerprint(row.metadata_json));
+  }, 120_000);
 
 });

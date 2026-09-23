@@ -48,6 +48,13 @@ import {
   type ConversionProposal,
   type ServerCheckoutRecommendation
 } from "./marking.js"
+import {
+  runSetupChecks,
+  setupChecksNote,
+  setupFindingLines,
+  type SetupChecksReport
+} from "../setup-checks/index.js"
+
 import { recordHarnessFile } from "./outputs.js"
 import { REPORT_SENT_LINE, buildHarnessReportPayload, reportNotSentLine, type ReportSink } from "./report-sink.js"
 import { errorText, runRunbook, type RunbookStep } from "./runbook.js"
@@ -158,6 +165,8 @@ interface Ctx {
   /** Server-side checkout recommendation surfaced this run (detection only, never an edit). */
   serverCheckout?: ServerCheckoutRecommendation
   marking?: ApplyConversionsResult
+  /** Setup-correctness findings from the source scan; never a verification lane. */
+  setupChecks?: SetupChecksReport
   verifyResult?: VerifyLanesResult
   verifyIncomplete?: string
   /** Providers this run wrote (install/upgrade) — the lanes verification reads back. */
@@ -218,6 +227,7 @@ function flagArtifacts(root: string, args: HarnessArgs): WorkspaceInstallArtifac
     xPixelId: args.xPixelId,
     xEventTagIds: args.xEventTagIds,
     metaPixelId: args.metaPixelId,
+    metaAdvancedMatching: args.metaAdvancedMatching,
     infiniteSiteSourceKey: args.infiniteSiteSourceKey,
     infiniteCollectPath: args.infiniteCollectPath,
     infiniteProductionHosts: args.infiniteProductionHosts.length > 0 ? args.infiniteProductionHosts : undefined,
@@ -501,14 +511,25 @@ export const PRIVACY_DISCLOSURE_CODE = "INF_PRIVACY_DISCLOSURE"
 export const PIXEL_DISCLOSURE_FIELDS =
   "Browser pixel — each event is POSTed to Infinite (Ultima Inc.) at api.ultima.inc via a same-origin rewrite, so Infinite receives the request headers, INCLUDING the visitor's IP address and User-Agent, plus a JSON body of: a random anonymousId + sessionId, the page URL (origin + path; query string and fragment stripped), an optional referrer reduced to its host, the event name, and bounded event properties (no DOM text, form values, or click ids)."
 
+// Manual Advanced Matching is OFF unless the customer asked for it, so this line is added to the
+// disclosure only when it is actually installed. It is the one lane that can carry a visitor's
+// contact details, so it says so plainly rather than hiding behind "hashed".
+export const META_ADVANCED_MATCHING_DISCLOSURE_FIELDS =
+  "Meta Manual Advanced Matching (you turned this on with --meta-advanced-matching on) — when YOUR code calls window.infiniteMetaAdvancedMatch(), the page sends Meta a sha256 hash of the email address and/or the account id you passed it, alongside the event. The raw values are hashed in the browser and never transmitted, and the page never reads them from your forms or your DOM by itself; it sends only what your code hands it, when your code hands it over. Disclose that hashed contact details are shared with Meta for ad measurement."
+
 export const SERVER_LANE_DISCLOSURE_FIELDS =
   "Server lane — your edge middleware sends to Infinite (Ultima Inc.) at api.ultima.inc: the path, the host, the referrer host, a User-Agent CLASS (userAgentFamily, not the raw UA), and a secret-keyed visit key that rotates every 30 minutes. The raw IP address and full User-Agent are processed on your server to derive the class and key and never leave it."
 
 /** Builds the disclosure notice for exactly the lanes being installed, or null if neither is. */
-export function buildPrivacyDisclosureNotice(lanes: { pixel: boolean; serverLane: boolean }): string | null {
+export function buildPrivacyDisclosureNotice(lanes: {
+  pixel: boolean
+  serverLane: boolean
+  metaAdvancedMatching?: boolean
+}): string | null {
   const parts: string[] = []
   if (lanes.pixel) parts.push(PIXEL_DISCLOSURE_FIELDS)
   if (lanes.serverLane) parts.push(SERVER_LANE_DISCLOSURE_FIELDS)
+  if (lanes.metaAdvancedMatching) parts.push(META_ADVANCED_MATCHING_DISCLOSURE_FIELDS)
   if (parts.length === 0) return null
   return `${PRIVACY_DISCLOSURE_CODE} — Installing Infinite adds a new data processor (Infinite / Ultima Inc., api.ultima.inc). Disclose it in your privacy policy BEFORE enabling collection. What is sent: ${parts.join(" ")}`
 }
@@ -518,7 +539,15 @@ function remindInfinitePrivacyDisclosure(ctx: Ctx): void {
     (entry) => entry.provider === "infinite" && (entry.action === "install" || entry.action === "upgrade")
   )
   const serverLane = Boolean(ctx.planResult?.plan.serverLane)
-  const notice = buildPrivacyDisclosureNotice({ pixel, serverLane })
+  // Only when Meta is actually being installed AND the customer opted in — a discovered artifact
+  // that merely records the flag while Meta is skipped must not produce a disclosure for a lane
+  // that is not there.
+  const metaAdvancedMatching =
+    ctx.keys?.artifacts.meta?.advancedMatching === true &&
+    ctx.classifications.some(
+      (entry) => entry.provider === "meta" && (entry.action === "install" || entry.action === "upgrade")
+    )
+  const notice = buildPrivacyDisclosureNotice({ pixel, serverLane, metaAdvancedMatching })
   if (!notice) return
   if (!ctx.report.nextSteps.includes(notice)) ctx.report.nextSteps.push(notice)
 }
@@ -750,6 +779,45 @@ const conversions: RunbookStep<Ctx> = {
   failure: {
     code: "INF_MARK_STALE_ELEMENT",
     message: (ctx) => ctx.marking?.stale.map((entry) => entry.message).join(" ") ?? "stale element",
+    next: "continue"
+  }
+}
+
+/**
+ * SETUP CORRECTNESS — the checks that ask whether something SHOULD have fired.
+ *
+ * Placed immediately after `mark` and run in EVERY mode, `--check` included: it reads source only,
+ * so it needs no deploy, no browser and no receipt window, and `mark` is both the step that writes
+ * `data-conversion` and the step whose "already marked" skip hid the original defect. It never
+ * touches the verification contract — the five receipt lanes stay exactly what they are, and this
+ * step can neither mint nor deny one.
+ *
+ * Its failure is `continue`: a miswired conversion is worth stopping a human for, never worth
+ * abandoning a half-finished install over.
+ */
+const setupChecks: RunbookStep<Ctx> = {
+  id: "setup-checks",
+  title: "Setup correctness",
+  run(ctx) {
+    if (ctx.args.brief) return { skipped: "--brief" }
+    const report = runSetupChecks(ctx.appRootAbsolute)
+    ctx.setupChecks = report
+    ctx.report.setupChecks = report
+    for (const line of setupFindingLines(report)) {
+      if (!ctx.report.nextSteps.includes(line)) ctx.report.nextSteps.push(line)
+    }
+    return { note: setupChecksNote(report) }
+  },
+  successCheck(ctx) {
+    return !(ctx.setupChecks?.findings ?? []).some((finding) => finding.state === "problem")
+  },
+  failure: {
+    code: "INF_SETUP_MISWIRED",
+    message: (ctx) =>
+      (ctx.setupChecks?.findings ?? [])
+        .filter((finding) => finding.state === "problem")
+        .map((finding) => finding.message)
+        .join(" "),
     next: "continue"
   }
 }
@@ -1098,6 +1166,7 @@ export const HARNESS_STEPS: ReadonlyArray<RunbookStep<Ctx>> = [
   confirm,
   apply,
   conversions,
+  setupChecks,
   serverLane,
   serverLaneEnv,
   verify,

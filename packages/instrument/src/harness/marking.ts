@@ -259,13 +259,13 @@ function stripMarkup(inner: string): string {
     .trim()
 }
 
-function attribute(openingTag: string, name: string): string | undefined {
+export function attribute(openingTag: string, name: string): string | undefined {
   const match = new RegExp(`\\b${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|\\{\\s*["'\`]([^"'\`]*)["'\`]\\s*\\})`).exec(openingTag)
   if (!match) return undefined
   return match[1] ?? match[2] ?? match[3]
 }
 
-function hasAttribute(openingTag: string, name: string): boolean {
+export function hasAttribute(openingTag: string, name: string): boolean {
   return new RegExp(`\\b${name}\\b`).test(openingTag)
 }
 
@@ -326,7 +326,7 @@ const OPENING_TAG_START = /<(a|Link|button)\b/g
  * End offset (exclusive) of the opening tag starting at `start`, honouring JSX expression
  * braces and quoted attribute values so an `onClick={() => x()}` never ends the tag early.
  */
-function openingTagEnd(contents: string, start: number): number | null {
+export function openingTagEnd(contents: string, start: number): number | null {
   let depth = 0
   let quote: string | null = null
   for (let index = start; index < contents.length; index += 1) {
