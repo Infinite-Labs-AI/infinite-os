@@ -10,10 +10,22 @@ import type {
   InteractiveTransitionResult,
 } from "@infinite-os/types";
 
+/**
+ * The narrow database surface the daemon injects. Row types are constrained to records so the
+ * engine's own `InfiniteOsDb` (pg or PGlite) satisfies it directly, without a cast adapter.
+ */
 export interface InteractiveTaskStoreDb {
-  query<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T[]>;
-  one<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T | null>;
+  query<T extends Record<string, unknown> = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T[]>;
+  one<T extends Record<string, unknown> = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T | null>;
   withTransaction<T>(fn: (tx: InteractiveTaskStoreDb) => Promise<T>): Promise<T>;
+}
+
+export interface InteractiveTaskStoreOptions {
+  /**
+   * Clock for authority checks (grant expiry at dispatch). Defaults to the system clock;
+   * inject a fixed clock in tests so expiry fixtures never depend on today's date.
+   */
+  now?: () => Date;
 }
 
 export interface CreateInteractiveTaskInput {

@@ -92,13 +92,66 @@ function turnResultTransition() {
             title: "Update fake campaign budget",
             target: "Alpha",
             summary: "Change the fake daily budget to USD 30.",
-          },
+          } as Record<string, unknown>,
           inputHash: "d".repeat(64),
           effect: "external_write" as const,
           replayPolicy: "reconcile_before_retry" as const,
           continuationKey: "continuation:invocation_1",
         },
       ],
+    },
+  };
+}
+
+// The store never reads the wall clock for authority. Tests pin time explicitly so an
+// expiry fixture cannot turn into a time bomb once the calendar passes it.
+function fixedClock(iso: string) {
+  let current = new Date(iso);
+  return {
+    now: () => new Date(current.getTime()),
+    set(next: string) { current = new Date(next); },
+  };
+}
+
+function approveTransition(expectedRevision: number, authorizationExpiresAt: string) {
+  return {
+    taskId: "task_1",
+    workspaceId: WORKSPACE_A,
+    actorId: ACTOR_A,
+    expectedRevision,
+    requestId: "request_approve",
+    requestHash: "1".repeat(64),
+    eventId: "event_approve",
+    transition: {
+      kind: "resolve_approval" as const,
+      invocationId: "invocation_1",
+      proposalRef: "P1",
+      proposalHash: "c".repeat(64),
+      inputHash: "d".repeat(64),
+      decision: "approve" as const,
+      preparedContextRevision: "context_boot_1",
+      authorizationExpiresAt,
+      decisionProvenance: "cmdl-confirm-button",
+    },
+  };
+}
+
+function dispatchTransition(expectedRevision: number, requestId = "request_dispatch") {
+  return {
+    taskId: "task_1",
+    workspaceId: WORKSPACE_A,
+    actorId: ACTOR_A,
+    expectedRevision,
+    requestId,
+    requestHash: "2".repeat(64),
+    eventId: `event_${requestId}`,
+    transition: {
+      kind: "claim_dispatch" as const,
+      invocationId: "invocation_1",
+      inputHash: "d".repeat(64),
+      proposalHash: "c".repeat(64),
+      preparedContextRevision: "context_boot_1",
+      serviceResumeKey: "fake-journal:invocation_1",
     },
   };
 }
@@ -196,7 +249,8 @@ describe("interactive task store", () => {
 
   it("keeps input and service resume keys immutable across approval, dispatch, and outcome", async () => {
     const { db } = await fixture();
-    const store = createInteractiveTaskStore(db);
+    // Inside the approval window (expires 21:09), whatever today's wall-clock date is.
+    const store = createInteractiveTaskStore(db, { now: fixedClock("2026-09-20T21:05:00.000Z").now });
     await store.createTask(taskInput());
     await store.transition(turnResultTransition());
 
@@ -284,6 +338,30 @@ describe("interactive task store", () => {
       receiptRef: "fake-receipt:1",
       continuationState: "pending",
     });
+  });
+
+  it("expires dispatch authority by the injected clock, not the wall clock", async () => {
+    const { db } = await fixture();
+    // Dates far in the wall-clock future: only the injected clock can make this grant expire.
+    const clock = fixedClock("2030-01-01T00:00:00.000Z");
+    const store = createInteractiveTaskStore(db, { now: clock.now });
+    await store.createTask(taskInput({ authorityExpiresAt: "2030-01-01T00:15:00.000Z" }));
+    await store.transition(turnResultTransition());
+    await store.transition(approveTransition(2, "2030-01-01T00:10:00.000Z"));
+
+    // The grant ends AT its expiry instant; a restored or delayed dispatch cannot use it.
+    clock.set("2030-01-01T00:10:00.000Z");
+    await expect(store.transition(dispatchTransition(3))).rejects.toMatchObject({
+      code: "action_authority_expired",
+    });
+    const detail = await store.getTask({ taskId: "task_1", workspaceId: WORKSPACE_A, actorId: ACTOR_A });
+    expect(detail?.task.revision).toBe(3);
+    expect(detail?.actions[0]).toMatchObject({ state: "authorized", serviceResumeKey: null });
+
+    // One millisecond earlier the same claim is inside the window.
+    clock.set("2030-01-01T00:09:59.999Z");
+    const dispatching = await store.transition(dispatchTransition(3, "request_dispatch_in_window"));
+    expect(dispatching.actions[0]).toMatchObject({ state: "dispatching" });
   });
 
   it("cancels only undispatched actions and preserves committed or uncertain effects", async () => {

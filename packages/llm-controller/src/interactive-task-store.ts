@@ -12,6 +12,7 @@ import type {
   CreateInteractiveTaskInput,
   InteractiveTaskStore,
   InteractiveTaskStoreDb,
+  InteractiveTaskStoreOptions,
   InteractiveTaskTransition,
   PreparedInteractiveActionInput,
 } from "./interactive-task-types.js";
@@ -234,7 +235,11 @@ async function insertEvent(db: InteractiveTaskStoreDb, input: ApplyInteractiveTa
   return row;
 }
 
-export function createInteractiveTaskStore(db: InteractiveTaskStoreDb): InteractiveTaskStore {
+export function createInteractiveTaskStore(
+  db: InteractiveTaskStoreDb,
+  options: InteractiveTaskStoreOptions = {},
+): InteractiveTaskStore {
+  const now = options.now ?? (() => new Date());
   return {
     async createTask(input) {
       validateCreate(input);
@@ -352,7 +357,8 @@ export function createInteractiveTaskStore(db: InteractiveTaskStoreDb): Interact
           if (action.preparedContextRevision !== transition.preparedContextRevision || action.authorizationContextRevision !== transition.preparedContextRevision) {
             throw new InteractiveTaskConflictError("action_identity_mismatch","Action was not prepared under the current authority.");
           }
-          if (!action.authorizationExpiresAt || Date.parse(iso(action.authorizationExpiresAt)) < Date.now()) throw new InteractiveTaskConflictError("action_authority_expired","Action authorization expired before dispatch.");
+          // A grant ends at its expiry instant; restore or delay can never extend it.
+          if (!action.authorizationExpiresAt || Date.parse(iso(action.authorizationExpiresAt)) <= now().getTime()) throw new InteractiveTaskConflictError("action_authority_expired","Action authorization expired before dispatch.");
           if (action.serviceResumeKey && action.serviceResumeKey !== transition.serviceResumeKey) throw new InteractiveTaskConflictError("action_identity_mismatch","Action service resume key changed.");
           await tx.query(`update interactive_action_refs set state='dispatching',service_resume_key=coalesce(service_resume_key,$2),
             revision=revision+1,updated_at=now() where invocation_id=$1 and task_id=$3 and workspace_id=$4 and actor_id=$5`,

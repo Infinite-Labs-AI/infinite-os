@@ -5,5 +5,10 @@
     "outDir": "dist"
   },
   "include": ["src/**/*.ts", "test/**/*.ts"],
-  "references": [{ "path": "../config" }, { "path": "../runtime" }, { "path": "../types" }]
+  "references": [
+    { "path": "../config" },
+    { "path": "../runtime" },
+    { "path": "../types" },
+    { "path": "../db" }
+  ]
 }
