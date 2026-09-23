@@ -13,7 +13,11 @@ export type MetaAdsRequestKind =
   | "ad_edge"
   | "campaign_insights"
   | "adset_insights"
-  | "ad_insights";
+  | "ad_insights"
+  // Meta async report jobs (the data-volume ladder's last rung): the job POST and each status
+  // poll are real budgeted calls; their result pages count under the grain's *_insights kind.
+  | "insights_async_submit"
+  | "insights_async_poll";
 
 export type MetaRequestLane =
   | "hot_insights"
@@ -44,6 +48,8 @@ const META_ADS_REQUEST_KINDS: readonly MetaAdsRequestKind[] = [
   "campaign_insights",
   "adset_insights",
   "ad_insights",
+  "insights_async_submit",
+  "insights_async_poll",
 ];
 
 export const META_ADS_DEFAULT_REQUEST_BUDGET = 500;

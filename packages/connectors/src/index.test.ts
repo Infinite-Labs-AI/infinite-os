@@ -40,6 +40,7 @@ import {
   type SyncPlan,
   type SyncRequest
 } from "./index.js";
+import { MetaAdsRequestBudgetError, MetaAdsRequestTelemetry } from "./meta-telemetry.js";
 
 
 describe("provider URL log redaction", () => {
@@ -3922,6 +3923,155 @@ describe("live provider clients", () => {
     // The sub-windows cover the whole month start→end (no silent truncation).
     expect(insightsRanges[0].since).toBe("2026-03-01");
     expect(insightsRanges[insightsRanges.length - 1].until).toBe("2026-03-31");
+  });
+
+  // ── Data-volume ladder: day rung + async-report last rung (meta-async-insights.ts) ──────────
+  const metaLiveDb = () => fakeDb({
+    credential: {
+      credential_kind: "marketing_api_access_token",
+      encrypted_payload: encryptedCredential({
+        mode: "live",
+        adAccountId: "9900000001",
+        accessToken: "meta-access-token",
+        apiVersion: "v25.0"
+      })
+    }
+  });
+  const volumeError = () => new Response(
+    JSON.stringify({ error: { message: "Please reduce the amount of data you're asking for, then retry your request", code: 100, error_subcode: 1487534 } }),
+    { status: 400, headers: { "Content-Type": "application/json" } }
+  );
+  async function extractAdWindow(since: string, until: string, handler: (url: string, init: RequestInit) => Response, telemetry?: MetaAdsRequestTelemetry) {
+    let rows: Array<Record<string, unknown>> = [];
+    await withMockFetch(async (url, init) => handler(url, init), async () => {
+      rows = await connectorFor("meta_ads").extract(
+        metaLiveDb(),
+        { ...request("meta_ads"), metaAdsInsightsLevel: "ad", windowSince: since, windowUntil: until },
+        {
+          cursorKey: "meta_ads_campaign_daily",
+          cursorStart: `${since}T00:00:00.000Z`,
+          cursorEnd: `${until}T00:00:00.000Z`,
+          refreshWindowDays: 30,
+          mode: "live",
+          ...(telemetry ? { metaAdsRequestTelemetry: telemetry } : {}),
+        }
+      ) as unknown as Array<Record<string, unknown>>;
+    });
+    return rows;
+  }
+
+  it("§4d ad: a 7-day settled slice that trips 1487534 narrows to DAYS instead of re-issuing the same week", async () => {
+    // FAIL-BEFORE: the ladder bottomed out at weeks, and the week split of a 7-day slice IS the
+    // slice — a second identical 1487534 then failed the run (the settled-history lane only ever
+    // sends 7-day slices, so a heavy account could never finish its history).
+    const insightsRanges: string[] = [];
+    const rows = await extractAdWindow("2026-06-01", "2026-06-07", (url) => {
+      if (!isMetaAdInsightsRequest(url)) return adProbeRouter(url);
+      const range = JSON.parse(new URL(url).searchParams.get("time_range") as string);
+      insightsRanges.push(`${range.since}..${range.until}`);
+      if (range.since !== range.until) return volumeError();
+      return jsonResponse({ data: range.since === "2026-06-01" ? AD_PROBE.insights : [], paging: {} });
+    });
+    expect(insightsRanges.filter((r) => r === "2026-06-01..2026-06-07")).toHaveLength(1);
+    expect(insightsRanges.slice(1)).toEqual(["01", "02", "03", "04", "05", "06", "07"].map((d) => `2026-06-${d}..2026-06-${d}`));
+    expect(rows.filter((row) => row.objectType === "meta_ads_ad_daily")).toHaveLength(AD_PROBE.insights.length);
+  });
+
+  it("§4d ad: code 1 with Meta's 'reduce the amount of data' message narrows too (bare code 1 does not)", async () => {
+    const insightsRanges: string[] = [];
+    await extractAdWindow("2026-06-01", "2026-06-02", (url) => {
+      if (!isMetaAdInsightsRequest(url)) return adProbeRouter(url);
+      const range = JSON.parse(new URL(url).searchParams.get("time_range") as string);
+      insightsRanges.push(`${range.since}..${range.until}`);
+      if (range.since !== range.until) return new Response(JSON.stringify({ error: { message: "Please reduce the amount of data you're asking for, then retry your request", code: 1 } }), { status: 500 });
+      return jsonResponse({ data: [], paging: {} });
+    });
+    expect(insightsRanges).toEqual(["2026-06-01..2026-06-02", "2026-06-01..2026-06-01", "2026-06-02..2026-06-02"]);
+    const bare: string[] = [];
+    await expect(extractAdWindow("2026-06-01", "2026-06-02", (url) => {
+      if (!isMetaAdInsightsRequest(url)) return adProbeRouter(url);
+      bare.push(url);
+      return new Response(JSON.stringify({ error: { message: "An unknown error has occurred.", code: 1 } }), { status: 500 });
+    })).rejects.toThrow(/provider request failed/);
+    expect(bare).toHaveLength(1);
+  });
+
+  it("§4d ad: a single day that still trips 1487534 runs as an async report job — rows identical to the sync path, every call budgeted", async () => {
+    const day = "2026-06-01";
+    const methods: string[] = [];
+    const syncTelemetry = new MetaAdsRequestTelemetry(100);
+    const syncRows = await extractAdWindow(day, day, (url, init) => {
+      methods.push((init.method ?? "GET").toUpperCase());
+      return adProbeRouter(url);
+    }, syncTelemetry);
+    // Small windows stay synchronous: no report job, no POST.
+    expect(methods.every((m) => m === "GET")).toBe(true);
+    expect(syncTelemetry.snapshot().byKind.insights_async_submit).toBe(0);
+
+    const asyncCalls: string[] = [];
+    let polls = 0;
+    const router = (url: string, init: RequestInit): Response => {
+      const parsed = new URL(url);
+      const method = (init.method ?? "GET").toUpperCase();
+      if (parsed.pathname === "/v25.0/act_9900000001/insights" && method === "POST") {
+        asyncCalls.push("submit");
+        expect(headerValue(init.headers, "Authorization")).toBe("Bearer meta-access-token");
+        expect(parsed.searchParams.get("level")).toBe("ad");
+        return jsonResponse({ report_run_id: "6021000000001" });
+      }
+      if (isMetaAdInsightsRequest(url)) return volumeError();
+      if (parsed.pathname === "/v25.0/6021000000001") {
+        asyncCalls.push("poll");
+        polls += 1;
+        return jsonResponse(polls === 1
+          ? { async_status: "Job Running", async_percent_completion: 30 }
+          : { async_status: "Job Completed", async_percent_completion: 100 });
+      }
+      if (parsed.pathname === "/v25.0/6021000000001/insights") {
+        asyncCalls.push("results");
+        return parsed.searchParams.get("after") === "p2"
+          ? jsonResponse({ data: AD_PROBE.insights.slice(2), paging: {} })
+          : jsonResponse({ data: AD_PROBE.insights.slice(0, 2), paging: { next: `${url}&after=p2` } });
+      }
+      return adProbeRouter(url);
+    };
+    const asyncTelemetry = new MetaAdsRequestTelemetry(100);
+    const asyncRows = await extractAdWindow(day, day, router, asyncTelemetry);
+    expect(asyncCalls).toEqual(["submit", "poll", "poll", "results", "results"]);
+    // Entity snapshots carry a wall-clock observedAt; the insights fact records are what must match.
+    const facts = (rows: Array<Record<string, unknown>>) => rows.filter((row) => row.objectType === "meta_ads_ad_daily");
+    expect(facts(asyncRows)).toHaveLength(AD_PROBE.insights.length);
+    expect(facts(asyncRows)).toEqual(facts(syncRows));
+
+    const syncSnap = syncTelemetry.snapshot();
+    const asyncSnap = asyncTelemetry.snapshot();
+    expect(asyncSnap.byKind.insights_async_submit).toBe(1);
+    expect(asyncSnap.byKind.insights_async_poll).toBe(2);
+    expect(asyncSnap.byKind.ad_insights).toBe(1 + 2); // the refused sync call + 2 result pages
+    // Same non-insights overhead either way. Sync spent 1 ad page; the async day spent the refused
+    // sync call + POST + 2 polls + 2 result pages = 6, i.e. 5 more calls for the same 3 rows.
+    expect(syncSnap.byKind.ad_insights).toBe(1);
+    expect(asyncSnap.requestCount - syncSnap.requestCount).toBe(1 + 1 + 2 + 2 - 1);
+
+    // Fail closed: one request short of the async job's needs → a budget stop, never an overrun,
+    // and no partial rows escape (extract throws).
+    const tight = new MetaAdsRequestTelemetry(asyncSnap.requestCount - 1);
+    polls = 0;
+    await expect(extractAdWindow(day, day, router, tight)).rejects.toBeInstanceOf(MetaAdsRequestBudgetError);
+    expect(tight.snapshot().requestCount).toBe(asyncSnap.requestCount - 1);
+    expect(tight.snapshot().budget.exhausted).toBe(true);
+  });
+
+  it("§4d ad: an async job that ends Job Failed fails the window retryably (no sync retry of the refused day)", async () => {
+    const insightsGets: string[] = [];
+    await expect(extractAdWindow("2026-06-01", "2026-06-01", (url, init) => {
+      const parsed = new URL(url);
+      if ((init.method ?? "GET").toUpperCase() === "POST") return jsonResponse({ report_run_id: "6021000000002" });
+      if (isMetaAdInsightsRequest(url)) { insightsGets.push(url); return volumeError(); }
+      if (parsed.pathname === "/v25.0/6021000000002") return jsonResponse({ async_status: "Job Failed", async_percent_completion: 0, error_code: 1 });
+      return adProbeRouter(url);
+    })).rejects.toMatchObject({ code: "provider_api_error", retryable: true, message: expect.stringContaining("Job Failed") });
+    expect(insightsGets).toHaveLength(1);
   });
 
   it("§4d ad: the backfill start is CLAMPED to the 37-month retention floor (older windows not requested)", async () => {
