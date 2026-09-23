@@ -1,3 +1,10 @@
+import {
+  META_ADS_HOT_ROLLUP_DERIVATION,
+  MetaAdsRollupError,
+  metaAdsAllStatusAdFiltering,
+  metaAdsHotLaneRollsUpFromAds,
+  rollUpMetaAdsAdInsights,
+} from "./meta-ads-hot-rollup.js";
 import { metaEntityReadMode } from "./meta-entity-checkpoint.js";
 import { metaAdsEntityVersionFingerprint } from "./meta-entity-fingerprint.js";
 import {
@@ -2566,7 +2573,31 @@ const metaAdsConnector = createConnector<MetaAdsCredential, MetaAdsSyncRow>({
       && requestedGrains.length === 3
       && timeOptions.timeRange?.since === timeOptions.timeRange?.until;
     plan.metaAdsAtomicOneDaySnapshot = usesOneDayBatch;
-    if (usesOneDayBatch) {
+    // HOT open-day lane ONLY: one all-status ad-grain read, parents derived by summation (see
+    // meta-ads-hot-rollup.ts). Every other lane keeps Meta's own three grains, so each settled day
+    // is replaced by Meta's campaign/ad set numbers (reach included).
+    const rollsUpFromAds = usesOneDayBatch && metaAdsHotLaneRollsUpFromAds(request.metaAdsRequestLane);
+    if (rollsUpFromAds) {
+      const adRows: MetaAdsInsightsRow[] = [];
+      await metaAdsFetchOneDayInsightsBatch({
+        credential,
+        accessToken,
+        adAccountId,
+        range: timeOptions.timeRange!,
+        timeIncrement,
+        telemetry,
+        signal: request.signal,
+        grains: ["ad"],
+        adRead: {
+          fields: metaAdsHotRollupAdFields(),
+          filtering: metaAdsAllStatusAdFiltering(),
+        },
+        onRow(_grain, row) {
+          adRows.push(row);
+        },
+      });
+      rows.push(...metaAdsHotRollupRows(adAccountId, adRows, context, campaignStatus, adsetDims, adDims));
+    } else if (usesOneDayBatch) {
       await metaAdsFetchOneDayInsightsBatch({
         credential,
         accessToken,
@@ -8869,6 +8900,8 @@ function metaAdsInsightsUrl(
     timeRange?: { since: string; until: string };
     // §4 — request per-window subvalues so the headline 7d_click+1d_view is computable.
     attributionWindows?: readonly string[];
+    // Insights `filtering` JSON. Only the hot open-day ad read sets it (all ad effective_statuses).
+    filtering?: string;
   }
 ): string {
   const url = new URL(`https://graph.facebook.com/${metaAdsApiVersion(credential)}/${options.adAccountId}/insights`);
@@ -8888,6 +8921,9 @@ function metaAdsInsightsUrl(
     // 7d_view / 28d_view are hard-excluded (removed Jan 2026); use_unified_attribution_setting
     // and action_report_time are no-ops post-2026-01-12 and deliberately NOT sent.
     url.searchParams.set("action_attribution_windows", JSON.stringify([...options.attributionWindows]));
+  }
+  if (options.filtering) {
+    url.searchParams.set("filtering", options.filtering);
   }
   return url.toString();
 }
@@ -9439,6 +9475,47 @@ function metaAdsBatchContinuation(relativeUrl: string, body: Record<string, unkn
   return `${relative.pathname.replace(/^\//, "")}${relative.search}`;
 }
 
+// Hot open-day ad read: the standard ad field list plus adset_name, so derived ad set rows carry
+// the name Meta reported today (the ad set dimension map remains the fallback).
+function metaAdsHotRollupAdFields(): string {
+  return `adset_name,${metaAdsInsightsFieldsForLevel("ad")}`;
+}
+
+// Build the hot lane's rows: Meta's ad rows as-is, plus campaign and ad set rows DERIVED from them
+// through the same builders (status maps, optimization_goal precedence and the canonical conversion
+// mapping all apply unchanged). Derived rows carry reach NULL and an `actions_raw.derivation` marker.
+function metaAdsHotRollupRows(
+  adAccountId: string,
+  adRows: readonly MetaAdsInsightsRow[],
+  context: MetaAdsInsightsContext,
+  campaignStatus: Map<string, MetaAdsEntityStatus>,
+  adsetDims: Map<string, MetaAdsAdsetDim>,
+  adDims: Map<string, MetaAdsAdDim>,
+): MetaAdsSyncRow[] {
+  let rollup: ReturnType<typeof rollUpMetaAdsAdInsights>;
+  try {
+    rollup = rollUpMetaAdsAdInsights(adRows);
+  } catch (error) {
+    if (error instanceof MetaAdsRollupError) throw new ConnectorError("provider_api_error", error.message, true);
+    throw error;
+  }
+  const derived = (adRowCount: number, actionsRaw: unknown) => ({
+    ...(actionsRaw as Record<string, unknown>),
+    derivation: { ...META_ADS_HOT_ROLLUP_DERIVATION, ad_rows: adRowCount },
+  });
+  return [
+    ...rollup.campaigns.map(({ row, adRowCount }) => {
+      const built = metaAdsCampaignDailyRow(adAccountId, row as MetaAdsInsightsRow, context, campaignStatus);
+      return { ...built, actionsRaw: derived(adRowCount, built.actionsRaw) };
+    }),
+    ...rollup.adsets.map(({ row, adRowCount }) => {
+      const built = metaAdsAdsetDailyRow(adAccountId, row as MetaAdsInsightsRow, context, adsetDims);
+      return { ...built, actionsRaw: derived(adRowCount, built.actionsRaw) };
+    }),
+    ...adRows.map(row => metaAdsAdDailyRow(adAccountId, row, context, adDims, adsetDims)),
+  ];
+}
+
 async function metaAdsFetchOneDayInsightsBatch(input: {
   credential: MetaAdsCredential;
   accessToken: string;
@@ -9447,19 +9524,24 @@ async function metaAdsFetchOneDayInsightsBatch(input: {
   timeIncrement: string;
   telemetry?: MetaAdsRequestObserver;
   signal?: AbortSignal;
+  /** Grains read in this batch. Defaults to all three; the hot open-day lane reads only "ad". */
+  grains?: readonly MetaAdsHistoryGrain[];
+  /** Hot-lane ad read shape: extra parent-name fields and the all-status ad filter. */
+  adRead?: { fields: string; filtering: string };
   onRow: (grain: MetaAdsHistoryGrain, row: MetaAdsInsightsRow) => void;
 }): Promise<void> {
   const apiVersion = metaAdsApiVersion(input.credential);
-  let pending = (["campaign", "adset", "ad"] as const).map(grain => ({
+  let pending = (input.grains ?? (["campaign", "adset", "ad"] as const)).map(grain => ({
     grain,
     relativeUrl: metaAdsBatchRelativeUrl(metaAdsInsightsUrl(input.credential, {
       adAccountId: input.adAccountId,
-      fields: metaAdsInsightsFieldsForLevel(grain),
+      fields: grain === "ad" && input.adRead ? input.adRead.fields : metaAdsInsightsFieldsForLevel(grain),
       level: grain,
       limit: "500",
       timeIncrement: input.timeIncrement,
       attributionWindows: META_ADS_ATTRIBUTION_WINDOWS,
       timeRange: input.range,
+      ...(grain === "ad" && input.adRead ? { filtering: input.adRead.filtering } : {}),
     }), apiVersion, input.adAccountId),
   }));
 
