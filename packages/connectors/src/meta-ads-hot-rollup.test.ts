@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  META_ADS_ADSET_EFFECTIVE_STATUSES,
   META_ADS_AD_EFFECTIVE_STATUSES,
+  META_ADS_CAMPAIGN_EFFECTIVE_STATUSES,
   META_ADS_HOT_ROLLUP_DERIVATION,
   metaAdsAllStatusAdFiltering,
+  metaAdsAllStatusFiltering,
   metaAdsHotLaneRollsUpFromAds,
   rollUpMetaAdsAdInsights,
 } from "./meta-ads-hot-rollup.js";
@@ -135,6 +138,19 @@ describe("hot-lane ad read shape", () => {
     expect(JSON.parse(metaAdsAllStatusAdFiltering())).toEqual([
       { field: "ad.effective_status", operator: "IN", value: META_ADS_AD_EFFECTIVE_STATUSES },
     ]);
+  });
+
+  it("filters each settled grain on ITS OWN object's documented statuses (an unknown value fails the request)", () => {
+    // facebook-python-business-sdk AdSet.EffectiveStatus / Campaign.EffectiveStatus.
+    expect(META_ADS_ADSET_EFFECTIVE_STATUSES).toEqual(["ACTIVE", "PAUSED", "DELETED", "CAMPAIGN_PAUSED", "ARCHIVED", "IN_PROCESS", "WITH_ISSUES"]);
+    expect(META_ADS_CAMPAIGN_EFFECTIVE_STATUSES).toEqual(["ACTIVE", "PAUSED", "DELETED", "ARCHIVED", "IN_PROCESS", "WITH_ISSUES"]);
+    expect(JSON.parse(metaAdsAllStatusFiltering("adset"))).toEqual([
+      { field: "adset.effective_status", operator: "IN", value: META_ADS_ADSET_EFFECTIVE_STATUSES },
+    ]);
+    expect(JSON.parse(metaAdsAllStatusFiltering("campaign"))).toEqual([
+      { field: "campaign.effective_status", operator: "IN", value: META_ADS_CAMPAIGN_EFFECTIVE_STATUSES },
+    ]);
+    expect(metaAdsAllStatusFiltering("ad")).toBe(metaAdsAllStatusAdFiltering());
   });
 
   it("rolls up ONLY for the hot open-day lane", () => {

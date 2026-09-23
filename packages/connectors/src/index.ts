@@ -2,9 +2,11 @@ import {
   META_ADS_HOT_ROLLUP_DERIVATION,
   MetaAdsRollupError,
   metaAdsAllStatusAdFiltering,
+  metaAdsAllStatusFiltering,
   metaAdsHotLaneRollsUpFromAds,
   rollUpMetaAdsAdInsights,
 } from "./meta-ads-hot-rollup.js";
+import { metaAdsAccountLivenessCursorKey, metaAdsAccountLivenessDue } from "./meta-account-liveness.js";
 import { metaEntityReadMode } from "./meta-entity-checkpoint.js";
 import { metaAdsEntityVersionFingerprint } from "./meta-entity-fingerprint.js";
 import {
@@ -190,6 +192,9 @@ export interface SyncPlan {
   // so provider-specific methods cannot be called across lanes by accident.
   metaAdsRequestTelemetry?: MetaAdsRequestTelemetry;
   metaAdsAccountMetadata?: MetaAdsAccountMetadata;
+  // Set only when THIS run read the account node over Graph; committed at CLOSE as the inventory
+  // lane's once-per-24h liveness cursor (meta-account-liveness.ts).
+  metaAdsAccountLivenessReadAt?: string;
   // GA4-only. Snapshot-replacement state, carried from EXTRACT into CLOSE (the Stripe checkpoint
   // pattern): EXTRACT records the exact refreshed [start, end] date window, how many rows each
   // report staged, and the response's property metadata; CLOSE prunes fact rows inside that window
@@ -2395,13 +2400,22 @@ const metaAdsConnector = createConnector<MetaAdsCredential, MetaAdsSyncRow>({
       });
     } else if (depth === "liveness") {
       // The one per-sync liveness request also captures the account reporting calendar and currency,
-      // keeping the complete three-grain no-pagination floor at seven Graph calls.
-      accountMetadata = await metaAdsReadAccountMetadata(
-        credential,
-        request.signal,
-        plan?.metaAdsRequestTelemetry,
-      );
-      if (plan) plan.metaAdsAccountMetadata = accountMetadata;
+      // keeping the complete three-grain no-pagination floor at seven Graph calls. An INVENTORY scan
+      // consumes neither, and its own entity reads surface a revoked token in the same run, so it
+      // re-reads the account node at most once per 24h (see meta-account-liveness.ts).
+      const inventorySkipsRead = request.metaAdsSyncMode === "inventory_only"
+        && !metaAdsAccountLivenessDue(await metaAdsAccountLivenessReadAt(_db, request, adAccountId), new Date());
+      if (!inventorySkipsRead) {
+        accountMetadata = await metaAdsReadAccountMetadata(
+          credential,
+          request.signal,
+          plan?.metaAdsRequestTelemetry,
+        );
+        if (plan) {
+          plan.metaAdsAccountMetadata = accountMetadata;
+          plan.metaAdsAccountLivenessReadAt = new Date().toISOString();
+        }
+      }
     } else {
       // Primary direct-Graph probe. Also taken by transport=meta_ads_cli credentials that
       // store their own accessToken (see metaAdsReadsViaCli) so the test reflects CREDENTIAL
@@ -2613,7 +2627,8 @@ const metaAdsConnector = createConnector<MetaAdsCredential, MetaAdsSyncRow>({
     plan.metaAdsAtomicOneDaySnapshot = usesOneDayBatch;
     // HOT open-day lane ONLY: one all-status ad-grain read, parents derived by summation (see
     // meta-ads-hot-rollup.ts). Every other lane keeps Meta's own three grains, so each settled day
-    // is replaced by Meta's campaign/ad set numbers (reach included).
+    // is replaced by Meta's campaign/ad set numbers (reach included) — read in every status too, so
+    // a deleted ad's day survives settlement instead of being pruned.
     const rollsUpFromAds = usesOneDayBatch && metaAdsHotLaneRollsUpFromAds(request.metaAdsRequestLane);
     if (rollsUpFromAds) {
       const adRows: MetaAdsInsightsRow[] = [];
@@ -2662,7 +2677,7 @@ const metaAdsConnector = createConnector<MetaAdsCredential, MetaAdsSyncRow>({
       const urlFor = (range: MetaAdsDateWindow) => metaAdsInsightsUrl(credential, {
         adAccountId, fields: metaAdsInsightsFieldsForLevel(grain), level: grain,
         limit: "500", timeIncrement, attributionWindows: META_ADS_ATTRIBUTION_WINDOWS,
-        timeRange: range,
+        timeRange: range, filtering: metaAdsAllStatusFiltering(grain),
       });
       const trailing = timeOptions.timeRange ?? {
         since: cursorStartIso(plan).slice(0, 10), until: plan.cursorEnd.slice(0, 10),
@@ -2695,7 +2710,9 @@ const metaAdsConnector = createConnector<MetaAdsCredential, MetaAdsSyncRow>({
           limit: "500",
           timeIncrement,
           timeRange: range,
-          attributionWindows: META_ADS_ATTRIBUTION_WINDOWS
+          attributionWindows: META_ADS_ATTRIBUTION_WINDOWS,
+          // Deleted/archived ads' stats are omitted from level=ad results unless filtered for.
+          filtering: metaAdsAllStatusFiltering("ad"),
         });
       // The chunked windows are resolved from the plan (all_time → no timeRange; bounded backfill
       // → a finite timeRange). For the single-request path we need a concrete trailing window.
@@ -3973,6 +3990,20 @@ async function metaAdsCloseSuccess(
 ): Promise<void> {
   const replacement = plan.metaAdsSnapshotReplacement;
   const entitySnapshot = plan.metaAdsEntitySnapshot;
+  // Committed only on a successful CLOSE, so a failed run never suppresses the next account read.
+  if (plan.metaAdsAccountLivenessReadAt && plan.metaAdsAccountMetadata) {
+    await tx.query(
+      `insert into sync_cursors(id,workspace_id,source_id,cursor_key,cursor_value) values($1,$2,$3,$4,$5)
+       on conflict(source_id,cursor_key) do update set cursor_value=greatest(sync_cursors.cursor_value,excluded.cursor_value),updated_at=now()`,
+      [
+        `cursor_${randomUUID()}`,
+        request.workspaceId,
+        request.sourceId,
+        metaAdsAccountLivenessCursorKey(plan.metaAdsAccountMetadata.adAccountId),
+        plan.metaAdsAccountLivenessReadAt,
+      ],
+    );
+  }
   if (!replacement && !entitySnapshot) return;
 
   if (replacement) {
@@ -8942,7 +8973,8 @@ function metaAdsInsightsUrl(
     timeRange?: { since: string; until: string };
     // §4 — request per-window subvalues so the headline 7d_click+1d_view is computable.
     attributionWindows?: readonly string[];
-    // Insights `filtering` JSON. Only the hot open-day ad read sets it (all ad effective_statuses).
+    // Insights `filtering` JSON. Every direct-Graph history read sets the all-status filter for its
+    // own level (metaAdsAllStatusFiltering); only the connect-time probe leaves it unset.
     filtering?: string;
   }
 ): string {
@@ -9394,6 +9426,18 @@ async function metaAdsReadAccountMetadata(
   };
 }
 
+async function metaAdsAccountLivenessReadAt(
+  db: InfiniteOsDb,
+  request: SyncRequest,
+  adAccountId: string,
+): Promise<string | null> {
+  const row = await db.one<{ cursor_value: string }>(
+    "select cursor_value from sync_cursors where workspace_id = $1 and source_id = $2 and cursor_key = $3",
+    [request.workspaceId, request.sourceId, metaAdsAccountLivenessCursorKey(adAccountId)],
+  );
+  return row?.cursor_value ?? null;
+}
+
 async function assertMetaAdsSourceAccountBinding(
   db: InfiniteOsDb,
   request: SyncRequest,
@@ -9568,7 +9612,7 @@ async function metaAdsFetchOneDayInsightsBatch(input: {
   signal?: AbortSignal;
   /** Grains read in this batch. Defaults to all three; the hot open-day lane reads only "ad". */
   grains?: readonly MetaAdsHistoryGrain[];
-  /** Hot-lane ad read shape: extra parent-name fields and the all-status ad filter. */
+  /** Hot-lane ad read shape: extra parent-name fields and its (all-status) ad filter. */
   adRead?: { fields: string; filtering: string };
   onRow: (grain: MetaAdsHistoryGrain, row: MetaAdsInsightsRow) => void;
 }): Promise<void> {
@@ -9583,7 +9627,9 @@ async function metaAdsFetchOneDayInsightsBatch(input: {
       timeIncrement: input.timeIncrement,
       attributionWindows: META_ADS_ATTRIBUTION_WINDOWS,
       timeRange: input.range,
-      ...(grain === "ad" && input.adRead ? { filtering: input.adRead.filtering } : {}),
+      // Every grain reads its objects in EVERY status (Meta omits archived/deleted objects' stats
+      // from level=<grain> results by default); the hot lane's adRead carries the same ad filter.
+      filtering: grain === "ad" && input.adRead ? input.adRead.filtering : metaAdsAllStatusFiltering(grain),
     }), apiVersion, input.adAccountId),
   }));
 

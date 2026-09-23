@@ -7,7 +7,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { encryptCredentialPayload } from "@infinite-os/core";
 import { createInfiniteOsDb, runMigrations, type InfiniteOsDb } from "@infinite-os/db";
 
-import { connectorFor, type SyncRequest } from "./index.js";
+import { classifySyncFailure, connectorFor, type SyncRequest } from "./index.js";
 import {
   META_ADS_AD_FULL_FIELDS,
   META_ADS_AD_LEAN_FIELDS,
@@ -177,6 +177,14 @@ function graphEdgePage(nodes: Node[], url: URL): Response {
   return new Response(JSON.stringify({ data: page, ...(paging ? { paging } : {}) }), { status: 200, headers: { "content-type": "application/json" } });
 }
 
+/** Meta's answer to a revoked/expired token: HTTP 400 with an OAuthException code-190 body. */
+function revokedTokenResponse(): Response {
+  return new Response(
+    JSON.stringify({ error: { message: "Error validating access token: The session has been invalidated.", type: "OAuthException", code: 190, error_subcode: 460 } }),
+    { status: 400, headers: { "content-type": "application/json" } },
+  );
+}
+
 /** The Chargerless 1 shape: 25 campaigns (7 archived), 222 ad sets (12 archived), 460 ads (45 archived). */
 function prodShapeAccount(): Account {
   const campaigns: Node[] = Array.from({ length: 25 }, (_, i) => {
@@ -244,8 +252,9 @@ describe("lean Meta inventory reads against real PGlite", () => {
   }
 
   type FullAdRead = { mode: "lean" | "heavy"; fallback: string | null } | undefined;
-  async function sync(account: Account, syncRequest: SyncRequest): Promise<{ edges: EdgeRequest[]; byKind: Record<string, number>; requestCount: number; fullAdRead: FullAdRead }> {
+  async function sync(account: Account, syncRequest: SyncRequest, options: { revoked?: boolean } = {}): Promise<{ edges: EdgeRequest[]; byKind: Record<string, number>; requestCount: number; fullAdRead: FullAdRead; error?: unknown }> {
     const edges: EdgeRequest[] = [];
+    let error: unknown;
     const original = globalThis.fetch;
     globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
       const url = new URL(typeof input === "string" || input instanceof URL ? input.toString() : input.url);
@@ -258,6 +267,7 @@ describe("lean Meta inventory reads against real PGlite", () => {
         });
         return new Response(JSON.stringify(items), { status: 200, headers });
       }
+      if (options.revoked) return revokedTokenResponse();
       if (url.pathname.endsWith(`/${ACCOUNT}`)) {
         return new Response(JSON.stringify({ id: ACCOUNT, account_id: "777", currency: "USD", timezone_name: "America/New_York" }), { status: 200, headers });
       }
@@ -278,12 +288,15 @@ describe("lean Meta inventory reads against real PGlite", () => {
     }) as typeof fetch;
     try {
       await connectorFor("meta_ads").sync(db, syncRequest);
+    } catch (caught) {
+      if (!options.revoked) throw caught;
+      error = caught;
     } finally {
       globalThis.fetch = original;
     }
     const telemetry = (await db.query<{ request_telemetry: { byKind: Record<string, number>; requestCount: number; fullAdRead?: FullAdRead } }>(
       "select request_telemetry from sync_runs where id=$1", [syncRequest.syncRunId]))[0]!.request_telemetry;
-    return { edges, byKind: telemetry.byKind, requestCount: telemetry.requestCount, fullAdRead: telemetry.fullAdRead };
+    return { edges, byKind: telemetry.byKind, requestCount: telemetry.requestCount, fullAdRead: telemetry.fullAdRead, error };
   }
 
   function edgeCalls(byKind: Record<string, number>) {
@@ -325,9 +338,10 @@ describe("lean Meta inventory reads against real PGlite", () => {
       { entity_type: "creative", total: 460, current: 460 },
     ]);
 
-    // Incremental with nothing changed: one call per edge (campaigns are always a complete read).
+    // Incremental with nothing changed: one call per edge (campaigns are always a complete read),
+    // and no account read — the first scan's liveness read is good for 24h.
     const quiet = await sync(account, request(workspaceId, sourceId));
-    expect(edgeCalls(quiet.byKind)).toEqual({ account_liveness: 1, campaign_edge: 1, adset_edge: 1, ad_edge: 1 });
+    expect(edgeCalls(quiet.byKind)).toEqual({ account_liveness: 0, campaign_edge: 1, adset_edge: 1, ad_edge: 1 });
     expect(quiet.edges.find((call) => call.edge === "campaigns")?.updatedSince).toBeNull();
     // Incremental scans do not read the full ad snapshot at all.
     expect(quiet.fullAdRead).toBeUndefined();
@@ -335,7 +349,7 @@ describe("lean Meta inventory reads against real PGlite", () => {
     // Incremental with three changed ads: still one ad call (before: 2 — the empty follow-up).
     for (const ad of account.ads.slice(100, 103)) { ad.name = `${String(ad.name)} v2`; ad.updated_time = new Date().toISOString(); }
     const changed = await sync(account, request(workspaceId, sourceId));
-    expect(edgeCalls(changed.byKind)).toEqual({ account_liveness: 1, campaign_edge: 1, adset_edge: 1, ad_edge: 1 });
+    expect(edgeCalls(changed.byKind)).toEqual({ account_liveness: 0, campaign_edge: 1, adset_edge: 1, ad_edge: 1 });
     expect((await currentAd(sourceId, "a100"))[0]?.metadata_json.name).toBe("Ad 100 v2");
   }, 120_000);
 
@@ -352,8 +366,8 @@ describe("lean Meta inventory reads against real PGlite", () => {
     await forceNextScanFull(sourceId);
     const lean = await sync(account, request(workspaceId, sourceId));
     // Before: ad_edge 6 (5 heavy pages of 100 + an empty follow-up). After: one heavy delta + one lean page.
-    expect(edgeCalls(lean.byKind)).toEqual({ account_liveness: 1, campaign_edge: 1, adset_edge: 1, ad_edge: 2 });
-    expect(lean.requestCount).toBe(5);
+    expect(edgeCalls(lean.byKind)).toEqual({ account_liveness: 0, campaign_edge: 1, adset_edge: 1, ad_edge: 2 });
+    expect(lean.requestCount).toBe(4);
     expect(lean.fullAdRead).toEqual({ mode: "lean", fallback: null });
     const adCalls = lean.edges.filter((call) => call.edge === "ads");
     expect(adCalls).toEqual([
@@ -521,5 +535,53 @@ describe("lean Meta inventory reads against real PGlite", () => {
       "select metadata_json->>'name' as name, valid_to is null as current from meta_ads_entity_versions where source_id=$1 and entity_type='creative' and entity_id='cr100' order by first_observed_at, id",
       [sourceId]);
     expect(final).toEqual([{ name: null, current: false }, { name: "Renamed creative", current: true }]);
+  }, 120_000);
+
+  it("reads the account node at most once per 24h on inventory scans, and a revoked token still fails the very next scan", async () => {
+    const workspaceId = `ws_lean_liveness_${randomUUID()}`, sourceId = `src_lean_liveness_${randomUUID()}`;
+    await seedSource(workspaceId, sourceId);
+    const account = prodShapeAccount();
+    const livenessCursor = async () => (await db.query<{ cursor_value: string }>(
+      "select cursor_value from sync_cursors where source_id=$1 and cursor_key=$2", [sourceId, `meta_ads_account_liveness:${ACCOUNT}`]))[0]?.cursor_value;
+
+    // First scan: no cursor → one account read, committed at CLOSE.
+    const first = await sync(account, request(workspaceId, sourceId));
+    expect(first.byKind.account_liveness).toBe(1);
+    const readAt = await livenessCursor();
+    expect(Date.now() - Date.parse(readAt!)).toBeLessThan(60_000);
+
+    // Within 24h: no account read (before: one per scan, 12+/day at the 2-hour cadence).
+    for (let i = 0; i < 3; i += 1) {
+      const scan = await sync(account, request(workspaceId, sourceId));
+      expect(scan.byKind.account_liveness).toBe(0);
+    }
+    expect(await livenessCursor()).toBe(readAt);
+
+    // 24h later: read again, cursor advances.
+    await db.query("update sync_cursors set cursor_value=$3 where source_id=$1 and cursor_key=$2",
+      [sourceId, `meta_ads_account_liveness:${ACCOUNT}`, new Date(Date.now() - 24 * 60 * 60 * 1000 - 1000).toISOString()]);
+    const stale = await sync(account, request(workspaceId, sourceId));
+    expect(stale.byKind.account_liveness).toBe(1);
+    expect(Date.parse((await livenessCursor())!)).toBeGreaterThan(Date.parse(readAt!));
+
+    // A future-dated cursor (clock skew) never suppresses the read.
+    await db.query("update sync_cursors set cursor_value='2099-01-01T00:00:00.000Z' where source_id=$1 and cursor_key=$2",
+      [sourceId, `meta_ads_account_liveness:${ACCOUNT}`]);
+    expect((await sync(account, request(workspaceId, sourceId))).byKind.account_liveness).toBe(1);
+    await db.query("update sync_cursors set cursor_value=$3 where source_id=$1 and cursor_key=$2",
+      [sourceId, `meta_ads_account_liveness:${ACCOUNT}`, new Date().toISOString()]);
+
+    // Token revoked while the liveness read is skipped: the scan's own entity reads hit Meta's
+    // OAuthException 190 and the run fails with the credential-grade error — same run, no account read.
+    const revoked = await sync(account, request(workspaceId, sourceId), { revoked: true });
+    expect(revoked.error).toBeInstanceOf(Error);
+    expect(revoked.byKind.account_liveness).toBe(0);
+    const [failure] = await db.query<{ error_code: string; error_message: string; retryable: boolean }>(
+      "select e.error_code, e.error_message, e.retryable from sync_errors e join sync_runs r on r.id=e.sync_run_id where r.source_id=$1 and r.status='failed'",
+      [sourceId]);
+    expect(failure?.error_message).toContain("\"code\":190");
+    expect(classifySyncFailure({ code: failure!.error_code, message: failure!.error_message, retryable: failure!.retryable })).toBe("terminal");
+    // A failed scan never advances the liveness cursor.
+    expect(Date.now() - Date.parse((await livenessCursor())!)).toBeLessThan(60_000);
   }, 120_000);
 });

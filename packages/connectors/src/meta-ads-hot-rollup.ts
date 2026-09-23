@@ -21,9 +21,13 @@
  *    "does not return stats for the deleted object"; "You can query insights for DELETED objects
  *    using the ad.effective_status filter"). The hot read therefore filters on EVERY ad
  *    effective_status so the rolled-up totals match a campaign-level read.
- *  - Settled, restatement, backfill and attended-refresh reads are untouched: they keep reading
- *    all three grains from Meta, so every settled day is replaced by Meta's own campaign/ad set
- *    numbers (reach included).
+ *  - Settled, restatement, backfill and attended-refresh reads keep reading all three grains from
+ *    Meta, so every settled day is replaced by Meta's own campaign/ad set numbers (reach included).
+ *    They send the same all-status filter at each read's OWN level (metaAdsAllStatusFiltering):
+ *    the same doc's status table marks Archived and Deleted objects as NOT included in
+ *    `/<PARENT_OBJECT_ID>/insights?level=<OBJECT_LEVEL>` results at every level, so an unfiltered
+ *    settled read would drop a deleted ad's (or ad set's, or campaign's) day — ad rows would no
+ *    longer sum to the campaign row, and the settled CLOSE would prune the hot lane's row for it.
  */
 
 /** Every documented Ad `effective_status` (Graph Ad reference). Unknown values fail the request. */
@@ -42,11 +46,49 @@ export const META_ADS_AD_EFFECTIVE_STATUSES = [
   "WITH_ISSUES",
 ] as const;
 
+/** Every documented Ad Set `effective_status` (Graph Ad Set reference / business SDK enum). */
+export const META_ADS_ADSET_EFFECTIVE_STATUSES = [
+  "ACTIVE",
+  "PAUSED",
+  "DELETED",
+  "CAMPAIGN_PAUSED",
+  "ARCHIVED",
+  "IN_PROCESS",
+  "WITH_ISSUES",
+] as const;
+
+/** Every documented Campaign `effective_status` (Graph Campaign reference / business SDK enum). */
+export const META_ADS_CAMPAIGN_EFFECTIVE_STATUSES = [
+  "ACTIVE",
+  "PAUSED",
+  "DELETED",
+  "ARCHIVED",
+  "IN_PROCESS",
+  "WITH_ISSUES",
+] as const;
+
+const ALL_STATUSES_BY_LEVEL = {
+  ad: META_ADS_AD_EFFECTIVE_STATUSES,
+  adset: META_ADS_ADSET_EFFECTIVE_STATUSES,
+  campaign: META_ADS_CAMPAIGN_EFFECTIVE_STATUSES,
+} as const;
+
+/**
+ * Insights `filtering` value that returns stats for objects of `level` in every status, incl.
+ * ARCHIVED/DELETED — `<level>.effective_status IN <every documented status for that object>`.
+ * Filtering at the read's own level is the documented way to get deleted objects' stats back
+ * ("Manage Your Ad Object's Status"); an unknown status value fails the request, so each level
+ * carries only its own object's enum.
+ */
+export function metaAdsAllStatusFiltering(level: keyof typeof ALL_STATUSES_BY_LEVEL): string {
+  return JSON.stringify([
+    { field: `${level}.effective_status`, operator: "IN", value: [...ALL_STATUSES_BY_LEVEL[level]] },
+  ]);
+}
+
 /** Insights `filtering` value that returns stats for ads in every status, incl. ARCHIVED/DELETED. */
 export function metaAdsAllStatusAdFiltering(): string {
-  return JSON.stringify([
-    { field: "ad.effective_status", operator: "IN", value: [...META_ADS_AD_EFFECTIVE_STATUSES] },
-  ]);
+  return metaAdsAllStatusFiltering("ad");
 }
 
 /**
