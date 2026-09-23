@@ -1012,7 +1012,7 @@ describe("Meta Ads history CLOSE against real PGlite", () => {
     expect(edgeCalls).toBe(0);
     expect(providerRequests).toEqual([{pathname:"/v25.0/",method:"POST"}]);
     expect(batches).toHaveLength(1);
-    expect(batches[0]?.map(url => new URL(url, "https://graph.facebook.com/v25.0/").searchParams.get("level"))).toEqual(["campaign", "adset", "ad"]);
+    expect(batches[0]?.map(url => new URL(url, "https://graph.facebook.com/v25.0/").searchParams.get("level"))).toEqual(["ad"]);
     expect(await db.query("select ad_id from meta_ads_ad_daily where source_id=$1 and occurred_on='2026-09-02'",[sourceId])).toEqual([{ad_id:"a1"}]);
     expect(await db.query("select cursor_key,cursor_value from sync_cursors where source_id=$1 and cursor_key like 'meta_ads_entities_%' order by cursor_key",[sourceId])).toEqual(entityCursorBefore);
     expect(await db.query("select entity_id,last_observed_at::text from meta_ads_entity_versions where source_id=$1 and entity_type='ad' and valid_to is null order by entity_id",[sourceId])).toEqual(entityObservedBefore);
@@ -1023,10 +1023,145 @@ describe("Meta Ads history CLOSE against real PGlite", () => {
     expect(telemetry).toMatchObject({
       schemaVersion: 2,
       lane: "hot_insights",
-      requestCount: 3,
-      pageCount: 3,
-      budget: { limit: 12, remaining: 9, exhausted: false },
+      requestCount: 1,
+      pageCount: 1,
+      budget: { limit: 12, remaining: 11, exhausted: false },
     });
+  }, 120_000);
+
+  it("hot lane reads TODAY with ONE all-status ad request and derives campaign + ad set rows from it", async () => {
+    const workspaceId = `ws_meta_hot_rollup_${randomUUID()}`;
+    const sourceId = `src_meta_hot_rollup_${randomUUID()}`;
+    await seedSource(workspaceId, sourceId);
+    await withMetaFetch(fixture("2026-09-01"), () =>
+      connectorFor("meta_ads").sync(db, syncRequest(workspaceId, sourceId, "2026-09-01", "2026-09-01"))
+    );
+    const day = "2026-09-02";
+    const next = fixture(day);
+    // Meta's own campaign/ad set rows are poisoned: the hot lane must never read them.
+    next.campaignInsights[0]!.spend = "999";
+    next.adsetInsights[0]!.spend = "999";
+    next.adInsights[0]!.reach = "800";
+    next.adInsights.push({
+      // An ad deleted today: absent from the /ads edge, present only because the read asks for
+      // every ad.effective_status. Its spend must reach the rolled-up campaign and ad set.
+      date_start: day, spend: "20", clicks: "5", impressions: "500", reach: "400", account_currency: "GBP",
+      inline_link_clicks: "3", campaign_id: "c1", campaign_name: "Campaign", adset_id: "s1", adset_name: "UK buyers",
+      ad_id: "a_deleted", ad_name: "Deleted ad", objective: "OUTCOME_LEADS",
+      actions: [{ action_type: "lead", "7d_click": "1" }, { action_type: "landing_page_view", "7d_click": "4" }],
+      action_values: [],
+    });
+    const batches: string[][] = [];
+    next.onBatch = urls => batches.push(urls);
+    const request: SyncRequest = {
+      ...syncRequest(workspaceId, sourceId, day, day),
+      metaAdsSyncMode: "insights_only",
+      metaAdsRequestLane: "hot_insights",
+      metaAdsRequestBudget: 12,
+    };
+    await withMetaFetch(next, () => connectorFor("meta_ads").sync(db, request));
+
+    expect(batches).toHaveLength(1);
+    expect(batches[0]).toHaveLength(1);
+    const read = new URL(batches[0]![0]!, "https://graph.facebook.com/v25.0/");
+    expect(read.searchParams.get("level")).toBe("ad");
+    expect(read.searchParams.get("fields")?.split(",")).toEqual(expect.arrayContaining(["ad_id", "adset_id", "adset_name", "campaign_id", "campaign_name"]));
+    expect(JSON.parse(read.searchParams.get("filtering") ?? "null")).toEqual([{
+      field: "ad.effective_status",
+      operator: "IN",
+      value: ["ACTIVE", "PAUSED", "DELETED", "PENDING_REVIEW", "DISAPPROVED", "PREAPPROVED", "PENDING_BILLING_INFO", "CAMPAIGN_PAUSED", "ARCHIVED", "ADSET_PAUSED", "IN_PROCESS", "WITH_ISSUES"],
+    }]);
+
+    const telemetry = (await db.query<{ request_telemetry: Record<string, unknown> }>(
+      "select request_telemetry from sync_runs where id=$1", [request.syncRunId],
+    ))[0]?.request_telemetry;
+    expect(telemetry).toMatchObject({
+      lane: "hot_insights", requestCount: 1, pageCount: 1, budget: { limit: 12, remaining: 11, exhausted: false },
+    });
+
+    expect(await db.query("select ad_id,spend::float8 as spend from meta_ads_ad_daily where source_id=$1 and occurred_on=$2 order by ad_id", [sourceId, day]))
+      .toEqual([{ ad_id: "a1", spend: 50 }, { ad_id: "a_deleted", spend: 20 }]);
+    for (const [table, key] of [["meta_ads_campaign_daily", "campaign_id"], ["meta_ads_adset_daily", "adset_id"]] as const) {
+      const rows = await db.query<Record<string, unknown>>(
+        `select ${key} as id,spend::float8 as spend,clicks,impressions,inline_link_clicks,landing_page_views,reach,
+                ctr::float8 as ctr,cpc::float8 as cpc,cpm::float8 as cpm,actions_raw->'derivation' as derivation
+           from ${table} where source_id=$1 and occurred_on=$2`,
+        [sourceId, day],
+      );
+      expect(rows).toHaveLength(1);
+      const row = rows[0]!;
+      expect(row).toMatchObject({ spend: 70, reach: null, derivation: { method: "sum_of_ad_insights", version: 1, source_grain: "ad", ad_rows: 2 } });
+      expect(Number(row.clicks)).toBe(15);
+      expect(Number(row.impressions)).toBe(1500);
+      expect(Number(row.inline_link_clicks)).toBe(3);
+      expect(Number(row.landing_page_views)).toBe(4);
+      expect(row.ctr as number).toBeCloseTo(1, 5);
+      expect(row.cpc as number).toBeCloseTo(70 / 15, 5);
+      expect(row.cpm as number).toBeCloseTo(70 / 1500 * 1000, 5);
+    }
+    expect(await db.query("select actions_raw->'derivation' as derivation from meta_ads_ad_daily where source_id=$1 and occurred_on=$2 and ad_id='a1'", [sourceId, day]))
+      .toEqual([{ derivation: null }]);
+    for (const table of ["meta_ads_campaign_conversions_daily", "meta_ads_adset_conversions_daily"]) {
+      expect(await db.query(
+        `select result_type,results::float8 as results,conversion_value::float8 as conversion_value,is_primary,results_source
+           from ${table} where source_id=$1 and occurred_on=$2 order by result_type`,
+        [sourceId, day],
+      )).toEqual([
+        { result_type: "lead", results: 4, conversion_value: null, is_primary: true, results_source: "derived_from_canonical_mapping" },
+        { result_type: "purchase", results: 2, conversion_value: 125, is_primary: false, results_source: "derived_from_canonical_mapping" },
+      ]);
+    }
+    expect(await db.query("select grain,row_count from meta_ads_coverage_daily where source_id=$1 and occurred_on=$2 order by grain", [sourceId, day]))
+      .toEqual([{ grain: "ad", row_count: 2 }, { grain: "adset", row_count: 1 }, { grain: "campaign", row_count: 1 }]);
+  }, 120_000);
+
+  it("hot lane rolls up across every ad page and counts one request per page", async () => {
+    const workspaceId = `ws_meta_hot_rollup_pages_${randomUUID()}`;
+    const sourceId = `src_meta_hot_rollup_pages_${randomUUID()}`;
+    await seedSource(workspaceId, sourceId);
+    await withMetaFetch(fixture("2026-09-01"), () =>
+      connectorFor("meta_ads").sync(db, syncRequest(workspaceId, sourceId, "2026-09-01", "2026-09-01"))
+    );
+    const day = "2026-09-02";
+    const next = fixture(day, { includeSecondAd: true });
+    const [first, second] = next.adInsights;
+    const batches: string[][] = [];
+    next.onBatch = urls => batches.push(urls);
+    next.batchItem = (_level, url) => url.searchParams.has("after")
+      ? { body: { data: [second], paging: {} } }
+      : { body: { data: [first], paging: { cursors: { after: "ad-page-2" }, next: `https://graph.facebook.com/v25.0/${ACCOUNT}/insights?level=ad&after=ad-page-2` } } };
+    const request: SyncRequest = { ...syncRequest(workspaceId, sourceId, day, day), metaAdsSyncMode: "insights_only", metaAdsRequestLane: "hot_insights", metaAdsRequestBudget: 12 };
+    await withMetaFetch(next, () => connectorFor("meta_ads").sync(db, request));
+    expect(batches.map(batch => batch.length)).toEqual([1, 1]);
+    const continuation = new URL(batches[1]![0]!, "https://graph.facebook.com/v25.0/");
+    expect(continuation.searchParams.get("after")).toBe("ad-page-2");
+    expect(continuation.searchParams.get("filtering")).toContain("DELETED");
+    expect(await db.query("select spend::float8 as spend from meta_ads_campaign_daily where source_id=$1 and occurred_on=$2", [sourceId, day]))
+      .toEqual([{ spend: 70 }]);
+    expect((await db.query<{ requests: number }>("select (request_telemetry->>'requestCount')::integer as requests from sync_runs where id=$1", [request.syncRunId]))[0]?.requests).toBe(2);
+  }, 120_000);
+
+  it.each(["settled_history", "attended_refresh"] as const)("%s one-day insights still reads all three grains from Meta (reach included)", async (lane) => {
+    const workspaceId = `ws_meta_three_grain_${lane}_${randomUUID()}`;
+    const sourceId = `src_meta_three_grain_${lane}_${randomUUID()}`;
+    await seedSource(workspaceId, sourceId);
+    await withMetaFetch(fixture("2026-09-01"), () =>
+      connectorFor("meta_ads").sync(db, syncRequest(workspaceId, sourceId, "2026-09-01", "2026-09-01"))
+    );
+    const day = "2026-09-02";
+    const next = fixture(day);
+    next.campaignInsights[0]!.reach = "777";
+    next.campaignInsights[0]!.spend = "61";
+    const batches: string[][] = [];
+    next.onBatch = urls => batches.push(urls);
+    const request: SyncRequest = { ...syncRequest(workspaceId, sourceId, day, day), metaAdsSyncMode: "insights_only", metaAdsRequestLane: lane, metaAdsRequestBudget: 12 };
+    await withMetaFetch(next, () => connectorFor("meta_ads").sync(db, request));
+    expect(batches.map(batch => batch.map(url => new URL(url, "https://graph.facebook.com/v25.0/").searchParams.get("level")))).toEqual([["campaign", "adset", "ad"]]);
+    expect(batches[0]!.some(url => new URL(url, "https://graph.facebook.com/v25.0/").searchParams.has("filtering"))).toBe(false);
+    expect(await db.query("select spend::float8 as spend,reach,actions_raw->'derivation' as derivation from meta_ads_campaign_daily where source_id=$1 and occurred_on=$2", [sourceId, day]))
+      .toEqual([{ spend: 61, reach: expect.anything(), derivation: null }]);
+    expect(Number((await db.query<{ reach: unknown }>("select reach from meta_ads_campaign_daily where source_id=$1 and occurred_on=$2", [sourceId, day]))[0]?.reach)).toBe(777);
+    expect((await db.query<{ requests: number }>("select (request_telemetry->>'requestCount')::integer as requests from sync_runs where id=$1", [request.syncRunId]))[0]?.requests).toBe(3);
   }, 120_000);
 
   it("a failed one-day insights batch retains the complete last-good snapshot", async () => {
@@ -1041,8 +1176,9 @@ describe("Meta Ads history CLOSE against real PGlite", () => {
       [sourceId],
     );
     const broken = fixture("2026-09-03");
-    broken.campaignInsights[0]!.spend = "999";
-    broken.failLevel = "adset";
+    broken.adInsights[0]!.spend = "999";
+    // The hot lane reads only the ad grain; its failure must keep the last-good snapshot of all three.
+    broken.failLevel = "ad";
     await expect(withMetaFetch(broken, () => connectorFor("meta_ads").sync(db, {
       ...syncRequest(workspaceId, sourceId, "2026-09-03", "2026-09-03"),
       metaAdsSyncMode: "insights_only",
@@ -1139,7 +1275,7 @@ describe("Meta Ads history CLOSE against real PGlite", () => {
     const request: SyncRequest = {
       ...syncRequest(workspaceId, sourceId, "2026-09-06", "2026-09-06"),
       metaAdsSyncMode: "insights_only",
-      metaAdsRequestLane: "hot_insights",
+      metaAdsRequestLane: "settled_history",
       metaAdsRequestBudget: 12,
     };
     await expect(withMetaFetch(next, () => connectorFor("meta_ads").sync(db, request)))
@@ -1170,7 +1306,7 @@ describe("Meta Ads history CLOSE against real PGlite", () => {
     await expect(withMetaFetch(next, () => connectorFor("meta_ads").sync(db, {
       ...syncRequest(workspaceId, sourceId, "2026-09-07", "2026-09-07"),
       metaAdsSyncMode: "insights_only",
-      metaAdsRequestLane: "hot_insights",
+      metaAdsRequestLane: "settled_history",
       metaAdsOnResponse: async signal => { signals.push(signal); },
     }))).rejects.toMatchObject({code:"provider_rate_limited",retryable:true});
     expect(signals).toEqual([expect.objectContaining({maxPercent:55,throttled:true})]);
@@ -1189,7 +1325,7 @@ describe("Meta Ads history CLOSE against real PGlite", () => {
     await withMetaFetch(next, () => connectorFor("meta_ads").sync(db, {
       ...syncRequest(workspaceId, sourceId, "2026-09-07", "2026-09-07"),
       metaAdsSyncMode: "insights_only",
-      metaAdsRequestLane: "hot_insights",
+      metaAdsRequestLane: "settled_history",
       metaAdsOnResponse: async signal => { signals.push(signal); },
     }));
     expect(signals).toEqual([expect.objectContaining({ maxPercent: 55 })]);
@@ -1210,7 +1346,7 @@ describe("Meta Ads history CLOSE against real PGlite", () => {
     await expect(withMetaFetch(next, () => connectorFor("meta_ads").sync(db, {
       ...syncRequest(workspaceId, sourceId, "2026-09-08", "2026-09-08"),
       metaAdsSyncMode: "insights_only",
-      metaAdsRequestLane: "hot_insights",
+      metaAdsRequestLane: "settled_history",
       metaAdsOnResponse: async signal => { signals.push(signal); },
     }))).rejects.toMatchObject({ code: "provider_rate_limited", retryable: true });
     expect(signals).toEqual([expect.objectContaining({ maxPercent: 47, throttled: true })]);
@@ -1232,7 +1368,7 @@ describe("Meta Ads history CLOSE against real PGlite", () => {
         : {};
     await expect(withMetaFetch(next, () => connectorFor("meta_ads").sync(db, {
       ...syncRequest(workspaceId, sourceId, "2026-09-08", "2026-09-08"),
-      metaAdsSyncMode:"insights_only",metaAdsRequestLane:"hot_insights",
+      metaAdsSyncMode:"insights_only",metaAdsRequestLane:"settled_history",
     }))).rejects.toMatchObject({code:"provider_rate_limited",retryable:true});
   },120_000);
 
@@ -1329,7 +1465,7 @@ describe("Meta Ads history CLOSE against real PGlite", () => {
     expect(await db.query(
       "select status,request_telemetry->>'lane' as lane,(request_telemetry->>'requestCount')::integer as requests from sync_runs where id=$1",
       [request.syncRunId],
-    )).toEqual([{status:"failed",lane:"hot_insights",requests:3}]);
+    )).toEqual([{status:"failed",lane:"hot_insights",requests:1}]);
   }, 120_000);
 
   it("uses atomic publication for an effective one-day hot window without explicit bounds", async () => {
@@ -1413,14 +1549,14 @@ describe("Meta Ads history CLOSE against real PGlite", () => {
     }));
     const started = Date.now();
     await withMetaFetch(bounded,()=>connectorFor("meta_ads").sync(db,{
-      ...syncRequest(workspaceId,sourceId,day,day),metaAdsSyncMode:"insights_only",metaAdsRequestLane:"hot_insights",
+      ...syncRequest(workspaceId,sourceId,day,day),metaAdsSyncMode:"insights_only",metaAdsRequestLane:"settled_history",
     }));
     expect(Date.now()-started).toBeLessThan(60_000);
     expect(await db.query("select count(*)::integer as rows from meta_ads_campaign_daily where source_id=$1 and occurred_on=$2",[sourceId,day])).toEqual([{rows:6000}]);
     const oversized = fixture(day,{empty:true});
     oversized.campaignInsights = [...bounded.campaignInsights,{...bounded.campaignInsights[0],campaign_id:"bound_6000",campaign_name:"Bound 6000"}];
     await expect(withMetaFetch(oversized,()=>connectorFor("meta_ads").sync(db,{
-      ...syncRequest(workspaceId,sourceId,day,day),metaAdsSyncMode:"insights_only",metaAdsRequestLane:"hot_insights",
+      ...syncRequest(workspaceId,sourceId,day,day),metaAdsSyncMode:"insights_only",metaAdsRequestLane:"settled_history",
     }))).rejects.toThrow("6000-record atomic publication limit");
     expect(await db.query("select count(*)::integer as rows from meta_ads_campaign_daily where source_id=$1 and occurred_on=$2",[sourceId,day])).toEqual([{rows:6000}]);
   },120_000);
