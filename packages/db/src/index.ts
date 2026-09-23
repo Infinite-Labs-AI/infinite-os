@@ -542,9 +542,15 @@ const DELETE_PROJECT_WORKSPACE_TABLES: readonly string[] = [
   "chat_memory_facts",
   // --- sources (referenced by all the provider tables above) ---
   "sources",
+  // --- 0072 interactive ledger children reference interactive_tasks (cascade, but deleted
+  // explicitly for a deterministic order). interactive_tasks -> workspaces has NO ON DELETE, so
+  // omitting it aborts the whole transaction for any workspace that ever held a Cmd+L task. ---
+  "interactive_task_events",
+  "interactive_action_refs",
   // --- roots: tables that reference only workspaces (or each other above) ---
   "chat_sessions",
   "datasets",
+  "interactive_tasks",
   "job_runs",
   'journey.actors',
   'journey.entities',

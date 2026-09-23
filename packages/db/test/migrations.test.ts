@@ -85,7 +85,8 @@ describe("Infinite OS migration stack", () => {
       "0068_connection_credentials_selected_page.sql",
       "0069_meta_ads_history_integrity.sql",
       "0070_meta_ads_nullable_reach.sql",
-      "0071_meta_reach_unmeasured_days.sql"
+      "0071_meta_reach_unmeasured_days.sql",
+      "0072_interactive_task_ledger.sql"
     ]);
   });
 
@@ -1086,7 +1087,8 @@ describe("Infinite OS migration stack", () => {
       "0068_connection_credentials_selected_page.sql",
       "0069_meta_ads_history_integrity.sql",
       "0070_meta_ads_nullable_reach.sql",
-      "0071_meta_reach_unmeasured_days.sql"
+      "0071_meta_reach_unmeasured_days.sql",
+      "0072_interactive_task_ledger.sql"
     ]);
   });
 
@@ -1100,6 +1102,27 @@ describe("Infinite OS migration stack", () => {
     // Nullable, no default: existing rows stay NULL until a Page is chosen.
     expect(sql).not.toMatch(/selected_page_id[^;]*not null/);
     expect(sql).not.toMatch(/selected_page_id[^;]*default/);
+  });
+
+  it("adds the local interactive task ledger scoped by (task, workspace, actor) (0072)", () => {
+    const migration = loadMigrations().find(
+      (candidate) => candidate.id === "0072_interactive_task_ledger.sql"
+    );
+    const sql = (migration?.sql ?? "").toLowerCase().replace(/\s+/g, " ");
+
+    expect(sql).toContain("create table interactive_tasks");
+    expect(sql).toContain("unique (id, workspace_id, actor_id)");
+    expect(sql).toContain("create table interactive_task_events");
+    expect(sql).toContain("unique (task_id, sequence)");
+    expect(sql).toContain("unique (task_id, transition_request_id)");
+    expect(sql).toContain("create table interactive_action_refs");
+    expect(sql).toContain("unique (task_id, proposal_ref, proposal_revision)");
+    expect(sql.match(/foreign key \(task_id, workspace_id, actor_id\) references interactive_tasks\(id, workspace_id, actor_id\) on delete cascade/g)?.length).toBe(2);
+    expect(sql).toContain("create unique index interactive_action_refs_task_continuation_idx");
+    // Local desktop ledger only: the app role gets DML, the cloud engine role gets nothing.
+    expect(sql).toContain("to growth_os_app");
+    expect(sql).not.toContain("engine_app");
+    expect(sql).not.toContain("drop table");
   });
 
   it("adds durable Meta account, daily coverage, staged replacement keys, and covering indexes (0069)", () => {

@@ -88,9 +88,9 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
     rmSync(dataDir, { recursive: true, force: true });
   });
 
-  it("applied ALL 71 migrations on first boot and is idempotent on a re-run", async () => {
-    expect(loadMigrations().length).toBe(71);
-    expect(firstRun).toHaveLength(71);
+  it("applied ALL 72 migrations on first boot and is idempotent on a re-run", async () => {
+    expect(loadMigrations().length).toBe(72);
+    expect(firstRun).toHaveLength(72);
     expect(firstRun).toContain("0001_control_plane.sql");
     expect(firstRun).toContain("0006_security_roles.sql");
     expect(firstRun).toContain("0036_chat_sessions_desktop_surface.sql");
@@ -127,6 +127,7 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
     expect(firstRun).toContain("0067_signup_event_metric_semantics.sql");
     expect(firstRun).toContain("0068_connection_credentials_selected_page.sql");
     expect(firstRun).toContain("0069_meta_ads_history_integrity.sql");
+    expect(firstRun).toContain("0072_interactive_task_ledger.sql");
 
     // Idempotent: a second boot re-applies zero (the `rows.length` gate, not the pg `rowCount`
     // gate, makes this true on PGlite).
@@ -134,13 +135,13 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
     expect(secondRun).toEqual([]);
   });
 
-  it("created the schema_migrations ledger with all 71 rows", async () => {
+  it("created the schema_migrations ledger with all 72 rows", async () => {
     const ledger = await db.query<{ id: string }>(
       "select id from schema_migrations order by id"
     );
-    expect(ledger).toHaveLength(71);
+    expect(ledger).toHaveLength(72);
     expect(ledger[0]?.id).toBe("0001_control_plane.sql");
-    expect(ledger.at(-1)?.id).toBe("0071_meta_reach_unmeasured_days.sql");
+    expect(ledger.at(-1)?.id).toBe("0072_interactive_task_ledger.sql");
   });
 
   it("0063 serves both PostHog views from per-(workspace, source, day) rollups — refresh, is_internal, idempotency, grain key, grants", async () => {
@@ -2995,6 +2996,91 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
         await db.query(`select 1 from ${table} where workspace_id = $1`, [created.id])
       ).toEqual([]);
     }
+  });
+
+  // 0072 interactive task ledger. interactive_tasks references workspaces(id) with no ON DELETE, so
+  // a workspace holding a task is undeletable unless the three tables sit in the delete inventory.
+  async function seedInteractiveTask(workspaceId: string, suffix: string) {
+    const taskId = `itask_${suffix}`;
+    await db.query(
+      `insert into interactive_tasks
+         (id, workspace_id, actor_id, surface, client_surface_key, provider_id, model_id, agent_profile,
+          accepted_context_revision, authority_expires_at)
+       values ($1, $2, 'actor_a', 'cmdl', 'cmdl:primary', 'claude-cli', 'model', 'general', 'ctx_1',
+               '2026-09-20T21:10:00Z')`,
+      [taskId, workspaceId]
+    );
+    await db.query(
+      `insert into interactive_task_events
+         (event_id, task_id, workspace_id, actor_id, sequence, kind, transition_request_id, transition_request_hash)
+       values ($1, $2, $3, 'actor_a', 1, 'user_message', $4, $5)`,
+      [`ievent_${suffix}`, taskId, workspaceId, `ireq_${suffix}`, "a".repeat(64)]
+    );
+    await db.query(
+      `insert into interactive_action_refs
+         (invocation_id, task_id, workspace_id, actor_id, source_kind, operation_id, adapter_version,
+          schema_version, proposal_ref, proposal_revision, proposal_hash, input_hash, effect,
+          replay_policy, state, continuation_key)
+       values ($1, $2, $3, 'actor_a', 'host_confirmation', 'fake_op', 'fake.v1', '1', 'P1', 1, $4, $5,
+               'external_write', 'reconcile_before_retry', 'awaiting_approval', $6)`,
+      [`iinv_${suffix}`, taskId, workspaceId, "c".repeat(64), "d".repeat(64), `cont_${suffix}`]
+    );
+    return taskId;
+  }
+
+  it("0072 binds interactive events and actions to the task's own workspace and actor", async () => {
+    const created = await createProject(db, "Interactive Ledger Scope");
+    const taskId = await seedInteractiveTask(created.id, `scope_${Date.now()}`);
+
+    // Composite (task, workspace, actor) FK: a child row cannot claim another actor's task.
+    await expect(
+      db.query(
+        `insert into interactive_task_events
+           (event_id, task_id, workspace_id, actor_id, sequence, kind, transition_request_id, transition_request_hash)
+         values ('ievent_wrong_actor', $1, $2, 'actor_b', 2, 'progress', 'ireq_wrong_actor', $3)`,
+        [taskId, created.id, "b".repeat(64)]
+      )
+    ).rejects.toThrow(/foreign key/i);
+    // Per-task monotonic sequence is unique.
+    await expect(
+      db.query(
+        `insert into interactive_task_events
+           (event_id, task_id, workspace_id, actor_id, sequence, kind, transition_request_id, transition_request_hash)
+         values ('ievent_dup_seq', $1, $2, 'actor_a', 1, 'progress', 'ireq_dup_seq', $3)`,
+        [taskId, created.id, "b".repeat(64)]
+      )
+    ).rejects.toThrow(/unique|duplicate/i);
+    // Hash columns only accept lower-case sha256 hex.
+    await expect(
+      db.query(
+        `insert into interactive_task_events
+           (event_id, task_id, workspace_id, actor_id, sequence, kind, transition_request_id, transition_request_hash)
+         values ('ievent_bad_hash', $1, $2, 'actor_a', 2, 'progress', 'ireq_bad_hash', 'not-a-hash')`,
+        [taskId, created.id]
+      )
+    ).rejects.toThrow(/check constraint/i);
+    expect(await deleteProject(db, created.id)).toEqual({ deleted: true });
+  });
+
+  it("deletes a project that holds an interactive task, its events and action refs (0072)", async () => {
+    const created = await createProject(db, "Delete Me Interactive");
+    const other = await createProject(db, "Keep Me Interactive");
+    const stamp = Date.now();
+    await seedInteractiveTask(created.id, `doomed_${stamp}`);
+    await seedInteractiveTask(other.id, `kept_${stamp}`);
+
+    expect(await deleteProject(db, created.id)).toEqual({ deleted: true });
+    expect(await findProject(db, created.id)).toBeNull();
+    for (const table of ["interactive_action_refs", "interactive_task_events", "interactive_tasks"]) {
+      expect(
+        await db.query(`select 1 from ${table} where workspace_id = $1`, [created.id])
+      ).toEqual([]);
+      // No over-deletion across workspaces.
+      expect(
+        await db.query(`select 1 from ${table} where workspace_id = $1`, [other.id])
+      ).toHaveLength(1);
+    }
+    expect(await deleteProject(db, other.id)).toEqual({ deleted: true });
   });
 });
 
