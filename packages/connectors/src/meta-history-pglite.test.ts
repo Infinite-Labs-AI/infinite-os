@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,6 +8,7 @@ import { encryptCredentialPayload } from "@infinite-os/core";
 import { createInfiniteOsDb, runMigrations, type InfiniteOsDb } from "@infinite-os/db";
 
 import { connectorFor, metaAdsSettledWindow, type SyncRequest } from "./index.js";
+import { canonicalMetaAdsJson, metaAdsEntityVersionFingerprint } from "./meta-entity-fingerprint.js";
 
 const KEY = "meta-history-pglite-encryption-key";
 const ACCOUNT = "act_123";
@@ -1459,5 +1460,77 @@ describe("Meta Ads history CLOSE against real PGlite", () => {
     const rows=await db.query("select metadata_json,asset_descriptors from meta_ads_entity_versions where source_id=$1",[sourceId]);
     expect(JSON.stringify(rows)).not.toContain('raw-signed-secret');expect(JSON.stringify(rows)).not.toContain('thumb-secret');
   },120_000);
+
+  // Meta returns a freshly minted `emg1` preview URL for dynamic video creatives on nearly every
+  // read. Those rotations must not mint creative or ad versions (each fake version re-queues the
+  // creative's media downstream and replaces the version the Ads screen is showing).
+  function rotatedThumbnailFixture(path: string, body = "Copy"): MetaFixture {
+    const data = fixture("2026-09-01");
+    const ad = data.ads[0] as { creative: Record<string, unknown> };
+    ad.creative = { ...ad.creative, body, thumbnail_url: `https://external-dub4-1.xx.fbcdn.net/emg1/v/t13/${path}` };
+    return data;
+  }
+
+  async function currentVersionCounts(sourceId: string): Promise<Record<string, number>> {
+    const rows = await db.query<{ entity_type: string; entity_id: string; versions: number }>(
+      `select entity_type, entity_id, count(*)::int as versions from meta_ads_entity_versions
+        where source_id = $1 and entity_type in ('ad','creative') group by entity_type, entity_id`,
+      [sourceId],
+    );
+    return Object.fromEntries(rows.map((row) => [`${row.entity_type}:${row.entity_id}`, row.versions]));
+  }
+
+  it("does not re-version an ad or creative when only Meta's rendered thumbnail_url rotates", async () => {
+    const workspaceId = `ws_meta_thumb_${randomUUID()}`;
+    const sourceId = `src_meta_thumb_${randomUUID()}`;
+    await seedSource(workspaceId, sourceId);
+    for (const path of ["8893140978873974957", "15505404890301949775", "4411223344556677889"]) {
+      await withMetaFetch(rotatedThumbnailFixture(path), () =>
+        connectorFor("meta_ads").sync(db, syncRequest(workspaceId, sourceId, "2026-09-01", "2026-09-01"))
+      );
+    }
+    expect(await currentVersionCounts(sourceId)).toEqual({ "ad:a1": 1, "creative:cr1": 1 });
+    // The stored snapshot is still what Meta returned (first observation), not a rewritten copy.
+    const [creative] = await db.query<{ metadata_json: { thumbnail_url: string } }>(
+      "select metadata_json from meta_ads_entity_versions where source_id=$1 and entity_type='creative' and valid_to is null",
+      [sourceId],
+    );
+    expect(creative?.metadata_json.thumbnail_url).toBe("https://external-dub4-1.xx.fbcdn.net/emg1/v/t13/8893140978873974957");
+
+    // A real edit still versions both the creative and the ad that embeds it.
+    await withMetaFetch(rotatedThumbnailFixture("9999999999999999999", "New copy"), () =>
+      connectorFor("meta_ads").sync(db, syncRequest(workspaceId, sourceId, "2026-09-01", "2026-09-01"))
+    );
+    expect(await currentVersionCounts(sourceId)).toEqual({ "ad:a1": 2, "creative:cr1": 2 });
+  }, 120_000);
+
+  it("adopts a legacy full-metadata payload_hash in place instead of minting a one-time version", async () => {
+    const workspaceId = `ws_meta_legacy_${randomUUID()}`;
+    const sourceId = `src_meta_legacy_${randomUUID()}`;
+    await seedSource(workspaceId, sourceId);
+    await withMetaFetch(rotatedThumbnailFixture("8893140978873974957"), () =>
+      connectorFor("meta_ads").sync(db, syncRequest(workspaceId, sourceId, "2026-09-01", "2026-09-01"))
+    );
+    // Rows written before this fix carry sha256 over the FULL metadata, rotating URLs included.
+    const stored = await db.query<{ id: string; metadata_json: Record<string, unknown> }>(
+      "select id, metadata_json from meta_ads_entity_versions where source_id=$1 and valid_to is null",
+      [sourceId],
+    );
+    for (const row of stored) {
+      const legacyHash = createHash("sha256").update(canonicalMetaAdsJson(row.metadata_json)).digest("hex");
+      await db.query("update meta_ads_entity_versions set payload_hash=$2 where id=$1", [row.id, legacyHash]);
+    }
+
+    await withMetaFetch(rotatedThumbnailFixture("15505404890301949775"), () =>
+      connectorFor("meta_ads").sync(db, syncRequest(workspaceId, sourceId, "2026-09-01", "2026-09-01"))
+    );
+    expect(await currentVersionCounts(sourceId)).toEqual({ "ad:a1": 1, "creative:cr1": 1 });
+    const rekeyed = await db.query<{ payload_hash: string; metadata_json: Record<string, unknown> }>(
+      "select payload_hash, metadata_json from meta_ads_entity_versions where source_id=$1 and valid_to is null",
+      [sourceId],
+    );
+    expect(rekeyed.length).toBe(stored.length);
+    for (const row of rekeyed) expect(row.payload_hash).toBe(metaAdsEntityVersionFingerprint(row.metadata_json));
+  }, 120_000);
 
 });
