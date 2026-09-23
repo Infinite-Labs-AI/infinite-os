@@ -7633,6 +7633,31 @@ describe("Meta Ads WRITE helpers", () => {
       );
     });
 
+    it("stops at a page without a next link even though Meta still sends cursors.after on it", async () => {
+      // Meta returns paging.cursors.after on EVERY non-empty page, the last one included; only
+      // paging.next says more data exists. Following the cursor cost one extra, empty request.
+      await captureWrites(
+        () => jsonResponse({ data: [{ id: "c1" }, { id: "c2" }], paging: { cursors: { before: "B", after: "LAST_PAGE_CURSOR" } } }),
+        async (captured) => {
+          const rows = await listMetaEntities(metaWriteCredential, "campaign");
+          expect(rows).toEqual([{ id: "c1" }, { id: "c2" }]);
+          expect(captured).toHaveLength(1);
+        }
+      );
+    });
+
+    it("fails LOUD when a next link arrives without any continuation cursor", async () => {
+      await captureWrites(
+        () => jsonResponse({ data: [{ id: "c1" }], paging: { next: "https://graph.facebook.com/v25.0/act_1234567890/campaigns" } }),
+        async () => {
+          await expect(listMetaEntities(metaWriteCredential, "campaign")).rejects.toMatchObject({
+            code: "provider_api_error",
+            retryable: true
+          });
+        }
+      );
+    });
+
     it("fails LOUD when the list cursor never terminates (no silent truncation)", async () => {
       // A cursor that always returns a fresh `after` must throw at the page cap rather than
       // loop forever or return a truncated set. Mirrors metaAdsReadEdge §4d fail-loud.
@@ -7640,7 +7665,10 @@ describe("Meta Ads WRITE helpers", () => {
         () =>
           jsonResponse({
             data: [{ id: "ad_x" }],
-            paging: { cursors: { after: "NEVER_ENDING" } }
+            paging: {
+              cursors: { after: "NEVER_ENDING" },
+              next: "https://graph.facebook.com/v25.0/act_1234567890/ads?after=NEVER_ENDING"
+            }
           }),
         async () => {
           await expect(listMetaEntities(metaWriteCredential, "ad")).rejects.toMatchObject({
