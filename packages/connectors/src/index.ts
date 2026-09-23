@@ -5662,6 +5662,28 @@ async function writeMetaAdsEntityVersions(
       continue;
     }
     if (current) {
+      // A stored hash can be stale without the entity having changed: rows written before rendered
+      // media URLs were excluded carry sha256 over the FULL metadata (rotating thumbnail_url
+      // included). Re-fingerprint the stored snapshot under the current definition; if it matches,
+      // this is the same version — re-key its hash in place (so later syncs take the fast path
+      // above) instead of minting one extra version per entity, which would re-queue every
+      // creative's media downstream. Paid only on a hash mismatch; stored metadata is untouched.
+      const stored = await tx.one<{ metadata_json: Record<string, unknown> }>(
+        "select metadata_json from meta_ads_entity_versions where id = $1",
+        [current.id],
+      );
+      if (stored && metaAdsEntityVersionFingerprint(stored.metadata_json) === payloadHash) {
+        await tx.query(
+          `update meta_ads_entity_versions
+              set payload_hash = $2, raw_record_id = $3,
+                  last_observed_at = greatest(last_observed_at, $4::timestamptz)
+            where id = $1`,
+          [current.id, payloadHash, rawIds[index], row.observedAt],
+        );
+        continue;
+      }
+    }
+    if (current) {
       await tx.query(
         `update meta_ads_entity_versions
             set valid_to = greatest(first_observed_at, $2::timestamptz),
