@@ -164,7 +164,9 @@ afterEach(async () => {
   }
 });
 
-describe("interactive task store", () => {
+// Every test migrates a fresh temp PGlite through the whole stack (~1s alone, 5s+ when the full
+// suite runs in parallel), so the 5s default timeout flakes under CI load.
+describe("interactive task store", { timeout: 60_000 }, () => {
   it("persists a scoped task and replays an identical create request", async () => {
     const { db } = await fixture();
     const store = createInteractiveTaskStore(db);
