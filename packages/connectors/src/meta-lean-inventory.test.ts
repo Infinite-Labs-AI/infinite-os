@@ -441,4 +441,53 @@ describe("lean Meta inventory reads against real PGlite", () => {
     expect(weekly.edges.filter((call) => call.edge === "ads").every((call) => call.fields === META_ADS_AD_FULL_FIELDS)).toBe(true);
     expect((await currentAd(sourceId, "a60"))[0]?.metadata_json.creative).toMatchObject({ name: "Renamed creative" });
   }, 120_000);
+
+  it("#3 — REVIEW regression: a creative shared by two ads converges to ONE version on lean reads (no flip-flop, no regression)", async () => {
+    const workspaceId = `ws_review_shared_${randomUUID()}`, sourceId = `src_review_shared_${randomUUID()}`;
+    await seedSource(workspaceId, sourceId);
+    const account = prodShapeAccount();
+    // a100 and a101 share one AdCreative (common after duplicating an ad/ad set).
+    account.ads[101]!.creative = account.ads[100]!.creative;
+    await sync(account, request(workspaceId, sourceId)); // heavy (first run)
+    // Creative rename: never moves either ad's updated_time.
+    (account.ads[100]!.creative as Record<string, unknown>).name = "Renamed creative";
+    // a100's OWN status changes -> incremental heavy delta re-reads a100 WITH the renamed expansion.
+    Object.assign(account.ads[100]!, { status: "PAUSED", effective_status: "PAUSED", updated_time: new Date().toISOString() });
+    await sync(account, request(workspaceId, sourceId));
+    const creativeVersions = () => db.query<{ name: string | null; current: boolean }>(
+      "select metadata_json->>'name' as name, valid_to is null as current from meta_ads_entity_versions where source_id=$1 and entity_type='creative' and entity_id='cr100' order by first_observed_at, id",
+      [sourceId]);
+    const afterIncremental = await creativeVersions();
+    await forceNextScanFull(sourceId);
+    const lean1 = await sync(account, request(workspaceId, sourceId));
+    expect(lean1.byKind.ad_edge).toBe(2);
+    await forceNextScanFull(sourceId);
+    const lean2 = await sync(account, request(workspaceId, sourceId));
+    expect(lean2.byKind.ad_edge).toBe(2);
+    const final = await creativeVersions();
+    expect(final.filter((v) => v.current)).toEqual([{ name: "Renamed creative", current: true }]);
+    expect(final.length).toBe(afterIncremental.length);
+    // The sibling ad converges on the renamed creative once, then stays put.
+    const a101 = await db.query<{ name: string | null; current: boolean }>(
+      "select metadata_json->'creative'->>'name' as name, valid_to is null as current from meta_ads_entity_versions where source_id=$1 and entity_type='ad' and entity_id='a101' order by first_observed_at, id",
+      [sourceId]);
+    expect(a101).toEqual([{ name: null, current: false }, { name: "Renamed creative", current: true }]);
+  }, 120_000);
+
+  it("#3 — REVIEW control: the same shared-creative scenario under heavy full reads (pre-PR behavior)", async () => {
+    const workspaceId = `ws_review_ctl_${randomUUID()}`, sourceId = `src_review_ctl_${randomUUID()}`;
+    await seedSource(workspaceId, sourceId);
+    const account = prodShapeAccount();
+    account.ads[101]!.creative = account.ads[100]!.creative;
+    await sync(account, request(workspaceId, sourceId));
+    (account.ads[100]!.creative as Record<string, unknown>).name = "Renamed creative";
+    Object.assign(account.ads[100]!, { status: "PAUSED", effective_status: "PAUSED", updated_time: new Date().toISOString() });
+    await sync(account, request(workspaceId, sourceId));
+    const forceHeavy = () => db.query("delete from sync_cursors where source_id=$1 and cursor_key like 'meta_ads_entities_heavy:%'", [sourceId]);
+    for (let i = 0; i < 2; i += 1) { await forceNextScanFull(sourceId); await forceHeavy(); await sync(account, request(workspaceId, sourceId)); }
+    const final = await db.query<{ name: string | null; current: boolean }>(
+      "select metadata_json->>'name' as name, valid_to is null as current from meta_ads_entity_versions where source_id=$1 and entity_type='creative' and entity_id='cr100' order by first_observed_at, id",
+      [sourceId]);
+    expect(final).toEqual([{ name: null, current: false }, { name: "Renamed creative", current: true }]);
+  }, 120_000);
 });
