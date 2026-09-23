@@ -28,6 +28,33 @@ export type Authority = "tool_agent" | "operator";
  */
 export type RuntimeSurface = "cli" | "api" | "app" | "mcp" | "worker" | "desktop";
 
+/** Additive Cmd+L bridge capability for profile + cwd metadata negotiation. */
+export const INTERACTIVE_WORKSPACE_CAPABILITY = "interactive.workspace.v1" as const;
+export const LEGACY_GROWTH_OPERATOR_PROFILE = "legacy-growth-operator-v1" as const;
+export const GENERAL_MARKETING_PROFILE = "general-marketing-v1" as const;
+
+export type InteractiveAgentProfile =
+  | typeof LEGACY_GROWTH_OPERATOR_PROFILE
+  | typeof GENERAL_MARKETING_PROFILE;
+
+export type InteractiveFeature =
+  | "workspace.app-tools.v1"
+  | "actions.confirmation.v1"
+  | "actions.continuation.v1";
+
+/** Client request metadata. Cwd does not grant filesystem access. */
+export interface InteractiveWorkspaceRequestV1 {
+  profile: InteractiveAgentProfile;
+  cwd?: string;
+}
+
+/** Dynamic status metadata for the selected Desktop provider and host wiring. */
+export interface InteractiveWorkspaceStatusV1 {
+  supportedProfiles: InteractiveAgentProfile[];
+  availableFeatures: InteractiveFeature[];
+  workspaceAccess: "metadata-only";
+}
+
 export interface SessionContext {
   workspaceId: string;
   sessionId: string;

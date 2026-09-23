@@ -11,6 +11,7 @@ import {
   type DesktopInteractiveIo
 } from "./desktop-interactive.js";
 import type { DesktopTurnSource } from "./desktop-turn-source.js";
+import { GENERAL_MARKETING_PROFILE } from "@infinite-os/types";
 
 const env = {} as NodeJS.ProcessEnv;
 const io: DesktopInteractiveIo = { writeOut: () => {}, writeErr: () => {} };
@@ -297,6 +298,123 @@ function makeTurnSource(
 }
 
 describe("createDesktopSessionTurnRunner", () => {
+  it("sends general profile and startup cwd only for an explicitly configured caller", async () => {
+    const turn = vi.fn(async () => ({
+      message: "ok",
+      actionCalls: [],
+      sessionId: "session-1",
+    }));
+    const client = {
+      sessionCapable: true,
+      interactiveWorkspace: {
+        supportedProfiles: [GENERAL_MARKETING_PROFILE],
+        availableFeatures: ["workspace.app-tools.v1"],
+        workspaceAccess: "metadata-only",
+      },
+      status: vi.fn(async () => statusFor({ rev: "rev-1" })),
+      turn,
+      confirm: vi.fn(),
+    } as unknown as DesktopAppClient;
+    const runner = createDesktopSessionTurnRunner({
+      resolveBridge: () => ({ descriptor: { bootId: "boot-1" }, client }),
+      interactiveWorkspace: {
+        profile: GENERAL_MARKETING_PROFILE,
+        cwd: () => "/Users/example/project",
+      },
+    });
+
+    await runner.turn("hello");
+
+    expect(turn).toHaveBeenCalledWith(expect.objectContaining({
+      interactive: {
+        profile: GENERAL_MARKETING_PROFILE,
+        cwd: "/Users/example/project",
+      },
+    }), expect.any(Function));
+  });
+
+  it("keeps old CLI behavior when no interactive caller is configured", async () => {
+    const turn = vi.fn(async (_input: { interactive?: unknown }) => ({
+      message: "ok",
+      actionCalls: [],
+    }));
+    const client = {
+      sessionCapable: true,
+      interactiveWorkspace: undefined,
+      status: vi.fn(async () => statusFor({ rev: "rev-1" })),
+      turn,
+      confirm: vi.fn(),
+    } as unknown as DesktopAppClient;
+    const runner = createDesktopSessionTurnRunner({
+      resolveBridge: () => ({ descriptor: { bootId: "boot-1" }, client }),
+    });
+
+    await runner.turn("hello");
+
+    expect(turn.mock.calls[0]![0]).not.toHaveProperty("interactive");
+  });
+
+  it("fails an explicit general caller when Desktop did not negotiate the profile", async () => {
+    const turn = vi.fn();
+    const client = {
+      sessionCapable: true,
+      interactiveWorkspace: undefined,
+      status: vi.fn(async () => statusFor({ rev: "rev-1" })),
+      turn,
+      confirm: vi.fn(),
+    } as unknown as DesktopAppClient;
+    const runner = createDesktopSessionTurnRunner({
+      resolveBridge: () => ({ descriptor: { bootId: "boot-1" }, client }),
+      interactiveWorkspace: {
+        profile: GENERAL_MARKETING_PROFILE,
+        cwd: () => "/Users/example/project",
+      },
+    });
+
+    await expect(runner.turn("hello")).rejects.toMatchObject({
+      code: "interactive_capability_unavailable",
+    });
+    expect(turn).not.toHaveBeenCalled();
+  });
+
+  it("clears provider session when requested cwd metadata changes", async () => {
+    const sentSessions: Array<string | undefined> = [];
+    const turn = vi.fn(async (input: { sessionId?: string }) => {
+      sentSessions.push(input.sessionId);
+      return {
+        message: "ok",
+        actionCalls: [],
+        sessionId: `session-${sentSessions.length}`,
+      };
+    });
+    const client = {
+      sessionCapable: true,
+      interactiveWorkspace: {
+        supportedProfiles: [GENERAL_MARKETING_PROFILE],
+        availableFeatures: [],
+        workspaceAccess: "metadata-only",
+      },
+      status: vi.fn(async () => statusFor({ rev: "rev-1" })),
+      turn,
+      confirm: vi.fn(),
+    } as unknown as DesktopAppClient;
+    let cwd = "/Users/example/a";
+    const runner = createDesktopSessionTurnRunner({
+      resolveBridge: () => ({ descriptor: { bootId: "boot-1" }, client }),
+      interactiveWorkspace: {
+        profile: GENERAL_MARKETING_PROFILE,
+        cwd: () => cwd,
+      },
+    });
+
+    await runner.turn("one");
+    await runner.turn("two");
+    cwd = "/Users/example/b";
+    await runner.turn("three");
+
+    expect(sentSessions).toEqual([undefined, "session-1", undefined]);
+  });
+
   it("clears sessionId when contextRevision changes between turns", async () => {
     const src = makeTurnSource(statusSeq([{ rev: "1" }, { rev: "2" }]));
     await src.turn("a");

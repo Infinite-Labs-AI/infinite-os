@@ -1,5 +1,9 @@
 import type { ChatProgressEvent } from "@infinite-os/llm-controller";
 import {
+  type InteractiveAgentProfile,
+  type InteractiveWorkspaceRequestV1,
+} from "@infinite-os/types";
+import {
   DesktopAppClientError,
   type DesktopAppClient,
   type DesktopProgressFrame,
@@ -59,7 +63,8 @@ export interface DesktopInteractiveTurnSource {
     message: string,
     sessionId: string | undefined,
     onEvent: (event: ChatProgressEvent) => void,
-    signal: AbortSignal
+    signal: AbortSignal,
+    interactive?: InteractiveWorkspaceRequestV1
   ): Promise<DesktopInteractiveTurnResult>;
 }
 
@@ -211,6 +216,7 @@ export function adaptDesktopClientToTurnSource(
           message: input.message,
           expectedContextRevision: contextRevision,
           ...(input.sessionId ? { sessionId: input.sessionId } : {}),
+          ...(input.interactive ? { interactive: input.interactive } : {}),
           signal: input.signal
         },
         (frame: DesktopProgressFrame) => {
@@ -256,6 +262,11 @@ export interface DesktopSessionTurnDeps {
     client: DesktopAppClient,
     contextRevision: string
   ) => DesktopInteractiveTurnSource;
+  /** Explicit caller opt-in. Omitted keeps the legacy compatible turn shape. */
+  interactiveWorkspace?: {
+    profile: InteractiveAgentProfile;
+    cwd: () => string;
+  };
 }
 
 /**
@@ -349,7 +360,32 @@ export function createDesktopSessionTurnRunner(
             status.error?.message ?? "Infinite Desktop Cmd+L is not ready."
           );
         }
-        const scope = turnScopeFingerprint(resolved.descriptor.bootId, status);
+        const interactive = deps.interactiveWorkspace
+          ? {
+              profile: deps.interactiveWorkspace.profile,
+              cwd: deps.interactiveWorkspace.cwd(),
+            }
+          : undefined;
+        if (interactive) {
+          const supported = resolved.client.interactiveWorkspace;
+          if (!supported) {
+            throw new DesktopAppClientError(
+              "interactive_capability_unavailable",
+              "Infinite Desktop did not negotiate interactive workspace metadata."
+            );
+          }
+          if (!supported.supportedProfiles.includes(interactive.profile)) {
+            throw new DesktopAppClientError(
+              "interactive_profile_unsupported",
+              "Infinite Desktop does not support the requested interactive profile."
+            );
+          }
+        }
+        const scope = turnScopeFingerprint(
+          resolved.descriptor.bootId,
+          status,
+          interactive,
+        );
         if (lastScope !== undefined && scope !== lastScope) {
           sessionId = undefined;
         }
@@ -360,7 +396,8 @@ export function createDesktopSessionTurnRunner(
           message,
           sessionId,
           onEvent ?? (() => {}),
-          signal ?? NEVER_ABORT
+          signal ?? NEVER_ABORT,
+          interactive,
         );
         if (result.sessionId) {
           sessionId = result.sessionId;
@@ -378,13 +415,19 @@ export function createDesktopSessionTurnRunner(
  * the prior conversation belongs to a different context and its session id
  * must not be resent.
  */
-function turnScopeFingerprint(bootId: string, status: DesktopStatus): string {
+function turnScopeFingerprint(
+  bootId: string,
+  status: DesktopStatus,
+  interactive?: InteractiveWorkspaceRequestV1,
+): string {
   return JSON.stringify([
     bootId,
     status.contextRevision,
     status.workspace?.id ?? null,
     status.workspace?.name ?? null,
     status.provider?.id ?? null,
-    status.provider?.model ?? null
+    status.provider?.model ?? null,
+    interactive?.profile ?? null,
+    interactive?.cwd ?? null,
   ]);
 }

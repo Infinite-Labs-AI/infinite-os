@@ -1,4 +1,5 @@
 import type { ChatProgressEvent } from "@infinite-os/llm-controller";
+import type { InteractiveWorkspaceRequestV1 } from "@infinite-os/types";
 import type {
   InSessionConfirmationAction,
   InSessionConfirmationDetail
@@ -39,6 +40,7 @@ export interface DesktopTurnSourceInput {
    */
   sessionId?: string;
   signal: AbortSignal;
+  interactive?: InteractiveWorkspaceRequestV1;
 }
 
 /** Outcome a client's `turn(...)` may resolve with. */
@@ -77,7 +79,8 @@ export interface DesktopTurnSource {
     message: string,
     sessionId: string | undefined,
     onEvent: (event: ChatProgressEvent) => void,
-    signal: AbortSignal
+    signal: AbortSignal,
+    interactive?: InteractiveWorkspaceRequestV1
   ): Promise<DesktopTurnRunResult>;
 }
 
@@ -143,7 +146,7 @@ export function createDesktopTurnSource(
   client: DesktopTurnSourceClient
 ): DesktopTurnSource {
   return {
-    async runTurn(message, sessionId, onEvent, signal) {
+    async runTurn(message, sessionId, onEvent, signal, interactive) {
       let terminalSessionId = extractSessionId(undefined);
       let pendingConfirmations: InSessionConfirmationAction[] = [];
       // At most ONE `message.complete` per turn, first one wins. Both planes can
@@ -159,7 +162,8 @@ export function createDesktopTurnSource(
           message,
           // Capability-gated resend: omit against an incapable Desktop.
           sessionId: client.sessionCapable ? sessionId : undefined,
-          signal
+          signal,
+          ...(interactive ? { interactive } : {})
         },
         (frame) => {
           if (frame.kind === "done") {
