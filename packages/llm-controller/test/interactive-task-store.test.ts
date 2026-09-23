@@ -1040,18 +1040,23 @@ describe("provenance: an automatic turn is never human intent", { timeout: 60_00
     expect(await codeOf(store.createTask(triggeredInput({ provenance: { ...provenance, ruleVersion: 2 ** 40 } })))).toBe("invalid_task_input");
     // Values rejected before the database.
     expect(await codeOf(store.createTask(triggeredInput({ surface: "triggered" as unknown as "imessage" })))).toBe("invalid_task_input");
-    expect(await codeOf(store.createTask(taskInput({ providerId: "claude\u0000cli" })))).toBe("invalid_task_input");
-    expect(await codeOf(store.createTask(taskInput({ initialEvent: { ...taskInput().initialEvent, payload: { text: "a\u0000b" } } }))))
-      .toBe("invalid_task_input");
+    // NUL is refused by the store itself, before any SQL runs (the class-22 mapping is only a backstop).
+    await expect(store.createTask(taskInput({ providerId: "claude\u0000cli" })))
+      .rejects.toMatchObject({ code: "invalid_task_input", message: "text is invalid.", constraint: undefined });
+    await expect(store.createTask(taskInput({ initialEvent: { ...taskInput().initialEvent, payload: { text: "a\u0000b" } } })))
+      .rejects.toMatchObject({ code: "invalid_task_input", message: "text is invalid." });
     expect(await countRows(db, "interactive_tasks")).toBe(0);
 
     // A date Date.parse accepts but Postgres would not is normalised before binding.
     const created = await store.createTask(taskInput({ authorityExpiresAt: "Sun Sep 20 2026 22:10:00 GMT+0100 (British Summer Time)" }));
     expect(created.task.authorityExpiresAt).toBe("2026-09-20T21:10:00.000Z");
-    expect(await codeOf(store.transition(transitionFor("task_1", 1, "request_nul_reply", H("3"), { kind: "record_turn_result",
-      turnKey: "turn_nul", assistantMessage: "bad\u0000reply", actions: [] })))).toBe("invalid_task_input");
+    await expect(store.transition(transitionFor("task_1", 1, "request_nul_reply", H("3"), { kind: "record_turn_result",
+      turnKey: "turn_nul", assistantMessage: "bad\u0000reply", actions: [] })))
+      .rejects.toMatchObject({ code: "invalid_task_input", message: "text is invalid." });
+    // A cursor carries only Postgres timestamp text; anything else is refused before SQL.
     const forgedCursor = Buffer.from(JSON.stringify(["Tue Sep 30 2030 10:00:00 GMT+0100 (British Summer Time)", "task_1"])).toString("base64url");
-    expect(await codeOf(store.listActiveTasks({ workspaceId: WORKSPACE_A, actorId: ACTOR_A, cursor: forgedCursor }))).toBe("invalid_task_input");
+    await expect(store.listActiveTasks({ workspaceId: WORKSPACE_A, actorId: ACTOR_A, cursor: forgedCursor }))
+      .rejects.toMatchObject({ code: "invalid_task_input", message: "cursor is invalid." });
 
     // A global event id collision is typed too.
     expect(await codeOf(store.createTask(taskInput({ taskId: "task_2",
