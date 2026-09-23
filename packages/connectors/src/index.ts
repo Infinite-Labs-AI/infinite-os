@@ -8,6 +8,7 @@ import {
 } from "./meta-ads-hot-rollup.js";
 import { metaAdsAccountLivenessCursorKey, metaAdsAccountLivenessDue } from "./meta-account-liveness.js";
 import { metaEntityReadMode } from "./meta-entity-checkpoint.js";
+import { planMetaChildStatusRefresh, runMetaChildStatusRefresh } from "./meta-child-status-refresh.js";
 import { metaAdsEntityVersionFingerprint } from "./meta-entity-fingerprint.js";
 import {
   metaAdsFetchInsightsWindowWithNarrowing,
@@ -47,6 +48,7 @@ import { type FirstPhaseProvider, type InfiniteOsDb, assertFirstPhaseProvider } 
 import { writeStripeMrrMovementsAtClose } from "./stripe-mrr-movements.js";
 import {
   META_ADS_DEFAULT_REQUEST_BUDGET,
+  MetaAdsRequestBudgetError,
   MetaAdsRequestTelemetry,
   type MetaAdsResponseSignal,
   type MetaAdsRequestObserver,
@@ -2606,6 +2608,20 @@ const metaAdsConnector = createConnector<MetaAdsCredential, MetaAdsSyncRow>({
       metaAdsReadAdAdims(credential, telemetry, adNodes, entityScan?.updatedSince, cached.filter(row=>row.entity_type==='ad').map(row=>row.metadata_json as MetaAdsEdgeNode), request.metaAdsOnMedia, readsEntities, fullAdSnapshot),
     ]);
 
+    if (readsEntities && entityScan?.mode === "incremental") {
+      // A parent pause/resume changes its children's inherited effective_status without moving
+      // their updated_time, so the delta above cannot see it. Re-read those children's status now.
+      await metaAdsRefreshChildStatuses({
+        credential, telemetry, entityScan, accessToken,
+        campaignNodes, adsetNodes, adNodes, adsetDims, adDims,
+        stored: (entityType) => cached.filter(row=>row.entity_type===entityType).map(row=>row.metadata_json as MetaAdsEdgeNode),
+        loadStoredCreatives: async () => (await _db.query<{metadata_json:Record<string,unknown>}>(
+          "select metadata_json from meta_ads_entity_versions where workspace_id=$1 and source_id=$2 and ad_account_id=$3 and valid_to is null and entity_type='creative'",
+          [request.workspaceId,request.sourceId,adAccountId],
+        )).map(row=>row.metadata_json),
+      });
+    }
+
     const rows: MetaAdsSyncRow[] = [];
     if (readsEntities && entityScan) {
       const observedAt = new Date().toISOString();
@@ -4129,6 +4145,15 @@ async function metaAdsCloseSuccess(
       `insert into sync_cursors(id,workspace_id,source_id,cursor_key,cursor_value) values($1,$2,$3,$4,$5)
        on conflict(source_id,cursor_key) do update set cursor_value=greatest(sync_cursors.cursor_value,excluded.cursor_value),updated_at=now()`,
       [`cursor_${randomUUID()}`,request.workspaceId,request.sourceId,key,value],
+    );
+    // An incremental scan saw a parent status change it could not carry to the children (budget,
+    // or a child it could not explain). Age the full-read checkpoint so the NEXT scan is the daily
+    // full read, which re-reads every child's status. A full read that committed after this scan
+    // started already did that work, so it is left alone.
+    if (scan.mode === "incremental" && scan.fullReadRequested) await tx.query(
+      `update sync_cursors set cursor_value=$4, updated_at=now()
+        where workspace_id=$1 and source_id=$2 and cursor_key=$3 and cursor_value<=$5`,
+      [request.workspaceId,request.sourceId,`meta_ads_entities_full:${entitySnapshot.adAccountId}`,META_ADS_FULL_READ_REQUESTED_CURSOR,scan.startedAt],
     );
   }
 
@@ -10293,13 +10318,15 @@ async function metaAdsReadEdge(
   telemetry?: MetaAdsRequestObserver,
   updatedSince?: number,
   onPage?: (nodes:MetaAdsEdgeNode[])=>Promise<void>,
+  // Read a campaign's or ad set's own child edge instead of the account's (meta-child-status-refresh.ts).
+  parentId?: string,
 ): Promise<MetaAdsEdgeNode[]> {
   const accessToken = requireCredential(credential, "accessToken");
   const adAccountId = metaAdsAccountId(credential);
   const nodes: MetaAdsEdgeNode[] = [];
   let after: string | undefined;
   for (let page = 0; page < META_ADS_EDGE_PAGE_LIMIT; page += 1) {
-    const url = new URL(`https://graph.facebook.com/${metaAdsApiVersion(credential)}/${adAccountId}/${edge}`);
+    const url = new URL(`https://graph.facebook.com/${metaAdsApiVersion(credential)}/${parentId ?? adAccountId}/${edge}`);
     url.searchParams.set("fields", fields);
     url.searchParams.set("limit", fields.includes("{") ? "100" : "500");
     if (updatedSince !== undefined) url.searchParams.set("updated_since", String(updatedSince));
@@ -10480,6 +10507,90 @@ async function metaAdsReadCampaignStatus(
     statuses.set(campaignId, metaAdsEdgeNodeStatus(node));
   }
   return statuses;
+}
+
+/** The full-read checkpoint value that makes the next scan a full read (any age >= 24h does). */
+const META_ADS_FULL_READ_REQUESTED_CURSOR = "1970-01-01T00:00:00.000Z";
+
+/**
+ * Incremental scans only: carry a campaign/ad set status change to its children in the same run
+ * (meta-child-status-refresh.ts). Children whose status changed are merged into the snapshot sinks
+ * (a delta node is replaced, a stored-based one appended, so no entity gets two rows) and into the
+ * dim maps the insights rows read. When the refresh cannot run completely, nothing from it is
+ * applied and CLOSE ages the full-read checkpoint instead.
+ */
+async function metaAdsRefreshChildStatuses(input: {
+  credential: MetaAdsCredential;
+  telemetry: MetaAdsRequestTelemetry | undefined;
+  entityScan: ReturnType<typeof metaEntityReadMode>;
+  accessToken: string;
+  campaignNodes: MetaAdsEdgeNode[];
+  adsetNodes: MetaAdsEdgeNode[];
+  adNodes: MetaAdsEdgeNode[];
+  adsetDims: Map<string, MetaAdsAdsetDim>;
+  adDims: Map<string, MetaAdsAdDim>;
+  stored: (entityType: "campaign" | "adset" | "ad") => MetaAdsEdgeNode[];
+  loadStoredCreatives: () => Promise<Array<Record<string, unknown>>>;
+}): Promise<void> {
+  const storedAdsets = input.stored("adset"), storedAds = input.stored("ad");
+  const plan = planMetaChildStatusRefresh({
+    campaigns: input.campaignNodes,
+    adsets: input.adsetNodes,
+    storedCampaigns: input.stored("campaign"),
+    storedAdsets,
+    storedAds,
+  });
+  const summary = { outcome: "none" as "none" | "applied" | "full_read_requested", changedCampaigns: 0, changedAdsets: 0,
+    refreshes: 0, requests: 0, adsetsUpdated: 0, adsUpdated: 0, fullReadReason: null as string | null };
+  if (!plan) {
+    input.telemetry?.noteChildStatusRefresh(summary);
+    return;
+  }
+  summary.changedCampaigns = plan.changedCampaignIds.length;
+  summary.changedAdsets = plan.changedAdsetIds.length;
+  const requestsBefore = input.telemetry?.snapshot().requestCount ?? 0;
+  const outcome = await runMetaChildStatusRefresh<MetaAdsEdgeNode>({
+    plan,
+    remainingRequests: input.telemetry?.remainingRequests() ?? Number.POSITIVE_INFINITY,
+    readChildren: (read) => {
+      summary.refreshes += 1;
+      return metaAdsReadEdge(input.credential, read.edge, read.fields, input.telemetry, undefined, undefined, read.parentId);
+    },
+    loadStoredCreatives: input.loadStoredCreatives,
+    // Stored metadata is scrubbed; compare and merge fresh nodes in the same form.
+    normalize: (node) => scrubMetaAdsProviderMetadata(node, input.accessToken) as MetaAdsEdgeNode,
+    deltaAdsets: input.adsetNodes,
+    deltaAds: input.adNodes,
+    storedAdsets,
+    storedAds,
+    isBudgetError: (error) => error instanceof MetaAdsRequestBudgetError,
+  });
+  summary.requests = (input.telemetry?.snapshot().requestCount ?? 0) - requestsBefore;
+  if (outcome.kind === "full_read_required") {
+    input.entityScan.fullReadRequested = outcome.reason;
+    input.telemetry?.noteChildStatusRefresh({ ...summary, outcome: "full_read_requested", fullReadReason: outcome.reason });
+    return;
+  }
+  const upsert = (sink: MetaAdsEdgeNode[], nodes: MetaAdsEdgeNode[]) => {
+    const index = new Map<string, number>();
+    sink.forEach((node, position) => { const id = stringOrNull(node.id); if (id) index.set(id, position); });
+    for (const node of nodes) {
+      const position = index.get(stringOrNull(node.id) ?? "");
+      if (position === undefined) sink.push(node);
+      else sink[position] = node;
+    }
+  };
+  upsert(input.adsetNodes, outcome.adsets);
+  upsert(input.adNodes, outcome.ads);
+  const patchDims = (dims: Map<string, MetaAdsEntityStatus>, nodes: MetaAdsEdgeNode[]) => {
+    for (const node of nodes) {
+      const dim = dims.get(stringOrNull(node.id) ?? "");
+      if (dim) Object.assign(dim, metaAdsEdgeNodeStatus(node));
+    }
+  };
+  patchDims(input.adsetDims, outcome.adsets);
+  patchDims(input.adDims, outcome.ads);
+  input.telemetry?.noteChildStatusRefresh({ ...summary, outcome: "applied", adsetsUpdated: outcome.adsets.length, adsUpdated: outcome.ads.length });
 }
 
 function metaAdsEntitySnapshotRows(
