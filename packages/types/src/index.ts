@@ -51,7 +51,7 @@ export interface SessionContext {
  * this typing inline (it cannot depend on this leaf package); the two shapes are structural.
  */
 export interface MetaAdsRequestObserver {
-  beforeRequest(kind: "account_liveness" | "campaign_edge" | "adset_edge" | "ad_edge" | "campaign_insights" | "adset_insights" | "ad_insights", retry: boolean): Promise<void>;
+  beforeRequest(kind: "account_liveness" | "campaign_edge" | "adset_edge" | "ad_edge" | "campaign_insights" | "adset_insights" | "ad_insights" | "insights_async_submit" | "insights_async_poll", retry: boolean): Promise<void>;
   recordPage(utilizationPercent: number | null): void;
   recordRejectedResponse(utilizationPercent: number | null): void;
   observeResponse(signal: { maxPercent: number | null; estimatedRegainSeconds: number | null; resetSeconds: number | null; accessTier: string | null; throttled?: boolean }): Promise<void>;

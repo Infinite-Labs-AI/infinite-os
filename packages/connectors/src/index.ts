@@ -1,6 +1,11 @@
 import { metaEntityReadMode } from "./meta-entity-checkpoint.js";
 import { metaAdsEntityVersionFingerprint } from "./meta-entity-fingerprint.js";
 import {
+  metaAdsFetchInsightsWindowWithNarrowing,
+  metaAdsRunAsyncInsightsJob,
+  type MetaAdsAsyncInsightsStep,
+} from "./meta-async-insights.js";
+import {
   MetaGraphBatchTransportError,
   executeMetaGraphReadBatch,
   type MetaGraphBatchResult,
@@ -8953,22 +8958,6 @@ function metaAdsMonthWindows(sinceDay: string, untilDay: string): MetaAdsDateWin
   return windows;
 }
 
-// Split one window into WEEK-sized sub-windows (the narrower retry when a month 1487534s).
-function metaAdsWeekWindows(window: MetaAdsDateWindow): MetaAdsDateWindow[] {
-  const windows: MetaAdsDateWindow[] = [];
-  let cursor = new Date(`${window.since}T00:00:00.000Z`);
-  const until = new Date(`${window.until}T00:00:00.000Z`);
-  while (cursor <= until) {
-    const weekEnd = new Date(cursor);
-    weekEnd.setUTCDate(weekEnd.getUTCDate() + 6);
-    const windowUntil = weekEnd < until ? weekEnd : until;
-    windows.push({ since: metaAdsIsoDay(cursor), until: metaAdsIsoDay(windowUntil) });
-    cursor = new Date(windowUntil);
-    cursor.setUTCDate(cursor.getUTCDate() + 1);
-  }
-  return windows;
-}
-
 // §4d — inclusive day-span (days) of a [since, until] window. Used to decide whether the ad
 // pass must chunk: any range wider than a single calendar slice is too wide for one level=ad
 // daily request on a many-ads account (the Meta 100/1487534 trigger).
@@ -9120,7 +9109,11 @@ function isMetaAdsDataVolumeError(error: unknown): boolean {
   if (!(error instanceof ConnectorError)) {
     return false;
   }
-  return error.message.includes(String(META_ADS_DATA_VOLUME_ERROR_SUBCODE));
+  // Meta also answers an over-large insights query with code 1 carrying the same "Please reduce the
+  // amount of data you're asking for" message (no 1487534 subcode). Match the message, not bare
+  // code 1 — code 1 alone is Meta's generic unknown error and must not trigger narrowing.
+  return error.message.includes(String(META_ADS_DATA_VOLUME_ERROR_SUBCODE))
+    || /reduce the amount of data/i.test(error.message);
 }
 
 // §4f — structured throttle classifier for the safe fetch, mirroring 1bu-1's
@@ -9558,12 +9551,13 @@ async function metaAdsFetchOneDayInsightsBatch(input: {
   }
 }
 
-// Phase-2 slice-1b §4d — run the level=ad BACKFILL over MONTH-sized windows. For each month
-// window we issue one metaAdsFetchInsightsPages call; if Meta answers a window with subcode
-// 1487534 ("reduce the amount of data") we DO NOT fail the backfill — we retry that ONE
-// window split into WEEK sub-windows. Any error that is NOT a data-volume error (auth, a
-// genuine 5xx after retries, the page-cap throw) propagates unchanged. `urlFor` builds the
-// /insights URL for a given time_range so the loop owns only the windowing, not the field set.
+// Phase-2 slice-1b §4d — fetch ONE insights window (any grain) with the data-volume ladder. The
+// window is issued synchronously; on Meta 100/1487534 ("reduce the amount of data") it narrows
+// month → 7-day weeks → single days, and a single day that STILL trips the error runs as a Meta
+// async report job (the only remaining remedy — see meta-async-insights.ts for why async is the
+// last rung and never chosen by window size). Any error that is NOT a data-volume error (auth,
+// rate-limit-after-retries, budget, page cap) propagates unchanged. `urlFor` builds the /insights
+// URL for a given time_range so the ladder owns only the windowing, not the field set.
 async function metaAdsFetchAdInsightsChunked(
   accessToken: string,
   window: MetaAdsDateWindow,
@@ -9572,22 +9566,27 @@ async function metaAdsFetchAdInsightsChunked(
   telemetry?: MetaAdsRequestObserver,
   requestKind: "campaign_insights" | "adset_insights" | "ad_insights" = "ad_insights",
 ): Promise<void> {
-  try {
-    // Commit a window only after all pages succeed; narrower retry must not duplicate earlier pages.
-    const pending: MetaAdsInsightsRow[] = [];
-    await metaAdsFetchInsightsPages(accessToken, urlFor(window), row => pending.push(row), telemetry, requestKind);
-    pending.forEach(onRow);
-  } catch (error) {
-    // §4d — ONLY a data-volume (1487534) error triggers the narrower retry; everything else
-    // (auth/rate-limit-after-retries/page-cap) is a real failure and re-throws.
-    if (!isMetaAdsDataVolumeError(error)) {
-      throw error;
-    }
-    // The month window is still too wide — split it into weeks and retry each sub-window.
-    for (const week of metaAdsWeekWindows(window)) {
-      await metaAdsFetchInsightsPages(accessToken, urlFor(week), onRow, telemetry, requestKind);
-    }
-  }
+  const asyncKinds: Record<MetaAdsAsyncInsightsStep, MetaAdsRequestKind> = {
+    submit: "insights_async_submit",
+    poll: "insights_async_poll",
+    results: requestKind,
+  };
+  await metaAdsFetchInsightsWindowWithNarrowing<MetaAdsInsightsRow>({
+    window,
+    urlFor,
+    onRow,
+    isDataVolumeError: isMetaAdsDataVolumeError,
+    fetchPages: (url, sink) => metaAdsFetchInsightsPages(accessToken, url, sink, telemetry, requestKind),
+    finalRung: (_range, url) => metaAdsRunAsyncInsightsJob<MetaAdsInsightsRow>(url, {
+      fetch: (target, init, step) => metaAdsFetchWithThrottleBackoff(target, {
+        ...init,
+        headers: { ...(init.headers as Record<string, string> | undefined), ...bearerHeaders(accessToken) },
+      }, telemetry, asyncKinds[step]),
+      sleep: metaAdsSleep,
+      now: () => Date.now(),
+      fail: (message) => new ConnectorError("provider_api_error", message, true),
+    }),
+  });
 }
 
 // §4 — derive the typed child conversion rows for one campaign-day from the raw
