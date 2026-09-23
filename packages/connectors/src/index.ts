@@ -14,6 +14,7 @@ import {
 } from "./meta-async-insights.js";
 import {
   META_ADS_AD_FULL_FIELDS,
+  type MetaAdsFullAdReadFallback,
   type MetaAdsFullAdReadPlan,
   metaAdsFullAdReadPlan,
   metaAdsHeavyAdFieldsKey,
@@ -2557,13 +2558,24 @@ const metaAdsConnector = createConnector<MetaAdsCredential, MetaAdsSyncRow>({
       plan: metaAdsFullAdReadPlan({
         scanCheckpoint: checkpoints.find(row=>row.cursor_key===checkpointKey)?.cursor_value??null,
         heavyCheckpoint: checkpoints.find(row=>row.cursor_key===heavyCheckpointKey)?.cursor_value??null,
+        apiVersion: context.apiVersion,
         now: scanStart,
       }),
-      loadStored: async () => (await _db.query<{metadata_json:Record<string,unknown>}>(
-        "select metadata_json from meta_ads_entity_versions where workspace_id=$1 and source_id=$2 and ad_account_id=$3 and valid_to is null and entity_type='ad'",
-        [request.workspaceId,request.sourceId,adAccountId],
-      )).map(row=>row.metadata_json as MetaAdsEdgeNode),
-      onRead: (outcome: { heavy: boolean }) => { if (outcome.heavy) entityScan.heavyAdFieldsKey = metaAdsHeavyAdFieldsKey(); },
+      loadStored: async () => {
+        const stored = await _db.query<{entity_type:string;metadata_json:Record<string,unknown>}>(
+          "select entity_type,metadata_json from meta_ads_entity_versions where workspace_id=$1 and source_id=$2 and ad_account_id=$3 and valid_to is null and entity_type in ('ad','creative')",
+          [request.workspaceId,request.sourceId,adAccountId],
+        );
+        return {
+          ads: stored.filter(row=>row.entity_type==='ad').map(row=>row.metadata_json as MetaAdsEdgeNode),
+          creatives: stored.filter(row=>row.entity_type==='creative').map(row=>row.metadata_json),
+        };
+      },
+      onRead: (outcome: { heavy: boolean; fallback?: MetaAdsFullAdReadFallback }) => {
+        if (outcome.heavy) entityScan.heavyAdFieldsKey = metaAdsHeavyAdFieldsKey(context.apiVersion);
+        // Ops visibility: how often, and why, the lean full read falls back to the heavy one.
+        telemetry?.noteFullAdRead(outcome.heavy ? "heavy" : "lean", outcome.fallback ?? null);
+      },
     } : undefined;
     const cached = syncMode === "insights_only" || entityScan?.mode === "incremental"
       ? await _db.query<{entity_type:string;metadata_json:Record<string,unknown>}>(
@@ -10336,8 +10348,8 @@ async function metaAdsReadAdAdims(
   // FULL scans only: the complete ad snapshot, read lean when possible (meta-lean-inventory.ts).
   fullSnapshot?: {
     plan: MetaAdsFullAdReadPlan;
-    loadStored: () => Promise<MetaAdsEdgeNode[]>;
-    onRead: (outcome: { heavy: boolean }) => void;
+    loadStored: () => Promise<{ ads: MetaAdsEdgeNode[]; creatives: Array<Record<string, unknown>> }>;
+    onRead: (outcome: { heavy: boolean; fallback?: MetaAdsFullAdReadFallback }) => void;
   },
 ): Promise<Map<string, MetaAdsAdDim>> {
   const onMediaPage = onMedia ? async (page: MetaAdsEdgeNode[]) => {

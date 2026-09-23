@@ -26,7 +26,16 @@ import { canonicalMetaAdsJson } from "./meta-entity-fingerprint.js";
  *    the delta missed) falls back to the heavy full read, i.e. exactly the previous behavior.
  *    AdCreatives are immutable apart from name/status (see meta-entity-fingerprint.ts), so the only
  *    thing the lean read cannot see is a creative RENAME; a heavy full read at least every
- *    META_ADS_HEAVY_RECONCILE_MAX_AGE_MS (and whenever the heavy field set changes) bounds that.
+ *    META_ADS_HEAVY_RECONCILE_MAX_AGE_MS (and whenever the heavy field set or Graph API version
+ *    changes) bounds that.
+ *
+ * 3. Shared creatives. One AdCreative can back several ads, and every ad row writes a creative row.
+ *    An ad rebuilt from storage carries the expansion AS OF ITS OWN last version, which can predate
+ *    a creative rename another ad (re-read by a delta) already recorded. Writing both in one run
+ *    would flip the creative between versions on every lean read. So every ad in a lean snapshot
+ *    takes its creative expansion from ONE resolved source per creative id, freshest first: a delta
+ *    node from this run, else the creative's stored CURRENT version (the latest observation of that
+ *    creative across all ads), else the ad's own stored expansion.
  */
 
 /** The heavy ad field set: the full entity snapshot including the creative expansion. */
@@ -52,19 +61,27 @@ export function metaAdsHeavyCursorKey(adAccountId: string): string {
   return `meta_ads_entities_heavy:${adAccountId}`;
 }
 
-/** Identifies the heavy ad field set, so a field-set change forces one heavy re-read. */
-export function metaAdsHeavyAdFieldsKey(fields: string = META_ADS_AD_FULL_FIELDS): string {
-  return createHash("sha256").update(fields).digest("hex").slice(0, 16);
+/**
+ * Identifies the heavy read's response shape — Graph API version + heavy field set — so a version
+ * bump or field-set change forces one heavy re-read instead of merging stored snapshots of an older
+ * shape with fresh reads of the new one for up to a week.
+ */
+export function metaAdsHeavyAdFieldsKey(apiVersion: string, fields: string = META_ADS_AD_FULL_FIELDS): string {
+  return createHash("sha256").update(`${apiVersion}\n${fields}`).digest("hex").slice(0, 16);
 }
 
-/** Cursor value: `<scan startedAt ISO>|<heavy field-set key>` (ISO first keeps `greatest()` ordering). */
-export function metaAdsHeavyCursorValue(startedAt: string, fieldsKey: string = metaAdsHeavyAdFieldsKey()): string {
-  return `${startedAt}|${fieldsKey}`;
+/** Cursor value: `<scan startedAt ISO>|<heavy shape key>` (ISO first keeps `greatest()` ordering). */
+export function metaAdsHeavyCursorValue(startedAt: string, shapeKey: string): string {
+  return `${startedAt}|${shapeKey}`;
 }
+
+export type MetaAdsFullAdReadFallback =
+  | "no_scan_checkpoint" | "no_heavy_checkpoint" | "heavy_shape_changed" | "heavy_reconcile_due"
+  | "no_stored_ads" | "unknown_ad" | "creative_changed" | "fields_changed";
 
 export type MetaAdsFullAdReadPlan =
   | { lean: true; updatedSince: number }
-  | { lean: false; reason: "no_scan_checkpoint" | "no_heavy_checkpoint" | "heavy_fields_changed" | "heavy_reconcile_due" };
+  | { lean: false; reason: Extract<MetaAdsFullAdReadFallback, "no_scan_checkpoint" | "no_heavy_checkpoint" | "heavy_shape_changed" | "heavy_reconcile_due"> };
 
 /**
  * Decide how a FULL scan reads the ad edge. Lean needs (a) a committed scan checkpoint, whose start
@@ -74,6 +91,7 @@ export type MetaAdsFullAdReadPlan =
 export function metaAdsFullAdReadPlan(input: {
   scanCheckpoint: string | null;
   heavyCheckpoint: string | null;
+  apiVersion: string;
   now: Date;
 }): MetaAdsFullAdReadPlan {
   const at = input.now.getTime();
@@ -83,8 +101,8 @@ export function metaAdsFullAdReadPlan(input: {
   if (!input.heavyCheckpoint || separator < 0) return { lean: false, reason: "no_heavy_checkpoint" };
   const heavyAt = Date.parse(input.heavyCheckpoint.slice(0, separator));
   if (!Number.isFinite(heavyAt) || heavyAt > at) return { lean: false, reason: "no_heavy_checkpoint" };
-  if (input.heavyCheckpoint.slice(separator + 1) !== metaAdsHeavyAdFieldsKey()) {
-    return { lean: false, reason: "heavy_fields_changed" };
+  if (input.heavyCheckpoint.slice(separator + 1) !== metaAdsHeavyAdFieldsKey(input.apiVersion)) {
+    return { lean: false, reason: "heavy_shape_changed" };
   }
   if (at - heavyAt >= META_ADS_HEAVY_RECONCILE_MAX_AGE_MS) return { lean: false, reason: "heavy_reconcile_due" };
   return { lean: true, updatedSince: Math.max(0, Math.floor(scan / 1000) - DELTA_OVERLAP_SECONDS) };
@@ -115,11 +133,29 @@ export type MetaAdsLeanMergeResult<N extends AdNode> =
 /**
  * Rebuild the full ad snapshot from a lean read. The LEAN read is the membership + status truth
  * (only ids it returned are in the snapshot, so a vanished ad is still closed at CLOSE); the heavy
- * base for each id is the fresh delta node, else the stored current version.
+ * base for each id is the fresh delta node, else the stored current version. The creative
+ * expansion is resolved once per creative id (see note 3 at the top): delta, else the stored
+ * current creative version, else the ad's own stored expansion.
  */
-export function mergeMetaAdsLeanAds<N extends AdNode>(input: { lean: N[]; delta: N[]; stored: N[] }): MetaAdsLeanMergeResult<N> {
+export function mergeMetaAdsLeanAds<N extends AdNode>(input: {
+  lean: N[];
+  delta: N[];
+  stored: N[];
+  storedCreatives?: Array<Record<string, unknown>>;
+}): MetaAdsLeanMergeResult<N> {
   const deltaById = new Map<string, N>();
-  for (const node of input.delta) { const id = nodeId(node); if (id) deltaById.set(id, node); }
+  const creativeById = new Map<string, unknown>();
+  for (const creative of input.storedCreatives ?? []) {
+    const id = creative.id;
+    if (typeof id === "string" && id) creativeById.set(id, creative);
+  }
+  for (const node of input.delta) {
+    const id = nodeId(node);
+    if (id) deltaById.set(id, node);
+    // A creative read in THIS run outranks any stored snapshot of it.
+    const cid = creativeId(node);
+    if (cid) creativeById.set(cid, node.creative);
+  }
   const storedById = new Map<string, N>();
   for (const node of input.stored) { const id = nodeId(node); if (id) storedById.set(id, node); }
   const nodes: N[] = [];
@@ -136,6 +172,8 @@ export function mergeMetaAdsLeanAds<N extends AdNode>(input: { lean: N[]; delta:
       }
     }
     const merged: Record<string, unknown> = { ...base };
+    const cid = creativeId(base);
+    if (cid && creativeById.has(cid)) merged.creative = creativeById.get(cid);
     for (const key of STATUS_KEYS) {
       // Graph omits empty fields: an absent status in the lean read is absent now, not "unchanged".
       const value = field(lean, key);
@@ -153,18 +191,19 @@ export function mergeMetaAdsLeanAds<N extends AdNode>(input: { lean: N[]; delta:
  */
 export async function readMetaAdsFullAdSnapshot<N extends AdNode>(input: {
   plan: MetaAdsFullAdReadPlan;
-  loadStored: () => Promise<N[]>;
+  /** Current stored versions: every ad, and every creative (for shared-creative resolution). */
+  loadStored: () => Promise<{ ads: N[]; creatives: Array<Record<string, unknown>> }>;
   readEdge: (fields: string, updatedSince: number | undefined, withMedia: boolean) => Promise<N[]>;
   normalize: (node: N) => N;
-}): Promise<{ nodes: N[]; heavy: boolean; fallback?: string }> {
-  const heavy = async (fallback?: string) => ({
+}): Promise<{ nodes: N[]; heavy: boolean; fallback?: MetaAdsFullAdReadFallback }> {
+  const heavy = async (fallback?: MetaAdsFullAdReadFallback) => ({
     nodes: await input.readEdge(META_ADS_AD_FULL_FIELDS, undefined, true),
     heavy: true,
     ...(fallback ? { fallback } : {}),
   });
   if (!input.plan.lean) return heavy(input.plan.reason);
   const stored = await input.loadStored();
-  if (stored.length === 0) return heavy("no_stored_ads");
+  if (stored.ads.length === 0) return heavy("no_stored_ads");
   // Delta first, then the lean snapshot: the snapshot is the later observation of membership and
   // status, and any change between the two reads is re-read by the next scan's overlap window.
   const delta = await input.readEdge(META_ADS_AD_FULL_FIELDS, input.plan.updatedSince, true);
@@ -172,7 +211,8 @@ export async function readMetaAdsFullAdSnapshot<N extends AdNode>(input: {
   const merged = mergeMetaAdsLeanAds({
     lean: lean.map(input.normalize),
     delta: delta.map(input.normalize),
-    stored,
+    stored: stored.ads,
+    storedCreatives: stored.creatives,
   });
   if (merged.kind === "needs_full") return heavy(merged.reason);
   return { nodes: merged.nodes, heavy: false };

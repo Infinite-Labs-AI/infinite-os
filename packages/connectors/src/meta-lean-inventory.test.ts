@@ -42,30 +42,37 @@ describe("metaGraphNextPage", () => {
 
 describe("metaAdsFullAdReadPlan", () => {
   const now = new Date("2026-09-23T12:00:00Z");
-  const heavy = (at: string) => metaAdsHeavyCursorValue(at);
+  const V = "v25.0";
+  const heavy = (at: string, version = V) => metaAdsHeavyCursorValue(at, metaAdsHeavyAdFieldsKey(version));
   it("reads lean with a delta bounded by the last committed scan (5 min overlap)", () => {
-    expect(metaAdsFullAdReadPlan({ scanCheckpoint: "2026-09-23T10:00:00.000Z", heavyCheckpoint: heavy("2026-09-20T00:00:00.000Z"), now }))
+    expect(metaAdsFullAdReadPlan({ scanCheckpoint: "2026-09-23T10:00:00.000Z", heavyCheckpoint: heavy("2026-09-20T00:00:00.000Z"), apiVersion: V, now }))
       .toEqual({ lean: true, updatedSince: Date.parse("2026-09-23T09:55:00Z") / 1000 });
   });
   it("reads heavy without a scan checkpoint, a heavy checkpoint, the current field set, or a recent heavy read", () => {
-    expect(metaAdsFullAdReadPlan({ scanCheckpoint: null, heavyCheckpoint: heavy("2026-09-20T00:00:00.000Z"), now }))
+    expect(metaAdsFullAdReadPlan({ scanCheckpoint: null, heavyCheckpoint: heavy("2026-09-20T00:00:00.000Z"), apiVersion: V, now }))
       .toEqual({ lean: false, reason: "no_scan_checkpoint" });
-    expect(metaAdsFullAdReadPlan({ scanCheckpoint: "2026-09-23T10:00:00.000Z", heavyCheckpoint: null, now }))
+    expect(metaAdsFullAdReadPlan({ scanCheckpoint: "2026-09-23T10:00:00.000Z", heavyCheckpoint: null, apiVersion: V, now }))
       .toEqual({ lean: false, reason: "no_heavy_checkpoint" });
-    expect(metaAdsFullAdReadPlan({ scanCheckpoint: "2026-09-23T10:00:00.000Z", heavyCheckpoint: "2026-09-20T00:00:00.000Z|0123456789abcdef", now }))
-      .toEqual({ lean: false, reason: "heavy_fields_changed" });
+    expect(metaAdsFullAdReadPlan({ scanCheckpoint: "2026-09-23T10:00:00.000Z", heavyCheckpoint: "2026-09-20T00:00:00.000Z|0123456789abcdef", apiVersion: V, now }))
+      .toEqual({ lean: false, reason: "heavy_shape_changed" });
     expect(metaAdsFullAdReadPlan({
       scanCheckpoint: "2026-09-23T10:00:00.000Z",
       heavyCheckpoint: heavy(new Date(now.getTime() - META_ADS_HEAVY_RECONCILE_MAX_AGE_MS).toISOString()),
+      apiVersion: V,
       now,
     })).toEqual({ lean: false, reason: "heavy_reconcile_due" });
-    expect(metaAdsFullAdReadPlan({ scanCheckpoint: "2026-09-24T10:00:00.000Z", heavyCheckpoint: heavy("2026-09-20T00:00:00.000Z"), now }))
+    expect(metaAdsFullAdReadPlan({ scanCheckpoint: "2026-09-24T10:00:00.000Z", heavyCheckpoint: heavy("2026-09-20T00:00:00.000Z"), apiVersion: V, now }))
       .toEqual({ lean: false, reason: "no_scan_checkpoint" });
   });
-  it("keys the heavy checkpoint to the exact heavy field set", () => {
-    expect(metaAdsHeavyAdFieldsKey()).toBe(metaAdsHeavyAdFieldsKey(META_ADS_AD_FULL_FIELDS));
-    expect(metaAdsHeavyAdFieldsKey(`${META_ADS_AD_FULL_FIELDS},url_tags`)).not.toBe(metaAdsHeavyAdFieldsKey());
+  it("keys the heavy checkpoint to the exact heavy field set AND Graph API version", () => {
+    expect(metaAdsHeavyAdFieldsKey(V)).toBe(metaAdsHeavyAdFieldsKey(V, META_ADS_AD_FULL_FIELDS));
+    expect(metaAdsHeavyAdFieldsKey(V, `${META_ADS_AD_FULL_FIELDS},url_tags`)).not.toBe(metaAdsHeavyAdFieldsKey(V));
+    expect(metaAdsHeavyAdFieldsKey("v26.0")).not.toBe(metaAdsHeavyAdFieldsKey(V));
     expect(META_ADS_AD_LEAN_FIELDS).not.toContain("{");
+  });
+  it("forces a heavy read after a Graph API version bump", () => {
+    expect(metaAdsFullAdReadPlan({ scanCheckpoint: "2026-09-23T10:00:00.000Z", heavyCheckpoint: heavy("2026-09-22T00:00:00.000Z", "v25.0"), apiVersion: "v26.0", now }))
+      .toEqual({ lean: false, reason: "heavy_shape_changed" });
   });
 });
 
@@ -81,6 +88,23 @@ describe("mergeMetaAdsLeanAds", () => {
     const lean = { id: "a1", name: "Ad", adset_id: "s1", campaign_id: "c1", status: "PAUSED", effective_status: "PAUSED", creative: { id: "cr1" } };
     expect(mergeMetaAdsLeanAds({ lean: [lean], delta: [delta], stored: [stored] }))
       .toEqual({ kind: "merged", nodes: [{ ...delta, status: "PAUSED", effective_status: "PAUSED" }] });
+  });
+  it("resolves a shared creative to ONE source per creative id: delta, else the stored creative version, else the ad's own", () => {
+    const leanOf = (id: string): Record<string, unknown> => ({ id, name: "Ad", adset_id: "s1", campaign_id: "c1", status: "ACTIVE", effective_status: "ACTIVE", creative: { id: "cr1" } });
+    const staleAd: Record<string, unknown> = { ...stored, id: "a2", creative: { id: "cr1", name: "Old" } };
+    const renamed = { id: "cr1", name: "Renamed", body: "Copy" };
+    // The stored creative version (latest observation across ads) outranks a sibling's stale copy.
+    expect(mergeMetaAdsLeanAds({ lean: [leanOf("a2")], delta: [], stored: [staleAd], storedCreatives: [renamed] }))
+      .toEqual({ kind: "merged", nodes: [{ ...staleAd, creative: renamed }] });
+    // A creative read in this run outranks storage, for every ad sharing it.
+    const fresh = { id: "cr1", name: "Fresh", body: "Copy" };
+    const merged = mergeMetaAdsLeanAds({
+      lean: [leanOf("a1"), leanOf("a2")], delta: [{ ...stored, creative: fresh }], stored: [stored, staleAd], storedCreatives: [renamed],
+    });
+    expect(merged.kind === "merged" && merged.nodes.map(node => node.creative)).toEqual([fresh, fresh]);
+    // No stored creative version: the ad keeps its own expansion.
+    expect(mergeMetaAdsLeanAds({ lean: [leanOf("a2")], delta: [], stored: [staleAd] }))
+      .toEqual({ kind: "merged", nodes: [staleAd] });
   });
   it("membership comes from the lean read only (a vanished ad is not resurrected from storage)", () => {
     expect(mergeMetaAdsLeanAds({ lean: [], delta: [stored], stored: [stored] })).toEqual({ kind: "merged", nodes: [] });
@@ -219,7 +243,8 @@ describe("lean Meta inventory reads against real PGlite", () => {
     };
   }
 
-  async function sync(account: Account, syncRequest: SyncRequest): Promise<{ edges: EdgeRequest[]; byKind: Record<string, number>; requestCount: number }> {
+  type FullAdRead = { mode: "lean" | "heavy"; fallback: string | null } | undefined;
+  async function sync(account: Account, syncRequest: SyncRequest): Promise<{ edges: EdgeRequest[]; byKind: Record<string, number>; requestCount: number; fullAdRead: FullAdRead }> {
     const edges: EdgeRequest[] = [];
     const original = globalThis.fetch;
     globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
@@ -256,9 +281,9 @@ describe("lean Meta inventory reads against real PGlite", () => {
     } finally {
       globalThis.fetch = original;
     }
-    const telemetry = (await db.query<{ request_telemetry: { byKind: Record<string, number>; requestCount: number } }>(
+    const telemetry = (await db.query<{ request_telemetry: { byKind: Record<string, number>; requestCount: number; fullAdRead?: FullAdRead } }>(
       "select request_telemetry from sync_runs where id=$1", [syncRequest.syncRunId]))[0]!.request_telemetry;
-    return { edges, byKind: telemetry.byKind, requestCount: telemetry.requestCount };
+    return { edges, byKind: telemetry.byKind, requestCount: telemetry.requestCount, fullAdRead: telemetry.fullAdRead };
   }
 
   function edgeCalls(byKind: Record<string, number>) {
@@ -292,6 +317,7 @@ describe("lean Meta inventory reads against real PGlite", () => {
     // Before: campaign 2 / adset 2 / ad 6 (an extra empty request after every edge's last page).
     expect(edgeCalls(full.byKind)).toEqual({ account_liveness: 1, campaign_edge: 1, adset_edge: 1, ad_edge: 5 });
     expect(full.requestCount).toBe(8);
+    expect(full.fullAdRead).toEqual({ mode: "heavy", fallback: "no_scan_checkpoint" });
     expect(await versionCounts(sourceId)).toEqual([
       { entity_type: "ad", total: 460, current: 460 },
       { entity_type: "adset", total: 222, current: 222 },
@@ -303,6 +329,8 @@ describe("lean Meta inventory reads against real PGlite", () => {
     const quiet = await sync(account, request(workspaceId, sourceId));
     expect(edgeCalls(quiet.byKind)).toEqual({ account_liveness: 1, campaign_edge: 1, adset_edge: 1, ad_edge: 1 });
     expect(quiet.edges.find((call) => call.edge === "campaigns")?.updatedSince).toBeNull();
+    // Incremental scans do not read the full ad snapshot at all.
+    expect(quiet.fullAdRead).toBeUndefined();
 
     // Incremental with three changed ads: still one ad call (before: 2 — the empty follow-up).
     for (const ad of account.ads.slice(100, 103)) { ad.name = `${String(ad.name)} v2`; ad.updated_time = new Date().toISOString(); }
@@ -318,7 +346,7 @@ describe("lean Meta inventory reads against real PGlite", () => {
     await sync(account, request(workspaceId, sourceId));
     const heavyCursor = await db.query<{ cursor_value: string }>(
       "select cursor_value from sync_cursors where source_id=$1 and cursor_key=$2", [sourceId, `meta_ads_entities_heavy:${ACCOUNT}`]);
-    expect(heavyCursor[0]?.cursor_value).toMatch(new RegExp(`\\|${metaAdsHeavyAdFieldsKey()}$`));
+    expect(heavyCursor[0]?.cursor_value).toMatch(new RegExp(`\\|${metaAdsHeavyAdFieldsKey("v25.0")}$`));
     const before = await versionCounts(sourceId);
 
     await forceNextScanFull(sourceId);
@@ -326,6 +354,7 @@ describe("lean Meta inventory reads against real PGlite", () => {
     // Before: ad_edge 6 (5 heavy pages of 100 + an empty follow-up). After: one heavy delta + one lean page.
     expect(edgeCalls(lean.byKind)).toEqual({ account_liveness: 1, campaign_edge: 1, adset_edge: 1, ad_edge: 2 });
     expect(lean.requestCount).toBe(5);
+    expect(lean.fullAdRead).toEqual({ mode: "lean", fallback: null });
     const adCalls = lean.edges.filter((call) => call.edge === "ads");
     expect(adCalls).toEqual([
       expect.objectContaining({ fields: META_ADS_AD_FULL_FIELDS, limit: 100, updatedSince: expect.any(Number) }),
@@ -410,6 +439,7 @@ describe("lean Meta inventory reads against real PGlite", () => {
     const swapped = await sync(account, request(workspaceId, sourceId));
     // delta 1 + lean 1 + heavy 5
     expect(edgeCalls(swapped.byKind).ad_edge).toBe(7);
+    expect(swapped.fullAdRead).toEqual({ mode: "heavy", fallback: "creative_changed" });
     expect((await currentAd(sourceId, "a400"))[0]?.metadata_json.creative).toMatchObject({ id: "cr_new", title: "New hook" });
     // The heavy fallback refreshed the heavy checkpoint.
     const heavy = await db.query<{ cursor_value: string }>(
@@ -423,6 +453,7 @@ describe("lean Meta inventory reads against real PGlite", () => {
     await forceNextScanFull(sourceId);
     const ghost = await sync(account, request(workspaceId, sourceId));
     expect(edgeCalls(ghost.byKind).ad_edge).toBe(7);
+    expect(ghost.fullAdRead).toEqual({ mode: "heavy", fallback: "unknown_ad" });
     expect((await currentAd(sourceId, "a_ghost"))[0]?.metadata_json.creative).toMatchObject({ id: "cr_ghost", title: "Ghost hook" });
   }, 120_000);
 
@@ -432,12 +463,13 @@ describe("lean Meta inventory reads against real PGlite", () => {
     const account = prodShapeAccount();
     await sync(account, request(workspaceId, sourceId));
     await db.query("update sync_cursors set cursor_value=$2 where source_id=$1 and cursor_key like 'meta_ads_entities_heavy:%'",
-      [sourceId, metaAdsHeavyCursorValue(new Date(Date.now() - META_ADS_HEAVY_RECONCILE_MAX_AGE_MS - 60_000).toISOString())]);
+      [sourceId, metaAdsHeavyCursorValue(new Date(Date.now() - META_ADS_HEAVY_RECONCILE_MAX_AGE_MS - 60_000).toISOString(), metaAdsHeavyAdFieldsKey("v25.0"))]);
     // A creative RENAME never moves the ad's updated_time; only a heavy read can see it.
     (account.ads[60]!.creative as Record<string, unknown>).name = "Renamed creative";
     await forceNextScanFull(sourceId);
     const weekly = await sync(account, request(workspaceId, sourceId));
     expect(edgeCalls(weekly.byKind).ad_edge).toBe(5);
+    expect(weekly.fullAdRead).toEqual({ mode: "heavy", fallback: "heavy_reconcile_due" });
     expect(weekly.edges.filter((call) => call.edge === "ads").every((call) => call.fields === META_ADS_AD_FULL_FIELDS)).toBe(true);
     expect((await currentAd(sourceId, "a60"))[0]?.metadata_json.creative).toMatchObject({ name: "Renamed creative" });
   }, 120_000);
