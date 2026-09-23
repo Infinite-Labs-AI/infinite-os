@@ -2,6 +2,31 @@
 
 Updated: 2026-09-20
 
+## Status 2026-09-23 (slice 3A, branch `feature/2026-09-23-task-ledger`)
+
+Brought onto engine main `b5a1565`. Items 1–4 below are done:
+- the store compiles and its focused test is green;
+- the migration is renumbered to `0072_interactive_task_ledger.sql`, with the manifest, count
+  and PGlite schema assertions;
+- the store and types are exported;
+- the three tables are in `deleteProject`, with zero-residual and no-over-delete proof.
+
+The store now takes an injected clock (`createInteractiveTaskStore(db, { now })`), so grant
+expiry never reads the wall clock.
+
+Item 5 is only partly done. The composite-FK invariants are asserted in PGlite. The grants
+(`growth_os_app` only) were not independently reviewed.
+
+Items 6–9 remain open.
+
+**The schema is not final.** The alerts build needs the following before the first engine pin
+applies 0072 anywhere:
+- trigger-keyed proposals;
+- proposals that outlive a ≤10-minute grant;
+- origin/rule provenance.
+
+The text below is the original 2026-09-20 note.
+
 This branch preserves an unfinished Task 3 draft after product work was
 reprioritized toward user-visible Cmd+L capabilities. It is intentionally not
 merged, pushed, or advertised as working.
