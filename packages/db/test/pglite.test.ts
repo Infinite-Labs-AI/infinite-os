@@ -3218,6 +3218,36 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
     expect(await deleteProject(db, ws.id)).toEqual({ deleted: true });
   });
 
+  it("0072 authorizes an automatic task's proposal only after a re-prepare, even by direct SQL", async () => {
+    const ws = await createProject(db, "Automatic Reprepare");
+    const auto = triggered(`iarp_t_${ws.id}`, ws.id);
+    const sched = { id: `iarp_s_${ws.id}`, workspaceId: ws.id, origin: "scheduled", surface: "imessage",
+      triggerKey: "reminder:r1", ruleId: "r1", payloadHash: "8".repeat(64) };
+    await insertTask(auto);
+    await insertTask(sched);
+    const inv = (suffix: string) => `iarp_${suffix}_${ws.id}`;
+    // Revision 1 of an automatic turn may wait, be declined or be cancelled, never run.
+    for (const task of [auto, sched]) {
+      for (const state of ["authorized", "dispatching", "succeeded", "failed", "unknown"]) {
+        await expect(insertAction(task, { invocationId: inv(`${task.origin}_${state}`), proposalRef: `P_${state}`, state,
+          decisionSource: "host_confirmation" })).rejects.toThrow(/interactive_action_refs_automatic_reprepare_check/);
+      }
+    }
+    await insertAction(auto, { invocationId: inv("r1") });
+    await expect(db.query("update interactive_action_refs set state = 'authorized', decision_source = 'host_confirmation' where invocation_id = $1",
+      [inv("r1")])).rejects.toThrow(/interactive_action_refs_automatic_reprepare_check/);
+    await insertAction(auto, { invocationId: inv("declined"), proposalRef: "P_declined", state: "declined" });
+    // After Apply (a superseding revision) the new revision can be authorized.
+    await db.query("update interactive_action_refs set state = 'superseded' where invocation_id = $1", [inv("r1")]);
+    await insertAction(auto, { invocationId: inv("r2"), revision: 2, supersedes: inv("r1"), state: "authorized",
+      decisionSource: "host_confirmation" });
+    // A human task's own revision 1 is approvable as before.
+    const person = human(`iarp_h_${ws.id}`, ws.id);
+    await insertTask(person);
+    await insertAction(person, { invocationId: inv("human_r1"), state: "authorized", decisionSource: "host_confirmation" });
+    expect(await deleteProject(db, ws.id)).toEqual({ deleted: true });
+  });
+
   it("0072 keeps one live revision per proposal and an unforked lineage inside the proposal", async () => {
     const ws = await createProject(db, "Proposal Lineage");
     const task = human(`ilin_${ws.id}`, ws.id);

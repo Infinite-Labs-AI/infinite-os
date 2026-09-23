@@ -1140,6 +1140,8 @@ describe("Infinite OS migration stack", () => {
     expect(sql).toContain("create unique index interactive_task_events_turn_key_idx on interactive_task_events(task_id, turn_key)");
     // Terminal approvals are typed approvals.
     expect(sql).toContain("constraint interactive_action_refs_terminal_approval_check");
+    // An automatic turn's revision 1 is never authorized: only a re-prepared revision.
+    expect(sql).toContain("constraint interactive_action_refs_automatic_reprepare_check check ( origin = 'human' or state not in ('authorized', 'dispatching', 'succeeded', 'failed', 'unknown') or supersedes_invocation_id is not null )");
     expect(sql).toContain("'succeeded', 'failed', 'unknown', 'declined', 'cancelled', 'superseded', 'expired'");
     expect(sql).toContain("prepared_at timestamptz not null");
     expect(sql).toContain("create unique index interactive_action_refs_proposal_head_idx on interactive_action_refs(task_id, proposal_ref) where state <> 'superseded'");

@@ -178,6 +178,13 @@ create table interactive_action_refs (
     surface <> 'terminal'
     or state not in ('authorized', 'dispatching', 'succeeded', 'failed', 'unknown')
     or decision_source is not distinct from 'typed_approval'
+  ),
+  -- An automatic turn's own proposal is never authority: only a re-prepared revision (Apply) of
+  -- a triggered or scheduled task can be authorized or dispatched.
+  constraint interactive_action_refs_automatic_reprepare_check check (
+    origin = 'human'
+    or state not in ('authorized', 'dispatching', 'succeeded', 'failed', 'unknown')
+    or supersedes_invocation_id is not null
   )
 );
 
