@@ -90,7 +90,12 @@ export function metaAdsFullAdReadPlan(input: {
   return { lean: true, updatedSince: Math.max(0, Math.floor(scan / 1000) - DELTA_OVERLAP_SECONDS) };
 }
 
-type AdNode = Record<string, unknown> & { id?: string | null; creative?: unknown };
+/** Any Graph ad node (the connector's MetaAdsEdgeNode interface, or a plain record). */
+type AdNode = { id?: string | null; creative?: unknown };
+
+function field(node: AdNode, key: string): unknown {
+  return (node as Record<string, unknown>)[key];
+}
 
 function nodeId(node: AdNode): string | null {
   return typeof node.id === "string" && node.id ? node.id : null;
@@ -126,15 +131,16 @@ export function mergeMetaAdsLeanAds<N extends AdNode>(input: { lean: N[]; delta:
     if (creativeId(lean) !== creativeId(base)) return { kind: "needs_full", reason: "creative_changed", entityId: id };
     for (const key of LEAN_KEYS) {
       if (STATUS_KEYS.has(key)) continue;
-      if (canonicalMetaAdsJson(lean[key]) !== canonicalMetaAdsJson(base[key])) {
+      if (canonicalMetaAdsJson(field(lean, key)) !== canonicalMetaAdsJson(field(base, key))) {
         return { kind: "needs_full", reason: "fields_changed", entityId: id };
       }
     }
     const merged: Record<string, unknown> = { ...base };
     for (const key of STATUS_KEYS) {
       // Graph omits empty fields: an absent status in the lean read is absent now, not "unchanged".
-      if (lean[key] === undefined) delete merged[key];
-      else merged[key] = lean[key];
+      const value = field(lean, key);
+      if (value === undefined) delete merged[key];
+      else merged[key] = value;
     }
     nodes.push(merged as N);
   }

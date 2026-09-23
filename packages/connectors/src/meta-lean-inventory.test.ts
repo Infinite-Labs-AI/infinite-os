@@ -70,7 +70,7 @@ describe("metaAdsFullAdReadPlan", () => {
 });
 
 describe("mergeMetaAdsLeanAds", () => {
-  const stored = { id: "a1", name: "Ad", adset_id: "s1", campaign_id: "c1", status: "ACTIVE", effective_status: "ACTIVE", bid_amount: 5, creative: { id: "cr1", body: "Copy" } };
+  const stored: Record<string, unknown> = { id: "a1", name: "Ad", adset_id: "s1", campaign_id: "c1", status: "ACTIVE", effective_status: "ACTIVE", bid_amount: 5, creative: { id: "cr1", body: "Copy" } };
   it("takes status from the lean read and everything else from the stored snapshot", () => {
     const lean = { id: "a1", name: "Ad", adset_id: "s1", campaign_id: "c1", status: "ACTIVE", effective_status: "ARCHIVED", creative: { id: "cr1" } };
     expect(mergeMetaAdsLeanAds({ lean: [lean], delta: [], stored: [stored] }))
@@ -210,10 +210,11 @@ describe("lean Meta inventory reads against real PGlite", () => {
     );
   }
 
-  function request(workspaceId: string, sourceId: string, mode: "inventory_only" | "insights_only" = "inventory_only"): SyncRequest {
+  function request(workspaceId: string, sourceId: string, mode: "inventory_only" | "insights_only" | "full" = "inventory_only"): SyncRequest {
     return {
       workspaceId, sourceId, provider: "meta_ads", syncRunId: `sync_${randomUUID()}`, encryptionKey: KEY,
-      windowSince: "2026-09-22", windowUntil: "2026-09-22", metaAdsRequestBudget: 300, metaAdsSyncMode: mode,
+      windowSince: "2026-09-22", windowUntil: "2026-09-22", metaAdsRequestBudget: 300,
+      ...(mode === "full" ? {} : { metaAdsSyncMode: mode }),
       ...(mode === "insights_only" ? { metaAdsRequestLane: "hot_insights" as const } : {}),
     };
   }
@@ -236,6 +237,10 @@ describe("lean Meta inventory reads against real PGlite", () => {
         return new Response(JSON.stringify({ id: ACCOUNT, account_id: "777", currency: "USD", timezone_name: "America/New_York" }), { status: 200, headers });
       }
       const edge = url.pathname.split("/").at(-1) ?? "";
+      if (edge === "insights") {
+        const level = url.searchParams.get("level");
+        return new Response(JSON.stringify({ data: level === "ad" ? account.adInsights : [], paging: {} }), { status: 200, headers });
+      }
       if (edge === "campaigns" || edge === "adsets" || edge === "ads") {
         edges.push({
           edge, fields: url.searchParams.get("fields") ?? "", limit: Number(url.searchParams.get("limit")),
@@ -342,7 +347,8 @@ describe("lean Meta inventory reads against real PGlite", () => {
     const workspaceId = `ws_lean_archive_${randomUUID()}`, sourceId = `src_lean_archive_${randomUUID()}`;
     await seedSource(workspaceId, sourceId);
     const account = prodShapeAccount();
-    await sync(account, request(workspaceId, sourceId));
+    // A complete history sync (also stores the account currency/timezone the hot lane requires).
+    await sync(account, request(workspaceId, sourceId, "full"));
     expect((await currentAd(sourceId, "a200"))[0]).toMatchObject({ effective_status: "ACTIVE", configured_status: "ACTIVE" });
 
     // Direct archive: the ad's own status changes and updated_time moves → the incremental delta records it.
