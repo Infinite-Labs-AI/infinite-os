@@ -1119,6 +1119,19 @@ describe("Infinite OS migration stack", () => {
     expect(sql).toContain("unique (task_id, proposal_ref, proposal_revision)");
     expect(sql.match(/foreign key \(task_id, workspace_id, actor_id\) references interactive_tasks\(id, workspace_id, actor_id\) on delete cascade/g)?.length).toBe(2);
     expect(sql).toContain("create unique index interactive_action_refs_task_continuation_idx");
+    // Alerts contract (3A.1): trigger-keyed tasks, provenance by origin, proposals that outlive grants.
+    expect(sql).toContain("surface text not null check (surface in ('cmdl', 'imessage', 'agent_tasks'))");
+    expect(sql).toContain("origin text not null check (origin in ('human', 'triggered', 'scheduled'))");
+    expect(sql).toContain("create unique index interactive_tasks_trigger_key_idx on interactive_tasks(workspace_id, trigger_key) where trigger_key is not null");
+    expect(sql).toContain("trigger_key = 'trigger:' || rule_id || ':' || event_key");
+    expect(sql).toContain("constraint interactive_tasks_human_provenance_check");
+    expect(sql).toContain("constraint interactive_tasks_scheduled_provenance_check");
+    expect(sql).toContain("constraint interactive_tasks_origin_surface_check");
+    expect(sql).toContain("'user_message', 'trigger', 'assistant_message'");
+    expect(sql).toContain("'succeeded', 'failed', 'unknown', 'declined', 'cancelled', 'superseded', 'expired'");
+    expect(sql).toContain("create unique index interactive_action_refs_proposal_head_idx on interactive_action_refs(task_id, proposal_ref) where state <> 'superseded'");
+    expect(sql).toContain("create unique index interactive_action_refs_supersedes_idx");
+    expect(sql).toContain("foreign key (supersedes_invocation_id, task_id, proposal_ref) references interactive_action_refs(invocation_id, task_id, proposal_ref)");
     // Local desktop ledger only: the app role gets DML, the cloud engine role gets nothing.
     expect(sql).toContain("to growth_os_app");
     expect(sql).not.toContain("engine_app");

@@ -39,14 +39,19 @@ export {
   InteractiveTaskConflictError,
   createInteractiveTaskStore
 } from "./interactive-task-store.js";
+export { MAX_INTERACTIVE_GRANT_MS } from "./interactive-task-types.js";
 export type {
   ApplyInteractiveTaskTransitionInput,
+  CreateAutomaticInteractiveTaskInput,
+  CreateHumanInteractiveTaskInput,
   CreateInteractiveTaskInput,
   InteractiveTaskStore,
   InteractiveTaskStoreDb,
   InteractiveTaskStoreOptions,
   InteractiveTaskTransition,
-  PreparedInteractiveActionInput
+  ListActiveInteractiveTasksInput,
+  PreparedInteractiveActionInput,
+  RevisedInteractiveActionInput
 } from "./interactive-task-types.js";
 export { createConfiguredModelClient } from "./model-client.js";
 export { assembleInfiniteOsPrompt } from "./prompt-assembler.js";

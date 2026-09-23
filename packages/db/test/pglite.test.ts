@@ -3004,9 +3004,9 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
     const taskId = `itask_${suffix}`;
     await db.query(
       `insert into interactive_tasks
-         (id, workspace_id, actor_id, surface, client_surface_key, provider_id, model_id, agent_profile,
+         (id, workspace_id, actor_id, surface, origin, client_surface_key, provider_id, model_id, agent_profile,
           accepted_context_revision, authority_expires_at)
-       values ($1, $2, 'actor_a', 'cmdl', 'cmdl:primary', 'claude-cli', 'model', 'general', 'ctx_1',
+       values ($1, $2, 'actor_a', 'cmdl', 'human', 'cmdl:primary', 'claude-cli', 'model', 'general', 'ctx_1',
                '2026-09-20T21:10:00Z')`,
       [taskId, workspaceId]
     );
@@ -3060,6 +3060,129 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
       )
     ).rejects.toThrow(/check constraint/i);
     expect(await deleteProject(db, created.id)).toEqual({ deleted: true });
+  });
+
+  // Raw inserts for the 0072 constraint tests: every rule below is enforced by the database itself,
+  // so a store bug (or a second writer) cannot create two live proposals or unlabelled automatic turns.
+  type TaskShape = {
+    id: string; workspaceId: string; origin: string; surface: string; triggerKey?: string | null;
+    ruleId?: string | null; ruleVersion?: number | null; checkKey?: string | null; eventKey?: string | null;
+    payloadHash?: string | null;
+  };
+  function insertTask(shape: TaskShape) {
+    return db.query(
+      `insert into interactive_tasks
+         (id, workspace_id, actor_id, surface, origin, trigger_key, rule_id, rule_version, check_key, event_key,
+          trigger_payload_hash, client_surface_key, provider_id, model_id, agent_profile,
+          accepted_context_revision, authority_expires_at)
+       values ($1, $2, 'actor_a', $3, $4, $5, $6, $7, $8, $9, $10, 'k', 'claude-cli', 'model', 'legacy',
+               'ctx_1', '2026-09-20T21:10:00Z')`,
+      [shape.id, shape.workspaceId, shape.surface, shape.origin, shape.triggerKey ?? null, shape.ruleId ?? null,
+        shape.ruleVersion ?? null, shape.checkKey ?? null, shape.eventKey ?? null, shape.payloadHash ?? null]
+    );
+  }
+  const triggered = (id: string, workspaceId: string, overrides: Partial<TaskShape> = {}): TaskShape => ({
+    id, workspaceId, origin: "triggered", surface: "agent_tasks", triggerKey: "trigger:alert_1:ev_1",
+    ruleId: "alert_1", ruleVersion: 2, checkKey: "check_1", eventKey: "ev_1", payloadHash: "9".repeat(64),
+    ...overrides
+  });
+  function insertAction(taskId: string, workspaceId: string, row: {
+    invocationId: string; proposalRef?: string; revision?: number; state?: string; supersedes?: string | null;
+    continuationKey?: string | null;
+  }) {
+    return db.query(
+      `insert into interactive_action_refs
+         (invocation_id, task_id, workspace_id, actor_id, source_kind, operation_id, adapter_version,
+          schema_version, proposal_ref, proposal_revision, proposal_hash, input_hash, effect,
+          replay_policy, state, supersedes_invocation_id, continuation_key)
+       values ($1, $2, $3, 'actor_a', 'host_confirmation', 'fake_op', 'fake.v1', '1', $4, $5, $6, $6,
+               'external_write', 'reconcile_before_retry', $7, $8, $9)`,
+      [row.invocationId, taskId, workspaceId, row.proposalRef ?? "P1", row.revision ?? 1, "c".repeat(64),
+        row.state ?? "awaiting_approval", row.supersedes ?? null, row.continuationKey ?? null]
+    );
+  }
+
+  it("0072 gives each trigger key exactly one task per workspace", async () => {
+    const a = await createProject(db, "Trigger Key A");
+    const b = await createProject(db, "Trigger Key B");
+    await insertTask(triggered(`itk_a1_${a.id}`, a.id));
+    await expect(insertTask(triggered(`itk_a2_${a.id}`, a.id)))
+      .rejects.toThrow(/interactive_tasks_trigger_key_idx/);
+    // Another workspace's alert with the same key text is a different task.
+    await insertTask(triggered(`itk_b1_${b.id}`, b.id));
+    // Human tasks carry no key, so any number coexist.
+    await insertTask({ id: `itk_h1_${a.id}`, workspaceId: a.id, origin: "human", surface: "cmdl" });
+    await insertTask({ id: `itk_h2_${a.id}`, workspaceId: a.id, origin: "human", surface: "cmdl" });
+    expect(await deleteProject(db, a.id)).toEqual({ deleted: true });
+    expect(await deleteProject(db, b.id)).toEqual({ deleted: true });
+  });
+
+  it("0072 requires full provenance by origin and keeps automatic turns out of Cmd+L", async () => {
+    const ws = await createProject(db, "Provenance Rules");
+    const id = (suffix: string) => `iprov_${suffix}_${ws.id}`;
+    // Triggered: the key must mirror trigger:{alert_id}:{event_key}, and version/check/hash are required.
+    await expect(insertTask(triggered(id("key"), ws.id, { triggerKey: "trigger:alert_1:other" })))
+      .rejects.toThrow(/interactive_tasks_triggered_provenance_check/);
+    for (const missing of ["ruleVersion", "checkKey", "payloadHash", "ruleId"] as const) {
+      await expect(insertTask(triggered(id(missing), ws.id, { [missing]: null })))
+        .rejects.toThrow(/interactive_tasks_triggered_provenance_check/);
+    }
+    // Human: no trigger provenance at all.
+    await expect(insertTask({ id: id("human_rule"), workspaceId: ws.id, origin: "human", surface: "cmdl", ruleId: "alert_1" }))
+      .rejects.toThrow(/interactive_tasks_human_provenance_check/);
+    await expect(insertTask({ id: id("human_hash"), workspaceId: ws.id, origin: "human", surface: "cmdl", payloadHash: "9".repeat(64) }))
+      .rejects.toThrow(/interactive_tasks_human_provenance_check/);
+    // Scheduled: rule, key and payload hash.
+    await expect(insertTask({ id: id("sched"), workspaceId: ws.id, origin: "scheduled", surface: "imessage",
+      triggerKey: "reminder:r1", ruleId: "r1" })).rejects.toThrow(/interactive_tasks_scheduled_provenance_check/);
+    await insertTask({ id: id("sched_ok"), workspaceId: ws.id, origin: "scheduled", surface: "imessage",
+      triggerKey: "reminder:r1", ruleId: "r1", payloadHash: "8".repeat(64) });
+    // Surfaces: an automatic turn never renders in Cmd+L; a human never types into the board.
+    await expect(insertTask(triggered(id("cmdl"), ws.id, { surface: "cmdl", triggerKey: "trigger:alert_1:ev_2", eventKey: "ev_2" })))
+      .rejects.toThrow(/interactive_tasks_origin_surface_check/);
+    await expect(insertTask({ id: id("human_board"), workspaceId: ws.id, origin: "human", surface: "agent_tasks" }))
+      .rejects.toThrow(/interactive_tasks_origin_surface_check/);
+    await expect(insertTask({ id: id("bad_origin"), workspaceId: ws.id, origin: "system", surface: "imessage" }))
+      .rejects.toThrow(/interactive_tasks_origin_check/);
+    // An unknown surface fails the per-origin surface rule (Postgres reports the first failing CHECK).
+    await expect(insertTask({ id: id("bad_surface"), workspaceId: ws.id, origin: "human", surface: "triggered" }))
+      .rejects.toThrow(/interactive_tasks_(origin_)?surface_check/);
+    expect(await deleteProject(db, ws.id)).toEqual({ deleted: true });
+  });
+
+  it("0072 keeps one live revision per proposal and an unforked lineage inside the proposal", async () => {
+    const ws = await createProject(db, "Proposal Lineage");
+    const taskId = `ilin_${ws.id}`;
+    await insertTask({ id: taskId, workspaceId: ws.id, origin: "human", surface: "cmdl" });
+    const inv = (suffix: string) => `ilin_${suffix}_${ws.id}`;
+    await insertAction(taskId, ws.id, { invocationId: inv("r1"), continuationKey: "cont_1" });
+
+    // A second live row for the same proposal is refused; so is revision 2 with no predecessor.
+    await expect(insertAction(taskId, ws.id, { invocationId: inv("dup"), revision: 2, supersedes: inv("r1") }))
+      .rejects.toThrow(/interactive_action_refs_proposal_head_idx/);
+    await expect(insertAction(taskId, ws.id, { invocationId: inv("orphan"), proposalRef: "P9", revision: 2 }))
+      .rejects.toThrow(/interactive_action_refs_revision_lineage_check/);
+
+    // Supersede, then insert the head: the continuation key moves to the new revision.
+    await db.query("update interactive_action_refs set state = 'superseded' where invocation_id = $1", [inv("r1")]);
+    await insertAction(taskId, ws.id, { invocationId: inv("r2"), revision: 2, supersedes: inv("r1"), continuationKey: "cont_1" });
+
+    // The lineage cannot fork (two revisions superseding r1), even if both are superseded.
+    await db.query("update interactive_action_refs set state = 'superseded' where invocation_id = $1", [inv("r2")]);
+    await expect(insertAction(taskId, ws.id, { invocationId: inv("fork"), revision: 3, supersedes: inv("r1") }))
+      .rejects.toThrow(/interactive_action_refs_supersedes_idx/);
+    // Nor can a revision claim a predecessor from another proposal.
+    await insertAction(taskId, ws.id, { invocationId: inv("p2"), proposalRef: "P2" });
+    await expect(insertAction(taskId, ws.id, { invocationId: inv("cross"), revision: 3, supersedes: inv("p2") }))
+      .rejects.toThrow(/foreign key/i);
+    await insertAction(taskId, ws.id, { invocationId: inv("r3"), revision: 3, supersedes: inv("r2") });
+
+    // New states are accepted; unknown ones are not.
+    await db.query("update interactive_action_refs set state = 'expired' where invocation_id = $1", [inv("r3")]);
+    await expect(db.query("update interactive_action_refs set state = 'stale' where invocation_id = $1", [inv("r3")]))
+      .rejects.toThrow(/interactive_action_refs_state_check/);
+    expect(await deleteProject(db, ws.id)).toEqual({ deleted: true });
+    expect(await db.query("select 1 from interactive_action_refs where workspace_id = $1", [ws.id])).toEqual([]);
   });
 
   it("deletes a project that holds an interactive task, its events and action refs (0072)", async () => {

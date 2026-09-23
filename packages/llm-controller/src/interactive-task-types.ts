@@ -5,8 +5,11 @@ import type {
   InteractiveReplayPolicy,
   InteractiveTaskDetail,
   InteractiveTaskEvent,
-  InteractiveTaskEventKind,
+  InteractiveTaskOrigin,
+  InteractiveTaskPage,
+  InteractiveTaskProvenance,
   InteractiveTaskRecord,
+  InteractiveTaskSurface,
   InteractiveTransitionResult,
 } from "@infinite-os/types";
 
@@ -20,19 +23,23 @@ export interface InteractiveTaskStoreDb {
   withTransaction<T>(fn: (tx: InteractiveTaskStoreDb) => Promise<T>): Promise<T>;
 }
 
+/** The grant ceiling: a confirmation lives at most 10 minutes (alerts contract §5). */
+export const MAX_INTERACTIVE_GRANT_MS = 10 * 60_000;
+
 export interface InteractiveTaskStoreOptions {
   /**
-   * Clock for authority checks (grant expiry at dispatch). Defaults to the system clock;
-   * inject a fixed clock in tests so expiry fixtures never depend on today's date.
+   * Clock for every authority check (task authority, grant ceiling, grant expiry). Defaults to
+   * the system clock; inject a fixed clock in tests so expiry fixtures never depend on today's date.
    */
   now?: () => Date;
+  /** A shorter grant ceiling. Values above MAX_INTERACTIVE_GRANT_MS are rejected. */
+  maxGrantMs?: number;
 }
 
-export interface CreateInteractiveTaskInput {
+interface CreateInteractiveTaskBase {
   taskId: string;
   workspaceId: string;
   actorId: string;
-  surface: "cmdl";
   clientSurfaceKey: string;
   providerId: string;
   modelId: string;
@@ -40,6 +47,13 @@ export interface CreateInteractiveTaskInput {
   acceptedContextRevision: string;
   authorityExpiresAt: string;
   context: Record<string, unknown>;
+}
+
+/** A turn a human typed. Its opening event is the human's message. */
+export interface CreateHumanInteractiveTaskInput extends CreateInteractiveTaskBase {
+  origin: "human";
+  surface: Extract<InteractiveTaskSurface, "cmdl" | "imessage">;
+  provenance?: null;
   initialEvent: {
     eventId: string;
     requestId: string;
@@ -48,6 +62,25 @@ export interface CreateInteractiveTaskInput {
     payload: Record<string, unknown>;
   };
 }
+
+/**
+ * A turn no human typed. Its opening event is a `trigger`, never a `user_message`, and its
+ * provenance is host-authored. A retry with the same trigger key returns the existing task.
+ */
+export interface CreateAutomaticInteractiveTaskInput extends CreateInteractiveTaskBase {
+  origin: Exclude<InteractiveTaskOrigin, "human">;
+  surface: Extract<InteractiveTaskSurface, "imessage" | "agent_tasks">;
+  provenance: InteractiveTaskProvenance;
+  initialEvent: {
+    eventId: string;
+    requestId: string;
+    requestHash: string;
+    kind: "trigger";
+    payload: Record<string, unknown>;
+  };
+}
+
+export type CreateInteractiveTaskInput = CreateHumanInteractiveTaskInput | CreateAutomaticInteractiveTaskInput;
 
 export interface PreparedInteractiveActionInput {
   invocationId: string;
@@ -66,6 +99,9 @@ export interface PreparedInteractiveActionInput {
   continuationKey?: string;
 }
 
+/** A fresh prepare of an existing proposal. Ref and revision are derived from the predecessor. */
+export type RevisedInteractiveActionInput = Omit<PreparedInteractiveActionInput, "proposalRef" | "proposalRevision">;
+
 export type InteractiveTaskTransition =
   | {
       kind: "record_turn_result";
@@ -74,16 +110,22 @@ export type InteractiveTaskTransition =
       actions: PreparedInteractiveActionInput[];
     }
   | {
+      /** Only `progress`, or a `user_message` on a human task. Other kinds belong to their transitions. */
       kind: "append_event";
-      eventKind: InteractiveTaskEventKind;
+      eventKind: "progress" | "user_message";
       payload: Record<string, unknown>;
     }
   | {
-      kind: "reprepare_action";
+      /**
+       * "Apply" re-prepares: a fresh read produces a new revision (new hashes allowed) that
+       * supersedes the predecessor. Allowed from awaiting_approval, authorized or expired.
+       * Any grant on the predecessor is discarded, never carried over.
+       */
+      kind: "revise_proposal";
       invocationId: string;
       proposalHash: string;
-      inputHash: string;
       preparedContextRevision: string;
+      revised: RevisedInteractiveActionInput;
     }
   | {
       kind: "resolve_approval";
@@ -93,8 +135,19 @@ export type InteractiveTaskTransition =
       inputHash: string;
       decision: "approve" | "decline";
       preparedContextRevision: string;
+      /** Must be after now and at most the grant ceiling from now. Ignored for a decline. */
       authorizationExpiresAt: string;
       decisionProvenance: string;
+    }
+  | {
+      /**
+       * Ends a grant without dispatch. `lapsed` requires the grant's expiry to have passed;
+       * `host_restart` and `discarded` end it early (the in-memory confirmation is gone, or the
+       * user pressed Cancel). The proposal stays durable as `expired`.
+       */
+      kind: "expire_authorization";
+      invocationId: string;
+      reason: "lapsed" | "host_restart" | "discarded";
     }
   | {
       kind: "claim_dispatch";
@@ -136,10 +189,22 @@ export interface ApplyInteractiveTaskTransitionInput {
   transition: InteractiveTaskTransition;
 }
 
+export interface ListActiveInteractiveTasksInput {
+  workspaceId: string;
+  actorId: string;
+  surface?: InteractiveTaskSurface;
+  origin?: InteractiveTaskOrigin;
+  /** Page size, 1..100 (default 50). */
+  limit?: number;
+  /** `nextCursor` from the previous page. */
+  cursor?: string;
+}
+
 export interface InteractiveTaskStore {
   createTask(input: CreateInteractiveTaskInput): Promise<InteractiveTransitionResult>;
   getTask(input: { taskId: string; workspaceId: string; actorId: string }): Promise<InteractiveTaskDetail | null>;
-  listActiveTasks(input: { workspaceId: string; actorId: string; surface: "cmdl" }): Promise<InteractiveTaskDetail[]>;
+  /** Newest-first keyset pages over non-terminal tasks; nothing is silently dropped. */
+  listActiveTasks(input: ListActiveInteractiveTasksInput): Promise<InteractiveTaskPage>;
   listEvents(input: { taskId: string; workspaceId: string; actorId: string; after?: number; limit?: number }): Promise<InteractiveTaskEvent[]>;
   transition(input: ApplyInteractiveTaskTransitionInput): Promise<InteractiveTransitionResult>;
 }
@@ -148,6 +213,7 @@ export type {
   InteractiveActionRef,
   InteractiveTaskDetail,
   InteractiveTaskEvent,
+  InteractiveTaskPage,
   InteractiveTaskRecord,
   InteractiveTransitionResult,
 };
