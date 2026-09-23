@@ -65,6 +65,8 @@ interface MetaAdsRequestTelemetrySnapshotBase {
   pageCount: number;
   retryCount: number;
   byKind: Record<MetaAdsRequestKind, number>;
+  /** Present on FULL inventory scans only: how the ad edge was read, and why it fell back to heavy. */
+  fullAdRead?: { mode: "lean" | "heavy"; fallback: string | null };
   utilization: {
     maxPercent: number | null;
     samples: number[];
@@ -126,6 +128,7 @@ export class MetaAdsRequestTelemetry {
   private exhausted = false;
   private lastReservedAt: string | null = null;
   private readonly samples: number[] = [];
+  private fullAdRead: { mode: "lean" | "heavy"; fallback: string | null } | null = null;
   private readonly byKind = Object.fromEntries(
     META_ADS_REQUEST_KINDS.map((kind) => [kind, 0]),
   ) as Record<MetaAdsRequestKind, number>;
@@ -195,6 +198,11 @@ export class MetaAdsRequestTelemetry {
     this.recordUtilization(utilizationPercent);
   }
 
+  /** Records how a FULL inventory scan read the ad edge (meta-lean-inventory.ts). */
+  noteFullAdRead(mode: "lean" | "heavy", fallback: string | null): void {
+    this.fullAdRead = { mode, fallback };
+  }
+
   snapshot(): MetaAdsRequestTelemetrySnapshot {
     const common: MetaAdsRequestTelemetrySnapshotBase = {
       provider: "meta_ads",
@@ -204,6 +212,7 @@ export class MetaAdsRequestTelemetry {
       pageCount: this.pageCount,
       retryCount: this.retryCount,
       byKind: { ...this.byKind },
+      ...(this.fullAdRead ? { fullAdRead: { ...this.fullAdRead } } : {}),
       utilization: {
         maxPercent: this.maxUtilizationPercent,
         samples: [...this.samples],
