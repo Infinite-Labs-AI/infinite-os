@@ -7,6 +7,7 @@ import {
 } from "./meta-async-insights.js";
 import {
   META_ADS_AD_FULL_FIELDS,
+  type MetaAdsFullAdReadPlan,
   metaAdsFullAdReadPlan,
   metaAdsHeavyAdFieldsKey,
   metaAdsHeavyCursorKey,
@@ -2532,15 +2533,31 @@ const metaAdsConnector = createConnector<MetaAdsCredential, MetaAdsSyncRow>({
     // updated_since filters at Meta; paging walks only that changed set, never stops at a known ID.
     const checkpointKey = `meta_ads_entities_scan:${adAccountId}`;
     const fullCheckpointKey = `meta_ads_entities_full:${adAccountId}`;
+    const heavyCheckpointKey = metaAdsHeavyCursorKey(adAccountId);
     const checkpoints = await _db.query<{cursor_key:string;cursor_value:string}>(
-      "select cursor_key,cursor_value from sync_cursors where workspace_id=$1 and source_id=$2 and cursor_key in ($3,$4)",
-      [request.workspaceId,request.sourceId,checkpointKey,fullCheckpointKey],
+      "select cursor_key,cursor_value from sync_cursors where workspace_id=$1 and source_id=$2 and cursor_key in ($3,$4,$5)",
+      [request.workspaceId,request.sourceId,checkpointKey,fullCheckpointKey,heavyCheckpointKey],
     );
+    const scanStart = new Date();
     const entityScan = readsEntities ? metaEntityReadMode(
       checkpoints.find(row=>row.cursor_key===checkpointKey)?.cursor_value??null,
       checkpoints.find(row=>row.cursor_key===fullCheckpointKey)?.cursor_value??null,
-      new Date(),
+      scanStart,
     ) : null;
+    // A FULL scan reads the ad edge lean (no creative expansion) when storage + a heavy delta can
+    // supply the expansion; see meta-lean-inventory.ts. Status and membership stay a complete read.
+    const fullAdSnapshot = entityScan?.mode === "full" ? {
+      plan: metaAdsFullAdReadPlan({
+        scanCheckpoint: checkpoints.find(row=>row.cursor_key===checkpointKey)?.cursor_value??null,
+        heavyCheckpoint: checkpoints.find(row=>row.cursor_key===heavyCheckpointKey)?.cursor_value??null,
+        now: scanStart,
+      }),
+      loadStored: async () => (await _db.query<{metadata_json:Record<string,unknown>}>(
+        "select metadata_json from meta_ads_entity_versions where workspace_id=$1 and source_id=$2 and ad_account_id=$3 and valid_to is null and entity_type='ad'",
+        [request.workspaceId,request.sourceId,adAccountId],
+      )).map(row=>row.metadata_json as MetaAdsEdgeNode),
+      onRead: (outcome: { heavy: boolean }) => { if (outcome.heavy) entityScan.heavyAdFieldsKey = metaAdsHeavyAdFieldsKey(); },
+    } : undefined;
     const cached = syncMode === "insights_only" || entityScan?.mode === "incremental"
       ? await _db.query<{entity_type:string;metadata_json:Record<string,unknown>}>(
         "select entity_type,metadata_json from meta_ads_entity_versions where workspace_id=$1 and source_id=$2 and ad_account_id=$3 and valid_to is null and entity_type in ('campaign','adset','ad')",
@@ -2553,7 +2570,7 @@ const metaAdsConnector = createConnector<MetaAdsCredential, MetaAdsSyncRow>({
       metaAdsReadAdsetDims(credential, telemetry, adsetNodes, entityScan?.updatedSince, cached.filter(row=>row.entity_type==='adset').map(row=>row.metadata_json as MetaAdsEdgeNode), readsEntities),
       // Campaigns have no documented updated_since parameter; retain their bounded full read.
       metaAdsReadCampaignStatus(credential, telemetry, campaignNodes, cached.filter(row=>row.entity_type==='campaign').map(row=>row.metadata_json as MetaAdsEdgeNode), readsEntities),
-      metaAdsReadAdAdims(credential, telemetry, adNodes, entityScan?.updatedSince, cached.filter(row=>row.entity_type==='ad').map(row=>row.metadata_json as MetaAdsEdgeNode), request.metaAdsOnMedia, readsEntities),
+      metaAdsReadAdAdims(credential, telemetry, adNodes, entityScan?.updatedSince, cached.filter(row=>row.entity_type==='ad').map(row=>row.metadata_json as MetaAdsEdgeNode), request.metaAdsOnMedia, readsEntities, fullAdSnapshot),
     ]);
 
     const rows: MetaAdsSyncRow[] = [];
@@ -4028,12 +4045,16 @@ async function metaAdsCloseSuccess(
 
   if (entitySnapshot) {
     const scan = entitySnapshot.entityScan;
-    const keys = [`meta_ads_entities_scan:${entitySnapshot.adAccountId}`,
-      ...(scan.mode === "full" ? [`meta_ads_entities_full:${entitySnapshot.adAccountId}`] : [])];
-    for (const key of keys) await tx.query(
+    const keys: Array<[string, string]> = [[`meta_ads_entities_scan:${entitySnapshot.adAccountId}`, scan.startedAt],
+      ...(scan.mode === "full" ? [[`meta_ads_entities_full:${entitySnapshot.adAccountId}`, scan.startedAt] as [string, string]] : []),
+      // A heavy (creative-expansion) full ad read restarts the lean read's reconcile clock.
+      ...(scan.mode === "full" && scan.heavyAdFieldsKey
+        ? [[metaAdsHeavyCursorKey(entitySnapshot.adAccountId), metaAdsHeavyCursorValue(scan.startedAt, scan.heavyAdFieldsKey)] as [string, string]]
+        : [])];
+    for (const [key, value] of keys) await tx.query(
       `insert into sync_cursors(id,workspace_id,source_id,cursor_key,cursor_value) values($1,$2,$3,$4,$5)
        on conflict(source_id,cursor_key) do update set cursor_value=greatest(sync_cursors.cursor_value,excluded.cursor_value),updated_at=now()`,
-      [`cursor_${randomUUID()}`,request.workspaceId,request.sourceId,key,scan.startedAt],
+      [`cursor_${randomUUID()}`,request.workspaceId,request.sourceId,key,value],
     );
   }
 
@@ -10230,14 +10251,14 @@ async function metaAdsReadAdAdims(
   cachedNodes: MetaAdsEdgeNode[] = [],
   onMedia?: SyncRequest["metaAdsOnMedia"],
   readProvider = true,
+  // FULL scans only: the complete ad snapshot, read lean when possible (meta-lean-inventory.ts).
+  fullSnapshot?: {
+    plan: MetaAdsFullAdReadPlan;
+    loadStored: () => Promise<MetaAdsEdgeNode[]>;
+    onRead: (outcome: { heavy: boolean }) => void;
+  },
 ): Promise<Map<string, MetaAdsAdDim>> {
-  const nodes = readProvider ? await metaAdsReadEdge(
-    credential,
-    "ads",
-    "id,name,creative{id,name,title,body,thumbnail_url,image_url,image_hash,video_id,call_to_action_type,object_story_spec,asset_feed_spec},adset_id,campaign_id,effective_status,status,bid_amount,tracking_specs,conversion_specs",
-    telemetry,
-    updatedSince,
-    onMedia ? async page => {
+  const onMediaPage = onMedia ? async (page: MetaAdsEdgeNode[]) => {
       const media:MetaAdsFreshMedia[]=[];
       for(const node of page){
         const creative=node.creative;
@@ -10250,8 +10271,25 @@ async function metaAdsReadAdAdims(
       }
       // Media failure cannot fail an otherwise valid metrics read; caller records retryable outcomes.
       if(media.length)try{await onMedia(media);}catch{ /* Caller-owned best-effort cache; canonical metadata remains retryable. */ }
-    } : undefined,
-  ) : [];
+    } : undefined;
+  // Only expansion-bearing reads carry fresh media URLs for the caller's media hand-off.
+  const readAds = (fields: string, since: number | undefined, withMedia: boolean) =>
+    metaAdsReadEdge(credential, "ads", fields, telemetry, since, withMedia ? onMediaPage : undefined);
+  let nodes: MetaAdsEdgeNode[] = [];
+  if (readProvider && fullSnapshot) {
+    const accessToken = requireCredential(credential, "accessToken");
+    const snapshot = await readMetaAdsFullAdSnapshot<MetaAdsEdgeNode>({
+      plan: fullSnapshot.plan,
+      loadStored: fullSnapshot.loadStored,
+      readEdge: readAds,
+      // Stored metadata is scrubbed; compare and merge fresh nodes in the same form.
+      normalize: node => scrubMetaAdsProviderMetadata(node, accessToken) as MetaAdsEdgeNode,
+    });
+    fullSnapshot.onRead(snapshot);
+    nodes = snapshot.nodes;
+  } else if (readProvider) {
+    nodes = await readAds(META_ADS_AD_FULL_FIELDS, updatedSince, true);
+  }
   snapshotSink?.push(...nodes);
   const dims = new Map<string, MetaAdsAdDim>();
   for (const node of [...cachedNodes, ...nodes]) {

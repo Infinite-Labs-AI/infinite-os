@@ -912,7 +912,8 @@ describe("Meta Ads history CLOSE against real PGlite", () => {
     expect(urls.filter(url=>/\/(ads|adsets)$/.test(url.pathname)).every(url=>Number(url.searchParams.get('updated_since'))>0)).toBe(true);
     expect(urls.find(url=>url.pathname.endsWith('/campaigns'))?.searchParams.has('updated_since')).toBe(false);
     const before=await db.query("select cursor_key,cursor_value from sync_cursors where source_id=$1 and cursor_key like 'meta_ads_entities_%' order by cursor_key",[sourceId]);
-    expect(before).toHaveLength(2);
+    // scan + full + heavy (the first full read was heavy, see meta-lean-inventory.ts).
+    expect(before.map(row=>String((row as {cursor_key:string}).cursor_key).split(':')[0])).toEqual(['meta_ads_entities_full','meta_ads_entities_heavy','meta_ads_entities_scan']);
     delta.edgeResponse=(edge,url)=>edge==='ads'?new Response(JSON.stringify(url.searchParams.has('after')?{error:{code:100,message:'failed second page'}}:{data:[],paging:{cursors:{after:'page2'},next:'https://graph.facebook.com/page2'}}),{status:url.searchParams.has('after')?400:200,headers:{'content-type':'application/json'}}):undefined;
     await expect(withMetaFetch(delta,()=>connectorFor('meta_ads').sync(db,syncRequest(workspaceId,sourceId,'2026-09-01','2026-09-01')))).rejects.toThrow();
     expect(await db.query("select cursor_key,cursor_value from sync_cursors where source_id=$1 and cursor_key like 'meta_ads_entities_%' order by cursor_key",[sourceId])).toEqual(before);

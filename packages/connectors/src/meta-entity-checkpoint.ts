@@ -2,7 +2,9 @@
  * The checkpoint is the START of a successfully committed scan, never its finish or last item ID.
  * Overlap tolerates boundary/eventual-consistency lag; a daily full scan reconciles removals.
  */
-export function metaEntityReadMode(checkpoint:string|null,fullCheckpoint:string|null,now:Date):{mode:'full'|'incremental';updatedSince?:number;startedAt:string}{
+/** heavyAdFieldsKey is set by extraction when a FULL scan read the ad edge with the heavy field set
+ * (see meta-lean-inventory.ts); CLOSE then advances the heavy-reconcile checkpoint. */
+export function metaEntityReadMode(checkpoint:string|null,fullCheckpoint:string|null,now:Date):{mode:'full'|'incremental';updatedSince?:number;startedAt:string;heavyAdFieldsKey?:string}{
   const startedAt=now.toISOString(),at=now.getTime();
   const last=checkpoint?Date.parse(checkpoint):NaN,full=fullCheckpoint?Date.parse(fullCheckpoint):NaN;
   if(!Number.isFinite(last)||!Number.isFinite(full)||last>at||full>at||at-full>=86_400_000)return {mode:'full',startedAt};
