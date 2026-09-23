@@ -67,6 +67,8 @@ interface MetaAdsRequestTelemetrySnapshotBase {
   byKind: Record<MetaAdsRequestKind, number>;
   /** Present on FULL inventory scans only: how the ad edge was read, and why it fell back to heavy. */
   fullAdRead?: { mode: "lean" | "heavy"; fallback: string | null };
+  /** Present on INCREMENTAL inventory scans only: parent-transition child status refreshes. */
+  childStatusRefresh?: MetaAdsChildStatusRefreshTelemetry;
   utilization: {
     maxPercent: number | null;
     samples: number[];
@@ -77,6 +79,23 @@ interface MetaAdsRequestTelemetrySnapshotBase {
     remaining: number;
     exhausted: boolean;
   };
+}
+
+/**
+ * What an incremental scan did about parents whose own status changed (meta-child-status-refresh.ts).
+ * `refreshes` is the number of parent-edge child reads that ran and `requests` the Graph calls they
+ * cost. With no parent change, everything is 0 and `outcome` is "none".
+ */
+export interface MetaAdsChildStatusRefreshTelemetry {
+  outcome: "none" | "applied" | "full_read_requested";
+  changedCampaigns: number;
+  changedAdsets: number;
+  refreshes: number;
+  requests: number;
+  adsetsUpdated: number;
+  adsUpdated: number;
+  /** Why the refresh was not applied and the next scan was switched to a full read. */
+  fullReadReason: string | null;
 }
 
 export interface MetaAdsRequestTelemetrySnapshotV1 extends MetaAdsRequestTelemetrySnapshotBase {
@@ -129,6 +148,7 @@ export class MetaAdsRequestTelemetry {
   private lastReservedAt: string | null = null;
   private readonly samples: number[] = [];
   private fullAdRead: { mode: "lean" | "heavy"; fallback: string | null } | null = null;
+  private childStatusRefresh: MetaAdsChildStatusRefreshTelemetry | null = null;
   private readonly byKind = Object.fromEntries(
     META_ADS_REQUEST_KINDS.map((kind) => [kind, 0]),
   ) as Record<MetaAdsRequestKind, number>;
@@ -203,6 +223,16 @@ export class MetaAdsRequestTelemetry {
     this.fullAdRead = { mode, fallback };
   }
 
+  /** Records the incremental scan's parent-transition child refresh (meta-child-status-refresh.ts). */
+  noteChildStatusRefresh(summary: MetaAdsChildStatusRefreshTelemetry): void {
+    this.childStatusRefresh = { ...summary };
+  }
+
+  /** Requests this run can still admit before the budget refuses one. */
+  remainingRequests(): number {
+    return Math.max(0, this.limit - this.requestCount);
+  }
+
   snapshot(): MetaAdsRequestTelemetrySnapshot {
     const common: MetaAdsRequestTelemetrySnapshotBase = {
       provider: "meta_ads",
@@ -213,6 +243,7 @@ export class MetaAdsRequestTelemetry {
       retryCount: this.retryCount,
       byKind: { ...this.byKind },
       ...(this.fullAdRead ? { fullAdRead: { ...this.fullAdRead } } : {}),
+      ...(this.childStatusRefresh ? { childStatusRefresh: { ...this.childStatusRefresh } } : {}),
       utilization: {
         maxPercent: this.maxUtilizationPercent,
         samples: [...this.samples],
