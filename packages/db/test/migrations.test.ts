@@ -1104,34 +1104,50 @@ describe("Infinite OS migration stack", () => {
     expect(sql).not.toMatch(/selected_page_id[^;]*default/);
   });
 
-  it("adds the local interactive task ledger scoped by (task, workspace, actor) (0072)", () => {
+  it("adds the local interactive task ledger scoped by (task, workspace, actor, origin, surface) (0072)", () => {
     const migration = loadMigrations().find(
       (candidate) => candidate.id === "0072_interactive_task_ledger.sql"
     );
     const sql = (migration?.sql ?? "").toLowerCase().replace(/\s+/g, " ");
 
     expect(sql).toContain("create table interactive_tasks");
-    expect(sql).toContain("unique (id, workspace_id, actor_id)");
+    expect(sql).toContain("unique (id, workspace_id, actor_id, origin, surface)");
     expect(sql).toContain("create table interactive_task_events");
     expect(sql).toContain("unique (task_id, sequence)");
     expect(sql).toContain("unique (task_id, transition_request_id)");
     expect(sql).toContain("create table interactive_action_refs");
     expect(sql).toContain("unique (task_id, proposal_ref, proposal_revision)");
-    expect(sql.match(/foreign key \(task_id, workspace_id, actor_id\) references interactive_tasks\(id, workspace_id, actor_id\) on delete cascade/g)?.length).toBe(2);
+    // Events and actions copy origin and surface from their task, so their own CHECKs can use them.
+    expect(sql.match(/foreign key \(task_id, workspace_id, actor_id, origin, surface\) references interactive_tasks\(id, workspace_id, actor_id, origin, surface\) on delete cascade/g)?.length).toBe(2);
     expect(sql).toContain("create unique index interactive_action_refs_task_continuation_idx");
-    // Alerts contract (3A.1): trigger-keyed tasks, provenance by origin, proposals that outlive grants.
-    expect(sql).toContain("surface text not null check (surface in ('cmdl', 'imessage', 'agent_tasks'))");
+    // Channels and origins.
+    expect(sql).toContain("surface text not null check (surface in ('cmdl', 'terminal', 'imessage', 'agent_tasks'))");
     expect(sql).toContain("origin text not null check (origin in ('human', 'triggered', 'scheduled'))");
+    expect(sql).toContain("(origin = 'human' and surface in ('cmdl', 'terminal', 'imessage')) or (origin <> 'human' and surface in ('imessage', 'agent_tasks'))");
+    // The triggered key is the cloud delivery identity, hashed when it would exceed 200 characters.
     expect(sql).toContain("create unique index interactive_tasks_trigger_key_idx on interactive_tasks(workspace_id, trigger_key) where trigger_key is not null");
-    expect(sql).toContain("trigger_key = 'trigger:' || rule_id || ':' || event_key");
+    expect(sql).toContain("and trigger_key = case when char_length('trigger:' || rule_id || ':' || event_key) > 200 then 'trigger:' || rule_id || ':sha256:' || encode(sha256(convert_to(event_key, 'utf8')), 'hex') else 'trigger:' || rule_id || ':' || event_key end");
+    expect(sql).toContain("rule_id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'");
+    expect(sql).toContain("event_key text check (event_key is null or char_length(event_key) between 1 and 500)");
+    // No producer sends a check key yet: it is optional for a triggered task.
+    expect(sql).not.toMatch(/interactive_tasks_triggered_provenance_check[^;]*check_key is not null/);
     expect(sql).toContain("constraint interactive_tasks_human_provenance_check");
     expect(sql).toContain("constraint interactive_tasks_scheduled_provenance_check");
-    expect(sql).toContain("constraint interactive_tasks_origin_surface_check");
+    // Human intent never appears on an automatic task, at the event level too.
+    expect(sql).toContain("check (kind <> 'user_message' or origin = 'human')");
+    expect(sql).toContain("check (kind <> 'trigger' or origin <> 'human')");
     expect(sql).toContain("'user_message', 'trigger', 'assistant_message'");
+    expect(sql).toContain("create unique index interactive_task_events_turn_key_idx on interactive_task_events(task_id, turn_key)");
+    // Terminal approvals are typed approvals.
+    expect(sql).toContain("constraint interactive_action_refs_terminal_approval_check");
     expect(sql).toContain("'succeeded', 'failed', 'unknown', 'declined', 'cancelled', 'superseded', 'expired'");
+    expect(sql).toContain("prepared_at timestamptz not null");
     expect(sql).toContain("create unique index interactive_action_refs_proposal_head_idx on interactive_action_refs(task_id, proposal_ref) where state <> 'superseded'");
     expect(sql).toContain("create unique index interactive_action_refs_supersedes_idx");
     expect(sql).toContain("foreign key (supersedes_invocation_id, task_id, proposal_ref) references interactive_action_refs(invocation_id, task_id, proposal_ref)");
+    // Board and restart reads.
+    expect(sql).toContain("create index interactive_action_refs_live_idx");
+    expect(sql).toContain("create index interactive_action_refs_recovery_idx");
     // Local desktop ledger only: the app role gets DML, the cloud engine role gets nothing.
     expect(sql).toContain("to growth_os_app");
     expect(sql).not.toContain("engine_app");

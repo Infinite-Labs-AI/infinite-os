@@ -1,90 +1,87 @@
-# Interactive task durability — deferred WIP handoff
+# Interactive task durability — engine ledger (work in progress)
 
-Updated: 2026-09-20
+Updated: 2026-09-23
 
-## Status 2026-09-23 (slice 3A, branch `feature/2026-09-23-task-ledger`)
+The engine keeps a small local ledger of interactive agent tasks: the task, its ordered events,
+and references to the actions it proposed. The ledger is engine-only today. Nothing advertises
+it or calls it yet.
 
-Brought onto engine main `b5a1565`. Items 1–4 below are done:
-- the store compiles and its focused test is green;
-- the migration is renumbered to `0072_interactive_task_ledger.sql`, with the manifest, count
-  and PGlite schema assertions;
-- the store and types are exported;
-- the three tables are in `deleteProject`, with zero-residual and no-over-delete proof.
+## What exists
 
-The store now takes an injected clock (`createInteractiveTaskStore(db, { now })`), so grant
-expiry never reads the wall clock.
+- **Migration** `packages/db/migrations/0072_interactive_task_ledger.sql`, with three tables:
+  - `interactive_tasks`
+  - `interactive_task_events`
+  - `interactive_action_refs`
 
-Item 5 is only partly done. The composite-FK invariants are asserted in PGlite. The grants
-(`growth_os_app` only) were not independently reviewed.
+  All three are in `deleteProject`.
+- **Store** `packages/llm-controller/src/interactive-task-store.ts`, with its types in
+  `interactive-task-types.ts`. It is exported from `@infinite-os/llm-controller`, and the wire
+  types are in `@infinite-os/types` (`interactive-task.ts`).
+- **Tests:**
+  - `packages/llm-controller/test/interactive-task-store.test.ts`, on real temporary PGlite through
+    the real migrations, with an injected clock;
+  - the 0072 assertions in `packages/db/test/migrations.test.ts` and `pglite.test.ts`.
 
-Items 6–9 remain open.
+## Rules the ledger enforces
 
-**The schema is not final.** The alerts build needs the following before the first engine pin
-applies 0072 anywhere:
-- trigger-keyed proposals;
-- proposals that outlive a ≤10-minute grant;
-- origin/rule provenance.
+**Origin and surface.**
+- A task has an origin: `human`, `triggered` (a data alert) or `scheduled` (a time reminder).
+- It has a surface: `cmdl`, `terminal`, `imessage` or `agent_tasks`.
+- Automatic turns never render in Cmd+L or the terminal.
+- Automatic tasks open with a `trigger` event and can never record a `user_message`. The database
+  enforces this as well as the store.
+- A `human` task on the terminal is not proof of who typed. Its actions can only be authorized by a
+  typed approval that names the exact proposal revision. The database enforces this too.
 
-The text below is the original 2026-09-20 note.
+**Provenance.** Automatic tasks carry host-written provenance:
+- the trigger key;
+- the rule id and version;
+- optional check and event keys;
+- a sha256 of the untrusted event payload.
 
-This branch preserves an unfinished Task 3 draft after product work was
-reprioritized toward user-visible Cmd+L capabilities. It is intentionally not
-merged, pushed, or advertised as working.
+A triggered task's key must equal `trigger:{alert_id}:{event_key}`. When that key would exceed 200
+characters, it is `trigger:{alert_id}:sha256:{lowercase hex sha256 of the UTF-8 event key}`
+instead. `interactiveTriggerKey()` computes the same value.
 
-## Source identity
+**Retries.**
+- A retried automatic create returns the task its trigger key already opened.
+- A retried model turn, meaning the same turn key, returns the recorded outcome and writes nothing.
+- A later turn with a new turn key is recorded. A continuation's reply is an example.
 
-- Worktree: `/Users/chaos/Github/infinite-os-task3-durability-20260920`
-- Branch: `feature/2026-09-20-interactive-task-durability`
-- Base: `0592a902ee92ddbaf12f6643ccbbd9180c3a5171` (reviewed Task 2 stack)
-- Remote `main` observed before drafting: `cb974804270b953e0b3ab9d61c58ff0f493bf6ed`
-- Candidate migration number at that observation: `0071`
+**Proposals outlive grants.**
+- A grant lasts at most 10 minutes from the injected clock.
+- A proposal can be approved only within that window after it was prepared.
+- A proposal from an automatic turn can be approved only after it has been re-prepared.
+- `revise_proposal` re-prepares: it creates a new revision and marks the old one `superseded`.
+- `expire_authorization` ends a lapsed or restarted grant, leaving the proposal `expired`.
+- `reject_proposal` (Cancel) retires a proposal permanently.
 
-The dirty canonical `~/Github/infinite-os` checkout was not edited. Dependencies
-were installed offline into this worktree's own real `node_modules` directory;
-no dependency symlink points at the canonical checkout.
+**Task state follows the task's live actions.** Cancelled is terminal. After a cancel, only
+effects already in flight can still be recorded.
 
-## Drafted, not accepted
+**Reads:**
+- `listActiveTasks` and `listLiveProposals` return keyset pages;
+- `listRecoverableActions` lists, across actors, the grants to end and the dispatches to reconcile
+  after a restart.
 
-- A zero-dependency interactive task/event/action-reference wire contract.
-- A three-table migration draft: `interactive_tasks`,
-  `interactive_task_events`, and `interactive_action_refs`.
-- Store input/transition types.
-- A store implementation draft covering scoped reads, revision/event sequencing,
-  request-id replay, proposal payload bounds, action identity checks, cancellation,
-  and outcome/continuation transitions.
-- A real temporary-PGlite test draft covering scoped create/replay, atomic final
-  turn/action recording, request/CAS conflicts, immutable hashes/resume keys,
-  cancellation, real database/store recreation, and secret-shaped proposal
-  rejection.
+**Errors.** Every database error leaves the store as a typed `InteractiveTaskConflictError`.
 
-The TDD red run was observed before the store file existed:
+## Not built yet
 
-```text
-FAIL packages/llm-controller/test/interactive-task-store.test.ts
-Cannot find module '../src/interactive-task-store.js'
-```
+1. Operator-only daemon routes, with route-level tests for:
+   - workspace and actor scope;
+   - idempotency;
+   - CAS;
+   - body bounds.
 
-No green run, build, typecheck, migration apply, route test, or review is claimed.
+   Only the host may create an automatic task. Its origin and provenance come from the claimed
+   cloud turn, never from model output.
+2. Capability negotiation for task events, only after the routes exist.
+3. Desktop use: a write-ahead record at dispatch, and a boot pass that ends every `authorized`
+   grant with `host_restart` and reports `dispatching` or `unknown` actions for verification. The
+   boot pass never re-dispatches.
+4. An independent review before any desktop dependency.
 
-## Required before this can be resumed or consumed
-
-1. Compile the store and correct its types/SQL against real PGlite.
-2. Run the focused store test to green, then add the migration manifest/count and
-   PGlite schema assertions.
-3. Export the store/types from `@infinite-os/llm-controller`.
-4. Add the three tables to transactional workspace deletion ordering and prove
-   zero residual rows.
-5. Review the migration grants and validate its composite task/workspace/actor
-   foreign-key invariants.
-6. Add operator-only daemon routes and route-level workspace/opaque-actor scope,
-   idempotency, CAS, and body-bound tests.
-7. Add daemon capability negotiation only after those routes are real.
-8. Obtain an independent review checkpoint before any Desktop dependency work.
-9. Desktop service hooks, restart reconciliation, fake service-journal proof,
-   documentation in `1bu-1`, and every user-visible surface remain completely
-   unimplemented.
-
-Cloud journals must remain authoritative. A missing service-journal row is not
-proof that dispatch did not happen unless an owning adapter specifically proves
-non-dispatch or supplies a valid idempotency guarantee. Old process-local
-confirmation thunks must never be restored after restart.
+Cloud service journals remain authoritative. A missing service-journal row is not proof that a
+dispatch did not happen, unless an owning adapter proves non-dispatch or supplies a valid
+idempotency guarantee. Process-local confirmation thunks are never restored after a restart.

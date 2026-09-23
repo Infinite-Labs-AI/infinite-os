@@ -37,7 +37,8 @@ export type {
 export { createSessionStore } from "./session-store.js";
 export {
   InteractiveTaskConflictError,
-  createInteractiveTaskStore
+  createInteractiveTaskStore,
+  interactiveTriggerKey
 } from "./interactive-task-store.js";
 export { MAX_INTERACTIVE_GRANT_MS } from "./interactive-task-types.js";
 export type {
@@ -50,6 +51,8 @@ export type {
   InteractiveTaskStoreOptions,
   InteractiveTaskTransition,
   ListActiveInteractiveTasksInput,
+  ListLiveProposalsInput,
+  ListRecoverableActionsInput,
   PreparedInteractiveActionInput,
   RevisedInteractiveActionInput
 } from "./interactive-task-types.js";

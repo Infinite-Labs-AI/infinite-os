@@ -1,4 +1,4 @@
--- Minimal local durability for interactive agent tasks (Cmd+L turns and automatic turns).
+-- Minimal local durability for interactive agent tasks (Cmd+L, terminal and automatic turns).
 --
 -- These rows are a task/event projection and references to action owners. They are
 -- deliberately not a second provider journal: cloud services keep their own
@@ -12,18 +12,19 @@ create table interactive_tasks (
   id text primary key,
   workspace_id text not null references workspaces(id),
   actor_id text not null,
-  -- Where the turn is shown. A human types into Cmd+L or iMessage; an automatic turn replies on
-  -- iMessage or the agent-tasks board, never in the Cmd+L pane.
-  surface text not null check (surface in ('cmdl', 'imessage', 'agent_tasks')),
-  -- Who asked. Only `human` is ever human intent; `triggered` (data alert) and `scheduled`
-  -- (time reminder) turns are written by the server from rule data.
+  -- Where the turn is shown. A human types into Cmd+L, the terminal or iMessage; an automatic
+  -- turn replies on iMessage or the agent-tasks board, never in Cmd+L or the terminal.
+  surface text not null check (surface in ('cmdl', 'terminal', 'imessage', 'agent_tasks')),
+  -- Who started the turn. `triggered` (data alert) and `scheduled` (time reminder) turns are
+  -- written by the server from rule data and are never human intent. A `human` task is a turn a
+  -- person started on that surface; it is not by itself proof of who typed it (see decision_source).
   origin text not null check (origin in ('human', 'triggered', 'scheduled')),
   -- Host-authored provenance of an automatic turn. Never taken from model output.
-  trigger_key text check (trigger_key is null or length(trigger_key) between 1 and 512),
-  rule_id text check (rule_id is null or length(rule_id) between 1 and 200),
+  trigger_key text check (trigger_key is null or char_length(trigger_key) between 1 and 512),
+  rule_id text check (rule_id is null or char_length(rule_id) between 1 and 200),
   rule_version integer check (rule_version is null or rule_version > 0),
-  check_key text check (check_key is null or length(check_key) between 1 and 512),
-  event_key text check (event_key is null or length(event_key) between 1 and 512),
+  check_key text check (check_key is null or char_length(check_key) between 1 and 512),
+  event_key text check (event_key is null or char_length(event_key) between 1 and 500),
   trigger_payload_hash text check (trigger_payload_hash is null or trigger_payload_hash ~ '^[a-f0-9]{64}$'),
   client_surface_key text not null,
   provider_id text not null,
@@ -42,26 +43,34 @@ create table interactive_tasks (
   cancel_requested_at timestamptz,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
-  unique (id, workspace_id, actor_id),
+  -- Children copy origin and surface through this key, so their own CHECKs can use them.
+  unique (id, workspace_id, actor_id, origin, surface),
   -- A human task carries no trigger provenance at all.
   constraint interactive_tasks_human_provenance_check check (
     origin <> 'human' or (trigger_key is null and rule_id is null and rule_version is null
       and check_key is null and event_key is null and trigger_payload_hash is null)
   ),
-  -- A triggered task carries the full contract provenance, and its key mirrors the alert delivery
-  -- identity `trigger:{alert_id}:{event_key}` exactly.
+  -- A triggered task names its alert (a lowercase UUID), rule version, event key and payload hash.
+  -- Its key is the cloud delivery identity: `trigger:{alert_id}:{event_key}` when that fits in 200
+  -- characters, else `trigger:{alert_id}:sha256:{lowercase hex sha256 of the UTF-8 event key}`.
   constraint interactive_tasks_triggered_provenance_check check (
-    origin <> 'triggered' or (rule_id is not null and rule_version is not null and check_key is not null
-      and event_key is not null and trigger_payload_hash is not null
-      and trigger_key = 'trigger:' || rule_id || ':' || event_key)
+    origin <> 'triggered' or (
+      rule_id is not null and trigger_key is not null
+      and rule_id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+      and rule_version is not null and event_key is not null and trigger_payload_hash is not null
+      and trigger_key = case
+        when char_length('trigger:' || rule_id || ':' || event_key) > 200
+          then 'trigger:' || rule_id || ':sha256:' || encode(sha256(convert_to(event_key, 'UTF8')), 'hex')
+        else 'trigger:' || rule_id || ':' || event_key
+      end)
   ),
   -- A scheduled task names its rule, its key and the payload it was built from.
   constraint interactive_tasks_scheduled_provenance_check check (
     origin <> 'scheduled' or (rule_id is not null and trigger_key is not null and trigger_payload_hash is not null)
   ),
-  -- Automatic turns never render in the Cmd+L pane; a human never types into the board.
+  -- Automatic turns never render in Cmd+L or the terminal; a human never types into the board.
   constraint interactive_tasks_origin_surface_check check (
-    (origin = 'human' and surface in ('cmdl', 'imessage'))
+    (origin = 'human' and surface in ('cmdl', 'terminal', 'imessage'))
     or (origin <> 'human' and surface in ('imessage', 'agent_tasks'))
   )
 );
@@ -76,27 +85,44 @@ create table interactive_task_events (
   task_id text not null,
   workspace_id text not null,
   actor_id text not null,
+  origin text not null,
+  surface text not null,
   sequence bigint not null check (sequence > 0),
   kind text not null check (
     kind in ('user_message', 'trigger', 'assistant_message', 'progress', 'approval_requested',
-      'approval_resolved', 'proposal_revised', 'authorization_expired', 'action_dispatch',
-      'action_outcome', 'continuation', 'task_state')
+      'approval_resolved', 'proposal_revised', 'proposal_rejected', 'authorization_expired',
+      'action_dispatch', 'action_outcome', 'continuation', 'task_state')
   ),
+  -- The model turn a turn result belongs to. A retried turn (same key) maps to the recorded one.
+  turn_key text check (turn_key is null or char_length(turn_key) between 1 and 512),
   payload_json jsonb not null default '{}',
   transition_request_id text not null,
   transition_request_hash text not null check (transition_request_hash ~ '^[a-f0-9]{64}$'),
   created_at timestamptz not null default now(),
-  foreign key (task_id, workspace_id, actor_id)
-    references interactive_tasks(id, workspace_id, actor_id) on delete cascade,
+  foreign key (task_id, workspace_id, actor_id, origin, surface)
+    references interactive_tasks(id, workspace_id, actor_id, origin, surface) on delete cascade,
   unique (task_id, sequence),
-  unique (task_id, transition_request_id)
+  unique (task_id, transition_request_id),
+  -- An automatic task never records human intent, and only an automatic task opens with a trigger.
+  constraint interactive_task_events_user_message_origin_check check (kind <> 'user_message' or origin = 'human'),
+  constraint interactive_task_events_trigger_origin_check check (kind <> 'trigger' or origin <> 'human'),
+  -- The opening event is the human's message or the trigger, and a trigger only ever opens a task.
+  constraint interactive_task_events_opening_check check (sequence <> 1 or kind in ('user_message', 'trigger')),
+  constraint interactive_task_events_trigger_opens_check check (kind <> 'trigger' or sequence = 1),
+  constraint interactive_task_events_turn_key_kind_check check ((turn_key is null) = (kind <> 'assistant_message'))
 );
+
+create unique index interactive_task_events_turn_key_idx
+  on interactive_task_events(task_id, turn_key)
+  where turn_key is not null;
 
 create table interactive_action_refs (
   invocation_id text primary key,
   task_id text not null,
   workspace_id text not null,
   actor_id text not null,
+  origin text not null,
+  surface text not null,
   source_kind text not null check (source_kind in ('host_confirmation', 'engine_action_call', 'service_journal')),
   source_ref text,
   operation_id text not null,
@@ -116,10 +142,16 @@ create table interactive_action_refs (
   -- The revision this row re-prepared. The composite FK below keeps it inside the same
   -- (task, proposal_ref) lineage.
   supersedes_invocation_id text,
+  -- When this revision was prepared. Approval is only valid while the preparation is fresh.
+  prepared_at timestamptz not null,
   prepared_context_revision text,
   authorization_context_revision text,
   authorization_expires_at timestamptz,
   decision_provenance text,
+  -- How the decision reached the host: a host-rendered confirmation, or a typed approval that names
+  -- the exact proposal revision. Terminal text is not proof of a person, so a terminal task can only
+  -- be authorized through a typed approval.
+  decision_source text check (decision_source is null or decision_source in ('host_confirmation', 'typed_approval')),
   service_resume_key text,
   receipt_ref text,
   outcome_summary text,
@@ -133,14 +165,19 @@ create table interactive_action_refs (
   revision bigint not null default 0 check (revision >= 0),
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
-  foreign key (task_id, workspace_id, actor_id)
-    references interactive_tasks(id, workspace_id, actor_id) on delete cascade,
+  foreign key (task_id, workspace_id, actor_id, origin, surface)
+    references interactive_tasks(id, workspace_id, actor_id, origin, surface) on delete cascade,
   unique (task_id, proposal_ref, proposal_revision),
   unique (invocation_id, task_id, proposal_ref),
   foreign key (supersedes_invocation_id, task_id, proposal_ref)
     references interactive_action_refs(invocation_id, task_id, proposal_ref) on delete cascade,
   constraint interactive_action_refs_revision_lineage_check check (
     (proposal_revision = 1) = (supersedes_invocation_id is null)
+  ),
+  constraint interactive_action_refs_terminal_approval_check check (
+    surface <> 'terminal'
+    or state not in ('authorized', 'dispatching', 'succeeded', 'failed', 'unknown')
+    or decision_source is not distinct from 'typed_approval'
   )
 );
 
@@ -168,6 +205,16 @@ create index interactive_task_events_cursor_idx
 
 create index interactive_action_refs_scope_state_idx
   on interactive_action_refs(task_id, workspace_id, actor_id, state);
+
+-- Live proposals across tasks (the agent-tasks board reads these, newest first).
+create index interactive_action_refs_live_idx
+  on interactive_action_refs(workspace_id, actor_id, created_at desc, invocation_id desc)
+  where state in ('prepared', 'awaiting_approval', 'authorized', 'expired');
+
+-- Actions a restarted host must settle, across actors: grants to end and dispatches to reconcile.
+create index interactive_action_refs_recovery_idx
+  on interactive_action_refs(workspace_id, created_at, invocation_id)
+  where state in ('authorized', 'dispatching', 'unknown');
 
 grant select, insert, update, delete on interactive_tasks, interactive_task_events,
   interactive_action_refs to growth_os_app;

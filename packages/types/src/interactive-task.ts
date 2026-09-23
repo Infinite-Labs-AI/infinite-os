@@ -21,7 +21,7 @@ export type InteractiveActionState =
   | "cancelled"
   /** An earlier revision of a proposal that "Apply" re-prepared. Never executable. */
   | "superseded"
-  /** A proposal whose grant lapsed or was discarded. Only a re-prepare can revive it. */
+  /** A proposal whose grant lapsed or whose host restarted. Only a re-prepare can revive it. */
   | "expired";
 
 export type InteractiveVerificationState =
@@ -46,6 +46,7 @@ export type InteractiveTaskEventKind =
   | "approval_requested"
   | "approval_resolved"
   | "proposal_revised"
+  | "proposal_rejected"
   | "authorization_expired"
   | "action_dispatch"
   | "action_outcome"
@@ -57,18 +58,23 @@ export type InteractiveActionSourceKind =
   | "engine_action_call"
   | "service_journal";
 
-/** Where the turn is shown. Automatic turns never render in the Cmd+L pane. */
-export type InteractiveTaskSurface = "cmdl" | "imessage" | "agent_tasks";
+/** Where the turn is shown. Automatic turns never render in Cmd+L or the terminal. */
+export type InteractiveTaskSurface = "cmdl" | "terminal" | "imessage" | "agent_tasks";
 
 /**
- * Who asked. Only `human` is ever human intent. `triggered` (data alert) and `scheduled`
- * (time reminder) turns are written by the server from rule data.
+ * Who started the turn. `triggered` (data alert) and `scheduled` (time reminder) turns are
+ * written by the server from rule data and are never human intent. A `human` task is a turn a
+ * person started on its surface; terminal text alone is not proof of who typed it, so terminal
+ * approvals must be typed approvals.
  */
 export type InteractiveTaskOrigin = "human" | "triggered" | "scheduled";
 
 /** Host-authored provenance of an automatic turn. Null for a human task. */
 export interface InteractiveTaskProvenance {
-  /** `trigger:{alert_id}:{event_key}` for a triggered turn; the scheduled turn key otherwise. */
+  /**
+   * The cloud delivery identity. For a triggered turn: `trigger:{alert_id}:{event_key}`, or
+   * `trigger:{alert_id}:sha256:{hex}` when that exceeds 200 characters. The scheduled turn key otherwise.
+   */
   triggerKey: string;
   ruleId: string;
   ruleVersion: number | null;
@@ -77,6 +83,9 @@ export interface InteractiveTaskProvenance {
   /** sha256 hex of the untrusted event payload the turn was built from. */
   payloadHash: string;
 }
+
+/** How an approval reached the host. Terminal tasks accept only `typed_approval`. */
+export type InteractiveDecisionSource = "host_confirmation" | "typed_approval";
 
 export type InteractiveEffect = "read" | "local_write" | "external_write";
 export type InteractiveReplayPolicy =
@@ -114,6 +123,8 @@ export interface InteractiveTaskEvent {
   actorId: string;
   sequence: number;
   kind: InteractiveTaskEventKind;
+  /** The model turn an `assistant_message` belongs to; null for every other kind. */
+  turnKey: string | null;
   payload: Record<string, unknown>;
   transitionRequestId: string;
   transitionRequestHash: string;
@@ -139,10 +150,13 @@ export interface InteractiveActionRef {
   replayPolicy: InteractiveReplayPolicy;
   state: InteractiveActionState;
   supersedesInvocationId: string | null;
+  /** When this revision was prepared. Approval is valid only while the preparation is fresh. */
+  preparedAt: string;
   preparedContextRevision: string | null;
   authorizationContextRevision: string | null;
   authorizationExpiresAt: string | null;
   decisionProvenance: string | null;
+  decisionSource: InteractiveDecisionSource | null;
   serviceResumeKey: string | null;
   receiptRef: string | null;
   outcomeSummary: string | null;
@@ -162,6 +176,23 @@ export interface InteractiveTaskDetail {
 export interface InteractiveTaskPage {
   tasks: InteractiveTaskDetail[];
   /** Opaque keyset cursor for the next page, or null when this is the last page. */
+  nextCursor: string | null;
+}
+
+/** A live proposal (prepared, awaiting approval, authorized or expired) with its task. */
+export interface InteractiveProposal {
+  task: InteractiveTaskRecord;
+  action: InteractiveActionRef;
+}
+
+export interface InteractiveProposalPage {
+  proposals: InteractiveProposal[];
+  nextCursor: string | null;
+}
+
+/** Actions a restarted host must settle: grants to end, dispatches to reconcile. */
+export interface InteractiveActionPage {
+  actions: InteractiveActionRef[];
   nextCursor: string | null;
 }
 
