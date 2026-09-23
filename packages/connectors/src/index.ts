@@ -1,4 +1,5 @@
 import { metaEntityReadMode } from "./meta-entity-checkpoint.js";
+import { metaAdsEntityVersionFingerprint } from "./meta-entity-fingerprint.js";
 import {
   MetaGraphBatchTransportError,
   executeMetaGraphReadBatch,
@@ -5636,7 +5637,7 @@ async function writeMetaAdsEntityVersions(
 ): Promise<void> {
   for (let index = 0; index < rows.length; index += 1) {
     const row = rows[index];
-    const payloadHash = createHash("sha256").update(canonicalMetaAdsJson(row.metadata)).digest("hex");
+    const payloadHash = metaAdsEntityVersionFingerprint(row.metadata);
     await stageMetaAdsSnapshotKey(tx, request, {
       adAccountId: row.adAccountId,
       grain: row.entityType,
@@ -5714,18 +5715,6 @@ async function writeMetaAdsEntityVersions(
       rawIds[index],
     );
   }
-}
-
-function canonicalMetaAdsJson(value: unknown): string {
-  if (value === null || value === undefined) return "null";
-  if (Array.isArray(value)) return `[${value.map((entry) => canonicalMetaAdsJson(entry)).join(",")}]`;
-  if (typeof value === "object") {
-    const entries = Object.entries(value as Record<string, unknown>)
-      .filter(([, entry]) => entry !== undefined)
-      .sort(([left], [right]) => left.localeCompare(right));
-    return `{${entries.map(([key, entry]) => `${JSON.stringify(key)}:${canonicalMetaAdsJson(entry)}`).join(",")}}`;
-  }
-  return JSON.stringify(value);
 }
 
 async function writeMetaAdsCampaignDimension(
