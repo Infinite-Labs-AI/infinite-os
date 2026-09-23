@@ -88,9 +88,9 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
     rmSync(dataDir, { recursive: true, force: true });
   });
 
-  it("applied ALL 70 migrations on first boot and is idempotent on a re-run", async () => {
-    expect(loadMigrations().length).toBe(70);
-    expect(firstRun).toHaveLength(70);
+  it("applied ALL 71 migrations on first boot and is idempotent on a re-run", async () => {
+    expect(loadMigrations().length).toBe(71);
+    expect(firstRun).toHaveLength(71);
     expect(firstRun).toContain("0001_control_plane.sql");
     expect(firstRun).toContain("0006_security_roles.sql");
     expect(firstRun).toContain("0036_chat_sessions_desktop_surface.sql");
@@ -134,13 +134,13 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
     expect(secondRun).toEqual([]);
   });
 
-  it("created the schema_migrations ledger with all 70 rows", async () => {
+  it("created the schema_migrations ledger with all 71 rows", async () => {
     const ledger = await db.query<{ id: string }>(
       "select id from schema_migrations order by id"
     );
-    expect(ledger).toHaveLength(70);
+    expect(ledger).toHaveLength(71);
     expect(ledger[0]?.id).toBe("0001_control_plane.sql");
-    expect(ledger.at(-1)?.id).toBe("0070_meta_ads_nullable_reach.sql");
+    expect(ledger.at(-1)?.id).toBe("0071_meta_reach_unmeasured_days.sql");
   });
 
   it("0063 serves both PostHog views from per-(workspace, source, day) rollups — refresh, is_internal, idempotency, grain key, grants", async () => {

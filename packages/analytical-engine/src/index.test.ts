@@ -161,7 +161,8 @@ describe("analytical engine smoke", () => {
       expect(roas).not.toContain("avg(");
 
       const freq = aggregateExpression("frequency", metricColumn("frequency"));
-      expect(freq).toBe("sum(impressions) / nullif(sum(reach), 0)");
+      // Both bases over the rows whose reach was MEASURED (NULL reach = unmeasured, 0070).
+      expect(freq).toBe("sum(impressions) filter (where reach is not null) / nullif(sum(reach), 0)");
       expect(freq).not.toContain("avg(");
 
       const stripeRoas = aggregateExpression("roas_from_stripe", metricColumn("roas_from_stripe"));
@@ -3768,6 +3769,10 @@ describe("analytical engine smoke", () => {
       return {
         async query<T = Record<string, unknown>>(sql: string): Promise<T[]> {
           queries.push({ sql });
+          // The unmeasured-reach probe: every fixture row carries a measured reach.
+          if (sql.includes("unmeasured_reach_rows")) {
+            return [{ unmeasured_reach_rows: 0 }] as T[];
+          }
           if (sql.includes("from queryable.vw_meta_ads_campaign_daily")) {
             return [{ [metric]: evalAggregate(metric, sql) }] as T[];
           }
@@ -3851,6 +3856,8 @@ describe("analytical engine smoke", () => {
         "reach_is_approximate_summed_daily_reach_overcounts_unique_people"
       );
       expect(result?.caveats).toContain("read_only_marketing_api_reporting");
+      // Every fixture row is measured, so nothing was excluded and nothing is flagged.
+      expect(result?.caveats).not.toContain("reach_excludes_unmeasured_days");
     });
   });
 
@@ -6075,7 +6082,7 @@ describe("Phase-2 §9 acceptance — adset grain + on/off status (Stage-3)", () 
           metric: "frequency",
           groupBy: ["adset_id"],
           view: "queryable.vw_meta_ads_adset_daily",
-          expr: "sum(impressions) / nullif(sum(reach), 0) as frequency"
+          expr: "sum(impressions) filter (where reach is not null) / nullif(sum(reach), 0) as frequency"
         },
         {
           metric: "cost_per_result",

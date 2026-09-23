@@ -42,6 +42,8 @@ const LOCAL_STORE_CHOKE_POINTS: Record<string, readonly string[]> = {
   backfillXFollowerSnapshotIfNeeded: ["run_metric_query"],
   // The shared aggregate executor (`from ${view}` over queryable.*).
   runAggregate: ["run_metric_query", "run_breakdown_query", "run_funnel_query"],
+  // The unmeasured-reach probe (same view + filters as the reach/frequency aggregate).
+  unmeasuredReachCaveats: ["run_metric_query", "run_breakdown_query"],
   // The no-data honesty classifier probes the fact tables directly.
   classifyNoData: ["run_metric_query", "run_breakdown_query"],
   // drilldown_result provider-truth rows (queryable value join + *_truth).

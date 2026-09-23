@@ -6,6 +6,7 @@ import {
   metricColumn,
   aggregateExpression,
   caveatsForMetric,
+  unmeasuredReachCaveats,
   requiresResultTypePartition
 } from "@infinite-os/analytical-engine";
 import { loadInfiniteOsConfig } from "@infinite-os/config";
@@ -410,7 +411,8 @@ async function runSavedReport(db: InfiniteOsDb, workspaceId: string, reportId: s
     view,
     rows,
     rowCount: rows.length,
-    caveats: caveatsForMetric(metric)
+    // Unmeasured (NULL) reach is excluded from reach/frequency; flag it, exactly as the engine does.
+    caveats: [...(await unmeasuredReachCaveats(db, workspaceId, view, metric, {})), ...caveatsForMetric(metric)]
   };
 }
 

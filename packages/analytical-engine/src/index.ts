@@ -3167,6 +3167,7 @@ async function runMetricQuery(
     freshness
   );
   const effectiveRows = confirmedZero.rows ?? rows;
+  const unmeasuredReach = await unmeasuredReachCaveats(db, context.workspaceId, view, metric, input);
   await logTool(db, context, "run_metric_query", input, [view], [metric], { metric, view }, rows.length);
   // COMPARISON — opt-in compareTo re-runs the SAME aggregate over the adjacent prior
   // date range and attaches an additive `comparison` block to envelope.data. Runs AFTER
@@ -3198,6 +3199,9 @@ async function runMetricQuery(
       // curated digest line the model reads. Envelope consumers treat caveats as a set
       // (tests use arrayContaining), so the order change is safe.
       ...unboundedDateRangeCaveats(view, metric, filtersFrom(input)),
+      // reach_excludes_unmeasured_days rides second for the same digest-slice reason: a
+      // reach/frequency over measured days only must never read as the whole window.
+      ...unmeasuredReach,
       // zero_confirmed_fresh rides next for the same digest-slice reason: the confirmed
       // zero must reach the curated line even on multi-caveat metrics.
       ...confirmedZero.caveats,
@@ -3747,6 +3751,7 @@ async function runBreakdownQuery(
   // PR3 Step 13 — no-data honesty MUST cover breakdown queries (the Tier-1 questions:
   // "top pages", "by channel", "mobile vs desktop") via the SAME shared classifier.
   const noData = await classifyGa4NoData(db, context.workspaceId, view, metric, rows, input, resolvedSourceId);
+  const unmeasuredReach = await unmeasuredReachCaveats(db, context.workspaceId, view, metric, input);
   await logTool(db, context, "run_breakdown_query", input, [view], [metric], { metric, view, groupBy, orderBy }, rows.length);
   return envelope(
     "run_breakdown_query",
@@ -3754,7 +3759,7 @@ async function runBreakdownQuery(
     { rows, metric, view, groupBy, orderBy, ...noDataEnvelopeData(noData) },
     [view, "metric_definitions"],
     "ok",
-    [...caveatsForMetric(metric), ...noData.caveats],
+    [...unmeasuredReach, ...caveatsForMetric(metric), ...noData.caveats],
     ["explain_answer", "drilldown_result"],
     await freshnessForViews(db, context.workspaceId, [view])
   );
@@ -3994,16 +3999,7 @@ async function runAggregate(
       throw new Error(`unsupported_partition:result_type_required:${metric}`);
     }
   }
-  const where = ["workspace_id = $1"];
-  const params: unknown[] = [workspaceId];
-  for (const filter of filters) {
-    const field = normalizeDimensionAlias(view, filter.field);
-    if (!allowedDimensions.includes(field) && field !== "provider" && field !== "occurred_on" && field !== "source_id") {
-      throw new Error(`unsupported_dimension:${filter.field}`);
-    }
-    params.push(filter.value);
-    where.push(`${dimensionExpression(view, field)} ${filterOperatorSql(filter.operator)} $${params.length}`);
-  }
+  const { where, params } = aggregateWhere(view, workspaceId, filters);
   const limit = boundedLimit(input, 500);
   const groupColumns = groupedExpressions.length
     ? `${groupedExpressions.map((group) => `${group.expression} as ${group.alias}`).join(", ")}, `
@@ -4027,6 +4023,57 @@ async function runAggregate(
     limit $${params.length}
   `;
   return db.query(sql, params);
+}
+
+// The WHERE clause every aggregate over `view` applies: the workspace plus each caller filter,
+// gated to the view's allowed dimensions. Shared so a companion probe (unmeasuredReachCaveats)
+// scopes EXACTLY the rows the aggregate read.
+function aggregateWhere(
+  view: string,
+  workspaceId: string,
+  filters: ReturnType<typeof filtersFrom>
+): { where: string[]; params: unknown[] } {
+  const allowedDimensions = allowedDimensionsForView(view);
+  const where = ["workspace_id = $1"];
+  const params: unknown[] = [workspaceId];
+  for (const filter of filters) {
+    const field = normalizeDimensionAlias(view, filter.field);
+    if (!allowedDimensions.includes(field) && field !== "provider" && field !== "occurred_on" && field !== "source_id") {
+      throw new Error(`unsupported_dimension:${filter.field}`);
+    }
+    params.push(filter.value);
+    where.push(`${dimensionExpression(view, field)} ${filterOperatorSql(filter.operator)} $${params.length}`);
+  }
+  return { where, params };
+}
+
+// UNMEASURED REACH (2026-09-23). Meta reach is non-additive, so the hot open-day lane's DERIVED
+// campaign/ad set rows (actions_raw.derivation.method = "sum_of_ad_insights", meta-ads-hot-rollup)
+// store reach = NULL — unmeasured, never 0 (migration 0070). sum(reach) skips those rows, so a
+// window that includes an unsettled day reads LOW, and sum(impressions)/sum(reach) used to divide
+// that day's impressions by nobody, reading HIGH. The metric expressions now exclude unmeasured
+// rows from both sides (aggregateExpression), and this probe flags any answer whose scope held
+// one, so a reach/frequency over measured days only is never presented as the whole window.
+const META_REACH_METRICS = new Set(["reach", "frequency"]);
+export const REACH_EXCLUDES_UNMEASURED_DAYS_CAVEAT = "reach_excludes_unmeasured_days";
+
+// Exported (DEDUP single-source-of-truth): consumed by apps/worker runSavedReport.
+export async function unmeasuredReachCaveats(
+  db: InfiniteOsDb,
+  workspaceId: string,
+  view: string,
+  metric: string,
+  input: unknown
+): Promise<string[]> {
+  if (!META_REACH_METRICS.has(metric)) {
+    return [];
+  }
+  const { where, params } = aggregateWhere(view, workspaceId, filtersFrom(input));
+  const rows = await db.query<{ unmeasured_reach_rows: unknown }>(
+    `select count(*) as unmeasured_reach_rows from ${view} where ${where.join(" and ")} and reach is null`,
+    params
+  );
+  return Number(rows[0]?.unmeasured_reach_rows ?? 0) > 0 ? [REACH_EXCLUDES_UNMEASURED_DAYS_CAVEAT] : [];
 }
 
 // PR3 Step 13/14 — GA4 fact table behind each queryable view, used by the no-data
@@ -5229,6 +5276,8 @@ function isStripeSubscriberMetric(metric: string): boolean {
 }
 
 // Exported (DEDUP single-source-of-truth): consumed by apps/worker runSavedReport.
+// reach falls through to sum(reach): SQL sum() skips NULL (unmeasured) reach, i.e. it is the
+// reach of the MEASURED rows only — unmeasuredReachCaveats flags any answer that excluded one.
 export function aggregateExpression(metric: string, column: string): string {
   if (metric === "site_conversion_rate") {
     return "avg(site_conversion_rate)";
@@ -5275,9 +5324,12 @@ export function aggregateExpression(metric: string, column: string): string {
     return "sum(conversion_value) / nullif(sum(meta_ads_spend), 0)";
   }
   // frequency = impressions / reach, recomputed from summed bases (inherits reach's
-  // APPROXIMATE caveat — see caveatsForMetric). Never avg(per-row frequency).
+  // APPROXIMATE caveat — see caveatsForMetric). Never avg(per-row frequency). Rows with
+  // UNMEASURED reach (NULL — the hot lane's derived open-day rows) are excluded from the
+  // numerator too: sum(reach) already skips them, so counting their impressions would divide
+  // them by nobody and inflate frequency. See unmeasuredReachCaveats.
   if (metric === "frequency") {
-    return "sum(impressions) / nullif(sum(reach), 0)";
+    return "sum(impressions) filter (where reach is not null) / nullif(sum(reach), 0)";
   }
   // Phase-1 §5 Stripe-sourced ROAS — recomputed from the summed, currency-reconciled bases
   // the join view exposes (revenue already converted to major units in the matched account

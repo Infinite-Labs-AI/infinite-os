@@ -30,7 +30,27 @@ type MetaFixture = {
   };
   outerBatchResponse?: Response;
   onRequest?: (url: URL, init?: RequestInit) => void;
+  /**
+   * Model Meta's documented insights behaviour for archived/deleted objects: a row carrying
+   * `__status` ARCHIVED or DELETED is omitted from `level=<grain>` results unless the request
+   * filters `<grain>.effective_status` IN a list naming that status ("Manage Your Ad Object's
+   * Status"). `__status` is stripped from every returned row.
+   */
+  metaStatusSemantics?: boolean;
 };
+
+/** Apply Meta's archived/deleted omission to insights rows at `level` for the request `url`. */
+function metaVisibleInsightRows(fixture: MetaFixture, level: string, url: URL, rows: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
+  if (!fixture.metaStatusSemantics) return rows;
+  const filters = JSON.parse(url.searchParams.get("filtering") ?? "[]") as Array<{ field: string; operator: string; value: string[] }>;
+  const included = new Set(filters.find(filter => filter.field === `${level}.effective_status` && filter.operator === "IN")?.value ?? []);
+  return rows
+    .filter(row => {
+      const status = typeof row.__status === "string" ? row.__status : "ACTIVE";
+      return (status !== "ARCHIVED" && status !== "DELETED") || included.has(status);
+    })
+    .map(({ __status: _status, ...row }) => row);
+}
 
 describe("Meta Ads history CLOSE against real PGlite", () => {
   let dataDir: string;
@@ -118,11 +138,11 @@ describe("Meta Ads history CLOSE against real PGlite", () => {
           if (fixture.failLevel === level) {
             return { code: 500, headers: [], body: JSON.stringify({ error: { message: "fixture failure" } }) };
           }
-          const rows = level === "campaign"
+          const rows = metaVisibleInsightRows(fixture, level, url, level === "campaign"
             ? fixture.campaignInsights
             : level === "adset"
               ? fixture.adsetInsights
-              : fixture.adInsights;
+              : fixture.adInsights);
           const custom = fixture.batchItem?.(level, url, rows);
           return {
             code: custom?.code ?? 200,
@@ -146,11 +166,11 @@ describe("Meta Ads history CLOSE against real PGlite", () => {
         if (fixture.failLevel === level) {
           return new Response(JSON.stringify({ error: { message: "fixture failure" } }), { status: 500, headers });
         }
-        const rows = level === "campaign"
+        const rows = metaVisibleInsightRows(fixture, level, requestUrl, level === "campaign"
           ? fixture.campaignInsights
           : level === "adset"
             ? fixture.adsetInsights
-            : fixture.adInsights;
+            : fixture.adInsights);
         return new Response(JSON.stringify({ data: rows, paging: {} }), { status: 200, headers });
       }
       throw new Error(`unexpected Meta fixture URL ${requestUrl.toString()}`);
@@ -1158,11 +1178,85 @@ describe("Meta Ads history CLOSE against real PGlite", () => {
     const request: SyncRequest = { ...syncRequest(workspaceId, sourceId, day, day), metaAdsSyncMode: "insights_only", metaAdsRequestLane: lane, metaAdsRequestBudget: 12 };
     await withMetaFetch(next, () => connectorFor("meta_ads").sync(db, request));
     expect(batches.map(batch => batch.map(url => new URL(url, "https://graph.facebook.com/v25.0/").searchParams.get("level")))).toEqual([["campaign", "adset", "ad"]]);
-    expect(batches[0]!.some(url => new URL(url, "https://graph.facebook.com/v25.0/").searchParams.has("filtering"))).toBe(false);
+    // Each grain asks for its objects in EVERY status at its own level (archived/deleted included).
+    expect(batches[0]!.map(url => {
+      const filters = JSON.parse(new URL(url, "https://graph.facebook.com/v25.0/").searchParams.get("filtering") ?? "null") as Array<{ field: string; value: string[] }>;
+      return [filters[0]!.field, filters[0]!.value.includes("DELETED") && filters[0]!.value.includes("ARCHIVED")];
+    })).toEqual([["campaign.effective_status", true], ["adset.effective_status", true], ["ad.effective_status", true]]);
     expect(await db.query("select spend::float8 as spend,reach,actions_raw->'derivation' as derivation from meta_ads_campaign_daily where source_id=$1 and occurred_on=$2", [sourceId, day]))
       .toEqual([{ spend: 61, reach: expect.anything(), derivation: null }]);
     expect(Number((await db.query<{ reach: unknown }>("select reach from meta_ads_campaign_daily where source_id=$1 and occurred_on=$2", [sourceId, day]))[0]?.reach)).toBe(777);
     expect((await db.query<{ requests: number }>("select (request_telemetry->>'requestCount')::integer as requests from sync_runs where id=$1", [request.syncRunId]))[0]?.requests).toBe(3);
+  }, 120_000);
+
+  /** Day D as Meta reports it once ad a_deleted (spend 20) and ad set s_deleted (spend 5) are deleted. */
+  function deletedObjectsDay(day: string): MetaFixture {
+    const next = fixture(day);
+    next.metaStatusSemantics = true;
+    const deletedAd = {
+      date_start: day, spend: "20", clicks: "5", impressions: "500", reach: "400", account_currency: "GBP",
+      campaign_id: "c1", campaign_name: "Campaign", adset_id: "s1", adset_name: "UK buyers",
+      ad_id: "a_deleted", ad_name: "Deleted ad", objective: "OUTCOME_LEADS", actions: [], action_values: [], __status: "DELETED",
+    };
+    const deletedAdsetAd = {
+      ...deletedAd, spend: "5", clicks: "1", impressions: "100", reach: "90",
+      adset_id: "s_deleted", adset_name: "Deleted set", ad_id: "a_in_deleted_set", ad_name: "Ad in deleted set",
+    };
+    next.adInsights.push(deletedAd, deletedAdsetAd);
+    // A live ad set's own row includes its deleted ads' stats (the doc's example); the deleted ad set
+    // row, like any deleted object, is returned only when asked for.
+    next.adsetInsights[0]!.spend = "70";
+    next.adsetInsights.push({ ...next.adsetInsights[0]!, spend: "5", adset_id: "s_deleted", adset_name: "Deleted set", __status: "DELETED" });
+    // The live campaign's row already includes every deleted child's stats.
+    next.campaignInsights[0]!.spend = "75";
+    return next;
+  }
+
+  async function spendByGrain(sourceId: string, day: string): Promise<Record<"campaign" | "adset" | "ad", number>> {
+    const total = async (table: string) => Number((await db.query<{ spend: number | null }>(
+      `select sum(spend)::float8 as spend from ${table} where source_id=$1 and occurred_on=$2`, [sourceId, day]))[0]?.spend ?? 0);
+    return { campaign: await total("meta_ads_campaign_daily"), adset: await total("meta_ads_adset_daily"), ad: await total("meta_ads_ad_daily") };
+  }
+
+  it("settled one-day read keeps deleted ads' and ad sets' stats, so the hot lane's rows survive settlement at parity", async () => {
+    const workspaceId = `ws_meta_settled_deleted_${randomUUID()}`;
+    const sourceId = `src_meta_settled_deleted_${randomUUID()}`;
+    await seedSource(workspaceId, sourceId);
+    await withMetaFetch(fixture("2026-09-01"), () =>
+      connectorFor("meta_ads").sync(db, syncRequest(workspaceId, sourceId, "2026-09-01", "2026-09-01"))
+    );
+    const day = "2026-09-02";
+    const oneDay = (lane: "hot_insights" | "settled_history"): SyncRequest => ({
+      ...syncRequest(workspaceId, sourceId, day, day), metaAdsSyncMode: "insights_only", metaAdsRequestLane: lane, metaAdsRequestBudget: 12,
+    });
+    // Open day: the hot lane's all-status ad read sees every ad and derives the parents from them.
+    await withMetaFetch(deletedObjectsDay(day), () => connectorFor("meta_ads").sync(db, oneDay("hot_insights")));
+    expect(await spendByGrain(sourceId, day)).toEqual({ campaign: 75, adset: 75, ad: 75 });
+
+    // Settlement replaces the day with Meta's own three grains. Without the all-status filters Meta
+    // omits a_deleted / a_in_deleted_set / s_deleted, and CLOSE prunes the hot lane's rows for them.
+    await withMetaFetch(deletedObjectsDay(day), () => connectorFor("meta_ads").sync(db, oneDay("settled_history")));
+    expect(await spendByGrain(sourceId, day)).toEqual({ campaign: 75, adset: 75, ad: 75 });
+    expect((await db.query<{ ad_id: string }>("select ad_id from meta_ads_ad_daily where source_id=$1 and occurred_on=$2 order by ad_id", [sourceId, day]))
+      .map(row => row.ad_id)).toEqual(["a1", "a_deleted", "a_in_deleted_set"]);
+    expect((await db.query<{ adset_id: string }>("select adset_id from meta_ads_adset_daily where source_id=$1 and occurred_on=$2 order by adset_id", [sourceId, day]))
+      .map(row => row.adset_id)).toEqual(["s1", "s_deleted"]);
+    // Settled rows are Meta's own (reach measured), never the derivation.
+    expect(await db.query("select actions_raw->'derivation' as derivation from meta_ads_campaign_daily where source_id=$1 and occurred_on=$2", [sourceId, day]))
+      .toEqual([{ derivation: null }]);
+  }, 120_000);
+
+  it("multi-day restatement/backfill reads keep deleted ads' and ad sets' stats at every grain", async () => {
+    const workspaceId = `ws_meta_restate_deleted_${randomUUID()}`;
+    const sourceId = `src_meta_restate_deleted_${randomUUID()}`;
+    await seedSource(workspaceId, sourceId);
+    const requests: URL[] = [];
+    const data = deletedObjectsDay("2026-09-02");
+    data.onRequest = url => { if (url.pathname.endsWith("/insights")) requests.push(url); };
+    await withMetaFetch(data, () => connectorFor("meta_ads").sync(db, syncRequest(workspaceId, sourceId, "2026-09-01", "2026-09-03")));
+    expect(await spendByGrain(sourceId, "2026-09-02")).toEqual({ campaign: 75, adset: 75, ad: 75 });
+    expect(requests.map(url => [url.searchParams.get("level"), JSON.parse(url.searchParams.get("filtering") ?? "[]")[0]?.field]))
+      .toEqual([["campaign", "campaign.effective_status"], ["adset", "adset.effective_status"], ["ad", "ad.effective_status"]]);
   }, 120_000);
 
   it("a failed one-day insights batch retains the complete last-good snapshot", async () => {
