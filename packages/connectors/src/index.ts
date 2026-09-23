@@ -6,6 +6,15 @@ import {
   type MetaAdsAsyncInsightsStep,
 } from "./meta-async-insights.js";
 import {
+  META_ADS_AD_FULL_FIELDS,
+  metaAdsFullAdReadPlan,
+  metaAdsHeavyAdFieldsKey,
+  metaAdsHeavyCursorKey,
+  metaAdsHeavyCursorValue,
+  metaGraphNextPage,
+  readMetaAdsFullAdSnapshot,
+} from "./meta-lean-inventory.js";
+import {
   MetaGraphBatchTransportError,
   executeMetaGraphReadBatch,
   type MetaGraphBatchResult,
@@ -10149,11 +10158,16 @@ async function metaAdsReadEdge(
     const body = (await response.json()) as MetaAdsEdgeResponse;
     if(onPage)await onPage(body.data ?? []);
     nodes.push(...(body.data ?? []));
-    const nextAfter = metaAdsPagingAfter(body as MetaAdsInsightsResponse);
-    if (!nextAfter) {
+    // Only `paging.next` means another page: Meta sends cursors.after on the LAST page too, and
+    // following it cost one extra, empty request per edge read (see meta-lean-inventory.ts).
+    const nextPage = metaGraphNextPage(body.paging);
+    if (nextPage.kind === "malformed") {
+      throw new ConnectorError("provider_api_error", `Meta Ads /${edge} edge returned a next page without a cursor (refusing to truncate status)`, true);
+    }
+    if (nextPage.kind === "last") {
       return nodes;
     }
-    after = nextAfter;
+    after = nextPage.after;
   }
   // §4d — the cursor never terminated within the cap. Fail LOUD (retryable) rather than
   // returning a silently-truncated status set that would label live entities as unknown.
@@ -11500,11 +11514,15 @@ export async function listMetaEntities(
     }, telemetry, entity === "campaign" ? "campaign_edge" : entity === "adset" ? "adset_edge" : "ad_edge");
     const response = (await httpResponse.json()) as MetaListResponse;
     rows.push(...(response.data ?? []));
-    const nextAfter = metaAdsPagingAfter({ paging: response.paging });
-    if (!nextAfter) {
+    // Same last-page rule as metaAdsReadEdge: continue only when `paging.next` is present.
+    const nextPage = metaGraphNextPage(response.paging);
+    if (nextPage.kind === "malformed") {
+      throw new ConnectorError("provider_api_error", `Meta Ads /${META_READ_EDGE[entity]} list returned a next page without a cursor (refusing to truncate)`, true);
+    }
+    if (nextPage.kind === "last") {
       return rows;
     }
-    after = nextAfter;
+    after = nextPage.after;
   }
   // The cursor never terminated within the page cap — fail LOUD (retryable) rather than
   // return a silently-truncated set. Mirrors metaAdsReadEdge §4d.
