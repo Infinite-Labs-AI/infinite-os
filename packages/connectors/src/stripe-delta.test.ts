@@ -19,6 +19,7 @@ import {
 } from "./stripe-reconcile.js";
 import {
   STRIPE_DELTA_EVENT_PREFIXES,
+  STRIPE_DELTA_MAX_REACH_BACK_MS,
   STRIPE_DELTA_MAX_REFETCH_PER_RUN,
   STRIPE_DELTA_RELEVANT_EVENT_TYPE_COUNT,
   STRIPE_EVENTS_TYPES_FILTER_CAP,
@@ -842,15 +843,70 @@ describe("Stripe delta evidence reach-back (pure)", () => {
     expect(without.fanoutFromMs).toBe(without.segmentFromMs);
   });
 
-  it("never reaches back past the safe retention floor", () => {
-    const plan = planStripeDeltaSegment({
+  it("caps the reach-back span at six hours before the window's end (well inside retention)", () => {
+    expect(STRIPE_DELTA_MAX_REACH_BACK_MS).toBe(6 * 60 * MIN);
+    for (const reachBackToMs of [NOW_MS - 2 * 24 * 60 * MIN, NOW_MS - 29 * 24 * 60 * MIN]) {
+      const plan = planStripeDeltaSegment({
+        cursorEndMs,
+        fromCandidatesMs: [NOW_MS - 20 * MIN],
+        openSegment: null,
+        reachBackToMs,
+      });
+      expect(plan.segmentFromMs).toBe(toMs - STRIPE_DELTA_MAX_REACH_BACK_MS);
+      expect(plan.fanoutFromMs).toBe(NOW_MS - 25 * MIN);
+      // A capped window starts after the observed tail, so the coverage reset fires.
+      expect(stripeDeltaLeavesEventHole({
+        segmentFromMs: plan.segmentFromMs,
+        lastClosedSegmentEndMs: reachBackToMs,
+        continuousCoverageFromMs: NOW_MS - 30 * 24 * 60 * MIN,
+      })).toBe(true);
+    }
+    // Just inside the cap is NOT clamped.
+    const inside = planStripeDeltaSegment({
       cursorEndMs,
       fromCandidatesMs: [NOW_MS - 20 * MIN],
       openSegment: null,
-      reachBackToMs: NOW_MS - 29 * 24 * 60 * MIN,
+      reachBackToMs: toMs - STRIPE_DELTA_MAX_REACH_BACK_MS + STRIPE_EVENT_OVERLAP_MS,
     });
-    expect(plan.segmentFromMs).toBe(toMs - 28 * 24 * 60 * MIN);
-    expect(plan.fanoutFromMs).toBe(NOW_MS - 25 * MIN);
+    expect(inside.segmentFromMs).toBe(toMs - STRIPE_DELTA_MAX_REACH_BACK_MS);
+  });
+
+  it("counts and SKIPS a malformed event in the reach-back part, but still throws inside the normal window", () => {
+    const fanoutFromMs = NOW_MS - 40 * MIN;
+    const before = Math.floor((fanoutFromMs - MIN) / 1000);
+    const after = Math.floor((fanoutFromMs + MIN) / 1000);
+    const charge = PAYMENT_FIXTURE.kept.find((e) => e.type === "charge.succeeded")!;
+    const { id: _chargeId, ...idlessCharge } = charge.data!.object as Record<string, unknown>;
+    const poison = [
+      { ...charge, id: "evt_poison_charge", created: before, data: { object: idlessCharge } },
+      event({ type: "invoice.paid", id: "evt_poison_inv", created: before, data: { object: {} } }),
+      event({ type: "invoice.upcoming", id: "evt_poison_prev", created: before, data: { object: {} } }),
+      { ...event({ type: "customer.updated", created: before }), id: "" },
+      { ...event({ type: "customer.updated", id: "evt_no_type", created: before }), type: "" },
+    ];
+    const fanout = stripeDeltaFanout([
+      ...poison,
+      event({ type: "customer.updated", id: "evt_ok", created: after, data: { object: { id: "cus_ok" } } }),
+    ], { fanoutFromMs });
+    expect(fanout.unparseableReachBackEventTypes).toEqual({
+      "charge.succeeded": 1,
+      "invoice.paid": 1,
+      "invoice.upcoming": 1,
+      "customer.updated": 1,
+      "(no type)": 1,
+    });
+    expect(fanout.evidence.map((row) => row.stripeEventId)).toEqual(["evt_ok"]);
+    expect(fanout.customerIds).toEqual(["cus_ok"]);
+
+    // The SAME shapes inside the normal window still fail the run: there, an unkeyable event is a
+    // change we could silently drop.
+    for (const bad of poison) {
+      expect(() => stripeDeltaFanout([{ ...bad, created: after }], { fanoutFromMs })).toThrow();
+    }
+    // …and one with no usable `created` cannot be placed in either part, so it throws too.
+    expect(() => stripeDeltaFanout([
+      { ...poison[0]!, created: Number.NaN },
+    ], { fanoutFromMs })).toThrow();
   });
 
   it("recovers the fan-out bound of a RESUMED reach-back segment from the unchanged cutoffs", () => {
@@ -1000,7 +1056,13 @@ describe("Stripe request telemetry", () => {
       // NULL, not a zeroed record: "did not reconcile" must stay distinguishable from
       // "reconciled and found nothing" — only the second is evidence for relaxing the cadence.
       reconciliation: null,
+      unparseableReachBackEvents: {},
     });
+
+    telemetry.recordUnparseableReachBackEvents({ "charge.succeeded": 1, "(no type)": 0 });
+    telemetry.recordUnparseableReachBackEvents({ "charge.succeeded": 2, "invoice.paid": 1 });
+    expect(telemetry.snapshot().unparseableReachBackEvents)
+      .toEqual({ "charge.succeeded": 3, "invoice.paid": 1 });
   });
 
   it("keeps a due-but-unapplied reconciliation honest, then stamps the outcome", () => {
@@ -3647,38 +3709,236 @@ describe("Stripe delta lane against real PGlite", () => {
     });
   }, 180_000);
 
-  it("RESETS continuous coverage when the reach-back cannot cover the hole (retention floor)", async () => {
+  it("caps a long outage's reach-back at six hours and RESETS coverage honestly", async () => {
     const workspaceId = `ws_${randomUUID()}`;
     const sourceId = `src_${randomUUID()}`;
     await seedSource(workspaceId, sourceId);
     await seedHealthyWatermark(workspaceId, sourceId);
     const DAY = 24 * 60;
-    // The delta lane last CLOSED a window 29 days ago (full runs kept the snapshot fresh since),
-    // and coverage is claimed from 30 days ago. The stream between -29d and the 28-day safe floor
-    // has aged out of Stripe's retention: that part of the event record is gone for good.
+    // The delta lane last CLOSED a window two days ago; daily full runs kept the snapshot (and the
+    // delta watermark) fresh since, so no snapshot coverage gap fires. Coverage is claimed from
+    // three days ago.
     await db.query(
       `update stripe_sync_watermarks set continuous_coverage_from = $3
         where workspace_id = $1 and source_id = $2`,
-      [workspaceId, sourceId, iso(at(30 * DAY))],
+      [workspaceId, sourceId, iso(at(3 * DAY))],
     );
     await db.query(
       `insert into stripe_event_segments (
          id, workspace_id, source_id, segment_from, segment_to_exclusive, status, closed_at,
          parser_version
        ) values ($1,$2,$3,$4,$5,'closed',$5,'stripe-delta-events-v2')`,
-      [`seg_${randomUUID()}`, workspaceId, sourceId, iso(at(29 * DAY + 20)), iso(at(29 * DAY))],
+      [`seg_${randomUUID()}`, workspaceId, sourceId, iso(at(2 * DAY + 20)), iso(at(2 * DAY))],
+    );
+    const sale = PAYMENT_FIXTURE.kept.find((e) => e.type === "charge.succeeded")!;
+    const stream = [
+      // Older than the cap: never re-polled. The loss is recorded by the reset below.
+      { ...structuredClone(sale), id: "evt_outage_old", created: atS(DAY) },
+      // Inside the cap, before the normal start: recovered as evidence.
+      { ...structuredClone(sale), id: "evt_outage_recent", created: atS(3 * 60) },
+    ];
+
+    const urls: URL[] = [];
+    await runSyncAt(workspaceId, sourceId, CURSOR_END_MS, windowedDeltaRouter({
+      events: stream,
+      onUrl: (url) => urls.push(url),
+    }));
+    const capFrom = Date.parse(SEGMENT_TO) - STRIPE_DELTA_MAX_REACH_BACK_MS;
+    expect(urls.find((url) => url.pathname === "/v1/events")?.searchParams.get("created[gte]"))
+      .toBe(String(capFrom / 1000));
+    const evidence = await db.query<{ stripe_event_id: string }>(
+      `select stripe_event_id from stripe_event_evidence where workspace_id = $1 and source_id = $2`,
+      [workspaceId, sourceId],
+    );
+    expect(evidence.map((row) => row.stripe_event_id)).toEqual(["evt_outage_recent"]);
+    // Continuity restarts at the capped window: it may not be claimed across the unpolled stretch.
+    const watermark = await readWatermark(workspaceId, sourceId);
+    expect(new Date(watermark!.continuous_coverage_from).toISOString()).toBe(iso(capFrom));
+  }, 180_000);
+
+  it("a malformed event in the reach-back part no longer blocks the lane: counted, skipped, recovered", async () => {
+    // The reviewer's probe, as a real test. Before B1 the post-full delta re-read the poison from
+    // the same last-closed end on every tick and failed until it aged out of the reach-back.
+    const workspaceId = `ws_${randomUUID()}`;
+    const sourceId = `src_${randomUUID()}`;
+    await seedSource(workspaceId, sourceId);
+    const sale = PAYMENT_FIXTURE.kept.find((e) => e.type === "charge.succeeded")!;
+    const { id: _id, ...idless } = sale.data!.object as Record<string, unknown>;
+    const stream = [
+      { ...structuredClone(sale), id: "evt_poison", created: atS(45), data: { object: idless } },
+      { ...structuredClone(sale), id: "evt_neighbour_sale", created: atS(44) },
+    ];
+
+    await runSyncAt(workspaceId, sourceId, at(60), fullRouter()); // T0: bootstrap
+    await runSyncAt(workspaceId, sourceId, at(45), windowedDeltaRouter({ events: stream })); // T1: closes at -50m
+    // T2: the poison is in the NORMAL window, so the run fails, exactly as before.
+    await expect(runSyncAt(workspaceId, sourceId, at(30), windowedDeltaRouter({ events: stream })))
+      .rejects.toThrow(/carried no object id/);
+    // T3: the daily FULL run.
+    await forceFullDue(workspaceId, sourceId, at(15));
+    expect(await laneAt(workspaceId, sourceId, at(15))).toMatchObject({ lane: "full" });
+    await runSyncAt(workspaceId, sourceId, at(15), fullRouter());
+    // T4: DELTA reaches back to -55m over the poison — now in the reach-back part — and recovers.
+    expect(await laneAt(workspaceId, sourceId, CURSOR_END_MS)).toMatchObject({ lane: "delta" });
+    const syncRequest = { ...request(workspaceId, sourceId), windowUntil: CURSOR_END };
+    await withMockStripe(
+      windowedDeltaRouter({ events: stream }),
+      () => connectorFor("stripe").sync(db, syncRequest),
     );
 
+    const watermark = await readWatermark(workspaceId, sourceId);
+    expect(new Date(watermark!.delta_data_as_of).toISOString()).toBe(SEGMENT_TO);
+    const evidence = await db.query<{ stripe_event_id: string }>(
+      `select stripe_event_id from stripe_event_evidence where workspace_id = $1 and source_id = $2`,
+      [workspaceId, sourceId],
+    );
+    // The well-formed neighbour in the old hole is recovered; the poison is not invented.
+    expect(evidence.map((row) => row.stripe_event_id)).toEqual(["evt_neighbour_sale"]);
+    const runs = await db.query<{ status: string; request_telemetry: Record<string, unknown> }>(
+      "select status, request_telemetry from sync_runs where id = $1",
+      [syncRequest.syncRunId],
+    );
+    expect(runs[0]?.status).toBe("succeeded");
+    expect(runs[0]?.request_telemetry.unparseableReachBackEvents).toEqual({ "charge.succeeded": 1 });
+  }, 180_000);
+
+  it("never reaches back across a RECORDED coverage gap (the continuous_coverage_from floor)", async () => {
+    const workspaceId = `ws_${randomUUID()}`;
+    const sourceId = `src_${randomUUID()}`;
+    await seedSource(workspaceId, sourceId);
+    // A coverage-gap full run reset continuity to -20m (seeded as the watermark's coverage start);
+    // the last delta segment that ever CLOSED ended at -60m, BEFORE that recorded gap.
+    await seedHealthyWatermark(workspaceId, sourceId);
+    await db.query(
+      `insert into stripe_event_segments (
+         id, workspace_id, source_id, segment_from, segment_to_exclusive, status, closed_at,
+         parser_version
+       ) values ($1,$2,$3,$4,$5,'closed',$5,'stripe-delta-events-v2')`,
+      [`seg_${randomUUID()}`, workspaceId, sourceId, iso(at(80)), iso(at(60))],
+    );
     const urls: URL[] = [];
     await runSyncAt(workspaceId, sourceId, CURSOR_END_MS, windowedDeltaRouter({
       events: [],
       onUrl: (url) => urls.push(url),
     }));
-    const safeFloor = Date.parse(SEGMENT_TO) - 28 * DAY * MINUTE_MS;
+    // The normal window, not -65m: re-polling across a recorded gap would pretend it never happened.
     expect(urls.find((url) => url.pathname === "/v1/events")?.searchParams.get("created[gte]"))
-      .toBe(String(safeFloor / 1000));
-    // Continuity restarts at the window: it may not be claimed across the aged-out stretch.
+      .toBe(String(atS(25)));
     const watermark = await readWatermark(workspaceId, sourceId);
-    expect(new Date(watermark!.continuous_coverage_from).toISOString()).toBe(iso(safeFloor));
+    expect(new Date(watermark!.continuous_coverage_from).toISOString()).toBe(iso(at(20)));
+  }, 180_000);
+
+  it("resets coverage on the REFUSAL path too when the window could not cover the hole", async () => {
+    const workspaceId = `ws_${randomUUID()}`;
+    const sourceId = `src_${randomUUID()}`;
+    await seedSource(workspaceId, sourceId);
+    await seedHealthyWatermark(workspaceId, sourceId);
+    const DAY = 24 * 60;
+    await db.query(
+      `update stripe_sync_watermarks set continuous_coverage_from = $3
+        where workspace_id = $1 and source_id = $2`,
+      [workspaceId, sourceId, iso(at(3 * DAY))],
+    );
+    await db.query(
+      `insert into stripe_event_segments (
+         id, workspace_id, source_id, segment_from, segment_to_exclusive, status, closed_at,
+         parser_version
+       ) values ($1,$2,$3,$4,$5,'closed',$5,'stripe-delta-events-v2')`,
+      [`seg_${randomUUID()}`, workspaceId, sourceId, iso(at(2 * DAY + 20)), iso(at(2 * DAY))],
+    );
+    const burst = Array.from({ length: STRIPE_DELTA_MAX_REFETCH_PER_RUN + 1 }, (_, index) => ({
+      id: `evt_refuse_${index}`,
+      type: "customer.updated",
+      created: atS(10),
+      api_version: "2025-06-30.basil",
+      livemode: true,
+      data: { object: { id: `cus_refuse_${index}`, metadata: {} } },
+    }));
+    await runSyncAt(workspaceId, sourceId, CURSOR_END_MS, windowedDeltaRouter({ events: burst }));
+    const watermark = await readWatermark(workspaceId, sourceId);
+    expect(watermark?.pending_full_refresh_reason).toBe("delta_fanout_exceeded");
+    const capFrom = Date.parse(SEGMENT_TO) - STRIPE_DELTA_MAX_REACH_BACK_MS;
+    expect(new Date(watermark!.continuous_coverage_from).toISOString()).toBe(iso(capFrom));
+  }, 180_000);
+
+  it("walks a MULTI-PAGE reach-back across runs, never re-fetching hole events on resumed pages", async () => {
+    const workspaceId = `ws_${randomUUID()}`;
+    const sourceId = `src_${randomUUID()}`;
+    await seedSource(workspaceId, sourceId);
+
+    // Twelve subscription edits in the full run's hole (none retrievable: a re-fetch would throw)
+    // plus one in the normal window. At 2 events per page that is 7 pages, more than one run's 5.
+    const holeEvents = Array.from({ length: 12 }, (_, index) => {
+      const ev = subscriptionEvent(`evt_page_hole_${String(index).padStart(2, "0")}`,
+        subscriptionApi({ id: `sub_hole_${index}` }), 0);
+      ev.created = atS(54) + index * 60;
+      return ev;
+    });
+    const normal = subscriptionEvent("evt_page_normal", subscriptionApi(), 0);
+    normal.created = atS(10);
+    const stream = [...holeEvents, normal];
+
+    const retrieved: string[] = [];
+    const eventCalls: URL[] = [];
+    const pagedRouter = (url: URL) => {
+      if (url.pathname === "/v1/events") {
+        eventCalls.push(url);
+        const gte = Number(url.searchParams.get("created[gte]"));
+        const lt = Number(url.searchParams.get("created[lt]"));
+        // Newest first, as Stripe lists, two per page, `starting_after` walking older.
+        const inWindow = stream.filter((e) => e.created >= gte && e.created < lt)
+          .sort((a, b) => b.created - a.created || (a.id < b.id ? 1 : -1));
+        const after = url.searchParams.get("starting_after");
+        const startIndex = after ? inWindow.findIndex((e) => e.id === after) + 1 : 0;
+        const page = inWindow.slice(startIndex, startIndex + 2);
+        return { data: page, has_more: startIndex + 2 < inWindow.length };
+      }
+      if (url.pathname.startsWith("/v1/subscriptions/")) retrieved.push(url.pathname);
+      return deltaRouter({ events: [], subscriptions: { sub_delta: subscriptionApi() } })(url);
+    };
+
+    await runSyncAt(workspaceId, sourceId, at(60), fullRouter()); // T0: bootstrap
+    await runSyncAt(workspaceId, sourceId, at(45), windowedDeltaRouter({ events: [] })); // T1: closes at -50m
+    await forceFullDue(workspaceId, sourceId, at(30));
+    await runSyncAt(workspaceId, sourceId, at(30), fullRouter()); // T2: full, bound -35m
+
+    // T3: reach-back window [-55m, -5m). Five pages, stops mid-window: an OPEN segment.
+    await runSyncAt(workspaceId, sourceId, CURSOR_END_MS, pagedRouter);
+    expect(eventCalls).toHaveLength(5);
+    expect(eventCalls[0]!.searchParams.get("created[gte]")).toBe(String(atS(55)));
+    const open = await db.query<{ status: string; pagination_cursor: string | null }>(
+      `select status, pagination_cursor from stripe_event_segments
+        where workspace_id = $1 and source_id = $2 and segment_from = $3`,
+      [workspaceId, sourceId, iso(at(55))],
+    );
+    expect(open[0]?.status).toBe("open");
+    // Only the normal-window edit fanned out.
+    expect(retrieved).toEqual(["/v1/subscriptions/sub_delta"]);
+
+    // T3b: the RESUMED segment walks the older pages — all hole events — plus one top-up relist of
+    // the first page. The fan-out bound is recovered from the unchanged cutoffs, so no hole
+    // subscription is ever re-fetched (each would throw).
+    eventCalls.length = 0;
+    retrieved.length = 0;
+    await runSyncAt(workspaceId, sourceId, CURSOR_END_MS + 15 * MINUTE_MS, pagedRouter);
+    expect(eventCalls[0]!.searchParams.get("starting_after")).toBe(open[0]!.pagination_cursor);
+    expect(eventCalls[0]!.searchParams.get("created[gte]")).toBe(String(atS(55)));
+    expect(retrieved.every((path) => path === "/v1/subscriptions/sub_delta")).toBe(true);
+
+    const segment = await db.query<{ status: string; event_count: number }>(
+      `select status, event_count from stripe_event_segments
+        where workspace_id = $1 and source_id = $2 and segment_from = $3`,
+      [workspaceId, sourceId, iso(at(55))],
+    );
+    expect(segment[0]?.status).toBe("closed");
+    const evidence = await db.query<{ count: string }>(
+      `select count(*)::text as count from stripe_event_evidence
+        where workspace_id = $1 and source_id = $2`,
+      [workspaceId, sourceId],
+    );
+    expect(evidence[0]?.count).toBe(String(stream.length));
+    const watermark = await readWatermark(workspaceId, sourceId);
+    expect(new Date(watermark!.delta_data_as_of).toISOString()).toBe(iso(at(5)));
+    expect(watermark?.pending_full_refresh_reason).toBeNull();
   }, 180_000);
 });

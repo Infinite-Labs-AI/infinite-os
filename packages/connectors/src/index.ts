@@ -1903,8 +1903,13 @@ async function stripeExtractDelta(
     openSegment,
     reachBackToMs,
   });
-  // A window that still starts after the observed tail (the reach-back was clamped by retention)
-  // leaves a hole in the event record, so continuity restarts at this window.
+  // A window that still starts after the observed tail (the reach-back was clamped by its 6-hour
+  // cap or by retention) leaves a hole in the event record, so continuity restarts at this window.
+  //
+  // The reset is written even when this segment ends INCOMPLETE and is later superseded by a full
+  // run without ever closing. That stamp is harmless: its only reader is the reach-back floor
+  // above (a later window never reaches back across it, which is the conservative direction), and
+  // coverage for any reader is the union of CLOSED segments, never this column.
   const resetContinuousCoverage = stripeDeltaLeavesEventHole({
     segmentFromMs: segment.segmentFromMs,
     lastClosedSegmentEndMs,
@@ -1952,6 +1957,7 @@ async function stripeExtractDelta(
   telemetry?.recordEventsObserved(events.length);
 
   const fanout = stripeDeltaFanout(events, { fanoutFromMs: segment.fanoutFromMs });
+  telemetry?.recordUnparseableReachBackEvents(fanout.unparseableReachBackEventTypes);
   const targets = await stripeDeltaResolveRefetchTargets(db, request, fanout);
 
   // REFETCH BUDGET. One `price.*`/`coupon.*` edit fans out through the LOCAL reverse index to every
