@@ -1895,7 +1895,7 @@ async function stripeExtractDelta(
 
   const eventParams = {
     limit: "100",
-    // DELIBERATELY UNFILTERED. Stripe caps `types[]` at 20 entries and our relevant set is 33
+    // DELIBERATELY UNFILTERED. Stripe caps `types[]` at 20 entries and our relevant set is 45
     // (see STRIPE_DELTA_EVENT_PREFIXES), so a filtered poll would need multiple requests
     // against the very read allowance this lane exists to protect. Filter locally instead.
     "created[gte]": String(segment.segmentFromMs / 1_000),

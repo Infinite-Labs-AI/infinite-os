@@ -1,7 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 
 import { encryptCredentialPayload } from "@infinite-os/core";
@@ -25,6 +26,7 @@ import {
   STRIPE_EVENT_SAFETY_LAG_MS,
   STRIPE_FULL_REFRESH_INTERVAL_MS,
   STRIPE_INVOICE_PREVIEW_OBJECT_KIND,
+  STRIPE_PAYMENT_EVIDENCE_EVENT_TYPES,
   StripeRequestTelemetry,
   planStripeDeltaSegment,
   selectStripeSyncLane,
@@ -33,10 +35,187 @@ import {
   stripeDeltaMergeEventPages,
   stripeEndpointClass,
   stripeEventObjectKind,
+  stripeMinimisePaymentEvidence,
+  stripePaymentEvidenceKind,
   type StripeEventApi,
 } from "./stripe-delta.js";
 
 const TEST_ENCRYPTION_KEY = "stripe-delta-test-encryption-key";
+
+/**
+ * Full-shape Stripe payment events, sensitive fields included ON PURPOSE (see the fixture's
+ * `_comment`). `kept` is one payment story; `ignored` is same-family noise that must stay dropped.
+ */
+const PAYMENT_FIXTURE = JSON.parse(readFileSync(
+  fileURLToPath(new URL("./fixtures/stripe-payment-events.json", import.meta.url)),
+  "utf8",
+)) as { kept: StripeEventApi[]; ignored: StripeEventApi[] };
+
+/**
+ * EXACTLY what each kept fixture event is stored as — the minimisation contract, per event. Any
+ * field added to an allowlist has to be added here too, on purpose.
+ */
+const EXPECTED_PAYMENT_EVIDENCE: Record<string, {
+  eventType: string;
+  objectKind: string;
+  objectExternalId: string;
+  payload: Record<string, unknown>;
+  previousAttributes: Record<string, unknown> | null;
+}> = {
+  evt_3PayFixtureSucceeded01: {
+    eventType: "payment_intent.succeeded",
+    objectKind: "payment_intent",
+    objectExternalId: "pi_3PayFixtureA0001",
+    payload: {
+      id: "pi_3PayFixtureA0001", object: "payment_intent", amount: 4900, amount_received: 4900,
+      currency: "usd", status: "succeeded", created: 1785843880, livemode: true,
+      customer: "cus_PayFixtureBuyer01", latest_charge: "ch_3PayFixtureA0001",
+      last_payment_error: null,
+    },
+    previousAttributes: null,
+  },
+  evt_3PayFixtureChargeOk01: {
+    eventType: "charge.succeeded",
+    objectKind: "charge",
+    objectExternalId: "ch_3PayFixtureA0001",
+    payload: {
+      id: "ch_3PayFixtureA0001", object: "charge", amount: 4900, amount_refunded: 0,
+      currency: "usd", status: "succeeded", refunded: false, created: 1785843881, livemode: true,
+      customer: "cus_PayFixtureBuyer01", payment_intent: "pi_3PayFixtureA0001",
+    },
+    previousAttributes: null,
+  },
+  evt_1PayFixtureCheckout01: {
+    eventType: "checkout.session.completed",
+    objectKind: "checkout_session",
+    objectExternalId: "cs_live_PayFixtureSessionA0001",
+    payload: {
+      id: "cs_live_PayFixtureSessionA0001", object: "checkout.session", amount_total: 4900,
+      currency: "usd", status: "complete", payment_status: "paid", mode: "payment",
+      created: 1785843700, livemode: true, customer: "cus_PayFixtureBuyer01",
+      payment_intent: "pi_3PayFixtureA0001", subscription: null, invoice: null,
+    },
+    previousAttributes: null,
+  },
+  evt_3PayFixtureRefundNew01: {
+    eventType: "refund.created",
+    objectKind: "refund",
+    objectExternalId: "re_3PayFixtureA0001",
+    payload: {
+      id: "re_3PayFixtureA0001", object: "refund", amount: 2000, currency: "usd",
+      status: "succeeded", reason: "requested_by_customer", created: 1785844200,
+      charge: "ch_3PayFixtureA0001", payment_intent: "pi_3PayFixtureA0001",
+    },
+    previousAttributes: null,
+  },
+  evt_3PayFixtureChargeRefunded01: {
+    eventType: "charge.refunded",
+    objectKind: "charge",
+    objectExternalId: "ch_3PayFixtureA0001",
+    payload: {
+      id: "ch_3PayFixtureA0001", object: "charge", amount: 4900, amount_refunded: 2000,
+      currency: "usd", status: "succeeded", refunded: false, created: 1785843881, livemode: true,
+      customer: "cus_PayFixtureBuyer01", payment_intent: "pi_3PayFixtureA0001",
+    },
+    // `receipt_number`/`receipt_url` changed too; neither is kept.
+    previousAttributes: { amount_refunded: 0 },
+  },
+  evt_3PayFixtureRefundUpd01: {
+    eventType: "refund.updated",
+    objectKind: "refund",
+    objectExternalId: "re_3PayFixtureA0001",
+    payload: {
+      id: "re_3PayFixtureA0001", object: "refund", amount: 2000, currency: "usd",
+      status: "succeeded", reason: "requested_by_customer", created: 1785844200,
+      charge: "ch_3PayFixtureA0001", payment_intent: "pi_3PayFixtureA0001",
+    },
+    // Stripe DID send previous attributes (the card reference arrived); none is kept, and `{}`
+    // stays distinguishable from "no previous attributes at all" (null).
+    previousAttributes: {},
+  },
+  evt_1PayFixtureDisputeNew01: {
+    eventType: "charge.dispute.created",
+    objectKind: "dispute",
+    objectExternalId: "dp_1PayFixtureB0001",
+    payload: {
+      id: "dp_1PayFixtureB0001", object: "dispute", amount: 12000, currency: "usd",
+      status: "needs_response", reason: "fraudulent", created: 1785844300, livemode: true,
+      charge: "ch_3PayFixtureB0001", payment_intent: "pi_3PayFixtureB0001",
+      evidence_details: { due_by: 1786617599 },
+    },
+    previousAttributes: null,
+  },
+  evt_1PayFixtureDisputeFunds01: {
+    eventType: "charge.dispute.funds_withdrawn",
+    objectKind: "dispute",
+    objectExternalId: "dp_1PayFixtureB0001",
+    payload: {
+      id: "dp_1PayFixtureB0001", object: "dispute", amount: 12000, currency: "usd",
+      status: "needs_response", reason: "fraudulent", created: 1785844300, livemode: true,
+      charge: "ch_3PayFixtureB0001", payment_intent: "pi_3PayFixtureB0001",
+      evidence_details: { due_by: 1786617599 },
+    },
+    previousAttributes: {},
+  },
+  evt_1PayFixtureDisputeUpd01: {
+    eventType: "charge.dispute.updated",
+    objectKind: "dispute",
+    objectExternalId: "dp_1PayFixtureB0001",
+    payload: {
+      id: "dp_1PayFixtureB0001", object: "dispute", amount: 12000, currency: "usd",
+      status: "under_review", reason: "fraudulent", created: 1785844300, livemode: true,
+      charge: "ch_3PayFixtureB0001", payment_intent: "pi_3PayFixtureB0001",
+      evidence_details: { due_by: 1786617599 },
+    },
+    // The previous `evidence` block and evidence counters are dropped; the status change stays.
+    previousAttributes: { status: "needs_response" },
+  },
+  evt_1PayFixtureDisputeClosed01: {
+    eventType: "charge.dispute.closed",
+    objectKind: "dispute",
+    objectExternalId: "dp_1PayFixtureB0001",
+    payload: {
+      id: "dp_1PayFixtureB0001", object: "dispute", amount: 12000, currency: "usd",
+      status: "won", reason: "fraudulent", created: 1785844300, livemode: true,
+      charge: "ch_3PayFixtureB0001", payment_intent: "pi_3PayFixtureB0001",
+      evidence_details: { due_by: 1786617599 },
+    },
+    previousAttributes: { status: "under_review" },
+  },
+  evt_3PayFixtureFailed01: {
+    eventType: "payment_intent.payment_failed",
+    objectKind: "payment_intent",
+    objectExternalId: "pi_3PayFixtureC0001",
+    payload: {
+      id: "pi_3PayFixtureC0001", object: "payment_intent", amount: 9900, amount_received: 0,
+      currency: "eur", status: "requires_payment_method", created: 1785844430, livemode: true,
+      customer: "cus_PayFixtureBuyer02", latest_charge: "ch_3PayFixtureC0001",
+      last_payment_error: { code: "card_declined", decline_code: "insufficient_funds", type: "card_error" },
+    },
+    previousAttributes: null,
+  },
+};
+
+/**
+ * Every sensitive value the fixture carries, as patterns over the SERIALISED stored evidence. A hit
+ * on any of them means a card detail, a person, an address, a secret or merchant free text leaked.
+ */
+const PAYMENT_SENSITIVE_PATTERNS: RegExp[] = [
+  /@/, // any email
+  /4242|0341/, // card last4
+  /Fingerprint/i,
+  /Example Street|Sample Road|Exampleton|Sampleville|94000|10115/,
+  /Jordan|Alex Sample/,
+  /\+1555/, // phone
+  /secret/i, // payment intent client_secret
+  /203\.0\.113/, // purchase IP
+  /receipt/i,
+  /metadata|ord_7781|ord_6410|T-5521/,
+  /description|Order 7781|Renewal for/,
+  /billing_details|customer_details|shipping|"evidence"/,
+  /74987654321098765432109/, // refund card reference (ARN)
+  /pm_1PayFixture/, // payment method ids (the object carrying billing details)
+];
 
 // ---------------------------------------------------------------------------------------------
 // Lane selection (pure) — the decision table the scheduler relies on.
@@ -331,8 +510,10 @@ describe("Stripe delta event fan-out", () => {
       event({ type: "price.updated", id: "evt_6", data: { object: { id: "price_1" } } }),
       event({ type: "coupon.updated", id: "evt_7", data: { object: { id: "coupon_1" } } }),
       event({ type: "product.updated", id: "evt_8", data: { object: { id: "prod_1" } } }),
-      event({ type: "charge.refunded", id: "evt_9", data: { object: { id: "ch_1" } } }),
-      event({ type: "charge.refunded", id: "evt_10", data: { object: { id: "ch_2" } } }),
+      // Noise: `charge.updated` is a transitional charge type that is neither re-fetched nor kept
+      // as payment evidence (`charge.refunded` used to stand in here; it is now kept).
+      event({ type: "charge.updated", id: "evt_9", data: { object: { id: "ch_1" } } }),
+      event({ type: "charge.updated", id: "evt_10", data: { object: { id: "ch_2" } } }),
     ]);
 
     expect(fanout.subscriptionIds).toEqual(["sub_1", "sub_2"]);
@@ -342,7 +523,8 @@ describe("Stripe delta event fan-out", () => {
     expect(fanout.priceIds).toEqual(["price_1"]);
     expect(fanout.couponIds).toEqual(["coupon_1"]);
     expect(fanout.productIds).toEqual(["prod_1"]);
-    expect(fanout.ignoredEventTypes).toEqual({ "charge.refunded": 2 });
+    expect(fanout.ignoredEventTypes).toEqual({ "charge.updated": 2 });
+    expect(fanout.paymentEvidenceEventTypes).toEqual({});
     expect(fanout.evidence).toHaveLength(8);
     expect(fanout.evidence[0]).toMatchObject({
       stripeEventId: "evt_1",
@@ -449,6 +631,175 @@ describe("Stripe delta event fan-out", () => {
     ]);
     expect(fanout.invoiceIds).toEqual(["in_1", "in_2", "in_3"]);
     expect(fanout.previewEventTypes).toEqual({});
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// PAYMENT EVIDENCE — charges, refunds, disputes, checkouts, payment intents. Evidence only: kept
+// with a minimised payload, never fanned out, never re-fetched.
+// ---------------------------------------------------------------------------------------------
+
+describe("Stripe payment evidence (evidence only, minimised)", () => {
+  it("classifies exactly the kept payment types, and never as a re-fetch family", () => {
+    const kept: Array<[string, string]> = [
+      ["charge.succeeded", "charge"],
+      ["charge.refunded", "charge"],
+      ["refund.created", "refund"],
+      ["refund.updated", "refund"],
+      ["charge.dispute.created", "dispute"],
+      ["charge.dispute.updated", "dispute"],
+      ["charge.dispute.closed", "dispute"],
+      ["charge.dispute.funds_withdrawn", "dispute"],
+      ["charge.dispute.funds_reinstated", "dispute"],
+      ["checkout.session.completed", "checkout_session"],
+      ["payment_intent.succeeded", "payment_intent"],
+      ["payment_intent.payment_failed", "payment_intent"],
+    ];
+    for (const [type, kind] of kept) {
+      expect(stripePaymentEvidenceKind(type)).toBe(kind);
+      // Not an entity family: nothing canonical is ever re-fetched from a payment event.
+      expect(stripeEventObjectKind(type)).toBeNull();
+    }
+    for (const type of [
+      "charge.updated", "charge.pending", "charge.failed", "charge.captured", "charge.refund.updated",
+      "payment_intent.created", "payment_intent.processing", "checkout.session.expired",
+      "checkout.session.async_payment_succeeded", "refund.failed", "payment_method.attached",
+      "balance.available", "invoice.paid", "customer.subscription.updated",
+    ]) {
+      expect(stripePaymentEvidenceKind(type)).toBeNull();
+    }
+    expect(STRIPE_PAYMENT_EVIDENCE_EVENT_TYPES.size).toBe(7);
+  });
+
+  it("keeps every fixture payment event as minimised evidence and fans NOTHING out", () => {
+    const fanout = stripeDeltaFanout([...PAYMENT_FIXTURE.kept, ...PAYMENT_FIXTURE.ignored]);
+
+    // Nothing canonical is touched: no re-fetch target of any family.
+    expect(fanout.invoiceIds).toEqual([]);
+    expect(fanout.subscriptionIds).toEqual([]);
+    expect(fanout.customerIds).toEqual([]);
+    expect(fanout.priceIds).toEqual([]);
+    expect(fanout.couponIds).toEqual([]);
+    expect(fanout.productIds).toEqual([]);
+    expect(fanout.revalueCustomerIds).toEqual([]);
+    expect(fanout.previewEventTypes).toEqual({});
+
+    // Kept types are no longer counted as ignored; same-family noise still is.
+    expect(fanout.paymentEvidenceEventTypes).toEqual({
+      "payment_intent.succeeded": 1,
+      "charge.succeeded": 1,
+      "checkout.session.completed": 1,
+      "refund.created": 1,
+      "charge.refunded": 1,
+      "refund.updated": 1,
+      "charge.dispute.created": 1,
+      "charge.dispute.funds_withdrawn": 1,
+      "charge.dispute.updated": 1,
+      "charge.dispute.closed": 1,
+      "payment_intent.payment_failed": 1,
+    });
+    expect(fanout.ignoredEventTypes).toEqual({
+      "payment_intent.created": 1,
+      "charge.updated": 1,
+      "charge.refund.updated": 1,
+      "checkout.session.expired": 1,
+      "payment_method.attached": 1,
+      "balance.available": 1,
+    });
+
+    // Exactly the minimised payload, per event, in stream order.
+    expect(fanout.evidence.map((row) => row.stripeEventId))
+      .toEqual(PAYMENT_FIXTURE.kept.map((event) => event.id));
+    for (const row of fanout.evidence) {
+      const expected = EXPECTED_PAYMENT_EVIDENCE[row.stripeEventId];
+      expect(expected, row.stripeEventId).toBeDefined();
+      expect({
+        eventType: row.eventType,
+        objectKind: row.objectKind,
+        objectExternalId: row.objectExternalId,
+        payload: row.payload,
+        previousAttributes: row.previousAttributes,
+      }, row.stripeEventId).toEqual(expected);
+      expect(row.apiVersion).toBe("2025-06-30.basil");
+      expect(row.livemode).toBe(true);
+    }
+  });
+
+  it("stores no card detail, person, address, secret or merchant free text", () => {
+    // Guard the guard: every pattern DOES match the raw fixture, so a miss below is meaningful.
+    const raw = JSON.stringify(PAYMENT_FIXTURE.kept);
+    for (const pattern of PAYMENT_SENSITIVE_PATTERNS) expect(raw, String(pattern)).toMatch(pattern);
+
+    const stored = JSON.stringify(stripeDeltaFanout(PAYMENT_FIXTURE.kept).evidence
+      .map((row) => [row.payload, row.previousAttributes]));
+    for (const pattern of PAYMENT_SENSITIVE_PATTERNS) {
+      expect(stored, String(pattern)).not.toMatch(pattern);
+    }
+  });
+
+  it("reduces an EXPANDED reference to its id instead of storing the expanded object", () => {
+    // Stripe never expands references inside an event, but a projection that copied a reference
+    // verbatim would store a whole customer (email and address included) the day one arrived.
+    const charge = PAYMENT_FIXTURE.kept.find((event) => event.type === "charge.succeeded")!;
+    const object = charge.data!.object as Record<string, unknown>;
+    const minimised = stripeMinimisePaymentEvidence("charge", {
+      ...object,
+      customer: {
+        id: "cus_PayFixtureBuyer01",
+        object: "customer",
+        email: "buyer@example.test",
+        address: { line1: "1 Example Street" },
+      },
+      payment_intent: { id: "pi_3PayFixtureA0001", object: "payment_intent", client_secret: "x_secret_y" },
+    });
+    expect(minimised.customer).toBe("cus_PayFixtureBuyer01");
+    expect(minimised.payment_intent).toBe("pi_3PayFixtureA0001");
+    expect(JSON.stringify(minimised)).not.toMatch(/@|Example Street|secret/);
+  });
+
+  it("copies only JSON SCALARS for scalar fields: an object, array or non-finite value is dropped", () => {
+    // Every allowlisted scalar is a string, number, boolean or null in Stripe's shapes today. If one
+    // ever arrived as an object it could carry anything, so the projection must not copy it whole.
+    const minimised = stripeMinimisePaymentEvidence("dispute", {
+      id: "dp_shape",
+      object: "dispute",
+      status: { value: "needs_response", email: "buyer@example.test" },
+      reason: ["fraudulent", "buyer@example.test"],
+      amount: Number.NaN,
+      created: Number.POSITIVE_INFINITY,
+      currency: "usd",
+      livemode: false,
+      evidence_details: { due_by: { at: 1786617599, note: "buyer@example.test" } },
+    });
+    expect(minimised).toEqual({ id: "dp_shape", object: "dispute", currency: "usd", livemode: false });
+    // null is a scalar and is kept as an honest "Stripe said null".
+    expect(stripeMinimisePaymentEvidence("refund", { id: "re_n", reason: null }))
+      .toEqual({ id: "re_n", reason: null });
+  });
+
+  it("never invents a value: an absent amount stays absent, not 0", () => {
+    const minimised = stripeMinimisePaymentEvidence("refund", {
+      id: "re_partial",
+      object: "refund",
+      currency: "usd",
+    });
+    expect(minimised).toEqual({ id: "re_partial", object: "refund", currency: "usd" });
+    expect(Object.hasOwn(minimised, "amount")).toBe(false);
+  });
+
+  it("fails closed on a payment event that cannot be keyed to an object", () => {
+    const succeeded = PAYMENT_FIXTURE.kept.find((event) => event.type === "charge.succeeded")!;
+    const { id: _id, ...idless } = succeeded.data!.object as Record<string, unknown>;
+    expect(() => stripeDeltaFanout([
+      { ...succeeded, id: "evt_idless_charge", data: { object: idless } },
+    ])).toThrow(/carried no object id/);
+  });
+
+  it("de-duplicates a re-delivered payment event inside one window", () => {
+    const refund = PAYMENT_FIXTURE.kept.find((event) => event.type === "refund.created")!;
+    const fanout = stripeDeltaFanout([refund, structuredClone(refund)]);
+    expect(fanout.evidence).toHaveLength(1);
+    expect(fanout.paymentEvidenceEventTypes).toEqual({ "refund.created": 1 });
   });
 });
 
@@ -2537,5 +2888,377 @@ describe("Stripe delta lane against real PGlite", () => {
       driftCount: 0,
       healedByLoadCount: 0,
     });
+  }, 180_000);
+
+  // -------------------------------------------------------------------------------------------
+  // PAYMENT EVIDENCE through a real `sync()`. The pure tests above pin the projection; these pin
+  // what actually lands in the database, that nothing canonical moves, and that replays are inert.
+  // -------------------------------------------------------------------------------------------
+
+  /** A paid invoice, so the canonical invoice tables are non-empty before the payment window. */
+  function paidInvoiceApi(): Record<string, unknown> {
+    const at = Math.floor(Date.parse(SEGMENT_TO) / 1000) - 2 * 24 * 60 * 60;
+    return {
+      id: "in_pay_seed",
+      customer: { id: "cus_delta", email: "founder@example.test", metadata: {} },
+      subscription: "sub_delta",
+      status: "paid",
+      currency: "usd",
+      amount_paid: 8000,
+      amount_due: 8000,
+      created: at,
+      status_transitions: { paid_at: at },
+      lines: { has_more: false, data: [] },
+    };
+  }
+
+  /**
+   * One hash per BASE TABLE carrying `workspace_id`, over every row of this workspace — ids,
+   * timestamps and all, so a rewrite with identical content still counts as a change.
+   */
+  async function workspaceTableHashes(workspaceId: string): Promise<Record<string, string>> {
+    const tables = await db.query<{ table_name: string }>(
+      `select c.table_name
+         from information_schema.columns c
+         join information_schema.tables t
+           on t.table_schema = c.table_schema and t.table_name = c.table_name
+        where c.table_schema = current_schema() and c.column_name = 'workspace_id'
+          and t.table_type = 'BASE TABLE'
+        order by c.table_name`,
+    );
+    const hashes: Record<string, string> = {};
+    for (const { table_name: table } of tables) {
+      const rows = await db.query<{ n: number; h: string }>(
+        `select count(*)::int as n,
+                md5(coalesce(string_agg(to_jsonb(t)::text, '|' order by to_jsonb(t)::text), '')) as h
+           from "${table}" t where workspace_id = $1`,
+        [workspaceId],
+      );
+      hashes[table] = `${rows[0]?.n}:${rows[0]?.h}`;
+    }
+    return hashes;
+  }
+
+  function changedTables(before: Record<string, string>, after: Record<string, string>): string[] {
+    return Object.keys(after).filter((table) => before[table] !== after[table]).sort();
+  }
+
+  /** Canonical billing state: the tables subscriptions, invoices and MRR are read from. */
+  const CANONICAL_STRIPE_TABLES = [
+    "stripe_customers",
+    "stripe_invoices",
+    "stripe_invoice_lines",
+    "stripe_subscriptions",
+    "stripe_subscription_items",
+    "stripe_subscription_discounts",
+    "stripe_prices",
+    "stripe_products",
+    "stripe_customer_mrr_states",
+    "stripe_customer_mrr_movements",
+    "stripe_subscription_lifecycle_events",
+    "stripe_trial_spells",
+  ];
+
+  /**
+   * Canonical VALUE hashes. Whole rows for every table except `stripe_customer_mrr_states`, whose
+   * `last_complete_observed_at`/`updated_at` are re-stamped by EVERY delta CLOSE as an observation
+   * freshness mark (the zero-event control run moves them too); its values are what MRR reads.
+   */
+  async function canonicalValueHashes(workspaceId: string): Promise<Record<string, string>> {
+    const whole = await workspaceTableHashes(workspaceId);
+    const hashes: Record<string, string> = {};
+    for (const table of CANONICAL_STRIPE_TABLES) hashes[table] = whole[table]!;
+    const states = await db.query<{ n: number; h: string }>(
+      `select count(*)::int as n,
+              md5(coalesce(string_agg(v::text, '|' order by v::text), '')) as h
+         from (
+           select jsonb_build_array(stripe_customer_id, currency, monthly_amount_minor,
+                                    has_ever_positive, evidence_hash, last_movement_id,
+                                    classifier_version) as v
+             from stripe_customer_mrr_states where workspace_id = $1
+         ) s`,
+      [workspaceId],
+    );
+    hashes.stripe_customer_mrr_states = `${states[0]?.n}:${states[0]?.h}`;
+    return hashes;
+  }
+
+  /** Full import (canonical state lands), then a healthy watermark so the next run is DELTA. */
+  async function seedImportedSource(workspaceId: string, sourceId: string): Promise<void> {
+    await seedSource(workspaceId, sourceId);
+    await runSync(workspaceId, sourceId, fullRouter({ invoices: [paidInvoiceApi()] }));
+    await seedHealthyWatermark(workspaceId, sourceId);
+  }
+
+  it("keeps payment events as minimised evidence and moves NOTHING canonical", async () => {
+    // CONTROL: the same imported source running the same delta window with NO events. Whatever a
+    // delta run touches on its own (segment, watermark, coverage bookkeeping, the run row) shows up
+    // here, so the payment run can be held to "exactly that, plus evidence rows".
+    const controlWs = `ws_${randomUUID()}`;
+    const controlSrc = `src_${randomUUID()}`;
+    await seedImportedSource(controlWs, controlSrc);
+    const controlBefore = await workspaceTableHashes(controlWs);
+    const controlUrls: string[] = [];
+    await runSync(controlWs, controlSrc, deltaRouter({
+      events: [],
+      onUrl: (url) => controlUrls.push(url.toString()),
+    }));
+    const controlChanged = changedTables(controlBefore, await workspaceTableHashes(controlWs));
+
+    const workspaceId = `ws_${randomUUID()}`;
+    const sourceId = `src_${randomUUID()}`;
+    await seedImportedSource(workspaceId, sourceId);
+    const before = await workspaceTableHashes(workspaceId);
+    const canonicalBefore = await canonicalValueHashes(workspaceId);
+    // The canonical tables the assertion leans on are populated, so "unchanged" is not "empty".
+    for (const table of ["stripe_customers", "stripe_invoices", "stripe_subscriptions",
+      "stripe_subscription_items", "stripe_customer_mrr_states"]) {
+      expect(canonicalBefore[table], table).not.toMatch(/^0:/);
+    }
+
+    const urls: URL[] = [];
+    // `deltaRouter` THROWS on any retrieve it was not given, so a payment event that tried to
+    // re-fetch a charge, refund, dispute, session, intent or customer would fail the run.
+    await runSync(workspaceId, sourceId, deltaRouter({
+      events: [...PAYMENT_FIXTURE.kept, ...PAYMENT_FIXTURE.ignored],
+      onUrl: (url) => urls.push(url),
+    }));
+    // READ BUDGET: byte-for-byte the same requests as the zero-event control — same endpoints,
+    // same window, same count. Payment events cost nothing beyond the page they arrived on.
+    expect(urls.map((url) => url.toString())).toEqual(controlUrls);
+    expect(controlUrls.some((url) => url.includes("/v1/events?"))).toBe(true);
+
+    // Exactly what an empty delta run touches, plus the evidence rows — nothing else anywhere.
+    const changed = changedTables(before, await workspaceTableHashes(workspaceId));
+    expect(controlChanged).not.toContain("stripe_event_evidence");
+    expect(changed).toEqual([...controlChanged, "stripe_event_evidence"].sort());
+    // …and every canonical table's VALUES are byte-identical.
+    const canonicalAfter = await canonicalValueHashes(workspaceId);
+    for (const table of CANONICAL_STRIPE_TABLES) {
+      expect(canonicalBefore[table], `${table} must exist`).toBeDefined();
+      expect(canonicalAfter[table], table).toBe(canonicalBefore[table]);
+    }
+
+    // What landed is exactly the minimised payload, keyed as the pure fan-out keyed it.
+    const evidence = await db.query<{
+      stripe_event_id: string; event_type: string; event_created_at: Date; object_kind: string;
+      object_external_id: string; payload: Record<string, unknown>;
+      previous_attributes: Record<string, unknown> | null; api_version: string | null;
+      livemode: boolean | null; segment_id: string | null;
+    }>(
+      `select stripe_event_id, event_type, event_created_at, object_kind, object_external_id,
+              payload, previous_attributes, api_version, livemode, segment_id
+         from stripe_event_evidence where workspace_id = $1 and source_id = $2
+        order by event_created_at, stripe_event_id`,
+      [workspaceId, sourceId],
+    );
+    expect(evidence).toHaveLength(PAYMENT_FIXTURE.kept.length);
+    for (const row of evidence) {
+      const expected = EXPECTED_PAYMENT_EVIDENCE[row.stripe_event_id];
+      expect(expected, row.stripe_event_id).toBeDefined();
+      expect({
+        eventType: row.event_type,
+        objectKind: row.object_kind,
+        objectExternalId: row.object_external_id,
+        payload: row.payload,
+        previousAttributes: row.previous_attributes,
+      }, row.stripe_event_id).toEqual(expected);
+      const source = PAYMENT_FIXTURE.kept.find((event) => event.id === row.stripe_event_id)!;
+      expect(new Date(row.event_created_at).getTime()).toBe(source.created * 1000);
+      expect(row.api_version).toBe("2025-06-30.basil");
+      expect(row.livemode).toBe(true);
+      expect(row.segment_id).not.toBeNull();
+    }
+    const stored = JSON.stringify(evidence.map((row) => [row.payload, row.previous_attributes]));
+    for (const pattern of PAYMENT_SENSITIVE_PATTERNS) {
+      expect(stored, String(pattern)).not.toMatch(pattern);
+    }
+
+    // The window still closes and advances exactly as a window of subscription events would.
+    const segments = await db.query<{ status: string; event_count: number; refetch_count: number;
+      parser_version: string }>(
+      `select status, event_count, refetch_count, parser_version from stripe_event_segments
+        where workspace_id = $1 and source_id = $2`,
+      [workspaceId, sourceId],
+    );
+    expect(segments).toEqual([{
+      status: "closed",
+      event_count: PAYMENT_FIXTURE.kept.length + PAYMENT_FIXTURE.ignored.length,
+      refetch_count: 0,
+      parser_version: "stripe-delta-events-v2",
+    }]);
+    const watermarks = await db.query<{ delta_data_as_of: Date }>(
+      `select delta_data_as_of from stripe_sync_watermarks
+        where workspace_id = $1 and source_id = $2`,
+      [workspaceId, sourceId],
+    );
+    expect(new Date(watermarks[0]!.delta_data_as_of).toISOString()).toBe(SEGMENT_TO);
+  }, 180_000);
+
+  it("re-delivered payment events are idempotent: first observation wins, nothing duplicates", async () => {
+    const workspaceId = `ws_${randomUUID()}`;
+    const sourceId = `src_${randomUUID()}`;
+    await seedImportedSource(workspaceId, sourceId);
+
+    // Run 1: the whole story, with the sale re-delivered inside the SAME page.
+    const sale = PAYMENT_FIXTURE.kept.find((event) => event.type === "charge.succeeded")!;
+    await runSync(workspaceId, sourceId, deltaRouter({
+      events: [...PAYMENT_FIXTURE.kept, structuredClone(sale)],
+    }));
+    const readEvidence = () => db.query<{ stripe_event_id: string; payload: Record<string, unknown> }>(
+      `select stripe_event_id, payload from stripe_event_evidence
+        where workspace_id = $1 and source_id = $2 order by stripe_event_id`,
+      [workspaceId, sourceId],
+    );
+    const first = await readEvidence();
+    expect(first).toHaveLength(PAYMENT_FIXTURE.kept.length);
+    const canonicalAfterFirst = await canonicalValueHashes(workspaceId);
+
+    // Run 2: the deliberate overlap replays the SAME window, and this time the sale arrives with a
+    // different amount. The table is insert-only on (workspace, source, event id): the first
+    // observation stands and the replay adds nothing.
+    await seedHealthyWatermark(workspaceId, sourceId);
+    const mutatedSale = structuredClone(sale);
+    (mutatedSale.data!.object as Record<string, unknown>).amount = 5100;
+    await runSync(workspaceId, sourceId, deltaRouter({
+      events: [...PAYMENT_FIXTURE.kept.filter((event) => event.id !== sale.id), mutatedSale],
+    }));
+    const second = await readEvidence();
+    expect(second).toEqual(first);
+    expect(second.find((row) => row.stripe_event_id === sale.id)?.payload.amount).toBe(4900);
+
+    const segments = await db.query<{ count: string }>(
+      `select count(*)::text as count from stripe_event_segments
+        where workspace_id = $1 and source_id = $2`,
+      [workspaceId, sourceId],
+    );
+    expect(segments[0]?.count).toBe("1");
+
+    const canonicalAfterSecond = await canonicalValueHashes(workspaceId);
+    for (const table of CANONICAL_STRIPE_TABLES) {
+      expect(canonicalAfterSecond[table], table).toBe(canonicalAfterFirst[table]);
+    }
+  }, 180_000);
+
+  it("keeps a RESUMED v1 segment labelled v1, and relabels only a fully re-read CLOSED window", async () => {
+    // Deploy boundary: a window opened under v1 read its earlier pages with the parser that DROPPED
+    // payment events. Closing it under v2 must not claim payment coverage for those pages.
+    const workspaceId = `ws_${randomUUID()}`;
+    const sourceId = `src_${randomUUID()}`;
+    await seedSource(workspaceId, sourceId);
+    await seedHealthyWatermark(workspaceId, sourceId);
+    const fromMs = CURSOR_END_MS - 25 * 60 * 1000;
+    await seedOpenSegment(workspaceId, sourceId, fromMs, Date.parse(SEGMENT_TO));
+
+    await runSync(workspaceId, sourceId, deltaRouter({ events: PAYMENT_FIXTURE.kept }));
+    const resumed = await db.query<{ status: string; parser_version: string }>(
+      `select status, parser_version from stripe_event_segments
+        where workspace_id = $1 and source_id = $2`,
+      [workspaceId, sourceId],
+    );
+    expect(resumed).toEqual([{ status: "closed", parser_version: "stripe-delta-events-v1" }]);
+
+    // A CLOSED v1 window re-read in full (the deliberate overlap replays these exact bounds) has now
+    // been observed end to end by v2, so it takes the current version.
+    await seedHealthyWatermark(workspaceId, sourceId);
+    await runSync(workspaceId, sourceId, deltaRouter({ events: PAYMENT_FIXTURE.kept }));
+    const reread = await db.query<{ status: string; parser_version: string }>(
+      `select status, parser_version from stripe_event_segments
+        where workspace_id = $1 and source_id = $2`,
+      [workspaceId, sourceId],
+    );
+    expect(reread).toEqual([{ status: "closed", parser_version: "stripe-delta-events-v2" }]);
+  }, 120_000);
+
+  it("payment events ride an over-budget REFUSAL as minimised evidence and never count toward the budget", async () => {
+    const at = Math.floor(Date.parse(SEGMENT_TO) / 1000) - 60;
+    const customerEvents = (count: number, prefix: string) => Array.from({ length: count }, (_, index) => ({
+      id: `evt_${prefix}_${index}`,
+      type: "customer.updated",
+      created: at,
+      api_version: "2025-06-30.basil",
+      livemode: true,
+      data: { object: { id: `cus_${prefix}_${index}`, metadata: {} } },
+    }));
+
+    // AT the budget, plus the whole payment story: still applied. Eleven payment events that named
+    // customers, charges and intents added NOTHING to the retrieve count.
+    {
+      const workspaceId = `ws_${randomUUID()}`;
+      const sourceId = `src_${randomUUID()}`;
+      await seedSource(workspaceId, sourceId);
+      await seedHealthyWatermark(workspaceId, sourceId);
+      const retrieved: string[] = [];
+      await runSync(workspaceId, sourceId, (url) => {
+        if (url.pathname === "/v1/customers") return { data: [], has_more: false };
+        if (url.pathname === "/v1/events") {
+          return {
+            data: [...customerEvents(STRIPE_DELTA_MAX_REFETCH_PER_RUN, "at"), ...PAYMENT_FIXTURE.kept],
+            has_more: false,
+          };
+        }
+        const [, , collection, id] = url.pathname.split("/");
+        if (collection === "customers" && id) {
+          retrieved.push(id);
+          return { id, metadata: {} };
+        }
+        throw new Error(`unexpected Stripe URL: ${url.toString()}`);
+      });
+      expect(retrieved).toHaveLength(STRIPE_DELTA_MAX_REFETCH_PER_RUN);
+      expect(retrieved.every((id) => id.startsWith("cus_at_"))).toBe(true);
+      const watermark = await db.one<{ pending_full_refresh_reason: string | null }>(
+        `select pending_full_refresh_reason from stripe_sync_watermarks
+          where workspace_id = $1 and source_id = $2`,
+        [workspaceId, sourceId],
+      );
+      expect(watermark?.pending_full_refresh_reason).toBeNull();
+    }
+
+    // ONE past the budget, plus the payment story: refused WHOLE, and the payment events are kept
+    // anyway — minimised exactly as on the applied path.
+    const workspaceId = `ws_${randomUUID()}`;
+    const sourceId = `src_${randomUUID()}`;
+    await seedSource(workspaceId, sourceId);
+    await seedHealthyWatermark(workspaceId, sourceId);
+    const paths: string[] = [];
+    await runSync(workspaceId, sourceId, (url) => {
+      paths.push(url.pathname);
+      if (url.pathname === "/v1/customers") return { data: [], has_more: false };
+      if (url.pathname === "/v1/events") {
+        return {
+          data: [...customerEvents(STRIPE_DELTA_MAX_REFETCH_PER_RUN + 1, "over"), ...PAYMENT_FIXTURE.kept],
+          has_more: false,
+        };
+      }
+      throw new Error(`unexpected Stripe URL: ${url.toString()}`);
+    });
+    expect(paths.filter((path) => path !== "/v1/customers" && path !== "/v1/events")).toEqual([]);
+    const watermark = await db.one<{ pending_full_refresh_reason: string | null }>(
+      `select pending_full_refresh_reason from stripe_sync_watermarks
+        where workspace_id = $1 and source_id = $2`,
+      [workspaceId, sourceId],
+    );
+    expect(watermark?.pending_full_refresh_reason).toBe("delta_fanout_exceeded");
+
+    const payment = await db.query<{
+      stripe_event_id: string; event_type: string; object_kind: string; object_external_id: string;
+      payload: Record<string, unknown>; previous_attributes: Record<string, unknown> | null;
+    }>(
+      `select stripe_event_id, event_type, object_kind, object_external_id, payload,
+              previous_attributes
+         from stripe_event_evidence
+        where workspace_id = $1 and source_id = $2 and object_kind <> 'customer'`,
+      [workspaceId, sourceId],
+    );
+    expect(payment).toHaveLength(PAYMENT_FIXTURE.kept.length);
+    for (const row of payment) {
+      expect({
+        eventType: row.event_type,
+        objectKind: row.object_kind,
+        objectExternalId: row.object_external_id,
+        payload: row.payload,
+        previousAttributes: row.previous_attributes,
+      }, row.stripe_event_id).toEqual(EXPECTED_PAYMENT_EVIDENCE[row.stripe_event_id]);
+    }
   }, 180_000);
 });

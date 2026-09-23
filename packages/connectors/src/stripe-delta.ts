@@ -24,6 +24,11 @@ import type { InfiniteOsDb } from "@infinite-os/db";
  * classifier deliberately keeps its SETTLED-STATE semantics (an intra-window $50 -> $80 -> $60
  * settles to one $50 -> $60 contraction) and does not read this evidence today; it is stored so
  * a future classifier upgrade does not need a retention-expired event stream.
+ *
+ * PAYMENT EVIDENCE. Charges, refunds, disputes, completed checkouts and payment intents ride the
+ * SAME unfiltered poll (so they cost zero extra reads) and are kept as evidence-only rows with a
+ * MINIMISED payload — see STRIPE_PAYMENT_EVIDENCE_EVENT_TYPES. They are never fanned out, never
+ * re-fetched, and never touch subscriptions, invoices or MRR.
  */
 
 // ---------------------------------------------------------------------------------------------
@@ -78,7 +83,12 @@ export const STRIPE_DELTA_REFETCH_CONCURRENCY = 4;
  */
 export const STRIPE_DELTA_MAX_REFETCH_PER_RUN = 200;
 
-export const STRIPE_DELTA_PARSER_VERSION = "stripe-delta-events-v1";
+/**
+ * Stamped on every delta segment. v2 is the first parser that retains PAYMENT evidence (charges,
+ * refunds, disputes, checkouts, payment intents): a window closed under v1 observed those events
+ * and dropped them, so no reader may claim payment-event coverage over a v1 segment.
+ */
+export const STRIPE_DELTA_PARSER_VERSION = "stripe-delta-events-v2";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -560,7 +570,13 @@ export interface StripeEventApi {
  *   price.{created,updated,deleted}                                                 (3)
  *   coupon.{created,updated,deleted}                                                (3)
  *   product.{created,updated,deleted}                                               (3)
- *                                                                             total  33
+ * plus the evidence-only PAYMENT types (STRIPE_PAYMENT_EVIDENCE_EVENT_TYPES):
+ *   charge.{succeeded,refunded}                                                     (2)
+ *   refund.{created,updated}                                                        (2)
+ *   charge.dispute.{created,updated,closed,funds_withdrawn,funds_reinstated}        (5)
+ *   checkout.session.completed                                                      (1)
+ *   payment_intent.{succeeded,payment_failed}                                       (2)
+ *                                                                             total  45
  */
 export const STRIPE_DELTA_EVENT_PREFIXES: ReadonlyArray<readonly [string, StripeEventObjectKind]> = [
   ["customer.subscription.", "subscription"],
@@ -574,7 +590,7 @@ export const STRIPE_DELTA_EVENT_PREFIXES: ReadonlyArray<readonly [string, Stripe
 ] as const;
 
 /** Pinned by test: our relevant event set exceeds Stripe's documented 20-type `types[]` cap. */
-export const STRIPE_DELTA_RELEVANT_EVENT_TYPE_COUNT = 33;
+export const STRIPE_DELTA_RELEVANT_EVENT_TYPE_COUNT = 45;
 export const STRIPE_EVENTS_TYPES_FILTER_CAP = 20;
 
 /**
@@ -626,10 +642,154 @@ export function stripeEventObjectKind(eventType: string): StripeEventObjectKind 
   return null;
 }
 
-/** Entity families plus the preview sentinel, which is evidence-only and never re-fetched. */
+/**
+ * EVIDENCE-ONLY PAYMENT FAMILIES. Kept so "every sale", "every refund" and "a dispute opened" can
+ * be observed for any account that connects Stripe. They are NOT entity families of this engine:
+ * no canonical table stores them, so they are never fanned out or re-fetched, and nothing in the
+ * subscription/invoice/MRR path reads them.
+ */
+export type StripePaymentEvidenceKind =
+  | "charge"
+  | "refund"
+  | "dispute"
+  | "checkout_session"
+  | "payment_intent";
+
+/**
+ * Exact types, not prefixes: the `charge.*`, `refund.*`, `checkout.session.*` and
+ * `payment_intent.*` families carry many transitional types (`charge.pending`, `charge.updated`,
+ * `payment_intent.created`, `checkout.session.expired`, …) that describe no sale, refund or
+ * failure and would only grow the table. The one family kept WHOLE is `charge.dispute.*` — every
+ * member is a step in a dispute a merchant has to act on.
+ */
+export const STRIPE_PAYMENT_EVIDENCE_EVENT_TYPES: ReadonlyMap<string, StripePaymentEvidenceKind> =
+  new Map([
+    ["charge.succeeded", "charge"],
+    ["charge.refunded", "charge"],
+    ["refund.created", "refund"],
+    ["refund.updated", "refund"],
+    ["checkout.session.completed", "checkout_session"],
+    ["payment_intent.succeeded", "payment_intent"],
+    ["payment_intent.payment_failed", "payment_intent"],
+  ]);
+export const STRIPE_DISPUTE_EVENT_PREFIX = "charge.dispute.";
+
+export function stripePaymentEvidenceKind(eventType: string): StripePaymentEvidenceKind | null {
+  if (eventType.startsWith(STRIPE_DISPUTE_EVENT_PREFIX)) return "dispute";
+  return STRIPE_PAYMENT_EVIDENCE_EVENT_TYPES.get(eventType) ?? null;
+}
+
+/**
+ * PAYLOAD MINIMISATION — an ALLOWLIST per payment family. The subscription/invoice families keep
+ * the whole `data.object` because canonical state is re-derived from it downstream; a payment
+ * object instead carries billing details, card fingerprints and last4, receipt and customer emails,
+ * shipping addresses and merchant free text (`description`, `metadata`) that no alert needs. Only
+ * the fields below survive, and every reference is reduced to its id (an EXPANDED reference would
+ * otherwise smuggle a whole customer object, email included, back in).
+ *
+ * `scalars` are copied when present and a JSON scalar; `references` are stored as the bare id;
+ * `nested` picks named scalars out of one sub-object and drops the rest of it.
+ */
+interface StripePaymentEvidenceFieldSpec {
+  scalars: readonly string[];
+  references: readonly string[];
+  nested: Readonly<Record<string, readonly string[]>>;
+}
+
+export const STRIPE_PAYMENT_EVIDENCE_FIELDS: Readonly<
+  Record<StripePaymentEvidenceKind, StripePaymentEvidenceFieldSpec>
+> = {
+  charge: {
+    scalars: [
+      "id", "object", "amount", "amount_refunded", "currency", "status", "refunded", "created",
+      "livemode",
+    ],
+    // `invoice` exists on charges only before API version 2025-03-31.basil; absent is fine.
+    references: ["customer", "payment_intent", "invoice"],
+    nested: {},
+  },
+  refund: {
+    // A Stripe Refund has no `customer` and no `livemode`; the charge links to the customer, and
+    // the event's own `livemode` is stored in its column.
+    scalars: ["id", "object", "amount", "currency", "status", "reason", "failure_reason", "created"],
+    references: ["charge", "payment_intent"],
+    nested: {},
+  },
+  dispute: {
+    scalars: ["id", "object", "amount", "currency", "status", "reason", "created", "livemode"],
+    references: ["charge", "payment_intent"],
+    // The response deadline only. `evidence` itself holds the customer's name, email, billing and
+    // shipping address, and is never kept.
+    nested: { evidence_details: ["due_by"] },
+  },
+  checkout_session: {
+    // `amount_total`, not `amount`: a session has no `amount`. `payment_status` separates a paid
+    // session from an async method that completed the flow but has not paid yet.
+    scalars: [
+      "id", "object", "amount_total", "currency", "status", "payment_status", "mode", "created",
+      "livemode",
+    ],
+    references: ["customer", "payment_intent", "subscription", "invoice"],
+    nested: {},
+  },
+  payment_intent: {
+    scalars: [
+      "id", "object", "amount", "amount_received", "currency", "status", "created", "livemode",
+    ],
+    references: ["customer", "latest_charge", "invoice"],
+    // Why a payment failed, as Stripe's enum codes. The rest of `last_payment_error` carries the
+    // payment method with its billing details and is never kept.
+    nested: { last_payment_error: ["code", "decline_code", "type"] },
+  },
+};
+
+/**
+ * Project a payment object (or its `previous_attributes`) through its family's allowlist. Absent
+ * fields stay absent — the projection never invents a value, so an unmeasured amount is missing,
+ * not 0.
+ */
+export function stripeMinimisePaymentEvidence(
+  kind: StripePaymentEvidenceKind,
+  source: Record<string, unknown>,
+): Record<string, unknown> {
+  const spec = STRIPE_PAYMENT_EVIDENCE_FIELDS[kind];
+  const out: Record<string, unknown> = {};
+  for (const field of spec.scalars) {
+    if (Object.hasOwn(source, field) && isJsonScalar(source[field])) out[field] = source[field];
+  }
+  for (const field of spec.references) {
+    if (!Object.hasOwn(source, field)) continue;
+    const value = source[field];
+    if (value === null) {
+      out[field] = null;
+      continue;
+    }
+    const id = referenceId(value);
+    if (id !== null) out[field] = id;
+  }
+  for (const [field, keys] of Object.entries(spec.nested)) {
+    if (!Object.hasOwn(source, field)) continue;
+    const value = source[field];
+    if (value === null) {
+      out[field] = null;
+      continue;
+    }
+    if (typeof value !== "object") continue;
+    const nested = value as Record<string, unknown>;
+    const picked: Record<string, unknown> = {};
+    for (const key of keys) {
+      if (Object.hasOwn(nested, key) && isJsonScalar(nested[key])) picked[key] = nested[key];
+    }
+    if (Object.keys(picked).length > 0) out[field] = picked;
+  }
+  return out;
+}
+
+/** Entity families, the preview sentinel and the payment families; only entities are re-fetched. */
 export type StripeEventEvidenceKind =
   | StripeEventObjectKind
-  | typeof STRIPE_INVOICE_PREVIEW_OBJECT_KIND;
+  | typeof STRIPE_INVOICE_PREVIEW_OBJECT_KIND
+  | StripePaymentEvidenceKind;
 
 export interface StripeDeltaEvidenceRow {
   stripeEventId: string;
@@ -661,6 +821,11 @@ export interface StripeDeltaFanout {
    * a preview describes an object we very much store — it just has no state to read yet.
    */
   previewEventTypes: Record<string, number>;
+  /**
+   * Evidence-only PAYMENT events kept (see STRIPE_PAYMENT_EVIDENCE_EVENT_TYPES), with counts. Not
+   * `ignoredEventTypes` (they are stored) and not a re-fetch target (nothing canonical changes).
+   */
+  paymentEvidenceEventTypes: Record<string, number>;
 }
 
 class StripeDeltaEventError extends Error {}
@@ -676,6 +841,7 @@ class StripeDeltaEventError extends Error {}
  *   credit note events  -> the invoice it credits (credited amounts live on our invoice row)
  *   price / coupon      -> the object's referencing subscriptions, via the LOCAL reverse index
  *   product             -> evidence only, and only when we already store that product
+ *   payment families    -> evidence only (minimised), never a re-fetch target
  */
 export function stripeDeltaFanout(events: StripeEventApi[]): StripeDeltaFanout {
   const evidence: StripeDeltaEvidenceRow[] = [];
@@ -689,6 +855,7 @@ export function stripeDeltaFanout(events: StripeEventApi[]): StripeDeltaFanout {
   const revalueCustomerIds = new Set<string>();
   const ignoredEventTypes: Record<string, number> = {};
   const previewEventTypes: Record<string, number> = {};
+  const paymentEvidenceEventTypes: Record<string, number> = {};
 
   for (const event of events) {
     const eventId = nonEmpty(event.id);
@@ -702,7 +869,39 @@ export function stripeDeltaFanout(events: StripeEventApi[]): StripeDeltaFanout {
     if (!eventType) throw new StripeDeltaEventError(`Stripe event ${eventId} arrived without a type`);
     const kind = stripeEventObjectKind(eventType);
     if (!kind) {
-      ignoredEventTypes[eventType] = (ignoredEventTypes[eventType] ?? 0) + 1;
+      const paymentKind = stripePaymentEvidenceKind(eventType);
+      if (!paymentKind) {
+        ignoredEventTypes[eventType] = (ignoredEventTypes[eventType] ?? 0) + 1;
+        continue;
+      }
+      // EVIDENCE ONLY: recorded with a minimised payload and deliberately never fanned out.
+      const paymentObject = asObject(event.data?.object);
+      const paymentObjectId = nonEmpty(paymentObject.id);
+      if (!paymentObjectId) {
+        // Every one of these families is a persisted Stripe object that always carries an id. An
+        // id-less one is an unrecognised shape, and keying the row to a placeholder would make two
+        // different payments indistinguishable.
+        throw new StripeDeltaEventError(
+          `Stripe event ${eventId} (${eventType}) carried no object id;`
+          + " refusing to record unkeyable payment evidence",
+        );
+      }
+      paymentEvidenceEventTypes[eventType] = (paymentEvidenceEventTypes[eventType] ?? 0) + 1;
+      evidence.push({
+        stripeEventId: eventId,
+        eventType,
+        eventCreatedAt: unixSecondsToIso(event.created, eventId),
+        apiVersion: nonEmpty(event.api_version) ?? null,
+        livemode: typeof event.livemode === "boolean" ? event.livemode : null,
+        objectKind: paymentKind,
+        objectExternalId: paymentObjectId,
+        payload: stripeMinimisePaymentEvidence(paymentKind, paymentObject),
+        // `previous_attributes` is minimised through the SAME allowlist: on a dispute update it
+        // can carry the old `evidence` block, with the customer's name, email and addresses.
+        previousAttributes: event.data?.previous_attributes
+          ? stripeMinimisePaymentEvidence(paymentKind, asObject(event.data.previous_attributes))
+          : null,
+      });
       continue;
     }
 
@@ -813,6 +1012,7 @@ export function stripeDeltaFanout(events: StripeEventApi[]): StripeDeltaFanout {
     revalueCustomerIds: [...revalueCustomerIds].sort(),
     ignoredEventTypes,
     previewEventTypes,
+    paymentEvidenceEventTypes,
   };
 }
 
@@ -1086,7 +1286,13 @@ export async function writeStripeSyncLaneAtClose(
                         else excluded.refetch_count end,
        closed_at = case when excluded.status = 'closed'
                      then coalesce(stripe_event_segments.closed_at, now()) else null end,
-       parser_version = excluded.parser_version,
+       -- A RESUMED open segment keeps the version that read its earlier pages: a window opened
+       -- under v1 dropped payment events on those pages, and relabelling it v2 at close would
+       -- claim payment coverage it never had. A re-read of a CLOSED window re-observes every
+       -- event, so it takes the current version.
+       parser_version = case when stripe_event_segments.status = 'open'
+                          then stripe_event_segments.parser_version
+                          else excluded.parser_version end,
        updated_at = now()
      returning id`,
     [
@@ -1257,6 +1463,13 @@ function asObject(value: unknown): Record<string, unknown> & { id?: string } {
   return value !== null && typeof value === "object"
     ? (value as Record<string, unknown> & { id?: string })
     : {};
+}
+
+function isJsonScalar(value: unknown): value is string | number | boolean | null {
+  return value === null
+    || typeof value === "string"
+    || typeof value === "boolean"
+    || (typeof value === "number" && Number.isFinite(value));
 }
 
 /** An expandable Stripe reference is either a bare id string or an expanded object. */
