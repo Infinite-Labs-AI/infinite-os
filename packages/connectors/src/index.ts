@@ -69,10 +69,12 @@ import {
   StripeRequestTelemetry,
   isStripeEventSecondBoundary,
   planStripeDeltaSegment,
+  readStripeLastClosedEventSegmentEnd,
   readStripeOpenEventSegment,
   readStripeSyncWatermark,
   selectStripeSyncLane,
   stripeDeltaFanout,
+  stripeDeltaLeavesEventHole,
   stripeDeltaFilterProductEvidence,
   stripeDeltaMapBounded,
   stripeDeltaMergeEventPages,
@@ -1883,6 +1885,14 @@ async function stripeExtractDelta(
   // them is advanced — a window that does not reach back far enough advances only itself.
   const invoiceCutoffMs = stripeTimestampMs(invoiceState?.latest_successful_stripe_cutoff ?? null);
   const trialClosedThroughMs = stripeTimestampMs(trialState?.closed_through_exclusive ?? null);
+  // EVIDENCE REACH-BACK over the last full run: back to where the unfiltered stream was last
+  // observed (the last CLOSED delta segment), never before the start of continuous coverage — a
+  // recorded gap is not something to re-poll across. See `planStripeDeltaSegment`.
+  const lastClosedSegmentEndMs = await readStripeLastClosedEventSegmentEnd(db, request);
+  const continuousCoverageFromMs = stripeTimestampMs(watermark?.continuous_coverage_from ?? null);
+  const reachBackToMs = lastClosedSegmentEndMs === null
+    ? null
+    : Math.max(lastClosedSegmentEndMs, continuousCoverageFromMs ?? Number.NEGATIVE_INFINITY);
   const segment = planStripeDeltaSegment({
     cursorEndMs,
     fromCandidatesMs: [
@@ -1891,6 +1901,19 @@ async function stripeExtractDelta(
       trialClosedThroughMs,
     ].filter((value): value is number => value !== null),
     openSegment,
+    reachBackToMs,
+  });
+  // A window that still starts after the observed tail (the reach-back was clamped by its 6-hour
+  // cap or by retention) leaves a hole in the event record, so continuity restarts at this window.
+  //
+  // The reset is written even when this segment ends INCOMPLETE and is later superseded by a full
+  // run without ever closing. That stamp is harmless: its only reader is the reach-back floor
+  // above (a later window never reaches back across it, which is the conservative direction), and
+  // coverage for any reader is the union of CLOSED segments, never this column.
+  const resetContinuousCoverage = stripeDeltaLeavesEventHole({
+    segmentFromMs: segment.segmentFromMs,
+    lastClosedSegmentEndMs,
+    continuousCoverageFromMs,
   });
 
   const eventParams = {
@@ -1933,7 +1956,8 @@ async function stripeExtractDelta(
   }
   telemetry?.recordEventsObserved(events.length);
 
-  const fanout = stripeDeltaFanout(events);
+  const fanout = stripeDeltaFanout(events, { fanoutFromMs: segment.fanoutFromMs });
+  telemetry?.recordUnparseableReachBackEvents(fanout.unparseableReachBackEventTypes);
   const targets = await stripeDeltaResolveRefetchTargets(db, request, fanout);
 
   // REFETCH BUDGET. One `price.*`/`coupon.*` edit fans out through the LOCAL reverse index to every
@@ -1953,7 +1977,7 @@ async function stripeExtractDelta(
       eventCount: events.length,
       refetchCount: 0,
       evidence: stripeDeltaFilterProductEvidence(fanout, targets.storedProductIds),
-      resetContinuousCoverage: false,
+      resetContinuousCoverage,
       pendingFullRefreshReason: "delta_fanout_exceeded",
     };
     return [];
@@ -2063,13 +2087,18 @@ async function stripeExtractDelta(
   // non-containing window advances nothing but the delta watermark, so no lane ever claims
   // coverage of an interval it did not observe. Their pagination cursors are NEVER written from
   // here: an unfiltered-stream cursor does not index a filtered result set.
+  //
+  // Both ride the window from its NORMAL start (`fanoutFromMs`), not from the evidence reach-back:
+  // the reach-back part was already polled by the full run's own filtered event reads, so these
+  // lanes behave exactly as they did before the reach-back existed.
+  const laneFrom = new Date(segment.fanoutFromMs).toISOString();
   if (eventPage.complete) {
     if (
       !trialBootstrapInProgress
-      && (trialClosedThroughMs === null || segment.segmentFromMs <= trialClosedThroughMs)
+      && (trialClosedThroughMs === null || segment.fanoutFromMs <= trialClosedThroughMs)
     ) {
       const trialCheckpoint: StripeTrialCheckpoint = {
-        segmentFrom: segment.segmentFrom,
+        segmentFrom: laneFrom,
         segmentToExclusive: segment.segmentToExclusive,
         segmentComplete: true,
         segmentStartingAfter: null,
@@ -2081,7 +2110,7 @@ async function stripeExtractDelta(
       rows.push(...events
         .filter((event) => STRIPE_SUBSCRIPTION_EVENT_TYPES.includes(
           event.type as (typeof STRIPE_SUBSCRIPTION_EVENT_TYPES)[number],
-        ))
+        ) && event.created * 1_000 >= segment.fanoutFromMs)
         .map((event) => stripeSubscriptionEventRow(
           event as unknown as StripeSubscriptionEventApi,
           trialCheckpoint
@@ -2090,7 +2119,7 @@ async function stripeExtractDelta(
     if (
       invoiceState?.backfill_state === "complete"
       && invoiceCutoffMs !== null
-      && segment.segmentFromMs <= invoiceCutoffMs
+      && segment.fanoutFromMs <= invoiceCutoffMs
     ) {
       plan.stripeInvoiceCheckpoint = {
         backfillState: "complete",
@@ -2113,9 +2142,9 @@ async function stripeExtractDelta(
     eventCount: events.length,
     refetchCount: invoiceApis.length + subscriptions.length + customerApis.length,
     evidence: stripeDeltaFilterProductEvidence(fanout, targets.storedProductIds),
-    // Always false BY CONSTRUCTION: every coverage gap forces the FULL lane at plan time, so a
-    // delta run is never the one that discovers (or has to record) a broken chain.
-    resetContinuousCoverage: false,
+    // Every SNAPSHOT coverage gap forces the FULL lane at plan time; this is the EVENT-record
+    // counterpart — true only when the reach-back could not cover the last full run's hole.
+    resetContinuousCoverage,
     // Cleared on every applied window: only the fan-out refusal above parks a demand.
     pendingFullRefreshReason: null,
   };

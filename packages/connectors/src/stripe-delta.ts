@@ -60,6 +60,19 @@ export const STRIPE_EVENT_HARD_RETENTION_DAYS = 30;
  */
 export const STRIPE_FULL_REFRESH_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
+/**
+ * MAXIMUM EVIDENCE REACH-BACK SPAN, measured back from the window's end. The reach-back exists to
+ * cover the hole a full run leaves in the event record — 10-25 minutes at the heartbeat's cadence.
+ * It must stay well under STRIPE_FULL_REFRESH_INTERVAL_MS: a reach-back window is walked
+ * STRIPE_DELTA_MAX_PAGES per run as a resumable segment, and the next daily full run SUPERSEDES an
+ * unfinished one, after which the reach-back would restart from the same last-closed end, one day
+ * longer — on a busy account after a multi-day delta outage it would never converge. Six hours (a
+ * quarter of the interval) covers every routine hole and short outages. Anything older is not
+ * re-polled; the window then starts after the observed tail, `stripeDeltaLeavesEventHole` fires,
+ * and `continuous_coverage_from` restarts — the loss is recorded, not silent.
+ */
+export const STRIPE_DELTA_MAX_REACH_BACK_MS = 6 * 60 * 60 * 1000;
+
 /** Bounded pages per run: the segment is durable and resumable, so a busy account catches up. */
 export const STRIPE_DELTA_MAX_PAGES = 5;
 
@@ -160,6 +173,11 @@ export interface StripeRequestTelemetrySnapshot {
   rateLimitedReasons: Record<string, number>;
   byEndpointClass: Record<string, StripeEndpointTelemetry>;
   reconciliation: StripeReconciliationTelemetry | null;
+  /**
+   * Malformed events in a delta window's REACH-BACK part, by type, that were skipped instead of
+   * failing the run (see `stripeDeltaFanout`). Empty on a healthy run.
+   */
+  unparseableReachBackEvents: Record<string, number>;
 }
 
 /**
@@ -186,6 +204,7 @@ export class StripeRequestTelemetry {
   private reconciliation: StripeReconciliationTelemetry | null = null;
   private readonly rateLimitedReasons = new Map<string, number>();
   private readonly byEndpointClass = new Map<string, StripeEndpointTelemetry>();
+  private readonly unparseableReachBackEvents = new Map<string, number>();
 
   setLane(lane: StripeSyncLane, reason: StripeLaneReason): void {
     this.lane = lane;
@@ -263,6 +282,13 @@ export class StripeRequestTelemetry {
     if (Number.isFinite(count) && count > 0) this.eventsObserved += count;
   }
 
+  recordUnparseableReachBackEvents(counts: Record<string, number>): void {
+    for (const [type, count] of Object.entries(counts)) {
+      if (!Number.isFinite(count) || count <= 0) continue;
+      this.unparseableReachBackEvents.set(type, (this.unparseableReachBackEvents.get(type) ?? 0) + count);
+    }
+  }
+
   snapshot(): StripeRequestTelemetrySnapshot {
     return {
       version: "stripe-request-telemetry-v1",
@@ -278,6 +304,9 @@ export class StripeRequestTelemetry {
         [...this.byEndpointClass.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
       ),
       reconciliation: this.reconciliation === null ? null : { ...this.reconciliation },
+      unparseableReachBackEvents: Object.fromEntries(
+        [...this.unparseableReachBackEvents.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
+      ),
     };
   }
 
@@ -460,6 +489,13 @@ export interface StripeDeltaSegmentPlan {
   /** Resume cursor of THIS segment's unfiltered events stream, or null for a fresh window. */
   paginationCursor: string | null;
   resumedSegmentId: string | null;
+  /**
+   * The from-bound this window would have had WITHOUT the evidence reach-back: the earliest
+   * durable cutoff minus the overlap. Events created before it are EVIDENCE ONLY — never fanned out
+   * or re-fetched — and the trial/invoice lanes ride the window from here, exactly as before the
+   * reach-back existed. Equal to `segmentFromMs` whenever there is nothing to reach back for.
+   */
+  fanoutFromMs: number;
 }
 
 /**
@@ -474,17 +510,38 @@ export interface StripeDeltaSegmentPlan {
  * the delta watermark, the invoice-events cutoff, and the trial-lifecycle closed-through bound.
  * Taking their MINIMUM is what makes it safe for a single unfiltered poll to close all three —
  * a window that starts at the earliest of them cannot leave a hole in any of them.
+ *
+ * EVIDENCE REACH-BACK. A FULL run advances all three cutoffs to its own lagged bound but never
+ * reads the unfiltered stream, so without help every full run leaves a hole in the EVENT record:
+ * the interval between the end of the last CLOSED delta segment and the full run's bound was
+ * never polled. Canonical state does not care (the full replacement re-derived it), but evidence
+ * does — a charge or refund created there would never be stored. `reachBackToMs` (the end of the
+ * last closed delta segment, floored by the caller at `continuous_coverage_from`) pulls the
+ * window's start back over that hole. The part before the normal start is evidence-only
+ * (`fanoutFromMs`), so the fan-out set — and therefore the refetch budget — is exactly what it
+ * would have been without the reach-back: a replayed `price.*` edit from before a full run can
+ * never re-trip `delta_fanout_exceeded` and loop the full lane. In the usual case (delta after
+ * delta) the last closed end is at or after the normal start, and nothing changes at all. The
+ * span is capped at STRIPE_DELTA_MAX_REACH_BACK_MS (and the safe retention floor).
  */
 export function planStripeDeltaSegment(input: {
   cursorEndMs: number;
   fromCandidatesMs: number[];
   openSegment: StripeEventSegmentRow | null;
+  reachBackToMs?: number | null;
 }): StripeDeltaSegmentPlan {
-  const { cursorEndMs, fromCandidatesMs, openSegment } = input;
+  const { cursorEndMs, fromCandidatesMs, openSegment, reachBackToMs = null } = input;
   if (!Number.isFinite(cursorEndMs)) throw new Error("Stripe delta cursor end is invalid");
   const segmentToExclusiveMs = stripeEventSecondBoundary(cursorEndMs - STRIPE_EVENT_SAFETY_LAG_MS);
   const safeFloorMs = stripeEventSecondBoundary(
     segmentToExclusiveMs - STRIPE_EVENT_SAFE_RETENTION_DAYS * DAY_MS,
+  );
+
+  const finite = fromCandidatesMs.filter((value) => Number.isFinite(value));
+  const anchorMs = finite.length > 0 ? Math.min(...finite) : safeFloorMs;
+  const normalFromMs = Math.max(
+    safeFloorMs,
+    stripeEventSecondBoundary(anchorMs - STRIPE_EVENT_OVERLAP_MS),
   );
 
   if (openSegment) {
@@ -498,6 +555,9 @@ export function planStripeDeltaSegment(input: {
         segmentToExclusiveMs - STRIPE_EVENT_HARD_RETENTION_DAYS * DAY_MS,
       );
     if (resumable) {
+      // The cutoffs cannot move while a segment is open (only a COMPLETE delta window or a full run
+      // advances them, and a full run supersedes the open segment), so re-deriving the normal start
+      // recovers the fan-out bound the segment was opened with — clamped into its own bounds.
       return {
         segmentFrom: new Date(fromMs).toISOString(),
         segmentToExclusive: new Date(toMs).toISOString(),
@@ -505,16 +565,21 @@ export function planStripeDeltaSegment(input: {
         segmentToExclusiveMs: toMs,
         paginationCursor: openSegment.pagination_cursor,
         resumedSegmentId: openSegment.id,
+        fanoutFromMs: Math.min(Math.max(normalFromMs, fromMs), toMs),
       };
     }
   }
 
-  const finite = fromCandidatesMs.filter((value) => Number.isFinite(value));
-  const anchorMs = finite.length > 0 ? Math.min(...finite) : safeFloorMs;
-  const segmentFromMs = Math.max(
-    safeFloorMs,
-    stripeEventSecondBoundary(anchorMs - STRIPE_EVENT_OVERLAP_MS),
-  );
+  const reachBackFromMs = reachBackToMs !== null && Number.isFinite(reachBackToMs)
+    ? Math.max(
+      safeFloorMs,
+      stripeEventSecondBoundary(reachBackToMs - STRIPE_EVENT_OVERLAP_MS),
+      stripeEventSecondBoundary(segmentToExclusiveMs - STRIPE_DELTA_MAX_REACH_BACK_MS),
+    )
+    : null;
+  const segmentFromMs = reachBackFromMs === null
+    ? normalFromMs
+    : Math.min(normalFromMs, reachBackFromMs);
   // Never invert (or collapse) the window on a source whose cutoff is younger than the lag: the
   // durable segment records exactly the interval Stripe was asked for, and `from < to` is a
   // table check, not a convention.
@@ -526,7 +591,28 @@ export function planStripeDeltaSegment(input: {
     segmentToExclusiveMs: boundedToMs,
     paginationCursor: null,
     resumedSegmentId: null,
+    fanoutFromMs: normalFromMs,
   };
+}
+
+/**
+ * Did the event stream leave a HOLE before this window? The unfiltered stream has been observed
+ * without a break from `continuous_coverage_from` through the end of the last CLOSED delta
+ * segment (or through `continuous_coverage_from` itself when no delta segment has closed since).
+ * A window that starts after that tail — the reach-back was clamped by the retention floor, or a
+ * refused window was superseded before anything closed past it — cannot claim continuity across
+ * the gap, so the caller RESETS `continuous_coverage_from` to the window's start.
+ */
+export function stripeDeltaLeavesEventHole(input: {
+  segmentFromMs: number;
+  lastClosedSegmentEndMs: number | null;
+  continuousCoverageFromMs: number | null;
+}): boolean {
+  const { segmentFromMs, lastClosedSegmentEndMs, continuousCoverageFromMs } = input;
+  const tails = [lastClosedSegmentEndMs, continuousCoverageFromMs]
+    .filter((value): value is number => value !== null && Number.isFinite(value));
+  if (tails.length === 0) return false;
+  return segmentFromMs > Math.max(...tails);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -826,6 +912,16 @@ export interface StripeDeltaFanout {
    * `ignoredEventTypes` (they are stored) and not a re-fetch target (nothing canonical changes).
    */
   paymentEvidenceEventTypes: Record<string, number>;
+  /**
+   * Entity events kept as evidence WITHOUT fan-out because they were created before the window's
+   * normal start (the evidence reach-back over a full run — see `planStripeDeltaSegment`), counts.
+   */
+  reachBackEvidenceOnlyEventTypes: Record<string, number>;
+  /**
+   * Events in the REACH-BACK part that could not be parsed or keyed (no id, no type, no object id),
+   * by event type, counted and SKIPPED instead of failing the run. See `stripeDeltaFanout`.
+   */
+  unparseableReachBackEventTypes: Record<string, number>;
 }
 
 class StripeDeltaEventError extends Error {}
@@ -843,7 +939,16 @@ class StripeDeltaEventError extends Error {}
  *   product             -> evidence only, and only when we already store that product
  *   payment families    -> evidence only (minimised), never a re-fetch target
  */
-export function stripeDeltaFanout(events: StripeEventApi[]): StripeDeltaFanout {
+export function stripeDeltaFanout(
+  events: StripeEventApi[],
+  options: {
+    /**
+     * Events created BEFORE this instant are evidence only: they sit in the reach-back part of the
+     * window, whose canonical state a full run already re-derived. Omitted = fan out everything.
+     */
+    fanoutFromMs?: number;
+  } = {},
+): StripeDeltaFanout {
   const evidence: StripeDeltaEvidenceRow[] = [];
   const seenEventIds = new Set<string>();
   const invoiceIds = new Set<string>();
@@ -856,17 +961,45 @@ export function stripeDeltaFanout(events: StripeEventApi[]): StripeDeltaFanout {
   const ignoredEventTypes: Record<string, number> = {};
   const previewEventTypes: Record<string, number> = {};
   const paymentEvidenceEventTypes: Record<string, number> = {};
+  const reachBackEvidenceOnlyEventTypes: Record<string, number> = {};
+  const unparseableReachBackEventTypes: Record<string, number> = {};
+  const fanoutFromMs = options.fanoutFromMs ?? Number.NEGATIVE_INFINITY;
 
   for (const event of events) {
+    // A POISON EVENT IN THE REACH-BACK PART IS COUNTED AND SKIPPED, never thrown. Inside the normal
+    // window an unkeyable event is a change we could silently drop, so it still fails the run. In
+    // the reach-back part nothing canonical depends on it (a full run already re-derived that
+    // state), and throwing would be far worse than before the reach-back existed: every delta
+    // re-reads the same interval from the same last-closed end, so one malformed event would fail
+    // the lane on every tick until the reach-back cap aged it out. Counted and surfaced in the run
+    // telemetry (`unparseableReachBackEvents`), so this is reported, not hidden. An event without
+    // a usable `created` cannot be placed in either part and still throws.
+    const createdMs = typeof event.created === "number" && Number.isFinite(event.created)
+      ? event.created * 1_000
+      : null;
+    const inReachBack = createdMs !== null && createdMs < fanoutFromMs;
+    /** Throws inside the normal window; in the reach-back part counts the event (caller skips). */
+    const reject = (message: string): void => {
+      if (!inReachBack) throw new StripeDeltaEventError(message);
+      const key = nonEmpty(event.type) ?? "(no type)";
+      unparseableReachBackEventTypes[key] = (unparseableReachBackEventTypes[key] ?? 0) + 1;
+    };
+
     const eventId = nonEmpty(event.id);
-    if (!eventId) throw new StripeDeltaEventError("Stripe event arrived without an id");
+    if (!eventId) {
+      reject("Stripe event arrived without an id");
+      continue;
+    }
     // Stripe may re-deliver an event across pages/windows; the evidence table is insert-only and
     // keyed on the event id, but de-duping here also keeps the refetch set honest.
     if (seenEventIds.has(eventId)) continue;
     seenEventIds.add(eventId);
 
     const eventType = nonEmpty(event.type);
-    if (!eventType) throw new StripeDeltaEventError(`Stripe event ${eventId} arrived without a type`);
+    if (!eventType) {
+      reject(`Stripe event ${eventId} arrived without a type`);
+      continue;
+    }
     const kind = stripeEventObjectKind(eventType);
     if (!kind) {
       const paymentKind = stripePaymentEvidenceKind(eventType);
@@ -881,10 +1014,11 @@ export function stripeDeltaFanout(events: StripeEventApi[]): StripeDeltaFanout {
         // Every one of these families is a persisted Stripe object that always carries an id. An
         // id-less one is an unrecognised shape, and keying the row to a placeholder would make two
         // different payments indistinguishable.
-        throw new StripeDeltaEventError(
+        reject(
           `Stripe event ${eventId} (${eventType}) carried no object id;`
           + " refusing to record unkeyable payment evidence",
         );
+        continue;
       }
       paymentEvidenceEventTypes[eventType] = (paymentEvidenceEventTypes[eventType] ?? 0) + 1;
       evidence.push({
@@ -915,10 +1049,11 @@ export function stripeDeltaFanout(events: StripeEventApi[]): StripeDeltaFanout {
     if (STRIPE_DELTA_PREVIEW_EVENT_TYPES.has(eventType)) {
       const previewKey = objectId ?? referenceId(object.customer);
       if (!previewKey) {
-        throw new StripeDeltaEventError(
+        reject(
           `Stripe preview event ${eventId} (${eventType}) named neither an object nor a customer;`
           + " refusing to classify an unrecognised shape",
         );
+        continue;
       }
       previewEventTypes[eventType] = (previewEventTypes[eventType] ?? 0) + 1;
       evidence.push({
@@ -939,10 +1074,12 @@ export function stripeDeltaFanout(events: StripeEventApi[]): StripeDeltaFanout {
 
     if (!objectId) {
       // A relevant event we cannot key to an object can never be re-fetched. Failing here is the
-      // point: silently dropping it would quietly desynchronise canonical state.
-      throw new StripeDeltaEventError(
+      // point: silently dropping it would quietly desynchronise canonical state. (In the reach-back
+      // part there is no change to drop — the full run already re-derived it — so it is counted.)
+      reject(
         `Stripe event ${eventId} (${eventType}) carried no object id; refusing to drop a change`,
       );
+      continue;
     }
 
     evidence.push({
@@ -958,6 +1095,14 @@ export function stripeDeltaFanout(events: StripeEventApi[]): StripeDeltaFanout {
         ? asObject(event.data.previous_attributes)
         : null,
     });
+
+    // REACH-BACK: already reflected by the full replacement that ran after it. Products are the one
+    // exception — they cost no retrieve, and their id is only used to decide whether we store that
+    // product at all (see `stripeDeltaFilterProductEvidence`).
+    if (kind !== "product" && (event.created as number) * 1_000 < fanoutFromMs) {
+      reachBackEvidenceOnlyEventTypes[eventType] = (reachBackEvidenceOnlyEventTypes[eventType] ?? 0) + 1;
+      continue;
+    }
 
     switch (kind) {
       case "subscription":
@@ -1013,6 +1158,8 @@ export function stripeDeltaFanout(events: StripeEventApi[]): StripeDeltaFanout {
     ignoredEventTypes,
     previewEventTypes,
     paymentEvidenceEventTypes,
+    reachBackEvidenceOnlyEventTypes,
+    unparseableReachBackEventTypes,
   };
 }
 
@@ -1435,6 +1582,24 @@ export async function readStripeSyncWatermark(
       where workspace_id = $1 and source_id = $2`,
     [scope.workspaceId, scope.sourceId],
   );
+}
+
+/**
+ * End of the last segment the delta lane CLOSED — how far the unfiltered event stream has actually
+ * been observed. Superseded segments do not count: a full run re-derived state across them, but it
+ * never read their events.
+ */
+export async function readStripeLastClosedEventSegmentEnd(
+  db: InfiniteOsDb,
+  scope: { workspaceId: string; sourceId: string },
+): Promise<number | null> {
+  const row = await db.one<{ closed_through: string | Date | null }>(
+    `select max(segment_to_exclusive) as closed_through
+       from stripe_event_segments
+      where workspace_id = $1 and source_id = $2 and status = 'closed'`,
+    [scope.workspaceId, scope.sourceId],
+  );
+  return stripeTimestampMs(row?.closed_through ?? null);
 }
 
 export async function readStripeOpenEventSegment(
