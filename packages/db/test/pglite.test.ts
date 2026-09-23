@@ -88,9 +88,9 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
     rmSync(dataDir, { recursive: true, force: true });
   });
 
-  it("applied ALL 71 migrations on first boot and is idempotent on a re-run", async () => {
-    expect(loadMigrations().length).toBe(71);
-    expect(firstRun).toHaveLength(71);
+  it("applied ALL 72 migrations on first boot and is idempotent on a re-run", async () => {
+    expect(loadMigrations().length).toBe(72);
+    expect(firstRun).toHaveLength(72);
     expect(firstRun).toContain("0001_control_plane.sql");
     expect(firstRun).toContain("0006_security_roles.sql");
     expect(firstRun).toContain("0036_chat_sessions_desktop_surface.sql");
@@ -127,6 +127,7 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
     expect(firstRun).toContain("0067_signup_event_metric_semantics.sql");
     expect(firstRun).toContain("0068_connection_credentials_selected_page.sql");
     expect(firstRun).toContain("0069_meta_ads_history_integrity.sql");
+    expect(firstRun).toContain("0072_interactive_task_ledger.sql");
 
     // Idempotent: a second boot re-applies zero (the `rows.length` gate, not the pg `rowCount`
     // gate, makes this true on PGlite).
@@ -134,13 +135,13 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
     expect(secondRun).toEqual([]);
   });
 
-  it("created the schema_migrations ledger with all 71 rows", async () => {
+  it("created the schema_migrations ledger with all 72 rows", async () => {
     const ledger = await db.query<{ id: string }>(
       "select id from schema_migrations order by id"
     );
-    expect(ledger).toHaveLength(71);
+    expect(ledger).toHaveLength(72);
     expect(ledger[0]?.id).toBe("0001_control_plane.sql");
-    expect(ledger.at(-1)?.id).toBe("0071_meta_reach_unmeasured_days.sql");
+    expect(ledger.at(-1)?.id).toBe("0072_interactive_task_ledger.sql");
   });
 
   it("0063 serves both PostHog views from per-(workspace, source, day) rollups — refresh, is_internal, idempotency, grain key, grants", async () => {
@@ -2995,6 +2996,312 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
         await db.query(`select 1 from ${table} where workspace_id = $1`, [created.id])
       ).toEqual([]);
     }
+  });
+
+  // 0072 interactive task ledger. Raw inserts: every rule below is enforced by the database itself,
+  // so a store bug (or a second writer) cannot create two live proposals, unlabelled automatic turns
+  // or human intent on an automatic task.
+  const ALERT = "7c9e6679-7425-40de-944b-e07fc1f90ae7";
+  type TaskShape = {
+    id: string; workspaceId: string; origin: string; surface: string; actorId?: string; triggerKey?: string | null;
+    ruleId?: string | null; ruleVersion?: number | null; checkKey?: string | null; eventKey?: string | null;
+    payloadHash?: string | null;
+  };
+  function insertTask(shape: TaskShape) {
+    return db.query(
+      `insert into interactive_tasks
+         (id, workspace_id, actor_id, surface, origin, trigger_key, rule_id, rule_version, check_key, event_key,
+          trigger_payload_hash, client_surface_key, provider_id, model_id, agent_profile,
+          accepted_context_revision, authority_expires_at)
+       values ($1, $2, $11, $3, $4, $5, $6, $7, $8, $9, $10, 'k', 'claude-cli', 'model', 'legacy',
+               'ctx_1', '2026-09-20T21:10:00Z')`,
+      [shape.id, shape.workspaceId, shape.surface, shape.origin, shape.triggerKey ?? null, shape.ruleId ?? null,
+        shape.ruleVersion ?? null, shape.checkKey ?? null, shape.eventKey ?? null, shape.payloadHash ?? null,
+        shape.actorId ?? "actor_a"]
+    );
+  }
+  const triggered = (id: string, workspaceId: string, overrides: Partial<TaskShape> = {}): TaskShape => ({
+    id, workspaceId, origin: "triggered", surface: "agent_tasks", triggerKey: `trigger:${ALERT}:ev_1`,
+    ruleId: ALERT, ruleVersion: 2, checkKey: null, eventKey: "ev_1", payloadHash: "9".repeat(64),
+    ...overrides
+  });
+  const human = (id: string, workspaceId: string, overrides: Partial<TaskShape> = {}): TaskShape => ({
+    id, workspaceId, origin: "human", surface: "cmdl", ...overrides
+  });
+  function insertEvent(task: TaskShape, row: { eventId: string; sequence: number; kind: string; turnKey?: string | null;
+    actorId?: string; origin?: string; hash?: string }) {
+    return db.query(
+      `insert into interactive_task_events
+         (event_id, task_id, workspace_id, actor_id, origin, surface, sequence, kind, turn_key,
+          transition_request_id, transition_request_hash)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $1, $10)`,
+      [row.eventId, task.id, task.workspaceId, row.actorId ?? task.actorId ?? "actor_a", row.origin ?? task.origin,
+        task.surface, row.sequence, row.kind, row.turnKey ?? null, row.hash ?? "a".repeat(64)]
+    );
+  }
+  function insertAction(task: TaskShape, row: {
+    invocationId: string; proposalRef?: string; revision?: number; state?: string; supersedes?: string | null;
+    continuationKey?: string | null; decisionSource?: string | null;
+  }) {
+    return db.query(
+      `insert into interactive_action_refs
+         (invocation_id, task_id, workspace_id, actor_id, origin, surface, source_kind, operation_id, adapter_version,
+          schema_version, proposal_ref, proposal_revision, proposal_hash, input_hash, effect,
+          replay_policy, state, supersedes_invocation_id, continuation_key, decision_source, prepared_at)
+       values ($1, $2, $3, $11, $12, $13, 'host_confirmation', 'fake_op', 'fake.v1', '1', $4, $5, $6, $6,
+               'external_write', 'reconcile_before_retry', $7, $8, $9, $10, now())`,
+      [row.invocationId, task.id, task.workspaceId, row.proposalRef ?? "P1", row.revision ?? 1, "c".repeat(64),
+        row.state ?? "awaiting_approval", row.supersedes ?? null, row.continuationKey ?? null, row.decisionSource ?? null,
+        task.actorId ?? "actor_a", task.origin, task.surface]
+    );
+  }
+  async function seedInteractiveTask(workspaceId: string, suffix: string) {
+    const task = human(`itask_${suffix}`, workspaceId);
+    await insertTask(task);
+    await insertEvent(task, { eventId: `ievent_${suffix}`, sequence: 1, kind: "user_message" });
+    await insertAction(task, { invocationId: `iinv_${suffix}`, continuationKey: `cont_${suffix}` });
+    return task;
+  }
+
+  it("0072 binds interactive events and actions to the task's own workspace, actor and origin", async () => {
+    const created = await createProject(db, "Interactive Ledger Scope");
+    const task = await seedInteractiveTask(created.id, `scope_${Date.now()}`);
+
+    // Composite (task, workspace, actor, origin, surface) FK: a child row cannot claim another
+    // actor's task, nor relabel the task's origin to dodge the origin rules below.
+    await expect(insertEvent(task, { eventId: "ievent_wrong_actor", sequence: 2, kind: "progress", actorId: "actor_b" }))
+      .rejects.toThrow(/foreign key/i);
+    await expect(insertEvent(task, { eventId: "ievent_wrong_origin", sequence: 2, kind: "progress", origin: "triggered" }))
+      .rejects.toThrow(/foreign key/i);
+    // Per-task monotonic sequence is unique.
+    await expect(insertEvent(task, { eventId: "ievent_dup_seq", sequence: 1, kind: "user_message" }))
+      .rejects.toThrow(/unique|duplicate/i);
+    // Hash columns only accept lower-case sha256 hex.
+    await expect(insertEvent(task, { eventId: "ievent_bad_hash", sequence: 2, kind: "progress", hash: "not-a-hash" }))
+      .rejects.toThrow(/check constraint/i);
+    expect(await deleteProject(db, created.id)).toEqual({ deleted: true });
+  });
+
+  it("0072 separates human intent from automatic turns at the event level", async () => {
+    const ws = await createProject(db, "Event Origin Rules");
+    const auto = triggered(`ievo_t_${ws.id}`, ws.id);
+    const person = human(`ievo_h_${ws.id}`, ws.id);
+    await insertTask(auto);
+    await insertTask(person);
+    // No user_message on an automatic task, in any position; no trigger on a human task.
+    await expect(insertEvent(auto, { eventId: `ievo_t1_${ws.id}`, sequence: 1, kind: "user_message" }))
+      .rejects.toThrow(/interactive_task_events_user_message_origin_check/);
+    await expect(insertEvent(person, { eventId: `ievo_h1_${ws.id}`, sequence: 1, kind: "trigger" }))
+      .rejects.toThrow(/interactive_task_events_trigger_origin_check/);
+    await insertEvent(auto, { eventId: `ievo_t1ok_${ws.id}`, sequence: 1, kind: "trigger" });
+    await insertEvent(person, { eventId: `ievo_h1ok_${ws.id}`, sequence: 1, kind: "user_message" });
+    await expect(insertEvent(auto, { eventId: `ievo_t2_${ws.id}`, sequence: 2, kind: "user_message" }))
+      .rejects.toThrow(/interactive_task_events_user_message_origin_check/);
+    // A trigger opens a task and nothing else; the opening event is a message or a trigger.
+    await expect(insertEvent(auto, { eventId: `ievo_t3_${ws.id}`, sequence: 2, kind: "trigger" }))
+      .rejects.toThrow(/interactive_task_events_trigger_opens_check/);
+    const late = human(`ievo_h2_${ws.id}`, ws.id);
+    await insertTask(late);
+    await expect(insertEvent(late, { eventId: `ievo_h2a_${ws.id}`, sequence: 1, kind: "progress" }))
+      .rejects.toThrow(/interactive_task_events_opening_check/);
+    // A turn result carries its turn key, and one turn is recorded once.
+    await expect(insertEvent(person, { eventId: `ievo_h3_${ws.id}`, sequence: 2, kind: "assistant_message" }))
+      .rejects.toThrow(/interactive_task_events_turn_key_kind_check/);
+    await expect(insertEvent(person, { eventId: `ievo_h4_${ws.id}`, sequence: 2, kind: "progress", turnKey: "turn_1" }))
+      .rejects.toThrow(/interactive_task_events_turn_key_kind_check/);
+    await insertEvent(person, { eventId: `ievo_h5_${ws.id}`, sequence: 2, kind: "assistant_message", turnKey: "turn_1" });
+    await expect(insertEvent(person, { eventId: `ievo_h6_${ws.id}`, sequence: 3, kind: "assistant_message", turnKey: "turn_1" }))
+      .rejects.toThrow(/interactive_task_events_turn_key_idx/);
+    expect(await deleteProject(db, ws.id)).toEqual({ deleted: true });
+  });
+
+  it("0072 gives each trigger key exactly one task per workspace", async () => {
+    const a = await createProject(db, "Trigger Key A");
+    const b = await createProject(db, "Trigger Key B");
+    await insertTask(triggered(`itk_a1_${a.id}`, a.id));
+    await expect(insertTask(triggered(`itk_a2_${a.id}`, a.id)))
+      .rejects.toThrow(/interactive_tasks_trigger_key_idx/);
+    // Another workspace's alert with the same key text is a different task.
+    await insertTask(triggered(`itk_b1_${b.id}`, b.id));
+    // Human tasks carry no key, so any number coexist.
+    await insertTask(human(`itk_h1_${a.id}`, a.id));
+    await insertTask(human(`itk_h2_${a.id}`, a.id));
+    expect(await deleteProject(db, a.id)).toEqual({ deleted: true });
+    expect(await deleteProject(db, b.id)).toEqual({ deleted: true });
+  });
+
+  it("0072 accepts exactly the cloud trigger key, hashing event keys that do not fit in 200 characters", async () => {
+    const ws = await createProject(db, "Trigger Key Shape");
+    const id = (suffix: string) => `itks_${suffix}_${ws.id}`;
+    const eventKey = (length: number) => "e".repeat(length);
+    const hashOf = async (text: string) =>
+      (await db.query<{ h: string }>("select encode(sha256(convert_to($1::text, 'UTF8')), 'hex') as h", [text]))[0]?.h;
+    // 45-character prefix: an event key of 155 characters fits (200), 156 does not.
+    await insertTask(triggered(id("155"), ws.id, { eventKey: eventKey(155), triggerKey: `trigger:${ALERT}:${eventKey(155)}` }));
+    await expect(insertTask(triggered(id("155h"), ws.id, { eventKey: eventKey(155),
+      triggerKey: `trigger:${ALERT}:sha256:${await hashOf(eventKey(155))}` })))
+      .rejects.toThrow(/interactive_tasks_triggered_provenance_check/);
+    for (const length of [156, 500]) {
+      await expect(insertTask(triggered(id(`${length}r`), ws.id, { eventKey: eventKey(length),
+        triggerKey: `trigger:${ALERT}:${eventKey(length)}`.slice(0, 512) })))
+        .rejects.toThrow(/interactive_tasks_triggered_provenance_check/);
+      await insertTask(triggered(id(`${length}`), ws.id, { eventKey: eventKey(length),
+        triggerKey: `trigger:${ALERT}:sha256:${await hashOf(eventKey(length))}` }));
+    }
+    // The cloud caps event keys at 500 characters.
+    await expect(insertTask(triggered(id("501"), ws.id, { eventKey: eventKey(501),
+      triggerKey: `trigger:${ALERT}:sha256:${await hashOf(eventKey(501))}` }))).rejects.toThrow(/interactive_tasks_event_key_check/);
+    // The alert id is the canonical lowercase UUID the cloud prints.
+    await expect(insertTask(triggered(id("upper"), ws.id, { ruleId: ALERT.toUpperCase(), eventKey: "ev_9",
+      triggerKey: `trigger:${ALERT.toUpperCase()}:ev_9` }))).rejects.toThrow(/interactive_tasks_triggered_provenance_check/);
+    expect(await deleteProject(db, ws.id)).toEqual({ deleted: true });
+  });
+
+  it("0072 requires full provenance by origin and keeps automatic turns out of Cmd+L and the terminal", async () => {
+    const ws = await createProject(db, "Provenance Rules");
+    const id = (suffix: string) => `iprov_${suffix}_${ws.id}`;
+    // Triggered: key mirrors the alert and event; rule id, version, event key and hash are required.
+    await expect(insertTask(triggered(id("key"), ws.id, { triggerKey: `trigger:${ALERT}:other` })))
+      .rejects.toThrow(/interactive_tasks_triggered_provenance_check/);
+    for (const missing of ["ruleVersion", "payloadHash", "ruleId", "eventKey", "triggerKey"] as const) {
+      await expect(insertTask(triggered(id(missing), ws.id, { [missing]: null })))
+        .rejects.toThrow(/interactive_tasks_triggered_provenance_check/);
+    }
+    // No producer sends a check key yet, so it is optional.
+    await insertTask(triggered(id("no_check"), ws.id, { checkKey: null }));
+    // Human: no trigger provenance at all, field by field.
+    for (const [field, value] of [["ruleId", "alert_1"], ["ruleVersion", 1], ["checkKey", "check_1"], ["eventKey", "ev_1"],
+      ["payloadHash", "9".repeat(64)], ["triggerKey", "trigger:x"]] as const) {
+      await expect(insertTask(human(id(`human_${field}`), ws.id, { [field]: value })))
+        .rejects.toThrow(/interactive_tasks_human_provenance_check/);
+    }
+    // Scheduled: rule, key and payload hash.
+    await expect(insertTask({ id: id("sched"), workspaceId: ws.id, origin: "scheduled", surface: "imessage",
+      triggerKey: "reminder:r1", ruleId: "r1" })).rejects.toThrow(/interactive_tasks_scheduled_provenance_check/);
+    await insertTask({ id: id("sched_ok"), workspaceId: ws.id, origin: "scheduled", surface: "imessage",
+      triggerKey: "reminder:r1", ruleId: "r1", payloadHash: "8".repeat(64) });
+    // Surfaces: an automatic turn never renders in Cmd+L or the terminal; a human never types into the board.
+    for (const surface of ["cmdl", "terminal"]) {
+      await expect(insertTask(triggered(id(`auto_${surface}`), ws.id, { surface, triggerKey: `trigger:${ALERT}:ev_${surface}`,
+        eventKey: `ev_${surface}` }))).rejects.toThrow(/interactive_tasks_origin_surface_check/);
+    }
+    await insertTask(human(id("terminal"), ws.id, { surface: "terminal" }));
+    await expect(insertTask(human(id("human_board"), ws.id, { surface: "agent_tasks" })))
+      .rejects.toThrow(/interactive_tasks_origin_surface_check/);
+    await expect(insertTask({ id: id("bad_origin"), workspaceId: ws.id, origin: "system", surface: "imessage" }))
+      .rejects.toThrow(/interactive_tasks_origin_check/);
+    // An unknown surface fails the per-origin surface rule (Postgres reports the first failing CHECK).
+    await expect(insertTask(human(id("bad_surface"), ws.id, { surface: "triggered" })))
+      .rejects.toThrow(/interactive_tasks_(origin_)?surface_check/);
+    expect(await deleteProject(db, ws.id)).toEqual({ deleted: true });
+  });
+
+  it("0072 authorizes a terminal task's action only through a typed approval", async () => {
+    const ws = await createProject(db, "Terminal Approval");
+    const task = human(`itap_${ws.id}`, ws.id, { surface: "terminal" });
+    await insertTask(task);
+    const inv = (suffix: string) => `itap_${suffix}_${ws.id}`;
+    await insertAction(task, { invocationId: inv("pending") });
+    for (const state of ["authorized", "dispatching", "succeeded"]) {
+      await expect(insertAction(task, { invocationId: inv(`${state}_button`), proposalRef: `P_${state}`, state,
+        decisionSource: "host_confirmation" })).rejects.toThrow(/interactive_action_refs_terminal_approval_check/);
+      await expect(insertAction(task, { invocationId: inv(`${state}_none`), proposalRef: `P_${state}n`, state }))
+        .rejects.toThrow(/interactive_action_refs_terminal_approval_check/);
+    }
+    await insertAction(task, { invocationId: inv("typed"), proposalRef: "P_typed", state: "authorized", decisionSource: "typed_approval" });
+    // A decline by button is fine: declining needs no proof of who typed.
+    await insertAction(task, { invocationId: inv("declined"), proposalRef: "P_declined", state: "declined", decisionSource: "host_confirmation" });
+    // Other surfaces accept a host confirmation.
+    const cmdl = human(`itap_c_${ws.id}`, ws.id);
+    await insertTask(cmdl);
+    await insertAction(cmdl, { invocationId: inv("cmdl"), state: "authorized", decisionSource: "host_confirmation" });
+    expect(await deleteProject(db, ws.id)).toEqual({ deleted: true });
+  });
+
+  it("0072 authorizes an automatic task's proposal only after a re-prepare, even by direct SQL", async () => {
+    const ws = await createProject(db, "Automatic Reprepare");
+    const auto = triggered(`iarp_t_${ws.id}`, ws.id);
+    const sched = { id: `iarp_s_${ws.id}`, workspaceId: ws.id, origin: "scheduled", surface: "imessage",
+      triggerKey: "reminder:r1", ruleId: "r1", payloadHash: "8".repeat(64) };
+    await insertTask(auto);
+    await insertTask(sched);
+    const inv = (suffix: string) => `iarp_${suffix}_${ws.id}`;
+    // Revision 1 of an automatic turn may wait, be declined or be cancelled, never run.
+    for (const task of [auto, sched]) {
+      for (const state of ["authorized", "dispatching", "succeeded", "failed", "unknown"]) {
+        await expect(insertAction(task, { invocationId: inv(`${task.origin}_${state}`), proposalRef: `P_${state}`, state,
+          decisionSource: "host_confirmation" })).rejects.toThrow(/interactive_action_refs_automatic_reprepare_check/);
+      }
+    }
+    await insertAction(auto, { invocationId: inv("r1") });
+    await expect(db.query("update interactive_action_refs set state = 'authorized', decision_source = 'host_confirmation' where invocation_id = $1",
+      [inv("r1")])).rejects.toThrow(/interactive_action_refs_automatic_reprepare_check/);
+    await insertAction(auto, { invocationId: inv("declined"), proposalRef: "P_declined", state: "declined" });
+    // After Apply (a superseding revision) the new revision can be authorized.
+    await db.query("update interactive_action_refs set state = 'superseded' where invocation_id = $1", [inv("r1")]);
+    await insertAction(auto, { invocationId: inv("r2"), revision: 2, supersedes: inv("r1"), state: "authorized",
+      decisionSource: "host_confirmation" });
+    // A human task's own revision 1 is approvable as before.
+    const person = human(`iarp_h_${ws.id}`, ws.id);
+    await insertTask(person);
+    await insertAction(person, { invocationId: inv("human_r1"), state: "authorized", decisionSource: "host_confirmation" });
+    expect(await deleteProject(db, ws.id)).toEqual({ deleted: true });
+  });
+
+  it("0072 keeps one live revision per proposal and an unforked lineage inside the proposal", async () => {
+    const ws = await createProject(db, "Proposal Lineage");
+    const task = human(`ilin_${ws.id}`, ws.id);
+    await insertTask(task);
+    const inv = (suffix: string) => `ilin_${suffix}_${ws.id}`;
+    await insertAction(task, { invocationId: inv("r1"), continuationKey: "cont_1" });
+
+    // A second live row for the same proposal is refused; so is revision 2 with no predecessor.
+    await expect(insertAction(task, { invocationId: inv("dup"), revision: 2, supersedes: inv("r1") }))
+      .rejects.toThrow(/interactive_action_refs_proposal_head_idx/);
+    await expect(insertAction(task, { invocationId: inv("orphan"), proposalRef: "P9", revision: 2 }))
+      .rejects.toThrow(/interactive_action_refs_revision_lineage_check/);
+
+    // Supersede, then insert the head: the continuation key moves to the new revision.
+    await db.query("update interactive_action_refs set state = 'superseded' where invocation_id = $1", [inv("r1")]);
+    await insertAction(task, { invocationId: inv("r2"), revision: 2, supersedes: inv("r1"), continuationKey: "cont_1" });
+
+    // The lineage cannot fork (two revisions superseding r1), even if both are superseded.
+    await db.query("update interactive_action_refs set state = 'superseded' where invocation_id = $1", [inv("r2")]);
+    await expect(insertAction(task, { invocationId: inv("fork"), revision: 3, supersedes: inv("r1") }))
+      .rejects.toThrow(/interactive_action_refs_supersedes_idx/);
+    // Nor can a revision claim a predecessor from another proposal.
+    await insertAction(task, { invocationId: inv("p2"), proposalRef: "P2" });
+    await expect(insertAction(task, { invocationId: inv("cross"), revision: 3, supersedes: inv("p2") }))
+      .rejects.toThrow(/foreign key/i);
+    await insertAction(task, { invocationId: inv("r3"), revision: 3, supersedes: inv("r2") });
+
+    // New states are accepted; unknown ones are not.
+    await db.query("update interactive_action_refs set state = 'expired' where invocation_id = $1", [inv("r3")]);
+    await expect(db.query("update interactive_action_refs set state = 'stale' where invocation_id = $1", [inv("r3")]))
+      .rejects.toThrow(/interactive_action_refs_state_check/);
+    expect(await deleteProject(db, ws.id)).toEqual({ deleted: true });
+    expect(await db.query("select 1 from interactive_action_refs where workspace_id = $1", [ws.id])).toEqual([]);
+  });
+
+  it("deletes a project that holds an interactive task, its events and action refs (0072)", async () => {
+    const created = await createProject(db, "Delete Me Interactive");
+    const other = await createProject(db, "Keep Me Interactive");
+    const stamp = Date.now();
+    await seedInteractiveTask(created.id, `doomed_${stamp}`);
+    await seedInteractiveTask(other.id, `kept_${stamp}`);
+
+    expect(await deleteProject(db, created.id)).toEqual({ deleted: true });
+    expect(await findProject(db, created.id)).toBeNull();
+    for (const table of ["interactive_action_refs", "interactive_task_events", "interactive_tasks"]) {
+      expect(
+        await db.query(`select 1 from ${table} where workspace_id = $1`, [created.id])
+      ).toEqual([]);
+      // No over-deletion across workspaces.
+      expect(
+        await db.query(`select 1 from ${table} where workspace_id = $1`, [other.id])
+      ).toHaveLength(1);
+    }
+    expect(await deleteProject(db, other.id)).toEqual({ deleted: true });
   });
 });
 

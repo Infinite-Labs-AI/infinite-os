@@ -35,6 +35,27 @@ export type {
   CompactSessionResult
 } from "./session-store.js";
 export { createSessionStore } from "./session-store.js";
+export {
+  InteractiveTaskConflictError,
+  createInteractiveTaskStore,
+  interactiveTriggerKey
+} from "./interactive-task-store.js";
+export { MAX_INTERACTIVE_GRANT_MS } from "./interactive-task-types.js";
+export type {
+  ApplyInteractiveTaskTransitionInput,
+  CreateAutomaticInteractiveTaskInput,
+  CreateHumanInteractiveTaskInput,
+  CreateInteractiveTaskInput,
+  InteractiveTaskStore,
+  InteractiveTaskStoreDb,
+  InteractiveTaskStoreOptions,
+  InteractiveTaskTransition,
+  ListActiveInteractiveTasksInput,
+  ListLiveProposalsInput,
+  ListRecoverableActionsInput,
+  PreparedInteractiveActionInput,
+  RevisedInteractiveActionInput
+} from "./interactive-task-types.js";
 export { createConfiguredModelClient } from "./model-client.js";
 export { assembleInfiniteOsPrompt } from "./prompt-assembler.js";
 export { createSourceAwareQueryAdvisor } from "./query-advisor.js";
