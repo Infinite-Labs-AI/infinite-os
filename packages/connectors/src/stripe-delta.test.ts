@@ -757,6 +757,26 @@ describe("Stripe payment evidence (evidence only, minimised)", () => {
     expect(JSON.stringify(minimised)).not.toMatch(/@|Example Street|secret/);
   });
 
+  it("copies only JSON SCALARS for scalar fields: an object, array or non-finite value is dropped", () => {
+    // Every allowlisted scalar is a string, number, boolean or null in Stripe's shapes today. If one
+    // ever arrived as an object it could carry anything, so the projection must not copy it whole.
+    const minimised = stripeMinimisePaymentEvidence("dispute", {
+      id: "dp_shape",
+      object: "dispute",
+      status: { value: "needs_response", email: "buyer@example.test" },
+      reason: ["fraudulent", "buyer@example.test"],
+      amount: Number.NaN,
+      created: Number.POSITIVE_INFINITY,
+      currency: "usd",
+      livemode: false,
+      evidence_details: { due_by: { at: 1786617599, note: "buyer@example.test" } },
+    });
+    expect(minimised).toEqual({ id: "dp_shape", object: "dispute", currency: "usd", livemode: false });
+    // null is a scalar and is kept as an honest "Stripe said null".
+    expect(stripeMinimisePaymentEvidence("refund", { id: "re_n", reason: null }))
+      .toEqual({ id: "re_n", reason: null });
+  });
+
   it("never invents a value: an absent amount stays absent, not 0", () => {
     const minimised = stripeMinimisePaymentEvidence("refund", {
       id: "re_partial",
@@ -2978,7 +2998,11 @@ describe("Stripe delta lane against real PGlite", () => {
     const controlSrc = `src_${randomUUID()}`;
     await seedImportedSource(controlWs, controlSrc);
     const controlBefore = await workspaceTableHashes(controlWs);
-    await runSync(controlWs, controlSrc, deltaRouter({ events: [] }));
+    const controlUrls: string[] = [];
+    await runSync(controlWs, controlSrc, deltaRouter({
+      events: [],
+      onUrl: (url) => controlUrls.push(url.toString()),
+    }));
     const controlChanged = changedTables(controlBefore, await workspaceTableHashes(controlWs));
 
     const workspaceId = `ws_${randomUUID()}`;
@@ -2999,8 +3023,10 @@ describe("Stripe delta lane against real PGlite", () => {
       events: [...PAYMENT_FIXTURE.kept, ...PAYMENT_FIXTURE.ignored],
       onUrl: (url) => urls.push(url),
     }));
-    expect(urls.map((url) => url.pathname).filter((path) => path !== "/v1/customers"))
-      .toEqual(["/v1/events"]);
+    // READ BUDGET: byte-for-byte the same requests as the zero-event control — same endpoints,
+    // same window, same count. Payment events cost nothing beyond the page they arrived on.
+    expect(urls.map((url) => url.toString())).toEqual(controlUrls);
+    expect(controlUrls.some((url) => url.includes("/v1/events?"))).toBe(true);
 
     // Exactly what an empty delta run touches, plus the evidence rows — nothing else anywhere.
     const changed = changedTables(before, await workspaceTableHashes(workspaceId));
@@ -3111,6 +3137,128 @@ describe("Stripe delta lane against real PGlite", () => {
     const canonicalAfterSecond = await canonicalValueHashes(workspaceId);
     for (const table of CANONICAL_STRIPE_TABLES) {
       expect(canonicalAfterSecond[table], table).toBe(canonicalAfterFirst[table]);
+    }
+  }, 180_000);
+
+  it("keeps a RESUMED v1 segment labelled v1, and relabels only a fully re-read CLOSED window", async () => {
+    // Deploy boundary: a window opened under v1 read its earlier pages with the parser that DROPPED
+    // payment events. Closing it under v2 must not claim payment coverage for those pages.
+    const workspaceId = `ws_${randomUUID()}`;
+    const sourceId = `src_${randomUUID()}`;
+    await seedSource(workspaceId, sourceId);
+    await seedHealthyWatermark(workspaceId, sourceId);
+    const fromMs = CURSOR_END_MS - 25 * 60 * 1000;
+    await seedOpenSegment(workspaceId, sourceId, fromMs, Date.parse(SEGMENT_TO));
+
+    await runSync(workspaceId, sourceId, deltaRouter({ events: PAYMENT_FIXTURE.kept }));
+    const resumed = await db.query<{ status: string; parser_version: string }>(
+      `select status, parser_version from stripe_event_segments
+        where workspace_id = $1 and source_id = $2`,
+      [workspaceId, sourceId],
+    );
+    expect(resumed).toEqual([{ status: "closed", parser_version: "stripe-delta-events-v1" }]);
+
+    // A CLOSED v1 window re-read in full (the deliberate overlap replays these exact bounds) has now
+    // been observed end to end by v2, so it takes the current version.
+    await seedHealthyWatermark(workspaceId, sourceId);
+    await runSync(workspaceId, sourceId, deltaRouter({ events: PAYMENT_FIXTURE.kept }));
+    const reread = await db.query<{ status: string; parser_version: string }>(
+      `select status, parser_version from stripe_event_segments
+        where workspace_id = $1 and source_id = $2`,
+      [workspaceId, sourceId],
+    );
+    expect(reread).toEqual([{ status: "closed", parser_version: "stripe-delta-events-v2" }]);
+  }, 120_000);
+
+  it("payment events ride an over-budget REFUSAL as minimised evidence and never count toward the budget", async () => {
+    const at = Math.floor(Date.parse(SEGMENT_TO) / 1000) - 60;
+    const customerEvents = (count: number, prefix: string) => Array.from({ length: count }, (_, index) => ({
+      id: `evt_${prefix}_${index}`,
+      type: "customer.updated",
+      created: at,
+      api_version: "2025-06-30.basil",
+      livemode: true,
+      data: { object: { id: `cus_${prefix}_${index}`, metadata: {} } },
+    }));
+
+    // AT the budget, plus the whole payment story: still applied. Eleven payment events that named
+    // customers, charges and intents added NOTHING to the retrieve count.
+    {
+      const workspaceId = `ws_${randomUUID()}`;
+      const sourceId = `src_${randomUUID()}`;
+      await seedSource(workspaceId, sourceId);
+      await seedHealthyWatermark(workspaceId, sourceId);
+      const retrieved: string[] = [];
+      await runSync(workspaceId, sourceId, (url) => {
+        if (url.pathname === "/v1/customers") return { data: [], has_more: false };
+        if (url.pathname === "/v1/events") {
+          return {
+            data: [...customerEvents(STRIPE_DELTA_MAX_REFETCH_PER_RUN, "at"), ...PAYMENT_FIXTURE.kept],
+            has_more: false,
+          };
+        }
+        const [, , collection, id] = url.pathname.split("/");
+        if (collection === "customers" && id) {
+          retrieved.push(id);
+          return { id, metadata: {} };
+        }
+        throw new Error(`unexpected Stripe URL: ${url.toString()}`);
+      });
+      expect(retrieved).toHaveLength(STRIPE_DELTA_MAX_REFETCH_PER_RUN);
+      expect(retrieved.every((id) => id.startsWith("cus_at_"))).toBe(true);
+      const watermark = await db.one<{ pending_full_refresh_reason: string | null }>(
+        `select pending_full_refresh_reason from stripe_sync_watermarks
+          where workspace_id = $1 and source_id = $2`,
+        [workspaceId, sourceId],
+      );
+      expect(watermark?.pending_full_refresh_reason).toBeNull();
+    }
+
+    // ONE past the budget, plus the payment story: refused WHOLE, and the payment events are kept
+    // anyway — minimised exactly as on the applied path.
+    const workspaceId = `ws_${randomUUID()}`;
+    const sourceId = `src_${randomUUID()}`;
+    await seedSource(workspaceId, sourceId);
+    await seedHealthyWatermark(workspaceId, sourceId);
+    const paths: string[] = [];
+    await runSync(workspaceId, sourceId, (url) => {
+      paths.push(url.pathname);
+      if (url.pathname === "/v1/customers") return { data: [], has_more: false };
+      if (url.pathname === "/v1/events") {
+        return {
+          data: [...customerEvents(STRIPE_DELTA_MAX_REFETCH_PER_RUN + 1, "over"), ...PAYMENT_FIXTURE.kept],
+          has_more: false,
+        };
+      }
+      throw new Error(`unexpected Stripe URL: ${url.toString()}`);
+    });
+    expect(paths.filter((path) => path !== "/v1/customers" && path !== "/v1/events")).toEqual([]);
+    const watermark = await db.one<{ pending_full_refresh_reason: string | null }>(
+      `select pending_full_refresh_reason from stripe_sync_watermarks
+        where workspace_id = $1 and source_id = $2`,
+      [workspaceId, sourceId],
+    );
+    expect(watermark?.pending_full_refresh_reason).toBe("delta_fanout_exceeded");
+
+    const payment = await db.query<{
+      stripe_event_id: string; event_type: string; object_kind: string; object_external_id: string;
+      payload: Record<string, unknown>; previous_attributes: Record<string, unknown> | null;
+    }>(
+      `select stripe_event_id, event_type, object_kind, object_external_id, payload,
+              previous_attributes
+         from stripe_event_evidence
+        where workspace_id = $1 and source_id = $2 and object_kind <> 'customer'`,
+      [workspaceId, sourceId],
+    );
+    expect(payment).toHaveLength(PAYMENT_FIXTURE.kept.length);
+    for (const row of payment) {
+      expect({
+        eventType: row.event_type,
+        objectKind: row.object_kind,
+        objectExternalId: row.object_external_id,
+        payload: row.payload,
+        previousAttributes: row.previous_attributes,
+      }, row.stripe_event_id).toEqual(EXPECTED_PAYMENT_EVIDENCE[row.stripe_event_id]);
     }
   }, 180_000);
 });

@@ -1286,7 +1286,13 @@ export async function writeStripeSyncLaneAtClose(
                         else excluded.refetch_count end,
        closed_at = case when excluded.status = 'closed'
                      then coalesce(stripe_event_segments.closed_at, now()) else null end,
-       parser_version = excluded.parser_version,
+       -- A RESUMED open segment keeps the version that read its earlier pages: a window opened
+       -- under v1 dropped payment events on those pages, and relabelling it v2 at close would
+       -- claim payment coverage it never had. A re-read of a CLOSED window re-observes every
+       -- event, so it takes the current version.
+       parser_version = case when stripe_event_segments.status = 'open'
+                          then stripe_event_segments.parser_version
+                          else excluded.parser_version end,
        updated_at = now()
      returning id`,
     [
