@@ -240,6 +240,7 @@ describe("host restart recovery", { timeout: 60_000 }, () => {
     const a = await taskAt(f, "t_a", "authorized", { actorId: ACTOR_A });
     const b = await taskAt(f, "t_b", "dispatching", { actorId: ACTOR_B });
     const other = await taskAt(f, "t_other", "authorized", { workspaceId: WORKSPACE_B });
+    const otherFollowUp = await taskAt(f, "t_other_run", "running_follow_up", { workspaceId: WORKSPACE_B });
 
     const report = await recoverInteractiveTasksAfterHostRestart(f, { workspaceId: WORKSPACE_A, bootId: "boot_1" });
 
@@ -248,6 +249,7 @@ describe("host restart recovery", { timeout: 60_000 }, () => {
     expect((await actionOf(f, a.scope)).action.state).toBe("expired");
     expect((await actionOf(f, b.scope)).action.state).toBe("unknown");
     expect((await actionOf(f, other.scope)).action.state).toBe("authorized");
+    expect((await actionOf(f, otherFollowUp.scope)).action.continuationState).toBe("running");
   });
 
   it("pages past the first 50 recoverable actions and the first 50 follow-ups", async () => {
