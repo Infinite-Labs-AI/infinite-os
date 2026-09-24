@@ -45,6 +45,7 @@ import {
   filterCuratedMemoryCandidates,
   type InfiniteOsModelClient,
   type ScopedAppTools,
+  type ChatInput,
   type ChatSessionStore,
   type TurnModel
 } from "@infinite-os/llm-controller";
@@ -154,7 +155,15 @@ export const APP_CAPABILITIES = [
   // The local interactive task ledger's operator routes (/interactive/*, migration 0072). The
   // desktop records Cmd+L tasks, proposals and approvals here only when this flag is present;
   // an older bundle without the routes keeps the desktop on its in-memory confirmation path.
-  INTERACTIVE_TASKS_CAPABILITY
+  INTERACTIVE_TASKS_CAPABILITY,
+  // /gateway/turn and /gateway/turn/stream accept `agentProfile` ("general-marketing-v1" runs the
+  // general marketing role prompt) and `interactiveFeatures`. The desktop fails CLOSED on this flag:
+  // an older daemon would ignore the field and silently run a general turn on the legacy prompt.
+  "interactive_general_profile",
+  // Both turn routes accept `turnOrigin: "continuation"`: the message is the host's report of an
+  // approved action's outcome, stored as a host outcome (never as the user's words), with no query
+  // advisor and no curated-memory harvest. Desktop fails CLOSED on it for continuation turns.
+  "interactive_turn_origin"
 ] as const;
 
 type ScopedAppToolsParseResult =
@@ -257,6 +266,50 @@ function parseScopedAppTools(value: unknown): ScopedAppToolsParseResult {
         })
     }
   };
+}
+
+const INTERACTIVE_AGENT_PROFILES = new Set<string>(["legacy-growth-operator-v1", "general-marketing-v1"]);
+const INTERACTIVE_FEATURES = new Set<string>(["workspace.app-tools.v1", "actions.confirmation.v1", "actions.continuation.v1"]);
+
+type InteractiveTurnOptions = Pick<ChatInput, "agentProfile" | "interactiveFeatures" | "turnOrigin">;
+
+/**
+ * The interactive fields of a gateway turn. Strict like the scoped-tool parser: an unknown value is
+ * a 400, never coerced to a default, and a feature the turn does not really have is refused.
+ */
+function parseInteractiveTurnOptions(
+  body: GatewayTurnRequestBody | undefined,
+  scopedAppTools: ScopedAppTools | undefined
+): { value: InteractiveTurnOptions; error?: undefined } | { value?: undefined; error: { code: string; message: string } } {
+  const value: InteractiveTurnOptions = {};
+  const profile = body?.agentProfile;
+  if (profile !== undefined && profile !== null) {
+    if (typeof profile !== "string" || !INTERACTIVE_AGENT_PROFILES.has(profile)) {
+      return { error: { code: "invalid_agent_profile", message: "The requested agent profile is not supported." } };
+    }
+    value.agentProfile = profile as InteractiveTurnOptions["agentProfile"];
+  }
+  const features = body?.interactiveFeatures;
+  if (features !== undefined && features !== null) {
+    if (!Array.isArray(features) || features.length > INTERACTIVE_FEATURES.size ||
+      features.some((feature) => typeof feature !== "string" || !INTERACTIVE_FEATURES.has(feature))) {
+      return { error: { code: "invalid_interactive_features", message: "Interactive features must name supported features." } };
+    }
+    const unique = [...new Set(features as string[])] as NonNullable<InteractiveTurnOptions["interactiveFeatures"]>;
+    // App tools are described to the model only when the turn really unions them in.
+    if (unique.includes("workspace.app-tools.v1") && scopedAppTools?.mode !== "union") {
+      return { error: { code: "interactive_features_unavailable", message: "workspace.app-tools.v1 needs union-mode app tools on this turn." } };
+    }
+    value.interactiveFeatures = unique;
+  }
+  const origin = body?.turnOrigin;
+  if (origin !== undefined && origin !== null) {
+    if (origin !== "human" && origin !== "continuation") {
+      return { error: { code: "invalid_turn_origin", message: "Turn origin must be \"human\" or \"continuation\"." } };
+    }
+    value.turnOrigin = origin;
+  }
+  return { value };
 }
 
 function invalidScopedAppTools(message: string): ScopedAppToolsParseResult {
@@ -393,6 +446,9 @@ export interface GatewayTurnRequestBody {
   message?: string;
   sessionId?: string;
   appTools?: unknown;
+  agentProfile?: unknown;
+  interactiveFeatures?: unknown;
+  turnOrigin?: unknown;
 }
 
 export interface ConnectorOAuthSessionRequestBody {
@@ -805,6 +861,11 @@ export function createApp(options: {
       reply.code(400);
       return { ok: false, error: scopedAppTools.error };
     }
+    const interactive = parseInteractiveTurnOptions(request.body, scopedAppTools.value);
+    if (interactive.error) {
+      reply.code(400);
+      return { ok: false, error: interactive.error };
+    }
     try {
       const response = await llmController.chat({
         model,
@@ -814,7 +875,8 @@ export function createApp(options: {
         workspaceId: ws,
         actorId,
         surface: platformToSurface(platform),
-        ...(scopedAppTools.value ? { scopedAppTools: scopedAppTools.value } : {})
+        ...(scopedAppTools.value ? { scopedAppTools: scopedAppTools.value } : {}),
+        ...interactive.value
       });
       return {
         ok: true,
@@ -885,6 +947,11 @@ export function createApp(options: {
       reply.code(400);
       return { ok: false, error: scopedAppTools.error };
     }
+    const interactive = parseInteractiveTurnOptions(request.body, scopedAppTools.value);
+    if (interactive.error) {
+      reply.code(400);
+      return { ok: false, error: interactive.error };
+    }
 
     // Hijack the socket and stream SSE. Fastify will not serialize a return value after hijack().
     reply.hijack();
@@ -910,6 +977,7 @@ export function createApp(options: {
         progressMode: "both",
         onUsage: async (usage) => { send("progress", { type: "usage.update", usage }); },
         ...(scopedAppTools.value ? { scopedAppTools: scopedAppTools.value } : {}),
+        ...interactive.value,
         onProgress: async (event) => {
           send("progress", event);
         }
