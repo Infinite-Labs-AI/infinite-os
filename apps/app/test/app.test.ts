@@ -101,7 +101,9 @@ describe("Infinite OS app-hosted API/MCP skeleton", () => {
         "meta_live_insights_v2",
         // update_meta_budget also accepts lifetimeBudget. A desktop fails CLOSED on this flag so
         // an older daemon never sees a lifetime amount it would reject as a missing dailyBudget.
-        "meta_lifetime_budget_writes"
+        "meta_lifetime_budget_writes",
+        // update_meta_ad (existing-ad rename / creative swap). A desktop fails CLOSED on it.
+        "update_meta_ad"
       ])
     );
   });
@@ -300,6 +302,20 @@ describe("Infinite OS app-hosted API/MCP skeleton", () => {
       expect(response.json()).toMatchObject({
         error: { code: "operator_authority_required" }
       });
+    }
+  });
+
+  it("denies a tool_agent update_meta_ad via /tools/call with 403 (operator-only)", async () => {
+    const app = createApp({ database: workspaceProbeDb() });
+    for (const url of ["/tools/call", "/mcp/tools/call"]) {
+      const response = await app.inject({
+        method: "POST",
+        url,
+        headers: { authorization: `Bearer ${READ_TOKEN}`, "x-growth-os-workspace": WORKSPACE },
+        payload: { actionId: "update_meta_ad", input: { sourceId: "src_meta", entityId: "120000000000000001", name: "x" } }
+      });
+      expect(response.statusCode, `${url} update_meta_ad should 403 for tool_agent`).toBe(403);
+      expect(response.json()).toMatchObject({ error: { code: "operator_authority_required" } });
     }
   });
 

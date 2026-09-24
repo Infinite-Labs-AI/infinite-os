@@ -17,11 +17,13 @@ import {
   resolveMetaAdsCredential,
   setMetaEntityStatus,
   updateMetaBudget,
+  updateMetaAd,
   ConnectorError,
   type ConnectionTestResult,
   type MetaAdSetTargeting,
   type MetaAdsCredential,
   type MetaAdsCliExecution,
+  type MetaAdUpdateField,
   type MetaBudgetKind,
   type MetaEntityStatus,
   type MetaWriteEntity,
@@ -167,6 +169,7 @@ export function createActionHandlers(
     create_meta_ad: (input, context) => createMetaAdHandler(db, context, input, metaAdsCliExecution, encryptionKey, expectedMetaCredential),
     set_meta_entity_status: (input, context) => setMetaEntityStatusHandler(db, context, input, metaAdsCliExecution, encryptionKey, expectedMetaCredential),
     update_meta_budget: (input, context) => updateMetaBudgetHandler(db, context, input, metaAdsCliExecution, encryptionKey, expectedMetaCredential),
+    update_meta_ad: (input, context) => updateMetaAdHandler(db, context, input, metaAdsCliExecution, encryptionKey, expectedMetaCredential),
     delete_meta_entity: (input, context) => deleteMetaEntityHandler(db, context, input, metaAdsCliExecution, encryptionKey, expectedMetaCredential)
   };
 }
@@ -2754,6 +2757,102 @@ async function updateMetaBudgetHandler(
     action,
     context.authority,
     { id: result.id, entity: result.entity, updated: true },
+    ["integration_audit_log"],
+    "ok"
+  );
+}
+
+// Existing-ad edit: rename and/or creative swap. Validates EVERYTHING before resolving the
+// credential — a status key (an edit is never a go-live), no change, a blank name, or a
+// non-numeric ad/creative id is refused with no provider call and no audit row. Presence is read
+// from the raw field (not optionalString) so a blank name is an error, never a silent no-op.
+function requiredMetaAdUpdate(input: unknown): {
+  adId: string;
+  name?: string;
+  creativeId?: string;
+  changed: MetaAdUpdateField[];
+} {
+  if (objectField(input, "status") !== undefined) {
+    throw new Error("update_meta_ad_status_not_allowed: use set_meta_entity_status to pause or activate an ad");
+  }
+  const adId = requiredString(input, "entityId");
+  if (!/^\d+$/.test(adId)) {
+    throw new Error(`invalid_meta_ad_id:${adId}`);
+  }
+  const rawName = objectField(input, "name");
+  const rawCreativeId = objectField(input, "creativeId");
+  const changed: MetaAdUpdateField[] = [];
+  if (rawName !== undefined) {
+    if (typeof rawName !== "string" || rawName.trim() === "") {
+      throw new Error("invalid_meta_ad_name: name must be a non-empty string");
+    }
+    changed.push("name");
+  }
+  if (rawCreativeId !== undefined) {
+    if (typeof rawCreativeId !== "string" || !/^\d+$/.test(rawCreativeId)) {
+      throw new Error("invalid_meta_creative_id: creativeId must be a numeric creative id");
+    }
+    changed.push("creative");
+  }
+  if (changed.length === 0) {
+    throw new Error("update_meta_ad_no_change: pass name and/or creativeId");
+  }
+  return {
+    adId,
+    ...(rawName === undefined ? {} : { name: rawName as string }),
+    ...(rawCreativeId === undefined ? {} : { creativeId: rawCreativeId as string }),
+    changed
+  };
+}
+
+// Operator-only, INLINE (never db.createJob — a write never touches the worker's retry
+// machinery). The audit records WHICH fields changed (changed_fields), never the new name or
+// creative id (INV-6 spirit: kinds, not content).
+async function updateMetaAdHandler(
+  db: InfiniteOsDb,
+  context: SessionContext,
+  input: unknown,
+  cliExecution?: MetaAdsCliExecution,
+  encryptionKey?: string,
+  expectedCredential?: ExpectedMetaCredential
+): Promise<ActionEnvelope> {
+  const sourceId = requiredString(input, "sourceId");
+  const update = requiredMetaAdUpdate(input);
+  const action: InfiniteOsActionId = "update_meta_ad";
+  const credential = await resolveMetaCredentialForWrite(
+    db,
+    context,
+    sourceId,
+    cliExecution,
+    encryptionKey,
+    expectedCredential
+  );
+  let result;
+  try {
+    result = await updateMetaAd(credential, update.adId, {
+      ...(update.name === undefined ? {} : { name: update.name }),
+      ...(update.creativeId === undefined ? {} : { creativeId: update.creativeId })
+    });
+  } catch (error) {
+    await metaAuditLog(db, context, sourceId, action, "failed", {
+      action,
+      entity: "ad",
+      entity_id: update.adId,
+      changed_fields: update.changed,
+      error_code: metaErrorCode(error)
+    });
+    throw error;
+  }
+  await metaAuditLog(db, context, sourceId, action, "succeeded", {
+    action,
+    entity: "ad",
+    entity_id: update.adId,
+    changed_fields: result.changed
+  });
+  return envelope(
+    action,
+    context.authority,
+    { id: result.id, entity: "ad", updated: true, changed: result.changed },
     ["integration_audit_log"],
     "ok"
   );

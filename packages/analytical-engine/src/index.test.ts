@@ -7164,6 +7164,7 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
           ["create_meta_ad", { sourceId: "src_meta", adsetId: "adset_1", creativeId: "creative_1", name: "Stale" }],
           ["set_meta_entity_status", { sourceId: "src_meta", entityId: "campaign_1", entity: "campaign", status: "PAUSED" }],
           ["update_meta_budget", { sourceId: "src_meta", entityId: "campaign_1", entity: "campaign", dailyBudget: 100 }],
+          ["update_meta_ad", { sourceId: "src_meta", entityId: "120000000000001", name: "Stale" }],
           ["delete_meta_entity", { sourceId: "src_meta", entityId: "campaign_1", entity: "campaign" }]
         ] as const;
         for (const [actionId, input] of cases) {
@@ -8321,6 +8322,84 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
           ).rejects.toThrow(/invalid_lifetime_budget/);
         }
         expect(calls).toHaveLength(0);
+      }
+    );
+  });
+
+  it("updates an existing ad INLINE (POST /{adId} name + creative only, NO status) and audits the change KINDS, not the content", async () => {
+    const audits: AuditRow[] = [];
+    const db = metaWriteTestDb({ audits });
+    await withGraph(
+      () => jsonResponse({ success: true }),
+      async (calls) => {
+        const handlers = createActionHandlers(db);
+        const result = await handlers.update_meta_ad?.(
+          { sourceId: "src_meta", entityId: "120000000000557", name: "Secret launch name", creativeId: "120000000000999" },
+          operatorContext
+        );
+        expect(calls).toHaveLength(1);
+        expect(calls[0].url).toBe("https://graph.facebook.com/v25.0/120000000000557");
+        expect(calls[0].body).toEqual({ name: "Secret launch name", creative: { creative_id: "120000000000999" } });
+        expect(calls[0].body).not.toHaveProperty("status");
+        expect(result?.data).toMatchObject({ id: "120000000000557", entity: "ad", updated: true, changed: ["name", "creative"] });
+
+        const audit = audits.find((row) => row.action === "update_meta_ad");
+        expect(audit?.status).toBe("succeeded");
+        expect(audit?.actor_type).toBe("operator");
+        expect(audit?.details).toMatchObject({
+          entity: "ad",
+          entity_id: "120000000000557",
+          changed_fields: ["name", "creative"]
+        });
+        const serialized = JSON.stringify(audits);
+        expect(serialized).not.toContain("Secret launch name");
+        expect(serialized).not.toContain("120000000000999");
+        expect(serialized).not.toContain("secret-meta-token");
+      }
+    );
+  });
+
+  it("AD-UPDATE GUARD: a status key, no change, a blank name, or a non-numeric id is refused — NO POST", async () => {
+    const audits: AuditRow[] = [];
+    const db = metaWriteTestDb({ audits });
+    await withGraph(
+      () => jsonResponse({ success: true }),
+      async (calls) => {
+        const handlers = createActionHandlers(db);
+        const cases: Array<[Record<string, unknown>, RegExp]> = [
+          [{ sourceId: "src_meta", entityId: "120000000000557", name: "x", status: "ACTIVE" }, /update_meta_ad_status_not_allowed/],
+          [{ sourceId: "src_meta", entityId: "120000000000557", status: "PAUSED" }, /update_meta_ad_status_not_allowed/],
+          [{ sourceId: "src_meta", entityId: "120000000000557" }, /update_meta_ad_no_change/],
+          [{ sourceId: "src_meta", entityId: "120000000000557", name: "  " }, /invalid_meta_ad_name/],
+          [{ sourceId: "src_meta", entityId: "120000000000557", creativeId: "cr_9" }, /invalid_meta_creative_id/],
+          [{ sourceId: "src_meta", entityId: "ad_557", name: "x" }, /invalid_meta_ad_id/]
+        ];
+        for (const [input, error] of cases) {
+          await expect(handlers.update_meta_ad?.(input, operatorContext)).rejects.toThrow(error);
+        }
+        expect(calls).toHaveLength(0);
+        // Refused before the credential is even resolved, so nothing reached the audit log.
+        expect(audits.filter((row) => row.action === "update_meta_ad")).toHaveLength(0);
+      }
+    );
+  });
+
+  it("audits an ad-update failure (non-retryable) with the change kinds and re-throws", async () => {
+    const audits: AuditRow[] = [];
+    const db = metaWriteTestDb({ audits });
+    await withGraph(
+      () => jsonResponse({ error: { message: "boom" } }, 500),
+      async () => {
+        await expect(
+          createActionHandlers(db).update_meta_ad?.(
+            { sourceId: "src_meta", entityId: "120000000000557", creativeId: "120000000000999" },
+            operatorContext
+          )
+        ).rejects.toMatchObject({ retryable: false });
+        const audit = audits.find((row) => row.action === "update_meta_ad");
+        expect(audit?.status).toBe("failed");
+        expect(audit?.details).toMatchObject({ entity: "ad", changed_fields: ["creative"] });
+        expect(JSON.stringify(audits)).not.toContain("120000000000999");
       }
     );
   });

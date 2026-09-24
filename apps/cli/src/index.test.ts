@@ -12777,6 +12777,55 @@ describe("meta command (CLI write surface + confirm gates)", () => {
     expect(toolCalls(api).length).toBe(0);
   });
 
+  it("ad update fires update_meta_ad with name + creativeId and NO status, behind the standard write gate", async () => {
+    const api = stubToolsApi();
+    const confirmMutation = vi.fn(async () => true);
+    await metaCommand(
+      ["ad", "update", "120000000000000070", "--source-id", "src_meta", "--name", "Spring v2", "--creative-id", "120000000000000080"],
+      ENV,
+      { confirmMutation }
+    );
+    expect(confirmMutation).toHaveBeenCalledTimes(1);
+    const summary = JSON.stringify(confirmMutation.mock.calls[0]);
+    expect(summary).toContain("rename to \\\"Spring v2\\\"");
+    expect(summary).toContain("use creative 120000000000000080");
+    const body = toolCalls(api)[0]?.body as { actionId?: string; input?: Record<string, unknown> };
+    expect(body).toMatchObject({
+      actionId: "update_meta_ad",
+      input: { sourceId: "src_meta", entityId: "120000000000000070", name: "Spring v2", creativeId: "120000000000000080" }
+    });
+    expect(body.input).not.toHaveProperty("status");
+  });
+
+  it("ad update with only --creative-id sends creativeId only", async () => {
+    const api = stubToolsApi();
+    await metaCommand(
+      ["ad", "update", "120000000000000070", "--source-id", "src_meta", "--creative-id", "120000000000000080", "--yes"],
+      ENV,
+      {}
+    );
+    const body = toolCalls(api)[0]?.body as { input?: Record<string, unknown> };
+    expect(body.input).toEqual({ sourceId: "src_meta", entityId: "120000000000000070", creativeId: "120000000000000080" });
+  });
+
+  it("update is ad-only and needs a change; a declined gate issues NO /tools/call", async () => {
+    const api = stubToolsApi();
+    await expect(
+      metaCommand(["campaign", "update", "120000000000000010", "--source-id", "src_meta", "--name", "x", "--yes"], ENV, {})
+    ).rejects.toThrow(/only ads can be updated/);
+    await expect(
+      metaCommand(["ad", "update", "120000000000000070", "--source-id", "src_meta", "--yes"], ENV, {})
+    ).rejects.toThrow(/requires --name and\/or --creative-id/);
+    const result = (await metaCommand(
+      ["ad", "update", "120000000000000070", "--source-id", "src_meta", "--name", "x"],
+      ENV,
+      { confirmMutation: vi.fn(async () => false) }
+    )) as { cancelled?: boolean; section?: string };
+    expect(result.cancelled).toBe(true);
+    expect(result.section).toBe("meta_ad_update");
+    expect(toolCalls(api).length).toBe(0);
+  });
+
   it("creative has no activate transition", async () => {
     await expect(
       metaCommand(["creative", "activate", "120000000000000009", "--source-id", "src_meta"], ENV, {})

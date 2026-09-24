@@ -31,6 +31,7 @@ import {
   resolveMetaAdsCredential,
   setMetaEntityStatus,
   updateMetaBudget,
+  updateMetaAd,
   bindMetaAdsCliExecution,
   xCredentialFromSetup,
   xConnectSourceFromSetup,
@@ -7498,6 +7499,85 @@ describe("Meta Ads WRITE helpers", () => {
     // spawn harness, which this direct-Graph describe does not set up).
   });
 
+  describe("existing-ad update (rename / creative swap)", () => {
+    it("renames an ad: POSTs {name} ONLY to the ad NODE — no creative, no status, no act_ edge", async () => {
+      await captureWrites(
+        () => jsonResponse({ success: true }),
+        async (captured) => {
+          const result = await updateMetaAd(metaWriteCredential, "120000000000070", { name: "Spring — v2" });
+          expect(result).toEqual({ ok: true, id: "120000000000070", changed: ["name"] });
+          expect(captured).toHaveLength(1);
+          expect(captured[0].url).toBe("https://graph.facebook.com/v25.0/120000000000070");
+          expect(captured[0].method).toBe("POST");
+          expect(captured[0].body).toEqual({ name: "Spring — v2" });
+          expect(captured[0].body).not.toHaveProperty("status");
+        }
+      );
+    });
+
+    it("swaps the creative: POSTs creative:{creative_id} ONLY — the ad id stays the target", async () => {
+      await captureWrites(
+        () => jsonResponse({ success: true }),
+        async (captured) => {
+          const result = await updateMetaAd(metaWriteCredential, "120000000000070", { creativeId: "120000000000080" });
+          expect(result).toEqual({ ok: true, id: "120000000000070", changed: ["creative"] });
+          expect(captured[0].url).toBe("https://graph.facebook.com/v25.0/120000000000070");
+          expect(captured[0].body).toEqual({ creative: { creative_id: "120000000000080" } });
+          expect(captured[0].rawForm?.creative).toBe(JSON.stringify({ creative_id: "120000000000080" }));
+        }
+      );
+    });
+
+    it("does both in ONE node POST when both are requested", async () => {
+      await captureWrites(
+        () => jsonResponse({ success: true }),
+        async (captured) => {
+          const result = await updateMetaAd(metaWriteCredential, "120000000000070", {
+            name: "Both",
+            creativeId: "120000000000080"
+          });
+          expect(result.changed).toEqual(["name", "creative"]);
+          expect(captured).toHaveLength(1);
+          expect(captured[0].body).toEqual({ name: "Both", creative: { creative_id: "120000000000080" } });
+        }
+      );
+    });
+
+    it("refuses no change, a blank name, and non-numeric ad/creative ids BEFORE any POST — non-retryable", async () => {
+      await captureWrites(
+        () => jsonResponse({ success: "should-not-happen" }),
+        async (captured) => {
+          const bad: Array<[string, { name?: string; creativeId?: string }]> = [
+            ["120000000000070", {}],
+            ["120000000000070", { name: "   " }],
+            ["120000000000070", { creativeId: "cr_1" }],
+            ["120000000000070", { creativeId: "--status=ACTIVE" }],
+            ["-120000000000070", { name: "x" }],
+            ["act_120000000000070", { name: "x" }]
+          ];
+          for (const [adId, change] of bad) {
+            await expect(updateMetaAd(metaWriteCredential, adId, change)).rejects.toMatchObject({
+              code: "provider_api_error",
+              retryable: false
+            });
+          }
+          expect(captured).toHaveLength(0);
+        }
+      );
+    });
+
+    it("marks an ad-update failure as retryable:false (a write is never auto-retried)", async () => {
+      await captureWrites(
+        () => new Response("{\"error\":{\"message\":\"boom\"}}", { status: 503 }),
+        async () => {
+          await expect(
+            updateMetaAd(metaWriteCredential, "120000000000070", { name: "x" })
+          ).rejects.toMatchObject({ retryable: false });
+        }
+      );
+    });
+  });
+
   describe("delete (cleanup)", () => {
     it("issues DELETE to the entity NODE /{id} (not an act_ edge) with no body", async () => {
       await captureWrites(
@@ -8215,6 +8295,32 @@ console.log(${JSON.stringify(serialized)});
         const argv = recordedArgv(dir);
         expect(argv.slice(0, 9)).toEqual(["--no-color", "--no-input", "--output", "json", "ads", "--ad-account-id", "1234567890", "adset", "update"]);
         expect(argv[argv.indexOf("--daily-budget") + 1]).toBe("3000");
+      });
+    });
+
+    it("updates an existing ad via `meta ads ad update --name=… --creative-id=… -- <AD_ID>` — never --status", async () => {
+      await withTmp(async (dir) => {
+        const result = await updateMetaAd(cliCredential(dir, null, { emptyStdout: true }), "120000000000070", {
+          name: "-leading dash stays a value",
+          creativeId: "120000000000080"
+        });
+        expect(result).toEqual({ ok: true, id: "120000000000070", changed: ["name", "creative"] });
+        const argv = recordedArgv(dir);
+        expect(argv.slice(0, 9)).toEqual(["--no-color", "--no-input", "--output", "json", "ads", "--ad-account-id", "1234567890", "ad", "update"]);
+        // `--opt=value` keeps a value that starts with "-" from being parsed as another option.
+        expect(argv).toContain("--name=-leading dash stays a value");
+        expect(argv).toContain("--creative-id=120000000000080");
+        expect(argv.some((arg) => arg.startsWith("--status"))).toBe(false);
+        expect(argv.slice(-2)).toEqual(["--", "120000000000070"]);
+      });
+    });
+
+    it("a CLI rename alone passes --name only (no --creative-id)", async () => {
+      await withTmp(async (dir) => {
+        await updateMetaAd(cliCredential(dir, null, { emptyStdout: true }), "120000000000070", { name: "Only name" });
+        const argv = recordedArgv(dir);
+        expect(argv).toContain("--name=Only name");
+        expect(argv.some((arg) => arg.startsWith("--creative-id"))).toBe(false);
       });
     });
 

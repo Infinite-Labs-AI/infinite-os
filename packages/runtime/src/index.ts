@@ -918,6 +918,14 @@ function metadataFor(id: InfiniteOsActionId): {
       recommendedNextActions: ["get_meta_entity", "list_meta_entities"],
       recipeIds: []
     },
+    update_meta_ad: {
+      title: "Update Meta Ads ad",
+      summary:
+        "Operator-only. Edit an EXISTING Meta Ads ad in place: rename it (name) and/or point it at another EXISTING creative (creativeId). Send at least one. The ad id never changes. It never changes delivery status (no status input): an active ad keeps running with the new name/creative, a paused one stays paused. Use create_meta_creative first for a new creative.",
+      category: "operator",
+      recommendedNextActions: ["get_meta_entity", "list_meta_entities"],
+      recipeIds: []
+    },
     delete_meta_entity: {
       title: "Delete Meta Ads entity",
       summary:
@@ -1373,6 +1381,19 @@ function inputSchemaFor(id: InfiniteOsActionId): Record<string, unknown> {
         lifetimeBudget: { type: "number", exclusiveMinimum: 0 }
       },
       ["sourceId", "entityId", "entity"]
+    ),
+    // Existing-ad edit: rename and/or creative swap. At least one change is required and the
+    // handler enforces that (no top-level combinators in agent tool schemas). There is NO status
+    // property, so an ad edit can never be a go-live; additionalProperties:false rejects extras.
+    update_meta_ad: requiredObject(
+      {
+        sourceId: { type: "string" },
+        // Meta node ids are numeric. The pattern also keeps a leading "-" id out of the CLI argv.
+        entityId: { type: "string", pattern: "^[0-9]+$" },
+        name: { type: "string", minLength: 1 },
+        creativeId: { type: "string", pattern: "^[0-9]+$" }
+      },
+      ["sourceId", "entityId"]
     ),
     delete_meta_entity: requiredObject(
       {

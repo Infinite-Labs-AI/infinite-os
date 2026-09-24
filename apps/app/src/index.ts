@@ -153,7 +153,10 @@ export const APP_CAPABILITIES = [
   // update_meta_budget also accepts lifetimeBudget (exactly one of daily|lifetime per call) for an
   // entity that already runs on a lifetime budget. A desktop fails CLOSED on this flag: an older
   // daemon would refuse a lifetime-only input as "dailyBudget is required", never apply it.
-  "meta_lifetime_budget_writes"
+  "meta_lifetime_budget_writes",
+  // update_meta_ad: rename an existing ad and/or swap it to another existing creative (never a
+  // status change). A desktop fails CLOSED on this flag before offering an ad edit to a daemon.
+  "update_meta_ad"
 ] as const;
 
 type ScopedAppToolsParseResult =
