@@ -203,6 +203,8 @@ describe("Meta Ads management action authority (money-safety)", () => {
     "set_meta_entity_status",
     // update_meta_budget changes an existing daily budget (spend-affecting) → operator-only.
     "update_meta_budget",
+    // update_meta_ad renames an existing ad or swaps its creative (changes what runs) → operator-only.
+    "update_meta_ad",
     // delete_meta_entity is destructive (irreversible) → operator-only, exactly
     // like the spend-bearing writes: a tool_agent must NEVER be able to delete.
     "delete_meta_entity"
@@ -353,18 +355,46 @@ describe("Meta Ads management action authority (money-safety)", () => {
     }
   });
 
-  it("update_meta_budget requires sourceId/entityId/entity/dailyBudget and restricts entity to campaign|adset (no ad-level budget)", () => {
+  it("update_meta_budget requires sourceId/entityId/entity plus EXACTLY ONE of dailyBudget|lifetimeBudget and restricts entity to campaign|adset (no ad-level budget)", () => {
     const card = ACTION_CATALOG.find((action) => action.id === "update_meta_budget");
     expect(card).toBeDefined();
     const schema = card?.inputSchema as
-      | { required?: string[]; properties?: Record<string, { enum?: string[]; exclusiveMinimum?: number; type?: string }> }
+      | {
+          required?: string[];
+          oneOf?: Array<{ required?: string[] }>;
+          properties?: Record<string, { enum?: string[]; exclusiveMinimum?: number; type?: string }>;
+        }
       | undefined;
-    expect(schema?.required).toEqual(["sourceId", "entityId", "entity", "dailyBudget"]);
+    expect(schema?.required).toEqual(["sourceId", "entityId", "entity"]);
+    // Exactly one budget kind per call is enforced by the HANDLER, not a top-level oneOf: these
+    // schemas are served as agent tool schemas, and model tool APIs reject top-level combinators.
+    expect(schema?.oneOf).toBeUndefined();
     // Meta has NO ad-level budget → the enum must exclude "ad"/"creative".
     expect(schema?.properties?.entity?.enum).toEqual(["campaign", "adset"]);
-    // dailyBudget is a strictly-positive integer-cents amount (0 is not valid).
-    expect(schema?.properties?.dailyBudget?.type).toBe("number");
-    expect(schema?.properties?.dailyBudget?.exclusiveMinimum).toBe(0);
+    // Both amounts are strictly-positive integer cents (0 is not valid).
+    for (const key of ["dailyBudget", "lifetimeBudget"]) {
+      expect(schema?.properties?.[key]?.type).toBe("number");
+      expect(schema?.properties?.[key]?.exclusiveMinimum).toBe(0);
+    }
+    expect(card?.title).toBe("Update Meta Ads budget");
+  });
+
+  it("update_meta_ad requires sourceId/entityId, exposes ONLY name + creativeId as changes, and has NO status field", () => {
+    const card = ACTION_CATALOG.find((action) => action.id === "update_meta_ad");
+    expect(card).toBeDefined();
+    expect(card?.authority).toBe("operator");
+    const schema = card?.inputSchema as
+      | { required?: string[]; additionalProperties?: boolean; properties?: Record<string, { type?: string; pattern?: string; minLength?: number }> }
+      | undefined;
+    expect(schema?.required).toEqual(["sourceId", "entityId"]);
+    expect(Object.keys(schema?.properties ?? {}).sort()).toEqual(["creativeId", "entityId", "name", "sourceId"]);
+    // An ad edit can never be a go-live: there is no status input at all, and no extras pass.
+    expect(schema?.properties).not.toHaveProperty("status");
+    expect(schema?.additionalProperties).toBe(false);
+    expect(schema?.properties?.entityId?.pattern).toBe("^[0-9]+$");
+    expect(schema?.properties?.creativeId?.pattern).toBe("^[0-9]+$");
+    expect(schema?.properties?.name?.minLength).toBe(1);
+    expect((card?.summary ?? "").length).toBeLessThanOrEqual(500);
   });
 
   it("forbids a tool_agent session from executing any Meta WRITE action", async () => {
@@ -492,6 +522,7 @@ describe("createDaemonActionRegistry (Phase-2 native-analytics removal)", () => 
       "get_meta_entity",
       "create_meta_campaign",
       "update_meta_budget",
+      "update_meta_ad",
       "set_meta_entity_status",
       "delete_meta_entity"
     ]) {

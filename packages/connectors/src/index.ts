@@ -11026,6 +11026,26 @@ export interface MetaStatusResult {
 // no ad-level budget — so this is a NARROWER entity union than MetaWriteEntity.
 export type MetaBudgetEntity = "campaign" | "adset";
 
+// Which ONE budget field an update carries. An update keeps the entity's existing type:
+// it never converts a daily-budget entity to lifetime or the reverse.
+export type MetaBudgetKind = "daily" | "lifetime";
+
+// Existing-ad edit: rename and/or point the ad at another EXISTING creative. No status field —
+// an ad edit is never a go-live.
+export interface MetaAdUpdateInput {
+  name?: string;
+  creativeId?: string;
+}
+
+export type MetaAdUpdateField = "name" | "creative";
+
+export interface MetaAdUpdateResult {
+  ok: boolean;
+  id: string;
+  // WHICH fields changed (never their values — names/creative ids stay out of logs/audit).
+  changed: MetaAdUpdateField[];
+}
+
 export interface MetaBudgetResult {
   ok: boolean;
   id: string;
@@ -11720,12 +11740,23 @@ export async function setMetaEntityStatus(
 // campaign|adset restriction is a live runtime guard (Meta has no ad-level budget).
 // Only the direct-Graph (marketing_api) transport is supported; a CLI/MCP credential
 // is refused loudly + non-retryably by `metaAdsGraphWrite`, exactly like other writes.
+// `budgetKind` picks which ONE budget field is sent (daily_budget by default, for existing
+// callers; lifetime_budget when the entity already runs on a lifetime budget). It never
+// switches the entity's budget type and never touches end_time.
 export async function updateMetaBudget(
   credential: MetaAdsCredential,
   entityId: string,
-  dailyBudget: number,
-  entity: MetaWriteEntity
+  budget: number,
+  entity: MetaWriteEntity,
+  budgetKind: MetaBudgetKind = "daily"
 ): Promise<MetaBudgetResult> {
+  if (budgetKind !== "daily" && budgetKind !== "lifetime") {
+    throw new ConnectorError(
+      "provider_api_error",
+      `Meta Ads budget update supports only a daily or lifetime budget (got "${String(budgetKind)}")`,
+      false
+    );
+  }
   if (entity !== "campaign" && entity !== "adset") {
     // "ad"/"creative": Meta has NO ad-level (or creative-level) budget. Reject
     // BEFORE the POST so a wrong target never reaches the Graph transport.
@@ -11735,18 +11766,73 @@ export async function updateMetaBudget(
       false
     );
   }
-  const cents = metaPositiveBudgetCents(dailyBudget);
+  const cents = metaPositiveBudgetCents(budget);
   if (isMetaAdsCliTransport(credential)) {
     // CLI transport (system-user token, no app-reviewed direct-Graph write app): route the budget
     // change through the bundled `meta` CLI, exactly like create/status/delete. Without this branch a
     // CLI-transport source falls through to metaAdsGraphWrite below and is refused provider_unsupported
     // (the shipped gap: update_meta_budget could not run on the only Meta write transport we bundle).
-    return updateMetaBudgetViaCli(credential, entity, entityId, cents);
+    return updateMetaBudgetViaCli(credential, entity, entityId, cents, budgetKind);
   }
-  await metaAdsGraphPost(credential, entityId, { daily_budget: cents });
+  await metaAdsGraphPost(
+    credential,
+    entityId,
+    budgetKind === "lifetime" ? { lifetime_budget: cents } : { daily_budget: cents }
+  );
   // Graph returns { success: true } for a node budget POST. A non-2xx already threw a
   // non-retryable ConnectorError above; reaching here means Graph accepted the change.
   return { ok: true, id: entityId, entity };
+}
+
+// ── Existing-ad update (rename / creative swap) ── POST /{ad_id} ──────────────
+// A NODE call on the SAME non-retryable write transport (INVARIANT 3). The body carries ONLY the
+// requested `name` and/or `creative:{creative_id}` — never `status` — so an edit can never flip
+// delivery: an active ad keeps running with the new name/creative and a paused one stays paused.
+// The ad id is the target and never changes. Ids must be numeric Meta node ids; everything is
+// validated BEFORE any provider call.
+export async function updateMetaAd(
+  credential: MetaAdsCredential,
+  adId: string,
+  input: MetaAdUpdateInput
+): Promise<MetaAdUpdateResult> {
+  const change = metaAdUpdateChange(adId, input);
+  if (isMetaAdsCliTransport(credential)) {
+    return updateMetaAdViaCli(credential, adId, change);
+  }
+  await metaAdsGraphPost(credential, adId, {
+    ...(change.name === undefined ? {} : { name: change.name }),
+    ...(change.creativeId === undefined ? {} : { creative: { creative_id: change.creativeId } })
+  });
+  return { ok: true, id: adId, changed: change.changed };
+}
+
+function metaAdUpdateChange(
+  adId: string,
+  input: MetaAdUpdateInput
+): { name?: string; creativeId?: string; changed: MetaAdUpdateField[] } {
+  const invalid = (message: string): never => {
+    throw new ConnectorError("provider_api_error", `Meta Ads ad update ${message}`, false);
+  };
+  if (!/^\d+$/.test(adId)) {
+    invalid("requires a numeric ad id");
+  }
+  const changed: MetaAdUpdateField[] = [];
+  if (input.name !== undefined) {
+    if (typeof input.name !== "string" || input.name.trim() === "") {
+      invalid("name must be a non-empty string");
+    }
+    changed.push("name");
+  }
+  if (input.creativeId !== undefined) {
+    if (typeof input.creativeId !== "string" || !/^\d+$/.test(input.creativeId)) {
+      invalid("creativeId must be a numeric creative id");
+    }
+    changed.push("creative");
+  }
+  if (changed.length === 0) {
+    invalid("requires a name and/or creativeId change");
+  }
+  return { name: input.name, creativeId: input.creativeId, changed };
 }
 
 // ── Delete (cleanup) ── DELETE /{entity_id} ──────────────────────────────────
@@ -13281,16 +13367,18 @@ function pushCentsFlag(args: string[], flag: string, value: number | undefined):
   }
 }
 
-// ── CLI Budget update ── meta ads campaign|adset update <ID> --daily-budget … ──
-// Mirrors updateMetaBudget's direct-Graph path for the CLI transport. Sends --daily-budget ONLY —
-// never --status — so a budget change can never flip delivery state (an active entity keeps running
-// at the new budget; a paused one stays paused). Rides metaAdsCliWrite, so it is non-retryable
-// (INVARIANT 3) and its empty success body is accepted rather than misread as invalid JSON.
+// ── CLI Budget update ── meta ads campaign|adset update <ID> --daily-budget|--lifetime-budget … ──
+// Mirrors updateMetaBudget's direct-Graph path for the CLI transport. Sends ONE budget flag
+// (--daily-budget or --lifetime-budget, both accepted by `meta-ads` 1.1.0 campaign/adset update) and
+// never --status or --end-time, so a budget change can never flip delivery state or move the
+// schedule. Rides metaAdsCliWrite, so it is non-retryable (INVARIANT 3) and its empty success body
+// is accepted rather than misread as invalid JSON.
 async function updateMetaBudgetViaCli(
   credential: MetaAdsCredential,
   entity: "campaign" | "adset",
   entityId: string,
-  dailyBudgetCents: number
+  budgetCents: number,
+  budgetKind: MetaBudgetKind
 ): Promise<MetaBudgetResult> {
   const args = [
     "--output",
@@ -13301,10 +13389,31 @@ async function updateMetaBudgetViaCli(
     entity,
     "update"
   ];
-  pushCentsFlag(args, "--daily-budget", dailyBudgetCents);
+  pushCentsFlag(args, budgetKind === "lifetime" ? "--lifetime-budget" : "--daily-budget", budgetCents);
   args.push("--", entityId);
   await metaAdsCliWrite(credential, args);
   return { ok: true, id: entityId, entity };
+}
+
+// ── CLI Ad update ── meta ads ad update --name=… --creative-id=… -- <AD_ID> ─────
+// `meta-ads` 1.1.0 `ad update` takes --name / --creative-id / --status; this never passes --status.
+// Values use the `--opt=value` form so a name that starts with "-" can never be parsed as another
+// option, and the AD_ID positional goes LAST after "--". Non-retryable via metaAdsCliWrite.
+async function updateMetaAdViaCli(
+  credential: MetaAdsCredential,
+  adId: string,
+  change: { name?: string; creativeId?: string; changed: MetaAdUpdateField[] }
+): Promise<MetaAdUpdateResult> {
+  const args = ["--output", "json", "ads", "--ad-account-id", metaAdsCliAccountId(credential), "ad", "update"];
+  if (change.name !== undefined) {
+    args.push(`--name=${change.name}`);
+  }
+  if (change.creativeId !== undefined) {
+    args.push(`--creative-id=${change.creativeId}`);
+  }
+  args.push("--", adId);
+  await metaAdsCliWrite(credential, args);
+  return { ok: true, id: adId, changed: change.changed };
 }
 
 // ── CLI Create: Campaign ── meta ads campaign create … ────────────────────────

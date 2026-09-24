@@ -248,14 +248,17 @@ export const OPERATOR_ACTIONS = [
   // LLM/tool_agent session can NEVER fire these (assertAuthority throws "operator
   // authority required"). Creates ALWAYS land PAUSED; set_meta_entity_status is the
   // separate, gated go-live transition; update_meta_budget changes an EXISTING
-  // campaign/adset daily budget WITHOUT touching delivery status; delete_meta_entity
-  // is the destructive (irreversible) cleanup transition.
+  // campaign/adset daily or lifetime budget WITHOUT touching delivery status;
+  // update_meta_ad renames an existing ad or swaps its creative (it changes what an
+  // active ad shows, so it is operator-only) and never carries a status;
+  // delete_meta_entity is the destructive (irreversible) cleanup transition.
   "create_meta_campaign",
   "create_meta_ad_set",
   "create_meta_ad",
   "create_meta_creative",
   "set_meta_entity_status",
   "update_meta_budget",
+  "update_meta_ad",
   "delete_meta_entity"
 ] as const;
 

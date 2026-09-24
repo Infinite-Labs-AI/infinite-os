@@ -77,6 +77,8 @@ describe("Infinite OS runtime action registry", () => {
       "create_meta_creative",
       "set_meta_entity_status",
       "update_meta_budget",
+      // Existing-ad rename / creative swap (operator-only, never a status change).
+      "update_meta_ad",
       // Destructive cleanup (operator-only, irreversible, no spend) — PR #3b.
       "delete_meta_entity"
     ]);
