@@ -69,6 +69,17 @@ function turnResult(overrides: Record<string, unknown> = {}) {
 }
 
 describe("interactive task routes (0072 ledger over HTTP)", () => {
+  // A task of another actor in the same workspace, shaped as the store writes one (revision 1 and its
+  // opening event). The routes derive one actor per workspace, so it cannot be created through them.
+  async function insertOtherActorTask() {
+    await db.query(`insert into interactive_tasks (id, workspace_id, actor_id, surface, origin, client_surface_key, provider_id,
+      model_id, agent_profile, accepted_context_revision, authority_expires_at, revision, last_event_sequence)
+      values ('task_other', $1, 'local', 'cmdl', 'human', 'k', 'p', 'm', 'a', 'ctx', $2, 1, 1)`, [WS_A, AUTHORITY]);
+    await db.query(`insert into interactive_task_events (event_id, task_id, workspace_id, actor_id, origin, surface, sequence, kind,
+      transition_request_id, transition_request_hash) values ('ev_other_1', 'task_other', $1, 'local', 'human', 'cmdl', 1,
+      'user_message', 'rq_other_1', $2)`, [WS_A, H("a")]);
+  }
+
   let directory: string;
   let url: string;
   let db: InfiniteOsDb;
@@ -196,15 +207,52 @@ describe("interactive task routes (0072 ledger over HTTP)", () => {
     } finally { await app.close(); }
   });
 
+  it("settles a restarted host's leftovers across actors in one operator route", async () => {
+    const app = createApp({ database: db });
+    try {
+      await app.inject({ method: "POST", url: "/interactive/tasks", headers: headersFor(WS_A), payload: createBody() });
+      await app.inject({ method: "POST", url: "/interactive/tasks/task_route_1/transitions", headers: headersFor(WS_A), payload: turnResult() });
+      // Another actor's authorized grant and a send left in flight, in the same workspace.
+      await insertOtherActorTask();
+      await db.query(`insert into interactive_action_refs (invocation_id, task_id, workspace_id, actor_id, origin, surface, source_kind,
+        operation_id, adapter_version, schema_version, proposal_ref, proposal_revision, proposal_hash, input_hash, effect, replay_policy,
+        state, prepared_at, decision_source) values ('inv_granted', 'task_other', $1, 'local', 'human', 'cmdl', 'host_confirmation', 'op',
+        'v', '1', 'P1', 1, $2, $2, 'external_write', 'reconcile_before_retry', 'authorized', now(), 'host_confirmation'),
+        ('inv_sending', 'task_other', $1, 'local', 'human', 'cmdl', 'host_confirmation', 'op', 'v', '1', 'P2', 1, $2, $2, 'external_write',
+        'reconcile_before_retry', 'dispatching', now(), 'host_confirmation')`, [WS_A, H("c")]);
+
+      expect((await app.inject({ method: "POST", url: "/interactive/recovery/host-restart", headers: headersFor(WS_A, READ),
+        payload: { bootId: "boot-1" } })).statusCode).toBe(403);
+      expect((await app.inject({ method: "POST", url: "/interactive/recovery/host-restart", headers: headersFor(WS_A),
+        payload: { bootId: "bad boot id!" } })).statusCode).toBe(422);
+
+      const recovered = await app.inject({ method: "POST", url: "/interactive/recovery/host-restart", headers: headersFor(WS_A),
+        payload: { bootId: "boot-1" } });
+      expect(recovered.statusCode).toBe(200);
+      const report = recovered.json().data;
+      expect(report.bootId).toBe("boot-1");
+      expect(report.failures).toEqual([]);
+      expect(report.settled.map((item: { invocationId: string; kind: string }) => [item.invocationId, item.kind]).sort()).toEqual([
+        ["inv_granted", "grant_ended"], ["inv_sending", "outcome_unknown"]]);
+      const states = await db.query<{ invocation_id: string; state: string }>(
+        "select invocation_id, state from interactive_action_refs where task_id = 'task_other' order by invocation_id");
+      expect(states).toEqual([{ invocation_id: "inv_granted", state: "expired" }, { invocation_id: "inv_sending", state: "unknown" }]);
+      // Another workspace is untouched, and a replay of the same boot writes nothing new.
+      expect((await app.inject({ method: "POST", url: "/interactive/recovery/host-restart", headers: headersFor(WS_B),
+        payload: { bootId: "boot-1" } })).json().data.settled).toEqual([]);
+      const replay = await app.inject({ method: "POST", url: "/interactive/recovery/host-restart", headers: headersFor(WS_A),
+        payload: { bootId: "boot-1" } });
+      expect(replay.json().data.settled.every((item: { changed: boolean }) => item.changed === false)).toBe(true);
+    } finally { await app.close(); }
+  });
+
   it("lists actions a restarted host must settle across actors, scoped to the workspace", async () => {
     const app = createApp({ database: db });
     try {
       await app.inject({ method: "POST", url: "/interactive/tasks", headers: headersFor(WS_A), payload: createBody() });
       await app.inject({ method: "POST", url: "/interactive/tasks/task_route_1/transitions", headers: headersFor(WS_A), payload: turnResult() });
       // A second actor's authorized grant in the same workspace (written directly: routes derive the actor).
-      await db.query(`insert into interactive_tasks (id, workspace_id, actor_id, surface, origin, client_surface_key, provider_id,
-        model_id, agent_profile, accepted_context_revision, authority_expires_at) values ('task_other', $1, 'local', 'cmdl', 'human', 'k',
-        'p', 'm', 'a', 'ctx', $2)`, [WS_A, AUTHORITY]);
+      await insertOtherActorTask();
       await db.query(`insert into interactive_action_refs (invocation_id, task_id, workspace_id, actor_id, origin, surface, source_kind,
         operation_id, adapter_version, schema_version, proposal_ref, proposal_revision, proposal_hash, input_hash, effect, replay_policy,
         state, prepared_at, decision_source) values ('inv_other', 'task_other', $1, 'local', 'human', 'cmdl', 'host_confirmation', 'op',

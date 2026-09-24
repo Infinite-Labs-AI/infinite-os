@@ -13,6 +13,7 @@ import type { InfiniteOsDb } from "@infinite-os/db";
 import {
   InteractiveTaskConflictError,
   createInteractiveTaskStore,
+  recoverInteractiveTasksAfterHostRestart,
   type ApplyInteractiveTaskTransitionInput,
   type CreateInteractiveTaskInput,
   type InteractiveTaskStore,
@@ -242,6 +243,27 @@ export function registerInteractiveTaskRoutes(
         ...(typeof query.cursor === "string" ? { cursor: query.cursor } : {}),
       });
       return { ok: true, data: page };
+    } catch (error) {
+      return sendFailure(reply, error);
+    }
+  });
+
+  // A restarted host settles what its previous process left behind in this workspace, across every
+  // actor, through the store's own transitions: live grants end (host_restart), in-flight sends
+  // become `unknown`, and follow-ups that will never run are stopped. The host calls it once per
+  // boot per workspace, before it records any approval or claims any dispatch there; a retry with
+  // the same boot id replays instead of writing twice.
+  app.post<{ Body: unknown }>("/interactive/recovery/host-restart", { bodyLimit: 4 * 1024 }, async (request, reply) => {
+    const scoped = await scope(request, reply);
+    if (refused(scoped)) return scoped;
+    const body = request.body;
+    if (!isRecord(body) || typeof body.bootId !== "string") return invalid(reply, "A host restart needs its boot id.");
+    try {
+      const report = await recoverInteractiveTasksAfterHostRestart(
+        { db: database!, store: scoped.store },
+        { workspaceId: scoped.workspaceId, bootId: body.bootId },
+      );
+      return { ok: true, data: report };
     } catch (error) {
       return sendFailure(reply, error);
     }

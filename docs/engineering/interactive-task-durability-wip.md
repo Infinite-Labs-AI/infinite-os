@@ -82,6 +82,7 @@ id when claimed, else `local`), never from the body.
 | `POST /interactive/tasks/:id/transitions` | `transition` |
 | `GET /interactive/proposals` | `listLiveProposals` |
 | `GET /interactive/recovery?states=` | `listRecoverableActions` (across actors) |
+| `POST /interactive/recovery/host-restart {bootId}` | `recoverInteractiveTasksAfterHostRestart` (across actors; once per host boot) |
 
 Typed errors map to HTTP: not found is 404; expired task or grant authority is 410; bad input,
 origin violations and a missing typed approval are 422; every other conflict is 409. A create body
