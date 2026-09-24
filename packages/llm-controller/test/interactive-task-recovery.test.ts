@@ -244,6 +244,8 @@ describe("host restart recovery", { timeout: 60_000 }, () => {
 
     const report = await recoverInteractiveTasksAfterHostRestart(f, { workspaceId: WORKSPACE_A, bootId: "boot_1" });
 
+    // Another workspace's rows are never even read, so they cannot surface as failures here.
+    expect(report.failures).toEqual([]);
     expect(report.settled.map((item) => [item.actorId, item.kind]).sort()).toEqual([
       [ACTOR_A, "grant_ended"], [ACTOR_B, "outcome_unknown"]]);
     expect((await actionOf(f, a.scope)).action.state).toBe("expired");
