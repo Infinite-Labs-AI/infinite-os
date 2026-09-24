@@ -86,7 +86,8 @@ describe("Infinite OS migration stack", () => {
       "0069_meta_ads_history_integrity.sql",
       "0070_meta_ads_nullable_reach.sql",
       "0071_meta_reach_unmeasured_days.sql",
-      "0072_interactive_task_ledger.sql"
+      "0072_interactive_task_ledger.sql",
+      "0073_posthog_event_truth_event_time_index.sql"
     ]);
   });
 
@@ -1088,8 +1089,29 @@ describe("Infinite OS migration stack", () => {
       "0069_meta_ads_history_integrity.sql",
       "0070_meta_ads_nullable_reach.sql",
       "0071_meta_reach_unmeasured_days.sql",
-      "0072_interactive_task_ledger.sql"
+      "0072_interactive_task_ledger.sql",
+      "0073_posthog_event_truth_event_time_index.sql"
     ]);
+  });
+
+  it("adds the event-name-leading covering index on posthog_event_truth, transaction-safe (0073)", () => {
+    const migration = loadMigrations().find(
+      (candidate) => candidate.id === "0073_posthog_event_truth_event_time_index.sql"
+    );
+    const sql = (migration?.sql ?? "").toLowerCase().replace(/--[^\n]*/g, "").replace(/\s+/g, " ");
+
+    expect(sql).toContain(
+      "create index if not exists posthog_event_truth_workspace_event_time_idx on posthog_event_truth (workspace_id, event_name, occurred_at) include (source_id, distinct_id, session_id)"
+    );
+    expect(sql).toContain(
+      "alter table posthog_event_truth set (autovacuum_vacuum_insert_scale_factor = 0.01)"
+    );
+    // The runner applies every file inside a transaction, where `concurrently` is an error. The
+    // online build is an operator step outside the runner; the file itself must stay plain.
+    expect(sql).not.toContain("concurrently");
+    // Additive only: the 0046 time-leading index still serves the ordered drilldown.
+    expect(sql).not.toContain("drop index");
+    expect(sql).not.toContain("posthog_event_truth_workspace_time_event_idx");
   });
 
   it("adds the nullable Meta posting Page column beside the pixel (0068)", () => {
