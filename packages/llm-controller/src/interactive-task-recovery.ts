@@ -83,14 +83,16 @@ export async function recoverInteractiveTasksAfterHostRestart(
   if (typeof input.bootId !== "string" || !ID_RE.test(input.bootId)) {
     throw new InteractiveTaskConflictError("invalid_task_input", "bootId is invalid.");
   }
-  const report: HostRestartRecoveryReport = { bootId: input.bootId, settled: [], failures: [] };
+  const failures: HostRestartRecoveryFailure[] = [];
+  // Unknown sends an earlier boot left: reported (unchanged) so they stay visible until reconciled.
+  const leftUnknown: HostRestartSettlement[] = [];
 
   let cursor: string | undefined;
   do {
     const page = await deps.store.listRecoverableActions({ workspaceId: input.workspaceId, limit: PAGE, ...(cursor ? { cursor } : {}) });
     for (const action of page.actions) {
       if (action.state === "unknown") {
-        report.settled.push(settlement("outcome_unknown", action, false));
+        leftUnknown.push(settlement("outcome_unknown", action, false));
         continue;
       }
       const steps: Step[] = action.state === "authorized"
@@ -98,8 +100,7 @@ export async function recoverInteractiveTasksAfterHostRestart(
         : [{ name: "unknown", transition: { kind: "record_outcome", invocationId: action.invocationId, state: "unknown",
             outcomeSummary: HOST_RESTART_UNKNOWN_SUMMARY, verification: "not_run" } }];
       const failure = await applySteps(deps.store, input, action, steps);
-      if (failure) report.failures.push(failure);
-      else report.settled.push(settlement(action.state === "authorized" ? "grant_ended" : "outcome_unknown", action, true));
+      if (failure) failures.push(failure);
     }
     cursor = page.nextCursor ?? undefined;
   } while (cursor);
@@ -110,36 +111,83 @@ export async function recoverInteractiveTasksAfterHostRestart(
         task_id as "taskId", workspace_id as "workspaceId", actor_id as "actorId", operation_id as "operationId",
         proposal_json as "proposal", continuation_key as "continuationKey", continuation_state as "continuationState",
         created_at::text as "cursorCreatedAt"
-      from interactive_action_refs
+      from interactive_action_refs a
       where workspace_id = $1 and state = 'succeeded' and continuation_state in ('pending','running')
+        -- A cancelled task's pending follow-up can never start (the store refuses the claim): the
+        -- cancellation already settled it. One that was already running is still stopped below.
+        and not (continuation_state = 'pending' and exists (select 1 from interactive_tasks t
+          where t.id = a.task_id and t.workspace_id = a.workspace_id and t.state = 'cancelled'))
         and ($2::timestamptz is null or (created_at, invocation_id) > ($2::timestamptz, $3::text))
       order by created_at, invocation_id limit $4`,
       [input.workspaceId, after?.[0] ?? null, after?.[1] ?? null, PAGE]);
     for (const row of rows) {
       const continuationKey = row.continuationKey;
       if (!continuationKey) {
-        report.failures.push({ taskId: row.taskId, actorId: row.actorId, invocationId: row.invocationId, code: "continuation_key_missing" });
+        failures.push({ taskId: row.taskId, actorId: row.actorId, invocationId: row.invocationId, code: "continuation_key_missing" });
         continue;
       }
       const steps: Step[] = [
-        { name: "note", transition: { kind: "append_event", eventKind: "progress",
-          // Stable across retries of this boot: the same request id must carry the same payload.
-          payload: { kind: "host_restart_recovery", bootId: input.bootId, invocationId: row.invocationId,
-            stopped: "follow_up" } } },
         ...(row.continuationState === "pending"
           ? [{ name: "claim", transition: { kind: "claim_continuation", invocationId: row.invocationId, continuationKey } } satisfies Step]
           : []),
         { name: "finish", transition: { kind: "finish_continuation", invocationId: row.invocationId, continuationKey, state: "failed" } },
       ];
       const failure = await applySteps(deps.store, input, row, steps);
-      if (failure) report.failures.push(failure);
-      else report.settled.push(settlement("follow_up_stopped", row, true));
+      if (failure) {
+        failures.push(failure);
+        continue;
+      }
+      // Written only once the follow-up really was stopped. It is history, not a settlement: if it
+      // cannot be written the follow-up is still stopped, so its failure is not reported as one.
+      await applySteps(deps.store, input, row, [{ name: "note", transition: { kind: "append_event", eventKind: "progress",
+        // Stable across retries of this boot: the same request id must carry the same payload.
+        payload: { kind: "host_restart_recovery", bootId: input.bootId, invocationId: row.invocationId, stopped: "follow_up" } } }]);
     }
     const last = rows.at(-1);
     if (!last || rows.length < PAGE) break;
     after = [last.cursorCreatedAt, last.invocationId];
   }
-  return report;
+
+  // The report is rebuilt from what this boot wrote, not from what this call happened to do, so a
+  // retried call (say, after the caller timed out) still returns everything the boot settled.
+  const settled = await settledByBoot(deps.db, input);
+  const changedIds = new Set(settled.map((item) => item.invocationId));
+  return {
+    bootId: input.bootId,
+    settled: [...settled, ...leftUnknown.filter((item) => !changedIds.has(item.invocationId))],
+    failures,
+  };
+}
+
+type SettledEventRow = {
+  kind: string; payload: Record<string, unknown>; taskId: string; actorId: string;
+  invocationId: string; operationId: string; proposal: Record<string, unknown>;
+};
+
+async function settledByBoot(db: InteractiveTaskStoreDb, input: HostRestartRecoveryInput): Promise<HostRestartSettlement[]> {
+  const rows = await db.query<SettledEventRow>(`select e.kind, e.payload_json as "payload", e.task_id as "taskId",
+      e.actor_id as "actorId", a.invocation_id as "invocationId", a.operation_id as "operationId",
+      a.proposal_json as "proposal"
+    from interactive_task_events e
+    join interactive_action_refs a on a.task_id = e.task_id and a.invocation_id = e.payload_json->>'invocationId'
+    where e.workspace_id = $1 and e.transition_request_id like $2
+    order by e.created_at, e.task_id, e.sequence`,
+    [input.workspaceId, `${bootRequestPrefix(input.bootId)}%`]);
+  const settled: HostRestartSettlement[] = [];
+  for (const row of rows) {
+    const kind: HostRestartSettlementKind | null =
+      row.kind === "authorization_expired" ? "grant_ended"
+        : row.kind === "action_outcome" && row.payload.state === "unknown" ? "outcome_unknown"
+          : row.kind === "continuation" && row.payload.state === "failed" ? "follow_up_stopped"
+            : null;
+    if (kind) settled.push(settlement(kind, row, true));
+  }
+  return settled;
+}
+
+/** Every request id a boot writes starts with this, so the boot's own writes can be found again. */
+function bootRequestPrefix(bootId: string): string {
+  return `host-restart:${createHash("sha256").update(bootId).digest("hex").slice(0, 16)}:`;
 }
 
 type Step = { name: string; transition: InteractiveTaskTransition };
@@ -163,7 +211,7 @@ async function applySteps(
       const request: ApplyInteractiveTaskTransitionInput = {
         taskId: action.taskId, workspaceId: input.workspaceId, actorId: action.actorId,
         expectedRevision: detail.task.revision,
-        requestId: `host-restart:${key.slice(0, 48)}`,
+        requestId: `${bootRequestPrefix(input.bootId)}${key.slice(0, 48)}`,
         requestHash,
         eventId: `host-restart-event:${key.slice(0, 48)}`,
         transition: step.transition,
