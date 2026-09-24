@@ -7553,7 +7553,7 @@ describe("Meta Ads WRITE helpers", () => {
             ["120000000000070", { creativeId: "cr_1" }],
             ["120000000000070", { creativeId: "--status=ACTIVE" }],
             ["-120000000000070", { name: "x" }],
-            ["act_120000000000070", { name: "x" }]
+            ["act_1234567890", { name: "x" }]
           ];
           for (const [adId, change] of bad) {
             await expect(updateMetaAd(metaWriteCredential, adId, change)).rejects.toMatchObject({
