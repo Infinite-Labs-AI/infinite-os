@@ -2618,19 +2618,24 @@ function requiredMetaBudgetEntity(input: unknown): "campaign" | "adset" {
 // amount in the ad-account minor units (cents). Read + validate BEFORE resolving the
 // credential so both / neither / 0 / negative / non-integer fails early and uniformly. The
 // connector re-validates the amount (defense-in-depth) as the authoritative money-safety gate.
+// PRESENCE is "the key holds anything but undefined/null" — NOT "the key holds a number" — so a
+// stringly-typed or NaN amount alongside a numeric one is ambiguous rather than silently ignored,
+// and a lone non-number amount is invalid rather than "missing".
 function requiredBudgetUpdate(input: unknown): { kind: MetaBudgetKind; cents: number } {
-  const daily = numberOrNull(input, "dailyBudget");
-  const lifetime = numberOrNull(input, "lifetimeBudget");
-  if (daily !== null && lifetime !== null) {
+  const daily = objectField(input, "dailyBudget");
+  const lifetime = objectField(input, "lifetimeBudget");
+  const dailyPresent = daily !== undefined && daily !== null;
+  const lifetimePresent = lifetime !== undefined && lifetime !== null;
+  if (dailyPresent && lifetimePresent) {
     throw new Error("budget_kind_ambiguous: pass EITHER dailyBudget OR lifetimeBudget, not both");
   }
-  if (daily === null && lifetime === null) {
+  if (!dailyPresent && !lifetimePresent) {
     throw new Error("dailyBudget or lifetimeBudget is required");
   }
-  const kind: MetaBudgetKind = daily !== null ? "daily" : "lifetime";
-  const value = (daily ?? lifetime) as number;
-  if (!Number.isInteger(value) || value <= 0) {
-    throw new Error(`invalid_${kind}_budget:${value}`);
+  const kind: MetaBudgetKind = dailyPresent ? "daily" : "lifetime";
+  const value = dailyPresent ? daily : lifetime;
+  if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
+    throw new Error(`invalid_${kind}_budget:${String(value)}`);
   }
   return { kind, cents: value };
 }

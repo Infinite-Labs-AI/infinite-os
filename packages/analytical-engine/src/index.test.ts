@@ -8278,6 +8278,48 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
     );
   });
 
+  it("B1: a PRESENT budget key counts even when it is not a number — both present is ambiguous, a bad present value is invalid (NO POST)", async () => {
+    const audits: AuditRow[] = [];
+    const db = metaWriteTestDb({ audits });
+    await withGraph(
+      () => jsonResponse({ success: true }),
+      async (calls) => {
+        const handlers = createActionHandlers(db);
+        const base = { sourceId: "src_meta", entityId: "120000000000555", entity: "campaign" };
+        const cases: Array<[Record<string, unknown>, RegExp]> = [
+          // The reviewer's three measured bypasses: each used to POST the numeric key.
+          [{ ...base, dailyBudget: "5000", lifetimeBudget: 5000 }, /budget_kind_ambiguous/],
+          [{ ...base, dailyBudget: 5000, lifetimeBudget: "90000" }, /budget_kind_ambiguous/],
+          [{ ...base, dailyBudget: Number.NaN, lifetimeBudget: 7000 }, /budget_kind_ambiguous/],
+          // A single present key that is not a finite positive integer NUMBER is invalid, not absent.
+          [{ ...base, dailyBudget: "5000" }, /invalid_daily_budget/],
+          [{ ...base, lifetimeBudget: Number.NaN }, /invalid_lifetime_budget/],
+          [{ ...base, lifetimeBudget: Number.POSITIVE_INFINITY }, /invalid_lifetime_budget/],
+          [{ ...base, lifetimeBudget: true }, /invalid_lifetime_budget/]
+        ];
+        for (const [input, error] of cases) {
+          await expect(handlers.update_meta_budget?.(input, operatorContext)).rejects.toThrow(error);
+        }
+        expect(calls).toHaveLength(0);
+      }
+    );
+  });
+
+  it("B1: null still means absent (the other key alone is used)", async () => {
+    const audits: AuditRow[] = [];
+    const db = metaWriteTestDb({ audits });
+    await withGraph(
+      () => jsonResponse({ success: true }),
+      async (calls) => {
+        await createActionHandlers(db).update_meta_budget?.(
+          { sourceId: "src_meta", entityId: "120000000000555", entity: "campaign", dailyBudget: 5000, lifetimeBudget: null },
+          operatorContext
+        );
+        expect(calls.at(-1)?.body).toEqual({ daily_budget: "5000" });
+      }
+    );
+  });
+
   it("a daily update audits budget_kind=daily", async () => {
     const audits: AuditRow[] = [];
     const db = metaWriteTestDb({ audits });
