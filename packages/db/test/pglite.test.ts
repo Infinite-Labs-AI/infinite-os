@@ -88,9 +88,9 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
     rmSync(dataDir, { recursive: true, force: true });
   });
 
-  it("applied ALL 72 migrations on first boot and is idempotent on a re-run", async () => {
-    expect(loadMigrations().length).toBe(72);
-    expect(firstRun).toHaveLength(72);
+  it("applied ALL 73 migrations on first boot and is idempotent on a re-run", async () => {
+    expect(loadMigrations().length).toBe(73);
+    expect(firstRun).toHaveLength(73);
     expect(firstRun).toContain("0001_control_plane.sql");
     expect(firstRun).toContain("0006_security_roles.sql");
     expect(firstRun).toContain("0036_chat_sessions_desktop_surface.sql");
@@ -128,6 +128,7 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
     expect(firstRun).toContain("0068_connection_credentials_selected_page.sql");
     expect(firstRun).toContain("0069_meta_ads_history_integrity.sql");
     expect(firstRun).toContain("0072_interactive_task_ledger.sql");
+    expect(firstRun).toContain("0073_posthog_event_truth_event_time_index.sql");
 
     // Idempotent: a second boot re-applies zero (the `rows.length` gate, not the pg `rowCount`
     // gate, makes this true on PGlite).
@@ -135,13 +136,13 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
     expect(secondRun).toEqual([]);
   });
 
-  it("created the schema_migrations ledger with all 72 rows", async () => {
+  it("created the schema_migrations ledger with all 73 rows", async () => {
     const ledger = await db.query<{ id: string }>(
       "select id from schema_migrations order by id"
     );
-    expect(ledger).toHaveLength(72);
+    expect(ledger).toHaveLength(73);
     expect(ledger[0]?.id).toBe("0001_control_plane.sql");
-    expect(ledger.at(-1)?.id).toBe("0072_interactive_task_ledger.sql");
+    expect(ledger.at(-1)?.id).toBe("0073_posthog_event_truth_event_time_index.sql");
   });
 
   it("0063 serves both PostHog views from per-(workspace, source, day) rollups — refresh, is_internal, idempotency, grain key, grants", async () => {
@@ -4255,4 +4256,155 @@ describe("0046 indexes the analytics fact tables (partial-migration + planner pr
       await db2.close();
     }
   }, 120_000);
+});
+
+describe("0073 serves event-name reads from a covering index (partial-migration + planner proof)", () => {
+  // Reads that name their events (`workspace_id = $1 and event_name = any($2) and occurred_at in
+  // [from, to)`) walked the 0046 time-leading index over EVERY event of the workspace in the range
+  // and then fetched each matching heap row. This applies 0001..0072, seeds one busy workspace (40
+  // event names) beside quieter tenants, then applies 0073 ALONE and asserts both event-name reads
+  // become index-only scans of the new index, while the 0046 ordered drilldown keeps its index.
+  let dataDir: string;
+  let url: string;
+
+  beforeAll(() => {
+    dataDir = mkdtempSync(join(tmpdir(), "infinite-os-pglite-0073-idx-"));
+    url = `pglite://${dataDir}`;
+  });
+
+  afterAll(() => {
+    rmSync(dataDir, { recursive: true, force: true });
+  });
+
+  // The journey read: identity columns only, a few named events, a bounded range.
+  const JOURNEY_READ = `select source_id, distinct_id, session_id, event_name, occurred_at
+      from posthog_event_truth
+     where workspace_id = 'ws_busy'
+       and occurred_at >= timestamptz '2026-01-05 00:00:00+00'
+       and occurred_at < timestamptz '2026-01-15 00:00:00+00'
+       and event_name = any(array['evt_1', 'evt_2', 'evt_3']::text[])`;
+  // The same read stitched to persons through the distinct-id map (identity columns only).
+  const STITCHED_READ = `select coalesce(pdi.person_id, e.distinct_id) as person, e.session_id, e.event_name, e.occurred_at
+      from posthog_event_truth e
+      left join posthog_person_distinct_ids pdi on pdi.source_id = e.source_id and pdi.distinct_id = e.distinct_id
+     where e.workspace_id = 'ws_busy'
+       and e.occurred_at >= timestamptz '2026-01-05 00:00:00+00'
+       and e.occurred_at < timestamptz '2026-01-15 00:00:00+00'
+       and e.event_name = any(array['evt_1', 'evt_2', 'evt_3']::text[])`;
+  // Events and distinct sessions per day for named events.
+  const SESSIONS_READ = `select to_char(occurred_at at time zone 'UTC', 'YYYY-MM-DD') as day, event_name,
+           count(*)::int as events, count(distinct session_id)::int as sessions
+      from posthog_event_truth
+     where workspace_id = 'ws_busy'
+       and occurred_at >= timestamptz '2026-01-05 00:00:00+00'
+       and occurred_at < timestamptz '2026-01-15 00:00:00+00'
+       and event_name = any(array['evt_1', 'evt_2', 'evt_3']::text[])
+       and session_id is not null
+     group by 1, 2`;
+  // The 0046 drilldown: newest events first. Must stay on the time-leading index.
+  const DRILLDOWN_READ = `select event_name, occurred_at from posthog_event_truth
+     where workspace_id = 'ws_busy'
+     order by occurred_at desc, event_name asc
+     limit 20`;
+
+  async function planOf(db: InfiniteOsDb, sql: string): Promise<string> {
+    const rows = await db.query<Record<string, unknown>>(`explain ${sql}`);
+    return rows
+      .map((row) => Object.values(row)[0] as string)
+      .join("\n")
+      .toLowerCase();
+  }
+
+  it("applies on a DB already at 0072, turns event-name reads index-only, keeps the drilldown", async () => {
+    const all = loadMigrations();
+    const upTo0072 = all.filter((m) => m.id < "0073");
+    const m0073 = all.find((m) => m.id === "0073_posthog_event_truth_event_time_index.sql");
+    expect(m0073).toBeDefined();
+    expect(upTo0072.some((m) => m.id === m0073!.id)).toBe(false);
+
+    // 1. Apply 0001..0072 only, then seed one busy tenant and ten quiet ones.
+    await runPgliteMigrations(url, upTo0072);
+    const db = createInfiniteOsDb(url);
+    try {
+      const tenants = ["ws_busy", ...Array.from({ length: 10 }, (_, i) => `ws_quiet_${i}`)];
+      await db.withTransaction(async (tx) => {
+        for (const ws of tenants) {
+          await tx.ensureWorkspace(ws, `Event Index ${ws}`);
+          await tx.ensureFirstPhaseDatasets(ws);
+        }
+      });
+      for (const ws of tenants) {
+        const ds = await db.query<{ id: string }>(
+          "select id from datasets where workspace_id = $1 and key = 'web'",
+          [ws]
+        );
+        await db.query(
+          `insert into sources (
+             id, workspace_id, dataset_id, provider, connection_name, account_external_id, status
+           ) values ($1, $2, $3, 'posthog', 'conn', 'acct', 'connected')`,
+          [`src_${ws}`, ws, ds[0]?.id]
+        );
+        // Busy: 24,000 events over 20 days, 40 names round-robin. Quiet: 500 events each.
+        await db.query(
+          `insert into posthog_event_truth (
+             id, workspace_id, source_id, event_id, event_name, distinct_id, session_id, occurred_at, properties
+           )
+           select $1 || '_' || g, $2, $3, 'e_' || g, 'evt_' || (g % 40),
+                  'person_' || (g % 700), 'session_' || (g / 12),
+                  timestamptz '2026-01-01 00:00:00+00' + (g * 72 || ' seconds')::interval,
+                  jsonb_build_object('pad', repeat('x', 400))
+             from generate_series(1, $4::int) as g`,
+          [`ph_${ws}`, ws, `src_${ws}`, ws === "ws_busy" ? 24_000 : 500]
+        );
+      }
+      await db.query("vacuum analyze posthog_event_truth");
+
+      // BEFORE: the journey read rides the 0046 time-leading index (or the heap), never an
+      // index-only scan of an event-name-leading index.
+      const journeyBefore = await planOf(db, JOURNEY_READ);
+      expect(journeyBefore).not.toContain("posthog_event_truth_workspace_event_time_idx");
+      expect(journeyBefore).not.toContain("index only scan");
+    } finally {
+      await db.close();
+    }
+
+    // 2. Apply 0073 alone on the already-migrated DB; replay the body under a synthetic id to
+    //    prove `if not exists` makes a re-run (or a run after the online build) a no-op.
+    expect(await runPgliteMigrations(url, [m0073!])).toEqual([
+      "0073_posthog_event_truth_event_time_index.sql"
+    ]);
+    expect(await runPgliteMigrations(url, [m0073!])).toEqual([]);
+    expect(
+      await runPgliteMigrations(url, [{ ...m0073!, id: `${m0073!.id}__replay` }])
+    ).toEqual([`${m0073!.id}__replay`]);
+
+    // 3. AFTER.
+    const db2 = createInfiniteOsDb(url);
+    try {
+      await db2.query("vacuum analyze posthog_event_truth");
+      const idx = await db2.query<{ indexdef: string }>(
+        "select indexdef from pg_indexes where indexname = 'posthog_event_truth_workspace_event_time_idx'"
+      );
+      expect(idx).toHaveLength(1);
+      expect(idx[0]?.indexdef.toLowerCase()).toContain(
+        "on public.posthog_event_truth using btree (workspace_id, event_name, occurred_at) include (source_id, distinct_id, session_id)"
+      );
+      const opts = await db2.query<{ reloptions: string[] | null }>(
+        "select reloptions from pg_class where oid = 'posthog_event_truth'::regclass"
+      );
+      expect(opts[0]?.reloptions).toContain("autovacuum_vacuum_insert_scale_factor=0.01");
+
+      const journeyAfter = await planOf(db2, JOURNEY_READ);
+      expect(journeyAfter).toContain("index only scan using posthog_event_truth_workspace_event_time_idx");
+      const stitchedAfter = await planOf(db2, STITCHED_READ);
+      expect(stitchedAfter).toContain("index only scan using posthog_event_truth_workspace_event_time_idx");
+      const sessionsAfter = await planOf(db2, SESSIONS_READ);
+      expect(sessionsAfter).toContain("index only scan using posthog_event_truth_workspace_event_time_idx");
+      const drilldownAfter = await planOf(db2, DRILLDOWN_READ);
+      expect(drilldownAfter).toContain("posthog_event_truth_workspace_time_event_idx");
+      expect(drilldownAfter).not.toContain("posthog_event_truth_workspace_event_time_idx");
+    } finally {
+      await db2.close();
+    }
+  }, 180_000);
 });
