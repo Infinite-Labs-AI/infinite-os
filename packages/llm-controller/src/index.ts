@@ -7,7 +7,7 @@ import {
   createSessionContext
 } from "@infinite-os/runtime";
 import { createConfiguredModelClient } from "./model-client.js";
-import { assembleInfiniteOsPrompt } from "./prompt-assembler.js";
+import { HOST_OUTCOME_PREFIX, assembleInfiniteOsPrompt } from "./prompt-assembler.js";
 import type { InfiniteOsMemoryManager } from "./memory-manager.js";
 import {
   buildQueryRefinementSections,
@@ -16,7 +16,7 @@ import {
   classifyQueryFamily,
   type InfiniteOsQueryAdvisor
 } from "./query-advisor.js";
-import type { ChatResponse } from "@infinite-os/types";
+import type { ChatResponse, InteractiveAgentProfile, InteractiveFeature } from "@infinite-os/types";
 import type { ChatSessionStore } from "./session-store.js";
 
 // `ChatResponse` is canonical in `@infinite-os/types` (the cross-zone contract
@@ -68,7 +68,7 @@ export type {
   RevisedInteractiveActionInput
 } from "./interactive-task-types.js";
 export { createConfiguredModelClient } from "./model-client.js";
-export { assembleInfiniteOsPrompt } from "./prompt-assembler.js";
+export { HOST_OUTCOME_PREFIX, assembleInfiniteOsPrompt } from "./prompt-assembler.js";
 export { createSourceAwareQueryAdvisor } from "./query-advisor.js";
 export {
   createModelBackedMemoryReviewer,
@@ -383,6 +383,16 @@ export interface ChatInput {
   progressMode?: ChatProgressMode;
   scopedAppTools?: ScopedAppTools;
   onProgress?: (event: ChatProgressEvent) => Promise<void> | void;
+  /** Interactive role for this turn. Absent keeps the legacy growth-operator prompt unchanged. */
+  agentProfile?: InteractiveAgentProfile;
+  /** Host features this turn really has (app tools, confirmations, continuation). */
+  interactiveFeatures?: readonly InteractiveFeature[];
+  /**
+   * `continuation`: the host started this turn to report an approved action's outcome. The message
+   * is never recorded as the user's words: it is stored as a host outcome, skips the query advisor,
+   * and is never harvested into curated memory.
+   */
+  turnOrigin?: "human" | "continuation";
 }
 
 export interface ChatActionCall {
@@ -528,6 +538,7 @@ export function createLlmController(options: {
       // no session rows, no recall, no memory review. Every persistTurn use below is
       // gated on this so union turns get the full chat lifecycle and exclusive turns none.
       const persistTurn = !scopedAppTools || scopedAppTools.mode === "union";
+      const hostContinuation = input.turnOrigin === "continuation";
       const responseMetadata = (usage?: ModelUsage) => ({
         ...(usage ? { usage } : {}),
         ...(input.modelProvider ?? modelMetadata?.provider ? { modelProvider: input.modelProvider ?? modelMetadata?.provider } : {}),
@@ -550,13 +561,12 @@ export function createLlmController(options: {
         await emitStatus("recall", "Recalled prior session context.");
       }
       if (persistTurn) {
-        await sessionStore?.appendMessage({
-          sessionId,
-          role: "user",
-          content: input.message
-        });
+        await sessionStore?.appendMessage(hostContinuation
+          ? { sessionId, role: "system", content: `${HOST_OUTCOME_PREFIX}${input.message}` }
+          : { sessionId, role: "user", content: input.message });
       }
-      const advisory = persistTurn
+      // The advisor rewrites or answers a person's question; a host outcome is neither.
+      const advisory = persistTurn && !hostContinuation
         ? await loadQueryAdvisory(options.queryAdvisor, {
             message: input.message,
             workspaceId: input.workspaceId,
@@ -575,6 +585,10 @@ export function createLlmController(options: {
       // rejects, so the detached work is safe), which keeps the harvest off the
       // turn's critical path. "blocking" awaits it for deterministic tests.
       const scheduleMemoryReview = async (message: string, calls: ChatActionCall[]) => {
+        // Curated memory harvests what the user said; a host outcome is not their words.
+        if (hostContinuation) {
+          return;
+        }
         const review = reviewMemory(memoryManager, input, sessionId, message, calls, effectiveMessage);
         if (memoryReviewMode === "blocking") {
           await review;
@@ -653,7 +667,10 @@ export function createLlmController(options: {
             compactedSummaries: priorSession?.summaries,
             recalledSessions,
             curatedMemory: memoryContext,
-            advisories: [...(advisory?.promptSections ?? []), ...refinementSections, ...synthesisSections]
+            advisories: [...(advisory?.promptSections ?? []), ...refinementSections, ...synthesisSections],
+            ...(input.agentProfile ? { agentProfile: input.agentProfile } : {}),
+            ...(input.interactiveFeatures ? { interactiveFeatures: input.interactiveFeatures } : {}),
+            ...(input.turnOrigin ? { turnOrigin: input.turnOrigin } : {})
           });
           const streamState = { messageStarted: false };
           const response = await modelClient.complete({
