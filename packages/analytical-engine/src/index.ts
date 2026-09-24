@@ -17,11 +17,14 @@ import {
   resolveMetaAdsCredential,
   setMetaEntityStatus,
   updateMetaBudget,
+  updateMetaAd,
   ConnectorError,
   type ConnectionTestResult,
   type MetaAdSetTargeting,
   type MetaAdsCredential,
   type MetaAdsCliExecution,
+  type MetaAdUpdateField,
+  type MetaBudgetKind,
   type MetaEntityStatus,
   type MetaWriteEntity,
   type MetaWriteResult
@@ -165,7 +168,8 @@ export function createActionHandlers(
     create_meta_creative: (input, context) => createMetaCreativeHandler(db, context, input, metaAdsCliExecution, encryptionKey, expectedMetaCredential),
     create_meta_ad: (input, context) => createMetaAdHandler(db, context, input, metaAdsCliExecution, encryptionKey, expectedMetaCredential),
     set_meta_entity_status: (input, context) => setMetaEntityStatusHandler(db, context, input, metaAdsCliExecution, encryptionKey, expectedMetaCredential),
-    update_meta_budget: (input, context) => updateMetaBudgetHandler(db, context, input, metaAdsCliExecution, encryptionKey, expectedMetaCredential),
+    update_meta_budget: (input, context) => updateMetaBudgetHandler(db, context, input, metaAdsCliExecution, encryptionKey, expectedMetaCredential, options?.metaAdsRequestTelemetry),
+    update_meta_ad: (input, context) => updateMetaAdHandler(db, context, input, metaAdsCliExecution, encryptionKey, expectedMetaCredential),
     delete_meta_entity: (input, context) => deleteMetaEntityHandler(db, context, input, metaAdsCliExecution, encryptionKey, expectedMetaCredential)
   };
 }
@@ -2610,19 +2614,47 @@ function requiredMetaBudgetEntity(input: unknown): "campaign" | "adset" {
   throw new Error(`unsupported_meta_budget_entity:${raw}`);
 }
 
-// A budget update requires a POSITIVE integer amount in the ad-account minor units
-// (cents). Read + validate BEFORE resolving the credential so 0 / negative /
-// non-integer / missing fails early and uniformly. The connector re-validates this
-// (defense-in-depth) as the authoritative money-safety gate.
-function requiredPositiveBudgetCents(input: unknown): number {
-  const value = numberOrNull(input, "dailyBudget");
-  if (value === null) {
-    throw new Error("dailyBudget is required");
+// The entity's CURRENT budget type from a node read of daily_budget + lifetime_budget. Graph
+// returns them as strings and reports an unused one as "0" or omits it, so "set" means a value
+// above 0. Neither set (e.g. a campaign whose budgets live on its ad sets) or both set is
+// "unknown" — the caller fails closed rather than guessing.
+function metaCurrentBudgetKind(node: Record<string, unknown>): MetaBudgetKind | "unknown" {
+  const isSet = (value: unknown): boolean => {
+    const parsed = typeof value === "number" ? value : typeof value === "string" ? Number(value) : Number.NaN;
+    return Number.isFinite(parsed) && parsed > 0;
+  };
+  const daily = isSet(node.daily_budget);
+  const lifetime = isSet(node.lifetime_budget);
+  if (daily === lifetime) {
+    return "unknown";
   }
-  if (!Number.isInteger(value) || value <= 0) {
-    throw new Error(`invalid_daily_budget:${value}`);
+  return daily ? "daily" : "lifetime";
+}
+
+// A budget update requires EXACTLY ONE of dailyBudget | lifetimeBudget, a POSITIVE integer
+// amount in the ad-account minor units (cents). Read + validate BEFORE resolving the
+// credential so both / neither / 0 / negative / non-integer fails early and uniformly. The
+// connector re-validates the amount (defense-in-depth) as the authoritative money-safety gate.
+// PRESENCE is "the key holds anything but undefined/null" — NOT "the key holds a number" — so a
+// stringly-typed or NaN amount alongside a numeric one is ambiguous rather than silently ignored,
+// and a lone non-number amount is invalid rather than "missing".
+function requiredBudgetUpdate(input: unknown): { kind: MetaBudgetKind; cents: number } {
+  const daily = objectField(input, "dailyBudget");
+  const lifetime = objectField(input, "lifetimeBudget");
+  const dailyPresent = daily !== undefined && daily !== null;
+  const lifetimePresent = lifetime !== undefined && lifetime !== null;
+  if (dailyPresent && lifetimePresent) {
+    throw new Error("budget_kind_ambiguous: pass EITHER dailyBudget OR lifetimeBudget, not both");
   }
-  return value;
+  if (!dailyPresent && !lifetimePresent) {
+    throw new Error("dailyBudget or lifetimeBudget is required");
+  }
+  const kind: MetaBudgetKind = dailyPresent ? "daily" : "lifetime";
+  const value = dailyPresent ? daily : lifetime;
+  if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
+    throw new Error(`invalid_${kind}_budget:${String(value)}`);
+  }
+  return { kind, cents: value };
 }
 
 async function setMetaEntityStatusHandler(
@@ -2690,14 +2722,186 @@ async function setMetaEntityStatusHandler(
   );
 }
 
-// Budget update (scale / reduce / reallocate). Operator-only. Changes the daily
-// budget of an EXISTING campaign or ad set INLINE (never db.createJob — a money
+// Budget update (scale / reduce / reallocate). Operator-only. Changes the daily OR
+// lifetime budget of an EXISTING campaign or ad set INLINE (never db.createJob — a money
 // write never touches the worker's retry machinery) and audits it. MONEY-SAFETY:
-// this NEVER changes delivery status — the connector POSTs daily_budget only, so an
-// active entity keeps spending at the new budget and a paused one stays paused;
+// this NEVER changes delivery status — the connector POSTs the one budget field only, so
+// an active entity keeps spending at the new budget and a paused one stays paused;
 // there is no activation gate/bookkeeping because a budget change is not a go-live.
-// The audit records budget_present (a boolean) ONLY — never the raw amount (INV-6).
+// The audit records budget_present + budget_kind ONLY — never the raw amount (INV-6).
 async function updateMetaBudgetHandler(
+  db: InfiniteOsDb,
+  context: SessionContext,
+  input: unknown,
+  cliExecution?: MetaAdsCliExecution,
+  encryptionKey?: string,
+  expectedCredential?: ExpectedMetaCredential,
+  telemetry?: MetaAdsRequestObserver
+): Promise<ActionEnvelope> {
+  const sourceId = requiredString(input, "sourceId");
+  const entityId = requiredString(input, "entityId");
+  // campaign|adset ONLY (Meta has no ad-level budget) — rejects "ad"/"creative" early.
+  const entity = requiredMetaBudgetEntity(input);
+  // EXACTLY ONE budget kind, POSITIVE integer cents, validated before any credential resolve or POST.
+  const budget = requiredBudgetUpdate(input);
+  const action: InfiniteOsActionId = "update_meta_budget";
+  const credential = await resolveMetaCredentialForWrite(
+    db,
+    context,
+    sourceId,
+    cliExecution,
+    encryptionKey,
+    expectedCredential
+  );
+  // BUDGET-TYPE GUARD: read the entity's current budget type and refuse a daily<->lifetime
+  // mismatch HERE, so every caller (desktop, cloud, CLI, a direct operator call) is covered by one
+  // check instead of each proposal layer. One node GET per operator budget write; it rides the
+  // caller's request telemetry, so it counts against the shared per-account request budget.
+  // The read is a Graph GET that needs a STORED token. An ambient-auth CLI credential has none, so
+  // the budget type cannot be checked — refuse typed (nothing changed) instead of surfacing the raw
+  // "accessToken credential is required" from deep inside the read.
+  const storedToken = (credential as unknown as Record<string, unknown>).accessToken;
+  if (typeof storedToken !== "string" || storedToken === "") {
+    await metaAuditLog(db, context, sourceId, action, "failed", {
+      action,
+      entity,
+      entity_id: entityId,
+      budget_present: true,
+      budget_kind: budget.kind,
+      error_code: "budget_kind_unreadable"
+    });
+    throw metaTypedError(
+      "budget_kind_unreadable",
+      `budget_kind_unreadable: this Meta source cannot read the ${entity}'s budget type (it has no stored access token), so nothing was changed`
+    );
+  }
+  let currentKind: MetaBudgetKind | "unknown";
+  try {
+    currentKind = metaCurrentBudgetKind(
+      await getMetaEntity(credential, entityId, { fields: "id,daily_budget,lifetime_budget", entity }, telemetry)
+    );
+  } catch (error) {
+    // The budget-type check could not run, so NOTHING was written. Surface ONE typed pre-write code so a
+    // caller can tell this apart from a failed write (whose provider codes look the same), while keeping
+    // the read's own code (message, audit, `cause`) and retryability — a failed read is safe to retry.
+    const readErrorCode = metaErrorCode(error);
+    await metaAuditLog(db, context, sourceId, action, "failed", {
+      action,
+      entity,
+      entity_id: entityId,
+      budget_present: true,
+      budget_kind: budget.kind,
+      error_code: "budget_kind_read_failed",
+      read_error_code: readErrorCode
+    });
+    const retryable = (error as { retryable?: unknown } | null)?.retryable === true;
+    const detail = error instanceof Error ? error.message : String(error);
+    throw Object.assign(
+      new ConnectorError(
+        "budget_kind_read_failed",
+        `budget_kind_read_failed: the ${entity}'s budget type could not be read (${readErrorCode}: ${detail}), so nothing was changed`,
+        retryable
+      ),
+      { cause: error }
+    );
+  }
+  if (currentKind !== budget.kind) {
+    const code = currentKind === "unknown" ? "budget_kind_unknown" : "budget_kind_mismatch";
+    await metaAuditLog(db, context, sourceId, action, "failed", {
+      action,
+      entity,
+      entity_id: entityId,
+      budget_present: true,
+      budget_kind: budget.kind,
+      current_budget_kind: currentKind,
+      error_code: code
+    });
+    throw metaTypedError(
+      code,
+      currentKind === "unknown"
+        ? `${code}: this ${entity} has no single daily or lifetime budget of its own, so it cannot be updated here`
+        : `${code}: this ${entity} runs on a ${currentKind} budget; send ${currentKind === "daily" ? "dailyBudget" : "lifetimeBudget"} (the budget type is never switched)`
+    );
+  }
+  let result;
+  try {
+    result = await updateMetaBudget(credential, entityId, budget.cents, entity, budget.kind);
+  } catch (error) {
+    await metaAuditLog(db, context, sourceId, action, "failed", {
+      action,
+      entity,
+      entity_id: entityId,
+      // Presence + kind only — the amount is NEVER recorded (INV-6). Belt-and-suspenders:
+      // redactMetaAuditDetails also drops any daily_budget/lifetime_budget key.
+      budget_present: true,
+      budget_kind: budget.kind,
+      error_code: metaErrorCode(error)
+    });
+    throw error;
+  }
+  await metaAuditLog(db, context, sourceId, action, "succeeded", {
+    action,
+    entity,
+    entity_id: entityId,
+    budget_present: true,
+    budget_kind: budget.kind
+  });
+  return envelope(
+    action,
+    context.authority,
+    { id: result.id, entity: result.entity, updated: true },
+    ["integration_audit_log"],
+    "ok"
+  );
+}
+
+// Existing-ad edit: rename and/or creative swap. Validates EVERYTHING before resolving the
+// credential — a status key (an edit is never a go-live), no change, a blank name, or a
+// non-numeric ad/creative id is refused with no provider call and no audit row. Presence is read
+// from the raw field (not optionalString) so a blank name is an error, never a silent no-op.
+function requiredMetaAdUpdate(input: unknown): {
+  adId: string;
+  name?: string;
+  creativeId?: string;
+  changed: MetaAdUpdateField[];
+} {
+  if (objectField(input, "status") !== undefined) {
+    throw new Error("update_meta_ad_status_not_allowed: use set_meta_entity_status to pause or activate an ad");
+  }
+  const adId = requiredString(input, "entityId");
+  if (!/^\d+$/.test(adId)) {
+    throw new Error(`invalid_meta_ad_id:${adId}`);
+  }
+  const rawName = objectField(input, "name");
+  const rawCreativeId = objectField(input, "creativeId");
+  const changed: MetaAdUpdateField[] = [];
+  if (rawName !== undefined) {
+    if (typeof rawName !== "string" || rawName.trim() === "") {
+      throw new Error("invalid_meta_ad_name: name must be a non-empty string");
+    }
+    changed.push("name");
+  }
+  if (rawCreativeId !== undefined) {
+    if (typeof rawCreativeId !== "string" || !/^\d+$/.test(rawCreativeId)) {
+      throw new Error("invalid_meta_creative_id: creativeId must be a numeric creative id");
+    }
+    changed.push("creative");
+  }
+  if (changed.length === 0) {
+    throw new Error("update_meta_ad_no_change: pass name and/or creativeId");
+  }
+  return {
+    adId,
+    ...(rawName === undefined ? {} : { name: rawName as string }),
+    ...(rawCreativeId === undefined ? {} : { creativeId: rawCreativeId as string }),
+    changed
+  };
+}
+
+// Operator-only, INLINE (never db.createJob — a write never touches the worker's retry
+// machinery). The audit records WHICH fields changed (changed_fields), never the new name or
+// creative id (INV-6 spirit: kinds, not content).
+async function updateMetaAdHandler(
   db: InfiniteOsDb,
   context: SessionContext,
   input: unknown,
@@ -2706,12 +2910,8 @@ async function updateMetaBudgetHandler(
   expectedCredential?: ExpectedMetaCredential
 ): Promise<ActionEnvelope> {
   const sourceId = requiredString(input, "sourceId");
-  const entityId = requiredString(input, "entityId");
-  // campaign|adset ONLY (Meta has no ad-level budget) — rejects "ad"/"creative" early.
-  const entity = requiredMetaBudgetEntity(input);
-  // POSITIVE integer cents, validated before any credential resolve or POST.
-  const dailyBudget = requiredPositiveBudgetCents(input);
-  const action: InfiniteOsActionId = "update_meta_budget";
+  const update = requiredMetaAdUpdate(input);
+  const action: InfiniteOsActionId = "update_meta_ad";
   const credential = await resolveMetaCredentialForWrite(
     db,
     context,
@@ -2722,29 +2922,30 @@ async function updateMetaBudgetHandler(
   );
   let result;
   try {
-    result = await updateMetaBudget(credential, entityId, dailyBudget, entity);
+    result = await updateMetaAd(credential, update.adId, {
+      ...(update.name === undefined ? {} : { name: update.name }),
+      ...(update.creativeId === undefined ? {} : { creativeId: update.creativeId })
+    });
   } catch (error) {
     await metaAuditLog(db, context, sourceId, action, "failed", {
       action,
-      entity,
-      entity_id: entityId,
-      // Presence only — the amount is NEVER recorded (INV-6). Belt-and-suspenders:
-      // redactMetaAuditDetails also drops any daily_budget/dailyBudget key.
-      budget_present: true,
+      entity: "ad",
+      entity_id: update.adId,
+      changed_fields: update.changed,
       error_code: metaErrorCode(error)
     });
     throw error;
   }
   await metaAuditLog(db, context, sourceId, action, "succeeded", {
     action,
-    entity,
-    entity_id: entityId,
-    budget_present: true
+    entity: "ad",
+    entity_id: update.adId,
+    changed_fields: result.changed
   });
   return envelope(
     action,
     context.authority,
-    { id: result.id, entity: result.entity, updated: true },
+    { id: result.id, entity: "ad", updated: true, changed: result.changed },
     ["integration_audit_log"],
     "ok"
   );

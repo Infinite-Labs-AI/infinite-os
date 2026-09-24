@@ -8183,7 +8183,7 @@ export async function metaCommand(
   const [object, action, ...rest] = args;
   if (!object || !action) {
     throw new Error(
-      "Usage: infinite local meta <campaign|adset|ad|creative> <create|activate|pause|budget|delete|list|get> [...]"
+      "Usage: infinite local meta <campaign|adset|ad|creative> <create|activate|pause|budget|update|delete|list|get> [...]"
     );
   }
   if (!META_OBJECTS.includes(object as MetaObject)) {
@@ -8243,17 +8243,72 @@ export async function metaCommand(
   if (action === "budget") {
     return metaBudgetCommand(metaObject, rest, env, options, { json, sourceId });
   }
+  if (action === "update") {
+    return metaAdUpdateCommand(metaObject, rest, env, options, { json, sourceId });
+  }
   if (action === "delete") {
     return metaDeleteCommand(metaObject, rest, env, options, { json, sourceId });
   }
   throw new Error(
-    `Unknown meta action: ${action} (expected create|activate|pause|budget|delete|list|get)`
+    `Unknown meta action: ${action} (expected create|activate|pause|budget|update|delete|list|get)`
   );
 }
 
-// `infinite meta {campaign|adset} budget <id> --daily-budget <cents> --source-id <id>
-// [--yes] [--json]`. Change the daily budget of an EXISTING campaign or ad set (Meta
-// has no ad-level budget, so `ad`/`creative` are rejected). A budget change affects
+// `infinite meta ad update <id> [--name <name>] [--creative-id <id>] --source-id <id> [--yes] [--json]`.
+// Rename an EXISTING ad and/or point it at another EXISTING creative. Ads only (campaign/ad set
+// renames are out of this slice). Never sends a status, so it is not a go-live and uses the SAME
+// standard write gate as budget/pause; the engine validates the ids before any provider call.
+async function metaAdUpdateCommand(
+  object: MetaObject,
+  rest: string[],
+  env: CliEnv,
+  options: MetaCommandOptions,
+  ctx: { json: boolean; sourceId: string }
+): Promise<unknown> {
+  if (object !== "ad") {
+    throw new Error(`meta ${object} update is not supported: only ads can be updated (rename / creative swap)`);
+  }
+  const entityId = metaPositionalId(rest);
+  if (!entityId) {
+    throw new Error("meta ad update requires an ad id");
+  }
+  const name = optionValue(rest, "--name");
+  const creativeId = optionValue(rest, "--creative-id");
+  if (name === undefined && creativeId === undefined) {
+    throw new Error("meta ad update requires --name and/or --creative-id");
+  }
+  const changes = [
+    ...(name === undefined ? [] : [`rename to ${JSON.stringify(name)}`]),
+    ...(creativeId === undefined ? [] : [`use creative ${creativeId}`])
+  ];
+  const proceed = await metaConfirmWrite(
+    "update",
+    object,
+    `Update ad ${entityId}: ${changes.join(", ")}`,
+    rest,
+    env,
+    options,
+    "meta_ad_update"
+  );
+  if (!proceed.ok) {
+    return proceed.result;
+  }
+  return metaToolCall(
+    "update_meta_ad",
+    {
+      sourceId: ctx.sourceId,
+      entityId,
+      ...(name === undefined ? {} : { name }),
+      ...(creativeId === undefined ? {} : { creativeId })
+    },
+    env
+  );
+}
+
+// `infinite meta {campaign|adset} budget <id> (--daily-budget <cents> | --lifetime-budget <cents>)
+// --source-id <id> [--yes] [--json]`. Change the daily or lifetime budget of an EXISTING campaign
+// or ad set (Meta has no ad-level budget, so `ad`/`creative` are rejected). Exactly one budget flag
+// per call; the entity keeps the budget type it already has. A budget change affects
 // spend but is NOT a go-live, so it uses the SAME standard write gate as create/pause —
 // NOT the stricter typed-confirm reserved for `activate`. Budgets are INTEGER cents.
 async function metaBudgetCommand(
@@ -8271,14 +8326,22 @@ async function metaBudgetCommand(
     throw new Error(`meta ${object} budget requires an entity id`);
   }
   const dailyBudget = metaCentsFlag(rest, "--daily-budget");
-  if (dailyBudget === undefined) {
-    throw new Error(`meta ${object} budget requires --daily-budget <cents> (e.g. 5000 = $50.00)`);
+  const lifetimeBudget = metaCentsFlag(rest, "--lifetime-budget");
+  if (dailyBudget !== undefined && lifetimeBudget !== undefined) {
+    throw new Error(`meta ${object} budget takes either --daily-budget or --lifetime-budget, not both`);
   }
-  if (dailyBudget <= 0) {
-    throw new Error("--daily-budget must be a positive integer number of cents");
+  if (dailyBudget === undefined && lifetimeBudget === undefined) {
+    throw new Error(
+      `meta ${object} budget requires --daily-budget <cents> or --lifetime-budget <cents> (e.g. 5000 = $50.00)`
+    );
   }
+  const flag = dailyBudget !== undefined ? "--daily-budget" : "--lifetime-budget";
+  if (((dailyBudget ?? lifetimeBudget) as number) <= 0) {
+    throw new Error(`${flag} must be a positive integer number of cents`);
+  }
+  const budget = dailyBudget !== undefined ? { dailyBudget } : { lifetimeBudget: lifetimeBudget as number };
   const section = `meta_${object}_budget`;
-  const budgetLine = metaBudgetSummary({ dailyBudget }, options.adAccountCurrency);
+  const budgetLine = metaBudgetSummary(budget, options.adAccountCurrency);
   const proceed = await metaConfirmWrite(
     "update budget for",
     object,
@@ -8293,7 +8356,7 @@ async function metaBudgetCommand(
   }
   return metaToolCall(
     "update_meta_budget",
-    { sourceId: ctx.sourceId, entityId, entity: object, dailyBudget },
+    { sourceId: ctx.sourceId, entityId, entity: object, ...budget },
     env
   );
 }

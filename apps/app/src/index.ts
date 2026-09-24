@@ -152,6 +152,14 @@ export const APP_CAPABILITIES = [
   // by guardedAction. The desktop fails CLOSED on this flag (daemon_capability_missing → "update
   // Infinite") — an older bundle must never answer the v2 request with the v1 shape.
   "meta_live_insights_v2",
+  // update_meta_budget also accepts lifetimeBudget (exactly one of daily|lifetime per call) for an
+  // entity that already runs on a lifetime budget. A desktop fails CLOSED on this flag: an older
+  // daemon would refuse a lifetime-only input as "dailyBudget is required", never apply it.
+  "meta_lifetime_budget_writes",
+  // update_meta_ad: rename an existing ad and/or swap it to another existing creative (never a
+  // status change). Named to the meta_*_writes convention. A desktop fails CLOSED on this flag
+  // before offering an ad edit to a daemon.
+  "meta_ad_update_writes",
   // The local interactive task ledger's operator routes (/interactive/*, migration 0072). The
   // desktop records Cmd+L tasks, proposals and approvals here only when this flag is present;
   // an older bundle without the routes keeps the desktop on its in-memory confirmation path.

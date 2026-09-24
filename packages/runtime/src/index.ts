@@ -911,9 +911,17 @@ function metadataFor(id: InfiniteOsActionId): {
       recipeIds: []
     },
     update_meta_budget: {
-      title: "Update Meta Ads daily budget",
+      title: "Update Meta Ads budget",
       summary:
-        "Operator-only. Change the daily budget of an EXISTING Meta Ads campaign or ad set (campaign|adset only — Meta has no ad-level budget). dailyBudget is a POSITIVE integer in the ad-account minor units (cents). Adjusts spend ONLY; it never changes delivery status (an already-active entity keeps spending at the new budget; a paused one stays paused).",
+        "Operator-only. Change the daily OR lifetime budget of an EXISTING Meta Ads campaign or ad set (no ad-level budget). Send EXACTLY ONE of dailyBudget or lifetimeBudget: a POSITIVE integer in ad-account minor units (cents), of the budget type the entity already uses (read first; a mismatch is refused, never switched; end time never moves). Adjusts spend ONLY; never changes delivery status (active keeps spending at the new budget; paused stays paused).",
+      category: "operator",
+      recommendedNextActions: ["get_meta_entity", "list_meta_entities"],
+      recipeIds: []
+    },
+    update_meta_ad: {
+      title: "Update Meta Ads ad",
+      summary:
+        "Operator-only. Edit an EXISTING Meta Ads ad in place: rename it (name) and/or point it at another EXISTING creative (creativeId); send at least one. The ad id never changes. No status input: an active ad stays active, a paused one stays paused. A creative swap usually sends the ad back through Meta review, which can pause delivery until approved. Use create_meta_creative first for a new creative.",
       category: "operator",
       recommendedNextActions: ["get_meta_entity", "list_meta_entities"],
       recipeIds: []
@@ -1364,9 +1372,28 @@ function inputSchemaFor(id: InfiniteOsActionId): Record<string, unknown> {
         // POSITIVE: setting a budget to 0 is not a valid spend instruction, so the enum
         // is a strict lower bound (exclusiveMinimum 0) and the handler/connector reject
         // 0 / negative / non-integer amounts before any Graph POST.
-        dailyBudget: { type: "number", exclusiveMinimum: 0 }
+        // EXACTLY ONE of dailyBudget | lifetimeBudget per call. The handler enforces that rule
+        // (budget_kind_ambiguous / missing) rather than a top-level oneOf, because these schemas
+        // are served as agent tool schemas and model tool APIs reject top-level combinators.
+        dailyBudget: { type: "number", exclusiveMinimum: 0 },
+        // Lifetime amount for an entity that ALREADY runs on a lifetime budget. Same unit and
+        // positivity rules as dailyBudget. It never switches the budget type or moves end time.
+        lifetimeBudget: { type: "number", exclusiveMinimum: 0 }
       },
-      ["sourceId", "entityId", "entity", "dailyBudget"]
+      ["sourceId", "entityId", "entity"]
+    ),
+    // Existing-ad edit: rename and/or creative swap. At least one change is required and the
+    // handler enforces that (no top-level combinators in agent tool schemas). There is NO status
+    // property, so an ad edit can never be a go-live; additionalProperties:false rejects extras.
+    update_meta_ad: requiredObject(
+      {
+        sourceId: { type: "string" },
+        // Meta node ids are numeric. The pattern also keeps a leading "-" id out of the CLI argv.
+        entityId: { type: "string", pattern: "^[0-9]+$" },
+        name: { type: "string", minLength: 1 },
+        creativeId: { type: "string", pattern: "^[0-9]+$" }
+      },
+      ["sourceId", "entityId"]
     ),
     delete_meta_entity: requiredObject(
       {

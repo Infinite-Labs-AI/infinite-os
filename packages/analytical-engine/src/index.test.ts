@@ -7164,6 +7164,7 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
           ["create_meta_ad", { sourceId: "src_meta", adsetId: "adset_1", creativeId: "creative_1", name: "Stale" }],
           ["set_meta_entity_status", { sourceId: "src_meta", entityId: "campaign_1", entity: "campaign", status: "PAUSED" }],
           ["update_meta_budget", { sourceId: "src_meta", entityId: "campaign_1", entity: "campaign", dailyBudget: 100 }],
+          ["update_meta_ad", { sourceId: "src_meta", entityId: "120000000000001", name: "Stale" }],
           ["delete_meta_entity", { sourceId: "src_meta", entityId: "campaign_1", entity: "campaign" }]
         ] as const;
         for (const [actionId, input] of cases) {
@@ -8209,24 +8210,38 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
     );
   });
 
+  // R1: every budget update first reads the entity's CURRENT budget type (one node GET). Graph
+  // returns budgets as strings and reports an unused budget as "0" or omits it.
+  const budgetRead =
+    (fields: Record<string, string>, post: () => Response = () => jsonResponse({ success: true })) =>
+    (call: GraphCall): Response =>
+      call.method === "POST" ? post() : jsonResponse({ id: "120000000000555", ...fields });
+  const DAILY_ENTITY = { daily_budget: "4000", lifetime_budget: "0" };
+  const LIFETIME_ENTITY = { lifetime_budget: "80000", daily_budget: "0" };
+
   it("updates a daily budget INLINE (POST /{id} daily_budget only, NO status) and audits budget_present WITHOUT the amount/token", async () => {
     const audits: AuditRow[] = [];
     const db = metaWriteTestDb({ audits });
     await withGraph(
-      () => jsonResponse({ success: true }),
+      budgetRead(DAILY_ENTITY),
       async (calls) => {
         const handlers = createActionHandlers(db);
         const result = await handlers.update_meta_budget?.(
           { sourceId: "src_meta", entityId: "120000000000555", entity: "campaign", dailyBudget: 5000 },
           operatorContext
         );
+        // R1 pre-read: ONE node GET for the budget fields only, BEFORE the write.
+        expect(calls).toHaveLength(2);
+        expect(calls[0].method).toBe("GET");
+        const read = new URL(calls[0].url);
+        expect(read.pathname).toBe("/v25.0/120000000000555");
+        expect(read.searchParams.get("fields")).toBe("id,daily_budget,lifetime_budget");
         // INLINE node POST — daily_budget only, NEVER a status field (money-safety).
-        expect(calls).toHaveLength(1);
-        expect(calls[0].url).toBe("https://graph.facebook.com/v25.0/120000000000555");
-        expect(calls[0].method).toBe("POST");
-        expect(calls[0].body).toEqual({ daily_budget: "5000" });
-        expect(calls[0].body).not.toHaveProperty("status");
-        expect(calls[0].authorization).toBe("Bearer secret-meta-token");
+        expect(calls[1].url).toBe("https://graph.facebook.com/v25.0/120000000000555");
+        expect(calls[1].method).toBe("POST");
+        expect(calls[1].body).toEqual({ daily_budget: "5000" });
+        expect(calls[1].body).not.toHaveProperty("status");
+        expect(calls[1].authorization).toBe("Bearer secret-meta-token");
         expect(result?.data).toMatchObject({ id: "120000000000555", entity: "campaign", updated: true });
 
         // INVARIANT 6: audit stores presence + ids, NEVER the token or the raw amount.
@@ -8241,7 +8256,392 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
         const serialized = JSON.stringify(audits);
         expect(serialized).not.toContain("secret-meta-token");
         expect(serialized).not.toContain("5000");
+        expect(serialized).not.toContain("4000");
         expect(serialized).not.toContain("daily_budget");
+      }
+    );
+  });
+
+  it("updates a LIFETIME budget INLINE (POST /{id} lifetime_budget only) and audits budget_kind WITHOUT the amount", async () => {
+    const audits: AuditRow[] = [];
+    const db = metaWriteTestDb({ audits });
+    await withGraph(
+      budgetRead(LIFETIME_ENTITY),
+      async (calls) => {
+        const handlers = createActionHandlers(db);
+        const result = await handlers.update_meta_budget?.(
+          { sourceId: "src_meta", entityId: "120000000000556", entity: "adset", lifetimeBudget: 91234 },
+          operatorContext
+        );
+        expect(calls.map((call) => call.method)).toEqual(["GET", "POST"]);
+        expect(calls[1].url).toBe("https://graph.facebook.com/v25.0/120000000000556");
+        expect(calls[1].body).toEqual({ lifetime_budget: "91234" });
+        expect(result?.data).toMatchObject({ id: "120000000000556", entity: "adset", updated: true });
+
+        const audit = audits.find((row) => row.action === "update_meta_budget");
+        expect(audit?.status).toBe("succeeded");
+        expect(audit?.details).toMatchObject({
+          entity: "adset",
+          entity_id: "120000000000556",
+          budget_present: true,
+          budget_kind: "lifetime"
+        });
+        const serialized = JSON.stringify(audits);
+        expect(serialized).not.toContain("91234");
+        expect(serialized).not.toContain("secret-meta-token");
+      }
+    );
+  });
+
+  it("R1: refuses a budget-TYPE mismatch in BOTH directions after ONE read — NO POST, audited without amounts", async () => {
+    for (const [entityFields, input, current] of [
+      // The dangerous direction: a lifetime-sized amount sent as a DAILY budget to a lifetime entity.
+      [LIFETIME_ENTITY, { dailyBudget: 300000 }, "lifetime"],
+      [DAILY_ENTITY, { lifetimeBudget: 300000 }, "daily"]
+    ] as const) {
+      const audits: AuditRow[] = [];
+      const db = metaWriteTestDb({ audits });
+      await withGraph(budgetRead(entityFields), async (calls) => {
+        await expect(
+          createActionHandlers(db).update_meta_budget?.(
+            { sourceId: "src_meta", entityId: "120000000000555", entity: "adset", ...input },
+            operatorContext
+          )
+        ).rejects.toMatchObject({ code: "budget_kind_mismatch", retryable: false });
+        expect(calls.map((call) => call.method)).toEqual(["GET"]);
+        const audit = audits.find((row) => row.action === "update_meta_budget");
+        expect(audit?.status).toBe("failed");
+        expect(audit?.details).toMatchObject({
+          entity: "adset",
+          entity_id: "120000000000555",
+          budget_kind: "dailyBudget" in input ? "daily" : "lifetime",
+          current_budget_kind: current,
+          error_code: "budget_kind_mismatch"
+        });
+        const serialized = JSON.stringify(audits);
+        expect(serialized).not.toContain("300000");
+        expect(serialized).not.toContain("80000");
+        expect(serialized).not.toContain("4000");
+      });
+    }
+  });
+
+  it("R1: fails CLOSED with budget_kind_unknown when the entity has no budget of its own, or reports both — NO POST", async () => {
+    const entities: Array<Record<string, string>> = [
+      {}, // e.g. a campaign whose budgets live on its ad sets: Graph omits both fields
+      { daily_budget: "0", lifetime_budget: "0" },
+      { daily_budget: "4000", lifetime_budget: "80000" }
+    ];
+    for (const entityFields of entities) {
+      const audits: AuditRow[] = [];
+      const db = metaWriteTestDb({ audits });
+      await withGraph(budgetRead(entityFields), async (calls) => {
+        await expect(
+          createActionHandlers(db).update_meta_budget?.(
+            { sourceId: "src_meta", entityId: "120000000000555", entity: "campaign", dailyBudget: 5000 },
+            operatorContext
+          )
+        ).rejects.toMatchObject({ code: "budget_kind_unknown", retryable: false });
+        expect(calls.map((call) => call.method)).toEqual(["GET"]);
+        expect(audits.find((row) => row.action === "update_meta_budget")?.details).toMatchObject({
+          current_budget_kind: "unknown",
+          error_code: "budget_kind_unknown"
+        });
+      });
+    }
+  });
+
+  it("R1 on the CLI transport (the cloud money lane): a mismatch is refused after the Graph read with NO CLI spawn; a match reads then writes via the CLI", async () => {
+    for (const [entityFields, expectSpawn] of [[DAILY_ENTITY, false], [LIFETIME_ENTITY, true]] as const) {
+      const dir = mkdtempSync(join(tmpdir(), "meta-r1-cli-"));
+      const marker = join(dir, "argv.json");
+      const executable = join(dir, "meta-server.mjs");
+      writeFileSync(executable, `#!${process.execPath}\nimport { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(marker)}, JSON.stringify(process.argv.slice(2)));\n`);
+      chmodSync(executable, 0o700);
+      try {
+        const audits: AuditRow[] = [];
+        const db = metaWriteTestDb({
+          audits,
+          credential: { mode: "live", transport: "meta_ads_cli", adAccountId: "act_999", accessToken: "stored-server-token" }
+        });
+        await withGraph(budgetRead(entityFields), async (calls) => {
+          const handlers = createActionHandlers(db, { metaAdsCliExecution: { mode: "isolated_server", executable } });
+          const run = handlers.update_meta_budget?.(
+            { sourceId: "src_meta", entityId: "120000000000555", entity: "adset", lifetimeBudget: 300000 },
+            operatorContext
+          );
+          if (expectSpawn) {
+            await run;
+          } else {
+            await expect(run).rejects.toMatchObject({ code: "budget_kind_mismatch" });
+          }
+          // The budget-type read is a Graph GET with the stored token; the write itself is never a Graph POST.
+          expect(calls.map((call) => call.method)).toEqual(["GET"]);
+          expect(calls[0].authorization).toBe("Bearer stored-server-token");
+        });
+        expect(existsSync(marker)).toBe(expectSpawn);
+        if (expectSpawn) {
+          const argv = JSON.parse(readFileSync(marker, "utf8")) as string[];
+          expect(argv[argv.indexOf("--lifetime-budget") + 1]).toBe("300000");
+          expect(argv).not.toContain("--daily-budget");
+        }
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it("N1: a credential that cannot read the budget type (ambient CLI auth, no stored token) is refused TYPED as budget_kind_unreadable — no call, audited", async () => {
+    const audits: AuditRow[] = [];
+    const db = metaWriteTestDb({ audits, credential: { mode: "live", transport: "meta_ads_cli", adAccountId: "act_999" } });
+    await withGraph(budgetRead(DAILY_ENTITY), async (calls) => {
+      const handlers = createActionHandlers(db, { metaAdsCliExecution: { mode: "isolated_server", executable: "/missing/meta" } });
+      await expect(
+        handlers.update_meta_budget?.(
+          { sourceId: "src_meta", entityId: "120000000000555", entity: "adset", dailyBudget: 5000 },
+          operatorContext
+        )
+      ).rejects.toMatchObject({ code: "budget_kind_unreadable", retryable: false });
+      expect(calls).toHaveLength(0);
+      expect(audits.find((row) => row.action === "update_meta_budget")?.details).toMatchObject({
+        budget_kind: "daily",
+        error_code: "budget_kind_unreadable"
+      });
+    });
+  });
+
+  it("R1: a failed budget-type read writes NOTHING and is audited", async () => {
+    const audits: AuditRow[] = [];
+    const db = metaWriteTestDb({ audits });
+    await withGraph(
+      (call) => (call.method === "POST" ? jsonResponse({ success: true }) : jsonResponse({ error: { message: "read boom" } }, 500)),
+      async (calls) => {
+        await expect(
+          createActionHandlers(db).update_meta_budget?.(
+            { sourceId: "src_meta", entityId: "120000000000555", entity: "campaign", dailyBudget: 5000 },
+            operatorContext
+          )
+        ).rejects.toMatchObject({
+          // ONE typed pre-write code, so a caller can tell "the check could not run, nothing changed"
+          // from a failed write. The read's own retryability is kept (a 500 read is safe to retry).
+          code: "budget_kind_read_failed",
+          retryable: true,
+          message: expect.stringContaining("provider_api_error")
+        });
+        expect(calls.some((call) => call.method === "POST")).toBe(false);
+        const audit = audits.find((row) => row.action === "update_meta_budget");
+        expect(audit?.status).toBe("failed");
+        expect(audit?.details).toMatchObject({ budget_kind: "daily", error_code: "budget_kind_read_failed", read_error_code: "provider_api_error" });
+      }
+    );
+  });
+
+  it("R1: a read refused BEFORE the fetch (the caller's request meter) is also budget_kind_read_failed, keeping the meter's code and message", async () => {
+    const audits: AuditRow[] = [];
+    const db = metaWriteTestDb({ audits });
+    await withGraph(budgetRead(DAILY_ENTITY), async (calls) => {
+      const refusingMeter = new MetaAdsRequestTelemetry(5, async () => {
+        throw Object.assign(new Error("request budget exhausted for this ad account"), { code: "meta_write_read_budget_exhausted" });
+      });
+      let caught: unknown;
+      try {
+        await createActionHandlers(db, { metaAdsRequestTelemetry: refusingMeter }).update_meta_budget?.(
+          { sourceId: "src_meta", entityId: "120000000000555", entity: "campaign", dailyBudget: 5000 },
+          operatorContext
+        );
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toMatchObject({ code: "budget_kind_read_failed", retryable: false });
+      expect(String((caught as Error).message)).toContain("meta_write_read_budget_exhausted: request budget exhausted");
+      expect((caught as { cause?: { code?: string } }).cause?.code).toBe("meta_write_read_budget_exhausted");
+      expect(calls).toHaveLength(0);
+      expect(audits.find((row) => row.action === "update_meta_budget")?.details).toMatchObject({
+        error_code: "budget_kind_read_failed",
+        read_error_code: "meta_write_read_budget_exhausted"
+      });
+    });
+  });
+
+  it("R1: the pre-read is COUNTED by the caller's request telemetry (shared per-account request budget)", async () => {
+    const db = metaWriteTestDb({ audits: [] });
+    await withGraph(budgetRead(DAILY_ENTITY), async () => {
+      const telemetry = new MetaAdsRequestTelemetry(5);
+      await createActionHandlers(db, { metaAdsRequestTelemetry: telemetry }).update_meta_budget?.(
+        { sourceId: "src_meta", entityId: "120000000000555", entity: "campaign", dailyBudget: 5000 },
+        operatorContext
+      );
+      // Exactly the one GET is a metered read; the write POST is not a read-budget request.
+      expect(telemetry.snapshot()).toMatchObject({ requestCount: 1 });
+    });
+  });
+
+  it("B1: a PRESENT budget key counts even when it is not a number — both present is ambiguous, a bad present value is invalid (NO POST)", async () => {
+    const audits: AuditRow[] = [];
+    const db = metaWriteTestDb({ audits });
+    await withGraph(
+      () => jsonResponse({ success: true }),
+      async (calls) => {
+        const handlers = createActionHandlers(db);
+        const base = { sourceId: "src_meta", entityId: "120000000000555", entity: "campaign" };
+        const cases: Array<[Record<string, unknown>, RegExp]> = [
+          // The reviewer's three measured bypasses: each used to POST the numeric key.
+          [{ ...base, dailyBudget: "5000", lifetimeBudget: 5000 }, /budget_kind_ambiguous/],
+          [{ ...base, dailyBudget: 5000, lifetimeBudget: "90000" }, /budget_kind_ambiguous/],
+          [{ ...base, dailyBudget: Number.NaN, lifetimeBudget: 7000 }, /budget_kind_ambiguous/],
+          // A single present key that is not a finite positive integer NUMBER is invalid, not absent.
+          [{ ...base, dailyBudget: "5000" }, /invalid_daily_budget/],
+          [{ ...base, lifetimeBudget: Number.NaN }, /invalid_lifetime_budget/],
+          [{ ...base, lifetimeBudget: Number.POSITIVE_INFINITY }, /invalid_lifetime_budget/],
+          [{ ...base, lifetimeBudget: true }, /invalid_lifetime_budget/]
+        ];
+        for (const [input, error] of cases) {
+          await expect(handlers.update_meta_budget?.(input, operatorContext)).rejects.toThrow(error);
+        }
+        expect(calls).toHaveLength(0);
+      }
+    );
+  });
+
+  it("B1: null still means absent (the other key alone is used)", async () => {
+    const audits: AuditRow[] = [];
+    const db = metaWriteTestDb({ audits });
+    await withGraph(
+      budgetRead(DAILY_ENTITY),
+      async (calls) => {
+        await createActionHandlers(db).update_meta_budget?.(
+          { sourceId: "src_meta", entityId: "120000000000555", entity: "campaign", dailyBudget: 5000, lifetimeBudget: null },
+          operatorContext
+        );
+        expect(calls.at(-1)?.body).toEqual({ daily_budget: "5000" });
+      }
+    );
+  });
+
+  it("a daily update audits budget_kind=daily", async () => {
+    const audits: AuditRow[] = [];
+    const db = metaWriteTestDb({ audits });
+    await withGraph(
+      budgetRead(DAILY_ENTITY),
+      async () => {
+        await createActionHandlers(db).update_meta_budget?.(
+          { sourceId: "src_meta", entityId: "120000000000555", entity: "campaign", dailyBudget: 5000 },
+          operatorContext
+        );
+        const audit = audits.find((row) => row.action === "update_meta_budget");
+        expect(audit?.details).toMatchObject({ budget_kind: "daily" });
+      }
+    );
+  });
+
+  it("BUDGET GUARD: dailyBudget AND lifetimeBudget together, or neither, is refused — NO POST", async () => {
+    const audits: AuditRow[] = [];
+    const db = metaWriteTestDb({ audits });
+    await withGraph(
+      () => jsonResponse({ success: true }),
+      async (calls) => {
+        const handlers = createActionHandlers(db);
+        await expect(
+          handlers.update_meta_budget?.(
+            { sourceId: "src_meta", entityId: "120000000000555", entity: "campaign", dailyBudget: 5000, lifetimeBudget: 90000 },
+            operatorContext
+          )
+        ).rejects.toThrow(/budget_kind_ambiguous/);
+        await expect(
+          handlers.update_meta_budget?.(
+            { sourceId: "src_meta", entityId: "120000000000555", entity: "campaign" },
+            operatorContext
+          )
+        ).rejects.toThrow(/dailyBudget or lifetimeBudget is required/);
+        for (const bad of [0, -100, 12.5]) {
+          await expect(
+            handlers.update_meta_budget?.(
+              { sourceId: "src_meta", entityId: "120000000000555", entity: "campaign", lifetimeBudget: bad },
+              operatorContext
+            )
+          ).rejects.toThrow(/invalid_lifetime_budget/);
+        }
+        expect(calls).toHaveLength(0);
+      }
+    );
+  });
+
+  it("updates an existing ad INLINE (POST /{adId} name + creative only, NO status) and audits the change KINDS, not the content", async () => {
+    const audits: AuditRow[] = [];
+    const db = metaWriteTestDb({ audits });
+    await withGraph(
+      () => jsonResponse({ success: true }),
+      async (calls) => {
+        const handlers = createActionHandlers(db);
+        const result = await handlers.update_meta_ad?.(
+          { sourceId: "src_meta", entityId: "120000000000557", name: "Secret launch name", creativeId: "120000000000999" },
+          operatorContext
+        );
+        expect(calls).toHaveLength(1);
+        expect(calls[0].url).toBe("https://graph.facebook.com/v25.0/120000000000557");
+        expect(calls[0].body).toEqual({ name: "Secret launch name", creative: { creative_id: "120000000000999" } });
+        expect(calls[0].body).not.toHaveProperty("status");
+        expect(result?.data).toMatchObject({ id: "120000000000557", entity: "ad", updated: true, changed: ["name", "creative"] });
+
+        const audit = audits.find((row) => row.action === "update_meta_ad");
+        expect(audit?.status).toBe("succeeded");
+        expect(audit?.actor_type).toBe("operator");
+        expect(audit?.details).toMatchObject({
+          entity: "ad",
+          entity_id: "120000000000557",
+          changed_fields: ["name", "creative"]
+        });
+        const serialized = JSON.stringify(audits);
+        expect(serialized).not.toContain("Secret launch name");
+        expect(serialized).not.toContain("120000000000999");
+        expect(serialized).not.toContain("secret-meta-token");
+      }
+    );
+  });
+
+  it("AD-UPDATE GUARD: a status key, no change, a blank name, or a non-numeric id is refused — NO POST", async () => {
+    const audits: AuditRow[] = [];
+    const db = metaWriteTestDb({ audits });
+    await withGraph(
+      () => jsonResponse({ success: true }),
+      async (calls) => {
+        const handlers = createActionHandlers(db);
+        const cases: Array<[Record<string, unknown>, RegExp]> = [
+          [{ sourceId: "src_meta", entityId: "120000000000557", name: "x", status: "ACTIVE" }, /update_meta_ad_status_not_allowed/],
+          [{ sourceId: "src_meta", entityId: "120000000000557", status: "PAUSED" }, /update_meta_ad_status_not_allowed/],
+          // ANY present status key is refused, including null — never silently read as "absent".
+          [{ sourceId: "src_meta", entityId: "120000000000557", name: "x", status: null }, /update_meta_ad_status_not_allowed/],
+          [{ sourceId: "src_meta", entityId: "120000000000557" }, /update_meta_ad_no_change/],
+          [{ sourceId: "src_meta", entityId: "120000000000557", name: "  " }, /invalid_meta_ad_name/],
+          [{ sourceId: "src_meta", entityId: "120000000000557", creativeId: "cr_9" }, /invalid_meta_creative_id/],
+          [{ sourceId: "src_meta", entityId: "ad_557", name: "x" }, /invalid_meta_ad_id/]
+        ];
+        for (const [input, error] of cases) {
+          await expect(handlers.update_meta_ad?.(input, operatorContext)).rejects.toThrow(error);
+        }
+        expect(calls).toHaveLength(0);
+        // Refused before the credential is even resolved, so nothing reached the audit log.
+        expect(audits.filter((row) => row.action === "update_meta_ad")).toHaveLength(0);
+      }
+    );
+  });
+
+  it("audits an ad-update failure (non-retryable) with the change kinds and re-throws", async () => {
+    const audits: AuditRow[] = [];
+    const db = metaWriteTestDb({ audits });
+    await withGraph(
+      () => jsonResponse({ error: { message: "boom" } }, 500),
+      async () => {
+        await expect(
+          createActionHandlers(db).update_meta_ad?.(
+            { sourceId: "src_meta", entityId: "120000000000557", creativeId: "120000000000999" },
+            operatorContext
+          )
+        ).rejects.toMatchObject({ retryable: false });
+        const audit = audits.find((row) => row.action === "update_meta_ad");
+        expect(audit?.status).toBe("failed");
+        expect(audit?.details).toMatchObject({ entity: "ad", changed_fields: ["creative"] });
+        expect(JSON.stringify(audits)).not.toContain("120000000000999");
       }
     );
   });
@@ -8289,7 +8689,7 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
     const audits: AuditRow[] = [];
     const db = metaWriteTestDb({ audits });
     await withGraph(
-      () => jsonResponse({ error: { message: "boom" } }, 500),
+      budgetRead(DAILY_ENTITY, () => jsonResponse({ error: { message: "boom" } }, 500)),
       async () => {
         const handlers = createActionHandlers(db);
         await expect(
