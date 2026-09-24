@@ -41,6 +41,17 @@ export {
   interactiveTriggerKey
 } from "./interactive-task-store.js";
 export { MAX_INTERACTIVE_GRANT_MS } from "./interactive-task-types.js";
+export {
+  HOST_RESTART_UNKNOWN_SUMMARY,
+  recoverInteractiveTasksAfterHostRestart
+} from "./interactive-task-recovery.js";
+export type {
+  HostRestartRecoveryFailure,
+  HostRestartRecoveryInput,
+  HostRestartRecoveryReport,
+  HostRestartSettlement,
+  HostRestartSettlementKind
+} from "./interactive-task-recovery.js";
 export type {
   ApplyInteractiveTaskTransitionInput,
   CreateAutomaticInteractiveTaskInput,

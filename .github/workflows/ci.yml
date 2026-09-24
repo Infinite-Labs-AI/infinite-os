@@ -77,8 +77,8 @@ jobs:
       # packages/llm-controller — some of its tests are environment-dependent
       # (local model auth / OS keychain) and can flake outside a configured
       # machine. TODO: isolate those and re-add (then this is `pnpm test`).
-      # interactive-task-store.test.ts is hermetic (temp PGlite + injected
-      # clock), so it runs here by file.
+      # interactive-task-store.test.ts and interactive-task-recovery.test.ts
+      # are hermetic (temp PGlite + injected clock), so they run here by file.
       #
       # Suites/tests that need live services self-skip and stay green:
       #   - tests/integration/* and apps/app/test/projects.integration.test.ts
@@ -101,6 +101,7 @@ jobs:
           packages/desktop-installer
           packages/instrument
           packages/llm-controller/test/interactive-task-store.test.ts
+          packages/llm-controller/test/interactive-task-recovery.test.ts
           packages/metadata
           packages/runtime
           packages/setup
