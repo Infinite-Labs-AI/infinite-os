@@ -8421,13 +8421,46 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
             { sourceId: "src_meta", entityId: "120000000000555", entity: "campaign", dailyBudget: 5000 },
             operatorContext
           )
-        ).rejects.toBeDefined();
+        ).rejects.toMatchObject({
+          // ONE typed pre-write code, so a caller can tell "the check could not run, nothing changed"
+          // from a failed write. The read's own retryability is kept (a 500 read is safe to retry).
+          code: "budget_kind_read_failed",
+          retryable: true,
+          message: expect.stringContaining("provider_api_error")
+        });
         expect(calls.some((call) => call.method === "POST")).toBe(false);
         const audit = audits.find((row) => row.action === "update_meta_budget");
         expect(audit?.status).toBe("failed");
-        expect(audit?.details).toMatchObject({ budget_kind: "daily", error_code: "provider_api_error" });
+        expect(audit?.details).toMatchObject({ budget_kind: "daily", error_code: "budget_kind_read_failed", read_error_code: "provider_api_error" });
       }
     );
+  });
+
+  it("R1: a read refused BEFORE the fetch (the caller's request meter) is also budget_kind_read_failed, keeping the meter's code and message", async () => {
+    const audits: AuditRow[] = [];
+    const db = metaWriteTestDb({ audits });
+    await withGraph(budgetRead(DAILY_ENTITY), async (calls) => {
+      const refusingMeter = new MetaAdsRequestTelemetry(5, async () => {
+        throw Object.assign(new Error("request budget exhausted for this ad account"), { code: "meta_write_read_budget_exhausted" });
+      });
+      let caught: unknown;
+      try {
+        await createActionHandlers(db, { metaAdsRequestTelemetry: refusingMeter }).update_meta_budget?.(
+          { sourceId: "src_meta", entityId: "120000000000555", entity: "campaign", dailyBudget: 5000 },
+          operatorContext
+        );
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toMatchObject({ code: "budget_kind_read_failed", retryable: false });
+      expect(String((caught as Error).message)).toContain("meta_write_read_budget_exhausted: request budget exhausted");
+      expect((caught as { cause?: { code?: string } }).cause?.code).toBe("meta_write_read_budget_exhausted");
+      expect(calls).toHaveLength(0);
+      expect(audits.find((row) => row.action === "update_meta_budget")?.details).toMatchObject({
+        error_code: "budget_kind_read_failed",
+        read_error_code: "meta_write_read_budget_exhausted"
+      });
+    });
   });
 
   it("R1: the pre-read is COUNTED by the caller's request telemetry (shared per-account request budget)", async () => {

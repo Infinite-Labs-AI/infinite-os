@@ -2781,15 +2781,29 @@ async function updateMetaBudgetHandler(
       await getMetaEntity(credential, entityId, { fields: "id,daily_budget,lifetime_budget", entity }, telemetry)
     );
   } catch (error) {
+    // The budget-type check could not run, so NOTHING was written. Surface ONE typed pre-write code so a
+    // caller can tell this apart from a failed write (whose provider codes look the same), while keeping
+    // the read's own code (message, audit, `cause`) and retryability — a failed read is safe to retry.
+    const readErrorCode = metaErrorCode(error);
     await metaAuditLog(db, context, sourceId, action, "failed", {
       action,
       entity,
       entity_id: entityId,
       budget_present: true,
       budget_kind: budget.kind,
-      error_code: metaErrorCode(error)
+      error_code: "budget_kind_read_failed",
+      read_error_code: readErrorCode
     });
-    throw error;
+    const retryable = (error as { retryable?: unknown } | null)?.retryable === true;
+    const detail = error instanceof Error ? error.message : String(error);
+    throw Object.assign(
+      new ConnectorError(
+        "budget_kind_read_failed",
+        `budget_kind_read_failed: the ${entity}'s budget type could not be read (${readErrorCode}: ${detail}), so nothing was changed`,
+        retryable
+      ),
+      { cause: error }
+    );
   }
   if (currentKind !== budget.kind) {
     const code = currentKind === "unknown" ? "budget_kind_unknown" : "budget_kind_mismatch";
