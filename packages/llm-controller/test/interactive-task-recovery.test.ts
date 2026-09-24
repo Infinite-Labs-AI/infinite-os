@@ -281,17 +281,60 @@ describe("host restart recovery", { timeout: 60_000 }, () => {
     const next = await recoverInteractiveTasksAfterHostRestart(f, { workspaceId: WORKSPACE_A, bootId: "boot_2" });
 
     expect(await eventCount(f)).toBe(after);
-    // Only the unknown send stays reported, so the person keeps seeing it until it is reconciled.
-    for (const report of [retried, next]) {
-      expect(report.failures).toEqual([]);
-      expect(report.settled).toMatchObject([{ kind: "outcome_unknown", taskId: "t_disp", changed: false }]);
+    // A retry of the same boot (say, after the desktop timed out waiting) still tells the person
+    // everything that boot settled; nothing is written twice.
+    expect(retried.failures).toEqual([]);
+    expect(retried.settled.map((item) => [item.kind, item.taskId, item.changed]).sort()).toEqual([
+      ["follow_up_stopped", "t_run", true], ["grant_ended", "t_auth", true], ["outcome_unknown", "t_disp", true]]);
+    // A later boot only keeps the unknown send visible until someone reconciles it.
+    expect(next.failures).toEqual([]);
+    expect(next.settled).toMatchObject([{ kind: "outcome_unknown", taskId: "t_disp", changed: false }]);
+    expect(next.settled).toHaveLength(1);
+  });
+
+  it("reports what a boot settled even when the first call's reply was lost", async () => {
+    const f = await fixture();
+    await taskAt(f, "t_auth", "authorized");
+    // The first call committed, but its caller never saw the report.
+    await recoverInteractiveTasksAfterHostRestart(f, { workspaceId: WORKSPACE_A, bootId: "boot_1" });
+
+    const retried = await recoverInteractiveTasksAfterHostRestart(f, { workspaceId: WORKSPACE_A, bootId: "boot_1" });
+
+    expect(retried).toEqual({ bootId: "boot_1", failures: [], settled: [{ kind: "grant_ended", taskId: "t_auth", actorId: ACTOR_A,
+      invocationId: "inv_t_auth", operationId: "fake_update_budget", title: "Change budget inv_t_auth", changed: true }] });
+  });
+
+  it("treats a cancelled task's pending follow-up as settled: no failure, no note, every boot", async () => {
+    const f = await fixture();
+    const { scope } = await taskAt(f, "t_cancel_pend", "pending_follow_up");
+    await apply(f.store, scope, { kind: "cancel_task", reason: "user pressed Cancel" });
+    const before = await eventCount(f);
+
+    for (const bootId of ["boot_1", "boot_2", "boot_3"]) {
+      const report = await recoverInteractiveTasksAfterHostRestart(f, { workspaceId: WORKSPACE_A, bootId });
+      expect(report).toEqual({ bootId, settled: [], failures: [] });
     }
+
+    expect(await eventCount(f)).toBe(before);
+    expect((await actionOf(f, scope)).task.state).toBe("cancelled");
+  });
+
+  it("still stops a follow-up that was already running when its task was cancelled", async () => {
+    const f = await fixture();
+    const { scope } = await taskAt(f, "t_cancel_run", "running_follow_up");
+    await apply(f.store, scope, { kind: "cancel_task", reason: "user pressed Cancel" });
+
+    const report = await recoverInteractiveTasksAfterHostRestart(f, { workspaceId: WORKSPACE_A, bootId: "boot_1" });
+
+    expect(report.failures).toEqual([]);
+    expect(report.settled).toMatchObject([{ kind: "follow_up_stopped", taskId: "t_cancel_run", changed: true }]);
+    expect((await actionOf(f, scope)).action.continuationState).toBe("failed");
   });
 
   it("replays a step the same boot already wrote instead of writing it twice", async () => {
     const f = await fixture();
     const { scope } = await taskAt(f, "t_pend", "pending_follow_up");
-    // A first attempt of this boot wrote its note and claim, then the host died before finishing.
+    // A first attempt of this boot claimed the follow-up, then the host died before finishing.
     const flaky: InteractiveTaskStore = { ...f.store, transition: async (input) => {
       if (input.transition.kind === "finish_continuation") throw new Error("host died");
       return f.store.transition(input);
@@ -299,6 +342,8 @@ describe("host restart recovery", { timeout: 60_000 }, () => {
     const first = await recoverInteractiveTasksAfterHostRestart({ db: f.db, store: flaky }, { workspaceId: WORKSPACE_A, bootId: "boot_1" });
     expect(first.failures).toMatchObject([{ taskId: "t_pend", code: "recovery_failed" }]);
     expect((await actionOf(f, scope)).action.continuationState).toBe("running");
+    // The note is written only once the follow-up really was stopped, so a failed boot leaves no false note.
+    expect((await f.store.listEvents(scope)).filter((event) => event.kind === "progress")).toHaveLength(0);
 
     const second = await recoverInteractiveTasksAfterHostRestart(f, { workspaceId: WORKSPACE_A, bootId: "boot_1" });
 
