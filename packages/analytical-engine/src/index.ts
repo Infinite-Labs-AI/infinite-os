@@ -22,6 +22,7 @@ import {
   type MetaAdSetTargeting,
   type MetaAdsCredential,
   type MetaAdsCliExecution,
+  type MetaBudgetKind,
   type MetaEntityStatus,
   type MetaWriteEntity,
   type MetaWriteResult
@@ -2610,19 +2611,25 @@ function requiredMetaBudgetEntity(input: unknown): "campaign" | "adset" {
   throw new Error(`unsupported_meta_budget_entity:${raw}`);
 }
 
-// A budget update requires a POSITIVE integer amount in the ad-account minor units
-// (cents). Read + validate BEFORE resolving the credential so 0 / negative /
-// non-integer / missing fails early and uniformly. The connector re-validates this
-// (defense-in-depth) as the authoritative money-safety gate.
-function requiredPositiveBudgetCents(input: unknown): number {
-  const value = numberOrNull(input, "dailyBudget");
-  if (value === null) {
-    throw new Error("dailyBudget is required");
+// A budget update requires EXACTLY ONE of dailyBudget | lifetimeBudget, a POSITIVE integer
+// amount in the ad-account minor units (cents). Read + validate BEFORE resolving the
+// credential so both / neither / 0 / negative / non-integer fails early and uniformly. The
+// connector re-validates the amount (defense-in-depth) as the authoritative money-safety gate.
+function requiredBudgetUpdate(input: unknown): { kind: MetaBudgetKind; cents: number } {
+  const daily = numberOrNull(input, "dailyBudget");
+  const lifetime = numberOrNull(input, "lifetimeBudget");
+  if (daily !== null && lifetime !== null) {
+    throw new Error("budget_kind_ambiguous: pass EITHER dailyBudget OR lifetimeBudget, not both");
   }
+  if (daily === null && lifetime === null) {
+    throw new Error("dailyBudget or lifetimeBudget is required");
+  }
+  const kind: MetaBudgetKind = daily !== null ? "daily" : "lifetime";
+  const value = (daily ?? lifetime) as number;
   if (!Number.isInteger(value) || value <= 0) {
-    throw new Error(`invalid_daily_budget:${value}`);
+    throw new Error(`invalid_${kind}_budget:${value}`);
   }
-  return value;
+  return { kind, cents: value };
 }
 
 async function setMetaEntityStatusHandler(
@@ -2690,13 +2697,13 @@ async function setMetaEntityStatusHandler(
   );
 }
 
-// Budget update (scale / reduce / reallocate). Operator-only. Changes the daily
-// budget of an EXISTING campaign or ad set INLINE (never db.createJob — a money
+// Budget update (scale / reduce / reallocate). Operator-only. Changes the daily OR
+// lifetime budget of an EXISTING campaign or ad set INLINE (never db.createJob — a money
 // write never touches the worker's retry machinery) and audits it. MONEY-SAFETY:
-// this NEVER changes delivery status — the connector POSTs daily_budget only, so an
-// active entity keeps spending at the new budget and a paused one stays paused;
+// this NEVER changes delivery status — the connector POSTs the one budget field only, so
+// an active entity keeps spending at the new budget and a paused one stays paused;
 // there is no activation gate/bookkeeping because a budget change is not a go-live.
-// The audit records budget_present (a boolean) ONLY — never the raw amount (INV-6).
+// The audit records budget_present + budget_kind ONLY — never the raw amount (INV-6).
 async function updateMetaBudgetHandler(
   db: InfiniteOsDb,
   context: SessionContext,
@@ -2709,8 +2716,8 @@ async function updateMetaBudgetHandler(
   const entityId = requiredString(input, "entityId");
   // campaign|adset ONLY (Meta has no ad-level budget) — rejects "ad"/"creative" early.
   const entity = requiredMetaBudgetEntity(input);
-  // POSITIVE integer cents, validated before any credential resolve or POST.
-  const dailyBudget = requiredPositiveBudgetCents(input);
+  // EXACTLY ONE budget kind, POSITIVE integer cents, validated before any credential resolve or POST.
+  const budget = requiredBudgetUpdate(input);
   const action: InfiniteOsActionId = "update_meta_budget";
   const credential = await resolveMetaCredentialForWrite(
     db,
@@ -2722,15 +2729,16 @@ async function updateMetaBudgetHandler(
   );
   let result;
   try {
-    result = await updateMetaBudget(credential, entityId, dailyBudget, entity);
+    result = await updateMetaBudget(credential, entityId, budget.cents, entity, budget.kind);
   } catch (error) {
     await metaAuditLog(db, context, sourceId, action, "failed", {
       action,
       entity,
       entity_id: entityId,
-      // Presence only — the amount is NEVER recorded (INV-6). Belt-and-suspenders:
-      // redactMetaAuditDetails also drops any daily_budget/dailyBudget key.
+      // Presence + kind only — the amount is NEVER recorded (INV-6). Belt-and-suspenders:
+      // redactMetaAuditDetails also drops any daily_budget/lifetime_budget key.
       budget_present: true,
+      budget_kind: budget.kind,
       error_code: metaErrorCode(error)
     });
     throw error;
@@ -2739,7 +2747,8 @@ async function updateMetaBudgetHandler(
     action,
     entity,
     entity_id: entityId,
-    budget_present: true
+    budget_present: true,
+    budget_kind: budget.kind
   });
   return envelope(
     action,

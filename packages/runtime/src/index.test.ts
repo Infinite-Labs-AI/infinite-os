@@ -353,18 +353,28 @@ describe("Meta Ads management action authority (money-safety)", () => {
     }
   });
 
-  it("update_meta_budget requires sourceId/entityId/entity/dailyBudget and restricts entity to campaign|adset (no ad-level budget)", () => {
+  it("update_meta_budget requires sourceId/entityId/entity plus EXACTLY ONE of dailyBudget|lifetimeBudget and restricts entity to campaign|adset (no ad-level budget)", () => {
     const card = ACTION_CATALOG.find((action) => action.id === "update_meta_budget");
     expect(card).toBeDefined();
     const schema = card?.inputSchema as
-      | { required?: string[]; properties?: Record<string, { enum?: string[]; exclusiveMinimum?: number; type?: string }> }
+      | {
+          required?: string[];
+          oneOf?: Array<{ required?: string[] }>;
+          properties?: Record<string, { enum?: string[]; exclusiveMinimum?: number; type?: string }>;
+        }
       | undefined;
-    expect(schema?.required).toEqual(["sourceId", "entityId", "entity", "dailyBudget"]);
+    expect(schema?.required).toEqual(["sourceId", "entityId", "entity"]);
+    // Exactly one budget kind per call is enforced by the HANDLER, not a top-level oneOf: these
+    // schemas are served as agent tool schemas, and model tool APIs reject top-level combinators.
+    expect(schema?.oneOf).toBeUndefined();
     // Meta has NO ad-level budget → the enum must exclude "ad"/"creative".
     expect(schema?.properties?.entity?.enum).toEqual(["campaign", "adset"]);
-    // dailyBudget is a strictly-positive integer-cents amount (0 is not valid).
-    expect(schema?.properties?.dailyBudget?.type).toBe("number");
-    expect(schema?.properties?.dailyBudget?.exclusiveMinimum).toBe(0);
+    // Both amounts are strictly-positive integer cents (0 is not valid).
+    for (const key of ["dailyBudget", "lifetimeBudget"]) {
+      expect(schema?.properties?.[key]?.type).toBe("number");
+      expect(schema?.properties?.[key]?.exclusiveMinimum).toBe(0);
+    }
+    expect(card?.title).toBe("Update Meta Ads budget");
   });
 
   it("forbids a tool_agent session from executing any Meta WRITE action", async () => {

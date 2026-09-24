@@ -8246,6 +8246,85 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
     );
   });
 
+  it("updates a LIFETIME budget INLINE (POST /{id} lifetime_budget only) and audits budget_kind WITHOUT the amount", async () => {
+    const audits: AuditRow[] = [];
+    const db = metaWriteTestDb({ audits });
+    await withGraph(
+      () => jsonResponse({ success: true }),
+      async (calls) => {
+        const handlers = createActionHandlers(db);
+        const result = await handlers.update_meta_budget?.(
+          { sourceId: "src_meta", entityId: "120000000000556", entity: "adset", lifetimeBudget: 91234 },
+          operatorContext
+        );
+        expect(calls).toHaveLength(1);
+        expect(calls[0].url).toBe("https://graph.facebook.com/v25.0/120000000000556");
+        expect(calls[0].body).toEqual({ lifetime_budget: "91234" });
+        expect(result?.data).toMatchObject({ id: "120000000000556", entity: "adset", updated: true });
+
+        const audit = audits.find((row) => row.action === "update_meta_budget");
+        expect(audit?.status).toBe("succeeded");
+        expect(audit?.details).toMatchObject({
+          entity: "adset",
+          entity_id: "120000000000556",
+          budget_present: true,
+          budget_kind: "lifetime"
+        });
+        const serialized = JSON.stringify(audits);
+        expect(serialized).not.toContain("91234");
+        expect(serialized).not.toContain("secret-meta-token");
+      }
+    );
+  });
+
+  it("a daily update audits budget_kind=daily", async () => {
+    const audits: AuditRow[] = [];
+    const db = metaWriteTestDb({ audits });
+    await withGraph(
+      () => jsonResponse({ success: true }),
+      async () => {
+        await createActionHandlers(db).update_meta_budget?.(
+          { sourceId: "src_meta", entityId: "120000000000555", entity: "campaign", dailyBudget: 5000 },
+          operatorContext
+        );
+        const audit = audits.find((row) => row.action === "update_meta_budget");
+        expect(audit?.details).toMatchObject({ budget_kind: "daily" });
+      }
+    );
+  });
+
+  it("BUDGET GUARD: dailyBudget AND lifetimeBudget together, or neither, is refused — NO POST", async () => {
+    const audits: AuditRow[] = [];
+    const db = metaWriteTestDb({ audits });
+    await withGraph(
+      () => jsonResponse({ success: true }),
+      async (calls) => {
+        const handlers = createActionHandlers(db);
+        await expect(
+          handlers.update_meta_budget?.(
+            { sourceId: "src_meta", entityId: "120000000000555", entity: "campaign", dailyBudget: 5000, lifetimeBudget: 90000 },
+            operatorContext
+          )
+        ).rejects.toThrow(/budget_kind_ambiguous/);
+        await expect(
+          handlers.update_meta_budget?.(
+            { sourceId: "src_meta", entityId: "120000000000555", entity: "campaign" },
+            operatorContext
+          )
+        ).rejects.toThrow(/dailyBudget or lifetimeBudget is required/);
+        for (const bad of [0, -100, 12.5]) {
+          await expect(
+            handlers.update_meta_budget?.(
+              { sourceId: "src_meta", entityId: "120000000000555", entity: "campaign", lifetimeBudget: bad },
+              operatorContext
+            )
+          ).rejects.toThrow(/invalid_lifetime_budget/);
+        }
+        expect(calls).toHaveLength(0);
+      }
+    );
+  });
+
   it("BUDGET GUARD: entity=ad is refused (Meta has no ad-level budget) — NO POST, no spend", async () => {
     const audits: AuditRow[] = [];
     const db = metaWriteTestDb({ audits });

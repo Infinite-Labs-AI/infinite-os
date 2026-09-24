@@ -7449,6 +7449,49 @@ describe("Meta Ads WRITE helpers", () => {
       });
     }
 
+    it("budgetKind=lifetime POSTs lifetime_budget ONLY to the node — never daily_budget, never status", async () => {
+      await captureWrites(
+        () => jsonResponse({ success: true }),
+        async (captured) => {
+          const result = await updateMetaBudget(metaWriteCredential, "120000000000010", 90000, "campaign", "lifetime");
+          expect(result).toEqual({ ok: true, id: "120000000000010", entity: "campaign" });
+          expect(captured).toHaveLength(1);
+          expect(captured[0].url).toBe("https://graph.facebook.com/v25.0/120000000000010");
+          expect(captured[0].method).toBe("POST");
+          // The kind the caller asked for is the ONLY budget field on the wire.
+          expect(captured[0].body).toEqual({ lifetime_budget: "90000" });
+        }
+      );
+    });
+
+    it("budgetKind=lifetime on an ad set targets the ad-set node", async () => {
+      await captureWrites(
+        () => jsonResponse({ success: true }),
+        async (captured) => {
+          await updateMetaBudget(metaWriteCredential, "120000000000020", 45000, "adset", "lifetime");
+          expect(captured[0].url).toBe("https://graph.facebook.com/v25.0/120000000000020");
+          expect(captured[0].body).toEqual({ lifetime_budget: "45000" });
+        }
+      );
+    });
+
+    it("rejects a zero / negative / fractional lifetime budget and an unknown budget kind BEFORE any POST", async () => {
+      await captureWrites(
+        () => jsonResponse({ success: "should-not-happen" }),
+        async (calls) => {
+          for (const bad of [0, -1, 99.5]) {
+            await expect(
+              updateMetaBudget(metaWriteCredential, "120000000000010", bad, "campaign", "lifetime")
+            ).rejects.toMatchObject({ retryable: false });
+          }
+          await expect(
+            updateMetaBudget(metaWriteCredential, "120000000000010", 5000, "campaign", "total" as never)
+          ).rejects.toMatchObject({ code: "provider_api_error", retryable: false });
+          expect(calls).toHaveLength(0);
+        }
+      );
+    });
+
     // NOTE: budget updates on the meta_ads_cli transport now route through the bundled `meta` CLI
     // (updateMetaBudgetViaCli) instead of being refused provider_unsupported. That behavior is
     // exercised against the fake CLI in the "CLI WRITE transport" describe below (it needs the CLI
@@ -8172,6 +8215,37 @@ console.log(${JSON.stringify(serialized)});
         const argv = recordedArgv(dir);
         expect(argv.slice(0, 9)).toEqual(["--no-color", "--no-input", "--output", "json", "ads", "--ad-account-id", "1234567890", "adset", "update"]);
         expect(argv[argv.indexOf("--daily-budget") + 1]).toBe("3000");
+      });
+    });
+
+    it("updates a LIFETIME budget via `meta ads campaign update --lifetime-budget` — never --daily-budget, never --status", async () => {
+      await withTmp(async (dir) => {
+        const result = await updateMetaBudget(
+          cliCredential(dir, null, { emptyStdout: true }),
+          "120000000000010",
+          90000,
+          "campaign",
+          "lifetime"
+        );
+        expect(result).toEqual({ ok: true, id: "120000000000010", entity: "campaign" });
+        const argv = recordedArgv(dir);
+        expect(argv.slice(0, 9)).toEqual(["--no-color", "--no-input", "--output", "json", "ads", "--ad-account-id", "1234567890", "campaign", "update"]);
+        expect(argv[argv.indexOf("--lifetime-budget") + 1]).toBe("90000");
+        expect(argv).not.toContain("--daily-budget");
+        expect(argv).not.toContain("--status");
+        // An end-time change is a separate decision; a lifetime amount update never carries one.
+        expect(argv).not.toContain("--end-time");
+        expect(argv.slice(-2)).toEqual(["--", "120000000000010"]);
+      });
+    });
+
+    it("updates an ad-set LIFETIME budget via `meta ads adset update --lifetime-budget`", async () => {
+      await withTmp(async (dir) => {
+        await updateMetaBudget(cliCredential(dir, null, { emptyStdout: true }), "120000000000020", 45000, "adset", "lifetime");
+        const argv = recordedArgv(dir);
+        expect(argv.slice(7, 9)).toEqual(["adset", "update"]);
+        expect(argv[argv.indexOf("--lifetime-budget") + 1]).toBe("45000");
+        expect(argv).not.toContain("--daily-budget");
       });
     });
 

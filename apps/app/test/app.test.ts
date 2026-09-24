@@ -98,7 +98,10 @@ describe("Infinite OS app-hosted API/MCP skeleton", () => {
         // v2 of that read (per-day rows via timeIncrement:1, effectiveStatus, purchase/lead
         // fields, window+currency, typed error codes). The desktop Meta Ads surface gates on
         // THIS flag and keeps the old one for the ⌘L path — both must be published.
-        "meta_live_insights_v2"
+        "meta_live_insights_v2",
+        // update_meta_budget also accepts lifetimeBudget. A desktop fails CLOSED on this flag so
+        // an older daemon never sees a lifetime amount it would reject as a missing dailyBudget.
+        "meta_lifetime_budget_writes"
       ])
     );
   });

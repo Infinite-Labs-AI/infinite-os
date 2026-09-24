@@ -149,7 +149,11 @@ export const APP_CAPABILITIES = [
   // window+currency on the envelope, and TYPED error codes (meta_ads_not_connected …) forwarded
   // by guardedAction. The desktop fails CLOSED on this flag (daemon_capability_missing → "update
   // Infinite") — an older bundle must never answer the v2 request with the v1 shape.
-  "meta_live_insights_v2"
+  "meta_live_insights_v2",
+  // update_meta_budget also accepts lifetimeBudget (exactly one of daily|lifetime per call) for an
+  // entity that already runs on a lifetime budget. A desktop fails CLOSED on this flag: an older
+  // daemon would refuse a lifetime-only input as "dailyBudget is required", never apply it.
+  "meta_lifetime_budget_writes"
 ] as const;
 
 type ScopedAppToolsParseResult =

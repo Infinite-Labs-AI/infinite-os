@@ -12713,6 +12713,41 @@ describe("meta command (CLI write surface + confirm gates)", () => {
     });
   });
 
+  it("budget --lifetime-budget fires update_meta_budget with lifetimeBudget ONLY (no dailyBudget, no status)", async () => {
+    const api = stubToolsApi();
+    const confirmMutation = vi.fn(async () => true);
+    await metaCommand(
+      ["adset", "budget", "120000000000000020", "--source-id", "src_meta", "--lifetime-budget", "90000"],
+      ENV,
+      { confirmMutation }
+    );
+    // Without --yes the standard write gate runs, and its summary names the lifetime amount.
+    expect(confirmMutation).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(confirmMutation.mock.calls[0])).toContain("lifetime budget 90000 cents");
+    const body = toolCalls(api)[0]?.body as { actionId?: string; input?: Record<string, unknown> };
+    expect(body).toMatchObject({
+      actionId: "update_meta_budget",
+      input: { sourceId: "src_meta", entityId: "120000000000000020", entity: "adset", lifetimeBudget: 90000 }
+    });
+    expect(body.input).not.toHaveProperty("dailyBudget");
+    expect(body.input).not.toHaveProperty("status");
+  });
+
+  it("budget refuses --daily-budget together with --lifetime-budget, and a zero lifetime budget, before any write", async () => {
+    const api = stubToolsApi();
+    await expect(
+      metaCommand(
+        ["campaign", "budget", "120000000000000010", "--source-id", "src_meta", "--daily-budget", "5000", "--lifetime-budget", "90000", "--yes"],
+        ENV,
+        {}
+      )
+    ).rejects.toThrow(/either --daily-budget or --lifetime-budget, not both/);
+    await expect(
+      metaCommand(["campaign", "budget", "120000000000000010", "--source-id", "src_meta", "--lifetime-budget", "0", "--yes"], ENV, {})
+    ).rejects.toThrow(/--lifetime-budget must be a positive integer/);
+    expect(toolCalls(api).length).toBe(0);
+  });
+
   it("budget without --yes: a NO returns cancelled and issues NO /tools/call", async () => {
     const api = stubToolsApi();
     const confirmMutation = vi.fn(async () => false);

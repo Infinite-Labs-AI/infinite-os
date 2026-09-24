@@ -911,9 +911,9 @@ function metadataFor(id: InfiniteOsActionId): {
       recipeIds: []
     },
     update_meta_budget: {
-      title: "Update Meta Ads daily budget",
+      title: "Update Meta Ads budget",
       summary:
-        "Operator-only. Change the daily budget of an EXISTING Meta Ads campaign or ad set (campaign|adset only — Meta has no ad-level budget). dailyBudget is a POSITIVE integer in the ad-account minor units (cents). Adjusts spend ONLY; it never changes delivery status (an already-active entity keeps spending at the new budget; a paused one stays paused).",
+        "Operator-only. Change the daily OR lifetime budget of an EXISTING Meta Ads campaign or ad set (no ad-level budget). Send EXACTLY ONE of dailyBudget or lifetimeBudget: a POSITIVE integer in ad-account minor units (cents), of the budget type the entity already uses (never switches daily<->lifetime, never moves end time). Adjusts spend ONLY; never changes delivery status (active keeps spending at the new budget; paused stays paused).",
       category: "operator",
       recommendedNextActions: ["get_meta_entity", "list_meta_entities"],
       recipeIds: []
@@ -1364,9 +1364,15 @@ function inputSchemaFor(id: InfiniteOsActionId): Record<string, unknown> {
         // POSITIVE: setting a budget to 0 is not a valid spend instruction, so the enum
         // is a strict lower bound (exclusiveMinimum 0) and the handler/connector reject
         // 0 / negative / non-integer amounts before any Graph POST.
-        dailyBudget: { type: "number", exclusiveMinimum: 0 }
+        // EXACTLY ONE of dailyBudget | lifetimeBudget per call. The handler enforces that rule
+        // (budget_kind_ambiguous / missing) rather than a top-level oneOf, because these schemas
+        // are served as agent tool schemas and model tool APIs reject top-level combinators.
+        dailyBudget: { type: "number", exclusiveMinimum: 0 },
+        // Lifetime amount for an entity that ALREADY runs on a lifetime budget. Same unit and
+        // positivity rules as dailyBudget. It never switches the budget type or moves end time.
+        lifetimeBudget: { type: "number", exclusiveMinimum: 0 }
       },
-      ["sourceId", "entityId", "entity", "dailyBudget"]
+      ["sourceId", "entityId", "entity"]
     ),
     delete_meta_entity: requiredObject(
       {
