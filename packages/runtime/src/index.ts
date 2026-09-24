@@ -921,7 +921,7 @@ function metadataFor(id: InfiniteOsActionId): {
     update_meta_ad: {
       title: "Update Meta Ads ad",
       summary:
-        "Operator-only. Edit an EXISTING Meta Ads ad in place: rename it (name) and/or point it at another EXISTING creative (creativeId). Send at least one. The ad id never changes. It never changes delivery status (no status input): an active ad keeps running with the new name/creative, a paused one stays paused. Use create_meta_creative first for a new creative.",
+        "Operator-only. Edit an EXISTING Meta Ads ad in place: rename it (name) and/or point it at another EXISTING creative (creativeId); send at least one. The ad id never changes. No status input: an active ad stays active, a paused one stays paused. A creative swap usually sends the ad back through Meta review, which can pause delivery until approved. Use create_meta_creative first for a new creative.",
       category: "operator",
       recommendedNextActions: ["get_meta_entity", "list_meta_entities"],
       recipeIds: []

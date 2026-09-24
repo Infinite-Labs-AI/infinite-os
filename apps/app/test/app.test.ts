@@ -103,7 +103,7 @@ describe("Infinite OS app-hosted API/MCP skeleton", () => {
         // an older daemon never sees a lifetime amount it would reject as a missing dailyBudget.
         "meta_lifetime_budget_writes",
         // update_meta_ad (existing-ad rename / creative swap). A desktop fails CLOSED on it.
-        "update_meta_ad"
+        "meta_ad_update_writes"
       ])
     );
   });

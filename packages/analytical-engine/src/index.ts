@@ -2614,10 +2614,6 @@ function requiredMetaBudgetEntity(input: unknown): "campaign" | "adset" {
   throw new Error(`unsupported_meta_budget_entity:${raw}`);
 }
 
-// A budget update requires EXACTLY ONE of dailyBudget | lifetimeBudget, a POSITIVE integer
-// amount in the ad-account minor units (cents). Read + validate BEFORE resolving the
-// credential so both / neither / 0 / negative / non-integer fails early and uniformly. The
-// connector re-validates the amount (defense-in-depth) as the authoritative money-safety gate.
 // The entity's CURRENT budget type from a node read of daily_budget + lifetime_budget. Graph
 // returns them as strings and reports an unused one as "0" or omits it, so "set" means a value
 // above 0. Neither set (e.g. a campaign whose budgets live on its ad sets) or both set is
@@ -2635,6 +2631,10 @@ function metaCurrentBudgetKind(node: Record<string, unknown>): MetaBudgetKind | 
   return daily ? "daily" : "lifetime";
 }
 
+// A budget update requires EXACTLY ONE of dailyBudget | lifetimeBudget, a POSITIVE integer
+// amount in the ad-account minor units (cents). Read + validate BEFORE resolving the
+// credential so both / neither / 0 / negative / non-integer fails early and uniformly. The
+// connector re-validates the amount (defense-in-depth) as the authoritative money-safety gate.
 // PRESENCE is "the key holds anything but undefined/null" — NOT "the key holds a number" — so a
 // stringly-typed or NaN amount alongside a numeric one is ambiguous rather than silently ignored,
 // and a lone non-number amount is invalid rather than "missing".
@@ -2757,6 +2757,24 @@ async function updateMetaBudgetHandler(
   // mismatch HERE, so every caller (desktop, cloud, CLI, a direct operator call) is covered by one
   // check instead of each proposal layer. One node GET per operator budget write; it rides the
   // caller's request telemetry, so it counts against the shared per-account request budget.
+  // The read is a Graph GET that needs a STORED token. An ambient-auth CLI credential has none, so
+  // the budget type cannot be checked — refuse typed (nothing changed) instead of surfacing the raw
+  // "accessToken credential is required" from deep inside the read.
+  const storedToken = (credential as unknown as Record<string, unknown>).accessToken;
+  if (typeof storedToken !== "string" || storedToken === "") {
+    await metaAuditLog(db, context, sourceId, action, "failed", {
+      action,
+      entity,
+      entity_id: entityId,
+      budget_present: true,
+      budget_kind: budget.kind,
+      error_code: "budget_kind_unreadable"
+    });
+    throw metaTypedError(
+      "budget_kind_unreadable",
+      `budget_kind_unreadable: this Meta source cannot read the ${entity}'s budget type (it has no stored access token), so nothing was changed`
+    );
+  }
   let currentKind: MetaBudgetKind | "unknown";
   try {
     currentKind = metaCurrentBudgetKind(

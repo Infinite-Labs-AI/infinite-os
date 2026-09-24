@@ -8351,6 +8351,65 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
     }
   });
 
+  it("R1 on the CLI transport (the cloud money lane): a mismatch is refused after the Graph read with NO CLI spawn; a match reads then writes via the CLI", async () => {
+    for (const [entityFields, expectSpawn] of [[DAILY_ENTITY, false], [LIFETIME_ENTITY, true]] as const) {
+      const dir = mkdtempSync(join(tmpdir(), "meta-r1-cli-"));
+      const marker = join(dir, "argv.json");
+      const executable = join(dir, "meta-server.mjs");
+      writeFileSync(executable, `#!${process.execPath}\nimport { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(marker)}, JSON.stringify(process.argv.slice(2)));\n`);
+      chmodSync(executable, 0o700);
+      try {
+        const audits: AuditRow[] = [];
+        const db = metaWriteTestDb({
+          audits,
+          credential: { mode: "live", transport: "meta_ads_cli", adAccountId: "act_999", accessToken: "stored-server-token" }
+        });
+        await withGraph(budgetRead(entityFields), async (calls) => {
+          const handlers = createActionHandlers(db, { metaAdsCliExecution: { mode: "isolated_server", executable } });
+          const run = handlers.update_meta_budget?.(
+            { sourceId: "src_meta", entityId: "120000000000555", entity: "adset", lifetimeBudget: 300000 },
+            operatorContext
+          );
+          if (expectSpawn) {
+            await run;
+          } else {
+            await expect(run).rejects.toMatchObject({ code: "budget_kind_mismatch" });
+          }
+          // The budget-type read is a Graph GET with the stored token; the write itself is never a Graph POST.
+          expect(calls.map((call) => call.method)).toEqual(["GET"]);
+          expect(calls[0].authorization).toBe("Bearer stored-server-token");
+        });
+        expect(existsSync(marker)).toBe(expectSpawn);
+        if (expectSpawn) {
+          const argv = JSON.parse(readFileSync(marker, "utf8")) as string[];
+          expect(argv[argv.indexOf("--lifetime-budget") + 1]).toBe("300000");
+          expect(argv).not.toContain("--daily-budget");
+        }
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it("N1: a credential that cannot read the budget type (ambient CLI auth, no stored token) is refused TYPED as budget_kind_unreadable — no call, audited", async () => {
+    const audits: AuditRow[] = [];
+    const db = metaWriteTestDb({ audits, credential: { mode: "live", transport: "meta_ads_cli", adAccountId: "act_999" } });
+    await withGraph(budgetRead(DAILY_ENTITY), async (calls) => {
+      const handlers = createActionHandlers(db, { metaAdsCliExecution: { mode: "isolated_server", executable: "/missing/meta" } });
+      await expect(
+        handlers.update_meta_budget?.(
+          { sourceId: "src_meta", entityId: "120000000000555", entity: "adset", dailyBudget: 5000 },
+          operatorContext
+        )
+      ).rejects.toMatchObject({ code: "budget_kind_unreadable", retryable: false });
+      expect(calls).toHaveLength(0);
+      expect(audits.find((row) => row.action === "update_meta_budget")?.details).toMatchObject({
+        budget_kind: "daily",
+        error_code: "budget_kind_unreadable"
+      });
+    });
+  });
+
   it("R1: a failed budget-type read writes NOTHING and is audited", async () => {
     const audits: AuditRow[] = [];
     const db = metaWriteTestDb({ audits });
@@ -8517,6 +8576,8 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
         const cases: Array<[Record<string, unknown>, RegExp]> = [
           [{ sourceId: "src_meta", entityId: "120000000000557", name: "x", status: "ACTIVE" }, /update_meta_ad_status_not_allowed/],
           [{ sourceId: "src_meta", entityId: "120000000000557", status: "PAUSED" }, /update_meta_ad_status_not_allowed/],
+          // ANY present status key is refused, including null — never silently read as "absent".
+          [{ sourceId: "src_meta", entityId: "120000000000557", name: "x", status: null }, /update_meta_ad_status_not_allowed/],
           [{ sourceId: "src_meta", entityId: "120000000000557" }, /update_meta_ad_no_change/],
           [{ sourceId: "src_meta", entityId: "120000000000557", name: "  " }, /invalid_meta_ad_name/],
           [{ sourceId: "src_meta", entityId: "120000000000557", creativeId: "cr_9" }, /invalid_meta_creative_id/],
