@@ -237,12 +237,19 @@ describe("interactive task routes (0072 ledger over HTTP)", () => {
       const states = await db.query<{ invocation_id: string; state: string }>(
         "select invocation_id, state from interactive_action_refs where task_id = 'task_other' order by invocation_id");
       expect(states).toEqual([{ invocation_id: "inv_granted", state: "expired" }, { invocation_id: "inv_sending", state: "unknown" }]);
-      // Another workspace is untouched, and a replay of the same boot writes nothing new.
+      // Another workspace is untouched. A replay of the same boot (a lost reply) reports everything
+      // that boot settled again, and writes nothing new.
       expect((await app.inject({ method: "POST", url: "/interactive/recovery/host-restart", headers: headersFor(WS_B),
         payload: { bootId: "boot-1" } })).json().data.settled).toEqual([]);
+      const eventCount = async () => (await db.query<{ n: number }>(
+        "select count(*)::int as n from interactive_task_events where task_id = 'task_other'"))[0]!.n;
+      const before = await eventCount();
       const replay = await app.inject({ method: "POST", url: "/interactive/recovery/host-restart", headers: headersFor(WS_A),
         payload: { bootId: "boot-1" } });
-      expect(replay.json().data.settled.every((item: { changed: boolean }) => item.changed === false)).toBe(true);
+      expect(replay.statusCode).toBe(200);
+      expect(replay.json().data.settled.map((item: { invocationId: string; kind: string }) => [item.invocationId, item.kind]).sort()).toEqual([
+        ["inv_granted", "grant_ended"], ["inv_sending", "outcome_unknown"]]);
+      expect(await eventCount()).toBe(before);
     } finally { await app.close(); }
   });
 
