@@ -9,7 +9,7 @@
   },
   "scripts": {
     "build": "tsc -b tsconfig.json",
-    "test": "cd ../.. && vitest run packages/llm-controller/test/controller.test.ts packages/llm-controller/test/founder-question-eval.test.ts packages/llm-controller/test/interactive-task-store.test.ts",
+    "test": "cd ../.. && vitest run packages/llm-controller/test/controller.test.ts packages/llm-controller/test/founder-question-eval.test.ts packages/llm-controller/test/interactive-task-store.test.ts packages/llm-controller/test/interactive-task-recovery.test.ts packages/llm-controller/test/interactive-turn-profile.test.ts",
     "typecheck": "tsc --noEmit --pretty false"
   },
   "dependencies": {
