@@ -913,7 +913,7 @@ function metadataFor(id: InfiniteOsActionId): {
     update_meta_budget: {
       title: "Update Meta Ads budget",
       summary:
-        "Operator-only. Change the daily OR lifetime budget of an EXISTING Meta Ads campaign or ad set (no ad-level budget). Send EXACTLY ONE of dailyBudget or lifetimeBudget: a POSITIVE integer in ad-account minor units (cents), of the budget type the entity already uses (never switches daily<->lifetime, never moves end time). Adjusts spend ONLY; never changes delivery status (active keeps spending at the new budget; paused stays paused).",
+        "Operator-only. Change the daily OR lifetime budget of an EXISTING Meta Ads campaign or ad set (no ad-level budget). Send EXACTLY ONE of dailyBudget or lifetimeBudget: a POSITIVE integer in ad-account minor units (cents), of the budget type the entity already uses (read first; a mismatch is refused, never switched; end time never moves). Adjusts spend ONLY; never changes delivery status (active keeps spending at the new budget; paused stays paused).",
       category: "operator",
       recommendedNextActions: ["get_meta_entity", "list_meta_entities"],
       recipeIds: []

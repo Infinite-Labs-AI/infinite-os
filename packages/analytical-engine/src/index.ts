@@ -168,7 +168,7 @@ export function createActionHandlers(
     create_meta_creative: (input, context) => createMetaCreativeHandler(db, context, input, metaAdsCliExecution, encryptionKey, expectedMetaCredential),
     create_meta_ad: (input, context) => createMetaAdHandler(db, context, input, metaAdsCliExecution, encryptionKey, expectedMetaCredential),
     set_meta_entity_status: (input, context) => setMetaEntityStatusHandler(db, context, input, metaAdsCliExecution, encryptionKey, expectedMetaCredential),
-    update_meta_budget: (input, context) => updateMetaBudgetHandler(db, context, input, metaAdsCliExecution, encryptionKey, expectedMetaCredential),
+    update_meta_budget: (input, context) => updateMetaBudgetHandler(db, context, input, metaAdsCliExecution, encryptionKey, expectedMetaCredential, options?.metaAdsRequestTelemetry),
     update_meta_ad: (input, context) => updateMetaAdHandler(db, context, input, metaAdsCliExecution, encryptionKey, expectedMetaCredential),
     delete_meta_entity: (input, context) => deleteMetaEntityHandler(db, context, input, metaAdsCliExecution, encryptionKey, expectedMetaCredential)
   };
@@ -2618,6 +2618,23 @@ function requiredMetaBudgetEntity(input: unknown): "campaign" | "adset" {
 // amount in the ad-account minor units (cents). Read + validate BEFORE resolving the
 // credential so both / neither / 0 / negative / non-integer fails early and uniformly. The
 // connector re-validates the amount (defense-in-depth) as the authoritative money-safety gate.
+// The entity's CURRENT budget type from a node read of daily_budget + lifetime_budget. Graph
+// returns them as strings and reports an unused one as "0" or omits it, so "set" means a value
+// above 0. Neither set (e.g. a campaign whose budgets live on its ad sets) or both set is
+// "unknown" — the caller fails closed rather than guessing.
+function metaCurrentBudgetKind(node: Record<string, unknown>): MetaBudgetKind | "unknown" {
+  const isSet = (value: unknown): boolean => {
+    const parsed = typeof value === "number" ? value : typeof value === "string" ? Number(value) : Number.NaN;
+    return Number.isFinite(parsed) && parsed > 0;
+  };
+  const daily = isSet(node.daily_budget);
+  const lifetime = isSet(node.lifetime_budget);
+  if (daily === lifetime) {
+    return "unknown";
+  }
+  return daily ? "daily" : "lifetime";
+}
+
 // PRESENCE is "the key holds anything but undefined/null" — NOT "the key holds a number" — so a
 // stringly-typed or NaN amount alongside a numeric one is ambiguous rather than silently ignored,
 // and a lone non-number amount is invalid rather than "missing".
@@ -2718,7 +2735,8 @@ async function updateMetaBudgetHandler(
   input: unknown,
   cliExecution?: MetaAdsCliExecution,
   encryptionKey?: string,
-  expectedCredential?: ExpectedMetaCredential
+  expectedCredential?: ExpectedMetaCredential,
+  telemetry?: MetaAdsRequestObserver
 ): Promise<ActionEnvelope> {
   const sourceId = requiredString(input, "sourceId");
   const entityId = requiredString(input, "entityId");
@@ -2735,6 +2753,44 @@ async function updateMetaBudgetHandler(
     encryptionKey,
     expectedCredential
   );
+  // BUDGET-TYPE GUARD: read the entity's current budget type and refuse a daily<->lifetime
+  // mismatch HERE, so every caller (desktop, cloud, CLI, a direct operator call) is covered by one
+  // check instead of each proposal layer. One node GET per operator budget write; it rides the
+  // caller's request telemetry, so it counts against the shared per-account request budget.
+  let currentKind: MetaBudgetKind | "unknown";
+  try {
+    currentKind = metaCurrentBudgetKind(
+      await getMetaEntity(credential, entityId, { fields: "id,daily_budget,lifetime_budget", entity }, telemetry)
+    );
+  } catch (error) {
+    await metaAuditLog(db, context, sourceId, action, "failed", {
+      action,
+      entity,
+      entity_id: entityId,
+      budget_present: true,
+      budget_kind: budget.kind,
+      error_code: metaErrorCode(error)
+    });
+    throw error;
+  }
+  if (currentKind !== budget.kind) {
+    const code = currentKind === "unknown" ? "budget_kind_unknown" : "budget_kind_mismatch";
+    await metaAuditLog(db, context, sourceId, action, "failed", {
+      action,
+      entity,
+      entity_id: entityId,
+      budget_present: true,
+      budget_kind: budget.kind,
+      current_budget_kind: currentKind,
+      error_code: code
+    });
+    throw metaTypedError(
+      code,
+      currentKind === "unknown"
+        ? `${code}: this ${entity} has no single daily or lifetime budget of its own, so it cannot be updated here`
+        : `${code}: this ${entity} runs on a ${currentKind} budget; send ${currentKind === "daily" ? "dailyBudget" : "lifetimeBudget"} (the budget type is never switched)`
+    );
+  }
   let result;
   try {
     result = await updateMetaBudget(credential, entityId, budget.cents, entity, budget.kind);
