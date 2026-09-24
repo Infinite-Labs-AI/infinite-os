@@ -292,6 +292,23 @@ describe("host restart recovery", { timeout: 60_000 }, () => {
     expect(next.settled).toHaveLength(1);
   });
 
+  it("lets two overlapping calls of one boot settle a row once, without a failure", async () => {
+    const f = await fixture();
+    await taskAt(f, "t_auth", "authorized");
+    await taskAt(f, "t_disp", "dispatching");
+    // The second call (a desktop retry after a timeout) listed the rows before the first call wrote.
+    const stale = await f.store.listRecoverableActions({ workspaceId: WORKSPACE_A });
+    await recoverInteractiveTasksAfterHostRestart(f, { workspaceId: WORKSPACE_A, bootId: "boot_1" });
+    const after = await eventCount(f);
+    const late: InteractiveTaskStore = { ...f.store, listRecoverableActions: async () => stale };
+
+    const second = await recoverInteractiveTasksAfterHostRestart({ db: f.db, store: late }, { workspaceId: WORKSPACE_A, bootId: "boot_1" });
+
+    expect(second.failures).toEqual([]);
+    expect(second.settled.map((item) => [item.kind, item.taskId]).sort()).toEqual([["grant_ended", "t_auth"], ["outcome_unknown", "t_disp"]]);
+    expect(await eventCount(f)).toBe(after);
+  });
+
   it("reports what a boot settled even when the first call's reply was lost", async () => {
     const f = await fixture();
     await taskAt(f, "t_auth", "authorized");
