@@ -9,14 +9,18 @@
  *
  * WHY IT IS SAFE for the open day only:
  *  - Every additive delivery metric (spend, impressions, clicks, inline_link_clicks, and every
- *    actions[]/action_values[] (and the dedicated start_trial_actions[]/start_trial_value[]) count
- *    per action_type per attribution window) is the sum of its
+ *    actions[]/action_values[] count per action_type per attribution window) is the sum of its
  *    child ads. Stored prod history agreed exactly for ad → ad set every day and ad → campaign on
  *    44/45 days (one day $0.09 off $8,025).
  *  - Rates are recomputed from the sums (never averaged): ctr = clicks / impressions × 100,
  *    cpc = spend / clicks, cpm = spend / impressions × 1000; a zero denominator is NULL.
+ *  - Typed results ride on those sums: a derived ad set row is classified by the same canonical
+ *    mapping as a Meta-read one (its promoted START_TRIAL / COMPLETE_REGISTRATION event included),
+ *    so an action_type the engine cannot yet name survives verbatim in the summed actions[] and a
+ *    START_TRIAL ad set's trials stay unknown, never a measured zero.
  *  - Reach and frequency are NOT additive (one person can see several ads). Derived rows carry
- *    NULL — unmeasured, never 0 and never a sum.
+ *    NULL — unmeasured, never 0 and never a sum. Meta's `results` (configured-outcome) list is
+ *    carried by no derived row either.
  *  - Meta's default level=ad result list OMITS deleted and archived ads, while a campaign-level
  *    read includes their stats ("Manage Your Ad Object's Status": `act_<ID>/insights?level=ad`
  *    "does not return stats for the deleted object"; "You can query insights for DELETED objects
@@ -127,8 +131,6 @@ export interface MetaAdsRollupSourceRow {
   impressions?: string | number | null;
   actions?: MetaAdsRollupActionElement[] | null;
   action_values?: MetaAdsRollupActionElement[] | null;
-  start_trial_actions?: MetaAdsRollupActionElement[] | null;
-  start_trial_value?: MetaAdsRollupActionElement[] | null;
   objective?: string | null;
   optimization_goal?: string | null;
   account_currency?: string | null;
@@ -153,8 +155,6 @@ export interface MetaAdsRolledUpRow {
   ctr: number | null;
   actions?: MetaAdsRollupActionElement[];
   action_values?: MetaAdsRollupActionElement[];
-  start_trial_actions?: MetaAdsRollupActionElement[];
-  start_trial_value?: MetaAdsRollupActionElement[];
   // Meta's opaque configured-outcome list is not additive; derived rows carry none.
   results: null;
   cost_per_result: null;
@@ -237,8 +237,6 @@ class GroupAccumulator {
   readonly goals = new Set<string | null>();
   private actions: ActionAccumulator | null = null;
   private actionValues: ActionAccumulator | null = null;
-  private startTrialActions: ActionAccumulator | null = null;
-  private startTrialValues: ActionAccumulator | null = null;
 
   constructor(readonly campaignId: string, readonly adsetId: string | null, readonly day: string) {}
 
@@ -258,10 +256,6 @@ class GroupAccumulator {
     // what a parent-level read returns — and stays absent (unknown) when no child reported any.
     if (Array.isArray(row.actions)) (this.actions ??= new ActionAccumulator()).add(row.actions);
     if (Array.isArray(row.action_values)) (this.actionValues ??= new ActionAccumulator()).add(row.action_values);
-    // Meta's dedicated StartTrial lists sum exactly like actions[] (per action_type, per window) and
-    // stay absent when no child reported any — the parent-level read would omit them too.
-    if (Array.isArray(row.start_trial_actions)) (this.startTrialActions ??= new ActionAccumulator()).add(row.start_trial_actions);
-    if (Array.isArray(row.start_trial_value)) (this.startTrialValues ??= new ActionAccumulator()).add(row.start_trial_value);
   }
 
   build(): MetaAdsRolledUpRow {
@@ -284,8 +278,6 @@ class GroupAccumulator {
       cpm: this.impressions === 0 ? null : (spend / this.impressions) * 1000,
       ...(this.actions ? { actions: this.actions.elements() } : {}),
       ...(this.actionValues ? { action_values: this.actionValues.elements() } : {}),
-      ...(this.startTrialActions ? { start_trial_actions: this.startTrialActions.elements() } : {}),
-      ...(this.startTrialValues ? { start_trial_value: this.startTrialValues.elements() } : {}),
       results: null,
       cost_per_result: null,
       result_values_performance_indicator: null,

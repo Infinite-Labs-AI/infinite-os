@@ -8634,13 +8634,7 @@ const META_ADS_INSIGHTS_FIELDS = [
   "result_values_performance_indicator",
   "objective",
   "optimization_goal",
-  "account_currency",
-  // StartTrial is reported in its OWN insights fields (documented on campaign, ad set and ad
-  // insights); Meta does not document it inside actions[]. Requested at every grain so a START_TRIAL
-  // ad set's result is measured. Graph rejects the WHOLE request on an unknown field, so these two
-  // were checked against a live v25.0 account before they shipped.
-  "start_trial_actions",
-  "start_trial_value"
+  "account_currency"
 ].join(",");
 
 // §4b — the grain-aware insights field list. At level=adset we ADD adset_id,adset_name so
@@ -8684,14 +8678,6 @@ const META_ADS_ATTRIBUTION_SETTING = META_ADS_ATTRIBUTION_WINDOWS.join(",");
 // wins and its count/value stay on the same action_type. Never sum aliases.
 type MetaHeadlineResultType = "purchase" | "lead" | "start_trial" | "complete_registration";
 
-// Objective-independent result rules, in the order supplemental rows are written.
-const META_HEADLINE_RESULT_TYPES: readonly MetaHeadlineResultType[] = [
-  "purchase",
-  "lead",
-  "start_trial",
-  "complete_registration",
-];
-
 const META_HEADLINE_RESULT_RULES: Record<MetaHeadlineResultType, MetaCanonicalEventRule> = {
   purchase: {
     resultType: "purchase",
@@ -8703,20 +8689,39 @@ const META_HEADLINE_RESULT_RULES: Record<MetaHeadlineResultType, MetaCanonicalEv
     actionTypes: ["lead", "onsite_conversion.lead_grouped", "offsite_conversion.fb_pixel_lead", "onsite_web_lead"],
     value: false,
   },
-  // StartTrial. The action_type names inside Meta's dedicated list are NOT documented and have not
-  // been observed on a stored row yet: `*_website` first (the pixel/CAPI population an ad set
-  // optimises), then `*_total`. An unrecognised name stays UNKNOWN via dedicatedCountField. When a
-  // real row shows the names, put them first here. A trial value is never revenue.
+  // Started trial (Meta StartTrial). ATTRIBUTION ONLY: Stripe is the trial truth, and a trial is
+  // never revenue. This rule reads only what is already stored; it adds no insights field.
+  //  - Meta documents START_TRIAL as an ad set promoted_object.custom_event_type (Ad Set reference,
+  //    OFFSITE_CONVERSIONS). The dedicated `start_trial_actions` / `start_trial_value` insights
+  //    fields in the reference are REJECTED by Graph v25.0 ("(#100) start_trial_actions,
+  //    start_trial_value are not valid for fields param", 2026-09-25). One unknown field fails the
+  //    WHOLE insights request, so never add them back.
+  //  - Meta documents NO StartTrial action_type inside actions[]. Its action_type enumeration (the
+  //    2024 out-of-cycle unique_actions deprecation list) names purchase, lead and
+  //    complete_registration types, but no start-trial type. No stored actions[] row has one.
+  //  - The only StartTrial string ever observed is Meta's own Results indicator on a START_TRIAL
+  //    ad set's rows: `conversions:start_trial_website` (value indicator
+  //    `conversion_values:start_trial_website`), kept verbatim in
+  //    actions_raw.provider_result_evidence. That points at Meta's `conversions` list, which this
+  //    sync does not request, so actions[] alone may never carry a trial.
+  // So actionTypes is EMPTY and missingAliasIsUnknown holds: a START_TRIAL ad set's trials are
+  // UNKNOWN ("—"), never a measured 0. The exact StartTrial action_type must be confirmed from
+  // stored actions_raw after the first attributed trial on Infinite (ad set 52508166941238), not
+  // from a Graph call. If it appears in actions[], list it here and drop missingAliasIsUnknown.
+  // (Reading the stored Results evidence instead is a separate, undecided option; see the
+  // missingAliasIsUnknown branch in metaAdsConversionForRule.)
   start_trial: {
     resultType: "start_trial",
-    actionTypes: ["start_trial_website", "start_trial_total"],
+    actionTypes: [],
     value: false,
-    countFields: ["start_trial_actions", "actions"],
-    valueFields: ["start_trial_value", "action_values"],
-    dedicatedCountField: "start_trial_actions",
+    missingAliasIsUnknown: true,
   },
-  // CompleteRegistration = a sign-up. offsite_conversion.fb_pixel_complete_registration is Meta's
-  // documented Pixel/CAPI type ("Website Registrations Completed").
+  // Sign up (Meta CompleteRegistration), never folded into lead. Documented action_types:
+  // `offsite_conversion.fb_pixel_complete_registration` ("Website Registrations Completed": events
+  // from the Meta Pixel or Conversions API on the website) first, because a pixel ad set optimises
+  // that population; then `complete_registration`. Both are in Meta's action_type enumeration (2024
+  // out-of-cycle changes), as are the omni_/offline_/app_ variants, which are other populations
+  // and stay excluded. A sign-up is never revenue.
   complete_registration: {
     resultType: "complete_registration",
     actionTypes: ["offsite_conversion.fb_pixel_complete_registration", "complete_registration"],
@@ -8725,7 +8730,7 @@ const META_HEADLINE_RESULT_RULES: Record<MetaHeadlineResultType, MetaCanonicalEv
 };
 
 function isMetaHeadlineResultType(value: string): value is MetaHeadlineResultType {
-  return (META_HEADLINE_RESULT_TYPES as readonly string[]).includes(value);
+  return Object.prototype.hasOwnProperty.call(META_HEADLINE_RESULT_RULES, value);
 }
 
 // ──────────────────────────────────────────────────────────────────────────────────
@@ -8747,24 +8752,16 @@ function isMetaHeadlineResultType(value: string): value is MetaHeadlineResultTyp
 // `resultType` is the canonical conversion type label stored on the child fact. `value`
 // flags whether a conversion_value is meaningful for this type (purchase-only guard,
 // §2.3): a configured lead value must NOT be stored as revenue.
-// The insights lists a canonical rule may read. actions[]/action_values[] carry every event;
-// start_trial_actions/start_trial_value are Meta's DEDICATED StartTrial lists.
-type MetaActionListField = "actions" | "action_values" | "start_trial_actions" | "start_trial_value";
-
 interface MetaCanonicalEventRule {
   resultType: string;
   // Ordered: primary first, then SAME-POPULATION fallbacks. NEVER omni_*.
   actionTypes: string[];
   // Whether conversion_value is meaningful for this result type (purchase-only).
   value: boolean;
-  // Lists searched IN ORDER for the count (and the value). The FIRST list holding one of
-  // `actionTypes` wins; lists are NEVER summed — they are two views of the same event.
-  // Omitted = ["actions"] / ["action_values"].
-  countFields?: readonly MetaActionListField[];
-  valueFields?: readonly MetaActionListField[];
-  // A list that holds ONLY this event. Present with entries but no known alias means OUR alias
-  // names are wrong: the partition is UNKNOWN (a marker row), never a measured zero.
-  dedicatedCountField?: MetaActionListField;
+  // True when we cannot yet name the action_type Meta uses for this event. An observed actions[]
+  // without one of `actionTypes` is then NOT a measured zero: the headline row is an unknown marker
+  // ("—"), and no supplemental row is written.
+  missingAliasIsUnknown?: boolean;
 }
 
 // Keyed by adset optimization_goal (uppercase, as Meta returns it).
@@ -8921,25 +8918,6 @@ function metaInsightsActionValues(row: MetaAdsInsightsRow): MetaActionElement[] 
   return Array.isArray(row.action_values) ? (row.action_values as MetaActionElement[]) : null;
 }
 
-function metaInsightsList(row: MetaAdsInsightsRow, field: MetaActionListField): MetaActionElement[] | null {
-  const list = row[field];
-  return Array.isArray(list) ? (list as MetaActionElement[]) : null;
-}
-
-// The FIRST canonical alias present in the FIRST list (in `fields` order) that holds one. Never sums
-// across lists or across aliases.
-function metaPickCanonicalActionFrom(
-  row: MetaAdsInsightsRow,
-  fields: readonly MetaActionListField[],
-  actionTypes: string[],
-): MetaActionElement | null {
-  for (const field of fields) {
-    const match = metaPickCanonicalAction(metaInsightsList(row, field), actionTypes);
-    if (match) return match;
-  }
-  return null;
-}
-
 // Keep the exact provider evidence that controls results fallback classification beside
 // actions/action_values in the existing audit JSON. This avoids a schema split while ensuring a
 // future investigator can distinguish Meta's reported result from our resolved objective rule.
@@ -8953,14 +8931,9 @@ function metaAdsActionsRaw(
   return {
     actions: metaInsightsActions(row) ?? [],
     action_values: metaInsightsActionValues(row) ?? [],
-    // Meta's dedicated StartTrial lists, verbatim: the evidence for checking the start_trial alias
-    // names against real rows.
-    start_trial_actions: metaInsightsList(row, "start_trial_actions") ?? [],
-    start_trial_value: metaInsightsList(row, "start_trial_value") ?? [],
     provider_result_evidence: {
       actions_present: Array.isArray(row.actions),
       action_values_present: Array.isArray(row.action_values),
-      start_trial_actions_present: Array.isArray(row.start_trial_actions),
       results: row.results ?? null,
       cost_per_result: row.cost_per_result ?? null,
       result_values_performance_indicator: stringOrNull(row.result_values_performance_indicator),
@@ -9909,23 +9882,31 @@ function metaAdsConversionForRule(
   isPrimary: boolean,
   allowUnknownMarker: boolean,
 ): MetaAdsConversionRow | null {
-  const countFields = rule.countFields ?? ["actions"];
-  const valueFields = rule.valueFields ?? ["action_values"];
-  const canonicalAction = metaPickCanonicalActionFrom(row, countFields, rule.actionTypes);
+  const actions = metaInsightsActions(row);
+  const canonicalAction = metaPickCanonicalAction(actions, rule.actionTypes);
   if (!canonicalAction || !canonicalAction.action_type) {
-    // A returned actions array is the action_type-grouped observation for this insights row. If
-    // no canonical alias is in any list the rule reads, the event is measured zero. Generic
-    // `results` is the ad's configured outcome and must not be relabeled into this typed partition.
-    // Preserve unknown when actions itself was absent, when positive value evidence contradicts the
-    // missing count, or when a DEDICATED list carries entries under names we do not recognise.
-    const valueOnlyEvidence = metaPickCanonicalActionFrom(row, valueFields, rule.actionTypes);
+    // A returned actions array is the action_type-grouped observation for this insights
+    // row. If it contains no canonical alias, that event is measured zero. Generic
+    // `results` is the ad's configured outcome and must not be relabeled into this typed
+    // partition. Preserve unknown only when actions itself was absent, or when positive
+    // value evidence contradicts the missing count.
+    const valueOnlyEvidence = metaPickCanonicalAction(
+      metaInsightsActionValues(row),
+      rule.actionTypes,
+    );
     const hasPositiveValueOnlyEvidence = valueOnlyEvidence !== null
       && metaHeadlineWindowValue(valueOnlyEvidence) > 0;
-    const dedicatedList = rule.dedicatedCountField ? metaInsightsList(row, rule.dedicatedCountField) : null;
-    const dedicatedUnrecognised = dedicatedList !== null && dedicatedList.length > 0;
-    // Meta omits an empty dedicated list, so actions[] is the observation for every rule.
-    if (metaInsightsActions(row) !== null && !hasPositiveValueOnlyEvidence && !dedicatedUnrecognised) return null;
+    // A missing alias is a measured zero only when we know the event's action_type names. For a
+    // rule that flags missingAliasIsUnknown (StartTrial), it stays unknown, never 0.
+    if (actions !== null && !hasPositiveValueOnlyEvidence && !rule.missingAliasIsUnknown) return null;
     if (!allowUnknownMarker) return null;
+    // The missingAliasIsUnknown seam. A future reader of Meta's stored Results evidence (row.results
+    // entries whose `indicator` is `conversions:start_trial_website`) would resolve the count HERE,
+    // before this marker, as a `meta_results` row. That reader is NOT built: whether to build it is
+    // undecided. Until then the partition stays unknown.
+    // `results` is an opaque list<Object> describing the configured outcome, not a typed
+    // purchase/lead fact. Preserve it in actions_raw, and write only an uncertainty marker
+    // here so readers keep this partition null instead of displaying an invented count.
     return {
       resultType: rule.resultType,
       results: 0,
@@ -9937,10 +9918,13 @@ function metaAdsConversionForRule(
   }
   // Count from the SAME canonical channel (headline window = 7d_click + 1d_view).
   const results = metaHeadlineWindowValue(canonicalAction);
-  // Value ONLY for purchase-type rules, from the SAME action_type.
+  // Value ONLY for purchase-type rules, from action_values[] of the SAME action_type.
   let conversionValue: number | null = null;
   if (rule.value) {
-    const valueElement = metaPickCanonicalActionFrom(row, valueFields, [canonicalAction.action_type]);
+    const valueElement = metaPickCanonicalAction(
+      metaInsightsActionValues(row),
+      [canonicalAction.action_type]
+    );
     conversionValue = valueElement ? metaHeadlineWindowValue(valueElement) : 0;
   }
   return {
@@ -9967,9 +9951,10 @@ function metaAdsConversionRows(
   const seen = new Set<string>();
 
   if (objectiveRule) {
-    // Headline result types use the same objective-independent alias rule the live surface uses,
-    // so Today and stored history stay comparable while `isPrimary` keeps the objective's headline
-    // distinct from incidental outcomes.
+    // Headline primary rows (purchase, lead, start_trial, complete_registration) use the same
+    // objective-independent alias rule the live surface uses. That makes Today and stored history
+    // byte-for-byte comparable while `isPrimary` keeps the objective's headline distinct from
+    // incidental outcomes.
     const primaryRule = isMetaHeadlineResultType(objectiveRule.resultType)
       ? META_HEADLINE_RESULT_RULES[objectiveRule.resultType]
       : objectiveRule;
@@ -9980,9 +9965,7 @@ function metaAdsConversionRows(
     }
   }
 
-  // Every headline type a row reports rides along as a NON-primary row, so a campaign row (which
-  // cannot see its ad sets' promoted events) still carries trials and sign-ups.
-  for (const resultType of META_HEADLINE_RESULT_TYPES) {
+  for (const resultType of ["purchase", "lead"] as const) {
     if (seen.has(resultType)) continue;
     const supplemental = metaAdsConversionForRule(
       row,
@@ -9990,6 +9973,24 @@ function metaAdsConversionRows(
       META_HEADLINE_RESULT_RULES[resultType],
       false,
       true,
+    );
+    if (supplemental) {
+      out.push(supplemental);
+      seen.add(resultType);
+    }
+  }
+
+  // Trials and sign-ups ride along as NON-primary rows only on POSITIVE evidence: a recognised
+  // action_type in actions[]. They never write an unknown marker here, so a row that reports
+  // neither (every purchase or lead ad set today) keeps exactly the conversion rows above.
+  for (const resultType of ["start_trial", "complete_registration"] as const) {
+    if (seen.has(resultType)) continue;
+    const supplemental = metaAdsConversionForRule(
+      row,
+      context,
+      META_HEADLINE_RESULT_RULES[resultType],
+      false,
+      false,
     );
     if (supplemental) {
       out.push(supplemental);
@@ -14590,10 +14591,6 @@ interface MetaAdsInsightsRow {
   // ('1d_click','7d_click','1d_view') alongside the element-level `value` (7d_click only).
   actions?: MetaActionElement[] | null;
   action_values?: MetaActionElement[] | null;
-  // Meta's DEDICATED StartTrial lists (same per-window element shape as actions[]). Requested in
-  // META_ADS_INSIGHTS_FIELDS; Meta omits them when a row has no trials.
-  start_trial_actions?: MetaActionElement[] | null;
-  start_trial_value?: MetaActionElement[] | null;
   // Meta's opaque configured-outcome family, retained verbatim for audit only. It is
   // never reclassified as a typed purchase/lead count.
   results?: Array<{ values?: Array<{ value?: string | number | null }> }> | null;

@@ -1136,6 +1136,71 @@ describe("Meta Ads history CLOSE against real PGlite", () => {
       .toEqual([{ grain: "ad", row_count: 2 }, { grain: "adset", row_count: 1 }, { grain: "campaign", row_count: 1 }]);
   }, 120_000);
 
+  it("hot lane keeps a START_TRIAL ad set's trials UNKNOWN on the derived ad set row, never a measured zero", async () => {
+    const workspaceId = `ws_meta_hot_trial_${randomUUID()}`;
+    const sourceId = `src_meta_hot_trial_${randomUUID()}`;
+    await seedSource(workspaceId, sourceId);
+    // NOT a Meta value: it stands in for the StartTrial action_type, which Meta has not documented for
+    // actions[]. The engine must not count it, and must keep it (summed) in the derived row.
+    const HYPOTHETICAL_TRIAL_TYPE = "hypothetical.start_trial_type";
+    const trialFixture = (day: string) => {
+      const data = fixture(day, { includeSecondAd: true });
+      data.campaigns[0] = { ...data.campaigns[0], objective: "OUTCOME_SALES" };
+      data.adsets[0] = {
+        ...data.adsets[0],
+        optimization_goal: "OFFSITE_CONVERSIONS",
+        promoted_object: { pixel_id: "px1", custom_event_type: "START_TRIAL" },
+      };
+      for (const rows of [data.campaignInsights, data.adsetInsights, data.adInsights]) {
+        for (const row of rows) {
+          Object.assign(row, {
+            objective: "OUTCOME_SALES",
+            optimization_goal: "OFFSITE_CONVERSIONS",
+            actions: [{ action_type: "link_click", "7d_click": "25" }, { action_type: HYPOTHETICAL_TRIAL_TYPE, "7d_click": "1" }],
+            action_values: [],
+            results: [{ indicator: "conversions:start_trial_website" }],
+          });
+        }
+      }
+      return data;
+    };
+    await withMetaFetch(trialFixture("2026-09-01"), () =>
+      connectorFor("meta_ads").sync(db, syncRequest(workspaceId, sourceId, "2026-09-01", "2026-09-01"))
+    );
+    const day = "2026-09-02";
+    const next = trialFixture(day);
+    const batches: string[][] = [];
+    next.onBatch = urls => batches.push(urls);
+    await withMetaFetch(next, () => connectorFor("meta_ads").sync(db, {
+      ...syncRequest(workspaceId, sourceId, day, day),
+      metaAdsSyncMode: "insights_only",
+      metaAdsRequestLane: "hot_insights",
+      metaAdsRequestBudget: 12,
+    }));
+
+    // One ad-grain read, and nothing new is asked of Meta.
+    expect(batches.flat()).toHaveLength(1);
+    expect(new URL(batches[0]![0]!, "https://graph.facebook.com/v25.0/").searchParams.get("fields")).not.toContain("start_trial");
+    const adset = await db.query<{ derivation: unknown; actions: unknown }>(
+      "select actions_raw->'derivation' as derivation, actions_raw->'actions' as actions from meta_ads_adset_daily where source_id=$1 and occurred_on=$2",
+      [sourceId, day],
+    );
+    expect(adset).toHaveLength(1);
+    expect(adset[0]!.derivation).toMatchObject({ method: "sum_of_ad_insights", ad_rows: 2 });
+    expect(adset[0]!.actions).toContainEqual({ action_type: HYPOTHETICAL_TRIAL_TYPE, "7d_click": 2 });
+    const marker = { result_type: "start_trial", results: 0, conversion_value: null, is_primary: true, results_source: "meta_results_unverified_type" };
+    expect(await db.query(
+      `select result_type,results::float8 as results,conversion_value::float8 as conversion_value,is_primary,results_source
+         from meta_ads_adset_conversions_daily where source_id=$1 and occurred_on=$2`,
+      [sourceId, day],
+    )).toEqual([marker]);
+    expect(await db.query(
+      `select ad_id,result_type,results::float8 as results,conversion_value::float8 as conversion_value,is_primary,results_source
+         from meta_ads_ad_conversions_daily where source_id=$1 and occurred_on=$2 order by ad_id`,
+      [sourceId, day],
+    )).toEqual([{ ad_id: "a1", ...marker }, { ad_id: "a2", ...marker }]);
+  }, 120_000);
+
   it("hot lane rolls up across every ad page and counts one request per page", async () => {
     const workspaceId = `ws_meta_hot_rollup_pages_${randomUUID()}`;
     const sourceId = `src_meta_hot_rollup_pages_${randomUUID()}`;
