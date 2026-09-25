@@ -32,13 +32,13 @@ log_warn() { printf "${YELLOW}⚠${NC} %s\n" "$1"; }
 log_error() { printf "${RED}✗${NC} %s\n" "$1" >&2; }
 
 DOWNLOAD_URL="https://infinite.fast/download"
-INSTALLER_VERSION="1.0.1"
+INSTALLER_VERSION="1.0.2"
 INSTALLER_USER_AGENT="Infinite-Installer/${INSTALLER_VERSION}"
 INFINITE_ONBOARDING_URI="infinite://onboarding"
 EXPECTED_BUNDLE_ID="inc.ultima.infiniteos-desktop"
 EXPECTED_TEAM_ID="4659K3678P"
-# 0.3.13 is the first release containing the no-clobber Desktop CLI launcher.
-MIN_SAFE_DESKTOP_VERSION="0.3.13"
+# Minimum signed Desktop release that implements the exact onboarding URI and bundled-CLI handoff.
+MIN_SAFE_DESKTOP_VERSION="0.3.20"
 APP_DIR="${INFINITE_APPLICATIONS_DIR:-/Applications}"
 PLIST_BUDDY="${INFINITE_PLIST_BUDDY:-/usr/libexec/PlistBuddy}"
 
