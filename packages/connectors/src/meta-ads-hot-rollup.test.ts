@@ -127,6 +127,30 @@ describe("rollUpMetaAdsAdInsights", () => {
   it("describes its derivation for the stored audit JSON", () => {
     expect(META_ADS_HOT_ROLLUP_DERIVATION).toEqual({ method: "sum_of_ad_insights", version: 1, source_grain: "ad" });
   });
+
+  it("sums start_trial_actions / start_trial_value like actions[] and leaves them absent when no ad reported any", () => {
+    const { adsets } = rollUpMetaAdsAdInsights([
+      ad({
+        ad_id: "a1", spend: "1", clicks: "1", impressions: "1",
+        actions: [{ action_type: "link_click", "7d_click": "3" }],
+        start_trial_actions: [{ action_type: "start_trial_website", "7d_click": "1", "1d_view": "1" }],
+        start_trial_value: [{ action_type: "start_trial_website", "7d_click": "0" }],
+      }),
+      ad({
+        ad_id: "a2", spend: "1", clicks: "1", impressions: "1",
+        actions: [{ action_type: "link_click", "7d_click": "2" }],
+        start_trial_actions: [{ action_type: "start_trial_website", "7d_click": "2" }],
+      }),
+      ad({ ad_id: "a3", adset_id: "s2", adset_name: "Adset two", spend: "1", clicks: "1", impressions: "1",
+        actions: [{ action_type: "link_click", "7d_click": "1" }] }),
+    ]);
+    const s1 = adsets.find((entry) => entry.entityId === "s1")!.row;
+    expect(s1.start_trial_actions).toEqual([{ action_type: "start_trial_website", "7d_click": 3, "1d_view": 1 }]);
+    expect(s1.start_trial_value).toEqual([{ action_type: "start_trial_website", "7d_click": 0 }]);
+    const s2 = adsets.find((entry) => entry.entityId === "s2")!.row;
+    expect(s2).not.toHaveProperty("start_trial_actions");
+    expect(s2).not.toHaveProperty("start_trial_value");
+  });
 });
 
 describe("hot-lane ad read shape", () => {

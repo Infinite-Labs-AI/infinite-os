@@ -9,7 +9,8 @@
  *
  * WHY IT IS SAFE for the open day only:
  *  - Every additive delivery metric (spend, impressions, clicks, inline_link_clicks, and every
- *    actions[]/action_values[] count per action_type per attribution window) is the sum of its
+ *    actions[]/action_values[] (and the dedicated start_trial_actions[]/start_trial_value[]) count
+ *    per action_type per attribution window) is the sum of its
  *    child ads. Stored prod history agreed exactly for ad → ad set every day and ad → campaign on
  *    44/45 days (one day $0.09 off $8,025).
  *  - Rates are recomputed from the sums (never averaged): ctr = clicks / impressions × 100,
@@ -126,6 +127,8 @@ export interface MetaAdsRollupSourceRow {
   impressions?: string | number | null;
   actions?: MetaAdsRollupActionElement[] | null;
   action_values?: MetaAdsRollupActionElement[] | null;
+  start_trial_actions?: MetaAdsRollupActionElement[] | null;
+  start_trial_value?: MetaAdsRollupActionElement[] | null;
   objective?: string | null;
   optimization_goal?: string | null;
   account_currency?: string | null;
@@ -150,6 +153,8 @@ export interface MetaAdsRolledUpRow {
   ctr: number | null;
   actions?: MetaAdsRollupActionElement[];
   action_values?: MetaAdsRollupActionElement[];
+  start_trial_actions?: MetaAdsRollupActionElement[];
+  start_trial_value?: MetaAdsRollupActionElement[];
   // Meta's opaque configured-outcome list is not additive; derived rows carry none.
   results: null;
   cost_per_result: null;
@@ -232,6 +237,8 @@ class GroupAccumulator {
   readonly goals = new Set<string | null>();
   private actions: ActionAccumulator | null = null;
   private actionValues: ActionAccumulator | null = null;
+  private startTrialActions: ActionAccumulator | null = null;
+  private startTrialValues: ActionAccumulator | null = null;
 
   constructor(readonly campaignId: string, readonly adsetId: string | null, readonly day: string) {}
 
@@ -251,6 +258,10 @@ class GroupAccumulator {
     // what a parent-level read returns — and stays absent (unknown) when no child reported any.
     if (Array.isArray(row.actions)) (this.actions ??= new ActionAccumulator()).add(row.actions);
     if (Array.isArray(row.action_values)) (this.actionValues ??= new ActionAccumulator()).add(row.action_values);
+    // Meta's dedicated StartTrial lists sum exactly like actions[] (per action_type, per window) and
+    // stay absent when no child reported any — the parent-level read would omit them too.
+    if (Array.isArray(row.start_trial_actions)) (this.startTrialActions ??= new ActionAccumulator()).add(row.start_trial_actions);
+    if (Array.isArray(row.start_trial_value)) (this.startTrialValues ??= new ActionAccumulator()).add(row.start_trial_value);
   }
 
   build(): MetaAdsRolledUpRow {
@@ -273,6 +284,8 @@ class GroupAccumulator {
       cpm: this.impressions === 0 ? null : (spend / this.impressions) * 1000,
       ...(this.actions ? { actions: this.actions.elements() } : {}),
       ...(this.actionValues ? { action_values: this.actionValues.elements() } : {}),
+      ...(this.startTrialActions ? { start_trial_actions: this.startTrialActions.elements() } : {}),
+      ...(this.startTrialValues ? { start_trial_value: this.startTrialValues.elements() } : {}),
       results: null,
       cost_per_result: null,
       result_values_performance_indicator: null,
