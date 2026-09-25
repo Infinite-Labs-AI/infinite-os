@@ -2608,7 +2608,7 @@ describe("live provider clients", () => {
       // The CAMPAIGN pass keeps EXACTLY the Phase-1 field list (no adset_id — that is added
       // only at level=adset).
       expect(campaignInsightsUrl.searchParams.get("fields")).toBe(
-        "campaign_id,campaign_name,date_start,spend,clicks,inline_link_clicks,impressions,reach,frequency,cpm,cpc,ctr,actions,action_values,results,cost_per_result,result_values_performance_indicator,objective,optimization_goal,account_currency"
+        "campaign_id,campaign_name,date_start,spend,clicks,inline_link_clicks,impressions,reach,frequency,cpm,cpc,ctr,actions,action_values,results,cost_per_result,result_values_performance_indicator,objective,optimization_goal,account_currency,start_trial_actions,start_trial_value"
       );
       expect(campaignInsightsUrl.searchParams.get("fields")).toContain("account_currency");
       expect(campaignInsightsUrl.searchParams.get("limit")).toBe("500");
@@ -2624,7 +2624,7 @@ describe("live provider clients", () => {
       );
       expect(adsetInsightsUrl.searchParams.get("level")).toBe("adset");
       expect(adsetInsightsUrl.searchParams.get("fields")).toBe(
-        "adset_id,adset_name,campaign_id,campaign_name,date_start,spend,clicks,inline_link_clicks,impressions,reach,frequency,cpm,cpc,ctr,actions,action_values,results,cost_per_result,result_values_performance_indicator,objective,optimization_goal,account_currency"
+        "adset_id,adset_name,campaign_id,campaign_name,date_start,spend,clicks,inline_link_clicks,impressions,reach,frequency,cpm,cpc,ctr,actions,action_values,results,cost_per_result,result_values_performance_indicator,objective,optimization_goal,account_currency,start_trial_actions,start_trial_value"
       );
     });
   });
@@ -3441,7 +3441,7 @@ describe("live provider clients", () => {
     // The ad field list PREPENDS ad_id,ad_name,adset_id; campaign_id,campaign_name already lead
     // the base field list (the carried parent keys are echoed at every grain — not duplicated).
     expect(adInsightsUrl.searchParams.get("fields")).toBe(
-      "ad_id,ad_name,adset_id,campaign_id,campaign_name,date_start,spend,clicks,inline_link_clicks,impressions,reach,frequency,cpm,cpc,ctr,actions,action_values,results,cost_per_result,result_values_performance_indicator,objective,optimization_goal,account_currency"
+      "ad_id,ad_name,adset_id,campaign_id,campaign_name,date_start,spend,clicks,inline_link_clicks,impressions,reach,frequency,cpm,cpc,ctr,actions,action_values,results,cost_per_result,result_values_performance_indicator,objective,optimization_goal,account_currency,start_trial_actions,start_trial_value"
     );
     // The /ads edge requests the creative id plus bounded metadata needed for durable pattern/media
     // archival, together with the parent ids.
@@ -9501,6 +9501,145 @@ describe("Meta Ads durable daily history", () => {
       expect(payload.actionsRaw).toMatchObject({
         provider_result_evidence: { resolved_promoted_custom_event_type: "LEAD" },
       });
+    });
+  });
+
+  // One OFFSITE_CONVERSIONS ad set optimising `promotedEvent`, in an OUTCOME_SALES campaign, with the
+  // given ad-level insights rows (ad ids come from the rows). Every other read is empty.
+  function promotedAdsetFetch(promotedEvent: string, adRows: Array<Record<string, unknown>>) {
+    return (url: string): Response => {
+      if (url.includes("/adsets")) return historyResponse({ data: [{
+        id: "s_promoted", campaign_id: "c_sales", name: "Promoted adset", status: "ACTIVE", effective_status: "ACTIVE",
+        optimization_goal: "OFFSITE_CONVERSIONS", billing_event: "IMPRESSIONS",
+        promoted_object: { pixel_id: "px1", custom_event_type: promotedEvent },
+      }], paging: {} });
+      if (url.includes("/campaigns")) return historyResponse({ data: [{
+        id: "c_sales", name: "Campaign", objective: "OUTCOME_SALES", status: "ACTIVE", effective_status: "ACTIVE",
+      }], paging: {} });
+      if (isMetaAdsEdgeRequest(url)) return historyResponse({ data: adRows.map((row) => ({
+        id: row.ad_id, adset_id: "s_promoted", campaign_id: "c_sales", name: String(row.ad_name ?? row.ad_id),
+        status: "ACTIVE", effective_status: "ACTIVE",
+      })), paging: {} });
+      if (isMetaAdInsightsRequest(url)) return historyResponse({ data: adRows.map((row) => ({
+        adset_id: "s_promoted", campaign_id: "c_sales", date_start: "2026-09-25",
+        objective: "OUTCOME_SALES", spend: "3.00", account_currency: "USD", ...row,
+      })), paging: {} });
+      return historyResponse({ data: [], paging: {} });
+    };
+  }
+
+  async function adPayloads(): Promise<Map<string, Record<string, unknown>>> {
+    const extracted = await connectorFor("meta_ads").extract(
+      historyCredentialDb(),
+      { ...request("meta_ads"), metaAdsInsightsLevel: "ad" },
+      { cursorKey: "meta_ads_campaign_daily", cursorStart: "2026-09-25T00:00:00.000Z", cursorEnd: "2026-09-25T23:59:59.000Z", refreshWindowDays: 30, mode: "live" },
+    );
+    return new Map(extracted.filter((row) => row.objectType === "meta_ads_ad_daily")
+      .map((row) => [(row.payload as { adId: string }).adId, row.payload as Record<string, unknown>]));
+  }
+
+  it("classifies an OFFSITE_CONVERSIONS + START_TRIAL ad set from start_trial_actions, never as purchase", async () => {
+    await withMockFetch(promotedAdsetFetch("START_TRIAL", [{
+      ad_id: "a_trial", ad_name: "Trial ad",
+      actions: [{ action_type: "link_click", "7d_click": "25" }],
+      start_trial_actions: [{ action_type: "start_trial_website", "7d_click": "2", "1d_view": "1" }],
+      start_trial_value: [{ action_type: "start_trial_website", "7d_click": "0" }],
+    }]), async () => {
+      const payload = (await adPayloads()).get("a_trial")!;
+      expect(payload.conversions).toEqual([
+        expect.objectContaining({ resultType: "start_trial", results: 3, conversionValue: null, isPrimary: true, resultsSource: "derived_from_canonical_mapping" }),
+      ]);
+      expect(payload.actionsRaw).toMatchObject({
+        start_trial_actions: [{ action_type: "start_trial_website", "7d_click": "2", "1d_view": "1" }],
+        provider_result_evidence: { resolved_promoted_custom_event_type: "START_TRIAL", start_trial_actions_present: true },
+      });
+    });
+  });
+
+  it("keeps an incidental purchase on a START_TRIAL ad set as supplemental, never the headline", async () => {
+    await withMockFetch(promotedAdsetFetch("START_TRIAL", [{
+      ad_id: "a_trial",
+      actions: [{ action_type: "link_click", "7d_click": "25" }, { action_type: "offsite_conversion.fb_pixel_purchase", "7d_click": "1" }],
+      action_values: [{ action_type: "offsite_conversion.fb_pixel_purchase", "7d_click": "29" }],
+    }]), async () => {
+      const payload = (await adPayloads()).get("a_trial")!;
+      // No start_trial row: actions[] was observed and no trial alias is present, so trials are a measured zero.
+      expect(payload.conversions).toEqual([
+        expect.objectContaining({ resultType: "purchase", results: 1, conversionValue: 29, isPrimary: false }),
+      ]);
+    });
+  });
+
+  it("keeps an unrecognised action_type inside start_trial_actions UNKNOWN, never zero", async () => {
+    await withMockFetch(promotedAdsetFetch("START_TRIAL", [{
+      ad_id: "a_trial",
+      actions: [{ action_type: "link_click", "7d_click": "25" }],
+      start_trial_actions: [{ action_type: "start_trial_some_new_channel", "7d_click": "4" }],
+    }]), async () => {
+      const payload = (await adPayloads()).get("a_trial")!;
+      expect(payload.conversions).toEqual([
+        expect.objectContaining({ resultType: "start_trial", results: 0, conversionValue: null, isPrimary: true, resultsSource: "meta_results_unverified_type" }),
+      ]);
+    });
+  });
+
+  it("reads a START_TRIAL count from actions[] when Meta reports it there, and never sums the two lists", async () => {
+    await withMockFetch(promotedAdsetFetch("START_TRIAL", [
+      { ad_id: "a_actions_only", actions: [{ action_type: "link_click", "7d_click": "9" }, { action_type: "start_trial_total", "7d_click": "2" }] },
+      {
+        ad_id: "a_both",
+        actions: [{ action_type: "link_click", "7d_click": "16" }, { action_type: "start_trial_total", "7d_click": "5" }],
+        start_trial_actions: [{ action_type: "start_trial_website", "7d_click": "3" }],
+      },
+    ]), async () => {
+      const byAd = await adPayloads();
+      expect(byAd.get("a_actions_only")?.conversions).toEqual([
+        expect.objectContaining({ resultType: "start_trial", results: 2, isPrimary: true, resultsSource: "derived_from_canonical_mapping" }),
+      ]);
+      // The dedicated list wins; 3 + 5 would double-count one event reported twice.
+      expect(byAd.get("a_both")?.conversions).toEqual([
+        expect.objectContaining({ resultType: "start_trial", results: 3, isPrimary: true }),
+      ]);
+    });
+  });
+
+  it("classifies an OFFSITE_CONVERSIONS + COMPLETE_REGISTRATION ad set as complete_registration (a sign-up)", async () => {
+    await withMockFetch(promotedAdsetFetch("COMPLETE_REGISTRATION", [{
+      ad_id: "a_signup",
+      actions: [
+        { action_type: "link_click", "7d_click": "8" },
+        { action_type: "offsite_conversion.fb_pixel_complete_registration", "7d_click": "4", "1d_view": "1" },
+      ],
+    }]), async () => {
+      const payload = (await adPayloads()).get("a_signup")!;
+      expect(payload.conversions).toEqual([
+        expect.objectContaining({ resultType: "complete_registration", results: 5, conversionValue: null, isPrimary: true, resultsSource: "derived_from_canonical_mapping" }),
+      ]);
+    });
+  });
+
+  it("carries trials on a campaign row as a NON-primary result (a campaign cannot see its ad sets' promoted events)", async () => {
+    const trialCampaign = {
+      campaign_id: "c_trials", campaign_name: "Trials", date_start: "2026-09-25", spend: "6.97",
+      objective: "OUTCOME_SALES", optimization_goal: "OFFSITE_CONVERSIONS", account_currency: "USD",
+      actions: [{ action_type: "link_click", "7d_click": "25" }],
+      start_trial_actions: [{ action_type: "start_trial_website", "7d_click": "2" }],
+    };
+    await withMockFetch((url) => {
+      if (url.includes("/campaigns") || url.includes("/adsets") || isMetaAdsEdgeRequest(url)) {
+        return historyResponse({ data: [], paging: {} });
+      }
+      if (isMetaAdsetInsightsRequest(url) || isMetaAdInsightsRequest(url)) return historyResponse({ data: [], paging: {} });
+      return historyResponse({ data: [trialCampaign], paging: {} });
+    }, async () => {
+      const extracted = await connectorFor("meta_ads").extract(historyCredentialDb(), request("meta_ads"), {
+        cursorKey: "meta_ads_campaign_daily", cursorStart: "2026-09-25T00:00:00.000Z",
+        cursorEnd: "2026-09-25T23:59:59.000Z", refreshWindowDays: 30, mode: "live",
+      });
+      const campaign = extracted.find((row) => row.objectType === "meta_ads_campaign_daily")?.payload as Record<string, unknown>;
+      expect(campaign.conversions).toEqual([
+        expect.objectContaining({ resultType: "start_trial", results: 2, isPrimary: false, resultsSource: "derived_from_canonical_mapping" }),
+      ]);
     });
   });
 
