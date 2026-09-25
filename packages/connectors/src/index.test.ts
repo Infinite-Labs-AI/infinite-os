@@ -9504,6 +9504,342 @@ describe("Meta Ads durable daily history", () => {
     });
   });
 
+  // ── Started trial (START_TRIAL) and Sign up (COMPLETE_REGISTRATION), read from STORED actions[] ──
+  // No new insights field is requested for either: Graph v25.0 rejects start_trial_actions /
+  // start_trial_value, and one unknown field fails the whole request.
+
+  const HEADLINE_WINDOWS = "1d_click,7d_click,1d_view";
+
+  // One OFFSITE_CONVERSIONS ad set optimising `promotedEvent` in an OUTCOME_SALES campaign. Ad and ad
+  // set insights rows are served as given (ids come from the rows); every other read is empty.
+  // `insightsUrls` collects every insights request so a test can pin the fields sent to Meta.
+  function promotedAdsetFetch(
+    promotedEvent: string,
+    rows: { ad?: Array<Record<string, unknown>>; adset?: Array<Record<string, unknown>> },
+    insightsUrls: string[] = [],
+  ) {
+    const adRows = rows.ad ?? [];
+    return (url: string): Response => {
+      if (url.includes("/insights")) insightsUrls.push(url);
+      if (url.includes("/adsets")) return historyResponse({ data: [{
+        id: "s_promoted", campaign_id: "c_sales", name: "Promoted adset", status: "ACTIVE", effective_status: "ACTIVE",
+        optimization_goal: "OFFSITE_CONVERSIONS", billing_event: "IMPRESSIONS",
+        promoted_object: { pixel_id: "px1", custom_event_type: promotedEvent },
+      }], paging: {} });
+      if (url.includes("/campaigns")) return historyResponse({ data: [{
+        id: "c_sales", name: "Campaign", objective: "OUTCOME_SALES", status: "ACTIVE", effective_status: "ACTIVE",
+      }], paging: {} });
+      if (isMetaAdsEdgeRequest(url)) return historyResponse({ data: adRows.map((row) => ({
+        id: row.ad_id, adset_id: "s_promoted", campaign_id: "c_sales", name: String(row.ad_name ?? row.ad_id),
+        status: "ACTIVE", effective_status: "ACTIVE",
+      })), paging: {} });
+      const base = { adset_id: "s_promoted", campaign_id: "c_sales", date_start: "2026-09-25", objective: "OUTCOME_SALES", spend: "3.00", account_currency: "USD" };
+      if (isMetaAdInsightsRequest(url)) return historyResponse({ data: adRows.map((row) => ({ ...base, ...row })), paging: {} });
+      if (isMetaAdsetInsightsRequest(url)) return historyResponse({ data: (rows.adset ?? []).map((row) => ({ ...base, ...row })), paging: {} });
+      return historyResponse({ data: [], paging: {} });
+    };
+  }
+
+  async function promotedPayloads(level: "ad" | "adset"): Promise<Map<string, Record<string, unknown>>> {
+    const extracted = await connectorFor("meta_ads").extract(
+      historyCredentialDb(),
+      { ...request("meta_ads"), metaAdsInsightsLevel: level },
+      { cursorKey: "meta_ads_campaign_daily", cursorStart: "2026-09-25T00:00:00.000Z", cursorEnd: "2026-09-25T23:59:59.000Z", refreshWindowDays: 30, mode: "live" },
+    );
+    const objectType = level === "ad" ? "meta_ads_ad_daily" : "meta_ads_adset_daily";
+    return new Map(extracted.filter((row) => row.objectType === objectType).map((row) => {
+      const payload = row.payload as Record<string, unknown>;
+      return [String(level === "ad" ? payload.adId : payload.adsetId), payload];
+    }));
+  }
+
+  function unknownMarker(resultType: string, isPrimary: boolean) {
+    return { resultType, results: 0, conversionValue: null, attributionSetting: HEADLINE_WINDOWS, isPrimary, resultsSource: "meta_results_unverified_type" };
+  }
+
+  // The action_types Meta stored for a delivering START_TRIAL ad set on its first day, and Meta's own
+  // Results label for it. No start-trial type is among them: Meta labels the result
+  // `conversions:start_trial_website`, i.e. its `conversions` list, which the sync does not request.
+  const START_TRIAL_DAY_ONE_ACTIONS = [
+    "link_click", "page_engagement", "landing_page_view", "omni_landing_page_view", "post_engagement",
+    "onsite_conversion.post_save", "post_reaction", "post_interaction_gross", "post_interaction_net",
+    "onsite_conversion.post_net_save", "onsite_conversion.post_net_like", "video_view",
+  ].map((action_type) => ({ action_type, value: "3", "1d_click": "3", "7d_click": "3" }));
+  const START_TRIAL_RESULTS_LABEL = {
+    results: [{ indicator: "conversions:start_trial_website" }],
+    cost_per_result: [{ indicator: "conversions:start_trial_website" }],
+    result_values_performance_indicator: "conversion_values:start_trial_website",
+  };
+
+  it("keeps a START_TRIAL ad set's trials UNKNOWN when actions[] names no trial type and Meta's Results label has no values — never 0, never a purchase headline", async () => {
+    const insightsUrls: string[] = [];
+    const trialDay = { actions: START_TRIAL_DAY_ONE_ACTIONS, action_values: [], ...START_TRIAL_RESULTS_LABEL };
+    await withMockFetch(promotedAdsetFetch("START_TRIAL", {
+      ad: [{ ad_id: "a_trial", ad_name: "Trial ad", ...trialDay }],
+      adset: [{ adset_name: "Promoted adset", ...trialDay }],
+    }, insightsUrls), async () => {
+      for (const [level, id] of [["ad", "a_trial"], ["adset", "s_promoted"]] as const) {
+        const payload = (await promotedPayloads(level)).get(id)!;
+        expect(payload.conversions).toEqual([unknownMarker("start_trial", true)]);
+        // Meta's Results label is kept verbatim as evidence; actions_raw gains no new key.
+        expect(Object.keys(payload.actionsRaw as object)).toEqual(["actions", "action_values", "provider_result_evidence"]);
+        expect(payload.actionsRaw).toMatchObject({
+          provider_result_evidence: {
+            actions_present: true,
+            results: [{ indicator: "conversions:start_trial_website" }],
+            result_values_performance_indicator: "conversion_values:start_trial_website",
+            resolved_promoted_custom_event_type: "START_TRIAL",
+          },
+        });
+      }
+    });
+    // Nothing new is sent to Meta: no insights request names a start_trial field.
+    expect(insightsUrls.length).toBeGreaterThan(0);
+    for (const url of insightsUrls) expect(new URL(url).searchParams.get("fields")).not.toContain("start_trial");
+  });
+
+  it("does not guess StartTrial names: an undocumented trial-looking action_type in actions[] stays UNKNOWN", async () => {
+    // NOT a Meta value. It stands in for any name Meta has not documented for actions[]; counting it
+    // would be a guess. The real name is confirmed from stored actions_raw, then added to the rule.
+    const HYPOTHETICAL_TRIAL_TYPE = "hypothetical.start_trial_type";
+    await withMockFetch(promotedAdsetFetch("START_TRIAL", { ad: [{
+      ad_id: "a_trial",
+      actions: [{ action_type: "link_click", "7d_click": "25" }, { action_type: HYPOTHETICAL_TRIAL_TYPE, "7d_click": "4" }],
+    }] }), async () => {
+      const payload = (await promotedPayloads("ad")).get("a_trial")!;
+      expect(payload.conversions).toEqual([unknownMarker("start_trial", true)]);
+      // The unrecognised element survives verbatim, so the name can be confirmed from storage.
+      expect((payload.actionsRaw as { actions: unknown[] }).actions).toContainEqual({ action_type: HYPOTHETICAL_TRIAL_TYPE, "7d_click": "4" });
+    });
+  });
+
+  it("writes a START_TRIAL headline marker when actions[] is absent, with purchase/lead as NON-primary markers", async () => {
+    await withMockFetch(promotedAdsetFetch("START_TRIAL", { ad: [{ ad_id: "a_no_actions", ...START_TRIAL_RESULTS_LABEL }] }), async () => {
+      const payload = (await promotedPayloads("ad")).get("a_no_actions")!;
+      expect(payload.conversions).toEqual([
+        unknownMarker("start_trial", true),
+        unknownMarker("purchase", false),
+        unknownMarker("lead", false),
+      ]);
+    });
+  });
+
+  it("keeps an incidental purchase on a START_TRIAL ad set as supplemental, never the headline", async () => {
+    await withMockFetch(promotedAdsetFetch("START_TRIAL", { ad: [{
+      ad_id: "a_trial",
+      actions: [{ action_type: "link_click", "7d_click": "25" }, { action_type: "offsite_conversion.fb_pixel_purchase", "7d_click": "1" }],
+      action_values: [{ action_type: "offsite_conversion.fb_pixel_purchase", "7d_click": "29" }],
+    }] }), async () => {
+      const payload = (await promotedPayloads("ad")).get("a_trial")!;
+      expect(payload.conversions).toEqual([
+        unknownMarker("start_trial", true),
+        { resultType: "purchase", results: 1, conversionValue: 29, attributionSetting: HEADLINE_WINDOWS, isPrimary: false, resultsSource: "derived_from_canonical_mapping" },
+      ]);
+    });
+  });
+
+  // ── B1: Meta's own credited trials, from its stored Results evidence (`results` is already requested) ──
+
+  function trialResults(values: Array<{ value?: unknown; attribution_windows?: unknown }> | undefined, indicator = "conversions:start_trial_website") {
+    return { results: [{ indicator, ...(values === undefined ? {} : { values }) }] };
+  }
+
+  function metaResultsTrials(results: number, isPrimary = true) {
+    return { resultType: "start_trial", results, conversionValue: null, attributionSetting: HEADLINE_WINDOWS, isPrimary, resultsSource: "meta_results" };
+  }
+
+  it("B1: counts a START_TRIAL ad set's trials from Meta's Results evidence over 7d_click + 1d_view, at ad and ad set grain", async () => {
+    const insightsUrls: string[] = [];
+    await withMockFetch(promotedAdsetFetch("START_TRIAL", {
+      ad: [{
+        ad_id: "a_trial",
+        actions: START_TRIAL_DAY_ONE_ACTIONS,
+        ...trialResults([
+          { value: "2", attribution_windows: ["1d_click"] },
+          { value: "3", attribution_windows: ["7d_click"] },
+          { value: "1", attribution_windows: ["1d_view"] },
+          { value: "4", attribution_windows: ["default"] },
+        ]),
+      }],
+      // Meta's own ad set row carries Meta's own ad-set-level count.
+      adset: [{ adset_name: "Promoted adset", actions: START_TRIAL_DAY_ONE_ACTIONS, ...trialResults([{ value: "5", attribution_windows: ["7d_click"] }]) }],
+    }, insightsUrls), async () => {
+      expect((await promotedPayloads("ad")).get("a_trial")?.conversions).toEqual([metaResultsTrials(4)]);
+      // A missing 1d_view window counts 0 once 7d_click is present, as in actions[].
+      expect((await promotedPayloads("adset")).get("s_promoted")?.conversions).toEqual([metaResultsTrials(5)]);
+    });
+    // Nothing new is requested: `results` was already in the field list.
+    for (const url of insightsUrls) expect(new URL(url).searchParams.get("fields")).not.toContain("start_trial");
+  });
+
+  it("B1: Meta's explicit 0 is 0; no values, another indicator or a malformed value stays UNKNOWN", async () => {
+    await withMockFetch(promotedAdsetFetch("START_TRIAL", { ad: [
+      { ad_id: "a_explicit_zero", actions: START_TRIAL_DAY_ONE_ACTIONS, ...trialResults([{ value: "0", attribution_windows: ["7d_click"] }, { value: "0", attribution_windows: ["1d_view"] }]) },
+      { ad_id: "a_no_values", actions: START_TRIAL_DAY_ONE_ACTIONS, ...trialResults(undefined) },
+      { ad_id: "a_empty_values", actions: START_TRIAL_DAY_ONE_ACTIONS, ...trialResults([]) },
+      { ad_id: "a_no_results", actions: START_TRIAL_DAY_ONE_ACTIONS },
+      // Not our indicator: another prefix, or another name. Never read as trials.
+      { ad_id: "a_actions_prefix", actions: START_TRIAL_DAY_ONE_ACTIONS, ...trialResults([{ value: "2", attribution_windows: ["7d_click"] }], "actions:start_trial_website") },
+      { ad_id: "a_other_name", actions: START_TRIAL_DAY_ONE_ACTIONS, ...trialResults([{ value: "2", attribution_windows: ["7d_click"] }], "conversions:start_trial_total") },
+      // Malformed: no headline window, a window-less value, a non-numeric value, a negative value.
+      { ad_id: "a_only_other_windows", actions: START_TRIAL_DAY_ONE_ACTIONS, ...trialResults([{ value: "2", attribution_windows: ["1d_click"] }, { value: "2", attribution_windows: ["default"] }]) },
+      { ad_id: "a_windowless", actions: START_TRIAL_DAY_ONE_ACTIONS, ...trialResults([{ value: "2" }]) },
+      { ad_id: "a_not_a_number", actions: START_TRIAL_DAY_ONE_ACTIONS, ...trialResults([{ value: "two", attribution_windows: ["7d_click"] }]) },
+      { ad_id: "a_negative", actions: START_TRIAL_DAY_ONE_ACTIONS, ...trialResults([{ value: "-1", attribution_windows: ["7d_click"] }]) },
+    ] }), async () => {
+      const byAd = await promotedPayloads("ad");
+      expect(byAd.get("a_explicit_zero")?.conversions).toEqual([metaResultsTrials(0)]);
+      for (const adId of ["a_no_values", "a_empty_values", "a_no_results", "a_actions_prefix", "a_other_name", "a_only_other_windows", "a_windowless", "a_not_a_number", "a_negative"]) {
+        expect({ adId, conversions: byAd.get(adId)?.conversions }).toEqual({ adId, conversions: [unknownMarker("start_trial", true)] });
+      }
+    });
+  });
+
+  it("B1: two entries for the trial indicator are ambiguous, so the count stays UNKNOWN", async () => {
+    await withMockFetch(promotedAdsetFetch("START_TRIAL", { ad: [{
+      ad_id: "a_twice",
+      actions: START_TRIAL_DAY_ONE_ACTIONS,
+      results: [
+        { indicator: "conversions:start_trial_website", values: [{ value: "1", attribution_windows: ["7d_click"] }] },
+        { indicator: "conversions:start_trial_website", values: [{ value: "2", attribution_windows: ["7d_click"] }] },
+      ],
+    }] }), async () => {
+      expect((await promotedPayloads("ad")).get("a_twice")?.conversions).toEqual([unknownMarker("start_trial", true)]);
+    });
+  });
+
+  it("B1: carries Meta's credited trials on a campaign row as a NON-primary row (a campaign cannot see its ad sets' promoted events)", async () => {
+    const campaignRow = (campaign_id: string, extra: Record<string, unknown>) => ({
+      campaign_id, campaign_name: "Trials", date_start: "2026-09-25", spend: "6.97", objective: "OUTCOME_SALES",
+      optimization_goal: "OFFSITE_CONVERSIONS", account_currency: "USD", actions: [{ action_type: "link_click", "7d_click": "25" }], ...extra,
+    });
+    await withMockFetch((url) => {
+      if (url.includes("/campaigns") || url.includes("/adsets") || isMetaAdsEdgeRequest(url)) return historyResponse({ data: [], paging: {} });
+      if (isMetaAdsetInsightsRequest(url) || isMetaAdInsightsRequest(url)) return historyResponse({ data: [], paging: {} });
+      return historyResponse({ data: [
+        campaignRow("c_credited", trialResults([{ value: "2", attribution_windows: ["7d_click"] }])),
+        // No values: a campaign row writes no trial marker (only positive evidence rides along).
+        campaignRow("c_no_values", trialResults(undefined)),
+      ], paging: {} });
+    }, async () => {
+      const extracted = await connectorFor("meta_ads").extract(historyCredentialDb(), request("meta_ads"), {
+        cursorKey: "meta_ads_campaign_daily", cursorStart: "2026-09-25T00:00:00.000Z",
+        cursorEnd: "2026-09-25T23:59:59.000Z", refreshWindowDays: 30, mode: "live",
+      });
+      const byCampaign = new Map(extracted.filter((row) => row.objectType === "meta_ads_campaign_daily")
+        .map((row) => [(row.payload as { campaignId: string }).campaignId, row.payload as Record<string, unknown>]));
+      expect(byCampaign.get("c_credited")?.conversions).toEqual([metaResultsTrials(2, false)]);
+      expect(byCampaign.get("c_no_values")?.conversions).toEqual([]);
+    });
+  });
+
+  it("classifies a COMPLETE_REGISTRATION ad set as a Sign up from the documented pixel type, never summing aliases", async () => {
+    await withMockFetch(promotedAdsetFetch("COMPLETE_REGISTRATION", { ad: [
+      {
+        ad_id: "a_signup",
+        actions: [
+          { action_type: "link_click", "7d_click": "8" },
+          // Meta reports one sign-up under both documented names; the pixel type wins, never 4 + 4.
+          { action_type: "offsite_conversion.fb_pixel_complete_registration", "7d_click": "3", "1d_view": "1" },
+          { action_type: "complete_registration", "7d_click": "3", "1d_view": "1" },
+        ],
+        action_values: [{ action_type: "offsite_conversion.fb_pixel_complete_registration", "7d_click": "50" }],
+      },
+      { ad_id: "a_signup_grouped_only", actions: [{ action_type: "complete_registration", "7d_click": "2" }] },
+      // actions[] observed with no sign-up name: a documented event's measured zero, as for purchase/lead.
+      { ad_id: "a_signup_zero", actions: [{ action_type: "link_click", "7d_click": "5" }] },
+    ] }), async () => {
+      const byAd = await promotedPayloads("ad");
+      const signUp = (results: number) => ({ resultType: "complete_registration", results, conversionValue: null, attributionSetting: HEADLINE_WINDOWS, isPrimary: true, resultsSource: "derived_from_canonical_mapping" });
+      // A sign-up value is never stored as revenue.
+      expect(byAd.get("a_signup")?.conversions).toEqual([signUp(4)]);
+      expect(byAd.get("a_signup_grouped_only")?.conversions).toEqual([signUp(2)]);
+      expect(byAd.get("a_signup_zero")?.conversions).toEqual([]);
+    });
+  });
+
+  it("carries a recognised sign-up on a PURCHASE ad set as a NON-primary row, never a marker", async () => {
+    await withMockFetch(promotedAdsetFetch("PURCHASE", { ad: [{
+      ad_id: "a_buy",
+      actions: [{ action_type: "offsite_conversion.fb_pixel_purchase", "7d_click": "1" }, { action_type: "offsite_conversion.fb_pixel_complete_registration", "7d_click": "6" }],
+      action_values: [{ action_type: "offsite_conversion.fb_pixel_purchase", "7d_click": "29" }],
+    }] }), async () => {
+      const payload = (await promotedPayloads("ad")).get("a_buy")!;
+      expect(payload.conversions).toEqual([
+        { resultType: "purchase", results: 1, conversionValue: 29, attributionSetting: HEADLINE_WINDOWS, isPrimary: true, resultsSource: "derived_from_canonical_mapping" },
+        { resultType: "complete_registration", results: 6, conversionValue: null, attributionSetting: HEADLINE_WINDOWS, isPrimary: false, resultsSource: "derived_from_canonical_mapping" },
+      ]);
+    });
+  });
+
+  // REGRESSION: a PURCHASE-optimised ad set (the shape a store's sales ad set stores today) is
+  // byte-for-byte what origin/main produces: the same conversion rows, the same actions_raw, and the
+  // same insights fields. The expected values below were checked against origin/main.
+  it("leaves a PURCHASE-optimised ad set byte-for-byte unchanged (conversions, actions_raw, fields)", async () => {
+    const purchaseDay = {
+      actions: [
+        { action_type: "link_click", value: "31", "1d_click": "31", "7d_click": "31" },
+        { action_type: "landing_page_view", value: "22", "1d_click": "22", "7d_click": "22" },
+        { action_type: "omni_landing_page_view", value: "23", "1d_click": "23", "7d_click": "23" },
+        { action_type: "initiate_checkout", value: "3", "1d_click": "3", "7d_click": "3" },
+        { action_type: "offsite_conversion.fb_pixel_initiate_checkout", value: "3", "1d_click": "3", "7d_click": "3" },
+        { action_type: "offsite_conversion.fb_pixel_custom", value: "7", "1d_click": "7", "7d_click": "7" },
+        { action_type: "lead", value: "2", "1d_click": "2", "7d_click": "2" },
+        { action_type: "offsite_conversion.fb_pixel_lead", value: "2", "1d_click": "2", "7d_click": "2" },
+        { action_type: "onsite_web_lead", value: "2", "1d_click": "2", "7d_click": "2" },
+        { action_type: "purchase", value: "1", "1d_click": "1", "7d_click": "1", "1d_view": "1" },
+        { action_type: "omni_purchase", value: "1", "1d_click": "1", "7d_click": "1", "1d_view": "1" },
+        { action_type: "offsite_conversion.fb_pixel_purchase", value: "1", "1d_click": "1", "7d_click": "1", "1d_view": "1" },
+        { action_type: "onsite_web_purchase", value: "1", "1d_click": "1", "7d_click": "1", "1d_view": "1" },
+        { action_type: "web_in_store_purchase", value: "1", "1d_click": "1", "7d_click": "1", "1d_view": "1" },
+      ],
+      action_values: [
+        { action_type: "purchase", value: "29", "1d_click": "29", "7d_click": "29", "1d_view": "29" },
+        { action_type: "offsite_conversion.fb_pixel_purchase", value: "29", "1d_click": "29", "7d_click": "29", "1d_view": "29" },
+      ],
+      results: [{ indicator: "actions:offsite_conversion.fb_pixel_purchase", values: [{ value: "1", attribution_windows: ["7d_click"] }] }],
+      cost_per_result: [{ indicator: "actions:offsite_conversion.fb_pixel_purchase", values: [{ value: "35.39", attribution_windows: ["7d_click"] }] }],
+      result_values_performance_indicator: "action_values:offsite_conversion.fb_pixel_purchase",
+    };
+    const insightsUrls: string[] = [];
+    await withMockFetch(promotedAdsetFetch("PURCHASE", {
+      ad: [{ ad_id: "a_buy", ad_name: "Sales ad", ...purchaseDay }, { ad_id: "a_buy_no_actions", ad_name: "Sales ad 2" }],
+      adset: [{ adset_name: "Promoted adset", ...purchaseDay }],
+    }, insightsUrls), async () => {
+      const expectedConversions = [
+        { resultType: "purchase", results: 2, conversionValue: 58, attributionSetting: HEADLINE_WINDOWS, isPrimary: true, resultsSource: "derived_from_canonical_mapping" },
+        { resultType: "lead", results: 2, conversionValue: null, attributionSetting: HEADLINE_WINDOWS, isPrimary: false, resultsSource: "derived_from_canonical_mapping" },
+      ];
+      const expectedActionsRaw = {
+        actions: purchaseDay.actions,
+        action_values: purchaseDay.action_values,
+        provider_result_evidence: {
+          actions_present: true,
+          action_values_present: true,
+          results: purchaseDay.results,
+          cost_per_result: purchaseDay.cost_per_result,
+          result_values_performance_indicator: "action_values:offsite_conversion.fb_pixel_purchase",
+          objective: "OUTCOME_SALES",
+          optimization_goal: null,
+          resolved_optimization_goal: "OFFSITE_CONVERSIONS",
+          resolved_promoted_custom_event_type: "PURCHASE",
+        },
+      };
+      const byAd = await promotedPayloads("ad");
+      expect(byAd.get("a_buy")?.conversions).toEqual(expectedConversions);
+      expect(byAd.get("a_buy")?.actionsRaw).toEqual(expectedActionsRaw);
+      // actions[] absent: purchase headline + lead markers only. No trial or sign-up marker is added.
+      expect(byAd.get("a_buy_no_actions")?.conversions).toEqual([unknownMarker("purchase", true), unknownMarker("lead", false)]);
+      const adset = (await promotedPayloads("adset")).get("s_promoted")!;
+      expect(adset.conversions).toEqual(expectedConversions);
+      expect(adset.actionsRaw).toEqual(expectedActionsRaw);
+    });
+    const fieldsByLevel = new Map(insightsUrls.map((url) => [new URL(url).searchParams.get("level"), new URL(url).searchParams.get("fields")]));
+    const baseFields = "campaign_id,campaign_name,date_start,spend,clicks,inline_link_clicks,impressions,reach,frequency,cpm,cpc,ctr,actions,action_values,results,cost_per_result,result_values_performance_indicator,objective,optimization_goal,account_currency";
+    expect(fieldsByLevel.get("ad")).toBe(`ad_id,ad_name,adset_id,${baseFields}`);
+    expect(fieldsByLevel.get("adset")).toBe(`adset_id,adset_name,${baseFields}`);
+  });
+
   it("emits change-snapshot records for zero-delivery entities with targeting and creative descriptors", async () => {
     const seen: string[] = [];
     await withMockFetch((url) => {

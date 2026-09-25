@@ -14,6 +14,15 @@
  *    44/45 days (one day $0.09 off $8,025).
  *  - Rates are recomputed from the sums (never averaged): ctr = clicks / impressions × 100,
  *    cpc = spend / clicks, cpm = spend / impressions × 1000; a zero denominator is NULL.
+ *  - Typed results ride on those sums: a derived ad set row is classified by the same canonical
+ *    mapping as a Meta-read one (its promoted START_TRIAL / COMPLETE_REGISTRATION event included),
+ *    so an action_type the engine cannot yet name survives verbatim in the summed actions[].
+ *  - Meta's configured-outcome `results` list is not additive as a whole (a campaign's ad sets can
+ *    optimise different events). Only the indicators the engine reads as typed counts (StartTrial's
+ *    `conversions:start_trial_website`) are summed per attribution window, and only when EVERY ad
+ *    in the group reported the indicator with values; otherwise the derived entry has no values, so
+ *    the trial count stays unknown, never a partial sum or a measured zero. Inside one ad set every
+ *    ad shares the promoted event, so its ads' counts add up to the ad set's.
  *  - Reach and frequency are NOT additive (one person can see several ads). Derived rows carry
  *    NULL — unmeasured, never 0 and never a sum.
  *  - Meta's default level=ad result list OMITS deleted and archived ads, while a campaign-level
@@ -112,6 +121,20 @@ export interface MetaAdsRollupActionElement {
   [key: string]: unknown;
 }
 
+/** One entry of Meta's configured-outcome `results` list: an indicator plus one value per window. */
+export interface MetaAdsRollupResultEntry {
+  indicator?: string | null;
+  values?: Array<{ value?: string | number | null; attribution_windows?: string[] | null }> | null;
+}
+
+export interface MetaAdsRollupOptions {
+  /**
+   * The `results` indicators the caller reads as typed counts (e.g. `conversions:start_trial_website`).
+   * Only these are summed into a derived row; every other indicator stays off it.
+   */
+  resultIndicators?: readonly string[];
+}
+
 /** The subset of an ad-level insights row the rollup reads. */
 export interface MetaAdsRollupSourceRow {
   campaign_id?: string | null;
@@ -126,6 +149,7 @@ export interface MetaAdsRollupSourceRow {
   impressions?: string | number | null;
   actions?: MetaAdsRollupActionElement[] | null;
   action_values?: MetaAdsRollupActionElement[] | null;
+  results?: MetaAdsRollupResultEntry[] | null;
   objective?: string | null;
   optimization_goal?: string | null;
   account_currency?: string | null;
@@ -150,8 +174,9 @@ export interface MetaAdsRolledUpRow {
   ctr: number | null;
   actions?: MetaAdsRollupActionElement[];
   action_values?: MetaAdsRollupActionElement[];
-  // Meta's opaque configured-outcome list is not additive; derived rows carry none.
-  results: null;
+  // Meta's configured-outcome list is not additive as a whole. A derived row carries only the
+  // requested indicators (MetaAdsRollupOptions.resultIndicators), and null when no ad reported one.
+  results: MetaAdsRollupResultEntry[] | null;
   cost_per_result: null;
   result_values_performance_indicator: null;
   objective: string | null;
@@ -218,6 +243,55 @@ class ActionAccumulator {
   }
 }
 
+/**
+ * One ad's values for `indicator`, per attribution window, or null when they cannot be summed
+ * honestly: the ad has no `results`, has no single entry for the indicator, the entry has no values,
+ * or a value is malformed (not exactly one window, a repeated window, not a finite count >= 0).
+ */
+export function metaAdsResultWindowValues(results: MetaAdsRollupResultEntry[] | null | undefined, indicator: string): Map<string, number> | null {
+  if (!Array.isArray(results)) return null;
+  const entries = results.filter((entry) => entry?.indicator === indicator);
+  if (entries.length !== 1) return null;
+  const values = entries[0]!.values;
+  if (!Array.isArray(values) || values.length === 0) return null;
+  const byWindow = new Map<string, number>();
+  for (const value of values) {
+    const windows = value?.attribution_windows;
+    const window = Array.isArray(windows) && windows.length === 1 ? nonEmpty(windows[0]) : null;
+    if (window === null || byWindow.has(window)) return null;
+    const raw = value.value;
+    const count = typeof raw === "number" || (typeof raw === "string" && raw.trim() !== "") ? Number(raw) : Number.NaN;
+    if (!Number.isFinite(count) || count < 0) return null;
+    byWindow.set(window, count);
+  }
+  return byWindow;
+}
+
+/**
+ * Sum one `results` indicator across a group's ads. Inside one ad set every ad shares the promoted
+ * event, so every ad reports the same indicator and the counts add. The sum is published ONLY when
+ * every ad reported it with summable values; otherwise the parent's entry has NO values (unknown,
+ * never a partial sum). A window one ad omits counts 0 for it, as for actions[] (Meta omits zero
+ * windows). Returns null when no ad reported the indicator at all.
+ */
+function sumResultIndicator(
+  adResults: ReadonlyArray<MetaAdsRollupResultEntry[] | null>,
+  indicator: string,
+): MetaAdsRollupResultEntry | null {
+  const reported = adResults.some((results) => Array.isArray(results) && results.some((entry) => entry?.indicator === indicator));
+  if (!reported) return null;
+  const totals = new Map<string, number>();
+  for (const results of adResults) {
+    const byWindow = metaAdsResultWindowValues(results, indicator);
+    if (byWindow === null) return { indicator };
+    for (const [window, count] of byWindow) totals.set(window, (totals.get(window) ?? 0) + count);
+  }
+  return {
+    indicator,
+    values: [...totals].map(([window, total]) => ({ value: roundSum(total), attribution_windows: [window] })),
+  };
+}
+
 class GroupAccumulator {
   adRowCount = 0;
   spend = 0;
@@ -232,8 +306,14 @@ class GroupAccumulator {
   readonly goals = new Set<string | null>();
   private actions: ActionAccumulator | null = null;
   private actionValues: ActionAccumulator | null = null;
+  private readonly adResults: Array<MetaAdsRollupResultEntry[] | null> = [];
 
-  constructor(readonly campaignId: string, readonly adsetId: string | null, readonly day: string) {}
+  constructor(
+    readonly campaignId: string,
+    readonly adsetId: string | null,
+    readonly day: string,
+    private readonly resultIndicators: readonly string[],
+  ) {}
 
   add(row: MetaAdsRollupSourceRow): void {
     this.adRowCount += 1;
@@ -251,11 +331,15 @@ class GroupAccumulator {
     // what a parent-level read returns — and stays absent (unknown) when no child reported any.
     if (Array.isArray(row.actions)) (this.actions ??= new ActionAccumulator()).add(row.actions);
     if (Array.isArray(row.action_values)) (this.actionValues ??= new ActionAccumulator()).add(row.action_values);
+    this.adResults.push(Array.isArray(row.results) ? row.results : null);
   }
 
   build(): MetaAdsRolledUpRow {
     const spend = roundSum(this.spend);
     const goal = this.goals.size === 1 ? [...this.goals][0] ?? null : null;
+    const results = this.resultIndicators
+      .map((indicator) => sumResultIndicator(this.adResults, indicator))
+      .filter((entry): entry is MetaAdsRollupResultEntry => entry !== null);
     return {
       campaign_id: this.campaignId,
       campaign_name: this.campaignName,
@@ -273,7 +357,7 @@ class GroupAccumulator {
       cpm: this.impressions === 0 ? null : (spend / this.impressions) * 1000,
       ...(this.actions ? { actions: this.actions.elements() } : {}),
       ...(this.actionValues ? { action_values: this.actionValues.elements() } : {}),
-      results: null,
+      results: results.length > 0 ? results : null,
       cost_per_result: null,
       result_values_performance_indicator: null,
       objective: this.objective,
@@ -291,10 +375,11 @@ class GroupAccumulator {
  * insights rows. Throws rather than dropping a row it cannot attribute: silently losing spend
  * would publish a wrong total as if it were measured.
  */
-export function rollUpMetaAdsAdInsights(rows: readonly MetaAdsRollupSourceRow[]): {
+export function rollUpMetaAdsAdInsights(rows: readonly MetaAdsRollupSourceRow[], options: MetaAdsRollupOptions = {}): {
   campaigns: MetaAdsAdRollup[];
   adsets: MetaAdsAdRollup[];
 } {
+  const resultIndicators = options.resultIndicators ?? [];
   const campaigns = new Map<string, GroupAccumulator>();
   const adsets = new Map<string, GroupAccumulator>();
   let day: string | null = null;
@@ -310,10 +395,10 @@ export function rollUpMetaAdsAdInsights(rows: readonly MetaAdsRollupSourceRow[])
     }
     day = rowDay;
     let campaign = campaigns.get(campaignId);
-    if (!campaign) campaigns.set(campaignId, campaign = new GroupAccumulator(campaignId, null, rowDay));
+    if (!campaign) campaigns.set(campaignId, campaign = new GroupAccumulator(campaignId, null, rowDay, resultIndicators));
     campaign.add(row);
     let adset = adsets.get(adsetId);
-    if (!adset) adsets.set(adsetId, adset = new GroupAccumulator(campaignId, adsetId, rowDay));
+    if (!adset) adsets.set(adsetId, adset = new GroupAccumulator(campaignId, adsetId, rowDay, resultIndicators));
     else if (adset.campaignId !== campaignId) {
       throw new MetaAdsRollupError(`Meta Ads ad set ${adsetId} was reported under two campaigns`);
     }
