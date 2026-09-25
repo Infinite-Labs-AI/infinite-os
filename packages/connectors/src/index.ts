@@ -640,7 +640,7 @@ interface MetaAdsConversionRow {
   conversionValue: number | null;
   attributionSetting: string;
   isPrimary: boolean;
-  // 'derived_from_canonical_mapping' | 'meta_results_unverified_type'
+  // 'derived_from_canonical_mapping' | 'meta_results' | 'meta_results_unverified_type'
   resultsSource: string;
 }
 
@@ -8715,7 +8715,7 @@ const META_HEADLINE_RESULT_RULES: Record<MetaHeadlineResultType, MetaCanonicalEv
   // 0. Only an explicit 0 from Meta is 0. The Ads tab is about attribution, so this Meta-credited
   // count is its trial number; Stripe stays the trial truth. The exact StartTrial action_type in
   // actions[], if Meta ever reports one, must be confirmed from stored actions_raw after the first
-  // attributed trial on Infinite (ad set 52508166941238), not from a Graph call; then list it here.
+  // attributed trial on a START_TRIAL ad set, not from a Graph call; then list it here.
   start_trial: {
     resultType: "start_trial",
     actionTypes: [],
@@ -10022,7 +10022,8 @@ function metaAdsConversionRows(
   }
 
   // Trials and sign-ups ride along as NON-primary rows only on POSITIVE evidence: a recognised
-  // action_type in actions[]. They never write an unknown marker here, so a row that reports
+  // action_type in actions[] (sign-ups), or Meta's own Results entry with values for the rule's
+  // exact indicator (trials). They never write an unknown marker here, so a row that reports
   // neither (every purchase or lead ad set today) keeps exactly the conversion rows above.
   for (const resultType of ["start_trial", "complete_registration"] as const) {
     if (seen.has(resultType)) continue;
