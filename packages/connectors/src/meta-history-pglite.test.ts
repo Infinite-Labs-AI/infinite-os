@@ -1136,34 +1136,39 @@ describe("Meta Ads history CLOSE against real PGlite", () => {
       .toEqual([{ grain: "ad", row_count: 2 }, { grain: "adset", row_count: 1 }, { grain: "campaign", row_count: 1 }]);
   }, 120_000);
 
+  // NOT a Meta value: it stands in for the StartTrial action_type, which Meta has not documented for
+  // actions[]. The engine must not count it, and must keep it (summed) in the derived row.
+  const HYPOTHETICAL_TRIAL_TYPE = "hypothetical.start_trial_type";
+
+  // Two ads in ONE START_TRIAL-promoted ad set (OUTCOME_SALES campaign). `adResults(adId)` is each
+  // ad's Meta Results list; the campaign and ad set rows carry the same list as ad a1.
+  function startTrialFixture(day: string, adResults: (adId: string) => Array<Record<string, unknown>>): MetaFixture {
+    const data = fixture(day, { includeSecondAd: true });
+    data.campaigns[0] = { ...data.campaigns[0], objective: "OUTCOME_SALES" };
+    data.adsets[0] = {
+      ...data.adsets[0],
+      optimization_goal: "OFFSITE_CONVERSIONS",
+      promoted_object: { pixel_id: "px1", custom_event_type: "START_TRIAL" },
+    };
+    for (const rows of [data.campaignInsights, data.adsetInsights, data.adInsights]) {
+      for (const row of rows) {
+        Object.assign(row, {
+          objective: "OUTCOME_SALES",
+          optimization_goal: "OFFSITE_CONVERSIONS",
+          actions: [{ action_type: "link_click", "7d_click": "25" }, { action_type: HYPOTHETICAL_TRIAL_TYPE, "7d_click": "1" }],
+          action_values: [],
+          results: adResults(typeof row.ad_id === "string" ? row.ad_id : "a1"),
+        });
+      }
+    }
+    return data;
+  }
+
   it("hot lane keeps a START_TRIAL ad set's trials UNKNOWN on the derived ad set row, never a measured zero", async () => {
     const workspaceId = `ws_meta_hot_trial_${randomUUID()}`;
     const sourceId = `src_meta_hot_trial_${randomUUID()}`;
     await seedSource(workspaceId, sourceId);
-    // NOT a Meta value: it stands in for the StartTrial action_type, which Meta has not documented for
-    // actions[]. The engine must not count it, and must keep it (summed) in the derived row.
-    const HYPOTHETICAL_TRIAL_TYPE = "hypothetical.start_trial_type";
-    const trialFixture = (day: string) => {
-      const data = fixture(day, { includeSecondAd: true });
-      data.campaigns[0] = { ...data.campaigns[0], objective: "OUTCOME_SALES" };
-      data.adsets[0] = {
-        ...data.adsets[0],
-        optimization_goal: "OFFSITE_CONVERSIONS",
-        promoted_object: { pixel_id: "px1", custom_event_type: "START_TRIAL" },
-      };
-      for (const rows of [data.campaignInsights, data.adsetInsights, data.adInsights]) {
-        for (const row of rows) {
-          Object.assign(row, {
-            objective: "OUTCOME_SALES",
-            optimization_goal: "OFFSITE_CONVERSIONS",
-            actions: [{ action_type: "link_click", "7d_click": "25" }, { action_type: HYPOTHETICAL_TRIAL_TYPE, "7d_click": "1" }],
-            action_values: [],
-            results: [{ indicator: "conversions:start_trial_website" }],
-          });
-        }
-      }
-      return data;
-    };
+    const trialFixture = (day: string) => startTrialFixture(day, () => [{ indicator: "conversions:start_trial_website" }]);
     await withMetaFetch(trialFixture("2026-09-01"), () =>
       connectorFor("meta_ads").sync(db, syncRequest(workspaceId, sourceId, "2026-09-01", "2026-09-01"))
     );
@@ -1199,6 +1204,87 @@ describe("Meta Ads history CLOSE against real PGlite", () => {
          from meta_ads_ad_conversions_daily where source_id=$1 and occurred_on=$2 order by ad_id`,
       [sourceId, day],
     )).toEqual([{ ad_id: "a1", ...marker }, { ad_id: "a2", ...marker }]);
+  }, 120_000);
+
+  it("hot lane B1: sums Meta's credited trials across the ad set's ads into ONE meta_results ad set row", async () => {
+    const workspaceId = `ws_meta_hot_trial_b1_${randomUUID()}`;
+    const sourceId = `src_meta_hot_trial_b1_${randomUUID()}`;
+    await seedSource(workspaceId, sourceId);
+    const credited: Record<string, Array<Record<string, unknown>>> = {
+      a1: [{ indicator: "conversions:start_trial_website", values: [
+        { value: "1", attribution_windows: ["7d_click"] }, { value: "1", attribution_windows: ["1d_view"] },
+      ] }],
+      a2: [{ indicator: "conversions:start_trial_website", values: [{ value: "2", attribution_windows: ["7d_click"] }] }],
+    };
+    await withMetaFetch(startTrialFixture("2026-09-01", adId => credited[adId]!), () =>
+      connectorFor("meta_ads").sync(db, syncRequest(workspaceId, sourceId, "2026-09-01", "2026-09-01"))
+    );
+    const day = "2026-09-02";
+    const next = startTrialFixture(day, adId => credited[adId]!);
+    const batches: string[][] = [];
+    next.onBatch = urls => batches.push(urls);
+    await withMetaFetch(next, () => connectorFor("meta_ads").sync(db, {
+      ...syncRequest(workspaceId, sourceId, day, day),
+      metaAdsSyncMode: "insights_only",
+      metaAdsRequestLane: "hot_insights",
+      metaAdsRequestBudget: 12,
+    }));
+
+    expect(batches.flat()).toHaveLength(1);
+    expect(new URL(batches[0]![0]!, "https://graph.facebook.com/v25.0/").searchParams.get("fields")).not.toContain("start_trial");
+    const trials = (results: number) => ({ result_type: "start_trial", results, conversion_value: null, is_primary: true, results_source: "meta_results" });
+    // Ad a1: 1 (7d_click) + 1 (1d_view) = 2. Ad a2: 2 (7d_click). Ad set = 2 + 2 = 4.
+    expect(await db.query(
+      `select ad_id,result_type,results::float8 as results,conversion_value::float8 as conversion_value,is_primary,results_source
+         from meta_ads_ad_conversions_daily where source_id=$1 and occurred_on=$2 order by ad_id`,
+      [sourceId, day],
+    )).toEqual([{ ad_id: "a1", ...trials(2) }, { ad_id: "a2", ...trials(2) }]);
+    expect(await db.query(
+      `select result_type,results::float8 as results,conversion_value::float8 as conversion_value,is_primary,results_source
+         from meta_ads_adset_conversions_daily where source_id=$1 and occurred_on=$2`,
+      [sourceId, day],
+    )).toEqual([trials(4)]);
+    const adset = await db.query<{ derivation: unknown; results: unknown }>(
+      "select actions_raw->'derivation' as derivation, actions_raw->'provider_result_evidence'->'results' as results from meta_ads_adset_daily where source_id=$1 and occurred_on=$2",
+      [sourceId, day],
+    );
+    expect(adset[0]!.derivation).toMatchObject({ method: "sum_of_ad_insights", ad_rows: 2 });
+    expect(adset[0]!.results).toEqual([{ indicator: "conversions:start_trial_website", values: [
+      { value: 3, attribution_windows: ["7d_click"] }, { value: 1, attribution_windows: ["1d_view"] },
+    ] }]);
+  }, 120_000);
+
+  it("hot lane B1: one ad without values keeps the derived ad set's trials UNKNOWN, never a partial sum", async () => {
+    const workspaceId = `ws_meta_hot_trial_partial_${randomUUID()}`;
+    const sourceId = `src_meta_hot_trial_partial_${randomUUID()}`;
+    await seedSource(workspaceId, sourceId);
+    const partial = (adId: string) => adId === "a1"
+      ? [{ indicator: "conversions:start_trial_website", values: [{ value: "3", attribution_windows: ["7d_click"] }] }]
+      : [{ indicator: "conversions:start_trial_website" }];
+    await withMetaFetch(startTrialFixture("2026-09-01", partial), () =>
+      connectorFor("meta_ads").sync(db, syncRequest(workspaceId, sourceId, "2026-09-01", "2026-09-01"))
+    );
+    const day = "2026-09-02";
+    await withMetaFetch(startTrialFixture(day, partial), () => connectorFor("meta_ads").sync(db, {
+      ...syncRequest(workspaceId, sourceId, day, day),
+      metaAdsSyncMode: "insights_only",
+      metaAdsRequestLane: "hot_insights",
+      metaAdsRequestBudget: 12,
+    }));
+    expect(await db.query(
+      `select result_type,results::float8 as results,is_primary,results_source
+         from meta_ads_adset_conversions_daily where source_id=$1 and occurred_on=$2`,
+      [sourceId, day],
+    )).toEqual([{ result_type: "start_trial", results: 0, is_primary: true, results_source: "meta_results_unverified_type" }]);
+    // Each ad keeps its own answer: a1 is counted, a2 is unknown.
+    expect(await db.query(
+      `select ad_id,results::float8 as results,results_source from meta_ads_ad_conversions_daily
+        where source_id=$1 and occurred_on=$2 and result_type='start_trial' order by ad_id`,
+      [sourceId, day],
+    )).toEqual([
+      { ad_id: "a1", results: 3, results_source: "meta_results" },
+      { ad_id: "a2", results: 0, results_source: "meta_results_unverified_type" },
+    ]);
   }, 120_000);
 
   it("hot lane rolls up across every ad page and counts one request per page", async () => {

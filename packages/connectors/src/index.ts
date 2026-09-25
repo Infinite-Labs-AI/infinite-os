@@ -4,6 +4,7 @@ import {
   metaAdsAllStatusAdFiltering,
   metaAdsAllStatusFiltering,
   metaAdsHotLaneRollsUpFromAds,
+  metaAdsResultWindowValues,
   rollUpMetaAdsAdInsights,
 } from "./meta-ads-hot-rollup.js";
 import { metaAdsAccountLivenessCursorKey, metaAdsAccountLivenessDue } from "./meta-account-liveness.js";
@@ -8669,6 +8670,9 @@ const META_ADS_INSIGHTS_PROBE_FIELDS = "campaign_id,date_start,impressions,click
 // the headline must be COMPUTED as element['7d_click'] + element['1d_view'].
 const META_ADS_ATTRIBUTION_WINDOWS = ["1d_click", "7d_click", "1d_view"] as const;
 
+// The windows summed into a headline count (see metaHeadlineWindowValue).
+const META_ADS_HEADLINE_WINDOWS = ["7d_click", "1d_view"] as const;
+
 // The attribution_setting string we persist describing the REQUEST shape (provenance,
 // not a lever). Matches the windows we send.
 const META_ADS_ATTRIBUTION_SETTING = META_ADS_ATTRIBUTION_WINDOWS.join(",");
@@ -8704,17 +8708,20 @@ const META_HEADLINE_RESULT_RULES: Record<MetaHeadlineResultType, MetaCanonicalEv
   //    `conversion_values:start_trial_website`), kept verbatim in
   //    actions_raw.provider_result_evidence. That points at Meta's `conversions` list, which this
   //    sync does not request, so actions[] alone may never carry a trial.
-  // So actionTypes is EMPTY and missingAliasIsUnknown holds: a START_TRIAL ad set's trials are
-  // UNKNOWN ("—"), never a measured 0. The exact StartTrial action_type must be confirmed from
-  // stored actions_raw after the first attributed trial on Infinite (ad set 52508166941238), not
-  // from a Graph call. If it appears in actions[], list it here and drop missingAliasIsUnknown.
-  // (Reading the stored Results evidence instead is a separate, undecided option; see the
-  // missingAliasIsUnknown branch in metaAdsConversionForRule.)
+  // So actionTypes is EMPTY, and the count comes from Meta's OWN Results evidence for exactly that
+  // indicator (`results` is already requested, so nothing new is asked of Meta): a matching entry
+  // with values for our windows is a `meta_results` row. Anything else (no entry, an entry with no
+  // values, another indicator, a malformed value) keeps missingAliasIsUnknown's marker: "—", never
+  // 0. Only an explicit 0 from Meta is 0. The Ads tab is about attribution, so this Meta-credited
+  // count is its trial number; Stripe stays the trial truth. The exact StartTrial action_type in
+  // actions[], if Meta ever reports one, must be confirmed from stored actions_raw after the first
+  // attributed trial on Infinite (ad set 52508166941238), not from a Graph call; then list it here.
   start_trial: {
     resultType: "start_trial",
     actionTypes: [],
     value: false,
     missingAliasIsUnknown: true,
+    metaResultsIndicator: "conversions:start_trial_website",
   },
   // Sign up (Meta CompleteRegistration), never folded into lead. Documented action_types:
   // `offsite_conversion.fb_pixel_complete_registration` ("Website Registrations Completed": events
@@ -8732,6 +8739,12 @@ const META_HEADLINE_RESULT_RULES: Record<MetaHeadlineResultType, MetaCanonicalEv
 function isMetaHeadlineResultType(value: string): value is MetaHeadlineResultType {
   return Object.prototype.hasOwnProperty.call(META_HEADLINE_RESULT_RULES, value);
 }
+
+// The Results indicators the engine reads as typed counts. The hot lane sums exactly these onto its
+// derived rows (and no other indicator), so a derived ad set row resolves the same way a Meta-read
+// one does.
+const META_ADS_TYPED_RESULT_INDICATORS: readonly string[] = Object.values(META_HEADLINE_RESULT_RULES)
+  .flatMap((rule) => (rule.metaResultsIndicator ? [rule.metaResultsIndicator] : []));
 
 // ──────────────────────────────────────────────────────────────────────────────────
 // §4b — Objective → canonical-event mapping (the load-bearing artifact).
@@ -8762,6 +8775,10 @@ interface MetaCanonicalEventRule {
   // without one of `actionTypes` is then NOT a measured zero: the headline row is an unknown marker
   // ("—"), and no supplemental row is written.
   missingAliasIsUnknown?: boolean;
+  // Meta's own Results indicator for this event (exact match, e.g. `conversions:start_trial_website`).
+  // Read only when no `actionTypes` alias is present: its values for our windows become a
+  // `meta_results` row. Absent, valueless or malformed evidence is never read as 0.
+  metaResultsIndicator?: string;
 }
 
 // Keyed by adset optimization_goal (uppercase, as Meta returns it).
@@ -9684,7 +9701,7 @@ function metaAdsHotRollupRows(
 ): MetaAdsSyncRow[] {
   let rollup: ReturnType<typeof rollUpMetaAdsAdInsights>;
   try {
-    rollup = rollUpMetaAdsAdInsights(adRows);
+    rollup = rollUpMetaAdsAdInsights(adRows, { resultIndicators: META_ADS_TYPED_RESULT_INDICATORS });
   } catch (error) {
     if (error instanceof MetaAdsRollupError) throw new ConnectorError("provider_api_error", error.message, true);
     throw error;
@@ -9899,12 +9916,23 @@ function metaAdsConversionForRule(
     // A missing alias is a measured zero only when we know the event's action_type names. For a
     // rule that flags missingAliasIsUnknown (StartTrial), it stays unknown, never 0.
     if (actions !== null && !hasPositiveValueOnlyEvidence && !rule.missingAliasIsUnknown) return null;
+    // A rule that names Meta's own Results indicator (StartTrial) reads that exact entry. It is
+    // Meta's count for the configured outcome, so it is `meta_results`, not a canonical mapping.
+    const reported = rule.metaResultsIndicator
+      ? metaAdsReportedResultCount(row, rule.metaResultsIndicator)
+      : null;
+    if (reported !== null) {
+      return {
+        resultType: rule.resultType,
+        results: reported,
+        conversionValue: null,
+        attributionSetting: context.attributionSetting,
+        isPrimary,
+        resultsSource: "meta_results"
+      };
+    }
     if (!allowUnknownMarker) return null;
-    // The missingAliasIsUnknown seam. A future reader of Meta's stored Results evidence (row.results
-    // entries whose `indicator` is `conversions:start_trial_website`) would resolve the count HERE,
-    // before this marker, as a `meta_results` row. That reader is NOT built: whether to build it is
-    // undecided. Until then the partition stays unknown.
-    // `results` is an opaque list<Object> describing the configured outcome, not a typed
+    // Otherwise `results` is an opaque list<Object> describing the configured outcome, not a typed
     // purchase/lead fact. Preserve it in actions_raw, and write only an uncertainty marker
     // here so readers keep this partition null instead of displaying an invented count.
     return {
@@ -9935,6 +9963,19 @@ function metaAdsConversionForRule(
     isPrimary,
     resultsSource: "derived_from_canonical_mapping"
   };
+}
+
+// Meta's own count for one Results `indicator`, over the headline windows (7d_click + 1d_view, as
+// for actions[]), or null when it is not known. Null for: no `results`, no single entry with exactly
+// this indicator (another prefix or name is not ours), an entry with no values, a malformed value,
+// or values for neither headline window. A window Meta omits counts 0 once the other is present
+// (Meta omits zero windows, as in actions[]). So 0 comes only from Meta's own explicit 0.
+function metaAdsReportedResultCount(row: MetaAdsInsightsRow, indicator: string): number | null {
+  const byWindow = metaAdsResultWindowValues(row.results, indicator);
+  if (byWindow === null) return null;
+  const headline = META_ADS_HEADLINE_WINDOWS.filter((window) => byWindow.has(window));
+  if (headline.length === 0) return null;
+  return headline.reduce((total, window) => total + byWindow.get(window)!, 0);
 }
 
 function metaAdsConversionRows(
@@ -14591,9 +14632,9 @@ interface MetaAdsInsightsRow {
   // ('1d_click','7d_click','1d_view') alongside the element-level `value` (7d_click only).
   actions?: MetaActionElement[] | null;
   action_values?: MetaActionElement[] | null;
-  // Meta's opaque configured-outcome family, retained verbatim for audit only. It is
-  // never reclassified as a typed purchase/lead count.
-  results?: Array<{ values?: Array<{ value?: string | number | null }> }> | null;
+  // Meta's opaque configured-outcome family, retained verbatim for audit. It is never reclassified
+  // as a typed purchase/lead count; only a rule's exact `metaResultsIndicator` (StartTrial) is read.
+  results?: Array<{ indicator?: string | null; values?: Array<{ value?: string | number | null; attribution_windows?: string[] | null }> | null }> | null;
   cost_per_result?: Array<{ values?: Array<{ value?: string | number | null }> }> | null;
   // Meta's reported performance indicator, retained as provider evidence.
   result_values_performance_indicator?: string | null;

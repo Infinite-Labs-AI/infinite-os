@@ -9571,7 +9571,7 @@ describe("Meta Ads durable daily history", () => {
     result_values_performance_indicator: "conversion_values:start_trial_website",
   };
 
-  it("keeps a START_TRIAL ad set's trials UNKNOWN when stored actions[] names no start-trial type — never 0, never a purchase headline", async () => {
+  it("keeps a START_TRIAL ad set's trials UNKNOWN when actions[] names no trial type and Meta's Results label has no values — never 0, never a purchase headline", async () => {
     const insightsUrls: string[] = [];
     const trialDay = { actions: START_TRIAL_DAY_ONE_ACTIONS, action_values: [], ...START_TRIAL_RESULTS_LABEL };
     await withMockFetch(promotedAdsetFetch("START_TRIAL", {
@@ -9635,6 +9635,101 @@ describe("Meta Ads durable daily history", () => {
         unknownMarker("start_trial", true),
         { resultType: "purchase", results: 1, conversionValue: 29, attributionSetting: HEADLINE_WINDOWS, isPrimary: false, resultsSource: "derived_from_canonical_mapping" },
       ]);
+    });
+  });
+
+  // ── B1: Meta's own credited trials, from its stored Results evidence (`results` is already requested) ──
+
+  function trialResults(values: Array<{ value?: unknown; attribution_windows?: unknown }> | undefined, indicator = "conversions:start_trial_website") {
+    return { results: [{ indicator, ...(values === undefined ? {} : { values }) }] };
+  }
+
+  function metaResultsTrials(results: number, isPrimary = true) {
+    return { resultType: "start_trial", results, conversionValue: null, attributionSetting: HEADLINE_WINDOWS, isPrimary, resultsSource: "meta_results" };
+  }
+
+  it("B1: counts a START_TRIAL ad set's trials from Meta's Results evidence over 7d_click + 1d_view, at ad and ad set grain", async () => {
+    const insightsUrls: string[] = [];
+    await withMockFetch(promotedAdsetFetch("START_TRIAL", {
+      ad: [{
+        ad_id: "a_trial",
+        actions: START_TRIAL_DAY_ONE_ACTIONS,
+        ...trialResults([
+          { value: "2", attribution_windows: ["1d_click"] },
+          { value: "3", attribution_windows: ["7d_click"] },
+          { value: "1", attribution_windows: ["1d_view"] },
+          { value: "4", attribution_windows: ["default"] },
+        ]),
+      }],
+      // Meta's own ad set row carries Meta's own ad-set-level count.
+      adset: [{ adset_name: "Promoted adset", actions: START_TRIAL_DAY_ONE_ACTIONS, ...trialResults([{ value: "5", attribution_windows: ["7d_click"] }]) }],
+    }, insightsUrls), async () => {
+      expect((await promotedPayloads("ad")).get("a_trial")?.conversions).toEqual([metaResultsTrials(4)]);
+      // A missing 1d_view window counts 0 once 7d_click is present, as in actions[].
+      expect((await promotedPayloads("adset")).get("s_promoted")?.conversions).toEqual([metaResultsTrials(5)]);
+    });
+    // Nothing new is requested: `results` was already in the field list.
+    for (const url of insightsUrls) expect(new URL(url).searchParams.get("fields")).not.toContain("start_trial");
+  });
+
+  it("B1: Meta's explicit 0 is 0; no values, another indicator or a malformed value stays UNKNOWN", async () => {
+    await withMockFetch(promotedAdsetFetch("START_TRIAL", { ad: [
+      { ad_id: "a_explicit_zero", actions: START_TRIAL_DAY_ONE_ACTIONS, ...trialResults([{ value: "0", attribution_windows: ["7d_click"] }, { value: "0", attribution_windows: ["1d_view"] }]) },
+      { ad_id: "a_no_values", actions: START_TRIAL_DAY_ONE_ACTIONS, ...trialResults(undefined) },
+      { ad_id: "a_empty_values", actions: START_TRIAL_DAY_ONE_ACTIONS, ...trialResults([]) },
+      { ad_id: "a_no_results", actions: START_TRIAL_DAY_ONE_ACTIONS },
+      // Not our indicator: another prefix, or another name. Never read as trials.
+      { ad_id: "a_actions_prefix", actions: START_TRIAL_DAY_ONE_ACTIONS, ...trialResults([{ value: "2", attribution_windows: ["7d_click"] }], "actions:start_trial_website") },
+      { ad_id: "a_other_name", actions: START_TRIAL_DAY_ONE_ACTIONS, ...trialResults([{ value: "2", attribution_windows: ["7d_click"] }], "conversions:start_trial_total") },
+      // Malformed: no headline window, a window-less value, a non-numeric value, a negative value.
+      { ad_id: "a_only_other_windows", actions: START_TRIAL_DAY_ONE_ACTIONS, ...trialResults([{ value: "2", attribution_windows: ["1d_click"] }, { value: "2", attribution_windows: ["default"] }]) },
+      { ad_id: "a_windowless", actions: START_TRIAL_DAY_ONE_ACTIONS, ...trialResults([{ value: "2" }]) },
+      { ad_id: "a_not_a_number", actions: START_TRIAL_DAY_ONE_ACTIONS, ...trialResults([{ value: "two", attribution_windows: ["7d_click"] }]) },
+      { ad_id: "a_negative", actions: START_TRIAL_DAY_ONE_ACTIONS, ...trialResults([{ value: "-1", attribution_windows: ["7d_click"] }]) },
+    ] }), async () => {
+      const byAd = await promotedPayloads("ad");
+      expect(byAd.get("a_explicit_zero")?.conversions).toEqual([metaResultsTrials(0)]);
+      for (const adId of ["a_no_values", "a_empty_values", "a_no_results", "a_actions_prefix", "a_other_name", "a_only_other_windows", "a_windowless", "a_not_a_number", "a_negative"]) {
+        expect({ adId, conversions: byAd.get(adId)?.conversions }).toEqual({ adId, conversions: [unknownMarker("start_trial", true)] });
+      }
+    });
+  });
+
+  it("B1: two entries for the trial indicator are ambiguous, so the count stays UNKNOWN", async () => {
+    await withMockFetch(promotedAdsetFetch("START_TRIAL", { ad: [{
+      ad_id: "a_twice",
+      actions: START_TRIAL_DAY_ONE_ACTIONS,
+      results: [
+        { indicator: "conversions:start_trial_website", values: [{ value: "1", attribution_windows: ["7d_click"] }] },
+        { indicator: "conversions:start_trial_website", values: [{ value: "2", attribution_windows: ["7d_click"] }] },
+      ],
+    }] }), async () => {
+      expect((await promotedPayloads("ad")).get("a_twice")?.conversions).toEqual([unknownMarker("start_trial", true)]);
+    });
+  });
+
+  it("B1: carries Meta's credited trials on a campaign row as a NON-primary row (a campaign cannot see its ad sets' promoted events)", async () => {
+    const campaignRow = (campaign_id: string, extra: Record<string, unknown>) => ({
+      campaign_id, campaign_name: "Trials", date_start: "2026-09-25", spend: "6.97", objective: "OUTCOME_SALES",
+      optimization_goal: "OFFSITE_CONVERSIONS", account_currency: "USD", actions: [{ action_type: "link_click", "7d_click": "25" }], ...extra,
+    });
+    await withMockFetch((url) => {
+      if (url.includes("/campaigns") || url.includes("/adsets") || isMetaAdsEdgeRequest(url)) return historyResponse({ data: [], paging: {} });
+      if (isMetaAdsetInsightsRequest(url) || isMetaAdInsightsRequest(url)) return historyResponse({ data: [], paging: {} });
+      return historyResponse({ data: [
+        campaignRow("c_credited", trialResults([{ value: "2", attribution_windows: ["7d_click"] }])),
+        // No values: a campaign row writes no trial marker (only positive evidence rides along).
+        campaignRow("c_no_values", trialResults(undefined)),
+      ], paging: {} });
+    }, async () => {
+      const extracted = await connectorFor("meta_ads").extract(historyCredentialDb(), request("meta_ads"), {
+        cursorKey: "meta_ads_campaign_daily", cursorStart: "2026-09-25T00:00:00.000Z",
+        cursorEnd: "2026-09-25T23:59:59.000Z", refreshWindowDays: 30, mode: "live",
+      });
+      const byCampaign = new Map(extracted.filter((row) => row.objectType === "meta_ads_campaign_daily")
+        .map((row) => [(row.payload as { campaignId: string }).campaignId, row.payload as Record<string, unknown>]));
+      expect(byCampaign.get("c_credited")?.conversions).toEqual([metaResultsTrials(2, false)]);
+      expect(byCampaign.get("c_no_values")?.conversions).toEqual([]);
     });
   });
 
