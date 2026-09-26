@@ -212,6 +212,10 @@ describe("connectionTestFailure: founder-word copy for a refused or unchecked ke
       const mapped = connectionTestFailure(row.provider, row.error) as Error;
       expect(mapped.message).not.toMatch(/[{}]/);
       expect(mapped.message).not.toMatch(/https?:\/\//);
+      // The raw provider error rides on a NON-enumerable `cause`, so serialising the error (a log
+      // line, an envelope built with a spread) never carries the provider's body along.
+      expect(Object.keys(mapped)).not.toContain("cause");
+      expect(JSON.stringify(mapped)).not.toContain("provider.test");
     }
   });
 
