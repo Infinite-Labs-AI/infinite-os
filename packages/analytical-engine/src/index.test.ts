@@ -1816,24 +1816,47 @@ describe("analytical engine smoke", () => {
         const handlers = createActionHandlers(makeDb(statuses, queries), { encryptionKey: KEY });
         await expect(
           handlers.connect_source?.({ provider: "posthog", connectionName: "PH", credentialPayload: posthogPayload }, CTX)
-        ).rejects.toThrow(/fetch failed/);
-        // A wifi blip must NOT park a fresh, valid credential.
+        ).rejects.toMatchObject({ code: "connection_test_unavailable", retryable: true });
+        // A wifi blip must NOT park a fresh, valid credential (C12: nothing was even written).
         expect(statuses.some((s) => s.status === "error")).toBe(false);
       } finally {
         vi.unstubAllGlobals();
       }
     });
 
-    it("connect_source: a TERMINAL test failure (401 auth) STILL parks the source", async () => {
+    it("connect_source: a TERMINAL test failure (401 auth) writes nothing, so there is no source to park", async () => {
+      const statuses: Array<{ id: string; status: string }> = [];
+      const queries: string[] = [];
+      vi.stubGlobal("fetch", (async () => new Response("nope", { status: 401 })) as typeof fetch);
+      try {
+        const db = makeDb(statuses, queries);
+        const connectSpy = vi.spyOn(db, "connectSource");
+        const handlers = createActionHandlers(db, { encryptionKey: KEY });
+        await expect(
+          handlers.connect_source?.({ provider: "posthog", connectionName: "PH", credentialPayload: posthogPayload }, CTX)
+        ).rejects.toMatchObject({ code: "provider_auth_failed", message: "The key was refused. Check you copied all of it." });
+        // C12: the key is tested BEFORE the write, so a refused key leaves no broken source behind.
+        expect(connectSpy).not.toHaveBeenCalled();
+        expect(statuses).toEqual([]);
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+
+    it("connect_source: X (still write-then-test) parks the source on a TERMINAL test failure", async () => {
       const statuses: Array<{ id: string; status: string }> = [];
       const queries: string[] = [];
       vi.stubGlobal("fetch", (async () => new Response("nope", { status: 401 })) as typeof fetch);
       try {
         const handlers = createActionHandlers(makeDb(statuses, queries), { encryptionKey: KEY });
         await expect(
-          handlers.connect_source?.({ provider: "posthog", connectionName: "PH", credentialPayload: posthogPayload }, CTX)
+          handlers.connect_source?.(
+            { provider: "x", connectionName: "X", credentialPayload: { mode: "live", bearerToken: "x-test-bearer", username: "founder" } },
+            CTX
+          )
         ).rejects.toThrow(/provider auth failed/);
-        // A genuine credential rejection is terminal — the loud park is preserved.
+        // X's probe writes a profile snapshot FK'd to the source, so it cannot be tested before the
+        // write; its genuine credential rejection keeps the loud park.
         expect(statuses).toContainEqual({ id: "src_ph", status: "error" });
       } finally {
         vi.unstubAllGlobals();
@@ -1850,14 +1873,14 @@ describe("analytical engine smoke", () => {
         const handlers = createActionHandlers(makeDb(statuses, queries), { encryptionKey: KEY });
         await expect(
           handlers.reconnect_source?.({ sourceId: "src_ph", credentialPayload: posthogPayload }, CTX)
-        ).rejects.toThrow(/fetch failed/);
+        ).rejects.toMatchObject({ code: "connection_test_unavailable", retryable: true });
         expect(statuses.some((s) => s.status === "error")).toBe(false);
       } finally {
         vi.unstubAllGlobals();
       }
     });
 
-    it("reconnect_source: RE-ASSERTS connected AFTER a successful test (concurrent-terminal-write race guard)", async () => {
+    it("reconnect_source: a re-check of the STORED credential RE-ASSERTS connected AFTER a successful test (concurrent-terminal-write race guard)", async () => {
       const statuses: Array<{ id: string; status: string }> = [];
       const queries: string[] = [];
       vi.stubGlobal(
@@ -1870,7 +1893,10 @@ describe("analytical engine smoke", () => {
       );
       try {
         const handlers = createActionHandlers(makeDb(statuses, queries), { encryptionKey: KEY });
-        const result = await handlers.reconnect_source?.({ sourceId: "src_ph", credentialPayload: posthogPayload }, CTX);
+        await handlers.connect_source?.({ provider: "posthog", connectionName: "PH", credentialPayload: posthogPayload }, CTX);
+        queries.length = 0;
+        // No new credential: the post-mutation probe of the stored one (the path that still re-asserts).
+        const result = await handlers.reconnect_source?.({ sourceId: "src_ph" }, CTX);
         expect(result?.data).toMatchObject({ connectionTest: { ok: true, provider: "posthog" } });
         // The pre-test update sets status='connected' WITH connected_at; the post-test re-assert
         // sets status='connected' WITHOUT connected_at. The presence of the latter proves the
@@ -7451,7 +7477,11 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
           adAccountId: "act_999",
           accessToken: "hanging-token"
         }
-      }, operatorContext)).rejects.toMatchObject({ code: "provider_api_error", retryable: true });
+      }, operatorContext)).rejects.toMatchObject({
+        code: "connection_test_unavailable",
+        message: "Couldn't reach Meta to check the token. Try again in a minute.",
+        retryable: true
+      });
       expect(timeoutSpy.mock.calls.some((call) => call[1] === 8_000)).toBe(true);
       expect(state).toEqual({
         credential: { mode: "live", transport: "meta_ads_cli", adAccountId: "act_999", accessToken: "working-token" },

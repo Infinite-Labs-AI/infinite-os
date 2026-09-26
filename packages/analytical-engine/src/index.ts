@@ -52,6 +52,13 @@ import {
   createInfiniteOsRegistry
 } from "@infinite-os/runtime";
 import { type InfiniteOsDb, createInfiniteOsDb } from "@infinite-os/db";
+import { connectionTestFailure, connectionTestTimedOut } from "./connection-test-copy.js";
+
+export {
+  CONNECTION_DETAILS_REJECTED,
+  CONNECTION_TEST_UNAVAILABLE,
+  connectionTestFailure
+} from "./connection-test-copy.js";
 
 export const analyticalBoot = true;
 
@@ -1516,13 +1523,15 @@ async function connectSource(
   const oauthTokenId = optionalString(input, "oauthTokenId");
   const encryptedPayload = credentialPayloadForStorage(input, credentialKind, oauthTokenId, encryptionKey);
   const candidate = { credentialKind, encryptedPayload, oauthTokenId };
-  // Meta reconnects can target an already-working source because connectSource upserts on the
-  // account binding. Probe the exact candidate row before that upsert: a rejected replacement must
-  // never overwrite the working credential or park its source. The candidate adapter feeds the
-  // normal typed connector resolver (including the per-request workspace key and OAuth bridge)
-  // without writing tenant state or process.env.
-  const candidateTest = provider === "meta_ads"
-    ? await testMetaConnectionCandidate(db, context, candidate, encryptionKey)
+  // C12: test the key BEFORE anything is written. A refused key, or a check that can't run, throws
+  // here and leaves no source, credential, schedule or audit row behind — so no surface can show a
+  // connection the user never finished making. It also protects a working source: connectSource
+  // upserts on the account binding, so a re-connect can target an already-working source, and a
+  // rejected replacement must never overwrite its credential or park it. The candidate adapter
+  // feeds the normal typed connector resolver (including the per-request workspace key and OAuth
+  // bridge) without writing tenant state or process.env.
+  const candidateTest = PRE_SAVE_TESTED_PROVIDERS.has(provider)
+    ? await testConnectionCandidate(db, context, provider, candidate, encryptionKey)
     : undefined;
   const connectInput = {
     workspaceId: context.workspaceId,
@@ -1571,8 +1580,10 @@ async function reconnectSource(
         oauthTokenId
       }
     : undefined;
-  const candidateTest = provider === "meta_ads" && candidate
-    ? await testMetaConnectionCandidate(db, context, candidate, encryptionKey)
+  // A replacement credential is tested before the swap below, so a refused or unchecked key leaves
+  // the working credential and the source status exactly as they were (see connectSource).
+  const candidateTest = candidate && PRE_SAVE_TESTED_PROVIDERS.has(provider)
+    ? await testConnectionCandidate(db, context, provider, candidate, encryptionKey)
     : undefined;
 
   await db.withTransaction(async (tx) => {
@@ -1639,8 +1650,9 @@ async function reconnectSource(
   });
   const connectionTest = candidateTest
     ?? await testConnectionForSource(db, context, provider, sourceId, encryptionKey);
-  // A candidate-tested Meta replacement sets connected only after the probe, inside the atomic
-  // swap above. Other providers retain their post-mutation probe and race-closing re-assert.
+  // A candidate-tested replacement sets connected only after the probe, inside the atomic swap
+  // above. A reconnect WITHOUT a new credential (re-check the stored one), and X, retain the
+  // post-mutation probe and its race-closing re-assert.
   if (!candidateTest) {
     // RE-ASSERT `connected` AFTER a successful test. testConnectionForSource only returns on
     // success, so reaching here means the stored credential is good. A sync already in flight when
@@ -6171,19 +6183,37 @@ interface ConnectionCredentialCandidate {
   oauthTokenId?: string;
 }
 
-const META_CONNECTION_CANDIDATE_TIMEOUT_MS = 8_000;
+const CONNECTION_CANDIDATE_TIMEOUT_MS = 8_000;
+
+// Providers whose connect-time probe writes no source-keyed state, so it can run against an
+// uncommitted candidate before anything is written (C12). (An OAuth-bridged probe may refresh its
+// EXISTING oauth_tokens row, exactly as before; that row is not source state and is not created
+// here.) X is the one exception: its probe persists a profile snapshot
+// keyed by — and foreign-keyed to — the real source row, so it cannot run before that row exists.
+// X keeps the write-then-test path (testConnectionForSource, which parks on a terminal failure);
+// the X lane is being retired engine-side rather than re-plumbed.
+const PRE_SAVE_TESTED_PROVIDERS: ReadonlySet<FirstPhaseProvider> = new Set<FirstPhaseProvider>([
+  "google_analytics_4",
+  "posthog",
+  "stripe",
+  "shopify",
+  "meta_ads"
+]);
 
 /**
- * Exercise the normal Meta connector against an uncommitted credential candidate.
+ * Exercise the provider's normal connector against an uncommitted credential candidate.
  *
- * The connector owns credential parsing, OAuth-token resolution and its direct Graph liveness
- * probe. Replacing only the credential-row lookup lets it validate the exact encrypted bytes that
- * would be stored while every other lookup still uses the caller's database. No candidate can be
- * observed by another request, and a failed probe has no source status to mutate.
+ * The connector owns credential parsing, OAuth-token resolution and its connect-depth probe.
+ * Replacing only the credential-row lookup lets it validate the exact encrypted bytes that would be
+ * stored while every other lookup still uses the caller's database. No candidate can be observed by
+ * another request, and a failed probe has no source status to mutate. A failure is rethrown in
+ * founder words (connection-test-copy.ts): a refused key is `provider_auth_failed`, a check that
+ * could not run (network, timeout, rate limit, outage) is `connection_test_unavailable`.
  */
-async function testMetaConnectionCandidate(
+async function testConnectionCandidate(
   db: InfiniteOsDb,
   context: SessionContext,
+  provider: FirstPhaseProvider,
   candidate: ConnectionCredentialCandidate,
   encryptionKey?: string
 ): Promise<ConnectionTestResult> {
@@ -6202,31 +6232,29 @@ async function testMetaConnectionCandidate(
   };
   const candidateDb: InfiniteOsDb = { ...db, one: candidateOne };
   const abortController = new AbortController();
-  const timeoutError = () => new ConnectorError(
-    "provider_api_error",
-    "Meta connection candidate probe timed out",
-    true
-  );
   let timeout: ReturnType<typeof setTimeout>;
   const deadline = new Promise<never>((_resolve, reject) => {
     timeout = setTimeout(() => {
       abortController.abort();
-      reject(timeoutError());
-    }, META_CONNECTION_CANDIDATE_TIMEOUT_MS);
+      reject(connectionTestTimedOut(provider));
+    }, CONNECTION_CANDIDATE_TIMEOUT_MS);
     timeout.unref?.();
   });
-  const probe = connectorFor("meta_ads").testConnection(candidateDb, {
+  // Only the Meta connector threads `signal` into its requests today; for the others the deadline
+  // still bounds the connect, and the late response is discarded (their probes write no source
+  // state, and Promise.race keeps a late rejection handled).
+  const probe = connectorFor(provider).testConnection(candidateDb, {
     workspaceId: context.workspaceId,
     sourceId: `candidate_${randomUUID()}`,
-    provider: "meta_ads",
+    provider,
     syncRunId: `test_${randomUUID()}`,
     signal: abortController.signal,
     ...(encryptionKey ? { encryptionKey } : {})
   }).catch((error: unknown) => {
     if (abortController.signal.aborted) {
-      throw timeoutError();
+      throw connectionTestTimedOut(provider);
     }
-    throw error;
+    throw connectionTestFailure(provider, error);
   });
   try {
     return await Promise.race([probe, deadline]);
