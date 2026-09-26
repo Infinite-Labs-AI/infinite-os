@@ -569,6 +569,11 @@ function codexTool(tool: InfiniteOsToolSchema): Record<string, unknown> {
     type: "function",
     name: tool.name,
     description: `${tool.title}: ${tool.summary}`,
+    // The Responses API treats an omitted `strict` as "normalize to strict mode when possible",
+    // which forces the model to fill EVERY property ("" / null / 0 / [] / a real enum value).
+    // The upstream codex CLI sends strict:false on its function tools; match it so optional
+    // fields stay optional. The input schema is sent as declared.
+    strict: false,
     parameters: tool.inputSchema
   };
 }
