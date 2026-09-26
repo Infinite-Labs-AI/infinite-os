@@ -8662,13 +8662,40 @@ function metaAdsInsightsFieldsForLevel(level: string): string {
 // NOT need the conversion fields; keep it minimal so the probe stays cheap.
 const META_ADS_INSIGHTS_PROBE_FIELDS = "campaign_id,date_start,impressions,clicks,spend";
 
-// §4 / §7 — attribution reality post-Jan-2026. Request the three windows whose
-// per-window subvalues we sum into the headline (7d_click + 1d_view). We HARD-EXCLUDE
+// §4 / §7 — attribution reality post-March-2026. Request the windows whose per-window
+// subvalues we sum into the headline (7d_click + 1d_ev + 1d_view). We HARD-EXCLUDE
 // 7d_view / 28d_view (removed Jan 2026 → silent empty), and we do NOT send
 // use_unified_attribution_setting or action_report_time (both no-ops post-2026-01-12).
 // The element `value` field on each actions[]/action_values[] entry is 7d_click ONLY —
-// the headline must be COMPUTED as element['7d_click'] + element['1d_view'].
-const META_ADS_ATTRIBUTION_WINDOWS = ["1d_click", "7d_click", "1d_view"] as const;
+// the headline must be COMPUTED from the per-window subvalues.
+//
+// WHY `1d_ev` JOINED THE SET (2026-09-20). Meta's "Simplifying Ad Measurement for a
+// Social-First World" announcement (2026-03-03, facebook.com/business/news/click-attribution)
+// narrowed click-through attribution to "exclusively include link clicks" and renamed
+// engaged-view attribution to ENGAGE-THROUGH. The conversions that used to land in
+// 7d_click on a non-link click now land in a separate ONE-DAY engage-through bucket.
+// Requesting only click + view therefore UNDER-COUNTS by exactly the displaced amount,
+// and our numbers read lower than Ads Manager's. `1d_ev` is the enum member for that
+// bucket — verified verbatim in the v25.0 Insights reference
+// (developers.facebook.com/docs/marketing-api/reference/ad-account/insights/v25.0,
+// "Updated: Aug 6, 2026"), whose enum is `list<enum{1d_view, 7d_view, 28d_view, 1d_click,
+// 7d_click, 28d_click, 1d_ev, dda, default, ...}>`, and on the response side in Ads Action
+// Stats ("Metric value of attribution window '1 day after having an engaged view on the
+// ad'"). There is NO `1d_et` / `engaged_view` / `engage_through` enum member — Meta renamed
+// the CONCEPT, not the field. Getting this wrong is expensive: an unrecognised value in
+// action_attribution_windows makes Graph reject the WHOLE insights query, not just the field.
+//
+// NOT DOUBLE-COUNTING. The three summed windows are disjoint by engagement TYPE: link
+// click, non-link engagement, impression. (1d_click is nested inside 7d_click, which is
+// exactly why it is requested but NOT summed.) Engage-through is ONE-DAY only — Meta
+// publishes no 7d engage-through window.
+//
+// HONEST CAVEAT, not fixable here: Meta's own help centre says engage-through covers any
+// non-link click, and then says "1-day engagement won't be seen in reporting for campaigns
+// not using video assets". If an account is image-only, `1d_ev` may simply be absent —
+// which this code already handles, since a missing subvalue contributes 0 rather than
+// erasing the row.
+const META_ADS_ATTRIBUTION_WINDOWS = ["1d_click", "7d_click", "1d_ev", "1d_view"] as const;
 
 // The windows summed into a headline count (see metaHeadlineWindowValue).
 const META_ADS_HEADLINE_WINDOWS = ["7d_click", "1d_view"] as const;
@@ -8866,28 +8893,36 @@ function metaCanonicalEventRule(
 // ──────────────────────────────────────────────────────────────────────────────────
 // §4 — actions[]/action_values[] parsing (deterministic, never sum variants).
 //
-// Each element looks like { action_type, value, '1d_click'?, '7d_click'?, '1d_view'? }.
+// Each element looks like
+// { action_type, value, '1d_click'?, '7d_click'?, '1d_ev'?, '1d_view'? }.
 // The element-level `value` is 7d_click ONLY (post-Jan-2026); the headline window we
-// compute is 7d_click + 1d_view from the per-window subvalues. If subvalues are absent
-// (older payloads), we fall back to the element `value`.
+// compute is 7d_click + 1d_ev + 1d_view from the per-window subvalues. If subvalues are
+// absent (older payloads), we fall back to the element `value`.
 
 interface MetaActionElement {
   action_type?: string | null;
   value?: string | number | null;
   "1d_click"?: string | number | null;
   "7d_click"?: string | number | null;
+  /** Engage-through (Meta's `1d_ev`): 1 day after a NON-LINK engagement. See
+   *  META_ADS_ATTRIBUTION_WINDOWS for why this window exists and why it is summed. */
+  "1d_ev"?: string | number | null;
   "1d_view"?: string | number | null;
   [key: string]: unknown;
 }
 
-// Compute the headline (7d_click + 1d_view) for one action element. Per-window
-// subvalues are summed; if neither subvalue is present we fall back to `value`
-// (which is 7d_click only) so we never lose the count entirely.
+// Compute the headline (7d_click + 1d_ev + 1d_view) for one action element. The three
+// windows are disjoint by engagement type, so summing cannot double-count; 1d_click is
+// nested inside 7d_click and is deliberately NOT summed. A missing subvalue contributes 0
+// (an image-only account may never report 1d_ev at all). If NONE of the three subvalues is
+// present we fall back to `value` (which is 7d_click only) so we never lose the count
+// entirely — note `value` alone is the pre-March-2026 shape and under-counts by design.
 function metaHeadlineWindowValue(element: MetaActionElement): number {
   const sevenDayClick = element["7d_click"];
+  const oneDayEngageThrough = element["1d_ev"];
   const oneDayView = element["1d_view"];
-  if (sevenDayClick !== undefined || oneDayView !== undefined) {
-    return numberOrZero(sevenDayClick) + numberOrZero(oneDayView);
+  if (sevenDayClick !== undefined || oneDayEngageThrough !== undefined || oneDayView !== undefined) {
+    return numberOrZero(sevenDayClick) + numberOrZero(oneDayEngageThrough) + numberOrZero(oneDayView);
   }
   return numberOrZero(element.value);
 }
