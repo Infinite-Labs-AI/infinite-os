@@ -6185,8 +6185,10 @@ interface ConnectionCredentialCandidate {
 
 const CONNECTION_CANDIDATE_TIMEOUT_MS = 8_000;
 
-// Providers whose connect-time probe only READS, so it can run against an uncommitted candidate
-// before anything is written (C12). X is the one exception: its probe persists a profile snapshot
+// Providers whose connect-time probe writes no source-keyed state, so it can run against an
+// uncommitted candidate before anything is written (C12). (An OAuth-bridged probe may refresh its
+// EXISTING oauth_tokens row, exactly as before; that row is not source state and is not created
+// here.) X is the one exception: its probe persists a profile snapshot
 // keyed by — and foreign-keyed to — the real source row, so it cannot run before that row exists.
 // X keeps the write-then-test path (testConnectionForSource, which parks on a terminal failure);
 // the X lane is being retired engine-side rather than re-plumbed.
@@ -6239,7 +6241,8 @@ async function testConnectionCandidate(
     timeout.unref?.();
   });
   // Only the Meta connector threads `signal` into its requests today; for the others the deadline
-  // still bounds the connect, and the late response is discarded (their probes only read).
+  // still bounds the connect, and the late response is discarded (their probes write no source
+  // state, and Promise.race keeps a late rejection handled).
   const probe = connectorFor(provider).testConnection(candidateDb, {
     workspaceId: context.workspaceId,
     sourceId: `candidate_${randomUUID()}`,
