@@ -155,6 +155,38 @@ describe("connect_source / reconnect_source test the key BEFORE saving (real PGl
       expect(await rowCounts(db)).toEqual(NOTHING);
     });
 
+    it("a check that never answers is cut off at the 8 s deadline and writes NOTHING", async () => {
+      // Only Meta threads the abort signal into its requests; for this provider the deadline race
+      // alone must stop a hung check. The fetch below ignores the signal and never settles. The
+      // 8 s timer fires at once (every other timer, PGlite's included, stays native).
+      const nativeSetTimeout = globalThis.setTimeout;
+      const timeoutSpy = vi.spyOn(globalThis, "setTimeout").mockImplementation(((
+        callback: (...args: unknown[]) => void,
+        delay?: number,
+        ...args: unknown[]
+      ) => {
+        if (delay === 8_000) {
+          queueMicrotask(() => callback(...args));
+          return { unref() {} } as unknown as ReturnType<typeof setTimeout>;
+        }
+        return nativeSetTimeout(callback, delay, ...args);
+      }) as typeof setTimeout);
+      onFetch = () => new Promise<Response>(() => {});
+      try {
+        const handlers = createActionHandlers(db, { encryptionKey: KEY });
+
+        await expect(handlers.connect_source?.(connectInput(row.goodPayload), context)).rejects.toMatchObject({
+          code: "connection_test_unavailable",
+          message: row.unavailableMessage,
+          retryable: true
+        });
+        expect(timeoutSpy.mock.calls.some((call) => call[1] === 8_000)).toBe(true);
+      } finally {
+        timeoutSpy.mockRestore();
+      }
+      expect(await rowCounts(db)).toEqual(NOTHING);
+    });
+
     it("a good key still writes the source and reports the passing test", async () => {
       onFetch = () => row.goodResponse();
       const handlers = createActionHandlers(db, { encryptionKey: KEY });
