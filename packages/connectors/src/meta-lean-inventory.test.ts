@@ -8,6 +8,7 @@ import { encryptCredentialPayload } from "@infinite-os/core";
 import { createInfiniteOsDb, runMigrations, type InfiniteOsDb } from "@infinite-os/db";
 
 import { classifySyncFailure, connectorFor, type SyncRequest } from "./index.js";
+import { metaAdsEntityVersionFingerprint } from "./meta-entity-fingerprint.js";
 import {
   META_ADS_AD_FULL_FIELDS,
   META_ADS_AD_LEAN_FIELDS,
@@ -18,6 +19,7 @@ import {
   metaAdsHeavyAdFieldsKey,
   metaAdsHeavyCursorValue,
   metaAdsMarkCreativeRulingFields,
+  metaAdsWithoutUnreadRulingFields,
   metaGraphNextPage,
 } from "./meta-lean-inventory.js";
 
@@ -94,6 +96,14 @@ describe("creative ruling fields (url_tags, degrees_of_freedom_spec)", () => {
     expect(metaAdsMarkCreativeRulingFields(tagged)).toBe(tagged);
     expect(metaAdsMarkCreativeRulingFields({ id: "a3", creative: { id: "cr3", url_tags: "x=1" } }).creative)
       .toEqual({ id: "cr3", url_tags: "x=1", degrees_of_freedom_spec: null });
+  });
+  it("strips from fresh metadata only the ruling keys the stored snapshot never held — top level and the ad's creative", () => {
+    const fresh = { id: "cr1", name: "A", url_tags: null, degrees_of_freedom_spec: spec };
+    expect(metaAdsWithoutUnreadRulingFields(fresh, { id: "cr1", name: "A" })).toEqual({ id: "cr1", name: "A" });
+    expect(metaAdsWithoutUnreadRulingFields(fresh, { id: "cr1", name: "A", url_tags: "x=1" })).toEqual({ id: "cr1", name: "A", url_tags: null });
+    const ad = { id: "a1", status: "ACTIVE", creative: { id: "cr1", url_tags: "utm_content={{ad.name}}", degrees_of_freedom_spec: null } };
+    expect(metaAdsWithoutUnreadRulingFields(ad, { id: "a1", status: "ACTIVE", creative: { id: "cr1" } })).toEqual({ id: "a1", status: "ACTIVE", creative: { id: "cr1" } });
+    expect(ad.creative).toHaveProperty("url_tags"); // not mutated
   });
   it("leaves a node without a creative expansion alone (no creative, or a bare lean reference is never a heavy node)", () => {
     const none = { id: "a4" };
@@ -611,6 +621,57 @@ describe("lean Meta inventory reads against real PGlite", () => {
     expect(heavy[0]?.cursor_value).toMatch(new RegExp(`\\|${metaAdsHeavyAdFieldsKey("v25.0")}$`));
     await forceNextScanFull(sourceId);
     expect((await sync(account, request(workspaceId, sourceId))).fullAdRead).toEqual({ mode: "lean", fallback: null });
+  }, 120_000);
+
+  it("the first heavy read after the ruling fields were added fills them into the CURRENT versions — no new version, no change", async () => {
+    const workspaceId = `ws_lean_rulings_fill_${randomUUID()}`, sourceId = `src_lean_rulings_fill_${randomUUID()}`;
+    await seedSource(workspaceId, sourceId);
+    const account = prodShapeAccount();
+    Object.assign(account.ads[70]!.creative as Record<string, unknown>, { url_tags: "utm_content={{ad.name}}", degrees_of_freedom_spec: { creative_features_spec: { image_touchups: { enroll_status: "OPT_OUT" } } } });
+    await sync(account, request(workspaceId, sourceId));
+    // Rewind storage to what the engine BEFORE this change wrote: no ruling keys anywhere, hashes over that metadata,
+    // and a heavy checkpoint keyed to the old field set.
+    const strip = (entityType: "creative" | "ad") => entityType === "creative"
+      ? "metadata_json - 'url_tags' - 'degrees_of_freedom_spec'"
+      : "metadata_json #- '{creative,url_tags}' #- '{creative,degrees_of_freedom_spec}'";
+    for (const entityType of ["creative", "ad"] as const) {
+      await db.query(`update meta_ads_entity_versions set metadata_json = ${strip(entityType)} where source_id=$1 and entity_type=$2`, [sourceId, entityType]);
+      const rows = await db.query<{ id: string; metadata_json: Record<string, unknown> }>(
+        "select id, metadata_json from meta_ads_entity_versions where source_id=$1 and entity_type=$2", [sourceId, entityType]);
+      for (const row of rows) await db.query("update meta_ads_entity_versions set payload_hash=$2 where id=$1", [row.id, metaAdsEntityVersionFingerprint(row.metadata_json)]);
+    }
+    const before = META_ADS_AD_FULL_FIELDS.replace(",url_tags,degrees_of_freedom_spec", "");
+    await db.query("update sync_cursors set cursor_value=$2 where source_id=$1 and cursor_key like 'meta_ads_entities_heavy:%'",
+      [sourceId, metaAdsHeavyCursorValue(new Date().toISOString(), metaAdsHeavyAdFieldsKey("v25.0", before))]);
+    const versions = await versionCounts(sourceId);
+    const stamp = async () => (await db.query<{ n: string }>("select count(*)::text||'@'||max(first_observed_at)::text as n from meta_ads_entity_versions where source_id=$1", [sourceId]))[0]?.n;
+    const firstSightings = await stamp();
+
+    // A creative renamed in Ads Manager at the same time IS a change: it still mints its version (and, as before this
+    // change, so does the one ad whose snapshot of it carries the name).
+    (account.ads[80]!.creative as Record<string, unknown>).name = "Renamed in Ads Manager";
+    await forceNextScanFull(sourceId);
+    const reread = await sync(account, request(workspaceId, sourceId));
+    expect(reread.fullAdRead).toEqual({ mode: "heavy", fallback: "heavy_shape_changed" });
+    const after = await versionCounts(sourceId);
+    expect(after).toEqual(versions.map((row) => (row.entity_type === "creative" || row.entity_type === "ad" ? { ...row, total: row.total + 1 } : row)));
+    // Every other creative and ad kept its version and got the fields in place, hash re-keyed to the new metadata.
+    const creative = async (id: string) => (await db.query<{ metadata_json: Record<string, unknown>; payload_hash: string; first_observed_at: Date }>(
+      "select metadata_json, payload_hash, first_observed_at from meta_ads_entity_versions where source_id=$1 and entity_type='creative' and entity_id=$2 and valid_to is null",
+      [sourceId, id]))[0]!;
+    const cr70 = await creative("cr70");
+    expect(cr70.metadata_json).toMatchObject({ url_tags: "utm_content={{ad.name}}", degrees_of_freedom_spec: { creative_features_spec: { image_touchups: { enroll_status: "OPT_OUT" } } } });
+    expect(cr70.payload_hash).toBe(metaAdsEntityVersionFingerprint(cr70.metadata_json));
+    expect((await creative("cr71")).metadata_json).toMatchObject({ url_tags: null, degrees_of_freedom_spec: null });
+    expect((await currentAd(sourceId, "a70"))[0]?.metadata_json.creative).toMatchObject({ url_tags: "utm_content={{ad.name}}" });
+    expect((await creative("cr80")).metadata_json).toMatchObject({ name: "Renamed in Ads Manager", url_tags: null });
+    // No first sighting is new except the rename's: nothing else reads as changed.
+    expect(await db.query("select entity_id from meta_ads_entity_versions where source_id=$1 and first_observed_at > $2::timestamptz order by entity_id",
+      [sourceId, firstSightings!.split("@")[1]])).toEqual([{ entity_id: "a80" }, { entity_id: "cr80" }]);
+    // And the next scan is the fast path: nothing new.
+    await forceNextScanFull(sourceId);
+    await sync(account, request(workspaceId, sourceId));
+    expect(await versionCounts(sourceId)).toEqual(after);
   }, 120_000);
 
   it("reads the account node at most once per 24h on inventory scans, and a revoked token still fails the very next scan", async () => {

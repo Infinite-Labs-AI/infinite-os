@@ -25,6 +25,7 @@ import {
   metaAdsHeavyCursorKey,
   metaAdsHeavyCursorValue,
   metaAdsMarkCreativeRulingFields,
+  metaAdsWithoutUnreadRulingFields,
   metaGraphNextPage,
   readMetaAdsFullAdSnapshot,
 } from "./meta-lean-inventory.js";
@@ -5858,13 +5859,28 @@ async function writeMetaAdsEntityVersions(
         "select metadata_json from meta_ads_entity_versions where id = $1",
         [current.id],
       );
-      if (stored && metaAdsEntityVersionFingerprint(stored.metadata_json) === payloadHash) {
+      const storedHash = stored ? metaAdsEntityVersionFingerprint(stored.metadata_json) : null;
+      if (storedHash === payloadHash) {
         await tx.query(
           `update meta_ads_entity_versions
               set payload_hash = $2, raw_record_id = $3,
                   last_observed_at = greatest(last_observed_at, $4::timestamptz)
             where id = $1`,
           [current.id, payloadHash, rawIds[index], row.observedAt],
+        );
+        continue;
+      }
+      // The first heavy read after url_tags / degrees_of_freedom_spec joined the field set: the stored snapshot lacks
+      // them and nothing else differs. The entity did not change — the sync read two more of its fields — so they are
+      // filled into the CURRENT version (metadata + hash) instead of minting one version per creative and per ad,
+      // which every version reader would otherwise see as a change nobody made.
+      if (stored && storedHash === metaAdsEntityVersionFingerprint(metaAdsWithoutUnreadRulingFields(row.metadata, stored.metadata_json))) {
+        await tx.query(
+          `update meta_ads_entity_versions
+              set metadata_json = $2::jsonb, payload_hash = $3, raw_record_id = $4,
+                  last_observed_at = greatest(last_observed_at, $5::timestamptz)
+            where id = $1`,
+          [current.id, JSON.stringify(row.metadata), payloadHash, rawIds[index], row.observedAt],
         );
         continue;
       }

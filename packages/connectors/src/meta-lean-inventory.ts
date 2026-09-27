@@ -75,6 +75,29 @@ export function metaAdsMarkCreativeRulingFields<N extends AdNode>(node: N): N {
 }
 
 /**
+ * `fresh` entity metadata as the engine would have stored it BEFORE it asked for the ruling fields: each ruling key
+ * `stored` does not hold is removed — at the top level (a creative row) and inside `creative` (an ad row's snapshot of
+ * its creative). The version writer compares this with the stored snapshot: equal means the entity did not change, the
+ * sync only read two more fields of it (an AdCreative is immutable apart from name/status, so they were always so).
+ * Those fields are then filled into the CURRENT version in place — no new version, so no reader sees a change nobody
+ * made. Anything else that differs still mints a version. Returns a copy; `fresh` is not mutated.
+ */
+export function metaAdsWithoutUnreadRulingFields(fresh: Record<string, unknown>, stored: Record<string, unknown>): Record<string, unknown> {
+  const strip = (from: Record<string, unknown>, known: Record<string, unknown>) => {
+    const out = { ...from };
+    for (const key of META_ADS_CREATIVE_RULING_FIELDS) if (!(key in known)) delete out[key];
+    return out;
+  };
+  const record = (value: unknown): Record<string, unknown> | null =>
+    value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+  const out = strip(fresh, stored);
+  const freshCreative = record(fresh.creative);
+  const storedCreative = record(stored.creative);
+  if (freshCreative && storedCreative) out.creative = strip(freshCreative, storedCreative);
+  return out;
+}
+
+/**
  * The lean ad field set: identity, parentage, creative REFERENCE (Graph returns `{id}` for a
  * reference field requested without sub-fields — no expansion, so 500-row pages) and status.
  */
