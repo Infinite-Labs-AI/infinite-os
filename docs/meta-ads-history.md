@@ -25,6 +25,15 @@ query-free `sourceLocator` of `{host, path}` so the archive worker can refresh b
 without storing Meta's signed media URL. Provider tokens, authorization fields and media query
 strings are removed before raw/normalized storage.
 
+Creative metadata also carries `url_tags` and `degrees_of_freedom_spec` (the per-feature Advantage+
+enhancement switches), read in the same heavy `/ads` request, so a host can check an existing creative
+against its own creative rules before reusing it. Graph omits a field that is not set, so the heavy read
+stores an absent one as `null`: a present value is Meta's, `null` means "asked, none set", and a MISSING
+key means the version was stored before these fields were requested (unknown, never "none"). Adding them
+changed the heavy field set, which forces one heavy full read on the next full scan. That read fills the two
+fields into each CURRENT creative / ad version in place when nothing else about it differs: no new version,
+so no version reader sees a change nobody made. Any other difference still mints a version.
+
 Reporting dates are Meta account-local calendar dates. `meta_ads_accounts.timezone_name` and
 `currency` are the sole Meta account metadata authority. Optional demographic, placement and device
 insight breakdowns are not collected by this schema and must never be inferred from the base facts.
