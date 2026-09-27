@@ -8,7 +8,7 @@ import {
   isEncryptedCredentialPayload
 } from "@infinite-os/core";
 import { type InfiniteOsDb } from "@infinite-os/db";
-import { MetaAdsRequestTelemetry } from "@infinite-os/connectors";
+import { META_CREATIVE_ENHANCEMENT_FEATURES, MetaAdsRequestTelemetry } from "@infinite-os/connectors";
 import { FIRST_PHASE_METRICS, createInfiniteOsRegistry } from "@infinite-os/runtime";
 
 import {
@@ -8110,6 +8110,78 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
     }
   });
 
+  // 2026-09-27 creative rulings: a host's Advantage+ enhancement switches and a multi-asset feed
+  // reach the CLI transport whole. An older engine dropped both keys silently.
+  it("forwards degreesOfFreedomSpec and assetFeedSpec through create_meta_creative to the CLI transport", async () => {
+    const audits: AuditRow[] = [];
+    const dir = mkdtempSync(join(tmpdir(), "analytical-meta-feed-cli-"));
+    const script = join(dir, "fake-meta-cli.mjs");
+    const argvPath = join(dir, "argv.json");
+    writeFileSync(
+      script,
+      `import { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(argvPath)}, JSON.stringify(process.argv.slice(2)));\nconsole.log(JSON.stringify({ id: 'creative-feed-1', status: null }));\n`,
+      "utf8"
+    );
+    const db = metaWriteTestDb({
+      audits,
+      credential: {
+        mode: "live",
+        transport: "meta_ads_cli",
+        adAccountId: "act_999",
+        accessToken: "secret-meta-token",
+        cliCommand: `${JSON.stringify(process.execPath)} ${JSON.stringify(script)}`,
+      },
+    });
+    process.env.GROWTH_OS_ENCRYPTION_KEY = "analytical-test-encryption-key";
+    const degreesOfFreedomSpec = { creative_features_spec: { text_optimizations: { enroll_status: "OPT_OUT" } } };
+    const assetFeedSpec = {
+      images: [{ url: "https://media.example.com/4x5.png", adlabels: [{ name: "r_4x5" }] }],
+      bodies: [{ text: "One" }, { text: "Two" }],
+    };
+    try {
+      const handlers = createActionHandlers(db);
+      const result = await handlers.create_meta_creative?.(
+        {
+          sourceId: "src_meta",
+          name: "Feed creative",
+          pageId: "page_1",
+          assetFeedSpec,
+          degreesOfFreedomSpec,
+          urlTags: "utm_content={{ad.name}}",
+          clientToken: "tok_feed_creative",
+        },
+        operatorContext
+      );
+      expect(result?.data).toMatchObject({ id: "creative-feed-1", deduped: false });
+      const argv = JSON.parse(readFileSync(argvPath, "utf8")) as string[];
+      expect(JSON.parse(argv[argv.indexOf("--asset-feed-spec") + 1])).toEqual(assetFeedSpec);
+      expect(JSON.parse(argv[argv.indexOf("--degrees-of-freedom-spec") + 1])).toEqual(degreesOfFreedomSpec);
+      expect(argv).not.toContain("--image");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a non-object degreesOfFreedomSpec TYPED before any claim or spawn", async () => {
+    const audits: AuditRow[] = [];
+    const dedupRows: DedupRow[] = [];
+    const db = metaWriteTestDb({ audits, dedupRows });
+    await withGraph(
+      () => jsonResponse({ id: "should-not-happen" }),
+      async (calls) => {
+        const handlers = createActionHandlers(db);
+        await expect(
+          handlers.create_meta_creative?.(
+            { sourceId: "src_meta", name: "Bad", pageId: "page_1", imageHash: "h", degreesOfFreedomSpec: "OPT_OUT", clientToken: "tok_bad_spec" },
+            operatorContext
+          )
+        ).rejects.toMatchObject({ code: "invalid_creative_spec", retryable: false });
+        expect(calls).toHaveLength(0);
+        expect(dedupRows).toHaveLength(0);
+      }
+    );
+  });
+
   it("releases an un-resolved claim on a failed POST so the same token can retry", async () => {
     const audits: AuditRow[] = [];
     const dedupRows: DedupRow[] = [];
@@ -9470,6 +9542,32 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
           expect(result?.data).toMatchObject({ id: "23850000000001", entity: "creative" });
           const post = calls.find((c) => c.method === "POST");
           expect(post?.body?.object_story_spec).toMatchObject({ page_id: "pg_stored" });
+        }
+      );
+    });
+
+    // dc-readiness wave-1 review, finding 3: a caller that names no enhancement choice (the terminal's
+    // `meta creative create`, an older host) gets every documented enhancement OFF — never Meta's defaults.
+    it("create_meta_creative switches every documented enhancement OFF when the caller names none, and keeps a caller's own choice", async () => {
+      await withGraph(
+        () => jsonResponse({ id: "23850000000009" }),
+        async (calls) => {
+          const handlers = createActionHandlers(creativeDb("pg_stored"));
+          await handlers.create_meta_creative?.(
+            { sourceId: "src_meta", name: "Terminal creative", linkUrl: "https://example.com", imageHash: "abc", clientToken: "tok_default_off" },
+            operatorContext
+          );
+          const spec = calls.find((c) => c.method === "POST")?.body?.degrees_of_freedom_spec as { creative_features_spec: Record<string, { enroll_status: string }> };
+          expect(Object.keys(spec.creative_features_spec).sort()).toEqual([...META_CREATIVE_ENHANCEMENT_FEATURES].sort());
+          expect(Object.values(spec.creative_features_spec).every((feature) => feature.enroll_status === "OPT_OUT")).toBe(true);
+          expect(spec.creative_features_spec).not.toHaveProperty("standard_enhancements");
+
+          const own = { creative_features_spec: { inline_comment: { enroll_status: "OPT_IN" } } };
+          await handlers.create_meta_creative?.(
+            { sourceId: "src_meta", name: "Host creative", linkUrl: "https://example.com", imageHash: "abc", degreesOfFreedomSpec: own, clientToken: "tok_own_choice" },
+            operatorContext
+          );
+          expect(calls.filter((c) => c.method === "POST").at(-1)?.body?.degrees_of_freedom_spec).toEqual(own);
         }
       );
     });

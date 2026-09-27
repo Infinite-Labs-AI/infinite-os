@@ -160,6 +160,12 @@ export const APP_CAPABILITIES = [
   // status change). Named to the meta_*_writes convention. A desktop fails CLOSED on this flag
   // before offering an ad edit to a daemon.
   "meta_ad_update_writes",
+  // create_meta_creative forwards `degreesOfFreedomSpec` (AdCreative.degrees_of_freedom_spec — the
+  // per-feature Advantage+ enhancement switches) and `assetFeedSpec` (a multi-asset creative: one
+  // picture in several placement sizes, up to five texts) to both transports. A desktop fails CLOSED
+  // on this flag: an older daemon drops both keys silently, so an "enhancements OFF" creative would be
+  // created with Meta's defaults and nobody would know.
+  "meta_creative_rulings_writes",
   // The local interactive task ledger's operator routes (/interactive/*, migration 0072). The
   // desktop records Cmd+L tasks, proposals and approvals here only when this flag is present;
   // an older bundle without the routes keeps the desktop on its in-memory confirmation path.

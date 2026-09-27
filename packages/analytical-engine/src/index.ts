@@ -14,6 +14,7 @@ import {
   getMetaEntity,
   listMetaAssets,
   listMetaEntities,
+  metaCreativeEnhancementsAllOff,
   resolveMetaAdsCredential,
   setMetaEntityStatus,
   updateMetaBudget,
@@ -21,10 +22,12 @@ import {
   ConnectorError,
   type ConnectionTestResult,
   type MetaAdSetTargeting,
+  type MetaAssetFeedSpec,
   type MetaAdsCredential,
   type MetaAdsCliExecution,
   type MetaAdUpdateField,
   type MetaBudgetKind,
+  type MetaDegreesOfFreedomSpec,
   type MetaEntityStatus,
   type MetaWriteEntity,
   type MetaWriteResult
@@ -2543,6 +2546,11 @@ async function createMetaCreativeHandler(
   expectedCredential?: ExpectedMetaCredential
 ): Promise<ActionEnvelope> {
   const name = requiredString(input, "name");
+  // Every creative this engine creates carries an explicit enhancement choice: the caller's, or — when it names
+  // none (the terminal's `meta creative create`, an older host) — every documented enhancement OFF. Meta's own
+  // Advantage+ defaults are never taken silently (the founder's ruling, 2026-09-23; dc-readiness wave-1 review).
+  const degreesOfFreedomSpec = optionalCreativeObject(input, "degreesOfFreedomSpec") ?? metaCreativeEnhancementsAllOff();
+  const assetFeedSpec = optionalCreativeObject(input, "assetFeedSpec");
   const sourceId = await resolveMetaWriteSourceId(db, context, input);
   const pageId = await resolveMetaPostingPageId(db, context, sourceId, input, expectedCredential);
   return runMetaCreate(db, context, input, sourceId, "create_meta_creative", "creative", (credential) =>
@@ -2560,9 +2568,25 @@ async function createMetaCreativeHandler(
       ...(optionalString(input, "callToAction") ? { callToAction: optionalString(input, "callToAction") } : {}),
       // Tracking parameters Meta appends to the destination link at delivery. Carries dynamic macros
       // verbatim — see MetaCreativeCreateInput.urlTags.
-      ...(optionalString(input, "urlTags") ? { urlTags: optionalString(input, "urlTags") } : {})
+      ...(optionalString(input, "urlTags") ? { urlTags: optionalString(input, "urlTags") } : {}),
+      // Raw AdCreative objects (validated by the connector before any download/spawn/POST). Forwarded
+      // whole — a host that sends them checks META_CREATIVE_WRITE_FEATURES / the daemon's
+      // meta_creative_rulings_writes capability first, because an older engine drops unknown keys.
+      degreesOfFreedomSpec: degreesOfFreedomSpec as unknown as MetaDegreesOfFreedomSpec,
+      ...(assetFeedSpec !== undefined ? { assetFeedSpec: assetFeedSpec as MetaAssetFeedSpec } : {})
     }), undefined, cliExecution, encryptionKey, expectedCredential
   );
+}
+
+// A raw AdCreative object off the create input: absent, or a plain object. Anything else fails TYPED
+// before the dedup claim (a list or a string here is a caller bug, never a value to drop silently).
+function optionalCreativeObject(input: unknown, key: "degreesOfFreedomSpec" | "assetFeedSpec"): Record<string, unknown> | undefined {
+  const value = objectField(input, key);
+  if (value === undefined || value === null) return undefined;
+  if (!isRecord(value)) {
+    throw metaTypedError("invalid_creative_spec", `invalid_creative_spec: ${key} must be an object`);
+  }
+  return value;
 }
 
 async function createMetaAdHandler(
