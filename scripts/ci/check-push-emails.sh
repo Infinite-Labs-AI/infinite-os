@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # check-push-emails.sh: the pre-push gate on commit METADATA. Refuses the push
-# when any commit being pushed has an author or committer email outside the
-# public allowlist (scripts/ci/public-email-allowlist.sh).
+# when any commit being pushed has an author or committer email, or an
+# annotated tag being pushed has a tagger email, outside the public allowlist
+# (scripts/ci/public-email-allowlist.sh).
 #
 # Why this runs before the push and not only in CI: once a commit is pushed
 # to a branch behind a pull request, GitHub keeps it under refs/pull/<n>/head
@@ -28,6 +29,15 @@ while read -r local_ref local_sha remote_ref remote_sha || [ -n "${local_ref:-}"
   [ -n "${local_sha:-}" ] || continue
   if is_zero "$local_sha"; then continue; fi
 
+  # An annotated tag carries its own identity (the tagger), which GitHub shows too.
+  if [ "$(git cat-file -t "$local_sha")" = tag ]; then
+    bad_tagger="$(git cat-file tag "$local_sha" | sed -n 's/^tagger .*<\(.*\)>.*/\1/p' | grep -viE "$PUBLIC_EMAIL_ALLOWLIST_ERE" || true)"
+    if [ -n "$bad_tagger" ]; then
+      report="${report}  ${remote_ref} (from ${local_ref}): annotated tag, tagger=${bad_tagger}"$'\n'
+      report="${report}    rewrite: git tag -f -a ${local_ref#refs/tags/} ${local_sha}^{}"$'\n'
+    fi
+  fi
+
   if ! is_zero "${remote_sha:-0}" && git cat-file -e "${remote_sha}^{commit}" 2>/dev/null; then
     set -- "$local_sha" "^$remote_sha"
   else
@@ -51,7 +61,7 @@ done
 
 next_email="$(git var GIT_AUTHOR_IDENT 2>/dev/null | sed -n 's/.*<\(.*\)>.*/\1/p' || true)"
 {
-  echo "pre-push: REFUSED. These commits carry an email that must not reach the public repo:"
+  echo "pre-push: REFUSED. These commits or tags carry an email that must not reach the public repo:"
   printf '%s' "$report"
   echo ""
   echo "Allowed: *@infinite.fast, *@users.noreply.github.com, noreply@github.com"

@@ -128,6 +128,27 @@ describe("pre-push email gate (check-push-emails.sh)", () => {
     expect(result.stderr).not.toContain(tip.slice(0, 7) + "  author");
   });
 
+  it("refuses an annotated tag whose tagger email is not public", () => {
+    const base = commit("base", OK);
+    git(["update-ref", "refs/remotes/origin/main", base]);
+    const tag = (name: string, tagger: string) => {
+      git(["tag", "-a", name, "-m", name, base], { GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: tagger });
+      return git(["rev-parse", name]);
+    };
+    const run = (name: string, sha: string) =>
+      spawnSync("bash", [join(ciDir, "check-push-emails.sh")], {
+        cwd: repo,
+        encoding: "utf8",
+        input: `refs/tags/${name} ${sha} refs/tags/${name} ${ZERO}\n`,
+        env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" }
+      });
+
+    const bad = run("v-bad", tag("v-bad", BAD));
+    expect(bad.status).toBe(1);
+    expect(bad.stderr).toContain(`tagger=${BAD}`);
+    expect(run("v-ok", tag("v-ok", OK)).status).toBe(0);
+  });
+
   it("lets a branch deletion through", () => {
     commit("base", BAD);
     expect(prePush(ZERO, git(["rev-parse", "HEAD"])).status).toBe(0);

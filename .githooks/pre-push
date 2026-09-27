@@ -8,8 +8,8 @@
 set -euo pipefail
 root="$(git rev-parse --show-toplevel)"
 
-# 1. Author/committer emails of every commit being pushed. git sends the
-#    pushed refs on stdin; this script reads all of it.
+# 1. Author/committer emails of every commit being pushed (and the tagger of
+#    an annotated tag). git sends the pushed refs on stdin; this reads all of it.
 bash "$root/scripts/ci/check-push-emails.sh"
 
 # 2. Tracked-tree tripwire, then the secret scan.
