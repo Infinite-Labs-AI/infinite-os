@@ -1,8 +1,10 @@
 import { existsSync, readFileSync } from "node:fs"
+import { createHash } from "node:crypto"
 import { dirname, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 
 import { describe, expect, it } from "vitest"
+import { campaignWireQueries, emitCampaignWireFixture } from "../../test/campaign-wire-fixture.js"
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..")
 const contractsRoot = resolve(packageRoot, "contracts")
@@ -12,7 +14,8 @@ const structuralTokenPattern = "^[A-Za-z0-9_-]{1,64}$"
 
 const utmKeys = ["utm_source", "utm_medium", "utm_campaign", "utm_content", "utm_term"] as const
 const clickIdPresenceKeys = ["has_gclid", "has_fbclid", "has_ttclid", "has_msclkid"] as const
-const campaignKeys = [...utmKeys, ...clickIdPresenceKeys]
+const adKeys = ["ad_id", "adset_id", "campaign_id", "utm_placement"] as const
+const campaignKeys = [...utmKeys, ...clickIdPresenceKeys, ...adKeys]
 
 type JsonSchema = boolean | Record<string, unknown>
 
@@ -62,6 +65,7 @@ function validateAgainstContract(root: Record<string, unknown>, value: unknown):
     for (const sub of (schema.allOf as JsonSchema[] | undefined) ?? []) {
       if (!check(sub, node)) return false
     }
+    if (Array.isArray(schema.anyOf) && !schema.anyOf.some(sub => check(sub as JsonSchema, node))) return false
     if (schema.if !== undefined) {
       if (check(schema.if as JsonSchema, node)) {
         if (schema.then !== undefined && !check(schema.then as JsonSchema, node)) return false
@@ -89,6 +93,20 @@ function pageView(properties: Record<string, unknown>): Record<string, unknown> 
 }
 
 describe("browser-collect-v1 public contract", () => {
+  it.each(campaignWireQueries)("validates actual serialized runtime payload for %s", search => {
+    const schema = JSON.parse(readFileSync(schemaPath, "utf8"));
+    expect(validateAgainstContract(schema, emitCampaignWireFixture(search))).toBe(true);
+  });
+  it.each(adKeys)("rejects the new %s key on click events", key => {
+    const schema = JSON.parse(readFileSync(schemaPath, "utf8"));
+    for (const eventName of ["site_click", "app_download_click", "sign_up_click"]) {
+      expect(validateAgainstContract(schema, { ...pageView({}), eventName, properties: { cta_id: "hero", cta_location: "hero", destination_path: "/download", [key]: "123" } })).toBe(false);
+    }
+  });
+  it("pins the independently reviewed H1 schema and fixture bytes", () => {
+    expect(createHash("sha256").update(readFileSync(schemaPath)).digest("hex")).toBe("f07be8b4cfaa4850d286fc144bec73da7b74629d516ea47ecc62b216d7849f73");
+    expect(createHash("sha256").update(readFileSync(fixturePath)).digest("hex")).toBe("1d413e6c0b044f3c108303315b03dd1872e155d3bde09ba3cacd40887a23ddb9");
+  });
   it("ships a versioned schema and fixture with the exact cloud-safe shape", () => {
     expect(existsSync(schemaPath), schemaPath).toBe(true)
     expect(existsSync(fixturePath), fixturePath).toBe(true)
@@ -172,16 +190,16 @@ describe("browser-collect-v1 public contract", () => {
     expect(fixture).toEqual({
       siteSourceKey: "site_public_fixture",
       eventId: "00000000-0000-4000-8000-000000000003",
-      eventName: "site_click",
+      eventName: "site_page_view",
       occurredAt: "2026-08-02T09:00:00.000Z",
       anonymousId: "00000000-0000-4000-8000-000000000001",
       sessionId: "00000000-0000-4000-8000-000000000002",
       url: "https://example.com/pricing/",
       referrer: "referrer.example",
       properties: {
-        cta_id: "pricing_primary",
-        cta_location: "hero",
-        destination_path: "/download"
+        nav: "navigate", utm_source: "facebook", utm_medium: "paid_social",
+        ad_id: "120211234567890123", adset_id: "120211234567890124",
+        campaign_id: "120211234567890125", utm_placement: "instagram_stories"
       }
     })
     expect(JSON.stringify(fixture)).not.toMatch(/[?#]|workspace|environment|authority|"path"/)
@@ -237,16 +255,16 @@ describe("browser-collect-v1 public contract", () => {
     for (const key of clickIdPresenceKeys) {
       expect(definitions[key], key).toEqual({ const: true })
     }
-    // 4 structural keys + 9 campaign keys — the cloud's PROPERTY_KEYS parity test pins the same count.
-    expect(Object.keys(definitions)).toHaveLength(13)
-    expect(schema.properties.properties.maxProperties).toBe(13)
+    // Existing structural/email-intent keys plus campaign/ad metadata; pinned to H1 server bytes.
+    expect(Object.keys(definitions)).toHaveLength(18)
+    expect(schema.properties.properties.maxProperties).toBe(18)
 
     const pageView = schema.allOf.find((branch) => branch.if.properties.eventName.const === "site_page_view")
     expect(pageView?.then.properties.properties).toEqual({
       type: "object",
-      maxProperties: 10,
+      maxProperties: 15,
       properties: Object.fromEntries(
-        ["nav", ...campaignKeys].map((key) => [key, { $ref: `#/properties/properties/properties/${key}` }])
+        ["nav", "ie", ...campaignKeys].map((key) => [key, { $ref: `#/properties/properties/properties/${key}` }])
       )
     })
     // Not required: a 0.5.x tag sends no properties on a page view and must keep validating.
