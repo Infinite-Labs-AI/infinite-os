@@ -7196,6 +7196,51 @@ describe("Meta Ads WRITE helpers", () => {
       }
     );
 
+    // 2026-09-27 creative rulings: degrees_of_freedom_spec is a TOP-LEVEL JSON-string field.
+    const degreesOfFreedomSpec = { creative_features_spec: { text_optimizations: { enroll_status: "OPT_OUT" as const } } };
+    await captureWrites(
+      () => jsonResponse({ id: "cr3" }),
+      async (captured) => {
+        await createMetaCreative(metaWriteCredential, {
+          name: "RulingsCreative",
+          pageId: "page_1",
+          imageHash: "hash_abc",
+          linkUrl: "https://example.com",
+          degreesOfFreedomSpec
+        });
+        expect(captured[0].body).toMatchObject({ name: "RulingsCreative", degrees_of_freedom_spec: degreesOfFreedomSpec });
+        expect(captured[0].rawForm?.degrees_of_freedom_spec).toBe(JSON.stringify(degreesOfFreedomSpec));
+      }
+    );
+
+    // A feed creative: identity in object_story_spec, everything else in asset_feed_spec.
+    const assetFeedSpec = {
+      ad_formats: ["SINGLE_IMAGE"],
+      images: [{ hash: "hash_4x5", adlabels: [{ name: "r_4x5" }] }, { hash: "hash_9x16", adlabels: [{ name: "r_9x16" }] }],
+      bodies: [{ text: "Primary one" }, { text: "Primary two" }],
+      titles: [{ text: "Headline" }]
+    };
+    await captureWrites(
+      () => jsonResponse({ id: "cr4" }),
+      async (captured) => {
+        await createMetaCreative(metaWriteCredential, {
+          name: "FeedCreative",
+          pageId: "page_1",
+          instagramUserId: "ig_1",
+          assetFeedSpec,
+          degreesOfFreedomSpec,
+          urlTags: "utm_content={{ad.name}}"
+        });
+        expect(captured[0].body).toEqual({
+          name: "FeedCreative",
+          object_story_spec: { page_id: "page_1", instagram_user_id: "ig_1" },
+          asset_feed_spec: assetFeedSpec,
+          degrees_of_freedom_spec: degreesOfFreedomSpec,
+          url_tags: "utm_content={{ad.name}}"
+        });
+      }
+    );
+
     await captureWrites(
       () => jsonResponse({ id: "ad1", status: "PAUSED" }),
       async (captured) => {
@@ -8789,6 +8834,145 @@ console.log(${JSON.stringify(serialized)});
             ).rejects.toMatchObject({ code: "provider_api_error", retryable: false });
           }
         );
+        expect(existsSync(join(dir, "argv.json"))).toBe(false);
+      });
+    });
+
+    // 2026-09-27 creative rulings: the caller's Advantage+ enhancement switches reach the CLI on the
+    // standard single-media path, as inline JSON (the arg vector is never a shell).
+    it("passes degreesOfFreedomSpec to a standard creative as --degrees-of-freedom-spec JSON", async () => {
+      await withTmp(async (dir) => {
+        const degreesOfFreedomSpec = {
+          creative_features_spec: { text_optimizations: { enroll_status: "OPT_OUT" as const }, image_touchups: { enroll_status: "OPT_OUT" as const } }
+        };
+        await withMockFetch(
+          () => new Response(Buffer.from("png"), { status: 200, headers: { "content-type": "image/png" } }),
+          async () => {
+            await createMetaCreative(cliCredential(dir, { id: "120000000000060" }), {
+              name: "Rulings",
+              pageId: "page_1",
+              imageUrl: "https://cdn.example.com/a.png",
+              linkUrl: "https://example.com/",
+              body: "Primary",
+              title: "Headline",
+              callToAction: "LEARN_MORE",
+              degreesOfFreedomSpec
+            });
+          }
+        );
+        const argv = recordedArgv(dir);
+        expect(argv).toContain("--image");
+        expect(JSON.parse(argv[argv.indexOf("--degrees-of-freedom-spec") + 1])).toEqual(degreesOfFreedomSpec);
+      });
+    });
+
+    it("creates a feed creative through the CLI's raw --asset-feed-spec mode, downloading nothing", async () => {
+      await withTmp(async (dir) => {
+        const assetFeedSpec = {
+          ad_formats: ["SINGLE_IMAGE"],
+          optimization_type: "PLACEMENT",
+          images: [
+            { url: "https://media.example.com/signed/4x5.png", adlabels: [{ name: "r_4x5" }] },
+            { url: "https://media.example.com/signed/9x16.png", adlabels: [{ name: "r_9x16" }] }
+          ],
+          bodies: [{ text: "Primary one" }, { text: "Primary two" }],
+          titles: [{ text: "Headline" }],
+          link_urls: [{ website_url: "https://example.com/" }],
+          call_to_action_types: ["LEARN_MORE"],
+          asset_customization_rules: [
+            { customization_spec: { publisher_platforms: ["instagram"], instagram_positions: ["story"] }, image_label: { name: "r_9x16" }, priority: 1 },
+            { customization_spec: {}, image_label: { name: "r_4x5" }, priority: 2 }
+          ]
+        };
+        const degreesOfFreedomSpec = { creative_features_spec: { text_optimizations: { enroll_status: "OPT_OUT" as const } } };
+        const fetched: string[] = [];
+        await withMockFetch(
+          (url) => {
+            fetched.push(url);
+            return new Response("unexpected", { status: 500 });
+          },
+          async () => {
+            const result = await createMetaCreative(cliCredential(dir, { id: "120000000000061" }), {
+              name: "inf_b2_static_na_hook_na_na_na_v1",
+              pageId: "page_1",
+              assetFeedSpec,
+              degreesOfFreedomSpec,
+              urlTags: "utm_source=facebook&utm_content={{ad.name}}"
+            });
+            expect(result).toEqual({ ok: true, id: "120000000000061", status: null });
+          }
+        );
+        expect(fetched).toEqual([]);
+        const argv = recordedArgv(dir);
+        expect(argv.slice(0, 11)).toEqual([
+          "--no-color", "--no-input", "--output", "json", "ads", "--ad-account-id", "1234567890", "creative", "create",
+          "--name", "inf_b2_static_na_hook_na_na_na_v1"
+        ]);
+        expect(argv[argv.indexOf("--page-id") + 1]).toBe("page_1");
+        expect(JSON.parse(argv[argv.indexOf("--asset-feed-spec") + 1])).toEqual(assetFeedSpec);
+        expect(JSON.parse(argv[argv.indexOf("--degrees-of-freedom-spec") + 1])).toEqual(degreesOfFreedomSpec);
+        expect(argv[argv.indexOf("--url-tags") + 1]).toBe("utm_source=facebook&utm_content={{ad.name}}");
+        // Raw mode REPLACES the shortcuts — none of them may ride along.
+        for (const shortcut of ["--image", "--video", "--images", "--body", "--title", "--link-url", "--call-to-action", "--object-story-spec"]) {
+          expect(argv).not.toContain(shortcut);
+        }
+      });
+    });
+
+    it("gives a feed creative its Instagram identity through --object-story-spec", async () => {
+      await withTmp(async (dir) => {
+        await createMetaCreative(cliCredential(dir, { id: "120000000000062" }), {
+          name: "ig",
+          pageId: "page_1",
+          instagramUserId: "1784100000",
+          assetFeedSpec: { images: [{ hash: "h1" }], bodies: [{ text: "b" }] }
+        });
+        const argv = recordedArgv(dir);
+        expect(argv).not.toContain("--page-id");
+        expect(argv).not.toContain("--instagram-user-id");
+        expect(JSON.parse(argv[argv.indexOf("--object-story-spec") + 1])).toEqual({ page_id: "page_1", instagram_user_id: "1784100000" });
+      });
+    });
+
+    it.each([
+      ["imageUrl", { imageUrl: "https://cdn.example.com/a.png" }],
+      ["body", { body: "Primary" }],
+      ["linkUrl", { linkUrl: "https://example.com/" }],
+      ["callToAction", { callToAction: "LEARN_MORE" }]
+    ])("REFUSES a feed creative that also carries %s, before any spawn", async (_key, extra) => {
+      await withTmp(async (dir) => {
+        await expect(
+          createMetaCreative(cliCredential(dir, { id: "should-not-happen" }), {
+            name: "Mixed",
+            pageId: "page_1",
+            assetFeedSpec: { images: [{ hash: "h1" }] },
+            ...extra
+          })
+        ).rejects.toMatchObject({ code: "invalid_creative_spec", retryable: false });
+        expect(existsSync(join(dir, "argv.json"))).toBe(false);
+      });
+    });
+
+    it("REFUSES a malformed degreesOfFreedomSpec before downloading or spawning", async () => {
+      await withTmp(async (dir) => {
+        const fetched: string[] = [];
+        await withMockFetch(
+          (url) => {
+            fetched.push(url);
+            return new Response(Buffer.from("png"), { status: 200 });
+          },
+          async () => {
+            await expect(
+              createMetaCreative(cliCredential(dir, { id: "should-not-happen" }), {
+                name: "Bad spec",
+                pageId: "page_1",
+                imageUrl: "https://cdn.example.com/a.png",
+                degreesOfFreedomSpec: { creative_features_spec: { text_optimizations: { enroll_status: "OFF" } } } as never
+              })
+            ).rejects.toMatchObject({ code: "invalid_creative_spec", retryable: false });
+          }
+        );
+        expect(fetched).toEqual([]);
         expect(existsSync(join(dir, "argv.json"))).toBe(false);
       });
     });

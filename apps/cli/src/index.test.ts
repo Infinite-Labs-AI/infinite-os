@@ -90,6 +90,8 @@ import {
   parsePersistentInputHistory,
   projectCommand,
   metaCommand,
+  META_DEFAULT_URL_TAGS,
+  isUtmSafeMetaAdName,
   renderProjectDeleteResult,
   requiresOperatorConfirmation,
   createLocalGa4OauthBootstrap,
@@ -12509,6 +12511,50 @@ describe("meta command (CLI write surface + confirm gates)", () => {
     expect((call?.body.input as Record<string, unknown>).status).toBeUndefined();
   });
 
+  // dc-readiness wave-1 review, finding 3: the terminal builds ads to the same launch rulings as the app — a clean
+  // link with every tag in url_tags (utm_content={{ad.name}}), and an ad name that passes as utm_content unchanged.
+  // Enhancements OFF is the engine's own default for create_meta_creative (analytical-engine).
+  it("creative create tags the ruling's url_tags onto a clean link, and refuses a link that already carries UTMs", async () => {
+    const api = stubToolsApi();
+    await metaCommand(
+      ["creative", "create", "--source-id", "src_meta", "--name", "hero", "--image-hash", "h1", "--link-url", "https://infinite.fast/", "--yes"],
+      ENV
+    );
+    expect(toolCalls(api)[0]?.body).toMatchObject({
+      actionId: "create_meta_creative",
+      input: { linkUrl: "https://infinite.fast/", urlTags: META_DEFAULT_URL_TAGS },
+    });
+    expect(META_DEFAULT_URL_TAGS).toContain("utm_content={{ad.name}}");
+    await metaCommand(
+      ["creative", "create", "--source-id", "src_meta", "--name", "hero", "--image-hash", "h1", "--link-url", "https://infinite.fast/", "--url-tags", "utm_content={{ad.id}}", "--yes"],
+      ENV
+    );
+    expect(toolCalls(api)[1]?.body.input).toMatchObject({ urlTags: "utm_content={{ad.id}}" });
+    await expect(metaCommand(
+      ["creative", "create", "--source-id", "src_meta", "--name", "hero", "--image-hash", "h1", "--link-url", "https://infinite.fast/?utm_source=fb", "--yes"],
+      ENV
+    )).rejects.toThrow(/already carries utm_source/);
+    expect(toolCalls(api)).toHaveLength(2);
+  });
+
+  it("ad create and ad update refuse a name that could not be the ad's utm_content, before any /tools/call", async () => {
+    const api = stubToolsApi();
+    await expect(metaCommand(
+      ["ad", "create", "120555", "--source-id", "src_meta", "--name", "Summer Sale · v2", "--creative-id", "777", "--yes"],
+      ENV
+    )).rejects.toThrow(/utm_content/);
+    await expect(metaCommand(["ad", "update", "120556", "--source-id", "src_meta", "--name", "Summer Sale", "--yes"], ENV)).rejects.toThrow(/utm_content/);
+    expect(toolCalls(api)).toHaveLength(0);
+    await metaCommand(
+      ["ad", "create", "120555", "--source-id", "src_meta", "--name", "inf_b1_static_na_hero_na_na_na_v1", "--creative-id", "777", "--yes"],
+      ENV
+    );
+    expect(toolCalls(api)[0]?.body).toMatchObject({ actionId: "create_meta_ad", input: { name: "inf_b1_static_na_hero_na_na_na_v1" } });
+    for (const [name, safe] of [["summer-sale", true], ["a.b_c-d", true], ["Summer", false], ["-x", false], ["a--b", false], ["jane@example.com", false], ["call-555-123-4567", false], ["x".repeat(161), false]] as const) {
+      expect([name, isUtmSafeMetaAdName(name)]).toEqual([name, safe]);
+    }
+  });
+
   it("create -y short flag also bypasses the confirm seam", async () => {
     const api = stubToolsApi();
     const confirmMutation = vi.fn(async () => true);
@@ -12781,18 +12827,18 @@ describe("meta command (CLI write surface + confirm gates)", () => {
     const api = stubToolsApi();
     const confirmMutation = vi.fn(async () => true);
     await metaCommand(
-      ["ad", "update", "120000000000000070", "--source-id", "src_meta", "--name", "Spring v2", "--creative-id", "120000000000000080"],
+      ["ad", "update", "120000000000000070", "--source-id", "src_meta", "--name", "spring_v2", "--creative-id", "120000000000000080"],
       ENV,
       { confirmMutation }
     );
     expect(confirmMutation).toHaveBeenCalledTimes(1);
     const summary = JSON.stringify(confirmMutation.mock.calls[0]);
-    expect(summary).toContain("rename to \\\"Spring v2\\\"");
+    expect(summary).toContain("rename to \\\"spring_v2\\\"");
     expect(summary).toContain("use creative 120000000000000080");
     const body = toolCalls(api)[0]?.body as { actionId?: string; input?: Record<string, unknown> };
     expect(body).toMatchObject({
       actionId: "update_meta_ad",
-      input: { sourceId: "src_meta", entityId: "120000000000000070", name: "Spring v2", creativeId: "120000000000000080" }
+      input: { sourceId: "src_meta", entityId: "120000000000000070", name: "spring_v2", creativeId: "120000000000000080" }
     });
     expect(body.input).not.toHaveProperty("status");
   });
@@ -13008,7 +13054,7 @@ describe("meta command (CLI write surface + confirm gates)", () => {
           "act_123",
           "as_888",
           "--name",
-          "Ad",
+          "ad",
           "--creative-id",
           "cr_1",
           "--yes"
