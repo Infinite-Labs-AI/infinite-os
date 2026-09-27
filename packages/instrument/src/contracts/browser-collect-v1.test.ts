@@ -270,9 +270,9 @@ describe("browser-collect-v1 public contract", () => {
     // Not required: a 0.5.x tag sends no properties on a page view and must keep validating.
     expect(pageView?.then.properties.properties).not.toHaveProperty("required")
 
-    // The shared file has exactly the three event branches the cloud pins by hash — campaign keys on
-    // click events are rejected by the cloud INGEST, not by the schema (kept permissive so both
-    // repos' copies stay byte-identical).
+    // The shared file has exactly three event branches pinned by the cloud hash. Legacy campaign
+    // keys remain permissive here and are rejected on clicks by ingest; the four new ad keys are
+    // explicitly forbidden by this schema on every non-page-view event.
     expect(schema.allOf.map((branch) => branch.if.properties.eventName.const)).toEqual([
       "site_page_view",
       "site_click",
