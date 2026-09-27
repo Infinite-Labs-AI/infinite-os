@@ -88,9 +88,9 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
     rmSync(dataDir, { recursive: true, force: true });
   });
 
-  it("applied ALL 73 migrations on first boot and is idempotent on a re-run", async () => {
-    expect(loadMigrations().length).toBe(73);
-    expect(firstRun).toHaveLength(73);
+  it("applied ALL 75 migrations on first boot and is idempotent on a re-run", async () => {
+    expect(loadMigrations().length).toBe(75);
+    expect(firstRun).toHaveLength(75);
     expect(firstRun).toContain("0001_control_plane.sql");
     expect(firstRun).toContain("0006_security_roles.sql");
     expect(firstRun).toContain("0036_chat_sessions_desktop_surface.sql");
@@ -129,6 +129,8 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
     expect(firstRun).toContain("0069_meta_ads_history_integrity.sql");
     expect(firstRun).toContain("0072_interactive_task_ledger.sql");
     expect(firstRun).toContain("0073_posthog_event_truth_event_time_index.sql");
+    expect(firstRun).toContain("0074_sync_batch_records_indexes.sql");
+    expect(firstRun).toContain("0075_posthog_raw_retention_90_days.sql");
 
     // Idempotent: a second boot re-applies zero (the `rows.length` gate, not the pg `rowCount`
     // gate, makes this true on PGlite).
@@ -136,13 +138,13 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
     expect(secondRun).toEqual([]);
   });
 
-  it("created the schema_migrations ledger with all 73 rows", async () => {
+  it("created the schema_migrations ledger with all 75 rows", async () => {
     const ledger = await db.query<{ id: string }>(
       "select id from schema_migrations order by id"
     );
-    expect(ledger).toHaveLength(73);
+    expect(ledger).toHaveLength(75);
     expect(ledger[0]?.id).toBe("0001_control_plane.sql");
-    expect(ledger.at(-1)?.id).toBe("0073_posthog_event_truth_event_time_index.sql");
+    expect(ledger.at(-1)?.id).toBe("0075_posthog_raw_retention_90_days.sql");
   });
 
   it("0063 serves both PostHog views from per-(workspace, source, day) rollups — refresh, is_internal, idempotency, grain key, grants", async () => {
@@ -529,12 +531,14 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
     ]);
     expect(await rollupSum()).toBe(await truthCount()); // "6" = "6"
 
-    // Config seeded 180 by the migration; the retention floor derives from it.
+    // Config seeded 180 by 0064 and lowered to 90 by 0075; the retention floor derives from it.
+    // Every day below sits either under both floors (190, 200) or above both (5, 10), so the prune
+    // assertions below hold at either value.
     const cfg = await db.query<{ retention_days: number }>(
       "select retention_days from posthog_retention_config"
     );
     expect(cfg).toHaveLength(1);
-    expect(Number(cfg[0]?.retention_days)).toBe(180);
+    expect(Number(cfg[0]?.retention_days)).toBe(90);
 
     // PRUNE: deletes exactly the 3 raw rows below the floor, returns the count, and touches ONLY
     // truth — every rollup row survives byte-for-byte. The watermark records what was pruned.
@@ -594,7 +598,7 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
       await expect(prune(pBefore)).rejects.toThrow(/query returned no rows|no data found/i);
     } finally {
       await db.query(
-        "insert into posthog_retention_config (singleton, retention_days) values (true, 180) on conflict (singleton) do nothing"
+        "insert into posthog_retention_config (singleton, retention_days) values (true, 90) on conflict (singleton) do nothing"
       );
     }
 

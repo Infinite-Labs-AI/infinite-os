@@ -4094,7 +4094,7 @@ async function explainAnswer(
       rawPayloadJsonExposed: false,
       genericSqlAllowed: false
     },
-    [metricView(metric), "record_lineage"],
+    [metricView(metric)],
     "ok",
     caveatsForMetric(metric),
     ["drilldown_result"]
@@ -4119,7 +4119,7 @@ async function drilldownResult(
       rawPayloadJsonExposed: false,
       genericSqlAllowed: false
     },
-    [drilldownForMetric(metric), "record_lineage"],
+    [drilldownForMetric(metric)],
     "ok",
     caveatsForMetric(metric),
     [],

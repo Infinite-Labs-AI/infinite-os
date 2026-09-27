@@ -87,7 +87,9 @@ describe("Infinite OS migration stack", () => {
       "0070_meta_ads_nullable_reach.sql",
       "0071_meta_reach_unmeasured_days.sql",
       "0072_interactive_task_ledger.sql",
-      "0073_posthog_event_truth_event_time_index.sql"
+      "0073_posthog_event_truth_event_time_index.sql",
+      "0074_sync_batch_records_indexes.sql",
+      "0075_posthog_raw_retention_90_days.sql"
     ]);
   });
 
@@ -1090,7 +1092,9 @@ describe("Infinite OS migration stack", () => {
       "0070_meta_ads_nullable_reach.sql",
       "0071_meta_reach_unmeasured_days.sql",
       "0072_interactive_task_ledger.sql",
-      "0073_posthog_event_truth_event_time_index.sql"
+      "0073_posthog_event_truth_event_time_index.sql",
+      "0074_sync_batch_records_indexes.sql",
+      "0075_posthog_raw_retention_90_days.sql"
     ]);
   });
 
@@ -1112,6 +1116,42 @@ describe("Infinite OS migration stack", () => {
     // Additive only: the 0046 time-leading index still serves the ordered drilldown.
     expect(sql).not.toContain("drop index");
     expect(sql).not.toContain("posthog_event_truth_workspace_time_event_idx");
+  });
+
+  it("indexes sync_batch_records by batch + status and by raw record, transaction-safe (0074)", () => {
+    const migration = loadMigrations().find(
+      (candidate) => candidate.id === "0074_sync_batch_records_indexes.sql"
+    );
+    const sql = (migration?.sql ?? "").toLowerCase().replace(/--[^\n]*/g, "").replace(/\s+/g, " ");
+
+    // The per-chunk status flip filters (sync_batch_id, record_status); the GA4 prune and the
+    // raw_records foreign key look rows up by raw_record_id.
+    expect(sql).toContain(
+      "create index if not exists sync_batch_records_sync_batch_id_record_status_idx on sync_batch_records (sync_batch_id, record_status)"
+    );
+    expect(sql).toContain(
+      "create index if not exists sync_batch_records_raw_record_id_idx on sync_batch_records (raw_record_id)"
+    );
+    // The runner applies every file inside a transaction, where `concurrently` is an error. The
+    // online build is an operator step outside the runner; the file itself must stay plain.
+    expect(sql).not.toContain("concurrently");
+    // Additive only.
+    expect(sql).not.toContain("drop ");
+    expect(sql).not.toContain("delete ");
+    expect(sql).not.toContain("update ");
+  });
+
+  it("lowers the seeded PostHog raw retention from 180 to 90 days and nothing else (0075)", () => {
+    const migration = loadMigrations().find(
+      (candidate) => candidate.id === "0075_posthog_raw_retention_90_days.sql"
+    );
+    const sql = (migration?.sql ?? "").toLowerCase().replace(/--[^\n]*/g, "").replace(/\s+/g, " ").trim();
+
+    // Only the 0064 seed value moves; a deployment that chose its own retention keeps it. The
+    // file changes the policy row only: deletion is the retention job's, never the migration's.
+    expect(sql).toBe(
+      "update posthog_retention_config set retention_days = 90 where singleton and retention_days = 180;"
+    );
   });
 
   it("adds the nullable Meta posting Page column beside the pixel (0068)", () => {
