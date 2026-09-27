@@ -1,15 +1,18 @@
-import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(here, "..");
-const tripwire = readFileSync(join(repoRoot, "scripts", "ci", "repo-tripwire.sh"), "utf8");
+const ciDir = join(repoRoot, "scripts", "ci");
+const read = (name: string) => readFileSync(join(ciDir, name), "utf8");
 
 describe("repo-tripwire public email allowlist", () => {
   it("allows public Infinite and GitHub noreply commit metadata only", () => {
-    const match = tripwire.match(/grep -viE '([^']+)'/);
+    const match = read("public-email-allowlist.sh").match(/PUBLIC_EMAIL_ALLOWLIST_ERE='([^']+)'/);
     expect(match).not.toBeNull();
 
     const allowlist = new RegExp(match![1], "i");
@@ -17,5 +20,116 @@ describe("repo-tripwire public email allowlist", () => {
     expect("123456+agent@users.noreply.github.com").toMatch(allowlist);
     expect("noreply@github.com").toMatch(allowlist);
     expect("founder@example.com").not.toMatch(allowlist);
+  });
+
+  it("is the one rule both the CI tripwire and the pre-push gate read", () => {
+    for (const script of ["repo-tripwire.sh", "check-push-emails.sh"]) {
+      const source = read(script);
+      expect(source).toContain("public-email-allowlist.sh");
+      expect(source).toContain('grep -viE "$PUBLIC_EMAIL_ALLOWLIST_ERE"');
+      expect(source).not.toContain("noreply\\.github\\.com");
+    }
+    const hook = readFileSync(join(repoRoot, ".githooks", "pre-push"), "utf8");
+    expect(hook).toContain("scripts/ci/check-push-emails.sh");
+  });
+});
+
+describe("pre-push email gate (check-push-emails.sh)", () => {
+  const ZERO = "0".repeat(40);
+  const OK = "123456+agent@users.noreply.github.com";
+  const BAD = "founder@example.com";
+  let repo: string;
+
+  const git = (args: string[], env: Record<string, string> = {}) => {
+    const result = spawnSync("git", args, {
+      cwd: repo,
+      encoding: "utf8",
+      env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1", ...env }
+    });
+    if (result.status !== 0) throw new Error(`git ${args.join(" ")}: ${result.stderr}`);
+    return result.stdout.trim();
+  };
+
+  const commit = (message: string, author: string, committer = author) => {
+    git(["commit", "-q", "--allow-empty", "-m", message], {
+      GIT_AUTHOR_NAME: "a",
+      GIT_AUTHOR_EMAIL: author,
+      GIT_COMMITTER_NAME: "c",
+      GIT_COMMITTER_EMAIL: committer
+    });
+    return git(["rev-parse", "HEAD"]);
+  };
+
+  const prePush = (localSha: string, remoteSha: string) =>
+    spawnSync("bash", [join(ciDir, "check-push-emails.sh")], {
+      cwd: repo,
+      encoding: "utf8",
+      input: `refs/heads/topic ${localSha} refs/heads/topic ${remoteSha}\n`,
+      env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" }
+    });
+
+  beforeEach(() => {
+    repo = mkdtempSync(join(tmpdir(), "push-email-gate-"));
+    git(["init", "-q"]);
+  });
+  afterEach(() => rmSync(repo, { recursive: true, force: true }));
+
+  it("refuses a new branch carrying a non-public author email and names the commit", () => {
+    const base = commit("base", OK);
+    git(["update-ref", "refs/remotes/origin/main", base]);
+    const bad = commit("leak", BAD);
+
+    const result = prePush(bad, ZERO);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(bad.slice(0, 7));
+    expect(result.stderr).toContain(`author=${BAD}`);
+    expect(result.stderr).toContain("--reset-author");
+  });
+
+  it("refuses a non-public committer even when the author is public", () => {
+    const base = commit("base", OK);
+    git(["update-ref", "refs/remotes/origin/main", base]);
+    const bad = commit("rebased by a personal identity", OK, BAD);
+
+    const result = prePush(bad, ZERO);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(`committer=${BAD}`);
+  });
+
+  it("checks only the pushed commits, not history the remote already has", () => {
+    const old = commit("already public", BAD);
+    git(["update-ref", "refs/remotes/origin/main", old]);
+    const fresh = commit("new work", OK);
+
+    expect(prePush(fresh, ZERO).status).toBe(0);
+    expect(prePush(fresh, old).status).toBe(0);
+  });
+
+  it("starts at the remote tip when git has it, else at every remote-tracking ref", () => {
+    const old = commit("already on the pushed-to branch", BAD);
+    const fresh = commit("new work", OK);
+
+    expect(prePush(fresh, old).status).toBe(0);
+    // A new branch, or a remote tip never fetched, is checked against the
+    // remote-tracking refs, and none of them has `old` here.
+    expect(prePush(fresh, ZERO).status).toBe(1);
+    expect(prePush(fresh, "deadbeef".repeat(5)).status).toBe(1);
+  });
+
+  it("refuses a bad commit in an update of an existing branch", () => {
+    const base = commit("base", OK);
+    git(["update-ref", "refs/remotes/origin/main", base]);
+    const bad = commit("leak", BAD);
+    const tip = commit("later", OK);
+
+    const result = prePush(tip, base);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(bad.slice(0, 7));
+    expect(result.stderr).not.toContain(tip.slice(0, 7) + "  author");
+  });
+
+  it("lets a branch deletion through", () => {
+    commit("base", BAD);
+    expect(prePush(ZERO, git(["rev-parse", "HEAD"])).status).toBe(0);
   });
 });
