@@ -11,8 +11,11 @@
  *   Media is referenced the way the Graph API documents it: an image by `hash` or `url` ("either url or
  *   hash is required"), a video by `video_id`. Nothing is downloaded or uploaded here.
  *
- * The engine does not BUILD either object. A caller builds them; the engine refuses shapes that could only
- * fail at Meta (or, worse, succeed as something the caller did not mean) and passes the rest verbatim.
+ * The engine does not BUILD a feed. A caller builds it; the engine refuses shapes that could only fail at Meta
+ * (or, worse, succeed as something the caller did not mean) and passes the rest verbatim. It builds ONE default:
+ * a creative whose caller names no `degreesOfFreedomSpec` gets `metaCreativeEnhancementsAllOff()` — every documented
+ * enhancement OFF — so no path (the terminal's `meta creative create`, an older host) creates a creative with
+ * Meta's own Advantage+ defaults silently. A caller that wants an enhancement ON says so explicitly.
  *
  * `META_CREATIVE_WRITE_FEATURES` is the capability list an embedding host checks BEFORE sending either
  * field. An older engine silently drops input keys it does not know, so a host that sends
@@ -38,6 +41,46 @@ export class MetaCreativeSpecError extends Error {
     super(`invalid_creative_spec: ${message}`);
     this.name = "MetaCreativeSpecError";
   }
+}
+
+/**
+ * Every `creative_features_spec` feature Meta documents (Advantage+ Creative — Get started, read 2026-09-27). The
+ * deprecated `standard_enhancements` bundle (v22+) is not one of them. Music is not a creative_features_spec feature
+ * at all: only a feed with an empty `asset_feed_spec.audios` switches it off, so this default cannot.
+ */
+export const META_CREATIVE_ENHANCEMENT_FEATURES = [
+  "adapt_to_placement",
+  "add_text_overlay",
+  "creative_stickers",
+  "description_automation",
+  "enhance_cta",
+  "image_animation",
+  "image_background_gen",
+  "image_brightness_and_contrast",
+  "image_templates",
+  "image_text_translation",
+  "image_touchups",
+  "image_uncrop",
+  "inline_comment",
+  "media_type_automation",
+  "pac_relaxation",
+  "product_extensions",
+  "reveal_details_over_time",
+  "text_optimizations",
+  "text_translation",
+  "translate_voiceover",
+  "video_auto_crop",
+  "video_filtering",
+  "video_uncrop",
+] as const;
+
+/** A fresh degrees_of_freedom_spec with every documented enhancement OFF — create_meta_creative's default. */
+export function metaCreativeEnhancementsAllOff(): MetaDegreesOfFreedomSpec {
+  return {
+    creative_features_spec: Object.fromEntries(
+      META_CREATIVE_ENHANCEMENT_FEATURES.map((feature) => [feature, { enroll_status: "OPT_OUT" as const }])
+    ),
+  };
 }
 
 const FEATURE_KEY = /^[a-z][a-z0-9_]{0,79}$/;

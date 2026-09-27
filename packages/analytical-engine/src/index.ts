@@ -14,6 +14,7 @@ import {
   getMetaEntity,
   listMetaAssets,
   listMetaEntities,
+  metaCreativeEnhancementsAllOff,
   resolveMetaAdsCredential,
   setMetaEntityStatus,
   updateMetaBudget,
@@ -2545,7 +2546,10 @@ async function createMetaCreativeHandler(
   expectedCredential?: ExpectedMetaCredential
 ): Promise<ActionEnvelope> {
   const name = requiredString(input, "name");
-  const degreesOfFreedomSpec = optionalCreativeObject(input, "degreesOfFreedomSpec");
+  // Every creative this engine creates carries an explicit enhancement choice: the caller's, or — when it names
+  // none (the terminal's `meta creative create`, an older host) — every documented enhancement OFF. Meta's own
+  // Advantage+ defaults are never taken silently (the founder's ruling, 2026-09-23; dc-readiness wave-1 review).
+  const degreesOfFreedomSpec = optionalCreativeObject(input, "degreesOfFreedomSpec") ?? metaCreativeEnhancementsAllOff();
   const assetFeedSpec = optionalCreativeObject(input, "assetFeedSpec");
   const sourceId = await resolveMetaWriteSourceId(db, context, input);
   const pageId = await resolveMetaPostingPageId(db, context, sourceId, input, expectedCredential);
@@ -2568,7 +2572,7 @@ async function createMetaCreativeHandler(
       // Raw AdCreative objects (validated by the connector before any download/spawn/POST). Forwarded
       // whole — a host that sends them checks META_CREATIVE_WRITE_FEATURES / the daemon's
       // meta_creative_rulings_writes capability first, because an older engine drops unknown keys.
-      ...(degreesOfFreedomSpec !== undefined ? { degreesOfFreedomSpec: degreesOfFreedomSpec as unknown as MetaDegreesOfFreedomSpec } : {}),
+      degreesOfFreedomSpec: degreesOfFreedomSpec as unknown as MetaDegreesOfFreedomSpec,
       ...(assetFeedSpec !== undefined ? { assetFeedSpec: assetFeedSpec as MetaAssetFeedSpec } : {})
     }), undefined, cliExecution, encryptionKey, expectedCredential
   );

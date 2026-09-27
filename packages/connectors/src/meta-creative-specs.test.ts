@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  META_CREATIVE_ENHANCEMENT_FEATURES,
   META_CREATIVE_WRITE_FEATURES,
   MetaCreativeSpecError,
   metaAssetFeedHasVideo,
+  metaCreativeEnhancementsAllOff,
   normalizeMetaAssetFeedSpec,
   normalizeMetaDegreesOfFreedomSpec
 } from "./meta-creative-specs.js";
@@ -12,6 +14,19 @@ const OFF = { enroll_status: "OPT_OUT" } as const;
 describe("META_CREATIVE_WRITE_FEATURES", () => {
   it("names both raw creative objects a host may send (the host fails closed on a missing one)", () => {
     expect([...META_CREATIVE_WRITE_FEATURES]).toEqual(["degrees_of_freedom_spec", "asset_feed_spec"]);
+  });
+});
+
+describe("metaCreativeEnhancementsAllOff (create_meta_creative's default)", () => {
+  it("switches every documented feature OFF, never the deprecated standard_enhancements bundle", () => {
+    const spec = metaCreativeEnhancementsAllOff();
+    expect(Object.keys(spec.creative_features_spec)).toEqual([...META_CREATIVE_ENHANCEMENT_FEATURES]);
+    expect(META_CREATIVE_ENHANCEMENT_FEATURES).toHaveLength(23);
+    expect(Object.values(spec.creative_features_spec).every((feature) => feature.enroll_status === "OPT_OUT")).toBe(true);
+    expect(spec.creative_features_spec).not.toHaveProperty("standard_enhancements");
+    // It is exactly what the transport validator accepts, and a fresh object every call.
+    expect(normalizeMetaDegreesOfFreedomSpec(spec)).toEqual(spec);
+    expect(metaCreativeEnhancementsAllOff()).not.toBe(spec);
   });
 });
 

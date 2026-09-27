@@ -8,7 +8,7 @@ import {
   isEncryptedCredentialPayload
 } from "@infinite-os/core";
 import { type InfiniteOsDb } from "@infinite-os/db";
-import { MetaAdsRequestTelemetry } from "@infinite-os/connectors";
+import { META_CREATIVE_ENHANCEMENT_FEATURES, MetaAdsRequestTelemetry } from "@infinite-os/connectors";
 import { FIRST_PHASE_METRICS, createInfiniteOsRegistry } from "@infinite-os/runtime";
 
 import {
@@ -9542,6 +9542,32 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
           expect(result?.data).toMatchObject({ id: "23850000000001", entity: "creative" });
           const post = calls.find((c) => c.method === "POST");
           expect(post?.body?.object_story_spec).toMatchObject({ page_id: "pg_stored" });
+        }
+      );
+    });
+
+    // dc-readiness wave-1 review, finding 3: a caller that names no enhancement choice (the terminal's
+    // `meta creative create`, an older host) gets every documented enhancement OFF — never Meta's defaults.
+    it("create_meta_creative switches every documented enhancement OFF when the caller names none, and keeps a caller's own choice", async () => {
+      await withGraph(
+        () => jsonResponse({ id: "23850000000009" }),
+        async (calls) => {
+          const handlers = createActionHandlers(creativeDb("pg_stored"));
+          await handlers.create_meta_creative?.(
+            { sourceId: "src_meta", name: "Terminal creative", linkUrl: "https://example.com", imageHash: "abc", clientToken: "tok_default_off" },
+            operatorContext
+          );
+          const spec = calls.find((c) => c.method === "POST")?.body?.degrees_of_freedom_spec as { creative_features_spec: Record<string, { enroll_status: string }> };
+          expect(Object.keys(spec.creative_features_spec).sort()).toEqual([...META_CREATIVE_ENHANCEMENT_FEATURES].sort());
+          expect(Object.values(spec.creative_features_spec).every((feature) => feature.enroll_status === "OPT_OUT")).toBe(true);
+          expect(spec.creative_features_spec).not.toHaveProperty("standard_enhancements");
+
+          const own = { creative_features_spec: { inline_comment: { enroll_status: "OPT_IN" } } };
+          await handlers.create_meta_creative?.(
+            { sourceId: "src_meta", name: "Host creative", linkUrl: "https://example.com", imageHash: "abc", degreesOfFreedomSpec: own, clientToken: "tok_own_choice" },
+            operatorContext
+          );
+          expect(calls.filter((c) => c.method === "POST").at(-1)?.body?.degrees_of_freedom_spec).toEqual(own);
         }
       );
     });

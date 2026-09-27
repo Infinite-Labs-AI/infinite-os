@@ -69,8 +69,10 @@ import {
   type MetaDegreesOfFreedomSpec,
 } from "./meta-creative-specs.js";
 export {
+  META_CREATIVE_ENHANCEMENT_FEATURES,
   META_CREATIVE_WRITE_FEATURES,
   MetaCreativeSpecError,
+  metaCreativeEnhancementsAllOff,
   normalizeMetaAssetFeedSpec,
   normalizeMetaDegreesOfFreedomSpec,
   type MetaAssetFeedSpec,

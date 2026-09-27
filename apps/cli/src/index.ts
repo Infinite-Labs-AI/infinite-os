@@ -8048,6 +8048,48 @@ function metaSourceIdFromArgs(args: string[]): string {
   return sourceId;
 }
 
+// The launch rulings every ad the terminal builds follows (the same ones Infinite's app enforces; its
+// src/lib/links/ad-utm.ts and creative-rulings.ts): the Website URL is the CLEAN page, every tracking parameter
+// rides the creative's url_tags — utm_content is the AD'S NAME — and so an ad's name must pass as utm_content
+// unchanged. Enhancements OFF is the engine's own default (create_meta_creative).
+export const META_DEFAULT_URL_TAGS =
+  "utm_source=facebook&utm_medium=paid_social&utm_campaign={{campaign.id}}&utm_term={{adset.id}}" +
+  "&utm_content={{ad.name}}&utm_placement={{placement}}&ad_id={{ad.id}}&adset_id={{adset.id}}&campaign_id={{campaign.id}}";
+
+/** The utm_* keys a link already carries ([] for none or an unparsable link). */
+export function metaLinkUtmKeys(link: string): string[] {
+  let url: URL;
+  try {
+    url = new URL(link.trim());
+  } catch {
+    return [];
+  }
+  return [...new Set([...url.searchParams.keys()].filter((key) => key.toLowerCase().startsWith("utm_")))];
+}
+
+/**
+ * True when an ad name can be its own utm_content unchanged: lowercase letters, digits, `.`, `_`, `-`; no leading or
+ * trailing separator, no `--`; at most 160 characters; not an email or a phone-shaped digit run (the UTM governor's
+ * PII rule). E.g. the naming convention's `inf_b1_static_customer_10k-users_f-asian_warm_na_v3`.
+ */
+export function isUtmSafeMetaAdName(name: string): boolean {
+  if (!name || name.length > 160) return false;
+  if (!/^[a-z0-9]/.test(name) || !/[a-z0-9]$/.test(name)) return false;
+  if (!/^[a-z0-9._-]+$/.test(name) || /-{2,}/.test(name)) return false;
+  if (/[^\s@]+@[^\s@]+\.[^\s@]+/.test(name)) return false;
+  const digits = name.replace(/[^0-9]/g, "");
+  return !(digits.length >= 7 && /[0-9][\s().-]{0,2}[0-9]/.test(name));
+}
+
+function assertUtmSafeMetaAdName(name: string, command: string): void {
+  if (!isUtmSafeMetaAdName(name)) {
+    throw new Error(
+      `${command}: --name becomes the ad's utm_content (url_tags carry utm_content={{ad.name}}), so it must be ` +
+        "lowercase letters, digits, ., _ and - only — e.g. inf_b1_static_customer_10k-users_f-asian_warm_na_v3"
+    );
+  }
+}
+
 // Value-taking flags across the whole `meta` surface. The positional-id resolver
 // MUST skip both the flag AND its following value so that, e.g.,
 // `--source-id act_123 cmp_999` resolves to `cmp_999` (the entity id), NOT to
@@ -8077,6 +8119,7 @@ const META_VALUE_FLAGS = new Set<string>([
   "--call-to-action",
   "--instagram-user-id",
   "--image-hash",
+  "--url-tags",
   "--client-token",
   "--fields",
   "-l",
@@ -8277,6 +8320,7 @@ async function metaAdUpdateCommand(
   if (name === undefined && creativeId === undefined) {
     throw new Error("meta ad update requires --name and/or --creative-id");
   }
+  if (name !== undefined) assertUtmSafeMetaAdName(name, "meta ad update");
   const changes = [
     ...(name === undefined ? [] : [`rename to ${JSON.stringify(name)}`]),
     ...(creativeId === undefined ? [] : [`use creative ${creativeId}`])
@@ -8474,6 +8518,15 @@ async function metaCreateCommand(
     // STANDARD creatives only: a single uploaded image referenced by hash. The
     // `/adimages` upload→imageHash flow is deferred; we pass a supplied hash.
     const imageHash = optionValue(rest, "--image-hash");
+    // A clean link; the tracking rides url_tags (the rulings above). --url-tags overrides the default string.
+    const preTagged = linkUrl ? metaLinkUtmKeys(linkUrl) : [];
+    if (preTagged.length > 0) {
+      throw new Error(
+        `meta creative create: --link-url already carries ${preTagged.join(", ")}. Give the clean page address; ` +
+          "tracking rides --url-tags (default: utm_content={{ad.name}} and the id macros)"
+      );
+    }
+    const urlTags = optionValue(rest, "--url-tags") ?? (linkUrl ? META_DEFAULT_URL_TAGS : undefined);
     actionId = "create_meta_creative";
     toolInput = {
       sourceId: ctx.sourceId,
@@ -8482,6 +8535,7 @@ async function metaCreateCommand(
       ...(imageHash ? { imageHash } : {}),
       ...(instagramUserId ? { instagramUserId } : {}),
       ...(linkUrl ? { linkUrl } : {}),
+      ...(urlTags ? { urlTags } : {}),
       ...(body ? { body } : {}),
       ...(title ? { title } : {}),
       ...(description ? { description } : {}),
@@ -8494,6 +8548,7 @@ async function metaCreateCommand(
       throw new Error("meta ad create requires an ad set id (positional)");
     }
     const name = requireMetaFlag(rest, "--name", "ad create");
+    assertUtmSafeMetaAdName(name, "meta ad create");
     const creativeId = requireMetaFlag(rest, "--creative-id", "ad create");
     actionId = "create_meta_ad";
     toolInput = {
