@@ -134,8 +134,13 @@ if [ -n "$matches" ]; then echo "$matches" >&2; fail "internal-style doc tracked
 #    the metadata counterpart to check 5. Allowlist: @infinite.fast + GitHub
 #    noreply (user noreply + synthetic PR merge noreply@github.com).
 #    PUBLIC-MODE-ONLY. Set repo-local `user.email` in the public clone.
+#    The allowlist lives in public-email-allowlist.sh, shared with the
+#    pre-push gate (check-push-emails.sh), which stops a bad email BEFORE a
+#    push creates a PR ref; this check only sees history after the fact.
 if [ "${PUBLIC_SURFACE:-0}" = "1" ]; then
-  bad_emails="$(git log --format='%ae%n%ce' | sort -u | grep -viE '(@infinite\.fast|@users\.noreply\.github\.com|^noreply@github\.com)$' || true)"
+  # shellcheck source=scripts/ci/public-email-allowlist.sh
+  . "scripts/ci/public-email-allowlist.sh"
+  bad_emails="$(git log --format='%ae%n%ce' | sort -u | grep -viE "$PUBLIC_EMAIL_ALLOWLIST_ERE" || true)"
   if [ -n "$bad_emails" ]; then
     echo "$bad_emails" >&2
     echo "::error::commit author/committer email(s) not on the public allowlist — set repo-local user.email to a public address"
