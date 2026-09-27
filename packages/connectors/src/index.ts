@@ -4323,13 +4323,6 @@ async function writeGa4OverviewTruth(
       row.keyEvents
     ]
   );
-  await writeLineage(
-    tx,
-    request,
-    "ga4_report_snapshot_fact",
-    `${row.reportingDate}:${row.country}:${row.landingPage}:${row.utmSource}:${row.utmMedium}:${row.utmCampaign}:${row.sessionDefaultChannelGroup}:${row.deviceCategory}:${row.hostName}`,
-    rawId
-  );
 }
 
 async function writeGa4PageTruth(
@@ -4371,13 +4364,6 @@ async function writeGa4PageTruth(
       row.keyEvents
     ]
   );
-  await writeLineage(
-    tx,
-    request,
-    "ga4_page_report_fact",
-    `${row.reportingDate}:${row.hostName}:${row.pagePath}`,
-    rawId
-  );
 }
 
 async function writeGa4EventTruth(
@@ -4410,13 +4396,6 @@ async function writeGa4EventTruth(
       row.keyEvents
     ]
   );
-  await writeLineage(
-    tx,
-    request,
-    "ga4_event_report_fact",
-    `${row.reportingDate}:${row.hostName}:${row.eventName}`,
-    rawId
-  );
 }
 
 // Rows per multi-row INSERT. The widest statement below is posthog_event_truth at 16 columns →
@@ -4430,16 +4409,11 @@ interface PostHogTruthItem {
   rawId: string;
 }
 
-interface PostHogLineageItem {
-  providerTable: string;
-  providerRowId: string;
-  rawId: string;
-}
-
 /**
  * PostHog truth loader. Replaces a per-event loop that cost EIGHT round trips per event (four
- * upserts + four lineage rows) — 92k events could not clear the 900s cloud sync worker at that
- * price. Every statement is now a multi-row INSERT over a chunk.
+ * upserts + four record_lineage rows, which are no longer written at all) — 92k events could not
+ * clear the 900s cloud sync worker at that price. Every statement is now a multi-row INSERT over a
+ * chunk.
  *
  * The rows written are byte-identical to the per-event loop's, which turns on ONE subtlety: a
  * multi-row `on conflict do update` raises "cannot affect row a second time" if a conflict target
@@ -4447,8 +4421,7 @@ interface PostHogLineageItem {
  * id. Every writer below therefore folds its duplicates with foldByConflictKey and reproduces the
  * loop's outcome exactly: the FIRST occurrence supplies the insert-only columns (the row that
  * would have won the INSERT) and the LAST supplies the updatable ones (the statement that would
- * have won the final DO UPDATE). Lineage is NOT folded that way — the loop wrote one row per event
- * per table, keyed by (table, business key, raw record), and so does this.
+ * have won the final DO UPDATE).
  */
 async function writePostHogTruth(
   tx: InfiniteOsDb,
@@ -4466,16 +4439,6 @@ async function writePostHogTruth(
     await writePostHogPersonCurrentChunk(tx, request, chunk);
     await writePostHogDistinctIdChunk(tx, request, chunk);
     await writePostHogSessionFactChunk(tx, request, chunk);
-    await writePostHogLineageChunk(
-      tx,
-      request,
-      chunk.flatMap(({ row, rawId }) => [
-        { providerTable: "posthog_event_truth", providerRowId: row.eventId, rawId },
-        { providerTable: "posthog_person_current", providerRowId: row.personId, rawId },
-        { providerTable: "posthog_person_distinct_ids", providerRowId: row.distinctId, rawId },
-        { providerTable: "posthog_session_fact", providerRowId: row.sessionId, rawId }
-      ])
-    );
   }
 }
 
@@ -4662,49 +4625,6 @@ async function writePostHogSessionFactChunk(
   );
 }
 
-const LINEAGE_CASTS = ["", "", "", "", "", "", "", "", ""] as const;
-
-async function writePostHogLineageChunk(
-  tx: InfiniteOsDb,
-  request: SyncRequest,
-  items: PostHogLineageItem[]
-): Promise<void> {
-  for (let offset = 0; offset < items.length; offset += POSTHOG_TRUTH_WRITE_CHUNK) {
-    const folded = foldByConflictKey(
-      items.slice(offset, offset + POSTHOG_TRUTH_WRITE_CHUNK),
-      (item) => JSON.stringify([item.providerTable, item.providerRowId, item.rawId])
-    );
-    const params: unknown[] = [];
-    for (const { first } of folded) {
-      // Column order matches writeLineage's expansion of ($1,$2,$3,$4,$5,$3,$4,$6,'live-v1'):
-      // canonical_* mirror provider_*, and the normalization version is the same literal.
-      params.push(
-        `lineage_${randomUUID()}`,
-        request.workspaceId,
-        first.providerTable,
-        first.providerRowId,
-        request.provider,
-        first.providerTable,
-        first.providerRowId,
-        first.rawId,
-        "live-v1"
-      );
-    }
-    await tx.query(
-      `
-        insert into record_lineage (
-          id, workspace_id, canonical_table, canonical_id, provider,
-          provider_table, provider_row_id, raw_record_id, normalization_version
-        )
-        values ${multiRowValues(folded.length, LINEAGE_CASTS)}
-        on conflict (workspace_id, provider_table, provider_row_id, raw_record_id)
-        do update set normalization_version = excluded.normalization_version
-      `,
-      params
-    );
-  }
-}
-
 // `metrics_classification` used to be a one-way trapdoor: every customer upsert coalesced the
 // incoming value over the stored one, so REMOVING the `infinite_metrics_classification` tag in
 // Stripe could never clear it and the customer stayed excluded from every business metric
@@ -4771,7 +4691,6 @@ async function writeStripeTruth(
           invoice.createdAt
         ]
       );
-      await writeLineage(tx, request, "stripe_customers", invoice.customerId, rawIds[index]);
     }
     await tx.query(
       `
@@ -4819,7 +4738,6 @@ async function writeStripeTruth(
         invoice.prePaymentCreditedMinor
       ]
     );
-    await writeLineage(tx, request, "stripe_invoices", invoice.invoiceId, rawIds[index]);
     for (const line of invoice.lines) {
       if (line.productId) {
         await tx.query(
@@ -4830,7 +4748,6 @@ async function writeStripeTruth(
           `,
           [`prod_${randomUUID()}`, request.workspaceId, request.sourceId, rawIds[index], line.productId, line.productName]
         );
-        await writeLineage(tx, request, "stripe_products", line.productId, rawIds[index]);
       }
       if (line.priceId && line.productId) {
         await tx.query(
@@ -4854,7 +4771,6 @@ async function writeStripeTruth(
             line.amountCents
           ]
         );
-        await writeLineage(tx, request, "stripe_prices", line.priceId, rawIds[index]);
       }
       await tx.query(
         `
@@ -4883,7 +4799,6 @@ async function writeStripeTruth(
           invoice.externalOrderId
         ]
       );
-      await writeLineage(tx, request, "stripe_invoice_lines", line.lineId, rawIds[index]);
     }
     if (invoice.subscriptionId) {
       // A PLACEHOLDER, not truth. An invoice payload carries no subscription status and no
@@ -4918,7 +4833,6 @@ async function writeStripeTruth(
           invoice.createdAt
         ]
       );
-      await writeLineage(tx, request, "stripe_subscriptions", invoice.subscriptionId, rawIds[index]);
     }
   }
 }
@@ -4976,7 +4890,6 @@ async function writeStripeSubscriptionEventTruth(
       STRIPE_TRIAL_PARSER_VERSION,
     ],
   );
-  await writeLineage(tx, request, "stripe_subscription_lifecycle_events", event.stripeEventId, rawId);
 }
 
 async function writeStripeSubscriptionTruth(
@@ -5010,7 +4923,6 @@ async function writeStripeSubscriptionTruth(
         sub.createdAt,
       ]
     );
-    await writeLineage(tx, request, "stripe_customers", sub.customerId, rawId);
   }
 
   await tx.query(
@@ -5060,7 +4972,6 @@ async function writeStripeSubscriptionTruth(
       sub.liveMode
     ]
   );
-  await writeLineage(tx, request, "stripe_subscriptions", sub.subscriptionId, rawId);
 
   // Extraction reaches this transaction only after every subscription-item page has succeeded.
   // Replace the complete child sets atomically so removed Stripe objects cannot keep contributing.
@@ -5097,7 +5008,6 @@ async function writeStripeSubscriptionTruth(
         `,
         [`prod_${randomUUID()}`, request.workspaceId, request.sourceId, rawId, item.productId]
       );
-      await writeLineage(tx, request, "stripe_products", item.productId, rawId);
     }
     if (item.priceId) {
       await tx.query(
@@ -5145,7 +5055,6 @@ async function writeStripeSubscriptionTruth(
           item.transformQuantityRound
         ]
       );
-      await writeLineage(tx, request, "stripe_prices", item.priceId, rawId);
     }
     await tx.query(
       `
@@ -5207,7 +5116,6 @@ async function writeStripeSubscriptionTruth(
         item.transformQuantityRound
       ]
     );
-    await writeLineage(tx, request, "stripe_subscription_items", item.itemId, rawId);
     for (const discount of item.discounts) {
       await writeStripeSubscriptionDiscount(
         tx,
@@ -5257,7 +5165,6 @@ async function writeStripeCustomerTruth(
       customer.createdAt
     ]
   );
-  await writeLineage(tx, request, "stripe_customers", customer.customerId, rawId);
 }
 
 async function writeStripeSubscriptionDiscount(
@@ -5345,15 +5252,6 @@ async function writeXTruth(
         JSON.stringify(profileSnapshot.publicMetrics)
       ]
     );
-    if (rawIds[0]) {
-      // KNOWN (chunked loader): writeTruth now runs once per ~500-record chunk, and
-      // writeLineage's conflict key includes raw_record_id — each chunk passes its
-      // own rawIds[0], so a multi-chunk X sync writes one snapshot-lineage row per
-      // chunk (was 1 per sync). Provenance noise only, never corruption (the
-      // snapshot upsert above is idempotent on (source_id, captured_at)); left
-      // as-is because X is sunset engine-side.
-      await writeLineage(tx, request, "x_profile_snapshot", `${profileSnapshot.userId}:${profileSnapshot.capturedAt}`, rawIds[0]);
-    }
   }
   for (let index = 0; index < rows.length; index += 1) {
     const post = rows[index];
@@ -5386,7 +5284,6 @@ async function writeXTruth(
         post.publishedAt
       ]
     );
-    await writeLineage(tx, request, "x_post", post.postId, rawIds[index]);
     await tx.query(
       `
         insert into x_post_metric_snapshot (
@@ -5421,7 +5318,6 @@ async function writeXTruth(
         JSON.stringify(post.publicMetrics)
       ]
     );
-    await writeLineage(tx, request, "x_post_metric_snapshot", `${post.postId}:${post.capturedAt}`, rawIds[index]);
   }
 }
 
@@ -5465,7 +5361,6 @@ async function writeShopifyTruth(
           row.updatedAt
         ]
       );
-      await writeLineage(tx, request, "shopify_products", row.productId, rawIds[index]);
       continue;
     }
     const order = row;
@@ -5513,7 +5408,6 @@ async function writeShopifyTruth(
         order.processedAt
       ]
     );
-    await writeLineage(tx, request, "shopify_orders", order.orderId, rawIds[index]);
     for (const line of order.lineItems) {
       await tx.query(
         `
@@ -5550,7 +5444,6 @@ async function writeShopifyTruth(
           line.lineTotalAmount
         ]
       );
-      await writeLineage(tx, request, "shopify_order_lines", line.lineItemId, rawIds[index]);
     }
   }
 }
@@ -5748,42 +5641,6 @@ async function stageMetaAdsSnapshotKeys(
   });
 }
 
-// Batched form of writeLineage — same INSERT, same
-// `on conflict (workspace_id, provider_table, provider_row_id, raw_record_id)` target and constant
-// `normalization_version = 'live-v1'`. All entries share one provider_table; each carries its own
-// provider_row_id + raw_record_id.
-async function writeLineageRows(
-  tx: InfiniteOsDb,
-  request: SyncRequest,
-  providerTable: string,
-  entries: ReadonlyArray<{ providerRowId: string; rawRecordId: string }>,
-): Promise<void> {
-  await bulkUpsertRows(tx, entries, {
-    conflictKey: (entry) => `${entry.providerRowId}${entry.rawRecordId}`,
-    keepLast: false,
-    paramsPerRow: 6,
-    // Positions 6 and 7 reuse $3 (provider_table) and $4 (provider_row_id); normalization_version is
-    // the literal 'live-v1' — mirroring the per-row writeLineage tuple exactly.
-    rowValuesSql: (b) => `($${b + 1},$${b + 2},$${b + 3},$${b + 4},$${b + 5},$${b + 3},$${b + 4},$${b + 6},'live-v1')`,
-    paramsOf: (entry) => [
-      `lineage_${randomUUID()}`,
-      request.workspaceId,
-      providerTable,
-      entry.providerRowId,
-      request.provider,
-      entry.rawRecordId,
-    ],
-    buildSql: (valuesSql) =>
-      `insert into record_lineage (
-         id, workspace_id, canonical_table, canonical_id, provider,
-         provider_table, provider_row_id, raw_record_id, normalization_version
-       )
-       values ${valuesSql}
-       on conflict (workspace_id, provider_table, provider_row_id, raw_record_id)
-       do update set normalization_version = excluded.normalization_version`,
-  });
-}
-
 async function stageMetaAdsSnapshotKey(
   tx: InfiniteOsDb,
   request: SyncRequest,
@@ -5931,13 +5788,6 @@ async function writeMetaAdsEntityVersions(
         row.observedAt,
       ],
     );
-    await writeLineage(
-      tx,
-      request,
-      "meta_ads_entity_versions",
-      `${row.adAccountId}:${row.entityType}:${row.entityId}:${payloadHash}`,
-      rawIds[index],
-    );
   }
 }
 
@@ -5989,16 +5839,6 @@ async function writeMetaAdsCampaignDimension(
           configured_status = coalesce(excluded.configured_status, meta_ads_campaigns.configured_status),
           updated_at = now()`,
   });
-  // Lineage carries an FK to raw_records, so only write it when a real raw id exists for
-  // this run (the dimension is a fold of the day rows; a fabricated id would break the FK).
-  if (rawRecordId) {
-    await writeLineageRows(
-      tx,
-      request,
-      "meta_ads_campaigns",
-      dims.map((dim) => ({ providerRowId: `${dim.adAccountId}:${dim.campaignId}`, rawRecordId })),
-    );
-  }
 }
 
 // §4c — the DISPATCHING writer. extractLive emits a grain-tagged union (campaign + adset
@@ -6119,10 +5959,6 @@ async function writeMetaAdsCampaignTruth(
     entityId: row.campaignId,
     keyKind: "delivery",
   })));
-  await writeLineageRows(tx, request, "meta_ads_campaign_daily", items.map(({ row, rawId }) => ({
-    providerRowId: `${row.adAccountId}:${row.campaignId}:${row.occurredOn}`,
-    rawRecordId: rawId,
-  })));
   await writeMetaAdsConversionRows(tx, request, items);
 }
 
@@ -6184,10 +6020,6 @@ async function writeMetaAdsConversionRows(
     keyKind: "conversion",
     resultType: conversion.resultType,
   })));
-  await writeLineageRows(tx, request, "meta_ads_campaign_conversions_daily", flat.map(({ row, rawId, conversion }) => ({
-    providerRowId: `${row.adAccountId}:${row.campaignId}:${row.occurredOn}:${conversion.resultType}`,
-    rawRecordId: rawId,
-  })));
 }
 
 // ──────────────────────────────────────────────────────────────────────────────────
@@ -6246,14 +6078,6 @@ async function writeMetaAdsAdsetDimension(
           currency = coalesce(excluded.currency, meta_ads_adsets.currency),
           updated_at = now()`,
   });
-  if (rawRecordId) {
-    await writeLineageRows(
-      tx,
-      request,
-      "meta_ads_adsets",
-      dims.map((dim) => ({ providerRowId: `${dim.adAccountId}:${dim.adsetId}`, rawRecordId })),
-    );
-  }
 }
 
 async function writeMetaAdsAdsetTruth(
@@ -6332,10 +6156,6 @@ async function writeMetaAdsAdsetTruth(
     entityId: row.adsetId,
     keyKind: "delivery",
   })));
-  await writeLineageRows(tx, request, "meta_ads_adset_daily", items.map(({ row, rawId }) => ({
-    providerRowId: `${row.adAccountId}:${row.adsetId}:${row.occurredOn}`,
-    rawRecordId: rawId,
-  })));
   await writeMetaAdsAdsetConversionRows(tx, request, items);
 }
 
@@ -6397,10 +6217,6 @@ async function writeMetaAdsAdsetConversionRows(
     keyKind: "conversion",
     resultType: conversion.resultType,
   })));
-  await writeLineageRows(tx, request, "meta_ads_adset_conversions_daily", flat.map(({ row, rawId, conversion }) => ({
-    providerRowId: `${row.adAccountId}:${row.adsetId}:${row.occurredOn}:${conversion.resultType}`,
-    rawRecordId: rawId,
-  })));
 }
 
 // ──────────────────────────────────────────────────────────────────────────────────
@@ -6458,14 +6274,6 @@ async function writeMetaAdsAdDimension(
           configured_status = coalesce(excluded.configured_status, meta_ads_ads.configured_status),
           updated_at = now()`,
   });
-  if (rawRecordId) {
-    await writeLineageRows(
-      tx,
-      request,
-      "meta_ads_ads",
-      dims.map((dim) => ({ providerRowId: `${dim.adAccountId}:${dim.adId}`, rawRecordId })),
-    );
-  }
 }
 
 async function writeMetaAdsAdTruth(
@@ -6546,10 +6354,6 @@ async function writeMetaAdsAdTruth(
     entityId: row.adId,
     keyKind: "delivery",
   })));
-  await writeLineageRows(tx, request, "meta_ads_ad_daily", items.map(({ row, rawId }) => ({
-    providerRowId: `${row.adAccountId}:${row.adId}:${row.occurredOn}`,
-    rawRecordId: rawId,
-  })));
   await writeMetaAdsAdConversionRows(tx, request, items);
 }
 
@@ -6613,31 +6417,6 @@ async function writeMetaAdsAdConversionRows(
     keyKind: "conversion",
     resultType: conversion.resultType,
   })));
-  await writeLineageRows(tx, request, "meta_ads_ad_conversions_daily", flat.map(({ row, rawId, conversion }) => ({
-    providerRowId: `${row.adAccountId}:${row.adId}:${row.occurredOn}:${conversion.resultType}`,
-    rawRecordId: rawId,
-  })));
-}
-
-async function writeLineage(
-  tx: InfiniteOsDb,
-  request: SyncRequest,
-  providerTable: string,
-  providerRowId: string,
-  rawRecordId: string
-): Promise<void> {
-  await tx.query(
-    `
-      insert into record_lineage (
-        id, workspace_id, canonical_table, canonical_id, provider,
-        provider_table, provider_row_id, raw_record_id, normalization_version
-      )
-      values ($1,$2,$3,$4,$5,$3,$4,$6,'live-v1')
-      on conflict (workspace_id, provider_table, provider_row_id, raw_record_id)
-      do update set normalization_version = excluded.normalization_version
-    `,
-    [`lineage_${randomUUID()}`, request.workspaceId, providerTable, providerRowId, request.provider, rawRecordId]
-  );
 }
 
 function ga4BaseUrl(credential: Ga4Credential): string {

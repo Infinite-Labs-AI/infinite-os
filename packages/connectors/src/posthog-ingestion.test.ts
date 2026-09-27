@@ -435,19 +435,13 @@ describe("PostHog ingestion against real PGlite", () => {
     );
     expect(distinctIds).toEqual([{ distinct_id: "anon_shared", person_id: "person_shared" }]);
 
-    // One lineage row per (table, business key, raw record) — four tables x three events, minus
-    // the two person/session/distinct rows that reuse the SAME business key under a new raw id.
-    const lineage = await db.query<{ provider_table: string; n: string }>(
-      `select provider_table, count(*)::text as n from record_lineage
-        where workspace_id = $1 and provider = 'posthog' group by 1 order by 1`,
+    // record_lineage is no longer written (2026-09-27): nothing read it, and on the cloud engine it
+    // had grown to 2.4 GB of one row per (table, business key, raw record).
+    const lineage = await db.query<{ n: string }>(
+      "select count(*)::text as n from record_lineage where workspace_id = $1",
       [workspaceId]
     );
-    expect(lineage).toEqual([
-      { provider_table: "posthog_event_truth", n: "3" },
-      { provider_table: "posthog_person_current", n: "3" },
-      { provider_table: "posthog_person_distinct_ids", n: "3" },
-      { provider_table: "posthog_session_fact", n: "3" }
-    ]);
+    expect(lineage).toEqual([{ n: "0" }]);
   }, 60_000);
 
   it("re-points raw_record_id and refreshes properties when the same events are synced again", async () => {
