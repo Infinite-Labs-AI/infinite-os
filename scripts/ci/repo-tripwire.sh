@@ -9,6 +9,7 @@
 # Run from anywhere inside the repo: bash scripts/ci/repo-tripwire.sh
 set -euo pipefail
 
+ci_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$(git rev-parse --show-toplevel)"
 
 failures=0
@@ -137,14 +138,28 @@ if [ -n "$matches" ]; then echo "$matches" >&2; fail "internal-style doc tracked
 #    The allowlist lives in public-email-allowlist.sh, shared with the
 #    pre-push gate (check-push-emails.sh), which stops a bad email BEFORE a
 #    push creates a PR ref; this check only sees history after the fact.
+#    It walks ALL of HEAD's history. On a pull_request run HEAD is GitHub's
+#    merge commit, so that covers main plus every commit the PR adds. A
+#    shallow clone would show only the tip (on a PR, that merge commit, which
+#    always has public emails), so a shallow clone FAILS here rather than
+#    passing without looking. CI checks out with fetch-depth: 0.
 if [ "${PUBLIC_SURFACE:-0}" = "1" ]; then
   # shellcheck source=scripts/ci/public-email-allowlist.sh
-  . "scripts/ci/public-email-allowlist.sh"
-  bad_emails="$(git log --format='%ae%n%ce' | sort -u | grep -viE "$PUBLIC_EMAIL_ALLOWLIST_ERE" || true)"
-  if [ -n "$bad_emails" ]; then
-    echo "$bad_emails" >&2
-    echo "::error::commit author/committer email(s) not on the public allowlist — set repo-local user.email to a public address"
-    fail "non-public commit author/committer email in history (see list above)"
+  . "$ci_dir/public-email-allowlist.sh"
+  if [ "$(git rev-parse --is-shallow-repository)" = "true" ]; then
+    echo "::error::shallow clone — the commit-email check needs full history (actions/checkout fetch-depth: 0)"
+    fail "shallow clone: commit emails can't be checked (only the tip commit is visible)"
+  else
+    bad_emails="$(git log --format='%ae%n%ce' | sort -u | grep -viE "$PUBLIC_EMAIL_ALLOWLIST_ERE" || true)"
+    if [ -n "$bad_emails" ]; then
+      echo "$bad_emails" >&2
+      git log --format='%h%x09%ae%x09%ce%x09%s' |
+        BAD="$bad_emails" awk -F'\t' '
+          BEGIN { n = split(ENVIRON["BAD"], b, "\n"); for (i = 1; i <= n; i++) bad[b[i]] = 1 }
+          ($2 in bad) || ($3 in bad) { printf "  %s  author=%s  committer=%s  %s\n", $1, $2, $3, $4 }' >&2
+      echo "::error::commit author/committer email(s) not on the public allowlist — set repo-local user.email to a public address"
+      fail "non-public commit author/committer email in history (see list above)"
+    fi
   fi
 fi
 

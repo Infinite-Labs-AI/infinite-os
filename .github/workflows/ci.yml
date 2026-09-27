@@ -14,7 +14,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
+      # Full history, because the tripwire's commit-email check (check 6) walks
+      # it. With the default depth of 1, a pull_request run sees only GitHub's
+      # synthetic merge commit, whose emails are always public, so the PR's
+      # own commits were never checked. With full history, git log from that
+      # merge commit covers both parents: main, and every commit the PR adds.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       # No explicit version: pnpm/action-setup reads the "packageManager"
       # field from package.json (pnpm@10.0.0), so it can never drift.

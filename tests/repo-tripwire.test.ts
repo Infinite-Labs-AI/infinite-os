@@ -154,3 +154,82 @@ describe("pre-push email gate (check-push-emails.sh)", () => {
     expect(prePush(ZERO, git(["rev-parse", "HEAD"])).status).toBe(0);
   });
 });
+
+describe("CI email check on a pull request (repo-tripwire.sh check 6)", () => {
+  const OK = "123456+agent@users.noreply.github.com";
+  const BAD = "founder@example.com";
+  const gitEnv = { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
+  let root: string;
+
+  const git = (cwd: string, args: string[], env: Record<string, string> = {}) => {
+    const result = spawnSync("git", args, { cwd, encoding: "utf8", env: { ...gitEnv, ...env } });
+    if (result.status !== 0) throw new Error(`git ${args.join(" ")}: ${result.stderr}`);
+    return result.stdout.trim();
+  };
+  const as = (email: string, committer = email) => ({
+    GIT_AUTHOR_NAME: "a",
+    GIT_AUTHOR_EMAIL: email,
+    GIT_COMMITTER_NAME: "c",
+    GIT_COMMITTER_EMAIL: committer
+  });
+  const tripwire = (cwd: string) =>
+    spawnSync("bash", [join(ciDir, "repo-tripwire.sh")], {
+      cwd,
+      encoding: "utf8",
+      env: { ...gitEnv, PUBLIC_SURFACE: "1", IP_CANARIES: "" }
+    });
+
+  // The shape GitHub checks out for a pull_request run: a synthetic merge of
+  // the PR head into main, authored by the PR opener's noreply address and
+  // committed by noreply@github.com. The PR's first commit has `prEmail`; its
+  // tip is clean, as on #90.
+  const prMergeRepo = (prEmail: string) => {
+    const repo = join(root, `repo-${prEmail.split("@")[0].replace(/\W/g, "")}`);
+    git(root, ["init", "-q", repo]);
+    git(repo, ["commit", "-q", "--allow-empty", "-m", "main"], as(OK));
+    const base = git(repo, ["rev-parse", "HEAD"]);
+    git(repo, ["commit", "-q", "--allow-empty", "-m", "pr: first"], as(prEmail));
+    git(repo, ["commit", "-q", "--allow-empty", "-m", "pr: clean tip"], as(OK));
+    const head = git(repo, ["rev-parse", "HEAD"]);
+    const merge = git(
+      repo,
+      ["commit-tree", `${head}^{tree}`, "-p", base, "-p", head, "-m", "Merge PR into main"],
+      as(OK, "noreply@github.com")
+    );
+    git(repo, ["reset", "-q", "--hard", merge]);
+    return repo;
+  };
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), "tripwire-pr-"));
+  });
+  afterEach(() => rmSync(root, { recursive: true, force: true }));
+
+  it("CI checks out full history", () => {
+    const ci = readFileSync(join(repoRoot, ".github", "workflows", "ci.yml"), "utf8");
+    expect(ci).toMatch(/actions\/checkout@v4\n\s+with:\n\s+fetch-depth: 0\n/);
+  });
+
+  it("fails on a PR whose earlier commit has a non-public email, and names it", () => {
+    const repo = prMergeRepo(BAD);
+    const bad = git(repo, ["rev-parse", "--short", "HEAD^2^"]);
+
+    const result = tripwire(repo);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(`${bad}  author=${BAD}`);
+  });
+
+  it("passes on a PR whose commits are all public", () => {
+    expect(tripwire(prMergeRepo(OK)).status).toBe(0);
+  });
+
+  it("fails on a shallow clone instead of passing on the merge commit alone", () => {
+    const repo = prMergeRepo(OK);
+    const shallow = join(root, "shallow");
+    git(root, ["clone", "-q", "--depth", "1", `file://${repo}`, shallow]);
+
+    const result = tripwire(shallow);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("shallow clone");
+  });
+});
