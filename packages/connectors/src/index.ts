@@ -60,6 +60,25 @@ import {
 } from "./meta-telemetry.js";
 export { MetaAdsRequestTelemetry, type MetaAdsResponseSignal, type MetaAdsRequestObserver, type MetaRequestLane } from "./meta-telemetry.js";
 import {
+  META_CREATIVE_WRITE_FEATURES,
+  MetaCreativeSpecError,
+  metaAssetFeedHasVideo,
+  normalizeMetaAssetFeedSpec,
+  normalizeMetaDegreesOfFreedomSpec,
+  type MetaAssetFeedSpec,
+  type MetaDegreesOfFreedomSpec,
+} from "./meta-creative-specs.js";
+export {
+  META_CREATIVE_WRITE_FEATURES,
+  MetaCreativeSpecError,
+  normalizeMetaAssetFeedSpec,
+  normalizeMetaDegreesOfFreedomSpec,
+  type MetaAssetFeedSpec,
+  type MetaCreativeFeatureEnrollStatus,
+  type MetaCreativeWriteFeature,
+  type MetaDegreesOfFreedomSpec,
+} from "./meta-creative-specs.js";
+import {
   STRIPE_DELTA_MAX_PAGES,
   STRIPE_DELTA_MAX_REFETCH_PER_RUN,
   STRIPE_DELTA_REFETCH_CONCURRENCY,
@@ -11117,6 +11136,16 @@ export interface MetaCreativeCreateInput {
   // {{adset.id}}, {{placement}}), which Meta expands per impression. It is passed through VERBATIM:
   // percent-encoding the braces would leave the customer with a literal "%7B%7Bplacement%7D%7D".
   urlTags?: string;
+  // AdCreative.degrees_of_freedom_spec — the per-feature Advantage+ creative enhancement switches
+  // (creative_features_spec, each OPT_IN / OPT_OUT). Sent verbatim after shape validation on BOTH
+  // transports and with every creative shape; which features are on or off is the caller's policy.
+  degreesOfFreedomSpec?: MetaDegreesOfFreedomSpec;
+  // AdCreative.asset_feed_spec — a multi-asset creative (e.g. one picture in several sizes, one per
+  // placement, with up to five texts). Media is referenced by image hash / https url or video_id; the
+  // engine downloads nothing for it. It REPLACES the single-media shortcuts: a feed creative may not
+  // also carry imageUrl / videoUrl / imageHash / linkUrl / body / title / description / callToAction
+  // (all of those live inside the feed).
+  assetFeedSpec?: MetaAssetFeedSpec;
 }
 
 export interface MetaAdCreateInput {
@@ -11721,11 +11750,44 @@ export async function createMetaAdSet(
 // photo_data only. The meta_ads_cli transport supports standard single-image or
 // single-video file upload via --image/--video. No child_attachments /
 // asset_feed_spec / DCO flags here (carousel/DCO are deferred to PR #4+).
+// 2026-09-27: both transports ALSO accept a caller-built `assetFeedSpec` (a multi-asset creative whose
+// media is referenced by hash/url/video_id, sent through the CLI's raw `--asset-feed-spec`) and a
+// `degreesOfFreedomSpec` (Advantage+ enhancement switches, `--degrees-of-freedom-spec`). Still no DCO
+// `--images/--bodies` flags: a DCO creative only runs in a Dynamic Creative ad set.
 // NOTE: creatives have no go-live status; nothing to PAUSE-guard here.
+
+// The media / copy shortcuts a feed creative carries INSIDE its asset_feed_spec instead.
+const META_FEED_EXCLUSIVE_SHORTCUTS = ["imageHash", "imageUrl", "videoUrl", "linkUrl", "body", "title", "description", "callToAction"] as const;
+
+// Validates the two raw objects once, before either transport (a malformed spec fails typed and
+// non-retryable, before any download or spawn), and refuses a feed mixed with single-media shortcuts:
+// the CLI's raw mode REPLACES the shortcuts, so a mixed input would silently drop half of itself.
+function normalizedMetaCreativeInput(input: MetaCreativeCreateInput): MetaCreativeCreateInput {
+  try {
+    const degreesOfFreedomSpec = input.degreesOfFreedomSpec === undefined ? undefined : normalizeMetaDegreesOfFreedomSpec(input.degreesOfFreedomSpec);
+    const assetFeedSpec = input.assetFeedSpec === undefined ? undefined : normalizeMetaAssetFeedSpec(input.assetFeedSpec);
+    if (assetFeedSpec) {
+      const mixed = META_FEED_EXCLUSIVE_SHORTCUTS.filter((key) => input[key] !== undefined);
+      if (mixed.length > 0) {
+        throw new MetaCreativeSpecError(`an assetFeedSpec creative carries its media and copy inside the feed; remove ${mixed.join(", ")}`);
+      }
+    }
+    return {
+      ...input,
+      ...(degreesOfFreedomSpec ? { degreesOfFreedomSpec } : {}),
+      ...(assetFeedSpec ? { assetFeedSpec } : {})
+    };
+  } catch (error) {
+    if (error instanceof MetaCreativeSpecError) throw new ConnectorError(error.code, error.message, false);
+    throw error;
+  }
+}
+
 export async function createMetaCreative(
   credential: MetaAdsCredential,
-  input: MetaCreativeCreateInput
+  rawInput: MetaCreativeCreateInput
 ): Promise<MetaWriteResult> {
+  const input = normalizedMetaCreativeInput(rawInput);
   if (input.imageUrl && input.videoUrl) {
     throw new ConnectorError(
       "provider_api_error",
@@ -11737,6 +11799,20 @@ export async function createMetaCreative(
     return createMetaCreativeViaCli(credential, input);
   }
   const adAccountId = metaAdsAccountId(credential);
+  if (input.assetFeedSpec) {
+    // Multi-asset creative. Identity rides object_story_spec; every media/text/link/CTA rides the feed.
+    const identity: Record<string, unknown> = { page_id: input.pageId };
+    if (input.instagramUserId) identity.instagram_user_id = input.instagramUserId;
+    const feedResponse = await metaAdsGraphPost(credential, `${adAccountId}/${META_CREATE_EDGE.creative}`, {
+      name: input.name,
+      object_story_spec: identity,
+      asset_feed_spec: input.assetFeedSpec,
+      ...(input.degreesOfFreedomSpec ? { degrees_of_freedom_spec: input.degreesOfFreedomSpec } : {}),
+      ...(input.urlTags ? { url_tags: input.urlTags } : {})
+    });
+    const feedId = requireGraphId("creative", feedResponse);
+    return { ok: true, id: feedId, status: null };
+  }
   if (!input.imageHash) {
     // Image upload (POST /act_{id}/adimages → image_hash) happens before this in
     // the action handler; the STANDARD creative needs a hash to reference.
@@ -11780,6 +11856,9 @@ export async function createMetaCreative(
   const response = await metaAdsGraphPost(credential, `${adAccountId}/${META_CREATE_EDGE.creative}`, {
     name: input.name,
     object_story_spec: objectStorySpec,
+    // degrees_of_freedom_spec is a TOP-LEVEL AdCreative field — [CONFIRMED-SDK]
+    // (facebook_business AdCreative.Field.degrees_of_freedom_spec). Omitted entirely when unset.
+    ...(input.degreesOfFreedomSpec ? { degrees_of_freedom_spec: input.degreesOfFreedomSpec } : {}),
     // url_tags is a TOP-LEVEL AdCreative field, not part of object_story_spec — [CONFIRMED-SDK]
     // (facebook_business AdCreative.Field.url_tags). Omitted entirely when unset.
     ...(input.urlTags ? { url_tags: input.urlTags } : {})
@@ -13649,6 +13728,9 @@ async function createMetaCreativeViaCli(
   credential: MetaAdsCredential,
   input: MetaCreativeCreateInput
 ): Promise<MetaWriteResult> {
+  if (input.assetFeedSpec) {
+    return createMetaFeedCreativeViaCli(credential, input, input.assetFeedSpec);
+  }
   if (!input.imageUrl && !input.videoUrl) {
     // A hash can't become a file. Surface a clear, non-retryable error rather than
     // passing a hash as a bogus --image/--video path (which the CLI rejects as missing file).
@@ -13695,6 +13777,9 @@ async function createMetaCreativeViaCli(
     // `creative create` ONLY — `ad create` has no such flag — which is why tracking parameters are
     // set at the CREATIVE level on both transports.
     if (input.urlTags) args.push("--url-tags", input.urlTags);
+    // `--degrees-of-freedom-spec` works with every creative mode (meta-ads 1.1.0 help: "Performance &
+    // compliance flags (work with any mode)"). Inline JSON, never @file: the arg vector is not a shell.
+    if (input.degreesOfFreedomSpec) args.push("--degrees-of-freedom-spec", JSON.stringify(input.degreesOfFreedomSpec));
     // A4: budget the kill timer for the upload + Meta-side processing the CLI waits on.
     const response = await metaAdsCliWrite(credential, args, {
       timeoutMs: mediaKind === "video" ? META_CLI_VIDEO_CREATIVE_TIMEOUT_MS : META_CLI_IMAGE_CREATIVE_TIMEOUT_MS
@@ -13710,6 +13795,44 @@ async function createMetaCreativeViaCli(
       // ignore — the temp file lives under os.tmpdir() and is reaped by the OS.
     }
   }
+}
+
+// ── CLI Create: multi-asset (asset_feed_spec) creative ─────────────────────────────────────────
+// `meta ads creative create --asset-feed-spec <json>` is the CLI's raw mode (meta-ads 1.1.0): it
+// REPLACES the --image/--body/... shortcuts and uploads nothing, so every medium in the feed is
+// already a Graph reference (image hash / https url, video_id). The Page identity rides --page-id,
+// the pairing the CLI's own Advantage+ example uses; an Instagram identity needs the raw
+// --object-story-spec instead (the CLI documents --asset-feed-spec pairing with either).
+async function createMetaFeedCreativeViaCli(
+  credential: MetaAdsCredential,
+  input: MetaCreativeCreateInput,
+  feed: MetaAssetFeedSpec
+): Promise<MetaWriteResult> {
+  const args = [
+    "--output",
+    "json",
+    "ads",
+    "--ad-account-id",
+    metaAdsCliAccountId(credential),
+    "creative",
+    "create",
+    "--name",
+    input.name
+  ];
+  if (input.instagramUserId) {
+    args.push("--object-story-spec", JSON.stringify({ page_id: input.pageId, instagram_user_id: input.instagramUserId }));
+  } else {
+    args.push("--page-id", input.pageId);
+  }
+  args.push("--asset-feed-spec", JSON.stringify(feed));
+  if (input.degreesOfFreedomSpec) args.push("--degrees-of-freedom-spec", JSON.stringify(input.degreesOfFreedomSpec));
+  if (input.urlTags) args.push("--url-tags", input.urlTags);
+  const response = await metaAdsCliWrite(credential, args, {
+    // Meta fetches url-referenced images server-side during the create; budget like a media create.
+    timeoutMs: metaAssetFeedHasVideo(feed) ? META_CLI_VIDEO_CREATIVE_TIMEOUT_MS : META_CLI_IMAGE_CREATIVE_TIMEOUT_MS
+  });
+  const id = requireGraphId("creative", response);
+  return { ok: true, id, status: null };
 }
 
 // Download a creative media URL to a uniquely-named temp file under os.tmpdir()
