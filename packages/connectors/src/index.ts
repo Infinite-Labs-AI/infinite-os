@@ -13890,11 +13890,14 @@ async function downloadCreativeMediaToTempFile(
   label: string,
   kind: MetaCreativeMediaKind
 ): Promise<string> {
+  // Split-and-join instead of trimming dashes with /^-+|-+$/: same slug, linear on any label (CodeQL
+  // js/polynomial-redos flagged the trim on a label the host controls).
   const slug =
     label
       .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-+|-+$/g, "")
+      .split(/[^a-z0-9]+/)
+      .filter(Boolean)
+      .join("-")
       .slice(0, 40) || "creative";
   let response: Response;
   const abortController = new AbortController();
