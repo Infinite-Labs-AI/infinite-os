@@ -89,7 +89,8 @@ describe("Infinite OS migration stack", () => {
       "0072_interactive_task_ledger.sql",
       "0073_posthog_event_truth_event_time_index.sql",
       "0074_sync_batch_records_indexes.sql",
-      "0075_posthog_raw_retention_90_days.sql"
+      "0075_posthog_raw_retention_90_days.sql",
+      "0076_sync_runs_source_index.sql"
     ]);
   });
 
@@ -1094,7 +1095,8 @@ describe("Infinite OS migration stack", () => {
       "0072_interactive_task_ledger.sql",
       "0073_posthog_event_truth_event_time_index.sql",
       "0074_sync_batch_records_indexes.sql",
-      "0075_posthog_raw_retention_90_days.sql"
+      "0075_posthog_raw_retention_90_days.sql",
+      "0076_sync_runs_source_index.sql"
     ]);
   });
 
@@ -1151,6 +1153,15 @@ describe("Infinite OS migration stack", () => {
     // file changes the policy row only: deletion is the retention job's, never the migration's.
     expect(sql).toBe(
       "update posthog_retention_config set retention_days = 90 where singleton and retention_days = 180;"
+    );
+  });
+
+  it("indexes sync_runs by source for the health and newest-run reads, and nothing else (0076)", () => {
+    const migration = loadMigrations().find((candidate) => candidate.id === "0076_sync_runs_source_index.sql");
+    const sql = (migration?.sql ?? "").toLowerCase().replace(/--[^\n]*/g, "").replace(/\s+/g, " ").trim();
+    expect(sql).toBe(
+      "create index if not exists sync_runs_source_id_status_finished_at_idx on sync_runs (source_id, status, finished_at desc); " +
+        "create index if not exists sync_runs_source_id_started_at_idx on sync_runs (source_id, started_at desc);"
     );
   });
 
