@@ -38,9 +38,41 @@ import { canonicalMetaAdsJson } from "./meta-entity-fingerprint.js";
  *    creative across all ads), else the ad's own stored expansion.
  */
 
-/** The heavy ad field set: the full entity snapshot including the creative expansion. */
+/**
+ * The heavy ad field set: the full entity snapshot including the creative expansion.
+ *
+ * The expansion carries `url_tags` (the query string Meta appends to the destination at delivery) and
+ * `degrees_of_freedom_spec` (the per-feature Advantage+ creative enhancement switches) so a host can tell, from
+ * stored metadata alone, whether an existing creative follows its own creative rules before reusing it in a new ad.
+ * Both ride this same request; see `metaAdsMarkCreativeRulingFields` for how an absent value is stored.
+ */
 export const META_ADS_AD_FULL_FIELDS =
-  "id,name,creative{id,name,title,body,thumbnail_url,image_url,image_hash,video_id,call_to_action_type,object_story_spec,asset_feed_spec},adset_id,campaign_id,effective_status,status,bid_amount,tracking_specs,conversion_specs";
+  "id,name,creative{id,name,title,body,thumbnail_url,image_url,image_hash,video_id,call_to_action_type,object_story_spec,asset_feed_spec,url_tags,degrees_of_freedom_spec},adset_id,campaign_id,effective_status,status,bid_amount,tracking_specs,conversion_specs";
+
+/** The creative fields the heavy read asks for so a creative's link tags and enhancement switches are stored. */
+export const META_ADS_CREATIVE_RULING_FIELDS = ["url_tags", "degrees_of_freedom_spec"] as const;
+
+/**
+ * Record, on an ad node from a HEAVY read (`META_ADS_AD_FULL_FIELDS`), that its creative expansion was asked for the
+ * ruling fields. Graph omits a field that is not set, so an absent one is stored as an explicit `null`. The stored
+ * creative metadata then reads three ways, and a consumer must keep them apart:
+ *   - key present with a value: what Meta holds;
+ *   - key present, `null`: asked, and Meta holds none (no url_tags; no enhancement spec, i.e. Meta's defaults);
+ *   - key absent: never read with these fields (stored before they were requested) — unknown, never "none".
+ * Only a heavy read may mark: a lean read carries no expansion, and its rebuilt nodes reuse stored expansions that
+ * already carry the marker from the heavy read that wrote them. Returns a new node; the input is not mutated.
+ */
+export function metaAdsMarkCreativeRulingFields<N extends AdNode>(node: N): N {
+  const creative = node.creative;
+  if (!creative || typeof creative !== "object" || Array.isArray(creative)) return node;
+  const record = creative as Record<string, unknown>;
+  if (META_ADS_CREATIVE_RULING_FIELDS.every((key) => record[key] !== undefined)) return node;
+  const marked: Record<string, unknown> = { ...record };
+  for (const key of META_ADS_CREATIVE_RULING_FIELDS) {
+    if (marked[key] === undefined) marked[key] = null;
+  }
+  return { ...node, creative: marked };
+}
 
 /**
  * The lean ad field set: identity, parentage, creative REFERENCE (Graph returns `{id}` for a

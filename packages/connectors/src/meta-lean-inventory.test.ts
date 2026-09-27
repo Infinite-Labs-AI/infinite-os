@@ -11,11 +11,13 @@ import { classifySyncFailure, connectorFor, type SyncRequest } from "./index.js"
 import {
   META_ADS_AD_FULL_FIELDS,
   META_ADS_AD_LEAN_FIELDS,
+  META_ADS_CREATIVE_RULING_FIELDS,
   META_ADS_HEAVY_RECONCILE_MAX_AGE_MS,
   mergeMetaAdsLeanAds,
   metaAdsFullAdReadPlan,
   metaAdsHeavyAdFieldsKey,
   metaAdsHeavyCursorValue,
+  metaAdsMarkCreativeRulingFields,
   metaGraphNextPage,
 } from "./meta-lean-inventory.js";
 
@@ -73,6 +75,31 @@ describe("metaAdsFullAdReadPlan", () => {
   it("forces a heavy read after a Graph API version bump", () => {
     expect(metaAdsFullAdReadPlan({ scanCheckpoint: "2026-09-23T10:00:00.000Z", heavyCheckpoint: heavy("2026-09-22T00:00:00.000Z", "v25.0"), apiVersion: "v26.0", now }))
       .toEqual({ lean: false, reason: "heavy_shape_changed" });
+  });
+});
+
+describe("creative ruling fields (url_tags, degrees_of_freedom_spec)", () => {
+  const spec = { creative_features_spec: { image_touchups: { enroll_status: "OPT_OUT" }, text_optimizations: { enroll_status: "OPT_IN" } } };
+  it("the heavy read asks for both inside the creative expansion — the same request, no new one", () => {
+    const expansion = META_ADS_AD_FULL_FIELDS.slice(META_ADS_AD_FULL_FIELDS.indexOf("creative{") + "creative{".length, META_ADS_AD_FULL_FIELDS.indexOf("}"));
+    expect(expansion.split(",")).toEqual(expect.arrayContaining([...META_ADS_CREATIVE_RULING_FIELDS]));
+    expect([...META_ADS_CREATIVE_RULING_FIELDS]).toEqual(["url_tags", "degrees_of_freedom_spec"]);
+    expect(META_ADS_AD_LEAN_FIELDS).not.toContain("url_tags");
+  });
+  it("records an absent field as null (asked, none set) and keeps what Meta returned", () => {
+    const bare = { id: "a1", creative: { id: "cr1", name: "Old" } };
+    expect(metaAdsMarkCreativeRulingFields(bare)).toEqual({ id: "a1", creative: { id: "cr1", name: "Old", url_tags: null, degrees_of_freedom_spec: null } });
+    expect(bare.creative).toEqual({ id: "cr1", name: "Old" }); // the input is not mutated
+    const tagged = { id: "a2", creative: { id: "cr2", url_tags: "utm_content={{ad.name}}", degrees_of_freedom_spec: spec } };
+    expect(metaAdsMarkCreativeRulingFields(tagged)).toBe(tagged);
+    expect(metaAdsMarkCreativeRulingFields({ id: "a3", creative: { id: "cr3", url_tags: "x=1" } }).creative)
+      .toEqual({ id: "cr3", url_tags: "x=1", degrees_of_freedom_spec: null });
+  });
+  it("leaves a node without a creative expansion alone (no creative, or a bare lean reference is never a heavy node)", () => {
+    const none = { id: "a4" };
+    expect(metaAdsMarkCreativeRulingFields(none)).toBe(none);
+    const list = { id: "a5", creative: [] as unknown };
+    expect(metaAdsMarkCreativeRulingFields(list)).toBe(list);
   });
 });
 
@@ -535,6 +562,55 @@ describe("lean Meta inventory reads against real PGlite", () => {
       "select metadata_json->>'name' as name, valid_to is null as current from meta_ads_entity_versions where source_id=$1 and entity_type='creative' and entity_id='cr100' order by first_observed_at, id",
       [sourceId]);
     expect(final).toEqual([{ name: null, current: false }, { name: "Renamed creative", current: true }]);
+  }, 120_000);
+
+  it("stores each creative's url_tags and enhancement switches from the heavy read, absent ones as null, and keeps them on lean reads", async () => {
+    const workspaceId = `ws_lean_rulings_${randomUUID()}`, sourceId = `src_lean_rulings_${randomUUID()}`;
+    await seedSource(workspaceId, sourceId);
+    const account = prodShapeAccount();
+    const spec = { creative_features_spec: { image_touchups: { enroll_status: "OPT_OUT" }, text_optimizations: { enroll_status: "OPT_OUT" } } };
+    Object.assign(account.ads[50]!.creative as Record<string, unknown>, { url_tags: "utm_source=facebook&utm_content={{ad.name}}", degrees_of_freedom_spec: spec });
+    const first = await sync(account, request(workspaceId, sourceId));
+    expect(first.edges.filter((call) => call.edge === "ads").every((call) => call.fields === META_ADS_AD_FULL_FIELDS)).toBe(true);
+    const creative = async (id: string) => (await db.query<{ metadata_json: Record<string, unknown> }>(
+      "select metadata_json from meta_ads_entity_versions where source_id=$1 and entity_type='creative' and entity_id=$2 and valid_to is null",
+      [sourceId, id]))[0]?.metadata_json;
+    expect(await creative("cr50")).toMatchObject({ url_tags: "utm_source=facebook&utm_content={{ad.name}}", degrees_of_freedom_spec: spec });
+    // Meta returned neither: stored as null ("asked, none set"), never left absent ("never read").
+    const bare = await creative("cr51");
+    expect(bare).toMatchObject({ url_tags: null, degrees_of_freedom_spec: null });
+    expect(Object.keys(bare ?? {})).toEqual(expect.arrayContaining(["url_tags", "degrees_of_freedom_spec"]));
+    // The ad's own snapshot of its creative carries the same fields.
+    expect((await currentAd(sourceId, "a50"))[0]?.metadata_json.creative).toMatchObject({ url_tags: "utm_source=facebook&utm_content={{ad.name}}" });
+    const before = await versionCounts(sourceId);
+
+    // A lean full read rebuilds every creative from storage: the fields survive, nothing re-versions.
+    await forceNextScanFull(sourceId);
+    const lean = await sync(account, request(workspaceId, sourceId));
+    expect(lean.fullAdRead).toEqual({ mode: "lean", fallback: null });
+    expect(await versionCounts(sourceId)).toEqual(before);
+    expect(await creative("cr51")).toMatchObject({ url_tags: null, degrees_of_freedom_spec: null });
+    expect(await creative("cr50")).toMatchObject({ degrees_of_freedom_spec: spec });
+  }, 120_000);
+
+  it("a heavy checkpoint taken before the ruling fields were requested forces ONE heavy re-read, which stores them", async () => {
+    const workspaceId = `ws_lean_rulings_old_${randomUUID()}`, sourceId = `src_lean_rulings_old_${randomUUID()}`;
+    await seedSource(workspaceId, sourceId);
+    const account = prodShapeAccount();
+    await sync(account, request(workspaceId, sourceId));
+    // The deployed engine before this change: its heavy key named the field set without the ruling fields.
+    const before = META_ADS_AD_FULL_FIELDS.replace(",url_tags,degrees_of_freedom_spec", "");
+    expect(before).not.toBe(META_ADS_AD_FULL_FIELDS);
+    await db.query("update sync_cursors set cursor_value=$2 where source_id=$1 and cursor_key like 'meta_ads_entities_heavy:%'",
+      [sourceId, metaAdsHeavyCursorValue(new Date().toISOString(), metaAdsHeavyAdFieldsKey("v25.0", before))]);
+    await forceNextScanFull(sourceId);
+    const reread = await sync(account, request(workspaceId, sourceId));
+    expect(reread.fullAdRead).toEqual({ mode: "heavy", fallback: "heavy_shape_changed" });
+    const heavy = await db.query<{ cursor_value: string }>(
+      "select cursor_value from sync_cursors where source_id=$1 and cursor_key=$2", [sourceId, `meta_ads_entities_heavy:${ACCOUNT}`]);
+    expect(heavy[0]?.cursor_value).toMatch(new RegExp(`\\|${metaAdsHeavyAdFieldsKey("v25.0")}$`));
+    await forceNextScanFull(sourceId);
+    expect((await sync(account, request(workspaceId, sourceId))).fullAdRead).toEqual({ mode: "lean", fallback: null });
   }, 120_000);
 
   it("reads the account node at most once per 24h on inventory scans, and a revoked token still fails the very next scan", async () => {

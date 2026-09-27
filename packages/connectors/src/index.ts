@@ -24,6 +24,7 @@ import {
   metaAdsHeavyAdFieldsKey,
   metaAdsHeavyCursorKey,
   metaAdsHeavyCursorValue,
+  metaAdsMarkCreativeRulingFields,
   metaGraphNextPage,
   readMetaAdsFullAdSnapshot,
 } from "./meta-lean-inventory.js";
@@ -10606,9 +10607,13 @@ async function metaAdsReadAdAdims(
       // Media failure cannot fail an otherwise valid metrics read; caller records retryable outcomes.
       if(media.length)try{await onMedia(media);}catch{ /* Caller-owned best-effort cache; canonical metadata remains retryable. */ }
     } : undefined;
-  // Only expansion-bearing reads carry fresh media URLs for the caller's media hand-off.
-  const readAds = (fields: string, since: number | undefined, withMedia: boolean) =>
-    metaAdsReadEdge(credential, "ads", fields, telemetry, since, withMedia ? onMediaPage : undefined);
+  // Only expansion-bearing reads carry fresh media URLs for the caller's media hand-off. A heavy read ASKED for the
+  // creative's url_tags + degrees_of_freedom_spec, so an absent one is stored as null ("none"), never left absent
+  // ("never read") — see metaAdsMarkCreativeRulingFields.
+  const readAds = async (fields: string, since: number | undefined, withMedia: boolean) => {
+    const read = await metaAdsReadEdge(credential, "ads", fields, telemetry, since, withMedia ? onMediaPage : undefined);
+    return fields === META_ADS_AD_FULL_FIELDS ? read.map(metaAdsMarkCreativeRulingFields) : read;
+  };
   let nodes: MetaAdsEdgeNode[] = [];
   if (readProvider && fullSnapshot) {
     const accessToken = requireCredential(credential, "accessToken");
