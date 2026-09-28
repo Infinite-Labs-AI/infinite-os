@@ -90,7 +90,8 @@ describe("Infinite OS migration stack", () => {
       "0073_posthog_event_truth_event_time_index.sql",
       "0074_sync_batch_records_indexes.sql",
       "0075_posthog_raw_retention_90_days.sql",
-      "0076_sync_runs_source_index.sql"
+      "0076_sync_runs_source_index.sql",
+      "0077_meta_ads_account_spend_limit.sql"
     ]);
   });
 
@@ -1096,7 +1097,8 @@ describe("Infinite OS migration stack", () => {
       "0073_posthog_event_truth_event_time_index.sql",
       "0074_sync_batch_records_indexes.sql",
       "0075_posthog_raw_retention_90_days.sql",
-      "0076_sync_runs_source_index.sql"
+      "0076_sync_runs_source_index.sql",
+      "0077_meta_ads_account_spend_limit.sql"
     ]);
   });
 
@@ -1163,6 +1165,24 @@ describe("Infinite OS migration stack", () => {
       "create index if not exists sync_runs_source_id_status_finished_at_idx on sync_runs (source_id, status, finished_at desc); " +
         "create index if not exists sync_runs_source_id_started_at_idx on sync_runs (source_id, started_at desc);"
     );
+  });
+
+  it("adds the Meta account spending limit as nullable columns on the account row, and nothing else (0077)", () => {
+    const migration = loadMigrations().find((candidate) => candidate.id === "0077_meta_ads_account_spend_limit.sql");
+    const sql = (migration?.sql ?? "").toLowerCase().replace(/--[^\n]*/g, "").replace(/\s+/g, " ").trim();
+    // Nullable with no default (each statement ends at its type): every existing row stays
+    // unmeasured until its next account read.
+    expect(sql).toContain("alter table meta_ads_accounts add column if not exists spend_cap bigint;");
+    expect(sql).toContain("alter table meta_ads_accounts add column if not exists amount_spent bigint;");
+    expect(sql).toContain("alter table meta_ads_accounts add column if not exists spend_limit_read_at timestamptz;");
+    expect(sql).not.toContain("default");
+    // A value never exists without its read time.
+    expect(sql).toContain("spend_limit_read_at is not null or (spend_cap is null and amount_spent is null)");
+    // Additive only.
+    expect(sql).not.toContain("drop ");
+    expect(sql).not.toContain("delete ");
+    expect(sql).not.toContain("update ");
+    expect(sql).not.toContain("create table");
   });
 
   it("adds the nullable Meta posting Page column beside the pixel (0068)", () => {

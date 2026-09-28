@@ -10118,11 +10118,16 @@ describe("Meta Ads durable daily history", () => {
   it("records the seven-request no-pagination floor, account timezone, and successful coverage CLOSE", async () => {
     const queries: Array<{ sql: string; params?: unknown[] }> = [];
     let calls = 0;
+    const accountFields: Array<string | null> = [];
     await withMockFetch((url) => {
       calls += 1;
       const parsed = new URL(url);
       if (parsed.pathname.endsWith("/act_123")) {
-        return historyResponse({ id: "act_123", account_id: "123", currency: "GBP", timezone_name: "Europe/London" });
+        accountFields.push(parsed.searchParams.get("fields"));
+        return historyResponse({
+          id: "act_123", account_id: "123", currency: "GBP", timezone_name: "Europe/London",
+          spend_cap: "500000", amount_spent: "123456",
+        });
       }
       return historyResponse({ data: [], paging: {} });
     }, async () => {
@@ -10143,6 +10148,11 @@ describe("Meta Ads durable daily history", () => {
     });
     expect(queries.some((entry) => entry.sql.includes("insert into meta_ads_accounts") && entry.params?.includes("Europe/London"))).toBe(true);
     expect(queries.some((entry) => entry.sql.includes("insert into meta_ads_coverage_daily"))).toBe(true);
+    // The account spending limit rides on that same account read: still seven requests, one account read.
+    expect(accountFields).toEqual(["id,account_id,currency,timezone_name,spend_cap,amount_spent"]);
+    const spendLimit = queries.find((entry) => entry.sql.includes("insert into meta_ads_accounts") && entry.sql.includes("spend_limit_read_at"));
+    expect(spendLimit?.params?.slice(5, 7)).toEqual(["500000", "123456"]);
+    expect(Number.isNaN(Date.parse(String(spendLimit?.params?.[7])))).toBe(false);
   });
 
   it("holds subsequent requests after an accepted high-utilization page", async () => {

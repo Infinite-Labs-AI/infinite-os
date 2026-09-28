@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { encryptCredentialPayload } from "@infinite-os/core";
 import { createInfiniteOsDb, runMigrations, type InfiniteOsDb } from "@infinite-os/db";
@@ -161,7 +161,11 @@ describe("mergeMetaAdsLeanAds", () => {
 
 type Node = Record<string, unknown> & { id: string; updated_time: string };
 
-type Account = { campaigns: Node[]; adsets: Node[]; ads: Node[]; adInsights: Array<Record<string, unknown>> };
+type Account = {
+  campaigns: Node[]; adsets: Node[]; ads: Node[]; adInsights: Array<Record<string, unknown>>;
+  /** Extra ad account node fields (e.g. spend_cap / amount_spent); the node is projected like Graph does. */
+  node?: Record<string, unknown>;
+};
 
 type EdgeRequest = { edge: string; fields: string; limit: number; updatedSince: number | null; after: string | null };
 
@@ -289,8 +293,9 @@ describe("lean Meta inventory reads against real PGlite", () => {
   }
 
   type FullAdRead = { mode: "lean" | "heavy"; fallback: string | null } | undefined;
-  async function sync(account: Account, syncRequest: SyncRequest, options: { revoked?: boolean } = {}): Promise<{ edges: EdgeRequest[]; byKind: Record<string, number>; requestCount: number; fullAdRead: FullAdRead; error?: unknown }> {
+  async function sync(account: Account, syncRequest: SyncRequest, options: { revoked?: boolean } = {}): Promise<{ edges: EdgeRequest[]; accountReads: string[]; byKind: Record<string, number>; requestCount: number; fullAdRead: FullAdRead; error?: unknown }> {
     const edges: EdgeRequest[] = [];
+    const accountReads: string[] = [];
     let error: unknown;
     const original = globalThis.fetch;
     globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
@@ -306,7 +311,10 @@ describe("lean Meta inventory reads against real PGlite", () => {
       }
       if (options.revoked) return revokedTokenResponse();
       if (url.pathname.endsWith(`/${ACCOUNT}`)) {
-        return new Response(JSON.stringify({ id: ACCOUNT, account_id: "777", currency: "USD", timezone_name: "America/New_York" }), { status: 200, headers });
+        const fields = url.searchParams.get("fields") ?? "id";
+        accountReads.push(fields);
+        const node: Node = { id: ACCOUNT, account_id: "777", currency: "USD", timezone_name: "America/New_York", updated_time: OLD, ...account.node };
+        return new Response(JSON.stringify(project(node, fields)), { status: 200, headers });
       }
       const edge = url.pathname.split("/").at(-1) ?? "";
       if (edge === "insights") {
@@ -333,7 +341,7 @@ describe("lean Meta inventory reads against real PGlite", () => {
     }
     const telemetry = (await db.query<{ request_telemetry: { byKind: Record<string, number>; requestCount: number; fullAdRead?: FullAdRead } }>(
       "select request_telemetry from sync_runs where id=$1", [syncRequest.syncRunId]))[0]!.request_telemetry;
-    return { edges, byKind: telemetry.byKind, requestCount: telemetry.requestCount, fullAdRead: telemetry.fullAdRead, error };
+    return { edges, accountReads, byKind: telemetry.byKind, requestCount: telemetry.requestCount, fullAdRead: telemetry.fullAdRead, error };
   }
 
   function edgeCalls(byKind: Record<string, number>) {
@@ -720,5 +728,108 @@ describe("lean Meta inventory reads against real PGlite", () => {
     expect(classifySyncFailure({ code: failure!.error_code, message: failure!.error_message, retryable: failure!.retryable })).toBe("terminal");
     // A failed scan never advances the liveness cursor.
     expect(Date.now() - Date.parse((await livenessCursor())!)).toBeLessThan(60_000);
+  }, 120_000);
+
+  type StoredSpendLimit = { currency: string | null; timezone_name: string | null; spend_cap: string | null; amount_spent: string | null; spend_limit_read_at: Date | null };
+  async function storedSpendLimit(sourceId: string): Promise<StoredSpendLimit[]> {
+    return db.query<StoredSpendLimit>(
+      `select currency, timezone_name, spend_cap::text as spend_cap, amount_spent::text as amount_spent, spend_limit_read_at
+         from meta_ads_accounts where source_id=$1`,
+      [sourceId],
+    );
+  }
+  async function makeAccountReadDue(sourceId: string): Promise<void> {
+    await db.query("update sync_cursors set cursor_value=$3 where source_id=$1 and cursor_key=$2",
+      [sourceId, `meta_ads_account_liveness:${ACCOUNT}`, new Date(Date.now() - 24 * 60 * 60 * 1000 - 1000).toISOString()]);
+  }
+
+  it("stores the account spending limit from the account read it already makes, stamped with that read, only when that read happens", async () => {
+    const workspaceId = `ws_spend_limit_${randomUUID()}`, sourceId = `src_spend_limit_${randomUUID()}`;
+    await seedSource(workspaceId, sourceId);
+    // As the cloud connect seeds the row: currency + timezone, the spending limit never measured.
+    await db.query(
+      "insert into meta_ads_accounts (workspace_id, source_id, ad_account_id, currency, timezone_name) values ($1,$2,$3,'USD','America/New_York')",
+      [workspaceId, sourceId, ACCOUNT],
+    );
+    expect(await storedSpendLimit(sourceId)).toEqual([
+      { currency: "USD", timezone_name: "America/New_York", spend_cap: null, amount_spent: null, spend_limit_read_at: null },
+    ]);
+
+    // $5,000.00 limit, $1,234.56 spent toward it — Meta's cents, stored as returned.
+    const account: Account = { ...prodShapeAccount(), node: { spend_cap: "500000", amount_spent: "123456" } };
+    const first = await sync(account, request(workspaceId, sourceId));
+    expect(first.byKind.account_liveness).toBe(1);
+    expect(first.accountReads).toEqual(["id,account_id,currency,timezone_name,spend_cap,amount_spent"]);
+    const [measured] = await storedSpendLimit(sourceId);
+    // The connect-owned currency/timezone are untouched; the limit carries the read's own time.
+    expect(measured).toMatchObject({ currency: "USD", timezone_name: "America/New_York", spend_cap: "500000", amount_spent: "123456" });
+    const livenessCursor = (await db.query<{ cursor_value: string }>(
+      "select cursor_value from sync_cursors where source_id=$1 and cursor_key=$2", [sourceId, `meta_ads_account_liveness:${ACCOUNT}`]))[0]!.cursor_value;
+    expect(measured!.spend_limit_read_at?.getTime()).toBe(Date.parse(livenessCursor));
+
+    // Within 24h the scan does not read the account node, so nothing is re-measured: Meta's number
+    // moved, ours stays what it was with its own read time.
+    account.node = { spend_cap: "500000", amount_spent: "200000" };
+    const quiet = await sync(account, request(workspaceId, sourceId));
+    expect(quiet.byKind.account_liveness).toBe(0);
+    expect(quiet.accountReads).toEqual([]);
+    expect(await storedSpendLimit(sourceId)).toEqual([measured]);
+
+    // The next due read replaces it. A limit removed in Ads Manager comes back "0": stored as 0 (no limit), not null.
+    await makeAccountReadDue(sourceId);
+    account.node = { spend_cap: "0", amount_spent: "200000" };
+    const due = await sync(account, request(workspaceId, sourceId));
+    expect(due.byKind.account_liveness).toBe(1);
+    const [removed] = await storedSpendLimit(sourceId);
+    expect(removed).toMatchObject({ currency: "USD", spend_cap: "0", amount_spent: "200000" });
+    expect(removed!.spend_limit_read_at!.getTime()).toBeGreaterThan(measured!.spend_limit_read_at!.getTime());
+
+    // A value whose unit we cannot trust is never stored: the earlier measurement stands with its own
+    // read time, and the log names the field without the amount.
+    await makeAccountReadDue(sourceId);
+    account.node = { spend_cap: "2350.75", amount_spent: "210000" };
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const unreadable = await sync(account, request(workspaceId, sourceId));
+      expect(unreadable.byKind.account_liveness).toBe(1);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining("account spend_cap was not a whole number"));
+      expect(JSON.stringify(warn.mock.calls)).not.toContain("2350");
+    } finally {
+      warn.mockRestore();
+    }
+    expect(await storedSpendLimit(sourceId)).toEqual([removed]);
+
+    // A run that fails records nothing.
+    await makeAccountReadDue(sourceId);
+    account.node = { spend_cap: "999", amount_spent: "999" };
+    const failed = await sync(account, request(workspaceId, sourceId), { revoked: true });
+    expect(failed.error).toBeInstanceOf(Error);
+    expect(await storedSpendLimit(sourceId)).toEqual([removed]);
+  }, 120_000);
+
+  it("a full sync stores the spending limit too; a missing account row is created from the same read; an absent field stays null", async () => {
+    const workspaceId = `ws_spend_limit_full_${randomUUID()}`, sourceId = `src_spend_limit_full_${randomUUID()}`;
+    await seedSource(workspaceId, sourceId);
+    expect(await storedSpendLimit(sourceId)).toEqual([]);
+
+    // No limit set and Meta omits spend_cap: null (no limit), amount_spent is the account's total.
+    const account: Account = { ...prodShapeAccount(), node: { amount_spent: "4200" } };
+    const full = await sync(account, request(workspaceId, sourceId, "full"));
+    expect(full.byKind.account_liveness).toBe(1);
+    expect(full.accountReads).toEqual(["id,account_id,currency,timezone_name,spend_cap,amount_spent"]);
+    const [row] = await storedSpendLimit(sourceId);
+    expect(row).toMatchObject({ currency: "usd", timezone_name: "America/New_York", spend_cap: null, amount_spent: "4200" });
+    expect(row!.spend_limit_read_at).toBeInstanceOf(Date);
+    expect(Date.now() - row!.spend_limit_read_at!.getTime()).toBeLessThan(60_000);
+
+    // The hot (insights-only) lane never reads the account node, so it never touches the limit.
+    account.node = { spend_cap: "100", amount_spent: "100" };
+    const hot = await sync(account, request(workspaceId, sourceId, "insights_only"));
+    expect(hot.accountReads).toEqual([]);
+    expect(await storedSpendLimit(sourceId)).toEqual([row]);
+
+    // The schema refuses a spending-limit value without its read time (0077).
+    await expect(db.query("update meta_ads_accounts set spend_limit_read_at=null where source_id=$1", [sourceId]))
+      .rejects.toThrow(/meta_ads_accounts_spend_limit_check/);
   }, 120_000);
 });
