@@ -828,6 +828,15 @@ describe("lean Meta inventory reads against real PGlite", () => {
     expect(hot.accountReads).toEqual([]);
     expect(await storedSpendLimit(sourceId)).toEqual([row]);
 
+    // A reading stored LATER than this run's read (the cloud's read-back after a spending-limit write) is never
+    // overwritten by an older read: the CLOSE upsert is guarded on the read time.
+    await db.query("update meta_ads_accounts set spend_cap=80000, amount_spent=4200, spend_limit_read_at=now() + interval '1 day' where source_id=$1", [sourceId]);
+    const [newer] = await storedSpendLimit(sourceId);
+    account.node = { spend_cap: "0", amount_spent: "5000" };
+    const older = await sync(account, request(workspaceId, sourceId, "full"));
+    expect(older.byKind.account_liveness).toBe(1);
+    expect(await storedSpendLimit(sourceId)).toEqual([newer]);
+
     // The schema refuses a spending-limit value without its read time (0077).
     await expect(db.query("update meta_ads_accounts set spend_limit_read_at=null where source_id=$1", [sourceId]))
       .rejects.toThrow(/meta_ads_accounts_spend_limit_check/);

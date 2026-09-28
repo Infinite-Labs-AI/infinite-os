@@ -4414,3 +4414,25 @@ describe("0073 serves event-name reads from a covering index (partial-migration 
     }
   }, 180_000);
 });
+
+describe("0077 re-applied (the cloud engine's one-call execute_sql recipe can run a file twice)", () => {
+  it("is a no-op the second time — the check constraint included", async () => {
+    const { PGlite } = (await import("@electric-sql/pglite")) as unknown as {
+      PGlite: new () => { exec(sql: string): Promise<unknown>; query<T>(sql: string): Promise<{ rows: T[] }>; close(): Promise<void> };
+    };
+    const pg = new PGlite();
+    try {
+      await pg.exec("create table meta_ads_accounts (workspace_id text, source_id text, ad_account_id text, currency text)");
+      const sql = loadMigrations().find((m) => m.id === "0077_meta_ads_account_spend_limit.sql")?.sql ?? "";
+      expect(sql).not.toBe("");
+      await pg.exec(sql);
+      await pg.exec(sql);
+      const { rows } = await pg.query<{ conname: string }>(
+        "select conname from pg_constraint where conname = 'meta_ads_accounts_spend_limit_check'"
+      );
+      expect(rows).toHaveLength(1);
+    } finally {
+      await pg.close();
+    }
+  });
+});

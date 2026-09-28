@@ -19,11 +19,22 @@ alter table meta_ads_accounts add column if not exists spend_cap bigint;
 alter table meta_ads_accounts add column if not exists amount_spent bigint;
 alter table meta_ads_accounts add column if not exists spend_limit_read_at timestamptz;
 
--- A value without a read time does not exist, and Meta's amounts are never negative.
-alter table meta_ads_accounts
-  add constraint meta_ads_accounts_spend_limit_check
-  check (
-    (spend_cap is null or spend_cap >= 0)
-    and (amount_spent is null or amount_spent >= 0)
-    and (spend_limit_read_at is not null or (spend_cap is null and amount_spent is null))
-  );
+-- A value without a read time does not exist, and Meta's amounts are never negative. Guarded like the
+-- columns, so re-running this file (the cloud engine's one-call execute_sql recipe) is a no-op.
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint
+     where conname = 'meta_ads_accounts_spend_limit_check'
+       and conrelid = 'meta_ads_accounts'::regclass
+  ) then
+    alter table meta_ads_accounts
+      add constraint meta_ads_accounts_spend_limit_check
+      check (
+        (spend_cap is null or spend_cap >= 0)
+        and (amount_spent is null or amount_spent >= 0)
+        and (spend_limit_read_at is not null or (spend_cap is null and amount_spent is null))
+      );
+  end if;
+end
+$$;

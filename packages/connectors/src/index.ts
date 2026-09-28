@@ -4085,8 +4085,8 @@ async function metaAdsCloseSuccess(
       // The account spending limit from the SAME read (meta-account-spend-limit.ts), stamped with that
       // read's time so a reader can tell measured (and how old) from never measured. An existing row
       // keeps its currency/timezone (connect and the history CLOSE own those); a missing row is created
-      // from this same read. Runs for one source never overlap (the sync claim), so the newest CLOSE is
-      // the newest read.
+      // from this same read. Guarded on the read time: a reading stored LATER than this one — the cloud's
+      // own read-back after a spending-limit write, or a newer sync — is never overwritten by it.
       await tx.query(
         `insert into meta_ads_accounts (
            workspace_id, source_id, ad_account_id, currency, timezone_name,
@@ -4096,7 +4096,9 @@ async function metaAdsCloseSuccess(
            spend_cap = excluded.spend_cap,
            amount_spent = excluded.amount_spent,
            spend_limit_read_at = excluded.spend_limit_read_at,
-           updated_at = now()`,
+           updated_at = now()
+         where meta_ads_accounts.spend_limit_read_at is null
+            or meta_ads_accounts.spend_limit_read_at < excluded.spend_limit_read_at`,
         [
           request.workspaceId,
           request.sourceId,
