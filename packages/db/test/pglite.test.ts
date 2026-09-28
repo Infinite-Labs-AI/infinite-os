@@ -88,9 +88,9 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
     rmSync(dataDir, { recursive: true, force: true });
   });
 
-  it("applied ALL 76 migrations on first boot and is idempotent on a re-run", async () => {
-    expect(loadMigrations().length).toBe(76);
-    expect(firstRun).toHaveLength(76);
+  it("applied ALL 77 migrations on first boot and is idempotent on a re-run", async () => {
+    expect(loadMigrations().length).toBe(77);
+    expect(firstRun).toHaveLength(77);
     expect(firstRun).toContain("0001_control_plane.sql");
     expect(firstRun).toContain("0006_security_roles.sql");
     expect(firstRun).toContain("0036_chat_sessions_desktop_surface.sql");
@@ -132,6 +132,7 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
     expect(firstRun).toContain("0074_sync_batch_records_indexes.sql");
     expect(firstRun).toContain("0075_posthog_raw_retention_90_days.sql");
     expect(firstRun).toContain("0076_sync_runs_source_index.sql");
+    expect(firstRun).toContain("0077_meta_ads_account_spend_limit.sql");
 
     // Idempotent: a second boot re-applies zero (the `rows.length` gate, not the pg `rowCount`
     // gate, makes this true on PGlite).
@@ -139,13 +140,13 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
     expect(secondRun).toEqual([]);
   });
 
-  it("created the schema_migrations ledger with all 76 rows", async () => {
+  it("created the schema_migrations ledger with all 77 rows", async () => {
     const ledger = await db.query<{ id: string }>(
       "select id from schema_migrations order by id"
     );
-    expect(ledger).toHaveLength(76);
+    expect(ledger).toHaveLength(77);
     expect(ledger[0]?.id).toBe("0001_control_plane.sql");
-    expect(ledger.at(-1)?.id).toBe("0076_sync_runs_source_index.sql");
+    expect(ledger.at(-1)?.id).toBe("0077_meta_ads_account_spend_limit.sql");
   });
 
   it("0063 serves both PostHog views from per-(workspace, source, day) rollups — refresh, is_internal, idempotency, grain key, grants", async () => {
@@ -4412,4 +4413,26 @@ describe("0073 serves event-name reads from a covering index (partial-migration 
       await db2.close();
     }
   }, 180_000);
+});
+
+describe("0077 re-applied (the cloud engine's one-call execute_sql recipe can run a file twice)", () => {
+  it("is a no-op the second time — the check constraint included", async () => {
+    const { PGlite } = (await import("@electric-sql/pglite")) as unknown as {
+      PGlite: new () => { exec(sql: string): Promise<unknown>; query<T>(sql: string): Promise<{ rows: T[] }>; close(): Promise<void> };
+    };
+    const pg = new PGlite();
+    try {
+      await pg.exec("create table meta_ads_accounts (workspace_id text, source_id text, ad_account_id text, currency text)");
+      const sql = loadMigrations().find((m) => m.id === "0077_meta_ads_account_spend_limit.sql")?.sql ?? "";
+      expect(sql).not.toBe("");
+      await pg.exec(sql);
+      await pg.exec(sql);
+      const { rows } = await pg.query<{ conname: string }>(
+        "select conname from pg_constraint where conname = 'meta_ads_accounts_spend_limit_check'"
+      );
+      expect(rows).toHaveLength(1);
+    } finally {
+      await pg.close();
+    }
+  });
 });

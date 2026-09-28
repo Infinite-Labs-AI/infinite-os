@@ -8,6 +8,11 @@ import {
   rollUpMetaAdsAdInsights,
 } from "./meta-ads-hot-rollup.js";
 import { metaAdsAccountLivenessCursorKey, metaAdsAccountLivenessDue } from "./meta-account-liveness.js";
+import {
+  META_ADS_ACCOUNT_NODE_FIELDS,
+  metaAdsAccountSpendLimitRead,
+  type MetaAdsAccountSpendLimit,
+} from "./meta-account-spend-limit.js";
 import { metaEntityReadMode } from "./meta-entity-checkpoint.js";
 import { planMetaChildStatusRefresh, runMetaChildStatusRefresh } from "./meta-child-status-refresh.js";
 import { metaAdsEntityVersionFingerprint } from "./meta-entity-fingerprint.js";
@@ -280,6 +285,9 @@ interface MetaAdsAccountMetadata {
   adAccountId: string;
   currency: string | null;
   timezoneName: string | null;
+  // Only from a Graph read of the account node that returned a readable limit — never from the
+  // stored row (meta-account-spend-limit.ts). Absent = this run measured nothing.
+  spendLimit?: MetaAdsAccountSpendLimit;
 }
 
 /**
@@ -4072,6 +4080,37 @@ async function metaAdsCloseSuccess(
         plan.metaAdsAccountLivenessReadAt,
       ],
     );
+    const spendLimit = plan.metaAdsAccountMetadata.spendLimit;
+    if (spendLimit) {
+      // The account spending limit from the SAME read (meta-account-spend-limit.ts), stamped with that
+      // read's time so a reader can tell measured (and how old) from never measured. An existing row
+      // keeps its currency/timezone (connect and the history CLOSE own those); a missing row is created
+      // from this same read. Guarded on the read time: a reading stored LATER than this one — the cloud's
+      // own read-back after a spending-limit write, or a newer sync — is never overwritten by it.
+      await tx.query(
+        `insert into meta_ads_accounts (
+           workspace_id, source_id, ad_account_id, currency, timezone_name,
+           spend_cap, amount_spent, spend_limit_read_at
+         ) values ($1,$2,$3,$4,$5,$6::bigint,$7::bigint,$8::timestamptz)
+         on conflict (workspace_id, source_id, ad_account_id) do update set
+           spend_cap = excluded.spend_cap,
+           amount_spent = excluded.amount_spent,
+           spend_limit_read_at = excluded.spend_limit_read_at,
+           updated_at = now()
+         where meta_ads_accounts.spend_limit_read_at is null
+            or meta_ads_accounts.spend_limit_read_at < excluded.spend_limit_read_at`,
+        [
+          request.workspaceId,
+          request.sourceId,
+          plan.metaAdsAccountMetadata.adAccountId,
+          plan.metaAdsAccountMetadata.currency,
+          plan.metaAdsAccountMetadata.timezoneName,
+          spendLimit.spendCap,
+          spendLimit.amountSpent,
+          plan.metaAdsAccountLivenessReadAt,
+        ],
+      );
+    }
   }
   if (!replacement && !entitySnapshot) return;
 
@@ -9331,7 +9370,7 @@ async function metaAdsReadAccountMetadata(
 ): Promise<MetaAdsAccountMetadata> {
   const adAccountId = metaAdsAccountId(credential);
   const url = new URL(`https://graph.facebook.com/${metaAdsApiVersion(credential)}/${adAccountId}`);
-  url.searchParams.set("fields", "id,account_id,currency,timezone_name");
+  url.searchParams.set("fields", META_ADS_ACCOUNT_NODE_FIELDS);
   const response = await metaAdsFetchWithThrottleBackoff(
     url.toString(),
     {
@@ -9357,10 +9396,16 @@ async function metaAdsReadAccountMetadata(
       false,
     );
   }
+  const spendLimit = metaAdsAccountSpendLimitRead(body);
+  if (spendLimit.kind === "unreadable") {
+    // Never the value itself (no raw money in logs). The run goes on; the limit is simply not measured.
+    console.warn(`[meta_ads] account ${spendLimit.field} was not a whole number of the currency's basic unit; the spending limit was not recorded from this read`);
+  }
   return {
     adAccountId,
     currency: stringOrNull(body.currency)?.toLowerCase() ?? null,
     timezoneName: stringOrNull(body.timezone_name),
+    ...(spendLimit.kind === "measured" ? { spendLimit: { spendCap: spendLimit.spendCap, amountSpent: spendLimit.amountSpent } } : {}),
   };
 }
 

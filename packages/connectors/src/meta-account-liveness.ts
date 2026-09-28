@@ -2,11 +2,14 @@
  * How often the Meta inventory lane re-reads the ad account node (`GET /act_<id>`, telemetry kind
  * `account_liveness`).
  *
- * WHAT THAT READ IS FOR. It requests `id,account_id,currency,timezone_name` and checks the returned
- * id against the connected source. On an `inventory_only` run nothing else consumes it: the run
- * returns before the insights passes, so its currency/timezone never reach `meta_ads_accounts`
- * (only a history CLOSE writes that row, and the insights-only lanes read the STORED row instead of
- * calling Meta). It also cannot see a disabled account — it never asks for `account_status`.
+ * WHAT THAT READ IS FOR. It requests `id,account_id,currency,timezone_name,spend_cap,amount_spent` and
+ * checks the returned id against the connected source. On an `inventory_only` run the only other
+ * consumer is the account spending limit (meta-account-spend-limit.ts), which CLOSE stores with this
+ * read's time: the run returns before the insights passes, so its currency/timezone never overwrite an
+ * existing `meta_ads_accounts` row (connect and the history CLOSE own those, and the insights-only
+ * lanes read the STORED row instead of calling Meta). Where only inventory scans read the node, the
+ * stored spending limit therefore refreshes on this 24h cadence (plus the scan interval) — never
+ * faster. It also cannot see a disabled account — it never asks for `account_status`.
  *
  * WHY IT DOES NOT NEED TO RUN EVERY SCAN. Its only remaining job on the inventory lane is to fail
  * the run when the token is revoked or loses access, and the entity edge reads that follow it in
