@@ -2608,7 +2608,7 @@ describe("live provider clients", () => {
       // The CAMPAIGN pass keeps EXACTLY the Phase-1 field list (no adset_id — that is added
       // only at level=adset).
       expect(campaignInsightsUrl.searchParams.get("fields")).toBe(
-        "campaign_id,campaign_name,date_start,spend,clicks,inline_link_clicks,impressions,reach,frequency,cpm,cpc,ctr,actions,action_values,results,cost_per_result,result_values_performance_indicator,objective,optimization_goal,account_currency"
+        "campaign_id,campaign_name,date_start,spend,clicks,inline_link_clicks,impressions,reach,frequency,cpm,cpc,ctr,actions,action_values,results,cost_per_result,result_values_performance_indicator,objective,optimization_goal,account_currency,video_thruplay_watched_actions"
       );
       expect(campaignInsightsUrl.searchParams.get("fields")).toContain("account_currency");
       expect(campaignInsightsUrl.searchParams.get("limit")).toBe("500");
@@ -2624,7 +2624,7 @@ describe("live provider clients", () => {
       );
       expect(adsetInsightsUrl.searchParams.get("level")).toBe("adset");
       expect(adsetInsightsUrl.searchParams.get("fields")).toBe(
-        "adset_id,adset_name,campaign_id,campaign_name,date_start,spend,clicks,inline_link_clicks,impressions,reach,frequency,cpm,cpc,ctr,actions,action_values,results,cost_per_result,result_values_performance_indicator,objective,optimization_goal,account_currency"
+        "adset_id,adset_name,campaign_id,campaign_name,date_start,spend,clicks,inline_link_clicks,impressions,reach,frequency,cpm,cpc,ctr,actions,action_values,results,cost_per_result,result_values_performance_indicator,objective,optimization_goal,account_currency,video_thruplay_watched_actions"
       );
     });
   });
@@ -3441,7 +3441,7 @@ describe("live provider clients", () => {
     // The ad field list PREPENDS ad_id,ad_name,adset_id; campaign_id,campaign_name already lead
     // the base field list (the carried parent keys are echoed at every grain — not duplicated).
     expect(adInsightsUrl.searchParams.get("fields")).toBe(
-      "ad_id,ad_name,adset_id,campaign_id,campaign_name,date_start,spend,clicks,inline_link_clicks,impressions,reach,frequency,cpm,cpc,ctr,actions,action_values,results,cost_per_result,result_values_performance_indicator,objective,optimization_goal,account_currency"
+      "ad_id,ad_name,adset_id,campaign_id,campaign_name,date_start,spend,clicks,inline_link_clicks,impressions,reach,frequency,cpm,cpc,ctr,actions,action_values,results,cost_per_result,result_values_performance_indicator,objective,optimization_goal,account_currency,video_thruplay_watched_actions"
     );
     // The /ads edge requests the creative id plus bounded metadata needed for durable pattern/media
     // archival, together with the parent ids.
@@ -9765,8 +9765,8 @@ describe("Meta Ads durable daily history", () => {
       for (const [level, id] of [["ad", "a_trial"], ["adset", "s_promoted"]] as const) {
         const payload = (await promotedPayloads(level)).get(id)!;
         expect(payload.conversions).toEqual([unknownMarker("start_trial", true)]);
-        // Meta's Results label is kept verbatim as evidence; actions_raw gains no new key.
-        expect(Object.keys(payload.actionsRaw as object)).toEqual(["actions", "action_values", "provider_result_evidence"]);
+        // Meta's Results label is kept verbatim as evidence; actions_raw gains no key for it (the four are the standard set).
+        expect(Object.keys(payload.actionsRaw as object)).toEqual(["actions", "action_values", "video_thruplay_watched_actions", "provider_result_evidence"]);
         expect(payload.actionsRaw).toMatchObject({
           provider_result_evidence: {
             actions_present: true,
@@ -9997,6 +9997,8 @@ describe("Meta Ads durable daily history", () => {
       const expectedActionsRaw = {
         actions: purchaseDay.actions,
         action_values: purchaseDay.action_values,
+        // Requested on every insights read; Meta omitted it (no video), so a measured none.
+        video_thruplay_watched_actions: [],
         provider_result_evidence: {
           actions_present: true,
           action_values_present: true,
@@ -10019,9 +10021,29 @@ describe("Meta Ads durable daily history", () => {
       expect(adset.actionsRaw).toEqual(expectedActionsRaw);
     });
     const fieldsByLevel = new Map(insightsUrls.map((url) => [new URL(url).searchParams.get("level"), new URL(url).searchParams.get("fields")]));
-    const baseFields = "campaign_id,campaign_name,date_start,spend,clicks,inline_link_clicks,impressions,reach,frequency,cpm,cpc,ctr,actions,action_values,results,cost_per_result,result_values_performance_indicator,objective,optimization_goal,account_currency";
+    const baseFields = "campaign_id,campaign_name,date_start,spend,clicks,inline_link_clicks,impressions,reach,frequency,cpm,cpc,ctr,actions,action_values,results,cost_per_result,result_values_performance_indicator,objective,optimization_goal,account_currency,video_thruplay_watched_actions";
     expect(fieldsByLevel.get("ad")).toBe(`ad_id,ad_name,adset_id,${baseFields}`);
     expect(fieldsByLevel.get("adset")).toBe(`adset_id,adset_name,${baseFields}`);
+  });
+
+  it("stores Meta's ThruPlays list verbatim in actions_raw from the SAME insights read, and [] when Meta omits it", async () => {
+    // ThruPlays are not an actions[] type: only the top-level video_thruplay_watched_actions carries them. It is
+    // requested on every insights read, so an omitted list is a measured none ([]); a row saved before this field
+    // existed has no key at all, which is how a reader tells "unknown" from "none".
+    const thruplays = [{ action_type: "video_view", value: "9", "1d_view": "8", "7d_click": "1" }];
+    const insightsUrls: string[] = [];
+    await withMockFetch(promotedAdsetFetch("PURCHASE", {
+      ad: [{ ad_id: "a_video", ad_name: "Video ad", video_thruplay_watched_actions: thruplays }, { ad_id: "a_image", ad_name: "Image ad" }],
+      adset: [{ adset_name: "Promoted adset", video_thruplay_watched_actions: thruplays }],
+    }, insightsUrls), async () => {
+      const byAd = await promotedPayloads("ad");
+      expect((byAd.get("a_video")?.actionsRaw as Record<string, unknown>).video_thruplay_watched_actions).toEqual(thruplays);
+      expect((byAd.get("a_image")?.actionsRaw as Record<string, unknown>).video_thruplay_watched_actions).toEqual([]);
+      const adset = (await promotedPayloads("adset")).get("s_promoted")!;
+      expect((adset.actionsRaw as Record<string, unknown>).video_thruplay_watched_actions).toEqual(thruplays);
+    });
+    // Same request: no extra insights call was made for it.
+    for (const url of insightsUrls) expect(new URL(url).searchParams.get("fields")).toContain("video_thruplay_watched_actions");
   });
 
   it("emits change-snapshot records for zero-delivery entities with targeting and creative descriptors", async () => {

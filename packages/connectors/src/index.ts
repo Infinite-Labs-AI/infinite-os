@@ -8432,6 +8432,15 @@ const META_ADS_INSIGHTS_DEFAULT_TIME_INCREMENT = "1";
 // the meta_ads_campaigns dimension; it is the reconciliation axis for the Meta↔Stripe
 // value join (§5). Without it in this list, currency is ALWAYS null in live mode and the
 // Stripe ROAS join can never reconcile a currency — so it MUST be requested here.
+//
+// video_thruplay_watched_actions (2026-09-28, the Ads tables' ThruPlays + cost per ThruPlay
+// columns): ThruPlays are NOT an actions[] type, only this top-level field ([{action_type:
+// 'video_view', value, …windows}], omitted when there were none). It rides THIS request — no new
+// call, no extra spend of the per-account request budget — and is stored verbatim beside
+// actions[] in actions_raw (metaAdsActionsRaw), so no schema change. It is a long-documented
+// Insights field (an earlier insights pipeline of ours requested it beside actions/action_values
+// and stored the counts); ONE rejected field fails the WHOLE request, so verify it with one probe
+// before this ships (see start_trial_actions below, rejected by v25.0 despite the reference).
 const META_ADS_INSIGHTS_FIELDS = [
   "campaign_id",
   "campaign_name",
@@ -8452,7 +8461,8 @@ const META_ADS_INSIGHTS_FIELDS = [
   "result_values_performance_indicator",
   "objective",
   "optimization_goal",
-  "account_currency"
+  "account_currency",
+  "video_thruplay_watched_actions"
 ].join(",");
 
 // §4b — the grain-aware insights field list. At level=adset we ADD adset_id,adset_name so
@@ -8757,6 +8767,9 @@ function metaInsightsActionValues(row: MetaAdsInsightsRow): MetaActionElement[] 
 // future investigator can distinguish Meta's reported result from our resolved objective rule.
 // `resolved_optimization_goal` may come from the adset dimension at ad/adset grain; the unprefixed
 // `optimization_goal` remains the value Meta returned on this specific insights row.
+// `video_thruplay_watched_actions` is Meta's ThruPlays list, REQUESTED on every insights read, so
+// an absent list is a measured none and is stored as []. A reader tells a row saved before this
+// field existed (no key at all: ThruPlays unknown) from a row with none ([]).
 function metaAdsActionsRaw(
   row: MetaAdsInsightsRow,
   resolvedOptimizationGoal: string | null = stringOrNull(row.optimization_goal),
@@ -8765,6 +8778,7 @@ function metaAdsActionsRaw(
   return {
     actions: metaInsightsActions(row) ?? [],
     action_values: metaInsightsActionValues(row) ?? [],
+    video_thruplay_watched_actions: Array.isArray(row.video_thruplay_watched_actions) ? row.video_thruplay_watched_actions : [],
     provider_result_evidence: {
       actions_present: Array.isArray(row.actions),
       action_values_present: Array.isArray(row.action_values),
@@ -14575,6 +14589,9 @@ interface MetaAdsInsightsRow {
   // META_ADS_INSIGHTS_FIELDS, so live insights rows carry it and the delivery fact +
   // campaign dimension are populated WITHOUT a second ad-account read.
   account_currency?: string | null;
+  // ThruPlays (played to the end or ≥ 15 s), a top-level list shaped like actions[]. Omitted by
+  // Meta when there were none; stored in actions_raw.video_thruplay_watched_actions.
+  video_thruplay_watched_actions?: MetaActionElement[] | null;
 }
 
 interface MetaAdsInsightsResponse {

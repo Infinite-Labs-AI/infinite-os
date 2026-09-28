@@ -9,9 +9,9 @@
  *
  * WHY IT IS SAFE for the open day only:
  *  - Every additive delivery metric (spend, impressions, clicks, inline_link_clicks, and every
- *    actions[]/action_values[] count per action_type per attribution window) is the sum of its
- *    child ads. Stored prod history agreed exactly for ad → ad set every day and ad → campaign on
- *    44/45 days (one day $0.09 off $8,025).
+ *    actions[]/action_values[]/video_thruplay_watched_actions[] count per action_type per
+ *    attribution window) is the sum of its child ads. Stored prod history agreed exactly for
+ *    ad → ad set every day and ad → campaign on 44/45 days (one day $0.09 off $8,025).
  *  - Rates are recomputed from the sums (never averaged): ctr = clicks / impressions × 100,
  *    cpc = spend / clicks, cpm = spend / impressions × 1000; a zero denominator is NULL.
  *  - Typed results ride on those sums: a derived ad set row is classified by the same canonical
@@ -149,6 +149,7 @@ export interface MetaAdsRollupSourceRow {
   impressions?: string | number | null;
   actions?: MetaAdsRollupActionElement[] | null;
   action_values?: MetaAdsRollupActionElement[] | null;
+  video_thruplay_watched_actions?: MetaAdsRollupActionElement[] | null;
   results?: MetaAdsRollupResultEntry[] | null;
   objective?: string | null;
   optimization_goal?: string | null;
@@ -174,6 +175,9 @@ export interface MetaAdsRolledUpRow {
   ctr: number | null;
   actions?: MetaAdsRollupActionElement[];
   action_values?: MetaAdsRollupActionElement[];
+  // ThruPlays, summed per window like actions[]; absent when no child ad reported any (the row
+  // builder then stores [] — the list is requested on every ad read, so absent means none).
+  video_thruplay_watched_actions?: MetaAdsRollupActionElement[];
   // Meta's configured-outcome list is not additive as a whole. A derived row carries only the
   // requested indicators (MetaAdsRollupOptions.resultIndicators), and null when no ad reported one.
   results: MetaAdsRollupResultEntry[] | null;
@@ -306,6 +310,7 @@ class GroupAccumulator {
   readonly goals = new Set<string | null>();
   private actions: ActionAccumulator | null = null;
   private actionValues: ActionAccumulator | null = null;
+  private thruplays: ActionAccumulator | null = null;
   private readonly adResults: Array<MetaAdsRollupResultEntry[] | null> = [];
 
   constructor(
@@ -331,6 +336,7 @@ class GroupAccumulator {
     // what a parent-level read returns — and stays absent (unknown) when no child reported any.
     if (Array.isArray(row.actions)) (this.actions ??= new ActionAccumulator()).add(row.actions);
     if (Array.isArray(row.action_values)) (this.actionValues ??= new ActionAccumulator()).add(row.action_values);
+    if (Array.isArray(row.video_thruplay_watched_actions)) (this.thruplays ??= new ActionAccumulator()).add(row.video_thruplay_watched_actions);
     this.adResults.push(Array.isArray(row.results) ? row.results : null);
   }
 
@@ -357,6 +363,7 @@ class GroupAccumulator {
       cpm: this.impressions === 0 ? null : (spend / this.impressions) * 1000,
       ...(this.actions ? { actions: this.actions.elements() } : {}),
       ...(this.actionValues ? { action_values: this.actionValues.elements() } : {}),
+      ...(this.thruplays ? { video_thruplay_watched_actions: this.thruplays.elements() } : {}),
       results: results.length > 0 ? results : null,
       cost_per_result: null,
       result_values_performance_indicator: null,

@@ -96,6 +96,19 @@ describe("rollUpMetaAdsAdInsights", () => {
     expect(row.action_values).toEqual([{ action_type: "purchase", value: 100.5, "7d_click": 100.5, "1d_view": 9.5 }]);
   });
 
+  it("sums ThruPlays per window like actions[], and leaves them absent when no child ad reported any", () => {
+    const { campaigns, adsets } = rollUpMetaAdsAdInsights([
+      ad({ ad_id: "a1", spend: "1", clicks: "1", impressions: "100", video_thruplay_watched_actions: [{ action_type: "video_view", value: "7", "1d_view": "7" }] }),
+      ad({ ad_id: "a2", spend: "1", clicks: "1", impressions: "100", video_thruplay_watched_actions: [{ action_type: "video_view", value: "5", "1d_view": "4", "7d_click": "1" }] }),
+      // An image ad: Meta omits the list (it was requested), so it adds nothing.
+      ad({ ad_id: "a3", spend: "1", clicks: "1", impressions: "100" }),
+      ad({ ad_id: "a4", adset_id: "s2", spend: "1", clicks: "1", impressions: "100" }),
+    ]);
+    expect(campaigns[0]!.row.video_thruplay_watched_actions).toEqual([{ action_type: "video_view", value: 12, "1d_view": 11, "7d_click": 1 }]);
+    expect(adsets.find((entry) => entry.entityId === "s1")!.row.video_thruplay_watched_actions).toEqual([{ action_type: "video_view", value: 12, "1d_view": 11, "7d_click": 1 }]);
+    expect(adsets.find((entry) => entry.entityId === "s2")!.row).not.toHaveProperty("video_thruplay_watched_actions");
+  });
+
   it("leaves actions ABSENT when no ad returned them (unknown stays unknown, never an empty measured array)", () => {
     const { campaigns } = rollUpMetaAdsAdInsights([ad({ ad_id: "a1", spend: "1", clicks: "0", impressions: "5" })]);
     expect(campaigns[0]!.row.actions).toBeUndefined();
