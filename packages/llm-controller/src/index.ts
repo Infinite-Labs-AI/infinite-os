@@ -575,7 +575,7 @@ export function createLlmController(options: {
       //                            actions an app twin replaces (withheldNativeActionIds).
       const withheldActionIds = scopedAppTools?.mode === "union"
         ? withheldNativeActionIds(scopedAppTools)
-        : new Set<string>();
+        : new Map<string, string>();
       const actions = scopedAppTools
         ? scopedAppTools.mode === "union"
           ? unionActionSet(options.registry, scopedAppTools, withheldActionIds)
@@ -1063,7 +1063,7 @@ function scopedAppToolActions(scoped: NormalizedScopedAppTools): ActionDefinitio
 function unionActionSet(
   registry: ActionRegistry,
   scoped: NormalizedScopedAppTools,
-  withheld: ReadonlySet<string>
+  withheld: ReadonlyMap<string, string>
 ): ActionDefinition[] {
   // A kept native's next-step hints drop the withheld ids too, so the manifest never points at a refused action.
   const nativeActions = registry
@@ -1088,17 +1088,26 @@ function unionActionSet(
 // list_sources is the one the daemon still offers. Its native reads only this engine's local store; the app's twin
 // returns the cloud connectors plus the local Meta and Shopify rows, so it replaces the native. The advisor, digest
 // and progress labels read the twin's result as the native's (appListSourcesEnvelope).
-function withheldNativeActionIds(scoped: NormalizedScopedAppTools): Set<string> {
-  const appNames = new Set(scoped.tools.map((tool) => tool.rawName));
-  return new Set([
-    ...(appNames.has("get_meta_performance") ? ["run_meta_live_insights"] : []),
-    ...(appNames.has("list_meta_entities") ? ["list_meta_entities", "get_meta_entity", "list_meta_assets"] : []),
-    ...(appNames.has("list_sources") ? ["list_sources"] : []),
-    ...SAME_NAME_ANALYTICS_TWINS.filter((name) => appNames.has(name)),
-    // The app's copies refuse Meta metrics and views and point at get_meta_performance, so they replace the
-    // natives only when that read is in the turn too.
-    ...(appNames.has("get_meta_performance") ? META_GATED_ANALYTICS_TWINS.filter((name) => appNames.has(name)) : [])
-  ]);
+// Each withheld id maps to the model name of the app tool that replaces it, which a refused bare call names.
+function withheldNativeActionIds(scoped: NormalizedScopedAppTools): Map<string, string> {
+  const twins = new Map(scoped.tools.map((tool) => [tool.rawName, tool.modelName]));
+  const withheld = new Map<string, string>();
+  const replaceWith = (twin: string, nativeIds: readonly string[]) => {
+    const modelName = twins.get(twin);
+    if (modelName) {
+      for (const id of nativeIds) withheld.set(id, modelName);
+    }
+  };
+  replaceWith("get_meta_performance", ["run_meta_live_insights"]);
+  replaceWith("list_meta_entities", ["list_meta_entities", "get_meta_entity", "list_meta_assets"]);
+  replaceWith("list_sources", ["list_sources"]);
+  for (const name of SAME_NAME_ANALYTICS_TWINS) replaceWith(name, [name]);
+  // The app's copies refuse Meta metrics and views and point at get_meta_performance, so they replace the
+  // natives only when that read is in the turn too.
+  if (twins.has("get_meta_performance")) {
+    for (const name of META_GATED_ANALYTICS_TWINS) replaceWith(name, [name]);
+  }
+  return withheld;
 }
 
 const SAME_NAME_ANALYTICS_TWINS = [
@@ -1175,8 +1184,11 @@ async function executeToolCalls(
   input: ChatInput,
   progress?: {
     scopedAppTools?: NormalizedScopedAppTools;
-    /** Native actions this turn does not offer; a call to one fails like an unknown action. */
-    withheldActionIds?: ReadonlySet<string>;
+    /**
+     * Native actions this turn does not offer, each to the app tool that replaces it; a call to one fails like an
+     * unknown action and names that tool.
+     */
+    withheldActionIds?: ReadonlyMap<string, string>;
     progressLabels?: Map<string, string>;
     nowMs: () => number;
     emitToolStart: (event: ToolStartProgressEvent) => Promise<void>;
@@ -1270,9 +1282,12 @@ async function executeToolCalls(
       });
       continue;
     }
-    const action = progress?.withheldActionIds?.has(normalizedName) ? undefined : registry.get(normalizedName);
+    const replacement = progress?.withheldActionIds?.get(normalizedName);
+    const action = replacement ? undefined : registry.get(normalizedName);
     if (!action) {
-      const errorMessage = `Unknown Infinite OS action: ${normalizedName}`;
+      const errorMessage = replacement
+        ? `Unknown Infinite OS action: ${normalizedName}. This turn offers ${replacement} in its place.`
+        : `Unknown Infinite OS action: ${normalizedName}`;
       calls.push({
         id: toolCall.id,
         actionId: normalizedName,

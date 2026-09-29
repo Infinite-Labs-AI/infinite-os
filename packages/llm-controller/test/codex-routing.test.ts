@@ -617,7 +617,13 @@ describe("union turn: native live Meta entity reads", () => {
   it("refuses an mcp_-prefixed call to a withheld native entity read when the twin is present", async () => {
     for (const bare of LIVE_READS) {
       const { call, appCalls } = await run(["list_meta_entities"], `mcp_${bare}`);
-      expect(call, bare).toMatchObject({ status: "error", error: { code: "unknown_action" } });
+      expect(call, bare).toMatchObject({
+        status: "error",
+        error: {
+          code: "unknown_action",
+          message: `Unknown Infinite OS action: ${bare}. This turn offers mcp__${APP_SERVER}__list_meta_entities in its place.`
+        }
+      });
       expect(appCalls, bare).toEqual([]);
     }
   });
@@ -857,12 +863,15 @@ describe("union turn: the app's list_sources twin", () => {
     expect(hints("revoke_source")).toEqual([]);
   });
 
-  it("refuses a bare list_sources call instead of reading the local store", async () => {
+  it("refuses a bare list_sources call instead of reading the local store, and names the twin", async () => {
     for (const bare of ["list_sources", "mcp_list_sources"]) {
       const { result, appCalls } = await run(createDaemonActionRegistry(), ["list_sources"], { call: bare });
       expect(result.actionCalls.find((call) => call.id === "call_sources"), bare).toMatchObject({
         status: "error",
-        error: { code: "unknown_action" }
+        error: {
+          code: "unknown_action",
+          message: `Unknown Infinite OS action: list_sources. This turn offers ${app("list_sources")} in its place.`
+        }
       });
       expect(appCalls, bare).toEqual([]);
     }
