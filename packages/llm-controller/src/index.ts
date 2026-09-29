@@ -15,9 +15,10 @@ import {
   type QueryFamily,
   classifyQueryFamily,
   splitHostTurnContext,
-  type InfiniteOsQueryAdvisor
+  type InfiniteOsQueryAdvisor,
+  type QueryRefinementToolResult
 } from "./query-advisor.js";
-import type { ChatResponse, InteractiveAgentProfile, InteractiveFeature } from "@infinite-os/types";
+import type { ChatResponse, InfiniteOsActionId, InteractiveAgentProfile, InteractiveFeature } from "@infinite-os/types";
 import type { ChatSessionStore } from "./session-store.js";
 
 // `ChatResponse` is canonical in `@infinite-os/types` (the cross-zone contract
@@ -270,7 +271,8 @@ export interface ScopedAppTools {
   // How the injected app tools compose with the engine's native action registry.
   //   "exclusive" (default when absent) — the turn runs over ONLY the scoped app
   //     tools; the native registry is hidden and native calls fail closed. This is
-  //     the locked, EPHEMERAL ads sub-agent contract (no session memory).
+  //     the locked, EPHEMERAL lane contract (no session memory). The desktop's
+  //     iMessage (remote-human), scheduled and triggered lanes send it.
   //   "union" — the turn runs over the UNION of the native registry AND the scoped
   //     app tools, and persists like a normal chat turn (memory/recall/advisor).
   //     This is the Codex chat keystone: chat gets the engine's analytics AND the
@@ -294,7 +296,7 @@ interface NormalizedScopedAppTool {
 interface NormalizedScopedAppTools {
   serverName: string;
   allowedTools: string[];
-  // Resolved mode — absent on the wire ⇒ "exclusive" (preserves the ads sub-agent
+  // Resolved mode — absent on the wire ⇒ "exclusive" (preserves the locked-lane
   // contract). Only "union" opens the native registry + persistence.
   mode: "exclusive" | "union";
   tools: NormalizedScopedAppTool[];
@@ -535,7 +537,8 @@ export function createLlmController(options: {
       const scopedAppTools = normalizeScopedAppTools(input.scopedAppTools);
       // A plain chat turn (no scoped app tools) persists. A scoped turn persists ONLY
       // in "union" mode — Codex chat needs session memory + recall + advisor exactly
-      // like a normal turn. "exclusive" scoped turns (the ads sub-agent) stay EPHEMERAL:
+      // like a normal turn. "exclusive" scoped turns (the desktop's iMessage, scheduled and
+      // triggered lanes) stay EPHEMERAL:
       // no session rows, no recall, no memory review. Every persistTurn use below is
       // gated on this so union turns get the full chat lifecycle and exclusive turns none.
       const persistTurn = !scopedAppTools || scopedAppTools.mode === "union";
@@ -568,13 +571,15 @@ export function createLlmController(options: {
       }
       // Action set is mode-aware:
       //   no scoped tools        ⇒ the native registry (a plain chat turn).
-      //   scoped "exclusive"     ⇒ ONLY the scoped app tools (ads sub-agent; native hidden).
+      //   scoped "exclusive"     ⇒ ONLY the scoped app tools (the iMessage, scheduled and
+      //                            triggered lanes; native hidden).
       //   scoped "union"         ⇒ native registry ∪ scoped app tools (Codex chat keystone),
       //                            with native winning on any name collision, minus the native
-      //                            actions an app twin replaces (withheldNativeActionIds).
+      //                            actions an app twin replaces, the live Meta reads, every
+      //                            engine write and the local-only reads (withheldNativeActionIds).
       const withheldActionIds = scopedAppTools?.mode === "union"
-        ? withheldNativeActionIds(scopedAppTools)
-        : new Set<string>();
+        ? withheldNativeActionIds(options.registry, scopedAppTools)
+        : new Map<string, string>();
       const actions = scopedAppTools
         ? scopedAppTools.mode === "union"
           ? unionActionSet(options.registry, scopedAppTools, withheldActionIds)
@@ -666,15 +671,17 @@ export function createLlmController(options: {
       const tools = toolSchemas(actions);
       const actionCalls: ChatActionCall[] = [];
       const toolResults: ModelToolResult[] = [];
+      // The advisor also reads each call's input: an app twin called with an argument is not the native it replaces.
+      const advisorResults: QueryRefinementToolResult[] = [];
       let usage: ModelResponse["usage"];
       try {
         for (let iteration = 0; iteration < maxToolIterations; iteration += 1) {
           const refinementSections = buildQueryRefinementSections(
             advisedQuestion,
-            toolResults,
+            advisorResults,
             actions.map((action) => action.id)
           );
-          const synthesisSections = buildQuerySynthesisSections(advisedQuestion, toolResults);
+          const synthesisSections = buildQuerySynthesisSections(advisedQuestion, advisorResults);
           if (iteration > 0 && refinementSections.length > 0) {
             await emitStatus("resolve", refinementProgressMessage(refinementSections));
           }
@@ -691,7 +698,9 @@ export function createLlmController(options: {
             advisories: [...(advisory?.promptSections ?? []), ...refinementSections, ...synthesisSections],
             ...(input.agentProfile ? { agentProfile: input.agentProfile } : {}),
             ...(input.interactiveFeatures ? { interactiveFeatures: input.interactiveFeatures } : {}),
-            ...(input.turnOrigin ? { turnOrigin: input.turnOrigin } : {})
+            ...(input.turnOrigin ? { turnOrigin: input.turnOrigin } : {}),
+            // Only a union turn's prompt changes: it offers none of the engine's writes.
+            ...(scopedAppTools?.mode === "union" ? { scopedAppToolMode: "union" as const } : {})
           });
           const streamState = { messageStarted: false };
           const response = await modelClient.complete({
@@ -755,8 +764,8 @@ export function createLlmController(options: {
           }
           const progressLabels = new Map<string, string>();
           for (const call of response.toolCalls) {
-            const actionId = normalizeToolCallName(call.name, options.registry, scopedAppTools);
-            const message = toolCallProgressMessage(advisedQuestion, call, options.registry, scopedAppTools);
+            const actionId = normalizeToolCallName(call.name, options.registry, scopedAppTools, withheldActionIds);
+            const message = toolCallProgressMessage(advisedQuestion, call, options.registry, scopedAppTools, withheldActionIds);
             progressLabels.set(call.id, message);
             await emitLegacy({ stage: "tool", message });
             await emitInfinite({
@@ -794,7 +803,9 @@ export function createLlmController(options: {
               });
             }
             actionCalls.push(call);
-            toolResults.push(modelToolResult(call));
+            const toolResult = modelToolResult(call);
+            toolResults.push(toolResult);
+            advisorResults.push({ name: toolResult.name, result: toolResult.result, input: call.input });
           }
           if (nextCalls.some((call) => call.requiresConfirmation)) {
             const message = "This request includes an operator action that requires confirmation before execution.";
@@ -1058,7 +1069,7 @@ function scopedAppToolActions(scoped: NormalizedScopedAppTools): ActionDefinitio
 function unionActionSet(
   registry: ActionRegistry,
   scoped: NormalizedScopedAppTools,
-  withheld: ReadonlySet<string>
+  withheld: ReadonlyMap<string, string>
 ): ActionDefinition[] {
   // A kept native's next-step hints drop the withheld ids too, so the manifest never points at a refused action.
   const nativeActions = registry
@@ -1072,18 +1083,120 @@ function unionActionSet(
   return [...nativeActions, ...appActions];
 }
 
-// Native actions a union turn leaves out because an app twin replaces them. The native Meta reads are live Graph
-// reads on the account's throttled budget; when the app's stored copy is in the turn, offering both lets the model
-// pick the live read. get_meta_performance (stored history, settled account-zone days) replaces
-// run_meta_live_insights; list_meta_entities (stored entities and status history) replaces the native entity and
-// asset reads. A bare call to a withheld id resolves to the native name and is refused as an unknown action.
-function withheldNativeActionIds(scoped: NormalizedScopedAppTools): Set<string> {
-  const appNames = new Set(scoped.tools.map((tool) => tool.rawName));
-  return new Set([
-    ...(appNames.has("get_meta_performance") ? ["run_meta_live_insights"] : []),
-    ...(appNames.has("list_meta_entities") ? ["list_meta_entities", "get_meta_entity", "list_meta_assets"] : [])
-  ]);
+// Native actions a union turn leaves out. First, those an app twin replaces. A bare call to a withheld id resolves
+// to the native name and is refused as an unknown action.
+// The analytics reads below leave only when the app sends a twin of the same name: the twin runs the same engine
+// handler on the cloud workspace. The daemon registry already retires them (EMBEDDED_ONLY_READ_ACTIONS), so there
+// this is a no-op; it keeps a host that builds the full registry from offering both copies.
+// list_sources is the one the daemon still offers. Its native reads only this engine's local store; the app's twin
+// returns the cloud connectors plus the local Meta and Shopify rows, so it replaces the native. The advisor, digest
+// and progress labels read the twin's result as the native's (appListSourcesEnvelope).
+//
+// Then, in every union turn, the native live Meta reads, each engine write (authority "operator") and the local-only
+// reads below. The live Meta reads call the Graph API on this laptop's Meta credential and the account's throttled
+// budget, and write nothing. The desktop reaches Meta through the app's stored reads: get_meta_performance (stored
+// history, settled account-zone days) in place of run_meta_live_insights, list_meta_entities (stored entities and
+// status history) in place of the native entity and asset reads. Those reads come by name or behind capability_call
+// (the general profile's bridge, the Codex core+search deferral), so a live read is left out whether or not its twin
+// is named: a refusal names the twin, else capability_call with the app read's name, else nothing. Only the
+// desktop sends a union turn: the engine accepts mode "union" only with a loopback-HTTP app-tool proxy
+// (parseScopedAppTools in apps/app), and in the closed desktop repo only the Codex chat bridge sends it (the CLI and
+// worker never build scoped app tools). Its writes belong to the app: an engine write called from the turn became
+// a generic Confirm card that ran the model's own input with operator authority, past the app's rules (activation
+// only through its proposal, a typed budget, no live-ad rename, drift checks). The desktop's own engine writes do
+// not ride the chat (its local lane calls /tools/call with the operator token), so they are untouched. The
+// operators are read off each action's authority, so a new write is withheld without a list to update.
+// The local-only reads answer from this engine's local store, which a cloud workspace never fills
+// (describe_source, get_recent_sync_runs, list_source_schedules, and the context/journey trio), or run a full sync
+// inside the turn outside the sync single-flight guard (sync_source_now).
+//
+// Each withheld id maps to the sentence its refusal adds: the app tool(s) this turn carries in its place, when any.
+// Under any spelling the model gives it (normalizeToolCallName), a withheld id is refused with that sentence.
+function withheldNativeActionIds(registry: ActionRegistry, scoped: NormalizedScopedAppTools): Map<string, string> {
+  const twins = new Map(scoped.tools.map((tool) => [tool.rawName, tool.modelName]));
+  const withheld = new Map<string, string>();
+  const replaceWith = (twin: string, nativeIds: readonly string[]) => {
+    const modelName = twins.get(twin);
+    if (modelName) {
+      for (const id of nativeIds) withheld.set(id, `This turn offers ${modelName} in its place.`);
+    }
+  };
+  for (const [nativeId, appRead] of UNION_LIVE_META_READS) replaceWith(appRead, [nativeId]);
+  replaceWith("list_sources", ["list_sources"]);
+  for (const name of SAME_NAME_ANALYTICS_TWINS) replaceWith(name, [name]);
+  // The app's copies refuse Meta metrics and views and point at get_meta_performance, so they replace the
+  // natives only when that read is in the turn too.
+  if (twins.has("get_meta_performance")) {
+    for (const name of META_GATED_ANALYTICS_TWINS) replaceWith(name, [name]);
+  }
+  for (const action of registry.list()) {
+    const everyUnionTurn = action.authority === "operator" || UNION_LOCAL_ONLY_READS.has(action.id) ||
+      UNION_LIVE_META_READS.has(action.id);
+    if (everyUnionTurn && !withheld.has(action.id)) {
+      withheld.set(action.id, unionWithheldRefusal(action.id, twins));
+    }
+  }
+  return withheld;
 }
+
+// The native live Meta Graph reads, each to the app read that answers in its place.
+const UNION_LIVE_META_READS: ReadonlyMap<string, string> = new Map<InfiniteOsActionId, string>([
+  ["run_meta_live_insights", "get_meta_performance"],
+  ["list_meta_entities", "list_meta_entities"],
+  ["get_meta_entity", "list_meta_entities"],
+  ["list_meta_assets", "list_meta_entities"]
+]);
+
+const UNION_LOCAL_ONLY_READS: ReadonlySet<string> = new Set<InfiniteOsActionId>([
+  "sync_source_now",
+  "get_recent_sync_runs",
+  "describe_source",
+  "list_source_schedules",
+  "describe_context_item",
+  "validate_journey_plan",
+  "search_context"
+]);
+
+// The app tools that do what a withheld engine action did, in the order a refusal names them. A refusal names only
+// the ones the turn carries.
+const UNION_APP_REPLACEMENTS: Partial<Record<InfiniteOsActionId, readonly string[]>> = {
+  set_meta_entity_status: ["propose_activate_meta_entity", "propose_pause_meta_entity"],
+  update_meta_budget: ["propose_meta_budget"],
+  create_meta_campaign: ["propose_create_meta_campaign", "propose_meta_launch"],
+  create_meta_ad_set: ["propose_create_meta_ad_set", "propose_meta_launch"],
+  create_meta_ad: ["propose_create_meta_ad", "propose_meta_launch"],
+  create_meta_creative: ["propose_create_meta_creative", "propose_meta_launch"],
+  update_meta_ad: ["propose_update_meta_ad"],
+  describe_source: ["list_sources"],
+  get_recent_sync_runs: ["list_sources"]
+};
+
+function unionWithheldRefusal(actionId: string, twins: ReadonlyMap<string, string>): string {
+  // A live Meta read whose app read is not in the turn by name: the turn may still reach that read through
+  // capability_call (whose capabilityId is the app tool's name).
+  const appRead = UNION_LIVE_META_READS.get(actionId);
+  if (appRead) {
+    const capabilityCall = twins.get("capability_call");
+    return capabilityCall ? `Use ${capabilityCall} with ${appRead} in its place.` : "This chat turn does not offer it.";
+  }
+  if (actionId === "delete_meta_entity") {
+    const pause = twins.get("propose_pause_meta_entity");
+    return `Deleting is not available from chat; pause it instead${pause ? ` with ${pause}` : ""}.`;
+  }
+  const offered = (UNION_APP_REPLACEMENTS[actionId as InfiniteOsActionId] ?? [])
+    .map((name) => twins.get(name))
+    .filter((name): name is string => name !== undefined);
+  return offered.length > 0 ? `This turn offers ${offered.join(" or ")} in its place.` : "This chat turn does not offer it.";
+}
+
+const SAME_NAME_ANALYTICS_TWINS = [
+  "list_metrics",
+  "describe_metric",
+  "list_queryable_views",
+  "describe_queryable_view",
+  "run_funnel_query"
+] as const;
+const META_GATED_ANALYTICS_TWINS = ["run_metric_query", "run_breakdown_query"] as const;
 
 function normalizeScopedAppTools(scoped: ScopedAppTools | undefined): NormalizedScopedAppTools | undefined {
   if (!scoped) {
@@ -1105,7 +1218,7 @@ function normalizeScopedAppTools(scoped: ScopedAppTools | undefined): Normalized
   return {
     serverName,
     allowedTools,
-    // Absent ⇒ "exclusive" so existing callers (the ads sub-agent) are byte-for-byte
+    // Absent ⇒ "exclusive" so existing exclusive callers are byte-for-byte
     // unchanged. parseScopedAppTools has already rejected any value other than
     // "exclusive" | "union", so this fallback only ever fires for the absent case.
     mode: scoped.mode === "union" ? "union" : "exclusive",
@@ -1150,8 +1263,11 @@ async function executeToolCalls(
   input: ChatInput,
   progress?: {
     scopedAppTools?: NormalizedScopedAppTools;
-    /** Native actions this turn does not offer; a call to one fails like an unknown action. */
-    withheldActionIds?: ReadonlySet<string>;
+    /**
+     * Native actions this turn does not offer, each to the sentence its refusal adds (the app tool that replaces it,
+     * when the turn has one); a call to one fails like an unknown action.
+     */
+    withheldActionIds?: ReadonlyMap<string, string>;
     progressLabels?: Map<string, string>;
     nowMs: () => number;
     emitToolStart: (event: ToolStartProgressEvent) => Promise<void>;
@@ -1161,7 +1277,7 @@ async function executeToolCalls(
 ): Promise<ChatActionCall[]> {
   const calls: ChatActionCall[] = [];
   for (const toolCall of toolCalls) {
-    const normalizedName = normalizeToolCallName(toolCall.name, registry, progress?.scopedAppTools);
+    const normalizedName = normalizeToolCallName(toolCall.name, registry, progress?.scopedAppTools, progress?.withheldActionIds);
     const progressLabel = progress?.progressLabels?.get(toolCall.id) ?? `Running ${normalizedName}.`;
     const startedAt = progress?.nowMs() ?? Date.now();
     await progress?.emitToolStart({
@@ -1218,7 +1334,7 @@ async function executeToolCalls(
     }
     // EXCLUSIVE fail-closed isolation: when scoped app tools REPLACE the native
     // registry, a call that isn't one of the scoped tools must NOT fall through to
-    // a native action — the ads sub-agent is locked to its own tools. In UNION mode
+    // a native action — an exclusive lane is locked to its own tools. In UNION mode
     // that isolation is intentionally lifted (chat gets native + app tools), so a
     // non-app-tool name drops through to the native registry lookup below. Because
     // app tools are already resolved above (toolsByModelName), native winning here
@@ -1245,13 +1361,18 @@ async function executeToolCalls(
       });
       continue;
     }
-    const action = progress?.withheldActionIds?.has(normalizedName) ? undefined : registry.get(normalizedName);
+    const refusal = progress?.withheldActionIds?.get(normalizedName);
+    const action = refusal === undefined ? registry.get(normalizedName) : undefined;
     if (!action) {
-      const errorMessage = `Unknown Infinite OS action: ${normalizedName}`;
+      const errorMessage = refusal === undefined
+        ? `Unknown Infinite OS action: ${normalizedName}`
+        : `Unknown Infinite OS action: ${normalizedName}. ${refusal}`;
       calls.push({
         id: toolCall.id,
         actionId: normalizedName,
-        input: toolCall.input,
+        // A refused write (a union turn withholds every engine write) is recorded and echoed to the model redacted,
+        // as its Confirm card was before the turn withheld it.
+        input: redactActionValue(toolCall.input),
         status: "error",
         requiresConfirmation: false,
         error: { code: "unknown_action", message: errorMessage }
@@ -1500,7 +1621,8 @@ function compactPreview(value: string, maxLength: number): string {
 function normalizeToolCallName(
   name: string,
   registry: ActionRegistry,
-  scopedAppTools?: NormalizedScopedAppTools
+  scopedAppTools?: NormalizedScopedAppTools,
+  withheld?: ReadonlyMap<string, string>
 ): string {
   if (scopedAppTools?.toolsByModelName.has(name)) {
     return name;
@@ -1512,6 +1634,15 @@ function normalizeToolCallName(
     const stripped = name.slice(4);
     if (registry.get(stripped)) {
       return stripped;
+    }
+  }
+  // A union turn's withheld native, under a spelling the registry does not know (upper case, an app server's
+  // `mcp__<server>__` prefix): it resolves to the native id, so its refusal names what the turn offers instead.
+  // Only a withheld id resolves here, and a withheld id is always refused. A plain or exclusive turn withholds none.
+  if (withheld && withheld.size > 0) {
+    const bare = name.toLowerCase().replace(/^mcp__.+?__/, "").replace(/^mcp_+/, "");
+    if (withheld.has(bare)) {
+      return bare;
     }
   }
   return name;
@@ -1545,9 +1676,14 @@ function toolCallProgressMessage(
   message: string,
   call: ModelToolCall,
   registry: ActionRegistry,
-  scopedAppTools?: NormalizedScopedAppTools
+  scopedAppTools?: NormalizedScopedAppTools,
+  withheld?: ReadonlyMap<string, string>
 ): string {
-  const actionId = normalizeToolCallName(call.name, registry, scopedAppTools);
+  const normalizedName = normalizeToolCallName(call.name, registry, scopedAppTools, withheld);
+  // The app's list_sources twin stands in for the native a union turn withholds, so it keeps the native's labels.
+  const actionId = scopedAppTools?.toolsByModelName.get(normalizedName)?.rawName === "list_sources"
+    ? "list_sources"
+    : normalizedName;
   const openEndedProgress = openEndedAnalysisProgressMessage(message, actionId, call);
   if (openEndedProgress) {
     return openEndedProgress;

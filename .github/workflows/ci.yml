@@ -86,8 +86,10 @@ jobs:
       # machine. TODO: isolate those and re-add (then this is `pnpm test`).
       # interactive-task-store.test.ts, interactive-task-recovery.test.ts and
       # interactive-turn-profile.test.ts are hermetic (temp PGlite, injected
-      # clock, fake model client), so they run here by file. So is
-      # codex-tool-wire.test.ts (temp homes, injected fetch, no real auth).
+      # clock, fake model client), so they run here by file. So are
+      # codex-tool-wire.test.ts (temp homes, injected fetch, no real auth) and
+      # codex-routing.test.ts (stub model client, in-memory registries): the
+      # desktop Codex routing and union-turn tool budget pins live there.
       #
       # Suites/tests that need live services self-skip and stay green:
       #   - tests/integration/* and apps/app/test/projects.integration.test.ts
@@ -113,6 +115,7 @@ jobs:
           packages/llm-controller/test/interactive-task-recovery.test.ts
           packages/llm-controller/test/interactive-turn-profile.test.ts
           packages/llm-controller/test/codex-tool-wire.test.ts
+          packages/llm-controller/test/codex-routing.test.ts
           packages/metadata
           packages/runtime
           packages/setup
