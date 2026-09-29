@@ -55,6 +55,13 @@ export function assembleInfiniteOsPrompt(input: PromptAssemblyInput): string {
   // tool it cannot call.
   const availableLike = (name: string): boolean =>
     actions.some((action) => action.id === name || action.id.endsWith(`__${name}`));
+  // An app-tool twin only (`mcp__<server>__<name>`), never the native action of the same name.
+  const appTwin = (name: string): string | undefined =>
+    actions.find((action) => action.id !== name && action.id.endsWith(`__${name}`))?.id;
+  // A desktop turn carries the app's stored Meta read, which serves every Meta number from the app's DB. The
+  // engine's Meta metrics, views and recipes are refused there, so the prompt stops pointing at them.
+  const metaPerformance = availableLike("get_meta_performance");
+  const metaStatusTwin = appTwin("list_meta_entities");
 
   return [
     ...(input.agentProfile === GENERAL_MARKETING_PROFILE ? generalProfileHeader(input) : [
@@ -82,13 +89,14 @@ export function assembleInfiniteOsPrompt(input: PromptAssemblyInput): string {
     "Available providers:",
     JSON.stringify(FIRST_PHASE_PROVIDERS),
     "Queryable views:",
-    JSON.stringify(FIRST_PHASE_QUERYABLE_VIEWS),
+    JSON.stringify(metaPerformance ? FIRST_PHASE_QUERYABLE_VIEWS.filter((view) => !META_ENGINE_VIEW.test(view)) : FIRST_PHASE_QUERYABLE_VIEWS),
     "Metrics:",
-    JSON.stringify(FIRST_PHASE_METRICS),
+    JSON.stringify(metaPerformance ? FIRST_PHASE_METRICS.filter((id) => !META_ENGINE_METRIC_IDS.has(id)) : FIRST_PHASE_METRICS),
     availableLike("list_metrics") || availableLike("describe_metric")
       ? "Metric aliases (common phrasings -> metric id; the live list_metrics/describe_metric actions are authoritative):"
       : "Metric aliases (common phrasings -> metric id):",
-    JSON.stringify(FIRST_PHASE_METRIC_ALIASES),
+    JSON.stringify(injectedMetricAliases(availableLike)),
+    ...appRoutingGuidance(availableLike),
     "Typed Infinite OS action manifest:",
     JSON.stringify(actions),
     "",
@@ -100,21 +108,25 @@ export function assembleInfiniteOsPrompt(input: PromptAssemblyInput): string {
     "- The honesty floor never bends: a not-connected source, an empty or truncated result, an assumed scope, or stale data must still be stated, even in the tersest answer.",
     "- A confirmed zero IS a real answer, not missing data: when an envelope marks a metric zero_confirmed_fresh (a connected, fresh source with a genuinely empty window), state the zero plainly in one short sentence (e.g. 'You had no revenue in the last 7 days — $0.'). Do not hedge, do not call it unavailable or unverifiable, do not explain the mechanism, and do not offer follow-ups unless asked.",
     ...(availableLike("list_metrics") || availableLike("describe_metric") ? [
-      "- Before concluding a metric is unavailable, check the metric-aliases list above and, if still unsure, call list_metrics or describe_metric to confirm — a phrasing like 'cost per lead', 'cpl', or 'cpa' maps to the cost_per_result metric. Only say a metric is missing after that check, and pair it with the typed next step."
+      metaPerformance
+        ? "- Before concluding a metric is unavailable, check the metric-aliases list above and, if still unsure, call list_metrics or describe_metric to confirm. Only say a metric is missing after that check, and pair it with the typed next step."
+        : "- Before concluding a metric is unavailable, check the metric-aliases list above and, if still unsure, call list_metrics or describe_metric to confirm — a phrasing like 'cost per lead', 'cpl', or 'cpa' maps to the cost_per_result metric. Only say a metric is missing after that check, and pair it with the typed next step."
     ] : []),
-    ...(availableLike("run_breakdown_query") ? [
+    ...(availableLike("run_breakdown_query") && !metaPerformance ? [
       "- When a metric phrasing names a SPECIFIC result type, supply that result_type filter and answer directly instead of asking: 'cost per lead'/'cpl' -> cost_per_result with result_type=lead; 'cost per acquisition'/'cost per purchase'/'cpa' -> cost_per_result with result_type=purchase; 'ROAS'/'return on ad spend' for an ad/sales/purchase question -> the Meta-native roas with result_type=purchase (use roas, NOT roas_from_stripe, which is the Stripe revenue-attribution join that needs a revenue mapping and is often null). For the bare 'cost per result'/'cost per conversion' phrasing with no implied result type, do NOT ask which type — run a breakdown grouped by result_type (run_breakdown_query grouped by result_type) and SHOW all result types together (for example cost per lead AND cost per purchase side by side), then invite the user to narrow to one type. A grouped breakdown also satisfies the result_type partition guard, so prefer it over a single-type guess."
     ] : []),
     "- For a read/analytical metric or number question that names no time range, do not stop to ask for a window: run the query over all available data, state the assumed scope as a caveat (for example 'across all available data — say the word if you want a specific window'), and offer to narrow. Never fabricate or estimate numbers to avoid a tool call; default scope only widens the time range, it never invents data, and it never relaxes a required result_type partition (an ambiguous 'cost per result' must still be partitioned by result_type — show the per-type breakdown rather than running an unfiltered query, which the engine partition guard rejects).",
     "- Default-scope and discover-before-bail apply to read/analytical questions only. They never let an operator or write action skip its explicit confirmation, and they never override a genuinely ambiguous entity or identity that still needs clarification.",
     "- Exception: revenue, visitors/traffic, signups, and conversion-rate questions are time-sensitive — for these, do not silently use only all-time and do not stop to ask which window; show a few standard windows (last 7 days, last 30 days, and all time) together and invite the user to narrow to a specific range.",
     "- Currency display: recognized_revenue returns values in the currency's MINOR unit (cents/pence) — divide by 100 and show with the currency for display (a returned 295000 means 2,950.00 in major units); never present a minor-unit figure as if it were major units. roas_from_stripe and the Meta-Stripe value view already return major units.",
-    ...(availableLike("run_metric_query") || availableLike("run_breakdown_query") ? [
+    ...(metaStatusTwin ? [
+      `- Meta on/off status ('is X running/paused', which ad sets are live, when a status changed) -> ${metaStatusTwin}: the app's stored copy, no Meta call. configuredStatus = the entity's own switch, effectiveStatus = delivery, blockedBy = a paused parent; pass entityId or nameContains for its statusHistory. Label a paused/archived entity as paused rather than calling its low recent spend underperformance.`
+    ] : availableLike("run_metric_query") || availableLike("run_breakdown_query") ? [
       "- On/off status is QUERYABLE from the warehouse: campaigns and ad sets carry effective_status (Meta's delivery state — ACTIVE / PAUSED / ARCHIVED / CAMPAIGN_PAUSED / ...) and configured_status as columns on the read views. For 'is X running/paused/active', 'which adsets are paused/active', or restricting analysis to live entities, query/group/filter those columns (as of the last sync) via run_metric_query/run_breakdown_query — do NOT reach for a live entity-list or Graph tool (e.g. list_meta_entities) for status, and if such a tool errors or lacks credentials, fall back to the queryable effective_status. Label a paused/archived entity as paused rather than calling its low recent spend underperformance."
     ] : availableLike("list_meta_entities") ? [
       "- For 'is X running/paused/active' Meta status questions when the queryable views are not available this turn, use the live Meta entity tools (list_meta_entities/get_meta_entity). Label a paused/archived entity as paused rather than calling its low recent spend underperformance."
     ] : []),
-    ...(availableLike("run_meta_live_insights") ? [
+    ...(availableLike("run_meta_live_insights") && !metaPerformance ? [
       "- Meta ads PERFORMANCE questions (best/worst ad, spend, ROAS, results, CTR by campaign/adset/ad, 'how are my ads doing') -> run_meta_live_insights: a live Graph read at the requested level over a date window, rows sorted by spend. Meta performance data is not synced into the warehouse tables, so do not conclude it is unavailable from an empty warehouse metric — call this tool. It reads performance, not delivery status; for is-it-paused questions use the status guidance above."
     ] : []),
     "- Ground analytical claims in returned action envelopes; do not invent values.",
@@ -152,6 +164,78 @@ export function assembleInfiniteOsPrompt(input: PromptAssemblyInput): string {
     "- If the user asked for a time period and the results are scoped to that period, say the period explicitly in the answer."
     ,"- When ending with follow-up suggestions, prefer one or two concrete next questions over a long generic menu."
   ].join("\n");
+}
+
+/**
+ * The engine's Meta metric ids and views. A desktop turn refuses them on run_metric_query/run_breakdown_query and
+ * answers Meta numbers from the app's get_meta_performance, so its prompt leaves them out. roas_from_stripe (the
+ * Stripe revenue join) is not a Meta metric id and stays.
+ */
+const META_ENGINE_METRIC_IDS: ReadonlySet<string> = new Set([
+  "meta_ads_spend", "meta_ads_clicks", "impressions", "reach", "frequency", "cpm", "cpc", "ctr",
+  "link_clicks", "landing_page_views", "results", "roas", "cost_per_result", "conversion_value"
+]);
+const META_ENGINE_VIEW = /^queryable\.vw_meta_ads_/;
+
+/** GA4 phrasings that a server traffic reader answers instead (visits read high; GA4 is only a floor). */
+const GA4_TRAFFIC_ALIASES: Readonly<Record<string, readonly string[]>> = {
+  sessions: ["visits"],
+  site_visitors: ["visitors", "users"]
+};
+
+/**
+ * The prompt's alias hint, minus the phrasings an app tool in this turn answers better. With no such tool it is
+ * FIRST_PHASE_METRIC_ALIASES unchanged, so an open-core turn keeps every alias (the DB keeps them all either way).
+ */
+function injectedMetricAliases(availableLike: (name: string) => boolean): Record<string, readonly string[]> {
+  const outcomes = availableLike("run_app_outcomes");
+  const meta = availableLike("get_meta_performance");
+  const siteMetrics = availableLike("run_site_metrics");
+  if (!outcomes && !meta && !siteMetrics) {
+    return FIRST_PHASE_METRIC_ALIASES;
+  }
+  const aliases: Record<string, readonly string[]> = {};
+  for (const [id, phrases] of Object.entries(FIRST_PHASE_METRIC_ALIASES)) {
+    if ((outcomes && id === "signup_count") || (meta && META_ENGINE_METRIC_IDS.has(id))) {
+      continue;
+    }
+    const dropped = siteMetrics ? GA4_TRAFFIC_ALIASES[id] ?? [] : [];
+    const kept = phrases.filter((phrase) => !dropped.includes(phrase));
+    if (kept.length > 0) {
+      aliases[id] = kept;
+    }
+  }
+  return aliases;
+}
+
+/**
+ * Routing for the app tools a desktop turn carries as `mcp__<server>__<tool>` twins. Each line is emitted only when
+ * its tool is in the turn, so an open-core turn gets none of them.
+ */
+function appRoutingGuidance(availableLike: (name: string) => boolean): string[] {
+  const meta = availableLike("get_meta_performance");
+  return [
+    ...(availableLike("run_app_outcomes") ? [
+      "- Signups, registrations or new accounts: call run_app_outcomes with definition \"stages_v1\" first. accountCreated = Registrations; appSignup = App signups (its top-level signups field equals appSignup; cohort.signups counts registrations). null means not measured, never 0. Never answer signups by channel or source from a signup_count breakdown.",
+      "- Only when run_app_outcomes answers available:false may signup_count answer. Then call it \"PostHog 'signup' events\", never registrations, accounts or sign-ups, and say a 0 does not mean nobody signed up."
+    ] : []),
+    ...(availableLike("read_subscription_metrics") ? [
+      "- Trials started ('new trials', 'trials this week') and paying customers -> read_subscription_metrics. stripe_trialing_subscribers counts customers trialing now (a snapshot with no window), never trials started."
+    ] : []),
+    ...(availableLike("run_site_metrics") ? [
+      availableLike("analysis_compare")
+        ? "- Site visits, visitors or traffic totals -> run_site_metrics (server Visits read high and are never people). By channel or source -> analysis_compare with segmentBy entry_channel. GA4 site_visitors/sessions only when the person asks for GA4."
+        : "- Site visits, visitors or traffic totals -> run_site_metrics (server Visits read high and are never people). GA4 site_visitors/sessions only when the person asks for GA4."
+    ] : []),
+    ...(meta ? [
+      "- Meta Ads numbers (spend, ROAS, CPA, cost per lead/CPL, CTR, CPC, link clicks, reach, frequency, results, leads) -> get_meta_performance with a structured `period`. run_metric_query and run_breakdown_query refuse Meta metrics and views; never use run_meta_live_insights. Its results, leads, purchases, CPA and ROAS are Meta's claim, not our records."
+    ] : []),
+    ...(availableLike("list_audit_leads") ? [
+      meta
+        ? "- 'Leads', 'new leads' or 'audit leads' -> list_audit_leads: an audit lead is its own step, never a signup or registration. Meta's 'leads' result is Meta's claim; read it with get_meta_performance only when the person asks about Meta ads."
+        : "- 'Leads', 'new leads' or 'audit leads' -> list_audit_leads: an audit lead is its own step, never a signup or registration."
+    ] : [])
+  ];
 }
 
 /**
