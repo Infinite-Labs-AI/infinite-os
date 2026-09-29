@@ -861,7 +861,8 @@ function latestFailedSyncSourceNow(
   toolResults: QueryRefinementToolResult[]
 ): { errorMessage?: string } | undefined {
   for (const result of [...toolResults].reverse()) {
-    if (result.name !== "sync_source_now" || !isRecord(result.result)) {
+    // A refused call (a union turn withholds sync_source_now) never ran: it is no failed refresh.
+    if (result.name !== "sync_source_now" || !isRecord(result.result) || isRefusedCall(result.result)) {
       continue;
     }
     if (stringValue(result.result.status) !== "error") {
@@ -892,7 +893,9 @@ function genericOpenEndedRefinementSections(
     }
   }
 
-  const hasSources = toolResults.some((result) => result.name === "list_sources" && isRecord(result.result));
+  // A refused list_sources call (a union turn withholds the native for the app's twin) returned no source list.
+  const hasSources = toolResults.some((result) =>
+    result.name === "list_sources" && isRecord(result.result) && !isRefusedCall(result.result));
   const hasSyncs = toolResults.some((result) => result.name === "get_recent_sync_runs" && isRecord(result.result));
   const hasMetrics = toolResults.some((result) => result.name === "list_metrics" && isRecord(result.result));
   const hasViews = toolResults.some((result) => result.name === "list_queryable_views" && isRecord(result.result));
@@ -914,9 +917,11 @@ function genericOpenEndedRefinementSections(
     availableActionIds.some((id) => id === "get_meta_performance" || id.endsWith("__get_meta_performance")) &&
     isMetricShapedQuestion(message) &&
     isMetaMetricQuestion(message);
+  // The app's own reads for leads and signups, when this turn has them (the prompt's app routing).
+  const appReads = appRescueReads(message, availableActionIds);
   if (
     !isOpenEndedAnalysisPrompt(message) &&
-    (metaQuestion || isTargetedMetricQuestion(message)) &&
+    (appReads.length > 0 || metaQuestion || isTargetedMetricQuestion(message)) &&
     hasSources &&
     !hasMetrics &&
     !hasMetricDetail &&
@@ -925,6 +930,14 @@ function genericOpenEndedRefinementSections(
     !hasBreakdownResult &&
     !hasAppAnswer
   ) {
+    if (appReads.length > 0) {
+      return [
+        "Metric-question refinement guidance:",
+        "- The user asked for a number the app's own reads answer, but you only have a source list so far.",
+        ...appReads,
+        "- Do not stop to ask for a time range: read over the period the person named, or over all available data stated as the assumed scope."
+      ];
+    }
     // A turn with the app's stored Meta read refuses Meta metrics on run_metric_query/run_breakdown_query.
     if (metaQuestion) {
       return [
@@ -1053,6 +1066,49 @@ function isMetaMetricQuestion(message: string): boolean {
   }
   return META_ONLY_TERM_RE.test(message)
     || (META_SIGNAL_RE.test(message) && (METRIC_TERM_RE.test(message) || META_CREDIT_OUTCOME_RE.test(message)));
+}
+
+// The person asking about Meta ads themselves: the platform, plain "ads" or its ad sets. A campaign alone is not one
+// here: "leads from the spring campaign" are the workspace's Contacts, and Meta's leads are read only when the person
+// asks about Meta ads (the prompt's app routing).
+const META_ADS_ASK_RE = /\b(?:meta(?!\s+(?:titles?|descriptions?|tags?|keywords?|data)\b)|facebook|fb|instagram ads?|ads?|ad ?sets?)\b/i;
+// Leads, form submissions and contacts; "audit leads" are Infinite's own growth-audit form.
+const LEAD_ASK_RE = /\b(?:leads?|contacts?|form (?:fills?|submissions?|entries|responses))\b|\bfill(?:ed)? (?:in|out)\b[^.?!]*\bforms?\b/i;
+const AUDIT_LEAD_ASK_RE = /\baudit leads?\b/i;
+const SIGNUP_ASK_RE = /\b(?:sign[- ]?ups?|signed up|registrations?|registered|new accounts?)\b/i;
+const META_LEADS_CLAIM = " Meta's 'leads' result is Meta's claim; read it with get_meta_performance only when the person asks about Meta ads.";
+
+/**
+ * The rescue lines for a metric-shaped question the app's own reads answer, when this turn has them: leads, form
+ * submissions and contacts -> list_contacts (without it, list_audit_leads, as the prompt routes them), audit leads ->
+ * list_audit_leads, signups and registrations -> run_app_outcomes. None when the person asks about Meta ads and the
+ * turn has get_meta_performance (the Meta rescue answers that), for a Meta-only metric such as cost per lead, or
+ * when the turn has none of these reads: the rescue then stays as it was.
+ */
+function appRescueReads(message: string, availableActionIds: readonly string[]): string[] {
+  const availableLike = (name: string) => availableActionIds.some((id) => id === name || id.endsWith(`__${name}`));
+  if (!isMetricShapedQuestion(message)) {
+    return [];
+  }
+  const meta = availableLike("get_meta_performance");
+  if (meta && !OTHER_PLATFORM_RE.test(message) && (META_ONLY_TERM_RE.test(message) || META_ADS_ASK_RE.test(message))) {
+    return [];
+  }
+  const lines: string[] = [];
+  const metaClaim = meta ? META_LEADS_CLAIM : "";
+  if (!META_ONLY_TERM_RE.test(message)) {
+    if (AUDIT_LEAD_ASK_RE.test(message) && availableLike("list_audit_leads")) {
+      lines.push("- Audit leads (people who submitted Infinite's own growth-audit form) -> call list_audit_leads: an audit lead is its own step, never a signup or registration.");
+    } else if (LEAD_ASK_RE.test(message) && availableLike("list_contacts")) {
+      lines.push("- Leads, new leads, form submissions or contacts -> call list_contacts: this workspace's Contacts and their form submissions, never a signup or registration." + metaClaim);
+    } else if (LEAD_ASK_RE.test(message) && availableLike("list_audit_leads")) {
+      lines.push("- Leads, new leads or audit leads -> call list_audit_leads: an audit lead is its own step, never a signup or registration." + metaClaim);
+    }
+  }
+  if (SIGNUP_ASK_RE.test(message) && availableLike("run_app_outcomes")) {
+    lines.push("- Signups, registrations or new accounts -> call run_app_outcomes with definition \"stages_v1\" (accountCreated = registrations), never a signup_count metric or breakdown.");
+  }
+  return lines;
 }
 
 function isCapabilityExplorationPrompt(message: string): boolean {
@@ -1303,6 +1359,11 @@ function objectRecord(value: Record<string, unknown>, key: string): Record<strin
   return isRecord(nested) ? nested : undefined;
 }
 
+/** A call the turn refused before running it: an action it does not offer (the controller's unknown_action record). */
+function isRefusedCall(result: Record<string, unknown>): boolean {
+  return result.status === "error" && objectRecord(result, "error")?.code === "unknown_action";
+}
+
 function latestBreakdownRows(
   toolResults: QueryRefinementToolResult[],
   metric?: string
@@ -1349,8 +1410,10 @@ function hasBreakdownResult(toolResults: QueryRefinementToolResult[], metric: st
 }
 
 function hasSourceStatusResults(toolResults: QueryRefinementToolResult[]): boolean {
-  const toolNames = new Set(toolResults.map((result) => result.name));
-  return toolNames.has("list_sources") || toolNames.has("get_recent_sync_runs");
+  // A refused call (an action a union turn withholds) read no connection state.
+  return toolResults.some((result) =>
+    (result.name === "list_sources" || result.name === "get_recent_sync_runs") &&
+    !(isRecord(result.result) && isRefusedCall(result.result)));
 }
 
 function genericSynthesisSections(toolResults: QueryRefinementToolResult[]): string[] {

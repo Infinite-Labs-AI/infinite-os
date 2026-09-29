@@ -1381,3 +1381,171 @@ describe("union turn: engine writes and local-only reads", () => {
     expect(assembleInfiniteOsPrompt({ ...base, scopedAppToolMode: "exclusive" })).toBe(plain);
   });
 });
+
+describe("advisor rescue after a source list alone follows the app routing", () => {
+  const app = (name: string) => `mcp__${APP_SERVER}__${name}`;
+  const DESKTOP = ["list_sources", "get_meta_performance", "list_contacts", "list_audit_leads", "run_app_outcomes", "run_metric_query", "run_breakdown_query"];
+  const desktopIds = (...names: string[]) => [...createDaemonActionRegistry().list().map((action) => action.id as string), ...names.map(app)];
+  const sourcesOnly = [{ name: "list_sources", result: { data: { sources: [] } } }];
+  const rescue = (message: string, available: readonly string[]) =>
+    buildQueryRefinementSections(message, sourcesOnly, available).join("\n");
+  // The rescue exactly as 33ead6d wrote it, for a turn without the app's reads.
+  const METRIC_RESCUE = [
+    "Metric-question refinement guidance:",
+    "- The user asked for a specific metric or number, but you only have a source list so far.",
+    "- Do not stop to ask for a time range. Identify the metric (use the metric-aliases hint, or list_metrics/describe_metric if unsure) and run run_metric_query or run_breakdown_query over all available data, then state the assumed scope as a caveat and offer to narrow.",
+    "- Only report a metric as unavailable after confirming it is not reachable under any alias."
+  ];
+  const META_RESCUE = [
+    "Metric-question refinement guidance:",
+    "- The user asked for a Meta Ads number, but you only have a source list so far.",
+    "- Call get_meta_performance with a structured `period` (all available data when no period was named, stated as the assumed scope). run_metric_query and run_breakdown_query refuse Meta metrics."
+  ];
+  const CONTACTS_LINE = "- Leads, new leads, form submissions or contacts -> call list_contacts: this workspace's Contacts and their form submissions, never a signup or registration.";
+  const META_LEADS_CLAIM = " Meta's 'leads' result is Meta's claim; read it with get_meta_performance only when the person asks about Meta ads.";
+  const AUDIT_LINE = "- Audit leads (people who submitted Infinite's own growth-audit form) -> call list_audit_leads: an audit lead is its own step, never a signup or registration.";
+  const LEADS_TO_AUDIT_LINE = "- Leads, new leads or audit leads -> call list_audit_leads: an audit lead is its own step, never a signup or registration.";
+  const OUTCOMES_LINE = "- Signups, registrations or new accounts -> call run_app_outcomes with definition \"stages_v1\" (accountCreated = registrations), never a signup_count metric or breakdown.";
+  const appRescue = (...lines: string[]) => [
+    "Metric-question refinement guidance:",
+    "- The user asked for a number the app's own reads answer, but you only have a source list so far.",
+    ...lines,
+    "- Do not stop to ask for a time range: read over the period the person named, or over all available data stated as the assumed scope."
+  ];
+
+  it.each([
+    ["how many new leads this week?", appRescue(CONTACTS_LINE + META_LEADS_CLAIM)],
+    ["how many leads did we get this week?", appRescue(CONTACTS_LINE + META_LEADS_CLAIM)],
+    ["show me leads from the spring campaign", appRescue(CONTACTS_LINE + META_LEADS_CLAIM)],
+    ["how many leads did the spring campaign get?", appRescue(CONTACTS_LINE + META_LEADS_CLAIM)],
+    ["how many people filled in the contact form this week?", appRescue(CONTACTS_LINE + META_LEADS_CLAIM)],
+    ["how many audit leads this week?", appRescue(AUDIT_LINE)],
+    ["how many signups did we get", appRescue(OUTCOMES_LINE)],
+    ["how many registrations last week?", appRescue(OUTCOMES_LINE)],
+    ["how many signups came from my email campaign?", appRescue(OUTCOMES_LINE)],
+    ["how many leads and signups this week?", appRescue(CONTACTS_LINE + META_LEADS_CLAIM, OUTCOMES_LINE)]
+  ])("routes %j to the app's read when the turn carries it", (message, expected) => {
+    expect(buildQueryRefinementSections(message, sourcesOnly, desktopIds(...DESKTOP))).toEqual(expected);
+  });
+
+  it.each([
+    ["how many leads did our facebook ads get this week?"],
+    ["how many leads did the spring ad set get?"],
+    ["what's my cpl"],
+    ["what is our cost per lead this month?"]
+  ])("keeps the Meta rescue when %j asks about Meta ads", (message) => {
+    expect(buildQueryRefinementSections(message, sourcesOnly, desktopIds(...DESKTOP))).toEqual(META_RESCUE);
+  });
+
+  it("keeps the Meta rescue, with its credit note, for signups the person credits to Meta ads", () => {
+    const text = rescue("how many signups did facebook ads bring?", desktopIds(...DESKTOP));
+    expect(text).toContain(META_RESCUE[1]);
+    expect(text).toContain("are Meta's claim");
+    expect(text).not.toContain("run_app_outcomes with definition");
+  });
+
+  it("keeps the metric rescue for a number no app read answers", () => {
+    for (const message of ["what was my revenue last month?", "how many orders"]) {
+      expect(buildQueryRefinementSections(message, sourcesOnly, desktopIds(...DESKTOP)), message).toEqual(METRIC_RESCUE);
+    }
+  });
+
+  it("sends leads to list_audit_leads on a turn with it and no list_contacts, as the prompt does", () => {
+    expect(buildQueryRefinementSections("how many new leads this week?", sourcesOnly, desktopIds("list_sources", "list_audit_leads")))
+      .toEqual(appRescue(LEADS_TO_AUDIT_LINE));
+    expect(buildQueryRefinementSections("how many new leads this week?", sourcesOnly, desktopIds("list_sources", "list_audit_leads", "get_meta_performance")))
+      .toEqual(appRescue(LEADS_TO_AUDIT_LINE + META_LEADS_CLAIM));
+  });
+
+  it("names list_contacts without the Meta clause on a turn without get_meta_performance", () => {
+    expect(buildQueryRefinementSections("how many new leads this week?", sourcesOnly, desktopIds("list_sources", "list_contacts")))
+      .toEqual(appRescue(CONTACTS_LINE));
+  });
+
+  it("is byte-identical to 33ead6d without the app's reads", () => {
+    const natives = createDaemonActionRegistry().list().map((action) => action.id as string);
+    for (const available of [[], natives, [...native().map((action) => action.id as string)]]) {
+      for (const message of [
+        "how many new leads this week?", "how many leads did we get this week?", "how many signups did we get",
+        "how many leads did the spring campaign get?", "what was my revenue last month?", "what's my cpl"
+      ]) {
+        expect(buildQueryRefinementSections(message, sourcesOnly, available), message).toEqual(METRIC_RESCUE);
+      }
+      // Not metric-shaped then, not now.
+      expect(buildQueryRefinementSections("how many registrations last week?", sourcesOnly, available)).toEqual([]);
+      expect(buildQueryRefinementSections("how many people filled in the contact form this week?", sourcesOnly, available)).toEqual([]);
+    }
+    // Only the Meta read: a campaign's leads stay Meta's, as they were.
+    expect(buildQueryRefinementSections("how many leads did the spring campaign get?", sourcesOnly, desktopIds("get_meta_performance")))
+      .toEqual(META_RESCUE);
+  });
+
+  it("never reads a refused list_sources call as a source list", () => {
+    const refused = {
+      name: "list_sources",
+      result: {
+        status: "error",
+        actionId: "list_sources",
+        input: {},
+        error: { code: "unknown_action", message: `Unknown Infinite OS action: list_sources. This turn offers ${app("list_sources")} in its place.` }
+      }
+    };
+    for (const message of ["how many signups did we get", "what's my cpl", "how many new leads this week?"]) {
+      expect(buildQueryRefinementSections(message, [refused], desktopIds(...DESKTOP)), message).toEqual([]);
+      expect(buildQueryRefinementSections(message, [refused]), message).toEqual([]);
+    }
+    expect(buildQueryRefinementSections("what stands out?", [refused]).join("\n")).not.toContain("You know which sources are connected");
+    // Nor as a connection state to lead with.
+    const refusedSyncRuns = { name: "get_recent_sync_runs", result: { ...refused.result, actionId: "get_recent_sync_runs" } };
+    expect(buildQuerySynthesisSections("is ga4 connected?", [refused, refusedSyncRuns]).join("\n")).not.toContain("Source-status final synthesis guidance:");
+    expect(buildQuerySynthesisSections("is ga4 connected?", [sourcesOnly[0]!]).join("\n")).toContain("Source-status final synthesis guidance:");
+    // A refused sync_source_now is not a failed refresh to warn about by name.
+    const refusedSync = { name: "sync_source_now", result: { ...refused.result, actionId: "sync_source_now", error: { code: "unknown_action", message: "Unknown Infinite OS action: sync_source_now. This chat turn does not offer it." } } };
+    expect(buildQueryRefinementSections("what are my latest posts?", [refusedSync]).join("\n")).not.toContain("sync_source_now");
+  });
+
+  it("rescues toward list_contacts after the twin's source list in a real union turn, and not after a refused bare list_sources", async () => {
+    async function run(message: string, firstCall: string) {
+      const requests: ModelRequest[] = [];
+      const controller = createLlmController({
+        registry: createDaemonActionRegistry(),
+        modelClient: {
+          complete: async (request) => {
+            requests.push(request);
+            return requests.length === 1
+              ? { toolCalls: [{ id: "call_1", name: firstCall, input: {} }] }
+              : { message: "done" };
+          }
+        }
+      });
+      await controller.chat({
+        message,
+        sessionId: `s-rescue-${message}-${firstCall}`,
+        workspaceId: "ws_test",
+        actorId: "operator-1",
+        surface: "desktop",
+        scopedAppTools: {
+          serverName: APP_SERVER,
+          allowedTools: DESKTOP.map(app),
+          mode: "union",
+          tools: DESKTOP.map((name) => ({ name, description: name, inputSchema: { type: "object" } })),
+          callTool: async (name: string) => name === "list_sources"
+            ? { ok: true, actionId: "list_sources", authority: "tool_agent", status: "ok", data: { sources: [{ id: "src_ga4", provider: "ga4", status: "connected" }] }, provenance: [], caveats: [], truncated: false, nextActions: [] }
+            : { ok: true }
+        }
+      });
+      return requests[1]?.systemPrompt ?? "";
+    }
+    const afterTwin = await run("how many new leads this week?", app("list_sources"));
+    expect(afterTwin).toContain(CONTACTS_LINE);
+    expect(afterTwin).not.toContain("run run_metric_query or run_breakdown_query");
+    const signups = await run("how many signups did we get", app("list_sources"));
+    expect(signups).toContain(OUTCOMES_LINE);
+    expect(signups).not.toContain("run run_metric_query or run_breakdown_query");
+    const campaign = await run("show me leads from the spring campaign", app("list_sources"));
+    expect(campaign).toContain(CONTACTS_LINE);
+    expect(campaign).not.toContain(META_RESCUE[1]);
+    const refusedBare = await run("how many signups did we get", "list_sources");
+    expect(refusedBare).not.toContain("only have a source list so far");
+  });
+});
