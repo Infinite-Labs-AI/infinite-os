@@ -7820,6 +7820,50 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
       );
     });
 
+    // River 2026-09-29 — every conversion ad set the engine creates (cloud + local lanes, incl. the
+    // desktop Create sheet and R7 Duplicate/Restart copies, which all land here) carries Meta's
+    // default attribution setting explicitly; a link-click ad set carries none.
+    it("create_meta_ad_set sends Meta's default attribution_spec for a conversion goal, none for LINK_CLICKS", async () => {
+      const db = metaWriteTestDb({ audits: [], metaSources: [{ id: "src_meta_sole" }] });
+      await withGraph(
+        () => jsonResponse({ id: "adset_attr", status: "PAUSED" }),
+        async (calls) => {
+          const handlers = createActionHandlers(db);
+          await handlers.create_meta_ad_set?.(
+            {
+              campaignId: "120000000000001",
+              name: "Trials",
+              optimizationGoal: "OFFSITE_CONVERSIONS",
+              billingEvent: "IMPRESSIONS",
+              pixelId: "914812061724377",
+              customEventType: "START_TRIAL",
+              clientToken: "tok_adset_attr"
+            },
+            operatorContext
+          );
+          await handlers.create_meta_ad_set?.(
+            {
+              campaignId: "120000000000001",
+              name: "Clicks",
+              optimizationGoal: "LINK_CLICKS",
+              billingEvent: "IMPRESSIONS",
+              clientToken: "tok_adset_clicks"
+            },
+            operatorContext
+          );
+          expect(calls[0].body).toMatchObject({
+            status: "PAUSED",
+            attribution_spec: [
+              { event_type: "CLICK_THROUGH", window_days: 7 },
+              { event_type: "VIEW_THROUGH", window_days: 1 },
+              { event_type: "ENGAGED_VIDEO_VIEW", window_days: 1 }
+            ]
+          });
+          expect(calls[1].body).not.toHaveProperty("attribution_spec");
+        }
+      );
+    });
+
     // A3 (2026-09-13) — the desktop Create sheet's manual targeting + placements JSON passes
     // through to the connector (bounded keys only), and a malformed shape fails TYPED before
     // any POST.

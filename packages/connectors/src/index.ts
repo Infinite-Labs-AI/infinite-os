@@ -11303,6 +11303,30 @@ const META_OPTIMIZATION_GOAL_VALUES = new Set<string>([
   "THRUPLAY",
   "CONVERSATIONS"
 ]);
+// Meta's default attribution setting — 7-day click, 1-day view, 1-day engagement — in the exact
+// `attribution_spec` shape Meta stores on ad sets made in Ads Manager (prod: 217 Ads-Manager
+// conversion ad sets carry exactly this). Meta's API enum still says ENGAGED_VIDEO_VIEW after its
+// March 2026 rename to "engage-through". Leaving the field OUT is NOT Meta's default: an omitted
+// spec came back as 7-day click only on 7 of 7 of our conversion ad sets, so every conversion ad
+// set created here sends it EXPLICITLY (River, 2026-09-29). If Meta refuses it, the create fails
+// with Meta's own error — there is no quieter retry with a smaller setting.
+const META_DEFAULT_ATTRIBUTION_SPEC: ReadonlyArray<{ event_type: string; window_days: number }> = [
+  { event_type: "CLICK_THROUGH", window_days: 7 },
+  { event_type: "VIEW_THROUGH", window_days: 1 },
+  { event_type: "ENGAGED_VIDEO_VIEW", window_days: 1 }
+];
+// The optimisation goals that take the default: pixel/dataset conversion goals. Meta allows only
+// 1-day click on every other goal/objective combination (link clicks, landing page views, instant
+// forms, reach, …), so those send no spec and keep what Meta assigns.
+const META_DEFAULT_ATTRIBUTION_GOALS = new Set<string>(["OFFSITE_CONVERSIONS", "VALUE"]);
+
+// The attribution_spec a new ad set sends for an already-normalized optimisation goal, or undefined
+// when the goal takes none.
+function metaDefaultAttributionSpecFor(optimizationGoal: string): Array<{ event_type: string; window_days: number }> | undefined {
+  return META_DEFAULT_ATTRIBUTION_GOALS.has(optimizationGoal)
+    ? META_DEFAULT_ATTRIBUTION_SPEC.map((window) => ({ ...window }))
+    : undefined;
+}
 const META_BILLING_EVENT_VALUES = new Set<string>([
   "APP_INSTALLS",
   "CLICKS",
@@ -11550,6 +11574,8 @@ export async function createMetaAdSet(
     billing_event: billingEvent,
     status: META_CREATE_STATUS // INVARIANT 1: hard-coded PAUSED, ignores any caller status.
   };
+  const attributionSpec = metaDefaultAttributionSpecFor(optimizationGoal);
+  if (attributionSpec) params.attribution_spec = attributionSpec; // form-encoded as a JSON string
   const dailyBudget = metaCents(input.dailyBudget);
   const lifetimeBudget = metaCents(input.lifetimeBudget);
   const bidAmount = metaCents(input.bidAmount);
@@ -13553,6 +13579,10 @@ async function createMetaAdSetViaCli(
     assertMetaCliEnum(customEventType, META_CLI_CUSTOM_EVENT_TYPE_VALUES, "custom event type");
     args.push("--custom-event-type", customEventType);
   }
+  // Meta's default attribution for conversion goals, as the raw JSON `meta-ads` 1.1.0's
+  // `--attribution-spec` takes (`meta ads adset create --help`). Never with --incremental-attribution.
+  const attributionSpec = metaDefaultAttributionSpecFor(optimizationGoal);
+  if (attributionSpec) args.push("--attribution-spec", JSON.stringify(attributionSpec));
   // POSITIONAL hardening (review): "--" ends option parsing; everything after it is a
   // positional, so the CAMPAIGN_ID goes LAST (after all flags) and a leading-dash id can
   // never be misparsed as an option.

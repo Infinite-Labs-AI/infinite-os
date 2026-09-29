@@ -7013,6 +7013,82 @@ describe("Meta Ads WRITE helpers", () => {
     );
   });
 
+  // River 2026-09-29: every conversion ad set Infinite creates carries Meta's default attribution
+  // setting (7-day click, 1-day view, 1-day engagement) EXPLICITLY — an omitted spec came back as
+  // 7-day click only. Non-conversion goals send none (Meta allows only 1-day click there).
+  it("sends Meta's default attribution_spec on OFFSITE_CONVERSIONS and VALUE ad sets (Graph)", async () => {
+    for (const optimizationGoal of ["OFFSITE_CONVERSIONS", "value"]) {
+      await captureWrites(
+        () => jsonResponse({ id: "as_attr", status: "PAUSED" }),
+        async (captured) => {
+          await createMetaAdSet(metaWriteCredential, {
+            name: "Conversions",
+            campaignId: "c1",
+            optimizationGoal,
+            billingEvent: "IMPRESSIONS",
+            pixelId: "px_1",
+            customEventType: "START_TRIAL"
+          });
+          expect(captured[0].body?.attribution_spec).toEqual(META_DEFAULT_ATTRIBUTION_SPEC_WIRE);
+          expect(captured[0].rawForm?.attribution_spec).toBe(
+            '[{"event_type":"CLICK_THROUGH","window_days":7},{"event_type":"VIEW_THROUGH","window_days":1},{"event_type":"ENGAGED_VIDEO_VIEW","window_days":1}]'
+          );
+        }
+      );
+    }
+  });
+
+  it("sends NO attribution_spec on non-conversion goals (LINK_CLICKS, LANDING_PAGE_VIEWS, REACH) (Graph)", async () => {
+    for (const optimizationGoal of ["LINK_CLICKS", "LANDING_PAGE_VIEWS", "REACH", "LEAD_GENERATION"]) {
+      await captureWrites(
+        () => jsonResponse({ id: "as_no_attr", status: "PAUSED" }),
+        async (captured) => {
+          await createMetaAdSet(metaWriteCredential, {
+            name: "Traffic",
+            campaignId: "c1",
+            optimizationGoal,
+            billingEvent: "IMPRESSIONS"
+          });
+          expect(captured[0].rawForm).not.toHaveProperty("attribution_spec");
+        }
+      );
+    }
+  });
+
+  it("a Meta refusal of the attribution_spec fails the create with Meta's error — no retry without it (Graph)", async () => {
+    await captureWrites(
+      () =>
+        new Response(
+          JSON.stringify({
+            error: {
+              message: "(#100) Invalid attribution spec for this optimization goal",
+              type: "OAuthException",
+              code: 100
+            }
+          }),
+          { status: 400, headers: { "Content-Type": "application/json" } }
+        ),
+      async (captured) => {
+        await expect(
+          createMetaAdSet(metaWriteCredential, {
+            name: "Refused",
+            campaignId: "c1",
+            optimizationGoal: "OFFSITE_CONVERSIONS",
+            billingEvent: "IMPRESSIONS",
+            pixelId: "px_1"
+          })
+        ).rejects.toMatchObject({
+          code: "provider_api_error",
+          retryable: false,
+          message: expect.stringContaining("Invalid attribution spec")
+        });
+        // Exactly ONE POST, and it carried the default: no silent downgrade to a smaller setting.
+        expect(captured).toHaveLength(1);
+        expect(captured[0].body?.attribution_spec).toEqual(META_DEFAULT_ATTRIBUTION_SPEC_WIRE);
+      }
+    );
+  });
+
   it("sends the documented Graph payload shapes for each create (form-encoded wire)", async () => {
     await captureWrites(
       () => jsonResponse({ id: "c1", status: "PAUSED" }),
@@ -7056,10 +7132,13 @@ describe("Meta Ads WRITE helpers", () => {
           optimization_goal: "OFFSITE_CONVERSIONS",
           billing_event: "IMPRESSIONS",
           status: "PAUSED",
+          attribution_spec: META_DEFAULT_ATTRIBUTION_SPEC_WIRE,
           daily_budget: "2500",
           targeting: { geo_locations: { countries: ["US", "CA"] } },
           promoted_object: { pixel_id: "px_1", custom_event_type: "PURCHASE" }
         });
+        // Meta's default attribution rides as ONE JSON string, exactly as Ads Manager stores it.
+        expect(captured[0].rawForm?.attribution_spec).toBe(JSON.stringify(META_DEFAULT_ATTRIBUTION_SPEC_WIRE));
         // targeting + promoted_object ride as JSON STRINGS on the wire.
         expect(captured[0].rawForm?.targeting).toBe(
           JSON.stringify({ geo_locations: { countries: ["US", "CA"] } })
@@ -8476,6 +8555,83 @@ console.log(${JSON.stringify(serialized)});
         expect(argv).toContain("--no-advantage-audience");
         expect(argv).not.toContain("--advantage-audience");
         expect(argv).not.toContain("--targeting");
+        // LINK_CLICKS takes no attribution spec (Meta allows only 1-day click there).
+        expect(argv).not.toContain("--attribution-spec");
+      });
+    });
+
+    it("adset create sends Meta's default --attribution-spec JSON for OFFSITE_CONVERSIONS and VALUE (CLI)", async () => {
+      for (const optimizationGoal of ["OFFSITE_CONVERSIONS", "value"]) {
+        await withTmp(async (dir) => {
+          await createMetaAdSet(cliCredential(dir, { id: "120000000000025", status: "PAUSED" }), {
+            name: "Trials",
+            campaignId: "120000000000010",
+            optimizationGoal,
+            billingEvent: "IMPRESSIONS",
+            targeting: { geo_locations: { countries: ["US"] } },
+            pixelId: "px_1",
+            customEventType: "START_TRIAL"
+          });
+          const argv = recordedArgv(dir);
+          // Exactly one flag, raw JSON value (the shape `meta ads adset create --help` documents).
+          expect(argv.filter((arg) => arg === "--attribution-spec")).toHaveLength(1);
+          expect(argv[argv.indexOf("--attribution-spec") + 1]).toBe(
+            '[{"event_type":"CLICK_THROUGH","window_days":7},{"event_type":"VIEW_THROUGH","window_days":1},{"event_type":"ENGAGED_VIDEO_VIEW","window_days":1}]'
+          );
+          expect(argv).not.toContain("--incremental-attribution");
+          // The positional campaign id is still LAST, after `--`.
+          expect(argv.slice(-2)).toEqual(["--", "120000000000010"]);
+        });
+      }
+    });
+
+    it("adset create sends NO --attribution-spec for non-conversion goals (CLI)", async () => {
+      for (const optimizationGoal of ["LANDING_PAGE_VIEWS", "REACH", "LEAD_GENERATION", "THRUPLAY"]) {
+        await withTmp(async (dir) => {
+          await createMetaAdSet(cliCredential(dir, { id: "120000000000026", status: "PAUSED" }), {
+            name: "Not conversions",
+            campaignId: "120000000000010",
+            optimizationGoal,
+            billingEvent: "IMPRESSIONS"
+          });
+          expect(recordedArgv(dir)).not.toContain("--attribution-spec");
+        });
+      }
+    });
+
+    it("adset create: a Meta refusal of --attribution-spec surfaces as a non-retryable error (CLI)", async () => {
+      await withTmp(async (dir) => {
+        const script = join(dir, "meta-cli-attribution-refused.mjs");
+        writeFileSync(
+          script,
+          `import { writeFileSync } from "node:fs";
+writeFileSync(${JSON.stringify(join(dir, "argv.json"))}, JSON.stringify(process.argv.slice(2)));
+process.stderr.write("Error: (#100) Invalid attribution spec for this optimization goal");
+process.exit(1);`,
+          "utf8"
+        );
+        const credential: MetaAdsCredential = {
+          mode: "live",
+          transport: "meta_ads_cli",
+          adAccountId: "1234567890",
+          accessToken: "cli-write-token",
+          cliCommand: `${JSON.stringify(process.execPath)} ${JSON.stringify(script)}`
+        };
+        await expect(
+          createMetaAdSet(credential, {
+            name: "Refused",
+            campaignId: "120000000000010",
+            optimizationGoal: "OFFSITE_CONVERSIONS",
+            billingEvent: "IMPRESSIONS",
+            pixelId: "px_1"
+          })
+        ).rejects.toMatchObject({
+          retryable: false,
+          message: expect.stringContaining("Invalid attribution spec")
+        });
+        // The one CLI call carried the default; nothing re-ran without it.
+        const argv = recordedArgv(dir);
+        expect(argv).toContain("--attribution-spec");
       });
     });
 
@@ -10423,6 +10579,13 @@ async function withMockFetch(
     globalThis.fetch = originalFetch;
   }
 }
+
+// Meta's default attribution setting as Ads Manager stores it (7-day click, 1-day view, 1-day engagement).
+const META_DEFAULT_ATTRIBUTION_SPEC_WIRE = [
+  { event_type: "CLICK_THROUGH", window_days: 7 },
+  { event_type: "VIEW_THROUGH", window_days: 1 },
+  { event_type: "ENGAGED_VIDEO_VIEW", window_days: 1 }
+];
 
 function jsonResponse(value: unknown): Response {
   return new Response(JSON.stringify(value), {
