@@ -7,7 +7,10 @@ import {
   type ActionDefinition
 } from "@infinite-os/runtime";
 
+import { OPERATOR_ACTIONS } from "@infinite-os/types";
+
 import { assembleInfiniteOsPrompt, createLlmController, type ModelRequest } from "../src/index.js";
+import type { ChatSessionStore } from "../src/session-store.js";
 import {
   appListSourcesEnvelope,
   buildQueryRefinementSections,
@@ -39,6 +42,23 @@ function twin(name: string): ActionDefinition {
 }
 
 const native = (): ActionDefinition[] => createInfiniteOsRegistry({}).list();
+
+// Every union turn (only the desktop sends one) leaves out the engine's writes (authority "operator") and these
+// reads, which answer from this engine's local store or run a sync inside the turn.
+const LOCAL_ONLY_READS = [
+  "sync_source_now", "get_recent_sync_runs", "describe_source", "list_source_schedules",
+  "describe_context_item", "validate_journey_plan", "search_context"
+];
+type AnyRegistry = ReturnType<typeof createInfiniteOsRegistry>;
+const operatorIds = (registry: AnyRegistry) =>
+  registry.list().filter((action) => action.authority === "operator").map((action) => action.id as string);
+/** The ids every union turn withholds, whatever app tools it carries. */
+const unionAlwaysWithheld = (registry: AnyRegistry) => new Set([...operatorIds(registry), ...LOCAL_ONLY_READS]);
+/** The natives a union turn with no app twins keeps, in registry order. */
+const unionNatives = (registry: AnyRegistry) => {
+  const withheld = unionAlwaysWithheld(registry);
+  return registry.list().map((action) => action.id as string).filter((id) => !withheld.has(id));
+};
 
 function prompt(actions: ActionDefinition[]): string {
   return assembleInfiniteOsPrompt({ actions, workspaceId: "ws_test", surface: "desktop", modelProvider: "codex" });
@@ -704,7 +724,7 @@ describe("union turn: engine analytics twins", () => {
     const registry = createInfiniteOsRegistry({});
     for (const name of ANALYTICS_TWINS) {
       const { tools } = await firstRequest(registry, [name]);
-      expect(tools, name).toEqual([...nativeIds(registry).filter((id) => id !== name), app(name)]);
+      expect(tools, name).toEqual([...unionNatives(registry).filter((id) => id !== name), app(name)]);
     }
   });
 
@@ -719,13 +739,13 @@ describe("union turn: engine analytics twins", () => {
     for (const name of META_GATED_TWINS) {
       const withMeta = await firstRequest(registry, [name, "get_meta_performance"]);
       expect(withMeta.tools, name).toEqual([
-        ...nativeIds(registry).filter((id) => id !== name && id !== "run_meta_live_insights"),
+        ...unionNatives(registry).filter((id) => id !== name && id !== "run_meta_live_insights"),
         app(name),
         app("get_meta_performance")
       ]);
       // Without the app's Meta read the native copy stays: the twin refuses Meta metrics.
       const withoutMeta = await firstRequest(registry, [name]);
-      expect(withoutMeta.tools, name).toEqual([...nativeIds(registry), app(name)]);
+      expect(withoutMeta.tools, name).toEqual([...unionNatives(registry), app(name)]);
     }
   });
 
@@ -738,14 +758,23 @@ describe("union turn: engine analytics twins", () => {
         expect(entry.recommendedNextActions, entry.id).not.toContain(id);
       }
     }
-    expect(manifest.find((entry) => entry.id === "sync_source_now")?.recommendedNextActions).toEqual(["get_recent_sync_runs"]);
+    // A kept native keeps its other hints: run_journey_query drops only create_saved_report (an engine write).
+    expect(manifest.find((entry) => entry.id === "run_journey_query")?.recommendedNextActions).toEqual(["fetch_evidence", "verify_claims"]);
   });
 
-  it("keeps the native tool list and next-step hints unchanged in a union turn without the twins", async () => {
+  it("keeps every other native and its other next-step hints in a union turn without the twins", async () => {
     const registry = createInfiniteOsRegistry({});
+    const always = unionAlwaysWithheld(registry);
     const { tools, manifest } = await firstRequest(registry, ["get_current_workspace"]);
-    expect(tools).toEqual([...nativeIds(registry), app("get_current_workspace")]);
-    expect(manifest.filter((entry) => !entry.id.startsWith("mcp__"))).toEqual(nextSteps(registry).map((entry) => expect.objectContaining(entry)));
+    expect(tools).toEqual([...unionNatives(registry), app("get_current_workspace")]);
+    expect(manifest.filter((entry) => !entry.id.startsWith("mcp__"))).toEqual(
+      nextSteps(registry)
+        .filter((entry) => !always.has(entry.id))
+        .map((entry) => expect.objectContaining({
+          id: entry.id,
+          recommendedNextActions: entry.recommendedNextActions.filter((id) => !always.has(id))
+        }))
+    );
   });
 
   it("leaves exclusive and unscoped turns unchanged", async () => {
@@ -765,7 +794,7 @@ describe("union turn: engine analytics twins", () => {
       expect(daemon).not.toContain(name);
     }
     const { tools } = await firstRequest(registry, [...ANALYTICS_TWINS, ...META_GATED_TWINS]);
-    expect(tools).toEqual([...daemon, ...[...ANALYTICS_TWINS, ...META_GATED_TWINS].map(app)]);
+    expect(tools).toEqual([...unionNatives(registry), ...[...ANALYTICS_TWINS, ...META_GATED_TWINS].map(app)]);
   });
 });
 
@@ -849,19 +878,27 @@ describe("union turn: the app's list_sources twin", () => {
 
   it("withholds the native list_sources, on the daemon and the full registry, when the twin is in the turn", async () => {
     for (const registry of [createDaemonActionRegistry(), createInfiniteOsRegistry({})]) {
-      const natives = registry.list().map((action) => action.id as string);
+      const natives = unionNatives(registry);
       expect(natives).toContain("list_sources");
       const { tools } = await run(registry, ["list_sources"]);
       expect(tools).toEqual([...natives.filter((id) => id !== "list_sources"), app("list_sources")]);
     }
   });
 
-  it("drops list_sources from the next-step hints of the natives it keeps", async () => {
-    const { manifest } = await run(createDaemonActionRegistry(), ["list_sources"]);
-    const hints = (id: string) => manifest.find((entry) => entry.id === id)?.recommendedNextActions;
-    expect(hints("get_recent_sync_runs")).toEqual(["list_source_schedules"]);
-    expect(hints("connect_source")).toEqual(["start_source_sync"]);
-    expect(hints("revoke_source")).toEqual([]);
+  it("drops list_sources and every withheld id from the next-step hints of the natives it keeps", async () => {
+    for (const registry of [createDaemonActionRegistry(), createInfiniteOsRegistry({})]) {
+      const { manifest } = await run(registry, ["list_sources"]);
+      const withheld = new Set([...unionAlwaysWithheld(registry), "list_sources"]);
+      for (const entry of manifest) {
+        for (const id of entry.recommendedNextActions) {
+          expect(withheld.has(id), `${entry.id} -> ${id}`).toBe(false);
+        }
+      }
+      const hints = (id: string) => manifest.find((entry) => entry.id === id)?.recommendedNextActions;
+      // The engine-write hints go too: list_meta_assets pointed at connect_source, get_meta_entity at set_meta_entity_status.
+      expect(hints("list_meta_assets")).toEqual([]);
+      expect(hints("get_meta_entity")).toEqual(["list_meta_entities"]);
+    }
   });
 
   it("refuses a bare list_sources call instead of reading the local store, and names the twin", async () => {
@@ -886,20 +923,25 @@ describe("union turn: the app's list_sources twin", () => {
     expect(buildQueryRefinementSections("how many signups did we get", [nativeResult]).join("\n")).toContain("you only have a source list so far");
   });
 
-  it("sends the desktop Codex union every daemon native but the five its app twins replace", async () => {
+  it("sends the desktop Codex union no daemon native: its twins replace five, the rest are writes or local-only reads", async () => {
     const registry = createDaemonActionRegistry();
     const twins = [
       "get_meta_performance", "list_meta_entities", "list_sources", "list_metrics", "describe_metric",
       "list_queryable_views", "describe_queryable_view", "run_metric_query", "run_breakdown_query", "run_funnel_query"
     ];
-    const withheld = ["run_meta_live_insights", "list_meta_entities", "get_meta_entity", "list_meta_assets", "list_sources"];
+    const replaced = ["run_meta_live_insights", "list_meta_entities", "get_meta_entity", "list_meta_assets", "list_sources"];
     const { tools } = await run(registry, twins);
     const natives = tools.filter((name) => !name.startsWith("mcp__"));
     const daemon = registry.list().map((action) => action.id as string);
-    // Derived, not pinned: a new daemon action is a budget question for its own change, not a failure here.
-    expect(daemon).toEqual(expect.arrayContaining(withheld));
-    expect(natives).toEqual(daemon.filter((id) => !withheld.includes(id)));
-    expect(natives).toHaveLength(daemon.length - withheld.length);
+    const withheld = new Set([...replaced, ...unionAlwaysWithheld(registry)]);
+    // Derived, not pinned: a new daemon read is a budget question for its own change, not a failure here.
+    expect(daemon).toEqual(expect.arrayContaining(replaced));
+    expect(natives).toEqual(daemon.filter((id) => !withheld.has(id)));
+    // Today every one of the daemon's 30 natives is withheld: 18 writes, 7 local-only reads, 5 twin-replaced reads.
+    expect(operatorIds(registry)).toHaveLength(18);
+    expect(daemon).toHaveLength(30);
+    expect(natives).toEqual([]);
+    expect(tools).toEqual(twins.map(app));
   });
 
   it("labels the twin's progress like the native's", async () => {
@@ -1099,5 +1141,243 @@ describe("union turn: the answer read after the twin's source list", () => {
     // The home call (no argument) still reads as this workspace's sources.
     const home = await turn("give me a snapshot of the workspace", ["list_sources"]);
     expect(home.promptAfter(1)).toContain("- Connected sources: 2.");
+  });
+});
+
+describe("union turn: engine writes and local-only reads", () => {
+  const app = (name: string) => `mcp__${APP_SERVER}__${name}`;
+  // The desktop Codex union's app tools for these turns: its Meta proposal tools (1bu-1 meta-ads-pack.ts, registered
+  // unconditionally by catalog.ts), the source/Meta twins and the lead and outcome reads (a subset of its legacy
+  // Cmd+L catalogue).
+  const DESKTOP_TWINS = [
+    "list_sources", "get_meta_performance", "list_meta_entities", "propose_activate_meta_entity",
+    "propose_pause_meta_entity", "propose_meta_budget", "propose_meta_launch", "propose_update_meta_ad",
+    "propose_create_meta_campaign", "propose_create_meta_ad_set", "propose_create_meta_creative", "propose_create_meta_ad",
+    "list_contacts", "list_audit_leads", "run_app_outcomes"
+  ];
+  const CONFIRMATION_MESSAGE = "This request includes an operator action that requires confirmation before execution.";
+  const LEGACY_AUTHORITY_LINE = "- Operator/write actions are never auto-executed, but the RUNTIME owns that confirmation — not you. When you have the required parameters, CALL the action directly: the app then shows the user a Confirm control that gates execution, and the action runs only after they act on it. Do NOT run your own confirmation step — never ask the user to type or repeat a confirmation phrase (e.g. 'reply confirm' / 'CONFIRM CREATE ...'), never withhold the tool call waiting for verbal approval, and never invent an extra approval turn. Gather the parameters, make the single tool call, and let the app's Confirm control be the one and only confirmation.";
+
+  /** The real controller; the model makes each call in `calls` in its own round, then answers "done". */
+  async function turn(
+    registry: AnyRegistry,
+    appTools: string[] | undefined,
+    options: { calls?: Array<{ name: string; input?: Record<string, unknown> }>; mode?: "union" | "exclusive"; message?: string } = {}
+  ) {
+    const requests: ModelRequest[] = [];
+    const appCalls: string[] = [];
+    const recorded: Array<{ actionId: string; authority: string; requiresConfirmation: boolean; confirmationId?: string }> = [];
+    const sessionStore: ChatSessionStore = {
+      async ensureSession() {},
+      async appendMessage() {},
+      async recordActionCall(input) {
+        recorded.push({
+          actionId: input.actionId,
+          authority: input.authority,
+          requiresConfirmation: input.requiresConfirmation,
+          ...(input.confirmationId ? { confirmationId: input.confirmationId } : {})
+        });
+      },
+      async listSessions() { return []; },
+      async getSession() { return null; },
+      async searchSessions() { return []; },
+      async resumeSession() {},
+      async endSession() {},
+      async compactSession(input) { return { sessionId: input.newSessionId ?? "s", parentSessionId: input.sessionId }; }
+    };
+    const calls = options.calls ?? [];
+    const controller = createLlmController({
+      registry,
+      sessionStore,
+      modelClient: {
+        complete: async (request) => {
+          requests.push(request);
+          const step = calls[requests.length - 1];
+          return step
+            ? { toolCalls: [{ id: `call_${requests.length}`, name: step.name, input: step.input ?? {} }] }
+            : { message: "done" };
+        }
+      }
+    });
+    const result = await controller.chat({
+      message: options.message ?? "raise the spring ad set's budget to $80 a day",
+      sessionId: `s-writes-${options.mode ?? "union"}-${(appTools ?? ["plain"]).length}-${calls.map((call) => call.name).join("-")}-${options.message ?? ""}`,
+      workspaceId: "ws_test",
+      actorId: "operator-1",
+      surface: "desktop",
+      ...(appTools ? {
+        scopedAppTools: {
+          serverName: APP_SERVER,
+          allowedTools: appTools.map(app),
+          mode: options.mode ?? "union",
+          tools: appTools.map((name) => ({ name, description: name, inputSchema: { type: "object" } })),
+          callTool: async (name: string) => {
+            appCalls.push(name);
+            return { ok: true, rows: [] };
+          }
+        }
+      } : {})
+    });
+    const first = requests[0] as { tools: Array<{ name: string }>; systemPrompt: string };
+    const lines = first.systemPrompt.split("\n");
+    const manifest = JSON.parse(lines[lines.indexOf("Typed Infinite OS action manifest:") + 1] ?? "[]") as Array<{
+      id: string;
+      recommendedNextActions: string[];
+    }>;
+    return { tools: first.tools.map((tool) => tool.name), manifest, requests, result, appCalls, recorded };
+  }
+
+  it("derives the withheld writes from each action's authority, which is the whole OPERATOR_ACTIONS list", () => {
+    for (const registry of [createDaemonActionRegistry(), createInfiniteOsRegistry({})]) {
+      expect([...operatorIds(registry)].sort()).toEqual([...OPERATOR_ACTIONS].sort());
+      // Every local-only read is still a real registry read (a rename would leave a dead id here).
+      for (const id of LOCAL_ONLY_READS) {
+        expect(registry.get(id)?.authority, id).toBe("tool_agent");
+      }
+    }
+  });
+
+  it("withholds every engine write and the seven local-only reads from a union turn, on the daemon and the full registry", async () => {
+    for (const registry of [createDaemonActionRegistry(), createInfiniteOsRegistry({})]) {
+      const { tools, manifest } = await turn(registry, ["get_current_workspace"]);
+      expect(tools).toEqual([...unionNatives(registry), app("get_current_workspace")]);
+      for (const id of unionAlwaysWithheld(registry)) {
+        expect(tools, id).not.toContain(id);
+        expect(manifest.some((entry) => entry.recommendedNextActions.includes(id)), id).toBe(false);
+      }
+    }
+  });
+
+  it("sends a desktop Codex union on the daemon registry zero natives, and the turn runs on its app tools", async () => {
+    const registry = createDaemonActionRegistry();
+    const { tools, manifest, result, appCalls, requests } = await turn(registry, DESKTOP_TWINS, {
+      message: "how many new leads this week?",
+      calls: [{ name: app("list_contacts") }]
+    });
+    expect(tools).toEqual(DESKTOP_TWINS.map(app));
+    expect(tools.filter((name) => !name.startsWith("mcp__"))).toEqual([]);
+    expect(manifest.map((entry) => entry.id)).toEqual(DESKTOP_TWINS.map(app));
+    expect(appCalls).toEqual(["list_contacts"]);
+    expect(requests).toHaveLength(2);
+    expect(requests[1]?.toolResults[0]).toMatchObject({ name: app("list_contacts"), result: { status: "ok" } });
+    expect(result).toMatchObject({ ok: true, message: "done" });
+  });
+
+  it.each([
+    ["set_meta_entity_status", { sourceId: "src_meta", entityId: "1201", entity: "adset", status: "ACTIVE", confirmActivation: "1201" },
+      `This turn offers ${app("propose_activate_meta_entity")} or ${app("propose_pause_meta_entity")} in its place.`],
+    ["update_meta_budget", { sourceId: "src_meta", entityId: "1201", entity: "adset", dailyBudget: 8000 },
+      `This turn offers ${app("propose_meta_budget")} in its place.`],
+    ["create_meta_ad_set", { campaignId: "1200", name: "Spring", optimizationGoal: "LINK_CLICKS", billingEvent: "IMPRESSIONS" },
+      `This turn offers ${app("propose_create_meta_ad_set")} or ${app("propose_meta_launch")} in its place.`],
+    ["create_meta_campaign", { name: "Spring", objective: "OUTCOME_LEADS" },
+      `This turn offers ${app("propose_create_meta_campaign")} or ${app("propose_meta_launch")} in its place.`],
+    ["create_meta_creative", { name: "Spring", pageId: "1", imageHash: "abc" },
+      `This turn offers ${app("propose_create_meta_creative")} or ${app("propose_meta_launch")} in its place.`],
+    ["update_meta_ad", { sourceId: "src_meta", entityId: "1202", name: "Renamed" },
+      `This turn offers ${app("propose_update_meta_ad")} in its place.`],
+    ["delete_meta_entity", { sourceId: "src_meta", entityId: "1201", entity: "adset" },
+      `Deleting is not available from chat; pause it instead with ${app("propose_pause_meta_entity")}.`],
+    ["connect_source", { provider: "stripe" }, "This chat turn does not offer it."],
+    ["sync_source_now", { sourceId: "src_ga4" }, "This chat turn does not offer it."],
+    ["describe_source", { sourceId: "src_ga4" }, `This turn offers ${app("list_sources")} in its place.`]
+  ])("refuses a model call to %s as an unknown action, never a Confirm card", async (id, input, refusal) => {
+    for (const name of [id, `mcp_${id}`]) {
+      const { result, recorded, requests, appCalls } = await turn(createDaemonActionRegistry(), DESKTOP_TWINS, {
+        calls: [{ name, input }]
+      });
+      const call = result.actionCalls.find((entry) => entry.id === "call_1");
+      expect(call, name).toMatchObject({
+        actionId: id,
+        status: "error",
+        requiresConfirmation: false,
+        error: { code: "unknown_action", message: `Unknown Infinite OS action: ${id}. ${refusal}` }
+      });
+      expect(call?.confirmationId, name).toBeUndefined();
+      // The turn goes on: the model reads the refusal and answers; no confirmation message ends it.
+      expect(requests, name).toHaveLength(2);
+      expect(result.message, name).toBe("done");
+      expect(result.message, name).not.toBe(CONFIRMATION_MESSAGE);
+      expect(recorded, name).toEqual([{ actionId: id, authority: "tool_agent", requiresConfirmation: false }]);
+      expect(appCalls, name).toEqual([]);
+    }
+  });
+
+  it("names only the replacements the turn carries", async () => {
+    const launchOnly = await turn(createDaemonActionRegistry(), ["get_current_workspace", "propose_meta_launch"], {
+      calls: [{ name: "create_meta_ad_set" }]
+    });
+    expect(launchOnly.result.actionCalls[0]?.error?.message).toBe(
+      `Unknown Infinite OS action: create_meta_ad_set. This turn offers ${app("propose_meta_launch")} in its place.`
+    );
+    for (const [id, refusal] of [
+      ["set_meta_entity_status", "This chat turn does not offer it."],
+      ["update_meta_budget", "This chat turn does not offer it."],
+      ["delete_meta_entity", "Deleting is not available from chat; pause it instead."]
+    ]) {
+      const bare = await turn(createDaemonActionRegistry(), ["get_current_workspace"], { calls: [{ name: id! }] });
+      expect(bare.result.actionCalls[0]?.error?.message, id).toBe(`Unknown Infinite OS action: ${id}. ${refusal}`);
+    }
+  });
+
+  it("leaves a plain turn byte-identical: every engine write is offered and a call still becomes a Confirm card", async () => {
+    const registry = createDaemonActionRegistry();
+    const { tools, result, recorded, requests } = await turn(registry, undefined, {
+      calls: [{ name: "update_meta_budget", input: { sourceId: "src_meta", entityId: "1201", entity: "adset", dailyBudget: 8000 } }]
+    });
+    expect(tools).toEqual(registry.list().map((action) => action.id as string));
+    expect(requests).toHaveLength(1);
+    expect(result.message).toBe(CONFIRMATION_MESSAGE);
+    expect(result.actionCalls[0]).toMatchObject({
+      actionId: "update_meta_budget",
+      status: "requires_confirmation",
+      requiresConfirmation: true,
+      confirmationId: expect.stringMatching(/^confirm_/)
+    });
+    expect(recorded).toEqual([expect.objectContaining({ actionId: "update_meta_budget", authority: "operator", requiresConfirmation: true })]);
+    expect(requests[0]?.systemPrompt).toContain(LEGACY_AUTHORITY_LINE);
+  });
+
+  it("leaves an exclusive turn byte-identical: app tools only, a native write refused as an unknown scoped tool", async () => {
+    const { tools, result, requests } = await turn(createDaemonActionRegistry(), DESKTOP_TWINS, {
+      mode: "exclusive",
+      calls: [{ name: "update_meta_budget" }]
+    });
+    expect(tools).toEqual(DESKTOP_TWINS.map(app));
+    expect(result.actionCalls[0]?.error).toEqual({ code: "unknown_action", message: "Unknown scoped app tool: update_meta_budget" });
+    expect(requests[0]?.systemPrompt).toContain(LEGACY_AUTHORITY_LINE);
+  });
+
+  it("gives a union turn a prompt that names no withheld action and promises no engine Confirm control", async () => {
+    const cases: Array<[AnyRegistry, string[]]> = [
+      [createDaemonActionRegistry(), DESKTOP_TWINS],
+      [createDaemonActionRegistry(), ["get_current_workspace"]],
+      [createInfiniteOsRegistry({}), DESKTOP_TWINS],
+      [createInfiniteOsRegistry({}), ["get_current_workspace"]]
+    ];
+    for (const [registry, appTools] of cases) {
+      for (const message of [
+        "raise the spring ad set's budget to $80 a day",
+        "which campaign drove the most signups last month?",
+        "what stands out?"
+      ]) {
+        const { requests } = await turn(registry, appTools, { message });
+        const systemPrompt = requests[0]?.systemPrompt ?? "";
+        for (const id of unionAlwaysWithheld(registry)) {
+          expect(new RegExp(`\\b${id}\\b`).test(systemPrompt), `${appTools.length} tools, ${message}: ${id}`).toBe(false);
+        }
+        expect(systemPrompt).not.toContain("Confirm control");
+        expect(systemPrompt).not.toContain("the RUNTIME owns that confirmation");
+        expect(systemPrompt).toContain("this turn offers none of the engine's own write actions");
+        expect(systemPrompt).toContain("never ask the user to type or repeat a confirmation phrase");
+      }
+    }
+  });
+
+  it("keeps the legacy authority line on every non-union prompt", () => {
+    const base = { actions: native(), workspaceId: "ws_test", surface: "desktop" as const, modelProvider: "codex" as const };
+    const plain = assembleInfiniteOsPrompt(base);
+    expect(plain).toContain(LEGACY_AUTHORITY_LINE);
+    expect(assembleInfiniteOsPrompt({ ...base, scopedAppToolMode: "exclusive" })).toBe(plain);
   });
 });

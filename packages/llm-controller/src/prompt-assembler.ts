@@ -34,6 +34,12 @@ export interface PromptAssemblyInput {
   interactiveFeatures?: readonly InteractiveFeature[];
   /** `continuation`: the latest message is the host's report of an action outcome, not the user. */
   turnOrigin?: "human" | "continuation";
+  /**
+   * How the turn's app tools compose with the engine's actions. "union" (the desktop's Codex chat) offers none of
+   * the engine's writes, so its prompt never promises the engine's Confirm control. Absent or "exclusive" leaves the
+   * prompt byte for byte as before.
+   */
+  scopedAppToolMode?: "exclusive" | "union";
 }
 
 export function assembleInfiniteOsPrompt(input: PromptAssemblyInput): string {
@@ -62,6 +68,10 @@ export function assembleInfiniteOsPrompt(input: PromptAssemblyInput): string {
   // engine's Meta metrics, views and recipes are refused there, so the prompt stops pointing at them.
   const metaPerformance = availableLike("get_meta_performance");
   const metaStatusTwin = appTwin("list_meta_entities");
+  const unionTurn = input.scopedAppToolMode === "union";
+  // A union turn withholds the context/journey reads, so the journey flow is named only when its steps are in the turn.
+  const journeyFlow = availableLike("run_journey_query") &&
+    (!unionTurn || (availableLike("search_context") && availableLike("validate_journey_plan")));
 
   return [
     ...(input.agentProfile === GENERAL_MARKETING_PROFILE ? generalProfileHeader(input) : [
@@ -72,7 +82,9 @@ export function assembleInfiniteOsPrompt(input: PromptAssemblyInput): string {
     "Authority policy:",
     "- Use only the provided typed Infinite OS actions.",
     "- Read actions may be selected for automatic execution by the runtime.",
-    "- Operator/write actions are never auto-executed, but the RUNTIME owns that confirmation — not you. When you have the required parameters, CALL the action directly: the app then shows the user a Confirm control that gates execution, and the action runs only after they act on it. Do NOT run your own confirmation step — never ask the user to type or repeat a confirmation phrase (e.g. 'reply confirm' / 'CONFIRM CREATE ...'), never withhold the tool call waiting for verbal approval, and never invent an extra approval turn. Gather the parameters, make the single tool call, and let the app's Confirm control be the one and only confirmation.",
+    unionTurn
+      ? UNION_WRITE_POLICY
+      : "- Operator/write actions are never auto-executed, but the RUNTIME owns that confirmation — not you. When you have the required parameters, CALL the action directly: the app then shows the user a Confirm control that gates execution, and the action runs only after they act on it. Do NOT run your own confirmation step — never ask the user to type or repeat a confirmation phrase (e.g. 'reply confirm' / 'CONFIRM CREATE ...'), never withhold the tool call waiting for verbal approval, and never invent an extra approval turn. Gather the parameters, make the single tool call, and let the app's Confirm control be the one and only confirmation.",
     "",
     "Instruction/data boundary:",
     "- Do not expose raw SQL, arbitrary shell, filesystem, browser, generic MCP, or secret access.",
@@ -147,7 +159,7 @@ export function assembleInfiniteOsPrompt(input: PromptAssemblyInput): string {
     "- If you only have one scalar result or one lonely ranked row for a broad prompt, keep refining before answering as if you already understand the full picture.",
     "- For broad exploratory prompts, do not stop at inventory-only results like source lists, sync lists, metric lists, or view lists when the user is asking what stands out, what they should know, or what they can inspect. Fetch at least one concrete metric, breakdown, or metric/view detail before summarizing.",
     "- For broad workspace snapshot prompts, try to combine three things before answering strongly: what is connected, whether it looks current/fresh, and at least one concrete analytical signal.",
-    ...(availableLike("run_journey_query") ? [
+    ...(journeyFlow ? [
       "- For path, attribution, journey, or downstream-outcome questions such as which campaign, channel, content, event, or behavior drove signups, demos, purchases, revenue, LTV, churn, pipeline, or conversion, use the journey flow before answering: search context, validate a journey plan, run the journey query, then fetch evidence or verify claims when needed.",
       "- Do not answer a path/downstream question after only listing sources, schedules, metrics, or views. If the relevant sources exist, run validate_journey_plan and run_journey_query before the final answer; if the journey result is low_coverage or unsupported, then say that with the returned caveats and optionally use metric/breakdown fallback analysis."
     ] : availableLike("run_metric_query") ? [
@@ -169,6 +181,13 @@ export function assembleInfiniteOsPrompt(input: PromptAssemblyInput): string {
     ,"- When ending with follow-up suggestions, prefer one or two concrete next questions over a long generic menu."
   ].join("\n");
 }
+
+/**
+ * A union turn's write policy. It offers none of the engine's writes: a write goes through the app tool that proposes
+ * it, and the app's own approval card is the only confirmation.
+ */
+const UNION_WRITE_POLICY =
+  "- Operator/write actions are never auto-executed, and this turn offers none of the engine's own write actions. A change goes through the app tool in this turn that proposes it: when you have the required parameters, call that tool directly; the app shows the user its own approval card, and the change runs only after they approve it there. Do NOT run your own confirmation step — never ask the user to type or repeat a confirmation phrase (e.g. 'reply confirm' / 'CONFIRM CREATE ...'), never withhold the tool call waiting for verbal approval, and never invent an extra approval turn. When no tool in this turn can make the change, say so plainly and never imply that it ran.";
 
 /**
  * The engine's Meta metric ids and views. A desktop turn refuses them on run_metric_query/run_breakdown_query and
