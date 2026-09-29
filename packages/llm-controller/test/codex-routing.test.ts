@@ -899,7 +899,8 @@ describe("union turn: the app's list_sources twin", () => {
       message: "what's my cpl",
       call: app("list_sources")
     });
-    expect(requests[1]?.systemPrompt).toContain("get_meta_performance with a structured `period`");
+    // The rescue's own line: the Meta routing bullet also says "get_meta_performance with a structured `period`".
+    expect(requests[1]?.systemPrompt).toContain("- The user asked for a Meta Ads number, but you only have a source list so far.");
   });
 
   it("fires the metric rescue and the open-ended refinement after the twin's source list", async () => {
@@ -917,5 +918,168 @@ describe("union turn: the app's list_sources twin", () => {
     expect(overview).toContain("Do not describe a source as never synced");
     const metric = { name: "run_metric_query", result: { data: { metric: "recognized_revenue", rows: [{ recognized_revenue: "12000" }] } } };
     expect(buildQuerySynthesisSections("tell me something", [twin, metric]).join("\n")).toContain("- Source context: ga4 (Main site) has last_synced_at=2026-09-28T06:00:00.000Z");
+  });
+});
+
+describe("union turn: the answer read after the twin's source list", () => {
+  const app = (name: string) => `mcp__${APP_SERVER}__${name}`;
+  // The app tools a desktop Codex turn carries for these questions (a subset of the desktop's Codex allowlist).
+  const DESKTOP_TOOLS = [
+    "get_current_workspace", "list_sources", "get_meta_performance", "list_contacts", "list_audit_leads",
+    "run_app_outcomes", "list_metrics", "run_metric_query", "run_breakdown_query"
+  ];
+  const SOURCES = {
+    ok: true,
+    actionId: "list_sources",
+    authority: "tool_agent",
+    status: "ok",
+    data: {
+      sources: [
+        { id: "src_ga4", provider: "ga4", status: "connected", connection_name: "Main site", last_synced_at: "2026-09-28T06:00:00.000Z" },
+        { id: "src_meta", provider: "meta_ads", status: "connected", connection_name: "Ad account" }
+      ]
+    },
+    provenance: ["sources"],
+    caveats: [],
+    truncated: false,
+    nextActions: []
+  };
+  const engineEnvelope = (actionId: string, data: Record<string, unknown>) => ({
+    ok: true, actionId, authority: "tool_agent", status: "ok", data, provenance: [], caveats: [], truncated: false, nextActions: []
+  });
+  // What each app tool returns through the daemon's bridge.
+  const APP_RESULTS: Record<string, unknown> = {
+    get_current_workspace: { ok: true, workspace: { id: "ws_test", name: "Acme" } },
+    list_sources: SOURCES,
+    get_meta_performance: { ok: true, period: { preset: "last_7d" }, totals: { spend: 120, leads: 8, cost_per_lead: 15 } },
+    list_contacts: { ok: true, contacts: [{ email: "lead@example.com", form: "contact" }], total: 1 },
+    list_audit_leads: { ok: true, leads: [], total: 0 },
+    run_app_outcomes: { ok: true, available: true, accountCreated: 12, appSignup: 12 },
+    list_metrics: engineEnvelope("list_metrics", { metrics: [{ id: "recognized_revenue" }, { id: "site_visitors" }] }),
+    run_metric_query: engineEnvelope("run_metric_query", { metric: "recognized_revenue", rows: [{ recognized_revenue: "1234" }] })
+  };
+  const STALE_RESCUE = "only have a source list so far";
+  // The rescue's own line; the routing bullets also say "get_meta_performance with a structured `period`".
+  const META_RESCUE = "- The user asked for a Meta Ads number, but you only have a source list so far.";
+  const OPEN_ENDED = "Open-ended analysis refinement guidance:";
+  const OVERVIEW = "Generic workspace-overview synthesis guidance:";
+  const REFINING = "Refining answer with a better-targeted follow-up query.";
+
+  /** The real controller on the daemon registry; the model calls `calls` one per round, then answers. */
+  async function turn(
+    message: string,
+    calls: Array<string | { name: string; input: Record<string, unknown> }>,
+    options: { mode?: "union" | "exclusive"; results?: Record<string, unknown> } = {}
+  ) {
+    const requests: ModelRequest[] = [];
+    const progress: Array<{ stage?: string; message: string }> = [];
+    const steps = calls.map((call) => typeof call === "string" ? { name: call, input: {} } : call);
+    const controller = createLlmController({
+      registry: createDaemonActionRegistry(),
+      modelClient: {
+        complete: async (request) => {
+          requests.push(request);
+          const step = steps[requests.length - 1];
+          return step
+            ? { toolCalls: [{ id: `call_${requests.length}`, name: app(step.name), input: step.input }] }
+            : { message: "done" };
+        }
+      }
+    });
+    await controller.chat({
+      message,
+      sessionId: `s-answer-${options.mode ?? "union"}-${message}-${steps.map((step) => step.name).join("-")}-${Object.keys(options.results ?? {}).join("-")}`,
+      workspaceId: "ws_test",
+      actorId: "operator-1",
+      surface: "desktop",
+      onProgress: (event) => {
+        if ("message" in event && typeof event.message === "string") {
+          progress.push({ stage: "stage" in event ? String(event.stage) : undefined, message: event.message });
+        }
+      },
+      scopedAppTools: {
+        serverName: APP_SERVER,
+        allowedTools: DESKTOP_TOOLS.map(app),
+        mode: options.mode ?? "union",
+        tools: DESKTOP_TOOLS.map((name) => ({ name, description: name, inputSchema: { type: "object" } })),
+        callTool: async (name: string) => structuredClone(options.results?.[name] ?? APP_RESULTS[name] ?? { ok: true })
+      }
+    });
+    expect(requests).toHaveLength(steps.length + 1);
+    return {
+      /** The system prompt of the request that follows the given call (1-based). */
+      promptAfter: (call: number) => requests[call]?.systemPrompt ?? "",
+      /** The progress lines emitted after the given call's (1-based) own label. */
+      progressAfter: (call: number) => {
+        const labels = progress.flatMap((event, index) => event.stage === "tool" ? [index] : []);
+        return progress.slice((labels[call - 1] ?? progress.length) + 1).map((event) => event.message);
+      }
+    };
+  }
+
+  it.each([
+    ["what's my cpl", "get_meta_performance"],
+    ["how are my ads doing this week?", "get_meta_performance"],
+    ["how many leads did we get this week?", "list_contacts"],
+    ["how many new leads this week?", "list_contacts"],
+    ["how many signups did we get", "run_app_outcomes"],
+    ["what was my revenue last month?", "run_metric_query"]
+  ])("adds no stale rescue or workspace overview once %j has its answer read (%s)", async (message, answer) => {
+    const { promptAfter, progressAfter } = await turn(message, ["list_sources", answer]);
+    const text = promptAfter(2);
+    expect(text).not.toContain(STALE_RESCUE);
+    expect(text).not.toContain("Metric-question refinement guidance:");
+    expect(text).not.toContain("run run_metric_query or run_breakdown_query");
+    expect(text).not.toContain(OPEN_ENDED);
+    expect(text).not.toContain(OVERVIEW);
+    expect(progressAfter(2)).not.toContain(REFINING);
+  });
+
+  it("still fires the rescue after the twin's source list alone", async () => {
+    const meta = await turn("what's my cpl", ["list_sources", "get_meta_performance"]);
+    expect(meta.promptAfter(1)).toContain(META_RESCUE);
+    expect(meta.progressAfter(1)).toContain(REFINING);
+    const revenue = await turn("what was my revenue last month?", ["list_sources", "run_metric_query"]);
+    expect(revenue.promptAfter(1)).toContain(STALE_RESCUE);
+  });
+
+  it("keeps the rescue after a workspace-context read, which answers nothing", async () => {
+    const { promptAfter } = await turn("what's my cpl", ["list_sources", "get_current_workspace"]);
+    expect(promptAfter(2)).toContain(META_RESCUE);
+  });
+
+  it("does not repeat the rescue after an answer read that failed: the model has the error", async () => {
+    const { promptAfter } = await turn("what's my cpl", ["list_sources", "get_meta_performance"], {
+      results: { get_meta_performance: { ok: false, error: { code: "needs_login", message: "Sign in to read Meta." } } }
+    });
+    expect(promptAfter(2)).not.toContain(STALE_RESCUE);
+  });
+
+  it("stops asking an open-ended turn for metric coverage once the twin's metric list or a metric result is in", async () => {
+    const { promptAfter } = await turn("what stands out?", ["list_sources", "list_metrics", "run_metric_query"]);
+    expect(promptAfter(1)).toContain("You know which sources are connected");
+    expect(promptAfter(2)).not.toContain("not yet what metrics or views are available");
+    expect(promptAfter(2)).not.toContain(OPEN_ENDED);
+    expect(promptAfter(3)).not.toContain(OPEN_ENDED);
+    expect(promptAfter(3)).not.toContain(OVERVIEW);
+  });
+
+  it("adds no stale rescue in an exclusive turn (iMessage, scheduled, triggered) once the answer read is in", async () => {
+    const meta = await turn("what's my cpl", ["list_sources", "get_meta_performance"], { mode: "exclusive" });
+    expect(meta.promptAfter(2)).not.toContain(STALE_RESCUE);
+    expect(meta.promptAfter(2)).not.toContain(OVERVIEW);
+    const leads = await turn("how many new leads this week?", ["list_sources", "list_contacts"], { mode: "exclusive" });
+    expect(leads.promptAfter(2)).not.toContain(STALE_RESCUE);
+    expect(leads.promptAfter(2)).not.toContain(OVERVIEW);
+  });
+
+  it("never reads another brand's source list (a targeted twin call) as this workspace's sources", async () => {
+    const targeted = { name: "list_sources", input: { targetWorkspaceId: "ws_other_brand" } };
+    const overview = await turn("give me a snapshot of the workspace", [targeted]);
+    expect(overview.promptAfter(1)).not.toContain("- Connected sources: 2.");
+    expect(overview.promptAfter(1)).not.toContain(OVERVIEW);
+    // The home call (no argument) still reads as this workspace's sources.
+    const home = await turn("give me a snapshot of the workspace", ["list_sources"]);
+    expect(home.promptAfter(1)).toContain("- Connected sources: 2.");
   });
 });

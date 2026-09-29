@@ -15,7 +15,8 @@ import {
   type QueryFamily,
   classifyQueryFamily,
   splitHostTurnContext,
-  type InfiniteOsQueryAdvisor
+  type InfiniteOsQueryAdvisor,
+  type QueryRefinementToolResult
 } from "./query-advisor.js";
 import type { ChatResponse, InteractiveAgentProfile, InteractiveFeature } from "@infinite-os/types";
 import type { ChatSessionStore } from "./session-store.js";
@@ -666,15 +667,17 @@ export function createLlmController(options: {
       const tools = toolSchemas(actions);
       const actionCalls: ChatActionCall[] = [];
       const toolResults: ModelToolResult[] = [];
+      // The advisor also reads each call's input: an app twin called with an argument is not the native it replaces.
+      const advisorResults: QueryRefinementToolResult[] = [];
       let usage: ModelResponse["usage"];
       try {
         for (let iteration = 0; iteration < maxToolIterations; iteration += 1) {
           const refinementSections = buildQueryRefinementSections(
             advisedQuestion,
-            toolResults,
+            advisorResults,
             actions.map((action) => action.id)
           );
-          const synthesisSections = buildQuerySynthesisSections(advisedQuestion, toolResults);
+          const synthesisSections = buildQuerySynthesisSections(advisedQuestion, advisorResults);
           if (iteration > 0 && refinementSections.length > 0) {
             await emitStatus("resolve", refinementProgressMessage(refinementSections));
           }
@@ -794,7 +797,9 @@ export function createLlmController(options: {
               });
             }
             actionCalls.push(call);
-            toolResults.push(modelToolResult(call));
+            const toolResult = modelToolResult(call);
+            toolResults.push(toolResult);
+            advisorResults.push({ name: toolResult.name, result: toolResult.result, input: call.input });
           }
           if (nextCalls.some((call) => call.requiresConfirmation)) {
             const message = "This request includes an operator action that requires confirmation before execution.";

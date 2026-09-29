@@ -27,6 +27,8 @@ export interface InfiniteOsQueryAdvisor {
 export interface QueryRefinementToolResult {
   name?: string;
   result?: unknown;
+  /** The call's input, when the caller has it: an app twin called with an argument is not the native it replaces. */
+  input?: unknown;
 }
 
 export type QueryFamily =
@@ -607,20 +609,58 @@ export function splitHostTurnContext(message: string): { before: string; questio
 /**
  * A union turn withholds the native list_sources when the app sends its twin (`mcp__<server>__list_sources`). The
  * twin's result carries the app's own list_sources envelope as its data, one level below where the native keeps it.
- * Returns that envelope, or undefined for any other result.
+ * Returns that envelope, or undefined for any other result. Given the call's input, a call that carried an argument
+ * returns undefined too: the native takes none, and the twin's one argument (another brand's workspace id) lists
+ * that brand's cloud sources, not this workspace's.
  */
-export function appListSourcesEnvelope(name: string | undefined, result: unknown): Record<string, unknown> | undefined {
-  if (!name?.endsWith("__list_sources") || !isRecord(result)) {
+export function appListSourcesEnvelope(
+  name: string | undefined,
+  result: unknown,
+  input?: unknown
+): Record<string, unknown> | undefined {
+  if (appToolName(name) !== "list_sources" || !isRecord(result) || hasArgument(input)) {
     return undefined;
   }
   return isRecord(result.data) ? result.data : undefined;
 }
 
+/** The tool part of an app tool's model name (`mcp__<server>__<tool>`); undefined for a native id. */
+function appToolName(name: string | undefined): string | undefined {
+  if (!name?.startsWith("mcp__")) {
+    return undefined;
+  }
+  const separator = name.indexOf("__", "mcp__".length);
+  return separator === -1 ? undefined : name.slice(separator + 2);
+}
+
+function hasArgument(input: unknown): boolean {
+  return isRecord(input) && Object.values(input).some((value) =>
+    value !== undefined && value !== null && !(typeof value === "string" && value.trim() === "")
+  );
+}
+
 /** The results with the app's list_sources twin read as the native list_sources it replaces. */
 function withAppSourcesAsNative(toolResults: QueryRefinementToolResult[]): QueryRefinementToolResult[] {
   return toolResults.map((result) => {
-    const sources = appListSourcesEnvelope(result.name, result.result);
+    const sources = appListSourcesEnvelope(result.name, result.result, result.input);
     return sources ? { name: "list_sources", result: sources } : result;
+  });
+}
+
+// App reads that answer no question on their own: the workspace's context and a source list (this brand's or
+// another's).
+const APP_CONTEXT_TOOLS = new Set(["list_sources", "get_current_workspace", "list_my_workspaces"]);
+
+/**
+ * Whether an app read beyond the workspace context and the source list ran this turn, its result or its error in.
+ * The advisor counts the native reads by name; the app's reads (get_meta_performance, list_contacts,
+ * run_app_outcomes, and the same-name twins of the native analytics reads) arrive under their model names, so a
+ * turn that already has its answer read is never told it only has a source list.
+ */
+function hasAppAnswerRead(toolResults: QueryRefinementToolResult[]): boolean {
+  return toolResults.some((result) => {
+    const tool = appToolName(result.name);
+    return tool !== undefined && !APP_CONTEXT_TOOLS.has(tool) && isRecord(result.result);
   });
 }
 
@@ -859,13 +899,17 @@ function genericOpenEndedRefinementSections(
   const hasMetricResult = toolResults.some((result) => result.name === "run_metric_query" && isRecord(result.result));
   const hasBreakdownResult = toolResults.some((result) => result.name === "run_breakdown_query" && isRecord(result.result));
   const hasMetricDetail = toolResults.some((result) => result.name === "describe_metric" && isRecord(result.result));
+  // The app's reads count as reads too: after get_meta_performance or list_contacts ran, the turn has more than a
+  // source list.
+  const hasAppAnswer = hasAppAnswerRead(toolResults);
 
   // Targeted metric questions ("how many clicks?", "what's my CTR?", "cost per lead?") are not
   // open-ended, but the codex model still sometimes bails after list_sources and asks for a time
   // range instead of answering. Fire the "go fetch a metric, don't stop at the source list" rescue
   // for metric-shaped turns too — but ONLY when the turn so far has list_sources and has not yet run
-  // (or even located) any metric. This is conservative: it cannot fire once a metric query/breakdown
-  // result exists, and it never relaxes the result_type partition or any write confirmation.
+  // (or even located) any metric, nor any app read beyond the workspace context. This is conservative: it
+  // cannot fire once a metric query/breakdown result or an app answer read exists, and it never relaxes the
+  // result_type partition or any write confirmation.
   const metaQuestion =
     availableActionIds.some((id) => id === "get_meta_performance" || id.endsWith("__get_meta_performance")) &&
     isMetricShapedQuestion(message) &&
@@ -878,7 +922,8 @@ function genericOpenEndedRefinementSections(
     !hasMetricDetail &&
     !hasViews &&
     !hasMetricResult &&
-    !hasBreakdownResult
+    !hasBreakdownResult &&
+    !hasAppAnswer
   ) {
     // A turn with the app's stored Meta read refuses Meta metrics on run_metric_query/run_breakdown_query.
     if (metaQuestion) {
@@ -903,7 +948,7 @@ function genericOpenEndedRefinementSections(
     return [];
   }
 
-  if (hasSources && !hasMetrics && !hasViews) {
+  if (hasSources && !hasMetrics && !hasViews && !hasAppAnswer) {
     return [
       "Open-ended analysis refinement guidance:",
       "- You know which sources are connected, but not yet what metrics or views are available to analyze.",
@@ -1720,6 +1765,10 @@ function genericCapabilityOverviewSections(toolResults: QueryRefinementToolResul
 }
 
 function genericWorkspaceOverviewSections(toolResults: QueryRefinementToolResult[]): string[] {
+  // A workspace overview answers a question about the workspace, not one an app read already answered.
+  if (hasAppAnswerRead(toolResults)) {
+    return [];
+  }
   const sourcesEnvelope = [...toolResults]
     .reverse()
     .find((result) => result.name === "list_sources" && isRecord(result.result));
