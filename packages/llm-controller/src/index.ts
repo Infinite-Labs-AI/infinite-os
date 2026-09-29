@@ -1347,7 +1347,9 @@ async function executeToolCalls(
       calls.push({
         id: toolCall.id,
         actionId: normalizedName,
-        input: toolCall.input,
+        // A refused write (a union turn withholds every engine write) is recorded and echoed to the model redacted,
+        // as its Confirm card was before the turn withheld it.
+        input: redactActionValue(toolCall.input),
         status: "error",
         requiresConfirmation: false,
         error: { code: "unknown_action", message: errorMessage }

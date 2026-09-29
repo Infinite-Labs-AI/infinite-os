@@ -1802,3 +1802,37 @@ describe("advisor: a refused call is no read", () => {
     expect(buildQuerySynthesisSections("give me an overview of the workspace", [twinSources]).join("\n")).toContain("- Connected sources: 1.");
   });
 });
+
+describe("union turn: a refused write's input", () => {
+  it("is redacted where it is recorded and where it is echoed to the model, as the Confirm card's was", async () => {
+    const input = { provider: "stripe", credentialKind: "api_key", credentialPayload: { apiKey: "sk_live_abc123" } };
+    const requests: ModelRequest[] = [];
+    const controller = createLlmController({
+      registry: createDaemonActionRegistry(),
+      modelClient: {
+        complete: async (request) => {
+          requests.push(request);
+          return requests.length === 1 ? { toolCalls: [{ id: "call_1", name: "connect_source", input }] } : { message: "done" };
+        }
+      }
+    });
+    const result = await controller.chat({
+      message: "connect stripe with key sk_live_abc123",
+      sessionId: "s-refused-write-redaction",
+      workspaceId: "ws_test",
+      actorId: "operator-1",
+      surface: "desktop",
+      scopedAppTools: {
+        serverName: APP_SERVER,
+        allowedTools: [`mcp__${APP_SERVER}__list_sources`],
+        mode: "union",
+        tools: [{ name: "list_sources", description: "list_sources", inputSchema: { type: "object" } }],
+        callTool: async () => ({ ok: true })
+      }
+    });
+    const call = result.actionCalls[0];
+    expect(call).toMatchObject({ actionId: "connect_source", status: "error", error: { code: "unknown_action" } });
+    expect(call?.input).toEqual({ provider: "stripe", credentialKind: "[redacted]", credentialPayload: "[redacted]" });
+    expect(JSON.stringify(requests[1]?.toolResults)).not.toContain("sk_live_abc123");
+  });
+});
