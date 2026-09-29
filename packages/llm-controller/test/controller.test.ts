@@ -1422,7 +1422,7 @@ describe("Infinite OS LLM controller", () => {
     });
 
     expect(modelCalled).toBe(false);
-    expect(result.message).toContain("Do you mean best channel for traffic, signups, conversion rate, or revenue?");
+    expect(result.message).toContain("Do you mean best channel for traffic, registrations, conversion rate, or revenue?");
   });
 
   it.skip("adds a relative this-month window to planned revenue total queries", async () => {

@@ -14,6 +14,7 @@ import {
   buildQuerySynthesisSections,
   type QueryFamily,
   classifyQueryFamily,
+  splitHostTurnContext,
   type InfiniteOsQueryAdvisor
 } from "./query-advisor.js";
 import type { ChatResponse, InteractiveAgentProfile, InteractiveFeature } from "@infinite-os/types";
@@ -69,7 +70,7 @@ export type {
 } from "./interactive-task-types.js";
 export { createConfiguredModelClient } from "./model-client.js";
 export { HOST_OUTCOME_PREFIX, assembleInfiniteOsPrompt } from "./prompt-assembler.js";
-export { createSourceAwareQueryAdvisor } from "./query-advisor.js";
+export { createSourceAwareQueryAdvisor, splitHostTurnContext } from "./query-advisor.js";
 export {
   createModelBackedMemoryReviewer,
   createCuratedMemoryManager,
@@ -565,19 +566,45 @@ export function createLlmController(options: {
           ? { sessionId, role: "system", content: `${HOST_OUTCOME_PREFIX}${input.message}` }
           : { sessionId, role: "user", content: input.message });
       }
+      // Action set is mode-aware:
+      //   no scoped tools        ⇒ the native registry (a plain chat turn).
+      //   scoped "exclusive"     ⇒ ONLY the scoped app tools (ads sub-agent; native hidden).
+      //   scoped "union"         ⇒ native registry ∪ scoped app tools (Codex chat keystone),
+      //                            with native winning on any name collision, minus the native
+      //                            actions an app twin replaces (withheldNativeActionIds).
+      const withheldActionIds = scopedAppTools?.mode === "union"
+        ? withheldNativeActionIds(scopedAppTools)
+        : new Set<string>();
+      const actions = scopedAppTools
+        ? scopedAppTools.mode === "union"
+          ? unionActionSet(options.registry, scopedAppTools, withheldActionIds)
+          : scopedAppToolActions(scopedAppTools)
+        : options.registry.list();
+      // The advisor reads the person's question only: the host's time block and reply style around it are
+      // not the question. Its rewrite goes back inside those blocks for the model.
+      const hostContext = splitHostTurnContext(input.message);
       // The advisor rewrites or answers a person's question; a host outcome is neither.
       const advisory = persistTurn && !hostContinuation
         ? await loadQueryAdvisory(options.queryAdvisor, {
-            message: input.message,
+            message: hostContext.question,
             workspaceId: input.workspaceId,
             actorId: input.actorId,
             sessionId,
             surface: input.surface,
             now: now(),
-            recentMessages: priorSession?.messages
+            recentMessages: priorSession?.messages?.map((message) =>
+              message.role === "user" && typeof message.content === "string"
+                ? { ...message, content: splitHostTurnContext(message.content).question }
+                : message
+            ),
+            availableActionIds: actions.map((action) => action.id)
           })
         : undefined;
-      const effectiveMessage = advisory?.effectiveMessage ?? input.message;
+      // What the advisor classifies on (the question), and what the model reads (the whole turn text).
+      const advisedQuestion = advisory?.effectiveMessage ?? hostContext.question;
+      const effectiveMessage = advisory?.effectiveMessage !== undefined
+        ? `${hostContext.before}${advisory.effectiveMessage}${hostContext.after}`
+        : input.message;
       // Kick off the post-turn durable-memory harvest. Callers MUST invoke this
       // only AFTER the user-visible message + token usage have been emitted: in
       // the default "background" mode it is fire-and-forget (the returned promise
@@ -636,24 +663,18 @@ export function createLlmController(options: {
           ...responseMetadata()
         };
       }
-      // Action set is mode-aware:
-      //   no scoped tools        ⇒ the native registry (a plain chat turn).
-      //   scoped "exclusive"     ⇒ ONLY the scoped app tools (ads sub-agent; native hidden).
-      //   scoped "union"         ⇒ native registry ∪ scoped app tools (Codex chat keystone),
-      //                            with native winning on any name collision.
-      const actions = scopedAppTools
-        ? scopedAppTools.mode === "union"
-          ? unionActionSet(options.registry, scopedAppTools)
-          : scopedAppToolActions(scopedAppTools)
-        : options.registry.list();
       const tools = toolSchemas(actions);
       const actionCalls: ChatActionCall[] = [];
       const toolResults: ModelToolResult[] = [];
       let usage: ModelResponse["usage"];
       try {
         for (let iteration = 0; iteration < maxToolIterations; iteration += 1) {
-          const refinementSections = buildQueryRefinementSections(effectiveMessage, toolResults);
-          const synthesisSections = buildQuerySynthesisSections(effectiveMessage, toolResults);
+          const refinementSections = buildQueryRefinementSections(
+            advisedQuestion,
+            toolResults,
+            actions.map((action) => action.id)
+          );
+          const synthesisSections = buildQuerySynthesisSections(advisedQuestion, toolResults);
           if (iteration > 0 && refinementSections.length > 0) {
             await emitStatus("resolve", refinementProgressMessage(refinementSections));
           }
@@ -735,7 +756,7 @@ export function createLlmController(options: {
           const progressLabels = new Map<string, string>();
           for (const call of response.toolCalls) {
             const actionId = normalizeToolCallName(call.name, options.registry, scopedAppTools);
-            const message = toolCallProgressMessage(effectiveMessage, call, options.registry, scopedAppTools);
+            const message = toolCallProgressMessage(advisedQuestion, call, options.registry, scopedAppTools);
             progressLabels.set(call.id, message);
             await emitLegacy({ stage: "tool", message });
             await emitInfinite({
@@ -747,6 +768,7 @@ export function createLlmController(options: {
           }
           const nextCalls = await executeToolCalls(options.registry, response.toolCalls, scopedInput, {
             scopedAppTools,
+            withheldActionIds,
             progressLabels,
             nowMs: () => now().getTime(),
             emitToolStart: async (event) => emitInfinite(event),
@@ -940,6 +962,7 @@ async function loadQueryAdvisory(
     surface: Extract<RuntimeSurface, "api" | "app" | "cli" | "desktop">;
     now?: Date;
     recentMessages?: Array<{ role?: unknown; content?: unknown }>;
+    availableActionIds?: readonly string[];
   }
 ) {
   try {
@@ -1032,11 +1055,23 @@ function scopedAppToolActions(scoped: NormalizedScopedAppTools): ActionDefinitio
 // empty in practice. It is kept as defense-in-depth so an injected app tool can
 // never shadow a native action in the advertised tool set even if that invariant
 // were ever violated upstream.
-function unionActionSet(registry: ActionRegistry, scoped: NormalizedScopedAppTools): ActionDefinition[] {
-  const nativeActions = registry.list();
+function unionActionSet(
+  registry: ActionRegistry,
+  scoped: NormalizedScopedAppTools,
+  withheld: ReadonlySet<string>
+): ActionDefinition[] {
+  const nativeActions = registry.list().filter((action) => !withheld.has(action.id));
   const nativeIds = new Set(nativeActions.map((action) => action.id));
   const appActions = scopedAppToolActions(scoped).filter((action) => !nativeIds.has(action.id));
   return [...nativeActions, ...appActions];
+}
+
+// Native actions a union turn leaves out because an app twin replaces them. The native run_meta_live_insights is a
+// live Graph read; when the app's get_meta_performance (stored history, settled account-zone days) is in the turn,
+// offering both lets the model pick the live read.
+function withheldNativeActionIds(scoped: NormalizedScopedAppTools): Set<string> {
+  const appNames = new Set(scoped.tools.map((tool) => tool.rawName));
+  return new Set(appNames.has("get_meta_performance") ? ["run_meta_live_insights"] : []);
 }
 
 function normalizeScopedAppTools(scoped: ScopedAppTools | undefined): NormalizedScopedAppTools | undefined {
@@ -1104,6 +1139,8 @@ async function executeToolCalls(
   input: ChatInput,
   progress?: {
     scopedAppTools?: NormalizedScopedAppTools;
+    /** Native actions this turn does not offer; a call to one fails like an unknown action. */
+    withheldActionIds?: ReadonlySet<string>;
     progressLabels?: Map<string, string>;
     nowMs: () => number;
     emitToolStart: (event: ToolStartProgressEvent) => Promise<void>;
@@ -1197,7 +1234,7 @@ async function executeToolCalls(
       });
       continue;
     }
-    const action = registry.get(normalizedName);
+    const action = progress?.withheldActionIds?.has(normalizedName) ? undefined : registry.get(normalizedName);
     if (!action) {
       const errorMessage = `Unknown Infinite OS action: ${normalizedName}`;
       calls.push({
