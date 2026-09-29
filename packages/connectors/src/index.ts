@@ -11318,6 +11318,12 @@ const META_DEFAULT_ATTRIBUTION_SPEC: ReadonlyArray<{ event_type: string; window_
 // The optimisation goals that take the default: pixel/dataset conversion goals. Meta allows only
 // 1-day click on every other goal/objective combination (link clicks, landing page views, instant
 // forms, reach, …), so those send no spec and keep what Meta assigns.
+// Evidence (prod engine.meta_ads_entity_versions, 2026-09-29): Ads Manager stores exactly this spec
+// on OFFSITE_CONVERSIONS ad sets under OUTCOME_LEADS (163) and OUTCOME_SALES (57). UNVERIFIED — no ad
+// set of any kind to compare against: VALUE (0 ad sets; no Infinite surface creates one today), and
+// OFFSITE_CONVERSIONS under OUTCOME_ENGAGEMENT (0). Nobody has yet confirmed Meta ACCEPTS the
+// engagement window at create time on any combination: the first paused test create in the Infinite
+// workspace is the proof, and a refusal fails the create with Meta's error (no retry without it).
 const META_DEFAULT_ATTRIBUTION_GOALS = new Set<string>(["OFFSITE_CONVERSIONS", "VALUE"]);
 
 // The attribution_spec a new ad set sends for an already-normalized optimisation goal, or undefined
@@ -12764,7 +12770,7 @@ function metaAdsCliAccessToken(credential: MetaAdsCredential): string | undefine
 function ensureExecutableOnPath(
   executable: string,
   label: string,
-  installHint = "Install Meta's Ads CLI: pip install meta-ads"
+  installHint = "Install Meta's Ads CLI: pip install meta-ads==1.1.0"
 ): void {
   const message = `${label}: "${executable}" was not found. ${installHint}`;
   if (executable.includes("/")) {
@@ -13581,6 +13587,8 @@ async function createMetaAdSetViaCli(
   }
   // Meta's default attribution for conversion goals, as the raw JSON `meta-ads` 1.1.0's
   // `--attribution-spec` takes (`meta ads adset create --help`). Never with --incremental-attribution.
+  // This argv is `meta-ads` 1.1.0's: 1.2.0 dropped the positional CAMPAIGN_ID below for
+  // `--campaign-id` and exits 2 on it, so every host pins `meta-ads==1.1.0` (Trigger image, desktop).
   const attributionSpec = metaDefaultAttributionSpecFor(optimizationGoal);
   if (attributionSpec) args.push("--attribution-spec", JSON.stringify(attributionSpec));
   // POSITIONAL hardening (review): "--" ends option parsing; everything after it is a

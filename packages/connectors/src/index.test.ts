@@ -5010,7 +5010,7 @@ console.log(JSON.stringify({ data: [] }));
     await expect(connector.testConnection(db, request("meta_ads"))).rejects.toMatchObject({
       code: "provider_auth_failed",
       retryable: false,
-      message: expect.stringContaining("pip install meta-ads")
+      message: expect.stringContaining("pip install meta-ads==1.1.0")
     });
   });
 
