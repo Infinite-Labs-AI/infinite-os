@@ -91,7 +91,8 @@ describe("Infinite OS migration stack", () => {
       "0074_sync_batch_records_indexes.sql",
       "0075_posthog_raw_retention_90_days.sql",
       "0076_sync_runs_source_index.sql",
-      "0077_meta_ads_account_spend_limit.sql"
+      "0077_meta_ads_account_spend_limit.sql",
+      "0078_trialing_metric_aliases.sql"
     ]);
   });
 
@@ -1098,7 +1099,8 @@ describe("Infinite OS migration stack", () => {
       "0074_sync_batch_records_indexes.sql",
       "0075_posthog_raw_retention_90_days.sql",
       "0076_sync_runs_source_index.sql",
-      "0077_meta_ads_account_spend_limit.sql"
+      "0077_meta_ads_account_spend_limit.sql",
+      "0078_trialing_metric_aliases.sql"
     ]);
   });
 
@@ -1183,6 +1185,24 @@ describe("Infinite OS migration stack", () => {
     expect(sql).not.toContain("delete ");
     expect(sql).not.toContain("update ");
     expect(sql).not.toContain("create table");
+  });
+
+  it("re-aliases the trialing-now snapshot so 'trials' and 'new trials' never reach it, and nothing else (0078)", () => {
+    const migration = loadMigrations().find((candidate) => candidate.id === "0078_trialing_metric_aliases.sql");
+    const sql = (migration?.sql ?? "").toLowerCase().replace(/--[^\n]*/g, "").replace(/\s+/g, " ").trim();
+    expect(sql).toContain(
+      "update metric_definitions set aliases = '[\"trialing subscribers\",\"current trials\",\"trial customers\"]'::jsonb"
+    );
+    // Its example asks what the snapshot answers, not "how many trials started".
+    expect(sql).toContain("examples = '[\"how many customers are trialing right now?\"]'::jsonb");
+    expect(sql).toContain("where id = 'stripe_trialing_subscribers'");
+    // One row, prompt-facing metadata only: the metric's query semantics are unchanged.
+    expect(sql.match(/update /g)).toHaveLength(1);
+    expect(sql).not.toContain("expression");
+    expect(sql).not.toContain("drop ");
+    expect(sql).not.toContain("delete ");
+    expect(sql).not.toContain("create ");
+    expect(sql).not.toContain("alter ");
   });
 
   it("adds the nullable Meta posting Page column beside the pixel (0068)", () => {

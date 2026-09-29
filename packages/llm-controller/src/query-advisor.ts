@@ -6,6 +6,11 @@ export interface QueryAdvisorInput {
   surface: "api" | "app" | "cli" | "desktop";
   now?: Date;
   recentMessages?: Array<{ role?: unknown; content?: unknown }>;
+  /**
+   * The ids of the actions this turn really has (native ids and `mcp__<server>__<tool>` app twins). Absent on an
+   * open-core caller that does not pass them; routing that depends on an app tool then stays off.
+   */
+  availableActionIds?: readonly string[];
 }
 
 export interface QueryAdvisorResponse {
@@ -85,7 +90,10 @@ export function createSourceAwareQueryAdvisor(): InfiniteOsQueryAdvisor {
           ]
         };
       }
-      const missingBusinessMetricMessage = missingBusinessMetricClarificationMessage(input.message);
+      const missingBusinessMetricMessage = missingBusinessMetricClarificationMessage(
+        input.message,
+        (name) => (input.availableActionIds ?? []).some((id) => id === name || id.endsWith(`__${name}`))
+      );
       if (missingBusinessMetricMessage) {
         return {
           message: missingBusinessMetricMessage
@@ -234,7 +242,8 @@ function pendingBusinessMetricClarificationQuestion(
   if (!assistantMessage || typeof assistantMessage.content !== "string") {
     return undefined;
   }
-  if (!/Do you mean best channel for traffic, signups, conversion rate, or revenue\?/i.test(assistantMessage.content)) {
+  // "signups" is the wording asked before registrations replaced it; a session may still hold that question.
+  if (!/Do you mean best channel for traffic, (?:registrations|signups), conversion rate, or revenue\?/i.test(assistantMessage.content)) {
     return undefined;
   }
   const assistantIndex = recentMessages.lastIndexOf(assistantMessage);
@@ -258,6 +267,9 @@ function normalizeBusinessMetricClarificationReply(message: string): string | un
   }
   if (/\brevenue\b/.test(lower)) {
     return "for revenue";
+  }
+  if (/\b(registrations?|registered)\b/.test(lower)) {
+    return "for registrations";
   }
   if (/\b(signups?|signup)\b/.test(lower)) {
     return "for signups";
@@ -338,11 +350,23 @@ function broadWorkspaceSnapshotPromptSections(message: string): string[] {
   ];
 }
 
-function missingBusinessMetricClarificationMessage(message: string): string | undefined {
+function missingBusinessMetricClarificationMessage(
+  message: string,
+  availableLike: (name: string) => boolean
+): string | undefined {
   if (!isAmbiguousBusinessChannelQuestion(message)) {
     return undefined;
   }
-  return "Do you mean best channel for traffic, signups, conversion rate, or revenue?";
+  // A turn that has the app's Meta read answers a Meta-named question itself (spend, results and cost per
+  // result per campaign); asking "traffic, registrations, ...?" there offers none of the Meta numbers.
+  if (availableLike("get_meta_performance") && isMetaNamedQuestion(message)) {
+    return undefined;
+  }
+  return "Do you mean best channel for traffic, registrations, conversion rate, or revenue?";
+}
+
+function isMetaNamedQuestion(message: string): boolean {
+  return /\b(meta|facebook|fb|instagram|ads?|ad ?sets?|campaigns?|creatives?)\b/i.test(message);
 }
 
 // Detection only: which time-sensitive metric family is being asked about with no
@@ -513,7 +537,7 @@ function isAmbiguousBusinessChannelQuestion(message: string): boolean {
   if (!asksAboutChannel) {
     return false;
   }
-  const hasMetricDisambiguator = /\b(revenue|traffic|visitors|users|signups?|conversion|conversions|convert|converts|converting)\b/i.test(message);
+  const hasMetricDisambiguator = /\b(revenue|traffic|visitors|users|signups?|conversion|conversions|convert|converts|converting|registrations?|trials?|leads?|spend|roas|cpa|cpl|ctr|cpc|purchases?|sales)\b/i.test(message);
   return !hasMetricDisambiguator;
 }
 
@@ -554,9 +578,36 @@ function isDirectConversionBreakdownQuestion(message: string): boolean {
     || /\b(which|what)\b.*\b(source|channel|campaign)\b.*\b(converts?|converting)\b/i.test(message);
 }
 
+// The desktop host wraps the person's words: it prefixes a turn-time block and may append a reply style. Neither is
+// the question, and both carry words the advisor classifies on ("connected", "yesterday", "signup"), so a Codex
+// turn was read as a source-status or time-scoped question it never asked.
+const HOST_TURN_CONTEXT_HEADER = "[Host turn context:";
+const HOST_REPLY_STYLE_RE = /\n\nReply style for [^\n]*:\n[\s\S]*$/;
+
+/**
+ * Split the host-authored blocks off a turn's text: `before + question + after === message`. A message with no
+ * host block comes back whole as the question.
+ */
+export function splitHostTurnContext(message: string): { before: string; question: string; after: string } {
+  let before = "";
+  let rest = message;
+  if (rest.startsWith(HOST_TURN_CONTEXT_HEADER)) {
+    const end = rest.indexOf("\n\n");
+    if (end === -1) {
+      return { before: rest, question: "", after: "" };
+    }
+    before = rest.slice(0, end + 2);
+    rest = rest.slice(end + 2);
+  }
+  const style = HOST_REPLY_STYLE_RE.exec(rest);
+  const after = style ? rest.slice(style.index) : "";
+  return { before, question: style ? rest.slice(0, style.index) : rest, after };
+}
+
 export function buildQueryRefinementSections(
   message: string,
-  toolResults: QueryRefinementToolResult[]
+  toolResults: QueryRefinementToolResult[],
+  availableActionIds: readonly string[] = []
 ): string[] {
   const syncFreshnessFailure = xSyncFreshnessFailureSections(message, toolResults);
   const metricViewRecovery = xMetricViewRecoverySections(toolResults);
@@ -618,7 +669,7 @@ export function buildQueryRefinementSections(
     }
   }
   if (classifyQueryFamily(message) !== "best_post") {
-    const genericRefinement = genericOpenEndedRefinementSections(message, toolResults);
+    const genericRefinement = genericOpenEndedRefinementSections(message, toolResults, availableActionIds);
     if (genericRefinement.length > 0) {
       return genericRefinement;
     }
@@ -756,7 +807,8 @@ function latestFailedSyncSourceNow(
 
 function genericOpenEndedRefinementSections(
   message: string,
-  toolResults: QueryRefinementToolResult[]
+  toolResults: QueryRefinementToolResult[],
+  availableActionIds: readonly string[]
 ): string[] {
   if (isCapabilityExplorationPrompt(message)) {
     const hasMetrics = toolResults.some((result) => result.name === "list_metrics" && isRecord(result.result));
@@ -786,9 +838,13 @@ function genericOpenEndedRefinementSections(
   // for metric-shaped turns too — but ONLY when the turn so far has list_sources and has not yet run
   // (or even located) any metric. This is conservative: it cannot fire once a metric query/breakdown
   // result exists, and it never relaxes the result_type partition or any write confirmation.
+  const metaQuestion =
+    availableActionIds.some((id) => id === "get_meta_performance" || id.endsWith("__get_meta_performance")) &&
+    isMetricShapedQuestion(message) &&
+    isMetaMetricQuestion(message);
   if (
     !isOpenEndedAnalysisPrompt(message) &&
-    isTargetedMetricQuestion(message) &&
+    (metaQuestion || isTargetedMetricQuestion(message)) &&
     hasSources &&
     !hasMetrics &&
     !hasMetricDetail &&
@@ -796,6 +852,17 @@ function genericOpenEndedRefinementSections(
     !hasMetricResult &&
     !hasBreakdownResult
   ) {
+    // A turn with the app's stored Meta read refuses Meta metrics on run_metric_query/run_breakdown_query.
+    if (metaQuestion) {
+      return [
+        "Metric-question refinement guidance:",
+        "- The user asked for a Meta Ads number, but you only have a source list so far.",
+        "- Call get_meta_performance with a structured `period` (all available data when no period was named, stated as the assumed scope). run_metric_query and run_breakdown_query refuse Meta metrics.",
+        ...(META_CREDIT_OUTCOME_RE.test(message) ? [
+          "- Registrations, signups or trials from get_meta_performance are Meta's claim. Our own counts stay run_app_outcomes (registrations) and read_subscription_metrics (trial starts); never present one as the other, and when asked to compare, show both, labelled."
+        ] : [])
+      ];
+    }
     return [
       "Metric-question refinement guidance:",
       "- The user asked for a specific metric or number, but you only have a source list so far.",
@@ -885,11 +952,34 @@ function isOpenEndedAnalysisPrompt(message: string): boolean {
 // narrow: this only relaxes the "fetch a metric before answering" rescue, never any safety gate.
 const METRIC_TERM_RE =
   /\b(clicks?|impressions?|reach|ctr|cpc|cpm|cpl|cpa|roas|frequency|spend|cost per (?:lead|result|acquisition|conversion|click|mille|thousand)|conversions?|results?|leads?|purchases?|link clicks?|landing page views?|page ?views?|visitors?|users?|sessions?|signups?|orders?|revenue|sales|gmv|followers?|tweets?|posts?|comments?|replies|engagement|events?|conversion (?:rate|value)|engagement rate|session duration)\b/i;
-function isTargetedMetricQuestion(message: string): boolean {
-  const metricShaped =
-    /\b(how many|how much|what(?:['’]?s| is| are)? (?:my|our|the)|what was (?:my|our|the)|show me|give me)\b/i.test(message) ||
+function isMetricShapedQuestion(message: string): boolean {
+  return /\b(how many|how much|what(?:['’]?s| is| are)? (?:my|our|the)|what was (?:my|our|the)|show me|give me)\b/i.test(message) ||
     /\bcost per\b/i.test(message);
-  return metricShaped && METRIC_TERM_RE.test(message);
+}
+function isTargetedMetricQuestion(message: string): boolean {
+  return isMetricShapedQuestion(message) && METRIC_TERM_RE.test(message);
+}
+
+// Meta signals: the platform named, plain "ads", or its ad-account objects. Bare "instagram" is not one (organic
+// reach and posts are not Meta Ads); "instagram ads" is. "meta" is not one before titles/descriptions/tags/keywords/
+// data (SEO meta tags). A campaign is not one after a non-ad channel or another platform (email, newsletter, google, ...).
+const META_SIGNAL_RE = /\b(?:meta(?!\s+(?:titles?|descriptions?|tags?|keywords?|data)\b)|facebook|fb|instagram ads?|ads?|ad ?sets?)\b|(?<!\b(?:email|e-?mail|newsletter|drip|outreach|cold|sms|google|tiktok|x|linkedin|youtube|reddit)(?:\s+ads?)?\s+)\bcampaigns?\b/i;
+// Metric words only Meta Ads answers in this workspace.
+const META_ONLY_TERM_RE = /\b(cpl|cpa|roas|cost per (?:lead|result|acquisition|conversion|purchase))\b/i;
+// Another platform named: the question is not about Meta Ads even when it says "ads", "reach" or "impressions".
+const OTHER_PLATFORM_RE =
+  /\b(google (?:ads?|campaigns?)|adwords|bing|youtube|tiktok|twitter|tweets?|linkedin|reddit|pinterest|snapchat|organic instagram|x (?:posts?|ads?|impressions|followers|account))\b|\b(?:on|from|via) x\b/i;
+// Outcomes Meta also credits to its ads; ours stay run_app_outcomes / read_subscription_metrics unless Meta is named.
+const META_CREDIT_OUTCOME_RE = /\b(registrations?|sign[- ]?ups?|trials?)\b/i;
+
+// A Meta Ads number: never when another platform is named; otherwise a Meta-only metric word, or a metric (or a
+// registrations/signups/trials count Meta credits to its ads) asked with an explicit Meta signal.
+function isMetaMetricQuestion(message: string): boolean {
+  if (OTHER_PLATFORM_RE.test(message)) {
+    return false;
+  }
+  return META_ONLY_TERM_RE.test(message)
+    || (META_SIGNAL_RE.test(message) && (METRIC_TERM_RE.test(message) || META_CREDIT_OUTCOME_RE.test(message)));
 }
 
 function isCapabilityExplorationPrompt(message: string): boolean {
@@ -984,7 +1074,7 @@ export function buildQuerySynthesisSections(
     return [
       "Visitor-count final synthesis guidance:",
       "- Lead with the total visitor count in one sentence.",
-      "- Mention that GA4 is the first-phase traffic authority.",
+      "- Say this is GA4's visitor count: a floor (visitors who block GA4 are missing) that counts browsers, never people.",
       "- Keep the answer conversational."
     ];
   }
@@ -1002,6 +1092,7 @@ export function buildQuerySynthesisSections(
       "Signup-channel final synthesis guidance:",
       "- Lead with the strongest signup channel in one sentence.",
       "- Mention up to two runner-up channels when available.",
+      "- Say these are PostHog 'signup' events by channel, not registrations.",
       "- Add one short interpretation about what the top signup sources suggest.",
       "- Keep the answer conversational."
     ];
@@ -1019,7 +1110,7 @@ export function buildQuerySynthesisSections(
     return [
       "Signup-count final synthesis guidance:",
       "- Lead with the signup total in one sentence.",
-      "- Mention that PostHog signups are the first-phase signup authority.",
+      "- Say this counts PostHog events named 'signup', not accounts or registrations; 0 here does not mean nobody signed up.",
       "- Keep the answer conversational."
     ];
   }
@@ -1027,7 +1118,7 @@ export function buildQuerySynthesisSections(
     return [
       "Conversion-rate final synthesis guidance:",
       "- Lead with the conversion rate in one sentence.",
-      "- Mention that it uses first-phase GA4 visitors and PostHog signups.",
+      "- Say it is GA4 key events divided by GA4 visitors (same lane), not a signup or registration rate.",
       "- Keep the answer conversational."
     ];
   }
@@ -1037,6 +1128,14 @@ export function buildQuerySynthesisSections(
       "- Lead with the connection state in one sentence.",
       "- Mention the latest sync status when available.",
       "- Keep the answer conversational and concrete."
+    ];
+  }
+  if (/\btrial(?:s|ing)?\b/i.test(message) && hasMetricResult(toolResults, "stripe_trialing_subscribers")) {
+    return [
+      "Trialing-count final synthesis guidance:",
+      "- Lead with the count of customers trialing right now.",
+      "- Say it is a snapshot of who is trialing now, not trials started in any period.",
+      "- Keep the answer conversational."
     ];
   }
   if (kind === "other") {
