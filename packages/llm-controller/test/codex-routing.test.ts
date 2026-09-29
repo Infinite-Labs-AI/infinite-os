@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { FIRST_PHASE_METRIC_ALIASES, createInfiniteOsRegistry, type ActionDefinition } from "@infinite-os/runtime";
+import {
+  FIRST_PHASE_METRIC_ALIASES,
+  createDaemonActionRegistry,
+  createInfiniteOsRegistry,
+  type ActionDefinition
+} from "@infinite-os/runtime";
 
 import { assembleInfiniteOsPrompt, createLlmController, type ModelRequest } from "../src/index.js";
 import {
@@ -556,3 +561,134 @@ describe("union turn: native live Meta entity reads", () => {
   });
 });
 
+describe("union turn: engine analytics twins", () => {
+  // Engine reads the app carries as same-name twins that run the same engine handler on the cloud workspace.
+  const ANALYTICS_TWINS = ["list_metrics", "describe_metric", "list_queryable_views", "describe_queryable_view", "run_funnel_query"];
+  // The app's metric and breakdown twins refuse Meta metrics and views (get_meta_performance answers those).
+  const META_GATED_TWINS = ["run_metric_query", "run_breakdown_query"];
+  const app = (name: string) => `mcp__${APP_SERVER}__${name}`;
+  type Registry = ReturnType<typeof createInfiniteOsRegistry>;
+
+  async function firstRequest(
+    registry: Registry,
+    appTools?: string[],
+    options: { mode?: "union" | "exclusive"; call?: string } = {}
+  ) {
+    const requests: ModelRequest[] = [];
+    const appCalls: string[] = [];
+    const controller = createLlmController({
+      registry,
+      modelClient: {
+        complete: async (request) => {
+          requests.push(request);
+          if (options.call && request.toolResults.length === 0) {
+            return { toolCalls: [{ id: "call_bare", name: options.call, input: {} }] };
+          }
+          return { message: "done" };
+        }
+      }
+    });
+    const result = await controller.chat({
+      message: "what can I look at?",
+      sessionId: `s-twins-${options.mode ?? "union"}-${(appTools ?? ["none"]).join("-")}-${options.call ?? ""}`,
+      workspaceId: "ws_test",
+      actorId: "operator-1",
+      surface: "desktop",
+      ...(appTools ? {
+        scopedAppTools: {
+          serverName: APP_SERVER,
+          allowedTools: appTools.map(app),
+          mode: options.mode ?? "union",
+          tools: appTools.map((name) => ({ name, description: name, inputSchema: { type: "object" } })),
+          callTool: async (name: string) => {
+            appCalls.push(name);
+            return { ok: true };
+          }
+        }
+      } : {})
+    });
+    const first = requests[0] as { tools: Array<{ name: string }>; systemPrompt: string };
+    const lines = first.systemPrompt.split("\n");
+    const manifest = JSON.parse(lines[lines.indexOf("Typed Infinite OS action manifest:") + 1] ?? "[]") as Array<{
+      id: string;
+      recommendedNextActions: string[];
+    }>;
+    return {
+      tools: first.tools.map((tool) => tool.name),
+      manifest,
+      call: result.actionCalls.find((call) => call.id === "call_bare"),
+      appCalls
+    };
+  }
+
+  const nativeIds = (registry: Registry) => registry.list().map((action) => action.id as string);
+  const nextSteps = (registry: Registry) => registry.list().map((action) => ({ id: action.id as string, recommendedNextActions: action.recommendedNextActions }));
+
+  it("withholds each native analytics read when its same-name app twin is in the turn", async () => {
+    const registry = createInfiniteOsRegistry({});
+    for (const name of ANALYTICS_TWINS) {
+      const { tools } = await firstRequest(registry, [name]);
+      expect(tools, name).toEqual([...nativeIds(registry).filter((id) => id !== name), app(name)]);
+    }
+  });
+
+  it("refuses a bare call to a withheld native analytics read instead of running the local store", async () => {
+    const { call, appCalls } = await firstRequest(createInfiniteOsRegistry({}), ["run_funnel_query"], { call: "run_funnel_query" });
+    expect(call).toMatchObject({ status: "error", error: { code: "unknown_action" } });
+    expect(appCalls).toEqual([]);
+  });
+
+  it("withholds run_metric_query and run_breakdown_query only when the app's get_meta_performance is there too", async () => {
+    const registry = createInfiniteOsRegistry({});
+    for (const name of META_GATED_TWINS) {
+      const withMeta = await firstRequest(registry, [name, "get_meta_performance"]);
+      expect(withMeta.tools, name).toEqual([
+        ...nativeIds(registry).filter((id) => id !== name && id !== "run_meta_live_insights"),
+        app(name),
+        app("get_meta_performance")
+      ]);
+      // Without the app's Meta read the native copy stays: the twin refuses Meta metrics.
+      const withoutMeta = await firstRequest(registry, [name]);
+      expect(withoutMeta.tools, name).toEqual([...nativeIds(registry), app(name)]);
+    }
+  });
+
+  it("drops the withheld ids from the next-step hints of the natives it keeps", async () => {
+    const registry = createInfiniteOsRegistry({});
+    const withheld = [...ANALYTICS_TWINS, ...META_GATED_TWINS];
+    const { manifest } = await firstRequest(registry, [...withheld, "get_meta_performance"]);
+    for (const entry of manifest) {
+      for (const id of withheld) {
+        expect(entry.recommendedNextActions, entry.id).not.toContain(id);
+      }
+    }
+    expect(manifest.find((entry) => entry.id === "sync_source_now")?.recommendedNextActions).toEqual(["get_recent_sync_runs"]);
+  });
+
+  it("keeps the native tool list and next-step hints unchanged in a union turn without the twins", async () => {
+    const registry = createInfiniteOsRegistry({});
+    const { tools, manifest } = await firstRequest(registry, ["get_current_workspace"]);
+    expect(tools).toEqual([...nativeIds(registry), app("get_current_workspace")]);
+    expect(manifest.filter((entry) => !entry.id.startsWith("mcp__"))).toEqual(nextSteps(registry).map((entry) => expect.objectContaining(entry)));
+  });
+
+  it("leaves exclusive and unscoped turns unchanged", async () => {
+    const registry = createInfiniteOsRegistry({});
+    const twins = [...ANALYTICS_TWINS, ...META_GATED_TWINS, "get_meta_performance"];
+    const exclusive = await firstRequest(registry, twins, { mode: "exclusive" });
+    expect(exclusive.tools).toEqual(twins.map(app));
+    const unscoped = await firstRequest(registry);
+    expect(unscoped.tools).toEqual(nativeIds(registry));
+    expect(unscoped.manifest).toEqual(nextSteps(registry).map((entry) => expect.objectContaining(entry)));
+  });
+
+  it("changes nothing on the daemon registry, which already retires these reads", async () => {
+    const registry = createDaemonActionRegistry();
+    const daemon = nativeIds(registry);
+    for (const name of [...ANALYTICS_TWINS, ...META_GATED_TWINS]) {
+      expect(daemon).not.toContain(name);
+    }
+    const { tools } = await firstRequest(registry, [...ANALYTICS_TWINS, ...META_GATED_TWINS]);
+    expect(tools).toEqual([...daemon, ...[...ANALYTICS_TWINS, ...META_GATED_TWINS].map(app)]);
+  });
+});

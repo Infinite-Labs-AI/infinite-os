@@ -1077,13 +1077,29 @@ function unionActionSet(
 // pick the live read. get_meta_performance (stored history, settled account-zone days) replaces
 // run_meta_live_insights; list_meta_entities (stored entities and status history) replaces the native entity and
 // asset reads. A bare call to a withheld id resolves to the native name and is refused as an unknown action.
+// The analytics reads below leave only when the app sends a twin of the same name: the twin runs the same engine
+// handler on the cloud workspace. The daemon registry already retires them (EMBEDDED_ONLY_READ_ACTIONS), so there
+// this is a no-op; it keeps a host that builds the full registry from offering both copies.
 function withheldNativeActionIds(scoped: NormalizedScopedAppTools): Set<string> {
   const appNames = new Set(scoped.tools.map((tool) => tool.rawName));
   return new Set([
     ...(appNames.has("get_meta_performance") ? ["run_meta_live_insights"] : []),
-    ...(appNames.has("list_meta_entities") ? ["list_meta_entities", "get_meta_entity", "list_meta_assets"] : [])
+    ...(appNames.has("list_meta_entities") ? ["list_meta_entities", "get_meta_entity", "list_meta_assets"] : []),
+    ...SAME_NAME_ANALYTICS_TWINS.filter((name) => appNames.has(name)),
+    // The app's copies refuse Meta metrics and views and point at get_meta_performance, so they replace the
+    // natives only when that read is in the turn too.
+    ...(appNames.has("get_meta_performance") ? META_GATED_ANALYTICS_TWINS.filter((name) => appNames.has(name)) : [])
   ]);
 }
+
+const SAME_NAME_ANALYTICS_TWINS = [
+  "list_metrics",
+  "describe_metric",
+  "list_queryable_views",
+  "describe_queryable_view",
+  "run_funnel_query"
+] as const;
+const META_GATED_ANALYTICS_TWINS = ["run_metric_query", "run_breakdown_query"] as const;
 
 function normalizeScopedAppTools(scoped: ScopedAppTools | undefined): NormalizedScopedAppTools | undefined {
   if (!scoped) {
