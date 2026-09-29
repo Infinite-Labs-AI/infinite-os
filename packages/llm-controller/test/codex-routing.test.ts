@@ -9,6 +9,7 @@ import {
 
 import { assembleInfiniteOsPrompt, createLlmController, type ModelRequest } from "../src/index.js";
 import {
+  appListSourcesEnvelope,
   buildQueryRefinementSections,
   buildQuerySynthesisSections,
   createSourceAwareQueryAdvisor,
@@ -877,20 +878,28 @@ describe("union turn: the app's list_sources twin", () => {
     }
   });
 
-  it("sends the desktop Codex union 25 engine natives once every app twin is in the turn", async () => {
+  it("reads the native list_sources result as it is, never one level down", () => {
+    const nativeResult = { name: "list_sources", result: structuredClone(DESKTOP_SOURCES) };
+    expect(appListSourcesEnvelope(nativeResult.name, nativeResult.result)).toBeUndefined();
+    const overview = buildQuerySynthesisSections("give me a snapshot of the workspace", [nativeResult]).join("\n");
+    expect(overview).toContain("- Connected sources: 2.");
+    expect(buildQueryRefinementSections("how many signups did we get", [nativeResult]).join("\n")).toContain("you only have a source list so far");
+  });
+
+  it("sends the desktop Codex union every daemon native but the five its app twins replace", async () => {
     const registry = createDaemonActionRegistry();
     const twins = [
       "get_meta_performance", "list_meta_entities", "list_sources", "list_metrics", "describe_metric",
       "list_queryable_views", "describe_queryable_view", "run_metric_query", "run_breakdown_query", "run_funnel_query"
     ];
+    const withheld = ["run_meta_live_insights", "list_meta_entities", "get_meta_entity", "list_meta_assets", "list_sources"];
     const { tools } = await run(registry, twins);
     const natives = tools.filter((name) => !name.startsWith("mcp__"));
-    expect(registry.list()).toHaveLength(30);
-    expect(natives).toHaveLength(25);
-    expect(natives).not.toEqual(expect.arrayContaining(["list_sources"]));
-    for (const withheld of ["run_meta_live_insights", "list_meta_entities", "get_meta_entity", "list_meta_assets", "list_sources"]) {
-      expect(natives).not.toContain(withheld);
-    }
+    const daemon = registry.list().map((action) => action.id as string);
+    // Derived, not pinned: a new daemon action is a budget question for its own change, not a failure here.
+    expect(daemon).toEqual(expect.arrayContaining(withheld));
+    expect(natives).toEqual(daemon.filter((id) => !withheld.includes(id)));
+    expect(natives).toHaveLength(daemon.length - withheld.length);
   });
 
   it("labels the twin's progress like the native's", async () => {
