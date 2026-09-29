@@ -1069,9 +1069,9 @@ function isMetaMetricQuestion(message: string): boolean {
     || (META_SIGNAL_RE.test(message) && (METRIC_TERM_RE.test(message) || META_CREDIT_OUTCOME_RE.test(message)));
 }
 
-// The person asking about Meta ads themselves: the platform, plain "ads" or its ad sets. A campaign alone is not one
-// here: "leads from the spring campaign" are the workspace's Contacts, and Meta's leads are read only when the person
-// asks about Meta ads (the prompt's app routing).
+// The person asking about Meta ads themselves: the platform, plain "ads" or its ad sets; the Meta rescue alone answers
+// those. A campaign alone is not one here: "leads from the spring campaign" may be the workspace's Contacts or a Meta
+// campaign's, so the rescue names both reads, labelled "our records" and "Meta's claim" (appRescueReads).
 const META_ADS_ASK_RE = /\b(?:meta(?!\s+(?:titles?|descriptions?|tags?|keywords?|data)\b)|facebook|fb|instagram ads?|ads?|ad ?sets?)\b/i;
 // Lead words: the prompt's bullet without list_contacts sends only these ('leads', 'new leads') to list_audit_leads.
 const LEAD_WORD_RE = /\bleads?\b/i;
@@ -1100,6 +1100,12 @@ const FORM_SIGNUP_RE = new RegExp(String.raw`\b${FORM_TOPIC}[- ](?:sign[- ]?ups?
 const SITE_VISIT_ASK_RE = /\b(?:visits?|visitors?|traffic)\b/i;
 const NOT_SITE_METRICS_RE = /\b(?:ga ?4|google analytics|seo|search console|organic search|instagram|profile visits?|shopify|store visits?)\b/i;
 const META_LEADS_CLAIM = " Meta's 'leads' result is Meta's claim; read it with get_meta_performance only when the person asks about Meta ads.";
+// A campaign's number on a turn with get_meta_performance: the prompt sends a campaign's contacts to list_contacts (and,
+// without it, 'leads' to list_audit_leads), while its Meta bullet counts leads, results, registrations and trials as
+// Meta Ads numbers that "are Meta's claim, not our records", and its compare rule is "show both, labelled". A campaign
+// may be either, so the rescue names our read and Meta's, each labelled.
+const OUR_RECORDS_LABEL = "- Our records: ";
+const META_CAMPAIGN_CLAIM_LINE = "- Meta's claim: the campaign may be a Meta Ads campaign -> also call get_meta_performance with a structured `period`; its leads, results, registrations and trials are Meta's claim, not our records. Answer with both, labelled \"our records\" and \"Meta's claim\", never one presented as the other, and say so when Meta has no campaign by that name.";
 
 /** The message with every match of each pattern blanked, so a phrase one read owns is not read again as another's. */
 function without(message: string, ...patterns: RegExp[]): string {
@@ -1113,7 +1119,9 @@ function without(message: string, ...patterns: RegExp[]): string {
  * 'new leads') -> list_audit_leads; signups and registrations that are none of those -> run_app_outcomes; trials ->
  * read_subscription_metrics; site visitors -> run_site_metrics. None when the person asks about Meta ads
  * and the turn has get_meta_performance (the Meta rescue answers that), for a Meta-only metric such as cost per lead,
- * or when the turn has none of these reads: the rescue then stays as it was.
+ * or when the turn has none of these reads: the rescue then stays as it was. A campaign's number on a turn with
+ * get_meta_performance (a campaign that is not email, a newsletter or another platform's) names our reads labelled
+ * "our records" and get_meta_performance labelled "Meta's claim".
  */
 function appRescueReads(message: string, availableActionIds: readonly string[]): string[] {
   const availableLike = (name: string) => availableActionIds.some((id) => id === name || id.endsWith(`__${name}`));
@@ -1124,8 +1132,10 @@ function appRescueReads(message: string, availableActionIds: readonly string[]):
   if (meta && !OTHER_PLATFORM_RE.test(message) && (META_ONLY_TERM_RE.test(message) || META_ADS_ASK_RE.test(message))) {
     return [];
   }
+  // What is left of a Meta Ads number once the platform, "ads", ad sets and Meta-only metrics are out: a campaign's.
+  const campaign = meta && isMetaMetricQuestion(message);
   const lines: string[] = [];
-  const metaClaim = meta ? META_LEADS_CLAIM : "";
+  const metaClaim = meta && !campaign ? META_LEADS_CLAIM : "";
   const audit = AUDIT_ASK_RE.test(message) && availableLike("list_audit_leads");
   // What is left once the audit phrases are read as audit leads.
   const rest = audit ? without(message, AUDIT_ASK_RE) : message;
@@ -1155,6 +1165,10 @@ function appRescueReads(message: string, availableActionIds: readonly string[]):
     lines.push(availableLike("analysis_compare")
       ? "- Site visits, visitors or traffic totals -> call run_site_metrics (server Visits read high and are never people). By channel or source -> analysis_compare with segmentBy entry_channel. GA4 site_visitors or sessions only when the person asks for GA4."
       : "- Site visits, visitors or traffic totals -> call run_site_metrics (server Visits read high and are never people). GA4 site_visitors or sessions only when the person asks for GA4.");
+  }
+  // With none of our reads for it, the Meta rescue answers a campaign's number alone, as before.
+  if (campaign && lines.length > 0) {
+    return [...lines.map((line) => OUR_RECORDS_LABEL + line.slice(2)), META_CAMPAIGN_CLAIM_LINE];
   }
   return lines;
 }

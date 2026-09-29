@@ -1408,6 +1408,7 @@ describe("advisor rescue after a source list alone follows the app routing", () 
   const AUDIT_LINE = "- Audit leads and audit sign-ups (people who submitted Infinite's own growth-audit form) -> call list_audit_leads: an audit lead is its own step, never a signup or registration.";
   const LEADS_TO_AUDIT_LINE = "- Leads, new leads or audit leads -> call list_audit_leads: an audit lead is its own step, never a signup or registration.";
   const OUTCOMES_LINE = "- Signups, registrations or new accounts -> call run_app_outcomes with definition \"stages_v1\" (accountCreated = registrations), never a signup_count metric or breakdown.";
+  const META_CAMPAIGN_CLAIM_LINE = "- Meta's claim: the campaign may be a Meta Ads campaign -> also call get_meta_performance with a structured `period`; its leads, results, registrations and trials are Meta's claim, not our records. Answer with both, labelled \"our records\" and \"Meta's claim\", never one presented as the other, and say so when Meta has no campaign by that name.";
   const appRescue = (...lines: string[]) => [
     "Metric-question refinement guidance:",
     "- The user asked for a number the app's own reads answer, but you only have a source list so far.",
@@ -1418,8 +1419,9 @@ describe("advisor rescue after a source list alone follows the app routing", () 
   it.each([
     ["how many new leads this week?", appRescue(CONTACTS_LINE + META_LEADS_CLAIM)],
     ["how many leads did we get this week?", appRescue(CONTACTS_LINE + META_LEADS_CLAIM)],
-    ["show me leads from the spring campaign", appRescue(CONTACTS_LINE + META_LEADS_CLAIM)],
-    ["how many leads did the spring campaign get?", appRescue(CONTACTS_LINE + META_LEADS_CLAIM)],
+    // A campaign may be a Meta Ads campaign: our records and Meta's claim, labelled.
+    ["show me leads from the spring campaign", appRescue(`- Our records: ${CONTACTS_LINE.slice(2)}`, META_CAMPAIGN_CLAIM_LINE)],
+    ["how many leads did the spring campaign get?", appRescue(`- Our records: ${CONTACTS_LINE.slice(2)}`, META_CAMPAIGN_CLAIM_LINE)],
     ["how many people filled in the contact form this week?", appRescue(CONTACTS_LINE + META_LEADS_CLAIM)],
     ["how many audit leads this week?", appRescue(AUDIT_LINE)],
     ["how many signups did we get", appRescue(OUTCOMES_LINE)],
@@ -1545,7 +1547,8 @@ describe("advisor rescue after a source list alone follows the app routing", () 
     expect(signups).toContain(OUTCOMES_LINE);
     expect(signups).not.toContain("run run_metric_query or run_breakdown_query");
     const campaign = await run("show me leads from the spring campaign", app("list_sources"));
-    expect(campaign).toContain(CONTACTS_LINE);
+    expect(campaign).toContain(`- Our records: ${CONTACTS_LINE.slice(2)}`);
+    expect(campaign).toContain(META_CAMPAIGN_CLAIM_LINE);
     expect(campaign).not.toContain(META_RESCUE[1]);
     const refusedBare = await run("how many signups did we get", "list_sources");
     expect(refusedBare).not.toContain("only have a source list so far");
@@ -1755,6 +1758,95 @@ describe("advisor rescue: lead, audit, trial and form sign-up words go where the
     const trial = await laneTurn("how many people signed up for a trial this week?", MAIN_UNION, "union");
     expect(trial.second).toContain(TRIAL_LINE);
     expect(trial.second).not.toContain(OUTCOMES_LINE);
+  });
+
+  // A campaign's number on a turn with get_meta_performance. The prompt (prompt-assembler.ts appRoutingGuidance) sends
+  // "contacts from a campaign" to list_contacts, and without it 'leads' to list_audit_leads, while its Meta bullet
+  // lists leads, results, registrations and trials as Meta Ads numbers that "are Meta's claim, not our records", and
+  // its compare rule is "show both, labelled". The rescue names both reads, labelled; explicit Meta ads keep the Meta
+  // rescue alone.
+  const CONTACTS_LINE = "- Leads, new leads, form submissions or contacts -> call list_contacts: this workspace's Contacts and their form submissions, never a signup or registration.";
+  const ourRecords = (line: string) => `- Our records: ${line.slice(2)}`;
+  const META_CAMPAIGN_CLAIM_LINE = "- Meta's claim: the campaign may be a Meta Ads campaign -> also call get_meta_performance with a structured `period`; its leads, results, registrations and trials are Meta's claim, not our records. Answer with both, labelled \"our records\" and \"Meta's claim\", never one presented as the other, and say so when Meta has no campaign by that name.";
+  const META_RESCUE = [
+    "Metric-question refinement guidance:",
+    META_RESCUE_LINE,
+    "- Call get_meta_performance with a structured `period` (all available data when no period was named, stated as the assumed scope). run_metric_query and run_breakdown_query refuse Meta metrics."
+  ];
+  /** Every line of the rescue that names one of our lead reads. */
+  const ourLeadReadLines = (lines: string[]) => lines.filter((line) => /\b(?:list_contacts|list_audit_leads)\b/.test(line));
+
+  it.each([
+    ["how many leads did the spring campaign get?"],
+    ["show me leads from the spring campaign"],
+    ["how many leads did our spring campaign bring in this week?"]
+  ])("never sends %j to list_audit_leads alone on a turn without list_contacts: our records and Meta's claim, labelled", (message) => {
+    for (const [label, available] of NO_CONTACTS_SETS.filter(([, ids]) => ids.includes(app("get_meta_performance")))) {
+      const lines = rescue(message, available);
+      expect(lines, `${label}: ${message}`).toEqual(appRescue(ourRecords(LEADS_TO_AUDIT_LINE), META_CAMPAIGN_CLAIM_LINE));
+      expect(lines.join("\n"), label).not.toContain(LEADS_TO_AUDIT_LINE + META_LEADS_CLAIM);
+      expect(lines.join("\n"), label).not.toContain("only when the person asks about Meta ads");
+    }
+  });
+
+  it.each([
+    ["how many leads did the spring campaign get?"],
+    ["show me leads from the spring campaign"]
+  ])("never sends %j to list_contacts alone on a turn with it: our records and Meta's claim, labelled", (message) => {
+    const lines = rescue(message, desktopIds(...WITH_CONTACTS));
+    expect(lines).toEqual(appRescue(ourRecords(CONTACTS_LINE), META_CAMPAIGN_CLAIM_LINE));
+    expect(lines.join("\n")).not.toContain("only when the person asks about Meta ads");
+  });
+
+  it("labels a campaign's signups and trials as our records beside Meta's claim", () => {
+    expect(rescue("how many signups did the spring campaign bring?", desktopIds(...MAIN_UNION)))
+      .toEqual(appRescue(ourRecords(OUTCOMES_LINE), META_CAMPAIGN_CLAIM_LINE));
+    expect(rescue("how many trials did the spring campaign bring?", desktopIds(...MAIN_UNION)))
+      .toEqual(appRescue(ourRecords(TRIAL_LINE), META_CAMPAIGN_CLAIM_LINE));
+  });
+
+  it.each([
+    ["how many leads from facebook ads this week?"],
+    ["what's the cost per lead on the video ad?"],
+    ["cost per lead on the video ad"],
+    ["how many leads did the spring ad set get?"]
+  ])("keeps the Meta rescue alone for %j, with and without list_contacts", (message) => {
+    for (const available of [desktopIds(...MAIN_UNION), desktopIds(...WITH_CONTACTS), REMOTE_HUMAN.map(app), TRIGGERED.map(app)]) {
+      const lines = rescue(message, available);
+      expect(lines, message).toEqual(META_RESCUE);
+      expect(ourLeadReadLines(lines), message).toEqual([]);
+    }
+  });
+
+  it("names none of our lead reads for \"leads from facebook ads this week\", with and without list_contacts", () => {
+    // Not metric-shaped ("how many", "show me", "cost per"): no rescue fires, as before; the prompt's Meta bullet routes it.
+    for (const available of [desktopIds(...MAIN_UNION), desktopIds(...WITH_CONTACTS)]) {
+      expect(rescue("leads from facebook ads this week", available)).toEqual([]);
+    }
+  });
+
+  it("keeps plain lead questions on list_contacts or list_audit_leads, unlabelled, with Meta's leads only on a Meta ask", () => {
+    expect(rescue("how many new leads this week?", desktopIds(...WITH_CONTACTS))).toEqual(appRescue(CONTACTS_LINE + META_LEADS_CLAIM));
+    expect(rescue("how many new leads this week?", desktopIds(...MAIN_UNION))).toEqual(appRescue(LEADS_TO_AUDIT_LINE + META_LEADS_CLAIM));
+    for (const available of [desktopIds(...MAIN_UNION), desktopIds(...WITH_CONTACTS)]) {
+      expect(rescue("how many new audit leads this week?", available)).toEqual(appRescue(AUDIT_LINE));
+      // Not metric-shaped: no rescue, as before; the prompt's leads bullet routes it.
+      expect(rescue("any new audit leads?", available)).toEqual([]);
+    }
+    // A non-ad campaign is not Meta's: our records only.
+    expect(rescue("how many leads came from my email campaign?", desktopIds(...WITH_CONTACTS))).toEqual(appRescue(CONTACTS_LINE + META_LEADS_CLAIM));
+  });
+
+  it("leaves a campaign's leads as they were on a turn without get_meta_performance", () => {
+    expect(rescue("how many leads did the spring campaign get?", desktopIds("list_sources", "list_contacts"))).toEqual(appRescue(CONTACTS_LINE));
+    expect(rescue("how many leads did the spring campaign get?", desktopIds("list_sources", "list_audit_leads"))).toEqual(appRescue(LEADS_TO_AUDIT_LINE));
+  });
+
+  it("gives today's desktop union turn both reads, labelled, for a campaign's leads", async () => {
+    const { second } = await laneTurn("how many leads did the spring campaign get?", MAIN_UNION, "union");
+    expect(second).toContain(ourRecords(LEADS_TO_AUDIT_LINE));
+    expect(second).toContain(META_CAMPAIGN_CLAIM_LINE);
+    expect(second).not.toContain(LEADS_TO_AUDIT_LINE + META_LEADS_CLAIM);
   });
 });
 
