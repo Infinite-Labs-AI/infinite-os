@@ -881,7 +881,7 @@ function metadataFor(id: InfiniteOsActionId): {
     create_meta_ad_set: {
       title: "Create Meta Ads ad set",
       summary:
-        "Operator-only. Create a Meta Ads ad set under a campaign; ALWAYS lands PAUSED. OMIT sourceId — the engine uses your connected Meta account. Budgets accept the account currency's MAJOR unit via dailyBudgetMajor/lifetimeBudgetMajor (e.g. 50 = $50/day on a USD account; the engine converts to minor units), or integer cents via dailyBudget/lifetimeBudget. bidAmount stays integer cents.",
+        "Operator-only. Create a Meta Ads ad set under a campaign; ALWAYS lands PAUSED. OMIT sourceId — the engine uses your connected Meta account. Budgets accept the account currency's MAJOR unit via dailyBudgetMajor/lifetimeBudgetMajor (e.g. 50 = $50/day on a USD account; the engine converts to minor units), or integer cents via dailyBudget/lifetimeBudget. bidAmount stays integer cents. OFFSITE_CONVERSIONS/VALUE ad sets get Meta's default attribution (7-day click, 1-day view, 1-day engagement).",
       category: "operator",
       recommendedNextActions: ["create_meta_creative", "create_meta_ad"],
       recipeIds: []
