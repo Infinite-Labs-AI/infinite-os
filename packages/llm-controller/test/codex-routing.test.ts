@@ -262,6 +262,55 @@ describe("advisor refinement: Meta metric questions", () => {
     }
   });
 
+  it("sends a plain ads question to get_meta_performance", () => {
+    for (const question of [
+      "how much did I spend on ads last week?",
+      "what's my ad spend?",
+      "how many impressions did my ads get?"
+    ]) {
+      const text = buildQueryRefinementSections(question, sourcesOnly, [`mcp__${APP_SERVER}__get_meta_performance`]).join("\n");
+      expect(text, question).toContain("get_meta_performance with a structured `period`");
+    }
+  });
+
+  it("does not fire the Meta check on another platform's ads or campaigns", () => {
+    for (const question of [
+      "how much did I spend on reddit ads last week?",
+      "how many impressions did my pinterest ads get?",
+      "what's my snapchat ad spend?",
+      "how many clicks did my bing ads get?",
+      "how many clicks did my google campaign get?",
+      "how much did we spend on google campaigns this month?"
+    ]) {
+      const text = buildQueryRefinementSections(question, sourcesOnly, [`mcp__${APP_SERVER}__get_meta_performance`]).join("\n");
+      expect(text, question).not.toContain("get_meta_performance");
+    }
+  });
+
+  it("does not read a non-ad campaign or meta tags as Meta", () => {
+    for (const question of [
+      "how many signups came from my email campaign?",
+      "how many clicks did my newsletter campaign get?",
+      "what's the ctr on my meta descriptions?"
+    ]) {
+      const text = buildQueryRefinementSections(question, sourcesOnly, [`mcp__${APP_SERVER}__get_meta_performance`]).join("\n");
+      expect(text, question).not.toContain("get_meta_performance");
+    }
+  });
+
+  it("still reads a named ad campaign as Meta", () => {
+    const text = buildQueryRefinementSections("how many leads did the spring campaign get?", sourcesOnly, [`mcp__${APP_SERVER}__get_meta_performance`]).join("\n");
+    expect(text).toContain("get_meta_performance with a structured `period`");
+  });
+
+  it("labels Meta-credited signups as Meta's claim", () => {
+    for (const question of ["how many signups did facebook ads bring?", "how many sign-ups did meta get us?"]) {
+      const text = buildQueryRefinementSections(question, sourcesOnly, [`mcp__${APP_SERVER}__get_meta_performance`]).join("\n");
+      expect(text, question).toContain("get_meta_performance with a structured `period`");
+      expect(text, question).toContain("Meta's claim");
+    }
+  });
+
   it("keeps the metric-alias rescue on an open-core turn", () => {
     const text = buildQueryRefinementSections("what's my cpl", sourcesOnly).join("\n");
     expect(text).toContain("run run_metric_query or run_breakdown_query");
@@ -488,6 +537,14 @@ describe("union turn: native live Meta entity reads", () => {
       const refused = call?.status === "error" && (call.error as { code?: string } | undefined)?.code === "unknown_action";
       const routed = call?.actionId === `mcp__${APP_SERVER}__${bare}`;
       expect(refused || routed).toBe(true);
+    }
+  });
+
+  it("refuses an mcp_-prefixed call to a withheld native entity read when the twin is present", async () => {
+    for (const bare of LIVE_READS) {
+      const { call, appCalls } = await run(["list_meta_entities"], `mcp_${bare}`);
+      expect(call, bare).toMatchObject({ status: "error", error: { code: "unknown_action" } });
+      expect(appCalls, bare).toEqual([]);
     }
   });
 

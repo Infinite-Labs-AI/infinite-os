@@ -859,7 +859,7 @@ function genericOpenEndedRefinementSections(
         "- The user asked for a Meta Ads number, but you only have a source list so far.",
         "- Call get_meta_performance with a structured `period` (all available data when no period was named, stated as the assumed scope). run_metric_query and run_breakdown_query refuse Meta metrics.",
         ...(META_CREDIT_OUTCOME_RE.test(message) ? [
-          "- Registrations or trials from get_meta_performance are Meta's claim. Our own counts stay run_app_outcomes (registrations) and read_subscription_metrics (trial starts); never present one as the other, and when asked to compare, show both, labelled."
+          "- Registrations, signups or trials from get_meta_performance are Meta's claim. Our own counts stay run_app_outcomes (registrations) and read_subscription_metrics (trial starts); never present one as the other, and when asked to compare, show both, labelled."
         ] : [])
       ];
     }
@@ -960,19 +960,20 @@ function isTargetedMetricQuestion(message: string): boolean {
   return isMetricShapedQuestion(message) && METRIC_TERM_RE.test(message);
 }
 
-// Meta signals: the platform named, or its ad-account objects. Bare "instagram" is not one (organic reach and posts
-// are not Meta Ads); "instagram ads" is.
-const META_SIGNAL_RE = /\b(meta|facebook|fb|instagram ads?|ad ?sets?|campaigns?)\b/i;
+// Meta signals: the platform named, plain "ads", or its ad-account objects. Bare "instagram" is not one (organic
+// reach and posts are not Meta Ads); "instagram ads" is. "meta" is not one before titles/descriptions/tags/keywords/
+// data (SEO meta tags). A campaign is not one after a non-ad channel or another platform (email, newsletter, google, ...).
+const META_SIGNAL_RE = /\b(?:meta(?!\s+(?:titles?|descriptions?|tags?|keywords?|data)\b)|facebook|fb|instagram ads?|ads?|ad ?sets?)\b|(?<!\b(?:email|e-?mail|newsletter|drip|outreach|cold|sms|google|tiktok|x|linkedin|youtube|reddit)(?:\s+ads?)?\s+)\bcampaigns?\b/i;
 // Metric words only Meta Ads answers in this workspace.
 const META_ONLY_TERM_RE = /\b(cpl|cpa|roas|cost per (?:lead|result|acquisition|conversion|purchase))\b/i;
 // Another platform named: the question is not about Meta Ads even when it says "ads", "reach" or "impressions".
 const OTHER_PLATFORM_RE =
-  /\b(google ads?|adwords|youtube|tiktok|twitter|tweets?|linkedin|organic instagram|x (?:posts?|ads?|impressions|followers|account))\b|\b(?:on|from|via) x\b/i;
+  /\b(google (?:ads?|campaigns?)|adwords|bing|youtube|tiktok|twitter|tweets?|linkedin|reddit|pinterest|snapchat|organic instagram|x (?:posts?|ads?|impressions|followers|account))\b|\b(?:on|from|via) x\b/i;
 // Outcomes Meta also credits to its ads; ours stay run_app_outcomes / read_subscription_metrics unless Meta is named.
-const META_CREDIT_OUTCOME_RE = /\b(registrations?|trials?)\b/i;
+const META_CREDIT_OUTCOME_RE = /\b(registrations?|sign[- ]?ups?|trials?)\b/i;
 
 // A Meta Ads number: never when another platform is named; otherwise a Meta-only metric word, or a metric (or a
-// registrations/trials count Meta credits to its ads) asked with an explicit Meta signal.
+// registrations/signups/trials count Meta credits to its ads) asked with an explicit Meta signal.
 function isMetaMetricQuestion(message: string): boolean {
   if (OTHER_PLATFORM_RE.test(message)) {
     return false;
