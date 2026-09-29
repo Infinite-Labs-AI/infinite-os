@@ -559,6 +559,56 @@ interface StripeCredential {
   refreshWindowDays?: number;
 }
 
+/** Safe, customer-displayable Stripe catalog facts. Credentials and raw provider payloads never cross this shape. */
+export interface StripeCatalogPrice {
+  id: string;
+  active: boolean;
+  currency: string | null;
+  unitAmount: number | null;
+  unitAmountDecimal: string | null;
+  type: "one_time" | "recurring" | null;
+  recurring: {
+    interval: string | null;
+    intervalCount: number | null;
+    usageType: string | null;
+  } | null;
+  billingScheme: string | null;
+  customUnitAmount: boolean;
+  tiersMode: string | null;
+}
+
+export interface StripeCatalogProduct {
+  id: string;
+  active: boolean;
+  name: string;
+  description: string | null;
+  images: string[];
+  url: string | null;
+  defaultPrice: StripeCatalogPrice | null;
+}
+
+export interface StripeCatalogScope {
+  workspaceId: string;
+  sourceId?: string;
+  encryptionKey?: string;
+}
+
+export interface StripeCatalogPage {
+  sourceId: string;
+  products: StripeCatalogProduct[];
+  hasMore: boolean;
+  nextCursor: string | null;
+  /** Stripe Search is indexed asynchronously and unavailable to India-based merchants. */
+  searchEventuallyConsistent: boolean;
+}
+
+export interface StripeCatalogProductDetail {
+  sourceId: string;
+  product: StripeCatalogProduct;
+  prices: StripeCatalogPrice[];
+  pricesTruncated: boolean;
+}
+
 interface XCredential {
   [key: string]: unknown;
   mode?: "fixture" | "live";
@@ -6760,6 +6810,338 @@ async function stripeList<T>(
     }
     startingAfter = String((response.data[response.data.length - 1] as { id?: string }).id);
   }
+}
+
+const STRIPE_CATALOG_PAGE_MAX = 30;
+const STRIPE_CATALOG_PRICE_MAX = 100;
+const STRIPE_CATALOG_CACHE_TTL_MS = 60_000;
+const STRIPE_CATALOG_CACHE_MAX = 100;
+
+type StripeCatalogSource = {
+  source_id: string;
+  source_status: string;
+  credential_id: string | null;
+  credential_updated_at: string | Date | null;
+};
+
+type StripeCatalogProductApi = {
+  id?: unknown;
+  active?: unknown;
+  name?: unknown;
+  description?: unknown;
+  images?: unknown;
+  url?: unknown;
+  default_price?: unknown;
+};
+
+type StripeCatalogPriceApi = {
+  id?: unknown;
+  active?: unknown;
+  currency?: unknown;
+  unit_amount?: unknown;
+  unit_amount_decimal?: unknown;
+  type?: unknown;
+  recurring?: unknown;
+  billing_scheme?: unknown;
+  custom_unit_amount?: unknown;
+  tiers_mode?: unknown;
+};
+
+type StripeCatalogListApi<T> = {
+  data?: unknown;
+  has_more?: unknown;
+  next_page?: unknown;
+};
+
+const stripeCatalogCache = new Map<string, { expiresAt: number; value: Promise<unknown> }>();
+
+function catalogCacheGet<T>(key: string): Promise<T> | null {
+  const entry = stripeCatalogCache.get(key);
+  if (!entry) return null;
+  if (entry.expiresAt <= Date.now()) {
+    stripeCatalogCache.delete(key);
+    return null;
+  }
+  // Refresh insertion order without extending the TTL.
+  stripeCatalogCache.delete(key);
+  stripeCatalogCache.set(key, entry);
+  return entry.value as Promise<T>;
+}
+
+function catalogCacheSet<T>(key: string, load: () => Promise<T>): Promise<T> {
+  const existing = catalogCacheGet<T>(key);
+  if (existing) return existing;
+  const value = load();
+  stripeCatalogCache.set(key, { expiresAt: Date.now() + STRIPE_CATALOG_CACHE_TTL_MS, value });
+  while (stripeCatalogCache.size > STRIPE_CATALOG_CACHE_MAX) {
+    const oldest = stripeCatalogCache.keys().next().value as string | undefined;
+    if (!oldest) break;
+    stripeCatalogCache.delete(oldest);
+  }
+  value.catch(() => {
+    const current = stripeCatalogCache.get(key);
+    if (current?.value === value) stripeCatalogCache.delete(key);
+  });
+  return value;
+}
+
+function catalogCredentialVersion(source: StripeCatalogSource): string {
+  const updated = source.credential_updated_at instanceof Date
+    ? source.credential_updated_at.toISOString()
+    : String(source.credential_updated_at ?? "");
+  return `${source.source_id}:${source.credential_id ?? ""}:${updated}`;
+}
+
+async function resolveStripeCatalogSource(
+  db: InfiniteOsDb,
+  scope: StripeCatalogScope,
+): Promise<StripeCatalogSource> {
+  const rows = await db.query<StripeCatalogSource>(
+    `select s.id as source_id, s.status as source_status,
+            cc.id as credential_id, cc.updated_at as credential_updated_at
+       from sources s
+       left join lateral (
+         select id, updated_at
+           from connection_credentials
+          where workspace_id = s.workspace_id and source_id = s.id and revoked_at is null
+            and (expires_at is null or expires_at > now())
+          order by created_at desc
+          limit 1
+       ) cc on true
+      where s.workspace_id = $1 and s.provider = 'stripe'
+        and ($2::text is null or s.id = $2)
+      order by s.connected_at desc
+      limit 2`,
+    [scope.workspaceId, scope.sourceId ?? null],
+  );
+  if (rows.length === 0) {
+    if (scope.sourceId) {
+      throw new ConnectorError(
+        "stripe_source_unavailable",
+        "Selected Stripe source is unavailable or outside this workspace",
+        false,
+      );
+    }
+    throw new ConnectorError(
+      "stripe_not_connected",
+      "No Stripe source is connected to this workspace",
+      false,
+    );
+  }
+  const usable = rows.filter((row) =>
+    ["connected", "degraded"].includes(row.source_status) && Boolean(row.credential_id));
+  if (usable.length === 0) {
+    throw new ConnectorError(
+      "stripe_catalog_unavailable",
+      `Stripe source is ${rows[0].source_status || "unavailable"}; its live catalog cannot be read right now`,
+      true,
+    );
+  }
+  if (!scope.sourceId && usable.length > 1) {
+    throw new ConnectorError(
+      "stripe_source_ambiguous",
+      "Multiple Stripe sources are connected; choose one source before reading its catalog",
+      false,
+    );
+  }
+  return usable[0];
+}
+
+async function stripeCatalogCredential(
+  db: InfiniteOsDb,
+  scope: StripeCatalogScope,
+  source: StripeCatalogSource,
+): Promise<StripeCredential> {
+  const credential = await sourceCredential<StripeCredential>(db, {
+    workspaceId: scope.workspaceId,
+    sourceId: source.source_id,
+    provider: "stripe",
+    syncRunId: `catalog_${Date.now()}`,
+    ...(scope.encryptionKey ? { encryptionKey: scope.encryptionKey } : {}),
+  });
+  if (credential.kind === "fixture" || credential.payload.mode === "fixture") {
+    throw new ConnectorError(
+      "stripe_catalog_unavailable",
+      "Fixture Stripe credentials do not expose a live product catalog",
+      false,
+    );
+  }
+  return credential.payload;
+}
+
+function stripeCatalogPermissionError(error: unknown): never {
+  if (error instanceof ConnectorError && error.message.includes("more_permissions_required")) {
+    throw new ConnectorError(
+      "stripe_catalog_permissions_required",
+      "Stripe catalog access needs Products: Read and Prices: Read on the connected restricted key",
+      false,
+    );
+  }
+  throw error;
+}
+
+async function stripeCatalogGet<T>(
+  credential: StripeCredential,
+  secretKey: string,
+  path: string,
+  params: Record<string, string | string[]>,
+): Promise<T> {
+  try {
+    return await stripeGet<T>(credential, secretKey, path, params);
+  } catch (error) {
+    stripeCatalogPermissionError(error);
+  }
+}
+
+function catalogNullableString(value: unknown): string | null {
+  return typeof value === "string" && value !== "" ? value : null;
+}
+
+function catalogNullableNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function stripeCatalogPrice(value: unknown): StripeCatalogPrice | null {
+  if (!isRecord(value) || typeof value.id !== "string" || value.id === "") return null;
+  const raw = value as StripeCatalogPriceApi;
+  const recurring = isRecord(raw.recurring) ? raw.recurring : null;
+  const type = raw.type === "one_time" || raw.type === "recurring" ? raw.type : null;
+  return {
+    id: value.id,
+    active: raw.active === true,
+    currency: catalogNullableString(raw.currency)?.toLowerCase() ?? null,
+    unitAmount: catalogNullableNumber(raw.unit_amount),
+    unitAmountDecimal: catalogNullableString(raw.unit_amount_decimal),
+    type,
+    recurring: recurring ? {
+      interval: catalogNullableString(recurring.interval),
+      intervalCount: catalogNullableNumber(recurring.interval_count),
+      usageType: catalogNullableString(recurring.usage_type),
+    } : null,
+    billingScheme: catalogNullableString(raw.billing_scheme),
+    customUnitAmount: isRecord(raw.custom_unit_amount),
+    tiersMode: catalogNullableString(raw.tiers_mode),
+  };
+}
+
+function stripeCatalogProduct(value: unknown): StripeCatalogProduct {
+  if (!isRecord(value) || typeof value.id !== "string" || value.id === ""
+      || typeof value.name !== "string" || value.name === "") {
+    throw new ConnectorError(
+      "provider_api_error",
+      "Stripe returned a catalog product without an id or display name",
+      true,
+    );
+  }
+  const raw = value as StripeCatalogProductApi;
+  return {
+    id: value.id,
+    active: raw.active === true,
+    name: value.name,
+    description: catalogNullableString(raw.description),
+    images: Array.isArray(raw.images)
+      ? raw.images.filter((image): image is string => typeof image === "string" && image !== "")
+      : [],
+    url: catalogNullableString(raw.url),
+    defaultPrice: stripeCatalogPrice(raw.default_price),
+  };
+}
+
+function stripeSearchValue(value: string): string {
+  return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
+/** One live, bounded product page from the customer-owned Stripe connection. */
+export async function listStripeCatalogProducts(
+  db: InfiniteOsDb,
+  input: StripeCatalogScope & { query?: string; cursor?: string; limit?: number },
+): Promise<StripeCatalogPage> {
+  const source = await resolveStripeCatalogSource(db, input);
+  const query = input.query?.trim() || "";
+  const limit = Number.isInteger(input.limit)
+    ? Math.max(1, Math.min(STRIPE_CATALOG_PAGE_MAX, input.limit!))
+    : STRIPE_CATALOG_PAGE_MAX;
+  const cacheKey = JSON.stringify([
+    "stripe-products", input.workspaceId, catalogCredentialVersion(source), query, input.cursor ?? "", limit,
+  ]);
+  return catalogCacheSet(cacheKey, async () => {
+    const credential = await stripeCatalogCredential(db, input, source);
+    const secretKey = requireCredential(credential, "secretKey");
+    const search = query !== "";
+    const response = await stripeCatalogGet<StripeCatalogListApi<StripeCatalogProductApi>>(
+      credential,
+      secretKey,
+      search ? "/v1/products/search" : "/v1/products",
+      search ? {
+        query: `active:\"true\" AND ${query.length >= 3 ? "name~" : "name:"}\"${stripeSearchValue(query)}\"`,
+        limit: String(limit),
+        "expand[]": ["data.default_price"],
+        ...(input.cursor ? { page: input.cursor } : {}),
+      } : {
+        active: "true",
+        limit: String(limit),
+        "expand[]": ["data.default_price"],
+        ...(input.cursor ? { starting_after: input.cursor } : {}),
+      },
+    );
+    const rawProducts = Array.isArray(response.data) ? response.data : [];
+    const products = rawProducts.map(stripeCatalogProduct).filter((product) => product.active);
+    const hasMore = response.has_more === true;
+    const nextCursor = search
+      ? catalogNullableString(response.next_page)
+      : hasMore && rawProducts.length > 0 && isRecord(rawProducts.at(-1))
+        ? catalogNullableString(rawProducts.at(-1)?.id)
+        : null;
+    return {
+      sourceId: source.source_id,
+      products,
+      hasMore,
+      nextCursor,
+      searchEventuallyConsistent: search,
+    };
+  });
+}
+
+/** Exact product facts plus at most the first 100 active prices. Never auto-paginates. */
+export async function getStripeCatalogProduct(
+  db: InfiniteOsDb,
+  input: StripeCatalogScope & { productId: string },
+): Promise<StripeCatalogProductDetail> {
+  if (!/^prod_[A-Za-z0-9]+$/.test(input.productId)) {
+    throw new ConnectorError("invalid_stripe_product_id", "A valid Stripe product id is required", false);
+  }
+  const source = await resolveStripeCatalogSource(db, input);
+  const cacheKey = JSON.stringify([
+    "stripe-product", input.workspaceId, catalogCredentialVersion(source), input.productId,
+  ]);
+  return catalogCacheSet(cacheKey, async () => {
+    const credential = await stripeCatalogCredential(db, input, source);
+    const secretKey = requireCredential(credential, "secretKey");
+    const [rawProduct, rawPrices] = await Promise.all([
+      stripeCatalogGet<StripeCatalogProductApi>(
+        credential,
+        secretKey,
+        `/v1/products/${encodeURIComponent(input.productId)}`,
+        { "expand[]": ["default_price"] },
+      ),
+      stripeCatalogGet<StripeCatalogListApi<StripeCatalogPriceApi>>(
+        credential,
+        secretKey,
+        "/v1/prices",
+        { product: input.productId, active: "true", limit: String(STRIPE_CATALOG_PRICE_MAX) },
+      ),
+    ]);
+    const rawPriceRows = Array.isArray(rawPrices.data) ? rawPrices.data : [];
+    const prices = rawPriceRows
+      .map(stripeCatalogPrice)
+      .filter((price): price is StripeCatalogPrice => price !== null && price.active);
+    return {
+      sourceId: source.source_id,
+      product: stripeCatalogProduct(rawProduct),
+      prices,
+      pricesTruncated: rawPrices.has_more === true,
+    };
+  });
 }
 
 const STRIPE_RECONCILIATION_MAX_PAGES = 5;
