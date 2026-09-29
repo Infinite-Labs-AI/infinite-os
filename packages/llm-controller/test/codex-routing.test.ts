@@ -1403,7 +1403,7 @@ describe("advisor rescue after a source list alone follows the app routing", () 
   ];
   const CONTACTS_LINE = "- Leads, new leads, form submissions or contacts -> call list_contacts: this workspace's Contacts and their form submissions, never a signup or registration.";
   const META_LEADS_CLAIM = " Meta's 'leads' result is Meta's claim; read it with get_meta_performance only when the person asks about Meta ads.";
-  const AUDIT_LINE = "- Audit leads (people who submitted Infinite's own growth-audit form) -> call list_audit_leads: an audit lead is its own step, never a signup or registration.";
+  const AUDIT_LINE = "- Audit leads and audit sign-ups (people who submitted Infinite's own growth-audit form) -> call list_audit_leads: an audit lead is its own step, never a signup or registration.";
   const LEADS_TO_AUDIT_LINE = "- Leads, new leads or audit leads -> call list_audit_leads: an audit lead is its own step, never a signup or registration.";
   const OUTCOMES_LINE = "- Signups, registrations or new accounts -> call run_app_outcomes with definition \"stages_v1\" (accountCreated = registrations), never a signup_count metric or breakdown.";
   const appRescue = (...lines: string[]) => [
@@ -1471,7 +1471,7 @@ describe("advisor rescue after a source list alone follows the app routing", () 
       ]) {
         expect(buildQueryRefinementSections(message, sourcesOnly, available), message).toEqual(METRIC_RESCUE);
       }
-      // Not metric-shaped then, not now.
+      // Metric-shaped ("how many"), but no metric term names registrations or a form fill: no rescue then, none now.
       expect(buildQueryRefinementSections("how many registrations last week?", sourcesOnly, available)).toEqual([]);
       expect(buildQueryRefinementSections("how many people filled in the contact form this week?", sourcesOnly, available)).toEqual([]);
     }
@@ -1547,5 +1547,211 @@ describe("advisor rescue after a source list alone follows the app routing", () 
     expect(campaign).not.toContain(META_RESCUE[1]);
     const refusedBare = await run("how many signups did we get", "list_sources");
     expect(refusedBare).not.toContain("only have a source list so far");
+  });
+});
+
+describe("advisor rescue: lead, audit, trial and form sign-up words go where the prompt sends them", () => {
+  const app = (name: string) => `mcp__${APP_SERVER}__${name}`;
+  const desktopIds = (...names: string[]) => [...createDaemonActionRegistry().list().map((action) => action.id as string), ...names.map(app)];
+  const sourcesOnly = [{ name: "list_sources", result: { data: { sources: [] } } }];
+  const rescue = (message: string, available: readonly string[]) => buildQueryRefinementSections(message, sourcesOnly, available);
+  // 1bu-1 origin/main (ab1d9b28) apps/desktop/src/main/brain/tools/catalog.ts:537-623: the iMessage remote-human lane's
+  // app tools (main.ts:5495 sends them exclusive). The scheduled lane drops the alert and reminder CRUD and
+  // list_needs_you (:625-646); the triggered lane also drops the live reads (:672-679) and list_my_workspaces (:710).
+  // No lane carries list_contacts: only the unmerged feat/2026-09-29-cmdl-contacts-forms adds it.
+  const REMOTE_HUMAN = [
+    "list_alert_sources", "create_alert", "list_alerts", "update_alert", "cancel_alert", "create_imessage_reminder",
+    "list_imessage_reminders", "update_imessage_reminder", "cancel_imessage_reminder", "get_current_workspace",
+    "list_my_workspaces", "list_sources", "get_current_research_state", "run_metric_query", "run_breakdown_query",
+    "run_funnel_query", "run_site_metrics", "run_app_outcomes", "list_signup_people", "list_account_people",
+    "list_app_signup_people", "list_signup_attempts", "list_website_contacts", "list_audit_leads",
+    "read_subscription_metrics", "read_funnel_counts", "run_posthog_live_query", "list_metrics", "describe_metric",
+    "list_queryable_views", "describe_queryable_view", "list_reddit_leads", "list_needs_you", "search_x_accounts",
+    "list_x_drafts", "get_x_inspiration_playbook", "seo_recommendations", "seo_traffic", "seo_traffic_by_page",
+    "seo_competitor_intel", "seo_list_content", "seo_post_detail", "get_seo_job_status", "suggest_next_seo_move",
+    "get_lifecycle_overview", "get_email_campaign_outcomes", "count_audience", "preview_email_audience", "list_replies",
+    "read_email_draft", "list_tracked_links", "get_tracked_link_clicks", "preview_tracked_link", "get_links_playbook",
+    "organic_content_overview", "organic_post_deep_dive", "organic_daily_analysis_history", "get_organic_playbook",
+    "list_youtube_experiments", "get_youtube_experiment_reading", "get_youtube_experiment_strategy",
+    "get_meta_performance", "list_meta_entities", "analysis_discover", "analysis_compare", "analysis_decompose",
+    "analysis_trace", "analysis_reconcile", "analysis_catalog"
+  ];
+  const TRIGGERED_DROPPED = new Set([
+    "list_alert_sources", "create_alert", "list_alerts", "update_alert", "cancel_alert", "create_imessage_reminder",
+    "list_imessage_reminders", "update_imessage_reminder", "cancel_imessage_reminder", "list_needs_you",
+    "run_posthog_live_query", "seo_competitor_intel", "search_x_accounts", "list_youtube_experiments",
+    "get_youtube_experiment_reading", "get_lifecycle_overview", "list_my_workspaces"
+  ]);
+  const TRIGGERED = REMOTE_HUMAN.filter((name) => !TRIGGERED_DROPPED.has(name));
+  // The Cmd+L union's lead, outcome, trial and traffic reads on origin/main (no list_contacts yet).
+  const MAIN_UNION = [
+    "list_sources", "get_meta_performance", "list_meta_entities", "list_audit_leads", "run_app_outcomes",
+    "list_signup_people", "read_subscription_metrics", "run_site_metrics", "analysis_compare", "run_metric_query",
+    "run_breakdown_query"
+  ];
+  const WITH_CONTACTS = [...MAIN_UNION, "list_contacts"];
+  /** The tool sets a turn without list_contacts carries: each exclusive lane offers only its app tools. */
+  const NO_CONTACTS_SETS: Array<[string, string[]]> = [
+    ["audit leads only", desktopIds("list_sources", "list_audit_leads")],
+    ["audit leads and Meta", desktopIds("list_sources", "list_audit_leads", "get_meta_performance")],
+    ["the Cmd+L union", desktopIds(...MAIN_UNION)],
+    ["the remote-human lane", REMOTE_HUMAN.map(app)],
+    ["the triggered lane", TRIGGERED.map(app)]
+  ];
+
+  const METRIC_RESCUE = [
+    "Metric-question refinement guidance:",
+    "- The user asked for a specific metric or number, but you only have a source list so far.",
+    "- Do not stop to ask for a time range. Identify the metric (use the metric-aliases hint, or list_metrics/describe_metric if unsure) and run run_metric_query or run_breakdown_query over all available data, then state the assumed scope as a caveat and offer to narrow.",
+    "- Only report a metric as unavailable after confirming it is not reachable under any alias."
+  ];
+  const META_RESCUE_LINE = "- The user asked for a Meta Ads number, but you only have a source list so far.";
+  const META_LEADS_CLAIM = " Meta's 'leads' result is Meta's claim; read it with get_meta_performance only when the person asks about Meta ads.";
+  const AUDIT_LINE = "- Audit leads and audit sign-ups (people who submitted Infinite's own growth-audit form) -> call list_audit_leads: an audit lead is its own step, never a signup or registration.";
+  const LEADS_TO_AUDIT_LINE = "- Leads, new leads or audit leads -> call list_audit_leads: an audit lead is its own step, never a signup or registration.";
+  const OUTCOMES_LINE = "- Signups, registrations or new accounts -> call run_app_outcomes with definition \"stages_v1\" (accountCreated = registrations), never a signup_count metric or breakdown.";
+  const TRIAL_LINE = "- Trials started or trial sign-ups -> call read_subscription_metrics (Stripe trial starts): a trial is never a registration, and stripe_trialing_subscribers counts customers trialing now, never trials started.";
+  const FORM_SIGNUP_LINE = "- A newsletter, webinar, waitlist, demo or event sign-up is a form submission -> call list_contacts: this workspace's Contacts and their form submissions, never an account registration.";
+  const SITE_LINE = "- Site visits, visitors or traffic totals -> call run_site_metrics (server Visits read high and are never people). GA4 site_visitors or sessions only when the person asks for GA4.";
+  const SITE_COMPARE_LINE = "- Site visits, visitors or traffic totals -> call run_site_metrics (server Visits read high and are never people). By channel or source -> analysis_compare with segmentBy entry_channel. GA4 site_visitors or sessions only when the person asks for GA4.";
+  const appRescue = (...lines: string[]) => [
+    "Metric-question refinement guidance:",
+    "- The user asked for a number the app's own reads answer, but you only have a source list so far.",
+    ...lines,
+    "- Do not stop to ask for a time range: read over the period the person named, or over all available data stated as the assumed scope."
+  ];
+
+  const CONTACT_AND_FORM_QUESTIONS = [
+    "how many contacts do we have?",
+    "how many form submissions this week?",
+    "how many people filled out the contact form this week?",
+    "show me contacts from the spring campaign",
+    "how many form fills did we get this month?",
+    "how many people registered for the webinar?",
+    "how many people signed up for the newsletter this week?"
+  ];
+
+  it.each(NO_CONTACTS_SETS)("never sends contacts or form submissions to list_audit_leads on %s, and adds no rescue, as at 58888d9", (_label, available) => {
+    for (const message of CONTACT_AND_FORM_QUESTIONS) {
+      expect(rescue(message, available), message).toEqual([]);
+    }
+    // Lead words still go where the prompt's no-list_contacts bullet sends them.
+    const leads = rescue("how many new leads this week?", available).join("\n");
+    expect(leads).toContain(LEADS_TO_AUDIT_LINE);
+  });
+
+  it.each([
+    ["how many people signed up for an audit this week?", [AUDIT_LINE]],
+    ["who signed up for an audit this week? show me", [AUDIT_LINE]],
+    ["how many audit sign-ups did we get this month?", [AUDIT_LINE]],
+    ["how many people registered for a free growth audit?", [AUDIT_LINE]],
+    ["how many people requested an audit this week?", [AUDIT_LINE]],
+    ["how many people filled out the audit form this week?", [AUDIT_LINE]],
+    ["how many signups and audit sign-ups this week?", [AUDIT_LINE, OUTCOMES_LINE]]
+  ])("sends %j to list_audit_leads, never to run_app_outcomes, as an audit sign-up", (message, lines) => {
+    for (const available of [desktopIds(...MAIN_UNION), desktopIds(...WITH_CONTACTS), REMOTE_HUMAN.map(app), TRIGGERED.map(app)]) {
+      expect(rescue(message, available), message).toEqual(appRescue(...lines));
+    }
+  });
+
+  it.each([
+    ["how many trial signups this week?", [TRIAL_LINE]],
+    ["how many people signed up for a trial this week?", [TRIAL_LINE]],
+    ["how many free trial sign-ups did we get this month?", [TRIAL_LINE]],
+    ["how many new trials this week?", [TRIAL_LINE]],
+    ["how many people started a trial and signed up?", [OUTCOMES_LINE, TRIAL_LINE]],
+    ["how many signups and trials this week?", [OUTCOMES_LINE, TRIAL_LINE]]
+  ])("sends the trials in %j to read_subscription_metrics, never to run_app_outcomes", (message, lines) => {
+    for (const available of [desktopIds(...MAIN_UNION), REMOTE_HUMAN.map(app), TRIGGERED.map(app)]) {
+      expect(rescue(message, available), message).toEqual(appRescue(...lines));
+    }
+  });
+
+  it("never names run_app_outcomes for a trial sign-up on a turn without read_subscription_metrics", () => {
+    for (const message of ["how many trial signups this week?", "how many people signed up for a trial this week?", "how many free trial sign-ups did we get this month?"]) {
+      expect(rescue(message, desktopIds("list_sources", "run_app_outcomes")).join("\n"), message).not.toContain("run_app_outcomes");
+    }
+  });
+
+  it.each([
+    ["how many people registered for the webinar?", [FORM_SIGNUP_LINE]],
+    ["how many people signed up for the newsletter this week?", [FORM_SIGNUP_LINE]],
+    ["how many waitlist sign-ups this week?", [FORM_SIGNUP_LINE]],
+    ["how many people signed up for the newsletter and how many signed up for the app?", [FORM_SIGNUP_LINE, OUTCOMES_LINE]]
+  ])("sends the form sign-up in %j to list_contacts, never to run_app_outcomes", (message, lines) => {
+    expect(rescue(message, desktopIds(...WITH_CONTACTS))).toEqual(appRescue(...lines));
+  });
+
+  it("sends site visitors to run_site_metrics, as the prompt does, in place of the metric rescue's run_metric_query", () => {
+    for (const message of ["how many visitors this week?", "how many site visitors did we get last month?"]) {
+      expect(rescue(message, desktopIds(...MAIN_UNION)), message).toEqual(appRescue(SITE_COMPARE_LINE));
+      expect(rescue(message, desktopIds("list_sources", "run_site_metrics")), message).toEqual(appRescue(SITE_LINE));
+    }
+    // It adds no rescue where none fired: traffic and page visits name no metric term.
+    for (const message of ["how much traffic did the site get last month?", "how many visits did the pricing page get?"]) {
+      expect(rescue(message, desktopIds(...MAIN_UNION)), message).toEqual([]);
+    }
+    // GA4 by name keeps the metric rescue; SEO traffic is not a site-visits total; Meta's visitors stay Meta's.
+    expect(rescue("how many visitors did GA4 record this week?", desktopIds(...MAIN_UNION))).toEqual(METRIC_RESCUE);
+    expect(rescue("how much SEO traffic did we get this month?", desktopIds(...MAIN_UNION)).join("\n")).not.toContain("run_site_metrics");
+    expect(rescue("how many visitors did our facebook ads send?", desktopIds(...MAIN_UNION)).join("\n")).toContain(META_RESCUE_LINE);
+    // An open-core turn keeps the metric rescue.
+    expect(rescue("how many visitors this week?", [])).toEqual(METRIC_RESCUE);
+  });
+
+  /** A real controller turn: the model reads the app's list_sources, then answers; returns the second prompt. */
+  async function laneTurn(message: string, appTools: string[], mode: "union" | "exclusive") {
+    const requests: ModelRequest[] = [];
+    const controller = createLlmController({
+      registry: createDaemonActionRegistry(),
+      modelClient: {
+        complete: async (request) => {
+          requests.push(request);
+          return requests.length === 1
+            ? { toolCalls: [{ id: "call_1", name: app("list_sources"), input: {} }] }
+            : { message: "done" };
+        }
+      }
+    });
+    await controller.chat({
+      message,
+      sessionId: `s-lane-${mode}-${appTools.length}-${message}`,
+      workspaceId: "ws_test",
+      actorId: "operator-1",
+      surface: "desktop",
+      scopedAppTools: {
+        serverName: APP_SERVER,
+        allowedTools: appTools.map(app),
+        mode,
+        tools: appTools.map((name) => ({ name, description: name, inputSchema: { type: "object" } })),
+        callTool: async (name: string) => name === "list_sources"
+          ? { ok: true, actionId: "list_sources", authority: "tool_agent", status: "ok", data: { sources: [{ id: "src_ga4", provider: "ga4", status: "connected" }] }, provenance: [], caveats: [], truncated: false, nextActions: [] }
+          : { ok: true }
+      }
+    });
+    expect(requests).toHaveLength(2);
+    return { first: requests[0]!, second: requests[1]?.systemPrompt ?? "" };
+  }
+
+  it("gives the remote-human and triggered lanes no audit-leads rescue for contacts or form questions", async () => {
+    for (const lane of [REMOTE_HUMAN, TRIGGERED]) {
+      for (const message of ["how many contacts do we have?", "how many form submissions this week?", "how many people filled out the contact form this week?"]) {
+        const { second } = await laneTurn(message, lane, "exclusive");
+        expect(second, message).not.toContain(LEADS_TO_AUDIT_LINE);
+        expect(second, message).not.toContain("only have a source list so far");
+      }
+      const { second } = await laneTurn("how many new leads this week?", lane, "exclusive");
+      expect(second).toContain(LEADS_TO_AUDIT_LINE + META_LEADS_CLAIM);
+    }
+  });
+
+  it("gives a desktop union turn the audit and trial reads, never run_app_outcomes, for audit and trial sign-ups", async () => {
+    const audit = await laneTurn("how many people signed up for an audit this week?", MAIN_UNION, "union");
+    expect(audit.first.tools.filter((tool) => !tool.name.startsWith("mcp__"))).toEqual([]);
+    expect(audit.second).toContain(AUDIT_LINE);
+    expect(audit.second).not.toContain(OUTCOMES_LINE);
+    const trial = await laneTurn("how many people signed up for a trial this week?", MAIN_UNION, "union");
+    expect(trial.second).toContain(TRIAL_LINE);
+    expect(trial.second).not.toContain(OUTCOMES_LINE);
   });
 });

@@ -1072,18 +1072,47 @@ function isMetaMetricQuestion(message: string): boolean {
 // here: "leads from the spring campaign" are the workspace's Contacts, and Meta's leads are read only when the person
 // asks about Meta ads (the prompt's app routing).
 const META_ADS_ASK_RE = /\b(?:meta(?!\s+(?:titles?|descriptions?|tags?|keywords?|data)\b)|facebook|fb|instagram ads?|ads?|ad ?sets?)\b/i;
-// Leads, form submissions and contacts; "audit leads" are Infinite's own growth-audit form.
-const LEAD_ASK_RE = /\b(?:leads?|contacts?|form (?:fills?|submissions?|entries|responses))\b|\bfill(?:ed)? (?:in|out)\b[^.?!]*\bforms?\b/i;
-const AUDIT_LEAD_ASK_RE = /\baudit leads?\b/i;
+// Lead words: the prompt's bullet without list_contacts sends only these ('leads', 'new leads') to list_audit_leads.
+const LEAD_WORD_RE = /\bleads?\b/i;
+// Contacts and form fills: this workspace's Contacts (list_contacts), never Infinite's own audit form.
+const CONTACT_ASK_RE = /\b(?:contacts?|form (?:fills?|submissions?|entries|responses))\b|\bfill(?:ed)? (?:in|out)\b[^.?!]*\bforms?\b/i;
 const SIGNUP_ASK_RE = /\b(?:sign[- ]?ups?|signed up|registrations?|registered|new accounts?)\b/i;
+const TRIAL_ASK_RE = /\btrials?\b/i;
+// "sign up", "signed up", "signs up", "signing up", "sign-ups", "registered", "registrations" ...
+const SIGNUP_VERB = String.raw`(?:sign(?:ed|s|ing)?[- ]?ups?|register(?:ed|s|ing)?|registrations?)`;
+// The words between "signed up for" and what was signed up for: articles and a few modifiers, then at most one more
+// word ("our free SEO audit", "the 14-day pro trial", "the Q3 webinar").
+const ARTICLES = String.raw`(?:(?:an?|the|our|my|your|this|that|next|last|free|live|growth|website|site|marketing|\d+[- ]day)\s+)*(?:[\w'-]+\s+)?`;
+// Audit leads and audit sign-ups: Infinite's own growth-audit form, never a signup or registration.
+const AUDIT_ASK_RE = new RegExp(String.raw`\baudit[- ](?:leads?|forms?|sign[- ]?ups?|registrations?|requests?|submissions?)\b` +
+  String.raw`|\b${SIGNUP_VERB}\s+(?:for|to)\s+${ARTICLES}audits?\b` +
+  String.raw`|\b(?:requested|request(?:s|ing)?|booked|book(?:s|ing)?|applied for|asked for)\s+${ARTICLES}audits?\b`, "i");
+// A trial sign-up is a trial start (read_subscription_metrics), never a registration.
+const TRIAL_SIGNUP_RE = new RegExp(String.raw`\btrials?[- ](?:sign[- ]?ups?|registrations?)\b` +
+  String.raw`|\b${SIGNUP_VERB}\s+(?:for|to)\s+${ARTICLES}trials?\b`, "i");
+// A newsletter, webinar, waitlist, demo or event sign-up is a form fill (list_contacts), never an account registration.
+const FORM_TOPIC = String.raw`(?:newsletters?|webinars?|wait ?lists?|mailing lists?|email lists?|demos?|events?|workshops?|masterclass(?:es)?|courses?)`;
+const FORM_SIGNUP_RE = new RegExp(String.raw`\b${FORM_TOPIC}[- ](?:sign[- ]?ups?|registrations?|registrants?)\b` +
+  String.raw`|\b${SIGNUP_VERB}\s+(?:for|to)\s+${ARTICLES}${FORM_TOPIC}\b`, "i");
+// Site visits, visitors or traffic (run_site_metrics), unless the person names GA4, another platform or search traffic.
+// Named only on a question the metric rescue already answers, in place of its run_metric_query line.
+const SITE_VISIT_ASK_RE = /\b(?:visits?|visitors?|traffic)\b/i;
+const NOT_SITE_METRICS_RE = /\b(?:ga ?4|google analytics|seo|search console|organic search|instagram|profile visits?|shopify|store visits?)\b/i;
 const META_LEADS_CLAIM = " Meta's 'leads' result is Meta's claim; read it with get_meta_performance only when the person asks about Meta ads.";
 
+/** The message with every match of each pattern blanked, so a phrase one read owns is not read again as another's. */
+function without(message: string, ...patterns: RegExp[]): string {
+  return patterns.reduce((rest, pattern) => rest.replace(new RegExp(pattern.source, "gi"), " "), message);
+}
+
 /**
- * The rescue lines for a metric-shaped question the app's own reads answer, when this turn has them: leads, form
- * submissions and contacts -> list_contacts (without it, list_audit_leads, as the prompt routes them), audit leads ->
- * list_audit_leads, signups and registrations -> run_app_outcomes. None when the person asks about Meta ads and the
- * turn has get_meta_performance (the Meta rescue answers that), for a Meta-only metric such as cost per lead, or
- * when the turn has none of these reads: the rescue then stays as it was.
+ * The rescue lines for a metric-shaped question the app's own reads answer, when this turn has them, as the prompt's
+ * app routing sends them: audit leads and audit sign-ups -> list_audit_leads; leads, contacts and form fills
+ * (a newsletter, webinar or waitlist sign-up too) -> list_contacts, and without it only the lead words ('leads',
+ * 'new leads') -> list_audit_leads; signups and registrations that are none of those -> run_app_outcomes; trials ->
+ * read_subscription_metrics; site visitors -> run_site_metrics. None when the person asks about Meta ads
+ * and the turn has get_meta_performance (the Meta rescue answers that), for a Meta-only metric such as cost per lead,
+ * or when the turn has none of these reads: the rescue then stays as it was.
  */
 function appRescueReads(message: string, availableActionIds: readonly string[]): string[] {
   const availableLike = (name: string) => availableActionIds.some((id) => id === name || id.endsWith(`__${name}`));
@@ -1096,17 +1125,35 @@ function appRescueReads(message: string, availableActionIds: readonly string[]):
   }
   const lines: string[] = [];
   const metaClaim = meta ? META_LEADS_CLAIM : "";
+  const audit = AUDIT_ASK_RE.test(message) && availableLike("list_audit_leads");
+  // What is left once the audit phrases are read as audit leads.
+  const rest = audit ? without(message, AUDIT_ASK_RE) : message;
   if (!META_ONLY_TERM_RE.test(message)) {
-    if (AUDIT_LEAD_ASK_RE.test(message) && availableLike("list_audit_leads")) {
-      lines.push("- Audit leads (people who submitted Infinite's own growth-audit form) -> call list_audit_leads: an audit lead is its own step, never a signup or registration.");
-    } else if (LEAD_ASK_RE.test(message) && availableLike("list_contacts")) {
-      lines.push("- Leads, new leads, form submissions or contacts -> call list_contacts: this workspace's Contacts and their form submissions, never a signup or registration." + metaClaim);
-    } else if (LEAD_ASK_RE.test(message) && availableLike("list_audit_leads")) {
+    if (audit) {
+      lines.push("- Audit leads and audit sign-ups (people who submitted Infinite's own growth-audit form) -> call list_audit_leads: an audit lead is its own step, never a signup or registration.");
+    }
+    if (availableLike("list_contacts")) {
+      if (LEAD_WORD_RE.test(rest) || CONTACT_ASK_RE.test(rest)) {
+        lines.push("- Leads, new leads, form submissions or contacts -> call list_contacts: this workspace's Contacts and their form submissions, never a signup or registration." + metaClaim);
+      } else if (FORM_SIGNUP_RE.test(rest)) {
+        lines.push("- A newsletter, webinar, waitlist, demo or event sign-up is a form submission -> call list_contacts: this workspace's Contacts and their form submissions, never an account registration.");
+      }
+    } else if (!audit && LEAD_WORD_RE.test(rest) && availableLike("list_audit_leads")) {
       lines.push("- Leads, new leads or audit leads -> call list_audit_leads: an audit lead is its own step, never a signup or registration." + metaClaim);
     }
   }
-  if (SIGNUP_ASK_RE.test(message) && availableLike("run_app_outcomes")) {
+  // An audit, trial or form sign-up is never a registration: only the signup words left over ask for one.
+  if (SIGNUP_ASK_RE.test(without(message, AUDIT_ASK_RE, TRIAL_SIGNUP_RE, FORM_SIGNUP_RE)) && availableLike("run_app_outcomes")) {
     lines.push("- Signups, registrations or new accounts -> call run_app_outcomes with definition \"stages_v1\" (accountCreated = registrations), never a signup_count metric or breakdown.");
+  }
+  if (TRIAL_ASK_RE.test(message) && availableLike("read_subscription_metrics")) {
+    lines.push("- Trials started or trial sign-ups -> call read_subscription_metrics (Stripe trial starts): a trial is never a registration, and stripe_trialing_subscribers counts customers trialing now, never trials started.");
+  }
+  if (SITE_VISIT_ASK_RE.test(message) && isTargetedMetricQuestion(message) && !NOT_SITE_METRICS_RE.test(message) &&
+    !OTHER_PLATFORM_RE.test(message) && availableLike("run_site_metrics")) {
+    lines.push(availableLike("analysis_compare")
+      ? "- Site visits, visitors or traffic totals -> call run_site_metrics (server Visits read high and are never people). By channel or source -> analysis_compare with segmentBy entry_channel. GA4 site_visitors or sessions only when the person asks for GA4."
+      : "- Site visits, visitors or traffic totals -> call run_site_metrics (server Visits read high and are never people). GA4 site_visitors or sessions only when the person asks for GA4.");
   }
   return lines;
 }
