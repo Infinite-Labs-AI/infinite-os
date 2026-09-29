@@ -178,6 +178,13 @@ describe("engine prompt: Meta", () => {
 });
 
 describe("engine prompt: leads", () => {
+  const AUDIT_LEADS_LINE = "- 'Leads', 'new leads' or 'audit leads' -> list_audit_leads: an audit lead is its own step, never a signup or registration.";
+  const CONTACTS_LINE = "- People who filled in a form, 'leads', 'new leads' or contacts from a campaign -> list_contacts: this workspace's Contacts and their form submissions, never a signup or registration.";
+  const AUDIT_CLAUSE = " 'Audit leads' (people who submitted Infinite's own growth-audit form) -> list_audit_leads: an audit lead is its own step, never a signup or registration.";
+  const META_LEADS_CLAIM = " Meta's 'leads' result is Meta's claim; read it with get_meta_performance only when the person asks about Meta ads.";
+  const leadsBullets = (text: string) =>
+    text.split("\n").filter((line) => line.startsWith("- ") && /-> list_(contacts|audit_leads)\b/.test(line));
+
   it("sends leads to list_audit_leads, its own step, when that twin is present", () => {
     const text = prompt([...native(), twin("list_audit_leads"), twin("get_meta_performance")]);
     expect(text).toContain("'Leads', 'new leads' or 'audit leads' -> list_audit_leads");
@@ -187,6 +194,68 @@ describe("engine prompt: leads", () => {
 
   it("adds no leads bullet without list_audit_leads", () => {
     expect(prompt(native())).not.toContain("-> list_audit_leads");
+    expect(prompt(native())).not.toContain("-> list_contacts");
+  });
+
+  it("keeps the audit-leads bullet byte for byte on a turn without list_contacts", () => {
+    expect(leadsBullets(prompt([...native(), twin("list_audit_leads")]))).toEqual([AUDIT_LEADS_LINE]);
+    expect(leadsBullets(prompt([...native(), twin("list_audit_leads"), twin("get_meta_performance")]))).toEqual([
+      AUDIT_LEADS_LINE + META_LEADS_CLAIM
+    ]);
+    // The desktop's website sign-in reader (formerly list_website_contacts) is not list_contacts.
+    for (const name of ["list_website_contacts", "list_website_signins"]) {
+      expect(leadsBullets(prompt([...native(), twin("list_audit_leads"), twin(name)])), name).toEqual([AUDIT_LEADS_LINE]);
+    }
+  });
+
+  it("sends form leads, new leads and campaign contacts to list_contacts and keeps audit leads on list_audit_leads", () => {
+    const withMeta = prompt([...native(), twin("list_contacts"), twin("list_audit_leads"), twin("get_meta_performance")]);
+    expect(leadsBullets(withMeta)).toEqual([CONTACTS_LINE + AUDIT_CLAUSE + META_LEADS_CLAIM]);
+    expect(withMeta).not.toContain("'Leads', 'new leads' or 'audit leads' -> list_audit_leads");
+    expect(leadsBullets(prompt([...native(), twin("list_contacts"), twin("list_audit_leads")]))).toEqual([
+      CONTACTS_LINE + AUDIT_CLAUSE
+    ]);
+    expect(leadsBullets(prompt([...native(), twin("list_contacts"), twin("get_meta_performance")]))).toEqual([
+      CONTACTS_LINE + META_LEADS_CLAIM
+    ]);
+  });
+
+  it("names no audit-leads route when list_contacts comes without list_audit_leads", () => {
+    const text = prompt([...native(), twin("list_contacts")]);
+    expect(leadsBullets(text)).toEqual([CONTACTS_LINE]);
+    expect(text).not.toContain("list_audit_leads");
+    expect(text).not.toContain("Meta's 'leads' result");
+  });
+
+  it("routes leads to list_contacts in a real union turn that carries the app's Contacts read", async () => {
+    const requests: ModelRequest[] = [];
+    const appTools = ["list_contacts", "list_audit_leads", "get_meta_performance"];
+    const controller = createLlmController({
+      registry: createDaemonActionRegistry(),
+      modelClient: {
+        complete: async (request) => {
+          requests.push(request);
+          return { message: "done" };
+        }
+      }
+    });
+    await controller.chat({
+      message: "any new leads this week?",
+      sessionId: "s-union-leads",
+      workspaceId: "ws_test",
+      actorId: "operator-1",
+      surface: "desktop",
+      scopedAppTools: {
+        serverName: APP_SERVER,
+        allowedTools: appTools.map((name) => `mcp__${APP_SERVER}__${name}`),
+        mode: "union",
+        tools: appTools.map((name) => ({ name, description: name, inputSchema: { type: "object" } })),
+        callTool: async () => ({ ok: true })
+      }
+    });
+    const systemPrompt = requests[0]?.systemPrompt ?? "";
+    expect(leadsBullets(systemPrompt)).toEqual([CONTACTS_LINE + AUDIT_CLAUSE + META_LEADS_CLAIM]);
+    expect(systemPrompt).not.toContain("'Leads', 'new leads' or 'audit leads'");
   });
 });
 

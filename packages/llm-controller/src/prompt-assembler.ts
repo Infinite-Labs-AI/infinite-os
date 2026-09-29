@@ -235,7 +235,13 @@ function appRoutingGuidance(availableLike: (name: string) => boolean): string[] 
       "- Meta Ads numbers (spend, ROAS, CPA, cost per lead/CPL, CTR, CPC, link clicks, reach, frequency, results, leads, Meta-credited registrations and trials) -> get_meta_performance with a structured `period`. run_metric_query and run_breakdown_query refuse Meta metrics and views; never use run_meta_live_insights. Its results, leads, registrations, trials, purchases, CPA and ROAS are Meta's claim, not our records.",
       "- Registrations or trials credited to Meta ads → get_meta_performance (Meta's claim). Our own counts stay run_app_outcomes (registrations = first profile insert) and read_subscription_metrics (Stripe trial starts). Never present one as the other; when asked to compare, show both, labelled."
     ] : []),
-    ...(availableLike("list_audit_leads") ? [
+    // The app's Contacts read answers form leads; list_audit_leads keeps only Infinite's own audit-form leads. A turn
+    // without list_contacts keeps the audit-leads bullet below unchanged.
+    ...(availableLike("list_contacts") ? [
+      "- People who filled in a form, 'leads', 'new leads' or contacts from a campaign -> list_contacts: this workspace's Contacts and their form submissions, never a signup or registration."
+        + (availableLike("list_audit_leads") ? " 'Audit leads' (people who submitted Infinite's own growth-audit form) -> list_audit_leads: an audit lead is its own step, never a signup or registration." : "")
+        + (meta ? " Meta's 'leads' result is Meta's claim; read it with get_meta_performance only when the person asks about Meta ads." : "")
+    ] : availableLike("list_audit_leads") ? [
       meta
         ? "- 'Leads', 'new leads' or 'audit leads' -> list_audit_leads: an audit lead is its own step, never a signup or registration. Meta's 'leads' result is Meta's claim; read it with get_meta_performance only when the person asks about Meta ads."
         : "- 'Leads', 'new leads' or 'audit leads' -> list_audit_leads: an audit lead is its own step, never a signup or registration."
