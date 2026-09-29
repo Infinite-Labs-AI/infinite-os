@@ -19,6 +19,7 @@ import {
   reloadFreshlyRefreshedCodexImport,
   resolveCodexRuntimeCredentials
 } from "./model-auth/codex-auth.js";
+import { appListSourcesEnvelope } from "./query-advisor.js";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -628,7 +629,10 @@ function claudeUserContent(request: ModelRequest): string {
 function toolResultDigest(toolResults: ModelRequest["toolResults"]): string {
   const lines = toolResults.map((result, index) => {
     const prefix = `${index + 1}. ${result.name}`;
-    const payload = result.result;
+    // The app's list_sources twin carries the app's list_sources envelope as its data: digest that envelope's rows
+    // and caveats as the native's.
+    const appSources = appListSourcesEnvelope(result.name, result.result);
+    const payload = appSources ?? result.result;
     if (!isRecord(payload)) {
       return `${prefix}: result returned.`;
     }
@@ -646,7 +650,7 @@ function toolResultDigest(toolResults: ModelRequest["toolResults"]): string {
     const caveats = Array.isArray(caveatsRaw)
       ? caveatsRaw.filter((value: unknown): value is string => typeof value === "string").slice(0, 2)
       : [];
-    const summary = summarizeActionData(result.name, data);
+    const summary = summarizeActionData(appSources ? "list_sources" : result.name, data);
     const caveatText = caveats.length ? ` Caveats: ${caveats.join(", ")}.` : "";
     return `${prefix}: ${summary}${caveatText}`;
   });

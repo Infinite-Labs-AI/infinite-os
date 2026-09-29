@@ -604,10 +604,38 @@ export function splitHostTurnContext(message: string): { before: string; questio
   return { before, question: style ? rest.slice(0, style.index) : rest, after };
 }
 
+/**
+ * A union turn withholds the native list_sources when the app sends its twin (`mcp__<server>__list_sources`). The
+ * twin's result carries the app's own list_sources envelope as its data, one level below where the native keeps it.
+ * Returns that envelope, or undefined for any other result.
+ */
+export function appListSourcesEnvelope(name: string | undefined, result: unknown): Record<string, unknown> | undefined {
+  if (!name?.endsWith("__list_sources") || !isRecord(result)) {
+    return undefined;
+  }
+  return isRecord(result.data) ? result.data : undefined;
+}
+
+/** The results with the app's list_sources twin read as the native list_sources it replaces. */
+function withAppSourcesAsNative(toolResults: QueryRefinementToolResult[]): QueryRefinementToolResult[] {
+  return toolResults.map((result) => {
+    const sources = appListSourcesEnvelope(result.name, result.result);
+    return sources ? { name: "list_sources", result: sources } : result;
+  });
+}
+
 export function buildQueryRefinementSections(
   message: string,
   toolResults: QueryRefinementToolResult[],
   availableActionIds: readonly string[] = []
+): string[] {
+  return refinementSections(message, withAppSourcesAsNative(toolResults), availableActionIds);
+}
+
+function refinementSections(
+  message: string,
+  toolResults: QueryRefinementToolResult[],
+  availableActionIds: readonly string[]
 ): string[] {
   const syncFreshnessFailure = xSyncFreshnessFailureSections(message, toolResults);
   const metricViewRecovery = xMetricViewRecoverySections(toolResults);
@@ -990,6 +1018,10 @@ export function buildQuerySynthesisSections(
   message: string,
   toolResults: QueryRefinementToolResult[]
 ): string[] {
+  return synthesisSections(message, withAppSourcesAsNative(toolResults));
+}
+
+function synthesisSections(message: string, toolResults: QueryRefinementToolResult[]): string[] {
   const hasXPostEvidence = hasBreakdownResult(toolResults, "x_public_engagement");
   if (hasXPostEvidence && isXNegativeStrategyQuestion(message)) {
     const latestBreakdown = latestBreakdownRows(toolResults, "x_public_engagement");

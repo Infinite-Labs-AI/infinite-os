@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { writeInfiniteOsAuthRecord, writeInfiniteOsModelSelection } from "@infinite-os/config";
-import type { InfiniteOsToolSchema } from "../src/index.js";
+import type { InfiniteOsToolSchema, ModelToolResult } from "../src/index.js";
 import { createConfiguredModelClient } from "../src/model-client.js";
 
 // Hermetic wire-shape tests for how tool schemas are sent to each provider.
@@ -134,5 +134,48 @@ describe("model tool wire shape", () => {
     }
     expect(JSON.stringify(wireTools[0].input_schema)).toBe(JSON.stringify(OPTIONAL_TARGET_SCHEMA));
     expect(JSON.stringify(wireTools[1].input_schema)).toBe(JSON.stringify(REQUIRED_METRIC_SCHEMA));
+  });
+
+  it("digests the app's list_sources twin like the native: its source rows and its caveats", async () => {
+    const requests: CapturedRequest[] = [];
+    const client = createConfiguredModelClient({ env: codexEnv(), fetch: capturingFetch(requests, CODEX_RESPONSE) });
+    // A union turn's twin result: the bridge's envelope carries the app's list_sources envelope as its data.
+    const twin = {
+      ok: true,
+      actionId: "mcp__infinite_app__list_sources",
+      authority: "tool_agent",
+      status: "ok",
+      data: {
+        ok: true,
+        actionId: "list_sources",
+        authority: "tool_agent",
+        status: "ok",
+        data: {
+          sources: [
+            { id: "src_ga4", provider: "ga4", status: "connected", connection_name: "Main site", last_synced_at: "2026-09-28T06:00:00.000Z" }
+          ]
+        },
+        provenance: ["sources"],
+        caveats: ["cloud_sources_unavailable"],
+        truncated: false,
+        nextActions: []
+      },
+      provenance: [],
+      caveats: [],
+      truncated: false,
+      nextActions: []
+    } as unknown as ModelToolResult["result"];
+
+    await client.complete({
+      systemPrompt: "s",
+      userMessage: "u",
+      tools: [],
+      toolResults: [{ id: "call_sources", name: "mcp__infinite_app__list_sources", result: twin }]
+    });
+
+    const body = JSON.stringify(requests[0].body);
+    expect(body).toContain(
+      "1. mcp__infinite_app__list_sources: connected sources: ga4 (Main site) status=connected last_synced_at=2026-09-28T06:00:00.000Z. Do not say never synced when last_synced_at or sync runs are present. Caveats: cloud_sources_unavailable."
+    );
   });
 });

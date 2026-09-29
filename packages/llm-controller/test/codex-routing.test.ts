@@ -692,3 +692,161 @@ describe("union turn: engine analytics twins", () => {
     expect(tools).toEqual([...daemon, ...[...ANALYTICS_TWINS, ...META_GATED_TWINS].map(app)]);
   });
 });
+
+describe("union turn: the app's list_sources twin", () => {
+  const app = (name: string) => `mcp__${APP_SERVER}__${name}`;
+  // The desktop's list_sources envelope (cloud rows, or cloud plus local Meta/Shopify rows), as its bridge returns it.
+  const DESKTOP_SOURCES = {
+    ok: true,
+    actionId: "list_sources",
+    authority: "tool_agent",
+    status: "ok",
+    data: {
+      sources: [
+        { id: "src_ga4", provider: "ga4", status: "connected", connection_name: "Main site", last_synced_at: "2026-09-28T06:00:00.000Z" },
+        { id: "src_meta", provider: "meta_ads", status: "connected", connection_name: "Ad account" }
+      ]
+    },
+    provenance: ["sources", "datasets"],
+    caveats: ["permanent_local_sources_unavailable"],
+    truncated: false,
+    nextActions: []
+  };
+
+  async function run(
+    registry: ReturnType<typeof createInfiniteOsRegistry>,
+    appTools: string[],
+    options: { message?: string; call?: string } = {}
+  ) {
+    const requests: ModelRequest[] = [];
+    const appCalls: string[] = [];
+    const progress: string[] = [];
+    const controller = createLlmController({
+      registry,
+      modelClient: {
+        complete: async (request) => {
+          requests.push(request);
+          if (options.call && request.toolResults.length === 0) {
+            return { toolCalls: [{ id: "call_sources", name: options.call, input: {} }] };
+          }
+          return { message: "done" };
+        }
+      }
+    });
+    const result = await controller.chat({
+      message: options.message ?? "which sources are connected?",
+      sessionId: `s-sources-${appTools.join("-")}-${options.call ?? ""}-${options.message ?? ""}`,
+      workspaceId: "ws_test",
+      actorId: "operator-1",
+      surface: "desktop",
+      onProgress: (event) => {
+        if ("message" in event && typeof event.message === "string") progress.push(event.message);
+      },
+      scopedAppTools: {
+        serverName: APP_SERVER,
+        allowedTools: appTools.map(app),
+        mode: "union",
+        tools: appTools.map((name) => ({ name, description: name, inputSchema: { type: "object" } })),
+        callTool: async (name: string) => {
+          appCalls.push(name);
+          // The daemon's bridge parses the MCP text content back into the app's envelope.
+          return name === "list_sources" ? structuredClone(DESKTOP_SOURCES) : { ok: true };
+        }
+      }
+    });
+    const first = requests[0] as { tools: Array<{ name: string }>; systemPrompt: string };
+    const lines = first.systemPrompt.split("\n");
+    const manifest = JSON.parse(lines[lines.indexOf("Typed Infinite OS action manifest:") + 1] ?? "[]") as Array<{
+      id: string;
+      recommendedNextActions: string[];
+    }>;
+    return { tools: first.tools.map((tool) => tool.name), manifest, requests, result, appCalls, progress };
+  }
+
+  /** The twin's tool result exactly as the controller feeds it back (and to the advisor). */
+  async function twinResult() {
+    const { requests } = await run(createDaemonActionRegistry(), ["list_sources"], { call: app("list_sources") });
+    const result = requests[1]?.toolResults[0];
+    expect(result?.name).toBe(app("list_sources"));
+    return result as { name: string; result: unknown };
+  }
+
+  it("withholds the native list_sources, on the daemon and the full registry, when the twin is in the turn", async () => {
+    for (const registry of [createDaemonActionRegistry(), createInfiniteOsRegistry({})]) {
+      const natives = registry.list().map((action) => action.id as string);
+      expect(natives).toContain("list_sources");
+      const { tools } = await run(registry, ["list_sources"]);
+      expect(tools).toEqual([...natives.filter((id) => id !== "list_sources"), app("list_sources")]);
+    }
+  });
+
+  it("drops list_sources from the next-step hints of the natives it keeps", async () => {
+    const { manifest } = await run(createDaemonActionRegistry(), ["list_sources"]);
+    const hints = (id: string) => manifest.find((entry) => entry.id === id)?.recommendedNextActions;
+    expect(hints("get_recent_sync_runs")).toEqual(["list_source_schedules"]);
+    expect(hints("connect_source")).toEqual(["start_source_sync"]);
+    expect(hints("revoke_source")).toEqual([]);
+  });
+
+  it("refuses a bare list_sources call instead of reading the local store", async () => {
+    for (const bare of ["list_sources", "mcp_list_sources"]) {
+      const { result, appCalls } = await run(createDaemonActionRegistry(), ["list_sources"], { call: bare });
+      expect(result.actionCalls.find((call) => call.id === "call_sources"), bare).toMatchObject({
+        status: "error",
+        error: { code: "unknown_action" }
+      });
+      expect(appCalls, bare).toEqual([]);
+    }
+  });
+
+  it("sends the desktop Codex union 25 engine natives once every app twin is in the turn", async () => {
+    const registry = createDaemonActionRegistry();
+    const twins = [
+      "get_meta_performance", "list_meta_entities", "list_sources", "list_metrics", "describe_metric",
+      "list_queryable_views", "describe_queryable_view", "run_metric_query", "run_breakdown_query", "run_funnel_query"
+    ];
+    const { tools } = await run(registry, twins);
+    const natives = tools.filter((name) => !name.startsWith("mcp__"));
+    expect(registry.list()).toHaveLength(30);
+    expect(natives).toHaveLength(25);
+    expect(natives).not.toEqual(expect.arrayContaining(["list_sources"]));
+    for (const withheld of ["run_meta_live_insights", "list_meta_entities", "get_meta_entity", "list_meta_assets", "list_sources"]) {
+      expect(natives).not.toContain(withheld);
+    }
+  });
+
+  it("labels the twin's progress like the native's", async () => {
+    const { progress } = await run(createDaemonActionRegistry(), ["list_sources"], { call: app("list_sources") });
+    expect(progress).toContain("Checking connected sources.");
+    expect(progress).not.toContain(`Running ${app("list_sources")}.`);
+  });
+
+  it("fires the Meta rescue after the twin's source list, as it did after the native's", async () => {
+    const twin = await twinResult();
+    const text = buildQueryRefinementSections("what's my cpl", [twin], [app("get_meta_performance")]).join("\n");
+    expect(text).toContain("get_meta_performance with a structured `period`");
+    // End to end: the second model request carries the rescue.
+    const { requests } = await run(createDaemonActionRegistry(), ["list_sources", "get_meta_performance"], {
+      message: "what's my cpl",
+      call: app("list_sources")
+    });
+    expect(requests[1]?.systemPrompt).toContain("get_meta_performance with a structured `period`");
+  });
+
+  it("fires the metric rescue and the open-ended refinement after the twin's source list", async () => {
+    const twin = await twinResult();
+    expect(buildQueryRefinementSections("how many signups did we get", [twin]).join("\n")).toContain("you only have a source list so far");
+    expect(buildQueryRefinementSections("what stands out?", [twin]).join("\n")).toContain("You know which sources are connected");
+  });
+
+  it("reads the twin's rows for source-status and workspace synthesis", async () => {
+    const twin = await twinResult();
+    expect(buildQuerySynthesisSections("is ga4 connected?", [twin]).join("\n")).toContain("Source-status final synthesis guidance:");
+    const overview = buildQuerySynthesisSections("give me a snapshot of the workspace", [twin]).join("\n");
+    expect(overview).toContain("- Connected sources: 2.");
+    expect(overview).toContain("ga4 (Main site)");
+    expect(overview).toContain("Do not describe a source as never synced");
+    const metric = { name: "run_metric_query", result: { data: { metric: "recognized_revenue", rows: [{ recognized_revenue: "12000" }] } } };
+    expect(buildQuerySynthesisSections("tell me something", [twin, metric]).join("\n")).toContain("- Source context: ga4 (Main site) has last_synced_at=2026-09-28T06:00:00.000Z");
+  });
+});

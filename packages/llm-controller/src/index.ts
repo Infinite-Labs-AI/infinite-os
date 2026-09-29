@@ -1080,11 +1080,15 @@ function unionActionSet(
 // The analytics reads below leave only when the app sends a twin of the same name: the twin runs the same engine
 // handler on the cloud workspace. The daemon registry already retires them (EMBEDDED_ONLY_READ_ACTIONS), so there
 // this is a no-op; it keeps a host that builds the full registry from offering both copies.
+// list_sources is the one the daemon still offers. Its native reads only this engine's local store; the app's twin
+// returns the cloud connectors plus the local Meta and Shopify rows, so it replaces the native. The advisor, digest
+// and progress labels read the twin's result as the native's (appListSourcesEnvelope).
 function withheldNativeActionIds(scoped: NormalizedScopedAppTools): Set<string> {
   const appNames = new Set(scoped.tools.map((tool) => tool.rawName));
   return new Set([
     ...(appNames.has("get_meta_performance") ? ["run_meta_live_insights"] : []),
     ...(appNames.has("list_meta_entities") ? ["list_meta_entities", "get_meta_entity", "list_meta_assets"] : []),
+    ...(appNames.has("list_sources") ? ["list_sources"] : []),
     ...SAME_NAME_ANALYTICS_TWINS.filter((name) => appNames.has(name)),
     // The app's copies refuse Meta metrics and views and point at get_meta_performance, so they replace the
     // natives only when that read is in the turn too.
@@ -1563,7 +1567,11 @@ function toolCallProgressMessage(
   registry: ActionRegistry,
   scopedAppTools?: NormalizedScopedAppTools
 ): string {
-  const actionId = normalizeToolCallName(call.name, registry, scopedAppTools);
+  const normalizedName = normalizeToolCallName(call.name, registry, scopedAppTools);
+  // The app's list_sources twin stands in for the native a union turn withholds, so it keeps the native's labels.
+  const actionId = scopedAppTools?.toolsByModelName.get(normalizedName)?.rawName === "list_sources"
+    ? "list_sources"
+    : normalizedName;
   const openEndedProgress = openEndedAnalysisProgressMessage(message, actionId, call);
   if (openEndedProgress) {
     return openEndedProgress;
