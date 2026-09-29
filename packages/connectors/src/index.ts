@@ -17,6 +17,29 @@ import { metaEntityReadMode } from "./meta-entity-checkpoint.js";
 import { planMetaChildStatusRefresh, runMetaChildStatusRefresh } from "./meta-child-status-refresh.js";
 import { metaAdsEntityVersionFingerprint } from "./meta-entity-fingerprint.js";
 import {
+  META_ADS_BREAKDOWN_MAX_WINDOW_DAYS,
+  META_ADS_EXTENDED_READS_PROBE_MAX_REQUESTS,
+  META_ADS_LEARNING_STAGE_FIELD,
+  isMetaAdsBreakdownDimension,
+  metaAdsExtendedInsightsFieldSuffix,
+  metaAdsExtendedInsightsLane,
+  metaAdsLearningStageLane,
+  metaAdsSplitLearningStage,
+  metaAdsVideoActionsRaw,
+  metaAdsWindowDays,
+  type MetaAdsBreakdownDimension,
+  type MetaAdsLearningObservation,
+} from "./meta-extended-reads.js";
+export {
+  META_ADS_BREAKDOWN_DIMENSIONS,
+  META_ADS_EXTENDED_INSIGHTS_FIELDS,
+  META_ADS_EXTENDED_INSIGHTS_LANES,
+  META_ADS_EXTENDED_READS_PROBE_MAX_REQUESTS,
+  META_ADS_LEARNING_STAGE_LANES,
+  type MetaAdsBreakdownDimension,
+  type MetaAdsLearningObservation,
+} from "./meta-extended-reads.js";
+import {
   metaAdsFetchInsightsWindowWithNarrowing,
   metaAdsRunAsyncInsightsJob,
   type MetaAdsAsyncInsightsStep,
@@ -159,6 +182,19 @@ export interface SyncRequest {
   metaAdsRequestBudget?: number;
   /** Exact caller-owned allocation lane. Optional for local and legacy callers. */
   metaAdsRequestLane?: MetaRequestLane;
+  /**
+   * The EXTENDED READS switch (meta-extended-reads.ts; Ad Brain decision 2). Unset or false = every
+   * request and stored row is byte-identical to before. `true` adds, with NO extra call:
+   *  - the video watch fields to the insights reads of a `settled_history` / `history_backfill` run
+   *    whose window ends before today in the account's timezone (settled days only), stored in
+   *    actions_raw;
+   *  - `learning_stage_info` to the ad set edge read of an `inventory_sync` / `settled_history` /
+   *    `history_backfill` entity scan, stored in meta_ads_adset_learning_observations (0079) and kept
+   *    OUT of the entity version fingerprint.
+   * Never honoured on the hot, attended or media lanes, on a lane-less (local) run, or on the MCP/CLI
+   * transports. The caller decides which sources are switched on; the engine never raises a budget.
+   */
+  metaAdsExtendedReads?: boolean;
   metaAdsOnResponse?: (signal: MetaAdsResponseSignal) => Promise<void>;
   /** Optional bounded caller-owned media sink. Signed URLs exist only in this callback, never truth rows. */
   metaAdsOnMedia?: (media:MetaAdsFreshMedia[]) => Promise<void>;
@@ -241,6 +277,13 @@ export interface SyncPlan {
   /** Effective normalized provider window selected the bounded atomic one-day batch path. */
   metaAdsAtomicOneDaySnapshot?: boolean;
   metaAdsEntitySnapshot?: MetaAdsEntitySnapshotState;
+  /** Learning stages read by THIS run's ad set edge (extended reads only); written at CLOSE. */
+  metaAdsLearningObservations?: {
+    adAccountId: string;
+    observedAt: string;
+    apiVersion: string;
+    rows: MetaAdsLearningObservation[];
+  };
 }
 
 export type MetaAdsHistoryGrain = "campaign" | "adset" | "ad";
@@ -2646,6 +2689,11 @@ const metaAdsConnector = createConnector<MetaAdsCredential, MetaAdsSyncRow>({
     // each with the §4d fail-loud page cap.
     const accessToken = requireCredential(credential, "accessToken");
     const telemetry = plan.metaAdsRequestTelemetry;
+    // Extended reads (meta-extended-reads.ts; SyncRequest.metaAdsExtendedReads). Decided ONCE, here,
+    // on the direct-Graph path only (the MCP/CLI transports returned above). Off → every request below
+    // is byte-identical to before.
+    const extendedInsights = metaAdsExtendedInsightsApply(request, plan, timeOptions.timeRange);
+    if (extendedInsights) context.videoFieldsRequested = true;
 
     // §4a — net-new edge reads. The adset dim map (status + optimization_goal) drives the
     // adset rows; the campaign status map backfills the campaign dim's NULL-status gap; the
@@ -2656,6 +2704,8 @@ const metaAdsConnector = createConnector<MetaAdsCredential, MetaAdsSyncRow>({
     const adNodes: MetaAdsEdgeNode[] = [];
     const syncMode = request.metaAdsSyncMode ?? "full";
     const readsEntities = syncMode !== "insights_only";
+    const learningRequested = readsEntities && metaAdsLearningStageLane(request.metaAdsExtendedReads, request.metaAdsRequestLane);
+    const learningSink: MetaAdsLearningObservation[] = [];
     // §4 — the three account-level edge-dimension reads are mutually independent (distinct edges,
     // each fills its OWN *Nodes sink and returns its OWN map; no read consumes another's output), so
     // they run concurrently with a FIXED ceiling of 3 (one paginated loop per edge; each loop stays
@@ -2713,7 +2763,7 @@ const metaAdsConnector = createConnector<MetaAdsCredential, MetaAdsSyncRow>({
       throw new ConnectorError("provider_api_error", "Meta Ads insights-only sync requires a completed current-entity snapshot", true);
     }
     const [adsetDims, campaignStatus, adDims] = await Promise.all([
-      metaAdsReadAdsetDims(credential, telemetry, adsetNodes, entityScan?.updatedSince, cached.filter(row=>row.entity_type==='adset').map(row=>row.metadata_json as MetaAdsEdgeNode), readsEntities),
+      metaAdsReadAdsetDims(credential, telemetry, adsetNodes, entityScan?.updatedSince, cached.filter(row=>row.entity_type==='adset').map(row=>row.metadata_json as MetaAdsEdgeNode), readsEntities, learningRequested ? learningSink : undefined),
       // Campaigns have no documented updated_since parameter; retain their bounded full read.
       metaAdsReadCampaignStatus(credential, telemetry, campaignNodes, cached.filter(row=>row.entity_type==='campaign').map(row=>row.metadata_json as MetaAdsEdgeNode), readsEntities),
       metaAdsReadAdAdims(credential, telemetry, adNodes, entityScan?.updatedSince, cached.filter(row=>row.entity_type==='ad').map(row=>row.metadata_json as MetaAdsEdgeNode), request.metaAdsOnMedia, readsEntities, fullAdSnapshot),
@@ -2742,6 +2792,9 @@ const metaAdsConnector = createConnector<MetaAdsCredential, MetaAdsSyncRow>({
         ...metaAdsEntitySnapshotRows(adAccountId, "ad", adNodes, observedAt, context.apiVersion, accessToken),
       );
       plan.metaAdsEntitySnapshot = { entityScan, adAccountId };
+      if (learningRequested) {
+        plan.metaAdsLearningObservations = { adAccountId, observedAt, apiVersion: context.apiVersion, rows: learningSink };
+      }
     }
     if (syncMode === "inventory_only") return rows;
     const requestedGrains: MetaAdsHistoryGrain[] = request.metaAdsInsightsLevel
@@ -2786,6 +2839,7 @@ const metaAdsConnector = createConnector<MetaAdsCredential, MetaAdsSyncRow>({
         timeIncrement,
         telemetry,
         signal: request.signal,
+        ...(extendedInsights ? { extendedFields: true } : {}),
         onRow(grain, row) {
           rows.push(grain === "campaign"
             ? metaAdsCampaignDailyRow(adAccountId, row, context, campaignStatus)
@@ -2802,7 +2856,7 @@ const metaAdsConnector = createConnector<MetaAdsCredential, MetaAdsSyncRow>({
       if (usesOneDayBatch) continue;
       if (!requestedGrains.includes(grain)) continue;
       const urlFor = (range: MetaAdsDateWindow) => metaAdsInsightsUrl(credential, {
-        adAccountId, fields: metaAdsInsightsFieldsForLevel(grain), level: grain,
+        adAccountId, fields: metaAdsInsightsFieldsForLevel(grain, extendedInsights), level: grain,
         limit: "500", timeIncrement, attributionWindows: META_ADS_ATTRIBUTION_WINDOWS,
         timeRange: range, filtering: metaAdsAllStatusFiltering(grain),
       });
@@ -2832,7 +2886,7 @@ const metaAdsConnector = createConnector<MetaAdsCredential, MetaAdsSyncRow>({
       const adUrlFor = (range: { since: string; until: string }) =>
         metaAdsInsightsUrl(credential, {
           adAccountId,
-          fields: metaAdsInsightsFieldsForLevel("ad"),
+          fields: metaAdsInsightsFieldsForLevel("ad", extendedInsights),
           level: "ad",
           limit: "500",
           timeIncrement,
@@ -4161,6 +4215,42 @@ async function metaAdsCloseSuccess(
         ],
       );
     }
+  }
+  // Extended reads: the learning stages this run's ad set edge read carried. Written only on a
+  // successful CLOSE, one row per ad set per read (status NULL = Meta returned none for that ad set).
+  // observed_on is the account-local day of the read when the account's timezone is known.
+  const learning = plan.metaAdsLearningObservations;
+  if (learning && learning.rows.length > 0) {
+    await tx.query(
+      `insert into meta_ads_adset_learning_observations (
+         workspace_id, source_id, ad_account_id, adset_id, observed_at, observed_on, status,
+         conversions, last_sig_edit_ts, attribution_windows, api_version, sync_run_id
+       )
+       select $1, $2, $3, r.adset_id, $4::timestamptz,
+              (select ($4::timestamptz at time zone a.timezone_name)::date
+                 from meta_ads_accounts a
+                where a.workspace_id = $1 and a.source_id = $2 and a.ad_account_id = $3 and a.timezone_name is not null),
+              r.status, r.conversions, r.last_sig_edit_ts, r.attribution_windows, $5, $6
+         from jsonb_to_recordset($7::jsonb) as r(
+           adset_id text, status text, conversions numeric, last_sig_edit_ts timestamptz, attribution_windows jsonb
+         )
+       on conflict (source_id, adset_id, observed_at) do nothing`,
+      [
+        request.workspaceId,
+        request.sourceId,
+        learning.adAccountId,
+        learning.observedAt,
+        learning.apiVersion,
+        request.syncRunId,
+        JSON.stringify(learning.rows.map((row) => ({
+          adset_id: row.adsetId,
+          status: row.status,
+          conversions: row.conversions,
+          last_sig_edit_ts: row.lastSigEditAt,
+          attribution_windows: row.attributionWindows,
+        }))),
+      ],
+    );
   }
   if (!replacement && !entitySnapshot) return;
 
@@ -8893,18 +8983,23 @@ const META_ADS_INSIGHTS_FIELDS = [
 // existing campaign request is unchanged. The fields are gated on level=adset so the
 // shared field list never silently adds adset_id to the campaign request (or to the
 // MCP/CLI transports, which stay campaign-grain this slice).
-function metaAdsInsightsFieldsForLevel(level: string): string {
+//
+// `extended` (meta-extended-reads.ts) APPENDS the video watch fields. Only the settled/backfill
+// direct-Graph passes of a switched-on run pass it; every other caller (the hot lane, Live refresh,
+// fetchMetaLiveInsights, the MCP/CLI transports) calls with one argument and is byte-identical.
+function metaAdsInsightsFieldsForLevel(level: string, extended = false): string {
+  const suffix = extended ? `,${metaAdsExtendedInsightsFieldSuffix()}` : "";
   // Phase-2 slice-1b §4c — at level=ad we PREPEND ad_id,ad_name,adset_id so the ad row mapper
   // can re-key on ad_id (the #1 corruption fix) AND carry the parent adset_id (also the key the
   // §4e optimization_goal carry uses to look up the adset dim). campaign_id is NOT prepended —
   // it already leads META_ADS_INSIGHTS_FIELDS (the carried parent key is echoed at every grain).
   if (level === "ad") {
-    return `ad_id,ad_name,adset_id,${META_ADS_INSIGHTS_FIELDS}`;
+    return `ad_id,ad_name,adset_id,${META_ADS_INSIGHTS_FIELDS}${suffix}`;
   }
   if (level === "adset") {
-    return `adset_id,adset_name,${META_ADS_INSIGHTS_FIELDS}`;
+    return `adset_id,adset_name,${META_ADS_INSIGHTS_FIELDS}${suffix}`;
   }
-  return META_ADS_INSIGHTS_FIELDS;
+  return `${META_ADS_INSIGHTS_FIELDS}${suffix}`;
 }
 
 // §4 — the smaller field set used only by the connectivity probe (testLive). It does
@@ -9189,14 +9284,20 @@ function metaInsightsActionValues(row: MetaAdsInsightsRow): MetaActionElement[] 
 // future investigator can distinguish Meta's reported result from our resolved objective rule.
 // `resolved_optimization_goal` may come from the adset dimension at ad/adset grain; the unprefixed
 // `optimization_goal` remains the value Meta returned on this specific insights row.
+//
+// `videoFieldsRequested` (extended reads only): the row's read asked for the video watch fields, so
+// each is stored verbatim, or [] when Meta omitted it (measured none). Without it NO video key is
+// written — a reader tells "not requested" (key absent: unknown) from "none" ([]).
 function metaAdsActionsRaw(
   row: MetaAdsInsightsRow,
   resolvedOptimizationGoal: string | null = stringOrNull(row.optimization_goal),
   resolvedPromotedCustomEventType: string | null = null,
+  videoFieldsRequested = false,
 ): Record<string, unknown> {
   return {
     actions: metaInsightsActions(row) ?? [],
     action_values: metaInsightsActionValues(row) ?? [],
+    ...(videoFieldsRequested ? metaAdsVideoActionsRaw(row as Record<string, unknown>) : {}),
     provider_result_evidence: {
       actions_present: Array.isArray(row.actions),
       action_values_present: Array.isArray(row.action_values),
@@ -9318,6 +9419,24 @@ function metaAdsTimeOptions(request: SyncRequest, plan: SyncPlan): {
   };
 }
 
+/**
+ * Does THIS run's insights read carry the extended video fields? Only when the caller switched the
+ * source on, the lane is settled_history / history_backfill, and the whole window ends BEFORE today
+ * in the account's own timezone (settled days only). An unknown timezone or an open-ended window
+ * (date_preset=maximum) fails closed to the base fields.
+ */
+function metaAdsExtendedInsightsApply(
+  request: SyncRequest,
+  plan: SyncPlan,
+  range: { since: string; until: string } | undefined,
+  now: Date = new Date(),
+): boolean {
+  if (!metaAdsExtendedInsightsLane(request.metaAdsExtendedReads, request.metaAdsRequestLane)) return false;
+  const timeZone = plan.metaAdsAccountMetadata?.timezoneName;
+  if (!range || !timeZone) return false;
+  return range.until < metaAdsProviderDay(now.toISOString(), timeZone);
+}
+
 function metaAdsUsesHotOneDayRequestLimit(request: SyncRequest, plan: SyncPlan): boolean {
   if (request.metaAdsSyncMode !== "insights_only") return false;
   const hasExplicitWindow = request.windowSince !== undefined || request.windowUntil !== undefined;
@@ -9346,6 +9465,9 @@ function metaAdsInsightsUrl(
     // Insights `filtering` JSON. Every direct-Graph history read sets the all-status filter for its
     // own level (metaAdsAllStatusFiltering); only the connect-time probe leaves it unset.
     filtering?: string;
+    // ONE breakdown dimension (the weekly extended-reads breakdown and its probe only). Absent →
+    // the URL is byte-identical to before.
+    breakdowns?: MetaAdsBreakdownDimension;
   }
 ): string {
   const url = new URL(`https://graph.facebook.com/${metaAdsApiVersion(credential)}/${options.adAccountId}/insights`);
@@ -9368,6 +9490,9 @@ function metaAdsInsightsUrl(
   }
   if (options.filtering) {
     url.searchParams.set("filtering", options.filtering);
+  }
+  if (options.breakdowns) {
+    url.searchParams.set("breakdowns", options.breakdowns);
   }
   return url.toString();
 }
@@ -9483,6 +9608,8 @@ function metaAdsAdPassNeedsChunking(plan: SyncPlan, range: MetaAdsDateWindow): b
 interface MetaAdsInsightsContext {
   apiVersion: string;
   attributionSetting: string;
+  /** Set by extractLive ONLY for the direct-Graph passes of an extended-reads settled/backfill run. */
+  videoFieldsRequested?: boolean;
 }
 
 // §4d — fail-loud volume guard for the PRIMARY (direct-Graph) insights transport. Two
@@ -9990,6 +10117,8 @@ async function metaAdsFetchOneDayInsightsBatch(input: {
   grains?: readonly MetaAdsHistoryGrain[];
   /** Hot-lane ad read shape: extra parent-name fields and its (all-status) ad filter. */
   adRead?: { fields: string; filtering: string };
+  /** Extended reads: append the video watch fields to every grain's field list (never with adRead). */
+  extendedFields?: boolean;
   onRow: (grain: MetaAdsHistoryGrain, row: MetaAdsInsightsRow) => void;
 }): Promise<void> {
   const apiVersion = metaAdsApiVersion(input.credential);
@@ -9997,7 +10126,7 @@ async function metaAdsFetchOneDayInsightsBatch(input: {
     grain,
     relativeUrl: metaAdsBatchRelativeUrl(metaAdsInsightsUrl(input.credential, {
       adAccountId: input.adAccountId,
-      fields: grain === "ad" && input.adRead ? input.adRead.fields : metaAdsInsightsFieldsForLevel(grain),
+      fields: grain === "ad" && input.adRead ? input.adRead.fields : metaAdsInsightsFieldsForLevel(grain, input.extendedFields === true),
       level: grain,
       limit: "500",
       timeIncrement: input.timeIncrement,
@@ -10333,7 +10462,7 @@ function metaAdsCampaignDailyRow(
     attributionSetting: context.attributionSetting,
     apiVersion: context.apiVersion,
     // Persist actions plus the provider result evidence for audit/recompute.
-    actionsRaw: metaAdsActionsRaw(row),
+    actionsRaw: metaAdsActionsRaw(row, stringOrNull(row.optimization_goal), null, context.videoFieldsRequested === true),
     objective: stringOrNull(row.objective),
     optimizationGoal: stringOrNull(row.optimization_goal),
     effectiveStatus: status?.effectiveStatus ?? null,
@@ -10386,7 +10515,7 @@ function metaAdsAdsetDailyRow(
     currency: stringOrNull(row.account_currency)?.toLowerCase() ?? dim?.currency ?? null,
     attributionSetting: context.attributionSetting,
     apiVersion: context.apiVersion,
-    actionsRaw: metaAdsActionsRaw(row, optimizationGoal, dim?.promotedCustomEventType ?? null),
+    actionsRaw: metaAdsActionsRaw(row, optimizationGoal, dim?.promotedCustomEventType ?? null, context.videoFieldsRequested === true),
     optimizationGoal,
     billingEvent: dim?.billingEvent ?? null,
     effectiveStatus: dim?.effectiveStatus ?? null,
@@ -10450,7 +10579,7 @@ function metaAdsAdDailyRow(
     currency: stringOrNull(row.account_currency)?.toLowerCase() ?? null,
     attributionSetting: context.attributionSetting,
     apiVersion: context.apiVersion,
-    actionsRaw: metaAdsActionsRaw(row, optimizationGoal, adsetDim?.promotedCustomEventType ?? null),
+    actionsRaw: metaAdsActionsRaw(row, optimizationGoal, adsetDim?.promotedCustomEventType ?? null, context.videoFieldsRequested === true),
     effectiveStatus: dim?.effectiveStatus ?? null,
     configuredStatus: dim?.configuredStatus ?? null,
     conversions: metaAdsConversionRows(conversionRow, context, adsetDim?.promotedCustomEventType ?? null)
@@ -10776,14 +10905,21 @@ async function metaAdsReadAdsetDims(
   updatedSince?: number,
   cachedNodes: MetaAdsEdgeNode[] = [],
   readProvider = true,
+  // Extended reads only: ask for learning_stage_info on the SAME edge read and collect it here. It is
+  // split off every node before the node reaches the snapshot, so it never mints an entity version.
+  learningSink?: MetaAdsLearningObservation[],
 ): Promise<Map<string, MetaAdsAdsetDim>> {
-  const nodes = readProvider ? await metaAdsReadEdge(
+  const baseFields = "id,name,optimization_goal,billing_event,effective_status,status,campaign_id,daily_budget,lifetime_budget,bid_amount,bid_strategy,targeting,promoted_object,destination_type,attribution_spec,start_time,end_time";
+  const read = readProvider ? await metaAdsReadEdge(
     credential,
     "adsets",
-    "id,name,optimization_goal,billing_event,effective_status,status,campaign_id,daily_budget,lifetime_budget,bid_amount,bid_strategy,targeting,promoted_object,destination_type,attribution_spec,start_time,end_time",
+    learningSink ? `${baseFields},${META_ADS_LEARNING_STAGE_FIELD}` : baseFields,
     telemetry,
     updatedSince,
   ) : [];
+  const split = metaAdsSplitLearningStage(read, learningSink !== undefined);
+  const nodes = learningSink ? split.nodes : read;
+  learningSink?.push(...split.observations);
   snapshotSink?.push(...nodes);
   const dims = new Map<string, MetaAdsAdsetDim>();
   for (const node of [...cachedNodes, ...nodes]) {
@@ -13128,6 +13264,295 @@ export function findMetaDedupHit(
 // exported wrapper reuses that exact resolver (no duplicate decrypt/refresh
 // logic, no token ever leaving the credential object) so a Meta write reuses
 // the same live-token bridge a Meta read/sync does.
+// ──────────────────────────────────────────────────────────────────────────────────
+// EXTENDED READS — the weekly ad set breakdown and the one-shot probe (meta-extended-reads.ts).
+//
+// The breakdown is the ONLY new Meta call of the extended reads: one dimension per query, level=adset,
+// time_increment=all_days over a settled window (a week, by the caller's cadence). The caller owns the
+// schedule (at most once per account per settled week) and pays for it out of its OWN reserved share
+// of the per-account request budget: `requestBudget` is a hard ceiling the engine enforces on every
+// page. Rows + a coverage receipt are written in ONE transaction, so "Meta returned no rows for this
+// window" (coverage row_count 0) is told apart from "never measured" (no coverage row).
+// ──────────────────────────────────────────────────────────────────────────────────
+
+/** The breakdown read's fields: delivery + actions, no video fields, no rates (recomputed by readers). */
+const META_ADS_BREAKDOWN_FIELDS = "adset_id,adset_name,campaign_id,spend,impressions,reach,clicks,inline_link_clicks,actions,action_values,account_currency";
+
+export interface MetaAdsAdsetBreakdownWindowInput {
+  workspaceId: string;
+  sourceId: string;
+  /** Inclusive account-local window; must end BEFORE today in the account's timezone. */
+  since: string;
+  until: string;
+  dimension: MetaAdsBreakdownDimension;
+  /** Hard request ceiling (every page counts); the caller reserved it from its own lane. */
+  requestBudget: number;
+  /** The caller's allocation lane, recorded on the telemetry snapshot. */
+  lane?: MetaRequestLane;
+  syncRunId?: string | null;
+  signal?: AbortSignal;
+  /** Test seam for "today" in the account's timezone. */
+  now?: Date;
+}
+
+export interface MetaAdsAdsetBreakdownWindowResult {
+  adAccountId: string;
+  window: { since: string; until: string };
+  dimension: MetaAdsBreakdownDimension;
+  rowCount: number;
+  apiVersion: string;
+  telemetry: MetaAdsRequestTelemetrySnapshot;
+}
+
+function metaAdsDirectGraphOnly(credential: MetaAdsCredential, what: string): string {
+  if (isMetaAdsMcpTransport(credential) || metaAdsReadsViaCli(credential)) {
+    throw new ConnectorError("provider_unsupported", `${what} requires a stored-token direct Graph credential`, false);
+  }
+  return requireCredential(credential, "accessToken");
+}
+
+export async function syncMetaAdsAdsetBreakdownWindow(
+  db: InfiniteOsDb,
+  credential: MetaAdsCredential,
+  input: MetaAdsAdsetBreakdownWindowInput,
+): Promise<MetaAdsAdsetBreakdownWindowResult> {
+  if (!isMetaAdsBreakdownDimension(input.dimension)) {
+    throw new ConnectorError("provider_api_error", "Meta Ads breakdown dimension is not supported", false);
+  }
+  const days = metaAdsWindowDays(input.since, input.until);
+  if (days === null || days > META_ADS_BREAKDOWN_MAX_WINDOW_DAYS) {
+    throw new ConnectorError("provider_api_error", `Meta Ads breakdown window must be 1..${META_ADS_BREAKDOWN_MAX_WINDOW_DAYS} whole days`, false);
+  }
+  if (input.lane !== undefined && !isMetaRequestLane(input.lane)) {
+    throw new ConnectorError("provider_api_error", "Meta Ads request lane is invalid", false);
+  }
+  const accessToken = metaAdsDirectGraphOnly(credential, "Meta Ads breakdown read");
+  const adAccountId = metaAdsAccountId(credential);
+  const scope = { workspaceId: input.workspaceId, sourceId: input.sourceId } as SyncRequest;
+  await assertMetaAdsSourceAccountBinding(db, scope, adAccountId);
+  // Settled days only: the account's own calendar decides, so the timezone must be stored already
+  // (a history sync writes it). Unknown → refuse (no call), never guess UTC.
+  const account = await db.one<{ timezone_name: string | null }>(
+    "select timezone_name from meta_ads_accounts where workspace_id = $1 and source_id = $2 and ad_account_id = $3",
+    [input.workspaceId, input.sourceId, adAccountId],
+  );
+  if (!account?.timezone_name) {
+    throw new ConnectorError("provider_api_error", "Meta Ads breakdown read requires the stored account timezone", true);
+  }
+  const today = metaAdsProviderDay((input.now ?? new Date()).toISOString(), account.timezone_name);
+  if (input.until >= today) {
+    throw new ConnectorError("provider_api_error", "Meta Ads breakdown window must end before today in the account timezone (settled days only)", false);
+  }
+  const telemetry = new MetaAdsRequestTelemetry(input.requestBudget, undefined, undefined, undefined, "history_sync", input.lane ?? "settled_history");
+  const apiVersion = metaAdsApiVersion(credential);
+  const url = metaAdsInsightsUrl(credential, {
+    adAccountId,
+    fields: META_ADS_BREAKDOWN_FIELDS,
+    level: "adset",
+    limit: "500",
+    timeIncrement: "all_days",
+    timeRange: { since: input.since, until: input.until },
+    attributionWindows: META_ADS_ATTRIBUTION_WINDOWS,
+    filtering: metaAdsAllStatusFiltering("adset"),
+    breakdowns: input.dimension,
+  });
+  const byKey = new Map<string, {
+    adsetId: string; value: string; spend: number | null; impressions: number | null; reach: number | null;
+    clicks: number | null; inlineLinkClicks: number | null; actions: unknown[]; actionValues: unknown[]; currency: string | null;
+  }>();
+  await metaAdsFetchInsightsPages(accessToken, url, (row) => {
+    const record = row as MetaAdsInsightsRow & Record<string, unknown>;
+    const adsetId = stringOrNull(record.adset_id);
+    const value = stringOrNull(record[input.dimension]);
+    if (!adsetId || !value) {
+      throw new ConnectorError("provider_api_error", "Meta Ads breakdown row is missing its ad set or dimension value", true);
+    }
+    const key = `${adsetId}\u0000${value}`;
+    if (byKey.has(key)) {
+      throw new ConnectorError("provider_api_error", "Meta Ads breakdown returned the same ad set and dimension value twice", true);
+    }
+    byKey.set(key, {
+      adsetId,
+      value,
+      spend: numberOrNull(record.spend),
+      impressions: integerOrNull(record.impressions),
+      reach: integerOrNull(record.reach),
+      clicks: integerOrNull(record.clicks),
+      inlineLinkClicks: integerOrNull(record.inline_link_clicks),
+      actions: metaInsightsActions(record) ?? [],
+      actionValues: metaInsightsActionValues(record) ?? [],
+      currency: stringOrNull(record.account_currency)?.toLowerCase() ?? null,
+    });
+  }, telemetry, "adset_insights");
+  const rows = [...byKey.values()];
+  await db.withTransaction(async (tx) => {
+    await tx.query(
+      `delete from meta_ads_adset_breakdown_windows
+        where workspace_id = $1 and source_id = $2 and ad_account_id = $3
+          and window_since = $4::date and window_until = $5::date and dimension = $6`,
+      [input.workspaceId, input.sourceId, adAccountId, input.since, input.until, input.dimension],
+    );
+    if (rows.length > 0) {
+      await tx.query(
+        `insert into meta_ads_adset_breakdown_windows (
+           workspace_id, source_id, ad_account_id, adset_id, window_since, window_until, dimension, dimension_value,
+           spend, impressions, reach, clicks, inline_link_clicks, actions_raw, currency, api_version, sync_run_id
+         )
+         select $1, $2, $3, r.adset_id, $4::date, $5::date, $6, r.dimension_value,
+                r.spend, r.impressions, r.reach, r.clicks, r.inline_link_clicks, r.actions_raw, r.currency, $7, $8
+           from jsonb_to_recordset($9::jsonb) as r(
+             adset_id text, dimension_value text, spend numeric, impressions bigint, reach bigint, clicks bigint,
+             inline_link_clicks bigint, actions_raw jsonb, currency text
+           )`,
+        [
+          input.workspaceId, input.sourceId, adAccountId, input.since, input.until, input.dimension, apiVersion,
+          input.syncRunId ?? null,
+          JSON.stringify(rows.map((row) => ({
+            adset_id: row.adsetId,
+            dimension_value: row.value,
+            spend: row.spend,
+            impressions: row.impressions,
+            reach: row.reach,
+            clicks: row.clicks,
+            inline_link_clicks: row.inlineLinkClicks,
+            actions_raw: { actions: row.actions, action_values: row.actionValues },
+            currency: row.currency,
+          }))),
+        ],
+      );
+    }
+    await tx.query(
+      `insert into meta_ads_breakdown_coverage (
+         workspace_id, source_id, ad_account_id, window_since, window_until, dimension, closed_at, row_count, sync_run_id
+       ) values ($1, $2, $3, $4::date, $5::date, $6, now(), $7, $8)
+       on conflict (workspace_id, source_id, ad_account_id, window_since, window_until, dimension) do update set
+         closed_at = excluded.closed_at, row_count = excluded.row_count, sync_run_id = excluded.sync_run_id`,
+      [input.workspaceId, input.sourceId, adAccountId, input.since, input.until, input.dimension, rows.length, input.syncRunId ?? null],
+    );
+  });
+  return {
+    adAccountId,
+    window: { since: input.since, until: input.until },
+    dimension: input.dimension,
+    rowCount: rows.length,
+    apiVersion,
+    telemetry: telemetry.snapshot(),
+  };
+}
+
+/** One call of the extended-reads probe: accepted, or Meta's own refusal (a `(#100)` message names the bad field). */
+export interface MetaExtendedReadsProbeCall {
+  call: "insights_extended" | "adset_learning" | "breakdown_device";
+  accepted: boolean;
+  code: number | null;
+  subcode: number | null;
+  /** Meta's message, token-redacted and trimmed; null on acceptance. */
+  message: string | null;
+  /** Field NAMES present on the first returned row (never values); null when refused or no row came back. */
+  rowKeys: string[] | null;
+}
+
+export interface MetaExtendedReadsProbeResult {
+  calls: MetaExtendedReadsProbeCall[];
+  apiVersion: string | null;
+}
+
+const META_EXTENDED_READS_PROBE_MESSAGE_MAX = 300;
+
+/**
+ * The one-shot probe the founder asked for before any source is switched on: asks Meta ONCE for each
+ * extended read, exactly as the real read would (limit=1), and reports accepted / refused per call.
+ * AT MOST 3 calls, no retries, STORES NOTHING. Every call reserves through the request telemetry
+ * first (the caller's `telemetry`, else one capped at min(maxRequests, 3)), so no call can cross the
+ * admitted allowance. A throttle stops the probe at once (no further call).
+ */
+export async function probeMetaAdsExtendedReads(
+  credential: MetaAdsCredential,
+  input: { adAccountId: string; settledDay: string; maxRequests: number; signal?: AbortSignal },
+  telemetry?: MetaAdsRequestObserver,
+): Promise<MetaExtendedReadsProbeResult> {
+  const accessToken = metaAdsDirectGraphOnly(credential, "Meta Ads extended-reads probe");
+  const adAccountId = metaAdsAccountId(credential);
+  const asked = /^act_/.test(input.adAccountId) ? input.adAccountId : `act_${input.adAccountId}`;
+  if (asked !== adAccountId) {
+    throw new ConnectorError("source_scope_mismatch", "Meta Ads probe account does not match the credential", false);
+  }
+  if (metaAdsWindowDays(input.settledDay, input.settledDay) === null) {
+    throw new ConnectorError("provider_api_error", "Meta Ads probe settled day must be YYYY-MM-DD", false);
+  }
+  const limit = Math.min(input.maxRequests, META_ADS_EXTENDED_READS_PROBE_MAX_REQUESTS);
+  if (!Number.isInteger(limit) || limit < 1) {
+    throw new ConnectorError("provider_api_error", "Meta Ads probe needs at least one admitted request", false);
+  }
+  const observer: MetaAdsRequestObserver = telemetry ?? new MetaAdsRequestTelemetry(limit, undefined, undefined, undefined, "history_sync", "attended_refresh");
+  const apiVersion = metaAdsApiVersion(credential);
+  const weekSince = metaAdsShiftDay(input.settledDay, -6);
+  const learningUrl = new URL(`https://graph.facebook.com/${apiVersion}/${adAccountId}/adsets`);
+  learningUrl.searchParams.set("fields", `id,${META_ADS_LEARNING_STAGE_FIELD}`);
+  learningUrl.searchParams.set("limit", "1");
+  learningUrl.searchParams.set("effective_status", JSON.stringify([...META_ADS_EDGE_STATUS_FILTER]));
+  const plan: Array<{ call: MetaExtendedReadsProbeCall["call"]; kind: MetaAdsRequestKind; url: string }> = [
+    {
+      call: "insights_extended",
+      kind: "adset_insights",
+      url: metaAdsInsightsUrl(credential, {
+        adAccountId, fields: metaAdsInsightsFieldsForLevel("adset", true), level: "adset", limit: "1", timeIncrement: "1",
+        timeRange: { since: input.settledDay, until: input.settledDay }, attributionWindows: META_ADS_ATTRIBUTION_WINDOWS,
+        filtering: metaAdsAllStatusFiltering("adset"),
+      }),
+    },
+    { call: "adset_learning", kind: "adset_edge", url: learningUrl.toString() },
+    {
+      call: "breakdown_device",
+      kind: "adset_insights",
+      url: metaAdsInsightsUrl(credential, {
+        adAccountId, fields: META_ADS_BREAKDOWN_FIELDS, level: "adset", limit: "1", timeIncrement: "all_days",
+        timeRange: { since: weekSince, until: input.settledDay }, attributionWindows: META_ADS_ATTRIBUTION_WINDOWS,
+        filtering: metaAdsAllStatusFiltering("adset"), breakdowns: "device_platform",
+      }),
+    },
+  ];
+  const calls: MetaExtendedReadsProbeCall[] = [];
+  for (const step of plan.slice(0, limit)) {
+    await observer.beforeRequest(step.kind, false);
+    const response = await fetch(step.url, {
+      method: "GET",
+      headers: { "Content-Type": "application/json", ...bearerHeaders(accessToken) },
+      ...(input.signal ? { signal: input.signal } : {}),
+    });
+    const signal = metaAdsResponseSignal(response);
+    const text = await response.text().catch(() => "");
+    if (response.ok) {
+      let rowKeys: string[] | null = null;
+      try {
+        const body = JSON.parse(text) as { data?: unknown };
+        const first = Array.isArray(body.data) ? body.data[0] : undefined;
+        rowKeys = first && typeof first === "object" ? Object.keys(first as Record<string, unknown>).sort() : null;
+      } catch {
+        rowKeys = null;
+      }
+      await observer.observeResponse(signal);
+      observer.recordPage(signal.maxPercent);
+      calls.push({ call: step.call, accepted: true, code: null, subcode: null, message: null, rowKeys });
+      continue;
+    }
+    const parsed = parseMetaAdsErrorBody(text);
+    let message: string | null = null;
+    try {
+      const raw = (JSON.parse(text) as { error?: { message?: unknown } }).error?.message;
+      message = typeof raw === "string" ? redactProviderErrorDetail(raw).slice(0, META_EXTENDED_READS_PROBE_MESSAGE_MAX) : null;
+    } catch {
+      message = null;
+    }
+    signal.throttled = isMetaAdsRateLimitResponse({ status: response.status, code: parsed.code, subcode: parsed.subcode });
+    await observer.observeResponse(signal);
+    observer.recordRejectedResponse(signal.maxPercent);
+    calls.push({ call: step.call, accepted: false, code: parsed.code ?? response.status, subcode: parsed.subcode, message, rowKeys: null });
+    if (signal.throttled) break;
+  }
+  return { calls, apiVersion };
+}
+
 export async function resolveMetaAdsCredential(
   db: InfiniteOsDb,
   request: { workspaceId: string; sourceId: string; encryptionKey?: string }

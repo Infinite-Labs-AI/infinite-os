@@ -92,7 +92,9 @@ describe("Infinite OS migration stack", () => {
       "0075_posthog_raw_retention_90_days.sql",
       "0076_sync_runs_source_index.sql",
       "0077_meta_ads_account_spend_limit.sql",
-      "0078_trialing_metric_aliases.sql"
+      "0078_trialing_metric_aliases.sql",
+      "0079_meta_ads_adset_learning_observations.sql",
+      "0080_meta_ads_adset_breakdown_windows.sql"
     ]);
   });
 
@@ -1100,7 +1102,9 @@ describe("Infinite OS migration stack", () => {
       "0075_posthog_raw_retention_90_days.sql",
       "0076_sync_runs_source_index.sql",
       "0077_meta_ads_account_spend_limit.sql",
-      "0078_trialing_metric_aliases.sql"
+      "0078_trialing_metric_aliases.sql",
+      "0079_meta_ads_adset_learning_observations.sql",
+      "0080_meta_ads_adset_breakdown_windows.sql"
     ]);
   });
 
@@ -1202,6 +1206,37 @@ describe("Infinite OS migration stack", () => {
     expect(sql).not.toContain("drop ");
     expect(sql).not.toContain("delete ");
     expect(sql).not.toContain("create ");
+    expect(sql).not.toContain("alter ");
+  });
+
+  it("stores Meta's learning stage per ad set read in its own table, idempotently, with nothing else (0079)", () => {
+    const migration = loadMigrations().find((candidate) => candidate.id === "0079_meta_ads_adset_learning_observations.sql");
+    const sql = (migration?.sql ?? "").toLowerCase().replace(/--[^\n]*/g, "").replace(/\s+/g, " ").trim();
+    expect(sql).toContain("create table if not exists meta_ads_adset_learning_observations (");
+    expect(sql).toContain("primary key (source_id, adset_id, observed_at)");
+    // Unmeasured stays null: the status, the local day and the counts are all nullable, with no defaults.
+    expect(sql).toContain("observed_on date,");
+    expect(sql).toContain("status text,");
+    expect(sql).toContain("create index if not exists meta_ads_adset_learning_observations_latest_idx");
+    expect(sql).toContain("if exists (select 1 from pg_roles where rolname = 'engine_app')");
+    // Additive only: the entity version history is untouched (the stage never mints a version).
+    expect(sql).not.toContain("meta_ads_entity_versions");
+    expect(sql).not.toContain("drop ");
+    expect(sql).not.toContain("delete ");
+    expect(sql).not.toContain("alter ");
+  });
+
+  it("stores weekly one-dimension ad set breakdowns plus a coverage receipt, idempotently (0080)", () => {
+    const migration = loadMigrations().find((candidate) => candidate.id === "0080_meta_ads_adset_breakdown_windows.sql");
+    const sql = (migration?.sql ?? "").toLowerCase().replace(/--[^\n]*/g, "").replace(/\s+/g, " ").trim();
+    expect(sql).toContain("create table if not exists meta_ads_adset_breakdown_windows (");
+    expect(sql).toContain("create table if not exists meta_ads_breakdown_coverage (");
+    // One dimension per row; platform_position (only valid combined with publisher_platform) is refused.
+    expect(sql.match(/check \(dimension in \('device_platform', 'publisher_platform'\)\)/g)).toHaveLength(2);
+    expect(sql).not.toContain("platform_position");
+    expect(sql).toContain("row_count integer not null check (row_count >= 0)");
+    expect(sql).toContain("primary key (workspace_id, source_id, ad_account_id, window_since, window_until, dimension)");
+    expect(sql).not.toContain("drop ");
     expect(sql).not.toContain("alter ");
   });
 

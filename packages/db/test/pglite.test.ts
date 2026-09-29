@@ -88,9 +88,9 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
     rmSync(dataDir, { recursive: true, force: true });
   });
 
-  it("applied ALL 78 migrations on first boot and is idempotent on a re-run", async () => {
-    expect(loadMigrations().length).toBe(78);
-    expect(firstRun).toHaveLength(78);
+  it("applied ALL 80 migrations on first boot and is idempotent on a re-run", async () => {
+    expect(loadMigrations().length).toBe(80);
+    expect(firstRun).toHaveLength(80);
     expect(firstRun).toContain("0001_control_plane.sql");
     expect(firstRun).toContain("0006_security_roles.sql");
     expect(firstRun).toContain("0036_chat_sessions_desktop_surface.sql");
@@ -134,6 +134,8 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
     expect(firstRun).toContain("0076_sync_runs_source_index.sql");
     expect(firstRun).toContain("0077_meta_ads_account_spend_limit.sql");
     expect(firstRun).toContain("0078_trialing_metric_aliases.sql");
+    expect(firstRun).toContain("0079_meta_ads_adset_learning_observations.sql");
+    expect(firstRun).toContain("0080_meta_ads_adset_breakdown_windows.sql");
 
     // Idempotent: a second boot re-applies zero (the `rows.length` gate, not the pg `rowCount`
     // gate, makes this true on PGlite).
@@ -141,13 +143,13 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
     expect(secondRun).toEqual([]);
   });
 
-  it("created the schema_migrations ledger with all 78 rows", async () => {
+  it("created the schema_migrations ledger with all 80 rows", async () => {
     const ledger = await db.query<{ id: string }>(
       "select id from schema_migrations order by id"
     );
-    expect(ledger).toHaveLength(78);
+    expect(ledger).toHaveLength(80);
     expect(ledger[0]?.id).toBe("0001_control_plane.sql");
-    expect(ledger.at(-1)?.id).toBe("0078_trialing_metric_aliases.sql");
+    expect(ledger.at(-1)?.id).toBe("0080_meta_ads_adset_breakdown_windows.sql");
   });
 
   it("0063 serves both PostHog views from per-(workspace, source, day) rollups — refresh, is_internal, idempotency, grain key, grants", async () => {
@@ -4470,6 +4472,37 @@ describe("0078 re-applied (the cloud engine's one-call execute_sql recipe can ru
       expect(rows).toEqual([
         { id: "signup_count", aliases: ["signups"] },
         { id: "stripe_trialing_subscribers", aliases: ["trialing subscribers", "current trials", "trial customers"] }
+      ]);
+    } finally {
+      await pg.close();
+    }
+  });
+});
+
+describe("0079 + 0080 re-applied (the cloud engine's one-call execute_sql recipe can run a file twice)", () => {
+  it("creates the learning and breakdown tables once and a second run is a no-op", async () => {
+    const { PGlite } = (await import("@electric-sql/pglite")) as unknown as {
+      PGlite: new () => { exec(sql: string): Promise<unknown>; query<T>(sql: string): Promise<{ rows: T[] }>; close(): Promise<void> };
+    };
+    const pg = new PGlite();
+    try {
+      await pg.exec(
+        "create table workspaces (id text primary key); create table sources (id text primary key);" +
+          "create role growth_os_worker; create role growth_os_tool_agent; create role growth_os_app; create role growth_os_read_api;"
+      );
+      for (const id of ["0079_meta_ads_adset_learning_observations.sql", "0080_meta_ads_adset_breakdown_windows.sql"]) {
+        const sql = loadMigrations().find((m) => m.id === id)?.sql ?? "";
+        expect(sql).not.toBe("");
+        await pg.exec(sql);
+        await pg.exec(sql);
+      }
+      const { rows } = await pg.query<{ table_name: string }>(
+        "select table_name from information_schema.tables where table_name in ('meta_ads_adset_learning_observations','meta_ads_adset_breakdown_windows','meta_ads_breakdown_coverage') order by table_name"
+      );
+      expect(rows.map((row) => row.table_name)).toEqual([
+        "meta_ads_adset_breakdown_windows",
+        "meta_ads_adset_learning_observations",
+        "meta_ads_breakdown_coverage"
       ]);
     } finally {
       await pg.close();
