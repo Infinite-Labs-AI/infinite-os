@@ -108,7 +108,7 @@ export function assembleInfiniteOsPrompt(input: PromptAssemblyInput): string {
       ? "Metric aliases (common phrasings -> metric id; the live list_metrics/describe_metric actions are authoritative):"
       : "Metric aliases (common phrasings -> metric id):",
     JSON.stringify(injectedMetricAliases(availableLike)),
-    ...appRoutingGuidance(availableLike),
+    ...appRoutingGuidance(availableLike, unionTurn),
     "Typed Infinite OS action manifest:",
     JSON.stringify(actions),
     "",
@@ -138,11 +138,14 @@ export function assembleInfiniteOsPrompt(input: PromptAssemblyInput): string {
     ...(metaStatusTwin ? [
       `- Meta on/off status ('is X running/paused', which ad sets are live, when a status changed) -> ${metaStatusTwin}: the app's stored copy, no Meta call. configuredStatus = the entity's own switch, effectiveStatus = delivery, blockedBy = a paused parent; pass entityId or nameContains for its statusHistory. Label a paused/archived entity as paused rather than calling its low recent spend underperformance.`
     ] : availableLike("run_metric_query") || availableLike("run_breakdown_query") ? [
-      "- On/off status is QUERYABLE from the warehouse: campaigns and ad sets carry effective_status (Meta's delivery state — ACTIVE / PAUSED / ARCHIVED / CAMPAIGN_PAUSED / ...) and configured_status as columns on the read views. For 'is X running/paused/active', 'which adsets are paused/active', or restricting analysis to live entities, query/group/filter those columns (as of the last sync) via run_metric_query/run_breakdown_query — do NOT reach for a live entity-list or Graph tool (e.g. list_meta_entities) for status, and if such a tool errors or lacks credentials, fall back to the queryable effective_status. Label a paused/archived entity as paused rather than calling its low recent spend underperformance."
+      // A union turn offers no live Meta read, so its line names none.
+      unionTurn
+        ? "- On/off status is QUERYABLE from the warehouse: campaigns and ad sets carry effective_status (Meta's delivery state — ACTIVE / PAUSED / ARCHIVED / CAMPAIGN_PAUSED / ...) and configured_status as columns on the read views. For 'is X running/paused/active', 'which adsets are paused/active', or restricting analysis to live entities, query/group/filter those columns (as of the last sync) via run_metric_query/run_breakdown_query. Label a paused/archived entity as paused rather than calling its low recent spend underperformance."
+        : "- On/off status is QUERYABLE from the warehouse: campaigns and ad sets carry effective_status (Meta's delivery state — ACTIVE / PAUSED / ARCHIVED / CAMPAIGN_PAUSED / ...) and configured_status as columns on the read views. For 'is X running/paused/active', 'which adsets are paused/active', or restricting analysis to live entities, query/group/filter those columns (as of the last sync) via run_metric_query/run_breakdown_query — do NOT reach for a live entity-list or Graph tool (e.g. list_meta_entities) for status, and if such a tool errors or lacks credentials, fall back to the queryable effective_status. Label a paused/archived entity as paused rather than calling its low recent spend underperformance."
     ] : availableLike("list_meta_entities") ? [
       "- For 'is X running/paused/active' Meta status questions when the queryable views are not available this turn, use the live Meta entity tools (list_meta_entities/get_meta_entity). Label a paused/archived entity as paused rather than calling its low recent spend underperformance."
     ] : []),
-    ...(availableLike("run_meta_live_insights") && !metaPerformance ? [
+    ...(!unionTurn && availableLike("run_meta_live_insights") && !metaPerformance ? [
       "- Meta ads PERFORMANCE questions (best/worst ad, spend, ROAS, results, CTR by campaign/adset/ad, 'how are my ads doing') -> run_meta_live_insights: a live Graph read at the requested level over a date window, rows sorted by spend. Meta performance data is not synced into the warehouse tables, so do not conclude it is unavailable from an empty warehouse metric — call this tool. It reads performance, not delivery status; for is-it-paused questions use the status guidance above."
     ] : []),
     "- Ground analytical claims in returned action envelopes; do not invent values.",
@@ -235,7 +238,7 @@ function injectedMetricAliases(availableLike: (name: string) => boolean): Record
  * Routing for the app tools a desktop turn carries as `mcp__<server>__<tool>` twins. Each line is emitted only when
  * its tool is in the turn, so an open-core turn gets none of them.
  */
-function appRoutingGuidance(availableLike: (name: string) => boolean): string[] {
+function appRoutingGuidance(availableLike: (name: string) => boolean, unionTurn: boolean): string[] {
   const meta = availableLike("get_meta_performance");
   return [
     ...(availableLike("run_app_outcomes") ? [
@@ -251,7 +254,8 @@ function appRoutingGuidance(availableLike: (name: string) => boolean): string[] 
         : "- Site visits, visitors or traffic totals -> run_site_metrics (server Visits read high and are never people). GA4 site_visitors/sessions only when the person asks for GA4."
     ] : []),
     ...(meta ? [
-      "- Meta Ads numbers (spend, ROAS, CPA, cost per lead/CPL, CTR, CPC, link clicks, reach, frequency, results, leads, Meta-credited registrations and trials) -> get_meta_performance with a structured `period`. run_metric_query and run_breakdown_query refuse Meta metrics and views; never use run_meta_live_insights. Its results, leads, registrations, trials, purchases, CPA and ROAS are Meta's claim, not our records.",
+      // A union turn offers no live Meta read, so it is not named there.
+      `- Meta Ads numbers (spend, ROAS, CPA, cost per lead/CPL, CTR, CPC, link clicks, reach, frequency, results, leads, Meta-credited registrations and trials) -> get_meta_performance with a structured \`period\`. run_metric_query and run_breakdown_query refuse Meta metrics and views${unionTurn ? "." : "; never use run_meta_live_insights."} Its results, leads, registrations, trials, purchases, CPA and ROAS are Meta's claim, not our records.`,
       "- Registrations or trials credited to Meta ads → get_meta_performance (Meta's claim). Our own counts stay run_app_outcomes (registrations = first profile insert) and read_subscription_metrics (Stripe trial starts). Never present one as the other; when asked to compare, show both, labelled."
     ] : []),
     // The app's Contacts read answers form leads; list_audit_leads keeps only Infinite's own audit-form leads. A turn

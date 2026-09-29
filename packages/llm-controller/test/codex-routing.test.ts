@@ -49,11 +49,15 @@ const LOCAL_ONLY_READS = [
   "sync_source_now", "get_recent_sync_runs", "describe_source", "list_source_schedules",
   "describe_context_item", "validate_journey_plan", "search_context"
 ];
+// It leaves out the native live Meta Graph reads too, whatever app tools it carries: they read Meta on the laptop's
+// credential, and the turn reaches Meta through the app's reads (by name or through capability_call) instead.
+const META_LIVE_READS = ["run_meta_live_insights", "list_meta_entities", "get_meta_entity", "list_meta_assets"];
 type AnyRegistry = ReturnType<typeof createInfiniteOsRegistry>;
 const operatorIds = (registry: AnyRegistry) =>
   registry.list().filter((action) => action.authority === "operator").map((action) => action.id as string);
 /** The ids every union turn withholds, whatever app tools it carries. */
-const unionAlwaysWithheld = (registry: AnyRegistry) => new Set([...operatorIds(registry), ...LOCAL_ONLY_READS]);
+const unionAlwaysWithheld = (registry: AnyRegistry) =>
+  new Set([...operatorIds(registry), ...LOCAL_ONLY_READS, ...META_LIVE_READS]);
 /** The natives a union turn with no app twins keeps, in registry order. */
 const unionNatives = (registry: AnyRegistry) => {
   const withheld = unionAlwaysWithheld(registry);
@@ -568,9 +572,14 @@ describe("union turn: native live Meta read", () => {
     expect(call).toMatchObject({ status: "error", error: { code: "unknown_action" } });
   });
 
-  it("keeps run_meta_live_insights in a union turn without the app twin", async () => {
-    const { tools } = await toolsFor(["list_sources"]);
-    expect(tools).toContain("run_meta_live_insights");
+  it("drops run_meta_live_insights, and refuses a call to it, in a union turn without the app twin too", async () => {
+    const { tools, call } = await toolsFor(["list_sources"]);
+    expect(tools).toContain(`mcp__${APP_SERVER}__list_sources`);
+    expect(tools).not.toContain("run_meta_live_insights");
+    expect(call).toMatchObject({
+      status: "error",
+      error: { code: "unknown_action", message: "Unknown Infinite OS action: run_meta_live_insights. This chat turn does not offer it." }
+    });
   });
 });
 
@@ -649,10 +658,228 @@ describe("union turn: native live Meta entity reads", () => {
     }
   });
 
-  it("keeps the native live entity reads in a union turn without the twin", async () => {
+  it("withholds the native live entity reads in a union turn without the twin too", async () => {
     const { tools } = await run(["get_meta_performance"], "list_sources");
     for (const id of LIVE_READS) {
-      expect(tools).toContain(id);
+      expect(tools).not.toContain(id);
+    }
+  });
+});
+
+describe("union turn: the native live Meta Graph reads, whatever app tools the turn carries", () => {
+  const app = (name: string) => `mcp__${APP_SERVER}__${name}`;
+  // The app read that answers in each live read's place, by name or through capability_call.
+  const APP_READ: Record<string, string> = {
+    run_meta_live_insights: "get_meta_performance",
+    list_meta_entities: "list_meta_entities",
+    get_meta_entity: "list_meta_entities",
+    list_meta_assets: "list_meta_entities"
+  };
+  // The desktop's general-profile discovery tools (1bu-1 capability-discovery.ts GENERAL_PROFILE_REQUIRED_TOOL_NAMES).
+  const DISCOVERY = ["capability_search", "capability_describe", "capability_call", "skill_search", "skill_load"];
+  const CAPABILITY_CALL = app("capability_call");
+  // The app tools a union turn can carry, and the sentence each live read's refusal then adds.
+  const TURNS: Array<{ label: string; appTools: string[]; refusal: (id: string) => string }> = [
+    {
+      label: "the app's Meta reads by name",
+      appTools: ["get_current_workspace", "list_sources", "get_meta_performance", "list_meta_entities"],
+      refusal: (id) => `This turn offers ${app(APP_READ[id]!)} in its place.`
+    },
+    {
+      label: "the app's Meta reads by name beside capability_call",
+      appTools: ["get_meta_performance", "list_meta_entities", ...DISCOVERY],
+      refusal: (id) => `This turn offers ${app(APP_READ[id]!)} in its place.`
+    },
+    {
+      label: "capability_call only",
+      appTools: ["get_current_workspace", ...DISCOVERY],
+      refusal: (id) => `Use ${CAPABILITY_CALL} with ${APP_READ[id]} in its place.`
+    },
+    {
+      label: "get_meta_performance by name, the entity reads behind capability_call",
+      appTools: ["get_meta_performance", ...DISCOVERY],
+      refusal: (id) => id === "run_meta_live_insights"
+        ? `This turn offers ${app("get_meta_performance")} in its place.`
+        : `Use ${CAPABILITY_CALL} with list_meta_entities in its place.`
+    },
+    {
+      label: "neither",
+      appTools: ["get_current_workspace"],
+      refusal: () => "This chat turn does not offer it."
+    }
+  ];
+  const REGISTRIES: Array<[string, (handlers: Parameters<typeof createInfiniteOsRegistry>[0]) => AnyRegistry]> = [
+    ["daemon", (handlers) => createDaemonActionRegistry(handlers)],
+    ["full", (handlers) => createInfiniteOsRegistry(handlers)]
+  ];
+  const spellings = (id: string) => [id, `mcp_${id}`, app(id), id.toUpperCase(), app(id).toUpperCase()];
+
+  /** One turn on a registry whose live Meta reads record that they ran; the model calls `call` once, then answers. */
+  async function run(
+    makeRegistry: (handlers: Parameters<typeof createInfiniteOsRegistry>[0]) => AnyRegistry,
+    appTools: string[] | undefined,
+    options: { call?: string; mode?: "union" | "exclusive"; message?: string; general?: boolean } = {}
+  ) {
+    const graphReads: string[] = [];
+    const handlers = Object.fromEntries(META_LIVE_READS.map((id) => [id, async () => {
+      graphReads.push(id);
+      return { ok: true, actionId: id, authority: "tool_agent", status: "ok", data: {}, provenance: [], caveats: [], truncated: false, nextActions: [] };
+    }])) as Parameters<typeof createInfiniteOsRegistry>[0];
+    const requests: ModelRequest[] = [];
+    const appCalls: string[] = [];
+    const controller = createLlmController({
+      registry: makeRegistry(handlers),
+      modelClient: {
+        complete: async (request) => {
+          requests.push(request);
+          return options.call && request.toolResults.length === 0
+            ? { toolCalls: [{ id: "call_meta", name: options.call, input: { sourceId: "src_meta" } }] }
+            : { message: "done" };
+        }
+      }
+    });
+    const result = await controller.chat({
+      message: options.message ?? "how are my ads doing?",
+      sessionId: `s-live-meta-${options.mode ?? "union"}-${(appTools ?? ["plain"]).join("-")}-${options.call ?? ""}-${options.message ?? ""}-${options.general ? "general" : "legacy"}`,
+      workspaceId: "ws_test",
+      actorId: "operator-1",
+      surface: "desktop",
+      ...(options.general ? {
+        agentProfile: "general-marketing-v1" as const,
+        interactiveFeatures: ["workspace.app-tools.v1", "actions.confirmation.v1", "actions.continuation.v1"] as const
+      } : {}),
+      ...(appTools ? {
+        scopedAppTools: {
+          serverName: APP_SERVER,
+          allowedTools: appTools.map(app),
+          mode: options.mode ?? "union",
+          // App-authored descriptions are the app's own text; these never name an engine action.
+          tools: appTools.map((name) => ({ name, description: "App tool.", inputSchema: { type: "object" } })),
+          callTool: async (name: string) => {
+            appCalls.push(name);
+            return { ok: true };
+          }
+        }
+      } : {})
+    });
+    const first = requests[0] as { tools: Array<{ name: string }>; systemPrompt: string };
+    const lines = first.systemPrompt.split("\n");
+    const manifest = JSON.parse(lines[lines.indexOf("Typed Infinite OS action manifest:") + 1] ?? "[]") as Array<{
+      id: string;
+      recommendedNextActions: string[];
+    }>;
+    return {
+      tools: first.tools.map((tool) => tool.name),
+      manifest,
+      prompts: requests.map((request) => request.systemPrompt),
+      call: result.actionCalls.find((entry) => entry.id === "call_meta"),
+      graphReads,
+      appCalls
+    };
+  }
+
+  it("leaves every live Meta read out of the advertised set and the manifest, on the daemon and the full registry", async () => {
+    for (const [registryName, makeRegistry] of REGISTRIES) {
+      for (const { label, appTools } of TURNS) {
+        const { tools, manifest } = await run(makeRegistry, appTools);
+        expect(tools.filter((name) => name.startsWith("mcp__")), `${registryName}, ${label}`).toEqual(appTools.map(app));
+        for (const id of META_LIVE_READS) {
+          expect(tools, `${registryName}, ${label}: ${id}`).not.toContain(id);
+          expect(manifest.some((entry) => entry.id === id || entry.recommendedNextActions.includes(id)), `${registryName}, ${label}: ${id}`).toBe(false);
+        }
+      }
+    }
+  });
+
+  it("refuses each live read under every spelling, never reaching Graph, and names what the turn offers in its place", async () => {
+    for (const [registryName, makeRegistry] of REGISTRIES) {
+      for (const { label, appTools, refusal } of TURNS) {
+        for (const id of META_LIVE_READS) {
+          for (const spelling of spellings(id)) {
+            const { call, graphReads, appCalls } = await run(makeRegistry, appTools, { call: spelling });
+            const where = `${registryName}, ${label}: ${spelling}`;
+            expect(graphReads, where).toEqual([]);
+            if (spelling === app(id) && appTools.includes(id)) {
+              // The app's own read of that name, which answers from its stored copy.
+              expect(call, where).toMatchObject({ actionId: app(id), status: "ok" });
+              expect(appCalls, where).toEqual([id]);
+              continue;
+            }
+            expect(call, where).toMatchObject({
+              actionId: id,
+              status: "error",
+              requiresConfirmation: false,
+              error: { code: "unknown_action", message: `Unknown Infinite OS action: ${id}. ${refusal(id)}` }
+            });
+            expect(appCalls, where).toEqual([]);
+          }
+        }
+      }
+    }
+  });
+
+  it("names no live Meta read on any union prompt line, legacy or general profile, before and after a refused call", async () => {
+    const messages = [
+      "how are my ads doing?",
+      "is the spring campaign running?",
+      "what's my cost per lead this week?",
+      "which ad accounts and pixels can I use?",
+      "what stands out?"
+    ];
+    for (const [registryName, makeRegistry] of REGISTRIES) {
+      for (const { label, appTools } of TURNS) {
+        for (const message of messages) {
+          for (const general of [false, true]) {
+            const { prompts } = await run(makeRegistry, appTools, { message, general, call: "run_meta_live_insights" });
+            expect(prompts, message).toHaveLength(2);
+            for (const [index, systemPrompt] of prompts.entries()) {
+              for (const id of META_LIVE_READS) {
+                const named = systemPrompt.split("\n").filter((line) => new RegExp(`\\b${id}\\b`).test(line));
+                expect(named, `${registryName}, ${label}, ${general ? "general" : "legacy"}, request ${index}, "${message}": ${id}`).toEqual([]);
+              }
+            }
+          }
+        }
+      }
+    }
+  });
+
+  it("keeps every live Meta read in a plain turn, where a call still runs the native read", async () => {
+    for (const [registryName, makeRegistry] of REGISTRIES) {
+      const { tools, prompts } = await run(makeRegistry, undefined);
+      for (const id of META_LIVE_READS) {
+        expect(tools, `${registryName}: ${id}`).toContain(id);
+        for (const spelling of [id, `mcp_${id}`]) {
+          const { call, graphReads } = await run(makeRegistry, undefined, { call: spelling });
+          expect(graphReads, `${registryName}: ${spelling}`).toEqual([id]);
+          expect(call, `${registryName}: ${spelling}`).toMatchObject({ actionId: id, status: "ok" });
+        }
+        // A spelling the registry does not know is refused as before, with no added sentence.
+        for (const spelling of [app(id), id.toUpperCase()]) {
+          const { call, graphReads } = await run(makeRegistry, undefined, { call: spelling });
+          expect(graphReads, `${registryName}: ${spelling}`).toEqual([]);
+          expect(call?.error, `${registryName}: ${spelling}`).toEqual({ code: "unknown_action", message: `Unknown Infinite OS action: ${spelling}` });
+        }
+      }
+      expect(prompts[0]).toContain("-> run_meta_live_insights: a live Graph read at the requested level");
+    }
+  });
+
+  it("leaves an exclusive turn as it was: app tools only, a native spelling an unknown scoped tool, the prompt's Meta line whole", async () => {
+    const appTools = ["get_meta_performance", "list_meta_entities", "run_metric_query", ...DISCOVERY];
+    for (const [registryName, makeRegistry] of REGISTRIES) {
+      const { tools, prompts } = await run(makeRegistry, appTools, { mode: "exclusive" });
+      expect(tools, registryName).toEqual(appTools.map(app));
+      expect(prompts[0]).toContain("run_metric_query and run_breakdown_query refuse Meta metrics and views; never use run_meta_live_insights.");
+      for (const id of META_LIVE_READS) {
+        for (const spelling of [id, `mcp_${id}`, id.toUpperCase()]) {
+          const { call, graphReads, appCalls } = await run(makeRegistry, appTools, { mode: "exclusive", call: spelling });
+          const normalized = spelling === `mcp_${id}` ? id : spelling;
+          expect(graphReads, `${registryName}: ${spelling}`).toEqual([]);
+          expect(appCalls, `${registryName}: ${spelling}`).toEqual([]);
+          expect(call?.error, `${registryName}: ${spelling}`).toEqual({ code: "unknown_action", message: `Unknown scoped app tool: ${normalized}` });
+        }
+      }
     }
   });
 });
@@ -895,9 +1122,15 @@ describe("union turn: the app's list_sources twin", () => {
         }
       }
       const hints = (id: string) => manifest.find((entry) => entry.id === id)?.recommendedNextActions;
-      // The engine-write hints go too: list_meta_assets pointed at connect_source, get_meta_entity at set_meta_entity_status.
-      expect(hints("list_meta_assets")).toEqual([]);
-      expect(hints("get_meta_entity")).toEqual(["list_meta_entities"]);
+      if (registry.get("run_metric_query")) {
+        // The write and local-only hints go too: resolve_entity pointed at validate_journey_plan, drilldown_result at
+        // create_saved_report.
+        expect(hints("resolve_entity")).toEqual(["run_journey_query"]);
+        expect(hints("drilldown_result")).toEqual([]);
+      } else {
+        // The daemon union keeps no native once its list_sources twin is in the turn.
+        expect(manifest.map((entry) => entry.id)).toEqual([app("list_sources")]);
+      }
     }
   });
 
@@ -923,7 +1156,7 @@ describe("union turn: the app's list_sources twin", () => {
     expect(buildQueryRefinementSections("how many signups did we get", [nativeResult]).join("\n")).toContain("you only have a source list so far");
   });
 
-  it("sends the desktop Codex union no daemon native: its twins replace five, the rest are writes or local-only reads", async () => {
+  it("sends the desktop Codex union no daemon native: its twin replaces list_sources, the rest are live Meta, write or local-only", async () => {
     const registry = createDaemonActionRegistry();
     const twins = [
       "get_meta_performance", "list_meta_entities", "list_sources", "list_metrics", "describe_metric",
@@ -938,8 +1171,8 @@ describe("union turn: the app's list_sources twin", () => {
     expect(daemon).toEqual(expect.arrayContaining(replaced));
     expect(natives).toEqual(daemon.filter((id) => !withheld.has(id)));
     // Pinned on purpose, as a tripwire: today every one of the daemon's 30 natives is withheld (18 writes, 7 local-only
-    // reads, 5 twin-replaced reads). A new daemon native fails here, so its change must decide whether a union turn
-    // offers it.
+    // reads, 4 live Meta reads, list_sources). A new daemon native fails here, so its change must decide whether a
+    // union turn offers it.
     expect(operatorIds(registry)).toHaveLength(18);
     expect(daemon).toHaveLength(30);
     expect(natives).toEqual([]);
@@ -1212,7 +1445,9 @@ describe("union turn: engine writes and local-only reads", () => {
           serverName: APP_SERVER,
           allowedTools: appTools.map(app),
           mode: options.mode ?? "union",
-          tools: appTools.map((name) => ({ name, description: name, inputSchema: { type: "object" } })),
+          // The app's own description: it rides in the manifest as the tool's summary, and never names an engine
+          // action (the app's list_meta_entities shares a withheld native's name).
+          tools: appTools.map((name) => ({ name, description: "App tool.", inputSchema: { type: "object" } })),
           callTool: async (name: string) => {
             appCalls.push(name);
             return { ok: true, rows: [] };
@@ -1239,7 +1474,7 @@ describe("union turn: engine writes and local-only reads", () => {
     }
   });
 
-  it("withholds every engine write and the seven local-only reads from a union turn, on the daemon and the full registry", async () => {
+  it("withholds every engine write, the seven local-only reads and the four live Meta reads from a union turn, on the daemon and the full registry", async () => {
     for (const registry of [createDaemonActionRegistry(), createInfiniteOsRegistry({})]) {
       const { tools, manifest } = await turn(registry, ["get_current_workspace"]);
       expect(tools).toEqual([...unionNatives(registry), app("get_current_workspace")]);
