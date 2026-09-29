@@ -6760,7 +6760,8 @@ async function stripeGet<T>(
   // a 10,000/month floor) is the scheduling gate for the whole delta design, so every read is
   // counted. Telemetry is deliberately best-effort: it never changes a code path and never
   // becomes a reason a sync fails.
-  telemetry?: StripeRequestTelemetry
+  telemetry?: StripeRequestTelemetry,
+  signal?: AbortSignal,
 ): Promise<T> {
   const url = new URL(`${credential.apiBaseUrl ?? "https://api.stripe.com"}${path}`);
   for (const [key, value] of Object.entries(params)) {
@@ -6775,6 +6776,7 @@ async function stripeGet<T>(
     url.toString(),
     {
       method: "GET",
+      ...(signal ? { signal } : {}),
       headers: {
         Authorization: `Basic ${Buffer.from(`${secretKey}:`).toString("base64")}`
       }
@@ -6816,6 +6818,7 @@ const STRIPE_CATALOG_PAGE_MAX = 30;
 const STRIPE_CATALOG_PRICE_MAX = 100;
 const STRIPE_CATALOG_CACHE_TTL_MS = 60_000;
 const STRIPE_CATALOG_CACHE_MAX = 100;
+const STRIPE_CATALOG_REQUEST_TIMEOUT_MS = 15_000;
 
 type StripeCatalogSource = {
   source_id: string;
@@ -6898,7 +6901,8 @@ async function resolveStripeCatalogSource(
 ): Promise<StripeCatalogSource> {
   const rows = await db.query<StripeCatalogSource>(
     `select s.id as source_id, s.status as source_status,
-            cc.id as credential_id, cc.updated_at as credential_updated_at
+            cc.id as credential_id, cc.updated_at as credential_updated_at,
+            (s.status in ('connected', 'degraded', 'syncing') and cc.id is not null) as source_usable
        from sources s
        left join lateral (
          select id, updated_at
@@ -6910,7 +6914,7 @@ async function resolveStripeCatalogSource(
        ) cc on true
       where s.workspace_id = $1 and s.provider = 'stripe'
         and ($2::text is null or s.id = $2)
-      order by s.connected_at desc
+      order by source_usable desc, s.connected_at desc
       limit 2`,
     [scope.workspaceId, scope.sourceId ?? null],
   );
@@ -6929,7 +6933,7 @@ async function resolveStripeCatalogSource(
     );
   }
   const usable = rows.filter((row) =>
-    ["connected", "degraded"].includes(row.source_status) && Boolean(row.credential_id));
+    ["connected", "degraded", "syncing"].includes(row.source_status) && Boolean(row.credential_id));
   if (usable.length === 0) {
     throw new ConnectorError(
       "stripe_catalog_unavailable",
@@ -6987,7 +6991,14 @@ async function stripeCatalogGet<T>(
   params: Record<string, string | string[]>,
 ): Promise<T> {
   try {
-    return await stripeGet<T>(credential, secretKey, path, params);
+    return await stripeGet<T>(
+      credential,
+      secretKey,
+      path,
+      params,
+      undefined,
+      AbortSignal.timeout(STRIPE_CATALOG_REQUEST_TIMEOUT_MS),
+    );
   } catch (error) {
     stripeCatalogPermissionError(error);
   }

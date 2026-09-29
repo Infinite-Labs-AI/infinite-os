@@ -15,6 +15,8 @@ function catalogDb(options: {
   credentialId?: string;
   credentialUpdatedAt?: string;
   sourceStatus?: string;
+  sourceRows?: Array<Record<string, unknown>>;
+  observedSql?: string[];
 } = {}): InfiniteOsDb {
   const workspaceId = options.workspaceId ?? "ws_catalog";
   const sourceId = options.sourceId ?? "src_stripe";
@@ -43,7 +45,9 @@ function catalogDb(options: {
     throw new Error(`Unexpected SQL: ${sql}`);
   };
   const query: InfiniteOsDb["query"] = async <T extends Record<string, unknown>>(sql: string, params?: unknown[]) => {
+    options.observedSql?.push(sql);
     if (sql.includes("from sources s") && sql.includes("connection_credentials")) {
+      if (options.sourceRows) return options.sourceRows as T[];
       if (params?.[0] !== workspaceId || (params?.[1] && params[1] !== sourceId)) return [];
       return [{
         source_id: sourceId,
@@ -111,6 +115,7 @@ describe("Stripe live product catalog", () => {
     expect(url.searchParams.get("limit")).toBe("30");
     expect(url.searchParams.getAll("expand[]")).toEqual(["data.default_price"]);
     expect(String((init as RequestInit).headers)).not.toContain("rk_test_customer");
+    expect((init as RequestInit).signal).toBeInstanceOf(AbortSignal);
     expect(result).toEqual({
       sourceId: "src_stripe",
       products: [{
@@ -257,6 +262,45 @@ describe("Stripe live product catalog", () => {
       sourceId: "src_foreign",
       encryptionKey: KEY,
     })).rejects.toMatchObject({ code: "stripe_source_unavailable" });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("orders usable sources before the row cap and keeps a syncing source readable", async () => {
+    const observedSql: string[] = [];
+    const db = catalogDb({
+      workspaceId: "ws_source_order",
+      observedSql,
+      sourceRows: [
+        { source_id: "src_syncing", source_status: "syncing", credential_id: "cred_live", credential_updated_at: "2026-09-29T12:00:00Z" },
+        { source_id: "src_error", source_status: "error", credential_id: "cred_error", credential_updated_at: "2026-09-29T13:00:00Z" },
+        { source_id: "src_revoked", source_status: "revoked", credential_id: null, credential_updated_at: null },
+      ],
+    });
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({ data: [], has_more: false })));
+
+    await expect(listStripeCatalogProducts(db, {
+      workspaceId: "ws_source_order",
+      encryptionKey: KEY,
+    })).resolves.toMatchObject({ sourceId: "src_syncing" });
+    expect(observedSql[0]).toMatch(/source_usable[\s\S]*order by source_usable desc/i);
+    expect(observedSql[0]).toContain("'syncing'");
+  });
+
+  it("still refuses ambiguity when unhealthy rows accompany two usable sources", async () => {
+    const db = catalogDb({
+      workspaceId: "ws_ambiguous",
+      sourceRows: [
+        { source_id: "src_error", source_status: "error", credential_id: "cred_error", credential_updated_at: "2026-09-29T14:00:00Z" },
+        { source_id: "src_a", source_status: "connected", credential_id: "cred_a", credential_updated_at: "2026-09-29T13:00:00Z" },
+        { source_id: "src_b", source_status: "degraded", credential_id: "cred_b", credential_updated_at: "2026-09-29T12:00:00Z" },
+      ],
+    });
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(listStripeCatalogProducts(db, {
+      workspaceId: "ws_ambiguous",
+      encryptionKey: KEY,
+    })).rejects.toMatchObject({ code: "stripe_source_ambiguous" });
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
