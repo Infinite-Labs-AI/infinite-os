@@ -34,6 +34,12 @@ export interface PromptAssemblyInput {
   interactiveFeatures?: readonly InteractiveFeature[];
   /** `continuation`: the latest message is the host's report of an action outcome, not the user. */
   turnOrigin?: "human" | "continuation";
+  /**
+   * How the turn's app tools compose with the engine's actions. "union" (the desktop's Codex chat) offers none of
+   * the engine's writes, so its prompt never promises the engine's Confirm control. Absent or "exclusive" leaves the
+   * prompt byte for byte as before.
+   */
+  scopedAppToolMode?: "exclusive" | "union";
 }
 
 export function assembleInfiniteOsPrompt(input: PromptAssemblyInput): string {
@@ -62,6 +68,10 @@ export function assembleInfiniteOsPrompt(input: PromptAssemblyInput): string {
   // engine's Meta metrics, views and recipes are refused there, so the prompt stops pointing at them.
   const metaPerformance = availableLike("get_meta_performance");
   const metaStatusTwin = appTwin("list_meta_entities");
+  const unionTurn = input.scopedAppToolMode === "union";
+  // A union turn withholds the context/journey reads, so the journey flow is named only when its steps are in the turn.
+  const journeyFlow = availableLike("run_journey_query") &&
+    (!unionTurn || (availableLike("search_context") && availableLike("validate_journey_plan")));
 
   return [
     ...(input.agentProfile === GENERAL_MARKETING_PROFILE ? generalProfileHeader(input) : [
@@ -72,7 +82,9 @@ export function assembleInfiniteOsPrompt(input: PromptAssemblyInput): string {
     "Authority policy:",
     "- Use only the provided typed Infinite OS actions.",
     "- Read actions may be selected for automatic execution by the runtime.",
-    "- Operator/write actions are never auto-executed, but the RUNTIME owns that confirmation — not you. When you have the required parameters, CALL the action directly: the app then shows the user a Confirm control that gates execution, and the action runs only after they act on it. Do NOT run your own confirmation step — never ask the user to type or repeat a confirmation phrase (e.g. 'reply confirm' / 'CONFIRM CREATE ...'), never withhold the tool call waiting for verbal approval, and never invent an extra approval turn. Gather the parameters, make the single tool call, and let the app's Confirm control be the one and only confirmation.",
+    unionTurn
+      ? UNION_WRITE_POLICY
+      : "- Operator/write actions are never auto-executed, but the RUNTIME owns that confirmation — not you. When you have the required parameters, CALL the action directly: the app then shows the user a Confirm control that gates execution, and the action runs only after they act on it. Do NOT run your own confirmation step — never ask the user to type or repeat a confirmation phrase (e.g. 'reply confirm' / 'CONFIRM CREATE ...'), never withhold the tool call waiting for verbal approval, and never invent an extra approval turn. Gather the parameters, make the single tool call, and let the app's Confirm control be the one and only confirmation.",
     "",
     "Instruction/data boundary:",
     "- Do not expose raw SQL, arbitrary shell, filesystem, browser, generic MCP, or secret access.",
@@ -96,7 +108,7 @@ export function assembleInfiniteOsPrompt(input: PromptAssemblyInput): string {
       ? "Metric aliases (common phrasings -> metric id; the live list_metrics/describe_metric actions are authoritative):"
       : "Metric aliases (common phrasings -> metric id):",
     JSON.stringify(injectedMetricAliases(availableLike)),
-    ...appRoutingGuidance(availableLike),
+    ...appRoutingGuidance(availableLike, unionTurn),
     "Typed Infinite OS action manifest:",
     JSON.stringify(actions),
     "",
@@ -126,11 +138,14 @@ export function assembleInfiniteOsPrompt(input: PromptAssemblyInput): string {
     ...(metaStatusTwin ? [
       `- Meta on/off status ('is X running/paused', which ad sets are live, when a status changed) -> ${metaStatusTwin}: the app's stored copy, no Meta call. configuredStatus = the entity's own switch, effectiveStatus = delivery, blockedBy = a paused parent; pass entityId or nameContains for its statusHistory. Label a paused/archived entity as paused rather than calling its low recent spend underperformance.`
     ] : availableLike("run_metric_query") || availableLike("run_breakdown_query") ? [
-      "- On/off status is QUERYABLE from the warehouse: campaigns and ad sets carry effective_status (Meta's delivery state — ACTIVE / PAUSED / ARCHIVED / CAMPAIGN_PAUSED / ...) and configured_status as columns on the read views. For 'is X running/paused/active', 'which adsets are paused/active', or restricting analysis to live entities, query/group/filter those columns (as of the last sync) via run_metric_query/run_breakdown_query — do NOT reach for a live entity-list or Graph tool (e.g. list_meta_entities) for status, and if such a tool errors or lacks credentials, fall back to the queryable effective_status. Label a paused/archived entity as paused rather than calling its low recent spend underperformance."
+      // A union turn offers no live Meta read, so its line names none.
+      unionTurn
+        ? "- On/off status is QUERYABLE from the warehouse: campaigns and ad sets carry effective_status (Meta's delivery state — ACTIVE / PAUSED / ARCHIVED / CAMPAIGN_PAUSED / ...) and configured_status as columns on the read views. For 'is X running/paused/active', 'which adsets are paused/active', or restricting analysis to live entities, query/group/filter those columns (as of the last sync) via run_metric_query/run_breakdown_query. Label a paused/archived entity as paused rather than calling its low recent spend underperformance."
+        : "- On/off status is QUERYABLE from the warehouse: campaigns and ad sets carry effective_status (Meta's delivery state — ACTIVE / PAUSED / ARCHIVED / CAMPAIGN_PAUSED / ...) and configured_status as columns on the read views. For 'is X running/paused/active', 'which adsets are paused/active', or restricting analysis to live entities, query/group/filter those columns (as of the last sync) via run_metric_query/run_breakdown_query — do NOT reach for a live entity-list or Graph tool (e.g. list_meta_entities) for status, and if such a tool errors or lacks credentials, fall back to the queryable effective_status. Label a paused/archived entity as paused rather than calling its low recent spend underperformance."
     ] : availableLike("list_meta_entities") ? [
       "- For 'is X running/paused/active' Meta status questions when the queryable views are not available this turn, use the live Meta entity tools (list_meta_entities/get_meta_entity). Label a paused/archived entity as paused rather than calling its low recent spend underperformance."
     ] : []),
-    ...(availableLike("run_meta_live_insights") && !metaPerformance ? [
+    ...(!unionTurn && availableLike("run_meta_live_insights") && !metaPerformance ? [
       "- Meta ads PERFORMANCE questions (best/worst ad, spend, ROAS, results, CTR by campaign/adset/ad, 'how are my ads doing') -> run_meta_live_insights: a live Graph read at the requested level over a date window, rows sorted by spend. Meta performance data is not synced into the warehouse tables, so do not conclude it is unavailable from an empty warehouse metric — call this tool. It reads performance, not delivery status; for is-it-paused questions use the status guidance above."
     ] : []),
     "- Ground analytical claims in returned action envelopes; do not invent values.",
@@ -147,7 +162,7 @@ export function assembleInfiniteOsPrompt(input: PromptAssemblyInput): string {
     "- If you only have one scalar result or one lonely ranked row for a broad prompt, keep refining before answering as if you already understand the full picture.",
     "- For broad exploratory prompts, do not stop at inventory-only results like source lists, sync lists, metric lists, or view lists when the user is asking what stands out, what they should know, or what they can inspect. Fetch at least one concrete metric, breakdown, or metric/view detail before summarizing.",
     "- For broad workspace snapshot prompts, try to combine three things before answering strongly: what is connected, whether it looks current/fresh, and at least one concrete analytical signal.",
-    ...(availableLike("run_journey_query") ? [
+    ...(journeyFlow ? [
       "- For path, attribution, journey, or downstream-outcome questions such as which campaign, channel, content, event, or behavior drove signups, demos, purchases, revenue, LTV, churn, pipeline, or conversion, use the journey flow before answering: search context, validate a journey plan, run the journey query, then fetch evidence or verify claims when needed.",
       "- Do not answer a path/downstream question after only listing sources, schedules, metrics, or views. If the relevant sources exist, run validate_journey_plan and run_journey_query before the final answer; if the journey result is low_coverage or unsupported, then say that with the returned caveats and optionally use metric/breakdown fallback analysis."
     ] : availableLike("run_metric_query") ? [
@@ -169,6 +184,13 @@ export function assembleInfiniteOsPrompt(input: PromptAssemblyInput): string {
     ,"- When ending with follow-up suggestions, prefer one or two concrete next questions over a long generic menu."
   ].join("\n");
 }
+
+/**
+ * A union turn's write policy. It offers none of the engine's writes: a write goes through the app tool that proposes
+ * it, and the app's own approval card is the only confirmation.
+ */
+const UNION_WRITE_POLICY =
+  "- Operator/write actions are never auto-executed, and this turn offers none of the engine's own write actions. A change goes through the app tool in this turn that proposes it: when you have the required parameters, call that tool directly; the app shows the user its own approval card, and the change runs only after they approve it there. Do NOT run your own confirmation step — never ask the user to type or repeat a confirmation phrase (e.g. 'reply confirm' / 'CONFIRM CREATE ...'), never withhold the tool call waiting for verbal approval, and never invent an extra approval turn. When no tool in this turn can make the change, say so plainly and never imply that it ran.";
 
 /**
  * The engine's Meta metric ids and views. A desktop turn refuses them on run_metric_query/run_breakdown_query and
@@ -216,7 +238,7 @@ function injectedMetricAliases(availableLike: (name: string) => boolean): Record
  * Routing for the app tools a desktop turn carries as `mcp__<server>__<tool>` twins. Each line is emitted only when
  * its tool is in the turn, so an open-core turn gets none of them.
  */
-function appRoutingGuidance(availableLike: (name: string) => boolean): string[] {
+function appRoutingGuidance(availableLike: (name: string) => boolean, unionTurn: boolean): string[] {
   const meta = availableLike("get_meta_performance");
   return [
     ...(availableLike("run_app_outcomes") ? [
@@ -232,10 +254,17 @@ function appRoutingGuidance(availableLike: (name: string) => boolean): string[] 
         : "- Site visits, visitors or traffic totals -> run_site_metrics (server Visits read high and are never people). GA4 site_visitors/sessions only when the person asks for GA4."
     ] : []),
     ...(meta ? [
-      "- Meta Ads numbers (spend, ROAS, CPA, cost per lead/CPL, CTR, CPC, link clicks, reach, frequency, results, leads, Meta-credited registrations and trials) -> get_meta_performance with a structured `period`. run_metric_query and run_breakdown_query refuse Meta metrics and views; never use run_meta_live_insights. Its results, leads, registrations, trials, purchases, CPA and ROAS are Meta's claim, not our records.",
+      // A union turn offers no live Meta read, so it is not named there.
+      `- Meta Ads numbers (spend, ROAS, CPA, cost per lead/CPL, CTR, CPC, link clicks, reach, frequency, results, leads, Meta-credited registrations and trials) -> get_meta_performance with a structured \`period\`. run_metric_query and run_breakdown_query refuse Meta metrics and views${unionTurn ? "." : "; never use run_meta_live_insights."} Its results, leads, registrations, trials, purchases, CPA and ROAS are Meta's claim, not our records.`,
       "- Registrations or trials credited to Meta ads → get_meta_performance (Meta's claim). Our own counts stay run_app_outcomes (registrations = first profile insert) and read_subscription_metrics (Stripe trial starts). Never present one as the other; when asked to compare, show both, labelled."
     ] : []),
-    ...(availableLike("list_audit_leads") ? [
+    // The app's Contacts read answers form leads; list_audit_leads keeps only Infinite's own audit-form leads. A turn
+    // without list_contacts keeps the audit-leads bullet below unchanged.
+    ...(availableLike("list_contacts") ? [
+      "- People who filled in a form, 'leads', 'new leads' or contacts from a campaign -> list_contacts: this workspace's Contacts and their form submissions, never a signup or registration."
+        + (availableLike("list_audit_leads") ? " 'Audit leads' (people who submitted Infinite's own growth-audit form) -> list_audit_leads: an audit lead is its own step, never a signup or registration." : "")
+        + (meta ? " Meta's 'leads' result is Meta's claim; read it with get_meta_performance only when the person asks about Meta ads." : "")
+    ] : availableLike("list_audit_leads") ? [
       meta
         ? "- 'Leads', 'new leads' or 'audit leads' -> list_audit_leads: an audit lead is its own step, never a signup or registration. Meta's 'leads' result is Meta's claim; read it with get_meta_performance only when the person asks about Meta ads."
         : "- 'Leads', 'new leads' or 'audit leads' -> list_audit_leads: an audit lead is its own step, never a signup or registration."

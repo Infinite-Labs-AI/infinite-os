@@ -27,6 +27,8 @@ export interface InfiniteOsQueryAdvisor {
 export interface QueryRefinementToolResult {
   name?: string;
   result?: unknown;
+  /** The call's input, when the caller has it: an app twin called with an argument is not the native it replaces. */
+  input?: unknown;
 }
 
 export type QueryFamily =
@@ -604,10 +606,77 @@ export function splitHostTurnContext(message: string): { before: string; questio
   return { before, question: style ? rest.slice(0, style.index) : rest, after };
 }
 
+/**
+ * A union turn withholds the native list_sources when the app sends its twin (`mcp__<server>__list_sources`). The
+ * twin's result carries the app's own list_sources envelope as its data, one level below where the native keeps it.
+ * Returns that envelope, or undefined for any other result. Given the call's input, a call that carried an argument
+ * returns undefined too: the native takes none, and the twin's one argument (another brand's workspace id) lists
+ * that brand's cloud sources, not this workspace's.
+ */
+export function appListSourcesEnvelope(
+  name: string | undefined,
+  result: unknown,
+  input?: unknown
+): Record<string, unknown> | undefined {
+  if (appToolName(name) !== "list_sources" || !isRecord(result) || hasArgument(input)) {
+    return undefined;
+  }
+  return isRecord(result.data) ? result.data : undefined;
+}
+
+/** The tool part of an app tool's model name (`mcp__<server>__<tool>`); undefined for a native id. */
+function appToolName(name: string | undefined): string | undefined {
+  if (!name?.startsWith("mcp__")) {
+    return undefined;
+  }
+  const separator = name.indexOf("__", "mcp__".length);
+  return separator === -1 ? undefined : name.slice(separator + 2);
+}
+
+function hasArgument(input: unknown): boolean {
+  return isRecord(input) && Object.values(input).some((value) =>
+    value !== undefined && value !== null && !(typeof value === "string" && value.trim() === "")
+  );
+}
+
+/** The results with the app's list_sources twin read as the native list_sources it replaces. */
+function withAppSourcesAsNative(toolResults: QueryRefinementToolResult[]): QueryRefinementToolResult[] {
+  return toolResults.map((result) => {
+    const sources = appListSourcesEnvelope(result.name, result.result, result.input);
+    return sources ? { name: "list_sources", result: sources } : result;
+  });
+}
+
+// App reads that answer no question on their own: the workspace's context and a source list (this brand's or
+// another's).
+const APP_CONTEXT_TOOLS = new Set(["list_sources", "get_current_workspace", "list_my_workspaces"]);
+
+/**
+ * Whether an app read beyond the workspace context and the source list ran this turn, its result or its error in.
+ * The advisor counts the native reads by name; the app's reads (get_meta_performance, list_contacts,
+ * run_app_outcomes, and the same-name twins of the native analytics reads) arrive under their model names, so a
+ * turn that already has its answer read is never told it only has a source list.
+ */
+function hasAppAnswerRead(toolResults: QueryRefinementToolResult[]): boolean {
+  return toolResults.some((result) => {
+    const tool = appToolName(result.name);
+    // A refused call (a tool this turn does not offer) never ran; a failed read did, and the model has its error.
+    return tool !== undefined && !APP_CONTEXT_TOOLS.has(tool) && isReadResult(result);
+  });
+}
+
 export function buildQueryRefinementSections(
   message: string,
   toolResults: QueryRefinementToolResult[],
   availableActionIds: readonly string[] = []
+): string[] {
+  return refinementSections(message, withAppSourcesAsNative(toolResults), availableActionIds);
+}
+
+function refinementSections(
+  message: string,
+  toolResults: QueryRefinementToolResult[],
+  availableActionIds: readonly string[]
 ): string[] {
   const syncFreshnessFailure = xSyncFreshnessFailureSections(message, toolResults);
   const metricViewRecovery = xMetricViewRecoverySections(toolResults);
@@ -793,7 +862,8 @@ function latestFailedSyncSourceNow(
   toolResults: QueryRefinementToolResult[]
 ): { errorMessage?: string } | undefined {
   for (const result of [...toolResults].reverse()) {
-    if (result.name !== "sync_source_now" || !isRecord(result.result)) {
+    // A refused call (a union turn withholds sync_source_now) never ran: it is no failed refresh.
+    if (result.name !== "sync_source_now" || !isRecord(result.result) || isRefusedCall(result.result)) {
       continue;
     }
     if (stringValue(result.result.status) !== "error") {
@@ -824,34 +894,51 @@ function genericOpenEndedRefinementSections(
     }
   }
 
-  const hasSources = toolResults.some((result) => result.name === "list_sources" && isRecord(result.result));
-  const hasSyncs = toolResults.some((result) => result.name === "get_recent_sync_runs" && isRecord(result.result));
+  // A refused call (a union turn withholds the native list_sources for the app's twin, and get_recent_sync_runs as a
+  // local-only read) returned no source list and no sync runs.
+  const hasSources = toolResults.some((result) => result.name === "list_sources" && isReadResult(result));
+  const hasSyncs = toolResults.some((result) => result.name === "get_recent_sync_runs" && isReadResult(result));
   const hasMetrics = toolResults.some((result) => result.name === "list_metrics" && isRecord(result.result));
   const hasViews = toolResults.some((result) => result.name === "list_queryable_views" && isRecord(result.result));
   const hasMetricResult = toolResults.some((result) => result.name === "run_metric_query" && isRecord(result.result));
   const hasBreakdownResult = toolResults.some((result) => result.name === "run_breakdown_query" && isRecord(result.result));
   const hasMetricDetail = toolResults.some((result) => result.name === "describe_metric" && isRecord(result.result));
+  // The app's reads count as reads too: after get_meta_performance or list_contacts ran, the turn has more than a
+  // source list.
+  const hasAppAnswer = hasAppAnswerRead(toolResults);
 
   // Targeted metric questions ("how many clicks?", "what's my CTR?", "cost per lead?") are not
   // open-ended, but the codex model still sometimes bails after list_sources and asks for a time
   // range instead of answering. Fire the "go fetch a metric, don't stop at the source list" rescue
   // for metric-shaped turns too — but ONLY when the turn so far has list_sources and has not yet run
-  // (or even located) any metric. This is conservative: it cannot fire once a metric query/breakdown
-  // result exists, and it never relaxes the result_type partition or any write confirmation.
+  // (or even located) any metric, nor any app read beyond the workspace context. This is conservative: it
+  // cannot fire once a metric query/breakdown result or an app answer read exists, and it never relaxes the
+  // result_type partition or any write confirmation.
   const metaQuestion =
     availableActionIds.some((id) => id === "get_meta_performance" || id.endsWith("__get_meta_performance")) &&
     isMetricShapedQuestion(message) &&
     isMetaMetricQuestion(message);
+  // The app's own reads for leads and signups, when this turn has them (the prompt's app routing).
+  const appReads = appRescueReads(message, availableActionIds);
   if (
     !isOpenEndedAnalysisPrompt(message) &&
-    (metaQuestion || isTargetedMetricQuestion(message)) &&
+    (appReads.length > 0 || metaQuestion || isTargetedMetricQuestion(message)) &&
     hasSources &&
     !hasMetrics &&
     !hasMetricDetail &&
     !hasViews &&
     !hasMetricResult &&
-    !hasBreakdownResult
+    !hasBreakdownResult &&
+    !hasAppAnswer
   ) {
+    if (appReads.length > 0) {
+      return [
+        "Metric-question refinement guidance:",
+        "- The user asked for a number the app's own reads answer, but you only have a source list so far.",
+        ...appReads,
+        "- Do not stop to ask for a time range: read over the period the person named, or over all available data stated as the assumed scope."
+      ];
+    }
     // A turn with the app's stored Meta read refuses Meta metrics on run_metric_query/run_breakdown_query.
     if (metaQuestion) {
       return [
@@ -875,7 +962,7 @@ function genericOpenEndedRefinementSections(
     return [];
   }
 
-  if (hasSources && !hasMetrics && !hasViews) {
+  if (hasSources && !hasMetrics && !hasViews && !hasAppAnswer) {
     return [
       "Open-ended analysis refinement guidance:",
       "- You know which sources are connected, but not yet what metrics or views are available to analyze.",
@@ -982,6 +1069,110 @@ function isMetaMetricQuestion(message: string): boolean {
     || (META_SIGNAL_RE.test(message) && (METRIC_TERM_RE.test(message) || META_CREDIT_OUTCOME_RE.test(message)));
 }
 
+// The person asking about Meta ads themselves: the platform, plain "ads" or its ad sets; the Meta rescue alone answers
+// those. A campaign alone is not one here: "leads from the spring campaign" may be the workspace's Contacts or a Meta
+// campaign's, so the rescue names both reads, labelled "our records" and "Meta's claim" (appRescueReads).
+const META_ADS_ASK_RE = /\b(?:meta(?!\s+(?:titles?|descriptions?|tags?|keywords?|data)\b)|facebook|fb|instagram ads?|ads?|ad ?sets?)\b/i;
+// Lead words: the prompt's bullet without list_contacts sends only these ('leads', 'new leads') to list_audit_leads.
+const LEAD_WORD_RE = /\bleads?\b/i;
+// Contacts and form fills: this workspace's Contacts (list_contacts), never Infinite's own audit form.
+const CONTACT_ASK_RE = /\b(?:contacts?|form (?:fills?|submissions?|entries|responses))\b|\bfill(?:ed)? (?:in|out)\b[^.?!]*\bforms?\b/i;
+const SIGNUP_ASK_RE = /\b(?:sign[- ]?ups?|signed up|registrations?|registered|new accounts?)\b/i;
+const TRIAL_ASK_RE = /\btrials?\b/i;
+// "sign up", "signed up", "signs up", "signing up", "sign-ups", "registered", "registrations" ...
+const SIGNUP_VERB = String.raw`(?:sign(?:ed|s|ing)?[- ]?ups?|register(?:ed|s|ing)?|registrations?)`;
+// The words between "signed up for" and what was signed up for: articles and a few modifiers, then at most one more
+// word ("our free SEO audit", "the 14-day pro trial", "the Q3 webinar").
+const ARTICLES = String.raw`(?:(?:an?|the|our|my|your|this|that|next|last|free|live|growth|website|site|marketing|\d+[- ]day)\s+)*(?:[\w'-]+\s+)?`;
+// Audit leads and audit sign-ups: Infinite's own growth-audit form, never a signup or registration.
+const AUDIT_ASK_RE = new RegExp(String.raw`\baudit[- ](?:leads?|forms?|sign[- ]?ups?|registrations?|requests?|submissions?)\b` +
+  String.raw`|\b${SIGNUP_VERB}\s+(?:for|to)\s+${ARTICLES}audits?\b` +
+  String.raw`|\b(?:requested|request(?:s|ing)?|booked|book(?:s|ing)?|applied for|asked for)\s+${ARTICLES}audits?\b`, "i");
+// A trial sign-up is a trial start (read_subscription_metrics), never a registration.
+const TRIAL_SIGNUP_RE = new RegExp(String.raw`\btrials?[- ](?:sign[- ]?ups?|registrations?)\b` +
+  String.raw`|\b${SIGNUP_VERB}\s+(?:for|to)\s+${ARTICLES}trials?\b`, "i");
+// A newsletter, webinar, waitlist, demo or event sign-up is a form fill (list_contacts), never an account registration.
+const FORM_TOPIC = String.raw`(?:newsletters?|webinars?|wait ?lists?|mailing lists?|email lists?|demos?|events?|workshops?|masterclass(?:es)?|courses?)`;
+const FORM_SIGNUP_RE = new RegExp(String.raw`\b${FORM_TOPIC}[- ](?:sign[- ]?ups?|registrations?|registrants?)\b` +
+  String.raw`|\b${SIGNUP_VERB}\s+(?:for|to)\s+${ARTICLES}${FORM_TOPIC}\b`, "i");
+// Site visits, visitors or traffic (run_site_metrics), unless the person names GA4, another platform or search traffic.
+// Named only on a question the metric rescue already answers, in place of its run_metric_query line.
+const SITE_VISIT_ASK_RE = /\b(?:visits?|visitors?|traffic)\b/i;
+const NOT_SITE_METRICS_RE = /\b(?:ga ?4|google analytics|seo|search console|organic search|instagram|profile visits?|shopify|store visits?)\b/i;
+const META_LEADS_CLAIM = " Meta's 'leads' result is Meta's claim; read it with get_meta_performance only when the person asks about Meta ads.";
+// A campaign's number on a turn with get_meta_performance: the prompt sends a campaign's contacts to list_contacts (and,
+// without it, 'leads' to list_audit_leads), while its Meta bullet counts leads, results, registrations and trials as
+// Meta Ads numbers that "are Meta's claim, not our records", and its compare rule is "show both, labelled". A campaign
+// may be either, so the rescue names our read and Meta's, each labelled.
+const OUR_RECORDS_LABEL = "- Our records: ";
+const META_CAMPAIGN_CLAIM_LINE = "- Meta's claim: the campaign may be a Meta Ads campaign -> also call get_meta_performance with a structured `period`; its leads, results, registrations and trials are Meta's claim, not our records. Answer with both, labelled \"our records\" and \"Meta's claim\", never one presented as the other, and say so when Meta has no campaign by that name.";
+
+/** The message with every match of each pattern blanked, so a phrase one read owns is not read again as another's. */
+function without(message: string, ...patterns: RegExp[]): string {
+  return patterns.reduce((rest, pattern) => rest.replace(new RegExp(pattern.source, "gi"), " "), message);
+}
+
+/**
+ * The rescue lines for a metric-shaped question the app's own reads answer, when this turn has them, as the prompt's
+ * app routing sends them: audit leads and audit sign-ups -> list_audit_leads; leads, contacts and form fills
+ * (a newsletter, webinar or waitlist sign-up too) -> list_contacts, and without it only the lead words ('leads',
+ * 'new leads') -> list_audit_leads; signups and registrations that are none of those -> run_app_outcomes; trials ->
+ * read_subscription_metrics; site visitors -> run_site_metrics. None when the person asks about Meta ads
+ * and the turn has get_meta_performance (the Meta rescue answers that), for a Meta-only metric such as cost per lead,
+ * or when the turn has none of these reads: the rescue then stays as it was. A campaign's number on a turn with
+ * get_meta_performance (a campaign that is not email, a newsletter or another platform's) names our reads labelled
+ * "our records" and get_meta_performance labelled "Meta's claim".
+ */
+function appRescueReads(message: string, availableActionIds: readonly string[]): string[] {
+  const availableLike = (name: string) => availableActionIds.some((id) => id === name || id.endsWith(`__${name}`));
+  if (!isMetricShapedQuestion(message)) {
+    return [];
+  }
+  const meta = availableLike("get_meta_performance");
+  if (meta && !OTHER_PLATFORM_RE.test(message) && (META_ONLY_TERM_RE.test(message) || META_ADS_ASK_RE.test(message))) {
+    return [];
+  }
+  // What is left of a Meta Ads number once the platform, "ads", ad sets and Meta-only metrics are out: a campaign's.
+  const campaign = meta && isMetaMetricQuestion(message);
+  const lines: string[] = [];
+  const metaClaim = meta && !campaign ? META_LEADS_CLAIM : "";
+  const audit = AUDIT_ASK_RE.test(message) && availableLike("list_audit_leads");
+  // What is left once the audit phrases are read as audit leads.
+  const rest = audit ? without(message, AUDIT_ASK_RE) : message;
+  if (!META_ONLY_TERM_RE.test(message)) {
+    if (audit) {
+      lines.push("- Audit leads and audit sign-ups (people who submitted Infinite's own growth-audit form) -> call list_audit_leads: an audit lead is its own step, never a signup or registration.");
+    }
+    if (availableLike("list_contacts")) {
+      if (LEAD_WORD_RE.test(rest) || CONTACT_ASK_RE.test(rest)) {
+        lines.push("- Leads, new leads, form submissions or contacts -> call list_contacts: this workspace's Contacts and their form submissions, never a signup or registration." + metaClaim);
+      } else if (FORM_SIGNUP_RE.test(rest)) {
+        lines.push("- A newsletter, webinar, waitlist, demo or event sign-up is a form submission -> call list_contacts: this workspace's Contacts and their form submissions, never an account registration.");
+      }
+    } else if (!audit && LEAD_WORD_RE.test(rest) && availableLike("list_audit_leads")) {
+      lines.push("- Leads, new leads or audit leads -> call list_audit_leads: an audit lead is its own step, never a signup or registration." + metaClaim);
+    }
+  }
+  // An audit, trial or form sign-up is never a registration: only the signup words left over ask for one.
+  if (SIGNUP_ASK_RE.test(without(message, AUDIT_ASK_RE, TRIAL_SIGNUP_RE, FORM_SIGNUP_RE)) && availableLike("run_app_outcomes")) {
+    lines.push("- Signups, registrations or new accounts -> call run_app_outcomes with definition \"stages_v1\" (accountCreated = registrations), never a signup_count metric or breakdown.");
+  }
+  if (TRIAL_ASK_RE.test(message) && availableLike("read_subscription_metrics")) {
+    lines.push("- Trials started or trial sign-ups -> call read_subscription_metrics (Stripe trial starts): a trial is never a registration, and stripe_trialing_subscribers counts customers trialing now, never trials started.");
+  }
+  if (SITE_VISIT_ASK_RE.test(message) && isTargetedMetricQuestion(message) && !NOT_SITE_METRICS_RE.test(message) &&
+    !OTHER_PLATFORM_RE.test(message) && availableLike("run_site_metrics")) {
+    lines.push(availableLike("analysis_compare")
+      ? "- Site visits, visitors or traffic totals -> call run_site_metrics (server Visits read high and are never people). By channel or source -> analysis_compare with segmentBy entry_channel. GA4 site_visitors or sessions only when the person asks for GA4."
+      : "- Site visits, visitors or traffic totals -> call run_site_metrics (server Visits read high and are never people). GA4 site_visitors or sessions only when the person asks for GA4.");
+  }
+  // With none of our reads for it, the Meta rescue answers a campaign's number alone, as before.
+  if (campaign && lines.length > 0) {
+    return [...lines.map((line) => OUR_RECORDS_LABEL + line.slice(2)), META_CAMPAIGN_CLAIM_LINE];
+  }
+  return lines;
+}
+
 function isCapabilityExplorationPrompt(message: string): boolean {
   return /\b(what can i inspect|what .* can i inspect|what can i query|what metrics are available|what views are available|what is available)\b/i.test(message);
 }
@@ -990,6 +1181,10 @@ export function buildQuerySynthesisSections(
   message: string,
   toolResults: QueryRefinementToolResult[]
 ): string[] {
+  return synthesisSections(message, withAppSourcesAsNative(toolResults));
+}
+
+function synthesisSections(message: string, toolResults: QueryRefinementToolResult[]): string[] {
   const hasXPostEvidence = hasBreakdownResult(toolResults, "x_public_engagement");
   if (hasXPostEvidence && isXNegativeStrategyQuestion(message)) {
     const latestBreakdown = latestBreakdownRows(toolResults, "x_public_engagement");
@@ -1226,6 +1421,16 @@ function objectRecord(value: Record<string, unknown>, key: string): Record<strin
   return isRecord(nested) ? nested : undefined;
 }
 
+/** A call the turn refused before running it: an action it does not offer (the controller's unknown_action record). */
+function isRefusedCall(result: Record<string, unknown>): boolean {
+  return result.status === "error" && objectRecord(result, "error")?.code === "unknown_action";
+}
+
+/** A tool result that ran (its data or its error), never a call the turn refused. */
+function isReadResult(result: QueryRefinementToolResult): boolean {
+  return isRecord(result.result) && !isRefusedCall(result.result);
+}
+
 function latestBreakdownRows(
   toolResults: QueryRefinementToolResult[],
   metric?: string
@@ -1272,8 +1477,10 @@ function hasBreakdownResult(toolResults: QueryRefinementToolResult[], metric: st
 }
 
 function hasSourceStatusResults(toolResults: QueryRefinementToolResult[]): boolean {
-  const toolNames = new Set(toolResults.map((result) => result.name));
-  return toolNames.has("list_sources") || toolNames.has("get_recent_sync_runs");
+  // A refused call (an action a union turn withholds) read no connection state.
+  return toolResults.some((result) =>
+    (result.name === "list_sources" || result.name === "get_recent_sync_runs") &&
+    !(isRecord(result.result) && isRefusedCall(result.result)));
 }
 
 function genericSynthesisSections(toolResults: QueryRefinementToolResult[]): string[] {
@@ -1608,7 +1815,7 @@ function genericBreakdownPattern(rows: Record<string, unknown>[], metric: string
 function genericSourceContextSummary(toolResults: QueryRefinementToolResult[]): string | undefined {
   const sourcesEnvelope = [...toolResults]
     .reverse()
-    .find((result) => result.name === "list_sources" && isRecord(result.result));
+    .find((result) => result.name === "list_sources" && isReadResult(result));
   if (!sourcesEnvelope || !isRecord(sourcesEnvelope.result)) {
     return undefined;
   }
@@ -1620,7 +1827,7 @@ function genericSourceContextSummary(toolResults: QueryRefinementToolResult[]): 
 
   const syncEnvelope = [...toolResults]
     .reverse()
-    .find((result) => result.name === "get_recent_sync_runs" && isRecord(result.result));
+    .find((result) => result.name === "get_recent_sync_runs" && isReadResult(result));
   const syncPayload = syncEnvelope && isRecord(syncEnvelope.result)
     ? objectRecord(syncEnvelope.result, "data")
     : undefined;
@@ -1688,15 +1895,19 @@ function genericCapabilityOverviewSections(toolResults: QueryRefinementToolResul
 }
 
 function genericWorkspaceOverviewSections(toolResults: QueryRefinementToolResult[]): string[] {
+  // A workspace overview answers a question about the workspace, not one an app read already answered.
+  if (hasAppAnswerRead(toolResults)) {
+    return [];
+  }
   const sourcesEnvelope = [...toolResults]
     .reverse()
-    .find((result) => result.name === "list_sources" && isRecord(result.result));
+    .find((result) => result.name === "list_sources" && isReadResult(result));
   const metricsEnvelope = [...toolResults]
     .reverse()
     .find((result) => result.name === "list_metrics" && isRecord(result.result));
   const syncEnvelope = [...toolResults]
     .reverse()
-    .find((result) => result.name === "get_recent_sync_runs" && isRecord(result.result));
+    .find((result) => result.name === "get_recent_sync_runs" && isReadResult(result));
   if (!sourcesEnvelope || !isRecord(sourcesEnvelope.result)) {
     return [];
   }
