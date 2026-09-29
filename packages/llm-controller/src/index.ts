@@ -271,7 +271,8 @@ export interface ScopedAppTools {
   // How the injected app tools compose with the engine's native action registry.
   //   "exclusive" (default when absent) — the turn runs over ONLY the scoped app
   //     tools; the native registry is hidden and native calls fail closed. This is
-  //     the locked, EPHEMERAL ads sub-agent contract (no session memory).
+  //     the locked, EPHEMERAL lane contract (no session memory). The desktop's
+  //     iMessage (remote-human), scheduled and triggered lanes send it.
   //   "union" — the turn runs over the UNION of the native registry AND the scoped
   //     app tools, and persists like a normal chat turn (memory/recall/advisor).
   //     This is the Codex chat keystone: chat gets the engine's analytics AND the
@@ -295,7 +296,7 @@ interface NormalizedScopedAppTool {
 interface NormalizedScopedAppTools {
   serverName: string;
   allowedTools: string[];
-  // Resolved mode — absent on the wire ⇒ "exclusive" (preserves the ads sub-agent
+  // Resolved mode — absent on the wire ⇒ "exclusive" (preserves the locked-lane
   // contract). Only "union" opens the native registry + persistence.
   mode: "exclusive" | "union";
   tools: NormalizedScopedAppTool[];
@@ -536,7 +537,8 @@ export function createLlmController(options: {
       const scopedAppTools = normalizeScopedAppTools(input.scopedAppTools);
       // A plain chat turn (no scoped app tools) persists. A scoped turn persists ONLY
       // in "union" mode — Codex chat needs session memory + recall + advisor exactly
-      // like a normal turn. "exclusive" scoped turns (the ads sub-agent) stay EPHEMERAL:
+      // like a normal turn. "exclusive" scoped turns (the desktop's iMessage, scheduled and
+      // triggered lanes) stay EPHEMERAL:
       // no session rows, no recall, no memory review. Every persistTurn use below is
       // gated on this so union turns get the full chat lifecycle and exclusive turns none.
       const persistTurn = !scopedAppTools || scopedAppTools.mode === "union";
@@ -569,7 +571,8 @@ export function createLlmController(options: {
       }
       // Action set is mode-aware:
       //   no scoped tools        ⇒ the native registry (a plain chat turn).
-      //   scoped "exclusive"     ⇒ ONLY the scoped app tools (ads sub-agent; native hidden).
+      //   scoped "exclusive"     ⇒ ONLY the scoped app tools (the iMessage, scheduled and
+      //                            triggered lanes; native hidden).
       //   scoped "union"         ⇒ native registry ∪ scoped app tools (Codex chat keystone),
       //                            with native winning on any name collision, minus the native
       //                            actions an app twin replaces, every engine write and the
@@ -1195,7 +1198,7 @@ function normalizeScopedAppTools(scoped: ScopedAppTools | undefined): Normalized
   return {
     serverName,
     allowedTools,
-    // Absent ⇒ "exclusive" so existing callers (the ads sub-agent) are byte-for-byte
+    // Absent ⇒ "exclusive" so existing exclusive callers are byte-for-byte
     // unchanged. parseScopedAppTools has already rejected any value other than
     // "exclusive" | "union", so this fallback only ever fires for the absent case.
     mode: scoped.mode === "union" ? "union" : "exclusive",
@@ -1311,7 +1314,7 @@ async function executeToolCalls(
     }
     // EXCLUSIVE fail-closed isolation: when scoped app tools REPLACE the native
     // registry, a call that isn't one of the scoped tools must NOT fall through to
-    // a native action — the ads sub-agent is locked to its own tools. In UNION mode
+    // a native action — an exclusive lane is locked to its own tools. In UNION mode
     // that isolation is intentionally lifted (chat gets native + app tools), so a
     // non-app-tool name drops through to the native registry lookup below. Because
     // app tools are already resolved above (toolsByModelName), native winning here

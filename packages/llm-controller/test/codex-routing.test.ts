@@ -934,10 +934,12 @@ describe("union turn: the app's list_sources twin", () => {
     const natives = tools.filter((name) => !name.startsWith("mcp__"));
     const daemon = registry.list().map((action) => action.id as string);
     const withheld = new Set([...replaced, ...unionAlwaysWithheld(registry)]);
-    // Derived, not pinned: a new daemon read is a budget question for its own change, not a failure here.
+    // The withheld set is derived from each action's authority and the twins the turn carries.
     expect(daemon).toEqual(expect.arrayContaining(replaced));
     expect(natives).toEqual(daemon.filter((id) => !withheld.has(id)));
-    // Today every one of the daemon's 30 natives is withheld: 18 writes, 7 local-only reads, 5 twin-replaced reads.
+    // Pinned on purpose, as a tripwire: today every one of the daemon's 30 natives is withheld (18 writes, 7 local-only
+    // reads, 5 twin-replaced reads). A new daemon native fails here, so its change must decide whether a union turn
+    // offers it.
     expect(operatorIds(registry)).toHaveLength(18);
     expect(daemon).toHaveLength(30);
     expect(natives).toEqual([]);
