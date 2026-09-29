@@ -24,6 +24,8 @@ import {
   ga4ConnectSourceFromSetup,
   getMetaEntity,
   listMetaAssets,
+  META_WEBSITE_CUSTOM_EVENT_TYPES,
+  META_WEBSITE_EVENT_RESULT_TYPES,
   listMetaEntities,
   metaAdsSettledWindow,
   metaDedupKey,
@@ -7055,6 +7057,77 @@ describe("Meta Ads WRITE helpers", () => {
     }
   });
 
+  // GAPS §4 / gap 5: a promoted_object {pixel, event} rides ONLY on an event conversion goal, and the event
+  // is never guessed. The old code attached {pixel, PURCHASE} to a Link clicks ad set given a pixel.
+  it("sends every website event as promoted_object on OFFSITE_CONVERSIONS, and Purchase on VALUE (Graph)", async () => {
+    expect(META_WEBSITE_CUSTOM_EVENT_TYPES).toHaveLength(17);
+    for (const customEventType of META_WEBSITE_CUSTOM_EVENT_TYPES) {
+      await captureWrites(
+        () => jsonResponse({ id: "as_event", status: "PAUSED" }),
+        async (captured) => {
+          await createMetaAdSet(metaWriteCredential, {
+            name: customEventType, campaignId: "c1", optimizationGoal: "OFFSITE_CONVERSIONS", billingEvent: "IMPRESSIONS",
+            pixelId: "px_1", customEventType: customEventType.toLowerCase()
+          });
+          expect(captured[0].body?.promoted_object).toEqual({ pixel_id: "px_1", custom_event_type: customEventType });
+          expect(captured[0].body?.attribution_spec).toEqual(META_DEFAULT_ATTRIBUTION_SPEC_WIRE);
+        }
+      );
+    }
+    await captureWrites(
+      () => jsonResponse({ id: "as_value", status: "PAUSED" }),
+      async (captured) => {
+        await createMetaAdSet(metaWriteCredential, {
+          name: "Value", campaignId: "c1", optimizationGoal: "VALUE", billingEvent: "IMPRESSIONS", pixelId: "px_1", customEventType: "PURCHASE"
+        });
+        expect(captured[0].body?.promoted_object).toEqual({ pixel_id: "px_1", custom_event_type: "PURCHASE" });
+        expect(captured[0].body?.attribution_spec).toEqual(META_DEFAULT_ATTRIBUTION_SPEC_WIRE);
+      }
+    );
+  });
+
+  it("sends NO promoted_object on non-event goals and refuses a pixel or event there before any POST (Graph)", async () => {
+    for (const optimizationGoal of ["LINK_CLICKS", "LANDING_PAGE_VIEWS", "REACH", "IMPRESSIONS", "LEAD_GENERATION", "THRUPLAY"]) {
+      await captureWrites(
+        () => jsonResponse({ id: "as_plain", status: "PAUSED" }),
+        async (captured) => {
+          await createMetaAdSet(metaWriteCredential, { name: "Plain", campaignId: "c1", optimizationGoal, billingEvent: "IMPRESSIONS" });
+          expect(captured[0].rawForm).not.toHaveProperty("promoted_object");
+          expect(captured[0].rawForm).not.toHaveProperty("attribution_spec");
+        }
+      );
+      for (const extra of [{ pixelId: "px_1" }, { customEventType: "PURCHASE" }, { pixelId: "px_1", customEventType: "LEAD" }]) {
+        await captureWrites(
+          () => jsonResponse({ id: "as_never", status: "PAUSED" }),
+          async (captured) => {
+            await expect(
+              createMetaAdSet(metaWriteCredential, { name: "Refused", campaignId: "c1", optimizationGoal, billingEvent: "IMPRESSIONS", ...extra })
+            ).rejects.toMatchObject({ code: "provider_api_error", retryable: false, message: expect.stringContaining("takes no pixel and no conversion event") });
+            expect(captured).toHaveLength(0);
+          }
+        );
+      }
+    }
+  });
+
+  it("never defaults the event to PURCHASE: a pixel with no event, or an event with no pixel, is refused before any POST (Graph)", async () => {
+    for (const [extra, message] of [
+      [{ pixelId: "px_1" }, "needs a customEventType"],
+      [{ customEventType: "START_TRIAL" }, "needs a pixelId"],
+      [{ pixelId: "px_1", customEventType: "NOT_AN_EVENT" }, "Unsupported Meta Ads custom event type"]
+    ] as const) {
+      await captureWrites(
+        () => jsonResponse({ id: "as_never", status: "PAUSED" }),
+        async (captured) => {
+          await expect(
+            createMetaAdSet(metaWriteCredential, { name: "Refused", campaignId: "c1", optimizationGoal: "OFFSITE_CONVERSIONS", billingEvent: "IMPRESSIONS", ...extra })
+          ).rejects.toMatchObject({ code: "provider_api_error", retryable: false, message: expect.stringContaining(message) });
+          expect(captured).toHaveLength(0);
+        }
+      );
+    }
+  });
+
   it("a Meta refusal of the attribution_spec fails the create with Meta's error — no retry without it (Graph)", async () => {
     await captureWrites(
       () =>
@@ -7075,7 +7148,8 @@ describe("Meta Ads WRITE helpers", () => {
             campaignId: "c1",
             optimizationGoal: "OFFSITE_CONVERSIONS",
             billingEvent: "IMPRESSIONS",
-            pixelId: "px_1"
+            pixelId: "px_1",
+            customEventType: "PURCHASE"
           })
         ).rejects.toMatchObject({
           code: "provider_api_error",
@@ -7123,7 +7197,8 @@ describe("Meta Ads WRITE helpers", () => {
           billingEvent: "IMPRESSIONS",
           dailyBudget: 2500,
           targetingCountries: ["US", "CA"],
-          pixelId: "px_1"
+          pixelId: "px_1",
+          customEventType: "PURCHASE"
         });
         expect(captured[0].contentType).toBe("application/x-www-form-urlencoded");
         expect(captured[0].body).toEqual({
@@ -8533,8 +8608,7 @@ console.log(${JSON.stringify(serialized)});
           optimizationGoal: "link_clicks",
           billingEvent: "impressions",
           dailyBudget: 3000,
-          targetingCountries: ["US", "CA"],
-          pixelId: "px_1"
+          targetingCountries: ["US", "CA"]
         });
         expect(result).toMatchObject({ ok: true, id: "120000000000020", status: "PAUSED" });
         const argv = recordedArgv(dir);
@@ -8547,9 +8621,9 @@ console.log(${JSON.stringify(serialized)});
         expect(argv[argv.indexOf("--billing-event") + 1]).toBe("IMPRESSIONS");
         expect(argv[argv.indexOf("--daily-budget") + 1]).toBe("3000");
         expect(argv[argv.indexOf("--targeting-countries") + 1]).toBe("US,CA");
-        expect(argv[argv.indexOf("--pixel-id") + 1]).toBe("px_1");
-        // pixel ⇒ default conversion event PURCHASE.
-        expect(argv[argv.indexOf("--custom-event-type") + 1]).toBe("PURCHASE");
+        // Link clicks optimise for no website event: no pixel, no event, never a PURCHASE default.
+        expect(argv).not.toContain("--pixel-id");
+        expect(argv).not.toContain("--custom-event-type");
         expect(argv[argv.indexOf("--status") + 1]).toBe("PAUSED");
         // Product rule: Advantage+ audience is OFF on every ad set, even the countries-only shape.
         expect(argv).toContain("--no-advantage-audience");
@@ -8583,6 +8657,66 @@ console.log(${JSON.stringify(serialized)});
           expect(argv.slice(-2)).toEqual(["--", "120000000000010"]);
         });
       }
+    });
+
+    // The CLI must send every website event the Graph path sends (GAPS noted 27 Graph vs 18 CLI: the extra
+    // nine are app/gaming/messaging events, never a website one).
+    it("adset create sends every website event on the CLI, the same list as Graph; an app-only event fails before spawning (CLI)", async () => {
+      for (const customEventType of META_WEBSITE_CUSTOM_EVENT_TYPES) {
+        await withTmp(async (dir) => {
+          await createMetaAdSet(cliCredential(dir, { id: "120000000000027", status: "PAUSED" }), {
+            name: customEventType, campaignId: "120000000000010", optimizationGoal: "OFFSITE_CONVERSIONS", billingEvent: "IMPRESSIONS",
+            targeting: { geo_locations: { countries: ["US"] } }, pixelId: "px_1", customEventType
+          });
+          const argv = recordedArgv(dir);
+          expect(argv[argv.indexOf("--pixel-id") + 1]).toBe("px_1");
+          expect(argv[argv.indexOf("--custom-event-type") + 1]).toBe(customEventType);
+          expect(argv).toContain("--attribution-spec");
+        });
+      }
+      await withTmp(async (dir) => {
+        await expect(
+          createMetaAdSet(cliCredential(dir, { id: "120000000000028", status: "PAUSED" }), {
+            name: "App event", campaignId: "120000000000010", optimizationGoal: "OFFSITE_CONVERSIONS", billingEvent: "IMPRESSIONS",
+            pixelId: "px_1", customEventType: "LEVEL_ACHIEVED"
+          })
+        ).rejects.toMatchObject({ code: "provider_unsupported", retryable: false });
+        expect(existsSync(join(dir, "argv.json"))).toBe(false);
+      });
+    });
+
+    it("adset create sends no --pixel-id / --custom-event-type on non-event goals and refuses one before spawning (CLI)", async () => {
+      for (const optimizationGoal of ["LINK_CLICKS", "LANDING_PAGE_VIEWS", "REACH"]) {
+        await withTmp(async (dir) => {
+          await createMetaAdSet(cliCredential(dir, { id: "120000000000029", status: "PAUSED" }), {
+            name: "Plain", campaignId: "120000000000010", optimizationGoal, billingEvent: "IMPRESSIONS"
+          });
+          const argv = recordedArgv(dir);
+          expect(argv).not.toContain("--pixel-id");
+          expect(argv).not.toContain("--custom-event-type");
+        });
+        for (const extra of [{ pixelId: "px_1" }, { pixelId: "px_1", customEventType: "PURCHASE" }]) {
+          await withTmp(async (dir) => {
+            await expect(
+              createMetaAdSet(cliCredential(dir, { id: "120000000000030", status: "PAUSED" }), {
+                name: "Refused", campaignId: "120000000000010", optimizationGoal, billingEvent: "IMPRESSIONS", ...extra
+              })
+            ).rejects.toMatchObject({ code: "provider_api_error", retryable: false });
+            expect(existsSync(join(dir, "argv.json"))).toBe(false);
+          });
+        }
+      }
+    });
+
+    it("adset create never defaults the CLI event to PURCHASE: a pixel with no event is refused before spawning (CLI)", async () => {
+      await withTmp(async (dir) => {
+        await expect(
+          createMetaAdSet(cliCredential(dir, { id: "120000000000031", status: "PAUSED" }), {
+            name: "No event", campaignId: "120000000000010", optimizationGoal: "OFFSITE_CONVERSIONS", billingEvent: "IMPRESSIONS", pixelId: "px_1"
+          })
+        ).rejects.toMatchObject({ code: "provider_api_error", retryable: false, message: expect.stringContaining("needs a customEventType") });
+        expect(existsSync(join(dir, "argv.json"))).toBe(false);
+      });
     });
 
     it("adset create sends NO --attribution-spec for non-conversion goals (CLI)", async () => {
@@ -8623,7 +8757,8 @@ process.exit(1);`,
             campaignId: "120000000000010",
             optimizationGoal: "OFFSITE_CONVERSIONS",
             billingEvent: "IMPRESSIONS",
-            pixelId: "px_1"
+            pixelId: "px_1",
+            customEventType: "PURCHASE"
           })
         ).rejects.toMatchObject({
           retryable: false,
@@ -8675,7 +8810,8 @@ process.exit(1);`,
           billingEvent: "IMPRESSIONS",
           dailyBudget: 3000,
           targeting,
-          pixelId: "px_1"
+          pixelId: "px_1",
+          customEventType: "PURCHASE"
         });
         expect(result).toMatchObject({ ok: true, id: "120000000000021", status: "PAUSED" });
         const argv = recordedArgv(dir);
@@ -9857,13 +9993,14 @@ describe("Meta Ads durable daily history", () => {
     promotedEvent: string,
     rows: { ad?: Array<Record<string, unknown>>; adset?: Array<Record<string, unknown>> },
     insightsUrls: string[] = [],
+    optimizationGoal = "OFFSITE_CONVERSIONS",
   ) {
     const adRows = rows.ad ?? [];
     return (url: string): Response => {
       if (url.includes("/insights")) insightsUrls.push(url);
       if (url.includes("/adsets")) return historyResponse({ data: [{
         id: "s_promoted", campaign_id: "c_sales", name: "Promoted adset", status: "ACTIVE", effective_status: "ACTIVE",
-        optimization_goal: "OFFSITE_CONVERSIONS", billing_event: "IMPRESSIONS",
+        optimization_goal: optimizationGoal, billing_event: "IMPRESSIONS",
         promoted_object: { pixel_id: "px1", custom_event_type: promotedEvent },
       }], paging: {} });
       if (url.includes("/campaigns")) return historyResponse({ data: [{
@@ -10108,6 +10245,126 @@ describe("Meta Ads durable daily history", () => {
       expect(payload.conversions).toEqual([
         { resultType: "purchase", results: 1, conversionValue: 29, attributionSetting: HEADLINE_WINDOWS, isPrimary: true, resultsSource: "derived_from_canonical_mapping" },
         { resultType: "complete_registration", results: 6, conversionValue: null, attributionSetting: HEADLINE_WINDOWS, isPrimary: false, resultsSource: "derived_from_canonical_mapping" },
+      ]);
+    });
+  });
+
+  // ── Every website event a new ad set can promote is scored (GAPS §4.5) ──
+  // Each has a result rule: its own result_type, never PURCHASE's, ONE action_type variant (the fb_pixel_
+  // type first, else the bare name; never summed), and no conversion value (only a purchase is revenue).
+
+  it("gives every creatable website event its own result_type — never a purchase headline for a non-purchase event", async () => {
+    expect(Object.keys(META_WEBSITE_EVENT_RESULT_TYPES).sort()).toEqual([...META_WEBSITE_CUSTOM_EVENT_TYPES].sort());
+    expect(new Set(Object.values(META_WEBSITE_EVENT_RESULT_TYPES)).size).toBe(META_WEBSITE_CUSTOM_EVENT_TYPES.length);
+    expect(META_WEBSITE_EVENT_RESULT_TYPES).toMatchObject({
+      PURCHASE: "purchase", LEAD: "lead", START_TRIAL: "start_trial", COMPLETE_REGISTRATION: "complete_registration",
+      INITIATED_CHECKOUT: "initiated_checkout", CONTENT_VIEW: "content_view", SUBSCRIBE: "subscribe", SCHEDULE: "schedule",
+    });
+    for (const event of META_WEBSITE_CUSTOM_EVENT_TYPES) {
+      // actions[] absent: the headline is the event's own unknown marker, primary.
+      await withMockFetch(promotedAdsetFetch(event, { ad: [{ ad_id: "a_event" }] }), async () => {
+        const conversions = (await promotedPayloads("ad")).get("a_event")!.conversions as Array<Record<string, unknown>>;
+        const primary = conversions.filter((row) => row.isPrimary);
+        expect(primary).toEqual([unknownMarker(META_WEBSITE_EVENT_RESULT_TYPES[event], true)]);
+      });
+    }
+  });
+
+  const PIXEL_EVENTS = [
+    ["INITIATED_CHECKOUT", "initiated_checkout", "initiate_checkout"],
+    ["ADD_PAYMENT_INFO", "add_payment_info", "add_payment_info"],
+    ["ADD_TO_CART", "add_to_cart", "add_to_cart"],
+    ["ADD_TO_WISHLIST", "add_to_wishlist", "add_to_wishlist"],
+    ["CONTENT_VIEW", "content_view", "view_content"],
+    ["SEARCH", "search", "search"],
+  ] as const;
+
+  it("counts pixel-reported events from offsite_conversion.fb_pixel_<event> first, else the bare event — never summed, never revenue", async () => {
+    for (const [event, resultType, pixelAction] of PIXEL_EVENTS) {
+      await withMockFetch(promotedAdsetFetch(event, { ad: [
+        {
+          ad_id: "a_both",
+          actions: [
+            { action_type: "link_click", "7d_click": "9" },
+            // Meta reports the same people under both names (and omni_ / onsite_web_ sub-counts): one wins.
+            { action_type: `offsite_conversion.fb_pixel_${pixelAction}`, "7d_click": "3", "1d_view": "2" },
+            { action_type: pixelAction, "7d_click": "3", "1d_view": "2" },
+            { action_type: `omni_${pixelAction}`, "7d_click": "7" },
+            { action_type: `onsite_web_${pixelAction}`, "7d_click": "7" },
+          ],
+          action_values: [{ action_type: `offsite_conversion.fb_pixel_${pixelAction}`, "7d_click": "120" }],
+        },
+        { ad_id: "a_bare", actions: [{ action_type: pixelAction, "7d_click": "4" }] },
+        // actions[] observed with neither name: this event's measured zero (nothing written), as for purchase.
+        { ad_id: "a_zero", actions: [{ action_type: "link_click", "7d_click": "5" }] },
+      ] }), async () => {
+        const byAd = await promotedPayloads("ad");
+        const row = (results: number) => ({ resultType, results, conversionValue: null, attributionSetting: HEADLINE_WINDOWS, isPrimary: true, resultsSource: "derived_from_canonical_mapping" });
+        expect(byAd.get("a_both")?.conversions).toEqual([row(5)]);
+        expect(byAd.get("a_bare")?.conversions).toEqual([row(4)]);
+        expect(byAd.get("a_zero")?.conversions).toEqual([]);
+      });
+    }
+  });
+
+  it("scores an INITIATED_CHECKOUT ad set at ad set grain from the shape prod stores (Results indicator = the fb_pixel type)", async () => {
+    await withMockFetch(promotedAdsetFetch("INITIATED_CHECKOUT", { adset: [{
+      adset_name: "Checkout adset",
+      actions: [
+        { action_type: "omni_initiated_checkout", "7d_click": "6" },
+        { action_type: "initiate_checkout", "7d_click": "6" },
+        { action_type: "onsite_web_initiate_checkout", "7d_click": "6" },
+        { action_type: "offsite_initiate_checkout_add_20_s_calls", "7d_click": "6" },
+        { action_type: "offsite_conversion.fb_pixel_initiate_checkout", "7d_click": "6", "1d_view": "1" },
+        { action_type: "offsite_conversion.fb_pixel_purchase", "7d_click": "1" },
+      ],
+      action_values: [{ action_type: "offsite_conversion.fb_pixel_purchase", "7d_click": "49" }],
+      results: [{ indicator: "actions:offsite_conversion.fb_pixel_initiate_checkout", values: [{ value: "7", attribution_windows: ["7d_click"] }] }],
+    }] }), async () => {
+      const payload = (await promotedPayloads("adset")).get("s_promoted")!;
+      expect(payload.conversions).toEqual([
+        { resultType: "initiated_checkout", results: 7, conversionValue: null, attributionSetting: HEADLINE_WINDOWS, isPrimary: true, resultsSource: "derived_from_canonical_mapping" },
+        // The incidental purchase stays supplemental, never the checkout ad set's headline.
+        { resultType: "purchase", results: 1, conversionValue: 49, attributionSetting: HEADLINE_WINDOWS, isPrimary: false, resultsSource: "derived_from_canonical_mapping" },
+      ]);
+    });
+  });
+
+  const RESULTS_ONLY_EVENTS = [
+    ["SUBSCRIBE", "subscribe"], ["DONATE", "donate"], ["CONTACT", "contact"], ["SCHEDULE", "schedule"],
+    ["SUBMIT_APPLICATION", "submit_application"], ["FIND_LOCATION", "find_location"], ["CUSTOMIZE_PRODUCT", "customize_product"],
+  ] as const;
+
+  it("counts events Meta has no fb_pixel type for from Meta's own conversions:<event>_website Results entry; otherwise UNKNOWN, never 0", async () => {
+    for (const [event, resultType] of RESULTS_ONLY_EVENTS) {
+      const indicator = `conversions:${resultType}_website`;
+      await withMockFetch(promotedAdsetFetch(event, { ad: [
+        { ad_id: "a_counted", actions: START_TRIAL_DAY_ONE_ACTIONS, ...trialResults([{ value: "3", attribution_windows: ["7d_click"] }, { value: "1", attribution_windows: ["1d_view"] }], indicator) },
+        { ad_id: "a_no_values", actions: START_TRIAL_DAY_ONE_ACTIONS, ...trialResults(undefined, indicator) },
+        // Another indicator is not this event's count.
+        { ad_id: "a_other", actions: START_TRIAL_DAY_ONE_ACTIONS, ...trialResults([{ value: "3", attribution_windows: ["7d_click"] }], "actions:link_click") },
+        // A bare action_type with the event's name is not a documented report of it: still unknown.
+        { ad_id: "a_bare_name", actions: [{ action_type: resultType, "7d_click": "8" }] },
+      ] }), async () => {
+        const byAd = await promotedPayloads("ad");
+        expect(byAd.get("a_counted")?.conversions).toEqual([
+          { resultType, results: 4, conversionValue: null, attributionSetting: HEADLINE_WINDOWS, isPrimary: true, resultsSource: "meta_results" },
+        ]);
+        for (const id of ["a_no_values", "a_other", "a_bare_name"]) {
+          expect(byAd.get(id)?.conversions).toEqual([unknownMarker(resultType, true)]);
+        }
+      });
+    }
+  });
+
+  it("scores a VALUE (purchase value) ad set by its promoted Purchase", async () => {
+    await withMockFetch(promotedAdsetFetch("PURCHASE", { ad: [{
+      ad_id: "a_value",
+      actions: [{ action_type: "offsite_conversion.fb_pixel_purchase", "7d_click": "2" }],
+      action_values: [{ action_type: "offsite_conversion.fb_pixel_purchase", "7d_click": "80" }],
+    }] }, [], "VALUE"), async () => {
+      expect((await promotedPayloads("ad")).get("a_value")?.conversions).toEqual([
+        { resultType: "purchase", results: 2, conversionValue: 80, attributionSetting: HEADLINE_WINDOWS, isPrimary: true, resultsSource: "derived_from_canonical_mapping" },
       ]);
     });
   });
