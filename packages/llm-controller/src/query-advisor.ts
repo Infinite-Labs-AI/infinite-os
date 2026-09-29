@@ -660,7 +660,8 @@ const APP_CONTEXT_TOOLS = new Set(["list_sources", "get_current_workspace", "lis
 function hasAppAnswerRead(toolResults: QueryRefinementToolResult[]): boolean {
   return toolResults.some((result) => {
     const tool = appToolName(result.name);
-    return tool !== undefined && !APP_CONTEXT_TOOLS.has(tool) && isRecord(result.result);
+    // A refused call (a tool this turn does not offer) never ran; a failed read did, and the model has its error.
+    return tool !== undefined && !APP_CONTEXT_TOOLS.has(tool) && isReadResult(result);
   });
 }
 
@@ -893,10 +894,10 @@ function genericOpenEndedRefinementSections(
     }
   }
 
-  // A refused list_sources call (a union turn withholds the native for the app's twin) returned no source list.
-  const hasSources = toolResults.some((result) =>
-    result.name === "list_sources" && isRecord(result.result) && !isRefusedCall(result.result));
-  const hasSyncs = toolResults.some((result) => result.name === "get_recent_sync_runs" && isRecord(result.result));
+  // A refused call (a union turn withholds the native list_sources for the app's twin, and get_recent_sync_runs as a
+  // local-only read) returned no source list and no sync runs.
+  const hasSources = toolResults.some((result) => result.name === "list_sources" && isReadResult(result));
+  const hasSyncs = toolResults.some((result) => result.name === "get_recent_sync_runs" && isReadResult(result));
   const hasMetrics = toolResults.some((result) => result.name === "list_metrics" && isRecord(result.result));
   const hasViews = toolResults.some((result) => result.name === "list_queryable_views" && isRecord(result.result));
   const hasMetricResult = toolResults.some((result) => result.name === "run_metric_query" && isRecord(result.result));
@@ -1411,6 +1412,11 @@ function isRefusedCall(result: Record<string, unknown>): boolean {
   return result.status === "error" && objectRecord(result, "error")?.code === "unknown_action";
 }
 
+/** A tool result that ran (its data or its error), never a call the turn refused. */
+function isReadResult(result: QueryRefinementToolResult): boolean {
+  return isRecord(result.result) && !isRefusedCall(result.result);
+}
+
 function latestBreakdownRows(
   toolResults: QueryRefinementToolResult[],
   metric?: string
@@ -1795,7 +1801,7 @@ function genericBreakdownPattern(rows: Record<string, unknown>[], metric: string
 function genericSourceContextSummary(toolResults: QueryRefinementToolResult[]): string | undefined {
   const sourcesEnvelope = [...toolResults]
     .reverse()
-    .find((result) => result.name === "list_sources" && isRecord(result.result));
+    .find((result) => result.name === "list_sources" && isReadResult(result));
   if (!sourcesEnvelope || !isRecord(sourcesEnvelope.result)) {
     return undefined;
   }
@@ -1807,7 +1813,7 @@ function genericSourceContextSummary(toolResults: QueryRefinementToolResult[]): 
 
   const syncEnvelope = [...toolResults]
     .reverse()
-    .find((result) => result.name === "get_recent_sync_runs" && isRecord(result.result));
+    .find((result) => result.name === "get_recent_sync_runs" && isReadResult(result));
   const syncPayload = syncEnvelope && isRecord(syncEnvelope.result)
     ? objectRecord(syncEnvelope.result, "data")
     : undefined;
@@ -1881,13 +1887,13 @@ function genericWorkspaceOverviewSections(toolResults: QueryRefinementToolResult
   }
   const sourcesEnvelope = [...toolResults]
     .reverse()
-    .find((result) => result.name === "list_sources" && isRecord(result.result));
+    .find((result) => result.name === "list_sources" && isReadResult(result));
   const metricsEnvelope = [...toolResults]
     .reverse()
     .find((result) => result.name === "list_metrics" && isRecord(result.result));
   const syncEnvelope = [...toolResults]
     .reverse()
-    .find((result) => result.name === "get_recent_sync_runs" && isRecord(result.result));
+    .find((result) => result.name === "get_recent_sync_runs" && isReadResult(result));
   if (!sourcesEnvelope || !isRecord(sourcesEnvelope.result)) {
     return [];
   }

@@ -1755,3 +1755,50 @@ describe("advisor rescue: lead, audit, trial and form sign-up words go where the
     expect(trial.second).not.toContain(OUTCOMES_LINE);
   });
 });
+
+describe("advisor: a refused call is no read", () => {
+  const app = (name: string) => `mcp__${APP_SERVER}__${name}`;
+  const refused = (name: string) => ({
+    name,
+    result: {
+      status: "error",
+      actionId: name,
+      input: {},
+      error: { code: "unknown_action", message: `Unknown Infinite OS action: ${name}` }
+    }
+  });
+  const twinSources = {
+    name: app("list_sources"),
+    result: {
+      data: {
+        ok: true, actionId: "list_sources", authority: "tool_agent", status: "ok",
+        data: { sources: [{ id: "src_ga4", provider: "ga4", status: "connected", connection_name: "Main site" }] },
+        provenance: [], caveats: [], truncated: false, nextActions: []
+      }
+    }
+  };
+
+  it("still rescues after a refused app call, which answered nothing", () => {
+    const available = [...createDaemonActionRegistry().list().map((action) => action.id as string), app("list_sources"), app("list_audit_leads")];
+    expect(buildQueryRefinementSections("how many new leads this week?", [twinSources, refused(app("list_contacts"))], available))
+      .toEqual(buildQueryRefinementSections("how many new leads this week?", [twinSources], available));
+    expect(buildQueryRefinementSections("how many new leads this week?", [twinSources], available).join("\n"))
+      .toContain("-> call list_audit_leads");
+  });
+
+  it("never reads a refused get_recent_sync_runs as freshness context", () => {
+    const sources = { name: "list_sources", result: { data: { sources: [{ id: "src_ga4", provider: "ga4", status: "connected" }] } } };
+    const metrics = { name: "list_metrics", result: { data: { metrics: [{ id: "site_visitors" }] } } };
+    expect(buildQueryRefinementSections("what stands out?", [sources, metrics, refused("get_recent_sync_runs")]))
+      .toEqual(buildQueryRefinementSections("what stands out?", [sources, metrics]));
+    expect(buildQueryRefinementSections("what stands out?", [sources, metrics]).join("\n")).toContain("not enough freshness context yet");
+  });
+
+  it("keeps the twin's source list when a refused bare list_sources follows it", () => {
+    for (const message of ["give me an overview of the workspace", "give me a snapshot of the workspace", "what stands out?"]) {
+      expect(buildQuerySynthesisSections(message, [twinSources, refused("list_sources")]), message)
+        .toEqual(buildQuerySynthesisSections(message, [twinSources]));
+    }
+    expect(buildQuerySynthesisSections("give me an overview of the workspace", [twinSources]).join("\n")).toContain("- Connected sources: 1.");
+  });
+});
