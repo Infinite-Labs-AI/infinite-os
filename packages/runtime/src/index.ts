@@ -286,7 +286,7 @@ export const FIRST_PHASE_METRICS = [
 ] as const;
 
 // Compact {metric id -> common aliases} hint, mirrored by hand from the `aliases` column of the
-// metric_definitions seeds (migrations 0005/0011/0014/0016/0022/0024/0025/0029/0033/0034). The
+// metric_definitions seeds (migrations 0005/0011/0014/0016/0022/0024/0025/0029/0033/0034/0048/0078). The
 // authoritative source is still the DB (list_metrics/describe_metric hydrate the live aliases);
 // this map is only a prompt-time hint so common phrasings like "cost per lead" or "cpl" resolve
 // to cost_per_result WITHOUT a discovery round-trip. Keep it in sync with the seeds when aliases
@@ -329,7 +329,8 @@ export const FIRST_PHASE_METRIC_ALIASES: Record<string, readonly string[]> = {
   posthog_page_views: ["posthog page views", "posthog pageviews", "pageviews by device", "pageviews by os", "pageviews by country"],
   stripe_current_paid_subscribers: ["current paid subscribers", "active paid subscribers", "current customers", "paid customers"],
   stripe_new_paid_subscribers: ["new paid subscribers", "new customers", "new paid customers"],
-  stripe_trialing_subscribers: ["trialing subscribers", "trials", "trial customers"],
+  // A trialing-now snapshot: "trials"/"new trials" ask for trial starts, which it never counts (0078).
+  stripe_trialing_subscribers: ["trialing subscribers", "current trials", "trial customers"],
   stripe_churned_subscribers: ["churned subscribers", "churned customers", "cancellations"],
   stripe_paid_subscribers: ["paid subscribers", "subscribers", "paid customers", "customers"],
   site_event_count: ["site events", "ga4 events", "event count by name", "events by name", "event counts"],
@@ -678,7 +679,7 @@ function metadataFor(id: InfiniteOsActionId): {
     },
     run_funnel_query: {
       title: "Run funnel query",
-      summary: "Execute the first-phase visit-to-signup funnel surface.",
+      summary: "Execute the first-phase GA4 funnel: GA4 key events divided by GA4 visitors (same lane), not a signup rate.",
       category: "questions",
       recommendedNextActions: ["explain_answer", "drilldown_result"],
       recipeIds: ["explain_answer"]

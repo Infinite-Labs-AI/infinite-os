@@ -88,9 +88,9 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
     rmSync(dataDir, { recursive: true, force: true });
   });
 
-  it("applied ALL 77 migrations on first boot and is idempotent on a re-run", async () => {
-    expect(loadMigrations().length).toBe(77);
-    expect(firstRun).toHaveLength(77);
+  it("applied ALL 78 migrations on first boot and is idempotent on a re-run", async () => {
+    expect(loadMigrations().length).toBe(78);
+    expect(firstRun).toHaveLength(78);
     expect(firstRun).toContain("0001_control_plane.sql");
     expect(firstRun).toContain("0006_security_roles.sql");
     expect(firstRun).toContain("0036_chat_sessions_desktop_surface.sql");
@@ -133,6 +133,7 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
     expect(firstRun).toContain("0075_posthog_raw_retention_90_days.sql");
     expect(firstRun).toContain("0076_sync_runs_source_index.sql");
     expect(firstRun).toContain("0077_meta_ads_account_spend_limit.sql");
+    expect(firstRun).toContain("0078_trialing_metric_aliases.sql");
 
     // Idempotent: a second boot re-applies zero (the `rows.length` gate, not the pg `rowCount`
     // gate, makes this true on PGlite).
@@ -140,13 +141,13 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
     expect(secondRun).toEqual([]);
   });
 
-  it("created the schema_migrations ledger with all 77 rows", async () => {
+  it("created the schema_migrations ledger with all 78 rows", async () => {
     const ledger = await db.query<{ id: string }>(
       "select id from schema_migrations order by id"
     );
-    expect(ledger).toHaveLength(77);
+    expect(ledger).toHaveLength(78);
     expect(ledger[0]?.id).toBe("0001_control_plane.sql");
-    expect(ledger.at(-1)?.id).toBe("0077_meta_ads_account_spend_limit.sql");
+    expect(ledger.at(-1)?.id).toBe("0078_trialing_metric_aliases.sql");
   });
 
   it("0063 serves both PostHog views from per-(workspace, source, day) rollups — refresh, is_internal, idempotency, grain key, grants", async () => {
@@ -966,6 +967,17 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
     expect(signupMetadata[0]?.name).toBe("PostHog signup events");
     expect(signupMetadata[0]?.unit).toBe("events");
     expect(signupMetadata[0]?.caveats).toContain("not verified account registrations");
+    // 0078: the trialing-now snapshot answers to no "trials"/"new trials" phrasing (a snapshot is never a start),
+    // and signup_count keeps its "signups" alias for open-core users whose PostHog event is their signup.
+    const aliasRows = await db.query<{ id: string; aliases: unknown }>(
+      "select id, aliases from metric_definitions where id in ('stripe_trialing_subscribers', 'signup_count') order by id"
+    );
+    const aliasesOf = (id: string) => {
+      const raw = aliasRows.find((row) => row.id === id)?.aliases;
+      return typeof raw === "string" ? JSON.parse(raw) : raw;
+    };
+    expect(aliasesOf("stripe_trialing_subscribers")).toEqual(["trialing subscribers", "current trials", "trial customers"]);
+    expect(aliasesOf("signup_count")).toEqual(["signups"]);
   });
 
   it("materialized the Stripe delta + reconciliation objects with WORKING grants", async () => {
@@ -4431,6 +4443,34 @@ describe("0077 re-applied (the cloud engine's one-call execute_sql recipe can ru
         "select conname from pg_constraint where conname = 'meta_ads_accounts_spend_limit_check'"
       );
       expect(rows).toHaveLength(1);
+    } finally {
+      await pg.close();
+    }
+  });
+});
+
+describe("0078 re-applied (the cloud engine's one-call execute_sql recipe can run a file twice)", () => {
+  it("leaves the same aliases and touches no other metric", async () => {
+    const { PGlite } = (await import("@electric-sql/pglite")) as unknown as {
+      PGlite: new () => { exec(sql: string): Promise<unknown>; query<T>(sql: string): Promise<{ rows: T[] }>; close(): Promise<void> };
+    };
+    const pg = new PGlite();
+    try {
+      await pg.exec(
+        "create table metric_definitions (id text primary key, aliases jsonb not null default '[]', examples jsonb not null default '[]');" +
+          "insert into metric_definitions values " +
+          "('stripe_trialing_subscribers', '[\"trialing subscribers\",\"trials\",\"new trials\"]', '[\"How many trials started this week?\"]')," +
+          "('signup_count', '[\"signups\"]', '[]')"
+      );
+      const sql = loadMigrations().find((m) => m.id === "0078_trialing_metric_aliases.sql")?.sql ?? "";
+      expect(sql).not.toBe("");
+      await pg.exec(sql);
+      await pg.exec(sql);
+      const { rows } = await pg.query<{ id: string; aliases: unknown }>("select id, aliases from metric_definitions order by id");
+      expect(rows).toEqual([
+        { id: "signup_count", aliases: ["signups"] },
+        { id: "stripe_trialing_subscribers", aliases: ["trialing subscribers", "current trials", "trial customers"] }
+      ]);
     } finally {
       await pg.close();
     }
