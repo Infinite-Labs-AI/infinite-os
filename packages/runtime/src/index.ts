@@ -1296,8 +1296,14 @@ function inputSchemaFor(id: InfiniteOsActionId): Record<string, unknown> {
           maxLength: 512,
           description: "Server-bound EU DSA payor. Omit unless the trusted Meta account binding supplies it."
         },
-        pixelId: { type: "string" },
-        customEventType: { type: "string" },
+        pixelId: {
+          type: "string",
+          description: "Website pixel/dataset id. Only with optimizationGoal OFFSITE_CONVERSIONS or VALUE, and always with customEventType; any other goal is refused if it carries one."
+        },
+        customEventType: {
+          type: "string",
+          description: "The website event to optimise for (promoted_object.custom_event_type), e.g. PURCHASE, START_TRIAL, INITIATED_CHECKOUT. Only with OFFSITE_CONVERSIONS or VALUE, and always with pixelId; never defaulted."
+        },
         clientToken: { type: "string" }
       },
       ["campaignId", "name", "optimizationGoal", "billingEvent"]
