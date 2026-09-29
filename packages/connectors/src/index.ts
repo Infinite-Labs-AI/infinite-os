@@ -9026,11 +9026,15 @@ export type MetaWebsiteCustomEventType = (typeof META_WEBSITE_CUSTOM_EVENT_TYPES
 // `offsite_conversion.fb_pixel_add_to_wishlist` + `add_to_wishlist`. The other fb_pixel_ names
 // (add_payment_info, add_to_cart, view_content, search) are in Meta's documented action_type enumeration.
 // No count is revenue: only Purchase carries a conversion value.
+// Its measured zero is WRITTEN (a 0 row on the primary partition), unlike purchase/lead: rows synced before
+// this rule existed carry no row of the type at all, so a reader must be able to tell "Meta measured none"
+// (a 0 row) from "our DB holds no count for this day" (no row: unknown, never 0).
 function metaPixelEventRule(resultType: string, pixelAction: string): MetaCanonicalEventRule {
   return {
     resultType,
     actionTypes: [`offsite_conversion.fb_pixel_${pixelAction}`, pixelAction],
     value: false,
+    writesMeasuredZero: true,
   };
 }
 
@@ -9121,6 +9125,9 @@ interface MetaCanonicalEventRule {
   // Read only when no `actionTypes` alias is present: its values for our windows become a
   // `meta_results` row. Absent, valueless or malformed evidence is never read as 0.
   metaResultsIndicator?: string;
+  // True when a PRIMARY row's measured zero (actions[] observed, no alias) is written as an explicit 0 row
+  // instead of no row, so "no row" keeps meaning "not stored" for a type added after history was synced.
+  writesMeasuredZero?: boolean;
 }
 
 // Keyed by adset optimization_goal (uppercase, as Meta returns it).
@@ -10261,7 +10268,17 @@ function metaAdsConversionForRule(
       && metaHeadlineWindowValue(valueOnlyEvidence) > 0;
     // A missing alias is a measured zero only when we know the event's action_type names. For a
     // rule that flags missingAliasIsUnknown (StartTrial), it stays unknown, never 0.
-    if (actions !== null && !hasPositiveValueOnlyEvidence && !rule.missingAliasIsUnknown) return null;
+    if (actions !== null && !hasPositiveValueOnlyEvidence && !rule.missingAliasIsUnknown) {
+      if (!(rule.writesMeasuredZero && isPrimary)) return null;
+      return {
+        resultType: rule.resultType,
+        results: 0,
+        conversionValue: null,
+        attributionSetting: context.attributionSetting,
+        isPrimary,
+        resultsSource: "derived_from_canonical_mapping"
+      };
+    }
     // A rule that names Meta's own Results indicator (StartTrial) reads that exact entry. It is
     // Meta's count for the configured outcome, so it is `meta_results`, not a canonical mapping.
     const reported = rule.metaResultsIndicator

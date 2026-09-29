@@ -10295,14 +10295,15 @@ describe("Meta Ads durable daily history", () => {
           action_values: [{ action_type: `offsite_conversion.fb_pixel_${pixelAction}`, "7d_click": "120" }],
         },
         { ad_id: "a_bare", actions: [{ action_type: pixelAction, "7d_click": "4" }] },
-        // actions[] observed with neither name: this event's measured zero (nothing written), as for purchase.
+        // actions[] observed with neither name: this event's measured zero, WRITTEN as a 0 row (unlike purchase), so a
+        // day synced before this rule (no row) stays distinguishable from a measured none.
         { ad_id: "a_zero", actions: [{ action_type: "link_click", "7d_click": "5" }] },
       ] }), async () => {
         const byAd = await promotedPayloads("ad");
         const row = (results: number) => ({ resultType, results, conversionValue: null, attributionSetting: HEADLINE_WINDOWS, isPrimary: true, resultsSource: "derived_from_canonical_mapping" });
         expect(byAd.get("a_both")?.conversions).toEqual([row(5)]);
         expect(byAd.get("a_bare")?.conversions).toEqual([row(4)]);
-        expect(byAd.get("a_zero")?.conversions).toEqual([]);
+        expect(byAd.get("a_zero")?.conversions).toEqual([row(0)]);
       });
     }
   });
