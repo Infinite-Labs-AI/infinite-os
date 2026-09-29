@@ -1060,18 +1060,29 @@ function unionActionSet(
   scoped: NormalizedScopedAppTools,
   withheld: ReadonlySet<string>
 ): ActionDefinition[] {
-  const nativeActions = registry.list().filter((action) => !withheld.has(action.id));
+  // A kept native's next-step hints drop the withheld ids too, so the manifest never points at a refused action.
+  const nativeActions = registry
+    .list()
+    .filter((action) => !withheld.has(action.id))
+    .map((action) => action.recommendedNextActions.some((id) => withheld.has(id))
+      ? { ...action, recommendedNextActions: action.recommendedNextActions.filter((id) => !withheld.has(id)) }
+      : action);
   const nativeIds = new Set(nativeActions.map((action) => action.id));
   const appActions = scopedAppToolActions(scoped).filter((action) => !nativeIds.has(action.id));
   return [...nativeActions, ...appActions];
 }
 
-// Native actions a union turn leaves out because an app twin replaces them. The native run_meta_live_insights is a
-// live Graph read; when the app's get_meta_performance (stored history, settled account-zone days) is in the turn,
-// offering both lets the model pick the live read.
+// Native actions a union turn leaves out because an app twin replaces them. The native Meta reads are live Graph
+// reads on the account's throttled budget; when the app's stored copy is in the turn, offering both lets the model
+// pick the live read. get_meta_performance (stored history, settled account-zone days) replaces
+// run_meta_live_insights; list_meta_entities (stored entities and status history) replaces the native entity and
+// asset reads. A bare call to a withheld id resolves to the native name and is refused as an unknown action.
 function withheldNativeActionIds(scoped: NormalizedScopedAppTools): Set<string> {
   const appNames = new Set(scoped.tools.map((tool) => tool.rawName));
-  return new Set(appNames.has("get_meta_performance") ? ["run_meta_live_insights"] : []);
+  return new Set([
+    ...(appNames.has("get_meta_performance") ? ["run_meta_live_insights"] : []),
+    ...(appNames.has("list_meta_entities") ? ["list_meta_entities", "get_meta_entity", "list_meta_assets"] : [])
+  ]);
 }
 
 function normalizeScopedAppTools(scoped: ScopedAppTools | undefined): NormalizedScopedAppTools | undefined {

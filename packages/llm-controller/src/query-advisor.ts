@@ -838,9 +838,13 @@ function genericOpenEndedRefinementSections(
   // for metric-shaped turns too — but ONLY when the turn so far has list_sources and has not yet run
   // (or even located) any metric. This is conservative: it cannot fire once a metric query/breakdown
   // result exists, and it never relaxes the result_type partition or any write confirmation.
+  const metaQuestion =
+    availableActionIds.some((id) => id === "get_meta_performance" || id.endsWith("__get_meta_performance")) &&
+    isMetricShapedQuestion(message) &&
+    isMetaMetricQuestion(message);
   if (
     !isOpenEndedAnalysisPrompt(message) &&
-    isTargetedMetricQuestion(message) &&
+    (metaQuestion || isTargetedMetricQuestion(message)) &&
     hasSources &&
     !hasMetrics &&
     !hasMetricDetail &&
@@ -849,14 +853,14 @@ function genericOpenEndedRefinementSections(
     !hasBreakdownResult
   ) {
     // A turn with the app's stored Meta read refuses Meta metrics on run_metric_query/run_breakdown_query.
-    if (
-      availableActionIds.some((id) => id === "get_meta_performance" || id.endsWith("__get_meta_performance")) &&
-      isMetaMetricQuestion(message)
-    ) {
+    if (metaQuestion) {
       return [
         "Metric-question refinement guidance:",
         "- The user asked for a Meta Ads number, but you only have a source list so far.",
-        "- Call get_meta_performance with a structured `period` (all available data when no period was named, stated as the assumed scope). run_metric_query and run_breakdown_query refuse Meta metrics."
+        "- Call get_meta_performance with a structured `period` (all available data when no period was named, stated as the assumed scope). run_metric_query and run_breakdown_query refuse Meta metrics.",
+        ...(META_CREDIT_OUTCOME_RE.test(message) ? [
+          "- Registrations or trials from get_meta_performance are Meta's claim. Our own counts stay run_app_outcomes (registrations) and read_subscription_metrics (trial starts); never present one as the other, and when asked to compare, show both, labelled."
+        ] : [])
       ];
     }
     return [
@@ -948,17 +952,33 @@ function isOpenEndedAnalysisPrompt(message: string): boolean {
 // narrow: this only relaxes the "fetch a metric before answering" rescue, never any safety gate.
 const METRIC_TERM_RE =
   /\b(clicks?|impressions?|reach|ctr|cpc|cpm|cpl|cpa|roas|frequency|spend|cost per (?:lead|result|acquisition|conversion|click|mille|thousand)|conversions?|results?|leads?|purchases?|link clicks?|landing page views?|page ?views?|visitors?|users?|sessions?|signups?|orders?|revenue|sales|gmv|followers?|tweets?|posts?|comments?|replies|engagement|events?|conversion (?:rate|value)|engagement rate|session duration)\b/i;
-function isTargetedMetricQuestion(message: string): boolean {
-  const metricShaped =
-    /\b(how many|how much|what(?:['’]?s| is| are)? (?:my|our|the)|what was (?:my|our|the)|show me|give me)\b/i.test(message) ||
+function isMetricShapedQuestion(message: string): boolean {
+  return /\b(how many|how much|what(?:['’]?s| is| are)? (?:my|our|the)|what was (?:my|our|the)|show me|give me)\b/i.test(message) ||
     /\bcost per\b/i.test(message);
-  return metricShaped && METRIC_TERM_RE.test(message);
+}
+function isTargetedMetricQuestion(message: string): boolean {
+  return isMetricShapedQuestion(message) && METRIC_TERM_RE.test(message);
 }
 
-// A Meta Ads number: a Meta-only metric word, or an ad metric asked about Meta/Facebook/Instagram ads.
+// Meta signals: the platform named, or its ad-account objects. Bare "instagram" is not one (organic reach and posts
+// are not Meta Ads); "instagram ads" is.
+const META_SIGNAL_RE = /\b(meta|facebook|fb|instagram ads?|ad ?sets?|campaigns?)\b/i;
+// Metric words only Meta Ads answers in this workspace.
+const META_ONLY_TERM_RE = /\b(cpl|cpa|roas|cost per (?:lead|result|acquisition|conversion|purchase))\b/i;
+// Another platform named: the question is not about Meta Ads even when it says "ads", "reach" or "impressions".
+const OTHER_PLATFORM_RE =
+  /\b(google ads?|adwords|youtube|tiktok|twitter|tweets?|linkedin|organic instagram|x (?:posts?|ads?|impressions|followers|account))\b|\b(?:on|from|via) x\b/i;
+// Outcomes Meta also credits to its ads; ours stay run_app_outcomes / read_subscription_metrics unless Meta is named.
+const META_CREDIT_OUTCOME_RE = /\b(registrations?|trials?)\b/i;
+
+// A Meta Ads number: never when another platform is named; otherwise a Meta-only metric word, or a metric (or a
+// registrations/trials count Meta credits to its ads) asked with an explicit Meta signal.
 function isMetaMetricQuestion(message: string): boolean {
-  return /\b(cpl|cpa|roas|ctr|cpc|cpm|frequency|reach|impressions?|cost per (?:lead|result|acquisition|click|mille|thousand))\b/i.test(message)
-    || (/\b(meta|facebook|fb|instagram|ads?|ad ?sets?|campaigns?)\b/i.test(message) && METRIC_TERM_RE.test(message));
+  if (OTHER_PLATFORM_RE.test(message)) {
+    return false;
+  }
+  return META_ONLY_TERM_RE.test(message)
+    || (META_SIGNAL_RE.test(message) && (METRIC_TERM_RE.test(message) || META_CREDIT_OUTCOME_RE.test(message)));
 }
 
 function isCapabilityExplorationPrompt(message: string): boolean {

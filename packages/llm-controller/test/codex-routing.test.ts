@@ -141,6 +141,29 @@ describe("engine prompt: Meta", () => {
     expect(text).not.toContain("do NOT reach for a live entity-list or Graph tool");
   });
 
+  it("tells Meta-credited registrations and trials apart from our own counts", () => {
+    const text = prompt([...metaTurn(), twin("run_app_outcomes"), twin("read_subscription_metrics")]);
+    expect(text).toContain(
+      "- Registrations or trials credited to Meta ads → get_meta_performance (Meta's claim). Our own counts stay run_app_outcomes (registrations = first profile insert) and read_subscription_metrics (Stripe trial starts). Never present one as the other; when asked to compare, show both, labelled."
+    );
+    const metaLine = text.split("\n").find((line) => line.startsWith("- Meta Ads numbers")) ?? "";
+    expect(metaLine).toMatch(/registrations/);
+    expect(metaLine).toMatch(/trials/);
+    const claim = metaLine.slice(metaLine.indexOf("Its results"));
+    expect(claim).toMatch(/registrations/);
+    expect(claim).toMatch(/trials/);
+    expect(claim).toContain("Meta's claim");
+  });
+
+  it("adds no Meta-credit bullet without get_meta_performance", () => {
+    expect(prompt(native())).not.toContain("credited to Meta ads");
+  });
+
+  it("drops the result_type partition rule on a desktop Meta turn and keeps it open-core", () => {
+    expect(prompt(metaTurn())).not.toContain("partition");
+    expect(prompt(native())).toContain("it never relaxes a required result_type partition");
+  });
+
   it("leaves an open-core turn's Meta recipes as they were", () => {
     const text = prompt(native());
     expect(text).toContain("cost_per_result with result_type=lead");
@@ -206,6 +229,36 @@ describe("advisor refinement: Meta metric questions", () => {
       const text = buildQueryRefinementSections(question, sourcesOnly, [`mcp__${APP_SERVER}__get_meta_performance`]).join("\n");
       expect(text).toContain("get_meta_performance with a structured `period`");
       expect(text).not.toContain("run run_metric_query or run_breakdown_query");
+    }
+  });
+
+  it("sends Meta-credited registrations and trials to get_meta_performance, labelled as Meta's claim", () => {
+    for (const question of [
+      "how many registrations did facebook ads bring last week?",
+      "how many trials came from our meta campaigns?"
+    ]) {
+      const text = buildQueryRefinementSections(question, sourcesOnly, [`mcp__${APP_SERVER}__get_meta_performance`]).join("\n");
+      expect(text).toContain("get_meta_performance with a structured `period`");
+      expect(text).toContain("Meta's claim");
+    }
+  });
+
+  it("does not fire the Meta check on non-Meta questions", () => {
+    for (const question of [
+      "how many impressions did my tweets get last week?",
+      "what is my instagram reach this month?",
+      "how much did I spend on google ads?",
+      "what's my reach on youtube?"
+    ]) {
+      const text = buildQueryRefinementSections(question, sourcesOnly, [`mcp__${APP_SERVER}__get_meta_performance`]).join("\n");
+      expect(text, question).not.toContain("get_meta_performance");
+    }
+  });
+
+  it("does not fire the Meta check on our own registrations or trials", () => {
+    for (const question of ["how many registrations last week?", "how many trials this month?"]) {
+      const text = buildQueryRefinementSections(question, sourcesOnly, [`mcp__${APP_SERVER}__get_meta_performance`]).join("\n");
+      expect(text, question).not.toContain("get_meta_performance");
     }
   });
 
@@ -376,3 +429,73 @@ describe("union turn: native live Meta read", () => {
     expect(tools).toContain("run_meta_live_insights");
   });
 });
+
+describe("union turn: native live Meta entity reads", () => {
+  const LIVE_READS = ["list_meta_entities", "get_meta_entity", "list_meta_assets"];
+
+  async function run(appTools: string[], callName: string) {
+    const requests: ModelRequest[] = [];
+    const appCalls: string[] = [];
+    const controller = createLlmController({
+      registry: createInfiniteOsRegistry({}),
+      modelClient: {
+        complete: async (request) => {
+          requests.push(request);
+          if (request.toolResults.length === 0) {
+            return { toolCalls: [{ id: "call_status", name: callName, input: {} }] };
+          }
+          return { message: "done" };
+        }
+      }
+    });
+    const result = await controller.chat({
+      message: "is the spring campaign running?",
+      sessionId: `s-union-status-${appTools.join("-")}-${callName}`,
+      workspaceId: "ws_test",
+      actorId: "operator-1",
+      surface: "desktop",
+      scopedAppTools: {
+        serverName: APP_SERVER,
+        allowedTools: appTools.map((name) => `mcp__${APP_SERVER}__${name}`),
+        mode: "union",
+        tools: appTools.map((name) => ({ name, description: name, inputSchema: { type: "object" } })),
+        callTool: async (name: string) => {
+          appCalls.push(name);
+          return { ok: true };
+        }
+      }
+    });
+    const first = requests[0] as { tools: Array<{ name: string }>; systemPrompt?: string };
+    return {
+      tools: first.tools.map((tool) => tool.name),
+      call: result.actionCalls.find((call) => call.id === "call_status"),
+      appCalls
+    };
+  }
+
+  it("withholds the native live entity reads when the app's list_meta_entities twin is present", async () => {
+    const { tools } = await run(["list_meta_entities", "get_meta_performance"], "list_meta_entities");
+    expect(tools).toContain(`mcp__${APP_SERVER}__list_meta_entities`);
+    for (const id of LIVE_READS) {
+      expect(tools).not.toContain(id);
+    }
+  });
+
+  it("never runs a live Graph read for a bare list_meta_entities call when the twin is present", async () => {
+    for (const bare of LIVE_READS) {
+      const { call } = await run(["list_meta_entities"], bare);
+      // Refused (never the native live read) or routed to the app twin.
+      const refused = call?.status === "error" && (call.error as { code?: string } | undefined)?.code === "unknown_action";
+      const routed = call?.actionId === `mcp__${APP_SERVER}__${bare}`;
+      expect(refused || routed).toBe(true);
+    }
+  });
+
+  it("keeps the native live entity reads in a union turn without the twin", async () => {
+    const { tools } = await run(["get_meta_performance"], "list_sources");
+    for (const id of LIVE_READS) {
+      expect(tools).toContain(id);
+    }
+  });
+});
+
