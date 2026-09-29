@@ -106,14 +106,46 @@ function recordingSessionStore(recorded: Array<{ actionId: string; authority: st
   };
 }
 
-// The three writes the desktop's local lane sends (pause/unpause, budget, paused create), each through /tools/call and
-// through its named route.
-const WRITES = [
+interface Write {
+  actionId: string;
+  /** The daemon's named /meta/* route, when it has one. */
+  route?: string;
+  input: Record<string, unknown>;
+  /** The Graph POST; `body` lists every field it carries, for the writes whose body is pinned exactly. */
+  expectPost: { url: string; body: Record<string, string>; exact?: true };
+}
+
+// A campaign that runs on a lifetime budget: the fetch stub answers its budget-type read with a lifetime budget.
+const LIFETIME_CAMPAIGN = "120000000000557";
+
+// The writes the desktop's local lane sends (pause/unpause, daily and lifetime budget, paused create, ad edit), each
+// through /tools/call and through its named route where the daemon has one. update_meta_ad has none: the desktop's ad
+// edit (1bu-1 meta-ads-pack.ts executeMetaAdUpdate, wired at main.ts updateMetaAd) sends it through
+// executeOperatorAction, and its lifetime budget change (1bu-1 ads/engine-action.ts budgetType "lifetime") sends
+// update_meta_budget with lifetimeBudget the same way.
+const WRITES: readonly Write[] = [
   {
     actionId: "update_meta_budget",
     route: "/meta/budget",
     input: { sourceId: "src_meta", entityId: "120000000000555", entity: "adset", dailyBudget: 8000 },
     expectPost: { url: "https://graph.facebook.com/v25.0/120000000000555", body: { daily_budget: "8000" } }
+  },
+  {
+    // Lifetime budget: the POST carries lifetime_budget only (never daily_budget, a status or an end time).
+    actionId: "update_meta_budget",
+    route: "/meta/budget",
+    input: { sourceId: "src_meta", entityId: LIFETIME_CAMPAIGN, entity: "campaign", lifetimeBudget: 150000 },
+    expectPost: { url: `https://graph.facebook.com/v25.0/${LIFETIME_CAMPAIGN}`, body: { lifetime_budget: "150000" }, exact: true }
+  },
+  {
+    // Ad edit: rename and creative swap only, never a status.
+    actionId: "update_meta_ad",
+    input: { sourceId: "src_meta", entityId: "120000000000560", name: "Spring v2", creativeId: "120000000000777" },
+    expectPost: {
+      url: "https://graph.facebook.com/v25.0/120000000000560",
+      body: { name: "Spring v2", creative: JSON.stringify({ creative_id: "120000000000777" }) },
+      exact: true
+    }
   },
   {
     actionId: "set_meta_entity_status",
@@ -127,7 +159,15 @@ const WRITES = [
     input: { sourceId: "src_meta", campaignId: "120000000000001", name: "Spring", optimizationGoal: "LINK_CLICKS", billingEvent: "IMPRESSIONS" },
     expectPost: { url: "https://graph.facebook.com/v25.0/act_999/adsets", body: { status: "PAUSED", name: "Spring" } }
   }
-] as const;
+];
+
+/** Each path the desktop's local lane can send a write through: /tools/call, and its named route when it has one. */
+function directCalls(write: Write): Array<readonly [string, Record<string, unknown>]> {
+  return [
+    ["/tools/call", { actionId: write.actionId, input: write.input }] as const,
+    ...(write.route ? [[write.route, write.input] as const] : [])
+  ];
+}
 
 describe("union withholding leaves the desktop's direct operator path intact", () => {
   let graphCalls: GraphCall[];
@@ -144,9 +184,11 @@ describe("union withholding leaves the desktop's direct operator path intact", (
       const body = Object.fromEntries(new URLSearchParams(typeof init?.body === "string" ? init.body : "").entries());
       const method = init?.method ?? "GET";
       graphCalls.push({ url, method, authorization: headers.Authorization ?? headers.authorization ?? null, body });
-      // The budget write first reads the entity's budget type (a daily-budget ad set here).
+      // The budget write first reads the entity's budget type: a daily-budget ad set, or the lifetime-budget campaign.
       const payload = method === "GET"
-        ? { id: "120000000000555", daily_budget: "4000", lifetime_budget: "0" }
+        ? url.includes(`/${LIFETIME_CAMPAIGN}?`)
+          ? { id: LIFETIME_CAMPAIGN, daily_budget: "0", lifetime_budget: "100000" }
+          : { id: "120000000000555", daily_budget: "4000", lifetime_budget: "0" }
         : url.endsWith("/adsets")
           ? { id: "120000000000888" }
           : { success: true };
@@ -184,7 +226,7 @@ describe("union withholding leaves the desktop's direct operator path intact", (
         headers: OPERATOR,
         payload: {
           platform: "desktop",
-          message: "raise the spring ad set's budget to $80, turn it on, and add a new ad set",
+          message: "raise the spring ad set's budget to $80 and the campaign's lifetime budget to $1,500, turn it on, rename the video ad, and add a new ad set",
           appTools: {
             serverName: "infinite_app",
             mode: "union",
@@ -212,10 +254,7 @@ describe("union withholding leaves the desktop's direct operator path intact", (
 
       // 2) The desktop's local lane, same daemon, after that turn: each write executes with operator authority.
       for (const write of WRITES) {
-        for (const [url, payload] of [
-          ["/tools/call", { actionId: write.actionId, input: write.input }],
-          [write.route, write.input]
-        ] as const) {
+        for (const [url, payload] of directCalls(write)) {
           graphCalls = [];
           const response = await app.inject({ method: "POST", url, headers: OPERATOR, payload });
           expect(response.statusCode, `${write.actionId} via ${url}`).toBe(200);
@@ -228,6 +267,9 @@ describe("union withholding leaves the desktop's direct operator path intact", (
           const post = graphCalls.find((call) => call.method === "POST");
           expect(post?.url, `${write.actionId} via ${url}`).toBe(write.expectPost.url);
           expect(post?.body, `${write.actionId} via ${url}`).toMatchObject(write.expectPost.body);
+          if (write.expectPost.exact) {
+            expect(post?.body, `${write.actionId} via ${url}`).toEqual(write.expectPost.body);
+          }
           expect(post?.authorization).toBe(`Bearer ${META_TOKEN}`);
           expect(audits.at(-1), `${write.actionId} via ${url}`).toEqual({ actorType: "operator", action: write.actionId, status: "succeeded" });
         }
@@ -235,10 +277,7 @@ describe("union withholding leaves the desktop's direct operator path intact", (
 
       // 3) The read token still cannot write on either route (unchanged).
       for (const write of WRITES) {
-        for (const [url, payload] of [
-          ["/tools/call", { actionId: write.actionId, input: write.input }],
-          [write.route, write.input]
-        ] as const) {
+        for (const [url, payload] of directCalls(write)) {
           const denied = await app.inject({ method: "POST", url, headers: READ, payload });
           expect(denied.statusCode, `${write.actionId} via ${url}`).toBe(403);
           expect(denied.json()).toMatchObject({ error: { code: "operator_authority_required" } });
