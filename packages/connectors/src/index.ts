@@ -9084,11 +9084,108 @@ function isMetaHeadlineResultType(value: string): value is MetaHeadlineResultTyp
   return Object.prototype.hasOwnProperty.call(META_HEADLINE_RESULT_RULES, value);
 }
 
+// Every WEBSITE event a new ad set can optimise for: Meta's `promoted_object.custom_event_type` for a
+// pixel/dataset conversion goal (OFFSITE_CONVERSIONS / VALUE), Marketing API spelling (INITIATED_CHECKOUT
+// and CONTENT_VIEW, not the Pixel's InitiateCheckout / ViewContent). Source: Meta's Help Centre
+// "Available conversion locations and events by objective" (website location) + the Ad Promoted Object
+// reference, read 2026-09-29 (1bu-artifacts research/2026-09-29-meta-create-events/GAPS.md §3). ONE list:
+// both create transports' allow-lists contain exactly these website events (a test pins it), and every one
+// has a result rule below, so an ad set Infinite can create is an ad set the Ads tab can score.
+export const META_WEBSITE_CUSTOM_EVENT_TYPES = [
+  "PURCHASE",
+  "INITIATED_CHECKOUT",
+  "ADD_PAYMENT_INFO",
+  "ADD_TO_CART",
+  "ADD_TO_WISHLIST",
+  "COMPLETE_REGISTRATION",
+  "START_TRIAL",
+  "SUBSCRIBE",
+  "SEARCH",
+  "CONTENT_VIEW",
+  "DONATE",
+  "LEAD",
+  "CONTACT",
+  "SCHEDULE",
+  "SUBMIT_APPLICATION",
+  "FIND_LOCATION",
+  "CUSTOMIZE_PRODUCT"
+] as const;
+export type MetaWebsiteCustomEventType = (typeof META_WEBSITE_CUSTOM_EVENT_TYPES)[number];
+
+// A website event Meta reports inside actions[] as `offsite_conversion.fb_pixel_<pixelAction>` (the Pixel /
+// Conversions API population the ad set optimises) and, for the same people, as the bare `<pixelAction>`.
+// ONE variant per event, in that order: the first present alias wins and the two are never summed (the §0
+// trap). omni_* / onsite_web_* / *_add_20_s_calls are other populations or Meta's sub-counts and stay out.
+// FACT (prod engine.meta_ads_adset_daily, 2026-09-29): an INITIATED_CHECKOUT ad set's own Results indicator
+// is `actions:offsite_conversion.fb_pixel_initiate_checkout` (151 rows), and add-to-wishlist rows carry
+// `offsite_conversion.fb_pixel_add_to_wishlist` + `add_to_wishlist`. The other fb_pixel_ names
+// (add_payment_info, add_to_cart, view_content, search) are in Meta's documented action_type enumeration.
+// No count is revenue: only Purchase carries a conversion value.
+// Its measured zero is WRITTEN (a 0 row on the primary partition), unlike purchase/lead: rows synced before
+// this rule existed carry no row of the type at all, so a reader must be able to tell "Meta measured none"
+// (a 0 row) from "our DB holds no count for this day" (no row: unknown, never 0).
+function metaPixelEventRule(resultType: string, pixelAction: string): MetaCanonicalEventRule {
+  return {
+    resultType,
+    actionTypes: [`offsite_conversion.fb_pixel_${pixelAction}`, pixelAction],
+    value: false,
+    writesMeasuredZero: true,
+  };
+}
+
+// A website event Meta has NO fb_pixel_ action_type for (the same case as StartTrial, see its rule): it is
+// counted only from Meta's own Results entry for `conversions:<name>_website` on an ad set promoting it
+// (`results` is already requested; nothing new is asked of Meta). A missing alias, an absent entry or an
+// entry with no values stays the unknown marker ("—"), never 0. INFERENCE, by analogy with the observed
+// `conversions:start_trial_website`: prod has no delivering ad set promoting any of these yet, so each
+// indicator must be confirmed from stored actions_raw.provider_result_evidence after its first delivery.
+// An exact-match miss keeps the count unknown; it can never invent one.
+function metaResultsOnlyEventRule(resultType: string): MetaCanonicalEventRule {
+  return {
+    resultType,
+    actionTypes: [],
+    value: false,
+    missingAliasIsUnknown: true,
+    metaResultsIndicator: `conversions:${resultType}_website`,
+  };
+}
+
+// Keyed by promoted_object.custom_event_type. result_type is the event's lowercase API code (the four
+// headline types keep theirs: purchase, lead, start_trial, complete_registration).
+const META_WEBSITE_EVENT_RESULT_RULES: Record<MetaWebsiteCustomEventType, MetaCanonicalEventRule> = {
+  PURCHASE: META_HEADLINE_RESULT_RULES.purchase,
+  LEAD: META_HEADLINE_RESULT_RULES.lead,
+  START_TRIAL: META_HEADLINE_RESULT_RULES.start_trial,
+  COMPLETE_REGISTRATION: META_HEADLINE_RESULT_RULES.complete_registration,
+  INITIATED_CHECKOUT: metaPixelEventRule("initiated_checkout", "initiate_checkout"),
+  ADD_PAYMENT_INFO: metaPixelEventRule("add_payment_info", "add_payment_info"),
+  ADD_TO_CART: metaPixelEventRule("add_to_cart", "add_to_cart"),
+  ADD_TO_WISHLIST: metaPixelEventRule("add_to_wishlist", "add_to_wishlist"),
+  CONTENT_VIEW: metaPixelEventRule("content_view", "view_content"),
+  SEARCH: metaPixelEventRule("search", "search"),
+  SUBSCRIBE: metaResultsOnlyEventRule("subscribe"),
+  DONATE: metaResultsOnlyEventRule("donate"),
+  CONTACT: metaResultsOnlyEventRule("contact"),
+  SCHEDULE: metaResultsOnlyEventRule("schedule"),
+  SUBMIT_APPLICATION: metaResultsOnlyEventRule("submit_application"),
+  FIND_LOCATION: metaResultsOnlyEventRule("find_location"),
+  CUSTOMIZE_PRODUCT: metaResultsOnlyEventRule("customize_product"),
+};
+
+// The result_type each website event is stored under (exported so a reader can name it without copying).
+export const META_WEBSITE_EVENT_RESULT_TYPES: Readonly<Record<MetaWebsiteCustomEventType, string>> = Object.fromEntries(
+  META_WEBSITE_CUSTOM_EVENT_TYPES.map((event) => [event, META_WEBSITE_EVENT_RESULT_RULES[event].resultType])
+) as Record<MetaWebsiteCustomEventType, string>;
+
 // The Results indicators the engine reads as typed counts. The hot lane sums exactly these onto its
 // derived rows (and no other indicator), so a derived ad set row resolves the same way a Meta-read
 // one does.
-const META_ADS_TYPED_RESULT_INDICATORS: readonly string[] = Object.values(META_HEADLINE_RESULT_RULES)
-  .flatMap((rule) => (rule.metaResultsIndicator ? [rule.metaResultsIndicator] : []));
+const META_ADS_TYPED_RESULT_INDICATORS: readonly string[] = [
+  ...new Set(
+    Object.values(META_WEBSITE_EVENT_RESULT_RULES)
+      .flatMap((rule) => (rule.metaResultsIndicator ? [rule.metaResultsIndicator] : []))
+  ),
+];
 
 // ──────────────────────────────────────────────────────────────────────────────────
 // §4b — Objective → canonical-event mapping (the load-bearing artifact).
@@ -9123,6 +9220,9 @@ interface MetaCanonicalEventRule {
   // Read only when no `actionTypes` alias is present: its values for our windows become a
   // `meta_results` row. Absent, valueless or malformed evidence is never read as 0.
   metaResultsIndicator?: string;
+  // True when a PRIMARY row's measured zero (actions[] observed, no alias) is written as an explicit 0 row
+  // instead of no row, so "no row" keeps meaning "not stored" for a type added after history was synced.
+  writesMeasuredZero?: boolean;
 }
 
 // Keyed by adset optimization_goal (uppercase, as Meta returns it).
@@ -9149,12 +9249,9 @@ const META_OPTIMIZATION_GOAL_RULES: Record<string, MetaCanonicalEventRule> = {
 // OFFSITE_CONVERSIONS is generic: the promoted_object custom_event_type decides what the
 // adset is actually optimizing for. Treating every such adset as purchase mislabeled live
 // LEAD campaigns and let their opaque `results` fallback poison the purchase partition.
-const META_PROMOTED_CUSTOM_EVENT_RULES: Record<string, MetaCanonicalEventRule> = {
-  PURCHASE: META_HEADLINE_RESULT_RULES.purchase,
-  LEAD: META_HEADLINE_RESULT_RULES.lead,
-  START_TRIAL: META_HEADLINE_RESULT_RULES.start_trial,
-  COMPLETE_REGISTRATION: META_HEADLINE_RESULT_RULES.complete_registration,
-};
+// Every website event a new ad set can promote has a rule (META_WEBSITE_EVENT_RESULT_RULES); an event
+// outside it (an app event, OTHER) falls through to the objective, never to a guessed event.
+const META_PROMOTED_CUSTOM_EVENT_RULES: Record<string, MetaCanonicalEventRule> = META_WEBSITE_EVENT_RESULT_RULES;
 
 // Coarse fallback keyed by campaign objective (ODAX, 6 outcomes) when optimization_goal
 // is absent. Same action_type drives BOTH count and value.
@@ -9189,7 +9286,8 @@ function metaCanonicalEventRule(
   promotedCustomEventType: string | null = null,
 ): MetaCanonicalEventRule | null {
   const goalKey = optimizationGoal?.toUpperCase();
-  if (goalKey === "OFFSITE_CONVERSIONS") {
+  // VALUE ("Maximise value of conversions") promotes an event the same way (Purchase).
+  if (goalKey === "OFFSITE_CONVERSIONS" || goalKey === "VALUE") {
     const eventKey = promotedCustomEventType?.toUpperCase();
     if (eventKey && eventKey in META_PROMOTED_CUSTOM_EVENT_RULES) {
       return META_PROMOTED_CUSTOM_EVENT_RULES[eventKey];
@@ -10299,7 +10397,17 @@ function metaAdsConversionForRule(
       && metaHeadlineWindowValue(valueOnlyEvidence) > 0;
     // A missing alias is a measured zero only when we know the event's action_type names. For a
     // rule that flags missingAliasIsUnknown (StartTrial), it stays unknown, never 0.
-    if (actions !== null && !hasPositiveValueOnlyEvidence && !rule.missingAliasIsUnknown) return null;
+    if (actions !== null && !hasPositiveValueOnlyEvidence && !rule.missingAliasIsUnknown) {
+      if (!(rule.writesMeasuredZero && isPrimary)) return null;
+      return {
+        resultType: rule.resultType,
+        results: 0,
+        conversionValue: null,
+        attributionSetting: context.attributionSetting,
+        isPrimary,
+        resultsSource: "derived_from_canonical_mapping"
+      };
+    }
     // A rule that names Meta's own Results indicator (StartTrial) reads that exact entry. It is
     // Meta's count for the configured outcome, so it is `meta_results`, not a canonical mapping.
     const reported = rule.metaResultsIndicator
@@ -11844,6 +11952,9 @@ const META_DEFAULT_ATTRIBUTION_SPEC: ReadonlyArray<{ event_type: string; window_
   { event_type: "VIEW_THROUGH", window_days: 1 },
   { event_type: "ENGAGED_VIDEO_VIEW", window_days: 1 }
 ];
+// The optimisation goals that carry a website conversion event: a promoted_object {pixel_id,
+// custom_event_type} rides ONLY on these, and they alone take Meta's default attribution below.
+const META_EVENT_CONVERSION_GOALS: ReadonlySet<string> = new Set<string>(["OFFSITE_CONVERSIONS", "VALUE"]);
 // The optimisation goals that take the default: pixel/dataset conversion goals. Meta allows only
 // 1-day click on every other goal/objective combination (link clicks, landing page views, instant
 // forms, reach, …), so those send no spec and keep what Meta assigns.
@@ -11853,7 +11964,7 @@ const META_DEFAULT_ATTRIBUTION_SPEC: ReadonlyArray<{ event_type: string; window_
 // OFFSITE_CONVERSIONS under OUTCOME_ENGAGEMENT (0). Nobody has yet confirmed Meta ACCEPTS the
 // engagement window at create time on any combination: the first paused test create in the Infinite
 // workspace is the proof, and a refusal fails the create with Meta's error (no retry without it).
-const META_DEFAULT_ATTRIBUTION_GOALS = new Set<string>(["OFFSITE_CONVERSIONS", "VALUE"]);
+const META_DEFAULT_ATTRIBUTION_GOALS: ReadonlySet<string> = META_EVENT_CONVERSION_GOALS;
 
 // The attribution_spec a new ad set sends for an already-normalized optimisation goal, or undefined
 // when the goal takes none.
@@ -11861,6 +11972,52 @@ function metaDefaultAttributionSpecFor(optimizationGoal: string): Array<{ event_
   return META_DEFAULT_ATTRIBUTION_GOALS.has(optimizationGoal)
     ? META_DEFAULT_ATTRIBUTION_SPEC.map((window) => ({ ...window }))
     : undefined;
+}
+// The promoted_object a new ad set sends, or undefined for none. A pixel and its event ride together, and
+// only on an event conversion goal (OFFSITE_CONVERSIONS / VALUE); nothing is ever guessed:
+//  - an event goal with a pixel needs its event (Meta: "If you use pixel_id, you must provide
+//    custom_event_type"). The old silent PURCHASE default turned a missing event into a purchase ad set.
+//  - an event without a pixel is refused, never silently dropped.
+//  - LINK_CLICKS, LANDING_PAGE_VIEWS, REACH, LEAD_GENERATION, … take no pixel and no event: the old
+//    default attached promoted_object {pixel, PURCHASE} to a Link clicks ad set while every surface said
+//    "no Pixel needed" (GAPS gap 5). A caller that sends one is refused, so the ad set is exactly what the
+//    person saw.
+// An event goal with neither is passed through as before (Meta decides; a future custom conversion rides
+// its own field). The caller's allow-list (Graph or CLI) still validates the event.
+function metaPromotedObjectFor(
+  optimizationGoal: string,
+  input: Pick<MetaAdSetCreateInput, "pixelId" | "customEventType">,
+  allowedEvents: Set<string>
+): { pixel_id: string; custom_event_type: string } | undefined {
+  const pixelId = typeof input.pixelId === "string" && input.pixelId.trim() !== "" ? input.pixelId.trim() : undefined;
+  const rawEvent = typeof input.customEventType === "string" && input.customEventType.trim() !== "" ? input.customEventType : undefined;
+  if (!META_EVENT_CONVERSION_GOALS.has(optimizationGoal)) {
+    if (pixelId !== undefined || rawEvent !== undefined) {
+      throw new ConnectorError(
+        "provider_api_error",
+        `Meta Ads optimization goal ${optimizationGoal} takes no pixel and no conversion event; only ${[...META_EVENT_CONVERSION_GOALS].join(" / ")} ad sets optimise for a website event`,
+        false
+      );
+    }
+    return undefined;
+  }
+  const customEventType = metaEnum(rawEvent, allowedEvents, "custom event type");
+  if (pixelId === undefined && customEventType === undefined) return undefined;
+  if (pixelId === undefined) {
+    throw new ConnectorError(
+      "provider_api_error",
+      `Meta Ads custom event type ${customEventType} needs a pixelId (the website pixel/dataset that records it)`,
+      false
+    );
+  }
+  if (customEventType === undefined) {
+    throw new ConnectorError(
+      "provider_api_error",
+      `Meta Ads ${optimizationGoal} ad set with a pixel needs a customEventType (the website event to optimise for)`,
+      false
+    );
+  }
+  return { pixel_id: pixelId, custom_event_type: customEventType };
 }
 const META_BILLING_EVENT_VALUES = new Set<string>([
   "APP_INSTALLS",
@@ -11910,27 +12067,13 @@ const META_CALL_TO_ACTION_VALUES = new Set<string>([
   "GET_SHOWTIMES",
   "WHATSAPP_MESSAGE"
 ]);
+// Graph's custom_event_type enum: every website event (META_WEBSITE_CUSTOM_EVENT_TYPES), OTHER, and the
+// app / gaming / messaging events only the direct Graph transport can send.
 const META_CUSTOM_EVENT_TYPE_VALUES = new Set<string>([
+  ...META_WEBSITE_CUSTOM_EVENT_TYPES,
   "AD_IMPRESSION",
   "RATE",
   "TUTORIAL_COMPLETION",
-  "CONTACT",
-  "CUSTOMIZE_PRODUCT",
-  "DONATE",
-  "FIND_LOCATION",
-  "SCHEDULE",
-  "START_TRIAL",
-  "SUBMIT_APPLICATION",
-  "SUBSCRIBE",
-  "ADD_TO_CART",
-  "ADD_TO_WISHLIST",
-  "INITIATED_CHECKOUT",
-  "ADD_PAYMENT_INFO",
-  "PURCHASE",
-  "LEAD",
-  "COMPLETE_REGISTRATION",
-  "CONTENT_VIEW",
-  "SEARCH",
   "SERVICE_BOOKING_REQUEST",
   "MESSAGING_CONVERSATION_STARTED_7D",
   "LEVEL_ACHIEVED",
@@ -11981,26 +12124,9 @@ const META_CLI_BILLING_EVENT_VALUES = new Set<string>([
   "POST_ENGAGEMENT",
   "THRUPLAY"
 ]);
-const META_CLI_CUSTOM_EVENT_TYPE_VALUES = new Set<string>([
-  "ADD_PAYMENT_INFO",
-  "ADD_TO_CART",
-  "ADD_TO_WISHLIST",
-  "COMPLETE_REGISTRATION",
-  "CONTACT",
-  "CONTENT_VIEW",
-  "CUSTOMIZE_PRODUCT",
-  "DONATE",
-  "FIND_LOCATION",
-  "INITIATED_CHECKOUT",
-  "LEAD",
-  "OTHER",
-  "PURCHASE",
-  "SCHEDULE",
-  "SEARCH",
-  "START_TRIAL",
-  "SUBMIT_APPLICATION",
-  "SUBSCRIBE"
-]);
+// The CLI's `--custom-event-type` Click choices: exactly the website events plus OTHER. The website events
+// are the SAME list the Graph set carries (a test pins both), so a website event is never Graph-only.
+const META_CLI_CUSTOM_EVENT_TYPE_VALUES = new Set<string>([...META_WEBSITE_CUSTOM_EVENT_TYPES, "OTHER"]);
 const META_CLI_CALL_TO_ACTION_VALUES = new Set<string>([
   "APPLY_NOW",
   "BOOK_TRAVEL",
@@ -12136,16 +12262,10 @@ export async function createMetaAdSet(
   } else if (input.targetingCountries && input.targetingCountries.length > 0) {
     params.targeting = { geo_locations: { countries: input.targetingCountries } }; // VERIFY against a real Meta sandbox capture before live use
   }
-  if (input.pixelId) {
-    // promoted_object only when a pixel is supplied (conversion adsets).
-    // FIX 3: custom_event_type is an enum → normalize+validate before the POST.
-    const customEventType =
-      metaEnum(input.customEventType, META_CUSTOM_EVENT_TYPE_VALUES, "custom event type") ?? "PURCHASE";
-    params.promoted_object = {
-      pixel_id: input.pixelId,
-      custom_event_type: customEventType
-    };
-  }
+  // promoted_object only on an event conversion goal, pixel + event together (metaPromotedObjectFor).
+  // FIX 3: custom_event_type is an enum → normalize+validate before the POST.
+  const promotedObject = metaPromotedObjectFor(optimizationGoal, input, META_CUSTOM_EVENT_TYPE_VALUES);
+  if (promotedObject) params.promoted_object = promotedObject;
 
   const response = await metaAdsGraphPost(credential, `${adAccountId}/${META_CREATE_EDGE.adset}`, params);
   const id = requireGraphId("adset", response);
@@ -14392,16 +14512,13 @@ async function createMetaAdSetViaCli(
   // Explicit on/off: omission lets the CLI choose a default, which is not an acceptable product
   // contract. Undefined remains OFF for callers that predate this field.
   args.push(input.advantageAudience === true ? "--advantage-audience" : "--no-advantage-audience");
-  if (input.pixelId) {
-    args.push("--pixel-id", input.pixelId);
-    // Mirror the Graph path: default the conversion event to PURCHASE when a pixel
-    // is supplied. Validate/normalize first so a bad enum throws non-retryably.
-    const customEventType =
-      metaEnum(input.customEventType, META_CUSTOM_EVENT_TYPE_VALUES, "custom event type") ?? "PURCHASE";
-    // Per-transport gate (review HIGH): reject a Graph-valid custom_event_type the CLI's
-    // Click choice set does NOT accept, BEFORE spawning. (PURCHASE default is in-set.)
-    assertMetaCliEnum(customEventType, META_CLI_CUSTOM_EVENT_TYPE_VALUES, "custom event type");
-    args.push("--custom-event-type", customEventType);
+  // Mirror the Graph path exactly: pixel + event together, only on an event conversion goal. Validate /
+  // normalize first so a bad enum throws non-retryably. Per-transport gate (review HIGH): a Graph-valid
+  // custom_event_type the CLI's Click choice set does NOT accept (an app event) fails BEFORE spawning.
+  const promotedObject = metaPromotedObjectFor(optimizationGoal, input, META_CUSTOM_EVENT_TYPE_VALUES);
+  if (promotedObject) {
+    assertMetaCliEnum(promotedObject.custom_event_type, META_CLI_CUSTOM_EVENT_TYPE_VALUES, "custom event type");
+    args.push("--pixel-id", promotedObject.pixel_id, "--custom-event-type", promotedObject.custom_event_type);
   }
   // Meta's default attribution for conversion goals, as the raw JSON `meta-ads` 1.1.0's
   // `--attribution-spec` takes (`meta ads adset create --help`). Never with --incremental-attribution.
