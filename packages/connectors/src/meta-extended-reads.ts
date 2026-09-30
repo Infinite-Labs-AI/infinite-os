@@ -68,6 +68,24 @@ export function isMetaAdsBreakdownDimension(value: unknown): value is MetaAdsBre
   return typeof value === "string" && (META_ADS_BREAKDOWN_DIMENSIONS as readonly string[]).includes(value);
 }
 
+/**
+ * The THIRD weekly window read (Ad Brain card 11, River 2026-09-30: "allow a third weekly Meta call per
+ * account (level=adset, all days, no breakdown) for window frequency"). Same query as a breakdown, with
+ * NO `breakdowns` parameter: each ad set's whole-window impressions and Meta's de-duplicated WINDOW
+ * reach, so window frequency = impressions / reach is Meta's own, never rebuilt from daily reach (reach
+ * isn't additive across days). Stored beside the breakdowns under this dimension with ONE dimension
+ * value per ad set (0081).
+ */
+export const META_ADS_WINDOW_TOTAL_DIMENSION = "none" as const;
+export const META_ADS_WINDOW_TOTAL_VALUE = "all" as const;
+/** Every dimension the weekly window read accepts: the two breakdowns, then the no-breakdown total. */
+export const META_ADS_WINDOW_READ_DIMENSIONS = [...META_ADS_BREAKDOWN_DIMENSIONS, META_ADS_WINDOW_TOTAL_DIMENSION] as const;
+export type MetaAdsWindowReadDimension = (typeof META_ADS_WINDOW_READ_DIMENSIONS)[number];
+
+export function isMetaAdsWindowReadDimension(value: unknown): value is MetaAdsWindowReadDimension {
+  return typeof value === "string" && (META_ADS_WINDOW_READ_DIMENSIONS as readonly string[]).includes(value);
+}
+
 /** The switch is on only for an explicit `true` on a settled insights lane. */
 export function metaAdsExtendedInsightsLane(switchOn: boolean | undefined, lane: string | undefined): boolean {
   return switchOn === true && lane !== undefined && META_ADS_EXTENDED_INSIGHTS_LANES.has(lane);

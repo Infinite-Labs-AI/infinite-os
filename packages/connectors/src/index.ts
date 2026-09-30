@@ -20,7 +20,9 @@ import {
   META_ADS_BREAKDOWN_MAX_WINDOW_DAYS,
   META_ADS_EXTENDED_READS_PROBE_MAX_REQUESTS,
   META_ADS_LEARNING_STAGE_FIELD,
-  isMetaAdsBreakdownDimension,
+  META_ADS_WINDOW_TOTAL_DIMENSION,
+  META_ADS_WINDOW_TOTAL_VALUE,
+  isMetaAdsWindowReadDimension,
   metaAdsExtendedInsightsFieldSuffix,
   metaAdsExtendedInsightsLane,
   metaAdsLearningStageLane,
@@ -29,15 +31,20 @@ import {
   metaAdsWindowDays,
   type MetaAdsBreakdownDimension,
   type MetaAdsLearningObservation,
+  type MetaAdsWindowReadDimension,
 } from "./meta-extended-reads.js";
 export {
   META_ADS_BREAKDOWN_DIMENSIONS,
+  META_ADS_WINDOW_READ_DIMENSIONS,
+  META_ADS_WINDOW_TOTAL_DIMENSION,
+  META_ADS_WINDOW_TOTAL_VALUE,
   META_ADS_EXTENDED_INSIGHTS_FIELDS,
   META_ADS_EXTENDED_INSIGHTS_LANES,
   META_ADS_EXTENDED_READS_PROBE_MAX_REQUESTS,
   META_ADS_LEARNING_STAGE_LANES,
   type MetaAdsBreakdownDimension,
   type MetaAdsLearningObservation,
+  type MetaAdsWindowReadDimension,
 } from "./meta-extended-reads.js";
 import {
   metaAdsFetchInsightsWindowWithNarrowing,
@@ -13404,7 +13411,8 @@ export interface MetaAdsAdsetBreakdownWindowInput {
   /** Inclusive account-local window; must end BEFORE today in the account's timezone. */
   since: string;
   until: string;
-  dimension: MetaAdsBreakdownDimension;
+  /** One breakdown dimension, or `"none"` for the no-breakdown window total (window reach → window frequency). */
+  dimension: MetaAdsWindowReadDimension;
   /** Hard request ceiling (every page counts); the caller reserved it from its own lane. */
   requestBudget: number;
   /** The caller's allocation lane, recorded on the telemetry snapshot. */
@@ -13418,7 +13426,7 @@ export interface MetaAdsAdsetBreakdownWindowInput {
 export interface MetaAdsAdsetBreakdownWindowResult {
   adAccountId: string;
   window: { since: string; until: string };
-  dimension: MetaAdsBreakdownDimension;
+  dimension: MetaAdsWindowReadDimension;
   rowCount: number;
   apiVersion: string;
   telemetry: MetaAdsRequestTelemetrySnapshot;
@@ -13436,9 +13444,11 @@ export async function syncMetaAdsAdsetBreakdownWindow(
   credential: MetaAdsCredential,
   input: MetaAdsAdsetBreakdownWindowInput,
 ): Promise<MetaAdsAdsetBreakdownWindowResult> {
-  if (!isMetaAdsBreakdownDimension(input.dimension)) {
+  if (!isMetaAdsWindowReadDimension(input.dimension)) {
     throw new ConnectorError("provider_api_error", "Meta Ads breakdown dimension is not supported", false);
   }
+  // `"none"` = the window total: the same read with NO breakdowns parameter, one row per ad set.
+  const breakdown = input.dimension === META_ADS_WINDOW_TOTAL_DIMENSION ? undefined : input.dimension;
   const days = metaAdsWindowDays(input.since, input.until);
   if (days === null || days > META_ADS_BREAKDOWN_MAX_WINDOW_DAYS) {
     throw new ConnectorError("provider_api_error", `Meta Ads breakdown window must be 1..${META_ADS_BREAKDOWN_MAX_WINDOW_DAYS} whole days`, false);
@@ -13474,7 +13484,7 @@ export async function syncMetaAdsAdsetBreakdownWindow(
     timeRange: { since: input.since, until: input.until },
     attributionWindows: META_ADS_ATTRIBUTION_WINDOWS,
     filtering: metaAdsAllStatusFiltering("adset"),
-    breakdowns: input.dimension,
+    ...(breakdown ? { breakdowns: breakdown } : {}),
   });
   const byKey = new Map<string, {
     adsetId: string; value: string; spend: number | null; impressions: number | null; reach: number | null;
@@ -13483,7 +13493,7 @@ export async function syncMetaAdsAdsetBreakdownWindow(
   await metaAdsFetchInsightsPages(accessToken, url, (row) => {
     const record = row as MetaAdsInsightsRow & Record<string, unknown>;
     const adsetId = stringOrNull(record.adset_id);
-    const value = stringOrNull(record[input.dimension]);
+    const value = breakdown ? stringOrNull(record[breakdown]) : META_ADS_WINDOW_TOTAL_VALUE;
     if (!adsetId || !value) {
       throw new ConnectorError("provider_api_error", "Meta Ads breakdown row is missing its ad set or dimension value", true);
     }

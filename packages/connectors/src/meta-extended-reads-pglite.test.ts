@@ -319,6 +319,34 @@ describe("Meta Ads extended reads against real PGlite", () => {
       expect(await db.query("select 1 from meta_ads_adset_breakdown_windows where source_id=$1", [scope.sourceId])).toEqual([]);
     }, 120_000);
 
+    it("the window total (dimension none): the SAME read with NO breakdowns, one 'all' row per ad set + its own coverage", async () => {
+      const scope = await primed();
+      const totals = [
+        { adset_id: "s1", spend: "50", impressions: "1000", reach: "400", clicks: "10", inline_link_clicks: "8", account_currency: "GBP" },
+        { adset_id: "s2", spend: "5", impressions: "90", reach: "60", clicks: "0", inline_link_clicks: "0", account_currency: "GBP" },
+      ];
+      await withMeta({ day: week.until, insights: () => new Response(JSON.stringify({ data: breakdownRows, paging: {} }), { status: 200 }) }, () =>
+        syncMetaAdsAdsetBreakdownWindow(db, CREDENTIAL, { ...scope, ...week, dimension: "device_platform", requestBudget: 1 }));
+      const { result, seen } = await withMeta({ day: week.until, insights: () => new Response(JSON.stringify({ data: totals, paging: {} }), { status: 200 }) }, () =>
+        syncMetaAdsAdsetBreakdownWindow(db, CREDENTIAL, { ...scope, ...week, dimension: "none", requestBudget: 1 }));
+      expect(seen).toHaveLength(1);
+      const url = seen[0]!.url;
+      expect(url.searchParams.has("breakdowns")).toBe(false);
+      expect(url.searchParams.get("level")).toBe("adset");
+      expect(url.searchParams.get("time_increment")).toBe("all_days");
+      expect(url.searchParams.get("time_range")).toBe(JSON.stringify(week));
+      expect(result).toMatchObject({ rowCount: 2, dimension: "none" });
+      expect(result.telemetry.requestCount).toBe(1);
+      expect(await db.query("select adset_id, dimension_value, impressions::int as impressions, reach::int as reach from meta_ads_adset_breakdown_windows where source_id=$1 and dimension='none' order by adset_id", [scope.sourceId]))
+        .toEqual([
+          { adset_id: "s1", dimension_value: "all", impressions: 1000, reach: 400 },
+          { adset_id: "s2", dimension_value: "all", impressions: 90, reach: 60 },
+        ]);
+      // The device rows of the same window are untouched: one read replaces only its own dimension.
+      expect(await db.query("select dimension, row_count from meta_ads_breakdown_coverage where source_id=$1 order by dimension", [scope.sourceId]))
+        .toEqual([{ dimension: "device_platform", row_count: 2 }, { dimension: "none", row_count: 2 }]);
+    }, 120_000);
+
     it("refuses with 0 calls: a window reaching today, two dimensions, an unknown account timezone", async () => {
       const scope = await primed();
       const today = localDay("Europe/London");
