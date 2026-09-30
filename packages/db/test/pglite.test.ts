@@ -88,9 +88,9 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
     rmSync(dataDir, { recursive: true, force: true });
   });
 
-  it("applied ALL 80 migrations on first boot and is idempotent on a re-run", async () => {
-    expect(loadMigrations().length).toBe(80);
-    expect(firstRun).toHaveLength(80);
+  it("applied ALL 81 migrations on first boot and is idempotent on a re-run", async () => {
+    expect(loadMigrations().length).toBe(81);
+    expect(firstRun).toHaveLength(81);
     expect(firstRun).toContain("0001_control_plane.sql");
     expect(firstRun).toContain("0006_security_roles.sql");
     expect(firstRun).toContain("0036_chat_sessions_desktop_surface.sql");
@@ -136,6 +136,7 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
     expect(firstRun).toContain("0078_trialing_metric_aliases.sql");
     expect(firstRun).toContain("0079_meta_ads_adset_learning_observations.sql");
     expect(firstRun).toContain("0080_meta_ads_adset_breakdown_windows.sql");
+    expect(firstRun).toContain("0081_meta_ads_window_total_dimension.sql");
 
     // Idempotent: a second boot re-applies zero (the `rows.length` gate, not the pg `rowCount`
     // gate, makes this true on PGlite).
@@ -143,13 +144,13 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
     expect(secondRun).toEqual([]);
   });
 
-  it("created the schema_migrations ledger with all 80 rows", async () => {
+  it("created the schema_migrations ledger with all 81 rows", async () => {
     const ledger = await db.query<{ id: string }>(
       "select id from schema_migrations order by id"
     );
-    expect(ledger).toHaveLength(80);
+    expect(ledger).toHaveLength(81);
     expect(ledger[0]?.id).toBe("0001_control_plane.sql");
-    expect(ledger.at(-1)?.id).toBe("0080_meta_ads_adset_breakdown_windows.sql");
+    expect(ledger.at(-1)?.id).toBe("0081_meta_ads_window_total_dimension.sql");
   });
 
   it("0063 serves both PostHog views from per-(workspace, source, day) rollups — refresh, is_internal, idempotency, grain key, grants", async () => {
@@ -4479,7 +4480,7 @@ describe("0078 re-applied (the cloud engine's one-call execute_sql recipe can ru
   });
 });
 
-describe("0079 + 0080 re-applied (the cloud engine's one-call execute_sql recipe can run a file twice)", () => {
+describe("0079 + 0080 + 0081 re-applied (the cloud engine's one-call execute_sql recipe can run a file twice)", () => {
   it("creates the learning and breakdown tables once and a second run is a no-op", async () => {
     const { PGlite } = (await import("@electric-sql/pglite")) as unknown as {
       PGlite: new () => { exec(sql: string): Promise<unknown>; query<T>(sql: string): Promise<{ rows: T[] }>; close(): Promise<void> };
@@ -4490,7 +4491,7 @@ describe("0079 + 0080 re-applied (the cloud engine's one-call execute_sql recipe
         "create table workspaces (id text primary key); create table sources (id text primary key);" +
           "create role growth_os_worker; create role growth_os_tool_agent; create role growth_os_app; create role growth_os_read_api;"
       );
-      for (const id of ["0079_meta_ads_adset_learning_observations.sql", "0080_meta_ads_adset_breakdown_windows.sql"]) {
+      for (const id of ["0079_meta_ads_adset_learning_observations.sql", "0080_meta_ads_adset_breakdown_windows.sql", "0081_meta_ads_window_total_dimension.sql"]) {
         const sql = loadMigrations().find((m) => m.id === id)?.sql ?? "";
         expect(sql).not.toBe("");
         await pg.exec(sql);
@@ -4504,6 +4505,18 @@ describe("0079 + 0080 re-applied (the cloud engine's one-call execute_sql recipe
         "meta_ads_adset_learning_observations",
         "meta_ads_breakdown_coverage"
       ]);
+      // 0081: the no-breakdown window total ('none' / 'all') is accepted beside the two breakdowns; any other
+      // value under 'none', and platform_position, are still refused.
+      await pg.exec("insert into workspaces values ('w'); insert into sources values ('s');");
+      const row = (dimension: string, value: string) =>
+        `insert into meta_ads_adset_breakdown_windows (workspace_id, source_id, ad_account_id, adset_id, window_since, window_until, dimension, dimension_value, impressions, reach) values ('w', 's', 'act_1', 'as_1', '2026-09-21', '2026-09-27', '${dimension}', '${value}', 900, 300)`;
+      await pg.exec(row("none", "all"));
+      await pg.exec(row("device_platform", "mobile_app"));
+      await expect(pg.exec(row("none", "mobile_app"))).rejects.toThrow(/total_value_check/);
+      await expect(pg.exec(row("platform_position", "feed"))).rejects.toThrow(/dimension_check/);
+      await pg.exec("insert into meta_ads_breakdown_coverage (workspace_id, source_id, ad_account_id, window_since, window_until, dimension, row_count) values ('w', 's', 'act_1', '2026-09-21', '2026-09-27', 'none', 1)");
+      await expect(pg.exec("insert into meta_ads_breakdown_coverage (workspace_id, source_id, ad_account_id, window_since, window_until, dimension, row_count) values ('w', 's', 'act_1', '2026-09-21', '2026-09-27', 'platform_position', 1)"))
+        .rejects.toThrow(/dimension_check/);
     } finally {
       await pg.close();
     }

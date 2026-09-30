@@ -94,7 +94,8 @@ describe("Infinite OS migration stack", () => {
       "0077_meta_ads_account_spend_limit.sql",
       "0078_trialing_metric_aliases.sql",
       "0079_meta_ads_adset_learning_observations.sql",
-      "0080_meta_ads_adset_breakdown_windows.sql"
+      "0080_meta_ads_adset_breakdown_windows.sql",
+      "0081_meta_ads_window_total_dimension.sql"
     ]);
   });
 
@@ -1104,7 +1105,8 @@ describe("Infinite OS migration stack", () => {
       "0077_meta_ads_account_spend_limit.sql",
       "0078_trialing_metric_aliases.sql",
       "0079_meta_ads_adset_learning_observations.sql",
-      "0080_meta_ads_adset_breakdown_windows.sql"
+      "0080_meta_ads_adset_breakdown_windows.sql",
+      "0081_meta_ads_window_total_dimension.sql"
     ]);
   });
 
@@ -1238,6 +1240,21 @@ describe("Infinite OS migration stack", () => {
     expect(sql).toContain("primary key (workspace_id, source_id, ad_account_id, window_since, window_until, dimension)");
     expect(sql).not.toContain("drop ");
     expect(sql).not.toContain("alter ");
+  });
+
+  it("widens the weekly window read to the no-breakdown window total, idempotently (0081)", () => {
+    const migration = loadMigrations().find((candidate) => candidate.id === "0081_meta_ads_window_total_dimension.sql");
+    const sql = (migration?.sql ?? "").toLowerCase().replace(/--[^\n]*/g, "").replace(/\s+/g, " ").trim();
+    // Both tables accept 'none' beside the two breakdowns; platform_position is still refused.
+    expect(sql.match(/check \(dimension in \('device_platform', 'publisher_platform', 'none'\)\)/g)).toHaveLength(2);
+    expect(sql).toContain("check (dimension <> 'none' or dimension_value = 'all')");
+    expect(sql).not.toContain("platform_position");
+    // Every add is preceded by its drop-if-exists (a re-run is a no-op); no table, row or column is dropped.
+    expect(sql.match(/drop constraint if exists/g)).toHaveLength(3);
+    expect(sql.match(/add constraint/g)).toHaveLength(3);
+    expect(sql).not.toContain("drop table");
+    expect(sql).not.toContain("drop column");
+    expect(sql).not.toContain("delete ");
   });
 
   it("adds the nullable Meta posting Page column beside the pixel (0068)", () => {
