@@ -47,7 +47,7 @@ describe("decodeAnswerView", () => {
     ["an unknown state", { state: "exploded" }],
     ["an array kind", { kind: ["change"] }],
     ["an array state", { state: ["done"] }],
-    ["an object state that stringifies to a known state", { state: { toString: () => "done" } }],
+    ["an object state that stringifies to a known state", { state: { toString: (): string => "done" } }],
     ["a missing title", { title: undefined }],
     ["a non-string tool", { tool: 7 }],
     ["a missing body", { body: undefined }],

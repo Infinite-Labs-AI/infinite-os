@@ -77,6 +77,7 @@ import {
   type InkInteractiveSelectionPrompt
 } from "./tui/ink/interactive-session.js";
 import { runInfiniteWelcome } from "./tui/ink/infinite-welcome.js";
+import { linkAbortSignals } from "./tui/ink/turn-abort.js";
 import { appendPersistentInputHistory, loadPersistentInputHistory } from "./tui/ink/input-history.js";
 import { resolveCliRenderSurface, usesTranscriptRenderSurface } from "./tui/runtime/render-surface.js";
 import { resolveTheme, type Theme } from "./tui/theme.js";
@@ -1704,11 +1705,14 @@ async function runDesktopInteractiveEntry(env: CliEnv): Promise<void> {
         // The streamed answer renders through the shell's turnController via
         // `onProgress`; the terminal message.complete commits it. The runner
         // threads the session forward (Desktop owns its own active workspace).
-        const outcome = await runner.turn(
-          trimmed,
-          onProgress,
-          AbortSignal.any([turnAbort.signal, signal])
-        );
+        // Not `AbortSignal.any`: it needs Node 20.3 and the engines allow 20.0.
+        const linked = linkAbortSignals([turnAbort.signal, signal]);
+        let outcome: Awaited<ReturnType<typeof runner.turn>>;
+        try {
+          outcome = await runner.turn(trimmed, onProgress, linked.signal);
+        } finally {
+          linked.dispose();
+        }
         if (outcome.busy) {
           return { messages: [desktopBusyMessage()] };
         }

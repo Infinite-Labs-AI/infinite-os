@@ -63,3 +63,34 @@ export function turnStoppedLine(error: unknown): string | null {
 export function ctrlCAction(turnAbort: TurnAbort): "stopped" | "exit" {
   return turnAbort.stop("ctrl_c") ? "stopped" : "exit";
 }
+
+/**
+ * One signal that aborts when any input aborts, carrying that input's reason.
+ * A local stand-in for `AbortSignal.any`, which needs Node 20.3 while the CLI's
+ * engines allow 20.0. `dispose()` detaches from the inputs once the caller is
+ * done, so a long-lived (session) input does not collect a listener per turn.
+ */
+export function linkAbortSignals(signals: readonly AbortSignal[]): {
+  signal: AbortSignal;
+  dispose(): void;
+} {
+  const controller = new AbortController();
+  const detach: Array<() => void> = [];
+  const dispose = () => {
+    for (const off of detach.splice(0)) off();
+  };
+  for (const input of signals) {
+    if (input.aborted) {
+      dispose();
+      controller.abort(input.reason);
+      return { signal: controller.signal, dispose };
+    }
+    const onAbort = () => {
+      dispose();
+      controller.abort(input.reason);
+    };
+    input.addEventListener("abort", onAbort, { once: true });
+    detach.push(() => input.removeEventListener("abort", onAbort));
+  }
+  return { signal: controller.signal, dispose };
+}

@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
-import { createTurnAbort, ctrlCAction, TURN_STOPPED, turnStoppedLine } from "./turn-abort.js";
+import { createTurnAbort, ctrlCAction, linkAbortSignals, TURN_STOPPED, turnStoppedLine } from "./turn-abort.js";
 
 describe("turn abort", () => {
   it("stop() aborts only the running turn and reports whether one was running", () => {
@@ -49,6 +49,51 @@ describe("turn abort", () => {
   });
 });
 
+describe("linkAbortSignals (Node 20.0-20.2 lack AbortSignal.any)", () => {
+  it("never calls AbortSignal.any", () => {
+    const original = (AbortSignal as { any?: unknown }).any;
+    (AbortSignal as { any?: unknown }).any = undefined;
+    try {
+      const a = new AbortController();
+      const linked = linkAbortSignals([a.signal, new AbortController().signal]);
+      a.abort(new Error(TURN_STOPPED));
+      expect(linked.signal.aborted).toBe(true);
+      expect((linked.signal.reason as Error).message).toBe(TURN_STOPPED);
+      linked.dispose();
+    } finally {
+      (AbortSignal as { any?: unknown }).any = original;
+    }
+  });
+
+  it("aborts when either input aborts, with that input's reason", () => {
+    const a = new AbortController();
+    const b = new AbortController();
+    const linked = linkAbortSignals([a.signal, b.signal]);
+    expect(linked.signal.aborted).toBe(false);
+    b.abort(new Error("second"));
+    expect(linked.signal.aborted).toBe(true);
+    expect((linked.signal.reason as Error).message).toBe("second");
+    a.abort(new Error("first"));
+    expect((linked.signal.reason as Error).message).toBe("second");
+  });
+
+  it("is already aborted when an input already is", () => {
+    const a = new AbortController();
+    a.abort(new Error("early"));
+    const linked = linkAbortSignals([new AbortController().signal, a.signal]);
+    expect(linked.signal.aborted).toBe(true);
+    expect((linked.signal.reason as Error).message).toBe("early");
+  });
+
+  it("dispose() detaches from the inputs, so a long-lived session signal does not collect listeners", () => {
+    const session = new AbortController();
+    const linked = linkAbortSignals([session.signal, new AbortController().signal]);
+    linked.dispose();
+    session.abort(new Error("later"));
+    expect(linked.signal.aborted).toBe(false);
+  });
+});
+
 describe("turn abort wiring (structural, CI-run)", () => {
   const session = readFileSync(fileURLToPath(new URL("./interactive-session.tsx", import.meta.url)), "utf8");
   const index = readFileSync(fileURLToPath(new URL("../../index.ts", import.meta.url)), "utf8");
@@ -83,6 +128,8 @@ describe("turn abort wiring (structural, CI-run)", () => {
 
   it("the desktop session opts in and passes the turn's signal to the runner", () => {
     expect(index).toContain("turnStoppable: true,");
-    expect(index).toContain("AbortSignal.any([turnAbort.signal, signal])");
+    expect(index).toContain("linkAbortSignals([turnAbort.signal, signal])");
+    expect(index).toContain("linked.dispose()");
+    expect(index).not.toContain("AbortSignal.any(");
   });
 });
