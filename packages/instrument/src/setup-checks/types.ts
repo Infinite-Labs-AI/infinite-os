@@ -22,8 +22,16 @@ export type SetupCheckId =
   | "silent_form"
   /** Meta's `_fbc` click id never captured where a visitor lands. */
   | "click_id_capture"
+  /** Meta's automatic events left on, and the managed Meta snippet's counts and order. */
+  | "meta_pixel_config"
 
-export type SetupFindingState = "ok" | "problem" | "undetermined"
+/**
+ * `info` is not a pass and not a problem: something worth a decision that infinite-tag will never
+ * change on its own — today only an ADOPTED Meta pixel with automatic events on (founder decision
+ * 10: a plan line with a measured count, never an automatic edit). It ranks above `ok` and below
+ * `undetermined`, so it can never hide a check that did not run.
+ */
+export type SetupFindingState = "ok" | "info" | "problem" | "undetermined"
 
 /**
  * How sure the finding is.
@@ -44,7 +52,12 @@ export const SETUP_FINDING_CODES = [
   "INF_SETUP_FORM_UNDETERMINED",
   "INF_SETUP_CLICK_ID_NOT_AT_LANDING",
   "INF_SETUP_CLICK_ID_UNDETERMINED",
-  "INF_SETUP_CLICK_ID_PRESENT"
+  "INF_SETUP_CLICK_ID_PRESENT",
+  "INF_SETUP_META_AUTOCONFIG_OFF",
+  "INF_SETUP_META_AUTOCONFIG_MANAGED_ON",
+  "INF_SETUP_META_AUTOCONFIG_ADOPTED_ON",
+  "INF_SETUP_META_AUTOCONFIG_UNDETERMINED",
+  "INF_SETUP_META_SNIPPET_CENSUS"
 ] as const
 export type SetupFindingCode = (typeof SETUP_FINDING_CODES)[number]
 
@@ -63,7 +76,7 @@ export interface SetupFinding {
 
 export interface SetupCheckResult {
   check: SetupCheckId
-  /** Worst finding wins: problem > undetermined > ok. A check with no findings is `ok`. */
+  /** Worst finding wins: problem > undetermined > info > ok. A check with no findings is `ok`. */
   state: SetupFindingState
   findings: SetupFinding[]
 }
@@ -72,5 +85,6 @@ export interface SetupCheckResult {
 export function worstState(findings: readonly SetupFinding[]): SetupFindingState {
   if (findings.some((finding) => finding.state === "problem")) return "problem"
   if (findings.some((finding) => finding.state === "undetermined")) return "undetermined"
+  if (findings.some((finding) => finding.state === "info")) return "info"
   return "ok"
 }
