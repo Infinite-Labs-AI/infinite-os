@@ -27,6 +27,11 @@ import {
   decodeAnswerView,
   isToolViewFrameData
 } from "./desktop/answer-view-decode.js";
+import {
+  askConfirmDecision,
+  confirmResultLines,
+  leftForLaterLine
+} from "./desktop/confirm-result-lines.js";
 import { negotiateInteractiveWorkspace } from "./desktop/interactive-protocol.js";
 
 const PROTOCOL_VERSION = 1;
@@ -206,9 +211,12 @@ interface DesktopAppIo {
 
 interface RunDesktopAppCommandOptions extends DesktopAppClientOptions {
   io?: DesktopAppIo;
+  /** Decide a card directly ("pending" leaves it unanswered). Overrides `promptAnswer`. */
   promptConfirmation?: (
     action: PendingConfirmation
-  ) => Promise<"approve" | "decline">;
+  ) => Promise<"approve" | "decline" | "pending">;
+  /** Ask one question on the TTY (defaults to a readline prompt on stdin). */
+  promptAnswer?: (question: string) => Promise<string>;
   signal?: AbortSignal;
 }
 
@@ -217,6 +225,8 @@ interface PendingConfirmation {
   confirmationHandle: string;
   summary: string;
   confirmationDetails: ConfirmationDetail[];
+  /** The approval view's expiry, when the app sent a view. */
+  expiresAt?: string;
 }
 
 interface ConfirmationDetail {
@@ -687,18 +697,25 @@ export async function runDesktopAppCommand(
   }
 
   for (const action of pending) {
+    // Only y/yes approves and only n/no declines. Bare Enter or any other
+    // answer re-prompts once, then leaves the card pending: nothing is sent.
     const decision = options.promptConfirmation
       ? await options.promptConfirmation(action)
-      : await promptForConfirmation(action);
-    await client.confirm({
+      : await promptForConfirmation(action, options.promptAnswer);
+    if (decision === "pending") {
+      io.writeOut(`${leftForLaterLine(action.expiresAt)}\n`);
+      continue;
+    }
+    // A failed confirm keeps rejecting with its typed code (non-zero exit).
+    const confirmed = await client.confirm({
       turnId: result.turnId,
       confirmationHandle: action.confirmationHandle,
       decision,
       signal: options.signal
     });
-    io.writeOut(
-      `Confirmation ${decision === "approve" ? "approved" : "declined"}: ${terminalText(action.summary, "action")}\n`
-    );
+    for (const line of confirmResultLines(confirmed, decision)) {
+      io.writeOut(`${line.text}\n`);
+    }
   }
 }
 
@@ -1150,11 +1167,13 @@ function parsePendingConfirmations(
       suppliedDetails.length > 0
         ? suppliedDetails
         : buildGenericConfirmationDetails(value.input);
+    const expiresAt = decodeAnswerView(value.view)?.approval?.expiresAt;
     pending.push({
       actionId,
       confirmationHandle,
       summary,
-      confirmationDetails
+      confirmationDetails,
+      ...(typeof expiresAt === "string" ? { expiresAt } : {})
     });
   }
   return pending;
@@ -1348,18 +1367,16 @@ function renderProgress(value: unknown, io: DesktopAppIo): void {
 }
 
 async function promptForConfirmation(
-  action: PendingConfirmation
-): Promise<"approve" | "decline"> {
+  action: PendingConfirmation,
+  promptAnswer?: (question: string) => Promise<string>
+): Promise<"approve" | "decline" | "pending"> {
+  const question = `Approve "${boundedTerminalText(action.summary, MAX_CONFIRMATION_VALUE_CHARS, "action")}"? [y/n] `;
+  if (promptAnswer) {
+    return askConfirmDecision(promptAnswer, question);
+  }
   const prompt = createInterface({ input: stdin, output: stdout });
   try {
-    const answer = (
-      await prompt.question(
-        `Approve "${boundedTerminalText(action.summary, MAX_CONFIRMATION_VALUE_CHARS, "action")}"? [y/N] `
-      )
-    )
-      .trim()
-      .toLowerCase();
-    return answer === "y" || answer === "yes" ? "approve" : "decline";
+    return await askConfirmDecision((text) => prompt.question(text), question);
   } finally {
     prompt.close();
   }

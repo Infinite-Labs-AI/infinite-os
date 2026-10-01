@@ -31,6 +31,7 @@ import {
   terminalText,
   type InSessionConfirmationAction
 } from "../../desktop/confirm-in-session.js";
+import { confirmErrorLines, confirmResultLines, type ConfirmLine } from "../../desktop/confirm-result-lines.js";
 
 import { turnController } from "../app/turn-controller.js";
 import { getTurnState, subscribeTurnState, type TurnState } from "../app/turn-store.js";
@@ -218,8 +219,8 @@ export interface InkInteractiveSessionAppProps {
   /**
    * Resolve an in-session write confirmation surfaced by a turn's
    * `pendingConfirmations`. Calls the Desktop client's `confirm(...)` for the
-   * decision and resolves with the JSON result (rendered into the transcript on
-   * approve). Only the cloud-brain entry wires this; the LOCAL interactive path
+   * decision (approve or a real decline) and resolves with its raw result,
+   * which the session prints as receipt lines (`confirmResultLines`). Only the cloud-brain entry wires this; the LOCAL interactive path
    * never returns `pendingConfirmations`, so it is never invoked there. (Plan 2)
    */
   onConfirmAction?(action: InSessionConfirmationAction, decision: "approve" | "decline"): Promise<unknown>;
@@ -942,39 +943,25 @@ export function InkInteractiveSessionApp({
   }, [appendMessages, pendingSelection, rememberInputLine, runSubmittedLine]);
 
   // Resolve the head write confirmation. Dequeue FIRST (dismisses the overlay and
-  // guards against a double-resolve of the same single-use handle), then act:
-  // decline appends a note and calls nothing; approve drives `onConfirmAction`
-  // (the Desktop `client.confirm`) and appends its JSON result — or an error line
-  // if the confirm call rejects. The un-redacted summary is scrubbed through
-  // `terminalText` before it reaches the transcript (matching the readline card).
+  // guards against a double-resolve of the same single-use handle), then send the
+  // decision through `onConfirmAction` (the Desktop `client.confirm`): a decline
+  // is a real "no" that reaches the app's ledger, not a local note. Either way
+  // the transcript gets receipt lines (the app's receipt sentence, scrubbed),
+  // never JSON; a confirm that throws gets its error lines instead.
   const resolveConfirmAction = useCallback((decision: "approve" | "decline") => {
     const head = pendingConfirmActions[0];
     if (!head) {
       return;
     }
     setPendingConfirmActions((current) => current.slice(1));
-    if (decision === "decline") {
-      appendMessages([{
-        kind: "slash",
-        role: "system",
-        text: `Confirmation declined: ${terminalText(head.summary, "action")}`
-      }]);
-      return;
-    }
+    const appendLines = (lines: readonly ConfirmLine[]) =>
+      appendMessages(lines.map((line) => ({ kind: "slash", role: "system", text: line.text }) as Msg));
     void (async () => {
       try {
-        const result = await onConfirmAction?.(head, "approve");
-        appendMessages([{
-          kind: "slash",
-          role: "system",
-          text: JSON.stringify(result, null, 2)
-        }]);
+        const result = await onConfirmAction?.(head, decision);
+        appendLines(confirmResultLines(result, decision));
       } catch (error) {
-        appendMessages([{
-          kind: "slash",
-          role: "system",
-          text: `error: ${error instanceof Error ? error.message : String(error)}`
-        }]);
+        appendLines(confirmErrorLines(error));
       }
     })();
   }, [appendMessages, onConfirmAction, pendingConfirmActions]);
@@ -2136,17 +2123,18 @@ function InkLineInput({
       }
       return;
     }
-    // In-session write gate (cloud brain, Plan 2): a y/N confirmation for a
-    // `requires_confirmation` action. Mirrors the readline handler's semantics —
-    // ONLY an explicit `y`/`Y` approves; `n`/`N`, Enter, or Escape decline; every
-    // other key is swallowed so a stray keystroke can't approve a write. Guarded
-    // BEFORE the plain composer so no keystroke leaks into the input line.
+    // In-session write gate (cloud brain, Plan 2): a y/n confirmation for a
+    // `requires_confirmation` action. ONLY an explicit `y`/`Y` approves and ONLY
+    // `n`/`N` declines (a real "no" sent to the app). Enter, Escape and every
+    // other key are swallowed, so a stray keystroke can neither approve a write
+    // nor send a decline. Guarded BEFORE the plain composer so no keystroke leaks
+    // into the input line.
     if (confirmActionActive) {
       if (input === "y" || input === "Y") {
         onConfirmActionApprove();
         return;
       }
-      if (input === "n" || input === "N" || key.return || key.escape) {
+      if (input === "n" || input === "N") {
         onConfirmActionDecline();
         return;
       }
