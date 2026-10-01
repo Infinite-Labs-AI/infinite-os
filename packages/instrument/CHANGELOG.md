@@ -94,6 +94,13 @@ Fixes ported from infinite.fast: ways a customer site silently collected the wro
   anything else is now refused, and the message says what a pixel ID looks like and where to find
   it in Events Manager. Pixels already on a site are still detected whatever their shape, so a
   broken one is reported rather than hidden.
+- **The managed PostHog snippet now starts, and can identify visitors before PostHog loads.** Its
+  stub method list named methods under parents the stub never creates (`person.*`, `group.*`,
+  `feature_flags.*`, `sessionRecording.*`), so building the stub threw before `posthog.init` was
+  queued, and it had no top-level `identify`, `alias` or `get_distinct_id`, so an early
+  `posthog.identify()` threw too. The list is now PostHog's current official one (the list
+  infinite.fast ships). Only the method list changed: `defaults`, `api_host` and installs the
+  customer already had are untouched.
 
 ## 0.11.0 — 2026-09-21
 
