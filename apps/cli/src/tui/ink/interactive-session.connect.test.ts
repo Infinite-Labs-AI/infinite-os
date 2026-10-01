@@ -101,11 +101,12 @@ describe("in-chat /connect wizard (#20) — structural security guards (CI-runna
   // These assert the dangerous leak paths are BYPASSED in source, mirroring the
   // existing file's render + source-string approach for the PTY-only flow.
 
-  it("Ctrl-C is guarded for the wizard BEFORE the session-wide app.exit()", () => {
-    // The wizard-cancel branch must appear before the unconditional app.exit().
+  it("Ctrl-C is guarded for the wizard BEFORE the session-wide exit", () => {
+    // The wizard-cancel branch must appear before the unconditional exit, which
+    // goes through onExit() (requestExit: commit the live turn, then app.exit()).
     const ctrlCBlock = source.slice(source.indexOf('if (key.ctrl && input === "c")'));
     const cancelIdx = ctrlCBlock.indexOf("onConnectCancel()");
-    const exitIdx = ctrlCBlock.indexOf("app.exit()");
+    const exitIdx = ctrlCBlock.indexOf("onExit()");
     expect(cancelIdx).toBeGreaterThan(-1);
     expect(exitIdx).toBeGreaterThan(-1);
     expect(cancelIdx).toBeLessThan(exitIdx);
