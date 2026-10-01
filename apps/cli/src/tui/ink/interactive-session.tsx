@@ -46,8 +46,21 @@ import {
   type HomeInventoryTool
 } from "./home-inventory.js";
 import { isInfiniteTurnBusy } from "./status-indicator.js";
-import { inkTranscriptRowCount, InkTranscriptApp, useInfiniteTranscriptClock } from "./transcript-app.js";
-import { useTerminalColumns } from "./terminal-columns.js";
+import {
+  inkTranscriptLayout,
+  InkTranscriptApp,
+  renderCommittedTranscriptLines,
+  useInfiniteTranscriptClock
+} from "./transcript-app.js";
+import {
+  commitOnSubmit,
+  DEFAULT_COMPOSER_ROWS,
+  livePageKey,
+  pageLiveWindow,
+  type CommittedEntry,
+  type LivePageDirection
+} from "./transcript-static.js";
+import { useTerminalColumns, useTerminalRows } from "./terminal-columns.js";
 
 /**
  * The every-launch home inventory shown above the transcript on the empty home
@@ -222,6 +235,12 @@ export interface InkInteractiveSessionAppProps {
   promptPlaceholder?: string;
   requiresConfirmation?: (line: string) => string | undefined;
   requiresSelection?: (line: string) => InkInteractiveSelectionPrompt | undefined;
+  /**
+   * Test-only height override. When absent, the live region is capped by the live
+   * terminal height (`useTerminalRows`; no cap when the output is not a TTY).
+   * `null` = no cap.
+   */
+  rows?: number | null;
   status?: readonly string[] | (() => readonly string[]);
   theme?: Theme;
   title?: string;
@@ -256,8 +275,9 @@ export function renderInkInteractiveSessionToString(
 ): string {
   // A string render has no terminal to follow, so it always pins a width (88 by
   // default) instead of reading whatever stream `useStdout` falls back to.
+  // Likewise no live height: uncapped unless the caller pins `rows`.
   const columns = props.columns ?? options.columns ?? 88;
-  return renderToString(<InkInteractiveSessionApp {...props} columns={columns} />, { columns });
+  return renderToString(<InkInteractiveSessionApp {...props} columns={columns} rows={props.rows ?? null} />, { columns });
 }
 
 /**
@@ -353,6 +373,7 @@ export function InkInteractiveSessionApp({
   promptPlaceholder = "Type a message, /help, or /exit.",
   requiresConfirmation,
   requiresSelection,
+  rows: rowsOverride,
   status = [],
   theme,
   title
@@ -361,6 +382,8 @@ export function InkInteractiveSessionApp({
   const t = theme ?? resolveTheme();
   const liveColumns = useTerminalColumns(88);
   const columns = columnsOverride ?? liveColumns;
+  const liveRows = useTerminalRows();
+  const rows = rowsOverride === undefined ? liveRows : rowsOverride ?? undefined;
   const [busy, setBusy] = useState(false);
   const [busyStartedAt, setBusyStartedAt] = useState<number | undefined>(undefined);
   const [completionIndex, setCompletionIndex] = useState(0);
@@ -376,7 +399,17 @@ export function InkInteractiveSessionApp({
     entries: initialInputHistory,
     index: null
   }));
+  // `history` holds only the LIVE latest turn. Finished turns move to
+  // `committed` (printed once through <Static>) when the next line is submitted;
+  // see transcript-static.ts.
   const [history, setHistory] = useState<readonly Msg[]>(initialMessages);
+  const historyRef = useRef(history);
+  historyRef.current = history;
+  const [committed, setCommitted] = useState<readonly CommittedEntry[]>([]);
+  const [homeCommitted, setHomeCommitted] = useState(false);
+  const turnSeq = useRef(0);
+  // First visible line of a paged live turn; null = follow the tail.
+  const [liveOffset, setLiveOffset] = useState<number | null>(null);
   const [pendingOperatorLine, setPendingOperatorLine] = useState<string | null>(null);
   // FIFO of cloud-brain write confirmations awaiting a y/N decision. The head is
   // rendered by `ConfirmActionMenu`; resolving it (approve → `onConfirmAction`,
@@ -446,6 +479,8 @@ export function InkInteractiveSessionApp({
       return;
     }
     setHistory((current) => [...current, ...messages].slice(-HISTORY_LIMIT));
+    // New lines in the live turn (a receipt, a note) are shown: follow the tail.
+    setLiveOffset(null);
   }, []);
 
   const statusParts = typeof status === "function" ? status() : status;
@@ -474,27 +509,9 @@ export function InkInteractiveSessionApp({
   });
   const visibleStatusParts = formatInteractiveStatus(statusParts, busy, queuedLines);
   // The home inventory shows ONCE, on the empty home screen (no transcript yet)
-  // and only when the CLI supplied its data. The first submitted line scrolls it
-  // away (history is non-empty), so it never repeats per message.
-  const showHomeInventory = Boolean(homeInventory) && history.length === 0;
-  // The inventory renders ABOVE the transcript, so its rows must be added to the
-  // composer's native-cursor row prediction — otherwise the cursor parks too high
-  // (the PR #27 invariant: predicted composer row == live rendered row count).
-  const homeInventoryRows = showHomeInventory ? homeInventoryRowCount(columns) : 0;
-  const composerRow = homeInventoryRows + inkTranscriptRowCount({
-    busy,
-    columns,
-    homeBanner: !showHomeInventory,
-    indicatorTick: labelTick,
-    nowMs: clock,
-    showComposer: false,
-    spinnerTick,
-    status: visibleStatusParts,
-    theme: t,
-    title,
-    transcript,
-    turnStartedAt: busyStartedAt
-  });
+  // and only when the CLI supplied its data. The first submitted line commits it
+  // into scrollback with the first turn (`commitLatestTurn`), so it never repeats.
+  const showHomeInventory = Boolean(homeInventory) && !homeCommitted && history.length === 0;
   const completions = useMemo(
     () => getCompletions?.(inputValue).slice(0, 6) ?? [],
     [getCompletions, inputValue]
@@ -646,6 +663,8 @@ export function InkInteractiveSessionApp({
       turnController.reset();
       setBusy(false);
       setBusyStartedAt(undefined);
+      // A finished turn opens at its top; a tall one is paged from there.
+      setLiveOffset(0);
     }
   }, [app, appendMessages, getAgentTitle, onSubmitLine]);
 
@@ -852,7 +871,45 @@ export function InkInteractiveSessionApp({
     void submitExecutableLine(line);
   }, [appendMessages, buildConnectDispatch, cancelConnectWizard, pendingConnectConfirm, submitExecutableLine, zeroizeConnectWizard]);
 
+  // The latest turn stays live (its keys still act on it) until the NEXT line is
+  // submitted; only then is it printed once into scrollback through <Static>, at
+  // the current width. The home inventory goes with the first commit.
+  const commitLatestTurn = useCallback((line: string) => {
+    if (!line.trim()) {
+      return;
+    }
+    const turn = historyRef.current;
+    const latest: CommittedEntry | null = turn.length
+      ? {
+          id: `turn:${++turnSeq.current}`,
+          lines: renderCommittedTranscriptLines({ agentTitle, messages: turn }, { columns, theme: t })
+        }
+      : null;
+    const home: CommittedEntry | null = homeInventory && !homeCommitted && turn.length === 0
+      ? {
+          id: "home",
+          lines: [],
+          node: (
+            <HomeInventory
+              columns={columns}
+              commands={homeInventory.commands}
+              connections={homeInventory.connections}
+              tools={homeInventory.tools}
+              version={homeInventory.version}
+              workspace={homeInventory.workspace}
+            />
+          )
+        }
+      : null;
+    setCommitted((current) => commitOnSubmit({ committed: home ? [...current, home] : current, latest }, line).committed);
+    setHomeCommitted(true);
+    historyRef.current = [];
+    setHistory([]);
+    setLiveOffset(null);
+  }, [agentTitle, columns, homeCommitted, homeInventory, t]);
+
   const runSubmittedLine = useCallback((line: string) => {
+    commitLatestTurn(line);
     if (pendingOperatorLine) {
       appendMessages([{ role: "user", text: line }]);
       if (line.toLowerCase() === "confirm") {
@@ -899,7 +956,7 @@ export function InkInteractiveSessionApp({
     }
 
     void submitExecutableLine(line);
-  }, [appendMessages, connectWizard, pendingOperatorLine, requiresConfirmation, requiresSelection, startConnectWizard, submitExecutableLine]);
+  }, [appendMessages, commitLatestTurn, connectWizard, pendingOperatorLine, requiresConfirmation, requiresSelection, startConnectWizard, submitExecutableLine]);
 
   const selectPendingOption = useCallback((direction: "next" | "previous") => {
     setPendingSelection((current) => {
@@ -1045,6 +1102,43 @@ export function InkInteractiveSessionApp({
             ? "type confirm to continue, anything else to cancel"
             : promptPlaceholder;
 
+  // The live frame's row budget. The home inventory renders ABOVE the transcript,
+  // so its rows go into the composer's native-cursor row prediction (the PR #27
+  // invariant: predicted composer row == live rendered row count); committed
+  // <Static> rows never do. Everything the frame draws besides the transcript is
+  // reserved out of the live-region cap, so the frame never fills the window.
+  const homeInventoryRows = showHomeInventory ? homeInventoryRowCount(columns) : 0;
+  const composerText = activeFieldComposer ? activeFieldComposer.display : inputValue;
+  const reservedRows = homeInventoryRows
+    + Math.max(DEFAULT_COMPOSER_ROWS, composerRowsFor(composerText || connectPlaceholder, columns, t))
+    + liveOverlayRows({
+      confirmAction: pendingConfirmActions[0] ?? null,
+      connectConfirm: Boolean(pendingConnectConfirm),
+      field: fieldPromptActive && pendingFieldPrompt ? pendingFieldPrompt : null,
+      selection: pendingSelection?.prompt ?? null,
+      width: columns
+    })
+    + completions.length;
+  const liveLayout = inkTranscriptLayout({
+    busy,
+    columns,
+    composerRows: reservedRows,
+    homeBanner: !showHomeInventory,
+    indicatorTick: labelTick,
+    livePage: liveOffset,
+    nowMs: clock,
+    rows,
+    showComposer: false,
+    spinnerTick,
+    status: visibleStatusParts,
+    theme: t,
+    title,
+    transcript,
+    turnStartedAt: busyStartedAt
+  });
+  const composerRow = homeInventoryRows + liveLayout.rowCount;
+  const pageLive = (direction: LivePageDirection) => setLiveOffset(pageLiveWindow(liveLayout.window, direction));
+
   return (
     <Box flexDirection="column" width={columns}>
       {showHomeInventory && homeInventory ? (
@@ -1060,9 +1154,13 @@ export function InkInteractiveSessionApp({
       <InkTranscriptApp
         busy={busy}
         columns={columns}
+        committed={committed}
+        composerRows={reservedRows}
         homeBanner={!showHomeInventory}
         indicatorTick={labelTick}
+        livePage={liveOffset}
         nowMs={clock}
+        rows={rows}
         prompt={{ placeholder: promptPlaceholder }}
         showComposer={false}
         spinnerTick={spinnerTick}
@@ -1120,6 +1218,8 @@ export function InkInteractiveSessionApp({
         onChoicePrevious={() => moveConnectChoice("previous")}
         onHistoryNewer={() => navigateHistory("newer")}
         onHistoryOlder={() => navigateHistory("older")}
+        livePaging={{ next: liveLayout.window.hiddenBelow > 0, previous: liveLayout.window.hiddenAbove > 0 }}
+        onLivePage={pageLive}
         onSelectionAccept={acceptPendingSelection}
         onSelectionNext={() => selectPendingOption("next")}
         onSelectionPrevious={() => selectPendingOption("previous")}
@@ -1960,6 +2060,7 @@ function InkLineInput({
   cursor,
   fieldChoiceActive,
   fieldPromptActive,
+  livePaging,
   onChange,
   onConfirmActionApprove,
   onConfirmActionDecline,
@@ -1978,6 +2079,7 @@ function InkLineInput({
   onFieldKey,
   onHistoryNewer,
   onHistoryOlder,
+  onLivePage,
   onSelectionAccept,
   onSelectionNext,
   onSelectionPrevious,
@@ -2000,6 +2102,8 @@ function InkLineInput({
   cursor: number;
   fieldChoiceActive: boolean;
   fieldPromptActive: boolean;
+  /** Whether the live latest turn has hidden lines below / above (T4 paging). */
+  livePaging: { next: boolean; previous: boolean };
   onChange(state: ComposerEditState): void;
   onConfirmActionApprove(): void;
   onConfirmActionDecline(): void;
@@ -2018,6 +2122,7 @@ function InkLineInput({
   onFieldKey(text: string): void;
   onHistoryNewer(): void;
   onHistoryOlder(): void;
+  onLivePage(direction: LivePageDirection): void;
   onSelectionAccept(): void;
   onSelectionNext(): void;
   onSelectionPrevious(): void;
@@ -2101,6 +2206,18 @@ function InkLineInput({
         onConnectConfirmNext();
         return;
       }
+      return;
+    }
+    // Page a tall live turn (transcript-static.ts): PgDn/PgUp always, space only on
+    // an empty prompt. Ahead of the write gate so a long answer stays readable
+    // while its card waits; a paging key never approves or declines anything.
+    const page = livePageKey(input, key, {
+      composerEmpty: value.length === 0,
+      canPageNext: livePaging.next,
+      canPagePrevious: livePaging.previous
+    });
+    if (page) {
+      onLivePage(page);
       return;
     }
     // In-session write gate (cloud brain, Plan 2): a y/N confirmation for a
@@ -2466,6 +2583,54 @@ function CompletionMenu({
       })}
     </Box>
   );
+}
+
+/**
+ * Rows the composer row may take for `text` (its value, or the placeholder): the
+ * same word-wrap Ink uses, at the widest prompt label. Feeds the live-region cap.
+ */
+function composerRowsFor(text: string, columns: number, theme: Theme): number {
+  const labelWidth = Math.max(displayWidth(`${theme.brand.prompt} `), displayWidth("! "));
+  return composerCursorLayout(text, text.length, Math.max(1, columns - labelWidth)).line + 1;
+}
+
+/**
+ * Rows the overlays between the transcript and the composer draw right now
+ * (selection, /connect wizard, Connect/Cancel, write gate) — reserved out of the
+ * live-region cap. Mirrors the overlay components below; an overestimate only
+ * shows fewer live lines, an underestimate could fill the window.
+ */
+function liveOverlayRows({
+  confirmAction,
+  connectConfirm,
+  field,
+  selection,
+  width
+}: {
+  confirmAction: InSessionConfirmationAction | null;
+  connectConfirm: boolean;
+  field: { descriptor: ConnectSetupDescriptor; index: number } | null;
+  selection: InkInteractiveSelectionPrompt | null;
+  width: number;
+}): number {
+  let rows = 0;
+  if (selection) {
+    rows += 1 + (selection.description ? 1 : 0) + selection.options.length;
+  }
+  const current = field?.descriptor.fields[field.index];
+  if (current) {
+    const guidance = current.guidance
+      ? wrapAnsi(current.guidance, Math.max(1, width), { trim: false, hard: true }).split("\n").length
+      : 0;
+    rows += 3 + guidance + (current.choices ? current.choices.length : current.secret ? 1 : 0);
+  }
+  if (connectConfirm) {
+    rows += 3;
+  }
+  if (confirmAction) {
+    rows += 2 + confirmAction.confirmationDetails.length;
+  }
+  return rows;
 }
 
 function isMessageCompleteResult(value: unknown): value is { finalMessages: readonly Msg[]; finalText: string } {

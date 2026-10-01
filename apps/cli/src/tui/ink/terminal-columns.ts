@@ -1,4 +1,5 @@
-// Live terminal size for the interactive session.
+// Live terminal size (width, and height for the live-region cap) for the
+// interactive session.
 //
 // The session used to read `output.columns` once at launch and pass it down as a
 // prop, so a resized terminal kept drawing at the launch width (rows wider than the
@@ -61,4 +62,37 @@ export function useTerminalColumns(fallback: number): number {
   }, [stdout]);
 
   return columns;
+}
+
+/** Same as `subscribeTerminalColumns`, for the terminal height. */
+export function subscribeTerminalRows(
+  stream: NodeJS.WriteStream | undefined,
+  onChange: (rows: number) => void
+): () => void {
+  return subscribeTerminalSize(stream, (s) => usableSize(s.rows), onChange);
+}
+
+/**
+ * The live terminal height, or `undefined` when the output is not a TTY (piped
+ * output, string renders). Ink only switches to its scrollback-clearing
+ * fullscreen redraw on a TTY, so a non-TTY needs no live-region cap.
+ */
+export function useTerminalRows(): number | undefined {
+  const { stdout } = useStdout();
+  const tty = Boolean(stdout?.isTTY);
+  const [rows, setRows] = useState<number | undefined>(() => (tty ? usableSize(stdout?.rows) ?? undefined : undefined));
+
+  useEffect(() => {
+    if (!tty) {
+      setRows(undefined);
+      return;
+    }
+    const now = usableSize(stdout?.rows);
+    if (now !== null) {
+      setRows(now);
+    }
+    return subscribeTerminalRows(stdout, setRows);
+  }, [stdout, tty]);
+
+  return rows;
 }
