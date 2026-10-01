@@ -1212,6 +1212,7 @@ export function InkInteractiveSessionApp({
         indicatorTick={labelTick}
         keyBarRows={keyBarRows}
         livePage={liveOffset}
+        livePageSpace={pendingConfirmActions.length === 0 && !pendingSelection && !pendingOperatorLine}
         nowMs={clock}
         rows={rows}
         prompt={{ placeholder: promptPlaceholder }}

@@ -56,6 +56,11 @@ export interface InkTranscriptAppProps {
    * follow the tail. Clamped, so a stale offset after a resize is safe.
    */
   livePage?: number | null;
+  /**
+   * Whether space pages the live region right now (false while a write card or
+   * picker owns space). Only the hint text changes; the row count does not.
+   */
+  livePageSpace?: boolean;
   indicatorTick?: number;
   nowMs?: number;
   /**
@@ -157,6 +162,7 @@ export function InkTranscriptApp({
   keyBarRows,
   latest,
   livePage,
+  livePageSpace = true,
   rows,
   indicatorTick,
   nowMs,
@@ -207,7 +213,7 @@ export function InkTranscriptApp({
     statusRowCount: statusRows.length,
     transcriptLines
   }), [composerRows, keyBarRows, latest, livePage, rows, showComposer, statusRows.length, transcriptLines]);
-  const hint = livePageHint(live);
+  const hint = livePageHint(live, { spacePages: livePageSpace });
   // <Static> wants a mutable array type; it only reads it.
   const committed = committedProp as CommittedEntry[];
 

@@ -152,13 +152,21 @@ export function livePageKey(
   return null;
 }
 
-/** The one-row hint under a paged live region (generic chrome, no product words). */
-export function livePageHint(window: LiveWindow): string | null {
+/**
+ * The one-row hint under a paged live region (generic chrome, no product words).
+ * `spacePages` is false while a write card or picker is open: it owns space
+ * (see livePageKey's `composerEmpty`), so only PgDn pages and the hint says so.
+ */
+export function livePageHint(
+  window: LiveWindow,
+  options: { spacePages?: boolean } = {}
+): string | null {
   if (!window.paged) {
     return null;
   }
   if (window.hiddenBelow > 0) {
-    return `▼ ${window.hiddenBelow} more ${window.hiddenBelow === 1 ? "line" : "lines"} · space or PgDn`;
+    const keys = options.spacePages === false ? "PgDn" : "space or PgDn";
+    return `▼ ${window.hiddenBelow} more ${window.hiddenBelow === 1 ? "line" : "lines"} · ${keys}`;
   }
   if (window.hiddenAbove > 0) {
     return `▲ ${window.hiddenAbove} ${window.hiddenAbove === 1 ? "line" : "lines"} above · PgUp`;

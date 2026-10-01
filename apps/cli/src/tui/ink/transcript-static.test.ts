@@ -173,10 +173,27 @@ describe("transcript-static pure helpers", () => {
     expect(livePageHint(liveWindow(lines, 11, null))).toMatch(/15 lines above/);
     expect(livePageHint(liveWindow(lines, 60, 0))).toBeNull();
   });
+
+  it("the hint offers space only while space pages (a card or picker keeps space)", () => {
+    const lines = Array.from({ length: 25 }, (_, i) => `l${i}`);
+    expect(livePageHint(liveWindow(lines, 11, 0))).toMatch(/space or PgDn$/);
+    expect(livePageHint(liveWindow(lines, 11, 0), { spacePages: true })).toMatch(/space or PgDn$/);
+    const cardOpen = livePageHint(liveWindow(lines, 11, 0), { spacePages: false });
+    expect(cardOpen).toMatch(/15 more lines · PgDn$/);
+    expect(cardOpen).not.toContain("space");
+  });
 });
 
 describe("the session wires the live cap (CI-run)", () => {
   const sessionSource = readFileSync(fileURLToPath(new URL("./interactive-session.tsx", import.meta.url)), "utf8");
+
+  it("the live hint drops space while a card or picker owns it", () => {
+    // Mirrors the key handler's `composerEmpty` gate (confirmActionActive /
+    // selectionActive / pendingConfirmation) at the render site.
+    expect(sessionSource).toContain(
+      "livePageSpace={pendingConfirmActions.length === 0 && !pendingSelection && !pendingOperatorLine}"
+    );
+  });
 
   it("a 200-line turn in a 24-row session renders one capped page, the composer and a hint", () => {
     const text = Array.from({ length: 200 }, (_, i) => `gamma line ${i}`).join("\n");
