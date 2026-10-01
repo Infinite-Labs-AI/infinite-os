@@ -474,6 +474,10 @@ describe("static-html domain-verification files", () => {
     for (const file of [META_FILE, GOOGLE_FILE, BOM_FILE]) expect(plan.files).not.toContain(file)
     expect(plan.assumptions.join("\n")).toContain(`Left untouched: ${META_FILE}`)
     expect(plan.assumptions.join("\n")).toContain("no <head> is ever added")
+    // Labelled by what the bytes show (the token SHAPE), never asserted to BE a verification file:
+    // a one-line placeholder page has the same shape.
+    expect(plan.assumptions.join("\n")).toContain("look like a verification token (one short line, no markup")
+    expect(plan.assumptions.join("\n")).not.toMatch(/(is a|are) domain-verification file/)
 
     applyInstallation({ root, workspaceId: "ws_test", plan })
     expect(readFileSync(join(root, "about.html"), "utf8")).toContain("<!-- infinite:start -->")
@@ -498,6 +502,17 @@ describe("static-html domain-verification files", () => {
       expect(plan.applyMode).toBe("plan-only")
       expect(plan.blockers).toContain(`Static HTML apply requires a closing </head> tag in ${name}.`)
     }
+  })
+
+  it("says a lone one-line page LOOKS like a token, and how to make it a page", () => {
+    const root = copyFixture("static-html-multipage")
+    writeNestedFile(root, "coming-soon.html", "Coming soon\n")
+    const plan = planFor(root)
+    expect(plan.blockers).toEqual([])
+    const assumption = plan.assumptions.find((line) => line.startsWith("Left untouched: coming-soon.html"))
+    expect(assumption).toContain("coming-soon.html looks like a verification token")
+    expect(assumption).toContain("If it is meant to be a page, it needs real HTML with a </head>")
+    expect(assumption).not.toContain("is a domain-verification file")
   })
 
   it("never treats index.html as a verification file, even when it is a bare token", () => {

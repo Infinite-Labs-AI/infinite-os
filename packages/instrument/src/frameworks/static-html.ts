@@ -298,7 +298,10 @@ function findVerificationFiles(appRoot: string): string[] {
 }
 
 function verificationFilesAssumption(files: string[]): string {
-  return `Left untouched: ${files.join(", ")} ${files.length === 1 ? "is a" : "are"} domain-verification ${files.length === 1 ? "file" : "files"} (a bare token with no markup, like Meta's or Google's). The provider checks ${files.length === 1 ? "it" : "them"} byte for byte, so no analytics is added and no <head> is ever added.`
+  // Worded as what infinite-tag can actually tell from the bytes: the SHAPE of a verification
+  // token. A one-line placeholder ("Coming soon") has the same shape, so the plan never claims more.
+  const one = files.length === 1
+  return `Left untouched: ${files.join(", ")} ${one ? "looks" : "look"} like a verification token (one short line, no markup — the shape of Meta's and Google's domain-verification files). A provider checks such a file byte for byte, so no analytics is added and no <head> is ever added. If ${one ? "it is" : "one is"} meant to be a page, it needs real HTML with a </head>; then re-run.`
 }
 
 /**
