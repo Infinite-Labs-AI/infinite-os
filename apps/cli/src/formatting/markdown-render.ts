@@ -38,7 +38,18 @@ const SGR = {
   underline: ["\u001b[4m", "\u001b[24m"]
 } as const;
 
+/**
+ * Quote nesting the renderer draws as bars. Deeper `>` print as text under the
+ * last bar: each level re-renders its inner text, so unbounded nesting was a
+ * stack overflow on model text (3,000 `>` threw; wave-1 adversarial review).
+ */
+const MAX_QUOTE_DEPTH = 8;
+
 export function renderMarkdown(text: string, opts: MarkdownRenderOptions): string[] {
+  return renderDocument(text, opts, 0);
+}
+
+function renderDocument(text: string, opts: MarkdownRenderOptions, quoteDepth: number): string[] {
   const width = Math.max(1, Math.floor(opts.width));
   const source = text
     .replace(/\r\n?/g, "\n")
@@ -54,7 +65,7 @@ export function renderMarkdown(text: string, opts: MarkdownRenderOptions): strin
     }
   } else {
     for (const block of lexMarkdown(source)) {
-      lines.push(...renderBlock(block, { ...opts, width }));
+      lines.push(...renderBlock(block, { ...opts, width }, quoteDepth));
     }
   }
 
@@ -82,7 +93,7 @@ function renderPlainLine(line: string, opts: MarkdownRenderOptions): string[] {
   );
 }
 
-function renderBlock(block: MarkdownBlock, opts: MarkdownRenderOptions): string[] {
+function renderBlock(block: MarkdownBlock, opts: MarkdownRenderOptions, quoteDepth: number): string[] {
   switch (block.type) {
     case "blank":
       return [""];
@@ -97,10 +108,14 @@ function renderBlock(block: MarkdownBlock, opts: MarkdownRenderOptions): string[
     case "code":
       return renderCode(block.lines, opts);
     case "quote": {
+      const depth = quoteDepth + 1;
+      // At the cap the inner text prints as written (plain: scrubbed and
+      // wrapped), so any further `>` show as text.
+      const innerOpts = depth >= MAX_QUOTE_DEPTH ? { ...opts, plain: true } : opts;
       if (opts.width < 4) {
-        return renderMarkdown(block.lines.join("\n"), opts);
+        return renderDocument(block.lines.join("\n"), innerOpts, depth);
       }
-      const inner = renderMarkdown(block.lines.join("\n"), { ...opts, width: opts.width - 2 });
+      const inner = renderDocument(block.lines.join("\n"), { ...innerOpts, width: opts.width - 2 }, depth);
       const bar = paint("│", "muted", opts);
       return inner.map((line) => (line ? `${bar} ${line}` : bar));
     }

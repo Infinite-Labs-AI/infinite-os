@@ -173,3 +173,66 @@ describe("parseInline and wrapSpans", () => {
     expect(lines[1]?.find((span) => span.text === "three")?.bold).toBe(true);
   });
 });
+
+describe("pathological model text (wave-1 adversarial review)", () => {
+  it("a 5,000-deep quote does not overflow the stack, and every line still fits", () => {
+    const out = renderMarkdown(`${">".repeat(5000)} deep`, { width: 40, color: false, theme });
+    expect(out.every((l) => displayWidth(l) <= 40)).toBe(true);
+    expect(out.join("\n")).toContain("deep");
+  });
+
+  it("past the nesting cap the remaining > print as text under the bars", () => {
+    const out = renderMarkdown(`${">".repeat(12)} deep`, { width: 80, color: false, theme });
+    expect(out).toHaveLength(1);
+    const bars = (out[0]!.match(/│/g) ?? []).length;
+    expect(bars).toBeLessThanOrEqual(8);
+    expect(out[0]).toContain(`${">".repeat(12 - bars)} deep`);
+  });
+
+  it("nested quotes under the cap still render as bars", () => {
+    expect(renderMarkdown(">> two", { width: 40, color: false, theme })).toEqual(["│ │ two"]);
+  });
+
+  it("20,000 unmatched ** openers render in linear time", () => {
+    const text = "**a ".repeat(20000);
+    const started = performance.now();
+    const out = renderMarkdown(text, { width: 80, color: false, theme });
+    const elapsed = performance.now() - started;
+    expect(out.every((l) => displayWidth(l) <= 80)).toBe(true);
+    expect(out.join("")).toContain("**a");
+    expect(elapsed).toBeLessThan(500);
+  });
+
+  it("70 KB of unmatched ** between words renders in linear time", () => {
+    const text = "x ** y ".repeat(10000);
+    const started = performance.now();
+    renderMarkdown(text, { width: 80, color: false, theme });
+    expect(performance.now() - started).toBeLessThan(500);
+  });
+
+  it("70 KB of unmatched [ and 10,000 unclosed [x]( render in linear time", () => {
+    for (const text of ["[".repeat(70000), "[x](".repeat(10000)]) {
+      const started = performance.now();
+      const out = renderMarkdown(text, { width: 80, color: false, theme });
+      expect(performance.now() - started).toBeLessThan(500);
+      expect(out.every((l) => displayWidth(l) <= 80)).toBe(true);
+    }
+  });
+
+  it("5,000 nested link labels do not overflow the stack", () => {
+    const out = renderMarkdown(`${"[".repeat(5000)}x${"](u)".repeat(5000)}`, { width: 80, color: false, theme });
+    expect(out.every((l) => displayWidth(l) <= 80)).toBe(true);
+  });
+
+  it("links keep their label and URL after the linear index", () => {
+    const out = renderMarkdown("see [the (docs)](https://e.x/a_(b)) and [x](\nnope) [y](z", { width: 120, color: false, theme });
+    expect(out.join("\n")).toContain("the (docs)");
+    expect(out.join("\n")).toContain("[y](z");
+  });
+
+  it("memoized closer lookup keeps emphasis results unchanged", () => {
+    const out = renderMarkdown("a **b c **d e **f** g *h* _i_ ~~j~~", { width: 80, color: false, theme });
+    // Pinned against the pre-memo implementation's output.
+    expect(out).toEqual(["a b c **d e **f g h i j"]);
+  });
+});
