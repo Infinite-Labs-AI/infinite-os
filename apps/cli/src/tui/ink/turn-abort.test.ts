@@ -69,7 +69,12 @@ describe("turn abort wiring (structural, CI-run)", () => {
 
   it("each turn gets its own signal, and a stopped turn prints the stop line", () => {
     expect(session).toContain("const signal = turnAbort.start();");
-    expect(session).toContain("}, signal);");
+    // The turn's own signal must be onSubmitLine's third argument, not just any `, signal)`.
+    const callStart = session.indexOf("const result = await onSubmitLine(line,");
+    expect(callStart).toBeGreaterThan(-1);
+    const callEnd = session.indexOf("if (result.exit)", callStart);
+    expect(callEnd).toBeGreaterThan(callStart);
+    expect(session.slice(callStart, callEnd).trimEnd()).toMatch(/\}, signal\);$/);
     expect(session).toContain("turnStoppedLine(signal.aborted ? signal.reason : error)");
     expect(session).toContain("turnAbort.end(signal);");
     expect(session).toContain('"esc to stop"');

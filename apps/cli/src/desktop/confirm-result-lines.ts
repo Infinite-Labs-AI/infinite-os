@@ -46,8 +46,17 @@ const STATE_MARK: Partial<Record<AnswerViewState, { glyph: string; tone: Confirm
 const UNREACHABLE_CODES = new Set([
   "desktop_unreachable",
   "desktop_not_running",
-  "desktop_turn_detached",
   "desktop_auth_failed"
+]);
+
+/**
+ * Codes where the confirm may already have landed, so the outcome is unknown.
+ * `desktop_turn_detached` is the caller giving up after the POST was likely
+ * sent ("Provider work may still continue"), so it must never claim nothing ran.
+ */
+const UNKNOWN_OUTCOME_CODES = new Set([
+  "desktop_confirmation_outcome_unknown",
+  "desktop_turn_detached"
 ]);
 
 /** Neutral link fields an older app returns without a view. */
@@ -73,16 +82,20 @@ export function confirmResultLines(result: unknown, decision: ConfirmDecision): 
   return lines;
 }
 
-/** The lines for a confirm that threw. */
+/**
+ * The lines for a confirm that threw. Only a listed transport code says the
+ * card stays; an uncoded error is a bug (the client codes every real transport
+ * failure), so it prints its own message rather than hiding as "unreachable".
+ */
 export function confirmErrorLines(error: unknown): ConfirmLine[] {
   const code = isRecord(error) && typeof error.code === "string" ? error.code : undefined;
-  if (code === undefined || UNREACHABLE_CODES.has(code)) {
+  if (code !== undefined && UNREACHABLE_CODES.has(code)) {
     return [{ tone: "bad", text: UNREACHABLE_LINE }];
   }
   const fromView = receiptViewLines(isRecord(error) ? error.view : undefined, "approve");
   if (fromView) return fromView;
   const message = error instanceof Error ? boundedTerminalText(error.message, MAX_LINE_CHARS) : "";
-  if (code === "desktop_confirmation_outcome_unknown") {
+  if (code !== undefined && UNKNOWN_OUTCOME_CODES.has(code)) {
     return [{ tone: "warn", text: `? ${message || "Not sure it happened."}` }];
   }
   return [{ tone: "bad", text: `✗ ${message || "Failed."}` }];

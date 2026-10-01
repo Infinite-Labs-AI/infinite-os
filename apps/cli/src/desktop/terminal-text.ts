@@ -12,9 +12,12 @@ const TRUNCATION_SUFFIX = " ... [truncated]";
 /**
  * Strip ANSI/OSC/C1 control sequences and other terminal-control characters from
  * a display string, then collapse whitespace to single spaces. This is a port of
- * the file-private `terminalText` in `desktop-app-client.ts` (which is out of this
- * task's editable scope), kept behavior-identical so the in-session path matches
- * the one-shot renderer's terminal-injection defense.
+ * the file-private `terminalText` in `desktop-app-client.ts`, kept
+ * behavior-identical so the in-session path matches the one-shot renderer's
+ * terminal-injection defense. The one-shot client keeps its own copy because it
+ * also has a line-break-preserving mode (`preserveLineBreaks`); both strip the
+ * same CSI/OSC/C1/bidi set. Folding the two into one export (with a shared test
+ * run against both entry points) is owed to T8.
  */
 export function terminalText(value: string, fallback = ""): string {
   return scanTerminalText(value).replace(/\s+/gu, " ").trim() || fallback;

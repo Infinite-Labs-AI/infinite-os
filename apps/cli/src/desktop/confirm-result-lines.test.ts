@@ -82,9 +82,11 @@ describe("confirmErrorLines", () => {
     expect(confirmErrorLines(unreachable)).toEqual([
       { tone: "bad", text: "✗ Couldn't reach the app — the card stays until it expires." }
     ]);
-    expect(confirmErrorLines(new TypeError("fetch failed"))).toEqual([
-      { tone: "bad", text: "✗ Couldn't reach the app — the card stays until it expires." }
-    ]);
+  });
+
+  it("an uncoded error is a bug, not a transport failure: it prints its own message", () => {
+    expect(confirmErrorLines(new TypeError("fetch failed"))).toEqual([{ tone: "bad", text: "✗ fetch failed" }]);
+    expect(confirmErrorLines(new Error(""))).toEqual([{ tone: "bad", text: "✗ Failed." }]);
   });
 
   it("a failure that carries a receipt view prints its sentence", () => {
@@ -99,6 +101,17 @@ describe("confirmErrorLines", () => {
     expect(confirmErrorLines(unknown)).toEqual([
       { tone: "warn", text: "? Desktop may have resolved this confirmation." }
     ]);
+  });
+
+  it("a detached confirm is an unknown outcome too, never 'the card stays'", () => {
+    const detached = Object.assign(new Error("Stopped waiting for Infinite Desktop. Provider work may still continue."), {
+      code: "desktop_turn_detached"
+    });
+    expect(confirmErrorLines(detached)).toEqual([
+      { tone: "warn", text: "? Stopped waiting for Infinite Desktop. Provider work may still continue." }
+    ]);
+    const bare = Object.assign(new Error(""), { code: "desktop_turn_detached" });
+    expect(confirmErrorLines(bare)).toEqual([{ tone: "warn", text: "? Not sure it happened." }]);
   });
 
   it("any other app answer prints its message, scrubbed", () => {
