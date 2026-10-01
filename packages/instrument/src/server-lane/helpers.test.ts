@@ -340,6 +340,19 @@ describe("hashInfiniteExternalId", () => {
   })
 })
 
+// The doc comments above say "Use hashInfiniteEmail / hashInfiniteExternalId": both must be
+// importable from the package entry, or that advice points at an undefined export.
+describe("the hashing recipes are part of the package's public API", () => {
+  it("exports hashInfiniteEmail and hashInfiniteExternalId from the package entry", async () => {
+    const entry = (await import("../index.js")) as Record<string, unknown>
+    expect(entry.hashInfiniteEmail).toBe(hashInfiniteEmail)
+    expect(entry.hashInfiniteExternalId).toBe(hashInfiniteExternalId)
+    // Negative: a name the entry does not export reads as undefined, which is what the old entry
+    // gave for both recipes.
+    expect(entry.hashInfiniteNothing).toBeUndefined()
+  })
+})
+
 describe("adMatch on a signed outcome", () => {
   const adMatch: InfiniteAdMatch = {
     em: hashInfiniteEmail("founder@example.com"),
