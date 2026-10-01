@@ -26,6 +26,7 @@ export type ConfirmDecision = "approve" | "decline";
 const DISMISSED_SENTENCE = "Dismissed — nothing was executed.";
 const UNREACHABLE_LINE = "✗ Couldn't reach the app — the card stays until it expires.";
 const MAX_LINE_CHARS = 240;
+const CODED_NO_MESSAGE_LINE = "The app couldn't confirm this. Check it before trying again.";
 
 /** Glyph and tone for the receipt view's state (the shared state words' glyphs). */
 const STATE_MARK: Partial<Record<AnswerViewState, { glyph: string; tone: ConfirmLineTone }>> = {
@@ -86,6 +87,7 @@ export function confirmResultLines(result: unknown, decision: ConfirmDecision): 
  * The lines for a confirm that threw. Only a listed transport code says the
  * card stays; an uncoded error is a bug (the client codes every real transport
  * failure), so it prints its own message rather than hiding as "unreachable".
+ * Any other coded app answer without a view prints under a neutral `!`.
  */
 export function confirmErrorLines(error: unknown): ConfirmLine[] {
   const code = isRecord(error) && typeof error.code === "string" ? error.code : undefined;
@@ -97,6 +99,15 @@ export function confirmErrorLines(error: unknown): ConfirmLine[] {
   const message = error instanceof Error ? boundedTerminalText(error.message, MAX_LINE_CHARS) : "";
   if (code !== undefined && UNKNOWN_OUTCOME_CODES.has(code)) {
     return [{ tone: "warn", text: `? ${message || "Not sure it happened."}` }];
+  }
+  if (code !== undefined) {
+    // A coded app answer without a decodable view: an older app (no receipt
+    // views) reports uncertain dispatches as plain codes such as
+    // `dispatch_uncertain`, and its ledger treats every non-success other than
+    // proven not-sent as unknown. ✗ is the Failed / Not sent head, so a bare
+    // code gets the neutral warn mark and its message verbatim; only a view's
+    // own failed / hit_limit / blocked state earns the ✗/$/⊗ heads.
+    return [{ tone: "warn", text: `! ${message || CODED_NO_MESSAGE_LINE}` }];
   }
   return [{ tone: "bad", text: `✗ ${message || "Failed."}` }];
 }

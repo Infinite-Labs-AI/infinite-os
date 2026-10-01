@@ -114,9 +114,29 @@ describe("confirmErrorLines", () => {
     expect(confirmErrorLines(bare)).toEqual([{ tone: "warn", text: "? Not sure it happened." }]);
   });
 
-  it("any other app answer prints its message, scrubbed", () => {
+  it("any other coded app answer prints its message, scrubbed, under a neutral warn mark", () => {
     const rejected = Object.assign(new Error("Write rejected\nFORGED\u001b]0;t\u0007"), { code: "write_rejected" });
-    expect(confirmErrorLines(rejected)).toEqual([{ tone: "bad", text: "✗ Write rejected FORGED" }]);
+    expect(confirmErrorLines(rejected)).toEqual([{ tone: "warn", text: "! Write rejected FORGED" }]);
+  });
+
+  it("an older app's uncertain dispatch (no view) never prints the Failed glyph", () => {
+    const message = "Infinite already started this change and couldn't confirm the result. Check it before trying again.";
+    const uncertain = Object.assign(new Error(message), { code: "dispatch_uncertain" });
+    const lines = confirmErrorLines(uncertain);
+    expect(lines).toEqual([{ tone: "warn", text: `! ${message}` }]);
+    expect(lines[0]!.text.startsWith("✗")).toBe(false);
+  });
+
+  it("a coded app answer with no message still avoids the Failed glyph", () => {
+    const bare = Object.assign(new Error(""), { code: "dispatch_uncertain" });
+    expect(confirmErrorLines(bare)).toEqual([
+      { tone: "warn", text: "! The app couldn't confirm this. Check it before trying again." }
+    ]);
+  });
+
+  it("a failed receipt view keeps the Failed glyph", () => {
+    const failed = Object.assign(new Error("failed"), { code: "write_failed", view: receiptView("failed", "Meta rejected the change") });
+    expect(confirmErrorLines(failed)).toEqual([{ tone: "bad", text: "✗ Meta rejected the change" }]);
   });
 });
 
