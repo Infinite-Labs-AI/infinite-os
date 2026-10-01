@@ -30,7 +30,21 @@ import type { MetaBrowserGate } from "./consent.js"
 //   3. `document.cookie` lists longer paths first and, within a path, OLDEST FIRST.
 // It rejects a Domain attribute naming a public suffix or a domain the page is not on, as browsers
 // do. Every cookie here is path=/.
-const PUBLIC_SUFFIXES = new Set(["app", "vercel.app", "fast", "com", "co.uk", "uk"])
+// The preview platforms' suffixes (vercel.app, netlify.app, pages.dev, github.io) are on the real
+// Public Suffix List, so a browser refuses a Domain cookie on them exactly as it refuses co.uk.
+const PUBLIC_SUFFIXES = new Set([
+  "app",
+  "vercel.app",
+  "netlify.app",
+  "dev",
+  "pages.dev",
+  "io",
+  "github.io",
+  "fast",
+  "com",
+  "co.uk",
+  "uk"
+])
 
 const domainMatches = (host: string, domain: string) => host === domain || host.endsWith(`.${domain}`)
 
@@ -281,14 +295,14 @@ describe("Meta _fbc landing capture (ported from infinite.fast)", () => {
     assertSecondClickWins(SHIPPED)
     // Negative: the pre-06b2ce8 capture — a HOST-ONLY write beside Meta's Domain cookie, never
     // retired — leaves two cookies, and the same assertion fails.
-    expect(() =>
-      assertSecondClickWins(
-        broken("var domains = cookieDomains();", "var domains = [];").replace(
-          "if (storedFbcs(false).length) {",
-          "if (false) {"
-        )
-      )
-    ).toThrow()
+    // Every broken copy is built OUTSIDE the toThrow closure: `broken()` asserts its search string is
+    // present, and a drifted search string throwing inside the closure would pass vacuously.
+    const hostOnlyNeverRetired = broken("var domains = cookieDomains();", "var domains = [];").replace(
+      "if (storedFbcs(false).length) {",
+      "if (false) {"
+    )
+    expect(hostOnlyNeverRetired).not.toBe(SHIPPED)
+    expect(() => assertSecondClickWins(hostOnlyNeverRetired)).toThrow()
     // Negative: a first-listed reader returns the OLDER click while a duplicate exists.
     const firstListed = broken(
       "if (!newest || Number(values[index].split(\".\")[2]) > Number(newest.split(\".\")[2])) newest = values[index];",
@@ -319,9 +333,8 @@ describe("Meta _fbc landing capture (ported from infinite.fast)", () => {
       `_fbc=${written};domain=infinite.fast;path=/;max-age=7776000;samesite=Lax;secure`
     ])
     // Negative: a capture that "tidies" on every page load writes with no fbclid on the URL.
-    expect(() =>
-      assertNoClickNoWrite(broken("if (!fbclid) return;\n", 'if (!fbclid) { document.cookie = "_fbc=;path=/;max-age=0"; return; }\n'))
-    ).toThrow()
+    const tidiesEveryLoad = broken("if (!fbclid) return;\n", 'if (!fbclid) { document.cookie = "_fbc=;path=/;max-age=0"; return; }\n')
+    expect(() => assertNoClickNoWrite(tidiesEveryLoad)).toThrow()
   })
 
   it("a reload of the landing URL is the same click: nothing is rewritten and Meta's own cookie is left alone", () => {
@@ -379,9 +392,8 @@ describe("Meta _fbc landing capture (ported from infinite.fast)", () => {
     // vercel.app is a public suffix too: the deployment's own host, index 2.
     assertIndexForHost(SHIPPED, "acme-abc.vercel.app", ".acme-abc.vercel.app", "2")
     // Negative: infinite.fast's hard-coded index is wrong on a co.uk customer.
-    expect(() =>
-      assertIndexForHost(broken("var value = format(domainIndex(domains[index]), fbclid);", "var value = format(1, fbclid);"), "shop.acme.co.uk", ".acme.co.uk", "2")
-    ).toThrow()
+    const hardCodedIndex = broken("var value = format(domainIndex(domains[index]), fbclid);", "var value = format(1, fbclid);")
+    expect(() => assertIndexForHost(hardCodedIndex, "shop.acme.co.uk", ".acme.co.uk", "2")).toThrow()
   })
 
   it("localhost and bare IPs cannot carry a Domain cookie: host-only, indexed by the host written, no Secure over http", () => {
@@ -492,10 +504,18 @@ describe("Meta _fbc landing capture (ported from infinite.fast)", () => {
   })
 
   it("is NOT host-guarded: preview hosts still capture (decision 15 — it writes a cookie and sends nothing)", () => {
-    for (const hostname of ["acme-git-feature.vercel.app", "deploy-preview-3--acme.netlify.app", "staging.acme.com"]) {
+    // A preview platform's suffix is public, so the cookie lands on the deployment's own host.
+    for (const [hostname, domain, index] of [
+      ["acme-git-feature.vercel.app", ".acme-git-feature.vercel.app", "2"],
+      ["deploy-preview-3--acme.netlify.app", ".deploy-preview-3--acme.netlify.app", "2"],
+      ["feature.acme.pages.dev", ".acme.pages.dev", "2"],
+      ["acme.github.io", ".acme.github.io", "2"],
+      ["staging.acme.com", ".acme.com", "1"]
+    ] as const) {
       const jar = createCookieJar({ hostname })
-      loadPage(jar, { search: "?fbclid=Preview1" })
-      expect(jar.entries("_fbc")).toHaveLength(1)
+      const page = loadPage(jar, { search: "?fbclid=Preview1" })
+      expect(page.fbc()).toMatch(new RegExp(`^fb\\.${index}\\.[0-9]{13}\\.Preview1$`))
+      expect(jar.entries("_fbc")).toEqual([{ domain, value: page.fbc() }])
     }
   })
 
@@ -558,9 +578,53 @@ describe("Meta _fbc capture under the optional consent hook (consent_mode=requir
     expect(page.fbc()).toBe("")
   })
 
-  it("without a hook the capture runs whenever the pixel would (the pixel itself is not consent-gated)", () => {
+  it("the builder's hook-less default ignores consent — which is why infinite-tag never emits it (see meta.ts)", () => {
     const jar = createCookieJar({ hostname: "acme.com" })
     loadPage(jar, { search: `?fbclid=${FIRST}`, doNotTrack: "1" })
     expect(jar.entries("_fbc")).toHaveLength(1)
+  })
+})
+
+// Ported from infinite-site test-inject-analytics.mjs L458-466 @ 9f65b47 (the consent block of the
+// `_fbc` capture). infinite.fast's gate starts a normal visitor at once, never starts after a stored
+// denial, and defers a DNT/GPC visitor until a live grant. infinite-tag emits its capture under the
+// not_required hook by default, which applies the same rule through the runtime's recorded decision.
+describe("Meta _fbc capture under the optional consent hook (consent_mode=not_required, the default)", () => {
+  const NOT_REQUIRED_GATE: MetaBrowserGate = { kind: "infinite-consent", mode: "not_required" }
+
+  it("a normal visitor is captured at once", () => {
+    const jar = createCookieJar({ hostname: "acme.com" })
+    const page = loadPage(jar, { search: `?fbclid=${FIRST}`, gate: NOT_REQUIRED_GATE })
+    expect(jar.entries("_fbc").map((cookie) => clickIdOf(cookie.value))).toEqual([FIRST])
+    expect(clickIdOf(page.fbc())).toBe(FIRST)
+  })
+
+  it("an explicit stored denial writes no _fbc", () => {
+    const jar = createCookieJar({ hostname: "acme.com" })
+    const page = loadPage(jar, { search: "?fbclid=IwAR0denied", gate: NOT_REQUIRED_GATE, storedConsent: "denied" })
+    expect(jar.writes).toEqual([])
+    expect(page.fbc()).toBe("")
+    // Negative: the ungated capture writes for the same visitor.
+    const ungated = createCookieJar({ hostname: "acme.com" })
+    loadPage(ungated, { search: "?fbclid=IwAR0denied", storedConsent: "denied" })
+    expect(ungated.writes).not.toEqual([])
+  })
+
+  it("a privacy signal with no decision defers the capture; a live grant captures right then, while the fbclid is still on the URL", () => {
+    const jar = createCookieJar({ hostname: "acme.com" })
+    const page = loadPage(jar, { search: "?fbclid=IwAR0deferred", gate: NOT_REQUIRED_GATE, doNotTrack: "1" })
+    expect(jar.writes).toEqual([])
+    expect(page.fbc()).toBe("")
+    page.grant()
+    expect(page.fbc()).toMatch(/^fb\.1\.[0-9]{13}\.IwAR0deferred$/)
+    expect(jar.entries("_fbc")).toEqual([{ domain: ".acme.com", value: page.fbc() }])
+  })
+
+  it("a stored grant overrides the privacy signal, and a later revocation empties the accessor", () => {
+    const jar = createCookieJar({ hostname: "acme.com" })
+    const page = loadPage(jar, { search: `?fbclid=${FIRST}`, gate: NOT_REQUIRED_GATE, storedConsent: "granted", doNotTrack: "1" })
+    expect(jar.entries("_fbc")).toHaveLength(1)
+    page.revoke()
+    expect(page.fbc()).toBe("")
   })
 })

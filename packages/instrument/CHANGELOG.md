@@ -63,7 +63,7 @@ static-html `<script>` and the Next module's string literal) in a sandbox, not a
 
 - **Meta click id (`_fbc`) saved on the landing page, for new installs.** When a visitor arrives
   from a Meta ad, the `fbclid` exists in the landing URL and nowhere else. If the pixel cannot run
-  there (an ad blocker, consent still pending, a Traffic Permissions block), the click id used to be
+  there (an ad blocker, a Traffic Permissions block), the click id used to be
   lost, and a later sign-up or purchase reached Meta with nothing tying it to the ad, so the ad looked
   like it did not work. The Meta snippet now saves the click id in Meta's own `_fbc` cookie before
   the pixel starts. The last click wins: a second ad click replaces the first, and one cookie is
@@ -71,8 +71,11 @@ static-html `<script>` and the Next module's string literal) in a sandbox, not a
   index names the domain the cookie was actually written on (`www.acme.com` → 1, `shop.acme.co.uk` →
   2). It never writes `_fbp`, never stores the click id anywhere else, writes nothing when there is no
   `fbclid`, and refuses malformed or oversized ids. It sends nothing. It is not limited to the
-  production host, so previews can test it. Under `--infinite-consent-mode required` it waits for
-  the visitor's recorded grant. `window.infiniteMetaClickId()` returns the click id or `""`.
+  production host, so previews can test it. It follows the visitor's consent in every consent
+  mode, as infinite.fast's capture does: nothing is written for a visitor who said no on the site,
+  or whose browser sends Do Not Track / Global Privacy Control, until they grant; and under
+  `--infinite-consent-mode required` nothing is written before a recorded grant.
+  `window.infiniteMetaClickId()` returns the click id or `""`.
   Pixels the site already had are left exactly as they are.
 - **Manual Advanced Matching follows consent.** `window.infiniteMetaAdvancedMatch` now attaches
   nothing for a visitor who denied on the site, or whose browser sends DNT/GPC without a grant, and

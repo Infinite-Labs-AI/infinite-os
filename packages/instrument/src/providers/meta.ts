@@ -20,13 +20,19 @@ import { jsLiteral, validateMetaPixelId } from "./validate.js"
  *
  * `_fbc` LANDING CAPTURE — DEFAULT ON for pixels infinite-tag installs. Ported from infinite.fast
  * (see `./meta-browser/click-id.ts`): the click id on an ad's landing URL is written into Meta's own
- * `_fbc` cookie even when the pixel cannot run (ad blocker, consent not yet granted, a Traffic
- * Permissions block), last click wins, and `window.infiniteMetaClickId()` reads it. It is emitted
- * BEFORE the pixel bootstrap so it has written by the time fbevents reads the cookie, and it is not
- * host-guarded (it writes one first-party cookie and sends nothing). Under
- * `--infinite-consent-mode required` it waits for the visitor's recorded grant; otherwise it runs
- * whenever the pixel runs, exactly like the pixel. An ADOPTED pixel (one the site already had) gets
- * none of this: infinite-tag never edits a provider it did not install.
+ * `_fbc` cookie even when the pixel cannot run (an ad blocker, a Traffic Permissions block), last
+ * click wins, and `window.infiniteMetaClickId()` reads it. It is emitted BEFORE the pixel bootstrap
+ * so it has written by the time fbevents reads the cookie, and it is not host-guarded (it writes one
+ * first-party cookie and sends nothing).
+ *
+ * It follows the visitor's consent in EVERY mode, as infinite.fast's capture does (inject-analytics
+ * L272-289, pinned by test-inject-analytics L460/L462): a visitor whose "no" the Infinite runtime
+ * recorded gets no `_fbc`, a DNT/GPC visitor gets none until they grant on this site, and under
+ * `--infinite-consent-mode required` nothing is written before a recorded grant. This is stricter
+ * than the pixel itself on purpose: the capture exists for exactly the visitor the pixel cannot
+ * reach — typically one running their own blocker — and writing Meta's ad-click cookie for a visitor
+ * who said no would be infinite-tag overriding that choice. An ADOPTED pixel (one the site already
+ * had) gets none of this: infinite-tag never edits a provider it did not install.
  *
  * MANUAL ADVANCED MATCHING — `--meta-advanced-matching on`, DEFAULT OFF.
  *
@@ -106,7 +112,7 @@ export const metaProviderAdapter: ProviderAdapter = {
         "Meta wiring will use only the public pixelId artifact.",
         consentMode === "required"
           ? "Meta click-id capture is ON: when a visitor who has granted consent lands from a Meta ad, the page saves the ad's click id in Meta's own _fbc cookie, even if the pixel itself is blocked. It sends nothing."
-          : "Meta click-id capture is ON: when a visitor lands from a Meta ad, the page saves the ad's click id in Meta's own _fbc cookie, even if the pixel itself is blocked, so a later conversion can be credited to the ad. It sends nothing.",
+          : "Meta click-id capture is ON: when a visitor lands from a Meta ad, the page saves the ad's click id in Meta's own _fbc cookie, even if the pixel itself is blocked, so a later conversion can be credited to the ad. It skips visitors who said no on this site or whose browser sends Do Not Track / Global Privacy Control (until they grant), and it sends nothing.",
         advancedMatching
           ? "Manual Advanced Matching is ON: the page will define window.infiniteMetaAdvancedMatch, which hashes the raw email / external id YOUR code passes it. It never reads the page and never runs on its own."
           : "Manual Advanced Matching is OFF (default): the pixel sends no visitor contact details. Turn it on with --meta-advanced-matching on."
@@ -152,15 +158,15 @@ export interface MetaPixelSnippetOptions {
 
 export function buildMetaPixelSnippet(pixelId: string, options: MetaPixelSnippetOptions = {}): string {
   const consentMode = options.consentMode === "required" ? "required" : "not_required"
-  // The capture follows the pixel: it is gated only where the site requires consent.
-  const captureGate: MetaBrowserGate =
-    consentMode === "required" ? { kind: "infinite-consent", mode: "required" } : { kind: "none" }
-  // Identity is stricter: it always follows the visitor's recorded decision and DNT/GPC.
-  const matchingGate: MetaBrowserGate = { kind: "infinite-consent", mode: consentMode }
+  // The capture and the matching accessor share ONE gate: the visitor's recorded decision wins in
+  // either direction, DNT/GPC without a grant means no, and the consent mode decides the rest — the
+  // Infinite runtime's rule (see `./meta-browser/consent.ts`). infinite.fast gates its capture the
+  // same way; an ungated capture would write Meta's ad-click cookie for a visitor who said no.
+  const gate: MetaBrowserGate = { kind: "infinite-consent", mode: consentMode }
   return [
     // Capture BEFORE the bootstrap: Meta asks for the click id at landing, and the cookie must
     // already hold this click when fbevents reads it.
-    ...(options.clickIdCapture === false ? [] : [buildMetaClickIdCaptureScript({ gate: captureGate })]),
+    ...(options.clickIdCapture === false ? [] : [buildMetaClickIdCaptureScript({ gate })]),
     "!function(f,b,e,v,n,t,s)",
     "{if(f.fbq)return;n=f.fbq=function(){n.callMethod?",
     "n.callMethod.apply(n,arguments):n.queue.push(arguments)};",
@@ -172,7 +178,7 @@ export function buildMetaPixelSnippet(pixelId: string, options: MetaPixelSnippet
     `fbq('set', 'autoConfig', 'false', ${jsLiteral(pixelId)});`,
     `fbq('init', ${jsLiteral(pixelId)});`,
     "fbq('track', 'PageView');",
-    ...(options.advancedMatching === true ? [buildMetaAdvancedMatchingSnippet(pixelId, matchingGate)] : [])
+    ...(options.advancedMatching === true ? [buildMetaAdvancedMatchingSnippet(pixelId, gate)] : [])
   ].join("\n")
 }
 

@@ -2,14 +2,14 @@
 //
 // Source: infinite-site `scripts/lib/meta-click-id.mjs` @ 9f65b47, with its tests
 // (`.github/scripts/test-meta-click-id.mjs`) and the RFC 6265bis cookie-jar fixture
-// (`.github/scripts/fixtures/browser-cookie-jar.mjs`) ported alongside into
-// `click-id.test.ts` / `click-id.fixture.ts`. Every rule below was fixed after a real incident on
+// (`.github/scripts/fixtures/browser-cookie-jar.mjs`) ported alongside into `click-id.test.ts`
+// (the cookie jar lives at the top of that file). Every rule below was fixed after a real incident on
 // infinite.fast; read them before changing a character.
 //
 // WHY THIS EXISTS. `_fbc` is `fb.<subdomainIndex>.<creationMs>.<fbclid>` — the strongest match
 // parameter a conversion can carry, because it ties the conversion to ONE ad click. Meta's pixel
-// writes it on page load, but it cannot when the pixel never runs: an ad blocker, ITP, consent not
-// yet granted, or a Traffic Permissions block in Events Manager. The `fbclid` exists in the URL only
+// writes it on page load, but it cannot when the pixel never runs: an ad blocker, ITP, or a Traffic
+// Permissions block in Events Manager. The `fbclid` exists in the URL only
 // on the LANDING hit, so a click id not saved there is lost for good — and the server conversion
 // that still fires for that visitor reaches Meta unattributable, so the ad looks like it failed.
 // Meta: "Capture cookies early... Ideally retrieve _fbp and _fbc when loading your landing page."
@@ -41,7 +41,7 @@
 //   6. `creationMs` is when the click was first observed — now, at landing — in MILLISECONDS.
 //
 // THE ACCESSOR. `window.infiniteMetaClickId()` returns the newest stored click, or — when the click
-// on THIS page's URL could not be stored (consent deferred, cookies blocked) — that click in Meta's
+// on THIS page's URL could not be stored (cookies blocked or silently dropped) — that click in Meta's
 // format, built with index 1. That value describes no cookie, and Meta's own guidance for a value
 // that is not saved as a cookie is "use the value 1". Returns "" when there is nothing honest to
 // return; never a placeholder. It never writes. Under a consent hook it returns "" whenever the hook
@@ -64,7 +64,11 @@ export const META_CLICK_ID_ACCESSOR = "infiniteMetaClickId"
 export const META_CLICK_ID_MAX_AGE_SECONDS = 90 * 24 * 60 * 60
 
 export interface MetaClickIdCaptureOptions {
-  /** Default `{ kind: "none" }`: the capture runs whenever the pixel runs. */
+  /**
+   * Default `{ kind: "none" }`: no consent check at all. infinite-tag never emits that default —
+   * `providers/meta.ts` always passes the Infinite consent hook for the site's consent mode, so a
+   * visitor's recorded "no" and DNT/GPC are honoured exactly as infinite.fast honours them.
+   */
   gate?: MetaBrowserGate
 }
 

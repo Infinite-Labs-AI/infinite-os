@@ -19,6 +19,8 @@ import { buildAnalyticsModuleSource } from "../../frameworks/managed-files.js"
 import type { InstallPlan } from "../../types.js"
 import { buildMetaPixelSnippet, metaProviderAdapter, type MetaPixelSnippetOptions } from "../meta.js"
 
+import { buildMetaClickIdCaptureScript } from "./click-id.js"
+
 const PIXEL = "1234567890123456"
 
 interface PageOptions {
@@ -157,9 +159,34 @@ describe("the Meta snippet infinite-tag installs, executed", () => {
     expect(held.cookieWrites).toEqual([])
     const granted = runPage(staticHtmlScript({}, "required"), { search: "?fbclid=X1", storedConsent: "granted" })
     expect(granted.cookieWrites).toHaveLength(1)
-    // not_required behaves like the pixel: no gate.
-    const open = runPage(staticHtmlScript({}, "not_required"), { search: "?fbclid=X1", doNotTrack: "1" })
-    expect(open.cookieWrites).toHaveLength(1)
+  })
+
+  // Ported from infinite-site test-inject-analytics.mjs L460/L462 @ 9f65b47: "an explicit stored
+  // denial writes no _fbc" and "a privacy signal with no decision defers the capture". The capture
+  // follows the visitor's consent in EVERY mode — including the default not_required.
+  it("consent_mode=not_required (the default): a recorded denial or a DNT/GPC signal writes no _fbc; a normal visitor and a grant do", () => {
+    const cases: Array<[PageOptions, number]> = [
+      [{ storedConsent: "denied" }, 0],
+      [{ storedConsent: "denied", globalPrivacyControl: true }, 0],
+      [{ globalPrivacyControl: true }, 0],
+      [{ doNotTrack: "1" }, 0],
+      [{}, 1],
+      // An explicit grant on this site overrides the browser signal — the runtime's rule.
+      [{ storedConsent: "granted", doNotTrack: "1" }, 1]
+    ]
+    for (const source of [staticHtmlScript({}), staticHtmlScript({}, "not_required"), nextModuleScript()]) {
+      for (const [options, writes] of cases) {
+        const page = runPage(source, { search: "?fbclid=X1", ...options })
+        expect(page.cookieWrites, JSON.stringify(options)).toHaveLength(writes)
+        if (writes === 0) expect(page.clickId()).toBe("")
+        // The pixel itself is unchanged by this: it still boots.
+        expect(page.inserted).toEqual(["https://connect.facebook.net/en_US/fbevents.js"])
+      }
+    }
+    // Negative: the ungated capture this replaced writes Meta's ad-click cookie for the visitor who said no.
+    const ungated = buildMetaClickIdCaptureScript()
+    expect(runPage(ungated, { search: "?fbclid=X1", storedConsent: "denied" }).cookieWrites).toHaveLength(1)
+    expect(runPage(ungated, { search: "?fbclid=X1", globalPrivacyControl: true }).cookieWrites).toHaveLength(1)
   })
 
   it("the capture can be left out explicitly, and only explicitly", () => {
