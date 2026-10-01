@@ -143,6 +143,13 @@ const THIRD = "IwAR0Third_click.Id-99"
 const segments = (value: string) => String(value).split(".")
 const clickIdOf = (value: string) => segments(value).slice(3).join(".")
 const clickMsOf = (value: string) => Number(segments(value)[2])
+// The fbc's shape is checked with a FIXED pattern and its index/click id by exact equality, so no
+// test data (hostnames above all) is ever compiled into a RegExp — CodeQL js/incomplete-hostname-regexp.
+function expectFbc(value: string, index: string, clickId: string): void {
+  expect(value).toMatch(/^fb\.[0-9]+\.[0-9]{13}\./)
+  expect(segments(value)[1]).toBe(index)
+  expect(clickIdOf(value)).toBe(clickId)
+}
 
 const SHIPPED = buildMetaClickIdCaptureScript()
 const REQUIRED_GATE: MetaBrowserGate = { kind: "infinite-consent", mode: "required" }
@@ -273,7 +280,7 @@ function assertSecondClickWins(script: string): void {
 function assertIndexForHost(script: string, hostname: string, cookieDomain: string, index: string): void {
   const jar = createCookieJar({ hostname })
   const page = loadPage(jar, { search: "?fbclid=AbC123xyz", script })
-  expect(page.fbc()).toMatch(new RegExp(`^fb\\.${index}\\.[0-9]{13}\\.AbC123xyz$`))
+  expectFbc(page.fbc(), index, "AbC123xyz")
   expect(jar.entries("_fbc")).toEqual([{ domain: cookieDomain, value: page.fbc() }])
 }
 
@@ -403,7 +410,7 @@ describe("Meta _fbc landing capture (ported from infinite.fast)", () => {
     ] as const) {
       const jar = createCookieJar({ hostname })
       const page = loadPage(jar, { search: "?fbclid=Local1", protocol: "http:" })
-      expect(page.fbc()).toMatch(new RegExp(`^fb\\.${index}\\.[0-9]{13}\\.Local1$`))
+      expectFbc(page.fbc(), index, "Local1")
       expect(jar.entries("_fbc")).toEqual([{ domain: hostname, value: page.fbc() }])
       expect(jar.writes.join("\n")).not.toMatch(/secure/)
     }
@@ -514,7 +521,7 @@ describe("Meta _fbc landing capture (ported from infinite.fast)", () => {
     ] as const) {
       const jar = createCookieJar({ hostname })
       const page = loadPage(jar, { search: "?fbclid=Preview1" })
-      expect(page.fbc()).toMatch(new RegExp(`^fb\\.${index}\\.[0-9]{13}\\.Preview1$`))
+      expectFbc(page.fbc(), index, "Preview1")
       expect(jar.entries("_fbc")).toEqual([{ domain, value: page.fbc() }])
     }
   })
