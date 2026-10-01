@@ -57,6 +57,40 @@ Meta Manual Advanced Matching, as a customer-controlled option that is OFF by de
   value that is not a digest never reaches `fbq`.
 - **The privacy disclosure notice names the lane** when, and only when, it was actually installed.
 
+Meta browser code ported from infinite.fast, where every rule was fixed after a real incident. The
+code and its tests came across together; the tests run the snippet infinite-tag writes (the
+static-html `<script>` and the Next module's string literal) in a sandbox, not a text search.
+
+- **Meta click id (`_fbc`) saved on the landing page, for new installs.** When a visitor arrives
+  from a Meta ad, the `fbclid` exists in the landing URL and nowhere else. If the pixel cannot run
+  there (an ad blocker, consent still pending, a Traffic Permissions block), the click id used to be
+  lost, and a later sign-up or purchase reached Meta with nothing tying it to the ad, so the ad looked
+  like it did not work. The Meta snippet now saves the click id in Meta's own `_fbc` cookie before
+  the pixel starts. The last click wins: a second ad click replaces the first, and one cookie is
+  left, in the scope Meta uses, so an older copy can never shadow the newer click. The subdomain
+  index names the domain the cookie was actually written on (`www.acme.com` → 1, `shop.acme.co.uk` →
+  2). It never writes `_fbp`, never stores the click id anywhere else, writes nothing when there is no
+  `fbclid`, and refuses malformed or oversized ids. It sends nothing. It is not limited to the
+  production host, so previews can test it. Under `--infinite-consent-mode required` it waits for
+  the visitor's recorded grant. `window.infiniteMetaClickId()` returns the click id or `""`.
+  Pixels the site already had are left exactly as they are.
+- **Manual Advanced Matching follows consent.** `window.infiniteMetaAdvancedMatch` now attaches
+  nothing for a visitor who denied on the site, or whose browser sends DNT/GPC without a grant, and
+  under `required` mode nothing until a grant. It checks on every call, so a revocation counts at
+  once. Unchanged and now pinned by tests: the email is trimmed and lowercased before hashing, the
+  account id is trimmed only (case kept, matching the server's hash), a phone number is never sent,
+  and a missing `fbq` or WebCrypto resolves `false` instead of failing. It is still off by default.
+- **New setup check: Meta automatic events.** A Meta pixel infinite-tag installed that is missing
+  `fbq('set', 'autoConfig', false, id)` before `init` is a problem in infinite-tag's own code. A
+  pixel the site already had with automatic events on is reported as information to review, never
+  as a problem and never edited. When the source cannot settle it, the check says "undetermined".
+  The same check counts infinite-tag's managed Meta block: exactly one `init` per pixel, at most one
+  click-id capture and one matching accessor, and the capture before `init`.
+- **Fixed: the setup checks could not see a managed Next.js pixel.** The Next module stores the
+  snippet as a string with escaped quotes, so the click-id check read a correct Next install as "no
+  pixel found". The checks now decode it, and the click-id check names the managed capture when it
+  is there.
+
 ## 0.11.0 — 2026-09-21
 
 The Meta pixel's `verify` lane now checks DELIVERY, not just that a snippet is on the page.

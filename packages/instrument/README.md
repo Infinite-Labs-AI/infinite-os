@@ -99,7 +99,7 @@ contract. Noninteractive `--yes` and `apply` runs fail on the same blocker.
 | `--posthog-ui-host <https://...>` | Optional PostHog toolbar host when proxying. |
 | `--x-pixel-id <id>` | Public X pixel ID. |
 | `--x-event-tag-id <id>` | Public X event tag ID; repeatable. |
-| `--meta-pixel-id <id>` | Public Meta pixel ID. Installs with Meta's Automatic Configuration off (`fbq('set','autoConfig','false', id)` before `init`): no button clicks or page metadata are sent to Meta by default. |
+| `--meta-pixel-id <id>` | Public Meta pixel ID. Installs with Meta's Automatic Configuration off (`fbq('set','autoConfig','false', id)` before `init`): no button clicks or page metadata are sent to Meta by default. Also installs the `_fbc` landing capture: when a visitor arrives from a Meta ad, the ad's click id is saved in Meta's own `_fbc` cookie (last click wins) even if the pixel itself is blocked, and `window.infiniteMetaClickId()` reads it. It sends nothing. With `--infinite-consent-mode required` it waits for the visitor's grant. |
 | `--meta-advanced-matching <on\|off>` | **Default off.** Manual Advanced Matching — see below. On, the page defines `window.infiniteMetaAdvancedMatch({ email, externalId })` for **your** code to call once a visitor identifies themselves; it hashes those values before anything reaches Meta. It never reads your pages and never fires on its own. |
 | `--artifact-file <path>` | Read the same public artifact shape from JSON. |
 | `--server-lane` | Add the lossless server lane (see below). Works alone or with the artifact flags. |
@@ -130,6 +130,13 @@ before it is transmitted and is never sent in the clear — but a hash of an ema
 identifier for that person, so this is genuinely data about your visitor going to Meta for ad
 measurement. **Disclose it in your privacy policy**, and check it against your consent rules, before
 you turn it on. The installer reminds you at install time.
+
+**It follows the visitor's recorded consent.** The accessor attaches nothing for a visitor who
+denied on your site, or whose browser sends Do Not Track / Global Privacy Control without a grant;
+with `--infinite-consent-mode required` it attaches nothing until the visitor granted. It checks on
+every call, so a revocation counts at once. It never sends a phone number. The email is trimmed and
+lowercased before hashing; the account id is trimmed only (its case is kept), so it hashes to the
+same bytes your server sends.
 
 **We will not do it behind your back.** Meta also offers *Automatic* Advanced Matching, where the
 pixel scrapes your forms for these values by itself. `infinite-tag` keeps that switched off

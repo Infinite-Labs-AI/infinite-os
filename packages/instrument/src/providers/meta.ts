@@ -1,5 +1,7 @@
 import type { ProviderAdapter, SupportedFramework } from "../types.js"
 import { isHtmlInjectedFramework } from "../types.js"
+import { buildMetaClickIdCaptureScript, META_CLICK_ID_ACCESSOR } from "./meta-browser/click-id.js"
+import { consentAllowsSource, type MetaBrowserGate } from "./meta-browser/consent.js"
 import { jsLiteral, validateMetaPixelId } from "./validate.js"
 
 /**
@@ -15,6 +17,16 @@ import { jsLiteral, validateMetaPixelId } from "./validate.js"
  * `init` — Meta only honours it in that order). With it on, the pixel sends button clicks
  * and page metadata to Meta on its own, which contradicts the installer's no-DOM-text
  * posture. The provider is otherwise Meta's own native snippet, unchanged.
+ *
+ * `_fbc` LANDING CAPTURE — DEFAULT ON for pixels infinite-tag installs. Ported from infinite.fast
+ * (see `./meta-browser/click-id.ts`): the click id on an ad's landing URL is written into Meta's own
+ * `_fbc` cookie even when the pixel cannot run (ad blocker, consent not yet granted, a Traffic
+ * Permissions block), last click wins, and `window.infiniteMetaClickId()` reads it. It is emitted
+ * BEFORE the pixel bootstrap so it has written by the time fbevents reads the cookie, and it is not
+ * host-guarded (it writes one first-party cookie and sends nothing). Under
+ * `--infinite-consent-mode required` it waits for the visitor's recorded grant; otherwise it runs
+ * whenever the pixel runs, exactly like the pixel. An ADOPTED pixel (one the site already had) gets
+ * none of this: infinite-tag never edits a provider it did not install.
  *
  * MANUAL ADVANCED MATCHING — `--meta-advanced-matching on`, DEFAULT OFF.
  *
@@ -44,8 +56,23 @@ import { jsLiteral, validateMetaPixelId } from "./validate.js"
  *   DOWN. Nothing raw is ever transmitted, and a value that is not a digest never reaches fbq.
  *
  * Two fields only. Meta matches on more, but a field whose normalisation we have not
- * implemented correctly is worse than an absent one, so phone/name/city are deliberately not
- * accepted yet rather than accepted and mis-normalised.
+ * implemented correctly is worse than an absent one, so name/city are deliberately not accepted
+ * rather than accepted and mis-normalised — and a phone number is never sent at all (founder
+ * ruling: no `ph` anywhere in Meta matching).
+ *
+ *   `external_id` keeps its CASE. It is sha256(trim(id)) — no lowercasing — because the server leg
+ *   hashes the same id that way, and the two legs must produce the same bytes or Meta reconciles
+ *   them as two different people (infinite.fast `meta-advanced-matching.mjs`, rule 1).
+ *
+ *   CONSENT GOVERNS IT, checked at CALL time (ported from infinite.fast, rule 4): nothing is attached
+ *   for a visitor who denied on this site, or whose browser sends DNT/GPC without a grant, and under
+ *   `--infinite-consent-mode required` nothing is attached until the visitor granted. A revocation
+ *   is honoured on the very next call. See `./meta-browser/consent.ts` for why this reads the
+ *   Infinite runtime's recorded decision rather than adding a gate of its own.
+ *
+ *   It always resolves — true when identity was attached, false otherwise — and never rejects or
+ *   hangs on a missing `fbq` or a missing `crypto.subtle` (an insecure origin), so a caller can chain
+ *   its own `fbq('track', …)` on it without risking a conversion that never fires.
  */
 export const metaProviderAdapter: ProviderAdapter = {
   id: "meta",
@@ -54,7 +81,7 @@ export const metaProviderAdapter: ProviderAdapter = {
     // The pixel id is public and inlined directly into the snippet; no env var to record.
     return []
   },
-  plan(framework, artifact) {
+  plan(framework, artifact, context) {
     const pixelId =
       artifact && typeof artifact === "object" && "pixelId" in artifact ? artifact.pixelId : undefined
     // Absent means OFF. Only an explicit `true` on the artifact installs the accessor, so a
@@ -69,10 +96,17 @@ export const metaProviderAdapter: ProviderAdapter = {
       return { assumptions: [], blockers: [pixelError], instructions: [] }
     }
 
-    const snippet = buildMetaPixelSnippet(pixelId!, { advancedMatching })
+    const consentMode = context?.artifacts.infinite?.consentMode
+    const snippet = buildMetaPixelSnippet(pixelId!, {
+      advancedMatching,
+      consentMode: consentMode === "required" ? "required" : "not_required"
+    })
     return {
       assumptions: [
         "Meta wiring will use only the public pixelId artifact.",
+        consentMode === "required"
+          ? "Meta click-id capture is ON: when a visitor who has granted consent lands from a Meta ad, the page saves the ad's click id in Meta's own _fbc cookie, even if the pixel itself is blocked. It sends nothing."
+          : "Meta click-id capture is ON: when a visitor lands from a Meta ad, the page saves the ad's click id in Meta's own _fbc cookie, even if the pixel itself is blocked, so a later conversion can be credited to the ad. It sends nothing.",
         advancedMatching
           ? "Manual Advanced Matching is ON: the page will define window.infiniteMetaAdvancedMatch, which hashes the raw email / external id YOUR code passes it. It never reads the page and never runs on its own."
           : "Manual Advanced Matching is OFF (default): the pixel sends no visitor contact details. Turn it on with --meta-advanced-matching on."
@@ -107,11 +141,26 @@ function frameworkInstructionPath(framework: SupportedFramework): string {
 /** The global the customer's own code calls. Stable, documented, and only defined when opted in. */
 export const META_ADVANCED_MATCHING_ACCESSOR = "infiniteMetaAdvancedMatch"
 
-export function buildMetaPixelSnippet(
-  pixelId: string,
-  options: { advancedMatching?: boolean } = {}
-): string {
+export interface MetaPixelSnippetOptions {
+  /** Manual Advanced Matching accessor. Only an explicit `true` installs it. */
+  advancedMatching?: boolean
+  /** The `_fbc` landing capture. Absent = ON; only an explicit `false` leaves it out. */
+  clickIdCapture?: boolean
+  /** The site's Infinite consent mode. Absent = `not_required` (no Infinite consent requirement). */
+  consentMode?: "required" | "not_required"
+}
+
+export function buildMetaPixelSnippet(pixelId: string, options: MetaPixelSnippetOptions = {}): string {
+  const consentMode = options.consentMode === "required" ? "required" : "not_required"
+  // The capture follows the pixel: it is gated only where the site requires consent.
+  const captureGate: MetaBrowserGate =
+    consentMode === "required" ? { kind: "infinite-consent", mode: "required" } : { kind: "none" }
+  // Identity is stricter: it always follows the visitor's recorded decision and DNT/GPC.
+  const matchingGate: MetaBrowserGate = { kind: "infinite-consent", mode: consentMode }
   return [
+    // Capture BEFORE the bootstrap: Meta asks for the click id at landing, and the cookie must
+    // already hold this click when fbevents reads it.
+    ...(options.clickIdCapture === false ? [] : [buildMetaClickIdCaptureScript({ gate: captureGate })]),
     "!function(f,b,e,v,n,t,s)",
     "{if(f.fbq)return;n=f.fbq=function(){n.callMethod?",
     "n.callMethod.apply(n,arguments):n.queue.push(arguments)};",
@@ -123,9 +172,11 @@ export function buildMetaPixelSnippet(
     `fbq('set', 'autoConfig', 'false', ${jsLiteral(pixelId)});`,
     `fbq('init', ${jsLiteral(pixelId)});`,
     "fbq('track', 'PageView');",
-    ...(options.advancedMatching === true ? [buildMetaAdvancedMatchingSnippet(pixelId)] : [])
+    ...(options.advancedMatching === true ? [buildMetaAdvancedMatchingSnippet(pixelId, matchingGate)] : [])
   ].join("\n")
 }
+
+export { META_CLICK_ID_ACCESSOR }
 
 /**
  * Manual Advanced Matching, as an accessor the CUSTOMER calls — never a scraper, never a timer.
@@ -136,9 +187,13 @@ export function buildMetaPixelSnippet(
  * nobody. The emitted source must also stay free of backticks and `${` — for Next it is folded
  * into a String.raw template — and free of a literal `</script>`.
  */
-function buildMetaAdvancedMatchingSnippet(pixelId: string): string {
+function buildMetaAdvancedMatchingSnippet(pixelId: string, gate: MetaBrowserGate): string {
   return [
     "(function () {",
+    `  if (typeof window.${META_ADVANCED_MATCHING_ACCESSOR} === "function") return;`,
+    ...consentAllowsSource(gate)
+      .split("\n")
+      .map((line) => `  ${line}`),
     "  var HEX64 = /^[a-f0-9]{64}$/;",
     "  var EMAIL = /^[^@\\s]+@[^@\\s]+$/;",
     "  function hex(buffer) {",
@@ -160,6 +215,8 @@ function buildMetaAdvancedMatchingSnippet(pixelId: string): string {
     "  // Resolves true when identity was attached, false when there was nothing honest to attach.",
     `  window.${META_ADVANCED_MATCHING_ACCESSOR} = function (identity) {`,
     "    return Promise.resolve().then(function () {",
+    "      // Consent at CALL time, so a revocation a moment ago is honoured.",
+    "      if (!infiniteConsentAllows()) return false;",
     "      if (typeof window.fbq !== 'function') return false;",
     "      var source = identity || {};",
     "      var email = typeof source.email === 'string' ? source.email.trim().toLowerCase() : '';",
@@ -172,6 +229,7 @@ function buildMetaAdvancedMatchingSnippet(pixelId: string): string {
     "          var userData = {};",
     "          if (HEX64.test(d[0])) userData.em = d[0];",
     "          if (HEX64.test(d[1])) userData.external_id = d[1];",
+    "          // Two keys only, ever. Never ph: no phone number reaches Meta from this accessor.",
     "          if (!userData.em && !userData.external_id) return false;",
     `          window.fbq('init', ${jsLiteral(pixelId)}, userData);`,
     "          return true;",

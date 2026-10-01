@@ -23,6 +23,7 @@ import { readSourceFile, walkSourceFiles } from "../harness/scan.js"
 import { checkClickIdCapture } from "./click-id-capture.js"
 import { checkConversionPlacement } from "./conversion-placement.js"
 import { runtimeConversionLanes } from "./contract.js"
+import { checkMetaPixelConfig } from "./meta-pixel-config.js"
 import { checkSilentForms } from "./silent-form.js"
 import { worstState, type SetupCheckResult, type SetupFinding } from "./types.js"
 
@@ -31,11 +32,12 @@ export { parseConversionLanes, runtimeConversionLanes } from "./contract.js"
 export { checkConversionPlacement } from "./conversion-placement.js"
 export { checkSilentForms } from "./silent-form.js"
 export { checkClickIdCapture, isSharedEntry } from "./click-id-capture.js"
+export { checkMetaPixelConfig, metaSourceUnits } from "./meta-pixel-config.js"
 
 export interface SetupChecksReport {
   version: 1
   /** Worst state across every check. */
-  state: "ok" | "problem" | "undetermined"
+  state: "ok" | "info" | "problem" | "undetermined"
   checks: SetupCheckResult[]
   findings: SetupFinding[]
 }
@@ -55,7 +57,8 @@ export function runSetupChecks(appRootAbsolute: string): SetupChecksReport {
   const checks = [
     checkConversionPlacement({ files, lanes: runtimeConversionLanes() }),
     checkSilentForms({ files }),
-    checkClickIdCapture({ files })
+    checkClickIdCapture({ files }),
+    checkMetaPixelConfig({ files })
   ]
   const findings = checks.flatMap((check) => check.findings)
   return { version: 1, state: worstState(findings), checks, findings }

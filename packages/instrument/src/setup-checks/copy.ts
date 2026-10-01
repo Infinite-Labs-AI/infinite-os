@@ -8,6 +8,8 @@
 // The `likely` findings lead with "Worth checking:" and say plainly what would make them wrong. A
 // check that accuses confidently and is wrong once gets muted forever, and a muted check is worse
 // than no check at all.
+import { maskPixelId } from "../meta-live/copy.js"
+
 import type { ConversionLane } from "./contract.js"
 
 export function describeLane(lane: ConversionLane): string {
@@ -160,6 +162,17 @@ export function clickIdPresentMessage(input: { file: string }): string {
   )
 }
 
+/** The managed `_fbc` capture is installed in a shared entry. */
+export function clickIdManagedCaptureMessage(input: { file: string }): string {
+  return (
+    `infinite-tag's managed click-id capture runs in ${input.file}, a shared entry that loads on ` +
+    `every route. On the page a visitor lands on it saves the ad's \`fbclid\` into Meta's own ` +
+    `\`_fbc\` cookie — last click wins — even when the pixel itself is blocked or still waiting, so ` +
+    `a later conversion can still be credited to the ad. That is the setup being right; it is not ` +
+    `proof a cookie was written on your live site.`
+  )
+}
+
 export function clickIdUndeterminedMessage(): string {
   return (
     `No \`fbq('init', …)\` was found in this repo's source, so click-id capture could not be ` +
@@ -167,4 +180,69 @@ export function clickIdUndeterminedMessage(): string {
     `from here — this is "not checked", not "not needed". If you run Meta ads, confirm by hand that ` +
     `the pixel is present on your landing pages and not only on the pages that convert.`
   )
+}
+
+/** A pixel infinite-tag installed without the automatic-events opt-out before init. */
+export function metaAutoConfigManagedOnMessage(input: { pixelId: string; file: string; reason: string }): string {
+  return (
+    `The Meta pixel infinite-tag installed in ${input.file} (pixel ${maskPixelId(input.pixelId)}) ` +
+    `${autoConfigReasonText(input.reason)}. With automatic events on, Meta's pixel sends button ` +
+    `clicks and page details from your visitors' pages on its own, which infinite-tag never turns ` +
+    `on. This is infinite-tag's own managed code: re-run \`npx infinite-tag install\` to restore it, ` +
+    `and do not hand-edit the managed block.`
+  )
+}
+
+/** A pixel the site already had, with automatic events on. Information, never an edit. */
+export function metaAutoConfigAdoptedOnMessage(input: { pixelId: string; file: string; reason: string }): string {
+  return (
+    `Worth checking: the Meta pixel already on your site in ${input.file} (pixel ` +
+    `${maskPixelId(input.pixelId)}) ${autoConfigReasonText(input.reason)}, so Meta collects automatic ` +
+    `events (button clicks, page details) from your pages. infinite-tag leaves pixels it did not ` +
+    `install untouched. To turn them off, add \`fbq('set', 'autoConfig', false, '<pixel id>')\` ` +
+    `before that pixel's \`fbq('init', …)\`. Automatic events are not what improves matching; ` +
+    `Manual Advanced Matching is.`
+  )
+}
+
+export function metaAutoConfigOffMessage(input: { pixelId: string; file: string }): string {
+  return (
+    `The Meta pixel in ${input.file} (pixel ${maskPixelId(input.pixelId)}) switches automatic events ` +
+    `off before init. That is the setup being right in the source; it is not a check of the live page.`
+  )
+}
+
+export function metaAutoConfigUndeterminedMessage(input: { pixelId?: string; file?: string; reason: string }): string {
+  if (!input.pixelId || !input.file) {
+    return (
+      `No \`fbq('init', …)\` was found in this repo's source, so Meta's automatic events could not ` +
+      `be checked. A pixel loaded by a tag manager or the hosting edge is invisible from here — this ` +
+      `is "not checked", not "off".`
+    )
+  }
+  return (
+    `Could not tell whether Meta's automatic events are off for pixel ${maskPixelId(input.pixelId)} ` +
+    `in ${input.file}: ${input.reason === "autoconfig_unreadable" ? "its autoConfig call does not use literal values" : "its init could not be read"}. ` +
+    `This is "not checked", not "off".`
+  )
+}
+
+export function metaSnippetCensusMessage(input: { file: string; issues: readonly string[] }): string {
+  return (
+    `infinite-tag's managed Meta block in ${input.file} is not the shape it writes: ` +
+    `${input.issues.join("; ")}. A duplicated init double-counts every page view, two captures or ` +
+    `two matching accessors disagree with each other, and a capture after init lets the pixel read ` +
+    `\`_fbc\` before this click is in it. Re-run \`npx infinite-tag install\` to rewrite the block.`
+  )
+}
+
+function autoConfigReasonText(reason: string): string {
+  switch (reason) {
+    case "opted_in":
+      return "explicitly turns Meta's automatic events ON (`autoConfig` true)"
+    case "opt_out_after_init":
+      return "turns automatic events off only AFTER `init`, which Meta ignores"
+    default:
+      return "has no `fbq('set', 'autoConfig', false, …)` before `init`, so Meta's automatic events are ON by default"
+  }
 }
