@@ -1,5 +1,13 @@
 import type { ChatProgressEvent } from "@infinite-os/llm-controller";
-import type { InteractiveWorkspaceRequestV1 } from "@infinite-os/types";
+import type {
+  InteractiveWorkspaceRequestV1,
+  ToolViewFrameV1
+} from "@infinite-os/types";
+import {
+  decodeAnswerView,
+  decodeToolViewFrame,
+  isToolViewFrameData
+} from "./answer-view-decode.js";
 import type {
   InSessionConfirmationAction,
   InSessionConfirmationDetail
@@ -75,12 +83,19 @@ export interface DesktopTurnSourceClient {
 }
 
 export interface DesktopTurnSource {
+  /**
+   * `onView` receives each decoded `tool.view` frame (sent only after the
+   * client negotiated `result.view.v1`). A `tool.view` frame never becomes a
+   * `ChatProgressEvent`; one that does not decode is dropped, and the turn's
+   * text answer stays the answer.
+   */
   runTurn(
     message: string,
     sessionId: string | undefined,
     onEvent: (event: ChatProgressEvent) => void,
     signal: AbortSignal,
-    interactive?: InteractiveWorkspaceRequestV1
+    interactive?: InteractiveWorkspaceRequestV1,
+    onView?: (frame: ToolViewFrameV1) => void
   ): Promise<DesktopTurnRunResult>;
 }
 
@@ -94,6 +109,9 @@ export function bridgeFrameToChatEvent(
 ): ChatProgressEvent | null {
   switch (frame.kind) {
     case "progress": {
+      // A `tool.view` frame is a view for `onView`, never a chat event: the
+      // shell would otherwise record it as an unknown typed event.
+      if (isToolViewFrameData(frame.data)) return null;
       // Codex: `data` is already a typed ChatProgressEvent — pass it through
       // untouched so no shape drifts on the way to the shell.
       if (isTypedEvent(frame.data)) {
@@ -146,7 +164,7 @@ export function createDesktopTurnSource(
   client: DesktopTurnSourceClient
 ): DesktopTurnSource {
   return {
-    async runTurn(message, sessionId, onEvent, signal, interactive) {
+    async runTurn(message, sessionId, onEvent, signal, interactive, onView) {
       let terminalSessionId = extractSessionId(undefined);
       let pendingConfirmations: InSessionConfirmationAction[] = [];
       // At most ONE `message.complete` per turn, first one wins. Both planes can
@@ -166,6 +184,11 @@ export function createDesktopTurnSource(
           ...(interactive ? { interactive } : {})
         },
         (frame) => {
+          if (frame.kind === "progress" && isToolViewFrameData(frame.data)) {
+            const toolView = decodeToolViewFrame(frame.data);
+            if (toolView) onView?.(toolView);
+            return;
+          }
           if (frame.kind === "done") {
             terminalSessionId =
               readSessionId(frame) ?? terminalSessionId;
@@ -306,11 +329,16 @@ function parsePendingConfirmations(
       suppliedDetails.length > 0
         ? suppliedDetails
         : buildGenericConfirmationDetails(value.input);
+    // The approval view (sent only after `result.view.v1` was accepted). One
+    // that does not decode is left off; the redacted summary + details above
+    // still carry the card.
+    const view = decodeAnswerView(value.view);
     pending.push({
       turnId: turnId ?? "",
       confirmationHandle,
       summary,
-      confirmationDetails
+      confirmationDetails,
+      ...(view ? { view } : {})
     });
   }
   if (pending.length > 0 && !turnId) {

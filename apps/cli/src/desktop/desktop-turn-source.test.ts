@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ChatProgressEvent } from "@infinite-os/llm-controller";
+import type { ToolViewFrameV1 } from "@infinite-os/types";
 import {
   bridgeFrameToChatEvent,
   createDesktopTurnSource,
@@ -273,9 +274,166 @@ describe("createDesktopTurnSource", () => {
       src.runTurn("do it", undefined, () => {}, new AbortController().signal)
     ).rejects.toThrow(/turn id/i);
   });
+
+  it("routes a tool.view frame to onView and never emits it as a ChatProgressEvent", async () => {
+    const view = approvalView();
+    const toolView = {
+      type: "tool.view",
+      stage: "tool",
+      message: "Pause",
+      viewId: "view-1",
+      name: "pause_entity",
+      view
+    };
+    const client = fakeClient({
+      sessionCapable: true,
+      frames: [
+        { kind: "progress", data: { type: "tool.start", name: "pause_entity" } },
+        { kind: "progress", data: toolView },
+        { kind: "done", message: "ok", data: { turnId: "turn-4" }, actionCalls: [] }
+      ]
+    });
+    const events: ChatProgressEvent[] = [];
+    const views: ToolViewFrameV1[] = [];
+    await createDesktopTurnSource(client).runTurn(
+      "pause it",
+      undefined,
+      (e) => events.push(e),
+      new AbortController().signal,
+      undefined,
+      (frame) => views.push(frame)
+    );
+    expect(views).toEqual([toolView]);
+    expect(events.map((e) => (e as { type?: string }).type)).toEqual([
+      "tool.start",
+      "message.complete"
+    ]);
+  });
+
+  it("drops an undecodable tool.view frame: no onView call and no ChatProgressEvent", async () => {
+    const client = fakeClient({
+      sessionCapable: true,
+      frames: [
+        {
+          kind: "progress",
+          data: {
+            type: "tool.view",
+            stage: "tool",
+            message: "Pause",
+            viewId: "view-2",
+            name: "pause_entity",
+            view: approvalView({ kind: "carousel" })
+          }
+        },
+        { kind: "done", message: "ok", data: { turnId: "turn-5" }, actionCalls: [] }
+      ]
+    });
+    const events: ChatProgressEvent[] = [];
+    const views: ToolViewFrameV1[] = [];
+    await createDesktopTurnSource(client).runTurn(
+      "pause it",
+      undefined,
+      (e) => events.push(e),
+      new AbortController().signal,
+      undefined,
+      (frame) => views.push(frame)
+    );
+    expect(views).toEqual([]);
+    expect(events.map((e) => (e as { type?: string }).type)).toEqual([
+      "message.complete"
+    ]);
+  });
+
+  it("keeps a pending call's decoded view, and leaves an undecodable one off", async () => {
+    const view = approvalView();
+    const client = fakeClient({
+      sessionCapable: true,
+      frames: [
+        {
+          kind: "done",
+          message: "queued",
+          data: { turnId: "turn-6" },
+          actionCalls: [
+            {
+              status: "requires_confirmation",
+              confirmationHandle: "h6",
+              actionId: "pause_entity",
+              summary: "Pause ad Hook B",
+              view
+            },
+            {
+              status: "requires_confirmation",
+              confirmationHandle: "h7",
+              actionId: "pause_entity",
+              summary: "Pause ad Hook C",
+              view: approvalView({ v: 2 })
+            }
+          ]
+        }
+      ]
+    });
+    const r = await createDesktopTurnSource(client).runTurn(
+      "pause both",
+      undefined,
+      () => {},
+      new AbortController().signal
+    );
+    expect(r.pendingConfirmations).toHaveLength(2);
+    expect(r.pendingConfirmations![0]!.view).toEqual(view);
+    expect(r.pendingConfirmations![0]!.view?.approval?.confirmLabel).toBe("Pause");
+    expect(r.pendingConfirmations![1]!).not.toHaveProperty("view");
+    // The existing redacted fields still ride alongside the view.
+    expect(r.pendingConfirmations![0]!).toMatchObject({
+      turnId: "turn-6",
+      confirmationHandle: "h6",
+      summary: "Pause ad Hook B"
+    });
+  });
 });
 
+// Synthetic approval view written from the contract (open-core: no real data).
+function approvalView(overrides: Record<string, unknown> = {}) {
+  return {
+    v: 1,
+    kind: "change",
+    tool: "pause_entity",
+    title: "Pause ad",
+    state: "needs_yes",
+    asOf: null,
+    scope: { workspaceName: "Example Co", crossWorkspace: false },
+    caveats: [],
+    approval: {
+      kind: "card",
+      turnId: "turn-6",
+      handle: "h6",
+      title: "Pause ad",
+      summary: null,
+      confirmLabel: "Pause",
+      dismissLabel: "Dismiss",
+      rows: [{ label: "Ad", value: "Hook B" }]
+    },
+    body: {
+      target: { kind: "ad", label: "Hook B" },
+      rows: [{ label: "Status", before: "Active", after: "Paused" }],
+      warnings: []
+    },
+    ...overrides
+  };
+}
+
 describe("bridgeFrameToChatEvent", () => {
+  it("never maps a tool.view frame, decodable or not, to a ChatProgressEvent", () => {
+    expect(
+      bridgeFrameToChatEvent({
+        kind: "progress",
+        data: { type: "tool.view", viewId: "v", name: "n", view: approvalView() }
+      })
+    ).toBeNull();
+    expect(
+      bridgeFrameToChatEvent({ kind: "progress", data: { type: "tool.view" } })
+    ).toBeNull();
+  });
+
   it("passes a typed Codex progress event through unchanged (identity)", () => {
     const data = { type: "tool.complete", stage: "tool", name: "run_x" };
     const frame: BridgeFrame = { kind: "progress", data };
