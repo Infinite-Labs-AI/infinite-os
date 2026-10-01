@@ -944,3 +944,83 @@ describe("the outcome helper module format (TS vs JS)", () => {
     })
   })
 })
+
+// THE SERVER HALF OF infinite.fast's 2026-09-29 "first click shadowed later ones" incident (06b2ce8).
+// A browser can hold two _fbc cookies — a host-only one and Meta's registrable-domain one — and
+// lists the OLDER first. Reading the first-listed value sends Meta the oldest ad click, so Meta
+// credits the wrong ad. infinite.fast's reader (scripts/lib/meta-click-id.mjs rule 3 at 9f65b47)
+// picks the newest by the creation time inside Meta's format, skipping values without Meta's shape.
+// Run against BOTH emitted variants: the .ts helper and the type-stripped .js helper.
+describe.each([
+  { variant: "ts", language: "ts" as const, extension: "ts" as const },
+  { variant: "js", language: "js" as const, extension: "js" as const }
+])("adMatchFromRequest picks the newest ad click ($variant helper, executed)", ({ language, extension }) => {
+  const FIRST_CLICK = "fb.1.1790645529960.TEST_NOT_REAL_FIRST"
+  const SECOND_CLICK = "fb.1.1790645538268.TEST_NOT_REAL_SECOND"
+  type AdMatchHelper = {
+    adMatchFromRequest: (request: { headers: unknown }, hashed?: { em?: string }) => Record<string, string>
+  }
+  const helper = async (): Promise<AdMatchHelper> =>
+    (await loadGenerated(outcomeHelperSource(BUILD, { language, extension }), extension)) as AdMatchHelper
+  const withCookie = (cookie: string) => ({ headers: new Headers({ cookie, "user-agent": "ua" }) })
+
+  it("sends the SECOND click when the older first click is listed first (the live 09-29 capture)", async () => {
+    const block = (await helper()).adMatchFromRequest(withCookie(`_fbc=${FIRST_CLICK}; _fbc=${SECOND_CLICK}`))
+    expect(block.fbc).toBe(SECOND_CLICK)
+    expect(block.fbc).not.toBe(FIRST_CLICK)
+  })
+
+  it("picks by timestamp, not by position: the same answer whichever order the browser lists them", async () => {
+    const block = (await helper()).adMatchFromRequest(withCookie(`_fbc=${SECOND_CLICK}; _fbc=${FIRST_CLICK}`))
+    expect(block.fbc).toBe(SECOND_CLICK)
+  })
+
+  it("a malformed first _fbc cannot hide a valid later one, and is never forwarded itself", async () => {
+    const bad = "fb.1.notms.IwAR0bad"
+    const h = await helper()
+    expect(h.adMatchFromRequest(withCookie(`_fbc=${bad}; _fbc=${FIRST_CLICK}`)).fbc).toBe(FIRST_CLICK)
+    // Negative: only malformed values → no fbc at all, never the bad bytes.
+    const onlyBad = h.adMatchFromRequest(withCookie(`_fbc=${bad}; _fbc=fb.1.1790645538268.has space`))
+    expect(onlyBad).not.toHaveProperty("fbc")
+    expect(JSON.stringify(onlyBad)).not.toContain("IwAR0bad")
+  })
+
+  it("keeps the fbclid byte for byte (Meta's _fbc is case-sensitive), and ties keep the first listed", async () => {
+    const h = await helper()
+    const mixedCase = "fb.2.1790645538268.IwAR0aBc-DeF_9.x"
+    expect(h.adMatchFromRequest(withCookie(`_fbc=${mixedCase}`)).fbc).toBe(mixedCase)
+    const tieA = "fb.1.1790645538268.TEST_NOT_REAL_A"
+    const tieB = "fb.1.1790645538268.TEST_NOT_REAL_B"
+    expect(h.adMatchFromRequest(withCookie(`_fbc=${tieA}; _fbc=${tieB}`)).fbc).toBe(tieA)
+  })
+
+  it("reads a plain-object headers bag (Vercel Node functions, Express) as well as Headers", async () => {
+    const block = (await helper()).adMatchFromRequest(
+      {
+        headers: {
+          Cookie: `_fbp=fb.1.1755500000123.987654321; _fbc=${FIRST_CLICK}; _fbc=${SECOND_CLICK}`,
+          "user-agent": VECTORS.userAgent,
+          "x-forwarded-for": `${VECTORS.clientIp}, 10.0.0.1`
+        }
+      },
+      { em: hashInfiniteEmail("founder@example.com") }
+    )
+    expect(block).toEqual({
+      em: hashInfiniteEmail("founder@example.com"),
+      fbc: SECOND_CLICK,
+      fbp: "fb.1.1755500000123.987654321",
+      client_ip_address: VECTORS.clientIp,
+      client_user_agent: VECTORS.userAgent
+    })
+  })
+
+  it("_fbp is a browser id, not a click: first listed, and dropped when it lacks Meta's shape", async () => {
+    const h = await helper()
+    expect(
+      h.adMatchFromRequest(withCookie("_fbp=fb.1.1755500000123.111; _fbp=fb.1.1790645538268.222")).fbp
+    ).toBe("fb.1.1755500000123.111")
+    // Negative: an oversized or malformed _fbp is absent, never forwarded.
+    expect(h.adMatchFromRequest(withCookie(`_fbp=fb.1.1725350400000.${"A".repeat(513)}`))).not.toHaveProperty("fbp")
+    expect(h.adMatchFromRequest(withCookie("_fbp=garbage"))).not.toHaveProperty("fbp")
+  })
+})

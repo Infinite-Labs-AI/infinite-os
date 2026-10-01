@@ -57,6 +57,17 @@ Meta Manual Advanced Matching, as a customer-controlled option that is OFF by de
   value that is not a digest never reaches `fbq`.
 - **The privacy disclosure notice names the lane** when, and only when, it was actually installed.
 
+Fixes ported from infinite.fast: ways a customer site silently collected the wrong data.
+
+- **The server lane now sends Meta the visitor's newest ad click, not their oldest.** A browser can
+  hold two `_fbc` click-id cookies (one per domain scope) and lists the older one first;
+  `adMatchFromRequest` used to forward whichever came first, so Meta credited an earlier ad than the
+  one the visitor last clicked. It now picks the newest click by the creation time inside Meta's
+  cookie format, skips values that do not have Meta's shape (so a broken first cookie can no longer
+  hide a good one), and reads a plain-object `req.headers` (Vercel Node functions, Express) as well
+  as `Headers`. `_fbp` is read as before (first listed), and dropped when it is not in Meta's shape.
+  Same rules as infinite.fast, fixed there on 29 Sep.
+
 ## 0.11.0 — 2026-09-21
 
 The Meta pixel's `verify` lane now checks DELIVERY, not just that a snippet is on the page.
