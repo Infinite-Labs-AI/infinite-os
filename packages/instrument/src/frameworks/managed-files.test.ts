@@ -365,7 +365,7 @@ describe.each(frameworks)("$name assembled module with every provider, executed"
     expect(loaded.some((src) => src.includes("googletagmanager.com/gtag/js?id=G-TEST123"))).toBe(true)
     // PostHog: init queued for array.js.
     const posthog = window.posthog as { _i: unknown[][] }
-    expect(plain(posthog._i)[0]).toEqual(["phc_test", { api_host: "https://us.i.posthog.com", defaults: "2025-05-24" }, "posthog"])
+    expect((plain(posthog._i) as unknown[][])[0]).toEqual(["phc_test", { api_host: "https://us.i.posthog.com", defaults: "2025-05-24" }, "posthog"])
     expect(loaded).toContain("https://us-assets.i.posthog.com/static/array.js")
     // X
     expect(typeof window.twq).toBe("function")
