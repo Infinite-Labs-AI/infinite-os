@@ -46,6 +46,7 @@ import {
   type HomeInventoryTool
 } from "./home-inventory.js";
 import { isInfiniteTurnBusy } from "./status-indicator.js";
+import { createTurnAbort, ctrlCAction, turnStoppedLine, type TurnAbort } from "./turn-abort.js";
 import { inkTranscriptRowCount, InkTranscriptApp, useInfiniteTranscriptClock } from "./transcript-app.js";
 
 /**
@@ -205,7 +206,15 @@ export interface InkInteractiveSessionAppProps {
   initialInputHistory?: readonly string[];
   initialMessages?: readonly Msg[];
   onRememberInput?: (line: string) => void;
-  onSubmitLine(line: string, onProgress: (event: ChatProgressEvent) => void): Promise<InkInteractiveLineResult>;
+  /**
+   * Run one submitted line. `signal` aborts when the user stops the turn (Esc,
+   * or Ctrl-C while a turn runs); only honoured when `turnStoppable` is set.
+   */
+  onSubmitLine(
+    line: string,
+    onProgress: (event: ChatProgressEvent) => void,
+    signal: AbortSignal
+  ): Promise<InkInteractiveLineResult>;
   /**
    * Resolve an in-session write confirmation surfaced by a turn's
    * `pendingConfirmations`. Calls the Desktop client's `confirm(...)` for the
@@ -220,6 +229,12 @@ export interface InkInteractiveSessionAppProps {
   status?: readonly string[] | (() => readonly string[]);
   theme?: Theme;
   title?: string;
+  /**
+   * The caller honours `onSubmitLine`'s abort signal, so Esc stops the running
+   * turn and Ctrl-C stops it instead of quitting. Off (the local path, whose
+   * turns cannot be aborted): Esc does nothing and Ctrl-C quits, as before.
+   */
+  turnStoppable?: boolean;
 }
 
 export interface InkInteractiveSessionRunOptions extends InkInteractiveSessionAppProps {
@@ -347,10 +362,14 @@ export function InkInteractiveSessionApp({
   requiresSelection,
   status = [],
   theme,
-  title
+  title,
+  turnStoppable = false
 }: InkInteractiveSessionAppProps) {
   const app = useApp();
   const t = theme ?? resolveTheme();
+  // One turn-abort per session: each turn arms a fresh signal (Esc / Ctrl-C
+  // stop it) and disarms it when the turn settles.
+  const [turnAbort] = useState<TurnAbort>(() => createTurnAbort());
   const [busy, setBusy] = useState(false);
   const [busyStartedAt, setBusyStartedAt] = useState<number | undefined>(undefined);
   const [completionIndex, setCompletionIndex] = useState(0);
@@ -563,6 +582,7 @@ export function InkInteractiveSessionApp({
     // Freeze the active-project label now and stamp it onto this turn's
     // answers, so switching projects later never relabels them.
     const turnTitle = getAgentTitle?.();
+    const signal = turnAbort.start();
 
     try {
       const result = await onSubmitLine(line, (event) => {
@@ -588,7 +608,7 @@ export function InkInteractiveSessionApp({
           // through `progressResult` and gate on it like the branch below.
           appendMessages(stampAgentTitle(progressResult.finalMessages, getAgentTitle?.() ?? turnTitle));
         }
-      });
+      }, signal);
 
       if (result.exit) {
         app.exit();
@@ -627,17 +647,22 @@ export function InkInteractiveSessionApp({
         setPendingConfirmActions(result.pendingConfirmations);
       }
     } catch (error) {
+      // A stopped turn rejects with whatever the transport makes of the abort
+      // (the desktop client maps it to a "detached" error), so read the stop
+      // from the signal's reason, not from the rejection.
+      const stoppedLine = turnStoppedLine(signal.aborted ? signal.reason : error);
       appendMessages([{
         kind: "slash",
         role: "system",
-        text: `error: ${error instanceof Error ? error.message : String(error)}`
+        text: stoppedLine ?? `error: ${error instanceof Error ? error.message : String(error)}`
       }]);
     } finally {
+      turnAbort.end(signal);
       turnController.reset();
       setBusy(false);
       setBusyStartedAt(undefined);
     }
-  }, [app, appendMessages, getAgentTitle, onSubmitLine]);
+  }, [app, appendMessages, getAgentTitle, onSubmitLine, turnAbort]);
 
   // ── In-chat /connect wizard (#20) ───────────────────────────────────────────
   // The final "Connect <Provider> / Cancel" step. Kept SEPARATE from
@@ -1033,7 +1058,9 @@ export function InkInteractiveSessionApp({
           ? "choose with up/down, Enter to select"
           : pendingOperatorLine
             ? "type confirm to continue, anything else to cancel"
-            : promptPlaceholder;
+            : busy && turnStoppable
+              ? "esc to stop"
+              : promptPlaceholder;
 
   return (
     <Box flexDirection="column" width={columns}>
@@ -1119,6 +1146,8 @@ export function InkInteractiveSessionApp({
         row={composerRow}
         selectionActive={Boolean(pendingSelection)}
         theme={t}
+        turnAbort={turnAbort}
+        turnStoppable={turnStoppable}
         value={activeFieldComposer ? connectComposerValue : inputValue}
         valueIsMasked={Boolean(activeFieldComposer)}
         selection={activeFieldComposer ? null : inputSelection}
@@ -1978,6 +2007,8 @@ function InkLineInput({
   selection,
   selectionActive,
   theme,
+  turnAbort,
+  turnStoppable,
   value,
   valueIsMasked,
   width
@@ -2018,6 +2049,8 @@ function InkLineInput({
   selection?: ComposerSelection | null;
   selectionActive: boolean;
   theme: Theme;
+  turnAbort: TurnAbort;
+  turnStoppable: boolean;
   value: string;
   valueIsMasked?: boolean;
   width: number;
@@ -2038,7 +2071,17 @@ function InkLineInput({
         onConnectCancel();
         return;
       }
+      // A running turn is stopped, not the session: Ctrl-C quits only when no
+      // turn is running.
+      if (turnStoppable && ctrlCAction(turnAbort) === "stopped") {
+        return;
+      }
       app.exit();
+      return;
+    }
+    // Esc stops the running turn. It never approves or declines anything.
+    if (busy && key.escape && turnStoppable) {
+      turnAbort.stop("esc");
       return;
     }
     // Field-collection loop: every printable keystroke is routed to the wizard's

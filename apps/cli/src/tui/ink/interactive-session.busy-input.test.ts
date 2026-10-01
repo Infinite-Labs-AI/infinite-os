@@ -73,6 +73,47 @@ describe("Ink busy input handling", () => {
     expect(source).not.toMatch(/if \(busy\) {\s*return;\s*}/);
   });
 
+  it.skipIf(process.env.CI === "true")("esc stops the running turn, ctrl-c stops the next one without quitting", { timeout: 30_000 }, async () => {
+    const input = ttyInput();
+    const output = ttyOutput();
+    const errorOutput = ttyOutput();
+    const signals: AbortSignal[] = [];
+
+    const session = runInkInteractiveSession({
+      columns: 80,
+      errorOutput,
+      input,
+      output,
+      title: "Infinite TUI",
+      turnStoppable: true,
+      onSubmitLine(_line, _onProgress, signal) {
+        signals.push(signal);
+        // Like the desktop client: the stop surfaces as a transport error.
+        return new Promise<InkInteractiveLineResult>((_resolve, reject) => {
+          signal.addEventListener("abort", () => reject(new Error("Detached from the Desktop turn.")), { once: true });
+        });
+      }
+    });
+
+    await waitFor(() => output.text().includes("ready"), 4_000, output.text);
+    await sendKeys(input, "first\r");
+    await waitFor(() => signals.length === 1 && output.text().includes("esc to stop"), 4_000, output.text);
+    await sendRaw(input, "\x1b");
+    await waitFor(() => output.text().includes("■ Stopped."), 4_000, output.text);
+    expect(signals[0]!.aborted).toBe(true);
+    expect(output.text()).not.toContain("Detached from the Desktop turn.");
+
+    await sendKeys(input, "second\r");
+    await waitFor(() => signals.length === 2, 4_000, output.text);
+    await sendRaw(input, "\x03");
+    await waitFor(() => signals[1]!.aborted, 4_000, output.text);
+
+    // Not busy any more: ctrl-c now quits the session.
+    await waitFor(() => output.text().lastIndexOf("ready") > output.text().lastIndexOf("esc to stop"), 4_000, output.text);
+    await sendRaw(input, "\x03");
+    await session;
+  });
+
   it.skipIf(process.env.CI === "true")("lets arrow-key choices turn a line into a follow-up command before confirmation", { timeout: 30_000 }, async () => {
     const input = ttyInput();
     const output = ttyOutput();
