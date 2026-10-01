@@ -29,6 +29,8 @@
  * `renderConfirmationCard` writes them.
  */
 
+import type { AnswerViewV1, ApprovalFieldAnswerV1 } from "@infinite-os/types";
+
 /** Upper bound on the summary length echoed into the TTY prompt (reference parity). */
 const MAX_CONFIRMATION_VALUE_CHARS = 240;
 const TRUNCATION_SUFFIX = " ... [truncated]";
@@ -48,6 +50,12 @@ export interface InSessionConfirmationAction {
   confirmationHandle: string;
   summary: string;
   confirmationDetails: InSessionConfirmationDetail[];
+  /**
+   * The decoded approval view (`done.actionCalls[i].view`), present only when
+   * the turn accepted `result.view.v1` and the view decoded. Its strings are
+   * NOT redacted or scrubbed here: renderers scrub every one before printing.
+   */
+  view?: AnswerViewV1;
 }
 
 /** The TTY seam: readiness flags, a line prompt, and a transcript writer. */
@@ -64,6 +72,8 @@ export interface InSessionConfirmationClient {
     turnId: string;
     confirmationHandle: string;
     decision: "approve" | "decline";
+    /** Answers to the card's `approval.fields` (needs `confirm.fields.v1`). */
+    fields?: Record<string, ApprovalFieldAnswerV1>;
     signal?: AbortSignal;
   }): Promise<unknown>;
 }

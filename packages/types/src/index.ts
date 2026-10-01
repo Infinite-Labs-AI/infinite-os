@@ -43,6 +43,7 @@ export type InteractiveFeature =
   | "actions.continuation.v1";
 
 export * from "./interactive-task.js";
+export * from "./answer-view.js";
 
 /** Client request metadata. Cwd does not grant filesystem access. */
 export interface InteractiveWorkspaceRequestV1 {

@@ -560,4 +560,149 @@ describe("createDesktopSessionTurnRunner", () => {
       })
     ).rejects.toMatchObject({ code: "desktop_confirmation_invalid" });
   });
+
+  it("runner.turn(line, onProgress, signal, onView) forwards onView to the turn-source", async () => {
+    const runTurn = vi.fn(async () => ({}));
+    const client = {
+      sessionCapable: true,
+      status: vi.fn(async () => statusFor({ rev: "rev-1" })),
+      turn: vi.fn(),
+      confirm: vi.fn()
+    } as unknown as DesktopAppClient;
+    const runner = createDesktopSessionTurnRunner({
+      resolveBridge: () => ({ descriptor: { bootId: "boot-1" }, client }),
+      createTurnSource: () => ({ runTurn })
+    });
+    const onProgress = vi.fn();
+    const onView = vi.fn();
+    const signal = new AbortController().signal;
+
+    await runner.turn("hello", onProgress, signal, onView);
+
+    expect(runTurn).toHaveBeenCalledTimes(1);
+    expect(runTurn.mock.calls[0]).toEqual([
+      "hello",
+      undefined,
+      onProgress,
+      signal,
+      undefined,
+      onView
+    ]);
+  });
+
+  it("delivers a real client's tool.view frame to onView, and keeps a pending call's view", async () => {
+    const view = changeView();
+    const toolView = {
+      type: "tool.view",
+      stage: "tool",
+      message: "Pause ad",
+      viewId: "view-1",
+      name: "pause_entity",
+      view
+    };
+    const client = {
+      sessionCapable: true,
+      status: vi.fn(async () => statusFor({ rev: "rev-1" })),
+      async turn(
+        _input: unknown,
+        onProgress: (frame: { data: unknown }) => void
+      ) {
+        onProgress({ data: { type: "tool.start", name: "pause_entity" } });
+        onProgress({ data: toolView });
+        return {
+          turnId: "turn-1",
+          message: "Ready to pause.",
+          actionCalls: [
+            {
+              status: "requires_confirmation",
+              confirmationHandle: "h1",
+              actionId: "pause_entity",
+              summary: "Pause ad Hook B",
+              view
+            }
+          ]
+        };
+      },
+      confirm: vi.fn()
+    } as unknown as DesktopAppClient;
+    const runner = createDesktopSessionTurnRunner({
+      resolveBridge: () => ({ descriptor: { bootId: "boot-1" }, client })
+    });
+    const events: ChatProgressEvent[] = [];
+    const views: unknown[] = [];
+
+    const outcome = await runner.turn(
+      "pause it",
+      (event) => events.push(event),
+      undefined,
+      (frame) => views.push(frame)
+    );
+
+    expect(views).toEqual([toolView]);
+    expect(
+      events.some((event) => (event as { type?: string }).type === "tool.view")
+    ).toBe(false);
+    expect(outcome.busy).not.toBe(true);
+    expect(
+      !outcome.busy && outcome.pendingConfirmations?.[0]?.view
+    ).toEqual(view);
+  });
+
+  it("runner.confirm({ …, fields }) forwards fields and returns the client's raw confirm JSON", async () => {
+    const raw = {
+      ok: true,
+      receipt: "Paused ad “Hook B”",
+      view: { ...changeView(), state: "done" }
+    };
+    const confirm = vi.fn(async () => raw);
+    const client = {
+      sessionCapable: true,
+      status: vi.fn(async () => statusFor({ rev: "rev-1" })),
+      turn: vi.fn(async () => ({ message: "ok", actionCalls: [] })),
+      confirm
+    } as unknown as DesktopAppClient;
+    const runner = createDesktopSessionTurnRunner({
+      resolveBridge: () => ({ descriptor: { bootId: "boot-1" }, client })
+    });
+    await runner.turn("hello");
+
+    const result = await runner.confirm({
+      turnId: "turn-1",
+      confirmationHandle: "h1",
+      decision: "approve",
+      fields: { adSetBudget: { text: "30" } }
+    });
+
+    expect(confirm).toHaveBeenCalledWith({
+      turnId: "turn-1",
+      confirmationHandle: "h1",
+      decision: "approve",
+      fields: { adSetBudget: { text: "30" } }
+    });
+    // The same raw shape onConfirmAction hands to the receipt renderer: no wrapper.
+    expect(result).toBe(raw);
+  });
 });
+
+// Synthetic change view written from the contract (open-core: no real data).
+function changeView() {
+  return {
+    v: 1,
+    kind: "change",
+    tool: "pause_entity",
+    title: "Pause ad",
+    state: "needs_yes",
+    asOf: null,
+    scope: { workspaceName: "Example Co", crossWorkspace: false },
+    caveats: [],
+    approval: {
+      kind: "card",
+      title: "Pause ad",
+      summary: null,
+      confirmLabel: "Pause",
+      dismissLabel: "Dismiss",
+      rows: [{ label: "Ad", value: "Hook B" }]
+    },
+    body: { target: { kind: "ad", label: "Hook B" }, rows: [], warnings: [] }
+  };
+}

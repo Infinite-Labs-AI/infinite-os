@@ -19,8 +19,10 @@ import {
   type DesktopBridgeDescriptor
 } from "./desktop-app-client.js";
 import {
+  CONFIRM_FIELDS_CAPABILITY,
   GENERAL_MARKETING_PROFILE,
   INTERACTIVE_WORKSPACE_CAPABILITY,
+  RESULT_VIEW_CAPABILITY,
 } from "@infinite-os/types";
 
 const SERVICE = "infinite-desktop-cmdl";
@@ -1065,7 +1067,405 @@ describe("desktop bridge HTTP client", () => {
   });
 });
 
+// Synthetic receipt view written from the contract (open-core: no real data).
+function receiptView(overrides: Record<string, unknown> = {}) {
+  return {
+    v: 1,
+    kind: "change",
+    tool: "pause_entity",
+    title: "Pause",
+    state: "done",
+    asOf: null,
+    scope: { workspaceName: "Example Co", crossWorkspace: false },
+    caveats: [],
+    receipt: { sentence: "Paused ad “Hook B”", tone: "ok", revertible: true },
+    body: { target: { kind: "ad", label: "Hook B" }, rows: [], warnings: [] },
+    ...overrides
+  };
+}
+
+describe("answer view negotiation (result.view.v1, confirm.fields.v1)", () => {
+  const VIEW_CAPABILITIES = [
+    ...CAPABILITIES,
+    RESULT_VIEW_CAPABILITY,
+    CONFIRM_FIELDS_CAPABILITY
+  ];
+
+  function turnBodies(capabilities: {
+    descriptor: string[];
+    status: string[];
+  }) {
+    const fixture = createBridgeHome(
+      descriptor({ capabilities: capabilities.descriptor })
+    );
+    roots.push(fixture.root);
+    const bodies: Record<string, unknown>[] = [];
+    const fetchImpl = vi.fn(
+      async (input: string | URL | Request, init?: RequestInit) => {
+        if (String(input).endsWith("/v1/status")) {
+          return jsonResponse(status({ capabilities: capabilities.status }));
+        }
+        bodies.push(JSON.parse(String(init?.body)));
+        return ndjsonResponse([
+          JSON.stringify({
+            protocolVersion: 1,
+            requestId: "view-turn",
+            sequence: 1,
+            kind: "done",
+            data: { turnId: "turn-1", message: "ok", actionCalls: [] }
+          })
+        ]);
+      }
+    ) as typeof fetch;
+    const client = createDesktopAppClient(fixture.env, {
+      fetchImpl,
+      randomId: () => "view-turn"
+    });
+    return { client, bodies };
+  }
+
+  it("never sends accept to a desktop that does not advertise result.view.v1", async () => {
+    const { client, bodies } = turnBodies({
+      descriptor: CAPABILITIES,
+      status: CAPABILITIES
+    });
+    await client.status();
+    expect(client.viewsCapable).toBe(false);
+    expect(client.confirmFieldsCapable).toBe(false);
+
+    await client.turn({ message: "hi", expectedContextRevision: "context-1" });
+
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0]).not.toHaveProperty("accept");
+  });
+
+  it.each([
+    ["only the descriptor", VIEW_CAPABILITIES, CAPABILITIES, false],
+    ["only the status", CAPABILITIES, VIEW_CAPABILITIES, false],
+    ["both descriptor and status", VIEW_CAPABILITIES, VIEW_CAPABILITIES, true]
+  ])(
+    "sends accept only when %s advertise result.view.v1",
+    async (_label, descriptorCapabilities, statusCapabilities, capable) => {
+      const { client, bodies } = turnBodies({
+        descriptor: descriptorCapabilities,
+        status: statusCapabilities
+      });
+      await client.status();
+      expect(client.viewsCapable).toBe(capable);
+      expect(client.confirmFieldsCapable).toBe(capable);
+
+      await client.turn({ message: "hi", expectedContextRevision: "context-1" });
+
+      if (capable) {
+        expect(bodies[0]?.accept).toEqual([RESULT_VIEW_CAPABILITY]);
+      } else {
+        expect(bodies[0]).not.toHaveProperty("accept");
+      }
+    }
+  );
+
+  it("revokes view and fields capabilities when a later status stops advertising them", async () => {
+    const fixture = createBridgeHome(
+      descriptor({ capabilities: VIEW_CAPABILITIES })
+    );
+    roots.push(fixture.root);
+    const statuses = [VIEW_CAPABILITIES, CAPABILITIES];
+    const client = createDesktopAppClient(fixture.env, {
+      fetchImpl: (async () =>
+        jsonResponse(
+          status({ capabilities: statuses.shift() ?? CAPABILITIES })
+        )) as typeof fetch
+    });
+
+    await client.status();
+    expect(client.viewsCapable).toBe(true);
+    expect(client.confirmFieldsCapable).toBe(true);
+    await client.status();
+    expect(client.viewsCapable).toBe(false);
+    expect(client.confirmFieldsCapable).toBe(false);
+  });
+
+  it("refuses confirm fields on a desktop without confirm.fields.v1 and sends nothing", async () => {
+    const fixture = createBridgeHome();
+    roots.push(fixture.root);
+    const requests: string[] = [];
+    const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      requests.push(url);
+      if (url.endsWith("/v1/status")) return jsonResponse(status());
+      return jsonResponse({ ok: true });
+    }) as typeof fetch;
+    const client = createDesktopAppClient(fixture.env, { fetchImpl });
+
+    await client.status();
+    await expect(
+      client.confirm({
+        turnId: "turn-1",
+        confirmationHandle: "opaque-confirm-1",
+        decision: "approve",
+        fields: { adSetBudget: { text: "30" } }
+      })
+    ).rejects.toMatchObject({
+      name: "DesktopAppClientError",
+      code: "desktop_update_required"
+    });
+    expect(requests.some((url) => url.endsWith("/v1/confirm"))).toBe(false);
+  });
+
+  it("forwards confirm fields to a desktop that advertises confirm.fields.v1", async () => {
+    const fixture = createBridgeHome(
+      descriptor({ capabilities: VIEW_CAPABILITIES })
+    );
+    roots.push(fixture.root);
+    const confirmBodies: unknown[] = [];
+    const fetchImpl = vi.fn(
+      async (input: string | URL | Request, init?: RequestInit) => {
+        if (String(input).endsWith("/v1/status")) {
+          return jsonResponse(status({ capabilities: VIEW_CAPABILITIES }));
+        }
+        confirmBodies.push(JSON.parse(String(init?.body)));
+        return jsonResponse({ ok: true });
+      }
+    ) as typeof fetch;
+    const client = createDesktopAppClient(fixture.env, {
+      fetchImpl,
+      randomId: () => "confirm-fields"
+    });
+
+    await client.status();
+    await client.confirm({
+      turnId: "turn-1",
+      confirmationHandle: "opaque-confirm-1",
+      decision: "approve",
+      fields: {
+        adSetBudget: { text: "30" },
+        split: { choice: "meta_split" }
+      }
+    });
+
+    expect(confirmBodies).toEqual([
+      {
+        protocolVersion: 1,
+        requestId: "confirm-fields",
+        turnId: "turn-1",
+        confirmationHandle: "opaque-confirm-1",
+        decision: "approve",
+        fields: {
+          adSetBudget: { text: "30" },
+          split: { choice: "meta_split" }
+        }
+      }
+    ]);
+  });
+
+  it("returns the raw /v1/confirm JSON with the view decoded in place (no wrapper)", async () => {
+    const fixture = createBridgeHome();
+    roots.push(fixture.root);
+    const view = receiptView();
+    const client = createDesktopAppClient(fixture.env, {
+      fetchImpl: (async () =>
+        jsonResponse({
+          ok: true,
+          receipt: "Paused ad “Hook B”",
+          runId: "run-1",
+          view
+        })) as typeof fetch
+    });
+
+    const result = await client.confirm({
+      turnId: "turn-1",
+      confirmationHandle: "opaque-confirm-1",
+      decision: "approve"
+    });
+
+    expect(result).toEqual({
+      ok: true,
+      receipt: "Paused ad “Hook B”",
+      runId: "run-1",
+      view
+    });
+    expect(result).not.toHaveProperty("raw");
+    expect(result.view?.receipt?.sentence).toBe("Paused ad “Hook B”");
+  });
+
+  it("turns an undecodable confirm view into undefined and keeps the rest of the JSON", async () => {
+    const fixture = createBridgeHome();
+    roots.push(fixture.root);
+    const client = createDesktopAppClient(fixture.env, {
+      fetchImpl: (async () =>
+        jsonResponse({
+          ok: true,
+          receipt: "Done",
+          view: receiptView({ kind: "carousel" })
+        })) as typeof fetch
+    });
+
+    const result = await client.confirm({
+      turnId: "turn-1",
+      confirmationHandle: "opaque-confirm-1",
+      decision: "decline"
+    });
+
+    expect(result.view).toBeUndefined();
+    expect(result).toEqual({ ok: true, receipt: "Done" });
+    expect(result).not.toHaveProperty("raw");
+  });
+
+  // A failed resolution (expired card, nothing sent, not sure it happened) still
+  // rejects with its typed code, and carries the receipt view so the terminal can
+  // print the same receipt Cmd+L shows instead of a transport error.
+  it("rejects a failed /v1/confirm answer with its typed code and the decoded receipt view", async () => {
+    const fixture = createBridgeHome();
+    roots.push(fixture.root);
+    const expired = receiptView({
+      state: "expired",
+      receipt: { sentence: "This card expired.", tone: "warn", revertible: false }
+    });
+    const client = createDesktopAppClient(fixture.env, {
+      fetchImpl: (async () =>
+        jsonResponse({
+          ok: false,
+          code: "confirmation_not_found",
+          message: "This confirmation expired.",
+          view: expired
+        })) as typeof fetch
+    });
+
+    const failure = await client
+      .confirm({
+        turnId: "turn-1",
+        confirmationHandle: "opaque-confirm-1",
+        decision: "approve"
+      })
+      .catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(DesktopAppClientError);
+    expect(failure).toMatchObject({
+      code: "confirmation_not_found",
+      view: expired
+    });
+  });
+
+  it("rejects a nested execution failure with the decoded outcome_unknown view and its reconcile", async () => {
+    const fixture = createBridgeHome();
+    roots.push(fixture.root);
+    const unknown = receiptView({
+      state: "outcome_unknown",
+      outcome: "unknown",
+      retry: "check_first",
+      reconcile: { label: "Check what happened", ask: "Did the pause go through?" }
+    });
+    const client = createDesktopAppClient(fixture.env, {
+      fetchImpl: (async () =>
+        jsonResponse({
+          ok: true,
+          result: { ok: false, code: "cloud_unreachable", message: "Lost the line." },
+          view: unknown
+        })) as typeof fetch
+    });
+
+    const failure = await client
+      .confirm({
+        turnId: "turn-1",
+        confirmationHandle: "opaque-confirm-1",
+        decision: "approve"
+      })
+      .catch((error: unknown) => error);
+
+    expect(failure).toMatchObject({ code: "cloud_unreachable", view: unknown });
+    expect((failure as DesktopAppClientError).view?.reconcile?.ask).toBe(
+      "Did the pause go through?"
+    );
+  });
+
+  it("leaves the error's view undefined when a failed answer's view does not decode", async () => {
+    const fixture = createBridgeHome();
+    roots.push(fixture.root);
+    const client = createDesktopAppClient(fixture.env, {
+      fetchImpl: (async () =>
+        jsonResponse({
+          ok: false,
+          code: "confirmation_not_found",
+          message: "This confirmation expired.",
+          view: receiptView({ state: "melted" })
+        })) as typeof fetch
+    });
+
+    const failure = await client
+      .confirm({
+        turnId: "turn-1",
+        confirmationHandle: "opaque-confirm-1",
+        decision: "approve"
+      })
+      .catch((error: unknown) => error);
+
+    expect(failure).toMatchObject({ code: "confirmation_not_found" });
+    expect((failure as DesktopAppClientError).view).toBeUndefined();
+  });
+});
+
 describe("infinite app command", () => {
+  it("prints no progress line for a tool.view frame", async () => {
+    const capabilities = [...CAPABILITIES, RESULT_VIEW_CAPABILITY];
+    const fixture = createBridgeHome(descriptor({ capabilities }));
+    roots.push(fixture.root);
+    const stderr: string[] = [];
+    const turnBodies: Record<string, unknown>[] = [];
+    const fetchImpl = vi.fn(
+      async (input: string | URL | Request, init?: RequestInit) => {
+        if (String(input).endsWith("/v1/status")) {
+          return jsonResponse(status({ capabilities }));
+        }
+        turnBodies.push(JSON.parse(String(init?.body)));
+        return ndjsonResponse([
+          JSON.stringify({
+            protocolVersion: 1,
+            requestId: "request-1",
+            sequence: 1,
+            kind: "progress",
+            data: {
+              type: "tool.view",
+              stage: "tool",
+              message: "View title line",
+              viewId: "view-1",
+              name: "pause_entity",
+              view: receiptView()
+            }
+          }),
+          JSON.stringify({
+            protocolVersion: 1,
+            requestId: "request-1",
+            sequence: 2,
+            kind: "progress",
+            data: { type: "status.update", message: "Checking analytics" }
+          }),
+          JSON.stringify({
+            protocolVersion: 1,
+            requestId: "request-1",
+            sequence: 3,
+            kind: "done",
+            data: { turnId: "turn-1", message: "Done.", actionCalls: [] }
+          })
+        ]);
+      }
+    ) as typeof fetch;
+
+    await runDesktopAppCommand(["pause", "it"], fixture.env, {
+      fetchImpl,
+      randomId: () => "request-1",
+      io: {
+        inputIsTTY: false,
+        outputIsTTY: false,
+        writeOut: () => undefined,
+        writeErr: (text) => stderr.push(text)
+      }
+    });
+
+    expect(turnBodies[0]?.accept).toEqual([RESULT_VIEW_CAPABILITY]);
+    expect(stderr.join("")).toContain("Checking analytics");
+    expect(stderr.join("")).not.toContain("View title line");
+  });
+
   it("prints deterministic status without exposing descriptor credentials", async () => {
     const fixture = createBridgeHome();
     roots.push(fixture.root);
