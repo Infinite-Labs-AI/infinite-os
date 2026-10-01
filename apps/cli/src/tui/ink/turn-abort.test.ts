@@ -57,7 +57,8 @@ describe("turn abort wiring (structural, CI-run)", () => {
     const block = session.slice(session.indexOf('if (key.ctrl && input === "c")'));
     const cancel = block.indexOf("onConnectCancel()");
     const stop = block.indexOf("ctrlCAction(turnAbort)");
-    const exit = block.indexOf("app.exit()");
+    // Idle Ctrl-C exits through `onExit()` (requestExit commits the live turn to scrollback first).
+    const exit = block.indexOf("onExit()");
     expect(cancel).toBeGreaterThan(-1);
     expect(stop).toBeGreaterThan(cancel);
     expect(exit).toBeGreaterThan(stop);

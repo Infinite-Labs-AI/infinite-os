@@ -46,7 +46,10 @@ describe("Ink in-session write confirmation (Plan 2) — structural guards (CI-r
 
   it("names the OK key from the approval view, renders the key bar above the composer, and counts its rows", () => {
     expect(source).toContain("confirmCardKeys(headConfirmAction, NO_KEY_CAPS)");
-    expect(source).toContain("keyBarRowCount(keyHints, columns) + inkTranscriptRowCount({");
+    // The bar's rows count in the live-region reserve and in the composer-row prediction.
+    expect(source).toContain("const keyBarRows = keyBarRowCount(keyHints, columns);");
+    expect(source).toMatch(/const reservedRows = homeInventoryRows\s*\+ keyBarRows/);
+    expect(source).toContain("const composerRow = homeInventoryRows + keyBarRows + liveLayout.rowCount;");
     expect(source.indexOf("<KeyBar hints={keyHints}")).toBeLessThan(source.indexOf("<InkLineInput"));
     expect(source.indexOf("<KeyBar hints={keyHints}")).toBeGreaterThan(source.indexOf("<ConfirmActionMenu"));
     // The old fixed affordance is gone: the bar shows only what works now.

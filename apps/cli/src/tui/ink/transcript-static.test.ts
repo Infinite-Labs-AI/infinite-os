@@ -334,10 +334,11 @@ describe("scrollback in a running session (fake TTY; skipped on CI like the othe
     input.write(`${ESC}[6~`);
     await waitFor(() => maxLine(output.text(), "alpha") > before, 4_000, output.text);
     expect(decisions).toEqual([]);
+    // `n` is the card's real "no" (T6): it reaches the app as a decline.
     await sendKeys(input, "n");
     await sendKeys(input, "/exit\r");
     await session;
-    expect(decisions).toEqual([]);
+    expect(decisions).toEqual(["decline"]);
   });
 });
 
