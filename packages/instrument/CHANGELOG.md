@@ -86,9 +86,14 @@ static-html `<script>` and the Next module's string literal) in a sandbox, not a
 - **New setup check: Meta automatic events.** A Meta pixel infinite-tag installed that is missing
   `fbq('set', 'autoConfig', false, id)` before `init` is a problem in infinite-tag's own code. A
   pixel the site already had with automatic events on is reported as information to review, never
-  as a problem and never edited. When the source cannot settle it, the check says "undetermined".
-  The same check counts infinite-tag's managed Meta block: exactly one `init` per pixel, at most one
-  click-id capture and one matching accessor, and the capture before `init`.
+  as a problem and never edited. When the source cannot settle it, the check says "undetermined";
+  an opt-out that only exists inside a comment is "undetermined", never a pass. A Next module written
+  by an older infinite-tag (before 0.7) is recognised as infinite-tag's own. The same check counts
+  infinite-tag's managed Meta block across the whole page: exactly one `init` per pixel, at most one
+  click-id capture and one matching accessor, and the capture before `init`, so a page that ended up
+  with the block twice (every page view counted twice) is caught. Identical results are reported
+  once, naming up to five files and counting the rest, and the step note now also counts the
+  "worth checking" items. A site with no Meta pixel in its source gets one line about it, not two.
 - **Fixed: the setup checks could not see a managed Next.js pixel.** The Next module stores the
   snippet as a string with escaped quotes, so the click-id check read a correct Next install as "no
   pixel found". The checks now decode it, and the click-id check names the managed capture when it

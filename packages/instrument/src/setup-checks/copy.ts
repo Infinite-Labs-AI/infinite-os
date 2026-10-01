@@ -175,17 +175,29 @@ export function clickIdManagedCaptureMessage(input: { file: string }): string {
 
 export function clickIdUndeterminedMessage(): string {
   return (
-    `No \`fbq('init', …)\` was found in this repo's source, so click-id capture could not be ` +
-    `checked. A pixel injected by a tag manager, by the hosting edge, or by a dependency is invisible ` +
-    `from here — this is "not checked", not "not needed". If you run Meta ads, confirm by hand that ` +
-    `the pixel is present on your landing pages and not only on the pages that convert.`
+    `No \`fbq('init', …)\` was found in this repo's source, so neither click-id capture nor Meta's ` +
+    `automatic events could be checked. A pixel injected by a tag manager, by the hosting edge, or by ` +
+    `a dependency is invisible from here — this is "not checked", not "not needed". If you run Meta ` +
+    `ads, confirm by hand that the pixel is present on your landing pages and not only on the pages ` +
+    `that convert.`
   )
 }
 
+/** Where a grouped finding was seen: the named files, then how many more. */
+export interface FileList {
+  files: readonly string[]
+  remaining: number
+}
+
+function fileList(input: FileList): string {
+  const named = input.files.join(", ")
+  return input.remaining > 0 ? `${named} and ${input.remaining} more` : named
+}
+
 /** A pixel infinite-tag installed without the automatic-events opt-out before init. */
-export function metaAutoConfigManagedOnMessage(input: { pixelId: string; file: string; reason: string }): string {
+export function metaAutoConfigManagedOnMessage(input: FileList & { pixelId: string; reason: string }): string {
   return (
-    `The Meta pixel infinite-tag installed in ${input.file} (pixel ${maskPixelId(input.pixelId)}) ` +
+    `The Meta pixel infinite-tag installed in ${fileList(input)} (pixel ${maskPixelId(input.pixelId)}) ` +
     `${autoConfigReasonText(input.reason)}. With automatic events on, Meta's pixel sends button ` +
     `clicks and page details from your visitors' pages on its own, which infinite-tag never turns ` +
     `on. This is infinite-tag's own managed code: re-run \`npx infinite-tag install\` to restore it, ` +
@@ -194,9 +206,9 @@ export function metaAutoConfigManagedOnMessage(input: { pixelId: string; file: s
 }
 
 /** A pixel the site already had, with automatic events on. Information, never an edit. */
-export function metaAutoConfigAdoptedOnMessage(input: { pixelId: string; file: string; reason: string }): string {
+export function metaAutoConfigAdoptedOnMessage(input: FileList & { pixelId: string; reason: string }): string {
   return (
-    `Worth checking: the Meta pixel already on your site in ${input.file} (pixel ` +
+    `Worth checking: the Meta pixel already on your site in ${fileList(input)} (pixel ` +
     `${maskPixelId(input.pixelId)}) ${autoConfigReasonText(input.reason)}, so Meta collects automatic ` +
     `events (button clicks, page details) from your pages. infinite-tag leaves pixels it did not ` +
     `install untouched. To turn them off, add \`fbq('set', 'autoConfig', false, '<pixel id>')\` ` +
@@ -205,15 +217,16 @@ export function metaAutoConfigAdoptedOnMessage(input: { pixelId: string; file: s
   )
 }
 
-export function metaAutoConfigOffMessage(input: { pixelId: string; file: string }): string {
+export function metaAutoConfigOffMessage(input: FileList & { pixelId: string }): string {
   return (
-    `The Meta pixel in ${input.file} (pixel ${maskPixelId(input.pixelId)}) switches automatic events ` +
-    `off before init. That is the setup being right in the source; it is not a check of the live page.`
+    `The Meta pixel in ${fileList(input)} (pixel ${maskPixelId(input.pixelId)}) switches automatic ` +
+    `events off before init. That is the setup being right in the source; it is not a check of the ` +
+    `live page.`
   )
 }
 
-export function metaAutoConfigUndeterminedMessage(input: { pixelId?: string; file?: string; reason: string }): string {
-  if (!input.pixelId || !input.file) {
+export function metaAutoConfigUndeterminedMessage(input: Partial<FileList> & { pixelId?: string; reason: string }): string {
+  if (!input.pixelId || !input.files || input.files.length === 0) {
     return (
       `No \`fbq('init', …)\` was found in this repo's source, so Meta's automatic events could not ` +
       `be checked. A pixel loaded by a tag manager or the hosting edge is invisible from here — this ` +
@@ -222,17 +235,30 @@ export function metaAutoConfigUndeterminedMessage(input: { pixelId?: string; fil
   }
   return (
     `Could not tell whether Meta's automatic events are off for pixel ${maskPixelId(input.pixelId)} ` +
-    `in ${input.file}: ${input.reason === "autoconfig_unreadable" ? "its autoConfig call does not use literal values" : "its init could not be read"}. ` +
+    `in ${fileList({ files: input.files, remaining: input.remaining ?? 0 })}: ${undeterminedReasonText(input.reason)}. ` +
     `This is "not checked", not "off".`
   )
 }
 
-export function metaSnippetCensusMessage(input: { file: string; issues: readonly string[] }): string {
+function undeterminedReasonText(reason: string): string {
+  switch (reason) {
+    case "autoconfig_unreadable":
+      return "its autoConfig call does not use literal values"
+    case "opt_out_commented":
+      return "its only `fbq('set', 'autoConfig', false, …)` sits inside a comment, so it may never run"
+    default:
+      return "its init could not be read"
+  }
+}
+
+export function metaSnippetCensusMessage(input: FileList & { issues: readonly string[] }): string {
   return (
-    `infinite-tag's managed Meta block in ${input.file} is not the shape it writes: ` +
-    `${input.issues.join("; ")}. A duplicated init double-counts every page view, two captures or ` +
-    `two matching accessors disagree with each other, and a capture after init lets the pixel read ` +
-    `\`_fbc\` before this click is in it. Re-run \`npx infinite-tag install\` to rewrite the block.`
+    `infinite-tag's managed Meta block in ${fileList(input)} is not the shape it writes: ` +
+    `${input.issues.join("; ")}. A duplicated init double-counts every page view, a second capture or ` +
+    `matching accessor means the block was pasted twice (only the first copy runs, so an edited ` +
+    `second copy silently does nothing), and a capture after init lets the pixel read \`_fbc\` ` +
+    `before this click is in it. Re-run \`npx infinite-tag install\` to rewrite the block, and keep ` +
+    `one managed block per page.`
   )
 }
 

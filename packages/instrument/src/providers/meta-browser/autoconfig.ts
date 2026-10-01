@@ -39,6 +39,8 @@ export type MetaAutoConfigReason =
   | "pixel_not_initialised"
   /** An autoConfig call exists whose arguments are not literals, so its effect cannot be read. */
   | "autoconfig_unreadable"
+  /** The only opt-out for this pixel sits inside a comment, so it may not run at all. */
+  | "opt_out_commented"
 
 export interface MetaAutoConfigVerdict {
   pixelId: string
@@ -69,23 +71,43 @@ export function checkMetaAutoConfigOptOut(
     reason
   })
   if (!/^[0-9]{1,24}$/.test(pixelId)) return verdict("undetermined", "invalid_pixel_id")
-  const optOut = new RegExp(String.raw`${SET_AUTOCONFIG}\s*,\s*(?:false|["']false["'])\s*,\s*["']${pixelId}["']\s*\)`)
+  const optOut = new RegExp(String.raw`${SET_AUTOCONFIG}\s*,\s*(?:false|["']false["'])\s*,\s*["']${pixelId}["']\s*\)`, "g")
   const optIn = new RegExp(String.raw`${SET_AUTOCONFIG}\s*,\s*(?:true|["']true["'])\s*,\s*["']${pixelId}["']\s*\)`)
   const bad = origin === "managed" ? "problem" : "info"
 
   if (optIn.test(source)) return verdict(bad, "opted_in")
   const allCalls = source.match(new RegExp(SET_AUTOCONFIG, "g"))?.length ?? 0
   const literalCalls = source.match(LITERAL_AUTOCONFIG)?.length ?? 0
-  const optOutMatch = optOut.exec(source)
-  if (!optOutMatch) {
+  // These are static bytes, not a running page: an opt-out inside a comment never runs. Only an
+  // opt-out outside every comment counts; one that exists only inside a comment cannot settle it.
+  const optOutMatches = [...source.matchAll(optOut)]
+  const liveOptOut = optOutMatches.find((match) => !insideComment(source, match.index))
+  if (!liveOptOut) {
+    if (optOutMatches.length > 0) return verdict("undetermined", "opt_out_commented")
     // A call we cannot read might be this pixel's opt-out; that is "cannot tell", never "missing".
     if (allCalls > literalCalls) return verdict("undetermined", "autoconfig_unreadable")
     return verdict(bad, "opt_out_missing")
   }
   const initIndex = source.search(new RegExp(String.raw`fbq\(\s*["']init["']\s*,\s*["']${pixelId}["']`))
   if (initIndex === -1) return verdict("undetermined", "pixel_not_initialised")
-  if (optOutMatch.index > initIndex) return verdict(bad, "opt_out_after_init")
+  if (liveOptOut.index > initIndex) return verdict(bad, "opt_out_after_init")
   return verdict("ok", "opted_out_before_init")
+}
+
+/**
+ * Does `index` sit inside a comment? A heuristic over raw bytes, deliberately biased so that a wrong
+ * answer can only turn a pass into "undetermined", never the reverse:
+ *   • a JS line comment: `//` earlier on the same line, except a URL's `://`;
+ *   • a JS block comment: the nearest `/*` before it is not yet closed;
+ *   • an HTML comment: the nearest `<!--` before it is not yet closed.
+ */
+function insideComment(source: string, index: number): boolean {
+  const lineStart = source.lastIndexOf("\n", index - 1) + 1
+  if (/(^|[^:])\/\//.test(source.slice(lineStart, index))) return true
+  const before = source.slice(0, index)
+  if (before.lastIndexOf("/*") > before.lastIndexOf("*/")) return true
+  if (before.lastIndexOf("<!--") > before.lastIndexOf("-->")) return true
+  return false
 }
 
 export type MetaCensusIssueCode =

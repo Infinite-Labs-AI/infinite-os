@@ -75,5 +75,8 @@ export function setupFindingLines(report: SetupChecksReport): string[] {
 export function setupChecksNote(report: SetupChecksReport): string {
   const problems = report.findings.filter((finding) => finding.state === "problem").length
   const undetermined = report.findings.filter((finding) => finding.state === "undetermined").length
-  return `${problems} setup problem${problems === 1 ? "" : "s"}, ${undetermined} undetermined`
+  // `info` is listed in the next steps ("Worth checking: …"), so the note counts it too: a note that
+  // says nothing was found above a list of things to review reads as a contradiction.
+  const info = report.findings.filter((finding) => finding.state === "info").length
+  return `${problems} setup problem${problems === 1 ? "" : "s"}, ${undetermined} undetermined, ${info} worth checking`
 }

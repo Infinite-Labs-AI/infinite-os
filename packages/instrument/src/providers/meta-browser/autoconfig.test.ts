@@ -54,6 +54,33 @@ describe("checkMetaAutoConfigOptOut (ported from infinite.fast's live guardrail)
     expect(checkMetaAutoConfigOptOut(page('"false"'), "abc", "managed")).toMatchObject({ state: "undetermined", reason: "invalid_pixel_id" })
   })
 
+  it("an opt-out inside a comment never runs: line, block and HTML comments are UNDETERMINED, never ok", () => {
+    const init = `fbq("init", "${ID}");`
+    for (const commented of [
+      `// fbq("set", "autoConfig", false, "${ID}");\n${init}`,
+      `var x = 1; // fbq("set", "autoConfig", "false", "${ID}");\n${init}`,
+      `/* fbq("set", "autoConfig", false, "${ID}"); */\n${init}`,
+      `/*\n * fbq("set", "autoConfig", false, "${ID}");\n */\n${init}`,
+      `<!-- <script>fbq("set", "autoConfig", false, "${ID}");</script> -->\n<script>${init}</script>`
+    ]) {
+      for (const origin of ["managed", "adopted"] as const) {
+        expect(checkMetaAutoConfigOptOut(commented, ID, origin), commented).toMatchObject({
+          state: "undetermined",
+          reason: "opt_out_commented"
+        })
+      }
+    }
+    // A live opt-out beside a commented one still counts.
+    const both = `// fbq("set", "autoConfig", false, "${ID}");\nfbq("set", "autoConfig", false, "${ID}");\n${init}`
+    expect(checkMetaAutoConfigOptOut(both, ID, "adopted").state).toBe("ok")
+    // Not comments: a URL's "://" earlier on the line (Meta's minified one-line paste), and comments
+    // that closed before the call.
+    const oneLine = `s.parentNode.insertBefore(t,s)}(window,document,'script','https://connect.facebook.net/en_US/fbevents.js'); fbq("set", "autoConfig", false, "${ID}"); ${init}`
+    expect(checkMetaAutoConfigOptOut(oneLine, ID, "adopted").state).toBe("ok")
+    const closed = `/* setup */ <!-- pixel --> fbq("set", "autoConfig", false, "${ID}"); ${init}`
+    expect(checkMetaAutoConfigOptOut(closed, ID, "adopted").state).toBe("ok")
+  })
+
   it("passes the snippet infinite-tag actually writes, with and without Advanced Matching", () => {
     for (const advancedMatching of [false, true]) {
       const snippet = buildMetaPixelSnippet("1234567890123456", { advancedMatching })

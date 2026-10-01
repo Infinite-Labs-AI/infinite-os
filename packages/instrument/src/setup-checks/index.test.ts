@@ -55,7 +55,7 @@ describe("runSetupChecks", () => {
       // problem and never an edit (founder decision 10).
       "INF_SETUP_META_AUTOCONFIG_ADOPTED_ON"
     ])
-    expect(setupChecksNote(report)).toBe("3 setup problems, 0 undetermined")
+    expect(setupChecksNote(report)).toBe("3 setup problems, 0 undetermined, 1 worth checking")
     expect(setupFindingLines(report)).toHaveLength(4)
   })
 
@@ -83,5 +83,10 @@ describe("runSetupChecks", () => {
     const report = runSetupChecks(makeApp({ "src/app/page.tsx": "<main>Nothing here</main>" }))
     // No pixel in source: the click-id question is UNANSWERED, and the overall state says so.
     expect(report.state).toBe("undetermined")
+    // Both Meta checks are unanswered, and both say so — in ONE next-step line, not two: a site that
+    // may not use Meta at all is not told twice about a provider it never asked for.
+    expect(report.checks.map((check) => [check.check, check.state])).toContainEqual(["meta_pixel_config", "undetermined"])
+    expect(setupFindingLines(report).filter((line) => line.includes("fbq('init'"))).toHaveLength(1)
+    expect(setupChecksNote(report)).toBe("0 setup problems, 1 undetermined, 0 worth checking")
   })
 })

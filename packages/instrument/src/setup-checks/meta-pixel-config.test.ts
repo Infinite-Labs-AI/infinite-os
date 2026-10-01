@@ -92,9 +92,107 @@ describe("meta_pixel_config: automatic events + managed-snippet census", () => {
   it("cannot tell → UNDETERMINED, never ok: a computed autoConfig call, or no pixel in source at all", () => {
     const computed = check({ "index.html": `<script>fbq('set', 'autoConfig', false, ID); fbq('init', '${ADOPTED}');</script>` })
     expect(computed.state).toBe("undetermined")
+    // No pixel anywhere: the CHECK says undetermined, but adds no line of its own — the click-id
+    // check's one "no fbq('init') found" line already names both open questions.
     const none = check({ "src/app/page.tsx": "<main>Nothing here</main>" })
     expect(none.state).toBe("undetermined")
-    expect(none.findings[0]!.message).toContain('"not checked", not "off"')
+    expect(none.findings).toEqual([])
+  })
+
+  it("infinite-tag's capture with no readable init beside it is UNDETERMINED with its own line", () => {
+    const plan = metaProviderAdapter.plan("static-html", { pixelId: PIXEL } as never)
+    const block = buildManagedHtmlBlock([plan.instructions[0]!.snippet])
+    const capture = `<html><head>\n${block}\n</head><body></body></html>`.replace(`fbq('init', "${PIXEL}");`, "fbq('init', window.PIXEL);")
+    expect(capture).toContain("fbq('init', window.PIXEL);")
+    const result = check({ "index.html": capture })
+    expect(result.state).toBe("undetermined")
+    expect(result.findings.map((finding) => finding.code)).toEqual(["INF_SETUP_META_AUTOCONFIG_UNDETERMINED"])
+  })
+
+  // The 849ccf1 shape: a merge that kept both sides leaves the managed block on the page TWICE. Each
+  // block is well-formed on its own, so only a census over the whole page sees two inits.
+  it("a page carrying the managed block TWICE fails the census (two inits = every page view counted twice)", () => {
+    const plan = metaProviderAdapter.plan("static-html", { pixelId: PIXEL } as never)
+    const block = buildManagedHtmlBlock([plan.instructions[0]!.snippet])
+    const page = `<html><head>\n${block}\n</head><body>\n<h1>Hi</h1>\n${block}\n</body></html>`
+    expect(metaSourceUnits("index.html", page).filter((unit) => unit.managed)).toHaveLength(2)
+    const result = check({ "index.html": page })
+    expect(result.state).toBe("problem")
+    const census = result.findings.find((finding) => finding.code === "INF_SETUP_META_SNIPPET_CENSUS")!
+    expect(census.message).toContain("initialised 2 times")
+    expect(census.message).toContain("2 click-id captures")
+    expect(census.line).toBe(2)
+    // The second block is infinite-tag's own, never read as the site's (adopted) pixel.
+    expect(result.findings.map((finding) => finding.code)).not.toContain("INF_SETUP_META_AUTOCONFIG_ADOPTED_ON")
+    // One block on the page stays clean.
+    expect(check({ "index.html": managedPage() }).state).toBe("ok")
+  })
+
+  it("one finding per verdict, not one per page: a 31-page site with its own pixel gets ONE line naming 5 pages and a count", () => {
+    const adopted = `<script>\nfbq('init', '${ADOPTED}');\nfbq('track', 'PageView');\n</script>`
+    const files: Record<string, string> = {}
+    for (let page = 1; page <= 31; page += 1) {
+      files[`page-${String(page).padStart(2, "0")}.html`] = `<html><head>\n${adopted}\n</head><body></body></html>`
+    }
+    const result = check(files)
+    expect(result.state).toBe("info")
+    expect(result.findings).toHaveLength(1)
+    const finding = result.findings[0]!
+    expect(finding.code).toBe("INF_SETUP_META_AUTOCONFIG_ADOPTED_ON")
+    expect(finding.file).toBe("page-01.html")
+    expect(finding.line).toBe(3)
+    expect(finding.message).toContain("page-01.html, page-02.html, page-03.html, page-04.html, page-05.html and 26 more")
+    expect(finding.message).not.toContain("page-06.html")
+  })
+
+  it("different verdicts stay separate findings: two pixels, or the same pixel managed here and adopted there", () => {
+    const other = "555666777888999"
+    const result = check({
+      "a.html": `<script>fbq('init', '${ADOPTED}');</script>`,
+      "b.html": `<script>fbq('init', '${ADOPTED}');</script>`,
+      "c.html": `<script>fbq('init', '${other}');</script>`,
+      "index.html": managedPage()
+    })
+    expect(result.findings.map((finding) => [finding.code, finding.file]).sort()).toEqual([
+      ["INF_SETUP_META_AUTOCONFIG_ADOPTED_ON", "a.html"],
+      ["INF_SETUP_META_AUTOCONFIG_ADOPTED_ON", "c.html"],
+      ["INF_SETUP_META_AUTOCONFIG_OFF", "index.html"]
+    ])
+  })
+
+  // infinite-tag < 0.7 (before a36660c) wrote the Next module as a String.raw template, quotes
+  // unescaped, and before the autoConfig opt-out existed. That module is OUR code: a problem with a
+  // re-install fix, never "the pixel already on your site".
+  it("a pre-0.7 String.raw managed Next module is infinite-tag's own pixel, not the site's", () => {
+    const oldModule = [
+      "// Managed by Infinite. Public install artifacts only.",
+      "",
+      "const bootstrapSource = String.raw`",
+      "!function(f,b,e,v,n,t,s){if(f.fbq)return;n=f.fbq=function(){};}(window, document,'script','https://connect.facebook.net/en_US/fbevents.js');",
+      `fbq('init', '${PIXEL}');`,
+      "fbq('track', 'PageView');",
+      "`",
+      "",
+      "export function installInfiniteInstrumentation(): void {}"
+    ].join("\n")
+    const units = metaSourceUnits("lib/infinite-analytics.ts", oldModule)
+    expect(units).toHaveLength(1)
+    expect(units[0]!.managed).toBe(true)
+    const result = check({ "lib/infinite-analytics.ts": oldModule })
+    expect(result.state).toBe("problem")
+    expect(result.findings.map((finding) => finding.code)).toEqual(["INF_SETUP_META_AUTOCONFIG_MANAGED_ON"])
+    expect(result.findings[0]!.line).toBe(5)
+    expect(result.findings[0]!.message).toContain("infinite-tag installed")
+    // And a managed file in a shape this build cannot decode is still ours, never adopted.
+    const unknownShape = `// Managed by Infinite. Public install artifacts only.\nconst other = 1; fbq('init', '${PIXEL}');`
+    expect(check({ "lib/infinite-analytics.ts": unknownShape }).findings[0]!.code).toBe("INF_SETUP_META_AUTOCONFIG_MANAGED_ON")
+  })
+
+  it("an adopted opt-out that is commented out is UNDETERMINED, never ok", () => {
+    const commented = `<script>\n// fbq('set', 'autoConfig', false, '${ADOPTED}');\nfbq('init', '${ADOPTED}');\n</script>`
+    const result = check({ "index.html": `<html><head>${commented}</head><body></body></html>` })
+    expect(result.state).toBe("undetermined")
+    expect(result.findings[0]!.message).toContain("inside a comment")
   })
 })
 
