@@ -20,6 +20,7 @@ const TRUNCATION_SUFFIX = " ... [truncated]";
  * run against both entry points) is owed to T8.
  */
 export function terminalText(value: string, fallback = ""): string {
+  if (typeof value !== "string") return fallback;
   return scanTerminalText(value).replace(/\s+/gu, " ").trim() || fallback;
 }
 
@@ -31,6 +32,7 @@ export function terminalText(value: string, fallback = ""): string {
  * code indentation must survive.
  */
 export function scrubTerminalControls(value: string): string {
+  if (typeof value !== "string") return "";
   return scanTerminalText(value);
 }
 
@@ -55,6 +57,9 @@ export function boundedTerminalText(
  * and whitespace char becomes a single space so nothing re-flows the cursor.
  */
 function scanTerminalText(value: string): string {
+  // Decoded views vouch only for their envelope; a body field can arrive as an
+  // array or a `{ length }` object at runtime despite the static type.
+  if (typeof value !== "string") return "";
   const output: string[] = [];
   let index = 0;
   while (index < value.length) {

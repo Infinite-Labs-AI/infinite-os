@@ -16,6 +16,13 @@ import {
  * are left in place and ignored. Kind renderers still read every body field
  * defensively and send every string through terminal text scrubbing: the
  * decoder never vouches for a value, only for the shape.
+ *
+ * Deviation from the plan's C8 code block: `kind` and `state` must be strings
+ * before the set lookup. The plan's `KINDS.has(String(value.kind))` let
+ * `kind: ["change"]` and `state: { toString() { return "done" } }` decode as
+ * valid views (wave-1 adversarial review). The contract types also do not
+ * enforce one level of `sections` nesting, or `legs` being required outside
+ * `composite`, so kind renderers (T8) must cap recursion and check types.
  */
 const KINDS = new Set<string>(ANSWER_VIEW_KINDS);
 const STATES = new Set<string>(ANSWER_VIEW_STATES);
@@ -24,8 +31,10 @@ export function decodeAnswerView(value: unknown): AnswerViewV1 | null {
   if (
     !isRecord(value) ||
     value.v !== 1 ||
-    !KINDS.has(String(value.kind)) ||
-    !STATES.has(String(value.state))
+    typeof value.kind !== "string" ||
+    !KINDS.has(value.kind) ||
+    typeof value.state !== "string" ||
+    !STATES.has(value.state)
   ) {
     return null;
   }

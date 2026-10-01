@@ -9,7 +9,8 @@ import {
   keyBarRowCount,
   okKeyFor,
   resolveKey,
-  type KeyContext
+  type KeyContext,
+  type PendingCardKeySource
 } from "./keymap.js";
 
 const NO_CAPS = { open: false, watch: false, retry: false } as const;
@@ -196,6 +197,20 @@ describe("confirmCardKeys", () => {
     }, NO_CAPS);
     expect(keys.ctx.okLabel).toBe("Pause");
     expect(keys.explainText).toBe("Stops spend");
+  });
+
+  it.each([
+    ["an array approval.summary", { approval: { confirmLabel: ["Pause"], summary: ["x"] } }],
+    ["an array confirmLabel", { approval: { confirmLabel: ["Pause"], summary: null } }],
+    ["a length-carrying explain object", { explain: { length: 2 } }],
+    ["a length-carrying summary object", { approval: { confirmLabel: { length: 5 }, summary: { length: 3 } } }]
+  ])("a malformed view (%s) falls back to y Confirm without throwing", (_label, view) => {
+    const keys = confirmCardKeys(
+      { summary: "Pause ad", view: view as unknown as PendingCardKeySource["view"] },
+      NO_CAPS
+    );
+    expect(keys.ctx).toMatchObject({ focus: "card", okKey: "y", okLabel: "Confirm", explain: false });
+    expect(keys.explainText).toBeNull();
   });
 
   it("a view with nothing to explain hides ?", () => {

@@ -166,10 +166,14 @@ export function confirmCardKeys(
   pending: PendingCardKeySource,
   caps: KeyContext["caps"]
 ): { ctx: KeyContext; explainText: string | null } {
-  const okLabel = terminalText(pending.view?.approval?.confirmLabel ?? "", "Confirm");
+  // A decoded view only vouches for its envelope, so read each field as a
+  // string or nothing: an array or object here must degrade, never throw.
+  const approval = pending.view?.approval;
+  const confirmLabel = stringOrUndefined(approval?.confirmLabel);
+  const okLabel = terminalText(confirmLabel ?? "", "Confirm");
   const rawExplain = pending.view
-    ? pending.view.approval?.summary ?? pending.view.explain ?? null
-    : pending.summary;
+    ? stringOrUndefined(approval?.summary) ?? stringOrUndefined(pending.view.explain) ?? null
+    : stringOrUndefined(pending.summary) ?? null;
   const explainText = rawExplain === null ? null : terminalText(rawExplain) || null;
   return {
     ctx: {
@@ -182,4 +186,8 @@ export function confirmCardKeys(
     },
     explainText
   };
+}
+
+function stringOrUndefined(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
 }
