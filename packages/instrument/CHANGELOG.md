@@ -101,6 +101,10 @@ Fixes ported from infinite.fast: ways a customer site silently collected the wro
   `posthog.identify()` threw too. The list is now PostHog's current official one (the list
   infinite.fast ships). Only the method list changed: `defaults`, `api_host` and installs the
   customer already had are untouched.
+- **The harness's step list has one source of truth.** The runbook's step ids listed 12 steps while
+  the harness ran 13 (`setup-checks` was missing from the list), so anything reading the step ids
+  disagreed with what actually ran. The run order is now derived from the id list, an id without a
+  step does not compile, and a test fails if the two ever drift again.
 
 ## 0.11.0 — 2026-09-21
 

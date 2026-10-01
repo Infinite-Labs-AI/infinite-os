@@ -494,7 +494,7 @@ infinite analytics [--check | --plan | --apply | --verify-only] [flags]         
 `infinite analytics` adds only what the standalone tag cannot know — the Desktop's active
 workspace, the public keys `infinite setup` saved under `~/.infinite/artifacts/<workspaceId>.json`,
 and a verification backend that reads receipts back through the running Desktop (the CLI holds no
-cloud credential; the app makes the call with its own session) — then runs the same eleven steps. The `infinite` CLI is fully
+cloud credential; the app makes the call with its own session) — then runs the same steps. The `infinite` CLI is fully
 paid: `--plan`, the default apply, `--verify-only` — anything that writes or reaches the cloud —
 goes through the same Desktop readiness gate as the rest of the product (signed in, workspace
 linked, subscription active) and prints the standard onboarding guidance otherwise, touching
