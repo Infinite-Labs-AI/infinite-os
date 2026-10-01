@@ -310,6 +310,55 @@ describe("createDesktopTurnSource", () => {
     ]);
   });
 
+  it("a throwing onView drops the view and the turn still resolves with its answer and pending cards", async () => {
+    const client = fakeClient({
+      sessionCapable: true,
+      frames: [
+        {
+          kind: "progress",
+          data: {
+            type: "tool.view",
+            stage: "tool",
+            message: "Pause",
+            viewId: "view-3",
+            name: "pause_entity",
+            view: approvalView()
+          }
+        },
+        {
+          kind: "done",
+          message: "Ready to pause.",
+          sessionId: "s9",
+          data: { sessionId: "s9", turnId: "turn-9" },
+          actionCalls: [
+            {
+              status: "requires_confirmation",
+              confirmationHandle: "h9",
+              actionId: "pause_entity",
+              summary: "Pause Hook B"
+            }
+          ]
+        }
+      ]
+    });
+    const events: ChatProgressEvent[] = [];
+    const r = await createDesktopTurnSource(client).runTurn(
+      "pause it",
+      undefined,
+      (e) => events.push(e),
+      new AbortController().signal,
+      undefined,
+      () => {
+        throw new Error("renderer blew up");
+      }
+    );
+    expect(completions(events)).toHaveLength(1);
+    expect(JSON.stringify(completions(events)[0])).toContain("Ready to pause.");
+    expect(r.sessionId).toBe("s9");
+    expect(r.pendingConfirmations).toHaveLength(1);
+    expect(r.pendingConfirmations![0]!.turnId).toBe("turn-9");
+  });
+
   it("drops an undecodable tool.view frame: no onView call and no ChatProgressEvent", async () => {
     const client = fakeClient({
       sessionCapable: true,

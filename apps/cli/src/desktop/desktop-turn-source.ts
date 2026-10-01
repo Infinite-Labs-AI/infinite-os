@@ -186,7 +186,17 @@ export function createDesktopTurnSource(
         (frame) => {
           if (frame.kind === "progress" && isToolViewFrameData(frame.data)) {
             const toolView = decodeToolViewFrame(frame.data);
-            if (toolView) onView?.(toolView);
+            if (toolView && onView) {
+              // C8: a view degrades and never fails a turn. A renderer that
+              // throws here would otherwise reject the stream before `done`,
+              // losing the text answer and every pending approval card; drop
+              // the view instead (the trail row stays the answer).
+              try {
+                onView(toolView);
+              } catch {
+                // dropped on purpose
+              }
+            }
             return;
           }
           if (frame.kind === "done") {
