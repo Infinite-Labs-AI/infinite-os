@@ -2130,7 +2130,7 @@ describe("infinite app command", () => {
         "FORGED",
         "Pending confirmation: Publish FORGED",
         "  Bud get: $500 FORGED",
-        "Confirmation approved: Publish FORGED",
+        "✓ Done",
         ""
       ].join("\n")
     );
@@ -2208,10 +2208,100 @@ describe("infinite app command", () => {
         }
       ]);
       expect(stdout.join("")).toContain(
-        `Confirmation ${decision === "approve" ? "approved" : "declined"}: Publish the page`
+        decision === "approve" ? "✓ Done\n" : "✕ Dismissed — nothing was executed.\n"
       );
     }
   );
+
+  describe("typed answers on the one-shot prompt", () => {
+    const expiresAt = new Date(2026, 9, 1, 16, 45).toISOString();
+    function oneShotFetch(confirmBodies: unknown[]) {
+      return vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("/v1/status")) return jsonResponse(status());
+        if (url.endsWith("/v1/confirm")) {
+          const body = JSON.parse(String(init?.body)) as { decision: string };
+          confirmBodies.push(body);
+          return jsonResponse({ ok: true, decision: body.decision });
+        }
+        return ndjsonResponse([
+          JSON.stringify({
+            protocolVersion: 1,
+            requestId: "request-1",
+            sequence: 1,
+            kind: "done",
+            data: {
+              turnId: "turn-1",
+              message: "Ready.",
+              actionCalls: [
+                {
+                  actionId: "pause_ad",
+                  status: "requires_confirmation",
+                  confirmationHandle: "opaque-confirm-1",
+                  summary: "Pause Ad 01",
+                  view: {
+                    v: 1, kind: "change", tool: "pause_ad", title: "Pause", state: "needs_yes", asOf: null,
+                    scope: { workspaceName: "W", crossWorkspace: false }, caveats: [],
+                    approval: { kind: "card", title: "Pause", summary: null, confirmLabel: "Pause",
+                      dismissLabel: "Dismiss", rows: [], expiresAt },
+                    body: { target: { kind: "ad", label: "Ad 01" }, rows: [], warnings: [] }
+                  }
+                }
+              ]
+            }
+          })
+        ]);
+      }) as typeof fetch;
+    }
+
+    async function runWithAnswers(answers: string[]) {
+      const fixture = createBridgeHome();
+      roots.push(fixture.root);
+      const confirmBodies: unknown[] = [];
+      const stdout: string[] = [];
+      const asked: string[] = [];
+      await runDesktopAppCommand(["pause", "it"], fixture.env, {
+        fetchImpl: oneShotFetch(confirmBodies),
+        randomId: () => "request-1",
+        promptAnswer: async (question) => {
+          asked.push(question);
+          return answers.shift() ?? "";
+        },
+        io: {
+          inputIsTTY: true,
+          outputIsTTY: true,
+          writeOut: (text) => stdout.push(text),
+          writeErr: () => undefined
+        }
+      });
+      return { confirmBodies, stdout: stdout.join(""), asked };
+    }
+
+    it.each([
+      ["n", "decline"],
+      ["no", "decline"],
+      ["y", "approve"],
+      ["yes", "approve"]
+    ] as const)("%j sends decision %s", async (answer, decision) => {
+      const run = await runWithAnswers([answer]);
+      expect(run.confirmBodies).toEqual([expect.objectContaining({ decision })]);
+      expect(run.asked).toHaveLength(1);
+    });
+
+    it("bare Enter re-prompts once; a second non-answer leaves the card pending and sends nothing", async () => {
+      const run = await runWithAnswers(["", ""]);
+      expect(run.asked).toHaveLength(2);
+      expect(run.confirmBodies).toEqual([]);
+      expect(run.stdout).toContain("Left for later — expires 16:45\n");
+      expect(run.stdout).not.toContain("Dismissed");
+    });
+
+    it("bare Enter then n is a real decline", async () => {
+      const run = await runWithAnswers(["", "n"]);
+      expect(run.confirmBodies).toEqual([expect.objectContaining({ decision: "decline" })]);
+      expect(run.stdout).toContain("✕ Dismissed — nothing was executed.\n");
+    });
+  });
 
   it.each(["data", "result", "envelope"] as const)(
     "reports a nested execution failure under %s without printing an approval",

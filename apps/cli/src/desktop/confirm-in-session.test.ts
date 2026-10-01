@@ -29,7 +29,10 @@ describe("handleInSessionConfirmation", () => {
     expect(client.confirm).toHaveBeenCalledWith(
       expect.objectContaining({ confirmationHandle: "h1", decision: "approve" })
     );
+    // A receipt, not JSON: the link still prints, as a plain line.
+    expect(out.join("")).toContain("✓ Done\n");
     expect(out.join("")).toContain("go.infinite.fast/x");
+    expect(out.join("")).not.toMatch(/[{}"]/);
   });
 
   it("sanitizes ANSI/control sequences out of the summary in the card and prompt", async () => {
@@ -100,18 +103,90 @@ describe("handleInSessionConfirmation", () => {
     expect(prompts[0]!.length).toBeLessThan(300);
   });
 
-  it("declines on n/Enter → does not call confirm", async () => {
+  it.each(["n", "N", "no", "No"])("%j sends a real decline and prints the dismissed line", async (answer) => {
+    const out: string[] = [];
+    const client = { confirm: vi.fn(async () => ({ ok: true })) };
+    await handleInSessionConfirmation(
+      { confirmationHandle: "h1", turnId: "t1", summary: "x", confirmationDetails: [] },
+      { inputIsTTY: true, outputIsTTY: true, prompt: async () => answer, write: (s: string) => out.push(s) },
+      client
+    );
+    expect(client.confirm).toHaveBeenCalledTimes(1);
+    expect(client.confirm).toHaveBeenCalledWith(
+      expect.objectContaining({ turnId: "t1", confirmationHandle: "h1", decision: "decline" })
+    );
+    expect(out.join("")).toContain("✕ Dismissed — nothing was executed.\n");
+    expect(out.join("")).not.toContain("Confirmation declined");
+  });
+
+  it.each(["y", "Y", "yes", "YES"])("%j approves", async (answer) => {
+    const client = { confirm: vi.fn(async () => ({ ok: true })) };
+    await handleInSessionConfirmation(
+      { confirmationHandle: "h1", turnId: "t1", summary: "x", confirmationDetails: [] },
+      { inputIsTTY: true, outputIsTTY: true, prompt: async () => answer, write: () => {} },
+      client
+    );
+    expect(client.confirm).toHaveBeenCalledWith(expect.objectContaining({ decision: "approve" }));
+  });
+
+  it("bare Enter never declines: it re-prompts once, then leaves the card pending", async () => {
+    const out: string[] = [];
+    const prompts: string[] = [];
     const client = { confirm: vi.fn() };
+    const expiresAt = new Date(2026, 9, 1, 9, 30).toISOString();
     await handleInSessionConfirmation(
       {
         confirmationHandle: "h1",
         turnId: "t1",
         summary: "x",
-        confirmationDetails: []
+        confirmationDetails: [],
+        view: {
+          v: 1, kind: "change", tool: "t", title: "Pause", state: "needs_yes", asOf: null,
+          scope: { workspaceName: "W", crossWorkspace: false }, caveats: [],
+          approval: { kind: "card", title: "Pause", summary: null, confirmLabel: "Pause", dismissLabel: "Dismiss", rows: [], expiresAt },
+          body: { target: { kind: "ad", label: "Ad 01" }, rows: [], warnings: [] }
+        }
       },
-      { inputIsTTY: true, outputIsTTY: true, prompt: async () => "", write: () => {} },
+      {
+        inputIsTTY: true,
+        outputIsTTY: true,
+        prompt: async (q: string) => {
+          prompts.push(q);
+          return "";
+        },
+        write: (s: string) => out.push(s)
+      },
+      client
+    );
+    expect(prompts).toHaveLength(2);
+    expect(client.confirm).not.toHaveBeenCalled();
+    expect(out.join("")).toContain("Left for later — expires 09:30\n");
+  });
+
+  it("any other answer is not a decline either", async () => {
+    const client = { confirm: vi.fn() };
+    const out: string[] = [];
+    await handleInSessionConfirmation(
+      { confirmationHandle: "h1", turnId: "t1", summary: "x", confirmationDetails: [] },
+      { inputIsTTY: true, outputIsTTY: true, prompt: async () => "maybe", write: (s: string) => out.push(s) },
       client
     );
     expect(client.confirm).not.toHaveBeenCalled();
+    expect(out.join("")).toContain("Left for later — nothing was sent.\n");
+  });
+
+  it("a confirm that cannot reach the app says the card stays", async () => {
+    const out: string[] = [];
+    const client = {
+      confirm: vi.fn(async () => {
+        throw Object.assign(new Error("Infinite Desktop stopped responding."), { code: "desktop_unreachable" });
+      })
+    };
+    await handleInSessionConfirmation(
+      { confirmationHandle: "h1", turnId: "t1", summary: "x", confirmationDetails: [] },
+      { inputIsTTY: true, outputIsTTY: true, prompt: async () => "n", write: (s: string) => out.push(s) },
+      client
+    );
+    expect(out.join("")).toContain("✗ Couldn't reach the app — the card stays until it expires.\n");
   });
 });

@@ -25,18 +25,20 @@ const PENDING: InSessionConfirmationAction = {
 };
 
 describe("Ink in-session write confirmation (Plan 2) — structural guards (CI-runnable)", () => {
-  it("gates the y/N branch inside the SINGLE useInput owner (only y/Y approves)", () => {
+  it("gates the y/n branch inside the SINGLE useInput owner (only y/Y approves, only n/N declines)", () => {
     // The write gate must live in the one useInput owner, before the plain
-    // composer, and only an explicit y/Y approves — everything else declines or
-    // is swallowed (mirrors the readline handler's semantics).
+    // composer. Only an explicit y/Y approves and only n/N declines (a real "no"
+    // now reaches the app); Enter and Escape are swallowed with every other key.
     const block = source.slice(
       source.indexOf("if (confirmActionActive) {"),
       source.indexOf("if (selectionActive) {")
     );
     expect(block).toContain('input === "y" || input === "Y"');
     expect(block).toContain("onConfirmActionApprove()");
-    expect(block).toContain('input === "n" || input === "N" || key.return || key.escape');
+    expect(block).toContain('if (input === "n" || input === "N") {');
     expect(block).toContain("onConfirmActionDecline()");
+    expect(block).not.toContain("key.return");
+    expect(block).not.toContain("key.escape");
   });
 
   it("dequeues the head BEFORE acting so a single-use handle can't double-resolve", () => {
@@ -47,13 +49,25 @@ describe("Ink in-session write confirmation (Plan 2) — structural guards (CI-r
     // Dequeue precedes the branch that calls onConfirmAction.
     expect(handler.indexOf("setPendingConfirmActions((current) => current.slice(1))"))
       .toBeLessThan(handler.indexOf("onConfirmAction?.(head"));
-    expect(handler).toContain('onConfirmAction?.(head, "approve")');
+    // Both decisions reach the app: a decline is a real "no", not a local note.
+    expect(handler).toContain("onConfirmAction?.(head, decision)");
+    expect(handler).not.toContain('if (decision === "decline")');
   });
 
-  it("scrubs the un-redacted summary through terminalText before rendering/echoing", () => {
-    // Both the declined transcript line and the overlay render run the summary
-    // through terminalText (the details are redacted upstream → rendered verbatim).
-    expect(source).toContain("terminalText(head.summary");
+  it("prints receipt lines, never the JSON result", () => {
+    const handler = source.slice(
+      source.indexOf("const resolveConfirmAction"),
+      source.indexOf("useEffect(() => {\n    // Don't drain")
+    );
+    expect(handler).toContain("confirmResultLines(result, decision)");
+    expect(handler).toContain("confirmErrorLines(error)");
+    expect(handler).not.toContain("JSON.stringify");
+  });
+
+  it("scrubs the un-redacted summary through terminalText before rendering", () => {
+    // The overlay render runs the summary through terminalText (the details are
+    // redacted upstream → rendered verbatim); receipts are scrubbed by
+    // confirmResultLines.
     expect(source).toContain("terminalText(pending.summary");
     expect(source).toContain("detail.label}: ${detail.value}");
   });
@@ -94,7 +108,7 @@ describe("Ink in-session write confirmation (Plan 2) — live PTY flow (skipped 
   // headless CI, runs in milliseconds locally, and is the primary functional proof.
 
   it.skipIf(process.env.CI === "true")(
-    "y approves → calls onConfirmAction(approve) and renders the JSON result",
+    "y approves → calls onConfirmAction(approve) and renders the receipt, not JSON",
     { timeout: 30_000 },
     async () => {
       const input = ttyInput();
@@ -110,7 +124,7 @@ describe("Ink in-session write confirmation (Plan 2) — live PTY flow (skipped 
         title: "Infinite TUI",
         onConfirmAction: async (action, decision) => {
           confirmed.push({ handle: action.confirmationHandle, decision });
-          return { ok: true, published: "rev_42" };
+          return { ok: true, published: "rev_42", receipt: "Page published" };
         },
         async onSubmitLine(): Promise<InkInteractiveLineResult> {
           return { messages: [{ role: "assistant", text: "done" }], pendingConfirmations: [PENDING] };
@@ -127,8 +141,9 @@ describe("Ink in-session write confirmation (Plan 2) — live PTY flow (skipped 
 
       await sendKeys(input, "y");
       await waitFor(() => confirmed.length === 1, 4_000, output.text);
-      // The JSON result lands in the transcript.
-      await waitFor(() => output.text().includes('"published": "rev_42"'), 4_000, output.text);
+      // The receipt lands in the transcript; the JSON never does.
+      await waitFor(() => output.text().includes("✓ Page published"), 4_000, output.text);
+      expect(output.text()).not.toContain('"published"');
 
       expect(confirmed).toEqual([{ handle: "h1", decision: "approve" }]);
 
@@ -138,7 +153,7 @@ describe("Ink in-session write confirmation (Plan 2) — live PTY flow (skipped 
   );
 
   it.skipIf(process.env.CI === "true")(
-    "n declines → calls nothing and appends a declined note",
+    "n declines → sends a real decline and prints the dismissed receipt",
     { timeout: 30_000 },
     async () => {
       const input = ttyInput();
@@ -166,9 +181,9 @@ describe("Ink in-session write confirmation (Plan 2) — live PTY flow (skipped 
       await waitFor(() => output.text().includes("Approve this write?"), 4_000, output.text);
 
       await sendKeys(input, "n");
-      await waitFor(() => output.text().includes("Confirmation declined"), 4_000, output.text);
-      // Decline calls the client NOTHING.
-      expect(confirmed).toEqual([]);
+      await waitFor(() => output.text().includes("✕ Dismissed — nothing was executed."), 4_000, output.text);
+      // The decline reaches the app.
+      expect(confirmed).toEqual(["decline"]);
 
       await sendKeys(input, "/exit\r");
       await session;
@@ -176,7 +191,7 @@ describe("Ink in-session write confirmation (Plan 2) — live PTY flow (skipped 
   );
 
   it.skipIf(process.env.CI === "true")(
-    "bare Enter declines (safe default), like the readline handler",
+    "bare Enter and Esc never decline: the card stays and nothing is sent",
     { timeout: 30_000 },
     async () => {
       const input = ttyInput();
@@ -204,8 +219,14 @@ describe("Ink in-session write confirmation (Plan 2) — live PTY flow (skipped 
       await waitFor(() => output.text().includes("Approve this write?"), 4_000, output.text);
 
       await sendKeys(input, "\r");
-      await waitFor(() => output.text().includes("Confirmation declined"), 4_000, output.text);
+      await sendKeys(input, "\x1b");
+      await new Promise((resolve) => setTimeout(resolve, 200));
       expect(confirmed).toEqual([]);
+      expect(output.text()).not.toContain("Dismissed");
+      // Still pending: the card's own n is what declines.
+      await sendKeys(input, "n");
+      await waitFor(() => confirmed.length === 1, 4_000, output.text);
+      expect(confirmed).toEqual(["decline"]);
 
       await sendKeys(input, "/exit\r");
       await session;
