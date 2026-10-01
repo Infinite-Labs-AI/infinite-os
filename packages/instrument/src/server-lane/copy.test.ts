@@ -68,6 +68,11 @@ describe("the agent brief", () => {
     expect(brief).toContain("Send outcomes to Meta Conversions API")
     // The hashing recipe is spelled out, so nobody has to guess Meta's normalisation.
     expect(brief).toContain('createHash("sha256").update(email.trim().toLowerCase()).digest("hex")')
+    // ONE external_id rule, the browser accessor's: trimmed only, case kept. Never "lowercased".
+    expect(brief).toContain('external_id: createHash("sha256").update(user.id.trim()).digest("hex")')
+    expect(brief).toContain("**trimmed only — its case is kept**")
+    expect(brief).not.toMatch(/external_id[^\n]*\.toLowerCase\(\)/)
+    expect(brief).not.toMatch(/`em` and `external_id` are sha256 hex of the trimmed, lowercased/)
     expect(brief).toContain("discarded")
     expect(brief).toContain("64-character hex digest is rejected")
     // The dedup promise, with the 48-hour window and the pixel's own eventID argument.

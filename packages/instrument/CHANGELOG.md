@@ -67,6 +67,11 @@ Fixes ported from infinite.fast: ways a customer site silently collected the wro
   hide a good one), and reads a plain-object `req.headers` (Vercel Node functions, Express) as well
   as `Headers`. `_fbp` is read as before (first listed), and dropped when it is not in Meta's shape.
   Same rules as infinite.fast, fixed there on 29 Sep.
+- **One rule for hashing the account ID sent to Meta.** The server-lane setup guide told customers
+  to lowercase `external_id` before hashing, while the browser pixel's matching helper keeps the
+  id's case — so an id with capital letters reached Meta as two different people. The guide, the
+  generated helper's comments and a new `hashInfiniteExternalId` recipe now all say the same thing
+  as infinite.fast: the email is trimmed and lowercased; the account id is trimmed only.
 
 ## 0.11.0 — 2026-09-21
 

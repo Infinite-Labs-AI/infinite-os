@@ -253,7 +253,7 @@ ${exported}interface InfiniteAdMatch {
   fbc?: string
   /** Meta's own _fbp first-party cookie on your domain, verbatim. */
   fbp?: string
-  /** sha256 hex of your own account id. */
+  /** sha256 hex of your own account id, trimmed only (case kept — never lowercase an id). */
   external_id?: string
 }
 
@@ -600,7 +600,7 @@ export function outcomeHelperSource(
   fbc?: string
   /** Meta's _fbp cookie, verbatim. */
   fbp?: string
-  /** sha256 hex of your own account id. */
+  /** sha256 hex of your own account id, trimmed only (case kept — never lowercase an id). */
   external_id?: string
   /** The BUYER'S BROWSER ip, from YOUR inbound request. Meta needs the browser's, not your server's. */
   client_ip_address?: string
@@ -863,8 +863,12 @@ function infiniteFbp(header${t(": string")})${t(": string | undefined")} {
  * PROVIDER'S, not your buyer's — capture the block during the checkout request instead and carry it
  * to the webhook, or report the outcome from the browser-facing route.
  *
- * You supply em / external_id yourself, already hashed:
- *   adMatchFromRequest(request, { em: createHash("sha256").update(email.trim().toLowerCase()).digest("hex") })
+ * You supply em / external_id yourself, already hashed. em is trimmed AND lowercased; external_id is
+ * trimmed ONLY (an id keeps its case, exactly as the browser pixel's matching helper hashes it):
+ *   adMatchFromRequest(request, {
+ *     em: createHash("sha256").update(email.trim().toLowerCase()).digest("hex"),
+ *     external_id: createHash("sha256").update(user.id.trim()).digest("hex")
+ *   })
  */
 export function adMatchFromRequest(request${t(": InfiniteVisitKeyRequest")}, hashed${t(": { em?: string; external_id?: string }")} = {})${t(": InfiniteAdMatch")} {
   // A WHATWG Headers (edge, newer Vercel) OR a plain object (req.headers on a Vercel Node function,
