@@ -178,7 +178,9 @@ export function readMarkdownTableBlock(
       return "hold";
     }
     const rawLines = lines.slice(0, end);
-    const tableLines = rawLines.filter((line) => !isMarkdownTableDivider(line));
+    // Only a divider in the header position is chrome; a later all-dash row is
+    // data (a dash for an unmeasured value) and must stay.
+    const tableLines = rawLines.filter((line, index) => !(index === 1 && isMarkdownTableDivider(line)));
     if (tableLines.length > 0) {
       return { rawCount: end, rawLines, tableLines };
     }
@@ -206,7 +208,7 @@ export function isMarkdownTableDivider(row: string): boolean {
 }
 
 function tableBlock(block: MarkdownTableBlock): MarkdownBlock {
-  const divider = block.rawLines.find(isMarkdownTableDivider);
+  const divider = block.rawLines[1] && isMarkdownTableDivider(block.rawLines[1]) ? block.rawLines[1] : undefined;
   const aligns = divider
     ? splitMarkdownTableRow(divider).map((cell): TableAlign | undefined =>
         cell.endsWith(":") && !cell.startsWith(":") ? "right" : cell.startsWith(":") && !cell.endsWith(":") ? "left" : undefined

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { displayWidth, stripAnsi } from "../tui/lib/display-width.js";
-import { resolveTheme } from "../tui/theme.js";
+import { ansiFg, resolveTheme } from "../tui/theme.js";
 import { looksNumeric, renderTable } from "./table.js";
 
 // infinite-os is public: every number and name below is synthetic.
@@ -104,6 +104,19 @@ describe("renderTable", () => {
     expect(colored.lines.map(stripAnsi)).toEqual(plain.lines);
     expect(colored.lines.join("")).toContain("\u001b[1m");
     expect(plain.lines.join("")).not.toMatch(/[\u001b‮]/);
+  });
+
+  it("paints borders back to the caller's role instead of a full reset", () => {
+    const theme = resolveTheme();
+    const input = { columns: [{ label: "Name" }, { label: "Spend" }], rows: [["Hook", "$1.00"]], total: ["Total", "$1.00"] };
+    const text = renderTable(input, { width: 40, color: true, theme, role: "text" });
+    expect(text.lines.every((l) => !l.includes("\u001b[0m"))).toBe(true);
+    expect(text.lines[1]).toContain(`│${ansiFg(theme, "text")}`);
+    const muted = renderTable(input, { width: 40, color: true, theme, role: "muted" });
+    expect(muted.lines[3]).toContain(`│${ansiFg(theme, "muted")} Hook`);
+    const record = renderTable(input, { width: 6, color: true, theme, role: "text" });
+    expect(record.fallback).toBe("record");
+    expect(record.lines.every((l) => !l.includes("\u001b[0m"))).toBe(true);
   });
 });
 

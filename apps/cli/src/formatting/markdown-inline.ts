@@ -173,9 +173,10 @@ function parseRange(text: string, style: Style): Span[] {
     if (char === "!" && text[index + 1] === "[") {
       const link = readLink(text, index + 1);
       if (link) {
-        // No pictures in the terminal: an image is its alt text, linked like any link.
+        // No pictures in the terminal and no picture URLs: an image is its alt
+        // text only, with no link, so nothing offers to open or copy it.
         flush();
-        out.push(...parseRange(link.label || "image", { ...style, link: link.url }));
+        out.push(...parseRange(link.label || "image", style));
         index = link.end;
         continue;
       }

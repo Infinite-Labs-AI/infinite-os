@@ -13,12 +13,19 @@ import { renderTable } from "./table.js";
  *
  * `role` is the color the caller paints the line in (default `text`). A span
  * that switches color (code, links, a level-1 heading) switches back to it.
+ *
+ * `plain` skips the markdown parse (see the option).
  */
 export interface MarkdownRenderOptions {
   width: number;
   color: boolean;
   theme: Theme;
   role?: AnsiRole;
+  /**
+   * Plain text, no markdown: each line is scrubbed and wrapped, nothing else.
+   * For tool output, which must read exactly as the tool returned it.
+   */
+  plain?: boolean;
 }
 
 const BULLETS = ["•", "◦", "▪"] as const;
@@ -41,8 +48,14 @@ export function renderMarkdown(text: string, opts: MarkdownRenderOptions): strin
     .join("\n");
   const lines: string[] = [];
 
-  for (const block of lexMarkdown(source)) {
-    lines.push(...renderBlock(block, { ...opts, width }));
+  if (opts.plain) {
+    for (const line of source.split("\n")) {
+      lines.push(...renderPlainLine(line.trimEnd(), { ...opts, width }));
+    }
+  } else {
+    for (const block of lexMarkdown(source)) {
+      lines.push(...renderBlock(block, { ...opts, width }));
+    }
   }
 
   while (lines.length && lines[0] === "") {
@@ -52,6 +65,21 @@ export function renderMarkdown(text: string, opts: MarkdownRenderOptions): strin
     lines.pop();
   }
   return lines.length ? lines : [""];
+}
+
+/** A line that fits prints as written (spacing kept); a longer one wraps under its own indent. */
+function renderPlainLine(line: string, opts: MarkdownRenderOptions): string[] {
+  if (!line) {
+    return [""];
+  }
+  if (displayWidth(line) <= opts.width) {
+    return [line];
+  }
+  const lead = /^\s*/.exec(line)![0];
+  const indent = displayWidth(lead) <= opts.width / 2 ? lead : "";
+  return wrapSpans([{ text: line.slice(lead.length) }], opts.width, { first: indent, rest: indent }).map((spans) =>
+    styleLine(spans, opts)
+  );
 }
 
 function renderBlock(block: MarkdownBlock, opts: MarkdownRenderOptions): string[] {
@@ -69,7 +97,10 @@ function renderBlock(block: MarkdownBlock, opts: MarkdownRenderOptions): string[
     case "code":
       return renderCode(block.lines, opts);
     case "quote": {
-      const inner = renderMarkdown(block.lines.join("\n"), { ...opts, width: Math.max(1, opts.width - 2) });
+      if (opts.width < 4) {
+        return renderMarkdown(block.lines.join("\n"), opts);
+      }
+      const inner = renderMarkdown(block.lines.join("\n"), { ...opts, width: opts.width - 2 });
       const bar = paint("│", "muted", opts);
       return inner.map((line) => (line ? `${bar} ${line}` : bar));
     }
@@ -86,19 +117,27 @@ function renderListItem(block: Extract<MarkdownBlock, { type: "list_item" }>, op
   if (opts.width - displayWidth(`${indent}${marker} `) < 8) {
     indent = "";
   }
-  const first = `${indent}${marker} `;
-  const rest = " ".repeat(displayWidth(first));
+  let first = `${indent}${marker} `;
+  let rest = " ".repeat(displayWidth(first));
+  if (displayWidth(first) >= opts.width) {
+    first = rest = "";
+  }
   return layout(parseInline(block.text), opts, { first, rest }).map((line) => styleLine(line, opts));
 }
 
 function renderCode(source: readonly string[], opts: MarkdownRenderOptions): string[] {
   const indent = opts.width > 4 ? "  " : "";
-  const avail = Math.max(2, opts.width - indent.length);
+  const avail = opts.width - indent.length;
   const out: string[] = [];
   for (const raw of source) {
     const line = raw.trimEnd();
     if (displayWidth(line) <= avail) {
       out.push(`${indent}${paint(line, "primaryBright", opts)}`);
+      continue;
+    }
+    if (avail < 2) {
+      // No room for a character plus the ↩ mark.
+      out.push(paint(truncateCells(line, opts.width), "primaryBright", opts));
       continue;
     }
     let chunk = "";
@@ -120,7 +159,7 @@ function renderMarkdownTable(block: Extract<MarkdownBlock, { type: "table" }>, o
       columns: block.header.map((label, index) => ({ label: plainInline(label), align: block.aligns[index] })),
       rows: block.rows.map((row) => row.map(plainInline))
     },
-    { width: opts.width, color: opts.color, theme: opts.theme }
+    { width: opts.width, color: opts.color, theme: opts.theme, role: opts.role }
   );
   const lines = [...table.lines];
   if (table.hidden.length) {

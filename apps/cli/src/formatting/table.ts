@@ -1,6 +1,6 @@
 import { terminalText } from "../desktop/confirm-in-session.js";
 import { displayWidth, padEndCells, truncateCells } from "../tui/lib/display-width.js";
-import { ansi, type Theme } from "../tui/theme.js";
+import { ansiFg, type AnsiRole, type Theme } from "../tui/theme.js";
 
 /**
  * The one table drawer for the terminal. Markdown tables (T3) and the numbers,
@@ -21,7 +21,8 @@ import { ansi, type Theme } from "../tui/theme.js";
 export type TableAlign = "left" | "right";
 export interface TableColumn { label: string; align?: TableAlign; dropPriority?: number } // 0 = never drop; higher drops first
 export interface TableInput { columns: TableColumn[]; rows: string[][]; total?: string[] }
-export interface TableOptions { width: number; color: boolean; theme: Theme }
+/** `role` is the color the caller paints the line in (default `text`); borders switch back to it, never to a full reset. */
+export interface TableOptions { width: number; color: boolean; theme: Theme; role?: AnsiRole }
 export interface TableRender { lines: string[]; hidden: string[]; fallback: "record" | null }
 
 const NUMBER = String.raw`[+\-−]?[$€£¥]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?[%kKMBx×]?`;
@@ -75,7 +76,7 @@ export function renderTable(input: TableInput, opts: TableOptions): TableRender 
     return body.length > 0 && body.every(looksNumeric);
   });
 
-  const border = (value: string) => ansi(opts.theme, "muted", value, opts.color);
+  const border = (value: string) => paint(value, "muted", opts);
   const rule = (left: string, middle: string, end: string) =>
     border(`${left}${keep.map((index) => "─".repeat((widths[index] ?? 0) + 2)).join(middle)}${end}`);
   const line = (cells: readonly string[], strong: boolean) => {
@@ -180,6 +181,10 @@ function normalizeRow(row: readonly string[], count: number): string[] {
 
 function scrub(value: string): string {
   return terminalText(value);
+}
+
+function paint(value: string, tone: AnsiRole, opts: TableOptions): string {
+  return opts.color ? `${ansiFg(opts.theme, tone)}${value}${ansiFg(opts.theme, opts.role ?? "text")}` : value;
 }
 
 function bold(value: string, opts: TableOptions): string {

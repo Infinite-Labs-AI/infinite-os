@@ -3,6 +3,7 @@ import { displayWidth, stripAnsi } from "../tui/lib/display-width.js";
 import { resolveTheme } from "../tui/theme.js";
 import { parseInline, wrapSpans } from "./markdown-inline.js";
 import { renderMarkdown } from "./markdown-render.js";
+import { stripInlineMarkup } from "./markdown.js";
 
 const theme = resolveTheme({});
 
@@ -102,6 +103,46 @@ describe("renderMarkdown", () => {
     const out = renderMarkdown("See ![chart](https://example.com/c.png) here.", { width: 60, color: false, theme }).join("\n");
     expect(out).not.toContain("http");
     expect(out).toContain("chart");
+    expect(out).not.toContain("↗");
+    expect(parseInline("![c](https://x/c.png)")[0]?.link).toBeUndefined();
+    expect(stripInlineMarkup("see ![c](https://x/c.png)")).toBe("see c");
+  });
+
+  it("plain mode keeps text exactly as written: no markdown, only scrub and wrap", () => {
+    expect(renderMarkdown("- a __init__.py *x*", { width: 40, color: false, theme, plain: true })).toEqual(["- a __init__.py *x*"]);
+    expect(renderMarkdown("# comment\n\n+ added\nC:\\Users\\me\\_file", { width: 40, color: false, theme, plain: true })).toEqual([
+      "# comment",
+      "",
+      "+ added",
+      "C:\\Users\\me\\_file"
+    ]);
+    expect(renderMarkdown("x\u001b]0;t\u0007y", { width: 40, color: false, theme, plain: true })).toEqual(["xy"]);
+    expect(renderMarkdown("  indented   a    b", { width: 40, color: false, theme, plain: true })).toEqual(["  indented   a    b"]);
+    expect(renderMarkdown("    one two three four", { width: 12, color: false, theme, plain: true })).toEqual(["    one two", "    three", "    four"]);
+    const wrapped = renderMarkdown("src/__init__.py src/__main__.py src/a_b_c.py", { width: 16, color: true, theme, plain: true });
+    expect(wrapped.every((l) => displayWidth(l) <= 16)).toBe(true);
+    expect(wrapped.map(stripAnsi).join(" ")).toBe("src/__init__.py src/__main__.py src/a_b_c.py");
+  });
+
+  it("keeps a body row of single-hyphen cells in a table without a header divider", () => {
+    const out = renderMarkdown("| A | B |\n| x | 1 |\n| - | - |", { width: 40, color: false, theme });
+    const body = out.filter((l) => l.startsWith("│"));
+    expect(body).toHaveLength(3); // header + 2 body rows
+    expect(body[2]?.replace(/\s+/g, " ")).toBe("│ - │ - │");
+  });
+
+  it("never ends a table border with a full reset inside a colored line", () => {
+    const out = renderMarkdown("| A | B |\n|---|--:|\n| x | 12 |", { width: 40, color: true, theme, role: "muted" });
+    expect(out.some((l) => l.includes("┌"))).toBe(true);
+    expect(out.every((l) => !l.includes("\u001b[0m"))).toBe(true);
+  });
+
+  it.each([1, 2, 3, 4, 5])("keeps every line within width %i for a mixed document", (width) => {
+    const doc = "# Head\n\n- one two\n  - nested item\n1. first\n\n> quoted words\n\n```\nconst value = 1;\n```\n\n| A | B |\n|---|---|\n| x | 1 |";
+    for (const color of [false, true]) {
+      const out = renderMarkdown(doc, { width, color, theme });
+      expect(out.filter((l) => displayWidth(l) > width)).toEqual([]);
+    }
   });
 
   it("keeps literal underscores inside words", () => {

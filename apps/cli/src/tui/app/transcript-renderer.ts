@@ -154,7 +154,10 @@ function renderTranscriptMessage(msg: Msg, ctx: RenderContext): string[] {
   }
 
   if (msg.text.trim()) {
-    return renderBodyLines(msg.text, msg.role === "tool" ? "muted" : "text", ctx);
+    // Tool output is shown as the tool returned it; only model-written text is markdown.
+    return msg.role === "tool"
+      ? renderBodyLines(msg.text, "muted", ctx, "", false)
+      : renderBodyLines(msg.text, "text", ctx);
   }
 
   return [];
@@ -349,12 +352,13 @@ function diffLineRole(line: string): RenderRole {
   return "muted";
 }
 
-function renderBodyLines(text: string, role: RenderRole, ctx: RenderContext, indent = ""): string[] {
+function renderBodyLines(text: string, role: RenderRole, ctx: RenderContext, indent = "", markdown = true): string[] {
   return renderMarkdown(text, {
     width: Math.max(16, ctx.contentWidth - displayWidth(indent) - 2),
     color: ctx.color,
     theme: ctx.theme,
-    role
+    role,
+    plain: !markdown
   }).map((line) => formatTrailLine(`${indent}${line}`, role, ctx));
 }
 
@@ -410,7 +414,7 @@ function renderToolTrail(line: string, ctx: RenderContext): string[] {
 
   return [
     formatTrailLine(`  ${lead}`, tone, ctx),
-    ...renderBodyLines(parsed.detail, tone, ctx, "    ")
+    ...renderBodyLines(parsed.detail, tone, ctx, "    ", false)
   ];
 }
 

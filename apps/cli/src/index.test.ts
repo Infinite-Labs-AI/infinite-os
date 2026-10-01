@@ -2926,6 +2926,37 @@ describe("cli smoke", () => {
     expect(streamed).not.toContain("---:");
   });
 
+  it("scrubs terminal control and bidi characters out of streamed assistant lines", () => {
+    const chunks: string[] = [];
+    const progress = createInteractiveProgressReporter(
+      {
+        columns: 88,
+        isTTY: true,
+        write: (chunk: string) => chunks.push(chunk) > 0
+      },
+      { animate: true, now: () => 1_000 }
+    );
+
+    progress.progress({
+      type: "message.delta",
+      stage: "message",
+      message: "title",
+      text: "Before\u001b]0;pwned\u0007 after \u202emirror\n"
+    });
+    progress.progress({
+      type: "message.complete",
+      stage: "message",
+      message: "Assistant message complete.",
+      text: "done"
+    });
+    progress.stop();
+
+    const written = chunks.join("");
+    expect(written).not.toContain("\u001b]0;pwned");
+    expect(written).not.toContain("\u202e");
+    expect(stripAnsi(written)).toMatch(/│ Before after +mirror/);
+  });
+
   it("draws markdown tables as bordered tables in final TTY assistant panels", () => {
     const panel = renderAssistantResponsePanel(
       ["| Metric | Value |", "| --- | ---: |", "| Revenue | $123 |", "| Signups | 45 |"].join("\n"),

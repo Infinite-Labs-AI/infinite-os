@@ -45,7 +45,7 @@ export function renderMarkdownTableBlock(block: MarkdownTableBlock, width: numbe
 
 export function stripInlineMarkup(value: string): string {
   return value
-    .replace(/!\[(.*?)\]\(((?:[^\s()]|\([^\s()]*\))+?)\)/g, "[image: $1] $2")
+    .replace(/!\[(.*?)\]\(((?:[^\s()]|\([^\s()]*\))+?)\)/g, "$1")
     .replace(/\[(.+?)\]\(((?:[^\s()]|\([^\s()]*\))+?)\)/g, "$1")
     .replace(/<((?:https?:\/\/|mailto:)[^>\s]+|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})>/g, "$1")
     .replace(/~~(.+?)~~/g, "$1")
