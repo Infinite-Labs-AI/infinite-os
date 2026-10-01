@@ -150,9 +150,10 @@ sign-up completes, or on an order-confirmation page:
 // Pass RAW values. The tag hashes them; you must not hash them first.
 await window.infiniteMetaAdvancedMatch({
   email: user.email,        // normalised (trimmed + lowercased) and SHA-256'd for you
-  externalId: user.id       // your own stable account id; hashed the same way
+  externalId: user.id       // your own stable account id; trimmed only (case kept) and SHA-256'd
 })
-fbq("track", "Purchase", { value: 49, currency: "USD" })
+// Browser events fired after this carry the hashed identity. A purchase is not one of them: it
+// goes to Meta from your server's payment webhook (see adMatch below), never as a browser fbq.
 ```
 
 **The contract, so nothing is ambiguous:**
@@ -365,24 +366,33 @@ never logged. Neither half works alone — no block, nothing to forward; no togg
 import { createHash } from "node:crypto"
 import { adMatchFromRequest, postInfiniteOutcome } from "../lib/infinite-outcome"
 
+// 1. At CHECKOUT, from the BUYER'S browser request: their _fbc/_fbp cookies, ip and user agent,
+//    saved together (one device) with the order. Your later call to Infinite is server-to-server
+//    and carries none of them.
+const adMatch = adMatchFromRequest(request, {
+  em: createHash("sha256").update(email.trim().toLowerCase()).digest("hex"),
+  external_id: createHash("sha256").update(user.id.trim()).digest("hex")   // trimmed only: never lowercase an id
+})
+await saveOrderAdMatch(order.id, adMatch)   // e.g. a column on your order row
+
+// 2. In the PAYMENT WEBHOOK, once the payment is real. A purchase is a server event only:
+//    no browser fbq('track', 'Purchase') next to it.
 await postInfiniteOutcome({
   type: "purchase",
   path: "/checkout",                 // Meta requires event_source_url
-  eventId: "purchase:" + order.id,   // Meta gets the same event_id, so your browser pixel dedupes
+  eventId: "purchase:" + order.id,   // Infinite's idempotency key: a retried webhook is counted once
   properties: { value: order.total, currency: "USD" },   // required for a Purchase
-  visitKeyInputs: request,
-  // `request` must be the BUYER'S browser request — it carries their _fbc/_fbp cookies AND the ip
-  // and user agent Meta needs. Your call to Infinite is server-to-server and carries neither.
-  adMatch: adMatchFromRequest(request, {
-    em: createHash("sha256").update(email.trim().toLowerCase()).digest("hex")
-  })
+  adMatch: await loadOrderAdMatch(order.id)
 })
 ```
 
-- **You hash; Infinite never does.** `em` and `external_id` are sha256 hex of the trimmed, lowercased
-  value — a raw email never leaves your server. A value that is not a 64-character hex digest is
-  rejected with a `400` instead of being forwarded, so a mistake shows up at integration time rather
-  than as an empty match rate three months later. Never hash an already-hashed value.
+- **You hash; Infinite never does.** `em` is sha256 hex of the email, trimmed and lowercased.
+  `external_id` is sha256 hex of your own account id, **trimmed only — its case is kept**: the
+  browser accessor hashes the same id the same way, and an id hashed two different ways reaches Meta
+  as two different people. A raw email never leaves your server. A value that is not a 64-character
+  hex digest is rejected with a `400` instead of being forwarded, so a mistake shows up at
+  integration time rather than as an empty match rate three months later. Never hash an
+  already-hashed value.
 - **`fbc` / `fbp` are Meta's own cookies** on your domain
   ([fbp and fbc](https://developers.facebook.com/docs/marketing-api/conversions-api/parameters/fbp-and-fbc)).
   A visitor can set them to anything, so a malformed one is **dropped** and your outcome is still
@@ -393,10 +403,19 @@ await postInfiniteOutcome({
   events shared using the Conversions API". Your call to Infinite is server-to-server — its ip is
   your host's egress address and its user agent is `node` — so `adMatchFromRequest` reads them from
   *your* inbound request. In a webhook the incoming request is the provider's, not your buyer's:
-  capture the block during the checkout request and carry it, or report from the browser-facing route.
-- **`eventId` becomes Meta's `event_id`**, and Meta deduplicates on matching `event_id` +
-  `event_name` within **48 hours**. If you also fire the browser pixel for the same conversion, pass
-  the same id: `fbq('track', 'Purchase', { ... }, { eventID: "purchase:" + order.id })`.
+  that is why the example captures the block at checkout and carries it to the webhook. When a
+  browser holds two `_fbc` cookies, `adMatchFromRequest` sends the newest ad click.
+- **`eventId` is Infinite's idempotency key, not Meta's event ID.** Make it stable per outcome (the
+  order id), so a retried webhook is counted once in your Infinite ledger. Infinite decides the
+  `event_id` Meta receives: for a conversion counted once per order it is this value, but for one
+  counted once per account or once per visit Infinite derives a different id, which your pages never
+  see.
+- **Purchases are server events only.** Report them from the payment webhook and do not also fire
+  `fbq('track', 'Purchase')` on a thank-you page: that browser event cannot carry the id Meta received
+  from the server, so Meta can count the purchase twice.
+- **Never build a Meta event ID in the page, and never fire a Meta conversion (`Purchase`, `Lead`,
+  `CompleteRegistration`, `StartTrial`, …) with `fbq` on a click.** A click is intent, not a
+  conversion; a browser event with an id your page made up matches no server event.
 - **The relay declines rather than sending a broken event.** It skips — and says which, in Site
   Settings — when there is no `event_source_url` (send `path`), no `client_user_agent`, a Purchase
   with no `value` + `currency`, or an `occurredAt` older than Meta's 7-day `event_time` window. Your

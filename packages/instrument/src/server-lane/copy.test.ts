@@ -75,9 +75,21 @@ describe("the agent brief", () => {
     expect(brief).not.toMatch(/`em` and `external_id` are sha256 hex of the trimmed, lowercased/)
     expect(brief).toContain("discarded")
     expect(brief).toContain("64-character hex digest is rejected")
-    // The dedup promise, with the 48-hour window and the pixel's own eventID argument.
-    expect(brief).toContain("within **48 hours**")
-    expect(brief).toContain("eventID:")
+    // eventId is Infinite's idempotency key; Infinite decides the event_id Meta receives (it derives
+    // one for account- and visitor-deduped conversions), so the page must never build a Meta event ID.
+    expect(brief).toContain("**`eventId` is Infinite's idempotency key, not Meta's event ID.**")
+    expect(brief).toContain("Infinite derives a different id, which your pages never see")
+    // Purchases are server events only, from the payment webhook; no browser twin; never on a click.
+    expect(brief).toContain("**Purchases are server events only.**")
+    expect(brief).toContain("// 2. In the PAYMENT WEBHOOK")
+    expect(brief).toContain("**Never build a Meta event ID in the page, and never fire a Meta conversion")
+    // Negative: the old, wrong advice is gone everywhere in the brief.
+    expect(brief).not.toContain("Meta gets the same event_id")
+    expect(brief).not.toContain("becomes Meta's `event_id`")
+    expect(brief).not.toMatch(/eventID:\s*\\?"purchase:/)
+    expect(brief).not.toMatch(/fbq\([^)]*\{\s*eventID/)
+    // The not-yet-built server-instructed mirror is never promised.
+    expect(brief).not.toContain("metaEventId")
     // The buyer's browser pair, and WHY it cannot come from the call to Infinite.
     expect(brief).toContain("the IP address of the browser")
     expect(brief).toContain("server-to-server")
@@ -134,5 +146,24 @@ describe("the agent brief", () => {
       moduleImportPath: "./lib/infinite-server-lane"
     })
     expect(again).toBe(brief)
+  })
+})
+
+// The published README carries the same Meta rules as the brief: one external_id rule, eventId is
+// Infinite's idempotency key (never Meta's event ID), purchases are server-only, and the page never
+// builds a Meta event ID. The README ships in the npm package, so it is what customers read first.
+describe("the README's Meta advice", () => {
+  it("matches the brief, and the old wrong advice is gone", async () => {
+    const { readFileSync } = await import("node:fs")
+    const { fileURLToPath } = await import("node:url")
+    const readme = readFileSync(fileURLToPath(new URL("../../README.md", import.meta.url)), "utf8")
+    expect(readme).toContain("**`eventId` is Infinite's idempotency key, not Meta's event ID.**")
+    expect(readme).toContain("**Purchases are server events only.**")
+    expect(readme).toContain("**trimmed only — its case is kept**")
+    expect(readme).not.toContain("Meta gets the same event_id")
+    expect(readme).not.toContain("becomes Meta's `event_id`")
+    expect(readme).not.toMatch(/eventID:\s*"purchase:/)
+    expect(readme).not.toMatch(/`em` and `external_id` are sha256 hex of the trimmed, lowercased/)
+    expect(readme).not.toContain("hashed the same way\n")
   })
 })

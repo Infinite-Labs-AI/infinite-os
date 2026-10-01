@@ -72,6 +72,16 @@ Fixes ported from infinite.fast: ways a customer site silently collected the wro
   id's case — so an id with capital letters reached Meta as two different people. The guide, the
   generated helper's comments and a new `hashInfiniteExternalId` recipe now all say the same thing
   as infinite.fast: the email is trimmed and lowercased; the account id is trimmed only.
+- **Truthful Meta event-ID advice in the setup guide and README.** They told customers that the
+  `eventId` they pass (`"purchase:" + order.id`) is the event ID Meta receives, and to fire a
+  browser `fbq('track', 'Purchase', …, { eventID })` with the same value so Meta would deduplicate.
+  That is wrong whenever Infinite derives a different ID (conversions counted once per account or
+  once per visit), and a page that builds its own Meta event ID is how infinite.fast sent Meta
+  phantom sign-ups. The guide now says: `eventId` is Infinite's idempotency key, so a retried
+  webhook is counted once; Infinite decides the ID Meta receives; purchases are reported from the
+  payment webhook as server events only, with the match data captured at checkout; and the page
+  never builds a Meta event ID or fires a Meta conversion on a click. The serverless route example
+  no longer attaches Meta match data to a purchase.
 
 ## 0.11.0 — 2026-09-21
 
