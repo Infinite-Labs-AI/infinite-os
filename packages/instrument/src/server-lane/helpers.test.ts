@@ -310,11 +310,16 @@ describe("hashInfiniteExternalId", () => {
 
   it("matches the browser pixel's matching helper byte for byte (the emitted accessor, executed)", async () => {
     const calls: unknown[][] = []
+    // A browser page with no consent decision recorded and no DNT/GPC signal. `navigator` must
+    // exist: the managed Meta helpers read navigator.doNotTrack / globalPrivacyControl before they
+    // act (the consent hook), and a missing navigator reads as "no" — the accessor would then
+    // return false without calling fbq, and this test would prove nothing about the hash.
     const context: Record<string, unknown> = {
       crypto: webcrypto,
       TextEncoder,
       Uint8Array,
       Promise,
+      navigator: {},
       window: { fbq: (...args: unknown[]) => calls.push(args) }
     }
     context.globalThis = context
