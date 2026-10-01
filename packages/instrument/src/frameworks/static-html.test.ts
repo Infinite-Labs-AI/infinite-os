@@ -21,6 +21,8 @@ import { verifyInstallation } from "../verify.js"
 import type { WorkspaceInstallArtifacts } from "../types.js"
 import { applyPosthogProxy } from "../workspace-artifacts.js"
 
+import { isVerificationTokenContent } from "./static-html.js"
+
 const tempRoots: string[] = []
 const fixtureRoot = dirname(fileURLToPath(import.meta.url))
 
@@ -440,5 +442,79 @@ describe("static-html posthog reverse proxy (vercel.json)", () => {
 
     uninstallInstallation({ root })
     expect(readFileSync(join(root, "vercel.json"), "utf8")).toBe(original)
+  })
+})
+
+// Meta's domain-verification file (and Google's google<hash>.html) is .html by extension only: its
+// body is a bare token the provider checks byte for byte, with no </head>. Before this, one such
+// file blocked the WHOLE static-site install. infinite.fast hit the same thing and excluded its own
+// file by name (849ccf1 at 9f65b47); a customer's filenames vary, so it is recognised by CONTENT.
+describe("static-html domain-verification files", () => {
+  // Synthetic tokens in the providers' real shapes (never a real customer's token).
+  const META_FILE = "a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5.html"
+  const META_BYTES = "a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5\n"
+  const GOOGLE_FILE = "google0123456789abcdef.html"
+  const GOOGLE_BYTES = "google-site-verification: google0123456789abcdef.html"
+  const BOM_FILE = "verify/token.html"
+  const BOM_BYTES = "\uFEFF  TEST_NOT_REAL_TOKEN_123  \r\n"
+
+  const planFor = (root: string) =>
+    planInstallation({ root, inspect: inspectWorkspace(root), workspaceId: "ws_test", artifacts })
+
+  it("installs on every real page and leaves each verification file byte-identical", () => {
+    const root = copyFixture("static-html-multipage")
+    writeNestedFile(root, META_FILE, META_BYTES)
+    writeNestedFile(root, GOOGLE_FILE, GOOGLE_BYTES)
+    writeNestedFile(root, BOM_FILE, BOM_BYTES)
+
+    const plan = planFor(root)
+    expect(plan.blockers).toEqual([])
+    expect(plan.applyMode).toBe("supported")
+    expect(plan.files).toEqual(expect.arrayContaining(["index.html", "about.html", "privacy/index.html"]))
+    for (const file of [META_FILE, GOOGLE_FILE, BOM_FILE]) expect(plan.files).not.toContain(file)
+    expect(plan.assumptions.join("\n")).toContain(`Left untouched: ${META_FILE}`)
+    expect(plan.assumptions.join("\n")).toContain("no <head> is ever added")
+
+    applyInstallation({ root, workspaceId: "ws_test", plan })
+    expect(readFileSync(join(root, "about.html"), "utf8")).toContain("<!-- infinite:start -->")
+    // Never "fixed" by adding a head, never injected: the provider reads these bytes exactly.
+    expect(readFileSync(join(root, META_FILE), "utf8")).toBe(META_BYTES)
+    expect(readFileSync(join(root, GOOGLE_FILE), "utf8")).toBe(GOOGLE_BYTES)
+    expect(readFileSync(join(root, BOM_FILE), "utf8")).toBe(BOM_BYTES)
+
+    uninstallInstallation({ root, dryRun: false })
+    expect(readFileSync(join(root, META_FILE), "utf8")).toBe(META_BYTES)
+  })
+
+  it("still blocks a genuinely broken page: markup without </head>, an empty file, or a multi-line text file", () => {
+    for (const [name, bytes] of [
+      ["broken.html", "<!doctype html>\n<html><body><h1>Broken</h1></body></html>\n"],
+      ["empty.html", ""],
+      ["notes.html", "first line of prose\nsecond line of prose\n"]
+    ] as const) {
+      const root = copyFixture("static-html-multipage")
+      writeNestedFile(root, name, bytes)
+      const plan = planFor(root)
+      expect(plan.applyMode).toBe("plan-only")
+      expect(plan.blockers).toContain(`Static HTML apply requires a closing </head> tag in ${name}.`)
+    }
+  })
+
+  it("never treats index.html as a verification file, even when it is a bare token", () => {
+    const root = copyFixture("static-html-multipage")
+    writeFileSync(join(root, "index.html"), "TEST_NOT_REAL_TOKEN\n")
+    expect(planFor(root).blockers).toContain("Static HTML apply requires a closing </head> tag.")
+  })
+
+  it("recognises the token shape by content, never by name", () => {
+    expect(isVerificationTokenContent("a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5\n")).toBe(true)
+    expect(isVerificationTokenContent("google-site-verification: google0123456789abcdef.html")).toBe(true)
+    expect(isVerificationTokenContent("\uFEFF token \r\n")).toBe(true)
+    // Negative cases: markup, emptiness, more than one line, or too long for a token.
+    expect(isVerificationTokenContent("<html><head></head></html>")).toBe(false)
+    expect(isVerificationTokenContent("token<br>")).toBe(false)
+    expect(isVerificationTokenContent("   \n  ")).toBe(false)
+    expect(isVerificationTokenContent("line one\nline two")).toBe(false)
+    expect(isVerificationTokenContent("x".repeat(257))).toBe(false)
   })
 })

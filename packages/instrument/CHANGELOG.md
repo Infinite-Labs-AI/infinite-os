@@ -82,6 +82,12 @@ Fixes ported from infinite.fast: ways a customer site silently collected the wro
   payment webhook as server events only, with the match data captured at checkout; and the page
   never builds a Meta event ID or fires a Meta conversion on a click. The serverless route example
   no longer attaches Meta match data to a purchase.
+- **A domain-verification file no longer blocks a static-site install.** Meta's domain-verification
+  `.html` file (and Google's `google<hash>.html`) is a bare token with no markup, so it has no
+  `</head>`, and one such file blocked the whole install. Files whose content is a single short line
+  with no markup at all are now recognised as verification tokens (by content, since the names vary
+  per site), left byte-for-byte untouched, and named in the plan. A head is never added to one.
+  Genuinely broken pages (markup without `</head>`, empty files) still block the install.
 
 ## 0.11.0 — 2026-09-21
 
