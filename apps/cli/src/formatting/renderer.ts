@@ -1,7 +1,7 @@
 import { ansi, resolveTheme, type Theme } from "../tui/theme.js";
 import { displayWidth, padEndCells, truncateCells } from "../tui/lib/display-width.js";
 import { resolveCliRenderSurface } from "../tui/runtime/render-surface.js";
-import { formatMarkdownForTerminal, styleInlineMarkdown } from "./markdown.js";
+import { renderMarkdown } from "./markdown-render.js";
 
 interface RenderStream {
   columns?: number;
@@ -55,9 +55,13 @@ export function renderAssistantResponsePanel(
   const text = (value: string) => ansi(theme, "text", value, options.color);
   const top = `${border("╭─")}${titleText(title)}${border(`${"─".repeat(Math.max(0, width - titleWidth - 3))}╮`)}`;
   const bottom = border(`╰${"─".repeat(width - 2)}╯`);
-  const body = formatMarkdownForTerminal(message.trim() || "No answer was produced.", inner).map((line) =>
-    styleInlineMarkdown(line, Boolean(options.color))
-  );
+  // Styled before wrapping: renderMarkdown lays out visible text, then paints it.
+  const body = renderMarkdown(message.trim() || "No answer was produced.", {
+    width: inner,
+    color: Boolean(options.color),
+    theme,
+    role: "text"
+  });
 
   return [
     top,

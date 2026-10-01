@@ -140,6 +140,17 @@ export function terminalText(value: string, fallback = ""): string {
   return scanTerminalText(value).replace(/\s+/gu, " ").trim() || fallback;
 }
 
+/**
+ * The same scrub as {@link terminalText} without the whitespace collapse or
+ * trim: escape/control sequences and bidi controls are dropped (each stripped
+ * control character becomes a space), and ordinary spacing is kept. The
+ * markdown renderer uses it on every text node, where inter-span spaces and
+ * code indentation must survive.
+ */
+export function scrubTerminalControls(value: string): string {
+  return scanTerminalText(value);
+}
+
 /** {@link terminalText} plus a length bound with a truncation suffix. */
 export function boundedTerminalText(
   value: string,

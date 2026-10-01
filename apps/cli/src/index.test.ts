@@ -2926,15 +2926,16 @@ describe("cli smoke", () => {
     expect(streamed).not.toContain("---:");
   });
 
-  it("realigns markdown tables in final TTY assistant panels", () => {
+  it("draws markdown tables as bordered tables in final TTY assistant panels", () => {
     const panel = renderAssistantResponsePanel(
       ["| Metric | Value |", "| --- | ---: |", "| Revenue | $123 |", "| Signups | 45 |"].join("\n"),
       { color: false, columns: 88 }
     );
 
-    expect(panel).toContain("Metric   Value");
-    expect(panel).toContain("Revenue  $123");
-    expect(panel).toContain("Signups  45");
+    expect(panel).toContain("┌─────────┬───────┐");
+    expect(panel).toContain("│ Metric  │ Value │");
+    expect(panel).toContain("│ Revenue │  $123 │");
+    expect(panel).toContain("│ Signups │    45 │");
     expect(panel).not.toContain("---:");
   });
 

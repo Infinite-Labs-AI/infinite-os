@@ -1,4 +1,4 @@
-import { formatMarkdownForTerminal } from "../../formatting/markdown.js";
+import { renderMarkdown } from "../../formatting/markdown-render.js";
 import { formatElapsedSeconds } from "../../formatting/progress.js";
 import { renderAssistantResponsePanel, renderStatusFooter } from "../../formatting/renderer.js";
 import { ansi, resolveTheme, type Theme } from "../theme.js";
@@ -350,8 +350,12 @@ function diffLineRole(line: string): RenderRole {
 }
 
 function renderBodyLines(text: string, role: RenderRole, ctx: RenderContext, indent = ""): string[] {
-  return formatMarkdownForTerminal(text, Math.max(16, ctx.contentWidth - displayWidth(indent) - 2))
-    .map((line) => formatTrailLine(`${indent}${line}`, role, ctx));
+  return renderMarkdown(text, {
+    width: Math.max(16, ctx.contentWidth - displayWidth(indent) - 2),
+    color: ctx.color,
+    theme: ctx.theme,
+    role
+  }).map((line) => formatTrailLine(`${indent}${line}`, role, ctx));
 }
 
 function renderFooterRows(parts: readonly string[], ctx: RenderContext): string[] {
