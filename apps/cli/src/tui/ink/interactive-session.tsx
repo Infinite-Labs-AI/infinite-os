@@ -1154,12 +1154,12 @@ export function InkInteractiveSessionApp({
   // <Static> rows never do. Everything the frame draws besides the transcript is
   // reserved out of the live-region cap, so the frame never fills the window.
   const homeInventoryRows = showHomeInventory ? homeInventoryRowCount(columns) : 0;
-  // The key bar renders directly above the composer, so its rows count in both
-  // the live-region reserve and the composer-row prediction.
+  // The key bar renders directly above the composer: its real wrapped rows go to
+  // the live-region cap through its own `keyBarRows` slot (0 when no card is
+  // open), and into the composer-row prediction below.
   const keyBarRows = keyBarRowCount(keyHints, columns);
   const composerText = activeFieldComposer ? activeFieldComposer.display : inputValue;
   const reservedRows = homeInventoryRows
-    + keyBarRows
     + Math.max(DEFAULT_COMPOSER_ROWS, composerRowsFor(composerText || connectPlaceholder, columns, t))
     + liveOverlayRows({
       confirmAction: pendingConfirmActions[0] ?? null,
@@ -1176,6 +1176,7 @@ export function InkInteractiveSessionApp({
     composerRows: reservedRows,
     homeBanner: !showHomeInventory,
     indicatorTick: labelTick,
+    keyBarRows,
     livePage: liveOffset,
     nowMs: clock,
     rows,
@@ -1209,6 +1210,7 @@ export function InkInteractiveSessionApp({
         composerRows={reservedRows}
         homeBanner={!showHomeInventory}
         indicatorTick={labelTick}
+        keyBarRows={keyBarRows}
         livePage={liveOffset}
         nowMs={clock}
         rows={rows}
