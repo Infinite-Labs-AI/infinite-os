@@ -333,13 +333,12 @@ export function outcomeRouteSnippet(
   const specifier = options.importSpecifier ?? "../lib/infinite-outcome"
   const js = options.language === "js"
   const routeExtension = js ? "js" : "ts"
-  const outcomeImportLine = `import { adMatchFromRequest, postInfiniteOutcome } from "${specifier}"`
+  const outcomeImportLine = `import { postInfiniteOutcome } from "${specifier}"`
   const handlerSignature = js
     ? "export default async function handler(request) {"
     : "export default async function handler(request: Request): Promise<Response> {"
   return String.raw`// api/checkout-status.${routeExtension} — a Vercel serverless function confirming a paid session.
 ${outcomeImportLine}
-import { createHash } from "node:crypto"   // only needed for the optional adMatch block below
 
 ${handlerSignature}
   const session = await stripe.checkout.sessions.retrieve(new URL(request.url).searchParams.get("id"))
@@ -348,17 +347,15 @@ ${handlerSignature}
   await postInfiniteOutcome({
     type: "purchase",              // the exact name from Infinite -> Conversions
     path: "/checkout",             // pathname only
-    eventId: "purchase:" + session.id, // stable, so a retry dedupes
+    eventId: "purchase:" + session.id, // Infinite's idempotency key: a retry is counted once
     accountKey: session.customer,  // optional; hashed at rest by Infinite
-    visitKeyInputs: request,       // same visitKey as the page view -> same-lane conversion rate
-    // OPTIONAL - only if you run Meta ads and have no PostHog. Forwarded to Meta's Conversions API
-    // when you turn the relay on in Infinite -> Site -> Settings, then discarded: never stored.
-    // NOTE: request here is the BUYER'S browser request, so this picks up their _fbc/_fbp cookies AND
-    // their ip + user agent - which Meta requires and which your call to Infinite cannot carry.
-    adMatch: adMatchFromRequest(request, {
-      em: createHash("sha256").update(session.customer_email.trim().toLowerCase()).digest("hex")
-    })
+    visitKeyInputs: request        // same visitKey as the page view -> same-lane conversion rate
   })
+  // Running Meta ads without PostHog? Then report the purchase from your PAYMENT WEBHOOK INSTEAD of
+  // here — the SAME eventId ("purchase:" + session.id), plus the adMatch block captured at checkout
+  // (see "Optional: forward the conversion to Meta") — and delete this call, so one purchase is
+  // reported once. A purchase is a server event only: no fbq('track', 'Purchase') in the page, and
+  // never an event ID built here.
 
   return Response.json({ paid: true })
 }

@@ -57,7 +57,7 @@ import {
 
 import { recordHarnessFile } from "./outputs.js"
 import { REPORT_SENT_LINE, buildHarnessReportPayload, reportNotSentLine, type ReportSink } from "./report-sink.js"
-import { errorText, runRunbook, type RunbookStep } from "./runbook.js"
+import { RUNBOOK_STEP_IDS, errorText, runRunbook, type RunbookStep, type RunbookStepId } from "./runbook.js"
 import {
   SERVER_LANE_FIRST_EVENT_BUDGET_MS,
   runServerLaneEnvStep,
@@ -1157,21 +1157,29 @@ const reportStep: RunbookStep<Ctx> = {
   failure: { code: "INF_PLAN_BLOCKED", message: () => "report failed", next: "continue" }
 }
 
-export const HARNESS_STEPS: ReadonlyArray<RunbookStep<Ctx>> = [
+/**
+ * Every harness step, keyed by its runbook id. A Record over RunbookStepId: a new id in
+ * RUNBOOK_STEP_IDS without a step here is a compile error, and runbook.test.ts fails when a step's
+ * own `id` disagrees with its key.
+ */
+export const HARNESS_STEPS_BY_ID: Readonly<Record<RunbookStepId, RunbookStep<Ctx>>> = {
   preflight,
   inspect,
-  resolveKeys,
+  "resolve-keys": resolveKeys,
   classify,
   plan,
   confirm,
   apply,
   conversions,
-  setupChecks,
-  serverLane,
-  serverLaneEnv,
+  "setup-checks": setupChecks,
+  "server-lane": serverLane,
+  "server-lane-env": serverLaneEnv,
   verify,
-  reportStep
-]
+  report: reportStep
+}
+
+/** The run order, DERIVED from RUNBOOK_STEP_IDS so the two can never drift. */
+export const HARNESS_STEPS: ReadonlyArray<RunbookStep<Ctx>> = RUNBOOK_STEP_IDS.map((id) => HARNESS_STEPS_BY_ID[id])
 
 // ---------------------------------------------------------------------------------------------
 // Entry

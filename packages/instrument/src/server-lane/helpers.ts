@@ -188,7 +188,11 @@ export interface InfiniteAdMatch {
   fbc?: string
   /** Meta's `_fbp` cookie, verbatim. */
   fbp?: string
-  /** sha256 hex of your own account id. */
+  /**
+   * sha256 hex of your own account id, TRIMMED ONLY — case kept. Use `hashInfiniteExternalId`.
+   * Never lowercase an id: the browser pixel's matching helper hashes the same id with its case
+   * kept, and the two legs must produce the same bytes or Meta sees one person as two.
+   */
   external_id?: string
   /** The BUYER'S BROWSER ip, from YOUR inbound request. Never the ip of the call to Infinite. */
   client_ip_address?: string
@@ -215,6 +219,20 @@ export const AD_MATCH_KEYS = [
  */
 export function hashInfiniteEmail(email: string): string {
   return createHash("sha256").update(email.trim().toLowerCase()).digest("hex")
+}
+
+/**
+ * The account-id hash Infinite (and Meta) expect for `external_id`: sha256 hex of the TRIMMED id,
+ * with its CASE KEPT.
+ *
+ * Unlike an email, an account id is case-sensitive (`Acct_A` and `acct_a` can be two different
+ * accounts), so it is never lowercased. The browser pixel's matching helper
+ * (`infiniteMetaAdvancedMatch({ externalId })`) applies exactly this rule, and so does
+ * infinite.fast's own lane: when the server and the browser hash the same id differently, Meta
+ * receives two digests for one person and matches neither leg to the other.
+ */
+export function hashInfiniteExternalId(id: string): string {
+  return createHash("sha256").update(id.trim()).digest("hex")
 }
 
 export interface ServerLaneEvent {
