@@ -48,6 +48,8 @@ import {
 } from "./home-inventory.js";
 import { isInfiniteTurnBusy } from "./status-indicator.js";
 import { createTurnAbort, ctrlCAction, turnStoppedLine, type TurnAbort } from "./turn-abort.js";
+import { confirmCardKeys, keyBarHints, keyBarRowCount, resolveKey, type KeyContext } from "../keys/keymap.js";
+import { KeyBar } from "./key-bar.js";
 import { inkTranscriptRowCount, InkTranscriptApp, useInfiniteTranscriptClock } from "./transcript-app.js";
 
 /**
@@ -68,6 +70,8 @@ export interface HomeInventoryData {
 
 const HISTORY_LIMIT = 120;
 const INPUT_HISTORY_LIMIT = 1000;
+// No app-link, watch or retry keys yet (T12 adds `o`; T11 adds `w`/`r`).
+const NO_KEY_CAPS: KeyContext["caps"] = { open: false, watch: false, retry: false };
 const BRACKETED_PASTE_MARKER_RE = /\x1b?\[20[01]~/g;
 const INVERSE_OFF = "\u001b[27m";
 const INVERSE_ON = "\u001b[7m";
@@ -396,6 +400,8 @@ export function InkInteractiveSessionApp({
   const [pendingConfirmActions, setPendingConfirmActions] = useState<
     readonly InSessionConfirmationAction[]
   >([]);
+  // `?` on the head card toggles its explanation (the terminal can't hover).
+  const [explainOpen, setExplainOpen] = useState(false);
   const [pendingSelection, setPendingSelection] = useState<{
     prompt: InkInteractiveSelectionPrompt;
     selectedIndex: number;
@@ -483,6 +489,14 @@ export function InkInteractiveSessionApp({
     state: turnState
   });
   const visibleStatusParts = formatInteractiveStatus(statusParts, busy, queuedLines);
+  // The head card's keys: its named OK key, `n`, and `?` (keymap.ts owns the rules).
+  // `o`/`w`/`r` stay off until app links, watch and retry land (T12, T11).
+  const headConfirmAction = pendingConfirmActions[0] ?? null;
+  const confirmKeys = useMemo(
+    () => headConfirmAction ? confirmCardKeys(headConfirmAction, NO_KEY_CAPS) : null,
+    [headConfirmAction]
+  );
+  const keyHints = confirmKeys ? keyBarHints(confirmKeys.ctx) : [];
   // The home inventory shows ONCE, on the empty home screen (no transcript yet)
   // and only when the CLI supplied its data. The first submitted line scrolls it
   // away (history is non-empty), so it never repeats per message.
@@ -491,7 +505,8 @@ export function InkInteractiveSessionApp({
   // composer's native-cursor row prediction — otherwise the cursor parks too high
   // (the PR #27 invariant: predicted composer row == live rendered row count).
   const homeInventoryRows = showHomeInventory ? homeInventoryRowCount(columns) : 0;
-  const composerRow = homeInventoryRows + inkTranscriptRowCount({
+  // The key bar renders directly above the composer, so its rows count too.
+  const composerRow = homeInventoryRows + keyBarRowCount(keyHints, columns) + inkTranscriptRowCount({
     busy,
     columns,
     homeBanner: !showHomeInventory,
@@ -954,6 +969,7 @@ export function InkInteractiveSessionApp({
       return;
     }
     setPendingConfirmActions((current) => current.slice(1));
+    setExplainOpen(false);
     const appendLines = (lines: readonly ConfirmLine[]) =>
       appendMessages(lines.map((line) => ({ kind: "slash", role: "system", text: line.text }) as Msg));
     void (async () => {
@@ -1037,8 +1053,8 @@ export function InkInteractiveSessionApp({
     ? activeFieldComposer.secret
       ? "type the secret (hidden), Enter to continue, Ctrl-C to cancel"
       : "type a value, Enter to continue, Ctrl-C to cancel"
-    : pendingConfirmActions.length > 0
-      ? "press y to approve this write, n to decline"
+    : confirmKeys
+      ? `press ${confirmKeys.ctx.okKey} to ${confirmKeys.ctx.okLabel}, n to dismiss`
       : pendingConnectConfirm
         ? "choose with up/down, Enter to select"
         : pendingSelection
@@ -1093,18 +1109,22 @@ export function InkInteractiveSessionApp({
         width={columns}
       />
       <ConfirmActionMenu
-        pending={pendingConfirmActions[0] ?? null}
+        explainText={explainOpen ? confirmKeys?.explainText ?? null : null}
+        pending={headConfirmAction}
         theme={t}
         width={columns}
       />
+      <KeyBar hints={keyHints} theme={t} width={columns} />
       <InkLineInput
         busy={busy}
         completionActive={completions.length > 0}
         completionRows={completions.length}
         cursor={inputCursor}
         confirmActionActive={pendingConfirmActions.length > 0}
+        confirmKeys={confirmKeys?.ctx ?? null}
         onConfirmActionApprove={() => resolveConfirmAction("approve")}
         onConfirmActionDecline={() => resolveConfirmAction("decline")}
+        onConfirmActionExplain={() => setExplainOpen((open) => !open)}
         connectConfirmActive={Boolean(pendingConnectConfirm)}
         fieldPromptActive={fieldPromptActive}
         fieldChoiceActive={Boolean(currentConnectField?.choices)}
@@ -1962,6 +1982,7 @@ function InkLineInput({
   completionActive,
   completionRows,
   confirmActionActive,
+  confirmKeys,
   connectConfirmActive,
   cursor,
   fieldChoiceActive,
@@ -1969,6 +1990,7 @@ function InkLineInput({
   onChange,
   onConfirmActionApprove,
   onConfirmActionDecline,
+  onConfirmActionExplain,
   onChoiceCommit,
   onChoiceNext,
   onChoicePrevious,
@@ -2004,6 +2026,7 @@ function InkLineInput({
   completionActive: boolean;
   completionRows: number;
   confirmActionActive: boolean;
+  confirmKeys: KeyContext | null;
   connectConfirmActive: boolean;
   cursor: number;
   fieldChoiceActive: boolean;
@@ -2011,6 +2034,7 @@ function InkLineInput({
   onChange(state: ComposerEditState): void;
   onConfirmActionApprove(): void;
   onConfirmActionDecline(): void;
+  onConfirmActionExplain(): void;
   onChoiceCommit(): void;
   onChoiceNext(): void;
   onChoicePrevious(): void;
@@ -2123,20 +2147,21 @@ function InkLineInput({
       }
       return;
     }
-    // In-session write gate (cloud brain, Plan 2): a y/n confirmation for a
-    // `requires_confirmation` action. ONLY an explicit `y`/`Y` approves and ONLY
-    // `n`/`N` declines (a real "no" sent to the app). Enter, Escape and every
-    // other key are swallowed, so a stray keystroke can neither approve a write
-    // nor send a decline. Guarded BEFORE the plain composer so no keystroke leaks
-    // into the input line.
+    // In-session write gate (cloud brain, Plan 2) for a `requires_confirmation`
+    // action. The keymap decides: ONLY the card's named OK key (`p` for Pause, `y`
+    // on an old desktop) approves, ONLY `n` dismisses (a real "no" sent to the
+    // app), and `?` toggles the explanation. Enter, Escape and every other key are
+    // swallowed, so a stray keystroke can neither approve a write nor send a
+    // decline. Guarded BEFORE the plain composer so no keystroke leaks into the
+    // input line.
     if (confirmActionActive) {
-      if (input === "y" || input === "Y") {
+      const action = confirmKeys ? resolveKey(input, key, confirmKeys) : { type: "none" as const };
+      if (action.type === "ok") {
         onConfirmActionApprove();
-        return;
-      }
-      if (input === "n" || input === "N") {
+      } else if (action.type === "dismiss") {
         onConfirmActionDecline();
-        return;
+      } else if (action.type === "explain") {
+        onConfirmActionExplain();
       }
       return;
     }
@@ -2424,12 +2449,16 @@ function ConnectConfirmMenu({
 // confirmation: the summary (scrubbed through `terminalText` — it is NOT covered
 // by the upstream redaction contract, and its `<Text>` child reaches the raw
 // terminal) then each already-redacted `label: value` detail VERBATIM (mirroring
-// the readline card's `renderConfirmationCard`), and a `[y]/[n]` affordance.
+// the readline card's `renderConfirmationCard`), then the `?` explanation when it
+// is open. The keys (named OK key, `n dismiss`, `?`) live in the `KeyBar` below.
 function ConfirmActionMenu({
+  explainText,
   pending,
   theme,
   width
 }: {
+  /** The scrubbed `?` text when the explanation is open, else null. */
+  explainText: string | null;
   pending: InSessionConfirmationAction | null;
   theme: Theme;
   width: number;
@@ -2447,7 +2476,9 @@ function ConfirmActionMenu({
           {truncateCells(`  ${detail.label}: ${detail.value}`, width)}
         </Text>
       ))}
-      <Text color={theme.color.muted}>[y] approve   [n] decline</Text>
+      {explainText ? (
+        <Text color={theme.color.text} wrap="wrap">{`? ${explainText}`}</Text>
+      ) : null}
     </Box>
   );
 }

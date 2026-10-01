@@ -25,20 +25,40 @@ const PENDING: InSessionConfirmationAction = {
 };
 
 describe("Ink in-session write confirmation (Plan 2) — structural guards (CI-runnable)", () => {
-  it("gates the y/n branch inside the SINGLE useInput owner (only y/Y approves, only n/N declines)", () => {
+  it("gates the card inside the SINGLE useInput owner through the keymap", () => {
     // The write gate must live in the one useInput owner, before the plain
-    // composer. Only an explicit y/Y approves and only n/N declines (a real "no"
-    // now reaches the app); Enter and Escape are swallowed with every other key.
+    // composer. The keymap (keymap.ts, pinned by keymap.test.ts) decides: only
+    // the card's named OK key approves, only n dismisses (a real "no" that
+    // reaches the app), ? explains; Enter and Escape are swallowed with every
+    // other key. No hard-coded letter survives here.
     const block = source.slice(
       source.indexOf("if (confirmActionActive) {"),
       source.indexOf("if (selectionActive) {")
     );
-    expect(block).toContain('input === "y" || input === "Y"');
-    expect(block).toContain("onConfirmActionApprove()");
-    expect(block).toContain('if (input === "n" || input === "N") {');
-    expect(block).toContain("onConfirmActionDecline()");
+    expect(block).toContain("resolveKey(input, key, confirmKeys)");
+    expect(block).toContain('if (action.type === "ok") {\n        onConfirmActionApprove();');
+    expect(block).toContain('} else if (action.type === "dismiss") {\n        onConfirmActionDecline();');
+    expect(block).toContain('} else if (action.type === "explain") {\n        onConfirmActionExplain();');
+    expect(block).not.toMatch(/input === "[a-zA-Z]"/);
     expect(block).not.toContain("key.return");
     expect(block).not.toContain("key.escape");
+  });
+
+  it("names the OK key from the approval view, renders the key bar above the composer, and counts its rows", () => {
+    expect(source).toContain("confirmCardKeys(headConfirmAction, NO_KEY_CAPS)");
+    expect(source).toContain("keyBarRowCount(keyHints, columns) + inkTranscriptRowCount({");
+    expect(source.indexOf("<KeyBar hints={keyHints}")).toBeLessThan(source.indexOf("<InkLineInput"));
+    expect(source.indexOf("<KeyBar hints={keyHints}")).toBeGreaterThan(source.indexOf("<ConfirmActionMenu"));
+    // The old fixed affordance is gone: the bar shows only what works now.
+    expect(source).not.toContain("[y] approve");
+  });
+
+  it("closes the explanation when the head card resolves", () => {
+    const handler = source.slice(
+      source.indexOf("const resolveConfirmAction"),
+      source.indexOf("useEffect(() => {\n    // Don't drain")
+    );
+    expect(handler).toContain("setExplainOpen(false)");
   });
 
   it("dequeues the head BEFORE acting so a single-use handle can't double-resolve", () => {
@@ -137,7 +157,8 @@ describe("Ink in-session write confirmation (Plan 2) — live PTY flow (skipped 
       await waitFor(() => output.text().includes("Approve this write?"), 4_000, output.text);
       expect(output.text()).toContain("Publish landing page to production");
       expect(output.text()).toContain("acme.example.com");
-      expect(output.text()).toContain("[y] approve");
+      // Old desktop (no approval view): the bar names y Confirm and n dismiss.
+      expect(output.text()).toContain("y Confirm   n dismiss");
 
       await sendKeys(input, "y");
       await waitFor(() => confirmed.length === 1, 4_000, output.text);
@@ -227,6 +248,62 @@ describe("Ink in-session write confirmation (Plan 2) — live PTY flow (skipped 
       await sendKeys(input, "n");
       await waitFor(() => confirmed.length === 1, 4_000, output.text);
       expect(confirmed).toEqual(["decline"]);
+
+      await sendKeys(input, "/exit\r");
+      await session;
+    }
+  );
+
+  it.skipIf(process.env.CI === "true")(
+    "a view names the OK key: p pauses, y does nothing, ? shows the explanation",
+    { timeout: 30_000 },
+    async () => {
+      const input = ttyInput();
+      const output = ttyOutput();
+      const errorOutput = ttyOutput();
+      const confirmed: string[] = [];
+      const withView = {
+        ...PENDING,
+        view: {
+          v: 1, kind: "change", tool: "propose_pause_meta_entity", title: "Pause ad", state: "needs_yes", asOf: null,
+          scope: { workspaceName: "W", crossWorkspace: false }, caveats: [],
+          approval: { kind: "card", title: "Pause ad 01?", summary: "Stops spend on Ad 01 until you turn it back on.",
+            confirmLabel: "Pause", dismissLabel: "Dismiss", rows: [] },
+          body: { target: { kind: "ad", label: "Ad 01" }, rows: [], warnings: [] }
+        }
+      } as unknown as InSessionConfirmationAction;
+
+      const session = runInkInteractiveSession({
+        columns: 80,
+        errorOutput,
+        input,
+        output,
+        title: "Infinite TUI",
+        onConfirmAction: async (_action, decision) => {
+          confirmed.push(decision);
+          return { ok: true, receipt: "Paused ad 01" };
+        },
+        async onSubmitLine(): Promise<InkInteractiveLineResult> {
+          return { messages: [], pendingConfirmations: [withView] };
+        }
+      });
+
+      await waitFor(() => output.text().includes("ready"));
+      await sendKeys(input, "pause it\r");
+      await waitFor(() => output.text().includes("p Pause   n dismiss   ? what it does"), 4_000, output.text);
+      expect(output.text()).not.toContain("Stops spend on Ad 01");
+
+      await sendKeys(input, "y");
+      await sendKeys(input, "\r");
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      expect(confirmed).toEqual([]);
+
+      await sendKeys(input, "?");
+      await waitFor(() => output.text().includes("Stops spend on Ad 01"), 4_000, output.text);
+
+      await sendKeys(input, "p");
+      await waitFor(() => output.text().includes("✓ Paused ad 01"), 4_000, output.text);
+      expect(confirmed).toEqual(["approve"]);
 
       await sendKeys(input, "/exit\r");
       await session;
