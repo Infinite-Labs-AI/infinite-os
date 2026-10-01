@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import type { InSessionConfirmationAction } from "../../desktop/confirm-in-session.js";
 import { PassThrough } from "node:stream";
 import { fileURLToPath } from "node:url";
 import type { Key } from "ink";
@@ -6,7 +7,12 @@ import { describe, expect, it, vi } from "vitest";
 
 import { getTurnState, resetTurnState } from "../app/turn-store.js";
 import { displayWidth } from "../lib/display-width.js";
-import { runInkInteractiveSession, wouldTriggerInkFullscreen } from "./interactive-session.js";
+import {
+  renderInkInteractiveSessionToString,
+  runInkInteractiveSession,
+  wouldTriggerInkFullscreen,
+  type InkInteractiveLineResult
+} from "./interactive-session.js";
 import { inkTranscriptLayout, inkTranscriptRowCount, renderInkTranscriptToString } from "./transcript-app.js";
 import {
   commitOnSubmit,
@@ -169,6 +175,45 @@ describe("transcript-static pure helpers", () => {
   });
 });
 
+describe("the session wires the live cap (CI-run)", () => {
+  const sessionSource = readFileSync(fileURLToPath(new URL("./interactive-session.tsx", import.meta.url)), "utf8");
+
+  it("a 200-line turn in a 24-row session renders one capped page, the composer and a hint", () => {
+    const text = Array.from({ length: 200 }, (_, i) => `gamma line ${i}`).join("\n");
+    const rendered = stripAnsi(renderInkInteractiveSessionToString({
+      columns: 80,
+      rows: 24,
+      initialMessages: [{ role: "assistant", text }],
+      async onSubmitLine() {
+        return { messages: [] };
+      },
+      title: "Infinite TUI"
+    })).split("\n");
+    // The live frame fits under the cap (rows - (composer 3 + key bar 1 + 2)),
+    // plus the hint row, plus the composer below it.
+    expect(rendered.length).toBeLessThanOrEqual(24 - (3 + 1 + 2) - 1 + 3);
+    expect(rendered.some((line) => /more lines|lines above/.test(line))).toBe(true);
+    // A turn the session starts with follows its tail, so its first lines are paged away.
+    expect(rendered.some((line) => /gamma line 199(?!\d)/.test(line))).toBe(true);
+    expect(rendered.some((line) => /gamma line 0(?!\d)/.test(line))).toBe(false);
+  });
+
+  it("space pages only from the composer; a card or picker keeps the key", () => {
+    const call = sessionSource.slice(sessionSource.indexOf("livePageKey(input, key, {"));
+    expect(call.slice(0, call.indexOf("});"))).toMatch(
+      /composerEmpty: value\.length === 0 && !confirmActionActive && !selectionActive && !pendingConfirmation/
+    );
+  });
+
+  it("every exit path commits the live turn before Ink unmounts", () => {
+    // /exit, /quit, a result's `exit` and idle Ctrl-C all go through requestExit.
+    const direct = sessionSource.match(/app\.exit\(\)/g) ?? [];
+    expect(direct).toHaveLength(1);
+    expect(sessionSource).toMatch(/if \(exitRequested\) \{\s*app\.exit\(\);/);
+    expect(sessionSource).toMatch(/commitLatestTurn\("\/exit"\);\s*setExitRequested\(true\)/);
+  });
+});
+
 describe("scrollback in a running session (fake TTY; skipped on CI like the other PTY tests)", () => {
   it.skipIf(process.env.CI === "true")("200-line answers stay whole in scrollback and never trip a fullscreen redraw", { timeout: 30_000 }, async () => {
     const input = ttyInput();
@@ -215,12 +260,94 @@ describe("scrollback in a running session (fake TTY; skipped on CI like the othe
 
     await sendKeys(input, "/exit\r");
     await session;
+    // Exiting commits the live answer first, so all of it reaches scrollback, once.
+    const final = stripAnsi(output.text());
+    for (const i of [100, 150, 199]) {
+      expect(countLine(final, `beta line ${i}`)).toBe(1);
+    }
+    expect(countLine(final, "beta line 0")).toBeGreaterThanOrEqual(1);
     // ink only clears the terminal (and the scrollback with it) after a frame as
     // tall as the window; the cap means that never happens.
     expect(output.text()).not.toContain(`${ESC}[3J`);
     expect(output.text()).not.toContain(`${ESC}[2J`);
   });
+
+  it.skipIf(process.env.CI === "true")("idle Ctrl-C still writes the whole last answer before quitting", { timeout: 30_000 }, async () => {
+    const input = ttyInput();
+    const output = ttyOutput();
+    const session = runInkInteractiveSession({
+      errorOutput: ttyOutput(),
+      input,
+      async onSubmitLine() {
+        return { messages: [{ role: "assistant", text: Array.from({ length: 200 }, (_, i) => `alpha line ${i}`).join("\n") }] };
+      },
+      output,
+      title: "Infinite TUI"
+    });
+    await waitFor(() => output.text().includes("ready"), 4_000, output.text);
+    await sendKeys(input, "first\r");
+    await waitFor(() => output.text().includes("more lines"), 4_000, output.text);
+    expect(output.text()).not.toContain("alpha line 150");
+    input.write("\u0003");
+    await session;
+    const final = stripAnsi(output.text());
+    for (const i of [150, 199]) {
+      expect(countLine(final, `alpha line ${i}`)).toBe(1);
+    }
+    expect(output.text()).not.toContain(`${ESC}[2J`);
+  });
+
+  it.skipIf(process.env.CI === "true")("space reaches an open card, not the pager; PgDn still pages", { timeout: 30_000 }, async () => {
+    const pending: InSessionConfirmationAction = {
+      turnId: "t1",
+      confirmationHandle: "h1",
+      summary: "Publish landing page to production",
+      confirmationDetails: [{ label: "domain", value: "acme.example.com" }]
+    };
+    const input = ttyInput();
+    const output = ttyOutput();
+    const decisions: string[] = [];
+    const session = runInkInteractiveSession({
+      errorOutput: ttyOutput(),
+      input,
+      onConfirmAction: async (_action, decision) => {
+        decisions.push(decision);
+        return { ok: true };
+      },
+      async onSubmitLine(): Promise<InkInteractiveLineResult> {
+        return {
+          messages: [{ role: "assistant", text: Array.from({ length: 200 }, (_, i) => `alpha line ${i}`).join("\n") }],
+          pendingConfirmations: [pending]
+        };
+      },
+      output,
+      title: "Infinite TUI"
+    });
+    await waitFor(() => output.text().includes("ready"), 4_000, output.text);
+    await sendKeys(input, "publish it\r");
+    await waitFor(() => output.text().includes("Approve this write?") && output.text().includes("more lines"), 4_000, output.text);
+    const before = maxLine(output.text(), "alpha");
+    await sendKeys(input, " ");
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(maxLine(output.text(), "alpha")).toBe(before);
+    expect(decisions).toEqual([]);
+    input.write(`${ESC}[6~`);
+    await waitFor(() => maxLine(output.text(), "alpha") > before, 4_000, output.text);
+    expect(decisions).toEqual([]);
+    await sendKeys(input, "n");
+    await sendKeys(input, "/exit\r");
+    await session;
+    expect(decisions).toEqual([]);
+  });
 });
+
+function countLine(text: string, line: string) {
+  return text.match(new RegExp(`${line}(?!\\d)`, "g"))?.length ?? 0;
+}
+
+function maxLine(text: string, name: string) {
+  return Math.max(-1, ...[...stripAnsi(text).matchAll(new RegExp(`${name} line (\\d+)`, "g"))].map((m) => Number(m[1])));
+}
 
 function ttyInput() {
   const stream = new PassThrough() as PassThrough & NodeJS.ReadStream & {

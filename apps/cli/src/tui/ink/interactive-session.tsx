@@ -488,6 +488,60 @@ export function InkInteractiveSessionApp({
   // frozen `title` (stamped at submit) so a mid-session `/project use` never
   // relabels earlier answers.
   const agentTitle = getAgentTitle?.();
+  // The latest turn stays live (its keys still act on it) until the NEXT line is
+  // submitted; only then is it printed once into scrollback through <Static>, at
+  // the current width. The home inventory goes with the first commit.
+  const commitLatestTurn = useCallback((line: string) => {
+    if (!line.trim()) {
+      return;
+    }
+    const turn = historyRef.current;
+    const latest: CommittedEntry | null = turn.length
+      ? {
+          id: `turn:${++turnSeq.current}`,
+          lines: renderCommittedTranscriptLines({ agentTitle, messages: turn }, { columns, theme: t })
+        }
+      : null;
+    const home: CommittedEntry | null = homeInventory && !homeCommitted && turn.length === 0
+      ? {
+          id: "home",
+          lines: [],
+          node: (
+            <HomeInventory
+              columns={columns}
+              commands={homeInventory.commands}
+              connections={homeInventory.connections}
+              tools={homeInventory.tools}
+              version={homeInventory.version}
+              workspace={homeInventory.workspace}
+            />
+          )
+        }
+      : null;
+    setCommitted((current) => commitOnSubmit({ committed: home ? [...current, home] : current, latest }, line).committed);
+    setHomeCommitted(true);
+    historyRef.current = [];
+    setHistory([]);
+    setLiveOffset(null);
+  }, [agentTitle, columns, homeCommitted, homeInventory, t]);
+
+  // Every way out of the session (/exit, /quit, a result's `exit`, idle Ctrl-C)
+  // commits the live turn to <Static> first, uncapped, at the current width, and
+  // only unmounts in the effect after that render: Ink's final frame holds just
+  // the visible page, so quitting straight away would lose the rest of the answer.
+  const [exitRequested, setExitRequested] = useState(false);
+  const requestExit = useCallback(() => {
+    commitLatestTurn("/exit");
+    setExitRequested(true);
+  }, [commitLatestTurn]);
+  useEffect(() => {
+    if (exitRequested) {
+      app.exit();
+    }
+    // `committed` and `exitRequested` change in the same batched render, so by
+    // the time this runs Ink has already written the Static flush.
+  }, [app, exitRequested]);
+
   const transcript = useMemo(() => ({
     agentTitle,
     messages: history,
@@ -618,7 +672,7 @@ export function InkInteractiveSessionApp({
       });
 
       if (result.exit) {
-        app.exit();
+        requestExit();
         return;
       }
       // PR5 layer-bridge: the wrapper decided a project must be picked PRE-TURN
@@ -666,7 +720,7 @@ export function InkInteractiveSessionApp({
       // A finished turn opens at its top; a tall one is paged from there.
       setLiveOffset(0);
     }
-  }, [app, appendMessages, getAgentTitle, onSubmitLine]);
+  }, [appendMessages, getAgentTitle, onSubmitLine, requestExit]);
 
   // ── In-chat /connect wizard (#20) ───────────────────────────────────────────
   // The final "Connect <Provider> / Cancel" step. Kept SEPARATE from
@@ -871,43 +925,6 @@ export function InkInteractiveSessionApp({
     void submitExecutableLine(line);
   }, [appendMessages, buildConnectDispatch, cancelConnectWizard, pendingConnectConfirm, submitExecutableLine, zeroizeConnectWizard]);
 
-  // The latest turn stays live (its keys still act on it) until the NEXT line is
-  // submitted; only then is it printed once into scrollback through <Static>, at
-  // the current width. The home inventory goes with the first commit.
-  const commitLatestTurn = useCallback((line: string) => {
-    if (!line.trim()) {
-      return;
-    }
-    const turn = historyRef.current;
-    const latest: CommittedEntry | null = turn.length
-      ? {
-          id: `turn:${++turnSeq.current}`,
-          lines: renderCommittedTranscriptLines({ agentTitle, messages: turn }, { columns, theme: t })
-        }
-      : null;
-    const home: CommittedEntry | null = homeInventory && !homeCommitted && turn.length === 0
-      ? {
-          id: "home",
-          lines: [],
-          node: (
-            <HomeInventory
-              columns={columns}
-              commands={homeInventory.commands}
-              connections={homeInventory.connections}
-              tools={homeInventory.tools}
-              version={homeInventory.version}
-              workspace={homeInventory.workspace}
-            />
-          )
-        }
-      : null;
-    setCommitted((current) => commitOnSubmit({ committed: home ? [...current, home] : current, latest }, line).committed);
-    setHomeCommitted(true);
-    historyRef.current = [];
-    setHistory([]);
-    setLiveOffset(null);
-  }, [agentTitle, columns, homeCommitted, homeInventory, t]);
-
   const runSubmittedLine = useCallback((line: string) => {
     commitLatestTurn(line);
     if (pendingOperatorLine) {
@@ -1056,7 +1073,7 @@ export function InkInteractiveSessionApp({
       return;
     }
     if (line === "/exit" || line === "/quit") {
-      app.exit();
+      requestExit();
       return;
     }
 
@@ -1067,7 +1084,7 @@ export function InkInteractiveSessionApp({
 
     rememberInputLine(line);
     runSubmittedLine(line);
-  }, [app, busy, queueBusyLine, rememberInputLine, runSubmittedLine]);
+  }, [busy, queueBusyLine, rememberInputLine, requestExit, runSubmittedLine]);
 
   // The composer row shows the ACTIVE wizard field's value when a free-text field
   // is being collected: masked (bullets ×length) for secret fields, plain for the
@@ -1210,6 +1227,7 @@ export function InkInteractiveSessionApp({
         onConnectConfirmNext={() => moveConnectConfirm("next")}
         onConnectConfirmPrevious={() => moveConnectConfirm("previous")}
         onConnectCancel={cancelConnectWizard}
+        onExit={requestExit}
         onFieldKey={appendConnectFieldKey}
         onFieldBackspace={backspaceConnectField}
         onFieldCommit={commitConnectField}
@@ -2071,6 +2089,7 @@ function InkLineInput({
   onCompletionNext,
   onCompletionPrevious,
   onConnectCancel,
+  onExit,
   onConnectConfirmAccept,
   onConnectConfirmNext,
   onConnectConfirmPrevious,
@@ -2114,6 +2133,8 @@ function InkLineInput({
   onCompletionNext(): boolean;
   onCompletionPrevious(): boolean;
   onConnectCancel(): void;
+  /** Quit the session; commits the live turn to scrollback first. */
+  onExit(): void;
   onConnectConfirmAccept(): void;
   onConnectConfirmNext(): void;
   onConnectConfirmPrevious(): void;
@@ -2137,7 +2158,6 @@ function InkLineInput({
   valueIsMasked?: boolean;
   width: number;
 }) {
-  const app = useApp();
   const { setCursorPosition } = useCursor();
   const { stdout } = useStdout();
   const forwardDelete = useForwardDeleteSignal();
@@ -2146,14 +2166,14 @@ function InkLineInput({
     markCursorActivity();
     const editState = { cursor, selection, value };
     // In-chat /connect wizard (#20): Ctrl-C cancels the WIZARD ONLY (zeroizing the
-    // secret) and must be guarded BEFORE the session-wide `app.exit()` below — a
+    // secret) and must be guarded BEFORE the session-wide `onExit()` below — a
     // bare Ctrl-C mid-wizard must not quit the whole session.
     if (key.ctrl && input === "c") {
       if (fieldPromptActive || connectConfirmActive) {
         onConnectCancel();
         return;
       }
-      app.exit();
+      onExit();
       return;
     }
     // Field-collection loop: every printable keystroke is routed to the wizard's
@@ -2209,10 +2229,11 @@ function InkLineInput({
       return;
     }
     // Page a tall live turn (transcript-static.ts): PgDn/PgUp always, space only on
-    // an empty prompt. Ahead of the write gate so a long answer stays readable
-    // while its card waits; a paging key never approves or declines anything.
+    // an empty prompt in composer focus. Ahead of the write gate so a long answer
+    // stays readable while its card waits; a paging key never approves or declines
+    // anything, and space stays with an open card or picker (T7/T11 bind it there).
     const page = livePageKey(input, key, {
-      composerEmpty: value.length === 0,
+      composerEmpty: value.length === 0 && !confirmActionActive && !selectionActive && !pendingConfirmation,
       canPageNext: livePaging.next,
       canPagePrevious: livePaging.previous
     });
