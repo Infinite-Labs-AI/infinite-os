@@ -39,9 +39,9 @@ import {
   leftForLaterLine,
   type ConfirmLine
 } from "./confirm-result-lines.js";
-import { boundedTerminalText, terminalText } from "./terminal-text.js";
+import { boundedTerminalText, scrubTerminalControls, terminalText } from "./terminal-text.js";
 
-export { boundedTerminalText, terminalText };
+export { boundedTerminalText, scrubTerminalControls, terminalText };
 
 /** Upper bound on the summary length echoed into the TTY prompt (reference parity). */
 const MAX_CONFIRMATION_VALUE_CHARS = 240;
