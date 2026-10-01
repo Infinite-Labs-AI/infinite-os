@@ -88,6 +88,12 @@ Fixes ported from infinite.fast: ways a customer site silently collected the wro
   with no markup at all are now recognised as verification tokens (by content, since the names vary
   per site), left byte-for-byte untouched, and named in the plan. A head is never added to one.
   Genuinely broken pages (markup without `</head>`, empty files) still block the install.
+- **Only real Meta pixel IDs are accepted.** `--meta-pixel-id` (and a pixel ID read from `.env`)
+  accepted any 6-20 digit number, so a typo, a placeholder or an ad-account number installed a
+  pixel that looks alive and never receives an event. Meta issues 15- and 16-digit pixel IDs only;
+  anything else is now refused, and the message says what a pixel ID looks like and where to find
+  it in Events Manager. Pixels already on a site are still detected whatever their shape, so a
+  broken one is reported rather than hidden.
 
 ## 0.11.0 — 2026-09-21
 
