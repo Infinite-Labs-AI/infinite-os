@@ -251,3 +251,149 @@ it("embeds bootstrap snippets as a JS string literal so backticks remain executa
 
   expect(() => executeManagedModule(source, { consent: "granted" })).not.toThrow()
 })
+
+// Next.js joins EVERY provider's bootstrap into ONE inline <script> (ga4, posthog, x, meta, infinite,
+// in plan order). One snippet that throws therefore stops every provider after it, silently: the
+// managed PostHog stub did exactly that until its method list was replaced, so on every Next.js
+// install that managed PostHog the Meta pixel, the X pixel and the Infinite runtime never started.
+// This runs the whole assembled module the way a browser does — `window` IS the global, and an
+// inline script that throws is reported, not propagated to the code that appended it.
+function executeAssembledModuleAsBrowser(source: string) {
+  const loaded: string[] = []
+  const scriptErrors: Error[] = []
+  const elements: Array<Record<string, unknown>> = []
+  const localValues = new Map<string, string>()
+  const storage = (values: Map<string, string>) => ({
+    getItem: (key: string) => values.get(key) ?? null,
+    setItem: (key: string, value: string) => void values.set(key, value),
+    removeItem: (key: string) => void values.delete(key)
+  })
+  const location = { href: "https://example.com/", hostname: "example.com", origin: "https://example.com", pathname: "/", search: "" }
+  let context: Context
+  const scriptElement = () => {
+    const attributes = new Map<string, string>()
+    return {
+      src: "",
+      text: "",
+      id: "",
+      async: false,
+      setAttribute: (name: string, value: string) => void attributes.set(name, value),
+      getAttribute: (name: string) => attributes.get(name) ?? null
+    }
+  }
+  const document = {
+    referrer: "",
+    createElement: scriptElement,
+    getElementById: (id: string) => elements.find((element) => element.id === id) ?? null,
+    // The third-party loaders insert their library before the first <script> on the page.
+    getElementsByTagName: () => [
+      { parentNode: { insertBefore: (element: Record<string, unknown>) => void loaded.push(String(element.src)) } }
+    ],
+    addEventListener() {},
+    head: {
+      appendChild(element: Record<string, unknown>) {
+        elements.push(element)
+        if (typeof element.src === "string" && element.src) loaded.push(element.src)
+        if (typeof element.text === "string" && element.text.length > 0) {
+          try {
+            runInContext(element.text, context)
+          } catch (error) {
+            scriptErrors.push(error as Error)
+          }
+        }
+        return element
+      }
+    }
+  }
+  const moduleExports: Record<string, unknown> = {}
+  const browserGlobal: Record<string, unknown> = {
+    exports: moduleExports,
+    document,
+    location,
+    history: { pushState() {}, replaceState() {} },
+    localStorage: storage(localValues),
+    sessionStorage: storage(new Map()),
+    navigator: { doNotTrack: "0", globalPrivacyControl: false, sendBeacon: () => false },
+    crypto: { randomUUID: () => "00000000-0000-4000-8000-000000000001" },
+    fetch: async () => ({ ok: true }),
+    setTimeout: () => 1,
+    clearTimeout() {},
+    addEventListener() {},
+    removeEventListener() {},
+    URL,
+    Date,
+    JSON,
+    Math,
+    console
+  }
+  browserGlobal.window = browserGlobal
+  browserGlobal.self = browserGlobal
+  context = createContext(browserGlobal)
+  const javascript =
+    source.replace("export function installInfiniteInstrumentation(): void {", "function installInfiniteInstrumentation() {") +
+    "\nexports.installInfiniteInstrumentation = installInfiniteInstrumentation\n"
+  runInContext(javascript, context)
+  ;(moduleExports.installInfiniteInstrumentation as () => void)()
+  return { window: browserGlobal, loaded, scriptErrors }
+}
+
+const ALL_PROVIDERS: WorkspaceInstallArtifacts = {
+  productionHosts: ["example.com"],
+  ga4: { measurementId: "G-TEST123" },
+  posthog: { projectKey: "phc_test", apiHost: "https://us.i.posthog.com" },
+  x: { pixelId: "tw-pixel-123", eventTagIds: ["tw-event-1"] },
+  meta: { pixelId: "1234567890123456" },
+  infinite: {
+    siteSourceKey: "site_public_123",
+    collectPath: "/infinite/events/collect",
+    productionHosts: ["example.com"],
+    staticProxy: "vercel",
+    consentMode: "not_required"
+  }
+}
+
+/** Values built inside the vm belong to another realm; compare their plain JSON shape. */
+const plain = (value: unknown): unknown => JSON.parse(JSON.stringify(value))
+
+describe.each(frameworks)("$name assembled module with every provider, executed", ({ fixture, modulePath }) => {
+  it("starts GA4, PostHog, X, Meta and the Infinite runtime from the one shared script", () => {
+    const source = generateManagedModule(fixture, modulePath, ALL_PROVIDERS)
+    const { window, loaded, scriptErrors } = executeAssembledModuleAsBrowser(source)
+    expect(scriptErrors).toEqual([])
+    // GA4
+    expect(typeof window.gtag).toBe("function")
+    expect(loaded.some((src) => src.includes("googletagmanager.com/gtag/js?id=G-TEST123"))).toBe(true)
+    // PostHog: init queued for array.js.
+    const posthog = window.posthog as { _i: unknown[][] }
+    expect(plain(posthog._i)[0]).toEqual(["phc_test", { api_host: "https://us.i.posthog.com", defaults: "2025-05-24" }, "posthog"])
+    expect(loaded).toContain("https://us-assets.i.posthog.com/static/array.js")
+    // X
+    expect(typeof window.twq).toBe("function")
+    expect(loaded).toContain("https://static.ads-twitter.com/uwt.js")
+    // Meta: autoConfig off, init, PageView — queued for fbevents.js.
+    const fbq = window.fbq as { queue: ArrayLike<unknown>[] }
+    expect(typeof fbq).toBe("function")
+    expect(plain(fbq.queue.map((args) => Array.from(args)))).toEqual([
+      ["set", "autoConfig", "false", "1234567890123456"],
+      ["init", "1234567890123456"],
+      ["track", "PageView"]
+    ])
+    expect(loaded).toContain("https://connect.facebook.net/en_US/fbevents.js")
+    // Infinite's own runtime, last in the script.
+    expect(window.__infiniteAnalyticsRuntime).toBe(true)
+  })
+
+  it("negative: one snippet that throws (the old PostHog stub) stops every provider after it", () => {
+    const source = generateManagedModule(fixture, modulePath, ALL_PROVIDERS)
+    // The stub list it replaced named methods under parents the stub never creates.
+    const broken = source.replace(/o='[^']*'\.split/, "o='init capture people.set person.set_once group.set'.split")
+    expect(broken).not.toBe(source)
+    const { window, scriptErrors } = executeAssembledModuleAsBrowser(broken)
+    expect(scriptErrors).toHaveLength(1)
+    expect(scriptErrors[0]!.message).toMatch(/set_once/)
+    expect(typeof window.gtag).toBe("function") // before PostHog in the script: unaffected
+    expect(window.twq).toBeUndefined()
+    expect(window.fbq).toBeUndefined()
+    expect(window.__infiniteAnalyticsRuntime).toBeUndefined()
+  })
+})
