@@ -47,6 +47,7 @@ import {
 } from "./home-inventory.js";
 import { isInfiniteTurnBusy } from "./status-indicator.js";
 import { inkTranscriptRowCount, InkTranscriptApp, useInfiniteTranscriptClock } from "./transcript-app.js";
+import { useTerminalColumns } from "./terminal-columns.js";
 
 /**
  * The every-launch home inventory shown above the transcript on the empty home
@@ -174,6 +175,10 @@ export interface CompletionOptions {
 }
 
 export interface InkInteractiveSessionAppProps {
+  /**
+   * Test-only width override. When absent, the session draws at the live
+   * terminal width and redraws on every resize (`useTerminalColumns`).
+   */
   columns?: number;
   // In-chat /connect wizard (#20). Given a submitted line, decides whether it is a
   // token-provider connect (returns a `wizard` descriptor the TUI renders as a
@@ -229,8 +234,10 @@ export interface InkInteractiveSessionRunOptions extends InkInteractiveSessionAp
 }
 
 export async function runInkInteractiveSession(options: InkInteractiveSessionRunOptions): Promise<void> {
+  // No `columns` fallback to `output.columns` here: that froze the width at launch.
+  // The app follows the live width itself; `options.columns` stays a test override.
   const instance = render(
-    <InkInteractiveSessionApp {...options} columns={options.columns ?? options.output?.columns} />,
+    <InkInteractiveSessionApp {...options} />,
     {
       exitOnCtrlC: false,
       patchConsole: false,
@@ -247,9 +254,10 @@ export function renderInkInteractiveSessionToString(
   props: InkInteractiveSessionAppProps,
   options: { columns?: number } = {}
 ): string {
-  return renderToString(<InkInteractiveSessionApp {...props} columns={props.columns ?? options.columns} />, {
-    columns: props.columns ?? options.columns ?? 88
-  });
+  // A string render has no terminal to follow, so it always pins a width (88 by
+  // default) instead of reading whatever stream `useStdout` falls back to.
+  const columns = props.columns ?? options.columns ?? 88;
+  return renderToString(<InkInteractiveSessionApp {...props} columns={columns} />, { columns });
 }
 
 /**
@@ -328,7 +336,7 @@ export function buildProjectSelectionPrompt(selection: {
 }
 
 export function InkInteractiveSessionApp({
-  columns = 88,
+  columns: columnsOverride,
   connectWizard,
   buildConnectDispatch,
   getAgentTitle,
@@ -351,6 +359,8 @@ export function InkInteractiveSessionApp({
 }: InkInteractiveSessionAppProps) {
   const app = useApp();
   const t = theme ?? resolveTheme();
+  const liveColumns = useTerminalColumns(88);
+  const columns = columnsOverride ?? liveColumns;
   const [busy, setBusy] = useState(false);
   const [busyStartedAt, setBusyStartedAt] = useState<number | undefined>(undefined);
   const [completionIndex, setCompletionIndex] = useState(0);

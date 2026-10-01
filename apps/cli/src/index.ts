@@ -1675,7 +1675,6 @@ async function runDesktopInteractiveEntry(env: CliEnv): Promise<void> {
   if (shouldUseInkInteractiveSession(input, output, env)) {
     const homeInventoryConnections = await fetchHomeInventoryConnections(env);
     await runInkInteractiveSession({
-      columns: output.columns,
       errorOutput,
       homeInventory: homeInventoryData(status.workspace?.name, homeInventoryConnections),
       input,
@@ -7611,7 +7610,6 @@ async function interactiveSession(env: CliEnv): Promise<void> {
     const homeInventoryConnections = await fetchHomeInventoryConnections(env);
     try {
       await runInkInteractiveSession({
-        columns: output.columns,
         errorOutput,
         getAgentTitle: () =>
           activeProjectLabel ? `${theme.brand.name} — ${activeProjectLabel}` : undefined,
