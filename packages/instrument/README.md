@@ -364,25 +364,31 @@ never logged. Neither half works alone — no block, nothing to forward; no togg
 
 ```ts
 import { createHash } from "node:crypto"
-import { adMatchFromRequest, postInfiniteOutcome } from "../lib/infinite-outcome"
+import { adMatchFromRequest, infiniteVisitKey, postInfiniteOutcome } from "../lib/infinite-outcome"
 
 // 1. At CHECKOUT, from the BUYER'S browser request: their _fbc/_fbp cookies, ip and user agent,
-//    saved together (one device) with the order. Your later call to Infinite is server-to-server
+//    saved together (one device) with the checkout. Your later call to Infinite is server-to-server
 //    and carries none of them.
 const adMatch = adMatchFromRequest(request, {
   em: createHash("sha256").update(email.trim().toLowerCase()).digest("hex"),
-  external_id: createHash("sha256").update(user.id.trim()).digest("hex")   // trimmed only: never lowercase an id
+  // Only when the buyer has an account id (a guest has none). Trimmed only: never lowercase an id.
+  ...(user?.id != null ? { external_id: createHash("sha256").update(String(user.id).trim()).digest("hex") } : {})
 })
-await saveOrderAdMatch(order.id, adMatch)   // e.g. a column on your order row
+const infinite_visit_key = await infiniteVisitKey({ clientIp: adMatch.client_ip_address, userAgent: adMatch.client_user_agent })
+const session = await stripe.checkout.sessions.create({ /* … */ metadata: { infinite_visit_key } })
+await saveCheckoutAdMatch(session.id, adMatch)   // e.g. a column on your order row
 
-// 2. In the PAYMENT WEBHOOK, once the payment is real. A purchase is a server event only:
-//    no browser fbq('track', 'Purchase') next to it.
+// 2. In the PAYMENT WEBHOOK, once the payment is real. Report the purchase HERE and only here
+//    (not also from a checkout-status route), and never with a browser fbq('track', 'Purchase').
 await postInfiniteOutcome({
   type: "purchase",
-  path: "/checkout",                 // Meta requires event_source_url
-  eventId: "purchase:" + order.id,   // Infinite's idempotency key: a retried webhook is counted once
-  properties: { value: order.total, currency: "USD" },   // required for a Purchase
-  adMatch: await loadOrderAdMatch(order.id)
+  path: "/checkout",                   // Meta requires event_source_url
+  eventId: "purchase:" + session.id,   // the SAME id every time this purchase is reported: counted once
+  properties: {
+    value: session.amount_total / 100, currency: session.currency.toUpperCase(),   // required for a Purchase
+    visitKey: session.metadata.infinite_visit_key   // carried from checkout: same-lane attribution
+  },
+  adMatch: await loadCheckoutAdMatch(session.id)
 })
 ```
 
@@ -405,14 +411,17 @@ await postInfiniteOutcome({
   *your* inbound request. In a webhook the incoming request is the provider's, not your buyer's:
   that is why the example captures the block at checkout and carries it to the webhook. When a
   browser holds two `_fbc` cookies, `adMatchFromRequest` sends the newest ad click.
-- **`eventId` is Infinite's idempotency key, not Meta's event ID.** Make it stable per outcome (the
-  order id), so a retried webhook is counted once in your Infinite ledger. Infinite decides the
-  `event_id` Meta receives: for a conversion counted once per order it is this value, but for one
-  counted once per account or once per visit Infinite derives a different id, which your pages never
-  see.
+- **`eventId` is Infinite's idempotency key, not Meta's event ID.** Make it stable per outcome, and
+  use the SAME one every time the same outcome is reported (`"purchase:" + session.id` everywhere):
+  Infinite counts an `eventId` once, so a retried webhook is counted once, but two reports of one
+  purchase with two different ids count it twice. Infinite decides the `event_id` Meta receives. For
+  a conversion set to *Every event* or *Once per session* in Infinite → Conversions it is this value;
+  for *Once per account*, and for *Once per visitor (TTL)* when the outcome carries a `visitKey`,
+  Infinite derives a different id, which your pages never see.
 - **Purchases are server events only.** Report them from the payment webhook and do not also fire
-  `fbq('track', 'Purchase')` on a thank-you page: that browser event cannot carry the id Meta received
-  from the server, so Meta can count the purchase twice.
+  `fbq('track', 'Purchase')` on a thank-you page. The page never builds a Meta event ID, so a
+  browser Purchase has no server event to be deduplicated against, and Meta can count the purchase
+  twice.
 - **Never build a Meta event ID in the page, and never fire a Meta conversion (`Purchase`, `Lead`,
   `CompleteRegistration`, `StartTrial`, …) with `fbq` on a click.** A click is intent, not a
   conversion; a browser event with an id your page made up matches no server event.

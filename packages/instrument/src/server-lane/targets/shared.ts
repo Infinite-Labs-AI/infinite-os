@@ -867,7 +867,8 @@ function infiniteFbp(header${t(": string")})${t(": string | undefined")} {
  * trimmed ONLY (an id keeps its case, exactly as the browser pixel's matching helper hashes it):
  *   adMatchFromRequest(request, {
  *     em: createHash("sha256").update(email.trim().toLowerCase()).digest("hex"),
- *     external_id: createHash("sha256").update(user.id.trim()).digest("hex")
+ *     // only when the buyer has an account id; String() so a numeric id cannot throw
+ *     ...(user?.id != null ? { external_id: createHash("sha256").update(String(user.id).trim()).digest("hex") } : {})
  *   })
  */
 export function adMatchFromRequest(request${t(": InfiniteVisitKeyRequest")}, hashed${t(": { em?: string; external_id?: string }")} = {})${t(": InfiniteAdMatch")} {

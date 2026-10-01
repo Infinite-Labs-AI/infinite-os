@@ -351,9 +351,11 @@ ${handlerSignature}
     accountKey: session.customer,  // optional; hashed at rest by Infinite
     visitKeyInputs: request        // same visitKey as the page view -> same-lane conversion rate
   })
-  // Running Meta ads without PostHog? Send the purchase to Meta from your PAYMENT WEBHOOK, with the
-  // adMatch block captured at checkout (see "Optional: forward the conversion to Meta"). A purchase
-  // is a server event only: no fbq('track', 'Purchase') in the page, and never an event ID built here.
+  // Running Meta ads without PostHog? Then report the purchase from your PAYMENT WEBHOOK INSTEAD of
+  // here — the SAME eventId ("purchase:" + session.id), plus the adMatch block captured at checkout
+  // (see "Optional: forward the conversion to Meta") — and delete this call, so one purchase is
+  // reported once. A purchase is a server event only: no fbq('track', 'Purchase') in the page, and
+  // never an event ID built here.
 
   return Response.json({ paid: true })
 }

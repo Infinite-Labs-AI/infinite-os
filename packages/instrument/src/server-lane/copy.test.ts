@@ -1,3 +1,8 @@
+import { createHash } from "node:crypto"
+import { readFileSync } from "node:fs"
+import { fileURLToPath } from "node:url"
+import { runInNewContext } from "node:vm"
+
 import { describe, expect, it } from "vitest"
 
 import { INFINITE_SERVER_EVENTS_DESTINATION, INFINITE_SERVER_LANE_RECEIPT_URL } from "../workspace-artifacts.js"
@@ -8,6 +13,7 @@ import {
   renderServerLaneBrief,
   serverLaneCopy
 } from "./copy.js"
+import { outcomeHelperSource } from "./targets/shared.js"
 
 describe("the agent brief", () => {
   const brief = renderServerLaneBrief({
@@ -69,7 +75,7 @@ describe("the agent brief", () => {
     // The hashing recipe is spelled out, so nobody has to guess Meta's normalisation.
     expect(brief).toContain('createHash("sha256").update(email.trim().toLowerCase()).digest("hex")')
     // ONE external_id rule, the browser accessor's: trimmed only, case kept. Never "lowercased".
-    expect(brief).toContain('external_id: createHash("sha256").update(user.id.trim()).digest("hex")')
+    expect(brief).toContain('external_id: createHash("sha256").update(String(user.id).trim()).digest("hex")')
     expect(brief).toContain("**trimmed only — its case is kept**")
     expect(brief).not.toMatch(/external_id[^\n]*\.toLowerCase\(\)/)
     expect(brief).not.toMatch(/`em` and `external_id` are sha256 hex of the trimmed, lowercased/)
@@ -165,5 +171,115 @@ describe("the README's Meta advice", () => {
     expect(readme).not.toMatch(/eventID:\s*"purchase:/)
     expect(readme).not.toMatch(/`em` and `external_id` are sha256 hex of the trimmed, lowercased/)
     expect(readme).not.toContain("hashed the same way\n")
+  })
+})
+
+// Review fixes F1/F2/F5 on the Meta forwarding example. Every place a customer (or their agent)
+// copies the recipe from: the brief in both languages, the README, and the generated helper's own
+// doc comment.
+const README = readFileSync(fileURLToPath(new URL("../../README.md", import.meta.url)), "utf8")
+const BRIEF_TS = renderServerLaneBrief({ status: { kind: "other-stack", framework: "Express" } })
+const BRIEF_JS = renderServerLaneBrief({
+  status: { kind: "other-stack", framework: "Express" },
+  outcomeImportSpecifier: "../lib/infinite-outcome.js",
+  outcomeLanguage: "js"
+})
+const HELPER_TS = outcomeHelperSource({ siteSourceKey: "site_test", productionHosts: ["example.com"] })
+const HELPER_JS = outcomeHelperSource(
+  { siteSourceKey: "site_test", productionHosts: ["example.com"] },
+  { language: "js", extension: "js" }
+)
+const RECIPE_SOURCES = { BRIEF_TS, BRIEF_JS, README, HELPER_TS, HELPER_JS }
+
+/** Every distinct `X` in `eventId: "purchase:" + X` — one purchase must be reported under one id. */
+function purchaseEventIdSources(text: string): Set<string> {
+  return new Set([...text.matchAll(/eventId:\s*\\?"purchase:\\?"\s*\+\s*([\w.]+)/g)].map((match) => match[1]!))
+}
+
+/**
+ * Run the `external_id` line of a recipe as the customer's checkout route would: the line becomes
+ * one entry of an object literal (comment and trailing comma removed), evaluated with a real
+ * sha256 and the given `user`. Throws exactly where the customer's checkout would throw.
+ */
+function runExternalIdLine(line: string, user: unknown): Record<string, unknown> {
+  const entry = line
+    .replace(/^\s*\*?\s*/, "")
+    .replace(/\s*\/\/.*$/, "")
+    .replace(/,\s*$/, "")
+  return runInNewContext(`({ ${entry} })`, { createHash, user }) as Record<string, unknown>
+}
+
+function externalIdLines(text: string): string[] {
+  return text.split("\n").filter((line) => /external_id: createHash\(/.test(line))
+}
+
+const sha = (value: string) => createHash("sha256").update(value).digest("hex")
+
+describe("the Meta forwarding example: one purchase, one eventId (review F1)", () => {
+  it.each(Object.entries({ BRIEF_TS, BRIEF_JS, README }))("%s reports every purchase under the same eventId", (_name, text) => {
+    const ids = purchaseEventIdSources(text)
+    expect(ids.size).toBeGreaterThan(0)
+    expect([...ids]).toEqual(["session.id"])
+    // The Meta webhook call carries the visit key from checkout next to its adMatch block.
+    expect(text).toMatch(/visitKey: session\.metadata\.infinite_visit_key\s+\/\/ carried from checkout/)
+    expect(text).toContain("adMatch: await loadCheckoutAdMatch(session.id)")
+    expect(text).toContain("the SAME id every time this purchase is reported")
+  })
+
+  it("tells the agent to MOVE the purchase report to the webhook, not to add a second one", () => {
+    for (const brief of [BRIEF_TS, BRIEF_JS]) {
+      expect(brief).toContain("report the purchase from your PAYMENT WEBHOOK INSTEAD of")
+      expect(brief).toContain("and delete this call, so one purchase is")
+    }
+    expect(README).toContain("Report the purchase HERE and only here")
+  })
+
+  it("negative: the old copy reported one purchase under two different ids", () => {
+    const old = [
+      'eventId: "purchase:" + session.id,  // stable: a retried webhook is counted once',
+      'eventId: \\"purchase:\\" + order.id,   // Infinite\'s idempotency key'
+    ].join("\n")
+    expect([...purchaseEventIdSources(old)].sort()).toEqual(["order.id", "session.id"])
+  })
+})
+
+describe("the external_id recipe is safe to paste into a checkout route (review F2)", () => {
+  const users: Array<[string, unknown, string | undefined]> = [
+    ["a string id with capitals and spaces", { id: "  Acct_AbC-42 " }, sha("Acct_AbC-42")],
+    ["a numeric id", { id: 42 }, sha("42")],
+    ["a guest (no user)", undefined, undefined],
+    ["a guest (null user)", null, undefined],
+    ["a user without an id", {}, undefined]
+  ]
+
+  it.each(Object.entries(RECIPE_SOURCES))("%s: never throws, trims only, keeps case, skips guests", (_name, text) => {
+    const lines = externalIdLines(text)
+    expect(lines.length).toBeGreaterThan(0)
+    for (const line of lines) {
+      expect(line).not.toContain("user.id.trim()")
+      for (const [label, user, expected] of users) {
+        const result = runExternalIdLine(line, user)
+        expect(result.external_id, label).toBe(expected)
+      }
+    }
+  })
+
+  it("negative: the old recipe line throws on a numeric id and on a guest", () => {
+    const old = '  external_id: createHash("sha256").update(user.id.trim()).digest("hex")  // trimmed only: never lowercase an id'
+    expect(runExternalIdLine(old, { id: "Acct_A" }).external_id).toBe(sha("Acct_A"))
+    expect(() => runExternalIdLine(old, { id: 42 })).toThrow(/trim is not a function/)
+    expect(() => runExternalIdLine(old, undefined)).toThrow(/Cannot read properties of undefined/)
+  })
+})
+
+describe("the event-ID copy uses the app's own dedupe labels and the real reason (review F5)", () => {
+  it.each(Object.entries({ BRIEF_TS, README }))("%s", (_name, text) => {
+    const flat = text.replace(/\s+/g, " ")
+    expect(flat).toContain("*Every event* or *Once per session* in Infinite → Conversions it is this value")
+    expect(flat).toContain("for *Once per account*, and for *Once per visitor (TTL)* when the outcome carries a `visitKey`")
+    expect(flat).toContain("The page never builds a Meta event ID, so a browser Purchase has no server event")
+    // Negative: the old labels and the old (false for Every-event bindings) reason are gone.
+    expect(flat).not.toContain("counted once per account or once per visit")
+    expect(flat).not.toContain("cannot carry the id Meta received")
   })
 })
