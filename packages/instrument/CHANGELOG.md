@@ -70,23 +70,31 @@ Fixes ported from infinite.fast: ways a customer site silently collected the wro
 - **One rule for hashing the account ID sent to Meta.** The server-lane setup guide told customers
   to lowercase `external_id` before hashing, while the browser pixel's matching helper keeps the
   id's case — so an id with capital letters reached Meta as two different people. The guide, the
-  generated helper's comments and a new `hashInfiniteExternalId` recipe now all say the same thing
-  as infinite.fast: the email is trimmed and lowercased; the account id is trimmed only.
+  generated helper's comments and the README now all say the same thing as infinite.fast: the email
+  is trimmed and lowercased; the account id is trimmed only. The guide's recipe also stopped
+  throwing inside a checkout route on a numeric id or a guest (`String(user.id).trim()`, and only
+  when the buyer has an account id). Both recipes, `hashInfiniteEmail` and the new
+  `hashInfiniteExternalId`, are now exported from the package, as their documentation already
+  said.
 - **Truthful Meta event-ID advice in the setup guide and README.** They told customers that the
   `eventId` they pass (`"purchase:" + order.id`) is the event ID Meta receives, and to fire a
   browser `fbq('track', 'Purchase', …, { eventID })` with the same value so Meta would deduplicate.
-  That is wrong whenever Infinite derives a different ID (conversions counted once per account or
-  once per visit), and a page that builds its own Meta event ID is how infinite.fast sent Meta
-  phantom sign-ups. The guide now says: `eventId` is Infinite's idempotency key, so a retried
-  webhook is counted once; Infinite decides the ID Meta receives; purchases are reported from the
-  payment webhook as server events only, with the match data captured at checkout; and the page
-  never builds a Meta event ID or fires a Meta conversion on a click. The serverless route example
-  no longer attaches Meta match data to a purchase.
+  That is wrong whenever Infinite derives a different ID (conversions set to *Once per account*, or
+  *Once per visitor (TTL)* when a visit key is carried), and a page that builds its own Meta event
+  ID sends Meta conversions that never happened. The guide now says: `eventId` is Infinite's
+  idempotency key, so a retried webhook is counted once, and one purchase is reported under one
+  `eventId` wherever it is reported (`"purchase:" + session.id` in every example; two ids would
+  count it twice); Infinite decides the ID Meta receives; purchases are reported from the payment
+  webhook as server events only, with the match data and the visit key captured at checkout; and
+  the page never builds a Meta event ID or fires a Meta conversion on a click. The serverless route
+  example no longer attaches Meta match data to a purchase, and says to move the report to the
+  webhook (not add a second one) when purchases go to Meta.
 - **A domain-verification file no longer blocks a static-site install.** Meta's domain-verification
   `.html` file (and Google's `google<hash>.html`) is a bare token with no markup, so it has no
   `</head>`, and one such file blocked the whole install. Files whose content is a single short line
-  with no markup at all are now recognised as verification tokens (by content, since the names vary
-  per site), left byte-for-byte untouched, and named in the plan. A head is never added to one.
+  with no markup at all now look like verification tokens (judged by content, since the names vary
+  per site): they are left byte-for-byte untouched and named in the plan as looking like a token. A
+  head is never added to one.
   Genuinely broken pages (markup without `</head>`, empty files) still block the install.
 - **Only real Meta pixel IDs are accepted.** `--meta-pixel-id` (and a pixel ID read from `.env`)
   accepted any 6-20 digit number, so a typo, a placeholder or an ad-account number installed a
@@ -94,13 +102,19 @@ Fixes ported from infinite.fast: ways a customer site silently collected the wro
   anything else is now refused, and the message says what a pixel ID looks like and where to find
   it in Events Manager. Pixels already on a site are still detected whatever their shape, so a
   broken one is reported rather than hidden.
-- **The managed PostHog snippet now starts, and can identify visitors before PostHog loads.** Its
-  stub method list named methods under parents the stub never creates (`person.*`, `group.*`,
+- **The managed PostHog snippet now starts, and can identify visitors before PostHog loads — and on
+  Next.js, so do the Meta pixel, the X pixel and Infinite's own pixel.** The snippet's stub method
+  list named methods under parents the stub never creates (`person.*`, `group.*`,
   `feature_flags.*`, `sessionRecording.*`), so building the stub threw before `posthog.init` was
   queued, and it had no top-level `identify`, `alias` or `get_distinct_id`, so an early
-  `posthog.identify()` threw too. The list is now PostHog's current official one (the list
-  infinite.fast ships). Only the method list changed: `defaults`, `api_host` and installs the
-  customer already had are untouched.
+  `posthog.identify()` threw too. On Next.js (App Router and Pages Router) infinite-tag puts every
+  provider in ONE script, in the order GA4, PostHog, X, Meta, Infinite, so that throw also stopped
+  everything after PostHog: on every Next.js site where infinite-tag managed PostHog, the Meta
+  pixel, the X pixel and the Infinite pixel it installed never started (GA4, placed first, did).
+  Static HTML and Vite sites give each provider its own script, so there only PostHog was affected.
+  The list is now PostHog's official snippet list as infinite.fast ships it. Only the method list
+  changed: `defaults`, `api_host` and installs the customer already had are untouched. A new test
+  runs the whole Next.js module with every provider and checks that each one starts.
 - **The harness's step list has one source of truth.** The runbook's step ids listed 12 steps while
   the harness ran 13 (`setup-checks` was missing from the list), so anything reading the step ids
   disagreed with what actually ran. The run order is now derived from the id list, an id without a
