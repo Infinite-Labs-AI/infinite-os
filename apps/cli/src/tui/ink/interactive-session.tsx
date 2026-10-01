@@ -747,6 +747,16 @@ export function InkInteractiveSessionApp({
       // (the desktop client maps it to a "detached" error), so read the stop
       // from the signal's reason, not from the rejection.
       const stoppedLine = turnStoppedLine(signal.aborted ? signal.reason : error);
+      if (stoppedLine) {
+        // Keep what the stopped turn already showed (its partial answer and
+        // tool trail, running tools marked stopped) before reset() clears it:
+        // the stop line says app work may still finish, so the user must still
+        // see which tools were running.
+        const partial = turnController.stoppedTranscript();
+        if (partial.length) {
+          appendMessages(stampAgentTitle(partial, turnTitle));
+        }
+      }
       appendMessages([{
         kind: "slash",
         role: "system",

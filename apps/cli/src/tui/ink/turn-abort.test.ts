@@ -126,6 +126,16 @@ describe("turn abort wiring (structural, CI-run)", () => {
     expect(session).toContain('"esc to stop"');
   });
 
+  it("a stopped turn keeps its partial answer and tool trail: committed before the stop line and before reset", () => {
+    const catchBlock = session.slice(session.indexOf("const stoppedLine = turnStoppedLine("));
+    const keep = catchBlock.indexOf("turnController.stoppedTranscript()");
+    const stopLine = catchBlock.indexOf("text: stoppedLine ??");
+    const reset = catchBlock.indexOf("turnController.reset();");
+    expect(keep).toBeGreaterThan(-1);
+    expect(stopLine).toBeGreaterThan(keep);
+    expect(reset).toBeGreaterThan(stopLine);
+  });
+
   it("the desktop session opts in and passes the turn's signal to the runner", () => {
     expect(index).toContain("turnStoppable: true,");
     expect(index).toContain("linkAbortSignals([turnAbort.signal, signal])");

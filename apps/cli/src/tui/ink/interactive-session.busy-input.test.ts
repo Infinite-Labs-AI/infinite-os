@@ -86,8 +86,13 @@ describe("Ink busy input handling", () => {
       output,
       title: "Infinite TUI",
       turnStoppable: true,
-      onSubmitLine(_line, _onProgress, signal) {
+      onSubmitLine(_line, onProgress, signal) {
         signals.push(signal);
+        if (signals.length === 1) {
+          // The first turn streams a partial answer and starts a tool before Esc.
+          onProgress({ type: "tool.start", stage: "tool", message: "pause", toolId: "t1", name: "pause_entity", context: "Hook B" });
+          onProgress({ type: "message.delta", stage: "message", message: "PARTIAL-ANSWER-TEXT", text: "PARTIAL-ANSWER-TEXT" });
+        }
         // Like the desktop client: the stop surfaces as a transport error.
         return new Promise<InkInteractiveLineResult>((_resolve, reject) => {
           signal.addEventListener("abort", () => reject(new Error("Detached from the Desktop turn.")), { once: true });
@@ -97,11 +102,19 @@ describe("Ink busy input handling", () => {
 
     await waitFor(() => output.text().includes("ready"), 4_000, output.text);
     await sendKeys(input, "first\r");
-    await waitFor(() => signals.length === 1 && output.text().includes("esc to stop"), 4_000, output.text);
+    await waitFor(() => signals.length === 1 && output.text().includes("PARTIAL-ANSWER-TEXT"), 4_000, output.text);
+    const beforeEsc = output.text().length;
     await sendRaw(input, "\x1b");
     await waitFor(() => output.text().includes("■ Stopped."), 4_000, output.text);
     expect(signals[0]!.aborted).toBe(true);
     expect(output.text()).not.toContain("Detached from the Desktop turn.");
+    // The streamed partial answer and the running tool (marked stopped) survive
+    // the stop: they are committed above the stop line, not erased by reset().
+    const afterEsc = output.text().slice(beforeEsc);
+    const stopAt = afterEsc.lastIndexOf("■ Stopped.");
+    expect(afterEsc.lastIndexOf("PARTIAL-ANSWER-TEXT")).toBeGreaterThan(-1);
+    expect(afterEsc.lastIndexOf("PARTIAL-ANSWER-TEXT")).toBeLessThan(stopAt);
+    expect(afterEsc).toMatch(/Pause Entity\("Hook B"\) · stopped/);
 
     await sendKeys(input, "second\r");
     await waitFor(() => signals.length === 2, 4_000, output.text);
