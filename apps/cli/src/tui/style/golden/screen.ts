@@ -13,14 +13,14 @@
 // workspace and connections, the busy composer note; R2: step start/end on the
 // trail instead of durations), it updates this file in the same PR, so the
 // goldens keep measuring the session and not a re-implementation of it.
-import type { ToolViewFrameV1 } from "@infinite-os/types";
+import type { AnswerViewV1, ToolViewFrameV1 } from "@infinite-os/types";
 
 import type { InSessionConfirmationAction } from "../../../desktop/confirm-in-session.js";
 import { patchTurnState, recordTurnView, resetTurnState } from "../../app/turn-store.js";
 import { renderInkInteractiveSessionToString, type HomeInventoryData } from "../../ink/interactive-session.js";
 import { buildToolTrailLine } from "../../lib/text.js";
 import type { Msg } from "../../types.js";
-import type { R4ScreenFixture, R4Step } from "./fixtures.js";
+import type { R4ScreenFixture, R4Step, R4Turn } from "./fixtures.js";
 
 /** Steps still running when the screen is drawn (r4 `run` and `bg`). */
 const RUNNING: ReadonlySet<R4Step["status"]> = new Set(["run", "bg"]);
@@ -38,6 +38,21 @@ export interface ScreenOptions {
 /** The trail line one finished step leaves (today the trail carries durations, not start/end: spec T4). */
 function trailLine(step: R4Step): string {
   return buildToolTrailLine(step.label, "", FAILED.has(step.status), step.result, Math.max(0, step.end - step.start));
+}
+
+/** The messages the session holds for a fixture's turn: the question, the finished steps as the tool trail, the answer. */
+export function turnMessages(turn: R4Turn): Msg[] {
+  const trail = turn.steps.filter((step) => !RUNNING.has(step.status)).map(trailLine);
+  return [
+    { role: "user", text: turn.question },
+    ...(trail.length ? [{ kind: "trail" as const, role: "system" as const, text: "", tools: trail }] : []),
+    { role: "assistant", text: turn.answer }
+  ];
+}
+
+/** The views the turn store holds (every view but a waiting write card, which the session draws as the card). */
+export function recordedViews(turn: R4Turn): AnswerViewV1[] {
+  return turn.views.filter((view, index) => !(index === turn.pending && view.approval?.kind === "card"));
 }
 
 export function renderR4Screen(fixture: R4ScreenFixture, options: ScreenOptions): string {
@@ -85,12 +100,7 @@ export function renderR4Screen(fixture: R4ScreenFixture, options: ScreenOptions)
     }));
   }
 
-  const trail = turn.steps.filter((step) => !RUNNING.has(step.status)).map(trailLine);
-  const messages: Msg[] = [
-    { role: "user", text: turn.question },
-    ...(trail.length ? [{ kind: "trail" as const, role: "system" as const, text: "", tools: trail }] : []),
-    { role: "assistant", text: turn.answer }
-  ];
+  const messages = turnMessages(turn);
   return renderInkInteractiveSessionToString({
     columns: options.cols,
     initialMessages: messages,

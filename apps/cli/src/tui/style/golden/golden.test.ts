@@ -29,10 +29,15 @@ vi.hoisted(() => {
 
 import { decodeAnswerView } from "../../../desktop/answer-view-decode.js";
 import { homeInventoryData } from "../../../index.js";
+import { resolveTheme } from "../../theme.js";
+import { transcriptColumns } from "../../ink/transcript-app.js";
+import { renderLiveTurn } from "../../views/layout.js";
+import { ansiToSegmentLines } from "./ansi-to-segments.js";
 import { firstProblem, GoldenEvaluator, REGION_SCREENS, type Evaluation } from "./evaluate.js";
 import { loadR4Fixture, r4FixtureIds } from "./fixtures.js";
 import { GOLDENS_DIR, goldenIds, loadGolden, screenOf } from "./goldens.js";
-import { renderR4Screen } from "./screen.js";
+import { cellsOf, textOf } from "./normalize.js";
+import { recordedViews, renderR4Screen, turnMessages } from "./screen.js";
 
 /** The wall clock every screen is drawn at (the r4 data's "now": Oct 1, 10:44 UTC). */
 export const FIXED_CLOCK = Date.parse("2026-10-01T10:44:00Z");
@@ -40,6 +45,15 @@ const RATCHET_FILE = `${GOLDENS_DIR}expected-fail.json`;
 const ratchet: Record<string, string> = JSON.parse(readFileSync(RATCHET_FILE, "utf8")).expectedFail;
 const ids = goldenIds();
 const results = new Map<string, Evaluation>();
+/** Bridge checks (`bridge/<screen>`): the screens whose turn the session draws through `renderLiveTurn`. */
+const BRIDGE_COLS = 160;
+const bridgeIds = r4FixtureIds()
+  .filter((screen) => {
+    const turn = loadR4Fixture(screen).turn;
+    return turn !== null && recordedViews(turn).length > 0;
+  })
+  .map((screen) => `bridge/${screen}`);
+const bridgePass = new Map<string, boolean>();
 
 const evaluator = new GoldenEvaluator((fixture, cols) =>
   renderR4Screen(fixture, { cols, now: FIXED_CLOCK, homeInventory: homeInventoryData })
@@ -52,8 +66,9 @@ beforeAll(() => {
 afterAll(() => {
   vi.useRealTimers();
   const passing = ids.filter((id) => results.get(id)?.pass);
-  const newly = passing.filter((id) => id in ratchet);
-  console.log(`r4 goldens: ${passing.length} of ${ids.length} match (tier 1, truecolor)${newly.length ? `; newly matching: ${newly.join(", ")}` : ""}`);
+  const bridges = bridgeIds.filter((id) => bridgePass.get(id));
+  const newly = [...passing, ...bridges].filter((id) => id in ratchet);
+  console.log(`r4 goldens: ${passing.length} of ${ids.length} match (tier 1, truecolor); Ink bridge: ${bridges.length} of ${bridgeIds.length} screens lossless${newly.length ? `; newly matching: ${newly.join(", ")}` : ""}`);
   if (process.env.GOLDEN_RATCHET === "update" && newly.length) {
     const next = Object.fromEntries(Object.entries(ratchet).filter(([id]) => !newly.includes(id)));
     writeFileSync(RATCHET_FILE, `${JSON.stringify({ ...JSON.parse(readFileSync(RATCHET_FILE, "utf8")), expectedFail: next }, null, 1)}\n`);
@@ -79,8 +94,8 @@ describe("r4 goldens: fixtures and ratchet are complete", () => {
     expect(regions.filter((id) => !data.includes(id) && !REGION_SCREENS[id])).toEqual([]);
   });
 
-  it("the expected-fail list names only real goldens, each with a reason", () => {
-    expect(Object.keys(ratchet).filter((id) => !ids.includes(id))).toEqual([]);
+  it("the expected-fail list names only real goldens and bridge checks, each with a reason", () => {
+    expect(Object.keys(ratchet).filter((id) => !ids.includes(id) && !bridgeIds.includes(id))).toEqual([]);
     expect(Object.entries(ratchet).filter(([, why]) => !why.trim())).toEqual([]);
   });
 });
@@ -100,6 +115,41 @@ describe("r4 goldens (tier 1)", () => {
         return;
       }
       expect(evaluation.pass, `${id}: ${firstProblem(evaluation)}`).toBe(true);
+    });
+  }
+});
+
+// The Ink bridge (spec §11d "bridge smoke test"): the session prints a turn's
+// pre-rendered ANSI lines through `AnsiLine`. Every row the pure renderer draws
+// must reach the screen with the same text AND the same tokens, so a dropped
+// background, underline, inverse or faint (the bridge bug class) fails here
+// even before any golden can match.
+describe("Ink bridge: the session prints renderLiveTurn's rows unchanged", () => {
+  for (const id of bridgeIds) {
+    it(id, () => {
+      const fixture = loadR4Fixture(id.slice("bridge/".length));
+      const turn = fixture.turn!;
+      const pure = ansiToSegmentLines(renderLiveTurn({
+        messages: turnMessages(turn),
+        views: recordedViews(turn),
+        focus: null,
+        width: transcriptColumns(BRIDGE_COLS),
+        color: true,
+        theme: resolveTheme()
+      }).lines);
+      const screen = evaluator.screen(fixture, BRIDGE_COLS);
+      const key = (line: (typeof pure)[number]) => JSON.stringify(cellsOf(line));
+      const onScreen = new Set(screen.map(key));
+      const lost = pure.filter((line) => textOf(line).trim() && !onScreen.has(key(line)));
+      bridgePass.set(id, lost.length === 0);
+      const first = lost[0];
+      const twin = first ? screen.find((line) => textOf(line) === textOf(first)) : undefined;
+      if (id in ratchet) {
+        if (process.env.GOLDEN_RATCHET === "update") return;
+        expect(lost.length > 0, `${id} is now lossless: remove it from __goldens__/expected-fail.json`).toBe(true);
+        return;
+      }
+      expect(lost, first ? `${id}: ${JSON.stringify(first)} reached the screen as ${JSON.stringify(twin ?? "nothing")}` : id).toEqual([]);
     });
   }
 });
