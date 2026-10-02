@@ -11,6 +11,10 @@
 //   D3      r4's exact heads: Cmd+L-only is "⌘ Do this in Cmd+L" (the golden
 //           reads "⌘ Cmd+L only").
 //   D6      While busy, `esc stop` is the FIRST key-bar hint, shown once.
+//   TAB     `tab switch side` shows only while the turn on screen has details
+//           to switch to, a view or a card (improvement round, 2026-10-02:
+//           the bar offers only what works). The boot frame has none, where
+//           Tab completes in the composer, so its bar is `/ commands` alone.
 //   D1, D4, D5 need no golden edit: regions are located independently and the
 //           chrome must appear once (D1), the boot goldens are r4's frame only
 //           and nothing else may be on screen (D4, `compareFrame` coverage), and
@@ -57,6 +61,14 @@ function d6KeyBar(screen: string, cols: number): SegmentLine | null {
   return toSegments(trunc(raw, cols));
 }
 
+/** TAB key bars: the screens with no details on them, whose bar is `/ commands` alone. */
+const NO_SIDES_SCREENS: ReadonlySet<string> = new Set(["boot"]);
+
+function tabKeyBar(screen: string, cols: number): SegmentLine | null {
+  if (!NO_SIDES_SCREENS.has(screen)) return null;
+  return toSegments(trunc([["key", " / "], ["", " commands"]], cols));
+}
+
 const D3_HEADS: readonly [from: string, to: string][] = [["⌘ Cmd+L only", "⌘ Do this in Cmd+L"]];
 
 /** The golden with the binding decisions applied (a copy; the file on disk is r4 as drawn). */
@@ -70,6 +82,12 @@ export function applyDecisions(golden: GoldenFile, screen: string): { golden: Go
       lines = lines.map((line, index) => (index === at ? keybar : line));
       applied.push("D6 esc stop first");
     }
+  }
+  const noSides = tabKeyBar(screen, golden.cols);
+  const noSidesAt = golden.regions?.keybar?.[0];
+  if (noSides && golden.view_kind !== "region" && noSidesAt !== undefined) {
+    lines = lines.map((line, index) => (index === noSidesAt ? noSides : line));
+    applied.push("TAB no side to switch to");
   }
   // The head is the body's first row when wide and sits under the rule when stacked: replace the head segment wherever it is.
   for (const [from, to] of D3_HEADS) {

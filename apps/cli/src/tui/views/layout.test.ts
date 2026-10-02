@@ -179,4 +179,36 @@ describe("a committed document carries every page", () => {
     }
     expect(lines.some((line) => /page \d+ of \d+/u.test(line))).toBe(false);
   });
+
+  it("prints every version of a document, in order, under one head (scrollback has no key to switch them)", () => {
+    const versions = decodeAnswerView({
+      v: 1, kind: "document", tool: "read_draft", title: "Win-back sequence", state: "ready", asOf: null,
+      scope: { workspaceName: "Demo", crossWorkspace: false }, caveats: [],
+      body: {
+        sections: [{ text: "The first email.", format: "plain" }, { text: "The second email.", format: "plain" }, { text: "The third email.", format: "plain" }],
+        versions: [
+          { id: "e1", label: "Email 1", sectionIndexes: [0] },
+          { id: "e2", label: "Email 2", sectionIndexes: [1] },
+          { id: "e3", label: "Email 3", sectionIndexes: [2] }
+        ]
+      }
+    });
+    if (!versions) throw new Error("document fixture does not decode");
+    // Live, one version is open at a time (its tab key switches).
+    const live = renderLiveTurn({ messages, views: [versions], focus: viewFocusAfterTurnDone([versions]), width: 100, color: false, theme, rows: 40 }).lines;
+    expect(live.some((line) => line.includes("The first email."))).toBe(true);
+    expect(live.some((line) => line.includes("The second email."))).toBe(false);
+    // Committed, with the second one open: all three print, first to last, and the head once.
+    const focus = { ...viewFocusAfterTurnDone([versions]), tab: 1 };
+    const lines = renderCommittedTurn({ messages, views: [versions], focus, width: 100, color: false, theme });
+    const at = (text: string) => lines.findIndex((line) => line.includes(text));
+    expect(at("The first email.")).toBeGreaterThan(0);
+    expect(at("The second email.")).toBeGreaterThan(at("The first email."));
+    expect(at("The third email.")).toBeGreaterThan(at("The second email."));
+    expect(lines.filter((line) => line.includes("Win-back sequence"))).toHaveLength(1);
+    // Each version is under its own tab bar, the open tab bracketed.
+    expect(lines.filter((line) => line.includes("[1 Email 1]"))).toHaveLength(1);
+    expect(lines.filter((line) => line.includes("[2 Email 2]"))).toHaveLength(1);
+    expect(lines.filter((line) => line.includes("[3 Email 3]"))).toHaveLength(1);
+  });
 });

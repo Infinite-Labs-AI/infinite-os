@@ -55,9 +55,11 @@ describe("Ink in-session write confirmation (Plan 2) — structural guards (CI-r
     expect(source).toContain("const keyBarRows = keyBarRowCount(keyHints, columns);");
     expect(source.match(/^\s+keyBarRows,$/gm)?.length).toBe(1);
     expect(source).toContain("keyBarRows={keyBarRows}");
-    expect(source).toContain("const composerRow = homeInventoryRows + liveLayout.rowCount + draftLines.length + COMPOSER_RULE_ROWS;");
+    // The rule over the composer is counted only when it is drawn (`composerRuleRows`).
+    expect(source).toContain("const composerRow = homeInventoryRows + liveLayout.rowCount + draftLines.length + composerRuleRows;");
     expect(source.indexOf("<KeyBar hints={keyHints}")).toBeGreaterThan(source.indexOf("<InkLineInput"));
     expect(source.indexOf("<KeyBar hints={keyHints}")).toBeGreaterThan(source.indexOf("<CompletionMenu"));
+    expect(source).toContain("{composerRuleRows ? <AnsiLine line={ruleLine(columns, t)} /> : null}");
     expect(source.indexOf("<AnsiLine line={ruleLine(columns, t)} />")).toBeGreaterThan(source.indexOf("<ConfirmActionMenu"));
     expect(source.indexOf("<AnsiLine line={ruleLine(columns, t)} />")).toBeLessThan(source.indexOf("<InkLineInput"));
     // The old fixed affordance is gone: the bar shows only what works now.
@@ -187,7 +189,7 @@ describe("Ink in-session write confirmation (Plan 2) — live PTY flow (skipped 
         }
       });
 
-      await waitFor(() => output.text().includes("switch side"));
+      await waitFor(() => output.text().includes("Ask Infinite"));
       await sendKeys(input, "publish it\r");
       // The card: the summary in its border, the redacted details as rows, the keys inside.
       await waitFor(() => output.text().includes("Publish landing page to production"), 4_000, output.text);
@@ -233,7 +235,7 @@ describe("Ink in-session write confirmation (Plan 2) — live PTY flow (skipped 
         }
       });
 
-      await waitFor(() => output.text().includes("switch side"));
+      await waitFor(() => output.text().includes("Ask Infinite"));
       await sendKeys(input, "publish it\r");
       await waitFor(() => output.text().includes("Publish landing page to production"), 4_000, output.text);
 
@@ -271,7 +273,7 @@ describe("Ink in-session write confirmation (Plan 2) — live PTY flow (skipped 
         }
       });
 
-      await waitFor(() => output.text().includes("switch side"));
+      await waitFor(() => output.text().includes("Ask Infinite"));
       await sendKeys(input, "publish it\r");
       await waitFor(() => output.text().includes("Publish landing page to production"), 4_000, output.text);
 
@@ -324,7 +326,7 @@ describe("Ink in-session write confirmation (Plan 2) — live PTY flow (skipped 
         }
       });
 
-      await waitFor(() => output.text().includes("switch side"));
+      await waitFor(() => output.text().includes("Ask Infinite"));
       await sendKeys(input, "pause it\r");
       await waitFor(() => stripAnsi(output.text()).includes(" p  pause    n  dismiss    tab  switch side"), 4_000, output.text);
       expect(output.text()).not.toContain("Stops spend on Ad 01");
@@ -376,7 +378,7 @@ describe("receipts on the turn (r4 receipts; fake TTY, skipped on CI)", () => {
         return { messages: [{ role: "assistant", text: "Ready." }], pendingConfirmations: [CARD] };
       }
     });
-    await waitFor(() => output.text().includes("switch side"));
+    await waitFor(() => output.text().includes("Ask Infinite"));
     await sendKeys(input, "pause it\r");
     await waitFor(() => output.text().includes("Pause ad 01?"), 4_000, output.text);
     const before = output.text().length;
@@ -442,7 +444,7 @@ describe("receipts on the turn (r4 receipts; fake TTY, skipped on CI)", () => {
           return { messages: [{ role: "assistant", text: "Second answer." }] };
         }
       });
-      await waitFor(() => output.text().includes("switch side"));
+      await waitFor(() => output.text().includes("Ask Infinite"));
       await sendKeys(input, "pause it\r");
       await waitFor(() => asked.length === 1);
       // Typed while the first turn is busy: queued.
@@ -487,7 +489,7 @@ describe("receipts on the turn (r4 receipts; fake TTY, skipped on CI)", () => {
           return { messages: [{ role: "assistant", text: "Second answer." }] };
         }
       });
-      await waitFor(() => output.text().includes("switch side"));
+      await waitFor(() => output.text().includes("Ask Infinite"));
       await sendKeys(input, "pause it\r");
       await waitFor(() => output.text().includes("Pause ad 01?"), 4_000, output.text);
       await sendKeys(input, "p");

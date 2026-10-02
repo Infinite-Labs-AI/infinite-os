@@ -56,7 +56,7 @@ describe("Ink busy input handling", () => {
       title: "Infinite TUI"
     });
 
-    await waitFor(() => output.text().includes("switch side"), 4_000, output.text);
+    await waitFor(() => output.text().includes("Ask Infinite"), 4_000, output.text);
 
     await sendKeys(input, "first turn\r");
     await waitFor(() => submitted.length === 1, 4_000, output.text);
@@ -103,13 +103,15 @@ describe("Ink busy input handling", () => {
       }
     });
 
-    await waitFor(() => output.text().includes("switch side"), 4_000, output.text);
+    await waitFor(() => output.text().includes("Ask Infinite"), 4_000, output.text);
     await sendKeys(input, "first\r");
     await waitFor(() => signals.length === 1 && output.text().includes("PARTIAL-ANSWER-TEXT"), 4_000, output.text);
     // D6: while the turn runs, `esc stop` is the key bar's FIRST key, said once;
     // the composer keeps `Ask Infinite…` with its busy note and never repeats it.
-    await waitFor(() => lastLineWith(output.text(), "switch side").startsWith(" esc  stop    tab  switch side"), 4_000, output.text);
-    expect(lastLineWith(output.text(), "switch side").match(/esc/gu)).toHaveLength(1);
+    // A plain answer has no side to switch to: the bar is `esc stop` and `/ commands`.
+    await waitFor(() => lastLineWith(output.text(), "commands").startsWith(" esc  stop    /  commands"), 4_000, output.text);
+    expect(lastLineWith(output.text(), "commands").match(/esc/gu)).toHaveLength(1);
+    expect(lastLineWith(output.text(), "commands")).not.toContain("switch side");
     expect(lastLineWith(output.text(), "Ask Infinite…")).toMatch(/^❯ Ask Infinite… \(working · \d+s\)/u);
     const beforeEsc = output.text().length;
     await sendRaw(input, "\x1b");
@@ -131,7 +133,7 @@ describe("Ink busy input handling", () => {
     await waitFor(() => signals[1]!.aborted, 4_000, output.text);
 
     // Not busy any more (the key bar no longer offers esc): ctrl-c now quits the session.
-    await waitFor(() => !lastLineWith(output.text(), "switch side").includes("esc"), 4_000, output.text);
+    await waitFor(() => !lastLineWith(output.text(), "commands").includes("esc"), 4_000, output.text);
     await sendRaw(input, "\x03");
     await session;
   });
@@ -166,7 +168,7 @@ describe("Ink busy input handling", () => {
       }
     });
 
-    await waitFor(() => output.text().includes("switch side"));
+    await waitFor(() => output.text().includes("Ask Infinite"));
     await sendKeys(input, "/sync x\r");
     await waitFor(() => output.text().includes("How far back should we sync x?"), 4_000, output.text);
     expect(submitted).toEqual([]);
@@ -369,7 +371,7 @@ describe("Ink busy input handling", () => {
       }
     });
 
-    await waitFor(() => output.text().includes("switch side"));
+    await waitFor(() => output.text().includes("Ask Infinite"));
     await sendKeys(input, "@beta how many views\r");
     // The answer is labeled for the resolved pin (Beta), not the pre-call Acme.
     await waitFor(() => output.text().includes("Infinite — Beta"), 2_000, output.text);
@@ -532,7 +534,7 @@ describe("Ink busy input handling", () => {
       }
     });
 
-    await waitFor(() => output.text().includes("switch side"));
+    await waitFor(() => output.text().includes("Ask Infinite"));
 
     // First message in a pin-less session → the picker appears (no answer yet).
     await sendKeys(input, "how many views\r");

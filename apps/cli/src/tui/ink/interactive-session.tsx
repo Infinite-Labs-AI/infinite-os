@@ -90,7 +90,7 @@ import { useTerminalColumns, useTerminalRows } from "./terminal-columns.js";
 import { resolveViewKey, turnAsk, viewFocusAfterTurnDone, viewKeyHints, type ViewFocusState } from "../views/focus.js";
 import { clipboardSequence, copyTargets, copyThroughPbcopy } from "../views/clipboard.js";
 import { detailsPaneWidth, paneWidths, renderCommittedTurn, renderLiveTurn, rowsBesideCard, type LiveTurnRender } from "../views/layout.js";
-import { besideWorkingTurn, workingTurnMessages, workingTurnSteps } from "../app/transcript-renderer.js";
+import { besideWorkingTurn, workingTurnMessages, workingTurnSteps, type InfiniteTranscriptInput } from "../app/transcript-renderer.js";
 import {
   approvalRender,
   cancelCardField,
@@ -641,16 +641,20 @@ export function InkInteractiveSessionApp({
   // The latest turn stays live (its keys still act on it) until the NEXT line is
   // submitted; only then is it printed once into scrollback through <Static>, at
   // the current width. The home inventory goes with the first commit.
-  const commitLatestTurn = useCallback((line: string) => {
-    if (!line.trim()) {
-      return;
-    }
+  //
+  // One exception (River: "like a normal coding harness"): a FINISHED turn that
+  // does not fit the live region is never paged. It goes whole into scrollback
+  // the moment it finishes (`"overflow"`, see `finishedOverflow` below), and
+  // only the frame stays live. A write card still waiting for its answer stays
+  // live with the turn's Steps (`keepCard`): only the question, the answer and
+  // the other views go up.
+  const commitLiveTurn = useCallback((why: "submit" | "overflow", keepCard = false) => {
     commitSeq.current += 1;
     const turn = historyRef.current;
     const { views, steps } = getTurnState();
     const focus = viewFocusRef.current;
     // Scrollback is ONE column at any width (River, 2026-10-02): the question,
-    // the answer, its views underneath, then its Steps, under a thin rule.
+    // the answer, its views underneath, under a thin rule.
     // `redraw` draws it again at another width (a width change reprints scrollback).
     const drawTurn = (width: number) => renderCommittedTurn({
       messages: turn,
@@ -677,17 +681,31 @@ export function InkInteractiveSessionApp({
         workspace={inventory.workspace}
       />
     ) : null;
-    const home: CommittedEntry | null = homeInventory && !homeCommitted && turn.length === 0
+    const home: CommittedEntry | null = why === "submit" && homeInventory && !homeCommitted && turn.length === 0
       ? { id: "home", lines: [], node: drawHome(columns), redraw: (width) => ({ lines: [], node: drawHome(width) }) }
       : null;
-    setCommitted((current) => commitOnSubmit({ committed: home ? [...current, home] : current, latest }, line).committed);
+    setCommitted((current) => commitOnSubmit({ committed: home ? [...current, home] : current, latest }, why).committed);
     setHomeCommitted(true);
     historyRef.current = [];
     setHistory([]);
-    clearTurnViews();
+    if (keepCard) {
+      // The card that stays live keeps the turn's Steps (its own call waits there as ▣).
+      patchTurnState((state) => (state.views.length ? { ...state, views: [] } : state));
+    } else {
+      clearTurnViews();
+    }
+    // The store's listener is subscribed in an effect; a commit in the first
+    // frame's layout effect (a session that opens on a tall turn) runs before it.
+    setTurnState(getTurnState());
     setViewFocus(null);
     setLiveOffset(null);
   }, [agentTitle, columns, homeCommitted, homeInventory, t]);
+  const commitLatestTurn = useCallback((line: string) => {
+    if (!line.trim()) {
+      return;
+    }
+    commitLiveTurn("submit");
+  }, [commitLiveTurn]);
 
   // A width change (run-r2 MUST 4): the terminal re-wraps the frame it holds
   // into more rows than Ink can erase, and the part pushed into scrollback is
@@ -1678,20 +1696,21 @@ export function InkInteractiveSessionApp({
   // slot; it is below the composer, so never into the composer-row prediction.
   // The rule over the composer is reserved with the composer.
   const composerText = activeFieldComposer ? activeFieldComposer.display : inputValue;
+  const overlayRows = liveOverlayRows({
+    // The write card is the latest turn's details, inside the live region.
+    confirmAction: null,
+    confirmCardRows: null,
+    confirmExplain: null,
+    draftRows: draftLines.length,
+    connectConfirm: Boolean(pendingConnectConfirm),
+    field: fieldPromptActive && pendingFieldPrompt ? pendingFieldPrompt : null,
+    selection: pendingSelection?.prompt ?? null,
+    width: columns
+  });
   const reservedRows = homeInventoryRows
     + COMPOSER_RULE_ROWS
     + Math.max(DEFAULT_COMPOSER_ROWS, composerRowsFor(composerText || connectPlaceholder, columns, t))
-    + liveOverlayRows({
-      // The write card is the latest turn's details, inside the live region.
-      confirmAction: null,
-      confirmCardRows: null,
-      confirmExplain: null,
-      draftRows: draftLines.length,
-      connectConfirm: Boolean(pendingConnectConfirm),
-      field: fieldPromptActive && pendingFieldPrompt ? pendingFieldPrompt : null,
-      selection: pendingSelection?.prompt ?? null,
-      width: columns
-    })
+    + overlayRows
     + completions.length;
   // The rows the latest turn may take: the live budget (the same count the
   // live window pages with) less the key bar. The key bar's hints come from the
@@ -1730,26 +1749,56 @@ export function InkInteractiveSessionApp({
     () => liveTurn ? { id: "live-turn", lines: liveTurn.lines } : null,
     [liveTurn]
   );
-  const liveTranscript = liveTurn ? idleTranscript : transcript;
-  const liveLayout = inkTranscriptLayout({
-    bootFrame: true,
+  const turnTranscript = liveTurn ? idleTranscript : transcript;
+  // The boot frame (D4) is the screen before the first turn only. After it, a
+  // live region with nothing in it draws no row: the frame alone stays live.
+  const frameProps = { bootFrame: !homeCommitted, emptyLive: "none" as const };
+  const layoutOf = (latest: CommittedEntry | null, shown: InfiniteTranscriptInput) => inkTranscriptLayout({
+    ...frameProps,
     busy,
     columns,
     composerRows: reservedRows,
     keyBarRows,
-    latest: liveLatest,
+    latest,
     livePage: liveOffset,
     nowMs: clock,
     rows,
     showComposer: false,
     theme: t,
     topBar: topBarData,
-    transcript: liveTranscript,
+    transcript: shown,
     turnStartedAt: busyStartedAt
   });
+  const turnLayout = layoutOf(liveLatest, turnTranscript);
+  // A finished turn never pages (River: "it should just work like a normal
+  // coding harness"). While a turn runs, a tall one shows its tail (`N lines
+  // above`). Once it is finished and still taller than the live region, the
+  // WHOLE turn goes into scrollback at once (one column, nothing cut, no
+  // hint) and only the frame stays live. A turn that fits stays live until
+  // the next line, so its views keep their keys. A write card still waiting
+  // for its answer stays live too: its question, answer and other views go up
+  // and the card stays, paging inside itself as before.
+  const finishedOverflow = !transcriptBusy && !exitRequested
+    && (history.length > 0 || turnViews.length > 0)
+    && turnLayout.window.paged;
+  useLayoutEffect(() => {
+    if (finishedOverflow) {
+      commitLiveTurn("overflow", pendingConfirmActions.length > 0);
+    }
+  });
+  // The frame in which the overflow is found draws the turn nowhere (the commit
+  // above replaces it in the same tick), so a page of it and the pager hint
+  // never reach the screen.
+  const liveLatestShown = finishedOverflow ? null : liveLatest;
+  const liveTranscript = finishedOverflow ? idleTranscript : turnTranscript;
+  const liveLayout = finishedOverflow ? layoutOf(null, idleTranscript) : turnLayout;
+  // With nothing live after the first turn, the top bar's rule is the rule
+  // over the composer (the frame is top bar, rule, composer, key bar), unless
+  // a picker, the /connect steps or a draft line sit between them.
+  const composerRuleRows = homeCommitted && liveLayout.rowCount === TOP_BAR_ROWS && overlayRows === 0 ? 0 : COMPOSER_RULE_ROWS;
   // Rows above the composer: the first-run inventory, the live frame (top bar,
   // rule, latest turn), any image-draft lines, and the rule over the composer.
-  const composerRow = homeInventoryRows + liveLayout.rowCount + draftLines.length + COMPOSER_RULE_ROWS;
+  const composerRow = homeInventoryRows + liveLayout.rowCount + draftLines.length + composerRuleRows;
   const pageLive = (direction: LivePageDirection) => setLiveOffset(pageLiveWindow(liveLayout.window, direction));
   // One key on the latest turn's views (only reached with an empty composer and
   // no card or picker open). `false` = the key goes on to the composer.
@@ -1811,14 +1860,14 @@ export function InkInteractiveSessionApp({
         />
       ) : null}
       <InkTranscriptApp
-        bootFrame
+        {...frameProps}
         busy={busy}
         columns={columns}
         committed={committed}
         composerRows={reservedRows}
         staticKey={staticEpoch}
         keyBarRows={keyBarRows}
-        latest={liveLatest}
+        latest={liveLatestShown}
         livePage={liveOffset}
         livePageSpace={pendingConfirmActions.length === 0 && !pendingSelection && !pendingOperatorLine}
         nowMs={clock}
@@ -1846,7 +1895,7 @@ export function InkInteractiveSessionApp({
         width={columns}
       />
       <CreativeDraftLines lines={draftLines} theme={t} width={columns} />
-      <AnsiLine line={ruleLine(columns, t)} />
+      {composerRuleRows ? <AnsiLine line={ruleLine(columns, t)} /> : null}
       <InkLineInput
         busy={busy}
         completionActive={completions.length > 0}
@@ -1905,7 +1954,7 @@ export function InkInteractiveSessionApp({
         theme={t}
         width={columns}
       />
-      <KeyBar hints={keyHints} theme={t} width={columns} />
+      <KeyBar hints={keyHints} sides={Boolean(liveTurn?.details) && !finishedOverflow} theme={t} width={columns} />
     </Box>
   );
 }

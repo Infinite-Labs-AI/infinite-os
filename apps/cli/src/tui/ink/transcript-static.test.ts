@@ -204,24 +204,56 @@ describe("the session wires the live cap (CI-run)", () => {
     );
   });
 
-  it("a 200-line turn in a 24-row session renders one capped page, the composer and a hint", () => {
+  it("a finished 200-line turn in a 24-row session is whole above the frame: no page of it, no hint", () => {
     const text = Array.from({ length: 200 }, (_, i) => `gamma line ${i}`).join("\n");
     const rendered = stripAnsi(renderInkInteractiveSessionToString({
       columns: 80,
       rows: 24,
-      initialMessages: [{ role: "assistant", text }],
+      initialMessages: [{ role: "user", text: "how did it go?" }, { role: "assistant", text }],
       async onSubmitLine() {
         return { messages: [] };
       },
       title: "Infinite TUI"
     })).split("\n");
-    // The live frame fits under the cap (rows - (composer 3 + key bar 1 + 2)),
-    // plus the hint row, plus the composer below it.
-    expect(rendered.length).toBeLessThanOrEqual(24 - (3 + 1 + 2) - 1 + 3);
-    expect(rendered.some((line) => /more lines|lines above/.test(line))).toBe(true);
-    // A turn the session starts with follows its tail, so its first lines are paged away.
-    expect(rendered.some((line) => /gamma line 199(?!\d)/.test(line))).toBe(true);
-    expect(rendered.some((line) => /gamma line 0(?!\d)/.test(line))).toBe(false);
+    // Every line of the turn is printed, once, in order, above the live frame.
+    const joined = rendered.join("\n");
+    for (const i of [0, 1, 99, 100, 198, 199]) {
+      expect(countLine(joined, `gamma line ${i}`), `gamma line ${i}`).toBe(1);
+    }
+    expect(rendered[0]).toBe("❯ how did it go?");
+    expect(rendered.some((line) => /more lines|lines above/.test(line))).toBe(false);
+    // Under the turn's one rule only the frame stays live: top bar, rule, composer, key bar.
+    const last = rendered.findIndex((line) => /gamma line 199(?!\d)/.test(line));
+    const frame = rendered.slice(last + 1);
+    expect(frame).toHaveLength(5);
+    expect(frame[0]).toBe("─".repeat(80));
+    expect(frame[1]).toContain("∞ Infinite");
+    expect(frame[2]).toBe("─".repeat(80));
+    expect(frame[3]).toContain("❯ Ask Infinite…");
+    expect(frame[4]).toContain("/  commands");
+  });
+
+  it("a finished turn that fits a 24-row session stays live, under the top bar, with nothing printed above", () => {
+    const rendered = stripAnsi(renderInkInteractiveSessionToString({
+      columns: 80,
+      rows: 24,
+      initialMessages: [{ role: "user", text: "how did it go?" }, { role: "assistant", text: "gamma line 0\n\ngamma line 1" }],
+      async onSubmitLine() {
+        return { messages: [] };
+      },
+      title: "Infinite TUI"
+    })).split("\n");
+    expect(rendered[0]).toContain("∞ Infinite");
+    expect(rendered[2]).toBe("❯ how did it go?");
+    expect(rendered.some((line) => /more lines|lines above/.test(line))).toBe(false);
+  });
+
+  it("the overflow commit runs only for a finished turn, keeps a waiting card, and never draws the paged turn", () => {
+    const rule = sessionSource.slice(sessionSource.indexOf("const finishedOverflow ="), sessionSource.indexOf("// With nothing live after the first turn"));
+    expect(rule).toMatch(/const finishedOverflow = !transcriptBusy && !exitRequested/u);
+    expect(rule).toContain("turnLayout.window.paged");
+    expect(rule).toContain('commitLiveTurn("overflow", pendingConfirmActions.length > 0)');
+    expect(rule).toContain("const liveLatestShown = finishedOverflow ? null : liveLatest;");
   });
 
   it("space pages only from the composer; a card or picker keeps the key", () => {
@@ -241,7 +273,7 @@ describe("the session wires the live cap (CI-run)", () => {
 });
 
 describe("scrollback in a running session (fake TTY; skipped on CI like the other PTY tests)", () => {
-  it.skipIf(process.env.CI === "true")("200-line answers stay whole in scrollback and never trip a fullscreen redraw", { timeout: 30_000 }, async () => {
+  it.skipIf(process.env.CI === "true")("a 200-line finished answer is whole in scrollback at once: no pager hint, no fullscreen redraw", { timeout: 30_000 }, async () => {
     const input = ttyInput();
     const output = ttyOutput();
     const errorOutput = ttyOutput();
@@ -263,40 +295,84 @@ describe("scrollback in a running session (fake TTY; skipped on CI like the othe
       title: "Infinite TUI"
     });
 
-    await waitFor(() => output.text().includes("switch side"), 4_000, output.text);
+    await waitFor(() => output.text().includes("Ask Infinite"), 4_000, output.text);
     await sendKeys(input, "first\r");
-    // A finished tall answer opens at its top, with a hint, inside the cap.
-    await waitFor(() => output.text().includes("alpha line 0") && output.text().includes("more lines"), 4_000, output.text);
-    expect(output.text()).not.toContain("alpha line 100");
-
-    // space on an empty prompt pages the live answer.
-    await sendKeys(input, " ");
-    await waitFor(() => output.text().includes("alpha line 20"), 4_000, output.text);
-    expect(output.text()).not.toContain("alpha line 100");
-
-    // The next line commits the whole first turn to scrollback, every line once.
-    await sendKeys(input, "second\r");
-    await waitFor(() => output.text().includes("beta line 0"), 4_000, output.text);
-    const text = stripAnsi(output.text());
-    for (const i of [0, 1, 100, 198, 199]) {
-      expect(text).toContain(`alpha line ${i}`);
+    // The finished answer does not fit 24 rows: all of it is printed, once, the
+    // moment it finishes, with no key pressed and no next question.
+    await waitFor(() => output.text().includes("alpha line 199"), 4_000, output.text);
+    const first = stripAnsi(output.text());
+    for (const i of [0, 1, 20, 100, 198, 199]) {
+      expect(countLine(first, `alpha line ${i}`), `alpha line ${i}`).toBe(1);
     }
-    expect(countLine(text, "alpha line 100")).toBe(1);
-    expect(text).toContain("❯ first");
-    expect(text).not.toContain("┊");
+    expect(first).toContain("❯ first");
+    expect(first).not.toMatch(/more lines|lines above/u);
+    // What scrollback holds: the question, then the answer in order, nothing cut.
+    const rows = scrollbackRows(output.text());
+    const at = rows.findIndex((row) => row.startsWith("❯ first"));
+    expect(at, rows.join("\n")).toBeGreaterThanOrEqual(0);
+    expect(rows.slice(at + 2, at + 202).map((row) => row.trim().replace(/^∞ /u, ""))).toEqual(
+      Array.from({ length: 200 }, (_, i) => `alpha line ${i}`)
+    );
+    // Only the frame stays live under it: the turn's rule, the top bar, one rule, the composer, the key bar.
+    expect(rows.slice(at + 202).map((row) => row.trimEnd()).filter(Boolean)).toEqual([
+      "─".repeat(80), " ∞ Infinite", "─".repeat(80), "❯ Ask Infinite…", " /  commands"
+    ]);
 
+    // The composer still takes the next question; its answer lands the same way.
+    await sendKeys(input, "second\r");
+    await waitFor(() => output.text().includes("beta line 199"), 4_000, output.text);
     await sendKeys(input, "/exit\r");
     await session;
-    // Exiting commits the live answer first, so all of it reaches scrollback, once.
     const final = stripAnsi(output.text());
-    for (const i of [100, 150, 199]) {
-      expect(countLine(final, `beta line ${i}`)).toBe(1);
+    for (const i of [0, 100, 150, 199]) {
+      expect(countLine(final, `alpha line ${i}`), `alpha line ${i}`).toBe(1);
+      expect(countLine(final, `beta line ${i}`), `beta line ${i}`).toBe(1);
     }
-    expect(countLine(final, "beta line 0")).toBeGreaterThanOrEqual(1);
+    expect(final).not.toMatch(/more lines|lines above/u);
+    expect(final).not.toContain("┊");
     // ink only clears the terminal (and the scrollback with it) after a frame as
-    // tall as the window; the cap means that never happens.
+    // tall as the window; the live region never grows that tall.
     expect(output.text()).not.toContain(`${ESC}[3J`);
     expect(output.text()).not.toContain(`${ESC}[2J`);
+  });
+
+  it.skipIf(process.env.CI === "true")("a streaming answer shows its tail; once finished it is whole in scrollback, each line once", { timeout: 30_000 }, async () => {
+    const input = ttyInput();
+    const output = ttyOutput();
+    const text = Array.from({ length: 120 }, (_, i) => `alpha line ${i}`).join("\n");
+    let finish: () => void = () => {};
+    const session = runInkInteractiveSession({
+      errorOutput: ttyOutput(),
+      input,
+      async onSubmitLine(line, onProgress) {
+        if (line === "/exit") return { exit: true, messages: [] };
+        onProgress?.({ type: "message.start", stage: "message", message: "" });
+        onProgress?.({ type: "message.delta", stage: "message", message: "", text });
+        await new Promise<void>((resolve) => {
+          finish = resolve;
+        });
+        return { messages: [{ role: "assistant", text }] };
+      },
+      output,
+      title: "Infinite TUI"
+    });
+    await waitFor(() => output.text().includes("Ask Infinite"), 4_000, output.text);
+    await sendKeys(input, "first\r");
+    // While it streams the live region follows the tail, with the hint for what is above.
+    await waitFor(() => output.text().includes("alpha line 119") && output.text().includes("lines above"), 4_000, output.text);
+    expect(stripAnsi(output.text())).not.toContain("alpha line 50");
+    finish();
+    await waitFor(() => output.text().includes("alpha line 50"), 4_000, output.text);
+    await sendKeys(input, "/exit\r");
+    await session;
+    // Finished: the tail's rows were erased and the whole turn printed once, in order, with no hint left.
+    const rows = scrollbackRows(output.text());
+    const answer = rows.map((row) => row.trim().replace(/^∞ /u, "")).filter((row) => /^alpha line \d+$/u.test(row));
+    expect(answer).toEqual(Array.from({ length: 120 }, (_, i) => `alpha line ${i}`));
+    expect(rows.some((row) => /more lines|lines above/u.test(row))).toBe(false);
+    expect(stripAnsi(output.text())).not.toContain("more lines");
+    expect(output.text()).not.toContain(`${ESC}[2J`);
+    expect(output.text()).not.toContain(`${ESC}[3J`);
   });
 
   it.skipIf(process.env.CI === "true")("scrollback separates finished turns with exactly one thin rule (D1)", { timeout: 30_000 }, async () => {
@@ -313,7 +389,7 @@ describe("scrollback in a running session (fake TTY; skipped on CI like the othe
       output
     });
 
-    await waitFor(() => output.text().includes("switch side"), 4_000, output.text);
+    await waitFor(() => output.text().includes("Ask Infinite"), 4_000, output.text);
     for (const line of ["one", "two", "three"]) {
       await sendKeys(input, `${line}\r`);
       await waitFor(() => output.text().includes(`answer-${line}`), 4_000, output.text);
@@ -346,20 +422,21 @@ describe("scrollback in a running session (fake TTY; skipped on CI like the othe
       output,
       title: "Infinite TUI"
     });
-    await waitFor(() => output.text().includes("switch side"), 4_000, output.text);
+    await waitFor(() => output.text().includes("Ask Infinite"), 4_000, output.text);
     await sendKeys(input, "first\r");
-    await waitFor(() => output.text().includes("more lines"), 4_000, output.text);
-    expect(output.text()).not.toContain("alpha line 150");
+    // The finished answer is already whole in scrollback; quitting prints nothing twice.
+    await waitFor(() => output.text().includes("alpha line 199"), 4_000, output.text);
     input.write("\u0003");
     await session;
     const final = stripAnsi(output.text());
-    for (const i of [150, 199]) {
+    for (const i of [0, 150, 199]) {
       expect(countLine(final, `alpha line ${i}`)).toBe(1);
     }
+    expect(final).not.toContain("more lines");
     expect(output.text()).not.toContain(`${ESC}[2J`);
   });
 
-  it.skipIf(process.env.CI === "true")("space reaches an open card, not the pager; PgDn still pages", { timeout: 30_000 }, async () => {
+  it.skipIf(process.env.CI === "true")("a pending card stays live: the long answer goes whole into scrollback, the card keeps its keys", { timeout: 30_000 }, async () => {
     const pending: InSessionConfirmationAction = {
       turnId: "t1",
       confirmationHandle: "h1",
@@ -385,20 +462,28 @@ describe("scrollback in a running session (fake TTY; skipped on CI like the othe
       output,
       title: "Infinite TUI"
     });
-    await waitFor(() => output.text().includes("switch side"), 4_000, output.text);
+    await waitFor(() => output.text().includes("Ask Infinite"), 4_000, output.text);
     await sendKeys(input, "publish it\r");
-    // The r4 card carries the summary in its border. The card is the turn's
-    // details, under its answer below 120 columns, so a tall turn that ends on
-    // a card opens on the card (run-2 M1), the answer paged above it.
-    await waitFor(() => output.text().includes("Publish landing page to production") && output.text().includes("lines above · PgUp"), 4_000, output.text);
-    const before = minLine(output.text(), "alpha");
-    await sendKeys(input, " ");
+    // The answer is printed whole above; the card (its summary in its border) is what stays live, with its keys.
+    await waitFor(() => output.text().includes("alpha line 199") && stripAnsi(output.text()).includes("n  dismiss"), 4_000, output.text);
+    const shown = stripAnsi(output.text());
+    for (const i of [0, 100, 199]) {
+      expect(countLine(shown, `alpha line ${i}`), `alpha line ${i}`).toBe(1);
+    }
+    expect(shown).not.toMatch(/more lines|lines above/u);
+    const rows = scrollbackRows(output.text());
+    const answerEnd = rows.findIndex((row) => /alpha line 199$/u.test(row.trimEnd()));
+    const card = rows.findIndex((row) => row.includes("Publish landing page to production"));
+    expect(card, rows.join("\n")).toBeGreaterThan(answerEnd);
+    // The live frame under the answer: the turn's rule, the top bar and its rule, then the card.
+    expect(rows.slice(answerEnd + 1, answerEnd + 4).map((row) => row.trimEnd())).toEqual(["─".repeat(80), " ∞ Infinite", "─".repeat(80)]);
+    // Space, Enter and PgDn decide nothing and move nothing.
+    const before = output.text().length;
+    await sendKeys(input, " \r");
+    input.write(`${ESC}[6~`);
     await new Promise((resolve) => setTimeout(resolve, 300));
-    expect(minLine(output.text(), "alpha")).toBe(before);
     expect(decisions).toEqual([]);
-    input.write(`${ESC}[5~`);
-    await waitFor(() => minLine(output.text(), "alpha") < before, 4_000, output.text);
-    expect(decisions).toEqual([]);
+    expect(stripAnsi(output.text().slice(before))).not.toContain("alpha line");
     // `n` is the card's real "no" (T6): it reaches the app as a decline.
     await sendKeys(input, "n");
     // Wait for the decline to land and the card to leave before typing: the card
@@ -410,6 +495,7 @@ describe("scrollback in a running session (fake TTY; skipped on CI like the othe
     await sendKeys(input, "/exit\r");
     await session;
     expect(decisions).toEqual(["decline"]);
+    expect(countLine(stripAnsi(output.text()), "alpha line 100")).toBe(1);
   });
 });
 

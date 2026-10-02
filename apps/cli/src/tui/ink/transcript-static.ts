@@ -4,13 +4,18 @@
 // Why: the session re-rendered the WHOLE transcript every frame. Once the frame was
 // as tall as the terminal, Ink took its fullscreen branch (`clearTerminal` + redraw),
 // which wipes the terminal's scrollback. Now:
-//   - A finished turn is printed ONCE into <Static> (normal terminal scrollback) —
-//     but only when the NEXT line is submitted. Until then the latest turn (its
-//     answer, its pending card, later its views) stays in the live region, so the
-//     view keys can still act on it.
-//   - The live region is capped at `liveRegionCap(...)` rows. A taller latest turn
-//     is shown a page at a time (PgDn/PgUp, or space on an empty prompt), with a
-//     one-row hint saying what is hidden.
+//   - A finished turn is printed ONCE into <Static> (normal terminal scrollback).
+//     One that fits the live region goes there only when the NEXT line is
+//     submitted: until then it (its answer, its views) stays live, so the view
+//     keys can still act on it.
+//   - The live region is capped at `liveRegionCap(...)` rows. While a turn RUNS,
+//     a taller one shows its tail, with a one-row hint saying what is above
+//     (PgUp/PgDn page it). A FINISHED turn is never paged: one taller than the
+//     cap goes whole into scrollback the moment it finishes, as a coding
+//     harness prints it, and only the frame stays live. A write card still
+//     waiting for its answer is the exception that stays: the rest of its turn
+//     goes up and the card stays live (in a window too small for the card
+//     alone, the pager still pages it).
 //   - Committed rows never count toward the composer's native-cursor row
 //     prediction (`inkTranscriptRowCount`): Ink positions the cursor inside the
 //     live frame only.

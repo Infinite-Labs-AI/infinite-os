@@ -273,6 +273,10 @@ describe("keyBarHints", () => {
   it("the idle composer has no keys of its own; the bar still ends with tab and /", () => {
     expect(keyBarHints({ focus: "composer", busy: false, okKey: null, caps: NO_CAPS })).toEqual([]);
     expect(keyBarText([])).toBe(" tab  switch side    /  commands");
+    // With no details on screen there is no side to switch to: `/ commands` alone.
+    expect(keyBarText([], { sides: false })).toBe(" /  commands");
+    expect(keyBarText([{ key: "esc", label: "stop" }, { key: "tab", label: "switch side" }], { sides: false })).toBe(" esc  stop    /  commands");
+    expect(keyBarText([{ key: "j k", label: "row" }], { sides: true })).toBe(" j k  row    tab  switch side    /  commands");
   });
 
   it("formats and scrubs the bar, which is one row at every width (cut, never wrapped)", () => {

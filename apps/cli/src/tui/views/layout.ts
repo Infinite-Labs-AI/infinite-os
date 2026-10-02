@@ -197,6 +197,12 @@ export interface LiveTurnRender {
   lines: string[];
   /** The view the keys act on, as drawn now, and what it offers. */
   focused: { render: ViewRender; facts: ViewKeyFacts } | null;
+  /**
+   * The turn draws details (a view that takes the details pane, or a card):
+   * right of the answer from 120 columns, under it below that. The key bar
+   * offers `tab switch side` only then.
+   */
+  details: boolean;
 }
 
 /** The latest turn with its views, laid out for the live region: side by side from 120 columns. */
@@ -224,7 +230,8 @@ export function renderLiveTurn(input: LiveTurnInput): LiveTurnRender {
     lines,
     focused: focusedRender
       ? { render: focusedRender, facts: viewKeyFacts(input.views[focusIndex], focusedRender, input.livePageNext ?? false) }
-      : null
+      : null,
+    details: drawn.details
   };
 }
 
@@ -282,6 +289,17 @@ function drawLiveTurn(input: LiveTurnInput, width: number, rows: number | undefi
     renderView(view, view.kind !== "quiet" && index === focusIndex && input.focus
       ? focusedViewCtx(input.focus, base)
       : { ...plainCtx, selected: openingRow(view) }));
+  // Scrollback has no keys, so nothing may stay behind one: a view with tabs
+  // (a document's versions) prints every tab, in order, under the one head.
+  const drawn = split ? renders : renders.flatMap((render, index) => {
+    const tabs = render.tabs ?? 0;
+    if (tabs < 2) return [render];
+    return Array.from({ length: tabs }, (_unused, tab) => {
+      const view = input.views[index]!;
+      const at = renderView(view, { ...plainCtx, selected: openingRow(view), tab });
+      return tab === 0 ? at : { ...at, head: "", source: null };
+    });
+  });
   const card: ViewRender[] = input.details?.length
     ? [{ head: "", source: null, detail: [...input.details], footnotes: [], keys: [], okKey: null, rowCount: 0 }]
     : [];
@@ -289,18 +307,18 @@ function drawLiveTurn(input: LiveTurnInput, width: number, rows: number | undefi
   const stepRows = stepRowLines(steps, {
     width, color: input.color, theme: input.theme, nowMs: input.nowMs, views: [...input.views, ...(input.statusViews ?? [])]
   });
-  const takesPane = renders.some(inDetailsPane) || card.length > 0;
+  const takesPane = drawn.some(inDetailsPane) || card.length > 0;
   const sideBySide = wide && takesPane;
   // How wide a wider window redraws the answer: never for a committed turn
   // (printed once); at most the pane's cap when split; below 120 with details,
   // at most 119 (past it the turn splits and the answer gets narrower).
   const widenLimit = !split ? 0 : sideBySide ? ANSWER_PANE_MAX : takesPane ? SPLIT_MIN_COLUMNS - 1 : undefined;
   const answer = renderAnswerColumn(input.messages, sideBySide ? panes.left : width, input.theme, input.color, { widenLimit });
-  const lines = layoutTurn(answer, [...renders, ...card], stepRows, width, { color: input.color, theme: input.theme }, { split, steps: withSteps });
-  const detailRows = [...renders, ...card].filter(inDetailsPane)
+  const lines = layoutTurn(answer, [...drawn, ...card], stepRows, width, { color: input.color, theme: input.theme }, { split, steps: withSteps });
+  const detailRows = [...drawn, ...card].filter(inDetailsPane)
     .reduce((sum, render, index) => sum + (index > 0 ? 1 : 0) + viewLines(render, sideBySide ? panes.right : width).length, 0);
   return {
-    renders, lines, focusIndex, rows, wide: sideBySide, stepRows: stepRows.length ? stepRows.length + 1 : 0, detailRows, answerRows: answer.length
+    renders, lines, focusIndex, rows, wide: sideBySide, details: takesPane, stepRows: stepRows.length ? stepRows.length + 1 : 0, detailRows, answerRows: answer.length
   };
 }
 

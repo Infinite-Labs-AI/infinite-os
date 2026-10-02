@@ -71,7 +71,7 @@ describe("a narrowing resize never prints a row wider than the window (run-2 M2)
       },
       output
     });
-    await waitFor(() => output.chunks.join("").includes("switch side"));
+    await waitFor(() => output.chunks.join("").includes("Ask Infinite"));
     for (const key of "how did it go\r") {
       input.write(key);
       await new Promise((resolve) => setTimeout(resolve, 20));
@@ -120,7 +120,7 @@ describe("a width change reprints the transcript at the new width (run-r2 MUST 4
       },
       output
     });
-    await waitFor(() => output.chunks.join("").includes("switch side"));
+    await waitFor(() => output.chunks.join("").includes("Ask Infinite"));
     for (const key of "how did it go\r") {
       input.write(key);
       await new Promise((resolve) => setTimeout(resolve, 20));
@@ -180,7 +180,7 @@ describe("a width change reprints the transcript at the new width (run-r2 MUST 4
       await waitFor(() => output.chunks.join("").includes(`answer to ${line}:`));
       await new Promise((resolve) => setTimeout(resolve, 150));
     };
-    await waitFor(() => output.chunks.join("").includes("switch side"));
+    await waitFor(() => output.chunks.join("").includes("Ask Infinite"));
     await ask("alpha question");
     await ask("beta question");
     feed();

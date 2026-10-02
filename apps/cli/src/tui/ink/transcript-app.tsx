@@ -76,9 +76,17 @@ export interface InkTranscriptAppProps {
    * Draw the boot frame (an empty answer area and the Steps rule, D4) while
    * nothing is live. Must be passed identically to the live render and to
    * `inkTranscriptRowCount` so the composer's native-cursor row stays exact.
-   * Off, an empty live region is one blank row.
+   * Off, an empty live region is one blank row (or no row: `emptyLive`).
    */
   bootFrame?: boolean;
+  /**
+   * What an empty live region draws when the boot frame is off: one blank row
+   * (`"blank"`, the default), or no row at all (`"none"`: after a finished turn
+   * went whole into scrollback the session leaves only its frame live, the top
+   * bar, one rule, the composer and the key bar). Pass it identically to the
+   * render and to `inkTranscriptRowCount`, like `bootFrame`.
+   */
+  emptyLive?: "blank" | "none";
   prompt?: {
     placeholder?: string;
     text?: string;
@@ -131,6 +139,7 @@ export function InkTranscriptApp({
   columns = 88,
   committed: committedProp = NO_COMMITTED,
   composerRows,
+  emptyLive = "blank",
   keyBarRows,
   latest,
   livePage,
@@ -159,6 +168,7 @@ export function InkTranscriptApp({
   const live = useMemo(() => liveLinesWindow({
     bootFrame,
     composerRows,
+    emptyLive,
     keyBarRows,
     latest,
     livePage,
@@ -167,7 +177,7 @@ export function InkTranscriptApp({
     theme: t,
     transcriptLines,
     width
-  }), [bootFrame, composerRows, keyBarRows, latest, livePage, rows, showComposer, t, transcriptLines, width]);
+  }), [bootFrame, composerRows, emptyLive, keyBarRows, latest, livePage, rows, showComposer, t, transcriptLines, width]);
   const hint = livePageHint(live.window, { spacePages: livePageSpace });
   const header = useMemo(() => topBarLines(topBar, width, t), [t, topBar, width]);
   const rule = useMemo(() => ruleLine(width, t), [t, width]);
@@ -229,6 +239,7 @@ export function inkTranscriptLayout({
   bootFrame = false,
   columns = 88,
   composerRows,
+  emptyLive = "blank",
   keyBarRows,
   latest,
   livePage,
@@ -244,6 +255,7 @@ export function inkTranscriptLayout({
   const live = liveLinesWindow({
     bootFrame,
     composerRows,
+    emptyLive,
     keyBarRows,
     latest,
     livePage,
@@ -325,11 +337,13 @@ function frameHeaderRows(showComposer: boolean): number {
 /**
  * The live lines (the latest turn, then the transcript) cut to the live-region
  * budget: the cap minus the top bar, its rule and an in-app composer. With no
- * live lines, the boot frame's body (when asked for) or one blank row.
+ * live lines, the boot frame's body (when asked for), else one blank row or
+ * (`emptyLive: "none"`) no row.
  */
 function liveLinesWindow({
   bootFrame,
   composerRows = DEFAULT_COMPOSER_ROWS,
+  emptyLive = "blank",
   keyBarRows = DEFAULT_KEY_BAR_ROWS,
   latest,
   livePage,
@@ -341,6 +355,7 @@ function liveLinesWindow({
 }: {
   bootFrame: boolean;
   composerRows?: number;
+  emptyLive?: "blank" | "none";
   keyBarRows?: number;
   latest?: CommittedEntry | null;
   livePage?: number | null;
@@ -356,10 +371,10 @@ function liveLinesWindow({
   if (window.lines.length) {
     return { lines: window.lines, start: window.start, window };
   }
-  // Nothing live: the boot frame (D4) or one blank row, never paged.
+  // Nothing live: the boot frame (D4), one blank row, or no row; never paged.
   const empty = bootFrame
     ? bootBodyLines(width, theme, Number.isFinite(budget) ? budget : BOOT_BODY_ROWS)
-    : [""];
+    : emptyLive === "none" ? [] : [""];
   return { lines: empty, start: 0, window };
 }
 

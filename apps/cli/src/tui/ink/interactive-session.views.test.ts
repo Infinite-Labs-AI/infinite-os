@@ -115,7 +115,7 @@ describe("the session draws the latest turn's answer views (CI-runnable)", () =>
 
   it("a turn records its views in the turn store; the next submit commits and clears them", () => {
     expect(sessionSource).toMatch(/\}, signal, recordTurnView, recordCreativeDraft\);/u);
-    const commit = sessionSource.slice(sessionSource.indexOf("const commitLatestTurn"), sessionSource.indexOf("const [exitRequested"));
+    const commit = sessionSource.slice(sessionSource.indexOf("const commitLiveTurn"), sessionSource.indexOf("const [exitRequested"));
     expect(commit).toContain("renderCommittedTurn({");
     expect(commit).toContain("steps,");
     expect(commit).toContain("clearTurnViews();");
@@ -133,10 +133,10 @@ describe("the session draws the latest turn's answer views (CI-runnable)", () =>
   });
 
   it("the live turn is drawn to the rows the live region gives it, and commits whole (every page, one column)", () => {
-    const sizing = sessionSource.slice(sessionSource.indexOf("const turnRowsAt"), sessionSource.indexOf("const liveLayout = inkTranscriptLayout"));
+    const sizing = sessionSource.slice(sessionSource.indexOf("const turnRowsAt"), sessionSource.indexOf("const turnLayout = layoutOf("));
     expect(sizing).toContain("inkLatestTurnRows({");
     expect(sizing).toContain("keyBarRowCount(keyHintsFor(");
-    const commit = sessionSource.slice(sessionSource.indexOf("const commitLatestTurn"), sessionSource.indexOf("const [exitRequested"));
+    const commit = sessionSource.slice(sessionSource.indexOf("const commitLiveTurn"), sessionSource.indexOf("const [exitRequested"));
     expect(commit).not.toContain("rows:");
   });
 
@@ -154,18 +154,30 @@ describe("the session draws the latest turn's answer views (CI-runnable)", () =>
     });
     if (!doc) throw new Error("document view does not decode");
     recordTurnView({ type: "tool.view", stage: "tool", message: doc.title, viewId: "d1", name: doc.tool, view: doc });
-    for (const rows of [24, 30, 40]) {
-      const out = stripAnsi(renderInkInteractiveSessionToString({
-        columns: 100,
-        rows,
-        initialMessages: [{ role: "user", text: "show me the win-back emails" }, { role: "assistant", text: "Here are both emails." }],
-        onSubmitLine: async () => ({ messages: [] })
-      }));
+    const draw = (rows: number) => stripAnsi(renderInkInteractiveSessionToString({
+      columns: 100,
+      rows,
+      initialMessages: [{ role: "user", text: "show me the win-back emails" }, { role: "assistant", text: "Here are both emails." }],
+      onSubmitLine: async () => ({ messages: [] })
+    }));
+    for (const rows of [30, 40]) {
+      const out = draw(rows);
       expect(out, `${rows} rows`).toContain("Win-back sequence");
       expect(out, `${rows} rows`).toContain("Line 1 of the body.");
       expect(out, `${rows} rows`).toMatch(/page 1 of \d+/u);
       expect(out.split("\n").length, `${rows} rows`).toBeLessThan(rows);
     }
+    // 24 rows have no room for the turn even at the document's smallest page:
+    // the finished turn goes whole into scrollback instead of being paged
+    // (both emails, every line, no page line and no pager hint).
+    resetTurnState();
+    recordTurnView({ type: "tool.view", stage: "tool", message: doc.title, viewId: "d1", name: doc.tool, view: doc });
+    const whole = draw(24);
+    expect(whole).toContain("Win-back sequence");
+    expect(whole).toContain("Line 1 of the body.");
+    expect(whole).toContain("Line 60 of the body.");
+    expect(whole).toContain("The second email.");
+    expect(whole).not.toMatch(/page \d+ of \d+|more lines|lines above/u);
   });
 
   it("view keys are tried only with an empty composer and no card, picker or operator confirm", () => {
@@ -203,7 +215,7 @@ describe("views in a running session (fake TTY; skipped on CI like the other PTY
       title: "Infinite TUI"
     });
 
-    await waitFor(() => output.text().includes("switch side"), 4_000, output.text);
+    await waitFor(() => output.text().includes("Ask Infinite"), 4_000, output.text);
     await sendKeys(input, "which ads are on?\r");
     await waitFor(() => / {1}Ads running {2}✓ Ready/u.test(stripAnsi(output.text())), 4_000, output.text);
     // The key bar offers only what works on the view: rows to move, tab to type.
@@ -255,7 +267,7 @@ describe("a running turn's views (r4 working frames)", () => {
       title: "Infinite TUI"
     });
 
-    await waitFor(() => output.text().includes("switch side"), 4_000, output.text);
+    await waitFor(() => output.text().includes("Ask Infinite"), 4_000, output.text);
     await sendKeys(input, "which ads are on?\r");
     await waitFor(() => /∞ Two are on; pausing Cold brew car +│/u.test(stripAnsi(output.text())), 4_000, output.text);
     expect(stripAnsi(output.text())).toMatch(/❯ which ads are on\? +│ +Ads running/u);
@@ -293,7 +305,7 @@ describe("typing over a live view (fake TTY; skipped on CI like the other PTY te
       title: "Infinite TUI"
     });
 
-    await waitFor(() => output.text().includes("switch side"), 4_000, output.text);
+    await waitFor(() => output.text().includes("Ask Infinite"), 4_000, output.text);
     await sendKeys(input, "which ads are on?\r");
     await waitFor(() => stripAnsi(output.text()).includes("j k  move"), 4_000, output.text);
     await sendKeys(input, "just do it\r");
@@ -338,7 +350,7 @@ describe("copy in a running session (fake TTY; skipped on CI like the other PTY 
       title: "Infinite TUI"
     });
 
-    await waitFor(() => output.text().includes("switch side"), 4_000, output.text);
+    await waitFor(() => output.text().includes("Ask Infinite"), 4_000, output.text);
     await sendKeys(input, "make a link\r");
     await waitFor(() => stripAnsi(output.text()).includes("https://go.example.com/abc1"), 4_000, output.text);
     // Unengaged, `c` would type: the body offers no `c copy` yet.

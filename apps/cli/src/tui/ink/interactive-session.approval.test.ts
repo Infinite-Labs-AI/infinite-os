@@ -201,7 +201,7 @@ describe("the view card in a running session (fake TTY; skipped on CI like the o
           return { messages: [], pendingConfirmations: [card("change-budget-field")] };
         }
       });
-      await waitFor(() => output.text().includes("switch side"));
+      await waitFor(() => output.text().includes("Ask Infinite"));
       await sendKeys(input, "lower it\r");
       await waitFor(() => output.text().includes("Change the budget"), 4_000, output.text);
       await sendKeys(input, "l");
@@ -249,7 +249,7 @@ describe("the view card in a running session (fake TTY; skipped on CI like the o
           return { messages: [], pendingConfirmations: [budget] };
         }
       });
-      await waitFor(() => output.text().includes("switch side"));
+      await waitFor(() => output.text().includes("Ask Infinite"));
       await sendKeys(input, "lower it\r");
       await waitFor(() => output.text().includes("Change the budget"), 4_000, output.text);
       await sendKeys(input, "l");
@@ -295,7 +295,7 @@ describe("the view card in a running session (fake TTY; skipped on CI like the o
           return { messages: [], pendingConfirmations: [card("change-budget-field")] };
         }
       });
-      await waitFor(() => output.text().includes("switch side"));
+      await waitFor(() => output.text().includes("Ask Infinite"));
       await sendKeys(input, "lower it\r");
       await waitFor(() => output.text().includes("Change the budget"), 4_000, output.text);
       await sendKeys(input, "l");
@@ -339,7 +339,7 @@ describe("the view card in a running session (fake TTY; skipped on CI like the o
           return { messages: [], pendingConfirmations: [card("launch-send-card")] };
         }
       });
-      await waitFor(() => output.text().includes("switch side"));
+      await waitFor(() => output.text().includes("Ask Infinite"));
       await sendKeys(input, "send it\r");
       await waitFor(() => output.text().includes("Send this to 200 people?"), 4_000, output.text);
       await sendKeys(input, "v");
@@ -381,7 +381,7 @@ describe("the yes is working (run-2 M9: r4 flow-pause-02, fake TTY; skipped on C
           return { messages: [{ role: "assistant", text: "Ready." }], pendingConfirmations: [pending] };
         }
       });
-      await waitFor(() => output.text().includes("switch side"));
+      await waitFor(() => output.text().includes("Ask Infinite"));
       await sendKeys(input, "pause hook a\r");
       await waitFor(() => stripAnsi(output.text()).includes("p  Pause"), 4_000, output.text);
       const before = output.text().length;
