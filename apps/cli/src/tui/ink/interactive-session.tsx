@@ -1,7 +1,7 @@
 import { existsSync, readdirSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import { stdin as defaultInput, stderr as defaultErrorOutput, stdout as defaultOutput } from "node:process";
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 // The composer value renders in `<Text wrap="wrap">` (see InkLineInput), and Ink's
 // wrap="wrap" word-wraps via `wrapAnsi(text, width, { trim: false, hard: true })`
 // (ink/build/wrap-text.js). The native-cursor row prediction MUST use the SAME
@@ -49,7 +49,7 @@ import { TYPING_IDLE_MS } from "../config/timing.js";
 import { displayWidth, truncateCells } from "../lib/display-width.js";
 import { detectTerminalBackground } from "../style/background.js";
 import { drawsToTerminal, syncInkColorLevel } from "../style/ink-level.js";
-import { colorEnabled, resolveTheme, type Theme } from "../theme.js";
+import { colorEnabled, resolveTheme, themeInkStyle, type Theme } from "../theme.js";
 import type { Msg } from "../types.js";
 import {
   HomeInventory,
@@ -58,11 +58,14 @@ import {
   type HomeInventoryConnection,
   type HomeInventoryTool
 } from "./home-inventory.js";
-import { isInfiniteTurnBusy } from "./status-indicator.js";
+import { formatBusyNote, isInfiniteTurnBusy } from "./status-indicator.js";
 import { createTurnAbort, ctrlCAction, turnStoppedLine, type TurnAbort } from "./turn-abort.js";
 import { confirmCardKeys, keyBarHints, keyBarRowCount, resolveKey, type KeyAction, type KeyContext } from "../keys/keymap.js";
 import { KeyBar } from "./key-bar.js";
+import { COMPOSER_PLACEHOLDER, composerPlaceholderText } from "./composer-line.js";
+import { ruleLine, type TopBarData } from "./top-bar.js";
 import {
+  AnsiLine,
   inkLatestTurnRows,
   inkTranscriptLayout,
   InkTranscriptApp,
@@ -99,17 +102,19 @@ import {
 import { creativeDraftLine } from "../views/images.js";
 
 /**
- * The every-launch home inventory shown above the transcript on the empty home
- * screen (the big wordmark + Tools / Commands / Connected + welcome). Supplied by
- * the CLI (`index.ts`) so the registry / curated lists / live source fetch stay
- * there; the TUI only renders it. Absent (`undefined`) = no inventory (e.g. tests
- * / non-home paths) and the screen falls back to the bare rocket banner.
+ * The first-run inventory shown above the boot frame on the empty home screen
+ * (the big wordmark + Tools / Commands / Connected + welcome), only on the
+ * first-ever run (D4: every later boot is the r4 frame alone). Supplied by the
+ * CLI (`index.ts`) so the registry / curated lists / live source fetch stay
+ * there; the TUI only renders it. Absent (`undefined`) = no inventory.
  */
 export interface HomeInventoryData {
   tools: readonly HomeInventoryTool[];
   commands: readonly HomeInventoryCommand[];
-  /** `undefined` = daemon unreachable / fetch skipped (renders a muted note). */
+  /** `undefined` = the terminal cannot list them (see `connectionsNote`). */
   connections?: readonly HomeInventoryConnection[];
+  /** Why `connections` is undefined, in a few words (the daemon is down, the read failed); absent = no Connected row. */
+  connectionsNote?: string;
   version?: string;
   workspace?: string;
 }
@@ -129,6 +134,8 @@ const FWD_DEL_RE = new RegExp(`${ESC}\\[3(?:[~$^]|;)`);
 const PRINTABLE_INPUT_RE = /^[ -~\u00a0-\uffff]+$/;
 const TAB_PATH_RE = /((?:["']?(?:[A-Za-z]:[\\/]|\.{1,2}\/|~\/|\/|@|[^"'`\s]+\/))[^\s]*)$/;
 const QUEUED_PREVIEW_LIMIT = 50;
+/** The rule over the composer (terminal-r4: `─` across, then `❯ Ask Infinite…`). */
+const COMPOSER_RULE_ROWS = 1;
 
 export interface InkInteractiveLineResult {
   exit?: boolean;
@@ -250,9 +257,9 @@ export interface InkInteractiveSessionAppProps {
   getAgentTitle?: () => string | undefined;
   getCompletions?: (value: string) => readonly CompletionSuggestion[];
   /**
-   * The every-launch home inventory (big wordmark + Tools / Commands / Connected
-   * + welcome) shown ONCE on the empty home screen, above the transcript. Omitted
-   * = the home screen falls back to the bare rocket banner (e.g. tests).
+   * The first-run inventory (big wordmark + Tools / Commands / Connected +
+   * welcome) shown ONCE on the empty home screen, above the boot frame. The CLI
+   * passes it only on the first-ever run (D4). Omitted = the boot frame alone.
    */
   homeInventory?: HomeInventoryData;
   initialInputCursor?: number;
@@ -292,6 +299,13 @@ export interface InkInteractiveSessionAppProps {
     decision: "approve" | "decline",
     fields?: Record<string, ApprovalFieldAnswerV1>
   ): Promise<unknown>;
+  /**
+   * The running turn's own short reason, said in the composer's note in place
+   * of the generic `working · 4s` (terminal-r4 `❯ Ask Infinite… (the pause
+   * finishes either way)`). Read on every render; shown only while a turn runs.
+   */
+  busyNote?: string | (() => string | undefined);
+  /** The composer's placeholder. Default `Ask Infinite…` (terminal-r4). */
   promptPlaceholder?: string;
   requiresConfirmation?: (line: string) => string | undefined;
   requiresSelection?: (line: string) => InkInteractiveSelectionPrompt | undefined;
@@ -301,9 +315,16 @@ export interface InkInteractiveSessionAppProps {
    * `null` = no cap.
    */
   rows?: number | null;
+  /** Not drawn: the r4 frame has no status line (the composer carries the busy note). */
   status?: readonly string[] | (() => readonly string[]);
   theme?: Theme;
+  /** Not drawn: the r4 top bar shows the brand chip. */
   title?: string;
+  /**
+   * The top bar's workspace and sources (D1), read on every render so a
+   * `/project use` shows at once. Absent = the brand chip alone.
+   */
+  topBar?: TopBarData | (() => TopBarData | undefined);
   /**
    * The caller honours `onSubmitLine`'s abort signal, so Esc stops the running
    * turn and Ctrl-C stops it instead of quitting. Off (the local path, whose
@@ -450,13 +471,13 @@ export function InkInteractiveSessionApp({
   onRememberInput,
   onSubmitLine,
   onConfirmAction,
-  promptPlaceholder = "Type a message, /help, or /exit.",
+  busyNote,
+  promptPlaceholder = COMPOSER_PLACEHOLDER,
   requiresConfirmation,
   requiresSelection,
   rows: rowsOverride,
-  status = [],
   theme,
-  title,
+  topBar,
   turnStoppable = false
 }: InkInteractiveSessionAppProps) {
   const app = useApp();
@@ -582,7 +603,7 @@ export function InkInteractiveSessionApp({
     setLiveOffset(null);
   }, []);
 
-  const statusParts = typeof status === "function" ? status() : status;
+  const topBarData = typeof topBar === "function" ? topBar() : topBar;
   // Live label for the in-flight answer; completed messages carry their own
   // frozen `title` (stamped at submit) so a mid-session `/project use` never
   // relabels earlier answers.
@@ -622,6 +643,8 @@ export function InkInteractiveSessionApp({
               columns={columns}
               commands={homeInventory.commands}
               connections={homeInventory.connections}
+              connectionsNote={homeInventory.connectionsNote}
+              theme={t}
               tools={homeInventory.tools}
               version={homeInventory.version}
               workspace={homeInventory.workspace}
@@ -708,11 +731,18 @@ export function InkInteractiveSessionApp({
   // `isInfiniteTurnBusy(state)`, so this must stay an OR (a tool-only turn with
   // React `busy === false` still needs the indicator to animate).
   const transcriptBusy = busy || isInfiniteTurnBusy(turnState);
-  const { clock, labelTick, spinnerTick } = useInfiniteTranscriptClock({
-    busy: transcriptBusy,
-    state: turnState
-  });
-  const visibleStatusParts = formatInteractiveStatus(statusParts, busy, queuedLines);
+  const { clock } = useInfiniteTranscriptClock({ busy: transcriptBusy });
+  // The composer's note while a turn runs (terminal-r4 `❯ Ask Infinite… (note)`):
+  // that it is working and for how long, then any line queued behind it. No
+  // status line and no session id (r4 has neither).
+  // A turn that gives its own short reason says that instead of `working`.
+  const busyReason = transcriptBusy
+    ? (typeof busyNote === "function" ? busyNote() : busyNote)?.trim() || null
+    : null;
+  const composerNote = [
+    busyReason ?? (busy ? formatBusyNote({ nowMs: clock, state: turnState, turnStartedAt: busyStartedAt }) : null),
+    ...formatQueuedStatus(queuedLines)
+  ].filter((part): part is string => Boolean(part)).join(" · ");
   // The head card's keys: its named OK key, `n`, and `?` (keymap.ts owns the rules).
   // `o`/`w`/`r` stay off until app links, watch and retry land (T12, T11).
   const headConfirmAction = pendingConfirmActions[0] ?? null;
@@ -724,7 +754,10 @@ export function InkInteractiveSessionApp({
   // closed: the explanation stays behind `?`.
   // A card brought back opens with the answers it sent; a card whose answer
   // the app refused opens with the app's words under its field.
-  useEffect(() => {
+  // A layout effect, so the reset lands in the same task as the frame that
+  // shows the card: a key pressed on the card the moment it appears (`v`)
+  // is never undone by a late reset.
+  useLayoutEffect(() => {
     setExplainOpen(false);
     setCardUi(cardUiStart(headConfirmAction));
   }, [headConfirmAction]);
@@ -747,7 +780,8 @@ export function InkInteractiveSessionApp({
   // pages its middle, so the frame never reaches the window height and Ink
   // never takes its fullscreen path (which clears the user's scrollback).
   const cardRowsAround = rows
-    ? (showHomeInventory ? homeInventoryRowCount(columns) : 0)
+    ? (showHomeInventory ? homeInventoryRowCount(columns, homeInventory) : 0)
+      + COMPOSER_RULE_ROWS
       + Math.max(DEFAULT_COMPOSER_ROWS, composerRowsFor(inputValue, columns, t))
       + draftLines.length
       + 2
@@ -1437,33 +1471,35 @@ export function InkInteractiveSessionApp({
   }, [fieldPromptActive, currentConnectField, activeFieldTick]);
 
   const connectComposerValue = activeFieldComposer ? activeFieldComposer.display : inputValue;
+  // The placeholder is `Ask Infinite…` (with the busy note while a turn runs).
+  // A card's keys and `esc stop` live in the key bar only (D6: never twice);
+  // the pickers, the /connect fields and the operator confirm keep the words
+  // that say how to answer them.
   const connectPlaceholder = activeFieldComposer
     ? activeFieldComposer.secret
       ? "type the secret (hidden), Enter to continue, Ctrl-C to cancel"
       : "type a value, Enter to continue, Ctrl-C to cancel"
-    : confirmKeys
-      ? `press ${confirmKeys.ctx.okKey} to ${confirmKeys.ctx.okLabel}, n to dismiss`
-      : pendingConnectConfirm
+    : pendingConnectConfirm
+      ? "choose with up/down, Enter to select"
+      : pendingSelection
         ? "choose with up/down, Enter to select"
-        : pendingSelection
-          ? "choose with up/down, Enter to select"
-          : pendingOperatorLine
-            ? "type confirm to continue, anything else to cancel"
-            : busy && turnStoppable
-              ? "esc to stop"
-              : promptPlaceholder;
+        : pendingOperatorLine
+          ? "type confirm to continue, anything else to cancel"
+          : composerPlaceholderText(promptPlaceholder, composerNote);
 
   // The live frame's row budget. The home inventory renders ABOVE the transcript,
   // so its rows go into the composer's native-cursor row prediction (the PR #27
   // invariant: predicted composer row == live rendered row count); committed
   // <Static> rows never do. Everything the frame draws besides the transcript is
   // reserved out of the live-region cap, so the frame never fills the window.
-  const homeInventoryRows = showHomeInventory ? homeInventoryRowCount(columns) : 0;
-  // The key bar renders directly above the composer: its real wrapped rows go to
-  // the live-region cap through its own `keyBarRows` slot (0 when no card is
-  // open), and into the composer-row prediction below.
+  const homeInventoryRows = showHomeInventory ? homeInventoryRowCount(columns, homeInventory) : 0;
+  // The key bar is the LAST row, under the composer (one row: it is cut, never
+  // wrapped). Its row goes to the live-region cap through its own `keyBarRows`
+  // slot; it is below the composer, so never into the composer-row prediction.
+  // The rule over the composer is reserved with the composer.
   const composerText = activeFieldComposer ? activeFieldComposer.display : inputValue;
   const reservedRows = homeInventoryRows
+    + COMPOSER_RULE_ROWS
     + Math.max(DEFAULT_COMPOSER_ROWS, composerRowsFor(composerText || connectPlaceholder, columns, t))
     + liveOverlayRows({
       confirmAction: pendingConfirmActions[0] ?? null,
@@ -1484,13 +1520,10 @@ export function InkInteractiveSessionApp({
     busy,
     columns,
     composerRows: reservedRows,
-    indicatorTick: labelTick,
     keyBarRows: barRows,
     nowMs: clock,
     rows,
     showComposer: false,
-    spinnerTick,
-    status: visibleStatusParts,
     theme: t,
     transcript: idleTranscript,
     turnStartedAt: busyStartedAt
@@ -1518,25 +1551,24 @@ export function InkInteractiveSessionApp({
   );
   const liveTranscript = liveTurn ? idleTranscript : transcript;
   const liveLayout = inkTranscriptLayout({
+    bootFrame: true,
     busy,
     columns,
     composerRows: reservedRows,
-    homeBanner: !showHomeInventory,
-    indicatorTick: labelTick,
     keyBarRows,
     latest: liveLatest,
     livePage: liveOffset,
     nowMs: clock,
     rows,
     showComposer: false,
-    spinnerTick,
-    status: visibleStatusParts,
     theme: t,
-    title,
+    topBar: topBarData,
     transcript: liveTranscript,
     turnStartedAt: busyStartedAt
   });
-  const composerRow = homeInventoryRows + keyBarRows + liveLayout.rowCount;
+  // Rows above the composer: the first-run inventory, the live frame (top bar,
+  // rule, latest turn), any image-draft lines, and the rule over the composer.
+  const composerRow = homeInventoryRows + liveLayout.rowCount + draftLines.length + COMPOSER_RULE_ROWS;
   const pageLive = (direction: LivePageDirection) => setLiveOffset(pageLiveWindow(liveLayout.window, direction));
   // One key on the latest turn's views (only reached with an empty composer and
   // no card or picker open). `false` = the key goes on to the composer.
@@ -1574,6 +1606,9 @@ export function InkInteractiveSessionApp({
     return next.handled;
   };
 
+  // terminal-r4's frame, top to bottom (D1): [first-run inventory] · top bar ·
+  // rule · the latest turn (or the boot frame) · the card and other overlays ·
+  // rule · composer · completions · the key bar, LAST.
   return (
     <Box flexDirection="column" width={columns}>
       {showHomeInventory && homeInventory ? (
@@ -1581,30 +1616,28 @@ export function InkInteractiveSessionApp({
           columns={columns}
           commands={homeInventory.commands}
           connections={homeInventory.connections}
+          connectionsNote={homeInventory.connectionsNote}
+          theme={t}
           tools={homeInventory.tools}
           version={homeInventory.version}
           workspace={homeInventory.workspace}
         />
       ) : null}
       <InkTranscriptApp
+        bootFrame
         busy={busy}
         columns={columns}
         committed={committed}
         composerRows={reservedRows}
-        homeBanner={!showHomeInventory}
-        indicatorTick={labelTick}
         keyBarRows={keyBarRows}
         latest={liveLatest}
         livePage={liveOffset}
         livePageSpace={pendingConfirmActions.length === 0 && !pendingSelection && !pendingOperatorLine}
         nowMs={clock}
         rows={rows}
-        prompt={{ placeholder: promptPlaceholder }}
         showComposer={false}
-        spinnerTick={spinnerTick}
-        status={visibleStatusParts}
         theme={t}
-        title={title}
+        topBar={topBarData}
         transcript={liveTranscript}
         turnStartedAt={busyStartedAt}
       />
@@ -1632,11 +1665,11 @@ export function InkInteractiveSessionApp({
         theme={t}
         width={columns}
       />
-      <KeyBar hints={keyHints} theme={t} width={columns} />
+      <AnsiLine line={ruleLine(columns, t)} />
       <InkLineInput
         busy={busy}
         completionActive={completions.length > 0}
-        completionRows={completions.length}
+        rowsBelow={completions.length + keyBarRows}
         cursor={inputCursor}
         cardFieldActive={cardFieldActive}
         confirmActionActive={pendingConfirmActions.length > 0 && !cardFieldActive}
@@ -1691,6 +1724,7 @@ export function InkInteractiveSessionApp({
         theme={t}
         width={columns}
       />
+      <KeyBar hints={keyHints} theme={t} width={columns} />
     </Box>
   );
 }
@@ -1723,22 +1757,6 @@ export function formatQueuedStatus(lines: readonly string[]): readonly string[] 
 
   const extra = lines.length > 1 ? ` (+${lines.length - 1})` : "";
   return [`queued: "${previewQueuedLine(lines[0] ?? "")}"${extra}`];
-}
-
-export function formatInteractiveStatus(
-  statusParts: readonly string[] | undefined,
-  busy: boolean,
-  queuedLines: readonly string[]
-): readonly string[] {
-  const contextual = busy
-    ? (statusParts ?? []).filter((part) => part !== "session" && !part.startsWith("session "))
-    : (statusParts ?? []);
-
-  return [
-    ...contextual,
-    busy ? "busy" : "ready",
-    ...formatQueuedStatus(queuedLines)
-  ];
 }
 
 export function isForwardDeleteInput(event: unknown): boolean {
@@ -2505,7 +2523,7 @@ export function navigateInputHistory(
 function InkLineInput({
   busy,
   completionActive,
-  completionRows,
+  rowsBelow,
   confirmActionActive,
   confirmKeys,
   connectConfirmActive,
@@ -2556,7 +2574,8 @@ function InkLineInput({
 }: {
   busy: boolean;
   completionActive: boolean;
-  completionRows: number;
+  /** Rows drawn under the composer: an open completion menu, then the key bar. */
+  rowsBelow: number;
   confirmActionActive: boolean;
   confirmKeys: KeyContext | null;
   connectConfirmActive: boolean;
@@ -2614,9 +2633,23 @@ function InkLineInput({
   const { stdout } = useStdout();
   const forwardDelete = useForwardDeleteSignal();
   const markCursorActivity = useActivityAwareCursorBlink(stdout);
-  useInput((input, key) => {
+  // The composer's edit state as of the last key, so keys that arrive before
+  // React re-renders compose (none is lost); each render resets it to the props.
+  const editRef = useRef<ComposerEditState>({ cursor, selection, value });
+  editRef.current = { cursor, selection, value };
+  const change = (next: ComposerEditState) => {
+    editRef.current = next;
+    onChange(next);
+  };
+  // One stable subscription that always runs THIS render's handler. Ink
+  // re-subscribes `useInput` in an effect, after the frame is already on
+  // screen, so a key pressed in between used to reach an older render's
+  // handler: `v` on a card that had just appeared typed into the composer.
+  const handleInputRef = useRef<(input: string, key: Key) => void>(() => {});
+  handleInputRef.current = (input, key) => {
     markCursorActivity();
-    const editState = { cursor, selection, value };
+    const editState = editRef.current;
+    const value = editState.value;
     // In-chat /connect wizard (#20): Ctrl-C cancels the WIZARD ONLY (zeroizing the
     // secret) and must be guarded BEFORE the session-wide `onExit()` below — a
     // bare Ctrl-C mid-wizard must not quit the whole session.
@@ -2765,16 +2798,16 @@ function InkLineInput({
       return;
     }
     if (key.ctrl && input === "j") {
-      onChange(applyComposerEdit(editState, { type: "insert-newline" }));
+      change(applyComposerEdit(editState, { type: "insert-newline" }));
       return;
     }
     const keyWithPosition = key as typeof key & { end?: boolean; home?: boolean };
     if (keyWithPosition.home || (key.ctrl && input === "a")) {
-      onChange(applyComposerEdit(editState, { type: "move-start" }));
+      change(applyComposerEdit(editState, { type: "move-start" }));
       return;
     }
     if (keyWithPosition.end || (key.ctrl && input === "e")) {
-      onChange(applyComposerEdit(editState, { type: "move-end" }));
+      change(applyComposerEdit(editState, { type: "move-end" }));
       return;
     }
     if (key.tab) {
@@ -2793,7 +2826,7 @@ function InkLineInput({
       }
       const next = applyComposerEdit(editState, { type: key.shift ? "move-line-up-select" : "move-line-up" });
       if (next.cursor !== editState.cursor) {
-        onChange(next);
+        change(next);
         return;
       }
       onHistoryOlder();
@@ -2805,7 +2838,7 @@ function InkLineInput({
       }
       const next = applyComposerEdit(editState, { type: key.shift ? "move-line-down-select" : "move-line-down" });
       if (next.cursor !== editState.cursor) {
-        onChange(next);
+        change(next);
         return;
       }
       onHistoryNewer();
@@ -2816,7 +2849,7 @@ function InkLineInput({
       const type = key.shift
         ? word ? "move-word-left-select" : "move-left-select"
         : word ? "move-word-left" : "move-left";
-      onChange(applyComposerEdit(editState, { type }));
+      change(applyComposerEdit(editState, { type }));
       return;
     }
     if (key.rightArrow || (key.ctrl && input === "f")) {
@@ -2824,53 +2857,56 @@ function InkLineInput({
       const type = key.shift
         ? word ? "move-word-right-select" : "move-right-select"
         : word ? "move-word-right" : "move-right";
-      onChange(applyComposerEdit(editState, { type }));
+      change(applyComposerEdit(editState, { type }));
       return;
     }
     if (key.meta && input === "b") {
-      onChange(applyComposerEdit(editState, { type: "move-word-left" }));
+      change(applyComposerEdit(editState, { type: "move-word-left" }));
       return;
     }
     if (key.meta && input === "f") {
-      onChange(applyComposerEdit(editState, { type: "move-word-right" }));
+      change(applyComposerEdit(editState, { type: "move-word-right" }));
       return;
     }
     if (key.backspace) {
-      onChange(applyComposerEdit(editState, { type: "backspace" }));
+      change(applyComposerEdit(editState, { type: "backspace" }));
       return;
     }
     if (key.delete) {
-      onChange(applyComposerEdit(editState, { type: forwardDelete.current ? "delete-forward" : "backspace" }));
+      change(applyComposerEdit(editState, { type: forwardDelete.current ? "delete-forward" : "backspace" }));
       return;
     }
     if (input && !key.ctrl && !key.meta) {
       const action = input.length > 1 || input.includes("\n") || input.includes("[200~") || input.includes("[201~")
         ? { text: input, type: "insert-paste" as const }
         : { text: input, type: "insert" as const };
-      onChange(applyComposerEdit(editState, action));
+      change(applyComposerEdit(editState, action));
     }
-  });
+  };
+  useInput(useCallback((input: string, key: Key) => handleInputRef.current(input, key), []));
 
   // In-chat /connect wizard (#20): a free-text field row uses a `?`-style prompt
   // and never the native cursor (the rendered `value` is already the masked bullets
   // string for secret fields, so there is no raw value to position a cursor in).
   const fieldRowActive = fieldPromptActive && !fieldChoiceActive;
   const overlayActive = selectionActive || connectConfirmActive || fieldRowActive || confirmActionActive;
-  // A pending write gate shows the same `!` warning glyph as an operator confirm
-  // (a write is being gated), not the `?` overlay glyph used by the pickers.
-  const label = pendingConfirmation || confirmActionActive ? "!" : overlayActive ? "?" : theme.brand.prompt;
+  // The prompt is r4's cyan `❯`, with a write card open too (its keys are in the
+  // key bar). An operator confirm shows a `!` and the pickers and /connect
+  // fields a `?`, in amber: those rows take a typed answer, not a message.
+  const pickerActive = selectionActive || connectConfirmActive || fieldRowActive;
+  const label = pendingConfirmation ? "!" : pickerActive ? "?" : theme.brand.prompt;
   const promptWidth = displayWidth(`${label} `);
   const inputWidth = Math.max(1, width - promptWidth);
   // When the frame is tall enough to trip ink's fullscreen write branch, ink parks the
   // native cursor a row above the composer (see wouldTriggerInkFullscreen). Suppress the
   // native cursor there and let renderComposerValueWithCursor draw the in-text caret.
-  // An open completion menu renders BELOW the composer and counts toward ink's outputHeight
-  // (the other overlays already force the native cursor off), so include its rows here.
+  // An open completion menu and the key bar render BELOW the composer and count toward
+  // ink's outputHeight (the other overlays already force the native cursor off).
   const composerRows = composerCursorLayout(value, value.length, inputWidth).line + 1;
   const inkFullscreen = wouldTriggerInkFullscreen({
     rowsAboveComposer: row,
     composerRows,
-    rowsBelowComposer: completionRows,
+    rowsBelowComposer: rowsBelow,
     terminalRows: stdout?.rows
   });
   const nativeCursor =
@@ -2880,20 +2916,22 @@ function InkLineInput({
     ? composerNativeCursorPosition({ cursor, label, row, value, width })
     : undefined);
 
+  // An empty composer shows its placeholder on one row, cut to the width
+  // (terminal-r4: `❯ Ask Infinite…` in dim, the busy note in brackets).
   const content = fieldRowActive
     // Masked or plain field value with a trailing cursor — `value` already carries
     // bullets for a secret field, so the raw secret is never in the render tree.
-    ? (value ? `${value}|` : placeholder)
+    ? (value ? `${value}|` : truncateCells(placeholder, inputWidth))
     : value
       ? renderComposerValueWithCursor(value, cursor, selection, { nativeCursor })
-      : placeholder;
-  const color = value ? theme.color.text : theme.color.muted;
+      : truncateCells(placeholder, inputWidth);
+  const look = themeInkStyle(theme, value ? "text" : "muted");
 
   return (
     <Box width={width}>
-      <Text color={pendingConfirmation || overlayActive ? theme.color.warning : theme.color.primaryBright}>{label} </Text>
+      <Text {...themeInkStyle(theme, pendingConfirmation || pickerActive ? "warning" : "primary")}>{label} </Text>
       <Box width={inputWidth}>
-        <Text color={color} wrap="wrap">{content}</Text>
+        <Text {...look} wrap="wrap">{content}</Text>
       </Box>
     </Box>
   );

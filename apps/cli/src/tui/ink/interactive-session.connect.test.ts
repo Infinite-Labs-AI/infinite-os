@@ -202,7 +202,7 @@ describe("in-chat /connect wizard (#20) — live PTY flow (skipped on CI)", () =
         }
       });
 
-      await waitFor(() => output.text().includes("ready"));
+      await waitFor(() => output.text().includes("switch side"));
 
       // Arm the wizard.
       await sendKeys(input, "/connect posthog\r");
@@ -269,7 +269,7 @@ describe("in-chat /connect wizard (#20) — live PTY flow (skipped on CI)", () =
           }
         });
 
-        await waitFor(() => output.text().includes("ready"));
+        await waitFor(() => output.text().includes("switch side"));
         await sendKeys(input, "/connect posthog\r");
         await waitFor(() => output.text().includes("Step 1 of 3"), 4_000, output.text);
         await sendKeys(input, "1\r");
@@ -328,7 +328,7 @@ describe("in-chat /connect wizard (#20) — live PTY flow (skipped on CI)", () =
         }
       });
 
-      await waitFor(() => output.text().includes("ready"));
+      await waitFor(() => output.text().includes("switch side"));
 
       await sendKeys(input, "/connect meta_ads\r");
       await waitFor(() => output.text().includes("Step 1 of 3"), 4_000, output.text);
@@ -402,7 +402,7 @@ describe("in-chat /connect wizard (#20) — live PTY flow (skipped on CI)", () =
         }
       });
 
-      await waitFor(() => output.text().includes("ready"));
+      await waitFor(() => output.text().includes("switch side"));
       await sendKeys(input, "/connect posthog\r");
       await waitFor(() => output.text().includes("Step 1 of 3"), 4_000, output.text);
       await sendKeys(input, "12345\r");
@@ -449,7 +449,7 @@ describe("in-chat /connect wizard (#20) — live PTY flow (skipped on CI)", () =
         }
       });
 
-      await waitFor(() => output.text().includes("ready"));
+      await waitFor(() => output.text().includes("switch side"));
       await sendKeys(input, "/connect ga4\r");
       await waitFor(() => output.text().includes("infinite local setup"), 4_000, output.text);
 
@@ -488,7 +488,7 @@ describe("in-chat /connect wizard (#20) — live PTY flow (skipped on CI)", () =
           }
         });
 
-        await waitFor(() => output.text().includes("ready"));
+        await waitFor(() => output.text().includes("switch side"));
         await sendKeys(input, `/connect ${provider}\r`);
         await waitFor(() => output.text().includes(`infinite local connect ${provider}`), 4_000, output.text);
         expect(output.text()).not.toContain("Step 1 of");

@@ -44,7 +44,8 @@ describe("the write card draws its approval view (CI-runnable)", () => {
     }));
     expect(out).toContain("Pause ad “Hook A”?");
     expect(out).toContain("status  on → paused");
-    expect(out).toContain("p Pause   n dismiss");
+    // The key bar: chips (` p `), the OK key first; then always tab and / (terminal-r4).
+    expect(out).toContain(" p  Pause    n  dismiss");
     // The old card's summary line is not drawn when the view is.
     expect(out).not.toContain("Approve this write?");
     expect(out).not.toContain("Stops this ad's spend");
@@ -59,7 +60,7 @@ describe("the write card draws its approval view (CI-runnable)", () => {
     }));
     expect(out).toContain("Approve this write? — Pause ad Hook A");
     expect(out).toContain("Ad: Hook A");
-    expect(out).toContain("y Confirm   n dismiss");
+    expect(out).toContain(" y  Confirm    n  dismiss");
   });
 
   it("a send card offers v view; a card whose desktop can't take fields asks to update", () => {
@@ -68,7 +69,7 @@ describe("the write card draws its approval view (CI-runnable)", () => {
       initialPendingConfirmations: [card("launch-send-card")],
       onSubmitLine: async () => ({ messages: [] })
     }));
-    expect(send).toContain("v view   s Send to 200 people   n dismiss");
+    expect(send).toContain(" v  view    s  Send to 200 people    n  dismiss");
     const old = stripAnsi(renderInkInteractiveSessionToString({
       columns: 80,
       initialPendingConfirmations: [card("change-budget-field", { confirmFieldsCapable: false })],
@@ -76,6 +77,7 @@ describe("the write card draws its approval view (CI-runnable)", () => {
     }));
     expect(old).toContain("Update the Infinite app to set a value here");
     expect(old).not.toContain("l Lower to $30/day");
+    expect(old).not.toContain("l  Lower to $30/day");
   });
 
   it("image drafts in progress print one text line per run, never a URL", () => {
@@ -123,11 +125,11 @@ describe("the view card in a running session (fake TTY; skipped on CI like the o
           return { messages: [], pendingConfirmations: [card("change-budget-field")] };
         }
       });
-      await waitFor(() => output.text().includes("ready"));
+      await waitFor(() => output.text().includes("switch side"));
       await sendKeys(input, "lower it\r");
       await waitFor(() => output.text().includes("Change the budget"), 4_000, output.text);
       await sendKeys(input, "l");
-      await waitFor(() => stripAnsi(output.text()).includes("enter set"), 4_000, output.text);
+      await waitFor(() => stripAnsi(output.text()).includes("enter  set"), 4_000, output.text);
       expect(calls).toEqual([]);
       await sendKeys(input, "30\r");
       await waitFor(() => stripAnsi(output.text()).includes("$30.00/day"), 4_000, output.text);
@@ -171,17 +173,17 @@ describe("the view card in a running session (fake TTY; skipped on CI like the o
           return { messages: [], pendingConfirmations: [budget] };
         }
       });
-      await waitFor(() => output.text().includes("ready"));
+      await waitFor(() => output.text().includes("switch side"));
       await sendKeys(input, "lower it\r");
       await waitFor(() => output.text().includes("Change the budget"), 4_000, output.text);
       await sendKeys(input, "l");
-      await waitFor(() => stripAnsi(output.text()).includes("enter set"), 4_000, output.text);
+      await waitFor(() => stripAnsi(output.text()).includes("enter  set"), 4_000, output.text);
       await sendKeys(input, "30\r");
       await waitFor(() => stripAnsi(output.text()).includes("$30.00/day"), 4_000, output.text);
       await sendKeys(input, "l");
       await waitFor(() => calls.length === 1, 4_000, output.text);
       await waitFor(() => stripAnsi(output.text()).includes("→ Check first"), 4_000, output.text);
-      await waitFor(() => stripAnsi(output.text()).includes("l check again"), 4_000, output.text);
+      await waitFor(() => stripAnsi(output.text()).includes("l  check again"), 4_000, output.text);
       await sendKeys(input, "l");
       await waitFor(() => calls.length === 2, 4_000, output.text);
       expect(calls).toEqual([
@@ -217,19 +219,19 @@ describe("the view card in a running session (fake TTY; skipped on CI like the o
           return { messages: [], pendingConfirmations: [card("change-budget-field")] };
         }
       });
-      await waitFor(() => output.text().includes("ready"));
+      await waitFor(() => output.text().includes("switch side"));
       await sendKeys(input, "lower it\r");
       await waitFor(() => output.text().includes("Change the budget"), 4_000, output.text);
       await sendKeys(input, "l");
-      await waitFor(() => stripAnsi(output.text()).includes("enter set"), 4_000, output.text);
+      await waitFor(() => stripAnsi(output.text()).includes("enter  set"), 4_000, output.text);
       await sendKeys(input, "9000\r");
       await waitFor(() => stripAnsi(output.text()).includes("$9,000.00/day"), 4_000, output.text);
       await sendKeys(input, "l");
       await waitFor(() => calls.length === 1, 4_000, output.text);
       await waitFor(() => stripAnsi(output.text()).includes("Budget is above the cap."), 4_000, output.text);
-      await waitFor(() => stripAnsi(output.text()).includes("l Lower to $30/day"), 4_000, output.text);
+      await waitFor(() => stripAnsi(output.text()).includes("l  Lower to $30/day"), 4_000, output.text);
       await sendKeys(input, "l");
-      await waitFor(() => stripAnsi(output.text()).includes("enter set"), 4_000, output.text);
+      await waitFor(() => stripAnsi(output.text()).includes("enter  set"), 4_000, output.text);
       await sendKeys(input, "45\r");
       await waitFor(() => stripAnsi(output.text()).includes("$45.00/day"), 4_000, output.text);
       await sendKeys(input, "l");
@@ -261,7 +263,7 @@ describe("the view card in a running session (fake TTY; skipped on CI like the o
           return { messages: [], pendingConfirmations: [card("launch-send-card")] };
         }
       });
-      await waitFor(() => output.text().includes("ready"));
+      await waitFor(() => output.text().includes("switch side"));
       await sendKeys(input, "send it\r");
       await waitFor(() => output.text().includes("Send this to 200 people?"), 4_000, output.text);
       await sendKeys(input, "v");
@@ -311,7 +313,7 @@ describe("a tall card in a running session (fake TTY; skipped on CI like the oth
         title: "Infinite TUI",
         onSubmitLine: async () => ({ messages: [] })
       });
-      await waitFor(() => stripAnsi(output.text()).includes("l Launch 30 ads"), 4_000, output.text);
+      await waitFor(() => stripAnsi(output.text()).includes("l  Launch 30 ads"), 4_000, output.text);
       // A few clock ticks: every redraw stays below the window height.
       await new Promise((resolve) => setTimeout(resolve, 1_500));
       await sendKeys(input, " ");
@@ -319,7 +321,7 @@ describe("a tall card in a running session (fake TTY; skipped on CI like the oth
       const last = stripAnsi(output.lastFrame());
       expect(last).toContain("Needs your OK");
       expect(last).toContain("Launch 30 ads?");
-      expect(last).toContain("l Launch 30 ads");
+      expect(last).toContain("l  Launch 30 ads");
       expect(output.text()).not.toContain(`${ESC}[2J`);
       expect(output.text()).not.toContain(`${ESC}[3J`);
       input.write("\u0003");

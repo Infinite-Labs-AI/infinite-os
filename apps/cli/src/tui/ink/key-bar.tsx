@@ -1,13 +1,13 @@
 import React from "react";
 
 import type { Theme } from "../theme.js";
-import { type KeyHint, formatKeyBar } from "../keys/keymap.js";
-import { Box, Text } from "./renderer.js";
+import { type KeyHint, keyBarLine } from "../keys/keymap.js";
+import { AnsiLine } from "./transcript-app.js";
 
-// The bottom key bar (terminal-r4 "Keys"): only what works right now, rendered
-// just above the composer. Purely presentational — key handling stays in the
-// single `useInput` owner. Its wrapped rows are counted by `keyBarRowCount`
-// (same text, same wrap), which the session adds to the composer-row prediction.
+// The key bar (terminal-r4 "Keys"): the session's LAST row, under the
+// composer. Key chips for what works right now, then always `tab switch side`
+// and `/ commands`, cut to the width with `…` (one row: `keyBarRowCount`).
+// Purely presentational — key handling stays in the single `useInput` owner.
 export function KeyBar({
   hints,
   theme,
@@ -17,13 +17,5 @@ export function KeyBar({
   theme: Theme;
   width: number;
 }) {
-  if (hints.length === 0) {
-    return null;
-  }
-  // One plain string, so the rendered wrap matches `keyBarRowCount` exactly.
-  return (
-    <Box width={width}>
-      <Text color={theme.color.muted} wrap="wrap">{formatKeyBar(hints)}</Text>
-    </Box>
-  );
+  return <AnsiLine line={keyBarLine(hints, width, theme)} />;
 }

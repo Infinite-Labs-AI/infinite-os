@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { renderToString } from "./renderer.js";
 import { InfiniteWelcome } from "./infinite-welcome.js";
-import { GROWTH_TAGLINE } from "./rocket-banner.js";
+import { GROWTH_TAGLINE } from "./infinite-wordmark.js";
 import React from "react";
 
 const TAGLINE = GROWTH_TAGLINE.toUpperCase();

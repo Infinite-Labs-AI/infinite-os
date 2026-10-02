@@ -22,8 +22,10 @@ export interface InkTranscriptReporterOptions {
   markAssistantStreamed?: () => void;
   now?: () => number;
   prompt?: InfiniteAppChromeInput["prompt"];
+  /** Not drawn: the r4 frame has no status line (the composer carries the busy note). */
   status?: readonly string[] | (() => readonly string[]);
   theme?: Theme;
+  /** Not drawn: the r4 top bar shows the brand chip. */
   title?: string;
 }
 
@@ -110,18 +112,11 @@ export class InkTranscriptProgressReporter {
         columns={this.stream.columns}
         nowMs={this.now?.()}
         prompt={this.options.prompt ?? { placeholder: "Thinking, reasoning, or running tools." }}
-        status={this.status()}
         theme={this.options.theme}
-        title={this.options.title}
         transcript={transcript}
         turnStartedAt={this.turnStartedAt}
       />
     );
-  }
-
-  private status(): readonly string[] {
-    const status = this.options.status;
-    return typeof status === "function" ? status() : status ?? [];
   }
 }
 

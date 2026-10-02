@@ -16,6 +16,7 @@ import {
 import { inkTranscriptLayout, inkTranscriptRowCount, renderInkTranscriptToString } from "./transcript-app.js";
 import {
   commitOnSubmit,
+  DEFAULT_COMPOSER_ROWS,
   liveRegionCap,
   livePageHint,
   livePageKey,
@@ -67,9 +68,10 @@ describe("transcript Static: committed turns leave the live region", () => {
     for (const rows of [undefined, 24, 40]) {
       const props = { transcript: { state: emptyState }, columns: 80, rows, latest: tall, committed, showComposer: false };
       const rendered = stripAnsi(renderInkTranscriptToString(props)).split("\n");
-      // Ink prints <Static> output first; everything after it is the live region.
-      expect(rendered.slice(0, 2)).toEqual(["committed one", "committed two"]);
-      expect(rendered.length - 2).toBe(inkTranscriptRowCount(props));
+      // Ink prints <Static> output first, a thin rule between turns (D1, no top
+      // bar per turn); everything after it is the live region.
+      expect(rendered.slice(0, 3)).toEqual(["committed one", "─".repeat(80), "committed two"]);
+      expect(rendered.length - 3).toBe(inkTranscriptRowCount(props));
     }
   });
 
@@ -93,11 +95,15 @@ describe("transcript Static: committed turns leave the live region", () => {
   it.each([12, 24, 40, 60])("a capped live region never trips the fullscreen redraw (%i rows)", (rows) => {
     const tall = { id: "t1", lines: Array.from({ length: 500 }, (_, i) => `row ${i}`) };
     for (const busy of [false, true]) {
+      // The session reserves the rule over the composer with the composer (r4).
       const rowsAboveComposer = inkTranscriptRowCount({
-        busy, transcript: { state: emptyState }, columns: 80, rows, latest: tall, showComposer: false
+        busy, transcript: { state: emptyState }, columns: 80, rows, latest: tall, showComposer: false,
+        composerRows: DEFAULT_COMPOSER_ROWS + 1
       });
-      // + the key bar row (T7) above a composer that may wrap to 3 rows.
-      expect(wouldTriggerInkFullscreen({ rowsAboveComposer: rowsAboveComposer + 1, composerRows: 3, terminalRows: rows })).toBe(false);
+      // + the rule over a composer that may wrap to 3 rows, and the key bar under it (the last row).
+      expect(wouldTriggerInkFullscreen({
+        rowsAboveComposer: rowsAboveComposer + 1, composerRows: 3, rowsBelowComposer: 1, terminalRows: rows
+      })).toBe(false);
     }
   });
 
@@ -254,7 +260,7 @@ describe("scrollback in a running session (fake TTY; skipped on CI like the othe
       title: "Infinite TUI"
     });
 
-    await waitFor(() => output.text().includes("ready"), 4_000, output.text);
+    await waitFor(() => output.text().includes("switch side"), 4_000, output.text);
     await sendKeys(input, "first\r");
     // A finished tall answer opens at its top, with a hint, inside the cap.
     await waitFor(() => output.text().includes("alpha line 0") && output.text().includes("more lines"), 4_000, output.text);
@@ -289,6 +295,41 @@ describe("scrollback in a running session (fake TTY; skipped on CI like the othe
     expect(output.text()).not.toContain(`${ESC}[2J`);
   });
 
+  it.skipIf(process.env.CI === "true")("scrollback separates finished turns with exactly one thin rule (D1)", { timeout: 30_000 }, async () => {
+    const input = ttyInput();
+    const output = ttyOutput();
+    const errorOutput = ttyOutput();
+    const session = runInkInteractiveSession({
+      errorOutput,
+      input,
+      async onSubmitLine(line) {
+        if (line === "/exit") return { exit: true, messages: [] };
+        return { messages: [{ role: "assistant", text: `answer-${line}` }] };
+      },
+      output
+    });
+
+    await waitFor(() => output.text().includes("switch side"), 4_000, output.text);
+    for (const line of ["one", "two", "three"]) {
+      await sendKeys(input, `${line}\r`);
+      await waitFor(() => output.text().includes(`answer-${line}`), 4_000, output.text);
+    }
+    await sendKeys(input, "/exit\r");
+    await session;
+    // Exiting commits the last turn, so all three are in scrollback: each pair
+    // is separated by ONE rule row, never two stacked rules.
+    const rows = scrollbackRows(output.text());
+    const rule = "─".repeat(80);
+    for (const [answer, nextQuestion] of [["answer-one", "two"], ["answer-two", "three"]] as const) {
+      const from = rows.findIndex((row) => row.includes(answer));
+      const to = rows.findIndex((row, index) => index > from && row.includes(`❯ ${nextQuestion}`));
+      expect(from, rows.join("\n")).toBeGreaterThanOrEqual(0);
+      expect(to, rows.join("\n")).toBeGreaterThan(from);
+      const rules = rows.slice(from + 1, to).filter((row) => /^─+$/u.test(row.trim()));
+      expect(rules, rows.join("\n")).toEqual([rule]);
+    }
+  });
+
   it.skipIf(process.env.CI === "true")("idle Ctrl-C still writes the whole last answer before quitting", { timeout: 30_000 }, async () => {
     const input = ttyInput();
     const output = ttyOutput();
@@ -301,7 +342,7 @@ describe("scrollback in a running session (fake TTY; skipped on CI like the othe
       output,
       title: "Infinite TUI"
     });
-    await waitFor(() => output.text().includes("ready"), 4_000, output.text);
+    await waitFor(() => output.text().includes("switch side"), 4_000, output.text);
     await sendKeys(input, "first\r");
     await waitFor(() => output.text().includes("more lines"), 4_000, output.text);
     expect(output.text()).not.toContain("alpha line 150");
@@ -340,7 +381,7 @@ describe("scrollback in a running session (fake TTY; skipped on CI like the othe
       output,
       title: "Infinite TUI"
     });
-    await waitFor(() => output.text().includes("ready"), 4_000, output.text);
+    await waitFor(() => output.text().includes("switch side"), 4_000, output.text);
     await sendKeys(input, "publish it\r");
     await waitFor(() => output.text().includes("Approve this write?") && output.text().includes("more lines"), 4_000, output.text);
     const before = maxLine(output.text(), "alpha");
@@ -364,6 +405,47 @@ describe("scrollback in a running session (fake TTY; skipped on CI like the othe
     expect(decisions).toEqual(["decline"]);
   });
 });
+
+// What scrollback keeps: Ink writes each <Static> chunk once, ahead of the live
+// frame it then redraws (erasing the previous frame with cursor moves + erase).
+// Replaying the stream on a tiny screen model (rows, a cursor, erase) keeps the
+// static rows and drops the erased live frames.
+function scrollbackRows(raw: string): string[] {
+  const rows: string[][] = [[]];
+  let row = 0;
+  let col = 0;
+  const at = (r: number) => (rows[r] ??= []);
+  for (const token of raw.split(new RegExp(`(${ESC}\\[[0-9;?]*[A-Za-z]|\\n|\\r)`, "g"))) {
+    if (!token) continue;
+    if (token === "\n") {
+      row += 1;
+      col = 0;
+      at(row);
+    } else if (token === "\r") {
+      col = 0;
+    } else if (token.startsWith(ESC)) {
+      const match = /^\x1b\[(\d*)(?:;(\d*))?([A-Za-z])$/u.exec(token);
+      if (!match) continue;
+      const n = Number(match[1] || 1);
+      switch (match[3]) {
+        case "A": row = Math.max(0, row - n); break;
+        case "B": row += n; at(row); break;
+        case "C": col += n; break;
+        case "D": col = Math.max(0, col - n); break;
+        case "G": col = n - 1; break;
+        case "K": at(row).length = match[1] === "2" ? 0 : Math.min(at(row).length, col); break;
+        case "J": rows.length = row + 1; at(row).length = Math.min(at(row).length, col); break;
+        default: break;
+      }
+    } else {
+      for (const char of token) {
+        at(row)[col] = char;
+        col += 1;
+      }
+    }
+  }
+  return rows.map((cells) => Array.from(cells, (cell) => cell ?? " ").join(""));
+}
 
 function countLine(text: string, line: string) {
   return text.match(new RegExp(`${line}(?!\\d)`, "g"))?.length ?? 0;

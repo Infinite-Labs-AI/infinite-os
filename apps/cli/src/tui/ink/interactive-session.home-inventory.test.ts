@@ -4,11 +4,14 @@ import { renderInkInteractiveSessionToString } from "./interactive-session.js";
 import { homeInventoryRowCount } from "./home-inventory.js";
 import { MIN_BIG_COLUMNS } from "./infinite-wordmark.js";
 import { inkTranscriptRowCount } from "./transcript-app.js";
-import { DEFAULT_THEME } from "../theme.js";
+import { resolveTheme } from "../theme.js";
 import type { Msg } from "../types.js";
+import { R4_SOURCES_OK } from "./__fixtures__/r4-chrome.js";
 
 const ESC = String.fromCharCode(27);
 const stripAnsi = (value: string) => value.replace(new RegExp(`${ESC}\\[[0-9;]*m`, "g"), "");
+// A fixed tier, so the frame reads the same whatever terminal runs the tests.
+const THEME = resolveTheme({ INFINITE_COLOR: "truecolor" }, { isTTY: true });
 
 const HOME_INVENTORY = {
   tools: [
@@ -32,13 +35,70 @@ const COLUMNS = 88;
 
 function render(props: Record<string, unknown>, columns = COLUMNS): string {
   return renderInkInteractiveSessionToString(
-    { columns, onSubmitLine: async () => ({}), title: "Infinite TUI", ...props } as never,
+    { columns, onSubmitLine: async () => ({}), theme: THEME, ...props } as never,
     { columns }
   );
 }
 
-describe("interactive session home inventory", () => {
-  it("renders the wordmark, Tools/Commands/Connected and welcome on the empty home screen", () => {
+/** Rows above the composer the session predicts: the inventory, the live frame and the rule over the composer. */
+function predictedComposerRow(columns: number, inventory: Parameters<typeof homeInventoryRowCount>[1] | null): number {
+  return (inventory ? homeInventoryRowCount(columns, inventory) : 0)
+    + inkTranscriptRowCount({
+      bootFrame: true,
+      busy: false,
+      columns,
+      showComposer: false,
+      theme: THEME,
+      transcript: { messages: [], state: undefined as never },
+      nowMs: 5_000
+    })
+    + 1;
+}
+
+describe("the boot frame (D4: terminal-r4's frame, nothing else)", () => {
+  it("is the top bar, its rule, an empty answer area, the Steps rule, the composer's rule, the composer and the key bar (boot--c100)", () => {
+    const rows = stripAnsi(render({ topBar: { workspace: "Infinite workspace", sources: R4_SOURCES_OK, throughApp: true } }, 100))
+      .replace(/\n+$/u, "")
+      .split("\n")
+      .map((row) => row.trimEnd());
+
+    expect(rows).toEqual([
+      " ∞ Infinite   Infinite workspace   ⊘ Shopify ● GA4 ● Stripe ● PostHog ● Google Ads ● Meta",
+      "─".repeat(100),
+      ...Array.from({ length: 8 }, () => ""),
+      `─ Steps ${"─".repeat(92)}`,
+      "─".repeat(100),
+      "❯ Ask Infinite…",
+      " tab  switch side    /  commands"
+    ]);
+  });
+
+  it("says `through the Infinite app` on the right when the whole top bar fits (boot--c160)", () => {
+    const [top] = stripAnsi(render({ topBar: { workspace: "Infinite workspace", sources: R4_SOURCES_OK, throughApp: true } }, 160)).split("\n");
+    expect(top?.trimEnd()).toBe(
+      ` ∞ Infinite   Infinite workspace   ⊘ Shopify ● GA4 ● Stripe ● PostHog ● Google Ads ● Meta${" ".repeat(46)}through the Infinite app`
+    );
+  });
+
+  it("shows no wordmark, no inventory and no welcome text after the first run", () => {
+    const frame = stripAnsi(render({}));
+
+    expect(frame).not.toContain("███████╗");
+    expect(frame).not.toContain("Tools");
+    expect(frame).not.toContain("Welcome to Infinite");
+    expect(frame).not.toContain("Use Infinite wherever you prefer");
+    expect(frame).not.toContain("ready");
+    expect(frame).toContain("∞ Infinite");
+  });
+
+  it("parks the composer on the predicted row (PR #27 invariant)", () => {
+    const lines = stripAnsi(render({})).replace(/\n+$/u, "").split("\n");
+    expect(lines.findIndex((line) => line.startsWith("❯"))).toBe(predictedComposerRow(COLUMNS, null));
+  });
+});
+
+describe("the first-run inventory (D4: the first-ever run only)", () => {
+  it("renders the wordmark, Tools/Commands/Connected and welcome above the boot frame", () => {
     const frame = stripAnsi(render({ homeInventory: HOME_INVENTORY }));
 
     // Reused big INFINITE wordmark (not re-hand-drawn).
@@ -54,61 +114,35 @@ describe("interactive session home inventory", () => {
     expect(frame).toContain("Connected");
     expect(frame).toContain("Facebook");
     expect(frame).toContain("Welcome to Infinite");
-    expect(frame).not.toContain("▕█▏");
-    // …and the inventory sits ABOVE the transcript's top rule.
+    // …and the inventory sits ABOVE the top bar.
     const lines = frame.split("\n");
     const toolsRow = lines.findIndex((line) => line.includes("Tools"));
-    const ruleRow = lines.findIndex((line) => line.includes("∞ Infinite TUI"));
+    const topBarRow = lines.findIndex((line) => line.startsWith(" ∞ Infinite"));
     expect(toolsRow).toBeGreaterThanOrEqual(0);
-    expect(ruleRow).toBeGreaterThan(toolsRow);
+    expect(topBarRow).toBeGreaterThan(toolsRow);
   });
 
   it("keeps the composer-row prediction exact with the inventory present (PR #27 invariant)", () => {
-    // The session computes composerRow = homeInventoryRows + inkTranscriptRowCount(showComposer:false).
-    // The rendered composer (❯) must land on exactly that row, or the native cursor parks off.
-    const predicted =
-      homeInventoryRowCount(COLUMNS) +
-      inkTranscriptRowCount({
-        busy: false,
-        columns: COLUMNS,
-        homeBanner: false,
-        showComposer: false,
-        status: ["ready"],
-        theme: DEFAULT_THEME,
-        title: "Infinite TUI",
-        transcript: { messages: [], state: undefined as never },
-        nowMs: 5_000
-      });
-
-    const lines = stripAnsi(render({ homeInventory: HOME_INVENTORY })).replace(/\n+$/, "").split("\n");
-    const composerIndex = lines.findIndex((line) => line.startsWith("❯"));
-
-    expect(composerIndex).toBe(predicted);
+    const lines = stripAnsi(render({ homeInventory: HOME_INVENTORY })).replace(/\n+$/u, "").split("\n");
+    expect(lines.findIndex((line) => line.startsWith("❯"))).toBe(predictedComposerRow(COLUMNS, HOME_INVENTORY));
   });
 
   it.each([MIN_BIG_COLUMNS - 1, MIN_BIG_COLUMNS])(
     "keeps cursor prediction exact at the responsive wordmark boundary (%i columns)",
     (columns) => {
-      const predicted =
-        homeInventoryRowCount(columns) +
-        inkTranscriptRowCount({
-          busy: false,
-          columns,
-          homeBanner: false,
-          showComposer: false,
-          status: ["ready"],
-          theme: DEFAULT_THEME,
-          title: "Infinite TUI",
-          transcript: { messages: [], state: undefined as never },
-          nowMs: 5_000
-        });
       const lines = stripAnsi(render({ homeInventory: HOME_INVENTORY }, columns))
-        .replace(/\n+$/, "")
+        .replace(/\n+$/u, "")
         .split("\n");
 
-      expect(lines.findIndex((line) => line.startsWith("❯"))).toBe(predicted);
+      expect(lines.findIndex((line) => line.startsWith("❯"))).toBe(predictedComposerRow(columns, HOME_INVENTORY));
     }
   );
+
+  it("keeps the prediction exact when the Connected row is left out", () => {
+    const inventory = { ...HOME_INVENTORY, connections: undefined };
+    const lines = stripAnsi(render({ homeInventory: inventory })).replace(/\n+$/u, "").split("\n");
+    expect(lines.findIndex((line) => line.startsWith("❯"))).toBe(predictedComposerRow(COLUMNS, inventory));
+  });
 
   it("does NOT render the inventory once the transcript has messages (shown once, not per message)", () => {
     const messages: Msg[] = [{ role: "user", text: "hello" }];
@@ -120,22 +154,18 @@ describe("interactive session home inventory", () => {
     expect(frame).toContain("hello");
   });
 
-  it("degrades gracefully when the connected-sources fetch was unavailable", () => {
-    const frame = stripAnsi(render({ homeInventory: { ...HOME_INVENTORY, connections: undefined } }));
+  it("says why the sources could not be read, and never claims a healthy app's daemon is down", () => {
+    const local = stripAnsi(render({
+      homeInventory: { ...HOME_INVENTORY, connections: undefined, connectionsNote: "daemon not reachable" }
+    }));
+    expect(local).toContain("Connected");
+    expect(local).toContain("daemon not reachable");
+    expect(local).not.toContain("✓");
 
-    // Still renders the inventory — with a muted note instead of the live line.
-    expect(frame).toContain("Tools");
-    expect(frame).toContain("Connected");
-    expect(frame).toContain("daemon not reachable");
-    expect(frame).not.toContain("✓");
-  });
-
-  it("falls back to the bare rocket banner when no inventory is supplied", () => {
-    const frame = stripAnsi(render({}));
-
-    expect(frame).not.toContain("Tools");
-    expect(frame).not.toContain("Welcome to Infinite");
-    // The pre-existing home rocket banner still renders.
-    expect(frame).toContain("∞ Infinite");
+    // Through the app (the cloud session): the sources live in the app, so no Connected row at all.
+    const app = stripAnsi(render({ homeInventory: { ...HOME_INVENTORY, connections: undefined } }));
+    expect(app).toContain("Tools");
+    expect(app).not.toContain("Connected");
+    expect(app).not.toContain("daemon not reachable");
   });
 });

@@ -31,7 +31,6 @@ import {
   type SetupProviderId
 } from "./setup-prompts.js";
 import * as setupPrompts from "./setup-prompts.js";
-import { formatInfiniteBusyIndicator } from "./tui/ink/status-indicator.js";
 
 import {
   appendInputHistory,
@@ -1729,12 +1728,10 @@ describe("cli smoke", () => {
     expect(rendered).toContain("Draft recommendation");
   });
 
-  it("renders Hermes-style Ink busy status for active tools", () => {
+  it("shows a running turn only as the composer's note: working and for how long (r4: no status line)", () => {
     const rendered = renderInkTranscriptToString({
       columns: 96,
-      indicatorTick: 0,
       nowMs: 3_400,
-      status: ["session cli"],
       transcript: {
         state: {
           ...getTurnState(),
@@ -1750,19 +1747,17 @@ describe("cli smoke", () => {
         }
       }
     });
-    const statusLine = rendered.split("\n").find((line) => line.includes("session cli")) ?? "";
+    const composer = rendered.split("\n").find((line) => line.includes("❯")) ?? "";
 
-    expect(statusLine).toContain("querying…");
-    expect(statusLine).toContain("Run Metric Query");
-    expect(statusLine).toContain("2.4s");
+    expect(composer).toContain("(working · 2s)");
+    expect(rendered).not.toContain("session cli");
+    expect(rendered).not.toContain("querying…");
   });
 
-  it("shows a turn-level elapsed clock while streaming without active tools", () => {
+  it("counts a streaming turn's time from when it started, in whole seconds", () => {
     const rendered = renderInkTranscriptToString({
       columns: 96,
-      indicatorTick: 4,
       nowMs: 2_300,
-      status: ["session cli"],
       transcript: {
         state: {
           ...getTurnState(),
@@ -1771,57 +1766,24 @@ describe("cli smoke", () => {
       },
       turnStartedAt: 1_000
     });
-    const statusLine = rendered.split("\n").find((line) => line.includes("session cli")) ?? "";
+    const composer = rendered.split("\n").find((line) => line.includes("❯")) ?? "";
 
-    expect(statusLine).toContain("ruminating…");
-    expect(statusLine).toContain("streaming");
-    expect(statusLine).toContain("1.3s");
+    expect(composer).toContain("(working · 1s)");
   });
 
-  it("keeps Hermes spinner frames independent from slower face and verb ticks", () => {
-    const state = {
-      ...getTurnState(),
-      streaming: "Revenue is up."
-    };
-    const first = formatInfiniteBusyIndicator({
-      labelTick: 0,
-      nowMs: 2_300,
-      spinnerTick: 0,
-      state,
-      turnStartedAt: 1_000
-    });
-    const second = formatInfiniteBusyIndicator({
-      labelTick: 0,
-      nowMs: 2_300,
-      spinnerTick: 1,
-      state,
-      turnStartedAt: 1_000
-    });
-
-    expect(first).toContain("(｡•́︿•̀｡)");
-    expect(second).toContain("(｡•́︿•̀｡)");
-    expect(first).toContain("pondering…");
-    expect(second).toContain("pondering…");
-    expect(first).not.toBe(second);
-  });
-
-  it("renders submit-time busy status before transcript progress events arrive", () => {
+  it("says the turn is working at submit, before transcript progress events arrive", () => {
     const rendered = renderInkTranscriptToString({
       busy: true,
       columns: 96,
-      indicatorTick: 0,
       nowMs: 2_300,
-      status: ["session cli"],
       transcript: {
         state: getTurnState()
       },
       turnStartedAt: 1_000
     });
-    const statusLine = rendered.split("\n").find((line) => line.includes("session cli")) ?? "";
+    const composer = rendered.split("\n").find((line) => line.includes("❯")) ?? "";
 
-    expect(statusLine).toContain("pondering…");
-    expect(statusLine).toContain("working");
-    expect(statusLine).toContain("1.3s");
+    expect(composer).toContain("(working · 1s)");
   });
 
   it("renders nested subagent trees in Hermes transcript snapshots", () => {
@@ -2083,16 +2045,16 @@ describe("cli smoke", () => {
       columns: 88,
       nowMs: 2_500,
       prompt: { placeholder: "Type a message." },
-      status: ["session session-1"],
-      title: "Infinite TUI",
       transcript: { state: getTurnState() }
     });
 
-    expect(rendered).toContain("∞ Infinite TUI");
+    // The r4 top bar's brand chip, never a per-frame titled rule or a status line.
+    expect(rendered).toContain("∞ Infinite");
+    expect(rendered).not.toContain("Infinite TUI");
     expect(rendered).toContain("Checking source coverage.");
     expect(rendered).toContain("Run Metric Query");
     expect(rendered).toContain("recognized revenue");
-    expect(rendered).toContain("session session-1");
+    expect(rendered).not.toContain("session session-1");
     expect(rendered).toContain("Type a message.");
   });
 
@@ -2108,11 +2070,13 @@ describe("cli smoke", () => {
       title: "Infinite TUI"
     });
 
-    expect(rendered).toContain("∞ Infinite TUI");
+    expect(rendered).toContain("∞ Infinite");
     expect(rendered).toContain("Prior answer.");
-    expect(rendered).toContain("session cli_123");
-    expect(rendered).toContain("ready");
+    // r4: no status line (no session id, no ready/busy word).
+    expect(rendered).not.toContain("session cli_123");
+    expect(rendered).not.toMatch(/\bready\b/u);
     expect(rendered).toContain("Ask Infinite.");
+    expect(rendered).toContain("switch side");
   });
 
   it("matches slash command completions for the Ink composer", () => {
@@ -2800,9 +2764,9 @@ describe("cli smoke", () => {
 
     const output = chunks.join("");
     expect(output).toContain("Revenue is up.");
-    expect(output).toContain("streaming");
-    expect(output).toContain("1.3s");
-    expect(output).toContain("session session-1");
+    // The turn's elapsed time rides in the composer's note (r4: no status line).
+    expect(output).toContain("working · 1s");
+    expect(output).not.toContain("session session-1");
   });
 
   it("keeps alternate-screen transcript progress as the simple-stream Ink fallback", () => {

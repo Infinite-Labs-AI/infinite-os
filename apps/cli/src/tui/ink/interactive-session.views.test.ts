@@ -159,11 +159,11 @@ describe("views in a running session (fake TTY; skipped on CI like the other PTY
       title: "Infinite TUI"
     });
 
-    await waitFor(() => output.text().includes("ready"), 4_000, output.text);
+    await waitFor(() => output.text().includes("switch side"), 4_000, output.text);
     await sendKeys(input, "which ads are on?\r");
     await waitFor(() => /│ {2}Ads running {2}✓ Ready/u.test(stripAnsi(output.text())), 4_000, output.text);
     // The key bar offers only what works on the view: rows to move, tab to type.
-    await waitFor(() => stripAnsi(output.text()).includes("j k move"), 4_000, output.text);
+    await waitFor(() => stripAnsi(output.text()).includes("j k  move"), 4_000, output.text);
     // j then k move the selection and type nothing; h starts a message and types.
     await sendKeys(input, "jkh");
     await sendKeys(input, "ello\r");
@@ -204,9 +204,9 @@ describe("typing over a live view (fake TTY; skipped on CI like the other PTY te
       title: "Infinite TUI"
     });
 
-    await waitFor(() => output.text().includes("ready"), 4_000, output.text);
+    await waitFor(() => output.text().includes("switch side"), 4_000, output.text);
     await sendKeys(input, "which ads are on?\r");
-    await waitFor(() => stripAnsi(output.text()).includes("j k move"), 4_000, output.text);
+    await waitFor(() => stripAnsi(output.text()).includes("j k  move"), 4_000, output.text);
     await sendKeys(input, "just do it\r");
     await waitFor(() => stripAnsi(output.text()).includes("echo just do it"), 4_000, output.text);
     expect(lines).toEqual(["which ads are on?", "just do it"]);
@@ -214,7 +214,7 @@ describe("typing over a live view (fake TTY; skipped on CI like the other PTY te
     // A next step whose ask is /exit: Enter on it sends nothing and never quits.
     await sendKeys(input, "which ads are on?\r");
     await waitFor(() => lines.length === 3, 4_000, output.text);
-    await waitFor(() => stripAnsi(output.text()).split("j k move").length > 2, 4_000, output.text);
+    await waitFor(() => stripAnsi(output.text()).split("j k  move").length > 2, 4_000, output.text);
     await sendKeys(input, "\t");
     // Three rows, then the next step (the fourth row).
     for (let i = 0; i < 3; i += 1) await sendKeys(input, "j");
@@ -249,16 +249,17 @@ describe("copy in a running session (fake TTY; skipped on CI like the other PTY 
       title: "Infinite TUI"
     });
 
-    await waitFor(() => output.text().includes("ready"), 4_000, output.text);
+    await waitFor(() => output.text().includes("switch side"), 4_000, output.text);
     await sendKeys(input, "make a link\r");
     await waitFor(() => stripAnsi(output.text()).includes("https://go.example.com/abc1"), 4_000, output.text);
     // Unengaged, `c` would type: the body offers no `c copy` yet.
     expect(stripAnsi(output.text())).not.toContain("c copy");
+    expect(stripAnsi(output.text())).not.toContain("c  copy");
     const osc52 = `${ESC}]52;c;${Buffer.from("https://go.example.com/abc1").toString("base64")}\u0007`;
     expect(output.text()).not.toContain(osc52);
     await sendKeys(input, "\t");
     await waitFor(() => stripAnsi(output.text()).includes("https://go.example.com/abc1  c copy"), 4_000, output.text);
-    await waitFor(() => stripAnsi(output.text()).includes("c copy   tab"), 4_000, output.text);
+    await waitFor(() => stripAnsi(output.text()).includes("c  copy    tab"), 4_000, output.text);
     await sendKeys(input, "c");
     await waitFor(() => output.text().includes(osc52), 4_000, output.text);
     await sendKeys(input, "\t/exit\r");

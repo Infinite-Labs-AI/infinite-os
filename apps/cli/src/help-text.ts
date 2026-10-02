@@ -2,6 +2,47 @@ import {
   INFINITE_INSTALL_COMMAND,
   INFINITE_ONBOARDING_URI
 } from "./desktop/onboarding.js";
+import { GROWTH_TAGLINE, INFINITE_ART } from "./tui/ink/infinite-wordmark.js";
+
+/**
+ * "Use Infinite wherever you prefer": the App / Terminal block. It no longer
+ * opens every session (D4: the session boots straight into its frame); it is
+ * printed on the first-ever run and in `infinite --help`.
+ */
+export const USE_INFINITE_ANYWHERE: readonly string[] = [
+  "Use Infinite wherever you prefer:",
+  "",
+  "  APP       Press ⌘L",
+  "  TERMINAL  You’re already here",
+  "",
+  "Same account. Same workspace. Same agent."
+];
+
+/** What `infinite --help` lists under the wordmark: the curated tools and commands. */
+export interface HelpInventory {
+  tools: readonly { label: string }[];
+  commands: readonly { value: string }[];
+  version?: string;
+}
+
+/**
+ * The wordmark and the tool inventory that used to open every session (D4):
+ * the INFINITE block art, the tagline and version, then the Tools and
+ * Commands rows. Plain text, so it reads the same in a pipe.
+ */
+export function helpBanner(inventory: HelpInventory): string[] {
+  const meta = [GROWTH_TAGLINE, inventory.version ? `v${inventory.version}` : undefined]
+    .filter((part): part is string => Boolean(part))
+    .join("  ·  ");
+  return [
+    ...INFINITE_ART,
+    meta,
+    "",
+    `${"Tools".padEnd(11)}${inventory.tools.map((tool) => tool.label).join("  ·  ")}`,
+    `${"Commands".padEnd(11)}${inventory.commands.map((command) => command.value).join("   ")}`,
+    ""
+  ];
+}
 
 /**
  * Help text is SPLIT (design §6.6, round 5):
@@ -18,8 +59,9 @@ import {
  * "thinking never leaves your machine". The repo is MIT open source.
  */
 
-export function productHelpText(): string {
+export function productHelpText(inventory?: HelpInventory): string {
   return [
+    ...(inventory ? helpBanner(inventory) : []),
     "infinite — your Infinite growth agent, in the terminal",
     "",
     "Usage:",
@@ -36,8 +78,8 @@ export function productHelpText(): string {
     "Getting started:",
     "  Infinite Desktop owns sign-in, workspace, and provider setup.",
     `  Run \`${INFINITE_INSTALL_COMMAND}\`, then open ${INFINITE_ONBOARDING_URI}.`,
-    "  In the app, press ⌘L. In Terminal, run `infinite`.",
-    "  Same account. Same workspace. Same agent.",
+    "",
+    ...USE_INFINITE_ANYWHERE,
     "",
     "Orchestration runs locally; prompts run on your own Codex or Anthropic",
     "account, with your own credentials. Infinite OS is MIT open source."

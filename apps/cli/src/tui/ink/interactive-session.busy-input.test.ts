@@ -10,7 +10,6 @@ import {
   completeAtMentions,
   completeInteractiveInput,
   composerCursorLayout,
-  formatInteractiveStatus,
   formatQueuedStatus,
   isForwardDeleteInput,
   previewQueuedLine,
@@ -19,6 +18,8 @@ import {
   runInkInteractiveSession,
   type InkInteractiveLineResult
 } from "./interactive-session.js";
+import { getTurnState, patchTurnState, resetTurnState } from "../app/turn-store.js";
+import { formatBusyNote, formatWholeElapsed } from "./status-indicator.js";
 import { inkTranscriptRowCount, renderInkTranscriptToString } from "./transcript-app.js";
 
 const source = readFileSync(fileURLToPath(new URL("./interactive-session.tsx", import.meta.url)), "utf8");
@@ -53,7 +54,7 @@ describe("Ink busy input handling", () => {
       title: "Infinite TUI"
     });
 
-    await waitFor(() => output.text().includes("ready"), 4_000, output.text);
+    await waitFor(() => output.text().includes("switch side"), 4_000, output.text);
 
     await sendKeys(input, "first turn\r");
     await waitFor(() => submitted.length === 1, 4_000, output.text);
@@ -100,9 +101,14 @@ describe("Ink busy input handling", () => {
       }
     });
 
-    await waitFor(() => output.text().includes("ready"), 4_000, output.text);
+    await waitFor(() => output.text().includes("switch side"), 4_000, output.text);
     await sendKeys(input, "first\r");
     await waitFor(() => signals.length === 1 && output.text().includes("PARTIAL-ANSWER-TEXT"), 4_000, output.text);
+    // D6: while the turn runs, `esc stop` is the key bar's FIRST key, said once;
+    // the composer keeps `Ask Infinite…` with its busy note and never repeats it.
+    await waitFor(() => lastLineWith(output.text(), "switch side").startsWith(" esc  stop    tab  switch side"), 4_000, output.text);
+    expect(lastLineWith(output.text(), "switch side").match(/esc/gu)).toHaveLength(1);
+    expect(lastLineWith(output.text(), "Ask Infinite…")).toMatch(/^❯ Ask Infinite… \(working · \d+s\)/u);
     const beforeEsc = output.text().length;
     await sendRaw(input, "\x1b");
     await waitFor(() => output.text().includes("■ Stopped."), 4_000, output.text);
@@ -121,8 +127,8 @@ describe("Ink busy input handling", () => {
     await sendRaw(input, "\x03");
     await waitFor(() => signals[1]!.aborted, 4_000, output.text);
 
-    // Not busy any more: ctrl-c now quits the session.
-    await waitFor(() => output.text().lastIndexOf("ready") > output.text().lastIndexOf("esc to stop"), 4_000, output.text);
+    // Not busy any more (the key bar no longer offers esc): ctrl-c now quits the session.
+    await waitFor(() => !lastLineWith(output.text(), "switch side").includes("esc"), 4_000, output.text);
     await sendRaw(input, "\x03");
     await session;
   });
@@ -157,7 +163,7 @@ describe("Ink busy input handling", () => {
       }
     });
 
-    await waitFor(() => output.text().includes("ready"));
+    await waitFor(() => output.text().includes("switch side"));
     await sendKeys(input, "/sync x\r");
     await waitFor(() => output.text().includes("How far back should we sync x?"), 4_000, output.text);
     expect(submitted).toEqual([]);
@@ -218,12 +224,50 @@ describe("Ink busy input handling", () => {
     expect(formatQueuedStatus(["hello world", "next"])).toEqual(['queued: "hello world" (+1)']);
   });
 
-  it("hides internal session ids while a turn is busy", () => {
-    const session = "session desktop:chat:fe50dc50-7aaa-4d25-84f5-57c4d5f393a1";
+  it("says in the composer's note that the turn is working and for how long; no status line, no session id (r4)", () => {
+    expect(formatBusyNote({ nowMs: 5_300, state: getTurnState(), turnStartedAt: 1_000 })).toBe("working · 4s");
+    expect(formatBusyNote({ nowMs: 5_300, state: getTurnState() })).toBe("working");
+    expect(formatWholeElapsed(59_999)).toBe("59s");
+    expect(formatWholeElapsed(123_000)).toBe("2:03");
+    const rendered = stripAnsi(renderInkTranscriptToString({
+      busy: true,
+      columns: 80,
+      nowMs: 5_300,
+      prompt: { placeholder: "Ask Infinite…" },
+      turnStartedAt: 1_000
+    }, { columns: 80 }));
+    expect(rendered).toContain("❯ Ask Infinite… (working · 4s)");
+    expect(rendered).not.toContain("session");
+    expect(rendered).not.toMatch(/\bready\b|\bbusy\b/u);
+    // The session puts the queued line in the same note, and the card's keys
+    // and esc stop only in the key bar.
+    expect(source).toContain("...formatQueuedStatus(queuedLines)");
+    expect(source).toContain("composerPlaceholderText(promptPlaceholder, composerNote)");
+  });
 
-    expect(formatInteractiveStatus([session, "model gpt-5.6"], true, ["next turn"]))
-      .toEqual(["model gpt-5.6", "busy", 'queued: "next turn"']);
-    expect(formatInteractiveStatus([session], false, [])).toEqual([session, "ready"]);
+  it("puts the running turn's own short reason in the composer note in place of 'working' (r4 busy)", () => {
+    const render = (busyNote?: string | (() => string | undefined)) =>
+      stripAnsi(renderInkInteractiveSessionToString({
+        columns: 100,
+        onSubmitLine: async () => ({ messages: [] }),
+        ...(busyNote === undefined ? {} : { busyNote })
+      }));
+    try {
+      resetTurnState();
+      // Idle: a note given but no turn running draws no note.
+      expect(lastLineWith(render("the pause finishes either way"), "Ask Infinite…")).toBe("❯ Ask Infinite…");
+      // A running step (the turn store's active tool) with the turn's reason.
+      patchTurnState((state) => ({ ...state, tools: [{ id: "t1", name: "Pause", startedAt: Date.now() - 4_000 }] }));
+      expect(lastLineWith(render("the pause finishes either way"), "Ask Infinite…"))
+        .toBe("❯ Ask Infinite… (the pause finishes either way)");
+      // Read on every render, like topBar.
+      expect(lastLineWith(render(() => "the creatives finish either way"), "Ask Infinite…"))
+        .toBe("❯ Ask Infinite… (the creatives finish either way)");
+      // A blank reason is no reason: the composer keeps its plain placeholder.
+      expect(lastLineWith(render(() => "  "), "Ask Infinite…")).toBe("❯ Ask Infinite…");
+    } finally {
+      resetTurnState();
+    }
   });
 
   it("wraps composer cursor layout at the input width", () => {
@@ -231,39 +275,22 @@ describe("Ink busy input handling", () => {
     expect(composerCursorLayout("abcdefghi", 9, 8)).toEqual({ column: 1, line: 1 });
   });
 
-  it("keeps the composer cursor row in lockstep with the animated transcript height", () => {
-    // Regression: the busy status indicator's animated face changes width as it
-    // cycles, so the rendered transcript height changes per animation tick. The
-    // composer's native cursor row is predicted by inkTranscriptRowCount(); if that
-    // prediction uses a different tick than the live <InkTranscriptApp> render, the
-    // cursor lands a row off — on the "session …" status line instead of the input.
-    const base = {
-      busy: true,
-      columns: 86,
-      showComposer: false as const,
-      status: ["session cli_735d6486-cbc8-415d-8eca-ede1f0a9b2c3"],
-      title: "Infinite TUI",
-      turnStartedAt: 0,
-      nowMs: 5_000
-    };
-    const renderedRows = (tick: number) =>
-      renderInkTranscriptToString({ ...base, indicatorTick: tick, spinnerTick: tick }, { columns: base.columns })
+  it("keeps the composer cursor row in lockstep with the busy frame, whatever the clock says", () => {
+    // The composer's native cursor row is predicted by inkTranscriptRowCount(); a
+    // busy frame must be as tall as predicted at every moment of a turn (the busy
+    // note is one row, cut to the width, however long the turn has run).
+    const base = { busy: true, columns: 86, turnStartedAt: 0 };
+    const times = [0, 4_000, 61_000, 3_600_000];
+    const renderedRows = (nowMs: number) =>
+      renderInkTranscriptToString({ ...base, nowMs, showComposer: true }, { columns: base.columns })
         .replace(/\n$/, "")
         .split("\n").length;
-    const predictedRows = (tick: number) =>
-      inkTranscriptRowCount({ ...base, indicatorTick: tick, spinnerTick: tick });
+    const predictedRows = (nowMs: number) => inkTranscriptRowCount({ ...base, nowMs, showComposer: true });
 
-    const ticks = [0, 1, 2, 3, 4, 5, 6];
-    // The rendered height genuinely depends on the animation tick (the bug's trigger)…
-    expect(new Set(ticks.map(renderedRows)).size).toBeGreaterThan(1);
-    // …and the cursor-row prediction must equal the render at the SAME tick.
-    for (const tick of ticks) {
-      expect(predictedRows(tick)).toBe(renderedRows(tick));
+    for (const nowMs of times) {
+      expect(predictedRows(nowMs)).toBe(renderedRows(nowMs));
     }
-    // Pre-fix the prediction was pinned to tick 0 and diverged from later ticks.
-    const divergentTick = ticks.find((tick) => renderedRows(tick) !== renderedRows(0));
-    expect(divergentTick).toBeDefined();
-    expect(predictedRows(0)).not.toBe(renderedRows(divergentTick ?? 0));
+    expect(new Set(times.map(renderedRows)).size).toBe(1);
   });
 
   it("wires the shared animation clock into the composer (guards a caller regression)", () => {
@@ -316,7 +343,7 @@ describe("Ink busy input handling", () => {
       }
     });
 
-    await waitFor(() => output.text().includes("ready"));
+    await waitFor(() => output.text().includes("switch side"));
     await sendKeys(input, "@beta how many views\r");
     // The answer is labeled for the resolved pin (Beta), not the pre-call Acme.
     await waitFor(() => output.text().includes("Infinite — Beta"), 2_000, output.text);
@@ -479,7 +506,7 @@ describe("Ink busy input handling", () => {
       }
     });
 
-    await waitFor(() => output.text().includes("ready"));
+    await waitFor(() => output.text().includes("switch side"));
 
     // First message in a pin-less session → the picker appears (no answer yet).
     await sendKeys(input, "how many views\r");
@@ -552,4 +579,14 @@ async function sendKeys(input: NodeJS.WritableStream, keys: string) {
 async function sendRaw(input: NodeJS.WritableStream, keys: string) {
   input.write(keys);
   await new Promise((resolve) => setTimeout(resolve, 20));
+}
+
+const ESC = String.fromCharCode(27);
+function stripAnsi(value: string): string {
+  return value.replace(new RegExp(`${ESC}\\[[0-9;?]*[A-Za-z]`, "g"), "");
+}
+
+/** The last drawn line that contains `text` (the frame is redrawn whole, so this is the latest one). */
+function lastLineWith(output: string, text: string): string {
+  return stripAnsi(output).split(/\r?\n/u).filter((line) => line.includes(text)).at(-1) ?? "";
 }
