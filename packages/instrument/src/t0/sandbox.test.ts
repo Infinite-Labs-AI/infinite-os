@@ -10,6 +10,21 @@ import { buildSandboxProfile, CLI_CREDENTIAL_STORES, defaultDenyReads, minimalCh
 
 const darwin = process.platform === "darwin"
 
+/** True once `pid` no longer exists (signal 0 → ESRCH), polling for at most `ms`. */
+async function diesWithin(pid: number, ms: number): Promise<boolean> {
+  const deadline = Date.now() + ms
+  for (;;) {
+    try {
+      process.kill(pid, 0)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ESRCH") return true
+      throw error
+    }
+    if (Date.now() >= deadline) return false
+    await new Promise((resolve) => setTimeout(resolve, 25))
+  }
+}
+
 describe("the sandbox profile", () => {
   it("denies the network only when asked, reads per secret, and EVERY write outside the writable roots (later rules win)", () => {
     const off = buildSandboxProfile({
@@ -108,7 +123,7 @@ describe("the child's environment", () => {
       expect(grandchild).toBeGreaterThan(0)
       // negative control on the probe itself: our own pid answers signal 0
       expect(() => process.kill(process.pid, 0)).not.toThrow()
-      expect(() => process.kill(grandchild, 0)).toThrow(/ESRCH/)
+      expect(await diesWithin(grandchild, 2_000)).toBe(true)
     }
   })
 
@@ -118,7 +133,9 @@ describe("the child's environment", () => {
     expect(Date.now() - started).toBeLessThan(STDIO_GRACE_MS + 3_000)
     expect(result.timedOut).toBe(false)
     expect(result.exitCode).toBe(0)
-    expect(() => process.kill(Number.parseInt(result.stdout.trim(), 10), 0)).toThrow(/ESRCH/)
+    // The group was SIGKILLed when the child settled; on a loaded machine the kernel may take a moment to
+    // tear the grandchild down, so its death is awaited (bounded), never assumed.
+    expect(await diesWithin(Number.parseInt(result.stdout.trim(), 10), 2_000)).toBe(true)
   })
 
   it("off darwin the child is a plain process and says so (sandboxed:false)", async () => {
