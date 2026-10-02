@@ -73,11 +73,11 @@ describe("state heads (the shared state-word table)", () => {
   it("every glyph and word is exactly the contract table", () => {
     const table = Object.fromEntries(Object.entries(STATE_HEAD).map(([state, head]) => [state, `${head.glyph} ${head.words}`]));
     expect(table).toEqual({
-      working: "◑ Working", ready: "✓ Ready", nothing_found: "○ Nothing found", not_measured: "— Not measured",
+      working: "◑ Working", ready: "✓ Ready", nothing_found: "∅ Nothing found", not_measured: "— Not measured",
       partial: "◐ Partial", out_of_date: "⧗ Out of date", not_connected: "⊘ Not connected", blocked: "⊗ Blocked",
       finish_in_app: "↗ Finish in the app", needs_yes: "▣ Needs your OK", needs_answer: "▣ Needs an answer",
       applying: "◑ Applying", done: "✓ Done", failed: "✗ Failed", cancelled: "✕ Dismissed", expired: "◷ Expired",
-      outcome_unknown: "? Not sure it happened", hit_limit: "$ Hit a limit", background: "⟳ Running",
+      outcome_unknown: "◑ Not sure it happened", hit_limit: "$ Hit a limit", background: "⟳ Running",
       opened_in_app: "↗ Opened in the app", preview: "◇ Preview", no_change: "· Nothing to change",
       showing_defaults: "◇ Showing defaults", cmdl_only: "⌘ Do this in Cmd+L"
     });
@@ -92,6 +92,44 @@ describe("state heads (the shared state-word table)", () => {
   it("a failed write that was never sent says Not sent", () => {
     expect(stateHeadFor({ state: "failed", outcome: "not_sent" })).toMatchObject({ glyph: "✗", words: "Not sent", tone: "bad" });
     expect(stateHeadFor({ state: "failed", outcome: "unknown" }).words).toBe("Failed");
+  });
+
+  // D3 (River, 2026-10-02): the head is the glyph plus `stateReason.short ?? generic`, as round 4 draws it.
+  it("the needs-you heads take the bold amber ask tone; Cmd+L-only takes its own bold blue", () => {
+    expect(STATE_HEAD.needs_yes.tone).toBe("ask");
+    expect(STATE_HEAD.needs_answer.tone).toBe("ask");
+    expect(STATE_HEAD.cmdl_only.tone).toBe("cmdl_only");
+  });
+
+  it("a state reason's short words replace the generic words; the glyph and tone stay the state's", () => {
+    const head = (state: string, short: unknown, extra: Record<string, unknown> = {}) => {
+      const h = stateHeadFor({ state: state as never, stateReason: { code: "c", words: "w", short } as never, ...extra });
+      return `${h.glyph} ${h.words}|${h.tone}`;
+    };
+    expect(head("not_measured", "1 not measured")).toBe("— 1 not measured|muted");
+    expect(head("out_of_date", "Changed on Meta")).toBe("⧗ Changed on Meta|warn");
+    expect(head("outcome_unknown", "Still running")).toBe("◑ Still running|warn");
+    expect(head("no_change", "Already live")).toBe("· Already live|muted");
+    expect(head("cmdl_only", "Cmd+L only")).toBe("⌘ Cmd+L only|cmdl_only");
+    expect(head("failed", "Not sent", { outcome: "not_sent" })).toBe("✗ Not sent|bad");
+    // Short words that are empty, not a string, or only control characters fall back to the generic words.
+    expect(head("nothing_found", "")).toBe("∅ Nothing found|muted");
+    expect(head("nothing_found", 7)).toBe("∅ Nothing found|muted");
+    expect(head("nothing_found", "\u001b[2J")).toBe("∅ Nothing found|muted");
+    // Scrubbed like every view string.
+    expect(head("partial", "1 of 2\u001b[31m days")).toBe("◐ 1 of 2 days|warn");
+  });
+
+  it("running images draw the braille spinner and read Working; a job keeps ⟳ Running", () => {
+    const head = (kind: string, state: string) => {
+      const h = stateHeadFor({ kind: kind as never, state: state as never });
+      return `${h.glyph} ${h.words}|${h.tone}`;
+    };
+    expect(head("images", "background")).toBe("⠋ Working|busy");
+    expect(head("images", "working")).toBe("⠋ Working|busy");
+    expect(head("job", "background")).toBe("⟳ Running|busy");
+    expect(head("change", "working")).toBe("◑ Working|busy");
+    expect(head("images", "done")).toBe("✓ Done|ok");
   });
 });
 
