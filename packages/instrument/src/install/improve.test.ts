@@ -83,7 +83,11 @@ describe("improve lines for adopted tags (decision 4: optimise in place, never r
     const html = ADOPTED_POSTHOG_HTML.replace(", defaults: '2025-05-24'", "")
     const { lines } = linesFor({ "index.html": html }, "vite-react")
     expect(lines.map((line) => line.id)).toContain("improve_additive:posthog:history_change")
-    expect(lines.find((line) => line.target === "history_change")?.text).toContain("capture_pageview: 'history_change'")
+    expect(lines.find((line) => line.target === "history_change")?.text).toBe("PostHog: count page changes in your single-page app. Changes your existing PostHog setup.")
+    // Terminal QA #22: a plan line is plain words; config syntax ("capture_pageview: 'history_change'", "defaults
+    // '2026-01-30'") never reaches the plan screen. The PostHog defaults line names its date in words.
+    for (const line of lines) expect(line.text, line.id).not.toMatch(/[a-z]+_[a-z]+: '|defaults '|'\d{4}-\d{2}-\d{2}'/)
+    expect(lines.find((line) => line.kind === "posthog_defaults_bump_adopted")?.text).toContain("PostHog's current recommended settings (their 2026-01-30 defaults).")
     // NEGATIVE (P2-14): a multi-page static site reloads on every page; the line would change nothing.
     expect(linesFor({ "index.html": html }, "static-html").lines.map((line) => line.id)).not.toContain("improve_additive:posthog:history_change")
   })

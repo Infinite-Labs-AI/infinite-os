@@ -294,7 +294,8 @@ export function improveLinesFor(facts: AdoptedFacts, ctx: ImproveLinesContext): 
         kind: "improve_additive",
         provider: "posthog",
         target: "history_change",
-        text: "PostHog: count page changes in your single-page app (capture_pageview: 'history_change'). Changes your existing PostHog setup.",
+        // The line is read by a founder: plain words, no config syntax (terminal QA #22); the exact setting is in the diff.
+        text: "PostHog: count page changes in your single-page app. Changes your existing PostHog setup.",
         owner: "agent",
         evidence
       })
@@ -305,7 +306,7 @@ export function improveLinesFor(facts: AdoptedFacts, ctx: ImproveLinesContext): 
         kind: "posthog_defaults_bump_adopted",
         provider: "posthog",
         target: "defaults",
-        text: `PostHog: update your existing setup to PostHog's current recommended settings (defaults '${POSTHOG_DEFAULTS_CURRENT}'). This changes how PostHog measures; the report marks it "measurement changed", never growth.`,
+        text: `PostHog: update your existing setup to PostHog's current recommended settings (their ${POSTHOG_DEFAULTS_CURRENT} defaults). This changes how PostHog measures; the report marks it "measurement changed", never growth.`,
         owner: "agent",
         evidence
       })

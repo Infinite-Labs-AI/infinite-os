@@ -50,11 +50,11 @@ const PLAN_LINES: PlanLine[] = [
     "Server lane (Next.js middleware): counts every page request on your server, even with ad blockers. After you merge, the one real test visit lands TWO bot-flagged page rows in your Infinite ledger (the visit itself and a server-lane probe). The no-send checks before that land none."
   ),
   line("improve_additive:posthog:proxy", "improve_additive", "PostHog: send through /ingest on your own domain, so ad blockers do not drop it. Changes your existing PostHog setup.", { ownership: "adopted" }),
-  line("improve_additive:posthog:history_change", "improve_additive", "PostHog: count page changes in your single-page app (capture_pageview: 'history_change'). Changes your existing PostHog setup.", { ownership: "adopted" }),
+  line("improve_additive:posthog:history_change", "improve_additive", "PostHog: count page changes in your single-page app. Changes your existing PostHog setup.", { ownership: "adopted" }),
   line(
     "posthog_defaults_bump_adopted:posthog",
     "posthog_defaults_bump_adopted",
-    "PostHog: update your existing setup to PostHog's current recommended settings (defaults '2026-01-30'). This changes how PostHog measures; the report marks it \"measurement changed\", never growth."
+    "PostHog: update your existing setup to PostHog's current recommended settings (their 2026-01-30 defaults). This changes how PostHog measures; the report marks it \"measurement changed\", never growth."
   ),
   line("remove_duplicate:ga4:G-FAKE00001", "remove_duplicate", "GA4: G-FAKE00001 is set up 2 times in your code, so page views count more than once. Keep one.", { measured: { value: "2 page views per visit", window: "dry load" } }),
   line("preview_guard_adopted:ga4", "preview_guard_adopted", "Previews stay silent for your existing GA4, PostHog and Meta tags; acme-store.com and www.acme-store.com always fire."),
