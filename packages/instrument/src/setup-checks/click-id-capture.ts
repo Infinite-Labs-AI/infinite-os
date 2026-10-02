@@ -16,15 +16,26 @@
 //
 // What is NOT readable is a pixel injected by a tag manager, by the hosting edge, or by a
 // dependency. That case is `undetermined` and says so. It is never reported as "not needed".
+//
+// infinite-tag's OWN capture counts. A pixel infinite-tag installs carries a managed `_fbc` capture
+// (`providers/meta-browser/click-id.ts`) that saves the click id on the landing page even when the
+// pixel is blocked. Files are read through `metaSourceUnits`, which decodes the Next module's string
+// literal — read raw, its escaped quotes hide the managed pixel and the check called a correctly
+// installed Next site "not checked".
 import { extractMetaPixelIds } from "../meta-live/config-probe.js"
+import { META_CLICK_ID_ACCESSOR } from "../providers/meta-browser/click-id.js"
 
 import {
+  clickIdManagedCaptureMessage,
   clickIdMissingPagesMessage,
   clickIdNotAtLandingMessage,
   clickIdPresentMessage,
   clickIdUndeterminedMessage
 } from "./copy.js"
+import { metaSourceUnits } from "./meta-pixel-config.js"
 import { worstState, type SetupCheckResult, type SetupFinding } from "./types.js"
+
+const MANAGED_CAPTURE = new RegExp(String.raw`window\.${META_CLICK_ID_ACCESSOR}\s*=\s*function`)
 
 /**
  * Files every route loads. An `fbq('init')` here runs on the first page a visitor sees, whichever
@@ -69,9 +80,13 @@ export function checkClickIdCapture(input: ClickIdCaptureInput): SetupCheckResul
   const initFiles: string[] = []
   const htmlPagesWith: string[] = []
   const htmlPagesWithout: string[] = []
+  const managedCaptureFiles = new Set<string>()
 
   for (const [file, contents] of input.files) {
-    const initialises = extractMetaPixelIds(contents).length > 0
+    const units = metaSourceUnits(file, contents)
+    if (units.some((unit) => unit.managed && MANAGED_CAPTURE.test(unit.text))) managedCaptureFiles.add(file)
+    const initialises =
+      managedCaptureFiles.has(file) || units.some((unit) => extractMetaPixelIds(unit.text).length > 0)
     if (initialises) initFiles.push(file)
     if (isHtmlPage(file, contents)) (initialises ? htmlPagesWith : htmlPagesWithout).push(file)
   }
@@ -108,13 +123,15 @@ export function checkClickIdCapture(input: ClickIdCaptureInput): SetupCheckResul
 
   const shared = initFiles.filter(isSharedEntry)
   if (shared.length > 0) {
+    const managed = shared.find((file) => managedCaptureFiles.has(file))
+    const file = managed ?? (shared[0] as string)
     findings.push({
       check: "click_id_capture",
       code: "INF_SETUP_CLICK_ID_PRESENT",
       state: "ok",
       confidence: "certain",
-      file: shared[0] as string,
-      message: clickIdPresentMessage({ file: shared[0] as string })
+      file,
+      message: managed ? clickIdManagedCaptureMessage({ file }) : clickIdPresentMessage({ file })
     })
     return { check: "click_id_capture", state: "ok", findings }
   }

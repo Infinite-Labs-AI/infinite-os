@@ -1,5 +1,9 @@
+import { createHash, webcrypto } from "node:crypto"
+import { runInNewContext } from "node:vm"
+
 import { describe, expect, it } from "vitest"
 
+import { buildMetaPixelSnippet, META_ADVANCED_MATCHING_ACCESSOR } from "../providers/meta.js"
 import { INFINITE_SERVER_EVENTS_DESTINATION } from "../workspace-artifacts.js"
 
 import {
@@ -12,6 +16,7 @@ import {
   computeDocumentEventId,
   computeVisitKey,
   hashInfiniteEmail,
+  hashInfiniteExternalId,
   hmacHex,
   isDocumentPath,
   referrerHostOf,
@@ -259,6 +264,7 @@ describe("contracts/server-lane-v1.vectors.json (shared with the receiving side)
     }
     expect(parsed.adMatch.em).toBe(vectors.outcomeEmailHash)
     expect(parsed.adMatch.external_id).toBe(vectors.outcomeExternalIdHash)
+    expect(hashInfiniteExternalId(vectors.outcomeExternalId as string)).toBe(vectors.outcomeExternalIdHash)
     // The BUYER'S browser pair travels in the block. It cannot come from the call to Infinite,
     // which is server-to-server, so the vector pins that it is carried explicitly.
     expect(parsed.adMatch.client_ip_address).toBe("203.0.113.9")
@@ -279,6 +285,71 @@ describe("hashInfiniteEmail", () => {
   it("is not idempotent — hashing a hash gives a different value (never do it twice)", () => {
     const once = hashInfiniteEmail("founder@example.com")
     expect(hashInfiniteEmail(once)).not.toBe(once)
+  })
+})
+
+// ONE RULE FOR external_id (infinite.fast's, scripts/lib/meta-advanced-matching.mjs at 9f65b47):
+// em = sha256(trim + lowercase); external_id = sha256(trim ONLY, case kept). The setup guide used to
+// tell customers to lowercase the id on the server while the browser accessor kept its case, so an
+// id with capitals reached Meta as two different people.
+describe("hashInfiniteExternalId", () => {
+  const sha = (value: string) => createHash("sha256").update(value, "utf8").digest("hex")
+
+  it("trims and keeps the case — an account id is never lowercased", () => {
+    expect(hashInfiniteExternalId("  Acct_AbC-42 \n")).toBe(sha("Acct_AbC-42"))
+    expect(hashInfiniteExternalId("Acct_AbC-42")).toMatch(/^[a-f0-9]{64}$/)
+    // Negative: the old "trimmed, lowercased" advice gives a DIFFERENT digest for the same id.
+    expect(hashInfiniteExternalId("Acct_AbC-42")).not.toBe(sha("acct_abc-42"))
+    expect(hashInfiniteExternalId("Acct_AbC-42")).not.toBe(hashInfiniteExternalId("acct_abc-42"))
+  })
+
+  it("differs from the email rule on purpose: em lowercases, external_id does not", () => {
+    expect(hashInfiniteEmail("Founder@Example.com")).toBe(sha("founder@example.com"))
+    expect(hashInfiniteExternalId("Founder@Example.com")).toBe(sha("Founder@Example.com"))
+  })
+
+  it("matches the browser pixel's matching helper byte for byte (the emitted accessor, executed)", async () => {
+    const calls: unknown[][] = []
+    // A browser page with no consent decision recorded and no DNT/GPC signal. `navigator` must
+    // exist: the managed Meta helpers read navigator.doNotTrack / globalPrivacyControl before they
+    // act (the consent hook), and a missing navigator reads as "no" — the accessor would then
+    // return false without calling fbq, and this test would prove nothing about the hash.
+    const context: Record<string, unknown> = {
+      crypto: webcrypto,
+      TextEncoder,
+      Uint8Array,
+      Promise,
+      navigator: {},
+      window: { fbq: (...args: unknown[]) => calls.push(args) }
+    }
+    context.globalThis = context
+    // Meta's loader is sliced off (it would reach connect.facebook.net); the accessor runs as shipped.
+    const full = buildMetaPixelSnippet("1234567890123456", { advancedMatching: true })
+    runInNewContext(full.slice(full.indexOf("\n(function () {")), context)
+    const accessor = (context.window as Record<string, (identity: unknown) => Promise<boolean>>)[
+      META_ADVANCED_MATCHING_ACCESSOR
+    ]!
+    await accessor({ email: "  Founder@Example.COM ", externalId: " Acct_AbC-42 " })
+    expect(calls).toEqual([
+      [
+        "init",
+        "1234567890123456",
+        { em: hashInfiniteEmail("  Founder@Example.COM "), external_id: hashInfiniteExternalId(" Acct_AbC-42 ") }
+      ]
+    ])
+  })
+})
+
+// The doc comments above say "Use hashInfiniteEmail / hashInfiniteExternalId": both must be
+// importable from the package entry, or that advice points at an undefined export.
+describe("the hashing recipes are part of the package's public API", () => {
+  it("exports hashInfiniteEmail and hashInfiniteExternalId from the package entry", async () => {
+    const entry = (await import("../index.js")) as Record<string, unknown>
+    expect(entry.hashInfiniteEmail).toBe(hashInfiniteEmail)
+    expect(entry.hashInfiniteExternalId).toBe(hashInfiniteExternalId)
+    // Negative: a name the entry does not export reads as undefined, which is what the old entry
+    // gave for both recipes.
+    expect(entry.hashInfiniteNothing).toBeUndefined()
   })
 })
 

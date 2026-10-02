@@ -316,6 +316,7 @@ function printHelp(): void {
       "                             your pages and never fires on its own — Meta's page-scraping Automatic Advanced",
       "                             Matching stays off either way. Leave it off unless you have decided that sending",
       "                             your visitors' hashed contact details to Meta is something you want to do.",
+      "                             It attaches nothing for a visitor who denied, or who sends DNT/GPC without a grant.",
       "  --artifact-file <path>",
       "",
       "Shared browser runtime and Infinite first-party collection:",

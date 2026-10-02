@@ -60,7 +60,10 @@ describe("npm 11 package tarball", () => {
       // 130 → 146: the setup checks add eight PUBLISHED modules (types, contract, markup, copy,
       // conversion-placement, silent-form, click-id-capture, index), again .js + .d.ts each and
       // again with their tests excluded from the pack.
-      expect(receipt[0]?.files).toHaveLength(146)
+      // 146 → 154: the Meta browser port from infinite.fast adds four PUBLISHED modules
+      // (providers/meta-browser/{click-id,consent,autoconfig} and setup-checks/meta-pixel-config),
+      // .js + .d.ts each; their vm tests and the ported cookie jar live in excluded test files.
+      expect(receipt[0]?.files).toHaveLength(154)
 
       const tarballName = execFileSync(process.execPath, [receiptValidator, receiptPath], {
         encoding: "utf8"

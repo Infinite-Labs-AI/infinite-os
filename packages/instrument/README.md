@@ -99,7 +99,7 @@ contract. Noninteractive `--yes` and `apply` runs fail on the same blocker.
 | `--posthog-ui-host <https://...>` | Optional PostHog toolbar host when proxying. |
 | `--x-pixel-id <id>` | Public X pixel ID. |
 | `--x-event-tag-id <id>` | Public X event tag ID; repeatable. |
-| `--meta-pixel-id <id>` | Public Meta pixel ID. Installs with Meta's Automatic Configuration off (`fbq('set','autoConfig','false', id)` before `init`): no button clicks or page metadata are sent to Meta by default. |
+| `--meta-pixel-id <id>` | Public Meta pixel ID. Installs with Meta's Automatic Configuration off (`fbq('set','autoConfig','false', id)` before `init`): no button clicks or page metadata are sent to Meta by default. Also installs the `_fbc` landing capture: when a visitor arrives from a Meta ad, the ad's click id is saved in Meta's own `_fbc` cookie (last click wins) even if the pixel itself is blocked, and `window.infiniteMetaClickId()` reads it. It sends nothing. It skips a visitor who said no on the site, or whose browser sends Do Not Track / Global Privacy Control, until they grant; with `--infinite-consent-mode required` it waits for the visitor's grant. |
 | `--meta-advanced-matching <on\|off>` | **Default off.** Manual Advanced Matching — see below. On, the page defines `window.infiniteMetaAdvancedMatch({ email, externalId })` for **your** code to call once a visitor identifies themselves; it hashes those values before anything reaches Meta. It never reads your pages and never fires on its own. |
 | `--artifact-file <path>` | Read the same public artifact shape from JSON. |
 | `--server-lane` | Add the lossless server lane (see below). Works alone or with the artifact flags. |
@@ -131,6 +131,13 @@ identifier for that person, so this is genuinely data about your visitor going t
 measurement. **Disclose it in your privacy policy**, and check it against your consent rules, before
 you turn it on. The installer reminds you at install time.
 
+**It follows the visitor's recorded consent.** The accessor attaches nothing for a visitor who
+denied on your site, or whose browser sends Do Not Track / Global Privacy Control without a grant;
+with `--infinite-consent-mode required` it attaches nothing until the visitor granted. It checks on
+every call, so a revocation counts at once. It never sends a phone number. The email is trimmed and
+lowercased before hashing; the account id is trimmed only (its case is kept), so it hashes to the
+same bytes your server sends.
+
 **We will not do it behind your back.** Meta also offers *Automatic* Advanced Matching, where the
 pixel scrapes your forms for these values by itself. `infinite-tag` keeps that switched off
 (`fbq('set','autoConfig','false', id)`), on every install, opted in or not — deciding to harvest
@@ -150,9 +157,10 @@ sign-up completes, or on an order-confirmation page:
 // Pass RAW values. The tag hashes them; you must not hash them first.
 await window.infiniteMetaAdvancedMatch({
   email: user.email,        // normalised (trimmed + lowercased) and SHA-256'd for you
-  externalId: user.id       // your own stable account id; hashed the same way
+  externalId: user.id       // your own stable account id; trimmed only (case kept) and SHA-256'd
 })
-fbq("track", "Purchase", { value: 49, currency: "USD" })
+// Browser events fired after this carry the hashed identity. A purchase is not one of them: it
+// goes to Meta from your server's payment webhook (see adMatch below), never as a browser fbq.
 ```
 
 **The contract, so nothing is ambiguous:**
@@ -363,26 +371,41 @@ never logged. Neither half works alone — no block, nothing to forward; no togg
 
 ```ts
 import { createHash } from "node:crypto"
-import { adMatchFromRequest, postInfiniteOutcome } from "../lib/infinite-outcome"
+import { adMatchFromRequest, infiniteVisitKey, postInfiniteOutcome } from "../lib/infinite-outcome"
 
+// 1. At CHECKOUT, from the BUYER'S browser request: their _fbc/_fbp cookies, ip and user agent,
+//    saved together (one device) with the checkout. Your later call to Infinite is server-to-server
+//    and carries none of them.
+const adMatch = adMatchFromRequest(request, {
+  em: createHash("sha256").update(email.trim().toLowerCase()).digest("hex"),
+  // Only when the buyer has an account id (a guest has none). Trimmed only: never lowercase an id.
+  ...(user?.id != null ? { external_id: createHash("sha256").update(String(user.id).trim()).digest("hex") } : {})
+})
+const infinite_visit_key = await infiniteVisitKey({ clientIp: adMatch.client_ip_address, userAgent: adMatch.client_user_agent })
+const session = await stripe.checkout.sessions.create({ /* … */ metadata: { infinite_visit_key } })
+await saveCheckoutAdMatch(session.id, adMatch)   // e.g. a column on your order row
+
+// 2. In the PAYMENT WEBHOOK, once the payment is real. Report the purchase HERE and only here
+//    (not also from a checkout-status route), and never with a browser fbq('track', 'Purchase').
 await postInfiniteOutcome({
   type: "purchase",
-  path: "/checkout",                 // Meta requires event_source_url
-  eventId: "purchase:" + order.id,   // Meta gets the same event_id, so your browser pixel dedupes
-  properties: { value: order.total, currency: "USD" },   // required for a Purchase
-  visitKeyInputs: request,
-  // `request` must be the BUYER'S browser request — it carries their _fbc/_fbp cookies AND the ip
-  // and user agent Meta needs. Your call to Infinite is server-to-server and carries neither.
-  adMatch: adMatchFromRequest(request, {
-    em: createHash("sha256").update(email.trim().toLowerCase()).digest("hex")
-  })
+  path: "/checkout",                   // Meta requires event_source_url
+  eventId: "purchase:" + session.id,   // the SAME id every time this purchase is reported: counted once
+  properties: {
+    value: session.amount_total / 100, currency: session.currency.toUpperCase(),   // required for a Purchase
+    visitKey: session.metadata.infinite_visit_key   // carried from checkout: same-lane attribution
+  },
+  adMatch: await loadCheckoutAdMatch(session.id)
 })
 ```
 
-- **You hash; Infinite never does.** `em` and `external_id` are sha256 hex of the trimmed, lowercased
-  value — a raw email never leaves your server. A value that is not a 64-character hex digest is
-  rejected with a `400` instead of being forwarded, so a mistake shows up at integration time rather
-  than as an empty match rate three months later. Never hash an already-hashed value.
+- **You hash; Infinite never does.** `em` is sha256 hex of the email, trimmed and lowercased.
+  `external_id` is sha256 hex of your own account id, **trimmed only — its case is kept**: the
+  browser accessor hashes the same id the same way, and an id hashed two different ways reaches Meta
+  as two different people. A raw email never leaves your server. A value that is not a 64-character
+  hex digest is rejected with a `400` instead of being forwarded, so a mistake shows up at
+  integration time rather than as an empty match rate three months later. Never hash an
+  already-hashed value.
 - **`fbc` / `fbp` are Meta's own cookies** on your domain
   ([fbp and fbc](https://developers.facebook.com/docs/marketing-api/conversions-api/parameters/fbp-and-fbc)).
   A visitor can set them to anything, so a malformed one is **dropped** and your outcome is still
@@ -393,10 +416,22 @@ await postInfiniteOutcome({
   events shared using the Conversions API". Your call to Infinite is server-to-server — its ip is
   your host's egress address and its user agent is `node` — so `adMatchFromRequest` reads them from
   *your* inbound request. In a webhook the incoming request is the provider's, not your buyer's:
-  capture the block during the checkout request and carry it, or report from the browser-facing route.
-- **`eventId` becomes Meta's `event_id`**, and Meta deduplicates on matching `event_id` +
-  `event_name` within **48 hours**. If you also fire the browser pixel for the same conversion, pass
-  the same id: `fbq('track', 'Purchase', { ... }, { eventID: "purchase:" + order.id })`.
+  that is why the example captures the block at checkout and carries it to the webhook. When a
+  browser holds two `_fbc` cookies, `adMatchFromRequest` sends the newest ad click.
+- **`eventId` is Infinite's idempotency key, not Meta's event ID.** Make it stable per outcome, and
+  use the SAME one every time the same outcome is reported (`"purchase:" + session.id` everywhere):
+  Infinite counts an `eventId` once, so a retried webhook is counted once, but two reports of one
+  purchase with two different ids count it twice. Infinite decides the `event_id` Meta receives. For
+  a conversion set to *Every event* or *Once per session* in Infinite → Conversions it is this value;
+  for *Once per account*, and for *Once per visitor (TTL)* when the outcome carries a `visitKey`,
+  Infinite derives a different id, which your pages never see.
+- **Purchases are server events only.** Report them from the payment webhook and do not also fire
+  `fbq('track', 'Purchase')` on a thank-you page. The page never builds a Meta event ID, so a
+  browser Purchase has no server event to be deduplicated against, and Meta can count the purchase
+  twice.
+- **Never build a Meta event ID in the page, and never fire a Meta conversion (`Purchase`, `Lead`,
+  `CompleteRegistration`, `StartTrial`, …) with `fbq` on a click.** A click is intent, not a
+  conversion; a browser event with an id your page made up matches no server event.
 - **The relay declines rather than sending a broken event.** It skips — and says which, in Site
   Settings — when there is no `event_source_url` (send `path`), no `client_user_agent`, a Purchase
   with no `value` + `currency`, or an `occurredAt` older than Meta's 7-day `event_time` window. Your
@@ -475,7 +510,7 @@ infinite analytics [--check | --plan | --apply | --verify-only] [flags]         
 `infinite analytics` adds only what the standalone tag cannot know — the Desktop's active
 workspace, the public keys `infinite setup` saved under `~/.infinite/artifacts/<workspaceId>.json`,
 and a verification backend that reads receipts back through the running Desktop (the CLI holds no
-cloud credential; the app makes the call with its own session) — then runs the same eleven steps. The `infinite` CLI is fully
+cloud credential; the app makes the call with its own session) — then runs the same steps. The `infinite` CLI is fully
 paid: `--plan`, the default apply, `--verify-only` — anything that writes or reaches the cloud —
 goes through the same Desktop readiness gate as the rest of the product (signed in, workspace
 linked, subscription active) and prints the standard onboarding guidance otherwise, touching

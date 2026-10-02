@@ -6,6 +6,13 @@ import { describe, expect, it } from "vitest"
 
 import { buildMetaPixelSnippet, metaProviderAdapter } from "./meta.js"
 
+/** The Manual Advanced Matching block alone, exactly as it ships (it is the last block emitted). */
+function advancedMatchingSource(snippet: string): string {
+  const start = snippet.lastIndexOf("\n(function () {\n  if (typeof window.infiniteMetaAdvancedMatch")
+  expect(start).toBeGreaterThan(-1)
+  return snippet.slice(start)
+}
+
 describe("meta provider plan", () => {
   it("blocks a missing pixel id (no instructions)", () => {
     const blocked = metaProviderAdapter.plan("static-html", { pixelId: "" })
@@ -101,10 +108,12 @@ describe("meta provider plan", () => {
     // No scraping of any kind: the values arrive as an argument or not at all. Scoped to the
     // accessor, because Meta's own bootstrap legitimately uses getElementsByTagName to insert
     // its script tag — that is not DOM harvesting.
-    const accessorSource = snippet.slice(snippet.indexOf("\n(function () {"))
-    for (const forbidden of ["querySelector", "getElementsBy", "addEventListener", "document", "localStorage", "sessionStorage"]) {
+    const accessorSource = advancedMatchingSource(snippet)
+    for (const forbidden of ["querySelector", "getElementsBy", "addEventListener", "document", "setItem", "sessionStorage"]) {
       expect(accessorSource).not.toContain(forbidden)
     }
+    // The only storage it touches is a READ of the visitor's recorded consent decision.
+    expect(accessorSource.match(/localStorage\.[a-zA-Z]+/g)).toEqual(["localStorage.getItem"])
     // The bootstrap init is untouched, so the live config probe still finds the pixel id.
     expect(snippet).toContain(`fbq('init', "1234567890123456");`)
     // Foldable into the Next module's String.raw template, and never closes the script element.
@@ -134,13 +143,15 @@ describe("meta provider plan", () => {
         TextEncoder,
         Uint8Array,
         Promise,
+        localStorage: { getItem: () => null },
+        navigator: {},
         window: { fbq: (...args: unknown[]) => calls.push(args) }
       }
       context.globalThis = context
       // Run the accessor exactly as it ships. Meta's own loader is sliced off because it would
       // try to reach connect.facebook.net; everything below is byte-for-byte what a customer gets.
       const full = buildMetaPixelSnippet("1234567890123456", { advancedMatching: true })
-      runInNewContext(full.slice(full.indexOf("\n(function () {")), context)
+      runInNewContext(advancedMatchingSource(full), context)
       const accessor = (context.window as { infiniteMetaAdvancedMatch: (value: unknown) => Promise<boolean> })
         .infiniteMetaAdvancedMatch
       const attached = await accessor(identity)
