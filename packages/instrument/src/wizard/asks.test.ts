@@ -204,3 +204,42 @@ describe("agent questions are batched", () => {
     await expect(pending).resolves.toEqual({ answers: { "a:1": "yes", "b:2": "no" } })
   })
 })
+
+describe("a display-only ask closes on its own signal (O1-01)", () => {
+  const LINK: AskPayloads["link-code"] = { code: "4821", site: { repoLabel: "github.com/acme/site", appRoot: ".", folderLabel: "site" } }
+
+  for (const mode of [{ json: true }, { json: true, yes: true }, { json: true, nested: true }] as Array<Partial<WizardOptions>>) {
+    it(`link-code aborted by the step closes __cancelled__ and the next ask opens (${JSON.stringify(mode)})`, async () => {
+      const { store, asks } = setup(mode)
+      const close = new AbortController()
+      const linkCode = asks.ask("link-code", LINK, { timeoutMs: 300_000, signal: close.signal })
+      await Promise.resolve()
+      expect(store.getSnapshot().pendingAsk?.kind).toBe("link-code")
+      close.abort()
+      await expect(linkCode).resolves.toBe("__cancelled__")
+      expect(store.getSnapshot().pendingAsk).toBeNull()
+      // The next ask (here a confirm in a plain --json run) opens without a StoreAskConflictError.
+      const next = asks.ask("tty-handover", { reason: "gpg", command: "git commit" })
+      await Promise.resolve()
+      expect(store.getSnapshot().pendingAsk?.kind).toBe("tty-handover")
+      store.cancelAsk()
+      await expect(next).resolves.toBe("__cancelled__")
+    })
+  }
+
+  it("negative: without the signal the overlay stays open and a second ask conflicts", async () => {
+    const { store, asks } = setup({ json: true })
+    void asks.ask("link-code", LINK, { timeoutMs: 300_000 })
+    await Promise.resolve()
+    await expect(asks.ask("tty-handover", { reason: "gpg", command: "git commit" })).rejects.toThrow(/already open \(link-code\)/)
+    store.cancelAsk()
+  })
+
+  it("an already-aborted signal never opens the ask", async () => {
+    const { store, asks } = setup({ json: true })
+    const close = new AbortController()
+    close.abort()
+    await expect(asks.ask("link-code", LINK, { signal: close.signal })).resolves.toBe("__cancelled__")
+    expect(store.getSnapshot().pendingAsk).toBeNull()
+  })
+})

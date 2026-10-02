@@ -291,6 +291,8 @@ function mergePlanAnswers(base: AskAnswers["plan"], over: AskAnswers["plan"]): A
   return { approved: [...approved], declined: [...declined], edits: { ...base.edits, ...over.edits } }
 }
 
+type AskOptions = NonNullable<Parameters<AskFn>[2]>
+
 export function createWizardAsks(input: WizardAsksOptions): WizardAsks {
   const { store, emitter, options, answers, ttyPrompter, signal } = input
   let counter = 0
@@ -304,14 +306,22 @@ export function createWizardAsks(input: WizardAsksOptions): WizardAsks {
     return answer as AskAnswer<K>
   }
 
-  const openInStore = async <K extends AskKind>(kind: K, payload: AskPayloads[K], timeoutMs?: number): Promise<AskAnswer<K>> => {
-    if (signal?.aborted) return announce(kind, payload, ASK_CANCELLED)
+  /**
+   * Opens the ask in the store. It closes on an answer, on its timeout (`__timeout__`), on the run's
+   * signal or on the ASK's own signal (`__cancelled__`): a display-only ask (`link-code`) has no answer,
+   * so the step that opened it closes it with that signal, and the next ask can open.
+   */
+  const openInStore = async <K extends AskKind>(kind: K, payload: AskPayloads[K], askOptions?: AskOptions): Promise<AskAnswer<K>> => {
+    const own = askOptions?.signal
+    if (signal?.aborted || own?.aborted) return announce(kind, payload, ASK_CANCELLED)
     const askId = nextId()
     const opened = store.openAsk(kind, payload, askId)
     emitter.emit("ask.open", { askId, kind, payload })
     let timer: ReturnType<typeof setTimeout> | null = null
     const onAbort = () => store.cancelAsk(askId)
     signal?.addEventListener("abort", onAbort, { once: true })
+    own?.addEventListener("abort", onAbort, { once: true })
+    const timeoutMs = askOptions?.timeoutMs
     if (timeoutMs !== undefined && timeoutMs > 0) {
       timer = setTimeout(() => store.answerAsk(askId, ASK_TIMEOUT), timeoutMs)
     }
@@ -322,6 +332,7 @@ export function createWizardAsks(input: WizardAsksOptions): WizardAsks {
     } finally {
       if (timer) clearTimeout(timer)
       signal?.removeEventListener("abort", onAbort)
+      own?.removeEventListener("abort", onAbort)
     }
   }
 
@@ -346,11 +357,11 @@ export function createWizardAsks(input: WizardAsksOptions): WizardAsks {
     return announce("plan", payload, anything ? answer : ASK_TIMEOUT)
   }
 
-  const ask = (async <K extends AskKind>(kind: K, payload: AskPayloads[K], askOptions?: { timeoutMs?: number }): Promise<AskAnswer<K>> => {
+  const ask = (async <K extends AskKind>(kind: K, payload: AskPayloads[K], askOptions?: AskOptions): Promise<AskAnswer<K>> => {
     if (options.nested) {
       if (kind === "plan") return (await nestedPlan(payload as AskPayloads["plan"])) as AskAnswer<K>
       if (kind === "teammate-comments") return userOnly(kind, payload)
-      if (kind === "link-code" || kind === "tty-handover") return openInStore(kind, payload, askOptions?.timeoutMs)
+      if (kind === "link-code" || kind === "tty-handover") return openInStore(kind, payload, askOptions)
       const found = fileAnswer(answers, kind, payload)
       return announce(kind, payload, found.found ? found.answer : ASK_TIMEOUT)
     }
@@ -366,7 +377,7 @@ export function createWizardAsks(input: WizardAsksOptions): WizardAsks {
         const found = fileAnswer(answers, kind, payload)
         return announce(kind, payload, found.found ? found.answer : ASK_TIMEOUT)
       }
-      return openInStore(kind, payload, askOptions?.timeoutMs)
+      return openInStore(kind, payload, askOptions)
     }
     if (answers) {
       if (kind === "plan") {
@@ -380,28 +391,28 @@ export function createWizardAsks(input: WizardAsksOptions): WizardAsks {
     if (kind === "plan" && options.consentMode) {
       const plan = payload as AskPayloads["plan"]
       if (plan.decisions.consentMode === null) {
-        return openInStore(kind, { ...plan, decisions: { ...plan.decisions, consentMode: options.consentMode } } as AskPayloads[K], askOptions?.timeoutMs)
+        return openInStore(kind, { ...plan, decisions: { ...plan.decisions, consentMode: options.consentMode } } as AskPayloads[K], askOptions)
       }
     }
-    return openInStore(kind, payload, askOptions?.timeoutMs)
+    return openInStore(kind, payload, askOptions)
   }) as AskFn
 
   /** Always the user's: never `--yes`, never an answers file in nested mode; the UI or the wizard's own tty. */
-  const userOnly = async <K extends AskKind>(kind: K, payload: AskPayloads[K], askOptions?: { timeoutMs?: number }): Promise<AskAnswer<K>> => {
+  const userOnly = async <K extends AskKind>(kind: K, payload: AskPayloads[K], askOptions?: AskOptions): Promise<AskAnswer<K>> => {
     if (options.nested) {
       if (!ttyPrompter) return announce(kind, payload, ASK_TIMEOUT)
       return announce(kind, payload, await ttyPrompter.ask(kind, payload))
     }
     if (options.yes && !options.json) {
       // An attended terminal: the user is there, so ask; --yes still answers nothing here.
-      return openInStore(kind, payload, askOptions?.timeoutMs)
+      return openInStore(kind, payload, askOptions)
     }
     if (options.yes) return announce(kind, payload, ASK_TIMEOUT)
     if (answers) {
       const found = fileAnswer(answers, kind, payload)
       if (found.found) return announce(kind, payload, found.answer)
     }
-    return openInStore(kind, payload, askOptions?.timeoutMs)
+    return openInStore(kind, payload, askOptions)
   }
 
   return {

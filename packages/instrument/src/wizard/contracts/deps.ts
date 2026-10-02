@@ -49,8 +49,17 @@ export interface WizardEmitter {
   emit<T extends WizardEventType>(type: T, fields: WizardEventFields[T]): void
 }
 
-/** Opens ONE ask (a second while one is pending throws) and resolves with the answer or a non-answer. */
-export type AskFn = <K extends AskKind>(kind: K, payload: AskPayloads[K], options?: { timeoutMs?: number }) => Promise<AskAnswer<K>>
+/**
+ * Opens ONE ask (a second while one is pending throws) and resolves with the answer or a non-answer.
+ * `signal` closes the ask from the step's side (`__cancelled__`): a display-only ask such as `link-code`
+ * has no answer, so the step that opened it aborts the signal once it is over (§3d.8 amendment, O1 fix
+ * round, O1-01).
+ */
+export type AskFn = <K extends AskKind>(
+  kind: K,
+  payload: AskPayloads[K],
+  options?: { timeoutMs?: number; signal?: AbortSignal }
+) => Promise<AskAnswer<K>>
 
 export interface WizardContext {
   /** The cloud run id; null until the `agent` step creates it. */
