@@ -3,10 +3,13 @@
 // 1. HANDOFF: the agent jobs go out as `job.seeded` events with their brief, the tree is snapshotted
 //    (outside the repo and outside $TMPDIR), and the run parks (exit 3) for the parent agent to do them.
 // 2. RESUME (`npx infinite-tag --resume --json`): the same diff gate as the fence and the post-turn gate
-//    run on the parent agent's edits. Edits outside the seeded jobs' allowlists (or on a globally denied
-//    path) are LEFT UNSTAGED and reported; a hunk touching a consent call blocks its job; a gate hit blocks
-//    its job. Only allowlisted, clean paths are staged. Then the wizard's own S / B / T0 checks decide each
-//    item's state (claims are not needed; the parent agent can only change files).
+//    run on the parent agent's edits. As in the fence (§3f.6), every rejected edit is REVERTED to its
+//    snapshot (or HEAD) bytes before any build or T0, with the parent agent's bytes kept aside under the
+//    snapshot dir and reported: an edit outside the seeded jobs' allowlists (or on a globally denied
+//    path, or a deletion), a hunk touching a consent call (it blocks its job) and a post-turn gate hit (it
+//    blocks its job). Only allowlisted, clean paths are staged, so the S / B / T0 checks run on exactly
+//    the tree the commit will hold. Then the wizard's own checks decide each item's state (claims are not
+//    needed; the parent agent can only change files).
 import { createHash } from "node:crypto"
 import { spawnSync } from "node:child_process"
 import { promises as fsp } from "node:fs"
@@ -154,12 +157,30 @@ async function originalContent(ctx: WizardContext, dir: string, manifest: Snapsh
 
 export interface NestedGateReport {
   staged: string[]
-  /** Changed paths outside every seeded job's allowlist (or globally denied): left unstaged. */
-  leftUnstaged: string[]
-  /** Paths whose hunks touched a consent call (their jobs are blocked). */
+  /** Changed paths outside every seeded job's allowlist (or globally denied, or deleted): reverted. */
+  outsideAllowlist: string[]
+  /** Paths whose hunks touched a consent call (reverted; their jobs are blocked). */
   consentTouched: string[]
-  /** Paths the post-turn gate flagged (their jobs are blocked). */
+  /** Paths the post-turn gate flagged (reverted; their jobs are blocked). */
   gateHits: string[]
+  /** Where the parent agent's bytes of every reverted path were kept (`<snapshot>/rejected/<path>`). */
+  rejectedDir: string
+}
+
+/** Keeps the parent agent's bytes aside, then puts the snapshot (or HEAD) bytes back; a new file is removed. */
+async function revertToSnapshot(root: string, rejectedDir: string, path: string, before: string | null, after: string | null): Promise<void> {
+  if (after !== null) {
+    const copy = join(rejectedDir, path)
+    await fsp.mkdir(dirname(copy), { recursive: true, mode: 0o700 })
+    await fsp.writeFile(copy, after, { mode: 0o600 })
+  }
+  const target = join(root, path)
+  if (before === null) {
+    await fsp.rm(target, { force: true })
+  } else {
+    await fsp.mkdir(dirname(target), { recursive: true })
+    await fsp.writeFile(target, before)
+  }
 }
 
 async function resume(ctx: WizardContext, deps: WizardDeps, dir: string): Promise<StepOutcome> {
@@ -173,7 +194,8 @@ async function resume(ctx: WizardContext, deps: WizardDeps, dir: string): Promis
   const seeded = state.jobs.filter((item) => manifest.itemIds.includes(item.id))
 
   const candidates = new Set([...dirtyPaths(ctx.root), ...Object.keys(manifest.dirty)])
-  const report: NestedGateReport = { staged: [], leftUnstaged: [], consentTouched: [], gateHits: [] }
+  const report: NestedGateReport = { staged: [], outsideAllowlist: [], consentTouched: [], gateHits: [], rejectedDir: join(dir, "rejected") }
+  const contents = new Map<string, { before: string | null; after: string | null }>()
   const blocked = new Map<string, { reason: "consent_touched" | "agent_blocked"; note: string }>()
   const diff: TurnDiff = { files: [] }
   const ownersByPath = new Map<string, ChecklistItem[]>()
@@ -183,10 +205,11 @@ async function resume(ctx: WizardContext, deps: WizardDeps, dir: string): Promis
     const before = await originalContent(ctx, dir, manifest, path)
     const after = await readOrNull(join(ctx.root, path))
     if (before === after) continue
+    contents.set(path, { before, after })
     const owners = matchesAnyGlob(path, GLOBAL_DENY_GLOBS) ? [] : allowedFor(seeded, path, before === null)
     if (owners.length === 0 || after === null) {
-      // Outside the allowlist, globally denied, or a deletion (no v1 job deletes a file): never staged.
-      report.leftUnstaged.push(path)
+      // Outside the allowlist, globally denied, or a deletion (no v1 job deletes a file): reverted below.
+      report.outsideAllowlist.push(path)
       continue
     }
     const change = diffLines(before, after)
@@ -212,8 +235,14 @@ async function resume(ctx: WizardContext, deps: WizardDeps, dir: string): Promis
   for (const path of hitPaths) {
     report.gateHits.push(path)
     for (const owner of ownersByPath.get(path) ?? []) {
-      blocked.set(owner.id, { reason: "agent_blocked", note: `${path}: the wizard's safety check flagged this edit; left unstaged` })
+      blocked.set(owner.id, { reason: "agent_blocked", note: `${path}: the wizard's safety check flagged this edit; reverted` })
     }
+  }
+  // Every rejected edit goes back to its snapshot bytes BEFORE any build or T0 (§3f.6, §3a.9.5): no check
+  // may evaluate code the gate rejected, and the checks see exactly what the commit will hold.
+  for (const path of [...new Set([...report.outsideAllowlist, ...report.consentTouched, ...report.gateHits])]) {
+    const change = contents.get(path)
+    if (change) await revertToSnapshot(ctx.root, report.rejectedDir, path, change.before, change.after)
   }
   report.staged = diff.files.map((file) => file.path).filter((path) => !hitPaths.has(path))
   if (report.staged.length > 0) await deps.git.stage(report.staged)
@@ -246,13 +275,19 @@ async function resume(ctx: WizardContext, deps: WizardDeps, dir: string): Promis
     const block = blocked.get(item.id)
     ctx.emit.emit("job.state", { itemId: item.id, state: item.state, by: "wizard", ...(block ? { note: block.note } : {}) })
   }
-  for (const path of report.leftUnstaged) {
-    ctx.emit.emit("step.sub", { step: "jobs", text: `Left unstaged (outside the jobs' files): ${path}`, tone: "warn" })
+  const home = deps.env.HOME && deps.env.HOME.trim() !== "" ? deps.env.HOME : homedir()
+  const keptIn = report.rejectedDir.startsWith(`${home}/`) ? `~${report.rejectedDir.slice(home.length)}` : report.rejectedDir
+  for (const path of report.outsideAllowlist) {
+    ctx.emit.emit("step.sub", { step: "jobs", text: `Undone (outside the jobs' files): ${path}; your version is in ${keptIn}`, tone: "warn" })
+  }
+  for (const path of [...report.consentTouched, ...report.gateHits]) {
+    ctx.emit.emit("step.sub", { step: "jobs", text: `Undone (blocked by the wizard's checks): ${path}; your version is in ${keptIn}`, tone: "warn" })
   }
   const done = ctx.state.get().jobs.filter((job) => manifest.itemIds.includes(job.id) && job.state !== "pending" && job.state !== "blocked" && job.state !== "failed").length
   const parts = [`${done} of ${seeded.length} jobs pass the wizard's checks`]
   if (blocked.size > 0) parts.push(`${blocked.size} blocked`)
-  if (report.leftUnstaged.length > 0) parts.push(`${report.leftUnstaged.length} edit(s) outside the jobs' files left unstaged: ${report.leftUnstaged.join(", ")}`)
+  const undone = report.outsideAllowlist.length + report.consentTouched.length + report.gateHits.length
+  if (undone > 0) parts.push(`${undone} edit(s) undone (kept in ${keptIn})`)
   return { kind: "ok", status: parts.join(" · ") }
 }
 
