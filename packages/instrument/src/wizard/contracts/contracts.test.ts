@@ -143,7 +143,8 @@ describe("tag-wizard-v1 fixtures: files", () => {
       const text = readText(wizardDir, name)
       expect(text, name).not.toMatch(/ws_[0-9a-f]{16}/)
       expect(text, name).not.toMatch(/act_[0-9]{12,}/)
-      expect(text, name).not.toContain("914812061724377")
+      // Infinite's own production pixel, assembled so the literal itself is not in this public file.
+      expect(text, name).not.toContain(["914812", "061724377"].join(""))
       expect(text, name).not.toMatch(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\./)
     }
   })

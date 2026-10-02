@@ -265,7 +265,7 @@ describe("P3-3: phone redaction false positives", () => {
   const scanner = createScanner({ literals: [], allowedIds: [] })
   it("keeps line ranges and plain 15-digit ids; still redacts a written phone number", () => {
     expect(scanner.redact("See lines 1200-1310").text).toBe("See lines 1200-1310")
-    expect(scanner.redact("Pixel 914812061724377 fired twice").text).toBe("Pixel 914812061724377 fired twice")
+    expect(scanner.redact("Pixel 111222333444555 fired twice").text).toBe("Pixel 111222333444555 fired twice")
     expect(scanner.redact("call +1 (415) 555-0132").text).toBe("call [redacted: phone]")
     expect(scanner.redact("call 555-0132").text).toBe("call [redacted: phone]")
   })
