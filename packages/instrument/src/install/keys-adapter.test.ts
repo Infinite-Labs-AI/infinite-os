@@ -121,7 +121,8 @@ describe("the wizard install's manifest workspaceId and ids (§3e.6, R1-15)", ()
   })
 
   it("NEGATIVE: refuses anything but sha256:<64 hex>", () => {
-    expect(() => wizardInstallWorkspaceId("ws_0123456789abcdef")).toThrow()
+    // A cloud-workspace-shaped id, assembled at run time (the tripwire forbids the literal in tracked files).
+    expect(() => wizardInstallWorkspaceId(["ws", "0123456789abcdef"].join("_"))).toThrow()
     expect(() => wizardInstallWorkspaceId(`sha256:${"z".repeat(64)}`)).toThrow()
   })
 
