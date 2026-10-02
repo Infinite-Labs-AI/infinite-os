@@ -11,6 +11,8 @@
 //   glyph takes its tone (✓ green, ▣ amber, ⠋ cyan, ✗ red, ? amber, · dim, ⟳ cyan,
 //   ◐ amber, ⧗ amber); the result is `dim`.
 // - The label is a friendly name for the call, never a raw tool id or its JSON.
+// - A failed (✗) or unknown (?) call whose reason was cut to the result column
+//   prints the whole reason on dim rows under it, indented 4.
 import type { AnswerViewState, AnswerViewV1 } from "@infinite-os/types";
 
 import type { StepStatus, TurnStep } from "../app/turn-store.js";
@@ -18,7 +20,7 @@ import { displayWidth, padEndCells } from "../lib/display-width.js";
 import { parseToolTrailResultLine, splitToolDuration } from "../lib/text.js";
 import { ansi, type Theme, type ThemeStyle } from "../theme.js";
 import type { Msg } from "../types.js";
-import { viewText } from "./primitives.js";
+import { viewText, wrapText } from "./primitives.js";
 
 /** r4's result column. */
 const RESULT_WIDTH = 22;
@@ -215,7 +217,7 @@ export function stepRowLines(steps: readonly TurnStep[], options: StepStripOptio
   const span = Math.max(0.001, Math.max(...steps.map(endOf)) - t0);
   const paint = (text: string, tone: ThemeStyle) => (options.color && text ? ansi(options.theme, tone, text) : text);
 
-  const rows = steps.map((step) => {
+  const rows = steps.flatMap((step) => {
     const status = refineStepStatus(step, options.views ?? []);
     const a = Math.round(((step.startedAt - t0) / span) * gantt);
     const b = Math.max(1, Math.round(((endOf(step) - step.startedAt) / span) * gantt));
@@ -226,17 +228,21 @@ export function stepRowLines(steps: readonly TurnStep[], options: StepStripOptio
     const mark = status === "run" ? SPINNER[Math.floor(Math.max(0, now - step.startedAt) / SPINNER_MS) % SPINNER.length]! : glyph;
     const label = padEndCells(cut(viewText(step.label), labelWidth), labelWidth);
     const result = viewText(step.result);
-    return fitSegments(
-      [
-        [`  ${label} ${" ".repeat(a)}`, "text"],
-        [bar, barTone],
-        [`${" ".repeat(Math.max(0, gantt - a - bar.length))} `, "text"],
-        [mark, tone],
-        [result ? ` ${result}` : "", "dim"]
-      ],
-      width,
-      paint
-    );
+    const segments: (readonly [string, ThemeStyle])[] = [
+      [`  ${label} ${" ".repeat(a)}`, "text"],
+      [bar, barTone],
+      [`${" ".repeat(Math.max(0, gantt - a - bar.length))} `, "text"],
+      [mark, tone],
+      [result ? ` ${result}` : "", "dim"]
+    ];
+    const row = fitSegments(segments, width, paint);
+    // Why a call failed must stay readable: a reason cut to the result column
+    // is printed whole on dim rows under the call (ok rows stay one row, as r4).
+    const cutShort = segments.reduce((sum, [text]) => sum + displayWidth(text), 0) > width;
+    if (!result || !cutShort || (status !== "fail" && status !== "unk")) {
+      return [row];
+    }
+    return [row, ...wrapText(result, Math.max(1, width - 4)).map((line) => `    ${paint(line, "dim")}`)];
   });
   return rows;
 }

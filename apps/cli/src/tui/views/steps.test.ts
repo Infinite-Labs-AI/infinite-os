@@ -83,6 +83,30 @@ describe("the Steps strip (region-steps)", () => {
     }
   });
 
+  it("a failed or unknown call whose reason was cut keeps the whole reason on dim rows under it", () => {
+    const reason = "the ad account hit its daily spending limit, so the change was not sent";
+    for (const status of ["fail", "unk"] as const) {
+      const rows = stepStripLines([step({ status, label: "pausing ad", result: reason })], { width: 80, color: false, theme, nowMs: 1000 });
+      expect(rows[1]).toContain("…");
+      const more = rows.slice(2);
+      expect(more.length).toBeGreaterThan(0);
+      expect(more.every((row) => row.startsWith("    ") && displayWidth(row) <= 80)).toBe(true);
+      expect(more.map((row) => row.trim()).join(" ")).toBe(reason);
+      const painted = stepStripLines([step({ status, label: "pausing ad", result: reason })], { width: 80, color: true, theme, nowMs: 1000 });
+      expect(r4Segments(painted[2]!).filter((part) => part.text.trim()).every((part) => part.style === "dim")).toBe(true);
+    }
+  });
+
+  it("an ok call keeps one row however long its result (r4)", () => {
+    const rows = stepStripLines([step({ status: "ok", result: "r".repeat(80) })], { width: 80, color: false, theme, nowMs: 1000 });
+    expect(rows).toHaveLength(2);
+  });
+
+  it("a failed call whose reason fits has no extra rows", () => {
+    const rows = stepStripLines([step({ status: "fail", result: "limit" })], { width: 80, color: false, theme, nowMs: 1000 });
+    expect(rows).toHaveLength(2);
+  });
+
   it("draws nothing for a turn with no calls", () => {
     expect(stepStripLines([], { width: 100, color: true, theme })).toEqual([]);
   });
