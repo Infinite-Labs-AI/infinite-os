@@ -1,6 +1,6 @@
 // The bytes infinite-tag writes into a customer's site, installed through the real plan/apply path and
 // EXECUTED — over the static managed block AND the decoded Next bootstrap — on every host in the build
-// plan's 13-host matrix (§1.1, S5 table).
+// plan's 13-host matrix (§1.1, S5 table). The Vite managed block is run too.
 //
 // What this pins, with a negative case for each:
 //   - GA4, PostHog and Meta start on production and unknown hosts, and stay silent on previews and
@@ -75,10 +75,11 @@ const MATRIX: Array<[string, boolean]> = [
   ["other.example", true]
 ]
 
-type Form = "static" | "next"
+type Form = "static" | "vite" | "next"
 
 const installs = {
   static: () => installFixture("static-html-basic", ARTIFACTS).read("index.html"),
+  vite: () => installFixture("vite-react-basic", ARTIFACTS).read("index.html"),
   next: () => decodeNextBootstrap(installFixture("next-app-router-basic", ARTIFACTS).read("lib/infinite-analytics.ts"))
 }
 const cache = new Map<string, string>()
@@ -90,7 +91,7 @@ function bytes(form: Form): string {
 function load(form: Form, source: string, url: string, hostname?: string) {
   const vm = createBrowserVm({ url })
   if (hostname !== undefined) (vm.window.location as { hostname: string }).hostname = hostname
-  if (form === "static") vm.runHtml(source)
+  if (form !== "next") vm.runHtml(source)
   else vm.runScript(source)
   const loaded = (needle: string) => vm.loaded.some((src) => src.includes(needle))
   return {
@@ -102,7 +103,7 @@ function load(form: Form, source: string, url: string, hostname?: string) {
   }
 }
 
-describe.each(["static", "next"] as const)("the %s managed bytes on the 13-host matrix", (form) => {
+describe.each(["static", "vite", "next"] as const)("the %s managed bytes on the 13-host matrix", (form) => {
   it.each(MATRIX)("%s → guarded tools fire=%s", (host, fires) => {
     const page = load(form, bytes(form), "https://placeholder.test/", host)
     expect(page.vm.scriptErrors).toEqual([])
@@ -124,7 +125,9 @@ describe.each(["static", "next"] as const)("the %s managed bytes on the 13-host 
     const source =
       form === "static"
         ? installFixture("static-html-basic", unguarded).read("index.html")
-        : decodeNextBootstrap(installFixture("next-app-router-basic", unguarded).read("lib/infinite-analytics.ts"))
+        : form === "vite"
+          ? installFixture("vite-react-basic", unguarded).read("index.html")
+          : decodeNextBootstrap(installFixture("next-app-router-basic", unguarded).read("lib/infinite-analytics.ts"))
     const page = load(form, source, "https://acme-abc123.vercel.app/")
     expect([page.ga4, page.posthog, page.meta]).toEqual([true, true, true])
   })

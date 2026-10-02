@@ -400,6 +400,18 @@ describe.each(frameworks)("$name assembled module with every provider, executed"
     expect(window.__infiniteAnalyticsRuntime).toBe(true)
   })
 
+  it("a GA4 snippet that throws (first in the script) leaves PostHog, X, Meta and Infinite started", () => {
+    const source = generateManagedModule(fixture, modulePath, ALL_PROVIDERS)
+    const broken = source.replace("window.gtag('js', new Date());", "window.gtag('js', new Date()); throw new Error('ga4 broke');")
+    expect(broken).not.toBe(source)
+    const { window, scriptErrors, loaded } = executeAssembledModuleAsBrowser(broken)
+    expect(scriptErrors).toEqual([])
+    expect(loaded).toContain("https://us-assets.i.posthog.com/static/array.js")
+    expect(typeof window.twq).toBe("function")
+    expect(typeof window.fbq).toBe("function")
+    expect(window.__infiniteAnalyticsRuntime).toBe(true)
+  })
+
   it("negative: without the per-provider try, the same throw stops every provider after it", () => {
     const source = generateManagedModule(fixture, modulePath, ALL_PROVIDERS)
     const broken = source.replace(/o='[^']*'\.split/, "o='init capture people.set person.set_once group.set'.split")
