@@ -5,7 +5,8 @@ import { describe, expect, it } from "vitest";
 
 import { decodeAnswerView } from "../../desktop/answer-view-decode.js";
 import { displayWidth } from "../lib/display-width.js";
-import { resolveTheme } from "../theme.js";
+import { r4Segments } from "../../formatting/r4-segments.test-util.js";
+import { INFINITE_R4_THEME, resolveTheme } from "../theme.js";
 import { hasKindRenderer, renderView } from "./registry.js";
 import type { ViewRender, ViewRenderCtx } from "./types.js";
 
@@ -126,16 +127,21 @@ describe("numbers: legs", () => {
 });
 
 describe("numbers: rows", () => {
-  it("j/k select the settled leg's rows: the selected row is marked ▸ in place of its border", () => {
+  it("j/k select the settled leg's rows: once engaged, the selected row is on the selection background, never ▸ in the table (r4)", () => {
     const first = draw(fixture("numbers-week-today"));
     expect(first.rowCount).toBe(3);
-    expect(first.detail.find((line) => line.includes("Hook A"))).toMatch(/^▸ Hook A /u);
-    const third = draw(fixture("numbers-week-today"), { selected: 2 });
-    expect(third.detail.find((line) => line.includes("Hook C"))).toMatch(/^▸ Hook C /u);
-    expect(third.detail.find((line) => line.includes("Hook A"))).toMatch(/^│ Hook A /u);
-    // The today leg's rows are never marked, and every line keeps its width.
-    expect(third.detail.filter((line) => line.startsWith("▸"))).toHaveLength(1);
-    const widths = new Set(third.detail.filter((line) => /^[│▸┌├└]/u.test(line)).slice(0, 8).map(displayWidth));
+    // Not engaged (r4 draws a table with no selection): nothing is marked.
+    expect(first.detail.some((line) => line.includes("▸"))).toBe(false);
+    const painted = (selected: number) => draw(fixture("numbers-week-today"), { selected, engaged: true, color: true, theme: INFINITE_R4_THEME });
+    const third = painted(2).detail.map(r4Segments);
+    const rowWith = (name: string) => third.find((row) => row.some((part) => part.text.includes(name)))!;
+    expect(rowWith("Hook C").every((part) => part.style.split(" ").includes("sel"))).toBe(true);
+    expect(rowWith("Hook A").some((part) => part.style.split(" ").includes("sel"))).toBe(false);
+    // The borders stay: no ▸ is drawn into a table, and every line keeps its width.
+    const plain = draw(fixture("numbers-week-today"), { selected: 2, engaged: true }).detail;
+    expect(plain.some((line) => line.includes("▸"))).toBe(false);
+    expect(plain.find((line) => line.includes("Hook C"))).toMatch(/^│ Hook C /u);
+    const widths = new Set(plain.filter((line) => /^[│┌├└]/u.test(line)).slice(0, 8).map(displayWidth));
     expect(widths.size).toBe(1);
   });
 
@@ -246,7 +252,33 @@ describe("numbers: the coverage strip", () => {
     expect(strip(draw(fixture("numbers-week-today")))).toBe("·—█████◌");
     const detail = draw(fixture("numbers-week-today")).detail.join("\n");
     expect(detail).toMatch(/^Days Jan 8 ·—█████◌ Jan 15$/mu);
-    expect(detail).toContain("5 of 7 days measured");
+    // r4's legend: the marks and their words, no count ahead of them.
+    expect(detail).not.toContain("days measured");
+  });
+
+  it("a day not synced yet that is today is ◌ amber, and the legend says r4's words (run-2 M6)", () => {
+    const view = edited("numbers-ads", (body) => {
+      body.legs.settled.coverage.days = [
+        { date: "2026-01-12", status: "zero" }, { date: "2026-01-13", status: "measured" },
+        { date: "2026-01-14", status: "not_synced" }, { date: "2026-01-15", status: "not_synced" }
+      ];
+    });
+    const at = (iso: string) => {
+      const now = Date.now;
+      Date.now = () => Date.parse(iso);
+      try {
+        return draw(view, { color: true, theme: INFINITE_R4_THEME });
+      } finally {
+        Date.now = now;
+      }
+    };
+    const render = at("2026-01-15T10:00:00Z");
+    const rows = render.detail.map(r4Segments);
+    const stripRow = rows.find((row) => row[0]?.text === "Days")!;
+    expect(stripRow.find((part) => part.text.includes("◌"))?.style).toBe("amber");
+    expect(stripRow.find((part) => part.text.includes("░"))?.style).toBe("hatch");
+    const legend = render.detail.map((line) => r4Segments(line).map((part) => part.text).join("")).find((line) => line.includes("spent"));
+    expect(legend).toBe("     ····· no spend   █ spent   ░ not synced   ◌ today, not synced yet");
   });
 
   it("a not_measured day is never ·", () => {
@@ -258,8 +290,8 @@ describe("numbers: the coverage strip", () => {
 
   it("the legend names only the marks the strip uses", () => {
     const detail = draw(fixture("numbers-ads")).detail.join("\n");
-    expect(detail).toContain("· zero");
-    expect(detail).toContain("█ measured");
+    expect(detail).toContain("····· no spend");
+    expect(detail).toContain("█ spent");
     expect(detail).not.toContain("◌ today");
     expect(draw(fixture("numbers-week-today")).detail.join("\n")).toContain("◌ today");
   });
@@ -280,6 +312,44 @@ describe("numbers: the coverage strip", () => {
     expect(render.detail.every((line) => displayWidth(line) <= 40)).toBe(true);
     const stripRows = render.detail.filter((line) => /^[\s·█]+$/u.test(line));
     expect(stripRows.join("").replace(/[^·█]/gu, "")).toHaveLength(90);
+  });
+});
+
+describe("numbers: r4's table (run-2 M6)", () => {
+  const view01 = () => {
+    const raw = JSON.parse(readFileSync(fileURLToPath(new URL("./__fixtures__/r4/view-01-numbers.json", import.meta.url)), "utf8"));
+    return decodeAnswerView(raw.turn.views[0])!;
+  };
+
+  it("columns drop in r4's order: Impressions, then CPC, then Conv, then Clicks; Spend and CTR stay", () => {
+    expect(draw(view01(), { width: 60 }).detail).toContain("+ Impressions · → to see");
+    expect(draw(view01(), { width: 50 }).detail).toContain("+ Impressions, CPC · → to see");
+    expect(draw(view01(), { width: 44 }).detail).toContain("+ Impressions, CPC, Conv · → to see");
+    const narrow = draw(view01(), { width: 37 }).detail.join("\n");
+    expect(narrow).toContain("Spend");
+    expect(narrow).toContain("CTR");
+  });
+
+  it("the row-label column is named from the view (body.rowLabel), and percents keep fixed decimals", () => {
+    const detail = draw(view01(), { width: 100 }).detail;
+    expect(detail).toContain("│ Campaign  │  Spend │ Impressions │ Clicks │   CTR │   CPC │ Conv │");
+    expect(detail.find((line) => line.includes("Ad set 02"))).toContain("│ 1.50% │");
+    // No rowLabel: the header cell stays empty, never a guess.
+    const unnamed = JSON.parse(JSON.stringify(view01())) as AnswerViewV1;
+    delete (unnamed.body as { rowLabel?: string }).rowLabel;
+    expect(draw(unnamed, { width: 100 }).detail.find((line) => line.includes("Spend"))).toMatch(/^│ {11}│/u);
+  });
+
+  it("no window title over a single final leg the view's title already names; a not-final one keeps it", () => {
+    const detail = draw(view01(), { width: 100 }).detail;
+    expect(detail.some((line) => line.includes("since launch"))).toBe(false);
+    expect(draw(fixture("numbers-today-only")).detail).toContain("Today · Jan 15 · not final · as of 18:30");
+    expect(draw(fixture("numbers-week-today")).detail.some((line) => line.startsWith("Last 7 days · Jan 8–14"))).toBe(true);
+  });
+
+  it("a state reason that only repeats the head is not printed again", () => {
+    const view = { ...view01(), state: "not_measured", stateReason: { code: "not_measured", words: "1 not measured", short: "1 not measured" } } as AnswerViewV1;
+    expect(draw(view, { width: 100 }).detail.some((line) => line.includes("1 not measured"))).toBe(false);
   });
 });
 

@@ -94,6 +94,7 @@
               "factGroup": "conversions"
             }
           ],
+          "rowLabel": "Campaign",
           "legs": {
             "settled": {
               "window": {
@@ -252,7 +253,6 @@
     ]
   },
   "gaps": [
-    "The row-label column's header \"Campaign\" has no field (NumbersBodyV1 names measure columns only).",
     "Column drop priority (Impressions 4, CPC 3, Conv 2, Clicks 1) is not on ColumnV1: the renderer owns it.",
     "\"Source: Google Ads, via our data\" spells provenance.via; the link label is appLink.label."
   ]

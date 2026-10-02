@@ -76,6 +76,7 @@
               "factGroup": "conversions"
             }
           ],
+          "rowLabel": "Campaign",
           "legs": {
             "settled": {
               "window": {

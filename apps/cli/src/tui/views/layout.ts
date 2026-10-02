@@ -48,14 +48,15 @@ export function paneWidths(width: number): { wide: boolean; left: number; right:
 
 /**
  * One drawn view as lines: head, source, a blank row, the details, then
- * footnotes. A quiet view without a head is its step line only; lines with no
+ * footnotes right under them. A quiet view without a head is its step line only; lines with no
  * head and no source (a card handed in) are the details alone.
  */
 export function viewLines(render: ViewRender, width: number): string[] {
   if (!inDetailsPane(render)) {
     return render.detail.map((line) => fitLine(line, width));
   }
-  const body = [...render.detail, ...(render.footnotes.length ? ["", ...render.footnotes] : [])];
+  // Footnotes sit right under what they note (r4: `¹ not measured: …` under the table).
+  const body = [...render.detail, ...render.footnotes];
   const top = render.head || render.source !== null ? [render.head, ...(render.source !== null ? [render.source] : [])] : [];
   return [...top, ...(top.length && body.length ? [""] : []), ...body].map((line) => fitLine(line, width));
 }

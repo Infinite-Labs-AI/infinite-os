@@ -367,7 +367,8 @@ export function stateReasonLines(view: AnswerViewV1, ctx: ViewRenderCtx, fixAskB
     return [];
   }
   const head = stateHeadFor(view);
-  const words = viewText(reason.words);
+  // A reason whose words are only its short form says nothing the head did not (r4 `— 1 not measured`).
+  const words = viewText(reason.words) === viewText(reason.short) ? "" : viewText(reason.words);
   const sentence = !words || words.startsWith(`${head.glyph} `) ? words : `${head.glyph} ${words}`;
   const lines = paragraph(sentence, sentenceRole(head.tone), ctx);
   const fix = isRecord(reason.fix) ? reason.fix : null;

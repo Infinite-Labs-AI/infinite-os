@@ -13,9 +13,10 @@
 // - Leaders print one line per measure; nothing here ever names a winner.
 // - The coverage strip never draws a not-measured day as `·` (zero).
 //
-// The view's columns carry no drop priority, so the server's column order is
-// its order of importance: a narrow table drops from the right (never the row
-// label), and says which columns it hid (`→` shows them as records).
+// Columns drop in r4's order (the renderer owns it; ColumnV1 has no priority):
+// reach before cost-per before outcomes before clicks, while spend and rates
+// never drop (`DROP_PRIORITY`); any other column drops from the right, after
+// those. A table says which columns it hid (`→` shows them as records).
 import type { CellV1, TextCellV1, UnitV1 } from "@infinite-os/types";
 
 import { renderTable, type TableColumn } from "../../formatting/table.js";
@@ -57,8 +58,10 @@ export function finite(value: unknown): number | null {
 export interface MeasureDraw {
   notes: FootnoteBook;
   hidden: number;
-  /** The view has a state reason, which already says how many days are in: the legend skips its N-of-M lead. */
+  /** The view has a state reason, which already says which days are in: the strip draws no legend. */
   reasonSaid?: boolean;
+  /** The view's title: a single leg whose window it names needs no title of its own. */
+  viewTitle?: string;
 }
 
 // ── tables of cells ──
@@ -69,6 +72,8 @@ export interface CellTableColumn {
   dropPriority?: number;
   /** Format a cell's number with a sign (`+1%`): differences. */
   signed?: boolean;
+  /** A percent column's decimals, the same on every row (set by the table, r4 `1.50%`). */
+  fixedDigits?: number;
 }
 
 /** A cell, or text already drawn (status words, labels). */
@@ -86,8 +91,10 @@ export interface CellTableInput {
   rows: CellTableRow[];
   total?: CellTableRow | null;
   currency: string | null;
-  /** The row j/k selected: it is marked `▸` (in place of the table's left border). */
+  /** The row j/k selected: once the view is engaged, it is on r4's selection background (never a `▸` in the table). */
   selected?: number | null;
+  /** The row-label column's header (r4 `Campaign`, `Version`); empty when the view names none. */
+  rowLabel?: string;
 }
 
 /**
@@ -96,8 +103,9 @@ export interface CellTableInput {
  * draws every column as `label: value` records instead. A footnote is booked
  * only for a cell that is drawn, so no mark points at a hidden column.
  */
-export function cellTableLines(input: CellTableInput, ctx: ViewRenderCtx, draw: MeasureDraw): string[] {
-  const labels = ["", ...input.columns.map((column) => viewText(column.label))];
+export function cellTableLines(given: CellTableInput, ctx: ViewRenderCtx, draw: MeasureDraw): string[] {
+  const input = withFixedDigits(given);
+  const labels = [viewText(input.rowLabel), ...input.columns.map((column) => viewText(column.label))];
   const all = input.columns.map((_column, index) => index);
   // Pass 1 (a scratch book): which columns fit at this width.
   const trial = renderTable(tableInput(input, labels, all, new FootnoteBook()), tableOptions(ctx));
@@ -113,13 +121,13 @@ export function cellTableLines(input: CellTableInput, ctx: ViewRenderCtx, draw: 
     return recordLines(input, labels, ctx, draw.notes);
   }
   const lines = [...table.lines];
-  // Rows start after the top border, the header and its rule.
-  const selected = selectedRow(input);
+  // Rows start after the top border, the header and its rule. r4 draws a table
+  // with nothing selected; once the user moves (j/k), the selected row sits on
+  // the selection background, its borders kept.
+  const selected = ctx.engaged ? selectedRow(input) : null;
   if (selected !== null && lines[3 + selected] !== undefined) {
     // Pass 2 never drops more than pass 1 (fewer footnotes, never wider cells), and rows are one line each.
-    // The row's left border (its own painted run) becomes r4's selection token, a bold cyan ▸;
-    // the border's opening style is re-applied after it for anything else in that run.
-    lines[3 + selected] = lines[3 + selected]!.replace(/^((?:\u001b\[[0-9;]*m)*)│/u, (_match, open: string) => `${paint("▸", "cb", ctx)}${open}`);
+    lines[3 + selected] = paint(lines[3 + selected]!, "sel", ctx);
   }
   if (hiddenIndexes.length) {
     const named = hiddenIndexes.map((index) => labels[index + 1]).filter(Boolean).join(", ");
@@ -132,9 +140,35 @@ function tableOptions(ctx: ViewRenderCtx) {
   return { width: ctx.width, color: ctx.color, theme: ctx.theme };
 }
 
+/** The fraction digits `value` needs (at most 2): 1.5 → 1, 1.25 → 2, 3 → 0. */
+function fractionDigits(value: number): number {
+  for (let digits = 0; digits < 2; digits += 1) {
+    const scaled = value * 10 ** digits;
+    if (Math.abs(scaled - Math.round(scaled)) < 1e-9) return digits;
+  }
+  return 2;
+}
+
+/**
+ * A percent column prints every value with the same decimals (r4 `1.50%`
+ * beside `1.33%`): the most any of its values needs, at most 2.
+ */
+function withFixedDigits(input: CellTableInput): CellTableInput {
+  const columns = input.columns.map((column, index) => {
+    if (column.unit !== "percent" || column.fixedDigits !== undefined) return column;
+    const values = [...input.rows, ...(input.total ? [input.total] : [])]
+      .filter((row) => !row.units?.[index] || row.units[index] === "percent")
+      .map((row) => row.cells[index])
+      .map((cell) => (isRecord(cell) ? finite(cell.value) : null))
+      .filter((value): value is number => value !== null);
+    return values.length ? { ...column, fixedDigits: Math.max(...values.map(fractionDigits)) } : column;
+  });
+  return { ...input, columns };
+}
+
 function tableInput(input: CellTableInput, labels: readonly string[], keep: readonly number[], notes: FootnoteBook) {
   const columns: TableColumn[] = [
-    { label: "", dropPriority: 0 },
+    { label: labels[0] ?? "", dropPriority: 0 },
     ...keep.map((index) => {
       const column = input.columns[index]!;
       return {
@@ -179,8 +213,10 @@ export function drawCell(cell: TableCell, column: CellTableColumn, currency: str
   if (typeof cell === "string") {
     return viewText(cell);
   }
-  const text = cellText(cell as CellV1 | TextCellV1 | null | undefined, column.unit, currency, notes);
   const value = isRecord(cell) ? finite(cell.value) : null;
+  const text = column.unit === "percent" && column.fixedDigits !== undefined && value !== null
+    ? `${value.toLocaleString("en-US", { minimumFractionDigits: column.fixedDigits, maximumFractionDigits: column.fixedDigits })}%`
+    : cellText(cell as CellV1 | TextCellV1 | null | undefined, column.unit, currency, notes);
   return column.signed && value !== null && value > 0 ? `+${text}` : text;
 }
 
@@ -325,12 +361,31 @@ interface NumbersColumn extends CellTableColumn {
   key: string;
 }
 
+/**
+ * r4's drop order for the ads measures (`table()` priorities: Impressions 4,
+ * CPC 3, Conv 2, Clicks 1): the higher drops first; 0 never drops (spend and
+ * the rates a reader judges by). Keyed by the column's key; any other column
+ * drops from the right after these (`renderTable`).
+ */
+const DROP_PRIORITY: Readonly<Record<string, number>> = {
+  impressions: 4, reach: 4, frequency: 4,
+  cpc: 3, cpm: 3, cpa: 3, cpl: 3, cost_per: 3, cost_per_result: 3, cost_per_conversion: 3,
+  conv: 2, conversions: 2, purchases: 2, results: 2, leads: 2,
+  clicks: 1, link_clicks: 1,
+  spend: 0, ctr: 0, roas: 0
+};
+
 function numbersColumns(body: Record<string, unknown>): NumbersColumn[] {
-  return asList(body.columns).filter(isRecord).map((column) => ({
-    key: typeof column.key === "string" ? column.key : "",
-    label: viewText(column.label),
-    unit: asUnit(column.unit)
-  }));
+  return asList(body.columns).filter(isRecord).map((column) => {
+    const key = typeof column.key === "string" ? column.key : "";
+    const priority = DROP_PRIORITY[key.toLowerCase()];
+    return {
+      key,
+      label: viewText(column.label),
+      unit: asUnit(column.unit),
+      ...(priority !== undefined ? { dropPriority: priority } : {})
+    };
+  });
 }
 
 function legLines(
@@ -344,7 +399,15 @@ function legLines(
 ): string[] {
   const layout = body.layout;
   const currency = typeof body.currency === "string" ? body.currency : null;
-  const title = legTitle(leg, isToday, ctx);
+  // r4 draws no title over a single leg the view's title already names
+  // ("Google Ads since launch"), once it is final or a state reason says what
+  // is not in yet. Two legs keep theirs: they tell settled from today.
+  const window = asRecord(leg.window);
+  const label = viewText(window.label).toLowerCase();
+  const single = !isRecord(asRecord(body.legs).today);
+  const named = Boolean(label) && (draw.viewTitle ?? "").toLowerCase().includes(label);
+  const untitled = single && !isToday && named && (leg.final === true || draw.reasonSaid === true);
+  const title = untitled ? "" : legTitle(leg, isToday, ctx);
   const lines = title ? wrapText(title, ctx.width).map((line) => paint(line, "b", ctx)) : [];
 
   const rows = asList(leg.rows).filter(isRecord);
@@ -379,10 +442,15 @@ function legLines(
       rows: rows.map((row) => ({ label: viewText(row.label), cells: cellsOf(asRecord(row.cells), row.status) })),
       total: totals ? { label: "Total", cells: cellsOf(totals, null) } : null,
       currency,
-      selected
+      selected,
+      rowLabel: viewText(body.rowLabel)
     }, ctx, draw));
   }
   lines.push(...values);
+  if (!values.length && !steps.length) {
+    // A title over nothing says nothing (r4 "Not connected" draws no title).
+    return [];
+  }
   if (steps.length) {
     // The funnel follows the leg's numbers; neither replaces the other.
     if (values.length) lines.push("");
@@ -443,18 +511,35 @@ function kpiLines(
 
 // ── the coverage strip ──
 
-type CoverageMark = { glyph: string; words: string; role: "primary" | "muted" | "warning" | "hatch" };
+type CoverageMark = { glyph: string; words: string; role: "primary" | "muted" | "warning" | "hatch"; legend?: string };
 
-/** r4's day strip: `█` cyan, `·` dim, `◌` amber (today), `░` hatch (not synced yet). */
+/**
+ * r4's day strip: `█` cyan, `·` dim, `◌` amber (today), `░` hatch (not synced
+ * yet). A not-measured day is `—`, never `·` (a measured zero).
+ */
 const COVERAGE_MARKS: Record<string, CoverageMark> = {
   measured: { glyph: "█", words: "measured", role: "primary" },
   partial: { glyph: "▒", words: "partial", role: "warning" },
-  zero: { glyph: "·", words: "zero", role: "muted" },
+  // The legend shows five dots: one is too small to read (r4 `····· no spend`).
+  zero: { glyph: "·", words: "zero", role: "muted", legend: "·····" },
   not_measured: { glyph: "—", words: "not measured", role: "muted" },
   not_synced: { glyph: "░", words: "not synced", role: "hatch" },
   unknown: { glyph: "?", words: "unknown", role: "muted" }
 };
 const TODAY_MARK: CoverageMark = { glyph: "◌", words: "today, not synced yet", role: "warning" };
+/** A strip of spend (the table has a spend column) says r4's words: `no spend`, `spent`. */
+const SPEND_WORDS: Readonly<Record<string, string>> = { zero: "no spend", measured: "spent" };
+
+/** Today's date (`YYYY-MM-DD`) in `timeZone`, else UTC. */
+function todayIn(timeZone: unknown): string {
+  const zone = typeof timeZone === "string" && timeZone ? timeZone : "UTC";
+  const format = (tz: string) => new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(Date.now()));
+  try {
+    return format(zone);
+  } catch {
+    return format("UTC");
+  }
+}
 
 function coverageMark(status: unknown) {
   return typeof status === "string" && Object.hasOwn(COVERAGE_MARKS, status) && status !== "unknown"
@@ -468,7 +553,7 @@ function coverageMark(status: unknown) {
  * strip too long for the pane wraps below its dates. Then the legend, naming
  * only the marks the strip uses.
  */
-function coverageLines(legs: Record<string, unknown>, ctx: ViewRenderCtx, reasonSaid = false): string[] {
+function coverageLines(legs: Record<string, unknown>, ctx: ViewRenderCtx, reasonSaid = false, spend = false): string[] {
   const settled = asRecord(legs.settled);
   const today = isRecord(legs.today) ? legs.today : null;
   const coverage = asRecord(settled.coverage);
@@ -483,10 +568,14 @@ function coverageLines(legs: Record<string, unknown>, ctx: ViewRenderCtx, reason
     const to = asRecord(today.window).to;
     if (!todayDays.length && typeof to === "string") todayDates.add(to);
   }
+  // A day not synced yet that is today is today's ◌ (today is never final).
+  const today2 = todayIn(asRecord(settled.window).tz);
+  const words = (key: string, mark: CoverageMark): CoverageMark => (spend && SPEND_WORDS[key] ? { ...mark, words: SPEND_WORDS[key]! } : mark);
   const days: { date: string; mark: CoverageMark }[] = [];
   for (const day of asList(coverage.days).filter(isRecord)) {
     if (typeof day.date !== "string") continue;
-    days.push({ date: day.date, mark: todayDates.has(day.date) ? TODAY_MARK : coverageMark(day.status) });
+    const isToday = todayDates.has(day.date) || (day.status === "not_synced" && day.date === today2);
+    days.push({ date: day.date, mark: isToday ? TODAY_MARK : words(String(day.status), coverageMark(day.status)) });
   }
   for (const date of [...todayDates].sort()) {
     if (!days.some((day) => day.date === date)) days.push({ date, mark: TODAY_MARK });
@@ -513,14 +602,14 @@ function coverageLines(legs: Record<string, unknown>, ctx: ViewRenderCtx, reason
       lines.push(`  ${painted(start, Math.min(days.length, start + chunk))}`);
     }
   }
+  // The legend (r4): each mark the strip uses and its words, three spaces
+  // apart. A state reason already says which days are in: then no legend.
+  if (reasonSaid) {
+    return lines;
+  }
   const used = new Map<string, string>();
-  for (const day of days) used.set(day.mark.glyph, `${day.mark.glyph} ${day.mark.words}`);
-  const requested = finite(coverage.requestedDays);
-  const measured = finite(coverage.measuredDays);
-  const legend = [
-    ...(!reasonSaid && requested !== null && measured !== null ? [`${measured} of ${requested} days measured`] : []),
-    ...used.values()
-  ].join("   ");
+  for (const day of days) used.set(day.mark.glyph, `${day.mark.legend ?? day.mark.glyph} ${day.mark.words}`);
+  const legend = [...used.values()].join("   ");
   lines.push(...wrapText(legend, Math.max(1, ctx.width - legendIndent.length)).map((line) => `${legendIndent}${paint(line, "muted", ctx)}`));
   return lines;
 }
@@ -602,7 +691,7 @@ export function numbersBodyLines(body: Record<string, unknown>, ctx: ViewRenderC
     blocks.push(legLines(legs.today, true, nested, body, columns, ctx, draw));
   }
   if (legs) {
-    blocks.push(coverageLines(legs, ctx, draw.reasonSaid === true));
+    blocks.push(coverageLines(legs, ctx, draw.reasonSaid === true, columns.some((column) => column.key.toLowerCase() === "spend")));
   }
 
   const leaders = asList(body.leaders).filter(isRecord).flatMap((leader) => {
@@ -638,7 +727,7 @@ function selectableRows(body: Record<string, unknown>): number {
 }
 
 export const renderNumbers: KindRenderer<"numbers"> = (view, ctx): KindRender => {
-  const draw: MeasureDraw = { notes: new FootnoteBook(), hidden: 0, reasonSaid: isRecord(view.stateReason) };
+  const draw: MeasureDraw = { notes: new FootnoteBook(), hidden: 0, reasonSaid: isRecord(view.stateReason), viewTitle: viewText(view.title) };
   const detail = numbersBodyLines(asRecord(view.body), ctx, draw);
   return {
     detail,

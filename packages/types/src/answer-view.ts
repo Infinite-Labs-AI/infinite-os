@@ -5,7 +5,7 @@
  * Key rule: no key may end in "token", contain "credential", or equal a host-private key.
  */
 // ---- contract body (vendored verbatim into 1bu-1; edit only in infinite-os) ----
-export const ANSWER_VIEW_CONTRACT_REVISION = 1 as const;
+export const ANSWER_VIEW_CONTRACT_REVISION = 2 as const;
 export const RESULT_VIEW_CAPABILITY = "result.view.v1" as const;
 export const CONFIRM_FIELDS_CAPABILITY = "confirm.fields.v1" as const;
 export const CONFIRM_STREAM_CAPABILITY = "confirm.stream.v1" as const;
@@ -108,6 +108,7 @@ export type SectionV1 =
 export interface NumbersBodyV1 {
   layout: "kpis" | "table" | "series" | "steps" | "composite";
   currency: string | null; columns: ColumnV1[];
+  rowLabel?: string;                                      // the row-label column's header ("Campaign"); rev 2
   legs?: { settled: NumbersLegV1; today?: TodayLegV1 };   // required unless layout === "composite"; legs are NEVER summed
   leaders?: LeaderV1[];                                   // leaders per measure; never one winner without revenue
   sections?: SectionV1[]; verdictSource?: string; truncated?: TruncationV1;   // sections nest ONE level only
@@ -174,6 +175,7 @@ export interface JobBodyV1 {
 }
 export interface CompareBodyV1 {
   window: WindowV1;
+  armLabel?: string;                                      // the arm column's header ("Version"); rev 2
   arms: { key: string; label: string; n?: number | null; days?: number | null; metrics: Record<string, CellV1> }[];
   metricRows: { key: string; label: string; unit: UnitV1 }[];
   differences: { label: string; against: string; absolute: CellV1; relative: CellV1;

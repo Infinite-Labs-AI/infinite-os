@@ -60,6 +60,7 @@
             "tz": "UTC",
             "label": "Day 6 of 14"
           },
+          "armLabel": "Version",
           "arms": [
             {
               "key": "a",

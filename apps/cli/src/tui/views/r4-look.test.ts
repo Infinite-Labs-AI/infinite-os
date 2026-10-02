@@ -380,17 +380,17 @@ describe("numbers: the day strip (view-01, flow-numbers-03)", () => {
     const strip = render.detail.map(seg).filter((line) => line.startsWith("{b}Days") || line.startsWith("     "));
     expect(strip).toEqual([
       "{b}Days{} {dim}Sep 24 ·····{cyan}██{amber}◌{} {dim}Oct 1",
-      "     {dim}0 of 7 days measured   · zero   █ measured   ◌ today, not synced yet"
+      "     {dim}····· zero   █ measured   ◌ today, not synced yet"
     ]);
   });
 
-  it("a view whose state reason already says it drops the N-of-M lead from the legend", () => {
+  it("a view whose state reason already says which days are in draws no legend (r4 flow-numbers-03)", () => {
     const said = view({
       state: "partial", stateReason: { code: "p", words: "1 of 2 days in · Sep 30 not in yet" },
       body: numbers(days(["measured", "not_synced"], 29), null).body
     });
     const legend = renderView(said, ctx()).detail.map(seg).filter((line) => line.startsWith("     "));
-    expect(legend).toEqual(["     {dim}█ measured   ░ not synced"]);
+    expect(legend).toEqual([]);
   });
 
   it("a day not synced yet is the hatch ░, never a zero (flow-numbers-03)", () => {
@@ -399,18 +399,21 @@ describe("numbers: the day strip (view-01, flow-numbers-03)", () => {
   });
 });
 
-describe("selection outside the list is the same cb ▸ (SPEC §4 Arrows)", () => {
+describe("selection outside the list (SPEC §4 Arrows)", () => {
   const fixture = (name: string): AnswerViewV1 => {
     const decoded = decodeAnswerView(JSON.parse(readFileSync(fileURLToPath(new URL(`./__fixtures__/${name}.json`, import.meta.url)), "utf8")));
     if (!decoded) throw new Error(`fixture ${name} does not decode`);
     return decoded;
   };
 
-  it("a numbers table's selected row swaps its left border for a bold cyan ▸", () => {
-    const render = renderView(fixture("numbers-week-today"), ctx({ selected: 2 }));
+  it("a numbers table never draws ▸ into its border: once engaged, the selected row is on the sel background (run-2 M6)", () => {
+    const idle = renderView(fixture("numbers-week-today"), ctx({ selected: 2 }));
+    expect(idle.detail.map(seg).some((line) => line.includes("▸") || line.includes("sel"))).toBe(false);
+    const render = renderView(fixture("numbers-week-today"), ctx({ selected: 2, engaged: true }));
     const row = render.detail.map(seg).find((line) => line.includes("Hook C"))!;
-    expect(row.startsWith("{cb}▸")).toBe(true);
-    expect(render.detail.map(seg).find((line) => line.includes("Hook A"))!.startsWith("{cb}▸")).toBe(false);
+    expect(row).not.toContain("▸");
+    expect(row).toContain("sel");
+    expect(render.detail.map(seg).find((line) => line.includes("Hook A"))!).not.toContain("sel");
   });
 
   it("a numbers record's selected heading leads with the bold cyan ▸", () => {
