@@ -242,10 +242,42 @@ describe("runWizard: capabilities, budgets, nested mode and the fence", () => {
   it("a step that runs past its budget ends with the budget's outcome and kills the agents", async () => {
     const { run, log } = await setup()
     const result = await run(fakeSteps({ jobs: () => new Promise(() => {}) }, []), {
-      budgets: { jobs: { ms: 10, onOverrun: { kind: "failed", code: "INF_WIZ_AGENT_TIMEOUT", message: "late", next: "halt" } } }
+      budgets: { jobs: { ms: 10, onOverrun: { kind: "failed", code: "INF_WIZ_AGENT_TIMEOUT", message: "late", next: "halt" } } },
+      settleMs: 20
     })
     expect(result).toMatchObject({ exitCode: 1, stoppedAt: "jobs" })
     expect(log.names("agents")).toContain("agents.killAll")
+  })
+
+  it("after an overrun the engine waits for the step to unwind, THEN restores the fence snapshot, before it returns (O1-04)", async () => {
+    const { run, log } = await setup()
+    const order: string[] = []
+    const result = await run(
+      fakeSteps(
+        {
+          jobs: (ctx) =>
+            new Promise((resolve) => {
+              ctx.signal.addEventListener("abort", () => {
+                setTimeout(() => {
+                  order.push("step cleaned up")
+                  resolve({ kind: "ok", status: "late" })
+                }, 15)
+              })
+            })
+        },
+        []
+      ),
+      {
+        budgets: { jobs: { ms: 10, onOverrun: { kind: "failed", code: "INF_WIZ_AGENT_TIMEOUT", message: "late", next: "halt" } } },
+        settleMs: 2_000,
+        fenceAbort: async () => {
+          order.push(`fence abort (killAll before: ${log.names("agents").includes("agents.killAll")})`)
+        }
+      }
+    )
+    order.push("engine returned")
+    expect(result).toMatchObject({ exitCode: 1, stoppedAt: "jobs" })
+    expect(order).toEqual(["step cleaned up", "fence abort (killAll before: true)", "engine returned"])
   })
 
   it("nested mode spawns no agent: runJobs throws inside a step, and the jobs step is replaced by the handoff", async () => {

@@ -173,7 +173,18 @@ export interface EngineOptions {
   nestedJobs?: (ctx: WizardContext, deps: WizardDeps) => Promise<StepOutcome>
   /** The step a resume starts from (for `run.start`). */
   resumedFrom?: WizardStepId | null
+  /**
+   * The fence's snapshot restore (lane O3). After a budget overrun the engine kills the agents, waits for
+   * the step to settle (at most `settleMs`), then restores the snapshot, so the run never moves on (or
+   * releases its lock) while an overrun step is still writing.
+   */
+  fenceAbort?: () => Promise<void>
+  /** How long an overrun step gets to unwind after its abort (default STEP_SETTLE_MS). */
+  settleMs?: number
 }
+
+/** How long an overrun step gets to unwind after the engine aborts it. */
+export const STEP_SETTLE_MS = 30_000
 
 export interface EngineResult {
   exitCode: number
@@ -220,7 +231,8 @@ async function runWithBudget(
   step: WizardStep<WizardStepId>,
   ctx: WizardContext,
   deps: WizardDeps,
-  budget: StepBudget | undefined
+  budget: StepBudget | undefined,
+  overrun: { fenceAbort?: () => Promise<void>; settleMs: number }
 ): Promise<{ outcome: StepOutcome; overran: boolean }> {
   if (!budget) return { outcome: await step.run(ctx, deps), overran: false }
   const controller = new AbortController()
@@ -228,14 +240,29 @@ async function runWithBudget(
   ctx.signal.addEventListener("abort", onParentAbort, { once: true })
   const stepCtx: WizardContext = Object.create(ctx, { signal: { value: controller.signal, enumerable: true } })
   let timer: ReturnType<typeof setTimeout> | null = null
-  const overrun = new Promise<"overrun">((resolve) => {
+  const ranOut = new Promise<"overrun">((resolve) => {
     timer = setTimeout(() => resolve("overrun"), budget.ms)
   })
+  const running = step.run(stepCtx, deps)
   try {
-    const result = await Promise.race([step.run(stepCtx, deps), overrun])
+    const result = await Promise.race([running, ranOut])
     if (result === "overrun") {
+      // Stop the step, kill the agent tree, let the step unwind (bounded), then restore the snapshot:
+      // nothing may still be writing when the run moves on or releases its lock.
       controller.abort(new Error(`step ${step.id} ran past its budget`))
       await deps.agents.killAll()
+      let settleTimer: ReturnType<typeof setTimeout> | null = null
+      await Promise.race([
+        running.then(
+          () => undefined,
+          () => undefined
+        ),
+        new Promise<void>((resolve) => {
+          settleTimer = setTimeout(resolve, overrun.settleMs)
+        })
+      ])
+      if (settleTimer) clearTimeout(settleTimer)
+      if (overrun.fenceAbort) await overrun.fenceAbort()
       return { outcome: budget.onOverrun, overran: true }
     }
     return { outcome: result, overran: false }
@@ -300,7 +327,14 @@ export async function runWizard(ctx: WizardContext, rawDeps: WizardDeps, options
     } else {
       try {
         if (ctx.options.nested && id === "jobs") outcome = await nestedJobs(ctx, deps)
-        else outcome = (await runWithBudget(step, ctx, deps, budgets[id])).outcome
+        else {
+          outcome = (
+            await runWithBudget(step, ctx, deps, budgets[id], {
+              ...(options.fenceAbort ? { fenceAbort: options.fenceAbort } : {}),
+              settleMs: options.settleMs ?? STEP_SETTLE_MS
+            })
+          ).outcome
+        }
       } catch (error) {
         if (error instanceof EngineInvariantError) throw error
         if (isAbort(error, ctx.signal)) return interrupted()
