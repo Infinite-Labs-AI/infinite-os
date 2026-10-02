@@ -1,10 +1,14 @@
-// The `before` → `keys` hand-off: the IDs the live site and the code use, measured by `before` (lane O8).
+// The `before` → `keys` hand-off: the IDs the live site and the code use, as measured by `before` (lane O8).
 //
 // §3d.1 says the `keys` step compares the connection's IDs "with the live IDs from `before`", but the run state
-// (§3d.6) has no field for them and WizardDeps no channel. This lane therefore defines ONE file both steps use:
-// `.infinite/wizard/before-facts.json` (under the wizard's gitignore fence, mode 0600), holding `before`'s
-// BeforeFacts. `before` writes it with `writeBeforeFacts` (an integration item for O8/I1, recorded in the O2
-// note); `keys` reads it with `readBeforeFacts`. A missing or unreadable file never invents a match: the
+// (§3d.6) has no field for them and WizardDeps no channel. `before` (O8, `steps/before.ts`) therefore writes its
+// facts to `.infinite/wizard/before.json` (gitignored, mode 0600) as a `BeforeFactsFile`
+// `{schema:"infinite-tag.before-facts.v1", runId, measuredAt, facts, …}`; this module READS that file. O8 owns the
+// writer and the full envelope; only the fields read here are declared below, so the two cannot drift silently
+// (a renamed path, schema or field reads as "not measured", and the fix-round test pins O8's names).
+//
+// The read is RUN-SCOPED: a file written by another run (it is gitignored, so it outlives the run) or with no
+// run id is never this run's measurement. A missing, foreign or unreadable file never invents a match: the
 // comparison reads `undetermined (not measured)`.
 //
 // The IDs here are only ever COMPARED with the connection's. They are never used as keys (R2-16).
@@ -15,27 +19,29 @@ import type { BeforeFacts } from "../contracts/jobs.js"
 import { WIZARD_PATHS } from "../contracts/state.js"
 import type { TestTool } from "../contracts/test-engine.js"
 
-export const BEFORE_FACTS_PATH = `${WIZARD_PATHS.dir}/before-facts.json` as const
-export const BEFORE_FACTS_SCHEMA = "infinite-tag.wizard-before-facts.v1" as const
+/** O8's `BEFORE_FACTS_PATH` (`steps/before.ts`). */
+export const BEFORE_FACTS_PATH = `${WIZARD_PATHS.dir}/before.json` as const
+/** O8's `BEFORE_FACTS_SCHEMA` (`steps/before.ts`). */
+export const BEFORE_FACTS_SCHEMA = "infinite-tag.before-facts.v1" as const
 
-interface BeforeFactsFile {
+/** The part of O8's `BeforeFactsFile` this step reads. */
+export interface BeforeFactsEnvelope {
   schema: typeof BEFORE_FACTS_SCHEMA
-  writtenAt: string
+  runId: string
+  measuredAt: string
   facts: BeforeFacts
-}
-
-export async function writeBeforeFacts(fs: WizardFs, root: string, facts: BeforeFacts, writtenAt: string): Promise<void> {
-  const file: BeforeFactsFile = { schema: BEFORE_FACTS_SCHEMA, writtenAt, facts }
-  await fs.mkdirp(join(root, WIZARD_PATHS.dir), 0o700)
-  await fs.writeTextAtomic(join(root, BEFORE_FACTS_PATH), `${JSON.stringify(file, null, 2)}\n`, 0o600)
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
 }
 
-/** The facts `before` saved, or null when the file is missing, unreadable or not this schema. */
-export async function readBeforeFacts(fs: WizardFs, root: string): Promise<BeforeFacts | null> {
+/**
+ * The facts `before` measured in THIS run, or null when the file is missing, unreadable, another schema, or
+ * written by another run (or there is no run yet).
+ */
+export async function readBeforeFacts(fs: WizardFs, root: string, runId: string | null): Promise<BeforeFactsEnvelope | null> {
+  if (runId === null) return null
   const text = await fs.readText(join(root, BEFORE_FACTS_PATH))
   if (text === null) return null
   let parsed: unknown
@@ -44,11 +50,12 @@ export async function readBeforeFacts(fs: WizardFs, root: string): Promise<Befor
   } catch {
     return null
   }
-  if (!isRecord(parsed) || parsed.schema !== BEFORE_FACTS_SCHEMA || !isRecord(parsed.facts)) return null
+  if (!isRecord(parsed) || parsed.schema !== BEFORE_FACTS_SCHEMA || parsed.runId !== runId || !isRecord(parsed.facts)) return null
+  if (typeof parsed.measuredAt !== "string") return null
   const facts = parsed.facts
   if (!isRecord(facts.census) || !Array.isArray(facts.census.entries)) return null
   if (facts.dryLive !== null && !isRecord(facts.dryLive)) return null
-  return facts as unknown as BeforeFacts
+  return { schema: BEFORE_FACTS_SCHEMA, runId, measuredAt: parsed.measuredAt, facts: facts as unknown as BeforeFacts }
 }
 
 export type ObservedIds = Record<TestTool, string[]>

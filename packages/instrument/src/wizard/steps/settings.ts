@@ -2,8 +2,10 @@
 // never runs `vercel` and never sees a secret.
 //
 // 1. Declare the conversions the user APPROVED (the plan's answer ∩ the cloud run's `approvedConversions`).
-// 2. Save the server-lane settings on Vercel: `provisionServerLaneEnv({redeploy:"skip"})`. No hosting
-//    connection id is sent (the cloud resolves it); production is not restarted; they go live with the merge.
+// 2. Save the server-lane settings on Vercel, ONLY when the plan's `server_lane` line was approved (no line, an
+//    unanswered line or a declined one writes nothing to the customer's Vercel):
+//    `provisionServerLaneEnv({redeploy:"skip"})`. No hosting connection id is sent (the cloud resolves it);
+//    production is not restarted; they go live with the merge.
 // 3. Mark GA4 key events ONLY for approved names whose offline (T0) click test passed
 //    (`approved ∩ run.clickTestedConversions`); the rehearsal marks the rest after its own click tests.
 // 4. Bind and enable the Meta relay only when its plan line was approved AND the cloud says it is available.
@@ -69,8 +71,16 @@ function outcomeFor(error: unknown): StepOutcome | null {
 }
 
 async function provisionServerLane(ctx: WizardContext, deps: WizardDeps): Promise<"saved" | "needs_you" | "skipped"> {
-  if (lineApproval(ctx, "server_lane") === false) {
-    sub(ctx, "settings", "Server lane: skipped (you said no to it in the plan)", "info")
+  const approval = lineApproval(ctx, "server_lane")
+  if (approval !== true) {
+    // Writing env vars to the customer's Vercel production needs the user's yes on the plan line.
+    const why =
+      approval === false
+        ? "you said no to it in the plan"
+        : (ctx.state.get().plan?.lines ?? []).some((line) => lineKind(line.id) === "server_lane")
+          ? "its plan line was not approved"
+          : "the plan has no server lane for this site"
+    sub(ctx, "settings", `Server lane: nothing saved on Vercel (${why})`, "info")
     return "skipped"
   }
   sub(ctx, "settings", "Saving the server-lane settings on Vercel…", "pending")
@@ -106,11 +116,23 @@ async function enableMetaRelay(ctx: WizardContext, deps: WizardDeps): Promise<"o
     sub(ctx, "settings", status.reason ? RELAY_UNAVAILABLE_TEXT[status.reason] : "Meta server events: not available yet", "info")
     return "waiting"
   }
+  const runId = ctx.runId ?? ctx.state.get().runId
+  const chosen = (await readKeysResult(deps.fs, ctx.root, runId))?.choices.metaPixel ?? null
   if (status.enabled && status.bound) {
+    if (chosen && status.bound.pixelId !== chosen.pixelId) {
+      // The browser pixel and the server events would go to different pixels, so the shared event id (D11)
+      // could never dedupe. Reported, never re-bound without the user.
+      sub(
+        ctx,
+        "settings",
+        `! Meta server events are on for pixel ${status.bound.pixelId}, but this site uses pixel ${chosen.pixelId}. Switch the server events to ${chosen.pixelId} in Infinite (Connections › Meta)`,
+        "warn"
+      )
+      return "needs_you"
+    }
     sub(ctx, "settings", `✓ Meta server events: already on (pixel ${status.bound.pixelId})`, "ok")
     return "on"
   }
-  const chosen = (await readKeysResult(deps.fs, ctx.root))?.choices.metaPixel ?? null
   const sourceRef = chosen?.sourceRef ?? null
   if (!sourceRef) {
     sub(ctx, "settings", "! Meta server events: no Meta pixel was chosen for this site, so nothing was switched on", "warn")
@@ -182,6 +204,7 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
     ]
     if (marked.length > 0) parts.push(`${marked.length} GA4 key event${marked.length === 1 ? "" : "s"}`)
     if (relay === "on") parts.push("Meta server events on")
+    if (relay === "needs_you") parts.push("Meta server events: needs you in Infinite")
     return { kind: "ok", status: parts.join(" · ") }
   } catch (error) {
     const outcome = outcomeFor(error)

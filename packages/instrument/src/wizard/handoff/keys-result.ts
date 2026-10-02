@@ -1,10 +1,12 @@
 // What the `keys` step decided, for the `plan` step (lane O7) and `settings`: which GA4 stream and Meta pixel
 // are this site's, how the connection's IDs compare with what `before` saw, and the plan lines that follow.
 //
-// Kept in `.infinite/wizard/keys.json` (gitignored, 0600). It holds CHOICES among the connection's own IDs and
-// the comparison, never a key from anywhere else: wizard keys come from the bridge `keys` verb only (R2-16);
-// the plan re-reads the verb and applies these choices. A mismatch between the live site and the connection is
-// a plan line the user sees, never an overwrite.
+// Kept in `.infinite/wizard/keys.json` (gitignored, 0600), scoped to the run that wrote it. It holds CHOICES
+// among the connection's own IDs and the comparison, never a key from anywhere else: wizard keys come from the
+// bridge `keys` verb only (R2-16). A reader applies the choices to the keys it read itself with
+// `applyKeysChoices` (the plan / install steps do this before building the installer's input, so a user's
+// "which GA4 stream?" / "which pixel?" answer is never dropped). A mismatch between the live site and the
+// connection is a plan line the user sees, never an overwrite.
 import { createHash } from "node:crypto"
 import { join } from "node:path"
 
@@ -54,9 +56,14 @@ export interface KeysChoices {
 
 export interface KeysStepResult {
   schema: typeof KEYS_RESULT_SCHEMA
+  /** The run this result belongs to: a reader for another run gets null. */
+  runId: string
   at: string
   linkId: string | null
-  /** sha256 of the keys response the choices were made against (the plan re-reads keys; a change → re-run keys). */
+  /**
+   * sha256 of the connections the choices were made against: the keys response WITHOUT its envelope
+   * (`protocolVersion`, `requestId`), keys in canonical order, so the same connections always hash the same.
+   */
   keysDigest: string
   choices: KeysChoices
   comparisons: KeysToolComparison[]
@@ -66,8 +73,43 @@ export interface KeysStepResult {
   metaInstall: boolean
 }
 
-export function keysDigest(keys: TagKeys): string {
-  return `sha256:${createHash("sha256").update(JSON.stringify(keys)).digest("hex")}`
+/** JSON with object keys sorted at every depth (arrays keep their order). */
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`
+  if (typeof value === "object" && value !== null) {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .filter(([, item]) => item !== undefined)
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    return `{${entries.map(([key, item]) => `${JSON.stringify(key)}:${canonicalJson(item)}`).join(",")}}`
+  }
+  return JSON.stringify(value)
+}
+
+/** The digest of the connections (the keys response without its bridge envelope). */
+export function keysDigest(keys: TagKeys | (TagKeys & { protocolVersion?: unknown; requestId?: unknown })): string {
+  const { protocolVersion: _version, requestId: _request, ...connections } = keys as TagKeys & { protocolVersion?: unknown; requestId?: unknown }
+  return `sha256:${createHash("sha256").update(canonicalJson(connections)).digest("hex")}`
+}
+
+/**
+ * The keys narrowed to this site's choices: GA4 keeps only the chosen stream and Meta only the chosen pixel
+ * (status `connected`). A choice that is no longer among the connection's IDs narrows nothing, and Infinite's
+ * own dataset is never turned into an installable pixel. Never adds an ID the keys verb did not return.
+ */
+export function applyKeysChoices<T extends TagKeys>(keys: T, result: Pick<KeysStepResult, "choices" | "metaInstall"> | null): T {
+  const narrowed = structuredClone(keys)
+  if (!result) return narrowed
+  const streamId = result.choices.ga4MeasurementId
+  if (streamId && narrowed.ga4.status === "connected") {
+    const stream = narrowed.ga4.streams.filter((candidate) => candidate.measurementId === streamId)
+    if (stream.length === 1) narrowed.ga4.streams = stream
+  }
+  const pixel = result.choices.metaPixel
+  if (pixel && result.metaInstall && (narrowed.meta.status === "connected" || narrowed.meta.status === "multiple")) {
+    const chosen = narrowed.meta.pixels.filter((candidate) => candidate.pixelId === pixel.pixelId && candidate.sourceRef === pixel.sourceRef)
+    if (chosen.length === 1) narrowed.meta = { ...narrowed.meta, status: "connected", pixels: chosen }
+  }
+  return narrowed
 }
 
 const TOOL_LABEL: Record<TestTool, string> = { infinite: "Infinite", ga4: "GA4", posthog: "PostHog", meta: "Meta" }
@@ -204,13 +246,15 @@ export async function writeKeysResult(fs: WizardFs, root: string, result: KeysSt
   await fs.writeTextAtomic(join(root, KEYS_RESULT_PATH), `${JSON.stringify(result, null, 2)}\n`, 0o600)
 }
 
-/** The saved result, or null when missing, unreadable or another schema. */
-export async function readKeysResult(fs: WizardFs, root: string): Promise<KeysStepResult | null> {
+/** This run's saved result, or null when missing, unreadable, another schema, or written by another run. */
+export async function readKeysResult(fs: WizardFs, root: string, runId: string | null): Promise<KeysStepResult | null> {
+  if (runId === null) return null
   const text = await fs.readText(join(root, KEYS_RESULT_PATH))
   if (text === null) return null
   try {
     const parsed = JSON.parse(text) as Partial<KeysStepResult>
-    if (parsed.schema !== KEYS_RESULT_SCHEMA || typeof parsed.choices !== "object" || parsed.choices === null || !Array.isArray(parsed.lines)) return null
+    if (parsed.schema !== KEYS_RESULT_SCHEMA || parsed.runId !== runId) return null
+    if (typeof parsed.choices !== "object" || parsed.choices === null || !Array.isArray(parsed.lines)) return null
     return parsed as KeysStepResult
   } catch {
     return null

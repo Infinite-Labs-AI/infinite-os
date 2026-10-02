@@ -4,16 +4,18 @@ import { join } from "node:path"
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
+import { writeO8BeforeFile } from "../../../test/wizard/before-file.js"
 import { fixtureResponse, loadTestRunCases, startFakeBridge, type FakeBridge, type FakeBridgeScript } from "../../../test/wizard/fake-bridge.js"
 import { makeContext, makeDeps, nodeWizardFs, type HarnessOptions } from "../../../test/wizard/step-harness.js"
 import { openTagBridge } from "../../bridge/client.js"
 import type { TagHosting, TagKeys } from "../contracts/bridge.js"
 import type { BeforeFacts } from "../contracts/jobs.js"
 import type { TestResult } from "../contracts/test-engine.js"
-import { writeBeforeFacts } from "../handoff/before-facts.js"
-import { KEYS_RESULT_PATH, readKeysResult } from "../handoff/keys-result.js"
+import { KEYS_RESULT_PATH, keysDigest, readKeysResult } from "../handoff/keys-result.js"
+import { hashInputs, PROCESS_NONCE } from "../../bridge/step-kit.js"
 import { step } from "./keys.js"
 
+const RUN_ID = "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
 let root: string
 const bridges: FakeBridge[] = []
 
@@ -65,14 +67,14 @@ async function setup(keys: TagKeys, context: Partial<HarnessOptions> = {}, scrip
   })
   client.setLinkId(linked.link?.linkId ?? null)
   bridge.calls.length = 0
-  const harness = makeContext({ root, ...context })
+  const harness = makeContext({ root, runId: RUN_ID, ...context })
   return { bridge, harness, deps: makeDeps({ bridge: client }) }
 }
 
 describe("step keys", () => {
   it("two GA4 web streams → ONE single ask; the choice is saved for the plan", async () => {
     const keys = baseKeys()
-    await writeBeforeFacts(nodeWizardFs, root, beforeFacts(keys, dryLive()), "2026-10-02T09:05:00.000Z")
+    await writeO8BeforeFile(nodeWizardFs, root, RUN_ID, beforeFacts(keys, dryLive()))
     const { harness, deps } = await setup(keys, { answers: [(payload: unknown) => (payload as { options: Array<{ value: string }> }).options[0]?.value] })
     const outcome = await step.run(harness.ctx, deps)
     expect(outcome).toEqual({ kind: "ok", status: "Keys from Infinite · nothing to paste" })
@@ -83,7 +85,7 @@ describe("step keys", () => {
     expect(payload.question).toBe("The GA4 property has 2 web streams. Which one is this site?")
     expect(payload.options.map((option) => option.value)).toEqual(["G-FAKE00001", "G-FAKE00002"])
     expect(payload.options[0]?.label).toBe("www.acme-store.com  (G-FAKE00001)")
-    const result = await readKeysResult(nodeWizardFs, root)
+    const result = await readKeysResult(nodeWizardFs, root, RUN_ID)
     expect(result?.choices.ga4MeasurementId).toBe("G-FAKE00001")
     expect(result?.choices.metaPixel).toEqual({ pixelId: "1234567890123456", sourceRef: "meta_src_FAKE_0001" })
     expect(harness.subs()).toContain("✓ Live site uses the same IDs")
@@ -96,32 +98,32 @@ describe("step keys", () => {
     const second = await setup(keys)
     expect((await step.run(second.harness.ctx, second.deps)).kind).toBe("ok")
     expect(second.harness.asks).toHaveLength(0)
-    expect((await readKeysResult(nodeWizardFs, root))?.choices.ga4MeasurementId).toBe("G-FAKE00002")
+    expect((await readKeysResult(nodeWizardFs, root, RUN_ID))?.choices.ga4MeasurementId).toBe("G-FAKE00002")
   })
 
   it("no answer to the stream ask → parked NEEDS_ANSWERS (never a guessed stream)", async () => {
     const { harness, deps } = await setup(baseKeys(), { answers: ["__cancelled__"] })
     expect(await step.run(harness.ctx, deps)).toMatchObject({ kind: "parked", code: "INF_WIZ_NEEDS_ANSWERS" })
-    expect(await readKeysResult(nodeWizardFs, root)).toBeNull()
+    expect(await readKeysResult(nodeWizardFs, root, RUN_ID)).toBeNull()
   })
 
   it("a live ID that differs from the connection → a plan line, not an overwrite", async () => {
     const keys = baseKeys()
     keys.ga4.streams = keys.ga4.streams.slice(0, 1)
-    await writeBeforeFacts(
+    await writeO8BeforeFile(
       nodeWizardFs,
       root,
+      RUN_ID,
       beforeFacts(
         keys,
         dryLive((result) => {
           for (const event of result.ga4.events) event.tid = "G-OLDSTREAM9"
         })
-      ),
-      "2026-10-02T09:05:00.000Z"
+      )
     )
     const { harness, deps } = await setup(keys)
     expect((await step.run(harness.ctx, deps)).kind).toBe("ok")
-    const result = await readKeysResult(nodeWizardFs, root)
+    const result = await readKeysResult(nodeWizardFs, root, RUN_ID)
     const ga4 = result?.comparisons.find((comparison) => comparison.tool === "ga4")
     expect(ga4).toMatchObject({ state: "problem", reason: "mismatch", expected: ["G-FAKE00001"], live: ["G-OLDSTREAM9"] })
     const line = result?.lines.find((candidate) => candidate.id === "user_action:keys_mismatch_ga4")
@@ -141,7 +143,7 @@ describe("step keys", () => {
     const { bridge, harness, deps } = await setup(keys)
     const outcome = await step.run(harness.ctx, deps)
     expect(outcome).toEqual({ kind: "ok", status: "Keys from Infinite · 1 to connect in Infinite" })
-    const result = await readKeysResult(nodeWizardFs, root)
+    const result = await readKeysResult(nodeWizardFs, root, RUN_ID)
     expect(result?.choices.ga4MeasurementId).toBeNull()
     expect(result?.comparisons.find((comparison) => comparison.tool === "ga4")).toMatchObject({ state: "undetermined", reason: "not_connected", expected: [] })
     expect(result?.lines.find((line) => line.id === "user_action:connect_ga4")?.text).toContain("Connect GA4 in Infinite")
@@ -157,7 +159,7 @@ describe("step keys", () => {
     keys.meta = { status: "infinite_dataset", pixels: [] }
     const { harness, deps } = await setup(keys)
     expect((await step.run(harness.ctx, deps)).kind).toBe("ok")
-    const result = await readKeysResult(nodeWizardFs, root)
+    const result = await readKeysResult(nodeWizardFs, root, RUN_ID)
     expect(result?.metaInstall).toBe(false)
     expect(result?.choices.metaPixel).toBeNull()
     expect(result?.lines.find((line) => line.id === "user_action:meta_infinite_dataset")).toMatchObject({
@@ -180,7 +182,7 @@ describe("step keys", () => {
     const { harness, deps } = await setup(keys, { answers: ["6543210987654321"] })
     expect((await step.run(harness.ctx, deps)).kind).toBe("ok")
     expect(harness.asks[0]?.kind).toBe("single")
-    expect((await readKeysResult(nodeWizardFs, root))?.choices.metaPixel).toEqual({ pixelId: "6543210987654321", sourceRef: "meta_src_FAKE_0002" })
+    expect((await readKeysResult(nodeWizardFs, root, RUN_ID))?.choices.metaPixel).toEqual({ pixelId: "6543210987654321", sourceRef: "meta_src_FAKE_0002" })
   })
 
   it("without before's facts nothing is claimed to match (undetermined, not measured)", async () => {
@@ -188,7 +190,7 @@ describe("step keys", () => {
     keys.ga4.streams = keys.ga4.streams.slice(0, 1)
     const { harness, deps } = await setup(keys)
     expect((await step.run(harness.ctx, deps)).kind).toBe("ok")
-    const result = await readKeysResult(nodeWizardFs, root)
+    const result = await readKeysResult(nodeWizardFs, root, RUN_ID)
     for (const tool of ["ga4", "posthog", "meta", "infinite"]) {
       expect(result?.comparisons.find((comparison) => comparison.tool === tool)).toMatchObject({ state: "undetermined", reason: "not_measured" })
     }
@@ -201,11 +203,81 @@ describe("step keys", () => {
     keys.serverLane.envWriteGranted = false
     const { harness, deps } = await setup(keys)
     await step.run(harness.ctx, deps)
-    expect((await readKeysResult(nodeWizardFs, root))?.lines.map((line) => line.id)).toContain("user_action:vercel_env_write")
+    expect((await readKeysResult(nodeWizardFs, root, RUN_ID))?.lines.map((line) => line.id)).toContain("user_action:vercel_env_write")
   })
 
   it("402 → blocked SUBSCRIPTION_REQUIRED", async () => {
     const { harness, deps } = await setup(baseKeys(), {}, { errors: { keys: { code: "subscription_required" } } })
     expect(await step.run(harness.ctx, deps)).toMatchObject({ kind: "blocked", code: "INF_WIZ_SUBSCRIPTION_REQUIRED" })
+  })
+
+  it("a code-only match is never claimed as the live site (the live load did not run)", async () => {
+    const keys = baseKeys()
+    keys.ga4.streams = keys.ga4.streams.slice(0, 1)
+    const facts = beforeFacts(keys, null)
+    facts.census.entries = [{ tool: "ga4", kind: "gtag_config", id: "G-FAKE00001", file: "app/layout.tsx", line: 14, owner: "adopted" }]
+    await writeO8BeforeFile(nodeWizardFs, root, RUN_ID, facts)
+    const { harness, deps } = await setup(keys)
+    expect((await step.run(harness.ctx, deps)).kind).toBe("ok")
+    expect(harness.subs()).not.toContain("✓ Live site uses the same IDs")
+    expect(harness.subs()).toContain("✓ IDs in your code match your Infinite connections (the live site was not measured)")
+  })
+
+  it("the live load ran but did not send a compared id → the code match is not called a live one", async () => {
+    const keys = baseKeys()
+    keys.ga4.streams = keys.ga4.streams.slice(0, 1)
+    const facts = beforeFacts(
+      keys,
+      dryLive((result) => {
+        result.ga4.events = []
+      })
+    )
+    facts.census.entries = [{ tool: "ga4", kind: "gtag_config", id: "G-FAKE00001", file: "app/layout.tsx", line: 14, owner: "adopted" }]
+    await writeO8BeforeFile(nodeWizardFs, root, RUN_ID, facts)
+    const { harness, deps } = await setup(keys)
+    expect((await step.run(harness.ctx, deps)).kind).toBe("ok")
+    expect(harness.subs()).not.toContain("✓ Live site uses the same IDs")
+    expect(harness.subs()).toContain("✓ IDs in your code match your Infinite connections")
+  })
+
+  it("a before file left by ANOTHER run is not this run's measurement (undetermined, nothing claimed)", async () => {
+    const keys = baseKeys()
+    keys.ga4.streams = keys.ga4.streams.slice(0, 1)
+    await writeO8BeforeFile(nodeWizardFs, root, "0a0a0a0a-b0de-4c5f-8a21-3e4d5c6b7a80", beforeFacts(keys, dryLive()))
+    const { harness, deps } = await setup(keys)
+    expect((await step.run(harness.ctx, deps)).kind).toBe("ok")
+    const result = await readKeysResult(nodeWizardFs, root, RUN_ID)
+    expect(result?.comparisons.find((comparison) => comparison.tool === "ga4")).toMatchObject({ state: "undetermined", reason: "not_measured" })
+    expect(harness.subs()).not.toContain("✓ Live site uses the same IDs")
+  })
+
+  it("keys.json records the run and a digest of the connections only", async () => {
+    const keys = baseKeys()
+    keys.ga4.streams = keys.ga4.streams.slice(0, 1)
+    const { harness, deps } = await setup(keys)
+    await step.run(harness.ctx, deps)
+    const result = await readKeysResult(nodeWizardFs, root, RUN_ID)
+    expect(result?.runId).toBe(RUN_ID)
+    expect(result?.keysDigest).toBe(keysDigest(keys))
+  })
+
+  it("is never skipped on resume (connections may have changed): its hash carries the process nonce", () => {
+    const harness = makeContext({ root, runId: RUN_ID })
+    expect(step.inputHash(harness.ctx)).toBe(step.inputHash(harness.ctx))
+    expect(step.inputHash(harness.ctx)).toBe(hashInputs({ step: "keys", linkId: null, before: null, process: PROCESS_NONCE }))
+  })
+
+  it("the app quits mid-run (connection refused) → blocked NO_APP, not a crash", async () => {
+    const { bridge, harness, deps } = await setup(baseKeys())
+    await bridge.close()
+    bridges.splice(bridges.indexOf(bridge), 1)
+    expect(await step.run(harness.ctx, deps)).toMatchObject({ kind: "blocked", code: "INF_WIZ_NO_APP" })
+  })
+
+  it("a cloud 502 on keys → blocked with a retry hint, not a crash", async () => {
+    const { harness, deps } = await setup(baseKeys(), {}, { errors: { keys: { code: "cloud_error", upstreamStatus: 502 } } })
+    const outcome = await step.run(harness.ctx, deps)
+    expect(outcome).toMatchObject({ kind: "blocked", code: "INF_WIZ_NO_APP" })
+    expect((outcome as { reason: string }).reason).toContain("Try again in a minute")
   })
 })

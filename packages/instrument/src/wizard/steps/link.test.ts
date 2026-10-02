@@ -99,10 +99,73 @@ describe("step link", () => {
     expect(await step.run(harness.ctx, deps)).toMatchObject({ kind: "failed", code: "INF_WIZ_LINK_EXPIRED" })
   })
 
-  it("the 5-minute window closing counts as expired", async () => {
+  it("the 5-minute window closing counts as expired, and no retry is offered past it", async () => {
     const { bridge, harness, deps } = await setup({ link: "pending" }, { answers: ["pending", false], clockStepMs: 120_000 })
     expect(await step.run(harness.ctx, deps)).toMatchObject({ kind: "failed", code: "INF_WIZ_LINK_EXPIRED" })
     expect(bridge.callsFor("link.poll").length).toBeLessThan(5)
+    expect(harness.asks.map((ask) => ask.kind)).toEqual(["link-code"])
+  })
+
+  it("a retry stays inside ONE 5-minute approval window (the engine's link budget is 6 minutes)", async () => {
+    let bridgeRef: FakeBridge | null = null
+    const { bridge, harness, deps } = await setup(
+      { link: "expire" },
+      {
+        answers: [
+          "pending",
+          () => {
+            if (bridgeRef) bridgeRef.script.link = "approve"
+            return true
+          },
+          "pending"
+        ],
+        clockStepMs: 10_000
+      }
+    )
+    bridgeRef = bridge
+    expect((await step.run(harness.ctx, deps)).kind).toBe("ok")
+    const [first, confirm, second] = harness.asks
+    const firstMs = first?.options?.timeoutMs as number
+    const confirmMs = confirm?.options?.timeoutMs as number
+    const secondMs = second?.options?.timeoutMs as number
+    expect(firstMs).toBeLessThanOrEqual(5 * 60_000)
+    expect(confirmMs).toBeLessThan(firstMs)
+    expect(secondMs).toBeLessThan(confirmMs)
+  })
+
+  it("the window closing on the code's own timer (ASK_TIMEOUT) → expired", async () => {
+    const { harness, deps } = await setup({ link: "pending" }, { answers: ["__timeout__", false] })
+    expect(await step.run(harness.ctx, deps)).toMatchObject({ kind: "failed", code: "INF_WIZ_LINK_EXPIRED" })
+  })
+
+  it("a stray answer to the display-only code card is not an expiry: polling continues to approval", async () => {
+    const { harness, deps } = await setup({ link: "approve", linkPollsBeforeAnswer: 2 }, { answers: ["stray"] })
+    const outcome = await step.run(harness.ctx, deps)
+    expect(outcome.kind).toBe("ok")
+    expect(harness.asks.map((ask) => ask.kind)).toEqual(["link-code"])
+  })
+
+  it("a resumed run whose site is now linked to ANOTHER workspace stops (its run id belongs to the first one)", async () => {
+    const state = freshState("", {
+      runId: "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80",
+      link: { linkId: "lk_FAKElinkGlobexSite00000", workspaceName: "Globex", approvedAt: "2026-10-01T09:01:00.000Z", runtimeVariant: "prod" }
+    })
+    const { client, harness, deps } = await setup({ link: "remembered" }, { state })
+    const outcome = await step.run(harness.ctx, deps)
+    expect(outcome).toMatchObject({ kind: "failed", code: "INF_WIZ_LINK_DECLINED", next: "halt" })
+    expect((outcome as { message: string }).message).toContain("started in the Infinite workspace Globex, but this site is now linked to Acme")
+    expect(harness.state().link?.workspaceName).toBe("Globex")
+    expect(client.currentLinkId()).toBeNull()
+  })
+
+  it("a re-link to the SAME workspace (a new link id) continues the run", async () => {
+    const state = freshState("", {
+      runId: "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80",
+      link: { linkId: "lk_FAKEoldLinkAcmeStore000", workspaceName: "Acme", approvedAt: "2026-10-01T09:01:00.000Z", runtimeVariant: "prod" }
+    })
+    const { client, harness, deps } = await setup({ link: "remembered" }, { state })
+    expect((await step.run(harness.ctx, deps)).kind).toBe("ok")
+    expect(client.currentLinkId()).toBe("lk_FAKElinkAcmeStore00000")
   })
 
   it("ESC on the code → cancelled (declined), polling stops", async () => {

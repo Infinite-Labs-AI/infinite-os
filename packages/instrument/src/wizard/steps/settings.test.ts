@@ -61,6 +61,8 @@ async function setup(options: {
   clickTested: string[]
   script?: Partial<FakeBridgeScript>
   agentAlive?: boolean
+  /** The run that wrote keys.json (default this run). */
+  keysRunId?: string
 }) {
   const bridge = await startFakeBridge({ script: { link: "remembered", ...options.script } })
   bridges.push(bridge)
@@ -75,6 +77,7 @@ async function setup(options: {
   bridge.calls.length = 0
   await writeKeysResult(nodeWizardFs, root, {
     schema: KEYS_RESULT_SCHEMA,
+    runId: options.keysRunId ?? RUN_ID,
     at: "2026-10-02T09:06:00.000Z",
     linkId: linked.link?.linkId ?? null,
     keysDigest: `sha256:${"c".repeat(64)}`,
@@ -225,6 +228,56 @@ describe("step settings", () => {
   it("402 → blocked SUBSCRIPTION_REQUIRED", async () => {
     const { harness, deps } = await setup({ conversions: ["signup"], lines: ALL_APPROVED, approved: ["signup"], clickTested: [], script: { paid: false } })
     expect(await step.run(harness.ctx, deps)).toMatchObject({ kind: "blocked", code: "INF_WIZ_SUBSCRIPTION_REQUIRED" })
+  })
+})
+
+describe("step settings: the customer's Vercel is written only with the user's yes", () => {
+  for (const [label, lines] of [
+    ["no server_lane line in the plan (e.g. a static site, or no Infinite pixel)", [{ id: "meta_relay", approved: false }]],
+    ["a server_lane line left unanswered", [{ id: "server_lane", approved: null }]]
+  ] as const) {
+    it(`${label} → no env write (negative)`, async () => {
+      const { bridge, harness, deps } = await setup({ conversions: [], lines: [...lines], approved: [], clickTested: [] })
+      const outcome = await step.run(harness.ctx, deps)
+      expect(bridge.callsFor("server-lane.provision-env")).toHaveLength(0)
+      expect(outcome).toMatchObject({ kind: "ok", status: "Vercel: skipped · 0 conversions declared" })
+      expect(harness.subs().some((text) => text.startsWith("Server lane: nothing saved on Vercel"))).toBe(true)
+    })
+  }
+})
+
+describe("step settings: Meta relay pixel", () => {
+  it("already on for ANOTHER pixel than this site's → a warning, never reported as on", async () => {
+    const { bridge, harness, deps } = await setup({
+      conversions: [],
+      lines: ALL_APPROVED,
+      approved: [],
+      clickTested: [],
+      script: { metaRelay: { available: true, reason: null, bound: { sourceRef: "meta_src_FAKE_0002", pixelId: "6543210987654321" }, enabled: true } }
+    })
+    const outcome = await step.run(harness.ctx, deps)
+    expect(bridge.callsFor("meta-relay.enable")).toHaveLength(0)
+    expect(harness.subs()).not.toContain("✓ Meta server events: already on (pixel 6543210987654321)")
+    expect(harness.subs().some((text) => text.includes("but this site uses pixel 1234567890123456"))).toBe(true)
+    expect((outcome as { status: string }).status).not.toContain("Meta server events on")
+  })
+
+  it("keys.json from another run is not this site's choice: the relay is not bound to it", async () => {
+    const { bridge, harness, deps } = await setup({ conversions: [], lines: ALL_APPROVED, approved: [], clickTested: [], keysRunId: "0a0a0a0a-b0de-4c5f-8a21-3e4d5c6b7a80" })
+    await step.run(harness.ctx, deps)
+    expect(bridge.callsFor("meta-relay.enable")).toHaveLength(0)
+    expect(harness.subs()).toContain("! Meta server events: no Meta pixel was chosen for this site, so nothing was switched on")
+  })
+
+  it("a cloud error mid-step → blocked with a retry hint, not a crash", async () => {
+    const { harness, deps } = await setup({
+      conversions: ["signup"],
+      lines: ALL_APPROVED,
+      approved: ["signup"],
+      clickTested: [],
+      script: { errors: { conversions: { code: "upstream_timeout" } } }
+    })
+    expect(await step.run(harness.ctx, deps)).toMatchObject({ kind: "blocked", code: "INF_WIZ_NO_APP" })
   })
 })
 

@@ -5,12 +5,14 @@
 // `before` already read the keys silently (for the dry load's `expect`); this step re-reads them and:
 // - asks which GA4 web stream is this site when the property has more than one (and which pixel when the Meta
 //   connection has several); a choice is remembered for resumes; no answer → parked NEEDS_ANSWERS;
-// - compares the connection's IDs with what `before` saw on the live site and in the code: a mismatch is a
-//   plan line, never an overwrite;
+// - compares the connection's IDs with what `before` saw on the live site and in the code (THIS run's facts
+//   only): a mismatch is a plan line, never an overwrite; "the live site uses the same IDs" is said only when
+//   the live site was measured and sent each compared ID, otherwise only the code is said to match;
 // - turns every missing connection into a "connect it in Infinite" line (that tool's `ids_match_connections`
 //   is `undetermined (not_connected)`);
 // - when the workspace's Meta pixel is Infinite's own dataset, says so and never installs Meta.
-// The result (choices, comparisons, lines) goes to `.infinite/wizard/keys.json` for the plan step.
+// The result (choices, comparisons, lines) goes to `.infinite/wizard/keys.json` (run-scoped) for the plan step,
+// which narrows the keys it reads with `applyKeysChoices`.
 import type { AskOption } from "../contracts/asks.js"
 import { ASK_CANCELLED, ASK_TIMEOUT } from "../contracts/asks.js"
 import type { TagKeys } from "../contracts/bridge.js"
@@ -18,7 +20,7 @@ import type { StepOutcome, WizardContext, WizardDeps, WizardStep } from "../cont
 import { WIZARD_STEP_META } from "../contracts/steps.js"
 import { isBridgeError } from "../../bridge/errors.js"
 import { bridgeErrorOutcome, missingCapabilities, protocolOutcome } from "../../bridge/outcomes.js"
-import { hashInputs, sub } from "../../bridge/step-kit.js"
+import { hashInputs, PROCESS_NONCE, sub } from "../../bridge/step-kit.js"
 import { observedIdsFromBefore, readBeforeFacts } from "../handoff/before-facts.js"
 import {
   KEYS_RESULT_SCHEMA,
@@ -135,6 +137,9 @@ function keySub(ctx: WizardContext, label: string, comparison: KeysToolCompariso
 async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
   const missing = missingCapabilities(deps.bridge, META.requiredCapabilities)
   if (missing.length > 0) return protocolOutcome(missing)
+  // `before` halts without a run, so a run always exists here; the hand-off files are scoped to it.
+  const runId = ctx.runId ?? ctx.state.get().runId
+  if (runId === null) throw new Error("keys: no cloud run (the agent step creates it before this step runs)")
 
   sub(ctx, "keys", "Reading your Infinite connections…", "pending")
   let keys: TagKeys
@@ -148,9 +153,9 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
     throw error
   }
 
-  const before = await readBeforeFacts(deps.fs, ctx.root)
+  const before = (await readBeforeFacts(deps.fs, ctx.root, runId))?.facts ?? null
   const observed = before ? observedIdsFromBefore(before) : null
-  const previous = (await readKeysResult(deps.fs, ctx.root))?.choices ?? null
+  const previous = (await readKeysResult(deps.fs, ctx.root, runId))?.choices ?? null
   const hostHints = [
     ...keys.infinite.productionHosts.map((host) => host.toLowerCase()),
     ...(before?.observedProductionHost ? [before.observedProductionHost.toLowerCase()] : [])
@@ -177,13 +182,18 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
   if (observed === null) {
     sub(ctx, "keys", "Live IDs were not measured in this run, so they are not compared", "info")
   } else if (problems.length === 0 && compared.length > 0) {
-    sub(ctx, "keys", "✓ Live site uses the same IDs", "ok")
+    // "Live" only when the live load ran and sent every compared ID; a literal in the repo is not the live site.
+    const liveConfirmed = observed.liveMeasured && compared.every((comparison) => comparison.live.length > 0)
+    if (liveConfirmed) sub(ctx, "keys", "✓ Live site uses the same IDs", "ok")
+    else if (!observed.liveMeasured) sub(ctx, "keys", "✓ IDs in your code match your Infinite connections (the live site was not measured)", "ok")
+    else sub(ctx, "keys", "✓ IDs in your code match your Infinite connections", "ok")
   }
 
   const lines = keysPlanLines(keys, comparisons)
   const metaInstall = keys.meta.status !== "infinite_dataset" && choices.metaPixel !== null
   const result: KeysStepResult = {
     schema: KEYS_RESULT_SCHEMA,
+    runId,
     at: ctx.now().toISOString(),
     linkId: ctx.state.get().link?.linkId ?? null,
     keysDigest: keysDigest(keys),
@@ -205,10 +215,13 @@ export const step: WizardStep<"keys"> = {
   who: [...META.who],
   learn: META.learn,
   requiredCapabilities: [...META.requiredCapabilities],
+  // Never skipped on resume: the connections may have changed since ("connect GA4 in Infinite, then run
+  // npx infinite-tag again"), and only a re-read sees that. A choice made in this run is remembered in
+  // keys.json, so a re-run asks nothing twice. (The plan step's hash does not include this one.)
   inputHash: (ctx) => {
     // Tolerates a bare context (F0's structural test hashes `{}`).
     const state = ctx.state?.get()
-    return hashInputs({ step: "keys", linkId: state?.link?.linkId ?? null, before: state?.steps.before?.inputHash ?? null })
+    return hashInputs({ step: "keys", linkId: state?.link?.linkId ?? null, before: state?.steps.before?.inputHash ?? null, process: PROCESS_NONCE })
   },
   run
 }

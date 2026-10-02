@@ -6,7 +6,8 @@
 // 3. Ask the app to link: a crypto-random 4-digit code, the normalised repo label (never the raw remote), the
 //    fingerprint, the app root and the folder. A remembered link answers at once (no card). Otherwise the
 //    `link-code` overlay shows the code while the step long-polls; approved → linked; "Not me" → LINK_DECLINED;
-//    expired → offer to retry; ESC → cancelled.
+//    expired → offer to retry; ESC → cancelled. Approval has ONE 5-minute window overall (§3a.2): a retry
+//    gets a new code inside what is left of it (the engine's link budget sits just above that window).
 // 4. Save the link (id, workspace name, time, runtime variant) and attach its id to the client.
 // 5. The first link-scoped call is the subscription check: 402 → blocked SUBSCRIPTION_REQUIRED (decision 7).
 // No run is created here (the `agent` step does that).
@@ -18,15 +19,17 @@ import type { BridgeDescriptor, Link } from "../contracts/bridge.js"
 import { BRIDGE_LIMITS } from "../contracts/bridge.js"
 import type { AskFn, StepOutcome, WizardContext, WizardDeps, WizardStep } from "../contracts/deps.js"
 import { WIZARD_STEP_META } from "../contracts/steps.js"
-import { ASK_CANCELLED } from "../contracts/asks.js"
+import { ASK_CANCELLED, ASK_TIMEOUT } from "../contracts/asks.js"
 import { isBridgeDiscoveryError, isBridgeError } from "../../bridge/errors.js"
 import { bridgeErrorOutcome, discoveryOutcome, missingCapabilities, protocolOutcome, SUBSCRIPTION_MESSAGE } from "../../bridge/outcomes.js"
 import { linkSiteFor } from "../../bridge/repo-identity.js"
 import { hashInputs, PROCESS_NONCE, sub } from "../../bridge/step-kit.js"
 
 const META = WIZARD_STEP_META.link
-/** A new code and card at most this many times (each one can expire). */
+/** A new code and card at most this many times (each one can expire), all inside ONE approval window. */
 export const MAX_LINK_ATTEMPTS = 3
+/** A retry is offered only while at least this much of the window is left (time to read the code and approve). */
+export const MIN_RETRY_WINDOW_MS = 30_000
 
 /** `AskFn`'s options plus the signal that closes a display-only ask (see the O2 note: a §3d.8 amendment). */
 type AskOptionsWithSignal = { timeoutMs?: number } & NonNullable<Parameters<AskFn>[2]> & { signal: AbortSignal }
@@ -66,21 +69,25 @@ function variantLabel(descriptor: Pick<BridgeDescriptor, "runtime">): string {
 
 type WaitResult = { state: "approved"; link: Link } | { state: "declined" } | { state: "expired" } | { state: "cancelled" }
 
-/** Long-poll the request until it is answered, the user presses ESC, or the 5-minute window closes. */
+/** Long-poll the request until it is answered, the user presses ESC, or the approval window (`deadline`) closes. */
 async function waitForApproval(
   ctx: WizardContext,
   deps: WizardDeps,
   linkRequestId: string,
   code: string,
   site: { repoLabel: string; appRoot: string; folderLabel: string },
-  startedAt: number
+  deadline: number
 ): Promise<WaitResult> {
   const closeAsk = new AbortController()
-  const options: AskOptionsWithSignal = { timeoutMs: BRIDGE_LIMITS.linkApprovalMs, signal: closeAsk.signal }
-  let cancelled = false
-  const ask = ctx.ask("link-code", { code, site }, options).then((answer) => {
-    if (answer === ASK_CANCELLED && !closeAsk.signal.aborted) cancelled = true
-    return "ask_closed" as const
+  const options: AskOptionsWithSignal = { timeoutMs: Math.max(1, deadline - ctx.now().getTime()), signal: closeAsk.signal }
+  // The card is display-only: ESC cancels, the ask's own timer means the window closed. Any other answer (a
+  // stray `ask.answer` from a JSON client) closes the overlay but changes nothing: the step keeps polling.
+  const never = new Promise<never>(() => undefined)
+  const askClosed: Promise<"cancelled" | "timeout"> = ctx.ask("link-code", { code, site }, options).then((answer) => {
+    if (closeAsk.signal.aborted) return never
+    if (answer === ASK_CANCELLED) return "cancelled" as const
+    if (answer === ASK_TIMEOUT) return "timeout" as const
+    return never
   })
   const stopPolling = new AbortController()
   const onAbort = () => stopPolling.abort()
@@ -88,20 +95,19 @@ async function waitForApproval(
   try {
     while (true) {
       if (ctx.signal.aborted) return { state: "cancelled" }
-      const remainingMs = startedAt + BRIDGE_LIMITS.linkApprovalMs - ctx.now().getTime()
+      const remainingMs = deadline - ctx.now().getTime()
       if (remainingMs <= 0) return { state: "expired" }
       const waitSeconds = Math.max(1, Math.min(BRIDGE_LIMITS.longPollMaxSeconds, Math.floor(remainingMs / 1000)))
       const polledAt = ctx.now().getTime()
-      const poll =deps.bridge.pollLink(linkRequestId, waitSeconds, { signal: stopPolling.signal }).then(
+      const poll = deps.bridge.pollLink(linkRequestId, waitSeconds, { signal: stopPolling.signal }).then(
         (response) => ({ kind: "poll" as const, response }),
         (error: unknown) => ({ kind: "error" as const, error })
       )
-      const first = await Promise.race([poll, ask])
-      if (first === "ask_closed") {
+      const first = await Promise.race([poll, askClosed])
+      if (first === "cancelled" || first === "timeout") {
         stopPolling.abort()
-        if (cancelled) return { state: "cancelled" }
-        // The ask timed out on its own (5 minutes): the request has expired too.
-        return { state: "expired" }
+        // ESC → cancelled; the ask's own timer is the approval window closing → expired.
+        return { state: first === "cancelled" ? "cancelled" : "expired" }
       }
       if (first.kind === "error") {
         if (isBridgeError(first.error) && first.error.code === "expired") return { state: "expired" }
@@ -177,10 +183,11 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
     })
 
     let link: Link | null = null
+    // ONE approval window for every attempt (§3a.2 "link approval ≤ 5 min overall").
+    const deadline = ctx.now().getTime() + BRIDGE_LIMITS.linkApprovalMs
     for (let attempt = 1; attempt <= MAX_LINK_ATTEMPTS && link === null; attempt++) {
       const code = newLinkCode()
       sub(ctx, "link", "Asking the Infinite app to link this site…", "pending")
-      const startedAt = ctx.now().getTime()
       const request = await deps.bridge.requestLink({ code, site, client: { tagVersion: deps.tagVersion } }, { signal: ctx.signal })
       if (request.state === "approved" && request.link) {
         link = request.link
@@ -194,7 +201,7 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
         request.linkRequestId,
         code,
         { repoLabel: site.repoLabel, appRoot: site.appRoot, folderLabel: site.folderLabel },
-        startedAt
+        deadline
       )
       if (result.state === "approved") {
         link = result.link
@@ -211,11 +218,28 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
       }
       sub(ctx, "link", "! The link request expired", "warn")
       if (attempt >= MAX_LINK_ATTEMPTS) break
-      const retry = await ctx.ask("confirm", { question: "The link request expired before it was approved. Try again with a new code?", defaultYes: true })
-      if (retry !== true) break
+      // A retry only while the window still leaves time to read a new code and approve it.
+      const left = deadline - ctx.now().getTime()
+      if (left < MIN_RETRY_WINDOW_MS) break
+      const retry = await ctx.ask(
+        "confirm",
+        { question: "The link request expired before it was approved. Try again with a new code?", defaultYes: true },
+        { timeoutMs: left }
+      )
+      if (retry !== true || deadline - ctx.now().getTime() < MIN_RETRY_WINDOW_MS) break
     }
     if (link === null) {
       return { kind: "failed", code: "INF_WIZ_LINK_EXPIRED", message: "The link request expired. Run npx infinite-tag again when the Infinite app is open.", next: "halt" }
+    }
+
+    // A resumed run belongs to the workspace it was started in: its run id means nothing to another one.
+    if (prior && ctx.state.get().runId !== null && prior.linkId !== link.linkId && prior.workspaceName !== link.workspace.name) {
+      return {
+        kind: "failed",
+        code: "INF_WIZ_LINK_DECLINED",
+        message: `This run was started in the Infinite workspace ${prior.workspaceName}, but this site is now linked to ${link.workspace.name}. Link it to ${prior.workspaceName} again to continue this run, or start a fresh run.`,
+        next: "halt"
+      }
     }
 
     deps.bridge.setLinkId(link.linkId)
