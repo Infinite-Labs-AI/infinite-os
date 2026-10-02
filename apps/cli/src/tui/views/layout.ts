@@ -44,26 +44,28 @@ export function paneWidths(width: number): { wide: boolean; left: number; right:
   return { wide: true, left, right: total - left - PANE_SEPARATOR.length };
 }
 
-/** One drawn view as lines: head, source, a blank row, the details, then footnotes. A quiet view is its step line only. */
+/**
+ * One drawn view as lines: head, source, a blank row, the details, then
+ * footnotes. A quiet view without a head is its step line only; lines with no
+ * head and no source (a card handed in) are the details alone.
+ */
 export function viewLines(render: ViewRender, width: number): string[] {
-  if (render.quiet) {
+  if (!inDetailsPane(render)) {
     return render.detail.map((line) => fitLine(line, width));
   }
   const body = [...render.detail, ...(render.footnotes.length ? ["", ...render.footnotes] : [])];
-  return [
-    render.head,
-    ...(render.source ? [render.source] : []),
-    ...(body.length ? ["", ...body] : [])
-  ].map((line) => fitLine(line, width));
+  const top = render.head || render.source !== null ? [render.head, ...(render.source !== null ? [render.source] : [])] : [];
+  return [...top, ...(top.length && body.length ? [""] : []), ...body].map((line) => fitLine(line, width));
 }
 
 /**
  * Lay out one turn. `answer` is drawn at the answer pane's width when split
  * (see `paneWidths`), else at the full width; each view at its pane's width.
  * Several views stack in the details pane, a blank row apart. No view = the
- * answer alone, full width. Quiet views never take the details pane: their
- * step lines print with the Steps, so a turn whose views are all quiet keeps
- * its answer full width. `split: false` keeps one column at any width (a turn
+ * answer alone, full width. A quiet view with no head never takes the details
+ * pane: its step line prints with the Steps, so a turn whose views are all
+ * quiet keeps its answer full width (one with a head, r4's `steps only`, is a
+ * details pane like any other). `split: false` keeps one column at any width (a turn
  * committed to scrollback). `steps` is the Steps strip's rows (the header is
  * drawn here).
  */
@@ -77,8 +79,8 @@ export function layoutTurn(
 ): string[] {
   const total = Math.max(1, Math.floor(width));
   const all: readonly ViewRender[] = view === null ? [] : isRenderList(view) ? view : [view];
-  const renders = all.filter((render) => !render.quiet);
-  const quietSteps = all.filter((render) => render.quiet).flatMap((render) => render.detail.map((line) => `  ${line}`));
+  const renders = all.filter(inDetailsPane);
+  const quietSteps = all.filter((render) => !inDetailsPane(render)).flatMap((render) => render.detail.map((line) => `  ${line}`));
   const rule = (line: string) => (style ? paint(line, "line", style) : line);
   const out: string[] = [];
   const panes = paneWidths(total);
@@ -189,6 +191,18 @@ export interface LiveTurnInput {
   steps?: readonly TurnStep[];
   /** Now (epoch ms), for a call still running. */
   nowMs?: number;
+  /**
+   * Lines already drawn for the details pane, after the views: the turn's
+   * pending write card, so it sits right of the answer like r4 draws it. Draw
+   * them at `detailsPaneWidth(width)` columns.
+   */
+  details?: readonly string[];
+}
+
+/** The columns the details pane gives a view or a card at this width (the whole width when one column). */
+export function detailsPaneWidth(width: number, split = true): number {
+  const panes = paneWidths(width);
+  return panes.wide && split ? panes.right : Math.max(1, Math.floor(width));
 }
 
 export interface LiveTurnRender {
@@ -253,18 +267,30 @@ function drawLiveTurn(input: LiveTurnInput, width: number, rows: number | undefi
   const plainCtx: ViewRenderCtx = {
     ...base, selected: 0, tab: 0, page: 0, explainOpen: false, showHiddenColumns: false, caps
   };
-  // A quiet view prints with the Steps (full width), never in the details pane.
+  // A quiet view without a head prints with the Steps (full width), not in the details pane.
   const stepCtx: ViewRenderCtx = { ...plainCtx, width: Math.max(1, width - 2) };
   const focusIndex = input.focus ? input.focus.viewIndex : focusedViewIndex(input.views);
-  const renders = input.views.map((view, index) =>
-    renderView(view, view.kind === "quiet" ? stepCtx : index === focusIndex && input.focus ? focusedViewCtx(input.focus, base) : plainCtx)
-  );
+  const renders = input.views.map((view, index) => {
+    if (view.kind === "quiet") {
+      const pane = renderView(view, plainCtx);
+      return inDetailsPane(pane) ? pane : renderView(view, stepCtx);
+    }
+    return renderView(view, index === focusIndex && input.focus ? focusedViewCtx(input.focus, base) : plainCtx);
+  });
+  const card: ViewRender[] = input.details?.length
+    ? [{ head: "", source: null, detail: [...input.details], footnotes: [], keys: [], okKey: null, rowCount: 0 }]
+    : [];
   const steps = input.steps?.length ? input.steps : stepsFromTrail(input.messages);
   const stepRows = stepRowLines(steps, { width, color: input.color, theme: input.theme, nowMs: input.nowMs, views: input.views });
-  const sideBySide = wide && renders.some((render) => !render.quiet);
+  const sideBySide = wide && (renders.some(inDetailsPane) || card.length > 0);
   const answer = renderAnswerColumn(input.messages, sideBySide ? panes.left : width, input.theme, input.color);
-  const lines = layoutTurn(answer, renders, stepRows, width, { color: input.color, theme: input.theme }, { split });
+  const lines = layoutTurn(answer, [...renders, ...card], stepRows, width, { color: input.color, theme: input.theme }, { split });
   return { renders, lines, focusIndex, rows };
+}
+
+/** Whether a drawn view takes the details pane (every view but a quiet one without a head). */
+function inDetailsPane(render: ViewRender): boolean {
+  return !render.quiet || Boolean(render.head);
 }
 
 function isRenderList(view: ViewRender | readonly ViewRender[]): view is readonly ViewRender[] {
