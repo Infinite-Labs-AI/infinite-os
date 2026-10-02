@@ -154,7 +154,9 @@ function checkGa4(page: PageBytes, expect: TestExpect, mode: "wizard" | "doctor"
   const result = (state: CheckResult["state"], reason: string) => [checkResult(id, state, "T1", ctx, { reason, ...at(page) })]
 
   if (units.some((unit) => GA4_FORBIDDEN.test(unit.text))) {
-    return result("problem", "GA4 uses a /gtm/gtag/js loader or transport_url — a proxied GA4 that Google may drop; load gtag.js directly")
+    // B19: an ADOPTED server-side Tag Manager loader / transport_url is the customer's own container: not ours
+    // to grade, and never a problem.
+    return result("undetermined", "via_tag_manager: GA4 goes through a server-side Tag Manager (a /gtm/gtag/js loader or transport_url), which is not read here")
   }
   if (!seen) {
     if (expected.some((value) => rawBytes(page).includes(value))) {

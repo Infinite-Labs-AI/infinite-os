@@ -17,7 +17,7 @@ function walk(routes: Record<string, FixtureHandler>, url = "https://acme.test/"
 const keep = (to: string): FixtureHandler => (request) => ({ status: 301, headers: { location: `${to}${new URL(request.url).search}` } })
 
 describe("redirect walk", () => {
-  it("passes when every hop keeps the campaign tags, and marks the click ids as test values", async () => {
+  it("passes when every hop keeps the campaign tags; the walk of production carries utm_* only, never a click id (B19)", async () => {
     const { results, requests } = await walk({
       "https://acme.test/": keep("https://www.acme.test/"),
       "https://www.acme.test/": { status: 200 }
@@ -26,8 +26,10 @@ describe("redirect walk", () => {
     expect(results[0]!.reason).toContain("1 hop")
     expect(requests.every((request) => request.method === "HEAD" && request.headers.purpose === "prefetch")).toBe(true)
     const first = new URL(requests[0]!.url)
-    expect(first.searchParams.get("fbclid")).toBe("INFINITE_TEST_NOT_REAL_7f3c2a")
-    expect(first.searchParams.get("utm_source")).toBe("infinite_check")
+    // negative: decision 12 — no fake click id ever reaches production
+    expect(first.searchParams.get("fbclid")).toBeNull()
+    expect(first.searchParams.get("gclid")).toBeNull()
+    expect(first.searchParams.get("utm_source")).toBe("infinite_redirect_check")
   })
 
   it("is a problem when a hop drops the query (negative: the same hop keeping it passes)", async () => {
@@ -36,7 +38,8 @@ describe("redirect walk", () => {
       "https://www.acme.test/": { status: 200 }
     })
     expect(results[0]!.state).toBe("problem")
-    expect(results[0]!.reason).toContain("drops utm_source, utm_medium, utm_campaign, fbclid, gclid")
+    expect(results[0]!.reason).toContain("drops utm_source, utm_medium, utm_campaign")
+    expect(results[0]!.reason).not.toContain("fbclid")
   })
 
   it("falls back to GET when the server refuses HEAD", async () => {
@@ -79,7 +82,8 @@ describe("redirect walk", () => {
   })
 
   it("names doctor's walk without a run id", () => {
-    expect(redirectTestParams(null).fbclid).toBe("INFINITE_TEST_NOT_REAL_doctor")
+    expect(redirectTestParams(null).utm_campaign).toBe("check_doctor")
+    expect(Object.keys(redirectTestParams(null)).sort()).toEqual(["utm_campaign", "utm_medium", "utm_source"])
   })
 })
 

@@ -31,15 +31,17 @@ export interface RedirectWalkInput {
   runId?: string | null
 }
 
-/** The query the walk starts with. Values are recognisable as test traffic. */
+/**
+ * The query the walk starts with: `utm_*` ONLY (B19). The walk reads PRODUCTION, so it never carries a fake
+ * click id (decision 12 keeps `fbclid`/`gclid` to no-send loads; their survival is tested in the rehearsal and
+ * the preview's own dry load). The values are recognisable as test traffic.
+ */
 export function redirectTestParams(runId: string | null | undefined): Record<string, string> {
   const suffix = (runId ?? "").replace(/-/g, "").slice(0, 6) || "doctor"
   return {
-    utm_source: "infinite_check",
+    utm_source: "infinite_redirect_check",
     utm_medium: "redirect_walk",
-    utm_campaign: `check_${suffix}`,
-    fbclid: `${FAKE_CLICK_ID_PREFIX}${suffix}`,
-    gclid: `${FAKE_CLICK_ID_PREFIX}${suffix}`
+    utm_campaign: `check_${suffix}`
   }
 }
 
@@ -126,7 +128,7 @@ export async function checkRedirectWalk(
             "pass",
             walk.hops.length === 0
               ? "no redirect: the landing URL keeps its campaign tags"
-              : `every hop keeps utm_*, fbclid and gclid (${walk.hops.length} hop${walk.hops.length === 1 ? "" : "s"}: ${path})`
+              : `every hop keeps utm_* (${walk.hops.length} hop${walk.hops.length === 1 ? "" : "s"}: ${path})`
           )
         )
         break

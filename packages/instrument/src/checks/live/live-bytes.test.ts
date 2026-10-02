@@ -158,6 +158,13 @@ describe("live bytes: shapes that need care", () => {
     expect(byId(results, LIVE_BYTES_CHECK_IDS.ga4)[0]!.reason).toContain("via_tag_manager")
   })
 
+  it("B19: an adopted server-side Tag Manager (transport_url) is undetermined (via_tag_manager), never a problem", async () => {
+    const html = `<html><head><script async src="https://www.googletagmanager.com/gtag/js?id=${GA4}"></script><script>window.dataLayer=window.dataLayer||[];function gtag(){dataLayer.push(arguments)}gtag('js', new Date());gtag('config', '${GA4}', { transport_url: 'https://sgtm.acme.test' })</script></head><body></body></html>`
+    const { results } = await run({ [`${SITE}/`]: { body: html } }, { ga4: [GA4] })
+    expect(byId(results, LIVE_BYTES_CHECK_IDS.ga4)[0]).toMatchObject({ state: "undetermined" })
+    expect(byId(results, LIVE_BYTES_CHECK_IDS.ga4)[0]!.reason).toContain("via_tag_manager")
+  })
+
   it("a PostHog sent to the other cloud region than the connected project is a problem", async () => {
     const html = managedPage([posthogSnippet(POSTHOG, "https://us.i.posthog.com")])
     const eu = await run({ [`${SITE}/`]: { body: html } }, { posthog: { projectKey: POSTHOG, apiHost: "https://eu.i.posthog.com" } })

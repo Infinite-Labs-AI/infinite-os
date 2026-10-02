@@ -122,6 +122,8 @@ const LINE_RULES: ReadonlyArray<{ rule: TurnGateRule; pattern: RegExp; buildTime
   { rule: "http_request", pattern: /\bhttps?\s*\.\s*(?:request|get)\s*\(/ },
   { rule: "node_internals", pattern: moduleLoad("vm|module|inspector|cluster|v8") },
   { rule: "node_internals", pattern: /\bprocess\s*\.\s*(?:binding|_linkedBinding|dlopen|mainModule)\b|\bmodule\s*\.\s*(?:require|constructor)\b/ },
+  // B19: `process.getBuiltinModule("child_process")` loads any Node module without an import or require.
+  { rule: "node_internals", pattern: /\bgetBuiltinModule\s*\(/ },
   // Build-time files: any request that is not a relative-path literal (a variable URL is the exfil path).
   { rule: "build_time_fetch", pattern: new RegExp(String.raw`(?<![\w$])fetch(?![\w$])(?!\s*\(\s*${RELATIVE_ARG})`), buildTimeOnly: true },
   { rule: "build_time_fetch", pattern: /\baxios\b|\bXMLHttpRequest\b|\bWebSocket\b|\bEventSource\b|\bsendBeacon\b/, buildTimeOnly: true },

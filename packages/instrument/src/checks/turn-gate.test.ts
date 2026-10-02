@@ -64,6 +64,8 @@ const CASES: Array<[TurnGateRule, string, string, string]> = [
   ["new_function", "src/lib/x.ts", '(() => {}).constructor("return process")()', "class A { constructor() {} }"],
   ["node_internals", "next.config.mjs", 'process.binding("spawn_sync")', "process.env.NODE_ENV"],
   ["node_internals", "next.config.mjs", 'import vm from "node:vm"', 'import path from "node:path"'],
+  // B19: process.getBuiltinModule loads child_process without an import or a require.
+  ["node_internals", "next.config.mjs", 'const cp = process.getBuiltinModule("child_process")', 'const mod = process.env.MODULE_NAME'],
   ["eval", "src/lib/x.ts", '(0, eval)("1")', "const evaluation = 1"],
   ["eval", "src/lib/x.ts", 'globalThis.eval("1")', "const medieval = 1"],
   ["build_time_fetch", "next.config.mjs", "await fetch(u)", "await fetch('/api/config')"],

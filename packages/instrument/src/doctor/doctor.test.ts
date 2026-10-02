@@ -174,34 +174,18 @@ describe("the server-lane probe is opt-in", () => {
     expect(report.exitCode).toBe(3)
   })
 
-  it("with the flag but no linked app: nothing is sent", async () => {
-    const root = repo({ "index.html": PAGE, ".infinite/install.json": laneManifest() })
-    const report = await runDoctor({ root, url: `${SITE}/`, flagIds: null, probeServerLane: true }, { ...deps(), linkedApp: () => false })
-    expect(report.results.find((result) => result.checkId === "server_lane_probe")!.reason).toContain("not linked")
+  it("with the flag, linked or not, doctor sends NOTHING (E3: no run-less receipt verb) and says where to look", async () => {
+    for (const linkedApp of [() => false, () => true]) {
+      const root = repo({ "index.html": PAGE, ".infinite/install.json": laneManifest() })
+      const readServerLaneReceipt = vi.fn(async () => ({ state: "verified" as const, reason: null }))
+      const report = await runDoctor({ root, url: `${SITE}/`, flagIds: null, probeServerLane: true }, { ...deps(), linkedApp, readServerLaneReceipt })
+      const cell = report.results.find((result) => result.checkId === "server_lane_probe")!
+      expect(cell).toMatchObject({ state: "undetermined" })
+      expect(cell.reason).toContain("not_probed")
+      expect(cell.reason).toContain("nothing was sent")
+      expect(readServerLaneReceipt).not.toHaveBeenCalled()
+    }
     expect(site.requests.some((request) => request.url.includes("/__infinite_probe/"))).toBe(false)
-  })
-
-  it("with the flag and a linked app but no receipt reader: nothing is sent (review P2-7)", async () => {
-    const root = repo({ ".infinite/install.json": manifest({ ids: { ga4: [GA4], meta: [PIXEL], posthog: { projectKey: POSTHOG, apiHost: "/ingest" }, infinite: null } }) })
-    const report = await runDoctor({ root, url: `${SITE}/`, flagIds: null, probeServerLane: true }, { ...deps(), linkedApp: () => true })
-    const cell = report.results.find((result) => result.checkId === "server_lane_probe")!
-    expect(cell).toMatchObject({ state: "undetermined" })
-    expect(cell.reason).toContain("nothing was sent")
-    expect(site.requests.some((request) => request.url.includes("/__infinite_probe/"))).toBe(false)
-  })
-
-  it("with the flag and a linked app: ONE probe, without Purpose, and its receipt decides", async () => {
-    const root = repo({ "index.html": PAGE, ".infinite/install.json": laneManifest() })
-    const readServerLaneReceipt = vi.fn(async () => ({ state: "verified" as const, reason: null }))
-    const report = await runDoctor(
-      { root, url: `${SITE}/`, flagIds: null, probeServerLane: true },
-      { ...deps(), linkedApp: () => true, readServerLaneReceipt, randomHex: () => "a1b2c3d4e5f6" }
-    )
-    const probes = site.requests.filter((request) => request.url.includes("/__infinite_probe/"))
-    expect(probes.map((request) => new URL(request.url).pathname)).toEqual(["/__infinite_probe/a1b2c3d4e5f6"])
-    expect(probes[0]!.headers.purpose).toBeUndefined()
-    expect(readServerLaneReceipt).toHaveBeenCalledWith("/__infinite_probe/a1b2c3d4e5f6")
-    expect(report.results.find((result) => result.checkId === "server_lane_probe")!.state).toBe("pass")
   })
 })
 

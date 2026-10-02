@@ -237,38 +237,15 @@ function notAskedAbout(result: CheckResult, check: string, ids: DoctorIds): Chec
   return { ...result, state: "info", reason: `not asked about (no ${label} id was given): ${result.reason ?? ""}`.trim() }
 }
 
-async function serverLaneCell(options: DoctorOptions, deps: DoctorDeps, ctx: { runId: null; now(): Date }, root: string): Promise<CheckResult[]> {
+async function serverLaneCell(options: DoctorOptions, _deps: DoctorDeps, ctx: { runId: null; now(): Date }, _root: string): Promise<CheckResult[]> {
   const cell = (state: CheckResult["state"], reason: string) => [checkResult("server_lane_probe", state, "PV", ctx, { reason })]
+  // E3 (§3z): a probe lands a bot-flagged row in the customer's ledger, and there is no run-less receipt verb
+  // to read it back, so doctor NEVER sends one (an unread row is what R2-27 forbids). The app shows the
+  // server lane's own receipts.
   if (!options.probeServerLane) {
-    return cell("undetermined", "not_probed: the server lane was not probed (pass --probe-server-lane with the Infinite app linked to send one test request)")
+    return cell("undetermined", "not_probed: the server lane was not probed; open Infinite › Site Settings to see what it received")
   }
-  const linked = (deps.linkedApp ?? ((path: string) => defaultLinkedApp(path, deps.env ?? process.env)))(root)
-  if (!linked) {
-    return cell("undetermined", "not_probed: this repo is not linked to a running Infinite app, so a probe's receipt could not be read; nothing was sent")
-  }
-  // The probe lands a bot-flagged row in the customer's ledger; with no way to read its receipt back it
-  // would be exactly the unread row R2-27 forbids. Send nothing until the receipt read is wired.
-  if (!deps.readServerLaneReceipt) {
-    return cell("undetermined", "not_probed: this build cannot read the probe's receipt back from the Infinite app, so nothing was sent")
-  }
-  const hex = deps.randomHex ? deps.randomHex() : randomBytes(6).toString("hex")
-  const path = serverLaneProbePath(hex)
-  const host = new URL(options.url as string).hostname
-  const sent = await sendServerLaneProbe(host, path, {
-    version: deps.version,
-    now: deps.now,
-    ...(deps.fetch ? { fetch: deps.fetch } : {})
-  })
-  if (sent.status === 0) return cell("undetermined", `the probe could not be sent (${sent.detail ?? "network error"})`)
-  const receipt = await deps.readServerLaneReceipt(path)
-  switch (receipt.state) {
-    case "verified":
-      return cell("pass", `the server lane recorded probe ${path} (receipt from this run)`)
-    case "no_receipt":
-      return cell("problem", `the server lane never recorded probe ${path}${receipt.reason ? `: ${receipt.reason}` : ""}`)
-    default:
-      return cell("undetermined", `no receipt yet for probe ${path}${receipt.reason ? ` (${receipt.reason})` : ""}`)
-  }
+  return cell("undetermined", "not_probed: doctor sends no probe in this version (its receipt could not be read back); nothing was sent. Open Infinite › Site Settings to see what the server lane received")
 }
 
 const ORDER: Record<CheckResult["state"], number> = { problem: 0, undetermined: 1, info: 2, pass: 3 }
