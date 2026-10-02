@@ -62,6 +62,38 @@ describe("what takes the details pane", () => {
   });
 });
 
+describe("a committed turn in scrollback is the question and the answer (D1, run-2 M3)", () => {
+  const steps: Msg[] = [
+    { role: "user", text: "site traffic" },
+    { kind: "trail", role: "system", text: "", tools: ["checking GA4 (0.4s) :: 3 pages ✓"] },
+    { role: "assistant", text: "Up 12% on the week." }
+  ];
+
+  it("keeps no Steps strip, live or quiet, at any width", () => {
+    for (const width of [60, 100, 160]) {
+      const lines = renderCommittedTurn({ messages: steps, views: [], focus: null, width, color: false, theme });
+      expect(lines.some((line) => line.includes("Steps"))).toBe(false);
+      expect(lines.some((line) => line.includes("checking GA4"))).toBe(false);
+      expect(lines).toEqual(["❯ site traffic", "", "∞ Up 12% on the week."]);
+    }
+  });
+
+  it("keeps its details, one column, under the answer", () => {
+    const listing = decodeAnswerView({
+      v: 1, kind: "quiet", tool: "read_playbook", title: "", state: "ready", asOf: null,
+      scope: { workspaceName: "Demo", crossWorkspace: false }, caveats: [], body: { stepLine: "read the playbook" }
+    });
+    const lines = renderCommittedTurn({ messages: steps, views: listing ? [listing] : [], focus: null, width: 160, color: false, theme });
+    expect(lines.some((line) => line.includes("Steps"))).toBe(false);
+    expect(lines.some((line) => line.includes(" │ "))).toBe(false);
+  });
+
+  it("the live turn keeps its Steps strip", () => {
+    const lines = renderLiveTurn({ messages: steps, views: [], focus: null, width: 100, color: false, theme }).lines;
+    expect(lines.some((line) => line.startsWith("─ Steps"))).toBe(true);
+  });
+});
+
 describe("a committed turn keeps every message the transcript draws (one renderer for both)", () => {
   const turn: Msg[] = [
     { role: "user", text: "fix the import" },

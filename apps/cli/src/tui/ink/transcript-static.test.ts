@@ -68,10 +68,11 @@ describe("transcript Static: committed turns leave the live region", () => {
     for (const rows of [undefined, 24, 40]) {
       const props = { transcript: { state: emptyState }, columns: 80, rows, latest: tall, committed, showComposer: false };
       const rendered = stripAnsi(renderInkTranscriptToString(props)).split("\n");
-      // Ink prints <Static> output first, a thin rule between turns (D1, no top
-      // bar per turn); everything after it is the live region.
-      expect(rendered.slice(0, 3)).toEqual(["committed one", "─".repeat(80), "committed two"]);
-      expect(rendered.length - 3).toBe(inkTranscriptRowCount(props));
+      // Ink prints <Static> output first, a thin rule under each turn (D1, no
+      // top bar per turn, and the live top bar never sits flush on the last
+      // answer); everything after it is the live region.
+      expect(rendered.slice(0, 4)).toEqual(["committed one", "─".repeat(80), "committed two", "─".repeat(80)]);
+      expect(rendered.length - 4).toBe(inkTranscriptRowCount(props));
     }
   });
 

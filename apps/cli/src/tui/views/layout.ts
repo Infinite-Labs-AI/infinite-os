@@ -77,7 +77,7 @@ export function layoutTurn(
   steps: readonly string[],
   width: number,
   style: { color: boolean; theme: Theme } | null = null,
-  options: { split?: boolean } = {}
+  options: { split?: boolean; steps?: boolean } = {}
 ): string[] {
   const total = Math.max(1, Math.floor(width));
   const all: readonly ViewRender[] = view === null ? [] : isRenderList(view) ? view : [view];
@@ -114,7 +114,8 @@ export function layoutTurn(
     }
   }
 
-  const strip = [...steps, ...quietSteps];
+  // `steps: false` (a turn committed to scrollback, D1) draws no Steps strip at all.
+  const strip = options.steps === false ? [] : [...steps, ...quietSteps];
   if (strip.length) {
     // One column: a blank row between the details and the Steps (r4 stacked frame).
     if (renders.length && !wide) {
@@ -217,25 +218,24 @@ export function renderLiveTurn(input: LiveTurnInput): LiveTurnRender {
 }
 
 /**
- * A finished turn as it is printed once into scrollback: ONE column at any
- * width (question, answer, then its details underneath and the Steps), every
- * page of it (no row budget), under a thin rule that separates it from the
- * turn before.
+ * A finished turn as it is printed once into scrollback (D1): ONE column at
+ * any width, the question, the answer and its details underneath, every page
+ * of it (no row budget). No Steps strip: the calls belonged to the live turn.
  */
 export function renderCommittedTurn(input: Omit<LiveTurnInput, "rows" | "livePageNext">): string[] {
   const width = Math.max(1, Math.floor(input.width));
   // No row budget: a document is one page as tall as its body (no page line,
   // which no key could act on in scrollback), whatever page the live turn showed.
-  // No rule of its own: scrollback draws the ONE thin rule between turns (D1,
-  // transcript-app.tsx), so a leading rule here would print two.
-  return drawLiveTurn(input, width, ALL_ROWS, false).lines;
+  // No rule of its own: scrollback draws the ONE thin rule under each turn (D1,
+  // transcript-app.tsx), so a rule here would print two.
+  return drawLiveTurn(input, width, ALL_ROWS, false, false).lines;
 }
 
 /** A row budget no view reaches: a committed turn is drawn whole. */
 const ALL_ROWS = Number.MAX_SAFE_INTEGER;
 
-/** One draw of the turn, its views given at most `rows` rows; `split` allows the side-by-side layout. */
-function drawLiveTurn(input: LiveTurnInput, width: number, rows: number | undefined, split: boolean) {
+/** One draw of the turn, its views given at most `rows` rows; `split` allows the side-by-side layout; `withSteps` draws the Steps strip. */
+function drawLiveTurn(input: LiveTurnInput, width: number, rows: number | undefined, split: boolean, withSteps = true) {
   const panes = paneWidths(width);
   const wide = panes.wide && split;
   const caps = input.focus?.caps ?? input.caps ?? NO_VIEW_CAPS;
@@ -259,7 +259,7 @@ function drawLiveTurn(input: LiveTurnInput, width: number, rows: number | undefi
   const card: ViewRender[] = input.details?.length
     ? [{ head: "", source: null, detail: [...input.details], footnotes: [], keys: [], okKey: null, rowCount: 0 }]
     : [];
-  const steps = input.steps?.length ? input.steps : stepsFromTrail(input.messages);
+  const steps = !withSteps ? [] : input.steps?.length ? input.steps : stepsFromTrail(input.messages);
   const stepRows = stepRowLines(steps, { width, color: input.color, theme: input.theme, nowMs: input.nowMs, views: input.views });
   const takesPane = renders.some(inDetailsPane) || card.length > 0;
   const sideBySide = wide && takesPane;
@@ -268,7 +268,7 @@ function drawLiveTurn(input: LiveTurnInput, width: number, rows: number | undefi
   // at most 119 (past it the turn splits and the answer gets narrower).
   const widenLimit = !split ? 0 : sideBySide ? ANSWER_PANE_MAX : takesPane ? SPLIT_MIN_COLUMNS - 1 : undefined;
   const answer = renderAnswerColumn(input.messages, sideBySide ? panes.left : width, input.theme, input.color, { widenLimit });
-  const lines = layoutTurn(answer, [...renders, ...card], stepRows, width, { color: input.color, theme: input.theme }, { split });
+  const lines = layoutTurn(answer, [...renders, ...card], stepRows, width, { color: input.color, theme: input.theme }, { split, steps: withSteps });
   return { renders, lines, focusIndex, rows };
 }
 

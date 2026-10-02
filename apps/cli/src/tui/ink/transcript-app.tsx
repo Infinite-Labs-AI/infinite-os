@@ -172,15 +172,16 @@ export function InkTranscriptApp({
   return (
     <Box flexDirection="column" width={width}>
       {/* Finished turns: printed once, above the live frame, into scrollback,
-          a thin rule between them (D1). This is the ONE rule between turns
-          (and after the first-run inventory): a committed entry's own lines
-          must not start with a rule of their own, or scrollback shows two
-          (transcript-static.test.ts pins exactly one). */}
+          each under a thin rule (D1), so turns are a rule apart and the live
+          top bar never sits flush on the last answer. This is the ONE rule
+          per turn (and after the first-run inventory): a committed entry's
+          own lines must not end with a rule of their own, or scrollback shows
+          two (transcript-static.test.ts pins exactly one). */}
       <Static items={committed}>
-        {(entry, index) => (
+        {(entry) => (
           <Box flexDirection="column" key={entry.id}>
-            {index > 0 ? <AnsiLine line={ruleLine(width, t)} /> : null}
             {entry.node ?? entry.lines.map((line, lineIndex) => <AnsiLine key={`${entry.id}:${lineIndex}`} line={rowText(line)} />)}
+            <AnsiLine line={ruleLine(width, t)} />
           </Box>
         )}
       </Static>
