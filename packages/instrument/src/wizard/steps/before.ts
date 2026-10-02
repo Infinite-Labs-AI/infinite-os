@@ -10,9 +10,13 @@
 // Honesty rules this step keeps:
 // - `expect` ids come from the keys verb only, never from the repo or a `.env` (R2-16);
 // - nothing is graded here: the desktop returns facts, `checks.gradeTestRun` (lane O6) grades them;
-// - no report cell is written here: the facts go to `.infinite/wizard/before.json` for the report
-//   builder (lane O1), and the step status only COUNTS the wizard's own check states;
-// - an undetermined check (held by consent, bot rules, a test error) is never counted as a problem.
+// - no report cell is computed here: the facts go to `.infinite/wizard/before-facts.json` (the ONE
+//   hand-off file lanes O7 and O2 read), and the live_today column is built by lane O1's column builder
+//   from the typed readings `liveTodayColumnInput` maps (injected as `buildLiveTodayColumn`); the step
+//   status only COUNTS the wizard's own check states;
+// - an undetermined check (held by consent, bot rules, a test error) is never counted as a problem;
+// - a busy test engine or a cloud blip leaves the dry load / the baseline unknown, never crashes the run
+//   (review P2-6); only a missing subscription or a signed-out app stops it.
 //
 // Call order (asserted by `before.test.ts`): hosting (the base is `hosting.vercel.productionBranch`,
 // §3g.1) → branch → keys → baseline build → scan + census + setup checks → dry_live → T1 → baseline
@@ -23,6 +27,7 @@ import { join } from "node:path"
 
 import { scanForJobs, jobScanFrom, type JobScan } from "../../jobs/detectors/index.js"
 import { detectDuplicates } from "../../jobs/detectors/duplicates.js"
+import { liveTodayColumnInput, gradeWords, type LiveTodayColumnInput } from "../before-column.js"
 import { detectAdoptedPosthogConfig } from "../../jobs/detectors/adopted-tags.js"
 import type { RepoSnapshot } from "../../jobs/repo-files.js"
 import { BRIDGE_ERROR_CODES, type BridgeErrorCode, type TagHosting, type TagKeys } from "../contracts/bridge.js"
@@ -30,7 +35,8 @@ import type { WizardCode } from "../contracts/codes.js"
 import type { StepOutcome, WizardContext, WizardDeps, WizardStep } from "../contracts/deps.js"
 import { normalizeHost } from "../contracts/host-deny.js"
 import type { BeforeFacts, BuildResult, CheckResult, ScanResult } from "../contracts/jobs.js"
-import type { BaselineResponseFields } from "../contracts/report.js"
+import type { WizardFs } from "../contracts/deps.js"
+import type { BaselineResponseFields, ReportColumnSnapshot } from "../contracts/report.js"
 import type { BaseSource } from "../contracts/state.js"
 import { WIZARD_PATHS } from "../contracts/state.js"
 import { wizardBranchName } from "../contracts/git-host.js"
@@ -50,31 +56,58 @@ import {
 // ---------------------------------------------------------------------------------------------
 
 export const BEFORE_FACTS_SCHEMA = "infinite-tag.before-facts.v1" as const
-/** Gitignored (inside `.infinite/wizard/`), mode 0600. Public IDs and facts only: never a secret. */
-export const BEFORE_FACTS_PATH = `${WIZARD_PATHS.dir}/before.json` as const
-
 /**
- * Everything `before` measured, as typed FACTS for the `live_today` column (lane O1's builder computes
- * the cells from them under FINISH_LINE_SOURCES; this step writes no cell).
+ * THE `before` hand-off file (review P1-1): the path and shape lane O7 (`install/before-facts.ts`) reads,
+ * `{schema, runId, facts}` with the baseline and the baseline build INSIDE `facts`. Lane O2's `keys` step
+ * reads the same path (its reader's schema constant must be this one; recorded for I1). Gitignored
+ * (inside `.infinite/wizard/`), mode 0600. Public IDs and facts only: never a secret.
  */
+export const BEFORE_FACTS_PATH = `${WIZARD_PATHS.dir}/before-facts.json` as const
+
+/** `BeforeFacts` plus the cloud's baseline reads and the production build's baseline (O7 `WizardBeforeFacts`). */
+export interface BeforeFactsWithBaseline extends BeforeFacts {
+  /** The cloud's baseline reads (null when the read failed: never 0). */
+  baseline: BaselineResponseFields | null
+  baselineBuild: BuildResult
+}
+
+/** Everything `before` measured, as typed FACTS (no cell is computed here). */
 export interface BeforeFactsFile {
   schema: typeof BEFORE_FACTS_SCHEMA
   runId: string
+  writtenAt: string
   measuredAt: string
   productionHost: string | null
   scan: { framework: string; packageManager: string | null; appRoot: string; fileCount: number; truncated: boolean }
-  facts: BeforeFacts
+  facts: BeforeFactsWithBaseline
   /** `checks.gradeTestRun` of the dry load, per tool (null when no dry load ran). */
   grades: Partial<Record<TestTool, CheckResult>> | null
   /** The checks by moment, so the builder can map each to its FINISH_LINE_SOURCES input. */
   setupChecks: CheckResult[]
   envTargetChecks: CheckResult[]
   liveChecks: CheckResult[]
-  baselineBuild: BuildResult
-  /** The cloud's baseline reads (null parts stay null; never 0). */
-  baseline: BaselineResponseFields | null
   /** The static CMP detector's answer (the grader's `cmpDetected` input when the window saw none). */
   cmpDetected: TestResult["environment"]["cmpDetected"]
+  /** A login exists (auth detector): job 9 and the identity row apply. */
+  loginFound: boolean
+}
+
+export async function writeBeforeFactsFile(fs: WizardFs, root: string, file: BeforeFactsFile): Promise<void> {
+  await fs.mkdirp(join(root, WIZARD_PATHS.dir), 0o700)
+  await fs.writeTextAtomic(join(root, BEFORE_FACTS_PATH), `${JSON.stringify(file, null, 2)}\n`, 0o600)
+}
+
+/** The facts file of THIS run, or null (absent, unreadable, another schema or another run's). */
+export async function readBeforeFactsFile(fs: WizardFs, root: string, runId: string): Promise<BeforeFactsFile | null> {
+  const text = await fs.readText(join(root, BEFORE_FACTS_PATH))
+  if (text === null) return null
+  try {
+    const parsed = JSON.parse(text) as Partial<BeforeFactsFile>
+    if (parsed.schema !== BEFORE_FACTS_SCHEMA || parsed.runId !== runId || !parsed.facts) return null
+    return parsed as BeforeFactsFile
+  } catch {
+    return null
+  }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -110,6 +143,18 @@ function appBlockedOutcome(error: unknown): StepOutcome | null {
   }
 }
 
+/** Bridge errors that leave a measurement unknown instead of stopping the run. */
+const DEGRADABLE: ReadonlySet<BridgeErrorCode> = new Set(["busy", "rate_limited", "cloud_error", "upstream_timeout", "capability_unavailable"])
+/** The test engine runs one test at a time (§3a.8): a busy engine is retried, then the load is unknown. */
+const RETRYABLE: ReadonlySet<BridgeErrorCode> = new Set(["busy", "rate_limited"])
+export const DRY_LIVE_START_ATTEMPTS = 4
+export const DRY_LIVE_RETRY_BASE_MS = 2_000
+
+function isDegradable(error: unknown): boolean {
+  const code = bridgeErrorCode(error)
+  return code !== null && DEGRADABLE.has(code)
+}
+
 function withoutEnvelope<T extends { protocolVersion: 1; requestId: string }>(response: T): Omit<T, "protocolVersion" | "requestId"> {
   const { protocolVersion: _version, requestId: _request, ...rest } = response
   return rest
@@ -138,6 +183,23 @@ export async function readOriginHead(deps: Pick<WizardDeps, "fs">, root: string)
   return match ? match[1]! : null
 }
 
+/** The git dir of `root` (a worktree's `.git` file points at it). */
+async function gitDirOf(deps: Pick<WizardDeps, "fs">, root: string): Promise<string> {
+  const dotGit = await deps.fs.readText(join(root, ".git")).catch(() => null)
+  if (dotGit !== null && dotGit.startsWith("gitdir:")) {
+    const dir = dotGit.slice("gitdir:".length).trim()
+    return dir.startsWith("/") ? dir : join(root, dir)
+  }
+  return join(root, ".git")
+}
+
+/** The checked-out branch (`.git/HEAD`'s `ref: refs/heads/<name>`), or null (detached or unreadable). */
+export async function readCurrentBranch(deps: Pick<WizardDeps, "fs">, root: string): Promise<string | null> {
+  const head = await deps.fs.readText(join(await gitDirOf(deps, root), "HEAD")).catch(() => null)
+  const match = head ? /^ref:\s*refs\/heads\/(.+?)\s*$/.exec(head) : null
+  return match ? match[1]! : null
+}
+
 /** §3g.1 base: Vercel's production branch, else the GitHub default branch, else origin/HEAD. */
 export async function resolveBase(
   deps: Pick<WizardDeps, "host" | "fs">,
@@ -145,8 +207,9 @@ export async function resolveBase(
   root: string
 ): Promise<{ base: string; baseSource: BaseSource } | null> {
   if (hosting.provider === "vercel" && hosting.vercel?.productionBranch) return { base: hosting.vercel.productionBranch, baseSource: "vercel" }
-  const facts = await deps.host.repoFacts()
-  if (!("unsupported" in facts) && facts.defaultBranch) return { base: facts.defaultBranch, baseSource: "default_branch" }
+  // A host CLI that is installed but not signed in must not stop the run: origin/HEAD still names it.
+  const facts = await deps.host.repoFacts().catch(() => null)
+  if (facts && !("unsupported" in facts) && facts.defaultBranch) return { base: facts.defaultBranch, baseSource: "default_branch" }
   const originHead = await readOriginHead(deps, root)
   return originHead ? { base: originHead, baseSource: "origin_head" } : null
 }
@@ -190,6 +253,17 @@ export function beforeDryLiveRequest(input: {
   return request
 }
 
+/** The host the dry load finally landed on (after redirects), or null. */
+function finalHostOf(result: TestResult): string | null {
+  const finalUrl = result.loads[0]?.finalUrl
+  if (!finalUrl) return null
+  try {
+    return normalizeHost(new URL(finalUrl).hostname)
+  } catch {
+    return null
+  }
+}
+
 function summarize(checks: readonly CheckResult[]): { pass: number; problem: number; unknown: number } {
   return {
     pass: checks.filter((check) => check.state === "pass").length,
@@ -208,7 +282,17 @@ async function runDryLive(
   request: TestRunRequest
 ): Promise<{ result: TestResult | null; error: string | null }> {
   const { requestId: _ignored, protocolVersion: _version, ...body } = request
-  const started = await deps.bridge.startTest(body, { signal: ctx.signal })
+  let started: { testRunId: string } | null = null
+  for (let attempt = 1; started === null; attempt += 1) {
+    try {
+      started = await deps.bridge.startTest(body, { signal: ctx.signal })
+    } catch (error) {
+      const code = bridgeErrorCode(error)
+      if (code === null || !DEGRADABLE.has(code)) throw error
+      if (!RETRYABLE.has(code) || attempt >= DRY_LIVE_START_ATTEMPTS) return { result: null, error: code === "busy" ? "the Infinite app is busy with another test" : code }
+      await deps.clock.sleep(DRY_LIVE_RETRY_BASE_MS * 2 ** (attempt - 1), ctx.signal)
+    }
+  }
   const deadline = deps.clock.now().getTime() + request.deadlineMs + 30_000
   try {
     for (;;) {
@@ -224,7 +308,8 @@ async function runDryLive(
       }
     }
   } catch (error) {
-    if (ctx.signal.aborted) await deps.bridge.cancelTest(started.testRunId).catch(() => undefined)
+    if (ctx.signal.aborted || isDegradable(error)) await deps.bridge.cancelTest(started.testRunId).catch(() => undefined)
+    if (!ctx.signal.aborted && isDegradable(error)) return { result: null, error: bridgeErrorCode(error) }
     throw error
   }
 }
@@ -241,6 +326,11 @@ export interface BeforeStepOptions {
   jobScan?: (scan: ScanResult) => JobScan
   /** A fresh request id per bridge request body (defaults to crypto's randomUUID). */
   requestId?: () => string
+  /**
+   * Lane O1's column builder for the live_today column (`(input) => buildColumn("live_today", input)`;
+   * wired at integration, I1). `before` computes no cell itself: without a builder the column stays null.
+   */
+  buildLiveTodayColumn?: (input: LiveTodayColumnInput) => ReportColumnSnapshot
 }
 
 /**
@@ -293,6 +383,17 @@ export function createBeforeStep(options: BeforeStepOptions = {}): WizardStep<"b
         const hosting: TagHosting = withoutEnvelope(await deps.bridge.hosting(undefined, { signal: ctx.signal }))
         const existing = ctx.state.get().git
         if (existing?.branch) {
+          // A resumed run must be ON its branch: otherwise the scan reads (and later steps edit) whatever
+          // the user switched to (review P2-7). GitOps has no switch verb, so the wizard stops and says so.
+          const current = await readCurrentBranch(deps, ctx.root)
+          if (current !== existing.branch) {
+            return {
+              kind: "failed",
+              code: "INF_WIZ_BRANCH_FAILED",
+              message: `This run works on ${existing.branch}, but ${current ? `${current} is` : "no branch is"} checked out. Run \`git switch ${existing.branch}\`, then npx infinite-tag again.`,
+              next: "halt"
+            }
+          }
           sub(`On branch ${existing.branch} (from ${existing.base})`, "ok")
         } else {
           const base = await resolveBase(deps, hosting, ctx.root)
@@ -345,11 +446,13 @@ export function createBeforeStep(options: BeforeStepOptions = {}): WizardStep<"b
         let dryLive: TestResult | null = null
         let grades: Partial<Record<TestTool, CheckResult>> | null = null
         const dryChecks: CheckResult[] = []
+        let dryRequestedSpa = false
         if (productionHost === null) {
           sub("! No production domain is known yet; the live test is skipped", "warn")
           dryChecks.push(syntheticCheck("dry_live", "undetermined", "no production domain", at(), runId))
         } else {
           const request = beforeDryLiveRequest({ requestId: newRequestId(), runId, productionHost, pages: jobScan.detections.pages, framework: scan.framework, keys, expect })
+          dryRequestedSpa = request.spaNavigation !== undefined
           const errors = testRequestModeErrors(request, (host) => host === productionHost || host.endsWith(`.${productionHost}`) || productionHost.endsWith(`.${host}`))
           if (request.clicks || request.fakeClickId || errors.length > 0) throw new Error(`before built an invalid dry_live request: ${errors.join("; ")}`)
           sub(`Test load of ${productionHost} (nothing sent)…`, "pending")
@@ -367,7 +470,7 @@ export function createBeforeStep(options: BeforeStepOptions = {}): WizardStep<"b
             for (const tool of Object.keys(graded) as TestTool[]) {
               const check = graded[tool]
               dryChecks.push(check)
-              if (check.state === "problem") sub(`! ${TOOL_LABEL[tool]}: ${check.reason ?? "problem"} on ${productionHost}`, "warn")
+              if (check.state === "problem") sub(`! ${TOOL_LABEL[tool]} ${gradeWords(check, finalHostOf(result) ?? productionHost)}`, "warn")
             }
           }
         }
@@ -385,36 +488,63 @@ export function createBeforeStep(options: BeforeStepOptions = {}): WizardStep<"b
           }
         }
 
-        // ---- the cloud's baseline reads ----
-        const baseline: BaselineResponseFields = withoutEnvelope(await deps.bridge.baseline(runId, { signal: ctx.signal }))
+        // ---- the cloud's baseline reads (a cloud blip leaves them unknown: null, never 0) ----
+        let baseline: BaselineResponseFields | null = null
+        try {
+          baseline = withoutEnvelope(await deps.bridge.baseline(runId, { signal: ctx.signal }))
+        } catch (error) {
+          if (!isDegradable(error)) throw error
+          sub("! Infinite could not read your analytics history right now; those numbers stay unknown", "warn")
+        }
 
-        // ---- the Before facts (for the report builder; no cell is written here) ----
+        // ---- the Before facts (the hand-off file; no cell is computed here) ----
         const checks = [...setupChecks, ...envTargetChecks, ...dryChecks, ...liveChecks]
-        const finalHost = dryLive?.loads[0]?.finalUrl ? normalizeHost(new URL(dryLive.loads[0].finalUrl).hostname) : null
+        const finalHost = dryLive ? finalHostOf(dryLive) : null
         const facts: BeforeFacts = { hosting, keys, census, dryLive, checks, observedProductionHost: finalHost }
+        const measuredAt = at()
+        const loginFound = jobScan.detections.auth.login.length > 0
         const factsFile: BeforeFactsFile = {
           schema: BEFORE_FACTS_SCHEMA,
           runId,
-          measuredAt: at(),
+          writtenAt: measuredAt,
+          measuredAt,
           productionHost,
           scan: { framework: scan.framework, packageManager: scan.packageManager, appRoot: scan.appRoot, fileCount: scan.fileCount, truncated: scan.truncated },
-          facts,
+          facts: { ...facts, baseline, baselineBuild },
           grades,
           setupChecks,
           envTargetChecks,
           liveChecks,
-          baselineBuild,
-          baseline,
-          cmpDetected: dryLive?.environment.cmpDetected ?? cmpDetectedStatic
+          cmpDetected: dryLive?.environment.cmpDetected ?? cmpDetectedStatic,
+          loginFound
         }
-        await deps.fs.mkdirp(join(ctx.root, WIZARD_PATHS.dir), 0o700)
-        await deps.fs.writeTextAtomic(join(ctx.root, BEFORE_FACTS_PATH), `${JSON.stringify(factsFile, null, 2)}\n`, 0o600)
+        await writeBeforeFactsFile(deps.fs, ctx.root, factsFile)
+        const duplicates = detectDuplicates(census, dryLive)
+        const liveToday = options.buildLiveTodayColumn
+          ? options.buildLiveTodayColumn(
+              liveTodayColumnInput({
+                runId,
+                measuredAt,
+                baseSha: ctx.state.get().git?.baseSha ?? null,
+                keys,
+                expect,
+                census,
+                dryLive,
+                grades,
+                liveChecks,
+                baseline,
+                repeatedInits: duplicates.filter((entry) => entry.kind === "repeated_init" && entry.id !== null).map((entry) => ({ tool: entry.tool, id: entry.id!, count: entry.evidence.length })),
+                loginFound,
+                spaNavigationRequested: dryRequestedSpa
+              })
+            )
+          : null
         for (const check of checks) {
           ctx.emit.emit("check.result", { checkId: check.checkId, tier: check.tier, state: check.state, ...(check.reason ? { reason: check.reason } : {}), runId })
         }
 
         // A few findings worth a live line (the plan step turns them into lines; nothing is decided here).
-        for (const duplicate of detectDuplicates(census, dryLive)) {
+        for (const duplicate of duplicates) {
           if (duplicate.kind === "gtm_and_gtag") sub("! GA4 also loaded by Tag Manager (counts every visit twice)", "warn")
           else sub(`! ${TOOL_LABEL[duplicate.tool]} is set up more than once`, "warn")
         }
@@ -424,6 +554,7 @@ export function createBeforeStep(options: BeforeStepOptions = {}): WizardStep<"b
         const candidates = deps.registry.seedCandidates(jobScan, facts)
         ctx.state.update((state) => {
           state.jobs = candidates
+          if (liveToday) state.report.live_today = liveToday
           state.markers.before = dryLive
             ? { infiniteEventIds: dryLive.markers.infiniteEventIds, posthogDistinctId: dryLive.markers.posthogDistinctId, probePath: null, metaEventIds: dryLive.markers.metaEventIds }
             : {}

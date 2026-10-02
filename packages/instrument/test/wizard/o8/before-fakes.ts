@@ -46,6 +46,10 @@ export interface FakeBridgeOptions {
   /** Polls answered in order; the last repeats. */
   polls?: TestRunPollResponse[]
   baseline?: Record<string, unknown>
+  /** Thrown by `startTest`, one per call, before it succeeds. */
+  startErrors?: FakeBridgeError[]
+  /** Thrown by `baseline`. */
+  baselineError?: FakeBridgeError
 }
 
 /** Rejects any production `dry_live` that carries clicks or the fake click id (R2-06): the test fails. */
@@ -83,6 +87,8 @@ export function fakeBridge(log: CallLog, options: FakeBridgeOptions = {}) {
     },
     async startTest(body) {
       log.push(`bridge.test.start(${body.mode})`)
+      const startError = options.startErrors?.shift()
+      if (startError) throw startError
       assertNoSendOnProduction(body)
       sentTests.push(body)
       return { protocolVersion: 1, requestId: "r", testRunId: "tr_FAKEdryLive00000000000", state: "queued" }
@@ -99,6 +105,7 @@ export function fakeBridge(log: CallLog, options: FakeBridgeOptions = {}) {
     },
     async baseline(runId: string) {
       log.push(`bridge.baseline(${runId})`)
+      if (options.baselineError) throw options.baselineError
       return (options.baseline ?? baselineResponse()) as never
     }
   })
@@ -133,11 +140,13 @@ export function fakeGit(log: CallLog, options: FakeGitOptions = {}) {
   return { git, branches }
 }
 
+/** `defaultBranch: "THROW"` = a host CLI that is installed but not signed in. */
 export function fakeHost(log: CallLog, defaultBranch: string | null = "main"): GitHostAdapter {
   return strict<GitHostAdapter>("host", {
     kind: "github",
     async repoFacts() {
       log.push("host.repoFacts")
+      if (defaultBranch === "THROW") throw new Error("gh: not logged in")
       return { isPrivate: true, defaultBranch, viewerPermission: "WRITE" }
     }
   })

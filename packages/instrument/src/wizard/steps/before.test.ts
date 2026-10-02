@@ -24,7 +24,7 @@ import { snapshotFromFiles } from "../../jobs/repo-files.js"
 import type { HostingResponse, KeysResponse } from "../contracts/bridge.js"
 import type { CheckResult } from "../contracts/jobs.js"
 import type { WizardRunState } from "../contracts/state.js"
-import { BEFORE_FACTS_PATH, beforeDryLiveRequest, createBeforeStep, jobScanWith, step as defaultStep, type BeforeFactsFile } from "./before.js"
+import { BEFORE_FACTS_PATH, beforeDryLiveRequest, createBeforeStep, jobScanWith, readBeforeFactsFile, step as defaultStep, type BeforeFactsFile } from "./before.js"
 import { WIZARD_STEPS } from "./index.js"
 
 const SITE = {
@@ -54,6 +54,9 @@ function setup(options: {
   keys?: KeysResponse | FakeBridgeError
   hosting?: HostingResponse
   bridgePolls?: NonNullable<Parameters<typeof fakeBridge>[1]>["polls"]
+  startErrors?: FakeBridgeError[]
+  baselineError?: FakeBridgeError
+  buildLiveTodayColumn?: Parameters<typeof createBeforeStep>[0] extends infer O ? (O extends { buildLiveTodayColumn?: infer B } ? B : never) : never
   git?: Parameters<typeof fakeGit>[1]
   checks?: Parameters<typeof fakeChecks>[1]
   state?: Partial<WizardRunState>
@@ -64,7 +67,7 @@ function setup(options: {
 } = {}): Setup {
   const log: CallLog = []
   const state = initialState(options.state)
-  const bridge = fakeBridge(log, { keys: options.keys, hosting: options.hosting, polls: options.bridgePolls })
+  const bridge = fakeBridge(log, { keys: options.keys, hosting: options.hosting, polls: options.bridgePolls, startErrors: options.startErrors, baselineError: options.baselineError })
   const git = fakeGit(log, options.git)
   const checks = fakeChecks(log, options.checks)
   const fs = memoryFs(log, { "/repo/.env": SITE[".env"], ...(options.fsFiles ?? {}) })
@@ -75,7 +78,11 @@ function setup(options: {
     let now = Date.parse("2026-10-02T09:05:00.000Z")
     wizardDeps.clock = { now: () => new Date((now += options.clockStepMs!)), sleep: async () => {} }
   }
-  const beforeStep = createBeforeStep({ jobScan: jobScanWith(snapshotFromFiles(options.files ?? SITE)), requestId: () => "00000000-0000-4000-8000-0000000000aa" })
+  const beforeStep = createBeforeStep({
+    jobScan: jobScanWith(snapshotFromFiles(options.files ?? SITE)),
+    requestId: () => "00000000-0000-4000-8000-0000000000aa",
+    ...(options.buildLiveTodayColumn ? { buildLiveTodayColumn: options.buildLiveTodayColumn } : {})
+  })
   return { log, state, run: () => beforeStep.run(ctx, wizardDeps), bridge, git, checks, fs, events }
 }
 
@@ -101,7 +108,7 @@ describe("step before: call order", () => {
       "checks.csp",
       "checks.metaDomains",
       "bridge.baseline",
-      "fs.write(/repo/.infinite/wizard/before.json)",
+      "fs.write(/repo/.infinite/wizard/before-facts.json)",
       "registry.seedCandidates"
     ].map((prefix) => indexOf(s.log, prefix))
     expect(order.every((index) => index >= 0)).toBe(true)
@@ -244,9 +251,31 @@ describe("step before: preconditions and the branch", () => {
   })
 
   it("on a resume the existing branch is reused, never re-created", async () => {
-    const s = setup({ state: { git: { base: "main", baseSource: "vercel", branch: "infinite/tag/2026-10-02-7f3c2a", baseSha: "0a".repeat(20), headSha: null } } })
+    const s = setup({
+      state: { git: { base: "main", baseSource: "vercel", branch: "infinite/tag/2026-10-02-7f3c2a", baseSha: "0a".repeat(20), headSha: null } },
+      fsFiles: { "/repo/.git/HEAD": "ref: refs/heads/infinite/tag/2026-10-02-7f3c2a\n" }
+    })
     expect(await s.run()).toMatchObject({ kind: "ok" })
     expect(s.git.branches).toEqual([])
+  })
+
+  it("a resume on another branch stops before any scan (review P2-7)", async () => {
+    const git = { base: "main", baseSource: "vercel" as const, branch: "infinite/tag/2026-10-02-7f3c2a", baseSha: "0a".repeat(20), headSha: null }
+    const onMain = setup({ state: { git }, fsFiles: { "/repo/.git/HEAD": "ref: refs/heads/main\n" } })
+    const outcome = await onMain.run()
+    expect(outcome).toMatchObject({ kind: "failed", code: "INF_WIZ_BRANCH_FAILED", next: "halt" })
+    expect((outcome as { message: string }).message).toContain("git switch infinite/tag/2026-10-02-7f3c2a")
+    expect(onMain.log.some((entry) => entry.startsWith("installer.scan") || entry.startsWith("bridge.keys"))).toBe(false)
+    // A worktree: `.git` is a file pointing at the worktree's git dir.
+    const worktree = setup({ state: { git }, fsFiles: { "/repo/.git": "gitdir: /main/.git/worktrees/repo\n", "/main/.git/worktrees/repo/HEAD": "ref: refs/heads/infinite/tag/2026-10-02-7f3c2a\n" } })
+    expect(await worktree.run()).toMatchObject({ kind: "ok" })
+  })
+
+  it("a signed-out GitHub CLI falls back to origin/HEAD instead of stopping (review P3-3)", async () => {
+    const none: HostingResponse = { protocolVersion: 1, requestId: "r", provider: "none", vercel: null }
+    const s = setup({ hosting: none, defaultBranch: "THROW", fsFiles: { "/repo/.git/refs/remotes/origin/HEAD": "ref: refs/remotes/origin/trunk\n" } })
+    expect(await s.run()).toMatchObject({ kind: "ok" })
+    expect(s.state.git).toMatchObject({ base: "trunk", baseSource: "origin_head" })
   })
 
   it("402 from the keys verb → blocked SUBSCRIPTION_REQUIRED (exit 4)", async () => {
@@ -262,6 +291,30 @@ describe("step before: preconditions and the branch", () => {
 })
 
 describe("step before: the dry load's own failures stay unknown", () => {
+  it("a busy test engine is retried, then the load stays unknown; nothing crashes (review P2-6, probe P-I)", async () => {
+    const busy = () => new FakeBridgeError(409, "busy", true)
+    const once = setup({ startErrors: [busy()] })
+    expect(await once.run()).toMatchObject({ kind: "ok", status: "Before: 9 pass · 0 problems · 0 unknown" })
+    expect(once.bridge.sentTests).toHaveLength(1)
+    const always = setup({ startErrors: [busy(), busy(), busy(), busy(), busy()] })
+    const outcome = await always.run()
+    expect(outcome).toMatchObject({ kind: "ok", status: expect.stringContaining("1 unknown") })
+    expect(always.log.filter((entry) => entry.startsWith("bridge.test.start"))).toHaveLength(4)
+    expect(always.state.jobs.length).toBeGreaterThan(0)
+    // Negative: a signed-out app still stops the run.
+    expect(await setup({ startErrors: [new FakeBridgeError(409, "signed_out")] }).run()).toMatchObject({ kind: "blocked", code: "INF_WIZ_SIGNED_OUT" })
+  })
+
+  it("a failed baseline read leaves the baseline unknown (null) and still seeds (review P2-6, probe P-J)", async () => {
+    const s = setup({ baselineError: new FakeBridgeError(502, "cloud_error", true) })
+    expect(await s.run()).toMatchObject({ kind: "ok" })
+    const file = JSON.parse(s.fs.store.get(`/repo/${BEFORE_FACTS_PATH}`)!.text) as BeforeFactsFile
+    expect(file.facts.baseline).toBeNull()
+    expect(s.state.jobs.length).toBeGreaterThan(0)
+    // Negative: 402 on the baseline still blocks.
+    expect(await setup({ baselineError: new FakeBridgeError(402, "subscription_required") }).run()).toMatchObject({ kind: "blocked", code: "INF_WIZ_SUBSCRIPTION_REQUIRED" })
+  })
+
   it("a failed test run is undetermined (test_error), and the step continues", async () => {
     const s = setup({ bridgePolls: [{ protocolVersion: 1, requestId: "r", state: "failed", progress: [], error: { code: "load_failed", message: "the page did not load" } }] })
     const outcome = await s.run()
@@ -306,7 +359,12 @@ describe("step before: the hand-off", () => {
     expect(file.productionHost).toBe("acme-store.com")
     expect(file.facts.observedProductionHost).toBe("www.acme-store.com")
     expect(file.facts.dryLive?.markers.infiniteEventIds).toEqual(["evt_FAKE0001"])
-    expect(file.baseline?.ga4.pageViews).toEqual({ production: 39, preview: 5, other: 0 })
+    // The ONE hand-off shape lane O7 reads: baseline and baselineBuild INSIDE facts (review P1-1).
+    expect(file.facts.baseline?.ga4.pageViews).toEqual({ production: 39, preview: 5, other: 0 })
+    expect(file.facts.baselineBuild).toEqual({ ok: true, failureSignature: [], durationMs: 1200 })
+    expect(file).not.toHaveProperty("baseline")
+    expect(await readBeforeFactsFile(s.fs.fs, "/repo", RUN_ID)).toEqual(file)
+    expect(await readBeforeFactsFile(s.fs.fs, "/repo", "another-run")).toBeNull()
     expect(Object.keys(file.facts.keys)).toEqual(["infinite", "ga4", "posthog", "meta", "serverLane"])
     expect(file).not.toHaveProperty("cells")
     expect(s.state.markers.before).toEqual({ infiniteEventIds: ["evt_FAKE0001"], posthogDistinctId: "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b", probePath: null, metaEventIds: [] })
@@ -317,6 +375,24 @@ describe("step before: the hand-off", () => {
     expect(subs).toContain("Branch infinite/tag/2026-10-02-7f3c2a from main")
     expect(subs).toContain("Found GA4 in app/layout.tsx:2")
     expect(subs).toContain("Test load of acme-store.com (nothing sent)…")
+  })
+
+  it("hands the live_today readings to the column builder and keeps its column (review P1-2)", async () => {
+    const inputs: unknown[] = []
+    const s = setup({
+      buildLiveTodayColumn: (input) => {
+        inputs.push(input)
+        return { meta: input.meta, cells: {}, finishLine: {} }
+      }
+    })
+    await s.run()
+    expect(inputs).toHaveLength(1)
+    const input = inputs[0] as { runId: string; meta: { measuredAt: string; sha: string }; facts: Array<{ input: string }>; rows: Record<string, { source: string }> }
+    expect(input.runId).toBe(RUN_ID)
+    expect(input.meta.sha).toBe("0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d")
+    expect(input.facts.map((fact) => fact.input)).toEqual(expect.arrayContaining(["dry_live.graded", "t1.redirect_walk", "baseline.preview_share", "keys.consent_mode"]))
+    expect(s.state.report.live_today).toEqual({ meta: input.meta, cells: {}, finishLine: {} })
+    expect(s.state.report.in_pr).toBeNull()
   })
 
   it("reads env targets only when the census found env-sourced ids", async () => {
@@ -335,7 +411,9 @@ describe("step before: the hand-off", () => {
     const s = setup({ checks: { grades: { meta: blocked } } })
     expect(await s.run()).toEqual({ kind: "ok", status: "Before: 8 pass · 1 problem · 0 unknown" })
     const subs = s.events.filter((event) => event.type === "step.sub").map((event) => (event.fields as { text: string; tone: string }))
-    expect(subs).toContainEqual({ step: "before", text: "! Meta pixel: traffic_permissions_blocked on acme-store.com", tone: "warn" })
+    expect(subs).toContainEqual({ step: "before", text: "! Meta pixel blocked on www.acme-store.com", tone: "warn" })
+    // Never a raw reason code in the live lines (review P3-5).
+    expect(subs.some((sub) => sub.text.includes("traffic_permissions_blocked"))).toBe(false)
   })
 
   it("the dry fixture is the production load (sanity)", () => {
