@@ -326,21 +326,22 @@ describe("document", () => {
 });
 
 describe("link", () => {
-  it("the minted URL renders on one line, with `c copy` beside it once the view is engaged", () => {
+  it("the minted URL renders on one line, with the `c` key chip and copy beside it once the view is engaged", () => {
     const fresh = draw(fixture("link-minted"));
     const bare = fresh.detail.find((l) => l.includes("https://go.example.com/abc1"))!;
     // Unengaged, `c` types (the first letter of a message), so the body offers no `c`.
-    expect(bare).not.toContain("c copy");
+    expect(bare).not.toContain("copy");
     expect(fresh.copyText).toBe("https://go.example.com/abc1");
     const render = draw(fixture("link-minted"), { engaged: true });
     const line = render.detail.find((l) => l.includes("https://go.example.com/abc1"))!;
-    expect(line).toMatch(/https:\/\/go\.example\.com\/abc1\s+c copy$/u);
+    // The chip prints as same-width brackets without colour.
+    expect(line).toMatch(/https:\/\/go\.example\.com\/abc1\s+\[c\] copy$/u);
     expect(render.copyText).toBe("https://go.example.com/abc1");
     expect(text(render)).toMatch(/source\s+forum/u);
     expect(text(render)).toMatch(/to\s+https:\/\/example\.com\/landing/u);
     // Too narrow for both: the URL is cut, the copy key stays on the line, and c copies it whole.
     const narrow = draw(fixture("link-minted"), { width: 30, engaged: true });
-    const cut = narrow.detail.find((l) => l.includes("c copy"))!;
+    const cut = narrow.detail.find((l) => l.includes("[c] copy"))!;
     expect(cut.length).toBeLessThanOrEqual(30);
     expect(cut).toContain("…");
     expect(narrow.copyText).toBe("https://go.example.com/abc1");
@@ -371,14 +372,14 @@ describe("link", () => {
     expect(text(render)).not.toContain("c copy");
   });
 
-  it("an app place prints its label, with (o) only when the session can open the app", () => {
+  it("an app place is a link with (o) only when the session can open the app", () => {
     const v = view({
       kind: "link",
       body: { target: "app_place", minted: false, opened: false, warnings: [], appPlace: { place: "library", label: "Library", selectionCount: 3 } }
     });
-    expect(text(draw(v))).toContain("↗ Library · 3 selected");
-    expect(text(draw(v))).not.toContain("(o)");
-    expect(text(draw(v, { caps: { open: true, watch: false, retry: false } }))).toContain("↗ Library · 3 selected (o)");
+    expect(text(draw(v))).toContain("Library · 3 selected");
+    expect(text(draw(v))).not.toMatch(/↗|\(o\)/u);
+    expect(text(draw(v, { caps: { open: true, watch: false, retry: false } }))).toContain("Library · 3 selected ↗  (o)");
   });
 });
 

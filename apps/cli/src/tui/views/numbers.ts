@@ -57,6 +57,8 @@ export function finite(value: unknown): number | null {
 export interface MeasureDraw {
   notes: FootnoteBook;
   hidden: number;
+  /** The view has a state reason, which already says how many days are in: the legend skips its N-of-M lead. */
+  reasonSaid?: boolean;
 }
 
 // ── tables of cells ──
@@ -115,7 +117,9 @@ export function cellTableLines(input: CellTableInput, ctx: ViewRenderCtx, draw: 
   const selected = selectedRow(input);
   if (selected !== null && lines[3 + selected] !== undefined) {
     // Pass 2 never drops more than pass 1 (fewer footnotes, never wider cells), and rows are one line each.
-    lines[3 + selected] = lines[3 + selected]!.replace("│", "▸");
+    // The row's left border (its own painted run) becomes r4's selection token, a bold cyan ▸;
+    // the border's opening style is re-applied after it for anything else in that run.
+    lines[3 + selected] = lines[3 + selected]!.replace(/^((?:\u001b\[[0-9;]*m)*)│/u, (_match, open: string) => `${paint("▸", "cb", ctx)}${open}`);
   }
   if (hiddenIndexes.length) {
     const named = hiddenIndexes.map((index) => labels[index + 1]).filter(Boolean).join(", ");
@@ -217,15 +221,16 @@ function recordLines(input: CellTableInput, labels: readonly string[], ctx: View
     if (recordIndex > 0 && (open || expanded(recordIndex - 1))) {
       lines.push("");
     }
-    const mark = selected === null ? "" : recordIndex === selected ? "▸ " : "  ";
-    lines.push(...wrapText(viewText(record.label), Math.max(1, ctx.width - mark.length)).map((line, index) =>
-      `${index === 0 ? mark : " ".repeat(mark.length)}${paint(line, "text", ctx, { bold: true })}`));
+    const mark = selected === null ? "" : recordIndex === selected ? paint("▸ ", "cb", ctx) : "  ";
+    const markWidth = selected === null ? 0 : 2;
+    lines.push(...wrapText(viewText(record.label), Math.max(1, ctx.width - markWidth)).map((line, index) =>
+      `${index === 0 ? mark : " ".repeat(markWidth)}${paint(line, "b", ctx)}`));
     if (!open) {
       return;
     }
     input.columns.forEach((column, index) => {
       const value = drawCell(record.cells[index], columnFor(column, record, index), input.currency, notes);
-      const indent = " ".repeat(mark.length + 2);
+      const indent = " ".repeat(markWidth + 2);
       lines.push(...wrapText(`${labels[index + 1]}: ${value}`, Math.max(1, ctx.width - indent.length)).map((line) => `${indent}${line}`));
     });
   });
@@ -340,7 +345,7 @@ function legLines(
   const layout = body.layout;
   const currency = typeof body.currency === "string" ? body.currency : null;
   const title = legTitle(leg, isToday, ctx);
-  const lines = title ? wrapText(title, ctx.width).map((line) => paint(line, "text", ctx, { bold: true })) : [];
+  const lines = title ? wrapText(title, ctx.width).map((line) => paint(line, "b", ctx)) : [];
 
   const rows = asList(leg.rows).filter(isRecord);
   const legTotals = isRecord(leg.totals) ? leg.totals : null;
@@ -426,7 +431,7 @@ function kpiLines(
   blocks.forEach((block, index) => {
     if (blocks.length > 1) {
       if (index > 0) lines.push("");
-      lines.push(...wrapText(block.label, ctx.width).map((line) => paint(line, "text", ctx, { bold: true })));
+      lines.push(...wrapText(block.label, ctx.width).map((line) => paint(line, "b", ctx)));
     }
     lines.push(...pairLines(columns.map((column) => ({
       label: column.label,
@@ -438,15 +443,18 @@ function kpiLines(
 
 // ── the coverage strip ──
 
-const COVERAGE_MARKS: Record<string, { glyph: string; words: string; role: "primary" | "muted" | "warning" }> = {
+type CoverageMark = { glyph: string; words: string; role: "primary" | "muted" | "warning" | "hatch" };
+
+/** r4's day strip: `█` cyan, `·` dim, `◌` amber (today), `░` hatch (not synced yet). */
+const COVERAGE_MARKS: Record<string, CoverageMark> = {
   measured: { glyph: "█", words: "measured", role: "primary" },
   partial: { glyph: "▒", words: "partial", role: "warning" },
   zero: { glyph: "·", words: "zero", role: "muted" },
   not_measured: { glyph: "—", words: "not measured", role: "muted" },
-  not_synced: { glyph: "░", words: "not synced", role: "warning" },
+  not_synced: { glyph: "░", words: "not synced", role: "hatch" },
   unknown: { glyph: "?", words: "unknown", role: "muted" }
 };
-const TODAY_MARK = { glyph: "◌", words: "today", role: "warning" as const };
+const TODAY_MARK: CoverageMark = { glyph: "◌", words: "today, not synced yet", role: "warning" };
 
 function coverageMark(status: unknown) {
   return typeof status === "string" && Object.hasOwn(COVERAGE_MARKS, status) && status !== "unknown"
@@ -460,7 +468,7 @@ function coverageMark(status: unknown) {
  * strip too long for the pane wraps below its dates. Then the legend, naming
  * only the marks the strip uses.
  */
-function coverageLines(legs: Record<string, unknown>, ctx: ViewRenderCtx): string[] {
+function coverageLines(legs: Record<string, unknown>, ctx: ViewRenderCtx, reasonSaid = false): string[] {
   const settled = asRecord(legs.settled);
   const today = isRecord(legs.today) ? legs.today : null;
   const coverage = asRecord(settled.coverage);
@@ -475,7 +483,7 @@ function coverageLines(legs: Record<string, unknown>, ctx: ViewRenderCtx): strin
     const to = asRecord(today.window).to;
     if (!todayDays.length && typeof to === "string") todayDates.add(to);
   }
-  const days: { date: string; mark: { glyph: string; words: string; role: "primary" | "muted" | "warning" } }[] = [];
+  const days: { date: string; mark: CoverageMark }[] = [];
   for (const day of asList(coverage.days).filter(isRecord)) {
     if (typeof day.date !== "string") continue;
     days.push({ date: day.date, mark: todayDates.has(day.date) ? TODAY_MARK : coverageMark(day.status) });
@@ -493,10 +501,13 @@ function coverageLines(legs: Record<string, unknown>, ctx: ViewRenderCtx): strin
     days.slice(from, to).map((day) => paint(day.mark.glyph, day.mark.role, ctx)).join("");
   const lines: string[] = [];
   const one = `Days ${first} ${plainGlyphs} ${last}`;
+  // The legend hangs under the strip, past `Days ` (r4), when the strip is one line.
+  let legendIndent = "";
   if (displayWidth(one) <= ctx.width) {
-    lines.push(`${paint("Days", "text", ctx, { bold: true })} ${paint(first, "muted", ctx)} ${painted(0, days.length)} ${paint(last, "muted", ctx)}`);
+    legendIndent = " ".repeat(DAYS_LABEL.length);
+    lines.push(`${paint("Days", "b", ctx)} ${paint(first, "muted", ctx)} ${painted(0, days.length)} ${paint(last, "muted", ctx)}`);
   } else {
-    lines.push(fitLine(`${paint("Days", "text", ctx, { bold: true })} ${paint(`${first} – ${last}`, "muted", ctx)}`, ctx.width));
+    lines.push(fitLine(`${paint("Days", "b", ctx)} ${paint(`${first} – ${last}`, "muted", ctx)}`, ctx.width));
     const chunk = Math.max(1, ctx.width - 2);
     for (let start = 0; start < days.length; start += chunk) {
       lines.push(`  ${painted(start, Math.min(days.length, start + chunk))}`);
@@ -507,12 +518,14 @@ function coverageLines(legs: Record<string, unknown>, ctx: ViewRenderCtx): strin
   const requested = finite(coverage.requestedDays);
   const measured = finite(coverage.measuredDays);
   const legend = [
-    ...(requested !== null && measured !== null ? [`${measured} of ${requested} days measured`] : []),
+    ...(!reasonSaid && requested !== null && measured !== null ? [`${measured} of ${requested} days measured`] : []),
     ...used.values()
   ].join("   ");
-  lines.push(...wrapText(legend, ctx.width).map((line) => paint(line, "muted", ctx)));
+  lines.push(...wrapText(legend, Math.max(1, ctx.width - legendIndent.length)).map((line) => `${legendIndent}${paint(line, "muted", ctx)}`));
   return lines;
 }
+
+const DAYS_LABEL = "Days ";
 
 // ── sections (composite) ──
 
@@ -544,7 +557,7 @@ export function sectionLines(sections: unknown, ctx: ViewRenderCtx, draw: Measur
     const title = viewText(section.title);
     if (!title && !drawn.length) continue;
     if (lines.length) lines.push("");
-    lines.push(...wrapText(title, ctx.width).map((line) => paint(line, "text", ctx, { bold: true })), ...drawn);
+    lines.push(...wrapText(title, ctx.width).map((line) => paint(line, "b", ctx)), ...drawn);
   }
   return lines;
 }
@@ -589,7 +602,7 @@ export function numbersBodyLines(body: Record<string, unknown>, ctx: ViewRenderC
     blocks.push(legLines(legs.today, true, nested, body, columns, ctx, draw));
   }
   if (legs) {
-    blocks.push(coverageLines(legs, ctx));
+    blocks.push(coverageLines(legs, ctx, draw.reasonSaid === true));
   }
 
   const leaders = asList(body.leaders).filter(isRecord).flatMap((leader) => {
@@ -625,7 +638,7 @@ function selectableRows(body: Record<string, unknown>): number {
 }
 
 export const renderNumbers: KindRenderer<"numbers"> = (view, ctx): KindRender => {
-  const draw: MeasureDraw = { notes: new FootnoteBook(), hidden: 0 };
+  const draw: MeasureDraw = { notes: new FootnoteBook(), hidden: 0, reasonSaid: isRecord(view.stateReason) };
   const detail = numbersBodyLines(asRecord(view.body), ctx, draw);
   return {
     detail,

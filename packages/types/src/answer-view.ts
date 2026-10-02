@@ -36,7 +36,8 @@ export interface ReasonV1 { code: string; words: string; show?: "dash" | "words"
 export interface AppLinkV1 { place: string; label: string; params?: Record<string, string>; url?: string }
 /** The message a client sends as a NEW user turn. Clients never call tools directly. */
 export interface NextStepV1 { label: string; ask: string }
-export interface StateReasonV1 { code: string; words: string; fix?: { label: string; appLink?: AppLinkV1; ask?: string } }
+/** short: the head's words in place of the generic state words ("Changed on Meta", "1 not measured"); words: the full sentence. */
+export interface StateReasonV1 { code: string; words: string; short?: string; fix?: { label: string; appLink?: AppLinkV1; ask?: string } }
 export interface ProvenanceV1 { source: string; via: "our_db" | "live_read" | "this_mac" | "server"; verdictsBy?: string }
 export interface CostV1 {
   usd: number | null; estimate: boolean;

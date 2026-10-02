@@ -9,6 +9,7 @@ import { getTurnState, recordTurnView, clearTurnViews, resetTurnState } from "..
 import { inkTranscriptRowCount } from "../ink/transcript-app.js";
 import { liveRegionCap } from "../ink/transcript-static.js";
 import { displayWidth } from "../lib/display-width.js";
+import { sgrOpen } from "../style/sgr.js";
 import { resolveTheme } from "../theme.js";
 import type { Msg } from "../types.js";
 import { HANDLED_KIND_KEYS, resolveViewKey, viewFocusAfterTurnDone, viewKeyFacts, viewKeyHints } from "./focus.js";
@@ -73,11 +74,11 @@ describe("state heads (the shared state-word table)", () => {
   it("every glyph and word is exactly the contract table", () => {
     const table = Object.fromEntries(Object.entries(STATE_HEAD).map(([state, head]) => [state, `${head.glyph} ${head.words}`]));
     expect(table).toEqual({
-      working: "◑ Working", ready: "✓ Ready", nothing_found: "○ Nothing found", not_measured: "— Not measured",
+      working: "◑ Working", ready: "✓ Ready", nothing_found: "∅ Nothing found", not_measured: "— Not measured",
       partial: "◐ Partial", out_of_date: "⧗ Out of date", not_connected: "⊘ Not connected", blocked: "⊗ Blocked",
       finish_in_app: "↗ Finish in the app", needs_yes: "▣ Needs your OK", needs_answer: "▣ Needs an answer",
-      applying: "◑ Applying", done: "✓ Done", failed: "✗ Failed", cancelled: "✕ Dismissed", expired: "◷ Expired",
-      outcome_unknown: "? Not sure it happened", hit_limit: "$ Hit a limit", background: "⟳ Running",
+      applying: "◑ Working", done: "✓ Done", failed: "✗ Failed", cancelled: "✕ Dismissed", expired: "◷ Expired",
+      outcome_unknown: "◑ Not sure it happened", hit_limit: "$ Hit a limit", background: "⟳ Running",
       opened_in_app: "↗ Opened in the app", preview: "◇ Preview", no_change: "· Nothing to change",
       showing_defaults: "◇ Showing defaults", cmdl_only: "⌘ Do this in Cmd+L"
     });
@@ -92,6 +93,64 @@ describe("state heads (the shared state-word table)", () => {
   it("a failed write that was never sent says Not sent", () => {
     expect(stateHeadFor({ state: "failed", outcome: "not_sent" })).toMatchObject({ glyph: "✗", words: "Not sent", tone: "bad" });
     expect(stateHeadFor({ state: "failed", outcome: "unknown" }).words).toBe("Failed");
+  });
+
+  // r4 "⧗ Changed on Meta" (amber): the write never left because the thing changed
+  // under it. Hosts may send it as failed + not_sent with code changed_on_meta.
+  it("a write not sent because it changed on the provider heads ⧗ amber, never ✗ red", () => {
+    const changed = (short?: string) => stateHeadFor({
+      state: "failed", outcome: "not_sent",
+      stateReason: { code: "changed_on_meta", words: "This changed since you looked.", ...(short ? { short } : {}) } as never
+    });
+    expect(changed("Changed on Meta")).toEqual({ glyph: "⧗", words: "Changed on Meta", tone: "warn" });
+    expect(changed()).toEqual({ glyph: "⧗", words: "Changed on Meta", tone: "warn" });
+    // Any other not-sent reason keeps the red ✗ Not sent.
+    expect(stateHeadFor({ state: "failed", outcome: "not_sent", stateReason: { code: "x", words: "w" } as never }))
+      .toEqual({ glyph: "✗", words: "Not sent", tone: "bad" });
+  });
+
+  it("a short longer than a head's room falls back to the generic words", () => {
+    const h = stateHeadFor({ state: "partial", stateReason: { code: "p", words: "w", short: "x".repeat(33) } as never });
+    expect(h.words).toBe("Partial");
+    expect(stateHeadFor({ state: "partial", stateReason: { code: "p", words: "w", short: "y".repeat(32) } as never }).words).toBe("y".repeat(32));
+  });
+
+  // D3 (River, 2026-10-02): the head is the glyph plus `stateReason.short ?? generic`, as round 4 draws it.
+  it("the needs-you heads take the bold amber ask tone; Cmd+L-only takes its own bold blue", () => {
+    expect(STATE_HEAD.needs_yes.tone).toBe("ask");
+    expect(STATE_HEAD.needs_answer.tone).toBe("ask");
+    expect(STATE_HEAD.cmdl_only.tone).toBe("cmdl_only");
+  });
+
+  it("a state reason's short words replace the generic words; the glyph and tone stay the state's", () => {
+    const head = (state: string, short: unknown, extra: Record<string, unknown> = {}) => {
+      const h = stateHeadFor({ state: state as never, stateReason: { code: "c", words: "w", short } as never, ...extra });
+      return `${h.glyph} ${h.words}|${h.tone}`;
+    };
+    expect(head("not_measured", "1 not measured")).toBe("— 1 not measured|muted");
+    expect(head("out_of_date", "Changed on Meta")).toBe("⧗ Changed on Meta|warn");
+    expect(head("outcome_unknown", "Still running")).toBe("◑ Still running|warn");
+    expect(head("no_change", "Already live")).toBe("· Already live|muted");
+    expect(head("cmdl_only", "Cmd+L only")).toBe("⌘ Cmd+L only|cmdl_only");
+    expect(head("failed", "Not sent", { outcome: "not_sent" })).toBe("✗ Not sent|bad");
+    // Short words that are empty, not a string, or only control characters fall back to the generic words.
+    expect(head("nothing_found", "")).toBe("∅ Nothing found|muted");
+    expect(head("nothing_found", 7)).toBe("∅ Nothing found|muted");
+    expect(head("nothing_found", "\u001b[2J")).toBe("∅ Nothing found|muted");
+    // Scrubbed like every view string.
+    expect(head("partial", "1 of 2\u001b[31m days")).toBe("◐ 1 of 2 days|warn");
+  });
+
+  it("running images draw the braille spinner and read Working; a job keeps ⟳ Running", () => {
+    const head = (kind: string, state: string) => {
+      const h = stateHeadFor({ kind: kind as never, state: state as never });
+      return `${h.glyph} ${h.words}|${h.tone}`;
+    };
+    expect(head("images", "background")).toBe("⠋ Working|busy");
+    expect(head("images", "working")).toBe("⠋ Working|busy");
+    expect(head("job", "background")).toBe("⟳ Running|busy");
+    expect(head("change", "working")).toBe("◑ Working|busy");
+    expect(head("images", "done")).toBe("✓ Done|ok");
   });
 });
 
@@ -146,8 +205,8 @@ describe("the view shell", () => {
       stateReason: { code: "role", words: "Only an owner or admin can do this." },
       body: { picturesInApp: false }
     }), ctx());
-    expect(render.head).toBe("Item  ⊗ Blocked");
-    expect(render.detail).toEqual(["Only an owner or admin can do this."]);
+    expect(render.head).toBe("[Item] ⊗ Blocked");
+    expect(render.detail).toEqual(["⊗ Only an owner or admin can do this."]);
   });
 
   it("the source line reads provenance · up to asOf", () => {
@@ -163,11 +222,11 @@ describe("the view shell", () => {
     expect(render.detail).toContain("40 of 100 · First 40 by spend · m for more");
   });
 
-  it("the head draws the title as an inverse chip, then the state (r4 head)", () => {
+  it("the head draws the title as a tag chip, then the state (r4 head)", () => {
     const head = renderView(envelope({}), ctx({ color: true })).head;
-    expect(head).toContain("\u001b[7m Item ");
+    expect(head).toContain(`${sgrOpen("tag", theme.tier)} Item `);
     expect(head.replace(/\u001b\[[0-9;]*m/gu, "")).toBe(" Item  ✓ Ready");
-    expect(renderView(envelope({}), ctx()).head).toBe("Item  ✓ Ready");
+    expect(renderView(envelope({}), ctx()).head).toBe("[Item] ✓ Ready");
   });
 
   it("a state's fix prints only when a key can act on it", () => {
@@ -178,19 +237,19 @@ describe("the view shell", () => {
     const appLink = { route: "connections" };
     // An ask with no row asks is bound to Enter.
     const asks = renderView(reason({ label: "Connect Meta", ask: "connect meta" }), ctx());
-    expect(asks.detail).toEqual(["Meta is not connected.", "→ Connect Meta"]);
+    expect(asks.detail).toEqual(["⊘ Meta is not connected.", "", "→ Connect Meta"]);
     expect(asks.fixAsk).toBe("connect meta");
     // A link opens with o only when the session can open the app.
     expect(renderView(reason({ label: "Connect Meta", appLink }), ctx({ caps: { open: true, watch: false, retry: false } })).detail)
-      .toEqual(["Meta is not connected.", "→ Connect Meta (o)"]);
+      .toEqual(["⊘ Meta is not connected.", "", "Connect Meta ↗  (o)"]);
     // Nothing can act: the line is not printed.
-    expect(renderView(reason({ label: "Connect Meta", appLink }), ctx()).detail).toEqual(["Meta is not connected."]);
-    expect(renderView(reason({ label: "Connect Meta" }), ctx()).detail).toEqual(["Meta is not connected."]);
+    expect(renderView(reason({ label: "Connect Meta", appLink }), ctx()).detail).toEqual(["⊘ Meta is not connected."]);
+    expect(renderView(reason({ label: "Connect Meta" }), ctx()).detail).toEqual(["⊘ Meta is not connected."]);
     expect(renderView(reason({ label: "Connect Meta" }), ctx()).fixAsk).toBeUndefined();
   });
 
   it("a failed write that was not sent heads as Not sent", () =>
-    expect(renderView(envelope({ state: "failed", outcome: "not_sent" }), ctx()).head).toBe("Item  ✗ Not sent"));
+    expect(renderView(envelope({ state: "failed", outcome: "not_sent" }), ctx()).head).toBe("[Item] ✗ Not sent"));
 
   it("the explanation stays behind ? until it is opened", () => {
     const view = envelope({ explain: "Reads the item from our copy." });
@@ -206,7 +265,7 @@ describe("the view shell", () => {
     }), ctx());
     const all = [render.head, render.source ?? "", ...render.detail].join("\n");
     expect(all).not.toMatch(/[\u001b\u0000‮⁦]/u);
-    expect(render.head).toBe("Item one  ✓ Ready");
+    expect(render.head).toBe("[Item one] ✓ Ready");
   });
 
   it("malformed envelope fields degrade instead of throwing", () => {
@@ -284,7 +343,7 @@ describe("the r4 layout", () => {
     const text = renderLiveTurn({ messages, views: [listViewFixture()], focus: null, width: 120, color: false, theme }).lines.join("\n");
     expect(text).toContain("❯ which ads are on?");
     expect(text).toContain("∞ Two are on.");
-    expect(text).toContain("│ Ads running  ✓ Ready");
+    expect(text).toContain("│ [Ads running] ✓ Ready");
     expect(text).not.toContain("**");
   });
 

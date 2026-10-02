@@ -96,8 +96,7 @@ export function renderView(given: AnswerViewV1, ctx: ViewRenderCtx): ViewRender 
     detail: [
       ...explainLines(view, shellCtx),
       ...managedSummaryLines(managed, shellCtx),
-      ...stateReasonLines(view, shellCtx, fixAsk !== null),
-      ...(body?.detail ?? []),
+      ...blankBetween(stateReasonLines(view, shellCtx, fixAsk !== null), body?.detail ?? []),
       ...(managed ? managedApprovalLines(managed, shellCtx) : []),
       ...reconcileLines(view, shellCtx),
       ...truncationLines(view, shellCtx),
@@ -116,6 +115,11 @@ export function renderView(given: AnswerViewV1, ctx: ViewRenderCtx): ViewRender 
     ...(fixAsk ? { fixAsk } : {}),
     ...(managed ? { approvalAsk: { key: managed.key, label: managed.label, ask: managed.ask } } : {})
   };
+}
+
+/** Two blocks, a blank row between them when both have lines (r4 sets a state's sentence apart from the body). */
+function blankBetween(first: readonly string[], second: readonly string[]): string[] {
+  return first.length && second.length ? [...first, "", ...second] : [...first, ...second];
 }
 
 function renderKindBody(view: AnswerViewV1, ctx: ViewRenderCtx): KindRender | null {

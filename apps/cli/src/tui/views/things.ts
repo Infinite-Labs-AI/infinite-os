@@ -8,7 +8,10 @@
 // call). Every string is scrubbed (`viewText`) before it is measured or drawn.
 import type { AnswerViewV1, UnitV1 } from "@infinite-os/types";
 
-import { displayWidth, padEndCells } from "../lib/display-width.js";
+import { displayWidth, padEndCells, truncateCells } from "../lib/display-width.js";
+import type { TokenStyle } from "../style/sgr.js";
+import type { Token } from "../style/tokens.js";
+import { themeTokens, type ThemeStyle } from "../theme.js";
 import { fitLine, isRecord, paint, viewText, wrapText } from "./primitives.js";
 import type { ViewRenderCtx } from "./types.js";
 
@@ -51,9 +54,45 @@ export function clampIndex(value: number, count: number): number {
   return Math.max(0, Math.min(count - 1, Math.floor(Number.isFinite(value) ? value : 0)));
 }
 
-/** The two columns before a selectable row: `▸ ` on the selected one. */
+/** The two columns before a selectable row: `▸ ` (bold cyan) on the selected one. */
 export function marker(selected: boolean, ctx: ViewRenderCtx): string {
-  return selected ? paint("▸ ", "primary", ctx, { bold: true }) : "  ";
+  return selected ? paint("▸ ", "cb", ctx) : "  ";
+}
+
+/** A run of text in one style: a row is drawn from these, so it can be sized before it is painted. */
+export interface Span {
+  text: string;
+  style: ThemeStyle;
+}
+
+/**
+ * One row from its spans, cut to the pane's width. The selected row (r4 List)
+ * leads with a bold cyan `▸` and sits on the selection background, padded to
+ * the full width; every other row leads with two spaces.
+ */
+export function rowLine(spans: readonly Span[], selected: boolean, ctx: ViewRenderCtx): string {
+  const width = Math.max(1, Math.floor(ctx.width));
+  const all: Span[] = [{ text: selected ? "▸ " : "  ", style: selected ? "cb" : "text" }, ...spans];
+  const fitted: Span[] = [];
+  let used = 0;
+  for (const span of all) {
+    const room = width - used;
+    if (room <= 0) break;
+    const text = displayWidth(span.text) > room ? truncateCells(span.text, room) : span.text;
+    fitted.push({ ...span, text });
+    used += displayWidth(text);
+  }
+  if (!selected || !ctx.color) {
+    return fitted.map((span) => (span.style === "text" ? span.text : paint(span.text, span.style, ctx))).join("").trimEnd();
+  }
+  fitted.push({ text: " ".repeat(Math.max(0, width - used)), style: "text" });
+  return fitted.map((span) => paint(span.text, withSelection(span.style), ctx)).join("");
+}
+
+/** A style on the selection background. */
+function withSelection(style: ThemeStyle): TokenStyle {
+  const tokens = themeTokens(style);
+  return [...(typeof tokens === "string" ? [tokens] : tokens), "sel"] as readonly Token[];
 }
 
 /**
@@ -83,13 +122,13 @@ export function labelColumnWidth(labels: readonly string[], width: number): numb
   return Math.max(1, Math.min(longest, Math.max(4, Math.floor(width * 0.4))));
 }
 
-/** `label  value`, the label muted and padded, the value wrapped under itself. */
+/** `label  value`, the label dim and padded, the value wrapped under itself. */
 export function labelValueLines(
   label: string,
   value: string,
   labelWidth: number,
   ctx: ViewRenderCtx,
-  valueRole: "text" | "muted" | "warning" = "text"
+  valueRole: "text" | "b" | "muted" | "warning" = "text"
 ): string[] {
   const width = Math.max(1, Math.floor(ctx.width));
   const shownLabel = fitLine(label, labelWidth);
@@ -122,12 +161,15 @@ export function nextSteps(view: AnswerViewV1): NextStep[] {
     .filter((step) => step.label !== "" && step.ask !== "");
 }
 
-/** The next steps as selectable rows: `▸ → Pause it`. `first` is the first step's row index; `selectedRow` the selection. */
+/**
+ * The next steps as selectable rows: `▸ → Pause it`, the arrow dim, the
+ * selected one on the selection background with its words bold. `first` is
+ * the first step's row index; `selectedRow` the selection.
+ */
 export function nextStepLines(steps: readonly NextStep[], first: number, selectedRow: number, ctx: ViewRenderCtx): string[] {
   return steps.map((step, index) => {
     const selected = selectedRow === first + index;
-    const text = fitLine(`→ ${step.label}`, Math.max(1, ctx.width - 2));
-    return `${marker(selected, ctx)}${paint(text, selected ? "text" : "primary", ctx, { bold: selected })}`;
+    return rowLine([{ text: "→ ", style: "muted" }, { text: step.label, style: selected ? "b" : "text" }], selected, ctx);
   });
 }
 

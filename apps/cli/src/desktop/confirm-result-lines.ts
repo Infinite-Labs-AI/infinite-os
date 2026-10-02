@@ -11,8 +11,9 @@
  * Used by the Ink session, the readline loop and the one-shot `infinite app`.
  */
 
-import type { AnswerViewState } from "@infinite-os/types";
+import type { AnswerViewState, OutcomeV1 } from "@infinite-os/types";
 
+import { STATE_HEAD, stateHeadFor, type StateTone } from "../tui/views/states.js";
 import { decodeAnswerView } from "./answer-view-decode.js";
 import { printableImagesView } from "./image-url-cut.js";
 import { boundedTerminalText } from "./terminal-text.js";
@@ -29,20 +30,30 @@ const UNREACHABLE_LINE = "✗ Couldn't reach the app — the card stays until it
 const MAX_LINE_CHARS = 240;
 const CODED_NO_MESSAGE_LINE = "The app couldn't confirm this. Check it before trying again.";
 
-/** Glyph and tone for the receipt view's state (the shared state words' glyphs). */
-const STATE_MARK: Partial<Record<AnswerViewState, { glyph: string; tone: ConfirmLineTone }>> = {
-  done: { glyph: "✓", tone: "ok" },
-  opened_in_app: { glyph: "↗", tone: "ok" },
-  background: { glyph: "⟳", tone: "ok" },
-  partial: { glyph: "◐", tone: "warn" },
-  outcome_unknown: { glyph: "?", tone: "warn" },
-  no_change: { glyph: "·", tone: "muted" },
-  cancelled: { glyph: "✕", tone: "muted" },
-  expired: { glyph: "◷", tone: "muted" },
-  failed: { glyph: "✗", tone: "bad" },
-  hit_limit: { glyph: "$", tone: "bad" },
-  blocked: { glyph: "⊗", tone: "bad" }
+/** The receipt states that take the view head's mark. */
+const RECEIPT_STATES = new Set<AnswerViewState>([
+  "done", "opened_in_app", "background", "partial", "outcome_unknown", "no_change",
+  "cancelled", "expired", "failed", "hit_limit", "blocked"
+]);
+
+/** A head tone as a receipt line's tone (a job still running reads as ok). */
+const LINE_TONE: Record<StateTone, ConfirmLineTone> = {
+  ok: "ok", busy: "ok", ask: "warn", warn: "warn", bad: "bad", muted: "muted", cmdl_only: "muted"
 };
+
+/**
+ * The receipt line's glyph and tone ARE the view head's (`stateHeadFor`, with
+ * its refinements: `◑` unknown, an amber `⧗` for a write not sent because it
+ * changed on the provider), so a receipt line never disagrees with its head.
+ */
+function stateMark(view: { state: AnswerViewState; outcome?: OutcomeV1; stateReason?: unknown }): { glyph: string; tone: ConfirmLineTone } | undefined {
+  if (!RECEIPT_STATES.has(view.state)) return undefined;
+  const head = stateHeadFor(view);
+  return { glyph: head.glyph, tone: LINE_TONE[head.tone] };
+}
+
+/** The unknown-outcome glyph, shared with the view head (`◑`). */
+const UNKNOWN_GLYPH = STATE_HEAD.outcome_unknown.glyph;
 
 /** Receipt states whose reconcile step the receipt prints (and offers as the next ask). */
 const UNSURE_STATES = new Set<AnswerViewState>(["outcome_unknown", "partial"]);
@@ -102,7 +113,7 @@ export function confirmErrorLines(error: unknown): ConfirmLine[] {
   if (fromView) return fromView;
   const message = error instanceof Error ? boundedTerminalText(error.message, MAX_LINE_CHARS) : "";
   if (code !== undefined && UNKNOWN_OUTCOME_CODES.has(code)) {
-    return [{ tone: "warn", text: `? ${message || "Not sure it happened."}` }];
+    return [{ tone: "warn", text: `${UNKNOWN_GLYPH} ${message || "Not sure it happened."}` }];
   }
   if (code !== undefined) {
     // A coded app answer without a decodable view: an older app (no receipt
@@ -182,7 +193,7 @@ function receiptViewLines(value: unknown, decision: ConfirmDecision): ConfirmLin
   const mark =
     decision === "decline"
       ? { glyph: "✕", tone: "muted" as const }
-      : STATE_MARK[view.state] ??
+      : stateMark(view) ??
         (receipt.tone === "warn" ? { glyph: "!", tone: "warn" as const } : { glyph: "✓", tone: "ok" as const });
   const lines: ConfirmLine[] = [{ tone: mark.tone, text: `${mark.glyph} ${sentence}` }];
   // Not sure it happened: the app's reconcile step (check first), never "try again".
