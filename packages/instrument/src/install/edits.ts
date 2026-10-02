@@ -7,7 +7,7 @@
 // `afterHash`. Reversal runs newest first. A `null` beforeHash means the edit CREATED the file.
 import { createHash } from "node:crypto"
 
-import { applyTextEdits, reverseTextEdits } from "../server-lane/text-edits.js"
+import { reverseTextEdits } from "../server-lane/text-edits.js"
 import type { ManagedTextEdit } from "../types.js"
 import type { WizardEditRecord } from "../wizard/contracts/jobs.js"
 
@@ -101,24 +101,28 @@ export function reverseEditRecord(current: string | null, record: EditRecord): R
 export interface RefreshIo {
   /** The file at HEAD (after hooks ran and the commit landed); null when absent. */
   readHead(file: string): string | null
-  /** The file at the branch base (before this run); null when absent. */
-  readBase(file: string): string | null
+  /**
+   * The exact text a record was made from (cached when the record was made; null = the record created
+   * the file, undefined = not known in this checkout).
+   */
+  beforeOf(record: EditRecord): string | null | undefined
 }
 
 export interface RefreshResult {
   records: EditRecord[]
   /** Files whose newest record was rebased onto the committed blob. */
   refreshed: string[]
-  /** Files whose chain could not be rebuilt from the base (left unchanged; never guessed). */
+  /** Files whose newest record's "before" is not known or does not hash right (left unchanged; never guessed). */
   unverifiable: string[]
 }
 
 /**
  * §3e.6: `afterHash` is recomputed from the committed blob after hooks run. For each file whose HEAD
- * blob no longer equals its newest record's `afterHash` (a hook reformatted it), the chain is replayed
- * from the base blob — each record's `beforeHash` must match, so a broken chain is never papered over —
- * and the NEWEST record is rebased: its `textEdits` and `afterHash` now describe its before → HEAD, so
- * uninstall still restores the exact pre-edit bytes. Pure; the caller writes the receipt.
+ * blob no longer equals its newest record's `afterHash` (a hook reformatted it), the NEWEST record is
+ * rebased: its `textEdits` and `afterHash` now describe its own before → HEAD, so uninstall (newest
+ * first) still restores the exact pre-edit bytes, and the older records reverse on top of that. The
+ * record's "before" must hash to its `beforeHash`, so a wrong cache is never papered over. Pure; the
+ * caller writes the receipt.
  */
 export function refreshFromHead(records: readonly EditRecord[], io: RefreshIo): RefreshResult {
   const out = records.map((record) => ({ ...record, textEdits: record.textEdits.map((edit) => ({ ...edit })) }))
@@ -131,30 +135,28 @@ export function refreshFromHead(records: readonly EditRecord[], io: RefreshIo): 
     const newest = out[newestIndex]!
     const head = io.readHead(file)
     if (head === null || sha256Tagged(head) === newest.afterHash) continue
-    // Replay the chain from the base to reach the newest record's own "before".
-    let content: string | null = io.readBase(file)
-    let intact = true
-    for (const index of indexes.slice(0, -1)) {
-      const record = out[index]!
-      if (!chainMatches(content, record.beforeHash)) {
-        intact = false
-        break
-      }
-      try {
-        content = applyTextEdits(content ?? "", record.textEdits)
-      } catch {
-        intact = false
-        break
-      }
-    }
-    if (!intact || !chainMatches(content, newest.beforeHash)) {
+    const before = io.beforeOf(newest)
+    if (before === undefined || !chainMatches(before, newest.beforeHash)) {
       unverifiable.push(file)
       continue
     }
-    out[newestIndex] = { ...newest, afterHash: sha256Tagged(head), textEdits: textEditsBetween(content ?? "", head) }
+    out[newestIndex] = { ...newest, afterHash: sha256Tagged(head), textEdits: textEditsBetween(before ?? "", head) }
     refreshed.push(file)
   }
   return { records: out, refreshed, unverifiable }
+}
+
+/** The text a record was made from, derived from the file it produced (null = the record created it). */
+export function beforeTextOf(after: string, record: EditRecord): string | null | undefined {
+  if (sha256Tagged(after) !== record.afterHash) return undefined
+  let before: string
+  try {
+    before = reverseTextEdits(after, record.textEdits)
+  } catch {
+    return undefined
+  }
+  if (record.beforeHash === null) return before === "" ? null : undefined
+  return sha256Tagged(before) === record.beforeHash ? before : undefined
 }
 
 function chainMatches(content: string | null, beforeHash: string | null): boolean {

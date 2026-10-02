@@ -6,7 +6,7 @@
 // `vercel`, auto-approve a line that reduces an adopted provider, or call the cloud (the steps call
 // the bridge; this module only reads and writes the repo).
 import { spawnSync } from "node:child_process"
-import { readdirSync } from "node:fs"
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 
 import { restoreSnapshot, snapshotFiles, type FileSnapshot } from "../apply.js"
@@ -55,7 +55,7 @@ import type {
   WizardEditRecord
 } from "../wizard/contracts/jobs.js"
 
-import { refreshFromHead } from "./edits.js"
+import { beforeTextOf, refreshFromHead } from "./edits.js"
 import { applyImproveEdit, detectAdoptedFacts, improveLinesFor, withSensitivePaths, type AdoptedFacts } from "./improve.js"
 import { artifactsFromKeys, manifestIdsFor, wizardInstallWorkspaceId, type WizardInstallArtifacts } from "./keys-adapter.js"
 import { findLockfile, NPM_JOB_ID, runNpmJob } from "./npm.js"
@@ -108,8 +108,40 @@ export interface InstallerOptions {
   spawn?: CommandSpawner
   /** Reads a committed blob (`git show <rev>:<path>`); tests pass a fake. */
   readBlob?: (root: string, rev: string, path: string) => string | null
-  /** The branch base sha (`state.git.baseSha`), for `refreshEditReceiptFromHead`. */
-  baseRev?: () => string | null
+}
+
+/**
+ * Each recorded edit's exact "before" text, cached beside the run state (gitignored, 0600) when the
+ * record is made, so a commit hook's rewrite can be rebased later (§3e.6) without guessing.
+ */
+export const EDIT_BASES_RELATIVE_PATH = ".infinite/wizard/edit-bases.json"
+
+function readEditBases(root: string): Record<string, string | null> {
+  try {
+    const parsed = JSON.parse(readFileSync(join(root, EDIT_BASES_RELATIVE_PATH), "utf8")) as unknown
+    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) ? (parsed as Record<string, string | null>) : {}
+  } catch {
+    return {}
+  }
+}
+
+/** Walks each file's new records newest → oldest from the file on disk (the uninstall walk) and caches each "before". */
+function cacheEditBefores(root: string, records: readonly WizardEditRecord[]): void {
+  if (records.length === 0) return
+  const bases = readEditBases(root)
+  for (const file of [...new Set(records.map((record) => record.file))]) {
+    const path = join(root, file)
+    let content: string | null | undefined = existsSync(path) ? readFileSync(path, "utf8") : undefined
+    for (const record of records.filter((entry) => entry.file === file).reverse()) {
+      if (content === undefined || content === null) break
+      content = beforeTextOf(content, record)
+      if (content !== undefined) bases[record.id] = content
+    }
+  }
+  mkdirSync(join(root, ".infinite/wizard"), { recursive: true, mode: 0o700 })
+  const target = join(root, EDIT_BASES_RELATIVE_PATH)
+  writeFileSync(`${target}.tmp`, `${JSON.stringify(bases)}\n`, { mode: 0o600 })
+  renameSync(`${target}.tmp`, target)
 }
 
 export interface WizardApplyResult extends InstallerApplyResult {
@@ -494,14 +526,13 @@ export class WizardInstaller implements Installer {
     const manifest = readInstallManifest(root)
     if (!manifest) return { refreshed: false }
     const readBlob = this.options.readBlob ?? gitShow
-    const base = this.options.baseRev?.() ?? null
     let changed = false
     let edits = manifest.edits ?? []
     if (edits.length > 0) {
-      if (base === null) throw new Error("refreshEditReceiptFromHead needs the branch base sha.")
+      const bases = readEditBases(root)
       const result = refreshFromHead(edits, {
         readHead: (file) => readBlob(root, "HEAD", file),
-        readBase: (file) => readBlob(root, base, file)
+        beforeOf: (record) => (Object.prototype.hasOwnProperty.call(bases, record.id) ? bases[record.id] : undefined)
       })
       if (result.refreshed.length > 0) {
         edits = result.records
@@ -554,7 +585,9 @@ export class WizardInstaller implements Installer {
         verifiedAt: null
       } satisfies InstallManifest)
     const known = new Set((base.edits ?? []).map((edit) => edit.id))
-    const merged = [...(base.edits ?? []), ...edits.filter((edit) => !known.has(edit.id))]
+    const fresh = edits.filter((edit) => !known.has(edit.id))
+    cacheEditBefores(root, fresh)
+    const merged = [...(base.edits ?? []), ...fresh]
     if (merged.length === 0 && ids === null && current) return
     writeInstallManifest(root, {
       ...base,

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest"
 
 import { applyTextEdits, reverseTextEdits } from "../server-lane/text-edits.js"
 
-import { makeEditRecord, refreshFromHead, reverseEditRecord, sha256Tagged, textEditsBetween } from "./edits.js"
+import { beforeTextOf, makeEditRecord, refreshFromHead, reverseEditRecord, sha256Tagged, textEditsBetween } from "./edits.js"
 
 describe("textEditsBetween (exact, minimal, reversible)", () => {
   const cases: Array<[string, string]> = [
@@ -53,32 +53,43 @@ describe("reverseEditRecord", () => {
 
 describe("refreshFromHead (§3e.6: a hook rewrote a recorded file)", () => {
   const base = "<head>\n</head>\n"
-  const first = makeEditRecord({ file: "index.html", before: base, after: "<head>\n<x/>\n</head>\n", jobId: null, planLineId: "l1", by: "wizard", runId: "r", seq: 0 })
-  const second = makeEditRecord({ file: "index.html", before: "<head>\n<x/>\n</head>\n", after: "<head>\n<x/>\n<y/>\n</head>\n", jobId: "csp", planLineId: null, by: "agent", runId: "r", seq: 1 })
+  const mid = "<head>\n<x/>\n</head>\n"
+  const first = makeEditRecord({ file: "index.html", before: base, after: mid, jobId: null, planLineId: "l1", by: "wizard", runId: "r", seq: 0 })
+  const second = makeEditRecord({ file: "index.html", before: mid, after: "<head>\n<x/>\n<y/>\n</head>\n", jobId: "csp", planLineId: null, by: "agent", runId: "r", seq: 1 })
+  const befores = new Map<string, string | null>([
+    [first.id, base],
+    [second.id, mid]
+  ])
 
   it("rebases the newest record onto the committed blob, so uninstall still restores the exact pre-edit bytes", () => {
     const hooked = "<head>\n  <x/>\n  <y/>\n</head>\n" // a formatter re-indented the file
-    const result = refreshFromHead([first, second], { readHead: () => hooked, readBase: () => base })
+    const result = refreshFromHead([first, second], { readHead: () => hooked, beforeOf: (record) => befores.get(record.id) })
     expect(result.refreshed).toEqual(["index.html"])
     const rebased = result.records[1]!
     expect(rebased.afterHash).toBe(sha256Tagged(hooked))
     // Newest first: the rebased record takes the hooked file back to the first record's after...
     const afterFirst = reverseEditRecord(hooked, rebased)
-    expect(afterFirst).toEqual({ ok: true, content: "<head>\n<x/>\n</head>\n" })
+    expect(afterFirst).toEqual({ ok: true, content: mid })
     // ...and the first record takes it back to the base.
     expect(reverseEditRecord(afterFirst.ok ? afterFirst.content : null, result.records[0]!)).toEqual({ ok: true, content: base })
   })
 
   it("leaves records whose committed blob already matches", () => {
-    const result = refreshFromHead([first], { readHead: () => "<head>\n<x/>\n</head>\n", readBase: () => base })
+    const result = refreshFromHead([first], { readHead: () => mid, beforeOf: (record) => befores.get(record.id) })
     expect(result.refreshed).toEqual([])
     expect(result.records).toEqual([first])
   })
 
-  it("NEGATIVE: a chain that does not start at the base is never papered over", () => {
-    const result = refreshFromHead([first, second], { readHead: () => "rewritten\n", readBase: () => "something else\n" })
-    expect(result.refreshed).toEqual([])
-    expect(result.unverifiable).toEqual(["index.html"])
-    expect(result.records[1]).toEqual(second)
+  it("beforeTextOf derives a record's before from the file it produced (and refuses a mismatch)", () => {
+    expect(beforeTextOf("<head>\n<x/>\n<y/>\n</head>\n", second)).toBe(mid)
+    expect(beforeTextOf("something else", second)).toBeUndefined()
+  })
+
+  it("NEGATIVE: an unknown or wrong 'before' is never papered over", () => {
+    const unknown = refreshFromHead([first, second], { readHead: () => "rewritten\n", beforeOf: () => undefined })
+    expect(unknown).toMatchObject({ refreshed: [], unverifiable: ["index.html"] })
+    const wrong = refreshFromHead([first, second], { readHead: () => "rewritten\n", beforeOf: () => "not the before\n" })
+    expect(wrong.unverifiable).toEqual(["index.html"])
+    expect(wrong.records[1]).toEqual(second)
   })
 })
