@@ -616,7 +616,7 @@ describe("an operation_managed approval on a view (the tool asks twice: OK sends
     expect(resolveViewKey("p", s0).effect).toBeNull();
     expect(resolveViewKey("p", s0).focus).toBe("composer");
     const engaged = resolveViewKey("", s0, tab);
-    expect(viewKeyHints(engaged).slice(0, 2)).toEqual([{ key: "p", label: "Publish" }, { key: "n", label: "dismiss" }]);
+    expect(viewKeyHints(engaged).slice(0, 2)).toEqual([{ key: "p", label: "Publish", ok: true }, { key: "n", label: "dismiss" }]);
     // A capital never decides.
     expect(resolveViewKey("P", engaged).effect).toBeNull();
     const yes = resolveViewKey("p", engaged);

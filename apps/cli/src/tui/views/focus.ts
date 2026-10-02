@@ -362,7 +362,7 @@ export function viewKeyHints(
   }
   const hints: KeyHint[] = [];
   if (state.engaged && facts.approve && !state.approvalClosed) {
-    hints.push({ key: facts.approve.key, label: facts.approve.label }, { key: "n", label: "dismiss" });
+    hints.push({ key: facts.approve.key, label: facts.approve.label, ok: true }, { key: "n", label: "dismiss" });
   }
   if (facts.rowCount > 1) hints.push({ key: "j k", label: "move" });
   if (state.engaged) {

@@ -246,8 +246,16 @@ export function keyBarSegments(hints: readonly KeyHint[]): StyledSegment[] {
   });
 }
 
-/** The bar's text with no colour (chips keep their padding): what a reader or a test sees. */
+/** The state's keys as one plain line (`p Pause   n dismiss`); every label is scrubbed. */
 export function formatKeyBar(hints: readonly KeyHint[]): string {
+  return hints.map((hint) => `${hint.key} ${terminalText(hint.label)}`).join("   ");
+}
+
+/**
+ * The drawn bar's text with no colour, uncut: chips keep their padding and the
+ * bar ends with `tab switch side` and `/ commands` (` p  Pause    n  dismiss    tab  …`).
+ */
+export function keyBarText(hints: readonly KeyHint[]): string {
   return keyBarSegments(hints).map(([, text]) => text).join("");
 }
 
