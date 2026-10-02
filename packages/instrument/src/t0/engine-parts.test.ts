@@ -132,7 +132,8 @@ describe("decoding the Next managed module's bootstrapSource", () => {
   it("returns the exact bytes the client component appends, with its line", () => {
     const moduleSource = buildAnalyticsModuleSource({ instructions: [{ path: "lib/infinite-analytics.ts", provider: "ga4", snippet: 'var re = /\\d+/; window.x = "a\\"b";' }] } as unknown as InstallPlan)
     const decoded = decodeNextBootstrap(moduleSource)
-    expect(decoded).toEqual({ ok: true, source: 'var re = /\\d+/; window.x = "a\\"b";', line: 3 })
+    // O5 isolates each provider in its own try block (Phase 1 F4 follow-up), so the decoded bytes carry that wrapper.
+    expect(decoded).toEqual({ ok: true, source: 'try {\nvar re = /\\d+/; window.x = "a\\"b";\n} catch (_infiniteProviderError) {}', line: 3 })
   })
 
   it("negative: a module without the literal, or with a broken one, is not decoded", () => {
