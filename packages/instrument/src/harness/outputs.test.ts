@@ -125,4 +125,23 @@ describe("the gitignore fence (wizard)", () => {
     expect(ensureGitignoreFence(crlf)).toBe("upgraded")
     expect(readFileSync(join(crlf, ".gitignore"), "utf8")).toBe(`dist\r\n${GITIGNORE_FENCE_BLOCK.split("\n").join("\r\n")}\r\n`)
   })
+
+  it("a CRLF fence (upgraded in place) is removed byte-identically by uninstall (O1-14)", () => {
+    const root = makeRoot()
+    const original = "dist\r\nnode_modules\r\n"
+    const legacy = LEGACY_GITIGNORE_FENCE_BLOCK.split("\n").join("\r\n")
+    writeFileSync(join(root, ".gitignore"), `${original}${legacy}\r\n`)
+    recordGitignoreBlock(root, legacy, false)
+    expect(ensureGitignoreFence(root)).toBe("upgraded")
+    expect(removeHarnessOutputs(root).gitignore).toBe("removed")
+    expect(readFileSync(join(root, ".gitignore"), "utf8")).toBe(original)
+
+    // A fence the harness CREATED in a CRLF upgrade is deleted with the file.
+    const created = makeRoot()
+    writeFileSync(join(created, ".gitignore"), `${legacy}\r\n`)
+    recordGitignoreBlock(created, legacy, true)
+    expect(ensureGitignoreFence(created)).toBe("upgraded")
+    expect(removeHarnessOutputs(created).gitignore).toBe("removed")
+    expect(existsSync(join(created, ".gitignore"))).toBe(false)
+  })
 })

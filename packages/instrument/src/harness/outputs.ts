@@ -168,12 +168,15 @@ export function removeHarnessOutputs(root: string): RemoveHarnessOutputsResult {
       result.gitignore = "absent"
     } else {
       const current = readFileSync(absolutePath, "utf8")
-      const withNewline = `${block.block}\n`
-      if (block.created && current === withNewline) {
+      // The block ends with the line end it was written with: CRLF when the file was CRLF (an upgraded
+      // fence keeps the file's line ends), else LF.
+      const eols = block.block.includes("\r\n") ? ["\r\n", "\n"] : ["\n", "\r\n"]
+      const withEol = eols.map((eol) => `${block.block}${eol}`).find((candidate) => current.includes(candidate))
+      if (withEol && block.created && current === withEol) {
         rmSync(absolutePath)
         result.gitignore = "removed"
-      } else if (current.includes(withNewline)) {
-        writeFileAtomic(absolutePath, current.replace(withNewline, ""))
+      } else if (withEol) {
+        writeFileAtomic(absolutePath, current.replace(withEol, ""))
         result.gitignore = "removed"
       } else {
         result.gitignore = "kept"
