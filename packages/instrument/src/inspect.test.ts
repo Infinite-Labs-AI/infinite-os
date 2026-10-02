@@ -551,3 +551,39 @@ describe("detectPosthogConfig + inspectWorkspace surface PostHog config", () => 
     expect(inspectWorkspace(clean).posthogConfig).toBeUndefined()
   })
 })
+
+// Lane O6 (BUILD-PLAN §2 O6 "Edit: src/inspect.ts"): PostHog config across EVERY file with evidence,
+// each init with its file:line, managed files and managed HTML blocks skipped, and `defaults` read.
+describe("detectPosthogConfig reads every init, skips Infinite's own bytes, and reads defaults", () => {
+  it("lists every init in every file (file:line), keeping the first init's values at the top level", () => {
+    const root = copyFixture("static-html-basic")
+    writeFileSync(join(root, "a.js"), "// first\nposthog.init('phc_one', { api_host: '/ingest', defaults: '2025-05-24', autocapture: false })\n")
+    writeFileSync(
+      join(root, "b.js"),
+      "posthog.init('phc_one', { api_host: 'https://eu.i.posthog.com' })\n\nposthog.init('phc_two', { disable_session_recording: true })\n"
+    )
+    const config = detectPosthogConfig(root)
+    expect(config?.file).toBe("a.js")
+    expect(config?.line).toBe(2)
+    expect(config?.defaults).toBe("2025-05-24")
+    expect(config?.inits.map((init) => [init.file, init.line, init.apiHost ?? null, init.disableSessionRecording ?? null])).toEqual([
+      ["a.js", 2, "/ingest", null],
+      ["b.js", 1, "https://eu.i.posthog.com", null],
+      ["b.js", 3, null, "true"]
+    ])
+  })
+
+  it("negative: Infinite's managed module and managed HTML block are not the founder's config", () => {
+    const root = copyFixture("static-html-basic")
+    mkdirSync(join(root, "lib"), { recursive: true })
+    writeFileSync(join(root, "lib", "infinite-analytics.ts"), "// Managed by Infinite. Public install artifacts only.\nposthog.init('phc_managed', { api_host: 'https://us.i.posthog.com' })\n")
+    writeFileSync(
+      join(root, "page.html"),
+      "<html><head><!-- infinite:start --><script>posthog.init('phc_managed', { api_host: 'https://us.i.posthog.com' })</script><!-- infinite:end --></head></html>\n"
+    )
+    expect(detectPosthogConfig(root)).toBeUndefined()
+    writeFileSync(join(root, "own.html"), "<html><head><script>// don't miss this\nposthog.init('phc_own', { autocapture: true })</script></head></html>\n")
+    const config = detectPosthogConfig(root)
+    expect(config?.inits.map((init) => [init.file, init.autocapture])).toEqual([["own.html", "true"]])
+  })
+})

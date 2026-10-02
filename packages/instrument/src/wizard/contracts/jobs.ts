@@ -505,19 +505,35 @@ export interface CheckRunner {
   t0(scenarios: readonly T0Scenario[], artifacts: WorkspaceInstallArtifacts): Promise<CheckResult[]>
   liveBytes(urls: readonly string[], expect: TestExpect): Promise<CheckResult[]>
   redirectWalk(urls: readonly string[]): Promise<CheckResult[]>
-  csp(url: string): Promise<CheckResult[]>
+  /**
+   * T1 `csp_header` (lane O9). `expect` (lane O6 fix round, additive, review O6-R4): O9's check needs the
+   * connected ids to know which hosts the policy must allow; without it the check is undetermined.
+   */
+  csp(url: string, expect?: TestExpect): Promise<CheckResult[]>
   metaDomains(domains: readonly string[], pixelIds: readonly string[]): Promise<CheckResult[]>
   census(root: string, appRoot: string): Promise<CensusResult>
   setupChecks(appRoot: string): Promise<CheckResult[]>
   envTargets(envSourcedIds: readonly EnvSourcedId[], hosting: TagHosting): Promise<CheckResult[]>
   /** §3f.9, after EVERY agent turn, before any build or T0. A `problem` reverts the hunk and blocks the job. */
   turnGate(diff: TurnDiff, ctx: { connectionIds: readonly string[] }): Promise<CheckResult[]>
-  /** §3h.8: THE grader of desktop test facts (the only one). */
+  /**
+   * §3h.8: THE grader of desktop test facts (the only one). `consentMode`, `installedTools` and
+   * `metaPixelOwnership` (lane O6, additive): §3h.8's "held by consent = consent_mode required …" and "no
+   * beacon from an INSTALLED tool → problem" need them, and D10 counts automatic events for an ADOPTED
+   * pixel only. A caller that omits `installedTools` gets `undetermined (test_error)` for a silent tool,
+   * never a guessed verdict.
+   */
   gradeTestRun(
     result: TestResult,
     expect: TestExpect,
     mode: TestMode,
-    ctx: { cmpDetected: TestResult["environment"]["cmpDetected"]; envSourcedIds: readonly EnvSourcedId[] }
+    ctx: {
+      cmpDetected: TestResult["environment"]["cmpDetected"]
+      envSourcedIds: readonly EnvSourcedId[]
+      consentMode?: "required" | "not_required" | null
+      installedTools?: readonly TestTool[]
+      metaPixelOwnership?: "managed" | "adopted"
+    }
   ): Promise<Record<TestTool, CheckResult>>
   /** The seam lane O9 registers its checks through. Registering an id twice throws. */
   register(checkId: CheckId, fn: CheckFn): void
