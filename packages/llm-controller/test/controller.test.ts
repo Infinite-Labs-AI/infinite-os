@@ -959,7 +959,7 @@ describe("Infinite OS LLM controller", () => {
     }
     async function runTurn(
       complete: (request: ModelRequest) => Promise<{ message?: string; toolCalls?: { id: string; name: string; input: unknown }[] }>,
-      options: { maxToolIterations?: number; provider?: "codex" | "claude" } = {}
+      options: { maxToolIterations?: number; provider?: "codex" | "claude"; scopedMode?: "exclusive" | "union" } = {}
     ) {
       const requests: ModelRequest[] = [];
       const progress: ChatProgressEvent[] = [];
@@ -983,7 +983,18 @@ describe("Infinite OS LLM controller", () => {
         progressMode: "rich",
         onProgress: (event) => {
           progress.push(event);
-        }
+        },
+        ...(options.scopedMode
+          ? {
+              scopedAppTools: {
+                serverName: "infinite_app",
+                mode: options.scopedMode,
+                allowedTools: ["mcp__infinite_app__capability_search"],
+                tools: [{ name: "capability_search", description: "Find a deferred tool.", inputSchema: { type: "object" } }],
+                callTool: async () => ({ ok: true })
+              }
+            }
+          : {})
       });
       return { result, requests, progress };
     }
@@ -1008,6 +1019,8 @@ describe("Infinite OS LLM controller", () => {
       expect(finalRequest.systemPrompt).toContain("No more tools can run");
       expect(finalRequest.systemPrompt).toContain("sample size");
       expect(finalRequest.systemPrompt).toContain("not checked");
+      expect(finalRequest.systemPrompt).toContain("Do not state a figure that no result contains");
+      expect(finalRequest.systemPrompt).toContain("flag a figure that rests on a small sample");
       expect(result.ok).toBe(true);
       expect(result.message).toBe("Ad 1 kept visitors longest: 120 s average over 14 sessions. Not checked: placements.");
       expect(result.actionCalls).toHaveLength(2);
@@ -1016,8 +1029,8 @@ describe("Infinite OS LLM controller", () => {
       expect(complete[0]).toMatchObject({ text: result.message });
     });
 
-    it("falls back to the iteration-limit sentence when the final call fails", async () => {
-      const { result, requests } = await runTurn(
+    it("falls back to the iteration-limit sentence when the final call fails, and says why", async () => {
+      const { result, requests, progress } = await runTurn(
         (request) => request.toolChoice === "none" ? Promise.reject(new Error("provider down")) : alwaysCallTool(request),
         { maxToolIterations: 2 }
       );
@@ -1026,6 +1039,56 @@ describe("Infinite OS LLM controller", () => {
       expect(result.ok).toBe(true);
       expect(result.message).toBe(CANNED);
       expect(result.actionCalls).toHaveLength(2);
+      // The fallback is visible: a warning names the failure, and the response carries the reason.
+      expect(result.roundLimitFallbackReason).toBe("provider down");
+      const warnings = progress.filter((event) => "type" in event && event.type === "status.update" && event.kind === "warn");
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toMatchObject({ text: expect.stringContaining("provider down") });
+    });
+
+    it("does not set a fallback reason when the final call answers", async () => {
+      const { result } = await runTurn(alwaysCallTool, { maxToolIterations: 1 });
+      expect(result.roundLimitFallbackReason).toBeUndefined();
+    });
+
+    it("keeps one message when the final call fails after it began streaming", async () => {
+      const { result, progress } = await runTurn(
+        async (request) => {
+          if (request.toolChoice !== "none") return alwaysCallTool(request);
+          await request.onMessageDelta?.("Ad 1 kept visitors ");
+          throw new Error("stream cut");
+        },
+        { maxToolIterations: 1 }
+      );
+
+      const events = progress.filter((event): event is Extract<ChatProgressEvent, { type: string }> => "type" in event);
+      expect(events.filter((event) => event.type === "message.start")).toHaveLength(1);
+      const shown = events.filter((event) => event.type === "message.delta").map((event) => (event as { text: string }).text).join("");
+      // What was shown is what the turn answers and stores: the partial text, then the limit sentence.
+      expect(result.message).toBe(`Ad 1 kept visitors \n\n${CANNED}`);
+      expect(shown).toBe(result.message);
+      const complete = events.filter((event) => event.type === "message.complete");
+      expect(complete).toHaveLength(1);
+      expect(complete[0]).toMatchObject({ text: result.message });
+      expect(result.roundLimitFallbackReason).toBe("stream cut");
+    });
+
+    it("keeps one message when the final call streamed only whitespace", async () => {
+      const { result, progress } = await runTurn(
+        async (request) => {
+          if (request.toolChoice !== "none") return alwaysCallTool(request);
+          await request.onMessageDelta?.("  ");
+          return { message: "  " };
+        },
+        { maxToolIterations: 1 }
+      );
+
+      const events = progress.filter((event): event is Extract<ChatProgressEvent, { type: string }> => "type" in event);
+      expect(events.filter((event) => event.type === "message.start")).toHaveLength(1);
+      expect(result.message).toBe(CANNED);
+      const complete = events.filter((event) => event.type === "message.complete");
+      expect(complete).toHaveLength(1);
+      expect(complete[0]).toMatchObject({ text: CANNED });
     });
 
     it("falls back to the iteration-limit sentence when the final call returns no text", async () => {
@@ -1042,18 +1105,27 @@ describe("Infinite OS LLM controller", () => {
       expect(result.actionCalls).toHaveLength(2);
     });
 
-    it("gives Codex twelve tool rounds and Claude eight before the final answer", async () => {
-      const codex = await runTurn(alwaysCallTool, { provider: "codex" });
+    it("gives a Codex chat (union) turn twelve tool rounds and Claude eight before the final answer", async () => {
+      const codex = await runTurn(alwaysCallTool, { provider: "codex", scopedMode: "union" });
       expect(codex.result.actionCalls).toHaveLength(12);
       expect(codex.requests).toHaveLength(13);
       expect(codex.requests[12].toolChoice).toBe("none");
 
-      const claude = await runTurn(alwaysCallTool, { provider: "claude" });
+      const claude = await runTurn(alwaysCallTool, { provider: "claude", scopedMode: "union" });
       expect(claude.result.actionCalls).toHaveLength(8);
       expect(claude.requests).toHaveLength(9);
 
-      const unknown = await runTurn(alwaysCallTool);
+      const unknown = await runTurn(alwaysCallTool, { scopedMode: "union" });
       expect(unknown.result.actionCalls).toHaveLength(8);
+    });
+
+    it("keeps Codex at eight rounds outside the union chat lane", async () => {
+      // Exclusive lanes (automatic, scheduled, iMessage) run under wall-clock budgets and get no deferred tools.
+      const exclusive = await runTurn(alwaysCallTool, { provider: "codex", scopedMode: "exclusive" });
+      expect(exclusive.requests).toHaveLength(9);
+      const plain = await runTurn(alwaysCallTool, { provider: "codex" });
+      expect(plain.result.actionCalls).toHaveLength(8);
+      expect(plain.requests).toHaveLength(9);
     });
 
     it("lets an explicit maxToolIterations override every provider's budget", async () => {
@@ -1062,9 +1134,11 @@ describe("Infinite OS LLM controller", () => {
     });
 
     it("exposes the per-provider budget", () => {
-      expect(toolRoundBudget("codex")).toBe(12);
-      expect(toolRoundBudget("claude")).toBe(8);
-      expect(toolRoundBudget(undefined)).toBe(8);
+      expect(toolRoundBudget("codex", "union")).toBe(12);
+      expect(toolRoundBudget("claude", "union")).toBe(8);
+      expect(toolRoundBudget(undefined, "union")).toBe(8);
+      expect(toolRoundBudget("codex", "exclusive")).toBe(8);
+      expect(toolRoundBudget("codex", undefined)).toBe(8);
     });
   });
 

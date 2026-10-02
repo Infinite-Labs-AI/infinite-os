@@ -349,9 +349,10 @@ export interface ModelRequest {
   // session's turns — so the large stable prefix is reused instead of
   // re-processed each turn. Optional: absent for non-chat/keyless callers.
   promptCacheKey?: string;
-  // "none" forbids tool calls for this request while keeping the tools declared: a history that
-  // already holds tool calls and results must still name its tools for the provider to accept it.
-  // Absent leaves the provider's default (the model may call any tool).
+  // "none" forbids tool calls for this request. The tools stay declared so the request matches the
+  // earlier rounds' cached prompt prefix (tools come first in both providers' cache order); dropping
+  // them would re-process a large prompt from scratch. Absent leaves the provider's default (the model
+  // may call any tool).
   toolChoice?: "none";
 }
 
@@ -453,17 +454,25 @@ export interface LlmController {
 /** Tool rounds a turn gets when nothing names its brain. */
 export const DEFAULT_TOOL_ROUNDS = 8;
 /**
- * Tool rounds per turn, by the brain running it. A round is one model call that asks for tools.
- * A host may hand Codex only its common tools directly and reach the rest through a deferred
- * search -> describe -> call trio, so every deferred tool costs three rounds where a direct tool
- * costs one. Eight rounds left room for about two deferred lookups, and an analysis question that
- * needed a deferred tool plus a retry ran out before it answered. Twelve covers three deferred
- * lookups and three direct calls. Claude is served its tools directly, so it keeps eight.
+ * Tool rounds per union (chat) turn, by the brain running it. A round is one model call that asks for
+ * tools. In a union turn a host may hand Codex only its common tools directly and reach the rest
+ * through a deferred search -> describe -> call trio, so every deferred tool costs three rounds where
+ * a direct tool costs one. Eight rounds left room for about two deferred lookups, and an analysis
+ * question that needed a deferred tool plus a retry ran out before it answered. Twelve covers three
+ * deferred lookups and three direct calls. Claude is served its tools directly, so it keeps eight.
+ *
+ * Only union turns get this table. A plain turn sees the native actions directly, and an exclusive
+ * turn (the automatic, scheduled and remote-message lanes) gets no deferred tools and runs under a
+ * host wall-clock budget, where four more model calls would only make a timeout likelier. Both keep
+ * DEFAULT_TOOL_ROUNDS.
  */
 export const TOOL_ROUNDS_BY_PROVIDER: Readonly<Record<"codex" | "claude", number>> = { codex: 12, claude: 8 };
 
-export function toolRoundBudget(provider: "codex" | "claude" | undefined): number {
-  return provider ? TOOL_ROUNDS_BY_PROVIDER[provider] : DEFAULT_TOOL_ROUNDS;
+export function toolRoundBudget(
+  provider: "codex" | "claude" | undefined,
+  scopedMode: ScopedAppTools["mode"] | undefined
+): number {
+  return provider && scopedMode === "union" ? TOOL_ROUNDS_BY_PROVIDER[provider] : DEFAULT_TOOL_ROUNDS;
 }
 
 const TOOL_ROUND_LIMIT_MESSAGE = "I reached the Infinite OS typed-action iteration limit before I could finish the answer.";
@@ -701,7 +710,10 @@ export function createLlmController(options: {
       }
       const tools = toolSchemas(actions);
       // An explicit option is a blanket override (tests, embedders); otherwise the brain sets the budget.
-      const maxToolIterations = options.maxToolIterations ?? toolRoundBudget(input.modelProvider ?? modelMetadata?.provider);
+      const maxToolIterations = options.maxToolIterations ?? toolRoundBudget(
+        input.modelProvider ?? modelMetadata?.provider,
+        scopedAppTools?.mode
+      );
       const actionCalls: ChatActionCall[] = [];
       const toolResults: ModelToolResult[] = [];
       // The advisor also reads each call's input: an app twin called with an argument is not the native it replaces.
@@ -878,8 +890,10 @@ export function createLlmController(options: {
         // turns what was gathered into an answer that says what it found, its sample sizes and what it
         // did not check. Only if that call fails does the turn end on the plain limit sentence.
         await emitStatus("status", "Writing the answer from the results gathered so far.");
-        const finalStreamState = { messageStarted: false };
+        const finalStreamState = { messageStarted: false, text: "" };
+        const finalCallbacks = streamCallbacks(finalStreamState);
         let finalMessage: string | undefined;
+        let fallbackReason: string | undefined;
         try {
           const finalResponse = await modelClient.complete({
             model: input.model,
@@ -892,19 +906,42 @@ export function createLlmController(options: {
             toolResults,
             toolChoice: "none",
             promptCacheKey: sessionId,
-            ...streamCallbacks(finalStreamState)
+            ...finalCallbacks,
+            onMessageDelta: async (delta) => {
+              finalStreamState.text += delta;
+              await finalCallbacks.onMessageDelta?.(delta);
+            }
           });
           usage = mergeUsage(usage, finalResponse.usage);
           if (usage) await input.onUsage?.(usage);
           // Any tool call it asks for anyway is never run: the answer is its text or nothing.
           finalMessage = finalResponse.message?.trim() ? finalResponse.message : undefined;
+          if (finalMessage === undefined) {
+            fallbackReason = "it returned no text";
+          }
         } catch (error) {
           const failedUsage = (error as { usage?: ModelUsage } | null)?.usage;
           if (failedUsage !== undefined) {
             usage = mergeUsage(usage, failedUsage);
           }
+          fallbackReason = error instanceof Error ? error.message : String(error);
         }
-        const message = finalMessage ?? TOOL_ROUND_LIMIT_MESSAGE;
+        let message: string;
+        let alreadyStreamed = finalStreamState.messageStarted;
+        if (finalMessage !== undefined) {
+          message = finalMessage;
+        } else {
+          // Say why the turn ends on the limit sentence, so a fallback can be diagnosed without a repro.
+          await emitStatus("status", `No final answer (${fallbackReason}); ending on the round limit.`, "warn");
+          // If part of the answer already streamed, end that same message with the limit sentence, so what
+          // is stored is what was shown and the screen gets no second message.
+          const shown = finalStreamState.text.trim() ? finalStreamState.text : "";
+          message = shown ? `${shown}\n\n${TOOL_ROUND_LIMIT_MESSAGE}` : TOOL_ROUND_LIMIT_MESSAGE;
+          if (finalStreamState.messageStarted) {
+            await emitAssistantMessageDelta(message.slice(shown.length));
+            alreadyStreamed = true;
+          }
+        }
         if (persistTurn) {
           await sessionStore?.appendMessage({
             sessionId,
@@ -914,7 +951,7 @@ export function createLlmController(options: {
           });
           await recordTokenUsage(sessionStore, sessionId, usage);
         }
-        await emitAssistantMessage(message, usage, { alreadyStreamed: finalMessage !== undefined && finalStreamState.messageStarted });
+        await emitAssistantMessage(message, usage, { alreadyStreamed });
         if (persistTurn) {
           await scheduleMemoryReview(message, actionCalls);
         }
@@ -924,7 +961,8 @@ export function createLlmController(options: {
           message,
           provenance: unique(actionCalls.flatMap((call) => call.envelope?.provenance ?? [])),
           actionCalls,
-          ...responseMetadata(usage)
+          ...responseMetadata(usage),
+          ...(fallbackReason !== undefined ? { roundLimitFallbackReason: fallbackReason } : {})
         };
       } catch (error) {
         // Preserve measured work from completed model invocations when a later round fails.

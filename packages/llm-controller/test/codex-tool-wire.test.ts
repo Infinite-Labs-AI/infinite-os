@@ -139,7 +139,7 @@ describe("model tool wire shape", () => {
     await client.complete({ systemPrompt: "s", userMessage: "u", tools: tools(), toolResults: [], toolChoice: "none" });
     await client.complete({ systemPrompt: "s", userMessage: "u", tools: tools(), toolResults: [] });
 
-    // Tool-use blocks in the history need the tools declared, so the final answer keeps them and sets none.
+    // The tools stay declared so the request matches the earlier rounds' cached prefix; "none" forbids calling them.
     expect(requests[0].body.tool_choice).toEqual({ type: "none" });
     expect(requests[0].body.tools).toHaveLength(2);
     expect(requests[1].body).not.toHaveProperty("tool_choice");
