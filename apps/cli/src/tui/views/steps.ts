@@ -211,7 +211,8 @@ export function stepStatusForView(view: Pick<AnswerViewV1, "state">): StepStatus
 export function refineStepStatus(step: TurnStep, views: readonly AnswerViewV1[]): StepStatus {
   if (step.status !== "ok") return step.status;
   const bare = bareToolName(step.name);
-  const matches = views.filter((view) => bareToolName(view.tool) === bare);
+  // A step read back from the tool trail has lost its tool id: its friendly label stands for it.
+  const matches = views.filter((view) => bareToolName(view.tool) === bare || friendlyStepLabel(view.tool) === step.label);
   return matches.length === 1 ? STATE_STATUS[matches[0]!.state] ?? "ok" : "ok";
 }
 

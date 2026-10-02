@@ -109,7 +109,7 @@ describe("Ink in-session write confirmation (Plan 2) — structural guards (CI-r
     // The card (confirm-card.tsx) runs the summary through terminalText; the
     // details are redacted upstream and scrubbed again as they become rows;
     // receipts are scrubbed by confirmResultLines.
-    expect(source).toMatch(/import \{ ConfirmActionMenu, [^}]+ \} from "\.\/confirm-card\.js";/u);
+    expect(source).toMatch(/import \{ fallbackCardLines, [^}]+ \} from "\.\/confirm-card\.js";/u);
     expect(source).not.toContain("function ConfirmActionMenu(");
     expect(cardSource).toContain("terminalText(pending.summary)");
     expect(cardSource).toContain("label: terminalText(detail.label), value: terminalText(detail.value)");

@@ -116,6 +116,69 @@ describe("the write card draws its approval view (CI-runnable)", () => {
   });
 });
 
+describe("the waiting card is the turn's details (run-2 M1: r4 Needs your OK)", () => {
+  const messages = [{ role: "user" as const, text: "pause hook a" }, { role: "assistant" as const, text: "Ready. It stops spending once you say OK." }];
+  const rowsOf = (columns: number, pending: InSessionConfirmationAction) => stripAnsi(renderInkInteractiveSessionToString({
+    columns,
+    initialMessages: messages,
+    initialPendingConfirmations: [pending],
+    onSubmitLine: async () => ({ messages: [] })
+  })).split("\n");
+
+  it("from 120 columns: the head and the card take the right pane, beside the answer, and the Steps come after", () => {
+    const rows = rowsOf(160, card("change-pause-card"));
+    const question = rows.findIndex((row) => row.startsWith("❯ pause hook a"));
+    expect(question).toBeGreaterThan(0);
+    // The question row carries the separator and the card's head on its right.
+    expect(rows[question]).toMatch(/^❯ pause hook a +│ /u);
+    const top = rows.findIndex((row) => row.includes("┌─ Pause ad “Hook A”?"));
+    // Right of the 40-column answer pane and its ` │ ` separator.
+    expect(rows[top]!.indexOf("┌")).toBe(43);
+    expect(rows[top]!.slice(40, 43)).toBe(" │ ");
+    const steps = rows.findIndex((row) => row.startsWith("─ Steps"));
+    const bottom = rows.findIndex((row) => /└─+┘/u.test(row));
+    expect(bottom).toBeGreaterThan(top);
+    if (steps >= 0) expect(steps).toBeGreaterThan(bottom);
+  });
+
+  it("under 120 columns: the answer, a blank and a rule, then the head and the card, then the Steps", () => {
+    const rows = rowsOf(100, card("change-pause-card"));
+    const answer = rows.findIndex((row) => row.startsWith("∞ Ready."));
+    expect(rows[answer + 1]).toBe("");
+    expect(rows[answer + 2]).toBe("─".repeat(100));
+    expect(rows[answer + 3]).toContain("Pause");
+    const top = rows.findIndex((row) => row.includes("┌─ Pause ad “Hook A”?"));
+    expect(top).toBeGreaterThan(answer + 2);
+    const ruleUnderTurn = rows.findIndex((row, index) => index > top && row === "─".repeat(100));
+    expect(ruleUnderTurn).toBeGreaterThan(top);
+  });
+
+  it("an old desktop's card (no view) takes the same place", () => {
+    const old = card("change-pause-card", { view: undefined });
+    const rows = rowsOf(160, old);
+    const top = rows.findIndex((row) => row.includes("┌─ Pause ad Hook A"));
+    expect(top).toBeGreaterThanOrEqual(0);
+    expect(rows[top]!.indexOf("┌")).toBe(43);
+  });
+
+  it("the call waiting for the OK is ▣ in the Steps, from the card's view", () => {
+    const start = Date.now();
+    const out = renderInkInteractiveSessionToString({
+      columns: 100,
+      initialMessages: [
+        messages[0]!,
+        { kind: "trail", role: "system", text: "", tools: ["Propose Pause Entity (0.1s) :: pause 1 ad ✓"] },
+        messages[1]!
+      ],
+      initialPendingConfirmations: [card("change-pause-card", { view: { ...card("change-pause-card").view!, tool: "propose_pause_entity" } })],
+      onSubmitLine: async () => ({ messages: [] })
+    });
+    expect(Date.now() - start).toBeLessThan(5_000);
+    const row = stripAnsi(out).split("\n").find((line) => line.includes("pause 1 ad") && line.includes("━"));
+    expect(row).toMatch(/▣ pause 1 ad$/u);
+  });
+});
+
 describe("the view card in a running session (fake TTY; skipped on CI like the other PTY tests)", () => {
   it.skipIf(process.env.CI === "true")(
     "a money field is asked before OK, Enter only sets it, and OK sends it as fields",

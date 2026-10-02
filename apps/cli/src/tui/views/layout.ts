@@ -105,10 +105,11 @@ export function layoutTurn(
           : `${padEndCells(fitLine(answer[index] ?? "", panes.left), panes.left)}${rule(PANE_SEPARATOR.trimEnd())}`);
       }
     } else {
+      // The rule parts the answer from the details; a turn with no answer
+      // (a card that arrived on its own) starts at its details.
       out.push(
         ...answer.map((line) => fitLine(line, total)),
-        ...(answer.length ? [""] : []),
-        rule("─".repeat(total)),
+        ...(answer.length ? ["", rule("─".repeat(total))] : []),
         ...details
       );
     }
@@ -170,10 +171,17 @@ export interface LiveTurnInput {
   nowMs?: number;
   /**
    * Lines already drawn for the details pane, after the views: the turn's
-   * pending write card, so it sits right of the answer like r4 draws it. Draw
-   * them at `detailsPaneWidth(width)` columns.
+   * pending write card (its head, source and box), so it takes the right pane
+   * from 120 columns and follows the answer and a rule below that, with the
+   * Steps under it, as r4 draws "Needs your OK". Draw them at
+   * `detailsPaneWidth(width)` columns.
    */
   details?: readonly string[];
+  /**
+   * Views the turn holds but does not draw as views (the pending write card's
+   * own view): a call's Steps status still follows them (needs_yes → ▣).
+   */
+  statusViews?: readonly AnswerViewV1[];
 }
 
 /** The columns the details pane gives a view or a card at this width (the whole width when one column). */
@@ -218,6 +226,25 @@ export function renderLiveTurn(input: LiveTurnInput): LiveTurnRender {
 }
 
 /**
+ * The rows a live turn shows WITH its pending card, besides the card, at
+ * `width`: the other views in the details pane and the Steps, plus, below
+ * 120 columns, the blank and the rule over the details and the blank over
+ * the Steps. The question and the answer are not counted: from 120 they sit
+ * beside the card, and below it a tall answer pages away above it (the turn
+ * opens on its card). The session holds the card to the rest of the live
+ * budget, so the card's head, title and OK key stay on screen.
+ */
+export function rowsBesideCard(input: Omit<LiveTurnInput, "details" | "rows" | "livePageNext">): number {
+  const width = Math.max(1, Math.floor(input.width));
+  const drawn = drawLiveTurn({ ...input, details: [CARD_PLACEHOLDER] }, width, undefined, true);
+  const around = drawn.stepRows + drawn.detailRows - 1;
+  return drawn.wide ? around : around + (drawn.answerRows ? 2 : 0) + (drawn.stepRows ? 1 : 0);
+}
+
+/** One details row standing in for the card while its neighbours are measured. */
+const CARD_PLACEHOLDER = " ";
+
+/**
  * A finished turn as it is printed once into scrollback (D1): ONE column at
  * any width, the question, the answer and its details underneath, every page
  * of it (no row budget). No Steps strip: the calls belonged to the live turn.
@@ -260,7 +287,9 @@ function drawLiveTurn(input: LiveTurnInput, width: number, rows: number | undefi
     ? [{ head: "", source: null, detail: [...input.details], footnotes: [], keys: [], okKey: null, rowCount: 0 }]
     : [];
   const steps = !withSteps ? [] : input.steps?.length ? input.steps : stepsFromTrail(input.messages);
-  const stepRows = stepRowLines(steps, { width, color: input.color, theme: input.theme, nowMs: input.nowMs, views: input.views });
+  const stepRows = stepRowLines(steps, {
+    width, color: input.color, theme: input.theme, nowMs: input.nowMs, views: [...input.views, ...(input.statusViews ?? [])]
+  });
   const takesPane = renders.some(inDetailsPane) || card.length > 0;
   const sideBySide = wide && takesPane;
   // How wide a wider window redraws the answer: never for a committed turn
@@ -269,7 +298,11 @@ function drawLiveTurn(input: LiveTurnInput, width: number, rows: number | undefi
   const widenLimit = !split ? 0 : sideBySide ? ANSWER_PANE_MAX : takesPane ? SPLIT_MIN_COLUMNS - 1 : undefined;
   const answer = renderAnswerColumn(input.messages, sideBySide ? panes.left : width, input.theme, input.color, { widenLimit });
   const lines = layoutTurn(answer, [...renders, ...card], stepRows, width, { color: input.color, theme: input.theme }, { split, steps: withSteps });
-  return { renders, lines, focusIndex, rows };
+  const detailRows = [...renders, ...card].filter(inDetailsPane)
+    .reduce((sum, render, index) => sum + (index > 0 ? 1 : 0) + viewLines(render, sideBySide ? panes.right : width).length, 0);
+  return {
+    renders, lines, focusIndex, rows, wide: sideBySide, stepRows: stepRows.length ? stepRows.length + 1 : 0, detailRows, answerRows: answer.length
+  };
 }
 
 /** Whether a drawn view takes the details pane (every view but a quiet one without a head). */

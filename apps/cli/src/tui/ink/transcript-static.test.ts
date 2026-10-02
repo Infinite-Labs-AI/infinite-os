@@ -385,15 +385,17 @@ describe("scrollback in a running session (fake TTY; skipped on CI like the othe
     });
     await waitFor(() => output.text().includes("switch side"), 4_000, output.text);
     await sendKeys(input, "publish it\r");
-    // The r4 card carries the summary in its border.
-    await waitFor(() => output.text().includes("Publish landing page to production") && output.text().includes("more lines"), 4_000, output.text);
-    const before = maxLine(output.text(), "alpha");
+    // The r4 card carries the summary in its border. The card is the turn's
+    // details, under its answer below 120 columns, so a tall turn that ends on
+    // a card opens on the card (run-2 M1), the answer paged above it.
+    await waitFor(() => output.text().includes("Publish landing page to production") && output.text().includes("lines above · PgUp"), 4_000, output.text);
+    const before = minLine(output.text(), "alpha");
     await sendKeys(input, " ");
     await new Promise((resolve) => setTimeout(resolve, 300));
-    expect(maxLine(output.text(), "alpha")).toBe(before);
+    expect(minLine(output.text(), "alpha")).toBe(before);
     expect(decisions).toEqual([]);
-    input.write(`${ESC}[6~`);
-    await waitFor(() => maxLine(output.text(), "alpha") > before, 4_000, output.text);
+    input.write(`${ESC}[5~`);
+    await waitFor(() => minLine(output.text(), "alpha") < before, 4_000, output.text);
     expect(decisions).toEqual([]);
     // `n` is the card's real "no" (T6): it reaches the app as a decline.
     await sendKeys(input, "n");
@@ -452,6 +454,10 @@ function scrollbackRows(raw: string): string[] {
 
 function countLine(text: string, line: string) {
   return text.match(new RegExp(`${line}(?!\\d)`, "g"))?.length ?? 0;
+}
+
+function minLine(text: string, name: string) {
+  return Math.min(Number.POSITIVE_INFINITY, ...[...stripAnsi(text).matchAll(new RegExp(`${name} line (\\d+)`, "g"))].map((m) => Number(m[1])));
 }
 
 function maxLine(text: string, name: string) {

@@ -61,10 +61,10 @@ import {
 import { formatBusyNote, isInfiniteTurnBusy } from "./status-indicator.js";
 import { createTurnAbort, ctrlCAction, turnStoppedLine, type TurnAbort } from "./turn-abort.js";
 import { confirmCardKeys, keyBarHints, keyBarRowCount, resolveKey, type KeyAction, type KeyContext } from "../keys/keymap.js";
-import { ConfirmActionMenu, fallbackCardRowCount, receiptViewFrame } from "./confirm-card.js";
+import { fallbackCardLines, fallbackCardRowCount, receiptViewFrame } from "./confirm-card.js";
 import { KeyBar } from "./key-bar.js";
 import { COMPOSER_PLACEHOLDER, composerPlaceholderText } from "./composer-line.js";
-import { ruleLine, type TopBarData } from "./top-bar.js";
+import { ruleLine, TOP_BAR_ROWS, type TopBarData } from "./top-bar.js";
 import {
   AnsiLine,
   inkLatestTurnRows,
@@ -78,7 +78,6 @@ import {
   DEFAULT_COMPOSER_ROWS,
   DEFAULT_KEY_BAR_ROWS,
   livePageKey,
-  MIN_LIVE_REGION_ROWS,
   pageLiveWindow,
   type CommittedEntry,
   type LivePageDirection
@@ -86,7 +85,7 @@ import {
 import { useTerminalColumns, useTerminalRows } from "./terminal-columns.js";
 import { resolveViewKey, turnAsk, viewFocusAfterTurnDone, viewKeyHints, type ViewFocusState } from "../views/focus.js";
 import { clipboardSequence, copyTargets, copyThroughPbcopy } from "../views/clipboard.js";
-import { renderCommittedTurn, renderLiveTurn, type LiveTurnRender } from "../views/layout.js";
+import { detailsPaneWidth, paneWidths, renderCommittedTurn, renderLiveTurn, rowsBesideCard, type LiveTurnRender } from "../views/layout.js";
 import { besideWorkingTurn, workingTurnMessages, workingTurnSteps } from "../app/transcript-renderer.js";
 import {
   approvalRender,
@@ -546,6 +545,8 @@ export function InkInteractiveSessionApp({
   // The rows the live turn was last drawn to, so the turn commits to scrollback
   // with the same document pages the user was reading.
   const liveTurnRowsRef = useRef<number | undefined>(undefined);
+  // Whether the latest turn is drawn side by side (its card right of the answer), for the turn's end.
+  const splitTurnRef = useRef(false);
   const [pendingSelection, setPendingSelection] = useState<{
     prompt: InkInteractiveSelectionPrompt;
     selectedIndex: number;
@@ -735,39 +736,27 @@ export function InkInteractiveSessionApp({
   // While the turn runs the drawn turn follows its state and the clock (its spinner, a running bar).
   const workingState = busy ? turnState : null;
   const workingClock = busy ? clock : 0;
-  const renderTurnAt = useMemo(() => {
-    if (!turnViews.length) {
-      return null;
-    }
-    const messages = workingState ? workingTurnMessages(history, workingState, agentTitle) : history;
-    const steps = workingState ? workingTurnSteps(messages, workingState, workingClock) : turnSteps;
-    const cache = new Map<number | undefined, LiveTurnRender>();
-    return (turnRows: number | undefined): LiveTurnRender => {
-      const hit = cache.get(turnRows);
-      if (hit) {
-        return hit;
-      }
-      const drawn = renderLiveTurn({
-        messages,
-        views: turnViews.map((frame) => frame.view),
-        focus: viewFocus,
-        steps,
-        width: transcriptColumns(columns),
-        color: colorEnabled(t),
-        theme: t,
-        rows: turnRows,
-        ...(workingState ? { nowMs: workingClock } : {})
-      });
-      cache.set(turnRows, drawn);
-      return drawn;
-    };
-  }, [agentTitle, columns, history, t, turnSteps, turnViews, viewFocus, workingClock, workingState]);
-  // Beside a drawn turn, the transcript carries only what the drawn turn does
-  // not show: its Steps are the drawn turn's own strip, and while it runs its
-  // arriving answer and calls are in it too, so nothing is drawn twice.
-  const idleTranscript = useMemo(
-    () => ({ agentTitle, messages: [], state: busy ? besideWorkingTurn(turnState) : { ...turnState, steps: [] } }),
-    [agentTitle, busy, turnState]
+  // The head write card is the turn's last details (r4 "Needs your OK"):
+  // beside the answer from 120 columns, under the answer and a rule below
+  // that, the Steps under it. It is drawn at the details pane's width.
+  const cardPaneWidth = detailsPaneWidth(transcriptColumns(columns));
+  splitTurnRef.current = paneWidths(transcriptColumns(columns)).wide;
+  // The rows the turn takes besides the card (its question, answer, rule,
+  // other views, Steps), so the card is held to what is left of the window.
+  const rowsBesideHeadCard = useMemo(
+    () => headConfirmAction
+      ? rowsBesideCard({
+          messages: history,
+          views: turnViews.map((frame) => frame.view),
+          focus: null,
+          steps: turnSteps,
+          width: transcriptColumns(columns),
+          color: colorEnabled(t),
+          theme: t,
+          ...(headConfirmAction.view ? { statusViews: [headConfirmAction.view] } : {})
+        })
+      : 0,
+    [columns, headConfirmAction, history, t, turnSteps, turnViews]
   );
   // A new head card (from any queue writer) always opens with its explanation
   // closed: the explanation stays behind `?`.
@@ -798,13 +787,17 @@ export function InkInteractiveSessionApp({
   // region's floor and the 2-row margin `liveRegionCap` keeps). A taller card
   // pages its middle, so the frame never reaches the window height and Ink
   // never takes its fullscreen path (which clears the user's scrollback).
+  // The card is the latest turn's details, so its budget is the live region's
+  // (the window less the inventory, the composer and its rule, the drafts, the
+  // key bar, the 2-row margin and the top bar with its rule), less the rows the
+  // turn shows beside it (`rowsBesideHeadCard`).
   const cardRowsAround = rows
     ? (showHomeInventory ? homeInventoryRowCount(columns, homeInventory) : 0)
       + COMPOSER_RULE_ROWS
       + Math.max(DEFAULT_COMPOSER_ROWS, composerRowsFor(inputValue, columns, t))
       + draftLines.length
       + 2
-      + MIN_LIVE_REGION_ROWS
+      + TOP_BAR_ROWS
     : null;
   const headCard = useMemo<ApprovalRender | null>(() => {
     if (!headConfirmAction?.view || !isPlainRecord(headConfirmAction.view.approval)) {
@@ -812,7 +805,7 @@ export function InkInteractiveSessionApp({
     }
     const view = headConfirmAction.view;
     const drawAt = (keyBarRows: number) => approvalRender(view, {
-      width: columns,
+      width: cardPaneWidth,
       color: colorEnabled(t),
       theme: t,
       selected: 0,
@@ -826,7 +819,7 @@ export function InkInteractiveSessionApp({
       ...(headConfirmAction.sentFields ? { sentFields: headConfirmAction.sentFields } : {}),
       pageRows: rows ? Math.max(4, Math.floor(rows / 3)) : undefined,
       ...(rows && cardRowsAround !== null
-        ? { maxRows: Math.max(CARD_MIN_ROWS, rows - cardRowsAround - keyBarRows) }
+        ? { maxRows: Math.max(CARD_MIN_ROWS, rows - cardRowsAround - keyBarRows - rowsBesideHeadCard) }
         : {})
     });
     // The bar's hints come from the drawn card ("space next page"), so draw,
@@ -837,7 +830,54 @@ export function InkInteractiveSessionApp({
       drawn = drawAt(barRows);
     }
     return drawn;
-  }, [cardRowsAround, cardUi, columns, headConfirmAction, rows, t]);
+  }, [cardPaneWidth, cardRowsAround, cardUi, columns, headConfirmAction, rows, rowsBesideHeadCard, t]);
+  // The card's lines for the turn's details: the view's card, else (an old
+  // desktop, no view) the r4 card from its details, its `?` text inside.
+  const headCardLines = useMemo<readonly string[] | null>(
+    () => headCard
+      ? headCard.lines
+      : headConfirmAction
+        ? fallbackCardLines(headConfirmAction, explainOpen ? confirmKeys?.explainText ?? null : null, cardPaneWidth, t)
+        : null,
+    [cardPaneWidth, confirmKeys, explainOpen, headCard, headConfirmAction, t]
+  );
+  const renderTurnAt = useMemo(() => {
+    if (!turnViews.length && !headCardLines) {
+      return null;
+    }
+    const messages = workingState ? workingTurnMessages(history, workingState, agentTitle) : history;
+    const steps = workingState ? workingTurnSteps(messages, workingState, workingClock) : turnSteps;
+    const cache = new Map<number | undefined, LiveTurnRender>();
+    return (turnRows: number | undefined): LiveTurnRender => {
+      const hit = cache.get(turnRows);
+      if (hit) {
+        return hit;
+      }
+      const drawn = renderLiveTurn({
+        messages,
+        views: turnViews.map((frame) => frame.view),
+        focus: viewFocus,
+        steps,
+        width: transcriptColumns(columns),
+        color: colorEnabled(t),
+        theme: t,
+        rows: turnRows,
+        ...(headCardLines ? { details: headCardLines } : {}),
+        ...(headConfirmAction?.view ? { statusViews: [headConfirmAction.view] } : {}),
+        ...(workingState ? { nowMs: workingClock } : {})
+      });
+      cache.set(turnRows, drawn);
+      return drawn;
+    };
+  }, [agentTitle, columns, headCardLines, headConfirmAction, history, t, turnSteps, turnViews, viewFocus, workingClock, workingState]);
+  // Beside a drawn turn, the transcript carries only what the drawn turn does
+  // not show: its Steps are the drawn turn's own strip, and while it runs its
+  // arriving answer and calls are in it too, so nothing is drawn twice.
+  const idleTranscript = useMemo(
+    () => ({ agentTitle, messages: [], state: busy ? besideWorkingTurn(turnState) : { ...turnState, steps: [] } }),
+    [agentTitle, busy, turnState]
+  );
+  // (end of the drawn turn)
   const cardKeyCtx = headCard ? headCard.keyCtx : confirmKeys?.ctx ?? null;
   // While a card field is being typed, the composer takes the keys (Enter sets
   // the value, Esc cancels it); the card itself takes none.
@@ -937,6 +977,8 @@ export function InkInteractiveSessionApp({
     setBusyStartedAt(Date.now());
     setBusy(true);
     let sawFinalMessage = false;
+    // The turn ends waiting on a write card: it opens where the card is.
+    let endsOnCard = false;
     // Freeze the active-project label now and stamp it onto this turn's
     // answers, so switching projects later never relabels them.
     const turnTitle = getAgentTitle?.();
@@ -1003,6 +1045,7 @@ export function InkInteractiveSessionApp({
       // empties. Absent (LOCAL path / no writes) this is a no-op.
       if (result.pendingConfirmations && result.pendingConfirmations.length > 0) {
         setPendingConfirmActions(result.pendingConfirmations);
+        endsOnCard = true;
       }
     } catch (error) {
       // A stopped turn rejects with whatever the transport makes of the abort
@@ -1029,8 +1072,11 @@ export function InkInteractiveSessionApp({
       turnController.reset();
       setBusy(false);
       setBusyStartedAt(undefined);
-      // A finished turn opens at its top; a tall one is paged from there.
-      setLiveOffset(0);
+      // A finished turn opens at its top; a tall one is paged from there. One
+      // that waits on a write card opens on the card: below 120 columns the
+      // card follows the answer, so a tall turn opens at its end (the card,
+      // the Steps), and PgUp pages back up through the answer.
+      setLiveOffset(endsOnCard && !splitTurnRef.current ? null : 0);
       // Its views stay live and take their keys until the next line is submitted.
       const views = getTurnState().views;
       setViewFocus(views.length ? viewFocusAfterTurnDone(views.map((frame) => frame.view), NO_KEY_CAPS) : null);
@@ -1541,9 +1587,10 @@ export function InkInteractiveSessionApp({
     + COMPOSER_RULE_ROWS
     + Math.max(DEFAULT_COMPOSER_ROWS, composerRowsFor(composerText || connectPlaceholder, columns, t))
     + liveOverlayRows({
-      confirmAction: pendingConfirmActions[0] ?? null,
-      confirmCardRows: headCard ? headCard.lines.length : null,
-      confirmExplain: explainOpen ? confirmKeys?.explainText ?? null : null,
+      // The write card is the latest turn's details, inside the live region.
+      confirmAction: null,
+      confirmCardRows: null,
+      confirmExplain: null,
       draftRows: draftLines.length,
       connectConfirm: Boolean(pendingConnectConfirm),
       field: fieldPromptActive && pendingFieldPrompt ? pendingFieldPrompt : null,
@@ -1703,13 +1750,6 @@ export function InkInteractiveSessionApp({
         width={columns}
       />
       <CreativeDraftLines lines={draftLines} theme={t} width={columns} />
-      <ConfirmActionMenu
-        card={headCard}
-        explainText={explainOpen ? confirmKeys?.explainText ?? null : null}
-        pending={headConfirmAction}
-        theme={t}
-        width={columns}
-      />
       <AnsiLine line={ruleLine(columns, t)} />
       <InkLineInput
         busy={busy}
