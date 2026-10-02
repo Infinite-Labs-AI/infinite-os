@@ -4,7 +4,18 @@ import { candidate, fakeBefore, fakeHosting, fakeKeys, fakeProductionDeniedConfl
 import type { ImproveLine } from "../types.js"
 import { YES_POLICY, yesApproves } from "../wizard/contracts/asks.js"
 import type { BaselineResponseFields } from "../wizard/contracts/report.js"
+import type { CheckResult } from "../wizard/contracts/jobs.js"
 import type { TestResult } from "../wizard/contracts/test-engine.js"
+
+/** Lane O6's stored D10 result, exactly as `gradeTestRun` words it (B12). */
+const d10 = (perVisit: number): CheckResult => ({
+  checkId: "meta_automatic_events",
+  tier: "T1",
+  state: "info",
+  reason: `meta_automatic_events — ${perVisit} automatic event(s) per visit, no clicks`,
+  at: "2026-10-02T09:12:00.000Z",
+  runId: IDS.run
+})
 
 import {
   buildPlanModel,
@@ -199,16 +210,13 @@ describe("adopted providers: every agent job that touches one waits on an approv
     expect(line.measured).toBeUndefined()
   })
 
-  it("D10: the autoConfig line carries the measured automatic events per visit from the no-send load", () => {
-    const dryLive = {
-      loads: [{ label: "home" }, { label: "pricing" }],
-      meta: { tr: [{ ev: "PageView" }, { ev: "SubscribedButtonClick" }, { ev: "Microdata" }, { ev: "PageView" }, { ev: "Microdata" }] },
-      ga4: { events: [] }
-    } as unknown as TestResult
+  it("D10 (B12): the autoConfig line carries lane O6's stored count, never one the plan counts itself", () => {
+    // The dry load's beacons would count 2 here; the plan must show O6's stored 1.5 instead.
+    const dryLive = { loads: [{ label: "home" }], meta: { tr: [{ ev: "PageView" }, { ev: "Microdata" }, { ev: "Microdata" }] }, ga4: { events: [] } } as unknown as TestResult
     const plan = buildPlanModel(
       input({
         scan: scanFacts({ improve: adoptedMetaLines, adopted: [{ provider: "meta", via: "snippet", file: "index.html", line: 6, key: IDS.meta }] }),
-        before: fakeBefore({ dryLive })
+        before: fakeBefore({ dryLive, checks: [d10(1.5)] })
       })
     )
     expect(plan.lines.find((line) => line.kind === "autoconfig_off_adopted")?.measured).toEqual({ value: "1.5 automatic events per visit, no clicks", window: "the no-send test load" })
@@ -372,18 +380,15 @@ describe("review fixes (O7 fix round)", () => {
     expect(duplicateFindings(fakeBefore({ census: census([gtm, gtag]), dryLive }))).toEqual([])
   })
 
-  it("P2-17: the D10 count is autoConfig's own events only, and '—' when the pixel did not fire or was blocked", () => {
+  it("P2-17 / B12: the D10 count is O6's stored result; '—' when O6 left it unmeasured (blocked, silent) or absent", () => {
     const meta = scanFacts({ improve: adoptedMetaLines, adopted: [{ provider: "meta", via: "snippet", file: "index.html", line: 6, key: IDS.meta }] })
-    const dry = (tr: Array<{ ev: string }>, console: string[] = []) =>
-      ({ loads: [{ label: "home" }], environment: { blockedBySiteBotRules: false }, meta: { tr: tr.map((event) => ({ ...event, pixelId: IDS.meta })), console }, ga4: { events: [] } }) as unknown as TestResult
-    const measured = (dryLive: TestResult) => buildPlanModel(input({ scan: meta, before: fakeBefore({ dryLive }) })).lines.find((line) => line.kind === "autoconfig_off_adopted")
-    // The site's own ViewContent / Lead are not automatic events.
-    expect(measured(dry([{ ev: "PageView" }, { ev: "ViewContent" }, { ev: "Lead" }]))?.measured?.value).toBe("0 automatic events per visit, no clicks")
-    expect(measured(dry([{ ev: "PageView" }, { ev: "Microdata" }]))?.measured?.value).toBe("1 automatic events per visit, no clicks")
-    // NEGATIVE: a pixel held by consent (no PageView at all) or blocked by Traffic Permissions is unmeasured, never 0.
-    expect(measured(dry([]))?.measured).toBeUndefined()
-    expect(measured(dry([]))?.text).toContain("Measured: —")
-    expect(measured(dry([{ ev: "PageView" }], ["traffic_permissions_blocked"]))?.measured).toBeUndefined()
+    const measured = (checks: CheckResult[]) => buildPlanModel(input({ scan: meta, before: fakeBefore({ checks }) })).lines.find((line) => line.kind === "autoconfig_off_adopted")
+    expect(measured([d10(0)])?.measured?.value).toBe("0 automatic events per visit, no clicks")
+    expect(measured([d10(1)])?.measured?.value).toBe("1 automatic events per visit, no clicks")
+    // NEGATIVE: an undetermined D10 (held by consent, blocked by Traffic Permissions) or none at all is unmeasured, never 0.
+    const blocked: CheckResult = { ...d10(0), state: "undetermined", reason: "traffic_permissions_blocked — the pixel is blocked, so its automatic events cannot be counted" }
+    expect(measured([blocked])?.measured).toBeUndefined()
+    expect(measured([])?.text).toContain("Measured: —")
   })
 
   it("P2-18: unless the agent-budget (cost) line is approved, every agent job waits for the user", () => {

@@ -440,13 +440,13 @@ export function createBeforeStep(options: BeforeStepOptions = {}): WizardStep<"b
           } else {
             dryLive = result
             // §3z.12 §3e.7 (B11): the live site's consent mode is the one Infinite records (null = unknown).
-            const graded = await deps.checks.gradeTestRun(
-              result,
-              expect,
-              "dry_live",
-              gradeContextFrom({ census, consentMode: keys.infinite.consentMode, cmpDetected: result.environment.cmpDetected ?? cmpDetectedStatic })
-            )
+            const gradeCtx = gradeContextFrom({ census, consentMode: keys.infinite.consentMode, cmpDetected: result.environment.cmpDetected ?? cmpDetectedStatic })
+            const graded = await deps.checks.gradeTestRun(result, expect, "dry_live", gradeCtx)
             grades = graded
+            // B12: lane O6's D10 result (an adopted pixel's automatic events) is stored with the checks, so the
+            // plan reads this ONE count and never counts `tr` events itself.
+            const d10 = (await deps.checks.gradeTestRunChecks(result, expect, "dry_live", gradeCtx)).find((check) => check.checkId === "meta_automatic_events")
+            if (d10) dryChecks.push(d10)
             for (const tool of Object.keys(graded) as TestTool[]) {
               const check = graded[tool]
               dryChecks.push(check)

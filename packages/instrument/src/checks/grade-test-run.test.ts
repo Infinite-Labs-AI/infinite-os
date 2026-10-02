@@ -11,7 +11,7 @@ import { describe, expect, it } from "vitest"
 
 import type { TestResult, TestRunFixtureCase } from "../wizard/contracts/test-engine.js"
 import { TEST_TOOLS } from "../wizard/contracts/test-engine.js"
-import { gradeTestRun, gradeTestRunFull, type GradeContext } from "./grade-test-run.js"
+import { automaticEventsPerVisitOf, gradeTestRun, gradeTestRunFull, type GradeContext } from "./grade-test-run.js"
 
 const here = dirname(fileURLToPath(import.meta.url))
 const cases = JSON.parse(readFileSync(join(here, "../../contracts/tag-wizard-v1/test-run.fixtures.json"), "utf8")) as TestRunFixtureCase[]
@@ -144,6 +144,16 @@ describe("negatives: one fact flipped flips the verdict", () => {
     expect(code(grade(fixture).posthog.reason)).toBe("not_connected")
     const expect2 = { ...fixture.request.expect, posthog: { projectKey: "phc_FAKEtestProjectKeyNotReal000", apiHost: "https://us.i.posthog.com" } }
     expect(gradeTestRun(fixture.result, expect2, "dry_live", contextOf(fixture)).posthog.state).toBe("pass")
+  })
+
+  it("B12: the stored D10 result reads back as its count (the plan's one source); a non-info result is unmeasured", () => {
+    const fixture = byId("dry_live_meta_automatic_events_info")
+    const graded = gradeTestRunFull(fixture.result, fixture.request.expect, "dry_live", contextOf(fixture)).metaAutomaticEvents!
+    expect(automaticEventsPerVisitOf([graded.result])).toBe(graded.count)
+    expect(graded.count).not.toBeNull()
+    // negative: blocked / ungraded / absent → null, never 0
+    expect(automaticEventsPerVisitOf([{ ...graded.result, state: "undetermined", reason: "no_beacon — the pixel sent nothing" }])).toBeNull()
+    expect(automaticEventsPerVisitOf([])).toBeNull()
   })
 
   it("D10 is counted only for an ADOPTED pixel", () => {

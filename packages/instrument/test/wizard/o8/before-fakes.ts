@@ -194,6 +194,8 @@ export interface FakeChecksOptions {
   grades?: Partial<Record<TestTool, CheckResult>>
   setup?: CheckResult[]
   baselineBuild?: BuildResult
+  /** Lane O6's D10 result `gradeTestRunChecks` returns (absent = no adopted pixel). */
+  metaAutomaticEvents?: CheckResult
 }
 
 const AT = "2026-10-02T09:12:00.000Z"
@@ -226,6 +228,10 @@ export function fakeChecks(log: CallLog, options: FakeChecksOptions = {}) {
       log.push(`checks.gradeTestRun(${mode})`)
       graded.push({ result, expect, mode, ctx })
       return { ...passGrades(), ...(options.grades ?? {}) } as Record<TestTool, CheckResult>
+    },
+    async gradeTestRunChecks() {
+      log.push("checks.gradeTestRunChecks")
+      return options.metaAutomaticEvents ? [options.metaAutomaticEvents] : []
     },
     async liveBytes() {
       log.push("checks.liveBytes")

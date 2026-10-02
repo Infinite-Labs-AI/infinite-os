@@ -259,6 +259,18 @@ function loadEvidence(result: TestResult): Evidence[] {
   return result.loads.map((load) => ({ url: load.url }))
 }
 
+/**
+ * B12: the D10 count read back from the ONE result this grader wrote (`before` stores it in before.json's
+ * checks; the plan reads it here and never counts `tr` events itself). null = unmeasured ("—", never 0):
+ * no such result, or one that is not `info` (blocked, silent, ungraded).
+ */
+export function automaticEventsPerVisitOf(checks: readonly CheckResult[]): number | null {
+  const check = checks.find((entry) => entry.checkId === "meta_automatic_events")
+  if (!check || check.state !== "info") return null
+  const match = /^meta_automatic_events — (\d+(?:\.\d+)?) automatic event\(s\) per visit/.exec(check.reason ?? "")
+  return match ? Number(match[1]) : null
+}
+
 /** D10: automatic events of an ADOPTED pixel, per visit, with no clicks. */
 function gradeMetaAutomaticEvents(result: TestResult, mode: TestMode, ctx: GradeContext, meta: CheckResult): GradedTestRun["metaAutomaticEvents"] {
   if (ctx.metaPixelOwnership !== "adopted") return null

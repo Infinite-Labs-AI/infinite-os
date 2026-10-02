@@ -13,6 +13,7 @@
 //     Infinite does not list it, NO guard is emitted and a blocking line says why;
 //   • the server-lane line carries the probe disclosure (§3h.6);
 //   • nothing here is computed from agent output.
+import { automaticEventsPerVisitOf } from "../checks/grade-test-run.js"
 import { requiredLineKind } from "../jobs/registry.js"
 import { createHash } from "node:crypto"
 
@@ -226,24 +227,14 @@ export function previewShare(baseline: BaselineResponseFields | null | undefined
   return { value: `${((source.preview / total) * 100).toFixed(1)}% of page views were previews`, window }
 }
 
-/** The events Meta's automatic configuration (autoConfig) sends by itself: never the site's own `track` calls. */
-export const META_AUTOCONFIG_EVENTS: readonly string[] = ["Microdata", "SubscribedButtonClick"]
-
 /**
- * D10: automatic Meta events per visit in `before`'s no-click load — only the events autoConfig sends
- * by itself (Microdata, SubscribedButtonClick), never a site-fired ViewContent or Lead. Null ("—") when
- * not measured: no dry load, the pixel did not fire at all (held by consent, blocked, a bot wall), or
- * Traffic Permissions blocked it (§3h.8: undetermined, never "0").
+ * D10: automatic Meta events per visit in `before`'s no-click load. B12: ONE count, lane O6's
+ * `meta_automatic_events` result that `before` stored in its checks; the plan reads it and never counts `tr`
+ * events itself. Null ("—") when not measured (no dry load, a silent or blocked pixel, Traffic Permissions):
+ * undetermined, never "0" (§3h.8).
  */
-export function automaticMetaEventsPerVisit(before: BeforeFacts, pixelId?: string | null): number | null {
-  const dry = before.dryLive
-  if (!dry || dry.loads.length === 0) return null
-  if (dry.environment?.blockedBySiteBotRules) return null
-  if ((dry.meta.console ?? []).includes("traffic_permissions_blocked")) return null
-  const ours = dry.meta.tr.filter((event) => !pixelId || !event.pixelId || event.pixelId === pixelId)
-  if (!ours.some((event) => event.ev === "PageView")) return null
-  const automatic = ours.filter((event) => META_AUTOCONFIG_EVENTS.includes(event.ev)).length
-  return Math.round((automatic / dry.loads.length) * 10) / 10
+export function automaticMetaEventsPerVisit(before: BeforeFacts): number | null {
+  return automaticEventsPerVisitOf(before.checks)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -517,8 +508,7 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
   const findLinked = (kind: PlanLineKind, provider: ProviderId | null, target: string): PlanLine | undefined =>
     linked.find((entry) => entry.kind === kind && entry.provider === provider && entry.target === target)?.line
   const share = previewShare(before.baseline)
-  const adoptedPixel = scan.adopted.find((entry) => entry.provider === "meta")?.key ?? null
-  const automatic = automaticMetaEventsPerVisit(before, adoptedPixel)
+  const automatic = automaticMetaEventsPerVisit(before)
   for (const entry of improveLines) {
     const measured =
       entry.kind === "preview_guard_adopted"

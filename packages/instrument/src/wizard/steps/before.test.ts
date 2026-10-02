@@ -271,6 +271,17 @@ describe("step before: preconditions and the branch", () => {
     expect(await worktree.run()).toMatchObject({ kind: "ok" })
   })
 
+  it("B12: lane O6's D10 result goes into before.json's checks (the plan's one count); none when O6 returns none", async () => {
+    const d10: CheckResult = { checkId: "meta_automatic_events", tier: "T1", state: "info", reason: "meta_automatic_events — 1.5 automatic event(s) per visit, no clicks", at: "2026-10-02T09:12:00.000Z", runId: RUN_ID }
+    const s = setup({ checks: { metaAutomaticEvents: d10 } })
+    expect(await s.run()).toMatchObject({ kind: "ok" })
+    const file = await readBeforeFactsFile(s.fs.fs, "/repo", RUN_ID)
+    expect(file?.facts.checks.filter((check) => check.checkId === "meta_automatic_events")).toEqual([d10])
+    const none = setup({})
+    expect(await none.run()).toMatchObject({ kind: "ok" })
+    expect((await readBeforeFactsFile(none.fs.fs, "/repo", RUN_ID))?.facts.checks.some((check) => check.checkId === "meta_automatic_events")).toBe(false)
+  })
+
   it("O8 resume: on another branch with a clean tree, the wizard switches back itself (O4 switchTo)", async () => {
     const git = { base: "main", baseSource: "vercel" as const, branch: "infinite/tag/2026-10-02-7f3c2a", baseSha: "0a".repeat(20), headSha: null }
     const checkedOut = { branch: "main" as string | null }
