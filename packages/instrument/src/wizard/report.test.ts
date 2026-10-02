@@ -15,6 +15,7 @@ import {
 import {
   ReportRuleError,
   buildColumn,
+  cellViolations,
   checksPassingCell,
   createReportBuilder,
   formatShare,
@@ -222,5 +223,47 @@ describe("renderers", () => {
     for (const line of narrow.split("\n")) expect(line.length).toBeLessThanOrEqual(70)
     expect(narrow).toContain("  Proven live: ")
     expect(narrow).toContain("7 days later: —")
+  })
+})
+
+describe("§3z.8: the tag refuses every cell the cloud parser refuses (review I1 P2-2)", () => {
+  const cell = (overrides: Partial<Cell> = {}): Cell => ({ value: "pass", display: "pass", state: "pass", provenance: { source: "wizard_check", at: AT, runId: RUN }, ...overrides })
+  const refused = (overrides: Partial<Cell>, startedAt: string | null = null) => cellViolations("c", cell(overrides), RUN, startedAt)
+
+  it("an honest cell passes", () => {
+    expect(refused({})).toEqual([])
+    expect(refused({ value: "12%", display: "12%", raw: { numerator: 12, denominator: 100 } })).toEqual([])
+  })
+
+  it("ASCII arrows (->, <-, =>) and the other arrow blocks are refused, like the Unicode arrow", () => {
+    for (const display of ["hop 1 (http://a => b)", "a -> b", "b <- a", "a → b", "a ⟶ b", "a ⤴ b", "a ⬆ b", "▲ 3"]) {
+      expect(refused({ display }).join(" "), display).toMatch(/arrows/)
+    }
+  })
+
+  it("a percentage needs its raw counts, and below 50 shows raw counts", () => {
+    expect(refused({ display: "-> 50%" }).join(" ")).toMatch(/raw counts/)
+    expect(refused({ display: "50%" }).join(" ")).toMatch(/raw counts/)
+    expect(refused({ display: "50%", raw: { numerator: 5, denominator: 10 } }).join(" ")).toMatch(/floor/)
+  })
+
+  it("a receipt from before the run started never backs verified/proven", () => {
+    const verified = { display: "1 verified", provenance: { source: "cloud_receipt" as const, at: AT, runId: RUN, receiptAt: "2026-10-02T08:00:00.000Z" } }
+    expect(refused(verified, "2026-10-02T09:00:00.000Z").join(" ")).toMatch(/before this run started/)
+    expect(refused({ ...verified, provenance: { ...verified.provenance, receiptAt: "2026-10-02T09:05:00.000Z" } }, "2026-10-02T09:00:00.000Z")).toEqual([])
+  })
+
+  it("lengths, control characters, check ids, and the null/— rules match the cloud", () => {
+    expect(refused({ display: "x".repeat(201) }).join(" ")).toMatch(/1–200/)
+    expect(refused({ display: "a\u0007b" }).join(" ")).toMatch(/control/)
+    expect(refused({ value: "v".repeat(121) }).join(" ")).toMatch(/120/)
+    expect(refused({ provenance: { source: "wizard_check", at: AT, runId: RUN, checkId: "Bad Id" } }).join(" ")).toMatch(/check id/)
+    expect(refused({ value: "x", display: "—", reason: "not_exercised" }).join(" ")).toMatch(/null value/)
+    expect(refused({ value: null, display: "—", reason: "not_exercised", state: "pass" }).join(" ")).toMatch(/never a pass/)
+    expect(refused({ value: 3, display: "3", reason: "read_failed", state: "undetermined" }).join(" ")).toMatch(/read nothing/)
+  })
+
+  it("buildColumn throws on a fact display the cloud would refuse (so it never reaches the cloud)", () => {
+    expect(() => buildColumn("proven_live", { runId: RUN, meta: { measuredAt: AT, sha: "a".repeat(40) }, facts: [{ input: "t1.redirect_walk", state: "pass", display: "hop 1 (http://a => b)", at: AT }], rows: {} })).toThrow(ReportRuleError)
   })
 })

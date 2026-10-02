@@ -266,7 +266,13 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
     const resumedRunId = ctx.state.get().runId
     if (resumedRunId !== null && deps.bridge.has("tag.runs.v1")) {
       try {
-        await deps.bridge.getRun(resumedRunId, { signal: ctx.signal })
+        const { run } = await deps.bridge.getRun(resumedRunId, { signal: ctx.signal })
+        // §3z.8 rule 3: the run's server-clock start bounds which receipts are this run's (kept for the report).
+        if (!ctx.state.get().runStartedAt && run.startedAt) {
+          ctx.state.update((state) => {
+            state.runStartedAt = run.startedAt
+          })
+        }
       } catch (error) {
         if (isBridgeError(error) && error.code === "not_found") {
           return { kind: "failed", code: "INF_WIZ_LINK_DECLINED", message: RUN_NOT_IN_WORKSPACE, next: "halt" }

@@ -88,6 +88,11 @@ export interface WizardRunState {
   schema: typeof WIZARD_STATE_SCHEMA
   /** The cloud run id; null until the `agent` step creates it. */
   runId: string | null
+  /**
+   * The run's server-clock start (`runs.start` / `runs.get` `startedAt`): a receipt before it is never this
+   * run's proof (§3z.8 rule 3). Absent in state files written before it existed.
+   */
+  runStartedAt?: string | null
   displayId: string
   createdAt: string
   tagVersion: string
@@ -191,7 +196,7 @@ export const WIZARD_RUN_STATE_SHAPE = shapeOf<WizardRunState>()(
     "report",
     "snapshot"
   ],
-  [],
+  ["runStartedAt"],
   {
     link: nullable(shapeOf<NonNullable<WizardRunState["link"]>>()("RunState.link", ["linkId", "workspaceName", "approvedAt", "runtimeVariant"], [])),
     steps: recordOf(shapeOf<StepRecord>()("StepRecord", ["outcome", "inputHash", "at"], ["code"])),

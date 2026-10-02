@@ -32,6 +32,7 @@ import {
   type TestTool
 } from "../contracts/test-engine.js"
 import { bridgeErrorCode, bridgeErrorState } from "../bridge-errors.js"
+import { gradeWords } from "../before-column.js"
 import { buildColumn, type ColumnFact, type RowCellInput } from "../report.js"
 
 /** How often the deploy status is read, and how long `prove` waits before parking (the desktop watcher continues). */
@@ -191,6 +192,15 @@ function toolsUnderTest(expect: TestExpect): TestTool[] {
   return (["infinite", "ga4", "posthog", "meta"] as const).filter((tool) => expect[tool] !== undefined)
 }
 
+/**
+ * A lane's receipt as this run's, or not: a "verified" receipt from before the run's server-clock start is
+ * never this run's proof (§3z.8 rule 3), so it reads as undetermined with no receipt time.
+ */
+export function ownReceipt(lane: LaneReceipt, runStartedAt: string | null): LaneReceipt {
+  if (lane.state !== "verified" || !lane.receiptAt || runStartedAt === null) return lane
+  return Date.parse(lane.receiptAt) < Date.parse(runStartedAt) ? { ...lane, state: "undetermined", receiptAt: null } : lane
+}
+
 function receiptFact(lane: LaneReceipt, input: ColumnFact["input"], at: string, label: string): ColumnFact {
   const fired = lane.state === "verified" || lane.state === "delivering"
   return {
@@ -200,6 +210,19 @@ function receiptFact(lane: LaneReceipt, input: ColumnFact["input"], at: string, 
     at,
     ...(lane.state === "verified" && lane.receiptAt ? { receiptAt: lane.receiptAt } : {})
   }
+}
+
+/**
+ * Fixed words for a T1 check in a report cell (review I1 P1-1). A check's free-text reason (a redirect hop
+ * "301 → https://www…", a CSP directive, a %-encoded path) NEVER becomes a cell display: it would break the
+ * report's own rules (no arrows, no % without counts) and crash the column after the real visit.
+ */
+export function t1Words(check: Pick<CheckResult, "checkId" | "state">): string {
+  const redirect = check.checkId === "redirect_walk"
+  if (check.state === "pass") return redirect ? "campaign tags kept through every redirect" : "the content security policy allows every tool"
+  if (check.state === "problem") return redirect ? "a redirect drops campaign tags" : "the content security policy blocks a tool"
+  if (check.state === "info") return redirect ? "no redirect on the way in" : "no content security policy"
+  return redirect ? "redirects could not be checked" : "the content security policy could not be checked"
 }
 
 export interface ProvenColumnInput {
@@ -215,11 +238,19 @@ export interface ProvenColumnInput {
   serverLaneInstalled: boolean
   /** Agent jobs waiting for a real conversion (they are pending, never "proven" here). */
   conversionsWaiting: number
+  /** The run's server-clock start (`runs.start`); null when this state file predates it. */
+  runStartedAt?: string | null
 }
 
 /** The `proven_live` column, from typed inputs only (receipts, graded facts, cloud reads). */
 export function buildProvenColumn(input: ProvenColumnInput): ReportColumnSnapshot {
-  const { at, expect, receipts, visit } = input
+  const { at, expect, visit } = input
+  const runStartedAt = input.runStartedAt ?? null
+  // §3z.8 rule 3: only receipts from after this run started are this run's.
+  const receipts: ReceiptsResponseFields = {
+    ...input.receipts,
+    lanes: Object.fromEntries(Object.entries(input.receipts.lanes).map(([lane, receipt]) => [lane, ownReceipt(receipt, runStartedAt)])) as ReceiptsResponseFields["lanes"]
+  }
   const facts: ColumnFact[] = []
   const tools = toolsUnderTest(expect)
 
@@ -230,7 +261,8 @@ export function buildProvenColumn(input: ProvenColumnInput): ReportColumnSnapsho
       const reason = grade.reason ?? ""
       const once: ColumnFact["state"] =
         grade.state === "pass" ? "pass" : grade.state === "problem" ? (ONCE_REASONS.has(reason) ? "problem" : "undetermined") : grade.state === "info" ? "info" : "undetermined"
-      facts.push({ input: "real_visit.graded", state: once, display: `${TOOL_LABELS[tool]}: ${grade.state === "pass" ? "fires once" : reason || grade.state}`, at, checkId: grade.checkId })
+      // Fixed words only (never the grader's free-text reason): `gradeWords` is the live_today column's wording.
+      facts.push({ input: "real_visit.graded", state: once, display: `${TOOL_LABELS[tool]}: ${gradeWords(grade, null)}`, at, checkId: grade.checkId })
       const ids: ColumnFact["state"] =
         grade.state === "pass" ? "pass" : grade.state === "problem" && ID_REASONS.has(reason) ? "problem" : "undetermined"
       facts.push({ input: "real_visit.ids_vs_keys", state: ids, display: `${TOOL_LABELS[tool]}: ${ids === "pass" ? "the connected ID" : ids === "problem" ? "an ID that is not the connection's" : "not determinable"}`, at, checkId: grade.checkId })
@@ -249,9 +281,9 @@ export function buildProvenColumn(input: ProvenColumnInput): ReportColumnSnapsho
 
   for (const result of input.t1) {
     if (result.checkId === "csp_header" || result.checkId === "csp") {
-      facts.push({ input: "t1.csp", state: result.state, at: result.at, checkId: result.checkId, ...(result.reason ? { display: result.reason } : {}) })
+      facts.push({ input: "t1.csp", state: result.state, at: result.at, checkId: result.checkId, display: t1Words(result) })
     } else if (result.checkId === "redirect_walk") {
-      facts.push({ input: "t1.redirect_walk", state: result.state, at: result.at, checkId: result.checkId, ...(result.reason ? { display: result.reason } : {}) })
+      facts.push({ input: "t1.redirect_walk", state: result.state, at: result.at, checkId: result.checkId, display: t1Words(result) })
     }
   }
 
@@ -302,6 +334,7 @@ export function buildProvenColumn(input: ProvenColumnInput): ReportColumnSnapsho
     meta: { measuredAt: at, sha: input.mergeSha },
     facts,
     rows,
+    runStartedAt,
     ...(visit ? {} : { unmeasured: { reason: "pending_open_infinite", state: "pending" } })
   })
 }
@@ -599,41 +632,51 @@ async function runProve(ctx: WizardContext, deps: WizardDeps): Promise<StepOutco
     ctx.emit.emit("step.sub", { step: "prove", text: `${fired ? "✓" : "·"} ${TOOL_LABELS[tool]} · ${RECEIPT_TEXT[lane.state]}`, tone: fired ? "ok" : "warn" })
   }
 
-  // T1 after the deploy (read-only).
-  const t1: CheckResult[] = []
-  if (productionHost) {
-    const url = `https://${productionHost}/`
-    t1.push(...(await deps.checks.redirectWalk([url])), ...(await deps.checks.csp(url)))
-  }
-
-  // §3z.12 §3e.1 (B15): the passive checks read real events AFTER the deploy (baseline since = deploy time).
-  await applyPassiveChecks(ctx, deps, runId, deployedSince(state, deps))
-
-  const at = deps.clock.now().toISOString()
-  const column = buildProvenColumn({
-    runId,
-    mergeSha,
-    at,
-    keys,
-    expect,
-    visit,
-    receipts,
-    t1,
-    serverLaneInstalled: keys.serverLane.laneState !== "no_secret",
-    conversionsWaiting: state.jobs.filter((item) => item.jobId === "server_conversions" && ["done_in_code", "waiting_real_event"].includes(item.state)).length
-  })
-  ctx.state.update((draft) => {
-    draft.report.proven_live = column
-  })
-  await ctx.state.save()
-
+  // Review I1 P1-1: once this run holds the claim, nothing between here and the PATCH may leave the cloud run
+  // `proving` for 24 h. An unexpected error building the column still settles the proof as undetermined.
   let proofState: "proven" | "problem" | "undetermined" | null = null
-  if (patchProofState) {
-    proofState = visitError ? "undetermined" : proofStateFrom(column)
-    // §3z.8 (A10): the proofState PATCH names its producer, which holds the claim.
-    await deps.bridge.patchRun(runId, { proofState }, { producer: "tag" })
-  } else if (ownClaim) {
-    proofState = visitError ? "undetermined" : proofStateFrom(column)
+  try {
+    // T1 after the deploy (read-only).
+    const t1: CheckResult[] = []
+    if (productionHost) {
+      const url = `https://${productionHost}/`
+      t1.push(...(await deps.checks.redirectWalk([url])), ...(await deps.checks.csp(url)))
+    }
+
+    // §3z.12 §3e.1 (B15): the passive checks read real events AFTER the deploy (baseline since = deploy time).
+    await applyPassiveChecks(ctx, deps, runId, deployedSince(state, deps))
+
+    const at = deps.clock.now().toISOString()
+    const column = buildProvenColumn({
+      runId,
+      mergeSha,
+      at,
+      keys,
+      expect,
+      visit,
+      receipts,
+      t1,
+      serverLaneInstalled: keys.serverLane.laneState !== "no_secret",
+      runStartedAt: state.runStartedAt ?? null,
+      conversionsWaiting: state.jobs.filter((item) => item.jobId === "server_conversions" && ["done_in_code", "waiting_real_event"].includes(item.state)).length
+    })
+    ctx.state.update((draft) => {
+      draft.report.proven_live = column
+    })
+    await ctx.state.save()
+
+    if (patchProofState) {
+      proofState = visitError ? "undetermined" : proofStateFrom(column)
+      // §3z.8 (A10): the proofState PATCH names its producer, which holds the claim.
+      await deps.bridge.patchRun(runId, { proofState }, { producer: "tag" })
+    } else if (ownClaim) {
+      proofState = visitError ? "undetermined" : proofStateFrom(column)
+    }
+  } catch (error) {
+    if (patchProofState && proofState === null) {
+      await deps.bridge.patchRun(runId, { proofState: "undetermined" }, { producer: "tag" }).catch(() => undefined)
+    }
+    throw error
   }
 
   const distinctId = visit?.result.markers.posthogDistinctId ?? state.markers.prove.posthogDistinctId ?? null

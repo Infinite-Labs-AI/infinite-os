@@ -116,6 +116,7 @@ async function runDone(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcom
     site,
     columns: state.report,
     provenLivePending: provenPending,
+    runStartedAt: state.runStartedAt ?? null,
     day7: null,
     notes: []
   })
@@ -125,6 +126,7 @@ async function runDone(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcom
     site,
     columns: state.report,
     provenLivePending: provenPending,
+    runStartedAt: state.runStartedAt ?? null,
     day7: null,
     notes: notesFor(ctx, draft)
   })

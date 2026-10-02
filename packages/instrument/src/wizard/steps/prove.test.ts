@@ -15,7 +15,7 @@ import {
 } from "../../../test/wizard/runtime-fakes.js"
 import type { TestRunRequest } from "../contracts/test-engine.js"
 import { createRunState } from "../run-state.js"
-import { PROVE_LIMITS, buildProvenColumn, proofStateFrom, receiptMarkersFrom, step } from "./prove.js"
+import { PROVE_LIMITS, buildProvenColumn, ownReceipt, proofStateFrom, receiptMarkersFrom, step } from "./prove.js"
 
 function mergedState() {
   const state = createRunState({ tagVersion: "0.12.0", root: "/repo", appRoot: ".", now: new Date("2026-10-02T09:00:00Z"), displayId: "r-7f3c" })
@@ -368,5 +368,72 @@ describe("prove: consent-held or unobserved tools are UNKNOWN, never problems (O
     })
     expect(column.cells.ga4_page_views_per_visit).toMatchObject({ value: 0, state: "problem" })
     expect(column.cells.posthog_route).toMatchObject({ value: "direct", state: "problem" })
+  })
+})
+
+describe("prove: a redirecting home page (review I1 P1-1)", () => {
+  const hop = (state: "pass" | "problem") => ({
+    checkId: "redirect_walk",
+    state,
+    tier: "T1" as const,
+    // O9's real reason text: an arrow, and a %-encoded path.
+    reason: `every hop keeps utm_* (1 hop: 301 → https://www.${HOST}/en%2Fhome -> /en => ok)`,
+    at: "2026-10-02T09:43:00.000Z",
+    runId: RUN_ID
+  })
+
+  it("an apex → www redirect builds the column with fixed words (never the check's free text) and PATCHes the proof", async () => {
+    const bundle = fakeDeps()
+    bundle.deps.checks.redirectWalk = async () => [hop("pass")]
+    bundle.deps.checks.csp = async () => [{ ...hop("problem"), checkId: "csp_header", reason: "script-src → blocks https://connect.facebook.net (100% of loads)" }]
+    const { outcome, ctx } = await runProve(bundle)
+    expect(outcome.kind).toBe("ok")
+    const column = ctx.current().report.proven_live!
+    expect(column.finishLine.utms_survive_redirects).toMatchObject({ state: "pass", display: "campaign tags kept through every redirect" })
+    expect(column.finishLine.csp_allows!.display).not.toMatch(/→|%|->/)
+    expect(bundle.log.calls.find((call) => call.what === "patchRun")!.args[1]).toEqual({ proofState: "proven" })
+  })
+
+  it("an unexpected error after the claim was granted still settles proofState undetermined before it throws (never 24 h of 'proving')", async () => {
+    const bundle = fakeDeps()
+    bundle.deps.checks.redirectWalk = async () => {
+      throw new Error("boom")
+    }
+    await expect(runProve(bundle)).rejects.toThrow("boom")
+    const patches = bundle.log.calls.filter((call) => call.what === "patchRun").map((call) => call.args[1])
+    expect(patches).toEqual([{ proofState: "undetermined" }])
+  })
+
+  it("negative: a lost claim (someone else's proof) never PATCHes on an error", async () => {
+    const bundle = fakeDeps({ bridge: { claim: { code: "claimed_by_other", state: "proving" } } })
+    bundle.deps.checks.redirectWalk = async () => {
+      throw new Error("boom")
+    }
+    await expect(runProve(bundle)).rejects.toThrow("boom")
+    expect(bundle.log.names("bridge")).not.toContain("bridge.patchRun")
+  })
+})
+
+describe("prove: receipts from before the run started are not this run's (§3z.8 rule 3)", () => {
+  it("a verified receipt older than runStartedAt reads undetermined, so nothing says verified/proven", () => {
+    const at = "2026-10-02T09:43:00.000Z"
+    const receipts = receiptsAll()
+    const column = buildProvenColumn({
+      runId: RUN_ID,
+      mergeSha: MERGE_SHA,
+      at,
+      keys: keysFixture(),
+      expect: { posthog: { projectKey: "phc_x", apiHost: "https://us.i.posthog.com" } },
+      visit: null,
+      receipts: { ...receipts, lanes: { ...receipts.lanes, posthog: lane("verified", "2026-10-02T08:00:00.000Z") } },
+      t1: [],
+      serverLaneInstalled: false,
+      conversionsWaiting: 0,
+      runStartedAt: "2026-10-02T09:00:00.000Z"
+    })
+    expect(column.finishLine.proof_from_real_visit!.state).not.toBe("pass")
+    expect(column.cells.live_test_per_tool!.display).not.toContain("verified")
+    expect(column.cells.live_test_per_tool!.provenance.receiptAt).toBeUndefined()
+    expect(ownReceipt(lane("verified", "2026-10-02T09:30:00.000Z"), "2026-10-02T09:00:00.000Z").state).toBe("verified")
   })
 })

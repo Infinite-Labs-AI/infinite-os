@@ -108,9 +108,11 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
   // LAST: start the cloud run with the worker and reviewer (R1-11).
   const fingerprint = await repoFingerprint({ remoteUrl: await deps.git.remoteUrl(), root: ctx.root, appRoot: ctx.appRoot })
   let runId: string
+  let runStartedAt: string
   try {
     const started = await deps.bridge.startRun({ tagVersion: deps.tagVersion, repoFingerprint: fingerprint, worker: workerKind, reviewer }, { signal: ctx.signal })
     runId = started.runId
+    runStartedAt = started.startedAt
   } catch (error) {
     const mapped = bridgeOutcome(error)
     if (mapped) return mapped
@@ -119,6 +121,7 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
   ctx.runId = runId
   ctx.state.update((state) => {
     state.runId = runId
+    state.runStartedAt = runStartedAt
   })
   await ctx.state.save()
   return { kind: "ok", status: statusLine(worker, reviewerInfo, reviewer, nested) }

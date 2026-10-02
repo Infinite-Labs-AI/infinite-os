@@ -485,6 +485,8 @@ export interface ReportBuilder {
     provenLivePending: ReportV2["columns"]["proven_live"]["pending"]
     day7: ReportV2["day7"] | null
     notes: string[]
+    /** The run's server-clock start (`runs.start`); a receipt before it never backs "verified"/"proven" (§3z.8). */
+    runStartedAt?: string | null
   }): ReportV2
   renderTerminal(report: ReportV2, width: number): string
   /** Plain-text statuses; never a literal `- [ ]`. */
