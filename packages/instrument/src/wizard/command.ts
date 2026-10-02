@@ -26,9 +26,8 @@ import { WizardEventEmitter } from "./events.js"
 import { nodeWizardFs, systemClock } from "./fs.js"
 import { acquireRunLock, type RunLockHandle } from "./lock.js"
 import { renderTerminal } from "./report.js"
-import { RunStateFile, createRunState, firstOpenStep, loadRunState, setStateAside } from "./run-state.js"
-import { installInterruptHandlers } from "./signals.js"
-import { WIZARD_REPORT_PATHS } from "./steps/done.js"
+import { RunStateFile, WIZARD_REPORT_PATHS, createRunState, firstOpenStep, loadRunState, setStateAside } from "./run-state.js"
+import { installInterruptHandlers, runInterruptSequence, type SignalSource } from "./signals.js"
 import { WizardStore } from "./store.js"
 import { runUninstallFlow } from "./uninstall-flow.js"
 import { getWizardWiring, type WizardIo, type WizardWiring } from "./wiring.js"
@@ -42,7 +41,7 @@ export const NOT_A_TTY_MESSAGE =
 export const WIZARD_USAGE = [
   "Usage: npx infinite-tag [--json] [--yes] [--answers <file>] [--root <dir>] [--app-root <dir>] [--resume]",
   "                        [--no-agent] [--worker claude|codex] [--reviewer claude|codex|brief|none]",
-  "                        [--consent-mode not_required|required] [--no-prove]",
+  "                        [--consent-mode not_required|required] [--no-prove] [--fresh]",
   "       npx infinite-tag uninstall --pr [--json] [--root <dir>] [--base <branch>] [--answers <file>]"
 ].join("\n")
 
@@ -68,6 +67,8 @@ export interface ParsedWizardArgs {
   root: string
   /** Repo-relative ("." for a single-app repo). */
   appRoot: string
+  /** `--fresh`: set an unfinished run aside (kept, never deleted) and start a new one. */
+  fresh: boolean
 }
 
 type Parse<T> = { ok: true; value: T } | { ok: false; message: string }
@@ -100,6 +101,7 @@ export function parseWizardArgs(argv: readonly string[], cwd: string): Parse<Par
   }
   let rootArg: string | null = null
   let appRootArg: string | null = null
+  let fresh = false
   for (let index = 0; index < argv.length; index += 1) {
     const flag = argv[index]!
     const value = (): string | null => {
@@ -124,6 +126,9 @@ export function parseWizardArgs(argv: readonly string[], cwd: string): Parse<Par
         break
       case "--no-prove":
         options.noProve = true
+        break
+      case "--fresh":
+        fresh = true
         break
       case "--answers": {
         const file = value()
@@ -159,10 +164,11 @@ export function parseWizardArgs(argv: readonly string[], cwd: string): Parse<Par
     }
   }
   if (options.noAgent && options.worker) return { ok: false, message: "--no-agent and --worker cannot be used together." }
+  if (fresh && options.resume) return { ok: false, message: "--fresh and --resume cannot be used together." }
   const root = resolve(cwd, rootArg ?? ".")
   const appRoot = appRootArg === null ? { ok: true as const, value: "." } : resolveAppRoot(root, appRootArg)
   if (!appRoot.ok) return appRoot
-  return { ok: true, value: { options, root, appRoot: appRoot.value } }
+  return { ok: true, value: { options, root, appRoot: appRoot.value, fresh } }
 }
 
 /** The nesting marker that is set (an agent launched the wizard), if any. */
@@ -191,17 +197,29 @@ export function routeWizard(options: Pick<WizardOptions, "json">, io: Pick<Wizar
 // The wizard
 // ---------------------------------------------------------------------------------------------
 
-async function readFinalReport(root: string): Promise<ReportV2 | null> {
+/**
+ * The final report, but ONLY when it is this run's: the state's `done` step finished ok in this run and
+ * the report carries this run's id. A previous run's report is never shown as this run's outro or
+ * `run.end.reportPath` ("verified/proven only with a receipt from THIS run").
+ */
+async function readFinalReport(root: string, state: Readonly<WizardRunState> | null): Promise<ReportV2 | null> {
+  if (!state?.runId || state.steps.done?.outcome !== "ok") return null
   try {
-    return JSON.parse(await fsp.readFile(join(root, WIZARD_REPORT_PATHS.json), "utf8")) as ReportV2
+    const report = JSON.parse(await fsp.readFile(join(root, WIZARD_REPORT_PATHS.json), "utf8")) as ReportV2
+    return report.runId === state.runId ? report : null
   } catch {
     return null
   }
 }
 
+export const NESTED_CONSENT_FLAG_MESSAGE =
+  "--consent-mode is your answer, not your agent's: run npx infinite-tag in your own terminal to choose it (the agent can run the rest with --json)."
+
 export interface RunWizardCommandOverrides {
   io?: WizardIo
   wiring?: WizardWiring | null
+  /** Where SIGINT/SIGTERM come from (default the process; tests pass a fake). */
+  signals?: SignalSource
 }
 
 export async function runWizardCommand(argv: readonly string[], overrides: RunWizardCommandOverrides = {}): Promise<number> {
@@ -211,7 +229,7 @@ export async function runWizardCommand(argv: readonly string[], overrides: RunWi
     io.stderr.write(`${parsed.message}\n${WIZARD_USAGE}\n`)
     return WIZARD_EXIT.usage
   }
-  const { root, appRoot } = parsed.value
+  const { root, appRoot, fresh } = parsed.value
   const options = { ...parsed.value.options }
   const route = routeWizard(options, io)
   if (route.kind === "refuse") {
@@ -219,6 +237,12 @@ export async function runWizardCommand(argv: readonly string[], overrides: RunWi
     return WIZARD_EXIT.usage
   }
   options.nested = route.kind === "json" && route.nested
+  // §3d.7 / R2-14: consent is a user-only answer. In nested mode the flag would be the PARENT AGENT's
+  // answer (the plan step resolves consent from it), so it is refused, never passed on.
+  if (options.nested && options.consentMode !== null) {
+    io.stderr.write(`${NESTED_CONSENT_FLAG_MESSAGE}\n`)
+    return WIZARD_EXIT.usage
+  }
   const wiring = overrides.wiring === undefined ? getWizardWiring() : overrides.wiring
   if (!wiring) {
     io.stderr.write(`${WIZARD_NOT_BUILT_MESSAGE}\n`)
@@ -240,7 +264,7 @@ export async function runWizardCommand(argv: readonly string[], overrides: RunWi
     io.stderr.write(`Another infinite-tag run is using this repo${holder}. Wait for it, or remove ${lock.path} if it is gone.\n`)
     return exitCodeFor("INF_WIZ_LOCKED")
   }
-  return runLocked({ io, wiring, options, root, appRoot, answers, lock: lock.handle })
+  return runLocked({ io, wiring, options, root, appRoot, fresh, answers, lock: lock.handle, signals: overrides.signals ?? process })
 }
 
 interface LockedRun {
@@ -249,12 +273,19 @@ interface LockedRun {
   options: WizardOptions
   root: string
   appRoot: string
+  fresh: boolean
   answers: AnswersFile | null
   lock: RunLockHandle
+  signals: SignalSource
+}
+
+/** A suffix for a run set aside: its run id (or display id) plus why. */
+function asideSuffix(state: Pick<WizardRunState, "runId" | "displayId">, why: string): string {
+  return `${state.runId ?? state.displayId}.${why}`
 }
 
 async function runLocked(input: LockedRun): Promise<number> {
-  const { io, wiring, options, root, appRoot, answers, lock } = input
+  const { io, wiring, options, root, appRoot, fresh, answers, lock, signals } = input
   const controller = new AbortController()
   const loaded = await loadRunState(nodeWizardFs, root)
   const existing = loaded.kind === "ok" ? loaded.state : null
@@ -262,68 +293,144 @@ async function runLocked(input: LockedRun): Promise<number> {
   const emitter = new WizardEventEmitter({ store, ndjson: options.json ? (line) => io.stdout.write(`${line}\n`) : null })
   const ui = wiring.createUi(options.json ? "json" : "tty", store, io)
   let ttyPrompter: TtyPrompter | null = null
-  let removeHandlers: (() => void) | null = null
   let deps: WizardDeps | null = null
+  let runState: RunStateFile | null = null
+
+  // Every way out releases the lock exactly once, and only AFTER the agent tree is killed and the fence
+  // snapshot is restored: `finish` is the sequence's lock-release stage, never called before it.
+  let finished: Promise<number> | null = null
+  let interrupt: Promise<void> | null = null
+  const finish = (exitCode: number): Promise<number> =>
+    (finished ??= (async () => {
+      const state = runState?.get() ?? null
+      const report = await readFinalReport(root, state)
+      const reportPath = report ? WIZARD_REPORT_PATHS.markdown : null
+      emitter.emit("run.end", {
+        exitCode,
+        runId: state?.runId ?? null,
+        ...(state?.pr?.url ? { prUrl: state.pr.url } : {}),
+        reportPath
+      })
+      if (report) store.setOutro(renderTerminal(report, io.stdout.columns ?? 100))
+      emitter.dispose()
+      ui.stop()
+      removeHandlers()
+      ttyPrompter?.close()
+      await lock.release()
+      return exitCode
+    })())
+  /** abort → kill the agents → fence abort → finish (lock release) → exit, for a signal or a crash. */
+  const stopAndFinish = (exitCode: number, exit: (code: number) => void): Promise<void> =>
+    runInterruptSequence({
+      abort: () => controller.abort(new Error(exitCode === WIZARD_EXIT.interrupted ? "interrupted" : "stopped")),
+      killAgents: async () => {
+        if (deps) await deps.agents.killAll()
+      },
+      ...(wiring.fenceAbort ? { fenceAbort: () => wiring.fenceAbort!() } : {}),
+      releaseLock: async () => {
+        await finish(exitCode)
+      },
+      exit,
+      notice: (text) => io.stderr.write(`${text}\n`)
+    })
+  const removeHandlers = installInterruptHandlers({
+    abort: () => controller.abort(new Error("interrupted")),
+    killAgents: async () => {
+      if (deps) await deps.agents.killAll()
+    },
+    ...(wiring.fenceAbort ? { fenceAbort: () => wiring.fenceAbort!() } : {}),
+    releaseLock: async () => {
+      await finish(WIZARD_EXIT.interrupted)
+    },
+    exit: (code) => io.exit(code),
+    notice: (text) => io.stderr.write(`${text}\n`),
+    started: (sequence) => {
+      interrupt = sequence
+    }
+  }, signals)
+  /** The normal way out; after a signal it waits for the whole interrupt sequence instead. */
+  const end = async (exitCode: number): Promise<number> => {
+    if (interrupt) {
+      await interrupt
+      return WIZARD_EXIT.interrupted
+    }
+    return finish(exitCode)
+  }
+
   ui.start(store)
   try {
     if (options.nested) ttyPrompter = wiring.ttyPrompter ? wiring.ttyPrompter() : openDevTtyPrompter()
     const asks = createWizardAsks({ store, emitter, options, answers, ttyPrompter, signal: controller.signal })
+    const newState = () => createRunState({ tagVersion: INSTRUMENT_VERSION, root, appRoot, now: systemClock.now() })
 
     // The run state: resume, start fresh, or ask (a corrupt file is never silently reset).
     let state: WizardRunState
-    let resumedFrom = null as ReturnType<typeof firstOpenStep>
+    let resuming = false
     if (loaded.kind === "corrupt") {
-      const fresh = await asks.askUserOnly("confirm", {
+      const yes = await asks.askUserOnly("confirm", {
         question: `The saved run (${loaded.path}) cannot be read (${loaded.problems[0] ?? "corrupt"}). Start a fresh run? The old file is kept beside it.`,
         defaultYes: false
       })
-      if (fresh !== true) {
+      if (yes !== true) {
         io.stderr.write("Not started: fix or move .infinite/wizard/state.json, or answer yes to start fresh.\n")
-        return finish(exitCodeFor("INF_WIZ_NEEDS_ANSWERS"), null)
+        return await end(exitCodeFor("INF_WIZ_NEEDS_ANSWERS"))
       }
       await setStateAside(root, `corrupt-${Date.now()}`)
-      state = createRunState({ tagVersion: INSTRUMENT_VERSION, root, appRoot, now: systemClock.now() })
-    } else if (loaded.kind === "ok" && loaded.state.steps.done?.outcome !== "ok") {
+      state = newState()
+    } else if (loaded.kind === "ok" && loaded.state.steps.done?.outcome !== "ok" && !fresh) {
       state = loaded.state
-      resumedFrom = firstOpenStep(state)
+      resuming = true
     } else {
-      if (loaded.kind === "ok") await setStateAside(root, `${loaded.state.runId ?? loaded.state.displayId}.done`)
-      if (options.resume) {
-        io.stderr.write("There is no unfinished run to resume here; starting a fresh one.\n")
+      if (loaded.kind === "ok") {
+        await setStateAside(root, asideSuffix(loaded.state, loaded.state.steps.done?.outcome === "ok" ? "done" : `set-aside-${Date.now()}`))
       }
-      state = createRunState({ tagVersion: INSTRUMENT_VERSION, root, appRoot, now: systemClock.now() })
+      if (options.resume) io.stderr.write("There is no unfinished run to resume here; starting a fresh one.\n")
+      state = newState()
     }
-    store.setRun({ displayId: state.displayId, runId: state.runId })
-    const runState = new RunStateFile(nodeWizardFs, root, state)
-    await runState.save()
 
-    deps = await wiring.createDeps({
-      root,
-      appRoot: state.appRoot,
-      options,
-      env: io.env,
-      platform: io.platform,
-      tagVersion: INSTRUMENT_VERSION,
-      signal: controller.signal
-    })
-    const agents = deps.agents
-    removeHandlers = installInterruptHandlers({
-      abort: () => controller.abort(new Error("interrupted")),
-      killAgents: () => agents.killAll(),
-      ...(wiring.fenceAbort ? { fenceAbort: () => wiring.fenceAbort!() } : {}),
-      releaseLock: () => lock.release(),
-      exit: (code) => {
-        ui.stop()
-        io.exit(code)
-      },
-      notice: (text) => io.stderr.write(`${text}\n`)
-    })
+    const createDeps = (forState: WizardRunState) =>
+      wiring.createDeps({
+        root,
+        appRoot: forState.appRoot,
+        options,
+        env: io.env,
+        platform: io.platform,
+        tagVersion: INSTRUMENT_VERSION,
+        signal: controller.signal
+      })
+    deps = await createDeps(state)
+
+    // §3d.6: a resumed run whose pull request was CLOSED (not merged) cannot go on; offer a fresh run.
+    // (A merged PR resumes at `merge`, which records the merge commit and hands over to `prove`.)
+    if (resuming && state.pr?.number !== undefined && state.pr.number !== null) {
+      const pr = await deps.host.readPr(state.pr.number)
+      if (!("unsupported" in pr) && pr.state === "CLOSED") {
+        const yes = await asks.askUserOnly("confirm", {
+          question: `The pull request #${pr.number} of this run was closed without merging. Start a fresh run? The closed run is kept aside.`,
+          defaultYes: false
+        })
+        if (yes !== true) {
+          io.stderr.write(`Not resumed: the pull request #${pr.number} is closed. Reopen it and run again, or run npx infinite-tag --fresh.\n`)
+          return await end(exitCodeFor("INF_WIZ_NEEDS_ANSWERS"))
+        }
+        await setStateAside(root, asideSuffix(state, "pr-closed"))
+        const previousAppRoot = state.appRoot
+        state = newState()
+        resuming = false
+        if (state.appRoot !== previousAppRoot) deps = await createDeps(state)
+      }
+    }
+
+    store.setRun({ displayId: state.displayId, runId: state.runId })
+    runState = new RunStateFile(nodeWizardFs, root, state)
+    await runState.save()
+    const accessor = runState
 
     const ctx: WizardContext = {
       get runId() {
-        return runState.get().runId
+        return accessor.get().runId
       },
-      state: runState,
+      state: accessor,
       emit: emitter,
       ask: asks.ask,
       signal: controller.signal,
@@ -332,30 +439,20 @@ async function runLocked(input: LockedRun): Promise<number> {
       appRoot: state.appRoot,
       now: () => deps!.clock.now()
     }
-    const result = await runWizard(ctx, deps, { ...(wiring.engine ?? {}), resumedFrom })
-    return finish(result.exitCode, runState.get())
+    const result = await runWizard(ctx, deps, {
+      ...(wiring.engine ?? {}),
+      ...(wiring.fenceAbort ? { fenceAbort: () => wiring.fenceAbort!() } : {}),
+      resumedFrom: resuming ? firstOpenStep(state) : null
+    })
+    return await end(result.exitCode)
   } catch (error) {
+    if (interrupt) return end(WIZARD_EXIT.interrupted)
     const prefix = error instanceof EngineInvariantError ? "Internal error (the wizard stopped itself)" : "Internal error"
     io.stderr.write(`${prefix}: ${error instanceof Error ? error.message : String(error)}\n`)
-    return finish(WIZARD_EXIT.failed, null)
-  }
-
-  async function finish(exitCode: number, state: Readonly<WizardRunState> | null): Promise<number> {
-    const report = await readFinalReport(root)
-    const reportPath = report ? WIZARD_REPORT_PATHS.markdown : null
-    emitter.emit("run.end", {
-      exitCode,
-      runId: state?.runId ?? null,
-      ...(state?.pr?.url ? { prUrl: state.pr.url } : {}),
-      reportPath
-    })
-    if (report) store.setOutro(renderTerminal(report, io.stdout.columns ?? 100))
-    emitter.dispose()
-    ui.stop()
-    removeHandlers?.()
-    ttyPrompter?.close()
-    await lock.release()
-    return exitCode
+    // A crash may leave an agent child mid-turn (an invariant fires exactly while one is alive): kill it
+    // and restore the snapshot BEFORE the lock is released, as on Ctrl+C.
+    await stopAndFinish(WIZARD_EXIT.failed, () => {})
+    return WIZARD_EXIT.failed
   }
 }
 

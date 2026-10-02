@@ -90,9 +90,13 @@ export async function loadRunState(fs: WizardFs, root: string): Promise<LoadedRu
   return { kind: "ok", state: parsed as WizardRunState }
 }
 
-/** Moves a corrupt (or finished) state file aside, never deletes it. Returns the new path. */
-export async function setStateAside(root: string, suffix: string): Promise<string | null> {
-  const path = stateFilePath(root)
+/** Where the final report lands (inside the gitignored `.infinite/wizard/`); `done` writes it. */
+export const WIZARD_REPORT_PATHS = {
+  json: `${WIZARD_PATHS.dir}/report.json`,
+  markdown: `${WIZARD_PATHS.dir}/report.md`
+} as const
+
+async function moveAside(path: string, suffix: string): Promise<string | null> {
   const target = `${path}.${suffix}`
   try {
     await fsp.rename(path, target)
@@ -101,6 +105,16 @@ export async function setStateAside(root: string, suffix: string): Promise<strin
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return null
     throw error
   }
+}
+
+/**
+ * Moves a corrupt (or finished, or abandoned) run aside, never deletes it: the state file AND the run's
+ * report files, so a new run can never show the old run's report as its own. Returns the state's new path.
+ */
+export async function setStateAside(root: string, suffix: string): Promise<string | null> {
+  const moved = await moveAside(stateFilePath(root), suffix)
+  for (const path of Object.values(WIZARD_REPORT_PATHS)) await moveAside(join(root, path), suffix)
+  return moved
 }
 
 /** The first step whose last outcome was not `ok` (the step a resume starts from), or null when all are ok. */
@@ -134,10 +148,14 @@ export class RunStateFile implements RunStateAccessor {
     this.state = draft
   }
 
-  /** Serialised: two saves never interleave, and the last write wins. */
+  /**
+   * Serialised: two saves never interleave, and the last write wins. Each save reports ITS OWN write; a
+   * failed write never poisons the saves after it (they run once the cause clears).
+   */
   save(): Promise<void> {
     const text = `${JSON.stringify(this.state, null, 2)}\n`
-    this.saving = this.saving.then(() => this.fs.writeTextAtomic(stateFilePath(this.root), text, WIZARD_STATE_FILE_MODE))
-    return this.saving
+    const write = this.saving.catch(() => {}).then(() => this.fs.writeTextAtomic(stateFilePath(this.root), text, WIZARD_STATE_FILE_MODE))
+    this.saving = write
+    return write
   }
 }

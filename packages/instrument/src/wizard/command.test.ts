@@ -4,14 +4,16 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 
-import { fakeDeps, fakeStepRecord, type StepBehaviour } from "../../test/wizard/runtime-fakes.js"
+import { createFakeHost, fakeDeps, fakeStepRecord, prSummary, type StepBehaviour } from "../../test/wizard/runtime-fakes.js"
 import { INSTRUMENT_VERSION } from "../package-manager.js"
 import type { AskPayloads, PlanLine } from "./contracts/asks.js"
 import type { WizardOptions } from "./contracts/deps.js"
 import type { ChecklistItem } from "./contracts/jobs.js"
 import type { WizardStepId } from "./contracts/steps.js"
 import { acquireRunLock } from "./lock.js"
-import { NOT_A_TTY_MESSAGE, WIZARD_NOT_BUILT_MESSAGE, parseWizardArgs, routeWizard, runWizardCommand } from "./command.js"
+import { NESTED_CONSENT_FLAG_MESSAGE, NOT_A_TTY_MESSAGE, WIZARD_NOT_BUILT_MESSAGE, parseWizardArgs, routeWizard, runWizardCommand } from "./command.js"
+import { createRunState } from "./run-state.js"
+import type { SignalSource } from "./signals.js"
 import type { WizardStore } from "./store.js"
 import type { WizardIo, WizardWiring } from "./wiring.js"
 
@@ -339,3 +341,247 @@ describe("nested-agent mode (§3d.7)", () => {
   })
 })
 
+
+// ---- fix round: teardown order, this run's report, consent in nested mode, closed PRs ----
+
+const lockPath = (root: string) => join(root, ".infinite/wizard/run.lock")
+
+function fakeSignals(): SignalSource & { fire(): void } {
+  const listeners = new Set<() => void>()
+  return {
+    on: (_signal, listener) => listeners.add(listener),
+    off: (_signal, listener) => listeners.delete(listener),
+    fire: () => {
+      for (const listener of [...listeners]) listener()
+    }
+  }
+}
+
+describe("every non-normal exit kills the agents and restores the fence BEFORE the lock is released (O1-03, O1-04)", () => {
+  function withFence(spy: WiringSpy, root: string, order: string[]) {
+    const agents = spy.bundle.agents
+    const killAll = agents.killAll.bind(agents)
+    agents.killAll = async () => {
+      order.push(`killAll (lock held: ${existsSync(lockPath(root))})`)
+      await killAll()
+    }
+    spy.wiring.fenceAbort = async () => {
+      order.push(`fence abort (lock held: ${existsSync(lockPath(root))}, agent alive: ${agents.alive})`)
+    }
+  }
+
+  it("an EngineInvariantError inside a step (an agent alive): exit 1, agent killed, snapshot restored, then the lock released", async () => {
+    const root = tempDir("wizard-cmd-")
+    const { io, err, events } = fakeIo(root)
+    const order: string[] = []
+    const spy = fakeWiring({
+      jobs: async (_ctx, deps) => {
+        spy.bundle.agents.alive = true
+        await deps.bridge.declareConversions({ conversions: [] } as unknown as Parameters<typeof deps.bridge.declareConversions>[0])
+        return { kind: "ok", status: "unreachable" }
+      }
+    })
+    withFence(spy, root, order)
+    expect(await runWizardCommand(["--json"], { io, wiring: spy.wiring, signals: fakeSignals() })).toBe(1)
+    expect(err.join("")).toContain("Internal error (the wizard stopped itself)")
+    expect(order).toEqual(["killAll (lock held: true)", "fence abort (lock held: true, agent alive: false)"])
+    expect(spy.bundle.agents.alive).toBe(false)
+    expect(existsSync(lockPath(root))).toBe(false)
+    expect(events().at(-1)).toMatchObject({ t: "run.end", exitCode: 1 })
+  })
+
+  it("a plain throw inside a step tears down the same way (negative: before the fix killAll and the fence abort never ran)", async () => {
+    const root = tempDir("wizard-cmd-")
+    const { io } = fakeIo(root)
+    const order: string[] = []
+    const spy = fakeWiring({
+      jobs: async () => {
+        spy.bundle.agents.alive = true
+        throw new Error("bridge blew up")
+      }
+    })
+    withFence(spy, root, order)
+    expect(await runWizardCommand(["--json"], { io, wiring: spy.wiring, signals: fakeSignals() })).toBe(1)
+    expect(order).toEqual(["killAll (lock held: true)", "fence abort (lock held: true, agent alive: false)"])
+    expect(existsSync(lockPath(root))).toBe(false)
+  })
+
+  it("SIGINT mid-step: abort → killAll → fence abort → run.end → lock released → exit 130, in that order", async () => {
+    const root = tempDir("wizard-cmd-")
+    const order: string[] = []
+    const { io, out } = fakeIo(root)
+    io.exit = (code) => order.push(`exit ${code} (lock held: ${existsSync(lockPath(root))})`)
+    const realWrite = io.stdout.write
+    io.stdout.write = (text: string) => {
+      if (text.includes('"t":"run.end"')) order.push(`run.end (lock held: ${existsSync(lockPath(root))})`)
+      return realWrite(text)
+    }
+    const signals = fakeSignals()
+    const spy = fakeWiring({
+      jobs: (ctx) =>
+        new Promise((resolve) => {
+          spy.bundle.agents.alive = true
+          ctx.signal.addEventListener("abort", () => {
+            order.push("step saw the abort")
+            resolve({ kind: "ok", status: "stopped" })
+          })
+          signals.fire()
+        })
+    })
+    withFence(spy, root, order)
+    const code = await runWizardCommand(["--json"], { io, wiring: spy.wiring, signals })
+    order.push(`returned ${code} (lock held: ${existsSync(lockPath(root))})`)
+    expect(order).toEqual([
+      "step saw the abort",
+      "killAll (lock held: true)",
+      "fence abort (lock held: true, agent alive: false)",
+      "run.end (lock held: true)",
+      "exit 130 (lock held: false)",
+      "returned 130 (lock held: false)"
+    ])
+    expect(out.join("").match(/"t":"run.end"/g)).toHaveLength(1)
+  })
+})
+
+describe("the outro and run.end.reportPath show only THIS run's report (O1-05)", () => {
+  const RUN_A = "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+  const writeReport: StepBehaviour = async (ctx, deps) => {
+    const runId = ctx.state.get().runId!
+    const report = deps.report.build({
+      runId,
+      tagVersion: deps.tagVersion,
+      site: { repoLabel: "github.com/acme/acme-store", productionHost: null },
+      columns: ctx.state.get().report,
+      provenLivePending: "deploy",
+      day7: null,
+      notes: []
+    })
+    mkdirSync(join(ctx.root, ".infinite/wizard"), { recursive: true })
+    writeFileSync(join(ctx.root, ".infinite/wizard/report.json"), JSON.stringify(deps.report.payload(report)))
+    writeFileSync(join(ctx.root, ".infinite/wizard/report.md"), deps.report.renderMarkdown(report))
+    return { kind: "ok", status: "report written" }
+  }
+  const setRunId: StepBehaviour = async (ctx) => {
+    ctx.state.update((state) => {
+      state.runId = RUN_A
+    })
+    return { kind: "ok", status: "run created" }
+  }
+
+  it("a finished run's report is its own outro; the NEXT run (which parks) never shows it, and it is set aside with the old state", async () => {
+    const root = tempDir("wizard-cmd-")
+    const first = fakeIo(root)
+    expect(await runWizardCommand(["--json"], { io: first.io, wiring: fakeWiring({ agent: setRunId, done: writeReport }).wiring, signals: fakeSignals() })).toBe(0)
+    expect(first.events().at(-1)).toMatchObject({ t: "run.end", runId: RUN_A, reportPath: ".infinite/wizard/report.md" })
+
+    const second = fakeIo(root)
+    expect(await runWizardCommand(["--json", "--yes"], { io: second.io, wiring: fakeWiring({ plan: consentPlanStep }).wiring, signals: fakeSignals() })).toBe(3)
+    expect(second.events().at(-1)).toMatchObject({ t: "run.end", exitCode: 3, runId: null, reportPath: null })
+    expect(existsSync(join(root, ".infinite/wizard/report.json"))).toBe(false)
+    const names = readdirSync(join(root, ".infinite/wizard"))
+    expect(names).toContain(`report.json.${RUN_A}.done`)
+    expect(names).toContain(`state.json.${RUN_A}.done`)
+  })
+
+  it("negative: a report.json left from another run is ignored even when this run reached done", async () => {
+    const root = tempDir("wizard-cmd-")
+    mkdirSync(join(root, ".infinite/wizard"), { recursive: true })
+    const { io, events } = fakeIo(root)
+    const spy = fakeWiring({
+      agent: setRunId,
+      done: async (ctx, deps) => {
+        await writeReport(ctx, deps)
+        const stale = JSON.parse(readFileSync(join(ctx.root, ".infinite/wizard/report.json"), "utf8"))
+        writeFileSync(join(ctx.root, ".infinite/wizard/report.json"), JSON.stringify({ ...stale, runId: "00000000-0000-4000-8000-000000000000" }))
+        return { kind: "ok", status: "done" }
+      }
+    })
+    expect(await runWizardCommand(["--json"], { io, wiring: spy.wiring, signals: fakeSignals() })).toBe(0)
+    expect(events().at(-1)).toMatchObject({ t: "run.end", reportPath: null })
+  })
+})
+
+describe("nested mode refuses --consent-mode: consent is never the parent agent's answer (O1-02)", () => {
+  it("nested + --consent-mode → exit 2 with the reason, and nothing runs", async () => {
+    const root = tempDir("wizard-cmd-")
+    const { io, err } = fakeIo(root, { env: { CLAUDECODE: "1" } })
+    const ran: string[] = []
+    const spy = fakeWiring({ plan: consentPlanStep }, undefined, ran)
+    expect(await runWizardCommand(["--json", "--yes", "--consent-mode", "not_required"], { io, wiring: spy.wiring, signals: fakeSignals() })).toBe(2)
+    expect(err.join("")).toContain(NESTED_CONSENT_FLAG_MESSAGE)
+    expect(ran).toEqual([])
+    expect(spy.createdWith).toEqual([])
+  })
+
+  it("negative: the same flags outside nested mode answer consent (the user typed them) and the run goes on", async () => {
+    const root = tempDir("wizard-cmd-")
+    const { io } = fakeIo(root)
+    const ran: string[] = []
+    expect(await runWizardCommand(["--json", "--yes", "--consent-mode", "not_required"], { io, wiring: fakeWiring({ plan: consentPlanStep }, undefined, ran).wiring, signals: fakeSignals() })).toBe(0)
+    expect(ran).toContain("install")
+  })
+})
+
+describe("a resumed run whose PR was closed offers a fresh run; --fresh sets a run aside (O1-12)", () => {
+  function savedRunWithPr(root: string): void {
+    const state = createRunState({ tagVersion: "0.12.0", root, appRoot: ".", now: new Date("2026-10-02T09:00:00.000Z"), displayId: "r-7f3c" })
+    state.runId = "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+    for (const id of ["link", "agent", "before", "keys", "plan", "install", "jobs", "settings", "rehearsal", "review"] as const) {
+      state.steps[id] = { outcome: "ok", inputHash: "h", at: "2026-10-02T09:10:00.000Z" }
+    }
+    state.steps.merge = { outcome: "parked", inputHash: "h", at: "2026-10-02T09:20:00.000Z", code: "INF_WIZ_MERGE_PARKED" }
+    state.pr = { host: "github", number: 42, url: "https://github.com/acme/acme-store/pull/42", nodeId: "PR_x", isDraft: false, round: 1, reviewedSha: null, handledThreadIds: [], mergeSha: null }
+    mkdirSync(join(root, ".infinite/wizard"), { recursive: true })
+    writeFileSync(join(root, ".infinite/wizard/state.json"), JSON.stringify(state))
+  }
+  function closedPrWiring(answer: (kind: string) => unknown, ran: string[]) {
+    const spy = fakeWiring({}, answer, ran)
+    spy.bundle.deps.host = createFakeHost(spy.bundle.log, { readPr: prSummary({ number: 42, state: "CLOSED" }) })
+    return spy
+  }
+
+  it("asks; no → exit 3, nothing runs and the saved run is untouched", async () => {
+    const root = tempDir("wizard-cmd-")
+    savedRunWithPr(root)
+    const before = readFileSync(join(root, ".infinite/wizard/state.json"), "utf8")
+    const { io, err } = fakeIo(root)
+    const ran: string[] = []
+    expect(await runWizardCommand(["--json"], { io, wiring: closedPrWiring(() => false, ran).wiring, signals: fakeSignals() })).toBe(3)
+    expect(ran).toEqual([])
+    expect(err.join("")).toContain("--fresh")
+    expect(readFileSync(join(root, ".infinite/wizard/state.json"), "utf8")).toBe(before)
+  })
+
+  it("yes → a fresh run from step 0; the closed run is kept aside", async () => {
+    const root = tempDir("wizard-cmd-")
+    savedRunWithPr(root)
+    const { io } = fakeIo(root)
+    const ran: string[] = []
+    expect(await runWizardCommand(["--json"], { io, wiring: closedPrWiring((kind) => kind === "confirm", ran).wiring, signals: fakeSignals() })).toBe(0)
+    expect(ran).toHaveLength(13)
+    expect(readdirSync(join(root, ".infinite/wizard")).some((name) => name.endsWith(".pr-closed"))).toBe(true)
+  })
+
+  it("negative: an OPEN pull request resumes where the run stopped (no question)", async () => {
+    const root = tempDir("wizard-cmd-")
+    savedRunWithPr(root)
+    const { io } = fakeIo(root)
+    const ran: string[] = []
+    const spy = fakeWiring({}, () => {
+      throw new Error("no ask expected")
+    }, ran)
+    expect(await runWizardCommand(["--json"], { io, wiring: spy.wiring, signals: fakeSignals() })).toBe(0)
+    expect(ran).toEqual(["merge", "prove", "done"])
+  })
+
+  it("--fresh sets the unfinished run aside and starts over", async () => {
+    const root = tempDir("wizard-cmd-")
+    savedRunWithPr(root)
+    const { io } = fakeIo(root)
+    const ran: string[] = []
+    expect(await runWizardCommand(["--json", "--fresh"], { io, wiring: fakeWiring({}, undefined, ran).wiring, signals: fakeSignals() })).toBe(0)
+    expect(ran).toHaveLength(13)
+    expect(readdirSync(join(root, ".infinite/wizard")).some((name) => name.startsWith("state.json.7f3c2a91") && name.includes("set-aside"))).toBe(true)
+    expect(parseWizardArgs(["--fresh", "--resume"], "/r")).toMatchObject({ ok: false })
+  })
+})

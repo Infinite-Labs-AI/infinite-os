@@ -68,6 +68,32 @@ describe("run state (.infinite/wizard/state.json)", () => {
   })
 })
 
+describe("run state saves after a failed write (O1-17)", () => {
+  it("one failed write never poisons the saves after it", async () => {
+    const root = tempRoot()
+    let failNext = true
+    const written: string[] = []
+    const fs = {
+      ...nodeWizardFs,
+      async writeTextAtomic(path: string, text: string) {
+        if (failNext) {
+          failNext = false
+          throw Object.assign(new Error("ENOSPC: no space left on device"), { code: "ENOSPC" })
+        }
+        written.push(text)
+      }
+    }
+    const file = new RunStateFile(fs, root, createRunState({ tagVersion: "0.12.0", root, appRoot: ".", now: NOW, displayId: "r-7f3c" }))
+    await expect(file.save()).rejects.toThrow("ENOSPC")
+    file.update((state) => {
+      state.runId = "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+    })
+    await expect(file.save()).resolves.toBeUndefined()
+    expect(written).toHaveLength(1)
+    expect(JSON.parse(written[0]!).runId).toBe("7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80")
+  })
+})
+
 describe("run lock (.infinite/wizard/run.lock)", () => {
   it("a second concurrent run is refused while the first holds the lock (INF_WIZ_LOCKED)", async () => {
     const root = tempRoot()

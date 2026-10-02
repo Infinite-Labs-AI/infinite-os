@@ -16,6 +16,11 @@ export interface InterruptDeps {
   exit(code: number): void
   /** Where the one-line notice goes. */
   notice?: (text: string) => void
+  /**
+   * Told the sequence's promise when a signal starts it, so the normal return path can await the whole
+   * sequence (agents killed, snapshot restored, lock released) instead of racing it.
+   */
+  started?: (sequence: Promise<void>) => void
 }
 
 export interface SignalSource {
@@ -53,7 +58,9 @@ export function installInterruptHandlers(deps: InterruptDeps, source: SignalSour
     }
     running = true
     deps.notice?.("Stopping: the agent is stopped, its unsaved edits are undone, and nothing is lost. Run npx infinite-tag again to resume.")
-    void runInterruptSequence(deps)
+    const sequence = runInterruptSequence(deps)
+    deps.started?.(sequence)
+    void sequence
   }
   source.on("SIGINT", listener)
   source.on("SIGTERM", listener)

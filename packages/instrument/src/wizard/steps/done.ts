@@ -9,15 +9,12 @@ import { basename, join } from "node:path"
 
 import type { StepOutcome, WizardContext, WizardDeps, WizardStep } from "../contracts/deps.js"
 import { REPORT_COLUMN_IDS, REPORT_SCHEMA, SAMPLE_FLOOR_PAGE_VIEWS, type ReportColumnId, type ReportV2 } from "../contracts/report.js"
-import { WIZARD_PATHS } from "../contracts/state.js"
 import { WIZARD_STEP_META } from "../contracts/steps.js"
+import { WIZARD_REPORT_PATHS } from "../run-state.js"
 import { proofStateFrom } from "./prove.js"
 
 /** Where the final report lands (inside the gitignored `.infinite/wizard/`). */
-export const WIZARD_REPORT_PATHS = {
-  json: `${WIZARD_PATHS.dir}/report.json`,
-  markdown: `${WIZARD_PATHS.dir}/report.md`
-} as const
+export { WIZARD_REPORT_PATHS }
 
 /** The accepted default (BUILD-PLAN §1.4): the 7-day check-in is on; the plan has no line that turns it off. */
 export const DEFAULT_CHECKIN_OPT_IN = true
