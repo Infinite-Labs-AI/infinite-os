@@ -265,6 +265,12 @@ describe("contracts/server-lane-v1.vectors.json (shared with the receiving side)
     expect(parsed.adMatch.em).toBe(vectors.outcomeEmailHash)
     expect(parsed.adMatch.external_id).toBe(vectors.outcomeExternalIdHash)
     expect(hashInfiniteExternalId(vectors.outcomeExternalId as string)).toBe(vectors.outcomeExternalIdHash)
+    // The mixed-case vector: trimmed ONLY, case kept. Lowercasing it (the old guide's mistake) gives a
+    // different digest, which Meta reads as a different person.
+    expect(hashInfiniteExternalId(vectors.outcomeExternalIdMixedCase as string)).toBe(vectors.outcomeExternalIdMixedCaseHash)
+    expect(hashInfiniteExternalId((vectors.outcomeExternalIdMixedCase as string).toLowerCase())).not.toBe(
+      vectors.outcomeExternalIdMixedCaseHash
+    )
     // The BUYER'S browser pair travels in the block. It cannot come from the call to Infinite,
     // which is server-to-server, so the vector pins that it is carried explicitly.
     expect(parsed.adMatch.client_ip_address).toBe("203.0.113.9")

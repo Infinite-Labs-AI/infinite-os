@@ -470,6 +470,13 @@ export function managedGeneratedFile(header: string[], body: string): string {
 
 export const OUTCOME_HELPER_EXPORT = "postInfiniteOutcome"
 
+/**
+ * The outcome reporter that returns Infinite's 202 (§3j.5): `{ accepted, duplicate, metaEventId,
+ * metaEventName }`. A non-null `metaEventId` is the server's instruction to mirror THIS conversion in the
+ * browser under exactly that id (`infiniteMetaMirror`); null means Infinite is not sending one.
+ */
+export const OUTCOME_REPORT_EXPORT = "reportInfiniteOutcome"
+
 /** The language the generated outcome helper is authored in. */
 export type OutcomeHelperLanguage = "ts" | "js"
 
@@ -628,7 +635,11 @@ export interface InfiniteOutcomeInput {
   type: string
   /** The page path the outcome belongs to (pathname only — no query string). */
   path?: string
-  /** Stable per-outcome id (order id, signup id) so retries dedupe. Defaults to a random UUID. */
+  /**
+   * Stable per-outcome id (order id, subscription id, account id, or a namespaced email hash for a
+   * lead) so retries dedupe. REQUIRED by reportInfiniteOutcome (it throws without one); postInfiniteOutcome
+   * still defaults it to a random UUID for older callers, which is why a retry there can count twice.
+   */
   eventId?: string
   /** Opaque account or order id; Infinite hashes it at rest. */
   accountKey?: string
@@ -668,6 +679,22 @@ export interface InfiniteOutcomeInput {
   visitKeyInputs?: InfiniteVisitKeyInputs | InfiniteVisitKeyRequest
   /** Runtimes without process.env (Cloudflare Workers) pass the values from their own env here. */
   credentials?: { secret?: string; sourceKey?: string }
+  /**
+   * The visitor's first-touch campaign context, from the page's \`infiniteCampaign()\` passed through your
+   * own request: recorded as the bounded properties campaign_provenance (tab / cookie / none) and
+   * browser_context (facebook_app / instagram_app / other_in_app / browser / unknown). Other values are dropped.
+   */
+  campaign?: { campaignProvenance?: string; browserContext?: string }
+}
+
+/** Infinite's answer to one outcome (the 202 body). Every field is false / null when it could not be read. */
+export interface InfiniteOutcomeReport {
+  accepted: boolean
+  duplicate: boolean
+  /** Mirror THIS conversion in the browser under exactly this id (infiniteMetaMirror), or null: do not. */
+  metaEventId: string | null
+  /** The Meta standard event the server is sending (Lead, CompleteRegistration, StartTrial, Subscribe), or null. */
+  metaEventName: string | null
 }`
   return managedGeneratedFile(
     [
@@ -696,6 +723,11 @@ export interface InfiniteOutcomeInput {
       "//   // 3. In the webhook, once the payment is REAL, pass it straight through:",
       `//   await ${OUTCOME_HELPER_EXPORT}({ type: "purchase", path: "/checkout", accountKey: order.id,`,
       "//     properties: { visitKey: session.metadata.infinite_visit_key } })",
+      "//",
+      "// The browser is waiting on this request and you run Meta ads? Use reportInfiniteOutcome with a",
+      "// STABLE eventId: its answer carries metaEventId, which the page passes to infiniteMetaMirror.",
+      "//",
+      `//   const { metaEventId, metaEventName } = await ${OUTCOME_REPORT_EXPORT}({ type: "sign_up", eventId: "signup:" + user.id, path: "/signup", visitKeyInputs: req })`,
       "//",
       "// Running Meta ads without PostHog? Add adMatch: adMatchFromRequest(request, { em }) and turn",
       "// the relay on in Infinite -> Site -> Settings; the outcome is forwarded to Meta's Conversions",
@@ -891,11 +923,26 @@ export function adMatchFromRequest(request${t(": InfiniteVisitKeyRequest")}, has
   }
 }
 
-/**
- * Sign and POST one outcome. Resolves true when Infinite acknowledged it; never throws, so a
- * failed report can never fail the checkout, sign-up, or download it describes.
- */
-export async function ${OUTCOME_HELPER_EXPORT}(input${t(": InfiniteOutcomeInput")})${t(": Promise<boolean>")} {
+const INFINITE_NO_REPORT${t(": InfiniteOutcomeReport")} = { accepted: false, duplicate: false, metaEventId: null, metaEventName: null }
+const INFINITE_CAMPAIGN_PROVENANCE = ["tab", "cookie", "none"]
+const INFINITE_BROWSER_CONTEXT = ["facebook_app", "instagram_app", "other_in_app", "browser", "unknown"]
+
+/** The 202 body, read strictly: anything unreadable is "not accepted, nothing to mirror". */
+function infiniteReadReport(body${t(": unknown")})${t(": InfiniteOutcomeReport")} {
+  if (!body || typeof body !== "object") return INFINITE_NO_REPORT
+  const value = body${t(" as Record<string, unknown>")}
+  const accepted = value.accepted === true
+  const duplicate = value.duplicate === true
+  // Only an accepted, first-time outcome can carry a mirror instruction (§3j.1: a duplicate is null).
+  const mirror = accepted && !duplicate
+  const metaEventId = mirror && typeof value.metaEventId === "string" && value.metaEventId.length > 0 ? value.metaEventId : null
+  const metaEventName =
+    metaEventId && typeof value.metaEventName === "string" && value.metaEventName.length > 0 ? value.metaEventName : null
+  return { accepted, duplicate, metaEventId: metaEventName ? metaEventId : null, metaEventName }
+}
+
+/** Sign and POST one outcome; resolve Infinite's answer. Never throws and never rejects. */
+async function infiniteSendOutcome(input${t(": InfiniteOutcomeInput")}, eventId${t(": string")})${t(": Promise<InfiniteOutcomeReport>")} {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), INFINITE_DELIVERY_TIMEOUT_MS)
   try {
@@ -904,12 +951,19 @@ export async function ${OUTCOME_HELPER_EXPORT}(input${t(": InfiniteOutcomeInput"
       input.credentials?.sourceKey ||
       infiniteEnv(${JSON.stringify(SERVER_LANE_SOURCE_KEY_ENV)}) ||
       INFINITE_SOURCE_KEY_FALLBACK
-    if (!secret || !sourceKey) return false
+    if (!secret || !sourceKey) return INFINITE_NO_REPORT
 
     // One clock for the whole call: the event time and the visit-key bucket must agree.
     const nowMs = input.occurredAt ? input.occurredAt.getTime() : Date.now()
     const properties${t(": Record<string, string | number | boolean>")} = { ...(input.properties ?? {}) }
     if (input.path) properties.path = input.path
+    const campaign = input.campaign
+    if (campaign && INFINITE_CAMPAIGN_PROVENANCE.includes(String(campaign.campaignProvenance))) {
+      properties.campaign_provenance = String(campaign.campaignProvenance)
+    }
+    if (campaign && INFINITE_BROWSER_CONTEXT.includes(String(campaign.browserContext))) {
+      properties.browser_context = String(campaign.browserContext)
+    }
     // Skip our own derivation when the caller already carried a visitKey (the webhook path); drop
     // nothing when there is neither. One shared recipe with the exported infiniteVisitKey, so a key
     // computed at checkout and one derived here for the same request are byte-identical.
@@ -924,7 +978,7 @@ export async function ${OUTCOME_HELPER_EXPORT}(input${t(": InfiniteOutcomeInput"
     }
 
     const body = JSON.stringify({
-      eventId: input.eventId ?? crypto.randomUUID(),
+      eventId,
       eventName: input.type,
       occurredAt: new Date(nowMs).toISOString(),
       ...(input.accountKey ? { accountKey: input.accountKey } : {}),
@@ -942,12 +996,41 @@ export async function ${OUTCOME_HELPER_EXPORT}(input${t(": InfiniteOutcomeInput"
       body,
       signal: controller.signal
     })
-    return response.ok
+    if (!response.ok) return INFINITE_NO_REPORT
+    // Inside the same 2 s budget: Infinite replies BEFORE it calls Meta, so this never waits on Meta.
+    return infiniteReadReport(await response.json())
   } catch {
-    return false
+    return INFINITE_NO_REPORT
   } finally {
     clearTimeout(timer)
   }
+}
+
+/**
+ * Sign and POST one outcome and return Infinite's answer: { accepted, duplicate, metaEventId,
+ * metaEventName }. Use it where the browser is waiting on your response, and hand metaEventId (with
+ * metaEventName) to the page's infiniteMetaMirror. A network failure, a timeout or an unreadable reply
+ * resolves all-false / all-null, so a failed report can never fail the sign-up it describes.
+ *
+ * eventId is REQUIRED and must be STABLE for this outcome (an order, subscription or account id, or a
+ * namespaced email hash for a lead): Infinite counts an eventId once, and the Meta id it returns is tied
+ * to it. Calling without one throws at once, so the mistake shows up in development, not as a double
+ * count in production.
+ */
+export function ${OUTCOME_REPORT_EXPORT}(input${t(": InfiniteOutcomeInput & { eventId: string }")})${t(": Promise<InfiniteOutcomeReport>")} {
+  if (!input || typeof input.eventId !== "string" || input.eventId.trim().length === 0) {
+    throw new TypeError("${OUTCOME_REPORT_EXPORT} needs a stable eventId (an order, subscription or account id).")
+  }
+  return infiniteSendOutcome(input, input.eventId)
+}
+
+/**
+ * Sign and POST one outcome. Resolves true when Infinite accepted it (the 202's \`accepted\`); never
+ * throws, so a failed report can never fail the checkout, sign-up, or download it describes.
+ */
+export async function ${OUTCOME_HELPER_EXPORT}(input${t(": InfiniteOutcomeInput")})${t(": Promise<boolean>")} {
+  const report = await infiniteSendOutcome(input, input.eventId ?? crypto.randomUUID())
+  return report.accepted
 }`
   )
 }

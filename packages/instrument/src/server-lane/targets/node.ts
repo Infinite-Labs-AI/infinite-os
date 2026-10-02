@@ -34,7 +34,7 @@ export const NODE_MIDDLEWARE_EXPORT = "infiniteServerLane"
 // (package-shape.test.ts) never mistakes them for this package's own imports.
 const NODE_CRYPTO_IMPORT = 'import { createHmac, randomUUID } from "node:crypto"'
 const NODE_LANE_IMPORT =
-  'import { infiniteVisitKey, sendInfiniteServerEvent } from "./infinite-server-lane.js"'
+  'import { infiniteVisitKey, reportInfiniteServerEvent } from "./infinite-server-lane.js"'
 const NODE_MOUNT_IMPORT = `import { ${NODE_MIDDLEWARE_EXPORT} } from "./lib/infinite-server-lane.js"`
 
 function jsStringArray(values: string[]): string {
@@ -53,7 +53,7 @@ app.use(${NODE_MIDDLEWARE_EXPORT}())
 /** lib/infinite-server-lane.js — the Node twin of the edge core (node:crypto, Node >= 18 fetch). */
 export function nodeLaneModuleSource(input: TargetBuildInput): string {
   const bakedHosts = jsStringArray(
-    input.productionHosts.map((host) => host.trim().toLowerCase()).filter(Boolean)
+    input.productionHosts.map((host) => host.trim().toLowerCase().replace(/\.$/, "")).filter(Boolean)
   )
   return managedGeneratedFile(
     [
@@ -155,6 +155,50 @@ export async function sendInfiniteServerEvent(event) {
   }
 }
 
+const INFINITE_NO_REPORT = { accepted: false, duplicate: false, metaEventId: null, metaEventName: null }
+
+/**
+ * Sign and POST one event and resolve Infinite's 202 answer: { accepted, duplicate, metaEventId,
+ * metaEventName }. All-false / all-null on any failure; never throws. Infinite replies before it calls
+ * Meta, so this never waits on Meta.
+ */
+export async function reportInfiniteServerEvent(event) {
+  const secret = infiniteSecret()
+  const sourceKey = infiniteSourceKey()
+  if (!secret || !sourceKey) return INFINITE_NO_REPORT
+  try {
+    const body = JSON.stringify({
+      eventId: event.eventId ?? randomUUID(),
+      eventName: event.eventName,
+      occurredAt: event.occurredAt ?? new Date().toISOString(),
+      ...(event.accountKey ? { accountKey: event.accountKey } : {}),
+      properties: event.properties ?? {}
+    })
+    const response = await fetch(INFINITE_SERVER_EVENTS_URL, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ${JSON.stringify(SERVER_LANE_SOURCE_KEY_HEADER)}: sourceKey,
+        ${JSON.stringify(SERVER_LANE_SIGNATURE_HEADER)}: infiniteHmacHex(secret, body)
+      },
+      body,
+      signal: AbortSignal.timeout(INFINITE_DELIVERY_TIMEOUT_MS)
+    })
+    if (!response.ok) return INFINITE_NO_REPORT
+    const value = await response.json()
+    if (!value || typeof value !== "object") return INFINITE_NO_REPORT
+    const accepted = value.accepted === true
+    const duplicate = value.duplicate === true
+    const mirror = accepted && !duplicate
+    const metaEventName = mirror && typeof value.metaEventName === "string" && value.metaEventName ? value.metaEventName : null
+    const metaEventId =
+      metaEventName && typeof value.metaEventId === "string" && value.metaEventId ? value.metaEventId : null
+    return { accepted, duplicate, metaEventId, metaEventName: metaEventId ? metaEventName : null }
+  } catch {
+    return INFINITE_NO_REPORT
+  }
+}
+
 /**
  * The Express-style middleware. Mount it once, before your routes and static handler:
  *   app.set("trust proxy", true)   // so req.ip / req.hostname reflect the real client
@@ -172,6 +216,7 @@ export function ${NODE_MIDDLEWARE_EXPORT}() {
         .trim()
         .toLowerCase()
         .replace(/:\d+$/, "")
+        .replace(/\.$/, "") // the one host normaliser: "ACME.com." is "acme.com"
       if (
         secret &&
         infiniteHostAllowed(host) &&
@@ -216,6 +261,10 @@ export function nodeOutcomeHelperSource(): string {
       "// visitKeyInputs accepts a Node request (req — .headers is a plain object, read correctly),",
       "// a WHATWG Request, OR an explicit { clientIp, userAgent }:",
       '//   await postInfiniteOutcome({ type: "purchase", path: "/checkout", accountKey: order.id, visitKeyInputs: req })',
+      "//",
+      "// Where the browser waits on your response, reportInfiniteOutcome (a STABLE eventId is required)",
+      "// returns { accepted, duplicate, metaEventId, metaEventName }; hand metaEventId to the page's",
+      "// infiniteMetaMirror.",
       "//",
       "// In a WEBHOOK the request is the PROVIDER'S, not the buyer's — compute the key at checkout",
       "// with infiniteVisitKey({ clientIp, userAgent }) from ./infinite-server-lane.js, carry it (e.g.",
@@ -273,31 +322,48 @@ function infiniteVisitKeyInputsOf(input) {
  * accountKey    opaque account or order id; Infinite hashes it at rest
  * visitKeyInputs a Node/WHATWG request OR { clientIp, userAgent }, for same-lane attribution
  */
-export async function postInfiniteOutcome({
-  type,
-  path,
-  eventId,
-  accountKey,
-  occurredAt,
-  properties,
-  visitKeyInputs
-}) {
+const INFINITE_CAMPAIGN_PROVENANCE = ["tab", "cookie", "none"]
+const INFINITE_BROWSER_CONTEXT = ["facebook_app", "instagram_app", "other_in_app", "browser", "unknown"]
+
+function infiniteSendOutcome({ type, path, eventId, accountKey, occurredAt, properties, visitKeyInputs, campaign }) {
   // One clock for the whole call: the event time and the visit-key bucket must agree.
   const nowMs = occurredAt ? occurredAt.getTime() : Date.now()
   const merged = { ...(properties ?? {}) }
   if (path) merged.path = path
+  if (campaign && INFINITE_CAMPAIGN_PROVENANCE.includes(String(campaign.campaignProvenance))) {
+    merged.campaign_provenance = String(campaign.campaignProvenance)
+  }
+  if (campaign && INFINITE_BROWSER_CONTEXT.includes(String(campaign.browserContext))) {
+    merged.browser_context = String(campaign.browserContext)
+  }
   const visitInputs = infiniteVisitKeyInputsOf(visitKeyInputs)
   if (visitInputs && merged.visitKey === undefined) {
     const visitKey = infiniteVisitKey({ clientIp: visitInputs.clientIp, userAgent: visitInputs.userAgent, nowMs })
     if (visitKey) merged.visitKey = visitKey
   }
-  return sendInfiniteServerEvent({
+  return reportInfiniteServerEvent({
     eventId,
     eventName: type,
     occurredAt: new Date(nowMs).toISOString(),
     accountKey,
     properties: merged
   })
+}
+
+/** Resolves true when Infinite accepted the outcome (the 202's accepted); never throws. */
+export async function postInfiniteOutcome(input) {
+  return (await infiniteSendOutcome(input)).accepted
+}
+
+/**
+ * Report one outcome and return Infinite's answer: { accepted, duplicate, metaEventId, metaEventName }.
+ * eventId is REQUIRED and must be stable for this outcome; calling without one throws at once.
+ */
+export function reportInfiniteOutcome(input) {
+  if (!input || typeof input.eventId !== "string" || input.eventId.trim().length === 0) {
+    throw new TypeError("reportInfiniteOutcome needs a stable eventId (an order, subscription or account id).")
+  }
+  return infiniteSendOutcome(input)
 }`
   )
 }
