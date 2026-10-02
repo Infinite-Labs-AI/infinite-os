@@ -89,7 +89,7 @@
           ],
           "expiresAt": "2026-10-01T10:59:00Z"
         },
-        "retry": "check_first",
+        "retry": "safe_resend",
         "stateReason": {
           "code": "still_running",
           "words": "The cloud Meta action is still running. Refresh Ads to see its result.",

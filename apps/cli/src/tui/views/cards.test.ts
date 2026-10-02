@@ -725,7 +725,14 @@ describe("job (r4 Job)", () => {
         watch: { label: "watch", ask: "how is the blog post going?" }
       }
     });
-    const out = renderView(view, viewCtx()).detail.map(segs);
+    const now = Date.now;
+    Date.now = () => Date.parse("2026-10-01T10:44:00Z");
+    let out: ReturnType<typeof segs>[];
+    try {
+      out = renderView(view, viewCtx()).detail.map(segs);
+    } finally {
+      Date.now = now;
+    }
     expect(out.slice(0, 8)).toEqual([
       [["b", "What a trial should cost on Meta"]],
       [],
@@ -736,7 +743,8 @@ describe("job (r4 Job)", () => {
       [["dim", "· Ready for you"]],
       []
     ]);
-    expect(out[8]).toEqual([["dim", "usually about 4 min · keeps going while you chat"]]);
+    // r4: how long it has run (the clock since startedAt) leads the line (run-2 M9).
+    expect(out[8]).toEqual([["dim", "2:03 so far · usually about 4 min · keeps going while you chat"]]);
     expect(out[9]).toEqual([["dim", "Lands in:"], ["", " "], ["cyan u", "Blog & AEO › Production ↗"]]);
   });
 

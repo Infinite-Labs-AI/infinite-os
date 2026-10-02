@@ -298,7 +298,10 @@ describe("document (view-04)", () => {
       "",
       "{line}│{} Hi {first name},",
       "{line}│",
-      "{line}│{} Before your trial ended."
+      "{line}│{} Before your trial ended.",
+      // The document's own keys under it (r4 view-04).
+      "",
+      "{key} 1-2 {} email"
     ]);
   });
 

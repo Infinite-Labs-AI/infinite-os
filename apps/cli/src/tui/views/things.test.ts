@@ -248,6 +248,17 @@ describe("record", () => {
 });
 
 describe("document", () => {
+  it("r4 view-04: the body wraps inside min(pane, 76) − 2, its gutter included, and its own keys sit under it (run-2 M9)", () => {
+    const long = "Before your trial ended, Infinite found 3 ads spending with no trials, and one that beat your goal by 40%.";
+    const v = withBody("document-versions", { sections: [{ text: long, format: "plain" }, { text: "A second note.", format: "plain" }] });
+    const render = draw(v, { width: 100 });
+    const ruled = render.detail.filter((line) => line.startsWith("│"));
+    expect(ruled.every((line) => line.length <= 74)).toBe(true);
+    expect(ruled[0]).toBe("│ Before your trial ended, Infinite found 3 ads spending with no trials,");
+    expect(render.detail.at(-1)).toBe("[1-2] email");
+    expect(render.detail.at(-2)).toBe("");
+  });
+
   it("1–9 tabs come from `versions`", () => {
     const v = fixture("document-versions");
     const first = draw(v);

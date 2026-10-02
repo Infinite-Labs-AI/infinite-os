@@ -250,13 +250,17 @@ export function approvalRender(given: AnswerViewV1, ctx: ApprovalRenderCtx): App
   }
 
   // ── the keys, drawn inside the card; the page chip only once the body pages ──
-  const okKey = ok ? okKeyFor(confirmLabel) : null;
+  // OK again on a card not sure it happened: the app may word it already
+  // (`check again (won't pause twice)`, r4 flow-pause-07); its key stays the
+  // action's own, read from the card's title ("Pause ad …?" → p).
+  const resendWorded = offersResend(view) && /^check again\b/iu.test(confirmLabel);
+  const okKey = ok ? okKeyFor(resendWorded ? viewText(approval.title) || confirmLabel : confirmLabel) : null;
   const keysFor = (paging: boolean): { keyCtx: KeyContext; keys: KeyHint[] } => {
     const keyCtx: KeyContext = {
       focus: "card",
       busy: false,
       okKey,
-      okLabel: offersResend(view) ? "check again" : okLabelFor(confirmLabel, fields, ui.answers),
+      okLabel: resendWorded ? confirmLabel : offersResend(view) ? "check again" : okLabelFor(confirmLabel, fields, ui.answers),
       ...(offersResend(view) ? { okVerb: "check again" } : {}),
       caps: { open: canOpen, watch: false, retry: retryable },
       explain,
@@ -283,7 +287,8 @@ export function approvalRender(given: AnswerViewV1, ctx: ApprovalRenderCtx): App
       documentOpen ? docWidth : inner,
       ctx
     );
-    const tail = cardBody([], chips, explain && !documentOpen && !ui.fieldEntry, ctx);
+    const after = documentOpen ? [] : linkAfterLines(view, innerCtx);
+    const tail = [...cardBody([], chips, false, ctx), ...(after.length ? ["", ...after] : []), ...cardBody([], [], explain && !documentOpen && !ui.fieldEntry, ctx)];
     const paged = pageCardBody({
       top,
       middle,
@@ -772,9 +777,18 @@ function linkCardLines(body: unknown, ctx: ViewRenderCtx): string[] {
   const rows: { label: string; value: string }[] = (["source", "medium", "campaign", "content", "term"] as const)
     .map((key) => ({ label: key, value: viewText(utm[key]) }))
     .filter((row) => row.value);
-  const shortUrl = viewText(record.shortUrl);
-  if (shortUrl) rows.push({ label: "short", value: shortUrl });
+  // r4 view-11: where the link goes is the last field; the short link it will be comes after the keys (`linkAfterLines`).
+  const to = viewText(record.finalUrl) || viewText(record.url);
+  if (to) rows.push({ label: "to", value: to });
   return [...labelValueLines(rows, ctx), ...warningLines(record.warnings, ctx)];
+}
+
+/** r4 view-11 `After: go.…/rdt-cpa`: the short link the card makes, under its keys (no `c copy` until it exists). */
+function linkAfterLines(view: AnswerViewV1, ctx: ViewRenderCtx): string[] {
+  const record = view.kind === "link" && isRecord(view.body) ? view.body : null;
+  const short = viewText(record?.shortUrl);
+  if (!short || record?.minted === true) return [];
+  return [fitPainted(`${paint("After:", "dim", ctx)} ${short}`, ctx.width)];
 }
 
 /**

@@ -292,6 +292,15 @@ describe("outcome unknown", () => {
     }
   });
 
+  it("r4 flow-pause-07: an app label that already says `check again (won't pause twice)` shows whole on the chip, on the action's key", () => {
+    const view = unknown("safe_resend");
+    const worded = { ...view, approval: { ...view.approval!, confirmLabel: "check again (won't pause twice)" } } as AnswerViewV1;
+    const render = approvalRender(worded, cardCtx());
+    expect(render.okKey).toBe("p");
+    expect(text(render.lines)).toContain("[p] check again (won't pause twice)");
+    expect(formatKeyBar(render.keys)).toContain("p check again");
+  });
+
   it("a brought-back card re-sends exactly the answers the first approve sent", () => {
     const original = fixture("change-budget-field");
     const asked = drive(original, [press("l")]);
@@ -539,6 +548,16 @@ describe("tracked-link card", () => {
     expect(render.keys.map((k) => k.key)).not.toContain("e");
     expect(formatKeyBar(render.keys)).toBe("y confirm   n dismiss");
     expect(text(render.lines)).toContain("[y] Confirm");
+  });
+
+  it("r4 view-11: the fields end with where it goes (`to`), and the short link it will be comes after the keys (run-2 M9)", () => {
+    const view = { ...fixture("link-tracked-card"), body: { ...fixture("link-tracked-card").body, url: "store.example/spring", shortUrl: "go.store.example/spr" } } as AnswerViewV1;
+    const lines = approvalRender(view, cardCtx()).lines.map((line) => line.replace(/\u001b\[[0-9;]*m/gu, ""));
+    expect(lines.some((line) => /│ to +store\.example\/spring/u.test(line))).toBe(true);
+    expect(lines.some((line) => /│ short /u.test(line))).toBe(false);
+    const keys = lines.findIndex((line) => line.includes("[y] Confirm"));
+    const after = lines.findIndex((line) => /│ After: go\.store\.example\/spr/u.test(line));
+    expect(after).toBeGreaterThan(keys);
   });
 });
 

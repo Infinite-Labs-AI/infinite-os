@@ -16,7 +16,7 @@ import { displayWidth, padEndCells } from "../lib/display-width.js";
 import { linkWords, paragraphIn } from "./card.js";
 import { labelValueLines } from "./change.js";
 import { afterwordLines, isSettledWithoutRunning } from "./outcome.js";
-import { formatAsOf, isRecord, paint, viewText, wrapText } from "./primitives.js";
+import { formatAsOf, formatSeconds, isRecord, paint, viewText, wrapText } from "./primitives.js";
 import type { KindRender, ViewRenderCtx } from "./types.js";
 
 /** Lines of command output kept per stream (the tail the app already cut). */
@@ -91,7 +91,12 @@ export function jobLines(body: unknown, ctx: ViewRenderCtx): string[] {
   // (it stops when the Mac or the app does), since the cloud is where a job runs by default.
   const where = record.runsWhere === "cloud" ? "" : RUNS_WHERE[String(record.runsWhere)] ?? "";
   const eta = isCount(record.etaMs) && record.etaMs > 0 ? `usually about ${minutesWords(record.etaMs)}` : "";
-  const whereWords = [eta, record.outlivesTurn === true ? "keeps going while you chat" : "", where]
+  // r4 `2:03 so far`: how long it has run, from its start, while it runs.
+  const startedMs = typeof record.startedAt === "string" ? Date.parse(record.startedAt) : Number.NaN;
+  const soFar = record.phase === "running" && Number.isFinite(startedMs) && Date.now() >= startedMs
+    ? `${formatSeconds(Math.floor((Date.now() - startedMs) / 1000))} so far`
+    : "";
+  const whereWords = [soFar, eta, record.outlivesTurn === true ? "keeps going while you chat" : "", where]
     .filter(Boolean)
     .join(" · ");
   if (whereWords) {

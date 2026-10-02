@@ -14,6 +14,7 @@
 // - `markdown` goes through `renderMarkdown`; `plain`, `html_stripped` and
 //   `code` print line for line. Every string is scrubbed first.
 import { renderMarkdown } from "../../formatting/markdown-render.js";
+import { chipRows } from "./card.js";
 import { fitLine, isRecord, paint, viewText, wrapText } from "./primitives.js";
 import {
   bodyOf,
@@ -88,7 +89,8 @@ export const renderDocument: KindRenderer<"document"> = (view, ctx) => {
 
   // The body, wrapped to the pane (at most the reading measure), then paged
   // into what is left of the rows once the lines above and below are counted.
-  const inner = { ...ctx, width: Math.max(1, Math.min(width, DOCUMENT_MEASURE) - BAR.length) };
+  // r4 wraps the ruled line, gutter included, inside min(pane, 76) − 2.
+  const inner = { ...ctx, width: Math.max(1, Math.min(width, DOCUMENT_MEASURE) - 2 - BAR.length) };
   const bodyLines: string[] = [];
   shown.forEach((part, index) => {
     if (index > 0) {
@@ -96,8 +98,19 @@ export const renderDocument: KindRenderer<"document"> = (view, ctx) => {
     }
     bodyLines.push(...sectionLines(part, viewUntrusted, inner));
   });
+  // The document's own keys under it (r4 view-04: `space next page   1-3 email`), a blank row above.
+  const noun = tabNoun(versions);
+  const keysFor = (paging: boolean): string[] => {
+    const hints = [
+      ...(paging ? [{ key: "space", label: "next page" }] : []),
+      ...(versions.length > 1 ? [{ key: `1-${versions.length}`, label: noun || "switch tab" }] : []),
+      ...(ctx.caps.open && isRecord(view.appLink) && viewText(view.appLink.label) ? [{ key: "o", label: viewText(view.appLink.label) }] : [])
+    ];
+    const rows = chipRows(hints, null, width, ctx);
+    return rows.length ? ["", ...rows] : [];
+  };
   const known = typeof ctx.rows === "number" && Number.isFinite(ctx.rows);
-  let perPage = documentPageLines(known ? ctx.rows! - lines.length - after.length : undefined);
+  let perPage = documentPageLines(known ? ctx.rows! - lines.length - after.length - keysFor(true).length : undefined);
   if (bodyLines.length > perPage && known) {
     // Paging adds the `page N of M` line, so the page gives up a row for it.
     perPage = documentPageLines(perPage - 1);
@@ -114,7 +127,7 @@ export const renderDocument: KindRenderer<"document"> = (view, ctx) => {
     lines.push(...Array.from({ length: perPage - pageLines.length }, () => ""));
     lines.push(paint(`page ${page + 1} of ${pages}`, "muted", ctx));
   }
-  lines.push(...after);
+  lines.push(...after, ...keysFor(pages > 1));
 
   return {
     detail: lines,
@@ -127,6 +140,13 @@ export const renderDocument: KindRenderer<"document"> = (view, ctx) => {
     ...(liveUrl ? { copyText: liveUrl } : {})
   };
 };
+
+/** The noun the tabs share ("Email 1", "Email 2" → "email"); "" when they differ. */
+function tabNoun(versions: readonly Fields[]): string {
+  const nouns = new Set(versions.map((version) => (viewText(version.slot) || viewText(version.label)).replace(/\s*\d+$/u, "").trim().toLowerCase()));
+  const [noun] = [...nouns];
+  return nouns.size === 1 && noun ? noun : "";
+}
 
 /** The sections one version shows, by index (an index out of range is skipped). */
 function sectionsFor(version: Fields | undefined, sections: readonly Fields[]): Fields[] {
