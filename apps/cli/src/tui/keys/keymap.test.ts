@@ -57,9 +57,20 @@ describe("resolveKey on a card", () => {
     expect(resolveKey(" ", {} as Key, ctx)).toEqual({ type: "none" });
   });
 
-  it("shifted letters keep their meaning; ctrl and meta chords never approve", () => {
-    expect(resolveKey("P", { shift: true } as Key, card())).toEqual({ type: "ok" });
-    expect(resolveKey("N", { shift: true } as Key, card())).toEqual({ type: "dismiss" });
+  it("a capital letter never decides (it starts a message: \"Show me…\"); ctrl and meta chords never approve", () => {
+    for (const okKey of ["p", "s", "l"]) {
+      const upper = okKey.toUpperCase();
+      expect(resolveKey(upper, { shift: true } as Key, card({ okKey }))).toEqual({ type: "none" });
+      expect(resolveKey(upper, {} as Key, card({ okKey }))).toEqual({ type: "none" });
+      expect(resolveKey(okKey, {} as Key, card({ okKey }))).toEqual({ type: "ok" });
+    }
+    expect(resolveKey("S", { shift: true } as Key, card({ okKey: "s" }))).toEqual({ type: "none" });
+    expect(resolveKey("P", { shift: true } as Key, card())).toEqual({ type: "none" });
+    expect(resolveKey("N", { shift: true } as Key, card())).toEqual({ type: "none" });
+    const retryable = card({ caps: { open: true, watch: true, retry: true } });
+    expect(resolveKey("R", { shift: true } as Key, retryable)).toEqual({ type: "none" });
+    expect(resolveKey("O", { shift: true } as Key, retryable)).toEqual({ type: "none" });
+    expect(resolveKey("r", {} as Key, retryable)).toEqual({ type: "retry" });
     expect(resolveKey("p", { ctrl: true } as Key, card())).toEqual({ type: "none" });
     expect(resolveKey("p", { meta: true } as Key, card())).toEqual({ type: "none" });
     expect(resolveKey("n", { ctrl: true } as Key, card())).toEqual({ type: "none" });

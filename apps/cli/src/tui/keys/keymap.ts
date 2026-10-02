@@ -5,8 +5,9 @@
 // works right now.
 //
 // The approval rule this file exists to hold: on a card ONLY the card's named OK
-// key approves and ONLY `n` dismisses (a real "no" that reaches the app). Enter
-// and Esc never approve or decline (Esc stops a running turn, nothing else).
+// key approves and ONLY `n` dismisses (a real "no" that reaches the app), each
+// in lowercase only (a capital letter starts a message). Enter and Esc never
+// approve or decline (Esc stops a running turn, nothing else).
 import type { Key } from "ink";
 import wrapAnsi from "wrap-ansi";
 
@@ -108,6 +109,12 @@ export function resolveKey(input: string, key: Key, ctx: KeyContext): KeyAction 
   }
   // A single printable key; a pasted burst is never a key press.
   if (Array.from(input).length !== 1) {
+    return { type: "none" };
+  }
+  // On a card a capital letter never decides or acts: it is the start of a
+  // message ("Show me the emails first" must not Send). Only the exact
+  // lowercase OK key, `n` and `r` decide.
+  if (ctx.focus === "card" && input !== input.toLowerCase()) {
     return { type: "none" };
   }
   const k = input.toLowerCase();
