@@ -136,7 +136,7 @@ function compareBodyLines(body: Record<string, unknown>, ctx: ViewRenderCtx, dra
     blocks.push([
       ...(sentence
         ? wrapText(`${grade.glyph} ${sentence}`, ctx.width).map((line, index) =>
-            index === 0 ? `${paint(grade.glyph, grade.role, ctx)}${paint(line.slice(grade.glyph.length), "text", ctx, { bold: true })}` : paint(line, "text", ctx, { bold: true }))
+            index === 0 ? `${paint(grade.glyph, grade.role, ctx)}${paint(line.slice(grade.glyph.length), "b", ctx)}` : paint(line, "b", ctx))
         : []),
       ...asList(verdict.unmet).flatMap((unmet) => wrapText(viewText(unmet), ctx.width).map((line) => paint(line, "muted", ctx)))
     ]);

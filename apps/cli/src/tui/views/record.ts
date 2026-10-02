@@ -23,6 +23,9 @@ import {
 } from "./things.js";
 import type { KindRenderer, ViewRenderCtx } from "./types.js";
 
+/** Record labels pad to at least this many cells, so the values start where r4's do. */
+const RECORD_LABEL_CELLS = 12;
+
 export const renderRecord: KindRenderer<"record"> = (view, ctx) => {
   const body = bodyOf(view);
   const notes = new FootnoteBook();
@@ -35,7 +38,8 @@ export const renderRecord: KindRenderer<"record"> = (view, ctx) => {
     const fallback = value && "text" in value ? "text" : "count";
     return { label: viewText(field.label), value: cellText(value, unitOf(field.unit, fallback), null, notes) };
   }).filter((field) => field.label !== "" || field.value !== "");
-  const labelWidth = labelColumnWidth(fields.map((field) => field.label), ctx.width);
+  // r4 lines the values up in one column, 14 in (labels padded to 12, then two spaces).
+  const labelWidth = Math.max(Math.min(RECORD_LABEL_CELLS, Math.floor(ctx.width * 0.4)), labelColumnWidth(fields.map((field) => field.label), ctx.width));
   for (const field of fields) {
     lines.push(...labelValueLines(field.label, field.value, labelWidth, ctx));
   }
@@ -59,7 +63,7 @@ function historyLines(value: unknown, ctx: ViewRenderCtx): string[] {
   if (!history.length) {
     return [];
   }
-  const lines = [paint("History", "text", ctx, { bold: true })];
+  const lines = [paint("History", "b", ctx)];
   for (const entry of history) {
     const when = formatAsOf(entry.at, ctx.timeZone) ?? "";
     const what = [changeText(entry), whoText(entry), viewText(entry.source)].filter(Boolean).join(" · ");

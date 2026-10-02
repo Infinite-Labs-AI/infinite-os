@@ -105,7 +105,8 @@ export const renderDocument: KindRenderer<"document"> = (view, ctx) => {
   }
   const pages = Math.max(1, Math.ceil(bodyLines.length / perPage));
   const page = clampIndex(ctx.page, pages);
-  const bar = paint(BAR.trimEnd(), "muted", ctx);
+  // r4's document gutter: a `│` in the rule colour before every body line.
+  const bar = paint(BAR.trimEnd(), "line", ctx);
   const pageLines = bodyLines.slice(page * perPage, (page + 1) * perPage).map((line) => (line ? `${bar} ${line}` : bar));
   lines.push(...pageLines);
   if (pages > 1) {
@@ -136,7 +137,7 @@ function sectionsFor(version: Fields | undefined, sections: readonly Fields[]): 
     .map((index) => sections[index]!);
 }
 
-/** `[1 Email 1]  2 Email 2`: the open tab inverse (bracketed without colour). */
+/** ` 1 Email 1   2 Email 2 `: the open tab in the brand chip, the others dim (the open one bracketed without colour). */
 function tabBar(versions: readonly Fields[], tab: number, ctx: ViewRenderCtx): string {
   const plain = versions.map((version, index) => {
     const label = [viewText(version.label), viewText(version.locale)].filter(Boolean).join(" · ");
@@ -150,7 +151,7 @@ function tabBar(versions: readonly Fields[], tab: number, ctx: ViewRenderCtx): s
     return paint(fitted, "muted", ctx);
   }
   return plain
-    .map((label, index) => (index === tab ? paint(` ${label} `, "text", ctx, { bold: true, inverse: true }) : paint(` ${label} `, "muted", ctx)))
+    .map((label, index) => paint(` ${label} `, index === tab ? "inv" : "muted", ctx))
     .join(" ");
 }
 
@@ -164,7 +165,7 @@ function sectionLines(part: Fields, viewUntrusted: boolean, ctx: ViewRenderCtx):
     const fitted = fitLine(plain, ctx.width);
     lines.push(
       fitted === plain && ctx.color
-        ? [mark ? paint(mark, "warning", ctx) : "", heading ? paint(heading, "text", ctx, { bold: true }) : ""].filter(Boolean).join(" ")
+        ? [mark ? paint(mark, "warning", ctx) : "", heading ? paint(heading, "b", ctx) : ""].filter(Boolean).join(" ")
         : paint(fitted, outside ? "warning" : "text", ctx)
     );
   }

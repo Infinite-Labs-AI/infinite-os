@@ -1,11 +1,11 @@
-// The link view (terminal-r4 "Link"): a minted link is ONE line with `c copy`
-// beside it once the view is engaged (a URL too long for the pane is cut on
+// The link view (terminal-r4 "Link"): a minted link is ONE line with the `c`
+// key chip and `copy` beside it once the view is engaged (a URL too long for the pane is cut on
 // screen; `c` copies it whole), then where it goes, its tags and its channel. Warnings print in
-// amber. An app place prints `↗ label`, with `(o)` only when the session can
-// open the app; a local file prints its name and path (and `c` copies the
-// path). A link not minted yet prints its address muted, with nothing to copy.
+// amber. An app place prints as a link `label ↗  (o)` when the session can
+// open the app, else plainly; a local file prints its name and path (and `c` copies the
+// path). A link not minted yet prints its address dim, with nothing to copy.
 import { displayWidth, truncateCells } from "../lib/display-width.js";
-import { fitLine, isRecord, paint, viewText, wrapText } from "./primitives.js";
+import { fitLine, isRecord, linkLine, paint, viewText, wrapText } from "./primitives.js";
 import {
   bodyOf,
   clampIndex,
@@ -20,7 +20,8 @@ import {
 } from "./things.js";
 import type { KindRender, KindRenderer, ViewRenderCtx } from "./types.js";
 
-const COPY_HINT = "c copy";
+/** ` c  copy`: the key chip, a space, the label. */
+const COPY_HINT = " c  copy";
 const UTM_KEYS = ["source", "medium", "campaign", "content", "term"] as const;
 
 export const renderLink: KindRenderer<"link"> = (view, ctx) => {
@@ -36,8 +37,9 @@ export const renderLink: KindRenderer<"link"> = (view, ctx) => {
     const label = viewText(place?.label);
     const count = countOf(place?.selectionCount);
     if (label) {
-      const text = `↗ ${label}${count !== null && count > 0 ? ` · ${formatCount(count)} selected` : ""}${ctx.caps.open ? " (o)" : ""}`;
-      lines.push(paint(fitLine(text, width), "primary", ctx));
+      const text = `${label}${count !== null && count > 0 ? ` · ${formatCount(count)} selected` : ""}`;
+      // A link only when `o` can open it; otherwise the place, plainly.
+      lines.push(ctx.caps.open ? linkLine(text, ctx, "(o)") : fitLine(text, width));
     }
   } else if (body.target === "local_file") {
     const file = isRecord(body.file) ? body.file : null;
@@ -45,7 +47,7 @@ export const renderLink: KindRenderer<"link"> = (view, ctx) => {
     const path = viewText(file?.path);
     const app = viewText(file?.app);
     if (name) {
-      lines.push(paint(fitLine(name, width), "text", ctx, { bold: true }));
+      lines.push(paint(fitLine(name, width), "b", ctx));
     }
     if (path) {
       lines.push(copyLine(path, ctx));
@@ -98,12 +100,10 @@ export const renderLink: KindRenderer<"link"> = (view, ctx) => {
 function copyLine(text: string, ctx: ViewRenderCtx): string {
   const width = Math.max(1, Math.floor(ctx.width));
   const room = width - displayWidth(COPY_HINT) - 2;
-  if (ctx.engaged !== true) {
-    return paint(fitLine(text, width), "primary", ctx, { bold: true });
-  }
-  if (room < 4) {
-    return paint(fitLine(text, width), "primary", ctx);
+  if (ctx.engaged !== true || room < 4) {
+    return paint(fitLine(text, width), "b", ctx);
   }
   const shown = truncateCells(text, room);
-  return `${paint(shown, "primary", ctx, { bold: true })}  ${paint(COPY_HINT, "muted", ctx)}`;
+  // r4's copy key: ` c ` on the key background, then `copy`.
+  return `${paint(shown, "b", ctx)}  ${paint(" c ", "key", ctx)} copy`;
 }

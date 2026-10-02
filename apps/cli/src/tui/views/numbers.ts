@@ -219,7 +219,7 @@ function recordLines(input: CellTableInput, labels: readonly string[], ctx: View
     }
     const mark = selected === null ? "" : recordIndex === selected ? "▸ " : "  ";
     lines.push(...wrapText(viewText(record.label), Math.max(1, ctx.width - mark.length)).map((line, index) =>
-      `${index === 0 ? mark : " ".repeat(mark.length)}${paint(line, "text", ctx, { bold: true })}`));
+      `${index === 0 ? mark : " ".repeat(mark.length)}${paint(line, "b", ctx)}`));
     if (!open) {
       return;
     }
@@ -340,7 +340,7 @@ function legLines(
   const layout = body.layout;
   const currency = typeof body.currency === "string" ? body.currency : null;
   const title = legTitle(leg, isToday, ctx);
-  const lines = title ? wrapText(title, ctx.width).map((line) => paint(line, "text", ctx, { bold: true })) : [];
+  const lines = title ? wrapText(title, ctx.width).map((line) => paint(line, "b", ctx)) : [];
 
   const rows = asList(leg.rows).filter(isRecord);
   const legTotals = isRecord(leg.totals) ? leg.totals : null;
@@ -426,7 +426,7 @@ function kpiLines(
   blocks.forEach((block, index) => {
     if (blocks.length > 1) {
       if (index > 0) lines.push("");
-      lines.push(...wrapText(block.label, ctx.width).map((line) => paint(line, "text", ctx, { bold: true })));
+      lines.push(...wrapText(block.label, ctx.width).map((line) => paint(line, "b", ctx)));
     }
     lines.push(...pairLines(columns.map((column) => ({
       label: column.label,
@@ -494,9 +494,9 @@ function coverageLines(legs: Record<string, unknown>, ctx: ViewRenderCtx): strin
   const lines: string[] = [];
   const one = `Days ${first} ${plainGlyphs} ${last}`;
   if (displayWidth(one) <= ctx.width) {
-    lines.push(`${paint("Days", "text", ctx, { bold: true })} ${paint(first, "muted", ctx)} ${painted(0, days.length)} ${paint(last, "muted", ctx)}`);
+    lines.push(`${paint("Days", "b", ctx)} ${paint(first, "muted", ctx)} ${painted(0, days.length)} ${paint(last, "muted", ctx)}`);
   } else {
-    lines.push(fitLine(`${paint("Days", "text", ctx, { bold: true })} ${paint(`${first} – ${last}`, "muted", ctx)}`, ctx.width));
+    lines.push(fitLine(`${paint("Days", "b", ctx)} ${paint(`${first} – ${last}`, "muted", ctx)}`, ctx.width));
     const chunk = Math.max(1, ctx.width - 2);
     for (let start = 0; start < days.length; start += chunk) {
       lines.push(`  ${painted(start, Math.min(days.length, start + chunk))}`);
@@ -544,7 +544,7 @@ export function sectionLines(sections: unknown, ctx: ViewRenderCtx, draw: Measur
     const title = viewText(section.title);
     if (!title && !drawn.length) continue;
     if (lines.length) lines.push("");
-    lines.push(...wrapText(title, ctx.width).map((line) => paint(line, "text", ctx, { bold: true })), ...drawn);
+    lines.push(...wrapText(title, ctx.width).map((line) => paint(line, "b", ctx)), ...drawn);
   }
   return lines;
 }

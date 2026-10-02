@@ -18,6 +18,7 @@ import {
   formatAsOf,
   FootnoteBook,
   isRecord,
+  linkLine,
   paint,
   toneRole,
   viewText,
@@ -33,12 +34,14 @@ import {
   labelValueLines,
   marker,
   nextStepLines,
+  rowLine,
   nextSteps,
   recordsOf,
   section,
   unitOf,
   whoText,
-  type Fields
+  type Fields,
+  type Span
 } from "./things.js";
 import type { KindRenderer, ViewRenderCtx } from "./types.js";
 
@@ -138,7 +141,7 @@ function groupHead(label: string, reason: string, ctx: ViewRenderCtx): string[] 
   if (fitted !== plain || !label) {
     return [paint(fitted, label ? "text" : "muted", ctx)];
   }
-  return [`${paint(label, "text", ctx, { bold: true })}${reason ? paint(` · ${reason}`, "muted", ctx) : ""}`];
+  return [`${paint(label, "b", ctx)}${reason ? paint(` · ${reason}`, "muted", ctx) : ""}`];
 }
 
 /** `▸ ● on  ` — the marker and the status word, in the status tone. */
@@ -189,16 +192,16 @@ function rowLines(
     const cellWidth = columnWidths[index] ?? 0;
     return right[index] ? `${" ".repeat(Math.max(0, cellWidth - displayWidth(text)))}${text}` : padEndCells(text, cellWidth);
   };
-  const lead = (row: number) => {
+  // `● on  ` — the status word in its tone, padded (in its tone, as r4 does) to the status column.
+  const statusSpans = (row: number): Span[] => {
+    if (!statusWidth) return [];
     const status = statuses[row];
-    const statusCell = statusWidth
-      ? `${status ? paint(status.text, status.tone, ctx) : ""}${" ".repeat(statusWidth - (status ? displayWidth(status.text) : 0))}${GAP}`
-      : "";
-    return `${marker(row === selected, ctx)}${statusCell}`;
+    const shown = status ? status.text : "";
+    return [{ text: `${shown}${" ".repeat(statusWidth - displayWidth(shown))}${GAP}`, style: status ? status.tone : "text" }];
   };
-  const titleCell = (row: number) => {
-    const title = padEndCells(truncateCells(titles[row] ?? "", titleWidth), titleWidth);
-    return row === selected ? paint(title, "text", ctx, { bold: true }) : title;
+  const titleSpan = (row: number, padded: boolean): Span => {
+    const title = truncateCells(titles[row] ?? "", titleWidth);
+    return { text: padded ? padEndCells(title, titleWidth) : title, style: row === selected ? "b" : "text" };
   };
 
   if (ctx.showHiddenColumns && hidden.length) {
@@ -209,7 +212,7 @@ function rowLines(
       header: [],
       hidden,
       rows: rows.map((_row, index) => [
-        fitLine(`${lead(index)}${titleCell(index).trimEnd()}`, width),
+        rowLine([...statusSpans(index), titleSpan(index, false)], index === selected, ctx),
         ...columns.flatMap((column, columnIndex) =>
           labelValueLines(column.label || column.key, cells[index]?.[columnIndex] ?? "", labelWidth, inner).map((line) => `    ${line}`)
         )
@@ -224,7 +227,11 @@ function rowLines(
     header,
     hidden,
     rows: rows.map((_row, index) => [
-      fitLine(`${lead(index)}${titleCell(index)}${kept.map((column) => `${GAP}${align(cells[index]?.[column] ?? "", column)}`).join("")}`.trimEnd(), width)
+      rowLine([
+        ...statusSpans(index),
+        titleSpan(index, true),
+        { text: kept.map((column) => `${GAP}${align(cells[index]?.[column] ?? "", column)}`).join(""), style: "text" }
+      ], index === selected, ctx)
     ])
   };
 }
@@ -243,7 +250,7 @@ function logLines(rows: readonly Fields[], first: number, selected: number, ctx:
     const head = [
       status ? paint(status.text, status.tone, ctx) : "",
       paint(formatAsOf(row.at, ctx.timeZone) ?? "", "muted", ctx),
-      index === selected ? paint(viewText(row.title), "text", ctx, { bold: true }) : viewText(row.title)
+      index === selected ? paint(viewText(row.title), "b", ctx) : viewText(row.title)
     ].filter(Boolean);
     const one = `${marker(index === selected, ctx)}${[...head, what].filter(Boolean).join(GAP)}`;
     if (displayWidth(one) <= width || !what) {
@@ -263,9 +270,12 @@ function rowDetailLines(row: Fields, ctx: ViewRenderCtx, notes: FootnoteBook): s
     value: cellText(asCell(item.value), "text", null, notes)
   })).filter((item) => item.label !== "" || item.value !== "");
   const lines: string[] = [];
-  const labelWidth = labelColumnWidth(detail.map((item) => item.label), ctx.width);
+  const labelWidth = labelColumnWidth(detail.filter((item) => item.label !== "").map((item) => item.label), ctx.width);
   for (const item of detail) {
-    lines.push(...labelValueLines(item.label, item.value, labelWidth, ctx));
+    // A detail with no label is one dim sentence (r4: `Hook B · since Sep 24 · Broad`).
+    lines.push(...(item.label
+      ? labelValueLines(item.label, item.value, labelWidth, ctx)
+      : wrapText(item.value, ctx.width).map((line) => paint(line, "muted", ctx))));
   }
   const url = viewText(row.url);
   if (url) {
@@ -274,7 +284,7 @@ function rowDetailLines(row: Fields, ctx: ViewRenderCtx, notes: FootnoteBook): s
   const appLink = isRecord(row.appLink) ? row.appLink : null;
   const place = viewText(appLink?.label);
   if (place && ctx.caps.open) {
-    lines.push(paint(fitLine(`↗ ${place} (o)`, ctx.width), "primary", ctx));
+    lines.push(linkLine(place, ctx, "(o)"));
   }
   return lines;
 }

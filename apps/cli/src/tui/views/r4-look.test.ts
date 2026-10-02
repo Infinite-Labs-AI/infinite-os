@@ -9,6 +9,7 @@ import type { AnswerViewV1 } from "@infinite-os/types";
 import { describe, expect, it } from "vitest";
 
 import { decodeAnswerView } from "../../desktop/answer-view-decode.js";
+import { displayWidth } from "../lib/display-width.js";
 import { resolveTheme } from "../theme.js";
 import { renderView } from "./registry.js";
 import type { ViewRenderCtx } from "./types.js";
@@ -214,5 +215,94 @@ describe("the state reason (flow-numbers-03…06)", () => {
   it("the needs-you sentence is amber, not bold; a sentence that already leads with the glyph keeps one", () => {
     const render = renderView(view({ state: "needs_yes", stateReason: { code: "y", words: "▣ Waiting for your OK." } }), ctx());
     expect(render.detail.map(seg)).toEqual(["{amber}▣ Waiting for your OK."]);
+  });
+});
+
+// ── the thing views (view-02 list, view-03 record, view-04 document) ──
+
+function thing(kind: string, body: Record<string, unknown>, extra: Record<string, unknown> = {}): AnswerViewV1 {
+  return view({ kind, title: "Thing", provenance: undefined, asOf: null, body, ...extra });
+}
+
+describe("list (view-02)", () => {
+  const list = () => thing("list", {
+    layout: "rows", total: 3, shown: 3,
+    columns: [{ key: "spend", label: "", unit: "money" }, { key: "ctr", label: "" }, { key: "trials", label: "" }],
+    rows: [
+      { id: "a", title: "Ad set 01 · demo loop", status: { word: "on", tone: "ok" }, cells: { spend: { value: 18.2 }, ctr: { text: "1.32%" }, trials: { text: "3 trials" } } },
+      { id: "b", title: "Ad set 02 · founder", status: { word: "on", tone: "ok" }, cells: { spend: { value: 12.4 }, ctr: { text: "0.41%" }, trials: { text: "0 trials" } },
+        detail: [{ label: "", value: { text: "Ad set 02 · since Sep 24 · Broad" } }] }
+    ]
+  });
+
+  it("status first in its tone; the selected row is ▸ on the selection background, its title bold, padded to the pane", () => {
+    const render = renderView(list(), ctx({ selected: 1, width: 60 }));
+    expect(render.detail.map(seg)).toEqual([
+      "  {green}● on  Ad set 01 · demo loop  18.20  1.32%  3 trials",
+      `{cb sel}▸ {green sel}● on  {b sel}Ad set 02 · founder  {sel}  12.40  0.41%  0 trials${" ".repeat(7)}`,
+      "",
+      "{dim}Ad set 02 · since Sep 24 · Broad"
+    ]);
+    expect(displayWidth(render.detail[1]!)).toBe(60);
+  });
+
+  it("without colour the selected row is only the ▸ marker, never padded", () => {
+    const render = renderView(list(), ctx({ selected: 1, width: 60, color: false }));
+    expect(render.detail[1]).toBe("▸ ● on  Ad set 02 · founder    12.40  0.41%  0 trials");
+  });
+});
+
+describe("record (view-03)", () => {
+  it("dim labels padded so values line up 14 in, a bold History, dim times", () => {
+    const render = renderView(thing("record", {
+      fields: [{ label: "campaign", value: { text: "Demo trials" } }, { label: "spend 7d", value: { value: 12.4 }, unit: "money" }],
+      history: [{ at: "2026-09-24T09:12:00Z", from: null, to: "on", who: "Robin" }]
+    }), ctx());
+    expect(render.detail.map(seg)).toEqual([
+      "{dim}campaign      Demo trials",
+      "{dim}spend 7d      12.40",
+      "",
+      "{b}History",
+      "{dim}Sep 24, 09:12  — → on · by Robin"
+    ]);
+    expect(render.detail[0]!.replace(/\u001b\[[0-9;]*m/gu, "").indexOf("Demo")).toBe(14);
+  });
+
+  it("a next step is a selectable row: ▸, a dim arrow, the words bold on the selection", () => {
+    const render = renderView(thing("record", { fields: [] }, { next: [{ label: "Pause it", ask: "pause it" }] }), ctx({ width: 30 }));
+    expect(render.detail.map(seg)).toEqual([`{cb sel}▸ {dim sel}→ {b sel}Pause it{sel}${" ".repeat(18)}`]);
+  });
+});
+
+describe("document (view-04)", () => {
+  const doc = () => thing("document", {
+    meta: [{ label: "Subject", value: "Your trial ended" }],
+    sections: [{ text: "Hi {first name},\n\nBefore your trial ended.", format: "plain" }, { text: "Two", format: "plain" }],
+    versions: [{ id: "1", label: "Email 1", sectionIndexes: [0] }, { id: "2", label: "Email 2", sectionIndexes: [1] }]
+  });
+
+  it("the open tab is the brand chip, the rest dim; the body hangs off a │ in the rule colour", () => {
+    expect(renderView(doc(), ctx()).detail.map(seg)).toEqual([
+      "{inv} 1 Email 1   {dim}2 Email 2",
+      "",
+      "{dim}Subject  Your trial ended",
+      "",
+      "{line}│ Hi {first name},",
+      "{line}│",
+      "{line}│ Before your trial ended."
+    ]);
+  });
+
+  it("without colour the open tab is bracketed", () => {
+    expect(renderView(doc(), ctx({ color: false })).detail[0]).toBe("[1 Email 1]  2 Email 2");
+  });
+});
+
+describe("link (view-11 body)", () => {
+  it("a minted link is bold, with the c key chip once engaged; an app place is a cyan underlined link", () => {
+    const minted = renderView(thing("link", { target: "url", minted: true, opened: false, warnings: [], shortUrl: "go.example.com/rdt" }), ctx({ engaged: true }));
+    expect(seg(minted.detail[0]!)).toBe("{b}go.example.com/rdt  {key} c  copy");
+    const place = renderView(thing("link", { target: "app_place", minted: false, opened: false, warnings: [], appPlace: { place: "library", label: "Library" } }), ctx());
+    expect(seg(place.detail[0]!)).toBe("{cyan u}Library ↗  {dim}(o)");
   });
 });
