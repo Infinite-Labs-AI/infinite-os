@@ -100,6 +100,53 @@ describe("list (r4 view-02 row grammar, run-2 M8)", () => {
   });
 });
 
+describe("list: r4 view-02 (run-r2 MUST 1)", () => {
+  // r4's three ads, synthetic: Hook B is the flagged row and its `0 trials` the bad cell.
+  const hooks = (over: Record<string, unknown> = {}) => withBody("list-rows", {
+    currency: "USD",
+    columns: [{ key: "spend", label: "Spend 7d", unit: "money" }, { key: "ctr", label: "CTR", unit: "percent" }, { key: "trials", label: "Trials", unit: "count" }],
+    rows: [
+      { id: "ad_a", title: "Hook A · demo loop", status: { word: "on", tone: "ok" }, cells: { spend: { value: 18.2 }, ctr: { value: 1.32 }, trials: { value: 3 } } },
+      { id: "ad_c", title: "Hook C · pricing", status: { word: "on", tone: "ok" }, cells: { spend: { value: 15.75 }, ctr: { value: 1.05 }, trials: { value: 1 } } },
+      { id: "ad_b", title: "Hook B · founder POV", status: { word: "on", tone: "ok" }, cells: { spend: { value: 12.4 }, ctr: { value: 0.41 }, trials: { value: 0, tone: "bad" } },
+        detail: [{ label: "since", value: { text: "Hook B · since Sep 24 · Broad · US · 25–54" } }] }
+    ],
+    ...over
+  });
+
+  it("opens on the row the view names (`body.selected`), so its details show without a key press", () => {
+    const v = hooks({ selected: "ad_b" });
+    const opening = viewFocusAfterTurnDone(v);
+    expect(opening.selected).toBe(2);
+    const detail = draw(v, { width: 100, selected: opening.selected }).detail;
+    expect(detail.filter((line) => line.startsWith("▸"))).toEqual([expect.stringContaining("Hook B · founder POV")]);
+    expect(detail).toContain("Hook B · since Sep 24 · Broad · US · 25–54");
+    // No `selected`, or one naming no row: the first row, as before.
+    expect(viewFocusAfterTurnDone(hooks()).selected).toBe(0);
+    expect(viewFocusAfterTurnDone(hooks({ selected: "nope" })).selected).toBe(0);
+  });
+
+  it("pads cells to r4's widths: money right in 8, a percent right in 6, a count with its noun left", () => {
+    const rows = draw(hooks({ selected: "ad_b" }), { width: 100, selected: 2 }).detail.filter((line) => /^(?:  |▸ )● /u.test(line));
+    expect(rows).toEqual([
+      "  ● on  Hook A · demo loop      $18.20   1.32%  3 trials",
+      "  ● on  Hook C · pricing        $15.75   1.05%  1 trial",
+      expect.stringMatching(/^▸ ● on  Hook B · founder POV    \$12\.40   0\.41%  0 trials\s*$/u)
+    ]);
+  });
+
+  it("a cell the view marks `tone: \"bad\"` is amber (r4 `0 trials`), on the selection too", () => {
+    const painted = draw(hooks({ selected: "ad_b" }), { width: 100, selected: 2, color: true, theme: INFINITE_R4_THEME }).detail.map(r4Segments);
+    const hookB = painted.find((row) => row.some((part) => part.text.includes("Hook B")))!;
+    expect(hookB.find((part) => part.text.includes("0 trials"))?.style).toBe("amber sel");
+    const unselected = draw(hooks({ selected: "ad_b" }), { width: 100, selected: 0, color: true, theme: INFINITE_R4_THEME }).detail.map(r4Segments);
+    const plainB = unselected.find((row) => row.some((part) => part.text.includes("Hook B")))!;
+    expect(plainB.find((part) => part.text.includes("0 trials"))?.style).toBe("amber");
+    const hookA = unselected.find((row) => row.some((part) => part.text.includes("Hook A")))!;
+    expect(hookA.some((part) => part.style.includes("amber"))).toBe(false);
+  });
+});
+
 describe("list", () => {
   it("status comes first (`● on`), then the title, then the cells", () => {
     const render = draw(fixture("list-rows"));

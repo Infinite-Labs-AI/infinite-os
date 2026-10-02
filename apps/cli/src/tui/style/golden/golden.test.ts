@@ -186,15 +186,12 @@ describe("Ink bridge: the session prints renderLiveTurn's rows unchanged", () =>
     it(id, () => {
       const fixture = loadR4Fixture(id.slice("bridge/".length));
       const turn = fixture.turn!;
-      // The session opens on the fixture's selection (feed-focus.ts): draw the pure turn on it too.
+      // The session opens its views' keys on the views' own opening rows: draw the pure turn on the same focus.
       const views = recordedViews(turn);
-      const opening = typeof turn.focus?.selected === "number" && views.length
-        ? { ...viewFocusAfterTurnDone(views), selected: turn.focus.selected }
-        : null;
       const pure = ansiToSegmentLines(renderLiveTurn({
         messages: turnMessages(turn),
         views,
-        focus: opening,
+        focus: views.length ? viewFocusAfterTurnDone(views) : null,
         width: transcriptColumns(BRIDGE_COLS),
         color: true,
         theme: resolveTheme()

@@ -247,7 +247,8 @@ describe("list (view-02)", () => {
     const render = renderView(list(), ctx({ selected: 1, width: 60 }));
     expect(render.detail.map(seg)).toEqual([
       "  {green}● on{}  Ad set 01 · demo loop  18.20  1.32%  3 trials",
-      `{cb sel}▸ {green sel}● on  {b sel}Ad set 02 · founder  {sel}  12.40  0.41%  0 trials${" ".repeat(7)}`,
+      // r4 pads the title (`padEnd(22)`) in bold, so the gap before the first cell is the title's (run-r2).
+      `{cb sel}▸ {green sel}● on  {b sel}Ad set 02 · founder    {sel}12.40  0.41%  0 trials${" ".repeat(7)}`,
       "",
       "{dim}Ad set 02 · since Sep 24 · Broad"
     ]);

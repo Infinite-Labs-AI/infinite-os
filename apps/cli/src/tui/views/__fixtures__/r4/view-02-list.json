@@ -56,6 +56,7 @@
         "body": {
           "layout": "rows",
           "currency": "USD",
+          "selected": "ad_hook_b",
           "columns": [
             {
               "key": "spend",
@@ -141,7 +142,8 @@
                   "value": 0.41
                 },
                 "trials": {
-                  "value": 0
+                  "value": 0,
+                  "tone": "bad"
                 }
               },
               "detail": [
@@ -174,12 +176,9 @@
         "result": "3 ads",
         "status": "ok"
       }
-    ],
-    "focus": {
-      "selected": 2
-    }
+    ]
   },
   "gaps": [
-    "The selected row is Hook B (focus.selected = 2); \"0 trials\" is amber because it is the bad metric (no field marks it)."
+    "The list opens on Hook B (body.selected = \"ad_hook_b\"); \"0 trials\" is amber because the cell is marked tone \"bad\"."
   ]
 }

@@ -41,6 +41,20 @@ describe("the session draws the latest turn's answer views (CI-runnable)", () =>
     expect(out.split("\n").every((line) => displayWidth(line) <= 120)).toBe(true);
   });
 
+  it("a list opens on the row its view names (`body.selected`), with no focus fed from outside (run-r2 MUST 1)", () => {
+    resetTurnState();
+    const frame = listFrame();
+    const view = { ...frame.view, body: { ...(frame.view.body as unknown as Record<string, unknown>), selected: "ad_2" } } as unknown as typeof frame.view;
+    recordTurnView({ ...frame, view });
+    const out = stripAnsi(renderInkInteractiveSessionToString({
+      columns: 100,
+      initialMessages: [{ role: "user", text: "which ads are on?" }, { role: "assistant", text: "Two are on." }],
+      onSubmitLine: async () => ({ messages: [] })
+    }));
+    expect(out).toMatch(/^▸ ● on +Hook B/mu);
+    expect(out).not.toMatch(/^▸ ● on +Hook A/mu);
+  });
+
   it("the turn's Steps strip is drawn once, from the turn store's calls", () => {
     resetTurnState();
     recordTurnView(listFrame());

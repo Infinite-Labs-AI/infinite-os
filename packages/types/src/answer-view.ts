@@ -81,8 +81,9 @@ export interface ReconcileV1 { label: string; ask: string }
 // ── bodies ──
 /** A picture by reference only (Cmd+L's CreativeThumb reads our archive by id). Never a URL. The terminal ignores it. */
 export interface CreativeRefV1 { archiveAssetId: string }
-export interface CellV1 { value: number | null; reason?: ReasonV1; untrusted?: true }      // money in MAJOR units; percent in points
-export interface TextCellV1 { text: string | null; reason?: ReasonV1; untrusted?: true }
+/** tone "bad": the host flags this value as the one to look at ("0 trials"); renderers draw it in the warn colour. rev 2 */
+export interface CellV1 { value: number | null; reason?: ReasonV1; untrusted?: true; tone?: "bad" }      // money in MAJOR units; percent in points
+export interface TextCellV1 { text: string | null; reason?: ReasonV1; untrusted?: true; tone?: "bad" }
 export interface WindowV1 { from: string; to: string; tz: string; label: string }          // YYYY-MM-DD
 export type UnitV1 = "money" | "count" | "percent" | "ratio" | "seconds" | "text";
 export interface ColumnV1 { key: string; label: string; unit: UnitV1; factGroup: string }  // never combine across factGroups
@@ -122,6 +123,7 @@ export interface ListRowV1 {
 export interface ListBodyV1 {
   layout: "rows" | "log" | "groups" | "files";
   currency?: string | null;                               // money cells' currency; rev 2
+  selected?: string;                                      // the row id the list opens on (the one the answer is about); rev 2
   columns: { key: string; label: string; unit?: UnitV1 }[]; rows: ListRowV1[];
   groups?: { label: string; reason?: string; rows: ListRowV1[] }[];
   total: number | null; shown: number; filterWords?: string; emptyWords?: string;

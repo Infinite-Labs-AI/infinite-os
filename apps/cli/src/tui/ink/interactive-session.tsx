@@ -271,12 +271,12 @@ export interface InkInteractiveSessionAppProps {
   /** Write cards already waiting when the session opens (tests draw a card with it). */
   initialPendingConfirmations?: readonly InSessionConfirmationAction[];
   /**
-   * The key focus the session opens in, over views and a card already there
-   * (a restored screen; the r4 goldens draw `view-02` on its flagged row and
-   * `flow-email-02` with the emails open): the selected row, and the head
-   * card's documents open. Absent = the defaults.
+   * The key focus the session opens in over a card already there (a restored
+   * screen; the r4 goldens draw `flow-email-02` with its emails open, the
+   * user having pressed `v`): the head card's documents open. Absent = the
+   * default. A list's opening row is the view's own (`body.selected`).
    */
-  initialFocus?: { selected?: number; documentOpen?: boolean };
+  initialFocus?: { documentOpen?: boolean };
   onRememberInput?: (line: string) => void;
   /**
    * Run one submitted line. `signal` aborts when the user stops the turn (Esc,
@@ -552,12 +552,10 @@ export function InkInteractiveSessionApp({
   // until the next line is submitted (views/focus.ts). The views themselves live
   // in the turn store (`turnState.views`), cleared when the turn commits.
   // Views already on the turn when the session opens take their keys, like a
-  // finished turn's (on the opening selection, when given).
+  // finished turn's (a list on the row its view names).
   const [viewFocus, setViewFocus] = useState<ViewFocusState | null>(() => {
     const views = getTurnState().views;
-    if (!views.length) return null;
-    const focus = viewFocusAfterTurnDone(views.map((frame) => frame.view), NO_KEY_CAPS);
-    return typeof initialFocus?.selected === "number" ? { ...focus, selected: initialFocus.selected } : focus;
+    return views.length ? viewFocusAfterTurnDone(views.map((frame) => frame.view), NO_KEY_CAPS) : null;
   });
   const viewFocusRef = useRef(viewFocus);
   viewFocusRef.current = viewFocus;

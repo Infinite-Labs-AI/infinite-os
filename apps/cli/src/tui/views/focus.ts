@@ -25,6 +25,7 @@ import { printableImagesView } from "../../desktop/image-url-cut.js";
 import { resolveKey, type FocusKind, type KeyAction, type KeyContext, type KeyHint } from "../keys/keymap.js";
 import { DEFAULT_THEME, type Theme } from "../theme.js";
 import { changeCardSummary } from "./change.js";
+import { listOpeningRow } from "./list.js";
 import { managedApproval } from "./managed.js";
 import { truncatedMoreAsk, turnAsk, viewText } from "./primitives.js";
 import { renderView } from "./registry.js";
@@ -203,7 +204,8 @@ export function viewFocusAfterTurnDone(
     viewIndex,
     focus: hasViewKeys(facts) ? detailsFocus : "composer",
     detailsFocus,
-    selected: 0,
+    // A list opens on the row its view names (r4 view-02: the flagged Hook B).
+    selected: view ? Math.min(openingRow(view), Math.max(0, facts.rowCount - 1)) : 0,
     tab: 0,
     page: 0,
     explainOpen: false,
@@ -216,6 +218,11 @@ export function viewFocusAfterTurnDone(
     handled: false,
     effect: null
   };
+}
+
+/** The row a view opens on before any key: the one it names (a list's `body.selected`), else the first. */
+export function openingRow(view: AnswerViewV1): number {
+  return listOpeningRow(view);
 }
 
 /** The render context for the focused view, carrying its selection, tab, page and toggles. */

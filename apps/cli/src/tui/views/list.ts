@@ -8,7 +8,11 @@
 // `groups` prints each group's label and reason above its rows. Columns that do
 // not fit drop from the right (`+ Spend · → to see`); `→` then prints every row
 // as a record. `omitted`, `filterWords` and `emptyWords` print verbatim.
-import type { CellV1, TextCellV1, UnitV1 } from "@infinite-os/types";
+//
+// The list opens on the row the view names (`body.selected`, r4 view-02 opens
+// on the flagged Hook B, so its details show at once), and a cell the view
+// marks `tone: "bad"` is amber (r4 `0 trials`).
+import type { AnswerViewV1, CellV1, TextCellV1, UnitV1 } from "@infinite-os/types";
 
 import { looksNumeric } from "../../formatting/table.js";
 import { displayWidth, padEndCells, truncateCells } from "../lib/display-width.js";
@@ -54,6 +58,18 @@ interface Column {
 /** A title never gets narrower than this (or its own width) before columns drop. */
 const MIN_TITLE_CELLS = 12;
 const GAP = "  ";
+/** r4's row grammar pads money to 8 and a percent to 6, right-aligned (`padStart(8)`, `padStart(6)`). */
+const ROW_GRAMMAR_MIN: Partial<Record<UnitV1, number>> = { money: 8, percent: 6 };
+
+/** The row the list opens on: the one `body.selected` names, else the first. Rows count top rows, then each group's. */
+export function listOpeningRow(view: AnswerViewV1): number {
+  if (view.kind !== "list") return 0;
+  const body = bodyOf(view);
+  const id = typeof body.selected === "string" ? body.selected : "";
+  if (!id) return 0;
+  const rows = [...recordsOf(body.rows), ...recordsOf(body.groups).flatMap((group) => recordsOf(group.rows))];
+  return Math.max(0, rows.findIndex((row) => row.id === id));
+}
 
 export const renderList: KindRenderer<"list"> = (view, ctx) => {
   const body = bodyOf(view);
@@ -199,6 +215,11 @@ function rowLines(
       return bare && column.unit === "count" ? withNoun(text, cell, column.label) : text;
     });
   });
+  // The cells the view flags as the ones to look at (`tone: "bad"`): amber (r4 `0 trials`).
+  const bad = rows.map((row) => {
+    const own = isRecord(row.cells) ? row.cells : {};
+    return columns.map((column) => asCell(own[column.key])?.tone === "bad");
+  });
   const statusWidth = statuses.reduce((max, status) => Math.max(max, status ? displayWidth(status.text) : 0), 0);
   const fixed = 2 + (statusWidth ? statusWidth + GAP.length : 0);
   const columnWidths = columns.map((column, index) =>
@@ -213,13 +234,31 @@ function rowLines(
     kept = kept.slice(0, -1);
   }
   const hidden = columns.filter((_column, index) => !kept.includes(index)).map((column) => column.label || column.key);
+  // r4's row grammar pads money and percents a little wider (8 and 6) when the
+  // row has the room; that padding never costs a column.
+  if (bare) {
+    const padded = columnWidths.map((cellWidth, index) => Math.max(cellWidth, ROW_GRAMMAR_MIN[columns[index]!.unit] ?? 0));
+    if (width - fixed - kept.reduce((sum, index) => sum + padded[index]! + GAP.length, 0) >= Math.max(minTitle, longestTitle)) {
+      padded.forEach((cellWidth, index) => { columnWidths[index] = cellWidth; });
+    }
+  }
   const titleWidth = Math.max(1, Math.min(longestTitle, width - fixed - used(kept)));
+  // A count that carries its noun (`3 trials`) reads left-aligned, as r4 prints it.
   const right = columns.map((column, index) =>
-    column.unit !== "text" || cells.every((row) => !row[index] || looksNumeric(row[index] ?? ""))
+    !(bare && column.unit === "count") && (column.unit !== "text" || cells.every((row) => !row[index] || looksNumeric(row[index] ?? "")))
   );
   const align = (text: string, index: number) => {
     const cellWidth = columnWidths[index] ?? 0;
     return right[index] ? `${" ".repeat(Math.max(0, cellWidth - displayWidth(text)))}${text}` : padEndCells(text, cellWidth);
+  };
+  // One cell as spans: its padding plain, its value amber when the view flags it.
+  // The first cell's gap is the padded title's.
+  const cellSpans = (row: number, index: number): Span[] => {
+    const text = cells[row]?.[index] ?? "";
+    const gap = index === kept[0] ? "" : GAP;
+    const pad = " ".repeat(Math.max(0, (columnWidths[index] ?? 0) - displayWidth(text)));
+    const value: Span = { text, style: bad[row]?.[index] ? "warning" : "text" };
+    return right[index] ? [{ text: `${gap}${pad}`, style: "text" }, value] : [{ text: gap, style: "text" }, value, { text: pad, style: "text" }];
   };
   // `● on  ` — the status word in its tone, padded (in its tone, as r4 does) to the status column.
   const statusSpans = (row: number): Span[] => {
@@ -228,9 +267,10 @@ function rowLines(
     const shown = status ? status.text : "";
     return [{ text: `${shown}${" ".repeat(statusWidth - displayWidth(shown))}${GAP}`, style: status ? status.tone : "text" }];
   };
+  // Padded, the title takes the gap before the first cell too (r4 `padEnd(22)` in bold on the selection).
   const titleSpan = (row: number, padded: boolean): Span => {
     const title = truncateCells(titles[row] ?? "", titleWidth);
-    return { text: padded ? padEndCells(title, titleWidth) : title, style: row === selected ? "b" : "text" };
+    return { text: padded ? padEndCells(title, titleWidth + (kept.length ? GAP.length : 0)) : title, style: row === selected ? "b" : "text" };
   };
 
   if (ctx.showHiddenColumns && hidden.length) {
@@ -259,7 +299,7 @@ function rowLines(
       rowLine([
         ...statusSpans(index),
         titleSpan(index, true),
-        { text: kept.map((column) => `${GAP}${align(cells[index]?.[column] ?? "", column)}`).join(""), style: "text" }
+        ...kept.flatMap((column) => cellSpans(index, column))
       ], index === selected, ctx)
     ])
   };

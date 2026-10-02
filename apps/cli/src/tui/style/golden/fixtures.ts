@@ -42,12 +42,11 @@ export interface R4Turn {
   /** The composer's busy note while the turn still runs (r4 `o.busy`); absent = idle. */
   busy?: string;
   /**
-   * The key focus the screen is drawn in, when not the default: the selected
-   * row (`view-02-list` selects Hook B), or a write card opened on its
-   * documents (`flow-email-02`, `v` pressed). `screen.ts` applies what the
-   * session lets a render take today; see its header.
+   * The key focus the screen is drawn in, when not the default: a write card
+   * opened on its documents (`flow-email-02`, `v` pressed). A list's selected
+   * row is the view's own (`body.selected`), never a fixture focus.
    */
-  focus?: { selected?: number; viewOpen?: boolean };
+  focus?: { viewOpen?: boolean };
 }
 
 export interface R4ScreenFixture {

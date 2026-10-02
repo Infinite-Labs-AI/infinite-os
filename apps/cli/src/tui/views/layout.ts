@@ -18,6 +18,7 @@ import type { Msg } from "../types.js";
 import {
   focusedViewCtx,
   focusedViewIndex,
+  openingRow,
   NO_VIEW_CAPS,
   viewKeyFacts,
   type ViewFocusState,
@@ -276,8 +277,11 @@ function drawLiveTurn(input: LiveTurnInput, width: number, rows: number | undefi
     ...base, selected: 0, tab: 0, page: 0, explainOpen: false, showHiddenColumns: false, caps
   };
   const focusIndex = input.focus ? input.focus.viewIndex : focusedViewIndex(input.views);
+  // A view with no key focus yet (a turn still running, a committed turn) is drawn on its opening row.
   const renders = input.views.map((view, index) =>
-    renderView(view, view.kind !== "quiet" && index === focusIndex && input.focus ? focusedViewCtx(input.focus, base) : plainCtx));
+    renderView(view, view.kind !== "quiet" && index === focusIndex && input.focus
+      ? focusedViewCtx(input.focus, base)
+      : { ...plainCtx, selected: openingRow(view) }));
   const card: ViewRender[] = input.details?.length
     ? [{ head: "", source: null, detail: [...input.details], footnotes: [], keys: [], okKey: null, rowCount: 0 }]
     : [];
