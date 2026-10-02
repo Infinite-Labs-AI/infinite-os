@@ -5,7 +5,22 @@
 // and parses one JSON answer from stdout under a deadline. A crash, a deadline, a sandbox that cannot be
 // applied, or output that does not parse is returned as a failure with a reason; the caller turns it into
 // `undetermined (test error)`, never a pass.
-import { existsSync } from "node:fs"
+//
+// THE CHILD'S OWN HARDENING (review O6-R6). The sandbox stops reads of secrets, writes and the network;
+// it cannot stop page code from LYING about its own result if it reaches the child's host realm. So the
+// child Node runs with:
+//   • `--disallow-code-generation-from-strings`: the host realm's `Function` refuses to compile, so the
+//     classic escape `<host fn>.constructor('return process')()` (and every spelling of it) throws. The
+//     page's own context keeps `eval` / `Function` (its intrinsics are its own);
+//   • `--frozen-intrinsics`: the host realm's `Array.prototype`, `Map.prototype`, `Error`, … are frozen,
+//     so page code holding a host array cannot patch `push` under the recorder;
+//   • the Node permission model (Node ≥ 22.13, `--permission`): file reads only of the infinite-tag
+//     package itself, no writes, no child processes, no workers, no addons, on every platform, including
+//     a Linux host where `sandbox-exec` does not exist.
+// What remains (documented, not closed here): page code that DETECTS T0 and behaves differently. The
+// rehearsal and the real visit, which page code cannot reach, are the backstop for that.
+import { existsSync, realpathSync } from "node:fs"
+import { dirname, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 
 import { T0_PROTOCOL_VERSION, type T0ChildRequest, type T0ChildResponse, type T0Session } from "./protocol.js"
@@ -40,6 +55,31 @@ export function resolveT0ChildEntry(moduleUrl: string = import.meta.url): string
   return fileURLToPath(new URL("./child.js", moduleUrl))
 }
 
+/** The package root a built child lives in (`<root>/dist/src/t0/child.js`). */
+export function t0PackageRoot(entry: string): string {
+  const root = resolve(dirname(entry), "../../..")
+  try {
+    return realpathSync(root)
+  } catch {
+    return root
+  }
+}
+
+/** Whether this Node has the stable permission model (`--permission`, Node ≥ 22.13). */
+export function t0PermissionModelAvailable(version: string = process.versions.node): boolean {
+  const [major = 0, minor = 0] = version.split(".").map((part) => Number.parseInt(part, 10))
+  return major > 22 || (major === 22 && minor >= 13)
+}
+
+/** The Node flags the T0 child runs with (see the header). `version` is a test seam. */
+export function t0ChildNodeFlags(packageRoot: string, version: string = process.versions.node): string[] {
+  const flags = ["--disallow-code-generation-from-strings", "--frozen-intrinsics"]
+  // The stable permission model only (Node ≥ 22.13): Node 20's experimental flag has different path
+  // semantics and is not exercised here. Below that, the two realm flags and (on macOS) the sandbox remain.
+  if (t0PermissionModelAvailable(version)) flags.push("--permission", `--allow-fs-read=${packageRoot}`)
+  return flags
+}
+
 export async function runT0Sessions(sessions: readonly T0Session[], options: T0RunOptions = {}): Promise<T0RunOutcome> {
   const entry = options.childEntry ?? resolveT0ChildEntry()
   if (!existsSync(entry)) return { ok: false, reason: "not_built", detail: `the T0 child is missing at ${entry}; build infinite-tag first` }
@@ -48,7 +88,7 @@ export async function runT0Sessions(sessions: readonly T0Session[], options: T0R
   const spawnFn = options.spawn ?? sandboxedSpawn
   let result
   try {
-    result = await spawnFn(process.execPath, ["--max-old-space-size=512", "--no-warnings", entry], {
+    result = await spawnFn(process.execPath, ["--max-old-space-size=512", "--no-warnings", ...t0ChildNodeFlags(t0PackageRoot(entry)), entry], {
       denyReads: deny.paths,
       denyReadPrefixes: deny.prefixes,
       network: false,

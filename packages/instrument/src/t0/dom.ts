@@ -22,6 +22,25 @@ export interface DomHooks {
   onFormSubmission(form: T0Element, viaMethod: boolean): void
 }
 
+// The links the RECORDING depends on (an element's document, the document's hooks and URL resolver) live
+// in module-private WeakMaps, never in page-visible properties: page code that reassigns
+// `document.hooks`, `document.resolveUrl` or `el.ownerDocument` must not be able to make a `src` it
+// really set go unrecorded (review O6-R6). The public `ownerDocument` / `resolveUrl` are read-only views.
+const OWNER = new WeakMap<object, T0Document>()
+const INTERNALS = new WeakMap<object, { hooks: DomHooks; resolveUrl: (raw: string) => string }>()
+
+function docOf(node: object): T0Document {
+  const doc = OWNER.get(node)
+  if (!doc) throw new Error("T0: a node without its document")
+  return doc
+}
+
+function internalsOf(doc: object): { hooks: DomHooks; resolveUrl: (raw: string) => string } {
+  const internals = INTERNALS.get(doc)
+  if (!internals) throw new Error("T0: a document without its hooks")
+  return internals
+}
+
 const VOID_ELEMENTS = new Set(["area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"])
 const RAW_TEXT_ELEMENTS = new Set(["script", "style", "textarea", "title", "noscript"])
 const REFLECTED = ["id", "href", "src", "type", "rel", "target", "name", "action", "method", "value", "title", "alt", "role", "async", "defer", "crossOrigin"]
@@ -137,11 +156,9 @@ export class T0Element extends T0EventTarget {
   private ownText = ""
   disabled = false
   checked = false
-  constructor(
-    public ownerDocument: T0Document,
-    tagName: string
-  ) {
+  constructor(ownerDocument: T0Document, tagName: string) {
     super()
+    OWNER.set(this, ownerDocument)
     this.localName = tagName.toLowerCase()
     for (const name of REFLECTED) {
       const attr = name === "crossOrigin" ? "crossorigin" : name
@@ -150,7 +167,7 @@ export class T0Element extends T0EventTarget {
         enumerable: true,
         get: () => {
           const raw = this.attributeMap.get(attr)
-          if (name === "href" || name === "src" || name === "action") return raw === undefined ? "" : this.ownerDocument.resolveUrl(raw)
+          if (name === "href" || name === "src" || name === "action") return raw === undefined ? "" : internalsOf(docOf(this)).resolveUrl(raw)
           if (name === "async" || name === "defer") return raw !== undefined
           return raw ?? ""
         },
@@ -233,10 +250,14 @@ export class T0Element extends T0EventTarget {
   get innerHTML(): string {
     return ""
   }
+  get ownerDocument(): T0Document {
+    return docOf(this)
+  }
   get isConnected(): boolean {
     let node: T0Element | null = this
+    const root = docOf(this).documentElement
     while (node) {
-      if (node === this.ownerDocument.documentElement) return true
+      if (node === root) return true
       node = node.parentNode
     }
     return false
@@ -244,7 +265,10 @@ export class T0Element extends T0EventTarget {
   setAttribute(name: string, value: unknown): void {
     const key = String(name).toLowerCase()
     this.attributeMap.set(key, String(value))
-    if (key === "src" && this.localName === "img") this.ownerDocument.hooks.onImageSrc(this, this.ownerDocument.resolveUrl(String(value)))
+    if (key === "src" && this.localName === "img") {
+      const internals = internalsOf(docOf(this))
+      internals.hooks.onImageSrc(this, internals.resolveUrl(String(value)))
+    }
   }
   getAttribute(name: string): string | null {
     return this.attributeMap.get(String(name).toLowerCase()) ?? null
@@ -265,7 +289,7 @@ export class T0Element extends T0EventTarget {
     const index = reference ? this.childNodes.indexOf(reference) : -1
     if (index === -1) this.childNodes.push(child)
     else this.childNodes.splice(index, 0, child)
-    if (child instanceof T0Element && this.isConnected) this.ownerDocument.connected(child)
+    if (child instanceof T0Element && this.isConnected) docOf(this).connected(child)
     return child
   }
   append(...nodes: Array<T0Element | T0Text | string>): void {
@@ -328,21 +352,21 @@ export class T0Element extends T0EventTarget {
   focus(): void {}
   blur(): void {}
   dispatchEvent(event: T0Event): boolean {
-    return this.ownerDocument.dispatch(this, event)
+    return docOf(this).dispatch(this, event)
   }
   /** `element.click()`: a trusted-shaped click that bubbles and runs the default action. */
   click(): void {
     const event = new T0Event("click", { bubbles: true, cancelable: true, button: 0 })
-    this.ownerDocument.dispatch(this, event)
+    docOf(this).dispatch(this, event)
   }
   /** `form.submit()`: no submit event, straight to the submission (the HTML spec). */
   submit(): void {
-    if (this.localName === "form") this.ownerDocument.hooks.onFormSubmission(this, true)
+    if (this.localName === "form") internalsOf(docOf(this)).hooks.onFormSubmission(this, true)
   }
   requestSubmit(): void {
     if (this.localName !== "form") return
     const event = new T0Event("submit", { bubbles: true, cancelable: true })
-    this.ownerDocument.dispatch(this, event)
+    docOf(this).dispatch(this, event)
   }
 }
 
@@ -360,17 +384,19 @@ export class T0Document extends T0EventTarget {
   /** Set by the page: the window to bubble to, the URL resolver, error reporting. */
   windowTarget: T0EventTarget | null = null
   reportError: (error: unknown) => void = () => undefined
-  constructor(
-    public hooks: DomHooks,
-    public resolveUrl: (raw: string) => string
-  ) {
+  constructor(hooks: DomHooks, resolveUrl: (raw: string) => string) {
     super()
+    INTERNALS.set(this, { hooks, resolveUrl })
     this.documentElement = new T0Element(this, "html")
     this.head = new T0Element(this, "head")
     this.body = new T0Element(this, "body")
     this.head.parentNode = this.documentElement
     this.body.parentNode = this.documentElement
     this.documentElement.childNodes.push(this.head, this.body)
+  }
+  /** Resolve a URL against the page (read-only: the recording relies on it). */
+  resolveUrl(raw: string): string {
+    return internalsOf(this).resolveUrl(raw)
   }
   get scripts(): T0Element[] {
     return this.getElementsByTagName("script")
@@ -418,7 +444,7 @@ export class T0Document extends T0EventTarget {
   }
   /** A subtree was connected: report every script inside it (in tree order). */
   connected(node: T0Element): void {
-    if (node.localName === "script") this.hooks.onScriptConnected(node)
+    if (node.localName === "script") internalsOf(this).hooks.onScriptConnected(node)
     for (const child of node.children) this.connected(child)
   }
   dispatchEvent(event: T0Event): boolean {
@@ -467,7 +493,7 @@ export class T0Document extends T0EventTarget {
     if (event.type === "click") {
       const anchor = target.closest("a[href]")
       if (anchor) {
-        this.hooks.onAnchorActivation(anchor, event)
+        internalsOf(this).hooks.onAnchorActivation(anchor, event)
         return
       }
       const submitter = target.closest("button, input[type=submit]")
@@ -480,7 +506,7 @@ export class T0Document extends T0EventTarget {
       }
       return
     }
-    if (event.type === "submit" && target.localName === "form") this.hooks.onFormSubmission(target, false)
+    if (event.type === "submit" && target.localName === "form") internalsOf(this).hooks.onFormSubmission(target, false)
   }
 }
 
@@ -488,7 +514,7 @@ export class T0Document extends T0EventTarget {
 
 /** Parse HTML markup into `parent` (elements, attributes and text; comments dropped; scripts kept with their text). */
 export function parseMarkupInto(parent: T0Element, markup: string): void {
-  const document = parent.ownerDocument
+  const document = docOf(parent)
   const stack: T0Element[] = [parent]
   const top = () => stack[stack.length - 1]!
   let at = 0

@@ -2,6 +2,7 @@
 // `sandboxedSpawn` (minimal env, temp HOME, and on macOS no network and no reads of the user's secrets),
 // writes ONE `T0ChildRequest` JSON to stdin, and reads ONE `T0ChildResponse` JSON line from stdout.
 // Page code runs here and only here. Nothing in this file grades anything.
+import { hardenHostRealm } from "./harden.js"
 import { runSession } from "./session.js"
 import { T0_PROTOCOL_VERSION, type T0ChildRequest, type T0ChildResponse } from "./protocol.js"
 
@@ -12,6 +13,8 @@ async function readStdin(): Promise<string> {
 }
 
 export async function main(): Promise<void> {
+  // Before any page code: the host classes a page receives are frozen (see harden.ts and run.ts).
+  hardenHostRealm()
   const raw = await readStdin()
   const request = JSON.parse(raw) as T0ChildRequest
   if (request.protocol !== T0_PROTOCOL_VERSION || !Array.isArray(request.sessions)) throw new Error("unsupported T0 request")

@@ -25,6 +25,7 @@ import {
   FAKE,
   fakeArtifacts,
   guardedPage,
+  hostGuardExpression,
   MIRROR_FIXTURE,
   page,
   sensitivePosthogSnippet,
@@ -36,9 +37,9 @@ import type { InstallPlan } from "../types.js"
 import type { CheckResult, T0Scenario } from "../wizard/contracts/jobs.js"
 import { decodeNextBootstrap } from "./next-bootstrap.js"
 import type { T0Session } from "./protocol.js"
-import { runT0Sessions } from "./run.js"
+import { runT0Sessions, t0ChildNodeFlags, t0PackageRoot, t0PermissionModelAvailable } from "./run.js"
 import { defaultDenyReads, sandboxedSpawn } from "./sandbox.js"
-import { clickTestLabel, hostMatrixRows, reasonCode, runT0Scenarios, T0ScenarioError } from "./scenarios.js"
+import { clickTestLabel, ga4Hits, hostMatrixRows, reasonCode, runT0Scenarios, T0ScenarioError } from "./scenarios.js"
 import { runSession } from "./session.js"
 
 const NOW = () => new Date("2026-10-02T10:00:00.000Z")
@@ -86,22 +87,45 @@ describe("T0 never runs in the wizard's process", () => {
   const session = (): T0Session => ({ id: "escape", actions: [{ kind: "load", label: "page", url: `https://${FAKE.host}/`, source: escape }] })
   const leaked = (body: string | null) => JSON.parse(body ?? "{}") as { pid: number; growth: string | null; tag: string[]; home: string }
 
-  it("escaped page code sees only the child's minimal env, and the parent is untouched", async () => {
+  it("in the child the vm escape is closed: page code cannot reach the child's process, whatever the spelling (review O6-R6)", async () => {
     const outcome = await runT0Sessions([session()])
     expect(outcome.ok).toBe(true)
     if (!outcome.ok) return
     expect(outcome.sandboxed).toBe(darwin)
-    const beacon = outcome.response.sessions[0]!.requests.find((request) => request.url.endsWith("/leak"))
-    const seen = leaked(beacon!.body)
-    expect(seen.pid).not.toBe(process.pid)
     expect(outcome.childPid).not.toBe(process.pid)
-    expect(seen.growth).toBeNull()
-    expect(seen.tag).toEqual([])
-    expect(seen.home).not.toBe(process.env.HOME)
+    const recording = outcome.response.sessions[0]!
+    // The escape threw before the beacon: nothing leaked, the page saw an EvalError.
+    expect(recording.requests.find((request) => request.url.endsWith("/leak"))).toBeUndefined()
+    expect(recording.actions[0]!.scriptErrors.join(" ")).toMatch(/Code generation from strings disallowed/)
     expect(process.env.T0_PWNED).toBeUndefined()
+
+    const attempts = page(
+      `<script>
+        var out = {};
+        function attempt(name, fn) { try { out[name] = String(fn()); } catch (e) { out[name] = 'threw:' + e.name; } }
+        attempt('constructor', function () { return fetch.constructor('return typeof process')(); });
+        attempt('spelled', function () { return fetch['const' + 'ructor']('return typeof process')(); });
+        attempt('async', function () { return (async function () {}).constructor === Function ? 'own realm' : 'host'; });
+        attempt('hostArrayPush', function () { navigator.languages.constructor.prototype.push = function () { return 0; }; return 'patched'; });
+        attempt('hostUrl', function () { Object.defineProperty(URL.prototype, 'href', { get: function () { return 'https://forged.invalid/'; } }); return new URL('https://x.test/').href; });
+        attempt('ownRealm', function () { Array.prototype.t0Polyfill = function () { return 'ok'; }; return [].t0Polyfill() + eval('1+1'); });
+        navigator.sendBeacon('/attempts', JSON.stringify(out));
+      </script>`
+    )
+    const second = await runT0Sessions([{ id: "attempts", actions: [{ kind: "load", label: "page", url: `https://${FAKE.host}/`, source: attempts }] }])
+    expect(second.ok).toBe(true)
+    if (!second.ok) return
+    const seen = JSON.parse(second.response.sessions[0]!.requests.find((request) => request.url.endsWith("/attempts"))!.body ?? "{}") as Record<string, string>
+    expect(seen.constructor).toBe("threw:EvalError")
+    expect(seen.spelled).toBe("threw:EvalError")
+    expect(seen.hostArrayPush).toBe("threw:TypeError")
+    // The host URL the recorder resolves with is frozen too.
+    expect(seen.hostUrl).toBe("threw:TypeError")
+    // The page's OWN realm is untouched: its polyfills and eval still work.
+    expect(seen.ownRealm).toBe("ok2")
   })
 
-  it("negative: the same page run IN-PROCESS reaches the wizard's env and pid (why T0 is a child)", async () => {
+  it("negative: the same page run IN-PROCESS reaches the wizard's env and pid (why T0 is a hardened child)", async () => {
     const recording = await runSession(session())
     const seen = leaked(recording.requests.find((request) => request.url.endsWith("/leak"))!.body)
     expect(seen.pid).toBe(process.pid)
@@ -110,29 +134,70 @@ describe("T0 never runs in the wizard's process", () => {
     expect(process.env.T0_PWNED).toBe("1")
   })
 
-  it.runIf(darwin)("darwin: under the profile a page cannot read ~/.growth-os (EPERM); without the deny it could", async () => {
-    const home = realpathSync(mkdtempSync(join(tmpdir(), "t0-fake-home-")))
-    mkdirSync(join(home, ".growth-os"))
-    writeFileSync(join(home, ".growth-os", "x"), "FAKE-secret-for-the-sandbox-test")
-    const reader = page(
+  it("the child runs with the codegen, frozen-intrinsics and permission-model flags for its Node version", () => {
+    expect(t0ChildNodeFlags("/pkg", "22.23.2")).toEqual(["--disallow-code-generation-from-strings", "--frozen-intrinsics", "--permission", "--allow-fs-read=/pkg"])
+    expect(t0ChildNodeFlags("/pkg", "23.0.0")).toContain("--permission")
+    // negative: before the stable permission model (Node 20, 22.12, 18) only the two realm flags
+    for (const version of ["22.12.0", "20.11.1", "18.20.0"]) expect(t0ChildNodeFlags("/pkg", version)).toEqual(["--disallow-code-generation-from-strings", "--frozen-intrinsics"])
+    expect(t0PackageRoot("/opt/x/node_modules/infinite-tag/dist/src/t0/child.js")).toBe("/opt/x/node_modules/infinite-tag")
+  })
+
+  it.runIf(t0PermissionModelAvailable())("with those flags a Node child can neither write nor read outside the package, even WITHOUT sandbox-exec", async () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), "t0-perm-")))
+    writeFileSync(join(dir, "secret"), "FAKE-secret-for-the-permission-test")
+    const script = `const fs=require('fs');const r={};try{fs.writeFileSync(${JSON.stringify(join(dir, "planted"))},'x');r.write='written'}catch(e){r.write=e.code}try{fs.readFileSync(${JSON.stringify(join(dir, "secret"))},'utf8');r.read='read'}catch(e){r.read=e.code}process.stdout.write(JSON.stringify(r))`
+    const flags = t0ChildNodeFlags("/nonexistent-package-root")
+    const hardened = await sandboxedSpawn(process.execPath, ["--no-warnings", ...flags, "-e", script], { denyReads: [], network: false, timeoutMs: 10_000, platform: "linux" })
+    expect(JSON.parse(hardened.stdout)).toEqual({ write: "ERR_ACCESS_DENIED", read: "ERR_ACCESS_DENIED" })
+    // negative: the same script without the flags writes and reads
+    const plain = await sandboxedSpawn(process.execPath, ["-e", script], { denyReads: [], network: false, timeoutMs: 10_000, platform: "linux" })
+    expect(JSON.parse(plain.stdout)).toEqual({ write: "written", read: "read" })
+  })
+
+  it("page code cannot unhook the recorder: reassigning document.hooks / resolveUrl / ownerDocument does not hide a beacon it set", async () => {
+    const unhook = page(
       `<script>
-        var p = this.constructor.constructor('return process')();
-        var result;
-        try { p.getBuiltinModule('fs').readFileSync(${JSON.stringify(join(home, ".growth-os", "x"))}, 'utf8'); result = 'read'; }
-        catch (e) { result = e.code; }
-        navigator.sendBeacon('/read', result);
+        var noop = function () {};
+        try { document.hooks = { onImageSrc: noop, onScriptConnected: noop, onAnchorActivation: noop, onFormSubmission: noop }; } catch (e) {}
+        try { document.resolveUrl = function () { return 'about:blank'; }; } catch (e) {}
+        var img = document.createElement('img');
+        try { Object.defineProperty(img, 'ownerDocument', { value: { hooks: { onImageSrc: noop }, resolveUrl: noop } }); } catch (e) {}
+        img.src = 'https://www.facebook.com/tr?id=${FAKE.pixel}&ev=PageView';
+        var script = document.createElement('script');
+        script.src = '/js/after.js';
+        document.head.appendChild(script);
       </script>`
     )
-    const read = async (homes: string[]) => {
-      const outcome = await runT0Sessions([{ id: "r", actions: [{ kind: "load", label: "p", url: `https://${FAKE.host}/`, source: reader }] }], {
-        denyReads: defaultDenyReads({ homes, growthOsHome: null })
-      })
-      if (!outcome.ok) throw new Error(outcome.detail)
-      return outcome.response.sessions[0]!.requests.find((request) => request.url.endsWith("/read"))!.body
+    const outcome = await runT0Sessions([{ id: "unhook", actions: [{ kind: "load", label: "page", url: `https://${FAKE.host}/`, source: unhook }] }])
+    expect(outcome.ok).toBe(true)
+    if (!outcome.ok) return
+    const urls = outcome.response.sessions[0]!.requests.map((request) => request.url)
+    expect(urls).toContain(`https://www.facebook.com/tr?id=${FAKE.pixel}&ev=PageView`)
+    expect(urls).toContain(`https://${FAKE.host}/js/after.js`)
+  })
+
+  it("a page that forges its own host_matrix by patching the recorder's realm still fails in the child (review O6-R6)", async () => {
+    const forge =
+      'var F=fetch["const"+"ructor"];var HA=F("return Array")();HA.__h=location.hostname;' +
+      "var push=HA.prototype.push;HA.prototype.push=function(){for(var i=0;i<arguments.length;i++){var a=arguments[i];" +
+      'if(a&&typeof a.url==="string"&&/google/.test(a.url)&&/(vercel\\.app|localhost|127\\.0\\.0\\.1|0\\.0\\.0\\.0|\\.local|netlify\\.app|pages\\.dev)$/.test(HA.__h))return this.length}return push.apply(this,arguments)}'
+    const ga4 = `window.dataLayer=window.dataLayer||[];function gtag(){dataLayer.push(arguments)};gtag("js",new Date());gtag("config","${FAKE.ga4}");`
+    const html = `<html><head><script>${forge}</script><script>${ga4}</script><script async src="https://www.googletagmanager.com/gtag/js?id=${FAKE.ga4}"></script></head><body></body></html>`
+    const results = await t0({ id: "host_matrix", params: { productionHost: FAKE.host, source: { html } } })
+    const main = only(results, "problem")
+    expect(reasonCode(main)).toBe("previews_send_data")
+    // negative: in-process (no hardening) the same prelude really does hide the preview's GA4 hits.
+    // It patches THIS process's Array.prototype.push, so restore it whatever happens.
+    const preview = (source: string) => runSession({ id: "forge", actions: [{ kind: "load", label: "preview", url: "https://acme-abc123.vercel.app/", source: { html: source } }] })
+    const control = await preview(html.replace(`<script>${forge}</script>`, ""))
+    expect(ga4Hits(control).length).toBeGreaterThan(0)
+    const originalPush = Array.prototype.push
+    try {
+      const forged = await preview(html)
+      expect(ga4Hits(forged)).toEqual([])
+    } finally {
+      Array.prototype.push = originalPush
     }
-    expect(await read([home])).toBe("EPERM")
-    const elsewhere = realpathSync(mkdtempSync(join(tmpdir(), "t0-other-home-")))
-    expect(await read([elsewhere])).toBe("read")
   })
 
   it.runIf(darwin)("darwin: network off denies even loopback; network on reaches it", async () => {
@@ -201,6 +266,8 @@ describe("host_matrix (decision 3: deny-list guard, production always fires)", (
       "localhost:silent",
       "127.0.0.1:silent",
       "0.0.0.0:silent",
+      "[::1]:silent",
+      "app.localhost:silent",
       "foo.local:silent",
       "x.netlify.app:silent",
       "x.pages.dev:silent",
@@ -222,6 +289,49 @@ describe("host_matrix (decision 3: deny-list guard, production always fires)", (
     const result = only(await t0({ id: "host_matrix", params: { productionHost: FAKE.host } }), "problem")
     expect(reasonCode(result)).toBe("previews_send_data")
     for (const host of ["acme-store-abc123.vercel.app", "localhost", "127.0.0.1", "x.netlify.app"]) expect(result.reason).toContain(host)
+  })
+
+  it("R22: IPv6 loopback and *.localhost are silent rows; a guard that forgets them fails", async () => {
+    // A guard whose deny list lacks [::1] and .localhost (only the older v0 hosts).
+    const partial = guardedPage([FAKE.host]).html!.split('"[::1]",').join("").split('".localhost",').join("")
+    const result = only(await t0({ id: "host_matrix", params: { productionHost: FAKE.host, source: { html: partial } } }), "problem")
+    expect(result.reason).toContain("[::1]: ")
+    expect(result.reason).toContain("app.localhost: ")
+    // negative: the full deny list passes (the guarded test above)
+  })
+
+  it("R7: an INVERTED guard (silent on production, firing on every preview) is a problem, not 'not installed'", async () => {
+    const guard = hostGuardExpression([FAKE.host])
+    const ga4 = `window.dataLayer=window.dataLayer||[];function gtag(){dataLayer.push(arguments)};gtag("js",new Date());gtag("config","${FAKE.ga4}");`
+    const inverted = page(`<script>(function(){ if (${guard}) return; ${ga4} })();</script><script async src="https://www.googletagmanager.com/gtag/js?id=${FAKE.ga4}"></script>`)
+    const result = only(await t0({ id: "host_matrix", params: { productionHost: FAKE.host, source: inverted } }), "problem")
+    expect(reasonCode(result)).toBe("previews_send_data")
+    expect(result.reason).toContain("acme-store-abc123.vercel.app: ga4 fire")
+    // with the tools named (the default page names them from the artifacts), production's silence is named too
+    const named = only(await t0({ id: "host_matrix", params: { productionHost: FAKE.host, source: inverted, tools: ["ga4"] } }), "problem")
+    expect(named.reason).toContain(`${FAKE.host}: ga4 silent on a host that must fire`)
+    // a tool the caller names that never starts anywhere is a production problem, not "not installed"
+    const nothing = only(await t0({ id: "host_matrix", params: { productionHost: FAKE.host, source: page(""), tools: ["ga4"] } }), "problem")
+    expect(reasonCode(nothing)).toBe("production_silent")
+    // negative: a page with no tag and no named tools is still "not installed" (undetermined)
+    expect(reasonCode(only(await t0({ id: "host_matrix", params: { productionHost: FAKE.host, source: page("") } }), "undetermined"))).toBe("not_installed")
+  })
+
+  it("R23: a vendor loader request alone is not a start; a missing capture has its own code", async () => {
+    // gtag.js is requested on every host, but gtag('config') runs only behind the guard: nothing measured on previews.
+    const guard = hostGuardExpression([FAKE.host])
+    const loaderOutside = page(
+      `<script>window.dataLayer=window.dataLayer||[];function gtag(){dataLayer.push(arguments)};(function(){ if (!${guard}) return; gtag("js",new Date()); gtag("config","${FAKE.ga4}"); })();</script><script async src="https://www.googletagmanager.com/gtag/js?id=${FAKE.ga4}"></script>`
+    )
+    only(await t0({ id: "host_matrix", params: { productionHost: FAKE.host, source: loaderOutside } }), "pass")
+    // A capture that is (wrongly) host-guarded: the guard is fine for the tools, the capture is the problem.
+    const capture = `(function(){var c=new URLSearchParams(location.search).get('fbclid');if(c)document.cookie='_fbc=fb.1.'+Date.now()+'.'+c+';path=/';})();`
+    const ga4 = `window.dataLayer=window.dataLayer||[];function gtag(){dataLayer.push(arguments)};gtag("js",new Date());gtag("config","${FAKE.ga4}");`
+    const guardedCapture = page(
+      `<script>(function(){ if (!${guard}) return; ${ga4} })();</script><script async src="https://www.googletagmanager.com/gtag/js?id=${FAKE.ga4}"></script><script>if (${guard}) { ${capture} }</script>`
+    )
+    const result = only(await t0({ id: "host_matrix", params: { productionHost: FAKE.host, source: guardedCapture } }), "problem")
+    expect(reasonCode(result)).toBe("no_fbc_capture")
   })
 
   it("negative: a guard with no exempt list silences an exempt production alias", async () => {
@@ -423,6 +533,40 @@ describe("click_test (jobs 10, 11: static HTML / Vite markup only)", () => {
     const click = [{ selector: "#nope", label: "sign_up", expect: { ga4: ["sign_up"] } }]
     only(await t0({ id: "click_test", params: { productionHost: FAKE.host, source: page(""), clicks: click } }), "problem")
     only(await t0({ id: "click_test", params: { productionHost: FAKE.host, framework: "vite-react", source: page(""), clicks: click } }), "undetermined")
+  })
+
+  it("R13: a click that expects no event is refused (a vacuous pass would mark key events); so is a label with ';'", async () => {
+    const source = guardedPage([FAKE.host], '<button id="signup">Start</button>')
+    for (const expectation of [{}, { ga4: [] }, { ga4: [], posthog: [], infinite: [] }]) {
+      await expect(t0({ id: "click_test", params: { productionHost: FAKE.host, source, clicks: [{ selector: "#signup", label: "sign_up", expect: expectation }] } })).rejects.toBeInstanceOf(T0ScenarioError)
+    }
+    await expect(t0({ id: "click_test", params: { productionHost: FAKE.host, source, clicks: [{ selector: "#signup", label: "a;b", expect: { ga4: ["a;b"] } }] } })).rejects.toThrow(/plain event name/)
+    // negative: the same dead button with a real expectation is a problem, not a pass
+    const dead = only(await t0({ id: "click_test", params: { productionHost: FAKE.host, source, clicks: [{ selector: "#signup", label: "sign_up", expect: { ga4: ["sign_up"] } }] } }), "problem")
+    expect(dead.reason).toContain("ga4 did not receive sign_up")
+  })
+
+  it("R14: on Vite a silent click whose handler may live in a module script T0 does not run is not_exercised, never a problem", async () => {
+    const vite = guardedPage([FAKE.host], '<button id="signup" data-infinite-conversion="sign_up">Start</button><script type="module" src="/src/main.js"></script>')
+    const click = [{ selector: "#signup", label: "sign_up", expect: { ga4: ["sign_up"] } }]
+    const result = only(await t0({ id: "click_test", params: { productionHost: FAKE.host, framework: "vite", source: vite, clicks: click } }), "undetermined")
+    expect(reasonCode(result)).toBe("not_exercised")
+    // negative: the same page graded as static HTML (no module to blame) is a problem
+    only(await t0({ id: "click_test", params: { productionHost: FAKE.host, framework: "static-html", source: vite, clicks: click } }), "problem")
+    // and on Vite an fbq standard conversion on the click is still a problem
+    const lead = guardedPage([FAKE.host], `<button id="signup">Start</button><script type="module" src="/src/main.js"></script><script>document.addEventListener('click',function(){fbq('track','Lead');});</script>`)
+    only(await t0({ id: "click_test", params: { productionHost: FAKE.host, framework: "vite", source: lead, clicks: click } }), "problem")
+  })
+
+  it("a caller's own scenario id dispatches on its checkId (`<item>:click_test`)", async () => {
+    const results = await runT0Scenarios(
+      [{ id: "conversions_to_tools:sign_up:click_test", checkId: "click_test", params: { productionHost: FAKE.host, source: guardedPage([FAKE.host], body), clicks: [{ selector: "#signup", label: "sign_up", expect: { ga4: ["sign_up"] } }] } }],
+      fakeArtifacts(),
+      { runId: FAKE.runId, now: NOW }
+    )
+    expect(only(results, "pass").checkId).toBe("click_test")
+    // negative: neither the id nor the checkId names a scenario
+    await expect(runT0Scenarios([{ id: "x:y", checkId: "nope", params: {} }], fakeArtifacts(), { runId: FAKE.runId, now: NOW })).rejects.toBeInstanceOf(T0ScenarioError)
   })
 })
 

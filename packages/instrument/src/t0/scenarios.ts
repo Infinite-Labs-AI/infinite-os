@@ -241,19 +241,6 @@ export function infiniteHits(recording: T0SessionRecording, collectPath: string)
   return hits
 }
 
-function loadersIn(recording: T0SessionRecording, action: number): Set<string> {
-  const out = new Set<string>()
-  for (const request of recording.requests) {
-    if (request.kind !== "script" || request.action !== action) continue
-    const url = parse(request.url)
-    if (!url) continue
-    if (url.pathname === "/gtag/js") out.add("ga4")
-    if (url.pathname.endsWith("/fbevents.js")) out.add("meta")
-    if (url.pathname.endsWith("/static/array.js") || /\/array\/[^/]+\/config/.test(url.pathname)) out.add("posthog")
-  }
-  return out
-}
-
 function fbqCalls(recording: T0SessionRecording, action: number): unknown[][] {
   return recording.timeline.filter((entry) => entry.kind === "fbq" && entry.action === action).map((entry) => entry.args)
 }
@@ -266,10 +253,17 @@ function cookieValue(recording: T0SessionRecording, name: string): string[] {
   return recording.cookies.filter((cookie) => cookie.name === name).map((cookie) => cookie.value)
 }
 
-/** Which guarded tools showed ANY sign of starting during an action (a loader, an init or a beacon). */
-function toolsStarted(recording: T0SessionRecording, action: number): Set<"ga4" | "posthog" | "meta"> {
-  const started = new Set<"ga4" | "posthog" | "meta">()
-  for (const tool of loadersIn(recording, action)) started.add(tool as "ga4" | "posthog" | "meta")
+type GuardedTool = "ga4" | "posthog" | "meta"
+const GUARDED: readonly GuardedTool[] = ["ga4", "posthog", "meta"]
+
+/**
+ * Which guarded tools STARTED during an action: an init (`gtag('config')`, `posthog.init`,
+ * `fbq('init')`) or a beacon. A vendor LOADER request alone is not a start (review O6-R23): a guard
+ * around an adopted `gtag('config')` with a separate `<script src=gtag/js>` measures nothing on a preview.
+ */
+function toolsStarted(recording: T0SessionRecording, action: number): Set<GuardedTool> {
+  const started = new Set<GuardedTool>()
+  if (recording.timeline.some((entry) => entry.kind === "gtag" && entry.action === action && entry.args[0] === "config")) started.add("ga4")
   if (ga4Hits(recording).some((hit) => hit.action === action)) started.add("ga4")
   if (metaHits(recording).some((hit) => hit.action === action)) started.add("meta")
   if (posthogHits(recording).some((hit) => hit.action === action)) started.add("posthog")
@@ -312,6 +306,8 @@ export function hostMatrixRows(productionHost: string, exempt: readonly string[]
     { host: "localhost", expect: "silent" },
     { host: "127.0.0.1", expect: "silent" },
     { host: "0.0.0.0", expect: "silent" },
+    { host: "[::1]", expect: "silent" },
+    { host: "app.localhost", expect: "silent" },
     { host: "foo.local", expect: "silent" },
     { host: "x.netlify.app", expect: "silent" },
     { host: "x.pages.dev", expect: "silent" },
@@ -328,11 +324,25 @@ export function hostMatrixRows(productionHost: string, exempt: readonly string[]
   })
 }
 
+/** The guarded tools the page under test is meant to start: `params.tools`, else the artifacts' (default page only). */
+function expectedGuardedTools(params: Readonly<Record<string, unknown>>, artifacts: WorkspaceInstallArtifacts): GuardedTool[] | null {
+  const named = strList(params, "tools")
+  if (named.length) {
+    const unknown = named.filter((tool) => !(GUARDED as readonly string[]).includes(tool))
+    if (unknown.length) throw new T0ScenarioError(`host_matrix: params.tools may name ga4, posthog, meta (not ${unknown.join(", ")})`)
+    return named as GuardedTool[]
+  }
+  // A caller-supplied page may carry any subset; without `params.tools` production itself is the reference.
+  if (params.source !== undefined) return null
+  return GUARDED.filter((tool) => artifacts[tool] !== undefined)
+}
+
 function planHostMatrix(scenario: T0Scenario, artifacts: WorkspaceInstallArtifacts, runId: string | null): PlannedScenario {
   const productionHost = productionHostParam(scenario.params, "host_matrix")
   const exempt = strList(scenario.params, "exempt")
   const rows = hostMatrixRows(productionHost, exempt)
   const source = pageSource(scenario.params, artifacts)
+  const expected = expectedGuardedTools(scenario.params, artifacts)
   const clickId = marker(runId, "_HM")
   const sessions: T0Session[] = rows.map((row, index) => ({
     id: `host:${index}`,
@@ -345,8 +355,10 @@ function planHostMatrix(scenario: T0Scenario, artifacts: WorkspaceInstallArtifac
       const crashed = sessionError(scenario, ctx, recordings)
       if (crashed) return [crashed]
       const production = toolsStarted(recordings[0]!, 0)
-      if (production.size === 0) return [result(scenario, ctx, "undetermined", "not_installed", "no guarded tool (GA4, PostHog, Meta) starts on the production host")]
-      const problems: string[] = []
+      const reference = new Set<GuardedTool>([...(expected ?? []), ...production])
+      const leaking: string[] = []
+      const silentWhereItMustFire: string[] = []
+      const captureMissing: string[] = []
       const evidence: Evidence[] = []
       const leaks: string[] = []
       // Only where the production load itself captured (consent can hold the capture everywhere).
@@ -354,28 +366,34 @@ function planHostMatrix(scenario: T0Scenario, artifacts: WorkspaceInstallArtifac
       rows.forEach((row, index) => {
         const started = toolsStarted(recordings[index]!, 0)
         if (row.expect === "fires") {
-          const missing = [...production].filter((tool) => !started.has(tool))
+          const missing = [...reference].filter((tool) => !started.has(tool)).sort()
           if (missing.length) {
-            problems.push(`${row.host}: ${missing.join(", ")} silent on a host that must fire`)
+            silentWhereItMustFire.push(`${row.host}: ${missing.join(", ")} silent on a host that must fire`)
             evidence.push({ url: `https://${row.host}/` })
           }
           if (row.note === "leaks_deny_list" && started.size) leaks.push(row.host)
         } else {
+          // Graded whatever production did (review O6-R7): an INVERTED guard is silent on production and
+          // fires on every preview, and that is the worst guard bug there is.
           const fired = [...started]
           if (fired.length) {
-            problems.push(`${row.host}: ${fired.sort().join(", ")} fire on a preview / local host`)
+            leaking.push(`${row.host}: ${fired.sort().join(", ")} fire on a preview / local host`)
             evidence.push({ url: `https://${row.host}/` })
           }
           // D15: the capture is never host-guarded, so previews can still test it.
           if (captureExpected && !recordings[index]!.cookieWrites.some((write) => write.value.startsWith("_fbc="))) {
-            problems.push(`${row.host}: the _fbc capture did not run (it must not be host-guarded)`)
+            captureMissing.push(`${row.host}: the _fbc capture did not run (it must not be host-guarded)`)
             evidence.push({ url: `https://${row.host}/` })
           }
         }
       })
+      const problems = [...leaking, ...silentWhereItMustFire, ...captureMissing]
+      if (reference.size === 0 && problems.length === 0)
+        return [result(scenario, ctx, "undetermined", "not_installed", "no guarded tool (GA4, PostHog, Meta) starts on any host")]
+      const code = leaking.length ? "previews_send_data" : silentWhereItMustFire.length ? "production_silent" : "no_fbc_capture"
       const out = [
         problems.length
-          ? result(scenario, ctx, "problem", "previews_send_data", problems.join("; "), evidence)
+          ? result(scenario, ctx, "problem", code, problems.join("; "), evidence)
           : result(scenario, ctx, "pass", null, `${rows.length} hosts: production and exempt hosts fire, previews and local hosts stay silent`)
       ]
       if (leaks.length) out.push(result(scenario, ctx, "info", "leaks_deny_list", `${leaks.join(", ")} fires: a deny list cannot tell a custom staging host from production; only the 7-day host share can`))
@@ -765,8 +783,22 @@ function clickSpecs(params: Readonly<Record<string, unknown>>): ClickSpec[] {
     const spec = entry as ClickSpec
     if (!spec || typeof spec.selector !== "string" || typeof spec.label !== "string" || !spec.expect || typeof spec.expect !== "object")
       throw new T0ScenarioError("click_test: each click needs selector, label and expect")
+    // The label travels in the reason as `label=<name>;` (clickTestLabel), so it is a plain event name.
+    if (!/^[A-Za-z0-9_.:-]{1,64}$/.test(spec.label)) throw new T0ScenarioError(`click_test: label ${JSON.stringify(spec.label)} must be a plain event name`)
+    // A click that expects nothing passes vacuously, and a pass marks key events (review O6-R13).
+    const named = (["ga4", "posthog", "infinite"] as const).flatMap((tool) => {
+      const list = spec.expect[tool]
+      if (list !== undefined && (!Array.isArray(list) || list.some((name) => typeof name !== "string"))) throw new T0ScenarioError(`click_test: expect.${tool} must be a string array`)
+      return list ?? []
+    })
+    if (named.length === 0) throw new T0ScenarioError(`click_test: the click ${spec.label} must expect at least one event (expect.ga4 / posthog / infinite)`)
     return spec
   })
+}
+
+/** Module scripts T0 records but never runs (a Vite entry): handlers living there are not exercised. */
+function hasModuleScripts(source: T0PageSource): boolean {
+  return /<script\b[^>]*\btype\s*=\s*["']?module\b/i.test(source.html ?? "")
 }
 
 /** `label=<label>; …` — the click a click_test result is about (O3 PATCHes `clickTestedConversions` from it). */
@@ -782,6 +814,7 @@ function planClickTest(scenario: T0Scenario, artifacts: WorkspaceInstallArtifact
   const framework = optStr(scenario.params, "framework") ?? "static-html"
   const collectPath = optStr(scenario.params, "collectPath") ?? artifacts.infinite?.collectPath ?? DEFAULT_INFINITE_COLLECT_PATH
   const clicks = clickSpecs(scenario.params)
+  const unexercisedModules = framework !== "static-html" && hasModuleScripts(source)
   // One session per click, so each is graded on a fresh page.
   const sessions: T0Session[] = clicks.map((click, index) => ({
     id: `click:${index}`,
@@ -808,10 +841,18 @@ function planClickTest(scenario: T0Scenario, artifacts: WorkspaceInstallArtifact
         const infinite = infiniteHits(recording, collectPath).filter((hit) => hit.action === 1 && hit.eventName !== "site_page_view").map((hit) => hit.eventName)
         const meta = metaHits(recording).filter((hit) => hit.action === 1 && hit.ev !== "PageView").map((hit) => hit.ev)
         const problems: string[] = []
+        let expectedSeen = 0
         for (const [tool, seen] of [["ga4", ga4], ["posthog", posthog], ["infinite", infinite]] as const) {
-          for (const name of click.expect[tool] ?? []) if (!seen.includes(name)) problems.push(`${tool} did not receive ${name}`)
+          for (const name of click.expect[tool] ?? []) {
+            if (seen.includes(name)) expectedSeen += 1
+            else problems.push(`${tool} did not receive ${name}`)
+          }
         }
         const standard = meta.filter((ev) => META_STANDARD_EVENTS.has(ev))
+        // Vite and friends: the handler may live in a module script T0 never runs (review O6-R14). A
+        // silent click there is not exercised, never a problem; a standard fbq conversion still is.
+        if (unexercisedModules && expectedSeen === 0 && standard.length === 0)
+          return result(scenario, ctx, "undetermined", "not_exercised", `${prefix}the page's handlers may live in module scripts T0 does not run (${framework}); the rehearsal clicks it`)
         if (standard.length) problems.push(`fbq sent a standard conversion (${standard.join(", ")}) on a click; browser conversions go only through the server-instructed mirror`)
         const nav = navigations(recording, 1)[0]
         if (nav) {
@@ -906,7 +947,11 @@ function planOneRuntimePerPage(scenario: T0Scenario, artifacts: WorkspaceInstall
 
 /** Turn one scenario into sessions + a grader. Unknown ids and bad params throw `T0ScenarioError`. */
 export function planScenario(scenario: T0Scenario, artifacts: WorkspaceInstallArtifacts, runId: string | null): PlannedScenario {
-  switch (scenario.id as T0ScenarioId) {
+  // The scenario id names the scenario; a caller that uses its own ids (e.g. `<item>:<checkId>`) names it
+  // through `checkId` instead.
+  const known = (id: string): id is T0ScenarioId => (T0_SCENARIO_IDS as readonly string[]).includes(id)
+  const id = known(scenario.id) ? scenario.id : known(scenario.checkId) ? scenario.checkId : scenario.id
+  switch (id as T0ScenarioId) {
     case "host_matrix":
       return planHostMatrix(scenario, artifacts, runId)
     case "consent_matrix":
@@ -930,7 +975,7 @@ export function planScenario(scenario: T0Scenario, artifacts: WorkspaceInstallAr
     case "click_test":
       return planClickTest(scenario, artifacts)
     default:
-      throw new T0ScenarioError(`unknown T0 scenario: ${scenario.id}`)
+      throw new T0ScenarioError(`unknown T0 scenario: ${scenario.id} (check ${scenario.checkId})`)
   }
 }
 

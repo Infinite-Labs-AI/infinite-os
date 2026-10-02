@@ -74,6 +74,8 @@ export class T0Page {
   private readonly rules: readonly T0ResponseRule[]
   private readonly loaders: T0LoaderBehaviour
   private currentUrl: URL
+  /** The page's URL resolver, held here (not read back from the page-visible document, review O6-R6). */
+  private readonly resolve: (raw: string) => string
 
   constructor(
     private readonly state: T0SessionState,
@@ -91,6 +93,7 @@ export class T0Page {
         return String(raw)
       }
     }
+    this.resolve = resolveUrl
     this.document = new T0Document(
       {
         onScriptConnected: (node) => this.scriptConnected(node),
@@ -393,7 +396,7 @@ export class T0Page {
       this.runCode(node.textContent, `inline-script@${this.currentUrl.pathname}`)
       return
     }
-    this.loadExternalScript(node, this.document.resolveUrl(src), false)
+    this.loadExternalScript(node, this.resolve(src), false)
   }
 
   private loadExternalScript(node: T0Element | null, url: string, synchronous: boolean): void {
@@ -462,7 +465,7 @@ export class T0Page {
   private formSubmission(form: T0Element): void {
     const method = (form.getAttribute("method") ?? "GET").toUpperCase()
     const action = form.getAttribute("action") ?? this.currentUrl.href
-    const url = this.document.resolveUrl(action)
+    const url = this.resolve(action)
     const fields = form
       .querySelectorAll("input, select, textarea")
       .filter((input) => input.getAttribute("name"))
@@ -480,13 +483,13 @@ export class T0Page {
     for (const node of parsedScripts) {
       if (!isJavaScriptType(node.getAttribute("type"))) {
         const src = node.getAttribute("src")
-        if (src && /module/i.test(node.getAttribute("type") ?? "")) this.state.recorder.record("script", "GET", this.document.resolveUrl(src), null)
+        if (src && /module/i.test(node.getAttribute("type") ?? "")) this.state.recorder.record("script", "GET", this.resolve(src), null)
         continue
       }
       const src = node.getAttribute("src")
       if (src) {
         const sync = !node.hasAttribute("async") && !node.hasAttribute("defer")
-        this.loadExternalScript(node, this.document.resolveUrl(src), sync)
+        this.loadExternalScript(node, this.resolve(src), sync)
       } else this.runCode(node.textContent, `${this.url.pathname}#script`)
     }
     for (const script of source.scripts ?? []) this.runCode(script.code, script.label)
