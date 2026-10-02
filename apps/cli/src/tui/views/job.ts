@@ -136,22 +136,27 @@ function stepLines(
   return steps.flatMap((step, index) => {
     const mark = STEP_MARK[String(step.state)] ?? { glyph: "?", token: "dim" as const };
     const until = step.state === "held" ? formatAsOf(step.heldUntil, ctx.timeZone) : null;
-    const detail = [viewText(step.detail), until ? `until ${until}` : ""].filter(Boolean).join(" · ");
+    const own = [viewText(step.detail), until ? `until ${until}` : ""].filter(Boolean).join(" · ");
     const label = labels[index] ?? "—";
+    // The head leaves the count to the running step: it says it on its bar, or after its detail.
+    const counted = step.state === "now" && progress ? `${progress.finished} of ${progress.of}` : "";
     const glyph = paint(mark.glyph, mark.token, ctx);
     if (step.state === "todo") {
       // Still to come: the whole row is dim.
-      return wrapText([label, detail].filter(Boolean).join(" · "), room)
+      return wrapText([label, own].filter(Boolean).join(" · "), room)
         .map((line, row) => row === 0 ? `${glyph} ${paint(line, "dim", ctx)}` : `  ${paint(line, "dim", ctx)}`);
     }
     const name = padEndCells(label, column);
     if (step.state === "now" && progress && progress.of > 0) {
       const gw = Math.max(10, Math.min(26, ctx.width - 40));
-      const barCells = displayWidth(name) + gw + 2 + displayWidth(detail);
+      const after = own || counted;
+      const barCells = displayWidth(name) + gw + 2 + displayWidth(after);
       if (barCells <= room) {
-        return [`${glyph} ${name}${progressBar(progress.finished / progress.of, gw, ctx)}${detail ? `  ${detail}` : ""}`.trimEnd()];
+        return [`${glyph} ${name}${progressBar(progress.finished / progress.of, gw, ctx)}${after ? `  ${after}` : ""}`.trimEnd()];
       }
     }
+    // No bar: the count joins the detail, so the row still says how far.
+    const detail = [own, counted].filter(Boolean).join(" · ");
     if (displayWidth(name) + displayWidth(detail) <= room) {
       return [`${glyph} ${name}${detail ? paint(detail, "dim", ctx) : ""}`.trimEnd()];
     }

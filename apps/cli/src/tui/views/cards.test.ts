@@ -692,4 +692,29 @@ describe("job (r4 Job)", () => {
     expect(out[8]).toEqual([["dim", "usually about 4 min · keeps going while you chat"]]);
     expect(out[9]).toEqual([["dim", "Lands in:"], ["", " "], ["cyan u", "Blog & AEO › Production ↗"]]);
   });
+
+  const running = (steps: unknown[]) => decode({
+    kind: "job", tool: "start_blog_post", title: "Blog post", state: "background",
+    provenance: { source: "Blog post", via: "our_db" },
+    body: {
+      jobId: "job_r4", label: "Post", phase: "running", steps,
+      progress: { finished: 4, of: 7 }, runsWhere: "cloud", outlivesTurn: true, noCompletionSignal: false
+    }
+  });
+  const plainText = (line: string) => line.replace(/\u001b\[[0-9;]*m/gu, "");
+
+  it("the count stays on the running step when it has no detail: after the bar", () => {
+    const view = running([{ id: "s3", label: "Draft", state: "now" }]);
+    const out = renderView(view, viewCtx()).detail.map(segs);
+    expect(out[2]).toEqual([["cb", "⠋"], ["", " Draft         "], ["cyan", "██████████████▉"], ["line", "░░░░░░░░░░░"], ["", "  4 of 7"]]);
+  });
+
+  it("in a narrow pane the bar does not fit, and the row still says how far: detail · N of M", () => {
+    const at40 = renderView(running([{ id: "s3", label: "Draft", state: "now", detail: "section 4" }]), viewCtx({ width: 40 })).detail.map(plainText);
+    expect(at40).toContain("⠋ Draft         █████▊░░░░  section 4");
+    const withDetail = renderView(running([{ id: "s3", label: "Draft", state: "now", detail: "section 4" }]), viewCtx({ width: 34 })).detail.map(plainText);
+    expect(withDetail).toContain("⠋ Draft         section 4 · 4 of 7");
+    const bare = renderView(running([{ id: "s3", label: "Draft", state: "now" }]), viewCtx({ width: 24 })).detail.map(plainText);
+    expect(bare).toContain("⠋ Draft         4 of 7");
+  });
 });
