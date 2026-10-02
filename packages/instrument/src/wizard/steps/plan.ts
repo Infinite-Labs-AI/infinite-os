@@ -98,9 +98,11 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
   // The plan's own seeds (an improve line no detector candidate links) pass the same gate, so an
   // approved line always has a job or a code edit behind it.
   const wizardPlan = plan as Partial<WizardPlanModel>
-  const applied = deps.registry.applyApprovals(candidates, plan, resolved.approvals)
-  const seeded = (wizardPlan.seeds ?? []).filter((seed) => !applied.some((item) => item.id === seed.id))
-  const items = withGuardHosts(gateSeededItems(plan, resolved, [...applied, ...seeded]), wizardPlan.guard ?? null)
+  // ONE seeding gate (§3z.12 B13): the detector candidates AND the plan's own improve seeds go through the
+  // registry's `applyApprovals` (its per-target line-kind table); `gateSeededItems` stays defence in depth.
+  const seeds = (wizardPlan.seeds ?? []).filter((seed) => !candidates.some((item) => item.id === seed.id))
+  const applied = deps.registry.applyApprovals([...candidates, ...seeds], plan, resolved.approvals)
+  const items = withGuardHosts(gateSeededItems(plan, resolved, applied), wizardPlan.guard ?? null)
   ctx.state.update((state) => {
     state.jobs = items
   })

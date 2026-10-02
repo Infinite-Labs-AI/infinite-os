@@ -49,7 +49,7 @@ async function setup(input: {
   candidates?: ChecklistItem[]
   consentFlag?: "required" | "not_required" | null
   before?: WizardBeforeFacts
-  siteSourceError?: { code: string }
+  siteSourceError?: { code: string; state?: string; retryable?: boolean }
 }): Promise<Harness> {
   const root = makeSite(input.files)
   const ctx = fakeContext({ root, answers: input.answers, options: { consentMode: input.consentFlag ?? null } })
@@ -178,13 +178,14 @@ describe("step install", () => {
     expect(ctx.events.some((event) => event.type === "step.sub" && (event.fields as { text: string }).text === "✓ Build passes")).toBe(true)
   })
 
-  it("never lists a preview-shaped host in the site source unless Infinite already does", async () => {
+  it("§3z.7 (A28): the site source lists keys ∪ the link's host hint ∪ the observed host, never a preview-shaped host", async () => {
     const before = fakeBefore({
       keys: fakeKeys({ infinite: { ...fakeKeys().infinite, productionHosts: [] } }),
       hosting: fakeHosting({ productionDomains: ["acme-store.com"], productionAliases: ["acme-store.vercel.app"] }),
       observedProductionHost: "acme-store.vercel.app"
     })
-    const h = await setup({ files: { "index.html": STATIC_HTML }, before, consentFlag: "not_required", answers: [] })
+    // The link's productionHostHint comes from the repo (a CNAME file), as the link step computed it.
+    const h = await setup({ files: { "index.html": STATIC_HTML, CNAME: "acme-store.com\n" }, before, consentFlag: "not_required", answers: [] })
     const ctx = h.ctx
     ctx.ask = (async (kind: never, payload: never) => {
       ctx.asks.push({ kind, payload })
@@ -249,6 +250,37 @@ describe("step install", () => {
     expect((await installStep.run(ctx, h.deps)).kind).toBe("ok")
     expect(read(ctx.root, "index.html")).not.toContain(IDS.siteSource)
     expect(readInstallManifest(ctx.root)!.ids?.infinite).toBeNull()
+  })
+})
+
+describe("§3z.7 / §3z.4 site-source refusals (I1)", () => {
+  const run = async (siteSourceError: { code: string; state?: string }) => {
+    const h = await setup({ files: { "index.html": STATIC_HTML }, consentFlag: "not_required", answers: [], siteSourceError })
+    const ctx = h.ctx
+    ctx.ask = (async (kind: never, payload: never) => {
+      ctx.asks.push({ kind, payload })
+      return approveAllFrom(ctx)
+    }) as typeof ctx.ask
+    await planStep.run(ctx, h.deps)
+    return { h, ctx, outcome: await installStep.run(ctx, h.deps) }
+  }
+
+  it("unverified_host: no Infinite pixel, one 'prove the domain' line, the other tools go on", async () => {
+    const { ctx, outcome } = await run({ code: "invalid_request", state: "unverified_host" })
+    expect(outcome.kind).toBe("ok")
+    expect(read(ctx.root, "index.html")).not.toContain(IDS.siteSource)
+    expect(readInstallManifest(ctx.root)!.ids?.infinite).toBeNull()
+    expect(readInstallManifest(ctx.root)!.ids?.ga4).toEqual([IDS.ga4])
+  })
+
+  it("a 423 lock on site-source parks INF_WIZ_SITE_LOCKED and writes nothing", async () => {
+    const { ctx, outcome } = await run({ code: "site_setup_locked", state: "live_site_lock" })
+    expect(outcome).toMatchObject({ kind: "parked", code: "INF_WIZ_SITE_LOCKED" })
+    expect(read(ctx.root, "index.html")).toBe(STATIC_HTML)
+  })
+
+  it("negative: an invalid_request with no known state is not swallowed", async () => {
+    await expect(run({ code: "invalid_request" })).rejects.toThrow(/invalid_request/)
   })
 })
 

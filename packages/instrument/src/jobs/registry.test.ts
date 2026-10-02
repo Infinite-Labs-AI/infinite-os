@@ -209,6 +209,37 @@ describe("applyApprovals", () => {
     expect(declined.some((item) => item.id === "identify_reset:auth")).toBe(false)
   })
 
+  it("B13: one gate with a required line kind PER TARGET (O7's improve seeds and open jobs included)", () => {
+    const seed = (id: string): ChecklistItem => ({
+      id,
+      jobId: id.split(":")[0] as ChecklistItem["jobId"],
+      n: 3,
+      title: id,
+      owner: "agent",
+      trigger: { finding: id, evidence: [] },
+      allow: { files: ["app/layout.tsx"], create: [] },
+      checks: [],
+      state: "pending"
+    })
+    expect(requiredLineKind(seed("posthog_improve:defaults"))).toBe("posthog_defaults_bump_adopted")
+    expect(requiredLineKind(seed("posthog_improve:sensitive_pages"))).toBe("sensitive_pages")
+    expect(requiredLineKind(seed("posthog_improve:history_change"))).toBe("improve_additive")
+    expect(requiredLineKind(seed("meta_improve:capture"))).toBe("capture_beside_adopted_pixel")
+    expect(requiredLineKind(seed("meta_improve:autoconfig_off_adopted"))).toBe("autoconfig_off_adopted")
+    expect(requiredLineKind(seed("meta_improve:retire_fbc_writer"))).toBe("retire_fbc_writer")
+    expect(requiredLineKind(seed("preview_guard:ga4"))).toBe("preview_guard_adopted")
+    expect(requiredLineKind(seed("unusual_layout:app/layout.tsx"))).toBeNull()
+    const defaults = seed("posthog_improve:defaults")
+    const right = line("posthog_defaults_bump_adopted:posthog", "posthog_defaults_bump_adopted", [defaults.id])
+    expect(applyApprovalsTo([defaults], plan([right]), { approved: [right.id], declined: [], edits: {} }).map((item) => item.id)).toEqual([defaults.id])
+    // negative: approving a line of another kind (an improve_additive line) never seeds the defaults bump
+    const wrong = line("improve_additive:posthog", "improve_additive", [defaults.id])
+    expect(applyApprovalsTo([defaults], plan([wrong]), { approved: [wrong.id], declined: [], edits: {} })).toEqual([])
+    // an open layout job needs no line, but a declined line naming it drops it
+    const layout = seed("unusual_layout:app/layout.tsx")
+    expect(applyApprovalsTo([layout], plan([]), { approved: [], declined: [], edits: {} })).toHaveLength(1)
+  })
+
   it("does not mutate the candidates", () => {
     const before = JSON.stringify(candidates)
     applyApprovalsTo(candidates, plan([line("improve_additive:posthog_proxy", "improve_additive", ["posthog_improve:proxy"])]), { approved: [], declined: [], edits: {} })

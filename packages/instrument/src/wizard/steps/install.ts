@@ -10,6 +10,8 @@ import { createHash } from "node:crypto"
 import type { WizardApplyResult } from "../../install/installer.js"
 import { DECISION_LINE_IDS } from "../../install/plan-model.js"
 import { bridgeErrorCode, keysOnly, loadPlanApprovals, loadPlanInputs, planCandidates } from "../../install/step-inputs.js"
+import { bridgeFailureLine, bridgeFailureOutcome, bridgeFailureState } from "../../bridge/outcomes.js"
+import { productionHostHint } from "./link.js"
 import type { InstallerApplyResult } from "../contracts/jobs.js"
 import { JOB_TABLE, type ChecklistItem } from "../contracts/jobs.js"
 import type { StepOutcome, WizardContext, WizardDeps, WizardStep } from "../contracts/deps.js"
@@ -36,13 +38,15 @@ function denied(host: string): boolean {
 }
 
 /**
- * The hosts the site source should list: what Infinite already lists, the Vercel production domains,
- * and the production host `before` observed — but never a preview-shaped host (a `*.vercel.app` alias)
- * unless Infinite already lists it: adding one would make a preview count as production.
+ * §3z.7 (A28): the site source's `productionHosts` = the normalised union of keys `infinite.productionHosts`,
+ * the link's `productionHostHint` (when set) and `before`'s observed final production host (when it is not
+ * deny-shaped); at most 10, no duplicates, and no preview-shaped host (`*.vercel.app`, …) unless Infinite
+ * already lists it. The cloud treats `www.<host>` and `<host>` as one site and proves a host it has not
+ * verified through the linked Vercel project.
  */
-export function siteSourceHosts(keys: TagKeys, hosting: TagHosting, observed: string | null): string[] {
-  const listed = keys.infinite.productionHosts.map(normalizeHost)
-  const extra = [...(hosting.vercel?.productionDomains ?? []), ...(observed ? [observed] : [])].map(normalizeHost).filter((host) => host !== "" && !denied(host))
+export function siteSourceHosts(keys: TagKeys, hint: string | null, observed: string | null): string[] {
+  const listed = keys.infinite.productionHosts.map(normalizeHost).filter((host) => host !== "")
+  const extra = [...(hint ? [hint] : []), ...(observed ? [observed] : [])].map(normalizeHost).filter((host) => host !== "" && !denied(host))
   return [...new Set([...listed, ...extra])].slice(0, MAX_SITE_SOURCE_HOSTS)
 }
 
@@ -104,7 +108,7 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
   // ---- the site source + the consent answer: ONLY behind an approved Infinite line (P2-20) ----
   const installInfinite = check.lines.some((line) => line.kind === "install_provider" && line.id.startsWith("install_provider:infinite") && approved.has(line.id))
   if (installInfinite) {
-    const hosts = siteSourceHosts(keys, inputs.hosting, inputs.before.observedProductionHost)
+    const hosts = siteSourceHosts(keys, await productionHostHint(ctx, deps), inputs.before.observedProductionHost)
     if (hosts.length === 0) {
       sub(ctx, "Infinite does not know your production domain yet: Infinite's tag is not installed this run", "warn")
     } else {
@@ -117,14 +121,22 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
         sub(ctx, `✓ Site source ${source.created ? "created" : "updated"} · consent ${source.consentMode === "required" ? "waits for your banner" : "collects by default"}`, "ok")
       } catch (error) {
         const code = bridgeErrorCode(error)
-        if (code === "subscription_required") {
-          return { kind: "blocked", code: "INF_WIZ_SUBSCRIPTION_REQUIRED", reason: "The linked Infinite workspace is not subscribed." }
-        }
-        if (code === "foreign_site_hosts") {
-          // The workspace's site source belongs to another site: its key is never written into this one.
+        const state = bridgeFailureState(error)
+        if (code === "foreign_site_hosts" || (code === "invalid_request" && state === "unverified_host")) {
+          // §3z.7 (A28): another site's source, or a host the workspace has not proven: no Infinite pixel is
+          // installed (its key is never written into this site), one user line, and the other tools go on.
           keys = { ...keys, infinite: { ...keys.infinite, status: "not_provisioned", siteSourceKey: null } }
-          sub(ctx, "This workspace already collects for another site; Infinite's tag is not installed here (link this repo to its own workspace)", "warn")
-        } else throw error
+          const line =
+            code === "invalid_request"
+              ? `Prove ${hosts[0] ?? "your domain"} in Infinite (Site Settings), then run npx infinite-tag again; Infinite's tag is not installed this run`
+              : (bridgeFailureLine(error, "Infinite's tag") ?? "This workspace collects for another site; Infinite's tag is not installed here")
+          sub(ctx, line, "warn")
+        } else {
+          // §3z.4: 402 / signed out / a lock (423 → parked SITE_LOCKED) / Infinite unavailable / …
+          const outcome = bridgeFailureOutcome(error, { verb: "site-source" })
+          if (outcome) return outcome
+          throw error
+        }
       }
     }
   }
@@ -146,8 +158,8 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
   }
   for (const warning of result.warnings ?? []) sub(ctx, warning.length > 120 ? `${warning.slice(0, 117)}…` : warning, "warn")
 
-  // ---- open jobs: a manual edit is job 2, never "installed" ----
-  const openJobs = openLayoutJobs(result.openJobs, ctx.state.get().jobs)
+  // ---- open jobs: a manual edit is job 2, never "installed"; it passes the ONE seeding gate (B13) ----
+  const openJobs = deps.registry.applyApprovals(openLayoutJobs(result.openJobs, ctx.state.get().jobs), plan, savedApprovals.approvals)
   if (openJobs.length > 0 || result.edits.length > 0) {
     ctx.state.update((current) => {
       current.jobs = [...current.jobs, ...openJobs]

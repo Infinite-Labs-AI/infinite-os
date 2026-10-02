@@ -41,7 +41,7 @@ export function newLinkCode(): string {
 const HOST_PATTERN = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/
 
 /** A best-effort production host for the card's workspace pre-selection: a CNAME file, else package.json `homepage`. */
-async function productionHostHint(ctx: WizardContext, deps: WizardDeps): Promise<string | null> {
+export async function productionHostHint(ctx: Pick<WizardContext, "root" | "appRoot">, deps: Pick<WizardDeps, "fs">): Promise<string | null> {
   const appDir = join(ctx.root, ctx.appRoot === "." ? "" : ctx.appRoot)
   for (const file of [join(appDir, "public", "CNAME"), join(appDir, "CNAME"), join(ctx.root, "CNAME")]) {
     const text = await deps.fs.readText(file)

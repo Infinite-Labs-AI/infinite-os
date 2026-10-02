@@ -13,6 +13,7 @@
 //     Infinite does not list it, NO guard is emitted and a blocking line says why;
 //   • the server-lane line carries the probe disclosure (§3h.6);
 //   • nothing here is computed from agent output.
+import { requiredLineKind } from "../jobs/registry.js"
 import { createHash } from "node:crypto"
 
 import type { ImproveLine, ImproveLineKind, ProviderId } from "../types.js"
@@ -177,17 +178,11 @@ export function candidateProvider(item: ChecklistItem): ProviderId | null {
 }
 
 /**
- * The plan line kind a candidate needs, or null when its job needs no line. A target that starts with
- * an improve kind (`retire_fbc_writer:…`, `capture_beside_adopted_pixel`) names it; otherwise the
- * job's own required kind (JOB_TABLE).
+ * The plan line kind a candidate needs, or null when its job needs no line: the ONE per-target table the
+ * registry's seeding gate uses (`requiredLineKind`, §3z.12 B13), so a line and the gate never disagree.
  */
 export function lineKindForCandidate(item: ChecklistItem): PlanLineKind | null {
-  const target = itemTarget(item)
-  const named = IMPROVE_KINDS.find((kind) => target === kind || target.startsWith(`${kind}:`) || target.startsWith(`${kind}-`))
-  if (named) return named
-  const spec = JOB_TABLE[item.jobId as JobId]
-  if (!spec || spec.requiresApprovedLine.length === 0) return null
-  return spec.requiresApprovedLine[0] ?? null
+  return requiredLineKind(item)
 }
 
 /** Conversion names proposed from the detectors' candidates (jobs 8 and 10): the item target when it is a valid name. */
@@ -562,7 +557,8 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
   // comes from `before` when the same tool + id was found there.
   for (const item of candidates) {
     const kind = lineKindForCandidate(item)
-    if (kind === null || kind === "conversion_names" || kind === "privacy_text") continue
+    // Plan-wide kinds are decided by their own one line (consent/names/privacy/server lane), never per candidate.
+    if (kind === null || kind === "conversion_names" || kind === "privacy_text" || kind === "server_lane") continue
     if (kind === "preview_guard_adopted" && !guard.emit) continue
     const provider = candidateProvider(item)
     const targetName = itemTarget(item) || item.jobId

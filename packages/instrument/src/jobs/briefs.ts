@@ -28,8 +28,12 @@ export interface BriefFacts {
   plan?: BriefPlan | null
   /** The connections' public IDs (`briefConnectionsFrom(keys)`); needed by the improve jobs 3, 4 and 5. */
   connections?: BriefConnections | null
-  /** Job 7: the emitted guard expression (lane O5 `buildHostGuardExpression`) and its exempt hosts. */
-  previewGuard?: { expression: string; exemptHosts: string[] } | null
+  /**
+   * Job 7: the emitted guard expression (lane O5 `buildHostGuardExpression`), its exempt hosts, and for an
+   * adopted Meta pixel the exact wrap (O5 `adoptedMetaGuardRecipe`, i.e. ADOPTED_META_GUARD_RECIPE with the
+   * expression in place; §3z.12 B13).
+   */
+  previewGuard?: { expression: string; exemptHosts: string[]; metaRecipe?: string } | null
 }
 
 /** §3e.1 agent instruction gists, one per agent job. */
@@ -158,7 +162,12 @@ function planDataFor(item: ChecklistItem, facts: BriefFacts): Record<string, unk
     }
     case "preview_guard": {
       if (!facts.previewGuard) return new Error(`the brief for ${item.id} needs the emitted preview-guard expression`)
-      return { guardExpression: facts.previewGuard.expression, productionHostsExempt: facts.previewGuard.exemptHosts }
+      if (target === "meta" && !facts.previewGuard.metaRecipe) return new Error(`the brief for ${item.id} needs the adopted Meta guard recipe`)
+      return {
+        guardExpression: facts.previewGuard.expression,
+        productionHostsExempt: facts.previewGuard.exemptHosts,
+        ...(target === "meta" ? { metaGuardRecipe: facts.previewGuard.metaRecipe } : {})
+      }
     }
     case "posthog_improve": {
       if (!facts.connections) return new Error(`the brief for ${item.id} needs the connections' public IDs`)

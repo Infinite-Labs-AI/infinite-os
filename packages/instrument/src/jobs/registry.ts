@@ -64,24 +64,37 @@ export function itemTarget(item: Pick<ChecklistItem, "id">): string {
 
 /**
  * The plan line kind a candidate needs before it is seeded, or null when it needs none (it is still
- * dropped if a line naming it is declined). Job 5's line depends on the target: the mirror wiring is an
- * `improve_additive` line, retiring a host-only `_fbc` writer is `retire_fbc_writer`, and the capture
- * beside an adopted pixel is `capture_beside_adopted_pixel` (§3e.1 job 5 "e.g."). Job 1 mounts the
- * server lane, so it needs the approved `server_lane` line: declining the lane drops it (review P1-4).
+ * dropped if a line naming it is declined). ONE seeding gate (§3z.12 §3e.5, B13), with a required line
+ * kind PER TARGET, so lane O7's own improve seeds and the installer's open jobs go through the same rule:
+ *   posthog_improve:defaults           → posthog_defaults_bump_adopted
+ *   posthog_improve:sensitive_pages    → sensitive_pages
+ *   posthog_improve:history_change / :proxy (and any other) → improve_additive
+ *   ga4_improve:*                      → improve_additive
+ *   meta_improve:capture…              → capture_beside_adopted_pixel
+ *   meta_improve:autoconfig_off_adopted→ autoconfig_off_adopted
+ *   meta_improve:retire_fbc_writer…    → retire_fbc_writer
+ *   meta_improve:* (the mirror wiring) → improve_additive
+ *   preview_guard:<tool>               → preview_guard_adopted
+ *   server_lane_mount                  → server_lane (plan-wide)
+ * Job 1 mounts the server lane, so it needs the approved `server_lane` line: declining the lane drops it.
  */
 export function requiredLineKind(item: Pick<ChecklistItem, "id" | "jobId">): PlanLineKind | null {
+  const target = itemTarget(item)
+  const startsWith = (prefix: string) => target === prefix || target.startsWith(`${prefix}:`) || target.startsWith(`${prefix}-`) || target.startsWith(prefix)
   switch (item.jobId) {
     case "server_lane_mount":
       return "server_lane"
     case "posthog_improve":
+      if (startsWith("defaults")) return "posthog_defaults_bump_adopted"
+      if (startsWith("sensitive_pages")) return "sensitive_pages"
+      return "improve_additive"
     case "ga4_improve":
       return "improve_additive"
-    case "meta_improve": {
-      const target = itemTarget(item)
-      if (target.startsWith("retire_fbc_writer")) return "retire_fbc_writer"
-      if (target.startsWith("capture")) return "capture_beside_adopted_pixel"
+    case "meta_improve":
+      if (startsWith("retire_fbc_writer")) return "retire_fbc_writer"
+      if (startsWith("autoconfig_off_adopted")) return "autoconfig_off_adopted"
+      if (startsWith("capture")) return "capture_beside_adopted_pixel"
       return "improve_additive"
-    }
     case "duplicates_remove":
       return "remove_duplicate"
     case "preview_guard":
