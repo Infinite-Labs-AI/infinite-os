@@ -28,7 +28,9 @@ import type { InfiniteOsDb } from "@infinite-os/db";
  * PAYMENT EVIDENCE. Charges, refunds, disputes, completed checkouts and payment intents ride the
  * SAME unfiltered poll (so they cost zero extra reads) and are kept as evidence-only rows with a
  * MINIMISED payload — see STRIPE_PAYMENT_EVIDENCE_EVENT_TYPES. They are never fanned out, never
- * re-fetched, and never touch subscriptions, invoices or MRR.
+ * re-fetched, and never touch subscriptions, invoices or MRR. The one exception is the Checkout
+ * session family: its events also upsert `stripe_checkout_sessions` (see
+ * ./stripe-checkout-sessions.ts for why a terminal session may be written from its event).
  */
 
 // ---------------------------------------------------------------------------------------------
@@ -100,8 +102,12 @@ export const STRIPE_DELTA_MAX_REFETCH_PER_RUN = 200;
  * Stamped on every delta segment. v2 is the first parser that retains PAYMENT evidence (charges,
  * refunds, disputes, checkouts, payment intents): a window closed under v1 observed those events
  * and dropped them, so no reader may claim payment-event coverage over a v1 segment.
+ *
+ * v3 additionally keeps `checkout.session.async_payment_{succeeded,failed}` — the events that move a
+ * delayed-payment Checkout session from `unpaid` to settled — and upserts every session event into
+ * `stripe_checkout_sessions` (./stripe-checkout-sessions.ts). A v2 window dropped those two types.
  */
-export const STRIPE_DELTA_PARSER_VERSION = "stripe-delta-events-v2";
+export const STRIPE_DELTA_PARSER_VERSION = "stripe-delta-events-v3";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -660,9 +666,9 @@ export interface StripeEventApi {
  *   charge.{succeeded,refunded}                                                     (2)
  *   refund.{created,updated}                                                        (2)
  *   charge.dispute.{created,updated,closed,funds_withdrawn,funds_reinstated}        (5)
- *   checkout.session.completed                                                      (1)
+ *   checkout.session.{completed,async_payment_succeeded,async_payment_failed}       (3)
  *   payment_intent.{succeeded,payment_failed}                                       (2)
- *                                                                             total  45
+ *                                                                             total  47
  */
 export const STRIPE_DELTA_EVENT_PREFIXES: ReadonlyArray<readonly [string, StripeEventObjectKind]> = [
   ["customer.subscription.", "subscription"],
@@ -676,7 +682,7 @@ export const STRIPE_DELTA_EVENT_PREFIXES: ReadonlyArray<readonly [string, Stripe
 ] as const;
 
 /** Pinned by test: our relevant event set exceeds Stripe's documented 20-type `types[]` cap. */
-export const STRIPE_DELTA_RELEVANT_EVENT_TYPE_COUNT = 45;
+export const STRIPE_DELTA_RELEVANT_EVENT_TYPE_COUNT = 47;
 export const STRIPE_EVENTS_TYPES_FILTER_CAP = 20;
 
 /**
@@ -755,6 +761,11 @@ export const STRIPE_PAYMENT_EVIDENCE_EVENT_TYPES: ReadonlyMap<string, StripePaym
     ["refund.created", "refund"],
     ["refund.updated", "refund"],
     ["checkout.session.completed", "checkout_session"],
+    // A delayed payment method (bank debits) completes the session `unpaid`; these two carry the
+    // whole session once the payment settles or fails. Kept as evidence here AND upserted into
+    // `stripe_checkout_sessions` by ./stripe-checkout-sessions.ts.
+    ["checkout.session.async_payment_succeeded", "checkout_session"],
+    ["checkout.session.async_payment_failed", "checkout_session"],
     ["payment_intent.succeeded", "payment_intent"],
     ["payment_intent.payment_failed", "payment_intent"],
   ]);

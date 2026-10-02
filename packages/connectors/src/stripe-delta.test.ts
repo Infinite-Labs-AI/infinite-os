@@ -654,6 +654,8 @@ describe("Stripe payment evidence (evidence only, minimised)", () => {
       ["charge.dispute.funds_withdrawn", "dispute"],
       ["charge.dispute.funds_reinstated", "dispute"],
       ["checkout.session.completed", "checkout_session"],
+      ["checkout.session.async_payment_succeeded", "checkout_session"],
+      ["checkout.session.async_payment_failed", "checkout_session"],
       ["payment_intent.succeeded", "payment_intent"],
       ["payment_intent.payment_failed", "payment_intent"],
     ];
@@ -665,12 +667,12 @@ describe("Stripe payment evidence (evidence only, minimised)", () => {
     for (const type of [
       "charge.updated", "charge.pending", "charge.failed", "charge.captured", "charge.refund.updated",
       "payment_intent.created", "payment_intent.processing", "checkout.session.expired",
-      "checkout.session.async_payment_succeeded", "refund.failed", "payment_method.attached",
+      "refund.failed", "payment_method.attached",
       "balance.available", "invoice.paid", "customer.subscription.updated",
     ]) {
       expect(stripePaymentEvidenceKind(type)).toBeNull();
     }
-    expect(STRIPE_PAYMENT_EVIDENCE_EVENT_TYPES.size).toBe(7);
+    expect(STRIPE_PAYMENT_EVIDENCE_EVENT_TYPES.size).toBe(9);
   });
 
   it("keeps every fixture payment event as minimised evidence and fans NOTHING out", () => {
@@ -1162,11 +1164,23 @@ function jsonResponse(value: unknown): Response {
   });
 }
 
+// Every Stripe sync now also lists `/v1/checkout/sessions` (stripe-checkout-sessions.ts). Routers
+// written before that lane model an account with NO Checkout sessions; only a handler registered
+// here sees those requests itself.
+const CHECKOUT_SESSION_AWARE_HANDLERS = new WeakSet<FetchHandler>();
+function servesCheckoutSessions(handler: FetchHandler): FetchHandler {
+  CHECKOUT_SESSION_AWARE_HANDLERS.add(handler);
+  return handler;
+}
+
 /** A handler may return a raw `Response` to model a non-2xx (the 404 a deleted invoice returns). */
 async function withMockStripe<T>(handler: FetchHandler, fn: () => Promise<T>): Promise<T> {
   const original = globalThis.fetch;
   globalThis.fetch = ((input: RequestInfo | URL) => {
-    const value = handler(new URL(String(input)));
+    const url = new URL(String(input));
+    const value = url.pathname === "/v1/checkout/sessions" && !CHECKOUT_SESSION_AWARE_HANDLERS.has(handler)
+      ? { object: "list", data: [], has_more: false }
+      : handler(url);
     return Promise.resolve(value instanceof Response ? value : jsonResponse(value));
   }) as typeof fetch;
   try {
@@ -3201,7 +3215,7 @@ describe("Stripe delta lane against real PGlite", () => {
     await seedHealthyWatermark(workspaceId, sourceId);
   }
 
-  it("keeps payment events as minimised evidence and moves NOTHING canonical", async () => {
+  it("keeps payment events as minimised evidence; only the Checkout session lands canonically", async () => {
     // CONTROL: the same imported source running the same delta window with NO events. Whatever a
     // delta run touches on its own (segment, watermark, coverage bookkeeping, the run row) shows up
     // here, so the payment run can be held to "exactly that, plus evidence rows".
@@ -3239,10 +3253,45 @@ describe("Stripe delta lane against real PGlite", () => {
     expect(urls.map((url) => url.toString())).toEqual(controlUrls);
     expect(controlUrls.some((url) => url.includes("/v1/events?"))).toBe(true);
 
-    // Exactly what an empty delta run touches, plus the evidence rows — nothing else anywhere.
+    // Exactly what an empty delta run touches, plus the evidence rows and the ONE payment family
+    // with a canonical home: the completed Checkout session upserts its minimised row (and its raw
+    // lineage record). Nothing else anywhere.
     const changed = changedTables(before, await workspaceTableHashes(workspaceId));
     expect(controlChanged).not.toContain("stripe_event_evidence");
-    expect(changed).toEqual([...controlChanged, "stripe_event_evidence"].sort());
+    expect(controlChanged).not.toContain("stripe_checkout_sessions");
+    expect(changed).toEqual(
+      [...controlChanged, "raw_records", "stripe_checkout_sessions", "stripe_event_evidence"].sort(),
+    );
+    const sessions = await db.query<Record<string, unknown>>(
+      `select stripe_checkout_session_id, mode, status, payment_status, amount_total::int as amount_total,
+              currency, stripe_customer_id, stripe_invoice_id, stripe_payment_intent_id,
+              stripe_subscription_id, livemode, observed_via
+         from stripe_checkout_sessions where workspace_id = $1 and source_id = $2`,
+      [workspaceId, sourceId],
+    );
+    expect(sessions).toEqual([{
+      stripe_checkout_session_id: "cs_live_PayFixtureSessionA0001",
+      mode: "payment",
+      status: "complete",
+      payment_status: "paid",
+      amount_total: 4900,
+      currency: "usd",
+      stripe_customer_id: "cus_PayFixtureBuyer01",
+      stripe_invoice_id: null,
+      stripe_payment_intent_id: "pi_3PayFixtureA0001",
+      stripe_subscription_id: null,
+      livemode: true,
+      observed_via: "event",
+    }]);
+    const sessionRaw = await db.query<{ payload: unknown }>(
+      `select payload from raw_records
+        where workspace_id = $1 and source_id = $2 and object_type = 'stripe_checkout_session'`,
+      [workspaceId, sourceId],
+    );
+    expect(sessionRaw).toHaveLength(1);
+    for (const pattern of PAYMENT_SENSITIVE_PATTERNS) {
+      expect(JSON.stringify(sessionRaw[0]?.payload), String(pattern)).not.toMatch(pattern);
+    }
     // …and every canonical table's VALUES are byte-identical.
     const canonicalAfter = await canonicalValueHashes(workspaceId);
     for (const table of CANONICAL_STRIPE_TABLES) {
@@ -3296,7 +3345,7 @@ describe("Stripe delta lane against real PGlite", () => {
       status: "closed",
       event_count: PAYMENT_FIXTURE.kept.length + PAYMENT_FIXTURE.ignored.length,
       refetch_count: 0,
-      parser_version: "stripe-delta-events-v2",
+      parser_version: "stripe-delta-events-v3",
     }]);
     const watermarks = await db.query<{ delta_data_as_of: Date }>(
       `select delta_data_as_of from stripe_sync_watermarks
@@ -3378,7 +3427,7 @@ describe("Stripe delta lane against real PGlite", () => {
         where workspace_id = $1 and source_id = $2`,
       [workspaceId, sourceId],
     );
-    expect(reread).toEqual([{ status: "closed", parser_version: "stripe-delta-events-v2" }]);
+    expect(reread).toEqual([{ status: "closed", parser_version: "stripe-delta-events-v3" }]);
   }, 120_000);
 
   it("payment events ride an over-budget REFUSAL as minimised evidence and never count toward the budget", async () => {
