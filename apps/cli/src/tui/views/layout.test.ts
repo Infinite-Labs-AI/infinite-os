@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 
 import { decodeAnswerView } from "../../desktop/answer-view-decode.js";
 import { r4Segments, seg } from "../../formatting/r4-segments.test-util.js";
+import type { TurnStep } from "../app/turn-store.js";
 import { INFINITE_R4_THEME } from "../theme.js";
 import type { Msg } from "../types.js";
 import { viewFocusAfterTurnDone } from "./focus.js";
@@ -93,6 +94,53 @@ describe("a committed turn in scrollback is the question and the answer (D1, run
   it("the live turn keeps its Steps strip", () => {
     const lines = renderLiveTurn({ messages: steps, views: [], focus: null, width: 100, color: false, theme }).lines;
     expect(lines.some((line) => line.startsWith("─ Steps"))).toBe(true);
+  });
+});
+
+describe("a committed turn keeps the calls that did not end clean (a failed step never disappears)", () => {
+  const turn: Msg[] = [{ role: "user", text: "site traffic" }, { role: "assistant", text: "Up 12% on the week." }];
+  const steps: TurnStep[] = [
+    { id: "c1", name: "mcp__sample_app__get_sample_rows", label: "reading the last 200 days", status: "ok", startedAt: 0, endedAt: 300, result: "200 days" },
+    { id: "c2", name: "mcp__sample_app__get_sample_rows", label: "reading today", status: "fail", startedAt: 340, endedAt: 640, result: "not synced yet" }
+  ];
+
+  it("the failed call's row follows the answer, a blank row apart; the clean call and the Steps header are gone", () => {
+    for (const width of [60, 100, 160]) {
+      const lines = renderCommittedTurn({ messages: turn, views: [], focus: null, steps, width, color: false, theme });
+      expect(lines).toEqual(["❯ site traffic", "", "∞ Up 12% on the week.", "", "  reading today ✗ not synced yet"]);
+    }
+  });
+
+  it("the row follows the details when the turn has a view", () => {
+    const listing = decodeAnswerView({
+      v: 1, kind: "quiet", tool: "read_playbook", title: "Playbook", state: "ready", asOf: null,
+      scope: { workspaceName: "Demo", crossWorkspace: false }, caveats: [], body: { stepLine: "read the playbook" }
+    });
+    const lines = renderCommittedTurn({ messages: turn, views: listing ? [listing] : [], focus: null, steps, width: 100, color: false, theme });
+    expect(lines.slice(-2)).toEqual(["", "  reading today ✗ not synced yet"]);
+    expect(lines.some((line) => line.includes("Steps"))).toBe(false);
+    expect(lines.some((line) => line.includes("reading the last 200 days"))).toBe(false);
+  });
+
+  it("reads the calls from the tool trail when the turn store has none", () => {
+    const trail: Msg[] = [
+      turn[0]!,
+      { kind: "trail", role: "system", text: "", tools: ["checking GA4 (0.4s) :: 3 pages ✓", "Pause Entity(\"Hook B\") (1.0s) :: refused ✗"] },
+      turn[1]!
+    ];
+    const lines = renderCommittedTurn({ messages: trail, views: [], focus: null, width: 100, color: false, theme });
+    expect(lines).toEqual(["❯ site traffic", "", "∞ Up 12% on the week.", "", "  pausing entity ✗ refused"]);
+  });
+
+  it("prints none while the calls stay live with a waiting card (they print when that turn is committed)", () => {
+    const lines = renderCommittedTurn({ messages: turn, views: [], focus: null, steps, width: 100, color: false, theme, stepsStayLive: true });
+    expect(lines).toEqual(["❯ site traffic", "", "∞ Up 12% on the week."]);
+  });
+
+  it("the live turn still draws every call in its Steps strip", () => {
+    const lines = renderLiveTurn({ messages: turn, views: [], focus: null, steps, width: 100, color: false, theme, details: ["card"] }).lines;
+    expect(lines.some((line) => /reading the last 200 days\s+━+\s+✓ 200 days/u.test(line))).toBe(true);
+    expect(lines.some((line) => /reading today\s+━+\s+✗ not synced yet/u.test(line))).toBe(true);
   });
 });
 

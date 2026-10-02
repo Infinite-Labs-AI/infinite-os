@@ -664,17 +664,23 @@ export function InkInteractiveSessionApp({
     // Scrollback is ONE column at any width (River, 2026-10-02): the question,
     // the answer, its views underneath, under a thin rule.
     // `redraw` draws it again at another width (a width change reprints scrollback).
+    // A call that did not end clean keeps its row under the answer (a failed
+    // step never disappears with the Steps strip). While a card still waits,
+    // the turn's calls stay live under it and print when that is committed.
+    const stepsStayLive = keepCard && steps.length > 0;
     const drawTurn = (width: number) => renderCommittedTurn({
       messages: turn,
       views: views.map((frame) => frame.view),
       focus,
       steps,
+      stepsStayLive,
       width: transcriptColumns(width),
       color: colorEnabled(t),
       theme: t
     });
-    const latest: CommittedEntry | null = turn.length || views.length
-      ? { id: `turn:${++turnSeq.current}`, lines: drawTurn(columns), redraw: (width) => ({ lines: drawTurn(width) }) }
+    const drawn = drawTurn(columns);
+    const latest: CommittedEntry | null = turn.length || views.length || drawn.length
+      ? { id: `turn:${++turnSeq.current}`, lines: drawn, redraw: (width) => ({ lines: drawTurn(width) }) }
       : null;
     const inventory = homeInventory;
     const drawHome = (width: number) => inventory ? (

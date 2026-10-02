@@ -508,6 +508,147 @@ describe("scrollback in a running session (fake TTY; skipped on CI like the othe
   });
 });
 
+// A call that did not end clean stays readable once its turn is in scrollback
+// (round 4, scenario S11): the Steps strip belongs to the live turn (D1), but
+// the failed call's row is printed under the answer. Synthetic names only.
+describe("a failed step survives the commit to scrollback (fake TTY; skipped on CI like the other PTY tests)", () => {
+  const RAW = "mcp__sample_app__get_sample_rows";
+  const FAILED_ROW = "  reading today ✗ not synced yet";
+  const text = Array.from({ length: 200 }, (_, i) => `alpha line ${i}`).join("\n");
+  /** Two calls of one tool, in the app's words: the first ends clean, the second fails. */
+  const twoCalls = (onProgress: ((frame: never) => void) | undefined) => {
+    const frame = (type: string, toolId: string, rest: Record<string, unknown>) =>
+      onProgress?.({ type, stage: "tool", message: RAW, toolId, name: RAW, ...rest } as never);
+    frame("tool.start", "call-1", { context: "{}", words: { label: "reading the last 200 days" } });
+    frame("tool.complete", "call-1", { status: "ok", words: { label: "reading the last 200 days", result: "200 days" } });
+    frame("tool.start", "call-2", { context: "{}", words: { label: "reading today" } });
+    frame("tool.complete", "call-2", { status: "error", words: { label: "reading today", result: "not synced yet" } });
+  };
+
+  it.skipIf(process.env.CI === "true")("two calls, the second fails, then a 200-line answer: the failed row is under the answer in scrollback, the clean one is not", { timeout: 30_000 }, async () => {
+    resetTurnState();
+    const input = ttyInput();
+    const output = ttyOutput();
+    let finish: () => void = () => {};
+    const session = runInkInteractiveSession({
+      errorOutput: ttyOutput(),
+      input,
+      async onSubmitLine(line, onProgress) {
+        if (line === "/exit") return { exit: true, messages: [] };
+        twoCalls(onProgress as never);
+        onProgress?.({ type: "message.start", stage: "message", message: "" });
+        onProgress?.({ type: "message.delta", stage: "message", message: "", text });
+        await new Promise<void>((resolve) => {
+          finish = resolve;
+        });
+        return { messages: [{ role: "assistant", text }] };
+      },
+      output,
+      title: "Infinite TUI"
+    });
+    await waitFor(() => output.text().includes("Ask Infinite"), 4_000, output.text);
+    await sendKeys(input, "first\r");
+    // While it streams, the Steps strip shows both calls, the failed one with its reason.
+    await waitFor(() => /reading today\s+━+\s+✗ not synced yet/u.test(stripAnsi(output.text())), 4_000, output.text);
+    finish();
+    await waitFor(() => output.text().includes("alpha line 50"), 4_000, output.text);
+    await waitFor(() => scrollbackRows(output.text()).some((row) => row.trimEnd() === FAILED_ROW), 4_000, output.text);
+    const rows = scrollbackRows(output.text()).map((row) => row.trimEnd());
+    const last = rows.findIndex((row) => /alpha line 199$/u.test(row));
+    // Under the answer: a blank row, the failed call with its reason, then the turn's rule and the frame.
+    expect(rows.slice(last + 1).filter(Boolean)).toEqual([
+      FAILED_ROW, "─".repeat(80), " ∞ Infinite", "─".repeat(80), "❯ Ask Infinite…", " /  commands"
+    ]);
+    expect(rows[last + 1]).toBe("");
+    // The clean call and the strip itself are gone with the live turn.
+    expect(rows.some((row) => row.includes("reading the last 200 days"))).toBe(false);
+    expect(rows.some((row) => row.includes("─ Steps"))).toBe(false);
+    expect(rows.some((row) => /more lines|lines above/u.test(row))).toBe(false);
+    await sendKeys(input, "/exit\r");
+    await session;
+    expect(scrollbackRows(output.text()).filter((row) => row.trimEnd() === FAILED_ROW)).toHaveLength(1);
+  });
+
+  it.skipIf(process.env.CI === "true")("a turn that fits keeps its Steps live; the next line commits it with the failed row only", { timeout: 30_000 }, async () => {
+    resetTurnState();
+    const input = ttyInput();
+    const output = ttyOutput();
+    const session = runInkInteractiveSession({
+      errorOutput: ttyOutput(),
+      input,
+      async onSubmitLine(line, onProgress) {
+        if (line === "/exit") return { exit: true, messages: [] };
+        if (line === "second") return { messages: [{ role: "assistant", text: "answer-second" }] };
+        twoCalls(onProgress as never);
+        return { messages: [{ role: "assistant", text: "Up 12% on the week." }] };
+      },
+      output,
+      title: "Infinite TUI"
+    });
+    await waitFor(() => output.text().includes("Ask Infinite"), 4_000, output.text);
+    await sendKeys(input, "first\r");
+    await waitFor(() => stripAnsi(output.text()).includes("∞ Up 12% on the week."), 4_000, output.text);
+    // Live: the whole strip, bars and all.
+    const live = scrollbackRows(output.text()).map((row) => row.trimEnd());
+    expect(live.some((row) => /reading the last.*━+\s+✓ 200 days/u.test(row))).toBe(true);
+    expect(live.some((row) => /reading today\s+━+\s+✗ not synced yet/u.test(row))).toBe(true);
+    expect(live).not.toContain(FAILED_ROW);
+    await sendKeys(input, "second\r");
+    await waitFor(() => stripAnsi(output.text()).includes("answer-second"), 4_000, output.text);
+    await sendKeys(input, "/exit\r");
+    await session;
+    const rows = scrollbackRows(output.text()).map((row) => row.trimEnd());
+    const answer = rows.findIndex((row) => row.includes("∞ Up 12% on the week."));
+    expect(rows.slice(answer + 1, answer + 4)).toEqual(["", FAILED_ROW, "─".repeat(80)]);
+    expect(rows.filter((row) => row === FAILED_ROW)).toHaveLength(1);
+    expect(rows.some((row) => row.includes("reading the last 200 days"))).toBe(false);
+  });
+
+  it.skipIf(process.env.CI === "true")("with a card still waiting the calls stay live under it; the failed row is printed once, when the card's turn is committed", { timeout: 30_000 }, async () => {
+    resetTurnState();
+    const pending: InSessionConfirmationAction = {
+      turnId: "t1",
+      confirmationHandle: "h1",
+      summary: "Publish landing page to production",
+      confirmationDetails: [{ label: "domain", value: "acme.example.com" }]
+    };
+    const input = ttyInput();
+    const output = ttyOutput();
+    const session = runInkInteractiveSession({
+      errorOutput: ttyOutput(),
+      input,
+      onConfirmAction: async () => ({ ok: true }),
+      async onSubmitLine(line, onProgress): Promise<InkInteractiveLineResult> {
+        if (line === "/exit") return { exit: true, messages: [] };
+        twoCalls(onProgress as never);
+        return { messages: [{ role: "assistant", text }], pendingConfirmations: [pending] };
+      },
+      output,
+      title: "Infinite TUI"
+    });
+    await waitFor(() => output.text().includes("Ask Infinite"), 4_000, output.text);
+    await sendKeys(input, "publish it\r");
+    await waitFor(() => output.text().includes("alpha line 199") && stripAnsi(output.text()).includes("n  dismiss"), 4_000, output.text);
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    const waiting = scrollbackRows(output.text()).map((row) => row.trimEnd());
+    const answerEnd = waiting.findIndex((row) => /alpha line 199$/u.test(row));
+    // The answer went up alone: right under it the turn's rule, then the frame with the card and its Steps.
+    expect(waiting.slice(answerEnd + 1, answerEnd + 4)).toEqual(["─".repeat(80), " ∞ Infinite", "─".repeat(80)]);
+    expect(waiting).not.toContain(FAILED_ROW);
+    expect(waiting.slice(answerEnd).some((row) => /reading today\s+━+\s+✗ not synced yet/u.test(row))).toBe(true);
+    // The card is answered, the session ends: what was live is committed, the failed call with it, once.
+    await sendKeys(input, "n");
+    await waitFor(() => stripAnsi(output.text()).includes("Dismissed"), 4_000, output.text);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    await sendKeys(input, "/exit\r");
+    await session;
+    const rows = scrollbackRows(output.text()).map((row) => row.trimEnd());
+    expect(rows.filter((row) => row === FAILED_ROW)).toHaveLength(1);
+    expect(rows.findIndex((row) => row === FAILED_ROW)).toBeGreaterThan(rows.findIndex((row) => /alpha line 199$/u.test(row)));
+    expect(countLine(stripAnsi(output.text()), "alpha line 100")).toBe(1);
+  });
+});
+
 // What scrollback keeps: Ink writes each <Static> chunk once, ahead of the live
 // frame it then redraws (erasing the previous frame with cursor moves + erase).
 // Replaying the stream on a tiny screen model (rows, a cursor, erase) keeps the

@@ -371,6 +371,19 @@ export function stepStripLines(steps: readonly TurnStep[], options: StepStripOpt
   return rows.length ? [stepHeader(options.width, options), ...rows] : [];
 }
 
+/** What one call's row says: its status (after its view), glyph, tone, label and result words. */
+function stepRowFacts(step: TurnStep, steps: readonly TurnStep[], options: Pick<StepStripOptions, "views" | "nowMs">) {
+  const now = options.nowMs ?? Date.now();
+  const status = refineStepStatus(step, options.views ?? [], steps);
+  const { glyph, tone } = GLYPHS[status];
+  const mark = status === "run" ? SPINNER[Math.floor(Math.max(0, now - step.startedAt) / SPINNER_MS) % SPINNER.length]! : glyph;
+  // A step still waiting says so (unless its label already does); once its card moved on, the words go with it.
+  const said = viewText(step.result);
+  const own = said === WAITING_ANSWER_WORDS && status !== "wait" ? "" : said;
+  const result = own || (status === "wait" && viewText(step.label) !== WAITING_WORDS ? WAITING_WORDS : "");
+  return { status, mark, tone, label: viewText(step.label), result };
+}
+
 /** The Steps strip's rows, one per call, without the header. */
 export function stepRowLines(steps: readonly TurnStep[], options: StepStripOptions): string[] {
   if (!steps.length) return [];
@@ -384,19 +397,13 @@ export function stepRowLines(steps: readonly TurnStep[], options: StepStripOptio
   const paint = (text: string, tone: ThemeStyle) => (options.color && text ? ansi(options.theme, tone, text) : text);
 
   const rows = steps.flatMap((step) => {
-    const status = refineStepStatus(step, options.views ?? [], steps);
+    const { status, mark, tone, label: words, result } = stepRowFacts(step, steps, { ...options, nowMs: now });
     const a = Math.round(((step.startedAt - t0) / span) * gantt);
     const b = Math.max(1, Math.round(((endOf(step) - step.startedAt) / span) * gantt));
     const running = status === "run" || status === "bg";
     const bar = (running ? `${"━".repeat(Math.max(1, b - 2))}╍╍` : "━".repeat(b)).slice(0, Math.max(1, gantt - a));
     const barTone: ThemeStyle = status === "ok" ? "dim" : status === "fail" ? "red" : status === "stopped" ? "dim" : "cyan";
-    const { glyph, tone } = GLYPHS[status];
-    const mark = status === "run" ? SPINNER[Math.floor(Math.max(0, now - step.startedAt) / SPINNER_MS) % SPINNER.length]! : glyph;
-    const label = padEndCells(cut(viewText(step.label), labelWidth), labelWidth);
-    // A step still waiting says so (unless its label already does); once its card moved on, the words go with it.
-    const said = viewText(step.result);
-    const own = said === WAITING_ANSWER_WORDS && status !== "wait" ? "" : said;
-    const result = own || (status === "wait" && viewText(step.label) !== WAITING_WORDS ? WAITING_WORDS : "");
+    const label = padEndCells(cut(words, labelWidth), labelWidth);
     const segments: (readonly [string, ThemeStyle])[] = [
       [`  ${label} ${" ".repeat(a)}`, "text"],
       [bar, barTone],
@@ -404,16 +411,58 @@ export function stepRowLines(steps: readonly TurnStep[], options: StepStripOptio
       [mark, tone],
       [result ? ` ${result}` : "", "dim"]
     ];
-    const row = fitSegments(segments, width, paint);
-    // Why a call failed must stay readable: a reason cut to the result column
-    // is printed whole on dim rows under the call (ok rows stay one row, as r4).
-    const cutShort = segments.reduce((sum, [text]) => sum + displayWidth(text), 0) > width;
-    if (!result || !cutShort || (status !== "fail" && status !== "unk")) {
-      return [row];
-    }
-    return [row, ...wrapText(result, Math.max(1, width - 4)).map((line) => `    ${paint(line, "dim")}`)];
+    return rowWithReason(segments, status, result, width, paint);
   });
   return rows;
+}
+
+/**
+ * One row, cut to the width. Why a call failed must stay readable: a reason
+ * cut short is printed whole on dim rows under the call, indented 4 (ok rows
+ * stay one row, as r4).
+ */
+function rowWithReason(
+  segments: readonly (readonly [string, ThemeStyle])[],
+  status: StepStatus,
+  result: string,
+  width: number,
+  paint: (text: string, tone: ThemeStyle) => string
+): string[] {
+  const row = fitSegments(segments, width, paint);
+  const cutShort = segments.reduce((sum, [text]) => sum + displayWidth(text), 0) > width;
+  if (!result || !cutShort || (status !== "fail" && status !== "unk")) {
+    return [row];
+  }
+  return [row, ...wrapText(result, Math.max(1, width - 4)).map((line) => `    ${paint(line, "dim")}`)];
+}
+
+/**
+ * The statuses a turn printed into scrollback keeps a row for. The Steps strip
+ * belongs to the live turn (D1), but a call that did not end clean must stay
+ * readable once its turn is committed: failed (✗), no outcome came back (?),
+ * the thing had changed (⧗), or an OK still unanswered (▣).
+ */
+const UNSETTLED: ReadonlySet<StepStatus> = new Set<StepStatus>(["fail", "unk", "old", "wait"]);
+
+/**
+ * The rows a committed turn keeps under its answer: one per call that did not
+ * end clean, in call order, as the Steps strip words it but without the bar
+ * (`  reading today ✗ not synced yet`). The labels are padded to the longest,
+ * so the glyphs sit in one column. Clean calls (✓, ·, ◐, ⟳) are dropped: no
+ * header and no rows when every call ended clean.
+ */
+export function unsettledStepLines(steps: readonly TurnStep[], options: StepStripOptions): string[] {
+  const width = Math.max(1, Math.floor(options.width));
+  const paint = (text: string, tone: ThemeStyle) => (options.color && text ? ansi(options.theme, tone, text) : text);
+  const kept = steps
+    .map((step) => stepRowFacts(step, steps, options))
+    .filter((facts) => UNSETTLED.has(facts.status));
+  const labelWidth = Math.min(stepLabelWidth(width), Math.max(0, ...kept.map((facts) => displayWidth(facts.label))));
+  return kept.flatMap(({ status, mark, tone, label, result }) => rowWithReason([
+    [`  ${padEndCells(cut(label, labelWidth), labelWidth)} `, "text"],
+    [mark, tone],
+    [result ? ` ${result}` : "", "dim"]
+  ], status, result, width, paint));
 }
 
 /** r4 `trunc()` for one string: past the width, cut to width − 1 and `…`. */

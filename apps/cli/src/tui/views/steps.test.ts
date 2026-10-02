@@ -16,7 +16,8 @@ import {
   stepGanttWidth,
   stepLabelWidth,
   stepsFromTrail,
-  stepStripLines
+  stepStripLines,
+  unsettledStepLines
 } from "./steps.js";
 
 // terminal-r4 `frame()` Steps strip, from the synthetic goldens region-steps
@@ -319,5 +320,56 @@ describe("a step that waits (r4 ▣)", () => {
     expect(stepsFromTrail(messages).map(({ label, status, result }) => ({ label, status, result }))).toEqual([
       { label: "proposing change", status: "wait", result: "pause 1 item" }
     ]);
+  });
+});
+
+// A turn printed into scrollback has no Steps strip (D1), but a call that did
+// not end clean must stay readable there: its row, without the bar.
+describe("the calls a committed turn keeps: the ones that did not end clean", () => {
+  const call = (id: string, status: StepStatus, label: string, result: string): TurnStep =>
+    ({ id, name: "mcp__sample_app__get_sample_rows", label, status, startedAt: 0, endedAt: 1000, result });
+  const rows = (steps: TurnStep[], width = 100, views: AnswerViewV1[] = []) => unsettledStepLines(steps, { width, color: false, theme, views });
+
+  it("keeps a failed call with its reason and drops the clean ones", () => {
+    expect(rows([
+      call("c1", "ok", "reading the last 200 days", "200 days"),
+      call("c2", "fail", "reading today", "not synced yet")
+    ])).toEqual(["  reading today ✗ not synced yet"]);
+    expect(rows([call("c1", "ok", "reading the last 200 days", "200 days")])).toEqual([]);
+    expect(rows([])).toEqual([]);
+  });
+
+  it("keeps ✗, ?, ⧗ and a ▣ still unanswered, in call order, glyphs in one column; never ✓ · ◐ ⟳ or a stopped call", () => {
+    const all: [StepStatus, string][] = [
+      ["ok", "listing sample rows"], ["fail", "pausing sample A"], ["off", "checking the catalog"], ["unk", "sending the note"],
+      ["part", "reading the week"], ["old", "pausing sample B"], ["bg", "drawing"], ["wait", "proposing the change"], ["stopped", "syncing"]
+    ];
+    expect(rows(all.map(([status, label], index) => call(`c${index}`, status, label, status === "wait" ? "" : "why")))).toEqual([
+      "  pausing sample A     ✗ why",
+      "  sending the note     ? why",
+      "  pausing sample B     ⧗ why",
+      "  proposing the change ▣ waiting for your OK"
+    ]);
+  });
+
+  it("paints the glyph in its tone and the reason dim, the label plain", () => {
+    const [row] = unsettledStepLines([call("c1", "fail", "reading today", "not synced yet")], { width: 100, color: true, theme });
+    expect(r4Segments(row!)).toEqual(seg(["  reading today ", ""], ["✗", "red"], [" ", ""], ["not synced yet", "dim"]));
+    const [asked] = unsettledStepLines([call("c1", "wait", "proposing the change", "pause 1 item")], { width: 100, color: true, theme });
+    expect(r4Segments(asked!)).toEqual(seg(["  proposing the change ", ""], ["▣", "amber"], [" ", ""], ["pause 1 item", "dim"]));
+  });
+
+  it("a reason too long for the row is cut with … and printed whole on dim rows under it; no row passes the width", () => {
+    const reason = "the ad account hit its daily spending limit, so the change was not sent and nothing was paused";
+    const drawn = rows([call("c1", "fail", "pausing sample A", reason)], 60);
+    expect(drawn[0]).toMatch(/^ {2}pausing sample A ✗ .*…$/u);
+    expect(drawn.slice(1).map((row) => row.trim()).join(" ")).toBe(reason);
+    expect(drawn.every((row) => displayWidth(row) <= 60)).toBe(true);
+  });
+
+  it("follows the view a call drew: a call that said done whose view failed is kept, one whose card was answered is not", () => {
+    const view = (state: AnswerViewV1["state"]) => ({ tool: "get_sample_rows", state }) as AnswerViewV1;
+    expect(rows([call("c1", "ok", "reading today", "1 row")], 100, [view("failed")])).toEqual(["  reading today ✗ 1 row"]);
+    expect(rows([call("c1", "wait", "proposing the change", "pause 1 item")], 100, [view("done")])).toEqual([]);
   });
 });

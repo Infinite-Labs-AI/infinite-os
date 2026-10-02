@@ -37,7 +37,7 @@ import {
 } from "./focus.js";
 import { fitLine, paint } from "./primitives.js";
 import { renderView } from "./registry.js";
-import { stepHeader, stepRowLines, stepsFromTrail } from "./steps.js";
+import { stepHeader, stepRowLines, stepsFromTrail, unsettledStepLines } from "./steps.js";
 import type { ViewRender, ViewRenderCtx } from "./types.js";
 
 export { stepLabelWidth } from "./steps.js";
@@ -297,18 +297,37 @@ export function rowsBesideCard(input: Omit<LiveTurnInput, "details" | "rows" | "
 /** One details row standing in for the card while its neighbours are measured. */
 const CARD_PLACEHOLDER = " ";
 
+export interface CommittedTurnInput extends Omit<LiveTurnInput, "rows" | "livePageNext"> {
+  /**
+   * The turn's calls stay live under a write card that still waits (the rest
+   * of the turn goes to scrollback, the card keeps the Steps): print none of
+   * them here. They print with what is committed once the card is answered.
+   */
+  stepsStayLive?: boolean;
+}
+
 /**
  * A finished turn as it is printed once into scrollback (D1): ONE column at
  * any width, the question, the answer and its details underneath, every page
  * of it (no row budget). No Steps strip: the calls belonged to the live turn.
+ * The one thing kept of them is every call that did NOT end clean (failed, no
+ * outcome, the thing had changed, an OK never answered): its row follows the
+ * answer, a blank row apart, so why a step failed is still in scrollback.
  */
-export function renderCommittedTurn(input: Omit<LiveTurnInput, "rows" | "livePageNext">): string[] {
+export function renderCommittedTurn(input: CommittedTurnInput): string[] {
   const width = Math.max(1, Math.floor(input.width));
   // No row budget: a document is one page as tall as its body (no page line,
   // which no key could act on in scrollback), whatever page the live turn showed.
   // No rule of its own: scrollback draws the ONE thin rule under each turn (D1,
   // transcript-app.tsx), so a rule here would print two.
-  return drawLiveTurn(input, width, ALL_ROWS, false, false).lines;
+  const lines = drawLiveTurn(input, width, ALL_ROWS, false, false).lines;
+  if (input.stepsStayLive) {
+    return lines;
+  }
+  const kept = unsettledStepLines(input.steps?.length ? input.steps : stepsFromTrail(input.messages), {
+    width, color: input.color, theme: input.theme, views: [...input.views, ...(input.statusViews ?? [])]
+  });
+  return kept.length ? [...lines, ...(lines.length ? [""] : []), ...kept] : lines;
 }
 
 /** A row budget no view reaches: a committed turn is drawn whole. */
