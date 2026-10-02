@@ -44,7 +44,8 @@ describe("the write card draws its approval view (CI-runnable)", () => {
     }));
     expect(out).toContain("Pause ad “Hook A”?");
     expect(out).toContain("│ status   on → paused");
-    expect(out).toContain("p Pause   n dismiss");
+    // The keys as chips inside the card (the key bar's own drawing is R1's).
+    expect(out).toContain("│  p  Pause    n  dismiss");
     // The old card's summary line is not drawn when the view is.
     expect(out).not.toContain("Approve this write?");
     expect(out).not.toContain("Stops this ad's spend");
@@ -59,7 +60,7 @@ describe("the write card draws its approval view (CI-runnable)", () => {
     }));
     expect(out).not.toContain("press p to Pause");
     expect(out).not.toContain("n to dismiss");
-    expect(out).toContain("p Pause   n dismiss");
+    expect(out).toContain("│  p  Pause    n  dismiss");
   });
 
   it("keeps the confirmationDetails card for an old desktop (no view)", () => {
@@ -72,7 +73,6 @@ describe("the write card draws its approval view (CI-runnable)", () => {
     expect(out).toContain("┌─ Pause ad Hook A ─");
     expect(out).toContain("│ Ad       Hook A");
     expect(out).toContain("│  y  Confirm    n  dismiss");
-    expect(out).toContain("y Confirm   n dismiss");
     expect(out).not.toContain("Approve this write? —");
   });
 
