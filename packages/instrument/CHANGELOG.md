@@ -5,6 +5,20 @@ All notable changes to the `infinite-tag` npm package (`packages/instrument`). V
 
 ## Unreleased
 
+### Setup wizard: review I1 fixes
+
+- A site whose home page redirects (apex → www, `/` → `/en`) is proved and reported; a check's free text never
+  goes in a report cell, and an unexpected error after the proof claim still settles the proof.
+- A Next.js site with its own `next.config.*` installs: the installer never edits it, the plan says so, and the
+  collect rewrite becomes a job the wizard checks. An install that cannot be applied stops before anything is
+  written in Infinite.
+- The wizard checks jobs 1, 2, 3, 8, 9, 12 and 14 itself (server-lane mount, app shell, Next rewrites, server
+  conversions, identify/reset, CSP hosts, the privacy paragraph); a job it could not check is named in the PR.
+- Code the wizard's own build runs is gated (network, DNS, file writes, computed globals), the build may write
+  only its output folders, and the gate runs again before every commit.
+- The second reviewer can read its worktree; Ctrl+C mid-turn waits until the agent's edits are undone; check
+  reasons are secret-scanned; downloads are declared once per event; the report refuses what the cloud refuses.
+
 ### Setup wizard: one wired run
 
 - `npx infinite-tag` now runs the whole 13-step wizard (link, agent, before, keys, plan, install, jobs,
