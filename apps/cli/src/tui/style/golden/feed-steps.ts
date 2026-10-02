@@ -11,13 +11,15 @@
 //   - a call still running (r4 `run`) has started and reported its progress
 //     ("1 of 3"), and has not completed;
 //   - ok and fail are what the call itself said (`ok`, `error`);
-//   - every other status is what the VIEW the call drew says (needs_yes → ▣,
+//   - a call waiting for the person's OK says so itself, as the bridge does
+//     (`requires_confirmation` → ▣), named after its card's tool when the turn
+//     holds that card, so the row then follows the card;
+//   - every other status is what the VIEW the call drew says (partial → ◐,
 //     outdated → ⧗, …) when exactly one view of the turn stands for it: the
 //     call is named after that view's tool and completes `ok`, and the session
 //     derives the status from the view (`refineStepStatus`);
 //   - with no such view, the call says it itself, as the transport does:
-//     `requires_confirmation` → ▣, `unsupported` → ·, `low_coverage` → ◐,
-//     `queued` → ⟳;
+//     `unsupported` → ·, `low_coverage` → ◐, `queued` → ⟳;
 //   - `unk` and `old` have no transport status (the first is a turn that ended
 //     without the call's result, the second only a view says): with no view
 //     standing for them the row's status is written to the turn store directly.
@@ -100,7 +102,8 @@ export function feedSteps(turn: R4Turn, now: number): void {
       }
       return;
     }
-    const status = view ? "ok" : FRAME_STATUS[step.status];
+    // A proposal's step says it waits itself (as the bridge does), with or without its card's view.
+    const status = step.status === "wait" ? FRAME_STATUS.wait : view ? "ok" : FRAME_STATUS[step.status];
     if (status === undefined) {
       direct.push({ id: toolId, status: step.status });
     }
