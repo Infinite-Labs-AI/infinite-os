@@ -272,3 +272,156 @@ function autoConfigReasonText(reason: string): string {
       return "has no `fbq('set', 'autoConfig', false, …)` before `init`, so Meta's automatic events are ON by default"
   }
 }
+
+// ---- Wizard-era checks (lane O9): provider census, PostHog config, host guard, sensitive pages,
+// Meta event id. Same rule: symptom, cause, remedy, consequence; `likely` findings lead with
+// "Worth checking:".
+
+function maskId(value: string): string {
+  if (value.length <= 10) return `${value.slice(0, 3)}...`
+  return `${value.slice(0, 6)}...${value.slice(-4)}`
+}
+
+export function providerDuplicateInitMessage(input: {
+  tool: string
+  id: string
+  places: readonly string[]
+  sameFile: boolean
+}): string {
+  const where = input.places.join(", ")
+  if (input.sameFile) {
+    return (
+      `${input.tool} ${maskId(input.id)} is initialised ${input.places.length} times in one page (${where}). Every ` +
+      `initialisation sends its own page view, so each visit is counted ${input.places.length} times and every rate ` +
+      `built on page views is wrong by that factor. Keep one and delete the others.`
+    )
+  }
+  return (
+    `Worth checking: ${input.tool} ${maskId(input.id)} is initialised in a shared entry that loads on every page AND ` +
+    `again elsewhere (${where}). On any page that renders both, every visit is counted twice. If the second one ` +
+    `never renders on the same page as the first, ignore this line.`
+  )
+}
+
+export function providerManagedAndAdoptedMessage(input: { tool: string; managed: string; adopted: string; sameFile: boolean }): string {
+  return (
+    `${input.sameFile ? "" : "Worth checking: "}${input.tool} is started twice: by infinite-tag's managed code in ` +
+    `${input.managed} and by the site's own code in ${input.adopted}. Two owners of one tool double-count every ` +
+    `page view and fight over its settings. Keep one: a plan line can remove the duplicate the site no longer needs.`
+  )
+}
+
+export function providerGtmAndGtagMessage(input: { container: string; ga4Id: string; file: string }): string {
+  return (
+    `Worth checking: Google Tag Manager (${input.container}) and a hand-written gtag('config', ${maskId(input.ga4Id)}) ` +
+    `both load in ${input.file}. If the container also fires a GA4 tag for the same id, every page view is counted ` +
+    `twice. The container's contents are not read here; open it in Tag Manager and check.`
+  )
+}
+
+export function providerMultipleIdsMessage(input: { tool: string; ids: ReadonlyArray<{ id: string; file: string }> }): string {
+  return (
+    `Worth checking: ${input.tool} is set up with ${input.ids.length} different ids ` +
+    `(${input.ids.map((entry) => `${maskId(entry.id)} in ${entry.file}`).join(", ")}). That can be deliberate ` +
+    `(two properties), or a leftover that sends half your data to an account nobody reads.`
+  )
+}
+
+export function posthogUnreadableMessage(input: { file: string; line: number }): string {
+  return (
+    `The PostHog init at ${input.file}:${input.line} takes its options from a variable or expression, so its proxy, ` +
+    `page-view and privacy settings could not be read from source. This is "not checked", not "fine".`
+  )
+}
+
+export function posthogNotProxiedMessage(input: { file: string; line: number; apiHost: string }): string {
+  return (
+    `Worth checking: the site's PostHog at ${input.file}:${input.line} sends straight to ${input.apiHost}. Ad blockers ` +
+    `drop requests to PostHog's own hosts, so a share of your visitors never reach PostHog at all. A plan line can ` +
+    `route it through /ingest on your own domain (infinite-tag changes the site's PostHog only with your OK).`
+  )
+}
+
+export function posthogSpaPageviewsMessage(input: { file: string; line: number }): string {
+  return (
+    `Worth checking: the site's PostHog at ${input.file}:${input.line} has neither \`defaults: '2025-05-24'\` (or ` +
+    `newer) nor \`capture_pageview: 'history_change'\`, so on a single-page app client-side navigations may not be ` +
+    `counted as page views and every page after the first goes missing.`
+  )
+}
+
+export function posthogRegionMismatchMessage(input: { file: string; line: number; served: string; expected: string }): string {
+  return (
+    `The site's PostHog at ${input.file}:${input.line} sends to ${input.served}, but the connected PostHog project ` +
+    `lives at ${input.expected}. Events sent to the wrong region land in no project you can read. Point api_host at ` +
+    `the connected project's region.`
+  )
+}
+
+export function posthogPrivacyChangedMessage(input: { file: string; option: string; before: string; after: string }): string {
+  return (
+    `\`${input.option}\` in ${input.file} changed from ${input.before} to ${input.after}. Session replay and click ` +
+    `capture are the site owner's privacy and billing choices; infinite-tag never changes them without an approved ` +
+    `sensitive-pages plan line. Revert this edit.`
+  )
+}
+
+export function hostGuardMissingMessage(input: { tool: string; file: string; line: number; strict: boolean }): string {
+  return (
+    `${input.strict ? "" : "Worth checking: "}the site's own ${input.tool} at ${input.file}:${input.line} starts on every ` +
+    `host — preview deploys (*.vercel.app), localhost and staging included — so previews and local testing send ` +
+    `data into the real ${input.tool} and inflate its numbers. A plan line can wrap this init in infinite-tag's ` +
+    `preview guard, which always lets your production domain through.`
+  )
+}
+
+export function hostGuardPresentMessage(input: { tool: string; file: string; line: number }): string {
+  return `The site's ${input.tool} at ${input.file}:${input.line} starts behind a host check, so previews stay silent.`
+}
+
+export function hostGuardSilencesProductionMessage(input: { tool: string; file: string; line: number; hosts: readonly string[] }): string {
+  return (
+    `The host check in front of ${input.tool} at ${input.file}:${input.line} does not let ${input.hosts.join(", ")} ` +
+    `through, so the production site would send nothing. Production must always be exempt (decision 3): add the ` +
+    `host to the guard's exempt list.`
+  )
+}
+
+export function sensitivePagesMessage(input: { routes: readonly string[]; remaining: number }): string {
+  const more = input.remaining > 0 ? ` and ${input.remaining} more` : ""
+  return (
+    `Worth checking: PostHog session replay and click capture are on for ${input.routes.length + input.remaining} ` +
+    `sensitive page${input.routes.length + input.remaining === 1 ? "" : "s"} (${input.routes.join(", ")}${more}). ` +
+    `Recordings of login, payment and confirmation pages can capture what people type there. A plan line can turn ` +
+    `replay and click capture off on those pages only; nothing changes without your OK.`
+  )
+}
+
+export function sensitivePagesHandledMessage(input: { file: string }): string {
+  return `PostHog in ${input.file} already turns replay or click capture off for sensitive pages.`
+}
+
+export function metaEventIdPageBuiltMessage(input: { file: string; line: number }): string {
+  return (
+    `A Meta event id is built in the page at ${input.file}:${input.line}. Meta merges a browser event with its server ` +
+    `twin only when both carry the SAME id, and the page cannot know the id the server sent — so this event is ` +
+    `either counted twice or, when the server sent nothing, it is a phantom conversion. Fire the browser event only ` +
+    `with the \`metaEventId\` the server returned (\`infiniteMetaMirror(metaEventId)\`), and stay silent when it is null.`
+  )
+}
+
+export function metaEventIdUndeterminedMessage(input: { file: string; line: number }): string {
+  return (
+    `A Meta event id at ${input.file}:${input.line} comes from a variable, so whether it is the \`metaEventId\` the ` +
+    `server returned could not be read from source. Check it by hand.`
+  )
+}
+
+export function metaStandardOnClickMessage(input: { file: string; line: number; event: string }): string {
+  return (
+    `\`fbq('track', '${input.event}')\` fires from a click handler at ${input.file}:${input.line}. A click is not a ` +
+    `${input.event}: it fires before the form validates or the payment succeeds, so Meta optimises your ads for ` +
+    `clicks that never converted. Report the conversion from the server after it succeeds (\`reportInfiniteOutcome\`) ` +
+    `and let the browser mirror it only with the server's \`metaEventId\`.`
+  )
+}

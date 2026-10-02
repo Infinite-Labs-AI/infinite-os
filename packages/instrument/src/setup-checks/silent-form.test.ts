@@ -85,4 +85,14 @@ describe("a form that submits and emits nothing", () => {
     expect(result.findings[0]!.message).not.toContain("contact-form")
     expect(result.findings[0]!.message).not.toContain("/api/lead")
   })
+
+  it("recognises infinite-tag's own conversion helpers as analytics calls (lane O9)", () => {
+    for (const call of ["infiniteTrack('sign_up')", "infiniteTrackThenNavigate('sign_up', '/thanks')", "infiniteMetaMirror(res.metaEventId)", "await reportInfiniteOutcome({ type: 'lead' })"]) {
+      const result = check("src/components/contact.tsx", `${LEAD_FORM}\nfunction onSubmit() { ${call} }`)
+      expect(result.findings[0]!.code).toBe("INF_SETUP_FORM_UNDETERMINED")
+    }
+    // Negative: a lookalike name that is not one of the helpers still reads as silent.
+    const lookalike = check("src/components/contact.tsx", `${LEAD_FORM}\nfunction onSubmit() { infiniteTracker('sign_up') }`)
+    expect(lookalike.findings[0]!.code).toBe("INF_SETUP_FORM_NO_CONVERSION")
+  })
 })
