@@ -80,6 +80,8 @@ describe("step jobs: claims are only claims; the wizard checks", () => {
     expect(t.checkCalls.build).toBe(1)
     const states = t.recorded.events.filter((event) => event.type === "job.state").map((event) => [event.fields.itemId, event.fields.state, event.fields.by])
     expect(states).toContainEqual(["conversions_to_tools:trial", "claimed", "agent_claim"])
+    // Review I1 P3-3: one `claimed` per claim (never once on the claim and again on apply).
+    expect(states.filter(([id, state]) => id === "conversions_to_tools:trial" && state === "claimed")).toHaveLength(1)
     expect(states).toContainEqual(["conversions_to_tools:trial", "waiting_real_event", "wizard"])
     expect(t.recorded.events.filter((event) => event.type === "check.result").every((event) => event.fields.runId === STEP_RUN_ID)).toBe(true)
   })
@@ -125,6 +127,30 @@ describe("step jobs: claims are only claims; the wizard checks", () => {
     const agree = setup({ scenario: { turns: [{ steps: [claim("meta_improve:landing", "not_needed", "already there")] }] }, items: [ITEMS[0]!], notNeededAgrees: true })
     await step.run(agree.ctx, agree.deps)
     expect(stateOf(agree.current().jobs, "meta_improve:landing")).toBe("not_needed")
+  })
+})
+
+describe("step jobs: check reasons are secret-scanned (review I1 P2-6)", () => {
+  it("a build failure that prints a .env value never reaches the agent's next brief, a job note or an event", async () => {
+    const leaked = "fixture-not-a-secret"
+    const t = setup({
+      scenario: { turns: [{ steps: [claim("server_conversions:signup")] }, { steps: [claim("server_conversions:signup")] }] },
+      checks: {
+        build: [
+          { ok: false, failureSignature: [`Error: connect ECONNREFUSED postgres://app:${leaked}@db/prod`], durationMs: 1 },
+          { ok: true, failureSignature: [], durationMs: 1 }
+        ]
+      },
+      items: [agentItem("server_conversions:signup", ["app/api/signup/route.ts"])]
+    })
+    await step.run(t.ctx, t.deps)
+    const [, second] = runs(t.fakes, "claude")
+    const brief = second!.argv![second!.argv!.indexOf("--append-system-prompt") + 1]!
+    expect(brief).toContain("the wizard's checks failed: build")
+    expect(brief).not.toContain(leaked)
+    expect(brief).toContain("[redacted: env_value]")
+    expect(JSON.stringify(t.recorded.events)).not.toContain(leaked)
+    expect(JSON.stringify(t.current().jobs)).not.toContain(leaked)
   })
 })
 

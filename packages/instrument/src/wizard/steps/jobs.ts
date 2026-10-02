@@ -42,6 +42,8 @@ import { runExtras } from "../../agents/runner.js"
 import { reverseTextEdits } from "../../server-lane/text-edits.js"
 import { applyClaim, applyResults, blockItem, failItem, unblockItem, type Transition } from "../../jobs/state-machine.js"
 import { sanitizeUntrusted } from "../../agents/sanitize.js"
+import { buildScanner } from "../../review/context.js"
+import type { Scanner } from "../../review/scan.js"
 import { outOfUsageResumeLine } from "../../agents/usage-limit.js"
 import { AGENT_LIMITS, type AgentRunResult, type SessionRef } from "../contracts/agents.js"
 import { ASK_CANCELLED, ASK_TIMEOUT } from "../contracts/asks.js"
@@ -187,9 +189,8 @@ async function runWorker(io: JobsIo, agentItems: ChecklistItem[]): Promise<StepO
         brief,
         budget: { maxTurns: turnsLeft, wallMs: wallLeft },
         ...(session && sessionId(session) !== "" ? { resume: session } : {}),
-        onClaim: (claim) => {
-          if (claim.status === "done") ctx.emit.emit("job.state", { itemId: claim.jobId, state: "claimed", by: "agent_claim", note: claim.note })
-        },
+        // The claim's `job.state` is emitted ONCE, when the step applies it after the turn (review I1 P3-3).
+        onClaim: () => undefined,
         onAsk: (question) => questions.push(question),
         onProgress: () => undefined,
         onNarrate: (beat) => ctx.emit.emit("narrate", beat)
@@ -633,13 +634,28 @@ class JobsIo {
     await this.save()
   }
 
+  private scannerPromise: Promise<Scanner> | null = null
+
+  /**
+   * §3g.5 (review I1 P2-6): the run's secret scanner (the repo's `.env*` values, the bridge and MCP tokens, the
+   * secret shapes; the connection IDs allowed). Every check reason passes through it before it reaches the
+   * agent's next brief, a `job.state` note, a `check.result` event or the run state: a build that prints a
+   * DB URL or an SDK key never hands it to the agent or the terminal.
+   */
+  scanner(): Promise<Scanner> {
+    this.scannerPromise ??= this.connectionIds().then((ids) => buildScanner(this.ctx, this.deps, ids))
+    return this.scannerPromise
+  }
+
   /** Runs the item's S, B and T0 checks (the build once per round, against the baseline). */
   async preDeployChecks(item: ChecklistItem): Promise<CheckResult[]> {
     const runId = this.runId()
     const out: CheckResult[] = []
+    const scanner = await this.scanner()
     const emit = (raw: CheckResult) => {
-      // Produced by the wizard's own checks in THIS run: a result without a run id carries this run's.
-      const result: CheckResult = { ...raw, runId: raw.runId ?? runId }
+      // Produced by the wizard's own checks in THIS run: a result without a run id carries this run's. Its
+      // reason is secret-scanned once, here, so every later use (feedback, notes, events, state) is clean.
+      const result: CheckResult = { ...raw, runId: raw.runId ?? runId, ...(raw.reason ? { reason: scanner.redact(raw.reason).text } : {}) }
       out.push(result)
       this.ctx.emit.emit("check.result", {
         checkId: result.checkId,
