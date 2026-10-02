@@ -112,8 +112,10 @@ describe("renderTable", () => {
       rows: [["Hook\u001b[31m A‮", "$1.00"]],
       total: ["Total", "$1.00"]
     };
-    const plain = renderTable(input, { width: 40, color: false, theme: resolveTheme() });
-    const colored = renderTable(input, { width: 40, color: true, theme: resolveTheme() });
+    // Pinned to the r4 theme: resolveTheme() follows the runner's terminal, and a
+    // CI runner without COLORTERM resolves a lower colour tier than truecolor.
+    const plain = renderTable(input, { width: 40, color: false, theme: INFINITE_R4_THEME });
+    const colored = renderTable(input, { width: 40, color: true, theme: INFINITE_R4_THEME });
     expect(colored.lines.map(stripAnsi)).toEqual(plain.lines);
     expect(colored.lines.join("")).toContain("\u001b[1;38;2;255;255;255m");
     expect(plain.lines.join("")).not.toMatch(/[\u001b‮]/);
