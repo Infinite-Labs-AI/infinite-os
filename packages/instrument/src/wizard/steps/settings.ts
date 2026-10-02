@@ -17,7 +17,7 @@ import type { StepOutcome, WizardContext, WizardDeps, WizardStep } from "../cont
 import type { PlanLineKind } from "../contracts/asks.js"
 import { STEP_COPY_OVERRIDES, WIZARD_STEP_META } from "../contracts/steps.js"
 import { isBridgeError } from "../../bridge/errors.js"
-import { bridgeErrorOutcome, missingCapabilities, protocolOutcome } from "../../bridge/outcomes.js"
+import { bridgeFailureLine, bridgeFailureOutcome, missingCapabilities, protocolOutcome } from "../../bridge/outcomes.js"
 import { hashInputs, sub } from "../../bridge/step-kit.js"
 import { readKeysResult } from "../handoff/keys-result.js"
 
@@ -67,7 +67,15 @@ const RELAY_UNAVAILABLE_TEXT: Record<NonNullable<MetaRelayStatusResponse["reason
 }
 
 function outcomeFor(error: unknown): StepOutcome | null {
-  return isBridgeError(error) ? bridgeErrorOutcome(error) : null
+  return bridgeFailureOutcome(error, { verb: "settings" })
+}
+
+/** §3z.4 row 9: `role_required`, a lock on one piece, and the named refusals are a user line; the step goes on. */
+function pieceLine(ctx: WizardContext, error: unknown, piece: string): boolean {
+  const line = bridgeFailureLine(error, piece)
+  if (line === null) return false
+  sub(ctx, "settings", `! ${line}`, "warn")
+  return true
 }
 
 async function provisionServerLane(ctx: WizardContext, deps: WizardDeps): Promise<"saved" | "needs_you" | "skipped"> {
@@ -98,9 +106,10 @@ async function provisionServerLane(ctx: WizardContext, deps: WizardDeps): Promis
       return "needs_you"
     }
     if (isBridgeError(error) && error.code === "ambiguous_connection") {
-      sub(ctx, "settings", "! More than one Vercel connection matches this site: pick one in Infinite (Connections › Vercel)", "warn")
+      if (!pieceLine(ctx, error, "Server lane")) sub(ctx, "settings", "! More than one Vercel connection matches this site: pick one in Infinite (Connections › Vercel)", "warn")
       return "needs_you"
     }
+    if (pieceLine(ctx, error, "Server lane")) return "needs_you"
     throw error
   }
 }
@@ -112,7 +121,10 @@ async function enableMetaRelay(ctx: WizardContext, deps: WizardDeps): Promise<"o
     return "skipped"
   }
   const status = await deps.bridge.metaRelayStatus({ signal: ctx.signal })
-  if (!status.available) {
+  // §3z.7 (A23): bind when the line is approved AND (available OR not yet rolled out): at switch-on the
+  // site already works, with no re-run. Any other reason (no pixel, Infinite's dataset, not production) waits.
+  const notRolledOut = !status.available && status.reason === "not_rolled_out"
+  if (!status.available && !notRolledOut) {
     sub(ctx, "settings", status.reason ? RELAY_UNAVAILABLE_TEXT[status.reason] : "Meta server events: not available yet", "info")
     return "waiting"
   }
@@ -140,13 +152,20 @@ async function enableMetaRelay(ctx: WizardContext, deps: WizardDeps): Promise<"o
   }
   try {
     const enabled = await deps.bridge.enableMetaRelay({ sourceRef, enable: true }, { signal: ctx.signal })
+    if (!enabled.available) {
+      // Bound while not rolled out: it reads "ready, waiting for Infinite to switch on".
+      sub(ctx, "settings", `${RELAY_UNAVAILABLE_TEXT.not_rolled_out} (pixel ${enabled.bound?.pixelId ?? chosen?.pixelId ?? ""} bound)`, "info")
+      return "waiting"
+    }
     sub(ctx, "settings", `✓ Meta server events: on (pixel ${enabled.bound?.pixelId ?? chosen?.pixelId ?? ""})`, "ok")
     return "on"
   } catch (error) {
     if (isBridgeError(error) && error.code === "relay_not_available") {
-      sub(ctx, "settings", RELAY_UNAVAILABLE_TEXT.not_rolled_out, "info")
+      const reason = (error.state ?? "") as keyof typeof RELAY_UNAVAILABLE_TEXT
+      sub(ctx, "settings", RELAY_UNAVAILABLE_TEXT[reason] ?? `Meta server events: not available (${error.state ?? "not available"})`, "info")
       return "waiting"
     }
+    if (pieceLine(ctx, error, "Meta server events")) return "needs_you"
     throw error
   }
 }
@@ -169,10 +188,15 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
     let declared: string[] = []
     if (approved.length > 0) {
       sub(ctx, "settings", `Declaring ${approved.length} conversion${approved.length === 1 ? "" : "s"} in Infinite…`, "pending")
-      const response = await deps.bridge.declareConversions({ runId, conversions: approved.map(conversionDeclaration) }, { signal: ctx.signal })
-      declared = response.declared
-      if (declared.length > 0) sub(ctx, "settings", `✓ Conversions declared: ${declared.join(" · ")}`, "ok")
-      for (const refused of response.refused) sub(ctx, "settings", `! Infinite refused ${refused.name} (${refused.reason})`, "warn")
+      try {
+        const response = await deps.bridge.declareConversions({ runId, conversions: approved.map(conversionDeclaration) }, { signal: ctx.signal })
+        declared = response.declared
+        if (declared.length > 0) sub(ctx, "settings", `✓ Conversions declared: ${declared.join(" · ")}`, "ok")
+        for (const refused of response.refused) sub(ctx, "settings", `! Infinite refused ${refused.name} (${refused.reason})`, "warn")
+      } catch (error) {
+        // §3z.7 (A27): `would_drop_ga4_events` declares nothing and says why; a lock or a role is a user line.
+        if (!pieceLine(ctx, error, "Conversions")) throw error
+      }
     } else {
       sub(ctx, "settings", "No conversions were approved, so none were declared", "info")
     }

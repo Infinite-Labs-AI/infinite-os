@@ -181,7 +181,7 @@ describe("step settings", () => {
     }
   })
 
-  it("an approved relay that is not available yet is not enabled", async () => {
+  it("§3z.7 (A23): an approved relay that is not rolled out yet is BOUND, and reads 'ready, waiting for Infinite to switch on'", async () => {
     const { bridge, harness, deps } = await setup({
       conversions: [],
       lines: ALL_APPROVED,
@@ -190,8 +190,33 @@ describe("step settings", () => {
       script: { metaRelay: { available: false, reason: "not_rolled_out", bound: null, enabled: false } }
     })
     await step.run(harness.ctx, deps)
+    expect(bridge.callsFor("meta-relay.enable")).toHaveLength(1)
+    expect(harness.subs().some((text) => text.startsWith("Meta server events: ready, waiting for Infinite to switch on"))).toBe(true)
+  })
+
+  it("negative: a relay refused for another reason (Infinite's own dataset) is never bound", async () => {
+    const { bridge, harness, deps } = await setup({
+      conversions: [],
+      lines: ALL_APPROVED,
+      approved: [],
+      clickTested: [],
+      script: { metaRelay: { available: false, reason: "infinite_dataset", bound: null, enabled: false } }
+    })
+    await step.run(harness.ctx, deps)
     expect(bridge.callsFor("meta-relay.enable")).toHaveLength(0)
-    expect(harness.subs()).toContain("Meta server events: ready, waiting for Infinite to switch on")
+    expect(harness.subs()).toContain("Meta server events: this workspace's pixel is Infinite's own, so it is not used here")
+  })
+
+  it("§3z.4: role_required on the relay is a user line and the step goes on (nothing changed)", async () => {
+    const { harness, deps } = await setup({
+      conversions: [],
+      lines: ALL_APPROVED,
+      approved: [],
+      clickTested: [],
+      script: { errors: { "meta-relay.enable": { code: "role_required", state: "owner_or_admin" } } }
+    })
+    expect((await step.run(harness.ctx, deps)).kind).toBe("ok")
+    expect(harness.subs().some((text) => text.includes("owner or admin"))).toBe(true)
   })
 
   it("a declined server-lane line → no env write", async () => {
