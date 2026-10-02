@@ -1,10 +1,7 @@
-import { describe, expect, it, vi } from "vitest";
+import { createRequire } from "node:module";
+import { pathToFileURL } from "node:url";
 
-// Ink paints through chalk, which reads the colour level once at import. A
-// test worker is not a TTY, so force full colour before anything loads Ink.
-vi.hoisted(() => {
-  process.env.FORCE_COLOR = "3";
-});
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import React from "react";
 
@@ -13,6 +10,25 @@ import { chip, style } from "../style/sgr.js";
 import type { Tier } from "../style/tokens.js";
 import { renderToString } from "./renderer.js";
 import { AnsiLine } from "./transcript-app.js";
+
+// Ink paints through chalk, and a test worker is not a TTY, so chalk's level
+// is 0 here. chalk is one instance per process (Node caches it), so set the
+// level on the very instance stock Ink imports, and put it back afterwards.
+type Chalk = { level: number };
+let inkChalk: Chalk;
+let previousLevel = 0;
+
+beforeAll(async () => {
+  const require = createRequire(import.meta.url);
+  const chalkPath = createRequire(require.resolve("ink")).resolve("chalk");
+  inkChalk = ((await import(pathToFileURL(chalkPath).href)) as { default: Chalk }).default;
+  previousLevel = inkChalk.level;
+  inkChalk.level = 3;
+});
+
+afterAll(() => {
+  inkChalk.level = previousLevel;
+});
 
 /** The style of every character, so two renders compare cell by cell whatever their escape layout. */
 function cells(segments: readonly AnsiSegment[]): string[] {
