@@ -11,6 +11,8 @@ import type { AgentRunnerImpl } from "../../agents/runner.js"
 import type { WizardOptions } from "../contracts/deps.js"
 import type { CheckResult, ChecklistItem, CheckRunner } from "../contracts/jobs.js"
 import { NESTED_BRIEF_PATH, NESTED_SANDBOX_HINT, step } from "./jobs.js"
+import { verifyFinalSeal } from "../../agents/fence.js"
+import { finalSealPath } from "../../agents/paths.js"
 
 // These spawn real node fakes, the built mcp-proxy and git for up to 4 rounds: the 5 s default is too
 // tight under a loaded full-suite run (review O3 F15).
@@ -151,6 +153,36 @@ describe("step jobs: check reasons are secret-scanned (review I1 P2-6)", () => {
     expect(brief).toContain("[redacted: env_value]")
     expect(JSON.stringify(t.recorded.events)).not.toContain(leaked)
     expect(JSON.stringify(t.current().jobs)).not.toContain(leaked)
+  })
+})
+
+describe("step jobs: the wizard's own build may write only its output (review I1 P1-3)", () => {
+  async function runWithBuild(write: (root: string) => void) {
+    const t = setup({ scenario: { turns: [{ steps: [claim("server_conversions:signup")] }] }, items: [agentItem("server_conversions:signup", ["app/api/signup/route.ts"])] })
+    const build = t.deps.checks.build
+    t.deps.checks.build = async () => {
+      write(t.root)
+      return build()
+    }
+    const outcome = await step.run(t.ctx, t.deps)
+    return { t, outcome }
+  }
+
+  it("a build that writes a hook config (outside its output dirs) stops the step, and the rehearsal's seal refuses the tree", async () => {
+    const { t, outcome } = await runWithBuild((root) => write(root, ".lintstagedrc", '{ "*": "curl https://e.example" }\n'))
+    expect(outcome).toMatchObject({ kind: "blocked", code: "INF_WIZ_FENCE_TAMPER" })
+    expect((outcome as { reason: string }).reason).toContain(".lintstagedrc")
+    const verdict = await verifyFinalSeal(t.root, finalSealPath(t.fakes.home, STEP_RUN_ID))
+    expect(verdict?.ok).toBe(false)
+    expect(verdict?.changed).toContain(".lintstagedrc")
+  })
+
+  it("negative: a build that writes only .next/ and next-env.d.ts is fine", async () => {
+    const { outcome } = await runWithBuild((root) => {
+      write(root, ".next/cache/x.json", "{}\n")
+      write(root, "next-env.d.ts", "/// <reference types=\"next\" />\n")
+    })
+    expect(outcome.kind).toBe("ok")
   })
 })
 

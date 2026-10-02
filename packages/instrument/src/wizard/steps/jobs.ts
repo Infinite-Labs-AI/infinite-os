@@ -34,8 +34,8 @@ import { homedir } from "node:os"
 import { join } from "node:path"
 
 import { connectionIdsFromKeys } from "../../agents/connection-ids.js"
-import { buildVerdict } from "../../checks/build.js"
-import { disposeSeal, Fence, heavyDirWritesDuring, NestedBranchMovedError, sealFinalTree, verifySeal, type FenceBlock, type TreeSeal } from "../../agents/fence.js"
+import { buildVerdict, isBuildOutputPath } from "../../checks/build.js"
+import { disposeSeal, Fence, heavyDirWritesDuring, keepAsFinalSeal, NestedBranchMovedError, sealFinalTree, sealTreeNow, verifySeal, type FenceBlock, type TreeSeal } from "../../agents/fence.js"
 import { matchesAnyGlob, normalizeRelPath } from "../../agents/glob.js"
 import { finalSealPath, snapshotDir, wizardCacheRoot } from "../../agents/paths.js"
 import { runExtras } from "../../agents/runner.js"
@@ -99,6 +99,8 @@ interface RoundOutcome {
   feedback: string[]
   /** Set when the tree changed after the turn settled: nothing was checked. */
   changedAfterTurn?: string[]
+  /** Set when the wizard's OWN build or T0 changed files outside the build's output dirs (review I1 P1-3). */
+  changedByChecks?: string[]
 }
 
 class SealBroken extends Error {
@@ -125,7 +127,11 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
   }
   const claimed = agentItems.filter((item) => item.state === "claimed")
   if (claimed.length > 0) {
-    await recheckClaimed(io, claimed)
+    const tampered = await recheckClaimed(io, claimed)
+    if (tampered) {
+      await io.settleEdits()
+      return tampered
+    }
     if (agentItems.length === claimed.length) {
       await io.settleEdits()
       return { kind: "ok", status: io.summary() }
@@ -138,7 +144,8 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
     // B5/B29: seal the tree the agent jobs left (after the failed jobs' edits were undone); the rehearsal
     // re-reads it right before it stages anything.
     const runId = io.runId()
-    if (io.agentTurns > 0 && runId) await sealFinalTree(ctx.root, finalSealPath(io.home(), runId))
+    // A build that tampered keeps its PRE-build seal as the final one (the rehearsal then refuses to stage).
+    if (io.agentTurns > 0 && runId && !io.buildTampered) await sealFinalTree(ctx.root, finalSealPath(io.home(), runId))
   }
 }
 
@@ -253,6 +260,7 @@ async function runWorker(io: JobsIo, agentItems: ChecklistItem[]): Promise<StepO
     )
     await disposeSeal(seal)
     if (round.changedAfterTurn) return sealBrokenOutcome(io, round.changedAfterTurn)
+    if (round.changedByChecks) return buildTamperOutcome(io, round.changedByChecks)
     feedback = round.feedback
     await io.patchClickTested()
     await io.save()
@@ -306,6 +314,9 @@ async function settleRound(io: JobsIo, claims: readonly Claim[], questions: read
       const verdict = await verifySeal(seal)
       if (!verdict.ok) return { results, feedback, changedAfterTurn: verdict.changed }
     }
+    // Review I1 P1-3: agent-written code runs inside the wizard's own build. The tree is sealed before it, and
+    // anything the build or T0 changed outside the build's output dirs stops the step (fail closed).
+    const preCheck = seal ?? (await sealTreeNow(io.ctx.root, join(wizardCacheRoot(io.home()), "checks", `${process.pid}-${Date.now().toString(36)}.marker`)))
     io.sub("Wizard checking each job itself…", "pending")
     const runId = io.runId()
     for (const item of checkable) {
@@ -338,6 +349,14 @@ async function settleRound(io: JobsIo, claims: readonly Claim[], questions: read
       io.put({ item: next, changed: true, by: "wizard", ...(note ? { note } : {}) })
     }
     io.endRound()
+    const after = await verifySeal(preCheck, { heavy: false, ignore: isBuildOutputPath })
+    if (preCheck !== seal) await disposeSeal(preCheck)
+    if (!after.ok) {
+      // Kept as the final seal: the rehearsal will refuse to stage this tree.
+      await keepAsFinalSeal(preCheck, finalSealPath(io.home(), io.runId() ?? "local-run"))
+      io.buildTampered = true
+      return { results, feedback, changedByChecks: after.changed }
+    }
   }
   return { results, feedback }
 }
@@ -421,6 +440,7 @@ async function runNested(io: JobsIo, agentItems: ChecklistItem[]): Promise<StepO
   const round = await settleRound(io, claims, [], false, settled.seal)
   await disposeSeal(settled.seal)
   if (round.changedAfterTurn) return sealBrokenOutcome(io, round.changedAfterTurn)
+  if (round.changedByChecks) return buildTamperOutcome(io, round.changedByChecks)
   await io.patchClickTested()
   await io.save()
   // B26: inside the parent agent's own sandbox, T0 and the build cannot run; they read undetermined
@@ -456,12 +476,27 @@ function sandboxBlocked(result: CheckResult): boolean {
  * B26: jobs a nested run left `claimed` (its checks could not run in the parent agent's sandbox) are checked
  * here, in the user's own terminal, before any agent turn. They are never handed to an agent again.
  */
-async function recheckClaimed(io: JobsIo, claimed: readonly ChecklistItem[]): Promise<void> {
+async function recheckClaimed(io: JobsIo, claimed: readonly ChecklistItem[]): Promise<StepOutcome | null> {
   const at = io.deps.clock.now().toISOString()
   const claims: Claim[] = claimed.map((item) => ({ jobId: item.id, status: "done", note: "Checked in your own terminal.", at }))
-  await settleRound(io, claims, [], false, null)
+  const round = await settleRound(io, claims, [], false, null)
+  if (round.changedByChecks) return buildTamperOutcome(io, round.changedByChecks)
   await io.patchClickTested()
   await io.save()
+  return null
+}
+
+/** Review I1 P1-3: the wizard's own build (running agent-written code) changed files it may not write. */
+async function buildTamperOutcome(io: JobsIo, changed: string[]): Promise<StepOutcome> {
+  for (const item of io.items().filter((entry) => entry.owner === "agent" && OPEN_STATES.includes(entry.state))) {
+    io.put(blockItem(item, "outside_allowlist", "Files changed while the wizard built the site; nothing was kept."))
+  }
+  await io.save()
+  return {
+    kind: "blocked",
+    code: "INF_WIZ_FENCE_TAMPER",
+    reason: `The build (running the agent's code) changed ${changed.slice(0, 3).join(", ")}${changed.length > 3 ? ", …" : ""}, outside its output folders. Nothing was committed; review \`git status\`.`
+  }
 }
 
 async function sealBrokenOutcome(io: JobsIo, changed: string[]): Promise<StepOutcome> {
@@ -508,6 +543,8 @@ function isTamper(error: unknown): boolean {
 class JobsIo {
   /** Agent turns this step ran (a final seal is taken only when an agent touched the tree). */
   agentTurns = 0
+  /** Review I1 P1-3: the wizard's own build/T0 changed files outside the build's output dirs. */
+  buildTampered = false
   private scanResult: ScanResult | null = null
   private failures = new Map<string, string>()
   private clickTested = new Set<string>()

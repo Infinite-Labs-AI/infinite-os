@@ -7,7 +7,7 @@ import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 
 import type { SandboxedSpawnFn, SandboxedSpawnOptions, SandboxedSpawnResult } from "../t0/sandbox.js"
-import { buildDeniedWrites, buildPackageManager, FAILURE_SIGNATURE_MAX_LINES, failureSignature, gradeBuild, runBuild } from "./build.js"
+import { buildAllowedWrites, buildDeniedWrites, buildPackageManager, FAILURE_SIGNATURE_MAX_LINES, failureSignature, gradeBuild, runBuild } from "./build.js"
 
 const ctx = { runId: "7f3c2a91-b0de-4c03-9a00-000000000001", now: () => new Date("2026-10-02T10:00:00.000Z") }
 
@@ -52,8 +52,11 @@ describe("runBuild goes through sandboxedSpawn, never the wizard's process", () 
     expect(calls[0]!.args).toEqual(["run", "build"])
     expect(calls[0]!.options).toMatchObject({ network: true, cwd: join(root, "apps/web"), denyReads: ["/Users/x/.ssh"], denyReadPrefixes: ["/Users/x/.growth-os"] })
     expect(calls[0]!.options.env).toMatchObject({ NEXT_TELEMETRY_DISABLED: "1" })
-    // writes: the repo only, never its git dir, husky hooks or the wizard's state (review O6-R1)
-    expect(calls[0]!.options.allowWrites).toEqual([root])
+    // writes: the build's output dirs only (review I1 P1-3), never the repo at large, its git dir, husky hooks or
+    // the wizard's state (review O6-R1)
+    expect(calls[0]!.options.allowWrites).toEqual(buildAllowedWrites(root, join(root, "apps/web")))
+    expect(calls[0]!.options.allowWrites).not.toContain(root)
+    expect(calls[0]!.options.allowWrites).toEqual(expect.arrayContaining([join(root, "apps/web/.next"), join(root, "apps/web/next-env.d.ts"), join(root, "node_modules/.cache")]))
     expect(calls[0]!.options.denyWrites).toEqual(buildDeniedWrites(root, join(root, "apps/web")))
     expect(calls[0]!.options.denyWrites).toEqual(expect.arrayContaining([join(root, ".git"), join(root, ".husky"), join(root, ".infinite"), join(root, "apps/web/.infinite")]))
     expect(run).toMatchObject({ ok: true, sandboxed: true, packageManager: "pnpm", failureSignature: [] })
@@ -196,13 +199,19 @@ describe.runIf(process.platform === "darwin")("darwin: a real sandboxed build ma
     const root = realpathSync(mkdtempSync(join(tmpdir(), "build-real-")))
     mkdirSync(join(root, ".git", "hooks"), { recursive: true })
     const script =
-      "node -e \"const fs=require('fs');fs.mkdirSync('dist',{recursive:true});fs.writeFileSync('dist/out.txt','ok');try{fs.writeFileSync('.git/hooks/pre-commit','#!/bin/sh');console.log('HOOK=written')}catch(e){console.log('HOOK='+e.code)}\""
+      "node -e \"const fs=require('fs');fs.mkdirSync('dist',{recursive:true});fs.writeFileSync('dist/out.txt','ok');const w=(f,k)=>{try{fs.writeFileSync(f,'x');console.log(k+'=written')}catch(e){console.log(k+'='+e.code)}};w('.git/hooks/pre-commit','HOOK');w('.lintstagedrc','LINTSTAGED');w('app.js','SOURCE');w('next-env.d.ts','NEXTENV')\""
     writeFileSync(join(root, "package.json"), JSON.stringify({ name: "x", version: "1.0.0", scripts: { build: script } }))
+    writeFileSync(join(root, "app.js"), "export default 1\n")
     const run = await runBuild({ root, appRoot: ".", packageManager: "npm", timeoutMs: 60_000 })
     expect(run.sandboxed).toBe(true)
     expect(run.ok).toBe(true)
     expect(readFileSync(join(root, "dist", "out.txt"), "utf8")).toBe("ok")
     expect(run.outputTail.join("\n")).toContain("HOOK=EPERM")
     expect(existsSync(join(root, ".git", "hooks", "pre-commit"))).toBe(false)
+    // Review I1 P1-3: a hook config or a source file is not build output, so the build cannot write it.
+    expect(run.outputTail.join("\n")).toContain("LINTSTAGED=EPERM")
+    expect(run.outputTail.join("\n")).toContain("SOURCE=EPERM")
+    expect(readFileSync(join(root, "app.js"), "utf8")).toBe("export default 1\n")
+    expect(run.outputTail.join("\n")).toContain("NEXTENV=written")
   })
 })

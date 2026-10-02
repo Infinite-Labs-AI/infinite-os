@@ -1209,7 +1209,7 @@ async function takeSeal(root: string, heavyDirs: readonly string[], marker: stri
  * dir. Run it right before the build/T0 and before anything is staged; `heavy:false` once the wizard's
  * own build has written its output dirs.
  */
-export async function verifySeal(seal: TreeSeal, options: { heavy?: boolean } = {}): Promise<{ ok: boolean; changed: string[] }> {
+export async function verifySeal(seal: TreeSeal, options: { heavy?: boolean; ignore?: (rel: string) => boolean } = {}): Promise<{ ok: boolean; changed: string[] }> {
   const now = await sealEntries(seal.root, seal.heavyDirs)
   const changed = new Set<string>()
   const statusBefore = new Map(seal.status)
@@ -1225,7 +1225,24 @@ export async function verifySeal(seal: TreeSeal, options: { heavy?: boolean } = 
     else changed.add("(the seal marker is gone)")
     for (const dir of await heavyDirsReplaced(seal.root, seal.heavyInodes)) changed.add(dir)
   }
+  // A caller that ran a build ignores ONLY what a build may write (its output dirs; review I1 P1-3).
+  if (options.ignore) for (const rel of [...changed]) if (options.ignore(rel)) changed.delete(rel)
   return { ok: changed.size === 0, changed: [...changed].sort() }
+}
+
+/** A seal of the tree as it is now (no heavy dirs), its marker at `marker` (outside the repo). */
+export async function sealTreeNow(root: string, marker: string): Promise<TreeSeal> {
+  await mkdir(dirname(marker), { recursive: true, mode: 0o700 })
+  return takeSeal(root, [], marker)
+}
+
+/**
+ * Review I1 P1-3: keeps a given seal as the run's final seal, so the rehearsal refuses to stage a tree that
+ * moved after it (used when the wizard's own build changed files outside its output dirs).
+ */
+export async function keepAsFinalSeal(seal: TreeSeal, sealPath: string): Promise<void> {
+  await mkdir(dirname(sealPath), { recursive: true, mode: 0o700 })
+  await writeFile(sealPath, JSON.stringify(seal), { mode: 0o600 })
 }
 
 /** Deletes the seal's marker file (nothing secret in it; it only dates the seal). */

@@ -76,6 +76,20 @@ async function scanStaged(git: WizardGitOps, scanner: Scanner): Promise<ScanHit[
   return hits
 }
 
+/** Runs the post-turn gate over the staged, agent-touchable (non-managed) files; unstages each one with a hit. */
+async function gateStaged(input: CommitInput): Promise<string[]> {
+  const managed = new Set(input.managed)
+  const files = parseUnifiedDiff(await input.git.stagedDiff()).filter((file) => !managed.has(file.path) && file.added.length > 0)
+  if (files.length === 0) return []
+  const results = await input.deps.checks.turnGate({ files: files.map((file) => ({ path: file.path, added: file.added, removed: file.removed })) }, { connectionIds: input.connectionIds })
+  const hit = [...new Set(results.filter((result) => result.state === "problem").flatMap((result) => (result.evidence ?? []).flatMap((entry) => ("file" in entry ? [entry.file] : []))))]
+  // A gate problem with no file (the gate itself crashed) holds back every gated file: fail closed.
+  const crashed = results.some((result) => result.state === "problem" && !(result.evidence ?? []).some((entry) => "file" in entry))
+  const out = crashed ? files.map((file) => file.path) : hit
+  await input.git.unstage(out)
+  return out
+}
+
 /** §3g.1: stage exactly the allowed set, scan it, commit with the run trailer. */
 export async function stageAndCommit(input: CommitInput): Promise<CommitResult> {
   const { git, ctx } = input
@@ -92,6 +106,14 @@ export async function stageAndCommit(input: CommitInput): Promise<CommitResult> 
   if (set.stage.length === 0) return { kind: "nothing", leftOut: set.leftOut, blocked: [] }
   await git.stage(set.stage)
   const blocked = await scanStaged(git, input.scanner)
+  // Review I1 P1-3: the post-turn gate again, on what is about to be committed. Each turn's diff was gated, but
+  // a later process (the wizard's own build running agent code) could have rewritten an agent file since.
+  // Wizard-written (managed) files are its own bytes and are not re-gated here.
+  const gated = await gateStaged(input)
+  if (gated.length > 0) {
+    blockJobsForFiles(ctx, gated.map((file) => ({ file, kind: "turn_gate" })))
+    sub(ctx, input.step, `Held back ${gated.length} file(s): the post-turn gate refused what would have been committed`, "warn")
+  }
   if (blocked.length > 0) {
     blockJobsForFiles(ctx, blocked.filter((hit) => hit.file).map((hit) => ({ file: hit.file!, kind: hit.kind })))
     sub(ctx, input.step, `Held back ${new Set(blocked.map((hit) => hit.file)).size} file(s): a secret or personal data would have been committed`, "warn")

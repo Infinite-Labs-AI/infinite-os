@@ -113,6 +113,29 @@ function opaqueSignature(signature: readonly string[]): boolean {
   return signature.length > 0 && signature.every((line) => /^(?:exit_code:|timeout$)/.test(line))
 }
 
+/**
+ * Review I1 P1-3: the ONLY places a build may write (under the repo root and the app root): its output and
+ * cache folders and the two files Next / tsc regenerate. Never a source file, `package.json`, a hook config
+ * (`.lintstagedrc`, `lefthook.yml`, …) or anything else the wizard later commits or its own `git commit` runs.
+ */
+export const BUILD_OUTPUT_DIRS = [".next", "dist", "build", "out", ".output", ".nuxt", ".svelte-kit", ".astro", ".turbo", ".vercel/output", ".cache", "node_modules/.cache", "node_modules/.vite", "node_modules/.astro"] as const
+export const BUILD_OUTPUT_FILES = ["next-env.d.ts", "tsconfig.tsbuildinfo", ".eslintcache"] as const
+
+/** True for a repo-relative path a build may have written (its output, caches, `*.tsbuildinfo`). */
+export function isBuildOutputPath(rel: string): boolean {
+  const path = rel.replace(/^\.\//, "")
+  if (/\.tsbuildinfo$/.test(path)) return true
+  const name = path.split("/").pop() ?? path
+  if ((BUILD_OUTPUT_FILES as readonly string[]).includes(name)) return true
+  return BUILD_OUTPUT_DIRS.some((dir) => path === dir || path.startsWith(`${dir}/`) || path.includes(`/${dir}/`) || path.endsWith(`/${dir}`))
+}
+
+/** The writable subtrees of a build: the output dirs and regenerated files, at the repo root and the app root. */
+export function buildAllowedWrites(root: string, appRoot: string): string[] {
+  const bases = [...new Set([root, appRoot])]
+  return bases.flatMap((base) => [...BUILD_OUTPUT_DIRS, ...BUILD_OUTPUT_FILES].map((entry) => join(base, entry)))
+}
+
 /** Paths a build may never write even inside the repo: git (hooks, config), husky hooks, the wizard's own state. */
 export function buildDeniedWrites(root: string, appRoot: string): string[] {
   return [...new Set([join(root, ".git"), join(root, ".husky"), join(root, ".infinite"), join(appRoot, ".infinite")])]
@@ -159,9 +182,10 @@ export async function runBuild(options: BuildOptions): Promise<BuildRun> {
       denyReads: deny.paths,
       denyReadPrefixes: deny.prefixes,
       network: true,
-      // Writes: the repo (outputs, caches, node_modules) and the throwaway HOME only; never `.git`
-      // (a planted hook would run at the wizard's own commit), `.husky`, or `.infinite` (the run state).
-      allowWrites: [root],
+      // Writes: the build's output and cache folders and the throwaway HOME only (review I1 P1-3): agent-written
+      // config or page code run by the build can never rewrite a source file, plant a hook config the wizard's
+      // own `git commit` would run, or touch `.git`, `.husky` or `.infinite`.
+      allowWrites: buildAllowedWrites(root, appRoot),
       denyWrites: buildDeniedWrites(root, appRoot),
       cwd: appRoot,
       // No telemetry, no update notifier, no funding/audit calls: the build talks to the registry only if
