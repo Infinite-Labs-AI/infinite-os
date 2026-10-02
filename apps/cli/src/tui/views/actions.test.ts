@@ -161,6 +161,55 @@ describe("money field", () => {
   });
 });
 
+describe("a money field with an option (the create-ad-set budget)", () => {
+  const field = () => fixture("launch-create-adset-field").approval!.fields![0]!;
+
+  it("typing the option's label sends fields { adSetBudget: { choice: \"meta_split\" } }", () => {
+    const view = fixture("launch-create-adset-field");
+    const asked = drive(view, [press("c")]);
+    // `c` is copy, so "Create ad set" takes the fallback OK key `y`.
+    expect(asked.effects).toEqual([]);
+    const first = drive(view, [press("y")]);
+    expect(first.ui.fieldEntry?.key).toBe("adSetBudget");
+    const committed = commitCardField(first.ui, "let meta split the budget");
+    expect(committed.error).toBeNull();
+    expect(committed.ui.answers).toEqual({ adSetBudget: { choice: "meta_split" } });
+    const out = text(approvalRender(view, cardCtx({ ui: committed.ui })).lines);
+    expect(out).toContain("Let Meta split the budget");
+    expect(out).not.toContain("meta_split");
+    expect(drive(view, [press("y")], { ui: committed.ui }).effects)
+      .toEqual([{ type: "confirm", decision: "approve", fields: { adSetBudget: { choice: "meta_split" } } }]);
+    expect(readFieldAnswer(field(), "meta_split")).toEqual({ choice: "meta_split" });
+  });
+
+  it("typing 30 sends { text: \"30\" }, and a bare 1 stays $1/day, never option 1", () => {
+    const view = fixture("launch-create-adset-field");
+    const first = drive(view, [press("y")]);
+    const committed = commitCardField(first.ui, "30");
+    expect(drive(view, [press("y")], { ui: committed.ui }).effects)
+      .toEqual([{ type: "confirm", decision: "approve", fields: { adSetBudget: { text: "30" } } }]);
+    expect(readFieldAnswer(field(), "1")).toEqual({ text: "1" });
+  });
+
+  it("lists the option under the field, and the hint names it", () => {
+    const view = fixture("launch-create-adset-field");
+    expect(text(approvalRender(view, cardCtx()).lines)).toContain("Let Meta split the budget");
+    const bad = commitCardField(drive(view, [press("y")]).ui, "thirty");
+    expect(bad.error).toBe("Type an amount per day, like 30, or: Let Meta split the budget");
+  });
+
+  it("with no readable currency, the hint names only the option, and a typed amount is refused here", () => {
+    const view = fixture("launch-create-adset-no-currency");
+    const asked = drive(view, [press("y")]);
+    const typed = commitCardField(asked.ui, "30");
+    expect(typed.error).toBe("Type: Let Meta split the budget");
+    expect(typed.error).not.toMatch(/amount|30/u);
+    expect(typed.ui.answers).toEqual({});
+    const split = commitCardField(asked.ui, "Let Meta split the budget");
+    expect(split.ui.answers).toEqual({ adSetBudget: { choice: "meta_split" } });
+  });
+});
+
 describe("outcome unknown", () => {
   const unknown = (retry: "retryable" | "safe_resend" | "check_first" | "never") =>
     ({

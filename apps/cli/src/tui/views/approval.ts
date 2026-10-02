@@ -368,8 +368,9 @@ export function cancelCardField(ui: CardUiState): CardUiState {
 
 /**
  * A typed answer for one field, or null when it is not one. Money is a
- * positive amount (`30`, `$30/day`, `42.50`); a choice is its number or its
- * label; text is any non-empty line.
+ * positive amount (`30`, `$30/day`, `42.50`) or one of the field's options by
+ * its label or value (never by number); a choice is its number or its label;
+ * text is any non-empty line.
  */
 export function readFieldAnswer(field: ApprovalFieldV1, text: string): ApprovalFieldAnswerV1 | null {
   const raw = viewText(text);
@@ -377,6 +378,18 @@ export function readFieldAnswer(field: ApprovalFieldV1, text: string): ApprovalF
     return null;
   }
   if (field.input === "money_per_day") {
+    // An option the host offers beside the amount ("Let Meta split the budget"),
+    // by its label or value. Never by number: "1" is $1/day.
+    const wanted = raw.toLowerCase();
+    const option = fieldOptions(field).find((item) =>
+      viewText(item.label).toLowerCase() === wanted || viewText(item.value).toLowerCase() === wanted);
+    if (option) {
+      return { choice: option.value };
+    }
+    if (!acceptsAmount(field)) {
+      // No readable currency: the host refuses a typed amount, so only an option answers.
+      return null;
+    }
     const amount = raw
       .replace(/(?:\/|per)\s*day$/iu, "")
       .replace(/^[A-Z]{3}\s*/u, "")
@@ -389,15 +402,15 @@ export function readFieldAnswer(field: ApprovalFieldV1, text: string): ApprovalF
     return { text: amount };
   }
   if (field.input === "choice") {
-    const options = Array.isArray(field.options) ? field.options.filter(isRecord) : [];
+    const options = fieldOptions(field);
     if (/^\d+$/u.test(raw)) {
       const option = options[Number(raw) - 1];
-      return option && typeof option.value === "string" ? { choice: option.value } : null;
+      return option ? { choice: option.value } : null;
     }
     const wanted = raw.toLowerCase();
     const option = options.find((item) =>
       viewText(item.label).toLowerCase() === wanted || viewText(item.value).toLowerCase() === wanted);
-    return option && typeof option.value === "string" ? { choice: option.value } : null;
+    return option ? { choice: option.value } : null;
   }
   return { text: raw.slice(0, 500) };
 }
@@ -489,19 +502,26 @@ function tabNounOf(documents: readonly CardDocument[]): { tabNoun?: string } {
 }
 
 function fieldLines(fields: readonly ApprovalFieldV1[], ui: CardUiState, ctx: ViewRenderCtx): string[] {
-  const rows = fields.map((field) => {
+  const lines: string[] = [];
+  for (const field of fields) {
     const answer = ui.answers[field.key];
     const current = field.current === null || field.current === undefined ? "" : fieldValue(field, field.current);
     const value = ui.fieldEntry?.key === field.key
-      ? `▸ type ${fieldHint(field).replace(/^Type /u, "")}, then Enter`
+      ? `▸ type ${fieldHint(field).replace(/^Type:? /u, "")}, then Enter`
       : answer
-        ? `${current ? `${current} → ` : ""}${fieldValue(field, "text" in answer ? answer.text : answer.choice)}`
+        ? `${current ? `${current} → ` : ""}${answerValue(field, answer)}`
         : current
           ? `now ${current}${field.required ? " · OK asks for a new value" : ""}`
           : field.required ? "OK asks for a value" : "optional";
-    return { label: viewText(field.label, field.key), value };
-  });
-  const lines = labelValueLines(rows, ctx);
+    lines.push(...labelValueLines([{ label: viewText(field.label, field.key), value }], ctx));
+    // A money field's options (the host's own words) under it: typing one answers it.
+    if (field.input === "money_per_day" && !answer) {
+      for (const option of fieldOptions(field)) {
+        lines.push(...wrapText(`  or: ${viewText(option.label, viewText(option.value))}`, ctx.width)
+          .map((line) => paint(line, "muted", ctx)));
+      }
+    }
+  }
   if (ui.fieldError) {
     lines.push(...wrapText(ui.fieldError, ctx.width).map((line) => paint(line, "warning", ctx)));
   }
@@ -513,18 +533,48 @@ function fieldValue(field: ApprovalFieldV1, value: string): string {
     return `${formatMoney(Number(value), typeof field.currency === "string" ? field.currency : null)}/day`;
   }
   if (field.input === "choice") {
-    const options = Array.isArray(field.options) ? field.options.filter(isRecord) : [];
-    const option = options.find((item) => item.value === value);
-    return viewText(option?.label, viewText(value));
+    return optionLabel(field, value);
   }
   return viewText(value);
 }
 
+/** An answer as words: a choice (on any field) is its option's label, never its raw value. */
+function answerValue(field: ApprovalFieldV1, answer: ApprovalFieldAnswerV1): string {
+  return "choice" in answer ? optionLabel(field, answer.choice) : fieldValue(field, answer.text);
+}
+
+function optionLabel(field: ApprovalFieldV1, value: string): string {
+  const option = fieldOptions(field).find((item) => item.value === value);
+  return viewText(option?.label, viewText(value));
+}
+
+/** The field's options with a string value (a decoded view vouches only for its envelope). */
+function fieldOptions(field: ApprovalFieldV1): { value: string; label: string }[] {
+  const list: unknown[] = Array.isArray(field.options) ? field.options : [];
+  return list.filter(isRecord)
+    .filter((item): item is Record<string, unknown> & { value: string } => typeof item.value === "string" && item.value !== "")
+    .map((item) => ({ value: item.value, label: viewText(item.label) }));
+}
+
+/**
+ * Whether a typed amount can answer a money field: not when the host sent no
+ * currency but offers options (it refuses a typed amount it cannot read, so
+ * only an option answers).
+ */
+function acceptsAmount(field: ApprovalFieldV1): boolean {
+  return (typeof field.currency === "string" && field.currency !== "") || fieldOptions(field).length === 0;
+}
+
 function fieldHint(field: ApprovalFieldV1): string {
-  if (field.input === "money_per_day") return "Type an amount per day, like 30";
+  if (field.input === "money_per_day") {
+    const options = fieldOptions(field).map((item) => viewText(item.label, item.value));
+    if (!acceptsAmount(field)) return `Type: ${options.join(" or ")}`;
+    return options.length
+      ? `Type an amount per day, like 30, or: ${options.join(" or ")}`
+      : "Type an amount per day, like 30";
+  }
   if (field.input === "choice") {
-    const options = Array.isArray(field.options) ? field.options.filter(isRecord) : [];
-    const list = options.map((item, index) => `${index + 1} ${viewText(item.label)}`).join(", ");
+    const list = fieldOptions(field).map((item, index) => `${index + 1} ${viewText(item.label)}`).join(", ");
     return list ? `Type one of: ${list}` : "Type a choice";
   }
   return "Type a value";

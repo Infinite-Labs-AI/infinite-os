@@ -1,0 +1,63 @@
+{
+  "v": 1,
+  "kind": "launch",
+  "tool": "propose_create_meta_ad_set",
+  "title": "Create ad set",
+  "state": "needs_yes",
+  "asOf": null,
+  "scope": {
+    "workspaceName": "Demo",
+    "crossWorkspace": false
+  },
+  "caveats": [],
+  "body": {
+    "tree": [
+      {
+        "level": "campaign",
+        "name": "Campaign 01",
+        "fields": [],
+        "status": "existing",
+        "children": [
+          {
+            "level": "adset",
+            "name": "Ad set 07",
+            "fields": [],
+            "status": "new",
+            "children": []
+          }
+        ]
+      }
+    ],
+    "picturesInApp": false
+  },
+  "approval": {
+    "kind": "card",
+    "turnId": "turn_1",
+    "handle": "h_10",
+    "title": "Create ad set “Ad set 07”?",
+    "summary": null,
+    "confirmLabel": "Create ad set",
+    "dismissLabel": "Dismiss",
+    "rows": [
+      {
+        "label": "Campaign",
+        "value": "Campaign 01"
+      }
+    ],
+    "fields": [
+      {
+        "key": "adSetBudget",
+        "label": "Its budget",
+        "input": "money_per_day",
+        "required": true,
+        "options": [
+          {
+            "value": "meta_split",
+            "label": "Let Meta split the budget"
+          }
+        ],
+        "current": null
+      }
+    ]
+  }
+}
