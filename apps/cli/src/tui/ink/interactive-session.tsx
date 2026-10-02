@@ -65,7 +65,7 @@ import { confirmCardKeys, keyBarHints, keyBarRowCount, resolveKey, shortOkVerb, 
 import { fallbackCardLines, fallbackCardRowCount, receiptViewFrame } from "./confirm-card.js";
 import { KeyBar } from "./key-bar.js";
 import { COMPOSER_PLACEHOLDER, composerPlaceholderText } from "./composer-line.js";
-import { ruleLine, TOP_BAR_ROWS, type TopBarData } from "./top-bar.js";
+import { askedSource, ruleLine, TOP_BAR_ROWS, type TopBarData } from "./top-bar.js";
 import {
   AnsiLine,
   inkLatestTurnRows,
@@ -592,6 +592,8 @@ export function InkInteractiveSessionApp({
   const [activeFieldTick, setActiveFieldTick] = useState(0);
   const [queuedLines, setQueuedLines] = useState<readonly string[]>([]);
   const [turnState, setTurnState] = useState<TurnState>(() => getTurnState());
+  // The not-connected source of a turn that already went to scrollback (see `topBarData`).
+  const [askedAfterCommit, setAskedAfterCommit] = useState<string | null>(null);
   const typingIdleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => subscribeTurnState(() => setTurnState(getTurnState())), []);
@@ -633,7 +635,13 @@ export function InkInteractiveSessionApp({
     setLiveOffset(null);
   }, []);
 
-  const topBarData = typeof topBar === "function" ? topBar() : topBar;
+  // The top bar leads with the source the turn on screen asked about and found
+  // not connected (r4's not-connected frame), at any width. A turn sent whole
+  // to scrollback the moment it finished is still the turn on screen: the mark
+  // stays until the next line is submitted.
+  const sessionTopBar = typeof topBar === "function" ? topBar() : topBar;
+  const askedNow = askedSource(turnState.views.map((frame) => frame.view)) ?? askedAfterCommit;
+  const topBarData = sessionTopBar && askedNow ? { ...sessionTopBar, asked: askedNow } : sessionTopBar;
   // Live label for the in-flight answer; completed messages carry their own
   // frozen `title` (stamped at submit) so a mid-session `/project use` never
   // relabels earlier answers.
@@ -686,6 +694,9 @@ export function InkInteractiveSessionApp({
       : null;
     setCommitted((current) => commitLatest({ committed: home ? [...current, home] : current, latest }).committed);
     setHomeCommitted(true);
+    // The next line starts a new turn: the bar forgets what the last one asked about.
+    const asked = askedSource(views.map((frame) => frame.view));
+    setAskedAfterCommit((current) => (why === "submit" ? null : asked ?? current));
     historyRef.current = [];
     setHistory([]);
     if (keepCard) {

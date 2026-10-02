@@ -4,6 +4,8 @@
 // with its Steps rule. Pure: the session draws these lines through `AnsiLine`,
 // and the golden tests call the same functions.
 
+import type { AnswerViewV1 } from "@infinite-os/types";
+
 import { terminalText } from "../../desktop/terminal-text.js";
 import type { Theme } from "../theme.js";
 import {
@@ -32,6 +34,12 @@ export interface TopBarData {
   sources?: readonly TopBarSource[];
   /** The session runs through the Infinite app: say so on the right when the whole line fits. */
   throughApp?: boolean;
+  /**
+   * The source the turn on screen asked about and found not connected (the
+   * name its view gives). Its amber mark is always drawn, first (r4's
+   * not-connected frame), at any width.
+   */
+  asked?: string;
 }
 
 /** Rows `topBarLines` draws: the bar and its rule. */
@@ -52,12 +60,19 @@ const SOURCE_ORDER: Readonly<Record<TopBarSourceState, number>> = { missing: 0, 
  * The top bar's segments (r4 row 0): the brand chip, the workspace, then one
  * dot per source, missing and broken ones first. `through the Infinite app`
  * sits on the right only when the whole line fits; otherwise the line is cut
- * at the width (`…` on the segment that does not fit, later ones dropped).
+ * at the width from the right (`…` on the segment that does not fit, later
+ * ones dropped), as r4 cuts it.
  *
- * A missing (not connected) mark never costs a connected or a broken one its
- * place: the missing ones are drawn, in their order, only while they fit whole
- * beside every other source. A workspace with many sources never connected
- * still shows what IS connected.
+ * The source the turn asked about and found not connected (`asked`) is always
+ * drawn, first, in amber: at 60 columns r4 still leads with it and cuts the
+ * connected dots. When the bar knows no missing source by that name, the first
+ * missing one stands for it; a name the bar knows as connected or broken
+ * forces nothing.
+ *
+ * Any OTHER missing mark never costs a connected or a broken source its place:
+ * those are drawn, in their order, only while they fit whole beside every
+ * other source. A workspace with many sources never connected still shows
+ * what IS connected.
  */
 export function topBarSegments(data: TopBarData | undefined, width: number): StyledSegment[] {
   const workspace = data?.workspace ? terminalText(data.workspace) : "";
@@ -71,9 +86,17 @@ export function topBarSegments(data: TopBarData | undefined, width: number): Sty
     source.state === "connected"
       ? ["green", `● ${source.label} `]
       : [source.state === "missing" ? "amber" : "red", `⊘ ${source.label} `];
+  const missing = sources.filter((source) => source.state === "missing");
+  const asked = sourceKey(data?.asked);
+  const known = asked ? sources.find((source) => sourceKey(source.label) === asked) : undefined;
+  const lead = !asked ? undefined : known ? (known.state === "missing" ? known : undefined) : missing[0];
+  if (lead) {
+    left.push(segment(lead));
+  }
   const kept = sources.filter((source) => source.state !== "missing").map(segment);
   let room = total - segmentsWidth(left) - segmentsWidth(kept);
-  for (const source of sources.filter((item) => item.state === "missing")) {
+  for (const source of missing) {
+    if (source === lead) continue;
     const mark = segment(source);
     room -= segmentsWidth([mark]);
     if (room < 0) break;
@@ -84,6 +107,26 @@ export function topBarSegments(data: TopBarData | undefined, width: number): Sty
     return [...padSegments(left, total - segmentsWidth([THROUGH_APP])), THROUGH_APP];
   }
   return truncSegments(left, total);
+}
+
+/** A source's name as the bar compares it: scrubbed, lower case, single spaces. */
+function sourceKey(name: string | undefined): string {
+  return name ? terminalText(name).toLowerCase().replace(/\s+/gu, " ").trim() : "";
+}
+
+/**
+ * The source a turn asked about and found not connected: the name its latest
+ * not-connected view gives (`provenance.source`). Null when no view says so,
+ * so the bar forces no mark.
+ */
+export function askedSource(views: readonly Pick<AnswerViewV1, "state" | "provenance">[]): string | null {
+  for (let index = views.length - 1; index >= 0; index -= 1) {
+    const view = views[index]!;
+    if (view.state !== "not_connected") continue;
+    const name = terminalText(view.provenance?.source ?? "");
+    if (name) return name;
+  }
+  return null;
 }
 
 /** A thin rule across the width, in the `line` grey. */

@@ -132,6 +132,52 @@ describe("the session draws the latest turn's answer views (CI-runnable)", () =>
     expect(out).toContain("Two are on.");
   });
 
+  it("a turn that asked for a source that is not connected leads the top bar with its amber mark, live and once the turn is in scrollback", () => {
+    const fixture = JSON.parse(readFileSync(fileURLToPath(new URL("../views/__fixtures__/r4/flow-numbers-05-not-connected.json", import.meta.url)), "utf8"));
+    const view = decodeAnswerView(fixture.turn.views[0]);
+    if (!view) throw new Error("the not-connected fixture does not decode");
+    const frame: ToolViewFrameV1 = { type: "tool.view", stage: "tool", message: view.title, viewId: "nc1", name: view.tool, view };
+    const topBar = {
+      workspace: "Infinite workspace",
+      throughApp: true,
+      sources: [
+        { label: "Shopify", state: "broken" as const }, { label: "GA4", state: "connected" as const },
+        { label: "Stripe", state: "connected" as const }, { label: "PostHog", state: "connected" as const },
+        { label: "Google Ads", state: "missing" as const }, { label: "Meta", state: "connected" as const }
+      ]
+    };
+    const question = { role: "user" as const, text: "google ads since launch?" };
+    const barOf = (rows: string[]) => rows.filter((row) => row.includes("∞ Infinite ")).at(-1)!.trimEnd();
+
+    // Live at 60 columns: r4 leads with the asked source and cuts the dots from the right.
+    resetTurnState();
+    recordTurnView(frame);
+    const live = stripAnsi(renderInkInteractiveSessionToString({
+      columns: 60, topBar, initialMessages: [question, { role: "assistant", text: "Google Ads isn't connected for this workspace." }],
+      onSubmitLine: async () => ({ messages: [] })
+    })).split("\n");
+    expect(barOf(live)).toBe(" ∞ Infinite   Infinite workspace   ⊘ Google Ads ⊘ Shopify ●…");
+
+    // An 80x24 window and a turn too tall for it: the turn goes to scrollback, and the bar under it still leads with the mark.
+    resetTurnState();
+    recordTurnView(frame);
+    const tall = Array.from({ length: 30 }, (_, index) => `note ${index}`).join("\n\n");
+    const committed = stripAnsi(renderInkInteractiveSessionToString({
+      columns: 80, rows: 24, topBar, initialMessages: [question, { role: "assistant", text: tall }],
+      onSubmitLine: async () => ({ messages: [] })
+    })).split("\n");
+    expect(committed.findIndex((row) => row.includes("note 29"))).toBeLessThan(committed.findIndex((row) => row.includes("∞ Infinite ")));
+    expect(barOf(committed)).toBe(" ∞ Infinite   Infinite workspace   ⊘ Google Ads ⊘ Shopify ● GA4 ● Stripe ● Post…");
+
+    // A turn that asked for nothing missing: the mark is drawn only when everything else fits (not at 80).
+    resetTurnState();
+    const plain = stripAnsi(renderInkInteractiveSessionToString({
+      columns: 80, topBar, initialMessages: [question, { role: "assistant", text: "Two are on." }],
+      onSubmitLine: async () => ({ messages: [] })
+    })).split("\n");
+    expect(barOf(plain)).toBe(" ∞ Infinite   Infinite workspace   ⊘ Shopify ● GA4 ● Stripe ● PostHog ● Meta");
+  });
+
   it("the desktop entry forwards each tool.view and creative.draft frame to the session", () => {
     expect(indexSource).toMatch(/async onSubmitLine\(line, onProgress, signal, onView, onCreativeDraft\)/u);
     expect(indexSource).toMatch(/runner\.turn\(trimmed, onProgress, linked\.signal, onView, onCreativeDraft\)/u);

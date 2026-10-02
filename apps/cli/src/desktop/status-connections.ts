@@ -75,7 +75,10 @@ function connectionName(value: unknown): string {
  * is the green `●`, `broken` the red `⊘`, `off` (not connected) the amber
  * `⊘`. The bar itself puts the amber and red ones first, and draws an amber
  * one only while it fits beside every connected and broken source: a source
- * that was never connected does not push a connected one off the bar.
+ * that was never connected does not push a connected one off the bar. The one
+ * exception is the source the turn on screen asked about (`TopBarData.asked`,
+ * which the session takes from the turn's not-connected view): its mark
+ * always leads.
  */
 export function topBarSourcesFromConnections(connections: readonly DesktopConnection[]): TopBarSource[] {
   return connections.map((connection) => ({

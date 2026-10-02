@@ -35,6 +35,44 @@ describe("the top bar (terminal-r4 row 0, D1)", () => {
     expectGolden(topBarLines(NOT_CONNECTED, 100, TRUECOLOR)[0]!, GOLDEN.topbarNotConnected);
   });
 
+  it("always draws the asked source that is missing, first, and cuts the line from the right (flow-numbers-05--c60)", () => {
+    const asked: TopBarData = { ...NOT_CONNECTED, asked: "Google Ads" };
+    expectGolden(topBarLines(asked, 60, TRUECOLOR)[0]!, GOLDEN.topbarNotConnected60);
+    // An 80-column window: the mark still leads, and the dot that does not fit is cut with `…`.
+    expect(stripAnsi(topBarLines(asked, 80, TRUECOLOR)[0]!)).toBe(
+      " ∞ Infinite   Infinite workspace   ⊘ Google Ads ⊘ Shopify ● GA4 ● Stripe ● Post…"
+    );
+    // The name is matched whatever its case or spacing.
+    expect(stripAnsi(topBarLines({ ...NOT_CONNECTED, asked: " google  ads " }, 60, TRUECOLOR)[0]!)).toContain("⊘ Google Ads ⊘ Shopify");
+    expectGolden(topBarLines(asked, 100, TRUECOLOR)[0]!, GOLDEN.topbarNotConnected);
+  });
+
+  it("without an asked source, a missing mark is still drawn only while every other source fits", () => {
+    expect(stripAnsi(topBarLines(NOT_CONNECTED, 60, TRUECOLOR)[0]!).trimEnd()).toBe(
+      " ∞ Infinite   Infinite workspace   ⊘ Shopify ● GA4 ● Stripe"
+    );
+  });
+
+  it("only the asked source is drawn at any cost: the other missing ones still wait for room", () => {
+    const sources = [
+      { label: "Catalog", state: "connected" },
+      { label: "Orders", state: "connected" },
+      { label: "Ad Network", state: "missing" },
+      { label: "Mailer", state: "missing" },
+      { label: "Storefront", state: "missing" }
+    ] as const;
+    const bar = (width: number, asked?: string) =>
+      stripAnsi(topBarLines({ workspace: "Infinite workspace", sources, ...(asked ? { asked } : {}) }, width, TRUECOLOR)[0]!).trimEnd();
+    // 70 columns: the asked mark and both dots fit; no other mark does.
+    expect(bar(70, "Mailer")).toBe(" ∞ Infinite   Infinite workspace   ⊘ Mailer ● Catalog ● Orders");
+    // 100 columns: the asked mark leads, the others follow in the app's order.
+    expect(bar(100, "Mailer")).toBe(" ∞ Infinite   Infinite workspace   ⊘ Mailer ⊘ Ad Network ⊘ Storefront ● Catalog ● Orders");
+    // A name the bar does not know as missing: the first missing source stands for it.
+    expect(bar(70, "Help Desk")).toBe(" ∞ Infinite   Infinite workspace   ⊘ Ad Network ● Catalog ● Orders");
+    // The asked source is connected after all: nothing is forced onto the bar.
+    expect(bar(60, "Orders")).toBe(" ∞ Infinite   Infinite workspace   ● Catalog ● Orders");
+  });
+
   it("drops the dots that do not fit in a narrow window (region-topbar-narrow-60)", () => {
     expectGolden(topBarLines(OK, 60, TRUECOLOR)[0]!, GOLDEN.topbarNarrow60);
   });

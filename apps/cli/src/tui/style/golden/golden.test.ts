@@ -176,6 +176,31 @@ describe.each(TIERS)("r4 goldens (tier 1, $tier)", ({ tier, suffix }) => {
   }
 });
 
+// A frame on the expected-fail list waits for a later wave in its BODY or its
+// key bar (app links, follow-up keys). Its chrome does not wait: the top bar,
+// the rules, the Steps header and the composer are drawn the same on every
+// screen. The ratchet above sees a frame only as a whole, so a chrome region
+// that stops matching inside an already failing frame would pass unseen
+// (round 4: the asked source's mark left the top bar of
+// flow-numbers-05-not-connected--c60). These checks pin the chrome of EVERY
+// frame, at both tiers.
+const CHROME_REGIONS = ["topbar", "rule_top", "steps_header", "rule_bottom", "composer"] as const;
+
+describe.each(TIERS)("r4 goldens: every frame's chrome matches, expected to fail or not ($tier)", ({ tier, suffix }) => {
+  for (const golden of ids) {
+    if (loadGolden(golden).view_kind === "region") continue;
+    it(`${golden}${suffix}: top bar, rules, Steps header and composer`, () => {
+      const evaluation = evaluators.get(tier)!.evaluate(loadGolden(golden), golden);
+      const chrome = evaluation.regions.filter((result) => (CHROME_REGIONS as readonly string[]).includes(result.region));
+      expect(chrome.map((result) => result.region)).toContain("topbar");
+      const bad = chrome.filter((result) => result.verdict !== "MATCH");
+      expect(
+        bad.map((result) => `${result.region}: ${JSON.stringify(result.diffs[0]?.golden ?? "")} vs ${JSON.stringify(result.diffs[0]?.actual ?? "")}`)
+      ).toEqual([]);
+    });
+  }
+});
+
 // The Ink bridge (spec §11d "bridge smoke test"): the session prints a turn's
 // pre-rendered ANSI lines through `AnsiLine`. Every row the pure renderer draws
 // must reach the screen with the same text AND the same tokens, so a dropped

@@ -56,6 +56,16 @@ export const GOLDEN = {
     s(" "),
     s("● GA4 ● Stripe ● PostHog ● Meta", "green")
   ],
+  /** flow-numbers-05-not-connected--c60 row 0: the asked source still leads; the line is cut from the right. */
+  topbarNotConnected60: [
+    s(" ∞ Infinite ", "inv"),
+    s("  Infinite workspace   "),
+    s("⊘ Google Ads", "amber"),
+    s(" "),
+    s("⊘ Shopify", "red"),
+    s(" "),
+    s("●…", "green")
+  ],
   /** region-topbar-narrow-60: dots that do not fit are dropped. */
   topbarNarrow60: [
     s(" ∞ Infinite ", "inv"),
