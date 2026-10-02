@@ -29,9 +29,15 @@ import {
 } from "./desktop/answer-view-decode.js";
 import {
   askConfirmDecision,
+  askDismissOnly,
   confirmResultLines,
   leftForLaterLine
 } from "./desktop/confirm-result-lines.js";
+import {
+  DISMISS_ONLY_QUESTION,
+  needsTypedField,
+  typedFieldLine
+} from "./desktop/confirm-in-session.js";
 import { negotiateInteractiveWorkspace } from "./desktop/interactive-protocol.js";
 import {
   boundedTerminalText,
@@ -231,6 +237,12 @@ interface PendingConfirmation {
   confirmationDetails: ConfirmationDetail[];
   /** The approval view's expiry, when the app sent a view. */
   expiresAt?: string;
+  /**
+   * Set when the card asks for a typed value (a required field) this prompt
+   * cannot send: the words saying where to answer it. Such a card is never
+   * approved here, only dismissed or left.
+   */
+  typedFieldWords?: string;
 }
 
 interface ConfirmationDetail {
@@ -703,9 +715,19 @@ export async function runDesktopAppCommand(
   for (const action of pending) {
     // Only y/yes approves and only n/no declines. Bare Enter or any other
     // answer re-prompts once, then leaves the card pending: nothing is sent.
-    const decision = options.promptConfirmation
-      ? await options.promptConfirmation(action)
-      : await promptForConfirmation(action, options.promptAnswer);
+    let decision: "approve" | "decline" | "pending";
+    if (action.typedFieldWords) {
+      // A card that needs a typed value: never approved on this prompt.
+      io.writeOut(`${action.typedFieldWords}\n`);
+      const asked = options.promptConfirmation
+        ? await options.promptConfirmation(action)
+        : await promptForDismissal(options.promptAnswer);
+      decision = asked === "approve" ? "pending" : asked;
+    } else {
+      decision = options.promptConfirmation
+        ? await options.promptConfirmation(action)
+        : await promptForConfirmation(action, options.promptAnswer);
+    }
     if (decision === "pending") {
       io.writeOut(`${leftForLaterLine(action.expiresAt)}\n`);
       continue;
@@ -1171,13 +1193,15 @@ function parsePendingConfirmations(
       suppliedDetails.length > 0
         ? suppliedDetails
         : buildGenericConfirmationDetails(value.input);
-    const expiresAt = decodeAnswerView(value.view)?.approval?.expiresAt;
+    const view = decodeAnswerView(value.view) ?? undefined;
+    const expiresAt = view?.approval?.expiresAt;
     pending.push({
       actionId,
       confirmationHandle,
       summary,
       confirmationDetails,
-      ...(typeof expiresAt === "string" ? { expiresAt } : {})
+      ...(typeof expiresAt === "string" ? { expiresAt } : {}),
+      ...(needsTypedField(view) ? { typedFieldWords: typedFieldLine(view) } : {})
     });
   }
   return pending;
@@ -1367,6 +1391,20 @@ function renderProgress(value: unknown, io: DesktopAppIo): void {
     (type?.startsWith("tool.") ? nonEmptyString(value.name) : undefined);
   if (text) {
     io.writeErr(`${boundedTerminalText(text, MAX_CONFIRMATION_VALUE_CHARS)}\n`);
+  }
+}
+
+async function promptForDismissal(
+  promptAnswer?: (question: string) => Promise<string>
+): Promise<"decline" | "pending"> {
+  if (promptAnswer) {
+    return askDismissOnly(promptAnswer, DISMISS_ONLY_QUESTION);
+  }
+  const prompt = createInterface({ input: stdin, output: stdout });
+  try {
+    return await askDismissOnly((text) => prompt.question(text), DISMISS_ONLY_QUESTION);
+  } finally {
+    prompt.close();
   }
 }
 

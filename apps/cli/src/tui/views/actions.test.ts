@@ -13,8 +13,10 @@ import {
   approvalRender,
   CARD_UI_START,
   cardKeyStep,
+  cardUiStart,
   commitCardField,
   readFieldAnswer,
+  receiptDetailLines,
   resendView,
   type ApprovalRenderCtx,
   type CardUiState
@@ -118,6 +120,17 @@ describe("money field", () => {
     expect(second.effects).toEqual([{ type: "confirm", decision: "approve", fields: { adSetBudget: { text: "30" } } }]);
   });
 
+  it("once a value is typed, the OK label shows it instead of the frozen one", () => {
+    const view = fixture("change-budget-field");
+    expect(formatKeyBar(approvalRender(view, cardCtx()).keys)).toContain("l Lower to $30/day");
+    const asked = drive(view, [press("l")]);
+    const ui = commitCardField(asked.ui, "45").ui;
+    const render = approvalRender(view, cardCtx({ ui }));
+    expect(render.okKey).toBe("l");
+    expect(formatKeyBar(render.keys)).toContain("l Lower to $45.00/day");
+    expect(formatKeyBar(render.keys)).not.toContain("$30");
+  });
+
   it("rejects a value that is not money and keeps the field open", () => {
     const view = fixture("change-budget-field");
     const { ui } = drive(view, [press("l")]);
@@ -157,37 +170,51 @@ describe("outcome unknown", () => {
       retry,
       reconcile: { label: "Check Ads for the result", ask: "did the pause of Hook A land?" }
     }) as AnswerViewV1;
+  // The desktop's only retryable shape: certain nothing ran (receipt-view failed()).
+  const notSent = (base = fixture("change-pause-card")) =>
+    ({ ...base, state: "failed", outcome: "not_sent", retry: "retryable" }) as AnswerViewV1;
 
   it("prints the reconcile.label", () => {
     expect(text(approvalRender(unknown("check_first"), cardCtx()).lines)).toContain("Check Ads for the result");
     expect(text(renderView(unknown("check_first"), viewCtx()).detail)).toContain("Check Ads for the result");
   });
 
-  it("r is absent unless retry === \"retryable\"", () => {
-    for (const retry of ["safe_resend", "check_first", "never"] as const) {
+  it("r is offered only on a failed, not-sent, retryable card", () => {
+    for (const retry of ["safe_resend", "check_first", "never", "retryable"] as const) {
       const render = approvalRender(unknown(retry), cardCtx({ caps: ALL_CAPS }));
       expect(render.keys.map((k) => k.key), retry).not.toContain("r");
       expect(drive(unknown(retry), [press("r")], { caps: ALL_CAPS }).effects, retry).toEqual([]);
     }
-    const retryable = approvalRender(unknown("retryable"), cardCtx());
+    const retryable = approvalRender(notSent(), cardCtx());
     expect(retryable.keys.map((k) => k.key)).toContain("r");
-    expect(drive(unknown("retryable"), [press("r")]).effects).toEqual([{ type: "confirm", decision: "approve" }]);
+    expect(drive(notSent(), [press("r")]).effects).toEqual([{ type: "confirm", decision: "approve" }]);
   });
 
-  it("after an approve, the card comes back only for safe_resend or retryable, with its approval words", () => {
+  it("n on a retryable card sends a real decline: the handle is live again", () => {
+    expect(approvalRender(notSent(), cardCtx()).dismiss).toBe("decline");
+    expect(drive(notSent(), [press("n")]).effects).toEqual([{ type: "confirm", decision: "decline" }]);
+    expect(approvalRender(notSent(), cardCtx()).okKey).toBeNull();
+  });
+
+  it("after an approve, the card comes back only for safe_resend or a not-sent retryable, with its approval words", () => {
     const original = fixture("change-pause-card");
-    const receipt = (retry: string) => ({ ok: false, view: { ...unknown(retry as "never"), approval: undefined } });
-    for (const retry of ["safe_resend", "retryable"]) {
-      const back = resendView(original, receipt(retry));
-      expect(back?.state, retry).toBe("outcome_unknown");
-      expect(back?.approval?.confirmLabel, retry).toBe("Pause");
+    const receipt = (view: AnswerViewV1) => ({ ok: false, view: { ...view, approval: undefined } });
+    for (const view of [unknown("safe_resend"), notSent()]) {
+      const back = resendView(original, receipt(view));
+      expect(back?.state, view.state).toBe(view.state);
+      expect(back?.approval?.confirmLabel, view.state).toBe("Pause");
     }
-    for (const retry of ["check_first", "never"]) {
-      expect(resendView(original, receipt(retry)), retry).toBeNull();
+    // outcome_unknown + retryable contradicts itself (the desktop's cleaner rejects it): never brought back.
+    for (const view of [unknown("retryable"), unknown("check_first"), unknown("never"),
+      { ...notSent(), retry: "never" } as AnswerViewV1]) {
+      expect(resendView(original, receipt(view)), `${view.state}/${view.retry}`).toBeNull();
     }
     expect(resendView(original, { ok: true, view: fixture("receipt-dismissed") })).toBeNull();
     expect(resendView(original, { ok: true })).toBeNull();
-    expect(resendView(undefined, receipt("safe_resend"))).toBeNull();
+    expect(resendView(undefined, receipt(unknown("safe_resend")))).toBeNull();
+    // A thrown confirm error carries the view the same way.
+    const thrown = Object.assign(new Error("Not sent"), { code: "x", view: notSent() });
+    expect(resendView(original, thrown)?.retry).toBe("retryable");
   });
 
   it("pressing OK again is offered only for retry === \"safe_resend\"", () => {
@@ -197,10 +224,63 @@ describe("outcome unknown", () => {
     expect(resend.okKey).toBe("p");
     expect(formatKeyBar(resend.keys)).toContain("p check again");
     expect(drive(unknown("safe_resend"), [press("p")]).effects).toEqual([{ type: "confirm", decision: "approve" }]);
-    for (const retry of ["retryable", "check_first", "never"] as const) {
-      expect(approvalRender(unknown(retry), cardCtx()).okKey, retry).toBeNull();
-      expect(drive(unknown(retry), [press("p")]).effects, retry).toEqual([]);
+    for (const view of [unknown("retryable"), unknown("check_first"), unknown("never"), notSent()]) {
+      expect(approvalRender(view, cardCtx()).okKey, view.retry).toBeNull();
+      expect(drive(view, [press("p")]).effects, view.retry).toEqual([]);
     }
+  });
+
+  it("a brought-back card re-sends exactly the answers the first approve sent", () => {
+    const original = fixture("change-budget-field");
+    const asked = drive(original, [press("l")]);
+    const answered = commitCardField(asked.ui, "30").ui;
+    const first = drive(original, [press("l")], { ui: answered });
+    const sent = { adSetBudget: { text: "30" } };
+    expect(first.effects).toEqual([{ type: "confirm", decision: "approve", fields: sent }]);
+
+    const unsure = { ...original, state: "outcome_unknown", outcome: "unknown", retry: "safe_resend", approval: undefined };
+    const back = resendView(original, { ok: false, view: unsure })!;
+    expect(back).not.toBeNull();
+    // The session seeds the brought-back card from its queue entry.
+    const seeded = drive(back, [press("l")], { sentFields: sent, ui: cardUiStart({ sentFields: sent }) });
+    expect(seeded.effects).toEqual([{ type: "confirm", decision: "approve", fields: sent }]);
+    expect(text(seeded.render.lines)).toContain("$30.00/day");
+    // Never from the card's own answers: a fresh ui still sends what was sent.
+    expect(drive(back, [press("l")], { sentFields: sent }).effects)
+      .toEqual([{ type: "confirm", decision: "approve", fields: sent }]);
+
+    const retry = resendView(original, { ok: false, view: { ...unsure, state: "failed", outcome: "not_sent", retry: "retryable" } })!;
+    expect(drive(retry, [press("r")], { sentFields: sent }).effects)
+      .toEqual([{ type: "confirm", decision: "approve", fields: sent }]);
+  });
+
+  it("a card refused with field_invalid comes back with the app's words under its field", () => {
+    const ui = cardUiStart({ fieldError: "Budget must be at least $1.\u001b[2J Nothing was executed." });
+    const render = approvalRender(fixture("change-budget-field"), cardCtx({ ui }));
+    expect(text(render.lines)).toContain("Budget must be at least $1. Nothing was executed.");
+    expect(text(render.lines)).not.toMatch(/\u001b/u);
+    expect(ui.answers).toEqual({});
+    // OK asks for the value again.
+    expect(drive(fixture("change-budget-field"), [press("l")], { ui }).ui.fieldEntry?.key).toBe("adSetBudget");
+  });
+});
+
+describe("receipt detail", () => {
+  it("a partial launch receipt lists each item: ✓, ✗ with its reason, ? for unknown", () => {
+    const lines = receiptDetailLines({ ok: false, view: fixture("launch-results") }, viewCtx());
+    const out = text(lines);
+    expect(out).toMatch(/✓ Hook A/u);
+    expect(out).toMatch(/✗ Hook B · Rejected by review/u);
+    expect(out).toMatch(/\? Hook C/u);
+    // The reconcile step is the receipt line's, not repeated here.
+    expect(out).not.toContain("Check what landed");
+    expect(lines.every((line) => displayWidth(line) <= 72)).toBe(true);
+  });
+
+  it("a done or dismissed receipt adds nothing", () => {
+    expect(receiptDetailLines({ ok: true, view: fixture("receipt-dismissed") }, viewCtx())).toEqual([]);
+    expect(receiptDetailLines({ ok: true, view: { ...fixture("launch-results"), state: "done" } }, viewCtx())).toEqual([]);
+    expect(receiptDetailLines({ ok: true }, viewCtx())).toEqual([]);
   });
 });
 
@@ -246,6 +326,9 @@ describe("images", () => {
     expect(creativeDraftLine({ ...frame, status: "done" })).toBe("✓ 3 images ready");
     expect(creativeDraftLine({ ...frame, status: "error", error: { code: "x", message: "Blocked\u001b[2J by a check" } }))
       .toBe("✗ Blocked by a check");
+    const leaked = creativeDraftLine({ ...frame, status: "error", error: { code: "x", message: "failed to fetch https://cdn.example.com/a.png" } });
+    expect(leaked).not.toMatch(/http/iu);
+    expect(leaked.startsWith("✗ ")).toBe(true);
   });
 });
 
@@ -291,7 +374,7 @@ describe("send card with email bodies", () => {
     expect(page1).toContain("Your trial ended");
     expect(page1).toContain("Hi {first name},");
     expect(opened.render.pages).toBeGreaterThan(1);
-    expect(formatKeyBar(opened.render.keys)).toContain("1-3 switch");
+    expect(formatKeyBar(opened.render.keys)).toContain("1-3 email");
     expect(formatKeyBar(opened.render.keys)).toContain("space next page");
 
     const paged = drive(send(), [press("v"), press(" ")], { pageRows: 6 });
@@ -332,6 +415,18 @@ describe("send card with email bodies", () => {
     expect(render.keys.map((k) => k.key)).not.toContain("v");
     expect(text(render.lines)).toContain("The emails are too long to show here. Read them in the app.");
     expect(drive(fixture("launch-send-withheld"), [press("v")]).ui.documentOpen).toBe(false);
+  });
+
+  it("o is offered on a card only with caps.open and an app link, matching the (o) in its body", () => {
+    const withOpen = approvalRender(fixture("launch-send-withheld"), cardCtx({ caps: { open: true, watch: false, retry: false } }));
+    expect(withOpen.keys.map((k) => k.key)).toContain("o");
+    expect(text(withOpen.lines)).toContain("(o)");
+    const without = approvalRender(fixture("launch-send-withheld"), cardCtx());
+    expect(without.keys.map((k) => k.key)).not.toContain("o");
+    expect(text(without.lines)).not.toContain("(o)");
+    // No app link on the card: no o even when the desktop can open things.
+    const noLink = approvalRender(fixture("change-pause-card"), cardCtx({ caps: { open: true, watch: false, retry: false } }));
+    expect(noLink.keys.map((k) => k.key)).not.toContain("o");
   });
 });
 

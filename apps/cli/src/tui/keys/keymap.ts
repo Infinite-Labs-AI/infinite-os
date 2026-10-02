@@ -46,6 +46,8 @@ export interface CardKeys {
   viewOpen?: boolean;
   /** `1`–`9` switch between this many documents. */
   tabs?: number;
+  /** What the documents are, for the bar (`1-3 email`, terminal-r4); absent = "switch". */
+  tabNoun?: string;
   /** Space pages the open document. */
   page?: boolean;
   /** `c` copies what the card shows. */
@@ -167,7 +169,7 @@ export function keyBarHints(ctx: KeyContext): KeyHint[] {
   }
   hints.push({ key: "n", label: "dismiss" });
   const tabs = cardTabs(card);
-  if (tabs > 1) hints.push({ key: `1-${tabs}`, label: "switch" });
+  if (tabs > 1) hints.push({ key: `1-${tabs}`, label: card.tabNoun || "switch" });
   if (card.page) hints.push({ key: "space", label: "next page" });
   if (card.edit) hints.push({ key: "e", label: "edit in the app" });
   if (card.copy) hints.push({ key: "c", label: "copy" });

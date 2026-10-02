@@ -199,6 +199,10 @@ describe("keyBarHints", () => {
     expect(formatKeyBar(keyBarHints(card({
       okKey: "s", okLabel: "Send to 200 people", card: { view: true, viewOpen: true, tabs: 3, page: true }
     })))).toBe("v close   s Send to 200 people   n dismiss   1-3 switch   space next page");
+    // terminal-r4 names what the tabs are: `1-3 email`.
+    expect(formatKeyBar(keyBarHints(card({
+      okKey: "s", okLabel: "Send to 200 people", card: { view: true, viewOpen: true, tabs: 3, tabNoun: "email" }
+    })))).toBe("v close   s Send to 200 people   n dismiss   1-3 email");
   });
 
   it("e and c show only when the card says they work", () => {

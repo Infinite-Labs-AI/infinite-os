@@ -13,7 +13,9 @@
 // - A send's documents list slot · subject; `v` opens the bodies, `1`–`9`
 //   switch, space pages. A withheld body (`finishInApp`) has no `v`.
 // - Not sure it happened: the reconcile step shows; OK again only for
-//   `safe_resend`, `r` only for `retryable`.
+//   `safe_resend`, `r` only for a failed, not-sent `retryable` card. A card
+//   brought back re-sends exactly the answers the first approve sent
+//   (`ctx.sentFields`), never the card's own fresh answers.
 import type {
   AnswerViewV1,
   ApprovalFieldAnswerV1,
@@ -62,12 +64,34 @@ export const CARD_UI_START: CardUiState = {
   fieldError: null
 };
 
+/**
+ * A head card's opening key state, from its queue entry: a card brought back
+ * shows the answers it sent; a card whose answer the app refused shows the
+ * app's words (scrubbed) under its field, with no answer kept.
+ */
+export function cardUiStart(entry: {
+  sentFields?: Readonly<Record<string, ApprovalFieldAnswerV1>>;
+  fieldError?: string;
+} | null | undefined): CardUiState {
+  const fieldError = viewText(entry?.fieldError) || null;
+  return {
+    ...CARD_UI_START,
+    ...(entry?.sentFields ? { answers: { ...entry.sentFields } } : {}),
+    ...(fieldError ? { fieldError } : {})
+  };
+}
+
 export interface ApprovalRenderCtx extends ViewRenderCtx {
   ui: CardUiState;
   /** The desktop takes `fields` on confirm (`confirm.fields.v1`). */
   fieldsCapable: boolean;
   /** Body rows per page while a document is open (the session sizes it to the window). */
   pageRows?: number;
+  /**
+   * A card brought back after an unsure approve: the answers that approve
+   * sent. OK again and `r` re-send exactly these.
+   */
+  sentFields?: Readonly<Record<string, ApprovalFieldAnswerV1>>;
 }
 
 /** What the OK key does right now. */
@@ -86,6 +110,8 @@ export interface ApprovalRender extends ViewRender {
   ok: CardOk | null;
   /** `n` sends a real decline (a live card) or only closes a card already answered. */
   dismiss: "decline" | "close";
+  /** What `r` re-sends on a retryable card: the answers the first approve sent. */
+  resendFields?: Record<string, ApprovalFieldAnswerV1>;
 }
 
 /** What a card key asks the session to do beyond redrawing. */
@@ -108,11 +134,13 @@ const LIVE_STATES = new Set(["needs_yes", "needs_answer"]);
 export function approvalRender(view: AnswerViewV1, ctx: ApprovalRenderCtx): ApprovalRender {
   const width = Math.max(8, Math.floor(ctx.width));
   const inner = width - 4;
-  const innerCtx: ViewRenderCtx = { ...ctx, width: inner };
   const approval: Record<string, unknown> = isRecord(view.approval) ? view.approval : {};
   const ui = ctx.ui;
   const notes = new FootnoteBook();
   const live = LIVE_STATES.has(view.state);
+  // A failed, not-sent retryable card is live again at the app (its handle is
+  // pending once more), so its `n` is a real decline.
+  const retryable = offersRetry(view);
 
   const confirmLabel = viewText(approval.confirmLabel, "Confirm");
   const fields = readFields(approval.fields);
@@ -120,8 +148,12 @@ export function approvalRender(view: AnswerViewV1, ctx: ApprovalRenderCtx): Appr
   const documents = finishInApp ? [] : readDocuments(view);
   const summary = viewText(approval.summary) || viewText(view.explain);
   const blockedByUpdate = live && !ctx.fieldsCapable && fields.some((field) => field.required);
+  // `o` (and the body's "(o)") only when the desktop opens app links AND the card has one.
+  const canOpen = ctx.caps.open && hasAppLink(view, finishInApp);
+  const innerCtx: ViewRenderCtx = { ...ctx, width: inner, caps: { ...ctx.caps, open: canOpen } };
+  const sentFields = ctx.sentFields && Object.keys(ctx.sentFields).length ? { ...ctx.sentFields } : undefined;
 
-  const ok = cardOk(view, fields, ui.answers, ctx.fieldsCapable);
+  const ok = cardOk(view, fields, ui.answers, ctx.fieldsCapable, sentFields);
   const fieldPrompt = ok?.type === "ask_field" ? ok.field : undefined;
   const documentOpen = ui.documentOpen && documents.length > 0;
 
@@ -151,7 +183,7 @@ export function approvalRender(view: AnswerViewV1, ctx: ApprovalRenderCtx): Appr
     }
     if (finishInApp) {
       const words = viewText(finishInApp.words);
-      const link = isRecord(finishInApp.appLink) && ctx.caps.open ? " (o)" : "";
+      const link = isRecord(finishInApp.appLink) && canOpen ? " (o)" : "";
       if (words) body.push("", ...wrapText(`↗ ${words}${link}`, inner).map((line) => paint(line, "primary", ctx)));
     }
     if (fields.length) {
@@ -185,13 +217,14 @@ export function approvalRender(view: AnswerViewV1, ctx: ApprovalRenderCtx): Appr
     focus: "card",
     busy: false,
     okKey: ok ? okKeyFor(confirmLabel) : null,
-    okLabel: offersResend(view) ? "check again" : confirmLabel,
-    caps: { open: false, watch: false, retry: offersRetry(view) },
+    okLabel: offersResend(view) ? "check again" : okLabelFor(confirmLabel, fields, ui.answers),
+    caps: { open: canOpen, watch: false, retry: retryable },
     explain: summary !== "",
     card: {
       view: documents.length > 0,
       viewOpen: documentOpen,
       tabs: documentOpen ? documents.length : 0,
+      ...(documentOpen ? tabNounOf(documents) : {}),
       page: documentOpen && pages > 1
     }
   };
@@ -213,7 +246,8 @@ export function approvalRender(view: AnswerViewV1, ctx: ApprovalRenderCtx): Appr
     keyCtx,
     lines: [head, ...framed],
     ok,
-    dismiss: live ? "decline" : "close"
+    dismiss: live || retryable ? "decline" : "close",
+    ...(retryable && sentFields ? { resendFields: sentFields } : {})
   };
 }
 
@@ -242,10 +276,11 @@ export function cardKeyStep(
         effect: render.dismiss === "decline" ? { type: "confirm", decision: "decline" } : { type: "close" }
       };
     case "retry": {
-      // `r` exists only on a card where nothing ran for certain (`retryable`).
+      // `r` exists only on a card where nothing ran for certain (`retryable`),
+      // and re-sends the answers the first approve sent.
       if (!render.keyCtx.caps.retry) return { ui, effect: null };
-      const fields = answeredFields(ui.answers);
-      return { ui, effect: { type: "confirm", decision: "approve", ...(fields ? { fields } : {}) } };
+      const fields = render.resendFields;
+      return { ui, effect: { type: "confirm", decision: "approve", ...(fields ? { fields: { ...fields } } : {}) } };
     }
     case "explain":
       return render.keyCtx.explain ? { ui: { ...ui, explainOpen: !ui.explainOpen }, effect: null } : { ui, effect: null };
@@ -271,14 +306,15 @@ export function cardKeyStep(
 }
 
 /**
- * After an approve, the card to bring back when the app is not sure it
- * happened: only when its receipt view says a resend is safe (`safe_resend`,
- * the app dedupes) or nothing ran (`retryable`). It keeps the original card's
- * approval words; any other outcome stays a receipt line.
+ * After an approve, the card to bring back: only when its receipt view says a
+ * resend is safe (`outcome_unknown` + `safe_resend`, the app dedupes) or
+ * nothing ran (`failed` + `retryable`, the handle is pending again). It keeps
+ * the original card's approval words; any other outcome stays a receipt line.
+ * `result` is the confirm's result or the error it threw (both carry `view`).
  */
 export function resendView(original: AnswerViewV1 | undefined, result: unknown): AnswerViewV1 | null {
   const view = isRecord(result) ? decodeAnswerView(result.view) : null;
-  if (!view || view.state !== "outcome_unknown" || (view.retry !== "safe_resend" && view.retry !== "retryable")) {
+  if (!view || !(offersResend(view) || offersRetry(view))) {
     return null;
   }
   const approval = isRecord(view.approval) ? view.approval : original?.approval;
@@ -343,17 +379,43 @@ export function readFieldAnswer(field: ApprovalFieldV1, text: string): ApprovalF
   return { text: raw.slice(0, 500) };
 }
 
+const RECEIPT_DETAIL_STATES = new Set(["partial", "outcome_unknown", "failed"]);
+const RECEIPT_DETAIL_KINDS = new Set(["launch", "change", "images"]);
+
+/**
+ * Under a receipt line that is not all done (partial, not sure, failed), the
+ * kind's own object: a launch's per-item ✓/✗/?, a change's rows, an image
+ * set's items. Never the reconcile step (the receipt line prints it) and never
+ * an `(o)` (the transcript takes no keys). Empty for any other receipt.
+ */
+export function receiptDetailLines(result: unknown, ctx: ViewRenderCtx): string[] {
+  const view = isRecord(result) ? decodeAnswerView(result.view) : null;
+  if (!view || !RECEIPT_DETAIL_STATES.has(view.state) || !RECEIPT_DETAIL_KINDS.has(view.kind)) {
+    return [];
+  }
+  const width = Math.max(1, Math.floor(ctx.width));
+  const bodyCtx: ViewRenderCtx = { ...ctx, width, caps: { ...ctx.caps, open: false } };
+  const notes = new FootnoteBook();
+  const lines = kindBody(view, bodyCtx, notes);
+  if (notes.size) {
+    lines.push(...notes.lines().flatMap((line) => wrapText(line, width)).map((line) => paint(line, "muted", bodyCtx)));
+  }
+  return lines.map((line) => truncateCells(line, width));
+}
+
 // ── helpers ──
 
 function cardOk(
   view: AnswerViewV1,
   fields: readonly ApprovalFieldV1[],
   answers: CardUiState["answers"],
-  fieldsCapable: boolean
+  fieldsCapable: boolean,
+  sentFields: Record<string, ApprovalFieldAnswerV1> | undefined
 ): CardOk | null {
   if (offersResend(view)) {
-    const sent = answeredFields(answers);
-    return { type: "approve", ...(sent ? { fields: sent } : {}) };
+    // OK again re-sends what the first approve sent, never fresh answers: the
+    // app's dedupe matches on them.
+    return { type: "approve", ...(sentFields ? { fields: { ...sentFields } } : {}) };
   }
   if (!LIVE_STATES.has(view.state)) {
     return null;
@@ -374,6 +436,33 @@ function cardOk(
 
 function answeredFields(answers: CardUiState["answers"]): Record<string, ApprovalFieldAnswerV1> | undefined {
   return Object.keys(answers).length ? { ...answers } : undefined;
+}
+
+/**
+ * The OK label once a money value is typed: the app's verb with the user's
+ * value ("Lower to $45.00/day"), never the frozen amount the card came with.
+ */
+function okLabelFor(confirmLabel: string, fields: readonly ApprovalFieldV1[], answers: CardUiState["answers"]): string {
+  const field = fields.find((item) => item.input === "money_per_day" && answers[item.key] && "text" in answers[item.key]!);
+  const answer = field ? answers[field.key] : undefined;
+  if (!field || !answer || !("text" in answer)) return confirmLabel;
+  const value = fieldValue(field, answer.text);
+  const cut = confirmLabel.indexOf(" to ");
+  return cut > 0 ? `${confirmLabel.slice(0, cut)} to ${value}` : `${confirmLabel} (${value})`;
+}
+
+/** The card has a place in the app to open: its finishInApp link, its own link, or where a job lands. */
+function hasAppLink(view: AnswerViewV1, finishInApp: Record<string, unknown> | null): boolean {
+  if (finishInApp && isRecord(finishInApp.appLink)) return true;
+  if (isRecord(view.appLink)) return true;
+  return view.kind === "job" && isRecord(view.body) && isRecord(view.body.landsAt);
+}
+
+/** The noun the document tabs share ("Email 1", "Email 2" → `1-2 email`); none when they differ. */
+function tabNounOf(documents: readonly CardDocument[]): { tabNoun?: string } {
+  const nouns = new Set(documents.map((doc) => doc.slot.replace(/\s*\d+$/u, "").trim().toLowerCase()));
+  const [noun] = [...nouns];
+  return nouns.size === 1 && noun ? { tabNoun: noun } : {};
 }
 
 function fieldLines(fields: readonly ApprovalFieldV1[], ui: CardUiState, ctx: ViewRenderCtx): string[] {

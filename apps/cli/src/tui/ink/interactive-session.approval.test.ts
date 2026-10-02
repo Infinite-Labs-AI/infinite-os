@@ -141,6 +141,106 @@ describe("the view card in a running session (fake TTY; skipped on CI like the o
   );
 
   it.skipIf(process.env.CI === "true")(
+    "a card brought back after 'not sure it happened' re-sends the same answers, and shows its reconcile step",
+    { timeout: 30_000 },
+    async () => {
+      const input = ttyInput();
+      const output = ttyOutput();
+      const calls: { decision: string; fields?: Record<string, ApprovalFieldAnswerV1> }[] = [];
+      const budget = card("change-budget-field");
+      const unsure = {
+        ...budget.view!, approval: undefined, state: "outcome_unknown", outcome: "unknown", retry: "safe_resend",
+        receipt: { sentence: "Not sure it happened", tone: "warn", revertible: false },
+        reconcile: { label: "Check first", ask: "did the budget change land?" }
+      };
+      const session = runInkInteractiveSession({
+        columns: 80,
+        errorOutput: ttyOutput(),
+        input,
+        output,
+        title: "Infinite TUI",
+        onConfirmAction: async (_action, decision, fields) => {
+          calls.push({ decision, ...(fields ? { fields } : {}) });
+          if (calls.length === 1) {
+            // A failed resolution throws, carrying its receipt view (desktop-app-client confirm).
+            throw Object.assign(new Error("Not sure it happened"), { code: "dispatch_uncertain", view: unsure });
+          }
+          return { ok: true };
+        },
+        async onSubmitLine(): Promise<InkInteractiveLineResult> {
+          return { messages: [], pendingConfirmations: [budget] };
+        }
+      });
+      await waitFor(() => output.text().includes("ready"));
+      await sendKeys(input, "lower it\r");
+      await waitFor(() => output.text().includes("Change the budget"), 4_000, output.text);
+      await sendKeys(input, "l");
+      await waitFor(() => stripAnsi(output.text()).includes("enter set"), 4_000, output.text);
+      await sendKeys(input, "30\r");
+      await waitFor(() => stripAnsi(output.text()).includes("$30.00/day"), 4_000, output.text);
+      await sendKeys(input, "l");
+      await waitFor(() => calls.length === 1, 4_000, output.text);
+      await waitFor(() => stripAnsi(output.text()).includes("→ Check first"), 4_000, output.text);
+      await waitFor(() => stripAnsi(output.text()).includes("l check again"), 4_000, output.text);
+      await sendKeys(input, "l");
+      await waitFor(() => calls.length === 2, 4_000, output.text);
+      expect(calls).toEqual([
+        { decision: "approve", fields: { adSetBudget: { text: "30" } } },
+        { decision: "approve", fields: { adSetBudget: { text: "30" } } }
+      ]);
+      await sendKeys(input, "/exit\r");
+      await session;
+    }
+  );
+
+  it.skipIf(process.env.CI === "true")(
+    "an answer the app refuses (field_invalid) keeps the card, with the app's words, for a corrected value",
+    { timeout: 30_000 },
+    async () => {
+      const input = ttyInput();
+      const output = ttyOutput();
+      const calls: { decision: string; fields?: Record<string, ApprovalFieldAnswerV1> }[] = [];
+      const session = runInkInteractiveSession({
+        columns: 80,
+        errorOutput: ttyOutput(),
+        input,
+        output,
+        title: "Infinite TUI",
+        onConfirmAction: async (_action, decision, fields) => {
+          calls.push({ decision, ...(fields ? { fields } : {}) });
+          if (calls.length === 1) {
+            throw Object.assign(new Error("Budget is above the cap. Nothing was executed."), { code: "field_invalid" });
+          }
+          return { ok: true };
+        },
+        async onSubmitLine(): Promise<InkInteractiveLineResult> {
+          return { messages: [], pendingConfirmations: [card("change-budget-field")] };
+        }
+      });
+      await waitFor(() => output.text().includes("ready"));
+      await sendKeys(input, "lower it\r");
+      await waitFor(() => output.text().includes("Change the budget"), 4_000, output.text);
+      await sendKeys(input, "l");
+      await waitFor(() => stripAnsi(output.text()).includes("enter set"), 4_000, output.text);
+      await sendKeys(input, "9000\r");
+      await waitFor(() => stripAnsi(output.text()).includes("$9,000.00/day"), 4_000, output.text);
+      await sendKeys(input, "l");
+      await waitFor(() => calls.length === 1, 4_000, output.text);
+      await waitFor(() => stripAnsi(output.text()).includes("Budget is above the cap."), 4_000, output.text);
+      await waitFor(() => stripAnsi(output.text()).includes("l Lower to $30/day"), 4_000, output.text);
+      await sendKeys(input, "l");
+      await waitFor(() => stripAnsi(output.text()).includes("enter set"), 4_000, output.text);
+      await sendKeys(input, "45\r");
+      await waitFor(() => stripAnsi(output.text()).includes("$45.00/day"), 4_000, output.text);
+      await sendKeys(input, "l");
+      await waitFor(() => calls.length === 2, 4_000, output.text);
+      expect(calls[1]).toEqual({ decision: "approve", fields: { adSetBudget: { text: "45" } } });
+      await sendKeys(input, "/exit\r");
+      await session;
+    }
+  );
+
+  it.skipIf(process.env.CI === "true")(
     "v opens the email bodies, 2 switches, Enter and Esc never decide, n sends a real no",
     { timeout: 30_000 },
     async () => {

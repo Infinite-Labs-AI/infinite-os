@@ -1,7 +1,9 @@
 // What a write view says when it is not sure it happened. `outcome_unknown`
 // shows the view's reconcile step (check first), never "try again": only a
 // `retry: "safe_resend"` card may offer its OK key again (the app dedupes), and
-// only `retry: "retryable"` offers `r` (certain nothing ran). The words of the
+// only a failed, not-sent `retry: "retryable"` card offers `r` (certain nothing
+// ran; the app's only retryable shape, since `outcome_unknown` + `retryable`
+// contradicts itself and the app's view cleaner rejects it). The words of the
 // step are the app's (`reconcile.label`); the arrow is chrome.
 import type { AnswerViewV1 } from "@infinite-os/types";
 
@@ -26,7 +28,10 @@ export function offersResend(view: AnswerViewV1): boolean {
   return view.state === "outcome_unknown" && view.retry === "safe_resend";
 }
 
-/** `r` is offered only when nothing ran for certain. */
+/**
+ * `r` is offered only when nothing ran for certain: `failed` + `retryable`
+ * (the app puts that card's handle back to pending, so it is live again).
+ */
 export function offersRetry(view: AnswerViewV1): boolean {
-  return (view.state === "outcome_unknown" || view.state === "failed") && view.retry === "retryable";
+  return view.state === "failed" && view.retry === "retryable";
 }

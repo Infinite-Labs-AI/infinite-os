@@ -30,6 +30,7 @@ import type {
 // The cloud-brain entry threads `pendingConfirmations` + `onConfirmAction` in;
 // the LOCAL interactive path never returns them, so this stays fully dormant.
 import {
+  requeueConfirmation,
   terminalText,
   type InSessionConfirmationAction
 } from "../../desktop/confirm-in-session.js";
@@ -82,7 +83,9 @@ import {
   cancelCardField,
   CARD_UI_START,
   cardKeyStep,
+  cardUiStart,
   commitCardField,
+  receiptDetailLines,
   resendView,
   type ApprovalRender,
   type CardUiState
@@ -681,9 +684,11 @@ export function InkInteractiveSessionApp({
   );
   // A new head card (from any queue writer) always opens with its explanation
   // closed: the explanation stays behind `?`.
+  // A card brought back opens with the answers it sent; a card whose answer
+  // the app refused opens with the app's words under its field.
   useEffect(() => {
     setExplainOpen(false);
-    setCardUi(CARD_UI_START);
+    setCardUi(cardUiStart(headConfirmAction));
   }, [headConfirmAction]);
   // The head card drawn from its approval view (an old desktop sends none: the
   // summary + details card and `y Confirm` stay). Its key context is the one the
@@ -702,6 +707,7 @@ export function InkInteractiveSessionApp({
           caps: NO_KEY_CAPS,
           ui: cardUi,
           fieldsCapable: headConfirmAction.confirmFieldsCapable === true,
+          ...(headConfirmAction.sentFields ? { sentFields: headConfirmAction.sentFields } : {}),
           pageRows: rows ? Math.max(4, Math.floor(rows / 3)) : undefined
         })
       : null,
@@ -1206,23 +1212,56 @@ export function InkInteractiveSessionApp({
     setPendingConfirmActions((current) => current.slice(1));
     const appendLines = (lines: readonly ConfirmLine[]) =>
       appendMessages(lines.map((line) => ({ kind: "slash", role: "system", text: line.text }) as Msg));
+    // An answer the app refused before anything ran (`field_invalid`): the card
+    // comes back in front with the app's words, for a corrected value.
+    const refusedField = (outcome: unknown): boolean => {
+      const message = decision === "approve" ? fieldInvalidMessage(outcome) : null;
+      if (message === null) return false;
+      setPendingConfirmActions((current) => requeueConfirmation(current, withoutSent(head, message), "front"));
+      return true;
+    };
+    // Not sure it happened: when the app says a resend is safe (it dedupes) or
+    // nothing ran for certain (the handle is live again), the card comes back
+    // behind the card the user is on, offering OK again (`safe_resend`) or `r`
+    // (`retryable`) with exactly the answers this approve sent. Otherwise a
+    // receipt that is not all done shows its object (a launch's ✓/✗/? items).
+    const afterReceipt = (outcome: unknown) => {
+      const resend = decision === "approve" ? resendView(head.view, outcome) : null;
+      if (resend) {
+        const back: InSessionConfirmationAction = { ...withoutSent(head), view: resend, ...(fields ? { sentFields: fields } : {}) };
+        setPendingConfirmActions((current) => requeueConfirmation(current, back, "behind_head"));
+        return;
+      }
+      const detail = receiptDetailLines(outcome, {
+        width: Math.max(8, columns - 4),
+        color: false,
+        theme: t,
+        selected: 0,
+        tab: 0,
+        page: 0,
+        explainOpen: false,
+        showHiddenColumns: false,
+        caps: NO_KEY_CAPS
+      });
+      if (detail.length) {
+        appendMessages(detail.map((text) => ({ kind: "slash", role: "system", text: `  ${text}` }) as Msg));
+      }
+    };
     void (async () => {
       try {
         const result = await onConfirmAction?.(head, decision, fields);
-        appendLines(confirmResultLines(result, decision));
-        // Not sure it happened: when the app says a resend is safe (it dedupes)
-        // or nothing ran for certain, the card comes back with that receipt view,
-        // offering OK again (`safe_resend`) or `r` (`retryable`) and its reconcile
-        // step. Any other outcome stays a receipt line.
-        const resend = decision === "approve" ? resendView(head.view, result) : null;
-        if (resend) {
-          setPendingConfirmActions((current) => [{ ...head, view: resend }, ...current]);
+        if (refusedField(result)) {
+          appendLines(confirmErrorLines(Object.assign(new Error(fieldInvalidMessage(result) ?? ""), { code: "field_invalid" })));
+          return;
         }
+        appendLines(confirmResultLines(result, decision));
+        afterReceipt(result);
       } catch (error) {
         appendLines(confirmErrorLines(error));
+        if (!refusedField(error)) afterReceipt(error);
       }
     })();
-  }, [appendMessages, onConfirmAction, pendingConfirmActions]);
+  }, [appendMessages, columns, onConfirmAction, pendingConfirmActions, t]);
 
   // One key on the head card, already resolved by the keymap. With an approval
   // view the card's own step decides (views/approval.ts); an old desktop's card
@@ -2926,6 +2965,18 @@ function CreativeDraftLines({ lines, theme, width }: { lines: readonly string[];
       ))}
     </Box>
   );
+}
+
+/** The app's words when it refused a card's answer before anything ran (`field_invalid`). */
+function fieldInvalidMessage(outcome: unknown): string | null {
+  if (!isPlainRecord(outcome) || outcome.code !== "field_invalid") return null;
+  return typeof outcome.message === "string" ? outcome.message : "";
+}
+
+/** A queue entry with no carried answers; with `fieldError`, the app's words for the field. */
+function withoutSent(entry: InSessionConfirmationAction, fieldError?: string): InSessionConfirmationAction {
+  const { sentFields: _sent, fieldError: _error, ...rest } = entry;
+  return { ...rest, ...(fieldError ? { fieldError } : {}) };
 }
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {

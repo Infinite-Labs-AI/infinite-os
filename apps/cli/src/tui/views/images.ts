@@ -111,7 +111,8 @@ export function creativeDraftLine(frame: CreativeDraftFrameV1, nowMs?: number): 
     return `✓ ${n} ${noun} ready`;
   }
   if (frame.status === "error") {
-    return `✗ ${viewText(frame.error?.message, "Couldn't make the images.")}`;
+    // A provider error can name an image URL: it is cut like any image text.
+    return `✗ ${imageText(frame.error?.message, "Couldn't make the images.")}`;
   }
   const pending = Array.isArray(frame.pending) ? frame.pending.filter(isRecord) : [];
   const left = pending

@@ -60,9 +60,10 @@ describe("Ink in-session write confirmation (Plan 2) — structural guards (CI-r
   it("closes the explanation whenever the head card changes, whoever changed the queue", () => {
     // Keyed to the head card itself, so a new card never opens with an earlier
     // card's explanation expanded (r4: the explanation stays behind ?), nor with
-    // its open document, page or field answers.
+    // its open document, page or field answers. (A card brought back opens with
+    // only the answers its own entry carries: cardUiStart(entry).)
     expect(source).toMatch(
-      /useEffect\(\(\) => \{\n\s+setExplainOpen\(false\);\n\s+setCardUi\(CARD_UI_START\);\n\s+\}, \[headConfirmAction\]\);/u
+      /useEffect\(\(\) => \{\n\s+setExplainOpen\(false\);\n\s+setCardUi\(cardUiStart\(headConfirmAction\)\);\n\s+\}, \[headConfirmAction\]\);/u
     );
   });
 

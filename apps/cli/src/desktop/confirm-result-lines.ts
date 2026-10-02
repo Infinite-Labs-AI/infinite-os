@@ -43,6 +43,9 @@ const STATE_MARK: Partial<Record<AnswerViewState, { glyph: string; tone: Confirm
   blocked: { glyph: "⊗", tone: "bad" }
 };
 
+/** Receipt states whose reconcile step the receipt prints (and offers as the next ask). */
+const UNSURE_STATES = new Set<AnswerViewState>(["outcome_unknown", "partial"]);
+
 /** Codes that mean the confirm never reached the app (so nothing changed). */
 const UNREACHABLE_CODES = new Set([
   "desktop_unreachable",
@@ -134,6 +137,29 @@ export async function askConfirmDecision(
   return second ?? "pending";
 }
 
+/**
+ * Ask on a card that needs a typed value (a required field) the line prompt
+ * cannot send: only `n`/`no` declines; anything else, `y` included, leaves it
+ * pending. Never approves.
+ */
+export async function askDismissOnly(
+  ask: (question: string) => Promise<string>,
+  question: string
+): Promise<"decline" | "pending"> {
+  return readConfirmAnswer(await ask(question)) === "decline" ? "decline" : "pending";
+}
+
+/**
+ * The reconcile ask of a receipt that is not sure it happened (`reconcile.ask`,
+ * a new user turn), so a caller can offer it as the next step. Null otherwise.
+ */
+export function receiptNextAsk(result: unknown): string | null {
+  const view = decodeAnswerView(isRecord(result) ? result.view : undefined);
+  if (!view || !UNSURE_STATES.has(view.state) || !isRecord(view.reconcile)) return null;
+  const ask = view.reconcile.ask;
+  return typeof ask === "string" ? boundedTerminalText(ask, MAX_LINE_CHARS) || null : null;
+}
+
 /** The line for a card left unanswered: it stays pending until it expires. */
 export function leftForLaterLine(expiresAt: string | null | undefined): string {
   const at = expiresAt ? new Date(expiresAt) : null;
@@ -157,6 +183,12 @@ function receiptViewLines(value: unknown, decision: ConfirmDecision): ConfirmLin
       : STATE_MARK[view.state] ??
         (receipt.tone === "warn" ? { glyph: "!", tone: "warn" as const } : { glyph: "✓", tone: "ok" as const });
   const lines: ConfirmLine[] = [{ tone: mark.tone, text: `${mark.glyph} ${sentence}` }];
+  // Not sure it happened: the app's reconcile step (check first), never "try again".
+  if (decision === "approve" && UNSURE_STATES.has(view.state) && isRecord(view.reconcile)
+    && typeof view.reconcile.label === "string") {
+    const label = boundedTerminalText(view.reconcile.label, MAX_LINE_CHARS);
+    if (label) lines.push({ tone: "warn", text: `→ ${label}` });
+  }
   if (typeof receipt.provenanceLine === "string") {
     const provenance = boundedTerminalText(receipt.provenanceLine, MAX_LINE_CHARS);
     if (provenance) lines.push({ tone: "muted", text: `  ${provenance}` });
