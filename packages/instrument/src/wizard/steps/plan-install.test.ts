@@ -30,7 +30,9 @@ import type { ChecklistItem } from "../contracts/jobs.js"
 import type { RunPatch, SiteSourceBody } from "../contracts/bridge.js"
 import type { WizardDeps } from "../contracts/deps.js"
 
-import { step as installStep } from "./install.js"
+import { GITIGNORE_FENCE_BLOCK } from "../../harness/outputs.js"
+import { reverseEditRecord, sha256Tagged } from "../../install/edits.js"
+import { GITIGNORE_FENCE_LINE_ID, step as installStep } from "./install.js"
 import { step as planStep } from "./plan.js"
 
 afterEach(cleanupSites)
@@ -281,6 +283,45 @@ describe("§3z.7 / §3z.4 site-source refusals (I1)", () => {
 
   it("negative: an invalid_request with no known state is not swallowed", async () => {
     await expect(run({ code: "invalid_request" })).rejects.toThrow(/invalid_request/)
+  })
+})
+
+describe("B24: the wizard's .gitignore fence is a receipted edit", () => {
+  const FENCED = `node_modules/\n\n${GITIGNORE_FENCE_BLOCK}\n`
+  const run = async (headText: string | null) => {
+    const h = await setup({ files: { "index.html": STATIC_HTML, ".gitignore": FENCED }, consentFlag: "not_required", answers: [] })
+    const shown: string[] = []
+    h.deps.git = {
+      statusEntries: async () => [],
+      showFile: async (rev: string, path: string) => {
+        shown.push(`${rev}:${path}`)
+        return headText
+      },
+      unstage: async () => undefined,
+      stagedDiff: async () => ""
+    } as unknown as WizardDeps["git"]
+    const ctx = h.ctx
+    ctx.ask = (async (kind: never, payload: never) => {
+      ctx.asks.push({ kind, payload })
+      return approveAllFrom(ctx)
+    }) as typeof ctx.ask
+    await planStep.run(ctx, h.deps)
+    expect((await installStep.run(ctx, h.deps)).kind).toBe("ok")
+    return { ctx, shown }
+  }
+
+  it("records the fence against the committed .gitignore (by: wizard, planLineId gitignore_fence), and its reversal restores HEAD's text", async () => {
+    const { ctx, shown } = await run("node_modules/\n")
+    expect(shown).toEqual(["HEAD:.gitignore"])
+    const fence = (readInstallManifest(ctx.root)!.edits ?? []).filter((edit) => edit.file === ".gitignore")
+    expect(fence).toHaveLength(1)
+    expect(fence[0]).toMatchObject({ by: "wizard", planLineId: GITIGNORE_FENCE_LINE_ID, jobId: null, runId: IDS.run, beforeHash: sha256Tagged("node_modules/\n") })
+    expect(reverseEditRecord(FENCED, fence[0]!)).toEqual({ ok: true, content: "node_modules/\n" })
+  })
+
+  it("NEGATIVE: a fence already committed at HEAD (a resumed run) records nothing", async () => {
+    const { ctx } = await run(FENCED)
+    expect((readInstallManifest(ctx.root)!.edits ?? []).filter((edit) => edit.file === ".gitignore")).toEqual([])
   })
 })
 

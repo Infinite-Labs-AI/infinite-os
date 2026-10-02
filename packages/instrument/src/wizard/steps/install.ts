@@ -12,6 +12,9 @@ import { DECISION_LINE_IDS } from "../../install/plan-model.js"
 import { bridgeErrorCode, keysOnly, loadPlanApprovals, loadPlanInputs, planCandidates } from "../../install/step-inputs.js"
 import { bridgeFailureLine, bridgeFailureOutcome, bridgeFailureState } from "../../bridge/outcomes.js"
 import { productionHostHint } from "./link.js"
+import { makeEditRecord } from "../../install/edits.js"
+import { GITIGNORE_FENCE_START } from "../../harness/outputs.js"
+import { wizardGitExtras } from "../../git/index.js"
 import type { InstallerApplyResult } from "../contracts/jobs.js"
 import { JOB_TABLE, type ChecklistItem } from "../contracts/jobs.js"
 import type { StepOutcome, WizardContext, WizardDeps, WizardStep } from "../contracts/deps.js"
@@ -48,6 +51,28 @@ export function siteSourceHosts(keys: TagKeys, hint: string | null, observed: st
   const listed = keys.infinite.productionHosts.map(normalizeHost).filter((host) => host !== "")
   const extra = [...(hint ? [hint] : []), ...(observed ? [observed] : [])].map(normalizeHost).filter((host) => host !== "" && !denied(host))
   return [...new Set([...listed, ...extra])].slice(0, MAX_SITE_SOURCE_HOSTS)
+}
+
+/** The `.gitignore` plan line id of the wizard's own fence (B24). */
+export const GITIGNORE_FENCE_LINE_ID = "gitignore_fence"
+
+/**
+ * B24: the wizard's `.gitignore` fence (written after `before`) is an edit like any other, so it is recorded
+ * in `.infinite/install.json` with `by: "wizard"` and the uninstall can reverse it. Compares the committed
+ * `.gitignore` (null = the fence created the file) with the working copy; nothing is recorded when they
+ * match (a resumed run whose fence is already committed) or when no fence is present.
+ */
+export async function recordGitignoreFence(ctx: WizardContext, deps: WizardDeps): Promise<boolean> {
+  const after = await deps.fs.readText(`${ctx.root}/.gitignore`)
+  if (after === null || !after.includes(GITIGNORE_FENCE_START)) return false
+  // `in` (not a property read): a contract-only fake carries no extras and must not be asked for them.
+  const git = "showFile" in deps.git ? wizardGitExtras(deps.git) : null
+  if (!git) return false
+  const before = await git.showFile("HEAD", ".gitignore")
+  if (before === after) return false
+  const runId = ctx.state.get().runId
+  await deps.installer.recordEdits([makeEditRecord({ file: ".gitignore", before, after, jobId: null, planLineId: GITIGNORE_FENCE_LINE_ID, by: "wizard", runId })])
+  return true
 }
 
 /** Job 2 ("unusual layout") for each file the installer could not edit itself: an open job, never installed. */
@@ -157,6 +182,7 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
     }
   }
   for (const warning of result.warnings ?? []) sub(ctx, warning.length > 120 ? `${warning.slice(0, 117)}…` : warning, "warn")
+  await recordGitignoreFence(ctx, deps)
 
   // ---- open jobs: a manual edit is job 2, never "installed"; it passes the ONE seeding gate (B13) ----
   const openJobs = deps.registry.applyApprovals(openLayoutJobs(result.openJobs, ctx.state.get().jobs), plan, savedApprovals.approvals)
