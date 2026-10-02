@@ -1,11 +1,17 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+
+import { decodeAnswerView } from "../../desktop/answer-view-decode.js";
 
 import { r4Segments, seg } from "../../formatting/r4-segments.test-util.js";
 import { displayWidth, stripAnsi } from "../lib/display-width.js";
 import { INFINITE_R4_THEME } from "../theme.js";
 import { InfiniteTurnController } from "./turn-controller.js";
-import { renderInfiniteTranscript } from "./transcript-renderer.js";
-import { getTurnState, resetTurnState } from "./turn-store.js";
+import { renderLiveTurn } from "../views/layout.js";
+import type { Msg } from "../types.js";
+import { besideWorkingTurn, renderInfiniteTranscript, workingTurnMessages, workingTurnSteps } from "./transcript-renderer.js";
+import { getTurnState, resetTurnState, type TurnState } from "./turn-store.js";
 
 // The transcript in the r4 look (terminal-r4 `frame()`): the answer column with
 // no box at any width, the Steps strip from the turn store, and a streamed
@@ -143,5 +149,46 @@ describe("one turn's steps", () => {
     createInteractiveProgressReporter(stream, { animate: false, now: () => 2_000 });
     expect(getTurnState().steps).toEqual([]);
     resetTurnState();
+  });
+});
+
+describe("a running turn with views is drawn in the r4 layout while it works", () => {
+  const listView = () => {
+    const raw = readFileSync(fileURLToPath(new URL("../views/__fixtures__/list-rows.json", import.meta.url)), "utf8");
+    const view = decodeAnswerView(JSON.parse(raw));
+    if (!view) throw new Error("list-rows fixture does not decode");
+    return view;
+  };
+  const working = (): TurnState => ({
+    ...getTurnState(),
+    streaming: "Two are on; pausing **Cold brew car",
+    steps: [
+      { id: "c1", name: "list_meta_entities", label: "listing meta entities", status: "ok", startedAt: 0, endedAt: 400, result: "3 ads" },
+      { id: "c2", name: "pause_entity", label: "pausing entity", status: "run", startedAt: 400, endedAt: null, result: "" }
+    ],
+    tools: [{ id: "c2", name: "pause_entity", startedAt: 400, latestPreview: "waiting for Meta" } as TurnState["tools"][number]]
+  });
+
+  it("puts the arriving answer left of the view at 160, held open, with the running call's progress in the Steps", () => {
+    const state = working();
+    const history: Msg[] = [{ role: "user", text: "pause the cold brew ad" }];
+    const messages = workingTurnMessages(history, state);
+    const lines = renderLiveTurn({
+      messages, views: [listView()], focus: null, width: 160, color: false, theme,
+      steps: workingTurnSteps(messages, state, 900), nowMs: 900
+    }).lines;
+    expect(lines[0]).toMatch(/^❯ pause the cold brew ad +│ Ads running/u);
+    expect(lines.join("\n")).toContain("∞ Two are on; pausing Cold");
+    expect(lines.join("\n")).not.toContain("**");
+    expect(lines.some((line) => /^ {2}pausing entity +━*╍╍ [⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] waiting for Meta$/u.test(line))).toBe(true);
+    expect(lines.filter((line) => line.startsWith("─ Steps ")).length).toBe(1);
+  });
+
+  it("the transcript beside it keeps nothing the drawn turn already shows", () => {
+    const beside = besideWorkingTurn({ ...working(), todos: [{ id: "t1", content: "Check the ad set", status: "in_progress" }] });
+    const out = renderInfiniteTranscript({ messages: [], state: beside }, { columns: 160, theme, nowMs: 900 });
+    expect(out).not.toContain("Cold brew");
+    expect(out).not.toContain("─ Steps");
+    expect(out).toContain("Check the ad set");
   });
 });

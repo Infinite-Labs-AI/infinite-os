@@ -83,6 +83,7 @@ import { useTerminalColumns, useTerminalRows } from "./terminal-columns.js";
 import { resolveViewKey, turnAsk, viewFocusAfterTurnDone, viewKeyHints, type ViewFocusState } from "../views/focus.js";
 import { clipboardSequence, copyTargets, copyThroughPbcopy } from "../views/clipboard.js";
 import { renderCommittedTurn, renderLiveTurn, type LiveTurnRender } from "../views/layout.js";
+import { besideWorkingTurn, workingTurnMessages, workingTurnSteps } from "../app/transcript-renderer.js";
 import {
   approvalRender,
   cancelCardField,
@@ -658,48 +659,6 @@ export function InkInteractiveSessionApp({
     messages: history,
     state: turnState
   }), [agentTitle, history, turnState]);
-  // A finished turn with answer views is drawn in the r4 layout (answer left,
-  // details right, Steps below) as the live region's latest lines, at the
-  // transcript's width; the transcript then carries only the idle turn state.
-  // While a turn runs its views collect in the turn store and the transcript
-  // renders as it always has.
-  //
-  // The turn is drawn to the rows the live region has for it (`turnRowsAt`,
-  // below, once the composer and the key bar are counted), so a document's
-  // page fits on screen. `renderTurnAt` draws it at a given row count, cached
-  // for this set of inputs.
-  const turnViews = turnState.views;
-  const turnSteps = turnState.steps;
-  const renderTurnAt = useMemo(() => {
-    if (busy || !turnViews.length) {
-      return null;
-    }
-    const cache = new Map<number | undefined, LiveTurnRender>();
-    return (turnRows: number | undefined): LiveTurnRender => {
-      const hit = cache.get(turnRows);
-      if (hit) {
-        return hit;
-      }
-      const drawn = renderLiveTurn({
-        messages: history,
-        views: turnViews.map((frame) => frame.view),
-        focus: viewFocus,
-        steps: turnSteps,
-        width: transcriptColumns(columns),
-        color: colorEnabled(t),
-        theme: t,
-        rows: turnRows
-      });
-      cache.set(turnRows, drawn);
-      return drawn;
-    };
-  }, [busy, columns, history, t, turnSteps, turnViews, viewFocus]);
-  // Beside a drawn turn, the transcript carries only the idle turn state; its
-  // Steps are the drawn turn's own strip, so they are not drawn twice.
-  const idleTranscript = useMemo(
-    () => ({ agentTitle, messages: [], state: { ...turnState, steps: [] } }),
-    [agentTitle, turnState]
-  );
   // Drive the transcript's animated clock here so the composer-cursor row
   // prediction below and the live <InkTranscriptApp> render share identical
   // tick/time values. Otherwise the busy indicator (or a tool's elapsed timer)
@@ -714,6 +673,56 @@ export function InkInteractiveSessionApp({
     busy: transcriptBusy,
     state: turnState
   });
+  // The latest turn with answer views is drawn in the r4 layout (answer left,
+  // details right from 120 columns, Steps below) as the live region's latest
+  // lines, at the transcript's width; the transcript then carries only what
+  // the drawn turn does not show. A turn still running is drawn the same way
+  // (r4's working frames): the answer arriving (held open) beside the views
+  // that already came, its calls running in the Steps.
+  //
+  // The turn is drawn to the rows the live region has for it (`turnRowsAt`,
+  // below, once the composer and the key bar are counted), so a document's
+  // page fits on screen. `renderTurnAt` draws it at a given row count, cached
+  // for this set of inputs.
+  const turnViews = turnState.views;
+  const turnSteps = turnState.steps;
+  // While the turn runs the drawn turn follows its state and the clock (its spinner, a running bar).
+  const workingState = busy ? turnState : null;
+  const workingClock = busy ? clock : 0;
+  const renderTurnAt = useMemo(() => {
+    if (!turnViews.length) {
+      return null;
+    }
+    const messages = workingState ? workingTurnMessages(history, workingState, agentTitle) : history;
+    const steps = workingState ? workingTurnSteps(messages, workingState, workingClock) : turnSteps;
+    const cache = new Map<number | undefined, LiveTurnRender>();
+    return (turnRows: number | undefined): LiveTurnRender => {
+      const hit = cache.get(turnRows);
+      if (hit) {
+        return hit;
+      }
+      const drawn = renderLiveTurn({
+        messages,
+        views: turnViews.map((frame) => frame.view),
+        focus: viewFocus,
+        steps,
+        width: transcriptColumns(columns),
+        color: colorEnabled(t),
+        theme: t,
+        rows: turnRows,
+        ...(workingState ? { nowMs: workingClock } : {})
+      });
+      cache.set(turnRows, drawn);
+      return drawn;
+    };
+  }, [agentTitle, columns, history, t, turnSteps, turnViews, viewFocus, workingClock, workingState]);
+  // Beside a drawn turn, the transcript carries only what the drawn turn does
+  // not show: its Steps are the drawn turn's own strip, and while it runs its
+  // arriving answer and calls are in it too, so nothing is drawn twice.
+  const idleTranscript = useMemo(
+    () => ({ agentTitle, messages: [], state: busy ? besideWorkingTurn(turnState) : { ...turnState, steps: [] } }),
+    [agentTitle, busy, turnState]
+  );
   const visibleStatusParts = formatInteractiveStatus(statusParts, busy, queuedLines);
   // The head card's keys: its named OK key, `n`, and `?` (keymap.ts owns the rules).
   // `o`/`w`/`r` stay off until app links, watch and retry land (T12, T11).

@@ -185,12 +185,50 @@ function renderTurn(messages: readonly Msg[], state: TurnState | undefined, ctx:
 }
 
 /**
+ * A running turn's messages as its drawn layout shows them (the turn beside
+ * its views while it works, r4 "working"): what is already in the transcript,
+ * the finished segments, and the answer still arriving (held open: a span not
+ * closed yet prints as plain words), labelled with the live project.
+ */
+export function workingTurnMessages(messages: readonly Msg[], state: TurnState, agentTitle?: string): Msg[] {
+  const streaming = state.streaming.trim()
+    ? [{ role: "assistant" as const, text: state.streaming, partial: true, ...(agentTitle ? { title: agentTitle } : {}) }]
+    : [];
+  return [...messages, ...state.streamSegments, ...streaming];
+}
+
+/** A running turn's Steps as its drawn layout shows them: a running call's result is its latest progress. */
+export function workingTurnSteps(messages: readonly Msg[], state: TurnState, nowMs: number): TurnStep[] {
+  return turnSteps(messages, state, { nowMs });
+}
+
+/**
+ * The turn state the transcript keeps beside a running turn drawn with its
+ * views: what the drawn turn already shows (its segments, the answer arriving,
+ * its calls and Steps) is taken out, so nothing prints twice; thinking, todos,
+ * subagents and the latest activity stay under it.
+ */
+export function besideWorkingTurn(state: TurnState): TurnState {
+  const segmentsThink = state.streamSegments.some((msg) => msg.thinking?.trim());
+  return {
+    ...state,
+    steps: [],
+    streamSegments: [],
+    streaming: "",
+    streamPendingTools: [],
+    tools: [],
+    reasoning: segmentsThink ? "" : state.reasoning,
+    activity: state.streaming.trim() ? [] : state.activity
+  };
+}
+
+/**
  * The turn's calls: the turn store's (one per call, with start and end; a
  * running one shows its latest progress as its result) when it has any, else
  * the tool trail laid end to end, with the calls still running after it. A
  * running call says "running" until it reports progress.
  */
-function turnSteps(messages: readonly Msg[], state: TurnState | undefined, ctx: RenderContext): TurnStep[] {
+function turnSteps(messages: readonly Msg[], state: TurnState | undefined, ctx: Pick<RenderContext, "nowMs">): TurnStep[] {
   if (state?.steps.length) {
     return state.steps.map((step) => {
       if (step.endedAt !== null) {

@@ -208,6 +208,51 @@ describe("views in a running session (fake TTY; skipped on CI like the other PTY
   });
 });
 
+describe("a running turn's views (r4 working frames)", () => {
+  it("the turn is drawn with its views while it runs, not only once it ends", () => {
+    const draw = sessionSource.slice(sessionSource.indexOf("const renderTurnAt"), sessionSource.indexOf("const visibleStatusParts"));
+    expect(draw).not.toMatch(/if \(busy \|\|/u);
+    expect(draw).toContain("workingTurnMessages(");
+    expect(draw).toContain("workingTurnSteps(");
+    expect(draw).toContain("besideWorkingTurn(");
+  });
+
+  it.skipIf(process.env.CI === "true")("at 160 a view that arrives mid-turn sits right of the arriving answer", { timeout: 30_000 }, async () => {
+    resetTurnState();
+    const input = ttyInput();
+    const output = ttyOutput(160);
+    let finish: () => void = () => {};
+    const session = runInkInteractiveSession({
+      errorOutput: ttyOutput(160),
+      input,
+      async onSubmitLine(line, onProgress, _signal, onView) {
+        if (line === "/exit") {
+          return { exit: true, messages: [] };
+        }
+        onView?.(listFrame());
+        onProgress?.({ type: "message.start", stage: "message", message: "" });
+        onProgress?.({ type: "message.delta", stage: "message", message: "", text: "Two are on; pausing **Cold brew car" });
+        await new Promise<void>((resolve) => {
+          finish = resolve;
+        });
+        return { messages: [{ role: "assistant", text: "Two are on; paused **Cold brew carousel**." }] };
+      },
+      output,
+      title: "Infinite TUI"
+    });
+
+    await waitFor(() => output.text().includes("ready"), 4_000, output.text);
+    await sendKeys(input, "which ads are on?\r");
+    await waitFor(() => /∞ Two are on; pausing Cold brew car +│/u.test(stripAnsi(output.text())), 4_000, output.text);
+    expect(stripAnsi(output.text())).toMatch(/❯ which ads are on\? +│ +Ads running/u);
+    expect(stripAnsi(output.text())).not.toContain("**Cold");
+    finish();
+    await waitFor(() => /∞ Two are on; paused Cold brew +│/u.test(stripAnsi(output.text())), 4_000, output.text);
+    await sendKeys(input, "/exit\r");
+    await session;
+  });
+});
+
 describe("typing over a live view (fake TTY; skipped on CI like the other PTY tests)", () => {
   it.skipIf(process.env.CI === "true")("\"just\" typed right after a list turn arrives whole; an ask of /exit never quits", { timeout: 30_000 }, async () => {
     resetTurnState();
