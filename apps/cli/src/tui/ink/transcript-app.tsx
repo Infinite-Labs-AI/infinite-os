@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { Box, Text, renderToString } from "./renderer.js";
+import { Box, Static, Text, renderToString } from "./renderer.js";
 
 import { renderStatusFooter } from "../../formatting/renderer.js";
 import { renderInfiniteTranscript, type InfiniteTranscriptInput } from "../app/transcript-renderer.js";
@@ -8,6 +8,15 @@ import { parseAnsiSegments } from "../lib/ansi-segments.js";
 import { displayWidth, padEndCells, truncateCells } from "../lib/display-width.js";
 import { resolveTheme, type Theme } from "../theme.js";
 import { ROCKET_BANNER_ROWS, RocketBanner } from "./rocket-banner.js";
+import {
+  DEFAULT_COMPOSER_ROWS,
+  DEFAULT_KEY_BAR_ROWS,
+  liveRegionCap,
+  livePageHint,
+  liveWindow,
+  type CommittedEntry,
+  type LiveWindow
+} from "./transcript-static.js";
 import {
   FACE_TICK_MS,
   formatInfiniteBusyIndicator,
@@ -18,6 +27,40 @@ import {
 export interface InkTranscriptAppProps {
   busy?: boolean;
   columns?: number;
+  /**
+   * Finished turns, printed ONCE through Ink's `<Static>` into the terminal's
+   * scrollback (see transcript-static.ts). Never counted by
+   * `inkTranscriptRowCount`: the composer's cursor row is relative to the live
+   * frame only. Must only ever grow.
+   */
+  committed?: readonly CommittedEntry[];
+  /**
+   * The latest turn as pre-rendered lines. Drawn live (before `transcript`'s own
+   * lines) and counted, capped by the live-region budget like the rest.
+   */
+  latest?: CommittedEntry | null;
+  /**
+   * Terminal height. When set, the live lines are capped at
+   * `liveRegionCap(rows, composerRows, keyBarRows)` and paged; undefined = no cap.
+   */
+  rows?: number;
+  /**
+   * Rows the live frame draws outside this component, other than the key bar:
+   * the composer, any overlay, the home inventory. Default DEFAULT_COMPOSER_ROWS.
+   */
+  composerRows?: number;
+  /** Rows of the key bar above the composer. Default DEFAULT_KEY_BAR_ROWS. */
+  keyBarRows?: number;
+  /**
+   * First visible live line when the live region is paged; `null`/undefined =
+   * follow the tail. Clamped, so a stale offset after a resize is safe.
+   */
+  livePage?: number | null;
+  /**
+   * Whether space pages the live region right now (false while a write card or
+   * picker owns space). Only the hint text changes; the row count does not.
+   */
+  livePageSpace?: boolean;
   indicatorTick?: number;
   nowMs?: number;
   /**
@@ -113,7 +156,14 @@ export function useInfiniteTranscriptClock({
 export function InkTranscriptApp({
   busy: busyOverride = false,
   columns = 88,
+  committed: committedProp = NO_COMMITTED,
+  composerRows,
   homeBanner = false,
+  keyBarRows,
+  latest,
+  livePage,
+  livePageSpace = true,
+  rows,
   indicatorTick,
   nowMs,
   prompt,
@@ -142,9 +192,41 @@ export function InkTranscriptApp({
     nowMs: clock,
     theme: t
   }), [clock, state, t, transcript, width]);
+  const statusRows = statusRowStrings({
+    busy,
+    columns: width,
+    labelTick: displayLabelTick,
+    nowMs: clock,
+    spinnerTick: displaySpinnerTick,
+    state,
+    status,
+    theme: t,
+    turnStartedAt
+  });
+  const live = useMemo(() => liveLinesWindow({
+    composerRows,
+    keyBarRows,
+    latest,
+    livePage,
+    rows,
+    showComposer,
+    statusRowCount: statusRows.length,
+    transcriptLines
+  }), [composerRows, keyBarRows, latest, livePage, rows, showComposer, statusRows.length, transcriptLines]);
+  const hint = livePageHint(live, { spacePages: livePageSpace });
+  // <Static> wants a mutable array type; it only reads it.
+  const committed = committedProp as CommittedEntry[];
 
   return (
     <Box flexDirection="column" width={width}>
+      {/* Finished turns: printed once, above the live frame, into scrollback. */}
+      <Static items={committed}>
+        {(entry) => (
+          <Box flexDirection="column" key={entry.id}>
+            {entry.node ?? entry.lines.map((line, index) => <AnsiLine key={`${entry.id}:${index}`} line={line} />)}
+          </Box>
+        )}
+      </Static>
       {/* truncate-end keeps the top rule to EXACTLY one terminal row — matching the
           literal `1` inkTranscriptRowCount() assumes for it. Without this, a label
           whose Ink string-width exceeds the repo's displayWidth (emoji-presentation
@@ -152,27 +234,13 @@ export function InkTranscriptApp({
           to overflow `columns` — word-wraps the rule to 2 rows, so the predicted
           composer row (and thus the native cursor) lands one row above the input. */}
       <Text color={t.color.primary} wrap="truncate-end">{topRule(title ?? t.brand.name, t, width)}</Text>
-      {transcriptLines.length ? (
-        transcriptLines.map((line, index) => {
-          const segments = parseAnsiSegments(line);
-          return (
-            <Text key={`line:${index}`} wrap="truncate-end">
-              {segments.length
-                ? segments.map((segment, segmentIndex) => (
-                    <Text
-                      key={segmentIndex}
-                      color={segment.color}
-                      bold={segment.bold}
-                      italic={segment.italic}
-                      strikethrough={segment.strikethrough}
-                    >
-                      {segment.text}
-                    </Text>
-                  ))
-                : line}
-            </Text>
-          );
-        })
+      {live.lines.length ? (
+        <>
+          {live.lines.map((line, index) => <AnsiLine key={`line:${live.start + index}`} line={line} />)}
+          {hint ? (
+            <Text color={t.color.muted} wrap="truncate-end">{truncateCells(hint, width)}</Text>
+          ) : null}
+        </>
       ) : homeBanner ? (
         // Empty transcript on the interactive home screen: the rocket mascot
         // (fixed ROCKET_BANNER_ROWS tall). It replaces the old welcome line —
@@ -185,17 +253,11 @@ export function InkTranscriptApp({
         // reservation and the predicted composer/native-cursor row.
         <Text wrap="truncate-end">{" "}</Text>
       )}
-      <InkStatusRule
-        busy={busy}
-        columns={width}
-        nowMs={clock}
-        state={state}
-        status={status}
-        theme={t}
-        labelTick={displayLabelTick}
-        spinnerTick={displaySpinnerTick}
-        turnStartedAt={turnStartedAt}
-      />
+      {statusRows.map((row, index) => (
+        <Text color={t.color.muted} key={`status:${index}`} wrap="truncate-end">
+          {row}
+        </Text>
+      ))}
       {showComposer ? (
         <Text color={t.color.primaryBright} wrap="truncate-end">
           {composerLine(prompt, t, width)}
@@ -214,31 +276,33 @@ export function renderInkTranscriptToString(
   });
 }
 
-export function inkTranscriptRowCount({
+/**
+ * The rows the live frame of `InkTranscriptApp` draws (committed `<Static>` rows
+ * are NOT counted: Ink positions the cursor inside the live frame only), plus the
+ * live window, so a caller can tell whether the latest turn can be paged.
+ */
+export function inkTranscriptLayout({
   busy: busyOverride = false,
   columns = 88,
+  composerRows,
   homeBanner = false,
   indicatorTick = 0,
+  keyBarRows,
+  latest,
+  livePage,
   nowMs = Date.now(),
+  rows,
   showComposer = true,
   spinnerTick = 0,
   status = [],
   theme,
   transcript,
   turnStartedAt
-}: InkTranscriptAppProps): number {
+}: InkTranscriptAppProps): { rowCount: number; window: LiveWindow } {
   const t = theme ?? resolveTheme();
   const width = clampColumns(columns);
   const state = transcript?.state ?? getTurnState();
   const busy = busyOverride || isInfiniteTurnBusy(state);
-  // Mirror the empty-transcript render branch exactly: the home banner renders
-  // ROCKET_BANNER_ROWS rows, everything else falls back to a single blank row.
-  const lineCount = renderTranscriptLines(transcript ?? { state }, {
-    columns: width,
-    nowMs,
-    theme: t
-  }).length;
-  const transcriptRows = lineCount > 0 ? lineCount : homeBanner ? ROCKET_BANNER_ROWS : 1;
   const statusRows = statusRowStrings({
     busy,
     columns: width,
@@ -250,51 +314,99 @@ export function inkTranscriptRowCount({
     theme: t,
     turnStartedAt
   }).length;
+  const live = liveLinesWindow({
+    composerRows,
+    keyBarRows,
+    latest,
+    livePage,
+    rows,
+    showComposer,
+    statusRowCount: statusRows,
+    transcriptLines: renderTranscriptLines(transcript ?? { state }, {
+      columns: width,
+      nowMs,
+      theme: t
+    })
+  });
+  // Mirror the empty-transcript render branch exactly: the home banner renders
+  // ROCKET_BANNER_ROWS rows, everything else falls back to a single blank row.
+  const liveRows = live.lines.length > 0
+    ? live.lines.length + (livePageHint(live) ? 1 : 0)
+    : homeBanner ? ROCKET_BANNER_ROWS : 1;
 
-  return 1 + transcriptRows + statusRows + (showComposer ? 1 : 0);
+  return { rowCount: 1 + liveRows + statusRows + (showComposer ? 1 : 0), window: live };
 }
 
-function InkStatusRule({
-  busy,
-  columns,
-  labelTick,
-  nowMs,
-  spinnerTick,
-  state,
-  status,
-  theme,
-  turnStartedAt
-}: {
-  busy: boolean;
-  columns: number;
-  labelTick: number;
-  nowMs: number;
-  spinnerTick: number;
-  state: TurnState;
-  status: readonly string[];
-  theme: Theme;
-  turnStartedAt?: number;
-}) {
-  const rows = statusRowStrings({
-    busy,
-    columns,
-    labelTick,
-    nowMs,
-    spinnerTick,
-    state,
-    status,
-    theme,
-    turnStartedAt
-  });
+export function inkTranscriptRowCount(props: InkTranscriptAppProps): number {
+  return inkTranscriptLayout(props).rowCount;
+}
 
+/**
+ * Lines of a finished turn for `<Static>`: exactly what the live region drew for
+ * it (same renderer, same colours), at the given width.
+ */
+export function renderCommittedTranscriptLines(
+  transcript: InfiniteTranscriptInput,
+  options: { columns: number; theme?: Theme }
+): string[] {
+  return renderTranscriptLines(transcript, {
+    columns: clampColumns(options.columns),
+    nowMs: Date.now(),
+    theme: options.theme ?? resolveTheme()
+  });
+}
+
+const NO_COMMITTED: readonly CommittedEntry[] = [];
+
+/**
+ * The live lines (the latest turn, then the transcript) cut to the live-region
+ * budget: the cap minus the top rule, the status rows and an in-app composer row.
+ */
+function liveLinesWindow({
+  composerRows = DEFAULT_COMPOSER_ROWS,
+  keyBarRows = DEFAULT_KEY_BAR_ROWS,
+  latest,
+  livePage,
+  rows,
+  showComposer,
+  statusRowCount,
+  transcriptLines
+}: {
+  composerRows?: number;
+  keyBarRows?: number;
+  latest?: CommittedEntry | null;
+  livePage?: number | null;
+  rows?: number;
+  showComposer: boolean;
+  statusRowCount: number;
+  transcriptLines: readonly string[];
+}): LiveWindow {
+  const lines = latest?.lines.length ? [...latest.lines, ...transcriptLines] : transcriptLines;
+  const cap = liveRegionCap(rows, composerRows, keyBarRows);
+  // Never below 2: one content row plus the hint row.
+  const budget = Math.max(2, cap - 1 - statusRowCount - (showComposer ? 1 : 0));
+  return liveWindow(lines, budget, livePage ?? null);
+}
+
+/** One pre-rendered ANSI line as Ink-native coloured segments. */
+function AnsiLine({ line }: { line: string }) {
+  const segments = parseAnsiSegments(line);
   return (
-    <>
-      {rows.map((row, index) => (
-        <Text color={theme.color.muted} key={`status:${index}`} wrap="truncate-end">
-          {row}
-        </Text>
-      ))}
-    </>
+    <Text wrap="truncate-end">
+      {segments.length
+        ? segments.map((segment, segmentIndex) => (
+            <Text
+              key={segmentIndex}
+              color={segment.color}
+              bold={segment.bold}
+              italic={segment.italic}
+              strikethrough={segment.strikethrough}
+            >
+              {segment.text}
+            </Text>
+          ))
+        : line}
+    </Text>
   );
 }
 

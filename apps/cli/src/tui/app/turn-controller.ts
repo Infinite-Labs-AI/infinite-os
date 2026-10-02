@@ -9,6 +9,7 @@ import {
 import { appendToolShelfMessage, isToolShelfMessage } from "../lib/live-progress.js";
 import {
   boundedLiveRenderText,
+  buildStoppedToolTrailLine,
   buildToolTrailLine,
   compactPreview,
   estimateTokensRough,
@@ -657,6 +658,34 @@ export class InfiniteTurnController {
     this.reset();
 
     return { finalMessages, finalText };
+  }
+
+  /**
+   * What the live turn shows right now, as transcript messages, for a turn the
+   * user stopped (Esc / Ctrl-C): the finished segments, completed tool rows not
+   * yet shelved, every still-running tool marked stopped (no ✓/✗, since the app
+   * may still finish it), and the streamed partial answer. Pure: it changes
+   * nothing, so the caller commits it and then `reset()`s as before.
+   */
+  stoppedTranscript(): Msg[] {
+    let messages: Msg[] = [...this.segmentMessages];
+    const tools = [
+      ...this.pendingSegmentTools,
+      ...this.activeTools.map((tool) => buildStoppedToolTrailLine(tool.name, tool.latestPreview || tool.context || ""))
+    ];
+
+    if (tools.length) {
+      messages = appendToolShelfMessage(messages, { kind: "trail", role: "system", text: "", tools });
+    }
+
+    const raw = this.bufRef.trimStart();
+    const text = raw && hasReasoningTag(raw) ? splitReasoning(raw).text : raw;
+
+    if (text.trim()) {
+      messages.push({ role: "assistant", text: finalTail(text, this.segmentMessages) });
+    }
+
+    return messages.filter((msg) => msg.text.trim() || hasDetails(msg));
   }
 
   reset() {

@@ -13,6 +13,13 @@
 // (stock `useCursor` -> vendored `useDeclaredCursor` is a component-level port,
 // tracked separately). Until that lands, run the vendored backend with:
 //   INFINITE_INK_RENDERER=infinite
+//
+// `Static` (finished turns printed once into terminal scrollback) is the same
+// kind of gap: the vendored renderer has no `<Static>`, so its backend gets a shim
+// that renders the items IN FLOW, every frame. That keeps the session rendering,
+// but on the vendored path committed turns stay in the live frame and the old
+// "tall frame loses scrollback" problem remains until `Static` is ported.
+import React from "react";
 import * as inkStock from "ink";
 import * as infiniteInk from "@infinite-os/ink";
 
@@ -52,7 +59,14 @@ function buildInfiniteBackend(): InkModule {
     // parks the cursor declaratively via useDeclaredCursor instead, so this
     // shim keeps the composer compiling and non-crashing; native parking on
     // the vendored backend is a follow-up port of the composer component.
-    useCursor: () => ({ setCursorPosition: (_position?: unknown) => {} })
+    useCursor: () => ({ setCursorPosition: (_position?: unknown) => {} }),
+    // No <Static> in the vendored renderer: draw the items in flow (see header).
+    Static: <T,>({ items, children, style }: inkStock.StaticProps<T>) =>
+      React.createElement(
+        infinite.Box as React.ElementType,
+        { flexDirection: "column", ...(style as Record<string, unknown> | undefined) },
+        items.map((item, index) => children(item, index))
+      )
   };
   return backend as unknown as InkModule;
 }
@@ -74,4 +88,5 @@ export const useInput: typeof inkStock.useInput = backend.useInput;
 export const useStdin: typeof inkStock.useStdin = backend.useStdin;
 export const useStdout: typeof inkStock.useStdout = backend.useStdout;
 export const useCursor: typeof inkStock.useCursor = backend.useCursor;
+export const Static: typeof inkStock.Static = backend.Static;
 export type Instance = inkStock.Instance;

@@ -1,4 +1,5 @@
 import type { ChatProgressEvent } from "@infinite-os/llm-controller";
+import { scrubTerminalControls } from "../desktop/confirm-in-session.js";
 import { formatElapsedSeconds, formatInteractiveProgress } from "./progress.js";
 import { turnController } from "../tui/app/turn-controller.js";
 import { renderInfiniteAppChrome, type InfiniteAppChromeInput } from "../tui/app/app-chrome.js";
@@ -564,7 +565,8 @@ class StreamingAssistantFrame {
       this.writeBorder("│ ");
       this.atLineStart = false;
     }
-    this.stream.write(ansi(this.theme, "text", line, this.color));
+    // Model text goes straight to the TTY: strip control and bidi characters first.
+    this.stream.write(ansi(this.theme, "text", scrubTerminalControls(line), this.color));
     this.stream.write("\n");
     this.atLineStart = true;
   }

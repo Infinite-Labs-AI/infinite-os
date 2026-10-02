@@ -152,6 +152,12 @@ export function ansi(theme: Theme, role: AnsiRole, value: string, enabled = true
   return `\u001b[38;2;${rgb[0]};${rgb[1]};${rgb[2]}m${value}\u001b[0m`;
 }
 
+/** The SGR that switches the foreground to a theme role (empty when the role's color is not a hex). */
+export function ansiFg(theme: Theme, role: AnsiRole): string {
+  const rgb = parseHex(theme.color[role]);
+  return rgb ? `\u001b[38;2;${rgb[0]};${rgb[1]};${rgb[2]}m` : "";
+}
+
 function buildTheme(definition: ThemeDefinition): Theme {
   return {
     brand: { ...INFINITE_NEON_THEME.brand, ...definition.brand },
