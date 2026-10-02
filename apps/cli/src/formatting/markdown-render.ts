@@ -244,8 +244,11 @@ function styleLine(line: readonly Span[], opts: MarkdownRenderOptions, extra: { 
       }
       const open: string[] = [];
       const close: string[] = [];
-      // Bold stays an attribute on the body colour; a heading is r4's `b` (bold white).
-      if (span.bold && !extra.heading) {
+      // In body text, **bold** and a heading are r4's `b` (bold white). In a
+      // coloured note, a code span or a link, bold stays an attribute on that colour.
+      const body = !opts.role || opts.role === "text";
+      const strong = (span.bold && body && !span.code && !span.link) || extra.heading === true;
+      if (span.bold && !strong) {
         open.push(SGR.bold[0]);
         close.push(SGR.bold[1]);
       }
@@ -257,7 +260,7 @@ function styleLine(line: readonly Span[], opts: MarkdownRenderOptions, extra: { 
         open.push(SGR.strike[0]);
         close.push(SGR.strike[1]);
       }
-      const tokens: ThemeStyle | undefined = span.code ? "cyan" : span.link ? ["cyan", "u"] : extra.heading ? "b" : undefined;
+      const tokens: ThemeStyle | undefined = span.code ? "cyan" : span.link ? ["cyan", "u"] : strong ? "b" : undefined;
       if (tokens) {
         const span = ansiSpan(opts.theme, tokens);
         open.push(span.open);

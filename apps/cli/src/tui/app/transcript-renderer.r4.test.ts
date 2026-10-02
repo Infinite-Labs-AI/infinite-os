@@ -64,7 +64,8 @@ describe("a streamed answer never shows an open marker (eval M4)", () => {
     const state = { ...getTurnState(), streaming: "Try the **Cold brew carousel**" };
     const out = renderInfiniteTranscript({ state }, { columns: 80, theme, color: true });
     expect(stripAnsi(out)).toBe("∞ Try the Cold brew carousel");
-    expect(out).toContain("\u001b[1mCold brew carousel\u001b[22m");
+    // r4's b token (bold white) once the span closes (run-2 N3).
+    expect(out.split("\n").map(r4Segments).flat()).toContainEqual({ text: "Cold brew carousel", style: "b" });
   });
 
   it("a stopped turn keeps its partial answer without the marker", () => {

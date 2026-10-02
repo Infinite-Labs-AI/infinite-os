@@ -34,10 +34,19 @@ describe("renderMarkdown", () => {
     const colored = renderMarkdown(text, { width: 28, color: true, theme });
     expect(colored.map(stripAnsi)).toEqual(plain);
     expect(colored.every((l) => displayWidth(l) <= 28)).toBe(true);
-    expect(colored.join("")).toContain("\u001b[1m");
+    // Bold is r4's b token (bold white): an SGR that opens with 1.
+    expect(colored.join("")).toMatch(/\u001b\[1[;m]/u);
     expect(colored.join("")).toContain("\u001b[3m");
     expect(colored.join("")).toContain("\u001b[9m");
     expect(plain.join("\n")).not.toMatch(/[*`~]/);
+  });
+
+  it("**bold** in an answer is r4's b token (bold white), never bold in the default colour (run-2 N3)", () => {
+    const out = renderMarkdown("Spend is **up 12%** on the week.", { width: 60, color: true, theme: INFINITE_R4_THEME });
+    expect(r4Segments(out[0]!)).toEqual(seg(["Spend is ", ""], ["up 12%", "b"], [" on the week.", ""]));
+    // A muted note keeps its own colour: bold there stays an attribute on it.
+    const note = renderMarkdown("a **b** c", { width: 60, color: true, theme: INFINITE_R4_THEME, role: "muted" });
+    expect(r4Segments(note[0]!).some((part) => part.style === "b")).toBe(false);
   });
 
   it("renders a link as its text with ↗ and never prints the URL", () => {
