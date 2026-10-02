@@ -21,6 +21,7 @@ import type { GitHostAdapter, GitOps, PrSummary } from "../../src/wizard/contrac
 import type { CheckResult, CheckRunner, Installer, JobRegistry } from "../../src/wizard/contracts/jobs.js"
 import type { LaneReceipt, ReceiptLane, ReceiptsRequestFields, ReceiptsResponseFields } from "../../src/wizard/contracts/receipts.js"
 import type { TestResult, TestTool } from "../../src/wizard/contracts/test-engine.js"
+import { WIZARD_STEP_IDS as WIZARD_STEP_IDS_FOR_FAKES, WIZARD_STEP_META as WIZARD_STEP_META_FOR_FAKES } from "../../src/wizard/contracts/steps.js"
 import { createReportBuilder } from "../../src/wizard/report.js"
 
 export const RUN_ID = "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
@@ -722,4 +723,32 @@ export function fakeContext(
     appRoot: ".",
     now: () => clock.now()
   }
+}
+
+export type StepBehaviour = (ctx: WizardContext, deps: WizardDeps) => Promise<import("../../src/wizard/contracts/deps.js").StepOutcome>
+
+/** A step Record of fakes: each step records its run and returns ok unless a behaviour says otherwise. */
+export function fakeStepRecord(
+  behaviours: Partial<Record<import("../../src/wizard/contracts/steps.js").WizardStepId, StepBehaviour>>,
+  ran: string[] = [],
+  hashes: Partial<Record<import("../../src/wizard/contracts/steps.js").WizardStepId, string>> = {}
+): import("../../src/wizard/contracts/deps.js").WizardStepRecord {
+  const meta = WIZARD_STEP_META_FOR_FAKES
+  const entries = WIZARD_STEP_IDS_FOR_FAKES.map((id) => [
+    id,
+    {
+      id,
+      title: meta[id].title,
+      who: [...meta[id].who],
+      learn: meta[id].learn,
+      requiredCapabilities: [...meta[id].requiredCapabilities],
+      inputHash: () => hashes[id] ?? "h",
+      run: async (ctx: WizardContext, deps: WizardDeps) => {
+        ran.push(id)
+        const behaviour = behaviours[id]
+        return behaviour ? behaviour(ctx, deps) : { kind: "ok" as const, status: `${id} ok` }
+      }
+    }
+  ])
+  return Object.fromEntries(entries) as unknown as import("../../src/wizard/contracts/deps.js").WizardStepRecord
 }
