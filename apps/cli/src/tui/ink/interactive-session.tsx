@@ -299,6 +299,12 @@ export interface InkInteractiveSessionAppProps {
     decision: "approve" | "decline",
     fields?: Record<string, ApprovalFieldAnswerV1>
   ): Promise<unknown>;
+  /**
+   * The running turn's own short reason, said in the composer's note in place
+   * of the generic `working · 4s` (terminal-r4 `❯ Ask Infinite… (the pause
+   * finishes either way)`). Read on every render; shown only while a turn runs.
+   */
+  busyNote?: string | (() => string | undefined);
   /** The composer's placeholder. Default `Ask Infinite…` (terminal-r4). */
   promptPlaceholder?: string;
   requiresConfirmation?: (line: string) => string | undefined;
@@ -465,6 +471,7 @@ export function InkInteractiveSessionApp({
   onRememberInput,
   onSubmitLine,
   onConfirmAction,
+  busyNote,
   promptPlaceholder = COMPOSER_PLACEHOLDER,
   requiresConfirmation,
   requiresSelection,
@@ -728,8 +735,12 @@ export function InkInteractiveSessionApp({
   // The composer's note while a turn runs (terminal-r4 `❯ Ask Infinite… (note)`):
   // that it is working and for how long, then any line queued behind it. No
   // status line and no session id (r4 has neither).
+  // A turn that gives its own short reason says that instead of `working`.
+  const busyReason = transcriptBusy
+    ? (typeof busyNote === "function" ? busyNote() : busyNote)?.trim() || null
+    : null;
   const composerNote = [
-    busy ? formatBusyNote({ nowMs: clock, state: turnState, turnStartedAt: busyStartedAt }) : null,
+    busyReason ?? (busy ? formatBusyNote({ nowMs: clock, state: turnState, turnStartedAt: busyStartedAt }) : null),
     ...formatQueuedStatus(queuedLines)
   ].filter((part): part is string => Boolean(part)).join(" · ");
   // The head card's keys: its named OK key, `n`, and `?` (keymap.ts owns the rules).

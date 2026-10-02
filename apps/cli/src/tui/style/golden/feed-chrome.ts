@@ -1,22 +1,21 @@
 // R1's feed (chrome): what the entry point gives the session besides the turn —
-// the composer placeholder, the boot home inventory, and (when R1 wires them)
-// the top bar's workspace and connections and the busy composer note.
+// the top bar's workspace and connections, and the busy composer note.
 //
 // OWNED BY R1. R1 edits THIS file, not screen.ts, when it changes how the
 // session's chrome is fed, so lanes never collide in one file.
 //
 // `ENTRY_SESSION_PROPS` mirrors the props `index.ts` passes the interactive
-// session (its `promptPlaceholder` literal at the interactive entry). R1: export
-// those props (or a `SESSION_PROMPT_PLACEHOLDER`) from `index.ts` and import
-// them in golden.test.ts in place of this copy, so the composer goldens measure
-// what the entry point passes and not the harness's own string.
+// session. Since the r4 restyle the entry point passes no placeholder: the
+// session's own `COMPOSER_PLACEHOLDER` (`Ask Infinite…`) is what users see, so
+// the composer goldens measure the session's default and not a harness string.
 import type { HomeInventoryData, InkInteractiveSessionAppProps } from "../../ink/interactive-session.js";
+import type { TopBarData } from "../../ink/top-bar.js";
 import type { R4ScreenFixture } from "./fixtures.js";
 
 /** The props the entry point gives every interactive session (injected into `renderR4Screen`). */
 export type EntrySessionProps = Pick<InkInteractiveSessionAppProps, "promptPlaceholder">;
 
-export const ENTRY_SESSION_PROPS: EntrySessionProps = { promptPlaceholder: "Type a message, /help, or /exit." };
+export const ENTRY_SESSION_PROPS: EntrySessionProps = {};
 
 /** The entry point's home inventory builder (`index.ts` `homeInventoryData`). */
 export type HomeInventoryBuilder = (workspace: string | undefined, connections: HomeInventoryData["connections"]) => HomeInventoryData;
@@ -29,19 +28,30 @@ export function inventoryConnections(fixture: R4ScreenFixture): HomeInventoryDat
   }));
 }
 
+/** The fixture's workspace and connections as the top bar takes them (D1): the session runs through the app. */
+export function topBarData(fixture: R4ScreenFixture): TopBarData {
+  return {
+    workspace: fixture.session.workspace,
+    sources: fixture.session.connections.map((connection) => ({ label: connection.name, state: connection.status })),
+    throughApp: true
+  };
+}
+
 /**
- * The chrome props for one screen: the entry point's props, plus the home
- * inventory at boot. Today the top bar's workspace and connections reach the
- * session ONLY through the boot inventory, and the busy note (`turn.busy`) not
- * at all: R1 adds them here.
+ * The chrome props for one screen: the entry point's props, the top bar's
+ * workspace and connections, and the running turn's busy note (`turn.busy`).
+ * No home inventory: the r4 screens are a returning user's, and only the
+ * first-ever run prints the inventory (D4). The builder stays in the signature
+ * because screen.ts (no lane edits it) injects it.
  */
 export function chromeProps(
   fixture: R4ScreenFixture,
   entry: EntrySessionProps,
-  homeInventory: HomeInventoryBuilder
+  _homeInventory: HomeInventoryBuilder
 ): Partial<InkInteractiveSessionAppProps> {
   return {
     ...entry,
-    ...(fixture.turn ? {} : { homeInventory: homeInventory(fixture.session.workspace, inventoryConnections(fixture)) })
+    topBar: topBarData(fixture),
+    ...(fixture.turn?.busy ? { busyNote: fixture.turn.busy } : {})
   };
 }

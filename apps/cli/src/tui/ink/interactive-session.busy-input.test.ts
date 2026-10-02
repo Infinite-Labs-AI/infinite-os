@@ -18,7 +18,7 @@ import {
   runInkInteractiveSession,
   type InkInteractiveLineResult
 } from "./interactive-session.js";
-import { getTurnState } from "../app/turn-store.js";
+import { getTurnState, patchTurnState, resetTurnState } from "../app/turn-store.js";
 import { formatBusyNote, formatWholeElapsed } from "./status-indicator.js";
 import { inkTranscriptRowCount, renderInkTranscriptToString } from "./transcript-app.js";
 
@@ -243,6 +243,31 @@ describe("Ink busy input handling", () => {
     // and esc stop only in the key bar.
     expect(source).toContain("...formatQueuedStatus(queuedLines)");
     expect(source).toContain("composerPlaceholderText(promptPlaceholder, composerNote)");
+  });
+
+  it("puts the running turn's own short reason in the composer note in place of 'working' (r4 busy)", () => {
+    const render = (busyNote?: string | (() => string | undefined)) =>
+      stripAnsi(renderInkInteractiveSessionToString({
+        columns: 100,
+        onSubmitLine: async () => ({ messages: [] }),
+        ...(busyNote === undefined ? {} : { busyNote })
+      }));
+    try {
+      resetTurnState();
+      // Idle: a note given but no turn running draws no note.
+      expect(lastLineWith(render("the pause finishes either way"), "Ask Infinite…")).toBe("❯ Ask Infinite…");
+      // A running step (the turn store's active tool) with the turn's reason.
+      patchTurnState((state) => ({ ...state, tools: [{ id: "t1", name: "Pause", startedAt: Date.now() - 4_000 }] }));
+      expect(lastLineWith(render("the pause finishes either way"), "Ask Infinite…"))
+        .toBe("❯ Ask Infinite… (the pause finishes either way)");
+      // Read on every render, like topBar.
+      expect(lastLineWith(render(() => "the creatives finish either way"), "Ask Infinite…"))
+        .toBe("❯ Ask Infinite… (the creatives finish either way)");
+      // A blank reason is no reason: the composer keeps its plain placeholder.
+      expect(lastLineWith(render(() => "  "), "Ask Infinite…")).toBe("❯ Ask Infinite…");
+    } finally {
+      resetTurnState();
+    }
   });
 
   it("wraps composer cursor layout at the input width", () => {
