@@ -35,7 +35,7 @@ import {
 import { hookFixItem, runFixRound } from "../../review/fix.js"
 import { buildPrBody } from "../../review/post.js"
 import { parseLedger, REVIEW_LEDGER_PATH } from "../../review/ledger.js"
-import { applyRehearsalToJobs, recordRehearsalCells, rehearsalLines, rehearse, type RehearsalOutcome } from "../../review/rehearse.js"
+import { applyRehearsalToJobs, recordGa4KeyEventCells, recordRehearsalCells, rehearsalLines, rehearse, type RehearsalOutcome } from "../../review/rehearse.js"
 import type { Scanner } from "../../review/scan.js"
 import { ensurePr, failed, pushBranch, stageAndCommit, type CommitResult } from "../../review/ship.js"
 
@@ -80,6 +80,8 @@ export async function recordClickTests(
   if (response === null) return
   const done: Awaited<ReturnType<WizardDeps["bridge"]["markGa4KeyEvents"]>> = response
   const marked = [...done.created, ...done.alreadyExisted]
+  // The report's "In this pull request" column says what Infinite marked (its own response, this run).
+  recordGa4KeyEventCells(ctx, marked.length, input.runId, input.step === "review" ? "new_names" : "all")
   if (marked.length > 0) sub(ctx, input.step, `GA4 key events: marked for ${marked.length} conversion${marked.length === 1 ? "" : "s"} (click test passed)`, "ok")
   for (const refusal of done.refused) sub(ctx, input.step, `GA4 key event not marked for ${refusal.name}: ${refusal.reason.replace(/_/g, " ")}`, "warn")
 }
@@ -329,7 +331,7 @@ async function rehearsalRun(ctx: WizardContext, deps: WizardDeps): Promise<StepO
     ghReady: prepared.ghReady
   })
   announceRehearsal(ctx, "rehearsal", outcome, runId)
-  recordRehearsalCells(ctx, outcome, { head, runId })
+  recordRehearsalCells(ctx, outcome, { head, runId, keys: facts.keys })
   applyRehearsalToJobs(ctx, deps, outcome, runId)
 
   // The names the rehearsal's click test proved (append-only union), after the tests (§3z.12 order).

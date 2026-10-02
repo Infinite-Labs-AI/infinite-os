@@ -27,7 +27,10 @@ import type { WizardStepId } from "../wizard/contracts/steps.js"
 import { GhError } from "../github/gh.js"
 import { isGitHubAdapter } from "../hosts/github.js"
 import { isUnsupported } from "../hosts/other.js"
+import { checksPassingCell } from "../wizard/report.js"
+import type { TagKeys } from "../wizard/contracts/bridge.js"
 import type { RunFacts } from "./context.js"
+import { derivedInPrCells, ga4KeyEventCells, preMergeCells } from "./in-pr-cells.js"
 import { bridgeErrorCode, bridgeStopCode, sub } from "./context.js"
 
 export type RehearsalUndetermined =
@@ -53,7 +56,14 @@ export interface RehearsalOutcome {
   ga4ClickTested: string[]
   /** Facts read off the rehearsal (not grades): PostHog's beacons went same-origin (the /ingest proxy); CSP violations
    *  that blocked an analytics host, and the other (unrelated) violations. */
-  facts: { posthogSameOrigin: boolean | null; cspViolations: number | null; cspOtherViolations?: number }
+  facts: {
+    posthogSameOrigin: boolean | null
+    cspViolations: number | null
+    cspOtherViolations?: number
+    /** GA4 page views on one page load (the most over the loads; a navigation's own page view is not counted): the
+     *  rehearsal's beacons, recorded and cancelled. Null when no GA4 beacon was seen. */
+    ga4PageViewsPerLoad?: number | null
+  }
   /** The tools the connections expect (from the keys) and the tools the census found in the PR's tree. A cell is
    *  `pass` only when every one of these graded pass; one undetermined tool makes it undetermined. */
   expectedTools?: TestTool[]
@@ -297,12 +307,21 @@ export async function rehearse(
     clickVerdicts: clicks.verdicts,
     facts: {
       posthogSameOrigin: posthogEvents.length === 0 ? null : posthogEvents.every((event) => event.sameOrigin),
+      ga4PageViewsPerLoad: ga4PageViewsPerLoad(rehearsal.result),
       ...cspCounts(rehearsal.result.csp.violations, expect)
     },
     spaExercised: secondPath !== null,
     expectedTools: expectedToolsOf(expect),
     installedTools: [...(gradeCtx.installedTools ?? [])]
   }
+}
+
+/** The most GA4 page views one page load sent (the same count the "Live site today" column shows); null = no GA4 beacon. */
+export function ga4PageViewsPerLoad(result: TestResult): number | null {
+  if (result.ga4.events.length === 0) return null
+  const perLoad = new Map<string, number>()
+  for (const event of result.ga4.events) if (event.en === "page_view" && !event.afterNav) perLoad.set(event.loadLabel, (perLoad.get(event.loadLabel) ?? 0) + 1)
+  return Math.max(0, ...perLoad.values())
 }
 
 /** The tools a `TestExpect` names (the connected ones). */
@@ -481,16 +500,38 @@ export function rehearsalCells(outcome: RehearsalOutcome, input: { head: string;
     return makeCell(
       result.state,
       result.state,
-      result.state === "pass" ? `${TOOL_LABEL[tool]}: fires once, right ID` : `${TOOL_LABEL[tool]}: ${code.replace(/_/g, " ") || result.state}`,
+      // The row's label names the tool ("Meta pixel"), so the cell does not say it again.
+      result.state === "pass" ? "fires once, right ID (nothing sent)" : code.replace(/_/g, " ") || result.state,
       at,
       runId,
       reason,
       result.checkId
     )
   }
-  cells.ga4_page_views_per_visit = row("ga4")
-  cells.posthog_route = row("posthog")
+  // The rows say what the row's label asks, in the words of the other two columns ("2" today, "1" in this pull
+  // request), from the rehearsal's own beacons. The grader's verdict is the state; a problem it found is named.
+  const words = (tool: TestTool) => reasonCode(grades[tool]).replace(/_/g, " ")
+  const measured = (tool: TestTool) => grades[tool]?.state === "pass" || grades[tool]?.state === "problem"
+  const views = outcome.facts.ga4PageViewsPerLoad
+  cells.ga4_page_views_per_visit =
+    measured("ga4") && typeof views === "number"
+      ? makeCell(grades.ga4!.state, String(views), `${views}${grades.ga4!.state === "problem" && views === 1 && words("ga4") ? ` · ${words("ga4")}` : ""}`, at, runId, undefined, grades.ga4!.checkId)
+      : row("ga4")
+  const sameOrigin = outcome.facts.posthogSameOrigin
+  cells.posthog_route =
+    measured("posthog") && sameOrigin === true
+      ? makeCell(grades.posthog!.state, "ingest", `through /ingest${grades.posthog!.state === "problem" && words("posthog") ? ` · ${words("posthog")}` : ""}`, at, runId, undefined, "posthog_via_proxy_once")
+      : measured("posthog") && sameOrigin === false
+        ? makeCell("problem", "direct", "direct to PostHog (ad blockers drop it)", at, runId, undefined, "posthog_via_proxy_once")
+        : row("posthog")
   cells.meta_pixel = row("meta")
+  // "Live test per tool": before the merge the live test is the rehearsal (every beacon recorded and cancelled).
+  const tested = consideredTools(outcome, grades).filter((tool) => grades[tool] && grades[tool]!.state !== "info")
+  if (tested.length > 0) {
+    const passing = tested.filter((tool) => grades[tool]!.state === "pass").length
+    const state: CellState = tested.some((tool) => grades[tool]!.state === "problem") ? "problem" : passing === tested.length ? "pass" : "undetermined"
+    cells.live_test_per_tool = makeCell(state, `${passing}/${tested.length}`, `rehearsal: ${passing} of ${tested.length} tools fire once, right ID (nothing sent)`, at, runId)
+  }
   return { cells, finishLine }
 }
 
@@ -528,8 +569,12 @@ export function rehearsalCheckResults(outcome: RehearsalOutcome, input: { at: st
   return { shared, clicks }
 }
 
-/** Merges the rehearsal's cells into the run state's `in_pr` column for `head`. */
-export function recordRehearsalCells(ctx: WizardContext, outcome: RehearsalOutcome, input: { head: string; runId: string }): void {
+/**
+ * Merges the rehearsal's cells into the run state's `in_pr` column for `head`, with the column's other pre-merge
+ * cells (`in-pr-cells.ts`: the jobs' static checks, the plan's answers, what Infinite holds) and the cells derived
+ * from all of them (`checks_passing` over the 14 checks). `keys` is this step's read of the connections.
+ */
+export function recordRehearsalCells(ctx: WizardContext, outcome: RehearsalOutcome, input: { head: string; runId: string; keys?: TagKeys | null }): void {
   const at = ctx.now().toISOString()
   const fresh = rehearsalCells(outcome, { ...input, at })
   ctx.state.update((state) => {
@@ -541,11 +586,39 @@ export function recordRehearsalCells(ctx: WizardContext, outcome: RehearsalOutco
       previous && previous.meta.sha === input.head
         ? previous
         : { meta: { measuredAt: at, sha: input.head }, cells: keepHeadIndependent(previous?.cells), finishLine: keepHeadIndependent(previous?.finishLine) }
-    state.report.in_pr = {
-      meta: { measuredAt: at, sha: input.head },
-      cells: { ...base.cells, ...fresh.cells },
-      finishLine: { ...base.finishLine, ...fresh.finishLine }
-    }
+    // The cells this call recomputes are dropped first, so a row that lost its evidence goes back to "—".
+    const cells = { ...base.cells }
+    const finishLine = { ...base.finishLine }
+    for (const id of RECOMPUTED_ROWS) delete cells[id]
+    for (const id of RECOMPUTED_FINISH_LINE) delete finishLine[id]
+    const own = preMergeCells(state, { at, runId: input.runId, ...(input.keys !== undefined ? { keys: input.keys } : {}) })
+    const column = { cells: { ...cells, ...own.cells, ...fresh.cells }, finishLine: { ...finishLine, ...own.finishLine, ...fresh.finishLine } }
+    const derived = derivedInPrCells(column, state, { at, runId: input.runId })
+    state.report.in_pr = { meta: { measuredAt: at, sha: input.head }, cells: { ...column.cells, ...derived.cells }, finishLine: column.finishLine }
+  })
+}
+
+/** Rows and finish-line cells `recordRehearsalCells` rebuilds from the run state on every call. */
+const RECOMPUTED_ROWS: readonly ReportRowId[] = ["checks_passing", "preview_share", "server_conversions", "consent_setting", "live_test_per_tool"]
+const RECOMPUTED_FINISH_LINE: readonly FinishLineId[] = ["conversions_server_side", "identity_joined", "consent_recorded", "keeps_being_checked"]
+
+/**
+ * The GA4 key events Infinite marked (`marked` = created + already existing in the `ga4-key-events` response) go
+ * into the `in_pr` column the rehearsal recorded; `checks_passing` is counted again. No column yet = nothing written.
+ */
+export function recordGa4KeyEventCells(ctx: WizardContext, marked: number, runId: string, mode: "all" | "new_names"): void {
+  if (marked <= 0) return
+  const at = ctx.now().toISOString()
+  ctx.state.update((state) => {
+    const column = state.report.in_pr
+    if (!column) return
+    const before = column.cells.ga4_key_events
+    // The rehearsal step marks every click-tested name (its count is the whole count, on a re-run too); the review
+    // step marks only names no earlier rehearsal of this run proved, so its count adds to the one recorded.
+    const already = mode === "new_names" && before && before.provenance.runId === runId && typeof before.value === "number" ? before.value : 0
+    const added = ga4KeyEventCells(marked, already, { at, runId })
+    const finishLine = { ...column.finishLine, ...added.finishLine }
+    state.report.in_pr = { meta: column.meta, cells: { ...column.cells, ...added.cells, checks_passing: checksPassingCell(finishLine, runId, column.meta.measuredAt ?? at) }, finishLine }
   })
 }
 

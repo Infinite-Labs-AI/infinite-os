@@ -241,6 +241,18 @@ describe("step `rehearsal` (§3d.1 step 8)", { timeout: 60_000 }, () => {
     expect(state.report.in_pr!.meta.sha).toBe(head)
     expect(state.report.in_pr!.finishLine.each_tool_once).toMatchObject({ state: "pass", provenance: { source: "desktop_test", runId: RUN_ID } })
     expect(state.report.in_pr!.finishLine.previews_silent!.state).toBe("pass")
+    // Final verify F12: the column a reviewer reads before merging is filled from this step's own evidence: the
+    // rehearsal's beacons, the consent mode read back from Infinite, the key events Infinite marked, and the
+    // count over all 14 checks (it was "—" for "Checks passing" and five other rows).
+    const inPr = state.report.in_pr!.cells
+    expect(inPr.checks_passing).toMatchObject({ provenance: { source: "wizard_check", runId: RUN_ID } })
+    expect(inPr.checks_passing!.display).toMatch(/^\d+ pass · \d+ problems?( · \d+ unknown)? · \d+ not testable of 14$/)
+    expect(inPr.ga4_page_views_per_visit).toMatchObject({ display: "1", provenance: { source: "desktop_test" } })
+    expect(inPr.posthog_route).toMatchObject({ display: "through /ingest" })
+    expect(inPr.consent_setting).toMatchObject({ state: "pass", display: '"collect by default" recorded', provenance: { source: "cloud_read" } })
+    expect(inPr.ga4_key_events).toMatchObject({ state: "info", value: 1, display: "1 marked as key event (click test passed)", provenance: { source: "cloud_read" } })
+    expect(inPr.live_test_per_tool!.display).toMatch(/^rehearsal: \d of \d tools fire once, right ID \(nothing sent\)$/)
+    expect(state.report.in_pr!.finishLine.ga4_key_events_received).toMatchObject({ state: "info" })
   })
 
   it("without the npm job's recorded edits, package.json is not committed, so the import check fails (negative)", async () => {

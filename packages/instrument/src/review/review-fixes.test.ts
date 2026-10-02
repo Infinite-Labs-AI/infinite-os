@@ -82,7 +82,7 @@ describe("P0-1: the rehearsal's in_pr cells never turn a problem or an unknown i
     expect(finishLine.ids_match_connections!.state).toBe("problem")
     expect(finishLine.survives_ad_blockers).toMatchObject({ state: "undetermined", reason: "held_by_consent" })
     expect(cells.posthog_route).toMatchObject({ state: "undetermined", reason: "held_by_consent" })
-    expect(cells.meta_pixel).toMatchObject({ state: "problem", display: "Meta: wrong id" })
+    expect(cells.meta_pixel).toMatchObject({ state: "problem", display: "wrong id" })
   })
 
   it("all connected tools pass → pass; a tool neither connected nor installed that sent nothing is left out", () => {

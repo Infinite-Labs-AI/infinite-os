@@ -780,7 +780,7 @@ async function reviewRun(ctx: WizardContext, deps: WizardDeps): Promise<StepOutc
             ghReady: prepared.ghReady
           })
           announceRehearsal(ctx, "review", outcome, prepared.runId)
-          recordRehearsalCells(ctx, outcome, { head: fixSha, runId: prepared.runId })
+          recordRehearsalCells(ctx, outcome, { head: fixSha, runId: prepared.runId, keys: prepared.facts.keys })
           applyRehearsalToJobs(ctx, deps, outcome, prepared.runId)
           sub(ctx, "review", outcome.state === "graded" ? "✓ Rehearsal re-run on the new commit" : "Rehearsal on the new commit: undetermined", outcome.state === "graded" ? "ok" : "warn")
           // Only conversions not already sent this run are PATCHed (append-only), and only those get GA4 key events.
