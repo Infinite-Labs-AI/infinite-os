@@ -208,11 +208,18 @@ describe("infiniteTrack", () => {
   })
 })
 
+/** A DOM-shaped anchor (`.href` is absolute, as the DOM reports it). */
+function anchorSource(href: string, target?: string): string {
+  return `({ tagName: 'A', href: new URL(${JSON.stringify(href)}, location.href).href, getAttribute: function (n) { return n === 'target' ? ${JSON.stringify(target ?? null)} : null } })`
+}
+const BUTTON = "({ tagName: 'BUTTON', getAttribute: function () { return null } })"
+
 describe("infiniteTrackThenNavigate", () => {
-  it("with no tags present, nothing throws and the link still works (nothing is held)", async () => {
+  it("with no tags present, nothing throws and an anchor's own navigation proceeds (nothing is held)", async () => {
     const p = page()
     const event = p.click()
     p.vm.window.__event = event
+    p.call(`window.__event.currentTarget = ${anchorSource("/signup")}`)
     p.call("infiniteTrackThenNavigate(window.__event, '/signup', 'cta_clicked')")
     expect(event.defaultPrevented).toBe(false) // the browser's own navigation proceeds at once
     expect(p.vm.assigned).toEqual([])
@@ -221,6 +228,61 @@ describe("infiniteTrackThenNavigate", () => {
     expect(p.vm.assigned).toEqual(["https://acme.com/signup"])
     await p.vm.advance(2000)
     expect(p.vm.assigned).toHaveLength(1)
+  })
+
+  // P1-1: a <button> CTA (a string target with a click) has no navigation of its own. Every case where
+  // GA4 did not start must still take the visitor there, at once.
+  it.each([
+    ["no tags at all", {} as PageOptions],
+    ["an ADOPTED gtag (no lane marker)", { ga4: "adopted", callback: "never" } as PageOptions],
+    ["consent no (GPC is not enough; an explicit denial)", { ga4: "managed", callback: "never", localStorage: { infinite_analytics_consent: "denied" } } as PageOptions],
+    ["required mode before a grant", { ga4: "managed", callback: "never", consentMode: "required" } as PageOptions]
+  ])("a button click goes there at once when GA4 did not start: %s", async (_label, options) => {
+    const p = page(options)
+    const event = p.click()
+    p.vm.window.__event = event
+    p.call(`window.__event.currentTarget = ${BUTTON}`)
+    p.call("infiniteTrackThenNavigate(window.__event, '/signup', 'cta_clicked')")
+    expect(p.vm.assigned).toEqual(["https://acme.com/signup"])
+    expect(event.defaultPrevented).toBe(true) // a submit button must not race the navigation
+    await p.vm.advance(2000)
+    expect(p.vm.assigned).toHaveLength(1)
+  })
+
+  it("a button click with a bad event name still navigates (nothing is sent)", () => {
+    const p = page({ ga4: "managed", posthog: true })
+    p.vm.window.__event = p.click()
+    p.call("infiniteTrackThenNavigate(window.__event, '/signup', 'not a name')")
+    expect(p.vm.assigned).toEqual(["https://acme.com/signup"])
+    expect(p.gtagCalls).toEqual([])
+    expect(p.posthogCalls).toEqual([])
+  })
+
+  it("negative: an anchor click with the SAME href is the browser's own navigation, so the helper does not navigate too", () => {
+    const p = page({ ga4: "adopted" })
+    const event = p.click()
+    p.vm.window.__event = event
+    p.call(`window.__event.currentTarget = ${anchorSource("https://acme.com/signup")}`)
+    p.call("infiniteTrackThenNavigate(window.__event, '/signup', 'cta_clicked')")
+    expect(p.vm.assigned).toEqual([])
+    expect(event.defaultPrevented).toBe(false)
+  })
+
+  it("an anchor pointing somewhere ELSE is not the browser's navigation: the helper goes to the destination", () => {
+    const p = page()
+    const event = p.click()
+    p.vm.window.__event = event
+    p.call(`window.__event.currentTarget = ${anchorSource("/pricing")}`)
+    p.call("infiniteTrackThenNavigate(window.__event, '/signup', 'cta_clicked')")
+    expect(event.defaultPrevented).toBe(true)
+    expect(p.vm.assigned).toEqual(["https://acme.com/signup"])
+  })
+
+  it("a button click the site already prevented still navigates (the caller asked the helper to go)", () => {
+    const p = page({ ga4: "adopted" })
+    p.vm.window.__event = p.click({ defaultPrevented: true })
+    p.call("infiniteTrackThenNavigate(window.__event, '/signup', 'cta_clicked')")
+    expect(p.vm.assigned).toEqual(["https://acme.com/signup"])
   })
 
   it("holds a same-tab click until GA4 has the hit, and navigates exactly once", async () => {
@@ -263,6 +325,7 @@ describe("infiniteTrackThenNavigate", () => {
     const p = page({ ga4: "adopted", callback: "never" })
     const event = p.click()
     p.vm.window.__event = event
+    p.call(`window.__event.currentTarget = ${anchorSource("/download")}`)
     p.call("infiniteTrackThenNavigate(window.__event, '/download', 'download_clicked')")
     expect(event.defaultPrevented).toBe(false)
     // The event is still sent, best effort, with no callback to wait on.
@@ -276,45 +339,86 @@ describe("infiniteTrackThenNavigate", () => {
     p.vm.window.__infiniteGa4Lane = { id: "G-ADOPTED" } // what the old heuristic effectively assumed
     const event = p.click()
     p.vm.window.__event = event
+    p.call(`window.__event.currentTarget = ${anchorSource("/download")}`)
     p.call("infiniteTrackThenNavigate(window.__event, '/download', 'download_clicked')")
     expect(event.defaultPrevented).toBe(true)
     await p.vm.advance(999)
     expect(p.vm.assigned).toEqual([])
   })
 
-  it("leaves new-tab and modified clicks to the browser", () => {
+  it("leaves new-tab and modified ANCHOR clicks to the browser", () => {
     for (const overrides of [{ metaKey: true }, { ctrlKey: true }, { shiftKey: true }, { altKey: true }, { button: 1 }]) {
       const p = page({ ga4: "managed", callback: "never" })
       const event = p.click(overrides)
       p.vm.window.__event = event
+      p.call(`window.__event.currentTarget = ${anchorSource("/download")}`)
       p.call("infiniteTrackThenNavigate(window.__event, '/download', 'download_clicked')")
       expect(event.defaultPrevented).toBe(false)
       expect((p.gtagCalls[0]![2] as Record<string, unknown>).event_callback).toBeUndefined()
+      expect(p.vm.assigned).toEqual([])
     }
     const p = page({ ga4: "managed", callback: "never" })
     const event = p.click()
     p.vm.window.__event = event
-    p.call(
-      "infiniteTrackThenNavigate(window.__event, { href: 'https://acme.com/x', getAttribute: function (n) { return n === 'target' ? '_blank' : null } }, 'cta')"
-    )
+    p.call(`window.__event.currentTarget = ${anchorSource("https://acme.com/x", "_blank")}`)
+    p.call(`infiniteTrackThenNavigate(window.__event, window.__event.currentTarget, 'cta')`)
     expect(event.defaultPrevented).toBe(false)
+    expect(p.vm.opened).toEqual([])
+  })
+
+  it("negative: a modified click on a BUTTON is still the helper's navigation (a button has no new-tab gesture)", () => {
+    const p = page({ ga4: "managed", callback: "never" })
+    p.vm.window.__event = p.click({ metaKey: true })
+    p.call("infiniteTrackThenNavigate(window.__event, '/download', 'download_clicked')")
+    expect((p.gtagCalls[0]![2] as Record<string, unknown>).event_callback).toBeTypeOf("function")
+  })
+
+  it("a delegated listener that passes the anchor the click landed in leaves that anchor to the browser", () => {
+    const p = page()
+    const event = p.click()
+    p.vm.window.__event = event
+    p.call("window.__span = { tagName: 'SPAN' }")
+    p.call(`window.__anchor = ${anchorSource("/download")}; window.__anchor.contains = function (node) { return node === window.__span }`)
+    p.call("window.__event.currentTarget = { nodeType: 9 }; window.__event.target = window.__span")
+    p.call("infiniteTrackThenNavigate(window.__event, window.__anchor, 'download_clicked')")
+    expect(event.defaultPrevented).toBe(false)
+    expect(p.vm.assigned).toEqual([])
+    // Negative: the same anchor, but the click landed outside it (a button elsewhere): the helper goes.
+    const other = p.click()
+    p.vm.window.__event = other
+    p.call(`window.__event.currentTarget = { nodeType: 9 }; window.__event.target = ${BUTTON}`)
+    p.call("infiniteTrackThenNavigate(window.__event, window.__anchor, 'download_clicked')")
+    expect(p.vm.assigned).toEqual(["https://acme.com/download"])
+  })
+
+  it("a target=_blank destination the browser will not open itself opens in a new tab, at once", () => {
+    const p = page({ ga4: "managed", callback: "never" })
+    const event = p.click()
+    p.vm.window.__event = event
+    p.call(`window.__event.currentTarget = ${BUTTON}`)
+    p.call(`infiniteTrackThenNavigate(window.__event, ${anchorSource("https://acme.com/x", "_blank")}, 'cta')`)
+    expect(p.vm.opened).toEqual(["_blank https://acme.com/x"])
+    expect(p.vm.assigned).toEqual([])
   })
 
   it("a denied consent hook captures nothing and never holds the click", async () => {
     const p = page({ ga4: "managed", posthog: true, callback: "never", localStorage: { infinite_analytics_consent: "denied" } })
     const event = p.click()
     p.vm.window.__event = event
+    p.call(`window.__event.currentTarget = ${anchorSource("/download")}`)
     p.call("infiniteTrackThenNavigate(window.__event, '/download', 'download_clicked')")
     expect(event.defaultPrevented).toBe(false)
     expect(p.gtagCalls).toEqual([])
     expect(p.posthogCalls).toEqual([])
   })
 
-  it("leaves an already-prevented click alone, and refuses a javascript: destination", () => {
+  it("leaves an already-prevented ANCHOR click alone (a router took it), and refuses a javascript: destination", () => {
     const p = page({ ga4: "managed", callback: "once" })
     p.vm.window.__event = p.click({ defaultPrevented: true })
-    p.call("infiniteTrackThenNavigate(window.__event, '/download', 'download_clicked')")
+    p.call(`infiniteTrackThenNavigate(window.__event, ${anchorSource("/download")}, 'download_clicked')`)
     p.call("infiniteTrackThenNavigate(null, 'javascript:alert(1)', 'download_clicked')")
+    p.vm.window.__event = p.click()
+    p.call("infiniteTrackThenNavigate(window.__event, 'javascript:alert(1)', 'download_clicked')")
     expect(p.gtagCalls).toEqual([])
     expect(p.vm.assigned).toEqual([])
   })

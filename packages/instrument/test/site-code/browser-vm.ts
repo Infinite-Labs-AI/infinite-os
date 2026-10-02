@@ -149,6 +149,8 @@ export interface BrowserVm {
   loaded: string[]
   scriptErrors: Error[]
   assigned: string[]
+  /** Every `window.open(url, target)` call, as `"<target> <url>"`. */
+  opened: string[]
   fetches: FetchCall[]
   beacons: Array<{ url: string; body: unknown }>
   cookies: CookieJar
@@ -186,6 +188,7 @@ export function createBrowserVm(options: BrowserVmOptions = {}): BrowserVm {
   const loaded: string[] = []
   const scriptErrors: Error[] = []
   const assigned: string[] = []
+  const opened: string[] = []
   const fetches: FetchCall[] = []
   const beacons: Array<{ url: string; body: unknown }> = []
   const localValues = new Map(Object.entries(options.localStorage ?? {}))
@@ -326,6 +329,10 @@ export function createBrowserVm(options: BrowserVmOptions = {}): BrowserVm {
     },
     addEventListener: addListener,
     removeEventListener() {},
+    open: (target: string, name?: string) => {
+      opened.push(`${String(name ?? "")} ${String(target)}`)
+      return null
+    },
     dispatchEvent(event: { type: string }) {
       for (const listener of listeners.get(event.type) ?? []) listener(event)
       return true
@@ -354,6 +361,7 @@ export function createBrowserVm(options: BrowserVmOptions = {}): BrowserVm {
     loaded,
     scriptErrors,
     assigned,
+    opened,
     fetches,
     beacons,
     cookies,

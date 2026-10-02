@@ -245,12 +245,30 @@ describe("the Next module's typed wrappers", () => {
     expect(api.infiniteReset!()).toBe(false)
     await expect(api.infiniteMetaMirror!("Lead", "id-1")).resolves.toBeUndefined()
     expect(plain(api.infiniteCampaign!())).toEqual({ campaignProvenance: "none", browserContext: "unknown" })
-    const event = { button: 0, defaultPrevented: false, preventDefault() { this.defaultPrevented = true } }
-    api.infiniteTrackThenNavigate!(event, "/signup", "signup_clicked")
-    expect(event.defaultPrevented).toBe(false) // the browser's own navigation
+    // An anchor click to the same place is the browser's own navigation: left alone.
+    const anchorClick = {
+      button: 0,
+      defaultPrevented: false,
+      currentTarget: { tagName: "A", href: "https://acme.com/signup" },
+      preventDefault() { this.defaultPrevented = true }
+    }
+    api.infiniteTrackThenNavigate!(anchorClick, "/signup", "signup_clicked")
+    expect(anchorClick.defaultPrevented).toBe(false)
     expect(vm.assigned).toEqual([])
+    // P1-1: a <button> click before hydration has no navigation of its own: the wrapper goes.
+    const buttonClick = {
+      button: 0,
+      defaultPrevented: false,
+      currentTarget: { tagName: "BUTTON" },
+      preventDefault() { this.defaultPrevented = true }
+    }
+    api.infiniteTrackThenNavigate!(buttonClick, "/signup", "signup_clicked")
+    expect(buttonClick.defaultPrevented).toBe(true)
+    expect(vm.assigned).toEqual(["https://acme.com/signup"])
     api.infiniteTrackThenNavigate!(null, "/signup", "signup_clicked")
-    expect(vm.assigned).toEqual(["/signup"])
+    expect(vm.assigned).toEqual(["https://acme.com/signup", "https://acme.com/signup"])
+    api.infiniteTrackThenNavigate!(null, "javascript:alert(1)", "signup_clicked")
+    expect(vm.assigned).toHaveLength(2)
     // Hydrated: the useEffect installs the bootstrap, and the wrappers reach the real helpers.
     api.installInfiniteInstrumentation!()
     expect(typeof vm.window.infiniteTrack).toBe("function")
