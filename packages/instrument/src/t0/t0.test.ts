@@ -30,7 +30,11 @@ import {
   sensitivePosthogSnippet,
   snippetBody
 } from "../../test/wizard/t0-fixtures.js"
+import { buildAnalyticsModuleSource } from "../frameworks/managed-files.js"
+import { getProviderAdapter } from "../providers/index.js"
+import type { InstallPlan } from "../types.js"
 import type { CheckResult, T0Scenario } from "../wizard/contracts/jobs.js"
+import { decodeNextBootstrap } from "./next-bootstrap.js"
 import type { T0Session } from "./protocol.js"
 import { runT0Sessions } from "./run.js"
 import { defaultDenyReads, sandboxedSpawn } from "./sandbox.js"
@@ -419,6 +423,21 @@ describe("click_test (jobs 10, 11: static HTML / Vite markup only)", () => {
     const click = [{ selector: "#nope", label: "sign_up", expect: { ga4: ["sign_up"] } }]
     only(await t0({ id: "click_test", params: { productionHost: FAKE.host, source: page(""), clicks: click } }), "problem")
     only(await t0({ id: "click_test", params: { productionHost: FAKE.host, framework: "vite-react", source: page(""), clicks: click } }), "undetermined")
+  })
+})
+
+describe("T0 runs the Next managed module's decoded bootstrapSource (as its useEffect would)", () => {
+  it("the decoded bytes start every lane on production; unguarded today, so previews fire too (negative)", async () => {
+    const artifacts = fakeArtifacts()
+    const instructions = (["ga4", "posthog", "meta", "infinite"] as const).flatMap(
+      (provider) => getProviderAdapter(provider).plan("next-app-router", artifacts[provider], { artifacts }).instructions
+    )
+    const decoded = decodeNextBootstrap(buildAnalyticsModuleSource({ instructions } as unknown as InstallPlan))
+    if (!decoded.ok) throw new Error(decoded.reason)
+    const source = { html: "<!doctype html><html><head></head><body></body></html>", scripts: [{ code: decoded.source, label: "bootstrapSource" }] }
+    only(await t0({ id: "one_runtime_per_page", params: { productionHost: FAKE.host, source } }), "pass")
+    only(await t0({ id: "fbc_capture", params: { productionHost: FAKE.host, source } }), "pass")
+    expect(reasonCode(only(await t0({ id: "host_matrix", params: { productionHost: FAKE.host, source } }), "problem"))).toBe("previews_send_data")
   })
 })
 
