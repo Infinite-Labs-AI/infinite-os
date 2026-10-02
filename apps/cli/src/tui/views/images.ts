@@ -96,7 +96,7 @@ export function imagesLines(view: ImagesViewLike, ctx: ViewRenderCtx): string[] 
     lines.push(...wrapText([head, tail].filter(Boolean).join("  "), ctx.width));
   }
   if (items.length) {
-    lines.push(...(lines.length ? [""] : []), ...itemLines(items, aspect, ctx));
+    lines.push(...(lines.length ? [""] : []), ...itemLines(items, aspect, ctx, false, perImageWords(view.cost, requested)));
   }
   if (link.length) lines.push("", ...link);
   if (items.some((item) => item.status === "done")) {
@@ -113,7 +113,7 @@ export function imagesLines(view: ImagesViewLike, ctx: ViewRenderCtx): string[] 
  * One row per image: `✓ 1  Explained` (its ratio after, in dim, once ready), a
  * failure's reason after. While they are made, the first queued image says `· next`.
  */
-function itemLines(items: readonly Record<string, unknown>[], aspect: string, ctx: ViewRenderCtx, making = false): string[] {
+function itemLines(items: readonly Record<string, unknown>[], aspect: string, ctx: ViewRenderCtx, making = false, each = ""): string[] {
   const labels = items.map((item) => imageText(item.label, "—"));
   const next = making ? items.findIndex((item) => item.status === "queued") : -1;
   const labelCells = Math.min(24, Math.max(12, ...labels.map(displayWidth)));
@@ -122,7 +122,7 @@ function itemLines(items: readonly Record<string, unknown>[], aspect: string, ct
     const mark = ITEM_MARK[String(item.status)] ?? { glyph: "?", token: "dim" as const };
     const label = labels[index] ?? "—";
     const failure = item.status === "failed" ? imageText(item.failureWords) : "";
-    const after = [aspect, failure ? `· ${failure}` : ""].filter(Boolean).join("  ");
+    const after = [aspect, failure ? `· ${failure}` : item.status === "done" ? each : ""].filter(Boolean).join("  ");
     // r4: `· 3  3 fixes · next`, one space before the dot.
     const shown = index === next ? `${label} · next` : label;
     const name = aspect ? padEndCells(`${index + 1}  ${shown}`, labelCells + 5) : `${index + 1}  ${shown}${after ? "  " : ""}`;
@@ -138,6 +138,17 @@ function itemLines(items: readonly Record<string, unknown>[], aspect: string, ct
       return row === 0 ? `${glyph} ${text}` : `  ${text}`;
     });
   });
+}
+
+/**
+ * What one made image cost, from the run's own figure (r4 `~$0.17`): the
+ * run's cost on Infinite over the images asked for, always as an estimate
+ * (`~`). Nothing when Infinite did not pay or the amount is not known.
+ */
+function perImageWords(cost: unknown, requested: number): string {
+  if (!isRecord(cost) || cost.whoPays !== "infinite" || requested <= 0) return "";
+  const usd = typeof cost.usd === "number" && Number.isFinite(cost.usd) && cost.usd > 0 ? cost.usd : null;
+  return usd === null ? "" : `~${formatMoney(usd / requested, "USD")}`;
 }
 
 /** `⠋ Making 3 creatives · ~25 s left`, with your own plan: `· $0 to Infinite`. */

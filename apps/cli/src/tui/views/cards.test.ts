@@ -613,9 +613,10 @@ describe("images (r4 Images, Make creatives)", () => {
       // All of them ready: r4's words, and where they were saved (the view's link is the Library).
       [["b", "3 creatives ready"], ["", "  "], ["dim", "· 4:5 · saved to your Library"]],
       [],
-      [["green", "✓"], ["", " 1  Explained     "], ["dim", "4:5"]],
-      [["green", "✓"], ["", " 2  Your audit    "], ["dim", "4:5"]],
-      [["green", "✓"], ["", " 3  3 fixes       "], ["dim", "4:5"]],
+      // Each made image with its share of the run's estimate (r4 `~$0.17`).
+      [["green", "✓"], ["", " 1  Explained     "], ["dim", "4:5  ~$0.17"]],
+      [["green", "✓"], ["", " 2  Your audit    "], ["dim", "4:5  ~$0.17"]],
+      [["green", "✓"], ["", " 3  3 fixes       "], ["dim", "4:5  ~$0.17"]],
       [],
       [["cyan u", "Open in Library ↗"], ["", "  "], ["dim", "(o)"]],
       [["dim", "Pictures can't show in a terminal."]],
