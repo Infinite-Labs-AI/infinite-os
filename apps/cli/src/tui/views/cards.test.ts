@@ -214,6 +214,19 @@ describe("card parts (r4 boxed(), lbl(), K(), PK())", () => {
     expect(segs(line!)).toEqual([["dim", "status"], ["", "   on "], ["dim", "→"], ["", " "], ["b", "PAUSED"]]);
   });
 
+  it("field labels pad to at most 14 (r4 9–14): a longer label sits on its own row, the value under the column (run-2 N6)", () => {
+    const plain = { color: false, theme };
+    expect(fieldRows([{ label: "Ad", value: "Hook A" }, { label: "Spend, last 7 days", value: "$40.00" }], 60, plain)).toEqual([
+      "Ad       Hook A",
+      "Spend, last 7 days",
+      "         $40.00"
+    ]);
+    expect(fieldRows([{ label: "ad set", value: "Broad" }, { label: "trials 7d", value: "0" }], 60, plain)).toEqual([
+      "ad set     Broad",
+      "trials 7d  0"
+    ]);
+  });
+
   it("key chips: the OK key on amber with a bold label, the rest on grey, three spaces apart", () => {
     const [line] = chipRows([{ key: "p", label: "Pause" }, { key: "n", label: "dismiss" }], "p", 65, { color: true, theme });
     expect(segs(line!)).toEqual([["pk", " p "], ["", " "], ["b", "Pause"], ["", "   "], ["key", " n "], ["", " dismiss"]]);
@@ -439,6 +452,19 @@ describe("receipts and settled states (r4 Pause an ad)", () => {
       row(69, "green", ["key", " ? "], ["", " "], ["dim", "what it does"]),
       bottom
     ]);
+  });
+
+  it("an app receipt whose title carries its provenance (S4): a short head, the provenance once, in the card's title (run-2 N5)", () => {
+    const view = receiptView({
+      title: "Paused ad “Ad 01” · Proposed by the agent · approved by You", state: "done", outcome: "applied",
+      receipt: { sentence: "Paused “Ad 01”. Meta shows it PAUSED.", tone: "ok", revertible: false, provenanceLine: "Proposed by the agent · approved by You" }
+    });
+    const render = renderView(view, viewCtx());
+    expect(render.head.replace(/\u001b\[[0-9;]*m/gu, "")).toBe(" Paused ad “Ad 01”  ✓ Done");
+    const all = [render.head, ...render.detail].map((line) => line.replace(/\u001b\[[0-9;]*m/gu, "")).join("\n");
+    expect(all.split("Proposed by the agent · approved by You").length - 1).toBe(1);
+    expect(all).toContain("┌─ Paused ad “Ad 01” · Proposed by the agent · approved by You ─");
+    expect(all).toContain("Paused “Ad 01”. Meta shows it PAUSED.");
   });
 
   it("a receipt view from the app (no approval left, the done title as its title) gets the same green card", () => {

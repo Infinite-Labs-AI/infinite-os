@@ -19,6 +19,8 @@ export const DOCUMENT_MAX_WIDTH = 76;
 const LABEL_COLUMN = 9;
 /** A label longer than this is cut, so a long label never squeezes the values off the line. */
 const MAX_LABEL_CELLS = 18;
+/** The widest label column (r4 `lbl(k, v, 14)`). */
+const MAX_COLUMN = 14;
 
 /** The border colour: amber while a card asks or works, green once it is done. */
 export type CardTone = "amber" | "green";
@@ -121,7 +123,10 @@ export function fieldRows(rows: readonly FieldRow[], width: number, ctx: PaintCt
     return [];
   }
   const max = Math.max(1, Math.floor(width));
-  const labelCells = Math.min(MAX_LABEL_CELLS, Math.max(...shown.map((row) => displayWidth(row.label))));
+  // r4 pads labels to 9 (14 at most): the column follows the labels that fit
+  // it; a longer label sits on its own row, its value under the column.
+  const fitting = shown.map((row) => displayWidth(row.label)).filter((cells) => cells + 2 <= MAX_COLUMN);
+  const labelCells = Math.min(MAX_LABEL_CELLS, Math.max(0, ...fitting));
   const column = Math.max(LABEL_COLUMN, labelCells + 2);
   const valueWidth = max - column;
   if (valueWidth < 8) {
@@ -132,7 +137,11 @@ export function fieldRows(rows: readonly FieldRow[], width: number, ctx: PaintCt
   }
   const indent = " ".repeat(column);
   return shown.flatMap((row) => {
-    const label = displayWidth(row.label) > labelCells ? fitPainted(row.label, labelCells) : row.label;
+    if (displayWidth(row.label) + 2 > column) {
+      const values = row.value ? wrapText(row.value, valueWidth) : [];
+      return [paint(fitPainted(row.label, max), "dim", ctx), ...values.map((value) => `${indent}${value}`)];
+    }
+    const label = row.label;
     const values = row.value ? wrapText(row.value, valueWidth) : [""];
     const pad = " ".repeat(Math.max(0, column - displayWidth(label)));
     return values.map((value, index) =>

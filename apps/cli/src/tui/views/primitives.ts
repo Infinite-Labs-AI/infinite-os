@@ -295,10 +295,22 @@ function paragraph(text: string, role: AnsiRole, ctx: ViewRenderCtx): string[] {
  * its tone; a needs-you head is bold amber. Without colour the chip prints as
  * same-width brackets (`[Title]`). One line.
  */
+/**
+ * A view's title without the receipt's provenance it may end with (an app
+ * receipt titled `Paused ad “…” · Proposed by the agent · approved by You`):
+ * the head shows the short title, and the card says who proposed and approved.
+ */
+export function shortTitle(view: AnswerViewV1): string {
+  const title = viewText(view.title);
+  const provenance = isRecord(view.receipt) ? viewText(view.receipt.provenanceLine) : "";
+  const suffix = provenance ? ` · ${provenance}` : "";
+  return suffix && title.endsWith(suffix) && title.length > suffix.length ? title.slice(0, -suffix.length) : title;
+}
+
 export function headLine(view: AnswerViewV1, ctx: ViewRenderCtx): string {
   const head = stateHeadFor(view);
   const state = `${head.glyph} ${head.words}`;
-  const title = viewText(view.title);
+  const title = shortTitle(view);
   const width = Math.max(1, Math.floor(ctx.width));
   if (!title) {
     return paint(fitLine(state, width), toneRole(head.tone), ctx);

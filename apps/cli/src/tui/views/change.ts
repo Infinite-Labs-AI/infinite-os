@@ -39,9 +39,16 @@ function changeViewLines(view: AnswerViewV1, ctx: ViewRenderCtx, notes: Footnote
   const approval = isRecord(view.approval) && view.approval.kind === "card" ? view.approval : null;
   const receipt = isRecord(view.receipt) ? view.receipt : null;
   if (view.state === "done") {
-    const doneTitle = viewText(approval?.doneTitle) || viewText(view.title);
-    const title = receipt ? [doneTitle, APPROVED_SUFFIX].filter(Boolean).join(" · ") : doneTitle;
-    const facts = receipt ? [viewText(receipt.sentence), viewText(receipt.provenanceLine)].filter(Boolean) : [];
+    // Who proposed and who said yes is said once, in the card's title: r4's
+    // words, or the app's own when its title already ends with its receipt's
+    // provenance (`… · Proposed by the agent · approved by You`), which is then
+    // not repeated in the card. Any other provenance line is a fact of the card.
+    const provenance = receipt ? viewText(receipt.provenanceLine) : "";
+    const rawTitle = viewText(approval?.doneTitle) || viewText(view.title);
+    const titled = provenance !== "" && rawTitle.endsWith(` · ${provenance}`);
+    const base = titled ? rawTitle.slice(0, -(provenance.length + 3)) : rawTitle;
+    const title = receipt ? [base, titled ? provenance : APPROVED_SUFFIX].filter(Boolean).join(" · ") : rawTitle;
+    const facts = receipt ? [viewText(receipt.sentence), titled ? "" : provenance].filter(Boolean) : [];
     return changeCard(view, title, "green", [
       ...cardRows(body, approval, ctx, notes),
       ...facts.flatMap((fact) => paragraphIn(fact, cardInner(ctx), "dim", ctx))
