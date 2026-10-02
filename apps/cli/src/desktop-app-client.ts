@@ -33,6 +33,11 @@ import {
   leftForLaterLine
 } from "./desktop/confirm-result-lines.js";
 import { negotiateInteractiveWorkspace } from "./desktop/interactive-protocol.js";
+import {
+  boundedTerminalText,
+  terminalOutputText,
+  terminalText
+} from "./desktop/terminal-text.js";
 
 const PROTOCOL_VERSION = 1;
 const DESCRIPTOR_SCHEMA_VERSION = 1;
@@ -51,7 +56,6 @@ const MAX_CONFIRMATION_DETAILS = 12;
 const MAX_CONFIRMATION_LABEL_CHARS = 80;
 const MAX_CONFIRMATION_VALUE_CHARS = 240;
 const MAX_CONFIRMATION_INPUT_DEPTH = 4;
-const TRUNCATION_SUFFIX = " ... [truncated]";
 const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
 const HIERARCHICAL_URI_RE =
   /[A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s<>"'`]+/gu;
@@ -1380,122 +1384,6 @@ async function promptForConfirmation(
   } finally {
     prompt.close();
   }
-}
-
-function terminalText(value: string, fallback = ""): string {
-  return (
-    scanTerminalText(value, false).replace(/\s+/gu, " ").trim() || fallback
-  );
-}
-
-function terminalOutputText(value: string, fallback = ""): string {
-  return scanTerminalText(value, true).trim() || fallback;
-}
-
-function scanTerminalText(value: string, preserveLineBreaks: boolean): string {
-  const output: string[] = [];
-  let index = 0;
-  while (index < value.length) {
-    const code = value.charCodeAt(index);
-    if (code === 0x1b) {
-      const next = value.charCodeAt(index + 1);
-      if (next === 0x5b) {
-        index = skipControlSequence(value, index + 2);
-      } else if (
-        next === 0x5d ||
-        next === 0x50 ||
-        next === 0x58 ||
-        next === 0x5e ||
-        next === 0x5f
-      ) {
-        index = skipControlString(value, index + 2);
-      } else {
-        index += Number.isNaN(next) ? 1 : 2;
-      }
-      continue;
-    }
-    if (code === 0x9b) {
-      index = skipControlSequence(value, index + 1);
-      continue;
-    }
-    if (
-      code === 0x90 ||
-      code === 0x98 ||
-      code === 0x9d ||
-      code === 0x9e ||
-      code === 0x9f
-    ) {
-      index = skipControlString(value, index + 1);
-      continue;
-    }
-    if (code === 0x0a) {
-      output.push(preserveLineBreaks ? "\n" : " ");
-      index += 1;
-      continue;
-    }
-    if (code === 0x0d) {
-      output.push(preserveLineBreaks ? "\n" : " ");
-      index += value.charCodeAt(index + 1) === 0x0a ? 2 : 1;
-      continue;
-    }
-    if (code === 0x09) {
-      output.push(preserveLineBreaks ? "  " : " ");
-      index += 1;
-      continue;
-    }
-    if (
-      code <= 0x1f ||
-      (code >= 0x7f && code <= 0x9f) ||
-      code === 0x061c ||
-      code === 0x200e ||
-      code === 0x200f ||
-      (code >= 0x202a && code <= 0x202e) ||
-      (code >= 0x2066 && code <= 0x2069)
-    ) {
-      output.push(" ");
-      index += 1;
-      continue;
-    }
-    output.push(value[index]!);
-    index += 1;
-  }
-  return output.join("");
-}
-
-function skipControlSequence(value: string, start: number): number {
-  let index = start;
-  while (index < value.length) {
-    const code = value.charCodeAt(index);
-    index += 1;
-    if (code >= 0x40 && code <= 0x7e) return index;
-  }
-  return value.length;
-}
-
-function skipControlString(value: string, start: number): number {
-  let index = start;
-  while (index < value.length) {
-    const code = value.charCodeAt(index);
-    if (code === 0x07 || code === 0x9c) return index + 1;
-    if (code === 0x1b && value.charCodeAt(index + 1) === 0x5c) return index + 2;
-    index += 1;
-  }
-  return value.length;
-}
-
-function boundedTerminalText(
-  value: string,
-  maxChars: number,
-  fallback = ""
-): string {
-  const sanitized = terminalText(value, fallback);
-  const characters = Array.from(sanitized);
-  if (characters.length <= maxChars) return sanitized;
-  const visibleChars = Math.max(
-    0,
-    maxChars - Array.from(TRUNCATION_SUFFIX).length
-  );
-  return `${characters.slice(0, visibleChars).join("")}${TRUNCATION_SUFFIX}`;
 }
 
 function redactSensitiveTerminalText(value: string): string {

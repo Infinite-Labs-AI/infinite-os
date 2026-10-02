@@ -1,0 +1,540 @@
+{
+  "v": 1,
+  "kind": "numbers",
+  "tool": "read_numbers",
+  "title": "Spend by ad set",
+  "state": "ready",
+  "asOf": "2026-01-14T23:00:00Z",
+  "provenance": {
+    "source": "Demo source",
+    "via": "our_db"
+  },
+  "scope": {
+    "workspaceName": "Demo",
+    "crossWorkspace": false
+  },
+  "caveats": [
+    "Synthetic numbers for tests."
+  ],
+  "body": {
+    "layout": "table",
+    "currency": "USD",
+    "columns": [
+      {
+        "key": "spend",
+        "label": "Spend",
+        "unit": "money",
+        "factGroup": "delivery"
+      },
+      {
+        "key": "clicks",
+        "label": "Clicks",
+        "unit": "count",
+        "factGroup": "delivery"
+      }
+    ],
+    "legs": {
+      "settled": {
+        "window": {
+          "from": "2026-01-08",
+          "to": "2026-01-14",
+          "tz": "UTC",
+          "label": "Last 7 days"
+        },
+        "final": true,
+        "asOf": "2026-01-14T23:00:00Z",
+        "rows": [
+          {
+            "id": "adset_1",
+            "label": "Ad set 01",
+            "cells": {
+              "spend": {
+                "value": 10
+              },
+              "clicks": {
+                "value": 4
+              }
+            }
+          },
+          {
+            "id": "adset_2",
+            "label": "Ad set 02",
+            "cells": {
+              "spend": {
+                "value": 20
+              },
+              "clicks": {
+                "value": 8
+              }
+            }
+          },
+          {
+            "id": "adset_3",
+            "label": "Ad set 03",
+            "cells": {
+              "spend": {
+                "value": 30
+              },
+              "clicks": {
+                "value": 12
+              }
+            }
+          },
+          {
+            "id": "adset_4",
+            "label": "Ad set 04",
+            "cells": {
+              "spend": {
+                "value": 40
+              },
+              "clicks": {
+                "value": 16
+              }
+            }
+          },
+          {
+            "id": "adset_5",
+            "label": "Ad set 05",
+            "cells": {
+              "spend": {
+                "value": 50
+              },
+              "clicks": {
+                "value": 20
+              }
+            }
+          },
+          {
+            "id": "adset_6",
+            "label": "Ad set 06",
+            "cells": {
+              "spend": {
+                "value": 60
+              },
+              "clicks": {
+                "value": 24
+              }
+            }
+          },
+          {
+            "id": "adset_7",
+            "label": "Ad set 07",
+            "cells": {
+              "spend": {
+                "value": 70
+              },
+              "clicks": {
+                "value": 28
+              }
+            }
+          },
+          {
+            "id": "adset_8",
+            "label": "Ad set 08",
+            "cells": {
+              "spend": {
+                "value": 80
+              },
+              "clicks": {
+                "value": 32
+              }
+            }
+          },
+          {
+            "id": "adset_9",
+            "label": "Ad set 09",
+            "cells": {
+              "spend": {
+                "value": 90
+              },
+              "clicks": {
+                "value": 36
+              }
+            }
+          },
+          {
+            "id": "adset_10",
+            "label": "Ad set 10",
+            "cells": {
+              "spend": {
+                "value": 100
+              },
+              "clicks": {
+                "value": 40
+              }
+            }
+          },
+          {
+            "id": "adset_11",
+            "label": "Ad set 11",
+            "cells": {
+              "spend": {
+                "value": 110
+              },
+              "clicks": {
+                "value": 44
+              }
+            }
+          },
+          {
+            "id": "adset_12",
+            "label": "Ad set 12",
+            "cells": {
+              "spend": {
+                "value": 120
+              },
+              "clicks": {
+                "value": 48
+              }
+            }
+          },
+          {
+            "id": "adset_13",
+            "label": "Ad set 13",
+            "cells": {
+              "spend": {
+                "value": 130
+              },
+              "clicks": {
+                "value": 52
+              }
+            }
+          },
+          {
+            "id": "adset_14",
+            "label": "Ad set 14",
+            "cells": {
+              "spend": {
+                "value": 140
+              },
+              "clicks": {
+                "value": 56
+              }
+            }
+          },
+          {
+            "id": "adset_15",
+            "label": "Ad set 15",
+            "cells": {
+              "spend": {
+                "value": 150
+              },
+              "clicks": {
+                "value": 60
+              }
+            }
+          },
+          {
+            "id": "adset_16",
+            "label": "Ad set 16",
+            "cells": {
+              "spend": {
+                "value": 160
+              },
+              "clicks": {
+                "value": 64
+              }
+            }
+          },
+          {
+            "id": "adset_17",
+            "label": "Ad set 17",
+            "cells": {
+              "spend": {
+                "value": 170
+              },
+              "clicks": {
+                "value": 68
+              }
+            }
+          },
+          {
+            "id": "adset_18",
+            "label": "Ad set 18",
+            "cells": {
+              "spend": {
+                "value": 180
+              },
+              "clicks": {
+                "value": 72
+              }
+            }
+          },
+          {
+            "id": "adset_19",
+            "label": "Ad set 19",
+            "cells": {
+              "spend": {
+                "value": 190
+              },
+              "clicks": {
+                "value": 76
+              }
+            }
+          },
+          {
+            "id": "adset_20",
+            "label": "Ad set 20",
+            "cells": {
+              "spend": {
+                "value": 200
+              },
+              "clicks": {
+                "value": 80
+              }
+            }
+          },
+          {
+            "id": "adset_21",
+            "label": "Ad set 21",
+            "cells": {
+              "spend": {
+                "value": 210
+              },
+              "clicks": {
+                "value": 84
+              }
+            }
+          },
+          {
+            "id": "adset_22",
+            "label": "Ad set 22",
+            "cells": {
+              "spend": {
+                "value": 220
+              },
+              "clicks": {
+                "value": 88
+              }
+            }
+          },
+          {
+            "id": "adset_23",
+            "label": "Ad set 23",
+            "cells": {
+              "spend": {
+                "value": 230
+              },
+              "clicks": {
+                "value": 92
+              }
+            }
+          },
+          {
+            "id": "adset_24",
+            "label": "Ad set 24",
+            "cells": {
+              "spend": {
+                "value": 240
+              },
+              "clicks": {
+                "value": 96
+              }
+            }
+          },
+          {
+            "id": "adset_25",
+            "label": "Ad set 25",
+            "cells": {
+              "spend": {
+                "value": 250
+              },
+              "clicks": {
+                "value": 100
+              }
+            }
+          },
+          {
+            "id": "adset_26",
+            "label": "Ad set 26",
+            "cells": {
+              "spend": {
+                "value": 260
+              },
+              "clicks": {
+                "value": 104
+              }
+            }
+          },
+          {
+            "id": "adset_27",
+            "label": "Ad set 27",
+            "cells": {
+              "spend": {
+                "value": 270
+              },
+              "clicks": {
+                "value": 108
+              }
+            }
+          },
+          {
+            "id": "adset_28",
+            "label": "Ad set 28",
+            "cells": {
+              "spend": {
+                "value": 280
+              },
+              "clicks": {
+                "value": 112
+              }
+            }
+          },
+          {
+            "id": "adset_29",
+            "label": "Ad set 29",
+            "cells": {
+              "spend": {
+                "value": 290
+              },
+              "clicks": {
+                "value": 116
+              }
+            }
+          },
+          {
+            "id": "adset_30",
+            "label": "Ad set 30",
+            "cells": {
+              "spend": {
+                "value": 300
+              },
+              "clicks": {
+                "value": 120
+              }
+            }
+          },
+          {
+            "id": "adset_31",
+            "label": "Ad set 31",
+            "cells": {
+              "spend": {
+                "value": 310
+              },
+              "clicks": {
+                "value": 124
+              }
+            }
+          },
+          {
+            "id": "adset_32",
+            "label": "Ad set 32",
+            "cells": {
+              "spend": {
+                "value": 320
+              },
+              "clicks": {
+                "value": 128
+              }
+            }
+          },
+          {
+            "id": "adset_33",
+            "label": "Ad set 33",
+            "cells": {
+              "spend": {
+                "value": 330
+              },
+              "clicks": {
+                "value": 132
+              }
+            }
+          },
+          {
+            "id": "adset_34",
+            "label": "Ad set 34",
+            "cells": {
+              "spend": {
+                "value": 340
+              },
+              "clicks": {
+                "value": 136
+              }
+            }
+          },
+          {
+            "id": "adset_35",
+            "label": "Ad set 35",
+            "cells": {
+              "spend": {
+                "value": 350
+              },
+              "clicks": {
+                "value": 140
+              }
+            }
+          },
+          {
+            "id": "adset_36",
+            "label": "Ad set 36",
+            "cells": {
+              "spend": {
+                "value": 360
+              },
+              "clicks": {
+                "value": 144
+              }
+            }
+          },
+          {
+            "id": "adset_37",
+            "label": "Ad set 37",
+            "cells": {
+              "spend": {
+                "value": 370
+              },
+              "clicks": {
+                "value": 148
+              }
+            }
+          },
+          {
+            "id": "adset_38",
+            "label": "Ad set 38",
+            "cells": {
+              "spend": {
+                "value": 380
+              },
+              "clicks": {
+                "value": 152
+              }
+            }
+          },
+          {
+            "id": "adset_39",
+            "label": "Ad set 39",
+            "cells": {
+              "spend": {
+                "value": 390
+              },
+              "clicks": {
+                "value": 156
+              }
+            }
+          },
+          {
+            "id": "adset_40",
+            "label": "Ad set 40",
+            "cells": {
+              "spend": {
+                "value": 400
+              },
+              "clicks": {
+                "value": 160
+              }
+            }
+          }
+        ]
+      }
+    },
+    "truncated": {
+      "shown": 40,
+      "total": 100,
+      "reason": "First 40 by spend",
+      "more": {
+        "label": "Show more",
+        "ask": "Show the next 40 ad sets"
+      }
+    }
+  }
+}

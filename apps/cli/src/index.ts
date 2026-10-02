@@ -1697,19 +1697,21 @@ async function runDesktopInteractiveEntry(env: CliEnv): Promise<void> {
       // aborting the turn's signal drops the `/v1/turn` request, and the
       // bridge stops the app turn on disconnect.
       turnStoppable: true,
-      async onSubmitLine(line, onProgress, signal) {
+      async onSubmitLine(line, onProgress, signal, onView) {
         const trimmed = line.trim();
         if (trimmed === "/help") {
           return { messages: [desktopHelpMessage()] };
         }
         // The streamed answer renders through the shell's turnController via
-        // `onProgress`; the terminal message.complete commits it. The runner
-        // threads the session forward (Desktop owns its own active workspace).
+        // `onProgress`; the terminal message.complete commits it. Answer views
+        // (`tool.view`, only from a Desktop that negotiated them) go to `onView`,
+        // and the shell draws them beside the answer. The runner threads the
+        // session forward (Desktop owns its own active workspace).
         // Not `AbortSignal.any`: it needs Node 20.3 and the engines allow 20.0.
         const linked = linkAbortSignals([turnAbort.signal, signal]);
         let outcome: Awaited<ReturnType<typeof runner.turn>>;
         try {
-          outcome = await runner.turn(trimmed, onProgress, linked.signal);
+          outcome = await runner.turn(trimmed, onProgress, linked.signal, onView);
         } finally {
           linked.dispose();
         }
