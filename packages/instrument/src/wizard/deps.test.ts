@@ -12,7 +12,7 @@ import { afterEach, describe, expect, it } from "vitest"
 import { O9_CHECK_IDS } from "../checks/o9.js"
 import type { O6CheckRunner } from "../checks/registry.js"
 import { parseWizardArgs } from "./command.js"
-import { createDefaultWizardDeps } from "./deps.js"
+import { createDefaultWizardDeps, createDefaultWizardWiring } from "./deps.js"
 
 const dirs: string[] = []
 afterEach(() => {
@@ -78,5 +78,23 @@ describe("createDefaultWizardDeps (I1 wiring)", () => {
     await wired.checks.redirectWalk(["https://acme-store.com/"])
     expect(seen.length).toBeGreaterThan(0)
     expect(seen.every((url) => url.startsWith("https://acme-store.com/"))).toBe(true)
+  })
+})
+
+describe("createDefaultWizardWiring: the SIGINT restore stage (review I1 P2-5)", () => {
+  it("has a fenceAbort, a no-op before deps exist, and the runner's killAll (which awaits the restore) after", async () => {
+    const wiring = createDefaultWizardWiring()
+    expect(typeof wiring.fenceAbort).toBe("function")
+    await expect(wiring.fenceAbort!()).resolves.toBeUndefined()
+    const { root, home } = site()
+    const parsed = parseWizardArgs(["--json"], root)
+    if (!parsed.ok) throw new Error(parsed.message)
+    const created = await wiring.createDeps({ root, appRoot: ".", options: parsed.value.options, env: { HOME: home }, platform: "darwin", tagVersion: "0.12.0-test", signal: new AbortController().signal })
+    let killed = 0
+    created.agents.killAll = async () => {
+      killed += 1
+    }
+    await wiring.fenceAbort!()
+    expect(killed).toBe(1)
   })
 })

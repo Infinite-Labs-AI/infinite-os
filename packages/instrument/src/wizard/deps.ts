@@ -288,9 +288,15 @@ export function createDefaultUi(kind: "tty" | "json", io: WizardIo): WizardUiLik
 }
 
 export function createDefaultWizardWiring(overrides: DefaultDepsOverrides = {}): WizardWiring {
+  let created: WizardDeps | null = null
   return {
-    createDeps: (input) => createDefaultWizardDeps(input, overrides),
-    createUi: (kind, _store, io) => createDefaultUi(kind, io)
+    createDeps: async (input) => (created = await createDefaultWizardDeps(input, overrides)),
+    createUi: (kind, _store, io) => createDefaultUi(kind, io),
+    // The SIGINT sequence's restore stage (review I1 P2-5): waits until the open turn's snapshot is back
+    // (idempotent after `killAll`; nothing to do when no turn is open).
+    fenceAbort: async () => {
+      if (created) await created.agents.killAll()
+    }
   }
 }
 

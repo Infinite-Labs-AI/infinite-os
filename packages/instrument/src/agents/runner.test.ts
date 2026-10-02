@@ -285,6 +285,23 @@ describe("killAll (SIGINT)", () => {
   })
 })
 
+describe("killAll waits for the restore (review I1 P2-5)", () => {
+  it("when killAll returns, the agent's edit is already undone and the snapshot is gone, even while runJobs is still unwinding", async () => {
+    const { root, fakes } = setup({ turns: [{ steps: [{ edit: { path: "app/page.tsx", content: PAGE_EDIT } }, { hang: true }] }] })
+    const runner = makeRunner(fakes, root)
+    const pending = runner.runJobs(jobsInput().input)
+    await waitFor(fakes, "hanging")
+    expect(readFileSync(join(root, "app/page.tsx"), "utf8")).toContain("data-conversion")
+    await runner.killAll()
+    // No `await pending` first: the SIGINT sequence releases the lock and exits right after killAll.
+    expect(readFileSync(join(root, "app/page.tsx"), "utf8")).not.toContain("data-conversion")
+    const snapshots = join(fakes.home, "Library/Caches/infinite-tag/snapshots", RUN_ID)
+    const left = existsSync(snapshots) ? readdirSync(snapshots) : []
+    expect(left).toEqual([])
+    await pending
+  })
+})
+
 describe("review (read-only, detached worktree)", () => {
   const REVIEW = { verdict: "changes_suggested", summary: "One nit.", checklist: [{ item: "R6", status: "pass", note: "no consent edits" }], findings: [{ id: "F1", item: "R3", severity: "nit", path: "app/page.tsx", line: 2, body: "Name the event.", suggested_fix: null }] }
 

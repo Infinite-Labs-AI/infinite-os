@@ -214,12 +214,18 @@ export class AgentRunnerImpl implements AgentRunner {
     return this.registry.isAlive()
   }
 
-  /** SIGINT / abort: kill every agent process group, then restore the open turn's snapshot. */
+  /**
+   * SIGINT / abort: kill every agent process group, then restore the open turn's snapshot, and RETURN ONLY
+   * ONCE IT IS RESTORED. `fence.abort()` is idempotent: when `runJobs` has already started its own abort (the
+   * killed agent ended the turn first), it hands back that in-flight restore, which is awaited here too. Before
+   * (review I1 P2-5) a started abort was skipped, so the lock was released and the process exited mid-restore,
+   * leaving the agent's edits in the tree and the snapshot on disk.
+   */
   async killAll(): Promise<void> {
     this.interrupted = true
     await this.registry.killAll()
     const fence = this.activeFence
-    if (fence && !fence.isSettled) await fence.abort()
+    if (fence) await fence.abort()
   }
 
   async runJobs(input: RunJobsInput): Promise<AgentRunResultWithExtras> {
