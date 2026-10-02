@@ -1,8 +1,10 @@
 // The managed-provider options the wizard's plan lines turn on, EXECUTED:
 //   - decision 17: replay and autocapture OFF on sensitive pages (infinite.fast inject L340-362; its tests
 //     test-inject-analytics.mjs L597-598 and L605-616 @ 9f65b47), every other page keeping PostHog's own
-//     defaults — the keys are not even present;
-//   - PostHog `defaults`: "2026-01-30" for new installs, "2025-05-24" only where the plan pins it;
+//     defaults — the keys are not even present — re-decided at every $pageview so an SPA route change
+//     into or out of a listed page is honoured, with `/x/*` prefix rules;
+//   - PostHog `defaults`: "2026-01-30" for new installs, "2025-05-24" where pinned (a re-install keeps
+//     the managed value: `posthog-defaults.test.ts`);
 //   - the Meta capture-only block beside an ADOPTED pixel (no second pixel, nothing sent).
 import { describe, expect, it } from "vitest"
 
@@ -70,7 +72,70 @@ describe("decision 17: sensitive pages", () => {
     expect(initOptions(guarded, "https://acme.com/login")).toMatchObject({ disable_session_recording: true, autocapture: false })
   })
 
+  // P2-5: an SPA changes pages without a load. PostHog records a $pageview per History-API route change
+  // (its `defaults` bundles); the snippet re-decides there through the instance `loaded` hands it.
+  function routeAware(paths: string[], landing: string) {
+    const vm = createBrowserVm({ url: `https://acme.com${landing}` })
+    vm.runScript(buildPostHogBootstrapSnippet("phc_test", "https://us.i.posthog.com", undefined, { sensitivePaths: paths }))
+    expect(vm.scriptErrors).toEqual([])
+    const options = (vm.window.posthog as { _i: Array<[string, { loaded?: (instance: unknown) => void }]> })._i[0]![1]
+    const configs: unknown[] = []
+    let listener: ((data: { event: string }) => void) | undefined
+    options.loaded!({
+      on: (name: string, callback: (data: { event: string }) => void) => {
+        if (name === "eventCaptured") listener = callback
+      },
+      set_config: (config: unknown) => void configs.push(plain(config))
+    })
+    const location = vm.window.location as { pathname: string }
+    return {
+      configs,
+      go(path: string, event = "$pageview") {
+        location.pathname = path
+        listener!({ event })
+      }
+    }
+  }
+
+  it("a client-side navigation INTO a sensitive page turns replay and autocapture off, and back on leaving it", () => {
+    const page = routeAware(["/login"], "/")
+    page.go("/pricing")
+    expect(page.configs).toEqual([]) // not sensitive → untouched
+    page.go("/login/")
+    expect(page.configs).toEqual([{ disable_session_recording: true, autocapture: false }])
+    page.go("/dashboard")
+    expect(page.configs).toEqual([
+      { disable_session_recording: true, autocapture: false },
+      { disable_session_recording: false, autocapture: true }
+    ])
+  })
+
+  it("landing ON a sensitive page does not keep the provider reduced after leaving it", () => {
+    const page = routeAware(["/login"], "/login")
+    page.go("/")
+    expect(page.configs).toEqual([{ disable_session_recording: false, autocapture: true }])
+  })
+
+  it("negative: only a $pageview re-decides (an autocapture event on the way does not)", () => {
+    const page = routeAware(["/login"], "/")
+    page.go("/login", "$autocapture")
+    expect(page.configs).toEqual([])
+  })
+
+  it("a /* rule covers the path and everything under it (a dynamic segment), and nothing beside it", () => {
+    const page = routeAware(["/account/*"], "/")
+    page.go("/account-help")
+    expect(page.configs).toEqual([])
+    page.go("/account/123/billing")
+    expect(page.configs).toEqual([{ disable_session_recording: true, autocapture: false }])
+    const landing = buildPostHogBootstrapSnippet("phc_test", "https://us.i.posthog.com", undefined, { sensitivePaths: ["/account/*"] })
+    expect(initOptions(landing, "https://acme.com/account")).toMatchObject({ autocapture: false })
+    expect(initOptions(landing, "https://acme.com/accounts")).not.toHaveProperty("autocapture")
+  })
+
   it("normalises the page list and refuses anything that is not a root-relative path", () => {
+    expect(normalizeSensitivePaths(["/account/*", "/account/*/"])).toHaveProperty("error")
+    expect(normalizeSensitivePaths(["/account/*"])).toEqual({ paths: ["/account/*"] })
     expect(normalizeSensitivePaths(["/login/", "/login", "/a/b"])).toEqual({ paths: ["/a/b", "/login"] })
     expect(normalizeSensitivePaths(undefined)).toEqual({ paths: [] })
     for (const bad of [["login"], ["/login?next=/"], ["/login#x"], ["//evil.example"], [42], "not-a-list"]) {

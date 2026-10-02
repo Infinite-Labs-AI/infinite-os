@@ -108,7 +108,7 @@ export const posthogProviderAdapter: ProviderAdapter = {
               : []),
             ...(snippetOptions.sensitivePaths!.length > 0
               ? [
-                  `Session replay and click autocapture are OFF on ${snippetOptions.sensitivePaths!.join(", ")} (set when the page first loads).`
+                  `Session replay and click autocapture are OFF on ${snippetOptions.sensitivePaths!.join(", ")} (re-checked at every page view, client-side route changes included; a path ending in /* covers everything under it).`
                 ]
               : [])
           ]
@@ -220,17 +220,20 @@ export interface PosthogSnippetOptions {
 
 /**
  * Decision 17's page list, normalised the way the emitted check compares it: root-relative, no query or
- * hash, a trailing slash dropped (except "/"), de-duplicated and sorted.
+ * hash, a trailing slash dropped (except "/"), de-duplicated and sorted. A path ending in `/*` is a
+ * prefix rule (`/account/*` covers `/account` and every page under it, e.g. a dynamic `/account/[id]`).
  */
 export function normalizeSensitivePaths(value: unknown): { paths: string[] } | { error: string } {
   if (value === undefined) return { paths: [] }
   if (!Array.isArray(value)) return { error: "PostHog sensitivePaths must be a list of paths." }
   const paths = new Set<string>()
   for (const raw of value) {
-    if (typeof raw !== "string" || !/^\/[A-Za-z0-9._~%/-]*$/.test(raw) || raw.startsWith("//") || raw.length > 256) {
-      return { error: `PostHog sensitive path ${JSON.stringify(raw)} must be a root-relative path without query or hash.` }
+    if (typeof raw !== "string" || !/^\/[A-Za-z0-9._~%/-]*(?:\/\*)?$/.test(raw) || raw.startsWith("//") || raw.length > 256) {
+      return {
+        error: `PostHog sensitive path ${JSON.stringify(raw)} must be a root-relative path without query or hash (end it with /* to cover everything under it).`
+      }
     }
-    paths.add(raw.length > 1 ? raw.replace(/\/+$/, "") || "/" : raw)
+    paths.add(raw.endsWith("/*") || raw.length <= 1 ? raw : raw.replace(/\/+$/, "") || "/")
   }
   return { paths: [...paths].sort() }
 }
@@ -260,11 +263,15 @@ export function buildPostHogBootstrapSnippet(
   // queue-only (`posthogQueueOnlyStub`), so a later `posthog.identify(...)` in the site's own code cannot
   // throw: it is queued in memory and never sent.
   //
-  // SENSITIVE PAGES (decision 17), infinite.fast's pattern (inject L340-362): the path is read once at
-  // init, a trailing slash ignored, and on a listed page `disable_session_recording: true` and
-  // `autocapture: false` are set. Every other page keeps PostHog's own defaults — the keys are not even
-  // present. (A client-side navigation INTO a listed page keeps the first page's settings: an SPA needs
-  // PostHog's own route controls; see the builder note.)
+  // SENSITIVE PAGES (decision 17), infinite.fast's pattern (inject L340-362) made route-aware: at init the
+  // landing path is checked (a trailing slash ignored; `/account/*` covers `/account` and everything under
+  // it), and on a listed page `disable_session_recording: true` and `autocapture: false` are set; every
+  // other page keeps PostHog's own defaults (the keys are not even present). Then, at every `$pageview`
+  // PostHog records — its `defaults` bundles capture one per History-API route change — the path is
+  // re-checked and `set_config` turns replay and autocapture off on entering a listed page and back to
+  // PostHog's defaults on leaving it, so an SPA neither records a sensitive page it navigated into nor
+  // stays reduced after leaving one. (posthog-js: `loaded(instance)`, `on('eventCaptured')`, and
+  // `set_config` re-evaluating autocapture and recording — checked against posthog-js 1.402.2.)
   //
   // THE STUB METHOD LIST is PostHog's current official snippet list, copied from infinite.fast
   // (infinite-site inject-analytics.cjs at 9f65b47). The list it replaced named methods under
@@ -283,13 +290,38 @@ export function buildPostHogBootstrapSnippet(
     sensitivePaths.length > 0
       ? [
           `var INFINITE_SENSITIVE_PATHS = ${jsLiteral(sensitivePaths)};`,
-          "var infinitePathHere = location.pathname;",
-          "if (infinitePathHere.length > 1 && infinitePathHere.charAt(infinitePathHere.length - 1) === '/') infinitePathHere = infinitePathHere.slice(0, -1);",
+          "function infiniteSensitivePath(path) {",
+          "  path = String(path || '/');",
+          "  if (path.length > 1 && path.charAt(path.length - 1) === '/') path = path.slice(0, -1);",
+          "  for (var i = 0; i < INFINITE_SENSITIVE_PATHS.length; i += 1) {",
+          "    var rule = INFINITE_SENSITIVE_PATHS[i];",
+          "    if (rule.slice(-2) === '/*') {",
+          "      var base = rule.slice(0, -2);",
+          "      if (path === base || path.indexOf(base + '/') === 0) return true;",
+          "    } else if (rule === path) return true;",
+          "  }",
+          "  return false;",
+          "}",
+          "var infiniteSensitiveNow = infiniteSensitivePath(location.pathname);",
           `var infinitePosthogOptions = { ${initOptions} };`,
-          "if (INFINITE_SENSITIVE_PATHS.indexOf(infinitePathHere) !== -1) {",
+          "if (infiniteSensitiveNow) {",
           "  infinitePosthogOptions.disable_session_recording = true;",
           "  infinitePosthogOptions.autocapture = false;",
           "}",
+          "// A client-side route change is a new page: re-decide at every page view PostHog records.",
+          "infinitePosthogOptions.loaded = function (instance) {",
+          "  try {",
+          "    instance.on('eventCaptured', function (data) {",
+          "      try {",
+          "        if (!data || data.event !== '$pageview') return;",
+          "        var sensitive = infiniteSensitivePath(location.pathname);",
+          "        if (sensitive === infiniteSensitiveNow) return;",
+          "        infiniteSensitiveNow = sensitive;",
+          "        instance.set_config(sensitive ? { disable_session_recording: true, autocapture: false } : { disable_session_recording: false, autocapture: true });",
+          "      } catch (_error) {}",
+          "    });",
+          "  } catch (_error) {}",
+          "};",
           `posthog.init(${jsLiteral(projectKey)}, infinitePosthogOptions);`
         ].join("\n")
       : `posthog.init(${jsLiteral(projectKey)}, { ${initOptions} });`
