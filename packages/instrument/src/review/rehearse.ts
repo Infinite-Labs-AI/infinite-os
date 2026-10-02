@@ -107,6 +107,8 @@ export async function runDesktopTest(
       await deps.bridge.cancelTest(started.testRunId).catch(() => undefined)
       return { result: null, error: "deadline" }
     }
+    // The desktop holds each poll up to 25 s; a quick "running" answer never turns this into a hot loop.
+    await deps.clock.sleep(1_000, ctx.signal)
   }
 }
 
@@ -114,7 +116,8 @@ async function waitForPreview(ctx: WizardContext, deps: WizardDeps, step: Wizard
   const until = deps.clock.now().getTime() + PR_LOOP_LIMITS.previewWaitMs
   sub(ctx, step, "Waiting for its Vercel preview…", "pending")
   for (;;) {
-    const url = await deps.host.previewUrl(head)
+    // A failed read (rate limit, a blip) is "not yet", never a guess.
+    const url = await deps.host.previewUrl(head).catch(() => null)
     if (isUnsupported(url)) return null
     if (url) return url
     if (ctx.signal.aborted || deps.clock.now().getTime() + PREVIEW_POLL_MS > until) return null

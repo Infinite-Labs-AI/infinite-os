@@ -88,10 +88,16 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
   const started = deps.clock.now().getTime()
   for (;;) {
     if (ctx.signal.aborted) return parked("Stopped while waiting for the merge.", number)
-    pr = await github.readPr(number)
+    if (deps.clock.now().getTime() - started > MAX_POLL_MS) return parked("Still not merged after a day of waiting.", number)
+    try {
+      pr = await github.readPr(number)
+    } catch {
+      // A failed read is retried on the next poll.
+      await deps.clock.sleep(PR_LOOP_LIMITS.mergePollMs, ctx.signal)
+      continue
+    }
     if (pr.state === "MERGED" && pr.mergeCommitOid) return saveMerge(ctx, deps, runId, pr.mergeCommitOid, pr.mergedAt)
     if (pr.state === "CLOSED") return parked("The pull request was closed without merging. Run `npx infinite-tag` to start a fresh run.", null)
-    if (deps.clock.now().getTime() - started > MAX_POLL_MS) return parked("Still not merged after a day of waiting.", number)
     await deps.clock.sleep(PR_LOOP_LIMITS.mergePollMs, ctx.signal)
   }
 }

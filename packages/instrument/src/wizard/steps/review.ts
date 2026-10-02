@@ -16,7 +16,7 @@ import { WIZARD_STEP_META } from "../contracts/steps.js"
 import { isGloballyDenied } from "../../git/commit.js"
 import { isGitHubAdapter, type GitHubHostAdapter } from "../../hosts/github.js"
 import { isUnsupported } from "../../hosts/other.js"
-import { parseBriefReview, printedReviewBrief, reviewerBrief } from "../../review/brief.js"
+import { isReviewResult, parseBriefReview, printedReviewBrief, reviewerBrief } from "../../review/brief.js"
 import { allowlistUnion, assertNoAgentAlive, manifestFiles, status, sub } from "../../review/context.js"
 import { parseUnifiedDiff } from "../../review/diff.js"
 import { job16Item, runFixRound, verifyFix } from "../../review/fix.js"
@@ -115,6 +115,8 @@ async function runReviewer(session: Session, reviewer: AgentKind, round: number,
         brief: `${brief}\n\nYour previous answer did not match the JSON schema. Return JSON only, exactly matching it.`
       })
     }
+    // Belt and braces: whatever the runner parsed must match review.schema.json before anything is posted.
+    if (!("error" in result) && !isReviewResult(result)) return { error: "unparseable" }
     return result
   } finally {
     await ship.git.worktreeRemove(worktree.dir)
