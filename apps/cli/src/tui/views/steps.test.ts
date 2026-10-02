@@ -16,6 +16,7 @@ import {
   stepGanttWidth,
   stepLabelWidth,
   stepsFromTrail,
+  stepStatusForView,
   stepStripLines,
   unsettledStepLines
 } from "./steps.js";
@@ -182,6 +183,20 @@ describe("step labels and statuses", () => {
     expect(refineStepStatus(done, [view("get_report", "partial"), view("get_report", "ready")])).toBe("ok");
     expect(refineStepStatus(step({ status: "fail", name: "get_report" }), [view("get_report", "partial")])).toBe("fail");
   });
+
+  // r4 flow-pause-06: `pausing on Meta ⧗ changed`. No transport status says it; the view does.
+  it("a call whose view says the thing changed on the provider is ⧗ (out of date), not ✗ and not ✓", () => {
+    const changed = { tool: "pause_item", state: "failed", outcome: "not_sent", stateReason: { code: "changed_on_meta", words: "It changed." } } as unknown as AnswerViewV1;
+    const done = step({ status: "ok", name: "mcp__app__pause_item", label: "pausing the item", result: "changed" });
+    expect(stepStatusForView(changed)).toBe("old");
+    expect(refineStepStatus(done, [changed])).toBe("old");
+    const row = stepStripLines([done], { width: 100, color: true, theme, nowMs: 1000, views: [changed] })[1]!;
+    expect(r4Segments(row).filter((part) => part.text.trim()).slice(-2)).toEqual(seg(["⧗", "amber"], ["changed", "dim"]));
+    // A write that plainly never left is still a failure.
+    const notSent = { tool: "pause_item", state: "failed", outcome: "not_sent" } as unknown as AnswerViewV1;
+    expect(stepStatusForView(notSent)).toBe("fail");
+    expect(refineStepStatus(done, [notSent])).toBe("fail");
+  });
 });
 
 describe("generic words for a call the app sent no words for", () => {
@@ -241,8 +256,22 @@ describe("a call's outcome from its complete frame", () => {
 
   it("never returns JSON or control sequences as a result", () => {
     expect(toolOutcome({ status: "ok", summary: '{"rows":3}' }).result).toBe("");
-    expect(toolOutcome({ status: "error", error: '[{"code":"x"}]' }).result).toBe("");
+    // A failure whose reason is JSON with no words in it says only that it failed.
+    expect(toolOutcome({ status: "error", error: '[{"code":"x"}]' }).result).toBe("failed");
     expect(toolOutcome({ status: "ok", summary: "\u001b[31m3 rows\u001b[0m" }).result).toBe("3 rows");
+  });
+
+  it("a failed call always says something: the transport's reason, the message inside a JSON error, else `failed`", () => {
+    expect(toolOutcome({ status: "error" })).toEqual({ status: "fail", result: "failed" });
+    expect(toolOutcome({ status: "error", words: { label: "reading the week" } })).toEqual({ status: "fail", result: "failed" });
+    expect(toolOutcome({ status: "error", error: '{"message":"Rate limit reached","code":429}' }).result).toBe("Rate limit reached");
+    expect(toolOutcome({ status: "error", error: '{"error":{"message":"The sample store is offline"}}' }).result).toBe("The sample store is offline");
+    expect(toolOutcome({ status: "error", summary: '{"error":"not allowed"}' }).result).toBe("not allowed");
+    // The message is scrubbed like any other words, and nested JSON is never printed.
+    expect(toolOutcome({ status: "error", error: '{"message":"\\u001b[31mnope\\u001b[0m"}' }).result).toBe("nope");
+    expect(toolOutcome({ status: "error", error: '{"message":"{\\"a\\":1}"}' }).result).toBe("failed");
+    // A finished call with no result still says nothing.
+    expect(toolOutcome({ status: "ok" })).toEqual({ status: "ok", result: "" });
   });
 
   it("a running call's progress is shown only when it is words", () => {
@@ -291,9 +320,10 @@ describe("a step that waits (r4 ▣)", () => {
     expect(refineStepStatus(first, views, steps)).toBe("ok");
     expect(refineStepStatus(second, views, steps)).toBe("off");
     const rows = stepStripLines(steps, { width: 100, color: false, theme, nowMs: 1000, views }).slice(1);
-    expect(rows[1]).toMatch(/pausing sample A.*✓$/u);
+    // A row that waited takes its card's state words once the card has moved on.
+    expect(rows[1]).toMatch(/pausing sample A.*✓ done$/u);
     expect(rows[2]).toMatch(/pausing sample C.*✗ refused$/u);
-    expect(rows[3]).toMatch(/pausing sample B.*·$/u);
+    expect(rows[3]).toMatch(/pausing sample B.*· dismissed$/u);
     expect(rows.join("\n")).not.toContain("waiting");
     // More calls than cards (or fewer): no telling which is whose, each keeps its own status.
     expect(refineStepStatus(first, [view("propose_change", "done")], steps)).toBe("wait");
@@ -305,14 +335,45 @@ describe("a step that waits (r4 ▣)", () => {
     const row = (views: AnswerViewV1[]) => stepStripLines([asking], { width: 100, color: false, theme, nowMs: 1000, views })[1]!;
     expect(row([])).toMatch(/▣ waiting for an answer$/u);
     expect(row([view("ask_which", "needs_answer")])).toMatch(/▣ waiting for an answer$/u);
-    expect(row([view("ask_which", "done")])).toMatch(/✓$/u);
+    expect(row([view("ask_which", "done")])).toMatch(/✓ done$/u);
     expect(row([view("ask_which", "done")])).not.toContain("waiting");
   });
 
   it("a waiting row that moved on no longer says it is waiting", () => {
     const rows = stepStripLines([waiting], { width: 100, color: false, theme, nowMs: 1000, views: [view("propose_change", "done")] });
-    expect(rows[1]).toMatch(/✓$/u);
+    expect(rows[1]).toMatch(/✓ done$/u);
     expect(rows[1]).not.toContain("waiting");
+  });
+
+  // r4: `waiting for your OK ▣ pause 1 ad` becomes `pausing on Meta ⠋ running`, then `✓ paused`;
+  // a card dismissed or expired keeps `waiting for your OK · dismissed`.
+  it("once its card is answered, a row labelled `waiting for your OK` says what is being done, and how it ended", () => {
+    const asked = step({ status: "wait", name: "mcp__app__propose_change", label: "waiting for your OK", result: "pause 1 item" });
+    const card = (state: AnswerViewV1["state"], over: Record<string, unknown> = {}) => ({ tool: "propose_change", state, ...over }) as unknown as AnswerViewV1;
+    const row = (views: AnswerViewV1[], from: TurnStep = asked) =>
+      stepStripLines([from], { width: 100, color: false, theme, nowMs: 1000, views })[1]!.replace(/\s*[━╍]+\s*/u, " | ").trim();
+    expect(row([])).toBe("waiting for your OK | ▣ pause 1 item");
+    expect(row([card("needs_yes")])).toBe("waiting for your OK | ▣ pause 1 item");
+    expect(row([card("applying")])).toMatch(/^pausing 1 item \| [⠀-⣿] running$/u);
+    expect(row([card("done")])).toBe("pausing 1 item | ✓ done");
+    expect(row([card("failed", { outcome: "not_sent" })])).toBe("pausing 1 item | ✗ not sent");
+    expect(row([card("failed", { outcome: "not_sent", stateReason: { code: "changed_on_meta", words: "It changed." } })])).toBe("pausing 1 item | ⧗ changed on Meta");
+    expect(row([card("outcome_unknown", { stateReason: { code: "still_running", words: "Still running.", short: "Still running" } })])).toBe("pausing 1 item | ? still running");
+    // Nothing was done: the row keeps its label and says why.
+    expect(row([card("cancelled")])).toBe("waiting for your OK | · dismissed");
+    expect(row([card("expired")])).toBe("waiting for your OK | · expired");
+    // No verb in what it waited for: the card's own OK label names it, else the label stays (r4 `waiting for your OK ✓ ~$0.52 · OK`).
+    const priced = step({ status: "wait", name: "mcp__app__propose_change", label: "waiting for your OK", result: "3 items" });
+    expect(row([card("done", { approval: { confirmLabel: "Launch 3 items" } })], priced)).toBe("launching | ✓ done");
+    expect(row([card("done")], priced)).toBe("waiting for your OK | ✓ done");
+    // A label of its own is never replaced.
+    expect(row([card("done")], step({ status: "wait", name: "mcp__app__propose_change", label: "pricing 3 images", result: "" }))).toBe("pricing 3 images | ✓ done");
+  });
+
+  it("a proper noun that starts the card's words keeps its capital", () => {
+    const asked = step({ status: "wait", name: "mcp__app__propose_change", label: "waiting for your OK", result: "" });
+    const view = { tool: "propose_change", state: "no_change", stateReason: { code: "x", words: "Meta already shows it paused.", short: "Meta shows it paused" } } as unknown as AnswerViewV1;
+    expect(stepStripLines([asked], { width: 100, color: false, theme, nowMs: 1000, views: [view] })[1]).toMatch(/· Meta shows it paused$/u);
   });
 
   it("reads a pending trail line as waiting", () => {

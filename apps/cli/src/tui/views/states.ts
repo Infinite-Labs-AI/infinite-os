@@ -93,9 +93,18 @@ export function stateHeadFor(view: StateHeadInput): StateHead {
   return short ? { ...base, words: short } : base;
 }
 
+/**
+ * Whether the view says its write never left because the thing had changed on
+ * the provider since the user looked (`failed` + `not_sent` + the
+ * `changed_on_meta` reason): out of date (⧗), not a failure (✗).
+ */
+export function isChangedOnProvider(view: Pick<StateHeadInput, "state" | "outcome" | "stateReason">): boolean {
+  return view.state === "failed" && view.outcome === "not_sent" && reasonCode(view.stateReason) === CHANGED_ON_PROVIDER_CODE;
+}
+
 function baseHead(view: StateHeadInput): StateHead {
   if (view.state === "failed" && view.outcome === "not_sent") {
-    return reasonCode(view.stateReason) === CHANGED_ON_PROVIDER_CODE ? CHANGED_ON_PROVIDER : NOT_SENT;
+    return isChangedOnProvider(view) ? CHANGED_ON_PROVIDER : NOT_SENT;
   }
   if (view.kind === "images" && (view.state === "working" || view.state === "background")) {
     return RUNNING_IMAGES;

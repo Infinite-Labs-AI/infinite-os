@@ -108,7 +108,8 @@ describe("one row per call, never merged by tool name", () => {
     expect(rows()).toEqual([
       { label: "listing sample rows", status: "ok", result: "" },
       { label: "getting sample report", status: "ok", result: "" },
-      { label: "listing sample rows", status: "fail", result: "" }
+      // A failure the transport gave no reason for still says it failed.
+      { label: "listing sample rows", status: "fail", result: "failed" }
     ]);
     expect(new Set(getTurnState().steps.map((step) => step.id)).size).toBe(3);
   });

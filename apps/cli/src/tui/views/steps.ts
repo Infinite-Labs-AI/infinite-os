@@ -16,6 +16,11 @@
 // - A call that waits for the person's OK is `▣` (amber), never `✓`; with no
 //   result of its own it says `waiting for your OK` (`waiting for an answer`
 //   when it asked a question instead).
+// - Once its card is answered, a row that waited takes its words from the
+//   card: a row labelled `waiting for your OK` says what is being done
+//   (`pausing 1 ad`), and its result is `running`, then how the card ended
+//   (`done`, `dismissed`, `not sent`).
+// - A failed (✗) call always says something: its reason, else `failed`.
 // - A failed (✗) or unknown (?) call whose reason was cut to the result column
 //   prints the whole reason on dim rows under it, indented 4.
 import type { AnswerViewState, AnswerViewV1 } from "@infinite-os/types";
@@ -26,7 +31,9 @@ import { displayWidth, padEndCells } from "../lib/display-width.js";
 import { compactPreview, defuseTrailStructure, parseToolTrailResultLine, splitToolDuration } from "../lib/text.js";
 import { ansi, type Theme, type ThemeStyle } from "../theme.js";
 import type { Msg } from "../types.js";
+import { shortOkVerb } from "../keys/keymap.js";
 import { viewText, wrapText } from "./primitives.js";
+import { isChangedOnProvider, stateHeadFor } from "./states.js";
 
 /** r4's result column. */
 const RESULT_WIDTH = 22;
@@ -192,11 +199,38 @@ function resultWords(value: string | undefined): string {
   return text && !/^[{[]/u.test(text) ? compactPreview(text, 72) : "";
 }
 
+/** What a failed call says when the transport gave no reason that reads as words. */
+export const FAILED_WORDS = "failed";
+
+/**
+ * Why a call failed, as words. A reason that is already words is used as it
+ * is. A JSON error object is never printed, but the short message it carries
+ * is (`message`, `error`, `error.message`, `reason`, `detail`), scrubbed like
+ * any other words. "" when there is none.
+ */
+function failureWords(value: string | undefined): string {
+  const plain = resultWords(value);
+  if (plain || typeof value !== "string") return plain;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    return "";
+  }
+  const field = (record: unknown, key: string): unknown =>
+    typeof record === "object" && record !== null && !Array.isArray(record) ? (record as Record<string, unknown>)[key] : undefined;
+  const nested = field(parsed, "error");
+  const said = [field(parsed, "message"), nested, field(nested, "message"), field(parsed, "reason"), field(parsed, "detail")]
+    .find((item): item is string => typeof item === "string" && item.trim() !== "");
+  return said ? resultWords(said) : "";
+}
+
 /**
  * A finished call's status and one-line result. With the app's words
  * (`step.words.v1`) the result is the app's, or nothing when it sent none:
  * the transport's raw summary never stands in for it. A failure with no
- * worded result keeps the transport's reason, so why it failed stays readable.
+ * worded result keeps the transport's reason, so why it failed stays readable;
+ * with no reason at all it still says `failed`, never a bare ✗.
  * A call that asked a question (`needs_clarification`) and has no result of
  * its own says it waits for an answer: a question is not an approval.
  */
@@ -207,12 +241,13 @@ export function toolOutcome(input: {
   words?: StepWords | null;
 }): { status: StepStatus; result: string } {
   const status = input.error ? "fail" : stepStatusOf(input.status);
-  const reason = resultWords(input.error || (status === "fail" ? input.summary : undefined));
+  const reason = failureWords(input.error || (status === "fail" ? input.summary : undefined));
   const asked = input.status === "needs_clarification" && status === "wait" ? WAITING_ANSWER_WORDS : "";
+  const failed = status === "fail" ? reason || FAILED_WORDS : "";
   if (input.words) {
-    return { status, result: input.words.result ?? (status === "fail" ? reason : asked) };
+    return { status, result: input.words.result ?? (status === "fail" ? failed : asked) };
   }
-  return { status, result: reason || resultWords(input.summary) || asked };
+  return { status, result: failed || resultWords(input.summary) || asked };
 }
 
 /** A running call's latest progress, when it reads as words (`1 of 3`); "" for JSON, an id or nothing. */
@@ -298,38 +333,80 @@ const STATE_STATUS: Partial<Record<AnswerViewState, StepStatus>> = {
   cmdl_only: "off"
 };
 
-/** The Steps status a view's state stands for (needs_yes → ▣, partial → ◐, …); null = the call's own. */
-export function stepStatusForView(view: Pick<AnswerViewV1, "state">): StepStatus | null {
+/**
+ * The Steps status a view stands for (needs_yes → ▣, partial → ◐, …); null =
+ * the call's own. A write that never left because the thing had changed on
+ * the provider is out of date (⧗, r4 `pausing on Meta ⧗ changed`): no
+ * transport status says that, the view does.
+ */
+export function stepStatusForView(view: Pick<AnswerViewV1, "state" | "outcome" | "stateReason">): StepStatus | null {
+  if (isChangedOnProvider(view)) return "old";
   return STATE_STATUS[view.state] ?? null;
 }
 
 /**
- * A finished call's status, refined by the view it drew (matched by bare tool
- * name): a call whose view is partial is ◐, out of date ⧗, and so on. A call
- * that waits for the person's OK follows its card the same way: working (⠋)
- * once the yes is sent, then done, dismissed (·) or failed.
- *
+ * The view a call drew (matched by bare tool name), when it can be told.
  * Several calls of one tool (`pause these 2`) each follow their own view,
  * paired in order: the turn's nth such call drew the nth view of that tool.
  * That holds only when there are as many such calls as views; with `steps`
- * absent, or the counts apart, there is no telling which view is whose and
- * the call keeps its own status. A call with no view keeps its own status.
+ * absent, or the counts apart, there is no telling which view is whose. A
+ * failed or stopped call drew none.
+ */
+function viewDrawnBy(step: TurnStep, views: readonly AnswerViewV1[], steps: readonly TurnStep[]): AnswerViewV1 | undefined {
+  if (!canFollowView(step)) return undefined;
+  const matches = views.filter((view) => drewView(step, view));
+  if (!matches.length) return undefined;
+  // The calls that could have drawn these views: a failed or stopped call drew none.
+  const calls = steps.filter((other) => canFollowView(other) && matches.some((view) => drewView(other, view)));
+  return calls.length === matches.length ? matches[calls.indexOf(step)] : undefined;
+}
+
+/**
+ * A finished call's status, refined by the view it drew (`viewDrawnBy`): a
+ * call whose view is partial is ◐, out of date ⧗, and so on. A call that
+ * waits for the person's OK follows its card the same way: working (⠋) once
+ * the yes is sent, then done, dismissed (·) or failed. A call with no view,
+ * or one whose view cannot be told, keeps its own status.
  */
 export function refineStepStatus(
   step: TurnStep,
   views: readonly AnswerViewV1[],
   steps: readonly TurnStep[] = [step]
 ): StepStatus {
-  if (!canFollowView(step)) return step.status;
-  const matches = views.filter((view) => drewView(step, view));
-  if (!matches.length) return step.status;
-  // The calls that could have drawn these views: a failed or stopped call drew none.
-  const calls = steps.filter((other) => canFollowView(other) && matches.some((view) => drewView(other, view)));
-  const view = calls.length === matches.length ? matches[calls.indexOf(step)] : undefined;
+  const view = viewDrawnBy(step, views, steps);
   if (!view) return step.status;
-  const state = view.state;
-  if (step.status === "wait" && (state === "applying" || state === "working")) return "run";
-  return STATE_STATUS[state] ?? "ok";
+  if (step.status === "wait" && (view.state === "applying" || view.state === "working")) return "run";
+  return stepStatusForView(view) ?? "ok";
+}
+
+/** What a row that waited says while its card is being applied (r4 `pausing on Meta ⠋ running`). */
+const APPLYING_WORDS = "running";
+
+/**
+ * What a row that waited for an OK is doing once the OK is given (r4: `waiting
+ * for your OK` becomes `pausing on Meta`): what it waited for, when that
+ * starts with a verb (`pause 1 ad` → `pausing 1 ad`, `send to 214` → `sending
+ * to 214`), else the card's own OK label's verb (`Launch 3 ads` →
+ * `launching`). Null when neither names it: the row keeps its label.
+ */
+function appliedLabel(waitedFor: string, view: AnswerViewV1): string | null {
+  const [first = "", ...rest] = waitedFor.split(/\s+/u).filter(Boolean);
+  if (VERBS.has(first.toLowerCase())) {
+    return [gerund(first.toLowerCase()), ...rest].join(" ");
+  }
+  const approval = view.approval as { confirmLabel?: unknown } | undefined;
+  const okLabel = typeof approval?.confirmLabel === "string" ? viewText(approval.confirmLabel) : "";
+  const verb = okLabel ? shortOkVerb(okLabel) : "";
+  return verb && VERBS.has(verb) ? gerund(verb) : null;
+}
+
+/** A state head's words as a row's result: the first letter lowered, unless the word is a name (`Meta`, `GA4`). */
+function resultCase(words: string): string {
+  const first = words.split(/\s+/u)[0] ?? "";
+  if (!first || PROPER_NOUNS[first.toLowerCase()] === first || first.slice(1) !== first.slice(1).toLowerCase()) {
+    return words;
+  }
+  return `${first.charAt(0).toLowerCase()}${words.slice(1)}`;
 }
 
 /** Only a call that finished, or waits for the person, has a view to follow. */
@@ -374,13 +451,22 @@ export function stepStripLines(steps: readonly TurnStep[], options: StepStripOpt
 /** What one call's row says: its status (after its view), glyph, tone, label and result words. */
 function stepRowFacts(step: TurnStep, steps: readonly TurnStep[], options: Pick<StepStripOptions, "views" | "nowMs">) {
   const now = options.nowMs ?? Date.now();
+  const view = viewDrawnBy(step, options.views ?? [], steps);
   const status = refineStepStatus(step, options.views ?? [], steps);
   const { glyph, tone } = GLYPHS[status];
   const mark = status === "run" ? SPINNER[Math.floor(Math.max(0, now - step.startedAt) / SPINNER_MS) % SPINNER.length]! : glyph;
-  // A step still waiting says so (unless its label already does); once its card moved on, the words go with it.
   const said = viewText(step.result);
-  const own = said === WAITING_ANSWER_WORDS && status !== "wait" ? "" : said;
-  const result = own || (status === "wait" && viewText(step.label) !== WAITING_WORDS ? WAITING_WORDS : "");
+  if (step.status === "wait" && view && status !== "wait") {
+    // The card it waited on has moved on: the row says what is being done, then how the card ended.
+    const acted = status !== "off" && viewText(step.label) === WAITING_WORDS ? appliedLabel(said, view) : null;
+    return {
+      status, mark, tone,
+      label: acted ?? viewText(step.label),
+      result: status === "run" ? APPLYING_WORDS : resultCase(stateHeadFor(view).words)
+    };
+  }
+  // A step still waiting says so (unless its label already does).
+  const result = said || (status === "wait" && viewText(step.label) !== WAITING_WORDS ? WAITING_WORDS : "");
   return { status, mark, tone, label: viewText(step.label), result };
 }
 
