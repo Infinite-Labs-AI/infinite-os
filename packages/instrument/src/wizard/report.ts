@@ -81,6 +81,9 @@ export const REASON_TEXT: Record<Reason, string> = {
   test_error: "the test could not finish (it crashed or ran out of time)"
 }
 
+/** §3i.1: `columns.live_today.sha` is always null (the cloud's parser refuses any other value). */
+export const LIVE_TODAY_SHA_RULE = "columns.live_today.sha must be null: the live site today has no commit SHA (§3i.1)"
+
 export class ReportRuleError extends Error {
   constructor(message: string) {
     super(message)
@@ -373,6 +376,7 @@ export function buildColumn(column: ReportColumnId, input: ColumnInput): ReportC
     }
   }
   if (column === "in_pr" && !input.meta.sha) throw new ReportRuleError("in_pr: the column is keyed to the PR head (meta.sha is required)")
+  if (column === "live_today" && input.meta.sha !== null) throw new ReportRuleError(LIVE_TODAY_SHA_RULE)
   const at = input.meta.measuredAt ?? input.facts.map((fact) => fact.at).sort().at(-1) ?? new Date(0).toISOString()
   const finishLine: Partial<Record<FinishLineId, Cell>> = {}
   for (const id of FINISH_LINE_IDS) finishLine[id] = finishLineCell(id, column, input.facts, input.runId, at, input.unmeasured, input.runStartedAt ?? null)
@@ -474,9 +478,17 @@ export function buildReport(input: BuildInput, now: () => Date = () => new Date(
     const cells = {} as Record<ReportColumnId, Cell>
     for (const column of REPORT_COLUMN_IDS) {
       const spec = FINISH_LINE_SOURCES[id][column]
+      // A pending-by-design cell (§3z.8: it waits for a real event or day 7) is pending for ITS OWN reason even
+      // before its column is measured, as `finishLineCell` builds it when a measured column has no reading; the
+      // cloud refuses `ga4_key_events_received × proven_live` with any reason but `needs_7_days` (round 3).
+      const byDesign = spec.fixedState === "pending" && spec.reason !== undefined ? spec.reason : null
       cells[column] = spec.notMeasured
         ? dashCell("wizard_check", generatedAt, runId, spec.notMeasured)
-        : cellFor(column, (snapshot) => snapshot.finishLine[id], () => ({ ...missing(column), provenance: { source: dashSource(id, column), at: generatedAt, runId } }))
+        : cellFor(column, (snapshot) => snapshot.finishLine[id], () =>
+            byDesign
+              ? dashCell(FINISH_LINE_INPUT_PROVENANCE[spec.inputs[0]!], generatedAt, runId, byDesign, "pending")
+              : { ...missing(column), provenance: { source: dashSource(id, column), at: generatedAt, runId } }
+          )
     }
     return { n: index + 1, id, cells }
   })
@@ -503,6 +515,15 @@ export function assertReport(report: ReportV2, runStartedAt: string | null = nul
   if (report.schema !== REPORT_SCHEMA) problems.push(`schema is ${JSON.stringify(report.schema)}`)
   if (report.rows.map((row) => row.id).join() !== REPORT_ROWS.map((row) => row.id).join()) problems.push("rows are not the §3i.4 rows in order")
   if (report.finishLine.map((line) => line.id).join() !== FINISH_LINE_IDS.join()) problems.push("finishLine is not the 14 ids in order")
+  // §3i.1, as the cloud parser refuses it (final verify F17): the live site has no commit; the PR and the merge
+  // columns carry a full 40-hex SHA or null.
+  if (problems.length === 0) {
+    if (report.columns.live_today.sha !== null) problems.push(LIVE_TODAY_SHA_RULE)
+    for (const column of ["in_pr", "proven_live"] as const) {
+      const sha = report.columns[column].sha
+      if (sha !== null && !/^[0-9a-f]{40}$/.test(sha)) problems.push(`columns.${column}.sha must be a 40-hex commit SHA or null`)
+    }
+  }
   if (problems.length > 0) throw new ReportRuleError(problems.join("; "))
   for (const row of report.rows) for (const column of REPORT_COLUMN_IDS) assertCell(`rows.${row.id}.${column}`, row.cells[column], report.runId, runStartedAt)
   for (const line of report.finishLine) {

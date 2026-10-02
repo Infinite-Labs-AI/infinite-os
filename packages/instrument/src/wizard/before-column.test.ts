@@ -18,7 +18,6 @@ function source(overrides: Partial<LiveTodaySource> = {}): LiveTodaySource {
   return {
     runId: RUN_ID,
     measuredAt: AT,
-    baseSha: "0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d",
     keys,
     expect: testExpectFromKeys(keys),
     census: census([{ tool: "ga4", kind: "gtag_config", id: "G-FAKE00001", file: "app/layout.tsx", line: 2 }]),
@@ -44,7 +43,8 @@ describe("liveTodayColumnInput", () => {
     const allowed = new Set(FINISH_LINE_IDS.flatMap((id) => FINISH_LINE_SOURCES[id].live_today.inputs))
     for (const fact of input.facts) expect(allowed.has(fact.input)).toBe(true)
     for (const row of Object.values(input.rows)) expect(PROVENANCE_SOURCES).toContain(row!.source)
-    expect(input.meta).toEqual({ measuredAt: AT, sha: "0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d" })
+    // F17: §3i.1 and the cloud parser want null here (the live site has no commit SHA).
+    expect(input.meta).toEqual({ measuredAt: AT, sha: null })
     // The meta_domains check maps to no live_today input (it is not a finish-line reading here).
     expect(input.facts.some((fact) => fact.checkId === "meta_domains")).toBe(false)
   })

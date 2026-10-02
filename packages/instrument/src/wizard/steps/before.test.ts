@@ -437,9 +437,11 @@ describe("step before: the hand-off", () => {
     })
     await s.run()
     expect(inputs).toHaveLength(1)
-    const input = inputs[0] as { runId: string; meta: { measuredAt: string; sha: string }; facts: Array<{ input: string }>; rows: Record<string, { source: string }> }
+    const input = inputs[0] as { runId: string; meta: { measuredAt: string; sha: string | null }; facts: Array<{ input: string }>; rows: Record<string, { source: string }> }
     expect(input.runId).toBe(RUN_ID)
-    expect(input.meta.sha).toBe("0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d")
+    // F17: never the base commit (the branch was cut from 0a1b…, the state holds it), always null.
+    expect(s.state.git?.baseSha).toBe("0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d")
+    expect(input.meta.sha).toBeNull()
     expect(input.facts.map((fact) => fact.input)).toEqual(expect.arrayContaining(["dry_live.graded", "t1.redirect_walk", "baseline.preview_share", "keys.consent_mode"]))
     expect(s.state.report.live_today).toEqual({ meta: input.meta, cells: {}, finishLine: {} })
     expect(s.state.report.in_pr).toBeNull()
@@ -449,7 +451,7 @@ describe("step before: the hand-off", () => {
     const s = setup({ buildLiveTodayColumn })
     expect(await s.run()).toMatchObject({ kind: "ok" })
     const column = s.state.report.live_today!
-    expect(column.meta.sha).toBe("0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d")
+    expect(column.meta.sha).toBeNull()
     expect(Object.keys(column.cells).length).toBeGreaterThan(0)
     expect(Object.keys(column.finishLine).length).toBeGreaterThan(0)
     // negative: no builder → no column (the test harness's own default)

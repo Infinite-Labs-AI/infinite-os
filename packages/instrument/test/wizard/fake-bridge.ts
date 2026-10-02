@@ -15,7 +15,11 @@
 //   → 400 `invalid_request`; a `real_visit` without the tag's granted proof claim → 409 `claimed_by_other`;
 // - `runs.proof-claim`: one claim (`pending|pending_desktop → proving`); any other state → 409 with `state`;
 // - `runs.patch`: `phase` only moves forward (400), `mergeSha` is set once (400), `proofState` only while
-//   `proving` (409 `claimed_by_other`; the same result again is a no-op).
+//   `proving` (409 `claimed_by_other`; the same result again is a no-op), plus the cloud's own body rules
+//   (`cloudPatchRefusal`: conversion-name pattern, ≤ 20 names, 40-hex SHAs, `producer` with `proofState`,
+//   no `phase:"proven"` before a proof);
+// - `report`: the cloud's report parser (`parseCloudReport`, a port of 1bu-1's `parseReportV2`, final verify
+//   F17): a report the real cloud refuses is a 400 `invalid_request` naming the field, never a 201.
 //
 // It records every call in order (`calls`) and writes a descriptor (0700 dir, 0600 file) into a temp
 // `GROWTH_OS_HOME`. Every response it sends is checked against the verb's exact response shape, so the fake
@@ -56,6 +60,7 @@ import { shapeErrors } from "../../src/wizard/contracts/shape.js"
 import type { ReceiptsResponseFields } from "../../src/wizard/contracts/receipts.js"
 import { testRequestModeErrors, type TestMode, type TestResult, type TestRunFixtureCase, type TestRunRequest } from "../../src/wizard/contracts/test-engine.js"
 import { normalizeHost } from "../../src/wizard/contracts/host-deny.js"
+import { cloudPatchRefusal, parseCloudReport } from "./cloud-rules.js"
 
 const CONTRACTS_DIR = new URL("../../contracts/tag-wizard-v1/", import.meta.url)
 
@@ -169,6 +174,8 @@ export interface FakeBridge {
 }
 
 const RUN_ID = "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+/** The run's start on the fake cloud's clock (`runs.start` answers it; the report parser's rule 3 reads it). */
+export const FAKE_RUN_STARTED_AT = "2026-10-02T09:02:00.000Z"
 const LINK_ID = "lk_FAKElinkAcmeStore00000"
 const TEST_RUN_IDS: Record<TestMode, string> = {
   dry_live: "tr_FAKEdryLive00000000000",
@@ -466,8 +473,14 @@ export async function startFakeBridge(options: StartFakeBridgeOptions = {}): Pro
           return ok({ mergeDeployment: state.mergeDeployment, serving: state.serving, target: "production" })
         }
         case "runs.start":
-          script.run = { ...script.run, runId: RUN_ID, worker: reqBody.worker as WizardRunPublic["worker"], reviewer: reqBody.reviewer as WizardRunPublic["reviewer"] }
-          return ok({ runId: RUN_ID, startedAt: "2026-10-02T09:02:00.000Z" })
+          script.run = {
+            ...script.run,
+            runId: RUN_ID,
+            startedAt: FAKE_RUN_STARTED_AT,
+            worker: reqBody.worker as WizardRunPublic["worker"],
+            reviewer: reqBody.reviewer as WizardRunPublic["reviewer"]
+          }
+          return ok({ runId: RUN_ID, startedAt: FAKE_RUN_STARTED_AT })
         case "runs.proof-claim":
           if (script.proofClaim === "lost") return fail(res, record, requestId, "claimed_by_other", { state: "proving" })
           // ONE claim: only `pending | pending_desktop → proving` (C1's atomic conditional update).
@@ -478,6 +491,8 @@ export async function startFakeBridge(options: StartFakeBridgeOptions = {}): Pro
           return ok({ granted: true, proofState: "proving" })
         case "runs.patch": {
           const patch = (reqBody.patch ?? {}) as Partial<WizardRunPublic> & { clickTestedConversions?: string[] }
+          const refusal = cloudPatchRefusal(reqBody as { patch?: Record<string, unknown>; producer?: unknown }, script.run)
+          if (refusal) return fail(res, record, requestId, "invalid_request", { field: refusal.field, message: refusal.reason })
           if (patch.phase !== undefined && !phaseMoveAllowed(script.run.phase, patch.phase)) {
             return fail(res, record, requestId, "invalid_request", { field: "patch.phase", message: `phase only moves forward (the run is ${script.run.phase}).` })
           }
@@ -517,6 +532,17 @@ export async function startFakeBridge(options: StartFakeBridgeOptions = {}): Pro
         case "receipts":
           return ok(script.receipts ? { ...structuredClone(script.receipts) } : strip(fixtureResponse("receipts")))
         case "report": {
+          // As the cloud's POST report route: the run must exist, then every cell is parsed at the door.
+          const runId = decodeURIComponent(url.pathname.split("/")[3] ?? "")
+          if (runId !== script.run.runId) return fail(res, record, requestId, "not_found")
+          const verdict = parseCloudReport(reqBody.report, {
+            runId,
+            startedAt: script.run.startedAt,
+            phase: reqBody.phase as "live_today" | "in_pr" | "proven_live" | "day7",
+            producer: reqBody.producer as "tag" | "desktop" | "cloud",
+            partial: reqBody.partial as boolean
+          })
+          if (!verdict.ok) return fail(res, record, requestId, "invalid_request", { field: verdict.field, message: verdict.reason })
           const report = reqBody.report as { schema: string; runId: string }
           return ok({ id: randomUUID(), phase: reqBody.phase, storedAt: "2026-10-02T09:46:00.000Z", echo: { schema: report.schema, runId: report.runId } })
         }

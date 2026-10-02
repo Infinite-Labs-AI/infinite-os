@@ -540,7 +540,6 @@ export function createBeforeStep(options: BeforeStepOptions = {}): WizardStep<"b
               liveTodayColumnInput({
                 runId,
                 measuredAt,
-                baseSha: ctx.state.get().git?.baseSha ?? null,
                 keys,
                 expect,
                 census,

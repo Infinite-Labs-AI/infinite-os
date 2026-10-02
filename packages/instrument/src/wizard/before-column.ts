@@ -52,7 +52,6 @@ export interface LiveTodayColumnInput {
 export interface LiveTodaySource {
   runId: string
   measuredAt: string
-  baseSha: string | null
   keys: TagKeys
   expect: TestExpect
   census: CensusResult
@@ -253,7 +252,9 @@ export function liveTodayColumnInput(source: LiveTodaySource): LiveTodayColumnIn
 
   return {
     runId: source.runId,
-    meta: { measuredAt: at, sha: source.baseSha },
+    // §3i.1: the live site today has no commit SHA (the cloud refuses any other value); the column is keyed to
+    // when it was measured, never to the branch's base commit (final verify F17).
+    meta: { measuredAt: at, sha: null },
     facts,
     rows: rowsFor(source, tools, grades, host, split, window)
   }

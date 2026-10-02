@@ -15,7 +15,8 @@ import vm from "node:vm"
 import { afterEach, beforeAll, describe, expect, it } from "vitest"
 
 import { envProxyFetch } from "../checks/live/env-proxy-fetch.js"
-import type { FakeBridgeCall } from "../../test/wizard/fake-bridge.js"
+import { parseCloudReport, type CloudReportContext } from "../../test/wizard/cloud-rules.js"
+import { FAKE_RUN_STARTED_AT, type FakeBridgeCall } from "../../test/wizard/fake-bridge.js"
 import {
   BUILT_CLI,
   FAKE_BIN,
@@ -62,9 +63,30 @@ import {
 const RUN_ID = "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
 const RUN_TIMEOUT = 240_000
 
+/**
+ * Final verify F17: every report a run POSTed, replayed through the cloud's report parser (the port in
+ * `test/wizard/cloud-rules.ts`). The fake bridge applies the same parser at the door; this replay names each
+ * refused report in the test's own failure, whatever the run's exit code was.
+ */
+function cloudRefusedReports(calls: readonly FakeBridgeCall[]): string[] {
+  const refused: string[] = []
+  for (const call of calls.filter((entry) => entry.verb === "report")) {
+    const body = call.body as { phase: CloudReportContext["phase"]; producer: CloudReportContext["producer"]; partial: boolean; report: unknown }
+    const runId = decodeURIComponent(call.path.split("/")[3] ?? "")
+    const verdict = parseCloudReport(body.report, { runId, startedAt: FAKE_RUN_STARTED_AT, phase: body.phase, producer: body.producer, partial: body.partial })
+    if (!verdict.ok) refused.push(`report(${body.phase}) → HTTP ${call.status}: ${verdict.field}: ${verdict.reason}`)
+  }
+  return refused
+}
+
 const worlds: E2eWorld[] = []
 afterEach(async () => {
-  while (worlds.length > 0) await worlds.pop()!.close()
+  while (worlds.length > 0) {
+    const w = worlds.pop()!
+    const refused = cloudRefusedReports(w.bridge.calls)
+    await w.close()
+    expect(refused, "a report the real cloud refuses (final verify F17)").toEqual([])
+  }
 })
 
 beforeAll(() => {
@@ -277,6 +299,15 @@ describe("the offline end-to-end run (§4.3)", () => {
     const end = run.ofType("run.end")
     expect(end).toHaveLength(1)
     expect(end[0]).toMatchObject({ exitCode: 0, runId: RUN_ID, prUrl: "https://github.com/acme/acme-store/pull/42", reportPath: ".infinite/wizard/report.md" })
+    // F17: one report per measured column, each stored (201) by the cloud's own parser, and each passes the replay.
+    const reports = w.bridge.callsFor("report")
+    expect(reports.map((call) => [(call.body as { phase: string }).phase, call.status]), why).toEqual([
+      ["live_today", 201],
+      ["in_pr", 201],
+      ["proven_live", 201]
+    ])
+    expect(cloudRefusedReports(reports)).toEqual([])
+    for (const call of reports) expect((call.body as { report: { columns: { live_today: { sha: unknown } } } }).report.columns.live_today.sha).toBeNull()
     expect(w.tripwire.connections, "something tried to reach a network through the proxy").toEqual([])
     // The live checks read the FIXTURE production site; nothing else was fetched (a third-party read was
     // refused in-process, never sent), and Node's own fetch never left loopback.

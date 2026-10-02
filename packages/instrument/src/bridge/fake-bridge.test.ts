@@ -6,7 +6,8 @@ import { join } from "node:path"
 
 import { afterEach, describe, expect, it } from "vitest"
 
-import { deployCanceledThenServing, loadTestRunCases, phaseMoveAllowed, startFakeBridge, type FakeBridge } from "../../test/wizard/fake-bridge.js"
+import { deployCanceledThenServing, loadTestRunCases, loadVerbFixtures, phaseMoveAllowed, startFakeBridge, type FakeBridge } from "../../test/wizard/fake-bridge.js"
+import type { ReportV2 } from "../wizard/contracts/report.js"
 import type { TestRunRequest } from "../wizard/contracts/test-engine.js"
 import { FAKE_BRIDGE_TOKEN } from "../wizard/contracts/bridge.js"
 import { openTagBridge } from "./client.js"
@@ -230,6 +231,48 @@ describe("fake bridge refuses what D2 and C1 refuse", () => {
     const sha = "9f1e2d3c4b5a69788796a5b4c3d2e1f0a9b8c7d6"
     await client.patchRun(RUN, { mergeSha: sha })
     await expect(client.patchRun(RUN, { mergeSha: "0".repeat(40) })).rejects.toMatchObject({ status: 400, field: "patch.mergeSha" })
+  })
+
+  it("report (F17): the cloud's parser at the door: the fixture report is stored, a report the cloud refuses is a 400 naming the field", async () => {
+    const bridge = await fake()
+    const client = await linkedClient(bridge)
+    const fixture = (loadVerbFixtures().find((row) => row.verb === "report")!.request as { report: ReportV2 }).report
+    expect(await client.postReport(RUN, "in_pr", structuredClone(fixture))).toMatchObject({ phase: "in_pr", echo: { runId: RUN } })
+
+    // The round-3 failure: the base commit in the live_today column. The real cloud refused it; so does the fake now.
+    const withBase = structuredClone(fixture)
+    withBase.columns.live_today.sha = "0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d"
+    await expect(client.postReport(RUN, "live_today", withBase)).rejects.toMatchObject({ status: 400, code: "invalid_request", field: "report.columns.live_today.sha" })
+    const unearned = structuredClone(fixture)
+    const cell = unearned.rows[1]!.cells.in_pr
+    cell.display = "verified"
+    delete cell.provenance.receiptAt
+    await expect(client.postReport(RUN, "in_pr", unearned)).rejects.toMatchObject({ status: 400, field: "report.rows[1].cells.in_pr.display" })
+    // Another run's id in the path → 404, as the cloud's requireRun answers.
+    await expect(client.postReport("11111111-2222-4333-8444-555555555555", "in_pr", { ...structuredClone(fixture), runId: "11111111-2222-4333-8444-555555555555" })).rejects.toMatchObject({ status: 404, code: "not_found" })
+    expect(bridge.callsFor("report").map((call) => call.status)).toEqual([201, 400, 400, 404])
+  })
+
+  it("PATCH: the cloud's body rules the shape does not carry → 400 naming the field", async () => {
+    const bridge = await fake()
+    const client = await linkedClient(bridge)
+    await expect(client.patchRun(RUN, { approvedConversions: ["Sign Up"] })).rejects.toMatchObject({ status: 400, field: "patch.approvedConversions" })
+    await expect(client.patchRun(RUN, { approvedConversions: Array.from({ length: 21 }, (_, i) => `c${i}`) })).rejects.toMatchObject({ status: 400, field: "patch.approvedConversions" })
+    await expect(client.patchRun(RUN, { mergeSha: "abc123" })).rejects.toMatchObject({ status: 400, field: "patch.mergeSha" })
+    await expect(client.patchRun(RUN, {})).rejects.toMatchObject({ status: 400, field: "patch" })
+    // `phase: proven` while no proof has started (the deploy watch would skip the run for good).
+    await expect(client.patchRun(RUN, { phase: "proven" })).rejects.toMatchObject({ status: 400, field: "patch.phase" })
+    await client.claimProof(RUN, "tag")
+    // `proofState` names its producer (400 field producer, before the claim check).
+    // (the real client never sends it without one, so this one goes raw)
+    const noProducer = await raw(bridge, {
+      method: "PATCH",
+      path: `/v1/runs/${RUN}`,
+      headers: { "X-Infinite-Link-Id": "lk_FAKElinkAcmeStore00000", "Content-Type": "application/json" },
+      body: JSON.stringify({ protocolVersion: 1, requestId: "r-no-producer", patch: { proofState: "proven" } })
+    })
+    expect(noProducer).toMatchObject({ status: 400, body: { error: { code: "invalid_request", field: "producer" } } })
+    expect((await client.patchRun(RUN, { approvedConversions: ["sign_up"] })).run.approvedConversions).toEqual(["sign_up"])
   })
 
   it("phaseMoveAllowed mirrors C1: forward only, abandoned from an unfinished phase, nothing out of a finished run", () => {

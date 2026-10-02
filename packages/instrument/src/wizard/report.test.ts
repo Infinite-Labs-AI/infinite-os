@@ -198,6 +198,43 @@ describe("buildColumn (typed inputs → one column)", () => {
   it("the in_pr column is keyed to the PR head (negative: no sha throws)", () => {
     expect(() => buildColumn("in_pr", { runId: RUN, meta: { measuredAt: AT, sha: null }, facts: [], rows: {} })).toThrow(ReportRuleError)
   })
+
+  it("round 3: with no proven column yet, a pending-by-design cell keeps its own reason (the cloud refuses ga4 key events with any other)", () => {
+    const snapshots = snapshotsOf(example)
+    for (const pending of ["deploy", "open_infinite"] as const) {
+      const report = builder.build({
+        runId: RUN,
+        tagVersion: "0.12.0",
+        site: { repoLabel: "github.com/acme/acme-store", productionHost: "www.acme-store.com" },
+        columns: { live_today: snapshots.live_today, in_pr: snapshots.in_pr, proven_live: null },
+        provenLivePending: pending,
+        day7: null,
+        notes: []
+      })
+      const proven = (id: string) => report.finishLine.find((line) => line.id === id)!.cells.proven_live
+      expect(proven("ga4_key_events_received")).toMatchObject({ value: null, state: "pending", reason: "needs_7_days", provenance: { source: "cloud_read" } })
+      expect(proven("conversions_server_side")).toMatchObject({ state: "pending", reason: "waiting_real_event" })
+      // negative: a cell that is not pending by design still says what the column waits for.
+      expect(proven("each_tool_once")).toMatchObject({ state: "pending", reason: pending === "deploy" ? "pending_deploy" : "pending_open_infinite" })
+    }
+  })
+
+  it("F17: the live_today column has no commit SHA (§3i.1; the cloud refuses any other value)", () => {
+    const base = "0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d"
+    expect(buildColumn("live_today", { runId: RUN, meta: { measuredAt: AT, sha: null }, facts: [], rows: {} }).meta.sha).toBeNull()
+    // negative: the branch's base commit in the column meta is refused by the column builder…
+    expect(() => buildColumn("live_today", { runId: RUN, meta: { measuredAt: AT, sha: base }, facts: [], rows: {} })).toThrow(/live_today\.sha must be null/)
+    // …and by the report rules, for a snapshot handed in from a state file and for a report edited after its build.
+    const snapshots = snapshotsOf(example)
+    expect(() => buildFrom({ ...snapshots, live_today: { ...snapshots.live_today, meta: { measuredAt: AT, sha: base } } })).toThrow(/live_today\.sha must be null/)
+    const edited = structuredClone(buildFrom(snapshots))
+    edited.columns.live_today.sha = base
+    expect(() => builder.payload(edited)).toThrow(/live_today\.sha must be null/)
+    // the PR and merge columns: a full 40-hex SHA or null (a short SHA is refused, as the cloud does).
+    const short = structuredClone(buildFrom(snapshots))
+    short.columns.in_pr.sha = "1a2b3c4"
+    expect(() => builder.payload(short)).toThrow(/in_pr\.sha must be a 40-hex/)
+  })
 })
 
 describe("renderers", () => {
