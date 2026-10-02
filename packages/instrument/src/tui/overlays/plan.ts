@@ -13,7 +13,11 @@
 // - ENTER never approves a line that was not on screen. While a line that needs the user (an approval line or
 //   a thing only they can do) has not been shown in full, ENTER shows the next unread lines and says how many
 //   are left; ENTER approves once every one was shown. The overlay learns what was on screen from the box size
-//   the TTY UI passes to `onKey` (the same `OverlayContext` the frame drew with).
+//   the TTY UI passes to `onKey` (the same `OverlayContext` the frame drew with), and marks ONLY that screen:
+//   the screen after a key is drawn in a box measured for the new state, which can be a row shorter (final
+//   verify F18), so it is marked on the next key, once it was drawn.
+// - the box keeps its height while the plan scrolls (F19): the body takes every row it was given, so a notice
+//   or a shorter window never shrinks the box and brings the step list back above it.
 import { ASK_CANCELLED, type AskPayloads, type PlanLine } from "../../wizard/contracts/asks.js"
 import { wrapAnsi } from "../ansi.js"
 import type { Key } from "../keys.js"
@@ -226,6 +230,10 @@ function render(payload: PlanPayload, state: PlanState, ctx: OverlayContext): Ov
         : null
   const shown = at.tall ? (at.rows[at.start] ?? []).slice(at.tall.from, at.tall.to) : at.rows.slice(at.start, at.end).flat()
   const rows = [...(above ? [s.dim(`      ${above}`)] : []), ...shown, ...(below ? [s.dim(`      ${below}`)] : [])]
+  // F19: a scrolling plan holds the box at the rows it was given (blank rows above the footer), so the box does
+  // not jump by a few rows on every key at 80 × 24.
+  const used = at.top.length + rows.length + at.footer.length
+  const hold = at.fits ? [] : Array.from({ length: Math.max(0, ctx.maxBodyLines - used) }, () => "")
   const counts = countLines(payload)
   // What ENTER does next: it approves only when every line that needs the user was on screen (this one counts).
   const unread = unseenLines(payload, observe(payload, state, ctx)).length
@@ -233,7 +241,7 @@ function render(payload: PlanPayload, state: PlanState, ctx: OverlayContext): Ov
   return {
     heading: at.fits ? "The plan (one screen)" : `The plan · ${position}`,
     question: `Approve the plan: ${counts.approval} lines to approve${counts.action ? ` · ${counts.action} ${counts.action === 1 ? "thing" : "things"} only you can do` : ""}.`,
-    body: [...at.top, ...rows, ...at.footer],
+    body: [...at.top, ...rows, ...hold, ...at.footer],
     keys: state.editing
       ? ["ENTER save", "ESC stop editing"]
       : [unread > 0 ? "ENTER read on" : "ENTER approve", "SPACE skip a line", "E edit a line", "↑↓ move", "ESC later"]
@@ -339,11 +347,15 @@ function handleKey(payload: PlanPayload, state: PlanState, key: Key, ctx: Overla
   }
 }
 
-/** `ctx` is the box the screen was drawn with: what it showed before the key, and shows after it, is `seen`. */
+/**
+ * `ctx` is the box the screen BEFORE this key was drawn with: what that screen showed is `seen`. The screen after
+ * the key is not marked here: it is drawn in a box measured for the new state (leaving the editor turns one
+ * key-hint row into two below about 82 columns, so the box loses a row), and marking it with this box approved a
+ * line that was never drawn (final verify F18). It is marked on the next key, which gets the box it was drawn in.
+ */
 function onKey(payload: PlanPayload, state: PlanState, key: Key, ctx?: OverlayContext): KeyOutcome<"plan", PlanState> {
   if (!ctx) return handleKey(payload, state, key, ctx)
-  const outcome = handleKey(payload, observe(payload, state, ctx), key, ctx)
-  return "answer" in outcome ? outcome : { state: observe(payload, outcome.state, ctx) }
+  return handleKey(payload, observe(payload, state, ctx), key, ctx)
 }
 
 export const planOverlay: Overlay<"plan", PlanState> = {

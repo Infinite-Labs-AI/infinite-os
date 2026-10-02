@@ -258,12 +258,18 @@ export class TtyUi implements WizardUi {
       }
       return
     }
+    // A chunk can carry several keys (a paste, a fast typist): draw the screen the previous key produced before
+    // this key reads "what was on screen" (final verify F18: the plan never approves a line that was not drawn).
+    if (this.renderQueued) {
+      this.renderQueued = false
+      this.render()
+    }
     this.syncOverlay(snapshot)
     const slot = this.overlay
     const pending = snapshot.pendingAsk
     if (!slot || !pending || pending.askId !== slot.askId) return
     // The overlay is told the box it was drawn in, so a key can depend on what was on screen (the plan never
-    // approves a line that was not shown).
+    // approves a line that was not shown). `slot.state` is the state the last frame was drawn from.
     const { width, height } = frameSize(this.options.stdout)
     const ctx = overlayContext({
       snapshot,
