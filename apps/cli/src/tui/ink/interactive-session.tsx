@@ -496,7 +496,16 @@ export function InkInteractiveSessionApp({
     () => headConfirmAction ? confirmCardKeys(headConfirmAction, NO_KEY_CAPS) : null,
     [headConfirmAction]
   );
-  const keyHints = confirmKeys ? keyBarHints(confirmKeys.ctx) : [];
+  // A new head card (from any queue writer) always opens with its explanation
+  // closed: the explanation stays behind `?`.
+  useEffect(() => {
+    setExplainOpen(false);
+  }, [headConfirmAction]);
+  // With no card, the bar is the composer's: `esc stop` while a stoppable turn
+  // runs (the only key that works then), nothing when idle.
+  const keyHints = confirmKeys
+    ? keyBarHints(confirmKeys.ctx)
+    : keyBarHints({ focus: "composer", busy: busy && turnStoppable, okKey: null, caps: NO_KEY_CAPS });
   // The home inventory shows ONCE, on the empty home screen (no transcript yet)
   // and only when the CLI supplied its data. The first submitted line scrolls it
   // away (history is non-empty), so it never repeats per message.
@@ -969,7 +978,6 @@ export function InkInteractiveSessionApp({
       return;
     }
     setPendingConfirmActions((current) => current.slice(1));
-    setExplainOpen(false);
     const appendLines = (lines: readonly ConfirmLine[]) =>
       appendMessages(lines.map((line) => ({ kind: "slash", role: "system", text: line.text }) as Msg));
     void (async () => {
