@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 
 import { ansiLineToCells, ansiToSegmentLines, applySgr, RESET_STATE, tokenOf } from "./ansi-to-segments.js";
 import { compareRegion, formatRegionResults, goldenRegionRows, locate, paintGoldenLines } from "./compare.js";
-import { firstProblem, GoldenEvaluator } from "./evaluate.js";
+import { firstProblem, GoldenEvaluator, hasTruecolorSgr } from "./evaluate.js";
 import { goldenIds, loadGolden } from "./goldens.js";
 import { normalizeCells, textOf, type SegmentLine } from "./normalize.js";
 import { PALETTE, xterm256Hex } from "./palette.js";
@@ -208,6 +208,18 @@ describe("the evaluator passes r4 itself (a renderer that prints the golden)", (
     expect(result.pass).toBe(false);
     expect(result.regions.find((region) => region.region === "rule_bottom")?.verdict).toBe("DIFF");
     expect(result.regions.find((region) => region.region === "rule_top")?.verdict).toBe("MATCH");
+  });
+
+  it("at the 256 tier, a screen painted in 256 colours matches and one painted in truecolor fails", () => {
+    const at = (tier: "truecolor" | "256") =>
+      new GoldenEvaluator((fixture, cols) => paintGoldenLines(loadGolden(`${fixture.screen}--c${cols}`).lines, sgr(tier)).join("\n"), "256");
+    expect(at("256").evaluate(loadGolden("view-06-change--c160")).pass).toBe(true);
+    const truecolor = at("truecolor").evaluate(loadGolden("view-06-change--c160"));
+    expect(truecolor.pass).toBe(false);
+    expect(firstProblem(truecolor)).toMatch(/^256 tier: the CLI painted truecolor SGR/u);
+    expect(hasTruecolorSgr(`${ESC}[1;38;5;232;48;5;179mx`)).toBe(false);
+    expect(hasTruecolorSgr(`${ESC}[0;48;2;1;2;3mx`)).toBe(true);
+    expect(hasTruecolorSgr(`${ESC}[38:2:1:2:3mx`)).toBe(true);
   });
 
   it("the 80–119 col body is skipped by the layout decision, and says so", () => {

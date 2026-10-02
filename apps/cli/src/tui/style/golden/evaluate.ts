@@ -59,21 +59,54 @@ export const REGION_SCREENS: Readonly<Record<string, { screen: string; cols: num
   "region-table-numbers-100": { screen: "view-01-numbers", cols: 100 }
 };
 
-export class GoldenEvaluator {
-  private readonly cache = new Map<string, SegmentLine[]>();
+/** The colour tiers tier 1 renders at. At `256` the CLI must not print truecolor SGR (`38;2`/`48;2`). */
+export type EvaluatorTier = "truecolor" | "256";
 
-  constructor(private readonly render: ScreenRenderer) {}
+/** True when an ANSI string paints with a 24-bit colour anywhere (an SGR `38;2;…` or `48;2;…`). */
+export function hasTruecolorSgr(ansi: string): boolean {
+  for (const match of ansi.matchAll(/\u001b\[([\d;:]*)m/gu)) {
+    const codes = match[1]!.split(/[;:]/u).map(Number);
+    for (let i = 0; i < codes.length; i += 1) {
+      if (codes[i] !== 38 && codes[i] !== 48) continue;
+      if (codes[i + 1] === 2) return true;
+      i += codes[i + 1] === 5 ? 2 : 1;
+    }
+  }
+  return false;
+}
+
+export class GoldenEvaluator {
+  private readonly cache = new Map<string, { lines: SegmentLine[]; ansi: string }>();
+  /** Screens drawn for the evaluation in progress (the tier check reads their ANSI). */
+  private touched = new Set<string>();
+
+  constructor(private readonly render: ScreenRenderer, readonly tier: EvaluatorTier = "truecolor") {}
 
   /** The screen as segment lines (cached per fixture and width). */
   screen(fixture: R4ScreenFixture, cols: number, key = `${fixture.screen}@${cols}`): SegmentLine[] {
+    this.touched.add(key);
     const hit = this.cache.get(key);
-    if (hit) return hit;
-    const lines = ansiToSegmentLines(this.render(fixture, cols));
-    this.cache.set(key, lines);
+    if (hit) return hit.lines;
+    const ansi = this.render(fixture, cols);
+    const lines = ansiToSegmentLines(ansi);
+    this.cache.set(key, { lines, ansi });
     return lines;
   }
 
   evaluate(raw: GoldenFile, id = raw.id): Evaluation {
+    this.touched = new Set();
+    const out = this.evaluateCells(raw, id);
+    if (this.tier === "256") {
+      const truecolor = [...this.touched].filter((key) => hasTruecolorSgr(this.cache.get(key)?.ansi ?? ""));
+      if (truecolor.length) {
+        out.problems.unshift(`256 tier: the CLI painted truecolor SGR (38;2 / 48;2) on ${truecolor.join(", ")}`);
+        out.pass = false;
+      }
+    }
+    return out;
+  }
+
+  private evaluateCells(raw: GoldenFile, id: string): Evaluation {
     const { screen: screenId, cols } = screenOf(id, raw);
     const { golden, applied } = applyDecisions(raw, screenId);
     const out: Evaluation = { id, pass: false, regions: [], skipped: [], decisions: applied, problems: [] };
