@@ -61,6 +61,14 @@ describe("confirmResultLines", () => {
     // The receipt's glyph and tone are the view head's (STATE_HEAD): a spending cap is amber, never red.
     expect(confirmResultLines({ ok: true, view: receiptView("hit_limit", "Hit the $5 cap", "warn") }, "approve")[0])
       .toEqual({ tone: "warn", text: "$ Hit the $5 cap" });
+    // A write not sent because it changed on Meta is the head's amber ⧗, not a red ✗.
+    const changed = {
+      ...receiptView("failed", "This changed since you looked. Nothing ran.", "warn"),
+      outcome: "not_sent",
+      stateReason: { code: "changed_on_meta", words: "This changed since you looked.", short: "Changed on Meta" }
+    };
+    expect(confirmResultLines({ ok: true, view: changed }, "approve")[0])
+      .toEqual({ tone: "warn", text: "⧗ This changed since you looked. Nothing ran." });
   });
 
   it("an undecodable view falls back to the neutral fields", () => {
