@@ -72,9 +72,9 @@ const METRIC_SET = new Set<string>(FIRST_PHASE_METRICS);
 // (or reconnecting) auto-queues an initial incremental sync at the shared choke point.
 const AUTO_SYNC_ON_CONNECT = new Set<string>(["x"]);
 
-type JourneyProvider = "meta_ads" | "x";
+type JourneyProvider = "meta_ads";
 
-type CompiledJourneyKind = "meta_campaign" | "x_content" | "channel_comparison";
+type CompiledJourneyKind = "meta_campaign";
 
 type CompiledJourney = {
   kind: CompiledJourneyKind;
@@ -353,7 +353,7 @@ async function listQueryableViews(db: InfiniteOsDb, context: SessionContext): Pr
       order by id
     `
   );
-  return envelope("list_queryable_views", context.authority, { views: views.map(hydrateQueryableViewMetadata) }, ["queryable_views"]);
+  return envelope("list_queryable_views", context.authority, { views }, ["queryable_views"]);
 }
 
 async function describeQueryableView(
@@ -364,7 +364,7 @@ async function describeQueryableView(
   const viewId = requiredString(input, "viewId");
   rejectUnsafeView(viewId);
   const view = await db.one("select * from queryable_views where id = $1", [viewId]);
-  return envelope("describe_queryable_view", context.authority, { view: hydrateQueryableViewMetadata(view) }, ["queryable_views"]);
+  return envelope("describe_queryable_view", context.authority, { view: view ?? {} }, ["queryable_views"]);
 }
 
 async function listMetrics(db: InfiniteOsDb, context: SessionContext): Promise<ActionEnvelope> {
@@ -376,7 +376,7 @@ async function listMetrics(db: InfiniteOsDb, context: SessionContext): Promise<A
       order by id
     `
   );
-  return envelope("list_metrics", context.authority, { metrics: metrics.map(hydrateMetricMetadata) }, ["metric_definitions"]);
+  return envelope("list_metrics", context.authority, { metrics }, ["metric_definitions"]);
 }
 
 async function describeMetric(
@@ -389,7 +389,7 @@ async function describeMetric(
     return unsupported("describe_metric", context.authority, "unsupported_metric");
   }
   const metric = await db.one("select * from metric_definitions where id = $1", [metricId]);
-  return envelope("describe_metric", context.authority, { metric: hydrateMetricMetadata(metric) }, ["metric_definitions"]);
+  return envelope("describe_metric", context.authority, { metric: metric ?? {} }, ["metric_definitions"]);
 }
 
 async function searchContext(
@@ -527,16 +527,14 @@ async function resolveEntity(
         ? await resolveAdsetEntities(db, context.workspaceId, query, limit)
         : entityType === "ad"
           ? await resolveAdEntities(db, context.workspaceId, query, limit)
-          : ["content_item", "event_item"].includes(entityType)
-            ? await resolveXContentEntities(db, context.workspaceId, query, limit)
-            : [];
+          : [];
   const provenance = entityType === "campaign"
     ? ["queryable.vw_meta_ads_campaign_daily"]
     : entityType === "adset"
       ? ["queryable.vw_meta_ads_adset_daily"]
       : entityType === "ad"
         ? ["queryable.vw_meta_ads_ad_daily"]
-        : ["queryable.vw_x_post_public_metrics"];
+        : [];
   return createEnvelope({
     actionId: "resolve_entity",
     authority: context.authority,
@@ -618,7 +616,7 @@ async function runJourneyQuery(
       interpretedPlan: plan,
       data: {
         validationId,
-        answer: "I cannot run that journey yet. Current local handlers cover X public content, Meta campaign metrics, and simple X-vs-Meta channel comparison.",
+        answer: "I cannot run that journey yet. Current handlers cover Meta campaign metrics.",
         rows: []
       },
       provenance: [],
@@ -987,39 +985,6 @@ async function resolveAdEntities(
   return toEvidence(nearRows);
 }
 
-async function resolveXContentEntities(
-  db: InfiniteOsDb,
-  workspaceId: string,
-  query: string,
-  limit: number
-): Promise<Record<string, unknown>[]> {
-  const like = `%${query}%`;
-  const rows = await db.query<Record<string, unknown>>(
-    `
-      select source_id, x_post_id, post_url, body_text, published_at,
-        x_public_engagement, like_count, reply_count
-      from queryable.vw_x_post_public_metrics
-      where workspace_id = $1
-        and (x_post_id ilike $2 or post_url ilike $2 or body_text ilike $2)
-      order by x_public_engagement desc nulls last, published_at desc nulls last
-      limit $3
-    `,
-    [workspaceId, like, limit]
-  );
-  return rows.map((row) => sanitizeEvidenceRow({
-    entityType: "content_item",
-    entityKey: row.x_post_id,
-    label: conciseLabel(row.body_text ?? row.post_url ?? row.x_post_id),
-    sourceId: row.source_id,
-    publishedAt: row.published_at,
-    metrics: {
-      x_public_engagement: row.x_public_engagement,
-      like_count: row.like_count,
-      reply_count: row.reply_count
-    }
-  }));
-}
-
 function requiredPlan(input: unknown): JourneyQueryPlan {
   const plan = objectField(input, "plan");
   if (!isRecord(plan)) {
@@ -1066,17 +1031,6 @@ function requiredProvidersForPlan(plan: JourneyQueryPlan): JourneyProvider[] {
   if (metric.startsWith("meta_ads_") || entityType === "campaign") {
     providers.add("meta_ads");
   }
-  if (
-    metric.startsWith("x_") ||
-    entityType === "content_item" ||
-    entityType === "event_item"
-  ) {
-    providers.add("x");
-  }
-  if (plan.intent === "compare_cohorts" || entityType === "channel") {
-    providers.add("meta_ads");
-    providers.add("x");
-  }
 
   return [...providers];
 }
@@ -1108,10 +1062,6 @@ function journeyCaveats(plan: JourneyQueryPlan): string[] {
   const caveats = new Set<string>();
   if (metric.startsWith("meta_ads_")) {
     caveats.add("read_only_marketing_api_reporting");
-  }
-  if (metric.startsWith("x_")) {
-    caveats.add("public_metrics_only");
-    caveats.add("no_paid_or_private_metrics");
   }
   if (requiresDownstreamAttribution(plan)) {
     caveats.add("cross_source_customer_attribution_not_implemented");
@@ -1151,21 +1101,13 @@ function compileJourneyPlan(plan: JourneyQueryPlan): CompiledJourney | null {
   const entityType = plan.entity?.type ?? entityTypeFromMetric(metric);
   const commonCaveats = journeyCaveats(plan);
 
+  // A channel comparison needs a second channel; Meta is the only journey provider, so it is unsupported.
   if (
     plan.intent === "compare_cohorts" ||
     entityType === "channel" ||
     metric === "channel_response"
   ) {
-    return {
-      kind: "channel_comparison",
-      metric: "channel_response",
-      entityType: "channel",
-      provenance: [
-        "queryable.vw_meta_ads_campaign_daily",
-        "queryable.vw_x_post_public_metrics"
-      ],
-      caveats: commonCaveats
-    };
+    return null;
   }
 
   if (
@@ -1182,20 +1124,6 @@ function compileJourneyPlan(plan: JourneyQueryPlan): CompiledJourney | null {
     };
   }
 
-  if (
-    entityType === "content_item" ||
-    entityType === "event_item" ||
-    metric === "x_public_engagement"
-  ) {
-    return {
-      kind: "x_content",
-      metric: "x_public_engagement",
-      entityType: "content_item",
-      provenance: ["queryable.vw_x_post_public_metrics"],
-      caveats: commonCaveats
-    };
-  }
-
   return null;
 }
 
@@ -1206,13 +1134,7 @@ async function rowsForCompiledJourney(
   plan: JourneyQueryPlan | undefined,
   limit: number
 ): Promise<Record<string, unknown>[]> {
-  if (compiled.kind === "meta_campaign") {
-    return metaCampaignJourneyRows(db, workspaceId, compiled, plan, limit);
-  }
-  if (compiled.kind === "x_content") {
-    return xContentJourneyRows(db, workspaceId, plan, limit);
-  }
-  return channelComparisonRows(db, workspaceId, plan, limit);
+  return metaCampaignJourneyRows(db, workspaceId, compiled, plan, limit);
 }
 
 async function metaCampaignJourneyRows(
@@ -1250,78 +1172,13 @@ async function metaCampaignJourneyRows(
   return sanitizeRows(rows);
 }
 
-async function xContentJourneyRows(
-  db: InfiniteOsDb,
-  workspaceId: string,
-  plan: JourneyQueryPlan | undefined,
-  limit: number
-): Promise<Record<string, unknown>[]> {
-  const order = journeyOrderDirection(plan);
-  const { start, end } = timeRangeParams(plan);
-  const rows = await db.query<Record<string, unknown>>(
-    `
-      select source_id, x_post_id, post_url, body_text, published_at, captured_at,
-        x_public_engagement, like_count, reply_count, retweet_count, quote_count,
-        bookmark_count, impression_count
-      from queryable.vw_x_post_public_metrics
-      where workspace_id = $1
-        and ($2::date is null or occurred_on >= $2::date)
-        and ($3::date is null or occurred_on <= $3::date)
-      order by x_public_engagement ${order} nulls last, published_at desc nulls last
-      limit $4
-    `,
-    [workspaceId, start, end, limit]
-  );
-  return sanitizeRows(rows);
-}
-
-async function channelComparisonRows(
-  db: InfiniteOsDb,
-  workspaceId: string,
-  plan: JourneyQueryPlan | undefined,
-  _limit: number
-): Promise<Record<string, unknown>[]> {
-  const { start, end } = timeRangeParams(plan);
-  const metaRows = await db.query<Record<string, unknown>>(
-    `
-      select 'meta_ads' as channel,
-        array_agg(distinct source_id) as source_ids,
-        count(distinct campaign_id) as campaign_count,
-        sum(impressions) as awareness_events,
-        sum(meta_ads_clicks) as response_events,
-        sum(meta_ads_spend) as spend
-      from queryable.vw_meta_ads_campaign_daily
-      where workspace_id = $1
-        and ($2::date is null or occurred_on >= $2::date)
-        and ($3::date is null or occurred_on <= $3::date)
-    `,
-    [workspaceId, start, end]
-  );
-  const xRows = await db.query<Record<string, unknown>>(
-    `
-      select 'x' as channel,
-        array_agg(distinct source_id) as source_ids,
-        count(distinct x_post_id) as content_count,
-        sum(impression_count) as awareness_events,
-        sum(x_public_engagement) as response_events,
-        null::numeric as spend
-      from queryable.vw_x_post_public_metrics
-      where workspace_id = $1
-        and ($2::date is null or occurred_on >= $2::date)
-        and ($3::date is null or occurred_on <= $3::date)
-    `,
-    [workspaceId, start, end]
-  );
-  return sanitizeRows([...metaRows, ...xRows]);
-}
-
 function metricFromPlan(plan: JourneyQueryPlan): string {
   const rankingMetric = plan.ranking?.metric;
   if (rankingMetric) {
     return rankingMetric;
   }
   const outcomeId = plan.outcome?.id ?? "";
-  if (outcomeId.startsWith("meta_ads_") || outcomeId.startsWith("x_")) {
+  if (outcomeId.startsWith("meta_ads_")) {
     return outcomeId;
   }
   if (plan.intent === "compare_cohorts" || plan.entity?.type === "channel") {
@@ -1330,18 +1187,12 @@ function metricFromPlan(plan: JourneyQueryPlan): string {
   if (plan.entity?.type === "campaign") {
     return "meta_ads_clicks";
   }
-  if (plan.entity?.type === "content_item" || plan.entity?.type === "event_item") {
-    return "x_public_engagement";
-  }
   return outcomeId || "channel_response";
 }
 
 function entityTypeFromMetric(metric: string): string {
   if (metric.startsWith("meta_ads_")) {
     return "campaign";
-  }
-  if (metric.startsWith("x_")) {
-    return "content_item";
   }
   return "channel";
 }
@@ -1428,19 +1279,9 @@ function answerForJourney(
     return "I did not find matching rows for that journey plan in the selected workspace and date range.";
   }
   const top = rows[0] ?? {};
-  if (compiled.kind === "meta_campaign") {
-    const label = String(top.campaign_name ?? top.campaign_id ?? "the top campaign");
-    const value = top[compiled.metric] ?? top.meta_ads_clicks ?? "unknown";
-    return `Meta Ads campaign ranking by ${compiled.metric}: ${label} is currently first with ${String(value)}. This is based on synced campaign/day insight rows for ${dateRangeSummary(plan)}.`;
-  }
-  if (compiled.kind === "x_content") {
-    const label = conciseLabel(top.body_text ?? top.post_url ?? top.x_post_id ?? "the top post");
-    const value = top.x_public_engagement ?? "unknown";
-    return `X content ranking by public engagement: ${label} is currently first with ${String(value)} public engagements. This is based on synced public post metric rows for ${dateRangeSummary(plan)}.`;
-  }
-  const ordered = [...rows].sort((a, b) => numericValue(b.response_events) - numericValue(a.response_events));
-  const label = String(ordered[0]?.channel ?? "the top channel");
-  return `Channel comparison by response events: ${label} is currently ahead for ${dateRangeSummary(plan)}. Meta Ads uses clicks and X uses public engagement, so treat this as channel role comparison rather than true revenue attribution.`;
+  const label = String(top.campaign_name ?? top.campaign_id ?? "the top campaign");
+  const value = top[compiled.metric] ?? top.meta_ads_clicks ?? "unknown";
+  return `Meta Ads campaign ranking by ${compiled.metric}: ${label} is currently first with ${String(value)}. This is based on synced campaign/day insight rows for ${dateRangeSummary(plan)}.`;
 }
 
 function dateRangeSummary(plan: JourneyQueryPlan): string {
@@ -1501,18 +1342,6 @@ function sanitizeEvidenceValue(key: string, value: unknown): unknown {
 
 function truncateString(value: string, maxLength: number): string {
   return value.length > maxLength ? `${value.slice(0, maxLength - 3)}...` : value;
-}
-
-function conciseLabel(value: unknown): string {
-  if (typeof value !== "string") {
-    return String(value ?? "unknown");
-  }
-  return truncateString(value.replace(/\s+/g, " ").trim(), 90);
-}
-
-function numericValue(value: unknown): number {
-  const parsed = numberValue(value);
-  return parsed ?? 0;
 }
 
 async function connectSource(
@@ -3381,9 +3210,6 @@ async function runMetricQuery(
   const view = optionalString(input, "view") ?? metricViewForGrain(metric, [], filtersFrom(input));
   rejectUnsafeView(view);
   rejectMetricViewMismatch(metric, view);
-  if (metric === "x_follower_count") {
-    await backfillXFollowerSnapshotIfNeeded(db, context);
-  }
   // PR3 Step 14 — per-site isolation: resolve {site} -> source_id filter before aggregating.
   const resolvedSourceId = await applySiteFilter(db, context.workspaceId, input);
   const rows = await runAggregate(db, context.workspaceId, view, metric, input, []);
@@ -3459,23 +3285,19 @@ async function runMetricQuery(
 // as a windowed answer. Purely additive: rows/values are untouched and NO default window
 // is injected (that would silently change every existing answer). Detection mirrors
 // computeComparison's date-bound lookup: normalizeDimensionAlias resolves the date/day
-// aliases (occurred_on for non-X views, published_at for X views), and a filter on the
-// always-admitted occurred_on column counts as a bound on every view too. Any gte/lte/
+// aliases to occurred_on, and a filter on the always-admitted occurred_on column counts as
+// a bound on every view. Any gte/lte/
 // equals filter on those counts as a bound — equals pins a single day, which is a
 // window, not all-time.
 //
-// Snapshot-grain metrics are exempt: a point-in-time count (current followers, current
-// paid/trialing subscribers) is not an over-time sum — an unbounded read IS the current
+// Snapshot-grain metrics are exempt: a point-in-time count (current paid/trialing
+// subscribers) is not an over-time sum — an unbounded read IS the current
 // value, not an all-time total, so "unbounded" is meaningless there and the caveat would
-// only bait the caller into windowing a number that has no window. (This rests on grain,
-// NOT on a missing date dimension: vw_x_profile_public_metrics does carry occurred_on/
-// captured_at (0014) — it is only the X `published_at` date alias that runAggregate
-// rejects there as unsupported_dimension.)
+// only bait the caller into windowing a number that has no window.
 const SNAPSHOT_GRAIN_METRICS = new Set([
   "stripe_current_paid_subscribers", // caveatsForMetric declares current_snapshot
   "stripe_paid_subscribers", // deprecated alias — current_paid_is_snapshot
-  "stripe_trialing_subscribers", // 0055 lifecycle lane holds only CURRENTLY-trialing rows — unbounded sum = current trialing count
-  "x_follower_count" // current-profile snapshot
+  "stripe_trialing_subscribers" // 0055 lifecycle lane holds only CURRENTLY-trialing rows — unbounded sum = current trialing count
 ]);
 
 function unboundedDateRangeCaveats(
@@ -3486,12 +3308,7 @@ function unboundedDateRangeCaveats(
   if (SNAPSHOT_GRAIN_METRICS.has(metric)) {
     return [];
   }
-  const dateField = normalizeDimensionAlias(view, "date"); // occurred_on | published_at
-  // occurred_on is ALSO a date bound everywhere: runAggregate's filter gate always admits
-  // occurred_on on every view, and the X views expose it directly (published_at::date,
-  // migrations 0011/0014) — so an X query windowed via occurred_on is bounded even though
-  // the resolved date alias for X views is published_at. On non-X views dateField already
-  // IS occurred_on, so the extra check is a no-op there.
+  const dateField = normalizeDimensionAlias(view, "date"); // occurred_on
   const hasDateBound = filters.some((filter) => {
     const normalized = normalizeDimensionAlias(view, filter.field);
     return (
@@ -3569,7 +3386,7 @@ async function classifyConfirmedZeroWindow(
   // Only pure date-windowed queries coalesce. A dimension slice (campaign_name, provider,
   // source_id, …) that matches nothing may mean "no such entity", not "zero over the
   // window" — that ambiguity stays an honest null.
-  const dateField = normalizeDimensionAlias(view, "date"); // occurred_on | published_at
+  const dateField = normalizeDimensionAlias(view, "date"); // occurred_on
   const onlyDateFilters = filtersFrom(input).every((filter) => {
     const normalized = normalizeDimensionAlias(view, filter.field);
     return (
@@ -3724,10 +3541,10 @@ async function computeComparison(
   if (mode !== "prior_period" && mode !== "prior_year") {
     return { caveats: [] };
   }
-  // Date bounds live as filters on the view's date dimension (occurred_on for non-X,
-  // published_at for X). Normalize each filter field so date/day aliases resolve.
+  // Date bounds live as filters on the view's date dimension (occurred_on). Normalize each
+  // filter field so date/day aliases resolve.
   const filters = filtersFrom(input);
-  const dateField = normalizeDimensionAlias(view, "date"); // occurred_on | published_at
+  const dateField = normalizeDimensionAlias(view, "date"); // occurred_on
   const gte = filters.find(
     (f) => normalizeDimensionAlias(view, f.field) === dateField && f.operator === "gte"
   )?.value;
@@ -3854,117 +3671,6 @@ function noDataEnvelopeData(
   return out;
 }
 
-async function backfillXFollowerSnapshotIfNeeded(
-  db: InfiniteOsDb,
-  context: SessionContext
-): Promise<void> {
-  const existing = await db.one<{ x_follower_count: number | null }>(
-    `
-      select x_follower_count
-      from queryable.vw_x_profile_public_metrics
-      where workspace_id = $1
-      limit 1
-    `,
-    [context.workspaceId]
-  );
-  if (existing && existing.x_follower_count !== null) {
-    return;
-  }
-
-  const source = await db.one<{ id: string; connection_name: string; account_external_id: string | null }>(
-    `
-      select id, connection_name, account_external_id
-      from sources
-      where workspace_id = $1 and provider = 'x' and status in ('connected', 'degraded')
-      order by connected_at desc
-      limit 1
-    `,
-    [context.workspaceId]
-  );
-  if (!source) {
-    return;
-  }
-  const requestedUsername = typeof source.account_external_id === "string"
-    ? source.account_external_id.replace(/^@/, "")
-    : undefined;
-  let resolvedUserId: string | undefined;
-  let resolvedUsername: string | undefined;
-  let followersCount = 0;
-  let followingCount = 0;
-  let tweetCount = 0;
-  let listedCount = 0;
-  let likeCount = 0;
-  if (requestedUsername) {
-    try {
-      const publicProfile = await fetch(`https://x.com/${encodeURIComponent(requestedUsername)}`, {
-        headers: {
-          "User-Agent": "Mozilla/5.0"
-        }
-      });
-      if (publicProfile.ok) {
-        const html = await publicProfile.text();
-        const profile = parsePublicXProfileHtml(html);
-        if (profile) {
-          resolvedUserId = profile.userId ?? resolvedUserId;
-          resolvedUsername = requestedUsername;
-          followersCount = profile.followersCount ?? followersCount;
-          followingCount = profile.followingCount ?? followingCount;
-          tweetCount = profile.tweetCount ?? tweetCount;
-          listedCount = profile.listedCount ?? listedCount;
-          likeCount = profile.likeCount ?? likeCount;
-        }
-      }
-    } catch {
-      return;
-    }
-  }
-
-  if (!resolvedUserId) {
-    return;
-  }
-
-  const capturedAt = new Date().toISOString();
-  await db.query(
-    `
-      insert into x_profile_snapshot (
-        id, workspace_id, source_id, captured_at, x_user_id, username,
-        followers_count, following_count, tweet_count, listed_count,
-        like_count, public_metrics
-      )
-      values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb)
-      on conflict (source_id, captured_at)
-      do update set x_user_id = excluded.x_user_id,
-        username = excluded.username,
-        followers_count = excluded.followers_count,
-        following_count = excluded.following_count,
-        tweet_count = excluded.tweet_count,
-        listed_count = excluded.listed_count,
-        like_count = excluded.like_count,
-        public_metrics = excluded.public_metrics
-    `,
-      [
-        `xps_${randomUUID()}`,
-        context.workspaceId,
-        source.id,
-        capturedAt,
-        resolvedUserId,
-        resolvedUsername ?? null,
-        followersCount,
-        followingCount,
-        tweetCount,
-        listedCount,
-        likeCount,
-        JSON.stringify({
-        followersCount,
-        followingCount,
-        tweetCount,
-        listedCount,
-        likeCount
-        })
-      ]
-    );
-}
-
 async function runBreakdownQuery(
   db: InfiniteOsDb,
   context: SessionContext,
@@ -4000,53 +3706,6 @@ async function runBreakdownQuery(
     ["explain_answer", "drilldown_result"],
     await freshnessForViews(db, context.workspaceId, [view])
   );
-}
-
-function parsePublicXProfileHtml(html: string): {
-  userId?: string;
-  followersCount?: number;
-  followingCount?: number;
-  tweetCount?: number;
-  listedCount?: number;
-  likeCount?: number;
-} | null {
-  const userId = matchStringValue(html, /"id_str":"([^"]+)"/);
-  const followersCount = matchNumberLike(html, /"followers_count":(\d+)/);
-  const followingCount = matchNumberLike(html, /"friends_count":(\d+)/);
-  const tweetCount = matchNumberLike(html, /"statuses_count":(\d+)/);
-  const listedCount = matchNumberLike(html, /"listed_count":(\d+)/);
-  const likeCount = matchNumberLike(html, /"favourites_count":(\d+)/);
-  if (
-    userId === undefined &&
-    followersCount === undefined &&
-    followingCount === undefined &&
-    tweetCount === undefined &&
-    listedCount === undefined &&
-    likeCount === undefined
-  ) {
-    return null;
-  }
-  return {
-    userId,
-    followersCount: typeof followersCount === "number" ? followersCount : undefined,
-    followingCount: typeof followingCount === "number" ? followingCount : undefined,
-    tweetCount: typeof tweetCount === "number" ? tweetCount : undefined,
-    listedCount: typeof listedCount === "number" ? listedCount : undefined,
-    likeCount: typeof likeCount === "number" ? likeCount : undefined
-  };
-}
-
-function matchNumberLike(html: string, pattern: RegExp): string | number | undefined {
-  const match = html.match(pattern);
-  if (!match?.[1]) {
-    return undefined;
-  }
-  return /^\d+$/.test(match[1]) ? Number(match[1]) : match[1];
-}
-
-function matchStringValue(html: string, pattern: RegExp): string | undefined {
-  const match = html.match(pattern);
-  return match?.[1] ? String(match[1]) : undefined;
 }
 
 async function runFunnelQuery(
@@ -4207,7 +3866,7 @@ async function runAggregate(
   const normalizedGroupBy = groupBy.map((group) => normalizeDimensionAlias(view, group));
   const groupedExpressions = normalizedGroupBy.map((group) => ({
     alias: group,
-    expression: dimensionExpression(view, group)
+    expression: group
   }));
   for (const group of normalizedGroupBy) {
     if (!allowedDimensions.includes(group)) {
@@ -4279,7 +3938,7 @@ function aggregateWhere(
       throw new Error(`unsupported_dimension:${filter.field}`);
     }
     params.push(filter.value);
-    where.push(`${dimensionExpression(view, field)} ${filterOperatorSql(filter.operator)} $${params.length}`);
+    where.push(`${field} ${filterOperatorSql(filter.operator)} $${params.length}`);
   }
   return { where, params };
 }
@@ -4546,7 +4205,7 @@ function filterOperatorSql(operator: "equals" | "matches" | "gte" | "lte"): stri
 
 function normalizeDimensionAlias(view: string, field: string): string {
   if (field === "date" || field === "day") {
-    return view.startsWith("queryable.vw_x_") ? "published_at" : "occurred_on";
+    return "occurred_on";
   }
   if (view === "queryable.vw_posthog_events") {
     if (field === "event_date" || field === "event_day" || field === "event_time") return "occurred_on";
@@ -4564,7 +4223,7 @@ function normalizeDimensionAlias(view: string, field: string): string {
   // synonyms. `device_category` maps to this view's `device_type` so a caller can send the
   // SAME dim name it uses for GA4's vw_site_traffic and get the PostHog cut. `os`/`platform`
   // -> operating_system mirrors the plan's requested aliases. date/day already normalize to
-  // occurred_on at the top of this function (the view is not a vw_x_ view).
+  // occurred_on at the top of this function.
   if (view === "queryable.vw_posthog_site") {
     if (field === "os" || field === "platform") return "operating_system";
     if (field === "device" || field === "device_category") return "device_type";
@@ -4608,50 +4267,6 @@ function normalizeDimensionAlias(view: string, field: string): string {
     if (field === "ad_key" || field === "ad_external_id") return "ad_id";
     if (field === "status" || field === "effective" || field === "delivery_status") return "effective_status";
     if (field === "configured") return "configured_status";
-  }
-  if (view.startsWith("queryable.vw_x_")) {
-    if (field === "post_id" || field === "tweet_id") return "x_post_id";
-    if (field === "user_id") return view === "queryable.vw_x_profile_public_metrics" ? "x_user_id" : "author_id";
-    if (field === "text" || field === "post_text" || field === "tweet_text" || field === "content") return "body_text";
-    if (field === "created_at" || field === "posted_at" || field === "post_created_at" || field === "tweet_created_at") return "published_at";
-    if (field === "post_type" || field === "content_type" || field === "content_kind" || field === "content_format" || field === "format") {
-      return "content_type";
-    }
-    if (field === "person" || field === "people" || field === "handle" || field === "mentioned_user" || field === "engaged_with") {
-      return "mentioned_handle";
-    }
-    if (field === "hour" || field === "hour_of_day" || field === "posting_hour" || field === "tweet_hour") {
-      return "published_hour_utc";
-    }
-    if (field === "day_of_week" || field === "weekday" || field === "posting_weekday" || field === "tweet_weekday") {
-      return "published_weekday_utc";
-    }
-  }
-  return field;
-}
-
-function dimensionExpression(view: string, field: string): string {
-  if (view.startsWith("queryable.vw_x_")) {
-    if (field === "published_hour_utc") {
-      return "extract(hour from published_at at time zone 'utc')::int";
-    }
-    if (field === "published_weekday_utc") {
-      return "extract(dow from published_at at time zone 'utc')::int";
-    }
-    if (field === "mentioned_handle") {
-      return "lower((regexp_match(coalesce(body_text, ''), '@([A-Za-z0-9_]{1,15})'))[1])";
-    }
-    if (field === "content_type") {
-      return `
-        case
-          when conversation_id is not null and conversation_id <> x_post_id then 'reply'
-          when coalesce(body_text, '') ~* '(https?://|t\\.co/)' then 'link'
-          when position('?' in coalesce(body_text, '')) > 0 then 'question'
-          when length(coalesce(body_text, '')) <= 80 then 'short_text'
-          else 'text'
-        end
-      `;
-    }
   }
   return field;
 }
@@ -4921,81 +4536,6 @@ async function providerTruthRows(
         where workspace_id = $1
           and ($2::text is null or source_id = $2)
         order by occurred_at desc, event_name asc
-        limit $3
-      `,
-      [workspaceId, sourceIdFilter ?? null, limit]
-    );
-  }
-  if (metric === "x_public_engagement") {
-    return db.query(
-      `
-        with latest_snapshot as (
-          select distinct on (workspace_id, source_id, x_post_id)
-            workspace_id, source_id, raw_record_id, x_post_id, captured_at,
-            retweet_count, reply_count, like_count, quote_count,
-            bookmark_count, impression_count
-          from x_post_metric_snapshot
-          where workspace_id = $1
-          order by workspace_id, source_id, x_post_id, captured_at desc
-        )
-        select p.id as post_row_id, p.x_post_id, p.author_id, p.post_url,
-          p.body_text, p.published_at, s.raw_record_id, s.captured_at,
-          s.retweet_count, s.reply_count, s.like_count, s.quote_count,
-          s.bookmark_count, s.impression_count,
-          (
-            s.retweet_count + s.reply_count + s.like_count +
-            s.quote_count + s.bookmark_count
-          ) as x_public_engagement
-        from x_post p
-        join latest_snapshot s
-          on s.workspace_id = p.workspace_id
-          and s.source_id = p.source_id
-          and s.x_post_id = p.x_post_id
-        where p.workspace_id = $1
-        order by x_public_engagement desc, s.captured_at desc
-        limit $2
-      `,
-      [workspaceId, limit]
-    );
-  }
-  if (metric === "x_post_count" || metric === "x_comment_count") {
-    const authoredRepliesOnly = metric === "x_comment_count" ? "and conversation_id is not null and conversation_id <> x_post_id" : "";
-    return db.query(
-      `
-        select id as post_row_id, source_id, x_post_id, author_id, conversation_id,
-          post_url, body_text, published_at,
-          1 as x_post_count,
-          case
-            when conversation_id is not null and conversation_id <> x_post_id then 1
-            else 0
-          end as x_comment_count
-        from x_post
-        where workspace_id = $1
-          and ($2::text is null or source_id = $2)
-          ${authoredRepliesOnly}
-        order by published_at desc nulls last
-        limit $3
-      `,
-      [workspaceId, sourceIdFilter ?? null, limit]
-    );
-  }
-  if (metric === "x_follower_count") {
-    return db.query(
-      `
-        select
-          source_id,
-          captured_at,
-          x_user_id,
-          username,
-          followers_count as x_follower_count,
-          following_count as x_following_count,
-          tweet_count as x_post_count_profile,
-          listed_count as x_listed_count,
-          like_count as x_like_count
-        from x_profile_snapshot
-        where workspace_id = $1
-          and ($2::text is null or source_id = $2)
-        order by captured_at desc
         limit $3
       `,
       [workspaceId, sourceIdFilter ?? null, limit]
@@ -5399,9 +4939,6 @@ export function metricView(metric: string): string {
   }
   // Phase-1 §5: Stripe-sourced ROAS reads the Meta↔Stripe true-value join view.
   if (metric === "roas_from_stripe") return "queryable.vw_meta_stripe_campaign_value_daily";
-  if (metric === "x_public_engagement") return "queryable.vw_x_post_public_metrics";
-  if (metric === "x_post_count" || metric === "x_comment_count") return "queryable.vw_x_authored_activity";
-  if (metric === "x_follower_count") return "queryable.vw_x_profile_public_metrics";
   // Same-lane rule (0062): signup_count reads the PURE PostHog lane — its authority/drilldown always
   // claimed PostHog, and the blended conversion view it used to ride no longer carries signups.
   if (metric === "signup_count") return "queryable.vw_posthog_events";
@@ -5753,88 +5290,7 @@ function allowedDimensionsForView(view: string): string[] {
   if (view === "queryable.vw_meta_stripe_campaign_value_daily") {
     return ["ad_account_id", "campaign_id", "campaign_name", "match_confidence", "currency", "occurred_on"];
   }
-  if (view === "queryable.vw_x_post_public_metrics") {
-    return [
-      "x_post_id",
-      "author_id",
-      "post_url",
-      "body_text",
-      "published_at",
-      "content_type",
-      "mentioned_handle",
-      "published_hour_utc",
-      "published_weekday_utc"
-    ];
-  }
-  if (view === "queryable.vw_x_authored_activity") {
-    return [
-      "x_post_id",
-      "author_id",
-      "conversation_id",
-      "post_url",
-      "body_text",
-      "published_at",
-      "content_type",
-      "mentioned_handle",
-      "published_hour_utc",
-      "published_weekday_utc"
-    ];
-  }
-  if (view === "queryable.vw_x_profile_public_metrics") {
-    return ["x_user_id", "username"];
-  }
   return ["landing_page", "referrer", "utm_source", "utm_medium", "utm_campaign"];
-}
-
-function hydrateQueryableViewMetadata(view: Record<string, unknown> | null): Record<string, unknown> {
-  if (!view) {
-    return {};
-  }
-  const id = optionalString(view, "id");
-  if (!id || (id !== "queryable.vw_x_post_public_metrics" && id !== "queryable.vw_x_authored_activity")) {
-    return view;
-  }
-  return {
-    ...view,
-    allowed_dimensions: appendAllowedDimensions(view.allowed_dimensions, [
-      "published_at",
-      "content_type",
-      "mentioned_handle",
-      "published_hour_utc",
-      "published_weekday_utc"
-    ])
-  };
-}
-
-function hydrateMetricMetadata(metric: Record<string, unknown> | null): Record<string, unknown> {
-  if (!metric) {
-    return {};
-  }
-  const id = optionalString(metric, "id");
-  if (!id || (id !== "x_public_engagement" && id !== "x_post_count" && id !== "x_comment_count")) {
-    return metric;
-  }
-  return {
-    ...metric,
-    allowed_dimensions: appendAllowedDimensions(metric.allowed_dimensions, [
-      "published_at",
-      "content_type",
-      "mentioned_handle",
-      "published_hour_utc",
-      "published_weekday_utc"
-    ])
-  };
-}
-
-function appendAllowedDimensions(value: unknown, dimensions: string[]): unknown {
-  const dims = Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
-  const merged = [...dims];
-  for (const dimension of dimensions) {
-    if (!merged.includes(dimension)) {
-      merged.push(dimension);
-    }
-  }
-  return merged;
 }
 
 // Exported (DEDUP single-source-of-truth): consumed by apps/worker runSavedReport.
@@ -5976,18 +5432,6 @@ export function caveatsForMetric(metric: string): string[] {
   if (metric === "engagement_rate" || metric === "average_session_duration") {
     return ["source_native_attribution_only", "weighted_average_across_grain"];
   }
-  if (metric === "x_public_engagement") {
-    return ["public_metrics_only", "no_posting", "no_paid_or_private_metrics", "no_content_attribution"];
-  }
-  if (metric === "x_post_count") {
-    return ["public_posts_only"];
-  }
-  if (metric === "x_comment_count") {
-    return ["reply_count_is_authored_replies_only_when_present_in_source_timeline"];
-  }
-  if (metric === "x_follower_count") {
-    return ["public_profile_metrics_only"];
-  }
   return [
     "source_native_attribution_only",
     "content_linkage_not_implemented",
@@ -6041,10 +5485,6 @@ function sourceAuthorityForMetric(metric: string): string {
   ) {
     return "GA4 is the first-phase traffic authority";
   }
-  if (metric === "x_public_engagement") return "X public metrics are the first-phase post engagement authority";
-  if (metric === "x_post_count") return "X authored posts in the synced timeline are the first-phase posting authority";
-  if (metric === "x_comment_count") return "X authored replies in the synced timeline are the first-phase comment authority";
-  if (metric === "x_follower_count") return "X public profile metrics are the first-phase follower authority";
   return "PostHog event occurrences, not verified account registrations";
 }
 
@@ -6096,9 +5536,6 @@ function drilldownForMetric(metric: string): string {
   ) {
     return "drilldown.ga4_traffic_provider_rows";
   }
-  if (metric === "x_public_engagement") return "drilldown.x_post_public_metric_rows";
-  if (metric === "x_post_count" || metric === "x_comment_count") return "drilldown.x_authored_post_rows";
-  if (metric === "x_follower_count") return "drilldown.x_profile_public_metric_rows";
   return "drilldown.posthog_signup_provider_rows";
 }
 

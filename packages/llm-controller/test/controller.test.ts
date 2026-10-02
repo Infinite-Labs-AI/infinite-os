@@ -2515,8 +2515,8 @@ describe("Infinite OS LLM controller", () => {
 
     expect(prompts[0]).toContain("Workspace snapshot prompt guidance:");
     expect(prompts[0]).toContain("at least one business signal");
-    expect(prompts[0]).toContain("Use compatible metric/view pairs:");
-    expect(prompts[0]).toContain("`x_post_count` and `x_comment_count` belong on `queryable.vw_x_authored_activity`");
+    expect(prompts[0]).not.toContain("x_post_count");
+    expect(prompts[0]).not.toContain("vw_x_");
     expect(prompts[0]).toContain("Do not let one noisy metric dominate");
   });
 
@@ -4196,80 +4196,6 @@ describe("Infinite OS LLM controller", () => {
     expect(prompts[0]).not.toContain("query recipe for this turn");
   });
 
-  it("builds refinement guidance after a weak best-post breakdown result", async () => {
-    const { buildQueryRefinementSections } = await import("../src/query-advisor.js");
-    const sections = buildQueryRefinementSections("my best tweet", [
-      {
-        name: "run_breakdown_query",
-        result: createEnvelope({
-          actionId: "run_breakdown_query",
-          authority: "tool_agent",
-          data: {
-            rows: [
-              {
-                x_post_id: "post_1",
-                post_url: "https://x.com/example/status/1",
-                body_text: "https://x.com/example/status/1",
-                x_public_engagement: "7"
-              }
-            ],
-            metric: "x_public_engagement",
-            view: "queryable.vw_x_post_public_metrics"
-          },
-          provenance: ["queryable.vw_x_post_public_metrics"]
-        })
-      }
-    ]);
-
-    expect(sections.join("\n")).toContain("Best-post refinement guidance:");
-    expect(sections.join("\n")).toContain("too thin for a strong final answer");
-  });
-
-  it("builds timing-analysis refinement guidance when engagement buckets exist without posting-volume buckets", async () => {
-    const { buildQueryRefinementSections } = await import("../src/query-advisor.js");
-    const sections = buildQueryRefinementSections("what are the best times for me to tweet", [
-      {
-        name: "run_breakdown_query",
-        result: createEnvelope({
-          actionId: "run_breakdown_query",
-          authority: "tool_agent",
-          data: {
-            rows: [{ published_hour_utc: 2, x_public_engagement: "33" }],
-            metric: "x_public_engagement",
-            view: "queryable.vw_x_post_public_metrics"
-          },
-          provenance: ["queryable.vw_x_post_public_metrics"]
-        })
-      }
-    ]);
-
-    expect(sections.join("\n")).toContain("Timing-analysis refinement guidance:");
-    expect(sections.join("\n")).toContain("fetch `x_post_count` over the same time buckets");
-  });
-
-  it("builds X metric/view mismatch recovery guidance after invalid X query errors", async () => {
-    const { buildQueryRefinementSections } = await import("../src/query-advisor.js");
-    const sections = buildQueryRefinementSections("When we increase spend on X or Meta Ads, are we getting proportionate gains?", [
-      {
-        name: "run_metric_query",
-        result: {
-          status: "error",
-          actionId: "run_metric_query",
-          input: { metric: "x_post_count", view: "queryable.vw_x_post_public_metrics" },
-          error: {
-            code: "action_execution_failed",
-            message: "unsupported_view_for_metric:x_post_count:queryable.vw_x_post_public_metrics"
-          }
-        }
-      }
-    ]);
-
-    expect(sections.join("\n")).toContain("X metric/view recovery guidance:");
-    expect(sections.join("\n")).toContain("`x_post_count` belongs on `queryable.vw_x_authored_activity`");
-    expect(sections.join("\n")).toContain("describe_metric");
-    expect(sections.join("\n")).toContain("Do not retry `x_post_count` on `queryable.vw_x_post_public_metrics`");
-  });
-
   it("builds failed-sync freshness guidance for current X answers", async () => {
     const { buildQueryRefinementSections } = await import("../src/query-advisor.js");
     const sections = buildQueryRefinementSections("what are my best tweets today?", [
@@ -4338,51 +4264,6 @@ describe("Infinite OS LLM controller", () => {
     ]);
 
     expect(sections.join("\n")).not.toContain("X freshness failure guidance:");
-  });
-
-  it("builds pattern-analysis refinement guidance when the top-post set is too thin", async () => {
-    const { buildQueryRefinementSections } = await import("../src/query-advisor.js");
-    const sections = buildQueryRefinementSections("analyse what my best performing tweets had in common", [
-      {
-        name: "run_breakdown_query",
-        result: createEnvelope({
-          actionId: "run_breakdown_query",
-          authority: "tool_agent",
-          data: {
-            rows: [{ x_post_id: "1", body_text: "https://x.com/example/status/1", x_public_engagement: "7" }],
-            metric: "x_public_engagement",
-            view: "queryable.vw_x_post_public_metrics"
-          },
-          provenance: ["queryable.vw_x_post_public_metrics"]
-        })
-      }
-    ]);
-
-    expect(sections.join("\n")).toContain("X pattern-analysis refinement guidance:");
-    expect(sections.join("\n")).toContain("too thin for a strong comparison answer");
-  });
-
-  it("builds negative-strategy refinement guidance when the post sample is too thin", async () => {
-    const { buildQueryRefinementSections } = await import("../src/query-advisor.js");
-    const sections = buildQueryRefinementSections("what should i stop posting on x", [
-      {
-        name: "run_breakdown_query",
-        result: createEnvelope({
-          actionId: "run_breakdown_query",
-          authority: "tool_agent",
-          data: {
-            rows: [{ x_post_id: "1", body_text: "https://x.com/example/status/1", x_public_engagement: "7" }],
-            metric: "x_public_engagement",
-            view: "queryable.vw_x_post_public_metrics"
-          },
-          provenance: ["queryable.vw_x_post_public_metrics"]
-        })
-      }
-    ]);
-
-    expect(sections.join("\n")).toContain("X negative-strategy refinement guidance:");
-    expect(sections.join("\n")).toContain("too thin for a strong stop-posting recommendation");
-    expect(sections.join("\n")).toContain("grounded caution from one-sided winner data");
   });
 
   it("builds open-ended refinement guidance when a generic ranked result is too thin", async () => {
@@ -4913,115 +4794,6 @@ describe("Infinite OS LLM controller", () => {
     expect(progressMessages).toContain("Re-running engagement breakdown with richer post detail.");
   });
 
-  it("emits timing-specific refinement progress when timing evidence needs another pass", async () => {
-    const events: Array<{ stage: string; message: string }> = [];
-    const controller = createLlmController({
-      registry: createInfiniteOsRegistry({
-        run_breakdown_query: (_input, context) =>
-          createEnvelope({
-            actionId: "run_breakdown_query",
-            authority: context.authority,
-            data: {
-              rows: [{ published_hour_utc: 2, x_public_engagement: "33" }],
-              metric: "x_public_engagement",
-              view: "queryable.vw_x_post_public_metrics"
-            },
-            provenance: ["queryable.vw_x_post_public_metrics"]
-          })
-      }),
-      modelClient: {
-        complete: async (request) => {
-          if (request.toolResults.length === 0) {
-            return {
-              toolCalls: [
-                {
-                  id: "call_timing_breakdown",
-                  name: "run_breakdown_query",
-                  input: {
-                    metric: "x_public_engagement",
-                    view: "queryable.vw_x_post_public_metrics",
-                    groupBy: ["published_hour_utc"]
-                  }
-                }
-              ]
-            };
-          }
-          return { message: "Timing answer." };
-        }
-      }
-    });
-
-    await controller.chat({
-      message: "what are the best times for me to tweet",
-      sessionId: "session-timing-refinement-progress",
-      workspaceId: "workspace-1",
-      actorId: "operator-1",
-      surface: "api",
-      onProgress(event) {
-        events.push(event);
-      }
-    });
-
-    expect(events).toContainEqual({
-      stage: "resolve",
-      message: "Refining timing analysis with posting-volume context."
-    });
-  });
-
-  it("emits strategy-specific refinement progress when recommendation evidence is too thin", async () => {
-    const events: Array<{ stage: string; message: string }> = [];
-    const controller = createLlmController({
-      registry: createInfiniteOsRegistry({
-        run_breakdown_query: (_input, context) =>
-          createEnvelope({
-            actionId: "run_breakdown_query",
-            authority: context.authority,
-            data: {
-              rows: [{ x_post_id: "1", body_text: "https://x.com/example/status/1", x_public_engagement: "7" }],
-              metric: "x_public_engagement",
-              view: "queryable.vw_x_post_public_metrics"
-            },
-            provenance: ["queryable.vw_x_post_public_metrics"]
-          })
-      }),
-      modelClient: {
-        complete: async (request) => {
-          if (request.toolResults.length === 0) {
-            return {
-              toolCalls: [
-                {
-                  id: "call_strategy_breakdown",
-                  name: "run_breakdown_query",
-                  input: {
-                    metric: "x_public_engagement",
-                    view: "queryable.vw_x_post_public_metrics"
-                  }
-                }
-              ]
-            };
-          }
-          return { message: "Strategy answer." };
-        }
-      }
-    });
-
-    await controller.chat({
-      message: "what should i post more of on x",
-      sessionId: "session-strategy-refinement-progress",
-      workspaceId: "workspace-1",
-      actorId: "operator-1",
-      surface: "api",
-      onProgress(event) {
-        events.push(event);
-      }
-    });
-
-    expect(events).toContainEqual({
-      stage: "resolve",
-      message: "Refining X strategy answer with a richer post sample."
-    });
-  });
-
   it("emits open-ended-analysis refinement progress when broad evidence needs more context", async () => {
     const events: Array<{ stage: string; message: string }> = [];
     const controller = createLlmController({
@@ -5184,61 +4956,10 @@ describe("Infinite OS LLM controller", () => {
     });
   });
 
-  it("builds best-post final synthesis guidance after a strong ranked breakdown", async () => {
-    const { buildQuerySynthesisSections } = await import("../src/query-advisor.js");
-    const sections = buildQuerySynthesisSections("my best tweet", [
-      {
-        name: "run_breakdown_query",
-        result: createEnvelope({
-          actionId: "run_breakdown_query",
-          authority: "tool_agent",
-          data: {
-            rows: [
-              { x_post_id: "1", body_text: "First strong post", x_public_engagement: "19" },
-              { x_post_id: "2", body_text: "Second strong post", x_public_engagement: "13" },
-              { x_post_id: "3", body_text: "Third strong post", x_public_engagement: "8" }
-            ],
-            metric: "x_public_engagement",
-            view: "queryable.vw_x_post_public_metrics"
-          },
-          provenance: ["queryable.vw_x_post_public_metrics"]
-        })
-      }
-    ]);
-
-    expect(sections.join("\n")).toContain("Best-post final synthesis guidance:");
-    expect(sections.join("\n")).toContain("Lead with the winning post text");
-    expect(sections.join("\n")).toContain("Mention at least two runner-ups");
-    expect(sections.join("\n")).toContain("Prefer a conversational ranked list or bullets");
-  });
-
   it("does not classify tweet timing questions as best-post ranking questions", async () => {
     const { classifyQueryFamily, buildQueryRefinementSections } = await import("../src/query-advisor.js");
     expect(classifyQueryFamily("what are the best times for me to tweet")).toBe("other");
     expect(buildQueryRefinementSections("what are the best times for me to tweet", [])).toEqual([]);
-  });
-
-  it("builds direct metric synthesis guidance for follower-count questions after metric results return", async () => {
-    const { buildQuerySynthesisSections } = await import("../src/query-advisor.js");
-    const sections = buildQuerySynthesisSections("how many followers i have", [
-      {
-        name: "run_metric_query",
-        result: createEnvelope({
-          actionId: "run_metric_query",
-          authority: "tool_agent",
-          data: {
-            rows: [{ x_follower_count: "31" }],
-            metric: "x_follower_count",
-            view: "queryable.vw_x_profile_public_metrics"
-          },
-          provenance: ["queryable.vw_x_profile_public_metrics"]
-        })
-      }
-    ]);
-
-    expect(sections.join("\n")).toContain("Follower-count final synthesis guidance:");
-    expect(sections.join("\n")).toContain("latest public X profile metrics snapshot");
-    expect(sections.join("\n")).toContain("avoid table-heavy formatting");
   });
 
   it("builds generic breakdown synthesis guidance for non-family questions after ranked rows return", async () => {
@@ -5298,133 +5019,6 @@ describe("Infinite OS LLM controller", () => {
     expect(sections.join("\n")).toContain("runner-ups");
   });
 
-  it("builds timing-analysis synthesis guidance for X time-bucket breakdowns", async () => {
-    const { buildQuerySynthesisSections } = await import("../src/query-advisor.js");
-    const sections = buildQuerySynthesisSections("what are the best times for me to tweet", [
-      {
-        name: "run_breakdown_query",
-        result: createEnvelope({
-          actionId: "run_breakdown_query",
-          authority: "tool_agent",
-          data: {
-            rows: [
-              { published_hour_utc: 2, x_public_engagement: "33" },
-              { published_hour_utc: 22, x_public_engagement: "20" },
-              { published_hour_utc: 18, x_public_engagement: "14" }
-            ],
-            metric: "x_public_engagement",
-            view: "queryable.vw_x_post_public_metrics"
-          },
-          provenance: ["queryable.vw_x_post_public_metrics"]
-        })
-      }
-    ]);
-
-    expect(sections.join("\n")).toContain("Timing-analysis synthesis guidance:");
-    expect(sections.join("\n")).toContain("Top hour buckets:");
-    expect(sections.join("\n")).toContain("directional");
-    expect(sections.join("\n")).toContain("posting-volume buckets");
-  });
-
-  it("builds combined timing-analysis guidance when engagement and posting-volume buckets are both present", async () => {
-    const { buildQuerySynthesisSections } = await import("../src/query-advisor.js");
-    const sections = buildQuerySynthesisSections("what are the best times for me to tweet", [
-      {
-        name: "run_breakdown_query",
-        result: createEnvelope({
-          actionId: "run_breakdown_query",
-          authority: "tool_agent",
-          data: {
-            rows: [
-              { published_hour_utc: 2, x_public_engagement: "33" },
-              { published_weekday_utc: 2, x_public_engagement: "66" }
-            ],
-            metric: "x_public_engagement",
-            view: "queryable.vw_x_post_public_metrics"
-          },
-          provenance: ["queryable.vw_x_post_public_metrics"]
-        })
-      },
-      {
-        name: "run_breakdown_query",
-        result: createEnvelope({
-          actionId: "run_breakdown_query",
-          authority: "tool_agent",
-          data: {
-            rows: [
-              { published_hour_utc: 2, x_post_count: "5" },
-              { published_weekday_utc: 2, x_post_count: "7" }
-            ],
-            metric: "x_post_count",
-            view: "queryable.vw_x_authored_activity"
-          },
-          provenance: ["queryable.vw_x_authored_activity"]
-        })
-      }
-    ]);
-
-    expect(sections.join("\n")).toContain("Timing-analysis synthesis guidance:");
-    expect(sections.join("\n")).toContain("Highest engagement hour bucket:");
-    expect(sections.join("\n")).toContain("Highest posting-volume hour bucket:");
-    expect(sections.join("\n")).toContain("Compare engagement buckets against posting-volume buckets");
-    expect(sections.join("\n")).toContain("signal may partly reflect frequency");
-  });
-
-  it("builds dedicated X pattern-analysis synthesis guidance for top-post comparison prompts", async () => {
-    const { buildQuerySynthesisSections, classifyQueryFamily } = await import("../src/query-advisor.js");
-    expect(classifyQueryFamily("analyse what my best performing tweets had in common")).toBe("best_post");
-    const sections = buildQuerySynthesisSections("analyse what my best performing tweets had in common", [
-      {
-        name: "run_breakdown_query",
-        result: createEnvelope({
-          actionId: "run_breakdown_query",
-          authority: "tool_agent",
-          data: {
-            rows: [
-              { x_post_id: "1", body_text: "Hot take one", x_public_engagement: "33" },
-              { x_post_id: "2", body_text: "Hot take two", x_public_engagement: "19" },
-              { x_post_id: "3", body_text: "Founder post", x_public_engagement: "10" }
-            ],
-            metric: "x_public_engagement",
-            view: "queryable.vw_x_post_public_metrics"
-          },
-          provenance: ["queryable.vw_x_post_public_metrics"]
-        })
-      }
-    ]);
-
-    expect(sections.join("\n")).toContain("X pattern-analysis synthesis guidance:");
-    expect(sections.join("\n")).toContain("Top posts include:");
-    expect(sections.join("\n")).toContain("Compare the top posts for recurring themes");
-  });
-
-  it("builds dedicated X strategy synthesis guidance for top-post recommendation prompts", async () => {
-    const { buildQuerySynthesisSections } = await import("../src/query-advisor.js");
-    const sections = buildQuerySynthesisSections("what should i post more of on x", [
-      {
-        name: "run_breakdown_query",
-        result: createEnvelope({
-          actionId: "run_breakdown_query",
-          authority: "tool_agent",
-          data: {
-            rows: [
-              { x_post_id: "1", body_text: "Hot take one", x_public_engagement: "33" },
-              { x_post_id: "2", body_text: "Hot take two", x_public_engagement: "19" },
-              { x_post_id: "3", body_text: "Founder post", x_public_engagement: "10" }
-            ],
-            metric: "x_public_engagement",
-            view: "queryable.vw_x_post_public_metrics"
-          },
-          provenance: ["queryable.vw_x_post_public_metrics"]
-        })
-      }
-    ]);
-
-    expect(sections.join("\n")).toContain("X strategy synthesis guidance:");
-    expect(sections.join("\n")).toContain("recommend what the user should post more of");
-    expect(sections.join("\n")).toContain("2-3 concrete content recommendations");
-  });
-
   it("keeps X strategy guidance scoped to X rows when a later non-X breakdown exists", async () => {
     const { buildQueryRefinementSections, buildQuerySynthesisSections } = await import("../src/query-advisor.js");
     const toolResults = [
@@ -5469,34 +5063,6 @@ describe("Infinite OS LLM controller", () => {
     expect(synthesis).toContain("Hot take one");
     expect(synthesis).not.toContain("/pricing");
     expect(synthesis).not.toContain("/blog");
-  });
-
-  it("builds dedicated X negative-strategy synthesis guidance for stop-posting prompts", async () => {
-    const { buildQuerySynthesisSections } = await import("../src/query-advisor.js");
-    const sections = buildQuerySynthesisSections("what should i stop posting on x", [
-      {
-        name: "run_breakdown_query",
-        result: createEnvelope({
-          actionId: "run_breakdown_query",
-          authority: "tool_agent",
-          data: {
-            rows: [
-              { x_post_id: "1", body_text: "Hot take one", x_public_engagement: "33" },
-              { x_post_id: "2", body_text: "Hot take two", x_public_engagement: "19" },
-              { x_post_id: "3", body_text: "Founder post", x_public_engagement: "10" }
-            ],
-            metric: "x_public_engagement",
-            view: "queryable.vw_x_post_public_metrics"
-          },
-          provenance: ["queryable.vw_x_post_public_metrics"]
-        })
-      }
-    ]);
-
-    expect(sections.join("\n")).toContain("X negative-strategy synthesis guidance:");
-    expect(sections.join("\n")).toContain("do not claim that the data directly proves what to stop posting");
-    expect(sections.join("\n")).toContain("grounded observations about what performs well");
-    expect(sections.join("\n")).toContain("cautious hypotheses");
   });
 
   it("builds generic metric synthesis guidance for non-family questions after scalar results return", async () => {
@@ -6124,9 +5690,9 @@ describe("Infinite OS LLM controller", () => {
             actionId: "run_metric_query",
             authority: context.authority,
             data: {
-              rows: [{ x_follower_count: "31" }],
-              metric: "x_follower_count",
-              view: "queryable.vw_x_profile_public_metrics"
+              rows: [{ recognized_revenue: "3100" }],
+              metric: "recognized_revenue",
+              view: "queryable.vw_revenue_by_source"
             },
             provenance: ["metric_definitions"]
           })
@@ -6148,24 +5714,24 @@ describe("Infinite OS LLM controller", () => {
             return {
               toolCalls: [
                 {
-                  id: "call_followers",
+                  id: "call_revenue",
                   name: "run_metric_query",
                   input: {
-                    metric: "x_follower_count",
-                    view: "queryable.vw_x_profile_public_metrics"
+                    metric: "recognized_revenue",
+                    view: "queryable.vw_revenue_by_source"
                   }
                 }
               ]
             };
           }
-          return { message: "You have 31 followers." };
+          return { message: "Revenue is 31.00." };
         }
       }
     });
 
     await controller.chat({
-      message: "how many followers i have",
-      sessionId: "session-x-progress",
+      message: "how much revenue did we make all time",
+      sessionId: "session-progress",
       workspaceId: "workspace-1",
       actorId: "operator-1",
       surface: "api",
@@ -6177,7 +5743,7 @@ describe("Infinite OS LLM controller", () => {
     expect(events).toEqual([
       { stage: "resolve", message: "Checking saved workspace context." },
       { stage: "resolve", message: "Resolved workspace context." },
-      { stage: "tool", message: "Running follower lookup." }
+      { stage: "tool", message: "Running revenue total lookup." }
     ]);
   });
 
@@ -6422,119 +5988,6 @@ describe("Infinite OS LLM controller", () => {
     expect(events).not.toContainEqual({
       stage: "tool",
       message: "Checking metric definition."
-    });
-  });
-
-  it("humanizes timing progress labels for model-selected X timing breakdowns", async () => {
-    const events: Array<{ stage: string; message: string }> = [];
-    const controller = createLlmController({
-      registry: createInfiniteOsRegistry({
-        run_breakdown_query: (_input, context) =>
-          createEnvelope({
-            actionId: "run_breakdown_query",
-            authority: context.authority,
-            data: {
-              rows: [{ published_hour_utc: 2, x_public_engagement: "33" }],
-              metric: "x_public_engagement",
-              view: "queryable.vw_x_post_public_metrics"
-            },
-            provenance: ["queryable.vw_x_post_public_metrics"]
-          })
-      }),
-      modelClient: {
-        complete: async (request) =>
-          request.toolResults.length === 0
-            ? {
-                toolCalls: [
-                  {
-                    id: "call_timing_breakdown",
-                    name: "run_breakdown_query",
-                    input: {
-                      metric: "x_public_engagement",
-                      view: "queryable.vw_x_post_public_metrics",
-                      groupBy: ["published_hour_utc"]
-                    }
-                  }
-                ]
-              }
-            : { message: "Timing answer." }
-      }
-    });
-
-    await controller.chat({
-      message: "what are the best times for me to tweet",
-      sessionId: "session-model-timing-progress-humanized",
-      workspaceId: "workspace-1",
-      actorId: "operator-1",
-      surface: "api",
-      onProgress(event) {
-        events.push(event);
-      }
-    });
-
-    expect(events).toContainEqual({
-      stage: "tool",
-      message: "Running X timing breakdown."
-    });
-    expect(events).not.toContainEqual({
-      stage: "tool",
-      message: "Running engagement breakdown."
-    });
-  });
-
-  it("humanizes strategy progress labels for model-selected X strategy breakdowns", async () => {
-    const events: Array<{ stage: string; message: string }> = [];
-    const controller = createLlmController({
-      registry: createInfiniteOsRegistry({
-        run_breakdown_query: (_input, context) =>
-          createEnvelope({
-            actionId: "run_breakdown_query",
-            authority: context.authority,
-            data: {
-              rows: [{ x_post_id: "1", body_text: "Hot take one", x_public_engagement: "33" }],
-              metric: "x_public_engagement",
-              view: "queryable.vw_x_post_public_metrics"
-            },
-            provenance: ["queryable.vw_x_post_public_metrics"]
-          })
-      }),
-      modelClient: {
-        complete: async (request) =>
-          request.toolResults.length === 0
-            ? {
-                toolCalls: [
-                  {
-                    id: "call_strategy_breakdown",
-                    name: "run_breakdown_query",
-                    input: {
-                      metric: "x_public_engagement",
-                      view: "queryable.vw_x_post_public_metrics"
-                    }
-                  }
-                ]
-              }
-            : { message: "Strategy answer." }
-      }
-    });
-
-    await controller.chat({
-      message: "what should i post more of on x",
-      sessionId: "session-model-strategy-progress-humanized",
-      workspaceId: "workspace-1",
-      actorId: "operator-1",
-      surface: "api",
-      onProgress(event) {
-        events.push(event);
-      }
-    });
-
-    expect(events).toContainEqual({
-      stage: "tool",
-      message: "Running top-post strategy breakdown."
-    });
-    expect(events).not.toContainEqual({
-      stage: "tool",
-      message: "Running engagement breakdown."
     });
   });
 
@@ -9206,75 +8659,6 @@ describe("Infinite OS LLM controller", () => {
       expect(bodyText).toContain("site_visitors ranked rows: #1 site_visitors=1200 google / cpc / brand");
       expect(bodyText).toContain("#2 site_visitors=700 twitter / social / launch");
       expect(bodyText).toContain("Pattern: top rows are relatively close");
-    } finally {
-      rmSync(growthHome, { recursive: true, force: true });
-    }
-  });
-
-  it("labels X engagement breakdowns as top posts in the digest", async () => {
-    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-claude-x-breakdown-digest-"));
-    const requests: Array<{ url: string; body: Record<string, unknown>; headers: Headers }> = [];
-    try {
-      const env = {
-        GROWTH_OS_HOME: growthHome
-      };
-      writeInfiniteOsModelSelection({ provider: "claude", model: "claude-sonnet-4-5" }, env);
-      writeInfiniteOsAuthRecord(
-        {
-          provider: "claude",
-          source: "claude-code",
-          authMode: "reuse",
-          token: "claude-access-token"
-        },
-        env
-      );
-      const client = createConfiguredModelClient({
-        env,
-        fetch: async (url, init) => {
-          requests.push({
-            url: String(url),
-            body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>,
-            headers: new Headers(init?.headers)
-          });
-          return new Response(
-            JSON.stringify({
-              usage: { input_tokens: 9, output_tokens: 4 },
-              content: [{ type: "text", text: "Done." }]
-            }),
-            { status: 200 }
-          );
-        }
-      });
-
-      await client.complete({
-        systemPrompt: "Use typed Infinite OS actions.",
-        userMessage: "What should I post more of on X?",
-        tools: [],
-        toolResults: [
-          {
-            id: "x_breakdown_1",
-            name: "run_breakdown_query",
-            result: createEnvelope({
-              actionId: "run_breakdown_query",
-              authority: "tool_agent",
-              data: {
-                rows: [
-                  { x_post_id: "1", body_text: "Hot take one", x_public_engagement: "33" },
-                  { x_post_id: "2", body_text: "Hot take two", x_public_engagement: "19" }
-                ],
-                metric: "x_public_engagement",
-                view: "queryable.vw_x_post_public_metrics"
-              },
-              provenance: ["queryable.vw_x_post_public_metrics"]
-            })
-          }
-        ]
-      });
-
-      const bodyText = JSON.stringify(requests[0].body);
-      expect(bodyText).toContain("top X posts by engagement");
-      expect(bodyText).toContain("Hot take one");
-      expect(bodyText).toContain("Hot take two");
     } finally {
       rmSync(growthHome, { recursive: true, force: true });
     }

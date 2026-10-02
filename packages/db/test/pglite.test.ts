@@ -88,9 +88,9 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
     rmSync(dataDir, { recursive: true, force: true });
   });
 
-  it("applied ALL 82 migrations on first boot and is idempotent on a re-run", async () => {
-    expect(loadMigrations().length).toBe(82);
-    expect(firstRun).toHaveLength(82);
+  it("applied ALL 83 migrations on first boot and is idempotent on a re-run", async () => {
+    expect(loadMigrations().length).toBe(83);
+    expect(firstRun).toHaveLength(83);
     expect(firstRun).toContain("0001_control_plane.sql");
     expect(firstRun).toContain("0006_security_roles.sql");
     expect(firstRun).toContain("0036_chat_sessions_desktop_surface.sql");
@@ -138,6 +138,7 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
     expect(firstRun).toContain("0080_meta_ads_adset_breakdown_windows.sql");
     expect(firstRun).toContain("0081_meta_ads_window_total_dimension.sql");
     expect(firstRun).toContain("0082_stripe_checkout_sessions.sql");
+    expect(firstRun).toContain("0083_remove_dead_x_metrics.sql");
 
     // Idempotent: a second boot re-applies zero (the `rows.length` gate, not the pg `rowCount`
     // gate, makes this true on PGlite).
@@ -145,13 +146,40 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
     expect(secondRun).toEqual([]);
   });
 
-  it("created the schema_migrations ledger with all 82 rows", async () => {
+  it("created the schema_migrations ledger with all 83 rows", async () => {
     const ledger = await db.query<{ id: string }>(
       "select id from schema_migrations order by id"
     );
-    expect(ledger).toHaveLength(82);
+    expect(ledger).toHaveLength(83);
     expect(ledger[0]?.id).toBe("0001_control_plane.sql");
-    expect(ledger.at(-1)?.id).toBe("0082_stripe_checkout_sessions.sql");
+    expect(ledger.at(-1)?.id).toBe("0083_remove_dead_x_metrics.sql");
+  });
+
+  it("0083 leaves no X metric or view advertised, keeps the X tables, and re-applies as a no-op", async () => {
+    const advertised = async () => ({
+      metrics: await db.query<{ id: string }>("select id from metric_definitions where id like 'x\\_%'"),
+      registry: await db.query<{ id: string }>("select id from queryable_views where id like 'queryable.vw\\_x\\_%'"),
+      views: await db.query<{ viewname: string }>(
+        "select viewname from pg_views where schemaname = 'queryable' and viewname like 'vw\\_x\\_%'"
+      ),
+      tables: await db.query<{ tablename: string }>(
+        "select tablename from pg_tables where tablename in ('x_post', 'x_post_metric_snapshot', 'x_profile_snapshot') order by tablename"
+      )
+    });
+    const expected = {
+      metrics: [],
+      registry: [],
+      views: [],
+      tables: [{ tablename: "x_post" }, { tablename: "x_post_metric_snapshot" }, { tablename: "x_profile_snapshot" }]
+    };
+    expect(await advertised()).toEqual(expected);
+
+    const sql = loadMigrations().find((m) => m.id === "0083_remove_dead_x_metrics.sql")?.sql ?? "";
+    expect(sql).not.toBe("");
+    for (const statement of sql.replace(/^--.*$/gm, "").split(";").map((part) => part.trim()).filter(Boolean)) {
+      await db.query(statement);
+    }
+    expect(await advertised()).toEqual(expected);
   });
 
   it("0063 serves both PostHog views from per-(workspace, source, day) rollups — refresh, is_internal, idempotency, grain key, grants", async () => {
