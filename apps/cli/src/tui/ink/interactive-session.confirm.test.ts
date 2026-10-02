@@ -326,7 +326,7 @@ describe("Ink in-session write confirmation (Plan 2) — live PTY flow (skipped 
 
       await waitFor(() => output.text().includes("switch side"));
       await sendKeys(input, "pause it\r");
-      await waitFor(() => stripAnsi(output.text()).includes(" p  Pause    n  dismiss    ?  what it does"), 4_000, output.text);
+      await waitFor(() => stripAnsi(output.text()).includes(" p  pause    n  dismiss    tab  switch side"), 4_000, output.text);
       expect(output.text()).not.toContain("Stops spend on Ad 01");
 
       await sendKeys(input, "y");

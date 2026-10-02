@@ -175,11 +175,26 @@ describe("keyBarHints", () => {
     expect(keyBarHints({ focus: "card", busy: false, okKey: "p", caps: { open: false, watch: false, retry: false } })
       .map((h) => h.key)).not.toContain("o"));
 
-  it("a card shows its named OK key with the card's verb, then n dismiss", () => {
+  it("a card shows its named OK key with the card's verb, then n dismiss; the bar says the short verb (run-2 M4)", () => {
     expect(keyBarHints(card({ okLabel: "Pause" }))).toEqual([
-      { key: "p", label: "Pause", ok: true },
+      { key: "p", label: "Pause", ok: true, barLabel: "pause" },
       { key: "n", label: "dismiss" }
     ]);
+    // terminal-r4's bar names the action in one lower-case word; the card's chip keeps the whole label.
+    expect(keyBarText(keyBarHints(card({ okKey: "l", okLabel: "Launch 3 ads" }))))
+      .toBe(" l  launch    n  dismiss    tab  switch side    /  commands");
+    expect(keyBarText(keyBarHints(card({ okKey: "g", okLabel: "Generate · ~$0.52" }))))
+      .toBe(" g  generate    n  dismiss    tab  switch side    /  commands");
+    // A card that names its own short verb keeps it ("check again").
+    expect(keyBarText(keyBarHints(card({ okLabel: "Pause", okVerb: "check again" }))))
+      .toBe(" p  check again    n  dismiss    tab  switch side    /  commands");
+  });
+
+  it("the bar never carries ? on a card: the card shows `? what it does` inside it (run-2 M4)", () => {
+    const hints = keyBarHints(card({ okLabel: "Pause", explain: true }));
+    expect(hints.map((h) => h.key)).toContain("?");
+    expect(keyBarText(hints)).toBe(" p  pause    n  dismiss    tab  switch side    /  commands");
+    expect(formatKeyBar(hints)).toBe("p pause   n dismiss");
   });
 
   it("shows ? only when there is an explanation, and o/w/r only with their capability", () => {
@@ -207,17 +222,17 @@ describe("keyBarHints", () => {
 
   it("a send card offers v view before its OK key; an open document offers its tabs and pages", () => {
     expect(formatKeyBar(keyBarHints(card({ okKey: "s", okLabel: "Send to 200 people", card: { view: true } }))))
-      .toBe("v view   s Send to 200 people   n dismiss");
+      .toBe("v view   s send   n dismiss");
     expect(formatKeyBar(keyBarHints(card({
       okKey: "s", okLabel: "Send to 200 people", card: { view: true, viewOpen: true, tabs: 3, page: true }
-    })))).toBe("v close   s Send to 200 people   n dismiss   1-3 switch   space next page");
+    })))).toBe("v close   s send   n dismiss   1-3 switch   space next page");
     // terminal-r4 names what the tabs are: `1-3 email`.
     expect(formatKeyBar(keyBarHints(card({
       okKey: "s", okLabel: "Send to 200 people", card: { view: true, viewOpen: true, tabs: 3, tabNoun: "email" }
-    })))).toBe("v close   s Send to 200 people   n dismiss   1-3 email");
-    // The drawn bar: chips, then always tab and / (terminal-r4).
+    })))).toBe("v close   s send   n dismiss   1-3 email");
+    // The drawn bar: chips, then always tab and / (terminal-r4 region-keybar-approval-email).
     expect(keyBarText(keyBarHints(card({ okKey: "s", okLabel: "Send to 200 people", card: { view: true } }))))
-      .toBe(" v  view    s  Send to 200 people    n  dismiss    tab  switch side    /  commands");
+      .toBe(" v  view    s  send    n  dismiss    tab  switch side    /  commands");
   });
 
   it("e and c show only when the card says they work", () => {
@@ -225,7 +240,7 @@ describe("keyBarHints", () => {
     expect(keyBarHints(card()).map((h) => h.key)).not.toContain("c");
     const keys = keyBarHints(card({ okKey: "y", okLabel: "Confirm", card: { edit: true, copy: true } }));
     expect(keys).toEqual([
-      { key: "y", label: "Confirm", ok: true },
+      { key: "y", label: "Confirm", ok: true, barLabel: "confirm" },
       { key: "n", label: "dismiss" },
       { key: "e", label: "edit in the app" },
       { key: "c", label: "copy" }
@@ -248,8 +263,8 @@ describe("keyBarHints", () => {
 
   it("formats and scrubs the bar, which is one row at every width (cut, never wrapped)", () => {
     const hints = keyBarHints(card({ okLabel: "Pause\u001b[2J‮", explain: true }));
-    expect(formatKeyBar(hints)).toBe("p Pause   n dismiss   ? what it does");
-    expect(keyBarText(hints)).toBe(" p  Pause    n  dismiss    ?  what it does    tab  switch side    /  commands");
+    expect(formatKeyBar(hints)).toBe("p pause   n dismiss");
+    expect(keyBarText(hints)).toBe(" p  pause    n  dismiss    tab  switch side    /  commands");
     expect(keyBarRowCount(hints, 80)).toBe(1);
     expect(keyBarRowCount([], 80)).toBe(1);
     expect(keyBarRowCount(hints, 10)).toBe(1);

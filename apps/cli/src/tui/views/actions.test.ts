@@ -65,13 +65,14 @@ function drive(view: AnswerViewV1, keys: { input: string; key: Key }[], over: Pa
 }
 
 describe("approval card", () => {
-  it("confirmLabel Pause gives the OK key p, and the bar reads p Pause   n dismiss", () => {
+  it("confirmLabel Pause gives the OK key p: the card's chip reads p Pause, the bar p pause   n dismiss (r4)", () => {
     const render = approvalRender(fixture("change-pause-card"), cardCtx());
     expect(render.okKey).toBe("p");
     expect(render.keyCtx.okKey).toBe("p");
-    expect(formatKeyBar(render.keys).startsWith("p Pause   n dismiss")).toBe(true);
+    expect(formatKeyBar(render.keys)).toBe("p pause   n dismiss");
+    expect(text(render.lines)).toContain("[p] Pause   [n] dismiss");
     const noExplain = approvalRender({ ...fixture("change-pause-card"), approval: { ...fixture("change-pause-card").approval!, summary: null } } as AnswerViewV1, cardCtx());
-    expect(formatKeyBar(noExplain.keys)).toBe("p Pause   n dismiss");
+    expect(formatKeyBar(noExplain.keys)).toBe("p pause   n dismiss");
     expect(text(render.lines)).toContain("Pause ad “Hook A”?");
     expect(text(render.lines)).toContain("on → paused");
   });
@@ -123,21 +124,24 @@ describe("money field", () => {
 
   it("once a value is typed, the OK label shows it beside the app's verb, never a made-up verb", () => {
     const view = fixture("change-budget-field");
-    expect(formatKeyBar(approvalRender(view, cardCtx()).keys)).toContain("l Lower to $30/day");
+    expect(text(approvalRender(view, cardCtx()).lines)).toContain("[l] Lower to $30/day");
+    expect(formatKeyBar(approvalRender(view, cardCtx()).keys)).toContain("l lower");
     const asked = drive(view, [press("l")]);
     // 60 is a raise: the app's "Lower to $30/day" no longer says what OK does,
     // and the terminal never rewrites it into "Lower to $60.00/day".
     const ui = commitCardField(asked.ui, "60").ui;
     const render = approvalRender(view, cardCtx({ ui }));
     expect(render.okKey).toBe("l");
-    expect(formatKeyBar(render.keys)).toContain("l approve · $60.00/day");
+    expect(text(render.lines)).toContain("[l] approve · $60.00/day");
+    expect(formatKeyBar(render.keys)).toContain("l approve");
+    expect(text(render.lines)).not.toContain("Lower to $30");
     expect(formatKeyBar(render.keys)).not.toContain("$30");
-    expect(formatKeyBar(render.keys)).not.toContain("Lower");
+    expect(formatKeyBar(render.keys)).not.toContain("lower");
     expect(text(render.lines)).toContain("$40.00/day → $60.00/day");
     // A verb with no amount of its own keeps its words, with the typed value beside it.
     const create = fixture("launch-create-adset-field");
     const typed = commitCardField(drive(create, [press("y")]).ui, "30").ui;
-    expect(formatKeyBar(approvalRender(create, cardCtx({ ui: typed })).keys)).toContain("y Create ad set · $30.00/day");
+    expect(text(approvalRender(create, cardCtx({ ui: typed })).lines)).toContain("[y] Create ad set · $30.00/day");
   });
 
   it("rejects a value that is not money and keeps the field open", () => {
@@ -451,7 +455,7 @@ describe("send card with email bodies", () => {
     const out = text(render.lines);
     expect(out).toContain("│ subject  Your trial ended");
     expect(out).toContain("│ to       200 people");
-    expect(formatKeyBar(render.keys).startsWith("v view   s Send to 200 people   n dismiss")).toBe(true);
+    expect(formatKeyBar(render.keys)).toBe("v view   s send   n dismiss");
     expect(out).toContain("[v] view   [s] Send to 200 people   [n] dismiss");
     expect(out).not.toContain("Line 1 of the first email.");
     // With no rows from the app, the body speaks: who it reaches and each document's slot and subject.
@@ -533,7 +537,8 @@ describe("tracked-link card", () => {
     expect(out).toMatch(/campaign +spring/u);
     expect(render.okKey).toBe("y");
     expect(render.keys.map((k) => k.key)).not.toContain("e");
-    expect(formatKeyBar(render.keys)).toBe("y Confirm   n dismiss");
+    expect(formatKeyBar(render.keys)).toBe("y confirm   n dismiss");
+    expect(text(render.lines)).toContain("[y] Confirm");
   });
 });
 

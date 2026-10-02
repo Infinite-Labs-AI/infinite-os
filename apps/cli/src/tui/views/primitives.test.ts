@@ -557,6 +557,15 @@ describe("view focus: the latest turn keeps its keys until the next submit", () 
     expect(viewKeyHints(viewFocusAfterTurnDone(envelope({})))).toEqual([]);
   });
 
+  it("r4's words in the bar: a table's rows are `j k row`, a document's tabs name what they are (run-2 M4)", () => {
+    const numbers = viewFocusAfterTurnDone(numbersFixture());
+    expect(viewKeyHints(numbers)[0]).toEqual({ key: "j k", label: "row" });
+    const list = viewFocusAfterTurnDone(listViewFixture());
+    expect(viewKeyHints(list)[0]).toEqual({ key: "j k", label: "move" });
+    const doc = viewFocusAfterTurnDone(fixture("document-versions"));
+    expect(viewKeyHints(doc).find((hint) => hint.key.startsWith("1-"))?.label).toBe("email");
+  });
+
   it("a kind key is hinted only once the key resolver acts on it", () => {
     const list = viewFocusAfterTurnDone(listViewFixture());
     const kindKeys = [{ key: "c", label: "copy" }, { key: "v", label: "view" }, { key: "e", label: "edit" }];

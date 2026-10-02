@@ -29,6 +29,11 @@ export interface KeyContext {
   caps: { open: boolean; watch: boolean; retry: boolean };
   /** The card's verb for the key bar ("Pause", "Lower to $30/day"). Defaults to "approve". */
   okLabel?: string;
+  /**
+   * The OK key's words in the key bar, when not the first word of `okLabel`
+   * ("check again"). The card's own chip keeps `okLabel` whole.
+   */
+  okVerb?: string;
   /** Whether `?` has an explanation to show; the bar offers `?` only when true. */
   explain?: boolean;
   /** What else a card offers right now (the approval renderer says; absent = nothing). */
@@ -63,6 +68,22 @@ export interface KeyHint {
   label: string;
   /** The card's OK key: an amber chip and a bold label (terminal-r4 `PK`), always first among the card's decisions. */
   ok?: boolean;
+  /**
+   * What the key bar says instead of `label` (terminal-r4: the card's chip
+   * reads `p Pause`, `s Send to 214 people`; the bar reads `p pause`, `s send`).
+   */
+  barLabel?: string;
+}
+
+/**
+ * The OK key's words in the key bar (terminal-r4 `PK('p','pause')`): the first
+ * word of the card's label, lower case ("Send to 214 people" → "send",
+ * "Generate · ~$0.52" → "generate").
+ */
+export function shortOkVerb(label: string): string {
+  const first = terminalText(label).trim().split(/[\s·]+/u)[0] ?? "";
+  const word = first.replace(/[^\p{L}\p{N}'-]+$/u, "").toLowerCase();
+  return word || "approve";
 }
 
 /**
@@ -189,7 +210,8 @@ export function keyBarHints(ctx: KeyContext): KeyHint[] {
   const card = ctx.card ?? {};
   if (card.view) hints.push({ key: "v", label: card.viewOpen ? "close" : "view" });
   if (ctx.okKey !== null) {
-    hints.push({ key: ctx.okKey, label: ctx.okLabel ?? "approve", ok: true });
+    const label = ctx.okLabel ?? "approve";
+    hints.push({ key: ctx.okKey, label, ok: true, barLabel: terminalText(ctx.okVerb ?? "") || shortOkVerb(label) });
   }
   hints.push({ key: "n", label: "dismiss" });
   const tabs = cardTabs(card);
@@ -212,18 +234,21 @@ function cardTabs(card: CardKeys): number {
 
 /**
  * The hints the bar draws, in order: the state's own keys (each key once, the
- * first meaning wins), then always `tab switch side` and `/ commands`.
+ * first meaning wins, each in its bar words), then always `tab switch side`
+ * and `/ commands`. A card's `?` stays off the bar: the card draws
+ * `? what it does` inside itself (terminal-r4).
  */
 export function keyBarShownHints(hints: readonly KeyHint[]): KeyHint[] {
   const always = new Set(ALWAYS_KEY_HINTS.map((hint) => hint.key));
+  const card = hints.some((hint) => hint.ok || hint.key === "n");
   const seen = new Set<string>();
   const shown: KeyHint[] = [];
   for (const hint of hints) {
-    if (always.has(hint.key) || seen.has(hint.key)) {
+    if (always.has(hint.key) || seen.has(hint.key) || (card && hint.key === "?")) {
       continue;
     }
     seen.add(hint.key);
-    shown.push(hint);
+    shown.push(hint.barLabel ? { key: hint.key, label: hint.barLabel, ...(hint.ok ? { ok: true } : {}) } : hint);
   }
   return [...shown, ...ALWAYS_KEY_HINTS];
 }
@@ -246,9 +271,13 @@ export function keyBarSegments(hints: readonly KeyHint[]): StyledSegment[] {
   });
 }
 
-/** The state's keys as one plain line (`p Pause   n dismiss`); every label is scrubbed. */
+/** The state's keys as one plain line, as the bar words them (`p pause   n dismiss`); every label is scrubbed. */
 export function formatKeyBar(hints: readonly KeyHint[]): string {
-  return hints.map((hint) => `${hint.key} ${terminalText(hint.label)}`).join("   ");
+  const always = new Set(ALWAYS_KEY_HINTS.map((hint) => hint.key));
+  return keyBarShownHints(hints)
+    .filter((hint) => !always.has(hint.key) || hints.some((given) => given.key === hint.key))
+    .map((hint) => `${hint.key} ${terminalText(hint.label)}`)
+    .join("   ");
 }
 
 /**
@@ -312,6 +341,7 @@ export function confirmCardKeys(
       busy: false,
       okKey: okKeyFor(okLabel),
       okLabel,
+      okVerb: shortOkVerb(okLabel),
       caps,
       explain: explainText !== null
     },

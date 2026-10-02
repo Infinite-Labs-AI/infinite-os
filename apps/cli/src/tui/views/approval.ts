@@ -257,6 +257,7 @@ export function approvalRender(given: AnswerViewV1, ctx: ApprovalRenderCtx): App
       busy: false,
       okKey,
       okLabel: offersResend(view) ? "check again" : okLabelFor(confirmLabel, fields, ui.answers),
+      ...(offersResend(view) ? { okVerb: "check again" } : {}),
       caps: { open: canOpen, watch: false, retry: retryable },
       explain,
       card: {

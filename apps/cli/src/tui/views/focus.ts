@@ -67,6 +67,10 @@ export interface ViewKeyFacts {
   copy: string | null;
   /** An operation_managed approval: its named OK key sends `ask` as a new user turn. */
   approve: { key: string; label: string; ask: string } | null;
+  /** The view is a table of numbers: `j k` moves by row (terminal-r4 `j k row`). */
+  table?: boolean;
+  /** What the tabs are (`1-3 email`, terminal-r4), when every tab is one kind of thing. */
+  tabNoun?: string | null;
 }
 
 export interface ViewFocusState {
@@ -135,8 +139,26 @@ export function viewKeyFacts(given: AnswerViewV1 | undefined, render: ViewRender
     livePageNext,
     rowCopies: (render.rowCopies ?? []).map((text) => viewText(text) || null),
     copy: viewText(render.copyText) || null,
-    approve: approveFact(render.approvalAsk)
+    approve: approveFact(render.approvalAsk),
+    table: view.kind === "numbers",
+    tabNoun: view.kind === "document" ? documentTabNoun(view.body) : null
   };
+}
+
+/** The noun a document's tabs share ("Email 1", "Email 2" → "email"); null when they differ or there are none. */
+function documentTabNoun(body: unknown): string | null {
+  const versions = isPlainRecord(body) && Array.isArray(body.versions) ? body.versions : [];
+  const nouns = new Set(
+    versions
+      .map((version) => (isPlainRecord(version) ? viewText(version.slot) || viewText(version.label) : ""))
+      .map((label) => label.replace(/\s*\d+$/u, "").trim().toLowerCase())
+  );
+  const [noun] = [...nouns];
+  return nouns.size === 1 && noun ? noun : null;
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function approveFact(value: ViewRender["approvalAsk"]): ViewKeyFacts["approve"] {
@@ -365,7 +387,7 @@ export function viewKeyHints(
   if (state.engaged && facts.approve && !state.approvalClosed) {
     hints.push({ key: facts.approve.key, label: facts.approve.label, ok: true }, { key: "n", label: "dismiss" });
   }
-  if (facts.rowCount > 1) hints.push({ key: "j k", label: "move" });
+  if (facts.rowCount > 1) hints.push({ key: "j k", label: facts.table ? "row" : "move" });
   if (state.engaged) {
     if (facts.rowAsks.some((ask) => ask !== null)) {
       hints.push({ key: "enter", label: "open" });
@@ -373,7 +395,7 @@ export function viewKeyHints(
       hints.push({ key: "enter", label: "fix" });
     }
   }
-  if (facts.tabs > 1) hints.push({ key: `1-${Math.min(9, facts.tabs)}`, label: "switch tab" });
+  if (facts.tabs > 1) hints.push({ key: `1-${Math.min(9, facts.tabs)}`, label: facts.tabNoun || "switch tab" });
   if (facts.pages > 1 && state.page + 1 < facts.pages) hints.push({ key: "space", label: "next page" });
   if (state.showHiddenColumns) {
     hints.push({ key: "→", label: "fewer columns" });
