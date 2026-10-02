@@ -13,15 +13,28 @@
 // is kept: run again after the reset); a write under node_modules/.next/dist/build/out → blocked
 // INF_WIZ_FENCE_TAMPER before any build or T0; toolless / timeout / a stopped agent → failed, continue (the
 // deterministic install still ships; the open jobs are listed for the user). Nested mode (§3d.7): no agent
-// is spawned; the jobs go out as `job.seeded`, the tree is snapshotted, and `--resume` runs the same fence
-// gate and checks on whatever the parent agent changed.
+// is spawned; the jobs go out as `job.seeded`, the tree is snapshotted, and the next run (with or without
+// `--resume`) runs the same fence, gate and checks on whatever the parent agent changed.
+//
+// Honesty rules this step keeps (review O3 F4, F5, F11, F19):
+//   - `done_in_code` only when at least one of the wizard's own pre-deploy checks RAN and passed and none
+//     failed; a job with nothing checkable before deploy stays `claimed` ("later tests decide");
+//   - the settled tree is re-read (`verifySeal`) right before the build/T0, so a write after the turn
+//     (a process the agent left running) stops the step instead of being built or tested;
+//   - an agent edit is recorded in the edit receipt only when its job ends `done_in_code` or `claimed`;
+//     the edits of a job that ends failed, blocked or not needed are undone (newest first, exactly);
+//   - a job the ask round left blocked is never checked into `done_in_code` in the same round.
 import { createHash } from "node:crypto"
+import { readFile, rm, writeFile } from "node:fs/promises"
 import { homedir } from "node:os"
 import { join } from "node:path"
 
-import { Fence, type FenceBlock } from "../../agents/fence.js"
+import { connectionIdsFromKeys } from "../../agents/connection-ids.js"
+import { disposeSeal, Fence, verifySeal, type FenceBlock, type TreeSeal } from "../../agents/fence.js"
+import { matchesAnyGlob, normalizeRelPath } from "../../agents/glob.js"
 import { snapshotDir } from "../../agents/paths.js"
 import { runExtras } from "../../agents/runner.js"
+import { reverseTextEdits } from "../../server-lane/text-edits.js"
 import { sanitizeUntrusted } from "../../agents/sanitize.js"
 import { outOfUsageResumeLine } from "../../agents/usage-limit.js"
 import { AGENT_LIMITS, type AgentRunResult, type SessionRef } from "../contracts/agents.js"
@@ -39,12 +52,17 @@ import type {
   T0Scenario,
   WizardEditRecord
 } from "../contracts/jobs.js"
+import type { TagKeys } from "../contracts/bridge.js"
 import { WIZARD_PATHS } from "../contracts/state.js"
 import { WIZARD_STEP_META } from "../contracts/steps.js"
 
 const META = WIZARD_STEP_META.jobs
 const PRE_DEPLOY_TIERS: readonly CheckTier[] = ["S", "B", "T0"]
 const OPEN_STATES: readonly JobItemState[] = ["pending", "claimed"]
+/** Item states whose agent edits stay in the tree and go in the edit receipt (all others are undone). */
+const KEEP_EDIT_STATES: readonly JobItemState[] = ["claimed", "pending", "done_in_code", "waiting_deploy", "waiting_real_event", "proven"]
+export const NOTHING_CHECKABLE_NOTE = "Nothing the wizard can check before deploy; later tests decide."
+export const CHECKED_NOTE = "Checked by the wizard, not the agent."
 /** The brief a nested parent agent reads (gitignored with the rest of `.infinite/wizard/`). */
 export const NESTED_BRIEF_PATH = `${WIZARD_PATHS.dir}/agent-brief.md`
 
@@ -66,6 +84,14 @@ export const step: WizardStep<"jobs"> = {
 interface RoundOutcome {
   results: CheckResult[]
   feedback: string[]
+  /** Set when the tree changed after the turn settled: nothing was checked. */
+  changedAfterTurn?: string[]
+}
+
+class SealBroken extends Error {
+  constructor(readonly changed: string[]) {
+    super(`Files changed after the agent's turn ended (${changed.slice(0, 3).join(", ")}${changed.length > 3 ? ", …" : ""}); a process it started may still be running. Nothing was built or tested.`)
+  }
 }
 
 async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
@@ -77,7 +103,22 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
   const agentItems = io.items().filter((item) => item.owner === "agent" && OPEN_STATES.includes(item.state))
   if (agentItems.length === 0 && !ctx.state.get().snapshot) return { kind: "ok", status: "No agent jobs in this run" }
 
-  if (ctx.options.nested) return runNested(io, agentItems)
+  if (ctx.options.nested) {
+    try {
+      return await runNested(io, agentItems)
+    } finally {
+      await io.settleEdits()
+    }
+  }
+  try {
+    return await runWorker(io, agentItems)
+  } finally {
+    await io.settleEdits()
+  }
+}
+
+async function runWorker(io: JobsIo, agentItems: ChecklistItem[]): Promise<StepOutcome> {
+  const { ctx, deps } = io
 
   const worker = ctx.state.get().agent?.worker ?? null
   if (!worker) {
@@ -122,14 +163,14 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
       }
       throw error
     }
-    const extras = runExtras(result)
+    const extras = runExtras(result, open)
     if (sessionId(result.session) !== "") {
       session = result.session
       io.setSession(result.session)
     }
     turnsLeft -= extras.turnsUsed ?? 0
     for (const incident of extras.incidents) io.sub(`! ${incident}`, "warn")
-    if (result.edits.length > 0) await io.recordEdits(result.edits)
+    io.bufferEdits(result.edits)
     applyBlocks(io, extras.blocked)
 
     if (result.outcome === "out_of_usage") {
@@ -139,8 +180,9 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
     }
     if (result.outcome === "toolless" || result.outcome === "timeout" || result.outcome === "error") {
       const reason: BlockedReason = result.outcome === "toolless" ? "toolless" : "agent_blocked"
-      for (const item of io.items().filter((entry) => entry.owner === "agent" && OPEN_STATES.includes(entry.state))) {
-        io.setState(item.id, "blocked", "wizard", { reason, note: stoppedNote(result.outcome) })
+      // Only this turn's jobs: a job an earlier round already left `claimed` keeps its state and its edits.
+      for (const item of open) {
+        if (io.item(item.id)?.state === "pending") io.setState(item.id, "blocked", "wizard", { reason, note: stoppedNote(result.outcome) })
       }
       await io.save()
       return {
@@ -151,9 +193,18 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
       }
     }
 
-    const round = await settleRound(io, result.claims, [...questions, ...result.questions.filter((question) => !questions.some((seen) => seen.jobId === question.jobId && seen.question === question.question))], roundsLeft > 0)
+    const seal = extras.seal
+    const round = await settleRound(
+      io,
+      result.claims,
+      [...questions, ...result.questions.filter((question) => !questions.some((seen) => seen.jobId === question.jobId && seen.question === question.question))],
+      roundsLeft > 0,
+      seal
+    )
+    await disposeSeal(seal)
+    if (round.changedAfterTurn) return sealBrokenOutcome(io, round.changedAfterTurn)
     feedback = round.feedback
-    await io.patchClickTested(round.results)
+    await io.patchClickTested()
     await io.save()
   }
 
@@ -167,7 +218,7 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
 }
 
 /** Claims → states, the one batched ask, then the wizard's own pre-deploy checks (§3e.5). */
-async function settleRound(io: JobsIo, claims: readonly Claim[], questions: readonly AgentQuestion[], budgetLeft: boolean): Promise<RoundOutcome> {
+async function settleRound(io: JobsIo, claims: readonly Claim[], questions: readonly AgentQuestion[], budgetLeft: boolean, seal: TreeSeal | null): Promise<RoundOutcome> {
   const feedback: string[] = []
   const toCheck: ChecklistItem[] = []
   for (const claim of claims) {
@@ -207,9 +258,16 @@ async function settleRound(io: JobsIo, claims: readonly Claim[], questions: read
   }
 
   const results: CheckResult[] = []
-  if (toCheck.length > 0) {
+  // A job the ask round left blocked (a question it still needs answered) is not checked now (F19).
+  const checkable = toCheck.filter((item) => io.item(item.id)?.state === "claimed")
+  if (checkable.length > 0) {
+    // The settled tree must still be the one the turn left (F11): nothing is built or run on anything else.
+    if (seal) {
+      const verdict = await verifySeal(seal)
+      if (!verdict.ok) return { results, feedback, changedAfterTurn: verdict.changed }
+    }
     io.sub("Wizard checking each job itself…", "pending")
-    for (const item of toCheck) {
+    for (const item of checkable) {
       const itemResults = await io.preDeployChecks(item)
       results.push(...itemResults)
       io.mergeResults(item.id, itemResults)
@@ -228,8 +286,12 @@ async function settleRound(io: JobsIo, claims: readonly Claim[], questions: read
         io.setState(item.id, "claimed", "wizard", {
           note: `The wizard could not check it here yet (${undetermined.map((result) => result.checkId).join(", ")}); later tests decide.`
         })
+      } else if (!itemResults.some((result) => result.state === "pass")) {
+        // No S/B/T0 check exists (or none ran): a claim alone is never "checked" (F4).
+        io.setState(item.id, "claimed", "wizard", { note: NOTHING_CHECKABLE_NOTE })
       } else {
-        io.setState(item.id, "done_in_code", "wizard", { note: "Checked by the wizard, not the agent." })
+        io.setState(item.id, "done_in_code", "wizard", { note: CHECKED_NOTE })
+        io.noteClickTested(item, itemResults)
       }
     }
     io.endRound()
@@ -240,7 +302,7 @@ async function settleRound(io: JobsIo, claims: readonly Claim[], questions: read
 async function runNested(io: JobsIo, agentItems: ChecklistItem[]): Promise<StepOutcome> {
   const { ctx, deps } = io
   const existing = ctx.state.get().snapshot
-  if (!existing || !ctx.options.resume) {
+  if (!existing) {
     // Hand the jobs to the agent that launched the wizard, then fence whatever it changes.
     await deps.fs.mkdirp(join(ctx.root, WIZARD_PATHS.dir), 0o700)
     await deps.fs.writeTextAtomic(join(ctx.root, NESTED_BRIEF_PATH), deps.registry.brief(agentItems), 0o600)
@@ -258,23 +320,66 @@ async function runNested(io: JobsIo, agentItems: ChecklistItem[]): Promise<StepO
       resumeHint: "Do the seeded jobs, then run `npx infinite-tag --resume --json`; the wizard checks every one itself."
     }
   }
-  const fence = await Fence.load(existing.dir)
-  const settled = await fence.end({ turnGate: (diff) => deps.checks.turnGate(diff, { connectionIds: [] }) })
-  ctx.state.update((state) => {
-    state.snapshot = null
-  })
+  // An open nested snapshot is ALWAYS settled first (F7): a second run without --resume never re-seeds
+  // over it (that would make the parent's edits the new baseline, un-fenced).
+  const clearSnapshot = async () => {
+    ctx.state.update((state) => {
+      state.snapshot = null
+    })
+    await io.save()
+  }
+  const blockOpen = (note: string) => {
+    for (const item of agentItems) {
+      if (OPEN_STATES.includes(io.item(item.id)?.state ?? "blocked")) io.setState(item.id, "blocked", "wizard", { reason: "outside_allowlist", note })
+    }
+  }
+  let fence: Fence
+  try {
+    fence = await Fence.load(existing.dir)
+  } catch {
+    blockOpen("The wizard's snapshot of the tree is gone, so it cannot tell what changed.")
+    await clearSnapshot()
+    return { kind: "blocked", code: "INF_WIZ_FENCE_TAMPER", reason: "The wizard's snapshot of your tree is gone, so it cannot tell what the agent changed. Nothing was built." }
+  }
+  const connectionIds = await io.connectionIds()
+  let settled: Awaited<ReturnType<Fence["end"]>>
+  try {
+    settled = await fence.end({ turnGate: (diff) => deps.checks.turnGate(diff, { connectionIds }) })
+  } catch (error) {
+    // F6: a write in a dependency/build folder (a `next build` by the parent agent) ends the step blocked;
+    // the run is never wedged on a snapshot the fence already deleted.
+    await clearSnapshot()
+    if (isTamper(error)) {
+      blockOpen("The agent wrote inside a dependency or build folder.")
+      await io.save()
+      return { kind: "blocked", code: "INF_WIZ_FENCE_TAMPER", reason: error instanceof Error ? error.message : "Reinstall your dependencies; nothing was built." }
+    }
+    throw error
+  }
+  await clearSnapshot()
   const outside = settled.reportedOutside.filter((path) => !path.startsWith(`${WIZARD_PATHS.dir}/`))
   if (outside.length > 0) io.sub(`! Left unstaged (outside every job's files): ${outside.slice(0, 4).join(", ")}${outside.length > 4 ? ", …" : ""}`, "warn")
-  if (settled.edits.length > 0) await io.recordEdits(settled.edits)
+  io.bufferEdits(settled.edits)
   applyBlocks(io, settled.blocked)
   // No claims in nested mode: every still-open seeded job goes through the wizard's own checks.
   const claims: Claim[] = agentItems
     .filter((item) => OPEN_STATES.includes(io.item(item.id)?.state ?? "blocked"))
     .map((item) => ({ jobId: item.id, status: "done", note: "Checked after the parent agent's turn.", at: deps.clock.now().toISOString() }))
-  const round = await settleRound(io, claims, [], false)
-  await io.patchClickTested(round.results)
+  const round = await settleRound(io, claims, [], false, settled.seal)
+  await disposeSeal(settled.seal)
+  if (round.changedAfterTurn) return sealBrokenOutcome(io, round.changedAfterTurn)
+  await io.patchClickTested()
   await io.save()
   return { kind: "ok", status: io.summary() }
+}
+
+async function sealBrokenOutcome(io: JobsIo, changed: string[]): Promise<StepOutcome> {
+  const error = new SealBroken(changed)
+  for (const item of io.items().filter((entry) => entry.owner === "agent" && OPEN_STATES.includes(entry.state))) {
+    io.setState(item.id, "blocked", "wizard", { reason: "outside_allowlist", note: "Files changed after the agent's turn ended; nothing was checked." })
+  }
+  await io.save()
+  return { kind: "blocked", code: "INF_WIZ_FENCE_TAMPER", reason: error.message }
 }
 
 function applyBlocks(io: JobsIo, blocks: readonly FenceBlock[]): void {
@@ -309,7 +414,11 @@ class JobsIo {
   private scanResult: ScanResult | null = null
   private failures = new Map<string, string>()
   private clickTested = new Set<string>()
+  private patchedClickTested = new Set<string>()
   private artifactsCache: Parameters<WizardDeps["checks"]["t0"]>[1] | null | undefined
+  private keysCache: Promise<TagKeys | null> | null = null
+  /** This step's kept agent edits, oldest first, with the item each one counts for (settled at exit). */
+  private pendingEdits: Array<{ edit: WizardEditRecord; itemId: string | null }> = []
 
   constructor(
     readonly ctx: WizardContext,
@@ -374,16 +483,57 @@ class JobsIo {
     return this.scanResult
   }
 
-  async recordEdits(edits: readonly WizardEditRecord[]): Promise<void> {
-    await this.deps.installer.recordEdits(edits)
+  /** Holds a turn's kept edits until the step knows how each job ended (F5). */
+  bufferEdits(edits: readonly WizardEditRecord[]): void {
+    for (const edit of edits) {
+      const file = normalizeRelPath(edit.file)
+      const covers = (entry: ChecklistItem) => entry.allow.files.concat(entry.allow.create).some((pattern) => (pattern.includes("*") ? matchesAnyGlob(file, [pattern]) : normalizeRelPath(pattern) === file))
+      const agentJobs = this.items().filter((entry) => entry.jobId === edit.jobId && entry.owner === "agent")
+      const item = agentJobs.find(covers) ?? agentJobs[0]
+      this.pendingEdits.push({ edit, itemId: item?.id ?? null })
+    }
+  }
+
+  /**
+   * At every exit of the step: the edits of a job that ended failed, blocked or not needed are undone
+   * (newest first, only when the file is still exactly what that edit left); every other edit goes in
+   * the edit receipt (`installer.recordEdits`) and on its item. An edit a later kept edit built on cannot
+   * be undone exactly; it is kept, recorded, and said.
+   */
+  async settleEdits(): Promise<void> {
+    const pending = this.pendingEdits
+    this.pendingEdits = []
+    if (pending.length === 0) return
+    const drop = (itemId: string | null) => {
+      if (itemId === null) return false
+      const state = this.item(itemId)?.state
+      return state !== undefined && !KEEP_EDIT_STATES.includes(state)
+    }
+    const undone = new Set<WizardEditRecord>()
+    for (const { edit, itemId } of [...pending].reverse()) {
+      if (!drop(itemId)) continue
+      const path = join(this.ctx.root, edit.file)
+      const bytes = await readFile(path).catch(() => null)
+      if (bytes === null || `sha256:${createHash("sha256").update(bytes).digest("hex")}` !== edit.afterHash) {
+        this.sub(`! Could not undo the agent's edit to ${edit.file} for a job that did not pass (a later edit built on it); it stays for review.`, "warn")
+        continue
+      }
+      if (edit.beforeHash === null) await rm(path, { force: true })
+      else await writeFile(path, reverseTextEdits(bytes.toString("utf8"), edit.textEdits))
+      undone.add(edit)
+    }
+    const kept = pending.filter((entry) => !undone.has(entry.edit))
+    if (undone.size > 0) this.sub(`Undid the agent's edits for jobs that did not pass: ${[...new Set([...undone].map((edit) => edit.file))].slice(0, 4).join(", ")}`, "info")
+    if (kept.length === 0) return
+    await this.deps.installer.recordEdits(kept.map((entry) => entry.edit))
     this.ctx.state.update((runState) => {
-      for (const edit of edits) {
-        const item = runState.jobs.find((entry) => entry.jobId === edit.jobId && entry.owner === "agent" && entry.allow.files.concat(entry.allow.create).includes(edit.file))
-          ?? runState.jobs.find((entry) => entry.jobId === edit.jobId && entry.owner === "agent")
+      for (const { edit, itemId } of kept) {
+        const item = runState.jobs.find((entry) => entry.id === itemId)
         if (!item) continue
         item.edits = [...(item.edits ?? []), { editId: edit.id, file: edit.file }]
       }
     })
+    await this.save()
   }
 
   /** Runs the item's S, B and T0 checks (the build once per round, against the baseline). */
@@ -426,11 +576,27 @@ class JobsIo {
         for (const result of await this.deps.checks.t0(scenarios, artifacts)) emit({ ...result, tier: "T0" })
       }
     }
-    if (item.jobId === "conversions_to_tools") {
-      const click = out.find((result) => result.tier === "T0" && result.checkId === "click_test")
-      if (click?.state === "pass") this.clickTested.add(item.id.slice(item.id.indexOf(":") + 1))
-    }
     return out
+  }
+
+  /** A conversion whose T0 click test passed AND whose job reached `done_in_code` (never a failed one, F5). */
+  noteClickTested(item: ChecklistItem, results: readonly CheckResult[]): void {
+    if (item.jobId !== "conversions_to_tools") return
+    const click = results.find((result) => result.tier === "T0" && result.checkId === "click_test")
+    if (click?.state === "pass") this.clickTested.add(item.id.slice(item.id.indexOf(":") + 1))
+  }
+
+  /** The connection's public IDs for the post-turn gate (F8), from `bridge.keys()`; none when unreadable. */
+  async connectionIds(): Promise<string[]> {
+    const keys = await this.keys()
+    return keys ? connectionIdsFromKeys(keys) : []
+  }
+
+  private keys(): Promise<TagKeys | null> {
+    if (!this.keysCache) {
+      this.keysCache = this.deps.bridge.has("tag.keys.v1") ? this.deps.bridge.keys({ signal: this.ctx.signal }).catch(() => null) : Promise.resolve(null)
+    }
+    return this.keysCache
   }
 
   private buildPromise: Promise<CheckResult> | null = null
@@ -472,9 +638,9 @@ class JobsIo {
 
   private async artifacts() {
     if (this.artifactsCache !== undefined) return this.artifactsCache
-    if (!this.deps.bridge.has("tag.keys.v1")) return (this.artifactsCache = null)
+    const keys = await this.keys()
+    if (!keys) return (this.artifactsCache = null)
     try {
-      const keys = await this.deps.bridge.keys({ signal: this.ctx.signal })
       const answers = this.ctx.state.get().plan?.answers
       this.artifactsCache = this.deps.installer.artifactsFromKeys(keys, {
         consentMode: answers?.consentMode ?? null,
@@ -493,13 +659,14 @@ class JobsIo {
   }
 
   /** §3d.1: PATCH the run's clickTestedConversions (append-only union) after T0 click tests pass. */
-  async patchClickTested(results: readonly CheckResult[]): Promise<void> {
-    void results
+  async patchClickTested(): Promise<void> {
     const runId = this.runId()
-    if (!runId || this.clickTested.size === 0) return
+    const fresh = [...this.clickTested].filter((name) => !this.patchedClickTested.has(name))
+    if (!runId || fresh.length === 0) return
     if (this.deps.agents.isAgentAlive()) throw new Error("engine invariant: no run PATCH while an agent child is alive")
     await this.deps.bridge.patchRun(runId, { clickTestedConversions: [...this.clickTested].sort() }, { signal: this.ctx.signal })
-    this.sub(`Offline click test passed: ${[...this.clickTested].sort().join(", ")}`, "ok")
+    for (const name of fresh) this.patchedClickTested.add(name)
+    this.sub(`Offline click test passed: ${fresh.sort().join(", ")}`, "ok")
   }
 
   async askQuestions(questions: readonly AgentQuestion[]): Promise<Record<string, string> | null> {
