@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { r4Segments, seg } from "../../formatting/r4-segments.test-util.js";
 import { INFINITE_R4_THEME } from "../theme.js";
 import type { Msg } from "../types.js";
-import { detailsPaneWidth, layoutTurn, renderLiveTurn } from "./layout.js";
+import { detailsPaneWidth, layoutTurn, renderCommittedTurn, renderLiveTurn } from "./layout.js";
 import type { ViewRender } from "./types.js";
 
 // The r4 frame body (terminal-r4 `frame()` + River's layout decision): side by
@@ -57,5 +57,31 @@ describe("what takes the details pane", () => {
     expect(wide.slice(0, 4).map((line) => line.slice(33))).toEqual([" │ steps only", " │", " │", " │ The draft is in the answer."]);
     const bare = layoutTurn(["∞ a"], view({ head: "", source: null, detail: ["read the playbook"], quiet: true }), [], 120);
     expect(bare).toEqual(["∞ a", `─ Steps ${"─".repeat(112)}`, "  read the playbook"]);
+  });
+});
+
+describe("a committed turn keeps every message the transcript draws (one renderer for both)", () => {
+  const turn: Msg[] = [
+    { role: "user", text: "fix the import" },
+    { kind: "trail", role: "system", text: "", todos: [{ id: "t1", content: "Check the import path", status: "in_progress" }] },
+    { role: "assistant", title: "Infinite — Acme", text: "Changed one line." },
+    { kind: "diff", role: "tool", text: "--- a/x.ts\n+++ b/x.ts\n-old line\n+new line" }
+  ];
+
+  it("keeps the project label, the diff's colours and the trail's todos", () => {
+    const lines = renderCommittedTurn({ messages: turn, views: [], focus: null, width: 80, color: true, theme });
+    const segments = lines.map((line) => r4Segments(line));
+    const has = (text: string, style: string) => segments.some((row) => row.some((part) => part.text.includes(text) && part.style === style));
+    expect(has("Infinite — Acme", "dim")).toBe(true);
+    expect(has("- old line", "red")).toBe(true);
+    expect(has("+ new line", "green")).toBe(true);
+    expect(lines.some((line) => line.includes("Check the import path"))).toBe(true);
+  });
+
+  it("draws the same answer column live", () => {
+    const lines = renderLiveTurn({ messages: turn, views: [], focus: null, width: 80, color: false, theme }).lines;
+    expect(lines).toContain("Δ diff");
+    expect(lines.some((line) => line.includes("Check the import path"))).toBe(true);
+    expect(lines.some((line) => line.includes("Infinite — Acme"))).toBe(true);
   });
 });

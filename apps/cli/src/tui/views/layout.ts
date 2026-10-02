@@ -9,7 +9,7 @@
 // widths first, and each line is cut to fit as a last resort.
 import type { AnswerViewV1 } from "@infinite-os/types";
 
-import { answerLines, noteLines, questionLines } from "../app/answer-column.js";
+import { renderTurnBody } from "../app/transcript-renderer.js";
 import type { TurnStep } from "../app/turn-store.js";
 import type { KeyContext } from "../keys/keymap.js";
 import { padEndCells } from "../lib/display-width.js";
@@ -124,9 +124,11 @@ export function layoutTurn(
 }
 
 /**
- * The answer column: the question (`❯`), then the answer (`∞`, markdown) and
- * any notes (receipts, errors) in dim. The tool trail is not here: it is the
- * Steps strip.
+ * The answer column: the question (`❯`), then the answer (`∞`, markdown, with
+ * its project label), diffs, the trail's thinking and todos, and any notes.
+ * The tool calls are not here: they are the Steps strip. The same renderer as
+ * the transcript (`renderTurnBody`), so a turn drawn here or committed to
+ * scrollback keeps everything the transcript shows.
  */
 export function renderAnswerColumn(
   messages: readonly Msg[],
@@ -134,36 +136,7 @@ export function renderAnswerColumn(
   theme: Theme,
   color: boolean
 ): string[] {
-  const style = { color, theme };
-  const lines: string[] = [];
-  let answered = false;
-  const block = (next: string[]) => {
-    if (!next.length) {
-      return;
-    }
-    if (lines.length) {
-      lines.push("");
-    }
-    lines.push(...next);
-  };
-
-  for (const msg of messages) {
-    if (msg.kind === "trail" || !msg.text.trim()) {
-      continue;
-    }
-    if (msg.role === "user") {
-      block(questionLines(msg.text, width, style));
-      answered = false;
-      continue;
-    }
-    if (msg.role === "assistant") {
-      block(answerLines(msg.text, width, style, { mark: !answered }));
-      answered = true;
-      continue;
-    }
-    block(noteLines(msg.text, width, style));
-  }
-  return lines;
+  return renderTurnBody(messages, { columns: width, color, theme });
 }
 
 export interface LiveTurnInput {

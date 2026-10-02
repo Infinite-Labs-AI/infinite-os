@@ -100,17 +100,48 @@ function splitTurns(messages: readonly Msg[]): Msg[][] {
   return turns;
 }
 
-/** One turn: its messages, then (for the live turn) what is arriving, then its Steps. */
-function renderTurn(messages: readonly Msg[], state: TurnState | undefined, ctx: RenderContext): string[] {
-  const all = state ? [...messages, ...state.streamSegments] : [...messages];
+export interface TurnBodyOptions extends ColumnStyle {
+  /** The column's width (the whole window in one column, the answer pane when split). */
+  columns: number;
+  thinkingMode?: ThinkingMode;
+}
+
+/**
+ * A turn's messages as the answer column draws them, without the Steps strip:
+ * the question, the answer with its project label, diffs, and the trail's
+ * thinking, todos, subagents and notes. The ONE per-message renderer: the
+ * transcript, the live turn beside its views and a turn committed to
+ * scrollback all draw through it, so none of them drops what the others show.
+ */
+export function renderTurnBody(messages: readonly Msg[], options: TurnBodyOptions): string[] {
+  return renderMessages(messages, {
+    color: options.color,
+    theme: options.theme,
+    columns: Math.max(1, Math.floor(options.columns)),
+    nowMs: 0,
+    thinkingMode: options.thinkingMode ?? "truncated"
+  }).lines;
+}
+
+/** Messages in order, one blank row between blocks; a new question starts a new answer (its `∞` mark). */
+function renderMessages(messages: readonly Msg[], ctx: RenderContext): { lines: string[]; answered: boolean } {
   const lines: string[] = [];
   let answered = false;
-
-  for (const msg of all) {
+  for (const msg of messages) {
+    if (msg.role === "user") {
+      answered = false;
+    }
     const block = renderMessage(msg, ctx, answered);
     answered ||= msg.role === "assistant" && Boolean(msg.text.trim());
     pushBlock(lines, block);
   }
+  return { lines, answered };
+}
+
+/** One turn: its messages, then (for the live turn) what is arriving, then its Steps. */
+function renderTurn(messages: readonly Msg[], state: TurnState | undefined, ctx: RenderContext): string[] {
+  const all = state ? [...messages, ...state.streamSegments] : [...messages];
+  const { lines, answered } = renderMessages(all, ctx);
 
   if (state) {
     if (state.reasoning.trim() && !state.streamSegments.some((msg) => msg.thinking?.trim())) {
