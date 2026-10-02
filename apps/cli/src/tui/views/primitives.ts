@@ -14,7 +14,8 @@ import wrapAnsi from "wrap-ansi";
 
 import { terminalText } from "../../desktop/terminal-text.js";
 import { displayWidth, truncateCells } from "../lib/display-width.js";
-import { ansiFg, type AnsiRole, type Theme } from "../theme.js";
+import type { Tone } from "../style/tokens.js";
+import { ansi, ansiSpan, colorEnabled, type AnsiRole, type Theme, type ThemeStyle } from "../theme.js";
 import { stateHeadFor, type StateTone } from "./states.js";
 import type { ViewRenderCtx } from "./types.js";
 
@@ -215,35 +216,51 @@ function instantParts(ms: number, timeZone: string | undefined) {
   }
 }
 
-/** The theme role for a tone. */
-export function toneRole(tone: StateTone | StatusWordV1["tone"]): AnsiRole {
+/**
+ * The theme role for a tone (r4): ok green, ask (needs you) bold amber, warn
+ * amber, bad red, busy cyan, muted dim, cmdl_only bold blue.
+ */
+export function toneRole(tone: StateTone | StatusWordV1["tone"] | Tone): AnsiRole {
   switch (tone) {
     case "ok":
       return "success";
+    case "ask":
+      return "ask";
     case "warn":
       return "warning";
     case "bad":
       return "error";
     case "busy":
       return "primary";
+    case "cmdl_only":
+      return "cmdl";
     case "muted":
     default:
       return "muted";
   }
 }
 
-/** Colour a span (and optionally bold or invert it), resetting after; plain when colour is off. */
+/**
+ * Paint a span in a role or r4 tokens (and optionally bold or invert it) at
+ * the theme's tier, ending it with specific resets (never `0m`), so a span
+ * inside a chip leaves the chip's background on. Plain when colour is off.
+ */
 export function paint(
   text: string,
-  role: AnsiRole,
+  role: ThemeStyle,
   ctx: { color: boolean; theme: Theme },
   options: { bold?: boolean; inverse?: boolean } = {}
 ): string {
   if (!ctx.color || !text) {
     return text;
   }
-  const open = `${ansiFg(ctx.theme, role)}${options.bold ? "\u001b[1m" : ""}${options.inverse ? "\u001b[7m" : ""}`;
-  return open ? `${open}${text}\u001b[0m` : text;
+  if ((!options.bold && !options.inverse) || !colorEnabled(ctx.theme)) {
+    return ansi(ctx.theme, role, text);
+  }
+  const span = ansiSpan(ctx.theme, role);
+  const on = `${options.bold ? "\u001b[1m" : ""}${options.inverse ? "\u001b[7m" : ""}`;
+  const off = [options.bold ? "22" : "", options.inverse ? "27" : ""].filter(Boolean).join(";");
+  return `${span.open}${on}${text}\u001b[${off}m${span.close}`;
 }
 
 /** Fit one line to `width` cells (a safety net: renderers lay out to width first). */

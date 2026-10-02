@@ -1,12 +1,13 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { Box, Static, Text, renderToString } from "./renderer.js";
+import { Box, Static, Text, activeInkRenderer, renderToString } from "./renderer.js";
 
 import { renderStatusFooter } from "../../formatting/renderer.js";
 import { renderInfiniteTranscript, type InfiniteTranscriptInput } from "../app/transcript-renderer.js";
 import { getTurnState, type TurnState } from "../app/turn-store.js";
-import { parseAnsiSegments } from "../lib/ansi-segments.js";
+import { parseAnsiSegments, type AnsiSegment } from "../lib/ansi-segments.js";
 import { displayWidth, padEndCells, truncateCells } from "../lib/display-width.js";
-import { resolveTheme, type Theme } from "../theme.js";
+import { toInkColor } from "../style/sgr.js";
+import { colorEnabled, resolveTheme, type Theme } from "../theme.js";
 import { ROCKET_BANNER_ROWS, RocketBanner } from "./rocket-banner.js";
 import {
   DEFAULT_COMPOSER_ROWS,
@@ -430,26 +431,46 @@ function liveLinesWindow({
   return liveWindow(lines, budget, livePage ?? null);
 }
 
-/** One pre-rendered ANSI line as Ink-native coloured segments. */
-function AnsiLine({ line }: { line: string }) {
+/**
+ * One pre-rendered ANSI line as Ink-native styled segments. Every attribute
+ * the renderers paint reaches the screen: colour, background (chips, the
+ * selected row), bold, faint, italic, underline (links), inverse and strike.
+ */
+export function AnsiLine({ line }: { line: string }) {
   const segments = parseAnsiSegments(line);
   return (
     <Text wrap="truncate-end">
       {segments.length
         ? segments.map((segment, segmentIndex) => (
-            <Text
-              key={segmentIndex}
-              color={segment.color}
-              bold={segment.bold}
-              italic={segment.italic}
-              strikethrough={segment.strikethrough}
-            >
+            <Text key={segmentIndex} {...segmentTextProps(segment)}>
               {segment.text}
             </Text>
           ))
         : line}
     </Text>
   );
+}
+
+/** Ink `Text` props for one segment, spelled for the active Ink backend. */
+function segmentTextProps(segment: AnsiSegment): React.ComponentProps<typeof Text> {
+  const props: Record<string, unknown> = {
+    color: toInkColor(segment.color, activeInkRenderer),
+    backgroundColor: toInkColor(segment.backgroundColor, activeInkRenderer),
+    bold: segment.bold,
+    italic: segment.italic,
+    underline: segment.underline,
+    inverse: segment.inverse,
+    strikethrough: segment.strikethrough
+  };
+  if (segment.dim) {
+    // Faint is `dimColor` on stock Ink, and `dim` (never together with bold) on the vendored one.
+    if (activeInkRenderer === "stock") {
+      props.dimColor = true;
+    } else if (!segment.bold) {
+      props.dim = true;
+    }
+  }
+  return props as React.ComponentProps<typeof Text>;
 }
 
 function statusRowStrings({
@@ -499,7 +520,8 @@ function renderTranscriptLines(
     // `<Text color=…>` props by the transcript view (see parseAnsiSegments).
     // This keeps the renderer's full palette (border/title/body/diff/tool)
     // while coloring via Ink-native props that both Ink backends honor.
-    color: true,
+    // The theme's tier decides what is painted (none at all when plain).
+    color: colorEnabled(options.theme),
     columns: options.columns,
     nowMs: options.nowMs,
     theme: options.theme

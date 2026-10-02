@@ -4,7 +4,9 @@ import { join, resolve } from "node:path";
 import { resolveInkRenderer } from "./ink/renderer-choice.js";
 import {
   inkStyle,
+  sgrClose,
   sgrForeground,
+  sgrOpen,
   style,
   type InkColorForm,
   type InkStyle,
@@ -262,6 +264,12 @@ export function ansi(theme: Theme, role: ThemeStyle, value: string, enabled = tr
 /** The SGR that switches only the foreground to a role ("" when the tier paints no colour). */
 export function ansiFg(theme: Theme, role: ThemeStyle): string {
   return sgrForeground(themeTokens(role), theme.tier, skinOverrides(theme));
+}
+
+/** The escapes that open and close a role (or r4 tokens) at the theme's tier ("" where nothing is painted). */
+export function ansiSpan(theme: Theme, role: ThemeStyle): { open: string; close: string } {
+  const tokens = themeTokens(role);
+  return { open: sgrOpen(tokens, theme.tier, skinOverrides(theme)), close: sgrClose(tokens, theme.tier) };
 }
 
 /** Ink `Text` props for a role (or r4 tokens) at the theme's tier. */

@@ -47,7 +47,7 @@ import {
 } from "../app/turn-store.js";
 import { TYPING_IDLE_MS } from "../config/timing.js";
 import { displayWidth, truncateCells } from "../lib/display-width.js";
-import { resolveTheme, type Theme } from "../theme.js";
+import { colorEnabled, resolveTheme, type Theme } from "../theme.js";
 import type { Msg } from "../types.js";
 import {
   HomeInventory,
@@ -591,7 +591,7 @@ export function InkInteractiveSessionApp({
                 views: views.map((frame) => frame.view),
                 focus: viewFocusRef.current,
                 width: transcriptColumns(columns),
-                color: true,
+                color: colorEnabled(t),
                 theme: t,
                 rows: liveTurnRowsRef.current
               }).lines
@@ -671,7 +671,7 @@ export function InkInteractiveSessionApp({
         views: turnViews.map((frame) => frame.view),
         focus: viewFocus,
         width: transcriptColumns(columns),
-        color: true,
+        color: colorEnabled(t),
         theme: t,
         rows: turnRows
       });
@@ -745,7 +745,7 @@ export function InkInteractiveSessionApp({
     const view = headConfirmAction.view;
     const drawAt = (keyBarRows: number) => approvalRender(view, {
       width: columns,
-      color: true,
+      color: colorEnabled(t),
       theme: t,
       selected: 0,
       tab: cardUi.tab,

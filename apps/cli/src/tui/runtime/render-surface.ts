@@ -9,7 +9,8 @@ export function resolveCliRenderSurface(
   env: NodeJS.ProcessEnv = process.env
 ): CliRenderSurface {
   const requested = normalizeRenderSurface(env.INFINITE_RENDER_SURFACE);
-  if (!stream.isTTY || isTruthy(env.INFINITE_PLAIN_OUTPUT) || requested === "plain") {
+  // A dumb terminal cannot move the cursor or show colour, so it never gets Ink.
+  if (!stream.isTTY || env.TERM?.trim().toLowerCase() === "dumb" || isTruthy(env.INFINITE_PLAIN_OUTPUT) || requested === "plain") {
     return "plain";
   }
   if (requested) {
