@@ -50,9 +50,14 @@ export const LEAD_FORM = new RegExp(
   "i"
 )
 
-/** A hand-rolled analytics call. Its presence downgrades a finding to `undetermined`. */
+/**
+ * A hand-rolled analytics call, or one of infinite-tag's own conversion helpers (which the site's code
+ * calls since decision 13 — `infiniteTrack(` has no word boundary before `Track`, so `\btrack` never
+ * matched it and a form wired through the helpers still read as "silent", scout S5 fact 24). Its
+ * presence downgrades a finding to `undetermined`.
+ */
 export const DIRECT_ANALYTICS_CALL =
-  /\bfbq\s*\(|\bgtag\s*\(|\bposthog\s*\.\s*capture\s*\(|\bdataLayer\s*\.\s*push\s*\(|\btrack(?:Event|Conversion)?\s*\(/
+  /\bfbq\s*\(|\bgtag\s*\(|\bposthog\s*\.\s*capture\s*\(|\bdataLayer\s*\.\s*push\s*\(|\btrack(?:Event|Conversion)?\s*\(|\binfiniteTrack\s*\(|\binfiniteTrackThenNavigate\s*\(|\binfiniteMetaMirror\s*\(|\breportInfiniteOutcome\s*\(/
 
 /** The form's own structural identity, for classification only. Never emitted in a finding. */
 function identityTokens(openingTag: string): string {
