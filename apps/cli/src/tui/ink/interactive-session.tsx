@@ -11,6 +11,8 @@ import wrapAnsi from "wrap-ansi";
 import { Box, Text, render, renderToString, useApp, useCursor, useInput, useStdin, useStdout } from "./renderer.js";
 
 import type { ChatProgressEvent } from "@infinite-os/llm-controller";
+import type { ToolViewFrameV1 } from "@infinite-os/types";
+import type { Key } from "ink";
 
 // Type-only import (erased at build, no runtime cycle): the in-chat /connect
 // wizard descriptor + decision are owned by index.ts (which owns the registry /
@@ -34,7 +36,13 @@ import {
 import { confirmErrorLines, confirmResultLines, type ConfirmLine } from "../../desktop/confirm-result-lines.js";
 
 import { turnController } from "../app/turn-controller.js";
-import { getTurnState, subscribeTurnState, type TurnState } from "../app/turn-store.js";
+import {
+  clearTurnViews,
+  getTurnState,
+  recordTurnView,
+  subscribeTurnState,
+  type TurnState
+} from "../app/turn-store.js";
 import { TYPING_IDLE_MS } from "../config/timing.js";
 import { displayWidth, truncateCells } from "../lib/display-width.js";
 import { resolveTheme, type Theme } from "../theme.js";
@@ -54,6 +62,7 @@ import {
   inkTranscriptLayout,
   InkTranscriptApp,
   renderCommittedTranscriptLines,
+  transcriptColumns,
   useInfiniteTranscriptClock
 } from "./transcript-app.js";
 import {
@@ -65,6 +74,8 @@ import {
   type LivePageDirection
 } from "./transcript-static.js";
 import { useTerminalColumns, useTerminalRows } from "./terminal-columns.js";
+import { resolveViewKey, viewFocusAfterTurnDone, viewKeyHints, type ViewFocusState } from "../views/focus.js";
+import { renderLiveTurn } from "../views/layout.js";
 
 /**
  * The every-launch home inventory shown above the transcript on the empty home
@@ -232,11 +243,14 @@ export interface InkInteractiveSessionAppProps {
   /**
    * Run one submitted line. `signal` aborts when the user stops the turn (Esc,
    * or Ctrl-C while a turn runs); only honoured when `turnStoppable` is set.
+   * `onView` takes each answer view (`tool.view` frame) the turn produces; the
+   * finished turn then draws them beside its answer (terminal-r4 layout).
    */
   onSubmitLine(
     line: string,
     onProgress: (event: ChatProgressEvent) => void,
-    signal: AbortSignal
+    signal: AbortSignal,
+    onView?: (frame: ToolViewFrameV1) => void
   ): Promise<InkInteractiveLineResult>;
   /**
    * Resolve an in-session write confirmation surfaced by a turn's
@@ -445,6 +459,12 @@ export function InkInteractiveSessionApp({
   >([]);
   // `?` on the head card toggles its explanation (the terminal can't hover).
   const [explainOpen, setExplainOpen] = useState(false);
+  // The latest finished turn's answer views keep their keys (j/k, 1–9, →, m, ?)
+  // until the next line is submitted (views/focus.ts). The views themselves live
+  // in the turn store (`turnState.views`), cleared when the turn commits.
+  const [viewFocus, setViewFocus] = useState<ViewFocusState | null>(null);
+  const viewFocusRef = useRef(viewFocus);
+  viewFocusRef.current = viewFocus;
   const [pendingSelection, setPendingSelection] = useState<{
     prompt: InkInteractiveSelectionPrompt;
     selectedIndex: number;
@@ -522,10 +542,21 @@ export function InkInteractiveSessionApp({
       return;
     }
     const turn = historyRef.current;
-    const latest: CommittedEntry | null = turn.length
+    const views = getTurnState().views;
+    // A turn with answer views commits in the same two-pane layout it was shown in.
+    const latest: CommittedEntry | null = turn.length || views.length
       ? {
           id: `turn:${++turnSeq.current}`,
-          lines: renderCommittedTranscriptLines({ agentTitle, messages: turn }, { columns, theme: t })
+          lines: views.length
+            ? renderLiveTurn({
+                messages: turn,
+                views: views.map((frame) => frame.view),
+                focus: viewFocusRef.current,
+                width: transcriptColumns(columns),
+                color: true,
+                theme: t
+              }).lines
+            : renderCommittedTranscriptLines({ agentTitle, messages: turn }, { columns, theme: t })
         }
       : null;
     const home: CommittedEntry | null = homeInventory && !homeCommitted && turn.length === 0
@@ -548,6 +579,8 @@ export function InkInteractiveSessionApp({
     setHomeCommitted(true);
     historyRef.current = [];
     setHistory([]);
+    clearTurnViews();
+    setViewFocus(null);
     setLiveOffset(null);
   }, [agentTitle, columns, homeCommitted, homeInventory, t]);
 
@@ -573,6 +606,30 @@ export function InkInteractiveSessionApp({
     messages: history,
     state: turnState
   }), [agentTitle, history, turnState]);
+  // A finished turn with answer views is drawn in the r4 layout (answer left,
+  // details right, Steps below) as the live region's latest lines, at the
+  // transcript's width; the transcript then carries only the idle turn state.
+  // While a turn runs its views collect in the turn store and the transcript
+  // renders as it always has.
+  const turnViews = turnState.views;
+  const liveTurn = useMemo(() => !busy && turnViews.length
+    ? renderLiveTurn({
+        messages: history,
+        views: turnViews.map((frame) => frame.view),
+        focus: viewFocus,
+        width: transcriptColumns(columns),
+        color: true,
+        theme: t
+      })
+    : null, [busy, columns, history, t, turnViews, viewFocus]);
+  const liveLatest = useMemo<CommittedEntry | null>(
+    () => liveTurn ? { id: "live-turn", lines: liveTurn.lines } : null,
+    [liveTurn]
+  );
+  const liveTranscript = useMemo(
+    () => liveTurn ? { agentTitle, messages: [], state: turnState } : transcript,
+    [agentTitle, liveTurn, transcript, turnState]
+  );
   // Drive the transcript's animated clock here so the composer-cursor row
   // prediction below and the live <InkTranscriptApp> render share identical
   // tick/time values. Otherwise the busy indicator (or a tool's elapsed timer)
@@ -600,11 +657,19 @@ export function InkInteractiveSessionApp({
   useEffect(() => {
     setExplainOpen(false);
   }, [headConfirmAction]);
-  // With no card, the bar is the composer's: `esc stop` while a stoppable turn
-  // runs (the only key that works then), nothing when idle.
+  // With no card, the latest turn's views offer their keys while the composer is
+  // empty (views/focus.ts: only what works on the focused view). Otherwise the
+  // bar is the composer's: `esc stop` while a stoppable turn runs (the only key
+  // that works then), nothing when idle.
+  const viewHints = liveTurn?.focused && viewFocus && !confirmKeys && inputValue.length === 0
+    && !pendingSelection && !pendingOperatorLine && !pendingFieldPrompt
+    ? viewKeyHints(viewFocus, liveTurn.focused.facts, liveTurn.focused.render.keys)
+    : [];
   const keyHints = confirmKeys
     ? keyBarHints(confirmKeys.ctx)
-    : keyBarHints({ focus: "composer", busy: busy && turnStoppable, okKey: null, caps: NO_KEY_CAPS });
+    : viewHints.length
+      ? viewHints
+      : keyBarHints({ focus: "composer", busy: busy && turnStoppable, okKey: null, caps: NO_KEY_CAPS });
   // The home inventory shows ONCE, on the empty home screen (no transcript yet)
   // and only when the CLI supplied its data. The first submitted line commits it
   // into scrollback with the first turn (`commitLatestTurn`), so it never repeats.
@@ -713,7 +778,7 @@ export function InkInteractiveSessionApp({
           // through `progressResult` and gate on it like the branch below.
           appendMessages(stampAgentTitle(progressResult.finalMessages, getAgentTitle?.() ?? turnTitle));
         }
-      }, signal);
+      }, signal, recordTurnView);
 
       if (result.exit) {
         requestExit();
@@ -778,6 +843,9 @@ export function InkInteractiveSessionApp({
       setBusyStartedAt(undefined);
       // A finished turn opens at its top; a tall one is paged from there.
       setLiveOffset(0);
+      // Its views stay live and take their keys until the next line is submitted.
+      const views = getTurnState().views;
+      setViewFocus(views.length ? viewFocusAfterTurnDone(views.map((frame) => frame.view), NO_KEY_CAPS) : null);
     }
   }, [appendMessages, getAgentTitle, onSubmitLine, requestExit, turnAbort]);
 
@@ -1195,6 +1263,7 @@ export function InkInteractiveSessionApp({
     homeBanner: !showHomeInventory,
     indicatorTick: labelTick,
     keyBarRows,
+    latest: liveLatest,
     livePage: liveOffset,
     nowMs: clock,
     rows,
@@ -1203,11 +1272,28 @@ export function InkInteractiveSessionApp({
     status: visibleStatusParts,
     theme: t,
     title,
-    transcript,
+    transcript: liveTranscript,
     turnStartedAt: busyStartedAt
   });
   const composerRow = homeInventoryRows + keyBarRows + liveLayout.rowCount;
   const pageLive = (direction: LivePageDirection) => setLiveOffset(pageLiveWindow(liveLayout.window, direction));
+  // One key on the latest turn's views (only reached with an empty composer and
+  // no card or picker open). `false` = the key goes on to the composer.
+  const handleViewKey = (input: string, key: Key): boolean => {
+    if (!viewFocus || !liveTurn?.focused) {
+      return false;
+    }
+    const facts = { ...liveTurn.focused.facts, livePageNext: liveLayout.window.hiddenBelow > 0 };
+    const next = resolveViewKey(input, viewFocus, key, facts);
+    setViewFocus(next);
+    if (next.effect?.type === "ask") {
+      // `next` and `more` are NEW user turns, never direct tool calls.
+      submitLine(next.effect.text);
+    } else if (next.effect?.type === "page_live") {
+      pageLive("next");
+    }
+    return next.handled;
+  };
 
   return (
     <Box flexDirection="column" width={columns}>
@@ -1229,6 +1315,7 @@ export function InkInteractiveSessionApp({
         homeBanner={!showHomeInventory}
         indicatorTick={labelTick}
         keyBarRows={keyBarRows}
+        latest={liveLatest}
         livePage={liveOffset}
         livePageSpace={pendingConfirmActions.length === 0 && !pendingSelection && !pendingOperatorLine}
         nowMs={clock}
@@ -1239,7 +1326,7 @@ export function InkInteractiveSessionApp({
         status={visibleStatusParts}
         theme={t}
         title={title}
-        transcript={transcript}
+        transcript={liveTranscript}
         turnStartedAt={busyStartedAt}
       />
       <SelectionMenu
@@ -1301,6 +1388,7 @@ export function InkInteractiveSessionApp({
         onSelectionNext={() => selectPendingOption("next")}
         onSelectionPrevious={() => selectPendingOption("previous")}
         onSubmit={submitLine}
+        onViewKey={handleViewKey}
         pendingConfirmation={Boolean(pendingOperatorLine)}
         placeholder={connectPlaceholder}
         row={composerRow}
@@ -2166,6 +2254,7 @@ function InkLineInput({
   onSelectionNext,
   onSelectionPrevious,
   onSubmit,
+  onViewKey,
   pendingConfirmation,
   placeholder,
   row,
@@ -2215,6 +2304,8 @@ function InkLineInput({
   onSelectionNext(): void;
   onSelectionPrevious(): void;
   onSubmit(value: string): void;
+  /** A key for the latest turn's views; returns whether it acted (else the composer takes it). */
+  onViewKey?(input: string, key: Key): boolean;
   pendingConfirmation: boolean;
   placeholder: string;
   row: number;
@@ -2305,6 +2396,21 @@ function InkLineInput({
         onConnectConfirmNext();
         return;
       }
+      return;
+    }
+    // The latest turn's views take the keys they use (views/focus.ts) while the
+    // composer is empty and no card, picker or operator confirm is open. Any
+    // other key falls through: a printable one types (and focus moves to the
+    // composer), space and PgDn still page the live region below.
+    if (
+      onViewKey &&
+      !busy &&
+      value.length === 0 &&
+      !confirmActionActive &&
+      !selectionActive &&
+      !pendingConfirmation &&
+      onViewKey(input, key)
+    ) {
       return;
     }
     // Page a tall live turn (transcript-static.ts): PgDn/PgUp always, space only on

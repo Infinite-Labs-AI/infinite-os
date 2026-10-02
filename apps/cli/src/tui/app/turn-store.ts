@@ -1,3 +1,5 @@
+import type { ToolViewFrameV1 } from "@infinite-os/types";
+
 import { isTodoDone } from "../lib/live-progress.js";
 import type { ActiveTool, ActivityItem, Msg, SubagentProgress, TodoItem } from "../types.js";
 
@@ -16,7 +18,8 @@ const buildTurnState = (): TurnState => ({
   todos: [],
   toolTokens: 0,
   tools: [],
-  turnTrail: []
+  turnTrail: [],
+  views: []
 });
 
 let turnState = buildTurnState();
@@ -71,6 +74,30 @@ export const archiveTodosAtTurnEnd = () => {
 
 export const resetTurnState = () => setTurnState(buildTurnState());
 
+/** The most views one turn keeps; the bridge already caps a turn's view bytes, this caps the count. */
+export const MAX_TURN_VIEWS = 64;
+
+/**
+ * Record a `tool.view` frame for the latest turn. A frame with a known `viewId`
+ * replaces that view in place (a job updating); a new one is appended, up to
+ * `MAX_TURN_VIEWS`. The turn controller's per-turn reset leaves views alone:
+ * they stay with the latest turn until the next line is submitted, then
+ * `clearTurnViews()` runs as the turn commits to scrollback.
+ */
+export const recordTurnView = (frame: ToolViewFrameV1) =>
+  patchTurnState((state) => {
+    const index = state.views.findIndex((view) => view.viewId === frame.viewId);
+    if (index >= 0) {
+      const views = state.views.slice();
+      views[index] = frame;
+      return { ...state, views };
+    }
+    return state.views.length >= MAX_TURN_VIEWS ? state : { ...state, views: [...state.views, frame] };
+  });
+
+export const clearTurnViews = () =>
+  patchTurnState((state) => (state.views.length ? { ...state, views: [] } : state));
+
 export interface TurnState {
   activity: ActivityItem[];
   outcome: string;
@@ -87,4 +114,6 @@ export interface TurnState {
   toolTokens: number;
   tools: ActiveTool[];
   turnTrail: string[];
+  /** The latest turn's answer views (`tool.view` frames), in arrival order. */
+  views: readonly ToolViewFrameV1[];
 }

@@ -116,8 +116,9 @@ export function resolveKey(input: string, key: Key, ctx: KeyContext): KeyAction 
  * the card's own verb, then `n dismiss`, then `o`/`w`/`r` when their capability
  * is present, then `?` when there is an explanation. The composer shows
  * `esc stop` while a turn runs (`busy` means a STOPPABLE turn: Esc resolves to
- * stop exactly then) and no bar when idle. The rows and document hints arrive
- * with the view renderers (T8–T11).
+ * stop exactly then) and no bar when idle. The rows and document hints of a
+ * finished turn's views come from `views/focus.ts` (`viewKeyHints`), from the
+ * same facts its key resolver uses.
  */
 export function keyBarHints(ctx: KeyContext): KeyHint[] {
   if (ctx.focus === "composer") {
