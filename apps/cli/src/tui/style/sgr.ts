@@ -64,7 +64,7 @@ function resolve(style: TokenStyle, tier: Tier, overrides?: TokenOverrides): Res
 function colourAt(tier: Tier, hex: string | undefined, index256: number | undefined, code16: number | undefined, override?: string): Colour | undefined {
   if (tier === "truecolor") {
     const value = override && parseHex(override) ? override : hex;
-    return value ? { kind: "hex", hex: value.toLowerCase() } : undefined;
+    return value ? { kind: "hex", hex: value.startsWith("#") ? value : `#${value}` } : undefined;
   }
   if (tier === "256") {
     return index256 === undefined ? undefined : { kind: "256", index: index256 };

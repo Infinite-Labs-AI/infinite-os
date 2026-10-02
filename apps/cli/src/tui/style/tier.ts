@@ -33,7 +33,7 @@ const TRUECOLOR_PROGRAMS = new Set(["vscode", "WezTerm", "ghostty"]);
  * 9. `TERM_PROGRAM=Apple_Terminal` or `TERM=*-256color` → `256`; otherwise `16`.
  */
 export function resolveTier(env: NodeJS.ProcessEnv, stream: TierStream): Tier {
-  const requested = TIER_NAMES[env.INFINITE_COLOR?.trim().toLowerCase() ?? ""];
+  const requested = explicitTier(env);
   if (requested) {
     return requested;
   }
@@ -78,6 +78,12 @@ export function resolveTier(env: NodeJS.ProcessEnv, stream: TierStream): Tier {
     return "256";
   }
   return "16";
+}
+
+/** The tier `INFINITE_COLOR` asks for, when it names one. */
+export function explicitTier(env: NodeJS.ProcessEnv): Tier | undefined {
+  const requested = env.INFINITE_COLOR?.trim().toLowerCase() ?? "";
+  return Object.prototype.hasOwnProperty.call(TIER_NAMES, requested) ? TIER_NAMES[requested] : undefined;
 }
 
 /** Whether a tier paints anything at all (only `plain` does not). */

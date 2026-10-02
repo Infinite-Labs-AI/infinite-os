@@ -13,6 +13,7 @@ describe("resolveTier", () => {
     expect(resolveTier({ INFINITE_COLOR: "MONO" }, tty)).toBe("mono");
     expect(resolveTier({ INFINITE_COLOR: "plain", COLORTERM: "truecolor" }, tty)).toBe("plain");
     expect(resolveTier({ INFINITE_COLOR: "sparkly", COLORTERM: "truecolor" }, tty)).toBe("truecolor");
+    expect(resolveTier({ INFINITE_COLOR: "constructor", COLORTERM: "truecolor" }, tty)).toBe("truecolor");
   });
 
   it("prints plain to a pipe, to TERM=dumb and under INFINITE_PLAIN_OUTPUT, even with NO_COLOR", () => {
