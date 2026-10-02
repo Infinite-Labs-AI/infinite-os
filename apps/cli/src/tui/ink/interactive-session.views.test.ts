@@ -41,6 +41,30 @@ describe("the session draws the latest turn's answer views (CI-runnable)", () =>
     expect(out.split("\n").every((line) => displayWidth(line) <= 120)).toBe(true);
   });
 
+  it.each([120, 140, 159])("at %i a turn whose answer has a table is one column: the table bordered and whole, the view under it", (columns) => {
+    resetTurnState();
+    recordTurnView(listFrame());
+    const table = [
+      "| Ad | Spend | Purchases | ROAS | CPA | Note |",
+      "| --- | ---: | ---: | ---: | ---: | --- |",
+      "| Spring demo, hook 3 | $1,284.50 | 42 | 3.41 | $30.58 | Strongest hook; watch for fatigue next week |",
+      "| Founder story, 30s | $612.00 | 1 | 0.29 | $612.00 | One purchase so far: the pause candidate |"
+    ].join("\n");
+    const rows = stripAnsi(renderInkInteractiveSessionToString({
+      columns,
+      initialMessages: [{ role: "user", text: "which ads are on?" }, { role: "assistant", text: `Two are on.\n\n${table}` }],
+      onSubmitLine: async () => ({ messages: [] })
+    })).split("\n");
+    expect(rows.some((row) => /│ Ad\s+│\s+Spend │\s+Purchases │\s+ROAS │\s+CPA │ Note\s+│/u.test(row))).toBe(true);
+    expect(rows.some((row) => /^\s*(Ad|Spend|Purchases|ROAS|CPA|Note): /u.test(row))).toBe(false);
+    // The view sits under the answer and a rule, never beside it.
+    const view = rows.findIndex((row) => / Ads running {2}✓ Ready/u.test(row));
+    expect(view).toBeGreaterThan(rows.findIndex((row) => row.includes("Founder story, 30s")));
+    expect(rows[view]!.startsWith(" Ads running")).toBe(true);
+    expect(rows[view - 1]).toBe("─".repeat(columns));
+    expect(rows.every((row) => displayWidth(row) <= columns)).toBe(true);
+  });
+
   it("a list opens on the row its view names (`body.selected`), with no focus fed from outside (run-r2 MUST 1)", () => {
     resetTurnState();
     const frame = listFrame();

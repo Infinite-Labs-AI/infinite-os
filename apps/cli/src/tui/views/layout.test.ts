@@ -5,7 +5,7 @@ import { r4Segments, seg } from "../../formatting/r4-segments.test-util.js";
 import { INFINITE_R4_THEME } from "../theme.js";
 import type { Msg } from "../types.js";
 import { viewFocusAfterTurnDone } from "./focus.js";
-import { detailsPaneWidth, layoutTurn, renderCommittedTurn, renderLiveTurn } from "./layout.js";
+import { answerCarriesTable, detailsPaneWidth, layoutTurn, renderCommittedTurn, renderLiveTurn, turnMaySplit } from "./layout.js";
 import type { ViewRender } from "./types.js";
 
 // The r4 frame body (terminal-r4 `frame()` + River's layout decision): side by
@@ -134,10 +134,10 @@ describe("an answer table never promises a widen that cannot happen", () => {
   const fits = turn("Ran longer than planned this week because the budget was raised twice");
   const card = ["┌─ card ─┐"];
 
-  it.each([160, 200])("split at %i: the answer pane never widens past 40, so a dropped column is just named", (width) => {
+  it.each([160, 200])("at %i a turn with a card and a table answer is one column, so every column shows and there is no hint", (width) => {
     const lines = renderLiveTurn({ messages: wide, views: [], focus: null, width, color: false, theme, details: card }).lines;
-    expect(lines.some((line) => /hidden/u.test(line))).toBe(true);
-    expect(lines.some((line) => /widen by/u.test(line))).toBe(false);
+    expect(lines.some((line) => /hidden|widen by/u.test(line))).toBe(false);
+    expect(lines.some((line) => /│ Campaign │\s+Spend │\s+Clicks │ Note\s+│\s+CTR │/u.test(line))).toBe(true);
   });
 
   it("one column under 120 with details: widening past 119 splits the turn, so only a table that fits below it says widen", () => {
@@ -157,6 +157,85 @@ describe("an answer table never promises a widen that cannot happen", () => {
     const lines = renderCommittedTurn({ messages: fits, views: [], focus: null, width: 100, color: false, theme });
     expect(lines.some((line) => /widen by/u.test(line))).toBe(false);
     expect(lines.some((line) => /hidden/u.test(line))).toBe(true);
+  });
+});
+
+describe("an answer with a table of its own takes the whole width (the split is for a view or a card)", () => {
+  // Six columns, as a model writes them: about 100 columns wide as a bordered table.
+  const table = [
+    "| Ad | Spend | Purchases | ROAS | CPA | Note |",
+    "| --- | ---: | ---: | ---: | ---: | --- |",
+    "| Spring demo, hook 3 | $1,284.50 | 42 | 3.41 | $30.58 | Strongest hook; watch for fatigue next week |",
+    "| Founder story, 30s | $612.00 | 1 | 0.29 | $612.00 | One purchase so far: the pause candidate |",
+    "| Cold brew carousel | $938.25 | 19 | 2.12 | $49.38 | Steady |"
+  ].join("\n");
+  const withTable: Msg[] = [
+    { role: "user", text: "how did the ads do?" },
+    { role: "assistant", text: `Spend is up on the week.\n\n${table}\n\nTwo ads carry most of it.` }
+  ];
+  const prose: Msg[] = [{ role: "user", text: "how did the ads do?" }, { role: "assistant", text: "Spend is up on the week. Two ads carry most of it." }];
+  const card = ["┌─ Pause ad? ─┐", "│ status      │", "└─────────────┘"];
+  const header = /│ Ad\s+│\s+Spend │\s+Purchases │\s+ROAS │\s+CPA │ Note\s+│/u;
+
+  it.each([120, 140, 159])("at %i the table stays a bordered table with every column, and the card follows under the answer", (width) => {
+    const lines = renderLiveTurn({ messages: withTable, views: [], focus: null, width, color: false, theme, details: card }).lines;
+    // One column: no pane separator beside the answer, the card under a rule.
+    expect(lines[0]).toBe("❯ how did the ads do?");
+    expect(lines.some((line) => line.includes(" │ ┌─ Pause ad? ─┐"))).toBe(false);
+    const rule = lines.indexOf("─".repeat(width));
+    expect(rule).toBeGreaterThan(0);
+    expect(lines.slice(rule + 1, rule + 4)).toEqual(card);
+    // A bordered table, all six columns on one header row; never `label: value` stacks, nothing dropped.
+    expect(lines.some((line) => header.test(line))).toBe(true);
+    expect(lines.filter((line) => /^ {2}┌[─┬]+┐$/u.test(line))).toHaveLength(1);
+    expect(lines.some((line) => /^\s*(Ad|Spend|Purchases|ROAS|CPA|Note): /u.test(line))).toBe(false);
+    expect(lines.some((line) => /^\s*\+ .*(hidden|widen|needs)/u.test(line))).toBe(false);
+    expect(lines.every((line) => line.length <= width)).toBe(true);
+  });
+
+  it.each([120, 140, 159])("at %i an answer with no table still sits left of its card", (width) => {
+    const lines = renderLiveTurn({ messages: prose, views: [], focus: null, width, color: false, theme, details: card }).lines;
+    expect(lines[0]).toMatch(/^❯ how did the ads do\? + │ ┌─ Pause ad\? ─┐$/u);
+    expect(lines.includes("─".repeat(width))).toBe(false);
+  });
+
+  it.each([120, 140, 159])("at %i a table answer with nothing for the right pane is the whole width too", (width) => {
+    const lines = renderLiveTurn({ messages: withTable, views: [], focus: null, width, color: false, theme }).lines;
+    expect(lines.some((line) => header.test(line))).toBe(true);
+    expect(lines.some((line) => line.includes(" │ ") && !line.trimStart().startsWith("│"))).toBe(false);
+  });
+
+  it("a view takes the whole width under a table answer, at the width a one-column turn gives it", () => {
+    const body = { sections: [{ text: "The draft.", format: "plain" }] };
+    const doc = decodeAnswerView({
+      v: 1, kind: "document", tool: "read_draft", title: "Win-back sequence", state: "ready", asOf: null,
+      scope: { workspaceName: "Demo", crossWorkspace: false }, caveats: [], body
+    });
+    if (!doc) throw new Error("document fixture does not decode");
+    const lines = renderLiveTurn({ messages: withTable, views: [doc], focus: null, width: 140, color: false, theme }).lines;
+    const rule = lines.indexOf("─".repeat(140));
+    expect(lines.some((line) => header.test(line))).toBe(true);
+    expect(lines.findIndex((line) => line.includes("Win-back sequence"))).toBeGreaterThan(rule);
+    expect(turnMaySplit(withTable, 140)).toBe(false);
+    expect(detailsPaneWidth(140, turnMaySplit(withTable, 140))).toBe(140);
+    expect(turnMaySplit(prose, 140)).toBe(true);
+    expect(turnMaySplit(prose, 119)).toBe(false);
+  });
+
+  it("only the answer's own markdown counts: the question, a tool's output and a diff never do; a table still arriving does", () => {
+    const user: Msg[] = [{ role: "user", text: table }, { role: "assistant", text: "Noted." }];
+    const tool: Msg[] = [{ role: "user", text: "q" }, { role: "tool", text: table }, { role: "system", kind: "diff", text: table }];
+    expect(answerCarriesTable(user)).toBe(false);
+    expect(answerCarriesTable(tool)).toBe(false);
+    expect(answerCarriesTable(withTable)).toBe(true);
+    // Arriving: it counts from the row the renderer first draws as a table (the same lexer decides both).
+    expect(answerCarriesTable([{ role: "assistant", text: "Here:\n\nAd | Spend", partial: true }])).toBe(false);
+    expect(answerCarriesTable([{ role: "assistant", text: "Here:\n\nAd | Spend\n--- | ---:\nSpring | $1", partial: true }])).toBe(true);
+    expect(answerCarriesTable([{ role: "assistant", text: "Here:\n\n| Ad | Spend |\n| --- | ---: |\n| Spring | $1", partial: true }])).toBe(true);
+    // A table inside a quote is drawn as a table too.
+    expect(answerCarriesTable([{ role: "assistant", text: "> | Ad | Spend |\n> | --- | ---: |\n> | Spring | $1 |" }])).toBe(true);
+    // A pipe in prose or code is not a table.
+    expect(answerCarriesTable([{ role: "assistant", text: "Run `a | b` then:\n\n```\n| not | a table |\n| --- | --- |\n```" }])).toBe(false);
   });
 });
 

@@ -5,10 +5,19 @@
 // column: the question, the answer, a rule, the details underneath, then the
 // Steps. The key bar and the composer are the session's, below all of it.
 //
+//
+// Two things keep a turn in ONE column from 120 columns too: it has nothing
+// for the right pane (no view that takes it and no card), or its answer
+// carries a markdown table. The answer pane is at most 40 columns, where a
+// table turns into `label: value` stacks or drops most of its columns; at the
+// whole width it stays a bordered table, and the details follow under it.
+//
 // Every line this returns fits its width: the panes are laid out to their own
 // widths first, and each line is cut to fit as a last resort.
 import type { AnswerViewV1 } from "@infinite-os/types";
 
+import { holdOpenMarkers } from "../../formatting/markdown-inline.js";
+import { markdownHasTable } from "../../formatting/markdown-render.js";
 import { renderTurnBody } from "../app/transcript-renderer.js";
 import type { TurnStep } from "../app/turn-store.js";
 import type { KeyContext } from "../keys/keymap.js";
@@ -193,6 +202,27 @@ export function detailsPaneWidth(width: number, split = true): number {
   return panes.wide && split ? panes.right : Math.max(1, Math.floor(width));
 }
 
+/**
+ * Whether the answer column draws a markdown table: in the answer itself or
+ * in a note the model wrote (the messages `renderTurnBody` draws as markdown;
+ * never the question, a tool's own output or a diff). An answer still
+ * arriving counts as soon as its table's header rule has come.
+ */
+export function answerCarriesTable(messages: readonly Msg[]): boolean {
+  return messages.some((msg) =>
+    msg.role !== "user" && msg.role !== "tool" && msg.kind !== "diff"
+    && markdownHasTable(msg.partial ? holdOpenMarkers(msg.text) : msg.text));
+}
+
+/**
+ * Whether a live turn with these messages may sit side by side at this width:
+ * the window is at least 120 columns and the answer has no table of its own.
+ * The session draws a pending card at `detailsPaneWidth(width, turnMaySplit(…))`.
+ */
+export function turnMaySplit(messages: readonly Msg[], width: number): boolean {
+  return paneWidths(width).wide && !answerCarriesTable(messages);
+}
+
 export interface LiveTurnRender {
   lines: string[];
   /** The view the keys act on, as drawn now, and what it offers. */
@@ -274,7 +304,8 @@ const ALL_ROWS = Number.MAX_SAFE_INTEGER;
 /** One draw of the turn, its views given at most `rows` rows; `split` allows the side-by-side layout; `withSteps` draws the Steps strip. */
 function drawLiveTurn(input: LiveTurnInput, width: number, rows: number | undefined, split: boolean, withSteps = true) {
   const panes = paneWidths(width);
-  const wide = panes.wide && split;
+  // An answer with a table of its own keeps the whole width (see the header).
+  const wide = split && turnMaySplit(input.messages, width);
   const caps = input.focus?.caps ?? input.caps ?? NO_VIEW_CAPS;
   const base = {
     width: wide ? panes.right : width, color: input.color, theme: input.theme, timeZone: input.timeZone,
@@ -314,7 +345,7 @@ function drawLiveTurn(input: LiveTurnInput, width: number, rows: number | undefi
   // at most 119 (past it the turn splits and the answer gets narrower).
   const widenLimit = !split ? 0 : sideBySide ? ANSWER_PANE_MAX : takesPane ? SPLIT_MIN_COLUMNS - 1 : undefined;
   const answer = renderAnswerColumn(input.messages, sideBySide ? panes.left : width, input.theme, input.color, { widenLimit });
-  const lines = layoutTurn(answer, [...drawn, ...card], stepRows, width, { color: input.color, theme: input.theme }, { split, steps: withSteps });
+  const lines = layoutTurn(answer, [...drawn, ...card], stepRows, width, { color: input.color, theme: input.theme }, { split: wide, steps: withSteps });
   const detailRows = [...drawn, ...card].filter(inDetailsPane)
     .reduce((sum, render, index) => sum + (index > 0 ? 1 : 0) + viewLines(render, sideBySide ? panes.right : width).length, 0);
   return {

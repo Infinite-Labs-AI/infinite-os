@@ -89,7 +89,7 @@ import {
 import { useTerminalColumns, useTerminalRows } from "./terminal-columns.js";
 import { resolveViewKey, turnAsk, viewFocusAfterTurnDone, viewKeyHints, type ViewFocusState } from "../views/focus.js";
 import { clipboardSequence, copyTargets, copyThroughPbcopy } from "../views/clipboard.js";
-import { detailsPaneWidth, paneWidths, renderCommittedTurn, renderLiveTurn, rowsBesideCard, type LiveTurnRender } from "../views/layout.js";
+import { detailsPaneWidth, renderCommittedTurn, renderLiveTurn, rowsBesideCard, turnMaySplit, type LiveTurnRender } from "../views/layout.js";
 import { besideWorkingTurn, workingTurnMessages, workingTurnSteps, type InfiniteTranscriptInput } from "../app/transcript-renderer.js";
 import {
   approvalRender,
@@ -824,8 +824,11 @@ export function InkInteractiveSessionApp({
   // The head write card is the turn's last details (r4 "Needs your OK"):
   // beside the answer from 120 columns, under the answer and a rule below
   // that, the Steps under it. It is drawn at the details pane's width.
-  const cardPaneWidth = detailsPaneWidth(transcriptColumns(columns));
-  splitTurnRef.current = paneWidths(transcriptColumns(columns)).wide;
+  // A turn whose answer has a table of its own stays one column at any width,
+  // so its card is drawn at the whole width, under the answer.
+  const turnSplits = useMemo(() => turnMaySplit(history, transcriptColumns(columns)), [columns, history]);
+  const cardPaneWidth = detailsPaneWidth(transcriptColumns(columns), turnSplits);
+  splitTurnRef.current = turnSplits;
   // The rows the turn takes besides the card (its question, answer, rule,
   // other views, Steps), so the card is held to what is left of the window.
   const rowsBesideHeadCard = useMemo(

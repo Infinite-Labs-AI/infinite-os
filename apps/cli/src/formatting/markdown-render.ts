@@ -60,6 +60,21 @@ export function renderMarkdown(text: string, opts: MarkdownRenderOptions): strin
   return renderDocument(text, opts, 0);
 }
 
+/**
+ * Whether this markdown draws a table (at the top level or inside a quote),
+ * read the way `renderMarkdown` reads it. A turn whose answer has one keeps
+ * the whole width for it (views/layout.ts).
+ */
+export function markdownHasTable(text: string, quoteDepth = 0): boolean {
+  if (!text.includes("|")) {
+    return false;
+  }
+  const source = text.replace(/\r\n?/g, "\n").replace(/\t/g, "    ").split("\n").map(scrubTerminalControls).join("\n");
+  return lexMarkdown(source).some((block) =>
+    block.type === "table"
+    || (block.type === "quote" && quoteDepth + 1 < MAX_QUOTE_DEPTH && markdownHasTable(block.lines.join("\n"), quoteDepth + 1)));
+}
+
 function renderDocument(text: string, opts: MarkdownRenderOptions, quoteDepth: number): string[] {
   const width = Math.max(1, Math.floor(opts.width));
   const source = text
