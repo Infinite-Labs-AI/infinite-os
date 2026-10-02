@@ -34,9 +34,9 @@ import { homedir } from "node:os"
 import { join } from "node:path"
 
 import { connectionIdsFromKeys } from "../../agents/connection-ids.js"
-import { disposeSeal, Fence, NestedBranchMovedError, verifySeal, type FenceBlock, type TreeSeal } from "../../agents/fence.js"
+import { disposeSeal, Fence, heavyDirWritesDuring, NestedBranchMovedError, verifySeal, type FenceBlock, type TreeSeal } from "../../agents/fence.js"
 import { matchesAnyGlob, normalizeRelPath } from "../../agents/glob.js"
-import { snapshotDir } from "../../agents/paths.js"
+import { snapshotDir, wizardCacheRoot } from "../../agents/paths.js"
 import { runExtras } from "../../agents/runner.js"
 import { reverseTextEdits } from "../../server-lane/text-edits.js"
 import { applyClaim, applyResults, blockItem, failItem, unblockItem, type Transition } from "../../jobs/state-machine.js"
@@ -66,6 +66,8 @@ const PRE_DEPLOY_TIERS: readonly CheckTier[] = ["S", "B", "T0"]
 const OPEN_STATES: readonly JobItemState[] = ["pending", "claimed"]
 /** Item states whose agent edits stay in the tree and go in the edit receipt (all others are undone). */
 const KEEP_EDIT_STATES: readonly JobItemState[] = ["claimed", "pending", "done_in_code", "waiting_deploy", "waiting_real_event", "proven"]
+/** §3z.12 §3f.6 (B21): the quiet window before the first agent turn. */
+export const DEV_SERVER_QUIET_MS = 2_000
 export const NOTHING_CHECKABLE_NOTE = "Nothing the wizard can check before deploy; later tests decide."
 export const CHECKED_NOTE = "Checked by the wizard, not the agent."
 /** The brief a nested parent agent reads (gitignored with the rest of `.infinite/wizard/`; §3z.12 §3d.7). */
@@ -130,6 +132,23 @@ async function runWorker(io: JobsIo, agentItems: ChecklistItem[]): Promise<StepO
     for (const item of agentItems) io.put(blockItem(io.item(item.id) ?? item, "needs_you", "No agent ran: this job is listed for you."))
     await io.save()
     return { kind: "ok", status: `No agent: ${agentItems.length} job${agentItems.length === 1 ? "" : "s"} listed for you` }
+  }
+
+  // B21: a dev server (or any watcher) writing build output would make every turn read as tamper. Before the
+  // first turn, the heavy dirs must stay quiet for 2 s; otherwise the run parks until the user stops it.
+  const noisy = await heavyDirWritesDuring({
+    root: ctx.root,
+    scratchDir: join(wizardCacheRoot(io.home()), "quiet"),
+    ms: DEV_SERVER_QUIET_MS,
+    sleep: (ms) => deps.clock.sleep(ms, ctx.signal)
+  })
+  if (noisy.length > 0) {
+    return {
+      kind: "parked",
+      code: "INF_WIZ_DEV_SERVER_RUNNING",
+      reason: `Something keeps writing build output (${noisy.slice(0, 2).join(", ")}${noisy.length > 2 ? ", …" : ""}): a dev server or watcher is running.`,
+      resumeHint: "Stop your dev server, then run npx infinite-tag again."
+    }
   }
 
   const started = deps.clock.now().getTime()

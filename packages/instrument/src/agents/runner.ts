@@ -58,7 +58,7 @@ import { Fence, recoverCrashedTurns, type FenceBlock, type TreeSeal } from "./fe
 import { assertReviewWorktree } from "./worktree-guard.js"
 import { AGENT_LABEL, claudeToolBeat, codexItemBeat, displayPath, Narrator, type NarrationBeat } from "./narration.js"
 import { AgentProcessRegistry } from "./process.js"
-import { ensurePrivateDir, resolveRealpath, resolveSensitivePaths, runScratchDir, snapshotDir, wizardCacheRoot } from "./paths.js"
+import { ensurePrivateDir, repoSecretPaths, resolveRealpath, resolveSensitivePaths, runScratchDir, snapshotDir, wizardCacheRoot } from "./paths.js"
 import { sanitizeUntrusted } from "./sanitize.js"
 import { parseReview, parseStructuredClaims, type StructuredClaims } from "./schema-check.js"
 import { ClaimChannel, isPlanDecidedTopic } from "./mcp/tools.js"
@@ -182,7 +182,18 @@ export class AgentRunnerImpl implements AgentRunner {
   private recovered = false
   private readonly fallback: Record<AgentKind, boolean> = { claude_code: false, codex: false }
 
+  /** The MCP bridge tokens of this run's turns (B5: O4's secret scanner must never let one into a commit). */
+  private readonly mcpTokens = new Set<string>()
+
   constructor(private readonly options: AgentRunnerOptions) {}
+
+  /**
+   * §3z.12 §3f.1 (B5): every secret literal this run handed to a process (the MCP tokens of its turns and
+   * the caller's own, e.g. the desktop bridge token), for the PR loop's secret scan. Never logged.
+   */
+  secretLiterals(): string[] {
+    return [...this.mcpTokens, ...(this.options.secretLiterals?.() ?? [])].filter((literal) => literal.length >= 8)
+  }
 
   async detect(): Promise<AgentDetectResult & DetectedAgents> {
     if (!this.detected) {
@@ -262,6 +273,7 @@ export class AgentRunnerImpl implements AgentRunner {
     }
     const bridge = await startMcpBridge({ handler, version: this.options.tagVersion })
     token = bridge.token
+    this.mcpTokens.add(token)
     // The snapshot dir is unique per process and turn, so a later run never overwrites a crashed turn's copies.
     const turnDir = (suffix = "") => snapshotDir(this.options.home, runId, `${turn}${suffix}-${process.pid}-${Date.now().toString(36)}`)
     let fence = await Fence.begin({ root: this.options.root, snapshotDir: turnDir(), runId, turn, items: input.items })
@@ -473,7 +485,9 @@ export class AgentRunnerImpl implements AgentRunner {
         homeRealpath: await resolveRealpath(this.options.home),
         sensitiveRealpaths: sensitive.map((entry) => entry.path),
         codexBinDir: runtime.codexBinDir,
-        codexInstallRoot: runtime.codexInstallRoot
+        codexInstallRoot: runtime.codexInstallRoot,
+        // B20: the repo's own secrets ("none") and, for the worker, .git read-only.
+        repoDenies: await repoSecretPaths(this.options.root)
       })
       const schemaPath = join(ctx.scratch, "claims.schema.json")
       await writeFile(schemaPath, schemaFileText(CLAIMS_SCHEMA), { mode: 0o600 })
@@ -621,7 +635,9 @@ export class AgentRunnerImpl implements AgentRunner {
         homeRealpath: await resolveRealpath(this.options.home),
         sensitiveRealpaths: sensitive.map((entry) => entry.path),
         codexBinDir: runtime.codexBinDir,
-        codexInstallRoot: runtime.codexInstallRoot
+        codexInstallRoot: runtime.codexInstallRoot,
+        // B20: the repo's own secrets ("none") and, for the worker, .git read-only.
+        repoDenies: await repoSecretPaths(input.worktreeDir)
       })
       const schemaPath = join(scratch, "review.schema.json")
       await writeFile(schemaPath, schemaFileText(REVIEW_SCHEMA), { mode: 0o600 })

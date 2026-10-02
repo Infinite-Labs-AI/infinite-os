@@ -1013,6 +1013,20 @@ describe("agents (§3f.3 + the NORMATIVE §3f.7 amendment)", () => {
     expect(() => codexPermissionArgs({ role: "worker", ...base, sensitiveRealpaths: ["/opt/a\nb"] })).toThrow(/control/)
   })
 
+  it("B20: repo secrets are their own \"none\" entries after :project_roots; the worker reads .git only; the reviewer gets no .git entry", () => {
+    const repoDenies = { none: ["/work/acme/.env", "/work/acme/apps/web/.env.local", "/work/acme/.npmrc"], readOnly: ["/work/acme/.git"] }
+    const worker = codexPermissionArgs({ role: "worker", ...base, repoDenies })[3]!
+    const roots = worker.indexOf('":project_roots"="write"')
+    expect(roots).toBeGreaterThan(0)
+    for (const path of repoDenies.none) expect(worker.indexOf(`"${path}"="none"`)).toBeGreaterThan(roots)
+    expect(worker.indexOf('"/work/acme/.git"="read"')).toBeGreaterThan(roots)
+    const reviewer = codexPermissionArgs({ role: "reviewer", ...base, repoDenies })[3]!
+    expect(reviewer).toContain('"/work/acme/.env"="none"')
+    expect(reviewer).not.toContain("/work/acme/.git")
+    // negative: a relative secret path throws (a profile key must be a realpath)
+    expect(() => codexPermissionArgs({ role: "worker", ...base, repoDenies: { none: [".env"] } })).toThrow(/absolute/)
+  })
+
   it("a quote or backslash in a path is escaped as a TOML basic string (it cannot break out of the key)", () => {
     const args = codexPermissionArgs({ role: "worker", ...base, sensitiveRealpaths: ['/opt/we"ird\\dir'] })
     expect(args[3]).toContain('"/opt/we\\"ird\\\\dir"="none"')

@@ -128,6 +128,27 @@ describe("step jobs: claims are only claims; the wizard checks", () => {
   })
 })
 
+describe("step jobs: a running dev server (§3z.12 B21)", () => {
+  it("a write under node_modules in the 2-second quiet window parks DEV_SERVER_RUNNING before any agent turn", async () => {
+    const t = setup({ scenario: { turns: [{ steps: [claim("conversions_to_tools:trial")] }] } })
+    t.deps.clock.sleep = async () => {
+      // the "dev server" writes while the wizard waits (after the marker)
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      write(t.root, "node_modules/.cache/next-dev.json", "{}\n")
+    }
+    const outcome = await step.run(t.ctx, t.deps)
+    expect(outcome).toMatchObject({ kind: "parked", code: "INF_WIZ_DEV_SERVER_RUNNING" })
+    expect(runs(t.fakes)).toEqual([])
+  })
+
+  it("negative: a quiet tree starts the agent", async () => {
+    const t = setup({ scenario: { turns: [{ steps: [claim("conversions_to_tools:trial")] }] } })
+    const outcome = await step.run(t.ctx, t.deps)
+    expect(outcome.kind).toBe("ok")
+    expect(runs(t.fakes, "claude").length).toBeGreaterThan(0)
+  })
+})
+
 describe("step jobs: questions, usage, fence", () => {
   it("ask_user → ONE batched agent-questions ask after the turn, then a resume with the answer", async () => {
     const t = setup({

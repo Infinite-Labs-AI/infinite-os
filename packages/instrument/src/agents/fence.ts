@@ -1241,6 +1241,27 @@ export async function disposeSeal(seal: TreeSeal | null | undefined): Promise<vo
  * `.env` copies). A report-mode (nested) snapshot is kept on purpose and skipped, and so is a turn whose
  * process is still alive.
  */
+/**
+ * §3z.12 §3f.6 (B21): before the FIRST agent turn the jobs step lays the heavy-dir marker and waits a quiet
+ * window. Any write under `node_modules` / `.next` / `dist` / `build` / `out` meanwhile is a running dev
+ * server (or watcher), not the agent: the run parks INF_WIZ_DEV_SERVER_RUNNING instead of every turn
+ * reading as tamper. Returns the paths written in the window (empty = quiet). The marker lives in
+ * `scratchDir` (outside the repo).
+ */
+export async function heavyDirWritesDuring(input: { root: string; scratchDir: string; ms: number; sleep(ms: number): Promise<void> }): Promise<string[]> {
+  const heavyDirs = await discoverHeavyDirs(input.root)
+  if (heavyDirs.length === 0) return []
+  await mkdir(input.scratchDir, { recursive: true, mode: 0o700 })
+  const marker = join(input.scratchDir, `quiet-window.${process.pid}.marker`)
+  await writeFile(marker, "", { mode: 0o600 })
+  try {
+    await input.sleep(input.ms)
+    return await findNewer(input.root, heavyDirs, marker)
+  } finally {
+    await rm(marker, { force: true })
+  }
+}
+
 export async function recoverCrashedTurns(input: { snapshotsRoot: string; root: string }): Promise<Array<{ dir: string; restored: string[] }>> {
   const out: Array<{ dir: string; restored: string[] }> = []
   let runs: string[]

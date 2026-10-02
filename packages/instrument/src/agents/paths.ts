@@ -5,6 +5,7 @@
 // live under `$HOME/Library/Caches/infinite-tag/…` (0700 dirs, 0600 files): never under `/tmp`,
 // `/private/tmp` or `$TMPDIR`, which stay READABLE under the Codex confinement profile (L7), and never in
 // the repo. `$HOME` is denied to Codex; Claude runs `--restricted` (cwd only) plus explicit denies.
+import type { Dirent } from "node:fs"
 import { constants } from "node:fs"
 import { access, lstat, mkdir, readdir, realpath, stat } from "node:fs/promises"
 import { basename, dirname, join, resolve } from "node:path"
@@ -147,4 +148,44 @@ export async function whichAll(name: string, pathEnv: string | undefined): Promi
     }
   }
   return out
+}
+
+/** Dirs a repo-secret walk never enters (build output, dependencies, git itself). */
+const SECRET_WALK_SKIP = new Set(["node_modules", ".next", "dist", "build", "out", ".git", ".infinite", ".turbo", ".vercel", "coverage"])
+
+/**
+ * §3z.12 §3f.3 (B20): the repo secrets the Codex profile also denies — the realpaths of every existing
+ * `<root>/**\/.env*` (bounded walk; build and dependency dirs skipped), `<root>/.npmrc` and `<root>/.netrc`
+ * (`"none"`), and for the worker `<root>/.git` (read only). Claude roles deny the same by `--disallowedTools`.
+ */
+export async function repoSecretPaths(root: string, options: { maxDepth?: number; maxEntries?: number } = {}): Promise<{ none: string[]; readOnly: string[] }> {
+  const maxDepth = options.maxDepth ?? 8
+  let budget = options.maxEntries ?? 20_000
+  const none: string[] = []
+  const walk = async (dir: string, depth: number): Promise<void> => {
+    if (depth > maxDepth || budget <= 0) return
+    let entries: Dirent[]
+    try {
+      entries = await readdir(dir, { withFileTypes: true })
+    } catch {
+      return
+    }
+    for (const entry of entries) {
+      budget -= 1
+      if (budget <= 0) return
+      const path = join(dir, entry.name)
+      if (entry.isDirectory()) {
+        if (!SECRET_WALK_SKIP.has(entry.name)) await walk(path, depth + 1)
+      } else if (entry.name.startsWith(".env")) {
+        none.push(await resolveRealpath(path))
+      }
+    }
+  }
+  await walk(root, 0)
+  for (const name of [".npmrc", ".netrc"]) {
+    if (await exists(join(root, name))) none.push(await resolveRealpath(join(root, name)))
+  }
+  const gitDir = join(root, ".git")
+  const readOnly = (await exists(gitDir)) ? [await resolveRealpath(gitDir)] : []
+  return { none: [...new Set(none)].sort(), readOnly }
 }
