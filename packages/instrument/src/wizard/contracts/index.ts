@@ -1,0 +1,17 @@
+// The wizard's contracts as code (§3a–§3i of the wizard build plan). Pure: types, `as const` id
+// lists, tables and a few pure helpers; no I/O. Every wizard lane imports from here.
+export * from "./agents.js"
+export * from "./asks.js"
+export * from "./bridge.js"
+export * from "./codes.js"
+export * from "./deps.js"
+export * from "./events.js"
+export * from "./git-host.js"
+export * from "./host-deny.js"
+export * from "./jobs.js"
+export * from "./receipts.js"
+export * from "./report.js"
+export * from "./shape.js"
+export * from "./state.js"
+export * from "./steps.js"
+export * from "./test-engine.js"

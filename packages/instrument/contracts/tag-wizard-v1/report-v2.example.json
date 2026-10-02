@@ -1,0 +1,946 @@
+{
+  "schema": "infinite-tag.report.v2",
+  "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80",
+  "tagVersion": "0.12.0",
+  "generatedAt": "2026-10-02T09:45:00.000Z",
+  "site": {
+    "repoLabel": "github.com/acme/acme-store",
+    "productionHost": "www.acme-store.com"
+  },
+  "columns": {
+    "live_today": {
+      "measuredAt": "2026-10-02T09:13:00.000Z",
+      "sha": null
+    },
+    "in_pr": {
+      "measuredAt": "2026-10-02T09:30:00.000Z",
+      "sha": "1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d"
+    },
+    "proven_live": {
+      "measuredAt": "2026-10-02T09:44:00.000Z",
+      "sha": "9f1e2d3c4b5a69788796a5b4c3d2e1f0a9b8c7d6",
+      "pending": null
+    }
+  },
+  "rows": [
+    {
+      "id": "checks_passing",
+      "label": "Checks passing (of 14)",
+      "cells": {
+        "live_today": {
+          "value": "4/12",
+          "display": "4 pass · 8 problems · 0 unknown of 12 determinable",
+          "state": "problem",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-02T09:13:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          }
+        },
+        "in_pr": {
+          "value": "12/12",
+          "display": "12 pass · 0 problems · 0 unknown of 12 determinable",
+          "state": "pass",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-02T09:30:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          }
+        },
+        "proven_live": {
+          "value": "9/12",
+          "display": "9 pass · 0 problems · 3 unknown of 12 determinable",
+          "state": "pending",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-02T09:44:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          }
+        }
+      }
+    },
+    {
+      "id": "ga4_page_views_per_visit",
+      "label": "GA4 page views per visit",
+      "cells": {
+        "live_today": {
+          "value": 2,
+          "display": "2 (counts every visit twice)",
+          "state": "problem",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-02T09:12:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80",
+            "checkId": "ga4_one_page_view"
+          }
+        },
+        "in_pr": {
+          "value": 1,
+          "display": "1",
+          "state": "pass",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-02T09:30:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80",
+            "checkId": "ga4_one_page_view"
+          }
+        },
+        "proven_live": {
+          "value": 1,
+          "display": "1 · sent (seen leaving)",
+          "state": "pass",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-02T09:41:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80",
+            "checkId": "ga4_seen_leaving"
+          }
+        }
+      }
+    },
+    {
+      "id": "posthog_route",
+      "label": "PostHog route",
+      "cells": {
+        "live_today": {
+          "value": "direct",
+          "display": "direct (ad blockers drop it)",
+          "state": "problem",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-02T09:12:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80",
+            "checkId": "proxy"
+          }
+        },
+        "in_pr": {
+          "value": "ingest",
+          "display": "through /ingest",
+          "state": "pass",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-02T09:30:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80",
+            "checkId": "posthog_via_proxy_once"
+          }
+        },
+        "proven_live": {
+          "value": "ingest",
+          "display": "through /ingest · this visit found",
+          "state": "pass",
+          "provenance": {
+            "source": "cloud_receipt",
+            "at": "2026-10-02T09:42:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80",
+            "checkId": "posthog_distinct_id_receipt",
+            "receiptAt": "2026-10-02T09:40:00.000Z"
+          }
+        }
+      }
+    },
+    {
+      "id": "meta_pixel",
+      "label": "Meta pixel",
+      "cells": {
+        "live_today": {
+          "value": "blocked",
+          "display": "blocked on www.acme-store.com",
+          "state": "problem",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-02T09:12:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80",
+            "checkId": "meta_traffic_permissions"
+          }
+        },
+        "in_pr": {
+          "value": "needs_you",
+          "display": "needs you: allow www in Meta",
+          "state": "info",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-02T09:30:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80",
+            "checkId": "meta_traffic_permissions"
+          }
+        },
+        "proven_live": {
+          "value": "sending",
+          "display": "sending · domain allowed",
+          "state": "pass",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-02T09:41:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80",
+            "checkId": "meta_seen_leaving"
+          }
+        }
+      }
+    },
+    {
+      "id": "preview_share",
+      "label": "Page views from preview links",
+      "cells": {
+        "live_today": {
+          "value": "5 of 44",
+          "display": "5 of 44 page views came from previews (GA4, excludes localhost; last 28 days)",
+          "state": "problem",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-02T09:13:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80",
+            "window": {
+              "from": "2026-09-04T00:00:00.000Z",
+              "to": "2026-10-02T00:00:00.000Z"
+            }
+          },
+          "reason": "below_sample_floor",
+          "raw": {
+            "numerator": 5,
+            "denominator": 44
+          }
+        },
+        "in_pr": {
+          "value": "guarded",
+          "display": "guard added",
+          "state": "pass",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-02T09:25:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80",
+            "checkId": "host_matrix"
+          }
+        },
+        "proven_live": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-02T09:45:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          },
+          "reason": "needs_7_days"
+        }
+      }
+    },
+    {
+      "id": "server_conversions",
+      "label": "Conversions sent from the server",
+      "cells": {
+        "live_today": {
+          "value": 0,
+          "display": "0 in the last 7 days",
+          "state": "problem",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-02T09:13:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80",
+            "window": {
+              "from": "2026-09-25T00:00:00.000Z",
+              "to": "2026-10-02T00:00:00.000Z"
+            }
+          }
+        },
+        "in_pr": {
+          "value": 3,
+          "display": "3 wired (signup, lead, purchase)",
+          "state": "pass",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-02T09:25:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80",
+            "checkId": "outcome_after_success"
+          }
+        },
+        "proven_live": {
+          "value": "waiting",
+          "display": "waits for a real sign-up",
+          "state": "pending",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-02T09:45:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          }
+        }
+      }
+    },
+    {
+      "id": "ga4_key_events",
+      "label": "GA4 key events",
+      "cells": {
+        "live_today": {
+          "value": "3 marked · 0 received",
+          "display": "3 marked · 0 received in 28 days",
+          "state": "problem",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-02T09:13:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80",
+            "window": {
+              "from": "2026-09-04T00:00:00.000Z",
+              "to": "2026-10-02T00:00:00.000Z"
+            }
+          }
+        },
+        "in_pr": {
+          "value": 3,
+          "display": "the 3 events now sent to GA4",
+          "state": "info",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-02T09:28:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          }
+        },
+        "proven_live": {
+          "value": null,
+          "display": "—",
+          "state": "pending",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-02T09:45:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          },
+          "reason": "needs_7_days"
+        }
+      }
+    },
+    {
+      "id": "consent_setting",
+      "label": "Consent setting",
+      "cells": {
+        "live_today": {
+          "value": "not recorded",
+          "display": "not recorded",
+          "state": "problem",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-02T09:09:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          }
+        },
+        "in_pr": {
+          "value": "not_required",
+          "display": "\"collect by default\" recorded",
+          "state": "pass",
+          "provenance": {
+            "source": "plan_answer",
+            "at": "2026-10-02T09:20:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          }
+        },
+        "proven_live": {
+          "value": "not_required",
+          "display": "collect by default",
+          "state": "pass",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-02T09:44:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          }
+        }
+      }
+    },
+    {
+      "id": "live_test_per_tool",
+      "label": "Live test per tool",
+      "cells": {
+        "live_today": {
+          "value": "3 of 4",
+          "display": "dry load: 3 of 4 fire correctly",
+          "state": "problem",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-02T09:12:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          }
+        },
+        "in_pr": {
+          "value": "4 of 4",
+          "display": "rehearsal: 4 of 4 fire correctly",
+          "state": "pass",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-02T09:30:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          }
+        },
+        "proven_live": {
+          "value": "4 of 4",
+          "display": "4 of 4 tools: receipts from this visit",
+          "state": "pass",
+          "provenance": {
+            "source": "cloud_receipt",
+            "at": "2026-10-02T09:42:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80",
+            "receiptAt": "2026-10-02T09:40:00.000Z"
+          }
+        }
+      }
+    },
+    {
+      "id": "day7_checkin",
+      "label": "7 days later",
+      "cells": {
+        "live_today": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-02T09:45:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          },
+          "reason": "needs_7_days"
+        },
+        "in_pr": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-02T09:45:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          },
+          "reason": "needs_7_days"
+        },
+        "proven_live": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-02T09:45:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          },
+          "reason": "needs_7_days"
+        }
+      }
+    }
+  ],
+  "day7": {
+    "measuredAt": null,
+    "window": null,
+    "cell": null
+  },
+  "finishLine": [
+    {
+      "n": 1,
+      "id": "each_tool_once",
+      "cells": {
+        "live_today": {
+          "value": "problem",
+          "display": "problem",
+          "state": "problem",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-02T09:13:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          }
+        },
+        "in_pr": {
+          "value": "pass",
+          "display": "pass",
+          "state": "pass",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-02T09:30:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          }
+        },
+        "proven_live": {
+          "value": "pass",
+          "display": "pass",
+          "state": "pass",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-02T09:44:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          }
+        }
+      }
+    },
+    {
+      "n": 2,
+      "id": "ids_match_connections",
+      "cells": {
+        "live_today": {
+          "value": "pass",
+          "display": "pass",
+          "state": "pass",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-02T09:13:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          }
+        },
+        "in_pr": {
+          "value": "pass",
+          "display": "pass",
+          "state": "pass",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-02T09:30:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          }
+        },
+        "proven_live": {
+          "value": "pass",
+          "display": "pass",
+          "state": "pass",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-02T09:44:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          }
+        }
+      }
+    },
+    {
+      "n": 3,
+      "id": "previews_silent",
+      "cells": {
+        "live_today": {
+          "value": "problem",
+          "display": "problem",
+          "state": "problem",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-02T09:13:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          }
+        },
+        "in_pr": {
+          "value": "pass",
+          "display": "pass",
+          "state": "pass",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-02T09:30:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          }
+        },
+        "proven_live": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-02T09:45:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          },
+          "reason": "needs_7_days"
+        }
+      }
+    },
+    {
+      "n": 4,
+      "id": "survives_ad_blockers",
+      "cells": {
+        "live_today": {
+          "value": "problem",
+          "display": "problem",
+          "state": "problem",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-02T09:13:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          }
+        },
+        "in_pr": {
+          "value": "pass",
+          "display": "pass",
+          "state": "pass",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-02T09:30:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          }
+        },
+        "proven_live": {
+          "value": "pass",
+          "display": "pass",
+          "state": "pass",
+          "provenance": {
+            "source": "cloud_receipt",
+            "at": "2026-10-02T09:44:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80",
+            "receiptAt": "2026-10-02T09:40:00.000Z"
+          }
+        }
+      }
+    },
+    {
+      "n": 5,
+      "id": "spa_page_views",
+      "cells": {
+        "live_today": {
+          "value": "problem",
+          "display": "problem",
+          "state": "problem",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-02T09:13:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          }
+        },
+        "in_pr": {
+          "value": "pass",
+          "display": "pass",
+          "state": "pass",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-02T09:30:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          }
+        },
+        "proven_live": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-02T09:45:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          },
+          "reason": "not_exercised"
+        }
+      }
+    },
+    {
+      "n": 6,
+      "id": "conversions_server_side",
+      "cells": {
+        "live_today": {
+          "value": "problem",
+          "display": "problem",
+          "state": "problem",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-02T09:13:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          }
+        },
+        "in_pr": {
+          "value": "pass",
+          "display": "pass",
+          "state": "pass",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-02T09:30:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          }
+        },
+        "proven_live": {
+          "value": "waiting",
+          "display": "waits for a real event",
+          "state": "pending",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-02T09:44:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          }
+        }
+      }
+    },
+    {
+      "n": 7,
+      "id": "identity_joined",
+      "cells": {
+        "live_today": {
+          "value": "problem",
+          "display": "problem",
+          "state": "problem",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-02T09:13:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          }
+        },
+        "in_pr": {
+          "value": "pass",
+          "display": "pass",
+          "state": "pass",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-02T09:30:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          }
+        },
+        "proven_live": {
+          "value": "waiting",
+          "display": "waits for a real event",
+          "state": "pending",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-02T09:44:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          }
+        }
+      }
+    },
+    {
+      "n": 8,
+      "id": "utms_survive_redirects",
+      "cells": {
+        "live_today": {
+          "value": "pass",
+          "display": "pass",
+          "state": "pass",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-02T09:13:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          }
+        },
+        "in_pr": {
+          "value": "pass",
+          "display": "pass",
+          "state": "pass",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-02T09:30:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          }
+        },
+        "proven_live": {
+          "value": "pass",
+          "display": "pass",
+          "state": "pass",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-02T09:44:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          }
+        }
+      }
+    },
+    {
+      "n": 9,
+      "id": "consent_recorded",
+      "cells": {
+        "live_today": {
+          "value": "problem",
+          "display": "problem",
+          "state": "problem",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-02T09:13:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          }
+        },
+        "in_pr": {
+          "value": "pass",
+          "display": "pass",
+          "state": "pass",
+          "provenance": {
+            "source": "plan_answer",
+            "at": "2026-10-02T09:30:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          }
+        },
+        "proven_live": {
+          "value": "pass",
+          "display": "pass",
+          "state": "pass",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-02T09:44:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          }
+        }
+      }
+    },
+    {
+      "n": 10,
+      "id": "csp_allows",
+      "cells": {
+        "live_today": {
+          "value": "pass",
+          "display": "pass",
+          "state": "pass",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-02T09:13:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          }
+        },
+        "in_pr": {
+          "value": "pass",
+          "display": "pass",
+          "state": "pass",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-02T09:30:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          }
+        },
+        "proven_live": {
+          "value": "pass",
+          "display": "pass",
+          "state": "pass",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-02T09:44:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          }
+        }
+      }
+    },
+    {
+      "n": 11,
+      "id": "ga4_key_events_received",
+      "cells": {
+        "live_today": {
+          "value": "problem",
+          "display": "problem",
+          "state": "problem",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-02T09:13:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          }
+        },
+        "in_pr": {
+          "value": "info",
+          "display": "designated in GA4; received later",
+          "state": "info",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-02T09:30:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          }
+        },
+        "proven_live": {
+          "value": null,
+          "display": "—",
+          "state": "pending",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-02T09:44:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          },
+          "reason": "needs_7_days"
+        }
+      }
+    },
+    {
+      "n": 12,
+      "id": "no_pii",
+      "cells": {
+        "live_today": {
+          "value": "pass",
+          "display": "pass",
+          "state": "pass",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-02T09:13:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          }
+        },
+        "in_pr": {
+          "value": "pass",
+          "display": "pass",
+          "state": "pass",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-02T09:30:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          }
+        },
+        "proven_live": {
+          "value": "pass",
+          "display": "pass",
+          "state": "pass",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-02T09:44:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          }
+        }
+      }
+    },
+    {
+      "n": 13,
+      "id": "proof_from_real_visit",
+      "cells": {
+        "live_today": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-02T09:45:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          },
+          "reason": "not_exercised"
+        },
+        "in_pr": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-02T09:45:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          },
+          "reason": "not_exercised"
+        },
+        "proven_live": {
+          "value": "pass",
+          "display": "pass",
+          "state": "pass",
+          "provenance": {
+            "source": "cloud_receipt",
+            "at": "2026-10-02T09:44:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80",
+            "receiptAt": "2026-10-02T09:40:00.000Z"
+          }
+        }
+      }
+    },
+    {
+      "n": 14,
+      "id": "keeps_being_checked",
+      "cells": {
+        "live_today": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-02T09:45:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          },
+          "reason": "not_exercised"
+        },
+        "in_pr": {
+          "value": "pass",
+          "display": "pass",
+          "state": "pass",
+          "provenance": {
+            "source": "plan_answer",
+            "at": "2026-10-02T09:30:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          }
+        },
+        "proven_live": {
+          "value": "pass",
+          "display": "pass",
+          "state": "pass",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-02T09:44:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          }
+        }
+      }
+    }
+  ],
+  "notes": [
+    "Below 50 page views a share is shown as raw counts.",
+    "Measurement changed: PostHog now goes through /ingest, so counts before and after this pull request are not comparable.",
+    "A real visit lands two bot-flagged document rows in your Infinite ledger (the page load and the server-lane probe)."
+  ]
+}
