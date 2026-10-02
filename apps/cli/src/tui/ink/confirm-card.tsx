@@ -75,6 +75,33 @@ export function receiptViewFrame(head: InSessionConfirmationAction, outcome: unk
   };
 }
 
+/** What a dismissed card says (r4 flow-pause-09): the same words the app's receipt uses. */
+export const DISMISSED_WORDS = "Dismissed — nothing was executed.";
+
+/**
+ * The dismissed card a `n` leaves on its turn AT ONCE (run-2 M5): the card's
+ * own view, settled as dismissed, in the receipt's place (`receipt:<handle>`),
+ * so the dismissed card and the Steps row's `· dismissed` draw in the same
+ * frame as the key, not 1–10 s later when the app answers. The decline is
+ * still sent once; the app's answer then replaces this in place (or takes it
+ * off, when the decline failed). Null for a card with no view of a receipt
+ * kind: its receipt lines wait for the app.
+ */
+export function dismissedReceiptFrame(head: InSessionConfirmationAction): ToolViewFrameV1 | null {
+  const view = head.view;
+  if (!view || !RECEIPT_KINDS.has(view.kind)) {
+    return null;
+  }
+  return {
+    type: "tool.view",
+    stage: "tool",
+    message: terminalText(view.title),
+    viewId: `receipt:${head.confirmationHandle}`,
+    name: view.tool,
+    view: { ...view, state: "cancelled", stateReason: { code: "dismissed", words: DISMISSED_WORDS } } as typeof view
+  };
+}
+
 /** The lines of the r4 card for a pending write that came without an approval view. */
 export function fallbackCardLines(
   pending: InSessionConfirmationAction,

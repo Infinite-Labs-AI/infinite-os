@@ -399,6 +399,83 @@ describe("the yes is working (run-2 M9: r4 flow-pause-02, fake TTY; skipped on C
   );
 });
 
+describe("n shows the dismissed card at once (run-2 M5, fake TTY; skipped on CI)", () => {
+  const PROPOSE = "mcp__sample_app__propose_pause_entity";
+
+  function dismissSession(onConfirmAction: (decision: string) => Promise<unknown>) {
+    const input = ttyInput();
+    const output = ttyOutput(100, 40);
+    const decisions: string[] = [];
+    const session = runInkInteractiveSession({
+      columns: 100,
+      errorOutput: ttyOutput(),
+      input,
+      output,
+      title: "Infinite TUI",
+      onConfirmAction: (_action, decision) => {
+        decisions.push(decision);
+        return onConfirmAction(decision) as never;
+      },
+      async onSubmitLine(_line, onProgress): Promise<InkInteractiveLineResult> {
+        onProgress({ type: "tool.complete", stage: "tool", message: PROPOSE, toolId: "call-1", name: PROPOSE, status: "requires_confirmation", words: { label: "waiting for your OK", result: "pause 1 ad" } } as never);
+        return { messages: [{ role: "assistant", text: "Ready." }], pendingConfirmations: [card("change-pause-card")] };
+      }
+    });
+    return { input, output, decisions, session };
+  }
+
+  it.skipIf(process.env.CI === "true")(
+    "the dismissed card and `· dismissed` draw with the key, before the app answers; the no is sent once; a plain ok adds nothing",
+    { timeout: 30_000 },
+    async () => {
+      let answer: (value: unknown) => void = () => {};
+      const { input, output, decisions, session } = dismissSession(() => new Promise((resolve) => { answer = resolve; }));
+      await waitFor(() => output.text().includes("Ask Infinite"));
+      await sendKeys(input, "pause hook a\r");
+      await waitFor(() => stripAnsi(output.text()).includes("p  Pause"), 4_000, output.text);
+      const before = output.text().length;
+      await sendKeys(input, "n");
+      // The app has not answered: the dismissed card and the row's `· dismissed` are already drawn.
+      await waitFor(() => stripAnsi(output.text().slice(before)).includes("✕ Dismissed — nothing was executed."), 4_000, output.text);
+      const drawn = stripAnsi(output.text().slice(before));
+      const row = drawn.split(/\r?\n/u).filter((line) => line.includes("waiting for your OK")).at(-1) ?? "";
+      expect(row).toMatch(/· dismissed/u);
+      expect(row).not.toContain("▣");
+      expect(decisions).toEqual(["decline"]);
+      const settled = output.text().length;
+      answer({ ok: true });
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      // A plain ok: no second "Dismissed" line printed under it.
+      expect(stripAnsi(output.text().slice(settled))).not.toMatch(/^✕ Dismissed/mu);
+      expect(decisions).toEqual(["decline"]);
+      await sendKeys(input, "/exit\r");
+      await session;
+    }
+  );
+
+  it.skipIf(process.env.CI === "true")(
+    "a late answer that says something else replaces the dismissed card in place",
+    { timeout: 30_000 },
+    async () => {
+      let answer: (value: unknown) => void = () => {};
+      const { input, output, session } = dismissSession(() => new Promise((resolve) => { answer = resolve; }));
+      await waitFor(() => output.text().includes("Ask Infinite"));
+      await sendKeys(input, "pause hook a\r");
+      await waitFor(() => stripAnsi(output.text()).includes("p  Pause"), 4_000, output.text);
+      await sendKeys(input, "n");
+      await waitFor(() => stripAnsi(output.text()).includes("✕ Dismissed — nothing was executed."), 4_000, output.text);
+      const pending = card("change-pause-card");
+      const settled = output.text().length;
+      answer({ ok: true, view: { ...pending.view!, approval: undefined, state: "expired", stateReason: { code: "expired", words: "This approval expired before the no." } } });
+      await waitFor(() => stripAnsi(output.text().slice(settled)).includes("This approval expired before the no."), 4_000, output.text);
+      const after = stripAnsi(output.text().slice(settled));
+      expect(after.lastIndexOf("This approval expired before the no.")).toBeGreaterThan(after.lastIndexOf("Dismissed — nothing was executed."));
+      await sendKeys(input, "/exit\r");
+      await session;
+    }
+  );
+});
+
 describe("a tall card in a running session (fake TTY; skipped on CI like the other PTY tests)", () => {
   /** A launch of `sets` ad sets with 3 ads each (synthetic names). */
   function tallLaunch(sets: number): InSessionConfirmationAction {

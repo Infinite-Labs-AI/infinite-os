@@ -5,7 +5,9 @@ import type { InSessionConfirmationAction } from "../../desktop/confirm-in-sessi
 import { displayWidth } from "../lib/display-width.js";
 import { confirmCardKeys } from "../keys/keymap.js";
 import { DEFAULT_THEME } from "../theme.js";
-import { ConfirmActionMenu, fallbackCardLines, fallbackCardRowCount, receiptViewFrame } from "./confirm-card.js";
+import { ConfirmActionMenu, DISMISSED_WORDS, dismissedReceiptFrame, fallbackCardLines, fallbackCardRowCount, receiptViewFrame } from "./confirm-card.js";
+import { renderLiveTurn } from "../views/layout.js";
+import type { TurnStep } from "../app/turn-store.js";
 import { renderToString } from "./renderer.js";
 
 const ESC = String.fromCharCode(27);
@@ -139,3 +141,43 @@ describe("the receipt a resolved card leaves on its turn", () => {
     expect(receiptViewFrame(pending(), receipt({ receipt: undefined }))).toBeNull();
   });
 });
+
+describe("n leaves the dismissed card at once (run-2 M5)", () => {
+  const approval = { kind: "card", title: "Pause ad “Hook A”?", summary: "Stops its spend.", confirmLabel: "Pause", dismissLabel: "Dismiss", rows: [] };
+  const cardView = {
+    v: 1, kind: "change", tool: "propose_pause_entity", title: "Pause Hook A", state: "needs_yes", asOf: null,
+    provenance: { source: "Ads · ad", via: "our_db" },
+    scope: { workspaceName: "W", crossWorkspace: false }, caveats: [],
+    body: { target: { kind: "ad", label: "Hook A" }, rows: [{ label: "Status", before: "On", after: "Paused" }], warnings: [] },
+    approval
+  };
+
+  it("is the card's own view, settled as dismissed, in the receipt's place", () => {
+    const frame = dismissedReceiptFrame(pending({ view: cardView as never }));
+    expect(frame).toMatchObject({ type: "tool.view", viewId: "receipt:h_1", name: "propose_pause_entity" });
+    expect(frame?.view.state).toBe("cancelled");
+    expect(frame?.view.stateReason).toEqual({ code: "dismissed", words: DISMISSED_WORDS });
+    expect(frame?.view.approval).toEqual(approval);
+    // The app's settled receipt lands on the same id, so it replaces this one in place.
+    expect(receiptViewFrame(pending({ view: cardView as never }), { ok: true, view: { ...cardView, state: "expired", approval: undefined, stateReason: { code: "expired", words: "This approval expired." } } })?.viewId)
+      .toBe(frame?.viewId);
+  });
+
+  it("a card with no view, or of a kind that draws no receipt, waits for the app's lines", () => {
+    expect(dismissedReceiptFrame(pending())).toBeNull();
+    expect(dismissedReceiptFrame(pending({ view: { ...cardView, kind: "record", body: { fields: [] } } as never }))).toBeNull();
+  });
+
+  it("drawn on its turn, the dismissed card and the Steps row's `· dismissed` are in the same frame", () => {
+    const frame = dismissedReceiptFrame(pending({ view: cardView as never }))!;
+    const steps: TurnStep[] = [{ id: "c1", name: "mcp__app__propose_pause_entity", label: "waiting for your OK", status: "wait", startedAt: 0, endedAt: 1000, result: "pause 1 ad" }];
+    const lines = renderLiveTurn({
+      messages: [{ role: "user", text: "pause hook a" }, { role: "assistant", text: "Okay, left it running." }],
+      views: [frame.view], focus: null, width: 100, color: false, theme: DEFAULT_THEME, steps, nowMs: 2000
+    }).lines.map(plain);
+    expect(lines).toContain(`✕ ${DISMISSED_WORDS}`);
+    expect(lines.find((line) => line.includes("waiting for your OK"))).toMatch(/· dismissed$/u);
+    expect(lines.join("\n")).not.toContain("▣");
+  });
+});
+

@@ -62,7 +62,7 @@ import {
 import { formatBusyNote, isInfiniteTurnBusy } from "./status-indicator.js";
 import { createTurnAbort, ctrlCAction, turnStoppedLine, type TurnAbort } from "./turn-abort.js";
 import { confirmCardKeys, keyBarHints, keyBarRowCount, resolveKey, shortOkVerb, type KeyAction, type KeyContext } from "../keys/keymap.js";
-import { fallbackCardLines, fallbackCardRowCount, receiptViewFrame } from "./confirm-card.js";
+import { dismissedReceiptFrame, fallbackCardLines, fallbackCardRowCount, receiptViewFrame } from "./confirm-card.js";
 import { KeyBar } from "./key-bar.js";
 import { COMPOSER_PLACEHOLDER, composerPlaceholderText } from "./composer-line.js";
 import { askedSource, ruleLine, TOP_BAR_ROWS, type TopBarData } from "./top-bar.js";
@@ -1548,8 +1548,17 @@ export function InkInteractiveSessionApp({
         view: { ...working, state: "applying", appliedAt: Date.now() } as AnswerViewV1
       });
     }
+    // r4 "Dismissed" (run-2 M5): a `n` shows the dismissed card and the Steps
+    // row's `· dismissed` in the same frame as the key, in the receipt's place.
+    // The decline is sent once; the app's answer then confirms it (a settled
+    // receipt replaces it in place, a plain ok keeps it) or shows what really
+    // happened instead (another receipt, or the failure's lines).
+    const dismissed = decision === "decline" ? dismissedReceiptFrame(head) : null;
+    if (dismissed) {
+      recordTurnView(dismissed);
+    }
     const dropWorking = () => {
-      if (working) patchTurnState((state) => ({ ...state, views: state.views.filter((frame) => frame.viewId !== workingId) }));
+      if (working || dismissed) patchTurnState((state) => ({ ...state, views: state.views.filter((frame) => frame.viewId !== workingId) }));
     };
     setConfirmsInFlight((count) => count + 1);
     void (async () => {
@@ -1564,6 +1573,14 @@ export function InkInteractiveSessionApp({
         const receipt = receiptViewFrame(head, result);
         if (receipt && onCardTurn()) {
           recordTurnView(receipt);
+          return;
+        }
+        if (dismissed && !isPlainRecord(isPlainRecord(result) ? result.view : undefined)) {
+          // The app took the no and sent no receipt of its own: the dismissed card already says it.
+          return;
+        }
+        if (dismissed && receipt?.view.state === "cancelled") {
+          // The turn moved on, the dismissed card with it: the app agreed, nothing more to print.
           return;
         }
         dropWorking();
