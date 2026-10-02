@@ -213,13 +213,16 @@ export interface PendingCardKeySource {
     explain?: string;
     approval?: { confirmLabel: string; summary: string | null };
   };
+  /** The summary was made from the tool's name: nothing real to explain behind `?`. */
+  summaryFromTool?: boolean;
 }
 
 /**
  * The key context and `?` text for a pending write card. With an approval view
  * the OK key comes from `approval.confirmLabel`; an old desktop (no view) gets
  * `y Confirm`. `?` shows `approval.summary`, else `view.explain`; without a view
- * it shows the pending summary. Every string is scrubbed here.
+ * it shows the pending summary, unless that was made from the tool's name.
+ * Every string is scrubbed here.
  */
 export function confirmCardKeys(
   pending: PendingCardKeySource,
@@ -232,7 +235,7 @@ export function confirmCardKeys(
   const okLabel = terminalText(confirmLabel ?? "", "Confirm");
   const rawExplain = pending.view
     ? stringOrUndefined(approval?.summary) ?? stringOrUndefined(pending.view.explain) ?? null
-    : stringOrUndefined(pending.summary) ?? null;
+    : pending.summaryFromTool ? null : stringOrUndefined(pending.summary) ?? null;
   const explainText = rawExplain === null ? null : terminalText(rawExplain) || null;
   return {
     ctx: {

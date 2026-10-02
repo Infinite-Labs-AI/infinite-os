@@ -3,11 +3,13 @@ import { describe, expect, it } from "vitest";
 
 import type { InSessionConfirmationAction } from "../../desktop/confirm-in-session.js";
 import { displayWidth } from "../lib/display-width.js";
+import { confirmCardKeys } from "../keys/keymap.js";
 import { DEFAULT_THEME } from "../theme.js";
 import { ConfirmActionMenu, fallbackCardLines, fallbackCardRowCount, receiptViewFrame } from "./confirm-card.js";
 import { renderToString } from "./renderer.js";
 
 const ESC = String.fromCharCode(27);
+const NO_KEY_CAPS = { open: false, watch: false, retry: false } as const;
 const plain = (value: string) => value.replace(new RegExp(`${ESC}\\[[0-9;?]*[A-Za-z]`, "g"), "");
 
 function pending(over: Partial<InSessionConfirmationAction> = {}): InSessionConfirmationAction {
@@ -49,6 +51,16 @@ describe("the write card for a desktop that sends no approval view (r4 card)", (
     ).map(plain);
     expect(lines[0]!.startsWith("┌─ Approve this write? ─")).toBe(true);
     expect(lines.join("\n")).not.toContain("mcp infinite app");
+  });
+
+  it("a summary made from the tool's name is nothing to explain: no '? what it does', and ? has no text", () => {
+    const fromTool = pending({ summary: "mcp infinite app propose pause meta entity", summaryFromTool: true });
+    const lines = fallbackCardLines(fromTool, null, 80, DEFAULT_THEME).map(plain);
+    expect(lines.join("\n")).not.toContain("what it does");
+    expect(confirmCardKeys(fromTool, NO_KEY_CAPS).explainText).toBeNull();
+    expect(confirmCardKeys(fromTool, NO_KEY_CAPS).ctx.explain).toBe(false);
+    // A real summary still explains.
+    expect(confirmCardKeys(pending(), NO_KEY_CAPS).explainText).toBe("Pause ad Hook A");
   });
 
   it("? opens the explanation inside the card, and the row count follows it", () => {
