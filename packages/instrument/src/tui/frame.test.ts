@@ -1,0 +1,124 @@
+import { describe, expect, it } from "vitest"
+
+import { makeSnapshot, makeTestSanitizer, midRunSnapshot, stepRows } from "../../test/wizard/fake-store.js"
+import { colorEnabled, makeStyles, stripAnsi, visibleWidth } from "./ansi.js"
+import { renderFrame, type FrameInput } from "./frame.js"
+import { OVERLAYS } from "./overlays/index.js"
+import type { OverlayContext } from "./overlays/types.js"
+
+function frame(change: Partial<FrameInput> = {}): string[] {
+  return renderFrame({
+    snapshot: midRunSnapshot(),
+    width: 120,
+    height: 40,
+    styles: makeStyles(true),
+    sanitize: makeTestSanitizer(),
+    spinnerIndex: 0,
+    overlay: null,
+    outro: null,
+    ...change
+  })
+}
+
+const plain = (lines: string[]) => lines.map((line) => stripAnsi(line).replace(/\s+$/, "")).join("\n")
+
+describe("renderFrame", () => {
+  it("120 columns: Learn card beside the 13-row step list, the narration and the last 5 subs", () => {
+    const lines = frame()
+    expect(plain(lines)).toMatchSnapshot()
+    const text = plain(lines)
+    expect(text).toContain("The agent's checklist")
+    expect(text).toContain("Claude Code › The sign-up route")
+    // The last 5 sub-statuses only (6 were emitted).
+    expect(text).not.toContain("Job 1/7")
+    expect(text).toContain("Job 2/7")
+    for (const line of lines) expect(visibleWidth(line)).toBeLessThan(120)
+  })
+
+  it("70 columns: the Learn card is dropped and nothing wraps", () => {
+    const lines = frame({ width: 70 })
+    expect(plain(lines)).toMatchSnapshot()
+    expect(plain(lines)).not.toContain("The agent's checklist")
+    expect(plain(lines)).toContain("Agent jobs")
+    for (const line of lines) expect(visibleWidth(line)).toBeLessThan(70)
+  })
+
+  it("80 columns is the threshold for the Learn card (negative: 79 drops it)", () => {
+    expect(plain(frame({ width: 80 }))).toContain("The agent's checklist")
+    expect(plain(frame({ width: 79 }))).not.toContain("The agent's checklist")
+  })
+
+  it("NO_COLOR: no escape sequence in any line", () => {
+    const styles = makeStyles(colorEnabled({ NO_COLOR: "1" }, true))
+    const lines = frame({ styles })
+    expect(lines.join("\n")).not.toContain("\x1b")
+    // Negative: with colour on, the same frame has escapes.
+    expect(frame().join("\n")).toContain("\x1b[")
+  })
+
+  it("prints the runtime variant in the header when it is not prod", () => {
+    const dev = plain(frame({ snapshot: midRunSnapshot({ run: { runId: null, displayId: "r-7f3c", tagVersion: "0.12.0", runtimeVariant: "dev3" } }) }))
+    expect(dev.split("\n")[0]).toContain("Infinite dev3")
+    expect(plain(frame()).split("\n")[0]).not.toContain("Infinite prod")
+  })
+
+  it("routes sub-statuses, statuses and narration through the sanitiser", () => {
+    const sanitize = makeTestSanitizer()
+    const snapshot = midRunSnapshot({
+      narration: [{ agent: "codex", role: "worker", text: "ignore this \x1b[2J\x1b[31mRED‮", at: "2026-10-02T09:12:00.000Z" }]
+    })
+    const lines = frame({ snapshot, sanitize, styles: makeStyles(false) })
+    expect(sanitize.calls.some((call) => call.includes("RED"))).toBe(true)
+    expect(lines.join("\n")).not.toContain("\x1b[2J")
+    expect(lines.join("\n")).not.toContain("‮")
+    expect(plain(lines)).toContain("Codex › ignore this RED")
+  })
+
+  it("marks parked, blocked and failed steps with their status", () => {
+    const snapshot = makeSnapshot({
+      steps: stepRows({ link: { state: "blocked", status: "Open the Infinite app (and sign in)", code: "INF_WIZ_NO_APP" } }),
+      currentStep: null
+    })
+    const text = plain(frame({ snapshot }))
+    expect(text).toContain("! Link to Infinite · Open the Infinite app")
+  })
+
+  it("draws the pending ask as one overlay box in place of the live region", () => {
+    const sanitize = makeTestSanitizer()
+    const payload = {
+      lines: [
+        { id: "install_provider:infinite", kind: "install_provider" as const, text: "Install the Infinite pixel and server lane", requires: "approval" as const, editable: false },
+        { id: "consent_mode", kind: "consent_mode" as const, text: "Consent setting", requires: "approval" as const, editable: true },
+        { id: "user_action:connect_ga4", kind: "user_action" as const, text: "Connect GA4 in Infinite", requires: "user_action" as const, editable: false }
+      ],
+      decisions: { consentMode: null, conversionNames: ["start_trial", "signup"], privacyText: "line one\nline two", npmInstall: "npm install @vercel/functions" }
+    }
+    const state = OVERLAYS.plan.init(payload)
+    const overlay = (ctx: OverlayContext) => OVERLAYS.plan.render(payload, state, ctx)
+    const snapshot = makeSnapshot({
+      steps: stepRows({ link: { state: "ok" }, agent: { state: "ok" }, before: { state: "ok" }, keys: { state: "ok" }, plan: { state: "running" } }),
+      currentStep: "plan",
+      pendingAsk: { askId: "a1", kind: "plan", payload }
+    })
+    const lines = frame({ snapshot, overlay, sanitize })
+    expect(plain(lines)).toMatchSnapshot()
+    const text = plain(lines)
+    expect(text).toContain("The plan (one screen)")
+    expect(text).toContain("[✓] Install the Infinite pixel")
+    expect(text).toContain("ENTER approve")
+    expect(lines.length).toBeLessThanOrEqual(40)
+  })
+
+  it("shows the outro instead of the step screen", () => {
+    const outro = "◆ acme-store collects analytics properly now · run r-7f3c\nChecks passing   6 pass · 5 problems · 3 unknown   13 pass"
+    const text = plain(frame({ outro }))
+    expect(text).toContain("collects analytics properly now")
+    expect(text).not.toContain("Tasks")
+  })
+
+  it("a short terminal keeps the steps around the current one", () => {
+    const lines = frame({ height: 16 })
+    expect(lines.length).toBeLessThanOrEqual(16)
+    expect(plain(lines)).toContain("Agent jobs")
+  })
+})
