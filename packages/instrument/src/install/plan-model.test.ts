@@ -127,6 +127,18 @@ describe("the plan model asks ONLY the four decisions", () => {
   })
 })
 
+describe("B28: the 7-day check-in is one info line", () => {
+  it("every plan says the check-in follows; it is information, never an answer --yes gives", () => {
+    const plan = buildPlanModel(input())
+    const checkin = plan.lines.filter((line) => line.kind === "checkin")
+    expect(checkin).toEqual([{ id: "checkin", kind: "checkin", text: expect.stringContaining("7 days after the deploy"), requires: "info", editable: false }])
+    // negative: not approvable — even an answer that lists it leaves it unanswered (null), never "approved"
+    expect(yesApproves(checkin[0]!)).toBe(false)
+    const resolved = resolvePlanAnswers(plan, { approved: ["consent_mode", "checkin"], declined: [], edits: { consent_mode: "not_required" } }, { consentFlag: null })
+    expect(resolved.lines.find((line) => line.id === "checkin")).toEqual({ id: "checkin", approved: null })
+  })
+})
+
 describe("adopted providers: every agent job that touches one waits on an approved line (R2-10, R2-11)", () => {
   const posthogAdopted = scanFacts({ improve: adoptedPosthogLines, adopted: [{ provider: "posthog", via: "snippet", file: "index.html", line: 5, key: IDS.posthog }] })
 

@@ -642,6 +642,16 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
     }
   }
 
+  // ---- B28: the 7-day check-in (on by default, BUILD-PLAN §1.4; the plan says so, nothing to answer) ----
+  lines.push(
+    line({
+      id: "checkin",
+      kind: "checkin",
+      text: "Infinite checks your site again 7 days after the deploy and shows you what it finds.",
+      requires: "info"
+    })
+  )
+
   // ---- the agent's budget (the cost line in the go-ahead) ----
   const agentJobs = [...candidates, ...seeds].filter((item) => item.owner === "agent").length
   if (agentJobs > 0) {

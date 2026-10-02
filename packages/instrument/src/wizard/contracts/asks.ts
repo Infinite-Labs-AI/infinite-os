@@ -51,7 +51,9 @@ export const PLAN_LINE_KINDS = [
   "retire_fbc_writer",
   "meta_relay",
   "meta_goal",
-  "user_action"
+  "user_action",
+  // B28: the 7-day check-in that follows the deploy (shown only; `checkinOptIn` stays the accepted default).
+  "checkin"
 ] as const
 export type PlanLineKind = (typeof PLAN_LINE_KINDS)[number]
 
@@ -106,7 +108,9 @@ export const YES_POLICY: { readonly [K in PlanLineKind]: YesPolicyValue | { mana
   // The D16 recommendation: an informational default the user can change.
   meta_goal: "yes",
   // GTM edit, Traffic Permissions, connect a tool, the GA4 page-change setting: shown only.
-  user_action: "n/a"
+  user_action: "n/a",
+  // B28: an information line; nothing to approve.
+  checkin: "n/a"
 }
 
 /** Whether `--yes` approves this line. */
