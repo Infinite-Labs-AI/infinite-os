@@ -1,0 +1,52 @@
+{
+  "v": 1,
+  "scope": {
+    "workspaceName": "Demo",
+    "crossWorkspace": false
+  },
+  "caveats": [],
+  "kind": "health",
+  "tool": "read_connections",
+  "title": "Connections",
+  "state": "ready",
+  "asOf": "2026-01-15T10:40:00Z",
+  "provenance": {
+    "source": "Demo connections",
+    "via": "this_mac"
+  },
+  "body": {
+    "items": [
+      {
+        "id": "src_1",
+        "name": "Analytics",
+        "state": "ok",
+        "dataThrough": "2026-01-14"
+      },
+      {
+        "id": "src_2",
+        "name": "Payments",
+        "state": "ok",
+        "lastSuccessAt": "2026-01-15T10:28:00Z"
+      },
+      {
+        "id": "src_3",
+        "name": "Store",
+        "state": "not_connected",
+        "fix": {
+          "label": "Connect the store",
+          "appLink": {
+            "place": "connections",
+            "label": "Connections"
+          }
+        }
+      },
+      {
+        "id": "src_4",
+        "name": "Email",
+        "account": "Demo list",
+        "state": "error",
+        "blocker": "sign-in expired"
+      }
+    ]
+  }
+}

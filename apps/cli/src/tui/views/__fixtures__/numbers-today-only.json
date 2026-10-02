@@ -1,0 +1,81 @@
+{
+  "v": 1,
+  "scope": {
+    "workspaceName": "Demo",
+    "crossWorkspace": false
+  },
+  "caveats": [],
+  "kind": "numbers",
+  "tool": "read_ads_today",
+  "title": "Ads today",
+  "state": "ready",
+  "asOf": "2026-01-15T18:30:00Z",
+  "provenance": {
+    "source": "Demo ads",
+    "via": "our_db"
+  },
+  "body": {
+    "layout": "table",
+    "currency": "USD",
+    "columns": [
+      {
+        "key": "spend",
+        "label": "Spend",
+        "unit": "money",
+        "factGroup": "delivery"
+      },
+      {
+        "key": "clicks",
+        "label": "Clicks",
+        "unit": "count",
+        "factGroup": "delivery"
+      }
+    ],
+    "legs": {
+      "settled": {
+        "window": {
+          "from": "2026-01-15",
+          "to": "2026-01-15",
+          "tz": "UTC",
+          "label": "Today"
+        },
+        "final": false,
+        "asOf": "2026-01-15T18:30:00Z",
+        "rows": [
+          {
+            "id": "ad_1",
+            "label": "Hook A",
+            "cells": {
+              "spend": {
+                "value": 5
+              },
+              "clicks": {
+                "value": 4
+              }
+            }
+          },
+          {
+            "id": "ad_2",
+            "label": "Hook B",
+            "cells": {
+              "spend": {
+                "value": 3
+              },
+              "clicks": {
+                "value": 1
+              }
+            }
+          }
+        ],
+        "totals": {
+          "spend": {
+            "value": 8
+          },
+          "clicks": {
+            "value": 5
+          }
+        }
+      }
+    }
+  }
+}
