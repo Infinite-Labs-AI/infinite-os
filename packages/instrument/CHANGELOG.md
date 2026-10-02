@@ -28,6 +28,19 @@ All notable changes to the `infinite-tag` npm package (`packages/instrument`). V
   fence is a receipted edit the uninstall reverses.
 - Live reads (the wizard's checks and `doctor`) honour `HTTPS_PROXY`, `HTTP_PROXY` and `NO_PROXY`.
 
+### Setup wizard: fixes from the offline end-to-end run
+
+- The managed GA4, PostHog and Meta tags now carry the preview guard the plan showed and you approved
+  (it was dropped on the way to the installer), and the guard's host list no longer stops the agent jobs.
+- A Meta pixel already on the page inside a `<Script>{`…`}</Script>` block is improved in place, never
+  installed a second time.
+- An agent's claim on a job whose check this version cannot run yet (or whose offline test cannot be set
+  up for that job) leaves the job "claimed" for a later test instead of stopping the run; the offline tests
+  get the site's production host and the guard's production hosts.
+- On a Next site without a `next.config`, the PostHog `/ingest` job may write the config the rewrite needs.
+- `uninstall --pr` no longer refuses a finished install because of the wizard's own untracked
+  `.infinite/harness.json`.
+
 ### Setup wizard foundation
 
 - Bare `npx infinite-tag`, `npx infinite-tag wizard …` and any flag-first argv (other than `--help`, `-h`,

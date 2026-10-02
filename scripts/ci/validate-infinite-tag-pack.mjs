@@ -29,12 +29,17 @@ const EXPECTED_FILENAME = "infinite-tag-0.11.0.tgz"
 // unpacked. F0's provisional ceilings (560 / 1,300,000 / 4,200,000) are re-based to measured x1.15:
 // 675 files (587 x 1.15 = 675.05), 1,254,000 packed (1,253,501 rounded up), 4,498,000 unpacked
 // (4,497,671 rounded up). Packed went DOWN from F0's guess; files and unpacked went up.
+//
+// Offline E2E (lane I1b, 2026-10-02): the fixes it forced add one module (src/wizard/item-t0, .js +
+// .d.ts). Re-measured: 589 files, 1,094,403 bytes packed, 3,924,183 bytes unpacked; tightened to measured
+// x1.15: 678 files (677.35 rounded up), 1,259,000 packed (1,258,564 rounded up), 4,513,000 unpacked
+// (4,512,811 rounded up). The E2E itself (test/wizard/, the fixture site) is never packed.
 const MIN_FILES = 50
-const MAX_FILES = 675
+const MAX_FILES = 678
 const MIN_PACKED_SIZE = 40_000
-const MAX_PACKED_SIZE = 1_254_000
+const MAX_PACKED_SIZE = 1_259_000
 const MIN_UNPACKED_SIZE = 200_000
-const MAX_UNPACKED_SIZE = 4_498_000
+const MAX_UNPACKED_SIZE = 4_513_000
 // The wizard's public contracts (1bu-1 vendors them and pins their sha256). Listed exactly, so a stray
 // file under contracts/ still fails the pack.
 const TAG_WIZARD_CONTRACT_FILES = [
