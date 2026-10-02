@@ -567,10 +567,10 @@ function groupStatusParts(parts: readonly string[], columns: number): string[][]
 }
 
 function clampColumns(columns: number): number {
-  return Math.max(20, Number.isFinite(columns) ? Math.floor(columns) : 88);
+  return Math.max(40, Math.min(160, Number.isFinite(columns) ? Math.floor(columns) : 88));
 }
 
-/** The width the transcript draws at for a terminal this wide (the whole window, at least 20). Pre-rendered `latest` lines use it. */
+/** The width the transcript draws at for a terminal this wide (40–160). Pre-rendered `latest` lines use it. */
 export function transcriptColumns(columns: number): number {
   return clampColumns(columns);
 }
