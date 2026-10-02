@@ -6,16 +6,19 @@
 // helpers take instead is an OPTIONAL hook: by default they run whenever the pixel itself runs, and
 // the one built-in hook reads the decision the Infinite runtime already records.
 //
-// WHY A COPY OF THE RUNTIME'S RULE. `runtime/infinite-browser.ts` decides consent in `hasConsent()`,
-// but the runtime ships through `Function.prototype.toString()` and exposes nothing but the handoff
-// accessor, so a helper cannot call it. The rule below is the same three lines, in the same order:
+// THE RUNTIME'S OWN CHECK FIRST. `runtime/infinite-browser.ts` decides consent in `hasConsent()` and,
+// on a verified production host, exposes it as `window.__infiniteConsentAllowed()` (the Phase-1
+// open question, closed by the wizard build). When that accessor exists the hook asks it, so the
+// helpers see exactly what the runtime sees: its in-memory decision when storage is blocked, and the
+// configured storage key under `required` mode.
+//
+// WHERE THE RUNTIME DOES NOT RUN (a preview host, a site with no Infinite source) the hook falls back to
+// the same three lines, in the same order, over what the runtime would have PERSISTED:
 //   1. an explicit decision the visitor made on this site (`infinite_analytics_consent` in
 //      localStorage, written by the runtime only after a real gesture) wins, in either direction;
 //   2. otherwise a DNT / GPC signal means no;
 //   3. otherwise `not_required` means yes and `required` means no.
-// It reads only what the runtime has already PERSISTED. The runtime's in-memory decision (used when
-// storage is unavailable) is invisible here, so a helper can only ever be stricter than the runtime,
-// never looser. Exposing the runtime's own check is the open question in the builder note.
+// The fallback can only ever be stricter than the runtime, never looser.
 
 /** How a managed Meta helper decides whether it may act. */
 export type MetaBrowserGate =
@@ -26,6 +29,13 @@ export type MetaBrowserGate =
 
 /** The localStorage key the runtime writes its decision under, in both consent modes. */
 export const INFINITE_CONSENT_STORAGE_KEY = "infinite_analytics_consent"
+
+/**
+ * The runtime's own consent check, exposed on verified production hosts. Every managed helper asks it
+ * first. The name is mirrored in `runtime/infinite-browser.ts`, which cannot import it (it ships through
+ * `Function.prototype.toString()`); `infinite-browser.test.ts` pins the two together.
+ */
+export const INFINITE_CONSENT_ACCESSOR = "__infiniteConsentAllowed"
 
 /** The event the site's own consent UI dispatches; the runtime persists the decision it carries. */
 export const INFINITE_CONSENT_EVENT = "infinite:analytics-consent-change"
@@ -42,6 +52,9 @@ export function consentAllowsSource(gate: MetaBrowserGate): string {
   const fallback = gate.mode === "not_required" ? "true" : "false"
   return [
     "function infiniteConsentAllows() {",
+    "  try {",
+    `    if (typeof window.${INFINITE_CONSENT_ACCESSOR} === "function") return window.${INFINITE_CONSENT_ACCESSOR}() === true;`,
+    "  } catch (_error) { return false; }",
     "  var decision = null;",
     `  try { decision = localStorage.getItem("${INFINITE_CONSENT_STORAGE_KEY}"); } catch (_error) { decision = null; }`,
     '  if (decision === "granted") return true;',
