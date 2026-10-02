@@ -248,19 +248,23 @@ export function renderFrame(input: FrameInput): string[] {
   } else {
     lower = liveLines(input, inner)
   }
-  const room = height - out.length - 1 - 1 - lower.length
+  // Rows left for the step list after the header, a blank line, the live region / overlay and the footer.
+  const room = height - out.length - 1 - lower.length - 1
   const columnHeight = Math.max(taskColumn.length, learnColumn.length)
   if (columnHeight <= room) {
     body = zipColumns(taskColumn, learnColumn, tasksWidth)
-  } else {
+  } else if (room >= 2) {
     // Not enough rows: keep the steps around the current one, then the progress line.
-    const keep = Math.max(1, room - 2)
+    const keep = room - 1
     const start = Math.max(0, Math.min(tasks.currentIndex - Math.floor(keep / 2), tasks.rows.length - keep))
     const windowed = tasks.rows.slice(start, start + keep)
     body = zipColumns([...windowed, tasks.progress], showLearn ? learnColumn.slice(0, keep + 1) : [], tasksWidth)
+  } else {
+    // A very short terminal: the overlay (the question) wins over the step list.
+    body = room === 1 ? [tasks.progress] : []
   }
   for (const line of body) out.push(pad(line))
-  out.push("")
+  if (body.length > 0) out.push("")
   for (const line of lower) out.push(pad(line))
   out.push(pad(footer))
   return out.slice(0, height)

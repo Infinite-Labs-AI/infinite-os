@@ -1,3 +1,4 @@
+// Contains code adapted from PostHog wizard v2.74.1, MIT, Copyright (c) 2025 PostHog (notice: packages/instrument/LICENSE).
 // Raw keyboard input for the TTY UI: ENTER, ESC, ↑ ↓ ← →, SPACE, BACKSPACE, TAB, letters (E, Q, Y, N…),
 // Ctrl+C. The keyboard owns raw mode: it records the mode it found, and `stop()` always restores it, also
 // after Ctrl+C and after a `read EIO` (macOS raises one on stdin when raw mode is torn down with a read

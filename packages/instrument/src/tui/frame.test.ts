@@ -121,4 +121,16 @@ describe("renderFrame", () => {
     expect(lines.length).toBeLessThanOrEqual(16)
     expect(plain(lines)).toContain("Agent jobs")
   })
+
+  it("a very short terminal keeps the whole question box (its keys line) and drops steps first", () => {
+    const payload = { question: "The GA4 property has 2 web streams. Which one is this site?", options: [{ label: "a", value: "a" }, { label: "b", value: "b" }] }
+    const state = OVERLAYS.single.init(payload)
+    const snapshot = makeSnapshot({ currentStep: "keys", steps: stepRows({ keys: { state: "running" } }), pendingAsk: { askId: "a", kind: "single", payload } })
+    for (const height of [12, 14, 18]) {
+      const lines = frame({ snapshot, height, overlay: (ctx) => OVERLAYS.single.render(payload, state, ctx) })
+      expect(lines.length).toBeLessThanOrEqual(height)
+      expect(plain(lines)).toContain("ENTER choose")
+      expect(plain(lines)).toContain("╰")
+    }
+  })
 })

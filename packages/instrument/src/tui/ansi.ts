@@ -1,3 +1,4 @@
+// Contains code adapted from PostHog wizard v2.74.1, MIT, Copyright (c) 2025 PostHog (notice: packages/instrument/LICENSE).
 // ANSI primitives for the TTY UI: colour on/off (`NO_COLOR`, `FORCE_COLOR`), styles, the spinner, terminal
 // control sequences, and width-aware truncation/padding so a frame never wraps.
 //

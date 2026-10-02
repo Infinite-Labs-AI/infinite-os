@@ -1,3 +1,4 @@
+// Contains code adapted from PostHog wizard v2.74.1, MIT, Copyright (c) 2025 PostHog (notice: packages/instrument/LICENSE).
 // The TTY UI: an ANSI renderer in the terminal's alternate screen. It follows O1's store, redraws only the
 // lines that changed, drives one overlay per pending ask, and gives the terminal back cleanly: raw mode
 // restored, cursor shown, alt screen left, then the outro and ONE exit line printed into scrollback. It also

@@ -1,3 +1,4 @@
+// Contains code adapted from PostHog wizard v2.74.1, MIT, Copyright (c) 2025 PostHog (notice: packages/instrument/LICENSE).
 // The line left in the user's scrollback after the TTY UI leaves the alternate screen (everything drawn in
 // the alt screen is wiped): the run id, the PR URL and the report path, so the next step is always findable.
 // Each URL/path sits after a plain separator so a terminal can select it cleanly.
