@@ -371,6 +371,18 @@ function infiniteBrowserRuntime(config: InfiniteBrowserConfig): void {
       const value = raw.replace(/[\u0000-\u001f]/g, "").trim().slice(0, 100)
       if (value) properties[key] = value
     }
+    // H1 optional ad metadata: same patterns as the server, but invalid values are OMITTED here.
+    // Keep this separate from the legacy UTM cleaner: trimming/truncating could reject the whole view.
+    const adFields: Array<[string, RegExp]> = [
+      ["ad_id", /^\d{1,32}$/], ["adset_id", /^\d{1,32}$/], ["campaign_id", /^\d{1,32}$/],
+      ["utm_placement", /^[A-Za-z0-9_]{1,64}$/]
+    ]
+    for (const [key, pattern] of adFields) {
+      const value = params.get(key)
+      if (value === null) continue
+      const match = value.match(pattern)
+      if (match && match[0] === value) properties[key] = value
+    }
     for (const key of ["gclid", "fbclid", "ttclid", "msclkid"]) {
       const raw = params.get(key)
       if (raw !== null && raw.trim() !== "") properties["has_" + key] = true

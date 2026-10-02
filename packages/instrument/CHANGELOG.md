@@ -5,6 +5,15 @@ All notable changes to the `infinite-tag` npm package (`packages/instrument`). V
 
 ## Unreleased
 
+### 0.11.1 local release candidate — page-view campaign identifiers
+
+- Initial page views may include `ad_id`, `adset_id`, `campaign_id` (1–32 digits) and
+  `utm_placement` (1–64 alphanumeric/underscore characters). Invalid values are omitted whole,
+  never truncated, trimmed or emitted on click events. Existing UTM and consent behavior is unchanged.
+- Shared browser contract/fixture updated to the reviewed collector acceptance. Publishing this
+  candidate requires verified forward AND rollback collector acceptance first. This entry and
+  package version are a local candidate, not evidence of an npm publication.
+
 Setup-correctness checks: the harness now catches wiring that was never going to fire, not only
 deliveries that failed.
 

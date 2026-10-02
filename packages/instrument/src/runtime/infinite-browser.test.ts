@@ -1487,6 +1487,14 @@ describe("sign_up_click — marked sign-up intent", () => {
 })
 
 describe("campaign capture on the initial page view (contract v1: +9 keys)", () => {
+  it("emits validated optional ad IDs and placement without changing old campaign bytes", () => {
+    const runtime = executeTag({ siteSourceKey: "site_public_123", consent: "granted", href: "https://example.com/?utm_source=paid&ad_id=120211234567890123&adset_id=456&campaign_id=789&utm_placement=instagram_stories" });
+    expect(runtime.requests[0]!.body.properties).toEqual({ nav: "navigate", utm_source: "paid", ad_id: "120211234567890123", adset_id: "456", campaign_id: "789", utm_placement: "instagram_stories" });
+  });
+  it.each(["utm_placement=instagram%20stories", "utm_placement=feed!", "utm_placement=%7B%7Bplacement%7D%7D", "utm_placement=" + "x".repeat(65), "ad_id=abc", "ad_id=", "ad_id=123%0A", "ad_id=123%E2%80%A8", "adset_id=%20123", "campaign_id=" + "1".repeat(33)])("omits invalid optional values, never truncating or reshaping: %s", search => {
+    const runtime = executeTag({ siteSourceKey: "site_public_123", consent: "granted", href: "https://example.com/?utm_source=paid&" + search });
+    expect(runtime.requests[0]!.body.properties).toEqual({ nav: "navigate", utm_source: "paid" });
+  });
   it("attaches allowlisted UTM values and click-id PRESENCE to the nav:navigate view — never the id value or the raw query", () => {
     const runtime = executeTag({
       siteSourceKey: "site_public_123",
