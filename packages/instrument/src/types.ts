@@ -67,9 +67,11 @@ export interface PackageManagerCommands {
  * or undefined when it is not statically determinable (rendered as "not detected"). This is
  * read-only reporting — inspect never changes the founder's config.
  */
-export interface PosthogConfigSummary {
+export interface PosthogInitConfig {
   /** App-root-relative file the PostHog init was read from. */
   file: string
+  /** 1-based line of the init call (1 when the file has evidence but no readable init). */
+  line: number
   autocapture?: string
   disableSessionRecording?: string
   capturePageview?: string
@@ -77,6 +79,13 @@ export interface PosthogConfigSummary {
   persistence?: string
   apiHost?: string
   uiHost?: string
+  /** PostHog's `defaults` bundle date (e.g. `2025-05-24`), as written. */
+  defaults?: string
+}
+
+/** The FIRST PostHog init's options (as before), plus every init found (`inits`). */
+export interface PosthogConfigSummary extends PosthogInitConfig {
+  inits: PosthogInitConfig[]
 }
 
 export interface InspectResult {
