@@ -73,6 +73,8 @@ export interface KeyHint {
    * reads `p Pause`, `s Send to 214 people`; the bar reads `p pause`, `s send`).
    */
   barLabel?: string;
+  /** A key the card shows on its own chips but not in the key bar (r4: an open document's bar is `s send   1-3 email`). */
+  chipOnly?: boolean;
 }
 
 /**
@@ -208,12 +210,15 @@ export function keyBarHints(ctx: KeyContext): KeyHint[] {
   }
   const hints: KeyHint[] = [];
   const card = ctx.card ?? {};
-  if (card.view) hints.push({ key: "v", label: card.viewOpen ? "close" : "view" });
+  // With its documents open, the bar is the OK key and the documents' own keys
+  // (r4 flow-email-02); `v` and `n` still work, and stay on the card's chips.
+  const reading = card.viewOpen === true;
+  if (card.view) hints.push({ key: "v", label: card.viewOpen ? "close" : "view", ...(reading ? { chipOnly: true } : {}) });
   if (ctx.okKey !== null) {
     const label = ctx.okLabel ?? "approve";
     hints.push({ key: ctx.okKey, label, ok: true, barLabel: terminalText(ctx.okVerb ?? "") || shortOkVerb(label) });
   }
-  hints.push({ key: "n", label: "dismiss" });
+  hints.push({ key: "n", label: "dismiss", ...(reading ? { chipOnly: true } : {}) });
   const tabs = cardTabs(card);
   if (tabs > 1) hints.push({ key: `1-${tabs}`, label: card.tabNoun || "switch" });
   if (card.page) hints.push({ key: "space", label: "next page" });
@@ -244,7 +249,7 @@ export function keyBarShownHints(hints: readonly KeyHint[]): KeyHint[] {
   const seen = new Set<string>();
   const shown: KeyHint[] = [];
   for (const hint of hints) {
-    if (always.has(hint.key) || seen.has(hint.key) || (card && hint.key === "?")) {
+    if (always.has(hint.key) || seen.has(hint.key) || hint.chipOnly || (card && hint.key === "?")) {
       continue;
     }
     seen.add(hint.key);

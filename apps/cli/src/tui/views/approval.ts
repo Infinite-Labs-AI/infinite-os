@@ -800,7 +800,8 @@ function linkAfterLines(view: AnswerViewV1, ctx: ViewRenderCtx): string[] {
  */
 function cardObject(view: AnswerViewV1, approval: Record<string, unknown>, ctx: ViewRenderCtx, notes: FootnoteBook): string[] {
   const rows = readRows(approval.rows);
-  const appRows = () => fieldRows(rows, ctx.width, ctx);
+  // r4's send card: the subject's value is bold, like a document's subject.
+  const appRows = () => fieldRows(rows.map((row) => (/^subject$/iu.test(row.label) ? { ...row, value: paint(row.value, "b", ctx) } : row)), ctx.width, ctx);
   const body: Record<string, unknown> = isRecord(view.body) ? view.body : {};
   switch (view.kind) {
     case "change": {

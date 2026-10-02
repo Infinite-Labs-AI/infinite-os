@@ -225,11 +225,11 @@ describe("keyBarHints", () => {
       .toBe("v view   s send   n dismiss");
     expect(formatKeyBar(keyBarHints(card({
       okKey: "s", okLabel: "Send to 200 people", card: { view: true, viewOpen: true, tabs: 3, page: true }
-    })))).toBe("v close   s send   n dismiss   1-3 switch   space next page");
+    })))).toBe("s send   1-3 switch   space next page");
     // terminal-r4 names what the tabs are: `1-3 email`.
     expect(formatKeyBar(keyBarHints(card({
       okKey: "s", okLabel: "Send to 200 people", card: { view: true, viewOpen: true, tabs: 3, tabNoun: "email" }
-    })))).toBe("v close   s send   n dismiss   1-3 email");
+    })))).toBe("s send   1-3 email");
     // The drawn bar: chips, then always tab and / (terminal-r4 region-keybar-approval-email).
     expect(keyBarText(keyBarHints(card({ okKey: "s", okLabel: "Send to 200 people", card: { view: true } }))))
       .toBe(" v  view    s  send    n  dismiss    tab  switch side    /  commands");
