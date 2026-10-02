@@ -1,5 +1,5 @@
 {
- "note": "Goldens the CLI does not match yet, with the restyle lanes (SPEC §11e) that flip them. A golden not listed here must match. When one starts matching, GOLDEN_RATCHET=update removes it from expectedFail and adds it to matchedEver; an id may never be on both lists, so hiding a regression means editing both. Ids ending @256 are the 256-tier pass. KNOWN GAP: frame bodies at 80-119 cols (all --c100 frames) are skipped, not compared: r4's c100 goldens split at 80 and the LAYOUT decision draws one column below 120. Re-dump the --c100 goldens one-column (r4 split at 120) to close it; until then the 100-col body has no assertion.",
+ "note": "Goldens the CLI does not match yet, with the restyle lanes (SPEC §11e) that flip them. A golden not listed here must match. When one starts matching, GOLDEN_RATCHET=update removes it from expectedFail and adds it to matchedEver; an id may never be on both lists, so hiding a regression means editing both. Ids ending @256 are the 256-tier pass. The --c100 frames are r4 drawn ONE column (LAYOUT: split at 120, applied when the goldens are dumped), so their bodies are compared.",
  "expectedFail": {
   "boot--c100": "R0 R1: boot is the r4 frame only (D4): top bar, rule, Steps rule, composer, key bar",
   "boot--c100@256": "R0: tier switch (the CLI paints truecolor SGR at the 256 tier; INFINITE_COLOR=256 has no reader yet)",
@@ -207,7 +207,7 @@
   "flow-pause-09-dismissed--c60@256": "R0: tier switch (the CLI paints truecolor SGR at the 256 tier; INFINITE_COLOR=256 has no reader yet)",
   "region-bar-eighths": "R0 R4: job progress bar in eighths",
   "region-bar-eighths@256": "R0: tier switch (the CLI paints truecolor SGR at the 256 tier; INFINITE_COLOR=256 has no reader yet)",
-  "region-card-done-green": "R0 R4: done card. ALSO an r4 defect to rule on: the title fills the box, so r4 draws the top border 70 wide over 69-wide rows (the c100 frame truncates it with …)",
+  "region-card-done-green": "R0 R4: done card. ALSO an r4 defect to rule on: the title fills the box, so r4 draws the top border 70 wide over 69-wide rows",
   "region-card-done-green@256": "R0: tier switch (the CLI paints truecolor SGR at the 256 tier; INFINITE_COLOR=256 has no reader yet)",
   "region-card-needs-ok": "R0 R4: approval and receipt cards",
   "region-card-needs-ok@256": "R0: tier switch (the CLI paints truecolor SGR at the 256 tier; INFINITE_COLOR=256 has no reader yet)",

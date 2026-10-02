@@ -6,7 +6,7 @@
    "id": "boot--c100",
    "view_kind": "boot",
    "cols": 100,
-   "rows": 22,
+   "rows": 14,
    "data": false,
    "derived": true
   },
@@ -30,7 +30,7 @@
    "id": "flow-email-01-needs-your-ok--c100",
    "view_kind": "flow/email",
    "cols": 100,
-   "rows": 25,
+   "rows": 28,
    "data": false,
    "derived": false
   },
@@ -54,7 +54,7 @@
    "id": "flow-email-02-viewing-the-email--c100",
    "view_kind": "flow/email",
    "cols": 100,
-   "rows": 24,
+   "rows": 29,
    "data": false,
    "derived": false
   },
@@ -78,7 +78,7 @@
    "id": "flow-email-03-done--c100",
    "view_kind": "flow/email",
    "cols": 100,
-   "rows": 23,
+   "rows": 20,
    "data": false,
    "derived": false
   },
@@ -102,7 +102,7 @@
    "id": "flow-email-04-blocked--c100",
    "view_kind": "flow/email",
    "cols": 100,
-   "rows": 23,
+   "rows": 17,
    "data": false,
    "derived": false
   },
@@ -126,7 +126,7 @@
    "id": "flow-email-05-not-approved-yet--c100",
    "view_kind": "flow/email",
    "cols": 100,
-   "rows": 23,
+   "rows": 19,
    "data": false,
    "derived": false
   },
@@ -150,7 +150,7 @@
    "id": "flow-email-06-already-live--c100",
    "view_kind": "flow/email",
    "cols": 100,
-   "rows": 23,
+   "rows": 18,
    "data": false,
    "derived": false
   },
@@ -174,7 +174,7 @@
    "id": "flow-images-01-needs-your-ok--c100",
    "view_kind": "flow/images",
    "cols": 100,
-   "rows": 23,
+   "rows": 24,
    "data": false,
    "derived": false
   },
@@ -198,7 +198,7 @@
    "id": "flow-images-02-making-them--c100",
    "view_kind": "flow/images",
    "cols": 100,
-   "rows": 24,
+   "rows": 22,
    "data": false,
    "derived": false
   },
@@ -246,7 +246,7 @@
    "id": "flow-images-04-done--c100",
    "view_kind": "flow/images",
    "cols": 100,
-   "rows": 23,
+   "rows": 19,
    "data": false,
    "derived": false
   },
@@ -270,7 +270,7 @@
    "id": "flow-images-05-hit-a-limit--c100",
    "view_kind": "flow/images",
    "cols": 100,
-   "rows": 23,
+   "rows": 19,
    "data": false,
    "derived": false
   },
@@ -318,7 +318,7 @@
    "id": "flow-images-07-cmd-l-only--c100",
    "view_kind": "flow/images",
    "cols": 100,
-   "rows": 23,
+   "rows": 20,
    "data": false,
    "derived": false
   },
@@ -342,7 +342,7 @@
    "id": "flow-numbers-01-ready--c100",
    "view_kind": "flow/numbers",
    "cols": 100,
-   "rows": 23,
+   "rows": 25,
    "data": false,
    "derived": false
   },
@@ -366,7 +366,7 @@
    "id": "flow-numbers-02-not-measured--c100",
    "view_kind": "flow/numbers",
    "cols": 100,
-   "rows": 23,
+   "rows": 24,
    "data": false,
    "derived": false
   },
@@ -390,7 +390,7 @@
    "id": "flow-numbers-03-partial--c100",
    "view_kind": "flow/numbers",
    "cols": 100,
-   "rows": 23,
+   "rows": 19,
    "data": false,
    "derived": false
   },
@@ -414,7 +414,7 @@
    "id": "flow-numbers-04-out-of-date--c100",
    "view_kind": "flow/numbers",
    "cols": 100,
-   "rows": 23,
+   "rows": 17,
    "data": false,
    "derived": false
   },
@@ -438,7 +438,7 @@
    "id": "flow-numbers-05-not-connected--c100",
    "view_kind": "flow/numbers",
    "cols": 100,
-   "rows": 23,
+   "rows": 19,
    "data": false,
    "derived": false
   },
@@ -462,7 +462,7 @@
    "id": "flow-numbers-06-nothing-found--c100",
    "view_kind": "flow/numbers",
    "cols": 100,
-   "rows": 23,
+   "rows": 17,
    "data": false,
    "derived": false
   },
@@ -510,7 +510,7 @@
    "id": "flow-pause-02-working--c100",
    "view_kind": "flow/pause",
    "cols": 100,
-   "rows": 24,
+   "rows": 26,
    "data": false,
    "derived": false
   },
@@ -534,7 +534,7 @@
    "id": "flow-pause-03-done--c100",
    "view_kind": "flow/pause",
    "cols": 100,
-   "rows": 24,
+   "rows": 26,
    "data": false,
    "derived": false
   },
@@ -582,7 +582,7 @@
    "id": "flow-pause-05-nothing-to-change--c100",
    "view_kind": "flow/pause",
    "cols": 100,
-   "rows": 23,
+   "rows": 19,
    "data": false,
    "derived": false
   },
@@ -606,7 +606,7 @@
    "id": "flow-pause-06-changed-on-meta--c100",
    "view_kind": "flow/pause",
    "cols": 100,
-   "rows": 23,
+   "rows": 18,
    "data": false,
    "derived": false
   },
@@ -630,7 +630,7 @@
    "id": "flow-pause-07-still-running--c100",
    "view_kind": "flow/pause",
    "cols": 100,
-   "rows": 23,
+   "rows": 26,
    "data": false,
    "derived": false
   },
@@ -654,7 +654,7 @@
    "id": "flow-pause-08-expired--c100",
    "view_kind": "flow/pause",
    "cols": 100,
-   "rows": 23,
+   "rows": 17,
    "data": false,
    "derived": false
   },
@@ -678,7 +678,7 @@
    "id": "flow-pause-09-dismissed--c100",
    "view_kind": "flow/pause",
    "cols": 100,
-   "rows": 23,
+   "rows": 18,
    "data": false,
    "derived": false
   },
@@ -870,7 +870,7 @@
    "id": "view-01-numbers--c100",
    "view_kind": "numbers",
    "cols": 100,
-   "rows": 24,
+   "rows": 30,
    "data": false,
    "derived": false
   },
@@ -918,7 +918,7 @@
    "id": "view-03-record--c100",
    "view_kind": "record",
    "cols": 100,
-   "rows": 23,
+   "rows": 29,
    "data": false,
    "derived": false
   },
@@ -942,7 +942,7 @@
    "id": "view-04-document--c100",
    "view_kind": "document",
    "cols": 100,
-   "rows": 25,
+   "rows": 31,
    "data": false,
    "derived": false
   },
@@ -966,7 +966,7 @@
    "id": "view-05-images--c100",
    "view_kind": "images",
    "cols": 100,
-   "rows": 25,
+   "rows": 28,
    "data": false,
    "derived": false
   },
@@ -1014,7 +1014,7 @@
    "id": "view-07-launch--c100",
    "view_kind": "launch",
    "cols": 100,
-   "rows": 24,
+   "rows": 30,
    "data": false,
    "derived": false
   },
@@ -1038,7 +1038,7 @@
    "id": "view-08-job--c100",
    "view_kind": "job",
    "cols": 100,
-   "rows": 24,
+   "rows": 27,
    "data": false,
    "derived": false
   },
@@ -1062,7 +1062,7 @@
    "id": "view-09-compare--c100",
    "view_kind": "compare",
    "cols": 100,
-   "rows": 24,
+   "rows": 27,
    "data": false,
    "derived": false
   },
@@ -1086,7 +1086,7 @@
    "id": "view-10-health--c100",
    "view_kind": "health",
    "cols": 100,
-   "rows": 23,
+   "rows": 24,
    "data": false,
    "derived": false
   },
@@ -1110,7 +1110,7 @@
    "id": "view-11-link--c100",
    "view_kind": "link",
    "cols": 100,
-   "rows": 23,
+   "rows": 28,
    "data": false,
    "derived": false
   },
@@ -1134,7 +1134,7 @@
    "id": "view-12-quiet--c100",
    "view_kind": "quiet",
    "cols": 100,
-   "rows": 24,
+   "rows": 18,
    "data": false,
    "derived": false
   },

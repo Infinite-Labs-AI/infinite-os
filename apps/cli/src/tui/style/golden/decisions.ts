@@ -3,10 +3,11 @@
 // named after its decision, so a lane can see why a golden row reads otherwise.
 //
 //   LAYOUT  Side by side only when the window is ≥ 120 cols; narrower, the turn
-//           is ONE column. r4 splits at 80, so a frame golden's body applies
-//           only at ≥ 120 (the wide live turn) and below 80 (r4's own stacked
-//           form). 80–119 bodies are skipped. Components (cards, tables, chips,
-//           steps, the top bar, composer and key bar) still apply at every width.
+//           is ONE column. Applied when the goldens are DUMPED, not here: the
+//           eval-width frames (--c60/--c100/--c160, boot) are r4's own frame()
+//           with its split moved from 80 to 120 (private dump-goldens.mjs), so
+//           --c100 is r4's stacked form at 100 cols and its body is compared.
+//           The region slices stay r4 as drawn at 100 (cards 69 wide).
 //   D3      r4's exact heads: Cmd+L-only is "⌘ Do this in Cmd+L" (the golden
 //           reads "⌘ Cmd+L only").
 //   D6      While busy, `esc stop` is the FIRST key-bar hint, shown once.
@@ -14,25 +15,8 @@
 //           chrome must appear once (D1), the boot goldens are r4's frame only
 //           and nothing else may be on screen (D4, `compareFrame` coverage), and
 //           body padding rows are never required (D5, tolerance T6).
-import type { GoldenFile, RegionName } from "./compare.js";
+import type { GoldenFile } from "./compare.js";
 import { normalizeCells, type Cell, type SegmentLine } from "./normalize.js";
-
-export const SPLIT_DECISION_COLUMNS = 120;
-export const R4_SPLIT_COLUMNS = 80;
-
-/** Regions of a frame golden that apply, and why the others do not. */
-export function applicableRegions(golden: GoldenFile, regions: readonly RegionName[]): { compare: RegionName[]; skipped: string[] } {
-  const compare: RegionName[] = [];
-  const skipped: string[] = [];
-  for (const region of regions) {
-    if (region === "body" && golden.cols >= R4_SPLIT_COLUMNS && golden.cols < SPLIT_DECISION_COLUMNS) {
-      skipped.push(`body (LAYOUT: one column below ${SPLIT_DECISION_COLUMNS} cols; r4 splits at ${R4_SPLIT_COLUMNS})`);
-      continue;
-    }
-    compare.push(region);
-  }
-  return { compare, skipped };
-}
 
 type Raw = [style: string, text: string][];
 const K = (key: string, label: string): Raw => [["key", ` ${key} `], ["", ` ${label}   `]];

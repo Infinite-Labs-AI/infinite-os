@@ -126,10 +126,12 @@ describe("region location and diff", () => {
   });
 
   it("a component golden is found inside the details pane (column offset)", () => {
+    // r4's two-pane form at 100 cols: the 69-wide card sits in the details pane, after the answer column and " │ ".
     const card = loadGolden("region-card-needs-ok").lines;
-    const at = locate(screen, card);
-    expect(at).toEqual({ row: 5, col: 31 });
-    expect(compareRegion(screen, card, "card").verdict).toBe("MATCH");
+    const pane = (line: SegmentLine): SegmentLine => [{ text: " ".repeat(28), style: "" }, { text: " │ ", style: "line" }, ...line];
+    const twoPane = ansiToSegmentLines(paintGoldenLines([...screen.slice(0, 5), ...card.map(pane)], sgr("truecolor")));
+    expect(locate(twoPane, card)).toEqual({ row: 5, col: 31 });
+    expect(compareRegion(twoPane, card, "card").verdict).toBe("MATCH");
   });
 
   it("names the first differing row, the token and a caret", () => {
@@ -145,19 +147,21 @@ describe("the evaluator passes r4 itself (a renderer that prints the golden)", (
   // The renderer stands in for a CLI that draws r4 exactly: it prints the
   // golden of the screen it is asked for. Every frame and line-region golden
   // must then match, except where a binding decision changes the golden.
+  // The card regions are drawn at 69 cols (r4's details pane at 100): no eval frame holds a 69-wide card any more
+  // (LAYOUT: --c100 is one column), so at 69 the renderer prints the card region itself.
+  const CARD_AT_69: Readonly<Record<string, string>> = {
+    "flow-pause-01-needs-your-ok": "region-card-needs-ok",
+    "flow-pause-03-done": "region-card-done-green"
+  };
   const painted = new GoldenEvaluator((fixture, cols) => {
-    // r4's c100 details pane is the 69-col column the card regions are drawn in.
-    const golden = loadGolden(`${fixture.screen}--c${cols === 69 ? 100 : cols}`);
+    const golden = loadGolden(cols === 69 ? CARD_AT_69[fixture.screen]! : `${fixture.screen}--c${cols}`);
     return paintGoldenLines(golden.lines, sgr("truecolor")).join("\n");
   });
   const DECIDED = new Set([
     "flow-pause-02-working--c60", "flow-pause-02-working--c100", "flow-pause-02-working--c160",
     "flow-images-02-making-them--c60", "flow-images-02-making-them--c100", "flow-images-02-making-them--c160",
     "flow-images-06-with-your-codex--c60", "flow-images-06-with-your-codex--c100", "flow-images-06-with-your-codex--c160",
-    "flow-images-07-cmd-l-only--c60", "flow-images-07-cmd-l-only--c160", "region-keybar-busy",
-    // r4 defect, not a decision: the done card's title fills the box, so boxed() draws its top border 70 wide over
-    // 69-wide rows, and the c100 frame truncates that border with "…". The region and the frame disagree.
-    "region-card-done-green"
+    "flow-images-07-cmd-l-only--c60", "flow-images-07-cmd-l-only--c100", "flow-images-07-cmd-l-only--c160", "region-keybar-busy"
   ]);
 
   it("matches every frame and line-region golden; fails exactly the decided ones", () => {
@@ -222,9 +226,13 @@ describe("the evaluator passes r4 itself (a renderer that prints the golden)", (
     expect(hasTruecolorSgr(`${ESC}[38:2:1:2:3mx`)).toBe(true);
   });
 
-  it("the 80–119 col body is skipped by the layout decision, and says so", () => {
-    const result = painted.evaluate(loadGolden("view-06-change--c100"));
-    expect(result.skipped).toEqual(["body (LAYOUT: one column below 120 cols; r4 splits at 80)"]);
-    expect(result.regions.map((region) => region.region)).not.toContain("body");
+  it("the 100-col body is compared: the --c100 goldens are r4 drawn one column (LAYOUT, split at 120)", () => {
+    const golden = loadGolden("view-06-change--c100");
+    expect(golden.layout?.wide).toBe(false);
+    expect(painted.evaluate(golden).regions.find((region) => region.region === "body")?.verdict).toBe("MATCH");
+    const answerRow = golden.lines.findIndex((line) => textOf(line).startsWith("∞ Ready."));
+    const edited = paintedWith((lines) => lines.map((line, i) => (i === answerRow ? plain("∞ Ready.") : line))).evaluate(golden);
+    expect(edited.pass).toBe(false);
+    expect(edited.regions.find((region) => region.region === "body")?.verdict).toBe("DIFF");
   });
 });

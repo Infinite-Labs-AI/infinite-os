@@ -13,7 +13,7 @@
 //     `data`. A golden with no rows and no data assertion FAILS, never passes
 //     vacuously.
 import { compareRegion, FRAME_REGIONS, goldenRegionRows, isBlankPadRow, locate, maskText, type GoldenFile, type RegionName, type RegionResult } from "./compare.js";
-import { applicableRegions, applyDecisions } from "./decisions.js";
+import { applyDecisions } from "./decisions.js";
 import { loadR4Fixture, type R4ScreenFixture, type R4Step } from "./fixtures.js";
 import { ansiToSegmentLines } from "./ansi-to-segments.js";
 import { screenOf } from "./goldens.js";
@@ -23,8 +23,6 @@ export interface Evaluation {
   id: string;
   pass: boolean;
   regions: RegionResult[];
-  /** Regions not compared, with the decision that rules them out. */
-  skipped: string[];
   /** Decisions applied to the golden before comparing. */
   decisions: string[];
   /** Failures of a data assertion (data goldens only). */
@@ -36,8 +34,8 @@ export type ScreenRenderer = (fixture: R4ScreenFixture, cols: number) => string;
 
 /**
  * Where each line-region golden is drawn: a screen fixture at a width. The card
- * goldens are 69 wide (r4's details pane at 100 cols). Under the LAYOUT
- * decision a 100-col turn is one column (its card would be 74 wide), so a
+ * goldens are 69 wide (r4's details pane at 100 cols, as drawn). Under the
+ * LAYOUT decision a 100-col turn is one column (its card is 74 wide), so a
  * 69-wide card is drawn at 69 cols, where the one column is 69 wide.
  */
 export const REGION_SCREENS: Readonly<Record<string, { screen: string; cols: number }>> = {
@@ -109,14 +107,11 @@ export class GoldenEvaluator {
   private evaluateCells(raw: GoldenFile, id: string): Evaluation {
     const { screen: screenId, cols } = screenOf(id, raw);
     const { golden, applied } = applyDecisions(raw, screenId);
-    const out: Evaluation = { id, pass: false, regions: [], skipped: [], decisions: applied, problems: [] };
+    const out: Evaluation = { id, pass: false, regions: [], decisions: applied, problems: [] };
 
     if (golden.view_kind !== "region") {
-      const fixture = loadR4Fixture(screenId);
-      const screen = this.screen(fixture, cols);
-      const { compare, skipped } = applicableRegions(golden, FRAME_REGIONS);
-      out.skipped = skipped;
-      out.regions = compareFrame(screen, golden, compare, fixture);
+      const screen = this.screen(loadR4Fixture(screenId), cols);
+      out.regions = compareFrame(screen, golden, FRAME_REGIONS);
       out.pass = out.regions.length > 0 && out.regions.every((result) => result.verdict === "MATCH");
       return out;
     }
@@ -153,12 +148,7 @@ const ONCE: readonly RegionName[] = ["topbar", "composer", "keybar"];
  * wordmark or inventory at boot; no stray spinner or per-turn rows). Blank pad
  * rows (`│` only) are T6's padding and never count as extra.
  */
-export function compareFrame(
-  screen: readonly SegmentLine[],
-  golden: GoldenFile,
-  regions: readonly RegionName[],
-  fixture: Pick<R4ScreenFixture, "turn">
-): RegionResult[] {
+export function compareFrame(screen: readonly SegmentLine[], golden: GoldenFile, regions: readonly RegionName[]): RegionResult[] {
   const byRegion = new Map<RegionName, RegionResult>();
   for (const region of regions) {
     if (region === "rule_top" || region === "rule_bottom") continue;
@@ -197,21 +187,6 @@ export function compareFrame(
   for (const result of byRegion.values()) {
     if (!result.locatedAt) continue;
     for (let row = result.locatedAt.row; row < result.locatedAt.row + result.goldenRows; row += 1) covered.add(row);
-  }
-  if (!regions.includes("body") && fixture.turn) {
-    // LAYOUT skips the body's cells at 80–119 cols, not its rows: from the question to the next located region.
-    // The question row: `❯ ` and the question's start (it wraps, and r4's two panes share the row).
-    const { question } = fixture.turn;
-    const start = screen.findIndex((line) => {
-      const text = textOf(line);
-      const asked = text.slice(2).split("│")[0]!.trim();
-      return text.startsWith("❯ ") && asked !== "" && question.startsWith(asked);
-    });
-    if (start >= 0) {
-      const next = [...byRegion.values()].flatMap((result) => (result.locatedAt && result.locatedAt.row > start ? [result.locatedAt.row] : []));
-      const end = next.length ? Math.min(...next) : screen.length;
-      for (let row = start; row < end; row += 1) covered.add(row);
-    }
   }
   screen.forEach((line, row) => {
     const text = textOf(line);
