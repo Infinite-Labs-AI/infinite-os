@@ -296,7 +296,7 @@ export function fakeContext(input: {
 }
 
 /** A deps object whose unexpected members throw (a step reaching for one it should not use fails the test). */
-export function fakeDeps(parts: Partial<WizardDeps> & { bridge?: Partial<TagBridgeClient> }): WizardDeps {
+export function fakeDeps(parts: Omit<Partial<WizardDeps>, "bridge"> & { bridge?: Partial<TagBridgeClient> }): WizardDeps {
   const guard = <T extends object>(name: string, value: Partial<T> | undefined): T =>
     new Proxy((value ?? {}) as T, {
       get(target, property) {
