@@ -1,27 +1,35 @@
 /**
- * Terminal-injection defense for the in-session confirmation surfaces (readline
- * and Ink): strip ANSI/OSC/C1 control sequences, other control characters and
- * bidi controls before any host-supplied string reaches the TTY.
+ * Terminal-injection defense for every TTY surface of the CLI: the in-session
+ * confirmation surfaces (readline and Ink), the receipt lines, the keymap, the
+ * answer view renderers and the one-shot `infinite app` client. Strips
+ * ANSI/OSC/C1 control sequences, other control characters and bidi controls
+ * before any host-supplied string reaches the TTY.
  *
  * Moved out of `confirm-in-session.ts` (which re-exports it) so the receipt
  * renderer (`confirm-result-lines.ts`) can share it without an import cycle.
+ * The one-shot client's private copy (with its line-break-preserving mode) is
+ * folded in here as `terminalOutputText`, so there is one scrubber.
  */
 
 const TRUNCATION_SUFFIX = " ... [truncated]";
 
 /**
  * Strip ANSI/OSC/C1 control sequences and other terminal-control characters from
- * a display string, then collapse whitespace to single spaces. This is a port of
- * the file-private `terminalText` in `desktop-app-client.ts`, kept
- * behavior-identical so the in-session path matches the one-shot renderer's
- * terminal-injection defense. The one-shot client keeps its own copy because it
- * also has a line-break-preserving mode (`preserveLineBreaks`); both strip the
- * same CSI/OSC/C1/bidi set. Folding the two into one export (with a shared test
- * run against both entry points) is owed to T8.
+ * a display string, then collapse whitespace to single spaces.
  */
 export function terminalText(value: string, fallback = ""): string {
   if (typeof value !== "string") return fallback;
-  return scanTerminalText(value).replace(/\s+/gu, " ").trim() || fallback;
+  return scanTerminalText(value, false).replace(/\s+/gu, " ").trim() || fallback;
+}
+
+/**
+ * The same scrub for multi-line output (the one-shot client's answer text): line
+ * breaks survive (`\r\n` and `\r` become `\n`), a tab becomes two spaces, and
+ * the result is trimmed. Every other control or bidi character is dropped.
+ */
+export function terminalOutputText(value: string, fallback = ""): string {
+  if (typeof value !== "string") return fallback;
+  return scanTerminalText(value, true).trim() || fallback;
 }
 
 /**
@@ -33,7 +41,7 @@ export function terminalText(value: string, fallback = ""): string {
  */
 export function scrubTerminalControls(value: string): string {
   if (typeof value !== "string") return "";
-  return scanTerminalText(value);
+  return scanTerminalText(value, false);
 }
 
 /** {@link terminalText} plus a length bound with a truncation suffix. */
@@ -55,8 +63,9 @@ export function boundedTerminalText(
 /**
  * Walk the string dropping escape/control sequences; every stripped control byte
  * and whitespace char becomes a single space so nothing re-flows the cursor.
+ * With `preserveLineBreaks`, `\n`/`\r\n`/`\r` become `\n` and a tab two spaces.
  */
-function scanTerminalText(value: string): string {
+function scanTerminalText(value: string, preserveLineBreaks: boolean): string {
   // Decoded views vouch only for their envelope; a body field can arrive as an
   // array or a `{ length }` object at runtime despite the static type.
   if (typeof value !== "string") return "";
@@ -95,9 +104,19 @@ function scanTerminalText(value: string): string {
       index = skipControlString(value, index + 1);
       continue;
     }
+    if (code === 0x0a) {
+      output.push(preserveLineBreaks ? "\n" : " ");
+      index += 1;
+      continue;
+    }
     if (code === 0x0d) {
-      output.push(" ");
+      output.push(preserveLineBreaks ? "\n" : " ");
       index += value.charCodeAt(index + 1) === 0x0a ? 2 : 1;
+      continue;
+    }
+    if (code === 0x09) {
+      output.push(preserveLineBreaks ? "  " : " ");
+      index += 1;
       continue;
     }
     if (
