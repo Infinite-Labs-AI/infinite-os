@@ -27,6 +27,9 @@ import type { KindRender, KindRenderer, ViewRender, ViewRenderCtx } from "./type
 // Each lane adds its imports and entries in its own block below, so lanes that
 // run in parallel never edit the same lines.
 // T9 (measures): numbers, compare, health
+import { renderCompare } from "./compare.js";
+import { renderHealth } from "./health.js";
+import { renderNumbers } from "./numbers.js";
 
 // T10 (things): list, record, document, link, quiet
 
@@ -36,6 +39,9 @@ type KindRendererMap = { [K in AnswerViewKind]?: KindRenderer<K> };
 
 const KIND_RENDERERS: KindRendererMap = {
   // T9 (measures)
+  numbers: renderNumbers,
+  compare: renderCompare,
+  health: renderHealth,
 
   // T10 (things)
 
