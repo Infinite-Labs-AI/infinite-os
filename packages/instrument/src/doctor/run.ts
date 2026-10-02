@@ -10,6 +10,9 @@
 //   • the server-lane probe is the one request MEANT to land in the customer's ledger, so it runs ONLY
 //     with `--probe-server-lane` AND a linked Infinite app (R2-27) — a CI run never adds an unread bot
 //     row. Otherwise, when the lane is installed, its cell is `undetermined (not probed)`.
+//   • the static setup checks grade only the tools doctor was asked about: a Meta-only finding on a site
+//     checked without a Meta id (a GA4-only site's "no pixel to capture click ids for") is `info`, so a
+//     CI gate on exit 0 is reachable for a GA4- or PostHog-only site;
 //   • every check runs on its own; a crash is `undetermined (test error)`, and the summary LEADS with how
 //     many checks could not tell (incident c912fa5 / 21b78ab: live checks hidden for two weeks because a
 //     failing step stopped the rest and the summary never said so).
@@ -169,13 +172,13 @@ export async function runDoctor(options: DoctorOptions, deps: DoctorDeps): Promi
   const expect = expectFromIds(ids)
   const results: CheckResult[] = []
 
-  // Static: the setup checks over the app's source.
+  // Static: the setup checks over the app's source, graded only for the tools doctor was asked about.
   results.push(
     ...(await isolated("setup_checks", "S", ctx, async () =>
       runSetupChecks(appRoot, {
         ...(ids.posthog && !ids.posthog.apiHost.startsWith("/") ? { expectedPosthogApiHost: ids.posthog.apiHost } : {}),
         ...(options.url ? { productionHosts: [new URL(options.url).hostname] } : {})
-      }).findings.map((finding) => setupFindingResult(finding, ctx))
+      }).findings.map((finding) => notAskedAbout(setupFindingResult(finding, ctx), finding.check, ids))
     ))
   )
 
@@ -217,6 +220,23 @@ export async function runDoctor(options: DoctorOptions, deps: DoctorDeps): Promi
   }
 }
 
+/** Setup checks that are about ONE tool. A finding of one doctor was given no id for is `info`. */
+const SETUP_CHECK_TOOL: Partial<Record<string, "meta" | "posthog">> = {
+  click_id_capture: "meta",
+  meta_pixel_config: "meta",
+  meta_event_id: "meta",
+  posthog_config: "posthog"
+}
+
+function notAskedAbout(result: CheckResult, check: string, ids: DoctorIds): CheckResult {
+  const tool = SETUP_CHECK_TOOL[check]
+  if (!tool || result.state === "pass" || result.state === "info") return result
+  const asked = tool === "meta" ? ids.meta.length > 0 : ids.posthog !== null
+  if (asked) return result
+  const label = tool === "meta" ? "Meta pixel" : "PostHog"
+  return { ...result, state: "info", reason: `not asked about (no ${label} id was given): ${result.reason ?? ""}`.trim() }
+}
+
 async function serverLaneCell(options: DoctorOptions, deps: DoctorDeps, ctx: { runId: null; now(): Date }, root: string): Promise<CheckResult[]> {
   const cell = (state: CheckResult["state"], reason: string) => [checkResult("server_lane_probe", state, "PV", ctx, { reason })]
   if (!options.probeServerLane) {
@@ -225,6 +245,11 @@ async function serverLaneCell(options: DoctorOptions, deps: DoctorDeps, ctx: { r
   const linked = (deps.linkedApp ?? ((path: string) => defaultLinkedApp(path, deps.env ?? process.env)))(root)
   if (!linked) {
     return cell("undetermined", "not_probed: this repo is not linked to a running Infinite app, so a probe's receipt could not be read; nothing was sent")
+  }
+  // The probe lands a bot-flagged row in the customer's ledger; with no way to read its receipt back it
+  // would be exactly the unread row R2-27 forbids. Send nothing until the receipt read is wired.
+  if (!deps.readServerLaneReceipt) {
+    return cell("undetermined", "not_probed: this build cannot read the probe's receipt back from the Infinite app, so nothing was sent")
   }
   const hex = deps.randomHex ? deps.randomHex() : randomBytes(6).toString("hex")
   const path = serverLaneProbePath(hex)
@@ -235,9 +260,6 @@ async function serverLaneCell(options: DoctorOptions, deps: DoctorDeps, ctx: { r
     ...(deps.fetch ? { fetch: deps.fetch } : {})
   })
   if (sent.status === 0) return cell("undetermined", `the probe could not be sent (${sent.detail ?? "network error"})`)
-  if (!deps.readServerLaneReceipt) {
-    return cell("undetermined", `probe ${path} sent (the site answered HTTP ${sent.status}); its receipt is read in the Infinite app — this is not proof yet`)
-  }
   const receipt = await deps.readServerLaneReceipt(path)
   switch (receipt.state) {
     case "verified":

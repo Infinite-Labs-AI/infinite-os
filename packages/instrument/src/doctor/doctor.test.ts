@@ -116,6 +116,15 @@ describe("doctor exit codes (§3d.5)", () => {
     expect(site.requests.some((request) => request.url.includes("/__infinite_probe/"))).toBe(false)
   })
 
+  it("0 on a GA4-only check: Meta-only static findings are not graded when no Meta id was given (review P2-6)", async () => {
+    const root = repo({})
+    const report = await runDoctor({ root, url: `${SITE}/`, flagIds: { ga4: [GA4], meta: [], posthog: null, infinite: null }, probeServerLane: false }, deps())
+    const clickIds = report.results.filter((result) => result.reason?.includes("INF_SETUP_CLICK_ID_UNDETERMINED"))
+    expect(clickIds.map((result) => result.state)).toEqual(["info"])
+    expect(report.results.filter((result) => result.state === "problem" || result.state === "undetermined")).toEqual([])
+    expect(report.exitCode).toBe(0)
+  })
+
   it("1 when any check finds a problem", async () => {
     const root = repo({ "index.html": PAGE })
     const report = await runDoctor({ root, url: `${SITE}/`, flagIds: { ...FLAG_IDS, meta: ["999888777666555"] }, probeServerLane: false }, deps())
@@ -169,6 +178,15 @@ describe("the server-lane probe is opt-in", () => {
     const root = repo({ "index.html": PAGE, ".infinite/install.json": laneManifest() })
     const report = await runDoctor({ root, url: `${SITE}/`, flagIds: null, probeServerLane: true }, { ...deps(), linkedApp: () => false })
     expect(report.results.find((result) => result.checkId === "server_lane_probe")!.reason).toContain("not linked")
+    expect(site.requests.some((request) => request.url.includes("/__infinite_probe/"))).toBe(false)
+  })
+
+  it("with the flag and a linked app but no receipt reader: nothing is sent (review P2-7)", async () => {
+    const root = repo({ ".infinite/install.json": manifest({ ids: { ga4: [GA4], meta: [PIXEL], posthog: { projectKey: POSTHOG, apiHost: "/ingest" }, infinite: null } }) })
+    const report = await runDoctor({ root, url: `${SITE}/`, flagIds: null, probeServerLane: true }, { ...deps(), linkedApp: () => true })
+    const cell = report.results.find((result) => result.checkId === "server_lane_probe")!
+    expect(cell).toMatchObject({ state: "undetermined" })
+    expect(cell.reason).toContain("nothing was sent")
     expect(site.requests.some((request) => request.url.includes("/__infinite_probe/"))).toBe(false)
   })
 

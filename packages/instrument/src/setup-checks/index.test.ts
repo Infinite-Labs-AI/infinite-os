@@ -74,7 +74,7 @@ describe("runSetupChecks", () => {
       makeApp({
         "index.html": [
           // The site's own pixel, behind a host check (so previews stay silent) and with automatic events off.
-          "<html><head><script>(function(){ if (location.hostname === 'localhost' || location.hostname.endsWith('.vercel.app')) return; fbq('set', 'autoConfig', false, '914812061724377');fbq('init', '914812061724377'); })()</script></head>",
+          "<html><head><script>(function(){ if (location.hostname === 'localhost' || location.hostname.endsWith('.vercel.app')) return; fbq('set', 'autoConfig', false, '111222333444555');fbq('init', '111222333444555'); })()</script></head>",
           '<body><form data-conversion="signup" method="post"><input type="email" /><button type="submit">Join</button></form></body></html>'
         ].join("\n")
       })
