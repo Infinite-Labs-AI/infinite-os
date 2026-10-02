@@ -1,3 +1,4 @@
+/* global process, Buffer, setTimeout */
 // Shared engine for the fake `claude` and `codex` binaries (test-only, never published). A fake:
 //   - records its argv, cwd, stdin and the env keys that matter to FAKE_AGENT_RECORD (JSONL, sync writes,
 //     so a kill never loses a record);
@@ -137,7 +138,9 @@ export class McpClient {
   close() {
     try {
       this.child.stdin.end()
-    } catch {}
+    } catch {
+      // Already closed.
+    }
   }
 }
 

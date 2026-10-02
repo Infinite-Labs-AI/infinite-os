@@ -1,3 +1,4 @@
+/* global process */
 // A fake `gh` for lane O4's tests (and I1's offline E2E). It keeps its state in the JSON file named by
 // FAKE_GH_STATE, records every call (argv + stdin) there, and answers the subset of gh the wizard uses:
 //   auth status, repo view, pr list/create/view/ready/checks/comment/update-branch,
