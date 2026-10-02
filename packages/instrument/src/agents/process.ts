@@ -1,9 +1,12 @@
 // Agent child processes (§3f.3, §3f.4): each agent runs in its OWN process group (detached), so one
 // signal reaches the agent and everything it spawned (its MCP proxy, a Codex sandbox helper, a shell).
 // Output is streamed line by line; a wall-clock timer ends a run that overstays; a kill is SIGTERM to the
-// group, then SIGKILL after 1 s. When the leader exits, the group is swept the same way, so no straggler
-// outlives its turn. The registry answers `isAgentAlive()` (the engine invariant, §3a.9.4) and `killAll()`
-// (SIGINT, out of usage, abort).
+// group, then SIGKILL after 1 s. When the leader exits, the group is swept the same way, so nothing left
+// in the group outlives its turn. A process that left the group (`setsid`, e.g. `perl -MPOSIX -e setsid`
+// from a Codex shell) is NOT reached by a group signal and can outlive the turn (review O3 F11); the fence's
+// seal (`verifySeal`, re-read before the build/T0 and before staging) is what catches a write it makes. The
+// registry answers `isAgentAlive()` (the engine invariant, §3a.9.4) and `killAll()` (SIGINT, out of usage,
+// abort).
 import { spawn, type ChildProcess } from "node:child_process"
 
 import { AGENT_LIMITS } from "../wizard/contracts/agents.js"

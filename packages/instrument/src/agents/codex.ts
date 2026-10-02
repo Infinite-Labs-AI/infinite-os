@@ -16,7 +16,7 @@ import {
 } from "../wizard/contracts/agents.js"
 import { CLAIM_TOOL_NAMES, MCP_SERVER_NAME } from "../wizard/contracts/jobs.js"
 import type { ModelChoice } from "./claude.js"
-import { isRecord, MODEL_REJECTED } from "./claude.js"
+import { isRecord, modelRejectedText } from "./claude.js"
 
 /** TOML value encodings for `-c key=value`. */
 const tomlString = (value: string) => `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`
@@ -177,8 +177,9 @@ export function parseCodexLine(line: string): CodexStreamEvent | null {
   }
 }
 
-export function codexModelRejected(message: string): boolean {
-  return MODEL_REJECTED.test(message)
+/** The pinned model was refused: the message names THE pinned model (`modelId`) with a not-found phrase (F20). */
+export function codexModelRejected(message: string, modelId: string | null): boolean {
+  return modelId !== null && modelRejectedText(message, modelId)
 }
 
 /** "unrecognized configuration setting" → fatal: a safety key was ignored (never run without it). */

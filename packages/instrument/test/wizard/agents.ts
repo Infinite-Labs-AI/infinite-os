@@ -107,6 +107,9 @@ export function gateSpy(): GateSpy {
   return spy
 }
 
+/** The fake connection's public IDs (what `bridge.keys()` would yield). */
+export const FAKE_CONNECTION_IDS = ["G-TEST000001", "123456789012345"] as const
+
 export function makeRunner(setup: FakeSetup, root: string, overrides: Partial<AgentRunnerOptions> = {}): AgentRunnerImpl {
   assertBuilt()
   return new AgentRunnerImpl({
@@ -117,6 +120,7 @@ export function makeRunner(setup: FakeSetup, root: string, overrides: Partial<Ag
     tagVersion: "0.0.0-test",
     runId: () => RUN_ID,
     checks: gateSpy(),
+    connectionIds: () => FAKE_CONNECTION_IDS,
     cliPath: BUILT_CLI,
     narrationThrottleMs: 0,
     codexStartupTimeoutMs: 15_000,

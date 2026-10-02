@@ -53,14 +53,15 @@ import {
 import { buildCodexReviewerArgv, buildCodexWorkerArgv, codexModelRejected, codexUnrecognizedConfig, parseCodexLine } from "./codex.js"
 import { detectAgents, apiKeySourceMatches, resolveCodexRuntime, type DetectedAgents } from "./detect.js"
 import { buildAgentEnv } from "./env.js"
-import { Fence, type FenceBlock } from "./fence.js"
+import { Fence, recoverCrashedTurns, type FenceBlock, type TreeSeal } from "./fence.js"
 import { assertReviewWorktree } from "./worktree-guard.js"
 import { AGENT_LABEL, claudeToolBeat, codexItemBeat, displayPath, Narrator, type NarrationBeat } from "./narration.js"
 import { AgentProcessRegistry } from "./process.js"
-import { ensurePrivateDir, resolveRealpath, resolveSensitivePaths, runScratchDir, snapshotDir } from "./paths.js"
+import { ensurePrivateDir, resolveRealpath, resolveSensitivePaths, runScratchDir, snapshotDir, wizardCacheRoot } from "./paths.js"
 import { sanitizeUntrusted } from "./sanitize.js"
 import { parseReview, parseStructuredClaims, type StructuredClaims } from "./schema-check.js"
 import { ClaimChannel, isPlanDecidedTopic } from "./mcp/tools.js"
+import type { McpServerHandler } from "./mcp/jsonrpc.js"
 import { startMcpBridge } from "./mcp/bridge.js"
 import { claudeUsageSignals, codexUsageLimit } from "./usage-limit.js"
 
@@ -75,7 +76,7 @@ export const AGENT_MODELS = {
 
 /** Prompts on stdin (the job brief is the system prompt for Claude and the prompt for Codex). */
 export const WORKER_KICKOFF =
-  "Do the jobs in your instructions. Start with job_list. Claim each job with job_claim when you think it is done, blocked or not needed; your claim is not the result, the wizard checks. Finish with the JSON your output schema asks for."
+  "Do the jobs in your instructions. Start with job_list. Edit files only; never run git, a build, the tests, an install or a dev server (the wizard builds and tests after your turn). Claim each job with job_claim when you think it is done, blocked or not needed; your claim is not the result, the wizard checks. Finish with the JSON your output schema asks for."
 export const WORKER_RESUME_KICKOFF =
   "Continue. The wizard ran its own checks; its notes and any answers from the user are at the end of your instructions. Fix what failed, then claim again with job_claim and finish with the JSON your output schema asks for."
 /** The first line of every Claude system prompt: the value after `--append-system-prompt` never starts with "-". */
@@ -96,17 +97,35 @@ export interface AgentRunExtras {
   turnsUsed: number | null
   /** True when the pinned model was refused and the user's default model ran instead. */
   modelFallback: boolean
+  /** The settled tree (`verifySeal` before the build/T0); null when the turn was aborted. */
+  seal: TreeSeal | null
 }
 
 export type AgentRunResultWithExtras = AgentRunResult & AgentRunExtras
 
-export function runExtras(result: AgentRunResult): AgentRunExtras {
+/**
+ * Reads the extras off a `runJobs` result. A runner that returns only the §3f.1 shape cannot say WHICH
+ * job the fence blocked (review O3 F14), so when it reverted anything and gave no `blocked` list, every
+ * item of the turn is blocked (fail closed) instead of none.
+ */
+export function runExtras(result: AgentRunResult, items: readonly { id: string }[] = []): AgentRunExtras {
   const extras = result as Partial<AgentRunExtras>
+  let blocked: FenceBlock[]
+  if (Array.isArray(extras.blocked)) blocked = extras.blocked
+  else if (result.reverted.length > 0) {
+    blocked = items.map((item) => ({
+      itemId: item.id,
+      reason: "outside_allowlist" as const,
+      paths: [...result.reverted],
+      note: "The fence undid part of this turn and the runner did not say which job; every job of the turn is blocked."
+    }))
+  } else blocked = []
   return {
-    blocked: Array.isArray(extras.blocked) ? extras.blocked : [],
+    blocked,
     incidents: Array.isArray(extras.incidents) ? extras.incidents : [],
     turnsUsed: typeof extras.turnsUsed === "number" ? extras.turnsUsed : null,
-    modelFallback: extras.modelFallback === true
+    modelFallback: extras.modelFallback === true,
+    seal: extras.seal ?? null
   }
 }
 
@@ -122,8 +141,11 @@ export interface AgentRunnerOptions {
   runId(): string | null
   /** O9's post-turn gate (registered on O6's CheckRunner). REQUIRED: no turn is kept without it. */
   checks: Pick<CheckRunner, "turnGate">
-  /** The connection's public provider IDs (the gate flags a different literal). */
-  connectionIds?(): readonly string[]
+  /**
+   * REQUIRED: the connection's public provider IDs (the gate flags any other ID literal; with none, every
+   * ID edit of jobs 4, 5 and 7 would be undone). `connectionIdsFromKeys` builds it from `bridge.keys()`.
+   */
+  connectionIds(): readonly string[] | Promise<readonly string[]>
   /** Literals no change or claim may contain (e.g. the desktop bridge token). The MCP token is added per turn. */
   secretLiterals?(): readonly string[]
   /** `--worker` / `--no-agent`. */
@@ -159,6 +181,7 @@ export class AgentRunnerImpl implements AgentRunner {
   private turn = 0
   private reviews = 0
   private interrupted = false
+  private recovered = false
   private readonly fallback: Record<AgentKind, boolean> = { claude_code: false, codex: false }
 
   constructor(private readonly options: AgentRunnerOptions) {}
@@ -196,7 +219,17 @@ export class AgentRunnerImpl implements AgentRunner {
     const info = await this.infoFor(kind)
     const emptySession: SessionRef = kind === "claude_code" ? { kind: "claude", sessionId: input.resume?.kind === "claude" ? input.resume.sessionId : "" } : { kind: "codex", threadId: input.resume?.kind === "codex" ? input.resume.threadId : "" }
     if (!info) {
-      return { outcome: "error", session: emptySession, claims: [], questions: [], permissionDenials: 0, reverted: [], edits: [], blocked: [], incidents: [], turnsUsed: null, modelFallback: false }
+      return { outcome: "error", session: emptySession, claims: [], questions: [], permissionDenials: 0, reverted: [], edits: [], blocked: [], incidents: [], turnsUsed: null, modelFallback: false, seal: null }
+    }
+    // A turn a killed wizard left open (its snapshot still on disk) is undone first, so the agent's
+    // unvetted edits never become this turn's baseline (review O3 F10).
+    if (!this.recovered) {
+      this.recovered = true
+      const recovered = await recoverCrashedTurns({ snapshotsRoot: join(wizardCacheRoot(this.options.home), "snapshots"), root: this.options.root })
+      const paths = [...new Set(recovered.flatMap((entry) => entry.restored))]
+      if (paths.length > 0) {
+        input.onNarrate({ agent: kind, role: "worker", text: `Undid an unfinished agent turn from an earlier run: ${paths.slice(0, 3).join(", ")}${paths.length > 3 ? ", …" : ""}` })
+      }
     }
     this.turn += 1
     const turn = this.turn
@@ -208,20 +241,32 @@ export class AgentRunnerImpl implements AgentRunner {
     const literals = () => [token, ...(this.options.secretLiterals?.() ?? [])].filter((literal) => literal.length >= 8)
     const redact = (text: string) => literals().reduce((acc, literal) => acc.split(literal).join("[redacted]"), text)
     const narrator = new Narrator({ agent: kind, role: "worker", emit: (beat) => input.onNarrate(beat), now: () => now().getTime(), throttleMs: this.options.narrationThrottleMs })
-    const channel = new ClaimChannel({
-      items: input.items,
-      now,
-      redact,
-      onClaim: (claim) => input.onClaim(claim),
-      onAsk: (question) => input.onAsk(question),
-      onProgress: (progress) => {
-        input.onProgress(progress)
-        narrator.beat(progress.text)
-      }
-    })
-    const bridge = await startMcpBridge({ handler: channel, version: this.options.tagVersion })
+    // One claim channel PER ATTEMPT (review O3 F20): a model-fallback retry must not inherit the first
+    // attempt's claims or its `initialized` count (that would hide a toolless retry).
+    const newChannel = () =>
+      new ClaimChannel({
+        items: input.items,
+        now,
+        redact,
+        onClaim: (claim) => input.onClaim(claim),
+        onAsk: (question) => input.onAsk(question),
+        onProgress: (progress) => {
+          input.onProgress(progress)
+          narrator.beat(progress.text)
+        }
+      })
+    let channel = newChannel()
+    const handler: McpServerHandler = {
+      tools: () => channel.tools(),
+      call: (name, args) => channel.call(name, args),
+      onInitialize: () => channel.onInitialize(),
+      onToolsList: () => channel.onToolsList()
+    }
+    const bridge = await startMcpBridge({ handler, version: this.options.tagVersion })
     token = bridge.token
-    let fence = await Fence.begin({ root: this.options.root, snapshotDir: snapshotDir(this.options.home, runId, turn), runId, turn, items: input.items })
+    // The snapshot dir is unique per process and turn, so a later run never overwrites a crashed turn's copies.
+    const turnDir = (suffix = "") => snapshotDir(this.options.home, runId, `${turn}${suffix}-${process.pid}-${Date.now().toString(36)}`)
+    let fence = await Fence.begin({ root: this.options.root, snapshotDir: turnDir(), runId, turn, items: input.items })
     this.activeFence = fence
     let modelFallback = false
     try {
@@ -231,8 +276,9 @@ export class AgentRunnerImpl implements AgentRunner {
         modelFallback = true
         input.onNarrate({ agent: kind, role: "worker", text: `${this.models()[kind].label} isn't on your plan: using your default model` })
         if (!fence.isSettled) await fence.abort()
-        fence = await Fence.begin({ root: this.options.root, snapshotDir: snapshotDir(this.options.home, runId, `${turn}-retry`), runId, turn: `${turn}-retry`, items: input.items })
+        fence = await Fence.begin({ root: this.options.root, snapshotDir: turnDir("-retry"), runId, turn: `${turn}-retry`, items: input.items })
         this.activeFence = fence
+        channel = newChannel()
         attempt = await this.workerAttempt(kind, info, input, { bridge, scratch, narrator, channel, turn, model: this.modelFor(kind) })
       }
       if (this.interrupted && attempt.outcome === "completed") attempt.outcome = "error"
@@ -250,16 +296,17 @@ export class AgentRunnerImpl implements AgentRunner {
       }
       if (attempt.outcome !== "completed" && attempt.outcome !== "max_turns") {
         const restored = await fence.abort()
-        return { ...base, outcome: attempt.outcome, reverted: restored.restored, edits: [], blocked: [] }
+        return { ...base, outcome: attempt.outcome, reverted: restored.restored, edits: [], blocked: [], seal: null }
       }
       // §3f.9: the gate runs on the kept diff after EVERY turn, before any build or T0. A heavy-dir write
       // throws FenceTamperError here (the fence has already restored what it could).
+      const connectionIds = [...(await this.options.connectionIds())]
       const settled = await fence.end({
         claims,
         secretLiterals: literals(),
-        turnGate: (diff) => this.options.checks.turnGate(diff, { connectionIds: this.options.connectionIds?.() ?? [] })
+        turnGate: (diff) => this.options.checks.turnGate(diff, { connectionIds })
       })
-      return { ...base, outcome: attempt.outcome, reverted: settled.reverted, edits: settled.edits, blocked: settled.blocked }
+      return { ...base, outcome: attempt.outcome, reverted: settled.reverted, edits: settled.edits, blocked: settled.blocked, seal: settled.seal }
     } finally {
       if (!fence.isSettled && !this.interrupted) await fence.abort().catch(() => undefined)
       this.activeFence = null
@@ -369,7 +416,7 @@ export class AgentRunnerImpl implements AgentRunner {
         onStdoutLine: (line) => {
           const event = parseClaudeLine(line)
           if (!event) return
-          if (claudeModelRejected(event)) {
+          if (claudeModelRejected(event, ctx.model.model)) {
             state.modelRejected = true
             return stop("error")
           }
@@ -465,7 +512,7 @@ export class AgentRunnerImpl implements AgentRunner {
               state.resetsAt = usage.resetsAt ?? state.resetsAt
               return stop("out_of_usage")
             }
-            if (codexModelRejected(message)) {
+            if (codexModelRejected(message, ctx.model.model)) {
               state.modelRejected = true
               return stop("error")
             }
@@ -556,7 +603,7 @@ export class AgentRunnerImpl implements AgentRunner {
         onStdoutLine: (line) => {
           const event = parseClaudeLine(line)
           if (!event) return
-          if (claudeModelRejected(event)) {
+          if (claudeModelRejected(event, model.model)) {
             modelRejected = true
             return stop("error")
           }
@@ -594,7 +641,7 @@ export class AgentRunnerImpl implements AgentRunner {
           const event = parseCodexLine(line)
           if (!event || event.kind !== "error") return
           if (codexUsageLimit(event.message)) return stop("out_of_usage")
-          if (codexModelRejected(event.message)) {
+          if (codexModelRejected(event.message, model.model)) {
             modelRejected = true
             return stop("error")
           }

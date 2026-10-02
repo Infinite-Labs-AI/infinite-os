@@ -3,8 +3,9 @@
 // Like the real CLI, it starts the MCP server from the `-c mcp_servers.infinite_tag.*` flags and hands it
 // ONLY the env vars named in `env_vars`, taken from its OWN env: a Codex child without this run's two MCP
 // vars cannot reach the claim channel, fails the required server and reports itself toolless.
-// Scenario keys: version, loginStatus, loginExit, turns[]: { rejectModel, steps[], final (the -o JSON),
-// exit, threadId }.
+// Scenario keys: version, loginStatus, loginExit, turns[]: { rejectModel, rejectModelAfterMcp (the real
+// CLI starts MCP servers before the first model call), mcp: "skip" (the required server never comes up),
+// steps[], final (the -o JSON), exit, threadId }.
 import { readdirSync, writeFileSync } from "node:fs"
 
 import { emit, envSnapshot, loadScenario, McpClient, priorRuns, readStdin, record, runSteps } from "./fake-agent-lib.mjs"
@@ -64,7 +65,13 @@ if (role === "worker" && command) {
   const env = { PATH: process.env.PATH ?? "" }
   for (const name of forwarded) if (process.env[name] !== undefined) env[name] = process.env[name]
   mcp = new McpClient(command, args, env)
-  const ok = await mcp.connect()
+  const ok = turn.mcp === "skip" ? false : await mcp.connect()
+  if (ok && turn.rejectModelAfterMcp && argv.includes("-m")) {
+    emit({ type: "error", message: `The '${flag("-m")}' model is not supported when using Codex with a ChatGPT account.` })
+    emit({ type: "turn.failed", error: { message: "model is not supported" } })
+    mcp.close()
+    process.exit(1)
+  }
   if (!ok) {
     record({ kind: "toolless", agent: "codex" })
     emit({ type: "error", message: "MCP client for `infinite_tag` failed to start: required server unavailable" })

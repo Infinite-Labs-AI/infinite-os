@@ -43,6 +43,13 @@ export interface ClaudeReviewerArgvInput {
   model: ModelChoice
 }
 
+/**
+ * Secrets that live INSIDE the repo beyond `.env*` (review O3 F12): `.git/config` (a credentialed remote,
+ * an `http.extraheader` bearer from actions/checkout) and a repo `.npmrc` / `.netrc` (`_authToken`). No job
+ * needs to read any of them; both roles get these Read denies.
+ */
+export const REPO_SECRET_DENIES = ["Read(./.git/**)", "Read(**/.npmrc)", "Read(**/.netrc)"] as const
+
 /** `Read(//<abs>/**) Edit(//<abs>/**) Write(//<abs>/**)` (a file gets no `/**`). */
 export function sensitiveDenies(paths: readonly SensitivePath[], tools: readonly ("Read" | "Edit" | "Write")[]): string[] {
   const out: string[] = []
@@ -67,6 +74,9 @@ export function buildClaudeWorkerArgv(input: ClaudeWorkerArgvInput): string[] {
     "Read(**/.env*)",
     "Edit(**/.env*)",
     "Write(**/.env*)",
+    ...REPO_SECRET_DENIES,
+    "Edit(**/.npmrc)",
+    "Write(**/.npmrc)",
     ...sensitiveDenies(input.sensitive, ["Read", "Edit", "Write"]),
     "Edit(./.infinite/**)",
     "Write(./.infinite/**)",
@@ -128,6 +138,7 @@ export function buildClaudeReviewerArgv(input: ClaudeReviewerArgvInput): string[
     "--disallowedTools",
     "Read(./.env*)",
     "Read(**/.env*)",
+    ...REPO_SECRET_DENIES,
     ...sensitiveDenies(input.sensitive, ["Read"]),
     "--permission-mode",
     "dontAsk",
@@ -250,13 +261,27 @@ export function parseClaudeLine(line: string): ClaudeStreamEvent | null {
 }
 
 /** The plan or CLI refused our pinned model (§3f.7: retry ONCE with the user's default model). */
-export function claudeModelRejected(event: ClaudeStreamEvent): boolean {
+/**
+ * The pinned model was refused (§3f.7 fallback). Only when a model was pinned (`modelId`), and only on the
+ * CLI's own model-not-found shapes, never on any error that happens to say "model … invalid" (review O3
+ * F20): the `model_not_found` assistant error, or a result error that names THE pinned model with a
+ * not-found / no-access phrase ("There's an issue with the selected model (<id>). It may not exist or you
+ * may not have access to it.").
+ */
+export function claudeModelRejected(event: ClaudeStreamEvent, modelId: string | null): boolean {
+  if (modelId === null) return false
   if (event.kind === "assistant_error") return event.error === "model_not_found"
-  if (event.kind === "result" && event.isError) return MODEL_REJECTED.test(event.text)
+  if (event.kind === "result" && event.isError) return modelRejectedText(event.text, modelId)
   return false
 }
 
-export const MODEL_REJECTED = /\bmodel\b.*\b(not found|not available|not supported|unsupported|does not exist|invalid|not allowed|no access)\b|\b(unknown|invalid|unsupported) model\b/i
+const MODEL_REJECTED_PHRASE = /\b(not found|not available|not supported|is not supported|does not exist|may not exist|do not have access|don't have access|not have access|no access)\b/i
+
+/** True when `text` names the pinned `modelId` together with a not-found / no-access phrase, or the `model_not_found` code. */
+export function modelRejectedText(text: string, modelId: string): boolean {
+  if (/\bmodel_not_found\b/.test(text)) return true
+  return text.toLowerCase().includes(modelId.toLowerCase()) && MODEL_REJECTED_PHRASE.test(text)
+}
 
 /** Paths whose read-denial is an incident (the agent reached for a secret), never just a count. */
 export const INCIDENT_PATH = /(^|\/)\.env[^/]*$|\.growth-os|Application Support\/Infinite|(^|\/)\.codex(\/|$)|(^|\/)\.ssh(\/|$)|(^|\/)\.aws(\/|$)|\.npmrc$|\.netrc$|\.credentials\.json$|Library\/Caches\/infinite-tag/
