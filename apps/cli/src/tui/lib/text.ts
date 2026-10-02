@@ -252,7 +252,7 @@ export const toolTrailLabel = (name: string) =>
 // forges a detail separator or a MEASURED duration this transport never recorded
 // — and `parseToolTrailResultLine`/`splitToolDuration` then parse the forgery back
 // out as real. Defuse both shapes; they carry no meaning inside a name anyway.
-const defuseTrailStructure = (value: string) =>
+export const defuseTrailStructure = (value: string) =>
   value.replace(/ :: /g, " ").replace(/\((\d+(?:\.\d+)?)s\)/g, "$1s");
 
 export const formatToolCall = (name: string, context = "") => {
@@ -267,14 +267,16 @@ export const buildToolTrailLine = (
   context: string,
   error?: boolean,
   note?: string,
-  duration?: number
+  duration?: number,
+  /** The call waits for the person's OK: its mark is `▣` (pending), never `✓`. */
+  pending?: boolean
 ) => {
   // `name` and `note` are provider-controlled (a tool's name, a tool's result
   // summary) and this line goes straight to a TTY. Scrub before any of it renders.
   const detail = compactPreview(neutralizeControlSequences(note ?? ""), 72);
   const took = duration !== undefined ? ` (${duration.toFixed(1)}s)` : "";
 
-  return `${formatToolCall(neutralizeControlSequences(name), neutralizeControlSequences(context))}${took}${detail ? ` :: ${detail}` : ""} ${error ? "✗" : "✓"}`;
+  return `${formatToolCall(neutralizeControlSequences(name), neutralizeControlSequences(context))}${took}${detail ? ` :: ${detail}` : ""} ${error ? "✗" : pending ? "▣" : "✓"}`;
 };
 
 /**
@@ -284,14 +286,14 @@ export const buildToolTrailLine = (
 export const buildStoppedToolTrailLine = (name: string, context: string) =>
   `■ ${formatToolCall(neutralizeControlSequences(name), neutralizeControlSequences(context))} · stopped`;
 
-export const isToolTrailResultLine = (line: string) => line.endsWith(" ✓") || line.endsWith(" ✗");
+export const isToolTrailResultLine = (line: string) => line.endsWith(" ✓") || line.endsWith(" ✗") || line.endsWith(" ▣");
 
 export const parseToolTrailResultLine = (line: string) => {
   if (!isToolTrailResultLine(line)) {
     return null;
   }
 
-  const mark = line.endsWith(" ✗") ? "✗" : "✓";
+  const mark = line.endsWith(" ✗") ? "✗" : line.endsWith(" ▣") ? "▣" : "✓";
   const body = line.slice(0, -2);
   const [call, detail] = body.split(" :: ", 2);
 
@@ -319,6 +321,7 @@ export const isTransientTrailLine = (line: string) => line.startsWith("drafting 
 export const sameToolTrailGroup = (label: string, entry: string) =>
   entry === `${label} ✓` ||
   entry === `${label} ✗` ||
+  entry === `${label} ▣` ||
   entry.startsWith(`${label}(`) ||
   entry.startsWith(`${label} ::`) ||
   entry.startsWith(`${label}:`);

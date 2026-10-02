@@ -23,7 +23,7 @@ import { displayWidth, truncateCells } from "../lib/display-width.js";
 import { countPendingTodos, isTodoDone } from "../lib/live-progress.js";
 import { buildSubagentTree, formatSubagentSummary, subagentSparkline, treeTotals, widthByDepth } from "../lib/subagent-tree.js";
 import { compactPreview, thinkingPreview } from "../lib/text.js";
-import { bareToolName, friendlyStepLabel, stepsFromTrail, stepStripLines } from "../views/steps.js";
+import { bareToolName, friendlyStepLabel, stepProgressWords, stepsFromTrail, stepStripLines } from "../views/steps.js";
 
 export interface InfiniteTranscriptInput {
   /**
@@ -234,8 +234,9 @@ function turnSteps(messages: readonly Msg[], state: TurnState | undefined, ctx: 
       if (step.endedAt !== null) {
         return step;
       }
-      const now = state.tools.find((item) => item.id === step.id)?.latestPreview?.trim();
-      return { ...step, result: now ? compactPreview(now, 72) : step.result || viewProgress(step.name, state.views) || "running" };
+      // Its latest progress when that is words (`1 of 3`); never its arguments or JSON.
+      const now = stepProgressWords(state.tools.find((item) => item.id === step.id)?.latestPreview);
+      return { ...step, result: now || step.result || viewProgress(step.name, state.views) || "running" };
     });
   }
   const pending: Msg[] = state?.streamPendingTools.length ? [{ kind: "trail", role: "system", text: "", tools: state.streamPendingTools }] : [];
@@ -244,11 +245,11 @@ function turnSteps(messages: readonly Msg[], state: TurnState | undefined, ctx: 
   const running: TurnStep[] = (state?.tools ?? []).map((tool) => ({
     id: tool.id,
     name: tool.name,
-    label: friendlyStepLabel(tool.name),
+    label: tool.label ?? friendlyStepLabel(tool.name),
     status: "run",
     startedAt: end,
     endedAt: end + (tool.startedAt === undefined ? 0 : Math.max(0, ctx.nowMs - tool.startedAt)),
-    result: tool.latestPreview?.trim() ? compactPreview(tool.latestPreview, 72) : "running"
+    result: stepProgressWords(tool.latestPreview) || "running"
   }));
   return [...done, ...running];
 }

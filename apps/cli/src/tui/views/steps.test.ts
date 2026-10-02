@@ -9,7 +9,10 @@ import type { Msg } from "../types.js";
 import {
   bareToolName,
   friendlyStepLabel,
+  plainToolWords,
   refineStepStatus,
+  stepProgressWords,
+  toolOutcome,
   stepGanttWidth,
   stepLabelWidth,
   stepsFromTrail,
@@ -177,5 +180,105 @@ describe("step labels and statuses", () => {
     expect(refineStepStatus(done, [view("get_report", "ready")])).toBe("ok");
     expect(refineStepStatus(done, [view("get_report", "partial"), view("get_report", "ready")])).toBe("ok");
     expect(refineStepStatus(step({ status: "fail", name: "get_report" }), [view("get_report", "partial")])).toBe("fail");
+  });
+});
+
+describe("generic words for a call the app sent no words for", () => {
+  it.each([
+    ["mcp__sample_app__list_sample_rows", "list sample rows"],
+    ["get_sample_report", "get sample report"],
+    ["readFile", "read file"],
+    ["", "tool"]
+  ])("plain words: namespace off, split, lower case: %s → %s", (name, words) => {
+    expect(plainToolWords(name)).toBe(words);
+  });
+
+  it.each([
+    ['List Sample Rows("{\\"level\\":\\"row\\"}")', "List Sample Rows"],
+    ['run sample query {"level":"row"}', "run sample query"],
+    ["list_sample_rows({\"limit\":5})", "listing sample rows"],
+    ["fetch rows [1,2,3]", "fetch rows"]
+  ])("a label never carries call arguments or JSON: %s → %s", (name, label) => {
+    expect(friendlyStepLabel(name)).toBe(label);
+  });
+
+  it("a provider-chosen name never forges a measured duration or the trail's separator", () => {
+    const label = friendlyStepLabel("evil (9.9s) :: pwned");
+    expect(label).not.toContain("(9.9s)");
+    expect(label).not.toContain(" :: ");
+    // Brackets that hold words stay (r4 `making 3 creatives (Codex)`).
+    expect(friendlyStepLabel("making 3 creatives (Codex)")).toBe("making 3 creatives (Codex)");
+  });
+
+  it("a name that is only arguments falls back to a neutral word", () => {
+    expect(friendlyStepLabel('{"level":"row"}')).toBe("tool");
+  });
+});
+
+describe("a call's outcome from its complete frame", () => {
+  it("ok, failed and waiting", () => {
+    expect(toolOutcome({ status: "ok", summary: "3 rows" })).toEqual({ status: "ok", result: "3 rows" });
+    expect(toolOutcome({ status: "error", summary: "refused" })).toEqual({ status: "fail", result: "refused" });
+    expect(toolOutcome({ error: "not allowed" })).toEqual({ status: "fail", result: "not allowed" });
+    expect(toolOutcome({ status: "requires_confirmation" })).toEqual({ status: "wait", result: "" });
+    expect(toolOutcome({ status: "needs_clarification" })).toEqual({ status: "wait", result: "" });
+  });
+
+  it("the app's words win: its result, or none; a failure with no worded result keeps its reason", () => {
+    expect(toolOutcome({ status: "ok", summary: "raw summary", words: { label: "checking the catalog", result: "3 rows" } }))
+      .toEqual({ status: "ok", result: "3 rows" });
+    expect(toolOutcome({ status: "ok", summary: "raw summary", words: { label: "checking the catalog" } }))
+      .toEqual({ status: "ok", result: "" });
+    expect(toolOutcome({ status: "error", summary: "refused", words: { label: "checking the catalog" } }))
+      .toEqual({ status: "fail", result: "refused" });
+  });
+
+  it("never returns JSON or control sequences as a result", () => {
+    expect(toolOutcome({ status: "ok", summary: '{"rows":3}' }).result).toBe("");
+    expect(toolOutcome({ status: "error", error: '[{"code":"x"}]' }).result).toBe("");
+    expect(toolOutcome({ status: "ok", summary: "\u001b[31m3 rows\u001b[0m" }).result).toBe("3 rows");
+  });
+
+  it("a running call's progress is shown only when it is words", () => {
+    expect(stepProgressWords("1 of 3")).toBe("1 of 3");
+    expect(stepProgressWords('{"level":"row"}')).toBe("");
+    expect(stepProgressWords("list_sample_rows")).toBe("");
+    expect(stepProgressWords(undefined)).toBe("");
+  });
+});
+
+describe("a step that waits (r4 ▣)", () => {
+  const view = (tool: string, state: AnswerViewV1["state"]) => ({ tool, state }) as AnswerViewV1;
+  const waiting = step({ status: "wait", name: "mcp__app__propose_change", result: "" });
+
+  it("says it is waiting while it has no result of its own", () => {
+    expect(strip([waiting])[1]!.map((segment) => segment.text).join("")).toMatch(/▣ waiting for your OK$/u);
+    expect(strip([step({ status: "wait", result: "pause 1 item" })])[1]!.map((segment) => segment.text).join("")).toMatch(/▣ pause 1 item$/u);
+  });
+
+  it("follows the card it waited on: working once the yes is sent, then done, dismissed or failed", () => {
+    expect(refineStepStatus(waiting, [])).toBe("wait");
+    expect(refineStepStatus(waiting, [view("propose_change", "needs_yes")])).toBe("wait");
+    expect(refineStepStatus(waiting, [view("propose_change", "applying")])).toBe("run");
+    expect(refineStepStatus(waiting, [view("propose_change", "done")])).toBe("ok");
+    expect(refineStepStatus(waiting, [view("propose_change", "cancelled")])).toBe("off");
+    expect(refineStepStatus(waiting, [view("propose_change", "expired")])).toBe("off");
+    expect(refineStepStatus(waiting, [view("propose_change", "failed")])).toBe("fail");
+    expect(refineStepStatus(waiting, [view("propose_change", "outcome_unknown")])).toBe("unk");
+    // Two cards of one tool: no telling which one this call made.
+    expect(refineStepStatus(waiting, [view("propose_change", "done"), view("propose_change", "needs_yes")])).toBe("wait");
+  });
+
+  it("a waiting row that moved on no longer says it is waiting", () => {
+    const rows = stepStripLines([waiting], { width: 100, color: false, theme, nowMs: 1000, views: [view("propose_change", "done")] });
+    expect(rows[1]).toMatch(/✓$/u);
+    expect(rows[1]).not.toContain("waiting");
+  });
+
+  it("reads a pending trail line as waiting", () => {
+    const messages: Msg[] = [{ kind: "trail", role: "system", text: "", tools: ["Propose Change (0.4s) :: pause 1 item ▣"] }];
+    expect(stepsFromTrail(messages).map(({ label, status, result }) => ({ label, status, result }))).toEqual([
+      { label: "proposing change", status: "wait", result: "pause 1 item" }
+    ]);
   });
 });

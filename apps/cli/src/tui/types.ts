@@ -1,6 +1,8 @@
 export interface ActiveTool {
   context?: string;
   id: string;
+  /** What the call's row says: the app's words when its frame carried them, else generic words from its name. */
+  label?: string;
   latestPreview?: string;
   name: string;
   progressCount?: number;

@@ -5,13 +5,19 @@
 //   ⠋ running breakdown query  9.8s          a call or a step still running
 //   running breakdown query ✓ 3 rows          a call that finished (r4: no duration)
 //   pausing entity ✗ not allowed              a call that failed
+//   proposing pause entity ▣ waiting for your OK   a call that waits for the person's OK
+//
+// A call's words are the app's own when its frame carries them
+// (`step.words.v1`), else generic words from the tool's name; a context or a
+// preview is shown only when it reads as words, never as JSON arguments.
 //   · recall  Recalled prior session context  1.2s
 //   ◇ delegate  Review the renderer  2.1s     a subagent
 import type { ChatProgressEvent } from "@infinite-os/llm-controller";
+import { isDisplayWords, stepWordsOf } from "../desktop/step-words.js";
 import { TOOL_VERBS } from "../tui/content/verbs.js";
 import { compactPreview } from "../tui/lib/text.js";
 import { viewText } from "../tui/views/primitives.js";
-import { bareToolName, friendlyStepLabel } from "../tui/views/steps.js";
+import { friendlyStepLabel, plainToolWords, toolOutcome, WAITING_WORDS } from "../tui/views/steps.js";
 
 type LegacyRenderableProgress = {
   stage: "recall" | "resolve" | "tool";
@@ -22,6 +28,8 @@ type LegacyRenderableProgress = {
 const RUNNING = "⠋";
 /** A step that is information, not a call (thinking, recall, context). */
 const NOTE = "·";
+/** r4's needs-you glyph: a call that waits for the person's OK. */
+const PENDING = "▣";
 
 export function formatInteractiveProgress(event: ChatProgressEvent, elapsedMs: number): string {
   if ("type" in event) {
@@ -33,19 +41,22 @@ export function formatInteractiveProgress(event: ChatProgressEvent, elapsedMs: n
 function formatInfiniteProgress(event: Extract<ChatProgressEvent, { type: string }>, elapsedMs: number): string {
   if (event.type === "tool.generating") {
     const verb = TOOL_VERBS[event.name] ?? "drafting";
-    return `  ${RUNNING} ${verb} ${toolWords(event.name)}…  ${formatElapsedSeconds(elapsedMs)}`;
+    return `  ${RUNNING} ${verb} ${plainToolWords(event.name)}…  ${formatElapsedSeconds(elapsedMs)}`;
   }
   if (event.type === "tool.start") {
-    return formatLegacyProgress({ stage: "tool", message: event.context || event.message }, elapsedMs);
+    return runningToolLine(event, event.context, elapsedMs);
   }
   if (event.type === "tool.progress") {
-    return formatLegacyProgress({ stage: "tool", message: event.preview || event.message }, elapsedMs);
+    return runningToolLine(event, event.preview, elapsedMs);
   }
   if (event.type === "tool.complete") {
-    // A transport may report failure as status:"error" with no error string.
-    const failed = Boolean(event.error || event.status === "error");
-    const result = compactPreview(viewText(event.error || event.summary || ""), 72);
-    return `  ${friendlyStepLabel(event.name)} ${failed ? "✗" : "✓"}${result ? ` ${result}` : ""}`;
+    // A transport may report failure as status:"error" with no error string;
+    // a call that waits for the person's OK is pending (▣), never ✓.
+    const words = stepWordsOf(event);
+    const outcome = toolOutcome({ status: event.status, error: event.error, summary: event.summary, words });
+    const mark = outcome.status === "fail" ? "✗" : outcome.status === "wait" ? PENDING : "✓";
+    const result = outcome.result || (outcome.status === "wait" ? WAITING_WORDS : "");
+    return `  ${words?.label ?? friendlyStepLabel(event.name)} ${mark}${result ? ` ${result}` : ""}`;
   }
   if (event.type === "thinking.delta" || event.type === "reasoning.delta") {
     const detail = viewText(event.text).replace(/\s+/g, " ").trim();
@@ -69,6 +80,28 @@ function formatInfiniteProgress(event: Extract<ChatProgressEvent, { type: string
     stage: event.stage === "recall" ? "recall" : "resolve",
     message: event.text || event.message
   }, elapsedMs);
+}
+
+/**
+ * A call still running: the app's words for it; else its context or preview
+ * when that reads as words (as the local engine sends them); else its own
+ * message when that is words; else generic words from the tool's name. Never
+ * JSON arguments and never the raw tool id.
+ */
+function runningToolLine(
+  event: { name: string; message: string },
+  detail: string | undefined,
+  elapsedMs: number
+): string {
+  const words = stepWordsOf(event);
+  if (words) {
+    return `  ${RUNNING} ${words.label}  ${formatElapsedSeconds(elapsedMs)}`;
+  }
+  const said = [detail, event.message].map((text) => viewText(text)).find((text) => text && isDisplayWords(text));
+  if (said) {
+    return formatLegacyProgress({ stage: "tool", message: said }, elapsedMs);
+  }
+  return `  ${RUNNING} ${friendlyStepLabel(event.name)}  ${formatElapsedSeconds(elapsedMs)}`;
 }
 
 function formatLegacyProgress(event: LegacyRenderableProgress, elapsedMs: number): string {
@@ -99,16 +132,6 @@ function formatLegacyProgress(event: LegacyRenderableProgress, elapsedMs: number
     return `  ${NOTE} recall  ${detail}  ${elapsed}`;
   }
   return `  ${RUNNING} ${detail}  ${elapsed}`;
-}
-
-/** A tool's name as plain words (`mcp__app__run_breakdown_query` → `run breakdown query`). */
-function toolWords(name: string): string {
-  const words = bareToolName(viewText(name))
-    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
-    .split(/[\s_.:/-]+/u)
-    .filter(Boolean)
-    .map((word) => word.toLowerCase());
-  return words.join(" ") || "tool";
 }
 
 export function formatElapsedSeconds(elapsedMs: number): string {

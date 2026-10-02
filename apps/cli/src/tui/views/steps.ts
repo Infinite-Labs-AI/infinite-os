@@ -10,14 +10,19 @@
 // - The bar is `dim` once done, `red` when it failed, `cyan` otherwise; the
 //   glyph takes its tone (✓ green, ▣ amber, ⠋ cyan, ✗ red, ? amber, · dim, ⟳ cyan,
 //   ◐ amber, ⧗ amber); the result is `dim`.
-// - The label is a friendly name for the call, never a raw tool id or its JSON.
+// - The label is the app's own words for the call when its frames carry them
+//   (`step.words.v1`), else generic words made from the tool's name. Never a
+//   raw tool id, and never its JSON arguments.
+// - A call that waits for the person's OK is `▣` (amber), never `✓`; with no
+//   result of its own it says `waiting for your OK`.
 // - A failed (✗) or unknown (?) call whose reason was cut to the result column
 //   prints the whole reason on dim rows under it, indented 4.
 import type { AnswerViewState, AnswerViewV1 } from "@infinite-os/types";
 
+import { isDisplayWords, type StepWords } from "../../desktop/step-words.js";
 import type { StepStatus, TurnStep } from "../app/turn-store.js";
 import { displayWidth, padEndCells } from "../lib/display-width.js";
-import { parseToolTrailResultLine, splitToolDuration } from "../lib/text.js";
+import { compactPreview, defuseTrailStructure, parseToolTrailResultLine, splitToolDuration } from "../lib/text.js";
 import { ansi, type Theme, type ThemeStyle } from "../theme.js";
 import type { Msg } from "../types.js";
 import { viewText, wrapText } from "./primitives.js";
@@ -40,6 +45,9 @@ const GLYPHS: Readonly<Record<StepStatus, { glyph: string; tone: ThemeStyle }>> 
   old: { glyph: "⧗", tone: "amber" },
   stopped: { glyph: "■", tone: "dim" }
 };
+
+/** What a waiting step says when the call gave no result of its own (r4's own step label for it). */
+export const WAITING_WORDS = "waiting for your OK";
 
 /** The label column: min(28, W − 34) under 80 cols, else min(28, 26% of W). Never under 4. */
 export function stepLabelWidth(width: number): number {
@@ -104,24 +112,107 @@ function isWords(text: string): boolean {
 }
 
 /**
- * A friendly step label. A label that is already words stays exactly as
- * written (`checking Google Ads`, `waiting for your OK`). A tool id is
- * humanised: the MCP prefix off, words split (snake, kebab, dots, camelCase),
- * lower case except the names that keep a capital (Google Ads, Meta, GA4,
- * PostHog, Stripe, Shopify, OK, X, I), and a leading verb as its -ing form:
- * `mcp__infinite_app__list_meta_entities` → `listing Meta entities`.
+ * A name without anything that follows it as call arguments or JSON
+ * (`List Rows("…")`, `run query {"a":1}`, `rows [1,2]`): a label never prints
+ * them. Brackets that hold words stay (`making 3 creatives (Codex)`).
  */
-export function friendlyStepLabel(name: string): string {
-  const text = viewText(name).trim();
-  if (isWords(text)) return text;
-  const words = bareToolName(text)
+function withoutArguments(text: string): string {
+  return text.replace(/\s*(?:\(\s*)?["{[].*$/su, "").trim();
+}
+
+/** A tool id's words: the MCP prefix off, split (snake, kebab, dots, camelCase), lower case. */
+function toolIdWords(text: string): string[] {
+  return bareToolName(text)
     .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
     .split(/[\s_.:/-]+/u)
     .filter(Boolean)
     .map((word) => word.toLowerCase());
+}
+
+/**
+ * A tool's name as plain words, nothing added: the MCP prefix off, split,
+ * lower case (`mcp__app__list_sample_rows` → `list sample rows`). For a
+ * sentence that brings its own verb (`drafting list sample rows…`).
+ */
+export function plainToolWords(name: string): string {
+  return toolIdWords(withoutArguments(viewText(name))).join(" ") || "tool";
+}
+
+/**
+ * A friendly step label, for a call the app sent no words for. A label that
+ * is already words stays exactly as written (`checking Google Ads`, `waiting
+ * for your OK`). A tool id is humanised: the MCP prefix off, words split
+ * (snake, kebab, dots, camelCase), lower case except the names that keep a
+ * capital (Google Ads, Meta, GA4, PostHog, Stripe, Shopify, OK, X, I), and a
+ * leading verb as its -ing form:
+ * `mcp__infinite_app__list_meta_entities` → `listing Meta entities`.
+ * Call arguments and JSON after the name are never part of the label.
+ */
+export function friendlyStepLabel(name: string): string {
+  // A name is provider-chosen: it never forges a measured duration (`(9.9s)`) or the trail's ` :: ` separator.
+  const text = defuseTrailStructure(withoutArguments(viewText(name)));
+  if (!text) return "tool";
+  if (isWords(text)) return text;
+  const words = toolIdWords(text);
   if (!words.length) return "tool";
   if (VERBS.has(words[0]!)) words[0] = gerund(words[0]!);
   return properNouns(words).join(" ");
+}
+
+// ── a call's outcome, from its `tool.complete` frame ──
+
+/** A tool call's status, as the Steps strip draws it, from what the transport reported. */
+export function stepStatusOf(status: string | undefined): StepStatus {
+  switch (status) {
+    case "error":
+    case "too_expensive":
+      return "fail";
+    // Waiting for the person's OK (or their answer): pending, not finished.
+    case "requires_confirmation":
+    case "needs_clarification":
+      return "wait";
+    case "unsupported":
+    case "not_implemented":
+      return "off";
+    case "low_coverage":
+      return "part";
+    case "queued":
+      return "bg";
+    default:
+      return "ok";
+  }
+}
+
+/** Text the transport sent as a result, when it reads as words: scrubbed, one line, never JSON. */
+function resultWords(value: string | undefined): string {
+  const text = viewText(value);
+  return text && !/^[{[]/u.test(text) ? compactPreview(text, 72) : "";
+}
+
+/**
+ * A finished call's status and one-line result. With the app's words
+ * (`step.words.v1`) the result is the app's, or nothing when it sent none:
+ * the transport's raw summary never stands in for it. A failure with no
+ * worded result keeps the transport's reason, so why it failed stays readable.
+ */
+export function toolOutcome(input: {
+  status?: string;
+  error?: string;
+  summary?: string;
+  words?: StepWords | null;
+}): { status: StepStatus; result: string } {
+  const status = input.error ? "fail" : stepStatusOf(input.status);
+  const reason = resultWords(input.error || (status === "fail" ? input.summary : undefined));
+  if (input.words) {
+    return { status, result: input.words.result ?? (status === "fail" ? reason : "") };
+  }
+  return { status, result: reason || resultWords(input.summary) };
+}
+
+/** A running call's latest progress, when it reads as words (`1 of 3`); "" for JSON, an id or nothing. */
+export function stepProgressWords(preview: string | undefined): string {
+  const text = viewText(preview);
+  return text && isDisplayWords(text) ? compactPreview(text, 72) : "";
 }
 
 // ── steps from the trail (when the turn store has none: old transports, the one-shot path) ──
@@ -150,7 +241,8 @@ export function stepsFromTrail(messages: readonly Msg[]): TurnStep[] {
       clock += Number.isFinite(seconds) ? seconds * 1000 : 0;
       const friendly = trailLabel(label);
       return [{
-        id: `trail_${index}`, name: friendly, label: friendly, status: parsed.mark === "✗" ? "fail" : "ok",
+        id: `trail_${index}`, name: friendly, label: friendly,
+        status: parsed.mark === "✗" ? "fail" : parsed.mark === "▣" ? "wait" : "ok",
         startedAt, endedAt: clock, result: viewText(parsed.detail)
       }];
     });
@@ -168,7 +260,9 @@ export function stepsFromTrail(messages: readonly Msg[]): TurnStep[] {
 function trailLabel(call: string): string {
   const name = viewText(call).replace(/\("(?:[^"\\]|\\.)*"\)$/u, "").trim();
   if (/\s/u.test(name) && name.split(/\s+/u).some((word) => /^[a-z]/u.test(word))) {
-    return `${name.charAt(0).toLowerCase()}${name.slice(1)}`;
+    // The trail capitalised the first letter only: lower it back, unless the word is a name (`Meta`, `GA4`).
+    const [first = "", ...rest] = name.split(" ");
+    return [PROPER_NOUNS[first.toLowerCase()] ?? `${first.charAt(0).toLowerCase()}${first.slice(1)}`, ...rest].join(" ");
   }
   let words = name.split(/\s+/u).filter(Boolean);
   if (words[0] === "Mcp") {
@@ -206,14 +300,19 @@ export function stepStatusForView(view: Pick<AnswerViewV1, "state">): StepStatus
 /**
  * A finished call's status, refined by the one view it drew (matched by bare
  * tool name): a call whose view is partial is ◐, out of date ⧗, and so on. A
- * call with no view, or with two views of the same tool, keeps its own status.
+ * call that waits for the person's OK follows its card the same way: working
+ * (⠋) once the yes is sent, then done, dismissed (·) or failed. A call with
+ * no view, or with two views of the same tool, keeps its own status.
  */
 export function refineStepStatus(step: TurnStep, views: readonly AnswerViewV1[]): StepStatus {
-  if (step.status !== "ok") return step.status;
+  if (step.status !== "ok" && step.status !== "wait") return step.status;
   const bare = bareToolName(step.name);
   // A step read back from the tool trail has lost its tool id: its friendly label stands for it.
   const matches = views.filter((view) => bareToolName(view.tool) === bare || friendlyStepLabel(view.tool) === step.label);
-  return matches.length === 1 ? STATE_STATUS[matches[0]!.state] ?? "ok" : "ok";
+  if (matches.length !== 1) return step.status;
+  const state = matches[0]!.state;
+  if (step.status === "wait" && (state === "applying" || state === "working")) return "run";
+  return STATE_STATUS[state] ?? "ok";
 }
 
 // ── drawing ──
@@ -264,7 +363,8 @@ export function stepRowLines(steps: readonly TurnStep[], options: StepStripOptio
     const { glyph, tone } = GLYPHS[status];
     const mark = status === "run" ? SPINNER[Math.floor(Math.max(0, now - step.startedAt) / SPINNER_MS) % SPINNER.length]! : glyph;
     const label = padEndCells(cut(viewText(step.label), labelWidth), labelWidth);
-    const result = viewText(step.result);
+    // A step still waiting says so; once its card moved on, the words go with it.
+    const result = viewText(step.result) || (status === "wait" ? WAITING_WORDS : "");
     const segments: (readonly [string, ThemeStyle])[] = [
       [`  ${label} ${" ".repeat(a)}`, "text"],
       [bar, barTone],

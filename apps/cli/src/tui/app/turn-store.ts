@@ -158,6 +158,8 @@ export const recordStepEnd = (end: {
   id: string;
   name: string;
   label: string;
+  /** The label came with this frame (the app's words): the call's row takes it. Otherwise a known row keeps its own. */
+  relabel?: boolean;
   status: StepStatus;
   result: string;
   endedAt: number;
@@ -169,7 +171,9 @@ export const recordStepEnd = (end: {
     while (index >= 0 && state.steps[index]!.id !== end.id) index -= 1;
     if (index >= 0) {
       const steps = state.steps.slice();
-      steps[index] = { ...steps[index]!, status: end.status, result: end.result, endedAt: end.endedAt };
+      steps[index] = {
+        ...steps[index]!, ...(end.relabel ? { label: end.label } : {}), status: end.status, result: end.result, endedAt: end.endedAt
+      };
       return { ...state, steps };
     }
     if (state.steps.length >= MAX_TURN_STEPS) {
