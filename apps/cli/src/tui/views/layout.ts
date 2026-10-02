@@ -224,12 +224,17 @@ export function renderLiveTurn(input: LiveTurnInput): LiveTurnRender {
  */
 export function renderCommittedTurn(input: Omit<LiveTurnInput, "rows" | "livePageNext">): string[] {
   const width = Math.max(1, Math.floor(input.width));
-  const { lines } = drawLiveTurn(input, width, undefined, false);
+  // No row budget: a document is one page as tall as its body (no page line,
+  // which no key could act on in scrollback), whatever page the live turn showed.
+  const { lines } = drawLiveTurn(input, width, ALL_ROWS, false);
   if (!lines.length) {
     return [];
   }
   return [paint("─".repeat(width), "line", input), ...lines];
 }
+
+/** A row budget no view reaches: a committed turn is drawn whole. */
+const ALL_ROWS = Number.MAX_SAFE_INTEGER;
 
 /** One draw of the turn, its views given at most `rows` rows; `split` allows the side-by-side layout. */
 function drawLiveTurn(input: LiveTurnInput, width: number, rows: number | undefined, split: boolean) {

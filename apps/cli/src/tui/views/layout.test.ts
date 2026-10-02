@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 
+import { decodeAnswerView } from "../../desktop/answer-view-decode.js";
 import { r4Segments, seg } from "../../formatting/r4-segments.test-util.js";
 import { INFINITE_R4_THEME } from "../theme.js";
 import type { Msg } from "../types.js";
+import { viewFocusAfterTurnDone } from "./focus.js";
 import { detailsPaneWidth, layoutTurn, renderCommittedTurn, renderLiveTurn } from "./layout.js";
 import type { ViewRender } from "./types.js";
 
@@ -123,5 +125,26 @@ describe("an answer table never promises a widen that cannot happen", () => {
     const lines = renderCommittedTurn({ messages: fits, views: [], focus: null, width: 100, color: false, theme });
     expect(lines.some((line) => /widen by/u.test(line))).toBe(false);
     expect(lines.some((line) => /hidden/u.test(line))).toBe(true);
+  });
+});
+
+describe("a committed document carries every page", () => {
+  const body = Array.from({ length: 60 }, (_, i) => `Line ${i + 1} of the body.`).join("\n");
+  const doc = decodeAnswerView({
+    v: 1, kind: "document", tool: "read_draft", title: "Win-back sequence", state: "ready", asOf: null,
+    scope: { workspaceName: "Demo", crossWorkspace: false }, caveats: [],
+    body: { sections: [{ text: body, format: "plain" }] }
+  });
+
+  it("prints all of the body, with no page line no key can act on, even when the live turn was on page 2", () => {
+    if (!doc) throw new Error("document fixture does not decode");
+    const focus = { ...viewFocusAfterTurnDone([doc]), page: 1 };
+    const live = renderLiveTurn({ messages, views: [doc], focus: null, width: 120, color: false, theme, rows: 30 }).lines;
+    expect(live.some((line) => /page 1 of \d+/u.test(line))).toBe(true);
+    const lines = renderCommittedTurn({ messages, views: [doc], focus, width: 120, color: false, theme });
+    for (let i = 1; i <= 60; i += 1) {
+      expect(lines.some((line) => line.includes(`Line ${i} of the body.`))).toBe(true);
+    }
+    expect(lines.some((line) => /page \d+ of \d+/u.test(line))).toBe(false);
   });
 });
