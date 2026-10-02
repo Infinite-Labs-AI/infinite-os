@@ -6,6 +6,8 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
+  afterEachLine,
+  createLocalSourcesTracker,
   desktopSessionOpening,
   helpInventory,
   homeInventoryCommands,
@@ -214,5 +216,39 @@ describe("the Desktop session's opening (D4)", () => {
       firstRun: false,
       text: "✓ Infinite Desktop is ready\n\n"
     });
+  });
+});
+
+describe("the local top bar's sources stay current (D1)", () => {
+  it("re-reads the sources on refresh, one read at a time, and keeps the latest", async () => {
+    let reads = 0;
+    let answer: { kind: "read"; connections: { label: string; degraded?: boolean }[] } = { kind: "read", connections: [] };
+    const tracker = createLocalSourcesTracker(async () => {
+      reads += 1;
+      return answer;
+    }, { kind: "unreachable" });
+    expect(tracker.current()).toEqual({ kind: "unreachable" });
+    answer = { kind: "read", connections: [{ label: "GA4" }] };
+    await Promise.all([tracker.refresh(), tracker.refresh()]);
+    expect(reads).toBe(1);
+    expect(tracker.current()).toEqual({ kind: "read", connections: [{ label: "GA4" }] });
+    answer = { kind: "read", connections: [{ label: "GA4", degraded: true }] };
+    await tracker.refresh();
+    expect(reads).toBe(2);
+    expect(tracker.current()).toEqual({ kind: "read", connections: [{ label: "GA4", degraded: true }] });
+  });
+
+  it("runs the refresh after every submitted line (a /connect, a /sync or a turn), even one that throws", async () => {
+    const order: string[] = [];
+    const submit = afterEachLine(async () => {
+      order.push("refresh");
+    }, async (line) => {
+      order.push(`line:${line}`);
+      if (line === "boom") throw new Error("boom");
+      return { messages: [] };
+    });
+    await expect(submit("/connect ga4", () => undefined, new AbortController().signal)).resolves.toEqual({ messages: [] });
+    await expect(submit("boom", () => undefined, new AbortController().signal)).rejects.toThrow("boom");
+    expect(order).toEqual(["line:/connect ga4", "refresh", "line:boom", "refresh"]);
   });
 });

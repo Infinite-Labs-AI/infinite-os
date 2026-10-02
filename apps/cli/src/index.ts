@@ -74,6 +74,7 @@ import {
   runInkInteractiveSession,
   type CompletionSuggestion,
   type HomeInventoryData,
+  type InkInteractiveSessionAppProps,
   type InkInteractiveSelectionPrompt
 } from "./tui/ink/interactive-session.js";
 import { runInfiniteWelcome } from "./tui/ink/infinite-welcome.js";
@@ -893,6 +894,46 @@ export async function readLocalSources(env: CliEnv): Promise<LocalSourcesRead> {
   } catch (error) {
     return { kind: error instanceof DaemonUnreachableError ? "unreachable" : "unreadable" };
   }
+}
+
+/**
+ * The local session's sources, kept current: the startup read, then a bounded
+ * re-read whenever `refresh` runs (after every submitted line, so a `/connect`,
+ * a `/sync` or a source breaking shows in the top bar's dots). Concurrent
+ * refreshes share one read.
+ */
+export function createLocalSourcesTracker(
+  read: () => Promise<LocalSourcesRead>,
+  initial: LocalSourcesRead
+): { current(): LocalSourcesRead; refresh(): Promise<void> } {
+  let current = initial;
+  let inFlight: Promise<void> | null = null;
+  return {
+    current: () => current,
+    refresh: () => {
+      inFlight ??= read()
+        .then((next) => {
+          current = next;
+        })
+        .finally(() => {
+          inFlight = null;
+        });
+      return inFlight;
+    }
+  };
+}
+
+type SessionSubmitLine = InkInteractiveSessionAppProps["onSubmitLine"];
+
+/** `submit`, then `after` once the line is done (answered or failed). */
+export function afterEachLine(after: () => Promise<void>, submit: SessionSubmitLine): SessionSubmitLine {
+  return async (...args) => {
+    try {
+      return await submit(...args);
+    } finally {
+      await after();
+    }
+  };
 }
 
 export function completeInteractiveInputForCli(value: string, env: CliEnv): readonly CompletionSuggestion[] {
@@ -7710,8 +7751,11 @@ async function interactiveSession(env: CliEnv): Promise<void> {
     // The local engine's sources: the top bar's dots, and the first-run
     // inventory's Connected row. LIVE but BOUNDED — capped by
     // `readinessProbeTimeoutMs`, so a missing/zombie daemon never hangs startup.
-    const localSources = await readLocalSources(env);
-    const localConnections = localSources.kind === "read" ? localSources.connections : undefined;
+    const localSources = createLocalSourcesTracker(() => readLocalSources(env), await readLocalSources(env));
+    const localConnections = (): HomeInventoryData["connections"] => {
+      const read = localSources.current();
+      return read.kind === "read" ? read.connections : undefined;
+    };
     try {
       await runInkInteractiveSession({
         errorOutput,
@@ -7719,11 +7763,11 @@ async function interactiveSession(env: CliEnv): Promise<void> {
           activeProjectLabel ? `${theme.brand.name} — ${activeProjectLabel}` : undefined,
         getCompletions: (value) => completeInteractiveInputForCli(value, env),
         ...(firstRun
-          ? { homeInventory: homeInventoryData(activeProjectLabel, localConnections, localSourcesNote(localSources)) }
+          ? { homeInventory: homeInventoryData(activeProjectLabel, localConnections(), localSourcesNote(localSources.current())) }
           : {}),
         // Read on every render: `/project use` renames the workspace at once.
         topBar: (): TopBarData => {
-          const sources = topBarSources(localConnections);
+          const sources = topBarSources(localConnections());
           return {
             ...(activeProjectLabel
               ? { workspace: boundedTerminalText(activeProjectLabel, HOME_INVENTORY_LABEL_MAX_CHARS, "Unknown") }
@@ -7758,7 +7802,9 @@ async function interactiveSession(env: CliEnv): Promise<void> {
           requiresOperatorConfirmation(line) ? `${operatorConfirmationText(line)} Type confirm to continue.` : undefined,
         requiresSelection: syncWindowSelectionPrompt,
         theme,
-        async onSubmitLine(line, onProgress) {
+        // After every line (a `/connect`, a `/sync`, a turn) the sources are
+        // re-read, bounded, so the top bar's dots never keep a stale state.
+        onSubmitLine: afterEachLine(() => localSources.refresh(), async (line, onProgress) => {
           // PR5 — pre-turn project selection. A pin-less session FAIL-CLOSES at
           // runtime construction (`infiniteOsWorkspaceId` throws `NoActiveProjectError`
           // at `createCliAgentRuntime`, BEFORE any tool), so the decision must be
@@ -7841,7 +7887,7 @@ async function interactiveSession(env: CliEnv): Promise<void> {
           //    the pin the turn actually answered for (the switch happened after
           //    the pre-call title capture).
           return { messages: interactiveResultMessages(result), project: pinnedProject };
-        }
+        })
       });
     } finally {
       resetAgentRuntime();
