@@ -119,6 +119,7 @@ jobs:
           packages/metadata
           packages/runtime
           packages/setup
+          packages/types
           tests
 
       - name: Installer smoke
