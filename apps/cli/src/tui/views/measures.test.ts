@@ -315,6 +315,35 @@ describe("numbers: narrow width", () => {
     expect(draw(view, { width: 48, showHiddenColumns: true }).footnotes.join("\n")).toContain("only in the dropped column");
   });
 
+  it("a very wide, tall table shown as records expands only the rows around ▸, so a key press stays cheap", () => {
+    const columns = Array.from({ length: 40 }, (_, index) => ({ key: `m${index}`, label: `Measure ${index + 1}`, unit: "count" }));
+    const row = (index: number) => ({
+      id: `r_${index}`, label: `Row ${index + 1}`,
+      cells: Object.fromEntries(columns.map((column, c) => [column.key, { value: index * 100 + c }]))
+    });
+    const view = edited("numbers-ads", (body) => {
+      body.columns = columns;
+      body.legs.settled.rows = Array.from({ length: 200 }, (_, index) => row(index));
+      body.legs.settled.totals = Object.fromEntries(columns.map((column, c) => [column.key, { value: 90_000 + c }]));
+    });
+    const started = Date.now();
+    const render = draw(view, { width: 40, selected: 150, showHiddenColumns: true });
+    const elapsed = Date.now() - started;
+    const detail = render.detail.join("\n");
+    // The selected row draws every value; a row far from it draws only its label.
+    expect(detail).toMatch(/^▸ Row 151$/mu);
+    expect(detail).toContain("Measure 40: 15,039");
+    expect(detail).toMatch(/^ {2}Row 1$/mu);
+    expect(detail).not.toContain("Measure 1: 0\n");
+    expect(detail).toMatch(/j k/u);
+    // Every row's label is still there, and the Total still draws.
+    expect(detail).toMatch(/^ {2}Row 200$/mu);
+    expect(detail).toMatch(/^ {2}Total$/mu);
+    expect(render.detail.length).toBeLessThan(1_500);
+    expect(render.detail.every((line) => displayWidth(line) <= 40)).toBe(true);
+    expect(elapsed).toBeLessThan(500);
+  });
+
   it("wide enough, nothing hides", () => {
     const render = draw(fixture("numbers-ads"), { width: 100 });
     expect(render.hiddenColumns ?? 0).toBe(0);

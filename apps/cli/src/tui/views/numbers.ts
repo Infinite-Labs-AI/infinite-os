@@ -188,18 +188,41 @@ function selectedRow(input: CellTableInput): number | null {
     : null;
 }
 
-/** Each row as its label, then `  Column: value` lines (the narrow-table record view). */
+/** Rows a record view expands (every value) around the selected one; the rest print their label. */
+const RECORD_WINDOW = 12;
+
+/**
+ * Each row as its label, then `  Column: value` lines (the narrow-table record
+ * view). A tall table expands only the rows around the selected one (and the
+ * Total); the others print their label alone, and a muted line says j/k
+ * moves the expanded rows. So a 200 × 40 table stays a few hundred lines and
+ * every key press stays cheap. Only drawn cells book footnotes.
+ */
 function recordLines(input: CellTableInput, labels: readonly string[], ctx: ViewRenderCtx, notes: FootnoteBook): string[] {
   const lines: string[] = [];
   const records = input.total ? [...input.rows, input.total] : input.rows;
   const selected = selectedRow(input);
+  const windowed = input.rows.length > RECORD_WINDOW;
+  const first = windowed
+    ? Math.max(0, Math.min(input.rows.length - RECORD_WINDOW, (selected ?? 0) - Math.floor(RECORD_WINDOW / 2)))
+    : 0;
+  const expanded = (recordIndex: number) =>
+    !windowed || recordIndex >= input.rows.length || (recordIndex >= first && recordIndex < first + RECORD_WINDOW);
+  if (windowed) {
+    lines.push(...wrapText(`values for rows ${first + 1}–${first + RECORD_WINDOW} of ${input.rows.length} · j k move`, ctx.width)
+      .map((line) => paint(line, "muted", ctx)));
+  }
   records.forEach((record, recordIndex) => {
-    if (recordIndex > 0) {
+    const open = expanded(recordIndex);
+    if (recordIndex > 0 && (open || expanded(recordIndex - 1))) {
       lines.push("");
     }
     const mark = selected === null ? "" : recordIndex === selected ? "▸ " : "  ";
     lines.push(...wrapText(viewText(record.label), Math.max(1, ctx.width - mark.length)).map((line, index) =>
       `${index === 0 ? mark : " ".repeat(mark.length)}${paint(line, "text", ctx, { bold: true })}`));
+    if (!open) {
+      return;
+    }
     input.columns.forEach((column, index) => {
       const value = drawCell(record.cells[index], columnFor(column, record, index), input.currency, notes);
       const indent = " ".repeat(mark.length + 2);
