@@ -62,6 +62,8 @@ export interface MeasureDraw {
   reasonSaid?: boolean;
   /** The view's title: a single leg whose window it names needs no title of its own. */
   viewTitle?: string;
+  /** Set when the coverage strip was drawn with its legend (the source line then closes the view). */
+  legendDrawn?: boolean;
 }
 
 // ── tables of cells ──
@@ -306,6 +308,26 @@ export function windowDates(window: unknown): string | null {
   return startMonth === endMonth && endDay ? `${start}–${endDay}` : `${start}–${end}`;
 }
 
+/**
+ * Whether a window's label already names its dates (`Sep 24 — Sep 30`,
+ * `Sep 24–30`), so the title does not say them twice. Case and dash style do
+ * not matter; a label naming only one end (`Since Sep 24`) does not count.
+ */
+export function labelNamesDates(label: string, window: unknown): boolean {
+  const { from, to } = asRecord(window);
+  const start = formatAsOf(from)?.toLowerCase();
+  const end = formatAsOf(to)?.toLowerCase();
+  if (!label || !start || !end) return false;
+  const text = label.toLowerCase().replace(/\s+/gu, " ");
+  const at = text.indexOf(start);
+  if (at < 0) return false;
+  if (from === to) return true;
+  const rest = text.slice(at + start.length);
+  const [endMonth, endDay] = end.split(" ");
+  const sameMonth = start.split(" ")[0] === endMonth;
+  return rest.includes(end) || (sameMonth && endDay !== undefined && new RegExp(`(^|\\D)${endDay}(\\D|$)`, "u").test(rest));
+}
+
 /** `18:30` for an instant, in `timeZone` (else the system zone); null when unparseable. */
 export function clockTime(value: unknown, timeZone?: string): string | null {
   if (typeof value !== "string" || /^\d{4}-\d{2}-\d{2}$/u.test(value)) {
@@ -348,9 +370,10 @@ function legTitle(leg: Leg, isToday: boolean, ctx: ViewRenderCtx): string {
   const refresh = asRecord(leg.refresh);
   const refreshWords = isToday && typeof refresh.status === "string" ? REFRESH_WORDS[refresh.status] : undefined;
   const retryAt = refreshWords ? clockTime(refresh.retryAt, ctx.timeZone) : null;
+  const label = viewText(window.label);
   return [
-    viewText(window.label),
-    isToday ? "" : windowDates(window) ?? "",
+    label,
+    isToday || labelNamesDates(label, window) ? "" : windowDates(window) ?? "",
     final ? "" : "not final",
     final || !asOf ? "" : `as of ${asOf}`,
     refreshWords ? `${refreshWords}${retryAt ? ` until ${retryAt}` : ""}` : ""
@@ -691,7 +714,10 @@ export function numbersBodyLines(body: Record<string, unknown>, ctx: ViewRenderC
     blocks.push(legLines(legs.today, true, nested, body, columns, ctx, draw));
   }
   if (legs) {
-    blocks.push(coverageLines(legs, ctx, draw.reasonSaid === true, columns.some((column) => column.key.toLowerCase() === "spend")));
+    const strip = coverageLines(legs, ctx, draw.reasonSaid === true, columns.some((column) => column.key.toLowerCase() === "spend"));
+    // The legend is drawn when no state reason already says which days are in.
+    if (strip.length && !nested && draw.reasonSaid !== true) draw.legendDrawn = true;
+    blocks.push(strip);
   }
 
   const leaders = asList(body.leaders).filter(isRecord).flatMap((leader) => {
@@ -726,9 +752,28 @@ function selectableRows(body: Record<string, unknown>): number {
   return rows.length > 1 ? rows.length : 0;
 }
 
+/** The provenance words r4 closes a numbers view with, per `via` (only our stored copy has words yet). */
+const VIA_WORDS: Readonly<Record<string, string>> = { our_db: "via our data" };
+
+/**
+ * r4 view-01's last row, `Source: Google Ads, via our data`, in dim: where the
+ * strip's days come from, under the strip's legend. Not drawn without one: a
+ * bare table (r4 flow-numbers-01) has none, and a state reason that says which
+ * days are in (flow-numbers-03) speaks for the days instead. The app link that
+ * follows it in r4 (`· Open in Google Ads ↗`) waits for the app-link wave.
+ */
+function sourceWordsLines(view: Parameters<KindRenderer<"numbers">>[0], ctx: ViewRenderCtx): string[] {
+  const provenance = asRecord(view.provenance);
+  const source = viewText(provenance.source);
+  const via = VIA_WORDS[String(provenance.via)];
+  return source && via ? wrapText(`Source: ${source}, ${via}`, ctx.width).map((line) => paint(line, "muted", ctx)) : [];
+}
+
 export const renderNumbers: KindRenderer<"numbers"> = (view, ctx): KindRender => {
   const draw: MeasureDraw = { notes: new FootnoteBook(), hidden: 0, reasonSaid: isRecord(view.stateReason), viewTitle: viewText(view.title) };
-  const detail = numbersBodyLines(asRecord(view.body), ctx, draw);
+  const body = numbersBodyLines(asRecord(view.body), ctx, draw);
+  const source = draw.legendDrawn ? sourceWordsLines(view, ctx) : [];
+  const detail = source.length ? [...body, "", ...source] : body;
   return {
     detail,
     footnotes: draw.notes.lines().flatMap((line) => wrapText(line, ctx.width).map((part) => paint(part, "muted", ctx))),

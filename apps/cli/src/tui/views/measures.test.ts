@@ -7,6 +7,7 @@ import { decodeAnswerView } from "../../desktop/answer-view-decode.js";
 import { displayWidth } from "../lib/display-width.js";
 import { r4Segments } from "../../formatting/r4-segments.test-util.js";
 import { INFINITE_R4_THEME, resolveTheme } from "../theme.js";
+import { paint } from "./primitives.js";
 import { hasKindRenderer, renderView } from "./registry.js";
 import type { ViewRender, ViewRenderCtx } from "./types.js";
 
@@ -59,6 +60,18 @@ describe("numbers: legs", () => {
     expect(detail.filter((line) => line.startsWith("┌"))).toHaveLength(2);
     expect(detail.slice(settled, today).join("\n")).toContain("Hook A");
     expect(detail.slice(today).join("\n")).toContain("$5.00");
+  });
+
+  it("a window label that already names its dates is not followed by them again (`Jan 8 — Jan 14`, run-r2 NICE)", () => {
+    const named = (label: string) => edited("numbers-week-today", (body) => { body.legs.settled.window.label = label; });
+    for (const label of ["Jan 8 — Jan 14", "Jan 8–14", "Jan 8 - Jan 14", "jan 8 – 14"]) {
+      const title = draw(named(label)).detail.find((line) => line.toLowerCase().startsWith(label.toLowerCase()));
+      expect(title, label).toBeDefined();
+      expect(title, label).not.toContain(" · Jan 8–14");
+    }
+    // A label that names other days (or none) keeps the dates.
+    expect(draw(named("Last week")).detail.some((line) => line.startsWith("Last week · Jan 8–14"))).toBe(true);
+    expect(draw(named("Since Jan 8")).detail.some((line) => line.startsWith("Since Jan 8 · Jan 8–14"))).toBe(true);
   });
 
   it("the today leg is labelled not final with the time it is as of", () => {
@@ -247,6 +260,18 @@ describe("numbers: leaders", () => {
 });
 
 describe("numbers: the coverage strip", () => {
+  it("says where the days come from under the strip: `Source: <source>, via our data` in dim (r4 view-01, run-r2 NICE)", () => {
+    const render = draw(fixture("numbers-ads"), { color: true, theme: INFINITE_R4_THEME });
+    expect(render.detail.at(-1)).toBe(paint("Source: Demo ads, via our data", "muted", { color: true, theme: INFINITE_R4_THEME }));
+    expect(render.detail.at(-2)).toBe("");
+    // Read live, or with no strip to explain: no source line (r4 flow-numbers-01 draws the table alone).
+    expect(draw({ ...fixture("numbers-ads"), provenance: { source: "Demo ads", via: "live_read" } } as AnswerViewV1).detail.join("\n")).not.toContain("Source:");
+    expect(draw(fixture("numbers-tall")).detail.join("\n")).not.toContain("Source:");
+    // A state reason that says which days are in speaks for them (r4 flow-numbers-03): no legend, no source line.
+    const partial = { ...fixture("numbers-ads"), state: "partial", stateReason: { code: "partial_days", words: "1 of 2 days in" } } as AnswerViewV1;
+    expect(draw(partial).detail.join("\n")).not.toContain("Source:");
+  });
+
   it("· zero, █ measured, ◌ today, — not measured", () => {
     expect(strip(draw(fixture("numbers-ads")))).toBe("·····██");
     expect(strip(draw(fixture("numbers-week-today")))).toBe("·—█████◌");
