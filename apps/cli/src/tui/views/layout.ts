@@ -39,8 +39,11 @@ export function paneWidths(width: number): { wide: boolean; left: number; right:
   return { wide: true, left, right: total - left - PANE_SEPARATOR.length };
 }
 
-/** One drawn view as lines: head, source, a blank row, the details, then footnotes. */
+/** One drawn view as lines: head, source, a blank row, the details, then footnotes. A quiet view is its step line only. */
 export function viewLines(render: ViewRender, width: number): string[] {
+  if (render.quiet) {
+    return render.detail.map((line) => fitLine(line, width));
+  }
   const body = [...render.detail, ...(render.footnotes.length ? ["", ...render.footnotes] : [])];
   return [
     render.head,
@@ -53,6 +56,8 @@ export function viewLines(render: ViewRender, width: number): string[] {
  * Lay out one turn. `answer` is drawn at the answer pane's width (see
  * `paneWidths`), each view at the details pane's. Several views stack in the
  * details pane, a blank row apart. No view = the answer alone, full width.
+ * Quiet views never take the details pane: their step lines print with the
+ * Steps, so a turn whose views are all quiet keeps its answer full width.
  */
 export function layoutTurn(
   answer: readonly string[],
@@ -62,7 +67,9 @@ export function layoutTurn(
   style: { color: boolean; theme: Theme } | null = null
 ): string[] {
   const total = Math.max(1, Math.floor(width));
-  const renders: readonly ViewRender[] = view === null ? [] : isRenderList(view) ? view : [view];
+  const all: readonly ViewRender[] = view === null ? [] : isRenderList(view) ? view : [view];
+  const renders = all.filter((render) => !render.quiet);
+  const quietSteps = all.filter((render) => render.quiet).flatMap((render) => render.detail.map((line) => `  ${line}`));
   const rule = (line: string) => (style ? paint(line, "muted", style) : line);
   const out: string[] = [];
 
@@ -90,8 +97,9 @@ export function layoutTurn(
     }
   }
 
-  if (steps.length) {
-    out.push(rule(fitLine(`─ Steps ${"─".repeat(Math.max(0, total - 8))}`, total)), ...steps.map((line) => fitLine(line, total)));
+  const strip = [...steps, ...quietSteps];
+  if (strip.length) {
+    out.push(rule(fitLine(`─ Steps ${"─".repeat(Math.max(0, total - 8))}`, total)), ...strip.map((line) => fitLine(line, total)));
   }
   return out;
 }
@@ -198,6 +206,11 @@ export interface LiveTurnInput {
   theme: Theme;
   caps?: KeyContext["caps"];
   timeZone?: string;
+  /**
+   * The rows the turn may take in the live region, when known (the session
+   * passes `inkLatestTurnRows`). A document pages so the whole turn fits.
+   */
+  rows?: number;
   /** The live region has more lines below (lets `m` page it). */
   livePageNext?: boolean;
 }
@@ -211,19 +224,23 @@ export interface LiveTurnRender {
 /** The latest turn with its views, laid out for the live region (and, once, for scrollback). */
 export function renderLiveTurn(input: LiveTurnInput): LiveTurnRender {
   const width = Math.max(1, Math.floor(input.width));
-  const { wide, left, right } = paneWidths(width);
-  const caps = input.focus?.caps ?? input.caps ?? NO_VIEW_CAPS;
-  const base = { width: wide ? right : width, color: input.color, theme: input.theme, timeZone: input.timeZone };
-  const plainCtx: ViewRenderCtx = {
-    ...base, selected: 0, tab: 0, page: 0, explainOpen: false, showHiddenColumns: false, caps
-  };
-  const focusIndex = input.focus ? input.focus.viewIndex : focusedViewIndex(input.views);
-  const renders = input.views.map((view, index) =>
-    renderView(view, index === focusIndex && input.focus ? focusedViewCtx(input.focus, base) : plainCtx)
-  );
-  const steps = stepLines(input.messages, width, input);
-  const answer = renderAnswerColumn(input.messages, wide && renders.length ? left : width, input.theme, input.color);
-  const lines = layoutTurn(answer, renders, steps, width, { color: input.color, theme: input.theme });
+  const budget = typeof input.rows === "number" && Number.isFinite(input.rows) ? Math.max(1, Math.floor(input.rows)) : undefined;
+  let drawn = drawLiveTurn(input, width, budget);
+  // The views start from the whole budget; while the turn is taller than it,
+  // give the views that many rows fewer (a document then pages smaller). Stops
+  // when the turn fits or stops shrinking (a long answer, a page at its floor).
+  for (let pass = 0; budget !== undefined && pass < 3; pass += 1) {
+    const overflow = drawn.lines.length - budget;
+    if (overflow <= 0 || drawn.rows === undefined || drawn.rows - overflow < 1) {
+      break;
+    }
+    const next = drawLiveTurn(input, width, drawn.rows - overflow);
+    if (next.lines.length >= drawn.lines.length) {
+      break;
+    }
+    drawn = next;
+  }
+  const { renders, lines, focusIndex } = drawn;
   const focusedRender = renders[focusIndex];
   return {
     lines,
@@ -231,6 +248,30 @@ export function renderLiveTurn(input: LiveTurnInput): LiveTurnRender {
       ? { render: focusedRender, facts: viewKeyFacts(input.views[focusIndex], focusedRender, input.livePageNext ?? false) }
       : null
   };
+}
+
+/** One draw of the turn, its views given at most `rows` rows. */
+function drawLiveTurn(input: LiveTurnInput, width: number, rows: number | undefined) {
+  const { wide, left, right } = paneWidths(width);
+  const caps = input.focus?.caps ?? input.caps ?? NO_VIEW_CAPS;
+  const base = {
+    width: wide ? right : width, color: input.color, theme: input.theme, timeZone: input.timeZone,
+    ...(rows === undefined ? {} : { rows })
+  };
+  const plainCtx: ViewRenderCtx = {
+    ...base, selected: 0, tab: 0, page: 0, explainOpen: false, showHiddenColumns: false, caps
+  };
+  // A quiet view prints with the Steps (full width), never in the details pane.
+  const stepCtx: ViewRenderCtx = { ...plainCtx, width: Math.max(1, width - 2) };
+  const focusIndex = input.focus ? input.focus.viewIndex : focusedViewIndex(input.views);
+  const renders = input.views.map((view, index) =>
+    renderView(view, view.kind === "quiet" ? stepCtx : index === focusIndex && input.focus ? focusedViewCtx(input.focus, base) : plainCtx)
+  );
+  const steps = stepLines(input.messages, width, input);
+  const split = renders.some((render) => !render.quiet);
+  const answer = renderAnswerColumn(input.messages, wide && split ? left : width, input.theme, input.color);
+  const lines = layoutTurn(answer, renders, steps, width, { color: input.color, theme: input.theme });
+  return { renders, lines, focusIndex, rows };
 }
 
 function isRenderList(view: ViewRender | readonly ViewRender[]): view is readonly ViewRender[] {

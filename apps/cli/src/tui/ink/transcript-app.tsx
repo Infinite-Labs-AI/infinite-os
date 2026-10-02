@@ -11,7 +11,7 @@ import { ROCKET_BANNER_ROWS, RocketBanner } from "./rocket-banner.js";
 import {
   DEFAULT_COMPOSER_ROWS,
   DEFAULT_KEY_BAR_ROWS,
-  liveRegionCap,
+  liveBodyRows,
   livePageHint,
   liveWindow,
   type CommittedEntry,
@@ -337,6 +337,50 @@ export function inkTranscriptLayout({
   return { rowCount: 1 + liveRows + statusRows + (showComposer ? 1 : 0), window: live };
 }
 
+/**
+ * The rows the latest turn may take in `InkTranscriptApp`'s live region without
+ * being paged: the live budget (`liveBodyRows`) minus the transcript lines drawn
+ * under it. Same inputs as `inkTranscriptLayout`, without `latest`. Undefined
+ * when the height is unknown (no cap).
+ */
+export function inkLatestTurnRows({
+  busy: busyOverride = false,
+  columns = 88,
+  composerRows = DEFAULT_COMPOSER_ROWS,
+  indicatorTick = 0,
+  keyBarRows = DEFAULT_KEY_BAR_ROWS,
+  nowMs = Date.now(),
+  rows,
+  showComposer = true,
+  spinnerTick = 0,
+  status = [],
+  theme,
+  transcript,
+  turnStartedAt
+}: InkTranscriptAppProps): number | undefined {
+  const t = theme ?? resolveTheme();
+  const width = clampColumns(columns);
+  const state = transcript?.state ?? getTurnState();
+  const busy = busyOverride || isInfiniteTurnBusy(state);
+  const statusRows = statusRowStrings({
+    busy,
+    columns: width,
+    labelTick: indicatorTick,
+    nowMs,
+    spinnerTick,
+    state,
+    status,
+    theme: t,
+    turnStartedAt
+  }).length;
+  const budget = liveBodyRows(rows, composerRows, keyBarRows, statusRows, showComposer);
+  if (!Number.isFinite(budget)) {
+    return undefined;
+  }
+  const transcriptLines = renderTranscriptLines(transcript ?? { state }, { columns: width, nowMs, theme: t });
+  return Math.max(2, budget - transcriptLines.length);
+}
+
 export function inkTranscriptRowCount(props: InkTranscriptAppProps): number {
   return inkTranscriptLayout(props).rowCount;
 }
@@ -382,9 +426,7 @@ function liveLinesWindow({
   transcriptLines: readonly string[];
 }): LiveWindow {
   const lines = latest?.lines.length ? [...latest.lines, ...transcriptLines] : transcriptLines;
-  const cap = liveRegionCap(rows, composerRows, keyBarRows);
-  // Never below 2: one content row plus the hint row.
-  const budget = Math.max(2, cap - 1 - statusRowCount - (showComposer ? 1 : 0));
+  const budget = liveBodyRows(rows, composerRows, keyBarRows, statusRowCount, showComposer);
   return liveWindow(lines, budget, livePage ?? null);
 }
 

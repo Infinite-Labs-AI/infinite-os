@@ -76,6 +76,24 @@ export function liveRegionCap(rows: number | undefined, composerRows: number, ke
   return Math.max(MIN_LIVE_REGION_ROWS, Math.floor(rows) - reserved);
 }
 
+/**
+ * The rows the live region's content (the latest turn, then the transcript) may
+ * take: the cap minus the top rule, the status rows and an in-app composer row.
+ * Never below 2 (one content row plus the pager hint). Infinite when `rows` is
+ * unknown. `liveLinesWindow` pages with it, and the session sizes a document's
+ * page to it, so both sides count the same rows.
+ */
+export function liveBodyRows(
+  rows: number | undefined,
+  composerRows: number,
+  keyBarRows: number,
+  statusRowCount: number,
+  showComposer: boolean
+): number {
+  const cap = liveRegionCap(rows, composerRows, keyBarRows);
+  return Math.max(2, cap - 1 - Math.max(0, statusRowCount) - (showComposer ? 1 : 0));
+}
+
 export interface LiveWindow {
   /** The rows to draw now. */
   lines: readonly string[];

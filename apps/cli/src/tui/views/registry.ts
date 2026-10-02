@@ -32,6 +32,11 @@ import { renderHealth } from "./health.js";
 import { renderNumbers } from "./numbers.js";
 
 // T10 (things): list, record, document, link, quiet
+import { renderDocument } from "./document.js";
+import { renderLink } from "./link.js";
+import { renderList } from "./list.js";
+import { renderQuiet } from "./quiet.js";
+import { renderRecord } from "./record.js";
 
 // T11 (actions): change, launch, images, job
 
@@ -44,6 +49,11 @@ const KIND_RENDERERS: KindRendererMap = {
   health: renderHealth,
 
   // T10 (things)
+  list: renderList,
+  record: renderRecord,
+  document: renderDocument,
+  link: renderLink,
+  quiet: renderQuiet,
 
   // T11 (actions)
 
@@ -58,6 +68,11 @@ export function hasKindRenderer(kind: AnswerViewKind): boolean {
 export function renderView(view: AnswerViewV1, ctx: ViewRenderCtx): ViewRender {
   const shellCtx: ViewRenderCtx = { ...ctx, width: Math.max(1, Math.floor(ctx.width)) };
   const body = renderKindBody(view, shellCtx);
+  if (view.kind === "quiet") {
+    // Steps only (r4): no head, no source, no explanation, state reason,
+    // truncation or caveats. The layout prints it with the Steps.
+    return { head: "", source: null, detail: body?.detail ?? [], footnotes: [], keys: [], okKey: null, rowCount: 0, quiet: true };
+  }
   // Enter sends the state's fix ask only when no row has an ask of its own.
   const fixAsk = (body?.rowAsks ?? []).some((ask) => viewText(ask) !== "") ? null : stateFixAsk(view);
   return {
@@ -78,6 +93,8 @@ export function renderView(view: AnswerViewV1, ctx: ViewRenderCtx): ViewRender {
     ...(body?.tabs ? { tabs: body.tabs } : {}),
     ...(body?.pages ? { pages: body.pages } : {}),
     ...(body?.hiddenColumns ? { hiddenColumns: body.hiddenColumns } : {}),
+    ...(body?.rowCopies ? { rowCopies: body.rowCopies } : {}),
+    ...(body?.copyText ? { copyText: body.copyText } : {}),
     ...(fixAsk ? { fixAsk } : {})
   };
 }

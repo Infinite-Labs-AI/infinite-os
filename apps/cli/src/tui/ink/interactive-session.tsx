@@ -59,6 +59,7 @@ import { createTurnAbort, ctrlCAction, turnStoppedLine, type TurnAbort } from ".
 import { confirmCardKeys, keyBarHints, keyBarRowCount, resolveKey, type KeyContext } from "../keys/keymap.js";
 import { KeyBar } from "./key-bar.js";
 import {
+  inkLatestTurnRows,
   inkTranscriptLayout,
   InkTranscriptApp,
   renderCommittedTranscriptLines,
@@ -68,6 +69,7 @@ import {
 import {
   commitOnSubmit,
   DEFAULT_COMPOSER_ROWS,
+  DEFAULT_KEY_BAR_ROWS,
   livePageKey,
   pageLiveWindow,
   type CommittedEntry,
@@ -75,7 +77,8 @@ import {
 } from "./transcript-static.js";
 import { useTerminalColumns, useTerminalRows } from "./terminal-columns.js";
 import { resolveViewKey, viewFocusAfterTurnDone, viewKeyHints, type ViewFocusState } from "../views/focus.js";
-import { renderLiveTurn } from "../views/layout.js";
+import { clipboardSequence, copyTargets, copyThroughPbcopy } from "../views/clipboard.js";
+import { renderLiveTurn, type LiveTurnRender } from "../views/layout.js";
 
 /**
  * The every-launch home inventory shown above the transcript on the empty home
@@ -414,6 +417,7 @@ export function InkInteractiveSessionApp({
   turnStoppable = false
 }: InkInteractiveSessionAppProps) {
   const app = useApp();
+  const { stdout: sessionStdout } = useStdout();
   const t = theme ?? resolveTheme();
   // One turn-abort per session: each turn arms a fresh signal (Esc / Ctrl-C
   // stop it) and disarms it when the turn settles.
@@ -465,6 +469,9 @@ export function InkInteractiveSessionApp({
   const [viewFocus, setViewFocus] = useState<ViewFocusState | null>(null);
   const viewFocusRef = useRef(viewFocus);
   viewFocusRef.current = viewFocus;
+  // The rows the live turn was last drawn to, so the turn commits to scrollback
+  // with the same document pages the user was reading.
+  const liveTurnRowsRef = useRef<number | undefined>(undefined);
   const [pendingSelection, setPendingSelection] = useState<{
     prompt: InkInteractiveSelectionPrompt;
     selectedIndex: number;
@@ -554,7 +561,8 @@ export function InkInteractiveSessionApp({
                 focus: viewFocusRef.current,
                 width: transcriptColumns(columns),
                 color: true,
-                theme: t
+                theme: t,
+                rows: liveTurnRowsRef.current
               }).lines
             : renderCommittedTranscriptLines({ agentTitle, messages: turn }, { columns, theme: t })
         }
@@ -611,24 +619,38 @@ export function InkInteractiveSessionApp({
   // transcript's width; the transcript then carries only the idle turn state.
   // While a turn runs its views collect in the turn store and the transcript
   // renders as it always has.
+  //
+  // The turn is drawn to the rows the live region has for it (`turnRowsAt`,
+  // below, once the composer and the key bar are counted), so a document's
+  // page fits on screen. `renderTurnAt` draws it at a given row count, cached
+  // for this set of inputs.
   const turnViews = turnState.views;
-  const liveTurn = useMemo(() => !busy && turnViews.length
-    ? renderLiveTurn({
+  const renderTurnAt = useMemo(() => {
+    if (busy || !turnViews.length) {
+      return null;
+    }
+    const cache = new Map<number | undefined, LiveTurnRender>();
+    return (turnRows: number | undefined): LiveTurnRender => {
+      const hit = cache.get(turnRows);
+      if (hit) {
+        return hit;
+      }
+      const drawn = renderLiveTurn({
         messages: history,
         views: turnViews.map((frame) => frame.view),
         focus: viewFocus,
         width: transcriptColumns(columns),
         color: true,
-        theme: t
-      })
-    : null, [busy, columns, history, t, turnViews, viewFocus]);
-  const liveLatest = useMemo<CommittedEntry | null>(
-    () => liveTurn ? { id: "live-turn", lines: liveTurn.lines } : null,
-    [liveTurn]
-  );
-  const liveTranscript = useMemo(
-    () => liveTurn ? { agentTitle, messages: [], state: turnState } : transcript,
-    [agentTitle, liveTurn, transcript, turnState]
+        theme: t,
+        rows: turnRows
+      });
+      cache.set(turnRows, drawn);
+      return drawn;
+    };
+  }, [busy, columns, history, t, turnViews, viewFocus]);
+  const idleTranscript = useMemo(
+    () => ({ agentTitle, messages: [], state: turnState }),
+    [agentTitle, turnState]
   );
   // Drive the transcript's animated clock here so the composer-cursor row
   // prediction below and the live <InkTranscriptApp> render share identical
@@ -661,15 +683,17 @@ export function InkInteractiveSessionApp({
   // empty (views/focus.ts: only what works on the focused view). Otherwise the
   // bar is the composer's: `esc stop` while a stoppable turn runs (the only key
   // that works then), nothing when idle.
-  const viewHints = liveTurn?.focused && viewFocus && !confirmKeys && inputValue.length === 0
-    && !pendingSelection && !pendingOperatorLine && !pendingFieldPrompt
-    ? viewKeyHints(viewFocus, liveTurn.focused.facts, liveTurn.focused.render.keys)
-    : [];
-  const keyHints = confirmKeys
-    ? keyBarHints(confirmKeys.ctx)
-    : viewHints.length
-      ? viewHints
-      : keyBarHints({ focus: "composer", busy: busy && turnStoppable, okKey: null, caps: NO_KEY_CAPS });
+  const keyHintsFor = (turn: LiveTurnRender | null) => {
+    const viewHints = turn?.focused && viewFocus && !confirmKeys && inputValue.length === 0
+      && !pendingSelection && !pendingOperatorLine && !pendingFieldPrompt
+      ? viewKeyHints(viewFocus, turn.focused.facts, turn.focused.render.keys)
+      : [];
+    return confirmKeys
+      ? keyBarHints(confirmKeys.ctx)
+      : viewHints.length
+        ? viewHints
+        : keyBarHints({ focus: "composer", busy: busy && turnStoppable, okKey: null, caps: NO_KEY_CAPS });
+  };
   // The home inventory shows ONCE, on the empty home screen (no transcript yet)
   // and only when the CLI supplied its data. The first submitted line commits it
   // into scrollback with the first turn (`commitLatestTurn`), so it never repeats.
@@ -1243,7 +1267,6 @@ export function InkInteractiveSessionApp({
   // The key bar renders directly above the composer: its real wrapped rows go to
   // the live-region cap through its own `keyBarRows` slot (0 when no card is
   // open), and into the composer-row prediction below.
-  const keyBarRows = keyBarRowCount(keyHints, columns);
   const composerText = activeFieldComposer ? activeFieldComposer.display : inputValue;
   const reservedRows = homeInventoryRows
     + Math.max(DEFAULT_COMPOSER_ROWS, composerRowsFor(composerText || connectPlaceholder, columns, t))
@@ -1256,6 +1279,47 @@ export function InkInteractiveSessionApp({
       width: columns
     })
     + completions.length;
+  // The rows the latest turn may take: the live budget (the same count the
+  // live window pages with) less the key bar. The key bar's hints come from the
+  // drawn turn (a document's `space next page`), so draw, count the bar, and
+  // draw again when the bar's height differs from the guess.
+  const turnRowsAt = (barRows: number) => inkLatestTurnRows({
+    busy,
+    columns,
+    composerRows: reservedRows,
+    indicatorTick: labelTick,
+    keyBarRows: barRows,
+    nowMs: clock,
+    rows,
+    showComposer: false,
+    spinnerTick,
+    status: visibleStatusParts,
+    theme: t,
+    transcript: idleTranscript,
+    turnStartedAt: busyStartedAt
+  });
+  let liveTurn: LiveTurnRender | null = null;
+  let liveTurnRows: number | undefined;
+  if (renderTurnAt) {
+    let barRows = DEFAULT_KEY_BAR_ROWS;
+    for (let pass = 0; pass < 3; pass += 1) {
+      liveTurnRows = turnRowsAt(barRows);
+      liveTurn = renderTurnAt(liveTurnRows);
+      const drawnBarRows = keyBarRowCount(keyHintsFor(liveTurn), columns);
+      if (drawnBarRows === barRows) {
+        break;
+      }
+      barRows = drawnBarRows;
+    }
+  }
+  liveTurnRowsRef.current = liveTurnRows;
+  const keyHints = keyHintsFor(liveTurn);
+  const keyBarRows = keyBarRowCount(keyHints, columns);
+  const liveLatest = useMemo<CommittedEntry | null>(
+    () => liveTurn ? { id: "live-turn", lines: liveTurn.lines } : null,
+    [liveTurn]
+  );
+  const liveTranscript = liveTurn ? idleTranscript : transcript;
   const liveLayout = inkTranscriptLayout({
     busy,
     columns,
@@ -1291,6 +1355,16 @@ export function InkInteractiveSessionApp({
       submitLine(next.effect.text);
     } else if (next.effect?.type === "page_live") {
       pageLive("next");
+    } else if (next.effect?.type === "copy") {
+      const targets = copyTargets(process.env, process.platform);
+      if (targets.osc52 && sessionStdout?.isTTY) {
+        // `c`: an OSC 52 clipboard write (zero width, so Ink's frame is untouched).
+        sessionStdout.write(clipboardSequence(next.effect.text));
+      }
+      if (targets.pbcopy) {
+        // A local Mac: Terminal.app ignores OSC 52, so the system tool copies too.
+        copyThroughPbcopy(next.effect.text);
+      }
     }
     return next.handled;
   };

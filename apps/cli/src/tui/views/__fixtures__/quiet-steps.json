@@ -1,0 +1,11 @@
+{
+  "v": 1,
+  "kind": "quiet",
+  "tool": "read_playbook",
+  "title": "",
+  "state": "ready",
+  "asOf": null,
+  "scope": { "workspaceName": "Demo", "crossWorkspace": false },
+  "caveats": [],
+  "body": { "stepLine": "read the writing playbook" }
+}

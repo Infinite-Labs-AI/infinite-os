@@ -1,0 +1,23 @@
+{
+  "v": 1,
+  "kind": "document",
+  "tool": "read_draft",
+  "title": "Win-back email",
+  "state": "ready",
+  "asOf": null,
+  "provenance": { "source": "Demo drafts", "via": "our_db" },
+  "scope": { "workspaceName": "Demo", "crossWorkspace": false },
+  "caveats": [],
+  "body": {
+    "meta": [{ "label": "From", "value": "Demo Team" }],
+    "sections": [
+      { "heading": "Subject: Your trial ended", "text": "Hi there,\n\nYour trial ended. **Three things** we spotted:\n\n- one\n- two\n- three", "format": "markdown" },
+      { "heading": "Subject: Still there?", "text": "A second note, plain text.", "format": "plain" },
+      { "heading": "Reply from a reader", "text": "Quoted text from outside.", "format": "plain", "untrusted": true }
+    ],
+    "versions": [
+      { "id": "e1", "label": "Email 1", "sectionIndexes": [0] },
+      { "id": "e2", "label": "Email 2", "sectionIndexes": [1, 2] }
+    ]
+  }
+}
