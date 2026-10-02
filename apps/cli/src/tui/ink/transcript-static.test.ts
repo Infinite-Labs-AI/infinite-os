@@ -295,6 +295,41 @@ describe("scrollback in a running session (fake TTY; skipped on CI like the othe
     expect(output.text()).not.toContain(`${ESC}[2J`);
   });
 
+  it.skipIf(process.env.CI === "true")("scrollback separates finished turns with exactly one thin rule (D1)", { timeout: 30_000 }, async () => {
+    const input = ttyInput();
+    const output = ttyOutput();
+    const errorOutput = ttyOutput();
+    const session = runInkInteractiveSession({
+      errorOutput,
+      input,
+      async onSubmitLine(line) {
+        if (line === "/exit") return { exit: true, messages: [] };
+        return { messages: [{ role: "assistant", text: `answer-${line}` }] };
+      },
+      output
+    });
+
+    await waitFor(() => output.text().includes("switch side"), 4_000, output.text);
+    for (const line of ["one", "two", "three"]) {
+      await sendKeys(input, `${line}\r`);
+      await waitFor(() => output.text().includes(`answer-${line}`), 4_000, output.text);
+    }
+    await sendKeys(input, "/exit\r");
+    await session;
+    // Exiting commits the last turn, so all three are in scrollback: each pair
+    // is separated by ONE rule row, never two stacked rules.
+    const rows = scrollbackRows(output.text());
+    const rule = "─".repeat(80);
+    for (const [answer, nextQuestion] of [["answer-one", "two"], ["answer-two", "three"]] as const) {
+      const from = rows.findIndex((row) => row.includes(answer));
+      const to = rows.findIndex((row, index) => index > from && row.includes(`❯ ${nextQuestion}`));
+      expect(from, rows.join("\n")).toBeGreaterThanOrEqual(0);
+      expect(to, rows.join("\n")).toBeGreaterThan(from);
+      const rules = rows.slice(from + 1, to).filter((row) => /^─+$/u.test(row.trim()));
+      expect(rules, rows.join("\n")).toEqual([rule]);
+    }
+  });
+
   it.skipIf(process.env.CI === "true")("idle Ctrl-C still writes the whole last answer before quitting", { timeout: 30_000 }, async () => {
     const input = ttyInput();
     const output = ttyOutput();
@@ -370,6 +405,47 @@ describe("scrollback in a running session (fake TTY; skipped on CI like the othe
     expect(decisions).toEqual(["decline"]);
   });
 });
+
+// What scrollback keeps: Ink writes each <Static> chunk once, ahead of the live
+// frame it then redraws (erasing the previous frame with cursor moves + erase).
+// Replaying the stream on a tiny screen model (rows, a cursor, erase) keeps the
+// static rows and drops the erased live frames.
+function scrollbackRows(raw: string): string[] {
+  const rows: string[][] = [[]];
+  let row = 0;
+  let col = 0;
+  const at = (r: number) => (rows[r] ??= []);
+  for (const token of raw.split(new RegExp(`(${ESC}\\[[0-9;?]*[A-Za-z]|\\n|\\r)`, "g"))) {
+    if (!token) continue;
+    if (token === "\n") {
+      row += 1;
+      col = 0;
+      at(row);
+    } else if (token === "\r") {
+      col = 0;
+    } else if (token.startsWith(ESC)) {
+      const match = /^\x1b\[(\d*)(?:;(\d*))?([A-Za-z])$/u.exec(token);
+      if (!match) continue;
+      const n = Number(match[1] || 1);
+      switch (match[3]) {
+        case "A": row = Math.max(0, row - n); break;
+        case "B": row += n; at(row); break;
+        case "C": col += n; break;
+        case "D": col = Math.max(0, col - n); break;
+        case "G": col = n - 1; break;
+        case "K": at(row).length = match[1] === "2" ? 0 : Math.min(at(row).length, col); break;
+        case "J": rows.length = row + 1; at(row).length = Math.min(at(row).length, col); break;
+        default: break;
+      }
+    } else {
+      for (const char of token) {
+        at(row)[col] = char;
+        col += 1;
+      }
+    }
+  }
+  return rows.map((cells) => Array.from(cells, (cell) => cell ?? " ").join(""));
+}
 
 function countLine(text: string, line: string) {
   return text.match(new RegExp(`${line}(?!\\d)`, "g"))?.length ?? 0;
