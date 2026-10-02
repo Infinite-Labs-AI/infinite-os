@@ -255,7 +255,7 @@ describe("step `rehearsal` (§3d.1 step 8)", { timeout: 60_000 }, () => {
     w.deps.bridge = fakeBridge({
       results: {
         rehearsal: testResult("rehearsal", {
-          clicks: [{ label: "sign_up", selector: '[data-infinite-conversion="sign_up"]', found: true, events: { ga4: [], posthog: ["sign_up"], meta: [], infinite: [] }, nonGetCancelled: 1, navigatedAfterMs: null, navigationCancelled: false }]
+          clicks: [{ label: "sign_up", selector: '[data-infinite-conversion="sign_up"]', found: true, events: { ga4: [], posthog: ["sign_up"], meta: [], infinite: [] }, nonGetCancelled: 1, navigatedAfterMs: null, navigationCancelled: false, refused: null }]
         })
       }
     })
@@ -271,7 +271,7 @@ describe("step `rehearsal` (§3d.1 step 8)", { timeout: 60_000 }, () => {
     w.deps.bridge = fakeBridge({
       results: {
         rehearsal: testResult("rehearsal", {
-          clicks: [{ label: "sign_up", selector: '[data-infinite-conversion="sign_up"]', found: true, events: { ga4: ["sign_up"], posthog: [], meta: ["CompleteRegistration"], infinite: [] }, nonGetCancelled: 1, navigatedAfterMs: null, navigationCancelled: false }]
+          clicks: [{ label: "sign_up", selector: '[data-infinite-conversion="sign_up"]', found: true, events: { ga4: ["sign_up"], posthog: [], meta: ["CompleteRegistration"], infinite: [] }, nonGetCancelled: 1, navigatedAfterMs: null, navigationCancelled: false, refused: null }]
         })
       }
     })
@@ -484,7 +484,7 @@ describe("step `rehearsal` (§3d.1 step 8)", { timeout: 60_000 }, () => {
     w.deps.bridge = fakeBridge({
       results: {
         rehearsal: testResult("rehearsal", {
-          clicks: [{ label: "sign_up", selector: '[data-infinite-conversion="sign_up"]', found: true, events: { ga4: [], posthog: [], meta: [], infinite: [] }, nonGetCancelled: 0, navigatedAfterMs: null, navigationCancelled: false }]
+          clicks: [{ label: "sign_up", selector: '[data-infinite-conversion="sign_up"]', found: true, events: { ga4: [], posthog: [], meta: [], infinite: [] }, nonGetCancelled: 0, navigatedAfterMs: null, navigationCancelled: false, refused: null }]
         })
       }
     })

@@ -2,14 +2,8 @@
 // `.gitignore` rule (the wizard commits its own fence block and nothing else in that file).
 import { GITIGNORE_FENCE_END, GITIGNORE_FENCE_START } from "../harness/outputs.js"
 
-/** One `git status --porcelain=v1 -z` entry. `x` = index, `y` = worktree; `??` untracked, `!!` ignored. */
-export interface StatusEntry {
-  x: string
-  y: string
-  path: string
-  /** The source path of a rename or copy. */
-  origPath?: string
-}
+export type { StatusEntry } from "../wizard/contracts/git-host.js"
+import type { StatusEntry } from "../wizard/contracts/git-host.js"
 
 /** Parses `git status --porcelain=v1 -z` output (NUL-separated; a rename carries its source as the next field). */
 export function parsePorcelainZ(output: string): StatusEntry[] {

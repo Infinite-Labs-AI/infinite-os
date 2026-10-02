@@ -201,6 +201,8 @@ export interface FakeBridgeScript {
   receipts?: ReceiptsResponseFields[]
   patchRun?: (patch: RunPatch) => WizardRunPublic
   reportEcho?: (phase: string, runId: string) => { schema: string; runId: string }
+  /** §3z.9 (A21): the real-visit facts the desktop stored (absent → 404 not_found). */
+  storedFacts?: TestResult
 }
 
 export function createFakeBridge(log: CallLog, script: FakeBridgeScript = {}): TagBridgeClient & { linkId: string | null } {
@@ -360,6 +362,11 @@ export function createFakeBridge(log: CallLog, script: FakeBridgeScript = {}): T
     async cancelTest(id: string) {
       record("cancelTest", id)
       return envelope({ testRunId: id, state: "cancelled" as const })
+    },
+    async testFacts(runId: string) {
+      record("testFacts", runId)
+      if (!script.storedFacts) throw new FakeBridgeError(404, "not_found")
+      return envelope({ result: script.storedFacts })
     }
   }
   return bridge as unknown as TagBridgeClient & { linkId: string | null }
@@ -571,6 +578,10 @@ export function createFakeChecks(log: CallLog, grades?: Partial<Record<TestTool,
     async gradeTestRun(testResult, expect, mode) {
       log.push("checks", "gradeTestRun", mode)
       return { infinite: pass("infinite"), ga4: pass("ga4"), posthog: pass("posthog"), meta: pass("meta"), ...grades }
+    },
+    async gradeTestRunChecks(_testResult, _expect, mode) {
+      log.push("checks", "gradeTestRunChecks", mode)
+      return []
     },
     register() {}
   }

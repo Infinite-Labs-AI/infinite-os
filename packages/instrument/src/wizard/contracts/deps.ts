@@ -14,7 +14,10 @@ import type { ReportBuilder } from "./report.js"
 import type { WizardRunState } from "./state.js"
 import type { LearnId, WizardStepId, Who } from "./steps.js"
 
-/** §3d.8. `failed` with `next:"continue"` (and `blocked`) never sets the exit code. */
+/**
+ * §3d.8 + §3z.12 (B3): `blocked` HALTS the run and its code sets the exit code (link's NO_APP / SIGNED_OUT,
+ * FENCE_TAMPER); `failed` with `next:"continue"` does not.
+ */
 export type StepOutcome =
   | { kind: "ok"; status: string }
   | { kind: "skipped"; reason: string }

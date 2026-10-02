@@ -11,6 +11,7 @@
 // 3. Receipts (waitMs 120 s, re-polled every 10 s), T1 checks after the deploy, the `proven_live` column,
 //    then `PATCH proofState` to the result (winner only).
 // 4. Print the run's PostHog distinct id so the user can filter this visitor out.
+import { gradeContextFrom } from "../../checks/grade-context.js"
 import { createHash } from "node:crypto"
 import { join } from "node:path"
 
@@ -541,7 +542,10 @@ async function runProve(ctx: WizardContext, deps: WizardDeps): Promise<StepOutco
       const result = await runRealVisit(ctx, deps, runId, productionHost, keys, expect)
       if ("error" in result) visitError = result.error
       else {
-        const grades = await deps.checks.gradeTestRun(result, expect, "real_visit", { cmpDetected: result.environment.cmpDetected, envSourcedIds: [] })
+        // §3z.12 §3e.7 (B11): the grader always gets the consent mode, the installed tools and whose Meta pixel it is.
+        const census = await deps.checks.census(ctx.root, ctx.appRoot)
+        const consentMode = state.plan?.answers.consentMode ?? keys.infinite.consentMode
+        const grades = await deps.checks.gradeTestRun(result, expect, "real_visit", gradeContextFrom({ census, consentMode, cmpDetected: result.environment.cmpDetected }))
         for (const [tool, grade] of Object.entries(grades) as Array<[TestTool, CheckResult]>) {
           ctx.emit.emit("check.result", { checkId: grade.checkId, tier: "PV", state: grade.state, ...(grade.reason ? { reason: grade.reason } : {}), runId })
           void tool

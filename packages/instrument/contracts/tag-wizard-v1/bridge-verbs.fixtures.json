@@ -408,7 +408,9 @@
               "endpointHost": "us.i.posthog.com",
               "sameOrigin": false,
               "libCustomApiHost": false,
-              "status": "cancelled"
+              "status": "cancelled",
+              "loadLabel": "home",
+              "afterNav": false
             }
           ],
           "bootRequests": [
@@ -422,10 +424,11 @@
           "events": [
             {
               "siteSourceKey": "site_FAKEacmeStoreSourceKey",
-              "eventName": "page_view",
+              "eventName": "site_page_view",
               "eventId": "evt_FAKE0001",
               "nav": false,
-              "status": "cancelled"
+              "status": "cancelled",
+              "loadLabel": "home"
             }
           ]
         },
@@ -439,7 +442,8 @@
               "ev": "PageView",
               "eid": null,
               "method": "GET",
-              "status": "cancelled"
+              "status": "cancelled",
+              "loadLabel": "home"
             }
           ],
           "console": [],
@@ -951,7 +955,9 @@
               "endpointHost": "www.acme-store.com",
               "sameOrigin": true,
               "libCustomApiHost": true,
-              "status": "cancelled"
+              "status": "cancelled",
+              "loadLabel": "home",
+              "afterNav": false
             }
           ],
           "bootRequests": [
@@ -965,10 +971,11 @@
           "events": [
             {
               "siteSourceKey": "site_FAKEacmeStoreSourceKey",
-              "eventName": "page_view",
+              "eventName": "site_page_view",
               "eventId": "evt_FAKE0201",
               "nav": false,
-              "status": "cancelled"
+              "status": "cancelled",
+              "loadLabel": "home"
             }
           ]
         },
@@ -982,7 +989,8 @@
               "ev": "PageView",
               "eid": null,
               "method": "GET",
-              "status": "cancelled"
+              "status": "cancelled",
+              "loadLabel": "home"
             }
           ],
           "console": [],
@@ -1017,7 +1025,8 @@
             },
             "nonGetCancelled": 1,
             "navigatedAfterMs": 1012,
-            "navigationCancelled": true
+            "navigationCancelled": true,
+            "refused": null
           }
         ],
         "pii": [],
@@ -1137,10 +1146,11 @@
           "events": [
             {
               "siteSourceKey": "site_FAKEacmeStoreSourceKey",
-              "eventName": "page_view",
+              "eventName": "site_page_view",
               "eventId": "evt_FAKE2501",
               "nav": false,
-              "status": "cancelled"
+              "status": "cancelled",
+              "loadLabel": "preview_self"
             }
           ]
         },
@@ -1477,7 +1487,9 @@
               "endpointHost": "www.acme-store.com",
               "sameOrigin": true,
               "libCustomApiHost": true,
-              "status": 200
+              "status": 200,
+              "loadLabel": "home",
+              "afterNav": false
             }
           ],
           "bootRequests": [
@@ -1491,10 +1503,11 @@
           "events": [
             {
               "siteSourceKey": "site_FAKEacmeStoreSourceKey",
-              "eventName": "page_view",
+              "eventName": "site_page_view",
               "eventId": "evt_FAKE0301",
               "nav": false,
-              "status": 202
+              "status": 202,
+              "loadLabel": "home"
             }
           ]
         },
@@ -1508,7 +1521,8 @@
               "ev": "PageView",
               "eid": null,
               "method": "GET",
-              "status": 200
+              "status": 200,
+              "loadLabel": "home"
             }
           ],
           "console": [],
@@ -1633,7 +1647,8 @@
       "requestId": "00000000-0000-4000-8000-000000000133",
       "patch": {
         "proofState": "proven"
-      }
+      },
+      "producer": "tag"
     },
     "status": 200,
     "response": {
@@ -2804,6 +2819,247 @@
     }
   },
   {
+    "verb": "meta-relay.enable",
+    "method": "POST",
+    "path": "/v1/meta-relay",
+    "request": {
+      "protocolVersion": 1,
+      "requestId": "00000000-0000-4000-8000-000000000301",
+      "sourceRef": "meta_src_FAKE_0001",
+      "enable": true
+    },
+    "status": 200,
+    "response": {
+      "protocolVersion": 1,
+      "requestId": "00000000-0000-4000-8000-000000000301",
+      "available": false,
+      "reason": "not_rolled_out",
+      "bound": {
+        "sourceRef": "meta_src_FAKE_0001",
+        "pixelId": "1234567890123456"
+      },
+      "enabled": true
+    }
+  },
+  {
+    "verb": "baseline",
+    "method": "GET",
+    "path": "/v1/baseline?runId=7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80&since=2026-10-02T09:38:00.000Z",
+    "request": null,
+    "status": 200,
+    "response": {
+      "protocolVersion": 1,
+      "requestId": "00000000-0000-4000-8000-000000000302",
+      "window": {
+        "days": 28,
+        "from": "2026-09-04T00:00:00.000Z",
+        "to": "2026-10-02T00:00:00.000Z"
+      },
+      "ga4": {
+        "status": "ok",
+        "pageViews": {
+          "production": 39,
+          "preview": 5,
+          "other": 0
+        },
+        "localhostExcluded": true,
+        "topOffenders": [
+          {
+            "host": "acme-store-git-feature-acme.vercel.app",
+            "count": 5
+          }
+        ],
+        "keyEvents": [
+          {
+            "name": "sign_up",
+            "designated": true,
+            "received28d": 0
+          }
+        ],
+        "syncedAt": "2026-10-02T08:00:00.000Z"
+      },
+      "posthog": {
+        "status": "ok",
+        "pageViews": {
+          "production": 120,
+          "preview": 14,
+          "other": 3
+        },
+        "proxied": {
+          "tagged": 0,
+          "webTotal": 137
+        },
+        "conversions": [
+          {
+            "name": "sign_up",
+            "count": 4
+          }
+        ]
+      },
+      "conversions": {
+        "infinite": [
+          {
+            "name": "signup",
+            "count": 2
+          }
+        ]
+      },
+      "serverLane": {
+        "laneState": "no_secret",
+        "documentRequests7d": 0,
+        "outcomes7d": 0
+      },
+      "stripe": {
+        "status": "connected",
+        "lastLiveEventAt": "2026-10-02T04:00:00.000Z"
+      }
+    }
+  },
+  {
+    "verb": "test.facts",
+    "method": "GET",
+    "path": "/v1/test/facts?runId=7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80",
+    "request": null,
+    "status": 200,
+    "response": {
+      "protocolVersion": 1,
+      "requestId": "00000000-0000-4000-8000-000000000303",
+      "result": {
+        "mode": "real_visit",
+        "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80",
+        "startedAt": "2026-10-02T09:40:00.000Z",
+        "finishedAt": "2026-10-02T09:41:00.000Z",
+        "environment": {
+          "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Infinite/0.4.1 Chrome/140.0.0.0 Electron/38.0.0 Safari/537.36 InfiniteVerifyCheck/1 (+https://infinite.fast; analytics monitor)",
+          "automationDetected": false,
+          "visibilityState": "visible",
+          "blockedBySiteBotRules": false,
+          "previewProtected": false,
+          "consentSeeded": false,
+          "cmpDetected": null
+        },
+        "loads": [
+          {
+            "label": "home",
+            "url": "https://acme-store.com/",
+            "finalUrl": "https://www.acme-store.com/",
+            "status": 200,
+            "rendered": true,
+            "managedMarkerSeen": true,
+            "redirects": [
+              {
+                "from": "https://acme-store.com/",
+                "to": "https://www.acme-store.com/",
+                "status": 308
+              }
+            ]
+          }
+        ],
+        "requests": {
+          "total": 64,
+          "cancelled": 0,
+          "otherBeacons": [
+            {
+              "host": "bat.bing.com",
+              "pathClass": "action",
+              "method": "GET",
+              "resourceType": "image",
+              "cancelled": false
+            }
+          ]
+        },
+        "ga4": {
+          "events": [
+            {
+              "tid": "G-FAKE00001",
+              "en": "page_view",
+              "dlHost": "www.acme-store.com",
+              "transport": "post",
+              "status": 204,
+              "loadLabel": "home",
+              "afterNav": false
+            }
+          ]
+        },
+        "posthog": {
+          "events": [
+            {
+              "projectKey": "phc_FAKEtestProjectKeyNotReal000",
+              "event": "$pageview",
+              "distinctId": "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4c03",
+              "host": "www.acme-store.com",
+              "endpointHost": "www.acme-store.com",
+              "sameOrigin": true,
+              "libCustomApiHost": true,
+              "status": 200,
+              "loadLabel": "home",
+              "afterNav": false
+            }
+          ],
+          "bootRequests": [
+            {
+              "path": "/flags",
+              "status": 200
+            }
+          ]
+        },
+        "infinite": {
+          "events": [
+            {
+              "siteSourceKey": "site_FAKEacmeStoreSourceKey",
+              "eventName": "site_page_view",
+              "eventId": "evt_FAKE0301",
+              "nav": false,
+              "status": 202,
+              "loadLabel": "home"
+            }
+          ]
+        },
+        "meta": {
+          "configRequests": [
+            "1234567890123456"
+          ],
+          "tr": [
+            {
+              "pixelId": "1234567890123456",
+              "ev": "PageView",
+              "eid": null,
+              "method": "GET",
+              "status": 200,
+              "loadLabel": "home"
+            }
+          ],
+          "console": [],
+          "fbc": {
+            "present": false,
+            "value": null,
+            "domain": null
+          },
+          "fbp": {
+            "present": true
+          }
+        },
+        "csp": {
+          "violations": []
+        },
+        "clicks": [],
+        "pii": [],
+        "serverLaneProbe": {
+          "path": "/__infinite_probe/7f3c2a91b0de",
+          "status": 404,
+          "sentAt": "2026-10-02T09:40:30.000Z"
+        },
+        "markers": {
+          "infiniteEventIds": [
+            "evt_FAKE0301"
+          ],
+          "posthogDistinctId": "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4c03",
+          "metaEventIds": []
+        }
+      }
+    }
+  },
+  {
     "verb": "ga4-key-events",
     "method": "POST",
     "path": "/v1/ga4/key-events",
@@ -2827,6 +3083,81 @@
           "reason": "not_click_tested"
         }
       ]
+    }
+  },
+  {
+    "verb": "site-source",
+    "method": "POST",
+    "path": "/v1/site-source",
+    "request": {
+      "protocolVersion": 1,
+      "requestId": "00000000-0000-4000-8000-000000000310",
+      "productionHosts": [
+        "acme-store.com",
+        "shop.acme-store.com"
+      ],
+      "consentMode": "not_required"
+    },
+    "status": 400,
+    "response": {
+      "protocolVersion": 1,
+      "requestId": "00000000-0000-4000-8000-000000000310",
+      "error": {
+        "code": "invalid_request",
+        "message": "shop.acme-store.com is not proven for this workspace",
+        "retryable": false,
+        "field": "productionHosts",
+        "state": "unverified_host"
+      }
+    }
+  },
+  {
+    "verb": "conversions",
+    "method": "POST",
+    "path": "/v1/conversions",
+    "request": {
+      "protocolVersion": 1,
+      "requestId": "00000000-0000-4000-8000-000000000311",
+      "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80",
+      "conversions": [
+        {
+          "name": "signup",
+          "type": "signup",
+          "dedupe": "event"
+        }
+      ]
+    },
+    "status": 400,
+    "response": {
+      "protocolVersion": 1,
+      "requestId": "00000000-0000-4000-8000-000000000311",
+      "error": {
+        "code": "invalid_request",
+        "message": "Infinite holds GA4 key events this write would drop",
+        "retryable": false,
+        "state": "would_drop_ga4_events"
+      }
+    }
+  },
+  {
+    "verb": "server-lane.provision-env",
+    "method": "POST",
+    "path": "/v1/server-lane/provision-env",
+    "request": {
+      "protocolVersion": 1,
+      "requestId": "00000000-0000-4000-8000-000000000312",
+      "redeploy": "serving_production"
+    },
+    "status": 400,
+    "response": {
+      "protocolVersion": 1,
+      "requestId": "00000000-0000-4000-8000-000000000312",
+      "error": {
+        "code": "invalid_request",
+        "message": "protocol 1 accepts only redeploy skip",
+        "retryable": false,
+        "field": "redeploy"
+      }
     }
   },
   {
@@ -2918,6 +3249,28 @@
     }
   },
   {
+    "verb": "meta-relay.enable",
+    "method": "POST",
+    "path": "/v1/meta-relay",
+    "request": {
+      "protocolVersion": 1,
+      "requestId": "00000000-0000-4000-8000-000000000313",
+      "sourceRef": "meta_src_FAKE_0001",
+      "enable": true
+    },
+    "status": 403,
+    "response": {
+      "protocolVersion": 1,
+      "requestId": "00000000-0000-4000-8000-000000000313",
+      "error": {
+        "code": "role_required",
+        "message": "a workspace owner or admin turns on Meta server events",
+        "retryable": false,
+        "state": "owner_or_admin"
+      }
+    }
+  },
+  {
     "verb": "server-lane.provision-env",
     "method": "POST",
     "path": "/v1/server-lane/provision-env",
@@ -2949,6 +3302,44 @@
       "error": {
         "code": "origin_refused",
         "message": "requests with an Origin header are refused",
+        "retryable": false
+      }
+    }
+  },
+  {
+    "verb": "meta-relay.enable",
+    "method": "POST",
+    "path": "/v1/meta-relay",
+    "request": {
+      "protocolVersion": 1,
+      "requestId": "00000000-0000-4000-8000-000000000314",
+      "sourceRef": "meta_src_FAKE_9999",
+      "enable": true
+    },
+    "status": 404,
+    "response": {
+      "protocolVersion": 1,
+      "requestId": "00000000-0000-4000-8000-000000000314",
+      "error": {
+        "code": "not_found",
+        "message": "no Meta source with that reference in this workspace",
+        "retryable": false,
+        "field": "sourceRef"
+      }
+    }
+  },
+  {
+    "verb": "test.facts",
+    "method": "GET",
+    "path": "/v1/test/facts?runId=7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80",
+    "request": null,
+    "status": 404,
+    "response": {
+      "protocolVersion": 1,
+      "requestId": "00000000-0000-4000-8000-000000000315",
+      "error": {
+        "code": "not_found",
+        "message": "the app made no real visit for this run",
         "retryable": false
       }
     }
@@ -3131,8 +3522,9 @@
       "requestId": "00000000-0000-4000-8000-000000000154",
       "error": {
         "code": "relay_not_available",
-        "message": "Meta server events are not switched on yet",
-        "retryable": false
+        "message": "Meta server events need a Meta pixel connected in Infinite",
+        "retryable": false,
+        "state": "no_pixel"
       }
     }
   },
@@ -3154,7 +3546,7 @@
       "requestId": "00000000-0000-4000-8000-000000000155",
       "error": {
         "code": "foreign_site_hosts",
-        "message": "this workspace already collects for acme-store.com",
+        "message": "this workspace already collects for another site",
         "retryable": false
       }
     }
@@ -3233,6 +3625,30 @@
     }
   },
   {
+    "verb": "site-source",
+    "method": "POST",
+    "path": "/v1/site-source",
+    "request": {
+      "protocolVersion": 1,
+      "requestId": "00000000-0000-4000-8000-000000000316",
+      "productionHosts": [
+        "acme-store.com"
+      ],
+      "consentMode": "required"
+    },
+    "status": 423,
+    "response": {
+      "protocolVersion": 1,
+      "requestId": "00000000-0000-4000-8000-000000000316",
+      "error": {
+        "code": "site_setup_locked",
+        "message": "a website test is running on this site in Infinite",
+        "retryable": false,
+        "state": "live_site_lock"
+      }
+    }
+  },
+  {
     "verb": "link.request",
     "method": "POST",
     "path": "/v1/link/request",
@@ -3259,6 +3675,22 @@
         "code": "rate_limited",
         "message": "too many link requests; try again in a minute",
         "retryable": true
+      }
+    }
+  },
+  {
+    "verb": "keys",
+    "method": "GET",
+    "path": "/v1/keys",
+    "request": null,
+    "status": 500,
+    "response": {
+      "protocolVersion": 1,
+      "requestId": "00000000-0000-4000-8000-000000000317",
+      "error": {
+        "code": "internal_error",
+        "message": "the linked-sites file is damaged; open Settings › Linked sites › Start over",
+        "retryable": false
       }
     }
   },

@@ -136,6 +136,8 @@ export interface FakeBridgeScript {
   errors: Partial<Record<BridgeVerbId, ScriptedError>>
   /** Verbs whose connection is destroyed AFTER the verb took effect, instead of answering (once each). */
   hangUpAfter: BridgeVerbId[]
+  /** §3z.9 (A21): the real-visit facts the desktop proof watcher stored for the run (null → 404 not_found). */
+  storedFacts: TestResult | null
 }
 
 export interface FakeBridgeCall {
@@ -217,7 +219,8 @@ function defaultScript(): FakeBridgeScript {
     receipts: null,
     metaRelay: relay as unknown as FakeBridgeScript["metaRelay"],
     errors: {},
-    hangUpAfter: []
+    hangUpAfter: [],
+    storedFacts: null
   }
 }
 
@@ -337,10 +340,12 @@ export async function startFakeBridge(options: StartFakeBridgeOptions = {}): Pro
         }
       }
       record.body = body
+      // §3z.2 (A7): echo the body's id (POST/PATCH) or the GET's `X-Request-Id` header, else a fresh uuid.
+      const headerId = typeof req.headers["x-request-id"] === "string" ? req.headers["x-request-id"] : null
       const requestId =
         typeof body === "object" && body !== null && typeof (body as Record<string, unknown>).requestId === "string"
           ? ((body as Record<string, unknown>).requestId as string)
-          : randomUUID()
+          : (headerId ?? randomUUID())
 
       // §3a.2: Origin / Host first (DNS rebinding), then the bearer.
       if (req.headers.origin !== undefined || req.headers.host !== `127.0.0.1:${port}`) return fail(res, record, requestId, "origin_refused")
@@ -364,6 +369,8 @@ export async function startFakeBridge(options: StartFakeBridgeOptions = {}): Pro
       } else if (text) {
         return fail(res, record, requestId, "invalid_request", { message: "GET takes no body" })
       }
+      // §3z.2: a query string on a POST or PATCH route → 400 unknown_field, before any cloud call.
+      if (method !== "GET" && path.includes("?")) return fail(res, record, requestId, "unknown_field", { message: "POST/PATCH take no query" })
       if (!req.headers["x-infinite-tag-version"]) return fail(res, record, requestId, "invalid_request", { field: "X-Infinite-Tag-Version" })
       if (!script.capabilities.includes(spec.capability)) return fail(res, record, requestId, "capability_unavailable")
 
@@ -464,6 +471,16 @@ export async function startFakeBridge(options: StartFakeBridgeOptions = {}): Pro
           if (patch.proofState !== undefined && script.run.proofState !== "proving" && script.run.proofState !== patch.proofState) {
             return fail(res, record, requestId, "claimed_by_other", { state: script.run.proofState, message: "This run is not being proven; claim it first." })
           }
+          // §3z.8 (A10): the proofState PATCH names its producer, which must hold the claim.
+          if (patch.proofState !== undefined && reqBody.producer !== script.run.proofClaimedBy) {
+            return fail(res, record, requestId, "claimed_by_other", { state: script.run.proofState, message: "Only the producer holding the proof claim may set proofState." })
+          }
+          if (patch.approvedConversions !== undefined && patch.approvedConversions.length > 20) {
+            return fail(res, record, requestId, "invalid_request", { field: "patch.approvedConversions" })
+          }
+          if (typeof patch.prUrl === "string" && (patch.prUrl.length > 300 || !patch.prUrl.startsWith("https://"))) {
+            return fail(res, record, requestId, "invalid_request", { field: "patch.prUrl" })
+          }
           const next = { ...script.run }
           for (const [key, value] of Object.entries(patch)) {
             if (key === "clickTestedConversions") {
@@ -515,16 +532,21 @@ export async function startFakeBridge(options: StartFakeBridgeOptions = {}): Pro
         case "server-lane.status":
           return ok(strip(fixtureResponse("server-lane.status")))
         case "server-lane.provision-env": {
+          // §3z.7 (A9): protocol 1 accepts only redeploy:"skip" (the shape refuses anything else first).
+          if (reqBody.redeploy !== "skip") return fail(res, record, requestId, "invalid_request", { field: "redeploy" })
           const response = strip(fixtureResponse("server-lane.provision-env"))
-          if (reqBody.redeploy === "skip") response.redeploy = { skipped: true, reason: "not_requested" }
+          response.redeploy = { skipped: true, reason: "not_requested" }
           return ok(response)
         }
         case "meta-relay.status":
           return ok({ ...script.metaRelay })
         case "meta-relay.enable": {
-          if (!script.metaRelay.available) return fail(res, record, requestId, "relay_not_available", { state: script.metaRelay.reason ?? "not_available" })
+          // §3z.7 (A23): it binds while not rolled out (200, available:false); other reasons refuse with 409.
+          if (!script.metaRelay.available && script.metaRelay.reason !== "not_rolled_out") {
+            return fail(res, record, requestId, "relay_not_available", { state: script.metaRelay.reason ?? "no_pixel" })
+          }
           const pixel = script.keys.meta.pixels.find((candidate) => candidate.sourceRef === reqBody.sourceRef)
-          if (!pixel) return fail(res, record, requestId, "invalid_request", { field: "sourceRef" })
+          if (!pixel) return fail(res, record, requestId, "not_found", { field: "sourceRef" })
           script.metaRelay = { ...script.metaRelay, bound: { sourceRef: pixel.sourceRef, pixelId: pixel.pixelId }, enabled: true }
           return ok({ ...script.metaRelay })
         }
@@ -557,6 +579,10 @@ export async function startFakeBridge(options: StartFakeBridgeOptions = {}): Pro
         case "test.cancel": {
           const id = url.pathname.split("/").slice(-2)[0] ?? ""
           return ok({ testRunId: id, state: "cancelled" })
+        }
+        case "test.facts": {
+          if (!script.storedFacts || script.storedFacts.runId !== url.searchParams.get("runId")) return fail(res, record, requestId, "not_found")
+          return ok({ result: structuredClone(script.storedFacts) })
         }
       }
     })().catch((error: unknown) => {

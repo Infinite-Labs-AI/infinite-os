@@ -5,6 +5,7 @@
 // `WizardGitOps` adds a few read helpers the O4 steps need beyond the §3g.1 list (the porcelain entries with
 // their status codes, a file at a revision, unstaging, the staged diff, a config read, the push-option push
 // for GitLab, the TTY hand-over switch). They are ADDITIVE: every §3g.1 method keeps its contract shape.
+import type { WizardGitOps } from "../wizard/contracts/git-host.js"
 import { constants, accessSync, mkdirSync } from "node:fs"
 import { isAbsolute, join } from "node:path"
 
@@ -27,34 +28,7 @@ export class GitCommandError extends Error {
   }
 }
 
-export interface WizardGitOps extends GitOps {
-  /** `git status --porcelain=v1 -z --untracked-files=all` (ignored files excluded). */
-  statusEntries(): Promise<StatusEntry[]>
-  /** The file at a revision (`git show <rev>:<path>`), or null when it does not exist there. */
-  showFile(rev: string, path: string): Promise<string | null>
-  /** `git restore --staged -- <paths>`: takes paths out of the index, leaves the worktree as is. */
-  unstage(paths: readonly string[]): Promise<void>
-  /** The staged diff (`git diff --cached`), for the commit scan. */
-  stagedDiff(): Promise<string>
-  /** `git config --get <key>`, or null. */
-  configGet(key: string): Promise<string | null>
-  /** `origin/HEAD`'s branch name, or null. */
-  originHead(): Promise<string | null>
-  /** Switch to an existing local branch (resume). */
-  switchTo(branch: string): Promise<void>
-  /** The current branch name, or null when detached. */
-  currentBranch(): Promise<string | null>
-  /** `git fetch origin <branch>` then the SHA of `origin/<branch>` (null when it cannot be read). */
-  remoteBranchSha(branch: string): Promise<string | null>
-  /** GitLab: push with merge-request push options (§3g.2). */
-  pushWithOptions(branch: string, pushOptions: readonly string[]): Promise<void>
-  /** True once the user owns the terminal (SSH may then prompt for a passphrase). */
-  setTtyHandedOver(handedOver: boolean): void
-  /** The base recorded by `createBranch` (or `setBase` on resume): pushes to it are refused. */
-  setBase(base: string): void
-  /** The exact argv of every git call made (for tests and the `--json` debug trail). */
-  readonly calls: ReadonlyArray<readonly string[]>
-}
+export type { WizardGitOps } from "../wizard/contracts/git-host.js"
 
 export interface CreateGitOpsOptions {
   /** The repo root (git's cwd). */

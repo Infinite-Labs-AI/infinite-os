@@ -300,6 +300,10 @@ export function createCheckRunner(options: CheckRunnerOptions): O6CheckRunner {
     turnGate: (diff, gateCtx) => seam("turn_gate", { diff, connectionIds: gateCtx.connectionIds }),
     async gradeTestRun(result, expect, mode, gradeCtx) {
       return grade({ result, expect, mode, ctx: gradeCtx }).tools as Record<TestTool, CheckResult>
+    },
+    async gradeTestRunChecks(result, expect, mode, gradeCtx) {
+      const graded = grade({ result, expect, mode, ctx: gradeCtx })
+      return [...(graded.metaAutomaticEvents ? [graded.metaAutomaticEvents.result] : []), ...graded.checks]
     }
   }
 }

@@ -23,8 +23,22 @@ export const WIZARD_PATHS = {
   dir: ".infinite/wizard",
   state: ".infinite/wizard/state.json",
   lock: ".infinite/wizard/run.lock",
-  prBody: ".infinite/wizard/pr-body.md",
+  /** `infinite-tag.before-facts.v1`, written by `before` (baseline + baselineBuild inside `facts`); run-scoped. */
+  beforeFacts: ".infinite/wizard/before.json",
+  /** `infinite-tag.wizard-keys.v1` (carries `runId`); run-scoped. */
+  keys: ".infinite/wizard/keys.json",
+  planApprovals: ".infinite/wizard/plan-approvals.json",
+  editBases: ".infinite/wizard/edit-bases.json",
+  reviewLedger: ".infinite/wizard/review-ledger.json",
+  proveVisit: ".infinite/wizard/prove-visit.json",
+  uninstall: ".infinite/wizard/uninstall.json",
+  /** The jobs brief (the agent's, or the parent agent's in nested mode). */
+  agentBrief: ".infinite/wizard/agent-brief.md",
   reviewBrief: ".infinite/wizard/review-brief.md",
+  prBody: ".infinite/wizard/pr-body.md",
+  commitMessage: ".infinite/wizard/commit-message.txt",
+  reportJson: ".infinite/wizard/report.json",
+  reportMarkdown: ".infinite/wizard/report.md",
   /** The review on hosts with no review API (GitLab, Bitbucket, other). */
   review: ".infinite/wizard/REVIEW.md",
   /** Committed (the edit receipt). */
@@ -62,6 +76,14 @@ export interface RunMarkers {
   metaEventIds?: string[]
 }
 
+/** One agent role's model as it actually ran (B22). */
+export interface AgentModelRecord {
+  model: string | null
+  effort: string
+  /** True when the pinned model was refused and the user's default model ran instead (§3f.7). */
+  fallback: boolean
+}
+
 export interface WizardRunState {
   schema: typeof WIZARD_STATE_SCHEMA
   /** The cloud run id; null until the `agent` step creates it. */
@@ -78,6 +100,11 @@ export interface WizardRunState {
     reviewer: Exclude<AgentReviewerKind, "none"> | null
     workerSession: { kind: "claude"; sessionId: string } | { kind: "codex"; threadId: string } | null
     whoPays: { worker: WhoPays | null; reviewer: WhoPays | null }
+    /**
+     * §3z.12 §3d.6 (B22): the model, effort and any model fallback each role ran with (the run record; also
+     * in the plan's cost line and the report notes). `model` is null when the user's default model ran.
+     */
+    models?: { worker: AgentModelRecord | null; reviewer: AgentModelRecord | null }
   } | null
   git: { base: string; baseSource: BaseSource; branch: string; baseSha: string; headSha: string | null } | null
   pr: {
@@ -137,6 +164,7 @@ export interface WizardStoreSnapshot {
 
 // ---- shapes ----
 
+const MODEL_RECORD_SHAPE = shapeOf<AgentModelRecord>()("AgentModelRecord", ["model", "effort", "fallback"], [])
 const MARKERS_SHAPE = shapeOf<RunMarkers>()("RunMarkers", [], ["infiniteEventIds", "posthogDistinctId", "probePath", "metaEventIds"])
 const WHO_PAYS_SHAPE = shapeOf<WhoPays>()("WhoPays", ["payer", "label"], [])
 
@@ -167,7 +195,11 @@ export const WIZARD_RUN_STATE_SHAPE = shapeOf<WizardRunState>()(
   {
     link: nullable(shapeOf<NonNullable<WizardRunState["link"]>>()("RunState.link", ["linkId", "workspaceName", "approvedAt", "runtimeVariant"], [])),
     steps: recordOf(shapeOf<StepRecord>()("StepRecord", ["outcome", "inputHash", "at"], ["code"])),
-    agent: nullable(shapeOf<NonNullable<WizardRunState["agent"]>>()("RunState.agent", ["worker", "reviewer", "workerSession", "whoPays"], [], {
+    agent: nullable(shapeOf<NonNullable<WizardRunState["agent"]>>()("RunState.agent", ["worker", "reviewer", "workerSession", "whoPays"], ["models"], {
+      models: shapeOf<NonNullable<NonNullable<WizardRunState["agent"]>["models"]>>()("RunState.models", ["worker", "reviewer"], [], {
+        worker: nullable(MODEL_RECORD_SHAPE),
+        reviewer: nullable(MODEL_RECORD_SHAPE)
+      }),
       workerSession: nullable(oneOf(
         shapeOf<{ kind: "claude"; sessionId: string }>()("ClaudeSession", ["kind", "sessionId"], []),
         shapeOf<{ kind: "codex"; threadId: string }>()("CodexSession", ["kind", "threadId"], [])

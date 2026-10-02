@@ -48,7 +48,13 @@ export const REASONS = [
   "not_vercel",
   "automation_detected",
   "not_exercised",
-  "not_probed"
+  "not_probed",
+  /** §3z.8 (A15): a passive check waits for a real visitor's event after the deploy. */
+  "waiting_real_event",
+  /** The site's bot rules refused the test window. */
+  "blocked_by_site_bot_rules",
+  /** The test crashed or ran out of time (never a pass). */
+  "test_error"
 ] as const
 export type Reason = (typeof REASONS)[number]
 
@@ -297,13 +303,13 @@ export const FINISH_LINE_SOURCES: { readonly [F in FinishLineId]: { n: number } 
     n: 6,
     live_today: src("baseline.server_lane_outcomes", "baseline.conversions_infinite"),
     in_pr: src("static.job8"),
-    proven_live: { inputs: ["passive.first_real_outcome"], fixedState: "pending" }
+    proven_live: { inputs: ["passive.first_real_outcome"], fixedState: "pending", reason: "waiting_real_event" }
   },
   identity_joined: {
     n: 7,
     live_today: src("census.identify_reset"),
     in_pr: src("static.job9"),
-    proven_live: { inputs: ["passive.first_identify"], fixedState: "pending" }
+    proven_live: { inputs: ["passive.first_identify"], fixedState: "pending", reason: "waiting_real_event" }
   },
   utms_survive_redirects: {
     n: 8,

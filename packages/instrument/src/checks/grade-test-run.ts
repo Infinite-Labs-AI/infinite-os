@@ -41,16 +41,20 @@ import type { CheckResult, CheckTier, EnvSourcedId, Evidence } from "../wizard/c
 import type { TestExpect, TestMode, TestResult, TestTool } from "../wizard/contracts/test-engine.js"
 import { TEST_TOOLS } from "../wizard/contracts/test-engine.js"
 
-/** Everything the grader needs beyond the facts. `installedTools` and `consentMode` come from the census and the keys verb. */
+/**
+ * Everything the grader needs beyond the facts (§3z.12 §3e.7, B11: the three context fields are REQUIRED on
+ * every call; null = honestly unknown, never guessed). `installedTools` and `consentMode` come from the
+ * census, the install and the keys verb / plan answer.
+ */
 export interface GradeContext {
   cmpDetected: TestResult["environment"]["cmpDetected"]
   envSourcedIds: readonly EnvSourcedId[]
-  /** The site's Infinite consent mode (keys `infinite.consentMode`). Absent = unknown. */
-  consentMode?: "required" | "not_required" | null
-  /** Tools installed on the site (census + install). Absent = unknown (a no-beacon tool is then undetermined). */
-  installedTools?: readonly TestTool[]
-  /** Whose Meta pixel the site runs; D10 counts automatic events for an ADOPTED pixel only. */
-  metaPixelOwnership?: "managed" | "adopted"
+  /** The site's Infinite consent mode. null = unknown (a silent tool then reads `undetermined (test_error)`). */
+  consentMode: "required" | "not_required" | null
+  /** Tools installed on the site. null = unknown (a no-beacon tool is then undetermined). */
+  installedTools: readonly TestTool[] | null
+  /** Whose Meta pixel the site runs; D10 counts automatic events for an ADOPTED pixel only. null = none / unknown. */
+  metaPixelOwnership: "managed" | "adopted" | null
   runId?: string | null
   now?: () => Date
 }
@@ -77,9 +81,18 @@ function isPreviewSelf(result: TestResult): boolean {
   return result.loads.length > 0 && result.loads.every((load) => load.label === "preview_self")
 }
 
-/** Some loads are the preview's own URL and some are not (PostHog / Meta facts carry no load label). */
-function isMixedPreviewSelf(result: TestResult): boolean {
-  return result.loads.some((load) => load.label === "preview_self") && !isPreviewSelf(result)
+/** The beacons a tool sent from the preview's own URL (every fact carries its load label since §3z.9, A17). */
+function previewSelfBeacons(result: TestResult, tool: TestTool): number {
+  switch (tool) {
+    case "ga4":
+      return result.ga4.events.filter((event) => event.loadLabel === "preview_self").length
+    case "posthog":
+      return result.posthog.events.filter((event) => event.loadLabel === "preview_self").length
+    case "meta":
+      return result.meta.tr.filter((tr) => tr.loadLabel === "preview_self").length
+    case "infinite":
+      return result.infinite.events.filter((event) => event.loadLabel === "preview_self").length
+  }
 }
 
 /** Loads that really rendered a page (2xx/3xx). A page that never ran cannot be graded. */
@@ -134,7 +147,7 @@ function expectedIds(expect: TestExpect, tool: TestTool): string[] | null {
 
 /** Evidence of a client-side route change in this result (the one load may then carry a second page view). */
 function spaNavigationSeen(result: TestResult): boolean {
-  return result.ga4.events.some((event) => event.afterNav) || result.infinite.events.some((event) => event.nav)
+  return result.ga4.events.some((event) => event.afterNav) || result.posthog.events.some((event) => event.afterNav) || result.infinite.events.some((event) => event.nav)
 }
 
 function duplicatePageViews(result: TestResult, tool: "ga4" | "posthog"): string[] {
@@ -147,14 +160,13 @@ function duplicatePageViews(result: TestResult, tool: "ga4" | "posthog"): string
     }
     return [...counts].filter(([, count]) => count > 1).map(([key, count]) => `${key.split("|")[1]} sent ${count} page_view on ${key.split("|")[0]}`)
   }
-  // PostHog facts carry no load label; every load is a fresh partition, so a distinct id is one load.
-  const allowed = spaNavigationSeen(result) ? 2 : 1
+  // §3z.9 (A17): PostHog facts carry their load and whether they came after a client-side navigation.
   for (const event of result.posthog.events) {
     if (event.event !== "$pageview") continue
-    const key = `${event.distinctId}|${event.projectKey}`
+    const key = `${event.loadLabel}|${event.projectKey}|${event.afterNav ? "nav" : "load"}`
     counts.set(key, (counts.get(key) ?? 0) + 1)
   }
-  return [...counts].filter(([, count]) => count > allowed).map(([key, count]) => `${key.split("|")[1]} sent ${count} $pageview in one load`)
+  return [...counts].filter(([, count]) => count > 1).map(([key, count]) => `${key.split("|")[1]} sent ${count} $pageview on ${key.split("|")[0]}`)
 }
 
 function isHttpStatus(status: TestResult["meta"]["tr"][number]["status"]): status is number {
@@ -184,16 +196,14 @@ function gradeTool(tool: TestTool, result: TestResult, expect: TestExpect, mode:
   }
 
   const beacons = beaconCount(result, tool)
-  if ((tool === "posthog" || tool === "meta") && beacons > 0 && isMixedPreviewSelf(result))
-    return { state: "undetermined", code: "test_error", detail: `${tool} facts carry no load label, so its beacons cannot be split between the preview's own URL and the other loads` }
   if (GUARDED_TOOLS.has(tool) && isPreviewSelf(result)) {
     return beacons > 0
       ? { state: "problem", code: "previews_send_data", detail: `${beacons} ${tool} beacon(s) from the preview's own URL` }
       : { state: "pass", code: null, detail: `${tool} stays silent on the preview` }
   }
-  if (GUARDED_TOOLS.has(tool) && tool === "ga4") {
-    const fromPreview = result.ga4.events.filter((event) => event.loadLabel === "preview_self").length
-    if (fromPreview > 0) return { state: "problem", code: "previews_send_data", detail: `${fromPreview} GA4 beacon(s) from the preview's own URL` }
+  if (GUARDED_TOOLS.has(tool)) {
+    const fromPreview = previewSelfBeacons(result, tool)
+    if (fromPreview > 0) return { state: "problem", code: "previews_send_data", detail: `${fromPreview} ${tool} beacon(s) from the preview's own URL` }
   }
   if (tool === "meta") {
     if (result.meta.console.includes("traffic_permissions_blocked"))
@@ -215,12 +225,12 @@ function gradeTool(tool: TestTool, result: TestResult, expect: TestExpect, mode:
     const cmp = ctx.cmpDetected ?? env.cmpDetected
     if (consentRequired || cmp !== null)
       return { state: "undetermined", code: "held_by_consent", detail: consentRequired ? "consent is required and the test-only grant had no effect" : `a consent tool (${cmp}) holds it` }
-    if (ctx.consentMode === undefined)
-      return { state: "undetermined", code: "test_error", detail: "the grader was not told the site's consent mode, so silence cannot be told from consent" }
+    if (ctx.consentMode === null)
+      return { state: "undetermined", code: "test_error", detail: "the site's consent mode is not known, so silence cannot be told from consent" }
     const envSourced = ctx.envSourcedIds.find((entry) => entry.tool === tool)
     if (envSourced && isPreviewBuild(result, mode))
       return { state: "undetermined", code: "env_dependent", detail: `${envSourced.envName} (${envSourced.file}:${envSourced.line}) has no value in a preview build` }
-    if (!ctx.installedTools) return { state: "undetermined", code: "test_error", detail: "the grader was not told which tools are installed" }
+    if (ctx.installedTools === null) return { state: "undetermined", code: "test_error", detail: "the tools installed on the site are not known" }
     if (ctx.installedTools.includes(tool)) return { state: "problem", code: "no_beacon", detail: `${tool} is installed but sent nothing` }
     return { state: "info", code: "not_installed", detail: `${tool} is not on the site` }
   }
@@ -363,6 +373,12 @@ export function gradeTestRunChecks(result: TestResult, tools: Record<TestTool, C
   // PostHog), because a pass here marks GA4 key events (review O6-R12). Unknown installs → undetermined.
   for (const click of result.clicks) {
     const prefix = `label=${click.label}; `
+    // §3z.9 (A17): a target the engine refused to click (a submit control, a consent banner) was not
+    // exercised; it is never a missing conversion.
+    if (click.refused !== null) {
+      add("click_test", "undetermined", "not_exercised", `${prefix}the test window does not click a ${click.refused === "submit_control" ? "submit control" : "consent banner"}`)
+      continue
+    }
     if (!click.found) {
       add("click_test", "undetermined", "not_exercised", `${prefix}no element matches ${click.selector}`)
       continue
@@ -373,7 +389,7 @@ export function gradeTestRunChecks(result: TestResult, tools: Record<TestTool, C
       add("click_test", "problem", "fbq_standard_on_click", `${prefix}fbq sent ${standard.join(", ")} on a click`)
       continue
     }
-    if (!ctx.installedTools) {
+    if (ctx.installedTools === null) {
       add("click_test", "undetermined", "test_error", `${prefix}the grader was not told which tools are installed, so it cannot say which must receive ${click.label}`)
       continue
     }

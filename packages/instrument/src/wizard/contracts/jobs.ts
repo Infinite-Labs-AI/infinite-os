@@ -166,7 +166,8 @@ export const JOB_TABLE: { readonly [J in JobId]: JobSpec & { jobId: J } } = {
     title: "Send conversions to every tool",
     requiresApprovedLine: ["conversion_names"],
     // T0 click_test for static HTML / Vite, RH click_test for every other framework.
-    checks: [c("T0", "click_test"), c("RH", "click_test"), c("S", "no_fbq_standard_on_click")],
+    // §3z.12 §3e.1 (B15): `first_real_conversion` (P) reads baseline(runId, since = the deploy time) on a re-run.
+    checks: [c("T0", "click_test"), c("RH", "click_test"), c("S", "no_fbq_standard_on_click"), c("P", "first_real_conversion")],
     donePath: ["done_in_code", "waiting_real_event", "proven"]
   },
   setup_check_fixes: {
@@ -498,6 +499,18 @@ export interface TurnDiff {
   files: Array<{ path: string; added: Array<{ line: number; text: string }>; removed: Array<{ line: number; text: string }> }>
 }
 
+/** What every grader call carries besides the facts (§3z.12 §3e.7, B11). */
+export interface GradeTestRunContext {
+  cmpDetected: TestResult["environment"]["cmpDetected"]
+  envSourcedIds: readonly EnvSourcedId[]
+  /** The site's consent mode (keys `infinite.consentMode` / the plan answer); null = unknown. */
+  consentMode: "required" | "not_required" | null
+  /** The tools installed on the site (census + install); null = unknown. */
+  installedTools: readonly TestTool[] | null
+  /** Whose Meta pixel the site runs; null = no Meta pixel (or unknown). */
+  metaPixelOwnership: "managed" | "adopted" | null
+}
+
 export interface CheckRunner {
   run(checkId: CheckId, input: unknown): Promise<CheckResult | CheckResult[]>
   buildBaseline(): Promise<BuildResult>
@@ -517,24 +530,14 @@ export interface CheckRunner {
   /** §3f.9, after EVERY agent turn, before any build or T0. A `problem` reverts the hunk and blocks the job. */
   turnGate(diff: TurnDiff, ctx: { connectionIds: readonly string[] }): Promise<CheckResult[]>
   /**
-   * §3h.8: THE grader of desktop test facts (the only one). `consentMode`, `installedTools` and
-   * `metaPixelOwnership` (lane O6, additive): §3h.8's "held by consent = consent_mode required …" and "no
-   * beacon from an INSTALLED tool → problem" need them, and D10 counts automatic events for an ADOPTED
-   * pixel only. A caller that omits `installedTools` gets `undetermined (test_error)` for a silent tool,
-   * never a guessed verdict.
+   * §3h.8: THE grader of desktop test facts (the only one). §3z.12 §3e.7 (B11): `consentMode`,
+   * `installedTools` and `metaPixelOwnership` are REQUIRED on every call (null = honestly unknown: a silent
+   * tool then reads `undetermined (test_error)`, never a guessed verdict). A call with another run's facts
+   * throws.
    */
-  gradeTestRun(
-    result: TestResult,
-    expect: TestExpect,
-    mode: TestMode,
-    ctx: {
-      cmpDetected: TestResult["environment"]["cmpDetected"]
-      envSourcedIds: readonly EnvSourcedId[]
-      consentMode?: "required" | "not_required" | null
-      installedTools?: readonly TestTool[]
-      metaPixelOwnership?: "managed" | "adopted"
-    }
-  ): Promise<Record<TestTool, CheckResult>>
+  gradeTestRun(result: TestResult, expect: TestExpect, mode: TestMode, ctx: GradeTestRunContext): Promise<Record<TestTool, CheckResult>>
+  /** §3z.12 §3e.7: the per-check results (RH / PV / T1 ids the jobs name) for the report's per-check cells. */
+  gradeTestRunChecks(result: TestResult, expect: TestExpect, mode: TestMode, ctx: GradeTestRunContext): Promise<CheckResult[]>
   /** The seam lane O9 registers its checks through. Registering an id twice throws. */
   register(checkId: CheckId, fn: CheckFn): void
 }

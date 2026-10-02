@@ -104,7 +104,9 @@
             "endpointHost": "us.i.posthog.com",
             "sameOrigin": false,
             "libCustomApiHost": false,
-            "status": "cancelled"
+            "status": "cancelled",
+            "loadLabel": "home",
+            "afterNav": false
           }
         ],
         "bootRequests": [
@@ -118,10 +120,11 @@
         "events": [
           {
             "siteSourceKey": "site_FAKEacmeStoreSourceKey",
-            "eventName": "page_view",
+            "eventName": "site_page_view",
             "eventId": "evt_FAKE0001",
             "nav": false,
-            "status": "cancelled"
+            "status": "cancelled",
+            "loadLabel": "home"
           }
         ]
       },
@@ -135,7 +138,8 @@
             "ev": "PageView",
             "eid": null,
             "method": "GET",
-            "status": "cancelled"
+            "status": "cancelled",
+            "loadLabel": "home"
           }
         ],
         "console": [],
@@ -301,7 +305,9 @@
             "endpointHost": "us.i.posthog.com",
             "sameOrigin": false,
             "libCustomApiHost": false,
-            "status": "cancelled"
+            "status": "cancelled",
+            "loadLabel": "home",
+            "afterNav": false
           }
         ],
         "bootRequests": [
@@ -315,10 +321,11 @@
         "events": [
           {
             "siteSourceKey": "site_FAKEacmeStoreSourceKey",
-            "eventName": "page_view",
+            "eventName": "site_page_view",
             "eventId": "evt_FAKE0001",
             "nav": false,
-            "status": "cancelled"
+            "status": "cancelled",
+            "loadLabel": "home"
           }
         ]
       },
@@ -332,7 +339,8 @@
             "ev": "PageView",
             "eid": null,
             "method": "GET",
-            "status": "cancelled"
+            "status": "cancelled",
+            "loadLabel": "home"
           }
         ],
         "console": [],
@@ -490,7 +498,9 @@
             "endpointHost": "us.i.posthog.com",
             "sameOrigin": false,
             "libCustomApiHost": false,
-            "status": "cancelled"
+            "status": "cancelled",
+            "loadLabel": "home",
+            "afterNav": false
           }
         ],
         "bootRequests": [
@@ -504,10 +514,11 @@
         "events": [
           {
             "siteSourceKey": "site_FAKEacmeStoreSourceKey",
-            "eventName": "page_view",
+            "eventName": "site_page_view",
             "eventId": "evt_FAKE0001",
             "nav": false,
-            "status": "cancelled"
+            "status": "cancelled",
+            "loadLabel": "home"
           }
         ]
       },
@@ -521,7 +532,8 @@
             "ev": "PageView",
             "eid": null,
             "method": "GET",
-            "status": "cancelled"
+            "status": "cancelled",
+            "loadLabel": "home"
           }
         ],
         "console": [],
@@ -679,7 +691,9 @@
             "endpointHost": "us.i.posthog.com",
             "sameOrigin": false,
             "libCustomApiHost": false,
-            "status": "cancelled"
+            "status": "cancelled",
+            "loadLabel": "home",
+            "afterNav": false
           }
         ],
         "bootRequests": [
@@ -693,10 +707,11 @@
         "events": [
           {
             "siteSourceKey": "site_FAKEacmeStoreSourceKey",
-            "eventName": "page_view",
+            "eventName": "site_page_view",
             "eventId": "evt_FAKE0001",
             "nav": false,
-            "status": "cancelled"
+            "status": "cancelled",
+            "loadLabel": "home"
           }
         ]
       },
@@ -710,7 +725,8 @@
             "ev": "PageView",
             "eid": null,
             "method": "GET",
-            "status": "cancelled"
+            "status": "cancelled",
+            "loadLabel": "home"
           }
         ],
         "console": [],
@@ -867,7 +883,9 @@
             "endpointHost": "us.i.posthog.com",
             "sameOrigin": false,
             "libCustomApiHost": false,
-            "status": "cancelled"
+            "status": "cancelled",
+            "loadLabel": "home",
+            "afterNav": false
           }
         ],
         "bootRequests": [
@@ -881,10 +899,11 @@
         "events": [
           {
             "siteSourceKey": "site_FAKEacmeStoreSourceKey",
-            "eventName": "page_view",
+            "eventName": "site_page_view",
             "eventId": "evt_FAKE0001",
             "nav": false,
-            "status": "cancelled"
+            "status": "cancelled",
+            "loadLabel": "home"
           }
         ]
       },
@@ -898,7 +917,8 @@
             "ev": "PageView",
             "eid": null,
             "method": "GET",
-            "status": "cancelled"
+            "status": "cancelled",
+            "loadLabel": "home"
           }
         ],
         "console": [],
@@ -1217,7 +1237,8 @@
           },
           "nonGetCancelled": 0,
           "navigatedAfterMs": null,
-          "navigationCancelled": false
+          "navigationCancelled": false,
+          "refused": null
         }
       ],
       "pii": [],
@@ -1508,7 +1529,9 @@
             "endpointHost": "us.i.posthog.com",
             "sameOrigin": false,
             "libCustomApiHost": false,
-            "status": "cancelled"
+            "status": "cancelled",
+            "loadLabel": "home",
+            "afterNav": false
           }
         ],
         "bootRequests": [
@@ -1522,10 +1545,11 @@
         "events": [
           {
             "siteSourceKey": "site_FAKEacmeStoreSourceKey",
-            "eventName": "page_view",
+            "eventName": "site_page_view",
             "eventId": "evt_FAKE0001",
             "nav": false,
-            "status": "cancelled"
+            "status": "cancelled",
+            "loadLabel": "home"
           }
         ]
       },
@@ -1695,7 +1719,9 @@
             "endpointHost": "www.acme-store.com",
             "sameOrigin": true,
             "libCustomApiHost": true,
-            "status": "cancelled"
+            "status": "cancelled",
+            "loadLabel": "home",
+            "afterNav": false
           }
         ],
         "bootRequests": [
@@ -1709,10 +1735,11 @@
         "events": [
           {
             "siteSourceKey": "site_FAKEacmeStoreSourceKey",
-            "eventName": "page_view",
+            "eventName": "site_page_view",
             "eventId": "evt_FAKE0201",
             "nav": false,
-            "status": "cancelled"
+            "status": "cancelled",
+            "loadLabel": "home"
           }
         ]
       },
@@ -1751,7 +1778,8 @@
           },
           "nonGetCancelled": 1,
           "navigatedAfterMs": 1012,
-          "navigationCancelled": true
+          "navigationCancelled": true,
+          "refused": null
         }
       ],
       "pii": [],
@@ -1902,7 +1930,9 @@
             "endpointHost": "us.i.posthog.com",
             "sameOrigin": false,
             "libCustomApiHost": false,
-            "status": "cancelled"
+            "status": "cancelled",
+            "loadLabel": "home",
+            "afterNav": false
           }
         ],
         "bootRequests": [
@@ -1916,10 +1946,11 @@
         "events": [
           {
             "siteSourceKey": "site_FAKEacmeStoreSourceKey",
-            "eventName": "page_view",
+            "eventName": "site_page_view",
             "eventId": "evt_FAKE0001",
             "nav": false,
-            "status": "cancelled"
+            "status": "cancelled",
+            "loadLabel": "home"
           }
         ]
       },
@@ -1933,7 +1964,8 @@
             "ev": "PageView",
             "eid": null,
             "method": "GET",
-            "status": "cancelled"
+            "status": "cancelled",
+            "loadLabel": "home"
           }
         ],
         "console": [],
@@ -2097,7 +2129,9 @@
             "endpointHost": "us.i.posthog.com",
             "sameOrigin": false,
             "libCustomApiHost": false,
-            "status": "cancelled"
+            "status": "cancelled",
+            "loadLabel": "home",
+            "afterNav": false
           }
         ],
         "bootRequests": [
@@ -2111,10 +2145,11 @@
         "events": [
           {
             "siteSourceKey": "site_FAKEacmeStoreSourceKey",
-            "eventName": "page_view",
+            "eventName": "site_page_view",
             "eventId": "evt_FAKE0001",
             "nav": false,
-            "status": "cancelled"
+            "status": "cancelled",
+            "loadLabel": "home"
           }
         ]
       },
@@ -2128,7 +2163,8 @@
             "ev": "PageView",
             "eid": null,
             "method": "GET",
-            "status": "cancelled"
+            "status": "cancelled",
+            "loadLabel": "home"
           }
         ],
         "console": [
@@ -2298,7 +2334,9 @@
             "endpointHost": "www.acme-store.com",
             "sameOrigin": true,
             "libCustomApiHost": true,
-            "status": "cancelled"
+            "status": "cancelled",
+            "loadLabel": "home",
+            "afterNav": false
           }
         ],
         "bootRequests": [
@@ -2312,10 +2350,11 @@
         "events": [
           {
             "siteSourceKey": "site_FAKEacmeStoreSourceKey",
-            "eventName": "page_view",
+            "eventName": "site_page_view",
             "eventId": "evt_FAKE0201",
             "nav": false,
-            "status": "cancelled"
+            "status": "cancelled",
+            "loadLabel": "home"
           }
         ]
       },
@@ -2329,7 +2368,8 @@
             "ev": "PageView",
             "eid": null,
             "method": "GET",
-            "status": "cancelled"
+            "status": "cancelled",
+            "loadLabel": "home"
           }
         ],
         "console": [],
@@ -2364,7 +2404,8 @@
           },
           "nonGetCancelled": 1,
           "navigatedAfterMs": 1012,
-          "navigationCancelled": true
+          "navigationCancelled": true,
+          "refused": null
         }
       ],
       "pii": [],
@@ -2496,10 +2537,11 @@
         "events": [
           {
             "siteSourceKey": "site_FAKEacmeStoreSourceKey",
-            "eventName": "page_view",
+            "eventName": "site_page_view",
             "eventId": "evt_FAKE2501",
             "nav": false,
-            "status": "cancelled"
+            "status": "cancelled",
+            "loadLabel": "preview_self"
           }
         ]
       },
@@ -2664,10 +2706,11 @@
         "events": [
           {
             "siteSourceKey": "site_FAKEacmeStoreSourceKey",
-            "eventName": "page_view",
+            "eventName": "site_page_view",
             "eventId": "evt_FAKE0001",
             "nav": false,
-            "status": "cancelled"
+            "status": "cancelled",
+            "loadLabel": "home"
           }
         ]
       },
@@ -2681,7 +2724,8 @@
             "ev": "PageView",
             "eid": null,
             "method": "GET",
-            "status": "cancelled"
+            "status": "cancelled",
+            "loadLabel": "home"
           }
         ],
         "console": [],
@@ -2839,7 +2883,9 @@
             "endpointHost": "www.acme-store.com",
             "sameOrigin": true,
             "libCustomApiHost": true,
-            "status": 200
+            "status": 200,
+            "loadLabel": "home",
+            "afterNav": false
           }
         ],
         "bootRequests": [
@@ -2853,10 +2899,11 @@
         "events": [
           {
             "siteSourceKey": "site_FAKEacmeStoreSourceKey",
-            "eventName": "page_view",
+            "eventName": "site_page_view",
             "eventId": "evt_FAKE0301",
             "nav": false,
-            "status": 202
+            "status": 202,
+            "loadLabel": "home"
           }
         ]
       },
@@ -2870,7 +2917,8 @@
             "ev": "PageView",
             "eid": null,
             "method": "GET",
-            "status": 200
+            "status": 200,
+            "loadLabel": "home"
           }
         ],
         "console": [],
@@ -3031,7 +3079,9 @@
             "endpointHost": "us.i.posthog.com",
             "sameOrigin": false,
             "libCustomApiHost": false,
-            "status": "cancelled"
+            "status": "cancelled",
+            "loadLabel": "home",
+            "afterNav": false
           }
         ],
         "bootRequests": [
@@ -3045,10 +3095,11 @@
         "events": [
           {
             "siteSourceKey": "site_FAKEacmeStoreSourceKey",
-            "eventName": "page_view",
+            "eventName": "site_page_view",
             "eventId": "evt_FAKE0001",
             "nav": false,
-            "status": "cancelled"
+            "status": "cancelled",
+            "loadLabel": "home"
           }
         ]
       },
@@ -3062,14 +3113,16 @@
             "ev": "PageView",
             "eid": null,
             "method": "GET",
-            "status": "cancelled"
+            "status": "cancelled",
+            "loadLabel": "home"
           },
           {
             "pixelId": "1234567890123456",
             "ev": "Microdata",
             "eid": null,
             "method": "GET",
-            "status": "cancelled"
+            "status": "cancelled",
+            "loadLabel": "home"
           }
         ],
         "console": [],
@@ -3232,7 +3285,9 @@
             "endpointHost": "us.i.posthog.com",
             "sameOrigin": false,
             "libCustomApiHost": false,
-            "status": "cancelled"
+            "status": "cancelled",
+            "loadLabel": "home",
+            "afterNav": false
           },
           {
             "projectKey": "phc_FAKEtestProjectKeyNotReal000",
@@ -3242,7 +3297,9 @@
             "endpointHost": "us.i.posthog.com",
             "sameOrigin": false,
             "libCustomApiHost": false,
-            "status": "cancelled"
+            "status": "cancelled",
+            "loadLabel": "home",
+            "afterNav": false
           }
         ],
         "bootRequests": [
@@ -3256,10 +3313,11 @@
         "events": [
           {
             "siteSourceKey": "site_FAKEacmeStoreSourceKey",
-            "eventName": "page_view",
+            "eventName": "site_page_view",
             "eventId": "evt_FAKE0001",
             "nav": false,
-            "status": "cancelled"
+            "status": "cancelled",
+            "loadLabel": "home"
           }
         ]
       },
@@ -3273,7 +3331,8 @@
             "ev": "PageView",
             "eid": null,
             "method": "GET",
-            "status": "cancelled"
+            "status": "cancelled",
+            "loadLabel": "home"
           }
         ],
         "console": [],
@@ -3427,7 +3486,9 @@
             "endpointHost": "us.i.posthog.com",
             "sameOrigin": false,
             "libCustomApiHost": false,
-            "status": "cancelled"
+            "status": "cancelled",
+            "loadLabel": "home",
+            "afterNav": false
           }
         ],
         "bootRequests": [
@@ -3441,10 +3502,11 @@
         "events": [
           {
             "siteSourceKey": "site_FAKEacmeStoreSourceKey",
-            "eventName": "page_view",
+            "eventName": "site_page_view",
             "eventId": "evt_FAKE0001",
             "nav": false,
-            "status": "cancelled"
+            "status": "cancelled",
+            "loadLabel": "home"
           }
         ]
       },
@@ -3458,7 +3520,8 @@
             "ev": "PageView",
             "eid": null,
             "method": "GET",
-            "status": "cancelled"
+            "status": "cancelled",
+            "loadLabel": "home"
           }
         ],
         "console": [],
@@ -3616,7 +3679,9 @@
             "endpointHost": "www.acme-store.com",
             "sameOrigin": true,
             "libCustomApiHost": true,
-            "status": 200
+            "status": 200,
+            "loadLabel": "home",
+            "afterNav": false
           }
         ],
         "bootRequests": [
@@ -3630,10 +3695,11 @@
         "events": [
           {
             "siteSourceKey": "site_FAKEacmeStoreSourceKey",
-            "eventName": "page_view",
+            "eventName": "site_page_view",
             "eventId": "evt_FAKE0301",
             "nav": false,
-            "status": 202
+            "status": 202,
+            "loadLabel": "home"
           }
         ]
       },
@@ -3647,7 +3713,8 @@
             "ev": "PageView",
             "eid": null,
             "method": "GET",
-            "status": 403
+            "status": 403,
+            "loadLabel": "home"
           }
         ],
         "console": [],

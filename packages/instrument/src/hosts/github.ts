@@ -1,6 +1,6 @@
 // `GitHostAdapter` for GitHub (§3g.2), over `gh`. The wizard does every GitHub write itself; agents never hold
 // gh or git credentials.
-import type { GitHostAdapter, PrSummary } from "../wizard/contracts/git-host.js"
+import type { GitHostAdapter, GitHostAdapterExtras, PrComment, PrSummary } from "../wizard/contracts/git-host.js"
 import { prChecks, type PrCheck } from "../github/checks.js"
 import type { GhClient } from "../github/gh.js"
 import { comment, createDraftPr, findPr, markReady, readPr, updateBranch } from "../github/pr.js"
@@ -10,7 +10,7 @@ import { postCommentReview } from "../github/review.js"
 import { baseRules } from "../github/rules.js"
 import { readThreads, replyToThread, resolveThread, type ReviewThreadDetail } from "../github/threads.js"
 
-export interface GitHubHostAdapter extends GitHostAdapter {
+export interface GitHubHostAdapter extends GitHostAdapter, GitHostAdapterExtras {
   kind: "github"
   readonly gh: GhClient
   /** The linked Vercel project, so a monorepo's several previews can be told apart (§3g.2). */
@@ -28,11 +28,7 @@ export interface GitHubHostAdapter extends GitHostAdapter {
   previewUrl(sha: string): Promise<string | null>
 }
 
-export interface PrComment {
-  author: string
-  authorAssociation: string
-  body: string
-}
+export type { PrComment } from "../wizard/contracts/git-host.js"
 
 export function createGitHubAdapter(gh: GhClient): GitHubHostAdapter {
   let facts: GhRepoFacts | null = null

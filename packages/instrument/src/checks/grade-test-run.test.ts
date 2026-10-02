@@ -23,7 +23,7 @@ function contextOf(fixture: TestRunFixtureCase): GradeContext {
     envSourcedIds: fixture.context.envSourcedIds,
     consentMode: fixture.context.consentMode,
     installedTools: fixture.context.installedTools,
-    ...(fixture.context.metaPixelOwnership ? { metaPixelOwnership: fixture.context.metaPixelOwnership } : {}),
+    metaPixelOwnership: fixture.context.metaPixelOwnership ?? null,
     runId: fixture.request.runId,
     now: NOW
   }
@@ -120,7 +120,7 @@ describe("negatives: one fact flipped flips the verdict", () => {
 
   it("a silent tool the caller did not declare installed or not is undetermined (test_error), never guessed", () => {
     const fixture = byId("dry_live_installed_no_beacon")
-    expect(code(grade(fixture, { installedTools: undefined }).posthog.reason)).toBe("test_error")
+    expect(code(grade(fixture, { installedTools: null }).posthog.reason)).toBe("test_error")
     expect(grade(fixture, { installedTools: ["infinite", "ga4", "meta"] }).posthog.state).toBe("info")
   })
 
@@ -235,11 +235,11 @@ describe("fix round (review O6): each rule with the fact that flips it", () => {
     const fixture = byId("dry_live_installed_no_beacon")
     const silent = TEST_TOOLS.filter((tool) => code(full(fixture).tools[tool].reason) === "no_beacon")
     expect(silent.length).toBeGreaterThan(0)
-    const unknown = full(fixture, { consentMode: undefined })
+    const unknown = full(fixture, { consentMode: null })
     for (const tool of silent) expect(code(unknown.tools[tool].reason)).toBe("test_error")
     // negative: a tool that fires is still graded on its facts without the consent mode
     const firing = byId("dry_live_all_once")
-    expect(full(firing, { consentMode: undefined }).tools.ga4.state).toBe("pass")
+    expect(full(firing, { consentMode: null }).tools.ga4.state).toBe("pass")
   })
 
   it("R10: a doubled page_view is reported by one_beacon_per_tool and ga4_one_page_view even when pii wins the per-tool verdict", () => {
@@ -275,7 +275,7 @@ describe("fix round (review O6): each rule with the fact that flips it", () => {
     expect(clickResult().state).toBe("problem")
     expect(clickResult().reason).toContain("ga4")
     // unknown installs → undetermined, never a pass
-    expect(clickResult({ installedTools: undefined }).state).toBe("undetermined")
+    expect(clickResult({ installedTools: null }).state).toBe("undetermined")
     // negative: with only PostHog installed, PostHog receiving it is the pass
     expect(clickResult({ installedTools: ["infinite", "posthog"] }).state).toBe("pass")
   })
@@ -299,12 +299,36 @@ describe("fix round (review O6): each rule with the fact that flips it", () => {
     expect(unscoped.checks.every((entry) => entry.runId === fixture.result.runId)).toBe(true)
   })
 
-  it("R21: PostHog / Meta beacons in a result mixing preview_self with other loads are undetermined, never a pass", () => {
+  it("R21 (§3z.9, A17): PostHog / Meta beacons carry their load, so a mixed run is split per load, never guessed", () => {
     const fixture = byId("dry_live_all_once")
     fixture.result.loads.push({ ...fixture.result.loads[0]!, label: "preview_self", url: "https://acme-git-x.vercel.app/", finalUrl: "https://acme-git-x.vercel.app/" })
-    expect(code(full(fixture).tools.posthog.reason)).toBe("test_error")
-    expect(code(full(fixture).tools.meta.reason)).toBe("test_error")
-    // negative: GA4 carries a load label, so it is still graded (its beacons are on the home load)
-    expect(full(fixture).tools.ga4.state).toBe("pass")
+    // every beacon is on the home load: graded normally
+    expect(full(fixture).tools.posthog.state).toBe("pass")
+    expect(full(fixture).tools.meta.state).toBe("pass")
+    // negative: the same beacons labelled with the preview's own load are a preview leak
+    fixture.result.posthog.events = fixture.result.posthog.events.map((event) => ({ ...event, loadLabel: "preview_self" }))
+    fixture.result.meta.tr = fixture.result.meta.tr.map((tr) => ({ ...tr, loadLabel: "preview_self" }))
+    expect(code(full(fixture).tools.posthog.reason)).toBe("previews_send_data")
+    expect(code(full(fixture).tools.meta.reason)).toBe("previews_send_data")
+  })
+
+  it("§3z.9 (A17): a click the engine refused (submit control, consent banner) is not exercised, never a problem", () => {
+    const fixture = byId("rehearsal_click_test")
+    fixture.result.clicks[0] = { ...fixture.result.clicks[0]!, found: false, refused: "submit_control", events: { ga4: [], posthog: [], meta: [], infinite: [] } }
+    const click = full(fixture).checks.find((entry) => entry.checkId === "click_test")!
+    expect(click.state).toBe("undetermined")
+    expect(code(click.reason)).toBe("not_exercised")
+    // negative: the same empty click that was NOT refused, on a found element, is a problem
+    fixture.result.clicks[0] = { ...fixture.result.clicks[0]!, found: true, refused: null }
+    expect(full(fixture).checks.find((entry) => entry.checkId === "click_test")!.state).toBe("problem")
+  })
+
+  it("§3z.9 (A17): two PostHog page views on one load are a duplicate; one per load (or one after a client navigation) is not", () => {
+    const fixture = byId("dry_live_all_once")
+    const view = fixture.result.posthog.events[0]!
+    fixture.result.posthog.events = [view, { ...view, afterNav: true }]
+    expect(full(fixture).tools.posthog.state).toBe("pass")
+    fixture.result.posthog.events = [view, { ...view }]
+    expect(code(full(fixture).tools.posthog.reason)).toBe("duplicate_page_view")
   })
 })

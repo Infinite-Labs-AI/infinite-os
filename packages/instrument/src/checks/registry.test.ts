@@ -129,7 +129,7 @@ describe("the register seam", () => {
 describe("built-in checks", () => {
   it("grades a test run of the runner's own run (THE grader, via the CheckRunner); another run's facts are refused", async () => {
     const fixture = fixtures.find((entry) => entry.id === "dry_live_ga4_wrong_tid")!
-    const ctx = { cmpDetected: null, envSourcedIds: [], consentMode: "not_required" as const, installedTools: ["infinite", "ga4", "posthog", "meta"] as const }
+    const ctx = { cmpDetected: null, envSourcedIds: [], consentMode: "not_required" as const, installedTools: ["infinite", "ga4", "posthog", "meta"] as const, metaPixelOwnership: null }
     // negative (review O6-R19): a runner on a different run never stamps its id on these facts
     const other = createCheckRunner({ root: "/repo", appRoot: ".", now: NOW, runId: () => FAKE.runId })
     expect(fixture.result.runId).not.toBe(FAKE.runId)
@@ -139,7 +139,8 @@ describe("built-in checks", () => {
       cmpDetected: null,
       envSourcedIds: [],
       consentMode: "not_required",
-      installedTools: ["infinite", "ga4", "posthog", "meta"]
+      installedTools: ["infinite", "ga4", "posthog", "meta"],
+      metaPixelOwnership: null
     })
     expect(graded.ga4).toMatchObject({ state: "problem", runId: fixture.result.runId, tier: "T1" })
     expect(graded.ga4.reason).toMatch(/^wrong_id/)

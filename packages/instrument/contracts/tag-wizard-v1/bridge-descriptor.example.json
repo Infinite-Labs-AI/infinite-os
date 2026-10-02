@@ -20,7 +20,8 @@
     "tag.server-lane.v1",
     "tag.meta-relay.v1",
     "tag.uninstall.v1",
-    "tag.test.v1"
+    "tag.test.v1",
+    "tag.test-facts.v1"
   ],
   "url": "http://127.0.0.1:53917",
   "pid": 4242,

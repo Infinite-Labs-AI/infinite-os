@@ -60,11 +60,11 @@ export function testResult(mode: TestMode, overrides: Partial<TestResult> = {}):
     loads: [{ label: "home", url: "https://acme-store.com/", finalUrl: "https://acme-store.com/", status: 200, rendered: true, managedMarkerSeen: true, redirects: [] }],
     requests: { total: 10, cancelled: 4, otherBeacons: [] },
     ga4: { events: [{ tid: GA4_ID, en: "page_view", dlHost: "acme-store.com", transport: "get", status: "cancelled", loadLabel: "home", afterNav: false }] },
-    posthog: { events: [{ projectKey: POSTHOG_KEY, event: "$pageview", distinctId: "d1", host: "acme-store.com", endpointHost: "acme-store.com", sameOrigin: true, libCustomApiHost: true, status: "cancelled" }], bootRequests: [] },
+    posthog: { events: [{ projectKey: POSTHOG_KEY, event: "$pageview", distinctId: "d1", host: "acme-store.com", endpointHost: "acme-store.com", sameOrigin: true, libCustomApiHost: true, status: "cancelled", loadLabel: "home", afterNav: false }], bootRequests: [] },
     infinite: { events: [] },
     meta: { configRequests: [PIXEL_ID], tr: [], console: [], fbc: { present: false, value: null, domain: null }, fbp: { present: true } },
     csp: { violations: [] },
-    clicks: [{ label: "sign_up", selector: '[data-infinite-conversion="sign_up"]', found: true, events: { ga4: ["sign_up"], posthog: ["sign_up"], meta: [], infinite: [] }, nonGetCancelled: 1, navigatedAfterMs: null, navigationCancelled: false }],
+    clicks: [{ label: "sign_up", selector: '[data-infinite-conversion="sign_up"]', found: true, events: { ga4: ["sign_up"], posthog: ["sign_up"], meta: [], infinite: [] }, nonGetCancelled: 1, navigatedAfterMs: null, navigationCancelled: false, refused: null }],
     pii: [],
     serverLaneProbe: null,
     markers: { infiniteEventIds: [], posthogDistinctId: "d1", metaEventIds: [] },
@@ -165,7 +165,8 @@ export function fakeBridge(options: { keys?: TagKeys; hosting?: TagHosting; resu
     async cancelTest(testRunId) {
       calls.push({ verb: "test.cancel" })
       return { ...env, testRunId, state: "cancelled" }
-    }
+    },
+    testFacts: notUsed("test.facts")
   }
   return bridge
 }
@@ -270,6 +271,9 @@ export function fakeChecks(options: { grades?: Partial<Record<TestMode, Partial<
       const out = {} as Record<TestTool, CheckResult>
       for (const tool of ["infinite", "ga4", "posthog", "meta"] as const) out[tool] = scripted[tool] ?? pass(tool, mode)
       return out
+    },
+    async gradeTestRunChecks() {
+      return []
     },
     register() {}
   }

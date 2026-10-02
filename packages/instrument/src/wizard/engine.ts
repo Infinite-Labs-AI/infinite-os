@@ -61,7 +61,8 @@ export const BRIDGE_METHOD_VERBS = {
   disableSiteSource: "uninstall.disable-site-source",
   startTest: "test.start",
   pollTest: "test.poll",
-  cancelTest: "test.cancel"
+  cancelTest: "test.cancel",
+  testFacts: "test.facts"
 } as const satisfies Record<Exclude<keyof TagBridgeClient, "descriptor" | "has" | "setLinkId">, BridgeVerbId>
 
 const STATE_CHANGING_METHODS: ReadonlySet<string> = new Set(

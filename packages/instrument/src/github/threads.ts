@@ -1,22 +1,9 @@
 // Review threads (lane O4, §3g.4 steps 3 and 6): read them all (paginated), reply, resolve.
-import type { ReviewThread } from "../wizard/contracts/git-host.js"
+import type { ReviewThread, ReviewThreadDetail, ThreadComment } from "../wizard/contracts/git-host.js"
 import { ghGraphql, type GhClient } from "./gh.js"
 
-/** One comment in a thread, oldest first. */
-export interface ThreadComment {
-  author: string
-  authorAssociation: string
-  body: string
-  viewerDidAuthor: boolean
-}
 
-/** `ReviewThread` (the §3g.2 shape: author and body of the FIRST comment) plus every comment and the viewer flags. */
-export interface ReviewThreadDetail extends ReviewThread {
-  comments: ThreadComment[]
-  viewerCanReply: boolean
-  viewerCanResolve: boolean
-  isOutdated: boolean
-}
+export type { ReviewThreadDetail, ThreadComment } from "../wizard/contracts/git-host.js"
 
 const THREADS_QUERY = `query($owner: String!, $name: String!, $number: Int!, $cursor: String) {
   repository(owner: $owner, name: $name) {

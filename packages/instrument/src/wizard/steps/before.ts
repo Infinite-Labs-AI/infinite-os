@@ -22,6 +22,7 @@
 // §3g.1) → branch → keys → baseline build → scan + census + setup checks → dry_live → T1 → baseline
 // reads → Before facts → seedCandidates. The branch is created before any other verb and before any
 // repo read.
+import { gradeContextFrom } from "../../checks/grade-context.js"
 import { createHash } from "node:crypto"
 import { join } from "node:path"
 
@@ -462,10 +463,13 @@ export function createBeforeStep(options: BeforeStepOptions = {}): WizardStep<"b
             dryChecks.push(syntheticCheck("dry_live", "undetermined", "test_error", at(), runId))
           } else {
             dryLive = result
-            const graded = await deps.checks.gradeTestRun(result, expect, "dry_live", {
-              cmpDetected: result.environment.cmpDetected ?? cmpDetectedStatic,
-              envSourcedIds: census.envSourcedIds
-            })
+            // §3z.12 §3e.7 (B11): the live site's consent mode is the one Infinite records (null = unknown).
+            const graded = await deps.checks.gradeTestRun(
+              result,
+              expect,
+              "dry_live",
+              gradeContextFrom({ census, consentMode: keys.infinite.consentMode, cmpDetected: result.environment.cmpDetected ?? cmpDetectedStatic })
+            )
             grades = graded
             for (const tool of Object.keys(graded) as TestTool[]) {
               const check = graded[tool]

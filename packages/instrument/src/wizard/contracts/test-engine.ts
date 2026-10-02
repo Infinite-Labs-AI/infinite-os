@@ -32,8 +32,19 @@ export function serverLaneProbePathFor(runId: string): string {
 
 export const TEST_LIMITS = {
   maxTargets: 5,
-  deadlineMs: { dry_live: 120_000, rehearsal: 180_000, real_visit: 90_000 }
+  deadlineMs: { dry_live: 120_000, rehearsal: 180_000, real_visit: 90_000 },
+  /** §3z.9 request bounds: target and click labels 1–200 characters, no control characters. */
+  labelMaxChars: 200,
+  maxClicks: 20,
+  /** `spaNavigation.path`: a same-origin path (no `//host`, `/\host`, whitespace or controls). */
+  spaPathMaxChars: 2048,
+  /** `expect.ga4` and `expect.meta`: at most this many ids each. */
+  maxExpectIds: 100
 } as const
+
+/** Infinite's own page view and click event names, as the runtime sends them (§3z.9, A18). */
+export const INFINITE_PAGE_VIEW_EVENT = "site_page_view" as const
+export const INFINITE_CLICK_EVENT = "site_click" as const
 
 /** The consent seed (used only when consent_mode = required; seeds Infinite's own keys only). */
 export interface ConsentSeed {
@@ -116,6 +127,7 @@ export function testRequestModeErrors(request: TestRunRequest, isProductionOrSib
     errors.push(`targets must hold 1–${TEST_LIMITS.maxTargets} entries`)
   }
   if (rules.exactlyOneTarget && request.targets.length !== 1) errors.push(`${request.mode} needs exactly one target`)
+  errors.push(...testRequestBoundErrors(request))
   if (request.mode === "rehearsal" && !request.rehearsal) errors.push("rehearsal needs rehearsal.previewOrigin and headSha")
   const hosts: string[] = []
   for (const target of request.targets) {
@@ -142,20 +154,53 @@ export function testRequestModeErrors(request: TestRunRequest, isProductionOrSib
   return errors
 }
 
+const CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/
+
+function labelErrors(what: string, label: string): string[] {
+  if (typeof label !== "string" || label.length < 1 || label.length > TEST_LIMITS.labelMaxChars) return [`${what} must be 1–${TEST_LIMITS.labelMaxChars} characters`]
+  return CONTROL_CHARS.test(label) ? [`${what} has a control character`] : []
+}
+
+/** §3z.9 request bounds (the desktop answers 400 `invalid_request` on any of these). */
+export function testRequestBoundErrors(request: TestRunRequest): string[] {
+  const errors: string[] = []
+  request.targets.forEach((target, index) => errors.push(...labelErrors(`targets[${index}].label`, target.label)))
+  const clicks = request.clicks ?? []
+  if (clicks.length > TEST_LIMITS.maxClicks) errors.push(`at most ${TEST_LIMITS.maxClicks} clicks`)
+  clicks.forEach((click, index) => errors.push(...labelErrors(`clicks[${index}].label`, click.label)))
+  const path = request.spaNavigation?.path
+  if (path !== undefined) {
+    if (
+      path.length > TEST_LIMITS.spaPathMaxChars ||
+      !path.startsWith("/") ||
+      path.startsWith("//") ||
+      path.startsWith("/\\") ||
+      /\s/.test(path) ||
+      CONTROL_CHARS.test(path)
+    ) {
+      errors.push("spaNavigation.path must be a same-origin path of at most 2048 characters")
+    }
+  }
+  if ((request.expect.ga4?.length ?? 0) > TEST_LIMITS.maxExpectIds) errors.push(`expect.ga4 holds more than ${TEST_LIMITS.maxExpectIds} ids`)
+  if ((request.expect.meta?.length ?? 0) > TEST_LIMITS.maxExpectIds) errors.push(`expect.meta holds more than ${TEST_LIMITS.maxExpectIds} ids`)
+  return errors
+}
+
 /**
  * §3h.2 + R2-16: `expect.*` comes ONLY from the keys verb (the connections), never from the site or the repo.
  * A tool that is not connected gets no entry (its id checks read `undetermined(not_connected)`).
  * - ga4: every stream's measurement id of the connected property;
- * - posthog: the connection's `projectKey` + `apiHost` (the PostHog host; a same-origin `/ingest` proxy is a
- *   FACT the test observes, `posthog.events[].sameOrigin`, not an expectation);
+ * - posthog: the connection's `projectKey` + its INGEST host as `apiHost` (§3z.9, A16: `https://us.i.posthog.com`
+ *   for US, `https://eu.i.posthog.com` for EU, a self-hosted project's own host; never `/ingest`). A first-party
+ *   proxy is a FACT the test observes (`posthog.events[].sameOrigin`, `libCustomApiHost`), not an expectation;
  * - meta: every connected pixel id;
  * - infinite: the site source key + collect path, once provisioned.
  */
 export function testExpectFromKeys(keys: TagKeys): TestExpect {
   const expect: TestExpect = {}
   if (keys.ga4.status === "connected" && keys.ga4.streams.length > 0) expect.ga4 = keys.ga4.streams.map((stream) => stream.measurementId)
-  if (keys.posthog.status === "connected" && keys.posthog.projectKey && keys.posthog.apiHost) {
-    expect.posthog = { projectKey: keys.posthog.projectKey, apiHost: keys.posthog.apiHost }
+  if (keys.posthog.status === "connected" && keys.posthog.projectKey && keys.posthog.ingestHost) {
+    expect.posthog = { projectKey: keys.posthog.projectKey, apiHost: keys.posthog.ingestHost }
   }
   if (keys.meta.status === "connected" && keys.meta.pixels.length > 0) expect.meta = keys.meta.pixels.map((pixel) => pixel.pixelId)
   if (keys.infinite.status === "ready" && keys.infinite.siteSourceKey && keys.infinite.collectPath) {
@@ -218,14 +263,19 @@ export interface PosthogEventFact {
   sameOrigin: boolean
   libCustomApiHost: boolean
   status: BeaconStatus
+  /** §3z.9 (A17): the load that sent it, and whether it came after a client-side navigation. */
+  loadLabel: string
+  afterNav: boolean
 }
 
 export interface InfiniteEventFact {
   siteSourceKey: string
+  /** The raw event name the page sent (`site_page_view`, `site_click`, …; §3z.9, A18). */
   eventName: string
   eventId: string
   nav: boolean
   status: BeaconStatus
+  loadLabel: string
 }
 
 export interface MetaTrFact {
@@ -234,6 +284,7 @@ export interface MetaTrFact {
   eid: string | null
   method: string
   status: BeaconStatus
+  loadLabel: string
 }
 
 export type MetaConsoleKind = "traffic_permissions_blocked" | "pixel_not_found" | "invalid_pixel_id" | "other"
@@ -246,6 +297,11 @@ export interface ClickFact {
   nonGetCancelled: number
   navigatedAfterMs: number | null
   navigationCancelled: boolean
+  /**
+   * §3z.9 (A17): why the engine refused to click (a submit control, a consent banner), else null. A refused
+   * target keeps `found:false`; the grader reads it as `undetermined (not_exercised)`, never a problem.
+   */
+  refused: null | "submit_control" | "consent_banner"
 }
 
 export interface PiiFact {
@@ -413,17 +469,17 @@ export const TEST_RESULT_SHAPE = shapeOf<TestResult>()(
       events: arrayOf(
         shapeOf<PosthogEventFact>()(
           "PosthogEventFact",
-          ["projectKey", "event", "distinctId", "host", "endpointHost", "sameOrigin", "libCustomApiHost", "status"],
+          ["projectKey", "event", "distinctId", "host", "endpointHost", "sameOrigin", "libCustomApiHost", "status", "loadLabel", "afterNav"],
           []
         )
       ),
       bootRequests: arrayOf(shapeOf<{ path: string; status: BeaconStatus }>()("PosthogBootRequest", ["path", "status"], []))
     }),
     infinite: shapeOf<TestResult["infinite"]>()("InfiniteFacts", ["events"], [], {
-      events: arrayOf(shapeOf<InfiniteEventFact>()("InfiniteEventFact", ["siteSourceKey", "eventName", "eventId", "nav", "status"], []))
+      events: arrayOf(shapeOf<InfiniteEventFact>()("InfiniteEventFact", ["siteSourceKey", "eventName", "eventId", "nav", "status", "loadLabel"], []))
     }),
     meta: shapeOf<TestResult["meta"]>()("MetaFacts", ["configRequests", "tr", "console", "fbc", "fbp"], [], {
-      tr: arrayOf(shapeOf<MetaTrFact>()("MetaTrFact", ["pixelId", "ev", "eid", "method", "status"], [])),
+      tr: arrayOf(shapeOf<MetaTrFact>()("MetaTrFact", ["pixelId", "ev", "eid", "method", "status", "loadLabel"], [])),
       fbc: shapeOf<TestResult["meta"]["fbc"]>()("MetaFbc", ["present", "value", "domain"], []),
       fbp: shapeOf<TestResult["meta"]["fbp"]>()("MetaFbp", ["present"], [])
     }),
@@ -433,7 +489,7 @@ export const TEST_RESULT_SHAPE = shapeOf<TestResult>()(
     clicks: arrayOf(
       shapeOf<ClickFact>()(
         "ClickFact",
-        ["label", "selector", "found", "events", "nonGetCancelled", "navigatedAfterMs", "navigationCancelled"],
+        ["label", "selector", "found", "events", "nonGetCancelled", "navigatedAfterMs", "navigationCancelled", "refused"],
         [],
         { events: shapeOf<ClickFact["events"]>()("ClickEvents", ["ga4", "posthog", "meta", "infinite"], []) }
       )

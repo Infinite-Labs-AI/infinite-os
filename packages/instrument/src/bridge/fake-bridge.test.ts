@@ -208,18 +208,20 @@ describe("fake bridge refuses what D2 and C1 refuse", () => {
     const client = await linkedClient(bridge)
     expect(await client.claimProof(RUN, "tag")).toMatchObject({ granted: true })
     await expect(client.claimProof(RUN, "desktop")).rejects.toMatchObject({ code: "claimed_by_other", state: "proving" })
-    await client.patchRun(RUN, { proofState: "proven" })
+    await client.patchRun(RUN, { proofState: "proven" }, { producer: "tag" })
     await expect(client.claimProof(RUN, "tag")).rejects.toMatchObject({ code: "claimed_by_other", state: "proven" })
   })
 
   it("PATCH: proofState only while proving (409), the same result again is a no-op; phase forward only (400); mergeSha once (400)", async () => {
     const bridge = await fake()
     const client = await linkedClient(bridge)
-    await expect(client.patchRun(RUN, { proofState: "proven" })).rejects.toMatchObject({ status: 409, code: "claimed_by_other", state: "pending" })
+    await expect(client.patchRun(RUN, { proofState: "proven" }, { producer: "tag" })).rejects.toMatchObject({ status: 409, code: "claimed_by_other", state: "pending" })
     await client.claimProof(RUN, "tag")
-    expect((await client.patchRun(RUN, { proofState: "proven" })).run.proofState).toBe("proven")
-    expect((await client.patchRun(RUN, { proofState: "proven" })).run.proofState).toBe("proven")
-    await expect(client.patchRun(RUN, { proofState: "problem" })).rejects.toMatchObject({ status: 409, code: "claimed_by_other" })
+    // §3z.8 (A10): only the producer holding the claim may set proofState.
+    await expect(client.patchRun(RUN, { proofState: "proven" }, { producer: "desktop" })).rejects.toMatchObject({ status: 409, code: "claimed_by_other" })
+    expect((await client.patchRun(RUN, { proofState: "proven" }, { producer: "tag" })).run.proofState).toBe("proven")
+    expect((await client.patchRun(RUN, { proofState: "proven" }, { producer: "tag" })).run.proofState).toBe("proven")
+    await expect(client.patchRun(RUN, { proofState: "problem" }, { producer: "tag" })).rejects.toMatchObject({ status: 409, code: "claimed_by_other" })
 
     expect((await client.patchRun(RUN, { phase: "merged" })).run.phase).toBe("merged")
     await expect(client.patchRun(RUN, { phase: "in_pr" })).rejects.toMatchObject({ status: 400, code: "invalid_request", field: "patch.phase" })

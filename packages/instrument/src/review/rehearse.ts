@@ -6,6 +6,7 @@
 //
 // Honest states: a protected preview, a non-Vercel host, or no preview within 10 minutes is `undetermined`,
 // never pass. Nothing here is computed from agent output.
+import { gradeContextFrom } from "../checks/grade-context.js"
 import type { WizardContext, WizardDeps } from "../wizard/contracts/deps.js"
 import type { ChecklistItem, CheckResult } from "../wizard/contracts/jobs.js"
 import type { Cell, CellState, FinishLineId, Reason, ReportColumnSnapshot, ReportRowId } from "../wizard/contracts/report.js"
@@ -275,15 +276,8 @@ export async function rehearse(
   if (!rehearsal.result) return empty(rehearsal.error === "busy" ? "test_busy" : "test_error", previewUrl)
 
   const census = await deps.checks.census(ctx.root, ctx.appRoot)
-  const installedTools = [...new Set(census.entries.map((entry) => entry.tool).filter((tool): tool is TestTool => tool !== "x"))]
-  // `consentMode` and `installedTools` are O6's additive grader inputs (held-by-consent and "installed but
-  // silent"); a grader that does not read them ignores them.
-  const gradeCtx = {
-    cmpDetected: null as TestResult["environment"]["cmpDetected"],
-    envSourcedIds: census.envSourcedIds,
-    consentMode: input.consentRequired ? ("required" as const) : ("not_required" as const),
-    installedTools
-  }
+  // §3z.12 §3e.7 (B11): the grader always gets the site's consent mode, the installed tools and whose Meta pixel it is.
+  const gradeCtx = gradeContextFrom({ census, consentMode: input.consentRequired ? "required" : "not_required", cmpDetected: null })
   const grade = (result: TestResult, mode: TestMode) => deps.checks.gradeTestRun(result, expect, mode, { ...gradeCtx, cmpDetected: result.environment.cmpDetected })
   const grades = await grade(rehearsal.result, "rehearsal")
   const previewGrades = preview.result ? await grade(preview.result, "dry_live") : {}
@@ -307,7 +301,7 @@ export async function rehearse(
     },
     spaExercised: secondPath !== null,
     expectedTools: expectedToolsOf(expect),
-    installedTools
+    installedTools: [...(gradeCtx.installedTools ?? [])]
   }
 }
 

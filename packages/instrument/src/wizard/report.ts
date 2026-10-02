@@ -75,7 +75,10 @@ export const REASON_TEXT: Record<Reason, string> = {
   not_vercel: "the site is not on Vercel, so previews cannot be loaded",
   automation_detected: "the site treated the test window as a bot",
   not_exercised: "this run did not exercise it",
-  not_probed: "the server lane was not probed"
+  not_probed: "the server lane was not probed",
+  waiting_real_event: "waiting for a real visitor's event after the deploy",
+  blocked_by_site_bot_rules: "the site's bot rules refused the test window",
+  test_error: "the test could not finish (it crashed or ran out of time)"
 }
 
 export class ReportRuleError extends Error {

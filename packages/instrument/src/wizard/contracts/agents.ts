@@ -48,6 +48,22 @@ export type SessionRef = { kind: "claude"; sessionId: string } | { kind: "codex"
 
 export type AgentRunOutcome = "completed" | "out_of_usage" | "timeout" | "max_turns" | "toolless" | "error"
 
+/** One item the fence blocked this turn, and why (§3f.6; lane O3's `FenceBlock`). */
+export interface AgentFenceBlock {
+  itemId: string
+  reason: string
+  paths: string[]
+  note: string
+}
+
+/**
+ * The fence's final tree seal (§3z.12 §3f.6), opaque outside lane O3: the runner keeps it so O4 verifies it
+ * again before staging (`verifySeal`). Its fields are O3's `TreeSeal`.
+ */
+export interface AgentTreeSeal {
+  root: string
+}
+
 export interface AgentRunResult {
   outcome: AgentRunOutcome
   session: SessionRef
@@ -59,7 +75,27 @@ export interface AgentRunResult {
   /** Paths the fence reverted this run. */
   reverted: string[]
   edits: WizardEditRecord[]
+  // §3z.12 §3f.1 (B5): optional extras.
+  /** Jobs the fence blocked this turn. */
+  blocked?: AgentFenceBlock[]
+  /** Plain incident lines ("Claude tried to read ~/.ssh/config (denied)"). */
+  incidents?: string[]
+  turnsUsed?: number | null
+  /** True when the pinned model was refused and the user's default model ran instead (§3f.7). */
+  modelFallback?: boolean
+  seal?: AgentTreeSeal | null
 }
+
+/**
+ * §3f.7 (River, 10-02, final): the models customers' runs use, in ONE constant, so a retirement is a
+ * one-line change. If the user's plan or CLI rejects one, the turn is retried ONCE with the user's default
+ * model at the same effort, and the user is told. The model and effort go in the plan's cost line and in
+ * `state.json` `agent` (B22).
+ */
+export const AGENT_MODELS = {
+  claude_code: { model: "claude-opus-4-8", effort: "xhigh", label: "Opus 4.8" },
+  codex: { model: "gpt-6.1-sol", effort: "xhigh", label: "Sol 6.1" }
+} as const satisfies Record<AgentKind, { model: string; effort: string; label: string }>
 
 export interface RunJobsInput {
   items: ChecklistItem[]
@@ -151,6 +187,12 @@ export interface CodexPermissionInput {
   codexBinDir: string
   /** realpath of the codex install root (e.g. `~/.codex/packages/standalone/releases/<v>`). Re-allowed READ. */
   codexInstallRoot: string
+  /**
+   * §3z.12 §3f.3 (B20): repo secrets the profile also denies. `none`: the realpaths of every existing
+   * `<root>/**\/.env*`, `<root>/.npmrc`, `<root>/.netrc` (each its own `"none"` entry, even inside
+   * `:project_roots`). `readOnly` (worker only): `<root>/.git`. Default: none.
+   */
+  repoDenies?: { none: readonly string[]; readOnly?: readonly string[] }
 }
 
 function isUnder(child: string, parent: string): boolean {
@@ -186,6 +228,10 @@ export function codexPermissionArgs(input: CodexPermissionInput): string[] {
   assertProfilePath("homeRealpath", home)
   if (home === "/") throw new Error("homeRealpath: $HOME is /; refusing a profile that denies the whole disk")
   input.sensitiveRealpaths.forEach((path, index) => assertProfilePath(`sensitiveRealpaths[${index}]`, path))
+  const repoNone = input.repoDenies?.none ?? []
+  const repoReadOnly = input.role === "worker" ? (input.repoDenies?.readOnly ?? []) : []
+  repoNone.forEach((path, index) => assertProfilePath(`repoDenies.none[${index}]`, path))
+  repoReadOnly.forEach((path, index) => assertProfilePath(`repoDenies.readOnly[${index}]`, path))
   const reAllows = [
     ["codexBinDir", input.codexBinDir],
     ["codexInstallRoot", input.codexInstallRoot]
@@ -209,6 +255,18 @@ export function codexPermissionArgs(input: CodexPermissionInput): string[] {
     entries.push([path, "read"])
   }
   entries.push([":project_roots", CODEX_READ_CONFINEMENT.projectRootsAccess[input.role]])
+  // Repo secrets after `:project_roots`, so the more specific entry is the last word (B20). I3's zero-prompt
+  // probe confirms a file-level "none" holds inside the project root; if it does not, the worker is not spawned.
+  for (const path of repoReadOnly) {
+    if (seen.has(path)) continue
+    seen.add(path)
+    entries.push([path, "read"])
+  }
+  for (const path of repoNone) {
+    if (seen.has(path)) continue
+    seen.add(path)
+    entries.push([path, "none"])
+  }
   const table = entries.map(([key, access]) => `${tomlKey(key)}="${access}"`).join(", ")
   return ["-c", `default_permissions="${profile}"`, "-c", `permissions.${profile}.filesystem={${table}}`]
 }

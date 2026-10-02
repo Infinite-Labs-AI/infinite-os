@@ -640,7 +640,8 @@
             "source": "cloud_read",
             "at": "2026-10-02T09:44:00.000Z",
             "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
-          }
+          },
+          "reason": "waiting_real_event"
         }
       }
     },
@@ -676,7 +677,8 @@
             "source": "cloud_read",
             "at": "2026-10-02T09:44:00.000Z",
             "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
-          }
+          },
+          "reason": "waiting_real_event"
         }
       }
     },

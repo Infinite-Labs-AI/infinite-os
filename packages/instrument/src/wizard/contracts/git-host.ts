@@ -47,7 +47,9 @@ export const PR_MARKERS = {
   reply: "<!-- infinite-tag:reply v1 -->",
   final: (runId: string) => `<!-- infinite-tag:final v1 run=${runId} -->`,
   /** The printed one-agent brief ends with this. */
-  briefReview: (runId: string) => `<!-- infinite-tag:review v1 run=${runId} -->`
+  briefReview: (runId: string) => `<!-- infinite-tag:review v1 run=${runId} -->`,
+  /** §3z.12 §3d.1 (B4): `done`'s report comment. */
+  report: (runId: string) => `<!-- infinite-tag:report v1 run=${runId} -->`
 } as const
 
 export const FORBIDDEN_CHECKBOX = "- [ ]" as const
@@ -129,4 +131,76 @@ export interface GitHostAdapter {
   updateBranch(number: number): Promise<void | Unsupported>
   previewUrl(sha: string): Promise<string | null | Unsupported>
   rules(base: string): Promise<{ requiresReview: boolean; mergeQueue: boolean } | Unsupported>
+}
+
+// ---------------------------------------------------------------------------------------------
+// §3z.12 §3g.1 / §3g.2 (B4): lane O4's additive surfaces, folded here so every fake and lane uses one type.
+// ---------------------------------------------------------------------------------------------
+
+/** One `git status --porcelain=v1 -z` entry. `x` = index, `y` = worktree; `??` untracked, `!!` ignored. */
+export interface StatusEntry {
+  x: string
+  y: string
+  path: string
+  /** The source path of a rename or copy. */
+  origPath?: string
+}
+
+/** `GitOps` plus what the PR loop, the fence and the resume need (lane O4's `createGitOps` implements it). */
+export interface WizardGitOps extends GitOps {
+  /** `git status --porcelain=v1 -z --untracked-files=all` (ignored files excluded). */
+  statusEntries(): Promise<StatusEntry[]>
+  /** The file at a revision (`git show <rev>:<path>`), or null when it does not exist there. */
+  showFile(rev: string, path: string): Promise<string | null>
+  /** `git restore --staged -- <paths>`: takes paths out of the index, leaves the worktree as is. */
+  unstage(paths: readonly string[]): Promise<void>
+  /** The staged diff (`git diff --cached`), for the commit scan. */
+  stagedDiff(): Promise<string>
+  /** `git config --get <key>`, or null. */
+  configGet(key: string): Promise<string | null>
+  /** `origin/HEAD`'s branch name, or null. */
+  originHead(): Promise<string | null>
+  /** Switch to an existing local branch (resume). */
+  switchTo(branch: string): Promise<void>
+  /** The current branch name, or null when detached. */
+  currentBranch(): Promise<string | null>
+  /** GitLab: push with merge-request push options (§3g.2). */
+  pushWithOptions(branch: string, pushOptions: readonly string[]): Promise<void>
+  /** True once the user owns the terminal (SSH may then prompt for a passphrase). */
+  setTtyHandedOver(handedOver: boolean): void
+  /** The base recorded by `createBranch` (or `setBase` on resume): pushes to it are refused. */
+  setBase(base: string): void
+  /** The exact argv of every git call made (for tests and the `--json` debug trail). */
+  readonly calls: ReadonlyArray<readonly string[]>
+}
+
+/** One comment in a review thread, oldest first. */
+export interface ThreadComment {
+  author: string
+  authorAssociation: string
+  body: string
+  viewerDidAuthor: boolean
+}
+
+/** `ReviewThread` plus every comment and the viewer flags (the trust rules need them). */
+export interface ReviewThreadDetail extends ReviewThread {
+  comments: ThreadComment[]
+  viewerCanReply: boolean
+  viewerCanResolve: boolean
+  isOutdated: boolean
+}
+
+/** A PR conversation comment or review body (a printed-brief review arrives as one of these). */
+export interface PrComment {
+  author: string
+  authorAssociation: string
+  body: string
+}
+
+/** The GitHub adapter's additions to `GitHostAdapter` (§3z.12 §3g.2). */
+export interface GitHostAdapterExtras {
+  /** The linked Vercel project, so a monorepo's several previews can be told apart. */
+  setPreviewProject(projectName: string | null): void
+  readThreadDetails(number: number): Promise<ReviewThreadDetail[]>
+  readComments(number: number): Promise<PrComment[]>
 }

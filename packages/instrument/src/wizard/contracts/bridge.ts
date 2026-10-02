@@ -6,11 +6,14 @@
 // `contracts/tag-wizard-v1/` are checked against the shapes below by `contracts.test.ts`, and 1bu-1
 // vendors those fixtures. The tag never calls the cloud directly; it talks to this bridge only.
 //
-// Interpretations F0 made where §3a is terse (also in the F0 note):
-// - every JSON request body (POST/PATCH) carries the `{protocolVersion, requestId}` envelope, as the
-//   link and runs requests in §3a show; the §3a.6 settings requests list only their verb fields;
+// §3z (the 2026-10-02 reconciliation amendment, NORMATIVE) is folded in here:
+// - every JSON request body (POST/PATCH) carries the `{protocolVersion, requestId}` envelope; every GET
+//   carries the header `X-Request-Id: <uuid>`; the bridge echoes the body's id (POST/PATCH) or the header's
+//   (GET), else a fresh uuid, and the client checks the echo (§3z.2, A7);
+// - the error body is exactly `{code, message, retryable, field?, state?, upstreamStatus?}`; `state` carries
+//   the sub-reason (BRIDGE_ERROR_STATES), `upstreamStatus` appears only on `cloud_error` (§3z.2, §3z.3);
 // - `claimed_by_other` (409) carries the current proof state in `error.state`;
-// - `cloud_error` (502) carries the cloud's status in `error.upstreamStatus`.
+// - three codes joined §3a.2: 403 `role_required`, 423 `site_setup_locked`, 500 `internal_error` (A4).
 // Sanitizer-safe names: no field that crosses the bridge ends in `token`, equals `apikey` or contains
 // `credential` (the desktop drops such keys). The descriptor's `token` is read from a local file, never
 // sent over HTTP.
@@ -55,7 +58,9 @@ export const TAG_CAPABILITIES = [
   "tag.server-lane.v1",
   "tag.meta-relay.v1",
   "tag.uninstall.v1",
-  "tag.test.v1"
+  "tag.test.v1",
+  /** §3z.9 (A21): `GET /v1/test/facts?runId=` — the real-visit facts the desktop proof watcher stored. */
+  "tag.test-facts.v1"
 ] as const
 export type TagCapability = (typeof TAG_CAPABILITIES)[number]
 
@@ -118,6 +123,8 @@ export const BRIDGE_HEADERS = {
   tagVersion: "X-Infinite-Tag-Version",
   /** Link-scoped verbs only: `lk_…`. */
   linkId: "X-Infinite-Link-Id",
+  /** Every GET carries a uuid here (§3z.2, A7); the bridge echoes it as the response's `requestId`. */
+  requestId: "X-Request-Id",
   contentType: "Content-Type",
   cacheControl: "Cache-Control",
   retryAfter: "Retry-After",
@@ -137,6 +144,22 @@ export const BRIDGE_LIMITS = {
   linkRequestsPerMinute: 10,
   /** Test runs, enforced server-side from `deadlineMs`. */
   testDeadlineMs: { dry_live: 120_000, rehearsal: 180_000, real_visit: 90_000 }
+} as const
+
+/** §3z.8 / §3c.1 request bounds (A10): the desktop and the cloud answer 400 `invalid_request` past them. */
+export const BRIDGE_BOUNDS = {
+  /** `https://…`, at most this many characters. */
+  prUrlMaxChars: 300,
+  /** `patch.approvedConversions`: at most this many names (each CONVERSION_NAME_PATTERN). */
+  approvedConversionsMax: 20,
+  /** `meta-relay` `sourceRef`. */
+  sourceRefMaxChars: 64,
+  /** `site-source` `productionHosts`. */
+  productionHostsMax: 10,
+  /** The compact JSON report the tag posts (§3z.8, A14); the tag checks before posting. */
+  reportMaxBytes: 56_000,
+  /** `GET /v1/baseline?since=`: a UTC ISO instant within this many days. */
+  baselineSinceMaxDays: 28
 } as const
 
 export const BRIDGE_ID_PATTERNS = {
@@ -175,9 +198,15 @@ export const BRIDGE_ERROR_STATUS = {
   foreign_site_hosts: 409,
   ambiguous_connection: 409,
   claimed_by_other: 409,
+  /** §3z.2: the verb needs a workspace owner or admin (`state:"owner_or_admin"`). */
+  role_required: 403,
   expired: 410,
   body_too_large: 413,
+  /** §3z.2: a running website test locks the site's setup or a conversion goal (`state:"live_site_lock" | "goal_lock"`). */
+  site_setup_locked: 423,
   rate_limited: 429,
+  /** §3z.2: an unexpected failure inside the desktop; `retryable:false` for a damaged `tag-links.json`. */
+  internal_error: 500,
   cloud_error: 502,
   cloud_auth_failed: 502,
   capability_unavailable: 503,
@@ -190,15 +219,32 @@ export const BRIDGE_ERROR_CODES = Object.keys(BRIDGE_ERROR_STATUS) as BridgeErro
 /** `link_invalid`'s `state`. */
 export type LinkInvalidState = "project_missing" | "not_cloud_linked" | "not_member"
 
+/**
+ * §3z.3 (A5): the `error.state` values the tag handles, per code. `state` is passed through verbatim; an
+ * unknown state gets generic wording, never a crash. `claimed_by_other` carries a ProofState (any value).
+ */
+export const BRIDGE_ERROR_STATES = {
+  invalid_request: ["unverified_host", "would_drop_ga4_events"],
+  not_found: ["no_site_source", "no_hosting_connection"],
+  foreign_site_hosts: ["infinite_workspace", "disabled_source_other_hosts", "no_hosting_connection"],
+  ambiguous_connection: ["connection_serves_no_site_host"],
+  capability_unavailable: ["ga4_not_connected", "internal_workspace_unconfigured"],
+  cloud_error: ["connection_unavailable"],
+  link_invalid: ["project_missing", "not_cloud_linked", "not_member"],
+  relay_not_available: ["no_pixel", "infinite_dataset", "non_production_source"],
+  site_setup_locked: ["live_site_lock", "goal_lock"],
+  role_required: ["owner_or_admin"]
+} as const satisfies Partial<Record<BridgeErrorCode, readonly string[]>>
+
 export interface BridgeErrorBody {
   code: BridgeErrorCode
   message: string
   retryable: boolean
   /** `invalid_request`: the offending field. */
   field?: string
-  /** `link_invalid`: a LinkInvalidState. `claimed_by_other`: the run's current ProofState. */
+  /** The sub-reason (§3z.3 BRIDGE_ERROR_STATES); `claimed_by_other`: the run's current ProofState. */
   state?: string
-  /** `cloud_error`: the cloud's HTTP status. A cloud 401 is never re-emitted as 401. */
+  /** `cloud_error` only: the cloud's HTTP status. A cloud 401 is never re-emitted as 401. */
   upstreamStatus?: number
 }
 
@@ -415,8 +461,13 @@ export interface RunPatch {
   proofState?: "proven" | "problem" | "undetermined"
 }
 
+/**
+ * §3z.8 (A10): `producer` is REQUIRED whenever `patch.proofState` is present and must equal the run's
+ * `proofClaimedBy`, else 409 `claimed_by_other`.
+ */
 export interface PatchRunBody extends BridgeEnvelope {
   patch: RunPatch
+  producer?: ProofProducer
 }
 
 /** A run's public fields (§3c.1 columns minus workspace, site-source and engine-project ids). */
@@ -534,9 +585,12 @@ export interface TagServerLaneStatus {
 
 export interface ServerLaneStatusResponse extends BridgeEnvelope, TagServerLaneStatus {}
 
-/** The wizard always sends `skip`: the settings go live with the user's merge. */
+/**
+ * §3z.7 (A9): protocol 1 accepts ONLY `skip` (the settings go live with the user's merge). Anything else,
+ * `"serving_production"` included, is 400 `invalid_request` field `redeploy` at the bridge and the cloud.
+ */
 export interface ProvisionEnvBody extends BridgeEnvelope {
-  redeploy: "skip" | "serving_production"
+  redeploy: "skip"
 }
 
 /** `skipped.reason` is `not_requested` when the wizard sent `redeploy:"skip"`. */
@@ -598,6 +652,11 @@ export interface TestRunCancelResponse extends BridgeEnvelope {
   state: "cancelled"
 }
 
+/** §3z.9 (A21) `GET /v1/test/facts?runId=`: the stored `real_visit` facts, or 404 `not_found`. Never starts a visit. */
+export interface TestFactsResponse extends BridgeEnvelope {
+  result: TestResult
+}
+
 // ---------------------------------------------------------------------------------------------
 // The verb table
 // ---------------------------------------------------------------------------------------------
@@ -628,7 +687,8 @@ export const BRIDGE_VERB_IDS = [
   "uninstall.disable-site-source",
   "test.start",
   "test.poll",
-  "test.cancel"
+  "test.cancel",
+  "test.facts"
 ] as const
 export type BridgeVerbId = (typeof BRIDGE_VERB_IDS)[number]
 
@@ -775,7 +835,7 @@ export const RUN_PATCH_SHAPE = shapeOf<RunPatch>()(
     "proofState"
   ]
 )
-const PATCH_RUN_BODY_SHAPE = shapeOf<PatchRunBody>()("PatchRunBody", [...ENVELOPE, "patch"], [], { patch: RUN_PATCH_SHAPE })
+const PATCH_RUN_BODY_SHAPE = shapeOf<PatchRunBody>()("PatchRunBody", [...ENVELOPE, "patch"], ["producer"], { patch: RUN_PATCH_SHAPE })
 export const WIZARD_RUN_PUBLIC_SHAPE = shapeOf<WizardRunPublic>()(
   "WizardRunPublic",
   [
@@ -886,6 +946,7 @@ const TEST_RUN_POLL_RESPONSE_SHAPE = shapeOf<TestRunPollResponse>()("TestRunPoll
   error: shapeOf<{ code: string; message: string }>()("TestRunError", ["code", "message"], [])
 })
 const TEST_RUN_CANCEL_RESPONSE_SHAPE = shapeOf<TestRunCancelResponse>()("TestRunCancelResponse", [...ENVELOPE, "testRunId", "state"], [])
+const TEST_FACTS_RESPONSE_SHAPE = shapeOf<TestFactsResponse>()("TestFactsResponse", [...ENVELOPE, "result"], [], { result: TEST_RESULT_SHAPE })
 
 /** Every §3a verb, one row each (the key equals the row's `verb`; checked at compile time). */
 export const BRIDGE_VERBS = {
@@ -902,7 +963,7 @@ export const BRIDGE_VERBS = {
   "runs.get": { verb: "runs.get", method: "GET", path: "/v1/runs/:runId", query: [], capability: "tag.runs.v1", linkScoped: true, paid: true, successStatus: 200, request: null, response: RUN_RESPONSE_SHAPE, stateChanging: false },
   receipts: { verb: "receipts", method: "POST", path: "/v1/runs/:runId/receipts", query: [], capability: "tag.receipts.v1", linkScoped: true, paid: true, successStatus: 200, request: RECEIPTS_BODY_SHAPE, response: RECEIPTS_BRIDGE_RESPONSE_SHAPE, stateChanging: false },
   report: { verb: "report", method: "POST", path: "/v1/runs/:runId/report", query: [], capability: "tag.report.v2", linkScoped: true, paid: true, successStatus: 201, request: REPORT_POST_BODY_SHAPE, response: REPORT_POST_RESPONSE_SHAPE, stateChanging: false },
-  baseline: { verb: "baseline", method: "GET", path: "/v1/baseline", query: ["runId"], capability: "tag.baseline.v1", linkScoped: true, paid: true, successStatus: 200, request: null, response: BASELINE_RESPONSE_SHAPE, stateChanging: false },
+  baseline: { verb: "baseline", method: "GET", path: "/v1/baseline", query: ["runId", "since"], capability: "tag.baseline.v1", linkScoped: true, paid: true, successStatus: 200, request: null, response: BASELINE_RESPONSE_SHAPE, stateChanging: false },
   "site-source": { verb: "site-source", method: "POST", path: "/v1/site-source", query: [], capability: "tag.site-source.v1", linkScoped: true, paid: true, successStatus: 200, request: SITE_SOURCE_BODY_SHAPE, response: SITE_SOURCE_RESPONSE_SHAPE, stateChanging: true },
   conversions: { verb: "conversions", method: "POST", path: "/v1/conversions", query: [], capability: "tag.conversions.v1", linkScoped: true, paid: true, successStatus: 200, request: CONVERSIONS_BODY_SHAPE, response: CONVERSIONS_RESPONSE_SHAPE, stateChanging: true },
   "ga4-key-events": { verb: "ga4-key-events", method: "POST", path: "/v1/ga4/key-events", query: [], capability: "tag.ga4-key-events.v1", linkScoped: true, paid: true, successStatus: 200, request: GA4_KEY_EVENTS_BODY_SHAPE, response: GA4_KEY_EVENTS_RESPONSE_SHAPE, stateChanging: true },
@@ -914,7 +975,8 @@ export const BRIDGE_VERBS = {
   "uninstall.disable-site-source": { verb: "uninstall.disable-site-source", method: "POST", path: "/v1/site-source/disable", query: [], capability: "tag.uninstall.v1", linkScoped: true, paid: true, successStatus: 200, request: EMPTY_BODY_SHAPE, response: DISABLE_SITE_SOURCE_RESPONSE_SHAPE, stateChanging: true },
   "test.start": { verb: "test.start", method: "POST", path: "/v1/test/runs", query: [], capability: "tag.test.v1", linkScoped: true, paid: true, successStatus: 202, request: TEST_RUN_REQUEST_SHAPE, response: TEST_RUN_START_RESPONSE_SHAPE, stateChanging: false },
   "test.poll": { verb: "test.poll", method: "GET", path: "/v1/test/runs/:testRunId", query: ["wait"], capability: "tag.test.v1", linkScoped: true, paid: true, successStatus: 200, request: null, response: TEST_RUN_POLL_RESPONSE_SHAPE, stateChanging: false },
-  "test.cancel": { verb: "test.cancel", method: "POST", path: "/v1/test/runs/:testRunId/cancel", query: [], capability: "tag.test.v1", linkScoped: true, paid: true, successStatus: 200, request: EMPTY_BODY_SHAPE, response: TEST_RUN_CANCEL_RESPONSE_SHAPE, stateChanging: false }
+  "test.cancel": { verb: "test.cancel", method: "POST", path: "/v1/test/runs/:testRunId/cancel", query: [], capability: "tag.test.v1", linkScoped: true, paid: true, successStatus: 200, request: EMPTY_BODY_SHAPE, response: TEST_RUN_CANCEL_RESPONSE_SHAPE, stateChanging: false },
+  "test.facts": { verb: "test.facts", method: "GET", path: "/v1/test/facts", query: ["runId"], capability: "tag.test-facts.v1", linkScoped: true, paid: true, successStatus: 200, request: null, response: TEST_FACTS_RESPONSE_SHAPE, stateChanging: false }
 } as const satisfies { readonly [V in BridgeVerbId]: BridgeVerbSpec & { readonly verb: V } }
 
 /** The id shape each path parameter must have; a segment that does not match is no route (404), never forwarded. */
@@ -1001,11 +1063,13 @@ export interface TagBridgeClient {
 
   startRun(body: WithoutEnvelope<StartRunBody>, options?: BridgeCallOptions): Promise<StartRunResponse>
   claimProof(runId: string, producer: ProofProducer, options?: BridgeCallOptions): Promise<ProofClaimResponse>
-  patchRun(runId: string, patch: RunPatch, options?: BridgeCallOptions): Promise<RunResponse>
+  /** `producer` is required whenever `patch.proofState` is set (§3z.8, A10). */
+  patchRun(runId: string, patch: RunPatch, options?: BridgeCallOptions & { producer?: ProofProducer }): Promise<RunResponse>
   getRun(runId: string, options?: BridgeCallOptions): Promise<RunResponse>
   postReceipts(runId: string, body: ReceiptsRequestFields, options?: BridgeCallOptions): Promise<ReceiptsResponse>
   postReport(runId: string, phase: ReportPhase, report: ReportV2, options?: BridgeCallOptions): Promise<ReportPostResponse>
-  baseline(runId: string, options?: BridgeCallOptions): Promise<BaselineResponse>
+  /** `since`: a UTC ISO instant within the last 28 days (the P checks read events after the deploy; §3z.8, A22). */
+  baseline(runId: string, options?: BridgeCallOptions & { since?: string }): Promise<BaselineResponse>
 
   ensureSiteSource(body: WithoutEnvelope<SiteSourceBody>, options?: BridgeCallOptions): Promise<SiteSourceResponse>
   declareConversions(body: WithoutEnvelope<ConversionsBody>, options?: BridgeCallOptions): Promise<ConversionsResponse>
@@ -1020,6 +1084,8 @@ export interface TagBridgeClient {
   startTest(body: WithoutEnvelope<TestRunRequest>, options?: BridgeCallOptions): Promise<TestRunStartResponse>
   pollTest(testRunId: string, waitSeconds: number, options?: BridgeCallOptions): Promise<TestRunPollResponse>
   cancelTest(testRunId: string, options?: BridgeCallOptions): Promise<TestRunCancelResponse>
+  /** §3z.9 (A21): the real-visit facts the desktop stored for this run; a 404 `not_found` when it made none. */
+  testFacts(runId: string, options?: BridgeCallOptions): Promise<TestFactsResponse>
 }
 
 /**

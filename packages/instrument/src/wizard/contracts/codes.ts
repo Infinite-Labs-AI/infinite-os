@@ -34,7 +34,9 @@ export const WIZARD_CODES_BY_EXIT = {
     "INF_WIZ_REVIEW_UNPARSEABLE",
     "INF_WIZ_PROOF_INCOMPLETE",
     "INF_WIZ_BRANCH_FAILED",
-    "INF_WIZ_FENCE_TAMPER"
+    "INF_WIZ_FENCE_TAMPER",
+    // §3z.4 (B6): a generic agent error (not out of usage, not a timeout, not toolless).
+    "INF_WIZ_AGENT_FAILED"
   ],
   2: [
     "INF_WIZ_NOT_BUILT",
@@ -53,7 +55,13 @@ export const WIZARD_CODES_BY_EXIT = {
     "INF_WIZ_DEPLOY_TIMEOUT",
     // Exit 3 only when it halts the run; a preview that never appears normally leaves the rehearsal
     // `undetermined (no preview)` and the run continues (§3d.1 step 8).
-    "INF_WIZ_PREVIEW_NOT_FOUND"
+    "INF_WIZ_PREVIEW_NOT_FOUND",
+    // §3z.4: a running website test in Infinite locks the site's setup (423 `site_setup_locked`).
+    "INF_WIZ_SITE_LOCKED",
+    // §3z.4: Infinite or its cloud did not answer (502/504, busy, rate limited, retryable internal error).
+    "INF_WIZ_INFINITE_UNAVAILABLE",
+    // §3z.12 (B21): a dev server keeps writing build output; stop it, then run again.
+    "INF_WIZ_DEV_SERVER_RUNNING"
   ],
   4: [
     "INF_WIZ_NO_APP",

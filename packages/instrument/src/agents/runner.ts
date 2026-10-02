@@ -39,6 +39,7 @@ import {
   type RunJobsInput,
   type SessionRef
 } from "../wizard/contracts/agents.js"
+import { AGENT_MODELS } from "../wizard/contracts/agents.js"
 import type { GitOps } from "../wizard/contracts/git-host.js"
 import type { AgentQuestion, CheckRunner, ChecklistItem, Claim } from "../wizard/contracts/jobs.js"
 import {
@@ -66,13 +67,10 @@ import { startMcpBridge } from "./mcp/bridge.js"
 import { claudeUsageSignals, codexUsageLimit } from "./usage-limit.js"
 
 /**
- * The models customers' runs use (River, 10-02, final): Opus 4.8 xhigh and Sol 6.1 xhigh, both roles. A
- * retirement is a one-line change here. The model and effort also go in the plan's cost line.
+ * The models customers' runs use (River, 10-02, final): Opus 4.8 xhigh and Sol 6.1 xhigh, both roles. ONE
+ * constant, in the contract (`AGENT_MODELS`), so a retirement is a one-line change there.
  */
-export const AGENT_MODELS = {
-  claude_code: { model: "claude-opus-4-8", effort: "xhigh", label: "Opus 4.8" },
-  codex: { model: "gpt-6.1-sol", effort: "xhigh", label: "Sol 6.1" }
-} as const satisfies Record<AgentKind, { model: string; effort: string; label: string }>
+export { AGENT_MODELS }
 
 /** Prompts on stdin (the job brief is the system prompt for Claude and the prompt for Codex). */
 export const WORKER_KICKOFF =

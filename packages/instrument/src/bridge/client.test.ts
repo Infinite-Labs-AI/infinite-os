@@ -185,8 +185,14 @@ describe("TagBridgeClient against the fake bridge", () => {
 describe("strict decoding (fixture-driven transport)", () => {
   const descriptor = { ...loadDescriptorExample(), pid: process.pid }
 
+  /** Answers `body`; a GET's success body echoes the request's `X-Request-Id` (§3z.2, A7), as the desktop does. */
   function replay(status: number, body: unknown, headers: Record<string, string> = {}): BridgeTransport {
-    return async () => ({ status, headers, body: typeof body === "string" ? body : JSON.stringify(body) })
+    return async (request) => {
+      if (typeof body !== "string" && status < 300 && request.method === "GET" && body !== null && typeof body === "object") {
+        return { status, headers, body: JSON.stringify({ ...(body as Record<string, unknown>), requestId: request.headers["X-Request-Id"] }) }
+      }
+      return { status, headers, body: typeof body === "string" ? body : JSON.stringify(body) }
+    }
   }
 
   function callFor(client: ReturnType<typeof createTagBridgeClient>, verb: BridgeVerbId, request: unknown): Promise<unknown> {
@@ -245,6 +251,8 @@ describe("strict decoding (fixture-driven transport)", () => {
         return client.pollTest("tr_FAKEdryLive00000000000", 25)
       case "test.cancel":
         return client.cancelTest("tr_FAKEcancelledRun000000")
+      case "test.facts":
+        return client.testFacts(runId)
     }
   }
 
@@ -297,7 +305,7 @@ describe("strict decoding (fixture-driven transport)", () => {
       const transport: BridgeTransport = async (request) => {
         const sent = request.body ? (JSON.parse(request.body) as { requestId: string }) : null
         const response = { ...(row.response as Record<string, unknown>) }
-        if (sent) response.requestId = sent.requestId
+        response.requestId = sent ? sent.requestId : request.headers["X-Request-Id"]
         return { status: row.status, headers: {}, body: JSON.stringify(response) }
       }
       const client = createTagBridgeClient(descriptor, { tagVersion: "x", transport })

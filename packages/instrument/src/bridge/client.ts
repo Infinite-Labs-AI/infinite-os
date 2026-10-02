@@ -11,7 +11,8 @@
 //   old verb);
 // - bodies ≤ 64 KB; 35 s per call; long polls ask for ≤ 25 s;
 // - a success response must have exactly the verb's keys (unknown or missing → `bad_response`), protocol 1,
-//   and echo the request id the client sent; an error response maps to `BridgeError {status, code,
+//   and echo the request id the client sent (POST/PATCH: the body's `requestId`; GET: the `X-Request-Id`
+//   header every GET carries, §3z.2 A7); an error response maps to `BridgeError {status, code,
 //   retryable}` when it is a well-formed §3a.2 envelope with a known code, else to `generic`.
 // The token is held in memory only and never appears in an error message.
 import { randomUUID } from "node:crypto"
@@ -60,6 +61,7 @@ import {
   type StatusResponse,
   type TagBridgeClient,
   type TagCapability,
+  type TestFactsResponse,
   type TestRunCancelResponse,
   type TestRunPollResponse,
   type TestRunStartResponse,
@@ -254,8 +256,14 @@ export class DescriptorTagBridgeClient implements TagBridgeClient {
     return this.call("runs.proof-claim", { params: { runId }, body: { producer }, signal: options?.signal })
   }
 
-  patchRun(runId: string, patch: RunPatch, options?: BridgeCallOptions): Promise<RunResponse> {
-    return this.call("runs.patch", { params: { runId }, body: { patch: { ...patch } }, signal: options?.signal })
+  patchRun(runId: string, patch: RunPatch, options?: BridgeCallOptions & { producer?: ProofProducer }): Promise<RunResponse> {
+    // §3z.8 (A10): the proofState PATCH names its producer, which must hold the claim.
+    if (patch.proofState !== undefined && options?.producer === undefined) {
+      throw new Error("bridge: a runs.patch with proofState needs a producer (§3z.8)")
+    }
+    const body: Record<string, unknown> = { patch: { ...patch } }
+    if (options?.producer !== undefined) body.producer = options.producer
+    return this.call("runs.patch", { params: { runId }, body, signal: options?.signal })
   }
 
   getRun(runId: string, options?: BridgeCallOptions): Promise<RunResponse> {
@@ -284,8 +292,8 @@ export class DescriptorTagBridgeClient implements TagBridgeClient {
     return response
   }
 
-  baseline(runId: string, options?: BridgeCallOptions): Promise<BaselineResponse> {
-    return this.call("baseline", { query: { runId }, signal: options?.signal })
+  baseline(runId: string, options?: BridgeCallOptions & { since?: string }): Promise<BaselineResponse> {
+    return this.call("baseline", { query: { runId, since: options?.since }, signal: options?.signal })
   }
 
   ensureSiteSource(body: WithoutEnvelope<SiteSourceBody>, options?: BridgeCallOptions): Promise<SiteSourceResponse> {
@@ -334,6 +342,10 @@ export class DescriptorTagBridgeClient implements TagBridgeClient {
 
   cancelTest(testRunId: string, options?: BridgeCallOptions): Promise<TestRunCancelResponse> {
     return this.call("test.cancel", { params: { testRunId }, body: {}, signal: options?.signal })
+  }
+
+  testFacts(runId: string, options?: BridgeCallOptions): Promise<TestFactsResponse> {
+    return this.call("test.facts", { query: { runId }, signal: options?.signal })
   }
 
   // -------------------------------------------------------------------------------------------
@@ -403,6 +415,10 @@ export class DescriptorTagBridgeClient implements TagBridgeClient {
       headers[BRIDGE_HEADERS.contentType] = "application/json"
     } else if (input.body !== undefined) {
       throw new Error(`bridge: ${verb} takes no body`)
+    } else {
+      // §3z.2 (A7): every GET carries a request id in a header; the bridge echoes it.
+      sentRequestId = this.newRequestId()
+      headers[BRIDGE_HEADERS.requestId] = sentRequestId
     }
 
     const response = await this.transport({

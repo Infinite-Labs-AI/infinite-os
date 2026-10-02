@@ -14,6 +14,7 @@ import {
   BRIDGE_DESCRIPTOR_SHAPE,
   BRIDGE_ERROR_CODES,
   BRIDGE_ERROR_RESPONSE_SHAPE,
+  BRIDGE_ERROR_STATES,
   BRIDGE_ERROR_STATUS,
   BRIDGE_ID_PATTERNS,
   BRIDGE_TOKEN_PATTERN,
@@ -286,15 +287,45 @@ describe("bridge-verbs.fixtures.json (§3a)", () => {
     expect(BRIDGE_VERB_IDS.filter((verb) => !covered.has(verb))).toEqual([])
   })
 
-  it("error rows: one example of EVERY error code, each with its HTTP status and the error envelope", () => {
+  it("error rows: an example of EVERY error code, each with its HTTP status and the error envelope", () => {
     const errors = fixtures.filter((f) => !isSuccess(f))
-    const codes = errors.map((f) => (f.response as { error: { code: string } }).error.code)
+    const codes = new Set(errors.map((f) => (f.response as { error: { code: string } }).error.code))
     expect([...codes].sort()).toEqual([...BRIDGE_ERROR_CODES].sort())
     for (const fixture of errors) {
-      const code = (fixture.response as { error: { code: keyof typeof BRIDGE_ERROR_STATUS } }).error.code
-      expect(shapeErrors(fixture.response, BRIDGE_ERROR_RESPONSE_SHAPE), code).toEqual([])
-      expect(fixture.status, code).toBe(BRIDGE_ERROR_STATUS[code])
+      const error = (fixture.response as { error: { code: keyof typeof BRIDGE_ERROR_STATUS; state?: string; upstreamStatus?: number } }).error
+      expect(shapeErrors(fixture.response, BRIDGE_ERROR_RESPONSE_SHAPE), error.code).toEqual([])
+      expect(fixture.status, error.code).toBe(BRIDGE_ERROR_STATUS[error.code])
+      // §3z.2: upstreamStatus appears only on cloud_error; a state is one §3z.3 lists for its code.
+      if (error.upstreamStatus !== undefined) expect(error.code).toBe("cloud_error")
+      const known = (BRIDGE_ERROR_STATES as Partial<Record<string, readonly string[]>>)[error.code]
+      if (error.state !== undefined && error.code !== "claimed_by_other") expect(known, `${error.code} state ${error.state}`).toContain(error.state)
     }
+  })
+
+  it("§3z rows: the three new codes, the relay binding while not rolled out, the skip-only provision and the facts verb", () => {
+    const errorOf = (f: BridgeVerbFixture) => (f.response as { error?: { code: string; state?: string; field?: string } }).error
+    expect(fixtures.find((f) => errorOf(f)?.code === "role_required")?.status).toBe(403)
+    expect(errorOf(fixtures.find((f) => errorOf(f)?.code === "site_setup_locked")!)?.state).toBe("live_site_lock")
+    expect(fixtures.find((f) => errorOf(f)?.code === "internal_error")?.status).toBe(500)
+    const bind = fixtures.find((f) => f.verb === "meta-relay.enable" && f.status === 200 && (f.response as { reason: string | null }).reason === "not_rolled_out")
+    expect(bind?.response).toMatchObject({ available: false, enabled: true, bound: { sourceRef: "meta_src_FAKE_0001" } })
+    const serving = fixtures.find((f) => f.verb === "server-lane.provision-env" && (f.request as { redeploy?: string } | null)?.redeploy === "serving_production")!
+    expect(serving.status).toBe(400)
+    expect(errorOf(serving)?.field).toBe("redeploy")
+    for (const row of fixtures.filter((f) => f.verb === "server-lane.provision-env" && f.status === 200)) expect((row.request as { redeploy: string }).redeploy).toBe("skip")
+    const facts = fixtures.find((f) => f.verb === "test.facts" && f.status === 200)!
+    expect((facts.response as { result: TestResult }).result.mode).toBe("real_visit")
+    expect(fixtures.some((f) => f.verb === "baseline" && f.status === 200 && f.path.includes("&since="))).toBe(true)
+    // A10: every proofState PATCH names its producer.
+    for (const row of fixtures.filter((f) => f.verb === "runs.patch" && (f.request as { patch?: { proofState?: string } } | null)?.patch?.proofState)) {
+      expect((row.request as { producer?: string }).producer).toBe("tag")
+    }
+  })
+
+  it("negative: a provision-env body that asks for a production redeploy does not type-check as protocol 1", () => {
+    // @ts-expect-error protocol 1 accepts only redeploy:"skip" (§3z.7, A9)
+    const body: import("./bridge.js").ProvisionEnvBody = { protocolVersion: 1, requestId: "x", redeploy: "serving_production" }
+    expect(body.redeploy).toBe("serving_production")
   })
 
   it("the routing examples really miss: route_not_found matches no verb, method_not_allowed uses another method", () => {
@@ -407,7 +438,10 @@ describe("bridge-verbs.fixtures.json (§3a)", () => {
   it("every test request's expect is exactly testExpectFromKeys(the keys row) (R2-16)", () => {
     const keys = fixtures.find((f) => f.verb === "keys" && f.status === 200)!.response as KeysResponse
     const derived = testExpectFromKeys(keys)
-    expect(derived.posthog).toEqual({ projectKey: keys.posthog.projectKey, apiHost: keys.posthog.apiHost })
+    // §3z.9 (A16): expect.posthog.apiHost is the connection's INGEST host, never "/ingest".
+    expect(derived.posthog).toEqual({ projectKey: keys.posthog.projectKey, apiHost: keys.posthog.ingestHost })
+    expect(testExpectFromKeys({ ...keys, posthog: { ...keys.posthog, apiHost: "/ingest", ingestHost: "https://eu.i.posthog.com" } }).posthog?.apiHost).toBe("https://eu.i.posthog.com")
+    expect(testExpectFromKeys({ ...keys, posthog: { ...keys.posthog, ingestHost: null } }).posthog).toBeUndefined()
     for (const start of fixtures.filter((f) => f.verb === "test.start" && f.status === 202)) {
       expect((start.request as TestRunRequest).expect, (start.response as { testRunId: string }).testRunId).toEqual(derived)
     }
@@ -827,9 +861,9 @@ describe("codes (§3d.5)", () => {
   it("exitCodeFor covers every WizardCode with the table's exit", () => {
     expect(WIZARD_CODES).toHaveLength(Object.keys(WIZARD_CODE_EXIT).length)
     const expected: Record<number, string[]> = {
-      1: ["APPLY_ROLLED_BACK", "AGENT_TOOLLESS", "AGENT_TIMEOUT", "PUSH_REFUSED", "PR_CREATE_FAILED", "REVIEW_UNPARSEABLE", "PROOF_INCOMPLETE", "BRANCH_FAILED", "FENCE_TAMPER"],
+      1: ["APPLY_ROLLED_BACK", "AGENT_TOOLLESS", "AGENT_TIMEOUT", "PUSH_REFUSED", "PR_CREATE_FAILED", "REVIEW_UNPARSEABLE", "PROOF_INCOMPLETE", "BRANCH_FAILED", "FENCE_TAMPER", "AGENT_FAILED"],
       2: ["NOT_BUILT", "NOT_MAC", "UNSUPPORTED_PLATFORM", "NO_GIT", "DIRTY_TREE", "BRIDGE_PROTOCOL", "LOCKED", "RUNTIME_MISMATCH"],
-      3: ["NEEDS_ANSWERS", "MERGE_PARKED", "AGENT_OUT_OF_USAGE", "DEPLOY_TIMEOUT", "PREVIEW_NOT_FOUND"],
+      3: ["NEEDS_ANSWERS", "MERGE_PARKED", "AGENT_OUT_OF_USAGE", "DEPLOY_TIMEOUT", "PREVIEW_NOT_FOUND", "SITE_LOCKED", "INFINITE_UNAVAILABLE", "DEV_SERVER_RUNNING"],
       4: ["NO_APP", "SIGNED_OUT", "SUBSCRIPTION_REQUIRED", "LINK_DECLINED", "LINK_EXPIRED"]
     }
     for (const [exit, codes] of Object.entries(expected)) {
