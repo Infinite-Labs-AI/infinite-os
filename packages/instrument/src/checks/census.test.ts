@@ -11,7 +11,7 @@ import { buildAnalyticsModuleSource } from "../frameworks/managed-files.js"
 import { buildManagedHtmlBlock } from "../frameworks/managed-html.js"
 import { getProviderAdapter } from "../providers/index.js"
 import type { InstallPlan } from "../types.js"
-import { censusChecks, censusInstalledTools, censusPages, runCensus } from "./census.js"
+import { censusChecks, censusInstalledTools, censusPages, censusViaTagManager, runCensus } from "./census.js"
 
 const NOW = () => new Date("2026-10-02T10:00:00.000Z")
 const ctx = { runId: "7f3c2a91-b0de-4c03-9a00-000000000001", now: NOW }
@@ -157,6 +157,43 @@ describe("duplicates, per page", () => {
     const census = runCensus({ root, appRoot: "." })
     expect(census.entries.map((entry) => `${entry.kind}:${entry.id}`)).toEqual(["gtag_config:G-FAKE00001", "gtm:GTM-FAKE01"])
     expect(check(censusChecks(census, ctx), "census_ga4_config_once").state).toBe("pass")
+  })
+})
+
+describe("fix round (review O6-R16, R17)", () => {
+  it("R16: a layout runs only on its own segment subtree: one GA4 start in each route group's layout is not a duplicate", () => {
+    const root = repo({
+      "app/(marketing)/layout.tsx": "gtag('config', 'G-AAAA1111')\n",
+      "app/(app)/layout.tsx": "gtag('config', 'G-AAAA1111')\n",
+      "app/(marketing)/page.tsx": "export default function P() { return null }\n",
+      "app/(app)/dashboard/page.tsx": "export default function D() { return null }\n"
+    })
+    const census = runCensus({ root, appRoot: "." })
+    expect(check(censusChecks(census, ctx), "census_ga4_config_once").state).toBe("pass")
+    // negative: a NESTED layout under one that already starts GA4 is a real duplicate on its pages
+    const nested = repo({
+      "app/layout.tsx": "gtag('config', 'G-AAAA1111')\n",
+      "app/(app)/layout.tsx": "gtag('config', 'G-AAAA1111')\n"
+    })
+    const result = check(censusChecks(runCensus({ root: nested, appRoot: "." }), ctx), "census_ga4_config_once")
+    expect(result.state).toBe("problem")
+    expect(result.evidence).toEqual([
+      { file: "app/(app)/layout.tsx", line: 1 },
+      { file: "app/layout.tsx", line: 1 }
+    ])
+  })
+
+  it("R17: a GTM-only site does not claim GA4 installed (its container is unreadable statically)", () => {
+    const root = repo({
+      "index.html": `<html><head><script>(function(w,d,s,l,i){j.src='https://www.googletagmanager.com/gtm.js?id='+i;})(window,document,'script','dataLayer','GTM-FAKE01');</script></head></html>`
+    })
+    const census = runCensus({ root, appRoot: "." })
+    expect(censusInstalledTools(census)).toEqual([])
+    expect(censusViaTagManager(census)).toBe(true)
+    // negative: a hand-written gtag config is GA4 installed
+    const gtag = repo({ "index.html": "<html><head><script>gtag('config', 'G-FAKE00001');</script></head></html>" })
+    expect(censusInstalledTools(runCensus({ root: gtag, appRoot: "." }))).toEqual(["ga4"])
+    expect(censusViaTagManager(runCensus({ root: gtag, appRoot: "." }))).toBe(false)
   })
 })
 

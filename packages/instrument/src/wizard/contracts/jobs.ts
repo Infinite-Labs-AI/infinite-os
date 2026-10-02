@@ -505,7 +505,11 @@ export interface CheckRunner {
   t0(scenarios: readonly T0Scenario[], artifacts: WorkspaceInstallArtifacts): Promise<CheckResult[]>
   liveBytes(urls: readonly string[], expect: TestExpect): Promise<CheckResult[]>
   redirectWalk(urls: readonly string[]): Promise<CheckResult[]>
-  csp(url: string): Promise<CheckResult[]>
+  /**
+   * T1 `csp_header` (lane O9). `expect` (lane O6 fix round, additive, review O6-R4): O9's check needs the
+   * connected ids to know which hosts the policy must allow; without it the check is undetermined.
+   */
+  csp(url: string, expect?: TestExpect): Promise<CheckResult[]>
   metaDomains(domains: readonly string[], pixelIds: readonly string[]): Promise<CheckResult[]>
   census(root: string, appRoot: string): Promise<CensusResult>
   setupChecks(appRoot: string): Promise<CheckResult[]>

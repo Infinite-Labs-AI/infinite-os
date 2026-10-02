@@ -9,13 +9,19 @@
 // registered check id with one input object:
 //   liveBytes    → "live_bytes"    {urls, expect}
 //   redirectWalk → "redirect_walk" {urls}
-//   csp          → "csp"           {url}
+//   csp          → "csp_header"    {url, expect?}  (O9's id; review O6-R4)
 //   metaDomains  → "meta_domains"  {domains, pixelIds}
 //   setupChecks  → "setup_checks"  {appRoot}
 //   envTargets   → "env_targets"   {envSourcedIds, hosting}
 //   turnGate     → "turn_gate"     {diff, connectionIds}
-// Fine-grained ids the job table names (e.g. `posthog_config`, `csp_header`) are registered by O9 under
-// their own names and reached through `run(checkId, input)`.
+// Fine-grained ids the job table names (e.g. `posthog_config`) are registered by O9 under their own
+// names and reached through `run(checkId, input)`.
+//
+// ONE ID, TWO TIERS: `click_test` is both a T0 scenario (jobs 10/11, static HTML / Vite) and a grader
+// check (RH, every other framework). `run("click_test", input)` dispatches on the input's shape — a
+// grader input `{result, expect, mode, ctx}` or a T0 input `{params, artifacts}` — and the tier-qualified
+// ids `T0:click_test` / `RH:click_test` (and `PV:` / `T1:` for the other grader ids) name the tier
+// explicitly. Every built-in validates its input and throws `CheckInputError`, never a TypeError.
 import type { WorkspaceInstallArtifacts } from "../types.js"
 import type { TagHosting } from "../wizard/contracts/bridge.js"
 import type {
@@ -41,7 +47,7 @@ import type { PackageManager } from "../types.js"
 export const CHECK_RUNNER_SEAMS = {
   liveBytes: "live_bytes",
   redirectWalk: "redirect_walk",
-  csp: "csp",
+  csp: "csp_header",
   metaDomains: "meta_domains",
   setupChecks: "setup_checks",
   envTargets: "env_targets",
@@ -52,7 +58,7 @@ export const CHECK_RUNNER_SEAMS = {
 export interface CheckRunnerSeamInputs {
   live_bytes: { urls: readonly string[]; expect: TestExpect }
   redirect_walk: { urls: readonly string[] }
-  csp: { url: string }
+  csp_header: { url: string; expect?: TestExpect }
   meta_domains: { domains: readonly string[]; pixelIds: readonly string[] }
   setup_checks: { appRoot: string }
   env_targets: { envSourcedIds: readonly EnvSourcedId[]; hosting: TagHosting }
@@ -83,6 +89,28 @@ export const O6_CHECK_IDS = [
   "meta_seen_leaving",
   "meta_automatic_events"
 ] as const
+
+export class CheckInputError extends Error {
+  constructor(
+    readonly checkId: string,
+    detail: string
+  ) {
+    super(`check "${checkId}": ${detail}`)
+    this.name = "CheckInputError"
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+function isGradeInput(input: unknown): input is GradeTestRunInput {
+  return isRecord(input) && isRecord(input.result) && isRecord(input.expect) && typeof input.mode === "string" && isRecord(input.ctx)
+}
+
+function isScenarioInput(input: unknown): input is { params: Readonly<Record<string, unknown>>; artifacts: WorkspaceInstallArtifacts } {
+  return isRecord(input) && isRecord(input.params) && isRecord(input.artifacts)
+}
 
 export class CheckNotRegisteredError extends Error {
   constructor(readonly checkId: string) {
@@ -182,14 +210,16 @@ export function createCheckRunner(options: CheckRunnerOptions): O6CheckRunner {
   }
 
   builtIn("t0", async (input) => {
-    const { scenarios, artifacts } = input as { scenarios: readonly T0Scenario[]; artifacts: WorkspaceInstallArtifacts }
-    return t0(scenarios, artifacts)
+    if (!isRecord(input) || !Array.isArray(input.scenarios) || !isRecord(input.artifacts)) throw new CheckInputError("t0", "input must be {scenarios, artifacts}")
+    return t0(input.scenarios as readonly T0Scenario[], input.artifacts as WorkspaceInstallArtifacts)
   })
+  const scenarioCheck = (id: string): CheckFn => async (input) => {
+    if (!isScenarioInput(input)) throw new CheckInputError(`T0:${id}`, "input must be {params, artifacts}")
+    return t0([{ id, checkId: id, params: input.params }], input.artifacts)
+  }
   for (const id of T0_SCENARIO_IDS) {
-    builtIn(id, async (input) => {
-      const { params, artifacts } = input as { params: Readonly<Record<string, unknown>>; artifacts: WorkspaceInstallArtifacts }
-      return t0([{ id, checkId: id, params }], artifacts)
-    })
+    builtIn(`T0:${id}`, scenarioCheck(id))
+    if (id !== "click_test") builtIn(id, scenarioCheck(id))
   }
   const buildCheck = (checkId: string) => async () => gradeBuild(checkId, await runBuild(buildOptions()), baseline, ctx())
   builtIn("build", buildCheck("build"))
@@ -209,17 +239,30 @@ export function createCheckRunner(options: CheckRunnerOptions): O6CheckRunner {
   for (const id of ["census_one_per_tool", "census_ga4_config_once", "census_posthog_init_once", "census_meta_init_once"]) {
     builtIn(id, async (input) => censusChecks(census(input), ctx()).filter((result) => result.checkId === id))
   }
+  const gradeInput = (checkId: string, input: unknown): GradeTestRunInput => {
+    if (!isGradeInput(input)) throw new CheckInputError(checkId, "input must be {result, expect, mode, ctx}")
+    return input
+  }
   builtIn("grade_test_run", async (input) => {
-    const graded = grade(input as GradeTestRunInput)
+    const graded = grade(gradeInput("grade_test_run", input))
     return [...Object.values(graded.tools), ...(graded.metaAutomaticEvents ? [graded.metaAutomaticEvents.result] : []), ...graded.checks]
   })
-  for (const id of GRADE_DERIVED_IDS) {
-    builtIn(id, async (input) => {
-      const graded = grade(input as GradeTestRunInput)
-      if (id === "meta_automatic_events") return graded.metaAutomaticEvents ? [graded.metaAutomaticEvents.result] : []
-      return graded.checks.filter((result) => result.checkId === id)
-    })
+  const derivedCheck = (id: string): CheckFn => async (input) => {
+    const graded = grade(gradeInput(id, input))
+    if (id === "meta_automatic_events") return graded.metaAutomaticEvents ? [graded.metaAutomaticEvents.result] : []
+    return graded.checks.filter((result) => result.checkId === id)
   }
+  for (const id of GRADE_DERIVED_IDS) {
+    builtIn(id, derivedCheck(id))
+    for (const tier of ["T1", "RH", "PV"]) builtIn(`${tier}:${id}`, derivedCheck(id))
+  }
+  for (const tier of ["T1", "RH", "PV"]) builtIn(`${tier}:click_test`, derivedCheck("click_test"))
+  // The bare id serves both tiers by input shape (see the header).
+  builtIn("click_test", async (input, checkCtx) => {
+    if (isGradeInput(input)) return derivedCheck("click_test")(input, checkCtx)
+    if (isScenarioInput(input)) return scenarioCheck("click_test")(input, checkCtx)
+    throw new CheckInputError("click_test", "input must be a grader input {result, expect, mode, ctx} (RH) or a T0 input {params, artifacts}")
+  })
 
   const run = async (checkId: CheckId, input: unknown): Promise<CheckResult | CheckResult[]> => {
     const fn = registry.get(checkId)
@@ -247,7 +290,7 @@ export function createCheckRunner(options: CheckRunnerOptions): O6CheckRunner {
     t0,
     liveBytes: (urls, expect) => seam("live_bytes", { urls, expect }),
     redirectWalk: (urls) => seam("redirect_walk", { urls }),
-    csp: (url) => seam("csp", { url }),
+    csp: (url, expect) => seam("csp_header", expect ? { url, expect } : { url }),
     metaDomains: (domains, pixelIds) => seam("meta_domains", { domains, pixelIds }),
     async census(root, appRoot) {
       return runCensus({ root, appRoot })

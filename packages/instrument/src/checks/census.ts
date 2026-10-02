@@ -297,18 +297,40 @@ export function runCensus(options: CensusOptions): CensusResult {
 // ---- the S checks the job table names on the census ------------------------------------------
 
 const ROUTE_PAGE = /(?:^|\/)(?:app\/(?:.*\/)?page|pages\/(?!_app\b|_document\b)[^.]+)\.(?:tsx|jsx|ts|js|mjs)$/
+const APP_LAYOUT = /^(.*(?:^|\/)app(?:\/.*)?)\/layout\.(?:tsx|jsx|ts|js|mjs)$/
+
+function dirOf(file: string): string {
+  const at = file.lastIndexOf("/")
+  return at === -1 ? "" : file.slice(0, at)
+}
+
+/** `dir` is `ancestor` or inside it. */
+function within(dir: string, ancestor: string): boolean {
+  return dir === ancestor || dir.startsWith(`${ancestor}/`)
+}
 
 /**
- * Group entries into pages. An HTML file and a Next route page are pages; every other file (layouts,
- * `_app`, shared modules, the managed module) is the SHELL that runs on every page. A page's starts =
- * the shell's + its own. With no page files, the shell is the one page.
+ * Group entries into pages. An HTML file and a Next route page are pages. A Next app-router `layout.*`
+ * runs only on the pages of ITS segment subtree (route groups included: `app/(marketing)/layout.tsx`
+ * never runs beside `app/(app)/layout.tsx`, review O6-R16); every other non-page file (`_app`, shared
+ * modules, the managed module) is the SHELL that runs on every page. Each layout also stands for "a page
+ * under it", so two layouts in one chain are caught even when no page file starts a tool. With no page
+ * and no layout, the shell is the one page.
  */
 export function censusPages(entries: readonly CensusEntry[]): Array<{ page: string; entries: CensusEntry[] }> {
   const isPage = (file: string) => /\.html?$/i.test(file) || ROUTE_PAGE.test(file)
-  const shell = entries.filter((entry) => !isPage(entry.file))
+  const layoutDir = (file: string) => APP_LAYOUT.exec(file)?.[1] ?? null
+  const shell = entries.filter((entry) => !isPage(entry.file) && layoutDir(entry.file) === null)
+  const layouts = entries.filter((entry) => layoutDir(entry.file) !== null)
+  const layoutsOver = (dir: string) => layouts.filter((entry) => within(dir, layoutDir(entry.file)!))
   const pages = [...new Set(entries.filter((entry) => isPage(entry.file)).map((entry) => entry.file))]
-  if (pages.length === 0) return [{ page: "(app shell)", entries: shell }]
-  return pages.map((page) => ({ page, entries: [...shell, ...entries.filter((entry) => entry.file === page)] }))
+  const layoutFiles = [...new Set(layouts.map((entry) => entry.file))]
+  const units = [
+    ...pages.map((page) => ({ page, entries: [...shell, ...layoutsOver(dirOf(page)), ...entries.filter((entry) => entry.file === page)] })),
+    ...layoutFiles.map((layout) => ({ page: `${layoutDir(layout)}/ (any page under ${layout})`, entries: [...shell, ...layoutsOver(layoutDir(layout)!)] }))
+  ]
+  if (units.length === 0) return [{ page: "(app shell)", entries: shell }]
+  return units
 }
 
 function checkResult(checkId: string, state: CheckResult["state"], code: string | null, detail: string, evidence: Evidence[], ctx: { runId: string | null; now(): Date }): CheckResult {
@@ -325,7 +347,22 @@ function checkResult(checkId: string, state: CheckResult["state"], code: string 
 
 function duplicatesFor(census: CensusResult, tool: Tool): { messages: string[]; evidence: Evidence[] } {
   const messages: string[] = []
-  const evidence: Evidence[] = []
+  const evidence: Array<{ file: string; line: number }> = []
+  // The same starts seen from several pages (a root layout duplicate is on every page) are said once.
+  const said = new Set<string>()
+  const seenEvidence = new Set<string>()
+  const say = (kind: string, list: readonly CensusEntry[], message: string) => {
+    const key = `${kind}|${list.map((entry) => `${entry.file}:${entry.line}`).sort().join(",")}`
+    if (said.has(key)) return
+    said.add(key)
+    messages.push(message)
+    for (const entry of list) {
+      const at = `${entry.file}:${entry.line}`
+      if (seenEvidence.has(at)) continue
+      seenEvidence.add(at)
+      evidence.push({ file: entry.file, line: entry.line })
+    }
+  }
   for (const page of censusPages(census.entries)) {
     const starts = page.entries.filter((entry) => entry.tool === tool && entry.kind !== "gtm")
     const byId = new Map<string, CensusEntry[]>()
@@ -335,15 +372,12 @@ function duplicatesFor(census: CensusResult, tool: Tool): { messages: string[]; 
     }
     for (const [id, list] of byId) {
       if (list.length < 2) continue
-      messages.push(`${page.page}: ${id} starts ${list.length} times (${list.map((entry) => `${entry.file}:${entry.line}`).join(", ")})`)
-      evidence.push(...list.map((entry) => ({ file: entry.file, line: entry.line })))
+      say(`dup:${id}`, list, `${page.page}: ${id} starts ${list.length} times (${list.map((entry) => `${entry.file}:${entry.line}`).join(", ")})`)
     }
     const owners = new Set(starts.map((entry) => entry.owner))
-    if (owners.size > 1) {
-      messages.push(`${page.page}: Infinite's managed block AND the site's own code both start ${tool}`)
-      evidence.push(...starts.map((entry) => ({ file: entry.file, line: entry.line })))
-    }
+    if (owners.size > 1) say("owners", starts, `${page.page}: Infinite's managed block AND the site's own code both start ${tool}`)
   }
+  evidence.sort((a, b) => (a.file === b.file ? a.line - b.line : a.file < b.file ? -1 : 1))
   return { messages, evidence }
 }
 
@@ -383,9 +417,18 @@ export function censusChecks(census: CensusResult, ctx: { runId: string | null; 
   return out
 }
 
-/** The tools the census sees started anywhere (for the grader's `installedTools`). */
+/**
+ * The tools the census sees started anywhere (for the grader's `installedTools`). A GTM container is NOT
+ * a GA4 install (review O6-R17): what it holds is not readable statically (it may hold only a Meta tag),
+ * so a GTM-only site does not claim GA4 — see `censusViaTagManager`, which the report shows instead.
+ */
 export function censusInstalledTools(census: CensusResult): TestTool[] {
   const tools = new Set<TestTool>()
-  for (const entry of census.entries) if (entry.tool !== "x") tools.add(entry.tool)
+  for (const entry of census.entries) if (entry.tool !== "x" && entry.kind !== "gtm") tools.add(entry.tool)
   return (["infinite", "ga4", "posthog", "meta"] as const).filter((tool) => tools.has(tool))
+}
+
+/** Whether a Google Tag Manager container is on the site (its contents need runtime evidence, §3i.2 `via_tag_manager`). */
+export function censusViaTagManager(census: CensusResult): boolean {
+  return census.entries.some((entry) => entry.kind === "gtm")
 }

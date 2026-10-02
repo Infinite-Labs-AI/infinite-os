@@ -196,3 +196,115 @@ describe("the derived rehearsal / prove checks", () => {
     expect(derived(byId("dry_live_posthog_double_pageview")).one_beacon_per_tool!.state).toBe("problem")
   })
 })
+
+describe("fix round (review O6): each rule with the fact that flips it", () => {
+  const full = (fixture: TestRunFixtureCase, ctx: Partial<GradeContext> = {}) =>
+    gradeTestRunFull(fixture.result, fixture.request.expect, fixture.request.mode, { ...contextOf(fixture), ...ctx })
+  const check = (fixture: TestRunFixtureCase, id: string, ctx: Partial<GradeContext> = {}) => full(fixture, ctx).checks.find((entry) => entry.checkId === id)!
+
+  it("R5: a page that never loaded is undetermined (test_error) for every tool, never 'installed but sent nothing'", () => {
+    const fixture = byId("dry_live_installed_no_beacon")
+    fixture.result.loads = fixture.result.loads.map((load) => ({ ...load, status: 500, rendered: false }))
+    const graded = full(fixture)
+    for (const tool of TEST_TOOLS) {
+      expect(graded.tools[tool].state, graded.tools[tool].reason).toBe("undetermined")
+      expect(code(graded.tools[tool].reason)).toBe("test_error")
+    }
+    // and silence on an unloaded preview is not "previews stay silent"
+    const preview = byId("dry_live_preview_self_beacon")
+    preview.result.ga4.events = []
+    preview.result.loads = preview.result.loads.map((load) => ({ ...load, status: 404, rendered: false }))
+    expect(full(preview).tools.ga4.state).toBe("undetermined")
+    expect(check(preview, "preview_self_silent").state).toBe("undetermined")
+    // negative: the same silence on a page that rendered is the no_beacon problem
+    const loaded = byId("dry_live_installed_no_beacon")
+    expect(TEST_TOOLS.some((tool) => code(full(loaded).tools[tool].reason) === "no_beacon")).toBe(true)
+  })
+
+  it("R8: a seeded run releases a MANAGED Meta pixel too, so its silence is no_beacon; an adopted one stays held", () => {
+    const fixture = byId("dry_live_held_by_consent")
+    fixture.result.environment.consentSeeded = true
+    fixture.result.meta.tr = []
+    expect(code(full(fixture, { metaPixelOwnership: "managed" }).tools.meta.reason)).toBe("no_beacon")
+    expect(full(fixture, { metaPixelOwnership: "managed" }).tools.meta.state).toBe("problem")
+    // negative: an adopted pixel reads its own (site) consent, which the seed does not touch
+    expect(code(full(fixture, { metaPixelOwnership: "adopted" }).tools.meta.reason)).toBe("held_by_consent")
+  })
+
+  it("R9: an omitted consentMode makes a silent tool undetermined (test_error), never no_beacon", () => {
+    const fixture = byId("dry_live_installed_no_beacon")
+    const silent = TEST_TOOLS.filter((tool) => code(full(fixture).tools[tool].reason) === "no_beacon")
+    expect(silent.length).toBeGreaterThan(0)
+    const unknown = full(fixture, { consentMode: undefined })
+    for (const tool of silent) expect(code(unknown.tools[tool].reason)).toBe("test_error")
+    // negative: a tool that fires is still graded on its facts without the consent mode
+    const firing = byId("dry_live_all_once")
+    expect(full(firing, { consentMode: undefined }).tools.ga4.state).toBe("pass")
+  })
+
+  it("R10: a doubled page_view is reported by one_beacon_per_tool and ga4_one_page_view even when pii wins the per-tool verdict", () => {
+    const fixture = byId("dry_live_ga4_two_page_views")
+    expect(check(fixture, "one_beacon_per_tool").state).toBe("problem")
+    fixture.result.pii = [{ lane: "ga4", kind: "email", count: 1 }]
+    expect(code(full(fixture).tools.ga4.reason)).toBe("no_pii")
+    expect(check(fixture, "one_beacon_per_tool").state).toBe("problem")
+    expect(code(check(fixture, "ga4_one_page_view").reason)).toBe("duplicate_page_view")
+    // negative: pii alone does not make ga4_one_page_view fail
+    const once = byId("dry_live_pii_in_ga4")
+    expect(check(once, "ga4_one_page_view").state).toBe("pass")
+    expect(check(once, "one_beacon_per_tool").state).toBe("pass")
+  })
+
+  it("R11: a second Meta PageView after a client-side navigation is not a duplicate; without the navigation it is", () => {
+    const fixture = byId("rehearsal_click_test")
+    const pageView = fixture.result.meta.tr.find((tr) => tr.ev === "PageView")
+    expect(pageView).toBeDefined()
+    fixture.result.meta.tr.push({ ...pageView! })
+    expect(check(fixture, "meta_pixel_once").state).toBe("problem")
+    fixture.result.ga4.events.push({ ...fixture.result.ga4.events.find((event) => event.en === "page_view")!, afterNav: true })
+    expect(check(fixture, "meta_pixel_once").state).toBe("pass")
+  })
+
+  it("R12: the RH click test needs the label in GA4 when GA4 is installed; PostHog alone is not enough", () => {
+    const fixture = byId("rehearsal_click_test")
+    const label = fixture.result.clicks[0]!.label
+    const clickResult = (ctx: Partial<GradeContext> = {}) => full(fixture, ctx).checks.find((entry) => entry.checkId === "click_test")!
+    expect(clickResult().state).toBe("pass")
+    fixture.result.clicks[0]!.events.ga4 = []
+    fixture.result.clicks[0]!.events.posthog = [label]
+    expect(clickResult().state).toBe("problem")
+    expect(clickResult().reason).toContain("ga4")
+    // unknown installs → undetermined, never a pass
+    expect(clickResult({ installedTools: undefined }).state).toBe("undetermined")
+    // negative: with only PostHog installed, PostHog receiving it is the pass
+    expect(clickResult({ installedTools: ["infinite", "posthog"] }).state).toBe("pass")
+  })
+
+  it("R18: D10 never reports a measured 0 when the pixel was not graded or sent nothing", () => {
+    const fixture = byId("dry_live_meta_automatic_events_info")
+    expect(full(fixture).metaAutomaticEvents!.result.state).toBe("info")
+    const automation = byId("dry_live_meta_automatic_events_info")
+    automation.result.environment.automationDetected = true
+    expect(full(automation).metaAutomaticEvents).toMatchObject({ count: null, result: { state: "undetermined" } })
+    const nothing = byId("dry_live_meta_automatic_events_info")
+    nothing.result.meta.tr = []
+    expect(full(nothing).metaAutomaticEvents).toMatchObject({ count: null, result: { state: "undetermined" } })
+  })
+
+  it("R19: facts from another run are refused; results carry the facts' own run id", () => {
+    const fixture = byId("dry_live_all_once")
+    expect(() => full(fixture, { runId: "00000000-0000-4000-8000-000000000000" })).toThrow(/stale facts/)
+    const unscoped = full(fixture, { runId: null })
+    expect(unscoped.tools.ga4.runId).toBe(fixture.result.runId)
+    expect(unscoped.checks.every((entry) => entry.runId === fixture.result.runId)).toBe(true)
+  })
+
+  it("R21: PostHog / Meta beacons in a result mixing preview_self with other loads are undetermined, never a pass", () => {
+    const fixture = byId("dry_live_all_once")
+    fixture.result.loads.push({ ...fixture.result.loads[0]!, label: "preview_self", url: "https://acme-git-x.vercel.app/", finalUrl: "https://acme-git-x.vercel.app/" })
+    expect(code(full(fixture).tools.posthog.reason)).toBe("test_error")
+    expect(code(full(fixture).tools.meta.reason)).toBe("test_error")
+    // negative: GA4 carries a load label, so it is still graded (its beacons are on the home load)
+    expect(full(fixture).tools.ga4.state).toBe("pass")
+  })
+})

@@ -5,7 +5,9 @@
 //
 // Per tool, first match wins:
 //   1. the environment makes the load ungradable → undetermined: `automation_detected`
-//      (`navigator.webdriver`), `blocked_by_site_bot_rules`, `preview_protected`;
+//      (`navigator.webdriver`), `blocked_by_site_bot_rules`, `preview_protected`; and no page actually
+//      loaded (no load rendered with a 2xx/3xx: a 5xx, a 404 preview, a timeout) → `test_error`, because
+//      a page that never ran says nothing about its tags (review O6-R5);
 //   2. a `preview_self` load (the preview's own URL): a GA4 / PostHog / Meta beacon → problem
 //      `previews_send_data`; silence is the pass. Infinite is not a guarded tool and is graded normally;
 //   3. Meta: `traffic_permissions_blocked` in the console → problem; a `/tr` answered 4xx → problem
@@ -15,7 +17,9 @@
 //   6. no beacon at all from the tool:
 //      - held by consent → undetermined `held_by_consent` (consent_mode = required and the seed had no
 //        effect, or a third-party CMP was detected). NEVER a problem: no agent job is ever seeded against
-//        consent wiring, and Infinite never touches a banner;
+//        consent wiring, and Infinite never touches a banner. The test-only seed releases Infinite AND a
+//        MANAGED Meta pixel (both read the seeded key), so for those a seeded silence is not consent;
+//      - the caller did not say the site's consent mode → undetermined `test_error` (never guessed);
 //      - the id is env-sourced (census `envSourcedIds`) and the build is a preview → undetermined
 //        `env_dependent`;
 //      - the tool is installed → problem `no_beacon`; not installed → `info` (`not_installed`);
@@ -24,7 +28,10 @@
 //   8. a live id the connection does not have → problem `wrong_id` (GA4: a `tid` in no connected stream);
 //   9. pass ("delivering" in a real visit).
 // Beside the Meta tool, D10: an ADOPTED pixel's automatic events, counted per visit with no clicks, as
-// `info` (undetermined while Traffic Permissions blocks the pixel).
+// `info`; undetermined (count null, never a measured 0) whenever the pixel itself could not be graded or
+// sent nothing at all.
+// The facts are THIS run's: a result whose `runId` differs from the caller's run is refused (review
+// O6-R19), and every CheckResult carries the facts' own run id.
 //
 // Incidents guarded here (wf5-PORT-PLAN §4): "Traffic Permissions blocked delivery while every surface
 // showed green" (rule 3), "Preview leak" (rule 2), "Sandbox held the production pixel" (rule 6,
@@ -68,6 +75,16 @@ export function tierForMode(mode: TestMode): CheckTier {
 
 function isPreviewSelf(result: TestResult): boolean {
   return result.loads.length > 0 && result.loads.every((load) => load.label === "preview_self")
+}
+
+/** Some loads are the preview's own URL and some are not (PostHog / Meta facts carry no load label). */
+function isMixedPreviewSelf(result: TestResult): boolean {
+  return result.loads.some((load) => load.label === "preview_self") && !isPreviewSelf(result)
+}
+
+/** Loads that really rendered a page (2xx/3xx). A page that never ran cannot be graded. */
+function renderedLoads(result: TestResult): TestResult["loads"] {
+  return result.loads.filter((load) => load.rendered && load.status >= 200 && load.status < 400)
 }
 
 /** The build is a preview build: the rehearsal (a preview served under production) or the preview's own URL. */
@@ -144,6 +161,12 @@ function isHttpStatus(status: TestResult["meta"]["tr"][number]["status"]): statu
   return typeof status === "number"
 }
 
+/** The `<code>` of a `<code> — <detail>` reason (null for a pass). */
+function reasonCodeOf(result: CheckResult): string | null {
+  if (result.state === "pass" || !result.reason) return null
+  return result.reason.split(" — ")[0] ?? null
+}
+
 interface Verdict {
   state: CheckResult["state"]
   code: string | null
@@ -155,8 +178,14 @@ function gradeTool(tool: TestTool, result: TestResult, expect: TestExpect, mode:
   if (env.automationDetected) return { state: "undetermined", code: "automation_detected", detail: "navigator.webdriver was true in the test window" }
   if (env.blockedBySiteBotRules) return { state: "undetermined", code: "blocked_by_site_bot_rules", detail: "the site's bot rules refused the test window" }
   if (env.previewProtected) return { state: "undetermined", code: "preview_protected", detail: "the preview is protected; v1 cannot load it" }
+  if (renderedLoads(result).length === 0) {
+    const statuses = result.loads.map((load) => `${load.label} ${load.status}${load.rendered ? "" : " (not rendered)"}`).join(", ")
+    return { state: "undetermined", code: "test_error", detail: result.loads.length ? `no page loaded (${statuses}), so its tags were never exercised` : "the run loaded no page" }
+  }
 
   const beacons = beaconCount(result, tool)
+  if ((tool === "posthog" || tool === "meta") && beacons > 0 && isMixedPreviewSelf(result))
+    return { state: "undetermined", code: "test_error", detail: `${tool} facts carry no load label, so its beacons cannot be split between the preview's own URL and the other loads` }
   if (GUARDED_TOOLS.has(tool) && isPreviewSelf(result)) {
     return beacons > 0
       ? { state: "problem", code: "previews_send_data", detail: `${beacons} ${tool} beacon(s) from the preview's own URL` }
@@ -179,10 +208,15 @@ function gradeTool(tool: TestTool, result: TestResult, expect: TestExpect, mode:
     if (duplicates.length) return { state: "problem", code: "duplicate_page_view", detail: `${duplicates.join("; ")}: every visit is counted twice` }
   }
   if (beacons === 0) {
-    const consentRequired = ctx.consentMode === "required" && !(env.consentSeeded && tool === "infinite")
+    // The seed writes Infinite's own consent key, which Infinite AND a managed Meta pixel read
+    // (providers/meta-browser/consent.ts): for those, a seeded silence is a broken install, not consent.
+    const seedReleases = tool === "infinite" || (tool === "meta" && ctx.metaPixelOwnership === "managed")
+    const consentRequired = ctx.consentMode === "required" && !(env.consentSeeded && seedReleases)
     const cmp = ctx.cmpDetected ?? env.cmpDetected
     if (consentRequired || cmp !== null)
       return { state: "undetermined", code: "held_by_consent", detail: consentRequired ? "consent is required and the test-only grant had no effect" : `a consent tool (${cmp}) holds it` }
+    if (ctx.consentMode === undefined)
+      return { state: "undetermined", code: "test_error", detail: "the grader was not told the site's consent mode, so silence cannot be told from consent" }
     const envSourced = ctx.envSourcedIds.find((entry) => entry.tool === tool)
     if (envSourced && isPreviewBuild(result, mode))
       return { state: "undetermined", code: "env_dependent", detail: `${envSourced.envName} (${envSourced.file}:${envSourced.line}) has no value in a preview build` }
@@ -216,12 +250,17 @@ function loadEvidence(result: TestResult): Evidence[] {
 }
 
 /** D10: automatic events of an ADOPTED pixel, per visit, with no clicks. */
-function gradeMetaAutomaticEvents(result: TestResult, mode: TestMode, ctx: GradeContext): GradedTestRun["metaAutomaticEvents"] {
+function gradeMetaAutomaticEvents(result: TestResult, mode: TestMode, ctx: GradeContext, meta: CheckResult): GradedTestRun["metaAutomaticEvents"] {
   if (ctx.metaPixelOwnership !== "adopted") return null
   const tier = tierForMode(mode)
   if (result.meta.console.includes("traffic_permissions_blocked"))
     return { result: toResult("meta_automatic_events", { state: "undetermined", code: "traffic_permissions_blocked", detail: "the pixel is blocked, so its automatic events cannot be counted" }, tier, ctx), count: null }
-  const visits = Math.max(1, result.loads.length)
+  // Unmeasured is "—", never 0 (review O6-R18): no count unless the pixel was graded and really sent.
+  if (meta.state === "undetermined")
+    return { result: toResult("meta_automatic_events", { state: "undetermined", code: reasonCodeOf(meta) ?? "test_error", detail: "the pixel could not be graded, so its automatic events were not counted" }, tier, ctx), count: null }
+  if (result.meta.tr.length === 0)
+    return { result: toResult("meta_automatic_events", { state: "undetermined", code: "no_beacon", detail: "the pixel sent nothing, so its automatic events were not counted" }, tier, ctx), count: null }
+  const visits = Math.max(1, renderedLoads(result).length)
   const automatic = result.meta.tr.filter((tr) => META_AUTOMATIC_EVENTS.has(tr.ev)).length
   const count = Math.round((automatic / visits) * 10) / 10
   return {
@@ -261,37 +300,55 @@ export function gradeTestRunChecks(result: TestResult, tools: Record<TestTool, C
   const add = (checkId: string, state: CheckResult["state"], code: string | null, detail: string) =>
     out.push(toResult(checkId, { state, code, detail }, tier, ctx, loadEvidence(result)))
   const blockedBy = (state: CheckResult["state"]) => state === "undetermined"
+  const code = (tool: TestTool) => reasonCodeOf(tools[tool])
+  // Every derived check reads the FACTS for its own question (review O6-R10): the per-tool verdict is
+  // first-match-wins, so a `no_pii` problem would otherwise hide a doubled page view.
+  const duplicates = { ga4: duplicatePageViews(result, "ga4"), posthog: duplicatePageViews(result, "posthog") }
 
   // one_beacon_per_tool: no tool doubled its page views and every installed tool sent something.
-  const failing = TEST_TOOLS.filter((tool) => tools[tool].state === "problem" && /^(duplicate_page_view|no_beacon)\b/.test(tools[tool].reason ?? ""))
+  const doubled = (["ga4", "posthog"] as const).filter((tool) => duplicates[tool].length > 0)
+  const silent = TEST_TOOLS.filter((tool) => code(tool) === "no_beacon")
   const unknown = TEST_TOOLS.filter((tool) => blockedBy(tools[tool].state))
-  if (failing.length) add("one_beacon_per_tool", "problem", "one_beacon_per_tool", `${failing.join(", ")}: not exactly one page view per load`)
+  if (doubled.length || silent.length)
+    add("one_beacon_per_tool", "problem", doubled.length ? "duplicate_page_view" : "no_beacon", [...doubled.map((tool) => `${tool}: ${duplicates[tool].join("; ")}`), ...silent.map((tool) => `${tool}: installed but sent nothing`)].join("; "))
   else if (unknown.length) add("one_beacon_per_tool", "undetermined", "not_exercised", `${unknown.join(", ")} could not be graded`)
   else add("one_beacon_per_tool", "pass", null, "each firing tool sends one page view per load")
 
-  const ga4 = tools.ga4
-  add("ga4_one_page_view", ga4.state, ga4.state === "pass" ? null : (ga4.reason?.split(" — ")[0] ?? null), ga4.reason?.split(" — ").slice(-1)[0] ?? "GA4")
+  // ga4_one_page_view: exactly one page_view per load, from the facts.
+  const ga4PageViews = result.ga4.events.filter((event) => event.en === "page_view").length
+  if (duplicates.ga4.length) add("ga4_one_page_view", "problem", "duplicate_page_view", duplicates.ga4.join("; "))
+  else if (blockedBy(tools.ga4.state)) add("ga4_one_page_view", "undetermined", code("ga4") ?? "not_exercised", "GA4 could not be graded")
+  else if (tools.ga4.state === "info") add("ga4_one_page_view", "info", code("ga4") ?? "not_installed", "GA4 is not on the site")
+  else if (isPreviewSelf(result)) add("ga4_one_page_view", "undetermined", "not_exercised", "only the preview's own URL was loaded (GA4 is meant to stay silent there)")
+  else if (ga4PageViews === 0) add("ga4_one_page_view", "problem", "no_beacon", code("ga4") === "no_beacon" ? "GA4 is installed but sent nothing" : "GA4 sent events but no page_view")
+  else add("ga4_one_page_view", "pass", null, "one GA4 page_view per load")
 
+  // meta_pixel_once: one PageView per load per pixel; fbevents also fires PageView on pushState, so a
+  // client-side navigation in the run allows one more (review O6-R11).
   const pageViews = new Map<string, number>()
   for (const tr of result.meta.tr) if (tr.ev === "PageView") pageViews.set(tr.pixelId, (pageViews.get(tr.pixelId) ?? 0) + 1)
-  const loads = Math.max(1, result.loads.length)
-  const doubled = [...pageViews].filter(([, count]) => count > loads)
+  const loads = Math.max(1, renderedLoads(result).length)
+  const allowedPageViews = loads + (spaNavigationSeen(result) ? 1 : 0)
+  const metaDoubled = [...pageViews].filter(([, count]) => count > allowedPageViews)
   if (blockedBy(tools.meta.state)) add("meta_pixel_once", "undetermined", "not_exercised", "the Meta pixel could not be graded")
-  else if (doubled.length) add("meta_pixel_once", "problem", "duplicate_page_view", doubled.map(([pixel, count]) => `${pixel} sent ${count} PageView in ${loads} load(s)`).join("; "))
+  else if (metaDoubled.length) add("meta_pixel_once", "problem", "duplicate_page_view", metaDoubled.map(([pixel, count]) => `${pixel} sent ${count} PageView in ${loads} load(s)`).join("; "))
   else if (pageViews.size === 0) add("meta_pixel_once", tools.meta.state === "problem" ? "problem" : "undetermined", "no_beacon", "no Meta PageView")
   else add("meta_pixel_once", "pass", null, "one PageView per load per pixel")
 
+  // posthog_via_proxy_once: through the same-origin proxy, once per load.
   const posthogEvents = result.posthog.events
   if (blockedBy(tools.posthog.state) || posthogEvents.length === 0) add("posthog_via_proxy_once", "undetermined", "not_exercised", "no PostHog event to inspect")
   else if (posthogEvents.some((event) => !event.sameOrigin)) add("posthog_via_proxy_once", "problem", "not_proxied", "PostHog events go straight to PostHog, so ad blockers drop them")
-  else if (tools.posthog.state === "problem") add("posthog_via_proxy_once", "problem", tools.posthog.reason?.split(" — ")[0] ?? "posthog", tools.posthog.reason ?? "PostHog")
+  else if (duplicates.posthog.length) add("posthog_via_proxy_once", "problem", "duplicate_page_view", duplicates.posthog.join("; "))
   else add("posthog_via_proxy_once", "pass", null, "PostHog goes through the same-origin proxy, once per load")
 
   const previewLoads = result.loads.filter((load) => load.label === "preview_self")
   if (previewLoads.length === 0) add("preview_self_silent", "undetermined", "not_exercised", "no load of the preview's own URL in this run")
   else {
-    const loud = [...GUARDED_TOOLS].filter((tool) => tools[tool].state === "problem" && (tools[tool].reason ?? "").startsWith("previews_send_data"))
+    const loud = [...GUARDED_TOOLS].filter((tool) => tools[tool].state === "problem" && code(tool) === "previews_send_data")
+    const unsure = [...GUARDED_TOOLS].filter((tool) => blockedBy(tools[tool].state))
     if (loud.length) add("preview_self_silent", "problem", "previews_send_data", `${loud.join(", ")} send data from the preview`)
+    else if (unsure.length) add("preview_self_silent", "undetermined", code(unsure[0]!) ?? "not_exercised", `${unsure.join(", ")} could not be graded on the preview`)
     else add("preview_self_silent", "pass", null, "GA4, PostHog and Meta stay silent on the preview's own URL")
   }
 
@@ -302,6 +359,8 @@ export function gradeTestRunChecks(result: TestResult, tools: Record<TestTool, C
   if (pii.length) add("no_pii", "problem", "no_pii", pii.map((entry) => `${entry.count} ${entry.kind} in ${entry.lane}`).join("; "))
   else add("no_pii", "pass", null, "no email, phone number or name parameter in any request")
 
+  // click_test (RH): the conversion must reach EVERY installed analytics tool that can take it (GA4 and
+  // PostHog), because a pass here marks GA4 key events (review O6-R12). Unknown installs → undetermined.
   for (const click of result.clicks) {
     const prefix = `label=${click.label}; `
     if (!click.found) {
@@ -310,9 +369,21 @@ export function gradeTestRunChecks(result: TestResult, tools: Record<TestTool, C
     }
     const standard = click.events.meta.filter((ev) => META_STANDARD_EVENTS.has(ev))
     const fired = [...click.events.ga4, ...click.events.posthog, ...click.events.infinite]
-    if (standard.length) add("click_test", "problem", "fbq_standard_on_click", `${prefix}fbq sent ${standard.join(", ")} on a click`)
-    else if (!click.events.ga4.includes(click.label) && !click.events.posthog.includes(click.label))
-      add("click_test", "problem", "click_test", `${prefix}the click sent ${fired.length ? fired.join(", ") : "nothing"}, not ${click.label}`)
+    if (standard.length) {
+      add("click_test", "problem", "fbq_standard_on_click", `${prefix}fbq sent ${standard.join(", ")} on a click`)
+      continue
+    }
+    if (!ctx.installedTools) {
+      add("click_test", "undetermined", "test_error", `${prefix}the grader was not told which tools are installed, so it cannot say which must receive ${click.label}`)
+      continue
+    }
+    const required = (["ga4", "posthog"] as const).filter((tool) => ctx.installedTools!.includes(tool))
+    if (required.length === 0) {
+      add("click_test", "undetermined", "not_exercised", `${prefix}neither GA4 nor PostHog is installed, so no analytics tool can take ${click.label}`)
+      continue
+    }
+    const missing = required.filter((tool) => !click.events[tool].includes(click.label))
+    if (missing.length) add("click_test", "problem", "click_test", `${prefix}${missing.join(" and ")} did not receive ${click.label} (the click sent ${fired.length ? fired.join(", ") : "nothing"})`)
     else add("click_test", "pass", null, `${prefix}fires ga4: ${click.events.ga4.join(", ") || "—"} · posthog: ${click.events.posthog.join(", ") || "—"}`)
   }
 
@@ -328,13 +399,17 @@ export function gradeTestRunChecks(result: TestResult, tools: Record<TestTool, C
 }
 
 /** Grade one test run: per tool, the D10 line, and the derived checks. */
-export function gradeTestRunFull(result: TestResult, expect: TestExpect, mode: TestMode, ctx: GradeContext): GradedTestRun {
+export function gradeTestRunFull(result: TestResult, expect: TestExpect, mode: TestMode, callerCtx: GradeContext): GradedTestRun {
   if (result.mode !== mode) throw new Error(`gradeTestRun: the result is a ${result.mode} run, not ${mode}`)
+  if (callerCtx.runId && result.runId !== callerCtx.runId)
+    throw new Error(`gradeTestRun: the facts belong to run ${result.runId}, not this run (${callerCtx.runId}); stale facts are never this run's proof`)
+  // Every result carries the run the FACTS came from.
+  const ctx: GradeContext = { ...callerCtx, runId: result.runId }
   const tier = tierForMode(mode)
   const tools = Object.fromEntries(
     TEST_TOOLS.map((tool) => [tool, toResult(`test_run:${tool}`, gradeTool(tool, result, expect, mode, ctx), tier, ctx, loadEvidence(result))])
   ) as Record<TestTool, CheckResult>
-  return { tools, metaAutomaticEvents: gradeMetaAutomaticEvents(result, mode, ctx), checks: gradeTestRunChecks(result, tools, mode, ctx) }
+  return { tools, metaAutomaticEvents: gradeMetaAutomaticEvents(result, mode, ctx, tools.meta), checks: gradeTestRunChecks(result, tools, mode, ctx) }
 }
 
 /** The `CheckRunner.gradeTestRun` shape (§3e.7): the per-tool results only. */
