@@ -16,9 +16,13 @@
 // is spawned; the jobs go out as `job.seeded`, the tree is snapshotted, and the next run (with or without
 // `--resume`) runs the same fence, gate and checks on whatever the parent agent changed.
 //
-// Honesty rules this step keeps (review O3 F4, F5, F11, F19):
-//   - `done_in_code` only when at least one of the wizard's own pre-deploy checks RAN and passed and none
-//     failed; a job with nothing checkable before deploy stays `claimed` ("later tests decide");
+// Item states (§3e.5) come from ONE implementation, `jobs/state-machine.ts` (§3z.12, B7): this step only
+// orchestrates (`applyClaim`, `applyResults(…, {budgetLeft})`, `blockItem`, `failItem`). The rules it keeps
+// (review O3 F4, F5, F11, F19):
+//   - `claimed → done_in_code` only when every applicable S/B/T0 check RAN in this run and passed; an
+//     undetermined one keeps the item `claimed`, a failing one sends it back to `pending` with the note (or
+//     `failed` once the budget is spent); a job with no S/B/T0 check needs in-scope recorded edits (the
+//     wizard's own evidence, never the claim);
 //   - the settled tree is re-read (`verifySeal`) right before the build/T0, so a write after the turn
 //     (a process the agent left running) stops the step instead of being built or tested;
 //   - an agent edit is recorded in the edit receipt only when its job ends `done_in_code` or `claimed`;
@@ -35,6 +39,7 @@ import { matchesAnyGlob, normalizeRelPath } from "../../agents/glob.js"
 import { snapshotDir } from "../../agents/paths.js"
 import { runExtras } from "../../agents/runner.js"
 import { reverseTextEdits } from "../../server-lane/text-edits.js"
+import { applyClaim, applyResults, blockItem, failItem, unblockItem, type Transition } from "../../jobs/state-machine.js"
 import { sanitizeUntrusted } from "../../agents/sanitize.js"
 import { outOfUsageResumeLine } from "../../agents/usage-limit.js"
 import { AGENT_LIMITS, type AgentRunResult, type SessionRef } from "../contracts/agents.js"
@@ -122,7 +127,7 @@ async function runWorker(io: JobsIo, agentItems: ChecklistItem[]): Promise<StepO
 
   const worker = ctx.state.get().agent?.worker ?? null
   if (!worker) {
-    for (const item of agentItems) io.setState(item.id, "blocked", "wizard", { reason: "needs_you", note: "No agent ran: this job is listed for you." })
+    for (const item of agentItems) io.put(blockItem(io.item(item.id) ?? item, "needs_you", "No agent ran: this job is listed for you."))
     await io.save()
     return { kind: "ok", status: `No agent: ${agentItems.length} job${agentItems.length === 1 ? "" : "s"} listed for you` }
   }
@@ -157,7 +162,7 @@ async function runWorker(io: JobsIo, agentItems: ChecklistItem[]): Promise<StepO
       })
     } catch (error) {
       if (isTamper(error)) {
-        for (const item of open) io.setState(item.id, "blocked", "wizard", { reason: "outside_allowlist", note: "The agent wrote inside a dependency or build folder." })
+        for (const item of open) io.put(blockItem(io.item(item.id) ?? item, "outside_allowlist", "The agent wrote inside a dependency or build folder."))
         await io.save()
         return { kind: "blocked", code: "INF_WIZ_FENCE_TAMPER", reason: error instanceof Error ? error.message : "Reinstall your dependencies; nothing was built." }
       }
@@ -182,12 +187,14 @@ async function runWorker(io: JobsIo, agentItems: ChecklistItem[]): Promise<StepO
       const reason: BlockedReason = result.outcome === "toolless" ? "toolless" : "agent_blocked"
       // Only this turn's jobs: a job an earlier round already left `claimed` keeps its state and its edits.
       for (const item of open) {
-        if (io.item(item.id)?.state === "pending") io.setState(item.id, "blocked", "wizard", { reason, note: stoppedNote(result.outcome) })
+        const current = io.item(item.id)
+        if (current?.state === "pending") io.put(blockItem(current, reason, stoppedNote(result.outcome)))
       }
       await io.save()
+      // §3z.4 (B6): a generic agent error is AGENT_FAILED, never "toolless".
       return {
         kind: "failed",
-        code: result.outcome === "timeout" ? "INF_WIZ_AGENT_TIMEOUT" : "INF_WIZ_AGENT_TOOLLESS",
+        code: result.outcome === "timeout" ? "INF_WIZ_AGENT_TIMEOUT" : result.outcome === "toolless" ? "INF_WIZ_AGENT_TOOLLESS" : "INF_WIZ_AGENT_FAILED",
         message: stoppedNote(result.outcome),
         next: "continue"
       }
@@ -210,36 +217,25 @@ async function runWorker(io: JobsIo, agentItems: ChecklistItem[]): Promise<StepO
 
   // Budget spent: an item still pending after a failed check is failed; one the agent never finished is blocked.
   for (const item of io.items().filter((entry) => entry.owner === "agent" && entry.state === "pending")) {
-    if (io.lastFailure(item.id)) io.setState(item.id, "failed", "wizard", { note: `Out of rounds: ${io.lastFailure(item.id)}` })
-    else io.setState(item.id, "blocked", "wizard", { reason: "agent_blocked", note: "The agent did not finish this job within 30 turns or 10 minutes." })
+    const failure = io.lastFailure(item.id)
+    io.put(failure ? failItem(item, `Out of rounds: ${failure}`) : blockItem(item, "agent_blocked", "The agent did not finish this job within 30 turns or 10 minutes."))
   }
   await io.save()
   return { kind: "ok", status: io.summary() }
 }
 
-/** Claims → states, the one batched ask, then the wizard's own pre-deploy checks (§3e.5). */
+/** Claims → states, the one batched ask, then the wizard's own pre-deploy checks (§3e.5, the state machine). */
 async function settleRound(io: JobsIo, claims: readonly Claim[], questions: readonly AgentQuestion[], budgetLeft: boolean, seal: TreeSeal | null): Promise<RoundOutcome> {
   const feedback: string[] = []
   const toCheck: ChecklistItem[] = []
+  const scan = claims.some((claim) => claim.status === "not_needed") ? await io.scan() : null
   for (const claim of claims) {
     const item = io.item(claim.jobId)
     if (!item || item.owner !== "agent" || !OPEN_STATES.includes(item.state)) continue
-    io.setClaim(item.id, claim)
-    if (claim.status === "done") {
-      io.setState(item.id, "claimed", "agent_claim", { note: claim.note })
-      toCheck.push(io.item(item.id)!)
-    } else if (claim.status === "blocked") {
-      io.setState(item.id, "blocked", "agent_claim", { reason: "agent_blocked", note: claim.note })
-    } else {
-      const verdict = io.deps.registry.reverifyNotNeeded(item, await io.scan())
-      if (verdict.agrees) io.setState(item.id, "not_needed", "wizard", { note: "The agent said not needed; the wizard's detector agrees." })
-      else {
-        const where = verdict.evidence.map((evidence) => ("file" in evidence ? `${evidence.file}:${evidence.line}` : evidence.url)).join(", ")
-        const note = `The agent said not needed; the wizard found ${where || "the trigger still there"}.`
-        io.setState(item.id, "pending", "wizard", { note })
-        feedback.push(`- ${item.id}: ${note}`)
-      }
-    }
+    const transition = applyClaim(item, claim, (candidate) => io.deps.registry.reverifyNotNeeded(candidate, scan!))
+    io.put(transition, claim.status === "done" ? sanitizeUntrusted(claim.note, 500) : undefined)
+    if (transition.item.state === "claimed") toCheck.push(transition.item)
+    else if (claim.status === "not_needed" && transition.item.state === "pending") feedback.push(`- ${item.id}: ${transition.note ?? "the wizard's detector disagrees"}`)
   }
 
   // ONE batched pop-up after the turn (never under --yes; never auto-answered).
@@ -248,11 +244,12 @@ async function settleRound(io: JobsIo, claims: readonly Claim[], questions: read
     const answers = await io.askQuestions(asked)
     for (const question of asked) {
       const answer = answers?.[question.jobId]
+      const current = io.item(question.jobId)!
       if (answer === undefined) {
-        io.setState(question.jobId, "blocked", "wizard", { reason: "needs_you", note: `Needs your answer: ${question.question}` })
+        io.put(blockItem(current, "needs_you", `Needs your answer: ${question.question}`))
       } else {
         feedback.push(`- ${question.jobId}: the user answered ${JSON.stringify(sanitizeUntrusted(answer, 200))} to "${question.question}"`)
-        if (io.item(question.jobId)?.state === "blocked") io.setState(question.jobId, "pending", "wizard", { note: "Answered; back to the agent." })
+        io.put(unblockItem(current, "Answered; back to the agent."))
       }
     }
   }
@@ -267,32 +264,35 @@ async function settleRound(io: JobsIo, claims: readonly Claim[], questions: read
       if (!verdict.ok) return { results, feedback, changedAfterTurn: verdict.changed }
     }
     io.sub("Wizard checking each job itself…", "pending")
+    const runId = io.runId()
     for (const item of checkable) {
       const itemResults = await io.preDeployChecks(item)
       results.push(...itemResults)
-      io.mergeResults(item.id, itemResults)
+      if (!runId) continue
+      // The state machine decides (B7). The step's in-scope kept edits for this item count as its recorded
+      // edits (they reach the receipt when the step settles), never the claim.
+      const current = io.item(item.id)!
+      const transition = applyResults(io.withPendingEdits(current), itemResults, runId, { budgetLeft })
+      const next: ChecklistItem = { ...transition.item }
+      if (current.edits) next.edits = current.edits
+      else delete next.edits
       const problems = itemResults.filter((result) => result.state === "problem")
       const undetermined = itemResults.filter((result) => result.state === "undetermined")
-      if (problems.length > 0) {
-        const note = problems.map((result) => `${result.checkId}: ${sanitizeUntrusted(result.reason ?? "problem", 200)}`).join("; ")
-        io.noteFailure(item.id, note)
-        if (budgetLeft) {
-          io.setState(item.id, "pending", "wizard", { note: `The wizard's check failed: ${note}` })
-          feedback.push(`- ${item.id}: the wizard's checks failed: ${note}`)
-        } else {
-          io.setState(item.id, "failed", "wizard", { note: `The wizard's check failed: ${note}` })
-        }
-      } else if (undetermined.length > 0) {
-        io.setState(item.id, "claimed", "wizard", {
-          note: `The wizard could not check it here yet (${undetermined.map((result) => result.checkId).join(", ")}); later tests decide.`
-        })
-      } else if (!itemResults.some((result) => result.state === "pass")) {
-        // No S/B/T0 check exists (or none ran): a claim alone is never "checked" (F4).
-        io.setState(item.id, "claimed", "wizard", { note: NOTHING_CHECKABLE_NOTE })
+      let note = transition.note
+      if (next.state === "pending" || next.state === "failed") {
+        const why = problems.map((result) => `${result.checkId}: ${sanitizeUntrusted(result.reason ?? "problem", 200)}`).join("; ")
+        io.noteFailure(item.id, why)
+        note = `The wizard's check failed: ${why}`
+        if (next.state === "pending") feedback.push(`- ${item.id}: the wizard's checks failed: ${why}`)
+      } else if (next.state === "claimed") {
+        note = undetermined.length > 0
+          ? `The wizard could not check it here yet (${undetermined.map((result) => result.checkId).join(", ")}); later tests decide.`
+          : NOTHING_CHECKABLE_NOTE
       } else {
-        io.setState(item.id, "done_in_code", "wizard", { note: CHECKED_NOTE })
-        io.noteClickTested(item, itemResults)
+        note = CHECKED_NOTE
+        io.noteClickTested(next, itemResults)
       }
+      io.put({ item: next, changed: true, by: "wizard", ...(note ? { note } : {}) })
     }
     io.endRound()
   }
@@ -330,7 +330,8 @@ async function runNested(io: JobsIo, agentItems: ChecklistItem[]): Promise<StepO
   }
   const blockOpen = (note: string) => {
     for (const item of agentItems) {
-      if (OPEN_STATES.includes(io.item(item.id)?.state ?? "blocked")) io.setState(item.id, "blocked", "wizard", { reason: "outside_allowlist", note })
+      const current = io.item(item.id)
+      if (current && OPEN_STATES.includes(current.state)) io.put(blockItem(current, "outside_allowlist", note))
     }
   }
   let fence: Fence
@@ -376,7 +377,7 @@ async function runNested(io: JobsIo, agentItems: ChecklistItem[]): Promise<StepO
 async function sealBrokenOutcome(io: JobsIo, changed: string[]): Promise<StepOutcome> {
   const error = new SealBroken(changed)
   for (const item of io.items().filter((entry) => entry.owner === "agent" && OPEN_STATES.includes(entry.state))) {
-    io.setState(item.id, "blocked", "wizard", { reason: "outside_allowlist", note: "Files changed after the agent's turn ended; nothing was checked." })
+    io.put(blockItem(item, "outside_allowlist", "Files changed after the agent's turn ended; nothing was checked."))
   }
   await io.save()
   return { kind: "blocked", code: "INF_WIZ_FENCE_TAMPER", reason: error.message }
@@ -386,7 +387,7 @@ function applyBlocks(io: JobsIo, blocks: readonly FenceBlock[]): void {
   for (const block of blocks) {
     const item = io.item(block.itemId)
     if (!item) continue
-    io.setState(block.itemId, "blocked", "wizard", { reason: block.reason, note: block.note })
+    io.put(blockItem(item, block.reason, block.note))
   }
 }
 
@@ -445,23 +446,24 @@ class JobsIo {
     this.ctx.emit.emit("step.sub", { step: "jobs", text: sanitizeUntrusted(text, 120), tone })
   }
 
-  setState(itemId: string, state: JobItemState, by: "wizard" | "agent_claim", extra: { reason?: BlockedReason; note?: string } = {}): void {
-    const note = extra.note === undefined ? undefined : sanitizeUntrusted(extra.note, 500)
+  /** Writes a state-machine transition's item back and emits its `job.state` (B7: the step decides nothing). */
+  put(transition: Transition, noteOverride?: string): void {
+    const next = transition.item
     this.ctx.state.update((runState) => {
-      const item = runState.jobs.find((entry) => entry.id === itemId)
-      if (!item) return
-      item.state = state
-      if (state === "blocked" && extra.reason) item.blockedReason = extra.reason
-      else if (state !== "blocked") delete item.blockedReason
+      const index = runState.jobs.findIndex((entry) => entry.id === next.id)
+      if (index >= 0) runState.jobs[index] = structuredClone(next)
     })
-    this.ctx.emit.emit("job.state", { itemId, state, by, ...(note ? { note } : {}) })
+    if (!transition.changed) return
+    const note = noteOverride ?? transition.note
+    const by = transition.by
+    this.ctx.emit.emit("job.state", { itemId: next.id, state: next.state, by, ...(note ? { note: sanitizeUntrusted(note, 500) } : {}) })
   }
 
-  setClaim(itemId: string, claim: Claim): void {
-    this.ctx.state.update((runState) => {
-      const item = runState.jobs.find((entry) => entry.id === itemId)
-      if (item) item.claim = { status: claim.status, note: claim.note, at: claim.at }
-    })
+  /** The item plus this step's kept (in-scope) agent edits for it, which the state machine counts as recorded. */
+  withPendingEdits(item: ChecklistItem): ChecklistItem {
+    const mine = this.pendingEdits.filter((entry) => entry.itemId === item.id).map((entry) => ({ editId: entry.edit.id, file: entry.edit.file }))
+    if (mine.length === 0) return item
+    return { ...item, edits: [...(item.edits ?? []), ...mine] }
   }
 
   setSession(session: SessionRef): void {
@@ -540,7 +542,9 @@ class JobsIo {
   async preDeployChecks(item: ChecklistItem): Promise<CheckResult[]> {
     const runId = this.runId()
     const out: CheckResult[] = []
-    const emit = (result: CheckResult) => {
+    const emit = (raw: CheckResult) => {
+      // Produced by the wizard's own checks in THIS run: a result without a run id carries this run's.
+      const result: CheckResult = { ...raw, runId: raw.runId ?? runId }
       out.push(result)
       this.ctx.emit.emit("check.result", {
         checkId: result.checkId,

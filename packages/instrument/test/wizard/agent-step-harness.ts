@@ -198,12 +198,8 @@ export function fakeRegistry(options: { notNeededAgrees?: boolean } = {}) {
       briefs.push(text)
       return text
     },
-    checksFor: (item, tier) => {
-      if (item.jobId === "conversions_to_tools") return tier === "T0" ? [{ tier, checkId: "click_test" }] : tier === "S" ? [{ tier, checkId: "no_fbq_standard_on_click" }] : []
-      if (tier === "S") return [{ tier, checkId: `${item.jobId}_static` }]
-      if (tier === "B") return [{ tier, checkId: "build" }]
-      return []
-    },
+    // Like the real registry: the item's own checks (agentItem seeds them), per tier.
+    checksFor: (item, tier) => item.checks.filter((check) => check.tier === tier).map((check) => ({ tier: check.tier, checkId: check.id })),
     apply: (items, results) =>
       items.map((item) => ({
         ...item,
@@ -281,7 +277,19 @@ export function agentItem(id: string, files: string[], create: string[] = []): C
     owner: "agent",
     trigger: { finding: "fixture", evidence: [{ file: files[0] ?? "app/page.tsx", line: 1 }] },
     allow: { files, create },
-    checks: [],
+    // The checks the real registry seeds for a static-HTML / Vite site (T0 click test; §3e.1 + B15's P check),
+    // and an S + B pair for every other job.
+    checks:
+      jobId === "conversions_to_tools"
+        ? [
+            { id: "click_test", tier: "T0", state: "not_run" },
+            { id: "no_fbq_standard_on_click", tier: "S", state: "not_run" },
+            { id: "first_real_conversion", tier: "P", state: "not_run" }
+          ]
+        : [
+            { id: `${jobId}_static`, tier: "S", state: "not_run" },
+            { id: "build", tier: "B", state: "not_run" }
+          ],
     state: "pending"
   }
 }

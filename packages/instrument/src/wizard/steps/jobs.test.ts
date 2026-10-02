@@ -69,8 +69,9 @@ describe("step jobs: claims are only claims; the wizard checks", () => {
     const outcome = await step.run(t.ctx, t.deps)
     expect(outcome).toEqual({ kind: "ok", status: "2 of 2 jobs done in code (checked by the wizard, not the agent)" })
     const items = t.current().jobs
-    expect(stateOf(items, "conversions_to_tools:trial")).toBe("done_in_code")
-    expect(stateOf(items, "meta_improve:landing")).toBe("done_in_code")
+    // §3e.5 done paths (the one state machine, B7): past done_in_code to the next waiting state.
+    expect(stateOf(items, "conversions_to_tools:trial")).toBe("waiting_real_event")
+    expect(stateOf(items, "meta_improve:landing")).toBe("waiting_deploy")
     expect(items.find((entry) => entry.id === "conversions_to_tools:trial")!.claim?.status).toBe("done")
     expect(items.find((entry) => entry.id === "conversions_to_tools:trial")!.edits).toEqual([{ editId: expect.stringMatching(/^agent-/), file: "app/page.tsx" }])
     expect(t.recordedEdits.flat().map((edit) => [edit.file, edit.by])).toEqual([["app/page.tsx", "agent"]])
@@ -79,7 +80,7 @@ describe("step jobs: claims are only claims; the wizard checks", () => {
     expect(t.checkCalls.build).toBe(1)
     const states = t.recorded.events.filter((event) => event.type === "job.state").map((event) => [event.fields.itemId, event.fields.state, event.fields.by])
     expect(states).toContainEqual(["conversions_to_tools:trial", "claimed", "agent_claim"])
-    expect(states).toContainEqual(["conversions_to_tools:trial", "done_in_code", "wizard"])
+    expect(states).toContainEqual(["conversions_to_tools:trial", "waiting_real_event", "wizard"])
     expect(t.recorded.events.filter((event) => event.type === "check.result").every((event) => event.fields.runId === STEP_RUN_ID)).toBe(true)
   })
 
@@ -95,7 +96,7 @@ describe("step jobs: claims are only claims; the wizard checks", () => {
     expect(second!.argv).toContain("--resume")
     expect(second!.argv![second!.argv!.indexOf("--resume") + 1]).toBe(first!.argv![first!.argv!.indexOf("--session-id") + 1])
     expect(second!.argv![second!.argv!.indexOf("--append-system-prompt") + 1]).toContain("the wizard's checks failed: click_test")
-    expect(stateOf(t.current().jobs, "conversions_to_tools:trial")).toBe("done_in_code")
+    expect(stateOf(t.current().jobs, "conversions_to_tools:trial")).toBe("waiting_real_event")
     expect(t.bridgeCalls.patchRun).toHaveLength(1)
   })
 
@@ -120,7 +121,7 @@ describe("step jobs: claims are only claims; the wizard checks", () => {
     await step.run(disagree.ctx, disagree.deps)
     const notes = disagree.recorded.events.filter((event) => event.type === "job.state").map((event) => String(event.fields.note ?? ""))
     expect(notes.some((note) => note.includes("the wizard found app/api/signup/route.ts:12"))).toBe(true)
-    expect(stateOf(disagree.current().jobs, "meta_improve:landing")).toBe("done_in_code")
+    expect(stateOf(disagree.current().jobs, "meta_improve:landing")).toBe("waiting_deploy")
     const agree = setup({ scenario: { turns: [{ steps: [claim("meta_improve:landing", "not_needed", "already there")] }] }, items: [ITEMS[0]!], notNeededAgrees: true })
     await step.run(agree.ctx, agree.deps)
     expect(stateOf(agree.current().jobs, "meta_improve:landing")).toBe("not_needed")
@@ -229,7 +230,7 @@ describe("step jobs: nested mode (§3d.7)", () => {
     expect(t.recorded.events.some((event) => String(event.fields.text ?? "").includes("Left unstaged (outside every job's files): lib/stray.ts"))).toBe(true)
     expect(readFileSync(join(t.root, "app/layout.tsx"), "utf8")).toBe(POST_INSTALL_LAYOUT)
     expect(stateOf(t.current().jobs, "meta_improve:landing")).toBe("blocked:consent_touched")
-    expect(stateOf(t.current().jobs, "conversions_to_tools:trial")).toBe("done_in_code")
+    expect(stateOf(t.current().jobs, "conversions_to_tools:trial")).toBe("waiting_real_event")
     expect(t.current().snapshot).toBeNull()
     expect(t.recordedEdits.flat().map((edit) => edit.file)).toEqual(["app/page.tsx"])
   })

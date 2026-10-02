@@ -110,7 +110,7 @@ describe("seedCandidates", () => {
     // The signOut in a test file is ignored; the CMP file is never allowed.
     expect(identify.allow.files).toEqual(["app/login/actions.ts", "components/user-menu.tsx"])
     // A Next.js site click-tests in the rehearsal (RH), never offline.
-    expect(items.find((item) => item.id === "conversions_to_tools:signup")!.checks.map((c) => `${c.tier}:${c.id}`)).toEqual(["RH:click_test", "S:no_fbq_standard_on_click"])
+    expect(items.find((item) => item.id === "conversions_to_tools:signup")!.checks.map((c) => `${c.tier}:${c.id}`)).toEqual(["RH:click_test", "S:no_fbq_standard_on_click", "P:first_real_conversion"])
     expect(items.every((item) => item.owner === "agent" && item.checks.every((c) => c.state === "not_run"))).toBe(true)
   })
 

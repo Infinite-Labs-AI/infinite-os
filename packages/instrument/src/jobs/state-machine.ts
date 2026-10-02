@@ -123,6 +123,23 @@ export function applyClaim(
   return { item: next, changed: true, by: "wizard", note: `agent said not needed; the wizard found ${evidenceText(verdict.evidence)}` }
 }
 
+/** The budget is spent (30 turns / 10 minutes, §3f.4) and the item's last wizard check failed: `failed`. */
+export function failItem(item: ChecklistItem, note: string): Transition {
+  const next = clone(item)
+  next.state = "failed"
+  delete next.blockedReason
+  return { item: next, changed: item.state !== "failed", by: "wizard", note }
+}
+
+/** A question answered: a `blocked:needs_you` item goes back to the agent (`pending`). */
+export function unblockItem(item: ChecklistItem, note: string): Transition {
+  if (item.state !== "blocked") return { item, changed: false, by: "wizard" }
+  const next = clone(item)
+  next.state = "pending"
+  delete next.blockedReason
+  return { item: next, changed: true, by: "wizard", note }
+}
+
 /** Marks an item blocked with one of the §3e.5 reasons (the fence, the post-turn gate, usage, …). */
 export function blockItem(item: ChecklistItem, reason: BlockedReason, note?: string): Transition {
   const next = clone(item)

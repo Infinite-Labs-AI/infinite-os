@@ -82,7 +82,8 @@ describe("F4: a claim with nothing checkable before deploy is never 'checked by 
   it("control: a job whose S check ran and passed is done_in_code with the 'checked' note", async () => {
     const t = setup({ scenario: { turns: [{ steps: [claim("meta_improve:landing")] }] }, items: [agentItem("meta_improve:landing", ["app/layout.tsx"])] })
     await step.run(t.ctx, t.deps)
-    expect(t.current().jobs[0]!.state).toBe("done_in_code")
+    // done_in_code, then the done path's next state (the one state machine, B7)
+    expect(["done_in_code", "waiting_deploy", "waiting_real_event"]).toContain(t.current().jobs[0]!.state)
     expect(t.recorded.events.filter((event) => event.type === "job.state").map((event) => event.fields.note)).toContain(CHECKED_NOTE)
   })
 })
