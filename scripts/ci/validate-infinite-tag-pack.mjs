@@ -24,16 +24,17 @@ const EXPECTED_FILENAME = "infinite-tag-0.11.0.tgz"
 // published modules, .js + .d.ts each: 130 → 146 measured, so the ceiling goes to 170 to keep the
 // same ~1.15x headroom for source growth rather than sitting on the measurement.
 //
-// PROVISIONAL (wizard build, lane F0): MAX_FILES 170 → 560, packed 350,000 → 1,300,000, unpacked
-// 1,200,000 → 4,200,000. The wizard build adds about 150 new published modules (R1-27 count of the
-// Create lists: ≈458 files, ≈3.5 MB unpacked) plus its cross-repo contract fixtures. Integration (I1)
-// re-measures the real tarball and re-bases all three to measured ×1.15, up or down.
+// Wizard build (lane I1, 2026-10-02): re-measured on the integrated tarball (npm pack of
+// packages/instrument at the integration head): 587 files, 1,090,001 bytes packed, 3,911,018 bytes
+// unpacked. F0's provisional ceilings (560 / 1,300,000 / 4,200,000) are re-based to measured x1.15:
+// 675 files (587 x 1.15 = 675.05), 1,254,000 packed (1,253,501 rounded up), 4,498,000 unpacked
+// (4,497,671 rounded up). Packed went DOWN from F0's guess; files and unpacked went up.
 const MIN_FILES = 50
-const MAX_FILES = 560
+const MAX_FILES = 675
 const MIN_PACKED_SIZE = 40_000
-const MAX_PACKED_SIZE = 1_300_000
+const MAX_PACKED_SIZE = 1_254_000
 const MIN_UNPACKED_SIZE = 200_000
-const MAX_UNPACKED_SIZE = 4_200_000
+const MAX_UNPACKED_SIZE = 4_498_000
 // The wizard's public contracts (1bu-1 vendors them and pins their sha256). Listed exactly, so a stray
 // file under contracts/ still fails the pack.
 const TAG_WIZARD_CONTRACT_FILES = [
