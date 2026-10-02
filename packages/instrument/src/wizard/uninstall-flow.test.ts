@@ -70,6 +70,11 @@ describe("uninstall --pr", () => {
     const dirty = fakeDeps({ git: { clean: false, dirtyPaths: ["src/app.tsx", ".infinite/wizard/state.json"] } })
     expect(await run(root, dirty, answering({}))).toMatchObject({ exitCode: 2, code: "INF_WIZ_DIRTY_TREE" })
     expect(dirty.log.names("git")).not.toContain("git.createBranch")
+    // I1b: a finished run leaves the fence's record `.infinite/harness.json` untracked (never committed).
+    const harnessRecord = fakeDeps({ git: { clean: false, dirtyPaths: [".infinite/harness.json", ".infinite/wizard/state.json"] } })
+    expect((await run(tempRoot(), harnessRecord, answering({}))).exitCode).toBe(0)
+    const harnessPlusUser = fakeDeps({ git: { clean: false, dirtyPaths: [".infinite/harness.json", ".infinite/install.json"] } })
+    expect(await run(tempRoot(), harnessPlusUser, answering({}))).toMatchObject({ exitCode: 2, code: "INF_WIZ_DIRTY_TREE" })
     const onlyOwn = fakeDeps({ git: { clean: false, dirtyPaths: [".infinite/wizard/state.json"] } })
     expect((await run(tempRoot(), onlyOwn, answering({}))).exitCode).toBe(0)
   })

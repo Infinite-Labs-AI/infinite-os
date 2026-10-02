@@ -62,7 +62,14 @@ describe("WizardInstaller.apply: a new install on a static site", () => {
     const plan = subject.buildPlan(scan, fakeKeys(), fakeBefore(), [])
     const result = (await subject.apply(plan, approveAll(plan))) as WizardApplyResult
     expect(result).toMatchObject({ ok: true, rolledBack: false, build: "passed", openJobs: [] })
-    expect(result.artifacts.hostGuard).toEqual({ mode: "deny", exempt: ["acme-store.com"], deny: expect.arrayContaining([".vercel.app", "localhost"]) })
+    // I1b: the spec's `deny` holds exact host literals only (the contract's suffixes are built into the
+    // emitted expression); a suffix such as ".vercel.app" there made every guard consumer throw.
+    expect(result.artifacts.hostGuard).toEqual({ mode: "deny", exempt: ["acme-store.com"], deny: expect.arrayContaining(["localhost", "127.0.0.1"]) })
+    expect(result.artifacts.hostGuard!.deny.filter((host) => host.startsWith("."))).toEqual([])
+    // ...and the managed bootstraps really carry it (I1b: the harness plan dropped `hostGuard`, so every
+    // managed tag fired on previews).
+    expect(read(root, "index.html")).toContain('"acme-store.com"')
+    expect(read(root, "index.html")).toContain(".vercel.app")
     expect(result.artifacts.infinite).toMatchObject({ consentMode: "not_required", staticProxy: "vercel" })
     const html = read(root, "index.html")
     expect(html).toContain(IDS.ga4)

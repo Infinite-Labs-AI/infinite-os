@@ -28,6 +28,7 @@ import { guardBridge } from "./engine.js"
 import { buildScanner } from "../review/context.js"
 import { safeText } from "../review/post.js"
 import { mergeIsDeployed } from "./steps/prove.js"
+import { HARNESS_OUTPUTS_RELATIVE_PATH } from "../harness/outputs.js"
 
 export const UNINSTALL_RECORD_SCHEMA = "infinite-tag.wizard-uninstall.v1" as const
 export const UNINSTALL_RECORD_PATH = `${WIZARD_PATHS.dir}/uninstall.json`
@@ -315,7 +316,10 @@ export async function runUninstallFlow(ctx: UninstallContext, rawDeps: WizardDep
   // 1. Clean tree, then the branch FIRST.
   if (!(await deps.git.isRepo())) return stop("INF_WIZ_NO_GIT", "This folder is not a git repository.", lines)
   const tree = await deps.git.cleanTree()
-  const dirty = tree.dirtyPaths.filter((path) => !path.startsWith(`${WIZARD_PATHS.dir}/`))
+  // The wizard's own bookkeeping never blocks its uninstall: the run directory, and `.infinite/harness.json`
+  // (the fence's record, written after `before` and never committed, §3z.12; I1b found that a finished run
+  // left it untracked, so `uninstall --pr` refused every completed install).
+  const dirty = tree.dirtyPaths.filter((path) => !path.startsWith(`${WIZARD_PATHS.dir}/`) && path !== HARNESS_OUTPUTS_RELATIVE_PATH)
   if (!tree.clean && dirty.length > 0) {
     return stop("INF_WIZ_DIRTY_TREE", `Commit or stash your changes first (${dirty.slice(0, 5).join(", ")}${dirty.length > 5 ? ", …" : ""}).`, lines)
   }

@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest"
 
 import { candidate, fakeBefore, fakeHosting, fakeKeys, fakeProductionDeniedConflict, IDS, notConnectedKeys } from "../../test/wizard/o7-fakes.js"
+import { buildHostGuardExpression } from "../host-guard.js"
 import type { ImproveLine } from "../types.js"
+import { previewGuardBrief } from "../wizard/deps.js"
 import { YES_POLICY, yesApproves } from "../wizard/contracts/asks.js"
 import type { BaselineResponseFields } from "../wizard/contracts/report.js"
 import type { CheckResult } from "../wizard/contracts/jobs.js"
@@ -289,6 +291,36 @@ describe("the preview guard's exempt list (§3h.9, R2-21)", () => {
     const keys = fakeKeys({ infinite: { ...fakeKeys().infinite, productionHosts: [] } })
     const plan = buildPlanModel(input({ keys, before: fakeBefore({ hosting: { provider: "none", vercel: null }, observedProductionHost: null }) }))
     expect(plan.guard).toEqual({ emit: false, reason: "no_production_host" })
+  })
+})
+
+describe("I1b: the guard spec is usable, and a pixel the census found is never installed twice", () => {
+  it("the guard's deny list holds exact hosts only, so every guard consumer can build it (job 7's brief, the managed bootstraps)", () => {
+    const plan = buildPlanModel(input({ before: fakeBefore({ hosting: fakeHosting({ productionDomains: ["acme-store.com"], productionAliases: [] }), observedProductionHost: "acme-store.com" }) }))
+    if (!plan.guard.emit) throw new Error("expected a guard")
+    expect(plan.guard.deny.filter((host) => host.startsWith("."))).toEqual([])
+    const expression = buildHostGuardExpression({ mode: "deny", exempt: plan.guard.exempt, deny: plan.guard.deny })
+    expect(expression).toContain('".vercel.app"')
+    expect(previewGuardBrief(plan.guard)?.expression).toBe(expression)
+    // The job-7 note still names every silenced host, suffixes included.
+    const [item] = withGuardHosts([candidate("preview_guard", "ga4")], plan.guard)
+    expect(item!.trigger.finding).toContain(".vercel.app")
+  })
+
+  it("NEGATIVE: a suffix in a guard spec's deny list is refused (why the plan must never put one there)", () => {
+    expect(() => buildHostGuardExpression({ mode: "deny", exempt: ["acme-store.com"], deny: [".vercel.app"] })).toThrow(/not a hostname/)
+  })
+
+  it("an adopted Meta pixel only the census sees (inside a <Script> template literal) gets no install_provider line", () => {
+    const census = { entries: [{ tool: "meta" as const, kind: "fbq_init" as const, id: IDS.meta, file: "app/layout.tsx", line: 27, owner: "adopted" as const }], envSourcedIds: [], identify: { identifyCalls: [], resetCalls: [] } }
+    const plan = buildPlanModel(input({ before: fakeBefore({ census }) }))
+    expect(plan.lines.some((line) => line.id.startsWith("install_provider:meta"))).toBe(false)
+  })
+
+  it("NEGATIVE: with no Meta in the census (or only the wizard's own managed one), Meta is installed", () => {
+    expect(buildPlanModel(input()).lines.some((line) => line.id.startsWith("install_provider:meta"))).toBe(true)
+    const managed = { entries: [{ tool: "meta" as const, kind: "managed_block" as const, id: IDS.meta, file: "lib/infinite-analytics.ts", line: 3, owner: "managed" as const }], envSourcedIds: [], identify: { identifyCalls: [], resetCalls: [] } }
+    expect(buildPlanModel(input({ before: fakeBefore({ census: managed }) })).lines.some((line) => line.id.startsWith("install_provider:meta"))).toBe(true)
   })
 })
 

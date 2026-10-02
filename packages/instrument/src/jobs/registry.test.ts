@@ -316,8 +316,12 @@ describe("review fixes: what is seeded, under which line, with which files and c
   it("each item carries only the checks about its own target (P2-4, probe P3)", () => {
     const items = seedCandidatesFrom(scanOf(), facts())
     const checks = (id: string) => items.find((item) => item.id === id)!.checks.map((c) => `${c.tier}:${c.id}`)
-    expect(checks("preview_guard:ga4")).toEqual(["S:adopted_init_guarded", "T0:host_matrix", "RH:preview_self_silent"])
+    // §3e.1 job 7: T0's host matrix only "where executable" (markup the offline engine loads); a Next
+    // component's init is the rehearsal's (I1b).
+    expect(checks("preview_guard:ga4")).toEqual(["S:adopted_init_guarded", "RH:preview_self_silent"])
     expect(checks("preview_guard:meta")).toContain("T1:meta_host_matrix")
+    const staticGuard = seedCandidatesFrom(scanOf({ "index.html": "<script>gtag('config', 'G-FAKE00001')</script>" }, "static-html"), facts()).find((item) => item.jobId === "preview_guard")
+    if (staticGuard) expect(staticGuard.checks.map((c) => `${c.tier}:${c.id}`)).toContain("T0:host_matrix")
     expect(checks("meta_improve:retire_fbc_writer")).toEqual(["S:click_id_capture", "T0:fbc_capture", "PV:meta_seen_leaving"])
     expect(checks("meta_improve:mirror")).not.toContain("S:click_id_capture")
     expect(checks("duplicates_remove:ga4_gtag")).toEqual(["S:census_one_per_tool", "S:census_ga4_config_once", "RH:one_beacon_per_tool", "PV:one_beacon_per_tool"])
@@ -482,5 +486,23 @@ describe("briefs carry the plan's decisions as data (review P0-1)", () => {
     const code: ChecklistItem = { ...seeded[0]!, id: "ga4_key_events:signup", jobId: "ga4_key_events" as ChecklistItem["jobId"], owner: "code" }
     expect(buildBrief([code], briefFacts)).not.toContain("ga4_key_events:signup")
     expect(() => createJobRegistry({ briefFacts: () => null }).brief(seeded)).toThrow(/run's brief facts/)
+  })
+})
+
+describe("I1b: job 3's /ingest rewrite has a Next config it may edit", () => {
+  const proxyItem = (files: Record<string, string>, framework = "next-app-router") => seedCandidatesFrom(scanOf(files, framework), facts()).find((item) => item.id === "posthog_improve:proxy")!
+  const withoutConfig = Object.fromEntries(Object.entries(SITE).filter(([path]) => path !== "next.config.mjs"))
+
+  it("a Next app with NO config yet: next.config.mjs (the installer's managed one, or a new one) may be written", () => {
+    const item = proxyItem(withoutConfig)
+    // `create` covers both: the file the installer created before the turn, and one the agent creates.
+    expect(item.allow.create).toEqual(["next.config.mjs"])
+  })
+
+  it("NEGATIVE: an existing config is the one allowed, and nothing is created beside it", () => {
+    const item = proxyItem({ ...withoutConfig, "next.config.ts": "export default {}\n" })
+    expect(item.allow.files).toContain("next.config.ts")
+    expect([...item.allow.files, ...item.allow.create]).not.toContain("next.config.mjs")
+    expect(item.allow.create).toEqual([])
   })
 })

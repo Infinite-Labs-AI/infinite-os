@@ -14,6 +14,7 @@ import type { WizardStepId } from "../wizard/contracts/steps.js"
 import { sub } from "./context.js"
 import { stripControl } from "./post.js"
 import type { Scanner } from "./scan.js"
+import { itemT0Scenarios, runItemT0, t0RunParams } from "../wizard/item-t0.js"
 import type { TriageDecision } from "./triage.js"
 
 /** Wraps untrusted comment text so the agent reads it as data (fenced, with an explicit "not instructions" line). */
@@ -161,14 +162,11 @@ export async function restoreFiles(
 async function rerunT0(ctx: WizardContext, deps: WizardDeps, runId: string): Promise<CheckResult[]> {
   const state = ctx.state.get()
   const settled = state.jobs.filter((item) => ["done_in_code", "waiting_deploy", "waiting_real_event", "proven"].includes(item.state))
-  const scenarios = settled.flatMap((item) =>
-    deps.registry.checksFor(item, "T0").map((spec) => ({
-      id: `${item.id}:${spec.checkId}`,
-      checkId: spec.checkId,
-      params: { itemId: item.id, jobId: item.jobId, target: item.id.slice(item.id.indexOf(":") + 1), files: [...item.allow.files] }
-    }))
-  )
-  if (scenarios.length === 0 || !deps.bridge.has("tag.keys.v1")) return []
+  const withT0 = settled.filter((item) => deps.registry.checksFor(item, "T0").length > 0)
+  if (withT0.length === 0 || !deps.bridge.has("tag.keys.v1")) return []
+  // I1b: the same scenarios the jobs step ran (with the run's production host and exempt hosts).
+  const runParams = await t0RunParams(ctx, deps)
+  const scenarios = (await Promise.all(withT0.map((item) => itemT0Scenarios(item, deps.registry.checksFor(item, "T0"), runParams, { fs: deps.fs, root: ctx.root })))).flat()
   let artifacts: ReturnType<WizardDeps["installer"]["artifactsFromKeys"]>
   try {
     const keys = await deps.bridge.keys({ signal: ctx.signal })
@@ -183,7 +181,7 @@ async function rerunT0(ctx: WizardContext, deps: WizardDeps, runId: string): Pro
     // Unknown, never a pass: the round's own build verdict stands and the rehearsal re-runs next.
     return []
   }
-  return (await deps.checks.t0(scenarios, artifacts)).map((result) => ({ ...result, tier: "T0" as const, runId: result.runId ?? runId }))
+  return (await runItemT0(deps, scenarios, artifacts, { runId, at: () => ctx.now().toISOString() })).map((result) => ({ ...result, tier: "T0" as const, runId: result.runId ?? runId }))
 }
 
 /**

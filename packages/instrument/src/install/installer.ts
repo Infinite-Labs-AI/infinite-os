@@ -41,6 +41,7 @@ import type {
   WorkspaceInstallArtifacts
 } from "../types.js"
 import { uninstallInstallation } from "../uninstall.js"
+import { HARNESS_OUTPUTS_RELATIVE_PATH } from "../harness/outputs.js"
 import type { TagHosting, TagKeys } from "../wizard/contracts/bridge.js"
 import type {
   BeforeFacts,
@@ -73,6 +74,21 @@ import {
   type WizardBeforeFacts,
   type WizardPlanModel
 } from "./plan-model.js"
+
+/**
+ * True when every uncommitted path in the repo is the wizard's own bookkeeping: the fence's record
+ * `.infinite/harness.json` (never committed, §3z.12) and the gitignored run directory `.infinite/wizard/`.
+ * Anything else (a user edit, a staged file, a rename) → false, so the uninstall's dirty-tree gate holds.
+ */
+export function onlyWizardBookkeepingDirty(root: string): boolean {
+  const status = spawnSync("git", ["status", "--porcelain=v1", "-z", "--untracked-files=all"], { cwd: root, encoding: "utf8" })
+  if (status.status !== 0) return false
+  const entries = status.stdout.split("\0").filter(Boolean)
+  return entries.length > 0 && entries.every((entry) => {
+    const path = entry.slice(3)
+    return entry.startsWith("?? ") && (path === HARNESS_OUTPUTS_RELATIVE_PATH || path.startsWith(".infinite/wizard/"))
+  })
+}
 
 /** The check id O6's D17 detector reports sensitive pages under (its evidence carries the page URLs). */
 export const SENSITIVE_PAGES_CHECK_ID = "sensitive_pages" as const
@@ -598,7 +614,10 @@ export class WizardInstaller implements Installer {
   }
 
   async uninstall(opts: { root: string; dryRun: boolean }): Promise<UninstallReport> {
-    const result = uninstallInstallation({ root: opts.root, dryRun: opts.dryRun })
+    // The wizard's own bookkeeping (`.infinite/harness.json`, never committed; `.infinite/wizard/`) is not
+    // the user's work: it never makes the tree "dirty" here (I1b: a finished run left harness.json
+    // untracked, so every `uninstall --pr` stopped with "Refusing to uninstall on a dirty git tree").
+    const result = uninstallInstallation({ root: opts.root, dryRun: opts.dryRun, allowDirty: onlyWizardBookkeepingDirty(opts.root) })
     return {
       reversed: [...new Set([...(result.editsReversed ?? []), ...result.restoredFiles, ...result.removedFiles])],
       leftAsIs: result.editsLeftAsIs ?? []

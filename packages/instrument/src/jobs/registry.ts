@@ -41,6 +41,7 @@ import { isJobScan, scanForJobs, type JobScan } from "./detectors/index.js"
 import { approvedConversionNames, approvedPrivacyText, boundConversionNames } from "./plan-data.js"
 import { repoPath, type RepoSnapshot } from "./repo-files.js"
 import { applyResults } from "./state-machine.js"
+import { MANAGED_NEXT_CONFIG_FILE } from "../frameworks/vercel-config.js"
 
 // ---------------------------------------------------------------------------------------------
 // Item ids and the plan line each candidate needs
@@ -117,6 +118,10 @@ export function requiredLineKind(item: Pick<ChecklistItem, "id" | "jobId">): Pla
 const T0_CLICK_FRAMEWORKS: ReadonlySet<string> = new Set(["static-html", "vite-react"])
 /** Single-page-app frameworks: PostHog's `capture_pageview` must follow history changes. */
 const SPA_FRAMEWORKS: ReadonlySet<string> = new Set(["next-app-router", "next-pages-router", "vite-react"])
+/** The Next.js frameworks (their rewrites live in the Next config). */
+const NEXT_FRAMEWORKS: ReadonlySet<string> = new Set(["next-app-router", "next-pages-router"])
+/** Every Next config file name Next reads. */
+const NEXT_CONFIG_NAMES: readonly string[] = ["next.config.js", "next.config.mjs", "next.config.ts", "next.config.cjs"]
 
 /** Third-party hosts a tag needs through the CSP. */
 const TAG_HOSTS = /(?:^|\.)(?:googletagmanager\.com|google-analytics\.com|analytics\.google\.com|posthog\.com|facebook\.net|facebook\.com|doubleclick\.net)$/i
@@ -141,10 +146,16 @@ const TARGET_CHECKS: Partial<Record<JobId, (target: string, framework: string) =
     const census = tool === "ga4" ? "S:census_ga4_config_once" : tool === "posthog" ? "S:census_posthog_init_once" : tool === "meta" ? "S:census_meta_init_once" : null
     return ["S:census_one_per_tool", ...(census ? [census] : []), "RH:one_beacon_per_tool", "PV:one_beacon_per_tool"]
   },
-  preview_guard: (target) =>
-    target === "meta"
-      ? ["S:adopted_init_guarded", "T0:host_matrix", "RH:preview_self_silent", "T1:meta_host_matrix"]
-      : ["S:adopted_init_guarded", "T0:host_matrix", "RH:preview_self_silent"]
+  // §3e.1 job 7: T0's host matrix only "where executable", i.e. where the guarded init is in markup the
+  // offline engine can load (static HTML / Vite's index.html). A Next component's init is not: there the
+  // rehearsal's preview_self load decides (I1b; before, the item carried a T0 check that tested the
+  // MANAGED page instead of the agent's edit, so a correct guard could never pass).
+  preview_guard: (target, framework) => {
+    const t0 = T0_CLICK_FRAMEWORKS.has(framework) ? ["T0:host_matrix"] : []
+    return target === "meta"
+      ? ["S:adopted_init_guarded", ...t0, "RH:preview_self_silent", "T1:meta_host_matrix"]
+      : ["S:adopted_init_guarded", ...t0, "RH:preview_self_silent"]
+  }
 }
 
 function checksFor(jobId: JobId, target: string, framework: string): ChecklistItem["checks"] {
@@ -294,7 +305,12 @@ export function seedCandidatesFrom(scan: JobScan, facts: BeforeFacts): Checklist
   // 3 posthog_improve (adopted PostHog only)
   const posthogConfigs = detectAdoptedPosthogConfig(scan.snapshot, facts.census)
   if (posthogConfigs.length > 0) {
-    const posthogFiles = [...filesOf(posthogConfigs), ...existingAppFiles(scan, ["next.config.js", "next.config.mjs", "next.config.ts", "next.config.cjs", "vercel.json"])]
+    // The /ingest rewrite lives in the Next config. A Next app with NO config yet gets the installer's
+    // managed `next.config.mjs` (any Infinite or PostHog proxy install creates it) or none at all, so the
+    // job may edit that file, or create it: without it, `next_rewrites_exact` could never pass (I1b).
+    const nextConfigs = existingAppFiles(scan, NEXT_CONFIG_NAMES)
+    const createConfig = nextConfigs.length === 0 && NEXT_FRAMEWORKS.has(framework) ? [repoPath(scan.snapshot.appRoot, MANAGED_NEXT_CONFIG_FILE)] : []
+    const posthogFiles = [...filesOf(posthogConfigs), ...nextConfigs, ...createConfig, ...existingAppFiles(scan, ["vercel.json"])]
     const direct = posthogConfigs.filter((config) => config.sendsDirect)
     const sentDirectLive = (facts.dryLive?.posthog.events ?? []).some((event) => !event.sameOrigin)
     if (direct.length > 0 || sentDirectLive) {
@@ -303,7 +319,7 @@ export function seedCandidatesFrom(scan: JobScan, facts: BeforeFacts): Checklist
         target: "proxy",
         finding: "PostHog is adopted and sends straight to PostHog (ad blockers drop it)",
         evidence: fileEvidence(direct.length > 0 ? direct : posthogConfigs),
-        allow: allow(posthogFiles)
+        allow: allow(posthogFiles, createConfig)
       })
     }
     const manualPageview = capturesPageviewManually(scan.snapshot)
@@ -314,7 +330,7 @@ export function seedCandidatesFrom(scan: JobScan, facts: BeforeFacts): Checklist
         target: "history_change",
         finding: "PostHog is adopted on a single-page app without `capture_pageview: 'history_change'` (page changes are missed)",
         evidence: fileEvidence(notHistory),
-        allow: allow(posthogFiles)
+        allow: allow(posthogFiles, createConfig)
       })
     }
   }

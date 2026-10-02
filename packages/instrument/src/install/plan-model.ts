@@ -241,8 +241,16 @@ export function automaticMetaEventsPerVisit(before: BeforeFacts): number | null 
 // The preview guard (§3h.9, R2-21)
 // ---------------------------------------------------------------------------------------------
 
-/** O5's deny-list shape: exact hosts and suffixes, from `contracts/host-deny-v1.json`. */
+/**
+ * What the guard silences, for DISPLAY only (the job-7 brief): the contract's exact hosts and suffixes,
+ * from `contracts/host-deny-v1.json`. Never a guard spec's `deny`: that list holds exact host literals
+ * (O5's `guardHostLiteral` rejects a suffix such as ".vercel.app"); the emitted expression applies the
+ * contract's suffixes itself.
+ */
 export const GUARD_DENY_LIST: readonly string[] = [...HOST_DENY_V1.deny.exact, ...HOST_DENY_V1.deny.suffix]
+
+/** The exact deny literals a guard spec carries (the contract's exact hosts; its suffixes are built in). */
+export const GUARD_DENY_EXACT: readonly string[] = [...HOST_DENY_V1.deny.exact]
 
 export function guardDecision(input: {
   keys: TagKeys
@@ -265,7 +273,7 @@ export function guardDecision(input: {
   if (conflict.length > 0) return { emit: false, reason: "production_denied", hosts: conflict }
   const exempt = [...new Set([...configured, ...observed])].filter((host) => host !== "")
   if (exempt.length === 0) return { emit: false, reason: "no_production_host" }
-  return { emit: true, exempt, deny: [...GUARD_DENY_LIST] }
+  return { emit: true, exempt, deny: [...GUARD_DENY_EXACT] }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -305,7 +313,13 @@ export function draftPrivacyParagraph(tools: readonly ProviderId[], serverLane: 
  * reinstalled). Infinite is always installable: its site source is created at `install`.
  */
 function newTools(input: PlanModelInput): { tools: ProviderId[]; ids: Partial<Record<ProviderId, string>> } {
-  const adopted = new Set(input.scan.adopted.map((entry) => entry.provider))
+  // Adopted = the installer's own evidence OR lane O6's census (which also reads an init inside a
+  // `<Script>{`…`}</Script>` template literal, the common Next pattern the installer's string-masked
+  // scan skips): a pixel the census already found on the page is improved in place, never installed twice.
+  const adopted = new Set<string>([
+    ...input.scan.adopted.map((entry) => entry.provider),
+    ...(input.before.census?.entries ?? []).filter((entry) => entry.owner === "adopted").map((entry) => entry.tool)
+  ])
   const { artifacts } = artifactsFromKeysDetailed(
     input.keys,
     { consentMode: "not_required", conversionNames: [], privacyText: null, npmInstall: null },
@@ -1028,7 +1042,7 @@ function gateByLines(plan: PlanModel, approval: Map<string, boolean | null>, ite
  */
 export function withGuardHosts(items: readonly ChecklistItem[], guard: GuardDecision | null): ChecklistItem[] {
   if (!guard || !guard.emit) return [...items]
-  const note = ` Production hosts that must ALWAYS fire (exempt first): ${guard.exempt.join(", ")}. Silence only these preview hosts: ${guard.deny.join(", ")}.`
+  const note = ` Production hosts that must ALWAYS fire (exempt first): ${guard.exempt.join(", ")}. Silence only these preview hosts: ${GUARD_DENY_LIST.join(", ")}.`
   return items.map((item) =>
     item.jobId === "preview_guard" && !item.trigger.finding.includes("must ALWAYS fire")
       ? { ...item, trigger: { ...item.trigger, finding: `${item.trigger.finding}${note}` } }

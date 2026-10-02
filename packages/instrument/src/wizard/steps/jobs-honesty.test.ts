@@ -248,3 +248,39 @@ describe("F14: a runner that returns only the §3f.1 shape cannot hide a fence b
     expect(runExtras({ ...base, reverted: ["x"], blocked: explicit } as AgentRunResult, [{ id: "a:1" }, { id: "b:2" }]).blocked).toEqual(explicit)
   })
 })
+
+describe("I1b: a check this build cannot run keeps the job claimed, never crashes the step", () => {
+  const notRegistered = (checkId: string) => Object.assign(new Error(`no check is registered under "${checkId}"`), { name: "CheckNotRegisteredError" })
+
+  it("an S check with no implementation (e.g. identify_on_auth_success) → undetermined, the item stays claimed", async () => {
+    const t = setup({ scenario: { turns: [{ steps: [claim("identify_reset:auth")] }] }, items: [agentItem("identify_reset:auth", ["app/layout.tsx"])] })
+    t.deps.checks.run = async (checkId: string) => {
+      throw notRegistered(checkId)
+    }
+    const outcome = await step.run(t.ctx, t.deps)
+    expect(outcome.kind).toBe("ok")
+    expect(t.current().jobs[0]!.state).toBe("claimed")
+    const results = t.recorded.events.filter((event) => event.type === "check.result").map((event) => event.fields)
+    expect(results).toContainEqual(expect.objectContaining({ checkId: "identify_reset_static", state: "undetermined", reason: expect.stringContaining("cannot check identify_reset_static") }))
+  })
+
+  it("a T0 scenario the wizard cannot build for the item → undetermined for that item, still claimed", async () => {
+    const t = setup({ scenario: { turns: [{ steps: [claim("conversions_to_tools:trial")] }] }, items: [agentItem("conversions_to_tools:trial", ["app/page.tsx"])] })
+    t.deps.checks.t0 = async () => {
+      throw Object.assign(new Error("click_test: params.clicks must list at least one {selector, label, expect}"), { name: "T0ScenarioError" })
+    }
+    await step.run(t.ctx, t.deps)
+    expect(t.current().jobs[0]!.state).toBe("claimed")
+    expect(t.recorded.events.filter((event) => event.type === "check.result").map((event) => event.fields)).toContainEqual(
+      expect.objectContaining({ checkId: "click_test", tier: "T0", state: "undetermined" })
+    )
+  })
+
+  it("NEGATIVE: any other failure of a check still stops the step loudly (never read as fine)", async () => {
+    const t = setup({ scenario: { turns: [{ steps: [claim("identify_reset:auth")] }] }, items: [agentItem("identify_reset:auth", ["app/layout.tsx"])] })
+    t.deps.checks.run = async () => {
+      throw new Error("the census crashed")
+    }
+    await expect(step.run(t.ctx, t.deps)).rejects.toThrow("the census crashed")
+  })
+})

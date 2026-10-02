@@ -60,6 +60,7 @@ import type {
 import type { TagKeys } from "../contracts/bridge.js"
 import { WIZARD_PATHS } from "../contracts/state.js"
 import { WIZARD_STEP_META } from "../contracts/steps.js"
+import { itemT0Scenarios, runItemT0, t0RunParams } from "../item-t0.js"
 
 const META = WIZARD_STEP_META.jobs
 const PRE_DEPLOY_TIERS: readonly CheckTier[] = ["S", "B", "T0"]
@@ -431,6 +432,14 @@ async function runNested(io: JobsIo, agentItems: ChecklistItem[]): Promise<StepO
   return { kind: "ok", status: io.summary() }
 }
 
+/** The reason an S check this build cannot run carries (undetermined; the item stays claimed). */
+export const UNCHECKABLE_REASON_PREFIX = "test_error — this version of infinite-tag cannot check"
+
+/** O6's `CheckNotRegisteredError`, by name (a fake runner in tests throws its own copy). */
+function isCheckNotRegistered(error: unknown): boolean {
+  return error instanceof Error && error.name === "CheckNotRegisteredError"
+}
+
 /** B26's park line. */
 export const NESTED_SANDBOX_HINT = "Run npx infinite-tag --resume in your own terminal to finish the checks."
 
@@ -501,6 +510,8 @@ class JobsIo {
   private patchedClickTested = new Set<string>()
   private artifactsCache: Parameters<WizardDeps["checks"]["t0"]>[1] | null | undefined
   private keysCache: Promise<TagKeys | null> | null = null
+  /** The run-level T0 params (production host, the guard's exempt hosts), read once per step. */
+  private t0Params: Promise<Record<string, unknown>> | null = null
   /** This step's kept agent edits, oldest first, with the item each one counts for (settled at exit). */
   private pendingEdits: Array<{ edit: WizardEditRecord; itemId: string | null }> = []
 
@@ -643,7 +654,17 @@ class JobsIo {
       if (specs.length === 0) continue
       if (tier === "S") {
         for (const spec of specs) {
-          const raw = await this.deps.checks.run(spec.checkId, { item, root: this.ctx.root, appRoot: this.ctx.appRoot, runId })
+          let raw: Awaited<ReturnType<WizardDeps["checks"]["run"]>>
+          try {
+            raw = await this.deps.checks.run(spec.checkId, { item, root: this.ctx.root, appRoot: this.ctx.appRoot, runId })
+          } catch (error) {
+            // A job-table check this build has no implementation for (I1b: e.g. `identify_on_auth_success`)
+            // is UNDETERMINED, never a pass and never a crash: the item stays `claimed` (the state machine
+            // never ticks it) and a later test, or a later version, decides. Any other error still throws.
+            if (!isCheckNotRegistered(error)) throw error
+            emit(this.result(spec.checkId, "S", "undetermined", `${UNCHECKABLE_REASON_PREFIX} ${spec.checkId} yet; a later test decides`))
+            continue
+          }
           for (const result of Array.isArray(raw) ? raw : [raw]) emit({ ...result, tier: "S" })
         }
       } else if (tier === "B") {
@@ -655,12 +676,12 @@ class JobsIo {
           for (const spec of specs) emit(this.result(spec.checkId, "T0", "undetermined", "the keys from Infinite could not be read, so the offline test could not run"))
           continue
         }
-        const scenarios: T0Scenario[] = specs.map((spec) => ({
-          id: `${item.id}:${spec.checkId}`,
-          checkId: spec.checkId,
-          params: { itemId: item.id, jobId: item.jobId, target: item.id.slice(item.id.indexOf(":") + 1), files: [...item.allow.files] }
-        }))
-        for (const result of await this.deps.checks.t0(scenarios, artifacts)) emit({ ...result, tier: "T0" })
+        // I1b: the run's production host and the guard's exempt hosts go with every scenario, and a scenario
+        // the wizard cannot build for this item reads undetermined (`item-t0.ts`), never a crash.
+        this.t0Params ??= t0RunParams(this.ctx, this.deps)
+        const scenarios: T0Scenario[] = await itemT0Scenarios(item, specs, await this.t0Params, { fs: this.deps.fs, root: this.ctx.root })
+        const results = await runItemT0(this.deps, scenarios, artifacts, { runId, at: () => this.deps.clock.now().toISOString() })
+        for (const result of results) emit({ ...result, tier: "T0" })
       }
     }
     return out

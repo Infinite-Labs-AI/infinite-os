@@ -485,6 +485,11 @@ export function plannedArtifacts(
 ): WorkspaceInstallArtifacts {
   const artifacts: WorkspaceInstallArtifacts = {}
   if (keys.artifacts.productionHosts) artifacts.productionHosts = keys.artifacts.productionHosts
+  // The plan-wide options ride along with the tools (I1b: they were dropped here, so the wizard's managed
+  // GA4 / PostHog / Meta were emitted WITHOUT the preview guard it planned and the user approved, and the
+  // conversion helpers never shipped). Absent on the plain installer, whose bytes are unchanged.
+  if (keys.artifacts.hostGuard) artifacts.hostGuard = keys.artifacts.hostGuard
+  if (keys.artifacts.conversions) artifacts.conversions = keys.artifacts.conversions
   for (const entry of classifications) {
     if (entry.action !== "install" && entry.action !== "upgrade") continue
     if (entry.provider === "gtm" || entry.provider === "server_lane") continue
