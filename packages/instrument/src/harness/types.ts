@@ -218,4 +218,5 @@ export interface ResolvedKeys {
   sources: Partial<Record<Exclude<HarnessProviderId, "gtm" | "server_lane">, KeySource>>
 }
 
-export type KeySource = "flag" | "artifact-file" | "discovered-artifacts" | "env" | "existing-snippet"
+/** `infinite-connection`: the wizard's keys verb (the user's Infinite connections; public ids only). */
+export type KeySource = "flag" | "artifact-file" | "discovered-artifacts" | "env" | "existing-snippet" | "infinite-connection"

@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process"
 import { existsSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -152,4 +153,103 @@ export function buildPackageManagerCommands(
     repeatableInstall: `After publishing ${instrumentPackage.name}, install it with: ${publishedCommands.repeatableInstall}`,
     repeatableRun: `After publishing ${instrumentPackage.name}, re-run it with: ${publishedCommands.repeatableRun}`
   }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The install-command runner (decision 5: the wizard may npm-install the server-lane package, as its
+// own plan line). Exact argv per package manager, never a shell, never a flag from a package name.
+// ---------------------------------------------------------------------------------------------
+
+/** A registry package spec: `name`, `@scope/name`, optionally `@<version range>`. Never starts with `-`. */
+export const PACKAGE_SPEC_PATTERN = /^(?:@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]*(?:@[A-Za-z0-9.^~<>=*|+-]+)?$/
+
+export interface PackageInstallCommand {
+  command: PackageManager
+  args: string[]
+}
+
+/** The exact argv that adds `packages` as runtime dependencies of the package in the working directory. */
+export function packageInstallCommand(manager: PackageManager, packages: readonly string[]): PackageInstallCommand {
+  if (packages.length === 0) throw new Error("No packages to install.")
+  for (const spec of packages) {
+    if (!PACKAGE_SPEC_PATTERN.test(spec) || spec.startsWith("-")) {
+      throw new Error(`Refusing to install ${JSON.stringify(spec)}: not a plain registry package name.`)
+    }
+  }
+  switch (manager) {
+    case "npm":
+      return { command: "npm", args: ["install", ...packages] }
+    case "pnpm":
+      return { command: "pnpm", args: ["add", ...packages] }
+    case "yarn":
+      return { command: "yarn", args: ["add", ...packages] }
+    case "bun":
+      return { command: "bun", args: ["add", ...packages] }
+  }
+}
+
+/** The one-line form shown on the plan line (`pnpm add @vercel/functions`). */
+export function packageInstallCommandLine(manager: PackageManager, packages: readonly string[]): string {
+  const { command, args } = packageInstallCommand(manager, packages)
+  return [command, ...args].join(" ")
+}
+
+export interface CommandRunResult {
+  exitCode: number | null
+  /** The last few KB of combined output (for the failure line), never parsed for success. */
+  outputTail: string
+  timedOut: boolean
+}
+
+export type CommandSpawner = (
+  command: string,
+  args: readonly string[],
+  options: { cwd: string; timeoutMs: number }
+) => Promise<CommandRunResult>
+
+const OUTPUT_TAIL_BYTES = 4_096
+
+/** The real spawner: no shell, inherited env (the package manager needs PATH, HOME and its config). */
+export const spawnCommand: CommandSpawner = (command, args, options) =>
+  new Promise((resolveRun) => {
+    let tail = ""
+    let timedOut = false
+    const child = spawn(command, [...args], { cwd: options.cwd, shell: false, stdio: ["ignore", "pipe", "pipe"] })
+    const keep = (chunk: Buffer) => {
+      tail = (tail + chunk.toString("utf8")).slice(-OUTPUT_TAIL_BYTES)
+    }
+    child.stdout?.on("data", keep)
+    child.stderr?.on("data", keep)
+    const timer = setTimeout(() => {
+      timedOut = true
+      child.kill("SIGTERM")
+    }, options.timeoutMs)
+    child.on("error", (error) => {
+      clearTimeout(timer)
+      resolveRun({ exitCode: null, outputTail: `${tail}${error.message}`.slice(-OUTPUT_TAIL_BYTES), timedOut })
+    })
+    child.on("close", (code) => {
+      clearTimeout(timer)
+      resolveRun({ exitCode: code, outputTail: tail, timedOut })
+    })
+  })
+
+export interface RunPackageInstallInput {
+  manager: PackageManager
+  cwd: string
+  packages: readonly string[]
+  spawn?: CommandSpawner
+  timeoutMs?: number
+}
+
+export interface RunPackageInstallResult extends CommandRunResult {
+  ok: boolean
+  argv: string[]
+}
+
+/** Runs the install command once. `ok` only on exit code 0 (and no timeout). */
+export async function runPackageInstall(input: RunPackageInstallInput): Promise<RunPackageInstallResult> {
+  const { command, args } = packageInstallCommand(input.manager, input.packages)
+  const result = await (input.spawn ?? spawnCommand)(command, args, { cwd: input.cwd, timeoutMs: input.timeoutMs ?? 5 * 60_000 })
+  return { ...result, ok: result.exitCode === 0 && !result.timedOut, argv: [command, ...args] }
 }

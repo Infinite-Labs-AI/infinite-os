@@ -1,3 +1,5 @@
+import type { InstallManifestIds, WizardEditRecord } from "./wizard/contracts/jobs.js"
+
 export const packageManagers = ["pnpm", "npm", "yarn", "bun"] as const
 export type PackageManager = (typeof packageManagers)[number]
 
@@ -45,11 +47,10 @@ export interface UnmanagedProvider {
   file: string
 }
 
-/** A requested provider that already existed in the repo and was left byte-for-byte alone. */
 /**
- * An adopted provider as the plan reports it. `improve` (decision 4, the wizard only) lists the
- * in-place improvements proposed for it; each is a plan line the user approves, and an unapproved
- * line changes nothing. Absent = adopted byte-for-byte, exactly as before.
+ * A requested provider that already existed in the repo and was left byte-for-byte alone. `improve`
+ * (decision 4, the wizard only) lists the in-place improvements proposed for it; each is a plan line
+ * the user approves, and an unapproved line changes nothing. Absent = adopted byte-for-byte.
  */
 export type AdoptedProvider = UnmanagedProvider & { improve?: ImproveLine[] }
 
@@ -184,6 +185,10 @@ export interface UninstallResult {
   restoredFiles: string[]
   warnings: string[]
   manifestPath: string | null
+  /** Receipt edits reversed this run (repo-root-relative files), newest first. */
+  editsReversed?: string[]
+  /** Receipt edits NOT reversed because the file changed since ("changed since; left as is"). */
+  editsLeftAsIs?: string[]
 }
 
 export interface VerifyResult {
@@ -329,6 +334,15 @@ export interface InstallManifest {
    * file actually contains the wiring, not merely because it was recorded here.
    */
   requiresManual?: ManualRequirement[]
+  /**
+   * §3e.6 the edit receipt: every change the wizard or an agent made to a file it does not own as a
+   * whole (improve edits, guard wraps, the npm job's package.json + lockfile, agent job edits), with
+   * exact text edits so `uninstall` reverses each one byte for byte, newest first, only while the
+   * file still hashes to `afterHash`. Absent on installs made without the wizard.
+   */
+  edits?: WizardEditRecord[]
+  /** §3e.6 the public IDs this install emitted (they are in the committed code anyway); `doctor` reads them. */
+  ids?: InstallManifestIds
   wiringVersion: number
   verifiedAt: string | null
 }
