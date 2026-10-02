@@ -2,6 +2,7 @@
 // the PR body, the ONE review (`event: COMMENT`; a finding outside a diff hunk goes into the body), the replies,
 // and the final comment. Statuses are plain text the wizard owns: a literal `- [ ]` (which anyone can tick) is
 // never posted. On a public repo, a provider ID that is not already in the diff is shown as `<id>`.
+import { sanitizeUntrustedBlock } from "../agents/sanitize.js"
 import type { AgentKind, ReviewResult } from "../wizard/contracts/agents.js"
 import { FORBIDDEN_CHECKBOX, PR_MARKERS } from "../wizard/contracts/git-host.js"
 import type { ChecklistItem } from "../wizard/contracts/jobs.js"
@@ -22,8 +23,8 @@ function escapeCell(text: string): string {
 
 /** Strips C0 control characters (but newlines and tabs) from untrusted text before it is posted. */
 export function stripControl(text: string): string {
-  // eslint-disable-next-line no-control-regex
-  return text.replace(/\u001b\[[0-9;?]*[A-Za-z]/g, "").replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "")
+  // The ONE sanitiser's multi-line shape (§3z.12 B9): newlines and tabs kept, everything else hostile stripped.
+  return sanitizeUntrustedBlock(text, 65_536)
 }
 
 /** The scan + control-strip every posted string goes through. */

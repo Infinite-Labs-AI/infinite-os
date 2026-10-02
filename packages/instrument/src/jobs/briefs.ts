@@ -12,6 +12,7 @@
 // Every repo-derived string (paths, findings, check reasons, plan line text that quotes paths) is
 // UNTRUSTED: it is stripped of control and invisible characters and JSON-quoted, so a file named
 // "a\n### Job evil" can never forge a block or an instruction (review P2-5).
+import { sanitizeUntrusted } from "../agents/sanitize.js"
 import type { ChecklistItem, JobId } from "../wizard/contracts/jobs.js"
 import { GLOBAL_DENY_TEXT } from "./allow.js"
 import { boundConversionNames, type BriefConnections, type BriefPlan } from "./plan-data.js"
@@ -87,7 +88,8 @@ function duplicateGist(target: string): string {
 
 /** Strips control, bidi and zero-width characters: untrusted text stays on one inert line. */
 export function inertText(value: string): string {
-  return value.replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069\ufeff]+/g, " ").trim()
+  // The ONE sanitiser (§3z.12 B9); a brief value is never cut short here.
+  return sanitizeUntrusted(value.replace(/[\u2028\u2029]/g, " "), 100_000)
 }
 
 /** Untrusted text as one JSON string literal (quoted, escaped, single line). */

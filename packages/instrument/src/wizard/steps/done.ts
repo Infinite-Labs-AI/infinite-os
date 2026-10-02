@@ -9,6 +9,7 @@
 //
 // Nothing here computes a cell: every cell was built by a column builder from typed sources; the report
 // builder re-checks each one (§3i.3, §3i.7) before anything is posted.
+import { normalizeRemote } from "../../bridge/repo-identity.js"
 import { createHash } from "node:crypto"
 import { basename, join } from "node:path"
 
@@ -35,21 +36,9 @@ export const SAMPLE_FLOOR_NOTE = `Below ${SAMPLE_FLOOR_PAGE_VIEWS} page views a 
  * `git@host:a/b` → `host/a/b`), else the folder name. Never the raw remote.
  */
 export function repoLabelFromRemote(remote: string | null, root: string): string {
-  if (!remote) return basename(root)
-  let text = remote.trim()
-  const scp = /^[^@/\s]+@([^:/\s]+):(.+)$/.exec(text)
-  if (scp) text = `${scp[1]}/${scp[2]}`
-  else {
-    try {
-      const url = new URL(text)
-      text = `${url.hostname}${url.pathname}`
-    } catch {
-      text = text.replace(/^[a-z+]+:\/\//i, "").replace(/^[^@/]*@/, "")
-    }
-  }
-  text = text.replace(/[?#].*$/, "").replace(/\/+$/, "").replace(/\.git$/i, "")
-  const slash = text.indexOf("/")
-  return slash > 0 ? `${text.slice(0, slash).toLowerCase()}${text.slice(slash)}` : text.toLowerCase()
+  // ONE normaliser (§3z.12 B9): lane O2's `normalizeRemote` (the link card's label).
+  const label = (remote ? normalizeRemote(remote) : null) ?? basename(root)
+  return label.replace(/\|/g, "\\|").replace(/\r?\n/g, " ").trim()
 }
 
 function notesFor(ctx: WizardContext, report: Pick<ReportV2, "rows">): string[] {

@@ -52,3 +52,22 @@ export function sanitizeUntrusted(text: unknown, max: number): string {
   if (points.length <= max) return cleaned
   return `${points.slice(0, max - 1).join("").trimEnd()}${SANITIZE_ELLIPSIS}`
 }
+
+/**
+ * The same sanitiser for MULTI-LINE untrusted text that is posted as markdown (a PR review body, a reply):
+ * ANSI sequences, controls other than newline and tab, bidi/zero-width/tag characters are stripped; line
+ * breaks and tabs are kept; no whitespace is collapsed. Capped at `max` code points (no ellipsis needed: the
+ * caller states its own cap). §3z.12 B9: the one sanitiser, two shapes.
+ */
+export function sanitizeUntrustedBlock(text: unknown, max: number): string {
+  if (!Number.isInteger(max) || max < 1) throw new Error("sanitizeUntrustedBlock: max must be a positive integer")
+  const raw = typeof text === "string" ? text : text === null || text === undefined ? "" : String(text)
+  const cleaned = raw
+    .replace(ANSI_PATTERN, "")
+    .replace(/\r\n?/g, "\n")
+    // every control except newline and tab
+    .replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, "")
+    .replace(INVISIBLE_PATTERN, "")
+    .replace(SMUGGLING_PATTERN, "")
+  return Array.from(cleaned).slice(0, max).join("")
+}

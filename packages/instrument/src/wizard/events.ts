@@ -7,6 +7,7 @@
 // are never dropped: they queue and release one per window, and `step.done` flushes the queue at once
 // so a step never finishes with a result still hidden. Text is capped and stripped of terminal
 // control sequences before it reaches the store or stdout.
+import { sanitizeUntrusted } from "../agents/sanitize.js"
 import type { WizardEmitter } from "./contracts/deps.js"
 import {
   EVENT_LIMITS,
@@ -42,19 +43,12 @@ const CONTROL_PATTERN = /[\u0000-\u001f\u007f-\u009f]/g
 const BIDI_PATTERN = /[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g
 
 /**
- * The emitter's own text hygiene: strip ANSI, C0/C1 controls and bidi overrides, collapse whitespace,
- * cap at `max` (with an ellipsis). Untrusted agent text is ALSO passed through lane O3's
- * `sanitizeUntrusted` by its producer; this is the last line before a terminal or stdout.
+ * The emitter's text hygiene: lane O3's ONE sanitiser (`sanitizeUntrusted`, §3z.12 B9) — ANSI, C0/C1
+ * controls, bidi overrides and zero-width characters stripped, whitespace collapsed, capped with an
+ * ellipsis. The last line before a terminal or stdout.
  */
 export function cleanEventText(text: string, max: number): string {
-  const flat = String(text)
-    .replace(ANSI_PATTERN, "")
-    .replace(BIDI_PATTERN, "")
-    .replace(CONTROL_PATTERN, " ")
-    .replace(/\s+/g, " ")
-    .trim()
-  if (flat.length <= max) return flat
-  return `${flat.slice(0, Math.max(0, max - 1)).trimEnd()}…`
+  return sanitizeUntrusted(text, Math.max(1, max))
 }
 
 export interface WizardEventEmitterOptions {

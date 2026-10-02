@@ -1,0 +1,68 @@
+// The live checks' fetch honours the proxy environment, so the offline E2E's tripwire proxy sees (and
+// refuses) any stray read. Loopback servers only: nothing leaves this machine.
+import { createServer, type IncomingMessage, type Server } from "node:http"
+import type { AddressInfo, Socket } from "node:net"
+import { afterEach, describe, expect, it } from "vitest"
+
+import { envProxyFetch, noProxyMatches, proxyFor } from "./env-proxy-fetch.js"
+
+const servers: Server[] = []
+afterEach(async () => {
+  for (const server of servers.splice(0)) await new Promise<void>((resolve) => server.close(() => resolve()))
+})
+
+async function listen(server: Server): Promise<number> {
+  servers.push(server)
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
+  return (server.address() as AddressInfo).port
+}
+
+describe("proxyFor / NO_PROXY", () => {
+  it("picks HTTPS_PROXY for https and HTTP_PROXY for http; NO_PROXY exempts exact hosts and suffixes", () => {
+    const env = { HTTPS_PROXY: "http://127.0.0.1:9", HTTP_PROXY: "http://127.0.0.1:8", NO_PROXY: "127.0.0.1,.internal.test" }
+    expect(proxyFor(new URL("https://acme-store.com/"), env)?.port).toBe("9")
+    expect(proxyFor(new URL("http://acme-store.com/"), env)?.port).toBe("8")
+    expect(proxyFor(new URL("http://127.0.0.1:3000/"), env)).toBeNull()
+    expect(proxyFor(new URL("https://api.internal.test/"), env)).toBeNull()
+    expect(noProxyMatches("x.example.com", "*")).toBe(true)
+    // negative: no proxy set, or an unrelated NO_PROXY entry, changes nothing
+    expect(proxyFor(new URL("https://acme-store.com/"), {})).toBeNull()
+    expect(noProxyMatches("acme-store.com", "example.com")).toBe(false)
+  })
+})
+
+describe("envProxyFetch", () => {
+  it("an https read goes to the proxy as a CONNECT (a refusing proxy fails it; nothing reaches the site)", async () => {
+    const seen: string[] = []
+    const proxy = createServer()
+    proxy.on("connect", (req: IncomingMessage, socket: Socket) => {
+      seen.push(`CONNECT ${req.url}`)
+      socket.end("HTTP/1.1 403 Forbidden\r\n\r\n")
+    })
+    const port = await listen(proxy)
+    const fetchImpl = envProxyFetch({ HTTPS_PROXY: `http://127.0.0.1:${port}` })
+    await expect(fetchImpl("https://acme-store.com/", { redirect: "manual" })).rejects.toThrow(/refused the tunnel/)
+    expect(seen).toEqual(["CONNECT acme-store.com:443"])
+  })
+
+  it("an http read goes to the proxy with the absolute URL; a NO_PROXY host goes direct (negative)", async () => {
+    const viaProxy: string[] = []
+    const proxy = createServer((req, res) => {
+      viaProxy.push(String(req.url))
+      res.writeHead(301, { Location: "https://acme-store.com/" })
+      res.end()
+    })
+    const proxyPort = await listen(proxy)
+    const direct = createServer((_req, res) => res.end("direct"))
+    const directPort = await listen(direct)
+    const env = { HTTP_PROXY: `http://127.0.0.1:${proxyPort}`, NO_PROXY: "127.0.0.1" }
+    const fetchImpl = envProxyFetch(env)
+    const response = await fetchImpl("http://acme-store.com/landing?x=1", { redirect: "manual" })
+    expect(response.status).toBe(301)
+    expect(response.headers.get("location")).toBe("https://acme-store.com/")
+    expect(viaProxy).toEqual(["http://acme-store.com/landing?x=1"])
+    const local = await fetchImpl(`http://127.0.0.1:${directPort}/`)
+    expect(await local.text()).toBe("direct")
+    expect(viaProxy).toHaveLength(1)
+  })
+})
