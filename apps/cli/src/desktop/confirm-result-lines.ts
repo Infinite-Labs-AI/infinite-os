@@ -14,6 +14,7 @@
 import type { AnswerViewState } from "@infinite-os/types";
 
 import { decodeAnswerView } from "./answer-view-decode.js";
+import { printableImagesView } from "./image-url-cut.js";
 import { boundedTerminalText } from "./terminal-text.js";
 
 export type ConfirmLineTone = "ok" | "warn" | "bad" | "muted";
@@ -154,7 +155,7 @@ export async function askDismissOnly(
  * a new user turn), so a caller can offer it as the next step. Null otherwise.
  */
 export function receiptNextAsk(result: unknown): string | null {
-  const view = decodeAnswerView(isRecord(result) ? result.view : undefined);
+  const view = printableImagesView(decodeAnswerView(isRecord(result) ? result.view : undefined));
   if (!view || !UNSURE_STATES.has(view.state) || !isRecord(view.reconcile)) return null;
   const ask = view.reconcile.ask;
   return typeof ask === "string" ? boundedTerminalText(ask, MAX_LINE_CHARS) || null : null;
@@ -172,7 +173,8 @@ export function leftForLaterLine(expiresAt: string | null | undefined): string {
 }
 
 function receiptViewLines(value: unknown, decision: ConfirmDecision): ConfirmLine[] | null {
-  const view = decodeAnswerView(value);
+  // An images receipt never prints a URL (its sentence, reconcile step or provenance).
+  const view = printableImagesView(decodeAnswerView(value));
   const receipt = view?.receipt;
   if (!view || !receipt || typeof receipt.sentence !== "string") return null;
   const sentence = boundedTerminalText(receipt.sentence, MAX_LINE_CHARS);

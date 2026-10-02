@@ -21,6 +21,7 @@ import {
   type ApprovalRenderCtx,
   type CardUiState
 } from "./approval.js";
+import { viewKeyFacts } from "./focus.js";
 import { creativeDraftLine } from "./images.js";
 import { renderView } from "./registry.js";
 import type { ViewRenderCtx } from "./types.js";
@@ -352,6 +353,38 @@ describe("images", () => {
     const out = text(renderView({ ...view, body } as unknown as AnswerViewV1, viewCtx()).detail);
     expect(out).not.toMatch(/http/iu);
     expect(out).toContain("✗ 1");
+  });
+
+  it("a URL in the shell's strings (title, explain, state reason, caveats, next, receipt) is never printed", () => {
+    const url = "https://cdn.example.com/img/abc.png";
+    const view = {
+      ...fixture("images-done"),
+      title: `Images ${url}`,
+      explain: `Made from ${url}`,
+      state: "partial",
+      stateReason: { code: "one_failed", words: `one failed: ${url}`, fix: { label: `retry ${url}`, ask: `retry ${url}` } },
+      caveats: [`see ${url}`],
+      next: [{ label: `open ${url}`, ask: `show me ${url}` }],
+      receipt: { sentence: `Made 2 of 3: ${url}`, tone: "warn", revertible: false, provenanceLine: `from ${url}` },
+      approval: { kind: "card", title: `Make images ${url}?`, summary: `uses ${url}`, confirmLabel: "Make 3 images",
+        dismissLabel: "Dismiss", rows: [{ label: "source", value: url }], effect: `costs ${url}` },
+      body: { ...(fixture("images-done").body as unknown as Record<string, unknown>),
+        truncated: { shown: 3, total: 9, more: { label: "more", ask: `more from ${url}` } } }
+    } as unknown as AnswerViewV1;
+    const drawn = renderView(view, viewCtx({ explainOpen: true, caps: ALL_CAPS }));
+    const all = [drawn.head, drawn.source ?? "", ...drawn.detail, ...drawn.footnotes, drawn.fixAsk ?? "", ...(drawn.rowAsks ?? []).map((ask) => ask ?? "")];
+    expect(text(all)).toContain("one failed");
+    expect(text(all)).not.toMatch(/https?:|cdn\.example/u);
+    const card = approvalRender({ ...view, state: "needs_yes" } as AnswerViewV1, cardCtx({ ui: { ...CARD_UI_START, explainOpen: true } }));
+    expect(text(card.lines)).not.toMatch(/https?:|cdn\.example/u);
+    const receipt = confirmResultLines({ view }, "approve").map((line) => line.text);
+    expect(text(receipt)).toContain("Made 2 of 3");
+    expect(text(receipt)).not.toMatch(/https?:|cdn\.example/u);
+    expect(text(receiptDetailLines({ view }, viewCtx()))).not.toMatch(/https?:|cdn\.example/u);
+    const facts = viewKeyFacts(view, drawn);
+    expect([facts.more, facts.fixAsk, ...facts.rowAsks].join(" ")).not.toMatch(/https?:|cdn\.example/u);
+    // The host's own place (appLink) is not a printed image URL: it is kept for `o`.
+    expect(text(all)).toContain("Open in Library");
   });
 
   it("madeWith your_codex prints $0 to Infinite, from cost.whoPays", () => {

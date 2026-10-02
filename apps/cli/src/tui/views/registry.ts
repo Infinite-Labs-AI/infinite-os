@@ -9,6 +9,8 @@
 // the session down.
 import type { AnswerViewKind, AnswerViewV1 } from "@infinite-os/types";
 
+import { printableImagesView } from "../../desktop/image-url-cut.js";
+
 import {
   caveatLines,
   explainLines,
@@ -73,7 +75,9 @@ export function hasKindRenderer(kind: AnswerViewKind): boolean {
 }
 
 /** One view, drawn at `ctx.width`: the shell around the kind's body. */
-export function renderView(view: AnswerViewV1, ctx: ViewRenderCtx): ViewRender {
+export function renderView(given: AnswerViewV1, ctx: ViewRenderCtx): ViewRender {
+  // An images view never prints a URL, in its body or its shell.
+  const view = printableImagesView(given);
   const shellCtx: ViewRenderCtx = { ...ctx, width: Math.max(1, Math.floor(ctx.width)) };
   const body = renderKindBody(view, shellCtx);
   if (view.kind === "quiet") {

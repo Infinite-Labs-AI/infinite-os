@@ -19,6 +19,7 @@
 import type { AnswerViewV1 } from "@infinite-os/types";
 import type { Key } from "ink";
 
+import { printableImagesView } from "../../desktop/image-url-cut.js";
 import { resolveKey, type FocusKind, type KeyAction, type KeyContext, type KeyHint } from "../keys/keymap.js";
 import { DEFAULT_THEME, type Theme } from "../theme.js";
 import { truncatedMoreAsk, viewText } from "./primitives.js";
@@ -95,10 +96,11 @@ export function focusedViewIndex(views: readonly AnswerViewV1[]): number {
 }
 
 /** Facts for the focused view, read from its current render (width-dependent, e.g. dropped columns). */
-export function viewKeyFacts(view: AnswerViewV1 | undefined, render: ViewRender, livePageNext = false): ViewKeyFacts {
-  if (!view) {
+export function viewKeyFacts(given: AnswerViewV1 | undefined, render: ViewRender, livePageNext = false): ViewKeyFacts {
+  if (!given) {
     return { ...EMPTY_FACTS, livePageNext };
   }
+  const view = printableImagesView(given);
   return {
     rowCount: count(render.rowCount),
     rowAsks: (render.rowAsks ?? []).map((ask) => viewText(ask) || null),

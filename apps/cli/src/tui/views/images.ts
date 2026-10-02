@@ -5,12 +5,10 @@
 // to Infinite.
 import type { AnswerViewEnvelopeV1, CreativeDraftFrameV1 } from "@infinite-os/types";
 
+import { cutUrls } from "../../desktop/image-url-cut.js";
 import { displayWidth, padEndCells } from "../lib/display-width.js";
 import { formatMoney, isRecord, paint, viewText, wrapText } from "./primitives.js";
 import type { KindRender, ViewRenderCtx } from "./types.js";
-
-/** Anything URL-shaped is cut from image text: the terminal never prints image links. */
-const URL_LIKE = /\b(?:https?|ftp|data|blob):\S*/giu;
 
 const ITEM_MARK: Record<string, { glyph: string; role: "success" | "primary" | "muted" | "error" }> = {
   done: { glyph: "✓", role: "success" },
@@ -136,7 +134,7 @@ function secondsWords(ms: number): string {
 
 /** Scrubbed image text with anything URL-shaped cut out. */
 function imageText(value: unknown, fallback = ""): string {
-  const text = viewText(value).replace(URL_LIKE, "").replace(/\s{2,}/gu, " ").trim();
+  const text = cutUrls(viewText(value));
   return text || fallback;
 }
 

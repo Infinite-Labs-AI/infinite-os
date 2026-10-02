@@ -23,6 +23,7 @@ import type {
 } from "@infinite-os/types";
 
 import { decodeAnswerView } from "../../desktop/answer-view-decode.js";
+import { printableImagesView } from "../../desktop/image-url-cut.js";
 import { keyBarHints, okKeyFor, type KeyAction, type KeyContext, type KeyHint } from "../keys/keymap.js";
 import { displayWidth, padEndCells, truncateCells } from "../lib/display-width.js";
 import { changeLines, labelValueLines, warningLines } from "./change.js";
@@ -140,7 +141,9 @@ const LIVE_STATES = new Set(["needs_yes", "needs_answer"]);
  * context. Every string from the view is scrubbed; no line is wider than
  * `ctx.width`.
  */
-export function approvalRender(view: AnswerViewV1, ctx: ApprovalRenderCtx): ApprovalRender {
+export function approvalRender(given: AnswerViewV1, ctx: ApprovalRenderCtx): ApprovalRender {
+  // An images card never prints a URL, in its body or its approval words.
+  const view = printableImagesView(given);
   const width = Math.max(8, Math.floor(ctx.width));
   const inner = width - 4;
   const approval: Record<string, unknown> = isRecord(view.approval) ? view.approval : {};
@@ -425,7 +428,7 @@ const RECEIPT_DETAIL_KINDS = new Set(["launch", "change", "images"]);
  * an `(o)` (the transcript takes no keys). Empty for any other receipt.
  */
 export function receiptDetailLines(result: unknown, ctx: ViewRenderCtx): string[] {
-  const view = isRecord(result) ? decodeAnswerView(result.view) : null;
+  const view = printableImagesView(isRecord(result) ? decodeAnswerView(result.view) : null);
   if (!view || !RECEIPT_DETAIL_STATES.has(view.state) || !RECEIPT_DETAIL_KINDS.has(view.kind)) {
     return [];
   }
