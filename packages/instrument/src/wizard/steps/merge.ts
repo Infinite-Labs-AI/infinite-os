@@ -84,6 +84,8 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
   sub(ctx, "merge", `Waiting for you to merge #${number}…`, "pending")
   const answer = await ctx.ask("merge-ready", { prUrl: pr.url, number, summary })
   if (answer !== "open") return parked(answer === "later" ? "You chose to merge later." : "The merge question was closed.", number)
+  // B29: "open" opens the pull request in the browser (darwin TTY runs; the wiring sets `openUrl` only there).
+  if (!ctx.options.json && deps.openUrl && /^https:\/\//.test(pr.url)) await deps.openUrl(pr.url).catch(() => undefined)
 
   const started = deps.clock.now().getTime()
   for (;;) {

@@ -16,6 +16,7 @@
 // Everything that needs the run (its id, plan, guard) reads it through `input.state()` (the engine's
 // in-memory state) or the gitignored, run-scoped hand-off files; a missing piece reads as "unknown",
 // never a guess.
+import { spawn } from "node:child_process"
 import { readFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
@@ -253,8 +254,25 @@ export async function createDefaultWizardDeps(input: DefaultDepsInput, overrides
     clock: systemClock,
     env,
     platform,
-    tagVersion
+    tagVersion,
+    // B29: the merge-ready "open" answer opens the PR, in a darwin terminal run only.
+    ...(platform === "darwin" && !options.json && !options.nested ? { openUrl: openInBrowser } : {})
   }
+}
+
+/** `open <https URL>` (macOS), detached; never waits, never throws into the run. */
+function openInBrowser(url: string): Promise<void> {
+  return new Promise((resolve) => {
+    if (!/^https:\/\/[^\s]+$/.test(url)) return resolve()
+    try {
+      const child = spawn("open", [url], { detached: true, stdio: "ignore" })
+      child.on("error", () => resolve())
+      child.unref()
+      resolve()
+    } catch {
+      resolve()
+    }
+  })
 }
 
 /** The TTY or JSON UI (lane O2) over the process streams, with lane O3's one sanitiser. */

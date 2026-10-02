@@ -84,6 +84,12 @@ export interface WizardFs {
   writeTextAtomic(path: string, text: string, mode?: number): Promise<void>
   exists(path: string): Promise<boolean>
   mkdirp(path: string, mode?: number): Promise<void>
+  /**
+   * B29: deletes a file only while its sha256 is still `expectedSha256` (`sha256:<hex>`) — e.g. a file an agent
+   * created in a fix round that failed the wizard's checks. Returns false (and deletes nothing) on a mismatch
+   * or a missing file. Optional for fakes.
+   */
+  removeFile?(path: string, expectedSha256: string): Promise<boolean>
 }
 
 export interface Clock {
@@ -105,6 +111,8 @@ export interface WizardDeps {
   env: Readonly<Record<string, string | undefined>>
   platform: string
   tagVersion: string
+  /** B29: opens a URL in the user's browser (darwin TTY runs only; absent elsewhere and in tests). */
+  openUrl?(url: string): Promise<void>
 }
 
 /** §3d.8. One per step file. */

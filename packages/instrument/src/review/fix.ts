@@ -3,6 +3,7 @@
 // (B), and the job registry computes the item's state (§3e.5). Claim notes and progress text pass through the
 // §3g.5 scan before they reach the terminal. The same runner fixes a commit hook that failed on the wizard's
 // own files (job 15 `build_fix` shape).
+import type { WizardEditRecord } from "../wizard/contracts/jobs.js"
 import { statSync } from "node:fs"
 import { join } from "node:path"
 
@@ -133,18 +134,56 @@ export async function snapshotFiles(deps: Pick<WizardDeps, "fs">, root: string, 
  * Puts the snapshotted files back (a fix round that broke the build leaves nothing behind). Returns the paths it
  * could not restore: a file the agent created where none existed (WizardFs cannot delete).
  */
-export async function restoreFiles(deps: Pick<WizardDeps, "fs">, root: string, snapshots: readonly FileSnapshot[]): Promise<string[]> {
+export async function restoreFiles(
+  deps: Pick<WizardDeps, "fs">,
+  root: string,
+  snapshots: readonly FileSnapshot[],
+  /** B29: the fix round's own edit records: a file the agent CREATED is deleted while it still holds its bytes. */
+  edits: readonly Pick<WizardEditRecord, "file" | "beforeHash" | "afterHash">[] = []
+): Promise<string[]> {
   const leftOver: string[] = []
   for (const snapshot of snapshots) {
     const absolute = join(root, snapshot.path)
     if (snapshot.text === null) {
-      if (await deps.fs.exists(absolute)) leftOver.push(snapshot.path)
+      if (!(await deps.fs.exists(absolute))) continue
+      const created = edits.find((edit) => edit.file === snapshot.path && edit.beforeHash === null)
+      if (created && deps.fs.removeFile && (await deps.fs.removeFile(absolute, created.afterHash))) continue
+      leftOver.push(snapshot.path)
       continue
     }
     if ((await deps.fs.readText(absolute)) === snapshot.text) continue
     await deps.fs.writeTextAtomic(absolute, snapshot.text, snapshot.mode ?? 0o644)
   }
   return leftOver
+}
+
+/** The offline checks the run's checked-in jobs carry, re-run on this tree (none → []). */
+async function rerunT0(ctx: WizardContext, deps: WizardDeps, runId: string): Promise<CheckResult[]> {
+  const state = ctx.state.get()
+  const settled = state.jobs.filter((item) => ["done_in_code", "waiting_deploy", "waiting_real_event", "proven"].includes(item.state))
+  const scenarios = settled.flatMap((item) =>
+    deps.registry.checksFor(item, "T0").map((spec) => ({
+      id: `${item.id}:${spec.checkId}`,
+      checkId: spec.checkId,
+      params: { itemId: item.id, jobId: item.jobId, target: item.id.slice(item.id.indexOf(":") + 1), files: [...item.allow.files] }
+    }))
+  )
+  if (scenarios.length === 0 || !deps.bridge.has("tag.keys.v1")) return []
+  let artifacts: ReturnType<WizardDeps["installer"]["artifactsFromKeys"]>
+  try {
+    const keys = await deps.bridge.keys({ signal: ctx.signal })
+    const answers = state.plan?.answers
+    artifacts = deps.installer.artifactsFromKeys(keys, {
+      consentMode: answers?.consentMode ?? null,
+      conversionNames: answers?.conversions ?? [],
+      privacyText: null,
+      npmInstall: null
+    })
+  } catch {
+    // Unknown, never a pass: the round's own build verdict stands and the rehearsal re-runs next.
+    return []
+  }
+  return (await deps.checks.t0(scenarios, artifacts)).map((result) => ({ ...result, tier: "T0" as const, runId: result.runId ?? runId }))
 }
 
 /**
@@ -167,6 +206,13 @@ export async function verifyFix(
   const results: CheckResult[] = [
     { checkId: "build", tier: "B", state: buildOk ? "pass" : "problem", ...(buildOk ? {} : { reason: "new build failures" }), at, runId: input.runId }
   ]
+  // B29 / §3g.4 step 5: a fix commit re-runs the offline (T0) checks the run's jobs already passed, on the
+  // install's own artifacts (rebuilt from the connection's keys and the plan's answers, as the jobs step does).
+  // A T0 problem there is a regression and fails the round like a new build failure.
+  if (buildOk) {
+    const t0 = await rerunT0(ctx, deps, input.runId)
+    if (t0.some((result) => result.state === "problem")) buildOk = false
+  }
   for (const item of input.items) {
     const touched = item.allow.files.some((file) => input.editedFiles.includes(file))
     if (!touched && item.state === "claimed") {

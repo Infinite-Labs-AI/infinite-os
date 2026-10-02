@@ -1,6 +1,6 @@
 // The real `WizardFs` and `Clock` (§3d.8): atomic writes (temp + rename) with an explicit mode, so
 // `.infinite/wizard/state.json` is never seen half-written and never wider than 0600.
-import { randomBytes } from "node:crypto"
+import { createHash, randomBytes } from "node:crypto"
 import { promises as fsp } from "node:fs"
 import { dirname, join, basename } from "node:path"
 
@@ -41,6 +41,19 @@ export const nodeWizardFs: WizardFs = {
   },
   async mkdirp(path, mode = WIZARD_DIR_MODE) {
     await fsp.mkdir(path, { recursive: true, mode })
+  },
+  async removeFile(path, expectedSha256) {
+    let bytes: Buffer
+    try {
+      const stat = await fsp.lstat(path)
+      if (!stat.isFile()) return false
+      bytes = await fsp.readFile(path)
+    } catch {
+      return false
+    }
+    if (`sha256:${createHash("sha256").update(bytes).digest("hex")}` !== expectedSha256) return false
+    await fsp.rm(path, { force: true })
+    return true
   }
 }
 

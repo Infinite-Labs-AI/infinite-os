@@ -687,11 +687,12 @@ async function reviewRun(ctx: WizardContext, deps: WizardDeps): Promise<StepOutc
       for (const item of items) ctx.emit.emit("job.seeded", { item })
       sub(ctx, "review", `${AGENT_LABEL[worker]} is fixing ${items.length} comment${items.length === 1 ? "" : "s"}…`, "pending")
       const prevHead = head
-      const snapshots = await snapshotFiles(deps, ctx.root, items.flatMap((item) => item.allow.files))
+      // The files the round may change AND create (a created file is removed again if the round fails; B29).
+      const snapshots = await snapshotFiles(deps, ctx.root, items.flatMap((item) => [...item.allow.files, ...item.allow.create]))
       const fix = await runFixRound(ctx, deps, { step: "review", worker, items, scanner: prepared.scanner })
       if (fix.run.outcome === "out_of_usage") {
         // Nothing half-done stays in the tree; the resume runs the round again.
-        await restoreFiles(deps, ctx.root, snapshots)
+        await restoreFiles(deps, ctx.root, snapshots, fix.run.edits)
         await saveLedger(session)
         await ctx.state.save()
         return {
@@ -706,7 +707,7 @@ async function reviewRun(ctx: WizardContext, deps: WizardDeps): Promise<StepOutc
       let finalItems = verified.items
       if (!verified.buildOk) {
         // Put the files back: nothing uncommitted stays on the PR branch, and nothing reaches the receipt.
-        const leftOver = await restoreFiles(deps, ctx.root, snapshots)
+        const leftOver = await restoreFiles(deps, ctx.root, snapshots, fix.run.edits)
         session.notes.push(
           `Round ${round}: the agent's fixes broke the build, so the wizard put the files back and did not commit them.${leftOver.length > 0 ? ` Remove ${leftOver.join(", ")} (the agent created it).` : ""}`
         )
