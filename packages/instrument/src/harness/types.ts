@@ -2,7 +2,7 @@
 // (`adopted`, `UnmanagedProvider`, hosting targets): those are adapted at the boundary in
 // inspect.ts so this module compiles against main today and against those branches tomorrow.
 import type { SetupChecksReport } from "../setup-checks/index.js"
-import type { ProviderId, WorkspaceInstallArtifacts } from "../types.js"
+import type { ImproveLine, ProviderId, WorkspaceInstallArtifacts } from "../types.js"
 
 /** The seven rows every run prints, in this order. `gtm` is a container, not an install target. */
 export const HARNESS_PROVIDER_ORDER = [
@@ -180,17 +180,24 @@ export interface ServerLaneEnvReport {
   firstEvent: { state: "not_checked" } | { state: "received"; at: string } | { state: "waiting" }
 }
 
-/** How the harness classified one provider before planning. */
-export type ProviderAction = "install" | "adopt" | "upgrade" | "manual" | "report" | "skip"
+/**
+ * How the harness classified one provider before planning. `improve` (decision 4) is an ADOPTED
+ * provider that also carries improve lines: it is still the customer's, never reinstalled, and every
+ * change to it waits on a plan line the user approves. Only the wizard produces it (the harness passes
+ * no improve lines, so its classifications are unchanged).
+ */
+export type ProviderAction = "install" | "adopt" | "improve" | "upgrade" | "manual" | "report" | "skip"
 
 export interface ProviderClassification {
   provider: HarnessProviderId
   action: ProviderAction
   reason: string
-  /** App-root-relative file the existing install was found in (adopt/manual/report). */
+  /** App-root-relative file the existing install was found in (adopt/improve/manual/report). */
   file?: string
   /** Public id read from flags/artifacts/.env or from the existing snippet. */
   key?: string
+  /** `improve` only: the proposed in-place improvements, each its own plan line. */
+  improve?: ImproveLine[]
 }
 
 /**
@@ -211,4 +218,5 @@ export interface ResolvedKeys {
   sources: Partial<Record<Exclude<HarnessProviderId, "gtm" | "server_lane">, KeySource>>
 }
 
-export type KeySource = "flag" | "artifact-file" | "discovered-artifacts" | "env" | "existing-snippet"
+/** `infinite-connection`: the wizard's keys verb (the user's Infinite connections; public ids only). */
+export type KeySource = "flag" | "artifact-file" | "discovered-artifacts" | "env" | "existing-snippet" | "infinite-connection"

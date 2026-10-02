@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto"
-import { existsSync, readFileSync } from "node:fs"
+import { existsSync, readdirSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 
 import {
@@ -7,7 +7,9 @@ import {
   resolveConfinedAppRoot,
   writeFileAtomic
 } from "./frameworks/shared.js"
-import type { InstallManifest } from "./types.js"
+import { isEditRecordShape } from "./install/edits.js"
+import { providerInstallEvidence } from "./provider-evidence.js"
+import type { InstallManifest, ProviderId, SupportedFramework } from "./types.js"
 
 export const installManifestRelativePath = ".infinite/install.json"
 
@@ -69,6 +71,10 @@ function assertManifestConfined(root: string, manifest: InstallManifest): void {
   for (const requirement of manifest.requiresManual ?? []) {
     assertConfinedManifestFileEntry(root, requirement.path)
   }
+  // uninstall rewrites (or removes) every recorded edit's file: confined like every other path.
+  for (const edit of manifest.edits ?? []) {
+    assertConfinedManifestFileEntry(root, edit.file)
+  }
 }
 
 function isInstallManifestShape(value: unknown): value is InstallManifest {
@@ -87,7 +93,31 @@ function isInstallManifestShape(value: unknown): value is InstallManifest {
     typeof candidate.contentHashes === "object" &&
     candidate.contentHashes !== null &&
     (candidate.configOwnership === undefined || isConfigOwnershipShape(candidate.configOwnership)) &&
-    (candidate.serverLane === undefined || isServerLaneManifestShape(candidate.serverLane))
+    (candidate.serverLane === undefined || isServerLaneManifestShape(candidate.serverLane)) &&
+    (candidate.edits === undefined || (Array.isArray(candidate.edits) && candidate.edits.every(isEditRecordShape))) &&
+    (candidate.ids === undefined || isManifestIdsShape(candidate.ids))
+  )
+}
+
+const stringArray = (value: unknown): boolean => Array.isArray(value) && value.every((entry) => typeof entry === "string")
+
+/** §3e.6 `ids`: `{ga4: string[], posthog: {projectKey, apiHost} | null, meta: string[], infinite: {siteSourceKey} | null}`. */
+function isManifestIdsShape(value: unknown): boolean {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false
+  const ids = value as Record<string, unknown>
+  // The four §3e.6 tools must be there; a newer tag's extra fields are tolerated (never "corrupt").
+  if (!["ga4", "infinite", "meta", "posthog"].every((key) => key in ids)) return false
+  const posthog = ids.posthog as Record<string, unknown> | null
+  const infinite = ids.infinite as Record<string, unknown> | null
+  return (
+    stringArray(ids.ga4) &&
+    stringArray(ids.meta) &&
+    (posthog === null ||
+      (typeof posthog === "object" &&
+        typeof posthog.projectKey === "string" &&
+        typeof posthog.apiHost === "string")) &&
+    (infinite === null ||
+      (typeof infinite === "object" && typeof infinite.siteSourceKey === "string"))
   )
 }
 
@@ -199,4 +229,126 @@ export function computeContentHashes(root: string, files: string[]): Record<stri
 
 export function computeContentHash(contents: string | Buffer): string {
   return createHash("sha256").update(contents).digest("hex")
+}
+
+// ---------------------------------------------------------------------------------------------
+// Rebuild from markers (a corrupt receipt, or one written by an incompatible version)
+// ---------------------------------------------------------------------------------------------
+
+/** The two markers every managed write carries: a whole managed file, and an injected HTML block. */
+const MANAGED_FILE_MARKER = "Managed by Infinite"
+const MANAGED_BLOCK_START = "<!-- infinite:start -->"
+const MANAGED_BLOCK_END = "<!-- infinite:end -->"
+const REBUILD_SKIPPED_DIRECTORIES = new Set(["node_modules", ".git", ".next", "dist", "build", "out", ".vercel", ".infinite", "coverage"])
+const REBUILD_MAX_FILES = 5_000
+const REBUILD_EXTENSIONS = /\.(html|htm|tsx|jsx|ts|js|mjs|cjs|json|astro|vue|svelte)$/
+
+export interface RebuildManifestInput {
+  root: string
+  /** The app root `inspect` resolved (repo-root-relative). */
+  appRoot: string
+  /** The framework `inspect` detected; a rebuild never guesses one. */
+  framework: SupportedFramework
+  workspaceId: string
+}
+
+export interface RebuildManifestResult {
+  manifest: InstallManifest
+  /** Repo-root-relative files that carried a managed marker. */
+  managedFiles: string[]
+  /**
+   * What a marker scan cannot recover, said plainly: the recorded edits (their exact reversal data
+   * lived only in the receipt), config ownership, the server-lane record, the manual requirements.
+   */
+  lost: string[]
+}
+
+function walkForMarkers(root: string): string[] {
+  const files: string[] = []
+  const visit = (directory: string): void => {
+    if (files.length >= REBUILD_MAX_FILES) return
+    let entries
+    try {
+      entries = readdirSync(join(root, directory), { withFileTypes: true })
+    } catch {
+      return
+    }
+    entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+    for (const entry of entries) {
+      if (files.length >= REBUILD_MAX_FILES) return
+      const relativePath = directory === "" ? entry.name : `${directory}/${entry.name}`
+      if (entry.isSymbolicLink()) continue
+      if (entry.isDirectory()) {
+        if (!REBUILD_SKIPPED_DIRECTORIES.has(entry.name)) visit(relativePath)
+        continue
+      }
+      if (entry.isFile() && REBUILD_EXTENSIONS.test(entry.name)) files.push(relativePath)
+    }
+  }
+  visit("")
+  return files
+}
+
+/**
+ * A minimal manifest rebuilt from the managed markers on disk: which files infinite-tag manages
+ * (by marker, never by guess), their current hashes, and the providers the managed bytes install.
+ * It never invents what it cannot read back: `lost` lists it, and the caller says so.
+ */
+export function rebuildInstallManifestFromMarkers(input: RebuildManifestInput): RebuildManifestResult {
+  const managedFiles: string[] = []
+  const providers = new Set<ProviderId>()
+  for (const file of walkForMarkers(input.root)) {
+    let contents: string
+    try {
+      contents = readFileSync(join(input.root, file), "utf8")
+    } catch {
+      continue
+    }
+    const wholeFile = contents.includes(MANAGED_FILE_MARKER)
+    const block = contents.indexOf(MANAGED_BLOCK_START)
+    if (!wholeFile && block < 0) continue
+    managedFiles.push(file)
+    const blockEnd = block < 0 ? -1 : contents.indexOf(MANAGED_BLOCK_END, block)
+    const managedBytes = wholeFile ? contents : contents.slice(block, blockEnd < 0 ? undefined : blockEnd + MANAGED_BLOCK_END.length)
+    for (const evidence of providerInstallEvidence(managedBytes)) providers.add(evidence.provider)
+    if (/__infinite|infiniteAnalytics|\/infinite\/ledger/.test(managedBytes)) providers.add("infinite")
+  }
+  const order: ProviderId[] = ["infinite", "ga4", "posthog", "x", "meta"]
+  return {
+    manifest: {
+      workspaceId: input.workspaceId,
+      appRoot: input.appRoot,
+      framework: input.framework,
+      providers: order.filter((provider) => providers.has(provider)),
+      files: managedFiles,
+      envKeys: [],
+      contentHashes: computeContentHashes(input.root, managedFiles),
+      wiringVersion: 1,
+      verifiedAt: null
+    },
+    managedFiles,
+    lost: ["edits", "configOwnership", "serverLane", "requiresManual"]
+  }
+}
+
+export type ReadOrRebuildResult =
+  | { manifest: InstallManifest | null; rebuilt: false }
+  | { manifest: InstallManifest; rebuilt: true; lost: string[] }
+
+/**
+ * Read the receipt; when it is corrupt and the caller allows it, rebuild it from the markers and
+ * write the rebuilt one. Without `rebuild` a corrupt receipt still throws (never a silent reset).
+ */
+export function readInstallManifestOrRebuild(
+  root: string,
+  options: { rebuild: Omit<RebuildManifestInput, "root"> | null }
+): ReadOrRebuildResult {
+  try {
+    return { manifest: readInstallManifest(root), rebuilt: false }
+  } catch (error) {
+    if (!options.rebuild || !(error instanceof Error) || !error.message.startsWith("Corrupt .infinite/install.json")) throw error
+    const result = rebuildInstallManifestFromMarkers({ root, ...options.rebuild })
+    writeInstallManifest(root, result.manifest)
+    return { manifest: result.manifest, rebuilt: true, lost: result.lost }
+  }
 }
