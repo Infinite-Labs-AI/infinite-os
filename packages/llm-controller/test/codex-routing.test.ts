@@ -202,6 +202,31 @@ describe("engine prompt: Meta", () => {
   });
 });
 
+describe("engine prompt: X", () => {
+  const X_LINE = "- X (Twitter): the user's own posts ('my best tweet', 'my latest post', their engagement) -> list_my_x_posts; tracked creators and their posts -> search_x_corpus. The engine has no X metrics; never answer an X question from run_metric_query or run_breakdown_query, and never call X disconnected or not syncing because of that.";
+  const GAP_LINE = "- When the honest answer is that you can't do what was asked (no tool, metric or data for it), call report_capability_gap with what was asked before you reply, then say so plainly.";
+
+  it("advertises no X metric, view or alias on any turn", () => {
+    for (const text of [prompt(native()), prompt([...native(), twin("list_my_x_posts"), twin("search_x_corpus")])]) {
+      expect(text).not.toMatch(/x_public_engagement|x_post_count|x_comment_count|x_follower_count|vw_x_/);
+      expect(Object.values(injectedAliases(text)).flat().join("|")).not.toMatch(/tweet|best post|follower/);
+    }
+  });
+
+  it("sends the user's own posts and tracked creators to the app's X tools when the host has them", () => {
+    expect(prompt([...native(), twin("list_my_x_posts"), twin("search_x_corpus")])).toContain(X_LINE);
+    const ownOnly = prompt([...native(), twin("list_my_x_posts")]);
+    expect(ownOnly).toContain("-> list_my_x_posts. The engine has no X metrics");
+    expect(ownOnly).not.toContain("search_x_corpus");
+  });
+
+  it("names report_capability_gap only where the host has it", () => {
+    expect(prompt([...native(), twin("report_capability_gap")])).toContain(GAP_LINE);
+    expect(prompt(native())).not.toContain("report_capability_gap");
+    expect(prompt(native())).not.toContain("list_my_x_posts");
+  });
+});
+
 describe("engine prompt: leads", () => {
   const AUDIT_LEADS_LINE = "- 'Leads', 'new leads' or 'audit leads' -> list_audit_leads: an audit lead is its own step, never a signup or registration.";
   const CONTACTS_LINE = "- People who filled in a form, 'leads', 'new leads' or contacts from a campaign -> list_contacts: this workspace's Contacts and their form submissions, never a signup or registration.";

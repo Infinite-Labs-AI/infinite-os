@@ -29,17 +29,12 @@ import {
 // ---------------------------------------------------------------------------
 
 const LOCAL_STORE_CHOKE_POINTS: Record<string, readonly string[]> = {
-  // resolve_entity candidate lookups (Meta campaign/adset/ad + X content).
+  // resolve_entity candidate lookups (Meta campaign/adset/ad).
   resolveCampaignEntities: ["resolve_entity"],
   resolveAdsetEntities: ["resolve_entity"],
   resolveAdEntities: ["resolve_entity"],
-  resolveXContentEntities: ["resolve_entity"],
   // Journey row producers behind rowsForCompiledJourney.
   metaCampaignJourneyRows: ["run_journey_query", "fetch_evidence", "verify_claims"],
-  xContentJourneyRows: ["run_journey_query", "fetch_evidence", "verify_claims"],
-  channelComparisonRows: ["run_journey_query", "fetch_evidence", "verify_claims"],
-  // x_follower_count freshness backfill inside run_metric_query.
-  backfillXFollowerSnapshotIfNeeded: ["run_metric_query"],
   // The shared aggregate executor (`from ${view}` over queryable.*).
   runAggregate: ["run_metric_query", "run_breakdown_query", "run_funnel_query"],
   // The unmeasured-reach probe (same view + filters as the reach/frequency aggregate).

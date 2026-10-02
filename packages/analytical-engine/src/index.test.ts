@@ -1194,46 +1194,6 @@ describe("analytical engine smoke", () => {
     });
   });
 
-  it("runs an end-to-end X content journey query with bounded post evidence", async () => {
-    const registry = createInfiniteOsRegistry(createActionHandlers(journeyTestDb()));
-    const context = {
-      workspaceId: "workspace",
-      authority: "tool_agent",
-      surface: "mcp",
-      actorId: "founder",
-      sessionId: "session"
-    } as const;
-    const plan = {
-      intent: "rank_entities_by_outcome",
-      actor: { grain: "person" },
-      journeyTemplateId: "entity_to_downstream_outcome",
-      entity: { type: "content_item" },
-      outcome: { id: "x_public_engagement", window: "30d" },
-      timeRange: { start: "2026-05-01", end: "2026-06-07" },
-      ranking: { metric: "x_public_engagement", direction: "desc" },
-      limit: 2
-    };
-
-    const result = await registry.execute(
-      "run_journey_query",
-      { plan, validationId: "validation_x", limit: 2 },
-      context
-    );
-
-    expect(result.status).toBe("resolved");
-    expect(result.data).toMatchObject({
-      answer: expect.stringContaining("X"),
-      rows: expect.arrayContaining([
-        expect.objectContaining({
-          x_post_id: "x_1",
-          body_text: "Demo request launch thread",
-          x_public_engagement: "80"
-        })
-      ])
-    });
-    expect(JSON.stringify(result.data)).not.toContain("secret");
-  });
-
   it("fetches evidence and verifies claims from journey evidence handles", async () => {
     const registry = createInfiniteOsRegistry(createActionHandlers(journeyTestDb()));
     const context = {
@@ -2529,69 +2489,6 @@ describe("analytical engine smoke", () => {
     expect(aggregateQuery?.params).toEqual(["workspace", "2026-06-01", "2026-06-04", 500]);
   });
 
-  it("supports ordered X post breakdowns by published_at for recency questions", async () => {
-    const queries: Array<{ sql: string; params?: unknown[] }> = [];
-    const db: InfiniteOsDb = {
-      async query<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T[]> {
-        queries.push({ sql, params });
-        if (sql.includes("from queryable.vw_x_post_public_metrics")) {
-          return [{ x_post_id: "1", body_text: "latest", published_at: "2026-06-04T10:00:00.000Z", x_public_engagement: "4" }] as T[];
-        }
-        return [] as T[];
-      },
-      async one() {
-        return null;
-      },
-      async close() {},
-      async ensureWorkspace() {},
-      async ensureFirstPhaseDatasets() {},
-      async connectSource() {
-        return null as never;
-      },
-      async updateSourceStatus() {},
-      async createJob() {
-        return {};
-      },
-      async claimNextJob() {
-        return null;
-      },
-      async completeJob() {},
-      async withTransaction(fn) {
-        return fn(this);
-      }
-    };
-
-    const handlers = createActionHandlers(db);
-    const result = await handlers.run_breakdown_query?.(
-      {
-        metric: "x_public_engagement",
-        view: "queryable.vw_x_post_public_metrics",
-        groupBy: ["x_post_id", "post_url", "body_text", "published_at"],
-        orderBy: { field: "published_at", direction: "desc" },
-        filters: [{ field: "source_id", operator: "equals", value: "src_x_1" }],
-        limit: 1
-      },
-      {
-        workspaceId: "workspace",
-        authority: "tool_agent",
-        surface: "api",
-        actorId: "operator",
-        sessionId: "session"
-      }
-    );
-
-    expect(result?.data).toMatchObject({
-      metric: "x_public_engagement",
-      view: "queryable.vw_x_post_public_metrics",
-      groupBy: ["x_post_id", "post_url", "body_text", "published_at"],
-      orderBy: { field: "published_at", direction: "desc" }
-    });
-    const aggregateQuery = queries.find((entry) => entry.sql.includes("from queryable.vw_x_post_public_metrics"));
-    expect(aggregateQuery?.sql).toContain("group by x_post_id, post_url, body_text, published_at");
-    expect(aggregateQuery?.sql).toContain("order by published_at desc");
-    expect(aggregateQuery?.sql).toContain("source_id = $2");
-  });
-
   it("breaks down posthog_page_views by operating_system + country over the PostHog audience view (0043)", async () => {
     const queries: Array<{ sql: string; params?: unknown[] }> = [];
     const db: InfiniteOsDb = {
@@ -2885,79 +2782,6 @@ describe("analytical engine smoke", () => {
     expect(result?.caveats).toEqual(expect.arrayContaining(["key_events_may_be_unconfigured"]));
   });
 
-  it("drills down x_post_count to authored x_post rows so the latest tweet content is retrievable", async () => {
-    const queries: Array<{ sql: string; params?: unknown[] }> = [];
-    const db: InfiniteOsDb = {
-      async query<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T[]> {
-        queries.push({ sql, params });
-        if (sql.includes("from x_post")) {
-          return [
-            {
-              post_row_id: "xp_1",
-              source_id: "src_x_1",
-              x_post_id: "2063231313730306485",
-              author_id: "founder",
-              conversation_id: "2063231313730306485",
-              post_url: "https://x.com/YourHandle/status/2063231313730306485",
-              body_text: "latest authored tweet",
-              published_at: "2026-06-06T12:07:32.000Z",
-              x_post_count: 1,
-              x_comment_count: 0
-            }
-          ] as T[];
-        }
-        return [] as T[];
-      },
-      async one() {
-        return null;
-      },
-      async close() {},
-      async ensureWorkspace() {},
-      async ensureFirstPhaseDatasets() {},
-      async connectSource() {
-        return null as never;
-      },
-      async updateSourceStatus() {},
-      async createJob() {
-        return {};
-      },
-      async claimNextJob() {
-        return null;
-      },
-      async completeJob() {},
-      async withTransaction(fn) {
-        return fn(this);
-      }
-    };
-
-    const handlers = createActionHandlers(db);
-    const result = await handlers.drilldown_result?.(
-      {
-        metric: "x_post_count",
-        limit: 1
-      },
-      {
-        workspaceId: "workspace",
-        authority: "tool_agent",
-        surface: "api",
-        actorId: "operator",
-        sessionId: "session"
-      }
-    );
-
-    const drilldownQuery = queries.find((entry) => entry.sql.includes("from x_post"));
-    expect(drilldownQuery?.sql).toBeDefined();
-    expect(drilldownQuery?.sql).toContain("order by published_at desc");
-    expect(queries.some((entry) => entry.sql.includes("from posthog_event_truth"))).toBe(false);
-    const data = result?.data as { rows?: Array<Record<string, unknown>> } | undefined;
-    expect(data?.rows?.[0]).toMatchObject({
-      x_post_id: "2063231313730306485",
-      body_text: "latest authored tweet",
-      post_url: "https://x.com/YourHandle/status/2063231313730306485"
-    });
-    expect(result?.provenance).toContain("drilldown.x_authored_post_rows");
-  });
-
   // §9 regression (findings #1/#5) — drilldown for the Phase-1 conversion/value metrics MUST
   // hit the Meta tables, never the posthog_event_truth default fallthrough. Before this guard,
   // providerTruthRows had no branch for results/cost_per_result/conversion_value/roas/
@@ -3236,8 +3060,8 @@ describe("analytical engine smoke", () => {
     await expect(
       handlers.run_metric_query?.(
         {
-          metric: "x_post_count",
-          view: "queryable.vw_x_post_public_metrics"
+          metric: "recognized_revenue",
+          view: "queryable.vw_site_traffic"
         },
         {
           workspaceId: "workspace",
@@ -3247,290 +3071,48 @@ describe("analytical engine smoke", () => {
           sessionId: "session"
         }
       )
-    ).rejects.toThrow("unsupported_view_for_metric:x_post_count:queryable.vw_x_post_public_metrics");
+    ).rejects.toThrow("unsupported_view_for_metric:recognized_revenue:queryable.vw_site_traffic");
     expect(queries).toHaveLength(0);
   });
 
-  it("maps X recency aliases like post_created_at to published_at", async () => {
-    const queries: Array<{ sql: string; params?: unknown[] }> = [];
-    const db: InfiniteOsDb = {
-      async query<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T[]> {
-        queries.push({ sql, params });
-        if (sql.includes("from queryable.vw_x_authored_activity")) {
-          return [{ x_post_id: "1", body_text: "latest", published_at: "2026-06-04T10:00:00.000Z", x_post_count: "1" }] as T[];
-        }
+  it("refuses the removed X metrics and views on every read, before any SQL", async () => {
+    const queries: string[] = [];
+    const db = {
+      async query<T = Record<string, unknown>>(sql: string): Promise<T[]> {
+        queries.push(sql);
         return [] as T[];
       },
       async one() {
         return null;
-      },
-      async close() {},
-      async ensureWorkspace() {},
-      async ensureFirstPhaseDatasets() {},
-      async connectSource() {
-        return null as never;
-      },
-      async updateSourceStatus() {},
-      async createJob() {
-        return {};
-      },
-      async claimNextJob() {
-        return null;
-      },
-      async completeJob() {},
-      async withTransaction(fn) {
-        return fn(this);
       }
-    };
-
-    const handlers = createActionHandlers(db);
-    await handlers.run_breakdown_query?.(
-      {
-        metric: "x_post_count",
-        view: "queryable.vw_x_authored_activity",
-        groupBy: ["x_post_id", "body_text", "published_at"],
-        orderBy: { field: "post_created_at", direction: "desc" },
-        filters: [{ field: "source_id", operator: "equals", value: "src_x_1" }],
-        limit: 1
-      },
-      {
-        workspaceId: "workspace",
-        authority: "tool_agent",
-        surface: "api",
-        actorId: "operator",
-        sessionId: "session"
-      }
-    );
-
-    const aggregateQuery = queries.find((entry) => entry.sql.includes("from queryable.vw_x_authored_activity"));
-    expect(aggregateQuery?.sql).toContain("order by published_at desc");
-  });
-
-  it("supports X hour-of-day breakdowns via derived published_at buckets", async () => {
-    const queries: Array<{ sql: string; params?: unknown[] }> = [];
-    const db: InfiniteOsDb = {
-      async query<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T[]> {
-        queries.push({ sql, params });
-        if (sql.includes("from queryable.vw_x_post_public_metrics")) {
-          return [{ published_hour_utc: 9, x_public_engagement: "42" }] as T[];
-        }
-        return [] as T[];
-      },
-      async one() {
-        return null;
-      },
-      async close() {},
-      async ensureWorkspace() {},
-      async ensureFirstPhaseDatasets() {},
-      async connectSource() {
-        return null as never;
-      },
-      async updateSourceStatus() {},
-      async createJob() {
-        return {};
-      },
-      async claimNextJob() {
-        return null;
-      },
-      async completeJob() {},
-      async withTransaction(fn) {
-        return fn(this);
-      }
-    };
-
-    const handlers = createActionHandlers(db);
-    const result = await handlers.run_breakdown_query?.(
-      {
-        metric: "x_public_engagement",
-        view: "queryable.vw_x_post_public_metrics",
-        groupBy: ["published_hour_utc"],
-        orderBy: { field: "x_public_engagement", direction: "desc" },
-        filters: [{ field: "source_id", operator: "equals", value: "src_x_1" }],
-        limit: 24
-      },
-      {
-        workspaceId: "workspace",
-        authority: "tool_agent",
-        surface: "api",
-        actorId: "operator",
-        sessionId: "session"
-      }
-    );
-
-    expect(result?.data).toMatchObject({
-      groupBy: ["published_hour_utc"],
-      orderBy: { field: "x_public_engagement", direction: "desc" }
-    });
-    const aggregateQuery = queries.find((entry) => entry.sql.includes("from queryable.vw_x_post_public_metrics"));
-    expect(aggregateQuery?.sql).toContain("extract(hour from published_at at time zone 'utc')::int as published_hour_utc");
-    expect(aggregateQuery?.sql).toContain("group by extract(hour from published_at at time zone 'utc')::int");
-  });
-
-  it("supports natural X aliases for text, content type, and engaged-with handle breakdowns", async () => {
-    const queries: Array<{ sql: string; params?: unknown[] }> = [];
-    const db: InfiniteOsDb = {
-      async query<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T[]> {
-        queries.push({ sql, params });
-        return [] as T[];
-      },
-      async one() {
-        return null;
-      },
-      async close() {},
-      async ensureWorkspace() {},
-      async ensureFirstPhaseDatasets() {},
-      async connectSource() {
-        return null as never;
-      },
-      async updateSourceStatus() {},
-      async createJob() {
-        return {};
-      },
-      async claimNextJob() {
-        return null;
-      },
-      async completeJob() {},
-      async withTransaction(fn) {
-        return fn(this);
-      }
-    };
-
+    } as unknown as InfiniteOsDb;
     const handlers = createActionHandlers(db);
     const context = {
       workspaceId: "workspace",
-      authority: "tool_agent" as const,
-      surface: "api" as const,
-      actorId: "operator",
-      sessionId: "session"
-    };
-
-    await handlers.run_breakdown_query?.(
-      {
-        metric: "x_public_engagement",
-        view: "queryable.vw_x_post_public_metrics",
-        groupBy: ["post_text", "published_at"],
-        orderBy: { field: "published_at", direction: "desc" },
-        filters: [{ field: "source_id", operator: "equals", value: "src_x_1" }],
-        limit: 1
-      },
-      context
-    );
-    await handlers.run_breakdown_query?.(
-      {
-        metric: "x_public_engagement",
-        view: "queryable.vw_x_post_public_metrics",
-        groupBy: ["post_type"],
-        orderBy: { field: "x_public_engagement", direction: "desc" },
-        filters: [{ field: "source_id", operator: "equals", value: "src_x_1" }],
-        limit: 5
-      },
-      context
-    );
-    await handlers.run_breakdown_query?.(
-      {
-        metric: "x_comment_count",
-        view: "queryable.vw_x_authored_activity",
-        groupBy: ["engaged_with"],
-        orderBy: { field: "x_comment_count", direction: "desc" },
-        filters: [{ field: "source_id", operator: "equals", value: "src_x_1" }],
-        limit: 3
-      },
-      context
-    );
-
-    const aggregateQueries = queries.filter((entry) => entry.sql.includes("from queryable.vw_x_"));
-    expect(aggregateQueries[0]?.sql).toContain("body_text as body_text");
-    expect(aggregateQueries[0]?.sql).toContain("order by published_at desc");
-    expect(aggregateQueries[1]?.sql).toContain("as content_type");
-    expect(aggregateQueries[1]?.sql).toContain("conversation_id is not null and conversation_id <> x_post_id");
-    expect(aggregateQueries[1]?.sql).toContain("coalesce(body_text, '') ~* '(https?://|t\\.co/)'");
-    expect(aggregateQueries[2]?.sql).toContain("as mentioned_handle");
-    expect(aggregateQueries[2]?.sql).toContain("regexp_match(coalesce(body_text, ''), '@([A-Za-z0-9_]{1,15})')");
-  });
-
-  it("hydrates published_at into X view and metric metadata", async () => {
-    const db: InfiniteOsDb = {
-      async query<T = Record<string, unknown>>(sql: string): Promise<T[]> {
-        if (sql.includes("from queryable_views")) {
-          return [{
-            id: "queryable.vw_x_post_public_metrics",
-            view_name: "vw_x_post_public_metrics",
-            allowed_dimensions: ["x_post_id", "author_id", "post_url", "body_text"],
-            default_time_column: "published_at"
-          }] as T[];
-        }
-        if (sql.includes("from metric_definitions")) {
-          return [{
-            id: "x_public_engagement",
-            source_view: "queryable.vw_x_post_public_metrics",
-            allowed_dimensions: ["x_post_id", "author_id", "post_url", "body_text"],
-            default_time_column: "published_at"
-          }] as T[];
-        }
-        return [] as T[];
-      },
-      async one<T = Record<string, unknown>>(sql: string): Promise<T | null> {
-        if (sql.includes("from queryable_views")) {
-          return {
-            id: "queryable.vw_x_post_public_metrics",
-            view_name: "vw_x_post_public_metrics",
-            allowed_dimensions: ["x_post_id", "author_id", "post_url", "body_text"],
-            default_time_column: "published_at"
-          } as T;
-        }
-        if (sql.includes("from metric_definitions")) {
-          return {
-            id: "x_public_engagement",
-            source_view: "queryable.vw_x_post_public_metrics",
-            allowed_dimensions: ["x_post_id", "author_id", "post_url", "body_text"],
-            default_time_column: "published_at"
-          } as T;
-        }
-        return null;
-      },
-      async close() {},
-      async ensureWorkspace() {},
-      async ensureFirstPhaseDatasets() {},
-      async connectSource() {
-        return null as never;
-      },
-      async updateSourceStatus() {},
-      async createJob() {
-        return {};
-      },
-      async claimNextJob() {
-        return null;
-      },
-      async completeJob() {},
-      async withTransaction(fn) {
-        return fn(this);
-      }
-    };
-
-    const handlers = createActionHandlers(db);
-    const viewsResult = await handlers.list_queryable_views?.({}, {
-      workspaceId: "workspace",
       authority: "tool_agent",
       surface: "api",
       actorId: "operator",
       sessionId: "session"
-    });
-    const metricResult = await handlers.describe_metric?.({ metricId: "x_public_engagement" }, {
-      workspaceId: "workspace",
-      authority: "tool_agent",
-      surface: "api",
-      actorId: "operator",
-      sessionId: "session"
-    });
+    } as const;
 
-    expect((viewsResult?.data as { views: Array<{ allowed_dimensions: string[] }> }).views[0]?.allowed_dimensions).toContain("published_at");
-    expect((viewsResult?.data as { views: Array<{ allowed_dimensions: string[] }> }).views[0]?.allowed_dimensions).toContain("published_hour_utc");
-    expect((viewsResult?.data as { views: Array<{ allowed_dimensions: string[] }> }).views[0]?.allowed_dimensions).toContain("content_type");
-    expect((viewsResult?.data as { views: Array<{ allowed_dimensions: string[] }> }).views[0]?.allowed_dimensions).toContain("mentioned_handle");
-    expect((metricResult?.data as { metric: { allowed_dimensions: string[] } }).metric.allowed_dimensions).toContain("published_at");
-    expect((metricResult?.data as { metric: { allowed_dimensions: string[] } }).metric.allowed_dimensions).toContain("published_hour_utc");
-    expect((metricResult?.data as { metric: { allowed_dimensions: string[] } }).metric.allowed_dimensions).toContain("content_type");
-    expect((metricResult?.data as { metric: { allowed_dimensions: string[] } }).metric.allowed_dimensions).toContain("mentioned_handle");
+    for (const metric of ["x_public_engagement", "x_post_count", "x_comment_count", "x_follower_count"]) {
+      await expect(handlers.run_metric_query?.({ metric }, context)).rejects.toThrow(`unsupported_metric:${metric}`);
+      await expect(
+        handlers.run_breakdown_query?.({ metric, groupBy: ["occurred_on"] }, context)
+      ).rejects.toThrow(`unsupported_metric:${metric}`);
+      const described = await handlers.describe_metric?.({ metricId: metric }, context);
+      expect(described?.error?.code).toBe("unsupported_metric");
+    }
+    for (const view of [
+      "queryable.vw_x_post_public_metrics",
+      "queryable.vw_x_authored_activity",
+      "queryable.vw_x_profile_public_metrics"
+    ]) {
+      await expect(
+        handlers.run_metric_query?.({ metric: "recognized_revenue", view }, context)
+      ).rejects.toThrow(`unsupported_view:${view}`);
+    }
+    expect(queries).toHaveLength(0);
   });
 
   it("uses Shopify and Meta Ads authority and drilldown metadata for new metrics", async () => {
@@ -4017,67 +3599,9 @@ describe("analytical engine smoke", () => {
       expect(result?.caveats).not.toContain("unbounded_date_range");
     });
 
-    it("uses published_at as the date dimension for X metrics", async () => {
-      // Unbounded X query -> caveat present.
-      const unboundedQueries: Array<{ sql: string; params?: unknown[] }> = [];
-      const handlers = createActionHandlers(
-        caveatFakeDb("queryable.vw_x_post_public_metrics", "x_public_engagement", unboundedQueries)
-      );
-      const unbounded = await handlers.run_metric_query?.({ metric: "x_public_engagement" }, ctx);
-      expect(unbounded?.caveats).toContain("unbounded_date_range");
-
-      // The same metric with a published_at bound (via the `date` alias) -> caveat absent.
-      const boundedQueries: Array<{ sql: string; params?: unknown[] }> = [];
-      const boundedHandlers = createActionHandlers(
-        caveatFakeDb("queryable.vw_x_post_public_metrics", "x_public_engagement", boundedQueries)
-      );
-      const bounded = await boundedHandlers.run_metric_query?.(
-        {
-          metric: "x_public_engagement",
-          filters: [{ field: "date", operator: "gte", value: "2026-08-17" }]
-        },
-        ctx
-      );
-      expect(bounded?.caveats).not.toContain("unbounded_date_range");
-    });
-
-    it("treats an occurred_on bound on an X view as a date bound (no false unbounded stamp)", async () => {
-      // All three X views expose occurred_on (published_at::date, migrations 0011/0014) and
-      // runAggregate's filter gate always admits occurred_on on every view — so a genuinely
-      // 7-day-bounded X query using occurred_on must NOT be stamped unbounded_date_range,
-      // even though normalizeDimensionAlias(view, "date") resolves to published_at for X.
-      const queries: Array<{ sql: string; params?: unknown[] }> = [];
-      const handlers = createActionHandlers(
-        caveatFakeDb("queryable.vw_x_authored_activity", "x_post_count", queries)
-      );
-      const result = await handlers.run_metric_query?.(
-        {
-          metric: "x_post_count",
-          filters: [
-            { field: "occurred_on", operator: "gte", value: "2026-08-17" },
-            { field: "occurred_on", operator: "lte", value: "2026-08-23" }
-          ]
-        },
-        ctx
-      );
-      expect(result?.caveats).not.toContain("unbounded_date_range");
-      // Purely additive guard: the rows themselves are untouched.
-      expect((result?.data as { rows: unknown }).rows).toEqual([{ x_post_count: "100" }]);
-    });
-
     it("exempts snapshot-grain metrics — a point-in-time count is not an all-time sum", async () => {
-      // x_follower_count is a current-profile snapshot: an unbounded read is the current
-      // value, not an all-time sum. (The exemption rests on grain, not on a missing date
-      // dimension — the view does carry occurred_on/captured_at; only the X published_at
-      // alias is rejected there.)
-      const followerQueries: Array<{ sql: string; params?: unknown[] }> = [];
-      const followerHandlers = createActionHandlers(
-        caveatFakeDb("queryable.vw_x_profile_public_metrics", "x_follower_count", followerQueries)
-      );
-      const follower = await followerHandlers.run_metric_query?.({ metric: "x_follower_count" }, ctx);
-      expect(follower?.caveats).not.toContain("unbounded_date_range");
-
-      // stripe_current_paid_subscribers already declares `current_snapshot` — same exemption.
+      // stripe_current_paid_subscribers is a current snapshot: an unbounded read is the current
+      // value, not an all-time sum, and it already declares `current_snapshot`.
       const subsQueries: Array<{ sql: string; params?: unknown[] }> = [];
       const subsHandlers = createActionHandlers(
         caveatFakeDb("queryable.vw_stripe_subscription_lifecycle", "stripe_current_paid_subscribers", subsQueries)
@@ -5406,10 +4930,6 @@ describe("Phase-2 §5 grain-aware view resolver (Stage-1 keystone)", () => {
     "shopify_gross_sales",
     "shopify_order_count",
     "roas_from_stripe",
-    "x_public_engagement",
-    "x_post_count",
-    "x_comment_count",
-    "x_follower_count",
     ...META_DELIVERY_METRICS,
     ...META_CONVERSION_METRICS
   ] as const;
@@ -6457,44 +5977,6 @@ describe("run_metric_query comparison (compareTo)", () => {
       direction: "new"
     });
     expect(result?.caveats).toContain("no_prior_baseline");
-  });
-
-  it("reads X date bounds from published_at (not occurred_on) for the prior re-run", async () => {
-    const queries: Array<{ sql: string; params?: unknown[] }> = [];
-    const db = comparisonFakeDb(
-      "queryable.vw_x_authored_activity",
-      "x_post_count",
-      {
-        "2026-06-01..2026-06-07": { x_post_count: "14" },
-        "2026-05-25..2026-05-31": { x_post_count: "10" }
-      },
-      queries
-    );
-    const handlers = createActionHandlers(db);
-    const result = await handlers.run_metric_query?.(
-      {
-        metric: "x_post_count",
-        view: "queryable.vw_x_authored_activity",
-        compareTo: "prior_period",
-        // The model expresses the range with the generic `date` alias; the engine
-        // normalizes it to published_at for X views — comparison must follow that.
-        filters: [
-          { field: "date", operator: "gte", value: "2026-06-01" },
-          { field: "date", operator: "lte", value: "2026-06-07" }
-        ]
-      },
-      COMPARISON_CONTEXT
-    );
-    expect((result?.data as { comparison?: Record<string, unknown> }).comparison).toMatchObject({
-      current: 14,
-      previous: 10,
-      absoluteDelta: 4,
-      direction: "up"
-    });
-    const aggregateRuns = queries.filter((entry) => entry.sql.includes("from queryable.vw_x_authored_activity"));
-    expect(aggregateRuns).toHaveLength(2);
-    expect(aggregateRuns[0]?.sql).toContain("published_at >=");
-    expect(aggregateRuns[1]?.params).toEqual(["workspace", "2026-05-25", "2026-05-31", 500]);
   });
 
   it("omits the comparison block and adds comparison_requires_date_range when date bounds are missing", async () => {

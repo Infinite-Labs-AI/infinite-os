@@ -685,12 +685,7 @@ function summarizeActionData(name: string, data: Record<string, unknown> | undef
     const metric = stringValue(data.metric);
     const topRows = rows.slice(0, 3).map((row, index) => describeBreakdownRow(row, index, metric));
     const pattern = breakdownPatternHint(rows, metric);
-    const lead =
-      metric === "x_public_engagement" && rows.some((row) => stringValue(row.body_text) || stringValue(row.post_url) || stringValue(row.x_post_id))
-        ? "top X posts by engagement"
-        : metric
-          ? `${metric} ranked rows`
-          : "top breakdown rows";
+    const lead = metric ? `${metric} ranked rows` : "top breakdown rows";
     return `${lead}: ${topRows.join(" | ")}.${pattern ? ` Pattern: ${pattern}.` : ""}`;
   }
   if (name === "explain_answer") {

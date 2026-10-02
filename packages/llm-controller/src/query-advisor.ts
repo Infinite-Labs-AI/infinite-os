@@ -32,10 +32,6 @@ export interface QueryRefinementToolResult {
 }
 
 export type QueryFamily =
-  | "best_post"
-  | "comment_count"
-  | "follower_count"
-  | "post_count"
   | "revenue_source"
   | "recognized_revenue"
   | "source_status"
@@ -159,26 +155,6 @@ function isXFirstPostQuestion(message: string): boolean {
   return FIRST_PERSON_RE.test(message)
     && /\b(first|earliest|oldest)\b/i.test(message)
     && /\b(post|posts|tweet|tweets)\b/i.test(message);
-}
-
-function isXTimingQuestion(message: string): boolean {
-  return /\b(best|worst)\s+times?\b/i.test(message) && /\b(tweet|tweets|post|posts)\b/i.test(message);
-}
-
-function isXPatternQuestion(message: string): boolean {
-  return /\b(had in common|have in common|what do .* have in common|analyse|analyze)\b/i.test(message)
-    && /\b(tweet|tweets|post|posts)\b/i.test(message)
-    && /\b(best|top|performing|performance)\b/i.test(message);
-}
-
-function isXStrategyQuestion(message: string): boolean {
-  return /\bwhat should i (post|tweet|write) more of\b/i.test(message)
-    || (/\b(post|tweet|write)\b/i.test(message) && /\bmore of\b/i.test(message) && /\b(x|twitter|tweet|tweets|post|posts)\b/i.test(message));
-}
-
-function isXNegativeStrategyQuestion(message: string): boolean {
-  return /\bwhat should i stop (posting|tweeting|writing)\b/i.test(message)
-    || (/\bstop posting\b/i.test(message) && /\b(x|twitter)\b/i.test(message));
 }
 
 function stringValue(value: unknown): string | undefined {
@@ -344,9 +320,6 @@ function broadWorkspaceSnapshotPromptSections(message: string): string[] {
     "For broad workspace snapshot prompts, try to gather at least one business signal (traffic, signups, conversion, or revenue) before answering strongly.",
     "If both funnel-style signals (traffic/signups/conversion) and revenue are available, try to gather at least one of each before summarizing.",
     "If you rely on `site_conversion_rate` in the answer, also try to gather the underlying `key_events` or visitor volume so the ratio has concrete magnitude context (the rate is GA4 key events / GA4 visitors — same-lane).",
-    "If X data is available, include one relevant social or operational signal only if it adds context rather than overwhelming the answer.",
-    "Use compatible metric/view pairs: `x_public_engagement` belongs on `queryable.vw_x_post_public_metrics`; `x_post_count` and `x_comment_count` belong on `queryable.vw_x_authored_activity`; `x_follower_count` belongs on `queryable.vw_x_profile_public_metrics`.",
-    "Do not request an X metric from a view that does not support it when building a broad workspace summary.",
     "If one or more business signals are available, lead the answer with the strongest business signal before discussing fixture/test caveats or source-quality warnings.",
     "Do not let one noisy metric dominate the entire answer when the user asked for a broad workspace read."
   ];
@@ -679,157 +652,10 @@ function refinementSections(
   availableActionIds: readonly string[]
 ): string[] {
   const syncFreshnessFailure = xSyncFreshnessFailureSections(message, toolResults);
-  const metricViewRecovery = xMetricViewRecoverySections(toolResults);
-  if (metricViewRecovery.length > 0 && syncFreshnessFailure.length > 0) {
-    return [...metricViewRecovery, ...syncFreshnessFailure];
-  }
-  if (metricViewRecovery.length > 0) {
-    return metricViewRecovery;
-  }
   if (syncFreshnessFailure.length > 0) {
     return syncFreshnessFailure;
   }
-  if (isXTimingQuestion(message)) {
-    const breakdowns = toolResults
-      .filter((result) => result.name === "run_breakdown_query" && isRecord(result.result))
-      .map((result) => objectRecord(result.result as Record<string, unknown>, "data"))
-      .filter((payload): payload is Record<string, unknown> => Boolean(payload));
-    const hasEngagementTiming = breakdowns.some((payload) =>
-      stringValue(payload.metric) === "x_public_engagement" &&
-      Array.isArray(payload.rows) &&
-      payload.rows.some((row) => isRecord(row) && (row.published_hour_utc !== undefined || row.published_weekday_utc !== undefined))
-    );
-    const hasPostCountTiming = breakdowns.some((payload) =>
-      stringValue(payload.metric) === "x_post_count" &&
-      Array.isArray(payload.rows) &&
-      payload.rows.some((row) => isRecord(row) && (row.published_hour_utc !== undefined || row.published_weekday_utc !== undefined))
-    );
-    if (hasEngagementTiming && !hasPostCountTiming) {
-      return [
-        "Timing-analysis refinement guidance:",
-        "- You have engagement buckets, but not matching posting-volume buckets yet.",
-        "- Before answering strongly, fetch `x_post_count` over the same time buckets so you can compare performance against posting frequency.",
-        "- If you cannot get posting-volume buckets, answer conservatively and call the result directional."
-      ];
-    }
-  }
-  if (
-    hasBreakdownResult(toolResults, "x_public_engagement") &&
-    (isXPatternQuestion(message) || isXStrategyQuestion(message) || isXNegativeStrategyQuestion(message))
-  ) {
-    const { rows } = latestBreakdownRows(toolResults, "x_public_engagement");
-    const strongRows = rows.filter((row) => hasReadablePostBody(row));
-    if (rows.length < 3 || strongRows.length < 2) {
-      return [
-        isXStrategyQuestion(message)
-          ? "X strategy refinement guidance:"
-          : isXNegativeStrategyQuestion(message)
-            ? "X negative-strategy refinement guidance:"
-            : "X pattern-analysis refinement guidance:",
-        isXStrategyQuestion(message)
-          ? "- The current top-post set is too thin for a strong content recommendation."
-          : isXNegativeStrategyQuestion(message)
-            ? "- The current post sample is too thin for a strong stop-posting recommendation."
-            : "- The current top-post set is too thin for a strong comparison answer.",
-        isXNegativeStrategyQuestion(message)
-          ? "- Before generalizing, fetch a richer post-level breakdown with multiple readable posts so you can distinguish grounded caution from one-sided winner data."
-          : "- Before generalizing, fetch a richer top-post breakdown with multiple readable posts so you can compare recurring themes and contrasts."
-      ];
-    }
-  }
-  if (classifyQueryFamily(message) !== "best_post") {
-    const genericRefinement = genericOpenEndedRefinementSections(message, toolResults, availableActionIds);
-    if (genericRefinement.length > 0) {
-      return genericRefinement;
-    }
-    return [];
-  }
-  const latestBreakdown = [...toolResults]
-    .reverse()
-    .find((result) => result.name === "run_breakdown_query" && isRecord(result.result));
-  if (!latestBreakdown || !isRecord(latestBreakdown.result)) {
-    return [];
-  }
-  const payload = objectRecord(latestBreakdown.result, "data");
-  const rows = Array.isArray(payload?.rows) ? payload.rows.filter(isRecord) : [];
-  if (rows.length === 0) {
-    return [
-      "Best-post refinement guidance:",
-      "- The current breakdown returned no ranked posts.",
-      "- Before answering, try a richer post-level engagement breakdown again."
-    ];
-  }
-  const strongRows = rows.filter((row) => hasReadablePostBody(row));
-  if (rows.length < 3 || strongRows.length < 2) {
-    return [
-      "Best-post refinement guidance:",
-      "- The current post ranking is too thin for a strong final answer.",
-      "- If possible, continue refining before answering: request a richer breakdown with multiple ranked posts and readable body_text so you can mention runner-ups and interpretation."
-    ];
-  }
-  return [];
-}
-
-const X_METRIC_VIEW_GUIDANCE: Record<string, { view: string; description: string }> = {
-  x_public_engagement: {
-    view: "queryable.vw_x_post_public_metrics",
-    description: "public post engagement totals"
-  },
-  x_post_count: {
-    view: "queryable.vw_x_authored_activity",
-    description: "authored post volume"
-  },
-  x_comment_count: {
-    view: "queryable.vw_x_authored_activity",
-    description: "authored replies/comments"
-  },
-  x_follower_count: {
-    view: "queryable.vw_x_profile_public_metrics",
-    description: "profile follower snapshots"
-  }
-};
-
-function xMetricViewRecoverySections(toolResults: QueryRefinementToolResult[]): string[] {
-  const mismatch = latestUnsupportedMetricViewError(toolResults);
-  if (!mismatch || !mismatch.metric.startsWith("x_")) {
-    return [];
-  }
-  const guidance = X_METRIC_VIEW_GUIDANCE[mismatch.metric];
-  if (!guidance) {
-    return [
-      "X metric/view recovery guidance:",
-      `- The previous query used unsupported X metric/view pair \`${mismatch.metric}\` on \`${mismatch.view}\`.`,
-      "- Call `describe_metric` for that metric before retrying so you use its declared source view and allowed dimensions.",
-      `- Do not retry \`${mismatch.metric}\` on \`${mismatch.view}\`.`
-    ];
-  }
-  return [
-    "X metric/view recovery guidance:",
-    `- The previous query used unsupported X metric/view pair \`${mismatch.metric}\` on \`${mismatch.view}\`.`,
-    `- \`${mismatch.metric}\` belongs on \`${guidance.view}\` for ${guidance.description}.`,
-    "- Call `describe_metric` if you need dimensions or time columns before retrying.",
-    `- Do not retry \`${mismatch.metric}\` on \`${mismatch.view}\`; switch to \`${guidance.view}\` or choose a metric that belongs on the requested view.`
-  ];
-}
-
-function latestUnsupportedMetricViewError(
-  toolResults: QueryRefinementToolResult[]
-): { metric: string; view: string } | undefined {
-  for (const result of [...toolResults].reverse()) {
-    if (!isRecord(result.result)) {
-      continue;
-    }
-    const error = objectRecord(result.result, "error");
-    const message = stringValue(error?.message) ?? stringValue(error?.code);
-    if (!message) {
-      continue;
-    }
-    const match = message.match(/unsupported_view_for_metric:([^:\s]+):([^,\s]+)/);
-    if (match?.[1] && match[2]) {
-      return { metric: match[1], view: match[2] };
-    }
-  }
-  return undefined;
+  return genericOpenEndedRefinementSections(message, toolResults, availableActionIds);
 }
 
 function xSyncFreshnessFailureSections(message: string, toolResults: QueryRefinementToolResult[]): string[] {
@@ -1185,69 +1011,7 @@ export function buildQuerySynthesisSections(
 }
 
 function synthesisSections(message: string, toolResults: QueryRefinementToolResult[]): string[] {
-  const hasXPostEvidence = hasBreakdownResult(toolResults, "x_public_engagement");
-  if (hasXPostEvidence && isXNegativeStrategyQuestion(message)) {
-    const latestBreakdown = latestBreakdownRows(toolResults, "x_public_engagement");
-    const negativeStrategySections = genericXNegativeStrategySections("x_public_engagement", latestBreakdown.rows);
-    if (negativeStrategySections.length > 0) {
-      return negativeStrategySections;
-    }
-  }
-  if (hasXPostEvidence && isXStrategyQuestion(message)) {
-    const latestBreakdown = latestBreakdownRows(toolResults, "x_public_engagement");
-    const strategySections = genericXStrategySections("x_public_engagement", latestBreakdown.rows);
-    if (strategySections.length > 0) {
-      return strategySections;
-    }
-  }
-  if (hasXPostEvidence && isXPatternQuestion(message)) {
-    const latestBreakdown = latestBreakdownRows(toolResults, "x_public_engagement");
-    const patternSections = genericXPatternSections("x_public_engagement", latestBreakdown.rows);
-    if (patternSections.length > 0) {
-      return patternSections;
-    }
-  }
   const kind = classifyQueryFamily(message);
-  if (kind === "best_post") {
-    const latestBreakdown = latestBreakdownRows(toolResults);
-    if (latestBreakdown.rows.length >= 3) {
-      return [
-        "Best-post final synthesis guidance:",
-        "- Lead with the winning post text and its public engagement total.",
-        "- Mention at least two runner-ups by rank when available.",
-        "- Add one short interpretation about what likely worked across the top posts.",
-        "- Prefer a conversational ranked list or bullets over a markdown table unless the user explicitly asked for tabular output.",
-        "- Keep the details section concise and grounded in the returned rows."
-      ];
-    }
-  }
-  if (kind === "comment_count" && hasMetricResult(toolResults, "x_comment_count")) {
-    return [
-      "Comment-count final synthesis guidance:",
-      "- Lead with the total comment/reply count in one sentence.",
-      "- Briefly explain that this reflects authored replies/comments present in the synced X timeline.",
-      "- Keep the answer conversational and avoid table-heavy formatting unless the user explicitly asked for it.",
-      "- Keep caveats concise."
-    ];
-  }
-  if (kind === "follower_count" && hasMetricResult(toolResults, "x_follower_count")) {
-    return [
-      "Follower-count final synthesis guidance:",
-      "- Lead with the follower total in one sentence.",
-      "- State that it comes from the latest public X profile metrics snapshot for the connected account.",
-      "- Keep the answer conversational and avoid table-heavy formatting unless the user explicitly asked for it.",
-      "- Keep the details section concise."
-    ];
-  }
-  if (kind === "post_count" && hasMetricResult(toolResults, "x_post_count")) {
-    return [
-      "Post-count final synthesis guidance:",
-      "- Lead with the authored post total in one sentence.",
-      "- State that it reflects authored posts present in the synced X timeline.",
-      "- Keep the answer conversational and avoid table-heavy formatting unless the user explicitly asked for it.",
-      "- Keep caveats concise."
-    ];
-  }
   if (kind === "revenue_source" && hasBreakdownResult(toolResults, "recognized_revenue")) {
     return [
       "Revenue-source final synthesis guidance:",
@@ -1349,9 +1113,6 @@ export function classifyQueryFamily(message: string): QueryFamily {
   ) {
     return "other";
   }
-  if (/\b(best|top|most popular)\b.*\b(tweet|tweets|post|posts)\b/i.test(message) || /\b(tweet|tweets|post|posts)\b.*\b(best|top|most popular)\b/i.test(message)) {
-    return "best_post";
-  }
   if (/\bconnected sources?\b/i.test(message) || /\bwhat sources\b.*\bconnected\b/i.test(message) || /\b(last sync|sync status|connected)\b/i.test(message)) {
     return "source_status";
   }
@@ -1390,27 +1151,10 @@ export function classifyQueryFamily(message: string): QueryFamily {
   if (/\bconversion\b/i.test(message)) {
     return "site_conversion_rate";
   }
-  if (/\bhow many\b.*\b(tweet|tweets|post|posts)\b/i.test(message) || /\b(tweet|tweets|post|posts)\b.*\b(count|made|have i made)\b/i.test(message)) {
-    return "post_count";
-  }
-  if (/\bcomments?\b/i.test(message) || /\brepl(?:y|ies)\b/i.test(message)) {
-    return "comment_count";
-  }
-  if (/\bfollowers?\b/i.test(message)) {
-    return "follower_count";
-  }
   return "other";
 }
 
 const FIRST_PERSON_RE = /\b(my|i|i['’]?m|i['’]?ve|ive|i have|me|our)\b/i;
-
-function hasReadablePostBody(row: Record<string, unknown>): boolean {
-  const text = stringValue(row.body_text);
-  if (!text) {
-    return false;
-  }
-  return !/^https?:\/\/\S+$/i.test(text.trim());
-}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -1484,10 +1228,6 @@ function hasSourceStatusResults(toolResults: QueryRefinementToolResult[]): boole
 }
 
 function genericSynthesisSections(toolResults: QueryRefinementToolResult[]): string[] {
-  const combinedTimingGuidance = genericCombinedTimingSections(toolResults);
-  if (combinedTimingGuidance.length > 0) {
-    return combinedTimingGuidance;
-  }
   const multiSignalGuidance = genericMultiSignalSections(toolResults);
   if (multiSignalGuidance.length > 0) {
     return multiSignalGuidance;
@@ -1500,14 +1240,6 @@ function genericSynthesisSections(toolResults: QueryRefinementToolResult[]): str
     const metric = stringValue(payload?.metric);
     const rows = Array.isArray(payload?.rows) ? payload.rows.filter(isRecord) : [];
     if (metric && rows.length > 0) {
-      const timingGuidance = genericTimingBreakdownSections(metric, rows);
-      if (timingGuidance.length > 0) {
-        return timingGuidance;
-      }
-      const xPatternGuidance = genericXPatternSections(metric, rows);
-      if (xPatternGuidance.length > 0) {
-        return xPatternGuidance;
-      }
       const top = genericBreakdownRowSummary(rows[0], metric);
       const runnerUp = rows[1] ? genericBreakdownRowSummary(rows[1], metric) : undefined;
       const pattern = genericBreakdownPattern(rows, metric);
@@ -1639,116 +1371,6 @@ function summarizeRecoverableToolErrors(toolResults: QueryRefinementToolResult[]
     return undefined;
   }
   return [...new Set(errors)].slice(0, 2).join(", ");
-}
-
-function genericCombinedTimingSections(toolResults: QueryRefinementToolResult[]): string[] {
-  const breakdowns = [...toolResults]
-    .filter((result) => result.name === "run_breakdown_query" && isRecord(result.result))
-    .map((result) => objectRecord(result.result as Record<string, unknown>, "data"))
-    .filter((payload): payload is Record<string, unknown> => Boolean(payload));
-  const engagement = breakdowns.find((payload) => stringValue(payload.metric) === "x_public_engagement");
-  const postCount = breakdowns.find((payload) => stringValue(payload.metric) === "x_post_count");
-  if (!engagement || !postCount) {
-    return [];
-  }
-  const engagementRows = Array.isArray(engagement.rows) ? engagement.rows.filter(isRecord) : [];
-  const postRows = Array.isArray(postCount.rows) ? postCount.rows.filter(isRecord) : [];
-  const hasTimingBuckets =
-    engagementRows.some((row) => row.published_hour_utc !== undefined || row.published_weekday_utc !== undefined) &&
-    postRows.some((row) => row.published_hour_utc !== undefined || row.published_weekday_utc !== undefined);
-  if (!hasTimingBuckets) {
-    return [];
-  }
-  const topEngagementHour = engagementRows.find((row) => row.published_hour_utc !== undefined);
-  const topVolumeHour = postRows.find((row) => row.published_hour_utc !== undefined);
-  const topEngagementDay = engagementRows.find((row) => row.published_weekday_utc !== undefined);
-  const topVolumeDay = postRows.find((row) => row.published_weekday_utc !== undefined);
-  return [
-    "Timing-analysis synthesis guidance:",
-    topEngagementHour ? `- Highest engagement hour bucket: hour ${stringValue(topEngagementHour.published_hour_utc) ?? String(topEngagementHour.published_hour_utc)} (${genericMetricValue(topEngagementHour, "x_public_engagement") ?? "?"}).` : undefined,
-    topVolumeHour ? `- Highest posting-volume hour bucket: hour ${stringValue(topVolumeHour.published_hour_utc) ?? String(topVolumeHour.published_hour_utc)} (${genericMetricValue(topVolumeHour, "x_post_count") ?? "?"} posts).` : undefined,
-    topEngagementDay ? `- Highest engagement weekday bucket: day ${stringValue(topEngagementDay.published_weekday_utc) ?? String(topEngagementDay.published_weekday_utc)} (${genericMetricValue(topEngagementDay, "x_public_engagement") ?? "?"}).` : undefined,
-    topVolumeDay ? `- Highest posting-volume weekday bucket: day ${stringValue(topVolumeDay.published_weekday_utc) ?? String(topVolumeDay.published_weekday_utc)} (${genericMetricValue(topVolumeDay, "x_post_count") ?? "?"} posts).` : undefined,
-    "- Compare engagement buckets against posting-volume buckets before claiming a slot is truly the best time to post.",
-    "- If the same bucket leads both engagement and posting volume, say that the signal may partly reflect frequency rather than per-post quality.",
-    "- Keep the answer directional unless the evidence clearly supports a stronger claim."
-  ].filter((value): value is string => Boolean(value));
-}
-
-function genericTimingBreakdownSections(metric: string, rows: Record<string, unknown>[]): string[] {
-  if (!["x_public_engagement", "x_post_count"].includes(metric)) {
-    return [];
-  }
-  const hasHour = rows.some((row) => row.published_hour_utc !== undefined);
-  const hasWeekday = rows.some((row) => row.published_weekday_utc !== undefined);
-  if (!hasHour && !hasWeekday) {
-    return [];
-  }
-  const hourRows = rows.filter((row) => row.published_hour_utc !== undefined).slice(0, 3);
-  const weekdayRows = rows.filter((row) => row.published_weekday_utc !== undefined).slice(0, 3);
-  return [
-    "Timing-analysis synthesis guidance:",
-    hasHour ? `- Top hour buckets: ${hourRows.map((row) => `hour ${stringValue(row.published_hour_utc) ?? String(row.published_hour_utc)} (${genericMetricValue(row, metric) ?? "?"})`).join("; ")}.` : undefined,
-    hasWeekday ? `- Top weekday buckets: ${weekdayRows.map((row) => `day ${stringValue(row.published_weekday_utc) ?? String(row.published_weekday_utc)} (${genericMetricValue(row, metric) ?? "?"})`).join("; ")}.` : undefined,
-    "- If you have only engagement totals, say the pattern is directional and may reflect posting frequency rather than per-post quality.",
-    "- If you also have posting-volume buckets, compare them before making a strong claim about the best time.",
-    "- Keep the answer grounded and avoid overstating statistical confidence."
-  ].filter((value): value is string => Boolean(value));
-}
-
-function genericXPatternSections(metric: string, rows: Record<string, unknown>[]): string[] {
-  if (metric !== "x_public_engagement") {
-    return [];
-  }
-  const postRows = rows.filter((row) => stringValue(row.body_text) || stringValue(row.post_url) || stringValue(row.x_post_id));
-  if (postRows.length < 2) {
-    return [];
-  }
-  const topRows = postRows.slice(0, 5).map((row) => genericBreakdownRowSummary(row, metric)).filter((value): value is string => Boolean(value));
-  return [
-    "X pattern-analysis synthesis guidance:",
-    topRows.length ? `- Top posts include: ${topRows.join("; ")}.` : undefined,
-    "- Compare the top posts for recurring themes, tone, format, or reply-versus-original-post patterns.",
-    "- Mention one or two concrete shared traits and one contrast if a standout post succeeded for a different reason.",
-    "- Keep the answer conversational and grounded in the returned posts rather than turning it into generic social advice."
-  ].filter((value): value is string => Boolean(value));
-}
-
-function genericXStrategySections(metric: string, rows: Record<string, unknown>[]): string[] {
-  if (metric !== "x_public_engagement") {
-    return [];
-  }
-  const postRows = rows.filter((row) => stringValue(row.body_text) || stringValue(row.post_url) || stringValue(row.x_post_id));
-  if (postRows.length < 2) {
-    return [];
-  }
-  const topRows = postRows.slice(0, 5).map((row) => genericBreakdownRowSummary(row, metric)).filter((value): value is string => Boolean(value));
-  return [
-    "X strategy synthesis guidance:",
-    topRows.length ? `- Top posts include: ${topRows.join("; ")}.` : undefined,
-    "- Use the strongest recurring traits across the top posts to recommend what the user should post more of.",
-    "- Give 2-3 concrete content recommendations, not just a theme summary.",
-    "- Keep the recommendations grounded in the returned top posts and explicitly mention uncertainty when the sample is small."
-  ].filter((value): value is string => Boolean(value));
-}
-
-function genericXNegativeStrategySections(metric: string, rows: Record<string, unknown>[]): string[] {
-  if (metric !== "x_public_engagement") {
-    return [];
-  }
-  const postRows = rows.filter((row) => stringValue(row.body_text) || stringValue(row.post_url) || stringValue(row.x_post_id));
-  if (postRows.length < 2) {
-    return [];
-  }
-  const topRows = postRows.slice(0, 5).map((row) => genericBreakdownRowSummary(row, metric)).filter((value): value is string => Boolean(value));
-  return [
-    "X negative-strategy synthesis guidance:",
-    topRows.length ? `- Strong posts in the current sample include: ${topRows.join("; ")}.` : undefined,
-    "- If the available evidence is mostly top-performing posts, do not claim that the data directly proves what to stop posting.",
-    "- Separate grounded observations about what performs well from more general cautionary advice about what may be lower-signal or worth reducing.",
-    "- Give 2-3 concrete 'stop or do less of' recommendations only when they clearly follow from the returned posts; otherwise frame them as cautious hypotheses.",
-    "- Keep the answer conversational and explicit about uncertainty when the evidence is one-sided."
-  ].filter((value): value is string => Boolean(value));
 }
 
 function genericMetricValue(row: Record<string, unknown>, metric: string): string | undefined {

@@ -6,6 +6,7 @@ import { JOURNEY_ENTITY_TYPES, RESOLVABLE_ENTITY_TYPES } from "@infinite-os/core
 
 import {
   FIRST_PHASE_ACTIONS,
+  FIRST_PHASE_METRIC_ALIASES,
   FIRST_PHASE_METRICS,
   FIRST_PHASE_PROVIDERS,
   FIRST_PHASE_QUERYABLE_VIEWS,
@@ -108,6 +109,15 @@ describe("Infinite OS runtime action registry", () => {
     // `sessions` — the GA4 traffic count that lived in vw_site_traffic but had no registered
     // metric id until the sessions-metric PR; pin its membership in the METRIC_SET gate.
     expect(FIRST_PHASE_METRICS).toContain("sessions");
+  });
+
+  it("advertises no X read metric, view or alias (the dead X lane is removed; X posting is not a metric)", () => {
+    expect(FIRST_PHASE_METRICS.filter((id) => id.startsWith("x_"))).toEqual([]);
+    expect(FIRST_PHASE_QUERYABLE_VIEWS.filter((view) => view.startsWith("queryable.vw_x_"))).toEqual([]);
+    expect(Object.keys(FIRST_PHASE_METRIC_ALIASES).filter((id) => id.startsWith("x_"))).toEqual([]);
+    expect(Object.values(FIRST_PHASE_METRIC_ALIASES).flat().join("|")).not.toMatch(/tweet|best post|follower/);
+    const manifest = JSON.stringify(createInfiniteOsRegistry({}).list());
+    expect(manifest).not.toMatch(/x_public_engagement|x_post_count|x_comment_count|x_follower_count|vw_x_/);
   });
 
   // Phase-2 slice-1a §3/§5/§9 — the TWO-PLACE allowlist contract. A grain-aware view is invisible

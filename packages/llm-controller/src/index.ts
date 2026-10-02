@@ -417,10 +417,6 @@ export interface ChatActionCall {
 
 const RECENT_SYNC_LOOKUP_LIMIT = 20;
 const FAMILY_PROVIDERS: Partial<Record<QueryFamily, string[]>> = {
-  best_post: ["x"],
-  follower_count: ["x"],
-  comment_count: ["x"],
-  post_count: ["x"],
   recognized_revenue: ["stripe"],
   revenue_source: ["stripe"],
   site_visitors: ["google_analytics_4"],
@@ -433,10 +429,6 @@ const FAMILY_PROVIDERS: Partial<Record<QueryFamily, string[]>> = {
   conversion_channel_breakdown: ["google_analytics_4"]
 };
 const PLANNED_PROGRESS_LABELS: Partial<Record<QueryFamily, string>> = {
-  best_post: "Running engagement breakdown.",
-  follower_count: "Running follower lookup.",
-  comment_count: "Running authored comment count.",
-  post_count: "Running authored post count.",
   revenue_source: "Running revenue-by-source breakdown.",
   recognized_revenue: "Running revenue total lookup.",
   source_status: "Running source status check.",
@@ -1820,10 +1812,6 @@ function toolCallProgressMessage(
   if (actionId === "list_sources" || actionId === "get_recent_sync_runs") {
     return autoDiagnoseProgressMessage(message, actionId);
   }
-  const xBreakdownProgress = xBreakdownProgressMessage(message, actionId, call);
-  if (xBreakdownProgress) {
-    return xBreakdownProgress;
-  }
   const metricFamily = metricFamilyFromToolCall(call);
   if (metricFamily) {
     return PLANNED_PROGRESS_LABELS[metricFamily] ?? `Running ${actionId}.`;
@@ -1928,83 +1916,13 @@ function refinementProgressMessage(refinementSections: string[]): string {
   if (joined.includes("Open-ended analysis refinement guidance:")) {
     return "Refining open-ended analysis with more comparison context.";
   }
-  if (joined.includes("Timing-analysis refinement guidance:")) {
-    return "Refining timing analysis with posting-volume context.";
-  }
-  if (joined.includes("X negative-strategy refinement guidance:")) {
-    return "Refining X strategy answer with a richer cautionary post sample.";
-  }
-  if (joined.includes("X strategy refinement guidance:")) {
-    return "Refining X strategy answer with a richer post sample.";
-  }
-  if (joined.includes("X pattern-analysis refinement guidance:")) {
-    return "Refining X pattern analysis with a richer post sample.";
-  }
-  if (joined.includes("Best-post refinement guidance:")) {
-    return "Refining best-post answer with a richer breakdown.";
-  }
   return "Refining answer with a better-targeted follow-up query.";
-}
-
-function xBreakdownProgressMessage(message: string, actionId: string, call: ModelToolCall): string | undefined {
-  if (actionId !== "run_breakdown_query") {
-    return undefined;
-  }
-  const metricFamily = metricFamilyFromToolCall(call);
-  if (metricFamily !== "best_post" && metricFamily !== "post_count") {
-    return undefined;
-  }
-  if (isXTimingProgressQuestion(message)) {
-    return "Running X timing breakdown.";
-  }
-  if (isXNegativeStrategyProgressQuestion(message)) {
-    return "Running X strategy post-sample breakdown.";
-  }
-  if (isXStrategyProgressQuestion(message)) {
-    return "Running top-post strategy breakdown.";
-  }
-  if (isXPatternProgressQuestion(message)) {
-    return "Running top-post pattern breakdown.";
-  }
-  return undefined;
-}
-
-function isXTimingProgressQuestion(message: string): boolean {
-  return /\b(best|worst)\s+times?\b/i.test(message) && /\b(tweet|tweets|post|posts)\b/i.test(message);
-}
-
-function isXPatternProgressQuestion(message: string): boolean {
-  return /\b(had in common|have in common|what do .* have in common|analyse|analyze)\b/i.test(message)
-    && /\b(tweet|tweets|post|posts)\b/i.test(message)
-    && /\b(best|top|performing|performance)\b/i.test(message);
-}
-
-function isXStrategyProgressQuestion(message: string): boolean {
-  return /\bwhat should i (post|tweet|write) more of\b/i.test(message)
-    || (/\b(post|tweet|write)\b/i.test(message) && /\bmore of\b/i.test(message) && /\b(x|twitter|tweet|tweets|post|posts)\b/i.test(message));
-}
-
-function isXNegativeStrategyProgressQuestion(message: string): boolean {
-  return /\bwhat should i stop (posting|tweeting|writing)\b/i.test(message)
-    || (/\bstop posting\b/i.test(message) && /\b(x|twitter)\b/i.test(message));
 }
 
 function metricFamilyFromToolCall(call: ModelToolCall): QueryFamily | undefined {
   const metric = metricIdFromToolCall(call);
   if (!metric) {
     return undefined;
-  }
-  if (metric === "x_public_engagement") {
-    return "best_post";
-  }
-  if (metric === "x_follower_count") {
-    return "follower_count";
-  }
-  if (metric === "x_comment_count") {
-    return "comment_count";
-  }
-  if (metric === "x_post_count") {
-    return "post_count";
   }
   if (metric === "recognized_revenue") {
     return call.name === "run_breakdown_query" ? "revenue_source" : "recognized_revenue";
