@@ -109,6 +109,18 @@ describe("resolveTheme picks the tier", () => {
     expect(resolveTheme(truecolor, { isTTY: true }).tier).toBe("truecolor");
   });
 
+  it("brackets chips when colour is off at the plain tier (dumb, pipe, INFINITE_PLAIN_OUTPUT)", () => {
+    for (const theme of [
+      resolveTheme({ TERM: "dumb" }),
+      resolveTheme({}, { isTTY: false }),
+      resolveTheme({ INFINITE_PLAIN_OUTPUT: "1" })
+    ]) {
+      expect(ansi(theme, "pk", " p ", false)).toBe("[p]");
+      expect(ansi(theme, "tag", " Title ", colorEnabled(theme))).toBe("[Title]");
+      expect(ansi(theme, "muted", "x", false)).toBe("x");
+    }
+  });
+
   it("resolves Ink props for a role or token at the theme's tier", () => {
     expect(themeInkStyle(DEFAULT_THEME, "link")).toEqual({ color: "#56c8e8", underline: true });
     expect(themeInkStyle(resolveTheme({ TERM: "xterm-256color" }), ["cb", "sel"])).toEqual({

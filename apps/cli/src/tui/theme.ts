@@ -296,9 +296,12 @@ export function colorEnabled(theme: Theme): boolean {
   return tierPaints(theme.tier);
 }
 
-/** Paint `value` in a role (or r4 tokens) at the theme's tier; plain when `enabled` is false. */
+/**
+ * Paint `value` in a role (or r4 tokens) at the theme's tier; plain when
+ * `enabled` is false, where a chip still prints as same-width brackets.
+ */
 export function ansi(theme: Theme, role: ThemeStyle, value: string, enabled = true): string {
-  return enabled ? style(value, themeTokens(role), theme.tier, skinOverrides(theme)) : value;
+  return enabled ? style(value, themeTokens(role), theme.tier, skinOverrides(theme)) : style(value, themeTokens(role), "plain");
 }
 
 /** The SGR that switches only the foreground to a role ("" when the tier paints no colour). */

@@ -14,9 +14,9 @@ import wrapAnsi from "wrap-ansi";
 
 import { terminalText } from "../../desktop/terminal-text.js";
 import { displayWidth, truncateCells } from "../lib/display-width.js";
-import { sgrAttributes } from "../style/sgr.js";
+import { sgrAttributes, style } from "../style/sgr.js";
 import type { Tone } from "../style/tokens.js";
-import { ansi, ansiSpan, colorEnabled, type AnsiRole, type Theme, type ThemeStyle } from "../theme.js";
+import { ansi, ansiSpan, colorEnabled, themeTokens, type AnsiRole, type Theme, type ThemeStyle } from "../theme.js";
 import { stateHeadFor, type StateTone } from "./states.js";
 import type { ViewRenderCtx } from "./types.js";
 
@@ -244,7 +244,8 @@ export function toneRole(tone: StateTone | StatusWordV1["tone"] | Tone): AnsiRol
 /**
  * Paint a span in a role or r4 tokens (and optionally bold or invert it) at
  * the theme's tier, ending it with specific resets (never `0m`), so a span
- * inside a chip leaves the chip's background on. Plain when colour is off.
+ * inside a chip leaves the chip's background on. Plain when colour is off,
+ * where a chip (` p `) prints as same-width brackets (`[p]`).
  */
 export function paint(
   text: string,
@@ -252,8 +253,12 @@ export function paint(
   ctx: { color: boolean; theme: Theme },
   options: { bold?: boolean; inverse?: boolean } = {}
 ): string {
-  if (!ctx.color || !text) {
+  if (!text) {
     return text;
+  }
+  if (!ctx.color) {
+    // Plain: no escapes, but a chip keeps its look as same-width brackets.
+    return style(text, themeTokens(role), "plain");
   }
   if ((!options.bold && !options.inverse) || !colorEnabled(ctx.theme)) {
     return ansi(ctx.theme, role, text);

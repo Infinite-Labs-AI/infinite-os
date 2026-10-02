@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { style } from "../style/sgr.js";
-import { DEFAULT_THEME, resolveTheme, type Theme } from "../theme.js";
+import { DEFAULT_THEME, colorEnabled, resolveTheme, type Theme } from "../theme.js";
 import { paint, toneRole } from "./primitives.js";
 
 const ESC = "\u001b";
@@ -29,6 +29,23 @@ describe("paint", () => {
     const dumb = resolveTheme({ TERM: "dumb" });
     expect(paint("x", "muted", on(dumb), { bold: true })).toBe("x");
     expect(paint(" p ", "pk", on(dumb))).toBe("[p]");
+  });
+
+  it("brackets chips at the plain tier through the real wiring (color = colorEnabled(theme))", () => {
+    const plainThemes = [
+      resolveTheme({ TERM: "dumb" }),
+      resolveTheme({}, { isTTY: false }),
+      resolveTheme({ INFINITE_PLAIN_OUTPUT: "1" })
+    ];
+    for (const theme of plainThemes) {
+      const ctx = { color: colorEnabled(theme), theme };
+      expect(ctx.color).toBe(false);
+      expect(paint(" p ", "pk", ctx)).toBe("[p]");
+      expect(paint(" Pause Hook B ", "tag", ctx)).toBe("[Pause Hook B]");
+      expect(paint("x", "muted", ctx)).toBe("x");
+    }
+    expect(paint("x", "muted", { color: false, theme: DEFAULT_THEME })).toBe("x");
+    expect(paint(" p ", "pk", { color: false, theme: DEFAULT_THEME })).toBe("[p]");
   });
 
   it("keeps attributes and drops colour under NO_COLOR", () => {
