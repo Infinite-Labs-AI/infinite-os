@@ -167,6 +167,35 @@ export function buildHostGuardExpression(spec: HostGuardSpec, options: HostGuard
 }
 
 /**
+ * The guard a plan's artifacts ask for, validated: `{}` when there is none, `{ spec }` when it is usable,
+ * `{ error }` (a plan blocker) when a host is malformed or a production host the plan knows about would
+ * be silenced by a deny rule the exempt list does not cover.
+ */
+export function resolveArtifactHostGuard(artifacts: {
+  productionHosts?: string[]
+  hostGuard?: { mode: "deny"; exempt: string[]; deny: string[] }
+}): { spec?: HostGuardSpec; error?: string } {
+  const guard = artifacts.hostGuard
+  if (guard === undefined) return {}
+  if (guard === null || typeof guard !== "object" || guard.mode !== "deny" || !Array.isArray(guard.exempt) || !Array.isArray(guard.deny)) {
+    return { error: "The preview guard must be { mode: \"deny\", exempt: [...], deny: [...] }." }
+  }
+  let spec: HostGuardSpec
+  try {
+    spec = normalizeHostGuardSpec({ mode: "deny", exempt: guard.exempt, deny: guard.deny })
+  } catch (error) {
+    return { error: (error as Error).message }
+  }
+  const conflicts = productionDeniedConflict(artifacts.productionHosts ?? [], guard.exempt)
+  if (conflicts.length > 0) {
+    return {
+      error: `The preview guard would silence production host(s) ${conflicts.join(", ")}: add them to the exempt list.`
+    }
+  }
+  return { spec }
+}
+
+/**
  * `(function () { if (!(<guard>)) return; <body> })();` — the only shape a guarded snippet may take
  * (one IIFE per snippet, so the `return` can only ever stop its own provider).
  */

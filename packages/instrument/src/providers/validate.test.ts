@@ -248,10 +248,10 @@ describe("provider plans reject hostile artifacts and escape valid ones", () => 
     expect(ok.instructions[0]!.snippet).not.toContain('api_host: "https://us.i.posthog.com/ingest?')
     // no proxy uiHost → no ui_host in the init options
     expect(ok.instructions[0]!.snippet).not.toContain("ui_host")
-    // 0.6.0 — full native: PostHog's OWN defaults (autocapture, pageview, pageleave, recording,
-    // persistence, opt-in state are PostHog's), opted into its current defaults bundle. The
-    // installer never reduces the provider.
-    expect(ok.instructions[0]!.snippet).toContain("defaults: '2025-05-24'")
+    // Full native: PostHog's OWN defaults (autocapture, pageview, pageleave, recording, persistence,
+    // opt-in state are PostHog's), opted into its current defaults bundle ('2026-01-30' for a new
+    // install). A provider is never reduced without an approved plan line.
+    expect(ok.instructions[0]!.snippet).toContain("defaults: '2026-01-30'")
     for (const reduced of [
       "capture_pageview: false",
       "autocapture: false",

@@ -1,5 +1,6 @@
 import { join } from "node:path"
 
+import { conversionHelpersInstruction, conversionHelpersWanted } from "./conversions/globals.js"
 import { getFrameworkAdapter, isSupportedFramework } from "./frameworks/index.js"
 import { normalizeAppRelativePath } from "./frameworks/shared.js"
 import { getProviderAdapter } from "./providers/index.js"
@@ -122,7 +123,11 @@ export function planInstallation(options: PlanInstallationOptions): InstallPlan 
   // wiring is only planned when at least one provider remains to install. When everything
   // requested was adopted there is nothing to write — the plan says so instead of injecting an
   // empty managed block.
-  const pixelWanted = providers.length > 0 || (!options.serverLane && adopted.length === 0)
+  // The managed conversion helpers (decisions 9 and 13) are their own reason to write the managed
+  // block: they serve ADOPTED tools too, so an all-adopted plan that asked for them still writes it.
+  const helpersWanted = conversionHelpersWanted(options.artifacts)
+  const pixelWanted =
+    providers.length > 0 || helpersWanted || (!options.serverLane && adopted.length === 0)
   const frameworkAdapter = getFrameworkAdapter(inspectResult.framework)
   const infiniteProxy = infiniteProxySpec(options.artifacts.infinite)
   const previousManifest = readInstallManifest(options.root)
@@ -161,6 +166,10 @@ export function planInstallation(options: PlanInstallationOptions): InstallPlan 
 
   const envKeys: string[] = []
   const instructions: InstallInstruction[] = []
+  // First in the block, so the globals exist before any provider bootstrap runs.
+  if (helpersWanted && frameworkDraft) {
+    instructions.push(conversionHelpersInstruction(inspectResult.framework, options.artifacts))
+  }
   for (const providerId of providers) {
     const adapter = getProviderAdapter(providerId)
     const providerPlan = adapter.plan(inspectResult.framework, options.artifacts[providerId], {

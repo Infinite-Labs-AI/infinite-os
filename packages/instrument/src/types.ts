@@ -224,6 +224,12 @@ export interface InfiniteHandoffContext {
 export interface MetaPublicArtifact {
   pixelId: string
   /**
+   * ADOPTED pixel: emit only the managed `_fbc` landing capture (no pixel bootstrap) beside the pixel the
+   * site already has. Set by an approved plan line (wf5-PORT-PLAN row 5); `pixelId` names the adopted
+   * pixel. Absent = a full managed install.
+   */
+  captureOnly?: boolean
+  /**
    * `--meta-advanced-matching on|off`. ABSENT = OFF, and only an explicit `true` installs it.
    *
    * Manual Advanced Matching: the page defines `window.infiniteMetaAdvancedMatch`, which the
@@ -259,6 +265,18 @@ export interface PosthogPublicArtifact {
   uiHost?: string
   /** When present, the framework adapter injects the reverse-proxy rewrites. */
   proxy?: PosthogProxySpec
+  /**
+   * PostHog's `defaults` bundle. ABSENT = "2026-01-30" (every new managed install, infinite.fast's
+   * value). The plan pins "2025-05-24" for a managed install made before it until the user approves the
+   * bump, because a new bundle changes what is measured ("measurement changed", never growth).
+   */
+  defaults?: "2025-05-24" | "2026-01-30"
+  /**
+   * Decision 17: pages where session replay and autocapture are OFF (`disable_session_recording: true`,
+   * `autocapture: false` at init), from an approved plan line. Root-relative paths; a trailing slash is
+   * ignored. Absent or empty = PostHog's own defaults everywhere.
+   */
+  sensitivePaths?: string[]
 }
 
 export interface XPublicArtifact {
@@ -267,14 +285,26 @@ export interface XPublicArtifact {
 }
 
 export interface WorkspaceInstallArtifacts {
-  /** Explicit host allowlist for the shared browser runtime (Infinite collection only — the
-   *  runtime never forwards into GA4/PostHog since 0.6.0; those providers install natively). */
+  /** Explicit host allowlist for the shared browser runtime (Infinite collection only — the runtime
+   *  forwards nothing into GA4/PostHog; those providers install natively, and the site's own code
+   *  reaches them through the managed helpers). */
   productionHosts?: string[]
   infinite?: InfinitePublicArtifact
   ga4?: Ga4PublicArtifact
   posthog?: PosthogPublicArtifact
   x?: XPublicArtifact
   meta?: MetaPublicArtifact
+  /**
+   * The preview guard (decision 3; decision 8 for Meta) around the managed GA4, PostHog and Meta
+   * bootstraps (`src/host-guard.ts`). `exempt` = the production hosts that always fire; `deny` = extra
+   * preview hosts on top of `contracts/host-deny-v1.json`. Absent = no guard (the plain installer).
+   */
+  hostGuard?: { mode: "deny"; exempt: string[]; deny: string[] }
+  /**
+   * The managed conversion helpers (decisions 9 and 13, `src/conversions/`). Only an explicit
+   * `helpers: true` emits them. Absent = none (the plain installer's bytes are unchanged).
+   */
+  conversions?: { helpers: boolean }
 }
 
 export interface InstallManifest {
@@ -429,6 +459,8 @@ export interface InstallInstruction {
   description: string
   snippet: string
   provider?: ProviderId
+  /** The managed conversion-helper script (`src/conversions/globals.ts`); it serves every provider. */
+  helpers?: true
 }
 
 /** Optional context passed to FrameworkAdapter.plan so it can see cross-cutting install choices. */
