@@ -162,7 +162,11 @@
   "view-11-link--c160": "T12: app links and follow-up keys (o t p g w e enter) stay off until the app link and follow-up wave",
   "view-11-link--c160@256": "T12: app links and follow-up keys (o t p g w e enter) stay off until the app link and follow-up wave",
   "view-11-link--c60": "T12: app links and follow-up keys (o t p g w e enter) stay off until the app link and follow-up wave",
-  "view-11-link--c60@256": "T12: app links and follow-up keys (o t p g w e enter) stay off until the app link and follow-up wave"
+  "view-11-link--c60@256": "T12: app links and follow-up keys (o t p g w e enter) stay off until the app link and follow-up wave",
+  "flow-numbers-02-not-measured--c100": "R3: `j k row` shows on a not-measured table, where r4 offers no keys (was a false pass until full-width regions were anchored at column 0)",
+  "flow-numbers-02-not-measured--c100@256": "R3: `j k row` shows on a not-measured table, where r4 offers no keys (was a false pass until full-width regions were anchored at column 0)",
+  "flow-numbers-02-not-measured--c160": "R3: `j k row` shows on a not-measured table, where r4 offers no keys (was a false pass until full-width regions were anchored at column 0)",
+  "flow-numbers-02-not-measured--c160@256": "R3: `j k row` shows on a not-measured table, where r4 offers no keys (was a false pass until full-width regions were anchored at column 0)"
  },
  "matchedEver": [
   "boot--c100",
@@ -236,10 +240,6 @@
   "flow-numbers-01-ready--c100@256",
   "flow-numbers-01-ready--c160",
   "flow-numbers-01-ready--c160@256",
-  "flow-numbers-02-not-measured--c100",
-  "flow-numbers-02-not-measured--c100@256",
-  "flow-numbers-02-not-measured--c160",
-  "flow-numbers-02-not-measured--c160@256",
   "flow-numbers-03-partial--c100",
   "flow-numbers-03-partial--c100@256",
   "flow-numbers-03-partial--c160",

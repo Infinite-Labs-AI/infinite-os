@@ -57,6 +57,9 @@ export const REGION_SCREENS: Readonly<Record<string, { screen: string; cols: num
   "region-table-numbers-100": { screen: "view-01-numbers", cols: 100 }
 };
 
+/** Line regions as wide as the window: found at column 0 only (a card or a table may sit inside a pane). */
+const FULL_WIDTH_REGION = /^region-(topbar|rule|composer|keybar|steps)/u;
+
 /** The colour tiers tier 1 renders at. At `256` the CLI must not print truecolor SGR (`38;2`/`48;2`). */
 export type EvaluatorTier = "truecolor" | "256";
 
@@ -128,7 +131,7 @@ export class GoldenEvaluator {
       return out;
     }
     const screen = this.screen(loadR4Fixture(where.screen), where.cols);
-    out.regions.push(compareRegion(screen, golden.lines, id.replace(/^region-/u, "")));
+    out.regions.push(compareRegion(screen, golden.lines, id.replace(/^region-/u, ""), { anchored: FULL_WIDTH_REGION.test(id) }));
     out.pass = out.regions.every((result) => result.verdict === "MATCH");
     return out;
   }
@@ -153,7 +156,8 @@ export function compareFrame(screen: readonly SegmentLine[], golden: GoldenFile,
   for (const region of regions) {
     if (region === "rule_top" || region === "rule_bottom") continue;
     const rows = goldenRegionRows(golden, region);
-    if (rows.length) byRegion.set(region, compareRegion(screen, rows, region));
+    // A frame is full width: every region starts at column 0 (never a row's tail).
+    if (rows.length) byRegion.set(region, compareRegion(screen, rows, region, { anchored: true }));
   }
   const anchors: Record<"rule_top" | "rule_bottom", { from: RegionName; offset: number }> = {
     rule_top: { from: "topbar", offset: 1 },

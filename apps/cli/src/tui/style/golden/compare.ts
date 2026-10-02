@@ -86,15 +86,25 @@ export function goldenRegionRows(golden: GoldenFile, region: RegionName | "all")
  * Find where `golden` (rows of a region) sits in `actual`. First a full-row
  * match of the first non-blank golden row (masked text); else, for component
  * regions, that row as a substring at some column (a card inside the details
- * pane). Returns the row/col of golden row 0.
+ * pane). A full-width region (`anchored`: the top bar, a rule, the composer,
+ * the key bar, a frame's regions) is found at column 0 only, so a longer row
+ * that merely ENDS with it (` j k  row    tab  switch side …` for
+ * ` tab  switch side …`) never stands for it, the way golden_diff.py's
+ * extra-row guard reads it. Returns the row/col of golden row 0.
  */
-export function locate(actual: readonly SegmentLine[], golden: readonly SegmentLine[], from = 0): { row: number; col: number } | null {
+export function locate(
+  actual: readonly SegmentLine[],
+  golden: readonly SegmentLine[],
+  from = 0,
+  anchored = false
+): { row: number; col: number } | null {
   const first = golden.findIndex((line) => textOf(line).trim() !== "");
   if (first < 0) return null;
   const want = maskText(textOf(golden[first]!));
   for (let row = from; row < actual.length; row += 1) {
     if (maskText(textOf(actual[row]!)) === want && row - first >= 0) return { row: row - first, col: 0 };
   }
+  if (anchored) return null;
   const needle = want.replace(/\s+$/u, "");
   for (let row = from; row < actual.length; row += 1) {
     const text = maskText(textOf(actual[row]!));
@@ -127,11 +137,11 @@ export function compareRegion(
   actual: readonly SegmentLine[],
   goldenRows: readonly SegmentLine[],
   region: string,
-  options: { gantt?: boolean; at?: { row: number; col: number } | null } = {}
+  options: { gantt?: boolean; at?: { row: number; col: number } | null; anchored?: boolean } = {}
 ): RegionResult {
   const result: RegionResult = { region, verdict: "MATCH", goldenRows: goldenRows.length, locatedAt: null, diffs: [] };
   if (!goldenRows.length) return result;
-  const at = options.at === undefined ? locate(actual, goldenRows) : options.at;
+  const at = options.at === undefined ? locate(actual, goldenRows, 0, options.anchored === true) : options.at;
   if (!at) {
     result.verdict = "NOT_FOUND";
     const first = goldenRows.find((line) => textOf(line).trim() !== "") ?? goldenRows[0]!;

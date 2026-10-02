@@ -206,6 +206,19 @@ describe("the evaluator passes r4 itself (a renderer that prints the golden)", (
     }
   });
 
+  it("a full-width region is found at column 0 only: a longer key bar never matches as its tail (run-r2 MUST 2)", () => {
+    // flow-numbers-02's bar is ` tab  switch side    /  commands`; ` j k  row    tab …` ends with it but is another bar.
+    const golden = loadGolden("flow-numbers-02-not-measured--c100");
+    const bar = golden.regions!.keybar![0];
+    const chip = paintGoldenLines([[{ text: " j k ", style: "key" }, { text: " row    ", style: "" }]], sgr("truecolor"))[0]!;
+    const result = paintedWith((lines) => lines.map((line, i) => (i === bar ? `${chip}${line}` : line))).evaluate(golden);
+    expect(result.pass).toBe(false);
+    expect(result.regions.find((region) => region.region === "keybar")?.verdict).not.toBe("MATCH");
+    // The same holds for a key-bar region golden, found on the screen it is drawn on.
+    const quiet = paintedWith((lines) => lines.map((line, i) => (i === lines.length - 1 ? `${plain("x  ")}${line}` : line)));
+    expect(quiet.evaluate(loadGolden("region-keybar-quiet")).pass).toBe(false);
+  });
+
   it("one rule row cannot stand for both rules: rule_bottom sits right above the composer", () => {
     const noBottomRule = paintedWith((lines) => lines.filter((_, i) => i !== lines.length - 3));
     const result = noBottomRule.evaluate(loadGolden("view-06-change--c160"));
