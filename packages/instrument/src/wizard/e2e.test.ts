@@ -7,7 +7,7 @@
 // asserts what the user, GitHub and the Infinite app would see: the NDJSON events, the exit code, the
 // branch and commits on the remote, the fake gh's PR / review / threads, the bridge's calls in order, the
 // files on disk.
-import { execFileSync } from "node:child_process"
+import { execFileSync, spawn } from "node:child_process"
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 
@@ -52,6 +52,7 @@ import {
   answersFile,
   codexWorkerScenario,
   usageLimitTurn,
+  duplicateRemovalSteps,
   fixtureFile,
   fixtureHosting,
   testResultFor
@@ -247,7 +248,7 @@ describe("the offline end-to-end run (§4.3)", () => {
     const branch = remoteBranches(w).find((name) => name.startsWith("infinite/tag/"))
     expect(branch, why).toMatch(/^infinite\/tag\/\d{4}-\d{2}-\d{2}-7f3c2a$/)
     const commits = commitMessages(w, `${w.site.initialSha}..${branch!}`)
-    expect(commits.length).toBeGreaterThanOrEqual(2)
+    expect(commits.length, why).toBeGreaterThanOrEqual(2)
     for (const commit of commits) expect(commit.body).toContain(`Infinite-Tag-Run: ${RUN_ID}`)
     const fixCommit = commits.find((commit) => commit.body.includes("Infinite-Review-Round: 1"))
     const firstCommit = commits.at(-1)!
@@ -319,6 +320,8 @@ describe("the offline end-to-end run (§4.3)", () => {
       "runs.patch(approvedConversions)",
       // install: the site source with the consent answer.
       "site-source",
+      // jobs: the keys once (the connection ids the check-reason secret scan allows; review I1 P2-6).
+      "keys",
       // jobs: no clickTestedConversions PATCH (a Next site's click tests are the rehearsal's, not T0).
       // settings: the cloud run (approved ∩ click-tested), conversions, the server lane (redeploy "skip");
       // no GA4 key event yet (nothing is click-tested before the rehearsal).
@@ -355,6 +358,8 @@ describe("the offline end-to-end run (§4.3)", () => {
       "test.start(real_visit:home)",
       "test.poll",
       "receipts",
+      // prove: the passive P checks of the jobs now waiting for a real event (8 and 9 are checked since I1's fix round).
+      "baseline",
       "runs.patch(proofState)",
       // done (§3z.12): checkinOptIn FIRST, the report once per measured phase, then the phase.
       "runs.patch(checkinOptIn)",
@@ -392,12 +397,15 @@ describe("the offline end-to-end run (§4.3)", () => {
     expect(job(ITEMS.conversionsToTools)).toMatchObject({ state: "blocked", blockedReason: "consent_touched" })
     expect(job(ITEMS.posthogDefaults)).toMatchObject({ state: "blocked", blockedReason: "outside_allowlist" })
 
-    // ---- 6. a claimed job with a failing check is never ticked; one the wizard cannot check stays claimed ----
+    // ---- 6. a claimed job with a failing check is never ticked; jobs 8 and 9 are now checked by the wizard ----
     expect(jobStates(run, ITEMS.guardPosthog)).toEqual(["claimed/agent_claim", "pending/wizard", "failed/wizard"])
     expect(job(ITEMS.guardPosthog).state).toBe("failed")
-    expect(jobStates(run, ITEMS.identify)).toEqual(["claimed/agent_claim", "claimed/wizard"])
-    expect(job(ITEMS.identify).state).toBe("claimed")
-    for (const id of [ITEMS.guardPosthog, ITEMS.identify]) expect(jobStates(run, id).some((entry) => entry.startsWith("done_in_code"))).toBe(false)
+    expect(jobStates(run, ITEMS.guardPosthog).some((entry) => entry.startsWith("done_in_code"))).toBe(false)
+    // Review I1 P1-5: identify/reset and the server conversion pass the wizard's own S checks (no longer stuck
+    // `claimed`) and wait for a real event; each claim is announced ONCE (P3-3).
+    expect(jobStates(run, ITEMS.identify)).toEqual(["claimed/agent_claim", "waiting_real_event/wizard"])
+    // Job 8: checked in code, then proven by a real outcome after the deploy (the passive check, P).
+    expect(jobStates(run, ITEMS.serverConversion)).toEqual(["claimed/agent_claim", "waiting_real_event/wizard", "proven/wizard"])
     // A real tick, for contrast: the duplicate GA4 init is gone and the wizard's own census says so.
     expect(jobStates(run, ITEMS.duplicates)).toEqual(["claimed/agent_claim", "waiting_deploy/wizard"])
 
@@ -638,5 +646,108 @@ describe("the negative variants (§4.3 a–h)", () => {
     expect(after).not.toContain("uninstall.remove-env")
     expect(after).not.toContain("uninstall.disable-site-source")
     expect(after).not.toContain("link.revoke")
+  })
+})
+
+describe("the §3z.12 variants (i)–(l) and the review I1 variants", () => {
+  it("(i) a 423 lock on site-source parks SITE_LOCKED at install (exit 3): no agent, nothing pushed", { timeout: RUN_TIMEOUT }, async () => {
+    const w = await world({ bridge: { errors: { "site-source": { code: "site_setup_locked", state: "live_site_lock" } } } })
+    const run = await runWizard({ cwd: w.site.repo, env: w.env, args: ["--json", "--answers", writeAnswers(w)], timeoutMs: RUN_TIMEOUT })
+    expect(run.code, trace(run)).toBe(3)
+    expect(stepOutcomes(run).at(-1)).toBe("install:parked:INF_WIZ_SITE_LOCKED")
+    expect(agentRuns(w, "claude")).toEqual([])
+    expect(remoteBranches(w)).toEqual(["main"])
+  })
+
+  it("(j) an approved Meta relay binds while not rolled out ('ready, waiting for Infinite to switch on')", { timeout: RUN_TIMEOUT }, async () => {
+    const w = await world({ bridge: { metaRelay: { available: false, reason: "not_rolled_out", enabled: false, bound: null } } })
+    const answers = answersFile()
+    const plan = answers.plan as { approved: string[]; declined: string[] }
+    const run = await runWizard({
+      cwd: w.site.repo,
+      env: w.env,
+      args: ["--json", "--answers", writeAnswers(w, { ...answers, plan: { approved: [...plan.approved, "meta_relay"], declined: [] } })],
+      respond: mergeThenOpen(w),
+      timeoutMs: RUN_TIMEOUT
+    })
+    expect(stepOutcomes(run), trace(run)).toContain("settings:ok")
+    expect(w.bridge.callsFor("meta-relay.enable")).toHaveLength(1)
+    // Bound to the chosen pixel while not rolled out (§3z.7 A23): at switch-on the site already works, no re-run.
+    expect(w.bridge.callsFor("meta-relay.enable")[0]!.body).toMatchObject({ enable: true })
+    expect(w.bridge.script.metaRelay).toMatchObject({ available: false, reason: "not_rolled_out", enabled: true, bound: { pixelId: FIXTURE_PIXEL_ID } })
+  })
+
+  it("(k) the claim holder stopped after its visit: the resume PATCHes proofState with NO second visit", { timeout: 2 * RUN_TIMEOUT }, async () => {
+    const w = await world({ bridge: { hangUpAfter: ["receipts"] } })
+    const answers = writeAnswers(w)
+    const first = await runWizard({ cwd: w.site.repo, env: w.env, args: ["--json", "--answers", answers], respond: mergeThenOpen(w), timeoutMs: RUN_TIMEOUT })
+    expect(stepOutcomes(first).at(-1), trace(first)).toMatch(/^prove:(parked|failed|blocked)/)
+    expect(w.bridge.callsFor("runs.patch").filter((call) => "proofState" in ((call.body as { patch: object }).patch))).toEqual([])
+    const second = await runWizard({ cwd: w.site.repo, env: w.env, args: ["--json", "--answers", answers], timeoutMs: RUN_TIMEOUT })
+    expect(second.code, trace(second)).toBe(0)
+    expect(w.bridge.callsFor("test.start").filter((call) => (call.body as { mode: string }).mode === "real_visit")).toHaveLength(1)
+    expect(w.bridge.callsFor("runs.patch").filter((call) => "proofState" in ((call.body as { patch: object }).patch))).toHaveLength(1)
+  })
+
+  it("(l) a dev server writing build output parks DEV_SERVER_RUNNING before any agent turn (exit 3)", { timeout: RUN_TIMEOUT }, async () => {
+    const w = await world()
+    mkdirSync(join(w.site.repo, ".next"), { recursive: true })
+    const writer = spawn(process.execPath, ["-e", "const fs=require('fs');setInterval(()=>fs.writeFileSync('.next/dev-server.txt',String(Date.now())),100)"], { cwd: w.site.repo, stdio: "ignore" })
+    try {
+      const run = await runWizard({ cwd: w.site.repo, env: w.env, args: ["--json", "--answers", writeAnswers(w)], timeoutMs: RUN_TIMEOUT })
+      expect(run.code, trace(run)).toBe(3)
+      expect(stepOutcomes(run).at(-1)).toBe("jobs:parked:INF_WIZ_DEV_SERVER_RUNNING")
+      expect(agentRuns(w, "claude")).toEqual([])
+    } finally {
+      writer.kill("SIGKILL")
+    }
+  })
+
+  it("review I1 P1-1: a home page that redirects (apex → www) is proved and reported, exit 0", { timeout: RUN_TIMEOUT }, async () => {
+    const w = await world()
+    const sitePath = join(w.site.base, "live-site.json")
+    const routes = JSON.parse(readFileSync(sitePath, "utf8")) as Record<string, unknown>
+    routes[`https://${PRODUCTION_HOST}/`] = { status: 301, headers: { location: `https://www.${PRODUCTION_HOST}/` }, body: "" }
+    writeFileSync(sitePath, JSON.stringify(routes))
+    const run = await runWizard({ cwd: w.site.repo, env: w.env, args: ["--json", "--answers", writeAnswers(w)], respond: mergeThenOpen(w), timeoutMs: RUN_TIMEOUT })
+    expect(run.code, trace(run)).toBe(0)
+    expect(stepOutcomes(run).slice(-2)).toEqual(["prove:ok", "done:ok"])
+    expect(w.bridge.callsFor("runs.patch").filter((call) => "proofState" in ((call.body as { patch: object }).patch))).toHaveLength(1)
+    expect(w.bridge.callsFor("report").map((call) => (call.body as { phase: string }).phase)).toContain("proven_live")
+  })
+
+  it("review I1 P1-2: a Next site with its own next.config.mjs installs (exit 0), its config untouched, the rewrite left as a job", { timeout: RUN_TIMEOUT }, async () => {
+    const w = await world()
+    const own = "/** @type {import('next').NextConfig} */\nconst nextConfig = { reactStrictMode: true }\n\nexport default nextConfig\n"
+    writeFileSync(join(w.site.repo, "next.config.mjs"), own)
+    git(w.site.repo, "add", "next.config.mjs")
+    git(w.site.repo, "commit", "-q", "-m", "next config")
+    git(w.site.repo, "push", "-q", "origin", "main")
+    const run = await runWizard({ cwd: w.site.repo, env: w.env, args: ["--json", "--answers", writeAnswers(w)], respond: mergeThenOpen(w), timeoutMs: RUN_TIMEOUT })
+    expect(stepOutcomes(run), trace(run)).toContain("install:ok")
+    expect(run.code, trace(run)).toBe(0)
+    const head = headOfBranch(w)!
+    expect(bareShow(w.site.bare, head.head, "next.config.mjs")).toBe(own)
+    expect(finalJobs(w).some((job) => job.id === "unusual_layout:next_config_rewrites")).toBe(true)
+  })
+
+  it("review I1 P2-5: Ctrl+C mid-turn undoes the agent's edit and removes the snapshot before exit 130", { timeout: RUN_TIMEOUT }, async () => {
+    const w = await world({ scenario: agentScenario({ round1: [{ tool: "job_list" }, ...duplicateRemovalSteps(), { hang: true }] }) })
+    const layoutPath = join(w.site.repo, "app/layout.tsx")
+    const loaders = () => readFileSync(layoutPath, "utf8").split(GTAG_LOADER.trim()).length - 1
+    const records = join(w.site.base, "agents.jsonl")
+    const run = await runWizard({
+      cwd: w.site.repo,
+      env: w.env,
+      args: ["--json", "--answers", writeAnswers(w)],
+      timeoutMs: RUN_TIMEOUT,
+      // SIGINT once the fake agent has edited and is hanging mid-turn.
+      interrupt: { when: () => existsSync(records) && readFileSync(records, "utf8").includes('"hanging"'), signal: "SIGINT" }
+    })
+    expect(run.code, trace(run)).toBe(130)
+    expect(loaders(), "the agent's removal of the duplicate loader is undone").toBe(2)
+    const snapshots = join(w.site.home, "Library/Caches/infinite-tag/snapshots")
+    const left = existsSync(snapshots) ? execFileSync("/usr/bin/find", [snapshots, "-name", "manifest.json"], { encoding: "utf8" }).trim() : ""
+    expect(left).toBe("")
   })
 })

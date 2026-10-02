@@ -329,6 +329,8 @@ export interface RunOptions {
   timeoutMs?: number
   /** Extra node flags (default: the live-site preload). */
   nodeFlags?: string[]
+  /** Sends `signal` to the wizard once `when()` turns true (polled every 100 ms), e.g. SIGINT mid-turn. */
+  interrupt?: { when: () => boolean; signal: NodeJS.Signals }
 }
 
 export function runWizard(options: RunOptions): Promise<WizardRun> {
@@ -371,11 +373,22 @@ export function runWizard(options: RunOptions): Promise<WizardRun> {
         if (event.t === "run.end") child.stdin.end()
       }
     })
+    let poller: ReturnType<typeof setInterval> | null = null
+    if (options.interrupt) {
+      const interrupt = options.interrupt
+      poller = setInterval(() => {
+        if (!interrupt.when()) return
+        clearInterval(poller!)
+        poller = null
+        child.kill(interrupt.signal)
+      }, 100)
+    }
     child.stderr.setEncoding("utf8")
     child.stderr.on("data", (chunk: string) => (stderr += chunk))
     child.on("error", rejectRun)
     child.on("exit", (code) => {
       clearTimeout(timer)
+      if (poller) clearInterval(poller)
       resolveRun({
         code: code ?? -1,
         events,

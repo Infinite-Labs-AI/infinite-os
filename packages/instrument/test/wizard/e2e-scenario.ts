@@ -70,9 +70,9 @@ export function identifyResetSteps(): Step[] {
 
 const SIGNUP_IMPORT = 'import { supabase } from "../../../lib/supabase"\n'
 const SIGNUP_CALL = "  const { data, error } = await supabase.auth.signUp({ email, password })\n"
-export const EARLY_REPORT = '  await reportInfiniteOutcome({ type: "signup", path: "/api/signup", eventId: data.user?.id ?? "unknown" })\n'
+export const EARLY_REPORT = '  await reportInfiniteOutcome({ type: "sign_up", path: "/api/signup", eventId: data.user?.id ?? "unknown" })\n'
 const SIGNUP_RETURN = "  return Response.json({ ok: true, accountId: data.user.id })"
-export const LATE_REPORT = '  await reportInfiniteOutcome({ type: "signup", path: "/api/signup", eventId: data.user.id })\n'
+export const LATE_REPORT = '  await reportInfiniteOutcome({ type: "sign_up", path: "/api/signup", eventId: data.user.id })\n'
 
 /** Job 8: report the signup outcome, deliberately BEFORE the error check (the reviewer flags it). */
 export function serverConversionSteps(): Step[] {
