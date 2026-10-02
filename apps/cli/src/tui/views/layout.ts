@@ -1,17 +1,19 @@
-// The r4 turn layout: the answer on the left, the view's details on the right,
-// the Steps strip below (terminal-r4 "Answer left, details right, steps and
-// keys at the bottom"). Under 80 columns the two stack: answer, a rule, then
-// the details. The key bar is drawn by the session, above the composer.
+// The r4 turn layout (terminal-r4 `frame()`; River's layout decision of
+// 2026-10-02): the CURRENT turn, in a window at least 120 columns wide, puts
+// the answer on the left, the view's details on the right and the Steps strip
+// below. Narrower, and for every turn committed to scrollback, the turn is ONE
+// column: the question, the answer, a rule, the details underneath, then the
+// Steps. The key bar and the composer are the session's, below all of it.
 //
 // Every line this returns fits its width: the panes are laid out to their own
 // widths first, and each line is cut to fit as a last resort.
 import type { AnswerViewV1 } from "@infinite-os/types";
 
-import { renderMarkdown } from "../../formatting/markdown-render.js";
+import { answerLines, noteLines, questionLines } from "../app/answer-column.js";
+import type { TurnStep } from "../app/turn-store.js";
 import type { KeyContext } from "../keys/keymap.js";
-import { padEndCells, truncateCells } from "../lib/display-width.js";
-import { parseToolTrailResultLine, splitToolDuration } from "../lib/text.js";
-import type { Theme } from "../theme.js";
+import { padEndCells } from "../lib/display-width.js";
+import { DEFAULT_THEME, type Theme } from "../theme.js";
 import type { Msg } from "../types.js";
 import {
   focusedViewCtx,
@@ -21,12 +23,15 @@ import {
   type ViewFocusState,
   type ViewKeyFacts
 } from "./focus.js";
-import { fitLine, paint, viewText, wrapText } from "./primitives.js";
+import { fitLine, paint } from "./primitives.js";
 import { renderView } from "./registry.js";
+import { stepHeader, stepRowLines, stepsFromTrail } from "./steps.js";
 import type { ViewRender, ViewRenderCtx } from "./types.js";
 
-/** At this width and up, the answer and the details sit side by side. */
-export const SPLIT_MIN_COLUMNS = 80;
+export { stepLabelWidth } from "./steps.js";
+
+/** At this width and up, the current turn's answer and details sit side by side (River, 2026-10-02). */
+export const SPLIT_MIN_COLUMNS = 120;
 export const PANE_SEPARATOR = " │ ";
 
 /** The answer pane is 28% of the width, clamped to 26–40 columns; the details get the rest. */
@@ -53,39 +58,47 @@ export function viewLines(render: ViewRender, width: number): string[] {
 }
 
 /**
- * Lay out one turn. `answer` is drawn at the answer pane's width (see
- * `paneWidths`), each view at the details pane's. Several views stack in the
- * details pane, a blank row apart. No view = the answer alone, full width.
- * Quiet views never take the details pane: their step lines print with the
- * Steps, so a turn whose views are all quiet keeps its answer full width.
+ * Lay out one turn. `answer` is drawn at the answer pane's width when split
+ * (see `paneWidths`), else at the full width; each view at its pane's width.
+ * Several views stack in the details pane, a blank row apart. No view = the
+ * answer alone, full width. Quiet views never take the details pane: their
+ * step lines print with the Steps, so a turn whose views are all quiet keeps
+ * its answer full width. `split: false` keeps one column at any width (a turn
+ * committed to scrollback). `steps` is the Steps strip's rows (the header is
+ * drawn here).
  */
 export function layoutTurn(
   answer: readonly string[],
   view: ViewRender | readonly ViewRender[] | null,
   steps: readonly string[],
   width: number,
-  style: { color: boolean; theme: Theme } | null = null
+  style: { color: boolean; theme: Theme } | null = null,
+  options: { split?: boolean } = {}
 ): string[] {
   const total = Math.max(1, Math.floor(width));
   const all: readonly ViewRender[] = view === null ? [] : isRenderList(view) ? view : [view];
   const renders = all.filter((render) => !render.quiet);
   const quietSteps = all.filter((render) => render.quiet).flatMap((render) => render.detail.map((line) => `  ${line}`));
-  const rule = (line: string) => (style ? paint(line, "muted", style) : line);
+  const rule = (line: string) => (style ? paint(line, "line", style) : line);
   const out: string[] = [];
+  const panes = paneWidths(total);
+  const wide = panes.wide && options.split !== false;
 
   if (!renders.length) {
     out.push(...answer.map((line) => fitLine(line, total)));
   } else {
-    const { wide, left, right } = paneWidths(total);
     const details = renders.flatMap((render, index) => [
       ...(index > 0 ? [""] : []),
-      ...viewLines(render, wide ? right : total)
+      ...viewLines(render, wide ? panes.right : total)
     ]);
     if (wide) {
       const separator = rule(PANE_SEPARATOR);
       const rows = Math.max(answer.length, details.length);
       for (let index = 0; index < rows; index += 1) {
-        out.push(`${padEndCells(fitLine(answer[index] ?? "", left), left)}${separator}${fitLine(details[index] ?? "", right)}`);
+        const right = details[index] ?? "";
+        // r4 `side()`: the separator on every row; an empty details row ends at the bar.
+        out.push(right ? `${padEndCells(fitLine(answer[index] ?? "", panes.left), panes.left)}${separator}${fitLine(right, panes.right)}`
+          : `${padEndCells(fitLine(answer[index] ?? "", panes.left), panes.left)}${rule(PANE_SEPARATOR.trimEnd())}`);
       }
     } else {
       out.push(
@@ -99,62 +112,19 @@ export function layoutTurn(
 
   const strip = [...steps, ...quietSteps];
   if (strip.length) {
-    out.push(rule(fitLine(`─ Steps ${"─".repeat(Math.max(0, total - 8))}`, total)), ...strip.map((line) => fitLine(line, total)));
+    // One column: a blank row between the details and the Steps (r4 stacked frame).
+    if (renders.length && !wide) {
+      out.push("");
+    }
+    out.push(stepHeader(total, style ?? { color: false, theme: DEFAULT_THEME }), ...strip.map((line) => fitLine(line, total)));
   }
   return out;
 }
 
-/** One Steps row: the label column, then the glyph and the result (r4 order). */
-export interface StepRow {
-  label: string;
-  mark: string;
-  result: string;
-}
-
-/** The Steps rows from the turn's tool trail; a row that is not a finished tool (a stopped one) has only a label. */
-export function stepRows(messages: readonly Msg[]): StepRow[] {
-  return messages
-    .filter((msg) => msg.kind === "trail")
-    .flatMap((msg) => msg.tools ?? [])
-    .map((line) => {
-      const parsed = parseToolTrailResultLine(line);
-      if (!parsed) {
-        return { label: viewText(line), mark: "", result: "" };
-      }
-      const { label, duration } = splitToolDuration(parsed.call ?? "");
-      return { label: viewText(label), mark: parsed.mark, result: `${viewText(parsed.detail)}${duration}`.trim() };
-    });
-}
-
-/** The label column of the Steps strip: min(28, 26% of the width), narrower when stacked (r4). */
-export function stepLabelWidth(width: number): number {
-  const total = Math.max(1, Math.floor(width));
-  return total < SPLIT_MIN_COLUMNS ? Math.max(8, Math.min(28, total - 34)) : Math.min(28, Math.floor(total * 0.26));
-}
-
 /**
- * The Steps strip, from the turn's tool trail, in r4's column order: the label
- * padded to a fixed column, then the glyph and the result (`label  ✓ 3 items
- * (0.6s)`), one row per tool. r4's timing bar between them waits for per-step
- * start times (the trail carries durations only).
- */
-export function stepLines(messages: readonly Msg[], width: number, style: { color: boolean; theme: Theme } | null = null): string[] {
-  const labelWidth = stepLabelWidth(width);
-  return stepRows(messages).map((row) => {
-    if (!row.mark) {
-      return `  ${style ? paint(row.label, "muted", style) : row.label}`;
-    }
-    const label = padEndCells(truncateCells(row.label, labelWidth), labelWidth);
-    const role = row.mark === "✓" ? "success" : row.mark === "✗" ? "error" : "muted";
-    const outcome = `${row.mark}${row.result ? ` ${row.result}` : ""}`;
-    return `  ${label} ${style ? paint(outcome, role, style) : outcome}`;
-  });
-}
-
-/**
- * The answer pane: the question (`❯`), then the answer (`∞`, markdown) and any
- * notes (receipts, errors) in plain muted text. The tool trail is not here: it
- * is the Steps strip.
+ * The answer column: the question (`❯`), then the answer (`∞`, markdown) and
+ * any notes (receipts, errors) in dim. The tool trail is not here: it is the
+ * Steps strip.
  */
 export function renderAnswerColumn(
   messages: readonly Msg[],
@@ -162,9 +132,9 @@ export function renderAnswerColumn(
   theme: Theme,
   color: boolean
 ): string[] {
-  const inner = Math.max(1, Math.floor(width) - 2);
   const style = { color, theme };
   const lines: string[] = [];
+  let answered = false;
   const block = (next: string[]) => {
     if (!next.length) {
       return;
@@ -180,18 +150,16 @@ export function renderAnswerColumn(
       continue;
     }
     if (msg.role === "user") {
-      block(wrapText(viewText(msg.text), inner).map((line, index) =>
-        index === 0 ? `${paint("❯", "primaryBright", style)} ${paint(line, "primaryBright", style, { bold: true })}` : `  ${paint(line, "primaryBright", style, { bold: true })}`
-      ));
+      block(questionLines(msg.text, width, style));
+      answered = false;
       continue;
     }
     if (msg.role === "assistant") {
-      block(renderMarkdown(msg.text, { width: inner, color, theme }).map((line, index) =>
-        index === 0 ? `${paint("∞", "primary", style)} ${line}` : `  ${line}`
-      ));
+      block(answerLines(msg.text, width, style, { mark: !answered }));
+      answered = true;
       continue;
     }
-    block(renderMarkdown(msg.text, { width: inner, color, theme, role: "muted", plain: true }).map((line) => `  ${line}`));
+    block(noteLines(msg.text, width, style));
   }
   return lines;
 }
@@ -213,6 +181,14 @@ export interface LiveTurnInput {
   rows?: number;
   /** The live region has more lines below (lets `m` page it). */
   livePageNext?: boolean;
+  /**
+   * The turn's tool calls with their start and end (the turn store's `steps`),
+   * for the Steps strip. Absent or empty: the strip comes from the tool trail
+   * in `messages`, laid end to end.
+   */
+  steps?: readonly TurnStep[];
+  /** Now (epoch ms), for a call still running. */
+  nowMs?: number;
 }
 
 export interface LiveTurnRender {
@@ -221,11 +197,11 @@ export interface LiveTurnRender {
   focused: { render: ViewRender; facts: ViewKeyFacts } | null;
 }
 
-/** The latest turn with its views, laid out for the live region (and, once, for scrollback). */
+/** The latest turn with its views, laid out for the live region: side by side from 120 columns. */
 export function renderLiveTurn(input: LiveTurnInput): LiveTurnRender {
   const width = Math.max(1, Math.floor(input.width));
   const budget = typeof input.rows === "number" && Number.isFinite(input.rows) ? Math.max(1, Math.floor(input.rows)) : undefined;
-  let drawn = drawLiveTurn(input, width, budget);
+  let drawn = drawLiveTurn(input, width, budget, true);
   // The views start from the whole budget; while the turn is taller than it,
   // give the views that many rows fewer (a document then pages smaller). Stops
   // when the turn fits or stops shrinking (a long answer, a page at its floor).
@@ -234,7 +210,7 @@ export function renderLiveTurn(input: LiveTurnInput): LiveTurnRender {
     if (overflow <= 0 || drawn.rows === undefined || drawn.rows - overflow < 1) {
       break;
     }
-    const next = drawLiveTurn(input, width, drawn.rows - overflow);
+    const next = drawLiveTurn(input, width, drawn.rows - overflow, true);
     if (next.lines.length >= drawn.lines.length) {
       break;
     }
@@ -250,12 +226,28 @@ export function renderLiveTurn(input: LiveTurnInput): LiveTurnRender {
   };
 }
 
-/** One draw of the turn, its views given at most `rows` rows. */
-function drawLiveTurn(input: LiveTurnInput, width: number, rows: number | undefined) {
-  const { wide, left, right } = paneWidths(width);
+/**
+ * A finished turn as it is printed once into scrollback: ONE column at any
+ * width (question, answer, then its details underneath and the Steps), every
+ * page of it (no row budget), under a thin rule that separates it from the
+ * turn before.
+ */
+export function renderCommittedTurn(input: Omit<LiveTurnInput, "rows" | "livePageNext">): string[] {
+  const width = Math.max(1, Math.floor(input.width));
+  const { lines } = drawLiveTurn(input, width, undefined, false);
+  if (!lines.length) {
+    return [];
+  }
+  return [paint("─".repeat(width), "line", input), ...lines];
+}
+
+/** One draw of the turn, its views given at most `rows` rows; `split` allows the side-by-side layout. */
+function drawLiveTurn(input: LiveTurnInput, width: number, rows: number | undefined, split: boolean) {
+  const panes = paneWidths(width);
+  const wide = panes.wide && split;
   const caps = input.focus?.caps ?? input.caps ?? NO_VIEW_CAPS;
   const base = {
-    width: wide ? right : width, color: input.color, theme: input.theme, timeZone: input.timeZone,
+    width: wide ? panes.right : width, color: input.color, theme: input.theme, timeZone: input.timeZone,
     ...(rows === undefined ? {} : { rows })
   };
   const plainCtx: ViewRenderCtx = {
@@ -267,10 +259,11 @@ function drawLiveTurn(input: LiveTurnInput, width: number, rows: number | undefi
   const renders = input.views.map((view, index) =>
     renderView(view, view.kind === "quiet" ? stepCtx : index === focusIndex && input.focus ? focusedViewCtx(input.focus, base) : plainCtx)
   );
-  const steps = stepLines(input.messages, width, input);
-  const split = renders.some((render) => !render.quiet);
-  const answer = renderAnswerColumn(input.messages, wide && split ? left : width, input.theme, input.color);
-  const lines = layoutTurn(answer, renders, steps, width, { color: input.color, theme: input.theme });
+  const steps = input.steps?.length ? input.steps : stepsFromTrail(input.messages);
+  const stepRows = stepRowLines(steps, { width, color: input.color, theme: input.theme, nowMs: input.nowMs, views: input.views });
+  const sideBySide = wide && renders.some((render) => !render.quiet);
+  const answer = renderAnswerColumn(input.messages, sideBySide ? panes.left : width, input.theme, input.color);
+  const lines = layoutTurn(answer, renders, stepRows, width, { color: input.color, theme: input.theme }, { split });
   return { renders, lines, focusIndex, rows };
 }
 

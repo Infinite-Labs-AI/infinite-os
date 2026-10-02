@@ -272,8 +272,9 @@ describe("scrollback in a running session (fake TTY; skipped on CI like the othe
     for (const i of [0, 1, 100, 198, 199]) {
       expect(text).toContain(`alpha line ${i}`);
     }
-    expect(text.split("alpha line 100 ").length - 1).toBe(1);
-    expect(text).toContain("┊ ❯ first");
+    expect(countLine(text, "alpha line 100")).toBe(1);
+    expect(text).toContain("❯ first");
+    expect(text).not.toContain("┊");
 
     await sendKeys(input, "/exit\r");
     await session;

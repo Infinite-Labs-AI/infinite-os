@@ -8,9 +8,11 @@ import { LongRunToolCharmTicker } from "../tui/app/long-run-tool-charms.js";
 import { canUseInkProgressReporter, InkTranscriptProgressReporter } from "../tui/ink/progress-reporter.js";
 import { padEndCells } from "../tui/lib/display-width.js";
 import { compactPreview, toolTrailLabel } from "../tui/lib/text.js";
-import { ansi, resolveTheme, type Theme } from "../tui/theme.js";
+import { ansi, colorEnabled, resolveTheme, type Theme } from "../tui/theme.js";
 import type { Msg } from "../tui/types.js";
 import { readMarkdownTableBlock, renderMarkdownTableBlock } from "./markdown.js";
+import { holdOpenMarkers } from "./markdown-inline.js";
+import { renderMarkdown } from "./markdown-render.js";
 
 const DEFAULT_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const TICK_MS = 120;
@@ -178,7 +180,7 @@ class LiveTranscriptFrame {
         transcript
       },
       {
-        color: Boolean(this.stream.isTTY && !process.env.NO_COLOR),
+        color: streamColor(this.stream, this.transcript?.theme),
         columns: this.stream.columns,
         theme: this.transcript?.theme
       }
@@ -312,7 +314,7 @@ class AlternateScreenTranscriptFrame {
         transcript
       },
       {
-        color: Boolean(this.stream.isTTY && !process.env.NO_COLOR),
+        color: streamColor(this.stream, this.transcript?.theme),
         columns: this.stream.columns,
         theme: this.transcript?.theme
       }
@@ -344,8 +346,14 @@ class AlternateScreenTranscriptFrame {
   }
 }
 
+/** The live frame uses the whole window (no cap: eval M3). */
 function frameWidth(stream: ProgressStream): number {
-  return Math.max(40, Math.min(160, stream.columns ?? 88));
+  return Math.max(20, stream.columns ?? 88);
+}
+
+/** Paint only on a terminal, and only what its colour tier paints (NO_COLOR keeps bold; dumb gets none). */
+function streamColor(stream: ProgressStream, theme: Theme | undefined): boolean {
+  return Boolean(stream.isTTY) && colorEnabled(theme ?? resolveTheme(process.env, stream));
 }
 
 export function shouldAnimateProgress(stream: ProgressStream, env: NodeJS.ProcessEnv = process.env): boolean {
@@ -474,23 +482,28 @@ class RawTerminalProgressReporter implements InteractiveProgressReporter {
   }
 }
 
+/**
+ * The answer as it streams on the plain one-shot path, in the r4 look: `∞` and
+ * the answer's lines hung under it, at the window's width, no box. Each line
+ * prints once it is complete, through the markdown renderer (so `**` never
+ * shows); a markdown table prints once its block is whole.
+ */
 class StreamingAssistantFrame {
   private readonly stream: ProgressStream;
   private readonly theme: Theme;
   private opened = false;
-  private atLineStart = true;
+  private first = true;
   private readonly color: boolean;
   private readonly contentWidth: number;
   private lineBuffer = "";
   private pendingLines: string[] = [];
-  private readonly width: number;
 
   constructor(stream: ProgressStream, theme: Theme) {
     this.stream = stream;
     this.theme = theme;
-    this.color = Boolean(stream.isTTY && !process.env.NO_COLOR);
-    this.width = Math.max(36, Math.min(100, (stream.columns ?? 88) - 2));
-    this.contentWidth = this.width - 4;
+    this.color = streamColor(stream, theme);
+    // r4 wraps at the width less one, with a two-column prefix.
+    this.contentWidth = Math.max(1, frameWidth(stream) - 3);
   }
 
   writeDelta(delta: string): void {
@@ -513,29 +526,18 @@ class StreamingAssistantFrame {
       return;
     }
     if (this.lineBuffer.length > 0) {
-      this.completeLine(this.lineBuffer);
+      // The answer ended without a newline: its last line may have a span it never closed.
+      this.completeLine(holdOpenMarkers(this.lineBuffer));
       this.lineBuffer = "";
     }
     this.flushPendingLines(true);
-    this.writeBorder(`╰${"─".repeat(this.width - 2)}╯\n`);
     this.opened = false;
-    this.atLineStart = true;
+    this.first = true;
     this.pendingLines = [];
   }
 
   private open(): void {
-    if (this.opened) {
-      return;
-    }
-    const title = ` ${this.theme.brand.name} `;
-    const top = `╭─${title}${"─".repeat(Math.max(0, this.width - title.length - 3))}╮`;
-    this.writeBorder(`${top}\n`);
     this.opened = true;
-    this.atLineStart = true;
-  }
-
-  private writeBorder(value: string): void {
-    this.stream.write(ansi(this.theme, "primary", value, this.color));
   }
 
   private completeLine(line: string): void {
@@ -551,24 +553,29 @@ class StreamingAssistantFrame {
       }
       if (block) {
         for (const renderedLine of renderMarkdownTableBlock(block, this.contentWidth)) {
-          this.writeContentLine(renderedLine);
+          this.writeContentLine(renderedLine, false);
         }
         this.pendingLines.splice(0, block.rawCount);
         continue;
       }
-      this.writeContentLine(this.pendingLines.shift() ?? "");
+      this.writeContentLine(this.pendingLines.shift() ?? "", true);
     }
   }
 
-  private writeContentLine(line: string): void {
-    if (this.atLineStart) {
-      this.writeBorder("│ ");
-      this.atLineStart = false;
-    }
+  private writeContentLine(line: string, markdown: boolean): void {
     // Model text goes straight to the TTY: strip control and bidi characters first.
-    this.stream.write(ansi(this.theme, "text", scrubTerminalControls(line), this.color));
-    this.stream.write("\n");
-    this.atLineStart = true;
+    const clean = scrubTerminalControls(line);
+    const rendered = markdown && clean.trim()
+      ? renderMarkdown(clean, { width: this.contentWidth, color: this.color, theme: this.theme })
+      : [clean];
+    for (const text of rendered) {
+      const prefix = this.first && text.trim() ? `${ansi(this.theme, "primary", "∞", this.color)} ` : "  ";
+      if (text.trim()) {
+        this.first = false;
+      }
+      this.stream.write(`${prefix}${text}`.trimEnd());
+      this.stream.write("\n");
+    }
   }
 }
 

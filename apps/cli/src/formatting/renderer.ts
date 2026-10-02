@@ -1,7 +1,7 @@
-import { ansi, resolveTheme, type Theme } from "../tui/theme.js";
-import { displayWidth, padEndCells, truncateCells } from "../tui/lib/display-width.js";
+import { colorEnabled, resolveTheme, ansi, type Theme } from "../tui/theme.js";
+import { padEndCells, truncateCells } from "../tui/lib/display-width.js";
+import { answerLines } from "../tui/app/answer-column.js";
 import { resolveCliRenderSurface } from "../tui/runtime/render-surface.js";
-import { renderMarkdown } from "./markdown-render.js";
 
 interface RenderStream {
   columns?: number;
@@ -20,8 +20,9 @@ export interface CliRenderer {
 }
 
 export function createCliRenderer(options: CliRendererOptions = {}): CliRenderer {
-  const theme = options.theme ?? resolveTheme();
-  const color = options.color ?? Boolean(options.stream?.isTTY && !process.env.NO_COLOR);
+  const theme = options.theme ?? resolveTheme(process.env, options.stream ?? { isTTY: false });
+  // The theme's tier already says what this terminal gets (NO_COLOR keeps bold; a pipe gets none).
+  const color = options.color ?? (Boolean(options.stream?.isTTY) && colorEnabled(theme));
   const columns = clampColumns(options.stream?.columns ?? 88);
 
   return {
@@ -34,6 +35,12 @@ export function createCliRenderer(options: CliRendererOptions = {}): CliRenderer
   };
 }
 
+/**
+ * The answer as the terminal prints it (terminal-r4): `∞ answer`, markdown,
+ * hung under its first word, at the window's full width. No box and no width
+ * cap. `title` is the answering project (`Infinite — Acme`), printed dim after
+ * the mark when it says more than the brand name.
+ */
 export function renderAssistantResponsePanel(
   message: string,
   options: {
@@ -45,29 +52,10 @@ export function renderAssistantResponsePanel(
 ): string {
   const theme = options.theme ?? resolveTheme();
   const columns = clampColumns(options.columns ?? 88);
-  const width = Math.max(36, Math.min(100, columns - 2));
-  const inner = width - 4;
-  const label = `${theme.brand.icon} ${options.title ?? theme.brand.name}`.trim();
-  const title = ` ${label} `;
-  const titleWidth = displayWidth(title);
-  const border = (value: string) => ansi(theme, "primary", value, options.color);
-  const titleText = (value: string) => ansi(theme, "primaryBright", value, options.color);
-  const text = (value: string) => ansi(theme, "text", value, options.color);
-  const top = `${border("╭─")}${titleText(title)}${border(`${"─".repeat(Math.max(0, width - titleWidth - 3))}╮`)}`;
-  const bottom = border(`╰${"─".repeat(width - 2)}╯`);
-  // Styled before wrapping: renderMarkdown lays out visible text, then paints it.
-  const body = renderMarkdown(message.trim() || "No answer was produced.", {
-    width: inner,
-    color: Boolean(options.color),
-    theme,
-    role: "text"
-  });
-
-  return [
-    top,
-    ...body.map((line) => `${border("│")} ${text(padEndCells(line, inner))} ${border("│")}`),
-    bottom
-  ].join("\n");
+  const title = options.title?.trim();
+  return answerLines(message.trim() || "No answer was produced.", columns, { color: Boolean(options.color), theme }, {
+    label: title && title !== theme.brand.name ? title : undefined
+  }).join("\n");
 }
 
 export function renderStatusFooter(
@@ -102,10 +90,11 @@ export function shouldUseInteractiveRenderer(stream: RenderStream, env: NodeJS.P
   return resolveCliRenderSurface(stream, env) !== "plain";
 }
 
+/** The window's width, at least 20: no upper cap (eval M3). */
 function clampColumns(columns: number): number {
-  return Math.max(40, Math.min(160, Number.isFinite(columns) ? Math.floor(columns) : 88));
+  return Math.max(20, Number.isFinite(columns) ? Math.floor(columns) : 88);
 }
 
 function clampStatusColumns(columns: number): number {
-  return Math.max(12, Math.min(160, Number.isFinite(columns) ? Math.floor(columns) : 88));
+  return Math.max(12, Number.isFinite(columns) ? Math.floor(columns) : 88);
 }

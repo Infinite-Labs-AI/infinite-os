@@ -24,18 +24,16 @@ describe("transcript tool output", () => {
     }
   });
 
-  it("shows the same tool-trail detail whether it fits inline or wraps", () => {
-    const tool = buildToolTrailLine("read_file", "src", false, "read src/__init__.py and a*b*c then __main__", 1.2);
+  it("a tool-trail row is one Steps row at any width: a friendly label, the glyph, the result as written (cut to fit)", () => {
+    const tool = buildToolTrailLine("read_file", "src", false, "src/__init__.py a*b*c", 1.2);
     const msg = { role: "tool" as const, kind: "trail" as const, text: "", tools: [tool] };
-    const wide = renderInfiniteTranscript({ messages: [msg] }, { columns: 120, theme });
-    const narrow = renderInfiniteTranscript({ messages: [msg] }, { columns: 48, theme });
-    for (const out of [wide, narrow]) {
-      const flat = out.replace(/\s+/g, " ");
-      expect(flat).toContain("src/__init__.py");
-      expect(flat).toContain("a*b*c");
-      expect(flat).toContain("__main__");
+    for (const columns of [120, 48]) {
+      const out = renderInfiniteTranscript({ messages: [msg] }, { columns, theme }).split("\n");
+      expect(out).toHaveLength(2);
+      expect(out[0]).toMatch(/^─ Steps ─+$/u);
+      expect(out[1]).toMatch(/^ {2}reading file +━+ ✓ src\/__init__\.py a\*b\*c$/u);
+      expect(out[1]).not.toContain("Read File");
     }
-    expect(narrow.split("\n").length).toBeGreaterThan(wide.split("\n").length);
   });
 
   it("still renders markdown in the assistant's own trail text", () => {

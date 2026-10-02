@@ -41,13 +41,21 @@ describe("transcript agent title", () => {
     expect(out).toContain("Infinite — Acme");
   });
 
-  it("falls back to the bare brand name (no dangling separator) when unlabeled", () => {
+  it("an unlabeled answer is just `∞ answer` (r4: no box, no title, no dangling separator)", () => {
     const out = renderInfiniteTranscript(
       { messages: [{ role: "assistant", text: "hello" }] },
       { columns: 80, theme }
     );
 
-    expect(out).toContain(theme.brand.name);
-    expect(out).not.toContain(`${theme.brand.name} —`);
+    expect(out).toBe("∞ hello");
+  });
+
+  it("a labeled answer prints its project dim after the mark, the answer hung under it", () => {
+    const out = renderInfiniteTranscript(
+      { messages: [{ role: "assistant", text: "hello", title: "Infinite — Acme" }] },
+      { columns: 80, theme }
+    );
+
+    expect(out.split("\n")).toEqual(["∞ Infinite — Acme", "  hello"]);
   });
 });

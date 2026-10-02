@@ -14,13 +14,15 @@ import {
   compactPreview,
   estimateTokensRough,
   isTransientTrailLine,
+  neutralizeControlSequences,
   sameToolTrailGroup,
   toolTrailLabel
 } from "../lib/text.js";
+import { holdOpenMarkers } from "../../formatting/markdown-inline.js";
 import { hasReasoningTag, splitReasoning } from "../lib/reasoning.js";
 import type { ActiveTool, ActivityItem, Msg, SubagentProgress, TodoItem } from "../types.js";
-
-import { getTurnState, patchTurnState, resetTurnState } from "./turn-store.js";
+import { friendlyStepLabel } from "../views/steps.js";
+import { closeRunningSteps, getTurnState, patchTurnState, recordStepEnd, recordStepStart, resetTurnState, type StepStatus } from "./turn-store.js";
 
 const ACTIVITY_LIMIT = 8;
 const TRAIL_LIMIT = 8;
@@ -516,6 +518,7 @@ export class InfiniteTurnController {
       ...this.activeTools.filter((tool) => tool.id !== toolId),
       { context, id: toolId, name, progressCount: 0, startedAt: this.now(), updatedAt: this.now() }
     ];
+    recordStepStart({ id: toolId, name, label: friendlyStepLabel(name), startedAt: this.now() });
 
     patchTurnState({ toolTokens: this.toolTokenAcc, tools: this.activeTools });
   }
@@ -534,6 +537,7 @@ export class InfiniteTurnController {
     // the desktop bridge does exactly that, because a tool's error text is raw
     // provider output it must not forward. Mark the trail from the STATUS too,
     // or a failed tool renders "✓".
+    const name = this.activeTools.find((tool) => tool.id === toolId)?.name ?? fallbackName ?? "tool";
     const line = this.completeTool(
       toolId,
       fallbackName,
@@ -542,6 +546,15 @@ export class InfiniteTurnController {
       durationMs,
       Boolean(error) || status === "error"
     );
+    recordStepEnd({
+      id: toolId,
+      name,
+      label: friendlyStepLabel(name),
+      status: error ? "fail" : stepStatusOf(status),
+      result: compactPreview(neutralizeControlSequences(error || summary || ""), 72),
+      endedAt: this.now(),
+      durationMs
+    });
 
     this.pendingSegmentTools = [...this.pendingSegmentTools, line];
     this.flushPendingToolsIntoLastSegment();
@@ -664,10 +677,13 @@ export class InfiniteTurnController {
    * What the live turn shows right now, as transcript messages, for a turn the
    * user stopped (Esc / Ctrl-C): the finished segments, completed tool rows not
    * yet shelved, every still-running tool marked stopped (no ✓/✗, since the app
-   * may still finish it), and the streamed partial answer. Pure: it changes
-   * nothing, so the caller commits it and then `reset()`s as before.
+   * may still finish it), and the streamed partial answer with any span it cut
+   * off unopened. It changes nothing but the turn store's running steps (marked
+   * stopped), so the caller commits it and then `reset()`s as before.
    */
   stoppedTranscript(): Msg[] {
+    // The calls still running keep their rows in the Steps strip, marked stopped.
+    closeRunningSteps("stopped", this.now());
     let messages: Msg[] = [...this.segmentMessages];
     const tools = [
       ...this.pendingSegmentTools,
@@ -682,13 +698,16 @@ export class InfiniteTurnController {
     const text = raw && hasReasoningTag(raw) ? splitReasoning(raw).text : raw;
 
     if (text.trim()) {
-      messages.push({ role: "assistant", text: finalTail(text, this.segmentMessages) });
+      // A span the stop cut off never keeps its opening marker (eval M4).
+      messages.push({ role: "assistant", text: holdOpenMarkers(finalTail(text, this.segmentMessages)) });
     }
 
     return messages.filter((msg) => msg.text.trim() || hasDetails(msg));
   }
 
   reset() {
+    // A call that never reported back by the turn's end has no known outcome (r4 `?`).
+    closeRunningSteps("unk", this.now());
     this.toolProgressTimer = clear(this.toolProgressTimer);
     this.clearReasoning();
     this.idle();
@@ -762,3 +781,24 @@ export class InfiniteTurnController {
 export const turnController = new InfiniteTurnController();
 
 export { getTurnState, resetTurnState };
+
+/** A tool call's status, as the Steps strip draws it, from what the transport reported. */
+function stepStatusOf(status: string | undefined): StepStatus {
+  switch (status) {
+    case "error":
+    case "too_expensive":
+      return "fail";
+    case "requires_confirmation":
+    case "needs_clarification":
+      return "wait";
+    case "unsupported":
+    case "not_implemented":
+      return "off";
+    case "low_coverage":
+      return "part";
+    case "queued":
+      return "bg";
+    default:
+      return "ok";
+  }
+}

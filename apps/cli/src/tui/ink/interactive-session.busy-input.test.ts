@@ -3,6 +3,8 @@ import { PassThrough } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 
+import { stripAnsi } from "../lib/display-width.js";
+
 import {
   applyComposerEdit,
   applyCompletionSuggestion,
@@ -114,7 +116,8 @@ describe("Ink busy input handling", () => {
     const stopAt = afterEsc.lastIndexOf("■ Stopped.");
     expect(afterEsc.lastIndexOf("PARTIAL-ANSWER-TEXT")).toBeGreaterThan(-1);
     expect(afterEsc.lastIndexOf("PARTIAL-ANSWER-TEXT")).toBeLessThan(stopAt);
-    expect(afterEsc).toMatch(/Pause Entity\("Hook B"\) · stopped/);
+    // The running call keeps its Steps row, marked stopped (no raw tool id).
+    expect(stripAnsi(afterEsc)).toMatch(/pausing entity[^\n]*■ stopped/u);
 
     await sendKeys(input, "second\r");
     await waitFor(() => signals.length === 2, 4_000, output.text);

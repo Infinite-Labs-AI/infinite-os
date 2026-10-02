@@ -403,9 +403,9 @@ describe("cli smoke", () => {
 
     const plain = stripAnsi(rendered);
     expect(plain).toContain("╔ ∞ Infinite ");
-    expect(plain).toContain("╭─ ∞ Infinite ");
-    expect(plain).toContain("│ You have 31 followers.");
-    expect(plain).toContain("╰");
+    // The r4 answer: `∞` and the words, no box (terminal-r4).
+    expect(plain).toContain("∞ You have 31 followers.");
+    expect(plain).not.toContain("╭─");
     expect(plain).toContain("session cli-session");
     expect(plain).toContain("model codex:gpt-5.4");
     expect(plain).toContain("tokens 10/4");
@@ -643,9 +643,10 @@ describe("cli smoke", () => {
 
     expect(rendered).toContain("∞ Infinite");
     expect(rendered).toContain("Revenue is up.");
-    expect(rendered).toContain("tools 1");
-    expect(rendered).toContain("Run Metric Query");
-    expect(rendered).toContain("metric=recognized_revenue");
+    // One Steps row per call: a friendly label and the result, never the call's arguments.
+    expect(stripAnsi(rendered)).toContain("─ Steps ");
+    expect(rendered).toContain("running metric query");
+    expect(rendered).not.toContain("metric=recognized_revenue");
     expect(rendered).toContain("1 row");
     expect(rendered).toContain("1 source");
     expect(rendered).toContain("session cli-session");
@@ -1690,9 +1691,10 @@ describe("cli smoke", () => {
 
     expect(rendered).toContain("thinking");
     expect(rendered).toContain("Compare revenue against traffic freshness.");
-    expect(rendered).toContain("tools 1");
-    expect(rendered).toContain("Run Metric Query(\"recognized revenue\")");
-    expect(rendered).toContain("recognized_revenue=9800");
+    expect(rendered).toContain("─ Steps ");
+    expect(rendered).toContain("running metric query");
+    // r4's result column is 22 wide: a longer result is cut with an ellipsis.
+    expect(rendered).toContain("✓ recognized_revenue=98…");
     expect(rendered).toContain("Revenue is up.");
     expect(rendered).toContain("session session-1");
     expect(rendered).toContain("model codex:gpt-5.4");
@@ -1718,12 +1720,10 @@ describe("cli smoke", () => {
 
     const rendered = renderInfiniteTranscript({ state: getTurnState() }, { columns: 72, color: false, nowMs: 3_400 });
 
-    expect(rendered).toContain("running 1");
-    expect(rendered).toContain("Run Breakdown Query");
-    expect(rendered).toContain("call_2");
-    expect(rendered).toContain("started");
-    expect(rendered).toContain("traffic by channel");
-    expect(rendered).toContain("2.4s");
+    // A running call is a Steps row with a spinner and a ╍╍ tail, no raw id or arguments.
+    expect(rendered).toContain("running breakdown query");
+    expect(rendered).toMatch(/╍╍ [\u2800-\u28ff]/u);
+    expect(rendered).not.toContain("call_2");
     expect(rendered).toContain("2 todos left");
     expect(rendered).toContain("Compare channel mix");
     expect(rendered).toContain("Draft recommendation");
@@ -2052,7 +2052,7 @@ describe("cli smoke", () => {
     expect(snapshots.join("\n")).toContain("Revenue is up.");
     expect(rendered).toContain("∞ Infinite Runtime");
     expect(rendered).toContain("Revenue is up.");
-    expect(rendered).toContain("Run Metric Query");
+    expect(rendered).toContain("running metric query");
     expect(rendered).toContain("session runtime-session");
     expect(rendered).toContain("Type a message.");
     expect(snapshots.join("\n")).not.toContain("Post-unsubscribe update.");
@@ -2090,8 +2090,7 @@ describe("cli smoke", () => {
 
     expect(rendered).toContain("∞ Infinite TUI");
     expect(rendered).toContain("Checking source coverage.");
-    expect(rendered).toContain("Run Metric Query");
-    expect(rendered).toContain("recognized revenue");
+    expect(rendered).toContain("running metric query");
     expect(rendered).toContain("session session-1");
     expect(rendered).toContain("Type a message.");
   });
@@ -2589,9 +2588,8 @@ describe("cli smoke", () => {
     progress.stop();
 
     const output = stripAnsi(chunks.join(""));
-    expect(output).toContain("╭─ Infinite ");
-    expect(output).toContain("│ Revenue is up.");
-    expect(output).toContain("╰");
+    expect(output).toContain("∞ Revenue is up.");
+    expect(output).not.toContain("╭─");
 
     const rendered = stripAnsi(renderCliResultForStream(
       { ok: true, sessionId: "session-1", message: "Revenue is up.", provenance: [], actionCalls: [] },
@@ -2659,9 +2657,9 @@ describe("cli smoke", () => {
 
     expect(chunks.join("")).toContain("Revenue is up.");
     expect(rendered).toContain("∞ Infinite");
-    expect(rendered).toContain("tools 1");
-    expect(rendered).toContain("Run Metric Query");
-    expect(rendered).toContain("metric=recognized_revenue");
+    expect(stripAnsi(rendered)).toContain("─ Steps ");
+    expect(rendered).toContain("running metric query");
+    expect(rendered).not.toContain("metric=recognized_revenue");
     expect(rendered).toContain("tokens 12/5");
     expect(rendered).not.toContain("Revenue is up.");
   });
@@ -2760,12 +2758,10 @@ describe("cli smoke", () => {
     expect(output).toContain("∞ Infinite");
     expect(output).toContain("thinking");
     expect(output).toContain("Checking source coverage.");
-    expect(output).toContain("running 1");
-    expect(output).toContain("Run Metric Query");
-    expect(output).toContain("recognized revenue");
-    expect(output).toContain("recognized revenue by source");
-    expect(output).toContain("1 update");
-    expect(output).toContain("call_1");
+    // The running call's Steps row shows its latest progress as its result.
+    expect(output).toContain("running metric query");
+    expect(output).toContain("recognized revenue by…");
+    expect(output).not.toContain("call_1");
     expect(output).toContain("session session-1");
     expect(output).toContain("Type a message.");
     expect(output).toContain("\u001b[");
@@ -2845,8 +2841,7 @@ describe("cli smoke", () => {
     expect(output).toContain("∞ Infinite TUI");
     expect(output).toContain("thinking");
     expect(output).toContain("Checking source coverage.");
-    expect(output).toContain("Run Metric Query");
-    expect(output).toContain("recognized revenue");
+    expect(output).toContain("running metric query");
     expect(output).toContain("session session-1");
     expect(output).toContain("Type a message.");
     expect(output).toContain("\u001b[?25h\u001b[?1049l");
@@ -2920,10 +2915,10 @@ describe("cli smoke", () => {
     progress.stop();
 
     const streamed = stripAnsi(chunks.join(""));
-    expect(streamed).toContain("│ Metric   Value");
-    expect(streamed).toContain("│ Revenue  $123");
-    expect(streamed).toContain("│ Signups  45");
-    expect(streamed).toContain("│ Done.");
+    expect(streamed).toContain("∞ Metric   Value");
+    expect(streamed).toContain("  Revenue  $123");
+    expect(streamed).toContain("  Signups  45");
+    expect(streamed).toContain("  Done.");
     expect(streamed).not.toContain("---:");
   });
 
@@ -2955,7 +2950,7 @@ describe("cli smoke", () => {
     const written = chunks.join("");
     expect(written).not.toContain("\u001b]0;pwned");
     expect(written).not.toContain("\u202e");
-    expect(stripAnsi(written)).toMatch(/│ Before after +mirror/);
+    expect(stripAnsi(written)).toMatch(/∞ Before after +mirror/);
   });
 
   it("draws markdown tables as bordered tables in final TTY assistant panels", () => {

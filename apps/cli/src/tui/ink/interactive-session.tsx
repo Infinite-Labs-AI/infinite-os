@@ -66,7 +66,6 @@ import {
   inkLatestTurnRows,
   inkTranscriptLayout,
   InkTranscriptApp,
-  renderCommittedTranscriptLines,
   transcriptColumns,
   useInfiniteTranscriptClock
 } from "./transcript-app.js";
@@ -83,7 +82,7 @@ import {
 import { useTerminalColumns, useTerminalRows } from "./terminal-columns.js";
 import { resolveViewKey, turnAsk, viewFocusAfterTurnDone, viewKeyHints, type ViewFocusState } from "../views/focus.js";
 import { clipboardSequence, copyTargets, copyThroughPbcopy } from "../views/clipboard.js";
-import { renderLiveTurn, type LiveTurnRender } from "../views/layout.js";
+import { renderCommittedTurn, renderLiveTurn, type LiveTurnRender } from "../views/layout.js";
 import {
   approvalRender,
   cancelCardField,
@@ -595,22 +594,21 @@ export function InkInteractiveSessionApp({
       return;
     }
     const turn = historyRef.current;
-    const views = getTurnState().views;
-    // A turn with answer views commits in the same two-pane layout it was shown in.
+    const { views, steps } = getTurnState();
+    // Scrollback is ONE column at any width (River, 2026-10-02): the question,
+    // the answer, its views underneath, then its Steps, under a thin rule.
     const latest: CommittedEntry | null = turn.length || views.length
       ? {
           id: `turn:${++turnSeq.current}`,
-          lines: views.length
-            ? renderLiveTurn({
-                messages: turn,
-                views: views.map((frame) => frame.view),
-                focus: viewFocusRef.current,
-                width: transcriptColumns(columns),
-                color: colorEnabled(t),
-                theme: t,
-                rows: liveTurnRowsRef.current
-              }).lines
-            : renderCommittedTranscriptLines({ agentTitle, messages: turn }, { columns, theme: t })
+          lines: renderCommittedTurn({
+            messages: turn,
+            views: views.map((frame) => frame.view),
+            focus: viewFocusRef.current,
+            steps,
+            width: transcriptColumns(columns),
+            color: colorEnabled(t),
+            theme: t
+          })
         }
       : null;
     const home: CommittedEntry | null = homeInventory && !homeCommitted && turn.length === 0
@@ -671,6 +669,7 @@ export function InkInteractiveSessionApp({
   // page fits on screen. `renderTurnAt` draws it at a given row count, cached
   // for this set of inputs.
   const turnViews = turnState.views;
+  const turnSteps = turnState.steps;
   const renderTurnAt = useMemo(() => {
     if (busy || !turnViews.length) {
       return null;
@@ -685,6 +684,7 @@ export function InkInteractiveSessionApp({
         messages: history,
         views: turnViews.map((frame) => frame.view),
         focus: viewFocus,
+        steps: turnSteps,
         width: transcriptColumns(columns),
         color: colorEnabled(t),
         theme: t,
@@ -693,7 +693,7 @@ export function InkInteractiveSessionApp({
       cache.set(turnRows, drawn);
       return drawn;
     };
-  }, [busy, columns, history, t, turnViews, viewFocus]);
+  }, [busy, columns, history, t, turnSteps, turnViews, viewFocus]);
   const idleTranscript = useMemo(
     () => ({ agentTitle, messages: [], state: turnState }),
     [agentTitle, turnState]
