@@ -1503,10 +1503,29 @@ const UNSUPPORTED_PRODUCT_PLATFORM =
 // Printed once, on the first-ever run (D4): every later session opens straight
 // into its frame. The "Use Infinite wherever you prefer" block is also in
 // `infinite --help`.
+const DESKTOP_READY_LINE = "✓ Infinite Desktop is ready\n\n";
 const DESKTOP_READY_HANDOFF =
-  "✓ Infinite Desktop is ready\n\n" +
+  DESKTOP_READY_LINE +
   "∞ Infinite is ready\n\n" +
   `${USE_INFINITE_ANYWHERE.join("\n")}\n\n`;
+
+/**
+ * What the Desktop session prints before its frame (D4). The first-ever run
+ * prints the whole hand-off (and the session then shows the inventory) and
+ * records the marker; a later run prints nothing, except that finishing
+ * onboarding always confirms Desktop is ready.
+ */
+export function desktopSessionOpening(
+  env: CliEnv,
+  options: { afterOnboarding: boolean }
+): { firstRun: boolean; text: string } {
+  const firstRun = isFirstEverRun(env);
+  if (firstRun) {
+    recordInfiniteWelcomeSeen(env);
+    return { firstRun, text: DESKTOP_READY_HANDOFF };
+  }
+  return { firstRun, text: options.afterOnboarding ? DESKTOP_READY_LINE : "" };
+}
 
 type ProductReadyContinuation = () => Promise<void>;
 
@@ -1545,7 +1564,7 @@ export async function runInteractiveEntry(
     if (result === "ready") {
       // Onboarding completes INTO the session (spec §6.2): once Desktop is
       // ready, continue straight into the proxied chat — never dead-end.
-      await runDesktopInteractiveEntry(env);
+      await runDesktopInteractiveEntry(env, { afterOnboarding: true });
       return;
     }
     if (result === "interrupted") {
@@ -1678,7 +1697,10 @@ function readDesktopOnboardingState(env: CliEnv): OnboardingState | null {
 // The cloud brain path: negotiate the Desktop bridge, then reuse the shared shell
 // (Ink chrome + turnController) with a STRIPPED desktop `onSubmitLine` fork — no
 // `@`-pins, `/project`, or `/resume`. One `sessionId` is threaded across turns.
-async function runDesktopInteractiveEntry(env: CliEnv): Promise<void> {
+async function runDesktopInteractiveEntry(
+  env: CliEnv,
+  options: { afterOnboarding: boolean } = { afterOnboarding: false }
+): Promise<void> {
   const interactiveWorkspace = interactiveWorkspaceForCli(env, processCwd());
   // Initial gate: a live ready bridge is required before the shell opens (this
   // also yields the workspace name for the banner). It is NOT trusted for the
@@ -1715,11 +1737,12 @@ async function runDesktopInteractiveEntry(env: CliEnv): Promise<void> {
   });
   const turnAbort = new AbortController();
   // The first-ever run opens with the Desktop hand-off block and the
-  // inventory; every later run opens straight into the frame (D4).
-  const firstRun = isFirstEverRun(env);
-  if (firstRun) {
-    output.write(DESKTOP_READY_HANDOFF);
-    recordInfiniteWelcomeSeen(env);
+  // inventory; every later run opens straight into the frame (D4), after a
+  // one-line "Desktop is ready" when onboarding just finished.
+  const opening = desktopSessionOpening(env, options);
+  const firstRun = opening.firstRun;
+  if (opening.text) {
+    output.write(opening.text);
   }
 
   if (shouldUseInkInteractiveSession(input, output, env)) {

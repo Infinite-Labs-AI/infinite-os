@@ -1,4 +1,4 @@
-import { mkdtempSync } from "node:fs";
+import { existsSync, mkdtempSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
+  desktopSessionOpening,
   helpInventory,
   homeInventoryCommands,
   homeInventoryData,
@@ -190,5 +191,28 @@ describe("the first-ever run (D4: the wordmark, inventory and App/Terminal block
     recordInfiniteWelcomeSeen(env);
     expect(isFirstEverRun(env)).toBe(false);
     expect(isFirstEverRun({ ...env, INFINITE_FORCE_WELCOME: "1" } as CliEnv)).toBe(true);
+  });
+});
+
+describe("the Desktop session's opening (D4)", () => {
+  it("prints the full hand-off once, records the marker and asks for the inventory; later runs open on the frame", () => {
+    const home = mkdtempSync(join(tmpdir(), "infinite-desktop-opening-"));
+    const env = { HOME: home, GROWTH_OS_HOME: home } as CliEnv;
+    const first = desktopSessionOpening(env, { afterOnboarding: false });
+    expect(first.firstRun).toBe(true);
+    expect(first.text.startsWith("✓ Infinite Desktop is ready\n\n")).toBe(true);
+    expect(first.text).toContain("Use Infinite wherever you prefer:");
+    expect(existsSync(join(home, "welcome-seen"))).toBe(true);
+    expect(desktopSessionOpening(env, { afterOnboarding: false })).toEqual({ firstRun: false, text: "" });
+  });
+
+  it("always confirms Desktop is ready right after onboarding, even when the welcome was already seen", () => {
+    const home = mkdtempSync(join(tmpdir(), "infinite-desktop-opening-"));
+    const env = { HOME: home, GROWTH_OS_HOME: home } as CliEnv;
+    recordInfiniteWelcomeSeen(env);
+    expect(desktopSessionOpening(env, { afterOnboarding: true })).toEqual({
+      firstRun: false,
+      text: "✓ Infinite Desktop is ready\n\n"
+    });
   });
 });
