@@ -87,6 +87,13 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
   const check = deps.installer.buildPlan(scan, keys, inputs.before, candidates)
   const approvedIds = new Set(state.plan.lines.map((line) => line.id))
   if (check.lines.length !== approvedIds.size || check.lines.some((line) => !approvedIds.has(line.id))) {
+    // Forget the old plan so the resume re-runs `plan` and asks again: the engine skips a step whose
+    // record is ok with unchanged inputs, which would park here on every resume (P2-15).
+    ctx.state.update((current) => {
+      delete current.steps.plan
+      current.plan = null
+    })
+    await ctx.state.save()
     return { kind: "parked", code: "INF_WIZ_NEEDS_ANSWERS", reason: "The saved plan changed; re-confirm it.", resumeHint: PARK_HINT }
   }
   const approved = new Set(state.plan.lines.filter((line) => line.approved === true).map((line) => line.id))
@@ -94,9 +101,9 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
   // Engine invariant (§3a.9.4): no state-changing verb while an agent child is alive.
   if (deps.agents.isAgentAlive()) throw new Error("An agent is still running; the site source is not changed while one runs.")
 
-  // ---- the site source + the consent answer ----
+  // ---- the site source + the consent answer: ONLY behind an approved Infinite line (P2-20) ----
   const installInfinite = check.lines.some((line) => line.kind === "install_provider" && line.id.startsWith("install_provider:infinite") && approved.has(line.id))
-  if (installInfinite || keys.infinite.status === "ready") {
+  if (installInfinite) {
     const hosts = siteSourceHosts(keys, inputs.hosting, inputs.before.observedProductionHost)
     if (hosts.length === 0) {
       sub(ctx, "Infinite does not know your production domain yet: Infinite's tag is not installed this run", "warn")

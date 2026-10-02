@@ -11,8 +11,8 @@ import type { TagHosting, TagKeys } from "../wizard/contracts/bridge.js"
 import type { ChecklistItem, PlanApprovals } from "../wizard/contracts/jobs.js"
 import { WIZARD_PATHS, WIZARD_STATE_FILE_MODE } from "../wizard/contracts/state.js"
 
-import { readBeforeFacts } from "./before-facts.js"
-import type { WizardBeforeFacts } from "./plan-model.js"
+import { narrowKeysToChoices, readBeforeFacts, readKeysChoices } from "./before-facts.js"
+import type { GuardDecision, WizardBeforeFacts } from "./plan-model.js"
 
 export const PLAN_APPROVALS_RELATIVE_PATH = `${WIZARD_PATHS.dir}/plan-approvals.json`
 const PLAN_APPROVALS_SCHEMA = "infinite-tag.plan-approvals.v1" as const
@@ -27,6 +27,11 @@ export interface SavedPlanApprovals {
   approvals: PlanApprovals
   /** The approved privacy paragraph (job 14 inserts it verbatim), or null. */
   privacyText: string | null
+  /**
+   * The preview guard the plan decided (exempt production hosts + deny list), persisted so job 7 (the
+   * agent's guard on an ADOPTED init) uses exactly the hosts the managed guard uses, never its own pick.
+   */
+  guard?: GuardDecision | null
 }
 
 export async function savePlanApprovals(ctx: WizardContext, deps: WizardDeps, saved: Omit<SavedPlanApprovals, "schema">): Promise<void> {
@@ -68,12 +73,17 @@ export interface PlanInputs {
  * are re-read from the app and the static census re-run, with NO live facts (never invented).
  */
 export async function loadPlanInputs(ctx: WizardContext, deps: WizardDeps): Promise<PlanInputs | { missingCapability: string }> {
+  // The `keys` step's GA4 stream / Meta pixel choice narrows the connection's keys (P1-9).
+  const choices = await readKeysChoices(deps.fs, ctx.root)
   const saved = await readBeforeFacts(deps.fs, ctx.root, ctx.runId)
-  if (saved) return { before: saved, keys: saved.keys, hosting: saved.hosting, liveFacts: saved.dryLive !== null }
+  if (saved) {
+    const keys = narrowKeysToChoices(keysOnly(saved.keys), choices)
+    return { before: { ...saved, keys }, keys, hosting: saved.hosting, liveFacts: saved.dryLive !== null && saved.dryLive !== undefined }
+  }
   for (const capability of ["tag.keys.v1", "tag.hosting.v1"] as const) {
     if (!deps.bridge.has(capability)) return { missingCapability: capability }
   }
-  const keys = keysOnly(await deps.bridge.keys({ signal: ctx.signal }))
+  const keys = narrowKeysToChoices(keysOnly(await deps.bridge.keys({ signal: ctx.signal })), choices)
   const hosting = hostingOnly(await deps.bridge.hosting(undefined, { signal: ctx.signal }))
   const census = await deps.checks.census(ctx.root, ctx.appRoot)
   return {

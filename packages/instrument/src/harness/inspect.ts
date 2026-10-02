@@ -28,7 +28,7 @@ import type {
 } from "../types.js"
 import { DEFAULT_INFINITE_COLLECT_PATH } from "../workspace-artifacts.js"
 
-import { lineNumberAt, readSourceFile, walkSourceFiles } from "./scan.js"
+import { lineNumberAt, readSourceFile, scanSourceFiles, walkSourceFiles } from "./scan.js"
 import type {
   DetectedProvider,
   HarnessFailureCode,
@@ -59,10 +59,11 @@ function signaturesIn(contents: string): Array<Omit<DetectedProviderEvidence, "f
  * in several files is one install (first file in walk order wins); two different ids for one
  * provider come back as two entries, which `classifyProviders` reports as a conflict.
  */
-export function detectProvidersWithEvidence(appRootAbsolute: string): DetectedProviderEvidence[] {
+export function detectProvidersWithEvidence(appRootAbsolute: string, options: { includePublic?: boolean } = {}): DetectedProviderEvidence[] {
   const entries: DetectedProviderEvidence[] = []
   const seen = new Set<string>()
-  for (const file of walkSourceFiles(appRootAbsolute)) {
+  const files = options.includePublic ? scanSourceFiles(appRootAbsolute, { includePublic: true }).files : walkSourceFiles(appRootAbsolute)
+  for (const file of files) {
     const raw = readSourceFile(appRootAbsolute, file)
     if (raw === null || isManagedInfiniteFile(raw)) continue
     const contents = raw.replace(managedHtmlBlock, block => block.replace(/[^\n]/g, " "))

@@ -318,3 +318,127 @@ describe("the receipt in a fresh process (O3 records agent edits, O4 refreshes a
     expect(read(root, "index.html")).toBe(STATIC_HTML)
   })
 })
+
+describe("review fixes (O7 fix round)", () => {
+  const noVercel = { provider: "none" as const, vercel: null }
+
+  async function run(root: string, keys = fakeKeys(), hosting = fakeHosting(), answer?: (plan: PlanModel) => { approved: string[]; declined: string[]; edits: Record<string, string> }, options: Partial<InstallerOptions> = {}) {
+    const subject = installer(options)
+    const scan = await subject.scan({ root, hosting })
+    const plan = subject.buildPlan(scan, keys, fakeBefore({ keys, hosting }), [])
+    const result = (await subject.apply(plan, answer ? answer(plan) : approveAll(plan))) as WizardApplyResult
+    return { subject, plan, result }
+  }
+
+  it("P1-3: a second run keeps the first run's edits; uninstall then reverses every one of them", async () => {
+    const root = makeSite({ "index.html": ADOPTED_META_HTML })
+    const keysWithoutPosthog = fakeKeys({ posthog: { status: "not_connected", projectKey: null, apiHost: null, ingestHost: null, uiHost: null, region: null } })
+    const first = await run(root, keysWithoutPosthog)
+    expect(first.result.ok).toBe(true)
+    const firstEdits = readInstallManifest(root)!.edits!.map((edit) => edit.id)
+    expect(firstEdits.length).toBeGreaterThanOrEqual(2)
+    // Run 2: PostHog is newly connected; the managed block changes on the same page.
+    const second = await run(root, fakeKeys())
+    expect(second.result.ok).toBe(true)
+    expect(read(root, "index.html")).toContain(IDS.posthog)
+    const edits = readInstallManifest(root)!.edits!
+    expect(edits.map((edit) => edit.id).slice(0, firstEdits.length)).toEqual(firstEdits)
+    const report = await second.subject.uninstall({ root, dryRun: false })
+    expect(report.leftAsIs).toEqual([])
+    expect(read(root, "index.html")).toBe(ADOPTED_META_HTML)
+  })
+
+  it("P1-4 + P2-12: declining 'Update …' on a re-run KEEPS the managed tags and their ids (never drops them)", async () => {
+    const root = makeSite({ "index.html": STATIC_HTML })
+    expect((await run(root)).result.ok).toBe(true)
+    const installed = read(root, "index.html")
+    const second = await run(root, fakeKeys(), fakeHosting(), (plan) => {
+      const updates = plan.lines.filter((line) => line.kind === "install_provider" && !line.id.startsWith("install_provider:infinite")).map((line) => line.id)
+      const all = approveAll(plan)
+      return { ...all, approved: all.approved.filter((id) => !updates.includes(id)), declined: updates }
+    })
+    expect(second.result.ok).toBe(true)
+    const html = read(root, "index.html")
+    for (const id of [IDS.ga4, IDS.posthog, IDS.meta]) expect(html).toContain(id)
+    expect(html).toBe(installed)
+    expect(readInstallManifest(root)!.providers).toEqual(expect.arrayContaining(["ga4", "posthog", "meta", "infinite"]))
+    expect(readInstallManifest(root)!.ids).toEqual({ ga4: [IDS.ga4], posthog: { projectKey: IDS.posthog, apiHost: "/ingest" }, meta: [IDS.meta], infinite: { siteSourceKey: IDS.siteSource } })
+  })
+
+  it("P1-5: a static site NOT served by Vercel installs PostHog straight to its region — no /ingest, no vercel.json", async () => {
+    const root = makeSite({ "index.html": STATIC_HTML })
+    const { plan, result } = await run(root, fakeKeys(), noVercel)
+    expect(result.ok).toBe(true)
+    expect(result.artifacts.posthog).toMatchObject({ apiHost: "https://us.i.posthog.com" })
+    expect(result.artifacts.posthog?.proxy).toBeUndefined()
+    expect(exists(root, "vercel.json")).toBe(false)
+    expect(plan.lines.find((line) => line.id.startsWith("install_provider:posthog"))?.text).not.toContain("/ingest")
+    expect(readInstallManifest(root)!.ids?.posthog?.apiHost).toBe("https://us.i.posthog.com")
+  })
+
+  it("P1-6: a static site off Vercel is still installable — Infinite becomes a user-action line, the other tools install", async () => {
+    const root = makeSite({ "index.html": STATIC_HTML })
+    const { plan, result } = await run(root, fakeKeys(), noVercel)
+    expect(result).toMatchObject({ ok: true })
+    expect(plan.lines.some((line) => line.id.startsWith("install_provider:infinite"))).toBe(false)
+    expect(plan.lines.find((line) => line.id === "user_action:infinite_blocked")?.text).toMatch(/not served through Vercel/)
+    const html = read(root, "index.html")
+    expect(html).toContain(IDS.ga4)
+    expect(html).not.toContain(IDS.siteSource)
+  })
+
+  it("P1-8: an adopted gtag in public/ is detected on a static site — no second managed GA4 on that page", async () => {
+    const gtag = `<script async src="https://www.googletagmanager.com/gtag/js?id=${IDS.ga4}"></script>\n    <script>window.dataLayer=[];function gtag(){dataLayer.push(arguments)}gtag('js', new Date());gtag('config', '${IDS.ga4}');</script>\n  </head>`
+    const root = makeSite({ "index.html": STATIC_HTML, "public/landing.html": STATIC_HTML.replace("</head>", gtag) })
+    const subject = installer()
+    const scan = await subject.scan({ root, hosting: fakeHosting() })
+    expect(scan.detected.some((entry) => entry.provider === "ga4" && entry.file === "public/landing.html")).toBe(true)
+    const plan = subject.buildPlan(scan, fakeKeys(), fakeBefore(), [])
+    expect(plan.lines.some((line) => line.id.startsWith("install_provider:ga4"))).toBe(false)
+    expect((await subject.apply(plan, approveAll(plan))).ok).toBe(true)
+    expect(read(root, "public/landing.html").match(new RegExp(`config', '${IDS.ga4}'`, "g"))).toHaveLength(1)
+  })
+
+  it("P2-11: the npm line never runs when the server lane is declined", async () => {
+    const root = makeSite({ "index.html": STATIC_HTML, "vercel.json": "{}\n", "package.json": `{"name":"acme"}\n`, "package-lock.json": `{"lockfileVersion":3}\n` })
+    const calls: string[][] = []
+    const spawn = async (command: string, args: readonly string[]) => {
+      calls.push([command, ...args])
+      return { code: 0, signal: null, timedOut: false, outputTail: "" }
+    }
+    const subject = installer({ spawn: spawn as never })
+    const scan = await subject.scan({ root, hosting: fakeHosting() })
+    const plan = subject.buildPlan(scan, fakeKeys(), fakeBefore(), [])
+    expect(plan.lines.some((line) => line.id === "npm_install")).toBe(true)
+    const all = approveAll(plan)
+    const result = await subject.apply(plan, { ...all, approved: all.approved.filter((id) => id !== "server_lane"), declined: ["server_lane"] })
+    expect(result.ok).toBe(true)
+    expect(calls).toEqual([])
+    expect(read(root, "package.json")).toBe(`{"name":"acme"}\n`)
+  })
+
+  it("P3-21: a build-failure rollback removes the server-lane files too (nothing left half-installed)", async () => {
+    const root = makeSite({ "index.html": STATIC_HTML, "vercel.json": "{}\n" })
+    const subject = installer({ build: async () => ({ ok: false, failureSignature: ["new failure"], durationMs: 1 }) })
+    const scan = await subject.scan({ root, hosting: fakeHosting() })
+    const before: WizardBeforeFacts = { ...fakeBefore(), baselineBuild: { ok: true, failureSignature: [], durationMs: 1 } }
+    const plan = subject.buildPlan(scan, fakeKeys(), before, [])
+    expect(plan.lines.some((line) => line.id === "server_lane")).toBe(true)
+    const answer = approveAll(plan)
+    const result = await subject.apply(plan, { ...answer, approved: answer.approved.filter((id) => id !== "npm_install") })
+    expect(result).toMatchObject({ ok: false, rolledBack: true })
+    expect(exists(root, "docs/infinite-server-lane.md")).toBe(false)
+    expect(exists(root, "middleware.ts")).toBe(false)
+    expect(read(root, "index.html")).toBe(STATIC_HTML)
+    expect(read(root, "vercel.json")).toBe("{}\n")
+  })
+
+  it("P3-22: a receipt that parses but fails the shape check is never overwritten by a rebuild", async () => {
+    const root = makeSite({ "index.html": STATIC_HTML })
+    mkdirSync(join(root, ".infinite"), { recursive: true })
+    const newer = `{"workspaceId":"wizard:abababababababab","appRoot":".","framework":"static-html","providers":"a newer shape"}\n`
+    writeFileSync(join(root, ".infinite/install.json"), newer)
+    await expect(installer().scan({ root, hosting: fakeHosting() })).rejects.toThrow(/Corrupt/)
+    expect(read(root, ".infinite/install.json")).toBe(newer)
+  })
+})

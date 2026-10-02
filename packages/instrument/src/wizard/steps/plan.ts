@@ -7,7 +7,7 @@
 // (INF_WIZ_NEEDS_ANSWERS, exit 3): `install` cannot create the site source without it.
 import { createHash } from "node:crypto"
 
-import { gateSeededItems, resolvePlanAnswers } from "../../install/plan-model.js"
+import { gateSeededItems, resolvePlanAnswers, withGuardHosts, type WizardPlanModel } from "../../install/plan-model.js"
 import { keysOnly, loadPlanApprovals, loadPlanInputs, planCandidates, savePlanApprovals } from "../../install/step-inputs.js"
 import { ASK_CANCELLED, ASK_TIMEOUT } from "../contracts/asks.js"
 import type { StepOutcome, WizardContext, WizardDeps, WizardStep } from "../contracts/deps.js"
@@ -80,7 +80,8 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
     beforeAt: ctx.state.get().steps.before?.at ?? null,
     candidates,
     approvals: resolved.approvals,
-    privacyText: resolved.privacyText
+    privacyText: resolved.privacyText,
+    guard: (plan as Partial<WizardPlanModel>).guard ?? null
   })
 
   if (resolved.consentMode === null) {
@@ -94,8 +95,12 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
   }
 
   // The approved lines decide which candidates become jobs; the gate re-checks the adopted-provider rule.
+  // The plan's own seeds (an improve line no detector candidate links) pass the same gate, so an
+  // approved line always has a job or a code edit behind it.
+  const wizardPlan = plan as Partial<WizardPlanModel>
   const applied = deps.registry.applyApprovals(candidates, plan, resolved.approvals)
-  const items = gateSeededItems(plan, resolved, applied)
+  const seeded = (wizardPlan.seeds ?? []).filter((seed) => !applied.some((item) => item.id === seed.id))
+  const items = withGuardHosts(gateSeededItems(plan, resolved, [...applied, ...seeded]), wizardPlan.guard ?? null)
   ctx.state.update((state) => {
     state.jobs = items
   })

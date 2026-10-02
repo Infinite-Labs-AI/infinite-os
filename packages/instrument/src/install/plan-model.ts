@@ -61,6 +61,19 @@ export interface PlanScanFacts {
   npm: { commandLine: string } | { refused: string } | null
   /** D17 detector output (O6): sensitive paths, e.g. `/account`. */
   sensitivePaths: string[]
+  /** Repo-root-relative app root (the files of items this plan seeds are repo-relative). Default ".". */
+  appRoot?: string
+  /**
+   * A NEW PostHog can be served through `/ingest` on the site's own domain: Next (its own rewrites, any
+   * host), or a static/Vite site Vercel serves (vercel.json). Elsewhere it installs straight to its
+   * region (an `/ingest` api_host would 404). Default true.
+   */
+  posthogProxy?: boolean
+  /**
+   * Why Infinite's pixel cannot be installed by the wizard on this site (null = it can). A static/Vite
+   * site not served by Vercel has no same-origin collect path the wizard can write.
+   */
+  infiniteBlocked?: string | null
 }
 
 export interface PlanAgentSummary {
@@ -92,8 +105,20 @@ export type GuardDecision =
 /** The plan model plus what `apply` needs (never shown, never hashed separately). */
 export interface WizardPlanModel extends PlanModel {
   guard: GuardDecision
-  /** The tools this plan installs new (each behind its `install_provider` line). */
+  /** The tools this plan installs or updates (each behind its `install_provider` line). */
   installTools: ProviderId[]
+  /** Tools this install already manages (an unapproved update keeps them as they are, never drops them). */
+  managedTools: ProviderId[]
+  /**
+   * Items this plan seeds itself, for an improve line no detector candidate links (each linked by its
+   * line's `jobIds`, so it passes the same gate): an approved line always has a job or a code edit
+   * behind it, never nothing.
+   */
+  seeds: ChecklistItem[]
+  /** D16's recommendation as DATA (null = none: the meta_goal line is then info, never an answer). */
+  metaGoal: "StartTrial" | "Purchase" | null
+  /** The server lane is offered (its privacy sentence depends on the `server_lane` line's answer). */
+  serverLaneOffered: boolean
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -206,11 +231,23 @@ export function previewShare(baseline: BaselineResponseFields | null | undefined
   return { value: `${((source.preview / total) * 100).toFixed(1)}% of page views were previews`, window }
 }
 
-/** D10: automatic Meta events per visit in `before`'s no-click load (`tr` events other than PageView). Null = not measured. */
-export function automaticMetaEventsPerVisit(before: BeforeFacts): number | null {
+/** The events Meta's automatic configuration (autoConfig) sends by itself: never the site's own `track` calls. */
+export const META_AUTOCONFIG_EVENTS: readonly string[] = ["Microdata", "SubscribedButtonClick"]
+
+/**
+ * D10: automatic Meta events per visit in `before`'s no-click load — only the events autoConfig sends
+ * by itself (Microdata, SubscribedButtonClick), never a site-fired ViewContent or Lead. Null ("—") when
+ * not measured: no dry load, the pixel did not fire at all (held by consent, blocked, a bot wall), or
+ * Traffic Permissions blocked it (§3h.8: undetermined, never "0").
+ */
+export function automaticMetaEventsPerVisit(before: BeforeFacts, pixelId?: string | null): number | null {
   const dry = before.dryLive
   if (!dry || dry.loads.length === 0) return null
-  const automatic = dry.meta.tr.filter((event) => event.ev !== "PageView").length
+  if (dry.environment?.blockedBySiteBotRules) return null
+  if ((dry.meta.console ?? []).includes("traffic_permissions_blocked")) return null
+  const ours = dry.meta.tr.filter((event) => !pixelId || !event.pixelId || event.pixelId === pixelId)
+  if (!ours.some((event) => event.ev === "PageView")) return null
+  const automatic = ours.filter((event) => META_AUTOCONFIG_EVENTS.includes(event.ev)).length
   return Math.round((automatic / dry.loads.length) * 10) / 10
 }
 
@@ -283,10 +320,14 @@ export function draftPrivacyParagraph(tools: readonly ProviderId[], serverLane: 
  */
 function newTools(input: PlanModelInput): { tools: ProviderId[]; ids: Partial<Record<ProviderId, string>> } {
   const adopted = new Set(input.scan.adopted.map((entry) => entry.provider))
-  const { artifacts } = artifactsFromKeysDetailed(input.keys, { consentMode: "not_required", conversionNames: [], privacyText: null, npmInstall: null })
+  const { artifacts } = artifactsFromKeysDetailed(
+    input.keys,
+    { consentMode: "not_required", conversionNames: [], privacyText: null, npmInstall: null },
+    { posthogProxy: input.scan.posthogProxy ?? true }
+  )
   const tools: ProviderId[] = []
   const ids: Partial<Record<ProviderId, string>> = {}
-  if (!adopted.has("infinite")) tools.push("infinite")
+  if (!adopted.has("infinite") && !input.scan.infiniteBlocked) tools.push("infinite")
   if (artifacts.ga4 && !adopted.has("ga4")) {
     tools.push("ga4")
     ids.ga4 = artifacts.ga4.measurementId
@@ -395,11 +436,14 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
         // The public id is part of the line id: approving "GA4 (G-A)" never installs G-B.
         id: id ? `install_provider:${tool}:${id}` : `install_provider:${tool}`,
         kind: "install_provider",
-        text: `${managed ? "Update" : "Install"} ${TOOL_NAME[tool]}${id ? ` (${id}, from your Infinite connection)` : ""}${tool === "posthog" && keys.posthog.region !== "self_hosted" ? " through /ingest on your own domain" : ""}`,
+        text: `${managed ? "Update" : "Install"} ${TOOL_NAME[tool]}${id ? ` (${id}, from your Infinite connection)` : ""}${tool === "posthog" && (scan.posthogProxy ?? true) && (keys.posthog.region === "us" || keys.posthog.region === "eu") ? " through /ingest on your own domain" : ""}`,
         requires: "approval",
         ownership: "managed"
       })
     )
+  }
+  if (scan.infiniteBlocked && !scan.adopted.some((entry) => entry.provider === "infinite")) {
+    lines.push(line({ id: "user_action:infinite_blocked", kind: "user_action", text: `Infinite: ${scan.infiniteBlocked}`, requires: "user_action" }))
   }
   if (scan.serverLane && tools.includes("infinite")) {
     lines.push(
@@ -469,14 +513,17 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
 
   // ---- adopted providers: improve lines, linked to the candidates that need them ----
   const improveLines = scan.improve.filter((entry) => entry.kind !== "preview_guard_adopted" || guard.emit)
-  /** Lines a candidate can link to, by kind + provider + target. */
+  /**
+   * Lines a candidate links to, by EXACT identity (kind + provider + normalised target). There is no
+   * "first line of the kind" fallback: a candidate that matches no line gets a line of its own, so
+   * declining one line can never leave another line's job seeded (P0-1).
+   */
   const linked: Array<{ kind: PlanLineKind; provider: ProviderId | null; target: string; line: PlanLine }> = []
-  const findLinked = (kind: PlanLineKind, provider: ProviderId | null, target: string): PlanLine | undefined => {
-    const sameKind = linked.filter((entry) => entry.kind === kind && (provider === null || entry.provider === provider))
-    return (sameKind.find((entry) => entry.target === target || target.startsWith(`${entry.target}`) || entry.target.startsWith(target)) ?? sameKind[0])?.line
-  }
+  const findLinked = (kind: PlanLineKind, provider: ProviderId | null, target: string): PlanLine | undefined =>
+    linked.find((entry) => entry.kind === kind && entry.provider === provider && entry.target === target)?.line
   const share = previewShare(before.baseline)
-  const automatic = automaticMetaEventsPerVisit(before)
+  const adoptedPixel = scan.adopted.find((entry) => entry.provider === "meta")?.key ?? null
+  const automatic = automaticMetaEventsPerVisit(before, adoptedPixel)
   for (const entry of improveLines) {
     const measured =
       entry.kind === "preview_guard_adopted"
@@ -503,44 +550,57 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
     linked.push({ kind: entry.kind, provider: entry.provider, target: entry.target, line: planLine })
   }
 
-  // Duplicates and conflicts, from the census and the no-send load.
-  for (const finding of duplicateFindings(before)) {
-    if (finding.kind === "duplicate") {
-      const planLine = line({ id: finding.id, kind: "remove_duplicate", text: finding.text, requires: "approval", ownership: "adopted" })
-      lines.push(planLine)
-      linked.push({ kind: "remove_duplicate", provider: finding.provider, target: finding.id, line: planLine })
-    } else {
-      lines.push(line({ id: finding.id, kind: "user_action", text: finding.text, requires: "user_action" }))
-    }
+  // Conflicts (two ids), from the census and the no-send load: the user resolves them.
+  const findings = duplicateFindings(before)
+  for (const finding of findings) {
+    if (finding.kind === "conflict") lines.push(line({ id: finding.id, kind: "user_action", text: finding.text, requires: "user_action" }))
   }
 
-  // Every candidate whose job needs a line is linked to exactly one (created from the candidate when
-  // no detector line exists). A candidate of an adopted-provider job is NEVER left unlinked.
+  // Every candidate whose job needs a line is linked to exactly ONE line of its own identity (created
+  // from the candidate when no improve line matches). A candidate of an adopted-provider job is NEVER
+  // left unlinked. A duplicate (job 6) is always its own line, one per candidate: the measured wording
+  // comes from `before` when the same tool + id was found there.
   for (const item of candidates) {
     const kind = lineKindForCandidate(item)
     if (kind === null || kind === "conversion_names" || kind === "privacy_text") continue
     if (kind === "preview_guard_adopted" && !guard.emit) continue
     const provider = candidateProvider(item)
     const targetName = itemTarget(item) || item.jobId
-    let target = findLinked(kind, provider, targetName)
+    const linkTarget = candidateLinkTarget(item, kind, targetName)
+    let target = findLinked(kind, provider, linkTarget)
     if (!target) {
+      const measured = kind === "remove_duplicate" ? duplicateTextFor(findings, provider, targetName) : null
       target = line({
         id: `${kind}:${provider ?? "site"}:${targetName}`,
         kind,
-        text: item.trigger.finding,
+        text: measured ?? item.trigger.finding,
         requires: "approval",
         ownership: "adopted"
       })
       lines.push(target)
-      linked.push({ kind, provider, target: targetName, line: target })
+      linked.push({ kind, provider, target: linkTarget, line: target })
     }
     target.jobIds = [...new Set([...(target.jobIds ?? []), item.id])]
   }
 
+  // An improve line no candidate links, whose change is (partly) the agent's, gets its own item, so an
+  // approved line always has a job or a code edit behind it (P2-14).
+  const seeds: ChecklistItem[] = []
+  const takenIds = new Set(candidates.map((item) => item.id))
+  for (const entry of improveLines) {
+    const planLine = lines.find((candidateLine) => candidateLine.id === entry.id)
+    if (!planLine || (planLine.jobIds?.length ?? 0) > 0) continue
+    const seed = seedForImproveLine(entry, scan.appRoot ?? ".")
+    if (!seed || takenIds.has(seed.id)) continue
+    takenIds.add(seed.id)
+    seeds.push(seed)
+    planLine.jobIds = [seed.id]
+  }
+
   // ---- Meta: the goal (D16) and the server-events relay (D11) ----
   const metaPresent = tools.includes("meta") || scan.adopted.some((entry) => entry.provider === "meta")
+  const goal = metaPresent ? recommendMetaGoal(conversionNames) : null
   if (metaPresent) {
-    const goal = recommendMetaGoal(conversionNames)
     lines.push(
       line({
         id: "meta_goal",
@@ -548,7 +608,8 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
         text: goal
           ? `Meta goal: ${goal} (${goal === "StartTrial" ? "a SaaS sign-up starts a trial" : "a shop sale"}); change it in Meta any time.`
           : "Meta goal: StartTrial if you sell subscriptions, Purchase if you sell products.",
-        requires: "approval"
+        // With no recommendation there is nothing to approve: the line only informs (never an answer).
+        requires: goal ? "approval" : "info"
       })
     )
   }
@@ -596,7 +657,7 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
   }
 
   // ---- the agent's budget (the cost line in the go-ahead) ----
-  const agentJobs = candidates.filter((item) => item.owner === "agent").length
+  const agentJobs = [...candidates, ...seeds].filter((item) => item.owner === "agent").length
   if (agentJobs > 0) {
     const name = input.agent?.worker === "claude_code" ? "Claude Code" : input.agent?.worker === "codex" ? "Codex" : null
     lines.push(
@@ -617,7 +678,89 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
     privacyText,
     npmInstall
   }
-  return { hash: planHash(lines, decisions), lines, decisions, guard, installTools: tools }
+  return {
+    hash: planHash(lines, decisions),
+    lines,
+    decisions,
+    guard,
+    installTools: tools,
+    managedTools: [...scan.managedProviders],
+    seeds,
+    metaGoal: goal,
+    serverLaneOffered: scan.serverLane !== null && tools.includes("infinite")
+  }
+}
+
+/** The target a candidate links by: job 7's line is per provider (`init`); job 5's capture is `capture`. */
+function candidateLinkTarget(item: ChecklistItem, kind: PlanLineKind, targetName: string): string {
+  if (item.jobId === "preview_guard" || kind === "preview_guard_adopted") return "init"
+  if (kind === "capture_beside_adopted_pixel") return "capture"
+  return targetName
+}
+
+/** A public id in a duplicate target (`ga4_config:G-X`, `meta_init:<id>`, `ga4_gtag:G-X`), else null. */
+function duplicateTargetId(targetName: string): string | null {
+  const colon = targetName.indexOf(":")
+  return colon < 0 ? null : targetName.slice(colon + 1)
+}
+
+/** The measured wording for a job-6 candidate, from `before`'s finding of the same tool AND id. */
+function duplicateTextFor(findings: readonly DuplicateFinding[], provider: ProviderId | null, targetName: string): string | null {
+  const id = duplicateTargetId(targetName)
+  const sameTool = findings.filter((finding) => finding.kind === "duplicate" && finding.provider === provider)
+  if (id !== null) return sameTool.find((finding) => finding.publicId === id)?.text ?? null
+  if (targetName === "ga4_gtag") {
+    const gtm = sameTool.filter((finding) => finding.shape === "gtm_and_gtag")
+    return gtm.length === 1 ? gtm[0]!.text : null
+  }
+  return null
+}
+
+/** The job + target an improve line's own item uses (null: the line's change is all code, or no job fits). */
+function seedJobFor(entry: ImproveLine): { jobId: JobId; target: string } | null {
+  switch (entry.kind) {
+    case "preview_guard_adopted":
+      return entry.provider === "infinite" || entry.provider === "x" ? null : { jobId: "preview_guard", target: entry.provider }
+    case "improve_additive":
+      if (entry.owner === "code" && !(entry.provider === "posthog" && entry.target === "proxy")) return null
+      return entry.provider === "posthog"
+        ? { jobId: "posthog_improve", target: entry.target }
+        : entry.provider === "ga4"
+          ? { jobId: "ga4_improve", target: entry.target }
+          : entry.provider === "meta"
+            ? { jobId: "meta_improve", target: entry.target }
+            : null
+    case "posthog_defaults_bump_adopted":
+      return { jobId: "posthog_improve", target: "defaults" }
+    case "sensitive_pages":
+      return entry.provider === "posthog" ? { jobId: "posthog_improve", target: "sensitive_pages" } : null
+    case "capture_beside_adopted_pixel":
+      return entry.owner === "agent" ? { jobId: "meta_improve", target: "capture" } : null
+    case "autoconfig_off_adopted":
+      return entry.owner === "agent" ? { jobId: "meta_improve", target: "autoconfig_off_adopted" } : null
+    case "retire_fbc_writer":
+      return { jobId: "meta_improve", target: "retire_fbc_writer" }
+    default:
+      return null
+  }
+}
+
+function seedForImproveLine(entry: ImproveLine, appRoot: string): ChecklistItem | null {
+  const job = seedJobFor(entry)
+  if (!job) return null
+  const spec = JOB_TABLE[job.jobId]
+  const file = entry.evidence ? (appRoot === "." ? entry.evidence.file : `${appRoot}/${entry.evidence.file}`) : null
+  return {
+    id: `${job.jobId}:${job.target}`,
+    jobId: job.jobId,
+    n: spec.n,
+    title: spec.title,
+    owner: "agent",
+    trigger: { finding: entry.text, evidence: file && entry.evidence ? [{ file, line: entry.evidence.line }] : [] },
+    allow: { files: file ? [file] : [], create: [] },
+    checks: spec.checks.map((check) => ({ id: check.checkId, tier: check.tier, state: "not_run" as const })),
+    state: "pending"
+  }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -629,6 +772,10 @@ export interface DuplicateFinding {
   kind: "duplicate" | "conflict"
   provider: ProviderId
   text: string
+  /** The public id the finding is about (null for a conflict). */
+  publicId: string | null
+  /** `repeated_init` (one id set up twice) or `gtm_and_gtag` (Tag Manager + a hand-written gtag). */
+  shape: "repeated_init" | "gtm_and_gtag" | null
 }
 
 export function duplicateFindings(before: BeforeFacts): DuplicateFinding[] {
@@ -640,7 +787,8 @@ export function duplicateFindings(before: BeforeFacts): DuplicateFinding[] {
   if (before.dryLive) {
     const perLoad = new Map<string, number>()
     for (const event of before.dryLive.ga4.events) {
-      if (event.en !== "page_view") continue
+      // Only the page view of the load itself: an SPA's after-navigation page view is not a duplicate.
+      if (event.en !== "page_view" || event.afterNav) continue
       const key = `${event.loadLabel}\n${event.tid}`
       perLoad.set(key, (perLoad.get(key) ?? 0) + 1)
     }
@@ -655,7 +803,14 @@ export function duplicateFindings(before: BeforeFacts): DuplicateFinding[] {
   for (const entry of ga4Configs) if (entry.id) byId.set(entry.id, (byId.get(entry.id) ?? 0) + 1)
   for (const [id, count] of byId) {
     if (count > 1) {
-      findings.push({ id: `remove_duplicate:ga4:${id}`, kind: "duplicate", provider: "ga4", text: `GA4: ${id} is set up ${count} times in your code, so page views count more than once. Keep one.` })
+      findings.push({
+        id: `remove_duplicate:ga4:${id}`,
+        kind: "duplicate",
+        provider: "ga4",
+        publicId: id,
+        shape: "repeated_init",
+        text: `GA4: ${id} is set up ${count} times in your code, so page views count more than once. Keep one.`
+      })
     }
   }
   // GTM + a hand-written gtag sending the SAME id (the live load counted 2+ page views for it).
@@ -666,6 +821,8 @@ export function duplicateFindings(before: BeforeFacts): DuplicateFinding[] {
         id: `remove_duplicate:ga4:${entry.id}`,
         kind: "duplicate",
         provider: "ga4",
+        publicId: entry.id,
+        shape: "gtm_and_gtag",
         text: `GA4: Google Tag Manager and a hand-written gtag (${entry.file}) both send ${entry.id}; the live site counted ${liveTids.get(entry.id)} page views per visit. Remove the hand-written one.`
       })
     }
@@ -677,6 +834,8 @@ export function duplicateFindings(before: BeforeFacts): DuplicateFinding[] {
       id: "conflict:ga4",
       kind: "conflict",
       provider: "ga4",
+      publicId: null,
+      shape: null,
       text: `GA4: two different ids fire on your site (${[...ids].sort().join(", ")}). Decide which one is this site's; the wizard does not pick.`
     })
   }
@@ -686,7 +845,14 @@ export function duplicateFindings(before: BeforeFacts): DuplicateFinding[] {
     for (const entry of entries) if (entry.tool === tool && entry.kind === kind && entry.id) counts.set(entry.id, (counts.get(entry.id) ?? 0) + 1)
     for (const [id, count] of counts) {
       if (count > 1) {
-        findings.push({ id: `remove_duplicate:${tool}:${id}`, kind: "duplicate", provider: tool, text: `${TOOL_NAME[tool]}: ${id} starts ${count} times in your code. Keep one start.` })
+        findings.push({
+          id: `remove_duplicate:${tool}:${id}`,
+          kind: "duplicate",
+          provider: tool,
+          publicId: id,
+          shape: "repeated_init",
+          text: `${TOOL_NAME[tool]}: ${id} starts ${count} times in your code. Keep one start.`
+        })
       }
     }
   }
@@ -780,19 +946,31 @@ export function resolvePlanAnswers(
     else privacyText = edited
   }
 
+  // The privacy draft follows the approved lines (P3-24): a declined tool or a declined server lane is
+  // not described. An edited paragraph is the user's own words and is kept as written.
+  const wizardPlan = plan as Partial<WizardPlanModel>
+  if (approved.has(DECISION_LINE_IDS.privacyText) && edits[DECISION_LINE_IDS.privacyText] === undefined && wizardPlan.installTools) {
+    const kept = wizardPlan.installTools.filter((tool) => {
+      const installLine = plan.lines.find((entry) => entry.kind === "install_provider" && (entry.id === `install_provider:${tool}` || entry.id.startsWith(`install_provider:${tool}:`)))
+      return (installLine !== undefined && approved.has(installLine.id)) || (wizardPlan.managedTools ?? []).includes(tool)
+    })
+    privacyText = draftPrivacyParagraph(kept, Boolean(wizardPlan.serverLaneOffered) && kept.includes("infinite") && approved.has("server_lane"))
+    if (privacyText === null) approved.delete(DECISION_LINE_IDS.privacyText)
+  }
+
   const npmAsked = known.has(DECISION_LINE_IDS.npmInstall)
   const lines = plan.lines.map((planLine) => ({
     id: planLine.id,
     approved: planLine.requires !== "approval" ? null : approved.has(planLine.id) ? true : declined.has(planLine.id) ? false : null
   }))
-  const metaGoalLine = known.get("meta_goal")
   return {
     consentMode,
     conversions,
     privacyApproved: !privacyAsked ? null : approved.has(DECISION_LINE_IDS.privacyText) ? true : declined.has(DECISION_LINE_IDS.privacyText) ? false : null,
     privacyText: approved.has(DECISION_LINE_IDS.privacyText) ? privacyText : null,
     npmInstall: !npmAsked ? null : approved.has(DECISION_LINE_IDS.npmInstall) ? true : declined.has(DECISION_LINE_IDS.npmInstall) ? false : null,
-    metaGoal: metaGoalLine && approved.has("meta_goal") ? metaGoalLine.text.replace(/^Meta goal: (\w+).*$/, "$1") : null,
+    // The recommendation is data on the plan, never parsed back out of its copy (P2-10).
+    metaGoal: approved.has("meta_goal") ? (wizardPlan.metaGoal ?? null) : null,
     lines,
     approvals: {
       approved: [...approved],
@@ -818,6 +996,14 @@ export function resolvePlanAnswers(
  */
 export function gateSeededItems(plan: PlanModel, answers: Pick<ResolvedPlanAnswers, "lines">, items: readonly ChecklistItem[]): ChecklistItem[] {
   const approval = new Map(answers.lines.map((entry) => [entry.id, entry.approved]))
+  const gated = gateByLines(plan, approval, items)
+  // The go-ahead cost line (P2-18): unless it is approved, no agent job runs — each waits for the user.
+  const budget = plan.lines.find((planLine) => planLine.id === "agent_budget" && planLine.requires === "approval")
+  if (!budget || approval.get(budget.id) === true) return gated
+  return gated.map((item) => (item.owner === "agent" && item.state !== "blocked" ? { ...item, state: "blocked" as const, blockedReason: "needs_you" as const } : item))
+}
+
+function gateByLines(plan: PlanModel, approval: Map<string, boolean | null>, items: readonly ChecklistItem[]): ChecklistItem[] {
   const lineOf = new Map<string, PlanLine>()
   for (const planLine of plan.lines) for (const jobId of planLine.jobIds ?? []) lineOf.set(jobId, planLine)
   const out: ChecklistItem[] = []
@@ -837,6 +1023,21 @@ export function gateSeededItems(plan: PlanModel, answers: Pick<ResolvedPlanAnswe
     out.push(item)
   }
   return out
+}
+
+/**
+ * Job 7 (the agent's preview guard on an ADOPTED init) gets the plan's exact guard: the production
+ * hosts that must always fire and the deny list, the same ones the managed guard uses (P2-19). With no
+ * guard (`production_denied` / no production host) the plan emits no job-7 line, so nothing is seeded.
+ */
+export function withGuardHosts(items: readonly ChecklistItem[], guard: GuardDecision | null): ChecklistItem[] {
+  if (!guard || !guard.emit) return [...items]
+  const note = ` Production hosts that must ALWAYS fire (exempt first): ${guard.exempt.join(", ")}. Silence only these preview hosts: ${guard.deny.join(", ")}.`
+  return items.map((item) =>
+    item.jobId === "preview_guard" && !item.trigger.finding.includes("must ALWAYS fire")
+      ? { ...item, trigger: { ...item.trigger, finding: `${item.trigger.finding}${note}` } }
+      : item
+  )
 }
 
 /** `Installer.planAsk`: exactly the §3d.3 `plan` payload (strict PlanLine keys, no internals). */

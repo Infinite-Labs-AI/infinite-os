@@ -71,6 +71,18 @@ export interface AdoptedMetaFact {
   html: boolean
   /** A `_fbc` capture already runs on that page. */
   captureNearby: boolean
+  /**
+   * The pixel's `<script>` tag runs as plain JavaScript on load: no non-JS `type` and no consent-manager
+   * attributes (a CMP-held `type="text/plain" data-cookieconsent=…` pixel is NOT executable). The capture
+   * block is inserted by code only beside an executable pixel, so it never runs before the CMP's consent.
+   */
+  executable: boolean
+  /**
+   * The literal `fbq('init', '<id>')` is a standalone statement (nothing but `;`, `{`, `}` or the script
+   * tag before it), so a statement inserted before it runs under exactly the same conditions. A gated
+   * init (`if (consent) fbq('init', …)`) is not: the D10 opt-out is then an agent job, never a code edit.
+   */
+  initStandalone: boolean
   guarded: boolean
   autoConfig: MetaAutoConfigVerdict | null
 }
@@ -111,6 +123,55 @@ function guardedBefore(contents: string, offset: number): boolean {
 
 const clean = (value: string | undefined): string | null => (value === undefined ? null : value)
 
+const PIXEL_BOOTSTRAP = /fbq\s*\(\s*["']init["']|connect\.facebook\.net\/[^"']*fbevents\.js/
+
+/** Script `type`s a browser runs as JavaScript. */
+const EXECUTABLE_SCRIPT_TYPES = new Set(["", "text/javascript", "application/javascript", "module", "text/ecmascript", "application/ecmascript"])
+/** Attributes consent managers (Cookiebot, OneTrust, Usercentrics, Complianz, Klaro, …) use to hold a tag. */
+const CMP_HOLD_ATTRIBUTE = /\b(?:data-cookieconsent|data-cookiecategory|data-cookie-consent|data-category|data-consent[\w-]*|data-usercentrics|data-cookiescript|data-cmp[\w-]*|data-blocked|data-type|data-name)\s*=|class\s*=\s*["'][^"']*(?:optanon-category|cmplz|cookieconsent)/i
+
+/** The `<script …>` opening tag that holds the pixel bootstrap, or null (not in a script tag / not HTML). */
+export function pixelScriptTag(contents: string): { tag: string; start: number } | null {
+  const init = contents.search(PIXEL_BOOTSTRAP)
+  if (init < 0) return null
+  const start = contents.lastIndexOf("<script", init)
+  if (start < 0) return null
+  const end = contents.indexOf(">", start)
+  if (end < 0 || end > init) return null
+  return { tag: contents.slice(start, end + 1), start }
+}
+
+/** A `<script>` tag the browser executes on load, and that no consent manager holds. */
+export function isExecutableScriptTag(tag: string): boolean {
+  const type = /\btype\s*=\s*["']?([^"'\s>]*)/i.exec(tag)?.[1]?.toLowerCase() ?? ""
+  if (!EXECUTABLE_SCRIPT_TYPES.has(type)) return false
+  return !CMP_HOLD_ATTRIBUTE.test(tag)
+}
+
+/**
+ * Whether the code at `at` starts a standalone statement: what precedes it (skipping blank lines and
+ * whole-line `//` comments) ends with `;`, `{`, `}`, an opening `<script …>` tag, or the file start.
+ * `if (consent) fbq(…)`, `else fbq(…)`, `cond && fbq(…)` and `() => fbq(…)` are NOT standalone.
+ */
+export function isStandaloneStatementAt(contents: string, at: number): boolean {
+  const lines = contents.slice(0, at).split("\n")
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const text = lines[index]!.trim()
+    if (text === "") continue
+    if (index !== lines.length - 1 && text.startsWith("//")) continue
+    if (/<script\b[^>]*>$/i.test(text)) return true
+    return /[;{}]$/.test(text)
+  }
+  return true
+}
+
+/** The offset of the single literal `fbq('init', '<pixelId>')`, or null (absent or more than one). */
+function literalInitOffset(contents: string, pixelId: string): number | null {
+  const pattern = new RegExp(String.raw`fbq\s*\(\s*["']init["']\s*,\s*["']${pixelId}["']`, "g")
+  const matches = [...contents.matchAll(pattern)]
+  return matches.length === 1 ? matches[0]!.index! : null
+}
+
 /** The adopted (customer-owned) PostHog / GA4 / Meta tags, read from the repo with file:line evidence. */
 export function detectAdoptedFacts(appRootAbsolute: string, detected: readonly DetectedProviderEvidence[]): AdoptedFacts {
   const facts: AdoptedFacts = { posthog: [], ga4: [], meta: [] }
@@ -134,12 +195,16 @@ export function detectAdoptedFacts(appRootAbsolute: string, detected: readonly D
       facts.ga4.push({ file: entry.file, line: entry.line, key: entry.key ?? null, via: entry.via, guarded })
     } else if (entry.provider === "meta") {
       const pixelId = entry.key ?? null
+      const tag = pixelScriptTag(contents)
+      const initAt = pixelId ? literalInitOffset(contents, pixelId) : null
       facts.meta.push({
         file: entry.file,
         line: entry.line,
         pixelId,
         html: /\.html?$/.test(entry.file),
         captureNearby: contents.includes(META_CLICK_ID_ACCESSOR) || /document\.cookie[^;\n]*_fbc|["']_fbc=/.test(contents),
+        executable: tag !== null && isExecutableScriptTag(tag.tag),
+        initStandalone: initAt !== null && isStandaloneStatementAt(contents, initAt),
         guarded,
         autoConfig: pixelId ? checkMetaAutoConfigOptOut(contents, pixelId, "adopted") : null
       })
@@ -157,6 +222,22 @@ export interface ImproveLinesContext {
   keys: TagKeys
   /** D17 sensitive paths the detector found (O6), e.g. `/account`, `/checkout`. */
   sensitivePaths: readonly string[]
+  /**
+   * The site is served by Vercel (the hosting verb, or the repo's vercel.json / .vercel link), so a
+   * `vercel.json` rewrite actually serves `/ingest`. Off Vercel a static/Vite site has no rewrite the
+   * wizard can write: no proxy is proposed there (an `/ingest` api_host would 404).
+   */
+  vercelServed: boolean
+}
+
+/** Frameworks whose pages change without a reload (PostHog must follow history changes). */
+const SPA_FRAMEWORKS: ReadonlySet<string> = new Set(["next-app-router", "next-pages-router", "vite-react"])
+
+/** An api_host that sends straight to PostHog Cloud (null = the SDK default, which is PostHog Cloud). */
+function sendsToPosthogCloud(apiHost: string | null): boolean {
+  if (apiHost === null) return true
+  const value = apiHost.replace(/['"]/g, "")
+  return /^(?:https?:)?\/\/(?:[a-z0-9-]+\.)?(?:i\.posthog\.com|posthog\.com)(?:[/:]|$)/i.test(value)
 }
 
 const lineId = (kind: ImproveLineKind, provider: ProviderId, target: string): string => `${kind}:${provider}:${target}`
@@ -187,11 +268,15 @@ function previewGuardLine(provider: ProviderId, evidence: { file: string; line: 
 export function improveLinesFor(facts: AdoptedFacts, ctx: ImproveLinesContext): ImproveLine[] {
   const lines: ImproveLine[] = []
   const htmlFramework = ctx.framework === "static-html" || ctx.framework === "vite-react"
+  // The proxy needs a rewrite the wizard can write: Next's own rewrites (any host), or vercel.json on a
+  // site Vercel serves. A static/Vite site elsewhere gets no proxy line (its /ingest would 404).
+  const proxyServable = !htmlFramework || ctx.vercelServed
 
   const posthog = facts.posthog[0]
   if (posthog) {
     const evidence = { file: posthog.file, line: posthog.line }
-    if (!isRelativeApiHost(posthog.apiHost)) {
+    // Only an api_host that sends straight to PostHog Cloud: a first-party custom proxy already works.
+    if (!isRelativeApiHost(posthog.apiHost) && sendsToPosthogCloud(posthog.apiHost) && proxyServable) {
       lines.push({
         id: lineId("improve_additive", "posthog", "proxy"),
         kind: "improve_additive",
@@ -203,7 +288,7 @@ export function improveLinesFor(facts: AdoptedFacts, ctx: ImproveLinesContext): 
       })
     }
     const historyDefaults = posthog.defaults !== null && posthog.defaults.replace(/['"]/g, "") >= POSTHOG_DEFAULTS_HISTORY
-    if (posthog.capturePageview?.replace(/['"]/g, "") !== "history_change" && !historyDefaults) {
+    if (SPA_FRAMEWORKS.has(ctx.framework) && posthog.capturePageview?.replace(/['"]/g, "") !== "history_change" && !historyDefaults) {
       lines.push({
         id: lineId("improve_additive", "posthog", "history_change"),
         kind: "improve_additive",
@@ -268,7 +353,9 @@ export function improveLinesFor(facts: AdoptedFacts, ctx: ImproveLinesContext): 
         provider: "meta",
         target: "capture",
         text: "Meta: save the ad-click id (_fbc) on landing pages beside your existing pixel, so conversions can be matched to the ad. Adds a small script; your pixel itself is unchanged.",
-        owner: meta.html ? "code" : "agent",
+        // Code inserts it only beside a pixel that runs on load; a CMP-held pixel is the agent's (the
+        // capture must be held by the same consent, which the wizard never guesses).
+        owner: meta.html && meta.executable ? "code" : "agent",
         evidence
       })
     }
@@ -279,7 +366,7 @@ export function improveLinesFor(facts: AdoptedFacts, ctx: ImproveLinesContext): 
         provider: "meta",
         target: "autoconfig",
         text: `Meta: turn off automatic events on your existing pixel ${meta.pixelId} (one line before its init). They send button clicks and page data you did not choose.`,
-        owner: "code",
+        owner: meta.initStandalone ? "code" : "agent",
         evidence
       })
     }
@@ -301,6 +388,8 @@ export interface ImproveEditInput {
   keys: TagKeys
   /** The plan's consent answer: the capture block uses the same Infinite consent hook as managed Meta. */
   consentMode: "required" | "not_required"
+  /** The site is served by Vercel (see `ImproveLinesContext.vercelServed`): the vercel.json rewrite is served. */
+  vercelServed: boolean
   runId: string
   /** Disambiguates two records of one file in one run. */
   seq?: number
@@ -349,6 +438,7 @@ export function applyImproveEdit(input: ImproveEditInput): ImproveEditResult {
     if (input.framework !== "static-html" && input.framework !== "vite-react") {
       return { ok: false, reason: "the vercel.json proxy is for static and Vite sites; other frameworks get it from the agent (job 3)" }
     }
+    if (!input.vercelServed) return { ok: false, reason: "the site is not served by Vercel, so a vercel.json rewrite would not serve /ingest" }
     const evidenceContents = line.evidence ? readAppFile(appRootAbsolute, line.evidence.file) : null
     const proxy = proxySpecFor(input.keys, evidenceContents ? clean(readPosthogOption(evidenceContents, "api_host")) : null)
     if (!proxy) return { ok: false, reason: "PostHog's region is unknown (connect PostHog in Infinite); the proxy is not guessed" }
@@ -370,10 +460,12 @@ export function applyImproveEdit(input: ImproveEditInput): ImproveEditResult {
     const before = readAppFile(appRootAbsolute, line.evidence.file)
     if (before === null) return { ok: false, reason: `${file} is unreadable` }
     if (before.includes(CAPTURE_BLOCK_MARKER) || before.includes(META_CLICK_ID_ACCESSOR)) return { ok: true, record: null }
-    const init = before.search(/fbq\s*\(\s*["']init["']|connect\.facebook\.net\/[^"']*fbevents\.js/)
-    if (init < 0) return { ok: false, reason: `no pixel bootstrap found in ${file}` }
-    const scriptStart = before.lastIndexOf("<script", init)
-    if (scriptStart < 0) return { ok: false, reason: `the pixel in ${file} is not in a <script> tag` }
+    const tag = pixelScriptTag(before)
+    if (!tag) return { ok: false, reason: `no pixel bootstrap in a <script> tag in ${file}` }
+    if (!isExecutableScriptTag(tag.tag)) {
+      return { ok: false, reason: `the pixel in ${file} is held by a consent manager (or is not plain JavaScript); the capture must wait for the same consent, so it is an agent job` }
+    }
+    const scriptStart = tag.start
     const lineStart = before.lastIndexOf("\n", scriptStart - 1) + 1
     const indent = /^[ \t]*/.exec(before.slice(lineStart, scriptStart))?.[0] ?? ""
     const capture = buildMetaClickIdCaptureScript({ gate: { kind: "infinite-consent", mode: input.consentMode } })
@@ -396,6 +488,9 @@ export function applyImproveEdit(input: ImproveEditInput): ImproveEditResult {
     if (verdict.reason === "opted_out_before_init") return { ok: true, record: null }
     if (verdict.reason !== "opt_out_missing") return { ok: false, reason: `automatic events on ${pixelId}: ${verdict.reason}; not changed by code` }
     const at = pixel.index
+    if (!isStandaloneStatementAt(before, at)) {
+      return { ok: false, reason: `the fbq('init') in ${file} runs under a condition; a line before it would not, so the opt-out is an agent job` }
+    }
     const lineStart = before.lastIndexOf("\n", at - 1) + 1
     const indent = /^[ \t]*/.exec(before.slice(lineStart, at))?.[0] ?? ""
     const prefix = before.slice(lineStart, at).trim() === "" ? "" : "\n" + indent

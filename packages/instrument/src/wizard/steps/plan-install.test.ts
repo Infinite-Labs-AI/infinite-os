@@ -17,9 +17,11 @@ import {
   makeSite,
   read,
   STATIC_HTML,
+  writeBeforeFacts,
+  writeKeysChoices,
   type FakeContext
 } from "../../../test/wizard/o7-fakes.js"
-import { writeBeforeFacts } from "../../install/before-facts.js"
+import { loadPlanInputs } from "../../install/step-inputs.js"
 import { WizardInstaller } from "../../install/installer.js"
 import type { WizardBeforeFacts } from "../../install/plan-model.js"
 import { readInstallManifest } from "../../manifest.js"
@@ -145,7 +147,7 @@ describe("step plan", () => {
 
   it("adopted PostHog: a declined improve line seeds no job 3; an unanswered one waits for the user", async () => {
     const candidates = [candidate("posthog_improve", "proxy"), candidate("posthog_improve", "history_change"), candidate("identify_reset", "auth")]
-    const answer = { approved: ["consent_mode"], declined: ["improve_additive:posthog:proxy"], edits: { consent_mode: "not_required" } }
+    const answer = { approved: ["consent_mode", "agent_budget"], declined: ["improve_additive:posthog:proxy"], edits: { consent_mode: "not_required" } }
     const h = await setup({ files: { "index.html": ADOPTED_POSTHOG_HTML.replace(", defaults: '2025-05-24'", "") }, answers: [answer], candidates })
     expect((await planStep.run(h.ctx, h.deps)).kind).toBe("ok")
     const jobs = h.ctx.stateValue().jobs
@@ -247,5 +249,97 @@ describe("step install", () => {
     expect((await installStep.run(ctx, h.deps)).kind).toBe("ok")
     expect(read(ctx.root, "index.html")).not.toContain(IDS.siteSource)
     expect(readInstallManifest(ctx.root)!.ids?.infinite).toBeNull()
+  })
+})
+
+describe("review fixes (O7 fix round)", () => {
+  function autoApprove(ctx: FakeContext, filter: (id: string) => boolean = () => true) {
+    ctx.ask = (async (kind: never, payload: never) => {
+      ctx.asks.push({ kind, payload })
+      const all = approveAllFrom(ctx)
+      return { ...all, approved: all.approved.filter(filter), declined: all.approved.filter((id) => !filter(id)) }
+    }) as typeof ctx.ask
+  }
+
+  it("P1-9: the plan reads lane O8's before.json (facts + baseline + baseline build) and lane O2's GA4 stream choice", async () => {
+    const twoStreams = fakeKeys({
+      ga4: {
+        status: "connected",
+        propertyLabel: "Acme",
+        streams: [
+          { measurementId: IDS.ga4, defaultUri: "https://other.example", streamName: "Other" },
+          { measurementId: IDS.ga4Other, defaultUri: "https://another.example", streamName: "Web" }
+        ]
+      }
+    })
+    const baselineBuild = { ok: false, failureSignature: ["old failure"], durationMs: 1 }
+    const h = await setup({ files: { "index.html": STATIC_HTML }, before: { ...fakeBefore({ keys: twoStreams }), baselineBuild }, consentFlag: "not_required", answers: [] })
+    const inputs = await loadPlanInputs(h.ctx, h.deps)
+    expect("before" in inputs && inputs.before.baselineBuild).toEqual(baselineBuild)
+    // NEGATIVE: with two streams and no choice, GA4 is never guessed.
+    autoApprove(h.ctx)
+    await planStep.run(h.ctx, h.deps)
+    let payload = h.ctx.asks.at(-1)!.payload as AskPayloads["plan"]
+    expect(payload.lines.some((line) => line.id.startsWith("install_provider:ga4"))).toBe(false)
+    // The keys step picked a stream: exactly that one is offered.
+    await writeKeysChoices(h.deps.fs, h.ctx.root, { ga4MeasurementId: IDS.ga4Other, metaPixel: null })
+    h.ctx.state.update((state) => {
+      state.plan = null
+    })
+    await planStep.run(h.ctx, h.deps)
+    payload = h.ctx.asks.at(-1)!.payload as AskPayloads["plan"]
+    expect(payload.lines.map((line) => line.id)).toContain(`install_provider:ga4:${IDS.ga4Other}`)
+    expect(payload.lines.map((line) => line.id)).not.toContain(`install_provider:ga4:${IDS.ga4}`)
+  })
+
+  it("P1-9 NEGATIVE: a before.json of another schema (another lane's hand-off) is never read as before's facts", async () => {
+    const h = await setup({ files: { "index.html": STATIC_HTML }, consentFlag: "not_required", answers: [] })
+    await h.deps.fs.writeTextAtomic(`${h.ctx.root}/.infinite/wizard/before.json`, JSON.stringify({ schema: "infinite-tag.wizard-before-facts.v1", facts: fakeBefore() }))
+    let bridgeKeysRead = 0
+    ;(h.deps.bridge as unknown as { keys: () => Promise<unknown> }).keys = async () => {
+      bridgeKeysRead += 1
+      return { protocolVersion: 1, requestId: "x", ...fakeKeys() }
+    }
+    ;(h.deps.bridge as unknown as { hosting: () => Promise<unknown> }).hosting = async () => ({ protocolVersion: 1, requestId: "x", ...fakeHosting() })
+    ;(h.deps as unknown as { checks: unknown }).checks = { census: async () => fakeBefore().census }
+    const inputs = await loadPlanInputs(h.ctx, h.deps)
+    expect(bridgeKeysRead).toBe(1)
+    expect("liveFacts" in inputs && inputs.liveFacts).toBe(false)
+  })
+
+  it("P2-15: a plan that changed before install parks AND forgets the old plan, so the resume asks again", async () => {
+    const h = await setup({ files: { "index.html": STATIC_HTML }, consentFlag: "not_required", answers: [] })
+    autoApprove(h.ctx)
+    h.ctx.state.update((state) => {
+      state.steps.plan = { outcome: "ok", inputHash: `sha256:${"1".repeat(64)}`, at: "2026-10-02T10:02:00.000Z" }
+    })
+    await planStep.run(h.ctx, h.deps)
+    // The connections changed between plan and install (GA4 disconnected).
+    await writeBeforeFacts(h.deps.fs, h.ctx.root, IDS.run, fakeBefore({ keys: fakeKeys({ ga4: { status: "not_connected", propertyLabel: null, streams: [] } }) }))
+    expect(await installStep.run(h.ctx, h.deps)).toMatchObject({ kind: "parked", reason: expect.stringMatching(/re-confirm/) })
+    expect(h.ctx.stateValue().steps.plan).toBeUndefined()
+    expect(h.ctx.stateValue().plan).toBeNull()
+    expect(h.siteSourceCalls).toEqual([])
+    expect(read(h.ctx.root, "index.html")).toBe(STATIC_HTML)
+  })
+
+  it("P2-20: a declined Infinite line never calls the site-source verb (no hosts merged, no consent written)", async () => {
+    const h = await setup({ files: { "index.html": STATIC_HTML }, consentFlag: "not_required", answers: [] })
+    autoApprove(h.ctx, (id) => !id.startsWith("install_provider:infinite"))
+    await planStep.run(h.ctx, h.deps)
+    expect((await installStep.run(h.ctx, h.deps)).kind).toBe("ok")
+    expect(h.siteSourceCalls).toEqual([])
+    expect(read(h.ctx.root, "index.html")).toContain(IDS.ga4)
+  })
+
+  it("P2-19: the approved plan persists the guard, and job 7 carries its exempt hosts", async () => {
+    const meta = STATIC_HTML.replace("</head>", `<script>fbq('init', '${IDS.meta}');</script>\n  </head>`)
+    const h = await setup({ files: { "index.html": meta }, consentFlag: "not_required", answers: [], candidates: [candidate("preview_guard", "meta")] })
+    autoApprove(h.ctx)
+    await planStep.run(h.ctx, h.deps)
+    const job7 = h.ctx.stateValue().jobs.find((item) => item.id === "preview_guard:meta")
+    expect(job7?.trigger.finding).toContain("ALWAYS fire (exempt first): acme-store.com")
+    const saved = JSON.parse(read(h.ctx.root, ".infinite/wizard/plan-approvals.json")) as { guard: { emit: boolean; exempt: string[] } }
+    expect(saved.guard).toMatchObject({ emit: true, exempt: ["acme-store.com"] })
   })
 })

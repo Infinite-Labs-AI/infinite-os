@@ -16,9 +16,12 @@ import {
   previewShare,
   resolvePlanAnswers,
   SERVER_LANE_PROBE_DISCLOSURE,
+  withGuardHosts,
   type PlanModelInput,
   type PlanScanFacts
 } from "./plan-model.js"
+
+type WizardBeforeFactsCensus = ReturnType<typeof fakeBefore>["census"]
 
 function scanFacts(overrides: Partial<PlanScanFacts> = {}): PlanScanFacts {
   return {
@@ -133,7 +136,7 @@ describe("adopted providers: every agent job that touches one waits on an approv
     const unanswered = resolvePlanAnswers(plan, { approved: ["consent_mode"], declined: [], edits: { consent_mode: "not_required" } }, { consentFlag: null })
     const gated = gateSeededItems(plan, unanswered, candidates)
     expect(gated.find((item) => item.id === "posthog_improve:proxy")).toMatchObject({ state: "blocked", blockedReason: "needs_you" })
-    const approved = resolvePlanAnswers(plan, { approved: ["consent_mode", "improve_additive:posthog:proxy"], declined: [], edits: { consent_mode: "not_required" } }, { consentFlag: null })
+    const approved = resolvePlanAnswers(plan, { approved: ["consent_mode", "improve_additive:posthog:proxy", "agent_budget"], declined: [], edits: { consent_mode: "not_required" } }, { consentFlag: null })
     expect(gateSeededItems(plan, approved, candidates).find((item) => item.id === "posthog_improve:proxy")?.state).toBe("pending")
   })
 
@@ -156,11 +159,13 @@ describe("adopted providers: every agent job that touches one waits on an approv
         identify: { identifyCalls: [], resetCalls: [] }
       }
     })
-    const plan = buildPlanModel(input({ scan: posthogAdopted, before, candidates: [candidate("posthog_improve", "proxy"), candidate("duplicates_remove", "posthog-init")] }))
+    // O8's job-6 target shape (`posthog_init:<id>`, ios:…/jobs/detectors/duplicates.ts).
+    const dupTarget = `posthog_init:${IDS.posthog}`
+    const plan = buildPlanModel(input({ scan: posthogAdopted, before, candidates: [candidate("posthog_improve", "proxy"), candidate("duplicates_remove", dupTarget)] }))
     const job3Lines = plan.lines.filter((line) => line.jobIds?.some((id) => id.startsWith("posthog_improve")))
     for (const line of job3Lines) expect(line.text).not.toMatch(/one init|starts \d+ times|remove/i)
     const dup = plan.lines.find((line) => line.kind === "remove_duplicate")!
-    expect(dup).toMatchObject({ id: `remove_duplicate:posthog:${IDS.posthog}`, jobIds: ["duplicates_remove:posthog-init"] })
+    expect(dup).toMatchObject({ id: `remove_duplicate:posthog:${dupTarget}`, jobIds: [`duplicates_remove:${dupTarget}`], text: expect.stringContaining("starts 2 times") })
     expect(YES_POLICY.remove_duplicate).toBe("never")
   })
 
@@ -300,5 +305,121 @@ describe("resolvePlanAnswers", () => {
     const resolved = resolvePlanAnswers(plan, { approved: ["server_lane", "no_such_line"], declined: ["server_lane"], edits: {} }, { consentFlag: null })
     expect(resolved.lines.find((line) => line.id === "server_lane")?.approved).toBe(false)
     expect(resolved.approvals.approved).not.toContain("no_such_line")
+  })
+})
+
+describe("review fixes (O7 fix round)", () => {
+  const consent = { consent_mode: "not_required" }
+  const census = (entries: Array<Record<string, unknown>>) =>
+    ({ entries, envSourcedIds: [], identify: { identifyCalls: [], resetCalls: [] } }) as unknown as WizardBeforeFactsCensus
+
+  it("P0-1: two duplicates, decline ONE → only the approved one's job 6 is seeded (no 'first line of the kind' fallback)", () => {
+    const before = fakeBefore({
+      census: census([
+        { tool: "ga4", kind: "gtag_config", id: "G-AAAA1111", file: "index.html", line: 3, owner: "adopted" },
+        { tool: "ga4", kind: "gtag_config", id: "G-AAAA1111", file: "index.html", line: 9, owner: "adopted" },
+        { tool: "ga4", kind: "gtag_config", id: "G-BBBB2222", file: "index.html", line: 12, owner: "adopted" },
+        { tool: "ga4", kind: "gtag_config", id: "G-BBBB2222", file: "index.html", line: 14, owner: "adopted" }
+      ])
+    })
+    const candidates = [candidate("duplicates_remove", "ga4_config:G-AAAA1111"), candidate("duplicates_remove", "ga4_config:G-BBBB2222")]
+    const plan = buildPlanModel(input({ before, candidates }))
+    const dupLines = plan.lines.filter((line) => line.kind === "remove_duplicate")
+    expect(dupLines.map((line) => line.jobIds)).toEqual([["duplicates_remove:ga4_config:G-AAAA1111"], ["duplicates_remove:ga4_config:G-BBBB2222"]])
+    const [lineA, lineB] = dupLines
+    const answers = resolvePlanAnswers(plan, { approved: ["consent_mode", lineA!.id, "agent_budget"], declined: [lineB!.id], edits: consent }, { consentFlag: null })
+    const seeded = gateSeededItems(plan, answers, candidates)
+    expect(seeded.map((item) => item.id)).toEqual(["duplicates_remove:ga4_config:G-AAAA1111"])
+    expect(seeded[0]!.state).toBe("pending")
+  })
+
+  it("P0-1: an unmatched candidate gets its OWN line; it never rides another line of the same kind", () => {
+    const ga4Id: ImproveLine = { id: "improve_additive:ga4:id", kind: "improve_additive", provider: "ga4", target: "id", text: "GA4: change the id.", owner: "agent", evidence: { file: "index.html", line: 3 } }
+    const plan = buildPlanModel(input({ scan: scanFacts({ improve: [ga4Id], adopted: [{ provider: "ga4", via: "snippet", file: "index.html", line: 3, key: IDS.ga4Other }] }), candidates: [candidate("ga4_improve", "spa_page_view")] }))
+    expect(plan.lines.find((line) => line.id === "improve_additive:ga4:id")?.jobIds).not.toContain("ga4_improve:spa_page_view")
+    expect(plan.lines.find((line) => line.id === "improve_additive:ga4:spa_page_view")?.jobIds).toEqual(["ga4_improve:spa_page_view"])
+  })
+
+  it("P2-14: an agent improve line no detector seeds gets its own item behind the same gate; declined → none", () => {
+    const plan = buildPlanModel(input({ scan: scanFacts({ improve: adoptedPosthogLines, adopted: [{ provider: "posthog", via: "snippet", file: "index.html", line: 5, key: IDS.posthog }] }) }))
+    expect(plan.seeds.map((item) => item.id).sort()).toEqual(["posthog_improve:defaults", "posthog_improve:history_change", "posthog_improve:proxy"])
+    const defaults = plan.lines.find((line) => line.id === "posthog_defaults_bump_adopted:posthog:defaults")!
+    expect(defaults.jobIds).toEqual(["posthog_improve:defaults"])
+    const approve = resolvePlanAnswers(plan, { approved: ["consent_mode", defaults.id, "agent_budget"], declined: [], edits: consent }, { consentFlag: null })
+    expect(gateSeededItems(plan, approve, plan.seeds).find((item) => item.id === "posthog_improve:defaults")?.state).toBe("pending")
+    const decline = resolvePlanAnswers(plan, { approved: ["consent_mode", "agent_budget"], declined: [defaults.id], edits: consent }, { consentFlag: null })
+    expect(gateSeededItems(plan, decline, plan.seeds).map((item) => item.id)).not.toContain("posthog_improve:defaults")
+  })
+
+  it("P2-10: metaGoal is data; with no recommendation the line is info and the answer is null (never StartTrial from copy)", () => {
+    const meta = scanFacts({ adopted: [{ provider: "meta", via: "snippet", file: "index.html", line: 6, key: IDS.meta }] })
+    const none = buildPlanModel(input({ scan: meta }))
+    expect(none.metaGoal).toBeNull()
+    expect(none.lines.find((line) => line.id === "meta_goal")?.requires).toBe("info")
+    expect(resolvePlanAnswers(none, { approved: ["consent_mode", "meta_goal"], declined: [], edits: consent }, { consentFlag: null }).metaGoal).toBeNull()
+    const shop = buildPlanModel(input({ scan: meta, candidates: [candidate("server_conversions", "purchase")] }))
+    expect(resolvePlanAnswers(shop, { approved: ["consent_mode", "meta_goal"], declined: [], edits: consent }, { consentFlag: null }).metaGoal).toBe("Purchase")
+  })
+
+  it("P2-16: an SPA's after-navigation page view is not a GTM + gtag duplicate", () => {
+    const gtm = { tool: "ga4", kind: "gtm", id: "GTM-ABC1234", file: "index.html", line: 3, owner: "adopted" }
+    const gtag = { tool: "ga4", kind: "gtag_config", id: IDS.ga4, file: "index.html", line: 9, owner: "adopted" }
+    const dryLive = {
+      loads: [{ label: "home" }],
+      ga4: { events: [{ tid: IDS.ga4, en: "page_view", loadLabel: "home", afterNav: false }, { tid: IDS.ga4, en: "page_view", loadLabel: "home", afterNav: true }] },
+      meta: { tr: [] }
+    } as unknown as TestResult
+    expect(duplicateFindings(fakeBefore({ census: census([gtm, gtag]), dryLive }))).toEqual([])
+  })
+
+  it("P2-17: the D10 count is autoConfig's own events only, and '—' when the pixel did not fire or was blocked", () => {
+    const meta = scanFacts({ improve: adoptedMetaLines, adopted: [{ provider: "meta", via: "snippet", file: "index.html", line: 6, key: IDS.meta }] })
+    const dry = (tr: Array<{ ev: string }>, console: string[] = []) =>
+      ({ loads: [{ label: "home" }], environment: { blockedBySiteBotRules: false }, meta: { tr: tr.map((event) => ({ ...event, pixelId: IDS.meta })), console }, ga4: { events: [] } }) as unknown as TestResult
+    const measured = (dryLive: TestResult) => buildPlanModel(input({ scan: meta, before: fakeBefore({ dryLive }) })).lines.find((line) => line.kind === "autoconfig_off_adopted")
+    // The site's own ViewContent / Lead are not automatic events.
+    expect(measured(dry([{ ev: "PageView" }, { ev: "ViewContent" }, { ev: "Lead" }]))?.measured?.value).toBe("0 automatic events per visit, no clicks")
+    expect(measured(dry([{ ev: "PageView" }, { ev: "Microdata" }]))?.measured?.value).toBe("1 automatic events per visit, no clicks")
+    // NEGATIVE: a pixel held by consent (no PageView at all) or blocked by Traffic Permissions is unmeasured, never 0.
+    expect(measured(dry([]))?.measured).toBeUndefined()
+    expect(measured(dry([]))?.text).toContain("Measured: —")
+    expect(measured(dry([{ ev: "PageView" }], ["traffic_permissions_blocked"]))?.measured).toBeUndefined()
+  })
+
+  it("P2-18: unless the agent-budget (cost) line is approved, every agent job waits for the user", () => {
+    const candidates = [candidate("identify_reset", "auth")]
+    const plan = buildPlanModel(input({ candidates }))
+    const declined = resolvePlanAnswers(plan, { approved: ["consent_mode"], declined: ["agent_budget"], edits: consent }, { consentFlag: null })
+    expect(gateSeededItems(plan, declined, candidates)[0]).toMatchObject({ state: "blocked", blockedReason: "needs_you" })
+    const approved = resolvePlanAnswers(plan, { approved: ["consent_mode", "agent_budget"], declined: [], edits: consent }, { consentFlag: null })
+    expect(gateSeededItems(plan, approved, candidates)[0]?.state).toBe("pending")
+  })
+
+  it("P2-19: job 7 carries the plan's exact exempt hosts and deny list", () => {
+    const plan = buildPlanModel(input({ scan: scanFacts({ improve: adoptedMetaLines, adopted: [{ provider: "meta", via: "snippet", file: "index.html", line: 6, key: IDS.meta }] }), candidates: [candidate("preview_guard", "meta")] }))
+    expect(plan.lines.find((line) => line.id === "preview_guard_adopted:meta:init")?.jobIds).toEqual(["preview_guard:meta"])
+    const [item] = withGuardHosts([candidate("preview_guard", "meta")], plan.guard)
+    expect(item!.trigger.finding).toContain("ALWAYS fire (exempt first): acme-store.com")
+    expect(item!.trigger.finding).toContain(".vercel.app")
+    // NEGATIVE: with no guard, nothing is added.
+    expect(withGuardHosts([candidate("preview_guard", "meta")], { emit: false, reason: "no_production_host" })[0]!.trigger.finding).not.toContain("ALWAYS fire")
+  })
+
+  it("P3-24: the privacy draft follows the approved lines — no server-lane sentence when the lane is declined", () => {
+    const plan = buildPlanModel(input())
+    expect(plan.decisions.privacyText).toContain("Our server also tells Infinite")
+    const approvedLines = plan.lines.filter((line) => line.requires === "approval").map((line) => line.id)
+    const withLane = resolvePlanAnswers(plan, { approved: approvedLines, declined: [], edits: consent }, { consentFlag: null })
+    expect(withLane.privacyText).toContain("Our server also tells Infinite")
+    const noLane = resolvePlanAnswers(plan, { approved: approvedLines.filter((id) => id !== "server_lane"), declined: ["server_lane"], edits: consent }, { consentFlag: null })
+    expect(noLane.privacyText).not.toContain("Our server also tells Infinite")
+    expect(noLane.privacyText).toContain("We use Infinite")
+  })
+
+  it("P1-6: Infinite that cannot be installed (a static site off Vercel) is a user-action line, never an install line", () => {
+    const plan = buildPlanModel(input({ scan: scanFacts({ framework: "static-html", infiniteBlocked: "your site is not served through Vercel" }) }))
+    expect(plan.lines.some((line) => line.id.startsWith("install_provider:infinite"))).toBe(false)
+    expect(plan.lines.find((line) => line.id === "user_action:infinite_blocked")).toMatchObject({ requires: "user_action" })
+    expect(plan.lines.some((line) => line.id.startsWith("install_provider:ga4"))).toBe(true)
   })
 })

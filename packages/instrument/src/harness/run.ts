@@ -336,6 +336,11 @@ export interface InspectPhaseInput {
   root: string
   appRoot?: string
   packageManager?: HarnessArgs["packageManager"]
+  /**
+   * Detect adopted tags in `public/` too when the app is a static site (its pages are served from
+   * there, and the static adapter injects into them). The wizard sets it; the harness keeps today's walk.
+   */
+  includePublicForStatic?: boolean
 }
 
 export interface InspectPhaseResult {
@@ -370,7 +375,9 @@ export function inspectPhase(input: InspectPhaseInput): InspectPhaseResult {
     hosting: detectHosting(appRootAbsolute),
     sourceLayout,
     manualBuildOwner,
-    detected: detectProvidersWithEvidence(appRootAbsolute),
+    detected: detectProvidersWithEvidence(appRootAbsolute, {
+      includePublic: Boolean(input.includePublicForStatic) && inspect.framework === "static-html"
+    }),
     manifest: readInstallManifest(input.root)
   }
 }

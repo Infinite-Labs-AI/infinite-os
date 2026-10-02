@@ -93,7 +93,16 @@ function pickGa4Stream(keys: TagKeys): { measurementId: string } | KeysSkipReaso
  * Maps every §3b keys status to an artifact or a skip reason. `answers.consentMode` is the plan's
  * consent decision; without it Infinite's pixel is not installable (the run parks at `plan`).
  */
-export function artifactsFromKeysDetailed(keys: TagKeys, answers: PlanModel["decisions"]): KeysAdapterResult {
+export interface ArtifactsFromKeysOptions {
+  /**
+   * The site can serve PostHog through `/ingest` on its own domain (Next's rewrites, or vercel.json on
+   * a site Vercel serves). False → PostHog is installed straight to its region host: an `/ingest`
+   * api_host with no rewrite behind it would 404 every event. Default true.
+   */
+  posthogProxy?: boolean
+}
+
+export function artifactsFromKeysDetailed(keys: TagKeys, answers: PlanModel["decisions"], options: ArtifactsFromKeysOptions = {}): KeysAdapterResult {
   const artifacts: WizardInstallArtifacts = {}
   const skipped: KeysAdapterResult["skipped"] = {}
 
@@ -135,7 +144,7 @@ export function artifactsFromKeysDetailed(keys: TagKeys, answers: PlanModel["dec
   } else if (validatePosthogProjectKey(posthog.projectKey) !== null) {
     skipped.posthog = "invalid_id"
   } else {
-    const proxy = posthogProxyFor(posthog)
+    const proxy = options.posthogProxy === false ? null : posthogProxyFor(posthog)
     artifacts.posthog = proxy
       ? { projectKey: posthog.projectKey, apiHost: proxy.path, ...(posthog.uiHost ? { uiHost: posthog.uiHost } : {}), proxy }
       : { projectKey: posthog.projectKey, apiHost: posthog.ingestHost ?? posthog.apiHost, ...(posthog.uiHost ? { uiHost: posthog.uiHost } : {}) }
@@ -161,8 +170,8 @@ export function artifactsFromKeysDetailed(keys: TagKeys, answers: PlanModel["dec
 }
 
 /** `Installer.artifactsFromKeys`: the artifacts only (the skip reasons ride `artifactsFromKeysDetailed`). */
-export function artifactsFromKeys(keys: TagKeys, answers: PlanModel["decisions"]): WizardInstallArtifacts {
-  return artifactsFromKeysDetailed(keys, answers).artifacts
+export function artifactsFromKeys(keys: TagKeys, answers: PlanModel["decisions"], options: ArtifactsFromKeysOptions = {}): WizardInstallArtifacts {
+  return artifactsFromKeysDetailed(keys, answers, options).artifacts
 }
 
 /** The wizard install's manifest `workspaceId` (§3e.6, R1-15). */
