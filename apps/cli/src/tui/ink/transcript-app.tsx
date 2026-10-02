@@ -36,9 +36,13 @@ export interface InkTranscriptAppProps {
    * Finished turns, printed ONCE through Ink's `<Static>` into the terminal's
    * scrollback (see transcript-static.ts), a thin rule between them. Never
    * counted by `inkTranscriptRowCount`: the composer's cursor row is relative
-   * to the live frame only. Must only ever grow.
+   * to the live frame only. Must only ever grow, except when `staticKey`
+   * changes: then every entry is printed again (a width change reprints the
+   * scrollback the session just cleared).
    */
   committed?: readonly CommittedEntry[];
+  /** A new value prints every committed entry again (after the session cleared the screen and scrollback). */
+  staticKey?: number;
   /**
    * The latest turn as pre-rendered lines. Drawn live (before `transcript`'s own
    * lines) and counted, capped by the live-region budget like the rest.
@@ -135,6 +139,7 @@ export function InkTranscriptApp({
   nowMs,
   prompt,
   showComposer = true,
+  staticKey = 0,
   theme,
   topBar,
   transcript,
@@ -177,7 +182,7 @@ export function InkTranscriptApp({
           per turn (and after the first-run inventory): a committed entry's
           own lines must not end with a rule of their own, or scrollback shows
           two (transcript-static.test.ts pins exactly one). */}
-      <Static items={committed}>
+      <Static items={committed} key={`static:${staticKey}`}>
         {(entry) => (
           <Box flexDirection="column" key={entry.id}>
             {entry.node ?? entry.lines.map((line, lineIndex) => <AnsiLine key={`${entry.id}:${lineIndex}`} line={rowText(line)} />)}

@@ -14,8 +14,12 @@
 //   - Committed rows never count toward the composer's native-cursor row
 //     prediction (`inkTranscriptRowCount`): Ink positions the cursor inside the
 //     live frame only.
-// Committed lines are rendered at the width current when they were committed and
-// do not reflow on a later resize — the same as any terminal scrollback.
+// Committed lines are rendered at the width current when they were committed.
+// When the window's width changes, the session clears the screen AND the
+// scrollback and prints every committed entry again at the new width (its
+// `redraw`), as Claude Code does: a terminal re-wraps the old frame into more
+// rows than it can erase, and the torn copy would otherwise stay in scrollback
+// (run-r2 MUST 4).
 //
 // Everything here is pure; the components only call it.
 import type { Key } from "ink";
@@ -30,6 +34,22 @@ export interface CommittedEntry {
    * (the home inventory). Committed rows are never counted, so it needs no lines.
    */
   node?: ReactNode;
+  /** The entry drawn again at another width (a width change reprints scrollback). */
+  redraw?: (columns: number) => Pick<CommittedEntry, "lines" | "node">;
+}
+
+/** Erase the screen, then the scrollback, then home the cursor (CSI 2J, CSI 3J, CSI H). */
+export const CLEAR_SCREEN_AND_SCROLLBACK = "\u001b[2J\u001b[3J\u001b[H";
+
+/** How long the width must hold still before the transcript is reprinted at it (a drag sends many resizes). */
+export const RESIZE_REPRINT_MS = 150;
+
+/**
+ * Every committed entry drawn at `columns` (its `redraw`), in order; an entry
+ * without one is kept as it is. Never mutates its input.
+ */
+export function redrawCommitted(committed: readonly CommittedEntry[], columns: number): CommittedEntry[] {
+  return committed.map((entry) => (entry.redraw ? { ...entry, ...entry.redraw(columns) } : entry));
 }
 
 export interface TranscriptCommitState {

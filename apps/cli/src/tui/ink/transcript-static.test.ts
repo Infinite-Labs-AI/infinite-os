@@ -15,6 +15,7 @@ import {
 } from "./interactive-session.js";
 import { inkTranscriptLayout, inkTranscriptRowCount, renderInkTranscriptToString } from "./transcript-app.js";
 import {
+  CLEAR_SCREEN_AND_SCROLLBACK,
   commitOnSubmit,
   DEFAULT_COMPOSER_ROWS,
   liveRegionCap,
@@ -22,6 +23,7 @@ import {
   livePageKey,
   liveWindow,
   pageLiveWindow,
+  redrawCommitted,
   type CommittedEntry
 } from "./transcript-static.js";
 
@@ -511,3 +513,33 @@ async function sendKeys(input: NodeJS.WritableStream, keys: string) {
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
 }
+
+describe("a width change reprints scrollback (run-r2 MUST 4)", () => {
+  it("redrawCommitted draws each entry that can be drawn again at the new width, in order, and keeps the rest", () => {
+    const at = (width: number) => [`turn at ${width}`];
+    const entries: CommittedEntry[] = [
+      { id: "turn:1", lines: at(160), redraw: (width) => ({ lines: at(width) }) },
+      { id: "note", lines: ["kept as printed"] },
+      { id: "turn:2", lines: at(160), redraw: (width) => ({ lines: at(width) }) }
+    ];
+    const redrawn = redrawCommitted(entries, 60);
+    expect(redrawn.map((entry) => [entry.id, ...entry.lines])).toEqual([["turn:1", "turn at 60"], ["note", "kept as printed"], ["turn:2", "turn at 60"]]);
+    expect(entries[0]!.lines).toEqual(["turn at 160"]);
+  });
+
+  it("the clear erases the screen, then the scrollback, then homes the cursor", () => {
+    expect(CLEAR_SCREEN_AND_SCROLLBACK).toBe(`${ESC}[2J${ESC}[3J${ESC}[H`);
+  });
+
+  it("the session reprints on a settled width change, through Ink, only on a terminal with the stock renderer", () => {
+    const source = readFileSync(fileURLToPath(new URL("./interactive-session.tsx", import.meta.url)), "utf8");
+    const effect = source.slice(source.indexOf("const printedColumns = useRef(columns);"), source.indexOf("// Every way out of the session"));
+    expect(effect).toContain("writeAboveFrame(CLEAR_SCREEN_AND_SCROLLBACK)");
+    expect(effect).toContain("redrawCommitted(current, width)");
+    expect(effect).toContain("setStaticEpoch(");
+    expect(effect).toMatch(/sessionStdout\?\.isTTY/u);
+    expect(effect).toContain('activeInkRenderer !== "stock"');
+    expect(effect).toContain("RESIZE_REPRINT_MS");
+  });
+});
+

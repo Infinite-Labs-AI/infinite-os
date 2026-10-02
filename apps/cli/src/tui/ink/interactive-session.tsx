@@ -8,7 +8,7 @@ import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useSta
 // wrap so it never lands a row off the line the user is typing on — char-by-char
 // width accumulation (a different, tighter packing) drifts from Ink's word-wrap.
 import wrapAnsi from "wrap-ansi";
-import { Box, Text, render, renderToString, useApp, useCursor, useInput, useStdin, useStdout } from "./renderer.js";
+import { Box, Text, activeInkRenderer, render, renderToString, useApp, useCursor, useInput, useStdin, useStdout } from "./renderer.js";
 
 import type { ChatProgressEvent } from "@infinite-os/llm-controller";
 import type { AnswerViewV1, ApprovalFieldAnswerV1, CreativeDraftFrameV1, ToolViewFrameV1 } from "@infinite-os/types";
@@ -75,11 +75,14 @@ import {
   useInfiniteTranscriptClock
 } from "./transcript-app.js";
 import {
+  CLEAR_SCREEN_AND_SCROLLBACK,
   commitOnSubmit,
   DEFAULT_COMPOSER_ROWS,
   DEFAULT_KEY_BAR_ROWS,
   livePageKey,
   pageLiveWindow,
+  redrawCommitted,
+  RESIZE_REPRINT_MS,
   type CommittedEntry,
   type LivePageDirection
 } from "./transcript-static.js";
@@ -490,7 +493,7 @@ export function InkInteractiveSessionApp({
   turnStoppable = false
 }: InkInteractiveSessionAppProps) {
   const app = useApp();
-  const { stdout: sessionStdout } = useStdout();
+  const { stdout: sessionStdout, write: writeAboveFrame } = useStdout();
   const t = theme ?? resolveTheme();
   // One turn-abort per session: each turn arms a fresh signal (Esc / Ctrl-C
   // stop it) and disarms it when the turn settles.
@@ -521,6 +524,8 @@ export function InkInteractiveSessionApp({
   const historyRef = useRef(history);
   historyRef.current = history;
   const [committed, setCommitted] = useState<readonly CommittedEntry[]>([]);
+  // Bumped when a width change reprints the scrollback: <Static> prints every committed entry again.
+  const [staticEpoch, setStaticEpoch] = useState(0);
   const [homeCommitted, setHomeCommitted] = useState(false);
   const turnSeq = useRef(0);
   // Counts every commit of the live turn (turnSeq counts only those with content),
@@ -643,39 +648,37 @@ export function InkInteractiveSessionApp({
     commitSeq.current += 1;
     const turn = historyRef.current;
     const { views, steps } = getTurnState();
+    const focus = viewFocusRef.current;
     // Scrollback is ONE column at any width (River, 2026-10-02): the question,
     // the answer, its views underneath, then its Steps, under a thin rule.
+    // `redraw` draws it again at another width (a width change reprints scrollback).
+    const drawTurn = (width: number) => renderCommittedTurn({
+      messages: turn,
+      views: views.map((frame) => frame.view),
+      focus,
+      steps,
+      width: transcriptColumns(width),
+      color: colorEnabled(t),
+      theme: t
+    });
     const latest: CommittedEntry | null = turn.length || views.length
-      ? {
-          id: `turn:${++turnSeq.current}`,
-          lines: renderCommittedTurn({
-            messages: turn,
-            views: views.map((frame) => frame.view),
-            focus: viewFocusRef.current,
-            steps,
-            width: transcriptColumns(columns),
-            color: colorEnabled(t),
-            theme: t
-          })
-        }
+      ? { id: `turn:${++turnSeq.current}`, lines: drawTurn(columns), redraw: (width) => ({ lines: drawTurn(width) }) }
       : null;
+    const inventory = homeInventory;
+    const drawHome = (width: number) => inventory ? (
+      <HomeInventory
+        columns={width}
+        commands={inventory.commands}
+        connections={inventory.connections}
+        connectionsNote={inventory.connectionsNote}
+        theme={t}
+        tools={inventory.tools}
+        version={inventory.version}
+        workspace={inventory.workspace}
+      />
+    ) : null;
     const home: CommittedEntry | null = homeInventory && !homeCommitted && turn.length === 0
-      ? {
-          id: "home",
-          lines: [],
-          node: (
-            <HomeInventory
-              columns={columns}
-              commands={homeInventory.commands}
-              connections={homeInventory.connections}
-              connectionsNote={homeInventory.connectionsNote}
-              theme={t}
-              tools={homeInventory.tools}
-              version={homeInventory.version}
-              workspace={homeInventory.workspace}
-            />
-          )
-        }
+      ? { id: "home", lines: [], node: drawHome(columns), redraw: (width) => ({ lines: [], node: drawHome(width) }) }
       : null;
     setCommitted((current) => commitOnSubmit({ committed: home ? [...current, home] : current, latest }, line).committed);
     setHomeCommitted(true);
@@ -685,6 +688,39 @@ export function InkInteractiveSessionApp({
     setViewFocus(null);
     setLiveOffset(null);
   }, [agentTitle, columns, homeCommitted, homeInventory, t]);
+
+  // A width change (run-r2 MUST 4): the terminal re-wraps the frame it holds
+  // into more rows than Ink can erase, and the part pushed into scrollback is
+  // out of the cursor's reach, so scrolling up showed the turn twice, once
+  // torn. Once the width holds still, clear the screen AND the scrollback
+  // (through Ink, which redraws its frame after the write), then print every
+  // committed entry again at the new width (<Static> remounts on the epoch).
+  // Only on a terminal, with the stock renderer (the vendored one diffs cells
+  // and draws scrollback in flow); `INFINITE_REFLOW_GUARD=0` turns it off with
+  // the reflow guard.
+  const columnsRef = useRef(columns);
+  columnsRef.current = columns;
+  const printedColumns = useRef(columns);
+  useEffect(() => {
+    if (columns === printedColumns.current) {
+      return;
+    }
+    if (!sessionStdout?.isTTY || activeInkRenderer !== "stock" || process.env.INFINITE_REFLOW_GUARD === "0") {
+      printedColumns.current = columns;
+      return;
+    }
+    const timer = setTimeout(() => {
+      const width = columnsRef.current;
+      if (width === printedColumns.current) {
+        return;
+      }
+      printedColumns.current = width;
+      writeAboveFrame(CLEAR_SCREEN_AND_SCROLLBACK);
+      setCommitted((current) => redrawCommitted(current, width));
+      setStaticEpoch((epoch) => epoch + 1);
+    }, RESIZE_REPRINT_MS);
+    return () => clearTimeout(timer);
+  }, [columns, sessionStdout, writeAboveFrame]);
 
   // Every way out of the session (/exit, /quit, a result's `exit`, idle Ctrl-C)
   // commits the live turn to <Static> first, uncapped, at the current width, and
@@ -1780,6 +1816,7 @@ export function InkInteractiveSessionApp({
         columns={columns}
         committed={committed}
         composerRows={reservedRows}
+        staticKey={staticEpoch}
         keyBarRows={keyBarRows}
         latest={liveLatest}
         livePage={liveOffset}
