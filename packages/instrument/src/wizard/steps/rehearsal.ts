@@ -5,6 +5,7 @@
 import { createHash } from "node:crypto"
 
 import type { StepOutcome, WizardContext, WizardDeps, WizardStep } from "../contracts/deps.js"
+import { PR_LOOP_LIMITS } from "../contracts/git-host.js"
 import { WIZARD_STEP_META } from "../contracts/steps.js"
 import type { TestTool } from "../contracts/test-engine.js"
 import { wizardGitExtras, type WizardGitOps } from "../../git/index.js"
@@ -23,6 +24,7 @@ import {
   sub,
   type RunFacts
 } from "../../review/context.js"
+import { hookFixItem, runFixRound } from "../../review/fix.js"
 import { buildPrBody } from "../../review/post.js"
 import { recordRehearsalCells, rehearsalLines, rehearse, type RehearsalOutcome } from "../../review/rehearse.js"
 import type { Scanner } from "../../review/scan.js"
@@ -153,20 +155,37 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
   const allowlist = allowlistUnion(state.jobs)
 
   sub(ctx, "rehearsal", "Committing the changes…", "pending")
-  const commit = await stageAndCommit({
-    ctx,
-    deps,
-    git,
-    step: "rehearsal",
-    scanner,
-    runId,
-    message: `infinite-tag: set up analytics (run ${state.displayId})`,
-    round: null,
-    allowlist,
-    managed,
-    npmFiles,
-    connectionIds: facts.connectionIds
-  })
+  const commitOnce = () =>
+    stageAndCommit({
+      ctx,
+      deps,
+      git,
+      step: "rehearsal",
+      scanner,
+      runId,
+      message: `infinite-tag: set up analytics (run ${state.displayId})`,
+      round: null,
+      allowlist,
+      managed,
+      npmFiles,
+      connectionIds: facts.connectionIds
+    })
+  let commit = await commitOnce()
+  // §3g.1: a commit hook that fails on the wizard's OWN files gets a fix round through the worker (≤ 2).
+  const worker = state.agent?.worker ?? null
+  for (let round = 1; commit.kind === "hook_failed" && commit.ourFiles.length > 0 && worker !== null && round <= PR_LOOP_LIMITS.maxFixRounds; round += 1) {
+    const fixable = commit.ourFiles.filter((file) => allowlist.includes(file) || managed.includes(file))
+    if (fixable.length === 0) break
+    sub(ctx, "rehearsal", `A commit hook flagged ${fixable.length} file(s); ${worker === "codex" ? "Codex" : "Claude Code"} is fixing them…`, "pending")
+    const item = hookFixItem(fixable, commit.output)
+    ctx.emit.emit("job.seeded", { item })
+    const fix = await runFixRound(ctx, deps, { step: "rehearsal", worker, items: [item], scanner })
+    if (fix.run.outcome === "out_of_usage") {
+      await ctx.state.save()
+      return { kind: "parked", code: "INF_WIZ_AGENT_OUT_OF_USAGE", reason: "The worker agent is out of usage while fixing a commit hook.", resumeHint: "Run `npx infinite-tag` again when your plan resets." }
+    }
+    commit = await commitOnce()
+  }
   const stop = commitStop(commit)
   if (stop) return stop
   const head = await git.head()

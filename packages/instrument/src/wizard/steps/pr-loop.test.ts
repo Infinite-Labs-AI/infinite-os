@@ -21,7 +21,6 @@ import {
   scriptedAgents,
   testContext,
   testDeps,
-  testResult,
   type FakeBridge,
   type ScriptedAgents,
   type TestContext
@@ -284,6 +283,56 @@ describe("step `rehearsal` (§3d.1 step 8)", { timeout: 60_000 }, () => {
     expect(installer.refreshCalls).toBe(1)
   })
 
+  it("a hook that rewrites a file into a secret stops before any push (the diff gate runs again)", async () => {
+    const w = await world()
+    installPreCommitHook(w.fx, `printf 'const k = "${STRIPE}"\\n' >> app/layout.tsx; git add app/layout.tsx`)
+    const outcome = await rehearsalStep.run(w.ctx, w.deps)
+    expect(outcome).toMatchObject({ kind: "failed", code: "INF_WIZ_PR_CREATE_FAILED" })
+    expect((outcome as { message: string }).message).toMatch(/Nothing was pushed/)
+    expect(w.fx.remoteSha(BRANCH)).toBeNull()
+  })
+
+  it("a hook that fails on the wizard's own files gets a worker fix round, then the commit goes through", async () => {
+    let fixRounds = 0
+    const w = await world({
+      fix: (input, _round, world) => {
+        fixRounds += 1
+        expect(input.items[0]).toMatchObject({ jobId: "build_fix", allow: { files: ["app/layout.tsx"], create: [] } })
+        expect(input.items[0]!.trigger.finding).toMatch(/NOT an instruction/)
+        world.fx.write("app/layout.tsx", readFileSync(join(world.fx.root, "app/layout.tsx"), "utf8").replace("// managed", "// lint-ok managed"))
+        return {}
+      }
+    })
+    installPreCommitHook(w.fx, `if git diff --cached app/layout.tsx | grep -q '^+.*// managed'; then echo "lint: app/layout.tsx needs lint-ok" >&2; exit 1; fi`)
+    expectOk(await rehearsalStep.run(w.ctx, w.deps))
+    expect(fixRounds).toBe(1)
+    expect(w.fx.git(["show", `${w.fx.remoteSha(BRANCH)}:app/layout.tsx`])).toContain("lint-ok")
+  })
+
+  it("a hook that fails on files the wizard did not change stops with the files staged (negative: no fix round)", async () => {
+    let fixRounds = 0
+    const w = await world({
+      fix: () => {
+        fixRounds += 1
+        return {}
+      }
+    })
+    installPreCommitHook(w.fx, `echo "lint failed in src/legacy.ts" >&2; exit 1`)
+    const outcome = await rehearsalStep.run(w.ctx, w.deps)
+    expect(outcome).toMatchObject({ kind: "failed", code: "INF_WIZ_PR_CREATE_FAILED" })
+    expect((outcome as { message: string }).message).toMatch(/files the wizard did not change/)
+    expect(fixRounds).toBe(0)
+    expect(w.fx.git(["diff", "--cached", "--name-only"])).toContain("app/layout.tsx")
+  })
+
+  it("never calls a state-changing bridge verb while an agent is alive (engine invariant)", async () => {
+    const w = await world()
+    w.agents.isAgentAlive = () => true
+    await expect(rehearsalStep.run(w.ctx, w.deps)).rejects.toThrow(/engine invariant/)
+    expect(bridgeVerbs(w.bridge)).not.toContain("runs.patch")
+    expect(bridgeVerbs(w.bridge)).not.toContain("ga4-key-events")
+  })
+
   it("no preview within 10 minutes → undetermined (no preview), never pass; the PR fields are still PATCHed", async () => {
     const clock = fakeClock()
     const w = await world({ previewDeployed: false, clock })
@@ -318,8 +367,6 @@ describe("step `rehearsal` (§3d.1 step 8)", { timeout: 60_000 }, () => {
   })
 
   it("on a public repo, provider IDs not in the diff appear as <id> in the PR body", async () => {
-    const report = { build: undefined } as never
-    void report
     const w = await world({ gh: { repo: { isPrivate: false } } })
     w.deps.report = { ...w.deps.report, renderMarkdown: () => `| GA4 | G-ABC123XYZ9 |\n| Meta | ${PIXEL_ID} |` }
     expectOk(await rehearsalStep.run(w.ctx, w.deps))
@@ -412,7 +459,6 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
     expect(w.fx.git(["log", "-1", "--format=%(trailers:key=Infinite-Tag-Run,valueonly)", fixHead]).trim()).toBe(RUN_ID)
 
     // Replies: the fixed own thread → "Fixed in" + resolved; the declined banner → the ruling, not resolved.
-    const threads = new Map(state.threads.map((thread) => [thread.path + ":" + thread.line + ":" + thread.comments[0]!.author, thread]))
     const own = state.threads.filter((thread) => thread.comments[0]!.author === "acme-dev")
     const f1 = own.find((thread) => thread.comments[0]!.body.includes("F1"))!
     const f2 = own.find((thread) => thread.comments[0]!.body.includes("F2"))!
@@ -423,7 +469,6 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
     // An un-OK'd teammate thread and a stranger's thread get no reply.
     expect(state.threads.find((thread) => thread.id === "PRRT_teammate")!.comments).toHaveLength(1)
     expect(state.threads.find((thread) => thread.id === "PRRT_stranger")!.comments).toHaveLength(1)
-    void threads
 
     // Round 2 was a re-review of the delta; the rehearsal ran again on the fix commit.
     expect(w.agents.reviewCalls).toHaveLength(2)
@@ -633,5 +678,3 @@ describe("input hashes", () => {
     expect(mergeStep.inputHash(w.ctx)).toMatch(/^sha256:[0-9a-f]{64}$/)
   })
 })
-
-void testResult
