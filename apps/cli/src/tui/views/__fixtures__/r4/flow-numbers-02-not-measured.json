@@ -58,12 +58,6 @@
           "currency": "USD",
           "columns": [
             {
-              "key": "campaign",
-              "label": "Campaign",
-              "unit": "text",
-              "factGroup": "entity"
-            },
-            {
               "key": "spend",
               "label": "Spend",
               "unit": "money",
@@ -97,9 +91,6 @@
                   "id": "c1",
                   "label": "Ad set 01",
                   "cells": {
-                    "campaign": {
-                      "text": "Ad set 01"
-                    },
                     "spend": {
                       "value": 10
                     },
@@ -120,9 +111,6 @@
                   "id": "c2",
                   "label": "Ad set 02",
                   "cells": {
-                    "campaign": {
-                      "text": "Ad set 02"
-                    },
                     "spend": {
                       "value": 12.5
                     },
@@ -143,9 +131,6 @@
                   "id": "c4",
                   "label": "Ad set 04",
                   "cells": {
-                    "campaign": {
-                      "text": "Ad set 04"
-                    },
                     "spend": {
                       "value": 17.5
                     },

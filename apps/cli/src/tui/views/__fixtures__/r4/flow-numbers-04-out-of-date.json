@@ -58,12 +58,6 @@
           "currency": "USD",
           "columns": [
             {
-              "key": "campaign",
-              "label": "Campaign",
-              "unit": "text",
-              "factGroup": "entity"
-            },
-            {
               "key": "spend",
               "label": "Spend",
               "unit": "money",
