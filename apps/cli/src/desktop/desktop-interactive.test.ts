@@ -212,6 +212,14 @@ describe("adaptDesktopClientToTurnSource", () => {
     expect(adapter.sessionCapable).toBe(false);
   });
 
+  it("delegates stepWordsCapable to the real client (absent = false)", () => {
+    const client: { sessionCapable: boolean; stepWordsCapable?: boolean; turn: unknown } = { sessionCapable: true, turn: vi.fn() };
+    const adapter = adaptDesktopClientToTurnSource(client as any, "rev-1");
+    expect(adapter.stepWordsCapable).toBe(false);
+    client.stepWordsCapable = true;
+    expect(adapter.stepWordsCapable).toBe(true);
+  });
+
   it("delegates confirmFieldsCapable to the real client", () => {
     const client = { sessionCapable: true, confirmFieldsCapable: false, turn: vi.fn() };
     const adapter = adaptDesktopClientToTurnSource(client as any, "rev-1");

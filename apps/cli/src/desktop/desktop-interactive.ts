@@ -216,6 +216,9 @@ export function adaptDesktopClientToTurnSource(
     get confirmFieldsCapable() {
       return client.confirmFieldsCapable === true;
     },
+    get stepWordsCapable() {
+      return client.stepWordsCapable === true;
+    },
     async turn(
       input: DesktopTurnSourceInput,
       onFrame: (frame: BridgeFrame) => void
