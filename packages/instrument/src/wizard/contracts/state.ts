@@ -13,7 +13,7 @@ import type { ChecklistItem } from "./jobs.js"
 import { CHECKLIST_ITEM_SHAPE } from "./jobs.js"
 import type { ReportColumnSnapshot } from "./report.js"
 import { REPORT_COLUMN_SNAPSHOT_SHAPE } from "./report.js"
-import { arrayOf, oneOf, recordOf, shapeOf } from "./shape.js"
+import { arrayOf, nullable, oneOf, recordOf, shapeOf } from "./shape.js"
 import type { LearnId, StepOutcomeKind, WizardStepId } from "./steps.js"
 
 export const WIZARD_STATE_SCHEMA = "infinite-tag.wizard-state.v1" as const
@@ -165,32 +165,32 @@ export const WIZARD_RUN_STATE_SHAPE = shapeOf<WizardRunState>()(
   ],
   [],
   {
-    link: shapeOf<NonNullable<WizardRunState["link"]>>()("RunState.link", ["linkId", "workspaceName", "approvedAt", "runtimeVariant"], []),
+    link: nullable(shapeOf<NonNullable<WizardRunState["link"]>>()("RunState.link", ["linkId", "workspaceName", "approvedAt", "runtimeVariant"], [])),
     steps: recordOf(shapeOf<StepRecord>()("StepRecord", ["outcome", "inputHash", "at"], ["code"])),
-    agent: shapeOf<NonNullable<WizardRunState["agent"]>>()("RunState.agent", ["worker", "reviewer", "workerSession", "whoPays"], [], {
-      workerSession: oneOf(
+    agent: nullable(shapeOf<NonNullable<WizardRunState["agent"]>>()("RunState.agent", ["worker", "reviewer", "workerSession", "whoPays"], [], {
+      workerSession: nullable(oneOf(
         shapeOf<{ kind: "claude"; sessionId: string }>()("ClaudeSession", ["kind", "sessionId"], []),
         shapeOf<{ kind: "codex"; threadId: string }>()("CodexSession", ["kind", "threadId"], [])
-      ),
+      )),
       whoPays: shapeOf<NonNullable<WizardRunState["agent"]>["whoPays"]>()("RunState.whoPays", ["worker", "reviewer"], [], {
-        worker: WHO_PAYS_SHAPE,
-        reviewer: WHO_PAYS_SHAPE
+        worker: nullable(WHO_PAYS_SHAPE),
+        reviewer: nullable(WHO_PAYS_SHAPE)
       })
-    }),
-    git: shapeOf<NonNullable<WizardRunState["git"]>>()("RunState.git", ["base", "baseSource", "branch", "baseSha", "headSha"], []),
-    pr: shapeOf<NonNullable<WizardRunState["pr"]>>()(
+    })),
+    git: nullable(shapeOf<NonNullable<WizardRunState["git"]>>()("RunState.git", ["base", "baseSource", "branch", "baseSha", "headSha"], [])),
+    pr: nullable(shapeOf<NonNullable<WizardRunState["pr"]>>()(
       "RunState.pr",
       ["host", "number", "url", "nodeId", "isDraft", "round", "reviewedSha", "handledThreadIds", "mergeSha"],
       []
-    ),
-    plan: shapeOf<NonNullable<WizardRunState["plan"]>>()("RunState.plan", ["hash", "answers", "lines"], [], {
+    )),
+    plan: nullable(shapeOf<NonNullable<WizardRunState["plan"]>>()("RunState.plan", ["hash", "answers", "lines"], [], {
       answers: shapeOf<NonNullable<WizardRunState["plan"]>["answers"]>()(
         "RunState.plan.answers",
         ["consentMode", "conversions", "privacyApproved", "npmInstall", "metaGoal"],
         []
       ),
       lines: arrayOf(shapeOf<{ id: string; approved: boolean | null }>()("RunState.plan.line", ["id", "approved"], []))
-    }),
+    })),
     jobs: arrayOf(CHECKLIST_ITEM_SHAPE),
     markers: shapeOf<WizardRunState["markers"]>()("RunState.markers", ["before", "rehearsal", "prove"], [], {
       before: MARKERS_SHAPE,
@@ -198,10 +198,10 @@ export const WIZARD_RUN_STATE_SHAPE = shapeOf<WizardRunState>()(
       prove: MARKERS_SHAPE
     }),
     report: shapeOf<WizardRunState["report"]>()("RunState.report", ["live_today", "in_pr", "proven_live"], [], {
-      live_today: REPORT_COLUMN_SNAPSHOT_SHAPE,
-      in_pr: REPORT_COLUMN_SNAPSHOT_SHAPE,
-      proven_live: REPORT_COLUMN_SNAPSHOT_SHAPE
+      live_today: nullable(REPORT_COLUMN_SNAPSHOT_SHAPE),
+      in_pr: nullable(REPORT_COLUMN_SNAPSHOT_SHAPE),
+      proven_live: nullable(REPORT_COLUMN_SNAPSHOT_SHAPE)
     }),
-    snapshot: shapeOf<NonNullable<WizardRunState["snapshot"]>>()("RunState.snapshot", ["dir"], [])
+    snapshot: nullable(shapeOf<NonNullable<WizardRunState["snapshot"]>>()("RunState.snapshot", ["dir"], []))
   }
 )

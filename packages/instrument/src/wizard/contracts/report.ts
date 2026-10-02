@@ -11,7 +11,7 @@
 // 6. A measurement change is noted as "measurement changed", never as growth.
 // 7. `in_pr` cells are keyed to `columns.in_pr.sha` and rebuilt on each new head.
 import type { ServerLaneState } from "./bridge.js"
-import { arrayOf, recordOf, shapeOf, type ObjectShape } from "./shape.js"
+import { arrayOf, nullable, recordOf, shapeOf, type ObjectShape } from "./shape.js"
 
 export const REPORT_SCHEMA = "infinite-tag.report.v2" as const
 
@@ -423,7 +423,7 @@ export const REPORT_V2_SHAPE = shapeOf<ReportV2>()(
       proven_live: shapeOf<ReportV2["columns"]["proven_live"]>()("ProvenLiveColumnMeta", ["measuredAt", "sha", "pending"], [])
     }),
     rows: arrayOf(shapeOf<ReportV2["rows"][number]>()("ReportRow", ["id", "label", "cells"], [], { cells: COLUMN_CELLS_SHAPE })),
-    day7: shapeOf<ReportV2["day7"]>()("ReportDay7", ["measuredAt", "window", "cell"], [], { window: WINDOW_SHAPE, cell: CELL_SHAPE }),
+    day7: shapeOf<ReportV2["day7"]>()("ReportDay7", ["measuredAt", "window", "cell"], [], { window: nullable(WINDOW_SHAPE), cell: nullable(CELL_SHAPE) }),
     finishLine: arrayOf(shapeOf<ReportV2["finishLine"][number]>()("FinishLineRow", ["n", "id", "cells"], [], { cells: COLUMN_CELLS_SHAPE }))
   }
 )
@@ -448,20 +448,20 @@ export const BASELINE_SHAPE = shapeOf<BaselineResponseFields>()(
       ["status", "pageViews", "localhostExcluded", "topOffenders", "keyEvents", "syncedAt"],
       [],
       {
-        pageViews: PAGE_VIEW_SPLIT_SHAPE,
-        topOffenders: arrayOf(shapeOf<{ host: string; count: number }>()("TopOffender", ["host", "count"], [])),
-        keyEvents: arrayOf(
+        pageViews: nullable(PAGE_VIEW_SPLIT_SHAPE),
+        topOffenders: nullable(arrayOf(shapeOf<{ host: string; count: number }>()("TopOffender", ["host", "count"], []))),
+        keyEvents: nullable(arrayOf(
           shapeOf<NonNullable<BaselineResponseFields["ga4"]["keyEvents"]>[number]>()("BaselineKeyEvent", ["name", "designated", "received28d"], [])
-        )
+        ))
       }
     ),
     posthog: shapeOf<BaselineResponseFields["posthog"]>()("BaselinePosthog", ["status", "pageViews", "proxied", "conversions"], [], {
-      pageViews: PAGE_VIEW_SPLIT_SHAPE,
-      proxied: shapeOf<NonNullable<BaselineResponseFields["posthog"]["proxied"]>>()("BaselineProxied", ["tagged", "webTotal"], []),
-      conversions: arrayOf(NAME_COUNT_SHAPE)
+      pageViews: nullable(PAGE_VIEW_SPLIT_SHAPE),
+      proxied: nullable(shapeOf<NonNullable<BaselineResponseFields["posthog"]["proxied"]>>()("BaselineProxied", ["tagged", "webTotal"], [])),
+      conversions: nullable(arrayOf(NAME_COUNT_SHAPE))
     }),
     conversions: shapeOf<BaselineResponseFields["conversions"]>()("BaselineConversions", ["infinite"], [], {
-      infinite: arrayOf(NAME_COUNT_SHAPE)
+      infinite: nullable(arrayOf(NAME_COUNT_SHAPE))
     }),
     serverLane: shapeOf<BaselineResponseFields["serverLane"]>()("BaselineServerLane", ["laneState", "documentRequests7d", "outcomes7d"], []),
     stripe: shapeOf<BaselineResponseFields["stripe"]>()("BaselineStripe", ["status", "lastLiveEventAt"], [])

@@ -7,13 +7,26 @@
 // keys; `shapeErrors` then rejects a JSON value with an unknown key or a missing required key, at
 // every nested level the shape names. Pure; no I/O; zero dependencies.
 
-/** The nested structure of one field whose value is an object (or an array / record of objects). */
-export type FieldShape =
+/** The nested structure of one field whose value is an object (or an array / record of objects), never null. */
+export type NonNullFieldShape =
   | ObjectShape
   | { readonly arrayOf: FieldShape }
   | { readonly recordOf: FieldShape }
   /** A union: the value must satisfy at least one member exactly. */
   | { readonly oneOf: readonly ObjectShape[] }
+
+/** A field whose type admits `null` (`X | null`). Only these accept a JSON null. */
+export interface NullableFieldShape {
+  readonly nullable: NonNullFieldShape
+}
+
+export type FieldShape = NonNullFieldShape | NullableFieldShape
+
+/**
+ * Per key: a field whose type includes `null` MUST be wrapped in `nullable(…)`, and one whose type does not
+ * must NOT be. Checked at compile time, so a nullable marker can never drift from the TypeScript type.
+ */
+type FieldsFor<T> = { [K in keyof T & string]?: null extends T[K] ? NullableFieldShape : NonNullFieldShape }
 
 export interface ObjectShape {
   readonly name: string
@@ -44,7 +57,7 @@ export function shapeOf<T>() {
     name: string,
     required: R & ExactlyCovers<RequiredKeyOf<T>, R, "__missingRequiredKeys">,
     optional: O & ExactlyCovers<OptionalKeyOf<T>, O, "__missingOptionalKeys">,
-    fields: Partial<Record<keyof T & string, FieldShape>> = {}
+    fields: FieldsFor<T> = {}
   ): ObjectShape =>
     Object.freeze({
       name,
@@ -64,7 +77,9 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 }
 
 function fieldErrors(value: unknown, field: FieldShape, path: string): string[] {
-  if (value === null || value === undefined) return []
+  if (value === undefined) return []
+  if ("nullable" in field) return value === null ? [] : fieldErrors(value, field.nullable, path)
+  if (value === null) return [`${path}: null is not allowed here`]
   if ("arrayOf" in field) {
     if (!Array.isArray(value)) return [`${path}: expected an array`]
     return value.flatMap((item, index) => fieldErrors(item, field.arrayOf, `${path}[${index}]`))
@@ -103,16 +118,21 @@ export function shapeErrors(value: unknown, shape: ObjectShape, path = "$"): str
 }
 
 /** A FieldShape for an array of objects. */
-export function arrayOf(field: FieldShape): FieldShape {
+export function arrayOf(field: FieldShape): NonNullFieldShape {
   return { arrayOf: field }
 }
 
 /** A FieldShape for a string-keyed record of objects. */
-export function recordOf(field: FieldShape): FieldShape {
+export function recordOf(field: FieldShape): NonNullFieldShape {
   return { recordOf: field }
 }
 
+/** A field whose type is `X | null`. */
+export function nullable(field: NonNullFieldShape): NullableFieldShape {
+  return { nullable: field }
+}
+
 /** A FieldShape for a union of object shapes. */
-export function oneOf(...members: ObjectShape[]): FieldShape {
+export function oneOf(...members: ObjectShape[]): NonNullFieldShape {
   return { oneOf: members }
 }

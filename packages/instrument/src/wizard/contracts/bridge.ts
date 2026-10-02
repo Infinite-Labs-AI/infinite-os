@@ -19,7 +19,7 @@ import type { BaselineResponseFields, ReportPhase, ReportV2 } from "./report.js"
 import { BASELINE_SHAPE, REPORT_V2_SHAPE } from "./report.js"
 import type { ReceiptsRequestFields, ReceiptsResponseFields } from "./receipts.js"
 import { RECEIPTS_REQUEST_SHAPE, RECEIPTS_RESPONSE_SHAPE } from "./receipts.js"
-import { arrayOf, oneOf, shapeOf, type ObjectShape } from "./shape.js"
+import { arrayOf, nullable, oneOf, shapeOf, type ObjectShape } from "./shape.js"
 import type { TestResult, TestRunRequest } from "./test-engine.js"
 import { TEST_RESULT_SHAPE, TEST_RUN_REQUEST_SHAPE } from "./test-engine.js"
 
@@ -743,15 +743,15 @@ const VERCEL_HOSTING_SHAPE = shapeOf<VercelHosting>()(
   ["envTargets"]
 )
 const HOSTING_RESPONSE_SHAPE = shapeOf<HostingResponse>()("HostingResponse", [...ENVELOPE, "provider", "vercel"], [], {
-  vercel: VERCEL_HOSTING_SHAPE
+  vercel: nullable(VERCEL_HOSTING_SHAPE)
 })
 const DEPLOY_STATUS_RESPONSE_SHAPE = shapeOf<DeployStatusResponse>()(
   "DeployStatusResponse",
   [...ENVELOPE, "mergeDeployment", "serving", "target"],
   [],
   {
-    mergeDeployment: shapeOf<NonNullable<DeployStatusResponse["mergeDeployment"]>>()("MergeDeployment", ["state", "readyAt"], []),
-    serving: shapeOf<NonNullable<DeployStatusResponse["serving"]>>()("ServingDeployment", ["sha", "readyAt", "createdAt", "ref"], [])
+    mergeDeployment: nullable(shapeOf<NonNullable<DeployStatusResponse["mergeDeployment"]>>()("MergeDeployment", ["state", "readyAt"], [])),
+    serving: nullable(shapeOf<NonNullable<DeployStatusResponse["serving"]>>()("ServingDeployment", ["sha", "readyAt", "createdAt", "ref"], []))
   }
 )
 
@@ -872,7 +872,7 @@ const META_RELAY_STATUS_RESPONSE_SHAPE = shapeOf<MetaRelayStatusResponse>()(
   "MetaRelayStatusResponse",
   [...ENVELOPE, "available", "reason", "bound", "enabled"],
   [],
-  { bound: shapeOf<NonNullable<MetaRelayStatusResponse["bound"]>>()("MetaRelayBinding", ["sourceRef", "pixelId"], []) }
+  { bound: nullable(shapeOf<NonNullable<MetaRelayStatusResponse["bound"]>>()("MetaRelayBinding", ["sourceRef", "pixelId"], [])) }
 )
 const META_RELAY_ENABLE_BODY_SHAPE = shapeOf<MetaRelayEnableBody>()("MetaRelayEnableBody", [...ENVELOPE, "sourceRef", "enable"], [])
 const EMPTY_BODY_SHAPE = shapeOf<BridgeEnvelope>()("EmptyBody", [...ENVELOPE], [])
@@ -917,11 +917,28 @@ export const BRIDGE_VERBS = {
   "test.cancel": { verb: "test.cancel", method: "POST", path: "/v1/test/runs/:testRunId/cancel", query: [], capability: "tag.test.v1", linkScoped: true, paid: true, successStatus: 200, request: EMPTY_BODY_SHAPE, response: TEST_RUN_CANCEL_RESPONSE_SHAPE, stateChanging: false }
 } as const satisfies { readonly [V in BridgeVerbId]: BridgeVerbSpec & { readonly verb: V } }
 
-/** Exact-match regexp for a verb's path (params are one path segment; the query string is ignored). */
+/** The id shape each path parameter must have; a segment that does not match is no route (404), never forwarded. */
+export const BRIDGE_PATH_PARAM_PATTERNS = {
+  runId: BRIDGE_ID_PATTERNS.uuid,
+  testRunId: BRIDGE_ID_PATTERNS.testRunId,
+  linkRequestId: BRIDGE_ID_PATTERNS.linkRequestId
+} as const
+
+/**
+ * Exact-match regexp for a verb's path (the query string is ignored). Each `:param` matches ONLY its
+ * BRIDGE_PATH_PARAM_PATTERNS id shape, so `/v1/runs/..` or `/v1/runs/%2e%2e` addresses no verb. An unknown
+ * param name throws (a table row with a param nobody validates would forward anything).
+ */
 export function bridgePathPattern(spec: Pick<BridgeVerbSpec, "path">): RegExp {
   const source = spec.path
     .split("/")
-    .map((segment) => (segment.startsWith(":") ? "[^/?#]+" : segment.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")))
+    .map((segment) => {
+      if (!segment.startsWith(":")) return segment.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+      const name = segment.slice(1)
+      const pattern = (BRIDGE_PATH_PARAM_PATTERNS as Record<string, RegExp>)[name]
+      if (!pattern) throw new Error(`bridge path ${spec.path}: no id pattern for :${name}`)
+      return `(?:${pattern.source.replace(/^\^/, "").replace(/\$$/, "")})`
+    })
     .join("/")
   return new RegExp(`^${source}(?:\\?[^#]*)?$`)
 }
@@ -1005,10 +1022,49 @@ export interface TagBridgeClient {
   cancelTest(testRunId: string, options?: BridgeCallOptions): Promise<TestRunCancelResponse>
 }
 
-/** A field-name rule the desktop's sanitizer enforces on everything that crosses the bridge (§0). */
+/**
+ * The keys the desktop's output sanitizer drops (normalised: lowercase, non-alphanumerics removed). Mirrors
+ * `bu:apps/desktop/src/main/brain/agent/cmdl-local-bridge.ts` `PRIVATE_OUTPUT_KEYS` exactly; a contract field
+ * with one of these names would silently vanish on the way through the bridge.
+ */
+export const DESKTOP_PRIVATE_OUTPUT_KEYS = [
+  "authorization",
+  "accesstoken",
+  "refreshtoken",
+  "bearertoken",
+  "servicerolekey",
+  "apikey",
+  "encryptionkey",
+  "confirmationid",
+  "internalconfirmationid",
+  "executioncontext",
+  "rawexecutioncontext",
+  "providerroute",
+  "providersessionid",
+  "engineprojectid",
+  "cloudworkspaceid",
+  "clouduserid",
+  "authgeneration",
+  "chatturnid",
+  "rendererturnid",
+  "webcontentsid"
+] as const
+
+/**
+ * The desktop sanitizer's field-name rule (§0), mirrored from `isPrivateOutputKey` in the same file: false for
+ * `__proto__`, any name whose normalised form is in DESKTOP_PRIVATE_OUTPUT_KEYS, is or ends in `token`, contains
+ * `credential`, or is `prototype` / `constructor`. A field this rejects must not appear in any bridge shape.
+ */
 export function isSanitizerSafeFieldName(name: string): boolean {
-  const lower = name.toLowerCase()
-  return !lower.endsWith("token") && lower !== "apikey" && !lower.includes("credential")
+  if (name === "__proto__") return false
+  const normalized = name.toLowerCase().replace(/[^a-z0-9]/g, "")
+  return !(
+    (DESKTOP_PRIVATE_OUTPUT_KEYS as readonly string[]).includes(normalized) ||
+    normalized.endsWith("token") ||
+    normalized.includes("credential") ||
+    normalized === "prototype" ||
+    normalized === "constructor"
+  )
 }
 
 /** Shapes re-exported for the contract tests and for strict decoders. */

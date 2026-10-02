@@ -368,7 +368,7 @@
         },
         "proven_live": {
           "value": "4 of 4",
-          "display": "4 of 4 tools: receipts from this visit",
+          "display": "4 of 4 fire: 2 verified (receipts from this visit) · 2 seen leaving",
           "state": "pass",
           "provenance": {
             "source": "cloud_receipt",

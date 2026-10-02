@@ -242,7 +242,6 @@ export const CODE_JOB_IDS = ["npm_install", "commit_pr", "ga4_key_events"] as co
 // ---------------------------------------------------------------------------------------------
 
 export const GLOBAL_DENY_GLOBS = [
-  ".git/**",
   ".env*",
   "**/.env*",
   "package-lock.json",
@@ -255,11 +254,20 @@ export const GLOBAL_DENY_GLOBS = [
   "**/bun.lockb",
   "bun.lock",
   "**/bun.lock",
+  "npm-shrinkwrap.json",
+  "**/npm-shrinkwrap.json",
   "package.json",
   "**/package.json",
+  // Anchored anywhere, not only at the repo root: the installer writes `.infinite/` under its root, which is the
+  // APP root in a monorepo (`apps/web/.infinite/install.json`).
+  ".git/**",
+  "**/.git/**",
   ".infinite/**",
+  "**/.infinite/**",
   ".claude/**",
+  "**/.claude/**",
   ".codex/**",
+  "**/.codex/**",
   "**/dist/**",
   "**/build/**",
   "**/.next/**",

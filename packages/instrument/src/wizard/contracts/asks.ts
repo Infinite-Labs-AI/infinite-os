@@ -117,15 +117,26 @@ export function yesApproves(line: Pick<PlanLine, "kind" | "ownership">): boolean
 }
 
 /**
- * The plan line kinds that stay HUMAN in nested-agent mode (§3d.7, R2-14): an `--answers` file never
- * satisfies them; the wizard asks them only through a prompt it opens on /dev/tty itself.
- * = every `never` kind (consent, conversion names, privacy text, meta_relay, every line that changes an
- * existing tag) plus adopted `improve_additive`.
+ * The plan line kinds that MAY stay HUMAN in nested-agent mode (§3d.7, R2-14): every `never` kind (consent,
+ * conversion names, privacy text, meta_relay, every line that changes an existing tag) plus `improve_additive`,
+ * which is user-only ONLY when it improves an ADOPTED provider. A kind-level list cannot say that, so this is the
+ * conservative superset; decide a concrete line with `isNestedUserOnly(line)`.
  */
 export const NESTED_USER_ONLY_LINE_KINDS: readonly PlanLineKind[] = PLAN_LINE_KINDS.filter((kind) => {
   const policy = YES_POLICY[kind]
   return policy === "never" || typeof policy === "object"
 })
+
+/**
+ * Whether a concrete plan line stays HUMAN in nested mode (§3d.7): an `--answers` file never satisfies it; the
+ * wizard asks it only through a prompt it opens on /dev/tty itself. A managed `improve_additive` is NOT user-only
+ * (it is a `--yes` line); an adopted or unspecified one is (fail-safe, as in `yesApproves`).
+ */
+export function isNestedUserOnly(line: Pick<PlanLine, "kind" | "ownership">): boolean {
+  const policy = YES_POLICY[line.kind]
+  if (typeof policy === "object") return (line.ownership ?? "adopted") !== "managed" || policy.managed !== "yes"
+  return policy === "never"
+}
 
 /** §3d.4 "Asks under --yes" (R2-15): `--yes` answers none of these. */
 export const YES_ASK_POLICY: { readonly [K in AskKind]: "plan_yes_lines_only" | "never" | "n/a" } = {

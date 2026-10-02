@@ -4,6 +4,8 @@
 // byte-identically under `contracts/tag-wizard-v1/`).
 //
 // NORMATIVE. The agent can only CLAIM; the wizard's checks decide. Nothing here spends a prompt.
+import { posix } from "node:path"
+
 import type { ChecklistItem, Claim, AgentQuestion, WizardEditRecord } from "./jobs.js"
 
 /** Who does the work (`runs.worker`). `none` = deterministic lanes only. */
@@ -29,15 +31,15 @@ export interface AgentInfo {
   whoPays: WhoPays
 }
 
-/** Why an installed agent cannot be used in this run. */
-export type AgentUnavailableReason = "not_installed" | "logged_out" | "read_confinement_unproven"
+/** Why an agent cannot be used in this run. (Codex no longer has a confinement gate: §3f.7, L7 passed.) */
+export type AgentUnavailableReason = "not_installed" | "logged_out"
 
 export interface AgentDetectResult {
   worker: AgentInfo | null
   reviewer: AgentInfo | null
   /** The wizard was launched by an agent (§3d.7): the marker env var that said so. */
   nested: { marker: string } | null
-  /** Agents found but not usable, with why (e.g. Codex until live check L7 proves a read confinement). */
+  /** Agents that cannot be used in this run, with why. */
   unavailable?: Array<{ kind: AgentKind; reason: AgentUnavailableReason }>
 }
 
@@ -112,12 +114,104 @@ export const AGENT_LIMITS = {
   narrationMaxChars: 120
 } as const
 
+// ---------------------------------------------------------------------------------------------
+// §3f.7 (NORMATIVE amendment, live checks 2026-10-02; supersedes §3f.3 where they differ)
+// ---------------------------------------------------------------------------------------------
+
+export type CodexRole = "worker" | "reviewer"
+
 /**
- * The Codex read confinement live check L7 proved (`-c` / `-P` setting), or null until it passes.
- * While null, NO Codex argv is built in any role: `detect()` reports Codex `read_confinement_unproven`
- * and the wizard prints the review brief instead (§3a.9.2, §6 item 5(f)).
+ * The Codex read confinement live check L7 proved (codex-cli 0.159.2): a `-c` permissions PROFILE,
+ * never `-s`. `-s` silently overrides the profile and falls back to the legacy workspace-write policy
+ * (header `workspace-write [workdir, /tmp, $TMPDIR]`), so the confinement IS the sandbox selection.
+ * The profile's paths are realpaths resolved at spawn time, so the argv comes from
+ * `codexPermissionArgs` (a pure builder), never from a static string.
  */
-export const CODEX_READ_CONFINEMENT: readonly string[] | null = null
+export const CODEX_READ_CONFINEMENT = {
+  provenBy: "live check L7, 2026-10-02, codex-cli 0.159.2",
+  profiles: { worker: "infinite_tag", reviewer: "infinite_tag_ro" },
+  projectRootsAccess: { worker: "write", reviewer: "read" }
+} as const satisfies {
+  provenBy: string
+  profiles: Record<CodexRole, string>
+  projectRootsAccess: Record<CodexRole, "write" | "read">
+}
+
+export interface CodexPermissionInput {
+  role: CodexRole
+  /** realpath($HOME). Denied (`"none"`): this is what keeps `~/.growth-os*`, `~/.codex/auth.json`, … unreadable. */
+  homeRealpath: string
+  /**
+   * Every resolved SENSITIVE path (§3f.3: GROWTH_OS_HOME, `~/.growth-os*`, the Infinite userData dirs, `~/.codex`, …,
+   * the wizard's snapshot cache). One under `$HOME` is already covered by the HOME deny and is omitted; every other
+   * one gets its own `"none"` entry.
+   */
+  sensitiveRealpaths: readonly string[]
+  /** realpath(dirname of the codex binary that is exec'd, after wrappers). Re-allowed READ, or Codex cannot start. */
+  codexBinDir: string
+  /** realpath of the codex install root (e.g. `~/.codex/packages/standalone/releases/<v>`). Re-allowed READ. */
+  codexInstallRoot: string
+}
+
+function isUnder(child: string, parent: string): boolean {
+  return child === parent || child.startsWith(parent === "/" ? "/" : `${parent}/`)
+}
+
+function assertProfilePath(label: string, path: string): void {
+  if (/[\u0000-\u001f\u007f]/.test(path)) throw new Error(`${label}: control character in path`)
+  if (!path.startsWith("/")) throw new Error(`${label}: not an absolute path: ${path}`)
+  if (posix.normalize(path) !== path || (path !== "/" && path.endsWith("/"))) {
+    throw new Error(`${label}: not a normalised realpath: ${path}`)
+  }
+}
+
+/** A TOML basic-string key (the `-c` value is parsed as TOML by Codex). */
+function tomlKey(path: string): string {
+  return `"${path.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`
+}
+
+/**
+ * §3f.7: the two `-c` flags that select the confinement profile for a Codex role. Pure; throws on a path
+ * that is not an absolute normalised realpath, on `$HOME` = `/`, and on a binary re-allow that would
+ * re-open `$HOME` or a sensitive path (a re-allow equal to, or an ancestor of, either).
+ *
+ * Worker:   `-c default_permissions="infinite_tag"` `-c permissions.infinite_tag.filesystem={":root"="read",
+ *           "<home>"="none", "<sensitive not under home>"="none", "<codex bin dir>"="read", "<install root>"="read",
+ *           ":project_roots"="write"}`. Reviewer: profile `infinite_tag_ro`, `":project_roots"="read"`.
+ * Never contains `-s`, `--sandbox` or `sandbox_mode`.
+ */
+export function codexPermissionArgs(input: CodexPermissionInput): string[] {
+  const profile = CODEX_READ_CONFINEMENT.profiles[input.role]
+  const home = input.homeRealpath
+  assertProfilePath("homeRealpath", home)
+  if (home === "/") throw new Error("homeRealpath: $HOME is /; refusing a profile that denies the whole disk")
+  input.sensitiveRealpaths.forEach((path, index) => assertProfilePath(`sensitiveRealpaths[${index}]`, path))
+  const reAllows = [
+    ["codexBinDir", input.codexBinDir],
+    ["codexInstallRoot", input.codexInstallRoot]
+  ] as const
+  for (const [label, path] of reAllows) {
+    assertProfilePath(label, path)
+    for (const denied of [home, ...input.sensitiveRealpaths]) {
+      if (isUnder(denied, path)) throw new Error(`${label}: re-allowing ${path} would re-open ${denied}`)
+    }
+  }
+  const entries: Array<[string, "read" | "write" | "none"]> = [[":root", "read"], [home, "none"]]
+  const seen = new Set<string>([":root", home])
+  for (const path of input.sensitiveRealpaths) {
+    if (isUnder(path, home) || seen.has(path)) continue
+    seen.add(path)
+    entries.push([path, "none"])
+  }
+  for (const [, path] of reAllows) {
+    if (seen.has(path)) continue
+    seen.add(path)
+    entries.push([path, "read"])
+  }
+  entries.push([":project_roots", CODEX_READ_CONFINEMENT.projectRootsAccess[input.role]])
+  const table = entries.map(([key, access]) => `${tomlKey(key)}="${access}"`).join(", ")
+  return ["-c", `default_permissions="${profile}"`, "-c", `permissions.${profile}.filesystem={${table}}`]
+}
 
 /** Env vars that mark a nested agent session (§3d.7); stripped from every agent child (§3f.3). */
 export const NESTING_ENV_MARKERS = [
@@ -133,7 +227,11 @@ export const NESTING_ENV_MARKERS = [
 export const INFINITE_TAG_ENV_PREFIX = "INFINITE_TAG_" as const
 export const MCP_ENV = { url: "INFINITE_TAG_MCP_URL", token: "INFINITE_TAG_MCP_TOKEN" } as const
 
-/** Codex 0.159.2 feature names disabled for every role (`-c features.<name>=false`); L8 confirms none is exposed. */
+/**
+ * Codex 0.159.2 feature names disabled for EVERY role, worker and reviewer (`-c features.<name>=false`).
+ * §3f.3's list + `shell_snapshot` / `skill_search` (the reviewer lacked them) + §3f.7's `view_image`, `goals`
+ * and `multi_agent` (still exposed after the old list, L8). A renamed feature fails `--strict-config` loudly.
+ */
 export const CODEX_DISABLED_FEATURES = [
   "browser_use",
   "browser_use_external",
@@ -145,11 +243,90 @@ export const CODEX_DISABLED_FEATURES = [
   "apps",
   "plugins",
   "hooks",
-  "memories"
+  "memories",
+  "shell_snapshot",
+  "skill_search",
+  "view_image",
+  "goals",
+  "multi_agent"
 ] as const
 
-/** Never on any agent argv (§3f.3). `--restricted` only if live check L4b passes. */
+/**
+ * Non-feature `-c` settings every Codex role carries (§3f.3 + §3f.7). `skills.include_instructions=false`:
+ * user skills in `~/.codex/skills` load even under `--ignore-user-config` (L2 caveat).
+ */
+export const CODEX_REQUIRED_CONFIG = [
+  'approval_policy="never"',
+  'web_search="disabled"',
+  "project_doc_max_bytes=0",
+  "skills.include_instructions=false"
+] as const
+
+/** Flags on every Codex argv, the resume line included. */
+export const CODEX_REQUIRED_FLAGS = ["--ignore-user-config", "--strict-config"] as const
+
+/** Never on any agent argv (§3f.3). Prefix `--dangerously` covers every `--dangerously*` flag. */
 export const FORBIDDEN_AGENT_FLAGS = ["--bare", "--safe-mode", "--approve-for-me", "--dangerously"] as const
+
+/** §3f.7: never on a Codex argv. `-s` / `--sandbox` silently drop the confinement profile. */
+export const FORBIDDEN_CODEX_FLAGS = ["-s", "--sandbox"] as const
+/** §3f.7: never as a Codex `-c` key (the resume line uses the profile flags instead). */
+export const FORBIDDEN_CODEX_CONFIG_KEYS = ["sandbox_mode"] as const
+
+/**
+ * §3f.7: required on BOTH Claude roles (L4b): it confines file tools to the working directories (symlink escapes
+ * included), loads no user hooks or plugins, and keeps plan billing (`system/init.apiKeySource === "none"`).
+ * It replaces `--setting-sources user`. SENSITIVE_DENIES stay as defence in depth.
+ */
+export const CLAUDE_REQUIRED_FLAGS = ["--restricted"] as const
+
+/**
+ * The §3f.3 + §3f.7 argv rules as a pure check, for O3's argv builders (at spawn time and in tests). Returns every
+ * violation; an empty array means the argv is allowed. It checks the safety flags only, not the whole invocation.
+ */
+export function agentArgvViolations(kind: AgentKind, argv: readonly string[]): string[] {
+  const out: string[] = []
+  for (const arg of argv) {
+    for (const flag of FORBIDDEN_AGENT_FLAGS) {
+      if (arg === flag || arg.startsWith(`${flag}=`) || (flag === "--dangerously" && arg.startsWith(flag))) out.push(`forbidden flag ${arg}`)
+    }
+  }
+  if (kind === "claude_code") {
+    for (const flag of CLAUDE_REQUIRED_FLAGS) if (!argv.includes(flag)) out.push(`missing ${flag}`)
+    if (argv.includes("--setting-sources")) out.push("--setting-sources is replaced by --restricted (§3f.7)")
+    return out
+  }
+  const configValues: string[] = []
+  argv.forEach((arg, index) => {
+    if (arg === "-c" || arg === "--config") configValues.push(argv[index + 1] ?? "")
+    else if (arg.startsWith("--config=")) configValues.push(arg.slice("--config=".length))
+    else if (arg.startsWith("-c") && arg.length > 2) configValues.push(arg.slice(2))
+  })
+  for (const arg of argv) {
+    for (const flag of FORBIDDEN_CODEX_FLAGS) {
+      if (arg === flag || arg.startsWith(`${flag}=`) || (flag === "-s" && /^-s[a-z-]/.test(arg))) out.push(`forbidden codex flag ${arg}`)
+    }
+  }
+  for (const value of configValues) {
+    const key = value.split("=")[0]!.trim()
+    if ((FORBIDDEN_CODEX_CONFIG_KEYS as readonly string[]).includes(key)) out.push(`forbidden codex config ${key}`)
+  }
+  for (const flag of CODEX_REQUIRED_FLAGS) if (!argv.includes(flag)) out.push(`missing ${flag}`)
+  if (!configValues.some((value) => /^default_permissions="infinite_tag(_ro)?"$/.test(value))) out.push("missing default_permissions profile")
+  if (!configValues.some((value) => /^permissions\.infinite_tag(_ro)?\.filesystem=\{/.test(value))) out.push("missing permissions filesystem table")
+  for (const feature of CODEX_DISABLED_FEATURES) {
+    if (!configValues.includes(`features.${feature}=false`)) out.push(`missing features.${feature}=false`)
+  }
+  for (const setting of CODEX_REQUIRED_CONFIG) if (!configValues.includes(setting)) out.push(`missing ${setting}`)
+  return out
+}
+
+/**
+ * §3f.7 scratch rule: under the Codex profile `/tmp`, `/private/tmp` and `$TMPDIR` stay READABLE, so token-bearing
+ * wizard scratch (`tag.mcp.json`, MCP tokens, snapshots) lives under `$HOME` (which the profile denies), 0700:
+ * `<home>/Library/Caches/infinite-tag/<runId>/`. Never under a temp dir.
+ */
+export const WIZARD_TOKEN_SCRATCH_HOME_RELATIVE = "Library/Caches/infinite-tag" as const
 
 /** Claude tools: the worker's set and the reviewer's set. Never Bash or Web tools. */
 export const CLAUDE_WORKER_TOOLS = ["Read", "Edit", "Write", "Glob", "Grep"] as const

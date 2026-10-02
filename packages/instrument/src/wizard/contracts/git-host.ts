@@ -65,6 +65,8 @@ export interface GitOps {
   commit(input: { message: string; trailers: Record<string, string> }): Promise<{ sha: string; hookRewrote: string[] }>
   /** Never `-f`; never the base. */
   push(branch: string): Promise<void>
+  /** §3g.4 step 5: after `gh pr update-branch`, `git pull --ff-only origin <branch>` (never a merge commit or rebase). */
+  pullFfOnly(branch: string): Promise<{ headSha: string }>
   worktreeAddDetached(sha: string): Promise<{ dir: string }>
   worktreeRemove(dir: string): Promise<void>
   diff(from: string, to: string): Promise<string>

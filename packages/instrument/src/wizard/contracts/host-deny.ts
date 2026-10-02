@@ -8,19 +8,36 @@
 // hand-copies the lists.
 
 export interface HostDenyList {
-  version: 1
-  deny: { exact: string[]; suffix: string[] }
+  readonly version: 1
+  readonly deny: { readonly exact: readonly string[]; readonly suffix: readonly string[] }
   /** The host normalisation every reader applies before matching, in order. */
-  normalize: "trim,lowercase,strip-one-trailing-dot"
+  readonly normalize: "trim,lowercase,strip-one-trailing-dot"
 }
 
-export const HOST_DENY_V1: Readonly<HostDenyList> = Object.freeze({
+/** Deeply frozen: a sort or push in one lane can never change the list another lane reads. */
+export const HOST_DENY_V1: HostDenyList = Object.freeze({
   version: 1,
-  deny: {
-    exact: ["localhost", "127.0.0.1", "::1", "[::1]", "0.0.0.0"],
-    suffix: [".localhost", ".local", ".vercel.app", ".netlify.app", ".pages.dev"]
-  },
+  deny: Object.freeze({
+    exact: Object.freeze(["localhost", "127.0.0.1", "::1", "[::1]", "0.0.0.0"]),
+    suffix: Object.freeze([".localhost", ".local", ".vercel.app", ".netlify.app", ".pages.dev"])
+  }),
   normalize: "trim,lowercase,strip-one-trailing-dot"
-})
+} as const)
 
 export const HOST_DENY_V1_FILENAME = "host-deny-v1.json" as const
+
+/**
+ * The published bytes of `contracts/host-deny-v1.json`: §3h.9 as ONE line plus a trailing newline (208 bytes,
+ * sha256 `5ba888c09c73d6d497e41bcb1c1fd9a123e6154f38e3c59b2fd4fcdc5cf74fe8`). 1bu-1 (B0) vendors exactly these
+ * bytes and pins that hash, so this file is NOT two-space JSON like the tag-wizard-v1 fixtures.
+ */
+export function hostDenyFileText(list: HostDenyList = HOST_DENY_V1): string {
+  return `${JSON.stringify(list)}\n`
+}
+export const HOST_DENY_V1_SHA256 = "5ba888c09c73d6d497e41bcb1c1fd9a123e6154f38e3c59b2fd4fcdc5cf74fe8" as const
+
+/** §3h.9 `normalize`: trim, lowercase, strip ONE trailing dot. Every host comparison goes through this first. */
+export function normalizeHost(host: string): string {
+  const lowered = host.trim().toLowerCase()
+  return lowered.endsWith(".") ? lowered.slice(0, -1) : lowered
+}

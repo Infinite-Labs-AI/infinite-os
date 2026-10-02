@@ -21,7 +21,7 @@
         ],
         "posthog": {
           "projectKey": "phc_FAKEtestProjectKeyNotReal000",
-          "apiHost": "/ingest"
+          "apiHost": "https://us.i.posthog.com"
         },
         "meta": [
           "1234567890123456"
@@ -209,7 +209,7 @@
         ],
         "posthog": {
           "projectKey": "phc_FAKEtestProjectKeyNotReal000",
-          "apiHost": "/ingest"
+          "apiHost": "https://us.i.posthog.com"
         },
         "meta": [
           "1234567890123456"
@@ -407,7 +407,7 @@
         ],
         "posthog": {
           "projectKey": "phc_FAKEtestProjectKeyNotReal000",
-          "apiHost": "/ingest"
+          "apiHost": "https://us.i.posthog.com"
         },
         "meta": [
           "1234567890123456"
@@ -596,7 +596,7 @@
         ],
         "posthog": {
           "projectKey": "phc_FAKEtestProjectKeyNotReal000",
-          "apiHost": "/ingest"
+          "apiHost": "https://us.i.posthog.com"
         },
         "meta": [
           "1234567890123456"
@@ -784,7 +784,7 @@
         ],
         "posthog": {
           "projectKey": "phc_FAKEtestProjectKeyNotReal000",
-          "apiHost": "/ingest"
+          "apiHost": "https://us.i.posthog.com"
         },
         "meta": [
           "1234567890123456"
@@ -976,7 +976,7 @@
         ],
         "posthog": {
           "projectKey": "phc_FAKEtestProjectKeyNotReal000",
-          "apiHost": "/ingest"
+          "apiHost": "https://us.i.posthog.com"
         },
         "meta": [
           "1234567890123456"
@@ -1112,7 +1112,7 @@
         ],
         "posthog": {
           "projectKey": "phc_FAKEtestProjectKeyNotReal000",
-          "apiHost": "/ingest"
+          "apiHost": "https://us.i.posthog.com"
         },
         "meta": [
           "1234567890123456"
@@ -1138,8 +1138,8 @@
     "result": {
       "mode": "rehearsal",
       "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80",
-      "startedAt": "2026-10-02T09:10:00.000Z",
-      "finishedAt": "2026-10-02T09:11:00.000Z",
+      "startedAt": "2026-10-02T09:29:00.000Z",
+      "finishedAt": "2026-10-02T09:30:00.000Z",
       "environment": {
         "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Infinite/0.4.1 Chrome/140.0.0.0 Electron/38.0.0 Safari/537.36 InfiniteVerifyCheck/1 (+https://infinite.fast; analytics monitor)",
         "automationDetected": false,
@@ -1152,18 +1152,12 @@
       "loads": [
         {
           "label": "home",
-          "url": "https://acme-store.com/",
+          "url": "https://www.acme-store.com/",
           "finalUrl": "https://www.acme-store.com/",
           "status": 401,
           "rendered": false,
           "managedMarkerSeen": true,
-          "redirects": [
-            {
-              "from": "https://acme-store.com/",
-              "to": "https://www.acme-store.com/",
-              "status": 308
-            }
-          ]
+          "redirects": []
         }
       ],
       "requests": {
@@ -1285,7 +1279,7 @@
         ],
         "posthog": {
           "projectKey": "phc_FAKEtestProjectKeyNotReal000",
-          "apiHost": "/ingest"
+          "apiHost": "https://us.i.posthog.com"
         },
         "meta": [
           "1234567890123456"
@@ -1441,7 +1435,7 @@
         ],
         "posthog": {
           "projectKey": "phc_FAKEtestProjectKeyNotReal000",
-          "apiHost": "/ingest"
+          "apiHost": "https://us.i.posthog.com"
         },
         "meta": [
           "1234567890123456"
@@ -1617,7 +1611,7 @@
         ],
         "posthog": {
           "projectKey": "phc_FAKEtestProjectKeyNotReal000",
-          "apiHost": "/ingest"
+          "apiHost": "https://us.i.posthog.com"
         },
         "meta": [
           "1234567890123456"
@@ -1643,8 +1637,8 @@
     "result": {
       "mode": "rehearsal",
       "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80",
-      "startedAt": "2026-10-02T09:10:00.000Z",
-      "finishedAt": "2026-10-02T09:11:00.000Z",
+      "startedAt": "2026-10-02T09:29:00.000Z",
+      "finishedAt": "2026-10-02T09:30:00.000Z",
       "environment": {
         "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Infinite/0.4.1 Chrome/140.0.0.0 Electron/38.0.0 Safari/537.36 InfiniteVerifyCheck/1 (+https://infinite.fast; analytics monitor)",
         "automationDetected": false,
@@ -1657,18 +1651,12 @@
       "loads": [
         {
           "label": "home",
-          "url": "https://acme-store.com/",
+          "url": "https://www.acme-store.com/",
           "finalUrl": "https://www.acme-store.com/",
           "status": 200,
           "rendered": true,
           "managedMarkerSeen": true,
-          "redirects": [
-            {
-              "from": "https://acme-store.com/",
-              "to": "https://www.acme-store.com/",
-              "status": 308
-            }
-          ]
+          "redirects": []
         }
       ],
       "requests": {
@@ -1702,7 +1690,7 @@
           {
             "projectKey": "phc_FAKEtestProjectKeyNotReal000",
             "event": "$pageview",
-            "distinctId": "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b",
+            "distinctId": "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4b02",
             "host": "www.acme-store.com",
             "endpointHost": "www.acme-store.com",
             "sameOrigin": true,
@@ -1722,7 +1710,7 @@
           {
             "siteSourceKey": "site_FAKEacmeStoreSourceKey",
             "eventName": "page_view",
-            "eventId": "evt_FAKE0001",
+            "eventId": "evt_FAKE0201",
             "nav": false,
             "status": "cancelled"
           }
@@ -1770,9 +1758,9 @@
       "serverLaneProbe": null,
       "markers": {
         "infiniteEventIds": [
-          "evt_FAKE0001"
+          "evt_FAKE0201"
         ],
-        "posthogDistinctId": "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b",
+        "posthogDistinctId": "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4b02",
         "metaEventIds": []
       }
     },
@@ -1831,7 +1819,7 @@
         ],
         "posthog": {
           "projectKey": "phc_FAKEtestProjectKeyNotReal000",
-          "apiHost": "/ingest"
+          "apiHost": "https://us.i.posthog.com"
         },
         "meta": [
           "1234567890123456"
@@ -2006,7 +1994,7 @@
   },
   {
     "id": "dry_live_meta_traffic_permissions_blocked",
-    "note": "Meta's Traffic Permissions refuse this domain: the pixel is blocked (problem).",
+    "note": "Meta's Traffic Permissions refuse this domain: the pixel is blocked (problem). The D10 automatic-events count is undetermined while Traffic Permissions blocks the pixel.",
     "request": {
       "protocolVersion": 1,
       "requestId": "00000000-0000-4000-8000-000000000011",
@@ -2026,7 +2014,7 @@
         ],
         "posthog": {
           "projectKey": "phc_FAKEtestProjectKeyNotReal000",
-          "apiHost": "/ingest"
+          "apiHost": "https://us.i.posthog.com"
         },
         "meta": [
           "1234567890123456"
@@ -2177,7 +2165,8 @@
         "posthog",
         "meta"
       ],
-      "envSourcedIds": []
+      "envSourcedIds": [],
+      "metaPixelOwnership": "adopted"
     },
     "expected": {
       "infinite": {
@@ -2191,6 +2180,10 @@
       },
       "meta": {
         "state": "problem",
+        "because": "traffic_permissions_blocked"
+      },
+      "meta_automatic_events": {
+        "state": "undetermined",
         "because": "traffic_permissions_blocked"
       }
     }
@@ -2221,7 +2214,7 @@
         ],
         "posthog": {
           "projectKey": "phc_FAKEtestProjectKeyNotReal000",
-          "apiHost": "/ingest"
+          "apiHost": "https://us.i.posthog.com"
         },
         "meta": [
           "1234567890123456"
@@ -2247,8 +2240,8 @@
     "result": {
       "mode": "rehearsal",
       "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80",
-      "startedAt": "2026-10-02T09:10:00.000Z",
-      "finishedAt": "2026-10-02T09:11:00.000Z",
+      "startedAt": "2026-10-02T09:29:00.000Z",
+      "finishedAt": "2026-10-02T09:30:00.000Z",
       "environment": {
         "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Infinite/0.4.1 Chrome/140.0.0.0 Electron/38.0.0 Safari/537.36 InfiniteVerifyCheck/1 (+https://infinite.fast; analytics monitor)",
         "automationDetected": false,
@@ -2261,243 +2254,8 @@
       "loads": [
         {
           "label": "home",
-          "url": "https://acme-store.com/",
-          "finalUrl": "https://www.acme-store.com/",
-          "status": 200,
-          "rendered": true,
-          "managedMarkerSeen": true,
-          "redirects": [
-            {
-              "from": "https://acme-store.com/",
-              "to": "https://www.acme-store.com/",
-              "status": 308
-            }
-          ]
-        }
-      ],
-      "requests": {
-        "total": 64,
-        "cancelled": 5,
-        "otherBeacons": [
-          {
-            "host": "bat.bing.com",
-            "pathClass": "action",
-            "method": "GET",
-            "resourceType": "image",
-            "cancelled": true
-          }
-        ]
-      },
-      "ga4": {
-        "events": [
-          {
-            "tid": "G-FAKE00001",
-            "en": "page_view",
-            "dlHost": "www.acme-store.com",
-            "transport": "post",
-            "status": "cancelled",
-            "loadLabel": "home",
-            "afterNav": false
-          }
-        ]
-      },
-      "posthog": {
-        "events": [
-          {
-            "projectKey": "phc_FAKEtestProjectKeyNotReal000",
-            "event": "$pageview",
-            "distinctId": "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b",
-            "host": "www.acme-store.com",
-            "endpointHost": "www.acme-store.com",
-            "sameOrigin": true,
-            "libCustomApiHost": true,
-            "status": "cancelled"
-          }
-        ],
-        "bootRequests": [
-          {
-            "path": "/flags",
-            "status": 200
-          }
-        ]
-      },
-      "infinite": {
-        "events": [
-          {
-            "siteSourceKey": "site_FAKEacmeStoreSourceKey",
-            "eventName": "page_view",
-            "eventId": "evt_FAKE0001",
-            "nav": false,
-            "status": "cancelled"
-          }
-        ]
-      },
-      "meta": {
-        "configRequests": [
-          "1234567890123456"
-        ],
-        "tr": [
-          {
-            "pixelId": "1234567890123456",
-            "ev": "PageView",
-            "eid": null,
-            "method": "GET",
-            "status": "cancelled"
-          }
-        ],
-        "console": [],
-        "fbc": {
-          "present": true,
-          "value": "fb.1.1759395600000.INFINITE_TEST_NOT_REAL_7f3c2a",
-          "domain": ".acme-store.com"
-        },
-        "fbp": {
-          "present": true
-        }
-      },
-      "csp": {
-        "violations": []
-      },
-      "clicks": [
-        {
-          "label": "sign_up",
-          "selector": "[data-infinite-conversion=\"sign_up\"]",
-          "found": true,
-          "events": {
-            "ga4": [
-              "sign_up"
-            ],
-            "posthog": [
-              "sign_up"
-            ],
-            "meta": [],
-            "infinite": [
-              "sign_up"
-            ]
-          },
-          "nonGetCancelled": 1,
-          "navigatedAfterMs": 1012,
-          "navigationCancelled": true
-        }
-      ],
-      "pii": [],
-      "serverLaneProbe": null,
-      "markers": {
-        "infiniteEventIds": [
-          "evt_FAKE0001"
-        ],
-        "posthogDistinctId": "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b",
-        "metaEventIds": []
-      }
-    },
-    "context": {
-      "consentMode": "not_required",
-      "installedTools": [
-        "infinite",
-        "ga4",
-        "posthog",
-        "meta"
-      ],
-      "envSourcedIds": []
-    },
-    "expected": {
-      "infinite": {
-        "state": "pass"
-      },
-      "ga4": {
-        "state": "pass"
-      },
-      "posthog": {
-        "state": "pass"
-      },
-      "meta": {
-        "state": "pass"
-      }
-    }
-  },
-  {
-    "id": "rehearsal_preview_self_beacon",
-    "note": "The preview's own URL fired a GA4 beacon: previews send data (problem).",
-    "request": {
-      "protocolVersion": 1,
-      "requestId": "00000000-0000-4000-8000-000000000021",
-      "mode": "rehearsal",
-      "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80",
-      "productionHost": "acme-store.com",
-      "targets": [
-        {
           "url": "https://www.acme-store.com/",
-          "label": "home"
-        }
-      ],
-      "rehearsal": {
-        "previewOrigin": "https://acme-store-git-infinite-tag-2026-10-02-7f3c2a-acme.vercel.app",
-        "headSha": "1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d"
-      },
-      "expect": {
-        "ga4": [
-          "G-FAKE00001",
-          "G-FAKE00002"
-        ],
-        "posthog": {
-          "projectKey": "phc_FAKEtestProjectKeyNotReal000",
-          "apiHost": "/ingest"
-        },
-        "meta": [
-          "1234567890123456"
-        ],
-        "infinite": {
-          "siteSourceKey": "site_FAKEacmeStoreSourceKey",
-          "collectPath": "/infinite/ledger"
-        }
-      },
-      "fakeClickId": true,
-      "consentSeed": null,
-      "clicks": [
-        {
-          "selector": "[data-infinite-conversion=\"sign_up\"]",
-          "label": "sign_up"
-        }
-      ],
-      "spaNavigation": {
-        "path": "/pricing"
-      },
-      "deadlineMs": 180000
-    },
-    "result": {
-      "mode": "rehearsal",
-      "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80",
-      "startedAt": "2026-10-02T09:10:00.000Z",
-      "finishedAt": "2026-10-02T09:11:00.000Z",
-      "environment": {
-        "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Infinite/0.4.1 Chrome/140.0.0.0 Electron/38.0.0 Safari/537.36 InfiniteVerifyCheck/1 (+https://infinite.fast; analytics monitor)",
-        "automationDetected": false,
-        "visibilityState": "visible",
-        "blockedBySiteBotRules": false,
-        "previewProtected": false,
-        "consentSeeded": false,
-        "cmpDetected": null
-      },
-      "loads": [
-        {
-          "label": "home",
-          "url": "https://acme-store.com/",
           "finalUrl": "https://www.acme-store.com/",
-          "status": 200,
-          "rendered": true,
-          "managedMarkerSeen": true,
-          "redirects": [
-            {
-              "from": "https://acme-store.com/",
-              "to": "https://www.acme-store.com/",
-              "status": 308
-            }
-          ]
-        },
-        {
-          "label": "preview_self",
-          "url": "https://acme-store-git-infinite-tag-2026-10-02-7f3c2a-acme.vercel.app/",
-          "finalUrl": "https://acme-store-git-infinite-tag-2026-10-02-7f3c2a-acme.vercel.app/",
           "status": 200,
           "rendered": true,
           "managedMarkerSeen": true,
@@ -2527,15 +2285,6 @@
             "status": "cancelled",
             "loadLabel": "home",
             "afterNav": false
-          },
-          {
-            "tid": "G-FAKE00001",
-            "en": "page_view",
-            "dlHost": "acme-store-git-infinite-tag-2026-10-02-7f3c2a-acme.vercel.app",
-            "transport": "post",
-            "status": "cancelled",
-            "loadLabel": "preview_self",
-            "afterNav": false
           }
         ]
       },
@@ -2544,7 +2293,7 @@
           {
             "projectKey": "phc_FAKEtestProjectKeyNotReal000",
             "event": "$pageview",
-            "distinctId": "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b",
+            "distinctId": "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4b02",
             "host": "www.acme-store.com",
             "endpointHost": "www.acme-store.com",
             "sameOrigin": true,
@@ -2564,7 +2313,7 @@
           {
             "siteSourceKey": "site_FAKEacmeStoreSourceKey",
             "eventName": "page_view",
-            "eventId": "evt_FAKE0001",
+            "eventId": "evt_FAKE0201",
             "nav": false,
             "status": "cancelled"
           }
@@ -2622,9 +2371,162 @@
       "serverLaneProbe": null,
       "markers": {
         "infiniteEventIds": [
-          "evt_FAKE0001"
+          "evt_FAKE0201"
         ],
-        "posthogDistinctId": "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b",
+        "posthogDistinctId": "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4b02",
+        "metaEventIds": []
+      }
+    },
+    "context": {
+      "consentMode": "not_required",
+      "installedTools": [
+        "infinite",
+        "ga4",
+        "posthog",
+        "meta"
+      ],
+      "envSourcedIds": []
+    },
+    "expected": {
+      "infinite": {
+        "state": "pass"
+      },
+      "ga4": {
+        "state": "pass"
+      },
+      "posthog": {
+        "state": "pass"
+      },
+      "meta": {
+        "state": "pass"
+      }
+    }
+  },
+  {
+    "id": "dry_live_preview_self_beacon",
+    "note": "A dry_live of the preview's own URL (label preview_self) caught a GA4 page_view: previews send data (problem). Infinite is not a guarded tool.",
+    "request": {
+      "protocolVersion": 1,
+      "requestId": "00000000-0000-4000-8000-000000000021",
+      "mode": "dry_live",
+      "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80",
+      "productionHost": "acme-store.com",
+      "targets": [
+        {
+          "url": "https://acme-store-git-infinite-tag-2026-10-02-7f3c2a-acme.vercel.app/",
+          "label": "preview_self"
+        }
+      ],
+      "expect": {
+        "ga4": [
+          "G-FAKE00001",
+          "G-FAKE00002"
+        ],
+        "posthog": {
+          "projectKey": "phc_FAKEtestProjectKeyNotReal000",
+          "apiHost": "https://us.i.posthog.com"
+        },
+        "meta": [
+          "1234567890123456"
+        ],
+        "infinite": {
+          "siteSourceKey": "site_FAKEacmeStoreSourceKey",
+          "collectPath": "/infinite/ledger"
+        }
+      },
+      "consentSeed": null,
+      "deadlineMs": 120000
+    },
+    "result": {
+      "mode": "dry_live",
+      "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80",
+      "startedAt": "2026-10-02T09:31:00.000Z",
+      "finishedAt": "2026-10-02T09:32:00.000Z",
+      "environment": {
+        "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Infinite/0.4.1 Chrome/140.0.0.0 Electron/38.0.0 Safari/537.36 InfiniteVerifyCheck/1 (+https://infinite.fast; analytics monitor)",
+        "automationDetected": false,
+        "visibilityState": "visible",
+        "blockedBySiteBotRules": false,
+        "previewProtected": false,
+        "consentSeeded": false,
+        "cmpDetected": null
+      },
+      "loads": [
+        {
+          "label": "preview_self",
+          "url": "https://acme-store-git-infinite-tag-2026-10-02-7f3c2a-acme.vercel.app/",
+          "finalUrl": "https://acme-store-git-infinite-tag-2026-10-02-7f3c2a-acme.vercel.app/",
+          "status": 200,
+          "rendered": true,
+          "managedMarkerSeen": true,
+          "redirects": []
+        }
+      ],
+      "requests": {
+        "total": 64,
+        "cancelled": 5,
+        "otherBeacons": [
+          {
+            "host": "bat.bing.com",
+            "pathClass": "action",
+            "method": "GET",
+            "resourceType": "image",
+            "cancelled": true
+          }
+        ]
+      },
+      "ga4": {
+        "events": [
+          {
+            "tid": "G-FAKE00001",
+            "en": "page_view",
+            "dlHost": "acme-store-git-infinite-tag-2026-10-02-7f3c2a-acme.vercel.app",
+            "transport": "post",
+            "status": "cancelled",
+            "loadLabel": "preview_self",
+            "afterNav": false
+          }
+        ]
+      },
+      "posthog": {
+        "events": [],
+        "bootRequests": []
+      },
+      "infinite": {
+        "events": [
+          {
+            "siteSourceKey": "site_FAKEacmeStoreSourceKey",
+            "eventName": "page_view",
+            "eventId": "evt_FAKE2501",
+            "nav": false,
+            "status": "cancelled"
+          }
+        ]
+      },
+      "meta": {
+        "configRequests": [],
+        "tr": [],
+        "console": [],
+        "fbc": {
+          "present": false,
+          "value": null,
+          "domain": null
+        },
+        "fbp": {
+          "present": false
+        }
+      },
+      "csp": {
+        "violations": []
+      },
+      "clicks": [],
+      "pii": [],
+      "serverLaneProbe": null,
+      "markers": {
+        "infiniteEventIds": [
+          "evt_FAKE2501"
+        ],
+        "posthogDistinctId": null,
         "metaEventIds": []
       }
     },
@@ -2676,7 +2578,7 @@
         ],
         "posthog": {
           "projectKey": "phc_FAKEtestProjectKeyNotReal000",
-          "apiHost": "/ingest"
+          "apiHost": "https://us.i.posthog.com"
         },
         "meta": [
           "1234567890123456"
@@ -2854,7 +2756,7 @@
         ],
         "posthog": {
           "projectKey": "phc_FAKEtestProjectKeyNotReal000",
-          "apiHost": "/ingest"
+          "apiHost": "https://us.i.posthog.com"
         },
         "meta": [
           "1234567890123456"
@@ -2873,8 +2775,8 @@
     "result": {
       "mode": "real_visit",
       "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80",
-      "startedAt": "2026-10-02T09:10:00.000Z",
-      "finishedAt": "2026-10-02T09:11:00.000Z",
+      "startedAt": "2026-10-02T09:40:00.000Z",
+      "finishedAt": "2026-10-02T09:41:00.000Z",
       "environment": {
         "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Infinite/0.4.1 Chrome/140.0.0.0 Electron/38.0.0 Safari/537.36 InfiniteVerifyCheck/1 (+https://infinite.fast; analytics monitor)",
         "automationDetected": false,
@@ -2932,7 +2834,7 @@
           {
             "projectKey": "phc_FAKEtestProjectKeyNotReal000",
             "event": "$pageview",
-            "distinctId": "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b",
+            "distinctId": "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4c03",
             "host": "www.acme-store.com",
             "endpointHost": "www.acme-store.com",
             "sameOrigin": true,
@@ -2952,7 +2854,7 @@
           {
             "siteSourceKey": "site_FAKEacmeStoreSourceKey",
             "eventName": "page_view",
-            "eventId": "evt_FAKE0001",
+            "eventId": "evt_FAKE0301",
             "nav": false,
             "status": 202
           }
@@ -2989,8 +2891,407 @@
       "serverLaneProbe": {
         "path": "/__infinite_probe/7f3c2a91b0de",
         "status": 404,
-        "sentAt": "2026-10-02T09:40:00.000Z"
+        "sentAt": "2026-10-02T09:40:30.000Z"
       },
+      "markers": {
+        "infiniteEventIds": [
+          "evt_FAKE0301"
+        ],
+        "posthogDistinctId": "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4c03",
+        "metaEventIds": []
+      }
+    },
+    "context": {
+      "consentMode": "not_required",
+      "installedTools": [
+        "infinite",
+        "ga4",
+        "posthog",
+        "meta"
+      ],
+      "envSourcedIds": []
+    },
+    "expected": {
+      "infinite": {
+        "state": "pass"
+      },
+      "ga4": {
+        "state": "pass"
+      },
+      "posthog": {
+        "state": "pass"
+      },
+      "meta": {
+        "state": "pass"
+      }
+    }
+  },
+  {
+    "id": "dry_live_meta_automatic_events_info",
+    "note": "D10: an ADOPTED Meta pixel sends an automatic event (Microdata) on a visit with no clicks: counted as info, beside a passing Meta PageView.",
+    "request": {
+      "protocolVersion": 1,
+      "requestId": "00000000-0000-4000-8000-000000000041",
+      "mode": "dry_live",
+      "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80",
+      "productionHost": "acme-store.com",
+      "targets": [
+        {
+          "url": "https://acme-store.com/",
+          "label": "home"
+        }
+      ],
+      "expect": {
+        "ga4": [
+          "G-FAKE00001",
+          "G-FAKE00002"
+        ],
+        "posthog": {
+          "projectKey": "phc_FAKEtestProjectKeyNotReal000",
+          "apiHost": "https://us.i.posthog.com"
+        },
+        "meta": [
+          "1234567890123456"
+        ],
+        "infinite": {
+          "siteSourceKey": "site_FAKEacmeStoreSourceKey",
+          "collectPath": "/infinite/ledger"
+        }
+      },
+      "consentSeed": null,
+      "spaNavigation": {
+        "path": "/pricing"
+      },
+      "deadlineMs": 120000
+    },
+    "result": {
+      "mode": "dry_live",
+      "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80",
+      "startedAt": "2026-10-02T09:10:00.000Z",
+      "finishedAt": "2026-10-02T09:11:00.000Z",
+      "environment": {
+        "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Infinite/0.4.1 Chrome/140.0.0.0 Electron/38.0.0 Safari/537.36 InfiniteVerifyCheck/1 (+https://infinite.fast; analytics monitor)",
+        "automationDetected": false,
+        "visibilityState": "visible",
+        "blockedBySiteBotRules": false,
+        "previewProtected": false,
+        "consentSeeded": false,
+        "cmpDetected": null
+      },
+      "loads": [
+        {
+          "label": "home",
+          "url": "https://acme-store.com/",
+          "finalUrl": "https://www.acme-store.com/",
+          "status": 200,
+          "rendered": true,
+          "managedMarkerSeen": false,
+          "redirects": [
+            {
+              "from": "https://acme-store.com/",
+              "to": "https://www.acme-store.com/",
+              "status": 308
+            }
+          ]
+        }
+      ],
+      "requests": {
+        "total": 64,
+        "cancelled": 5,
+        "otherBeacons": [
+          {
+            "host": "bat.bing.com",
+            "pathClass": "action",
+            "method": "GET",
+            "resourceType": "image",
+            "cancelled": true
+          }
+        ]
+      },
+      "ga4": {
+        "events": [
+          {
+            "tid": "G-FAKE00001",
+            "en": "page_view",
+            "dlHost": "www.acme-store.com",
+            "transport": "post",
+            "status": "cancelled",
+            "loadLabel": "home",
+            "afterNav": false
+          }
+        ]
+      },
+      "posthog": {
+        "events": [
+          {
+            "projectKey": "phc_FAKEtestProjectKeyNotReal000",
+            "event": "$pageview",
+            "distinctId": "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b",
+            "host": "www.acme-store.com",
+            "endpointHost": "us.i.posthog.com",
+            "sameOrigin": false,
+            "libCustomApiHost": false,
+            "status": "cancelled"
+          }
+        ],
+        "bootRequests": [
+          {
+            "path": "/flags",
+            "status": 200
+          }
+        ]
+      },
+      "infinite": {
+        "events": [
+          {
+            "siteSourceKey": "site_FAKEacmeStoreSourceKey",
+            "eventName": "page_view",
+            "eventId": "evt_FAKE0001",
+            "nav": false,
+            "status": "cancelled"
+          }
+        ]
+      },
+      "meta": {
+        "configRequests": [
+          "1234567890123456"
+        ],
+        "tr": [
+          {
+            "pixelId": "1234567890123456",
+            "ev": "PageView",
+            "eid": null,
+            "method": "GET",
+            "status": "cancelled"
+          },
+          {
+            "pixelId": "1234567890123456",
+            "ev": "Microdata",
+            "eid": null,
+            "method": "GET",
+            "status": "cancelled"
+          }
+        ],
+        "console": [],
+        "fbc": {
+          "present": false,
+          "value": null,
+          "domain": null
+        },
+        "fbp": {
+          "present": true
+        }
+      },
+      "csp": {
+        "violations": []
+      },
+      "clicks": [],
+      "pii": [],
+      "serverLaneProbe": null,
+      "markers": {
+        "infiniteEventIds": [
+          "evt_FAKE0001"
+        ],
+        "posthogDistinctId": "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b",
+        "metaEventIds": []
+      }
+    },
+    "context": {
+      "consentMode": "not_required",
+      "installedTools": [
+        "infinite",
+        "ga4",
+        "posthog",
+        "meta"
+      ],
+      "envSourcedIds": [],
+      "metaPixelOwnership": "adopted"
+    },
+    "expected": {
+      "infinite": {
+        "state": "pass"
+      },
+      "ga4": {
+        "state": "pass"
+      },
+      "posthog": {
+        "state": "pass"
+      },
+      "meta": {
+        "state": "pass"
+      },
+      "meta_automatic_events": {
+        "state": "info",
+        "because": "meta_automatic_events",
+        "count": 1
+      }
+    }
+  },
+  {
+    "id": "dry_live_posthog_double_pageview",
+    "note": "Two $pageview events from one load for the same project: PostHog counts every visit twice (problem).",
+    "request": {
+      "protocolVersion": 1,
+      "requestId": "00000000-0000-4000-8000-000000000042",
+      "mode": "dry_live",
+      "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80",
+      "productionHost": "acme-store.com",
+      "targets": [
+        {
+          "url": "https://acme-store.com/",
+          "label": "home"
+        }
+      ],
+      "expect": {
+        "ga4": [
+          "G-FAKE00001",
+          "G-FAKE00002"
+        ],
+        "posthog": {
+          "projectKey": "phc_FAKEtestProjectKeyNotReal000",
+          "apiHost": "https://us.i.posthog.com"
+        },
+        "meta": [
+          "1234567890123456"
+        ],
+        "infinite": {
+          "siteSourceKey": "site_FAKEacmeStoreSourceKey",
+          "collectPath": "/infinite/ledger"
+        }
+      },
+      "consentSeed": null,
+      "spaNavigation": {
+        "path": "/pricing"
+      },
+      "deadlineMs": 120000
+    },
+    "result": {
+      "mode": "dry_live",
+      "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80",
+      "startedAt": "2026-10-02T09:10:00.000Z",
+      "finishedAt": "2026-10-02T09:11:00.000Z",
+      "environment": {
+        "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Infinite/0.4.1 Chrome/140.0.0.0 Electron/38.0.0 Safari/537.36 InfiniteVerifyCheck/1 (+https://infinite.fast; analytics monitor)",
+        "automationDetected": false,
+        "visibilityState": "visible",
+        "blockedBySiteBotRules": false,
+        "previewProtected": false,
+        "consentSeeded": false,
+        "cmpDetected": null
+      },
+      "loads": [
+        {
+          "label": "home",
+          "url": "https://acme-store.com/",
+          "finalUrl": "https://www.acme-store.com/",
+          "status": 200,
+          "rendered": true,
+          "managedMarkerSeen": false,
+          "redirects": [
+            {
+              "from": "https://acme-store.com/",
+              "to": "https://www.acme-store.com/",
+              "status": 308
+            }
+          ]
+        }
+      ],
+      "requests": {
+        "total": 64,
+        "cancelled": 5,
+        "otherBeacons": [
+          {
+            "host": "bat.bing.com",
+            "pathClass": "action",
+            "method": "GET",
+            "resourceType": "image",
+            "cancelled": true
+          }
+        ]
+      },
+      "ga4": {
+        "events": [
+          {
+            "tid": "G-FAKE00001",
+            "en": "page_view",
+            "dlHost": "www.acme-store.com",
+            "transport": "post",
+            "status": "cancelled",
+            "loadLabel": "home",
+            "afterNav": false
+          }
+        ]
+      },
+      "posthog": {
+        "events": [
+          {
+            "projectKey": "phc_FAKEtestProjectKeyNotReal000",
+            "event": "$pageview",
+            "distinctId": "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b",
+            "host": "www.acme-store.com",
+            "endpointHost": "us.i.posthog.com",
+            "sameOrigin": false,
+            "libCustomApiHost": false,
+            "status": "cancelled"
+          },
+          {
+            "projectKey": "phc_FAKEtestProjectKeyNotReal000",
+            "event": "$pageview",
+            "distinctId": "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b",
+            "host": "www.acme-store.com",
+            "endpointHost": "us.i.posthog.com",
+            "sameOrigin": false,
+            "libCustomApiHost": false,
+            "status": "cancelled"
+          }
+        ],
+        "bootRequests": [
+          {
+            "path": "/flags",
+            "status": 200
+          }
+        ]
+      },
+      "infinite": {
+        "events": [
+          {
+            "siteSourceKey": "site_FAKEacmeStoreSourceKey",
+            "eventName": "page_view",
+            "eventId": "evt_FAKE0001",
+            "nav": false,
+            "status": "cancelled"
+          }
+        ]
+      },
+      "meta": {
+        "configRequests": [
+          "1234567890123456"
+        ],
+        "tr": [
+          {
+            "pixelId": "1234567890123456",
+            "ev": "PageView",
+            "eid": null,
+            "method": "GET",
+            "status": "cancelled"
+          }
+        ],
+        "console": [],
+        "fbc": {
+          "present": false,
+          "value": null,
+          "domain": null
+        },
+        "fbp": {
+          "present": true
+        }
+      },
+      "csp": {
+        "violations": []
+      },
+      "clicks": [],
+      "pii": [],
+      "serverLaneProbe": null,
       "markers": {
         "infiniteEventIds": [
           "evt_FAKE0001"
@@ -3017,10 +3318,389 @@
         "state": "pass"
       },
       "posthog": {
-        "state": "pass"
+        "state": "problem",
+        "because": "duplicate_page_view"
       },
       "meta": {
         "state": "pass"
+      }
+    }
+  },
+  {
+    "id": "dry_live_posthog_not_connected",
+    "note": "PostHog fires on the site but has no connection, so expect carries no posthog entry: its id checks are undetermined (not_connected), never a pass.",
+    "request": {
+      "protocolVersion": 1,
+      "requestId": "00000000-0000-4000-8000-000000000043",
+      "mode": "dry_live",
+      "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80",
+      "productionHost": "acme-store.com",
+      "targets": [
+        {
+          "url": "https://acme-store.com/",
+          "label": "home"
+        }
+      ],
+      "expect": {
+        "ga4": [
+          "G-FAKE00001",
+          "G-FAKE00002"
+        ],
+        "meta": [
+          "1234567890123456"
+        ],
+        "infinite": {
+          "siteSourceKey": "site_FAKEacmeStoreSourceKey",
+          "collectPath": "/infinite/ledger"
+        }
+      },
+      "consentSeed": null,
+      "spaNavigation": {
+        "path": "/pricing"
+      },
+      "deadlineMs": 120000
+    },
+    "result": {
+      "mode": "dry_live",
+      "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80",
+      "startedAt": "2026-10-02T09:10:00.000Z",
+      "finishedAt": "2026-10-02T09:11:00.000Z",
+      "environment": {
+        "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Infinite/0.4.1 Chrome/140.0.0.0 Electron/38.0.0 Safari/537.36 InfiniteVerifyCheck/1 (+https://infinite.fast; analytics monitor)",
+        "automationDetected": false,
+        "visibilityState": "visible",
+        "blockedBySiteBotRules": false,
+        "previewProtected": false,
+        "consentSeeded": false,
+        "cmpDetected": null
+      },
+      "loads": [
+        {
+          "label": "home",
+          "url": "https://acme-store.com/",
+          "finalUrl": "https://www.acme-store.com/",
+          "status": 200,
+          "rendered": true,
+          "managedMarkerSeen": false,
+          "redirects": [
+            {
+              "from": "https://acme-store.com/",
+              "to": "https://www.acme-store.com/",
+              "status": 308
+            }
+          ]
+        }
+      ],
+      "requests": {
+        "total": 64,
+        "cancelled": 5,
+        "otherBeacons": [
+          {
+            "host": "bat.bing.com",
+            "pathClass": "action",
+            "method": "GET",
+            "resourceType": "image",
+            "cancelled": true
+          }
+        ]
+      },
+      "ga4": {
+        "events": [
+          {
+            "tid": "G-FAKE00001",
+            "en": "page_view",
+            "dlHost": "www.acme-store.com",
+            "transport": "post",
+            "status": "cancelled",
+            "loadLabel": "home",
+            "afterNav": false
+          }
+        ]
+      },
+      "posthog": {
+        "events": [
+          {
+            "projectKey": "phc_FAKEtestProjectKeyNotReal000",
+            "event": "$pageview",
+            "distinctId": "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b",
+            "host": "www.acme-store.com",
+            "endpointHost": "us.i.posthog.com",
+            "sameOrigin": false,
+            "libCustomApiHost": false,
+            "status": "cancelled"
+          }
+        ],
+        "bootRequests": [
+          {
+            "path": "/flags",
+            "status": 200
+          }
+        ]
+      },
+      "infinite": {
+        "events": [
+          {
+            "siteSourceKey": "site_FAKEacmeStoreSourceKey",
+            "eventName": "page_view",
+            "eventId": "evt_FAKE0001",
+            "nav": false,
+            "status": "cancelled"
+          }
+        ]
+      },
+      "meta": {
+        "configRequests": [
+          "1234567890123456"
+        ],
+        "tr": [
+          {
+            "pixelId": "1234567890123456",
+            "ev": "PageView",
+            "eid": null,
+            "method": "GET",
+            "status": "cancelled"
+          }
+        ],
+        "console": [],
+        "fbc": {
+          "present": false,
+          "value": null,
+          "domain": null
+        },
+        "fbp": {
+          "present": true
+        }
+      },
+      "csp": {
+        "violations": []
+      },
+      "clicks": [],
+      "pii": [],
+      "serverLaneProbe": null,
+      "markers": {
+        "infiniteEventIds": [
+          "evt_FAKE0001"
+        ],
+        "posthogDistinctId": "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b",
+        "metaEventIds": []
+      }
+    },
+    "context": {
+      "consentMode": "not_required",
+      "installedTools": [
+        "infinite",
+        "ga4",
+        "posthog",
+        "meta"
+      ],
+      "envSourcedIds": []
+    },
+    "expected": {
+      "infinite": {
+        "state": "pass"
+      },
+      "ga4": {
+        "state": "pass"
+      },
+      "posthog": {
+        "state": "undetermined",
+        "because": "not_connected"
+      },
+      "meta": {
+        "state": "pass"
+      }
+    }
+  },
+  {
+    "id": "real_visit_meta_tr_rejected",
+    "note": "The real visit's Meta tr request was answered 403: Meta is blocked (problem). Only a real visit can see a tr status; dry modes cancel tr.",
+    "request": {
+      "protocolVersion": 1,
+      "requestId": "00000000-0000-4000-8000-000000000044",
+      "mode": "real_visit",
+      "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80",
+      "productionHost": "acme-store.com",
+      "targets": [
+        {
+          "url": "https://acme-store.com/",
+          "label": "home"
+        }
+      ],
+      "expect": {
+        "ga4": [
+          "G-FAKE00001",
+          "G-FAKE00002"
+        ],
+        "posthog": {
+          "projectKey": "phc_FAKEtestProjectKeyNotReal000",
+          "apiHost": "https://us.i.posthog.com"
+        },
+        "meta": [
+          "1234567890123456"
+        ],
+        "infinite": {
+          "siteSourceKey": "site_FAKEacmeStoreSourceKey",
+          "collectPath": "/infinite/ledger"
+        }
+      },
+      "consentSeed": null,
+      "serverLaneProbe": {
+        "path": "/__infinite_probe/7f3c2a91b0de"
+      },
+      "deadlineMs": 90000
+    },
+    "result": {
+      "mode": "real_visit",
+      "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80",
+      "startedAt": "2026-10-02T09:40:00.000Z",
+      "finishedAt": "2026-10-02T09:41:00.000Z",
+      "environment": {
+        "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Infinite/0.4.1 Chrome/140.0.0.0 Electron/38.0.0 Safari/537.36 InfiniteVerifyCheck/1 (+https://infinite.fast; analytics monitor)",
+        "automationDetected": false,
+        "visibilityState": "visible",
+        "blockedBySiteBotRules": false,
+        "previewProtected": false,
+        "consentSeeded": false,
+        "cmpDetected": null
+      },
+      "loads": [
+        {
+          "label": "home",
+          "url": "https://acme-store.com/",
+          "finalUrl": "https://www.acme-store.com/",
+          "status": 200,
+          "rendered": true,
+          "managedMarkerSeen": true,
+          "redirects": [
+            {
+              "from": "https://acme-store.com/",
+              "to": "https://www.acme-store.com/",
+              "status": 308
+            }
+          ]
+        }
+      ],
+      "requests": {
+        "total": 64,
+        "cancelled": 0,
+        "otherBeacons": [
+          {
+            "host": "bat.bing.com",
+            "pathClass": "action",
+            "method": "GET",
+            "resourceType": "image",
+            "cancelled": false
+          }
+        ]
+      },
+      "ga4": {
+        "events": [
+          {
+            "tid": "G-FAKE00001",
+            "en": "page_view",
+            "dlHost": "www.acme-store.com",
+            "transport": "post",
+            "status": 204,
+            "loadLabel": "home",
+            "afterNav": false
+          }
+        ]
+      },
+      "posthog": {
+        "events": [
+          {
+            "projectKey": "phc_FAKEtestProjectKeyNotReal000",
+            "event": "$pageview",
+            "distinctId": "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4c03",
+            "host": "www.acme-store.com",
+            "endpointHost": "www.acme-store.com",
+            "sameOrigin": true,
+            "libCustomApiHost": true,
+            "status": 200
+          }
+        ],
+        "bootRequests": [
+          {
+            "path": "/flags",
+            "status": 200
+          }
+        ]
+      },
+      "infinite": {
+        "events": [
+          {
+            "siteSourceKey": "site_FAKEacmeStoreSourceKey",
+            "eventName": "page_view",
+            "eventId": "evt_FAKE0301",
+            "nav": false,
+            "status": 202
+          }
+        ]
+      },
+      "meta": {
+        "configRequests": [
+          "1234567890123456"
+        ],
+        "tr": [
+          {
+            "pixelId": "1234567890123456",
+            "ev": "PageView",
+            "eid": null,
+            "method": "GET",
+            "status": 403
+          }
+        ],
+        "console": [],
+        "fbc": {
+          "present": false,
+          "value": null,
+          "domain": null
+        },
+        "fbp": {
+          "present": true
+        }
+      },
+      "csp": {
+        "violations": []
+      },
+      "clicks": [],
+      "pii": [],
+      "serverLaneProbe": {
+        "path": "/__infinite_probe/7f3c2a91b0de",
+        "status": 404,
+        "sentAt": "2026-10-02T09:40:30.000Z"
+      },
+      "markers": {
+        "infiniteEventIds": [
+          "evt_FAKE0301"
+        ],
+        "posthogDistinctId": "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4c03",
+        "metaEventIds": []
+      }
+    },
+    "context": {
+      "consentMode": "not_required",
+      "installedTools": [
+        "infinite",
+        "ga4",
+        "posthog",
+        "meta"
+      ],
+      "envSourcedIds": []
+    },
+    "expected": {
+      "infinite": {
+        "state": "pass"
+      },
+      "ga4": {
+        "state": "pass"
+      },
+      "posthog": {
+        "state": "pass"
+      },
+      "meta": {
+        "state": "problem",
+        "because": "meta_tr_rejected"
       }
     }
   }

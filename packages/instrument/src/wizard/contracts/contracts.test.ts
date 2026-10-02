@@ -1,12 +1,15 @@
 // The wizard contracts (§3a–§3i) against their published JSON: every fixture parses, every fixture's
 // keys equal its TS type's key list (at every nested level the shapes name), the schema files are
 // byte-identical to the TS constants, and the tables obey the plan's rules. Each rule has a negative.
+import { createHash } from "node:crypto"
 import { readdirSync, readFileSync } from "node:fs"
+import * as nodePath from "node:path"
 import { dirname, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "vitest"
 
 import {
+  AGENT_KINDS,
   ASK_KINDS,
   BRIDGE_DESCRIPTOR_SHAPE,
   BRIDGE_ERROR_CODES,
@@ -19,11 +22,18 @@ import {
   BRIDGE_VERBS,
   CHECKLIST_ITEM_SHAPE,
   CLAIMS_SCHEMA,
+  CLAUDE_REQUIRED_FLAGS,
+  CODEX_DISABLED_FEATURES,
+  CODEX_READ_CONFINEMENT,
+  CODEX_REQUIRED_CONFIG,
+  CODEX_REQUIRED_FLAGS,
   DOCTOR_EXIT_CODES,
   FAKE_BRIDGE_TOKEN,
   FINISH_LINE_IDS,
   FINISH_LINE_SOURCES,
+  GLOBAL_DENY_GLOBS,
   HOST_DENY_V1,
+  HOST_DENY_V1_SHA256,
   JOB_IDS,
   JOB_TABLE,
   NESTED_USER_ONLY_LINE_KINDS,
@@ -35,7 +45,11 @@ import {
   REVIEW_SCHEMA,
   STATE_CHANGING_VERBS,
   TAG_CAPABILITIES,
+  TEST_INFO_CODES,
+  TEST_PROBLEM_CODES,
   TEST_RUN_FIXTURE_CASE_SHAPE,
+  TEST_RUN_REQUEST_SHAPE,
+  TEST_RESULT_SHAPE,
   TEST_UNDETERMINED_REASONS,
   WIZARD_CODE_EXIT,
   WIZARD_CODES,
@@ -46,18 +60,24 @@ import {
   WIZARD_STEP_META,
   YES_ASK_POLICY,
   YES_POLICY,
+  agentArgvViolations,
   allowedFinishLineProvenance,
   bridgePathPattern,
+  codexPermissionArgs,
   doctorExitCode,
   exitCodeFor,
   fakeClickIdFor,
+  hostDenyFileText,
+  isNestedUserOnly,
   isSanitizerSafeFieldName,
   matchBridgeVerb,
+  normalizeHost,
   runExitCode,
   schemaFileText,
   serverLaneProbePathFor,
   shapeErrors,
   shapeOf,
+  testExpectFromKeys,
   testRequestModeErrors,
   wizardBranchName,
   wizardEventLineShape,
@@ -66,11 +86,15 @@ import {
   type BridgeVerbFixture,
   type BridgeVerbSpec,
   type Cell,
+  type GitOps,
+  type KeysResponse,
   type ReceiptsFixtureCase,
   type ReportV2,
   type TestRunFixtureCase,
+  type TestResult,
   type TestRunRequest,
-  type WizardCode
+  type WizardCode,
+  type WizardRunState
 } from "./index.js"
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..")
@@ -142,6 +166,22 @@ describe("shapeErrors (the key-list check every fixture goes through)", () => {
     expect(shapeErrors(missing, BRIDGE_DESCRIPTOR_SHAPE).join()).toContain('missing required key "bootId"')
   })
 
+  it("negative: null is refused where the type has no null, at every nested level; accepted where it does", () => {
+    expect(shapeErrors({ ...descriptor, runtime: null }, BRIDGE_DESCRIPTOR_SHAPE).join()).toContain("$.runtime: null is not allowed")
+    const report = readJson<Record<string, unknown> & { rows: Array<{ cells: Record<string, { provenance: unknown }> }> }>("report-v2.example.json")
+    expect(shapeErrors({ ...report, site: null }, REPORT_V2_SHAPE).join()).toContain("$.site: null is not allowed")
+    expect(shapeErrors({ ...report, columns: null }, REPORT_V2_SHAPE).join()).toContain("$.columns: null is not allowed")
+    const nullProvenance = JSON.parse(JSON.stringify(report)) as typeof report
+    nullProvenance.rows[0]!.cells.live_today!.provenance = null
+    expect(shapeErrors(nullProvenance, REPORT_V2_SHAPE).join()).toContain("provenance: null is not allowed")
+    const request = readJson<TestRunFixtureCase[]>("test-run.fixtures.json")[0]!.request
+    expect(shapeErrors({ ...request, consentSeed: null }, TEST_RUN_REQUEST_SHAPE)).toEqual([])
+    expect(shapeErrors({ ...request, expect: null }, TEST_RUN_REQUEST_SHAPE).join()).toContain("$.expect: null is not allowed")
+    const result = readJson<TestRunFixtureCase[]>("test-run.fixtures.json")[0]!.result
+    expect(shapeErrors({ ...result, serverLaneProbe: null }, TEST_RESULT_SHAPE)).toEqual([])
+    expect(shapeErrors({ ...result, loads: [null] }, TEST_RESULT_SHAPE).join()).toContain("$.loads[0]: null is not allowed")
+  })
+
   it("the key lists are compile-checked against the types", () => {
     interface X {
       a: string
@@ -170,6 +210,47 @@ describe("bridge-descriptor.example.json (§3a.1)", () => {
     expect(FAKE_BRIDGE_TOKEN).toContain("FAKE")
   })
 })
+
+function pollResult(rows: BridgeVerbFixture[], mode: TestResult["mode"]): TestResult | undefined {
+  const row = rows.find((f) => f.verb === "test.poll" && f.status === 200 && (f.response as { result?: TestResult }).result?.mode === mode)
+  return (row?.response as { result?: TestResult } | undefined)?.result
+}
+
+/** §3h.7 run-scoped proof: the real visit starts after the merge deploy is ready, and receipts ask only for what it saw. */
+function proofChainViolations(rows: BridgeVerbFixture[]): string[] {
+  const out: string[] = []
+  const real = pollResult(rows, "real_visit")
+  if (!real) return ["no real_visit result"]
+  const ready = rows
+    .filter((f) => f.verb === "hosting.deploy" && f.status === 200)
+    .map((f) => (f.response as { mergeDeployment: { state: string; readyAt: string | null } | null }).mergeDeployment)
+    .find((d) => d?.state === "ready")
+  if (!ready?.readyAt) out.push("no ready merge deployment")
+  else if (Date.parse(real.startedAt) < Date.parse(ready.readyAt)) out.push(`real visit started ${real.startedAt}, before the deploy was ready (${ready.readyAt})`)
+  if (Date.parse(real.finishedAt) < Date.parse(real.startedAt)) out.push("real visit finished before it started")
+  if (real.serverLaneProbe && Date.parse(real.serverLaneProbe.sentAt) < Date.parse(real.startedAt)) out.push("probe sent before the visit")
+  const receipts = rows.find((f) => f.verb === "receipts" && f.status === 200)?.request as
+    | { markers: { infinite?: { eventIds: string[] }; posthog?: { distinctId: string } } }
+    | undefined
+  if (!receipts) out.push("no receipts request")
+  else {
+    for (const id of receipts.markers.infinite?.eventIds ?? []) {
+      if (!real.markers.infiniteEventIds.includes(id)) out.push(`receipts asks for ${id}, not observed by the real visit`)
+    }
+    if (receipts.markers.posthog && receipts.markers.posthog.distinctId !== real.markers.posthogDistinctId) {
+      out.push(`receipts asks for distinct id ${receipts.markers.posthog.distinctId}, not the real visit's`)
+    }
+  }
+  for (const mode of ["dry_live", "rehearsal"] as const) {
+    const other = pollResult(rows, mode)
+    if (!other) continue
+    if (other.markers.posthogDistinctId !== null && other.markers.posthogDistinctId === real.markers.posthogDistinctId) {
+      out.push(`real visit reuses another load's distinct id (${mode}); §3h.3 is a fresh partition per load`)
+    }
+    for (const id of real.markers.infiniteEventIds) if (other.markers.infiniteEventIds.includes(id)) out.push(`real visit event id ${id} also in ${mode}`)
+  }
+  return out
+}
 
 describe("bridge-verbs.fixtures.json (§3a)", () => {
   const fixtures = readJson<BridgeVerbFixture[]>("bridge-verbs.fixtures.json")
@@ -246,11 +327,113 @@ describe("bridge-verbs.fixtures.json (§3a)", () => {
     expect(keys).not.toContain("projectToken")
   })
 
-  it("negative: the sanitizer rule flags token / apikey / credential names", () => {
-    expect(isSanitizerSafeFieldName("projectKey")).toBe(true)
-    for (const name of ["fooToken", "token", "apikey", "ApiKey", "credentialRef", "mcpCredential"]) {
+  it("negative: the sanitizer rule mirrors the desktop's (normalised names, the private key set, prototype keys)", () => {
+    for (const name of ["projectKey", "siteSourceKey", "pixelId", "runId", "linkId", "keyEvents"]) expect(isSanitizerSafeFieldName(name), name).toBe(true)
+    for (const name of [
+      "fooToken",
+      "token",
+      "apikey",
+      "ApiKey",
+      "api_key",
+      "API-KEY",
+      "credentialRef",
+      "mcpCredential",
+      "encryptionKey",
+      "providerRoute",
+      "service_role_key",
+      "authorization",
+      "engineProjectId",
+      "cloud_workspace_id",
+      "confirmationId",
+      "access_token",
+      "__proto__",
+      "constructor",
+      "prototype"
+    ]) {
       expect(isSanitizerSafeFieldName(name), name).toBe(false)
     }
+  })
+
+  it("path params match only their id shape: '..', an encoded dot-dot or a foreign id is no route", () => {
+    const runId = "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+    expect(matchBridgeVerb("GET", `/v1/runs/${runId}`)?.verb).toBe("runs.get")
+    expect(matchBridgeVerb("POST", `/v1/runs/${runId}/receipts`)?.verb).toBe("receipts")
+    expect(matchBridgeVerb("GET", "/v1/test/runs/tr_FAKEdryLive00000000000?wait=25")?.verb).toBe("test.poll")
+    expect(matchBridgeVerb("GET", "/v1/link/request/lr_FAKElinkRequestAcme000?wait=25")?.verb).toBe("link.poll")
+    for (const path of ["/v1/runs/..", "/v1/runs/%2e%2e", "/v1/runs/.", "/v1/runs/abc", `/v1/runs/${runId.toUpperCase()}`, "/v1/test/runs/..", "/v1/test/runs/lr_FAKElinkRequestAcme000", "/v1/link/request/x"]) {
+      expect(matchBridgeVerb(path.startsWith("/v1/runs/") ? "GET" : "GET", path), path).toBeNull()
+    }
+    expect(() => bridgePathPattern({ path: "/v1/things/:thingId" })).toThrow(/no id pattern/)
+  })
+
+  it("the story's proof chain is run-scoped: the real visit runs after the deploy, and receipts ask only for its markers", () => {
+    expect(proofChainViolations(fixtures)).toEqual([])
+  })
+
+  it("negatives: receipts that reuse the dry load's markers, or a real visit before the deploy, are caught", () => {
+    const clone = () => JSON.parse(JSON.stringify(fixtures)) as BridgeVerbFixture[]
+    const reused = clone()
+    const dry = pollResult(reused, "dry_live")!
+    const receipts = reused.find((f) => f.verb === "receipts" && f.status === 200)!.request as { markers: { infinite: { eventIds: string[] }; posthog: { distinctId: string } } }
+    receipts.markers.infinite.eventIds = [...dry.markers.infiniteEventIds]
+    receipts.markers.posthog.distinctId = dry.markers.posthogDistinctId!
+    const errors = proofChainViolations(reused).join()
+    expect(errors).toContain("not observed by the real visit")
+    expect(errors).toContain("distinct id")
+
+    const early = clone()
+    pollResult(early, "real_visit")!.startedAt = "2026-10-02T09:10:00.000Z"
+    expect(proofChainViolations(early).join()).toContain("before the deploy was ready")
+
+    const sharedId = clone()
+    pollResult(sharedId, "real_visit")!.markers.posthogDistinctId = pollResult(sharedId, "dry_live")!.markers.posthogDistinctId
+    expect(proofChainViolations(sharedId).join()).toContain("reuses another load's distinct id")
+  })
+
+  it("every test run loads only its own targets, and the preview's own URL is a separate dry_live after the rehearsal", () => {
+    const starts = fixtures.filter((f) => f.verb === "test.start" && f.status === 202)
+    for (const start of starts) {
+      const testRunId = (start.response as { testRunId: string }).testRunId
+      const poll = fixtures.find((f) => f.verb === "test.poll" && f.status === 200 && f.path.includes(testRunId) && (f.response as { result?: unknown }).result)
+      if (!poll) continue
+      const result = (poll.response as { result: TestResult }).result
+      expect(loadsOffTarget(start.request as TestRunRequest, result), testRunId).toEqual([])
+      expect(result.mode).toBe((start.request as TestRunRequest).mode)
+    }
+    const modes = starts.map((f) => `${(f.request as TestRunRequest).mode}:${(f.request as TestRunRequest).targets[0]!.label}`)
+    expect(modes.indexOf("dry_live:preview_self")).toBe(modes.indexOf("rehearsal:home") + 1)
+  })
+
+  it("every test request's expect is exactly testExpectFromKeys(the keys row) (R2-16)", () => {
+    const keys = fixtures.find((f) => f.verb === "keys" && f.status === 200)!.response as KeysResponse
+    const derived = testExpectFromKeys(keys)
+    expect(derived.posthog).toEqual({ projectKey: keys.posthog.projectKey, apiHost: keys.posthog.apiHost })
+    for (const start of fixtures.filter((f) => f.verb === "test.start" && f.status === 202)) {
+      expect((start.request as TestRunRequest).expect, (start.response as { testRunId: string }).testRunId).toEqual(derived)
+    }
+    // Negatives: an unconnected tool gets no entry; a tool that is connected but has no ids gets none either.
+    expect(testExpectFromKeys({ ...keys, posthog: { ...keys.posthog, status: "not_connected" } }).posthog).toBeUndefined()
+    expect(testExpectFromKeys({ ...keys, meta: { status: "connected", pixels: [] } }).meta).toBeUndefined()
+  })
+
+  it("the story is internally consistent: lane state, relay availability, and only click-tested GA4 key events", () => {
+    const keys = fixtures.find((f) => f.verb === "keys" && f.status === 200)!.response as KeysResponse
+    const laneStatus = fixtures.find((f) => f.verb === "server-lane.status" && f.status === 200)!.response as { laneState: string }
+    expect(keys.serverLane.laneState).toBe(laneStatus.laneState)
+    const storyEnd = fixtures.findIndex((f) => f.verb === "link.revoke" && f.status === 200)
+    const story = fixtures.slice(0, storyEnd + 1)
+    const relayStatus = story.find((f) => f.verb === "meta-relay.status")!.response as { available: boolean }
+    expect(relayStatus.available).toBe(true)
+    const clickTested = new Set<string>()
+    for (const row of story) {
+      const patch = (row.request as { patch?: { clickTestedConversions?: string[] } } | null)?.patch
+      patch?.clickTestedConversions?.forEach((name) => clickTested.add(name))
+      if (row.verb === "ga4-key-events") {
+        for (const name of (row.request as { names: string[] }).names) expect(clickTested.has(name), name).toBe(true)
+      }
+    }
+    const expiredPoll = fixtures.find((f) => f.verb === "link.poll" && f.status === 200 && (f.response as { state: string }).state === "expired")
+    expect(expiredPoll, "the §3a.3 200 expired poll").toBeDefined()
   })
 
   it("the verb table: keys equal verbs, capabilities are known, and the §3a.9.4 state-changing set is marked", () => {
@@ -277,6 +460,48 @@ describe("bridge-verbs.fixtures.json (§3a)", () => {
     expect(matchBridgeVerb("GET", "/v1/runs/abc/proof-claim")).toBeNull()
   })
 })
+
+/** Every §3h.8 rule a grader must be tested against, and every expectation's code must come from the vocabulary. */
+function expectationGaps(cases: TestRunFixtureCase[]): string[] {
+  const out: string[] = []
+  const seen = { problem: new Set<string>(), undetermined: new Set<string>(), info: new Set<string>() }
+  const posthogDuplicate = cases.some((c) => c.expected.posthog?.because === "duplicate_page_view")
+  const ga4Duplicate = cases.some((c) => c.expected.ga4?.because === "duplicate_page_view")
+  const metaTr4xx = cases.some((c) => c.expected.meta?.because === "meta_tr_rejected" && c.result.meta.tr.some((t) => typeof t.status === "number" && t.status >= 400 && t.status < 500))
+  for (const c of cases) {
+    for (const [key, e] of Object.entries(c.expected)) {
+      if (!e) continue
+      const where = `${c.id}.${key}`
+      if (e.state === "problem") {
+        if (!(TEST_PROBLEM_CODES as readonly string[]).includes(e.because ?? "")) out.push(`${where}: problem code ${e.because} not in TEST_PROBLEM_CODES`)
+        seen.problem.add(e.because ?? "")
+      }
+      if (e.state === "undetermined") {
+        if (!(TEST_UNDETERMINED_REASONS as readonly string[]).includes(e.because ?? "")) out.push(`${where}: reason ${e.because} not in TEST_UNDETERMINED_REASONS`)
+        seen.undetermined.add(e.because ?? "")
+      }
+      if (e.state === "info") {
+        if (!(TEST_INFO_CODES as readonly string[]).includes(e.because ?? "")) out.push(`${where}: info code ${e.because} not in TEST_INFO_CODES`)
+        if (typeof e.count !== "number") out.push(`${where}: info without a measured count`)
+        seen.info.add(e.because ?? "")
+      }
+      if (e.count !== undefined && e.state !== "info") out.push(`${where}: count on a non-info expectation`)
+    }
+  }
+  for (const code of TEST_PROBLEM_CODES) if (!seen.problem.has(code)) out.push(`no case for problem ${code}`)
+  // test_error has no facts to fixture (a crash or deadline); every other reason needs a case.
+  for (const reason of TEST_UNDETERMINED_REASONS) if (reason !== "test_error" && !seen.undetermined.has(reason)) out.push(`no case for undetermined ${reason}`)
+  for (const code of TEST_INFO_CODES) if (!seen.info.has(code)) out.push(`no case for info ${code}`)
+  if (!ga4Duplicate || !posthogDuplicate) out.push("duplicate_page_view needs a GA4 page_view AND a PostHog $pageview case")
+  if (!metaTr4xx) out.push("meta_tr_rejected needs a case whose tr status is 4xx")
+  return out
+}
+
+/** Every load is one of its request's targets (D2 loads only what it was asked to load). */
+function loadsOffTarget(request: TestRunRequest, result: TestResult): string[] {
+  const targets = new Set(request.targets.map((t) => t.url))
+  return result.loads.filter((load) => !targets.has(load.url)).map((load) => `${load.label}: ${load.url} is not a target`)
+}
 
 describe("test-run.fixtures.json (§3h; the grader's cases)", () => {
   const cases = readJson<TestRunFixtureCase[]>("test-run.fixtures.json")
@@ -316,6 +541,25 @@ describe("test-run.fixtures.json (§3h; the grader's cases)", () => {
     expect(testRequestModeErrors(dryOnPreview, productionOrSibling)).toEqual([])
   })
 
+  it("negatives: the production host is normalised first, a bad URL is an error, and a real visit targets production", () => {
+    const dry = cases.find((c) => c.request.mode === "dry_live" && c.request.targets[0]!.label === "home")!.request
+    for (const url of ["https://WWW.Acme-Store.COM./", "https://acme-store.com./", "https://ACME-STORE.COM/"]) {
+      const withClicks: TestRunRequest = { ...dry, targets: [{ url, label: "home" }], clicks: [{ selector: "a", label: "a" }], fakeClickId: true }
+      const errors = testRequestModeErrors(withClicks, productionOrSibling).join()
+      expect(errors, url).toContain("clicks is not allowed against the production host")
+      expect(errors, url).toContain("fakeClickId is not allowed against the production host")
+    }
+    expect(testRequestModeErrors({ ...dry, targets: [{ url: "not a url", label: "home" }] }, productionOrSibling).join()).toContain("invalid URL")
+    expect(() => testRequestModeErrors({ ...dry, targets: [{ url: "::", label: "home" }] }, productionOrSibling)).not.toThrow()
+    const real = cases.find((c) => c.request.mode === "real_visit")!.request
+    for (const url of ["https://evil.example/", "https://acme-store-git-infinite-tag-2026-10-02-7f3c2a-acme.vercel.app/"]) {
+      expect(testRequestModeErrors({ ...real, targets: [{ url, label: "home" }] }, productionOrSibling).join(), url).toContain(
+        "real_visit target must be the production host"
+      )
+    }
+    expect(testRequestModeErrors({ ...real, targets: [{ url: "https://Www.Acme-Store.com./", label: "home" }] }, productionOrSibling)).toEqual([])
+  })
+
   it("the fake click id appears only where a no-send load put it, never in a real visit", () => {
     for (const testCase of cases) {
       const text = JSON.stringify(testCase.result)
@@ -335,26 +579,70 @@ describe("test-run.fixtures.json (§3h; the grader's cases)", () => {
         }
       }
     }
-    const reasons = new Set(cases.flatMap((c) => Object.values(c.expected).map((e) => e?.because)))
-    for (const because of [
-      "held_by_consent",
-      "preview_protected",
-      "automation_detected",
-      "blocked_by_site_bot_rules",
-      "env_dependent",
-      "duplicate_page_view",
-      "wrong_id",
-      "no_pii",
-      "traffic_permissions_blocked",
-      "previews_send_data",
-      "no_beacon"
-    ]) {
-      expect(reasons.has(because), because).toBe(true)
-    }
+    expect(expectationGaps(cases)).toEqual([])
     // A tid equal to either of two connection streams is a pass.
     const second = cases.find((c) => c.id === "dry_live_ga4_second_stream")!
     expect(second.request.expect.ga4).toContain(second.result.ga4.events[0]!.tid)
     expect(second.expected.ga4?.state).toBe("pass")
+  })
+
+  it("negative: a fixture set missing a §3h.8 rule, or using an unknown code, is caught", () => {
+    expect(expectationGaps(cases.filter((c) => c.id !== "dry_live_meta_automatic_events_info")).join()).toContain("no case for info meta_automatic_events")
+    expect(expectationGaps(cases.filter((c) => c.id !== "real_visit_meta_tr_rejected")).join()).toContain("meta_tr_rejected")
+    expect(expectationGaps(cases.filter((c) => c.id !== "dry_live_posthog_double_pageview")).join()).toContain("PostHog $pageview")
+    expect(expectationGaps(cases.filter((c) => c.id !== "dry_live_posthog_not_connected")).join()).toContain("undetermined not_connected")
+    const unknown = JSON.parse(JSON.stringify(cases)) as TestRunFixtureCase[]
+    unknown[0]!.expected.ga4 = { state: "problem", because: "looks_bad" }
+    expect(expectationGaps(unknown).join()).toContain("looks_bad not in TEST_PROBLEM_CODES")
+  })
+
+  it("D10: Meta automatic events are graded beside the Meta tool, with a count, for an adopted pixel", () => {
+    const info = cases.find((c) => c.id === "dry_live_meta_automatic_events_info")!
+    expect(info.context.metaPixelOwnership).toBe("adopted")
+    expect(info.expected.meta?.state).toBe("pass")
+    expect(info.expected.meta_automatic_events).toEqual({ state: "info", because: "meta_automatic_events", count: 1 })
+    expect(info.result.clicks).toEqual([])
+    const blocked = cases.find((c) => c.id === "dry_live_meta_traffic_permissions_blocked")!
+    expect(blocked.expected.meta_automatic_events).toEqual({ state: "undetermined", because: "traffic_permissions_blocked" })
+  })
+
+  it("a tool with no connection has no expect entry and reads undetermined(not_connected)", () => {
+    const notConnected = cases.find((c) => c.id === "dry_live_posthog_not_connected")!
+    expect(notConnected.request.expect.posthog).toBeUndefined()
+    expect(notConnected.result.posthog.events.length).toBeGreaterThan(0)
+    expect(notConnected.expected.posthog).toEqual({ state: "undetermined", because: "not_connected" })
+  })
+
+  it("every load is one of its request's targets; preview_self is its own dry_live, never a rehearsal load", () => {
+    for (const testCase of cases) expect(loadsOffTarget(testCase.request, testCase.result), testCase.id).toEqual([])
+    for (const testCase of cases.filter((c) => c.request.mode === "rehearsal")) {
+      expect(testCase.result.loads.map((l) => l.label), testCase.id).not.toContain("preview_self")
+    }
+    const previewSelf = cases.find((c) => c.request.targets.some((t) => t.label === "preview_self"))!
+    expect(previewSelf.request.mode).toBe("dry_live")
+    // Negative: the old shape (a rehearsal that loads the bare apex and the preview, neither of them a target).
+    const drifted = JSON.parse(JSON.stringify(cases.find((c) => c.id === "rehearsal_click_test")!)) as TestRunFixtureCase
+    drifted.result.loads.push({ ...drifted.result.loads[0]!, label: "preview_self", url: "https://acme-git-x.vercel.app/" })
+    expect(loadsOffTarget(drifted.request, drifted.result).join()).toContain("preview_self")
+  })
+
+  it("markers come from the load's own events (one set per load, never copied from another load)", () => {
+    for (const testCase of cases) {
+      const r = testCase.result
+      expect([...r.markers.infiniteEventIds].sort(), testCase.id).toEqual([...new Set(r.infinite.events.map((e) => e.eventId))].sort())
+      const distinct = [...new Set(r.posthog.events.map((e) => e.distinctId))]
+      expect(r.markers.posthogDistinctId, testCase.id).toBe(distinct[0] ?? null)
+    }
+  })
+
+  it("expect comes only from the keys verb: every present entry equals testExpectFromKeys(keys)", () => {
+    const keys = readJson<BridgeVerbFixture[]>("bridge-verbs.fixtures.json").find((f) => f.verb === "keys" && f.status === 200)!.response as KeysResponse
+    const derived = testExpectFromKeys(keys)
+    for (const testCase of cases) {
+      for (const [tool, value] of Object.entries(testCase.request.expect)) {
+        expect(value, `${testCase.id}.${tool}`).toEqual(derived[tool as keyof typeof derived])
+      }
+    }
   })
 
   it("helpers: the fake click id and the probe path come from the run id", () => {
@@ -380,6 +668,14 @@ describe("receipts.fixtures.json (§3h.7)", () => {
       }
       expect(testCase.response.lanes.ga4.state).not.toBe("verified")
       expect(testCase.response.lanes.meta_pixel.state).not.toBe("verified")
+    }
+  })
+
+  it("every case asks only for the markers the story's real visit observed (never a dry load's)", () => {
+    const real = pollResult(readJson<BridgeVerbFixture[]>("bridge-verbs.fixtures.json"), "real_visit")!
+    for (const testCase of cases) {
+      expect(testCase.request.markers.infinite?.eventIds, testCase.id).toEqual(real.markers.infiniteEventIds)
+      if (testCase.request.markers.posthog) expect(testCase.request.markers.posthog.distinctId, testCase.id).toBe(real.markers.posthogDistinctId)
     }
   })
 })
@@ -441,6 +737,19 @@ describe("report-v2.example.json (§3i)", () => {
     expect(reportViolations(wrongSource).join()).toContain("not one §3i.7 allows")
   })
 
+  it("the per-tool proven cell claims receipts only for the lanes the story's receipts verified (GA4 / Meta pixel are only seen leaving)", () => {
+    const receipts = readJson<BridgeVerbFixture[]>("bridge-verbs.fixtures.json").find((f) => f.verb === "receipts" && f.status === 200)!
+      .response as { lanes: Record<string, { state: string }> }
+    const toolLanes = ["infinite", "posthog", "ga4", "meta_pixel"]
+    const verified = toolLanes.filter((lane) => receipts.lanes[lane]!.state === "verified").length
+    const leaving = toolLanes.filter((lane) => receipts.lanes[lane]!.state === "delivering").length
+    const display = report.rows.find((row) => row.id === "live_test_per_tool")!.cells.proven_live.display
+    expect(display).toContain(`${verified} verified`)
+    expect(display).toContain(`${leaving} seen leaving`)
+    // Negative: the old copy claimed a receipt for every tool.
+    expect(display).not.toMatch(/(\d+) of \1 tools: receipts/)
+  })
+
   it("FINISH_LINE_SOURCES covers the 14 ids in order, and every measured cell has an allowed provenance", () => {
     expect(Object.keys(FINISH_LINE_SOURCES)).toEqual([...FINISH_LINE_IDS])
     FINISH_LINE_IDS.forEach((id, index) => {
@@ -479,8 +788,15 @@ describe("review.schema.json and claims.schema.json (§3f.8, §3e.3)", () => {
 })
 
 describe("host-deny-v1.json (§3h.9)", () => {
-  it("is byte-identical to HOST_DENY_V1, with the plan's lists", () => {
-    expect(readText(contractsDir, "host-deny-v1.json")).toBe(schemaFileText(HOST_DENY_V1))
+  it("is §3h.9 as ONE line + newline, byte-identical to HOST_DENY_V1 and to the sha256 1bu-1 (B0) pins", () => {
+    const text = readText(contractsDir, "host-deny-v1.json")
+    expect(text).toBe(hostDenyFileText())
+    expect(text).toBe(`${JSON.stringify(HOST_DENY_V1)}\n`)
+    expect(Buffer.byteLength(text)).toBe(208)
+    expect(createHash("sha256").update(text).digest("hex")).toBe(HOST_DENY_V1_SHA256)
+    expect(HOST_DENY_V1_SHA256).toBe("5ba888c09c73d6d497e41bcb1c1fd9a123e6154f38e3c59b2fd4fcdc5cf74fe8")
+    // Negative: the pretty-printed form is a different byte string (and a different pin).
+    expect(schemaFileText(HOST_DENY_V1)).not.toBe(text)
     expect(JSON.parse(readText(contractsDir, "host-deny-v1.json"))).toEqual({
       version: 1,
       deny: {
@@ -489,6 +805,21 @@ describe("host-deny-v1.json (§3h.9)", () => {
       },
       normalize: "trim,lowercase,strip-one-trailing-dot"
     })
+  })
+
+  it("is frozen all the way down, so no lane can mutate the shared list", () => {
+    expect(Object.isFrozen(HOST_DENY_V1)).toBe(true)
+    expect(Object.isFrozen(HOST_DENY_V1.deny)).toBe(true)
+    expect(Object.isFrozen(HOST_DENY_V1.deny.exact)).toBe(true)
+    expect(Object.isFrozen(HOST_DENY_V1.deny.suffix)).toBe(true)
+    expect(() => (HOST_DENY_V1.deny.suffix as string[]).push(".evil")).toThrow()
+    expect(HOST_DENY_V1.deny.suffix).toHaveLength(5)
+  })
+
+  it("normalizeHost applies §3h.9's rule: trim, lowercase, strip ONE trailing dot", () => {
+    expect(normalizeHost("  WWW.Acme-Store.COM. ")).toBe("www.acme-store.com")
+    expect(normalizeHost("acme-store.com")).toBe("acme-store.com")
+    expect(normalizeHost("acme-store.com..")).toBe("acme-store.com.")
   })
 })
 
@@ -599,3 +930,154 @@ describe("steps, jobs and events tables", () => {
     expect(() => wizardManifestWorkspaceId("not-a-fingerprint")).toThrow()
   })
 })
+
+describe("agents (§3f.3 + the NORMATIVE §3f.7 amendment)", () => {
+  const base = {
+    homeRealpath: "/Users/acme",
+    sensitiveRealpaths: ["/Users/acme/.growth-os", "/Users/acme/.codex", "/opt/growth-os-home", "/Users/acme/Library/Caches/infinite-tag"],
+    codexBinDir: "/Users/acme/.local/bin",
+    codexInstallRoot: "/Users/acme/.codex/packages/standalone/releases/0.159.2-aarch64-apple-darwin"
+  }
+
+  it("CODEX_READ_CONFINEMENT is set (L7 passed): Codex is ON in both roles, with the two profiles", () => {
+    expect(CODEX_READ_CONFINEMENT).not.toBeNull()
+    expect(CODEX_READ_CONFINEMENT.profiles).toEqual({ worker: "infinite_tag", reviewer: "infinite_tag_ro" })
+    expect(CODEX_READ_CONFINEMENT.projectRootsAccess).toEqual({ worker: "write", reviewer: "read" })
+  })
+
+  it("codexPermissionArgs builds the exact L7 worker and reviewer profiles from realpaths", () => {
+    expect(codexPermissionArgs({ role: "worker", ...base })).toEqual([
+      "-c",
+      'default_permissions="infinite_tag"',
+      "-c",
+      'permissions.infinite_tag.filesystem={":root"="read", "/Users/acme"="none", "/opt/growth-os-home"="none", "/Users/acme/.local/bin"="read", "/Users/acme/.codex/packages/standalone/releases/0.159.2-aarch64-apple-darwin"="read", ":project_roots"="write"}'
+    ])
+    const reviewer = codexPermissionArgs({ role: "reviewer", ...base })
+    expect(reviewer[1]).toBe('default_permissions="infinite_tag_ro"')
+    expect(reviewer[3]).toMatch(/^permissions\.infinite_tag_ro\.filesystem=\{/)
+    expect(reviewer[3]).toContain('":project_roots"="read"}')
+  })
+
+  it("its output never selects a legacy sandbox (-s / --sandbox / sandbox_mode)", () => {
+    for (const role of ["worker", "reviewer"] as const) {
+      const args = codexPermissionArgs({ role, ...base })
+      expect(args).not.toContain("-s")
+      expect(args).not.toContain("--sandbox")
+      expect(args.join(" ")).not.toContain("sandbox_mode")
+    }
+  })
+
+  it("negatives: relative or unnormalised paths, HOME = /, and a re-allow that would re-open HOME or a sensitive path all throw", () => {
+    expect(() => codexPermissionArgs({ role: "worker", ...base, homeRealpath: "Users/acme" })).toThrow(/absolute/)
+    expect(() => codexPermissionArgs({ role: "worker", ...base, homeRealpath: "/Users/acme/" })).toThrow(/normalised/)
+    expect(() => codexPermissionArgs({ role: "worker", ...base, codexBinDir: "/Users/acme/../acme/.local/bin" })).toThrow(/normalised/)
+    expect(() => codexPermissionArgs({ role: "worker", ...base, homeRealpath: "/" })).toThrow(/whole disk/)
+    // A codex binary straight in $HOME would re-allow READ on all of it.
+    expect(() => codexPermissionArgs({ role: "worker", ...base, codexBinDir: "/Users/acme" })).toThrow(/re-open \/Users\/acme/)
+    expect(() => codexPermissionArgs({ role: "worker", ...base, codexInstallRoot: "/opt" })).toThrow(/re-open \/opt\/growth-os-home/)
+    expect(() => codexPermissionArgs({ role: "worker", ...base, codexInstallRoot: "/" })).toThrow(/re-open/)
+    expect(() => codexPermissionArgs({ role: "worker", ...base, sensitiveRealpaths: ["/opt/a\nb"] })).toThrow(/control/)
+  })
+
+  it("a quote or backslash in a path is escaped as a TOML basic string (it cannot break out of the key)", () => {
+    const args = codexPermissionArgs({ role: "worker", ...base, sensitiveRealpaths: ['/opt/we"ird\\dir'] })
+    expect(args[3]).toContain('"/opt/we\\"ird\\\\dir"="none"')
+  })
+
+  it("the disable list covers every §3f.3 + §3f.7 feature for every role", () => {
+    for (const feature of ["shell_snapshot", "skill_search", "view_image", "goals", "multi_agent", "apps", "plugins", "browser_use", "computer_use", "image_generation"]) {
+      expect(CODEX_DISABLED_FEATURES as readonly string[], feature).toContain(feature)
+    }
+    expect(CODEX_REQUIRED_CONFIG as readonly string[]).toContain("skills.include_instructions=false")
+    expect(CLAUDE_REQUIRED_FLAGS).toEqual(["--restricted"])
+  })
+
+  const codexArgv = (role: "worker" | "reviewer", extra: string[] = []) => [
+    "exec",
+    "--json",
+    "-C",
+    "/repo",
+    ...CODEX_REQUIRED_FLAGS,
+    "--ignore-rules",
+    ...codexPermissionArgs({ role, ...base }),
+    ...CODEX_REQUIRED_CONFIG.flatMap((setting) => ["-c", setting]),
+    ...CODEX_DISABLED_FEATURES.flatMap((feature) => ["-c", `features.${feature}=false`]),
+    ...extra,
+    "-"
+  ]
+  const claudeArgv = ["-p", "--output-format", "stream-json", "--verbose", "--restricted", "--tools", "Read,Edit,Write,Glob,Grep"]
+
+  it("agentArgvViolations passes a compliant argv for every agent and role", () => {
+    expect(agentArgvViolations("codex", codexArgv("worker"))).toEqual([])
+    expect(agentArgvViolations("codex", codexArgv("reviewer"))).toEqual([])
+    expect(agentArgvViolations("claude_code", claudeArgv)).toEqual([])
+    expect(AGENT_KINDS).toEqual(["claude_code", "codex"])
+  })
+
+  it("negatives: -s, --sandbox, sandbox_mode, a missing disable, a missing profile, Claude without --restricted, --dangerously*", () => {
+    expect(agentArgvViolations("codex", codexArgv("worker", ["-s", "workspace-write"])).join()).toContain("forbidden codex flag -s")
+    expect(agentArgvViolations("codex", codexArgv("worker", ["--sandbox=read-only"])).join()).toContain("forbidden codex flag --sandbox=read-only")
+    expect(agentArgvViolations("codex", codexArgv("worker", ["-c", 'sandbox_mode="workspace-write"'])).join()).toContain("forbidden codex config sandbox_mode")
+    const noViewImage = codexArgv("worker").filter((arg) => arg !== "features.view_image=false")
+    expect(agentArgvViolations("codex", noViewImage).join()).toContain("missing features.view_image=false")
+    const noProfile = codexArgv("worker").filter((arg) => !arg.startsWith("default_permissions="))
+    expect(agentArgvViolations("codex", noProfile).join()).toContain("missing default_permissions profile")
+    expect(agentArgvViolations("claude_code", claudeArgv.filter((arg) => arg !== "--restricted")).join()).toContain("missing --restricted")
+    expect(agentArgvViolations("claude_code", [...claudeArgv, "--setting-sources", "user"]).join()).toContain("--setting-sources")
+    expect(agentArgvViolations("claude_code", [...claudeArgv, "--dangerously-skip-permissions"]).join()).toContain("forbidden flag")
+  })
+})
+
+describe("allowlist, nested mode, run state and git (§3e, §3d.7, §3g)", () => {
+  it("the global deny covers every lockfile and the tool dirs at ANY depth (monorepo app roots)", () => {
+    const globs = GLOBAL_DENY_GLOBS as readonly string[]
+    for (const glob of ["npm-shrinkwrap.json", "**/npm-shrinkwrap.json", "**/.infinite/**", "**/.claude/**", "**/.codex/**", "**/.git/**"]) {
+      expect(globs, glob).toContain(glob)
+    }
+    const matchesGlob = (nodePath as { matchesGlob?: (path: string, glob: string) => boolean }).matchesGlob
+    if (matchesGlob) {
+      const denied = (path: string) => globs.some((glob) => matchesGlob(path, glob))
+      for (const path of ["apps/web/.infinite/install.json", "npm-shrinkwrap.json", "apps/web/npm-shrinkwrap.json", "apps/web/.claude/settings.json", ".git/config"]) {
+        expect(denied(path), path).toBe(true)
+      }
+      expect(denied("apps/web/app/layout.tsx")).toBe(false)
+    }
+  })
+
+  it("nested mode: a managed improve_additive is not user-only; an adopted or unspecified one is; never kinds always are", () => {
+    expect(isNestedUserOnly({ kind: "improve_additive", ownership: "managed" })).toBe(false)
+    expect(isNestedUserOnly({ kind: "improve_additive", ownership: "adopted" })).toBe(true)
+    expect(isNestedUserOnly({ kind: "improve_additive" })).toBe(true)
+    expect(isNestedUserOnly({ kind: "consent_mode" })).toBe(true)
+    expect(isNestedUserOnly({ kind: "install_provider" })).toBe(false)
+    for (const kind of NESTED_USER_ONLY_LINE_KINDS) if (kind !== "improve_additive") expect(isNestedUserOnly({ kind }), kind).toBe(true)
+  })
+
+  it("run state: a DECLINED line's job is dropped; only an UNANSWERED line's job is blocked:needs_you (§3e.7)", () => {
+    const state = readJson<WizardRunState>("run-state.example.json")
+    expect(declinedLineJobs(state)).toEqual([])
+    const declined = JSON.parse(JSON.stringify(state)) as WizardRunState
+    declined.plan!.lines.find((line) => line.id === "preview_guard_adopted:meta")!.approved = false
+    expect(declinedLineJobs(declined).join()).toContain("preview_guard:meta")
+  })
+
+  it("GitOps declares pull --ff-only for the update-branch step (§3g.4 step 5)", () => {
+    const method: keyof GitOps = "pullFfOnly"
+    expect(method).toBe("pullFfOnly")
+  })
+})
+
+/** Jobs that keep living although the plan line they need was declined (they must be dropped, not parked). */
+function declinedLineJobs(state: WizardRunState): string[] {
+  const out: string[] = []
+  const lines = new Map((state.plan?.lines ?? []).map((line) => [line.id, line.approved]))
+  for (const item of state.jobs) {
+    const target = item.id.includes(":") ? item.id.slice(item.id.indexOf(":") + 1) : null
+    for (const kind of JOB_TABLE[item.jobId as keyof typeof JOB_TABLE].requiresApprovedLine as readonly string[]) {
+      const approved = lines.get(target ? `${kind}:${target}` : kind)
+      if (approved === false) out.push(`${item.id} needs declined ${kind}`)
+      if (item.state === "blocked" && item.blockedReason === "needs_you" && approved === true) out.push(`${item.id} parked although ${kind} is approved`)
+    }
+  }
+  return out
+}

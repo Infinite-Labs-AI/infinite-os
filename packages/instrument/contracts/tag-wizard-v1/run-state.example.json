@@ -133,7 +133,7 @@
       },
       {
         "id": "preview_guard_adopted:meta",
-        "approved": false
+        "approved": null
       },
       {
         "id": "meta_relay",
@@ -238,16 +238,18 @@
   ],
   "markers": {
     "before": {
-      "infiniteEventIds": [],
-      "posthogDistinctId": null,
+      "infiniteEventIds": [
+        "evt_FAKE0001"
+      ],
+      "posthogDistinctId": "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b",
       "probePath": null,
       "metaEventIds": []
     },
     "rehearsal": {
       "infiniteEventIds": [
-        "evt_FAKE0001"
+        "evt_FAKE0201"
       ],
-      "posthogDistinctId": "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b",
+      "posthogDistinctId": "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4b02",
       "metaEventIds": []
     },
     "prove": {}

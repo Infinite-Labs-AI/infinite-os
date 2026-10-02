@@ -4,7 +4,9 @@
 // NORMATIVE. The desktop returns facts only (no `state`, no `verdict`); lane O6's grader is the ONE
 // place they are graded. No URL query string or body ever comes back, only extracted ids, classes and
 // counts; `pii` carries counts, never a value; no field ends in `token`.
-import { arrayOf, shapeOf } from "./shape.js"
+import type { TagKeys } from "./bridge.js"
+import { normalizeHost } from "./host-deny.js"
+import { arrayOf, nullable, shapeOf } from "./shape.js"
 
 /** `dry_live` and `rehearsal` send nothing; `real_visit` is ONE real load after a granted proof claim. */
 export const TEST_MODES = ["dry_live", "rehearsal", "real_visit"] as const
@@ -97,7 +99,9 @@ const MODE_OPTIONAL_KEYS = ["rehearsal", "fakeClickId", "consentSeed", "clicks",
 
 /**
  * The §3h.1 mode rules as a pure check (the desktop answers 400 on any of these). `isProductionOrSibling`
- * decides whether a target host is the production host or a registrable-domain sibling.
+ * decides whether a NORMALISED target host (§3h.9: trim, lowercase, strip one trailing dot) is the production
+ * host or a registrable-domain sibling; this helper normalises before calling it, so `WWW.Acme-Store.COM.`
+ * cannot slip clicks or the fake click id past it. An unparseable target URL is an error, never a throw.
  */
 export function testRequestModeErrors(request: TestRunRequest, isProductionOrSibling: (host: string) => boolean): string[] {
   const rules = TEST_MODE_RULES[request.mode]
@@ -113,16 +117,51 @@ export function testRequestModeErrors(request: TestRunRequest, isProductionOrSib
   }
   if (rules.exactlyOneTarget && request.targets.length !== 1) errors.push(`${request.mode} needs exactly one target`)
   if (request.mode === "rehearsal" && !request.rehearsal) errors.push("rehearsal needs rehearsal.previewOrigin and headSha")
-  const offProductionOnly: readonly string[] = rules.onlyOffProduction
-  if (offProductionOnly.length > 0) {
-    const touchesProduction = request.targets.some((target) => isProductionOrSibling(new URL(target.url).hostname))
-    for (const key of offProductionOnly) {
-      const value = request[key as (typeof MODE_OPTIONAL_KEYS)[number]]
-      const present = value !== undefined && value !== null && value !== false
-      if (present && touchesProduction) errors.push(`${key} is not allowed against the production host`)
+  const hosts: string[] = []
+  for (const target of request.targets) {
+    let url: URL
+    try {
+      url = new URL(target.url)
+    } catch {
+      errors.push(`target ${JSON.stringify(target.label)} has an invalid URL`)
+      continue
     }
+    hosts.push(normalizeHost(url.hostname))
+  }
+  const touchesProduction = hosts.some((host) => isProductionOrSibling(host))
+  const offProductionOnly: readonly string[] = rules.onlyOffProduction
+  for (const key of offProductionOnly) {
+    const value = request[key as (typeof MODE_OPTIONAL_KEYS)[number]]
+    const present = value !== undefined && value !== null && value !== false
+    if (present && touchesProduction) errors.push(`${key} is not allowed against the production host`)
+  }
+  // The one data-sending load goes to production, never to a preview or a third-party host.
+  if (request.mode === "real_visit" && hosts.some((host) => !isProductionOrSibling(host))) {
+    errors.push("real_visit target must be the production host")
   }
   return errors
+}
+
+/**
+ * §3h.2 + R2-16: `expect.*` comes ONLY from the keys verb (the connections), never from the site or the repo.
+ * A tool that is not connected gets no entry (its id checks read `undetermined(not_connected)`).
+ * - ga4: every stream's measurement id of the connected property;
+ * - posthog: the connection's `projectKey` + `apiHost` (the PostHog host; a same-origin `/ingest` proxy is a
+ *   FACT the test observes, `posthog.events[].sameOrigin`, not an expectation);
+ * - meta: every connected pixel id;
+ * - infinite: the site source key + collect path, once provisioned.
+ */
+export function testExpectFromKeys(keys: TagKeys): TestExpect {
+  const expect: TestExpect = {}
+  if (keys.ga4.status === "connected" && keys.ga4.streams.length > 0) expect.ga4 = keys.ga4.streams.map((stream) => stream.measurementId)
+  if (keys.posthog.status === "connected" && keys.posthog.projectKey && keys.posthog.apiHost) {
+    expect.posthog = { projectKey: keys.posthog.projectKey, apiHost: keys.posthog.apiHost }
+  }
+  if (keys.meta.status === "connected" && keys.meta.pixels.length > 0) expect.meta = keys.meta.pixels.map((pixel) => pixel.pixelId)
+  if (keys.infinite.status === "ready" && keys.infinite.siteSourceKey && keys.infinite.collectPath) {
+    expect.infinite = { siteSourceKey: keys.infinite.siteSourceKey, collectPath: keys.infinite.collectPath }
+  }
+  return expect
 }
 
 // ---- §3h.5 TestResult (facts only) ----
@@ -244,8 +283,9 @@ export interface TestResult {
 }
 
 /**
- * Why the grader may return `undetermined` for a tool (§3h.8). Never a problem: no agent job is
- * seeded against consent wiring. `test_error` = a crash or deadline (never pass).
+ * Why the grader may return `undetermined` (§3h.8). Never a problem: no agent job is seeded against consent
+ * wiring. `test_error` = a crash or deadline (never pass). `traffic_permissions_blocked` is the D10 automatic-events
+ * line's reason when Traffic Permissions blocks the pixel (the tool itself is then a `problem`).
  */
 export const TEST_UNDETERMINED_REASONS = [
   "automation_detected",
@@ -254,15 +294,41 @@ export const TEST_UNDETERMINED_REASONS = [
   "held_by_consent",
   "env_dependent",
   "not_connected",
+  "traffic_permissions_blocked",
   "test_error"
 ] as const
 export type TestUndeterminedReason = (typeof TEST_UNDETERMINED_REASONS)[number]
 
+/** The `problem` codes the grader emits (§3h.8), one per rule. */
+export const TEST_PROBLEM_CODES = [
+  /** A live id that is in no connected stream / project / pixel. */
+  "wrong_id",
+  /** More than one `page_view` (GA4) or `$pageview` (PostHog) per load per id. */
+  "duplicate_page_view",
+  /** `meta.console` contains `traffic_permissions_blocked`. */
+  "traffic_permissions_blocked",
+  /** A Meta `tr` answered 4xx (real_visit only: dry modes cancel `tr`). */
+  "meta_tr_rejected",
+  /** An installed tool sent no beacon. */
+  "no_beacon",
+  /** `pii` count > 0 for the lane. */
+  "no_pii",
+  /** The preview's own URL (`preview_self`) carried a GA4, PostHog or Meta beacon. */
+  "previews_send_data"
+] as const
+export type TestProblemCode = (typeof TEST_PROBLEM_CODES)[number]
+
+/** The `info` codes: D10, Meta automatic events counted "per visit, no clicks" (adopted pixels). */
+export const TEST_INFO_CODES = ["meta_automatic_events"] as const
+export type TestInfoCode = (typeof TEST_INFO_CODES)[number]
+
 /** One graded expectation in `test-run.fixtures.json` (§3h.8; lane O6's grader must agree). */
 export interface TestRunFixtureExpectation {
   state: "pass" | "problem" | "undetermined" | "info"
-  /** For `undetermined`, the TEST_UNDETERMINED_REASONS code; for `problem`, a short code (e.g. `no_pii`). */
+  /** `undetermined` → a TEST_UNDETERMINED_REASONS code; `problem` → a TEST_PROBLEM_CODES code; `info` → a TEST_INFO_CODES code. */
   because?: string
+  /** `info` only: the measured count (e.g. Meta automatic events per visit). */
+  count?: number
 }
 
 /** One case in `contracts/tag-wizard-v1/test-run.fixtures.json`. */
@@ -276,8 +342,11 @@ export interface TestRunFixtureCase {
     /** Tools installed on the site (an installed tool with no beacon is a problem). */
     installedTools: TestTool[]
     envSourcedIds: Array<{ tool: TestTool; envName: string; file: string; line: number }>
+    /** Whose Meta pixel the site runs (D10 counts automatic events as `info` for an ADOPTED pixel only). */
+    metaPixelOwnership?: "managed" | "adopted"
   }
-  expected: Partial<Record<TestTool, TestRunFixtureExpectation>>
+  /** Per tool, plus the D10 line (`meta_automatic_events`), which is graded beside the Meta tool, not instead of it. */
+  expected: Partial<Record<TestTool, TestRunFixtureExpectation>> & { meta_automatic_events?: TestRunFixtureExpectation }
 }
 
 // ---- shapes ----
@@ -295,7 +364,7 @@ export const TEST_RUN_REQUEST_SHAPE = shapeOf<TestRunRequest>()(
     targets: arrayOf(shapeOf<TestTarget>()("TestTarget", ["url", "label"], [])),
     rehearsal: shapeOf<NonNullable<TestRunRequest["rehearsal"]>>()("TestRunRequest.rehearsal", ["previewOrigin", "headSha"], []),
     expect: TEST_EXPECT_SHAPE,
-    consentSeed: shapeOf<ConsentSeed>()("ConsentSeed", ["kind", "storageKey"], []),
+    consentSeed: nullable(shapeOf<ConsentSeed>()("ConsentSeed", ["kind", "storageKey"], [])),
     clicks: arrayOf(shapeOf<{ selector: string; label: string }>()("TestClick", ["selector", "label"], [])),
     spaNavigation: shapeOf<{ path: string }>()("SpaNavigation", ["path"], []),
     serverLaneProbe: shapeOf<{ path: string }>()("ServerLaneProbeRequest", ["path"], [])
@@ -370,10 +439,12 @@ export const TEST_RESULT_SHAPE = shapeOf<TestResult>()(
       )
     ),
     pii: arrayOf(shapeOf<PiiFact>()("PiiFact", ["lane", "kind", "count"], [])),
-    serverLaneProbe: shapeOf<NonNullable<TestResult["serverLaneProbe"]>>()("ServerLaneProbeFact", ["path", "status", "sentAt"], []),
+    serverLaneProbe: nullable(shapeOf<NonNullable<TestResult["serverLaneProbe"]>>()("ServerLaneProbeFact", ["path", "status", "sentAt"], [])),
     markers: shapeOf<TestResult["markers"]>()("TestMarkers", ["infiniteEventIds", "posthogDistinctId", "metaEventIds"], [])
   }
 )
+
+const EXPECTATION_SHAPE = shapeOf<TestRunFixtureExpectation>()("Expectation", ["state"], ["because", "count"])
 
 export const TEST_RUN_FIXTURE_CASE_SHAPE = shapeOf<TestRunFixtureCase>()(
   "TestRunFixtureCase",
@@ -382,16 +453,17 @@ export const TEST_RUN_FIXTURE_CASE_SHAPE = shapeOf<TestRunFixtureCase>()(
   {
     request: TEST_RUN_REQUEST_SHAPE,
     result: TEST_RESULT_SHAPE,
-    context: shapeOf<TestRunFixtureCase["context"]>()("TestRunFixtureContext", ["consentMode", "installedTools", "envSourcedIds"], [], {
+    context: shapeOf<TestRunFixtureCase["context"]>()("TestRunFixtureContext", ["consentMode", "installedTools", "envSourcedIds"], ["metaPixelOwnership"], {
       envSourcedIds: arrayOf(
         shapeOf<TestRunFixtureCase["context"]["envSourcedIds"][number]>()("EnvSourcedId", ["tool", "envName", "file", "line"], [])
       )
     }),
-    expected: shapeOf<TestRunFixtureCase["expected"]>()("TestRunFixtureExpected", [], ["infinite", "ga4", "posthog", "meta"], {
-      infinite: shapeOf<TestRunFixtureExpectation>()("Expectation", ["state"], ["because"]),
-      ga4: shapeOf<TestRunFixtureExpectation>()("Expectation", ["state"], ["because"]),
-      posthog: shapeOf<TestRunFixtureExpectation>()("Expectation", ["state"], ["because"]),
-      meta: shapeOf<TestRunFixtureExpectation>()("Expectation", ["state"], ["because"])
+    expected: shapeOf<TestRunFixtureCase["expected"]>()("TestRunFixtureExpected", [], ["infinite", "ga4", "posthog", "meta", "meta_automatic_events"], {
+      infinite: EXPECTATION_SHAPE,
+      ga4: EXPECTATION_SHAPE,
+      posthog: EXPECTATION_SHAPE,
+      meta: EXPECTATION_SHAPE,
+      meta_automatic_events: EXPECTATION_SHAPE
     })
   }
 )
