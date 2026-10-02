@@ -46,7 +46,7 @@ import { renderChange } from "./change.js";
 import { renderImages } from "./images.js";
 import { renderJob } from "./job.js";
 import { renderLaunch } from "./launch.js";
-import { reconcileLines } from "./outcome.js";
+import { isSettledWithoutRunning, reconcileLines } from "./outcome.js";
 
 type KindRendererMap = { [K in AnswerViewKind]?: KindRenderer<K> };
 
@@ -99,7 +99,10 @@ export function renderView(given: AnswerViewV1, ctx: ViewRenderCtx): ViewRender 
     detail: [
       ...explainLines(view, shellCtx),
       ...managedSummaryLines(managed, shellCtx),
-      ...blankBetween(stateReasonLines(view, shellCtx, fixAsk !== null), body?.detail ?? []),
+      // A settled write's afterword ("Nothing ran.") follows its sentence on the next row (r4 receipts).
+      ...(AFTERWORD_KINDS.has(view.kind) && isSettledWithoutRunning(view)
+        ? [...stateReasonLines(view, shellCtx, fixAsk !== null), ...(body?.detail ?? [])]
+        : blankBetween(stateReasonLines(view, shellCtx, fixAsk !== null), body?.detail ?? [])),
       ...(managed ? managedApprovalLines(managed, shellCtx) : []),
       ...reconcileLines(view, shellCtx),
       ...truncationLines(view, shellCtx),
@@ -119,6 +122,9 @@ export function renderView(given: AnswerViewV1, ctx: ViewRenderCtx): ViewRender 
     ...(managed ? { approvalAsk: { key: managed.key, label: managed.label, ask: managed.ask } } : {})
   };
 }
+
+/** The kinds whose settled receipts draw only an afterword under the state's sentence (outcome.ts). */
+const AFTERWORD_KINDS: ReadonlySet<string> = new Set(["change", "launch", "images", "job"]);
 
 /** Two blocks, a blank row between them when both have lines (r4 sets a state's sentence apart from the body). */
 function blankBetween(first: readonly string[], second: readonly string[]): string[] {

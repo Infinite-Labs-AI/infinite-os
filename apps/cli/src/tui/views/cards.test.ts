@@ -501,6 +501,8 @@ describe("receipts and settled states (r4 Pause an ad)", () => {
     const out = detail(withReason).map((line) => line.replace(/\u001b\[[0-9;]*m/gu, ""));
     expect(out.filter((line) => line.includes("Dismissed — nothing was executed."))).toHaveLength(1);
     expect(out.at(-1)).toBe("Sent to the app");
+    // The afterword follows its sentence on the next row: no blank between them (r4, run-2 M9).
+    expect(out).toEqual(["✕ Dismissed — nothing was executed.", "Sent to the app"]);
     expect(out.join("\n")).not.toContain("PAUSED");
   });
 
@@ -512,6 +514,7 @@ describe("receipts and settled states (r4 Pause an ad)", () => {
     const out = detail(view);
     expect(segs(out.at(-1)!)).toEqual([["dim", "Nothing ran."]]);
     expect(out.join("\n")).not.toContain("→");
+    expect(out).toHaveLength(2);
   });
 
   it("expired (flow-pause-08): only the shell's sentence, no rows and no afterword", () => {
