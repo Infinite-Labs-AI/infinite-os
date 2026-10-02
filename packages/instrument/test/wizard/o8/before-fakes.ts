@@ -11,6 +11,7 @@ import type { BuildResult, CensusResult, CheckResult, CheckRunner, Installer, Jo
 import type { ReportBuilder } from "../../../src/wizard/contracts/report.js"
 import { WIZARD_STATE_SCHEMA, type WizardRunState } from "../../../src/wizard/contracts/state.js"
 import type { TestTool } from "../../../src/wizard/contracts/test-engine.js"
+import { checkEnvTargets } from "../../../src/checks/live/env-targets.js"
 import { baselineResponse, census as makeCensus, fixtureDryLive, hostingResponse, keysResponse, RUN_ID } from "./fixtures.js"
 
 export type CallLog = string[]
@@ -50,7 +51,12 @@ export interface FakeBridgeOptions {
   startErrors?: FakeBridgeError[]
   /** Thrown by `baseline`. */
   baselineError?: FakeBridgeError
+  /** Thrown by the `hosting?envNames=` read (the env-target presence read), after the desktop's own §3b check. */
+  hostingEnvError?: FakeBridgeError
 }
+
+/** The desktop's §3b decoder for `hosting?envNames=` (1bu-1 `verbs/hosting.ts`): ≤10 public build-time names. */
+const DESKTOP_ENV_NAME = /^(NEXT_PUBLIC|VITE|PUBLIC)_[A-Z0-9_]{1,64}$/
 
 /** Rejects any production `dry_live` that carries clicks or the fake click id (R2-06): the test fails. */
 export function assertNoSendOnProduction(request: Omit<TestRunRequest, "protocolVersion" | "requestId">): void {
@@ -74,6 +80,9 @@ export function fakeBridge(log: CallLog, options: FakeBridgeOptions = {}) {
     async hosting(envNames?: readonly string[]) {
       log.push(envNames ? `bridge.hosting(${envNames.join(",")})` : "bridge.hosting")
       hostingCalls.push(envNames)
+      // As the real desktop answers since review I2 P1-2: a server-side name or an 11th name is a 400 `invalid_request`.
+      if (envNames && (envNames.length > 10 || envNames.some((name) => !DESKTOP_ENV_NAME.test(name)))) throw new FakeBridgeError(400, "invalid_request")
+      if (envNames && options.hostingEnvError) throw options.hostingEnvError
       const response = options.hosting ?? hostingResponse()
       if (envNames && response.vercel) {
         return { ...response, vercel: { ...response.vercel, envTargets: Object.fromEntries(envNames.map((name) => [name, ["production" as const]])) } }
@@ -220,9 +229,10 @@ export function fakeChecks(log: CallLog, options: FakeChecksOptions = {}) {
       log.push(`checks.setupChecks(${appRoot})`)
       return options.setup ?? [{ checkId: "click_id_capture", tier: "S", state: "pass", at: AT, runId: RUN_ID }]
     },
-    async envTargets() {
+    async envTargets(envSourcedIds, hosting) {
       log.push("checks.envTargets")
-      return [{ checkId: "env_targets", tier: "T1", state: "pass", at: AT, runId: RUN_ID }]
+      // The real check (env-targets.ts), so a name that was never asked is graded as the step leaves it.
+      return checkEnvTargets(envSourcedIds, hosting, { runId: RUN_ID, now: () => new Date(AT) })
     },
     async gradeTestRun(result, expect, mode, ctx) {
       log.push(`checks.gradeTestRun(${mode})`)

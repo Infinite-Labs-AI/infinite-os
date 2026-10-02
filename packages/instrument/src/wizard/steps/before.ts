@@ -22,7 +22,8 @@
 // §3g.1) → branch → keys → baseline build → scan + census + setup checks → dry_live → T1 → baseline
 // reads → Before facts → seedCandidates. The branch is created before any other verb and before any
 // repo read.
-import { bridgeFailureOutcome, isTransientBridgeFailure } from "../../bridge/outcomes.js"
+import { asBridgeFailure, bridgeFailureOutcome, hardStopOutcome, isTransientBridgeFailure } from "../../bridge/outcomes.js"
+import { envNamesFor } from "../../checks/live/env-targets.js"
 import { gradeContextFrom } from "../../checks/grade-context.js"
 import { BEFORE_FACTS_SCHEMA, writeBeforeFactsFile, type BeforeFactsFile } from "../handoff/before-facts.js"
 import { createHash } from "node:crypto"
@@ -265,6 +266,41 @@ async function runDryLive(
   }
 }
 
+/**
+ * The hosting read the `env_targets` check grades (review I2 P1-2). It asks ONLY the names §3b allows (at
+ * most 10, `^(NEXT_PUBLIC|VITE|PUBLIC)_[A-Z0-9_]{1,64}$`, `envNamesFor`): a server-side name is never sent,
+ * and the check reads it `undetermined` (server env, so not a preview leak). With no askable name there is
+ * no second read. The read is optional, so a bridge failure goes through the §3z.4 table: a hard stop
+ * (402, signed out, the link) stops the step; anything else (a 4xx such as `invalid_request`, a 5xx, busy)
+ * leaves the hosting answer without `envTargets`, which the check reads as `undetermined`, never a pass.
+ */
+async function envTargetsHosting(
+  ctx: WizardContext,
+  deps: WizardDeps,
+  hosting: TagHosting,
+  envSourcedIds: CensusEnvSourcedIds,
+  sub: (text: string, tone?: "ok" | "warn" | "info" | "pending") => void
+): Promise<TagHosting> {
+  // The first hosting read asked for no names, so any `envTargets` on it answer nothing: never graded.
+  const unread: TagHosting = hosting.vercel ? { ...hosting, vercel: withoutEnvTargets(hosting.vercel) } : hosting
+  const envNames = envNamesFor(envSourcedIds)
+  if (envNames.length === 0) return unread
+  try {
+    return withoutEnvelope(await deps.bridge.hosting(envNames, { signal: ctx.signal }))
+  } catch (error) {
+    if (ctx.signal.aborted || hardStopOutcome(error) !== null || asBridgeFailure(error) === null) throw error
+    sub("! Infinite could not read where your env-sourced IDs are set on Vercel; that check stays unknown", "warn")
+    return unread
+  }
+}
+
+function withoutEnvTargets(vercel: NonNullable<TagHosting["vercel"]>): NonNullable<TagHosting["vercel"]> {
+  const { envTargets: _unasked, ...rest } = vercel
+  return rest
+}
+
+type CensusEnvSourcedIds = Parameters<WizardDeps["checks"]["envTargets"]>[0]
+
 // ---------------------------------------------------------------------------------------------
 // The step
 // ---------------------------------------------------------------------------------------------
@@ -413,9 +449,7 @@ export function createBeforeStep(options: BeforeStepOptions = {}): WizardStep<"b
         }
         let envTargetChecks: CheckResult[] = []
         if (census.envSourcedIds.length > 0 && hosting.provider === "vercel") {
-          const envNames = [...new Set(census.envSourcedIds.map((entry) => entry.envName))].sort()
-          const withTargets: TagHosting = withoutEnvelope(await deps.bridge.hosting(envNames, { signal: ctx.signal }))
-          envTargetChecks = await deps.checks.envTargets(census.envSourcedIds, withTargets)
+          envTargetChecks = await deps.checks.envTargets(census.envSourcedIds, await envTargetsHosting(ctx, deps, hosting, census.envSourcedIds, sub))
         }
 
         // ---- dry_live of production (nothing sent; no clicks, no fake click id) ----

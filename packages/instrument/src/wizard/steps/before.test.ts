@@ -56,6 +56,7 @@ function setup(options: {
   bridgePolls?: NonNullable<Parameters<typeof fakeBridge>[1]>["polls"]
   startErrors?: FakeBridgeError[]
   baselineError?: FakeBridgeError
+  hostingEnvError?: FakeBridgeError
   buildLiveTodayColumn?: Parameters<typeof createBeforeStep>[0] extends infer O ? (O extends { buildLiveTodayColumn?: infer B } ? B : never) : never
   git?: Parameters<typeof fakeGit>[1]
   checks?: Parameters<typeof fakeChecks>[1]
@@ -67,7 +68,7 @@ function setup(options: {
 } = {}): Setup {
   const log: CallLog = []
   const state = initialState(options.state)
-  const bridge = fakeBridge(log, { keys: options.keys, hosting: options.hosting, polls: options.bridgePolls, startErrors: options.startErrors, baselineError: options.baselineError })
+  const bridge = fakeBridge(log, { keys: options.keys, hosting: options.hosting, polls: options.bridgePolls, startErrors: options.startErrors, baselineError: options.baselineError, hostingEnvError: options.hostingEnvError })
   const git = fakeGit(log, options.git)
   const checks = fakeChecks(log, options.checks)
   const fs = memoryFs(log, { "/repo/.env": SITE[".env"], ...(options.fsFiles ?? {}) })
@@ -85,6 +86,8 @@ function setup(options: {
   })
   return { log, state, run: () => beforeStep.run(ctx, wizardDeps), bridge, git, checks, fs, events }
 }
+
+const BEFORE_FACTS_PATH_ABS = `/repo/${BEFORE_FACTS_PATH}`
 
 const indexOf = (log: CallLog, prefix: string): number => log.findIndex((entry) => entry.startsWith(prefix))
 
@@ -464,6 +467,49 @@ describe("step before: the hand-off", () => {
     await plain.run()
     expect(plain.log.some((entry) => entry.startsWith("checks.envTargets"))).toBe(false)
     expect(plain.bridge.hostingCalls).toEqual([undefined])
+  })
+
+  describe("review I2 P1-2: the env-target read sends only §3b names", () => {
+    const envId = (envName: string, line = 4) => ({ tool: "ga4" as const, envName, file: "app/layout.tsx", line })
+    const envChecks = (s: Setup) => {
+      const facts = JSON.parse(s.fs.store.get(BEFORE_FACTS_PATH_ABS)!.text) as BeforeFactsFile
+      return facts.envTargetChecks
+    }
+
+    it("a server-side name (GA_ID) is never sent, the run goes on, and the check reads it undetermined", async () => {
+      const s = setup({ checks: { census: census([], { envSourcedIds: [envId("GA_ID")] }) } })
+      expect(await s.run()).toMatchObject({ kind: "ok" })
+      // No second hosting read at all: no name was askable.
+      expect(s.bridge.hostingCalls).toEqual([undefined])
+      const checks = envChecks(s)
+      expect(checks).toHaveLength(1)
+      expect(checks[0]).toMatchObject({ checkId: "env_targets", state: "undetermined" })
+      expect(checks[0]!.reason).toContain("GA_ID is not a public build-time name")
+    })
+
+    it("a mixed list asks only the public names, at most 10; the rest stay undetermined", async () => {
+      const names = ["GA_ID", "INFINITE_SITE_SOURCE_KEY", "next_public_lower", ...Array.from({ length: 11 }, (_, index) => `NEXT_PUBLIC_ID_${String(index).padStart(2, "0")}`)]
+      const s = setup({ checks: { census: census([], { envSourcedIds: names.map((name, index) => envId(name, index + 1)) }) } })
+      expect(await s.run()).toMatchObject({ kind: "ok" })
+      expect(s.bridge.hostingCalls).toHaveLength(2)
+      const asked = s.bridge.hostingCalls[1]!
+      expect(asked).toHaveLength(10)
+      for (const name of asked) expect(name).toMatch(/^(NEXT_PUBLIC|VITE|PUBLIC)_[A-Z0-9_]{1,64}$/)
+      const checks = envChecks(s)
+      const byName = (name: string) => checks.find((check) => check.reason?.startsWith(name))
+      for (const name of ["GA_ID", "INFINITE_SITE_SOURCE_KEY", "next_public_lower", "NEXT_PUBLIC_ID_10"]) expect(byName(name)?.state, name).toBe("undetermined")
+      expect(byName("NEXT_PUBLIC_ID_00")?.state).toBe("pass")
+    })
+
+    it("a 4xx on the optional read degrades to undetermined (never a raw rethrow); a hard stop still stops", async () => {
+      const ids = { census: census([], { envSourcedIds: [envId("NEXT_PUBLIC_GA_ID")] }) }
+      const refused = setup({ checks: ids, hostingEnvError: new FakeBridgeError(400, "invalid_request") })
+      expect(await refused.run()).toMatchObject({ kind: "ok" })
+      expect(envChecks(refused)[0]).toMatchObject({ state: "undetermined" })
+      expect(refused.events.some((event) => event.type === "step.sub" && String((event.fields as { text: string }).text).includes("that check stays unknown"))).toBe(true)
+      const unpaid = setup({ checks: ids, hostingEnvError: new FakeBridgeError(402, "subscription_required") })
+      expect(await unpaid.run()).toMatchObject({ kind: "blocked", code: "INF_WIZ_SUBSCRIPTION_REQUIRED" })
+    })
   })
 
   it("counts a graded problem as a problem and shows it as a live warning", async () => {
