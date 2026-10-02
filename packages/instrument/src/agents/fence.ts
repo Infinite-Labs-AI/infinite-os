@@ -165,6 +165,7 @@ const HEAVY = new Set<string>(HEAVY_DIR_NAMES)
 
 export class Fence {
   private settled = false
+  private closing: { kind: "abort" | "end"; promise: Promise<unknown> } | null = null
 
   private constructor(private readonly manifest: FenceManifest, private readonly dir: string) {}
 
@@ -172,8 +173,9 @@ export class Fence {
     return this.dir
   }
 
+  /** True once `abort()` or `end()` has started (the turn is being, or has been, settled). */
   get isSettled(): boolean {
-    return this.settled
+    return this.settled || this.closing !== null
   }
 
   static async begin(options: FenceBeginOptions): Promise<Fence> {
@@ -271,9 +273,25 @@ export class Fence {
     return new Fence(manifest, snapshotDir)
   }
 
-  /** Restores every path the turn touched, exactly as it was before the turn. */
-  async abort(): Promise<{ restored: string[]; unrestorable: string[] }> {
-    this.assertOpen()
+  /**
+   * Restores every path the turn touched, exactly as it was before the turn. Idempotent: a second call (a
+   * SIGINT racing the turn's own abort) gets the first call's result; after `end()` it is a no-op.
+   */
+  abort(): Promise<{ restored: string[]; unrestorable: string[] }> {
+    if (this.closing?.kind === "abort") return this.closing.promise as Promise<{ restored: string[]; unrestorable: string[] }>
+    if (this.closing || this.settled) {
+      const settledAlready = this.closing?.promise ?? Promise.resolve()
+      return settledAlready.then(
+        () => ({ restored: [], unrestorable: [] }),
+        () => ({ restored: [], unrestorable: [] })
+      )
+    }
+    const promise = this.abortNow()
+    this.closing = { kind: "abort", promise }
+    return promise
+  }
+
+  private async abortNow(): Promise<{ restored: string[]; unrestorable: string[] }> {
     const touched = await this.touched()
     const restored: string[] = []
     for (const rel of touched.paths) {
@@ -284,8 +302,18 @@ export class Fence {
     return { restored, unrestorable: touched.tamper }
   }
 
-  async end(options: FenceEndOptions = {}): Promise<FenceEndResult> {
-    this.assertOpen()
+  end(options: FenceEndOptions = {}): Promise<FenceEndResult> {
+    try {
+      this.assertOpen()
+    } catch (error) {
+      return Promise.reject(error)
+    }
+    const promise = this.endNow(options)
+    this.closing = { kind: "end", promise }
+    return promise
+  }
+
+  private async endNow(options: FenceEndOptions): Promise<FenceEndResult> {
     const manifest = this.manifest
     const root = manifest.root
     const touched = await this.touched()
@@ -455,7 +483,7 @@ export class Fence {
   }
 
   private assertOpen(): void {
-    if (this.settled) throw new Error("this fence turn is already settled")
+    if (this.settled || this.closing) throw new Error("this fence turn is already settled")
   }
 
   private entry(rel: string): ManifestEntry | undefined {

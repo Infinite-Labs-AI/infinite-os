@@ -1,0 +1,91 @@
+#!/usr/bin/env node
+// Fake `codex` (codex-cli 0.159.2 surface) for the agent-runner tests. Never a model, never the network.
+// Like the real CLI, it starts the MCP server from the `-c mcp_servers.infinite_tag.*` flags and hands it
+// ONLY the env vars named in `env_vars`, taken from its OWN env: a Codex child without this run's two MCP
+// vars cannot reach the claim channel, fails the required server and reports itself toolless.
+// Scenario keys: version, loginStatus, loginExit, turns[]: { rejectModel, steps[], final (the -o JSON),
+// exit, threadId }.
+import { readdirSync, writeFileSync } from "node:fs"
+
+import { emit, envSnapshot, loadScenario, McpClient, priorRuns, readStdin, record, runSteps } from "./fake-agent-lib.mjs"
+
+const argv = process.argv.slice(2)
+const scenario = loadScenario()
+
+if (argv[0] === "--version") {
+  process.stdout.write(`${scenario.version ?? "codex-cli 0.159.2"}\n`)
+  process.exit(0)
+}
+if (argv[0] === "login" && argv[1] === "status") {
+  record({ kind: "probe", agent: "codex", argv, env: envSnapshot() })
+  process.stderr.write(`${scenario.loginStatus ?? "Logged in using ChatGPT"}\n`)
+  process.exit(scenario.loginExit ?? 0)
+}
+
+const configs = new Map()
+for (let i = 0; i < argv.length; i += 1) {
+  if (argv[i] === "-c") {
+    const value = argv[i + 1]
+    const eq = value.indexOf("=")
+    configs.set(value.slice(0, eq), value.slice(eq + 1))
+  }
+}
+const flag = (name) => {
+  const index = argv.indexOf(name)
+  return index === -1 ? null : argv[index + 1]
+}
+const toml = (raw) => (raw === undefined ? undefined : JSON.parse(raw))
+
+const resumeIndex = argv.indexOf("resume")
+const resumeThread = argv[0] === "exec" && resumeIndex === 1 ? argv[2] : null
+const role = argv.includes("--ephemeral") ? "reviewer" : "worker"
+const cwd = flag("-C") ?? process.cwd()
+const index = priorRuns("codex")
+const turns = scenario.turns ?? [{}]
+const turn = turns[Math.min(index, turns.length - 1)] ?? {}
+const stdin = await readStdin()
+record({ kind: "run", agent: "codex", role, argv, cwd, env: envSnapshot(), stdin, cwdEntries: readdirSync(cwd) })
+
+const threadId = resumeThread ?? turn.threadId ?? "thread-fake-0001"
+emit({ type: "thread.started", thread_id: threadId })
+emit({ type: "turn.started" })
+
+if (turn.rejectModel && argv.includes("-m")) {
+  emit({ type: "error", message: `The '${flag("-m")}' model is not supported when using Codex with a ChatGPT account.` })
+  emit({ type: "turn.failed", error: { message: "model is not supported" } })
+  process.exit(1)
+}
+
+let mcp = null
+const command = toml(configs.get("mcp_servers.infinite_tag.command"))
+if (role === "worker" && command) {
+  const args = toml(configs.get("mcp_servers.infinite_tag.args")) ?? []
+  const forwarded = toml(configs.get("mcp_servers.infinite_tag.env_vars")) ?? []
+  const env = { PATH: process.env.PATH ?? "" }
+  for (const name of forwarded) if (process.env[name] !== undefined) env[name] = process.env[name]
+  mcp = new McpClient(command, args, env)
+  const ok = await mcp.connect()
+  if (!ok) {
+    record({ kind: "toolless", agent: "codex" })
+    emit({ type: "error", message: "MCP client for `infinite_tag` failed to start: required server unavailable" })
+    emit({ type: "turn.failed", error: { message: "required MCP server infinite_tag failed to initialize" } })
+    process.exit(1)
+  }
+}
+
+await runSteps(turn.steps, {
+  agent: "codex",
+  cwd,
+  mcp,
+  onEdit: (path) => emit({ type: "item.completed", item: { id: "item_e", type: "file_change", changes: [{ path: `${cwd}/${path}`, kind: "update" }], status: "completed" } }),
+  onTool: (tool, args) => {
+    emit({ type: "item.started", item: { id: "item_s", type: "tool_search_call", query: `infinite_tag ${tool}` } })
+    emit({ type: "item.completed", item: { id: "item_t", type: "mcp_tool_call", server: "infinite_tag", tool, arguments: args, status: "completed" } })
+  }
+})
+mcp?.close()
+
+const out = flag("-o")
+if (out && turn.final !== null) writeFileSync(out, JSON.stringify(turn.final ?? (role === "reviewer" ? null : { claims: [], questions: [] })))
+if ((turn.exit ?? 0) === 0) emit({ type: "turn.completed", usage: { input_tokens: 1, output_tokens: 1 } })
+process.exit(turn.exit ?? 0)
