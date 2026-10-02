@@ -123,6 +123,43 @@ describe("run lock (.infinite/wizard/run.lock)", () => {
     expect(refused.ok).toBe(false)
   })
 
+  it("a racer that judged the lock stale never deletes the fresh lock another process just took: exactly one holder (O1-13)", async () => {
+    const root = tempRoot()
+    const STALE_PID = 4_000_001
+    mkdirSync(join(root, ".infinite/wizard"), { recursive: true })
+    writeFileSync(lockFilePath(root), `${JSON.stringify({ pid: STALE_PID, startedAt: "2026-10-01T00:00:00.000Z", hostname: "mac" })}\n`)
+    const isPidAlive = (pid: number) => pid !== STALE_PID
+    let releaseA!: () => void
+    const aPaused = new Promise<void>((resolve) => {
+      releaseA = resolve
+    })
+    let aReachedTakeover!: () => void
+    const aAtTakeover = new Promise<void>((resolve) => {
+      aReachedTakeover = resolve
+    })
+    // A reads the stale lock, then pauses right before taking it over…
+    const a = acquireRunLock(root, {
+      pid: 4_000_002,
+      hostname: "mac",
+      isPidAlive,
+      beforeTakeover: async () => {
+        aReachedTakeover()
+        await aPaused
+      }
+    })
+    await aAtTakeover
+    // …while B takes the stale lock over and holds it.
+    const b = await acquireRunLock(root, { pid: 4_000_003, hostname: "mac", isPidAlive })
+    expect(b.ok).toBe(true)
+    releaseA()
+    const resultA = await a
+    expect(resultA.ok).toBe(false)
+    if (!resultA.ok) expect(resultA.holder?.pid).toBe(4_000_003)
+    expect(JSON.parse(readFileSync(lockFilePath(root), "utf8")).pid).toBe(4_000_003)
+    expect(readdirSync(join(root, ".infinite/wizard"))).toEqual(["run.lock"])
+    if (b.ok) await b.handle.release()
+  })
+
   it("release removes only this run's lock", async () => {
     const root = tempRoot()
     const mine = await acquireRunLock(root, { pid: 111, isPidAlive: () => true })
