@@ -539,6 +539,71 @@ function codeBlock(language: string, code: string): string[] {
   return ["```" + language, code.replace(/\n$/, ""), "```"]
 }
 
+/**
+ * The WIZARD's server-lane copy (`npx infinite-tag`). Kept apart from `serverLaneCopy` on purpose: the
+ * plain installer (`install --server-lane`) still installs nothing and keeps its exact words
+ * (`copy.test.ts` pins them byte for byte), while the wizard installs the lane's package as its own plan
+ * line (decision 5) and wires conversions through `reportInfiniteOutcome` + `infiniteMetaMirror`
+ * (decisions 11, 13 and 18). Nothing here is rendered by the plain installer.
+ */
+export const serverLaneWizardCopy = {
+  /** Decision 5: the npm-install line, as the wizard's plan shows it. */
+  targetPackages: (packages: string[]) =>
+    `The generated entry imports ${packages.map((name) => `\`${name}\``).join(", ")}. The wizard installs it as its own plan line (\`npm install ${packages.join(" ")}\`, or your package manager's equivalent), only after you approve the plan. Without it the build fails at the import.`,
+
+  reportOutcomeHeading: "Report a conversion the browser is waiting on",
+  /** The reportInfiniteOutcome recipe (§3j.5, §3j.6): stable eventId, from the request the browser awaits, mirror via metaEventId. */
+  reportOutcomeRecipe: (importSpecifier = "../lib/infinite-outcome", language: "ts" | "js" = "ts"): string[] => [
+    "Report the conversion from the server route the browser is already waiting on (the sign-up or lead request), the moment it is REAL — the row committed, never on a click. Infinite answers before it calls Meta, so this adds no Meta latency.",
+    "```" + language,
+    `import { reportInfiniteOutcome } from "${importSpecifier}"`,
+    "",
+    "// In the route the browser awaits (e.g. POST /api/signup), after the account is created:",
+    "const { metaEventId, metaEventName } = await reportInfiniteOutcome({",
+    '  type: "sign_up",                  // the exact name from Infinite -> Conversions',
+    '  eventId: "signup:" + user.id,     // STABLE: the same id every time this sign-up is reported',
+    '  path: "/signup",',
+    "  visitKeyInputs: request,          // the buyer's own request: same-visit attribution",
+    "  campaign: body.campaign           // the page's infiniteCampaign(), passed through your request",
+    "})",
+    "return Response.json({ ok: true, metaEventId, metaEventName })",
+    "```",
+    "Then, in the page, mirror it ONLY with what the server returned, and wait for it before leaving:",
+    "```" + language,
+    "const data = await response.json()",
+    "await infiniteMetaMirror(data.metaEventName, data.metaEventId)  // null: Infinite is not sending one, nothing fires",
+    'location.assign("/welcome")',
+    "```",
+    "- **`eventId` is required and stable** (an account, order or subscription id; a namespaced email hash for a lead). Calling without one throws, so the mistake shows up now. Infinite counts an `eventId` once, and the Meta id it returns is tied to it.",
+    "- **Never build a Meta event id in the page.** The page mirrors only the `metaEventId` the server returned; `null` means no mirror. The mirror fires once per id, refuses `Purchase`, and holds the page at most 0.4 s.",
+    "- **Never fire a Meta conversion with `fbq` on a click.** A click is intent, not a conversion."
+  ],
+
+  webhookCaptureHeading: "Purchases and subscriptions: capture at checkout, report from the webhook",
+  /** The checkout-capture recipe: fbc, fbp, user agent and ip from ONE device, carried to the webhook. */
+  webhookCaptureRecipe: (importSpecifier = "../lib/infinite-outcome", language: "ts" | "js" = "ts"): string[] => [
+    "A payment webhook's request is the PROVIDER'S, not your buyer's. Capture the buyer's match data at CHECKOUT, from their own browser request — `_fbc`, `_fbp`, user agent and ip, all from ONE device — store it with the order, and report from the webhook once the payment is real.",
+    "```" + language,
+    `import { adMatchFromRequest, infiniteVisitKey, postInfiniteOutcome } from "${importSpecifier}"`,
+    "",
+    "// 1. Checkout route, from the BUYER'S request (one device, one moment):",
+    "const adMatch = adMatchFromRequest(request, { em: emailSha256 })   // you hash the email; never the phone",
+    "const infinite_visit_key = await infiniteVisitKey({ clientIp: adMatch.client_ip_address, userAgent: adMatch.client_user_agent })",
+    "await saveCheckoutAdMatch(session.id, adMatch)",
+    "",
+    "// 2. Payment webhook, once the payment is real (and only here):",
+    "await postInfiniteOutcome({",
+    '  type: "purchase",',
+    '  eventId: "purchase:" + session.id,   // the SAME id wherever this purchase is reported',
+    '  path: "/checkout",',
+    "  properties: { value: session.amount_total / 100, currency: session.currency.toUpperCase(), visitKey: infinite_visit_key },",
+    "  adMatch: await loadCheckoutAdMatch(session.id)",
+    "})",
+    "```",
+    "- **Purchases are server events only.** No browser `fbq('track', 'Purchase')` and no mirror: a purchase reaches Meta from this webhook alone."
+  ]
+}
+
 export function renderStatusParagraph(status: ServerLaneBriefStatus): string {
   switch (status.kind) {
     case "created":
