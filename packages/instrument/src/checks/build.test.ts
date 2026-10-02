@@ -1,13 +1,13 @@
 // The build check (lane O6): through sandboxedSpawn (a spy here; no real build, no network), and the
 // baseline-vs-new failure signature. Each verdict has a negative.
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs"
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 import { describe, expect, it } from "vitest"
 
 import type { SandboxedSpawnFn, SandboxedSpawnOptions, SandboxedSpawnResult } from "../t0/sandbox.js"
-import { buildPackageManager, failureSignature, gradeBuild, runBuild } from "./build.js"
+import { buildDeniedWrites, buildPackageManager, FAILURE_SIGNATURE_MAX_LINES, failureSignature, gradeBuild, runBuild } from "./build.js"
 
 const ctx = { runId: "7f3c2a91-b0de-4c03-9a00-000000000001", now: () => new Date("2026-10-02T10:00:00.000Z") }
 
@@ -24,7 +24,7 @@ function spy(answer: Partial<SandboxedSpawnResult>): { fn: SandboxedSpawnFn; cal
   const calls: Array<{ cmd: string; args: readonly string[]; options: SandboxedSpawnOptions }> = []
   const fn: SandboxedSpawnFn = async (cmd, args, options) => {
     calls.push({ cmd, args, options })
-    return { exitCode: 0, signal: null, stdout: "", stderr: "", timedOut: false, aborted: false, sandboxed: true, pid: 4242, stdoutTruncated: false, stderrTruncated: false, ...answer }
+    return { exitCode: 0, signal: null, stdout: "", stderr: "", timedOut: false, aborted: false, sandboxed: true, pid: 4242, home: "/private/var/folders/x1/T/infinite-tag-sbx-AAAA11", stdoutTruncated: false, stderrTruncated: false, ...answer }
   }
   return { fn, calls }
 }
@@ -52,6 +52,10 @@ describe("runBuild goes through sandboxedSpawn, never the wizard's process", () 
     expect(calls[0]!.args).toEqual(["run", "build"])
     expect(calls[0]!.options).toMatchObject({ network: true, cwd: join(root, "apps/web"), denyReads: ["/Users/x/.ssh"], denyReadPrefixes: ["/Users/x/.growth-os"] })
     expect(calls[0]!.options.env).toMatchObject({ NEXT_TELEMETRY_DISABLED: "1" })
+    // writes: the repo only, never its git dir, husky hooks or the wizard's state (review O6-R1)
+    expect(calls[0]!.options.allowWrites).toEqual([root])
+    expect(calls[0]!.options.denyWrites).toEqual(buildDeniedWrites(root, join(root, "apps/web")))
+    expect(calls[0]!.options.denyWrites).toEqual(expect.arrayContaining([join(root, ".git"), join(root, ".husky"), join(root, ".infinite"), join(root, "apps/web/.infinite")]))
     expect(run).toMatchObject({ ok: true, sandboxed: true, packageManager: "pnpm", failureSignature: [] })
   })
 
@@ -114,5 +118,91 @@ describe("the failure signature tells a new failure from the baseline's", () => 
     expect(gradeBuild("build", red, green, ctx).state).toBe("problem")
     expect(gradeBuild("build", red, null, ctx).state).toBe("problem")
     expect(gradeBuild("build", green, null, ctx).state).toBe("pass")
+  })
+})
+
+// npm ≥ 7 ends every failed script with the path of its debug log, under the (per-run, throwaway) HOME.
+const NPM_FAILURE = (home: string, stamp: string, extra = "") => `
+> acme@1.0.0 build
+> vite build
+
+${extra}error during build:
+[vite]: Rollup failed to resolve import "./missing" from "src/main.js".
+npm error Lifecycle script \`build\` failed with error:
+npm error code 1
+npm error path /Users/x/site
+npm error command failed
+npm error command sh -c vite build
+npm error A complete log of this run can be found in: ${home}/.npm/_logs/${stamp}-debug-0.log
+`
+
+describe("npm builds: the per-run HOME and log stamp never make an old failure new (review O6-R3)", () => {
+  it("the same failure under two different sandbox HOMEs and stamps is the same signature → pass against the red baseline", async () => {
+    const root = site({ "package.json": JSON.stringify({ scripts: { build: "vite build" } }) })
+    const homeA = "/private/var/folders/x1/T/infinite-tag-sbx-Qz98Lk"
+    const homeB = "/private/var/folders/x1/T/infinite-tag-sbx-Zz11Aa"
+    const baseline = await runBuild({ root, appRoot: ".", spawn: spy({ exitCode: 1, stderr: NPM_FAILURE(homeA, "2026-10-02T03_19_02_877Z"), home: homeA }).fn })
+    const again = await runBuild({ root, appRoot: ".", spawn: spy({ exitCode: 1, stderr: NPM_FAILURE(homeB, "2026-10-02T03_25_41_003Z"), home: homeB }).fn })
+    expect(again.failureSignature).toEqual(baseline.failureSignature)
+    expect(gradeBuild("build", again, baseline, ctx).state).toBe("pass")
+    expect(again.failureSignature.join("\n")).not.toMatch(/infinite-tag-sbx|_logs|2026-10-02T/)
+    expect(again.outputTail.join("\n")).not.toContain(homeB)
+  })
+
+  it("negative: a genuinely new npm failure is still a problem, and its reason carries no temp path", async () => {
+    const root = site({ "package.json": JSON.stringify({ scripts: { build: "vite build" } }) })
+    const home = "/private/var/folders/x1/T/infinite-tag-sbx-Qz98Lk"
+    const baseline = await runBuild({ root, appRoot: ".", spawn: spy({ exitCode: 1, stderr: NPM_FAILURE(home, "2026-10-02T03_19_02_877Z"), home }).fn })
+    const worse = await runBuild({
+      root,
+      appRoot: ".",
+      spawn: spy({ exitCode: 1, stderr: NPM_FAILURE(home, "2026-10-02T03_30_00_000Z", "SyntaxError: Unexpected token '<' in src/infinite.js\n"), home }).fn
+    })
+    const graded = gradeBuild("build", worse, baseline, ctx)
+    expect(graded.state).toBe("problem")
+    expect(graded.reason).toContain("SyntaxError")
+    expect(graded.reason).not.toMatch(/infinite-tag-sbx|_logs/)
+  })
+})
+
+describe("the whole failure set is compared (review O6-R25)", () => {
+  const many = (count: number, extra: string[] = []) => [...Array.from({ length: count }, (_, i) => `error TS2322: problem number ${String(i).padStart(4, "0")}`), ...extra].join("\n")
+
+  it("past the line cap, a new failure still changes the signature (hash line) → problem", () => {
+    const base = failureSignature(many(300), "/r")
+    expect(base).toHaveLength(FAILURE_SIGNATURE_MAX_LINES)
+    const plusOne = failureSignature(many(300, ["error TS9999: zz the new one sorts last"]), "/r")
+    const fresh = plusOne.filter((line) => !base.includes(line))
+    expect(fresh.length).toBeGreaterThan(0)
+    const green = { ok: false, failureSignature: base, durationMs: 1 }
+    expect(gradeBuild("build", { ok: false, failureSignature: plusOne, durationMs: 1 }, green, ctx).state).toBe("problem")
+    // negative: the identical set is identical
+    expect(failureSignature(many(300), "/r")).toEqual(base)
+  })
+
+  it("both red with no recognisable error line (only an exit code) is undetermined, never 'fails exactly as before'", () => {
+    const opaque = { ok: false, failureSignature: ["exit_code:1"], durationMs: 1 }
+    expect(gradeBuild("build", opaque, opaque, ctx)).toMatchObject({ state: "undetermined", reason: expect.stringContaining("test_error") })
+    const readable = { ok: false, failureSignature: ["Type error: x"], durationMs: 1 }
+    expect(gradeBuild("build", opaque, readable, ctx).state).toBe("undetermined")
+    // negative: a readable failure that matches the baseline is still a pass, and a green baseline makes it new
+    expect(gradeBuild("build", readable, readable, ctx).state).toBe("pass")
+    expect(gradeBuild("build", opaque, { ok: true, failureSignature: [], durationMs: 1 }, ctx).state).toBe("problem")
+  })
+})
+
+describe.runIf(process.platform === "darwin")("darwin: a real sandboxed build may write its outputs but never a git hook", () => {
+  it("npm run build writes dist/ and is refused .git/hooks/pre-commit", async () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "build-real-")))
+    mkdirSync(join(root, ".git", "hooks"), { recursive: true })
+    const script =
+      "node -e \"const fs=require('fs');fs.mkdirSync('dist',{recursive:true});fs.writeFileSync('dist/out.txt','ok');try{fs.writeFileSync('.git/hooks/pre-commit','#!/bin/sh');console.log('HOOK=written')}catch(e){console.log('HOOK='+e.code)}\""
+    writeFileSync(join(root, "package.json"), JSON.stringify({ name: "x", version: "1.0.0", scripts: { build: script } }))
+    const run = await runBuild({ root, appRoot: ".", packageManager: "npm", timeoutMs: 60_000 })
+    expect(run.sandboxed).toBe(true)
+    expect(run.ok).toBe(true)
+    expect(readFileSync(join(root, "dist", "out.txt"), "utf8")).toBe("ok")
+    expect(run.outputTail.join("\n")).toContain("HOOK=EPERM")
+    expect(existsSync(join(root, ".git", "hooks", "pre-commit"))).toBe(false)
   })
 })

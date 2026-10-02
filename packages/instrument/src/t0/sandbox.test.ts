@@ -1,26 +1,54 @@
 // sandboxedSpawn and its profile (lane O6, §3a.9 item 5). The darwin read/network denies are executed
 // in t0.test.ts; these cover the pieces every platform relies on, each with a negative.
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+
 import { describe, expect, it } from "vitest"
 
-import { buildSandboxProfile, defaultDenyReads, minimalChildEnv, sandboxedSpawn, SandboxUnavailableError } from "./sandbox.js"
+import { buildSandboxProfile, CLI_CREDENTIAL_STORES, defaultDenyReads, minimalChildEnv, sandboxedSpawn, SandboxUnavailableError, STDIO_GRACE_MS } from "./sandbox.js"
+
+const darwin = process.platform === "darwin"
 
 describe("the sandbox profile", () => {
-  it("denies the network only when asked, and each path as a subtree", () => {
-    const off = buildSandboxProfile({ denyReads: ["/Users/x/.ssh"], denyReadPrefixes: ["/Users/x/.growth-os"], network: false })
+  it("denies the network only when asked, reads per secret, and EVERY write outside the writable roots (later rules win)", () => {
+    const off = buildSandboxProfile({
+      denyReads: ["/Users/x/.ssh"],
+      denyReadPrefixes: ["/Users/x/.growth-os"],
+      network: false,
+      writableRoots: ["/tmp/home-x", "/repo"],
+      denyWrites: ["/repo/.git"]
+    })
     expect(off.split("\n")).toEqual([
       "(version 1)",
       "(allow default)",
       "(deny network*)",
       '(deny file-read* (subpath "/Users/x/.ssh"))',
-      '(deny file-read* (regex #"^/Users/x/\\.growth-os"))'
+      '(deny file-read* (regex #"^/Users/x/\\.growth-os"))',
+      "(deny file-write*)",
+      '(allow file-write* (subpath "/tmp/home-x") (subpath "/repo") (literal "/dev/null") (literal "/dev/zero") (literal "/dev/tty") (literal "/dev/dtracehelper") (regex #"^/dev/fd/"))',
+      '(deny file-write* (subpath "/repo/.git"))',
+      '(deny file-write* (subpath "/Users/x/.ssh"))',
+      '(deny file-write* (regex #"^/Users/x/\\.growth-os"))'
     ])
-    expect(buildSandboxProfile({ denyReads: [], network: true })).not.toContain("network")
+    expect(buildSandboxProfile({ denyReads: [], network: true, writableRoots: ["/tmp/h"] })).not.toContain("network")
   })
 
   it("negative: a relative path, a quote or a control character is refused, never written into the profile", () => {
-    expect(() => buildSandboxProfile({ denyReads: ["relative/.ssh"], network: false })).toThrow(/absolute/)
-    expect(() => buildSandboxProfile({ denyReads: [], denyReadPrefixes: ['/Users/x/"; (allow default'], network: false })).toThrow(/quote/)
-    expect(() => buildSandboxProfile({ denyReads: ["/Users/x/\n(allow default)"], network: false })).toThrow(/control/)
+    expect(() => buildSandboxProfile({ denyReads: ["relative/.ssh"], network: false, writableRoots: [] })).toThrow(/absolute/)
+    expect(() => buildSandboxProfile({ denyReads: [], denyReadPrefixes: ['/Users/x/"; (allow default'], network: false, writableRoots: [] })).toThrow(/quote/)
+    expect(() => buildSandboxProfile({ denyReads: ["/Users/x/\n(allow default)"], network: false, writableRoots: [] })).toThrow(/control/)
+    expect(() => buildSandboxProfile({ denyReads: [], network: false, writableRoots: ["relative"] })).toThrow(/absolute/)
+    expect(() => buildSandboxProfile({ denyReads: [], network: false, writableRoots: [], denyWrites: ["repo/.git"] })).toThrow(/absolute/)
+  })
+
+  it("also denies the CLI credential stores a build with the network on could otherwise read (review O6-R20)", () => {
+    const deny = defaultDenyReads({ homes: ["/Users/founder"], growthOsHome: null })
+    for (const store of CLI_CREDENTIAL_STORES) expect(deny.paths).toContain(`/Users/founder/${store}`)
+    expect(deny.paths).toContain("/Users/founder/Library/Application Support/com.vercel.cli")
+    expect(deny.paths).toContain("/Users/founder/.config/gh")
+    // negative: an unrelated dotfile is not swept in
+    expect(deny.paths).not.toContain("/Users/founder/.zshrc")
   })
 
   it("covers every §3a.9 secret location under each home, plus GROWTH_OS_HOME and extras", () => {
@@ -68,6 +96,31 @@ describe("the child's environment", () => {
     }
   })
 
+  it("the deadline holds for the whole tree: a grandchild holding stdout neither hangs the call nor survives it (review O6-R2)", async () => {
+    for (const platform of ["linux", process.platform] as const) {
+      const started = Date.now()
+      // The shell prints the grandchild's pid, then waits on it; the grandchild keeps stdout open.
+      const result = await sandboxedSpawn("/bin/sh", ["-c", "sleep 30 & echo $!; wait"], { denyReads: [], network: false, timeoutMs: 400, platform })
+      const elapsed = Date.now() - started
+      expect(result.timedOut).toBe(true)
+      expect(elapsed).toBeLessThan(400 + STDIO_GRACE_MS + 2_000)
+      const grandchild = Number.parseInt(result.stdout.trim(), 10)
+      expect(grandchild).toBeGreaterThan(0)
+      // negative control on the probe itself: our own pid answers signal 0
+      expect(() => process.kill(process.pid, 0)).not.toThrow()
+      expect(() => process.kill(grandchild, 0)).toThrow(/ESRCH/)
+    }
+  })
+
+  it("a child that exits while a grandchild keeps stdout open settles after the grace period, and the grandchild dies", async () => {
+    const started = Date.now()
+    const result = await sandboxedSpawn("/bin/sh", ["-c", "sleep 30 & echo $!"], { denyReads: [], network: false, timeoutMs: 20_000, platform: "linux" })
+    expect(Date.now() - started).toBeLessThan(STDIO_GRACE_MS + 3_000)
+    expect(result.timedOut).toBe(false)
+    expect(result.exitCode).toBe(0)
+    expect(() => process.kill(Number.parseInt(result.stdout.trim(), 10), 0)).toThrow(/ESRCH/)
+  })
+
   it("off darwin the child is a plain process and says so (sandboxed:false)", async () => {
     const plain = await sandboxedSpawn(process.execPath, ["-e", "1"], { denyReads: [], network: false, timeoutMs: 10_000, platform: "linux" })
     expect(plain.exitCode).toBe(0)
@@ -77,5 +130,59 @@ describe("the child's environment", () => {
   it("SandboxUnavailableError is a distinct error type (darwin fails closed with it)", () => {
     expect(new SandboxUnavailableError("x")).toBeInstanceOf(Error)
     expect(new SandboxUnavailableError("x").name).toBe("SandboxUnavailableError")
+  })
+})
+
+describe.runIf(darwin)("darwin: the profile denies writes outside the temp HOME and the named roots (review O6-R1)", () => {
+  const writeTo = (expression: string) => `try{require('fs').writeFileSync(${expression},'x');process.stdout.write('written')}catch(e){process.stdout.write(e.code)}`
+  const writer = (target: string) => writeTo(JSON.stringify(target))
+  const reader = (target: string) => `try{require('fs').readFileSync(${JSON.stringify(target)},'utf8');process.stdout.write('read')}catch(e){process.stdout.write(e.code)}`
+  const scratch = () => realpathSync(mkdtempSync(join(tmpdir(), "sbx-write-test-")))
+
+  it("a write outside the temp HOME is EPERM; into the child's own HOME it works", async () => {
+    const dir = scratch()
+    const outside = join(dir, "planted")
+    const denied = await sandboxedSpawn(process.execPath, ["-e", writer(outside)], { denyReads: [], network: false, timeoutMs: 10_000 })
+    expect(denied.sandboxed).toBe(true)
+    expect(denied.stdout).toBe("EPERM")
+    expect(existsSync(outside)).toBe(false)
+    const own = await sandboxedSpawn(process.execPath, ["-e", writeTo("require('path').join(process.env.HOME,'ok')")], { denyReads: [], network: false, timeoutMs: 10_000 })
+    expect(own.stdout).toBe("written")
+    // negative: the same write with the directory named writable succeeds (the deny is the profile's doing)
+    const allowed = await sandboxedSpawn(process.execPath, ["-e", writer(outside)], { denyReads: [], network: false, timeoutMs: 10_000, allowWrites: [dir] })
+    expect(allowed.stdout).toBe("written")
+    expect(readFileSync(outside, "utf8")).toBe("x")
+  })
+
+  it("inside a writable root, `denyWrites` (e.g. <root>/.git/hooks) and every deny-read secret stay unwritable", async () => {
+    const root = scratch()
+    mkdirSync(join(root, ".git", "hooks"), { recursive: true })
+    mkdirSync(join(root, ".growth-os"), { recursive: true })
+    writeFileSync(join(root, ".growth-os", ".env"), "GROWTH_OS_ENCRYPTION_KEY=original\n")
+    const options = { denyReads: [], denyReadPrefixes: [join(root, ".growth-os")], network: false, timeoutMs: 10_000, allowWrites: [root], denyWrites: [join(root, ".git")] }
+    const hook = await sandboxedSpawn(process.execPath, ["-e", writer(join(root, ".git", "hooks", "pre-commit"))], options)
+    expect(hook.stdout).toBe("EPERM")
+    expect(existsSync(join(root, ".git", "hooks", "pre-commit"))).toBe(false)
+    const clobber = await sandboxedSpawn(process.execPath, ["-e", writer(join(root, ".growth-os", ".env"))], options)
+    expect(clobber.stdout).toBe("EPERM")
+    expect(readFileSync(join(root, ".growth-os", ".env"), "utf8")).toBe("GROWTH_OS_ENCRYPTION_KEY=original\n")
+    const read = await sandboxedSpawn(process.execPath, ["-e", reader(join(root, ".growth-os", ".env"))], options)
+    expect(read.stdout).toBe("EPERM")
+    // negative: an ordinary file in the same root is writable
+    const plain = await sandboxedSpawn(process.execPath, ["-e", writer(join(root, "out.txt"))], options)
+    expect(plain.stdout).toBe("written")
+  })
+
+  it("a read of a denied secret is EPERM; the same read without the deny works", async () => {
+    const home = scratch()
+    mkdirSync(join(home, ".growth-os"))
+    writeFileSync(join(home, ".growth-os", "x"), "FAKE-secret-for-the-sandbox-test")
+    const target = join(home, ".growth-os", "x")
+    const deny = defaultDenyReads({ homes: [home], growthOsHome: null })
+    const denied = await sandboxedSpawn(process.execPath, ["-e", reader(target)], { denyReads: deny.paths, denyReadPrefixes: deny.prefixes, network: false, timeoutMs: 10_000 })
+    expect(denied.stdout).toBe("EPERM")
+    const other = defaultDenyReads({ homes: [scratch()], growthOsHome: null })
+    const open = await sandboxedSpawn(process.execPath, ["-e", reader(target)], { denyReads: other.paths, denyReadPrefixes: other.prefixes, network: false, timeoutMs: 10_000 })
+    expect(open.stdout).toBe("read")
   })
 })
