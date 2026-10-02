@@ -199,7 +199,10 @@ export function resolveArtifactHostGuard(artifacts: {
  * `(function () { if (!(<guard>)) return; <body> })();` — the only shape a guarded snippet may take
  * (one IIFE per snippet, so the `return` can only ever stop its own provider).
  */
-export function wrapGuardedSnippet(body: string, spec: HostGuardSpec): string {
+export function wrapGuardedSnippet(body: string, spec: HostGuardSpec, onDenied?: string): string {
   // The body is not re-indented: a snippet's bytes stay exactly what its builder emitted.
-  return ["(function () {", `if (!(${buildHostGuardExpression(spec)})) return;`, body, "})();"].join("\n")
+  const check = onDenied
+    ? [`if (!(${buildHostGuardExpression(spec)})) {`, onDenied, "return;", "}"].join("\n")
+    : `if (!(${buildHostGuardExpression(spec)})) return;`
+  return ["(function () {", check, body, "})();"].join("\n")
 }

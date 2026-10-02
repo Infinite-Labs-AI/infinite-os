@@ -123,6 +123,37 @@ function frameworkInstructionPath(framework: SupportedFramework): string {
   }
 }
 
+/**
+ * THE STUB METHOD LIST: PostHog's current official snippet list, copied from infinite.fast
+ * (infinite-site inject-analytics.cjs at 9f65b47). Every name is top-level, so the stub cannot throw
+ * while it is built (see the comment in `buildPostHogBootstrapSnippet`).
+ */
+export const POSTHOG_STUB_METHODS = [
+  "init", "capture", "register", "register_once", "register_for_session", "unregister", "unregister_for_session",
+  "getFeatureFlag", "getFeatureFlagPayload", "isFeatureEnabled", "reloadFeatureFlags",
+  "updateEarlyAccessFeatureEnrollment", "getEarlyAccessFeatures", "on", "onFeatureFlags", "onSessionId", "getSurveys",
+  "getActiveMatchingSurveys", "renderSurvey", "canRenderSurvey", "getNextSurveyStep", "identify", "setPersonProperties",
+  "group", "resetGroups", "setPersonPropertiesForFlags", "resetPersonPropertiesForFlags", "setGroupPropertiesForFlags",
+  "reset", "get_distinct_id", "getGroups", "get_session_id", "get_session_replay_url", "alias", "set_config",
+  "startSessionRecording", "stopSessionRecording", "sessionRecordingStarted", "captureException", "loadToolbar",
+  "get_property", "getSessionProperty", "createPersonProfile", "opt_in_capturing", "opt_out_capturing",
+  "has_opted_in_capturing", "has_opted_out_capturing", "clear_opt_in_out_capturing", "debug"
+] as const
+
+/**
+ * On a host the preview guard silences, `init` never runs, so the stub's methods are never created and a
+ * site's own `posthog.identify(...)` would throw. This defines each one as the stub would — the call is
+ * QUEUED in memory — without ever inserting array.js: nothing is loaded and nothing is sent.
+ */
+function posthogQueueOnlyStub(): string {
+  return [
+    `var infinitePosthogMethods = '${POSTHOG_STUB_METHODS.filter((name) => name !== "init").join(" ")}'.split(' ');`,
+    "for (var infiniteIndex = 0; infiniteIndex < infinitePosthogMethods.length; infiniteIndex += 1) (function (name) {",
+    "  if (typeof posthog[name] !== 'function') posthog[name] = function () { posthog.push([name].concat(Array.prototype.slice.call(arguments, 0))); };",
+    "})(infinitePosthogMethods[infiniteIndex]);"
+  ].join("\n")
+}
+
 /** PostHog's `defaults` bundle for every new managed install (infinite.fast's value, inject L349). */
 export const POSTHOG_DEFAULTS = "2026-01-30"
 /** The bundle managed installs carried before; kept only while the user has not approved the bump. */
@@ -178,9 +209,10 @@ export function buildPostHogBootstrapSnippet(
   // never calls set_config / opt_in / opt_out on it; conversions reach PostHog because the site's own
   // code calls the managed helpers (decisions 9 and 13).
   //
-  // THE PREVIEW GUARD (decision 3) wraps only `posthog.init`. The STUB always loads, so a later
-  // `posthog.identify(...)` in the site's own code cannot throw on a preview; the stub's `init` is what
-  // inserts array.js, so no init means no network at all.
+  // THE PREVIEW GUARD (decision 3) wraps only `posthog.init`. The stub's `init` is what inserts
+  // array.js, so no init means no network at all. On a silenced host the stub's methods are defined as
+  // queue-only (`posthogQueueOnlyStub`), so a later `posthog.identify(...)` in the site's own code cannot
+  // throw: it is queued in memory and never sent.
   //
   // SENSITIVE PAGES (decision 17), infinite.fast's pattern (inject L340-362): the path is read once at
   // init, a trailing slash ignored, and on a listed page `disable_session_recording: true` and
@@ -217,12 +249,12 @@ export function buildPostHogBootstrapSnippet(
       : `posthog.init(${jsLiteral(projectKey)}, { ${initOptions} });`
   const guardedInit =
     options.guard !== undefined
-      ? wrapGuardedSnippet(init, options.guard)
+      ? wrapGuardedSnippet(init, options.guard, posthogQueueOnlyStub())
       : sensitivePaths.length > 0
         ? ["(function () {", init, "})();"].join("\n")
         : init
   return [
-    "!function(t,e){var o,n,p,r;e.__SV||(window.posthog=e,e._i=[],e.init=function(i,s,a){function g(t,e){var o=e.split('.');2==o.length&&(t=t[o[0]],e=o[1]),t[e]=function(){t.push([e].concat(Array.prototype.slice.call(arguments,0)))}}(p=t.createElement('script')).type='text/javascript',p.crossOrigin='anonymous',p.async=!0,p.src=s.api_host.replace('.i.posthog.com','-assets.i.posthog.com')+'/static/array.js',(r=t.getElementsByTagName('script')[0]).parentNode.insertBefore(p,r);var u=e;for(void 0!==a?u=e[a]=[]:a='posthog',u.people=u.people||[],u.toString=function(t){var e='posthog';return'posthog'!==a&&(e+='.'+a),t||(e+=' (stub)'),e},u.people.toString=function(){return u.toString(1)+'.people'},o='init capture register register_once register_for_session unregister unregister_for_session getFeatureFlag getFeatureFlagPayload isFeatureEnabled reloadFeatureFlags updateEarlyAccessFeatureEnrollment getEarlyAccessFeatures on onFeatureFlags onSessionId getSurveys getActiveMatchingSurveys renderSurvey canRenderSurvey getNextSurveyStep identify setPersonProperties group resetGroups setPersonPropertiesForFlags resetPersonPropertiesForFlags setGroupPropertiesForFlags reset get_distinct_id getGroups get_session_id get_session_replay_url alias set_config startSessionRecording stopSessionRecording sessionRecordingStarted captureException loadToolbar get_property getSessionProperty createPersonProfile opt_in_capturing opt_out_capturing has_opted_in_capturing has_opted_out_capturing clear_opt_in_out_capturing debug'.split(' '),n=0;n<o.length;n++)g(u,o[n]);e._i.push([i,s,a])},e.__SV=1)}(document,window.posthog||[]);",
+    `!function(t,e){var o,n,p,r;e.__SV||(window.posthog=e,e._i=[],e.init=function(i,s,a){function g(t,e){var o=e.split('.');2==o.length&&(t=t[o[0]],e=o[1]),t[e]=function(){t.push([e].concat(Array.prototype.slice.call(arguments,0)))}}(p=t.createElement('script')).type='text/javascript',p.crossOrigin='anonymous',p.async=!0,p.src=s.api_host.replace('.i.posthog.com','-assets.i.posthog.com')+'/static/array.js',(r=t.getElementsByTagName('script')[0]).parentNode.insertBefore(p,r);var u=e;for(void 0!==a?u=e[a]=[]:a='posthog',u.people=u.people||[],u.toString=function(t){var e='posthog';return'posthog'!==a&&(e+='.'+a),t||(e+=' (stub)'),e},u.people.toString=function(){return u.toString(1)+'.people'},o='${POSTHOG_STUB_METHODS.join(" ")}'.split(' '),n=0;n<o.length;n++)g(u,o[n]);e._i.push([i,s,a])},e.__SV=1)}(document,window.posthog||[]);`,
     guardedInit
   ].join("\n")
 }
