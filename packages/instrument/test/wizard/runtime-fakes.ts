@@ -393,14 +393,17 @@ export function createFakeAgents(log: CallLog): AgentRunner & { alive: boolean }
 
 export interface FakeGitScript {
   ancestors?: Array<[string, string]>
+  /** Commits this clone has not fetched yet: `isAncestor` on one throws (git exits 128) until `remoteBranchSha` fetches. */
+  unfetched?: string[]
   clean?: boolean
   dirtyPaths?: string[]
   createBranchFails?: boolean
   remote?: string | null
 }
 
-export function createFakeGit(log: CallLog, script: FakeGitScript = {}): GitOps & { fetch(ref: string): Promise<void> } {
+export function createFakeGit(log: CallLog, script: FakeGitScript = {}): GitOps {
   const ancestors = new Set((script.ancestors ?? []).map(([a, b]) => `${a}..${b}`))
+  const unfetched = new Set(script.unfetched ?? [])
   return {
     async isRepo() {
       log.push("git", "isRepo")
@@ -443,10 +446,13 @@ export function createFakeGit(log: CallLog, script: FakeGitScript = {}): GitOps 
     },
     async isAncestor(a: string, b: string) {
       log.push("git", "isAncestor", a, b)
+      if (unfetched.has(a) || unfetched.has(b)) throw new Error(`git merge-base exited 128: Not a valid commit name ${unfetched.has(a) ? a : b}`)
       return ancestors.has(`${a}..${b}`)
     },
-    async fetch(ref: string) {
-      log.push("git", "fetch", ref)
+    async remoteBranchSha(branch: string) {
+      log.push("git", "remoteBranchSha", branch)
+      unfetched.clear()
+      return "f".repeat(40)
     }
   }
 }

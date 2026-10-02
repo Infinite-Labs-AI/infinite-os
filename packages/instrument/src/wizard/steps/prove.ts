@@ -12,13 +12,14 @@
 //    then `PATCH proofState` to the result (winner only).
 // 4. Print the run's PostHog distinct id so the user can filter this visitor out.
 import { createHash } from "node:crypto"
+import { join } from "node:path"
 
 import type { TagKeys, TagHosting, TestRunPollResponse } from "../contracts/bridge.js"
 import type { StepOutcome, WizardContext, WizardDeps, WizardStep } from "../contracts/deps.js"
-import type { GitOps } from "../contracts/git-host.js"
 import type { CheckResult } from "../contracts/jobs.js"
 import { RECEIPT_LIMITS, type LaneReceipt, type ReceiptLane, type ReceiptMarkers, type ReceiptsResponseFields } from "../contracts/receipts.js"
-import type { ReportColumnSnapshot } from "../contracts/report.js"
+import { REASONS, type Reason, type ReportColumnSnapshot } from "../contracts/report.js"
+import { WIZARD_PATHS } from "../contracts/state.js"
 import { WIZARD_STEP_META } from "../contracts/steps.js"
 import {
   TEST_LIMITS,
@@ -43,9 +44,6 @@ export const PROVE_LIMITS = {
 const TOOL_LANES: Record<TestTool, ReceiptLane> = { infinite: "infinite", posthog: "posthog", ga4: "ga4", meta: "meta_pixel" }
 const TOOL_LABELS: Record<TestTool, string> = { infinite: "Infinite pixel", posthog: "PostHog", ga4: "GA4", meta: "Meta" }
 
-/** The optional `git fetch` seam (`GitOps` has no fetch; lane O4's implementation provides it at integration). */
-type FetchableGit = GitOps & { fetch?: (ref: string) => Promise<void> }
-
 function hashOf(parts: unknown[]): string {
   return `sha256:${createHash("sha256").update(JSON.stringify(parts)).digest("hex")}`
 }
@@ -63,8 +61,8 @@ export async function mergeIsDeployed(deps: WizardDeps, mergeSha: string, produc
   const serving = status.serving?.sha ?? null
   if (!serving) return { deployed: false }
   if (serving === mergeSha) return { deployed: true, sha: mergeSha, how: "merge_deployment" }
-  const git = deps.git as FetchableGit
-  if (productionBranch && git.fetch) await git.fetch(productionBranch)
+  // The serving commit may be newer than anything this clone has: fetch the production branch first.
+  if (productionBranch) await deps.git.remoteBranchSha(productionBranch)
   let descends = false
   try {
     descends = await deps.git.isAncestor(mergeSha, serving)
@@ -252,7 +250,7 @@ export function buildProvenColumn(input: ProvenColumnInput): ReportColumnSnapsho
   for (const [lane, label] of proofLanes) facts.push(receiptFact(receipts.lanes[lane], "receipts.per_tool", at, label))
   if (expect.posthog) {
     const lane = receipts.lanes.posthog
-    const viaProxy = visit ? visit.result.posthog.events.some((event) => event.sameOrigin) : null
+    const viaProxy = posthogViaProxy(visit)
     const fact = receiptFact(lane, "receipts.posthog", at, "PostHog")
     if (fact.state === "pass" && viaProxy === false) facts.push({ ...fact, state: "problem", display: "PostHog: sent directly (ad blockers drop it)" })
     else if (fact.state === "pass" && viaProxy === null) facts.push({ ...fact, state: "undetermined", display: "PostHog: route not observed by this run" })
@@ -327,15 +325,33 @@ function ga4PageViewsRow(visit: NonNullable<ProvenColumnInput["visit"]>, expect:
   if (!expect.ga4) return { value: null, state: "not_measured", source: "desktop_test", at, reason: "not_connected" }
   const views = visit.result.ga4.events.filter((event) => event.en === "page_view" && expect.ga4!.includes(event.tid) && !event.afterNav)
   const grade = visit.grades.ga4
+  // A tool the grader could not grade (held by consent, a bot-flagged window, …) is UNKNOWN, never a
+  // problem: what this visit did not see says nothing about the site.
+  if (!grade || grade.state === "undetermined") {
+    return { value: null, state: "undetermined", source: "desktop_test", at, checkId: "ga4_seen_leaving", reason: reportReason(grade?.reason) }
+  }
   const sent = views.some((event) => typeof event.status === "number" && event.status >= 200 && event.status < 300)
   return {
     value: views.length,
     display: `${views.length}${sent ? " · sent (seen leaving)" : ""}`,
-    state: views.length === 1 ? (grade?.state === "undetermined" ? "undetermined" : "pass") : "problem",
+    state: views.length === 1 ? "pass" : "problem",
     source: "desktop_test",
     at,
     checkId: "ga4_seen_leaving"
   }
+}
+
+const REASON_SET: ReadonlySet<string> = new Set(REASONS)
+
+/** The grader's reason when the report knows it ("held_by_consent", "automation_detected", …), else "not_exercised". */
+function reportReason(reason: string | undefined): Reason {
+  return reason && REASON_SET.has(reason) ? (reason as Reason) : "not_exercised"
+}
+
+/** True / false when this visit saw PostHog events (same-origin = through the proxy); null when it saw none. */
+function posthogViaProxy(visit: ProvenColumnInput["visit"]): boolean | null {
+  if (!visit || visit.result.posthog.events.length === 0) return null
+  return visit.result.posthog.events.some((event) => event.sameOrigin)
 }
 
 function metaPixelRow(visit: NonNullable<ProvenColumnInput["visit"]>, expect: TestExpect, at: string): RowCellInput {
@@ -350,10 +366,14 @@ function metaPixelRow(visit: NonNullable<ProvenColumnInput["visit"]>, expect: Te
 
 function posthogRouteRow(lane: LaneReceipt, visit: ProvenColumnInput["visit"], expect: TestExpect, at: string): RowCellInput {
   if (!expect.posthog) return { value: null, state: "not_measured", source: "cloud_receipt", at, reason: "not_connected" }
-  const viaProxy = visit ? visit.result.posthog.events.some((event) => event.sameOrigin) : null
+  if (!visit) return { value: null, state: "pending", source: "cloud_receipt", at, reason: "pending_open_infinite" }
+  const viaProxy = posthogViaProxy(visit)
   const found = lane.state === "verified"
-  const route = viaProxy === null ? null : viaProxy ? "ingest" : "direct"
-  if (route === null) return { value: null, state: "pending", source: "cloud_receipt", at, reason: "pending_open_infinite" }
+  // The visit saw no PostHog event: the route is unknown (never "direct").
+  if (viaProxy === null) {
+    return { value: null, state: "undetermined", source: "cloud_receipt", at, checkId: "posthog_distinct_id_receipt", reason: reportReason(visit.grades.posthog?.reason) }
+  }
+  const route = viaProxy ? "ingest" : "direct"
   return {
     value: route,
     display: `${route === "ingest" ? "through /ingest" : "direct (ad blockers drop it)"}${found ? " · this visit found" : ""}`,
@@ -372,6 +392,42 @@ export function proofStateFrom(column: ReportColumnSnapshot): "proven" | "proble
   if (proof?.state === "problem" || once?.state === "problem") return "problem"
   if (proof?.state === "pass" && once?.state === "pass") return "proven"
   return "undetermined"
+}
+
+// ---------------------------------------------------------------------------------------------
+// This run's own claim and visit (kept so a resume can finish what it started)
+// ---------------------------------------------------------------------------------------------
+
+export const PROVE_VISIT_SCHEMA = "infinite-tag.prove-visit.v1" as const
+/** Gitignored with the rest of `.infinite/wizard/`; 0600. */
+export const PROVE_VISIT_PATH = `${WIZARD_PATHS.dir}/prove-visit.json`
+
+/**
+ * Written when THIS process wins the proof claim, and again with the visit's facts once the visit is
+ * graded. A resume that meets its own claim (409 `proving`) then finishes it (column + PATCH) instead of
+ * taking it for the Infinite app's and leaving the run `proving` forever.
+ */
+export interface ProveVisitRecord {
+  schema: typeof PROVE_VISIT_SCHEMA
+  runId: string
+  mergeSha: string
+  claimedAt: string
+  visit: { result: TestResult; grades: Record<TestTool, CheckResult> } | null
+}
+
+async function readOwnClaim(ctx: WizardContext, deps: WizardDeps, runId: string, mergeSha: string): Promise<ProveVisitRecord | null> {
+  const text = await deps.fs.readText(join(ctx.root, PROVE_VISIT_PATH))
+  if (text === null) return null
+  try {
+    const record = JSON.parse(text) as ProveVisitRecord
+    return record.schema === PROVE_VISIT_SCHEMA && record.runId === runId && record.mergeSha === mergeSha ? record : null
+  } catch {
+    return null
+  }
+}
+
+async function writeOwnClaim(ctx: WizardContext, deps: WizardDeps, record: ProveVisitRecord): Promise<void> {
+  await deps.fs.writeTextAtomic(join(ctx.root, PROVE_VISIT_PATH), `${JSON.stringify(record)}\n`, 0o600)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -420,19 +476,42 @@ async function runProve(ctx: WizardContext, deps: WizardDeps): Promise<StepOutco
   // a run the desktop is proving, or one already proven, answers 409 claimed_by_other with its state.
   let won = false
   let claimNote = ""
+  // This process's own earlier claim (a resume after Ctrl+C, a sleep or a crash between the visit and
+  // the PATCH): the cloud answers 409 to it like to anyone's, so the saved record tells them apart.
+  let ownClaim: ProveVisitRecord | null = null
+  let patchProofState = false
   try {
     const claim = await deps.bridge.claimProof(runId, "tag")
     won = claim.granted === true
+    if (won) {
+      await writeOwnClaim(ctx, deps, { schema: PROVE_VISIT_SCHEMA, runId, mergeSha, claimedAt: deps.clock.now().toISOString(), visit: null })
+      patchProofState = true
+    }
   } catch (error) {
     if (bridgeErrorCode(error) !== "claimed_by_other") throw error
     const proofState = bridgeErrorState(error)
-    claimNote = proofState === "proving" || proofState === null ? "the Infinite app is already proving this run" : `this run's proof is already ${proofState}`
+    ownClaim = await readOwnClaim(ctx, deps, runId, mergeSha)
+    // Still `proving` under this run's own claim: the PATCH never landed, so this run sends it now.
+    patchProofState = ownClaim !== null && (proofState === "proving" || proofState === null)
+    claimNote = ownClaim
+      ? "this run's own visit, from before the resume"
+      : proofState === "proving" || proofState === null
+        ? "the Infinite app is already proving this run"
+        : `this run's proof is already ${proofState}`
   }
 
   let visit: ProvenColumnInput["visit"] = null
   let markers: ReceiptMarkers = {}
   let visitError: string | null = null
-  if (won) {
+  if (ownClaim) {
+    ctx.emit.emit("step.sub", { step: "prove", text: `No second visit: ${claimNote}; reading its receipts.`, tone: "info" })
+    if (ownClaim.visit) {
+      visit = ownClaim.visit
+      markers = receiptMarkersFrom(ownClaim.visit.result, expect)
+    } else {
+      visitError = "the real visit was interrupted before its results were saved (no second visit is made)"
+    }
+  } else if (won) {
     if (!productionHost) {
       visitError = "no production host is known for this site"
     } else {
@@ -447,6 +526,7 @@ async function runProve(ctx: WizardContext, deps: WizardDeps): Promise<StepOutco
         }
         visit = { result, grades }
         markers = receiptMarkersFrom(result, expect)
+        await writeOwnClaim(ctx, deps, { schema: PROVE_VISIT_SCHEMA, runId, mergeSha, claimedAt: deps.clock.now().toISOString(), visit })
         ctx.state.update((draft) => {
           draft.markers.prove = {
             infiniteEventIds: result.markers.infiniteEventIds,
@@ -503,9 +583,11 @@ async function runProve(ctx: WizardContext, deps: WizardDeps): Promise<StepOutco
   await ctx.state.save()
 
   let proofState: "proven" | "problem" | "undetermined" | null = null
-  if (won) {
+  if (patchProofState) {
     proofState = visitError ? "undetermined" : proofStateFrom(column)
     await deps.bridge.patchRun(runId, { proofState })
+  } else if (ownClaim) {
+    proofState = visitError ? "undetermined" : proofStateFrom(column)
   }
 
   const distinctId = visit?.result.markers.posthogDistinctId ?? state.markers.prove.posthogDistinctId ?? null
@@ -518,7 +600,7 @@ async function runProve(ctx: WizardContext, deps: WizardDeps): Promise<StepOutco
   if (visitError) {
     return { kind: "failed", code: "INF_WIZ_PROOF_INCOMPLETE", message: `The real visit could not run: ${visitError}.`, next: "continue" }
   }
-  const tail = won ? "" : " (receipts from the Infinite app's visit)"
+  const tail = won || ownClaim ? "" : " (receipts from the Infinite app's visit)"
   return { kind: "ok", status: `${passed} of ${lanes.length} tools passed the live test${tail}${proofState === "problem" ? " · problems found" : ""}` }
 }
 

@@ -71,6 +71,12 @@ export interface GitOps {
   worktreeRemove(dir: string): Promise<void>
   diff(from: string, to: string): Promise<string>
   isAncestor(ancestor: string, descendant: string): Promise<boolean>
+  /**
+   * `git fetch origin <branch>` then the SHA of `origin/<branch>` (null when it cannot be read). `prove`
+   * fetches the production branch with it before `isAncestor(mergeSha, servingSha)`, so a serving commit
+   * this clone has not seen yet is known (O1 fix round, O1-11; lane O4's implementation already has it).
+   */
+  remoteBranchSha(branch: string): Promise<string | null>
 }
 
 /** Every non-GitHub host returns this from the review/PR methods; the review then goes to `.infinite/wizard/REVIEW.md`. */

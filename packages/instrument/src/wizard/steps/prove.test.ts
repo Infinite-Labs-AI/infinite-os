@@ -62,14 +62,16 @@ describe("prove: waiting for the deploy of the MERGE commit", () => {
     expect(bundle.log.calls.filter((call) => call.what === "deployStatus").every((call) => call.args[0] === MERGE_SHA)).toBe(true)
   })
 
-  it("a canceled merge build plus a later serving SHA that DESCENDS from the merge → deployed (fetch, then merge-base --is-ancestor)", async () => {
+  it("a canceled merge build plus a later serving SHA that DESCENDS from the merge → deployed (fetch the production branch, then merge-base --is-ancestor)", async () => {
     const bundle = fakeDeps({
       bridge: { deploy: [{ mergeDeployment: { state: "canceled", readyAt: null }, serving: { sha: SERVING_SHA, readyAt: "2026-10-02T09:39:00.000Z", createdAt: "2026-10-02T09:37:00.000Z", ref: "main" }, target: "production" }] },
-      git: { ancestors: [[MERGE_SHA, SERVING_SHA]] }
+      // The serving commit is not in this clone until the production branch is fetched (git exits 128).
+      git: { ancestors: [[MERGE_SHA, SERVING_SHA]], unfetched: [SERVING_SHA] }
     })
     const { outcome, ctx } = await runProve(bundle)
     expect(outcome.kind).toBe("ok")
-    expect(bundle.log.names("git")).toEqual(["git.fetch", "git.isAncestor"])
+    expect(bundle.log.names("git")).toEqual(["git.remoteBranchSha", "git.isAncestor"])
+    expect(bundle.log.calls.find((call) => call.what === "remoteBranchSha")!.args).toEqual(["main"])
     expect(subs(ctx).join(" ")).toContain(`a later commit, ${SERVING_SHA.slice(0, 7)}, includes it`)
   })
 
@@ -223,5 +225,131 @@ describe("prove: the proven_live column is honest", () => {
   it("markers name only what THIS visit observed (no dry-load ids, no unconnected tool)", () => {
     const markers = receiptMarkersFrom(realVisitResult(), { ga4: ["G-ACME000001"] })
     expect(markers).toEqual({ ga4: { measurementId: "G-ACME000001", seenLeaving: true, httpStatus: 204 }, serverLane: { probePath: "/__infinite_probe/7f3c2a91b0de" } })
+  })
+})
+
+describe("prove: a resume finishes its OWN claim (O1-06)", () => {
+  it("won, visited, then stopped before the PATCH: the resume (409 proving) rebuilds the column from the saved visit and PATCHes, with no second visit", async () => {
+    const first = fakeDeps({
+      bridge: {
+        patchRun: () => {
+          throw new Error("the laptop slept")
+        }
+      }
+    })
+    await expect(runProve(first)).rejects.toThrow("the laptop slept")
+    expect(first.log.names("bridge").filter((name) => name === "bridge.startTest")).toHaveLength(1)
+
+    const resumed = fakeDeps({ bridge: { claim: { code: "claimed_by_other", state: "proving" } } })
+    resumed.deps.fs = first.deps.fs
+    const { outcome, ctx } = await runProve(resumed)
+    expect(resumed.log.names("bridge")).not.toContain("bridge.startTest")
+    expect(resumed.log.calls.filter((call) => call.what === "patchRun").map((call) => call.args[1])).toEqual([{ proofState: "proven" }])
+    expect(outcome).toMatchObject({ kind: "ok", status: "4 of 4 tools passed the live test" })
+    expect((outcome as { status: string }).status).not.toContain("Infinite app")
+    const column = ctx.current().report.proven_live!
+    expect(column.finishLine.each_tool_once!.state).toBe("pass")
+    expect(proofStateFrom(column)).toBe("proven")
+    // The receipts are read with THIS visit's markers.
+    const markers = (resumed.log.calls.find((call) => call.what === "postReceipts")!.args[1] as { markers: { infinite?: unknown } }).markers
+    expect(markers.infinite).toEqual({ eventIds: ["evt_FAKE0301"] })
+  })
+
+  it("won, then stopped mid-visit (no facts saved): the resume makes no second visit and PATCHes undetermined", async () => {
+    const first = fakeDeps({
+      bridge: {
+        testPolls: [
+          {
+            state: "running",
+            progress: []
+          }
+        ]
+      }
+    })
+    first.deps.bridge.pollTest = async () => {
+      throw new Error("Ctrl+C")
+    }
+    await expect(runProve(first)).rejects.toThrow("Ctrl+C")
+
+    const resumed = fakeDeps({ bridge: { claim: { code: "claimed_by_other", state: "proving" } } })
+    resumed.deps.fs = first.deps.fs
+    const { outcome } = await runProve(resumed)
+    expect(resumed.log.names("bridge")).not.toContain("bridge.startTest")
+    expect(resumed.log.calls.filter((call) => call.what === "patchRun").map((call) => call.args[1])).toEqual([{ proofState: "undetermined" }])
+    expect(outcome).toMatchObject({ kind: "failed", code: "INF_WIZ_PROOF_INCOMPLETE", next: "continue" })
+  })
+
+  it("negative: a saved claim of ANOTHER run (or merge) is not this run's; the 409 stays someone else's and nothing is PATCHed", async () => {
+    const first = fakeDeps({
+      bridge: {
+        patchRun: () => {
+          throw new Error("the laptop slept")
+        }
+      }
+    })
+    await expect(runProve(first)).rejects.toThrow()
+    const resumed = fakeDeps({ bridge: { claim: { code: "claimed_by_other", state: "proving" } } })
+    resumed.deps.fs = first.deps.fs
+    const state = mergedState()
+    state.pr!.mergeSha = "a".repeat(40)
+    const ctx = fakeContext(state, {}, resumed.clock)
+    const outcome = await step.run(ctx, resumed.deps)
+    expect(resumed.log.calls.filter((call) => call.what === "patchRun")).toHaveLength(0)
+    expect((outcome as { status: string }).status).toContain("receipts from the Infinite app's visit")
+  })
+})
+
+describe("prove: consent-held or unobserved tools are UNKNOWN, never problems (O1-07)", () => {
+  const at = "2026-10-02T09:43:00.000Z"
+  const held = (tool: string) => ({ checkId: `real_visit_${tool}`, state: "undetermined" as const, reason: "held_by_consent", tier: "PV" as const, at, runId: RUN_ID })
+  const expect4 = { ga4: ["G-ACME000001"], posthog: { projectKey: "phc_x", apiHost: "https://us.i.posthog.com" }, meta: ["1234567890123456"], infinite: { siteSourceKey: "s", collectPath: "/c" } }
+
+  function heldVisit() {
+    const result = realVisitResult()
+    result.environment.cmpDetected = "onetrust"
+    result.ga4.events = []
+    result.posthog.events = []
+    result.meta.tr = []
+    return result
+  }
+
+  it("a CMP holds every tool: GA4 page views and the PostHog route read unknown with the grader's reason, and 'survives ad blockers' is not a problem", () => {
+    const column = buildProvenColumn({
+      runId: RUN_ID,
+      mergeSha: MERGE_SHA,
+      at,
+      keys: keysFixture(),
+      expect: expect4,
+      visit: { result: heldVisit(), grades: { infinite: held("infinite"), ga4: held("ga4"), posthog: held("posthog"), meta: held("meta") } },
+      receipts: receiptsAll({ posthog: lane("verified", "2026-10-02T09:40:06.000Z", "posthog_query") }),
+      t1: [],
+      serverLaneInstalled: true,
+      conversionsWaiting: 0
+    })
+    expect(column.cells.ga4_page_views_per_visit).toMatchObject({ value: null, display: "—", state: "undetermined", reason: "held_by_consent" })
+    expect(column.cells.posthog_route).toMatchObject({ value: null, display: "—", state: "undetermined", reason: "held_by_consent" })
+    expect(column.finishLine.survives_ad_blockers!.state).not.toBe("problem")
+    expect(JSON.stringify(column)).not.toContain("sent directly")
+  })
+
+  it("negative: a graded GA4 with 0 page views IS a problem, and PostHog events seen leaving directly ARE 'direct'", () => {
+    const pass = (tool: string) => ({ checkId: `real_visit_${tool}`, state: "pass" as const, tier: "PV" as const, at, runId: RUN_ID })
+    const result = realVisitResult()
+    result.ga4.events = []
+    result.posthog.events = result.posthog.events.map((event) => ({ ...event, sameOrigin: false }))
+    const column = buildProvenColumn({
+      runId: RUN_ID,
+      mergeSha: MERGE_SHA,
+      at,
+      keys: keysFixture(),
+      expect: expect4,
+      visit: { result, grades: { infinite: pass("infinite"), ga4: { ...pass("ga4"), state: "problem", reason: "no_beacon" }, posthog: pass("posthog"), meta: pass("meta") } },
+      receipts: receiptsAll(),
+      t1: [],
+      serverLaneInstalled: true,
+      conversionsWaiting: 0
+    })
+    expect(column.cells.ga4_page_views_per_visit).toMatchObject({ value: 0, state: "problem" })
+    expect(column.cells.posthog_route).toMatchObject({ value: "direct", state: "problem" })
   })
 })
