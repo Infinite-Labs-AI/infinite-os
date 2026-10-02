@@ -41,6 +41,12 @@ export interface ViewRenderCtx {
    * until the whole turn fits.
    */
   rows?: number;
+  /**
+   * The view is printed once into scrollback, where no key acts: it names no
+   * key (`m for more`, a document's tab keys) and `layout.ts` draws what a key
+   * would have shown (dropped columns, every tab).
+   */
+  scrollback?: boolean;
 }
 
 /** One view, drawn. `layout.ts` stacks head, source, detail, then footnotes. */

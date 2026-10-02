@@ -101,6 +101,10 @@ export const renderDocument: KindRenderer<"document"> = (view, ctx) => {
   // The document's own keys under it (r4 view-04: `space next page   1-3 email`), a blank row above.
   const noun = tabNoun(versions);
   const keysFor = (paging: boolean): string[] => {
+    if (ctx.scrollback) {
+      // Printed into scrollback: no key acts there, so none is offered.
+      return [];
+    }
     const hints = [
       ...(paging ? [{ key: "space", label: "next page" }] : []),
       ...(versions.length > 1 ? [{ key: `1-${versions.length}`, label: noun || "switch tab" }] : []),

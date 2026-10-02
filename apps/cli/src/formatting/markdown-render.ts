@@ -1,6 +1,6 @@
 import { scrubTerminalControls } from "../desktop/confirm-in-session.js";
 import { displayWidth, truncateCells } from "../tui/lib/display-width.js";
-import { ansiFg, ansiSpan, type AnsiRole, type Theme, type ThemeStyle } from "../tui/theme.js";
+import { ansiFg, ansiSpan, DEFAULT_THEME, type AnsiRole, type Theme, type ThemeStyle } from "../tui/theme.js";
 import { lexMarkdown, type MarkdownBlock } from "./markdown-blocks.js";
 import { NO_BREAK_SPACE, parseInline, wrapSpans, type Span } from "./markdown-inline.js";
 import { renderTable } from "./table.js";
@@ -65,6 +65,31 @@ export function markdownHasTable(text: string, quoteDepth = 0): boolean {
   return lexMarkdown(source).some((block) =>
     block.type === "table"
     || (block.type === "quote" && quoteDepth + 1 < MAX_QUOTE_DEPTH && markdownHasTable(block.lines.join("\n"), quoteDepth + 1)));
+}
+
+/**
+ * Whether every table this markdown draws stays whole at `width`: a bordered
+ * table with all of its columns (none dropped, never `label: value` records).
+ * True when it draws no table. Walks the blocks as `renderMarkdown` does, a
+ * quote's table two columns narrower per level. A turn splits side by side
+ * only while its answer's tables fit the answer pane (views/layout.ts).
+ */
+export function markdownTablesFit(text: string, width: number, quoteDepth = 0): boolean {
+  if (!text.includes("|")) {
+    return true;
+  }
+  const columns = Math.max(1, Math.floor(width));
+  const source = text.replace(/\r\n?/g, "\n").replace(/\t/g, "    ").split("\n").map(scrubTerminalControls).join("\n");
+  return lexMarkdown(source).every((block) => {
+    if (block.type === "table") {
+      const table = drawTable(block, { width: columns, color: false, theme: DEFAULT_THEME });
+      return table.fallback === null && table.hidden.length === 0;
+    }
+    if (block.type === "quote" && quoteDepth + 1 < MAX_QUOTE_DEPTH) {
+      return markdownTablesFit(block.lines.join("\n"), columns < 4 ? columns : columns - 2, quoteDepth + 1);
+    }
+    return true;
+  });
 }
 
 function renderDocument(text: string, opts: MarkdownRenderOptions, quoteDepth: number): string[] {
@@ -203,11 +228,22 @@ function renderCode(source: readonly string[], opts: MarkdownRenderOptions): str
 }
 
 function renderMarkdownTable(block: Extract<MarkdownBlock, { type: "table" }>, opts: MarkdownRenderOptions): string[] {
+  const table = drawTable(block, opts);
+  const lines = [...table.lines];
+  if (table.hidden.length) {
+    lines.push(...wrapSpans([{ text: hiddenColumnsHint(table.hidden, table.fullWidth - opts.width) }], opts.width)
+      .map((spans) => paint(spans.map((span) => span.text).join(""), "muted", opts)));
+  }
+  return lines;
+}
+
+/** One markdown table through the table drawer (the one call, so a fit check reads what is drawn). */
+function drawTable(block: Extract<MarkdownBlock, { type: "table" }>, opts: MarkdownRenderOptions) {
   const rows = block.rows.map((row) => row.map(plainInline));
   // A last row labelled Total is the table's total: a rule above it, in bold (N9).
   const last = rows.at(-1);
   const total = rows.length > 1 && last && TOTAL_LABEL.test((last[0] ?? "").trim()) ? last : undefined;
-  const table = renderTable(
+  return renderTable(
     {
       columns: block.header.map((label, index) => ({ label: plainInline(label), align: block.aligns[index] })),
       rows: total ? rows.slice(0, -1) : rows,
@@ -215,12 +251,6 @@ function renderMarkdownTable(block: Extract<MarkdownBlock, { type: "table" }>, o
     },
     { width: opts.width, color: opts.color, theme: opts.theme, role: opts.role }
   );
-  const lines = [...table.lines];
-  if (table.hidden.length) {
-    lines.push(...wrapSpans([{ text: hiddenColumnsHint(table.hidden, table.fullWidth - opts.width) }], opts.width)
-      .map((spans) => paint(spans.map((span) => span.text).join(""), "muted", opts)));
-  }
-  return lines;
 }
 
 /**

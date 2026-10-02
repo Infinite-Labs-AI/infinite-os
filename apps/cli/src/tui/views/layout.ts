@@ -8,16 +8,18 @@
 //
 // Two things keep a turn in ONE column from 120 columns too: it has nothing
 // for the right pane (no view that takes it and no card), or its answer
-// carries a markdown table. The answer pane is at most 40 columns, where a
-// table turns into `label: value` stacks or drops most of its columns; at the
-// whole width it stays a bordered table, and the details follow under it.
+// carries a markdown table that would not draw whole in the answer pane. The
+// pane is at most 40 columns, where a wide table turns into `label: value`
+// stacks or drops columns; at the whole width it stays a bordered table, and
+// the details follow under it. A table small enough for the pane keeps the split.
 //
 // Every line this returns fits its width: the panes are laid out to their own
 // widths first, and each line is cut to fit as a last resort.
 import type { AnswerViewV1 } from "@infinite-os/types";
 
 import { holdOpenMarkers } from "../../formatting/markdown-inline.js";
-import { markdownHasTable } from "../../formatting/markdown-render.js";
+import { markdownHasTable, markdownTablesFit } from "../../formatting/markdown-render.js";
+import { answerTextWidth } from "../app/answer-column.js";
 import { renderTurnBody } from "../app/transcript-renderer.js";
 import type { TurnStep } from "../app/turn-store.js";
 import type { KeyContext } from "../keys/keymap.js";
@@ -215,11 +217,23 @@ export function answerCarriesTable(messages: readonly Msg[]): boolean {
 
 /**
  * Whether a live turn with these messages may sit side by side at this width:
- * the window is at least 120 columns and the answer has no table of its own.
+ * the window is at least 120 columns and every table of the answer's own
+ * draws whole (bordered, no column dropped) in the answer pane.
  * The session draws a pending card at `detailsPaneWidth(width, turnMaySplit(…))`.
  */
 export function turnMaySplit(messages: readonly Msg[], width: number): boolean {
-  return paneWidths(width).wide && !answerCarriesTable(messages);
+  const panes = paneWidths(width);
+  return panes.wide && answerTablesFit(messages, panes.left);
+}
+
+/**
+ * Whether every markdown table the answer column draws stays a bordered table
+ * with all of its columns in a column `width` wide (true when it has none).
+ */
+function answerTablesFit(messages: readonly Msg[], width: number): boolean {
+  return messages.every((msg) =>
+    msg.role === "user" || msg.role === "tool" || msg.kind === "diff"
+    || markdownTablesFit(msg.partial ? holdOpenMarkers(msg.text) : msg.text, answerTextWidth(width)));
 }
 
 export interface LiveTurnRender {
@@ -311,7 +325,8 @@ function drawLiveTurn(input: LiveTurnInput, width: number, rows: number | undefi
     ...(rows === undefined ? {} : { rows })
   };
   const plainCtx: ViewRenderCtx = {
-    ...base, selected: 0, tab: 0, page: 0, explainOpen: false, showHiddenColumns: false, caps
+    ...base, selected: 0, tab: 0, page: 0, explainOpen: false, showHiddenColumns: false, caps,
+    ...(split ? {} : { scrollback: true })
   };
   const focusIndex = input.focus ? input.focus.viewIndex : focusedViewIndex(input.views);
   // A view with no key focus yet (a turn still running, a committed turn) is drawn on its opening row.
@@ -319,14 +334,17 @@ function drawLiveTurn(input: LiveTurnInput, width: number, rows: number | undefi
     renderView(view, view.kind !== "quiet" && index === focusIndex && input.focus
       ? focusedViewCtx(input.focus, base)
       : { ...plainCtx, selected: openingRow(view) }));
-  // Scrollback has no keys, so nothing may stay behind one: a view with tabs
-  // (a document's versions) prints every tab, in order, under the one head.
+  // Scrollback has no keys, so nothing may stay behind one. A table that
+  // dropped columns (`→`) prints every row with all of its columns, and a view
+  // with tabs (a document's versions) prints every tab, in order, under the
+  // one head. No view names a key there (`ctx.scrollback`).
   const drawn = split ? renders : renders.flatMap((render, index) => {
+    const view = input.views[index]!;
+    const whole = { ...plainCtx, selected: openingRow(view), showHiddenColumns: Boolean(render.hiddenColumns) };
     const tabs = render.tabs ?? 0;
-    if (tabs < 2) return [render];
+    if (tabs < 2) return [whole.showHiddenColumns ? renderView(view, whole) : render];
     return Array.from({ length: tabs }, (_unused, tab) => {
-      const view = input.views[index]!;
-      const at = renderView(view, { ...plainCtx, selected: openingRow(view), tab });
+      const at = renderView(view, { ...whole, tab });
       return tab === 0 ? at : { ...at, head: "", source: null };
     });
   });

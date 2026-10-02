@@ -23,6 +23,11 @@ function textWidth(width: number): number {
   return Math.max(1, Math.floor(width) - 3);
 }
 
+/** The columns an answer's markdown is drawn at in a column `width` wide (`views/layout.ts` asks before it splits). */
+export function answerTextWidth(width: number): number {
+  return textWidth(width);
+}
+
 /** `❯ question`: the mark in cyan, the words in b, hung under the first word. */
 export function questionLines(text: string, width: number, style: ColumnStyle): string[] {
   return wrapText(viewText(text), textWidth(width)).map((line, index) =>

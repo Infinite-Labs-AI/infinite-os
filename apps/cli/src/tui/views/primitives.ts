@@ -442,7 +442,7 @@ export function turnAsk(value: unknown): string | null {
   return text && !text.startsWith("/") ? text : null;
 }
 
-/** `shown of total · reason · m for more`, for the kinds whose bodies page (numbers, list). */
+/** `shown of total · reason · m for more`, for the kinds whose bodies page (numbers, list); no key named in scrollback. */
 export function truncationLines(view: AnswerViewV1, ctx: ViewRenderCtx): string[] {
   if (view.kind !== "numbers" && view.kind !== "list") {
     return [];
@@ -456,7 +456,7 @@ export function truncationLines(view: AnswerViewV1, ctx: ViewRenderCtx): string[
   const parts = [
     total === null ? `${count.format(truncated.shown)} shown` : `${count.format(truncated.shown)} of ${count.format(total)}`,
     viewText(truncated.reason),
-    truncatedMoreAsk(view) ? "m for more" : ""
+    truncatedMoreAsk(view) && !ctx.scrollback ? "m for more" : ""
   ].filter(Boolean);
   return paragraph(parts.join(" · "), "muted", ctx);
 }

@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 import { decodeAnswerView } from "../../desktop/answer-view-decode.js";
@@ -285,5 +287,87 @@ describe("a committed document carries every page", () => {
     expect(lines.filter((line) => line.includes("[1 Email 1]"))).toHaveLength(1);
     expect(lines.filter((line) => line.includes("[2 Email 2]"))).toHaveLength(1);
     expect(lines.filter((line) => line.includes("[3 Email 3]"))).toHaveLength(1);
+  });
+});
+
+describe("a committed turn hides nothing behind a key (scrollback has none)", () => {
+  const fixture = (name: string) => {
+    const view = decodeAnswerView(JSON.parse(readFileSync(fileURLToPath(new URL(`./__fixtures__/${name}.json`, import.meta.url)), "utf8")));
+    if (!view) throw new Error(`${name} fixture does not decode`);
+    return view;
+  };
+  const keyWords = /→ to see|m for more/u;
+
+  it("a numbers view that drops a column at 60: live it names the key, committed it prints every column", () => {
+    const ads = fixture("numbers-ads");
+    const live = renderLiveTurn({ messages, views: [ads], focus: null, width: 60, color: false, theme }).lines;
+    expect(live).toContain("+ Impressions · → to see");
+    expect(live.some((line) => /Impressions: \d/u.test(line))).toBe(false);
+    const lines = renderCommittedTurn({ messages, views: [ads], focus: null, width: 60, color: false, theme });
+    expect(lines.some((line) => keyWords.test(line))).toBe(false);
+    // Every row's Impressions, with its value, beside the columns the table kept.
+    expect(lines.filter((line) => /Impressions: [\d,]+/u.test(line)).map((line) => line.trim())).toEqual([
+      "Impressions: 4,000", "Impressions: 3,000", "Impressions: 2,000", "Impressions: 9,000"
+    ]);
+    for (const kept of ["Spend", "Clicks", "CTR", "Conv", "CPC", "Ad set 01", "Ad set 03", "$40.00"]) {
+      expect(lines.some((line) => line.includes(kept))).toBe(true);
+    }
+    expect(lines.every((line) => line.length <= 60)).toBe(true);
+  });
+
+  it("at a width where every column fits, the committed table is the live table", () => {
+    const ads = fixture("numbers-ads");
+    const lines = renderCommittedTurn({ messages, views: [ads], focus: null, width: 100, color: false, theme });
+    expect(lines.some((line) => /│\s+Impressions │/u.test(line))).toBe(true);
+    expect(lines.some((line) => keyWords.test(line))).toBe(false);
+  });
+
+  it.each([60, 80])("a truncated view at %i says what it shows, never `m for more`", (width) => {
+    const tall = fixture("numbers-tall");
+    const live = renderLiveTurn({ messages, views: [tall], focus: null, width, color: false, theme }).lines;
+    expect(live).toContain("40 of 100 · First 40 by spend · m for more");
+    const lines = renderCommittedTurn({ messages, views: [tall], focus: null, width, color: false, theme });
+    expect(lines).toContain("40 of 100 · First 40 by spend");
+    expect(lines.some((line) => keyWords.test(line))).toBe(false);
+  });
+
+  it("a compare view's dropped columns print too", () => {
+    const lines = renderCommittedTurn({ messages, views: [fixture("compare-test")], focus: null, width: 40, color: false, theme });
+    expect(lines.some((line) => keyWords.test(line))).toBe(false);
+    expect(lines.some((line) => line.trim() === "Relative: +33.33%")).toBe(true);
+    expect(lines.some((line) => line.trim() === "vs: A Current")).toBe(true);
+  });
+
+  it("each printed document version has no tab key line under it", () => {
+    const versions = fixture("document-versions");
+    const live = renderLiveTurn({ messages, views: [versions], focus: viewFocusAfterTurnDone([versions]), width: 60, color: false, theme, rows: 40 }).lines;
+    expect(live).toContain("[1-2] email");
+    const lines = renderCommittedTurn({ messages, views: [versions], focus: null, width: 60, color: false, theme });
+    expect(lines.some((line) => line.includes("[1-2]"))).toBe(false);
+    expect(lines.some((line) => line.includes("Your trial ended"))).toBe(true);
+    expect(lines.some((line) => line.includes("Still there?"))).toBe(true);
+  });
+});
+
+describe("a table that draws whole in the answer pane keeps the split", () => {
+  const small: Msg[] = [
+    { role: "user", text: "which won?" },
+    { role: "assistant", text: "Two ran.\n\n| Ad | Spend |\n| --- | ---: |\n| Spring | $120 |\n| Autumn | $80 |" }
+  ];
+  const card = ["┌─ card ─┐"];
+
+  it.each([160, 200])("at %i a two-column table sits in the answer pane, bordered, left of the card", (width) => {
+    expect(turnMaySplit(small, width)).toBe(true);
+    const lines = renderLiveTurn({ messages: small, views: [], focus: null, width, color: false, theme, details: card }).lines;
+    expect(lines[0]).toMatch(/^❯ which won\? + │ ┌─ card ─┐$/u);
+    expect(lines.some((line) => /│ Ad\s+│\s+Spend │/u.test(line))).toBe(true);
+    expect(lines.some((line) => /hidden|needs|Ad: /u.test(line))).toBe(false);
+    expect(lines.includes("─".repeat(width))).toBe(false);
+  });
+
+  it("a table too wide for the pane keeps the whole width, quoted or not", () => {
+    const wideTable = "| Ad | Spend | Purchases | ROAS | CPA |\n| --- | ---: | ---: | ---: | ---: |\n| Spring demo, hook 3 | $1,284.50 | 42 | 3.41 | $30.58 |";
+    expect(turnMaySplit([{ role: "assistant", text: wideTable }], 160)).toBe(false);
+    expect(turnMaySplit([{ role: "assistant", text: wideTable.split("\n").map((line) => `> ${line}`).join("\n") }], 160)).toBe(false);
   });
 });
