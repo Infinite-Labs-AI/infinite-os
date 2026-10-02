@@ -47,7 +47,8 @@ describe("the managed PostHog snippet, executed", () => {
     const { stub, scripts, error } = runSnippet(snippet)
     expect(error).toBeUndefined()
     // The stub names the default instance "posthog" before queueing it.
-    expect(plain(stub._i)).toEqual([["phc_test", { api_host: "https://us.i.posthog.com", defaults: "2025-05-24" }, "posthog"]])
+    // New managed installs opt into infinite.fast's bundle (inject L349).
+    expect(plain(stub._i)).toEqual([["phc_test", { api_host: "https://us.i.posthog.com", defaults: "2026-01-30" }, "posthog"]])
     expect(scripts).toHaveLength(1)
     expect(scripts[0]!.src).toBe("https://us-assets.i.posthog.com/static/array.js")
   })

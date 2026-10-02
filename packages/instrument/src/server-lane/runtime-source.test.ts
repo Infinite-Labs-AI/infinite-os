@@ -161,6 +161,27 @@ describe("generated Next.js module (executed with WebCrypto)", () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
+  it("one host normaliser: EXAMPLE.com.:443 is the baked example.com, and a baked trailing dot matches too", async () => {
+    for (const [baked, host] of [
+      ["example.com", "EXAMPLE.com.:443"],
+      ["Example.COM.", "example.com"]
+    ] as const) {
+      fetchMock.mockClear()
+      const mod = await loadGeneratedModule({ siteSourceKey: "site_baked", productionHosts: [baked] })
+      const event = fakeEvent()
+      mod.recordInfiniteDocumentRequest(fakeRequest({ host }), event)
+      await Promise.all(event.tasks)
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+    }
+    // Negative: another host is still off the list.
+    fetchMock.mockClear()
+    const mod = await loadGeneratedModule({ siteSourceKey: "site_baked", productionHosts: ["example.com"] })
+    const event = fakeEvent()
+    mod.recordInfiniteDocumentRequest(fakeRequest({ host: "staging.example.com." }), event)
+    await Promise.all(event.tasks)
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
   it("respects a baked production-host allowlist and falls back to the baked source key", async () => {
     delete process.env.INFINITE_SITE_SOURCE_KEY
     const mod = await loadGeneratedModule({ siteSourceKey: "site_baked", productionHosts: ["example.com"] })

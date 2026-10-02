@@ -52,9 +52,17 @@ export function applyInstallation(options: ApplyInstallationOptions): ApplyResul
     )
   }
 
-  // Every requested provider already exists (adopted) and no server lane was asked for: there is
-  // nothing to write, so nothing is written — no empty managed block, no manifest.
-  if (options.plan.providers.length === 0 && !options.plan.serverLane) {
+  // Managed code that serves ADOPTED tools is installable on its own: the conversion helpers
+  // (decisions 9 and 13) and the Meta `_fbc` capture beside an adopted pixel (`captureOnly`). A plan
+  // whose every provider was adopted still writes them.
+  const managedForAdopted = options.plan.instructions.some(
+    (instruction) => instruction.helpers === true || instruction.provider !== undefined
+  )
+
+  // Every requested provider already exists (adopted), nothing else managed was planned and no server
+  // lane was asked for: there is nothing to write, so nothing is written — no empty managed block, no
+  // manifest.
+  if (options.plan.providers.length === 0 && !managedForAdopted && !options.plan.serverLane) {
     return {
       changedFiles: [],
       manifestPath: installManifestPath(options.root),
@@ -62,8 +70,8 @@ export function applyInstallation(options: ApplyInstallationOptions): ApplyResul
     }
   }
 
-  // A server-lane-only plan (no provider artifacts) skips the pixel adapter entirely.
-  const runAdapter = options.plan.providers.length > 0 || !options.plan.serverLane
+  // A server-lane-only plan (no provider artifacts, no managed helpers) skips the pixel adapter entirely.
+  const runAdapter = options.plan.providers.length > 0 || managedForAdopted || !options.plan.serverLane
   const frameworkAdapter = getFrameworkAdapter(options.plan.framework)
   if (runAdapter && !frameworkAdapter?.apply) {
     throw new Error(`No apply implementation is registered for ${options.plan.framework}.`)

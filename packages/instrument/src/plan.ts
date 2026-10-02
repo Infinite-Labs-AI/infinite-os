@@ -1,8 +1,10 @@
 import { join } from "node:path"
 
+import { conversionHelpersInstruction, conversionHelpersWanted } from "./conversions/globals.js"
 import { getFrameworkAdapter, isSupportedFramework } from "./frameworks/index.js"
 import { normalizeAppRelativePath } from "./frameworks/shared.js"
 import { getProviderAdapter } from "./providers/index.js"
+import { managedPosthogDefaults } from "./providers/posthog.js"
 import { detectUnmanagedProviders, inspectWorkspace } from "./inspect.js"
 import { infiniteProxySpec } from "./workspace-artifacts.js"
 import { readInstallManifest } from "./manifest.js"
@@ -106,12 +108,23 @@ export function planInstallation(options: PlanInstallationOptions): InstallPlan 
   const unmanagedProviders = detectUnmanagedProviders(appRootAbsolute)
   const adopted: AdoptedProvider[] = []
   const providers: ProviderId[] = []
+  // Meta `captureOnly` is an approved plan line for an ADOPTED pixel (wf5-PORT-PLAN row 5, D8/D15): the
+  // `_fbc` landing capture is added beside it and the pixel itself is left exactly as it is.
+  const metaCaptureOnly = (options.artifacts.meta as { captureOnly?: unknown } | undefined)?.captureOnly === true
+  let adoptedMetaCapture = false
   for (const providerId of requestedProviders) {
     const existing = unmanagedProviders.find((entry) => entry.provider === providerId)
     if (existing) {
       adopted.push(existing)
       assumptions.push(
         `Existing ${providerLabels[providerId]} found in ${existing.file} (${adoptedViaLabel(existing.via)}); left untouched. infinite-tag will not install a second copy.`
+      )
+      if (providerId === "meta" && metaCaptureOnly) adoptedMetaCapture = true
+    } else if (providerId === "meta" && metaCaptureOnly) {
+      // Capture-only exists for a pixel the site already has. Without one it would claim a pixel that
+      // is not there, and the visitor would get a click-id cookie with no pixel to read it.
+      blockers.push(
+        "Meta click-id capture only (captureOnly) needs the site's existing Meta pixel, and none was found in this repo. Install the pixel instead (drop captureOnly), or point infinite-tag at the code that loads it."
       )
     } else {
       providers.push(providerId)
@@ -122,7 +135,14 @@ export function planInstallation(options: PlanInstallationOptions): InstallPlan 
   // wiring is only planned when at least one provider remains to install. When everything
   // requested was adopted there is nothing to write — the plan says so instead of injecting an
   // empty managed block.
-  const pixelWanted = providers.length > 0 || (!options.serverLane && adopted.length === 0)
+  // The managed conversion helpers (decisions 9 and 13) are their own reason to write the managed
+  // block: they serve ADOPTED tools too, so an all-adopted plan that asked for them still writes it.
+  const helpersWanted = conversionHelpersWanted(options.artifacts)
+  const pixelWanted =
+    providers.length > 0 ||
+    helpersWanted ||
+    adoptedMetaCapture ||
+    (!options.serverLane && adopted.length === 0)
   const frameworkAdapter = getFrameworkAdapter(inspectResult.framework)
   const infiniteProxy = infiniteProxySpec(options.artifacts.infinite)
   const previousManifest = readInstallManifest(options.root)
@@ -161,10 +181,26 @@ export function planInstallation(options: PlanInstallationOptions): InstallPlan 
 
   const envKeys: string[] = []
   const instructions: InstallInstruction[] = []
+  // First in the block, so the globals exist before any provider bootstrap runs.
+  if (helpersWanted && frameworkDraft) {
+    instructions.push(conversionHelpersInstruction(inspectResult.framework, options.artifacts))
+  }
+  // The adopted pixel's capture-only instruction (the adapter's `captureOnly` branch); `meta` stays in
+  // `adopted`, never in `providers`, so the manifest never claims the customer's pixel as managed.
+  if (adoptedMetaCapture && frameworkDraft) {
+    const capturePlan = getProviderAdapter("meta").plan(inspectResult.framework, options.artifacts.meta, {
+      artifacts: options.artifacts
+    })
+    assumptions.push(...capturePlan.assumptions)
+    blockers.push(...capturePlan.blockers)
+    instructions.push(...capturePlan.instructions)
+  }
+  const posthogDefaultsOnDisk = managedPosthogDefaults(options.root, previousManifest)
   for (const providerId of providers) {
     const adapter = getProviderAdapter(providerId)
     const providerPlan = adapter.plan(inspectResult.framework, options.artifacts[providerId], {
-      artifacts: options.artifacts
+      artifacts: options.artifacts,
+      ...(posthogDefaultsOnDisk !== undefined ? { managedPosthogDefaults: posthogDefaultsOnDisk } : {})
     })
     assumptions.push(...providerPlan.assumptions)
     blockers.push(...providerPlan.blockers)
@@ -175,7 +211,9 @@ export function planInstallation(options: PlanInstallationOptions): InstallPlan 
   // 0.6.0: no dormant "mirror-only" Infinite runtime. Before mirror mode was removed, a GA4/PostHog
   // install without an Infinite source still embedded the Infinite runtime so it could forward
   // page views into those providers; the runtime now emits only to Infinite, so without a source
-  // key there is nothing for it to do and nothing is embedded — GA4/PostHog install natively.
+  // key there is nothing for it to do and nothing is embedded — GA4/PostHog install natively. The
+  // runtime forwards nothing; conversions reach GA4/PostHog through the managed helpers the site's
+  // own code calls (decisions 9 and 13), planned above when `conversions.helpers` is set.
 
   if (serverLaneDraft) {
     envKeys.push(...serverLaneDraft.envKeys)

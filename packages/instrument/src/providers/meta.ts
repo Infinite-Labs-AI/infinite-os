@@ -1,3 +1,9 @@
+import {
+  buildHostGuardExpression,
+  resolveArtifactHostGuard,
+  wrapGuardedSnippet,
+  type HostGuardSpec
+} from "../host-guard.js"
 import type { ProviderAdapter, SupportedFramework } from "../types.js"
 import { isHtmlInjectedFramework } from "../types.js"
 import { buildMetaClickIdCaptureScript, META_CLICK_ID_ACCESSOR } from "./meta-browser/click-id.js"
@@ -37,7 +43,16 @@ import { jsLiteral, validateMetaPixelId } from "./validate.js"
  * than the pixel itself on purpose: the capture exists for exactly the visitor the pixel cannot
  * reach — typically one running their own blocker — and writing Meta's ad-click cookie for a visitor
  * who said no would be infinite-tag overriding that choice. An ADOPTED pixel (one the site already
- * had) gets none of this: infinite-tag never edits a provider it did not install.
+ * had) is never edited WITHOUT a plan line the user approved: with one, the plan can add the capture on
+ * its own beside it (`captureOnly`, `buildMetaCaptureOnlySnippet`), and job 7 can wrap the adopted
+ * bootstrap in the preview guard (`ADOPTED_META_GUARD_RECIPE`) — never the capture.
+ *
+ * PREVIEW GUARD (decision 8, new installs): with a guard on the plan, the pixel BOOTSTRAP (fbevents load,
+ * the autoConfig opt-out, `init`, `PageView`) sits in one IIFE behind it, so a preview or a laptop never
+ * loads the pixel. The `_fbc` capture is NOT guarded (decision 15): it sends nothing, and previews must
+ * still be able to test it. The matching accessor needs no guard: with no `fbq` it attaches nothing. On a
+ * silenced host an inert, flagged `fbq` stands in (`META_SILENCED_STUB`) so the site's own `fbq` calls
+ * cannot throw; the managed helpers treat it as no pixel.
  *
  * MANUAL ADVANCED MATCHING — `--meta-advanced-matching on`, DEFAULT OFF.
  *
@@ -108,14 +123,46 @@ export const metaProviderAdapter: ProviderAdapter = {
     if (pixelError) {
       return { assumptions: [], blockers: [pixelError], instructions: [] }
     }
+    const guard = resolveArtifactHostGuard(context?.artifacts ?? {})
+    if (guard.error) {
+      return { assumptions: [], blockers: [guard.error], instructions: [] }
+    }
 
     const consentMode = context?.artifacts.infinite?.consentMode
+    const captureOnly =
+      artifact && typeof artifact === "object" && (artifact as { captureOnly?: unknown }).captureOnly === true
+    if (captureOnly) {
+      const capture = buildMetaCaptureOnlySnippet({
+        consentMode: consentMode === "required" ? "required" : "not_required"
+      })
+      return {
+        assumptions: [
+          "Meta click-id capture only: your existing Meta pixel is left exactly as it is; the managed block adds the _fbc landing capture beside it, so an ad click is saved even when the pixel is blocked. It sends nothing."
+        ],
+        blockers: [],
+        instructions: [
+          {
+            path: frameworkInstructionPath(framework),
+            action: isHtmlInjectedFramework(framework) ? "modify" : "create",
+            description: "Add the Meta _fbc landing capture beside your existing pixel (no second pixel).",
+            provider: "meta",
+            snippet: isHtmlInjectedFramework(framework) ? wrapHtmlSnippet(capture) : capture
+          }
+        ]
+      }
+    }
     const snippet = buildMetaPixelSnippet(pixelId!, {
       advancedMatching,
-      consentMode: consentMode === "required" ? "required" : "not_required"
+      consentMode: consentMode === "required" ? "required" : "not_required",
+      ...(guard.spec ? { guard: guard.spec } : {})
     })
     return {
       assumptions: [
+        ...(guard.spec
+          ? [
+              "The Meta pixel starts only on your production hosts and any host that is not a preview or a laptop. The _fbc landing capture still runs everywhere (it sends nothing)."
+            ]
+          : []),
         "Meta wiring will use only the public pixelId artifact.",
         consentMode === "required"
           ? "Meta click-id capture is ON: when a visitor who has granted consent lands from a Meta ad, the page saves the ad's click id in Meta's own _fbc cookie, even if the pixel itself is blocked. It sends nothing."
@@ -161,6 +208,8 @@ export interface MetaPixelSnippetOptions {
   clickIdCapture?: boolean
   /** The site's Infinite consent mode. Absent = `not_required` (no Infinite consent requirement). */
   consentMode?: "required" | "not_required"
+  /** The preview guard around the pixel bootstrap (never around the capture). Absent = no guard. */
+  guard?: HostGuardSpec
 }
 
 export function buildMetaPixelSnippet(pixelId: string, options: MetaPixelSnippetOptions = {}): string {
@@ -170,10 +219,7 @@ export function buildMetaPixelSnippet(pixelId: string, options: MetaPixelSnippet
   // Infinite runtime's rule (see `./meta-browser/consent.ts`). infinite.fast gates its capture the
   // same way; an ungated capture would write Meta's ad-click cookie for a visitor who said no.
   const gate: MetaBrowserGate = { kind: "infinite-consent", mode: consentMode }
-  return [
-    // Capture BEFORE the bootstrap: Meta asks for the click id at landing, and the cookie must
-    // already hold this click when fbevents reads it.
-    ...(options.clickIdCapture === false ? [] : [buildMetaClickIdCaptureScript({ gate })]),
+  const bootstrap = [
     "!function(f,b,e,v,n,t,s)",
     "{if(f.fbq)return;n=f.fbq=function(){n.callMethod?",
     "n.callMethod.apply(n,arguments):n.queue.push(arguments)};",
@@ -184,9 +230,64 @@ export function buildMetaPixelSnippet(pixelId: string, options: MetaPixelSnippet
     "'https://connect.facebook.net/en_US/fbevents.js');",
     `fbq('set', 'autoConfig', 'false', ${jsLiteral(pixelId)});`,
     `fbq('init', ${jsLiteral(pixelId)});`,
-    "fbq('track', 'PageView');",
+    "fbq('track', 'PageView');"
+  ].join("\n")
+  return [
+    // Capture BEFORE the bootstrap: Meta asks for the click id at landing, and the cookie must
+    // already hold this click when fbevents reads it. Never inside the guard (decision 15).
+    ...(options.clickIdCapture === false ? [] : [buildMetaClickIdCaptureScript({ gate })]),
+    options.guard ? wrapGuardedSnippet(bootstrap, options.guard, META_SILENCED_STUB) : bootstrap,
     ...(options.advancedMatching === true ? [buildMetaAdvancedMatchingSnippet(pixelId, gate)] : [])
   ].join("\n")
+}
+
+/**
+ * The `_fbc` landing capture ALONE, for an ADOPTED pixel (an approved plan line, wf5-PORT-PLAN row 5):
+ * no second pixel, no `fbq` call, nothing sent. It follows the site's consent hook exactly as the managed
+ * pixel's capture does.
+ */
+export function buildMetaCaptureOnlySnippet(options: { consentMode?: "required" | "not_required" } = {}): string {
+  const gate: MetaBrowserGate = {
+    kind: "infinite-consent",
+    mode: options.consentMode === "required" ? "required" : "not_required"
+  }
+  return buildMetaClickIdCaptureScript({ gate })
+}
+
+/** The flag on the inert `fbq` a silenced host gets; the managed Meta helpers treat such an fbq as absent. */
+export const META_SILENCED_FLAG = "__infiniteSilenced"
+
+/**
+ * What a silenced host gets instead of the pixel: an inert `fbq` that DROPS every call (it never queues,
+ * so a pixel loaded later by anything else cannot replay them), flagged so the mirror and the matching
+ * accessor treat it as no pixel. The site's own `fbq('track', …)` on a preview cannot throw and strand a
+ * click. One line, so the job-7 recipe can carry it on its guard line.
+ */
+export const META_SILENCED_STUB = `if (typeof window.fbq !== 'function') { window.fbq = function () {}; window.fbq.${META_SILENCED_FLAG} = true; }`
+
+/** The placeholder the adopted-guard recipe uses for the emitted guard expression. */
+export const GUARD_EXPRESSION_PLACEHOLDER = "<GUARD_EXPRESSION>"
+
+/**
+ * Job 7 on an ADOPTED Meta pixel (decisions 8 and 15, R2-11), as text for the agent's brief: the exact
+ * wrap around the site's OWN bootstrap — the fbevents loader, `fbq('init', …)` and the FIRST
+ * `fbq('track', 'PageView')`, moved inside unchanged — and nothing else. The `_fbc` capture (the site's or
+ * infinite-tag's `infiniteMetaClickId` block) stays OUTSIDE: previews must still write `_fbc`, and a guard
+ * around it is a failed job. The wizard's own check (T0) runs the wrapped page on a preview host and on
+ * the production host.
+ */
+export const ADOPTED_META_GUARD_RECIPE = [
+  "(function () {",
+  `if (!(${GUARD_EXPRESSION_PLACEHOLDER})) { ${META_SILENCED_STUB} return; }`,
+  "<your existing Meta Pixel bootstrap, unchanged: the fbevents.js loader, fbq('set', 'autoConfig', …) if present, fbq('init', '<pixel id>'), and the first fbq('track', 'PageView')>",
+  "})();",
+  "",
+  "Rules: wrap ONLY that bootstrap. Leave any _fbc capture (window.infiniteMetaClickId, or a script that writes the _fbc cookie) OUTSIDE the wrapper and BEFORE it. Keep the guard line exactly as given: on a preview it defines an inert fbq, so the site's own fbq calls there cannot throw. Do not change the pixel id, do not add or remove fbq calls, and do not wrap other tags."
+].join("\n")
+
+/** The recipe with the real guard expression in place of the placeholder (what the brief shows). */
+export function adoptedMetaGuardRecipe(guard: HostGuardSpec): string {
+  return ADOPTED_META_GUARD_RECIPE.replace(GUARD_EXPRESSION_PLACEHOLDER, buildHostGuardExpression(guard))
 }
 
 export { META_CLICK_ID_ACCESSOR }
@@ -230,7 +331,7 @@ function buildMetaAdvancedMatchingSnippet(pixelId: string, gate: MetaBrowserGate
     "    return Promise.resolve().then(function () {",
     "      // Consent at CALL time, so a revocation a moment ago is honoured.",
     "      if (!infiniteConsentAllows()) return false;",
-    "      if (typeof window.fbq !== 'function') return false;",
+    `      if (typeof window.fbq !== 'function' || window.fbq.${META_SILENCED_FLAG} === true) return false;`,
     "      var source = identity || {};",
     "      var email = typeof source.email === 'string' ? source.email.trim().toLowerCase() : '';",
     "      var externalId = typeof source.externalId === 'string' ? source.externalId.trim() : '';",

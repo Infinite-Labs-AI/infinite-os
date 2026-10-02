@@ -136,7 +136,7 @@ export const staticHtmlAdapter: FrameworkAdapter = {
 
     // Provider snippets are page-agnostic — every page receives the same managed block.
     const providerSnippets = context.plan.instructions
-      .filter((instruction) => instruction.provider && isHtmlPath(instruction.path))
+      .filter((instruction) => (instruction.provider || instruction.helpers) && isHtmlPath(instruction.path))
       .map((instruction) => instruction.snippet.trim())
       .filter((snippet) => snippet.length > 0)
 

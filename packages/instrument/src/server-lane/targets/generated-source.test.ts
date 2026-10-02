@@ -35,6 +35,8 @@ import {
 import { vercelLaneModuleSource, vercelMiddlewareSource } from "./vercel-any.js"
 
 const tempRoots: string[] = []
+/** Infinite's real 202 (§3j.1, as answered today: no Meta instruction). */
+const acceptedResponse = () => new Response(JSON.stringify({ accepted: true, duplicate: false }), { status: 202 })
 const BUILD = { siteSourceKey: "site_test", productionHosts: [VECTORS.host] }
 
 afterEach(() => {
@@ -73,7 +75,7 @@ describe("the shared edge core, executed", () => {
   let fetchMock: ReturnType<typeof vi.fn>
 
   beforeEach(() => {
-    fetchMock = vi.fn(async () => new Response("{}", { status: 202 }))
+    fetchMock = vi.fn(async () => acceptedResponse())
     vi.stubGlobal("fetch", fetchMock)
     vi.spyOn(Date, "now").mockReturnValue(VECTORS.nowMs)
   })
@@ -209,6 +211,29 @@ describe("the shared edge core, executed", () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
+  it("one host normaliser: example.com. (any case, with a port) is the baked host; a baked trailing dot matches too", async () => {
+    const credentials = { secret: VECTORS.secret, sourceKey: "site_test" }
+    for (const [baked, host] of [
+      [VECTORS.host, "EXAMPLE.com.:443"],
+      [`${VECTORS.host.toUpperCase()}.`, VECTORS.host]
+    ] as const) {
+      fetchMock.mockClear()
+      const lane = (await loadGenerated(vercelLaneModuleSource({ ...BUILD, productionHosts: [baked] }))) as {
+        recordInfiniteDocumentRequest: (request: Request, credentials: unknown) => Promise<boolean>
+      }
+      await expect(
+        lane.recordInfiniteDocumentRequest(documentRequest({ headers: { "x-forwarded-host": host } }), credentials)
+      ).resolves.toBe(true)
+      expect(JSON.parse(postedBody(fetchMock).body).properties.host).toBe(VECTORS.host)
+    }
+    const lane = (await loadGenerated(vercelLaneModuleSource(BUILD))) as {
+      recordInfiniteDocumentRequest: (request: Request, credentials: unknown) => Promise<boolean>
+    }
+    await expect(
+      lane.recordInfiniteDocumentRequest(documentRequest({ headers: { "x-forwarded-host": "staging.example.com." } }), credentials)
+    ).resolves.toBe(false)
+  })
+
   it("records on any host when no production allowlist was baked in", async () => {
     const lane = (await loadGenerated(vercelLaneModuleSource({ productionHosts: [] }))) as {
       recordInfiniteDocumentRequest: (request: Request, credentials: unknown) => Promise<boolean>
@@ -241,7 +266,7 @@ describe("the Netlify edge function, executed", () => {
   let fetchMock: ReturnType<typeof vi.fn>
 
   beforeEach(() => {
-    fetchMock = vi.fn(async () => new Response("{}", { status: 202 }))
+    fetchMock = vi.fn(async () => acceptedResponse())
     vi.stubGlobal("fetch", fetchMock)
     vi.stubGlobal("Netlify", {
       env: {
@@ -306,7 +331,7 @@ describe("the Cloudflare Pages middleware, executed", () => {
   let fetchMock: ReturnType<typeof vi.fn>
 
   beforeEach(() => {
-    fetchMock = vi.fn(async () => new Response("{}", { status: 202 }))
+    fetchMock = vi.fn(async () => acceptedResponse())
     vi.stubGlobal("fetch", fetchMock)
     vi.spyOn(Date, "now").mockReturnValue(VECTORS.nowMs)
   })
@@ -373,7 +398,7 @@ describe("the Node module, executed", () => {
   beforeEach(() => {
     process.env.INFINITE_SERVER_EVENT_SECRET = VECTORS.secret
     process.env.INFINITE_SITE_SOURCE_KEY = "site_test"
-    fetchMock = vi.fn(async () => new Response("{}", { status: 202 }))
+    fetchMock = vi.fn(async () => acceptedResponse())
     vi.stubGlobal("fetch", fetchMock)
     vi.spyOn(Date, "now").mockReturnValue(VECTORS.nowMs)
   })
@@ -448,7 +473,7 @@ describe("the outcome helper, executed", () => {
   beforeEach(() => {
     process.env.INFINITE_SERVER_EVENT_SECRET = VECTORS.secret
     process.env.INFINITE_SITE_SOURCE_KEY = "site_test"
-    fetchMock = vi.fn(async () => new Response("{}", { status: 202 }))
+    fetchMock = vi.fn(async () => acceptedResponse())
     vi.stubGlobal("fetch", fetchMock)
     vi.spyOn(Date, "now").mockReturnValue(VECTORS.nowMs)
   })
@@ -816,7 +841,7 @@ describe("the generated files as text", () => {
     const lane = (await loadGenerated(vercelLaneModuleSource({ ...BUILD, apiOrigin: origin }))) as {
       recordInfiniteDocumentRequest: (request: Request, credentials: unknown) => Promise<boolean>
     }
-    const fetchMock = vi.fn(async () => new Response("{}", { status: 202 }))
+    const fetchMock = vi.fn(async () => acceptedResponse())
     vi.stubGlobal("fetch", fetchMock)
     vi.spyOn(Date, "now").mockReturnValue(VECTORS.nowMs)
     try {
@@ -902,7 +927,7 @@ describe("the outcome helper module format (TS vs JS)", () => {
     beforeEach(() => {
       process.env.INFINITE_SERVER_EVENT_SECRET = VECTORS.secret
       process.env.INFINITE_SITE_SOURCE_KEY = "site_test"
-      fetchMock = vi.fn(async () => new Response("{}", { status: 202 }))
+      fetchMock = vi.fn(async () => acceptedResponse())
       vi.stubGlobal("fetch", fetchMock)
       vi.spyOn(Date, "now").mockReturnValue(VECTORS.nowMs)
     })
