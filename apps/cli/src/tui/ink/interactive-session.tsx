@@ -47,6 +47,7 @@ import {
 } from "../app/turn-store.js";
 import { TYPING_IDLE_MS } from "../config/timing.js";
 import { displayWidth, truncateCells } from "../lib/display-width.js";
+import { drawsToTerminal, syncInkColorLevel } from "../style/ink-level.js";
 import { colorEnabled, resolveTheme, type Theme } from "../theme.js";
 import type { Msg } from "../types.js";
 import {
@@ -319,18 +320,25 @@ export interface InkInteractiveSessionRunOptions extends InkInteractiveSessionAp
 export async function runInkInteractiveSession(options: InkInteractiveSessionRunOptions): Promise<void> {
   // No `columns` fallback to `output.columns` here: that froze the width at launch.
   // The app follows the live width itself; `options.columns` stays a test override.
-  const instance = render(
-    <InkInteractiveSessionApp {...options} />,
-    {
-      exitOnCtrlC: false,
-      patchConsole: false,
-      stderr: options.errorOutput ?? defaultErrorOutput,
-      stdin: options.input ?? defaultInput,
-      stdout: options.output ?? defaultOutput
-    }
-  );
+  // On a real terminal, Ink's chalk paints at our tier, not the level it sniffed.
+  const output = options.output ?? defaultOutput;
+  const restoreColorLevel = drawsToTerminal(output) ? syncInkColorLevel((options.theme ?? resolveTheme()).tier) : () => {};
+  try {
+    const instance = render(
+      <InkInteractiveSessionApp {...options} />,
+      {
+        exitOnCtrlC: false,
+        patchConsole: false,
+        stderr: options.errorOutput ?? defaultErrorOutput,
+        stdin: options.input ?? defaultInput,
+        stdout: output
+      }
+    );
 
-  await instance.waitUntilExit();
+    await instance.waitUntilExit();
+  } finally {
+    restoreColorLevel();
+  }
 }
 
 export function renderInkInteractiveSessionToString(
