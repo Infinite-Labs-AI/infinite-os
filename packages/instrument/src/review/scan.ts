@@ -114,10 +114,11 @@ export function createScanner(options: ScannerOptions): Scanner {
     .filter((literal) => literal.value.length >= 8 && !allowed.has(literal.value))
     .sort((a, b) => b.value.length - a.value.length)
 
-  function redactSecrets(text: string, hits: ScanHit[], mode: "post" | "commit"): string {
+  function redactSecrets(text: string, hits: ScanHit[], mode: "post" | "commit", literalExempt?: (literal: ScanLiteral) => boolean): string {
     let out = text
     for (const literal of literals) {
       if (out.includes(literal.value)) {
+        if (literalExempt?.(literal)) continue
         hits.push({ kind: literal.kind })
         out = out.split(literal.value).join(`[redacted: ${literal.kind}]`)
       }
@@ -144,8 +145,12 @@ export function createScanner(options: ScannerOptions): Scanner {
       if (digits.length < 7 || digits.length > 16) return match
       if (inside(protectedSpans, offset, offset + match.length)) return match
       if (allowedDigits.has(digits) || allowed.has(match.trim())) return match
-      // A plain run of 16 digits with no separators is an id shape, not E.164 (max 15 digits).
-      if (digits.length === 16 && /^\d+$/.test(match)) return match
+      // A plain run of 15-16 digits with no separators or `+` is an id shape (a Meta pixel or ad id), not a
+      // written phone number.
+      if (digits.length >= 15 && /^\d+$/.test(match)) return match
+      // A numeric range (`lines 1200-1310`): two runs of the same length, ascending.
+      const range = /^(\d{1,8})\s*[-–]\s*(\d{1,8})$/.exec(match.trim())
+      if (range && range[1]!.length === range[2]!.length && Number(range[1]) < Number(range[2])) return match
       hits.push({ kind: "phone" })
       return "[redacted: phone]"
     })
@@ -163,7 +168,8 @@ export function createScanner(options: ScannerOptions): Scanner {
       for (const file of files) {
         for (const added of file.added) {
           const local: ScanHit[] = []
-          redactSecrets(added.text, local, "commit")
+          // A `.env` value already in this file at HEAD is not this run's doing (the repo already publishes it).
+          redactSecrets(added.text, local, "commit", (literal) => literal.kind === "env_value" && presentAtHead(file.path, literal.value))
           for (const match of added.text.matchAll(new RegExp(EMAIL.source, "g"))) {
             if (!isExemptEmail(match[0]) && !presentAtHead(file.path, match[0])) local.push({ kind: "email" })
           }
@@ -189,10 +195,33 @@ export function mostlyRedacted(original: string, redacted: string): boolean {
   return before > 0 && kept / before < 0.5
 }
 
+/** Committed templates (`.env.example`, `.env.sample`, …) hold placeholders and documented public values, not secrets. */
+const ENV_TEMPLATE = /\.(example|sample|template|dist|defaults)$/i
+/** Build-time public prefixes: these values are inlined into the browser bundle by design, so they are not secrets. */
+const PUBLIC_ENV_PREFIX = /^(NEXT_PUBLIC_|VITE_|PUBLIC_|REACT_APP_|GATSBY_|EXPO_PUBLIC_|NUXT_PUBLIC_|VUE_APP_)/
+
+/** A plain http(s) URL with no credentials, query or fragment (a host such as PostHog's), never a secret. */
+function isPlainPublicUrl(value: string): boolean {
+  if (!/^https?:\/\//i.test(value)) return false
+  try {
+    const url = new URL(value)
+    // Origin only: a path can carry a secret (a Slack or Discord webhook URL).
+    return url.username === "" && url.password === "" && url.search === "" && url.hash === "" && url.pathname === "/" && !/^https?:\/\/[^/]+\/./i.test(value)
+  } catch {
+    return false
+  }
+}
+
 /**
  * Every value ≥ 8 chars from the repo's `.env*` files (the wizard reads them; no agent does), as scan
- * literals. Plain lowercase words (`production`, `development`) and booleans are skipped: they are settings,
- * not secrets, and redacting them would garble every post. Public connection ids are passed as allowed ids.
+ * literals. Skipped, because they are settings or public by design, and redacting them would block the wizard's
+ * own managed code (the PostHog `/ingest` rewrite names the PostHog host) or garble every post:
+ * - plain lowercase words (`production`) and booleans;
+ * - committed templates (`.env.example`, `.env.sample`, `.env.template`, …);
+ * - values under a browser-public prefix (`NEXT_PUBLIC_*`, `VITE_*`, `PUBLIC_*`, …);
+ * - plain http(s) URLs with no credentials, query or fragment.
+ * Secret SHAPES (Stripe, GitHub, JWT, …) are still caught wherever they appear. Public connection ids are passed
+ * as allowed ids.
  */
 export function collectEnvLiterals(dirs: readonly string[]): ScanLiteral[] {
   const out: ScanLiteral[] = []
@@ -200,7 +229,7 @@ export function collectEnvLiterals(dirs: readonly string[]): ScanLiteral[] {
   for (const dir of dirs) {
     if (!existsSync(dir)) continue
     for (const name of readdirSync(dir)) {
-      if (!/^\.env(\..+)?$/.test(name)) continue
+      if (!/^\.env(\..+)?$/.test(name) || ENV_TEMPLATE.test(name)) continue
       const path = join(dir, name)
       try {
         if (!statSync(path).isFile()) continue
@@ -214,13 +243,14 @@ export function collectEnvLiterals(dirs: readonly string[]): ScanLiteral[] {
         continue
       }
       for (const line of text.split(/\r?\n/)) {
-        const match = /^\s*(?:export\s+)?[A-Za-z_][A-Za-z0-9_.-]*\s*=\s*(.*)$/.exec(line)
+        const match = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_.-]*)\s*=\s*(.*)$/.exec(line)
         if (!match) continue
-        const raw = match[1]!.trim()
+        if (PUBLIC_ENV_PREFIX.test(match[1]!)) continue
+        const raw = match[2]!.trim()
         // A quoted value ends at its closing quote (a `# comment` may follow); an unquoted one at ` #`.
         const quoted = /^(["'])(.*?)\1/.exec(raw)
         const value = quoted ? quoted[2]! : raw.replace(/\s+#.*$/, "")
-        if (value.length < 8 || /^[a-z]+$/.test(value) || /^(true|false)$/i.test(value) || seen.has(value)) continue
+        if (value.length < 8 || /^[a-z]+$/.test(value) || /^(true|false)$/i.test(value) || isPlainPublicUrl(value) || seen.has(value)) continue
         seen.add(value)
         out.push({ value, kind: "env_value" })
       }

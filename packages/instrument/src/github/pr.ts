@@ -20,6 +20,7 @@ interface RawPr {
   mergeStateStatus?: string | null
   reviewDecision?: string | null
   body?: string
+  isCrossRepository?: boolean
 }
 
 export function toPrSummary(raw: RawPr): PrSummary {
@@ -45,8 +46,10 @@ export async function readPr(gh: GhClient, number: number): Promise<PrSummary> {
 }
 
 /**
- * `gh pr list --head <branch> --state all --limit 200`: an open PR is adopted; else the newest. `--limit 200`
- * because gh's default of 30 misses the PR for a busy author (wf4 RV-12).
+ * `gh pr list --head <branch> --author @me --state all --limit 200`: an open PR is adopted; else the newest.
+ * `--limit 200` because gh's default of 30 misses the PR for a busy author (wf4 RV-12). Only the user's OWN
+ * same-repo PRs count: `--head` also matches a stranger's fork PR that reuses the branch name, and the wizard must
+ * never post on, ready or merge-watch someone else's PR.
  */
 export async function findPr(gh: GhClient, branch: string): Promise<PrSummary | null> {
   const rows = await gh.json<RawPr[]>([
@@ -54,14 +57,16 @@ export async function findPr(gh: GhClient, branch: string): Promise<PrSummary | 
     "list",
     "--head",
     branch,
+    "--author",
+    "@me",
     "--state",
     "all",
     "--limit",
     String(PR_LOOP_LIMITS.prListLimit),
     "--json",
-    PR_FIELDS
+    `${PR_FIELDS},isCrossRepository`
   ])
-  const matching = rows.filter((row) => row.headRefName === undefined || row.headRefName === branch)
+  const matching = rows.filter((row) => row.headRefName === branch && row.isCrossRepository !== true)
   if (matching.length === 0) return null
   const open = matching.find((row) => row.state === "OPEN")
   const chosen = open ?? [...matching].sort((a, b) => (b.number ?? 0) - (a.number ?? 0))[0]!

@@ -39,8 +39,9 @@ export async function resolveBase(input: {
   if (fromVercel && isSafeBranchName(fromVercel)) {
     return { base: fromVercel, baseSource: "vercel", fallback: false, label: `Base: ${fromVercel} (Vercel's production branch)` }
   }
-  const facts = await input.host.repoFacts()
-  const fromHost = "unsupported" in facts ? null : facts.defaultBranch
+  // gh missing, logged out or offline is not a stop: the third source (origin/HEAD) still answers.
+  const facts = await input.host.repoFacts().catch(() => null)
+  const fromHost = facts === null || "unsupported" in facts ? null : facts.defaultBranch
   if (fromHost && isSafeBranchName(fromHost)) {
     return {
       base: fromHost,

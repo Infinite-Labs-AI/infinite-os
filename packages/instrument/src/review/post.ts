@@ -90,48 +90,56 @@ export function buildReviewPost(input: {
   for (const finding of input.review.findings) {
     const raw = `${finding.body}${finding.suggested_fix ? `\n\nSuggested fix: ${finding.suggested_fix}` : ""}`
     const scanned = safeText(input.scanner, raw)
-    const location = finding.line === null ? finding.path : `${finding.path}:${finding.line}`
+    // The path is reviewer text too: it is scanned like the body before it appears anywhere.
+    const path = safeText(input.scanner, finding.path)
+    const location = finding.line === null ? path : `${path}:${finding.line}`
     const text = mostlyRedacted(raw, scanned)
       ? `A finding on ${location} was withheld because it quoted a secret or personal data.`
       : scanned
     const label = `**[${finding.item} ${finding.severity}]** ${finding.id}`
-    const path = safeText(input.scanner, finding.path)
     if (finding.line !== null && path === finding.path && lineInHunk(input.diffFiles, finding.path, finding.line)) {
-      threads.push({ path: finding.path, line: finding.line, body: `${label}\n\n${text}\n\n${marker}` })
+      threads.push({ path: finding.path, line: finding.line, body: `${neutralizeCheckboxes(`${label}\n\n${text}`)}\n\n${marker}` })
     } else {
       inBody.push(finding.id)
-      bodyFindings.push(`- ${label} \`${location}\`: ${text.replace(/\n+/g, " ")}`)
+      bodyFindings.push(`- ${label} \`${location.replace(/`/g, "'")}\`: ${text.replace(/\n+/g, " ")}`)
     }
   }
   const checklist = input.review.checklist
     .map((row) => `| ${row.item} | ${STATUS_TEXT[row.status]} | ${escapeCell(safeText(input.scanner, row.note))} |`)
     .join("\n")
   const verdict = input.review.verdict === "looks_good" ? "looks good" : "changes suggested"
-  const body = neutralizeCheckboxes(
-    [
-      `**Second review by ${AGENT_LABEL[input.reviewer]} (round ${input.round}): ${verdict}.** Posted by infinite-tag; a review is an opinion, not a receipt.`,
-      safeText(input.scanner, input.review.summary),
-      checklist ? `| Item | Status | Note |\n|---|---|---|\n${checklist}` : "",
-      bodyFindings.length > 0 ? `**Notes outside the changed lines**\n\n${bodyFindings.join("\n")}` : "",
-      marker
-    ]
-      .filter(Boolean)
-      .join("\n\n")
-  )
+  const content = [
+    `**Second review by ${AGENT_LABEL[input.reviewer]} (round ${input.round}): ${verdict}.** Posted by infinite-tag; a review is an opinion, not a receipt.`,
+    safeText(input.scanner, input.review.summary),
+    checklist ? `| Item | Status | Note |\n|---|---|---|\n${checklist}` : "",
+    bodyFindings.length > 0 ? `**Notes outside the changed lines**\n\n${bodyFindings.join("\n")}` : ""
+  ]
+    .filter(Boolean)
+    .join("\n\n")
+  // Belt and braces: the whole assembled body passes the scan once more (every GitHub post does, §3g.5).
+  const body = `${neutralizeCheckboxes(safeText(input.scanner, content))}\n\n${marker}`
   return { body, threads, inBody }
 }
 
+/**
+ * What happened to a FIX on its thread: `fixed` (committed, and the wizard's checks passed), `unverified`
+ * (committed and pushed, but the required checks had not finished), or `not_fixed`.
+ */
+export type FixReplyState = { kind: "fixed"; sha: string } | { kind: "unverified"; sha: string } | { kind: "not_fixed" }
+
 /** The reply on a thread (never re-read as feedback). */
-export function buildReply(scanner: Scanner, decision: TriageDecision, fixSha: string | null): string {
+export function buildReply(scanner: Scanner, decision: TriageDecision, fix: FixReplyState | null): string {
   const text =
     decision.action === "FIX"
-      ? fixSha
-        ? `Fixed in ${fixSha.slice(0, 7)}; the wizard re-ran its checks and the rehearsal on that commit.`
-        : "Not fixed this round: the agent's change did not pass the wizard's checks. It stays open."
+      ? fix?.kind === "fixed"
+        ? `Fixed in ${fix.sha.slice(0, 7)}; the wizard re-ran its checks and the rehearsal on that commit.`
+        : fix?.kind === "unverified"
+          ? `Changed in ${fix.sha.slice(0, 7)}. The required checks had not finished, so the wizard has not marked it done; it stays open.`
+          : "Not fixed this round: the agent's change did not pass the wizard's checks. It stays open."
       : decision.action === "ASK"
         ? `Waiting on the repo owner: ${decision.reason}`
         : decision.reason
-  return `${safeText(scanner, text)}\n\n${PR_MARKERS.reply}`
+  return `${neutralizeCheckboxes(safeText(scanner, text))}\n\n${PR_MARKERS.reply}`
 }
 
 export interface FinalCommentInput {

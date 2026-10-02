@@ -7,7 +7,7 @@
 // Honest states: a protected preview, a non-Vercel host, or no preview within 10 minutes is `undetermined`,
 // never pass. Nothing here is computed from agent output.
 import type { WizardContext, WizardDeps } from "../wizard/contracts/deps.js"
-import type { CheckResult } from "../wizard/contracts/jobs.js"
+import type { ChecklistItem, CheckResult } from "../wizard/contracts/jobs.js"
 import type { Cell, CellState, FinishLineId, Reason, ReportColumnSnapshot, ReportRowId } from "../wizard/contracts/report.js"
 import { NULL_DISPLAY, REASONS } from "../wizard/contracts/report.js"
 import { PR_LOOP_LIMITS } from "../wizard/contracts/git-host.js"
@@ -23,12 +23,22 @@ import {
   type TestTool
 } from "../wizard/contracts/test-engine.js"
 import type { WizardStepId } from "../wizard/contracts/steps.js"
+import { GhError } from "../github/gh.js"
 import { isGitHubAdapter } from "../hosts/github.js"
 import { isUnsupported } from "../hosts/other.js"
 import type { RunFacts } from "./context.js"
-import { sub } from "./context.js"
+import { bridgeErrorCode, bridgeStopCode, sub } from "./context.js"
 
-export type RehearsalUndetermined = "not_vercel" | "preview_protected" | "no_preview" | "no_production_host" | "not_github" | "test_error"
+export type RehearsalUndetermined =
+  | "not_vercel"
+  | "preview_protected"
+  | "no_preview"
+  | "no_production_host"
+  | "not_github"
+  | "gh_unavailable"
+  | "test_error"
+  | "test_busy"
+  | "facts_unreadable"
 
 export interface RehearsalOutcome {
   state: "graded" | "undetermined"
@@ -40,10 +50,17 @@ export interface RehearsalOutcome {
   clickTested: string[]
   /** The subset whose click fired a GA4 event (only these may become GA4 key events). */
   ga4ClickTested: string[]
-  /** Facts read off the rehearsal (not grades): PostHog's beacons went same-origin (the /ingest proxy); CSP violations. */
-  facts: { posthogSameOrigin: boolean | null; cspViolations: number | null }
+  /** Facts read off the rehearsal (not grades): PostHog's beacons went same-origin (the /ingest proxy); CSP violations
+   *  that blocked an analytics host, and the other (unrelated) violations. */
+  facts: { posthogSameOrigin: boolean | null; cspViolations: number | null; cspOtherViolations?: number }
+  /** The tools the connections expect (from the keys) and the tools the census found in the PR's tree. A cell is
+   *  `pass` only when every one of these graded pass; one undetermined tool makes it undetermined. */
+  expectedTools?: TestTool[]
+  installedTools?: TestTool[]
   /** Whether the rehearsal exercised a client-side navigation (the SPA page-view check). */
   spaExercised: boolean
+  /** Per approved conversion: the click test's verdict (pass, problem, or undetermined when no element matched). */
+  clickVerdicts?: Array<[string, { state: "pass" | "problem" | "undetermined"; reason?: string }]>
 }
 
 const POLL_WAIT_SECONDS = 25
@@ -92,6 +109,23 @@ export async function runDesktopTest(
   step: WizardStepId,
   request: Omit<TestRunRequest, "protocolVersion" | "requestId">
 ): Promise<{ result: TestResult | null; error: string | null }> {
+  try {
+    return await pollDesktopTest(ctx, deps, step, request)
+  } catch (error) {
+    // 402 / signed out stop the step; a busy window, a timeout or a cloud error make the test undetermined.
+    if (bridgeStopCode(error) !== null) throw error
+    const code = bridgeErrorCode(error)
+    if (code === null) throw error
+    return { result: null, error: code }
+  }
+}
+
+async function pollDesktopTest(
+  ctx: WizardContext,
+  deps: WizardDeps,
+  step: WizardStepId,
+  request: Omit<TestRunRequest, "protocolVersion" | "requestId">
+): Promise<{ result: TestResult | null; error: string | null }> {
   const started = await deps.bridge.startTest(request)
   const deadline = deps.clock.now().getTime() + request.deadlineMs + 30_000
   for (;;) {
@@ -112,40 +146,67 @@ export async function runDesktopTest(
   }
 }
 
-async function waitForPreview(ctx: WizardContext, deps: WizardDeps, step: WizardStepId, head: string): Promise<string | null> {
+async function waitForPreview(ctx: WizardContext, deps: WizardDeps, step: WizardStepId, head: string): Promise<{ url: string } | { url: null; why: "no_preview" | "gh_unavailable" }> {
   const until = deps.clock.now().getTime() + PR_LOOP_LIMITS.previewWaitMs
   sub(ctx, step, "Waiting for its Vercel preview…", "pending")
   for (;;) {
-    // A failed read (rate limit, a blip) is "not yet", never a guess.
-    const url = await deps.host.previewUrl(head).catch(() => null)
-    if (isUnsupported(url)) return null
-    if (url) return url
-    if (ctx.signal.aborted || deps.clock.now().getTime() + PREVIEW_POLL_MS > until) return null
+    let url: Awaited<ReturnType<WizardDeps["host"]["previewUrl"]>> | null
+    try {
+      url = await deps.host.previewUrl(head)
+    } catch (error) {
+      // gh missing or logged out never recovers by waiting; a rate limit or a blip is "not yet", never a guess.
+      if (error instanceof GhError && (error.kind === "not_installed" || error.kind === "not_authenticated")) return { url: null, why: "gh_unavailable" }
+      url = null
+    }
+    if (isUnsupported(url)) return { url: null, why: "no_preview" }
+    if (url) return { url }
+    if (ctx.signal.aborted || deps.clock.now().getTime() + PREVIEW_POLL_MS > until) return { url: null, why: "no_preview" }
     await deps.clock.sleep(PREVIEW_POLL_MS, ctx.signal)
   }
 }
 
-function clickResults(result: TestResult, names: readonly string[]): { tested: string[]; ga4: string[] } {
+function clickResults(result: TestResult, names: readonly string[]): { tested: string[]; ga4: string[]; verdicts: NonNullable<RehearsalOutcome["clickVerdicts"]> } {
   const tested: string[] = []
   const ga4: string[] = []
+  const verdicts: NonNullable<RehearsalOutcome["clickVerdicts"]> = []
   for (const name of names) {
     const click = result.clicks.find((candidate) => candidate.label === name)
-    if (!click || !click.found) continue
+    if (!click || !click.found) {
+      verdicts.push([name, { state: "undetermined", reason: "not_exercised" }])
+      continue
+    }
     // A standard Meta conversion fired by a click is on the never-list: such a click never counts as passed.
-    if (click.events.meta.length > 0) continue
+    if (click.events.meta.length > 0) {
+      verdicts.push([name, { state: "problem", reason: `fbq_standard_on_click — ${click.events.meta.join(", ")}` }])
+      continue
+    }
     const fired = click.events.ga4.includes(name) || click.events.posthog.includes(name) || click.events.infinite.includes(name)
-    if (!fired) continue
+    if (!fired) {
+      verdicts.push([name, { state: "problem", reason: `click_test — the click did not send ${name}` }])
+      continue
+    }
+    verdicts.push([name, { state: "pass" }])
     tested.push(name)
     if (click.events.ga4.includes(name)) ga4.push(name)
   }
-  return { tested, ga4 }
+  return { tested, ga4, verdicts }
 }
 
 /** Runs the rehearsal on `head`. Never throws for a site problem: those are graded `problem`. */
 export async function rehearse(
   ctx: WizardContext,
   deps: WizardDeps,
-  input: { step: WizardStepId; runId: string; head: string; facts: RunFacts; approvedConversions: readonly string[]; evidenceUrls: readonly string[]; consentRequired: boolean }
+  input: {
+    step: WizardStepId
+    runId: string
+    head: string
+    facts: RunFacts
+    approvedConversions: readonly string[]
+    evidenceUrls: readonly string[]
+    consentRequired: boolean
+    /** gh is installed and logged in (previews are read through it). */
+    ghReady: boolean
+  }
 ): Promise<RehearsalOutcome> {
   const empty = (reason: RehearsalUndetermined, previewUrl: string | null = null): RehearsalOutcome => ({
     state: "undetermined",
@@ -156,16 +217,21 @@ export async function rehearse(
     clickTested: [],
     ga4ClickTested: [],
     facts: { posthogSameOrigin: null, cspViolations: null },
-    spaExercised: false
+    spaExercised: false,
+    expectedTools: [],
+    installedTools: []
   })
   const { facts } = input
+  if (facts.readFailed) return empty("facts_unreadable")
   if (!facts.hosting || facts.hosting.provider !== "vercel" || !facts.hosting.vercel) return empty("not_vercel")
   if (facts.hosting.vercel.previewProtection !== "none" && facts.hosting.vercel.previewProtection !== "unknown") return empty("preview_protected")
   if (!facts.productionHost) return empty("no_production_host")
   if (deps.host.kind !== "github") return empty("not_github")
+  if (!input.ghReady) return empty("gh_unavailable")
   if (isGitHubAdapter(deps.host)) deps.host.setPreviewProject(facts.hosting.vercel.projectName)
-  const previewUrl = await waitForPreview(ctx, deps, input.step, input.head)
-  if (!previewUrl) return empty("no_preview")
+  const waited = await waitForPreview(ctx, deps, input.step, input.head)
+  if (waited.url === null) return empty(waited.why)
+  const previewUrl = waited.url
 
   const expect: TestExpect = facts.keys ? testExpectFromKeys(facts.keys) : {}
   const consentSeed =
@@ -206,11 +272,19 @@ export async function rehearse(
   sub(ctx, input.step, `Loading the preview under ${facts.productionHost} (nothing sent)…`, "pending")
   const rehearsal = await runDesktopTest(ctx, deps, input.step, rehearsalRequest)
   const preview = await runDesktopTest(ctx, deps, input.step, previewRequest)
-  if (!rehearsal.result) return empty("test_error", previewUrl)
+  if (!rehearsal.result) return empty(rehearsal.error === "busy" ? "test_busy" : "test_error", previewUrl)
 
   const census = await deps.checks.census(ctx.root, ctx.appRoot)
-  const grade = (result: TestResult, mode: TestMode) =>
-    deps.checks.gradeTestRun(result, expect, mode, { cmpDetected: result.environment.cmpDetected, envSourcedIds: census.envSourcedIds })
+  const installedTools = [...new Set(census.entries.map((entry) => entry.tool).filter((tool): tool is TestTool => tool !== "x"))]
+  // `consentMode` and `installedTools` are O6's additive grader inputs (held-by-consent and "installed but
+  // silent"); a grader that does not read them ignores them.
+  const gradeCtx = {
+    cmpDetected: null as TestResult["environment"]["cmpDetected"],
+    envSourcedIds: census.envSourcedIds,
+    consentMode: input.consentRequired ? ("required" as const) : ("not_required" as const),
+    installedTools
+  }
+  const grade = (result: TestResult, mode: TestMode) => deps.checks.gradeTestRun(result, expect, mode, { ...gradeCtx, cmpDetected: result.environment.cmpDetected })
   const grades = await grade(rehearsal.result, "rehearsal")
   const previewGrades = preview.result ? await grade(preview.result, "dry_live") : {}
   const clicks = clickResults(rehearsal.result, input.approvedConversions)
@@ -226,12 +300,44 @@ export async function rehearse(
     previewGrades,
     clickTested: clicks.tested,
     ga4ClickTested: clicks.ga4,
+    clickVerdicts: clicks.verdicts,
     facts: {
       posthogSameOrigin: posthogEvents.length === 0 ? null : posthogEvents.every((event) => event.sameOrigin),
-      cspViolations: rehearsal.result.csp.violations.length
+      ...cspCounts(rehearsal.result.csp.violations, expect)
     },
-    spaExercised: secondPath !== null
+    spaExercised: secondPath !== null,
+    expectedTools: expectedToolsOf(expect),
+    installedTools
   }
+}
+
+/** The tools a `TestExpect` names (the connected ones). */
+export function expectedToolsOf(expect: TestExpect): TestTool[] {
+  return (["infinite", "ga4", "posthog", "meta"] as const).filter((tool) => expect[tool] !== undefined)
+}
+
+const ANALYTICS_HOST_SUFFIXES = ["google-analytics.com", "analytics.google.com", "googletagmanager.com", "posthog.com", "facebook.com", "facebook.net"]
+
+function hostOf(value: string): string {
+  try {
+    return normalizeHost(value.includes("://") ? new URL(value).hostname : value.split("/")[0]!)
+  } catch {
+    return normalizeHost(value)
+  }
+}
+
+/**
+ * CSP violations split into those that blocked an analytics host (GA4, PostHog incl. its connected api host, Meta)
+ * and the rest. A site's unrelated violation (a blocked font) says nothing about whether the CSP allows analytics.
+ */
+export function cspCounts(violations: ReadonlyArray<{ blockedHost: string }>, expect: TestExpect): { cspViolations: number; cspOtherViolations: number } {
+  const suffixes = [...ANALYTICS_HOST_SUFFIXES]
+  if (expect.posthog?.apiHost) suffixes.push(hostOf(expect.posthog.apiHost))
+  const analytics = violations.filter((violation) => {
+    const host = hostOf(violation.blockedHost)
+    return host.length > 0 && suffixes.some((suffix) => host === suffix || host.endsWith(`.${suffix}`))
+  }).length
+  return { cspViolations: analytics, cspOtherViolations: violations.length - analytics }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -239,6 +345,17 @@ export async function rehearse(
 // ---------------------------------------------------------------------------------------------
 
 const TOOL_LABEL: Record<TestTool, string> = { infinite: "Infinite", ga4: "GA4", posthog: "PostHog", meta: "Meta" }
+const TOOLS: readonly TestTool[] = ["infinite", "ga4", "posthog", "meta"]
+/** The tools O6 guards on previews (they must stay silent on the preview's own URL). */
+const GUARDED: readonly TestTool[] = ["ga4", "posthog", "meta"]
+
+/**
+ * The code of a graded result. O6's grader writes `reason` as `<code> — <detail>`; a bare code (or a detail with
+ * no code) is returned whole.
+ */
+export function reasonCode(result: Pick<CheckResult, "reason"> | undefined | null): string {
+  return (result?.reason ?? "").split(" — ")[0]!.trim()
+}
 
 function asReason(value: string | undefined | null): Reason | undefined {
   return value && (REASONS as readonly string[]).includes(value) ? (value as Reason) : undefined
@@ -255,10 +372,36 @@ function makeCell(state: CellState, value: string | null, display: string, at: s
   return cell
 }
 
-function combine(results: readonly CheckResult[], problemWhen: (result: CheckResult) => boolean): CellState {
-  if (results.some(problemWhen)) return "problem"
-  if (results.some((result) => result.state === "pass")) return "pass"
-  return "undetermined"
+type Grades = Partial<Record<TestTool, CheckResult>>
+
+/**
+ * The tools a cell must account for: every connected (expected) tool, every tool the census found in the PR's tree,
+ * and every tool that actually fired (graded pass or problem). A tool that is neither connected nor installed and
+ * sent nothing (`info`, not installed) is left out.
+ */
+function consideredTools(outcome: RehearsalOutcome, grades: Grades, among: readonly TestTool[] = TOOLS): TestTool[] {
+  const named = new Set([...(outcome.expectedTools ?? []), ...(outcome.installedTools ?? [])])
+  return among.filter((tool) => named.has(tool) || grades[tool]?.state === "pass" || grades[tool]?.state === "problem")
+}
+
+/**
+ * One finish-line cell from O6's per-tool grades (§0 "undetermined never counts as pass"):
+ * - `problem` when ANY graded tool has one of `codes`;
+ * - `pass` only when EVERY considered tool graded pass;
+ * - `undetermined` otherwise (a tool undetermined, missing, or failing something this cell cannot see past).
+ */
+function aggregate(outcome: RehearsalOutcome, grades: Grades, codes: readonly string[], among: readonly TestTool[] = TOOLS): { state: CellState; reason?: Reason } {
+  const graded = among.map((tool) => grades[tool]).filter((result): result is CheckResult => Boolean(result))
+  if (graded.some((result) => result.state === "problem" && codes.includes(reasonCode(result)))) return { state: "problem" }
+  const tools = consideredTools(outcome, grades, among)
+  if (tools.length > 0 && tools.every((tool) => grades[tool]?.state === "pass")) return { state: "pass" }
+  const blocking = tools.map((tool) => grades[tool]).find((result) => !result || result.state !== "pass")
+  return { state: "undetermined", reason: asReason(reasonCode(blocking)) ?? (tools.length === 0 ? "not_connected" : "not_exercised") }
+}
+
+function finishCell(verdict: { state: CellState; reason?: Reason }, text: { pass: string; problem: string }, at: string, runId: string, checkId?: string): Cell {
+  if (verdict.state === "undetermined") return makeCell("undetermined", null, NULL_DISPLAY, at, runId, verdict.reason ?? "not_exercised", checkId)
+  return makeCell(verdict.state, verdict.state, verdict.state === "pass" ? text.pass : text.problem, at, runId, undefined, checkId)
 }
 
 const UNDETERMINED_REASON: Record<RehearsalUndetermined, Reason> = {
@@ -267,7 +410,10 @@ const UNDETERMINED_REASON: Record<RehearsalUndetermined, Reason> = {
   no_preview: "not_exercised",
   no_production_host: "not_exercised",
   not_github: "not_exercised",
-  test_error: "not_exercised"
+  gh_unavailable: "read_failed",
+  test_error: "not_exercised",
+  test_busy: "not_exercised",
+  facts_unreadable: "read_failed"
 }
 
 /** Writes the rehearsal's `in_pr` cells for `head` (only the cells the rehearsal measures; other lanes keep theirs). */
@@ -281,51 +427,111 @@ export function rehearsalCells(outcome: RehearsalOutcome, input: { head: string;
     for (const id of ids) finishLine[id] = makeCell("undetermined", null, NULL_DISPLAY, at, runId, reason)
     return { cells, finishLine }
   }
-  const graded = Object.values(outcome.grades).filter((result): result is CheckResult => Boolean(result))
-  const preview = Object.values(outcome.previewGrades).filter((result): result is CheckResult => Boolean(result))
-  const problem = (codes: readonly string[]) => (result: CheckResult) => result.state === "problem" && codes.includes(result.reason ?? "")
-  const once = combine(graded, problem(["duplicate_page_view", "no_beacon"]))
-  finishLine.each_tool_once = makeCell(once, once === "undetermined" ? null : once, once === "pass" ? "each tool once" : "a tool fires twice or not at all", at, runId, undefined, "one_beacon_per_tool")
-  const idsState = combine(graded, problem(["wrong_id"]))
-  finishLine.ids_match_connections = makeCell(idsState, idsState === "undetermined" ? null : idsState, idsState === "pass" ? "right IDs" : "an ID differs from the connection", at, runId)
-  const previewState = preview.some((result) => result.reason === "previews_send_data") ? "problem" : preview.length > 0 ? "pass" : "undetermined"
-  finishLine.previews_silent = makeCell(previewState, previewState === "undetermined" ? null : previewState, previewState === "pass" ? "preview link sent nothing" : "the preview link sends data", at, runId, previewState === "undetermined" ? "not_exercised" : undefined, "preview_self_silent")
+  const grades = outcome.grades
+  finishLine.each_tool_once = finishCell(
+    aggregate(outcome, grades, ["duplicate_page_view", "no_beacon"]),
+    { pass: "each tool once", problem: "a tool fires twice or not at all" },
+    at,
+    runId,
+    "one_beacon_per_tool"
+  )
+  finishLine.ids_match_connections = finishCell(aggregate(outcome, grades, ["wrong_id"]), { pass: "right IDs", problem: "an ID differs from the connection" }, at, runId)
+  const preview = outcome.previewGrades
+  finishLine.previews_silent =
+    Object.keys(preview).length === 0
+      ? makeCell("undetermined", null, NULL_DISPLAY, at, runId, "not_exercised", "preview_self_silent")
+      : finishCell(aggregate(outcome, preview, ["previews_send_data"], GUARDED), { pass: "preview link sent nothing", problem: "the preview link sends data" }, at, runId, "preview_self_silent")
   // RH posthog_via_proxy_once: PostHog graded "fires once, right key" AND its beacons went same-origin.
-  const posthog = outcome.grades.posthog
-  if (!posthog || posthog.state === "undetermined" || outcome.facts.posthogSameOrigin === null) {
-    finishLine.survives_ad_blockers = makeCell("undetermined", null, NULL_DISPLAY, at, runId, asReason(posthog?.reason) ?? "not_connected", "posthog_via_proxy_once")
+  const posthog = grades.posthog
+  if (!posthog || (posthog.state !== "pass" && posthog.state !== "problem") || outcome.facts.posthogSameOrigin === null) {
+    finishLine.survives_ad_blockers = makeCell("undetermined", null, NULL_DISPLAY, at, runId, asReason(reasonCode(posthog)) ?? (posthog?.state === "info" ? "not_connected" : "not_exercised"), "posthog_via_proxy_once")
   } else if (posthog.state === "pass" && outcome.facts.posthogSameOrigin) {
     finishLine.survives_ad_blockers = makeCell("pass", "pass", "PostHog through /ingest, once", at, runId, undefined, "posthog_via_proxy_once")
   } else if (posthog.state === "pass") {
     finishLine.survives_ad_blockers = makeCell("info", "direct", "PostHog sends direct (no /ingest proxy)", at, runId, undefined, "posthog_via_proxy_once")
   } else {
-    finishLine.survives_ad_blockers = makeCell("problem", "problem", `PostHog: ${posthog.reason ?? "problem"}`, at, runId, undefined, "posthog_via_proxy_once")
+    finishLine.survives_ad_blockers = makeCell("problem", "problem", `PostHog: ${reasonCode(posthog).replace(/_/g, " ") || "problem"}`, at, runId, undefined, "posthog_via_proxy_once")
   }
   if (outcome.spaExercised) {
-    const spa = combine(graded, problem(["duplicate_page_view"]))
-    finishLine.spa_page_views = makeCell(spa, spa === "undetermined" ? null : spa, spa === "pass" ? "one page view per navigation" : "a navigation counts twice", at, runId)
+    finishLine.spa_page_views = finishCell(
+      aggregate(outcome, grades, ["duplicate_page_view"], ["ga4", "posthog"]),
+      { pass: "one page view per navigation", problem: "a navigation counts twice" },
+      at,
+      runId
+    )
   } else {
     finishLine.spa_page_views = makeCell("not_measured", null, NULL_DISPLAY, at, runId, "not_exercised")
   }
-  // RH no_csp_violation: the count of violations the test window recorded (a fact, zero = pass).
+  // RH no_csp_violation: only violations that blocked an analytics host count (zero = pass).
   const violations = outcome.facts.cspViolations
+  const other = outcome.facts.cspOtherViolations ?? 0
   finishLine.csp_allows =
     violations === null
       ? makeCell("undetermined", null, NULL_DISPLAY, at, runId, "not_exercised", "no_csp_violation")
-      : makeCell(violations === 0 ? "pass" : "problem", String(violations), violations === 0 ? "no CSP violation" : `${violations} CSP violation(s)`, at, runId, undefined, "no_csp_violation")
-  const pii = combine(graded, problem(["no_pii"]))
-  finishLine.no_pii = makeCell(pii, pii === "undetermined" ? null : pii, pii === "pass" ? "no personal data in beacons" : "personal data in a beacon", at, runId)
+      : makeCell(
+          violations === 0 ? "pass" : "problem",
+          String(violations),
+          violations === 0 ? (other > 0 ? `no CSP violation for analytics (${other} unrelated)` : "no CSP violation") : `${violations} CSP violation(s) block analytics`,
+          at,
+          runId,
+          undefined,
+          "no_csp_violation"
+        )
+  finishLine.no_pii = finishCell(aggregate(outcome, grades, ["no_pii"]), { pass: "no personal data in beacons", problem: "personal data in a beacon" }, at, runId)
   const row = (tool: TestTool): Cell => {
-    const result = outcome.grades[tool]
+    const result = grades[tool]
     if (!result) return makeCell("undetermined", null, NULL_DISPLAY, at, runId, "not_connected")
-    const reason = asReason(result.reason)
-    if (result.state === "undetermined") return makeCell("undetermined", null, NULL_DISPLAY, at, runId, reason)
-    return makeCell(result.state, result.state, result.state === "pass" ? `${TOOL_LABEL[tool]}: fires once, right ID` : `${TOOL_LABEL[tool]}: ${result.reason ?? "problem"}`, at, runId, reason, result.checkId)
+    const code = reasonCode(result)
+    const reason = asReason(code)
+    if (result.state === "undetermined") return makeCell("undetermined", null, NULL_DISPLAY, at, runId, reason ?? "not_exercised")
+    return makeCell(
+      result.state,
+      result.state,
+      result.state === "pass" ? `${TOOL_LABEL[tool]}: fires once, right ID` : `${TOOL_LABEL[tool]}: ${code.replace(/_/g, " ") || result.state}`,
+      at,
+      runId,
+      reason,
+      result.checkId
+    )
   }
   cells.ga4_page_views_per_visit = row("ga4")
   cells.posthog_route = row("posthog")
   cells.meta_pixel = row("meta")
   return { cells, finishLine }
+}
+
+/**
+ * The rehearsal's per-check results for the checklist items (RH tier, this run): the finish-line cells that name a
+ * check id, plus one `click_test` per conversion item (matched by the conversion name after `conversions_to_tools:`).
+ * Built from O6's grades and the click facts; nothing here is the agent's word.
+ */
+export function rehearsalCheckResults(outcome: RehearsalOutcome, input: { at: string; runId: string }): { shared: CheckResult[]; clicks: Map<string, CheckResult> } {
+  const shared: CheckResult[] = []
+  const clicks = new Map<string, CheckResult>()
+  if (outcome.state === "undetermined") return { shared, clicks }
+  const { finishLine } = rehearsalCells(outcome, { head: "", at: input.at, runId: input.runId })
+  for (const cell of Object.values(finishLine)) {
+    const checkId = cell?.provenance.checkId
+    if (!cell || !checkId || (cell.state !== "pass" && cell.state !== "problem" && cell.state !== "undetermined")) continue
+    shared.push({ checkId, tier: "RH", state: cell.state, ...(cell.reason ? { reason: cell.reason } : cell.state === "problem" ? { reason: cell.display } : {}), at: input.at, runId: input.runId })
+  }
+  // The per-tool RH checks of jobs 4 and 5, straight from O6's grade of that tool (an `info` grade, a tool neither
+  // connected nor installed, gives no result). GA4's "one page view" is a problem only for a duplicate or a silent
+  // tag; any other GA4 problem leaves it undetermined.
+  const perTool: Array<[TestTool, string, readonly string[] | null]> = [
+    ["ga4", "ga4_one_page_view", ["duplicate_page_view", "no_beacon"]],
+    ["meta", "meta_pixel_once", null]
+  ]
+  for (const [tool, checkId, problemCodes] of perTool) {
+    const grade = outcome.grades[tool]
+    if (!grade || (grade.state !== "pass" && grade.state !== "problem" && grade.state !== "undetermined")) continue
+    const state = grade.state === "problem" && problemCodes !== null && !problemCodes.includes(reasonCode(grade)) ? "undetermined" : grade.state
+    shared.push({ checkId, tier: "RH", state, ...(grade.reason ? { reason: grade.reason } : {}), at: input.at, runId: input.runId })
+  }
+  for (const [name, verdict] of outcome.clickVerdicts ?? []) {
+    clicks.set(name, { checkId: "click_test", tier: "RH", state: verdict.state, ...(verdict.reason ? { reason: verdict.reason } : {}), at: input.at, runId: input.runId })
+  }
+  return { shared, clicks }
 }
 
 /** Merges the rehearsal's cells into the run state's `in_pr` column for `head`. */
@@ -334,14 +540,29 @@ export function recordRehearsalCells(ctx: WizardContext, outcome: RehearsalOutco
   const fresh = rehearsalCells(outcome, { ...input, at })
   ctx.state.update((state) => {
     const previous = state.report.in_pr
-    // §3i.3 rule 7: in_pr cells are keyed to the head; a new head starts a new column.
-    const base = previous && previous.meta.sha === input.head ? previous : { meta: { measuredAt: at, sha: input.head }, cells: {}, finishLine: {} }
+    // §3i.3 rule 7: in_pr cells are keyed to the head and rebuilt on a new head. Cells that do not depend on the
+    // code (plan answers, cloud reads and receipts, e.g. the consent answer or GA4 key events designated) carry
+    // over; everything measured on the old head (tests, wizard checks, git-host reads) is dropped.
+    const base =
+      previous && previous.meta.sha === input.head
+        ? previous
+        : { meta: { measuredAt: at, sha: input.head }, cells: keepHeadIndependent(previous?.cells), finishLine: keepHeadIndependent(previous?.finishLine) }
     state.report.in_pr = {
       meta: { measuredAt: at, sha: input.head },
       cells: { ...base.cells, ...fresh.cells },
       finishLine: { ...base.finishLine, ...fresh.finishLine }
     }
   })
+}
+
+const HEAD_INDEPENDENT_SOURCES = new Set(["plan_answer", "cloud_read", "cloud_receipt"])
+
+function keepHeadIndependent<K extends string>(cells: Partial<Record<K, Cell>> | undefined): Partial<Record<K, Cell>> {
+  const out: Partial<Record<K, Cell>> = {}
+  for (const [id, cell] of Object.entries(cells ?? {}) as Array<[K, Cell | undefined]>) {
+    if (cell && HEAD_INDEPENDENT_SOURCES.has(cell.provenance.source)) out[id] = cell
+  }
+  return out
 }
 
 /** One line per tool, the design's rehearsal sub-statuses. */
@@ -353,7 +574,10 @@ export function rehearsalLines(outcome: RehearsalOutcome): Array<{ text: string;
       no_preview: "Rehearsal: undetermined (no preview appeared within 10 minutes)",
       no_production_host: "Rehearsal: undetermined (no production host known)",
       not_github: "Rehearsal: undetermined (previews are read from GitHub only)",
-      test_error: "Rehearsal: undetermined (the test window did not finish)"
+      gh_unavailable: "Rehearsal: undetermined (gh is not installed or logged in, so the preview cannot be read)",
+      test_error: "Rehearsal: undetermined (the test window did not finish)",
+      test_busy: "Rehearsal: undetermined (the desktop's test window was busy)",
+      facts_unreadable: "Rehearsal: undetermined (the Infinite app could not read the connections or hosting)"
     }
     return [{ text: why[outcome.reason ?? "test_error"], tone: "warn" }]
   }
@@ -362,12 +586,47 @@ export function rehearsalLines(outcome: RehearsalOutcome): Array<{ text: string;
     const result = outcome.grades[tool]
     if (!result) continue
     if (result.state === "pass") lines.push({ text: `✓ ${TOOL_LABEL[tool]} fires once · right ID`, tone: "ok" })
-    else if (result.state === "problem") lines.push({ text: `${TOOL_LABEL[tool]}: ${result.reason ?? "problem"}`, tone: "warn" })
-    else lines.push({ text: `${TOOL_LABEL[tool]}: undetermined (${result.reason ?? "unknown"})`, tone: "info" })
+    else if (result.state === "problem") lines.push({ text: `${TOOL_LABEL[tool]}: ${reasonCode(result).replace(/_/g, " ") || "problem"}`, tone: "warn" })
+    else if (result.state === "undetermined") lines.push({ text: `${TOOL_LABEL[tool]}: undetermined (${reasonCode(result).replace(/_/g, " ") || "unknown"})`, tone: "info" })
   }
   if (outcome.clickTested.length > 0) lines.push({ text: `✓ Conversions fire on the right buttons (${outcome.clickTested.length})`, tone: "ok" })
-  const preview = Object.values(outcome.previewGrades)
-  if (preview.some((result) => result?.reason === "previews_send_data")) lines.push({ text: "The preview link itself sends data", tone: "warn" })
-  else if (preview.length > 0) lines.push({ text: "✓ Preview links themselves send nothing", tone: "ok" })
+  const silent = rehearsalCells(outcome, { head: "", at: "", runId: "" }).finishLine.previews_silent?.state
+  if (silent === "problem") lines.push({ text: "The preview link itself sends data", tone: "warn" })
+  else if (silent === "pass") lines.push({ text: "✓ Preview links themselves send nothing", tone: "ok" })
   return lines
+}
+
+function conversionKey(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]/g, "")
+}
+
+/**
+ * §3e.5: the rehearsal's RH results reach the checklist items. Every item with an RH check gets the shared results
+ * (one_beacon_per_tool, preview_self_silent, posthog_via_proxy_once, no_csp_violation); a `conversions_to_tools`
+ * item gets the `click_test` of ITS conversion only (its target, compared without case or separators, to the
+ * click's label). The registry's state machine decides each item's state; nothing is the agent's word.
+ */
+export function applyRehearsalToJobs(ctx: WizardContext, deps: Pick<WizardDeps, "registry">, outcome: RehearsalOutcome, runId: string): void {
+  const { shared, clicks } = rehearsalCheckResults(outcome, { at: ctx.now().toISOString(), runId })
+  if (shared.length === 0 && clicks.size === 0) return
+  const byKey = new Map([...clicks].map(([name, result]) => [conversionKey(name), result]))
+  const changes: Array<{ itemId: string; state: ChecklistItem["state"] }> = []
+  ctx.state.update((state) => {
+    state.jobs = state.jobs.map((job) => {
+      const rh = new Set(job.checks.filter((check) => check.tier === "RH").map((check) => check.id))
+      if (rh.size === 0) return job
+      const results = shared.filter((result) => rh.has(result.checkId))
+      if (rh.has("click_test") && job.jobId === "conversions_to_tools") {
+        const target = job.id.slice(job.id.indexOf(":") + 1)
+        const click = byKey.get(conversionKey(target))
+        if (click) results.push(click)
+      }
+      if (results.length === 0) return job
+      const [next] = deps.registry.apply([job], results, runId)
+      if (!next) return job
+      if (next.state !== job.state) changes.push({ itemId: job.id, state: next.state })
+      return next
+    })
+  })
+  for (const change of changes) ctx.emit.emit("job.state", { itemId: change.itemId, state: change.state, by: "wizard", note: "the rehearsal's results" })
 }

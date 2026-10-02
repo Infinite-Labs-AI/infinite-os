@@ -3,9 +3,11 @@
 // run (PR fields, phase `in_pr`, `clickTestedConversions`) → mark GA4 key events for the rehearsal-click-tested
 // names only. A protected preview, a non-Vercel host or no preview is `undetermined`, never pass.
 import { createHash } from "node:crypto"
+import { join } from "node:path"
 
 import type { StepOutcome, WizardContext, WizardDeps, WizardStep } from "../contracts/deps.js"
 import { PR_LOOP_LIMITS } from "../contracts/git-host.js"
+import { WIZARD_PATHS } from "../contracts/state.js"
 import { WIZARD_STEP_META } from "../contracts/steps.js"
 import type { TestTool } from "../contracts/test-engine.js"
 import { wizardGitExtras, type WizardGitOps } from "../../git/index.js"
@@ -15,6 +17,8 @@ import { howToReviewSection } from "../../review/brief.js"
 import {
   allowlistUnion,
   assertNoAgentAlive,
+  bestEffortBridge,
+  bridgeStop,
   buildScanner,
   loadRunFacts,
   manifestFiles,
@@ -26,7 +30,8 @@ import {
 } from "../../review/context.js"
 import { hookFixItem, runFixRound } from "../../review/fix.js"
 import { buildPrBody } from "../../review/post.js"
-import { recordRehearsalCells, rehearsalLines, rehearse, type RehearsalOutcome } from "../../review/rehearse.js"
+import { parseLedger, REVIEW_LEDGER_PATH } from "../../review/ledger.js"
+import { applyRehearsalToJobs, recordRehearsalCells, rehearsalLines, rehearse, type RehearsalOutcome } from "../../review/rehearse.js"
 import type { Scanner } from "../../review/scan.js"
 import { ensurePr, failed, pushBranch, stageAndCommit, type CommitResult } from "../../review/ship.js"
 
@@ -64,10 +69,24 @@ export async function recordClickTests(
   const names = input.outcome.ga4ClickTested.filter((name) => approved.has(name))
   if (names.length === 0 || !deps.bridge.has("tag.ga4-key-events.v1")) return
   assertNoAgentAlive(deps, "ga4-key-events")
-  const response = await deps.bridge.markGa4KeyEvents({ runId: input.runId, names })
-  const marked = [...response.created, ...response.alreadyExisted]
+  let response: Awaited<ReturnType<WizardDeps["bridge"]["markGa4KeyEvents"]>> | null = null
+  await bestEffortBridge(ctx, input.step, "mark the GA4 key events", async () => {
+    response = await deps.bridge.markGa4KeyEvents({ runId: input.runId, names })
+  })
+  if (response === null) return
+  const done: Awaited<ReturnType<WizardDeps["bridge"]["markGa4KeyEvents"]>> = response
+  const marked = [...done.created, ...done.alreadyExisted]
   if (marked.length > 0) sub(ctx, input.step, `GA4 key events: marked for ${marked.length} conversion(s) (click test passed)`, "ok")
-  for (const refusal of response.refused) sub(ctx, input.step, `GA4 key event not marked for ${refusal.name}: ${refusal.reason.replace(/_/g, " ")}`, "warn")
+  for (const refusal of done.refused) sub(ctx, input.step, `GA4 key event not marked for ${refusal.name}: ${refusal.reason.replace(/_/g, " ")}`, "warn")
+}
+
+/** The click-tested names already PATCHed this run (the review step PATCHes only new ones), in the review ledger. */
+export async function rememberClickTested(ctx: WizardContext, deps: WizardDeps, runId: string, names: readonly string[]): Promise<void> {
+  const path = join(ctx.root, REVIEW_LEDGER_PATH)
+  const ledger = parseLedger(await deps.fs.readText(path), runId)
+  ledger.clickTested = [...new Set([...(ledger.clickTested ?? []), ...names])].sort()
+  await deps.fs.mkdirp(join(ctx.root, WIZARD_PATHS.dir), 0o700)
+  await deps.fs.writeTextAtomic(path, `${JSON.stringify(ledger, null, 2)}\n`, 0o600)
 }
 
 export interface ShipContext {
@@ -137,8 +156,8 @@ export function commitStop(result: CommitResult): StepOutcome | null {
       return failed(
         "INF_WIZ_PR_CREATE_FAILED",
         result.ourFiles.length > 0
-          ? `A commit hook failed on the wizard's files (${result.ourFiles.join(", ")}). Your changes are staged; fix the hook's complaint, run \`git commit\`, then \`npx infinite-tag --resume\`.\n${result.output}`
-          : `A commit hook failed on files the wizard did not change. Your changes are staged. Run \`git commit\` yourself once the hook passes, then \`npx infinite-tag --resume\`.\n${result.output}`
+          ? `A commit hook failed on the wizard's files (${result.ourFiles.join(", ")}). Your changes are staged; fix the hook's complaint, run \`${result.command}\`, then \`npx infinite-tag --resume\`.\n${result.output}`
+          : `A commit hook failed on files the wizard did not change. Your changes are staged. Once the hook passes, run \`${result.command}\`, then \`npx infinite-tag --resume\`.\n${result.output}`
       )
     default:
       return null
@@ -146,6 +165,19 @@ export function commitStop(result: CommitResult): StepOutcome | null {
 }
 
 async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
+  try {
+    return await rehearsalRun(ctx, deps)
+  } catch (error) {
+    const stop = bridgeStop(error)
+    if (stop) {
+      await ctx.state.save()
+      return stop
+    }
+    throw error
+  }
+}
+
+async function rehearsalRun(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
   const prepared = await prepareShip(ctx, deps)
   if (!isShipContext(prepared)) return prepared
   const { runId, git, facts, scanner } = prepared
@@ -184,6 +216,8 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
       await ctx.state.save()
       return { kind: "parked", code: "INF_WIZ_AGENT_OUT_OF_USAGE", reason: "The worker agent is out of usage while fixing a commit hook.", resumeHint: "Run `npx infinite-tag` again when your plan resets." }
     }
+    // The hook itself re-checks the fix on the next commit; the receipt (a managed file) goes into that commit.
+    if (fix.run.edits.length > 0) await deps.installer.recordEdits(fix.run.edits)
     commit = await commitOnce()
   }
   const stop = commitStop(commit)
@@ -261,19 +295,24 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
     facts,
     approvedConversions: approved,
     evidenceUrls: evidenceUrls(ctx),
-    consentRequired: state.plan?.answers.consentMode === "required"
+    consentRequired: state.plan?.answers.consentMode === "required",
+    ghReady: prepared.ghReady
   })
   announceRehearsal(ctx, "rehearsal", outcome, runId)
   recordRehearsalCells(ctx, outcome, { head, runId })
+  applyRehearsalToJobs(ctx, deps, outcome, runId)
 
   assertNoAgentAlive(deps, "runs PATCH")
   const prState = ctx.state.get().pr
-  await deps.bridge.patchRun(runId, {
-    ...(prState?.url && prState.number !== null ? { prUrl: prState.url, prNumber: prState.number } : {}),
-    prHeadSha: head,
-    phase: "in_pr",
-    ...(outcome.clickTested.length > 0 ? { clickTestedConversions: outcome.clickTested } : {})
-  })
+  const patched = await bestEffortBridge(ctx, "rehearsal", "tell Infinite about the pull request", () =>
+    deps.bridge.patchRun(runId, {
+      ...(prState?.url && prState.number !== null ? { prUrl: prState.url, prNumber: prState.number } : {}),
+      prHeadSha: head,
+      phase: "in_pr",
+      ...(outcome.clickTested.length > 0 ? { clickTestedConversions: outcome.clickTested } : {})
+    })
+  )
+  if (patched && outcome.clickTested.length > 0) await rememberClickTested(ctx, deps, runId, outcome.clickTested)
   await recordClickTests(ctx, deps, { step: "rehearsal", runId, outcome, approved })
   await ctx.state.save()
 

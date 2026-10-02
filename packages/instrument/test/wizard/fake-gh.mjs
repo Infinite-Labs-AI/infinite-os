@@ -81,6 +81,7 @@ function prView(pr, fields) {
     mergeStateStatus: pr.mergeStateStatus ?? "CLEAN",
     reviewDecision: pr.reviewDecision ?? "",
     author: { login: pr.author },
+    isCrossRepository: pr.isCrossRepository ?? false,
     comments: pr.comments ?? [],
     reviews: pr.reviews ?? []
   }
@@ -166,6 +167,7 @@ if (group === "pr") {
   }
   if (sub === "update-branch") {
     if (argv.includes("--rebase")) fail("fake gh: update-branch --rebase is never allowed")
+    if (pr.mergeStateStatus === "DIRTY") fail("GraphQL: merge conflict between base and head (updatePullRequestBranch)")
     // GitHub's default: merge the base into the PR branch with a merge commit (made on the bare remote).
     const remote = process.env.FAKE_GH_REMOTE
     if (remote && pr.mergeStateStatus === "BEHIND") {

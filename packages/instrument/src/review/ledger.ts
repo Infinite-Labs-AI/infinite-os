@@ -2,6 +2,7 @@
 // remembers, across rounds AND resumes, what the wizard declined (so an item raised again becomes an ASK, never
 // a loop), which decisions are still open for the user, and which round ran on which head. The run state's
 // `pr.handledThreadIds` stays the record of replied threads.
+import type { ReviewResult } from "../wizard/contracts/agents.js"
 import type { TriageDecision } from "./triage.js"
 import { triageKey } from "./triage.js"
 
@@ -13,7 +14,16 @@ export interface ReviewLedger {
   declined: Array<{ key: string; reason: string; round: number }>
   /** ASK items not yet answered: they go into the final comment under "You decide". */
   open: Array<{ key: string; path: string | null; reason: string; excerpt: string; round: number }>
-  rounds: Array<{ round: number; reviewedSha: string; reviewer: string; fixSha: string | null }>
+  rounds: Array<{
+    round: number
+    reviewedSha: string
+    reviewer: string
+    fixSha: string | null
+    /** The round's review after the scan (a resume re-triages it instead of re-running and re-posting it). */
+    review?: ReviewResult
+  }>
+  /** Conversions already sent to the run as `clickTestedConversions` (a fix round PATCHes only new ones). */
+  clickTested?: string[]
 }
 
 export function emptyLedger(runId: string): ReviewLedger {

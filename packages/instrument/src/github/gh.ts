@@ -59,12 +59,22 @@ export function assertSafeGhCall(args: readonly string[], input?: string): void 
   if (group === "repo" && sub && FORBIDDEN_REPO_SUBCOMMANDS.has(sub)) throw new GhSafetyError(`gh repo ${sub} is never used`)
   if (group === "pr" && sub === "update-branch" && args.includes("--rebase")) throw new GhSafetyError("update-branch is merge-commit only")
   if (group === "api") {
-    const methodIndex = args.findIndex((arg) => arg === "-X" || arg === "--method")
-    const method = methodIndex === -1 ? null : args[methodIndex + 1]?.toUpperCase()
-    if (method === "DELETE" || method === "PUT") throw new GhSafetyError(`gh api -X ${method} is never used`)
+    // Every spelling of the method flag: `-X M`, `--method M`, `-XM`, `--method=M`.
+    const methods: string[] = []
+    args.forEach((arg, index) => {
+      if (arg === "-X" || arg === "--method") methods.push(args[index + 1] ?? "")
+      else if (arg.startsWith("--method=")) methods.push(arg.slice("--method=".length))
+      else if (/^-X./.test(arg)) methods.push(arg.slice(2))
+    })
+    for (const method of methods.map((value) => value.toUpperCase())) {
+      if (method === "DELETE" || method === "PUT") throw new GhSafetyError(`gh api -X ${method} is never used`)
+    }
     const path = args[1] ?? ""
     if (/\/merge(s)?\b|\/pulls\/\d+\/merge|\/git\/refs/.test(path)) throw new GhSafetyError(`gh api ${path} is never used`)
     if (path === "graphql") {
+      // The query goes on stdin (`--input -`) only, where the mutation allowlist reads it: a field flag could carry
+      // a query (`-f query='mutation{mergePullRequest…}'`) past it.
+      if (args.slice(2).some((arg) => /^(-f|-F|--raw-field|--field)/.test(arg))) throw new GhSafetyError("gh api graphql takes its query on stdin only")
       const query = input === undefined ? "" : (() => {
         try {
           const parsed = JSON.parse(input) as { query?: unknown }

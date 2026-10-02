@@ -71,13 +71,14 @@ describe("the secret / PII scan (§3g.5)", () => {
     expect(strict.redact("call 4155550132").text).toBe("call [redacted: phone]")
   })
 
-  it("reads .env* values ≥ 8 chars as literals, skipping plain words, booleans and public connection ids", () => {
+  it("reads .env* values ≥ 8 chars as literals, skipping plain words, booleans and browser-public values", () => {
     const dir = mkdtempSync(join(tmpdir(), "o4-env-"))
     try {
       writeFileSync(join(dir, ".env"), `NODE_ENV=production\nDEBUG=true\nSHORT=abc\nDATABASE_URL="postgres://u:hunter2secret@db:5432/app"\n`)
       writeFileSync(join(dir, ".env.local"), `export STRIPE_SECRET_KEY='${STRIPE}' # comment\nNEXT_PUBLIC_META_PIXEL_ID=${PIXEL}\n`)
       const literals = collectEnvLiterals([dir])
-      expect(literals.map((literal) => literal.value).sort()).toEqual(["postgres://u:hunter2secret@db:5432/app", STRIPE, PIXEL].sort())
+      // NEXT_PUBLIC_* is inlined into the browser bundle by design: not a secret.
+      expect(literals.map((literal) => literal.value).sort()).toEqual(["postgres://u:hunter2secret@db:5432/app", STRIPE].sort())
       const envScanner = createScanner({ literals, allowedIds: [PIXEL] })
       expect(envScanner.redact("db postgres://u:hunter2secret@db:5432/app").text).not.toContain("hunter2secret")
       expect(envScanner.redact(`pixel ${PIXEL}`).text).toBe(`pixel ${PIXEL}`)
@@ -117,9 +118,9 @@ describe("triage (§3g.4 step 4)", () => {
     expect(decision!.reason).toMatch(/never adds, changes or checks a cookie banner/)
   })
 
-  it("an R6 finding that REPORTS a consent edit is a fix (undo it), not a decline", () => {
+  it("an R6 finding that REPORTS a consent edit is the user's call (ASK), never a worker FIX", () => {
     const [decision] = triage([item({ item: "R6", body: "The diff edits the consent banner code; revert it." })], triageContext())
-    expect(decision!.action).toBe("FIX")
+    expect(decision).toMatchObject({ action: "ASK", askReason: "ruling_violation", ruling: "banner_consent" })
   })
 
   it("DECLINE: a GA4 proxy request and Meta never-list requests", () => {

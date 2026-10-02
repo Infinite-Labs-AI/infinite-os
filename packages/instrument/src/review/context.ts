@@ -4,7 +4,7 @@
 import { join } from "node:path"
 
 import type { TagHosting, TagKeys } from "../wizard/contracts/bridge.js"
-import type { WizardContext, WizardDeps } from "../wizard/contracts/deps.js"
+import type { StepOutcome, WizardContext, WizardDeps } from "../wizard/contracts/deps.js"
 import type { ChecklistItem, WizardEditRecord } from "../wizard/contracts/jobs.js"
 import type { WizardStepId } from "../wizard/contracts/steps.js"
 import { MCP_ENV } from "../wizard/contracts/agents.js"
@@ -15,6 +15,8 @@ import { collectEnvLiterals, createScanner, type ScanLiteral, type Scanner } fro
 export interface RunFacts {
   keys: TagKeys | null
   hosting: TagHosting | null
+  /** A keys or hosting read failed (not "absent"): the rehearsal is then undetermined (read failed), never guessed. */
+  readFailed?: boolean
   /** The production host the rehearsal serves the preview under (site source first, then Vercel's domains). */
   productionHost: string | null
   /** Every public id the connections hold (never a secret). */
@@ -38,11 +40,73 @@ export function connectionIdsFrom(keys: TagKeys | null): string[] {
  * them too, but the run state has no field for them (§3d.6), so each O4 step re-reads them here.
  */
 export async function loadRunFacts(deps: WizardDeps): Promise<RunFacts> {
-  const keys = deps.bridge.has("tag.keys.v1") ? await deps.bridge.keys() : null
-  const hosting = deps.bridge.has("tag.hosting.v1") ? await deps.bridge.hosting() : null
+  let readFailed = false
+  // A 402 / signed-out stops the step (`bridgeStop`); any other failed read is "unknown", never a guess.
+  const read = async <T>(capability: "tag.keys.v1" | "tag.hosting.v1", fn: () => Promise<T>): Promise<T | null> => {
+    if (!deps.bridge.has(capability)) return null
+    try {
+      return await fn()
+    } catch (error) {
+      if (bridgeStopCode(error) !== null || bridgeErrorCode(error) === null) throw error
+      readFailed = true
+      return null
+    }
+  }
+  const keys = await read("tag.keys.v1", () => deps.bridge.keys())
+  const hosting = await read("tag.hosting.v1", () => deps.bridge.hosting())
   const productionHost =
     keys?.infinite.productionHosts[0] ?? hosting?.vercel?.productionDomains[0] ?? hosting?.vercel?.productionAliases[0] ?? null
-  return { keys, hosting, productionHost: productionHost ? productionHost.toLowerCase() : null, connectionIds: connectionIdsFrom(keys) }
+  return { keys, hosting, productionHost: productionHost ? productionHost.toLowerCase() : null, connectionIds: connectionIdsFrom(keys), ...(readFailed ? { readFailed } : {}) }
+}
+
+/**
+ * The bridge error code of a thrown error (lane O2's `BridgeError {status, code, retryable}`), or null when it is
+ * not a bridge error. Duck-typed, so this lane does not import O2's client.
+ */
+export function bridgeErrorCode(error: unknown): string | null {
+  if (typeof error !== "object" || error === null) return null
+  const candidate = error as { name?: unknown; code?: unknown; status?: unknown }
+  if (candidate.name !== "BridgeError" || typeof candidate.code !== "string") return null
+  return candidate.code
+}
+
+/** The bridge errors that stop the run with "needs the Infinite app" (exit 4), whatever the step was doing. */
+export function bridgeStopCode(error: unknown): "INF_WIZ_SUBSCRIPTION_REQUIRED" | "INF_WIZ_SIGNED_OUT" | null {
+  const code = bridgeErrorCode(error)
+  if (code === "subscription_required") return "INF_WIZ_SUBSCRIPTION_REQUIRED"
+  if (code === "signed_out") return "INF_WIZ_SIGNED_OUT"
+  return null
+}
+
+/** A step's bridge failure as its outcome: 402 → SUBSCRIPTION_REQUIRED, signed out → SIGNED_OUT; anything else rethrows. */
+export function bridgeStop(error: unknown): StepOutcome | null {
+  const code = bridgeStopCode(error)
+  if (code === null) return null
+  const message =
+    code === "INF_WIZ_SUBSCRIPTION_REQUIRED"
+      ? "Your Infinite subscription is not active. Renew it in the Infinite app, then run `npx infinite-tag` again; the pull request stays as it is."
+      : "The Infinite app is signed out. Sign in, then run `npx infinite-tag` again; the pull request stays as it is."
+  return { kind: "failed", code, message, next: "halt" }
+}
+
+/**
+ * A run PATCH or GA4 key-event call that is not a stop: one retry when the bridge says it is retryable, then a
+ * warning line (the step goes on; the merge step PATCHes the run again).
+ */
+export async function bestEffortBridge(ctx: WizardContext, step: WizardStepId, what: string, call: () => Promise<unknown>): Promise<boolean> {
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    try {
+      await call()
+      return true
+    } catch (error) {
+      if (bridgeStopCode(error) !== null || bridgeErrorCode(error) === null) throw error
+      const retryable = (error as { retryable?: unknown }).retryable === true
+      if (attempt === 1 && retryable) continue
+      sub(ctx, step, `Could not ${what} (${bridgeErrorCode(error)}); the run goes on`, "warn")
+      return false
+    }
+  }
+  return false
 }
 
 /**

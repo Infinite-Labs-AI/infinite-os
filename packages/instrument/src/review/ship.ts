@@ -23,7 +23,7 @@ export type CommitResult =
   | { kind: "committed"; sha: string; staged: string[]; leftOut: StageSet["leftOut"]; blocked: ScanHit[]; receiptRefreshSha: string | null }
   | { kind: "nothing"; leftOut: StageSet["leftOut"]; blocked: ScanHit[] }
   | { kind: "refused"; message: string }
-  | { kind: "hook_failed"; ourFiles: string[]; output: string }
+  | { kind: "hook_failed"; ourFiles: string[]; output: string; /** The exact command that commits with the run's trailers (§3g.1). */ command: string }
   | { kind: "failed"; message: string }
 
 export interface CommitInput {
@@ -112,7 +112,9 @@ export async function stageAndCommit(input: CommitInput): Promise<CommitResult> 
     if (error.kind === "nothing_to_commit") return { kind: "nothing", leftOut: set.leftOut, blocked }
     if (error.kind === "hook_failed") {
       const ourFiles = error.pathsInOutput.filter((path) => set.stage.includes(path))
-      return { kind: "hook_failed", ourFiles, output: input.scanner.redact(error.stderr).text.slice(0, 2_000) }
+      // §3g.1: stop with the files staged and print the exact command (its message file carries the run trailer).
+      const command = await writeCommitMessage(input, trailers)
+      return { kind: "hook_failed", ourFiles, output: input.scanner.redact(error.stderr).text.slice(0, 2_000), command }
     }
     if (error.kind === "signing") {
       const handed = await handOverCommit(input, trailers)
@@ -151,14 +153,21 @@ export async function stageAndCommit(input: CommitInput): Promise<CommitResult> 
   return { kind: "committed", sha, staged: set.stage, leftOut: set.leftOut, blocked, receiptRefreshSha }
 }
 
+/** Writes the commit message (with the run trailers) to `.infinite/wizard/commit-message.txt`; returns the command. */
+async function writeCommitMessage(input: CommitInput, trailers: Record<string, string>): Promise<string> {
+  const messagePath = join(input.ctx.root, WIZARD_PATHS.dir, "commit-message.txt")
+  const message = `${input.message.trim()}\n\n${Object.entries(trailers).map(([key, value]) => `${key}: ${value}`).join("\n")}\n`
+  await input.deps.fs.mkdirp(join(input.ctx.root, WIZARD_PATHS.dir), 0o700)
+  await input.deps.fs.writeTextAtomic(messagePath, message, 0o600)
+  return `git commit -F ${WIZARD_PATHS.dir}/commit-message.txt`
+}
+
 /** Signing needs the user's terminal (pinentry / a passphrase): the UI runs the commit with the TTY. */
 async function handOverCommit(input: CommitInput, trailers: Record<string, string>): Promise<string | null> {
   const { ctx, git } = input
-  const messagePath = join(ctx.root, WIZARD_PATHS.dir, "commit-message.txt")
-  const message = `${input.message.trim()}\n\n${Object.entries(trailers).map(([key, value]) => `${key}: ${value}`).join("\n")}\n`
-  await input.deps.fs.writeTextAtomic(messagePath, message, 0o600)
+  const command = await writeCommitMessage(input, trailers)
   ctx.emit.emit("tty.handover", { reason: "gpg" })
-  const answer = await ctx.ask("tty-handover", { reason: "gpg", command: `git commit -F ${WIZARD_PATHS.dir}/commit-message.txt` })
+  const answer = await ctx.ask("tty-handover", { reason: "gpg", command })
   ctx.emit.emit("tty.resume", {})
   if (typeof answer !== "object" || answer.exitCode !== 0) return null
   return git.head()
@@ -211,7 +220,7 @@ export async function pushBranch(input: {
 export type EnsurePrResult =
   | { kind: "pr"; pr: PrSummary; adopted: boolean; draftFallback: boolean }
   | { kind: "link"; url: string | null; why: "not_github" | "gh_unavailable" }
-  | { kind: "failed"; message: string; noPushAccess?: boolean }
+  | { kind: "failed"; message: string; noPushAccess?: boolean; closed?: boolean }
 
 /** §3g.2: adopt an open PR on the branch, else create a draft (or a ready `[review pending] ` PR). */
 export async function ensurePr(input: {
@@ -231,6 +240,10 @@ export async function ensurePr(input: {
   }
   const existing = await deps.host.findPr(input.branch)
   if (!isUnsupported(existing) && existing !== null && existing.state === "OPEN") return { kind: "pr", pr: existing, adopted: true, draftFallback: false }
+  if (!isUnsupported(existing) && existing !== null && existing.state === "CLOSED") {
+    // §3d.6: a closed PR is never reopened or duplicated from the same branch: the user starts a fresh run.
+    return { kind: "failed", message: `Pull request #${existing.number} on this branch was closed without merging. Run \`npx infinite-tag\` to start a fresh run.`, closed: true }
+  }
   await deps.fs.mkdirp(join(input.root, WIZARD_PATHS.dir), 0o700)
   await deps.fs.writeTextAtomic(join(input.root, WIZARD_PATHS.prBody), input.body, 0o600)
   try {

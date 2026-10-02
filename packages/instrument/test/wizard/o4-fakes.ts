@@ -217,7 +217,15 @@ export function scriptedAgents(options: {
 
 export function fakeChecks(options: { grades?: Partial<Record<TestMode, Partial<Record<TestTool, CheckResult>>>>; build?: boolean } = {}): CheckRunner & { gradeCalls: TestMode[] } {
   const gradeCalls: TestMode[] = []
-  const pass = (tool: TestTool, mode: TestMode): CheckResult => ({ checkId: `${tool}_once`, state: "pass", tier: mode === "rehearsal" ? "RH" : "T1", at: "2026-10-02T10:00:20.000Z", runId: RUN_ID })
+  // O6's shape: `checkId: test_run:<tool>`, `reason: "<code> — <detail>"` (a pass carries the detail only).
+  const pass = (tool: TestTool, mode: TestMode): CheckResult => ({
+    checkId: `test_run:${tool}`,
+    state: "pass",
+    reason: `${tool} fires once with the connected id`,
+    tier: mode === "rehearsal" ? "RH" : "T1",
+    at: "2026-10-02T10:00:20.000Z",
+    runId: RUN_ID
+  })
   return {
     gradeCalls,
     async run(checkId) {
@@ -267,19 +275,34 @@ export function fakeChecks(options: { grades?: Partial<Record<TestMode, Partial<
   }
 }
 
+/**
+ * A registry whose `apply` follows lane O8's state machine (§3e.5): results merge into the item's checks (by id,
+ * tier and THIS run); a claimed item reaches done_in_code only when EVERY local check (S, B, T0) passed, and goes
+ * back to pending on a local problem; an RH problem sends a done item back too.
+ */
 export function fakeRegistry(): JobRegistry {
+  const LOCAL = new Set(["S", "B", "T0"])
   return {
     seedCandidates: () => [],
     applyApprovals: (candidates) => [...candidates],
     allowedFiles: (item) => item.allow,
     brief: (items) => `Do only these jobs: ${items.map((item) => item.id).join(", ")}`,
     checksFor: () => [],
-    apply(items, results) {
-      const problem = results.some((result) => result.state === "problem")
+    apply(items, results, runId) {
       return items.map((item): ChecklistItem => {
-        if (problem) return { ...item, state: "pending" }
-        if (item.claim?.status === "done") return { ...item, state: "done_in_code" }
-        return item
+        const checks = item.checks.map((check) => {
+          const result = results.find((candidate) => candidate.checkId === check.id && candidate.tier === check.tier && candidate.runId === runId)
+          return result ? { ...check, state: result.state, runId, at: result.at, ...(result.reason ? { reason: result.reason } : {}) } : check
+        })
+        const next: ChecklistItem = { ...item, checks }
+        const local = checks.filter((check) => LOCAL.has(check.tier))
+        if (next.state === "claimed") {
+          if (local.some((check) => check.state === "problem")) next.state = "pending"
+          else if (local.length > 0 && local.every((check) => check.state === "pass")) next.state = "done_in_code"
+        } else if (next.state === "done_in_code" || next.state === "waiting_deploy") {
+          if (checks.some((check) => check.tier === "RH" && check.state === "problem")) next.state = "pending"
+        }
+        return next
       })
     },
     reverifyNotNeeded: () => ({ agrees: true, evidence: [] })

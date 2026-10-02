@@ -9,7 +9,7 @@ import type { ReviewChecklistItemId } from "../wizard/contracts/agents.js"
 import { allowEntryMatches } from "../git/commit.js"
 
 export type TriageAction = "FIX" | "DECLINE" | "ANSWER" | "ASK"
-export type AskReason = "conversion_names" | "privacy_text" | "allowlist_widening" | "reviewer_conflict" | "raised_after_decline" | "unlocated"
+export type AskReason = "conversion_names" | "privacy_text" | "allowlist_widening" | "reviewer_conflict" | "raised_after_decline" | "unlocated" | "ruling_violation"
 
 export interface TriageItem {
   source: "reviewer" | "teammate"
@@ -37,7 +37,10 @@ export type RulingId = "banner_consent" | "ga4_proxy" | "meta_never_list" | "no_
 
 interface Ruling {
   id: RulingId
-  /** The checklist item under which a finding REPORTS a violation of this ruling (then it is a FIX: undo it). */
+  /**
+   * The checklist item under which a finding REPORTS that the PR breaks this ruling. That is an ASK (the user
+   * decides; a worker never edits consent, a GA4 proxy or the Meta never-list), never a FIX.
+   */
   violationItem: ReviewChecklistItemId | null
   pattern: RegExp
   reply: string
@@ -101,6 +104,14 @@ export interface TriageContext {
   answerFor(item: TriageItem): string | null
 }
 
+/** A plain repo-relative path: not absolute, no `..` segment, no backslash or control character. */
+export function isRepoRelativePath(path: string): boolean {
+  // eslint-disable-next-line no-control-regex
+  if (path.length === 0 || path.length > 400 || /[\\\u0000-\u001f]/.test(path)) return false
+  if (path.startsWith("/") || path.startsWith("~") || /^[A-Za-z]:/.test(path)) return false
+  return !path.split("/").some((segment) => segment === ".." || segment === "." || segment === "")
+}
+
 function inAllowlist(path: string, allowlist: readonly string[]): boolean {
   return allowlist.some((entry) => allowEntryMatches(entry, path))
 }
@@ -119,14 +130,32 @@ export function triage(items: readonly TriageItem[], ctx: TriageContext): Triage
   }
   return items.map((item): TriageDecision => {
     const text = `${item.body}\n${item.suggestedFix ?? ""}`
-    if (ctx.declinedKeys.has(triageKey(item))) {
-      return { item, action: "ASK", askReason: "raised_after_decline", reason: "Raised again after the wizard declined it: you decide, so the review never loops." }
-    }
-    for (const ruling of RULINGS) {
-      if (!ruling.pattern.test(text)) continue
-      // A finding that REPORTS a violation of the ruling (under its checklist item) asks to undo it: a fix.
-      if (ruling.violationItem !== null && item.item === ruling.violationItem && item.path !== null && inAllowlist(item.path, ctx.allowlist)) break
+    const declinedBefore = ctx.declinedKeys.has(triageKey(item))
+    // Rulings first, whatever the item label: a ruling match is never a FIX (and never offered as one).
+    const ruling = RULINGS.find((candidate) => candidate.pattern.test(text))
+    if (ruling) {
+      if (declinedBefore) {
+        return {
+          item,
+          action: "ASK",
+          askReason: "raised_after_decline",
+          ruling: ruling.id,
+          reason: `${ruling.reply} It was raised again after the wizard declined it: you decide, outside the wizard.`
+        }
+      }
+      if (ruling.violationItem !== null && item.item === ruling.violationItem) {
+        return {
+          item,
+          action: "ASK",
+          askReason: "ruling_violation",
+          ruling: ruling.id,
+          reason: "The reviewer says this pull request breaks a standing rule. The wizard never hands consent, a GA4 proxy or Meta's never-list to an agent: you decide."
+        }
+      }
       return { item, action: "DECLINE", ruling: ruling.id, reason: ruling.reply }
+    }
+    if (declinedBefore) {
+      return { item, action: "ASK", askReason: "raised_after_decline", reason: "Raised again after the wizard declined it: you decide, so the review never loops." }
     }
     if (conflicts.has(item)) {
       return { item, action: "ASK", askReason: "reviewer_conflict", reason: "Two reviewers suggest different changes on this line: you decide." }
@@ -145,6 +174,9 @@ export function triage(items: readonly TriageItem[], ctx: TriageContext): Triage
     }
     if (item.path === null) {
       return { item, action: "ASK", askReason: "unlocated", reason: "The comment names no file, so the wizard cannot scope a fix: you decide." }
+    }
+    if (!isRepoRelativePath(item.path)) {
+      return { item, action: "ASK", askReason: "unlocated", reason: "The comment names a path outside the repo, so the wizard cannot scope a fix: you decide." }
     }
     if (!inAllowlist(item.path, ctx.allowlist)) {
       return {
