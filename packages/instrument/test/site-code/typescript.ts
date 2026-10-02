@@ -36,3 +36,13 @@ export function transpileToCommonJs(source: string): string {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 }
   }).outputText
 }
+
+/**
+ * A package source file as `tsc -p tsconfig.build.json` emits it (the repo's ES2022 target, types erased),
+ * in CommonJS so a test can load it: the bytes `Function.prototype.toString()` serialises for customers.
+ */
+export function transpileLikeBuild(source: string): string {
+  return ts.transpileModule(source, {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 }
+  }).outputText
+}

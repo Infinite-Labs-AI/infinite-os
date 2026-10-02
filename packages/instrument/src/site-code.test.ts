@@ -222,6 +222,8 @@ describe("plan blockers", () => {
       hostGuard: { mode: "deny", exempt: ["acme.com"], deny: [] }
     })
     expect(plan.blockers.join("\n")).toMatch(/would silence production host\(s\) acme\.vercel\.app/)
+    // One guard, three guarded providers: the plan states the blocker once (it de-duplicates).
+    expect(plan.blockers.filter((blocker) => /would silence production/.test(blocker))).toHaveLength(1)
   })
 
   it("refuses a malformed exempt host and a malformed sensitive path", () => {

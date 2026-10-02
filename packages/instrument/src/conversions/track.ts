@@ -78,7 +78,12 @@ export function helperCoreSource(): string {
   ].join("\n")
 }
 
-/** `window.infiniteTrack`. Returns true when at least one tool accepted the event. */
+/**
+ * `window.infiniteTrack`. Returns true when at least one tool's function ACCEPTED the call. That is not
+ * "sent": on a silenced preview PostHog's methods only queue in memory and gtag only pushes to a
+ * dataLayer nothing reads, so it returns true while nothing leaves the page. Proof of delivery is the
+ * wizard's receipts, never this value.
+ */
 export function trackSource(): string {
   return [
     "window.infiniteTrack = function (name, props, options) {",

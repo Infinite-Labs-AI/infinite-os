@@ -111,7 +111,7 @@ export const infiniteProviderAdapter: ProviderAdapter = {
           : []),
         ...(infinite && (context?.artifacts.ga4 || context?.artifacts.posthog)
           ? [
-              "GA4 and PostHog run independently of Infinite: each installs its own native bootstrap with its own page views and its own consent handling. Infinite never forwards browser events into them and never changes their configuration."
+              "GA4 and PostHog run independently of Infinite: each installs its own native bootstrap with its own page views and its own consent handling. The Infinite runtime never forwards browser events into them and never changes their configuration while the page runs."
             ]
           : []),
         ...(infinite && context?.artifacts.conversions?.helpers === true
