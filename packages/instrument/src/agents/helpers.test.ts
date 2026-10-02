@@ -21,6 +21,12 @@ describe("sanitizeUntrusted", () => {
     expect(sanitizeUntrusted("short", 10)).toBe("short")
   })
 
+  it("strips Unicode tag characters (ASCII smuggling) and the soft hyphen (review O3 F22)", () => {
+    const smuggled = "ok" + String.fromCodePoint(0xe0049, 0xe0047, 0xe004e, 0xe007f) + "hid\u00ADden"
+    expect(sanitizeUntrusted(smuggled, 120)).toBe("okhidden")
+    expect(sanitizeUntrusted("plain text", 120)).toBe("plain text")
+  })
+
   it("rejects a bad cap and renders non-strings safely (negative)", () => {
     expect(() => sanitizeUntrusted("x", 0)).toThrow()
     expect(sanitizeUntrusted(undefined, 5)).toBe("")

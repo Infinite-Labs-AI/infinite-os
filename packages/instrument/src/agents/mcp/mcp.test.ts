@@ -182,6 +182,20 @@ describe("the claim tools", () => {
     }
     expect(asks).toHaveLength(1)
     expect(isPlanDecidedTopic("Which file holds the checkout handler?")).toBe(false)
+    // Decisions the plan made are refused; ordinary questions that share a word are not (review O3 F23).
+    for (const decided of [
+      "Should the consent default be granted?",
+      "Can I change the cookie banner text?",
+      "Should I reword the privacy paragraph?",
+      "What should the conversion name be?",
+      "Can I run npm install @vercel/functions?",
+      "Should I add a dependency for this?"
+    ]) {
+      expect(isPlanDecidedTopic(decided)).toBe(true)
+    }
+    for (const open of ["Which file is the privacy page?", "Which cookie holds the session id?", "Is the hero banner on /pricing a landing page?", "Is this a pnpm workspace?"]) {
+      expect(isPlanDecidedTopic(open)).toBe(false)
+    }
   })
 
   it("report_progress is sanitised and capped at 120 characters", async () => {

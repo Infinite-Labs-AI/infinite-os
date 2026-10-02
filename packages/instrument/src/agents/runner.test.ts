@@ -3,7 +3,7 @@
 import { execFile } from "node:child_process"
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
-import { afterEach, beforeAll, describe, expect, it } from "vitest"
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest"
 
 import { assertBuilt, FAKE_BIN_DIR, fakeAgents, gateSpy, makeRunner, records, RUN_ID, runs, type FakeSetup } from "../../test/wizard/agents.js"
 import { cleanup, item, makeFenceFixture, POST_INSTALL_LAYOUT, runGit, tempDir, write } from "../../test/wizard/repo.js"
@@ -14,6 +14,9 @@ import { runScratchDir } from "./paths.js"
 import { reviewInDetachedWorktree, SYSTEM_PROMPT_HEADER, WORKER_KICKOFF, WORKER_RESUME_KICKOFF, type AgentRunResultWithExtras } from "./runner.js"
 import { assertReviewWorktree } from "./worktree-guard.js"
 
+// These spawn real node fakes, the built mcp-proxy and git for up to 4 rounds: the 5 s default is too
+// tight under a loaded full-suite run (review O3 F15).
+vi.setConfig({ testTimeout: 30_000 })
 beforeAll(() => assertBuilt())
 
 const dirs: string[] = []

@@ -1,7 +1,7 @@
 // Step `agent` against the REAL runner's detection over the fake claude/codex binaries, and a fake bridge.
 import { mkdirSync, symlinkSync } from "node:fs"
 import { join } from "node:path"
-import { afterEach, beforeAll, describe, expect, it } from "vitest"
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest"
 
 import { assertBuilt, fakeAgents, makeRunner } from "../../../test/wizard/agents.js"
 import { cleanup, runGit, tempDir } from "../../../test/wizard/repo.js"
@@ -11,6 +11,9 @@ import type { TagCapability } from "../contracts/bridge.js"
 import type { WizardOptions } from "../contracts/deps.js"
 import { step } from "./agent.js"
 
+// These spawn real node fakes, the built mcp-proxy and git for up to 4 rounds: the 5 s default is too
+// tight under a loaded full-suite run (review O3 F15).
+vi.setConfig({ testTimeout: 30_000 })
 beforeAll(() => assertBuilt())
 const dirs: string[] = []
 afterEach(() => cleanup(...dirs.splice(0)))

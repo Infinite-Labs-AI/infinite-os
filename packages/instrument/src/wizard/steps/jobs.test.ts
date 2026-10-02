@@ -2,7 +2,7 @@
 // fixture) and fake checks / registry / installer / bridge. No real agent, no model, no network.
 import { existsSync, readFileSync, statSync } from "node:fs"
 import { join } from "node:path"
-import { afterEach, beforeAll, describe, expect, it } from "vitest"
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest"
 
 import { assertBuilt, fakeAgents, makeRunner, runs } from "../../../test/wizard/agents.js"
 import { cleanup, makeFenceFixture, POST_INSTALL_LAYOUT, write } from "../../../test/wizard/repo.js"
@@ -12,6 +12,9 @@ import type { WizardOptions } from "../contracts/deps.js"
 import type { CheckResult, ChecklistItem, CheckRunner } from "../contracts/jobs.js"
 import { NESTED_BRIEF_PATH, step } from "./jobs.js"
 
+// These spawn real node fakes, the built mcp-proxy and git for up to 4 rounds: the 5 s default is too
+// tight under a loaded full-suite run (review O3 F15).
+vi.setConfig({ testTimeout: 30_000 })
 beforeAll(() => assertBuilt())
 const dirs: string[] = []
 afterEach(() => cleanup(...dirs.splice(0)))

@@ -4,7 +4,7 @@
 //
 // It strips what could drive or fool a terminal: ANSI/VT escape sequences (CSI, OSC, DCS, single-char
 // ESC sequences), every C0 and C1 control character, the bidi overrides/isolates that reorder text
-// (Trojan Source), and zero-width joiners used to hide text. Whitespace runs collapse to one space, and
+// (Trojan Source), zero-width joiners used to hide text, and Unicode tag characters / the soft hyphen. Whitespace runs collapse to one space, and
 // the result is capped at `max` characters (code points, never splitting a surrogate pair), ending in "…"
 // when cut. Pure; no I/O.
 
@@ -31,6 +31,10 @@ const CONTROL_PATTERN = /[\u0000-\u001f\u007f-\u009f]/g
 // Bidi embeddings/overrides/isolates and marks, plus zero-width characters and the BOM.
 const INVISIBLE_PATTERN = /[؜​-‏‪-‮⁠-⁩﻿]/g
 
+// Unicode TAG characters (U+E0000–U+E007F: invisible "ASCII smuggling" text a model still reads) and the
+// soft hyphen (review O3 F22).
+const SMUGGLING_PATTERN = /[\u{E0000}-\u{E007F}\u00AD]/gu
+
 export const SANITIZE_ELLIPSIS = "…"
 
 export function sanitizeUntrusted(text: unknown, max: number): string {
@@ -41,6 +45,7 @@ export function sanitizeUntrusted(text: unknown, max: number): string {
     .replace(/[\t\n\r\v\f]/g, " ")
     .replace(CONTROL_PATTERN, "")
     .replace(INVISIBLE_PATTERN, "")
+    .replace(SMUGGLING_PATTERN, "")
     .replace(/\s+/g, " ")
     .trim()
   const points = Array.from(cleaned)
