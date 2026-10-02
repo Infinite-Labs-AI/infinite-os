@@ -1507,6 +1507,40 @@ describe("step words and connection dots (step.words.v1, status.connections.v1)"
     }
   });
 
+  it("the one-shot command prints each step in words, never the raw tool id", async () => {
+    const RAW = "mcp__sample_app__list_sample_rows";
+    const frame = (sequence: number, data: Record<string, unknown>) =>
+      JSON.stringify({ protocolVersion: 1, requestId: "request-1", sequence, kind: "progress", data });
+    const run = async (capabilities: string[]) => {
+      const fixture = createBridgeHome(descriptor({ capabilities }));
+      roots.push(fixture.root);
+      const stderr: string[] = [];
+      const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+        if (String(input).endsWith("/v1/status")) return jsonResponse(status({ capabilities }));
+        return ndjsonResponse([
+          frame(1, { type: "tool.start", stage: "tool", message: RAW, toolId: "c1", name: RAW, context: '{"level":"row"}', words: { label: "checking the catalog" } }),
+          frame(2, { type: "tool.complete", stage: "tool", message: RAW, toolId: "c1", name: RAW, status: "ok", words: { label: "checking the catalog", result: "3 rows" } }),
+          frame(3, { type: "tool.complete", stage: "tool", message: RAW, toolId: "c2", name: "mcp__sample_app__propose_pause_sample_item", status: "requires_confirmation" }),
+          JSON.stringify({ protocolVersion: 1, requestId: "request-1", sequence: 4, kind: "done", data: { turnId: "turn-1", message: "Done.", actionCalls: [] } })
+        ]);
+      }) as typeof fetch;
+      await runDesktopAppCommand(["how", "are", "the", "rows"], fixture.env, {
+        fetchImpl,
+        randomId: () => "request-1",
+        io: { inputIsTTY: false, outputIsTTY: false, writeOut: () => undefined, writeErr: (text) => stderr.push(text) }
+      });
+      return stderr.join("");
+    };
+
+    const worded = await run([...CAPABILITIES, STEP_WORDS]);
+    expect(worded).toBe("checking the catalog\nchecking the catalog ✓ 3 rows\nproposing pause sample item ▣ waiting for your OK\n");
+
+    // An old desktop never negotiated words: generic words from the tool's name, and still no raw id.
+    const plain = await run(CAPABILITIES);
+    expect(plain).toBe("listing sample rows\nlisting sample rows ✓\nproposing pause sample item ▣ waiting for your OK\n");
+    expect(`${worded}${plain}`).not.toMatch(/mcp__|sample_app|level/u);
+  });
+
   it("a capable desktop that sends no connections, or a broken list, still gives a status", async () => {
     const capable = [...CAPABILITIES, CONNECTIONS];
     const absent = harness({ descriptor: capable, status: capable });

@@ -13,11 +13,11 @@
 //   · recall  Recalled prior session context  1.2s
 //   ◇ delegate  Review the renderer  2.1s     a subagent
 import type { ChatProgressEvent } from "@infinite-os/llm-controller";
-import { isDisplayWords, stepWordsOf } from "../desktop/step-words.js";
+import { decodeStepWords, isDisplayWords, stepWordsOf, type StepWords } from "../desktop/step-words.js";
 import { TOOL_VERBS } from "../tui/content/verbs.js";
 import { compactPreview } from "../tui/lib/text.js";
 import { viewText } from "../tui/views/primitives.js";
-import { friendlyStepLabel, plainToolWords, toolOutcome, WAITING_WORDS } from "../tui/views/steps.js";
+import { friendlyStepLabel, plainToolWords, stepProgressWords, toolOutcome, WAITING_WORDS } from "../tui/views/steps.js";
 
 type LegacyRenderableProgress = {
   stage: "recall" | "resolve" | "tool";
@@ -50,13 +50,7 @@ function formatInfiniteProgress(event: Extract<ChatProgressEvent, { type: string
     return runningToolLine(event, event.preview, elapsedMs);
   }
   if (event.type === "tool.complete") {
-    // A transport may report failure as status:"error" with no error string;
-    // a call that waits for the person's OK is pending (▣), never ✓.
-    const words = stepWordsOf(event);
-    const outcome = toolOutcome({ status: event.status, error: event.error, summary: event.summary, words });
-    const mark = outcome.status === "fail" ? "✗" : outcome.status === "wait" ? PENDING : "✓";
-    const result = outcome.result || (outcome.status === "wait" ? WAITING_WORDS : "");
-    return `  ${words?.label ?? friendlyStepLabel(event.name)} ${mark}${result ? ` ${result}` : ""}`;
+    return `  ${finishedToolLine(event, stepWordsOf(event))}`;
   }
   if (event.type === "thinking.delta" || event.type === "reasoning.delta") {
     const detail = viewText(event.text).replace(/\s+/g, " ").trim();
@@ -80,6 +74,44 @@ function formatInfiniteProgress(event: Extract<ChatProgressEvent, { type: string
     stage: event.stage === "recall" ? "recall" : "resolve",
     message: event.text || event.message
   }, elapsedMs);
+}
+
+/**
+ * A finished call: its label, its mark and its result. A transport may report
+ * failure as status:"error" with no error string; a call that waits for the
+ * person's OK is pending (▣), never ✓.
+ */
+function finishedToolLine(
+  event: { name: string; status?: string; error?: string; summary?: string },
+  words: StepWords | null
+): string {
+  const outcome = toolOutcome({ status: event.status, error: event.error, summary: event.summary, words });
+  const mark = outcome.status === "fail" ? "✗" : outcome.status === "wait" ? PENDING : "✓";
+  const result = outcome.result || (outcome.status === "wait" ? WAITING_WORDS : "");
+  return `${words?.label ?? friendlyStepLabel(event.name)} ${mark}${result ? ` ${result}` : ""}`;
+}
+
+/**
+ * One tool frame as a plain line for the one-shot `infinite app` command (it
+ * prints progress to stderr, a line per frame: no spinner, no timer). The
+ * app's words when the turn negotiated them (`stepWords`), else generic words
+ * from the tool's name; a progress frame only when its preview reads as words.
+ * Null = nothing to print. Never the raw tool id or its arguments.
+ */
+export function plainToolProgressLine(data: Record<string, unknown>, stepWords: boolean): string | null {
+  const text = (value: unknown) => (typeof value === "string" && value.trim() ? value : undefined);
+  const name = text(data.name) ?? "tool";
+  const words = stepWords ? decodeStepWords(data.words) : null;
+  if (data.type === "tool.start") {
+    return words?.label ?? friendlyStepLabel(name);
+  }
+  if (data.type === "tool.complete") {
+    return finishedToolLine({ name, status: text(data.status), error: text(data.error), summary: text(data.summary) }, words);
+  }
+  if (data.type === "tool.progress") {
+    return stepProgressWords(text(data.preview)) || null;
+  }
+  return null;
 }
 
 /**

@@ -45,6 +45,7 @@ import {
 } from "./desktop/status-connections.js";
 import { STEP_WORDS_CAPABILITY } from "./desktop/step-words.js";
 import { negotiateInteractiveWorkspace } from "./desktop/interactive-protocol.js";
+import { plainToolProgressLine } from "./formatting/progress.js";
 import {
   boundedTerminalText,
   terminalOutputText,
@@ -714,7 +715,7 @@ export async function runDesktopAppCommand(
       expectedContextRevision: desktopStatus.contextRevision,
       signal: options.signal
     },
-    (frame) => renderProgress(frame.data, io)
+    (frame) => renderProgress(frame.data, io, client.stepWordsCapable)
   );
   io.writeOut(
     `${terminalOutputText(result.message, "Desktop returned an empty answer.")}\n`
@@ -1412,11 +1413,20 @@ function renderStatus(status: DesktopStatus, io: DesktopAppIo): void {
   }
 }
 
-function renderProgress(value: unknown, io: DesktopAppIo): void {
+function renderProgress(value: unknown, io: DesktopAppIo, stepWords = false): void {
   if (!isRecord(value)) return;
   // This command draws no views: a `tool.view` frame is not a progress line.
   if (isToolViewFrameData(value)) return;
   const type = nonEmptyString(value.type);
+  // A tool frame prints the step in words: the app's own when the turn asked
+  // for them, else generic words from the tool's name. Never the raw tool id.
+  if (type?.startsWith("tool.")) {
+    const line = plainToolProgressLine(value, stepWords);
+    if (line) {
+      io.writeErr(`${boundedTerminalText(line, MAX_CONFIRMATION_VALUE_CHARS)}\n`);
+    }
+    return;
+  }
   if (
     type === "message.delta" ||
     type === "reasoning.delta" ||
@@ -1427,8 +1437,7 @@ function renderProgress(value: unknown, io: DesktopAppIo): void {
   const text =
     nonEmptyString(value.message) ??
     nonEmptyString(value.text) ??
-    nonEmptyString(value.summary) ??
-    (type?.startsWith("tool.") ? nonEmptyString(value.name) : undefined);
+    nonEmptyString(value.summary);
   if (text) {
     io.writeErr(`${boundedTerminalText(text, MAX_CONFIRMATION_VALUE_CHARS)}\n`);
   }
