@@ -127,7 +127,12 @@ function isWords(text: string): boolean {
  * them. Brackets that hold words stay (`making 3 creatives (Codex)`).
  */
 function withoutArguments(text: string): string {
-  return text.replace(/\s*(?:\(\s*)?["{[].*$/su, "").trim();
+  // Cut at the first quote, brace or bracket, with one `(` before it (what
+  // `\s*(?:\(\s*)?["{[].*$` removed), without a backtracking regex.
+  const at = text.search(/["{[]/u);
+  if (at < 0) return text.trim();
+  const head = text.slice(0, at).trimEnd();
+  return (head.endsWith("(") ? head.slice(0, -1) : head).trim();
 }
 
 /** A tool id's words: the MCP prefix off, split (snake, kebab, dots, camelCase), lower case. */

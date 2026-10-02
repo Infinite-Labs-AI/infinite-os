@@ -465,7 +465,7 @@ describe("copy in a running session (fake TTY; skipped on CI like the other PTY 
 
     await waitFor(() => output.text().includes("Ask Infinite"), 4_000, output.text);
     await sendKeys(input, "make a link\r");
-    await waitFor(() => stripAnsi(output.text()).includes("https://go.example.com/abc1"), 4_000, output.text);
+    await waitFor(() => /https:\/\/go\.example\.com\/abc1/u.test(stripAnsi(output.text())), 4_000, output.text);
     // Unengaged, `c` would type: the body offers no `c copy` yet.
     expect(stripAnsi(output.text())).not.toContain("c copy");
     expect(stripAnsi(output.text())).not.toContain("c  copy");

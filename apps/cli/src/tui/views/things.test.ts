@@ -421,12 +421,12 @@ describe("document", () => {
 describe("link", () => {
   it("the minted URL renders on one line, with the `c` key chip and copy beside it once the view is engaged", () => {
     const fresh = draw(fixture("link-minted"));
-    const bare = fresh.detail.find((l) => l.includes("https://go.example.com/abc1"))!;
+    const bare = fresh.detail.find((l) => /https:\/\/go\.example\.com\/abc1/u.test(l))!;
     // Unengaged, `c` types (the first letter of a message), so the body offers no `c`.
     expect(bare).not.toContain("copy");
     expect(fresh.copyText).toBe("https://go.example.com/abc1");
     const render = draw(fixture("link-minted"), { engaged: true });
-    const line = render.detail.find((l) => l.includes("https://go.example.com/abc1"))!;
+    const line = render.detail.find((l) => /https:\/\/go\.example\.com\/abc1/u.test(l))!;
     // The chip prints as same-width brackets without colour.
     expect(line).toMatch(/https:\/\/go\.example\.com\/abc1\s+\[c\] copy$/u);
     expect(render.copyText).toBe("https://go.example.com/abc1");

@@ -224,6 +224,11 @@ describe("generic words for a call the app sent no words for", () => {
     expect(label).not.toContain(" :: ");
     // Brackets that hold words stay (r4 `making 3 creatives (Codex)`).
     expect(friendlyStepLabel("making 3 creatives (Codex)")).toBe("making 3 creatives (Codex)");
+    // Arguments go from the first quote, brace or bracket, with one opening bracket and spaces before it.
+    expect(friendlyStepLabel('List Rows ( "a" )')).toBe("List Rows");
+    expect(friendlyStepLabel("rows [1,2]")).toBe("rows");
+    expect(friendlyStepLabel('making 3 creatives (Codex) {"a":1}')).toBe("making 3 creatives (Codex)");
+    expect(friendlyStepLabel('a (( "x"')).toBe("a (");
   });
 
   it("a name that is only arguments falls back to a neutral word", () => {

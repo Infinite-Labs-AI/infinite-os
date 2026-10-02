@@ -339,4 +339,18 @@ describe("holdOpenMarkers", () => {
   it("renders a held partial without a literal marker", () => {
     expect(renderMarkdown(holdOpenMarkers("Try **Cold brew car"), { width: 60, color: false, theme })).toEqual(["Try Cold brew car"]);
   });
+
+  it.each([
+    ["a://b://c and _ital", "a://b://c and ital"],
+    ["://_x and _ital", "://_x and ital"]
+  ])("finds a URL the way a whitespace token holds `://`: %j → %j", (partial, held) => {
+    expect(holdOpenMarkers(partial)).toBe(held);
+  });
+
+  it("stays linear on a long run of one character (no backtracking on streamed text)", () => {
+    const text = "!".repeat(200_000);
+    const started = performance.now();
+    expect(holdOpenMarkers(text)).toBe(text);
+    expect(performance.now() - started).toBeLessThan(1_000);
+  });
 });

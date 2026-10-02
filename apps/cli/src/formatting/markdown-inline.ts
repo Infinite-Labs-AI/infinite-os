@@ -564,7 +564,11 @@ export function holdOpenMarkers(text: string): string {
   const removals: [number, number][] = [];
   const memo: CloserMemo = new Map();
   // A URL is text to its end: `https://x.com/_foo` has no opener in it.
-  const urls = Array.from(tail.matchAll(/\S+:\/\/\S*/gu), (match) => [match.index!, match.index! + match[0].length] as const);
+  // Whole whitespace-delimited tokens holding `://` after their first character
+  // (what `\S+:\/\/\S*` matched), found without a backtracking regex.
+  const urls = Array.from(tail.matchAll(/\S+/gu), (match) => [match.index!, match.index! + match[0].length, match[0]] as const)
+    .filter(([, , token]) => token.indexOf("://", 1) !== -1)
+    .map(([from, to]) => [from, to] as const);
   let index = 0;
   while (index < tail.length) {
     const char = tail[index]!;
