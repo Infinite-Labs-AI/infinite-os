@@ -18,7 +18,6 @@ import {
   sameToolTrailGroup,
   toolTrailLabel
 } from "../lib/text.js";
-import { holdOpenMarkers } from "../../formatting/markdown-inline.js";
 import { hasReasoningTag, splitReasoning } from "../lib/reasoning.js";
 import type { ActiveTool, ActivityItem, Msg, SubagentProgress, TodoItem } from "../types.js";
 import { friendlyStepLabel } from "../views/steps.js";
@@ -698,8 +697,8 @@ export class InfiniteTurnController {
     const text = raw && hasReasoningTag(raw) ? splitReasoning(raw).text : raw;
 
     if (text.trim()) {
-      // A span the stop cut off never keeps its opening marker (eval M4).
-      messages.push({ role: "assistant", text: holdOpenMarkers(finalTail(text, this.segmentMessages)) });
+      // Kept as written; a span the stop cut off is drawn without its opening marker (eval M4).
+      messages.push({ role: "assistant", text: finalTail(text, this.segmentMessages), partial: true });
     }
 
     return messages.filter((msg) => msg.text.trim() || hasDetails(msg));

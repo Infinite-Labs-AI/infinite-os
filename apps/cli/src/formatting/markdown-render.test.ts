@@ -307,7 +307,12 @@ describe("holdOpenMarkers", () => {
     ["Read [the do", "Read the do"],
     ["done **one**.\n\n**Two is still", "done **one**.\n\nTwo is still"],
     ["**early unclosed stays\n\nlater para", "**early unclosed stays\n\nlater para"],
-    ["```\nconst a = **b\n", "```\nconst a = **b\n"]
+    ["```\nconst a = **b\n", "```\nconst a = **b\n"],
+    // A marker inside a URL, a path or after = : . @ # is text, never an opener.
+    ["see https://x.com/_foo and **bold", "see https://x.com/_foo and bold"],
+    ["open src/_drafts/*.md and _ital", "open src/_drafts/*.md and ital"],
+    ["set key=_val, user@_x, #_tag and a.b_c", "set key=_val, user@_x, #_tag and a.b_c"],
+    ["see ftp://host/~~x/__y", "see ftp://host/~~x/__y"]
   ])("%j → %j", (partial, held) => {
     expect(holdOpenMarkers(partial)).toBe(held);
   });

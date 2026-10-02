@@ -221,6 +221,7 @@ function renderMessage(msg: Msg, ctx: RenderContext, answered: boolean): string[
       return [];
     }
     return answerLines(msg.text, ctx.columns, ctx, {
+      partial: msg.partial,
       mark: !answered,
       label: answered ? undefined : agentLabel(msg.title, ctx),
       widenLimit: ctx.widenLimit

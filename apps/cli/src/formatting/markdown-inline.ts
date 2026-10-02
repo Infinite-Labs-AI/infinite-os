@@ -543,6 +543,9 @@ function mergeSpans(spans: readonly Span[]): Span[] {
  * text and stay, and so does everything in a fenced code block still open.
  * Only the last paragraph can hold an open marker; earlier ones are final.
  */
+/** Characters after which a marker is part of a path, a key or a handle, not an opener. */
+const TEXT_BEFORE_MARKER = new Set(["/", ":", ".", "=", "@", "#"]);
+
 export function holdOpenMarkers(text: string): string {
   const fences = text.split("\n").filter((line) => /^ {0,3}(```|~~~)/.test(line)).length;
   if (fences % 2 === 1) {
@@ -560,9 +563,16 @@ export function holdOpenMarkers(text: string): string {
 
   const removals: [number, number][] = [];
   const memo: CloserMemo = new Map();
+  // A URL is text to its end: `https://x.com/_foo` has no opener in it.
+  const urls = Array.from(tail.matchAll(/\S+:\/\/\S*/gu), (match) => [match.index!, match.index! + match[0].length] as const);
   let index = 0;
   while (index < tail.length) {
     const char = tail[index]!;
+    const url = urls.find(([from, to]) => index >= from && index < to);
+    if (url) {
+      index = url[1];
+      continue;
+    }
     if (char === "\\") {
       index += 2;
       continue;
@@ -574,7 +584,8 @@ export function holdOpenMarkers(text: string): string {
     const run = runLength(tail, index, char);
     const before = tail[index - 1];
     const after = tail[index + run];
-    const opens = !isWordChar(before) && (after === undefined || !/\s/.test(after)) && (char !== "~" || run >= 2);
+    // After a path or key character (`a/_b`, `key=_v`, `user@_x`) a marker is text, as it is mid-word.
+    const opens = !isWordChar(before) && !TEXT_BEFORE_MARKER.has(before ?? "") && (after === undefined || !/\s/.test(after)) && (char !== "~" || run >= 2);
     if (char === "`") {
       const close = findCodeClose(tail, index + run, run);
       if (close >= 0) {

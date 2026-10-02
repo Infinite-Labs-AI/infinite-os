@@ -83,6 +83,11 @@ export interface Msg {
    * is created so switching projects mid-session never relabels earlier answers.
    */
   title?: string;
+  /**
+   * An answer cut off mid-way (a stopped turn): the text is kept as written,
+   * and a span whose closing marker never came is drawn as plain words.
+   */
+  partial?: boolean;
   thinking?: string;
   thinkingTokens?: number;
   toolTokens?: number;

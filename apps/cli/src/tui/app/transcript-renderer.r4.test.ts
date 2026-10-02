@@ -67,7 +67,20 @@ describe("a streamed answer never shows an open marker (eval M4)", () => {
     controller.recordProgressEvent({ type: "message.start", stage: "message", message: "" });
     controller.recordProgressEvent({ type: "message.delta", stage: "message", message: "", text: "Pause **Cold brew car" });
     const partial = controller.stoppedTranscript();
-    expect(partial.at(-1)).toEqual({ role: "assistant", text: "Pause Cold brew car" });
+    // The words are kept as written (copy and history see them whole); the open marker is held when drawn.
+    expect(partial.at(-1)).toEqual({ role: "assistant", text: "Pause **Cold brew car", partial: true });
+    expect(renderInfiniteTranscript({ messages: partial }, { columns: 80, theme })).toBe("∞ Pause Cold brew car");
+    controller.reset();
+  });
+
+  it("a stopped answer's URL is kept whole", () => {
+    resetTurnState();
+    const controller = new InfiniteTurnController(() => 1_000);
+    controller.recordProgressEvent({ type: "message.start", stage: "message", message: "" });
+    controller.recordProgressEvent({ type: "message.delta", stage: "message", message: "", text: "See https://x.com/_foo and **bo" });
+    const partial = controller.stoppedTranscript();
+    expect(partial.at(-1)?.text).toBe("See https://x.com/_foo and **bo");
+    expect(renderInfiniteTranscript({ messages: partial }, { columns: 80, theme })).toBe("∞ See https://x.com/_foo and bo");
     controller.reset();
   });
 });
