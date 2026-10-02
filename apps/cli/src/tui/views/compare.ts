@@ -137,7 +137,7 @@ function compareBodyLines(body: Record<string, unknown>, ctx: ViewRenderCtx, dra
     const wrapped = sentence ? wrapText(`${grade.glyph} ${sentence}`, ctx.width) : [];
     const lines = wrapped.map((line, index) =>
       index === 0 ? `${paint(grade.glyph, grade.role, ctx)}${paint(line.slice(grade.glyph.length), "b", ctx)}` : paint(line, "b", ctx));
-    const unmet = asList(verdict.unmet).map(viewText).filter(Boolean);
+    const unmet = asList(verdict.unmet).map((entry) => viewText(entry)).filter(Boolean);
     // r4: the first unmet condition rides the verdict's last line, dim (`◌ No winner yet  · Day 6 of 14`), when it fits.
     const lastPlain = wrapped[wrapped.length - 1];
     if (lastPlain !== undefined && unmet.length && displayWidth(lastPlain) + 4 + displayWidth(unmet[0]!) <= ctx.width) {
