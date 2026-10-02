@@ -46,7 +46,42 @@ export interface UnmanagedProvider {
 }
 
 /** A requested provider that already existed in the repo and was left byte-for-byte alone. */
-export type AdoptedProvider = UnmanagedProvider
+/**
+ * An adopted provider as the plan reports it. `improve` (decision 4, the wizard only) lists the
+ * in-place improvements proposed for it; each is a plan line the user approves, and an unapproved
+ * line changes nothing. Absent = adopted byte-for-byte, exactly as before.
+ */
+export type AdoptedProvider = UnmanagedProvider & { improve?: ImproveLine[] }
+
+/** The plan-line kinds an improvement to an ADOPTED provider can carry (each is "never" under --yes). */
+export type ImproveLineKind =
+  | "improve_additive"
+  | "remove_duplicate"
+  | "preview_guard_adopted"
+  | "autoconfig_off_adopted"
+  | "sensitive_pages"
+  | "posthog_defaults_bump_adopted"
+  | "capture_beside_adopted_pixel"
+  | "retire_fbc_writer"
+
+/**
+ * One proposed improvement to an adopted provider. `owner: "code"` = the wizard makes a deterministic,
+ * recorded, reversible edit (a vercel.json rewrite, the capture-only block, the autoConfig literal);
+ * `owner: "agent"` = an agent job seeded only behind the approved line (`jobIds`).
+ */
+export interface ImproveLine {
+  /** The plan line id this improvement is shown as. */
+  id: string
+  kind: ImproveLineKind
+  provider: ProviderId
+  /** Short target name (`proxy`, `history_change`, `capture`, `autoconfig`, …). */
+  target: string
+  text: string
+  owner: "code" | "agent"
+  /** Where the adopted code lives (app-root-relative), when known. */
+  evidence: { file: string; line: number } | null
+  jobIds?: string[]
+}
 
 export interface PackageManagerDetection {
   kind: PackageManagerDetectionKind

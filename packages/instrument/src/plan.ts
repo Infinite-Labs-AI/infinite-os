@@ -10,6 +10,7 @@ import { planServerLane } from "./server-lane/install.js"
 import type {
   AdoptedProvider,
   ApplyMode,
+  ImproveLine,
   InspectResult,
   InstallPlan,
   InstallInstruction,
@@ -31,6 +32,12 @@ export interface PlanInstallationOptions {
   artifacts: WorkspaceInstallArtifacts
   /** `--server-lane`: add the lossless server lane (Next.js middleware, or the agent brief). */
   serverLane?: boolean
+  /**
+   * The wizard's in-place improvements per ADOPTED provider (decision 4). They ride on the adopted
+   * entry (`adopted[].improve`) so the plan says what will change in the customer's own tag; they never
+   * move the provider into the install set. Absent = adopted byte-for-byte.
+   */
+  improve?: Partial<Record<ProviderId, readonly ImproveLine[]>>
 }
 
 function selectedProviders(artifacts: WorkspaceInstallArtifacts): ProviderId[] {
@@ -109,6 +116,14 @@ export function planInstallation(options: PlanInstallationOptions): InstallPlan 
   for (const providerId of requestedProviders) {
     const existing = unmanagedProviders.find((entry) => entry.provider === providerId)
     if (existing) {
+      const improve = options.improve?.[providerId]
+      if (improve && improve.length > 0) {
+        adopted.push({ ...existing, improve: [...improve] })
+        assumptions.push(
+          `Existing ${providerLabels[providerId]} found in ${existing.file} (${adoptedViaLabel(existing.via)}); kept, never reinstalled. ${improve.length} in-place improvement${improve.length === 1 ? "" : "s"} proposed, each only on an approved plan line.`
+        )
+        continue
+      }
       adopted.push(existing)
       assumptions.push(
         `Existing ${providerLabels[providerId]} found in ${existing.file} (${adoptedViaLabel(existing.via)}); left untouched. infinite-tag will not install a second copy.`
@@ -116,6 +131,19 @@ export function planInstallation(options: PlanInstallationOptions): InstallPlan 
     } else {
       providers.push(providerId)
     }
+  }
+  // An adopted provider the wizard improves is not in the install set (its key is not an install
+  // artifact), so it is listed here from the detection, with its improve lines.
+  for (const providerId of providerOrder) {
+    const improve = options.improve?.[providerId]
+    if (!improve || improve.length === 0) continue
+    if (providers.includes(providerId) || adopted.some((entry) => entry.provider === providerId)) continue
+    const existing = unmanagedProviders.find((entry) => entry.provider === providerId)
+    if (!existing) continue
+    adopted.push({ ...existing, improve: [...improve] })
+    assumptions.push(
+      `Existing ${providerLabels[providerId]} found in ${existing.file} (${adoptedViaLabel(existing.via)}); kept, never reinstalled. ${improve.length} in-place improvement${improve.length === 1 ? "" : "s"} proposed, each only on an approved plan line.`
+    )
   }
 
   // `--server-lane` alone is a complete install (the lane needs no browser artifact); the pixel

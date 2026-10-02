@@ -16,7 +16,16 @@ import { INSTRUMENT_VERSION } from "../package-manager.js"
 import { renderPreview } from "../render.js"
 import { serverLaneCopy } from "../server-lane/copy.js"
 import { detectHosting } from "../server-lane/hosting.js"
-import type { ApplyResult, InspectResult, InstallManifest, ProviderId, VerifyResult, WorkspaceInstallArtifacts } from "../types.js"
+import type {
+  ApplyResult,
+  InspectResult,
+  InstallManifest,
+  InstallPlan,
+  ManualRequirement,
+  ProviderId,
+  VerifyResult,
+  WorkspaceInstallArtifacts
+} from "../types.js"
 import { verifyInstallation } from "../verify.js"
 import {
   applyInfiniteDownloadDestinationPath,
@@ -31,6 +40,8 @@ import {
   detectProvidersWithEvidence,
   readEnvKeys,
   resolveHarnessKeys,
+  type BuildHarnessPlanInput,
+  type ClassifyProvidersInput,
   type DetectedProviderEvidence,
   type HarnessPlanResult
 } from "./inspect.js"
@@ -273,18 +284,258 @@ function renderProposalTable(proposal: ConversionProposal): string {
  * content hashes for `verify`, so after an additive mark the recorded hash is refreshed — the
  * mark itself is recorded (and reversible) in .infinite/conversions.json.
  */
-function refreshManagedHashes(ctx: Ctx): void {
-  if (!ctx.marking || ctx.marking.marked.length === 0) return
-  const manifest = readInstallManifest(ctx.root)
+function refreshManagedHashesAfterMarks(root: string, appRoot: string, marking: ApplyConversionsResult): void {
+  if (marking.marked.length === 0) return
+  const manifest = readInstallManifest(root)
   if (!manifest) return
-  const appRoot = ctx.inspect?.appRoot ?? "."
-  const touched = new Set(ctx.marking.marked.map((entry) => (appRoot === "." ? entry.file : `${appRoot}/${entry.file}`)))
+  const touched = new Set(marking.marked.map((entry) => (appRoot === "." ? entry.file : `${appRoot}/${entry.file}`)))
   const files = manifest.files.filter((file) => touched.has(file))
   if (files.length === 0) return
-  writeInstallManifest(ctx.root, {
+  writeInstallManifest(root, {
     ...manifest,
-    contentHashes: { ...manifest.contentHashes, ...computeContentHashes(ctx.root, files) }
+    contentHashes: { ...manifest.contentHashes, ...computeContentHashes(root, files) }
   })
+}
+
+// ---------------------------------------------------------------------------------------------
+// Phases
+//
+// The harness's work, one exported function per runbook phase, with explicit inputs and outputs
+// and NO report bookkeeping, prompts or printing. The runbook steps below wrap them (their
+// behaviour is unchanged); the wizard's installer (`src/install/installer.ts`) composes the same
+// functions without the runbook, so there is one install path, not two.
+// ---------------------------------------------------------------------------------------------
+
+export interface PreflightPhaseInput {
+  root: string
+  /** Defaults to the running Node. */
+  nodeVersion?: string
+  /** True when this run writes files (the dirty-tree gate applies only then). */
+  writes: boolean
+  allowDirty: boolean
+}
+
+export interface PreflightPhaseResult {
+  status: "clean" | "dirty" | "not-a-git-repo"
+  nodeVersion: string
+  /** A writing run on a dirty tree without --allow-dirty: the run must stop. */
+  blockedByDirtyTree: boolean
+}
+
+/** Node version (throws below MINIMUM_NODE_MAJOR) and the tree gate, aware of the harness's own outputs. */
+export function preflightPhase(input: PreflightPhaseInput): PreflightPhaseResult {
+  const nodeVersion = input.nodeVersion ?? process.versions.node
+  if (nodeMajor(nodeVersion) < MINIMUM_NODE_MAJOR) {
+    throw new Error(`Node ${nodeVersion} is too old; infinite-tag needs Node ${MINIMUM_NODE_MAJOR} or newer.`)
+  }
+  const status = harnessRepoStatus(input.root)
+  return { status, nodeVersion, blockedByDirtyTree: input.writes && status === "dirty" && !input.allowDirty }
+}
+
+export interface InspectPhaseInput {
+  root: string
+  appRoot?: string
+  packageManager?: HarnessArgs["packageManager"]
+}
+
+export interface InspectPhaseResult {
+  inspect: InspectResult
+  appRootAbsolute: string
+  /** The server-lane hosting detector's answer (vercel / netlify / cloudflare / node / unknown). */
+  hosting: string
+  sourceLayout: SourceLayout
+  /** A subdirectory of a custom parent build whose analytics owner is unresolved. */
+  manualBuildOwner: boolean
+  detected: DetectedProviderEvidence[]
+  /** Throws on a corrupt manifest (the caller decides whether to rebuild it from markers). */
+  manifest: InstallManifest | null
+}
+
+/** Framework + app root, hosting, the source layout, existing providers with evidence, the manifest. */
+export function inspectPhase(input: InspectPhaseInput): InspectPhaseResult {
+  const inspect = inspectWorkspace(input.root, { appRoot: input.appRoot, packageManager: input.packageManager })
+  const appRootAbsolute = inspect.appRoot === "." ? input.root : join(input.root, inspect.appRoot)
+  const sourceLayout = inspectSourceLayout(input.root, inspect.appRoot, INSTRUMENT_VERSION)
+  const manualBuildOwner = Boolean(
+    sourceLayout.outputDirectory && inspect.appRoot !== "." && !isSupportedFramework(inspectWorkspace(input.root).framework)
+  )
+  if (manualBuildOwner) {
+    sourceLayout.notes.push(
+      "The selected subdirectory does not identify the parent custom build's analytics owner. Inspect the built output and integrate with the parent builder; installing a second SDK into this subdirectory could duplicate tracking."
+    )
+  }
+  return {
+    inspect,
+    appRootAbsolute,
+    hosting: detectHosting(appRootAbsolute),
+    sourceLayout,
+    manualBuildOwner,
+    detected: detectProvidersWithEvidence(appRootAbsolute),
+    manifest: readInstallManifest(input.root)
+  }
+}
+
+export interface ResolveKeysPhaseInput {
+  root: string
+  appRoot: string
+  /** Artifacts from explicit flags / --artifact-file. */
+  flags: WorkspaceInstallArtifacts
+  explicitFlags: boolean
+  /** The saved artifacts `infinite setup` wrote, if any. */
+  discovered: WorkspaceInstallArtifacts | null
+  downloadDestinationPath?: string
+  detected: ReadonlyArray<DetectedProviderEvidence>
+}
+
+/** Flags → saved artifacts → real .env files (never a template, never an existing snippet's id). */
+export function resolveKeysPhase(input: ResolveKeysPhaseInput): ResolvedKeys {
+  const flags = applyInfiniteDownloadDestinationPath(input.flags, { path: input.downloadDestinationPath })
+  const env = readEnvKeys(input.root, input.appRoot)
+  const keys = resolveHarnessKeys({ flags, explicitFlags: input.explicitFlags, discovered: input.discovered, env, detected: input.detected })
+  if (input.discovered && input.downloadDestinationPath) {
+    keys.artifacts = applyInfiniteDownloadDestinationPath(keys.artifacts, { path: input.downloadDestinationPath })
+  }
+  return keys
+}
+
+/** One action per provider (install / adopt / improve / upgrade / manual / report / skip). */
+export function classifyPhase(input: ClassifyProvidersInput): ProviderClassification[] {
+  return classifyProviders(input)
+}
+
+/** The deterministic install plan for the classified providers. */
+export function planPhase(input: BuildHarnessPlanInput): HarnessPlanResult {
+  return buildHarnessPlan(input)
+}
+
+export interface ApplyPhaseInput {
+  root: string
+  workspaceId: string
+  plan: InstallPlan
+  allowDirty: boolean
+}
+
+export interface ApplyPhaseResult {
+  /** Undefined when static verification failed and the write was rolled back. */
+  applyResult: ApplyResult | undefined
+  staticVerify: VerifyResult
+  /** `applied`: written and statically verified. A failed verification is rolled back when it can be. */
+  outcome: "applied" | "rolled_back" | "left_written"
+  /**
+   * Edits the adapter could NOT make itself (a Vite page with no `</head>`, a missing index.html):
+   * each is an OPEN JOB. While any is pending the pixel is not live, so no provider of this plan
+   * may be reported as installed.
+   */
+  openJobs: ManualRequirement[]
+}
+
+/**
+ * Write the plan, verify it statically, and roll back a failed verification. `applyInstallation`
+ * restores its own snapshot when it throws (the error propagates); a static-verification failure
+ * AFTER a successful write is rolled back here from the same pre-image.
+ */
+export function applyPhase(input: ApplyPhaseInput): ApplyPhaseResult {
+  const p = input.plan
+  const snapshot: FileSnapshot[] = snapshotFiles(input.root, [
+    ...p.files,
+    ...(p.serverLane ? [p.serverLane.briefPath] : []),
+    installManifestRelativePath
+  ])
+  let applyResult: ApplyResult | undefined = applyInstallation({
+    root: input.root,
+    workspaceId: input.workspaceId,
+    plan: p,
+    allowDirty: input.allowDirty
+  })
+  const staticVerify = verifyInstallation({ root: input.root })
+  let outcome: ApplyPhaseResult["outcome"] = "applied"
+  if (!staticVerify.buildOk) {
+    try {
+      restoreSnapshot(input.root, snapshot)
+      outcome = "rolled_back"
+      applyResult = undefined
+    } catch {
+      outcome = "left_written"
+    }
+  }
+  return { applyResult, staticVerify, outcome, openJobs: applyResult?.requiresManual ?? [] }
+}
+
+export type ConversionsPhaseInput =
+  | { action: "propose"; root: string; appRoot: string; downloadDestinationPath?: string }
+  | { action: "mark"; root: string; appRoot: string; approved: ApprovedConversions }
+
+export type ConversionsPhaseResult =
+  | { action: "propose"; serverCheckout: ServerCheckoutRecommendation | null; proposal: ConversionProposal }
+  | { action: "mark"; marking: ApplyConversionsResult }
+
+/**
+ * `propose`: detect the server checkout (detection only) and the markable conversion elements,
+ * writing nothing. `mark`: add the approved `data-conversion` marks (recorded and reversible in
+ * .infinite/conversions.json) and refresh the manifest hashes of the managed files they touched.
+ */
+export function conversionsPhase(input: ConversionsPhaseInput): ConversionsPhaseResult {
+  if (input.action === "propose") {
+    const serverCheckout = detectServerCheckout({ root: input.root, appRoot: input.appRoot })
+    const proposal = proposeConversions({ root: input.root, appRoot: input.appRoot, downloadDestinationPath: input.downloadDestinationPath })
+    if (serverCheckout) proposal.serverCheckout = serverCheckout
+    return { action: "propose", serverCheckout, proposal }
+  }
+  const marking = applyConversions({ root: input.root, appRoot: input.appRoot, approved: input.approved })
+  refreshManagedHashesAfterMarks(input.root, input.appRoot, marking)
+  return { action: "mark", marking }
+}
+
+/** Source-only setup-correctness checks (never a receipt lane). */
+export function setupChecksPhase(appRootAbsolute: string): SetupChecksReport {
+  return runSetupChecks(appRootAbsolute)
+}
+
+export interface ServerLanePhaseInput {
+  lane: NonNullable<InstallPlan["serverLane"]>
+  applied: NonNullable<ApplyResult["serverLane"]>
+}
+
+/**
+ * What the server lane's apply actually left running. `installed`: a file that RUNS was written
+ * (the entry, or the Next middleware). `module_only`: a Node module the customer mounts. `manual_entry`:
+ * the module was written but the entry is someone else's file. `brief`: nothing runs; the brief is
+ * the install.
+ */
+export type ServerLanePhaseResult =
+  | { kind: "installed"; target: string; why: string; evidence: string | undefined; manualCount: number }
+  | { kind: "module_only"; target: string; why: string; evidence: string | undefined }
+  | { kind: "manual_entry"; target: string; manualEntry: { path: string; reason?: string } }
+  | { kind: "brief"; reason: string | undefined }
+
+export function serverLanePhase(input: ServerLanePhaseInput): ServerLanePhaseResult {
+  const { lane } = input
+  const target = lane.targetLabel ?? (lane.mode === "next-middleware" ? "Next.js middleware" : lane.mode)
+  const why = lane.targetEvidence ? ` (${lane.targetEvidence})` : ""
+  const middlewareWritten = lane.mode === "next-middleware" && lane.middleware?.action !== "unpatchable"
+  const created = lane.created ?? []
+  const entryWritten = created.some((entry) => entry.role === "entry" && entry.action !== "manual")
+  const moduleWritten = created.some((entry) => entry.role === "module" && entry.action !== "manual")
+  const manualEntry = created.find((entry) => entry.role === "entry" && entry.action === "manual")
+  const manual = created.filter((entry) => entry.action === "manual")
+  if (lane.mode !== "brief" && (middlewareWritten || entryWritten)) {
+    const evidence = lane.middleware?.path ?? created.find((entry) => entry.role === "entry" && entry.action !== "manual")?.path ?? lane.modulePath
+    return { kind: "installed", target, why, evidence, manualCount: manual.length }
+  }
+  if (lane.mode === "node-module" && moduleWritten) {
+    return { kind: "module_only", target, why, evidence: created.find((entry) => entry.role === "module")?.path ?? lane.modulePath }
+  }
+  if (lane.mode !== "brief" && moduleWritten && manualEntry) {
+    return { kind: "manual_entry", target, manualEntry: { path: manualEntry.path, ...(manualEntry.reason ? { reason: manualEntry.reason } : {}) } }
+  }
+  return { kind: "brief", reason: lane.middleware?.reason ?? manual[0]?.reason }
+}
+
+/** The harness copy for a pending manual requirement: the provider is NOT live until it is added. */
+export function openJobReason(requirements: readonly ManualRequirement[]): string {
+  const first = requirements[0]
+  const more = requirements.length > 1 ? ` (+${requirements.length - 1} more)` : ""
+  return `not live yet — open job: add the managed block to ${first?.path ?? "the page"} by hand (${first?.reason ?? "the installer could not edit it"})${more}`
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -295,17 +546,17 @@ const preflight: RunbookStep<Ctx> = {
   id: "preflight",
   title: "Preflight",
   run(ctx) {
-    const version = ctx.deps.nodeVersion ?? process.versions.node
-    if (nodeMajor(version) < MINIMUM_NODE_MAJOR) {
-      throw new Error(`Node ${version} is too old; infinite-tag needs Node ${MINIMUM_NODE_MAJOR} or newer.`)
-    }
-    const status = harnessRepoStatus(ctx.root)
-    const writes = ctx.args.mode === "apply" && !ctx.args.brief
-    if (writes && status === "dirty" && !ctx.args.allowDirty) {
+    const result = preflightPhase({
+      root: ctx.root,
+      nodeVersion: ctx.deps.nodeVersion,
+      writes: ctx.args.mode === "apply" && !ctx.args.brief,
+      allowDirty: ctx.args.allowDirty
+    })
+    if (result.blockedByDirtyTree) {
       return { note: "dirty" }
     }
-    ctx.treeCleanForHarness = status !== "dirty"
-    return { note: `git tree ${status}; node ${version}` }
+    ctx.treeCleanForHarness = result.status !== "dirty"
+    return { note: `git tree ${result.status}; node ${result.nodeVersion}` }
   },
   successCheck(ctx) {
     const step = ctx.report.steps.find((entry) => entry.id === "preflight")
@@ -322,17 +573,17 @@ const inspect: RunbookStep<Ctx> = {
   id: "inspect",
   title: "Inspect stack",
   run(ctx) {
-    ctx.inspect = inspectWorkspace(ctx.root, { appRoot: ctx.args.appRoot, packageManager: ctx.args.packageManager })
-    ctx.appRootAbsolute = ctx.inspect.appRoot === "." ? ctx.root : join(ctx.root, ctx.inspect.appRoot)
+    const phase = inspectPhase({ root: ctx.root, appRoot: ctx.args.appRoot, packageManager: ctx.args.packageManager })
+    ctx.inspect = phase.inspect
+    ctx.appRootAbsolute = phase.appRootAbsolute
     ctx.report.framework = ctx.inspect.framework
     ctx.report.appRoot = ctx.inspect.appRoot
-    ctx.report.hosting = detectHosting(ctx.appRootAbsolute)
-    ctx.sourceLayout = inspectSourceLayout(ctx.root, ctx.inspect.appRoot, INSTRUMENT_VERSION)
-    ctx.manualBuildOwner = Boolean(ctx.sourceLayout.outputDirectory && ctx.inspect.appRoot !== "." && !isSupportedFramework(inspectWorkspace(ctx.root).framework))
-    if (ctx.manualBuildOwner) ctx.sourceLayout.notes.push("The selected subdirectory does not identify the parent custom build's analytics owner. Inspect the built output and integrate with the parent builder; installing a second SDK into this subdirectory could duplicate tracking.")
+    ctx.report.hosting = phase.hosting
+    ctx.sourceLayout = phase.sourceLayout
+    ctx.manualBuildOwner = phase.manualBuildOwner
     ctx.report.nextSteps.push(...ctx.sourceLayout.notes)
-    ctx.detected = detectProvidersWithEvidence(ctx.appRootAbsolute)
-    ctx.manifest = readInstallManifest(ctx.root)
+    ctx.detected = phase.detected
+    ctx.manifest = phase.manifest
     if (ctx.args.brief && ctx.args.mode !== "check" && (!isSupportedFramework(ctx.inspect.framework) || ctx.manualBuildOwner)) {
       writeJson(ctx.root, HARNESS_BRIEF_RELATIVE_PATH, {
         version: 1, coverageStatus: "not_established", framework: ctx.inspect.framework,
@@ -369,7 +620,7 @@ const resolveKeys: RunbookStep<Ctx> = {
   title: "Resolve keys",
   run(ctx) {
     const explicit = hasExplicitArtifacts(ctx.args)
-    let flags = flagArtifacts(ctx.root, ctx.args)
+    const flags = flagArtifacts(ctx.root, ctx.args)
     let discovered: WorkspaceInstallArtifacts | null = null
     if (!explicit) {
       const found = (ctx.deps.discover ?? discoverWorkspaceArtifacts)({
@@ -382,12 +633,15 @@ const resolveKeys: RunbookStep<Ctx> = {
         ctx.io.err(`Discovered saved public artifacts: ${found.filePath} (providers: ${found.providers.join(", ")})`)
       }
     }
-    flags = applyInfiniteDownloadDestinationPath(flags, { path: ctx.args.infiniteDownloadDestinationPath })
-    const env = readEnvKeys(ctx.root, ctx.inspect?.appRoot ?? ".")
-    ctx.keys = resolveHarnessKeys({ flags, explicitFlags: explicit, discovered, env, detected: ctx.detected })
-    if (discovered && ctx.args.infiniteDownloadDestinationPath) {
-      ctx.keys.artifacts = applyInfiniteDownloadDestinationPath(ctx.keys.artifacts, { path: ctx.args.infiniteDownloadDestinationPath })
-    }
+    ctx.keys = resolveKeysPhase({
+      root: ctx.root,
+      appRoot: ctx.inspect?.appRoot ?? ".",
+      flags,
+      explicitFlags: explicit,
+      discovered,
+      downloadDestinationPath: ctx.args.infiniteDownloadDestinationPath,
+      detected: ctx.detected
+    })
     const named = Object.entries(ctx.keys.sources).map(([provider, source]) => `${provider} (${source})`)
     return { note: named.length === 0 ? "no keys resolved" : named.join(", ") }
   },
@@ -410,7 +664,7 @@ const classify: RunbookStep<Ctx> = {
   id: "classify",
   title: "Classify providers",
   run(ctx) {
-    ctx.classifications = classifyProviders({
+    ctx.classifications = classifyPhase({
       manifest: ctx.manifest,
       detected: ctx.detected,
       keys: ctx.keys ?? { artifacts: {}, sources: {} },
@@ -423,7 +677,10 @@ const classify: RunbookStep<Ctx> = {
         const evidence = entry.file ? `${entry.file}` : undefined
         switch (entry.action) {
           case "adopt":
+          case "improve":
           case "manual":
+            // `improve` is an adopted provider with improve lines (the wizard's plan); the harness
+            // never classifies one, and an improved provider is still the customer's, not ours.
             return { ...transitionProvider(state, { to: "adopted", reason: entry.reason, key: keyFor(entry), evidence }), verification: { kind: "adopted_not_ours" } }
           case "report":
             return transitionProvider(state, { to: "conflict", reason: entry.reason, key: keyFor(entry), evidence })
@@ -558,7 +815,7 @@ const plan: RunbookStep<Ctx> = {
   async run(ctx) {
     if (!ctx.inspect || !ctx.keys) throw new Error("inspect did not run")
     await resolveInfiniteConsent(ctx)
-    ctx.planResult = buildHarnessPlan({
+    ctx.planResult = planPhase({
       root: ctx.root,
       inspect: ctx.inspect,
       classifications: ctx.classifications,
@@ -650,31 +907,30 @@ const apply: RunbookStep<Ctx> = {
     const p = ctx.planResult.plan
     // The installer's own gate reads raw `git status`; preflight already judged the tree with the
     // harness's outputs excluded, so its verdict (or --allow-dirty) is what applies here.
-    // applyInstallation restores its own snapshot when it throws; a static-verification failure
-    // AFTER a successful write is ours to roll back, so the same pre-image is taken here.
-    const snapshot: FileSnapshot[] = snapshotFiles(ctx.root, [
-      ...p.files,
-      ...(p.serverLane ? [p.serverLane.briefPath] : []),
-      installManifestRelativePath
-    ])
-    ctx.applyResult = applyInstallation({
+    const phase = applyPhase({
       root: ctx.root,
       workspaceId: ctx.args.workspaceId as string,
       plan: p,
       allowDirty: ctx.args.allowDirty || ctx.treeCleanForHarness
     })
-    ctx.staticVerify = verifyInstallation({ root: ctx.root })
-    if (!ctx.staticVerify.buildOk) {
-      try {
-        restoreSnapshot(ctx.root, snapshot)
-        ctx.applyOutcome = "rolled_back"
-        ctx.applyResult = undefined
-      } catch {
-        ctx.applyOutcome = "left_written"
-      }
-    }
+    ctx.applyResult = phase.applyResult
+    ctx.staticVerify = phase.staticVerify
+    if (phase.outcome !== "applied") ctx.applyOutcome = phase.outcome
     if (ctx.staticVerify.buildOk) {
+      // A pending manual requirement means the managed block is NOT on the page yet: every pixel
+      // provider of this plan is an open job, never "installed" (and never read back as a lane).
+      const openJob = phase.openJobs.length > 0 ? openJobReason(phase.openJobs) : null
+      if (openJob) {
+        const line = `${openJob}. Snippet: see the plan instructions for ${phase.openJobs[0]?.path ?? "the page"}.`
+        if (!ctx.report.nextSteps.includes(line)) ctx.report.nextSteps.push(line)
+      }
       for (const provider of p.providers) {
+        if (openJob) {
+          updateProvider(ctx.report, provider as HarnessProviderId, (state) =>
+            transitionProvider(state, { to: "skipped", reason: openJob, evidence: phase.openJobs[0]?.path })
+          )
+          continue
+        }
         const lane = laneOf[provider as HarnessProviderId]
         if (lane) ctx.writtenLanes.push(lane)
         updateProvider(ctx.report, provider as HarnessProviderId, (state) =>
@@ -687,7 +943,12 @@ const apply: RunbookStep<Ctx> = {
       }
     }
     const changed = ctx.applyResult?.changedFiles.length ?? 0
-    return { note: ctx.applyOutcome ? `static verification failed; ${ctx.applyOutcome === "rolled_back" ? "rolled back" : "left as written"}` : `${changed} file${changed === 1 ? "" : "s"} changed` }
+    const open = phase.openJobs.length
+    return {
+      note: ctx.applyOutcome
+        ? `static verification failed; ${ctx.applyOutcome === "rolled_back" ? "rolled back" : "left as written"}`
+        : `${changed} file${changed === 1 ? "" : "s"} changed${open > 0 ? `; ${open} open job${open === 1 ? "" : "s"} (manual edit)` : ""}`
+    }
   },
   successCheck(ctx) {
     return ctx.staticVerify?.buildOk === true
@@ -721,7 +982,9 @@ const conversions: RunbookStep<Ctx> = {
 
     // Detection-only: a server checkout entry (and its webhook fulfillment) can't be marked by a
     // client button, so recommend emitting checkout_started + purchase server-side as a pair.
-    ctx.serverCheckout = detectServerCheckout({ root: ctx.root, appRoot }) ?? undefined
+    const detected = conversionsPhase({ action: "propose", root: ctx.root, appRoot, downloadDestinationPath })
+    if (detected.action !== "propose") throw new Error("unreachable")
+    ctx.serverCheckout = detected.serverCheckout ?? undefined
     if (ctx.serverCheckout) {
       for (const line of renderServerCheckoutRecommendation(ctx.serverCheckout)) {
         if (!ctx.report.nextSteps.includes(line)) ctx.report.nextSteps.push(line)
@@ -738,8 +1001,7 @@ const conversions: RunbookStep<Ctx> = {
       }
       if (ctx.declined) return { skipped: "install not approved; nothing marked" }
     } else {
-      ctx.proposal = proposeConversions({ root: ctx.root, appRoot, downloadDestinationPath })
-      if (ctx.serverCheckout) ctx.proposal.serverCheckout = ctx.serverCheckout
+      ctx.proposal = detected.proposal
       writeProposal(ctx.root, ctx.proposal)
       ensureProposedIgnored(ctx.root)
       ctx.report.conversions = { proposed: ctx.proposal.rows.length, marked: 0, skipped: ctx.proposal.skipped.length, stale: 0 }
@@ -758,8 +1020,9 @@ const conversions: RunbookStep<Ctx> = {
       approved = { rows: ctx.proposal.rows }
     }
 
-    ctx.marking = applyConversions({ root: ctx.root, appRoot, approved })
-    refreshManagedHashes(ctx)
+    const marked = conversionsPhase({ action: "mark", root: ctx.root, appRoot, approved })
+    if (marked.action !== "mark") throw new Error("unreachable")
+    ctx.marking = marked.marking
     ctx.report.conversions = {
       proposed: ctx.proposal?.rows.length ?? approved.rows.length,
       marked: ctx.marking.marked.length,
@@ -800,7 +1063,7 @@ const setupChecks: RunbookStep<Ctx> = {
   title: "Setup correctness",
   run(ctx) {
     if (ctx.args.brief) return { skipped: "--brief" }
-    const report = runSetupChecks(ctx.appRootAbsolute)
+    const report = setupChecksPhase(ctx.appRootAbsolute)
     ctx.setupChecks = report
     ctx.report.setupChecks = report
     for (const line of setupFindingLines(report)) {
@@ -834,41 +1097,33 @@ const serverLane: RunbookStep<Ctx> = {
     // The plan picked a target by framework + hosting (Next middleware, Vercel root middleware,
     // Netlify edge, Cloudflare Pages, Node module) or fell back to the brief. It is "installed"
     // only when a file the lane manages was actually written or kept this run.
-    const target = lane.targetLabel ?? (lane.mode === "next-middleware" ? "Next.js middleware" : lane.mode)
-    const why = lane.targetEvidence ? ` (${lane.targetEvidence})` : ""
-    const middlewareWritten = lane.mode === "next-middleware" && lane.middleware?.action !== "unpatchable"
-    const created = lane.created ?? []
-    // "installed" for a lane means a file that RUNS was written: the entry (middleware, edge
-    // function, Pages middleware), or the Next middleware. Module-only writes with a manual entry
-    // record nothing until the founder mounts them.
-    const entryWritten = created.some((entry) => entry.role === "entry" && entry.action !== "manual")
-    const moduleWritten = created.some((entry) => entry.role === "module" && entry.action !== "manual")
-    const manualEntry = created.find((entry) => entry.role === "entry" && entry.action === "manual")
-    const manual = created.filter((entry) => entry.action === "manual")
-    if (lane.mode !== "brief" && (middlewareWritten || entryWritten)) {
+    const outcome = serverLanePhase({ lane, applied })
+    if (outcome.kind === "installed") {
+      const { target, why, evidence, manualCount } = outcome
       ctx.writtenLanes.push("server_lane")
-      const evidence = lane.middleware?.path ?? created.find((entry) => entry.role === "entry" && entry.action !== "manual")?.path ?? lane.modulePath
       updateProvider(ctx.report, "server_lane", (state) =>
         transitionProvider(state, {
           to: "installed",
-          reason: `${target}${why}; brief ${applied.briefWritten ? "written" : "printed"}${manual.length > 0 ? `; ${manual.length} file${manual.length === 1 ? "" : "s"} left for you (see the brief)` : ""}`,
+          reason: `${target}${why}; brief ${applied.briefWritten ? "written" : "printed"}${manualCount > 0 ? `; ${manualCount} file${manualCount === 1 ? "" : "s"} left for you (see the brief)` : ""}`,
           evidence
         })
       )
       return { note: `${target}${why}: ${lane.files.join(", ")}; ${lane.briefPath} ${applied.briefWritten ? "written" : "not written"}` }
     }
-    if (lane.mode === "node-module" && moduleWritten) {
+    if (outcome.kind === "module_only") {
       // No entry by design: the customer mounts the module. Written, but not counting anything yet.
+      const { target, why, evidence } = outcome
       updateProvider(ctx.report, "server_lane", (state) =>
         transitionProvider(state, {
           to: "installed",
           reason: `${target}${why}; not mounted yet — add the one-line mount from ${lane.briefPath}; nothing is recorded until then`,
-          evidence: created.find((entry) => entry.role === "module")?.path ?? lane.modulePath
+          evidence
         })
       )
       return { note: `${target}: module written, mount is manual (${lane.briefPath})` }
     }
-    if (lane.mode !== "brief" && moduleWritten && manualEntry) {
+    if (outcome.kind === "manual_entry") {
+      const { target, manualEntry } = outcome
       updateProvider(ctx.report, "server_lane", (state) =>
         transitionProvider(state, {
           to: "skipped",
@@ -878,7 +1133,8 @@ const serverLane: RunbookStep<Ctx> = {
       )
       return { note: `${target}: module written, entry ${manualEntry.path} left for you (${lane.briefPath})` }
     }
-    const reason = lane.middleware?.reason ?? manual[0]?.reason
+    const target = lane.targetLabel ?? (lane.mode === "next-middleware" ? "Next.js middleware" : lane.mode)
+    const reason = outcome.reason
     updateProvider(ctx.report, "server_lane", (state) =>
       transitionProvider(state, {
         to: "skipped",

@@ -1,8 +1,11 @@
 // Adapters over the tag's inspect/plan functions for the harness: provider detection WITH
 // evidence (file, line, public id), key resolution (flags → saved artifacts → .env, never a
 // template), the per-provider classification, and the deterministic plan.
-import { existsSync, readFileSync } from "node:fs"
+import { existsSync, readdirSync, readFileSync } from "node:fs"
 import { join } from "node:path"
+
+import { frameworkAdapters } from "../frameworks/index.js"
+import { resolveConfinedAppRoot } from "../frameworks/shared.js"
 
 import { providerInstallEvidence } from "../provider-evidence.js"
 
@@ -16,6 +19,7 @@ import {
   validateXPixelId
 } from "../providers/validate.js"
 import type {
+  ImproveLine,
   InspectResult,
   InstallManifest,
   InstallPlan,
@@ -286,6 +290,23 @@ export interface ClassifyProvidersInput {
   serverLane: boolean
   /** `--providers` restriction; undefined = every resolvable provider. */
   requested?: ReadonlyArray<HarnessProviderId>
+  /**
+   * The wizard's proposed in-place improvements per adopted provider (decision 4). An adopted
+   * provider with at least one becomes `improve` instead of `adopt`; it is never installed or
+   * upgraded. The harness passes none, so its classifications are exactly as before.
+   */
+  improve?: Partial<Record<ProviderId, readonly ImproveLine[]>>
+}
+
+/** `adopt` → `improve` when the wizard proposed improvements for this adopted provider. */
+function adoptOrImprove(
+  entry: ProviderClassification,
+  improve: ClassifyProvidersInput["improve"]
+): ProviderClassification {
+  if (entry.action !== "adopt" || entry.provider === "gtm" || entry.provider === "server_lane") return entry
+  const lines = improve?.[entry.provider]
+  if (!lines || lines.length === 0) return entry
+  return { ...entry, action: "improve", improve: [...lines] }
 }
 
 function publicKey(artifacts: WorkspaceInstallArtifacts, provider: KeyedProvider): string | undefined {
@@ -419,7 +440,7 @@ export function classifyProviders(input: ClassifyProvidersInput): ProviderClassi
     }
     out.push({ provider, action: "skip", reason: "no key resolved (flags, saved artifacts, or .env)" })
   }
-  return out
+  return out.map((entry) => adoptOrImprove(entry, input.improve))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -433,6 +454,18 @@ export interface BuildHarnessPlanInput {
   keys: ResolvedKeys
   workspaceId?: string
   serverLane: boolean
+}
+
+/** The improve lines carried by `improve` classifications, keyed by provider (for the plan's adopted list). */
+export function improveLinesByProvider(
+  classifications: ReadonlyArray<ProviderClassification>
+): Partial<Record<ProviderId, ImproveLine[]>> {
+  const out: Partial<Record<ProviderId, ImproveLine[]>> = {}
+  for (const entry of classifications) {
+    if (entry.action !== "improve" || !entry.improve || entry.provider === "gtm" || entry.provider === "server_lane") continue
+    out[entry.provider] = [...entry.improve]
+  }
+  return out
 }
 
 export interface HarnessPlanResult {
@@ -467,7 +500,8 @@ export function buildHarnessPlan(input: BuildHarnessPlanInput): HarnessPlanResul
     inspect: input.inspect,
     workspaceId: input.workspaceId,
     artifacts,
-    serverLane: input.serverLane
+    serverLane: input.serverLane,
+    improve: improveLinesByProvider(input.classifications)
   })
   const nothingToInstall = plan.providers.length === 0 && !input.serverLane
   const blockers = plan.blockers.filter((blocker) => !(nothingToInstall && blocker === NO_ARTIFACTS_BLOCKER))
@@ -485,4 +519,107 @@ export function buildHarnessPlan(input: BuildHarnessPlanInput): HarnessPlanResul
       ? { code: "INF_PLAN_UNMANAGED_TARGET", message: unmanaged }
       : { code: "INF_PLAN_BLOCKED", message: blockers.join(" ") }
   }
+}
+
+// ---------------------------------------------------------------------------------------------
+// App root (monorepos)
+// ---------------------------------------------------------------------------------------------
+
+export type AppRootSource = "flag" | "vercel_root_directory" | "workspace_globs" | "default"
+
+export interface ResolvedAppRoot {
+  /** Repo-root-relative app root to hand `inspectWorkspace`, or undefined = today's discovery rule. */
+  appRoot: string | undefined
+  source: AppRootSource
+  /** Workspace packages that look like web apps (more than one = an ambiguous monorepo, job 2). */
+  candidates: string[]
+  /** True when the workspace globs matched more than one web app and none was chosen by Vercel. */
+  ambiguous: boolean
+}
+
+/** `package.json` `workspaces` (array or `{packages}`) plus `pnpm-workspace.yaml` `packages:`. */
+export function readWorkspaceGlobs(root: string): string[] {
+  const globs: string[] = []
+  try {
+    const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as { workspaces?: unknown }
+    const list = Array.isArray(pkg.workspaces)
+      ? pkg.workspaces
+      : pkg.workspaces && typeof pkg.workspaces === "object" && Array.isArray((pkg.workspaces as { packages?: unknown }).packages)
+        ? ((pkg.workspaces as { packages: unknown[] }).packages)
+        : []
+    for (const entry of list) if (typeof entry === "string") globs.push(entry)
+  } catch {
+    // no package.json, or not JSON: no workspaces
+  }
+  try {
+    const yaml = readFileSync(join(root, "pnpm-workspace.yaml"), "utf8")
+    let inPackages = false
+    for (const rawLine of yaml.split(/\r?\n/)) {
+      if (/^packages\s*:/.test(rawLine)) {
+        inPackages = true
+        continue
+      }
+      if (inPackages) {
+        const item = /^\s+-\s*["']?([^"'#]+?)["']?\s*(?:#.*)?$/.exec(rawLine)
+        if (item) {
+          globs.push(item[1]!.trim())
+          continue
+        }
+        if (/^\S/.test(rawLine)) inPackages = false
+      }
+    }
+  } catch {
+    // no pnpm-workspace.yaml
+  }
+  return [...new Set(globs.filter((glob) => !glob.startsWith("!")))]
+}
+
+/** Expands the simple workspace glob shapes (`dir`, `dir/*`, `dir/**`) to existing directories. */
+function expandWorkspaceGlob(root: string, glob: string): string[] {
+  const clean = glob.replace(/\/+$/, "").replace(/^\.\//, "")
+  const star = /^(.*?)\/\*{1,2}$/.exec(clean)
+  if (!star) return existsSync(join(root, clean)) ? [clean] : []
+  const base = star[1]!
+  if (base.includes("*")) return []
+  let entries
+  try {
+    entries = readdirSync(join(root, base), { withFileTypes: true })
+  } catch {
+    return []
+  }
+  return entries
+    .filter((entry) => entry.isDirectory() && !entry.isSymbolicLink() && entry.name !== "node_modules" && !entry.name.startsWith("."))
+    .map((entry) => `${base}/${entry.name}`)
+    .sort()
+}
+
+/**
+ * The app root, in the order the wizard trusts it:
+ *   1. an explicit flag;
+ *   2. the Vercel project's `rootDirectory` (from the hosting verb: what Vercel actually builds);
+ *   3. the workspace globs, when exactly one workspace package is a web app this installer knows;
+ *   4. today's rule (`inspectWorkspace` looks at the root and `apps/*`).
+ * A rootDirectory that escapes the repo or does not exist is ignored (it is not this checkout's app).
+ */
+export function resolveAppRoot(
+  root: string,
+  options: { flag?: string; vercelRootDirectory?: string | null } = {}
+): ResolvedAppRoot {
+  if (options.flag) return { appRoot: options.flag, source: "flag", candidates: [], ambiguous: false }
+  const rootDirectory = options.vercelRootDirectory?.trim().replace(/^\.\//, "").replace(/\/+$/, "")
+  if (rootDirectory && rootDirectory !== ".") {
+    try {
+      const absolute = resolveConfinedAppRoot(root, rootDirectory)
+      if (existsSync(absolute)) return { appRoot: rootDirectory, source: "vercel_root_directory", candidates: [], ambiguous: false }
+    } catch {
+      // escapes the root: not this checkout's app
+    }
+  }
+  const candidates = readWorkspaceGlobs(root)
+    .flatMap((glob) => expandWorkspaceGlob(root, glob))
+    .filter((dir, index, all) => all.indexOf(dir) === index)
+    .filter((dir) => frameworkAdapters.some((adapter) => adapter.detect(join(root, dir)) !== null))
+    .sort()
+  if (candidates.length === 1) return { appRoot: candidates[0], source: "workspace_globs", candidates, ambiguous: false }
+  return { appRoot: undefined, source: "default", candidates, ambiguous: candidates.length > 1 }
 }
