@@ -271,14 +271,25 @@ describe("record (view-03)", () => {
       "{dim}spend 7d{}      12.40",
       "",
       "{b}History",
-      "{dim}Sep 24, 09:12{}  — → on · by Robin"
+      // r4: `Sep 24 09:12  created and turned on · by Robin (in the app)` (run-2 M8).
+      "{dim}Sep 24 09:12{}  created and turned on · by Robin"
     ]);
     expect(render.detail[0]!.replace(/\u001b\[[0-9;]*m/gu, "").indexOf("Demo")).toBe(14);
   });
 
-  it("a next step is a selectable row: ▸, a dim arrow, the words bold on the selection", () => {
-    const render = renderView(thing("record", { fields: [] }, { next: [{ label: "Pause it", ask: "pause it" }] }), ctx({ width: 30 }));
-    expect(render.detail.map(seg)).toEqual([`{cb sel}▸ {dim sel}→ {b sel}Pause it{sel}${" ".repeat(18)}`]);
+  it("a next step reads r4's `Next: pause it`; once engaged it is a selectable row on the selection", () => {
+    const view = thing("record", { fields: [] }, { next: [{ label: "Pause it", ask: "pause it" }] });
+    expect(renderView(view, ctx({ width: 30 })).detail.map(seg)).toEqual(["{dim}Next:{} Pause it"]);
+    expect(renderView(view, ctx({ width: 30, engaged: true })).detail.map(seg))
+      .toEqual([`{cb sel}▸ {dim sel}Next: {b sel}Pause it{sel}${" ".repeat(14)}`]);
+  });
+
+  it("a record's own name is its bold title, and money carries its currency (body.title, body.currency)", () => {
+    const render = renderView(thing("record", {
+      title: "Ad “Ad set 02 · founder”", currency: "USD",
+      fields: [{ label: "spend 7d", value: { value: 12.4 }, unit: "money" }]
+    }), ctx());
+    expect(render.detail.map(seg)).toEqual(["{b}Ad “Ad set 02 · founder”", "", "{dim}spend 7d{}      $12.40"]);
   });
 });
 
@@ -338,6 +349,58 @@ describe("health (view-10)", () => {
       "",
       "{dim}Fix it:{} {cyan u}Reconnect Shopify ↗{}  {dim}(o) · Connections, in the app"
     ]);
+  });
+
+  it("an expired sign-in (needs you) is an amber ⊘, never the needs-you ▣; freshness reads how long ago (run-2 M8)", () => {
+    const now = Date.now;
+    Date.now = () => Date.parse("2026-10-01T10:44:00Z");
+    try {
+      const render = renderView(thing("health", {
+        items: [
+          { id: "st", name: "Stripe", state: "ok", lastSuccessAt: "2026-10-01T10:32:00Z" },
+          { id: "s", name: "Shopify", state: "needs_you", blocker: "sign-in expired", lastSuccessAt: "2026-09-29T10:44:00Z" }
+        ]
+      }), ctx());
+      expect(render.detail.map(seg).slice(0, 2)).toEqual([
+        "{green}✓{} Stripe   connected        {dim}12 min ago",
+        "{amber}⊘{} Shopify  {amber}sign-in expired{}  {dim}2 days ago"
+      ]);
+    } finally {
+      Date.now = now;
+    }
+  });
+});
+
+describe("compare (view-09) table (run-2 M8)", () => {
+  const body = (over: Record<string, unknown> = {}) => ({
+    window: { from: "2026-09-26", to: "2026-10-01", tz: "UTC", label: "Day 6 of 14" }, armLabel: "Version",
+    arms: [
+      { key: "a", label: "A Current", n: 412, days: 6, metrics: { visits: { value: 412 }, signups: { value: 13 }, rate: { value: 3.2 } }, interval: { metric: "rate", low: 1.7, high: 5.3, level: 0.9 } },
+      { key: "b", label: "B New", n: 398, days: 6, metrics: { visits: { value: 398 }, signups: { value: 16 }, rate: { value: 4 } }, interval: { metric: "rate", low: 2.3, high: 6.4, level: 0.9 } }
+    ],
+    metricRows: [{ key: "visits", label: "Visits", unit: "count" }, { key: "signups", label: "Signups", unit: "count" }, { key: "rate", label: "Rate", unit: "percent" }],
+    differences: [],
+    verdict: { sentence: "No winner yet", grade: "insufficient", unmet: ["Day 6 of 14", "check again Oct 9"], namesWinner: false },
+    ...over
+  });
+
+  it("Version | Visits | Signups | Rate | Likely range; n and days are not repeated; one verdict line; no window line it already says", () => {
+    const render = renderView(thing("compare", body()), ctx({ color: false }));
+    expect(render.detail).toEqual([
+      "┌───────────┬────────┬─────────┬──────┬──────────────┐",
+      "│ Version   │ Visits │ Signups │ Rate │ Likely range │",
+      "├───────────┼────────┼─────────┼──────┼──────────────┤",
+      "│ A Current │    412 │      13 │ 3.2% │     1.7–5.3% │",
+      "│ B New     │    398 │      16 │ 4.0% │     2.3–6.4% │",
+      "└───────────┴────────┴─────────┴──────┴──────────────┘",
+      "",
+      "◌ No winner yet  · Day 6 of 14 · check again Oct 9"
+    ]);
+  });
+
+  it("a sample that is not one of the arm's measures keeps its n column", () => {
+    const own = body({ arms: (body().arms as Record<string, unknown>[]).map((arm) => ({ ...arm, n: 999 })) });
+    expect(renderView(thing("compare", own), ctx({ color: false })).detail[1]).toContain("│   n │");
   });
 });
 

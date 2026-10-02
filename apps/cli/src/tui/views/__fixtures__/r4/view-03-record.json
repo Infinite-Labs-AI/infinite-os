@@ -60,6 +60,8 @@
           "label": "open in Meta Ads"
         },
         "body": {
+          "title": "Ad “Hook B · founder POV”",
+          "currency": "USD",
           "fields": [
             {
               "label": "campaign",
@@ -123,7 +125,6 @@
     ]
   },
   "gaps": [
-    "The bold heading \"Ad “Hook B · founder POV”\" has no RecordBodyV1 field.",
     "asOf with a time reads \"as of 10:40\"; a date reads \"up to Sep 30\"."
   ]
 }

@@ -74,6 +74,32 @@ describe("the registry draws the five things kinds", () => {
   });
 });
 
+describe("list (r4 view-02 row grammar, run-2 M8)", () => {
+  const withCurrency = () => withBody("list-rows", { currency: "USD" });
+
+  it("no column-header row: each cell carries its unit (money with its currency, a count with its noun)", () => {
+    const render = draw(withCurrency(), { width: 80 });
+    expect(render.detail.some((line) => /Spend\s+Trials/u.test(line))).toBe(false);
+    const hookA = render.detail.find((line) => line.includes("Hook A"))!;
+    expect(hookA).toContain("$100.00");
+    expect(hookA).toMatch(/3 trials$/u);
+    expect(render.detail.find((line) => line.includes("Hook C"))).toMatch(/1 trial$/u);
+    // A null is still a dash with its footnote, never 0 and never "— trials".
+    expect(render.detail.find((line) => line.includes("Hook C"))).toContain("—¹");
+  });
+
+  it("the selected row's details are one dim line under the rows (r4 `Hook B · since Sep 24 · …`)", () => {
+    const v = withBody("list-rows", {
+      rows: [
+        { id: "ad_1", title: "Hook A", cells: {} },
+        { id: "ad_2", title: "Hook B", cells: {}, detail: [{ label: "since", value: { text: "Hook B · since Sep 24 · Broad" } }, { label: "budget", value: { text: "$30/day" } }] }
+      ]
+    });
+    const render = draw(v, { selected: 1 });
+    expect(render.detail.at(-1)).toBe("Hook B · since Sep 24 · Broad · budget $30/day");
+  });
+});
+
 describe("list", () => {
   it("status comes first (`● on`), then the title, then the cells", () => {
     const render = draw(fixture("list-rows"));
@@ -228,7 +254,9 @@ describe("record", () => {
     const v = fixture("record-ad");
     const render = draw(v);
     expect(render.rowAsks).toEqual(["pause hook b"]);
-    expect(render.detail.find((line) => line.startsWith("▸"))).toContain("→ Pause it");
+    // r4 `Next: pause it`; the selection shows once the view is engaged.
+    expect(render.detail.at(-1)).toBe("Next: Pause it");
+    expect(draw(v, { engaged: true }).detail.find((line) => line.startsWith("▸"))).toContain("Next: Pause it");
     expect(pressAll(v, [press("", { tab: true }), press("", { return: true })]).effect).toEqual({ type: "ask", text: "pause hook b" });
   });
 

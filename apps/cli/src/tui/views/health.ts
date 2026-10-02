@@ -21,7 +21,9 @@ type ItemTone = "success" | "warning" | "error" | "muted";
 
 const ITEM_STATES: Record<string, { glyph: string; words: string; role: ItemTone }> = {
   ok: { glyph: "✓", words: "connected", role: "success" },
-  needs_you: { glyph: "▣", words: "needs you", role: "warning" },
+  // r4 view-10: a source that needs the user (an expired sign-in) is the amber ⊘ of a
+  // broken connection; ▣ is the needs-you of a card waiting for an OK, never a source.
+  needs_you: { glyph: "⊘", words: "needs you", role: "warning" },
   blocked: { glyph: "⊗", words: "blocked", role: "error" },
   unknown: { glyph: "?", words: "unknown", role: "muted" },
   error: { glyph: "✗", words: "error", role: "error" },
@@ -49,6 +51,21 @@ export interface HealthBodyDraw {
 }
 
 /** A health body, drawn. `nested`: inside a composite (no selection, no `o`, no sections). */
+/** r4 freshness: `12 min ago`, `3 h ago`, `2 days ago` since a time; null for a date or nothing usable. */
+function agoWords(value: unknown): string | null {
+  if (typeof value !== "string" || /^\d{4}-\d{2}-\d{2}$/u.test(value)) return null;
+  const at = Date.parse(value);
+  if (!Number.isFinite(at)) return null;
+  const minutes = Math.floor((Date.now() - at) / 60_000);
+  if (minutes < 0) return null;
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} h ago`;
+  const days = Math.floor(hours / 24);
+  return `${days} ${days === 1 ? "day" : "days"} ago`;
+}
+
 export function healthBodyLines(
   body: Record<string, unknown>,
   ctx: ViewRenderCtx,
@@ -72,12 +89,12 @@ export function healthBodyLines(
     const account = viewText(item.account);
     const name = [viewText(item.name), account].filter(Boolean).join(" · ");
     const dataThrough = formatAsOf(item.dataThrough, ctx.timeZone);
-    const lastSuccess = formatAsOf(item.lastSuccessAt, ctx.timeZone);
+    const lastSuccess = agoWords(item.lastSuccessAt) ?? formatAsOf(item.lastSuccessAt, ctx.timeZone);
     return {
       state,
       name,
       words: viewText(item.blocker) || state.words,
-      fresh: dataThrough ? `up to ${dataThrough}` : lastSuccess ? `last OK ${lastSuccess}` : ""
+      fresh: dataThrough ? `up to ${dataThrough}` : lastSuccess ? lastSuccess : ""
     };
   });
 

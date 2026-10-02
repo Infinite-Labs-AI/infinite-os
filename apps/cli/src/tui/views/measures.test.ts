@@ -516,9 +516,17 @@ describe("health", () => {
   });
 
   it("each item prints its glyph, name, state words and how fresh it is", () => {
-    const detail = draw(fixture("health-connections")).detail;
+    const now = Date.now;
+    Date.now = () => Date.parse("2026-01-15T10:40:00Z");
+    let detail: string[];
+    try {
+      detail = draw(fixture("health-connections")).detail;
+    } finally {
+      Date.now = now;
+    }
     expect(detail.find((line) => line.startsWith("✓ Analytics"))).toMatch(/up to Jan 14$/u);
-    expect(detail.find((line) => line.startsWith("✓ Payments"))).toMatch(/last OK Jan 15, 10:28$/u);
+    // r4: when it last worked, as how long ago (run-2 M8).
+    expect(detail.find((line) => line.startsWith("✓ Payments"))).toMatch(/12 min ago$/u);
     // A server blocker replaces the generic state words.
     expect(detail.find((line) => line.startsWith("✗ Email"))).toMatch(/sign-in expired/u);
   });

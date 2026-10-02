@@ -14,9 +14,9 @@ import {
   formatCount,
   labelColumnWidth,
   labelValueLines,
-  nextStepLines,
   nextSteps,
   recordsOf,
+  rowLine,
   section,
   unitOf,
   whoText
@@ -33,10 +33,16 @@ export const renderRecord: KindRenderer<"record"> = (view, ctx) => {
   const selected = clampIndex(ctx.selected, steps.length);
   const lines: string[] = [];
 
+  // r4: the thing's full name in bold first (`Ad “Hook B · founder POV”`), when the view gives it.
+  const title = viewText(body.title);
+  if (title) {
+    lines.push(...wrapText(title, ctx.width).map((line) => paint(line, "b", ctx)), "");
+  }
+  const currency = typeof body.currency === "string" ? body.currency : null;
   const fields = recordsOf(body.fields).map((field) => {
     const value = isRecord(field.value) ? (field.value as unknown as CellV1 | TextCellV1) : null;
     const fallback = value && "text" in value ? "text" : "count";
-    return { label: viewText(field.label), value: cellText(value, unitOf(field.unit, fallback), null, notes) };
+    return { label: viewText(field.label), value: cellText(value, unitOf(field.unit, fallback), currency, notes) };
   }).filter((field) => field.label !== "" || field.value !== "");
   // r4 lines the values up in one column, 14 in (labels padded to 12, then two spaces).
   const labelWidth = Math.max(Math.min(RECORD_LABEL_CELLS, Math.floor(ctx.width * 0.4)), labelColumnWidth(fields.map((field) => field.label), ctx.width));
@@ -46,7 +52,7 @@ export const renderRecord: KindRenderer<"record"> = (view, ctx) => {
 
   section(lines, historyLines(body.history, ctx));
   section(lines, ruleLines(body.rule, ctx));
-  section(lines, nextStepLines(steps, 0, selected, ctx));
+  section(lines, nextLines(steps, selected, ctx));
 
   return {
     detail: lines,
@@ -58,6 +64,28 @@ export const renderRecord: KindRenderer<"record"> = (view, ctx) => {
   };
 };
 
+/**
+ * r4 `Next: pause it`: each next step after a dim `Next:`. Once the user
+ * engages the view, the selected one is a row on the selection (Enter sends
+ * its ask as a NEW turn).
+ */
+function nextLines(steps: ReturnType<typeof nextSteps>, selected: number, ctx: ViewRenderCtx): string[] {
+  return steps.map((step, index) => (ctx.engaged
+    ? rowLine([{ text: "Next: ", style: "muted" }, { text: step.label, style: index === selected ? "b" : "text" }], index === selected, ctx)
+    : fitLine(`${paint("Next:", "muted", ctx)} ${step.label}`, ctx.width)));
+}
+
+/** What a history entry did, in r4's words: `created and turned on`, `on → paused`. */
+function historyWhat(entry: Record<string, unknown>): string {
+  const has = (key: string) => key in entry && entry[key] !== undefined;
+  const from = viewText(entry.from);
+  const to = viewText(entry.to);
+  if (has("from") && !from && to) {
+    return /^(on|off)$/iu.test(to) ? `created and turned ${to}` : `created as ${to}`;
+  }
+  return changeText(entry);
+}
+
 function historyLines(value: unknown, ctx: ViewRenderCtx): string[] {
   const history = recordsOf(value);
   if (!history.length) {
@@ -65,8 +93,13 @@ function historyLines(value: unknown, ctx: ViewRenderCtx): string[] {
   }
   const lines = [paint("History", "b", ctx)];
   for (const entry of history) {
-    const when = formatAsOf(entry.at, ctx.timeZone) ?? "";
-    const what = [changeText(entry), whoText(entry), viewText(entry.source)].filter(Boolean).join(" · ");
+    // r4 `Sep 24 09:12`: the time without the comma.
+    const when = (formatAsOf(entry.at, ctx.timeZone) ?? "").replace(/, (\d{2}:\d{2})$/u, " $1");
+    const source = viewText(entry.source);
+    const who = whoText(entry);
+    // r4 `by Robin (in the app)`: where it was done follows who did it.
+    const by = who && source ? `${who} (${source})` : who || source;
+    const what = [historyWhat(entry), by].filter(Boolean).join(" · ");
     const text = [when ? paint(when, "muted", ctx) : "", what].filter(Boolean).join("  ");
     lines.push(fitLine(text, ctx.width));
   }

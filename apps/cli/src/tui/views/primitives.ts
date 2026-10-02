@@ -339,12 +339,24 @@ export function openHint(appLink: unknown): string {
   return place ? `(o) · ${place}` : "(o)";
 }
 
-/** `<provenance.source> · up to <asOf>`, or null when the view says neither. */
+/**
+ * When the data is from (r4): a date is `up to Sep 30` (the data runs through
+ * that day); a time is `as of 10:40` when it is today, else `as of Oct 1, 10:40`.
+ */
+function asOfWords(value: unknown, timeZone?: string): string {
+  const formatted = formatAsOf(value, timeZone);
+  if (!formatted) return "";
+  if (typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/u.test(value)) return `up to ${formatted}`;
+  const today = formatAsOf(new Date(Date.now()).toISOString(), timeZone);
+  const [day, time] = formatted.split(", ");
+  return time && today?.split(", ")[0] === day ? `as of ${time}` : `as of ${formatted}`;
+}
+
+/** `<provenance.source> · up to <date>` or `· as of <time>`, or null when the view says neither. */
 export function sourceLine(view: AnswerViewV1, ctx: ViewRenderCtx): string | null {
   const provenance = isRecord(view.provenance) ? view.provenance : null;
   const source = viewText(provenance?.source);
-  const asOf = formatAsOf(view.asOf, ctx.timeZone);
-  const parts = [source, asOf ? `up to ${asOf}` : ""].filter(Boolean);
+  const parts = [source, asOfWords(view.asOf, ctx.timeZone)].filter(Boolean);
   return parts.length ? paint(fitLine(parts.join(" · "), ctx.width), "muted", ctx) : null;
 }
 

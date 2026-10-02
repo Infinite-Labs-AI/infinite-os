@@ -92,7 +92,8 @@ export const renderList: KindRenderer<"list"> = (view, ctx) => {
       index += group.rows.length;
     }
   } else {
-    const drawn = rowLines(rows, columns, selected, ctx, notes);
+    const currency = typeof body.currency === "string" ? body.currency : null;
+    const drawn = rowLines(rows, columns, selected, ctx, notes, currency);
     hiddenColumns = drawn.hidden.length;
     // Top rows first, then each group under its label and reason.
     lines.push(...drawn.header, ...drawn.rows.slice(0, top.length).flat());
@@ -155,25 +156,53 @@ function statusText(row: Fields): { text: string; tone: ReturnType<typeof toneRo
   return { text: `● ${word}`, tone: toneRole(tone) };
 }
 
+/**
+ * r4's row grammar (`● on  Hook A · demo loop  $18.20  1.32%  3 trials`)
+ * needs no header when every cell says what it is: at most one money column
+ * (with its currency) and one percent column, and counts that carry their
+ * column's noun. Anything else keeps the header row.
+ */
+function selfDescribing(columns: readonly Column[]): boolean {
+  const count = (unit: UnitV1) => columns.filter((column) => column.unit === unit).length;
+  return columns.length > 0
+    && count("money") <= 1
+    && count("percent") <= 1
+    && columns.every((column) => column.unit === "money" || column.unit === "percent" || (column.unit === "count" && column.label !== ""));
+}
+
+/** `3 trials`, `1 trial`: a measured count with its column's noun (a dash or words stay as they are). */
+function withNoun(text: string, cell: CellV1 | TextCellV1 | null, label: string): string {
+  const value = cell && "value" in cell && typeof cell.value === "number" && Number.isFinite(cell.value) ? cell.value : null;
+  if (value === null || !label) return text;
+  const noun = label.toLowerCase();
+  return `${text} ${value === 1 && noun.endsWith("s") && !noun.endsWith("ss") ? noun.slice(0, -1) : noun}`;
+}
+
 function rowLines(
   rows: readonly Fields[],
   columns: readonly Column[],
   selected: number,
   ctx: ViewRenderCtx,
-  notes: FootnoteBook
+  notes: FootnoteBook,
+  currency: string | null = null
 ): { header: string[]; rows: string[][]; hidden: string[] } {
   const width = Math.max(1, Math.floor(ctx.width));
   const titles = rows.map((row) => viewText(row.title));
   const statuses = rows.map(statusText);
+  const bare = selfDescribing(columns);
   // Cell text in row order, so footnote marks number top to bottom.
   const cells = rows.map((row) => {
     const own = isRecord(row.cells) ? row.cells : {};
-    return columns.map((column) => cellText(asCell(own[column.key]), column.unit, null, notes));
+    return columns.map((column) => {
+      const cell = asCell(own[column.key]);
+      const text = cellText(cell, column.unit, currency, notes);
+      return bare && column.unit === "count" ? withNoun(text, cell, column.label) : text;
+    });
   });
   const statusWidth = statuses.reduce((max, status) => Math.max(max, status ? displayWidth(status.text) : 0), 0);
   const fixed = 2 + (statusWidth ? statusWidth + GAP.length : 0);
   const columnWidths = columns.map((column, index) =>
-    Math.max(displayWidth(column.label), ...cells.map((row) => displayWidth(row[index] ?? "")))
+    Math.max(bare ? 0 : displayWidth(column.label), ...cells.map((row) => displayWidth(row[index] ?? "")))
   );
   const longestTitle = titles.reduce((max, title) => Math.max(max, displayWidth(title)), 0);
   const minTitle = Math.max(1, Math.min(longestTitle, MIN_TITLE_CELLS));
@@ -220,7 +249,7 @@ function rowLines(
     };
   }
 
-  const header = kept.length && kept.some((index) => columns[index]?.label)
+  const header = !bare && kept.length && kept.some((index) => columns[index]?.label)
     ? [paint(fitLine(`${" ".repeat(fixed + titleWidth)}${kept.map((index) => `${GAP}${align(columns[index]?.label ?? "", index)}`).join("")}`.trimEnd(), width), "muted", ctx)]
     : [];
   return {
@@ -263,19 +292,22 @@ function logLines(rows: readonly Fields[], first: number, selected: number, ctx:
   });
 }
 
-/** The selected row's details: its detail fields, its URL, and its app place when `o` can open it. */
+/**
+ * The selected row's details: one dim line (r4 `Hook B · since Sep 24 ·
+ * Broad · US · 25–54`), each detail as its value, or `label value` when the
+ * value does not already say what it is; then its URL, and its app place
+ * when `o` can open it.
+ */
 function rowDetailLines(row: Fields, ctx: ViewRenderCtx, notes: FootnoteBook): string[] {
   const detail = recordsOf(row.detail).map((item) => ({
     label: viewText(item.label),
     value: cellText(asCell(item.value), "text", null, notes)
   })).filter((item) => item.label !== "" || item.value !== "");
   const lines: string[] = [];
-  const labelWidth = labelColumnWidth(detail.filter((item) => item.label !== "").map((item) => item.label), ctx.width);
-  for (const item of detail) {
-    // A detail with no label is one dim sentence (r4: `Hook B · since Sep 24 · Broad`).
-    lines.push(...(item.label
-      ? labelValueLines(item.label, item.value, labelWidth, ctx)
-      : wrapText(item.value, ctx.width).map((line) => paint(line, "muted", ctx))));
+  const words = detail.map((item) =>
+    !item.label || item.value.toLowerCase().includes(item.label.toLowerCase()) ? item.value : `${item.label} ${item.value}`);
+  if (words.length) {
+    lines.push(...wrapText(words.join(" · "), ctx.width).map((line) => paint(line, "muted", ctx)));
   }
   const url = viewText(row.url);
   if (url) {

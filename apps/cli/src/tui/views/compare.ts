@@ -57,10 +57,27 @@ function differenceUnit(label: string, metrics: readonly MetricRow[]): UnitV1 {
   return match?.unit ?? "ratio";
 }
 
+/** `1.7–5.3%`: an arm's likely range in its metric's unit (the decimals the bounds need). */
+function armRangeText(interval: unknown, unit: UnitV1): string {
+  const range = asRecord(interval);
+  const low = finite(range.low);
+  const high = finite(range.high);
+  if (low === null || high === null) return "";
+  if (unit === "percent") {
+    const digits = Math.max(...[low, high].map((value) => (Number.isInteger(value * 10) ? (Number.isInteger(value) ? 0 : 1) : 2)));
+    const at = (value: number) => value.toLocaleString("en-US", { minimumFractionDigits: digits, maximumFractionDigits: digits });
+    return `${at(low)}–${at(high)}%`;
+  }
+  return `${formatValue(low, unit, null)}–${formatValue(high, unit, null)}`;
+}
+
 function compareBodyLines(body: Record<string, unknown>, ctx: ViewRenderCtx, draw: MeasureDraw): string[] {
   const blocks: string[][] = [];
   const window = asRecord(body.window);
-  const windowLine = [viewText(window.label), windowDates(window) ?? ""].filter(Boolean).join(" · ");
+  const verdictWords = isRecord(body.verdict) ? asList(body.verdict.unmet).map((entry) => viewText(entry)).join(" · ") : "";
+  // r4 draws no window line when the verdict already says where the test is (`Day 6 of 14`).
+  const said = viewText(window.label) !== "" && verdictWords.includes(viewText(window.label));
+  const windowLine = said ? "" : [viewText(window.label), windowDates(window) ?? ""].filter(Boolean).join(" · ");
   if (windowLine) {
     blocks.push(wrapText(windowLine, ctx.width).map((line) => paint(line, "muted", ctx)));
   }
@@ -77,25 +94,39 @@ function compareBodyLines(body: Record<string, unknown>, ctx: ViewRenderCtx, dra
   };
 
   if (arms.length) {
-    const withN = arms.some((arm) => finite(arm.n) !== null);
-    const withDays = arms.some((arm) => finite(arm.days) !== null);
-    // Sample size and days go first when the pane is narrow; the metrics stay.
+    // The sample (n) prints unless every arm's n is one of its own measures
+    // (r4: Visits is the sample); days print unless every arm ran the same days
+    // and the test's window or verdict already says how far in it is.
+    const nIsMeasure = arms.every((arm) => {
+      const n = finite(arm.n);
+      return n === null || metrics.some((metric) => metric.unit === "count" && finite(asRecord(asRecord(arm.metrics)[metric.key]).value) === n);
+    });
+    const withN = arms.some((arm) => finite(arm.n) !== null) && !nIsMeasure;
+    const days = new Set(arms.map((arm) => finite(arm.days)));
+    const daysSaid = days.size === 1 && /\bday\b/iu.test(`${viewText(window.label)} ${verdictWords}`);
+    const withDays = arms.some((arm) => finite(arm.days) !== null) && !daysSaid;
+    const ranged = arms.map((arm) => asRecord(arm.interval));
+    const rangeMetric = metrics.find((metric) => ranged.some((range) => range.metric === metric.key));
+    // Sample size and days go first when the pane is narrow; the metrics and the likely range stay.
     const columns: CellTableColumn[] = [
       ...(withN ? [{ label: "n", unit: "count" as const, dropPriority: 5 }] : []),
       ...(withDays ? [{ label: "Days", unit: "count" as const, dropPriority: 4 }] : []),
-      ...metrics.map((metric) => ({ label: metric.label, unit: metric.unit }))
+      ...metrics.map((metric) => ({ label: metric.label, unit: metric.unit })),
+      ...(rangeMetric ? [{ label: "Likely range", unit: "text" as const, dropPriority: 0 }] : [])
     ];
     blocks.push(cellTableLines({
       columns,
-      rows: arms.map((arm) => ({
+      rows: arms.map((arm, index) => ({
         label: viewText(arm.label),
         cells: [
           ...(withN ? [{ value: finite(arm.n) }] : []),
           ...(withDays ? [{ value: finite(arm.days) }] : []),
-          ...metrics.map((metric) => asRecord(arm.metrics)[metric.key] as TableCell)
+          ...metrics.map((metric) => asRecord(arm.metrics)[metric.key] as TableCell),
+          ...(rangeMetric ? [ranged[index]!.metric === rangeMetric.key ? armRangeText(ranged[index], rangeMetric.unit) : ""] : [])
         ]
       })),
-      currency: null
+      currency: null,
+      rowLabel: viewText(body.armLabel)
     }, ctx, draw));
   }
 
@@ -138,10 +169,15 @@ function compareBodyLines(body: Record<string, unknown>, ctx: ViewRenderCtx, dra
     const lines = wrapped.map((line, index) =>
       index === 0 ? `${paint(grade.glyph, grade.role, ctx)}${paint(line.slice(grade.glyph.length), "b", ctx)}` : paint(line, "b", ctx));
     const unmet = asList(verdict.unmet).map((entry) => viewText(entry)).filter(Boolean);
-    // r4: the first unmet condition rides the verdict's last line, dim (`◌ No winner yet  · Day 6 of 14`), when it fits.
+    // r4: the unmet conditions ride the verdict's last line, dim, as many as fit
+    // (`◌ No winner yet  · Day 6 of 14 · check again Oct 9`); the rest sit below.
     const lastPlain = wrapped[wrapped.length - 1];
     if (lastPlain !== undefined && unmet.length && displayWidth(lastPlain) + 4 + displayWidth(unmet[0]!) <= ctx.width) {
-      lines[lines.length - 1] = `${lines[lines.length - 1]}${paint(`  · ${unmet.shift()!}`, "muted", ctx)}`;
+      let tail = `  · ${unmet.shift()!}`;
+      while (unmet.length && displayWidth(lastPlain) + displayWidth(tail) + 3 + displayWidth(unmet[0]!) <= ctx.width) {
+        tail += ` · ${unmet.shift()!}`;
+      }
+      lines[lines.length - 1] = `${lines[lines.length - 1]}${paint(tail, "muted", ctx)}`;
     }
     lines.push(...unmet.flatMap((line) => wrapText(line, ctx.width).map((part) => paint(part, "muted", ctx))));
     blocks.push(lines);

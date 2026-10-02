@@ -55,6 +55,7 @@
         },
         "body": {
           "layout": "rows",
+          "currency": "USD",
           "columns": [
             {
               "key": "spend",

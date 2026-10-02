@@ -121,12 +121,14 @@ export interface ListRowV1 {
 }
 export interface ListBodyV1 {
   layout: "rows" | "log" | "groups" | "files";
+  currency?: string | null;                               // money cells' currency; rev 2
   columns: { key: string; label: string; unit?: UnitV1 }[]; rows: ListRowV1[];
   groups?: { label: string; reason?: string; rows: ListRowV1[] }[];
   total: number | null; shown: number; filterWords?: string; emptyWords?: string;
   omitted?: { count: number; reason: string }; truncated?: TruncationV1;
 }
 export interface RecordBodyV1 {
+  title?: string; currency?: string | null;               // the thing's full name ("Ad “Hook B · founder POV”"); money's currency; rev 2
   fields: { label: string; value: CellV1 | TextCellV1; unit?: UnitV1 }[]; creativeRef?: CreativeRefV1;
   history?: { at: IsoTime; from: string | null; to: string | null; who: string | null; source?: string }[];
   rule?: { summary: string; channel: string; schedule: string; nextRunAt: IsoTime | null;
@@ -176,7 +178,8 @@ export interface JobBodyV1 {
 export interface CompareBodyV1 {
   window: WindowV1;
   armLabel?: string;                                      // the arm column's header ("Version"); rev 2
-  arms: { key: string; label: string; n?: number | null; days?: number | null; metrics: Record<string, CellV1> }[];
+  arms: { key: string; label: string; n?: number | null; days?: number | null; metrics: Record<string, CellV1>;
+    interval?: { metric: string; low: number; high: number; level: number } }[];   // the arm's likely range for `metric`; rev 2
   metricRows: { key: string; label: string; unit: UnitV1 }[];
   differences: { label: string; against: string; absolute: CellV1; relative: CellV1;
     interval?: { low: number; high: number; level: number }; method: string }[];

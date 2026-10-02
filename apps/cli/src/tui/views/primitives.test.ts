@@ -209,11 +209,19 @@ describe("the view shell", () => {
     expect(render.detail).toEqual(["⊗ Only an owner or admin can do this."]);
   });
 
-  it("the source line reads provenance · up to asOf", () => {
+  it("the source line reads provenance · up to a date, or · as of a time (r4 view-03 `as of 10:40`, run-2 M8)", () => {
     const render = renderView(envelope({ asOf: "2026-01-15T10:40:00Z", provenance: { source: "Demo source", via: "our_db" } }), ctx());
-    expect(render.source).toBe("Demo source · up to Jan 15, 10:40");
+    expect(render.source).toBe("Demo source · as of Jan 15, 10:40");
     expect(renderView(envelope({ asOf: "2026-01-15" }), ctx()).source).toBe("up to Jan 15");
     expect(renderView(envelope({}), ctx()).source).toBeNull();
+    // A time today reads the clock alone.
+    const now = Date.now;
+    Date.now = () => Date.parse("2026-01-15T18:00:00Z");
+    try {
+      expect(renderView(envelope({ asOf: "2026-01-15T10:40:00Z" }), ctx()).source).toBe("as of 10:40");
+    } finally {
+      Date.now = now;
+    }
   });
 
   it("caveats print verbatim and truncation prints shown of total · m for more", () => {
