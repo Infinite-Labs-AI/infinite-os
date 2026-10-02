@@ -30,15 +30,29 @@
 // reverse them byte-for-byte.
 //
 // `abort()` restores everything from the snapshot (out of usage, timeout, SIGINT). The snapshot dir holds
-// a manifest, so a crashed turn can be restored later with `Fence.load(dir).abort()`; it is deleted once
-// the turn is settled (it holds `.env` copies).
+// a manifest, so a crashed turn can be restored later with `Fence.load(dir).abort()`, which
+// `recoverCrashedTurns` does for every snapshot a dead process left behind; it is deleted once the turn is
+// settled (it holds `.env` copies). If settling itself fails (a throwing gate), the turn is restored in
+// full before the error goes on, so a turn is never left half-settled.
+//
+// Git itself is fenced too (review O3 F1). An agent with a shell can plant `core.fsmonitor`, a hook or a
+// filter in `.git/config`, commit, move a branch or stage bytes. So after a turn, BEFORE the fence's first
+// git call, `.git/config`, `.git/config.worktree`, `.git/HEAD`, `.git/hooks/**` and `.git/info/**` are put
+// back from the snapshot with plain file I/O (and every fence git call runs with fsmonitor and hooks off,
+// `git-exec.ts`). Then the branch and tag refs and the index (`ls-files -s -v`, which shows content and
+// the assume-unchanged / skip-worktree bits) are compared with the snapshot and restored with
+// `update-ref` / the index copy, and the job is blocked.
+//
+// The settled tree is SEALED (`seal` on the result): `verifySeal` re-reads it right before the build/T0
+// and before anything is staged, because a process the agent left running (a `setsid` grandchild escapes
+// the process-group kill) can still write after the turn.
 //
 // Nested mode (§3d.7) uses `mode: "report"`: edits outside the allowlists are left in place (unstaged by
 // O4) and reported, while consent hunks and gate hits are still reverted and block their job.
 import { createHash } from "node:crypto"
 import { execFile } from "node:child_process"
 import { chmod, lstat, mkdir, readFile, readdir, readlink, rm, rmdir, symlink, unlink, writeFile } from "node:fs/promises"
-import { dirname, join, relative, sep } from "node:path"
+import { basename, dirname, join, relative, sep } from "node:path"
 
 import type { ManagedTextEdit } from "../types.js"
 import type { ChecklistItem, CheckResult, Claim, TurnDiff, WizardEditRecord } from "../wizard/contracts/jobs.js"
@@ -71,7 +85,26 @@ export const CONSENT_CALL_PATTERNS: readonly RegExp[] = [
   /\bUC_UI\b|\busercentrics\b/i,
   /\bklaro\b/i,
   /\bposthog\s*\.\s*(opt_in_capturing|opt_out_capturing)\b/,
-  /['"`]consent['"`]\s*,\s*['"`](default|update)['"`]/
+  /['"`]consent['"`]\s*,\s*['"`](default|update)['"`]/,
+  // Google Consent Mode keys: a line naming one is consent state, wherever the call starts.
+  /\b(ad_storage|analytics_storage|ad_user_data|ad_personalization|functionality_storage|personalization_storage|security_storage|wait_for_update)\b/
+]
+
+/**
+ * Where a consent CALL starts (review O3 F3). A hunk that changes any line inside the call's bracket span
+ * (in the text before OR after the turn) touches consent, so a key flipped on a continuation line of a
+ * Prettier-formatted `gtag('consent', 'default', {\n ad_storage: … })` is caught like a one-line call.
+ * `call` = the match holds the call's own "(" (the span runs to its matching ")"); `enclosing` = the match
+ * is inside the arguments (the span runs to the bracket that closes them, e.g. `dataLayer.push([…])`).
+ */
+const CONSENT_SPAN_STARTS: ReadonlyArray<{ pattern: RegExp; mode: "call" | "enclosing" }> = [
+  { pattern: /gtag\s*\(\s*['"`]consent['"`]/g, mode: "call" },
+  { pattern: /fbq\s*\(\s*['"`]consent['"`]/g, mode: "call" },
+  { pattern: /\b__tcfapi\s*\(/g, mode: "call" },
+  { pattern: /\b__uspapi\s*\(/g, mode: "call" },
+  { pattern: /\b__gpp\s*\(/g, mode: "call" },
+  { pattern: /\bposthog\s*\.\s*(?:opt_in_capturing|opt_out_capturing)\s*\(/g, mode: "call" },
+  { pattern: /['"`]consent['"`]\s*,\s*['"`](?:default|update)['"`]/g, mode: "enclosing" }
 ]
 
 export type FenceBlockReason = "outside_allowlist" | "consent_touched"
@@ -92,6 +125,23 @@ export interface FenceEndResult {
   gate: CheckResult[]
   /** Report mode only: paths changed outside the allowlists, left in place (never staged). */
   reportedOutside: string[]
+  /** The settled tree, for `verifySeal` right before the build/T0 and before anything is staged. */
+  seal: TreeSeal
+}
+
+/** The settled tree after a turn (review O3 F11): what `verifySeal` compares against. */
+export interface TreeSeal {
+  root: string
+  /** `git status` entries (heavy dirs excluded, `.infinite/**` excluded: the wizard writes there). */
+  status: Array<[string, string]>
+  /** Content hash (or a size/time fingerprint above the copy cap) of every listed file + git internals. */
+  files: Array<[string, string]>
+  /** HEAD, branch/tag refs and the index listing. */
+  git: string
+  heavyDirs: string[]
+  heavyInodes: HeavyInode[]
+  /** A file written when the seal was taken: a heavy-dir entry changed after it = a write after the turn. */
+  marker: string
 }
 
 export class FenceTamperError extends Error {
@@ -125,6 +175,22 @@ interface Fingerprint {
   ctimeMs: number
 }
 
+interface HeavyInode {
+  dir: string
+  dev: number
+  ino: number
+}
+
+/** HEAD, the branch and tag refs, and the index (copy + listing) before the turn (review O3 F1). */
+interface GitSnapshot {
+  head: string | null
+  refs: Array<[string, string]>
+  /** sha256 of `git ls-files -s -v -z` (content + assume-unchanged/skip-worktree bits, never stat info). */
+  indexListing: string | null
+  /** Snapshot-relative copy of `.git/index`, or null when there was none (or `.git` is not a directory). */
+  indexCopy: string | null
+}
+
 interface FenceManifest {
   schema: typeof FENCE_SNAPSHOT_SCHEMA
   root: string
@@ -139,6 +205,10 @@ interface FenceManifest {
   fingerprints: Fingerprint[]
   gitInternal: string[]
   marker: string
+  heavyInodes?: HeavyInode[]
+  git?: GitSnapshot | null
+  /** The process that owns the turn (crash recovery skips a live one). */
+  pid?: number
 }
 
 export interface FenceBeginOptions {
@@ -247,6 +317,16 @@ export class Fence {
       const info = await lstatOrNull(join(root, rel))
       if (info) fingerprints.push({ rel, size: info.size, mtimeMs: info.mtimeMs, ctimeMs: info.ctimeMs })
     }
+    const heavyInodes = await heavyInodesOf(root, heavyDirs)
+    const gitState = await captureGit(root)
+    let indexCopy: string | null = null
+    if (gitState.indexPath) {
+      const bytes = await readFile(gitState.indexPath).catch(() => null)
+      if (bytes) {
+        indexCopy = join("files", "git-index")
+        await writeFile(join(dir, indexCopy), bytes, { mode: 0o600 })
+      }
+    }
     const manifest: FenceManifest = {
       schema: FENCE_SNAPSHOT_SCHEMA,
       root,
@@ -260,7 +340,10 @@ export class Fence {
       heavyDirs,
       fingerprints,
       gitInternal,
-      marker
+      marker,
+      heavyInodes,
+      git: { head: gitState.head, refs: gitState.refs, indexListing: gitState.indexListing, indexCopy },
+      pid: process.pid
     }
     await writeFile(join(dir, "manifest.json"), JSON.stringify(manifest), { mode: 0o600 })
     return new Fence(manifest, dir)
@@ -292,14 +375,22 @@ export class Fence {
   }
 
   private async abortNow(): Promise<{ restored: string[]; unrestorable: string[] }> {
+    const { restored, unrestorable } = await this.restoreEverything()
+    await this.dispose()
+    return { restored, unrestorable }
+  }
+
+  /** Puts every path the turn touched back (git internals first, then refs and the index, then files). */
+  private async restoreEverything(): Promise<{ restored: string[]; unrestorable: string[] }> {
+    const gitFiles = await this.restoreGitInternals()
+    const gitState = await this.restoreGitState()
     const touched = await this.touched()
-    const restored: string[] = []
+    const restored: string[] = [...gitFiles, ...gitState]
     for (const rel of touched.paths) {
       await this.restore(rel)
       restored.push(rel)
     }
-    await this.dispose()
-    return { restored, unrestorable: touched.tamper }
+    return { restored: [...new Set(restored)].sort(), unrestorable: touched.tamper }
   }
 
   end(options: FenceEndOptions = {}): Promise<FenceEndResult> {
@@ -314,8 +405,30 @@ export class Fence {
   }
 
   private async endNow(options: FenceEndOptions): Promise<FenceEndResult> {
+    try {
+      return await this.settleTurn(options)
+    } catch (error) {
+      // Never half-settled (review O3 F9): a throwing gate (or any other failure) restores the whole turn
+      // before the error goes on. If even that fails, the snapshot is KEPT for `recoverCrashedTurns`.
+      if (!this.settled) {
+        try {
+          await this.restoreEverything()
+          await this.dispose()
+        } catch {
+          // keep the snapshot on disk
+        }
+      }
+      throw error
+    }
+  }
+
+  private async settleTurn(options: FenceEndOptions): Promise<FenceEndResult> {
     const manifest = this.manifest
     const root = manifest.root
+    const report = manifest.mode === "report"
+    // Git first, with plain file I/O, so no agent-planted config runs in the fence's own git calls.
+    const gitFiles = await this.restoreGitInternals()
+    const gitState = await this.restoreGitState()
     const touched = await this.touched()
     if (touched.tamper.length > 0) {
       for (const rel of touched.paths) await this.restore(rel)
@@ -325,7 +438,6 @@ export class Fence {
     const blocks = new Map<string, FenceBlock>()
     const reverted = new Set<string>()
     const reportedOutside: string[] = []
-    const report = manifest.mode === "report"
     const block = (rel: string, reason: FenceBlockReason, note: string) => {
       for (const itemId of this.itemsFor(rel, options.claims ?? [])) {
         const key = `${itemId}\u0000${reason}`
@@ -341,6 +453,15 @@ export class Fence {
       await this.restore(rel)
       reverted.add(rel)
       block(rel, reason, note)
+    }
+    // Git internals, refs and the index are undone in BOTH modes: an agent never runs git (§3f "Do not").
+    for (const rel of gitFiles) {
+      reverted.add(rel)
+      block(rel, "outside_allowlist", `Undid the change to ${rel}: the agent changed git's own files.`)
+    }
+    for (const rel of gitState) {
+      reverted.add(rel)
+      block(rel, "outside_allowlist", `Undid ${rel}: the agent ran git (a commit, a branch or staging). The wizard makes every commit itself.`)
     }
 
     interface Candidate {
@@ -393,9 +514,13 @@ export class Fence {
       const afterLines = splitLines(after)
       const hunks = hunksOf(beforeLines, afterLines)
       const keep = hunks.map(() => true)
+      const spansBefore = consentLineSpans(before)
+      const spansAfter = consentLineSpans(after)
       hunks.forEach((hunk, index) => {
         const { added, removed } = hunkLines(beforeLines, afterLines, hunk)
-        if ([...added, ...removed].some((line) => CONSENT_CALL_PATTERNS.some((pattern) => pattern.test(line.text)))) {
+        const byPattern = [...added, ...removed].some((line) => CONSENT_CALL_PATTERNS.some((pattern) => pattern.test(line.text)))
+        const inCall = added.some((line) => inSpans(line.line, spansAfter)) || removed.some((line) => inSpans(line.line, spansBefore))
+        if (byPattern || inCall) {
           keep[index] = false
           block(rel, "consent_touched", `Undid a change to a consent call in ${rel}: consent is never the agent's job.`)
         }
@@ -433,9 +558,14 @@ export class Fence {
         for (const evidence of fileEvidence) {
           const candidate = candidates.find((entry) => entry.rel === normalizeRelPath(evidence.file))
           if (!candidate) continue
-          const hit = candidate.hunks.findIndex((hunk) => evidence.line >= hunk.bStart + 1 && evidence.line <= Math.max(hunk.bEnd, hunk.bStart + 1))
-          if (hit === -1) candidate.keep = candidate.keep.map(() => false)
-          else candidate.keep[hit] = false
+          // The evidence line can be a NEW-file line (an added line) or an OLD-file line (a removed line,
+          // e.g. O9's `autoconfig_opt_out_removed`); `CheckResult` does not say which (review O3 F2). So every
+          // hunk the line could belong to is dropped, on either side; when none matches, the whole file is.
+          const hits = candidate.hunks
+            .map((hunk, index) => ({ hunk, index }))
+            .filter(({ hunk }) => (evidence.line > hunk.bStart && evidence.line <= hunk.bEnd) || (evidence.line > hunk.aStart && evidence.line <= hunk.aEnd))
+          if (hits.length === 0) candidate.keep = candidate.keep.map(() => false)
+          else for (const { index } of hits) candidate.keep[index] = false
           block(candidate.rel, "outside_allowlist", note)
         }
       }
@@ -472,8 +602,59 @@ export class Fence {
       })
       editIndex += 1
     }
+    const seal = await takeSeal(root, manifest.heavyDirs, join(dirname(this.dir), `${basename(this.dir)}.seal`))
     await this.dispose()
-    return { reverted: [...reverted].sort(), blocked: [...blocks.values()], edits, gate, reportedOutside: reportedOutside.sort() }
+    return { reverted: [...reverted].sort(), blocked: [...blocks.values()], edits, gate, reportedOutside: reportedOutside.sort(), seal }
+  }
+
+  /**
+   * Puts `.git/config`, `config.worktree`, `HEAD`, `hooks/**` and `info/**` back from the snapshot with
+   * plain file I/O (no git call), and deletes any such file the turn created. Returns what it changed.
+   */
+  private async restoreGitInternals(): Promise<string[]> {
+    const changed: string[] = []
+    for (const rel of this.manifest.gitInternal) {
+      const entry = this.entry(rel)
+      if (!entry) continue
+      if ((await currentHash(join(this.manifest.root, rel))) === entry.sha256) continue
+      await this.restore(rel)
+      changed.push(rel)
+    }
+    for (const rel of await listGitInternal(this.manifest.root)) {
+      if (this.entry(rel)) continue
+      // New since the snapshot: deleted directly (never via a git call).
+      await removePath(join(this.manifest.root, rel))
+      changed.push(rel)
+    }
+    return changed.sort()
+  }
+
+  /** Branch/tag refs, HEAD and the index back to the snapshot (git is safe again by now). */
+  private async restoreGitState(): Promise<string[]> {
+    const before = this.manifest.git
+    if (!before) return []
+    const root = this.manifest.root
+    const now = await captureGit(root)
+    const changed: string[] = []
+    const refsBefore = new Map(before.refs)
+    const refsNow = new Map(now.refs)
+    for (const [ref, sha] of refsBefore) {
+      if (refsNow.get(ref) === sha) continue
+      await gitOk(root, ["update-ref", "--no-deref", ref, sha])
+      changed.push(`.git/${ref}`)
+    }
+    for (const [ref] of refsNow) {
+      if (refsBefore.has(ref)) continue
+      await gitOk(root, ["update-ref", "--no-deref", "-d", ref])
+      changed.push(`.git/${ref}`)
+    }
+    // A detached HEAD moved by a commit: `.git/HEAD` itself was restored with the git internals.
+    if (now.indexPath && now.indexListing !== before.indexListing) {
+      if (before.indexCopy) await writeFile(now.indexPath, await readFile(join(this.dir, before.indexCopy)))
+      else await rm(now.indexPath, { force: true })
+      changed.push(".git/index")
+    }
+    return changed.sort()
   }
 
   /** Deletes the snapshot (it holds `.env` copies). */
@@ -533,6 +714,8 @@ export class Fence {
       const hits = await findNewer(root, manifest.heavyDirs, manifest.marker)
       tamper.push(...hits)
     }
+    // A heavy dir deleted or swapped for another (`rm -rf node_modules`): `find` sees nothing there (F18).
+    tamper.push(...(await heavyDirsReplaced(root, manifest.heavyInodes ?? [])))
     return { paths: [...paths].sort(), tamper: [...new Set(tamper)].sort() }
   }
 
@@ -659,7 +842,8 @@ async function currentHash(path: string): Promise<string | null> {
   return sha256Hex(await readFile(path))
 }
 
-const UTF8 = new TextDecoder("utf-8", { fatal: true })
+// `ignoreBOM: true` keeps a UTF-8 BOM in the text, so hashes and `textEdits` offsets match the file (F17).
+const UTF8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true })
 
 function decodeText(bytes: Buffer): string | null {
   if (bytes.includes(0)) return null
@@ -729,7 +913,7 @@ async function listGitInternal(root: string): Promise<string[]> {
   if (!info) return []
   if (!info.isDirectory()) return [".git"]
   const out: string[] = []
-  for (const name of ["config", "HEAD"]) if (await lstatOrNull(join(dotGit, name))) out.push(`.git/${name}`)
+  for (const name of ["config", "config.worktree", "HEAD"]) if (await lstatOrNull(join(dotGit, name))) out.push(`.git/${name}`)
   for (const sub of ["hooks", "info"]) out.push(...(await walkFiles(join(dotGit, sub), `.git/${sub}`)))
   return out.sort()
 }
@@ -767,4 +951,258 @@ function findNewer(root: string, dirs: readonly string[], marker: string): Promi
       }
     )
   })
+}
+
+// ---- git state (review O3 F1) ----
+
+interface GitNow {
+  head: string | null
+  refs: Array<[string, string]>
+  indexListing: string | null
+  /** Absolute `.git/index` when `.git` is a directory in the repo (a linked worktree's index lives outside it). */
+  indexPath: string | null
+}
+
+async function captureGit(root: string): Promise<GitNow> {
+  const dotGit = await lstatOrNull(join(root, ".git"))
+  if (!dotGit) return { head: null, refs: [], indexListing: null, indexPath: null }
+  const head = await git(root, ["rev-parse", "-q", "--verify", "HEAD"])
+  const refsOut = await git(root, ["for-each-ref", "--format=%(refname)%00%(objectname)", "refs/heads", "refs/tags"])
+  const refs: Array<[string, string]> = []
+  for (const line of refsOut.stdout.toString("utf8").split("\n")) {
+    const [ref, sha] = line.split("\0")
+    if (ref && sha) refs.push([ref, sha])
+  }
+  const listing = await git(root, ["ls-files", "-s", "-v", "-z"])
+  return {
+    head: head.code === 0 ? head.stdout.toString("utf8").trim() : null,
+    refs: refs.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)),
+    indexListing: listing.code === 0 ? sha256Hex(listing.stdout) : null,
+    indexPath: dotGit.isDirectory() ? join(root, ".git", "index") : null
+  }
+}
+
+async function heavyInodesOf(root: string, dirs: readonly string[]): Promise<HeavyInode[]> {
+  const out: HeavyInode[] = []
+  for (const dir of dirs) {
+    const info = await lstatOrNull(join(root, dir))
+    if (info && info.isDirectory()) out.push({ dir, dev: info.dev, ino: info.ino })
+  }
+  return out
+}
+
+async function heavyDirsReplaced(root: string, inodes: readonly HeavyInode[]): Promise<string[]> {
+  const out: string[] = []
+  for (const before of inodes) {
+    const info = await lstatOrNull(join(root, before.dir))
+    if (!info || !info.isDirectory() || info.ino !== before.ino || info.dev !== before.dev) out.push(before.dir)
+  }
+  return out
+}
+
+// ---- consent call spans (review O3 F3) ----
+
+/** 1-based, inclusive line ranges of every consent call in `text` (its whole bracket span). */
+export function consentLineSpans(text: string): Array<[number, number]> {
+  if (text === "") return []
+  const lineStarts: number[] = [0]
+  for (let index = 0; index < text.length; index += 1) if (text.charCodeAt(index) === 10) lineStarts.push(index + 1)
+  const lineOf = (offset: number) => {
+    let low = 0
+    let high = lineStarts.length - 1
+    while (low < high) {
+      const mid = (low + high + 1) >> 1
+      if (lineStarts[mid]! <= offset) low = mid
+      else high = mid - 1
+    }
+    return low + 1
+  }
+  const spans: Array<[number, number]> = []
+  for (const { pattern, mode } of CONSENT_SPAN_STARTS) {
+    pattern.lastIndex = 0
+    for (const match of text.matchAll(pattern)) {
+      const start = match.index ?? 0
+      const end = mode === "call" ? callEnd(text, start) : enclosingEnd(text, start + match[0].length)
+      const span: [number, number] = [lineOf(start), lineOf(Math.max(start, end))]
+      if (!spans.some(([first, last]) => first === span[0] && last === span[1])) spans.push(span)
+    }
+  }
+  return spans.sort((a, b) => a[0] - b[0] || a[1] - b[1])
+}
+
+function inSpans(line: number, spans: ReadonlyArray<[number, number]>): boolean {
+  return spans.some(([first, last]) => line >= first && line <= last)
+}
+
+const SPAN_SCAN_LIMIT = 20_000
+const OPENERS = new Set(["(", "[", "{"])
+const CLOSERS = new Set([")", "]", "}"])
+
+/** Offset of the bracket that closes the first "(" at or after `from` (or the scan limit). */
+function callEnd(text: string, from: number): number {
+  const open = text.indexOf("(", from)
+  if (open === -1) return from
+  let depth = 0
+  return scan(text, open, (char, index) => {
+    if (OPENERS.has(char)) depth += 1
+    else if (CLOSERS.has(char)) {
+      depth -= 1
+      if (depth <= 0) return index
+    }
+    return null
+  })
+}
+
+/** Offset of the bracket that closes the group `from` sits inside (or the scan limit). */
+function enclosingEnd(text: string, from: number): number {
+  let depth = 0
+  return scan(text, from, (char, index) => {
+    if (OPENERS.has(char)) depth += 1
+    else if (CLOSERS.has(char)) {
+      if (depth === 0) return index
+      depth -= 1
+    }
+    return null
+  })
+}
+
+/** Walks code from `from`, skipping strings and comments; `visit` returns an offset to stop there. */
+function scan(text: string, from: number, visit: (char: string, index: number) => number | null): number {
+  const limit = Math.min(text.length, from + SPAN_SCAN_LIMIT)
+  let index = from
+  while (index < limit) {
+    const char = text[index]!
+    if (char === "'" || char === '"' || char === "`") {
+      index += 1
+      while (index < limit && text[index] !== char) index += text[index] === "\\" ? 2 : 1
+      index += 1
+      continue
+    }
+    if (char === "/" && text[index + 1] === "/") {
+      const newline = text.indexOf("\n", index)
+      index = newline === -1 ? limit : newline
+      continue
+    }
+    if (char === "/" && text[index + 1] === "*") {
+      const close = text.indexOf("*/", index + 2)
+      index = close === -1 ? limit : close + 2
+      continue
+    }
+    const stop = visit(char, index)
+    if (stop !== null) return stop
+    index += 1
+  }
+  return limit - 1
+}
+
+// ---- the seal (review O3 F11) ----
+
+const SEAL_SKIP = /^\.infinite(\/|$)/
+
+async function sealEntries(root: string, heavyDirs: readonly string[]): Promise<{ status: Array<[string, string]>; files: Array<[string, string]>; git: string }> {
+  const statusList = (await statusOf(root, heavyDirs)).filter((entry) => !SEAL_SKIP.test(entry.path))
+  const status: Array<[string, string]> = statusList.map((entry) => [entry.path, `${entry.xy}${entry.from ? `<${entry.from}` : ""}`])
+  const files: Array<[string, string]> = []
+  const paths = new Set<string>([...statusList.map((entry) => entry.path), ...(await listGitInternal(root))])
+  for (const rel of [...paths].sort()) {
+    const info = await lstatOrNull(join(root, rel))
+    if (!info || info.isDirectory()) {
+      files.push([rel, "absent-or-dir"])
+      continue
+    }
+    if (info.isFile() && info.size > IGNORED_COPY_LIMITS.perFileBytes) {
+      files.push([rel, `fp:${info.size}:${info.mtimeMs}:${info.ctimeMs}`])
+      continue
+    }
+    files.push([rel, (await currentHash(join(root, rel))) ?? "none"])
+  }
+  const state = await captureGit(root)
+  return { status, files, git: sha256Hex(JSON.stringify([state.head, state.refs, state.indexListing])) }
+}
+
+async function takeSeal(root: string, heavyDirs: readonly string[], marker: string): Promise<TreeSeal> {
+  await writeFile(marker, `${Date.now()}\n`, { mode: 0o600 })
+  const entries = await sealEntries(root, heavyDirs)
+  return { root, ...entries, heavyDirs: [...heavyDirs], heavyInodes: await heavyInodesOf(root, heavyDirs), marker }
+}
+
+/**
+ * Re-reads the tree a turn settled (review O3 F11). `changed` lists what moved since the seal: a file, a
+ * status entry, git's own files, refs or the index, and (with `heavy`, the default) a write inside a heavy
+ * dir. Run it right before the build/T0 and before anything is staged; `heavy:false` once the wizard's
+ * own build has written its output dirs.
+ */
+export async function verifySeal(seal: TreeSeal, options: { heavy?: boolean } = {}): Promise<{ ok: boolean; changed: string[] }> {
+  const now = await sealEntries(seal.root, seal.heavyDirs)
+  const changed = new Set<string>()
+  const statusBefore = new Map(seal.status)
+  const statusNow = new Map(now.status)
+  for (const [rel, xy] of statusNow) if (statusBefore.get(rel) !== xy) changed.add(rel)
+  for (const [rel] of statusBefore) if (!statusNow.has(rel)) changed.add(rel)
+  const filesBefore = new Map(seal.files)
+  for (const [rel, hash] of now.files) if (filesBefore.get(rel) !== hash) changed.add(rel)
+  for (const [rel] of filesBefore) if (!now.files.some(([path]) => path === rel)) changed.add(rel)
+  if (now.git !== seal.git) changed.add(".git (refs or the index)")
+  if (options.heavy !== false && seal.heavyDirs.length > 0) {
+    if (await lstatOrNull(seal.marker)) for (const hit of await findNewer(seal.root, seal.heavyDirs, seal.marker)) changed.add(hit)
+    else changed.add("(the seal marker is gone)")
+    for (const dir of await heavyDirsReplaced(seal.root, seal.heavyInodes)) changed.add(dir)
+  }
+  return { ok: changed.size === 0, changed: [...changed].sort() }
+}
+
+/** Deletes the seal's marker file (nothing secret in it; it only dates the seal). */
+export async function disposeSeal(seal: TreeSeal | null | undefined): Promise<void> {
+  if (seal) await rm(seal.marker, { force: true })
+}
+
+// ---- crash recovery (review O3 F10) ----
+
+/**
+ * Restores every worker-turn snapshot a DEAD process left for this repo (the wizard was killed mid-turn),
+ * so an agent's unvetted edits never become the next turn's baseline, and deletes the snapshot (it holds
+ * `.env` copies). A report-mode (nested) snapshot is kept on purpose and skipped, and so is a turn whose
+ * process is still alive.
+ */
+export async function recoverCrashedTurns(input: { snapshotsRoot: string; root: string }): Promise<Array<{ dir: string; restored: string[] }>> {
+  const out: Array<{ dir: string; restored: string[] }> = []
+  let runs: string[]
+  try {
+    runs = await readdir(input.snapshotsRoot)
+  } catch {
+    return out
+  }
+  for (const run of runs.sort()) {
+    let turns: string[]
+    try {
+      turns = await readdir(join(input.snapshotsRoot, run))
+    } catch {
+      continue
+    }
+    for (const turn of turns.sort()) {
+      const dir = join(input.snapshotsRoot, run, turn)
+      let manifest: FenceManifest
+      try {
+        manifest = JSON.parse(await readFile(join(dir, "manifest.json"), "utf8")) as FenceManifest
+      } catch {
+        continue
+      }
+      if (manifest.schema !== FENCE_SNAPSHOT_SCHEMA || manifest.mode !== "revert" || manifest.root !== input.root) continue
+      if (manifest.pid !== undefined && manifest.pid !== process.pid && processAlive(manifest.pid)) continue
+      if (manifest.pid === process.pid) continue
+      const fence = await Fence.load(dir)
+      const result = await fence.abort()
+      out.push({ dir, restored: result.restored })
+    }
+  }
+  return out
+}
+
+function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM"
+  }
 }

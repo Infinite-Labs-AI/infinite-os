@@ -1,5 +1,11 @@
-// The few read-only git calls the fence and the runner need (status, ls-files, cat-file, rev-parse).
-// GitOps (lane O4) owns every git call that changes the repo; nothing here writes to git.
+// The few git calls the fence and the runner need (status, ls-files, cat-file, rev-parse, and the fence's
+// own undo of an agent's commit or staging: update-ref). GitOps (lane O4) owns every other git call that
+// changes the repo.
+//
+// Every call is hardened against config an agent could have planted in `.git/config` during its turn
+// (review O3 F1): `core.fsmonitor` (git status RUNS it), hooks (update-ref runs reference-transaction) and
+// the system config are switched off on the command line, which outranks every config file. The fence
+// also restores `.git/config` and friends from its snapshot BEFORE its first git call after a turn.
 import { execFile } from "node:child_process"
 
 export interface GitResult {
@@ -11,8 +17,21 @@ export interface GitResult {
 const GIT_ENV: Record<string, string> = {
   GIT_TERMINAL_PROMPT: "0",
   GIT_OPTIONAL_LOCKS: "0",
+  GIT_CONFIG_NOSYSTEM: "1",
   LC_ALL: "C"
 }
+
+/** `-c` flags on every call: no fsmonitor command, no hooks, no pager, quoted paths off. */
+export const GIT_HARDENING_ARGS = [
+  "-c",
+  "core.quotepath=off",
+  "-c",
+  "core.fsmonitor=false",
+  "-c",
+  "core.hooksPath=/dev/null",
+  "-c",
+  "core.pager=cat"
+] as const
 
 export function gitEnv(base: Readonly<Record<string, string | undefined>> = process.env): Record<string, string> {
   const out: Record<string, string> = {}
@@ -24,7 +43,7 @@ export function git(cwd: string, args: readonly string[], env?: Record<string, s
   return new Promise((resolveGit) => {
     execFile(
       "git",
-      ["-c", "core.quotepath=off", ...args],
+      [...GIT_HARDENING_ARGS, ...args],
       { cwd, env: env ?? gitEnv(), encoding: "buffer", maxBuffer: 512 * 1024 * 1024 },
       (error, stdout, stderr) => {
         const code = error ? (typeof (error as { code?: unknown }).code === "number" ? ((error as { code: number }).code) : 1) : 0

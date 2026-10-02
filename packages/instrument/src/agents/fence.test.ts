@@ -1,6 +1,6 @@
 import { existsSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 
 import { cleanup, HEAD_PACKAGE_JSON, item, makeFenceFixture, MANAGED_MODULE, POST_INSTALL_LAYOUT, POST_INSTALL_PACKAGE_JSON, runGit, tempDir, write } from "../../test/wizard/repo.js"
 import { reverseTextEdits } from "../server-lane/text-edits.js"
@@ -9,6 +9,8 @@ import { Fence, FenceTamperError } from "./fence.js"
 import { snapshotDir } from "./paths.js"
 
 const RUN_ID = "7f3c2a10-0000-4000-8000-000000000001"
+// Real git in throwaway repos: give a loaded full-suite run room (review O3 F15).
+vi.setConfig({ testTimeout: 30_000 })
 const dirs: string[] = []
 afterEach(() => cleanup(...dirs.splice(0)))
 
@@ -222,7 +224,7 @@ describe("fence end: consent hunks, text edits, the gate", () => {
   it("passes a clean turn through with no blocks (negative)", async () => {
     const { fence } = await setup()
     const result = await fence.end({ turnGate: async () => [] })
-    expect(result).toEqual({ reverted: [], blocked: [], edits: [], gate: [], reportedOutside: [] })
+    expect(result).toEqual({ reverted: [], blocked: [], edits: [], gate: [], reportedOutside: [], seal: expect.objectContaining({ root: expect.any(String) }) })
   })
 })
 
