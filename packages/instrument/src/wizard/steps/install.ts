@@ -94,6 +94,36 @@ export function openLayoutJobs(paths: readonly string[], existing: readonly Chec
     .filter((item) => !existing.some((other) => other.id === item.id))
 }
 
+/** The item id of the rewrite job for the user's own Next config (review I1 P1-2). */
+export const CONFIG_REWRITES_TARGET = "next_config_rewrites"
+
+/**
+ * Review I1 P1-2: the managed rewrites the user's OWN next.config lacks (the installer never edits it) are a job
+ * for the agent, checked by the wizard (`next_rewrites_exact`, then the build), never "installed".
+ */
+export function configRewriteJobs(deferred: ReadonlyArray<{ path: string; snippet: string }>, existing: readonly ChecklistItem[]): ChecklistItem[] {
+  const spec = JOB_TABLE.unusual_layout
+  return deferred
+    .map((entry): ChecklistItem => ({
+      id: `unusual_layout:${CONFIG_REWRITES_TARGET}`,
+      jobId: "unusual_layout",
+      n: spec.n,
+      title: "Add the analytics rewrites to your Next config",
+      owner: "agent",
+      trigger: {
+        finding: `Your own ${entry.path} lacks the same-origin rewrites the managed tag posts through; add exactly these to its async rewrites(), changing nothing else:\n${entry.snippet}`,
+        evidence: [{ file: entry.path, line: 1 }]
+      },
+      allow: { files: [entry.path], create: [] },
+      checks: [
+        { id: "next_rewrites_exact", tier: "S", state: "not_run" },
+        { id: "build", tier: "B", state: "not_run" }
+      ],
+      state: "pending"
+    }))
+    .filter((item, index, all) => all.findIndex((other) => other.id === item.id) === index && !existing.some((other) => other.id === item.id))
+}
+
 async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
   const state = ctx.state.get()
   if (!state.plan || state.plan.answers.consentMode === null) {
@@ -127,6 +157,17 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
     return { kind: "parked", code: "INF_WIZ_NEEDS_ANSWERS", reason: "The saved plan changed; re-confirm it.", resumeHint: PARK_HINT }
   }
   const approved = new Set(state.plan.lines.filter((line) => line.approved === true).map((line) => line.id))
+
+  // Review I1 P1-2: an install that cannot be applied stops HERE, before the first cloud write (the site source).
+  const blocked = deps.installer.preflight?.(check, savedApprovals.approvals) ?? null
+  if (blocked) {
+    return {
+      kind: "failed",
+      code: "INF_WIZ_APPLY_ROLLED_BACK",
+      message: `The install cannot be applied as planned: ${blocked} Nothing was written, in the repo or in Infinite.`,
+      next: "halt"
+    }
+  }
 
   // Engine invariant (§3a.9.4): no state-changing verb while an agent child is alive.
   if (deps.agents.isAgentAlive()) throw new Error("An agent is still running; the site source is not changed while one runs.")
@@ -186,7 +227,14 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
   await recordGitignoreFence(ctx, deps)
 
   // ---- open jobs: a manual edit is job 2, never "installed"; it passes the ONE seeding gate (B13) ----
-  const openJobs = deps.registry.applyApprovals(openLayoutJobs(result.openJobs, ctx.state.get().jobs), plan, savedApprovals.approvals)
+  const openJobs = deps.registry.applyApprovals(
+    [...openLayoutJobs(result.openJobs, ctx.state.get().jobs), ...configRewriteJobs(result.deferredConfigRewrites ?? [], ctx.state.get().jobs)],
+    plan,
+    savedApprovals.approvals
+  )
+  for (const deferred of result.deferredConfigRewrites ?? []) {
+    sub(ctx, `Your own ${deferred.path} is left as it is: the agent adds Infinite's collect rewrite there (the wizard checks it)`, "info")
+  }
   if (openJobs.length > 0 || result.edits.length > 0) {
     ctx.state.update((current) => {
       current.jobs = [...current.jobs, ...openJobs]

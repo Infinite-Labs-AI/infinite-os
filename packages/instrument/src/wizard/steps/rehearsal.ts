@@ -2,6 +2,7 @@
 // under the production hostname (nothing sent) + load the preview's own URL → grade (O6's grader) → PATCH the
 // run (PR fields, phase `in_pr`, `clickTestedConversions`) → mark GA4 key events for the rehearsal-click-tested
 // names only. A protected preview, a non-Vercel host or no preview is `undetermined`, never pass.
+import type { ChecklistItem } from "../contracts/jobs.js"
 import { homedir } from "node:os"
 import { finalSealPath } from "../../agents/paths.js"
 import { verifyFinalSeal } from "../../agents/fence.js"
@@ -270,7 +271,10 @@ async function rehearsalRun(ctx: WizardContext, deps: WizardDeps): Promise<StepO
     diffText,
     connectionIds: facts.connectionIds,
     scanner,
-    notes: state.agent?.reviewer === "codex" || state.agent?.reviewer === "claude_code" ? [] : ["No second review yet: the wizard printed a review brief."]
+    notes: [
+      ...(state.agent?.reviewer === "codex" || state.agent?.reviewer === "claude_code" ? [] : ["No second review yet: the wizard printed a review brief."]),
+      ...notCheckedNotes(state.jobs)
+    ]
   })
   sub(ctx, "rehearsal", "Opening draft pull request…", "pending")
   const pr = await ensurePr({ deps, remoteUrl: prepared.remoteUrl, base: gitState.base, branch: gitState.branch, title, body, root: ctx.root, ghReady: prepared.ghReady })
@@ -363,4 +367,20 @@ export const step: WizardStep<"rehearsal"> = {
     return sha256(`rehearsal:${git?.branch ?? ""}:${git?.headSha ?? git?.baseSha ?? ""}`)
   },
   run
+}
+
+/**
+ * Review I1 P1-5: an agent job the wizard could not check (still `claimed`) ships its code in this PR, so the
+ * PR says so, by job and file: never presented as checked.
+ */
+export function notCheckedNotes(jobs: readonly ChecklistItem[]): string[] {
+  const claimed = jobs.filter((item) => item.owner === "agent" && item.state === "claimed")
+  if (claimed.length === 0) return []
+  const list = claimed
+    .map((item) => {
+      const files = [...new Set((item.edits ?? []).map((edit) => edit.file))]
+      return `${item.title}${files.length > 0 ? ` (${files.slice(0, 3).join(", ")}${files.length > 3 ? ", …" : ""})` : ""}`
+    })
+    .join("; ")
+  return [`Not checked by the wizard: the agent's code for ${list} is in this pull request, but no check of the wizard's passed on it. Review it yourself.`]
 }

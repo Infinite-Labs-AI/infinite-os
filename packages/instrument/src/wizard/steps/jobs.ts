@@ -72,7 +72,9 @@ const OPEN_STATES: readonly JobItemState[] = ["pending", "claimed"]
 const KEEP_EDIT_STATES: readonly JobItemState[] = ["claimed", "pending", "done_in_code", "waiting_deploy", "waiting_real_event", "proven"]
 /** §3z.12 §3f.6 (B21): the quiet window before the first agent turn. */
 export const DEV_SERVER_QUIET_MS = 2_000
-export const NOTHING_CHECKABLE_NOTE = "Nothing the wizard can check before deploy; later tests decide."
+/** Review I1 P1-5: no later step ticks a `claimed` item, so the note never promises one. */
+export const NOTHING_CHECKABLE_NOTE = "Claimed done, but none of its files changed and the wizard has no check to run before the deploy: not ticked, and listed in the pull request as not checked by the wizard."
+export const NOT_CHECKED_NOTE = "not ticked, and listed in the pull request as not checked by the wizard"
 export const CHECKED_NOTE = "Checked by the wizard, not the agent."
 /** The brief a nested parent agent reads (gitignored with the rest of `.infinite/wizard/`; §3z.12 §3d.7). */
 export const NESTED_BRIEF_PATH = WIZARD_PATHS.agentBrief
@@ -327,7 +329,7 @@ async function settleRound(io: JobsIo, claims: readonly Claim[], questions: read
         if (next.state === "pending") feedback.push(`- ${item.id}: the wizard's checks failed: ${why}`)
       } else if (next.state === "claimed") {
         note = undetermined.length > 0
-          ? `The wizard could not check it here yet (${undetermined.map((result) => result.checkId).join(", ")}); later tests decide.`
+          ? `The wizard could not check it (${undetermined.map((result) => result.checkId).join(", ")}): ${NOT_CHECKED_NOTE}.`
           : NOTHING_CHECKABLE_NOTE
       } else {
         note = CHECKED_NOTE
@@ -679,7 +681,7 @@ class JobsIo {
             // is UNDETERMINED, never a pass and never a crash: the item stays `claimed` (the state machine
             // never ticks it) and a later test, or a later version, decides. Any other error still throws.
             if (!isCheckNotRegistered(error)) throw error
-            emit(this.result(spec.checkId, "S", "undetermined", `${UNCHECKABLE_REASON_PREFIX} ${spec.checkId} yet; a later test decides`))
+            emit(this.result(spec.checkId, "S", "undetermined", `${UNCHECKABLE_REASON_PREFIX} ${spec.checkId}`))
             continue
           }
           for (const result of Array.isArray(raw) ? raw : [raw]) emit({ ...result, tier: "S" })
@@ -817,7 +819,7 @@ class JobsIo {
     const needYou = agent.filter((item) => item.state === "blocked" && item.blockedReason === "needs_you").length
     const blocked = count(["blocked", "failed"]) - needYou
     const parts = [`${done} of ${agent.length} jobs done in code (checked by the wizard, not the agent)`]
-    if (claimed > 0) parts.push(`${claimed} wait for a later test`)
+    if (claimed > 0) parts.push(`${claimed} not checked by the wizard`)
     if (needYou > 0) parts.push(`${needYou} need you`)
     if (blocked > 0) parts.push(`${blocked} blocked`)
     return parts.join(" · ")

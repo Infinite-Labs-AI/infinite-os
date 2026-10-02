@@ -75,6 +75,15 @@ export const TARGET_GISTS: Readonly<Record<string, string>> = {
     "Here: retire the hand-written `_fbc` writer named below (it writes a host-only cookie that shadows Meta's own). Remove only that write; the managed capture replaces it."
 }
 
+/**
+ * Items whose target is a different task than their job's gist (the "What" line is replaced, never added to).
+ * Review I1 P1-2: the user's own Next config gets the managed rewrites; no tag goes in any page.
+ */
+export const TARGET_WHAT: Readonly<Record<string, string>> = {
+  "unusual_layout:next_config_rewrites":
+    "Add exactly the rewrites quoted under Why to the existing Next config's async rewrites() (create the function if it has none). Change nothing else in the file; never put a tag in a page."
+}
+
 /** Job 6 target families (`duplicates.ts` targets): which owner goes, which stays. */
 function duplicateGist(target: string): string {
   if (target === "ga4_gtag" || target.startsWith("ga4_gtag:")) {
@@ -195,7 +204,7 @@ function planDataFor(item: ChecklistItem, facts: BriefFacts): Record<string, unk
  * quoted data. Throws when the job needs a decision the plan did not give (never a guess).
  */
 export function jobBlock(item: ChecklistItem, facts: BriefFacts): string {
-  const gist = (JOB_GISTS as Record<string, string | undefined>)[item.jobId]
+  const gist = TARGET_WHAT[item.id] ?? (JOB_GISTS as Record<string, string | undefined>)[item.jobId]
   if (gist === undefined) throw new Error(`no brief for job ${item.jobId} (code jobs are never briefed)`)
   const data = planDataFor(item, facts)
   if (data instanceof Error) throw data

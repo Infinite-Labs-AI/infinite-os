@@ -58,7 +58,7 @@ export interface KeysAdapterResult {
 }
 
 /** The PostHog region hosts, from the connection's `region` (never derived from a US default). */
-function posthogProxyFor(keys: TagKeys["posthog"]): PosthogProxySpec | null {
+export function posthogProxyFor(keys: TagKeys["posthog"]): PosthogProxySpec | null {
   if (keys.region === "us") {
     return { path: DEFAULT_POSTHOG_PROXY_PATH, ingestHost: "https://us.i.posthog.com", assetsHost: "https://us-assets.i.posthog.com" }
   }

@@ -598,6 +598,11 @@ export interface Installer {
   buildPlan(scan: ScanResult, keys: TagKeys, before: BeforeFacts, candidates: readonly ChecklistItem[]): PlanModel
   planAsk(plan: PlanModel): { lines: PlanLine[]; decisions: PlanModel["decisions"] }
   apply(plan: PlanModel, approvals: PlanApprovals): Promise<InstallerApplyResult>
+  /**
+   * Review I1 P1-2 (additive, optional): why the approved install cannot be applied as planned (null = it can),
+   * WITHOUT writing anything. The install step reads it before any cloud write (the site source).
+   */
+  preflight?(plan: PlanModel, approvals: PlanApprovals): string | null
   npmInstall(pkgs: readonly string[]): Promise<{ ok: boolean; edits: WizardEditRecord[] }>
   recordEdits(edits: readonly WizardEditRecord[]): Promise<void>
   refreshEditReceiptFromHead(): Promise<{ refreshed: boolean }>

@@ -76,6 +76,13 @@ export interface PlanScanFacts {
    * site not served by Vercel has no same-origin collect path the wizard can write.
    */
   infiniteBlocked?: string | null
+  /**
+   * Review I1 P1-2: a Next app's own config (repo-relative) that lacks Infinite's collect rewrite. The installer
+   * never edits it; the plan says the rewrite is an agent job (checked by the wizard) before anything is written.
+   */
+  nextConfigRewrites?: { path: string } | null
+  /** Review I1 P1-2: why the install cannot be applied as planned (a dry plan's blocker), or null. */
+  installBlocked?: string | null
 }
 
 export interface PlanAgentSummary {
@@ -444,6 +451,26 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
   }
   if (scan.infiniteBlocked && !scan.adopted.some((entry) => entry.provider === "infinite")) {
     lines.push(line({ id: "user_action:infinite_blocked", kind: "user_action", text: `Infinite: ${scan.infiniteBlocked}`, requires: "user_action" }))
+  }
+  if (scan.installBlocked) {
+    lines.push(
+      line({
+        id: "user_action:install_blocked",
+        kind: "user_action",
+        text: `The install cannot be applied as planned until this is fixed: ${scan.installBlocked.slice(0, 300)}`,
+        requires: "user_action"
+      })
+    )
+  }
+  if (scan.nextConfigRewrites && tools.includes("infinite")) {
+    lines.push(
+      line({
+        id: "user_action:next_config_rewrites",
+        kind: "user_action",
+        text: `Your own ${scan.nextConfigRewrites.path} is never edited by the installer: Infinite's collect rewrite goes in it as an agent job the wizard checks (or you add it). Until it is there, Infinite's tag records nothing.`,
+        requires: "user_action"
+      })
+    )
   }
   if (scan.serverLane && tools.includes("infinite")) {
     lines.push(

@@ -19,7 +19,7 @@ const PAGE_FILE = /\.(?:[cm]?[jt]sx?|mdx?|html?|astro|vue|svelte)$/i
  * Tool-specific phrases only: "infinite scroll" does not disclose Infinite's analytics, and a "Follow us
  * on Facebook" link does not disclose the Meta pixel (review P3-4).
  */
-const TOOL_NAMES: Record<TestTool, RegExp> = {
+export const PRIVACY_TOOL_NAMES: Record<TestTool, RegExp> = {
   ga4: /google analytics|\bga4\b|googletagmanager/i,
   posthog: /posthog/i,
   meta: /\bmeta pixel\b|facebook pixel|\bmeta platforms\b|\bmeta conversions api\b|facebook conversions api/i,
@@ -36,7 +36,7 @@ export function detectPrivacyPages(snapshot: RepoSnapshot): PrivacyPageFinding[]
     const isMarkdownOrHtml = /\.(?:mdx?|html?)$/i.test(path)
     if (route === null && !isMarkdownOrHtml) continue
     const names = {} as Record<TestTool, boolean>
-    for (const tool of Object.keys(TOOL_NAMES) as TestTool[]) names[tool] = TOOL_NAMES[tool].test(text)
+    for (const tool of Object.keys(PRIVACY_TOOL_NAMES) as TestTool[]) names[tool] = PRIVACY_TOOL_NAMES[tool].test(text)
     findings.push({ file: path, line: 1, detail: "privacy page", route, names })
   }
   return sortFindings(findings)

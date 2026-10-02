@@ -416,3 +416,61 @@ describe("review fixes (O7 fix round)", () => {
     expect(saved.guard).toMatchObject({ emit: true, exempt: ["acme-store.com"] })
   })
 })
+
+describe("a Next site with its OWN next.config (review I1 P1-2)", () => {
+  const NEXT_FILES = {
+    "package.json": `{"dependencies":{"next":"15.0.0","react":"19.0.0"}}\n`,
+    "app/layout.tsx": "export default function RootLayout({ children }) {\n  return (\n    <html>\n      <body>{children}</body>\n    </html>\n  )\n}\n",
+    "app/page.tsx": "export default function Page() {\n  return <main>Acme</main>\n}\n",
+    "next.config.mjs": "/** @type {import('next').NextConfig} */\nconst nextConfig = { reactStrictMode: true }\n\nexport default nextConfig\n"
+  }
+
+  async function runBoth(files: Record<string, string>) {
+    const h = await setup({ files, consentFlag: "not_required", answers: [] })
+    const ctx = h.ctx
+    ctx.ask = (async (kind: never, payload: never) => {
+      ctx.asks.push({ kind, payload })
+      return approveAllFrom(ctx)
+    }) as typeof ctx.ask
+    const plan = await planStep.run(ctx, h.deps)
+    const install = await installStep.run(ctx, h.deps)
+    return { h, ctx, plan, install }
+  }
+
+  it("installs everything else, never edits the user's config, says so on the plan, and seeds a checked rewrite job", async () => {
+    const { h, ctx, plan, install } = await runBoth(NEXT_FILES)
+    expect(plan.kind).toBe("ok")
+    const lines = (ctx.asks[0]!.payload as AskPayloads["plan"]).lines
+    expect(lines.find((line) => line.id === "user_action:next_config_rewrites")?.text).toContain("next.config.mjs")
+    expect(lines.some((line) => line.id === "user_action:install_blocked")).toBe(false)
+    // PostHog installs straight to its region: no /ingest promise without a rewrite behind it.
+    expect(lines.find((line) => line.id.startsWith("install_provider:posthog"))?.text).not.toContain("/ingest")
+    expect(install.kind).toBe("ok")
+    expect(read(h.ctx.root, "next.config.mjs")).toBe(NEXT_FILES["next.config.mjs"])
+    expect(read(h.ctx.root, "app/layout.tsx")).toContain("InfiniteAnalyticsClient")
+    const job = ctx.stateValue().jobs.find((item) => item.id === "unusual_layout:next_config_rewrites")!
+    expect(job).toMatchObject({ owner: "agent", state: "pending", allow: { files: ["next.config.mjs"], create: [] } })
+    expect(job.checks.map((check) => `${check.tier}:${check.id}`)).toEqual(["S:next_rewrites_exact", "B:build"])
+    expect(job.trigger.finding).toContain("/infinite/ledger")
+    expect(h.siteSourceCalls).toHaveLength(1)
+  })
+
+  it("negative: a config that already has the exact rewrites gets no job and no plan line", async () => {
+    const withRewrites = {
+      ...NEXT_FILES,
+      "next.config.mjs": `export default {\n  async rewrites() {\n    return [\n      { source: "/infinite/ledger", destination: "https://api.ultima.inc/api/analytics/events/collect" }\n    ]\n  }\n}\n`
+    }
+    const { ctx, install } = await runBoth(withRewrites)
+    expect(install.kind).toBe("ok")
+    expect((ctx.asks[0]!.payload as AskPayloads["plan"]).lines.some((line) => line.id === "user_action:next_config_rewrites")).toBe(false)
+    expect(ctx.stateValue().jobs.some((item) => item.id === "unusual_layout:next_config_rewrites")).toBe(false)
+  })
+
+  it("an install the harness would refuse stops BEFORE the site source is written, and the plan said so", async () => {
+    const { h, ctx, install } = await runBoth({ ...NEXT_FILES, "next.config.js": "module.exports = {}\n" })
+    expect((ctx.asks[0]!.payload as AskPayloads["plan"]).lines.find((line) => line.id === "user_action:install_blocked")?.text).toMatch(/multiple Next configs/)
+    expect(install).toMatchObject({ kind: "failed", code: "INF_WIZ_APPLY_ROLLED_BACK" })
+    expect((install as { message: string }).message).toContain("Nothing was written")
+    expect(h.siteSourceCalls).toHaveLength(0)
+  })
+})

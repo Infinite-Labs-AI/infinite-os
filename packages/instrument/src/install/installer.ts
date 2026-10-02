@@ -33,6 +33,7 @@ import {
 import { packageInstallCommandLine, type CommandSpawner } from "../package-manager.js"
 import { planServerLane } from "../server-lane/install.js"
 import type {
+  DeferredConfigRewrite,
   ImproveLine,
   InspectResult,
   InstallManifest,
@@ -58,10 +59,12 @@ import type {
 
 import { beforeTextOf, makeEditRecord, refreshFromHead } from "./edits.js"
 import { applyImproveEdit, detectAdoptedFacts, improveLinesFor, withSensitivePaths, type AdoptedFacts } from "./improve.js"
-import { artifactsFromKeys, manifestIdsFor, wizardInstallWorkspaceId, type WizardInstallArtifacts } from "./keys-adapter.js"
+import { artifactsFromKeys, manifestIdsFor, posthogProxyFor, wizardInstallWorkspaceId, type WizardInstallArtifacts } from "./keys-adapter.js"
 import { SERVER_LANE_GUIDE_FILE } from "../server-lane/copy.js"
 import { normalizeAppRelativePath } from "../frameworks/shared.js"
-import { DEFAULT_POSTHOG_PROXY_PATH } from "../workspace-artifacts.js"
+import { DEFAULT_POSTHOG_PROXY_PATH, INFINITE_API_ORIGIN, infiniteCollectDestination } from "../workspace-artifacts.js"
+import { hasExactNextConfigRewrites, type ManagedProxySpec } from "../frameworks/vercel-config.js"
+import { isManagedInfiniteFile } from "../frameworks/managed-files.js"
 import { findLockfile, runNpmJob } from "./npm.js"
 import {
   buildPlanModel,
@@ -109,6 +112,11 @@ export interface WizardScanResult extends ScanResult {
   serverLane: { targetLabel: string; installPackages: string[] } | null
   npm: { commandLine: string } | { refused: string } | null
   warnings: string[]
+  /**
+   * A Next app's own config (repo-relative), when exactly one exists and the installer did not create it
+   * (review I1 P1-2: the installer never edits it; the rewrites it lacks become a checked agent job).
+   */
+  unmanagedNextConfig?: string | null
 }
 
 export interface InstallerOptions {
@@ -177,6 +185,8 @@ export interface WizardApplyResult extends InstallerApplyResult {
   build: "passed" | "failed_baseline" | "not_run"
   /** The resolved artifacts the managed bytes were written from (public ids only). */
   artifacts: WizardInstallArtifacts
+  /** Review I1 P1-2: the user's own config(s) the managed rewrites must still be added to (an agent job each). */
+  deferredConfigRewrites?: DeferredConfigRewrite[]
 }
 
 interface PlanInternals {
@@ -266,6 +276,7 @@ export class WizardInstaller implements Installer {
         : { refused: lockfile.reason === "no_lockfile" ? "no lockfile, so the package manager is unknown" : `${lockfile.reason.replace("_", " ")}: ${lockfile.detail}` }
     }
     const result: WizardScanResult = {
+      unmanagedNextConfig: unmanagedNextConfigOf(phase.appRootAbsolute, phase.inspect.appRoot, framework),
       root: opts.root,
       appRoot: phase.inspect.appRoot,
       framework,
@@ -301,7 +312,7 @@ export class WizardInstaller implements Installer {
     const wizardScan = this.requireWizardScan(scan)
     const beforeFacts = before as WizardBeforeFacts
     const sensitivePaths = sensitivePathsFrom(before)
-    const served = siteServing(wizardScan, beforeFacts)
+    const served = siteServing(wizardScan, beforeFacts, keys)
     const improve = improveLinesFor(wizardScan.facts, { framework: wizardScan.framework, keys, sensitivePaths, vercelServed: served.vercelServed })
     const managed = new Set<ProviderId>((wizardScan.manifest?.providers ?? []) as ProviderId[])
     const facts: PlanScanFacts = {
@@ -316,7 +327,15 @@ export class WizardInstaller implements Installer {
       sensitivePaths,
       appRoot: wizardScan.appRoot,
       posthogProxy: served.posthogProxy,
-      infiniteBlocked: served.infiniteBlocked
+      infiniteBlocked: served.infiniteBlocked,
+      nextConfigRewrites: nextConfigRewritesNeeded(wizardScan, keys),
+      // Review I1 P1-2: an installer blocker is said on the plan screen, before anything is approved or written.
+      installBlocked: this.dryInstallFailure(
+        wizardScan,
+        artifactsFromKeys(keys, { consentMode: "not_required", conversionNames: [], privacyText: null, npmInstall: null }, { posthogProxy: served.posthogProxy }),
+        wizardScan.serverLane !== null,
+        beforeFacts
+      )
     }
     const model = buildPlanModel({
       scan: facts,
@@ -335,6 +354,48 @@ export class WizardInstaller implements Installer {
     return planAskPayload(plan)
   }
 
+  /** Review I1 P1-2: the approved install's blocker, if any, from a dry plan (nothing is written). */
+  preflight(plan: PlanModel, approvals: PlanApprovals): string | null {
+    const internals = this.internals.get(plan)
+    if (!internals) return null
+    const { scan, keys } = internals
+    const answers = resolvePlanAnswers(plan, approvals, { consentFlag: this.options.consentFlag() })
+    const approved = new Set(answers.lines.filter((entry) => entry.approved === true).map((entry) => entry.id))
+    const served = siteServing(scan, internals.before, keys)
+    const all = artifactsFromKeys(keys, { ...plan.decisions, consentMode: answers.consentMode ?? "not_required" }, { posthogProxy: served.posthogProxy })
+    const artifacts: WizardInstallArtifacts = { ...(all.productionHosts ? { productionHosts: all.productionHosts } : {}) }
+    for (const tool of ["infinite", "ga4", "posthog", "meta"] as const) {
+      const lineForTool = plan.lines.find((entry) => entry.kind === "install_provider" && (entry.id === `install_provider:${tool}` || entry.id.startsWith(`install_provider:${tool}:`)))
+      if (lineForTool && approved.has(lineForTool.id) && all[tool]) (artifacts as Record<string, unknown>)[tool] = all[tool]
+    }
+    return this.dryInstallFailure(scan, artifacts, approved.has("server_lane") && artifacts.infinite !== undefined && scan.serverLane !== null, internals.before)
+  }
+
+  /** The harness plan's failure for these artifacts, planned exactly as `apply` plans them, with no write. */
+  private dryInstallFailure(scan: WizardScanResult, input: WizardInstallArtifacts, serverLane: boolean, before?: WizardBeforeFacts): string | null {
+    const served = siteServing(scan, before ?? { hosting: { provider: "none" } as WizardBeforeFacts["hosting"] })
+    // As `apply`: a static / Vite site Vercel serves gets Infinite's collect path through vercel.json.
+    let artifacts: WizardInstallArtifacts =
+      input.infinite && served.vercelServed && (scan.framework === "static-html" || scan.framework === "vite-react") ? { ...input, infinite: { ...input.infinite, staticProxy: "vercel" } } : input
+    // Before `install` writes the site source, Infinite's hosts are not final: the dry plan uses the hosts the
+    // site source will carry (as `siteSourceHosts`), and leaves Infinite out when none is known yet.
+    if (artifacts.infinite && artifacts.infinite.productionHosts.length === 0) {
+      const hosts = [...new Set([...(before?.hosting.vercel?.productionDomains ?? []), ...(before?.observedProductionHost ? [before.observedProductionHost] : [])])]
+      const { infinite, ...rest } = artifacts
+      artifacts = hosts.length > 0 ? { ...rest, infinite: { ...infinite, productionHosts: hosts } } : rest
+    }
+    try {
+      const phase = inspectPhase({ root: scan.root, appRoot: scan.appRoot })
+      const resolvedKeys: ResolvedKeys = { artifacts, sources: {} }
+      for (const tool of ["infinite", "ga4", "posthog", "meta"] as const) if (artifacts[tool]) resolvedKeys.sources[tool] = "infinite-connection"
+      const classifications = classifyPhase({ manifest: phase.manifest, detected: phase.detected, keys: resolvedKeys, adoptExisting: true, serverLane, improve: {} })
+      const result = planPhase({ root: scan.root, inspect: phase.inspect, classifications, keys: resolvedKeys, workspaceId: wizardInstallWorkspaceId(this.options.repoFingerprint), serverLane, deferUnmanagedNextConfig: true })
+      return result.failure && !result.nothingToInstall ? result.failure.message : null
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error)
+    }
+  }
+
   // ---------------------------------------------------------------------------------------------
   // apply
   // ---------------------------------------------------------------------------------------------
@@ -350,7 +411,7 @@ export class WizardInstaller implements Installer {
     if (answers.consentMode === null) throw new Error("apply needs an answered consent mode (the run parks at `plan` without one).")
     const approved = new Set(answers.lines.filter((entry) => entry.approved === true).map((entry) => entry.id))
     const warnings: string[] = [...scan.warnings]
-    const served = siteServing(scan, internals.before)
+    const served = siteServing(scan, internals.before, keys)
 
     // ---- the artifacts: approved tools from the connections; an already-managed tool whose update
     // was not approved is KEPT exactly as the receipt recorded it (never dropped from the page) ----
@@ -405,7 +466,9 @@ export class WizardInstaller implements Installer {
       serverLane,
       improve: improveByProvider
     })
-    let planResult = planPhase({ root, inspect: phase.inspect, classifications, keys: resolvedKeys, workspaceId, serverLane })
+    // Review I1 P1-2: the user's own next.config is never edited and never blocks the install; the rewrites it
+    // lacks are an agent job (`deferredConfigRewrites`, checked by `next_rewrites_exact`).
+    let planResult = planPhase({ root, inspect: phase.inspect, classifications, keys: resolvedKeys, workspaceId, serverLane, deferUnmanagedNextConfig: true })
     if (planResult.failure && artifacts.posthog?.proxy && /next\.config|rewrites/.test(planResult.failure.message)) {
       // An existing next.config the installer will not edit: PostHog installs direct to its region,
       // and the proxy is left to a line the user sees (never a silent downgrade).
@@ -413,7 +476,7 @@ export class WizardInstaller implements Installer {
       if (direct) {
         artifacts = { ...artifacts, posthog: { projectKey: artifacts.posthog.projectKey, apiHost: direct, ...(artifacts.posthog.uiHost ? { uiHost: artifacts.posthog.uiHost } : {}) } }
         resolvedKeys.artifacts = artifacts
-        planResult = planPhase({ root, inspect: phase.inspect, classifications, keys: resolvedKeys, workspaceId, serverLane })
+        planResult = planPhase({ root, inspect: phase.inspect, classifications, keys: resolvedKeys, workspaceId, serverLane, deferUnmanagedNextConfig: true })
         warnings.push("PostHog was installed straight to its region: your existing next.config is not edited by the installer, so the /ingest proxy is an agent job (add the rewrites to next.config).")
       }
     }
@@ -546,7 +609,8 @@ export class WizardInstaller implements Installer {
         reason: null,
         npmInstalled,
         build,
-        artifacts
+        artifacts,
+        deferredConfigRewrites: [...(p.deferredConfigRewrites ?? [])]
       }
     } catch (error) {
       const restored = rollback()
@@ -731,15 +795,20 @@ const TOOL_LABEL: Record<"infinite" | "ga4" | "posthog" | "meta", string> = { in
  * Vercel serves the site (the hosting verb, or the repo's own vercel.json / .vercel link).
  */
 export function siteServing(
-  scan: Pick<WizardScanResult, "framework" | "hosting">,
-  before: Pick<BeforeFacts, "hosting">
+  scan: Pick<WizardScanResult, "framework" | "hosting" | "root"> & { unmanagedNextConfig?: string | null },
+  before: Pick<BeforeFacts, "hosting">,
+  keys?: TagKeys
 ): { vercelServed: boolean; posthogProxy: boolean; infiniteBlocked: string | null } {
   const vercelServed = before.hosting.provider === "vercel" || scan.hosting === "vercel"
   const html = scan.framework === "static-html" || scan.framework === "vite-react"
+  // Review I1 P1-2: a Next app's OWN config is never edited, so a NEW PostHog proxies through /ingest only
+  // when that config already carries PostHog's exact rewrites; otherwise it installs straight to its region
+  // (an /ingest api_host with no rewrite behind it would 404 every event).
+  const ownConfigLacksPosthog = !html && !!scan.unmanagedNextConfig && !ownConfigHas(scan.root, scan.unmanagedNextConfig, keys ? { posthog: posthogProxyFor(keys.posthog) ?? undefined } : null)
   return {
     vercelServed,
     // Next proxies through its own rewrites on any host; a static/Vite page only through vercel.json.
-    posthogProxy: !html || vercelServed,
+    posthogProxy: html ? vercelServed : !ownConfigLacksPosthog,
     infiniteBlocked:
       html && !vercelServed
         ? "your site is not served through Vercel, so the wizard cannot add the same-origin collect path a static page needs; Infinite is not installed this run. Host the site on Vercel (or add the collect path by hand), then run npx infinite-tag again."
@@ -791,4 +860,35 @@ function keptArtifact(
 
 export function createWizardInstaller(options: InstallerOptions): WizardInstaller {
   return new WizardInstaller(options)
+}
+
+const NEXT_CONFIG_NAMES = ["next.config.js", "next.config.mjs", "next.config.ts", "next.config.cjs"] as const
+
+/** The Next app's own config (repo-relative) when exactly one exists and it is not the installer's managed file. */
+export function unmanagedNextConfigOf(appRootAbsolute: string, appRoot: string, framework: string): string | null {
+  if (framework !== "next-app-router" && framework !== "next-pages-router") return null
+  const present = NEXT_CONFIG_NAMES.filter((name) => existsSync(join(appRootAbsolute, name)))
+  if (present.length !== 1) return null
+  const source = readFileSync(join(appRootAbsolute, present[0]!), "utf8")
+  return isManagedInfiniteFile(source) ? null : normalizeAppRelativePath(appRoot, present[0]!)
+}
+
+/** True when the user's own config already has every rewrite of `proxy` exactly (null proxy / no spec = false). */
+function ownConfigHas(root: string, file: string, proxy: ManagedProxySpec | null): boolean {
+  if (!proxy || (!proxy.posthog && !proxy.infinite)) return false
+  try {
+    return hasExactNextConfigRewrites(readFileSync(join(root, file), "utf8"), proxy)
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Review I1 P1-2: the plan line's fact. A Next app with its own config that lacks Infinite's collect rewrite:
+ * the installer leaves the file as it is and the rewrite is an agent job, so the plan says so up front.
+ */
+export function nextConfigRewritesNeeded(scan: Pick<WizardScanResult, "root"> & { unmanagedNextConfig?: string | null }, keys: TagKeys): { path: string } | null {
+  if (!scan.unmanagedNextConfig || !keys.infinite.collectPath) return null
+  const infinite = { path: keys.infinite.collectPath, destination: infiniteCollectDestination(INFINITE_API_ORIGIN) }
+  return ownConfigHas(scan.root, scan.unmanagedNextConfig, { infinite }) ? null : { path: scan.unmanagedNextConfig }
 }

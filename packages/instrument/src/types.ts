@@ -158,6 +158,8 @@ export interface InstallPlan {
   adopted: AdoptedProvider[]
   /** Present when the plan was made with `--server-lane`. */
   serverLane?: ServerLanePlan
+  /** The wizard only: the user's own config(s) the managed rewrites still have to be added to (an agent job). */
+  deferredConfigRewrites?: DeferredConfigRewrite[]
 }
 
 /**
@@ -510,6 +512,15 @@ export interface FrameworkPlanDraft {
   assumptions: string[]
   blockers: string[]
   confidence: number
+  /** `deferUnmanagedNextConfig`: the user's own Next config the rewrites still have to be added to (left as is). */
+  deferredConfigRewrites?: DeferredConfigRewrite[]
+}
+
+/** A config file the installer leaves to the user / their agent, with the exact lines it needs (review I1 P1-2). */
+export interface DeferredConfigRewrite {
+  /** App-relative in a framework draft; repo-relative in an InstallPlan. */
+  path: string
+  snippet: string
 }
 
 export interface InstallInstruction {
@@ -531,6 +542,12 @@ export interface FrameworkPlanOptions {
   configOwnership?: Record<string, ManagedConfigOwnership>
   /** The manifest from a prior install, so an adapter can tell files IT wired from ones the user owns. */
   previousManifest?: InstallManifest | null
+  /**
+   * The wizard (review I1 P1-2): an existing, unmanaged Next config that lacks the rewrites is NOT a blocker;
+   * the rest installs and the rewrites become a checked agent job (`deferredConfigRewrites`). The plain
+   * installer leaves this unset and keeps refusing.
+   */
+  deferUnmanagedNextConfig?: boolean
 }
 
 export interface InfiniteProxySpec {

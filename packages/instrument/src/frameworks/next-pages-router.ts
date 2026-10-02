@@ -61,7 +61,7 @@ export const nextPagesRouterAdapter: FrameworkAdapter = {
     const appFile = firstExistingPath(root, appCandidates)
     const proxy = { posthog: options?.posthogProxy, infinite: options?.infiniteProxy }
     const proxyPlan = proxy.posthog || proxy.infinite
-      ? planNextConfigProxy(root, proxy, options?.configOwnership)
+      ? planNextConfigProxy(root, proxy, options?.configOwnership, { deferUnmanaged: options?.deferUnmanagedNextConfig === true })
       : null
 
     if (!appFile) {
@@ -120,7 +120,8 @@ export const nextPagesRouterAdapter: FrameworkAdapter = {
         "Next.js pages router placement points are inferred from the pages/ tree."
       ],
       blockers,
-      confidence: detected?.confidence ?? 0.88
+      confidence: detected?.confidence ?? 0.88,
+      ...(proxyPlan?.deferred?.length ? { deferredConfigRewrites: proxyPlan.deferred } : {})
     }
   },
   apply(context) {
@@ -176,7 +177,8 @@ export const nextPagesRouterAdapter: FrameworkAdapter = {
       const appliedConfig = applyManagedNextConfig({
         appRootAbsolute: appRoot,
         proxy,
-        previousOwnership: appRelativeConfigOwnership(context.previousManifest, context.appRoot)
+        previousOwnership: appRelativeConfigOwnership(context.previousManifest, context.appRoot),
+        deferUnmanaged: (context.plan.deferredConfigRewrites?.length ?? 0) > 0
       })
       const rootRelativeConfig = normalizeAppRelativePath(context.appRoot, appliedConfig.path)
       if (appliedConfig.changed) {

@@ -40,6 +40,8 @@ export interface PlanInstallationOptions {
    * move the provider into the install set. Absent = adopted byte-for-byte.
    */
   improve?: Partial<Record<ProviderId, readonly ImproveLine[]>>
+  /** The wizard: an unmanaged Next config without the rewrites becomes an agent job, not a blocker (review I1 P1-2). */
+  deferUnmanagedNextConfig?: boolean
 }
 
 function selectedProviders(artifacts: WorkspaceInstallArtifacts): ProviderId[] {
@@ -184,7 +186,8 @@ export function planInstallation(options: PlanInstallationOptions): InstallPlan 
         infiniteProxy,
         allowStaticVercelProxy: options.artifacts.infinite?.staticProxy === "vercel",
         configOwnership,
-        previousManifest
+        previousManifest,
+        ...(options.deferUnmanagedNextConfig ? { deferUnmanagedNextConfig: true } : {})
       })
     : undefined
 
@@ -289,7 +292,15 @@ export function planInstallation(options: PlanInstallationOptions): InstallPlan 
     workspaceId: options.workspaceId,
     artifacts: options.artifacts,
     adopted,
-    ...(serverLaneDraft ? { serverLane: stripDraft(serverLaneDraft) } : {})
+    ...(serverLaneDraft ? { serverLane: stripDraft(serverLaneDraft) } : {}),
+    ...(frameworkDraft?.deferredConfigRewrites?.length
+      ? {
+          deferredConfigRewrites: frameworkDraft.deferredConfigRewrites.map((entry) => ({
+            path: normalizeAppRelativePath(inspectResult.appRoot, entry.path),
+            snippet: entry.snippet
+          }))
+        }
+      : {})
   }
 }
 

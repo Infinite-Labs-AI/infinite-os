@@ -65,7 +65,7 @@ function registryWithRealTiers(): JobRegistry {
 }
 
 describe("F4: a claim with nothing checkable before deploy is never 'checked by the wizard'", () => {
-  it("ga4_improve claimed done with no S/B/T0 check → stays claimed, 'later tests decide'", async () => {
+  it("ga4_improve claimed done with no S/B/T0 check → stays claimed, never 'later tests decide' (no later step ticks it)", async () => {
     const t = setup({
       scenario: { turns: [{ steps: [claim("ga4_improve:spa_page_view", "done", "added the SPA page_view wiring")] }] },
       items: [agentItem("ga4_improve:spa_page_view", ["app/layout.tsx"])],
@@ -73,7 +73,7 @@ describe("F4: a claim with nothing checkable before deploy is never 'checked by 
     })
     const outcome = await step.run(t.ctx, t.deps)
     expect(t.current().jobs[0]!.state).toBe("claimed")
-    expect(outcome).toEqual({ kind: "ok", status: "0 of 1 jobs done in code (checked by the wizard, not the agent) · 1 wait for a later test" })
+    expect(outcome).toEqual({ kind: "ok", status: "0 of 1 jobs done in code (checked by the wizard, not the agent) · 1 not checked by the wizard" })
     const notes = t.recorded.events.filter((event) => event.type === "job.state").map((event) => event.fields.note)
     expect(notes).toContain(NOTHING_CHECKABLE_NOTE)
     expect(notes).not.toContain(CHECKED_NOTE)

@@ -27,6 +27,7 @@ import { AgentRunnerImpl } from "../agents/runner.js"
 import { sanitizeUntrusted } from "../agents/sanitize.js"
 import { openTagBridge } from "../bridge/client.js"
 import { envProxyFetch } from "../checks/live/env-proxy-fetch.js"
+import { registerJobStaticChecks, type JobStaticRunContext } from "../checks/job-static.js"
 import { registerO9Checks } from "../checks/o9.js"
 import { createCheckRunner } from "../checks/registry.js"
 import { createGitOps } from "../git/index.js"
@@ -37,7 +38,10 @@ import { createWizardInstaller } from "../install/installer.js"
 import type { GuardDecision } from "../install/plan-model.js"
 import type { SavedPlanApprovals } from "../install/step-inputs.js"
 import { briefConnectionsFrom, briefPlanFrom } from "../jobs/plan-data.js"
-import { createJobRegistry } from "../jobs/registry.js"
+import { createJobRegistry, newlyInstalledTools } from "../jobs/registry.js"
+import { posthogProxyFor } from "../install/keys-adapter.js"
+import { INFINITE_API_ORIGIN, infiniteCollectDestination } from "../workspace-artifacts.js"
+import type { BeforeFacts } from "./contracts/jobs.js"
 import type { BriefFacts } from "../jobs/briefs.js"
 import { adoptedMetaGuardRecipe } from "../providers/meta.js"
 import { createWizardUi } from "../tui/index.js"
@@ -118,6 +122,32 @@ export function o9RunContext(root: string, runId: string | null): { productionHo
     .map(normalizeHost)
     .filter((host) => host !== "")
   return { productionHosts: [...new Set(hosts)], expect: testExpectFromKeys(keys) }
+}
+
+/**
+ * The job-table S checks' run context (review I1 P1-5): O9's hosts and expectation, plus the approved
+ * conversion names and privacy paragraph (the saved plan), the tools this run newly installs and the
+ * same-origin rewrites the managed install relies on. A piece that cannot be read stays absent (the
+ * check that needs it reads undetermined, never a pass).
+ */
+export function jobStaticRunContext(root: string, runId: string | null): JobStaticRunContext {
+  const base = o9RunContext(root, runId) ?? {}
+  const before = readBeforeFactsSync(root, runId)
+  const saved = readPlanApprovalsSync(root)
+  const plan = saved?.plan ? briefPlanFrom(saved.plan, saved.approvals) : null
+  const out: JobStaticRunContext = { ...base }
+  if (plan) {
+    out.conversionNames = plan.conversionNames
+    out.privacyText = plan.privacyText
+  }
+  if (before) {
+    const keys = applyKeysChoices(before.facts.keys, readKeysResultSync(root, runId))
+    out.newTools = newlyInstalledTools({ ...(before.facts as unknown as BeforeFacts), keys })
+    const posthog = keys.posthog.status === "connected" ? posthogProxyFor(keys.posthog) : null
+    const infinite = keys.infinite.collectPath ? { path: keys.infinite.collectPath, destination: infiniteCollectDestination(INFINITE_API_ORIGIN) } : null
+    out.proxy = { ...(posthog ? { posthog } : {}), ...(infinite ? { infinite } : {}) }
+  }
+  return out
 }
 
 function routerOf(framework: string): BriefFacts["router"] {
@@ -205,6 +235,8 @@ export async function createDefaultWizardDeps(input: DefaultDepsInput, overrides
     fetch: overrides.fetch ?? envProxyFetch(env),
     run: () => o9RunContext(root, runId())
   })
+  // Review I1 P1-5: the job table's S checks on an agent's edit (jobs 1, 2, 3, 8, 9, 12, 14).
+  registerJobStaticChecks(checks, { root, run: () => jobStaticRunContext(root, runId()) })
 
   const agents = new AgentRunnerImpl({
     root,
