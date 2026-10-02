@@ -34,9 +34,9 @@ import { homedir } from "node:os"
 import { join } from "node:path"
 
 import { connectionIdsFromKeys } from "../../agents/connection-ids.js"
-import { disposeSeal, Fence, heavyDirWritesDuring, NestedBranchMovedError, verifySeal, type FenceBlock, type TreeSeal } from "../../agents/fence.js"
+import { disposeSeal, Fence, heavyDirWritesDuring, NestedBranchMovedError, sealFinalTree, verifySeal, type FenceBlock, type TreeSeal } from "../../agents/fence.js"
 import { matchesAnyGlob, normalizeRelPath } from "../../agents/glob.js"
-import { snapshotDir, wizardCacheRoot } from "../../agents/paths.js"
+import { finalSealPath, snapshotDir, wizardCacheRoot } from "../../agents/paths.js"
 import { runExtras } from "../../agents/runner.js"
 import { reverseTextEdits } from "../../server-lane/text-edits.js"
 import { applyClaim, applyResults, blockItem, failItem, unblockItem, type Transition } from "../../jobs/state-machine.js"
@@ -121,6 +121,10 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
     return await runWorker(io, agentItems)
   } finally {
     await io.settleEdits()
+    // B5/B29: seal the tree the agent jobs left (after the failed jobs' edits were undone); the rehearsal
+    // re-reads it right before it stages anything.
+    const runId = io.runId()
+    if (io.agentTurns > 0 && runId) await sealFinalTree(ctx.root, finalSealPath(io.home(), runId))
   }
 }
 
@@ -166,6 +170,7 @@ async function runWorker(io: JobsIo, agentItems: ChecklistItem[]): Promise<StepO
     const brief = composeBrief(deps.registry.brief(open), feedback)
     const questions: AgentQuestion[] = []
     let result: AgentRunResult
+    io.agentTurns += 1
     try {
       result = await deps.agents.runJobs({
         items: open,
@@ -450,6 +455,8 @@ function isTamper(error: unknown): boolean {
 
 /** The step's view of the run state and its collaborators (one place that writes items and emits). */
 class JobsIo {
+  /** Agent turns this step ran (a final seal is taken only when an agent touched the tree). */
+  agentTurns = 0
   private scanResult: ScanResult | null = null
   private failures = new Map<string, string>()
   private clickTested = new Set<string>()

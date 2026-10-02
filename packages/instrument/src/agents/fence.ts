@@ -1233,14 +1233,6 @@ export async function disposeSeal(seal: TreeSeal | null | undefined): Promise<vo
   if (seal) await rm(seal.marker, { force: true })
 }
 
-// ---- crash recovery (review O3 F10) ----
-
-/**
- * Restores every worker-turn snapshot a DEAD process left for this repo (the wizard was killed mid-turn),
- * so an agent's unvetted edits never become the next turn's baseline, and deletes the snapshot (it holds
- * `.env` copies). A report-mode (nested) snapshot is kept on purpose and skipped, and so is a turn whose
- * process is still alive.
- */
 /**
  * §3z.12 §3f.6 (B21): before the FIRST agent turn the jobs step lays the heavy-dir marker and waits a quiet
  * window. Any write under `node_modules` / `.next` / `dist` / `build` / `out` meanwhile is a running dev
@@ -1262,6 +1254,43 @@ export async function heavyDirWritesDuring(input: { root: string; scratchDir: st
   }
 }
 
+/**
+ * §3z.12 §3f.6 (B5/B29): the tree the agent jobs left, sealed at the END of the jobs step (after the failed
+ * jobs' edits were undone), so the rehearsal can re-read it right before it stages anything: a process an
+ * agent left running (a `setsid` grandchild) that writes later is caught, never committed. Heavy dirs are not
+ * compared (the wizard's own build writes them).
+ */
+export async function sealFinalTree(root: string, sealPath: string): Promise<void> {
+  await mkdir(dirname(sealPath), { recursive: true, mode: 0o700 })
+  const seal = await takeSeal(root, [], `${sealPath}.marker`)
+  await writeFile(sealPath, JSON.stringify(seal), { mode: 0o600 })
+}
+
+/** The final seal's verdict (`null` = no seal: no agent ran this run, or it was already verified). */
+export async function verifyFinalSeal(root: string, sealPath: string): Promise<{ ok: boolean; changed: string[] } | null> {
+  let seal: TreeSeal
+  try {
+    seal = JSON.parse(await readFile(sealPath, "utf8")) as TreeSeal
+  } catch {
+    return null
+  }
+  if (seal.root !== root) return null
+  const verdict = await verifySeal(seal, { heavy: false })
+  if (verdict.ok) {
+    await disposeSeal(seal)
+    await rm(sealPath, { force: true })
+  }
+  return verdict
+}
+
+// ---- crash recovery (review O3 F10) ----
+
+/**
+ * Restores every worker-turn snapshot a DEAD process left for this repo (the wizard was killed mid-turn),
+ * so an agent's unvetted edits never become the next turn's baseline, and deletes the snapshot (it holds
+ * `.env` copies). A report-mode (nested) snapshot is kept on purpose and skipped, and so is a turn whose
+ * process is still alive.
+ */
 export async function recoverCrashedTurns(input: { snapshotsRoot: string; root: string }): Promise<Array<{ dir: string; restored: string[] }>> {
   const out: Array<{ dir: string; restored: string[] }> = []
   let runs: string[]

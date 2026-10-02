@@ -2,6 +2,9 @@
 // under the production hostname (nothing sent) + load the preview's own URL → grade (O6's grader) → PATCH the
 // run (PR fields, phase `in_pr`, `clickTestedConversions`) → mark GA4 key events for the rehearsal-click-tested
 // names only. A protected preview, a non-Vercel host or no preview is `undetermined`, never pass.
+import { homedir } from "node:os"
+import { finalSealPath } from "../../agents/paths.js"
+import { verifyFinalSeal } from "../../agents/fence.js"
 import { createHash } from "node:crypto"
 import { join } from "node:path"
 
@@ -185,6 +188,17 @@ async function rehearsalRun(ctx: WizardContext, deps: WizardDeps): Promise<StepO
   const gitState = state.git!
   const { managed, npmFiles } = await manifestFiles(deps, ctx.root)
   const allowlist = allowlistUnion(state.jobs)
+
+  // B5/B29: the tree the agent jobs left is re-read right before anything is staged; a write after the last
+  // turn (a process an agent left running) stops the run instead of being committed.
+  const seal = await verifyFinalSeal(ctx.root, finalSealPath(deps.env.HOME ?? homedir(), runId))
+  if (seal && !seal.ok) {
+    return {
+      kind: "blocked",
+      code: "INF_WIZ_FENCE_TAMPER",
+      reason: `Files changed after the agent's last turn (${seal.changed.slice(0, 3).join(", ")}${seal.changed.length > 3 ? ", …" : ""}); a process it started may still be running. Nothing was committed.`
+    }
+  }
 
   sub(ctx, "rehearsal", "Committing the changes…", "pending")
   const commitOnce = () =>

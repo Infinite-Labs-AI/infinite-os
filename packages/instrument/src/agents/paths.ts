@@ -189,3 +189,8 @@ export async function repoSecretPaths(root: string, options: { maxDepth?: number
   const readOnly = (await exists(gitDir)) ? [await resolveRealpath(gitDir)] : []
   return { none: [...new Set(none)].sort(), readOnly }
 }
+
+/** Where the jobs step keeps the final tree seal of a run (outside the repo and $TMPDIR; B5/B29). */
+export function finalSealPath(home: string, runId: string): string {
+  return join(wizardCacheRoot(home), "snapshots", safeSegment(runId), "final.seal.json")
+}

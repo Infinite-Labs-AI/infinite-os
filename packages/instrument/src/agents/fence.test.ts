@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import { cleanup, HEAD_PACKAGE_JSON, item, makeFenceFixture, MANAGED_MODULE, POST_INSTALL_LAYOUT, POST_INSTALL_PACKAGE_JSON, runGit, tempDir, write } from "../../test/wizard/repo.js"
 import { reverseTextEdits } from "../server-lane/text-edits.js"
 import type { CheckResult, TurnDiff } from "../wizard/contracts/jobs.js"
-import { Fence, FenceTamperError } from "./fence.js"
+import { Fence, FenceTamperError, sealFinalTree, verifyFinalSeal } from "./fence.js"
 import { snapshotDir } from "./paths.js"
 
 const RUN_ID = "7f3c2a10-0000-4000-8000-000000000001"
@@ -290,5 +290,25 @@ describe("fence abort, load and report mode", () => {
     expect(statSync(join(dir, "manifest.json")).mode & 0o777).toBe(0o600)
     writeFileSync(join(dir, "probe"), "x")
     await fence.abort()
+  })
+})
+
+describe("the final tree seal (B5/B29: verified again right before staging)", () => {
+  it("passes on the same tree (and is consumed); a write after the jobs step is caught (negative)", async () => {
+    const { root } = makeFenceFixture()
+    const home = tempDir("infinite-tag-home-")
+    dirs.push(root, home)
+    const sealPath = join(home, "Library/Caches/infinite-tag/snapshots/run/final.seal.json")
+    await sealFinalTree(root, sealPath)
+    expect(statSync(sealPath).mode & 0o777).toBe(0o600)
+    expect(await verifyFinalSeal(root, sealPath)).toEqual({ ok: true, changed: [] })
+    expect(existsSync(sealPath)).toBe(false)
+    expect(await verifyFinalSeal(root, sealPath)).toBeNull()
+
+    await sealFinalTree(root, sealPath)
+    write(root, "app/layout.tsx", "export default function Layout() { return null }\n// written after the turn\n")
+    const verdict = await verifyFinalSeal(root, sealPath)
+    expect(verdict?.ok).toBe(false)
+    expect(verdict?.changed).toContain("app/layout.tsx")
   })
 })
