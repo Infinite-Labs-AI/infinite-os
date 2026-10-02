@@ -105,12 +105,25 @@ export async function bestEffortBridge(ctx: WizardContext, step: WizardStepId, w
  * token when this process holds it, with the connection IDs allowed. The wizard never reads the user's
  * session files to build this list (R2-02): the JWT shape covers the desktop bearer.
  */
-export function buildScanner(ctx: Pick<WizardContext, "root" | "appRoot">, deps: Pick<WizardDeps, "bridge" | "env">, connectionIds: readonly string[]): Scanner {
+export function buildScanner(
+  ctx: Pick<WizardContext, "root" | "appRoot">,
+  deps: Pick<WizardDeps, "bridge" | "env"> & { agents?: Pick<WizardDeps["agents"], "secretLiterals"> },
+  connectionIds: readonly string[]
+): Scanner {
   const literals: ScanLiteral[] = [...collectEnvLiterals([...new Set([ctx.root, join(ctx.root, ctx.appRoot)])])]
-  const bridgeToken = deps.bridge.descriptor?.token
+  let bridgeToken: unknown = null
+  try {
+    bridgeToken = deps.bridge.descriptor?.token
+  } catch {
+    // No descriptor readable now: the runner's own list still carries the token it was given.
+  }
   if (typeof bridgeToken === "string" && bridgeToken.length >= 8) literals.push({ value: bridgeToken, kind: "bridge_token" })
   const mcpToken = deps.env[MCP_ENV.token]
   if (typeof mcpToken === "string" && mcpToken.length >= 8) literals.push({ value: mcpToken, kind: "mcp_token" })
+  // B5: the runner's own secret literals (every MCP token its turns used, and the bridge token).
+  for (const literal of deps.agents?.secretLiterals?.() ?? []) {
+    if (literal.length >= 8 && !literals.some((entry) => entry.value === literal)) literals.push({ value: literal, kind: "mcp_token" })
+  }
   return createScanner({ literals, allowedIds: connectionIds })
 }
 

@@ -136,6 +136,11 @@ export interface AgentRunner {
   /** True while any agent child of this run is running (the engine invariant, §3a.9.4). */
   isAgentAlive(): boolean
   killAll(): Promise<void>
+  /**
+   * §3z.12 §3f.1 (B5): every secret literal this run handed to a process (the MCP tokens of its turns, the
+   * desktop bridge token), so the PR loop's secret scan blocks them. Optional for fakes; never logged.
+   */
+  secretLiterals?(): readonly string[]
 }
 
 /** §3f.4 limits. */

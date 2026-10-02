@@ -4,6 +4,7 @@
 // the real wiring with `setWizardWiring`. Until then the command says plainly that the wizard is not
 // wired, and exits 2 (INF_WIZ_NOT_BUILT) — a published build can never pretend the wizard ran.
 import type { WizardDeps, WizardOptions } from "./contracts/deps.js"
+import type { WizardRunState } from "./contracts/state.js"
 import type { TtyPrompter } from "./asks.js"
 import type { EngineOptions } from "./engine.js"
 import type { WizardStore } from "./store.js"
@@ -36,6 +37,11 @@ export interface CreateDepsInput {
   tagVersion: string
   /** Every collaborator stops on this (SIGINT/SIGTERM). */
   signal: AbortSignal
+  /**
+   * The run state as the engine holds it (in memory; null before it exists). Collaborators that need the
+   * run (its id, the chosen worker, the merge time) read it through this getter, never from a stale file.
+   */
+  state?: () => Readonly<WizardRunState> | null
 }
 
 export interface WizardWiring {

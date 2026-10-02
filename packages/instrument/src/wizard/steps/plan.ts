@@ -81,7 +81,8 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
     candidates,
     approvals: resolved.approvals,
     privacyText: resolved.privacyText,
-    guard: (plan as Partial<WizardPlanModel>).guard ?? null
+    guard: (plan as Partial<WizardPlanModel>).guard ?? null,
+    plan: { hash: plan.hash, lines: plan.lines, decisions: plan.decisions }
   })
 
   if (resolved.consentMode === null) {

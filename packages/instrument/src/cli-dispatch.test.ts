@@ -1,3 +1,4 @@
+import { INSTRUMENT_VERSION } from "./package-manager.js"
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -107,10 +108,17 @@ describe("runCli → the classic commands, unchanged", () => {
     expect(help).not.toContain("mcp-proxy")
   })
 
-  it("--version still reaches the installer's parser (today: an unknown command, exit 1), never the wizard", async () => {
-    expect(await runCli(["--version"])).toBe(1)
-    expect(stderr()).toContain("Unknown command: --version")
+  it("--version prints the version and exits 0 (B23), never the wizard", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined)
+    try {
+      expect(await runCli(["--version"])).toBe(0)
+      expect(log).toHaveBeenCalledWith(INSTRUMENT_VERSION)
+    } finally {
+      log.mockRestore()
+    }
     expectNoWizardEntry()
+    // negative: --version with anything after it is not the version flag (the installer's parser decides)
+    expect(routeCliArgv(["--version", "extra"])).toEqual({ kind: "installer", argv: ["--version", "extra"] })
   })
 
   it('["install","--json", …] still reaches the old parser', async () => {
@@ -141,14 +149,16 @@ describe("routeCliArgv", () => {
   })
 
   it("negatives: help flags, --version and every classic command stay with the installer", () => {
-    for (const argv of [["--help"], ["-h"], ["--version"], ["help"], ["install", "--json"], ["uninstall", "--yes"], ["plan"], ["verify"], ["server-lane", "--brief"]]) {
+    for (const argv of [["--help"], ["-h"], ["help"], ["install", "--json"], ["uninstall", "--yes"], ["plan"], ["verify"], ["server-lane", "--brief"]]) {
       expect(routeCliArgv(argv)).toEqual({ kind: "installer", argv })
     }
+    expect(routeCliArgv(["--version"])).toEqual({ kind: "version" })
   })
 })
 
 describe("the foundation stubs (until lanes O1, O3 and O9 fill them)", () => {
-  it("runWizardCommand / runWizardUninstall say the wizard is not built and exit 2", async () => {
+  it("runWizardCommand / runWizardUninstall say the wizard is not built and exit 2 (when nothing installed the wiring)", async () => {
+    ;(await vi.importActual<typeof import("./wizard/wiring.js")>("./wizard/wiring.js")).setWizardWiring(null)
     const actual = await vi.importActual<typeof import("./wizard/command.js")>("./wizard/command.js")
     expect(await actual.runWizardCommand(["--json"])).toBe(2)
     expect(await actual.runWizardUninstall(["--pr"])).toBe(2)

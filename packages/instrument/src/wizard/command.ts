@@ -397,7 +397,9 @@ async function runLocked(input: LockedRun): Promise<number> {
         env: io.env,
         platform: io.platform,
         tagVersion: INSTRUMENT_VERSION,
-        signal: controller.signal
+        signal: controller.signal,
+        // The engine's in-memory state once it exists (the loaded state until then).
+        state: () => runState?.get() ?? forState
       })
     deps = await createDeps(state)
 
@@ -430,6 +432,12 @@ async function runLocked(input: LockedRun): Promise<number> {
     const ctx: WizardContext = {
       get runId() {
         return accessor.get().runId
+      },
+      // A step that sets the run id (`agent`) writes it into the state; the state stays the one source.
+      set runId(value: string | null) {
+        accessor.update((current) => {
+          current.runId = value
+        })
       },
       state: accessor,
       emit: emitter,
@@ -558,7 +566,8 @@ export async function runWizardUninstall(argv: readonly string[], overrides: Run
       env: io.env,
       platform: io.platform,
       tagVersion: INSTRUMENT_VERSION,
-      signal: controller.signal
+      signal: controller.signal,
+      state: () => state
     })
     // No saved link (a fresh clone, a teammate's machine): run the `link` step on an in-memory state, so a
     // remembered site links at once and a new one shows the app's approval card.

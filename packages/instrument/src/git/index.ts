@@ -115,6 +115,10 @@ export function createGitOps(options: CreateGitOpsOptions): WizardGitOps {
       return { clean: entries.length === 0, dirtyPaths: entries.map((entry) => entry.path) }
     },
     async remoteUrl() {
+      // The remote as the user configured it (the repo's identity and its host), not an `insteadOf`
+      // rewrite of it (I1): a rewrite changes where git connects, never which repo this is.
+      const configured = await git(["config", "--get", "remote.origin.url"], { allowFail: true })
+      if (configured.status === 0 && configured.stdout.trim()) return configured.stdout.trim()
       const result = await git(["remote", "get-url", "origin"], { allowFail: true })
       return result.status === 0 ? result.stdout.trim() || null : null
     },

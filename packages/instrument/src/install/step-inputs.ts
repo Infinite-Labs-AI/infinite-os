@@ -8,7 +8,7 @@ import { join } from "node:path"
 
 import type { WizardContext, WizardDeps } from "../wizard/contracts/deps.js"
 import type { TagHosting, TagKeys } from "../wizard/contracts/bridge.js"
-import type { ChecklistItem, PlanApprovals } from "../wizard/contracts/jobs.js"
+import type { ChecklistItem, PlanApprovals, PlanModel } from "../wizard/contracts/jobs.js"
 import { WIZARD_PATHS, WIZARD_STATE_FILE_MODE } from "../wizard/contracts/state.js"
 
 import { narrowKeysToChoices, readBeforeFacts, readKeysChoices } from "./before-facts.js"
@@ -32,6 +32,11 @@ export interface SavedPlanApprovals {
    * agent's guard on an ADOPTED init) uses exactly the hosts the managed guard uses, never its own pick.
    */
   guard?: GuardDecision | null
+  /**
+   * The approved plan's lines and decisions (I1: the agent brief's plan data is rebuilt from them in a
+   * fresh process; `briefPlanFrom(plan, approvals)`). Absent in files written before I1.
+   */
+  plan?: { hash: string; lines: PlanModel["lines"]; decisions: PlanModel["decisions"] } | null
 }
 
 export async function savePlanApprovals(ctx: WizardContext, deps: WizardDeps, saved: Omit<SavedPlanApprovals, "schema">): Promise<void> {

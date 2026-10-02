@@ -553,6 +553,7 @@ function renderStandaloneBrief(framework: string, apiOrigin?: string): string {
  * - everything else, `--help` / `-h` / `--version` included → the installer's parser, unchanged.
  */
 export type CliRoute =
+  | { kind: "version" }
   | { kind: "wizard"; argv: string[] }
   | { kind: "wizard-uninstall"; argv: string[] }
   | { kind: "mcp-proxy" }
@@ -565,6 +566,7 @@ const INSTALLER_FLAG_COMMANDS: ReadonlySet<string> = new Set(["--help", "-h", "-
 export function routeCliArgv(argv: readonly string[]): CliRoute {
   const [first, ...rest] = argv
   if (first === undefined) return { kind: "wizard", argv: [] }
+  if (first === "--version" && rest.length === 0) return { kind: "version" }
   if (first === "wizard") return { kind: "wizard", argv: rest }
   if (first.startsWith("-") && !INSTALLER_FLAG_COMMANDS.has(first)) {
     return { kind: "wizard", argv: [...argv] }
@@ -589,9 +591,15 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
   // are imported lazily so the classic commands never load them.
   const route = routeCliArgv(argv)
   switch (route.kind) {
+    case "version":
+      // B23: `npx infinite-tag --version` prints the version and exits 0.
+      console.log(INSTRUMENT_VERSION)
+      return 0
     case "wizard":
+      ;(await import("./wizard/deps.js")).installDefaultWizardWiring()
       return (await import("./wizard/command.js")).runWizardCommand(route.argv)
     case "wizard-uninstall":
+      ;(await import("./wizard/deps.js")).installDefaultWizardWiring()
       return (await import("./wizard/command.js")).runWizardUninstall(route.argv)
     case "mcp-proxy":
       return (await import("./agents/mcp/proxy.js")).runMcpProxy()

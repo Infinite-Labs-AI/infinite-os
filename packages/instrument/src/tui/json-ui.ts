@@ -6,7 +6,7 @@
 // It is also the NDJSON writer O1's emitter writes to (`emit(type, fields)` implements WizardEmitter): every
 // field that can carry outside text (narration, sub-statuses, statuses, reasons, notes, agent questions,
 // teammate comments) goes through the injected sanitiser before it is written.
-import type { AskKind } from "../wizard/contracts/asks.js"
+import { ASK_CANCELLED, type AskKind } from "../wizard/contracts/asks.js"
 import {
   EVENT_LIMITS,
   WIZARD_EVENT_SHAPES,
@@ -24,6 +24,12 @@ export interface JsonInput {
   setEncoding?(encoding: BufferEncoding): unknown
   resume?(): unknown
   pause?(): unknown
+}
+
+/** The "end" event of a real stdin (fakes that never end simply never emit it). */
+interface EndEvents {
+  on(event: "end", listener: () => void): unknown
+  off(event: "end", listener: () => void): unknown
 }
 
 export interface JsonOutput {
@@ -50,6 +56,13 @@ export class JsonUi implements WizardUi {
   private buffer = ""
   private started = false
   private stopped = false
+  /** stdin ended: an ask can never be answered, so each one is closed `__cancelled__` (the step parks). */
+  private inputClosed = false
+  private unsubscribe: (() => void) | null = null
+  private readonly onEnd = () => {
+    this.inputClosed = true
+    this.closeUnanswerable()
+  }
   private readonly onData = (chunk: string | Buffer) => {
     this.buffer += typeof chunk === "string" ? chunk : chunk.toString("utf8")
     let newline = this.buffer.indexOf("\n")
@@ -73,13 +86,29 @@ export class JsonUi implements WizardUi {
     this.store = store
     this.options.stdin.setEncoding?.("utf8")
     this.options.stdin.on("data", this.onData)
+    // stdin ended (a real stream emits "end"): no answer can come any more.
+    ;(this.options.stdin as unknown as EndEvents).on("end", this.onEnd)
+    this.unsubscribe = store.subscribe(() => this.closeUnanswerable())
     this.options.stdin.resume?.()
+  }
+
+  /** With stdin closed, a pending ask can never be answered: close it, so the step parks instead of the run hanging. */
+  private closeUnanswerable(): void {
+    if (!this.inputClosed || !this.store) return
+    const pending = this.store.getSnapshot().pendingAsk
+    // `link-code` is display-only: the link step closes it itself once the app answers.
+    if (pending && pending.kind !== "link-code") queueMicrotask(() => {
+      if (this.store?.getSnapshot().pendingAsk?.askId === pending.askId) this.store.answerAsk(pending.askId, ASK_CANCELLED)
+    })
   }
 
   stop(): void {
     if (!this.started || this.stopped) return
     this.stopped = true
     this.options.stdin.off("data", this.onData)
+    ;(this.options.stdin as unknown as EndEvents).off("end", this.onEnd)
+    this.unsubscribe?.()
+    this.unsubscribe = null
     this.options.stdin.pause?.()
   }
 
