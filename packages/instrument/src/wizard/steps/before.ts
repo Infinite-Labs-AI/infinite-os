@@ -44,6 +44,7 @@ import type { BaseSource } from "../contracts/state.js"
 import { WIZARD_PATHS } from "../contracts/state.js"
 import { wizardBranchName } from "../contracts/git-host.js"
 import { wizardGitExtras } from "../../git/index.js"
+import { buildColumn } from "../report.js"
 import { WIZARD_STEP_META } from "../contracts/steps.js"
 import {
   TEST_LIMITS,
@@ -559,4 +560,8 @@ export function jobScanWith(snapshot: RepoSnapshot): (scan: ScanResult) => JobSc
   return (scan) => jobScanFrom(scan, snapshot)
 }
 
-export const step: WizardStep<"before"> = createBeforeStep()
+/** Lane O1's column builder for `before`'s readings (the production step's `buildLiveTodayColumn`). */
+export const buildLiveTodayColumn = (input: LiveTodayColumnInput): ReportColumnSnapshot => buildColumn("live_today", input)
+
+/** The production step: the "Live site today" column is built by lane O1's builder. */
+export const step: WizardStep<"before"> = createBeforeStep({ buildLiveTodayColumn })

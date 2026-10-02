@@ -24,7 +24,7 @@ import { snapshotFromFiles } from "../../jobs/repo-files.js"
 import type { HostingResponse, KeysResponse } from "../contracts/bridge.js"
 import type { CheckResult } from "../contracts/jobs.js"
 import type { WizardRunState } from "../contracts/state.js"
-import { BEFORE_FACTS_PATH, beforeDryLiveRequest, createBeforeStep, jobScanWith, readBeforeFactsFile, step as defaultStep, type BeforeFactsFile } from "./before.js"
+import { BEFORE_FACTS_PATH, beforeDryLiveRequest, buildLiveTodayColumn, createBeforeStep, jobScanWith, readBeforeFactsFile, step as defaultStep, type BeforeFactsFile } from "./before.js"
 import { WIZARD_STEPS } from "./index.js"
 
 const SITE = {
@@ -440,6 +440,19 @@ describe("step before: the hand-off", () => {
     expect(input.facts.map((fact) => fact.input)).toEqual(expect.arrayContaining(["dry_live.graded", "t1.redirect_walk", "baseline.preview_share", "keys.consent_mode"]))
     expect(s.state.report.live_today).toEqual({ meta: input.meta, cells: {}, finishLine: {} })
     expect(s.state.report.in_pr).toBeNull()
+  })
+
+  it("I1: the production builder (O1 buildColumn) turns the readings into a real live_today column", async () => {
+    const s = setup({ buildLiveTodayColumn })
+    expect(await s.run()).toMatchObject({ kind: "ok" })
+    const column = s.state.report.live_today!
+    expect(column.meta.sha).toBe("0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d")
+    expect(Object.keys(column.cells).length).toBeGreaterThan(0)
+    expect(Object.keys(column.finishLine).length).toBeGreaterThan(0)
+    // negative: no builder → no column (the test harness's own default)
+    const bare = setup({})
+    await bare.run()
+    expect(bare.state.report.live_today).toBeNull()
   })
 
   it("reads env targets only when the census found env-sourced ids", async () => {
