@@ -40,6 +40,7 @@ import { firstProblem, GoldenEvaluator, REGION_SCREENS, type Evaluation } from "
 import { loadR4Fixture, r4FixtureIds } from "./fixtures.js";
 import { GOLDENS_DIR, goldenIds, loadGolden, screenOf } from "./goldens.js";
 import { cellsOf, textOf } from "./normalize.js";
+import { ENTRY_SESSION_PROPS } from "./feed-chrome.js";
 import { recordedViews, renderR4Screen, turnMessages } from "./screen.js";
 
 /** The wall clock every screen is drawn at (the r4 data's "now": Oct 1, 10:44 UTC). */
@@ -59,7 +60,7 @@ const bridgeIds = r4FixtureIds()
 const bridgePass = new Map<string, boolean>();
 
 const evaluator = new GoldenEvaluator((fixture, cols) =>
-  renderR4Screen(fixture, { cols, now: FIXED_CLOCK, homeInventory: homeInventoryData })
+  renderR4Screen(fixture, { cols, now: FIXED_CLOCK, homeInventory: homeInventoryData, sessionProps: ENTRY_SESSION_PROPS })
 );
 
 beforeAll(() => {
