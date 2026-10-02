@@ -75,6 +75,12 @@ describe("improve lines for adopted tags (decision 4: optimise in place, never r
       "preview_guard_adopted:posthog:init"
     ])
     expect(lines.find((line) => line.target === "proxy")).toMatchObject({ owner: "code", provider: "posthog", evidence: { file: "index.html" } })
+    // F20: plain words on the plan screen, no setting name ("api_host", "rewrite").
+    expect(lines.find((line) => line.target === "proxy")?.text).toBe(
+      "PostHog: send events through your own domain (/ingest) so ad blockers do not drop them. Changes where your existing PostHog sends events, and adds a forwarding rule for /ingest to vercel.json."
+    )
+    const next = linesFor({ "index.html": ADOPTED_POSTHOG_HTML }, "next-app-router").lines.find((line) => line.target === "proxy")!
+    for (const line of [...lines, next]) expect(line.text, line.id).not.toMatch(/api_host|ui_host|\brewrite\b/)
     // A reduction is never an improve line (R2-10): no "one init", no removal.
     for (const line of lines) expect(line.text).not.toMatch(/one init|remove|delete/i)
   })

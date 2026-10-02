@@ -282,7 +282,8 @@ export function improveLinesFor(facts: AdoptedFacts, ctx: ImproveLinesContext): 
         kind: "improve_additive",
         provider: "posthog",
         target: "proxy",
-        text: `PostHog: send events through your own domain (${DEFAULT_POSTHOG_PROXY_PATH}) so ad blockers do not drop them. Changes your existing PostHog's api_host${htmlFramework ? " and adds the rewrite to vercel.json" : " and the rewrite"}.`,
+        // Plain words (final verify F20, terminal QA #22): no setting names on the plan screen; the exact settings are in the diff.
+        text: `PostHog: send events through your own domain (${DEFAULT_POSTHOG_PROXY_PATH}) so ad blockers do not drop them. Changes where your existing PostHog sends events, and adds a forwarding rule for ${DEFAULT_POSTHOG_PROXY_PATH}${htmlFramework ? " to vercel.json" : " to your site's config"}.`,
         owner: htmlFramework ? "code" : "agent",
         evidence
       })
