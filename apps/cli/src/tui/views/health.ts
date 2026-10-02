@@ -1,10 +1,11 @@
 // The health view (terminal-r4 "Health"): is everything connected and fresh,
 // with a key to fix what is not.
 //
-// One line per item: glyph, name, state words (the server's blocker words win
-// over the generic ones), and how fresh its data is. A fix prints under its
-// item; `(o)` marks the one fix `o` opens, and only when the session can open
-// the app. With more than one fix to open, j/k picks which.
+// One line per item: glyph (in the item's tone), name, state words (the
+// server's blocker words win over the generic ones; amber or red when not OK),
+// and how fresh its data is (dim). The fixes follow the rows, each `Fix it:`
+// and a link; `(o) · <place>` marks the one fix `o` opens, and only when the
+// session can open the app. With more than one fix to open, j/k picks which.
 //
 // `numbers.ts` and this file draw each other's sections (a composite can hold
 // a health section and a health body can hold numbers). The two only call
@@ -12,13 +13,13 @@
 import type { KeyHint } from "../keys/keymap.js";
 import { displayWidth, padEndCells } from "../lib/display-width.js";
 import { asList, asRecord, sectionLines, type MeasureDraw } from "./numbers.js";
-import { FootnoteBook, formatAsOf, isRecord, paint, viewText, wrapText } from "./primitives.js";
+import { FootnoteBook, formatAsOf, isRecord, linkLine, openHint, paint, viewText, wrapText } from "./primitives.js";
 import type { KindRender, KindRenderer, ViewRenderCtx } from "./types.js";
 
 type ItemTone = "success" | "warning" | "error" | "muted";
 
 const ITEM_STATES: Record<string, { glyph: string; words: string; role: ItemTone }> = {
-  ok: { glyph: "✓", words: "OK", role: "success" },
+  ok: { glyph: "✓", words: "connected", role: "success" },
   needs_you: { glyph: "▣", words: "needs you", role: "warning" },
   blocked: { glyph: "⊗", words: "blocked", role: "error" },
   unknown: { glyph: "?", words: "unknown", role: "muted" },
@@ -101,17 +102,24 @@ export function healthBodyLines(
       wrapText([row.words, row.fresh].filter(Boolean).join(" · "), Math.max(1, ctx.width - marker - 2))
         .forEach((part) => lines.push(`${indent}${paint(part, "muted", ctx)}`));
     }
-    const fix = asRecord(items[index]!.fix);
-    const label = viewText(fix.label);
-    if (label) {
-      const text = `→ ${label}${index === target ? " (o)" : ""}`;
-      wrapText(text, Math.max(1, ctx.width - marker - 2)).forEach((part) =>
-        lines.push(`${" ".repeat(marker + 2)}${paint(part, "muted", ctx)}`));
-    }
   });
 
   let openLabel = target >= 0 ? openableFix(items[target]!.fix) : null;
   const extra: string[][] = [];
+
+  // r4: the fixes after the rows, each `Fix it: <link ↗>`, and `(o) · <place>`
+  // on the one `o` opens. A fix the session cannot open prints plainly.
+  extra.push(items.flatMap((item, index) => {
+    const fix = asRecord(item.fix);
+    const label = viewText(fix.label);
+    if (!label) return [];
+    const lead = "Fix it: ";
+    if (ctx.caps.open && isRecord(fix.appLink)) {
+      const inner = { ...ctx, width: Math.max(1, ctx.width - lead.length) };
+      return [`${paint(lead, "muted", ctx)}${linkLine(label, inner, index === target ? openHint(fix.appLink) : "")}`];
+    }
+    return wrapText(`${lead}${label}`, ctx.width).map((line) => paint(line, "muted", ctx));
+  }));
 
   const steps = asList(body.steps).filter(isRecord).map((step) => {
     const mark = typeof step.state === "string" && Object.hasOwn(STEP_GLYPHS, step.state) ? STEP_GLYPHS[step.state]! : STEP_GLYPHS.unreadable!;

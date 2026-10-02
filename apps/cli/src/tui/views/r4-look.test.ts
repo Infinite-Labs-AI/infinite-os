@@ -306,3 +306,64 @@ describe("link (view-11 body)", () => {
     expect(seg(place.detail[0]!)).toBe("{cyan u}Library ↗  {dim}(o)");
   });
 });
+
+// ── the measure views (view-01 numbers, view-09 compare, view-10 health, flow-numbers-03) ──
+
+describe("health (view-10)", () => {
+  it("glyph in tone, name plain, bad words amber, freshness dim; the fix after the rows as a link", () => {
+    const item = (name: string, dataThrough: string) => ({ id: name, name, state: "ok", dataThrough });
+    const render = renderView(thing("health", {
+      items: [
+        item("GA4", "2026-09-30"), item("Google Ads", "2026-09-30"),
+        { id: "s", name: "Shopify", state: "not_connected", blocker: "sign-in expired", dataThrough: "2026-09-28",
+          fix: { label: "Reconnect Shopify", appLink: { place: "connections", label: "Connections, in the app" } } }
+      ]
+    }), ctx());
+    expect(render.detail.map(seg)).toEqual([
+      "{green}✓ GA4         connected        {dim}up to Sep 30",
+      "{green}✓ Google Ads  connected        {dim}up to Sep 30",
+      "{amber}⊘ Shopify     {amber}sign-in expired  {dim}up to Sep 28",
+      "",
+      "{dim}Fix it: {cyan u}Reconnect Shopify ↗  {dim}(o) · Connections, in the app"
+    ]);
+  });
+});
+
+describe("compare (view-09)", () => {
+  it("the server's verdict: the grade glyph in tone, the sentence bold white, what is unmet dim", () => {
+    const render = renderView(thing("compare", {
+      window: { from: "2026-09-24", to: "2026-09-30", tz: "UTC", label: "" },
+      arms: [], metricRows: [], differences: [],
+      verdict: { sentence: "No winner yet", grade: "inconclusive", unmet: ["Day 6 of 14 · check again Oct 9"], namesWinner: false }
+    }), ctx());
+    expect(render.detail.map(seg).slice(-2)).toEqual(["{amber}◌ {b}No winner yet", "{dim}Day 6 of 14 · check again Oct 9"]);
+  });
+});
+
+describe("numbers: the day strip (view-01, flow-numbers-03)", () => {
+  const days = (statuses: string[], from = 24) => statuses.map((status, index) => ({ date: `2026-09-${from + index}`, status }));
+  const numbers = (settledDays: { date: string; status: string }[], todayTo: string | null) => view({
+    body: {
+      layout: "table", currency: "USD", columns: [],
+      legs: {
+        settled: { window: { from: "2026-09-24", to: "2026-09-30", tz: "UTC", label: "" }, final: true, asOf: null, rows: [],
+          coverage: { requestedDays: settledDays.length, measuredDays: 0, days: settledDays } },
+        ...(todayTo ? { today: { window: { from: todayTo, to: todayTo, tz: "UTC", label: "" }, final: false, asOf: "2026-10-01T10:40:00Z", rows: [] } } : {})
+      }
+    }
+  });
+
+  it("Days bold, dates dim, a zero day dim, a measured day cyan, today amber; the legend hangs under the strip", () => {
+    const render = renderView(numbers(days(["zero", "zero", "zero", "zero", "zero", "measured", "measured"]), "2026-10-01"), ctx());
+    const strip = render.detail.map(seg).filter((line) => line.startsWith("{b}Days") || line.startsWith("     "));
+    expect(strip).toEqual([
+      "{b}Days {dim}Sep 24 ·····{cyan}██{amber}◌ {dim}Oct 1",
+      "     {dim}0 of 7 days measured   · zero   █ measured   ◌ today"
+    ]);
+  });
+
+  it("a day not synced yet is the hatch ░, never a zero (flow-numbers-03)", () => {
+    const render = renderView(numbers(days(["measured", "not_synced"], 29), null), ctx());
+    expect(render.detail.map(seg)).toContain("{b}Days {dim}Sep 29 {cyan}█{hatch}░ {dim}Sep 30");
+  });
+});

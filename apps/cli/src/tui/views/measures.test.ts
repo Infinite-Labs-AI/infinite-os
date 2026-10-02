@@ -431,13 +431,16 @@ describe("compare", () => {
 });
 
 describe("health", () => {
-  it("not_connected prints ⊘ and the fix label, with (o) only when the session can open the app", () => {
+  it("not_connected prints ⊘ and, after the rows, Fix it: with (o) only when the session can open the app", () => {
     const closed = draw(fixture("health-connections"));
     expect(closed.detail.find((line) => line.startsWith("⊘ Store"))).toBeDefined();
-    expect(closed.detail).toContain("  → Connect the store");
-    expect(text(closed)).not.toContain("(o)");
+    expect(closed.detail).toContain("Fix it: Connect the store");
+    expect(text(closed)).not.toMatch(/\(o\)|↗/u);
     const open = draw(fixture("health-connections"), { caps: OPEN });
-    expect(open.detail).toContain("  → Connect the store (o)");
+    expect(open.detail).toContain("Fix it: Connect the store ↗  (o) · Connections");
+    // The fixes follow the rows, a blank row apart (r4).
+    const fixAt = open.detail.indexOf("Fix it: Connect the store ↗  (o) · Connections");
+    expect(open.detail[fixAt - 1]).toBe("");
     expect(open.keys).toEqual([{ key: "o", label: "Connect the store" }]);
     expect(closed.keys).toEqual([]);
   });
@@ -459,11 +462,11 @@ describe("health", () => {
     expect(text(draw(view, { caps: OPEN }))).not.toContain("(o)");
     const first = draw(view, { caps: OPEN, selected: 2 });
     expect(first.rowCount).toBe(4);
-    expect(first.detail).toContain("    → Connect the store (o)");
-    expect(first.detail).toContain("    → Sign in to email");
+    expect(first.detail).toContain("Fix it: Connect the store ↗  (o) · Connections");
+    expect(first.detail).toContain("Fix it: Sign in to email ↗");
     const last = draw(view, { caps: OPEN, selected: 3 });
-    expect(last.detail).toContain("    → Connect the store");
-    expect(last.detail).toContain("    → Sign in to email (o)");
+    expect(last.detail).toContain("Fix it: Connect the store ↗");
+    expect(last.detail).toContain("Fix it: Sign in to email ↗  (o) · Connections");
     expect(last.keys).toEqual([{ key: "o", label: "Sign in to email" }]);
     expect(last.detail.find((line) => line.includes("Email"))).toMatch(/^▸ /u);
   });

@@ -438,15 +438,18 @@ function kpiLines(
 
 // ── the coverage strip ──
 
-const COVERAGE_MARKS: Record<string, { glyph: string; words: string; role: "primary" | "muted" | "warning" }> = {
+type CoverageMark = { glyph: string; words: string; role: "primary" | "muted" | "warning" | "hatch" };
+
+/** r4's day strip: `█` cyan, `·` dim, `◌` amber (today), `░` hatch (not synced yet). */
+const COVERAGE_MARKS: Record<string, CoverageMark> = {
   measured: { glyph: "█", words: "measured", role: "primary" },
   partial: { glyph: "▒", words: "partial", role: "warning" },
   zero: { glyph: "·", words: "zero", role: "muted" },
   not_measured: { glyph: "—", words: "not measured", role: "muted" },
-  not_synced: { glyph: "░", words: "not synced", role: "warning" },
+  not_synced: { glyph: "░", words: "not synced", role: "hatch" },
   unknown: { glyph: "?", words: "unknown", role: "muted" }
 };
-const TODAY_MARK = { glyph: "◌", words: "today", role: "warning" as const };
+const TODAY_MARK: CoverageMark = { glyph: "◌", words: "today", role: "warning" };
 
 function coverageMark(status: unknown) {
   return typeof status === "string" && Object.hasOwn(COVERAGE_MARKS, status) && status !== "unknown"
@@ -475,7 +478,7 @@ function coverageLines(legs: Record<string, unknown>, ctx: ViewRenderCtx): strin
     const to = asRecord(today.window).to;
     if (!todayDays.length && typeof to === "string") todayDates.add(to);
   }
-  const days: { date: string; mark: { glyph: string; words: string; role: "primary" | "muted" | "warning" } }[] = [];
+  const days: { date: string; mark: CoverageMark }[] = [];
   for (const day of asList(coverage.days).filter(isRecord)) {
     if (typeof day.date !== "string") continue;
     days.push({ date: day.date, mark: todayDates.has(day.date) ? TODAY_MARK : coverageMark(day.status) });
@@ -493,7 +496,10 @@ function coverageLines(legs: Record<string, unknown>, ctx: ViewRenderCtx): strin
     days.slice(from, to).map((day) => paint(day.mark.glyph, day.mark.role, ctx)).join("");
   const lines: string[] = [];
   const one = `Days ${first} ${plainGlyphs} ${last}`;
+  // The legend hangs under the strip, past `Days ` (r4), when the strip is one line.
+  let legendIndent = "";
   if (displayWidth(one) <= ctx.width) {
+    legendIndent = " ".repeat(DAYS_LABEL.length);
     lines.push(`${paint("Days", "b", ctx)} ${paint(first, "muted", ctx)} ${painted(0, days.length)} ${paint(last, "muted", ctx)}`);
   } else {
     lines.push(fitLine(`${paint("Days", "b", ctx)} ${paint(`${first} – ${last}`, "muted", ctx)}`, ctx.width));
@@ -510,9 +516,11 @@ function coverageLines(legs: Record<string, unknown>, ctx: ViewRenderCtx): strin
     ...(requested !== null && measured !== null ? [`${measured} of ${requested} days measured`] : []),
     ...used.values()
   ].join("   ");
-  lines.push(...wrapText(legend, ctx.width).map((line) => paint(line, "muted", ctx)));
+  lines.push(...wrapText(legend, Math.max(1, ctx.width - legendIndent.length)).map((line) => `${legendIndent}${paint(line, "muted", ctx)}`));
   return lines;
 }
+
+const DAYS_LABEL = "Days ";
 
 // ── sections (composite) ──
 
