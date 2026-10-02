@@ -9,6 +9,12 @@
 //   ─ Steps ──────────────────────────────────────────
 //     checking your campaigns    ━━━━━━━━━━━━━━   ✓ 3 ads
 //
+// While a turn runs and has not answered yet, the answer's place holds the
+// working line (terminal-r4: a braille spinner and `Working…` in cyan, then
+// what the turn says it is doing, dim):
+//
+//   ⠋ Working…  · checking the catalog
+//
 // Each turn (a user message and what follows it) ends with its Steps strip:
 // one row per tool call, never the raw tool id or its arguments. The live
 // turn's strip comes from the turn store's steps (start and end per call);
@@ -37,6 +43,12 @@ export interface InfiniteTranscriptInput {
 }
 
 export interface InfiniteTranscriptOptions {
+  /**
+   * The session's own word that a turn is running (from the moment the line is
+   * sent, before any frame came back): the working line is drawn at once.
+   * Without it, the turn's own progress (a running call, a status) says so.
+   */
+  busy?: boolean;
   color?: boolean;
   columns?: number;
   nowMs?: number;
@@ -46,6 +58,7 @@ export interface InfiniteTranscriptOptions {
 
 interface RenderContext extends ColumnStyle {
   agentTitle?: string;
+  busy: boolean;
   columns: number;
   nowMs: number;
   thinkingMode: ThinkingMode;
@@ -63,6 +76,7 @@ export function renderInfiniteTranscript(
   const theme = options.theme ?? resolveTheme();
   const ctx: RenderContext = {
     agentTitle: input.agentTitle,
+    busy: options.busy ?? false,
     color: options.color ?? false,
     columns: fluidColumns(options.columns ?? 88),
     nowMs: options.nowMs ?? Date.now(),
@@ -123,6 +137,7 @@ export interface TurnBodyOptions extends ColumnStyle {
  */
 export function renderTurnBody(messages: readonly Msg[], options: TurnBodyOptions): string[] {
   return renderMessages(messages, {
+    busy: false,
     color: options.color,
     theme: options.theme,
     columns: Math.max(1, Math.floor(options.columns)),
@@ -168,9 +183,22 @@ function renderTurn(messages: readonly Msg[], state: TurnState | undefined, ctx:
         mark: !answered,
         label: answered ? undefined : agentLabel(ctx.agentTitle, ctx)
       }));
-    } else if (state.activity.length) {
-      const last = state.activity.at(-1)!;
-      pushBlock(lines, noteLines(`• ${last.text}`, ctx.columns, ctx, last.tone === "error" ? "error" : last.tone === "warn" ? "warning" : "muted"));
+    } else {
+      // No answer yet: the working line holds its place, with what the turn
+      // says it is doing. A warning or an error keeps its own line and tone.
+      const last = state.activity.at(-1);
+      const working = !answered && !isBesideTurn(state) && (ctx.busy || turnShowsWork(state));
+      if (working) {
+        pushBlock(lines, [workingLine(last?.tone === "info" ? last.text : "", ctx)]);
+      }
+      if (last && !(working && last.tone === "info")) {
+        const note = noteLines(`• ${last.text}`, ctx.columns, ctx, last.tone === "error" ? "error" : last.tone === "warn" ? "warning" : "muted");
+        if (working) {
+          lines.push(...note);
+        } else {
+          pushBlock(lines, note);
+        }
+      }
     }
   }
 
@@ -182,6 +210,38 @@ function renderTurn(messages: readonly Msg[], state: TurnState | undefined, ctx:
     views: state?.views.map((frame) => frame.view)
   }));
   return lines;
+}
+
+/**
+ * The turn's own progress says it is working: a call still running, thinking
+ * or a subagent under way, or a status it reported. (A stopped turn's calls
+ * are closed, so it does not.)
+ */
+function turnShowsWork(state: TurnState): boolean {
+  return Boolean(
+    state.steps.some((step) => step.endedAt === null) ||
+    state.reasoningActive ||
+    state.reasoningStreaming ||
+    state.activity.length ||
+    state.subagents.some((subagent) => subagent.status === "running")
+  );
+}
+
+const SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏";
+const SPINNER_MS = 80;
+
+/**
+ * The working line (terminal-r4 `⠋ Working…`): a braille spinner frame and
+ * `Working…` in cyan, then what the turn says it is doing, dim. One row, cut
+ * to the width. Every glyph is one column wide.
+ */
+function workingLine(detail: string, ctx: RenderContext): string {
+  const frame = SPINNER[Math.floor(Math.max(0, ctx.nowMs) / SPINNER_MS) % SPINNER.length]!;
+  const words = `${frame} Working…`;
+  const room = ctx.columns - displayWidth(words);
+  const said = compactPreview(detail, 96);
+  const tail = said && room > 6 ? truncateCells(`  · ${said}`, room) : "";
+  return fit(`${paint(words, "primary", ctx)}${tail ? paint(tail, "muted", ctx) : ""}`, ctx);
 }
 
 /**
@@ -202,16 +262,26 @@ export function workingTurnSteps(messages: readonly Msg[], state: TurnState, now
   return turnSteps(messages, state, { nowMs });
 }
 
+/** A turn state for the transcript UNDER a turn drawn with its views: that turn says it is working itself. */
+export interface BesideTurnState extends TurnState {
+  readonly beside: true;
+}
+
+function isBesideTurn(state: TurnState): boolean {
+  return (state as Partial<BesideTurnState>).beside === true;
+}
+
 /**
  * The turn state the transcript keeps beside a running turn drawn with its
  * views: what the drawn turn already shows (its segments, the answer arriving,
  * its calls and Steps) is taken out, so nothing prints twice; thinking, todos,
  * subagents and the latest activity stay under it.
  */
-export function besideWorkingTurn(state: TurnState): TurnState {
+export function besideWorkingTurn(state: TurnState): BesideTurnState {
   const segmentsThink = state.streamSegments.some((msg) => msg.thinking?.trim());
   return {
     ...state,
+    beside: true,
     steps: [],
     streamSegments: [],
     streaming: "",

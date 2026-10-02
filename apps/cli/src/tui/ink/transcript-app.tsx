@@ -151,11 +151,14 @@ export function InkTranscriptApp({
   const busy = busyOverride || isInfiniteTurnBusy(state);
   const { clock } = useInfiniteTranscriptClock({ busy, nowMs });
 
+  // `busyOverride` (the session's own busy flag) is passed as it came to the
+  // render and to both row counts below, so they always agree on the working line.
   const transcriptLines = useMemo(() => renderTranscriptLines(transcript ?? { state }, {
+    busy: busyOverride,
     columns: width,
     nowMs: clock,
     theme: t
-  }), [clock, state, t, transcript, width]);
+  }), [busyOverride, clock, state, t, transcript, width]);
   const live = useMemo(() => liveLinesWindow({
     bootFrame,
     composerRows,
@@ -227,6 +230,7 @@ export function renderInkTranscriptToString(
  */
 export function inkTranscriptLayout({
   bootFrame = false,
+  busy = false,
   columns = 88,
   composerRows,
   keyBarRows,
@@ -251,6 +255,7 @@ export function inkTranscriptLayout({
     showComposer,
     theme: t,
     transcriptLines: renderTranscriptLines(transcript ?? { state }, {
+      busy,
       columns: width,
       nowMs,
       theme: t
@@ -269,6 +274,7 @@ export function inkTranscriptLayout({
  * when the height is unknown (no cap).
  */
 export function inkLatestTurnRows({
+  busy = false,
   columns = 88,
   composerRows = DEFAULT_COMPOSER_ROWS,
   keyBarRows = DEFAULT_KEY_BAR_ROWS,
@@ -285,7 +291,7 @@ export function inkLatestTurnRows({
   if (!Number.isFinite(budget)) {
     return undefined;
   }
-  const transcriptLines = renderTranscriptLines(transcript ?? { state }, { columns: width, nowMs, theme: t });
+  const transcriptLines = renderTranscriptLines(transcript ?? { state }, { busy, columns: width, nowMs, theme: t });
   return Math.max(2, budget - transcriptLines.length);
 }
 
@@ -424,12 +430,15 @@ function segmentTextProps(segment: AnsiSegment): React.ComponentProps<typeof Tex
 function renderTranscriptLines(
   transcript: InfiniteTranscriptInput,
   options: {
+    /** A turn is running (the session's flag): the working line holds the answer's place. */
+    busy?: boolean;
     columns: number;
     nowMs: number;
     theme: Theme;
   }
 ): string[] {
   const rendered = renderInfiniteTranscript(transcript, {
+    busy: options.busy ?? false,
     // Color is emitted as ANSI here, then parsed back into per-segment Ink
     // `<Text color=…>` props by the transcript view (see parseAnsiSegments).
     // This keeps the renderer's full palette (border/title/body/diff/tool)
