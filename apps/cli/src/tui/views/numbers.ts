@@ -117,7 +117,9 @@ export function cellTableLines(input: CellTableInput, ctx: ViewRenderCtx, draw: 
   const selected = selectedRow(input);
   if (selected !== null && lines[3 + selected] !== undefined) {
     // Pass 2 never drops more than pass 1 (fewer footnotes, never wider cells), and rows are one line each.
-    lines[3 + selected] = lines[3 + selected]!.replace("│", "▸");
+    // The row's left border (its own painted run) becomes r4's selection token, a bold cyan ▸;
+    // the border's opening style is re-applied after it for anything else in that run.
+    lines[3 + selected] = lines[3 + selected]!.replace(/^((?:\u001b\[[0-9;]*m)*)│/u, (_match, open: string) => `${paint("▸", "cb", ctx)}${open}`);
   }
   if (hiddenIndexes.length) {
     const named = hiddenIndexes.map((index) => labels[index + 1]).filter(Boolean).join(", ");
@@ -219,15 +221,16 @@ function recordLines(input: CellTableInput, labels: readonly string[], ctx: View
     if (recordIndex > 0 && (open || expanded(recordIndex - 1))) {
       lines.push("");
     }
-    const mark = selected === null ? "" : recordIndex === selected ? "▸ " : "  ";
-    lines.push(...wrapText(viewText(record.label), Math.max(1, ctx.width - mark.length)).map((line, index) =>
-      `${index === 0 ? mark : " ".repeat(mark.length)}${paint(line, "b", ctx)}`));
+    const mark = selected === null ? "" : recordIndex === selected ? paint("▸ ", "cb", ctx) : "  ";
+    const markWidth = selected === null ? 0 : 2;
+    lines.push(...wrapText(viewText(record.label), Math.max(1, ctx.width - markWidth)).map((line, index) =>
+      `${index === 0 ? mark : " ".repeat(markWidth)}${paint(line, "b", ctx)}`));
     if (!open) {
       return;
     }
     input.columns.forEach((column, index) => {
       const value = drawCell(record.cells[index], columnFor(column, record, index), input.currency, notes);
-      const indent = " ".repeat(mark.length + 2);
+      const indent = " ".repeat(markWidth + 2);
       lines.push(...wrapText(`${labels[index + 1]}: ${value}`, Math.max(1, ctx.width - indent.length)).map((line) => `${indent}${line}`));
     });
   });

@@ -14,6 +14,7 @@ import type { KeyHint } from "../keys/keymap.js";
 import { displayWidth, padEndCells } from "../lib/display-width.js";
 import { asList, asRecord, sectionLines, type MeasureDraw } from "./numbers.js";
 import { FootnoteBook, formatAsOf, isRecord, linkLine, openHint, paint, viewText, wrapText } from "./primitives.js";
+import { marker as selectionMarker } from "./things.js";
 import type { KindRender, KindRenderer, ViewRenderCtx } from "./types.js";
 
 type ItemTone = "success" | "warning" | "error" | "muted";
@@ -85,7 +86,7 @@ export function healthBodyLines(
   const wordsWidth = Math.max(0, ...rows.map((row) => displayWidth(row.words)));
   const lines: string[] = [];
   rows.forEach((row, index) => {
-    const lead = selectable ? (index === selected ? "▸ " : "  ") : "";
+    const lead = selectable ? selectionMarker(index === selected, ctx) : "";
     const glyph = paint(row.state.glyph, row.state.role, ctx);
     const one = `${row.state.glyph} ${padEndCells(row.name, nameWidth)}  ${padEndCells(row.words, wordsWidth)}  ${row.fresh}`.trimEnd();
     if (displayWidth(row.name) <= nameWidth && marker + displayWidth(one) <= ctx.width) {

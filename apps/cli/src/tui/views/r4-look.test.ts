@@ -5,6 +5,8 @@
 // truecolor output is read back into r4 tokens and normalised the way the
 // golden comparator does (`golden_compare.py` `token_of` + `normalize`), so a
 // wrong colour, weight, background or underline fails here, not only wrong text.
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import type { AnswerViewV1 } from "@infinite-os/types";
 import { describe, expect, it } from "vitest";
 
@@ -394,5 +396,32 @@ describe("numbers: the day strip (view-01, flow-numbers-03)", () => {
   it("a day not synced yet is the hatch ░, never a zero (flow-numbers-03)", () => {
     const render = renderView(numbers(days(["measured", "not_synced"], 29), null), ctx());
     expect(render.detail.map(seg)).toContain("{b}Days{} {dim}Sep 29{} {cyan}█{hatch}░{} {dim}Sep 30");
+  });
+});
+
+describe("selection outside the list is the same cb ▸ (SPEC §4 Arrows)", () => {
+  const fixture = (name: string): AnswerViewV1 => {
+    const decoded = decodeAnswerView(JSON.parse(readFileSync(fileURLToPath(new URL(`./__fixtures__/${name}.json`, import.meta.url)), "utf8")));
+    if (!decoded) throw new Error(`fixture ${name} does not decode`);
+    return decoded;
+  };
+
+  it("a numbers table's selected row swaps its left border for a bold cyan ▸", () => {
+    const render = renderView(fixture("numbers-week-today"), ctx({ selected: 2 }));
+    const row = render.detail.map(seg).find((line) => line.includes("Hook C"))!;
+    expect(row.startsWith("{cb}▸")).toBe(true);
+    expect(render.detail.map(seg).find((line) => line.includes("Hook A"))!.startsWith("{cb}▸")).toBe(false);
+  });
+
+  it("a numbers record's selected heading leads with the bold cyan ▸", () => {
+    const render = renderView(fixture("numbers-ads"), ctx({ width: 48, showHiddenColumns: true, selected: 1 }));
+    expect(render.detail.map(seg)).toContain("{cb}▸{} {b}Ad set 02");
+  });
+
+  it("a health row picked for o leads with the bold cyan ▸", () => {
+    const view = JSON.parse(JSON.stringify(fixture("health-connections"))) as AnswerViewV1;
+    (view.body as unknown as { items: Record<string, unknown>[] }).items[3]!.fix = { label: "Sign in to email", appLink: { place: "connections", label: "Connections" } };
+    const render = renderView(view, ctx({ selected: 3 }));
+    expect(render.detail.map(seg).find((line) => line.includes("Email"))!.startsWith("{cb}▸")).toBe(true);
   });
 });
