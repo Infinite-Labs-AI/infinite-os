@@ -34,7 +34,7 @@ describe("the session draws the latest turn's answer views (CI-runnable)", () =>
     }));
     expect(out).toContain("❯ which ads are on?");
     expect(out).toContain("∞ Two are on.");
-    expect(out).toMatch(/│ Ads running {2}✓ Ready/u);
+    expect(out).toMatch(/│ {2}Ads running {2}✓ Ready/u);
     expect(out.split("\n").every((line) => displayWidth(line) <= 100)).toBe(true);
   });
 
@@ -112,7 +112,7 @@ describe("views in a running session (fake TTY; skipped on CI like the other PTY
 
     await waitFor(() => output.text().includes("ready"), 4_000, output.text);
     await sendKeys(input, "which ads are on?\r");
-    await waitFor(() => /│ Ads running {2}✓ Ready/u.test(stripAnsi(output.text())), 4_000, output.text);
+    await waitFor(() => /│ {2}Ads running {2}✓ Ready/u.test(stripAnsi(output.text())), 4_000, output.text);
     // The key bar offers only what works on the view: rows to move, tab to type.
     await waitFor(() => stripAnsi(output.text()).includes("j k move"), 4_000, output.text);
     // j moves the selection and types nothing; h starts a message and types.

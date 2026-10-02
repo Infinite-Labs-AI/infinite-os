@@ -9,7 +9,7 @@ import type { AnswerViewV1 } from "@infinite-os/types";
 
 import { renderMarkdown } from "../../formatting/markdown-render.js";
 import type { KeyContext } from "../keys/keymap.js";
-import { padEndCells } from "../lib/display-width.js";
+import { padEndCells, truncateCells } from "../lib/display-width.js";
 import { parseToolTrailResultLine, splitToolDuration } from "../lib/text.js";
 import type { Theme } from "../theme.js";
 import type { Msg } from "../types.js";
@@ -96,23 +96,51 @@ export function layoutTurn(
   return out;
 }
 
-/**
- * The Steps strip, from the turn's tool trail: `✓ label · result (time)`, one
- * row per tool. Rows that are not a finished tool (a stopped one) print as is.
- */
-export function stepLines(messages: readonly Msg[]): string[] {
+/** One Steps row: the label column, then the glyph and the result (r4 order). */
+export interface StepRow {
+  label: string;
+  mark: string;
+  result: string;
+}
+
+/** The Steps rows from the turn's tool trail; a row that is not a finished tool (a stopped one) has only a label. */
+export function stepRows(messages: readonly Msg[]): StepRow[] {
   return messages
     .filter((msg) => msg.kind === "trail")
     .flatMap((msg) => msg.tools ?? [])
     .map((line) => {
       const parsed = parseToolTrailResultLine(line);
       if (!parsed) {
-        return `  ${viewText(line)}`;
+        return { label: viewText(line), mark: "", result: "" };
       }
       const { label, duration } = splitToolDuration(parsed.call ?? "");
-      const detail = viewText(parsed.detail);
-      return `  ${parsed.mark} ${viewText(label)}${detail ? ` · ${detail}` : ""}${duration}`;
+      return { label: viewText(label), mark: parsed.mark, result: `${viewText(parsed.detail)}${duration}`.trim() };
     });
+}
+
+/** The label column of the Steps strip: min(28, 26% of the width), narrower when stacked (r4). */
+export function stepLabelWidth(width: number): number {
+  const total = Math.max(1, Math.floor(width));
+  return total < SPLIT_MIN_COLUMNS ? Math.max(8, Math.min(28, total - 34)) : Math.min(28, Math.floor(total * 0.26));
+}
+
+/**
+ * The Steps strip, from the turn's tool trail, in r4's column order: the label
+ * padded to a fixed column, then the glyph and the result (`label  ✓ 3 items
+ * (0.6s)`), one row per tool. r4's timing bar between them waits for per-step
+ * start times (the trail carries durations only).
+ */
+export function stepLines(messages: readonly Msg[], width: number, style: { color: boolean; theme: Theme } | null = null): string[] {
+  const labelWidth = stepLabelWidth(width);
+  return stepRows(messages).map((row) => {
+    if (!row.mark) {
+      return `  ${style ? paint(row.label, "muted", style) : row.label}`;
+    }
+    const label = padEndCells(truncateCells(row.label, labelWidth), labelWidth);
+    const role = row.mark === "✓" ? "success" : row.mark === "✗" ? "error" : "muted";
+    const outcome = `${row.mark}${row.result ? ` ${row.result}` : ""}`;
+    return `  ${label} ${style ? paint(outcome, role, style) : outcome}`;
+  });
 }
 
 /**
@@ -193,7 +221,7 @@ export function renderLiveTurn(input: LiveTurnInput): LiveTurnRender {
   const renders = input.views.map((view, index) =>
     renderView(view, index === focusIndex && input.focus ? focusedViewCtx(input.focus, base) : plainCtx)
   );
-  const steps = stepLines(input.messages).map((line) => paintStep(line, input));
+  const steps = stepLines(input.messages, width, input);
   const answer = renderAnswerColumn(input.messages, wide && renders.length ? left : width, input.theme, input.color);
   const lines = layoutTurn(answer, renders, steps, width, { color: input.color, theme: input.theme });
   const focusedRender = renders[focusIndex];
@@ -203,12 +231,6 @@ export function renderLiveTurn(input: LiveTurnInput): LiveTurnRender {
       ? { render: focusedRender, facts: viewKeyFacts(input.views[focusIndex], focusedRender, input.livePageNext ?? false) }
       : null
   };
-}
-
-function paintStep(line: string, style: { color: boolean; theme: Theme }): string {
-  const mark = line.trimStart().charAt(0);
-  const role = mark === "✓" ? "success" : mark === "✗" ? "error" : "muted";
-  return paint(line, role, style);
 }
 
 function isRenderList(view: ViewRender | readonly ViewRender[]): view is readonly ViewRender[] {

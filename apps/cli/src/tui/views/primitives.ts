@@ -232,17 +232,17 @@ export function toneRole(tone: StateTone | StatusWordV1["tone"]): AnsiRole {
   }
 }
 
-/** Colour a span (and optionally bold it), resetting after; plain when colour is off. */
+/** Colour a span (and optionally bold or invert it), resetting after; plain when colour is off. */
 export function paint(
   text: string,
   role: AnsiRole,
   ctx: { color: boolean; theme: Theme },
-  options: { bold?: boolean } = {}
+  options: { bold?: boolean; inverse?: boolean } = {}
 ): string {
   if (!ctx.color || !text) {
     return text;
   }
-  const open = `${ansiFg(ctx.theme, role)}${options.bold ? "\u001b[1m" : ""}`;
+  const open = `${ansiFg(ctx.theme, role)}${options.bold ? "\u001b[1m" : ""}${options.inverse ? "\u001b[7m" : ""}`;
   return open ? `${open}${text}\u001b[0m` : text;
 }
 
@@ -267,7 +267,11 @@ function paragraph(text: string, role: AnsiRole, ctx: ViewRenderCtx): string[] {
 
 // ── the shell: lines every view gets, whatever its kind ──
 
-/** `Title  ✓ Ready`: the view's title, then its state head. One line. */
+/**
+ * The head, as r4 draws it: the title as an inverse chip (` Title `), one
+ * space, then the state head. Without colour the chip cannot show, so the
+ * title prints bare with two spaces before the state. One line.
+ */
 export function headLine(view: AnswerViewV1, ctx: ViewRenderCtx): string {
   const head = stateHeadFor(view);
   const state = `${head.glyph} ${head.words}`;
@@ -276,11 +280,14 @@ export function headLine(view: AnswerViewV1, ctx: ViewRenderCtx): string {
   if (!title) {
     return paint(fitLine(state, width), toneRole(head.tone), ctx);
   }
-  const room = width - displayWidth(state) - 2;
+  const chipPad = ctx.color ? 2 : 0;
+  const room = width - displayWidth(state) - 2 - chipPad;
   if (room < 4) {
     return fitLine(`${title}  ${state}`, width);
   }
-  return `${paint(fitLine(title, room), "text", ctx, { bold: true })}  ${paint(state, toneRole(head.tone), ctx)}`;
+  const shown = fitLine(title, room);
+  const chip = ctx.color ? paint(` ${shown} `, "text", ctx, { bold: true, inverse: true }) : shown;
+  return `${chip}${ctx.color ? " " : "  "}${paint(state, toneRole(head.tone), ctx)}`;
 }
 
 /** `<provenance.source> · up to <asOf>`, or null when the view says neither. */
@@ -297,8 +304,13 @@ export function explainLines(view: AnswerViewV1, ctx: ViewRenderCtx): string[] {
   return ctx.explainOpen ? paragraph(viewText(view.explain), "muted", ctx) : [];
 }
 
-/** The state's specifics, in the head's tone, and how to fix it when the view says. */
-export function stateReasonLines(view: AnswerViewV1, ctx: ViewRenderCtx): string[] {
+/**
+ * The state's specifics, in the head's tone, and how to fix it when a key can
+ * act on the fix: `o` opens its app link (when the session can open the app),
+ * or Enter sends its ask (`fixAskBound`: the view has no row asks). A fix no
+ * key can act on is not printed, so it never reads like an action.
+ */
+export function stateReasonLines(view: AnswerViewV1, ctx: ViewRenderCtx, fixAskBound = false): string[] {
   const reason = isRecord(view.stateReason) ? view.stateReason : null;
   if (!reason) {
     return [];
@@ -306,11 +318,18 @@ export function stateReasonLines(view: AnswerViewV1, ctx: ViewRenderCtx): string
   const lines = paragraph(viewText(reason.words), toneRole(stateHeadFor(view).tone), ctx);
   const fix = isRecord(reason.fix) ? reason.fix : null;
   const label = viewText(fix?.label);
-  if (label) {
-    const opens = ctx.caps.open && isRecord(fix?.appLink);
+  const opens = ctx.caps.open && isRecord(fix?.appLink);
+  if (label && (opens || (fixAskBound && stateFixAsk(view) !== null))) {
     lines.push(...paragraph(`→ ${label}${opens ? " (o)" : ""}`, "muted", ctx));
   }
   return lines;
+}
+
+/** The state's fix ask (a NEW user turn), when the view offers one. */
+export function stateFixAsk(view: AnswerViewV1): string | null {
+  const reason = isRecord(view.stateReason) ? view.stateReason : null;
+  const fix = reason && isRecord(reason.fix) ? reason.fix : null;
+  return viewText(fix?.ask) || null;
 }
 
 /** `shown of total · reason · m for more`, for the kinds whose bodies page (numbers, list). */

@@ -16,8 +16,10 @@ import {
   isRecord,
   paint,
   sourceLine,
+  stateFixAsk,
   stateReasonLines,
-  truncationLines
+  truncationLines,
+  viewText
 } from "./primitives.js";
 import type { KindRender, KindRenderer, ViewRender, ViewRenderCtx } from "./types.js";
 
@@ -50,12 +52,14 @@ export function hasKindRenderer(kind: AnswerViewKind): boolean {
 export function renderView(view: AnswerViewV1, ctx: ViewRenderCtx): ViewRender {
   const shellCtx: ViewRenderCtx = { ...ctx, width: Math.max(1, Math.floor(ctx.width)) };
   const body = renderKindBody(view, shellCtx);
+  // Enter sends the state's fix ask only when no row has an ask of its own.
+  const fixAsk = (body?.rowAsks ?? []).some((ask) => viewText(ask) !== "") ? null : stateFixAsk(view);
   return {
     head: headLine(view, shellCtx),
     source: sourceLine(view, shellCtx),
     detail: [
       ...explainLines(view, shellCtx),
-      ...stateReasonLines(view, shellCtx),
+      ...stateReasonLines(view, shellCtx, fixAsk !== null),
       ...(body?.detail ?? []),
       ...truncationLines(view, shellCtx),
       ...caveatLines(view, shellCtx)
@@ -67,7 +71,8 @@ export function renderView(view: AnswerViewV1, ctx: ViewRenderCtx): ViewRender {
     ...(body?.rowAsks ? { rowAsks: body.rowAsks } : {}),
     ...(body?.tabs ? { tabs: body.tabs } : {}),
     ...(body?.pages ? { pages: body.pages } : {}),
-    ...(body?.hiddenColumns ? { hiddenColumns: body.hiddenColumns } : {})
+    ...(body?.hiddenColumns ? { hiddenColumns: body.hiddenColumns } : {}),
+    ...(fixAsk ? { fixAsk } : {})
   };
 }
 

@@ -52,6 +52,11 @@ export interface ViewRender {
   pages?: number;
   /** Columns the table dropped at this width (`→` shows them). */
   hiddenColumns?: number;
+  /**
+   * The state's fix ask (`stateReason.fix.ask`) Enter sends as a NEW user turn.
+   * Set by the shell only when no row has an ask of its own.
+   */
+  fixAsk?: string;
 }
 
 /**
@@ -59,6 +64,6 @@ export interface ViewRender {
  * source line, the state reason, the explanation, truncation and caveats, so no
  * kind can drop or reword them.
  */
-export type KindRender = Omit<ViewRender, "head" | "source">;
+export type KindRender = Omit<ViewRender, "head" | "source" | "fixAsk">;
 
 export type KindRenderer<K extends AnswerViewKind> = (view: AnswerViewEnvelopeV1<K>, ctx: ViewRenderCtx) => KindRender;

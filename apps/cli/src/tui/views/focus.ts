@@ -5,10 +5,15 @@
 // The latest finished turn keeps its views live and focused until the next
 // line is submitted (then it commits to scrollback with them). While the
 // composer is empty, a key the focused view USES acts on it (j/k move, 1–9
-// switch tabs, space pages, → shows dropped columns, m asks for more, ? opens
-// the explanation, Enter asks a row's question). Any other printable key types:
-// it moves focus to the composer, where every key types, until tab brings the
-// view keys back. So a key is never eaten by a view that has no use for it.
+// switch tabs, space pages, → shows dropped columns, ? opens the explanation).
+// Any other printable key types: it moves focus to the composer, where every
+// key types, until tab brings the view keys back. So a key is never eaten by a
+// view that has no use for it:
+// - a capital letter always types ("Make me…" never becomes `m`);
+// - a move that moves nothing types (`k` on the first row starts "keep going");
+// - until the user ENGAGES the view (j/k, 1–9, space, →, ? acted, or tab), the
+//   keys that would send or page (`m`, Enter) type or stay with the composer,
+//   and ↑/↓ stay the composer's history recall.
 // Approvals are not views here: the card's own keymap (named OK key, `n`)
 // handles them, and Enter/Esc never approve or decline anything.
 import type { AnswerViewV1 } from "@infinite-os/types";
@@ -37,6 +42,8 @@ export interface ViewKeyFacts {
   explain: boolean;
   /** The ask `m` sends, when the view is truncated and says how to get more. */
   more: string | null;
+  /** The state's fix ask Enter sends (only when no row has an ask of its own). */
+  fixAsk: string | null;
   /** The live region has more lines below (`m` pages it when there is no `more` ask). */
   livePageNext: boolean;
 }
@@ -54,6 +61,11 @@ export interface ViewFocusState {
   showHiddenColumns: boolean;
   caps: KeyContext["caps"];
   facts: ViewKeyFacts;
+  /**
+   * The user has acted on the view (a view key that did something, or tab).
+   * Until then `m` and Enter never send or page, and ↑/↓ recall history.
+   */
+  engaged: boolean;
   /** Whether the last key acted on the view; false = it goes to the composer. */
   handled: boolean;
   effect: ViewKeyEffect | null;
@@ -62,7 +74,7 @@ export interface ViewFocusState {
 export const NO_VIEW_CAPS: KeyContext["caps"] = { open: false, watch: false, retry: false };
 
 const EMPTY_FACTS: ViewKeyFacts = {
-  rowCount: 0, rowAsks: [], tabs: 0, pages: 0, hiddenColumns: 0, explain: false, more: null, livePageNext: false
+  rowCount: 0, rowAsks: [], tabs: 0, pages: 0, hiddenColumns: 0, explain: false, more: null, fixAsk: null, livePageNext: false
 };
 
 /** The view the keys act on: the last one that is not quiet (steps only), else the last. */
@@ -88,6 +100,7 @@ export function viewKeyFacts(view: AnswerViewV1 | undefined, render: ViewRender,
     hiddenColumns: count(render.hiddenColumns),
     explain: viewText(view.explain) !== "",
     more: truncatedMoreAsk(view),
+    fixAsk: viewText(render.fixAsk) || null,
     livePageNext
   };
 }
@@ -100,7 +113,8 @@ export function hasViewKeys(facts: ViewKeyFacts): boolean {
     || facts.pages > 1
     || facts.hiddenColumns > 0
     || facts.explain
-    || facts.more !== null;
+    || facts.more !== null
+    || facts.fixAsk !== null;
 }
 
 /**
@@ -127,6 +141,7 @@ export function viewFocusAfterTurnDone(
     showHiddenColumns: false,
     caps,
     facts,
+    engaged: false,
     handled: false,
     effect: null
   };
@@ -163,27 +178,57 @@ export function resolveViewKey(
   const base: ViewFocusState = { ...state, facts, handled: false, effect: null };
   if (state.focus === "composer" || state.viewIndex < 0) {
     if (key.tab && !key.shift && state.viewIndex >= 0 && hasViewKeys(facts)) {
-      return { ...base, focus: state.detailsFocus, handled: true };
+      return { ...base, focus: state.detailsFocus, engaged: true, handled: true };
     }
     return base;
+  }
+  // A capital letter is the start of a message (the keymap folds case, so
+  // `M` would otherwise ask for more and `K` would move).
+  if (/^[A-Z]$/u.test(input) && !key.ctrl && !key.meta) {
+    return { ...base, focus: "composer", engaged: false };
+  }
+  // Before the view is engaged, tab engages it (the keys stay with the view)
+  // and ↑/↓ stay the composer's history recall.
+  if (!state.engaged) {
+    if (key.tab && !key.ctrl && !key.meta) {
+      return { ...base, engaged: true, handled: true };
+    }
+    if (key.upArrow || key.downArrow) {
+      return base;
+    }
   }
   const action = resolveKey(input, asKey(key), { focus: state.focus, busy: false, okKey: null, caps: state.caps });
   const next = applyViewAction(action, base, facts);
   if (next.handled || !typesIntoComposer(input, key)) {
     return next;
   }
-  return { ...next, focus: "composer" };
+  return { ...next, focus: "composer", engaged: false };
 }
 
+/**
+ * The kind keys (`render.keys`) whose action `applyViewAction` carries out. A
+ * kind hint is shown only for these, so the bar never offers a key that types.
+ * A lane that adds a reducer case for c/v/e/o/w/r adds its key here with it.
+ */
+export const HANDLED_KIND_KEYS: ReadonlySet<string> = new Set<string>();
+
 function applyViewAction(action: KeyAction, state: ViewFocusState, facts: ViewKeyFacts): ViewFocusState {
-  const handled = (patch: Partial<ViewFocusState>): ViewFocusState => ({ ...state, ...patch, handled: true });
+  // Every key that acts engages the view.
+  const handled = (patch: Partial<ViewFocusState>): ViewFocusState => ({ ...state, engaged: true, ...patch, handled: true });
   switch (action.type) {
-    case "move":
-      return facts.rowCount > 1
-        ? handled({ selected: clamp(state.selected + action.delta, 0, facts.rowCount - 1) })
-        : state;
+    case "move": {
+      if (facts.rowCount <= 1) {
+        return state;
+      }
+      const selected = clamp(state.selected + action.delta, 0, facts.rowCount - 1);
+      // A move that moves nothing types (`k` on the first row starts "keep…").
+      return selected === state.selected ? state : handled({ selected });
+    }
     case "enter": {
-      const ask = facts.rowAsks[state.selected] ?? null;
+      if (!state.engaged) {
+        return state;
+      }
+      const ask = facts.rowAsks[state.selected] ?? facts.fixAsk;
       return ask ? handled({ effect: { type: "ask", text: ask } }) : state;
     }
     case "tab":
@@ -195,6 +240,10 @@ function applyViewAction(action: KeyAction, state: ViewFocusState, facts: ViewKe
         ? handled({ showHiddenColumns: !state.showHiddenColumns })
         : state;
     case "more":
+      // Unengaged, `m` is the first letter of a message ("more…", "make…").
+      if (!state.engaged) {
+        return state;
+      }
       if (facts.more) {
         return handled({ effect: { type: "ask", text: facts.more } });
       }
@@ -202,7 +251,7 @@ function applyViewAction(action: KeyAction, state: ViewFocusState, facts: ViewKe
     case "explain":
       return facts.explain ? handled({ explainOpen: !state.explainOpen }) : state;
     case "switch_pane":
-      return handled({ focus: "composer" });
+      return { ...state, focus: "composer", engaged: false, handled: true };
     default:
       // ok/dismiss belong to approval cards; open/watch/retry/copy/edit/view
       // arrive with the renderers and capabilities that give them meaning.
@@ -213,7 +262,8 @@ function applyViewAction(action: KeyAction, state: ViewFocusState, facts: ViewKe
 /**
  * The key bar for the latest turn's views: only what works right now. The
  * generic keys come from the facts (so the bar and `resolveViewKey` agree by
- * construction), then the kind's own hints, then `?` and `tab`.
+ * construction), then the kind's own hints (only those the resolver acts on),
+ * then `?` and `tab`. `m` and Enter show only once the view is engaged.
  */
 export function viewKeyHints(
   state: ViewFocusState,
@@ -228,7 +278,13 @@ export function viewKeyHints(
   }
   const hints: KeyHint[] = [];
   if (facts.rowCount > 1) hints.push({ key: "j k", label: "move" });
-  if (facts.rowAsks.some((ask) => ask !== null)) hints.push({ key: "enter", label: "open" });
+  if (state.engaged) {
+    if (facts.rowAsks.some((ask) => ask !== null)) {
+      hints.push({ key: "enter", label: "open" });
+    } else if (facts.fixAsk) {
+      hints.push({ key: "enter", label: "fix" });
+    }
+  }
   if (facts.tabs > 1) hints.push({ key: `1-${Math.min(9, facts.tabs)}`, label: "switch tab" });
   if (facts.pages > 1 && state.page + 1 < facts.pages) hints.push({ key: "space", label: "next page" });
   if (state.showHiddenColumns) {
@@ -236,8 +292,8 @@ export function viewKeyHints(
   } else if (facts.hiddenColumns > 0) {
     hints.push({ key: "→", label: "columns" });
   }
-  if (facts.more || facts.livePageNext) hints.push({ key: "m", label: "more" });
-  hints.push(...kindKeys);
+  if (state.engaged && (facts.more || facts.livePageNext)) hints.push({ key: "m", label: "more" });
+  hints.push(...kindKeys.filter((hint) => HANDLED_KIND_KEYS.has(hint.key)));
   if (facts.explain) hints.push({ key: "?", label: "what it does" });
   hints.push({ key: "tab", label: "switch side" });
   return hints;

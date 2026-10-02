@@ -11,7 +11,7 @@ import { liveRegionCap } from "../ink/transcript-static.js";
 import { displayWidth } from "../lib/display-width.js";
 import { resolveTheme } from "../theme.js";
 import type { Msg } from "../types.js";
-import { resolveViewKey, viewFocusAfterTurnDone, viewKeyHints } from "./focus.js";
+import { HANDLED_KIND_KEYS, resolveViewKey, viewFocusAfterTurnDone, viewKeyHints } from "./focus.js";
 import { layoutTurn, paneWidths, renderLiveTurn, stepLines } from "./layout.js";
 import { cellText, FootnoteBook } from "./primitives.js";
 import { renderView } from "./registry.js";
@@ -161,6 +161,32 @@ describe("the view shell", () => {
     expect(render.detail).toContain("40 of 100 · First 40 by spend · m for more");
   });
 
+  it("the head draws the title as an inverse chip, then the state (r4 head)", () => {
+    const head = renderView(envelope({}), ctx({ color: true })).head;
+    expect(head).toContain("\u001b[7m Item ");
+    expect(head.replace(/\u001b\[[0-9;]*m/gu, "")).toBe(" Item  ✓ Ready");
+    expect(renderView(envelope({}), ctx()).head).toBe("Item  ✓ Ready");
+  });
+
+  it("a state's fix prints only when a key can act on it", () => {
+    const reason = (fix: Record<string, unknown>) => envelope({
+      state: "not_connected", body: { fields: [] },
+      stateReason: { code: "nc", words: "Meta is not connected.", fix }
+    });
+    const appLink = { route: "connections" };
+    // An ask with no row asks is bound to Enter.
+    const asks = renderView(reason({ label: "Connect Meta", ask: "connect meta" }), ctx());
+    expect(asks.detail).toEqual(["Meta is not connected.", "→ Connect Meta"]);
+    expect(asks.fixAsk).toBe("connect meta");
+    // A link opens with o only when the session can open the app.
+    expect(renderView(reason({ label: "Connect Meta", appLink }), ctx({ caps: { open: true, watch: false, retry: false } })).detail)
+      .toEqual(["Meta is not connected.", "→ Connect Meta (o)"]);
+    // Nothing can act: the line is not printed.
+    expect(renderView(reason({ label: "Connect Meta", appLink }), ctx()).detail).toEqual(["Meta is not connected."]);
+    expect(renderView(reason({ label: "Connect Meta" }), ctx()).detail).toEqual(["Meta is not connected."]);
+    expect(renderView(reason({ label: "Connect Meta" }), ctx()).fixAsk).toBeUndefined();
+  });
+
   it("a failed write that was not sent heads as Not sent", () =>
     expect(renderView(envelope({ state: "failed", outcome: "not_sent" }), ctx()).head).toBe("Item  ✗ Not sent"));
 
@@ -228,11 +254,14 @@ describe("the r4 layout", () => {
       { kind: "trail", role: "system", text: "", tools: ["Read Items(\"week\") (0.6s) :: 3 items ✓", "Load Other :: timed out ✗"] },
       { role: "assistant", text: "a" }
     ];
-    expect(stepLines(messages)).toEqual(["  ✓ Read Items(\"week\") · 3 items (0.6s)", "  ✗ Load Other · timed out"]);
+    // r4 column order: the label in a fixed column (min(28, 26% of the width)), then the glyph and the result.
+    const rows = [`  ${"Read Items(\"week\")".padEnd(26)} ✓ 3 items (0.6s)`, `  ${"Load Other".padEnd(26)} ✗ timed out`];
+    expect(stepLines(messages, 100)).toEqual(rows);
+    expect(stepLines(messages, 200)[0]).toBe(`  ${"Read Items(\"week\")".padEnd(28)} ✓ 3 items (0.6s)`);
     const lines = renderLiveTurn({ messages, views: [listViewFixture()], focus: null, width: 100, color: false, theme }).lines;
     const strip = lines.findIndex((line) => line.startsWith("─ Steps "));
     expect(strip).toBeGreaterThan(0);
-    expect(lines.slice(strip + 1)).toEqual(["  ✓ Read Items(\"week\") · 3 items (0.6s)", "  ✗ Load Other · timed out"]);
+    expect(lines.slice(strip + 1)).toEqual(rows);
   });
 
   it("the live turn shows the question and the answer left of the view", () => {
@@ -247,10 +276,28 @@ describe("the r4 layout", () => {
   it("a tall view never makes the live region exceed the cap", () =>
     expect(inkTranscriptRowCount({ transcript: { state: emptyState }, columns: 80, rows: 30, latest: tallNumbersTurn() }))
       .toBeLessThanOrEqual(liveRegionCap(30, 3, 1)));
+
+  it("a 300-row view never makes the live region exceed the cap", () => {
+    const tall = { ...fakeRender, detail: Array.from({ length: 300 }, (_, i) => `row ${i}`) };
+    const latest = { id: "t2", lines: layoutTurn(["a"], tall, [], 80) };
+    expect(latest.lines.length).toBeGreaterThan(300);
+    expect(inkTranscriptRowCount({ transcript: { state: emptyState }, columns: 80, rows: 30, latest }))
+      .toBeLessThanOrEqual(liveRegionCap(30, 3, 1));
+  });
 });
 
 describe("view focus: the latest turn keeps its keys until the next submit", () => {
   const press = (input: string, key: Partial<Key> = {}) => [input, key] as const;
+  const hintPress = (hint: string): readonly [string, Partial<Key>] => {
+    switch (hint) {
+      case "j k": return press("j");
+      case "enter": return press("", { return: true });
+      case "tab": return press("", { tab: true });
+      case "→": return press("", { rightArrow: true });
+      case "space": return press(" ");
+      default: return press(/^1-\d$/u.test(hint) ? "2" : hint);
+    }
+  };
 
   it("after a turn finishes, its views stay live and j/k still move the selection", () => {
     const s0 = viewFocusAfterTurnDone(listViewFixture());          // pure: the latest turn keeps focus until the next submit
@@ -285,10 +332,94 @@ describe("view focus: the latest turn keeps its keys until the next submit", () 
     }
   });
 
-  it("m asks for more as a new user turn when the view says how", () => {
-    const s = resolveViewKey("m", viewFocusAfterTurnDone(numbersFixture()));
+  it("m asks for more as a new user turn once the view is engaged", () => {
+    const s = resolveViewKey("m", resolveViewKey("j", viewFocusAfterTurnDone(numbersFixture())));
     expect(s.handled).toBe(true);
     expect(s.effect).toEqual({ type: "ask", text: "Show the next 40 ad sets" });
+  });
+
+  it("a capital letter always types: M, K and J never act on a view", () => {
+    for (const input of ["M", "K", "J"]) {
+      for (const s0 of [viewFocusAfterTurnDone(numbersFixture()), resolveViewKey("j", viewFocusAfterTurnDone(numbersFixture()))]) {
+        const next = resolveViewKey(input, s0);
+        expect(next.handled).toBe(false);
+        expect(next.focus).toBe("composer");
+        expect(next.effect).toBeNull();
+        expect(next.selected).toBe(s0.selected);
+      }
+    }
+  });
+
+  it("m on a fresh turn types (\"more…\" is a message), it never sends an ask", () => {
+    const next = resolveViewKey("m", viewFocusAfterTurnDone(numbersFixture()));
+    expect(next.handled).toBe(false);
+    expect(next.focus).toBe("composer");
+    expect(next.effect).toBeNull();
+  });
+
+  it("m on a fresh tall turn types instead of paging the live region", () => {
+    const s0 = viewFocusAfterTurnDone(listViewFixture());
+    const next = resolveViewKey("m", s0, {}, { ...s0.facts, livePageNext: true });
+    expect(next.handled).toBe(false);
+    expect(next.effect).toBeNull();
+    const engaged = resolveViewKey("j", s0);
+    expect(resolveViewKey("m", engaged, {}, { ...engaged.facts, livePageNext: true }).effect).toEqual({ type: "page_live" });
+  });
+
+  it("a key that moves nothing types: k on the first row, j on the last", () => {
+    const s0 = viewFocusAfterTurnDone(listViewFixture());
+    const k = resolveViewKey("k", s0);
+    expect(k.handled).toBe(false);
+    expect(k.focus).toBe("composer");
+    let last = s0;
+    for (let i = 0; i < 2; i += 1) last = resolveViewKey("j", last);
+    expect(last.selected).toBe(2);
+    expect(resolveViewKey("j", last).handled).toBe(false);
+  });
+
+  it("before the view is engaged, up and down stay with the composer's history", () => {
+    const s0 = viewFocusAfterTurnDone(listViewFixture());
+    expect(s0.engaged).toBe(false);
+    const up = resolveViewKey("", s0, { upArrow: true });
+    const down = resolveViewKey("", s0, { downArrow: true });
+    expect(up.handled).toBe(false);
+    expect(down.handled).toBe(false);
+    expect(down.selected).toBe(0);
+    // j engages the view; then the arrows move rows.
+    const engaged = resolveViewKey("j", s0);
+    expect(engaged.engaged).toBe(true);
+    expect(resolveViewKey("", engaged, { downArrow: true }).selected).toBe(2);
+    expect(resolveViewKey("", engaged, { upArrow: true }).selected).toBe(0);
+  });
+
+  it("tab engages the view without leaving it, and tab again goes to the composer", () => {
+    const s0 = viewFocusAfterTurnDone(listViewFixture());
+    const engaged = resolveViewKey("", s0, { tab: true });
+    expect(engaged.handled).toBe(true);
+    expect(engaged.engaged).toBe(true);
+    expect(engaged.focus).toBe("rows");
+    expect(resolveViewKey("", engaged, { downArrow: true }).selected).toBe(1);
+    const away = resolveViewKey("", engaged, { tab: true });
+    expect(away.focus).toBe("composer");
+    expect(away.engaged).toBe(false);
+    const back = resolveViewKey("", away, { tab: true });
+    expect(back.focus).toBe("rows");
+    expect(back.engaged).toBe(true);
+  });
+
+  it("Enter sends a state's fix ask as a new turn when the view has no row asks", () => {
+    const blocked = envelope({
+      state: "not_connected",
+      stateReason: { code: "nc", words: "Meta is not connected.", fix: { label: "Connect Meta", ask: "connect meta" } }
+    });
+    const s0 = viewFocusAfterTurnDone(blocked);
+    expect(s0.facts.fixAsk).toBe("connect meta");
+    expect(s0.focus).toBe("rows");
+    // A bare Enter on a fresh turn never sends anything.
+    expect(resolveViewKey("", s0, { return: true }).effect).toBeNull();
+    const engaged = resolveViewKey("", s0, { tab: true });
+    expect(viewKeyHints(engaged).map((h) => h.key)).toEqual(["enter", "tab"]);
+    expect(resolveViewKey("", engaged, { return: true }).effect).toEqual({ type: "ask", text: "connect meta" });
   });
 
   it("? toggles the explanation only when there is one", () => {
@@ -303,9 +434,31 @@ describe("view focus: the latest turn keeps its keys until the next submit", () 
   it("the key bar shows only what works on the focused view", () => {
     const list = viewFocusAfterTurnDone(listViewFixture());
     expect(viewKeyHints(list).map((h) => h.key)).toEqual(["j k", "tab"]);
-    expect(viewKeyHints(viewFocusAfterTurnDone(numbersFixture())).map((h) => h.key)).toEqual(["j k", "m", "tab"]);
+    const numbers = viewFocusAfterTurnDone(numbersFixture());
+    expect(viewKeyHints(numbers).map((h) => h.key)).toEqual(["j k", "tab"]);
+    expect(viewKeyHints(resolveViewKey("j", numbers)).map((h) => h.key)).toEqual(["j k", "m", "tab"]);
     expect(viewKeyHints(resolveViewKey("x", list)).map((h) => h.key)).toEqual(["tab"]);
     expect(viewKeyHints(viewFocusAfterTurnDone(envelope({})))).toEqual([]);
+  });
+
+  it("a kind key is hinted only once the key resolver acts on it", () => {
+    const list = viewFocusAfterTurnDone(listViewFixture());
+    const kindKeys = [{ key: "c", label: "copy" }, { key: "v", label: "view" }, { key: "e", label: "edit" }];
+    for (const hint of kindKeys) {
+      expect(HANDLED_KIND_KEYS.has(hint.key)).toBe(false);
+    }
+    expect(viewKeyHints(list, list.facts, kindKeys).map((h) => h.key)).toEqual(["j k", "tab"]);
+    expect(resolveViewKey("c", list).handled).toBe(false);
+  });
+
+  it("every key the bar shows acts when pressed", () => {
+    const fresh = [viewFocusAfterTurnDone(listViewFixture()), viewFocusAfterTurnDone(numbersFixture()), viewFocusAfterTurnDone(envelope({ explain: "What it does." }))];
+    for (const s0 of [...fresh, ...fresh.map((s) => resolveViewKey("", s, { tab: true }))]) {
+      for (const hint of viewKeyHints(s0)) {
+        const [input, key] = hintPress(hint.key);
+        expect({ hint: hint.key, handled: resolveViewKey(input, s0, key).handled }).toEqual({ hint: hint.key, handled: true });
+      }
+    }
   });
 
   it("focuses the last view that is not quiet", () => {
