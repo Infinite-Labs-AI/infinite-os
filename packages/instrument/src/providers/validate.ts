@@ -9,6 +9,7 @@
  * embedding helpers are belt-and-suspenders so even a validation gap cannot break out of a
  * string literal or `</script>` block.
  */
+import { normalizeHost } from "../wizard/contracts/host-deny.js"
 
 // GA4/gtag measurement-style IDs: G-XXXX (GA4), and the other prefixes the gtag loader
 // accepts (GT- google tag, AW- ads, UA- legacy, DC- floodlight). Alphanumerics + hyphens
@@ -215,14 +216,19 @@ export function normalizeInfiniteProductionHosts(
     if (typeof candidate !== "string" || candidate.trim().length === 0) {
       return { error: "Infinite production hosts must be non-empty hostnames." }
     }
+    // The one normaliser (src/host-guard.ts): `ACME.com.` and `acme.com` are ONE host. Without it
+    // `new URL("https://acme.com.").hostname` keeps the dot and the runtime saw two different hosts.
+    const host = normalizeHost(candidate)
     let parsed: URL
     try {
-      parsed = new URL(`https://${candidate.trim()}`)
+      parsed = new URL(`https://${host}`)
     } catch {
       return { error: `Infinite production host ${JSON.stringify(candidate)} is invalid.` }
     }
     if (
-      parsed.hostname !== candidate.trim().toLowerCase() ||
+      host.length === 0 ||
+      host.endsWith(".") ||
+      parsed.hostname !== host ||
       parsed.port ||
       parsed.pathname !== "/" ||
       parsed.search ||

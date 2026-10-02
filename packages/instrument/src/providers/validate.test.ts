@@ -136,6 +136,10 @@ describe("artifact validation", () => {
       hosts: ["example.com", "www.example.com"]
     })
     expect(normalizeInfiniteProductionHosts([])).toHaveProperty("error")
+    // One host normaliser: a trailing dot is the same host, never a second one.
+    expect(normalizeInfiniteProductionHosts(["acme.com.", "ACME.com", " acme.com "])).toEqual({ hosts: ["acme.com"] })
+    expect(normalizeInfiniteProductionHosts(["acme.com.."])).toHaveProperty("error")
+    expect(normalizeInfiniteProductionHosts(["."])).toHaveProperty("error")
     expect(normalizeInfiniteProductionHosts(["https://example.com"])).toHaveProperty("error")
     expect(normalizeInfiniteProductionHosts(["example.com/path"])).toHaveProperty("error")
   })

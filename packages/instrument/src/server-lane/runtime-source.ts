@@ -63,7 +63,7 @@ function jsStringArray(values: string[]): string {
 export function buildServerLaneModuleSource(input: ServerLaneModuleInput = {}): string {
   const bakedSourceKey = JSON.stringify(input.siteSourceKey ?? "")
   const bakedHosts = jsStringArray(
-    (input.productionHosts ?? []).map((host) => host.trim().toLowerCase()).filter(Boolean)
+    (input.productionHosts ?? []).map((host) => host.trim().toLowerCase().replace(/\.$/, "")).filter(Boolean)
   )
   return String.raw`${managedFileBanner}
 // Infinite server lane — lossless document + outcome analytics.
@@ -236,10 +236,12 @@ function isDocumentRequest(request: NextRequest): boolean {
   return !lastSegment.includes(".")
 }
 
+// The one host normaliser (trim, lowercase, strip ONE trailing dot; infinite-tag host-guard.ts), after
+// the port: "ACME.com.:443" is the production host "acme.com", never an unverified one.
 function requestHost(request: NextRequest): string {
   const forwarded = request.headers.get("x-forwarded-host")?.split(",")[0]?.trim()
   const raw = forwarded || request.headers.get("host") || request.nextUrl.host || ""
-  return raw.toLowerCase().replace(/:\d+$/, "")
+  return raw.trim().toLowerCase().replace(/:\d+$/, "").replace(/\.$/, "")
 }
 
 function hostAllowed(host: string): boolean {

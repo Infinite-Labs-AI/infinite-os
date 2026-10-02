@@ -668,6 +668,21 @@ describe("renderInfiniteBrowserTag", () => {
     expect(notAllowlisted.requests).toEqual([])
   })
 
+  it("one host normaliser: ACME.com. is the verified acme.com (trailing dot, any case), and exposes the consent check", () => {
+    for (const href of ["https://Example.com./", "https://EXAMPLE.COM/"]) {
+      const tag = executeTag({ siteSourceKey: "site_public_123", consent: "granted", href, productionHosts: ["example.com"] })
+      expect(tag.requests).toHaveLength(1)
+    }
+    // Negative: a different host is still unverified.
+    const other = executeTag({
+      siteSourceKey: "site_public_123",
+      consent: "granted",
+      href: "https://staging.example.com./",
+      productionHosts: ["example.com"]
+    })
+    expect(other.requests).toEqual([])
+  })
+
   it("stamps nav:\"navigate\" on the initial view and nav:\"history\" on History-API route changes (bounded enum), keeping the path-change dedupe", () => {
     const runtime = executeTag({
       siteSourceKey: "site_public_123",

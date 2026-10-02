@@ -234,7 +234,7 @@ export function edgeLaneCoreSource(input: EdgeCoreInput): string {
   const exported = input.exported ? "export " : ""
   const bakedSourceKey = JSON.stringify(input.siteSourceKey ?? "")
   const bakedHosts = jsStringArray(
-    input.productionHosts.map((host) => host.trim().toLowerCase()).filter(Boolean)
+    input.productionHosts.map((host) => host.trim().toLowerCase().replace(/\.$/, "")).filter(Boolean)
   )
   return String.raw`const INFINITE_SERVER_EVENTS_URL = ${JSON.stringify(infiniteServerEventsDestination(input.apiOrigin))}
 const INFINITE_SOURCE_KEY_FALLBACK = ${bakedSourceKey}
@@ -333,7 +333,8 @@ ${exported}function infiniteRequestHost(request: Request): string {
       raw = ""
     }
   }
-  return raw.toLowerCase().replace(/:\d+$/, "")
+  // The one host normaliser (trim, lowercase, strip ONE trailing dot), after the port.
+  return raw.trim().toLowerCase().replace(/:\d+$/, "").replace(/\.$/, "")
 }
 
 /** Loopback and any host outside the verified production list stay dormant. */

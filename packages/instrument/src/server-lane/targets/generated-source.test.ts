@@ -209,6 +209,29 @@ describe("the shared edge core, executed", () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
+  it("one host normaliser: example.com. (any case, with a port) is the baked host; a baked trailing dot matches too", async () => {
+    const credentials = { secret: VECTORS.secret, sourceKey: "site_test" }
+    for (const [baked, host] of [
+      [VECTORS.host, "EXAMPLE.com.:443"],
+      [`${VECTORS.host.toUpperCase()}.`, VECTORS.host]
+    ] as const) {
+      fetchMock.mockClear()
+      const lane = (await loadGenerated(vercelLaneModuleSource({ ...BUILD, productionHosts: [baked] }))) as {
+        recordInfiniteDocumentRequest: (request: Request, credentials: unknown) => Promise<boolean>
+      }
+      await expect(
+        lane.recordInfiniteDocumentRequest(documentRequest({ headers: { "x-forwarded-host": host } }), credentials)
+      ).resolves.toBe(true)
+      expect(JSON.parse(postedBody(fetchMock).body).properties.host).toBe(VECTORS.host)
+    }
+    const lane = (await loadGenerated(vercelLaneModuleSource(BUILD))) as {
+      recordInfiniteDocumentRequest: (request: Request, credentials: unknown) => Promise<boolean>
+    }
+    await expect(
+      lane.recordInfiniteDocumentRequest(documentRequest({ headers: { "x-forwarded-host": "staging.example.com." } }), credentials)
+    ).resolves.toBe(false)
+  })
+
   it("records on any host when no production allowlist was baked in", async () => {
     const lane = (await loadGenerated(vercelLaneModuleSource({ productionHosts: [] }))) as {
       recordInfiniteDocumentRequest: (request: Request, credentials: unknown) => Promise<boolean>
