@@ -185,6 +185,51 @@ describe("renderTable: the r4 look", () => {
   });
 });
 
+describe("renderTable: a long row label wraps before the numbers drop (live M7)", () => {
+  const name = "Sample · Trials · US · 2026-09-01 — sample_b1_trial_us";
+  const wide: TableInput = {
+    columns: [{ label: "" }, { label: "Spent", dropPriority: 0 }, { label: "Impressions", dropPriority: 4 },
+      { label: "Link clicks", dropPriority: 1 }, { label: "CTR (link)", dropPriority: 0 }],
+    rows: [[name, "$120.00", "1,000", "40", "4.00%"], ["Short one", "$8.00", "90", "3", "3.33%"]]
+  };
+
+  it("with labelMin, a label too wide for the numbers wraps on its words inside its cell, and no number drops", () => {
+    const t = renderTable(wide, { width: 80, color: false, theme: resolveTheme(), labelMin: 20 });
+    expect(t.hidden).toEqual([]);
+    expect(t.lines).toEqual([
+      "┌────────────────────────┬─────────┬─────────────┬─────────────┬────────────┐",
+      "│                        │   Spent │ Impressions │ Link clicks │ CTR (link) │",
+      "├────────────────────────┼─────────┼─────────────┼─────────────┼────────────┤",
+      "│ Sample · Trials · US · │ $120.00 │       1,000 │          40 │      4.00% │",
+      "│ 2026-09-01 —           │         │             │             │            │",
+      "│ sample_b1_trial_us     │         │             │             │            │",
+      "│ Short one              │   $8.00 │          90 │           3 │      3.33% │",
+      "└────────────────────────┴─────────┴─────────────┴─────────────┴────────────┘"
+    ]);
+    expect(t.rowLines).toEqual([[3, 3], [6, 1]]);
+  });
+
+  it("narrower than the label's floor, it wraps to the floor and the lowest numbers drop", () => {
+    const t = renderTable(wide, { width: 60, color: false, theme: resolveTheme(), labelMin: 20 });
+    expect(t.hidden).toEqual(["Impressions", "Link clicks"]);
+    expect(t.lines.every((line) => displayWidth(line) <= 60)).toBe(true);
+    expect(t.lines).toContain("│ Sample · Trials · US │ $120.00 │      4.00% │");
+    expect(t.lines.join("\n")).toContain("sample_b1_trial_us");
+  });
+
+  it("a table that fits as it is never wraps (the r4 goldens keep one line per row)", () => {
+    const t = renderTable(wide, { width: 120, color: false, theme: resolveTheme(), labelMin: 20 });
+    expect(t.lines.filter((line) => line.includes(name))).toHaveLength(1);
+    expect(t.rowLines).toEqual([[3, 1], [4, 1]]);
+  });
+
+  it("without labelMin the label never wraps (markdown tables keep r4's drop rule)", () => {
+    const t = renderTable(wide, { width: 100, color: false, theme: resolveTheme() });
+    expect(t.lines.filter((line) => line.includes(name))).toHaveLength(1);
+    expect(t.hidden).toEqual(["Impressions"]);
+  });
+});
+
 describe("looksNumeric", () => {
   it.each(["$1,234.50", "1.22%", "−3", "-3", "9,790", "—", "1.2k", "0", "+4", "€12", "—¹", "2.5x"])("%s is numeric", (cell) => {
     expect(looksNumeric(cell)).toBe(true);

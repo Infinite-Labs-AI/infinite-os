@@ -364,17 +364,20 @@ function drawLiveTurn(input: LiveTurnInput, width: number, rows: number | undefi
   };
   const focusIndex = input.focus ? input.focus.viewIndex : focusedViewIndex(input.views);
   // A view with no key focus yet (a turn still running, a committed turn) is drawn on its opening row.
+  // `→` acts only on the view the keys are on: any other names what its tables hid in words.
   const renders = input.views.map((view, index) =>
     renderView(view, view.kind !== "quiet" && index === focusIndex && input.focus
       ? focusedViewCtx(input.focus, base)
-      : { ...plainCtx, selected: openingRow(view) }));
-  // Scrollback has no keys, so nothing may stay behind one. A table that
-  // dropped columns (`→`) prints every row with all of its columns, and a view
-  // with tabs (a document's versions) prints every tab, in order, under the
-  // one head. No view names a key there (`ctx.scrollback`).
+      : { ...plainCtx, selected: openingRow(view), ...(index === focusIndex ? {} : { columnKey: false }) }));
+  // Scrollback has no keys, so nothing may stay behind one. A view with tabs
+  // (a document's versions) prints every tab, in order, under the one head,
+  // and a list or compare table that dropped columns (`→`) prints every row
+  // with all of its columns. A numbers view keeps r4's ONE table there and
+  // names what it hid in words (`+ CPM hidden`, run-2 M7): its records were
+  // the ~150-line dump the live eval saw. No view names a key (`ctx.scrollback`).
   const drawn = split ? renders : renders.flatMap((render, index) => {
     const view = input.views[index]!;
-    const whole = { ...plainCtx, selected: openingRow(view), showHiddenColumns: Boolean(render.hiddenColumns) };
+    const whole = { ...plainCtx, selected: openingRow(view), showHiddenColumns: Boolean(render.hiddenColumns) && view.kind !== "numbers" };
     const tabs = render.tabs ?? 0;
     if (tabs < 2) return [whole.showHiddenColumns ? renderView(view, whole) : render];
     return Array.from({ length: tabs }, (_unused, tab) => {

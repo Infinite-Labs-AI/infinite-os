@@ -468,7 +468,8 @@ describe("numbers: other layouts", () => {
       ];
     });
     const out = text(draw(view));
-    expect(out).toMatch(/^Delivery$/mu);
+    // A section's title and its leg's title share one heading line (run-2 M7).
+    expect(out).toMatch(/^Delivery · Last 7 days · Jan 8–14$/mu);
     expect(out).toContain("Ad set 01");
     expect(out).toMatch(/^Sources$/mu);
     expect(out).toContain("⊘ Store");

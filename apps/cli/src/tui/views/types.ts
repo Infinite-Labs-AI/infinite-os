@@ -47,6 +47,12 @@ export interface ViewRenderCtx {
    * would have shown (dropped columns, every tab).
    */
   scrollback?: boolean;
+  /**
+   * `false`: `→` does not act on this view (a live turn's view the keys are not
+   * on), so a table names what it hid in words, never `→ to see`. Absent = it
+   * acts, unless `scrollback`.
+   */
+  columnKey?: boolean;
 }
 
 /** One view, drawn. `layout.ts` stacks head, source, detail, then footnotes. */
