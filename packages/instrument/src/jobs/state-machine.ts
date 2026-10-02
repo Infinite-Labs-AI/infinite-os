@@ -1,0 +1,180 @@
+// §3e.5 item states (lane O8). States are COMPUTED by the wizard from its own check results; the
+// agent can only CLAIM. Every transition here is pure and returns the new item plus the note the
+// `job.state` event carries.
+//
+//   pending ──claim done──▶ claimed ──S+B+T0 pass, diff in scope──▶ done_in_code
+//      ▲                       │ a local check fails: budget left → pending (with the failure), spent → failed
+//      └───────────────────────┘
+//   done_in_code ──has T1/RH/PV──▶ waiting_deploy ──every live check passes with THIS run's id──▶ proven
+//   done_in_code ──has P (jobs 8, 9, 10)──▶ waiting_real_event ──the first real event (passive)──▶ proven
+//   claim not_needed ──the wizard's detector agrees──▶ not_needed, else ──▶ pending + the evidence
+//   claim blocked ──▶ blocked(agent_blocked)
+//
+// Honesty: a check result counts ONLY when its `runId` equals this run's id (another run's receipt never
+// proves), `undetermined` never counts as pass, and a claim never moves an item past `claimed`.
+import {
+  JOB_TABLE,
+  type BlockedReason,
+  type ChecklistItem,
+  type ChecklistItemCheck,
+  type CheckResult,
+  type CheckTier,
+  type Claim,
+  type Evidence,
+  type JobId,
+  type JobItemState
+} from "../wizard/contracts/jobs.js"
+
+export const LOCAL_TIERS: readonly CheckTier[] = ["S", "B", "T0"]
+export const LIVE_TIERS: readonly CheckTier[] = ["T1", "RH", "PV"]
+export const PASSIVE_TIERS: readonly CheckTier[] = ["P"]
+
+export interface Transition {
+  item: ChecklistItem
+  /** What changed, for the `job.state` event; null when nothing changed. */
+  changed: boolean
+  by: "wizard" | "agent_claim"
+  note?: string
+}
+
+const clone = (item: ChecklistItem): ChecklistItem => JSON.parse(JSON.stringify(item)) as ChecklistItem
+
+function donePathOf(item: ChecklistItem): readonly JobItemState[] {
+  const spec = (JOB_TABLE as Record<string, { donePath: readonly JobItemState[] } | undefined>)[item.jobId]
+  return spec?.donePath ?? ["done_in_code"]
+}
+
+function checksIn(item: ChecklistItem, tiers: readonly CheckTier[]): ChecklistItemCheck[] {
+  return item.checks.filter((check) => tiers.includes(check.tier))
+}
+
+const allPass = (checks: readonly ChecklistItemCheck[]): boolean => checks.every((check) => check.state === "pass")
+
+function evidenceText(evidence: readonly Evidence[]): string {
+  if (evidence.length === 0) return "no evidence"
+  return evidence
+    .slice(0, 3)
+    .map((entry) => ("url" in entry ? entry.url : `${entry.file}:${entry.line}`))
+    .join(", ")
+}
+
+/**
+ * Records an agent claim. A claim is input, never a result: `done` moves a `pending` item to `claimed`
+ * and no further. `not_needed` is re-verified by the wizard's own detector (`reverify`).
+ */
+export function applyClaim(
+  item: ChecklistItem,
+  claim: Claim,
+  reverify: (item: ChecklistItem) => { agrees: boolean; evidence: Evidence[] }
+): Transition {
+  if (item.owner !== "agent") return { item, changed: false, by: "agent_claim", note: "claim ignored: a code job is not the agent's" }
+  if (item.state !== "pending" && item.state !== "claimed") {
+    return { item, changed: false, by: "agent_claim", note: `claim ignored: the item is ${item.state}` }
+  }
+  const next = clone(item)
+  next.claim = { status: claim.status, note: claim.note, at: claim.at }
+  if (claim.status === "done") {
+    next.state = "claimed"
+    delete next.blockedReason
+    return { item: next, changed: true, by: "agent_claim", note: "claimed done; the wizard will run its own checks" }
+  }
+  if (claim.status === "blocked") {
+    next.state = "blocked"
+    next.blockedReason = "agent_blocked"
+    return { item: next, changed: true, by: "agent_claim", note: "the agent is blocked" }
+  }
+  const verdict = reverify(item)
+  if (verdict.agrees) {
+    next.state = "not_needed"
+    delete next.blockedReason
+    return { item: next, changed: true, by: "wizard", note: "not needed: the wizard's detector agrees" }
+  }
+  next.state = "pending"
+  if (verdict.evidence.length > 0) next.trigger = { finding: next.trigger.finding, evidence: verdict.evidence }
+  return { item: next, changed: true, by: "wizard", note: `agent said not needed; the wizard found ${evidenceText(verdict.evidence)}` }
+}
+
+/** Marks an item blocked with one of the §3e.5 reasons (the fence, the post-turn gate, usage, …). */
+export function blockItem(item: ChecklistItem, reason: BlockedReason, note?: string): Transition {
+  const next = clone(item)
+  next.state = "blocked"
+  next.blockedReason = reason
+  return { item: next, changed: item.state !== "blocked" || item.blockedReason !== reason, by: "wizard", ...(note ? { note } : {}) }
+}
+
+/**
+ * Merges this run's check results into an item and advances it as far as the results allow. A result
+ * from another run (or with no run id) is ignored, so it can never pass a check.
+ */
+export function applyResults(item: ChecklistItem, results: readonly CheckResult[], runId: string, options: { budgetLeft: boolean }): Transition {
+  const next = clone(item)
+  let merged = false
+  for (const check of next.checks) {
+    const result = results.find((candidate) => candidate.checkId === check.id && candidate.tier === check.tier && candidate.runId === runId)
+    if (!result) continue
+    check.state = result.state
+    check.at = result.at
+    check.runId = runId
+    if (result.reason !== undefined) check.reason = result.reason
+    else delete check.reason
+    merged = true
+  }
+  const advanced = advance(next, options)
+  return { item: advanced.item, changed: merged || advanced.item.state !== item.state, by: "wizard", ...(advanced.note ? { note: advanced.note } : {}) }
+}
+
+function advance(item: ChecklistItem, options: { budgetLeft: boolean }): { item: ChecklistItem; note?: string } {
+  let note: string | undefined
+  const path = donePathOf(item)
+  for (let guard = 0; guard < 5; guard += 1) {
+    const before = item.state
+    if (item.state === "claimed") {
+      const local = checksIn(item, LOCAL_TIERS)
+      const failing = local.filter((check) => check.state === "problem")
+      if (failing.length > 0) {
+        const reasons = failing.map((check) => `${check.tier}:${check.id}${check.reason ? ` (${check.reason})` : ""}`).join("; ")
+        item.state = options.budgetLeft ? "pending" : "failed"
+        note = options.budgetLeft ? `check failed: ${reasons}` : `check failed and the budget is spent: ${reasons}`
+        break
+      }
+      // With no local check the wizard has nothing to verify in code but the recorded, in-scope diff.
+      const verified = local.length > 0 ? allPass(local) : (item.edits?.length ?? 0) > 0
+      if (verified) item.state = "done_in_code"
+    } else if (item.state === "done_in_code") {
+      const after = path[path.indexOf("done_in_code") + 1]
+      if (after === "waiting_deploy" || after === "waiting_real_event") item.state = after
+      else if (after === "proven") {
+        const live = checksIn(item, [...LIVE_TIERS, ...PASSIVE_TIERS])
+        if (live.length > 0 && allPass(live)) item.state = "proven"
+      }
+    } else if (item.state === "waiting_deploy") {
+      const live = checksIn(item, LIVE_TIERS)
+      if (live.length > 0 && allPass(live)) item.state = "proven"
+    } else if (item.state === "waiting_real_event") {
+      const passive = checksIn(item, PASSIVE_TIERS)
+      if (passive.length > 0 && allPass(passive)) item.state = "proven"
+    }
+    if (item.state === before) break
+  }
+  return note ? { item, note } : { item }
+}
+
+/**
+ * `proven (= merged)`: items whose done path ends at `proven` but which have no live or passive check
+ * (job 14's privacy paragraph, job 16's comments) are proven by the merge itself.
+ */
+export function markMerged(item: ChecklistItem): Transition {
+  if (item.state !== "done_in_code") return { item, changed: false, by: "wizard" }
+  const path = donePathOf(item)
+  if (path[path.length - 1] !== "proven" || checksIn(item, [...LIVE_TIERS, ...PASSIVE_TIERS]).length > 0) {
+    return { item, changed: false, by: "wizard" }
+  }
+  const next = clone(item)
+  next.state = "proven"
+  return { item: next, changed: true, by: "wizard", note: "merged" }
+}
+
+/** The job ids whose done path waits for a real event (jobs 8, 9, 10). */
+export function waitsForRealEvent(jobId: JobId): boolean {
+  return JOB_TABLE[jobId].donePath.includes("waiting_real_event")
+}
