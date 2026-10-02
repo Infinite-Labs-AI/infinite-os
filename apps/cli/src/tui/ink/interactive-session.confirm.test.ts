@@ -57,12 +57,18 @@ describe("Ink in-session write confirmation (Plan 2) — structural guards (CI-r
     expect(source).not.toContain("[y] approve");
   });
 
-  it("closes the explanation when the head card resolves", () => {
-    const handler = source.slice(
-      source.indexOf("const resolveConfirmAction"),
-      source.indexOf("useEffect(() => {\n    // Don't drain")
+  it("closes the explanation whenever the head card changes, whoever changed the queue", () => {
+    // Keyed to the head card itself, so a new card never opens with an earlier
+    // card's explanation expanded (r4: the explanation stays behind ?).
+    expect(source).toMatch(
+      /useEffect\(\(\) => \{\n\s+setExplainOpen\(false\);\n\s+\}, \[headConfirmAction\]\);/u
     );
-    expect(handler).toContain("setExplainOpen(false)");
+  });
+
+  it("shows esc stop in the key bar while a stoppable turn runs and no card is pending", () => {
+    expect(source).toContain(
+      'keyBarHints({ focus: "composer", busy: busy && turnStoppable, okKey: null, caps: NO_KEY_CAPS })'
+    );
   });
 
   it("dequeues the head BEFORE acting so a single-use handle can't double-resolve", () => {

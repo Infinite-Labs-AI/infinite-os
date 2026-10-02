@@ -159,6 +159,13 @@ describe("keyBarHints", () => {
     }
   });
 
+  it("a running turn shows esc stop, the one key that works in the composer then", () => {
+    expect(keyBarHints({ focus: "composer", busy: true, okKey: null, caps: NO_CAPS }))
+      .toEqual([{ key: "esc", label: "stop" }]);
+    expect(formatKeyBar(keyBarHints({ focus: "composer", busy: true, okKey: null, caps: NO_CAPS })))
+      .toBe("esc stop");
+  });
+
   it("the idle composer shows no bar", () => {
     expect(keyBarHints({ focus: "composer", busy: false, okKey: null, caps: NO_CAPS })).toEqual([]);
   });

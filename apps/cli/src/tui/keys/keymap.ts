@@ -114,11 +114,15 @@ export function resolveKey(input: string, key: Key, ctx: KeyContext): KeyAction 
 /**
  * The key bar: only what works right now. A card offers its named OK key with
  * the card's own verb, then `n dismiss`, then `o`/`w`/`r` when their capability
- * is present, then `?` when there is an explanation. The composer shows no bar
- * (its placeholder already says `esc to stop` while a turn runs). The rows and
- * document hints arrive with the view renderers (T8–T11).
+ * is present, then `?` when there is an explanation. The composer shows
+ * `esc stop` while a turn runs (`busy` means a STOPPABLE turn: Esc resolves to
+ * stop exactly then) and no bar when idle. The rows and document hints arrive
+ * with the view renderers (T8–T11).
  */
 export function keyBarHints(ctx: KeyContext): KeyHint[] {
+  if (ctx.focus === "composer") {
+    return ctx.busy ? [{ key: "esc", label: "stop" }] : [];
+  }
   if (ctx.focus !== "card") {
     return [];
   }
