@@ -253,7 +253,7 @@ ${exported}interface InfiniteAdMatch {
   fbc?: string
   /** Meta's own _fbp first-party cookie on your domain, verbatim. */
   fbp?: string
-  /** sha256 hex of your own account id. */
+  /** sha256 hex of your own account id, trimmed only (case kept — never lowercase an id). */
   external_id?: string
 }
 
@@ -600,7 +600,7 @@ export function outcomeHelperSource(
   fbc?: string
   /** Meta's _fbp cookie, verbatim. */
   fbp?: string
-  /** sha256 hex of your own account id. */
+  /** sha256 hex of your own account id, trimmed only (case kept — never lowercase an id). */
   external_id?: string
   /** The BUYER'S BROWSER ip, from YOUR inbound request. Meta needs the browser's, not your server's. */
   client_ip_address?: string
@@ -807,16 +807,46 @@ function infiniteVisitKeyInputsOf(input${t(': InfiniteOutcomeInput["visitKeyInpu
   return input${t(" as InfiniteVisitKeyInputs")}
 }
 
-function infiniteCookie(header${t(": string | null")}, name${t(": string")})${t(": string | undefined")} {
-  if (!header) return undefined
+// Meta's documented _fbc / _fbp shape: fb.<subdomainIndex>.<creationTimeMs>.<payload>. The same rule
+// Infinite's relay applies, so a value that passes here is one the whole pipeline accepts; anything
+// else would be dropped downstream anyway (and must never hide a valid value listed after it).
+const INFINITE_FB_COOKIE = /^fb\.[0-9]{1,2}\.[0-9]{1,20}\.[A-Za-z0-9_%.-]{1,512}$/
+
+/** EVERY value the Cookie header carries for this name, in the order the browser listed them. */
+function infiniteCookieValues(header${t(": string")}, name${t(": string")})${t(": string[]")} {
+  const values${t(": string[]")} = []
+  if (!header) return values
   for (const part of header.split(";")) {
     const index = part.indexOf("=")
     if (index === -1) continue
     if (part.slice(0, index).trim() !== name) continue
-    const value = part.slice(index + 1).trim()
-    return value === "" ? undefined : value
+    values.push(part.slice(index + 1).trim())
   }
-  return undefined
+  return values
+}
+
+/**
+ * The NEWEST ad click among every _fbc the browser sent, by the creation time inside Meta's format.
+ * A browser can hold two _fbc cookies (one host-only, one on the registrable domain) and lists the
+ * OLDER one first, so "first listed" would credit an earlier ad than the one the visitor last
+ * clicked. Malformed values are skipped, never returned. Ties keep the first listed.
+ */
+function infiniteNewestFbc(header${t(": string")})${t(": string | undefined")} {
+  let newest = ""
+  for (const value of infiniteCookieValues(header, "_fbc")) {
+    if (!INFINITE_FB_COOKIE.test(value)) continue
+    if (!newest || Number(value.split(".")[2]) > Number(newest.split(".")[2])) newest = value
+  }
+  return newest || undefined
+}
+
+/**
+ * _fbp is a random browser id, not a click, so there is no "newest": the first-listed value is read
+ * (as Meta's own pixel does) and kept only when it has Meta's shape.
+ */
+function infiniteFbp(header${t(": string")})${t(": string | undefined")} {
+  const first = infiniteCookieValues(header, "_fbp")[0]
+  return first && INFINITE_FB_COOKIE.test(first) ? first : undefined
 }
 
 /**
@@ -833,18 +863,23 @@ function infiniteCookie(header${t(": string | null")}, name${t(": string")})${t(
  * PROVIDER'S, not your buyer's — capture the block during the checkout request instead and carry it
  * to the webhook, or report the outcome from the browser-facing route.
  *
- * You supply em / external_id yourself, already hashed:
- *   adMatchFromRequest(request, { em: createHash("sha256").update(email.trim().toLowerCase()).digest("hex") })
+ * You supply em / external_id yourself, already hashed. em is trimmed AND lowercased; external_id is
+ * trimmed ONLY (an id keeps its case, exactly as the browser pixel's matching helper hashes it):
+ *   adMatchFromRequest(request, {
+ *     em: createHash("sha256").update(email.trim().toLowerCase()).digest("hex"),
+ *     // only when the buyer has an account id; String() so a numeric id cannot throw
+ *     ...(user?.id != null ? { external_id: createHash("sha256").update(String(user.id).trim()).digest("hex") } : {})
+ *   })
  */
-export function adMatchFromRequest(request${t(": { headers: Headers }")}, hashed${t(": { em?: string; external_id?: string }")} = {})${t(": InfiniteAdMatch")} {
+export function adMatchFromRequest(request${t(": InfiniteVisitKeyRequest")}, hashed${t(": { em?: string; external_id?: string }")} = {})${t(": InfiniteAdMatch")} {
+  // A WHATWG Headers (edge, newer Vercel) OR a plain object (req.headers on a Vercel Node function,
+  // Express, Node http): both are read correctly.
   const headers = request.headers
-  const cookie = headers.get("cookie")
-  const forwarded = headers.get("x-forwarded-for")?.split(",")[0]?.trim()
-  const clientIp =
-    forwarded || headers.get("cf-connecting-ip")?.trim() || headers.get("x-real-ip")?.trim() || ""
-  const userAgent = headers.get("user-agent") ?? ""
-  const fbc = infiniteCookie(cookie, "_fbc")
-  const fbp = infiniteCookie(cookie, "_fbp")
+  const cookie = infiniteHeaderValue(headers, "cookie")
+  const clientIp = infiniteClientIpFrom(headers)
+  const userAgent = infiniteHeaderValue(headers, "user-agent")
+  const fbc = infiniteNewestFbc(cookie)
+  const fbp = infiniteFbp(cookie)
   return {
     ...(hashed.em ? { em: hashed.em } : {}),
     ...(hashed.external_id ? { external_id: hashed.external_id } : {}),

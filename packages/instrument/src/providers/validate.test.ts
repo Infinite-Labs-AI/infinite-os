@@ -142,6 +142,16 @@ describe("artifact validation", () => {
 
   it("accepts numeric Meta pixel ids and rejects non-numeric/hostile ones", () => {
     expect(validateMetaPixelId("1234567890123456")).toBeNull()
+    expect(validateMetaPixelId("123456789012345")).toBeNull()
+    // Meta issues 15- and 16-digit pixel ids only. Anything else is a typo, a placeholder, or a
+    // different id (ad account, page, app) that would boot a pixel that never receives an event.
+    for (const wrong of ["123456", "12345678901234", "12345678901234567", "px-1234567890123456", " 1234567890123456"]) {
+      const message = validateMetaPixelId(wrong)
+      expect(message).toBeTruthy()
+      // The rejection says what a pixel id looks like and where to find it.
+      expect(message).toContain("15 or 16 digits")
+      expect(message).toContain("Events Manager")
+    }
     expect(validateMetaPixelId("")).toBeTruthy()
     expect(validateMetaPixelId("abc123")).toBeTruthy()
     expect(validateMetaPixelId("</script>")).toBeTruthy()

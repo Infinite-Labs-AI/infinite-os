@@ -144,9 +144,9 @@ describe("resolveWorkspaceArtifacts", () => {
 
     const root = makeTempDir("meta-file")
     const artifactFile = join(root, "artifacts.json")
-    writeFileSync(artifactFile, JSON.stringify({ meta: { pixelId: "9876543210" } }))
+    writeFileSync(artifactFile, JSON.stringify({ meta: { pixelId: "9876543210987654" } }))
     const fromFile = resolveWorkspaceArtifacts(root, { artifactFile })
-    expect(fromFile.meta).toEqual({ pixelId: "9876543210" })
+    expect(fromFile.meta).toEqual({ pixelId: "9876543210987654" })
   })
 
   it("leaves Manual Advanced Matching OFF unless the customer asks, and takes only a real boolean", () => {
@@ -176,20 +176,20 @@ describe("resolveWorkspaceArtifacts", () => {
     const artifactFile = join(root, "artifacts.json")
     writeFileSync(
       artifactFile,
-      JSON.stringify({ meta: { pixelId: "9876543210", advancedMatching: "on" } })
+      JSON.stringify({ meta: { pixelId: "9876543210987654", advancedMatching: "on" } })
     )
-    expect(resolveWorkspaceArtifacts(root, { artifactFile }).meta).toEqual({ pixelId: "9876543210" })
+    expect(resolveWorkspaceArtifacts(root, { artifactFile }).meta).toEqual({ pixelId: "9876543210987654" })
 
     const optedIn = join(root, "opted-in.json")
-    writeFileSync(optedIn, JSON.stringify({ meta: { pixelId: "9876543210", advancedMatching: true } }))
+    writeFileSync(optedIn, JSON.stringify({ meta: { pixelId: "9876543210987654", advancedMatching: true } }))
     expect(resolveWorkspaceArtifacts(root, { artifactFile: optedIn }).meta).toEqual({
-      pixelId: "9876543210",
+      pixelId: "9876543210987654",
       advancedMatching: true
     })
     // An explicit `off` turns a saved opt-in back off — which is what asking to stop means.
     expect(
       resolveWorkspaceArtifacts(root, { artifactFile: optedIn, metaAdvancedMatching: false }).meta
-    ).toEqual({ pixelId: "9876543210" })
+    ).toEqual({ pixelId: "9876543210987654" })
   })
 
   it("partial x artifacts (only eventTagIds) surface a pixelId blocker and refuse to apply", () => {
@@ -285,12 +285,12 @@ describe("discoverWorkspaceArtifacts", () => {
     process.env.INFINITE_ARTIFACTS_DIR = dir
     writeFileSync(
       join(dir, "ws_meta.json"),
-      JSON.stringify({ workspaceId: "ws_meta", meta: { pixelId: "1234567890" } })
+      JSON.stringify({ workspaceId: "ws_meta", meta: { pixelId: "1234567890123456" } })
     )
 
     const discovered = discoverWorkspaceArtifacts({})
     expect(discovered?.providers).toEqual(["meta"])
-    expect(discovered?.artifacts.meta).toEqual({ pixelId: "1234567890" })
+    expect(discovered?.artifacts.meta).toEqual({ pixelId: "1234567890123456" })
   })
 })
 

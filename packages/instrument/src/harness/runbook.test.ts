@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest"
 
+import { HARNESS_STEPS, HARNESS_STEPS_BY_ID } from "./run.js"
 import { createHarnessReport, findProvider } from "./state.js"
 import {
   RUNBOOK_STEP_IDS,
@@ -35,7 +36,7 @@ function step(
 }
 
 describe("runRunbook", () => {
-  it("names the eleven teardown steps in order", () => {
+  it("names the harness steps in order (teardown §5.2 plus setup correctness)", () => {
     expect(RUNBOOK_STEP_IDS).toEqual([
       "preflight",
       "inspect",
@@ -45,11 +46,29 @@ describe("runRunbook", () => {
       "confirm",
       "apply",
       "conversions",
+      "setup-checks",
       "server-lane",
       "server-lane-env",
       "verify",
       "report"
     ])
+  })
+
+  // ONE SOURCE OF TRUTH. The report's step list and the steps the harness actually runs must be the
+  // same ids in the same order; this list once said 12 while the harness ran 13.
+  it("the harness runs exactly RUNBOOK_STEP_IDS, in order, and every step carries its own id", () => {
+    expect(HARNESS_STEPS.map((step) => step.id)).toEqual([...RUNBOOK_STEP_IDS])
+    expect(HARNESS_STEPS).toHaveLength(RUNBOOK_STEP_IDS.length)
+    for (const [key, step] of Object.entries(HARNESS_STEPS_BY_ID)) expect(step.id, key).toBe(key)
+    expect(Object.keys(HARNESS_STEPS_BY_ID).sort()).toEqual([...RUNBOOK_STEP_IDS].sort())
+  })
+
+  it("negative: the drift check fails when the ids and the steps disagree", () => {
+    const ids = HARNESS_STEPS.map((step) => step.id)
+    const withoutSetupChecks = RUNBOOK_STEP_IDS.filter((id) => id !== "setup-checks")
+    expect(ids).not.toEqual(withoutSetupChecks)
+    const misnamed = { ...HARNESS_STEPS_BY_ID, verify: HARNESS_STEPS_BY_ID.report }
+    expect(Object.entries(misnamed).every(([key, step]) => step.id === key)).toBe(false)
   })
 
   it("carries every teardown failure code", () => {
