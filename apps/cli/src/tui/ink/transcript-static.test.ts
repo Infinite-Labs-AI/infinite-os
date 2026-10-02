@@ -353,6 +353,12 @@ describe("scrollback in a running session (fake TTY; skipped on CI like the othe
     expect(decisions).toEqual([]);
     // `n` is the card's real "no" (T6): it reaches the app as a decline.
     await sendKeys(input, "n");
+    // Wait for the decline to land and the card to leave before typing: the card
+    // swallows "/", so "/exit" typed while it is still drawn would run "exit".
+    await waitFor(() => decisions.length === 1 && stripAnsi(output.text()).includes("Dismissed"), 4_000, output.text);
+    const afterDecline = output.text().length;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(output.text().slice(afterDecline)).not.toContain("Approve this write?");
     await sendKeys(input, "/exit\r");
     await session;
     expect(decisions).toEqual(["decline"]);
