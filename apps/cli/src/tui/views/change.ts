@@ -13,7 +13,7 @@
 // rows, only what the shell says and the afterword (`outcome.ts`).
 import type { AnswerViewEnvelopeV1, AnswerViewV1 } from "@infinite-os/types";
 
-import { beforeAfter, cardBody, cardBox, chipRows, fieldRows, paragraphIn, setTo, type CardTone, type FieldRow } from "./card.js";
+import { beforeAfter, cardBody, cardBox, cardWidth, chipRows, fieldRows, paragraphIn, setTo, type CardTone, type FieldRow } from "./card.js";
 import { afterwordLines, isSettledWithoutRunning } from "./outcome.js";
 import { cellText, FootnoteBook, isRecord, paint, viewText } from "./primitives.js";
 import type { KindRender, ViewRenderCtx } from "./types.js";
@@ -67,7 +67,7 @@ function changeCard(view: AnswerViewV1, title: string, tone: CardTone, content: 
 
 /** The width inside a card drawn at `ctx.width`. */
 function cardInner(ctx: ViewRenderCtx): number {
-  return Math.max(4, Math.min(74, Math.floor(ctx.width)) - 4);
+  return cardWidth(ctx.width) - 4;
 }
 
 /**
