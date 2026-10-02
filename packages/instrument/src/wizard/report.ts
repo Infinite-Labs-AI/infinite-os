@@ -66,7 +66,7 @@ export const REASON_TEXT: Record<Reason, string> = {
   via_tag_manager: "the tag runs through a tag manager, which this run cannot read",
   read_failed: "Infinite could not read it this time",
   not_built: "this check is not available in this version",
-  below_sample_floor: "fewer than 50 page views, so raw counts are shown",
+  below_sample_floor: "below 50 page views: raw counts shown",
   held_by_consent: "the tool waits for consent, so the test could not see it",
   preview_protected: "the preview is password-protected, so the rehearsal could not load it",
   env_dependent: "the ID comes from a setting that previews do not have",
@@ -326,7 +326,13 @@ function assertFinishLineSource(id: FinishLineId, column: ReportColumnId, cell: 
 // Columns
 // ---------------------------------------------------------------------------------------------
 
-/** "X pass · Y problems · Z unknown of N determinable" from one column's finish-line cells. */
+/**
+ * The `checks_passing` cell from one column's finish-line cells, against the row's label "Checks passing"
+ * and the 14 checks: "4 pass · 8 problems · 2 not testable of 14" (an "· N unknown" segment when a check is
+ * undetermined or pending, a "not testable" one when a check is not measured or info). The SEMANTICS are
+ * §3i.4 / §3z.8's: the value is pass over N determinable (cells neither `not_measured` nor `info`), and
+ * "unknown" = `undetermined` + `pending`; only the words name all 14, so the label and the cell never disagree.
+ */
 export function checksPassingCell(finishLine: Partial<Record<FinishLineId, Cell>>, runId: string, at: string): Cell {
   let pass = 0
   let problems = 0
@@ -346,9 +352,12 @@ export function checksPassingCell(finishLine: Partial<Record<FinishLineId, Cell>
   const determinable = pass + problems + unknown
   if (determinable === 0) return dashCell("wizard_check", at, runId, "not_exercised")
   const state: CellState = problems > 0 ? "problem" : unknown > 0 ? (pending === unknown ? "pending" : "undetermined") : "pass"
+  const total = FINISH_LINE_IDS.length
+  const notTestable = total - determinable
+  const words = [`${pass} pass`, `${problems} problem${problems === 1 ? "" : "s"}`, ...(unknown > 0 ? [`${unknown} unknown`] : []), ...(notTestable > 0 ? [`${notTestable} not testable`] : [])]
   return assertCell("rows.checks_passing", {
     value: `${pass}/${determinable}`,
-    display: `${pass} pass · ${problems} problem${problems === 1 ? "" : "s"} · ${unknown} unknown of ${determinable} determinable`,
+    display: `${words.join(" · ")} of ${total}`,
     state,
     provenance: { source: "wizard_check", at, runId }
   }, runId)
@@ -509,13 +518,33 @@ export function assertReport(report: ReportV2, runStartedAt: string | null = nul
 // Renderers
 // ---------------------------------------------------------------------------------------------
 
+/**
+ * One footnote per reason. A reason on a "—" or a pending cell is footnoted under "— / pending:"; a reason on
+ * a value the table DOES show (raw counts below the sample floor) is footnoted on its own, so a footnote never
+ * says a shown value was not measured.
+ */
 function footnotes(report: ReportV2): string[] {
-  const reasons = new Set<Reason>()
+  const missing = new Set<Reason>()
+  const shown = new Set<Reason>()
   const visit = (cell: Cell) => {
-    if (cell.reason && (cell.value === null || cell.state === "pending" || cell.reason === "below_sample_floor")) reasons.add(cell.reason)
+    if (!cell.reason) return
+    if (cell.value === null || cell.state === "pending") missing.add(cell.reason)
+    else if (cell.reason === "below_sample_floor") shown.add(cell.reason)
   }
   for (const row of report.rows) for (const column of REPORT_COLUMN_IDS) visit(row.cells[column])
-  return REASONS.filter((reason) => reasons.has(reason)).map((reason) => `${NULL_DISPLAY} / pending: ${REASON_TEXT[reason]}`)
+  return [
+    ...REASONS.filter((reason) => missing.has(reason)).map((reason) => `${NULL_DISPLAY} / pending: ${REASON_TEXT[reason]}`),
+    ...REASONS.filter((reason) => shown.has(reason)).map((reason) => sentence(REASON_TEXT[reason]))
+  ]
+}
+
+function sentence(text: string): string {
+  return `${text.charAt(0).toUpperCase()}${text.slice(1)}`
+}
+
+/** The report's own notes, then the footnotes, each said once (a note may already say a footnote's words). */
+function notesAndFootnotes(report: ReportV2): string[] {
+  return [...new Set([...report.notes, ...footnotes(report)])]
 }
 
 function cellText(cell: Cell): string {
@@ -558,7 +587,7 @@ export function renderTerminal(report: ReportV2, width: number): string {
     }
   }
   lines.push(fit(`7 days later: ${day7Text(report)}`, width).trimEnd())
-  for (const note of [...report.notes, ...footnotes(report)]) lines.push(fit(note, width).trimEnd())
+  for (const note of notesAndFootnotes(report)) lines.push(fit(note, width).trimEnd())
   return lines.join("\n")
 }
 
@@ -590,7 +619,7 @@ export function renderMarkdown(report: ReportV2): string {
   }
   out.push("")
   out.push("</details>")
-  const notes = [...report.notes, ...footnotes(report)]
+  const notes = notesAndFootnotes(report)
   if (notes.length > 0) {
     out.push("")
     for (const note of notes) out.push(`${md(note)}  `)

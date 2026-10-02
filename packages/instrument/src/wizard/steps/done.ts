@@ -34,7 +34,8 @@ export const DEFAULT_CHECKIN_OPT_IN = true
 
 export const REAL_VISIT_DISCLOSURE =
   "A real visit lands two bot-flagged document rows in your Infinite ledger (the page load and the server-lane probe)."
-export const SAMPLE_FLOOR_NOTE = `Below ${SAMPLE_FLOOR_PAGE_VIEWS} page views a share is shown as raw counts.`
+/** The same words as the renderers' footnote for a shown raw count (§3i.3 rule 4), so the report says it once. */
+export const SAMPLE_FLOOR_NOTE = `Below ${SAMPLE_FLOOR_PAGE_VIEWS} page views: raw counts shown`
 
 /**
  * The repo label the report shows: the normalised remote (no userinfo, query, fragment or `.git`;

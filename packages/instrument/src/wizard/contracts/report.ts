@@ -84,7 +84,7 @@ export interface Cell {
 
 /** §3i.4: the fixed row ids, in the design table's order, with the design's labels. */
 export const REPORT_ROWS = [
-  { id: "checks_passing", label: "Checks passing (of 14)" },
+  { id: "checks_passing", label: "Checks passing" },
   { id: "ga4_page_views_per_visit", label: "GA4 page views per visit" },
   { id: "posthog_route", label: "PostHog route" },
   { id: "meta_pixel", label: "Meta pixel" },

@@ -199,6 +199,16 @@ describe("shapeErrors (the key-list check every fixture goes through)", () => {
   })
 })
 
+describe("the status fixture row (review I2 P3-6)", () => {
+  it("advertises the same 16 protocol-1 capabilities as the descriptor (tag.test-facts.v1 included)", () => {
+    const status = readJson<BridgeVerbFixture[]>("bridge-verbs.fixtures.json").find((f) => f.verb === "status" && f.status === 200)!
+    const capabilities = (status.response as { capabilities: string[] }).capabilities
+    expect(capabilities).toEqual([...TAG_CAPABILITIES])
+    expect(capabilities).toContain("tag.test-facts.v1")
+    expect(capabilities).toEqual(readJson<{ capabilities: string[] }>("bridge-descriptor.example.json").capabilities)
+  })
+})
+
 describe("bridge-descriptor.example.json (§3a.1)", () => {
   const descriptor = readJson<Record<string, unknown> & { capabilities: string[]; token: string; url: string }>(
     "bridge-descriptor.example.json"

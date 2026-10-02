@@ -170,7 +170,7 @@ describe("buildColumn (typed inputs → one column)", () => {
     expect(column.finishLine.each_tool_once).toMatchObject({ state: "problem", display: "GA4 configured twice", provenance: { source: "wizard_check" } })
     expect(column.finishLine.csp_allows).toMatchObject({ state: "pass", provenance: { source: "wizard_check" } })
     expect(column.finishLine.no_pii).toMatchObject({ state: "not_measured", value: null, display: "—" })
-    expect(column.cells.checks_passing).toMatchObject({ value: "1/2", display: "1 pass · 1 problem · 0 unknown of 2 determinable", state: "problem" })
+    expect(column.cells.checks_passing).toMatchObject({ value: "1/2", display: "1 pass · 1 problem · 12 not testable of 14", state: "problem" })
   })
 
   it("N determinable: undetermined and pending count as unknown; not measured and info do not count", () => {
@@ -185,7 +185,7 @@ describe("buildColumn (typed inputs → one column)", () => {
       RUN,
       AT
     )
-    expect(cell).toMatchObject({ value: "1/3", display: "1 pass · 0 problems · 2 unknown of 3 determinable", state: "undetermined" })
+    expect(cell).toMatchObject({ value: "1/3", display: "1 pass · 0 problems · 2 unknown · 11 not testable of 14", state: "undetermined" })
   })
 
   it("refuses an agent-shaped input: an unknown input id, or a 'verified' reading with no receipt (negatives)", () => {
@@ -223,6 +223,37 @@ describe("renderers", () => {
     for (const line of narrow.split("\n")) expect(line.length).toBeLessThanOrEqual(70)
     expect(narrow).toContain("  Proven live: ")
     expect(narrow).toContain("7 days later: —")
+  })
+})
+
+describe("the before/after wording: one count of 14, footnotes that match what is shown", () => {
+  const report = buildFrom(snapshotsOf(example))
+  const outputs = () => [renderMarkdown(report), renderTerminal(report, 120), renderTerminal(report, 70)]
+
+  it("the row is 'Checks passing' and every cell counts all 14 (never '(of 14)' over 'of 12 determinable')", () => {
+    const row = report.rows.find((entry) => entry.id === "checks_passing")!
+    expect(row.label).toBe("Checks passing")
+    expect(row.cells.live_today.display).toBe("4 pass · 8 problems · 2 not testable of 14")
+    expect(row.cells.proven_live.display).toBe("9 pass · 0 problems · 3 unknown · 2 not testable of 14")
+    // §3i semantics unchanged: the value is pass over the determinable count.
+    expect(row.cells.live_today.value).toBe("4/12")
+    for (const text of outputs()) {
+      expect(text).not.toContain("(of 14)")
+      expect(text).not.toContain("determinable")
+    }
+  })
+
+  it("a raw count below 50 page views is footnoted as shown, once, never as '— / pending' or 'too few to say'", () => {
+    const small = report.rows.flatMap((row) => REPORT_COLUMN_IDS.map((column) => row.cells[column])).filter((cell) => cell.reason === "below_sample_floor")
+    expect(small.length, "the example shows a raw count below the floor").toBeGreaterThan(0)
+    for (const cell of small) expect(cell.value).not.toBeNull()
+    const withNote = structuredClone(report)
+    withNote.notes = ["Below 50 page views: raw counts shown"]
+    for (const text of [...outputs(), renderMarkdown(withNote), renderTerminal(withNote, 120)]) {
+      expect(text.split("Below 50 page views: raw counts shown").length - 1, text).toBe(1)
+      expect(text).not.toMatch(/pending: (fewer|below) .*50 page views/i)
+      expect(text).not.toMatch(/too few page views/i)
+    }
   })
 })
 

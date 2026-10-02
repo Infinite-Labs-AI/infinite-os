@@ -263,7 +263,7 @@
       "cells": {
         "checks_passing": {
           "value": "4/12",
-          "display": "4 pass · 8 problems · 0 unknown of 12 determinable",
+          "display": "4 pass · 8 problems · 2 not testable of 14",
           "state": "problem",
           "provenance": {
             "source": "wizard_check",
@@ -536,7 +536,7 @@
       "cells": {
         "checks_passing": {
           "value": "12/12",
-          "display": "12 pass · 0 problems · 0 unknown of 12 determinable",
+          "display": "12 pass · 0 problems · 2 not testable of 14",
           "state": "pass",
           "provenance": {
             "source": "wizard_check",
