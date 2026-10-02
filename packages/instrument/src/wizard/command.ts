@@ -16,7 +16,7 @@ import { isAbsolute, join, relative, resolve } from "node:path"
 import { INSTRUMENT_VERSION } from "../package-manager.js"
 import { NESTING_ENV_MARKERS } from "./contracts/agents.js"
 import { WIZARD_EXIT, exitCodeFor } from "./contracts/codes.js"
-import type { WizardContext, WizardDeps, WizardOptions } from "./contracts/deps.js"
+import type { RunStateAccessor, WizardContext, WizardDeps, WizardOptions } from "./contracts/deps.js"
 import type { ReportV2 } from "./contracts/report.js"
 import type { WizardRunState } from "./contracts/state.js"
 import { createWizardAsks, readAnswersFile, type AnswersFile, type TtyPrompter } from "./asks.js"
@@ -29,7 +29,8 @@ import { renderTerminal } from "./report.js"
 import { RunStateFile, WIZARD_REPORT_PATHS, createRunState, firstOpenStep, loadRunState, setStateAside } from "./run-state.js"
 import { installInterruptHandlers, runInterruptSequence, type SignalSource } from "./signals.js"
 import { WizardStore } from "./store.js"
-import { runUninstallFlow } from "./uninstall-flow.js"
+import { WIZARD_STEPS } from "./steps/index.js"
+import { runUninstallFlow, type UninstallLinkFn } from "./uninstall-flow.js"
 import { getWizardWiring, type WizardIo, type WizardWiring } from "./wiring.js"
 
 export const WIZARD_NOT_BUILT_MESSAGE =
@@ -559,12 +560,44 @@ export async function runWizardUninstall(argv: readonly string[], overrides: Run
       tagVersion: INSTRUMENT_VERSION,
       signal: controller.signal
     })
+    // No saved link (a fresh clone, a teammate's machine): run the `link` step on an in-memory state, so a
+    // remembered site links at once and a new one shows the app's approval card.
+    const link: UninstallLinkFn = async () => {
+      let current = createRunState({ tagVersion: INSTRUMENT_VERSION, root: args.root, appRoot: state?.appRoot ?? ".", now: deps.clock.now() })
+      const memory: RunStateAccessor = {
+        get: () => current,
+        update(mutate) {
+          const draft = structuredClone(current)
+          mutate(draft)
+          current = draft
+        },
+        async save() {}
+      }
+      const linkCtx: WizardContext = {
+        runId: null,
+        state: memory,
+        emit: emitter,
+        ask: asks.ask,
+        signal: controller.signal,
+        options,
+        root: args.root,
+        appRoot: current.appRoot,
+        now: () => deps.clock.now()
+      }
+      const steps = wiring.engine?.steps ?? WIZARD_STEPS
+      const outcome = await steps.link.run(linkCtx, deps)
+      if (outcome.kind === "ok" && current.link) return { linkId: current.link.linkId }
+      const code = outcome.kind === "parked" || outcome.kind === "blocked" || outcome.kind === "failed" ? outcome.code : null
+      const message = outcome.kind === "failed" ? outcome.message : outcome.kind === "ok" ? "the link step saved no link" : outcome.reason
+      return { linkId: null, code, message }
+    }
     const result = await runUninstallFlow(
-      { root: args.root, state, ask: asks.askUserOnly, print: (line) => io.stderr.write(`${line}\n`), now: () => deps.clock.now(), base: args.base },
+      { root: args.root, state, ask: asks.askUserOnly, link, print: (line) => io.stderr.write(`${line}\n`), now: () => deps.clock.now(), base: args.base },
       deps
     )
     store.setOutro(result.lines.join("\n"))
-    if (!options.json) for (const line of result.lines) io.stdout.write(`${line}\n`)
+    // stdout carries only NDJSON in --json mode, so the per-piece lines go to stderr there.
+    for (const line of result.lines) (options.json ? io.stderr : io.stdout).write(`${line}\n`)
     emitter.emit("run.end", { exitCode: result.exitCode, runId: state?.runId ?? null, ...(result.record?.pr ? { prUrl: result.record.pr.url } : {}), reportPath: null })
     return result.exitCode
   } catch (error) {

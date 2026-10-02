@@ -9,8 +9,13 @@
 // 3. One ask per cloud piece (revoke the link, remove the server-lane env, disable the site source). Each ask
 //    states the consequence and offers "after the merge" as the default: removing them NOW stops
 //    collection while the old code is still live. A later `uninstall --pr` that sees the uninstall PR
-//    merged and deployed runs the deferred pieces. A declined (or unanswered) piece is left untouched.
-// 4. One line per piece with its state.
+//    merged and deployed runs the deferred pieces, and retries a piece that failed. A declined (or
+//    unanswered) piece is left untouched. The link is revoked LAST, only once every other piece is
+//    finished (it is what lets the others run). With no saved link (a fresh clone, a teammate's machine)
+//    the flow links first; if it cannot, it says the pieces are not reachable from here — never "nothing
+//    to change".
+// 4. One line per piece with its state. When nothing is left to do, `.infinite/wizard/` is cleared (the
+//    uninstall PR removes its .gitignore line, so it would otherwise show up as untracked files).
 import { randomBytes } from "node:crypto"
 import { promises as fsp } from "node:fs"
 import { join } from "node:path"
@@ -31,8 +36,15 @@ export const UNINSTALL_COMMIT_MESSAGE = "infinite-tag: remove the analytics inst
 export const UNINSTALL_PIECES = ["server_lane_env", "site_source", "link"] as const
 export type UninstallPiece = (typeof UNINSTALL_PIECES)[number]
 
-/** A piece's state: `after_merge` = deferred to the run that sees the uninstall merged and deployed. */
-export type PieceState = "after_merge" | "done" | "kept" | "not_linked" | "failed"
+/**
+ * A piece's state: `after_merge` = deferred to the run that sees the uninstall merged and deployed;
+ * `no_link` = this machine has no link to Infinite, so the piece could not be asked or changed;
+ * `unsupported` = this Infinite app has no verb for it; `failed` = tried and retried on the next run.
+ */
+export type PieceState = "after_merge" | "done" | "kept" | "no_link" | "unsupported" | "failed"
+
+/** Pieces a later `uninstall --pr` still has to do. */
+const PENDING_STATES: ReadonlySet<PieceState> = new Set(["after_merge", "failed", "no_link"])
 
 export const PIECE_COPY: Record<UninstallPiece, { label: string; question: string }> = {
   server_lane_env: {
@@ -62,8 +74,13 @@ export interface UninstallRecord {
   pieces: Record<UninstallPiece, PieceState>
 }
 
+/** The link step, run for an uninstall that has no saved link (a fresh clone, a teammate's machine). */
+export type UninstallLinkFn = () => Promise<{ linkId: string } | { linkId: null; code: WizardCode | null; message: string }>
+
 export interface UninstallContext {
   root: string
+  /** Links this machine when no link is saved; absent = cannot link from here. */
+  link?: UninstallLinkFn
   /** The run state (for the link, the base and the run id), or null when there is none. */
   state: Readonly<WizardRunState> | null
   /** `askUserOnly`: never `--yes`, never an answers file in nested mode. */
@@ -103,8 +120,9 @@ const PIECE_WORDS: Record<PieceState, string> = {
   after_merge: "after the merge (run npx infinite-tag uninstall --pr again once it is merged and deployed)",
   done: "done",
   kept: "kept (unchanged)",
-  not_linked: "not linked (nothing in Infinite to change)",
-  failed: "failed (unchanged; see above)"
+  no_link: "NOT changed: this machine is not linked to Infinite (open Infinite, then run npx infinite-tag uninstall --pr again)",
+  unsupported: "not changed from here (this Infinite app cannot do it; turn it off in Infinite)",
+  failed: "failed, unchanged (run npx infinite-tag uninstall --pr again to retry; see above)"
 }
 
 function pieceLines(record: UninstallRecord): string[] {
@@ -128,24 +146,98 @@ async function runPiece(deps: WizardDeps, piece: UninstallPiece, linkId: string,
   }
 }
 
-/** Runs the pieces marked `now` / due, in a safe order: env, then the site source, then the link (it scopes the others). */
+/**
+ * Runs the due pieces in a safe order: env, then the site source, then the link. The link scopes every
+ * other verb, so it is revoked only when no other piece is still pending (deferred, failed or unlinked);
+ * otherwise it waits for the run that finishes them.
+ */
 async function runPieces(deps: WizardDeps, record: UninstallRecord, due: ReadonlySet<UninstallPiece>, lines: string[]): Promise<void> {
-  if (!record.linkId) return
+  if (!record.linkId || due.size === 0) return
   deps.bridge.setLinkId(record.linkId)
   for (const piece of UNINSTALL_PIECES) {
-    if (due.has(piece)) record.pieces[piece] = await runPiece(deps, piece, record.linkId, lines)
+    if (!due.has(piece)) continue
+    if (piece === "link") {
+      const waiting = UNINSTALL_PIECES.filter((other) => other !== "link" && PENDING_STATES.has(record.pieces[other]))
+      if (waiting.length > 0) {
+        record.pieces.link = "after_merge"
+        lines.push(`${PIECE_COPY.link.label}: kept until ${waiting.map((other) => PIECE_COPY[other].label.toLowerCase()).join(" and ")} ${waiting.length === 1 ? "is" : "are"} done (it is what lets them run).`)
+        continue
+      }
+    }
+    record.pieces[piece] = await runPiece(deps, piece, record.linkId, lines)
   }
 }
 
-function availablePieces(deps: WizardDeps, linkId: string | null): Set<UninstallPiece> {
+function supportedPieces(deps: WizardDeps): Set<UninstallPiece> {
   const out = new Set<UninstallPiece>()
-  if (!linkId) return out
   if (deps.bridge.has("tag.uninstall.v1")) {
     out.add("server_lane_env")
     out.add("site_source")
   }
   if (deps.bridge.has("tag.link.v1")) out.add("link")
   return out
+}
+
+/** One ask per piece; returns the pieces to run now (the rest are recorded as deferred or kept). */
+async function askPieces(ctx: UninstallContext, record: UninstallRecord, pieces: readonly UninstallPiece[], lines: string[]): Promise<Set<UninstallPiece>> {
+  const now = new Set<UninstallPiece>()
+  for (const piece of pieces) {
+    const answer = await ctx.ask("single", {
+      question: PIECE_COPY[piece].question,
+      options: [
+        { label: "After the merge (recommended)", value: "after_merge" },
+        { label: "Now", value: "now" },
+        { label: "Keep it", value: "keep" }
+      ],
+      default: "after_merge"
+    })
+    if (answer === "now") now.add(piece)
+    else if (answer === "after_merge") record.pieces[piece] = "after_merge"
+    else record.pieces[piece] = "kept"
+    if (answer === ASK_TIMEOUT || answer === ASK_CANCELLED) lines.push(`${PIECE_COPY[piece].label}: not answered, so it was left as it is.`)
+  }
+  return now
+}
+
+/** Links this machine when no link is saved. Null link = the pieces stay `no_link` (with the reason). */
+async function ensureLink(ctx: UninstallContext, record: UninstallRecord, lines: string[]): Promise<{ ok: true } | { ok: false; code: WizardCode | null }> {
+  if (record.linkId) return { ok: true }
+  if (!ctx.link) {
+    lines.push("This machine has no saved link to Infinite, so the pieces in Infinite cannot be changed from here.")
+    return { ok: false, code: null }
+  }
+  const linked = await ctx.link()
+  if (linked.linkId === null) {
+    lines.push(`Could not link this machine to Infinite: ${linked.message}`)
+    return { ok: false, code: linked.code }
+  }
+  record.linkId = linked.linkId
+  return { ok: true }
+}
+
+/** Removes the wizard's run files (never the lock this run holds) once nothing is left to do. */
+async function clearWizardRunFiles(root: string): Promise<void> {
+  const dir = join(root, WIZARD_PATHS.dir)
+  let names: string[]
+  try {
+    names = await fsp.readdir(dir)
+  } catch {
+    return
+  }
+  for (const name of names) {
+    if (`${WIZARD_PATHS.dir}/${name}` === WIZARD_PATHS.lock) continue
+    await fsp.rm(join(dir, name), { recursive: true, force: true })
+  }
+}
+
+/** Saves the record, or clears the run files when no piece is pending any more. */
+async function settle(deps: WizardDeps, root: string, record: UninstallRecord, lines: string[]): Promise<void> {
+  if (UNINSTALL_PIECES.some((piece) => PENDING_STATES.has(record.pieces[piece]))) {
+    await writeRecord(deps, root, record)
+    return
+  }
+  await clearWizardRunFiles(root)
+  lines.push("Nothing is left to do: the wizard's run files in .infinite/wizard/ were removed.")
 }
 
 async function resolveBase(ctx: UninstallContext, deps: WizardDeps): Promise<string | null> {
@@ -161,9 +253,28 @@ async function resolveBase(ctx: UninstallContext, deps: WizardDeps): Promise<str
   return null
 }
 
-/** The follow-up run: the uninstall PR merged and deployed → the deferred pieces run. */
+/**
+ * The follow-up run: link first when the first run could not; then the deferred pieces (and the ones
+ * that failed) run once the uninstall PR is merged and deployed.
+ */
 async function followUp(ctx: UninstallContext, deps: WizardDeps, record: UninstallRecord, lines: string[]): Promise<UninstallResult> {
-  const deferred = new Set(UNINSTALL_PIECES.filter((piece) => record.pieces[piece] === "after_merge"))
+  const unlinked = UNINSTALL_PIECES.filter((piece) => record.pieces[piece] === "no_link")
+  if (unlinked.length > 0) {
+    const linked = await ensureLink(ctx, record, lines)
+    if (!linked.ok) {
+      await writeRecord(deps, ctx.root, record)
+      return { exitCode: linked.code ? exitCodeFor(linked.code) : WIZARD_EXIT.needsApp, code: linked.code, record, lines: [...lines, ...pieceLines(record)] }
+    }
+    const supported = supportedPieces(deps)
+    for (const piece of unlinked) if (!supported.has(piece)) record.pieces[piece] = "unsupported"
+    const now = await askPieces(ctx, record, unlinked.filter((piece) => supported.has(piece)), lines)
+    await runPieces(deps, record, now, lines)
+  }
+  const deferred = new Set(UNINSTALL_PIECES.filter((piece) => record.pieces[piece] === "after_merge" || record.pieces[piece] === "failed"))
+  if (deferred.size === 0) {
+    await settle(deps, ctx.root, record, lines)
+    return { exitCode: WIZARD_EXIT.done, code: null, record, lines: [...lines, ...pieceLines(record)] }
+  }
   if (!record.pr) {
     return stop("INF_WIZ_MERGE_PARKED", `The uninstall branch ${record.branch} has no pull request here; merge it, then run this again.`, [...lines, ...pieceLines(record)], record)
   }
@@ -173,7 +284,7 @@ async function followUp(ctx: UninstallContext, deps: WizardDeps, record: Uninsta
   }
   if (pr.state === "CLOSED") {
     for (const piece of deferred) record.pieces[piece] = "kept"
-    await writeRecord(deps, ctx.root, record)
+    await settle(deps, ctx.root, record, lines)
     lines.push(`The uninstall pull request #${pr.number} was closed without merging; the deferred pieces were left as they are.`)
     return { exitCode: WIZARD_EXIT.done, code: null, record, lines: [...lines, ...pieceLines(record)] }
   }
@@ -186,7 +297,7 @@ async function followUp(ctx: UninstallContext, deps: WizardDeps, record: Uninsta
     return stop("INF_WIZ_DEPLOY_TIMEOUT", `The uninstall is merged; waiting for its deploy before changing anything in Infinite.`, [...lines, ...pieceLines(record)], record)
   }
   await runPieces(deps, record, deferred, lines)
-  await writeRecord(deps, ctx.root, record)
+  await settle(deps, ctx.root, record, lines)
   return { exitCode: WIZARD_EXIT.done, code: null, record, lines: [...lines, ...pieceLines(record)] }
 }
 
@@ -195,7 +306,7 @@ export async function runUninstallFlow(ctx: UninstallContext, rawDeps: WizardDep
   const lines: string[] = []
 
   const existing = await readRecord(ctx.root)
-  if (existing && UNINSTALL_PIECES.some((piece) => existing.pieces[piece] === "after_merge")) {
+  if (existing && UNINSTALL_PIECES.some((piece) => PENDING_STATES.has(existing.pieces[piece]))) {
     return followUp(ctx, deps, existing, lines)
   }
 
@@ -253,40 +364,29 @@ export async function runUninstallFlow(ctx: UninstallContext, rawDeps: WizardDep
     }
   }
 
-  // 3. The cloud pieces, one ask each; "after the merge" is the default.
-  const linkId = ctx.state?.link?.linkId ?? null
+  // 3. The cloud pieces, one ask each; "after the merge" is the default. No saved link → link first.
   const record: UninstallRecord = {
     schema: UNINSTALL_RECORD_SCHEMA,
     createdAt: ctx.now().toISOString(),
     base,
     branch,
     pr,
-    linkId,
-    pieces: { server_lane_env: "not_linked", site_source: "not_linked", link: "not_linked" }
+    linkId: ctx.state?.link?.linkId ?? null,
+    pieces: { server_lane_env: "no_link", site_source: "no_link", link: "no_link" }
   }
-  const available = availablePieces(deps, linkId)
-  const now = new Set<UninstallPiece>()
-  for (const piece of UNINSTALL_PIECES) {
-    if (!available.has(piece)) continue
-    const answer = await ctx.ask("single", {
-      question: PIECE_COPY[piece].question,
-      options: [
-        { label: "After the merge (recommended)", value: "after_merge" },
-        { label: "Now", value: "now" },
-        { label: "Keep it", value: "keep" }
-      ],
-      default: "after_merge"
-    })
-    if (answer === "now") now.add(piece)
-    else if (answer === "after_merge") record.pieces[piece] = "after_merge"
-    else record.pieces[piece] = "kept"
-    if (answer === ASK_TIMEOUT || answer === ASK_CANCELLED) lines.push(`${PIECE_COPY[piece].label}: not answered, so it was left as it is.`)
+  const linked = await ensureLink(ctx, record, lines)
+  if (!linked.ok) {
+    await writeRecord(deps, ctx.root, record)
+    return { exitCode: linked.code ? exitCodeFor(linked.code) : WIZARD_EXIT.needsApp, code: linked.code, record, lines: [...lines, ...pieceLines(record)] }
   }
+  const supported = supportedPieces(deps)
+  for (const piece of UNINSTALL_PIECES) if (!supported.has(piece)) record.pieces[piece] = "unsupported"
+  const now = await askPieces(ctx, record, UNINSTALL_PIECES.filter((piece) => supported.has(piece)), lines)
   await runPieces(deps, record, now, lines)
   if (!pr && reversal.reversed.length > 0) {
     // No PR to watch: a deferred piece could never run, so say so instead of waiting forever.
     for (const piece of UNINSTALL_PIECES) if (record.pieces[piece] === "after_merge") lines.push(`${PIECE_COPY[piece].label}: run this again after you merge ${branch}.`)
   }
-  await writeRecord(deps, ctx.root, record)
+  await settle(deps, ctx.root, record, lines)
   return { exitCode: WIZARD_EXIT.done, code: null, record, lines: [...lines, ...pieceLines(record)] }
 }

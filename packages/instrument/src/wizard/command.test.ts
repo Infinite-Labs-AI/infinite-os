@@ -11,7 +11,7 @@ import type { WizardOptions } from "./contracts/deps.js"
 import type { ChecklistItem } from "./contracts/jobs.js"
 import type { WizardStepId } from "./contracts/steps.js"
 import { acquireRunLock } from "./lock.js"
-import { NESTED_CONSENT_FLAG_MESSAGE, NOT_A_TTY_MESSAGE, WIZARD_NOT_BUILT_MESSAGE, parseWizardArgs, routeWizard, runWizardCommand } from "./command.js"
+import { NESTED_CONSENT_FLAG_MESSAGE, NOT_A_TTY_MESSAGE, WIZARD_NOT_BUILT_MESSAGE, parseWizardArgs, routeWizard, runWizardCommand, runWizardUninstall } from "./command.js"
 import { createRunState } from "./run-state.js"
 import type { SignalSource } from "./signals.js"
 import type { WizardStore } from "./store.js"
@@ -350,7 +350,7 @@ describe("nested-agent mode (§3d.7)", () => {
       },
       async run(checkId, input) {
         seenByChecks.push(readFileSync(join(root, "app/layout.tsx"), "utf8"))
-        return { checkId, state: "pass", tier: "S", at: "2026-10-02T09:43:00.000Z", runId: input.runId }
+        return { checkId, state: "pass", tier: "S", at: "2026-10-02T09:43:00.000Z", runId: (input as { runId: string | null }).runId }
       }
     }
     expect(await runWizardCommand(["--resume", "--json"], { io: second.io, wiring: resumed.wiring })).toBe(0)
@@ -632,5 +632,40 @@ describe("a resumed run whose PR was closed offers a fresh run; --fresh sets a r
     expect(ran).toHaveLength(13)
     expect(readdirSync(join(root, ".infinite/wizard")).some((name) => name.startsWith("state.json.7f3c2a91") && name.includes("set-aside"))).toBe(true)
     expect(parseWizardArgs(["--fresh", "--resume"], "/r")).toMatchObject({ ok: false })
+  })
+})
+
+describe("uninstall --pr with no saved run links through the link step (O1-09)", () => {
+  it("runs the link step on an in-memory state, then asks and changes each piece in Infinite", async () => {
+    const root = tempDir("wizard-cmd-")
+    const { io } = fakeIo(root)
+    const linkRan: string[] = []
+    const spy = fakeWiring(
+      {
+        link: async (ctx) => {
+          linkRan.push("link")
+          ctx.state.update((state) => {
+            state.link = { linkId: "lk_FAKEFAKEFAKEFAKEFAKE00", workspaceName: "Acme", approvedAt: "2026-10-02T09:01:00Z", runtimeVariant: "prod" }
+          })
+          return { kind: "ok", status: "linked" }
+        }
+      },
+      (kind) => (kind === "single" ? "now" : "__cancelled__")
+    )
+    expect(await runWizardUninstall(["--pr", "--json", "--base", "main"], { io, wiring: spy.wiring })).toBe(0)
+    expect(linkRan).toEqual(["link"])
+    expect(spy.bundle.log.names("bridge")).toEqual(["bridge.removeServerLaneEnv", "bridge.disableSiteSource", "bridge.revokeLink"])
+    expect(existsSync(join(root, ".infinite/wizard/state.json"))).toBe(false)
+  })
+
+  it("negative: a link the user declines leaves every piece 'NOT changed' and exits 4", async () => {
+    const root = tempDir("wizard-cmd-")
+    const { io, err } = fakeIo(root)
+    const spy = fakeWiring({
+      link: async () => ({ kind: "failed", code: "INF_WIZ_LINK_DECLINED", message: "The link was declined in Infinite.", next: "halt" })
+    })
+    expect(await runWizardUninstall(["--pr", "--json", "--base", "main"], { io, wiring: spy.wiring })).toBe(4)
+    expect(spy.bundle.log.names("bridge")).toEqual([])
+    expect(err.join("")).toContain("Could not link this machine to Infinite: The link was declined in Infinite.")
   })
 })

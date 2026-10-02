@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs"
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
@@ -129,7 +129,7 @@ describe("uninstall --pr", () => {
     expect(notDeployed.log.names("bridge")).toEqual(["bridge.deployStatus"])
   })
 
-  it("not linked: no cloud asks, every piece says so", async () => {
+  it("no saved link and no way to link from here: no cloud asks, and every piece says it was NOT changed (never 'nothing to change')", async () => {
     const root = tempRoot()
     const bundle = fakeDeps()
     const state = linkedState(root)
@@ -137,6 +137,83 @@ describe("uninstall --pr", () => {
     const asked: string[] = []
     const result = await run(root, bundle, answering({}, asked), state)
     expect(asked).toEqual([])
-    expect(result.record!.pieces).toEqual({ server_lane_env: "not_linked", site_source: "not_linked", link: "not_linked" })
+    expect(result.record!.pieces).toEqual({ server_lane_env: "no_link", site_source: "no_link", link: "no_link" })
+    expect(result.exitCode).toBe(4)
+    const text = result.lines.join("\n")
+    expect(text).not.toMatch(/nothing in Infinite to change/i)
+    expect(text).toContain("NOT changed: this machine is not linked to Infinite")
+  })
+})
+
+describe("uninstall --pr from a fresh clone, link last, retries (O1-09, O1-18)", () => {
+  function runWith(root: string, bundle: ReturnType<typeof fakeDeps>, ask: AskFn, state: ReturnType<typeof linkedState> | null, link?: () => Promise<{ linkId: string } | { linkId: null; code: "INF_WIZ_NO_APP"; message: string }>) {
+    bundle.deps.fs = nodeWizardFs
+    return runUninstallFlow({ root, state, ask, print() {}, now: () => new Date("2026-10-03T10:00:00Z"), base: "main", ...(link ? { link } : {}) }, bundle.deps)
+  }
+  const LINK_ID = "lk_FAKEFAKEFAKEFAKEFAKE00"
+
+  it("no state.json: the flow links first (a remembered link approves at once), then asks and runs each piece", async () => {
+    const root = tempRoot()
+    const bundle = fakeDeps()
+    const asked: string[] = []
+    let linkCalls = 0
+    const result = await runWith(root, bundle, answering({ server_lane_env: "now", site_source: "now", link: "after_merge" }, asked), null, async () => {
+      linkCalls += 1
+      return { linkId: LINK_ID }
+    })
+    expect(linkCalls).toBe(1)
+    expect(asked).toHaveLength(3)
+    expect(bundle.log.names("bridge")).toEqual(["bridge.removeServerLaneEnv", "bridge.disableSiteSource"])
+    expect(bundle.bridge.linkId).toBe(LINK_ID)
+    expect(result.record!.pieces).toEqual({ server_lane_env: "done", site_source: "done", link: "after_merge" })
+  })
+
+  it("the link cannot be made (no app): exit 4, the pieces stay pending as 'not linked', and the next run links, asks and runs them", async () => {
+    const root = tempRoot()
+    const first = fakeDeps()
+    const asked: string[] = []
+    const result = await runWith(root, first, answering({}, asked), null, async () => ({ linkId: null, code: "INF_WIZ_NO_APP", message: "Infinite is not running" }))
+    expect(result).toMatchObject({ exitCode: 4, code: "INF_WIZ_NO_APP" })
+    expect(asked).toEqual([])
+    expect(result.lines.join("\n")).toContain("Could not link this machine to Infinite: Infinite is not running")
+    expect(JSON.parse(readFileSync(join(root, UNINSTALL_RECORD_PATH), "utf8")).pieces.server_lane_env).toBe("no_link")
+
+    const second = fakeDeps({ host: { readPr: prSummary({ state: "MERGED", mergeCommitOid: MERGE_SHA }) } })
+    const again = await runWith(root, second, answering({ server_lane_env: "now", site_source: "after_merge", link: "after_merge" }), null, async () => ({ linkId: LINK_ID }))
+    expect(second.log.names("installer")).toEqual([])
+    expect(second.log.names("git")).not.toContain("git.createBranch")
+    expect(second.log.names("bridge")).toEqual(["bridge.removeServerLaneEnv", "bridge.deployStatus", "bridge.disableSiteSource", "bridge.revokeLink"])
+    expect(again.record!.pieces).toEqual({ server_lane_env: "done", site_source: "done", link: "done" })
+  })
+
+  it("the link is revoked LAST: with another piece failed it is kept, and the next run retries the failed piece, then revokes", async () => {
+    const root = tempRoot()
+    const first = fakeDeps()
+    first.bridge.removeServerLaneEnv = async () => {
+      throw new Error("Vercel said 500")
+    }
+    const result = await runWith(root, first, answering({ server_lane_env: "now", site_source: "now", link: "now" }), linkedState(root))
+    expect(result.record!.pieces).toEqual({ server_lane_env: "failed", site_source: "done", link: "after_merge" })
+    expect(first.log.names("bridge")).not.toContain("bridge.revokeLink")
+    expect(result.lines.join("\n")).toContain("The link to Infinite: kept until server-lane settings on vercel is done")
+
+    const second = fakeDeps({ host: { readPr: prSummary({ state: "MERGED", mergeCommitOid: MERGE_SHA }) } })
+    const retried = await runWith(root, second, answering({}), linkedState(root))
+    expect(second.log.names("bridge")).toEqual(["bridge.deployStatus", "bridge.removeServerLaneEnv", "bridge.revokeLink"])
+    expect(retried.record!.pieces).toEqual({ server_lane_env: "done", site_source: "done", link: "done" })
+  })
+
+  it("when nothing is left to do, .infinite/wizard/ is cleared (never the run lock); negative: a pending piece keeps the record", async () => {
+    const root = tempRoot()
+    mkdirSync(join(root, ".infinite/wizard"), { recursive: true })
+    writeFileSync(join(root, ".infinite/wizard/state.json"), "{}")
+    writeFileSync(join(root, ".infinite/wizard/run.lock"), "{}")
+    await runWith(root, fakeDeps(), answering({ server_lane_env: "after_merge", site_source: "now", link: "after_merge" }), linkedState(root))
+    expect(readdirSync(join(root, ".infinite/wizard")).sort()).toEqual(["run.lock", "state.json", "uninstall-pr-body.md", "uninstall.json"])
+
+    const merged = fakeDeps({ host: { readPr: prSummary({ state: "MERGED", mergeCommitOid: MERGE_SHA }) } })
+    const done = await runWith(root, merged, answering({}), linkedState(root))
+    expect(done.lines.join("\n")).toContain("the wizard's run files in .infinite/wizard/ were removed")
+    expect(readdirSync(join(root, ".infinite/wizard"))).toEqual(["run.lock"])
   })
 })
