@@ -9,9 +9,9 @@
 // The field is read only when the descriptor and the status both advertise the
 // capability. Names are DISPLAY text: at most 24 characters and 12 entries,
 // scrubbed, and never an id, an email or a URL (such an entry is dropped).
-import type { TopBarSource } from "../tui/ink/top-bar.js";
+import type { TopBarData, TopBarSource } from "../tui/ink/top-bar.js";
 import { isDisplayWords } from "./step-words.js";
-import { terminalText } from "./terminal-text.js";
+import { boundedTerminalText, terminalText } from "./terminal-text.js";
 
 export const STATUS_CONNECTIONS_CAPABILITY = "status.connections.v1" as const;
 
@@ -80,4 +80,27 @@ export function topBarSourcesFromConnections(connections: readonly DesktopConnec
     label: connection.name,
     state: connection.status === "connected" ? "connected" : connection.status === "broken" ? "broken" : "missing"
   }));
+}
+
+/** The longest workspace name the top bar takes (the bar cuts what does not fit the window). */
+const MAX_WORKSPACE_NAME_CHARS = 80;
+
+/**
+ * The desktop session's top bar from a `/v1/status`: the workspace, one dot
+ * per connection when the status carries them, and that the session runs
+ * through the app. A status without `connections` (an old desktop) draws no
+ * dots: the bar never guesses what is connected.
+ */
+export function desktopTopBarData(status: {
+  workspace?: { name: string };
+  connections?: readonly DesktopConnection[];
+}): TopBarData {
+  const workspace = status.workspace?.name
+    ? boundedTerminalText(status.workspace.name, MAX_WORKSPACE_NAME_CHARS, "Unknown")
+    : undefined;
+  return {
+    ...(workspace ? { workspace } : {}),
+    ...(status.connections ? { sources: topBarSourcesFromConnections(status.connections) } : {}),
+    throughApp: true
+  };
 }

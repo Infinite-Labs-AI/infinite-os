@@ -43,8 +43,10 @@ import { prepareGa4ConnectConfig } from "./ga4-connect-config.js";
 import {
   DesktopAppClientError,
   resolveLiveBridge,
-  runDesktopAppCommand
+  runDesktopAppCommand,
+  type DesktopStatus
 } from "./desktop-app-client.js";
+import { desktopTopBarData } from "./desktop/status-connections.js";
 import { resolveMode, type ModeDeps, type ModeIo } from "./desktop/mode-router.js";
 import {
   createDesktopSessionTurnRunner,
@@ -1765,8 +1767,15 @@ async function runDesktopInteractiveEntry(
   // a Desktop restart), re-checks readiness, resets the session on any scope
   // change (boot/contextRevision/workspace/provider), guards concurrent turns
   // with a `busy` result, and NEVER auto-replays a failed turn.
+  // The top bar follows the app: each turn's status preflight refreshes the
+  // workspace and, from a Desktop that sends them (`status.connections.v1`),
+  // the connection dots.
+  let barStatus: DesktopStatus = status;
   const runner = createDesktopSessionTurnRunner({
     resolveBridge: () => resolveLiveBridge(env),
+    onStatus: (next) => {
+      barStatus = next;
+    },
     ...(interactiveWorkspace
       ? {
           interactiveWorkspace: {
@@ -1788,18 +1797,17 @@ async function runDesktopInteractiveEntry(
 
   if (shouldUseInkInteractiveSession(input, output, env)) {
     // The workspace's sources live in the Infinite app, which the terminal
-    // cannot list: the top bar names the workspace and says the session runs
-    // through the app, and draws no dots (never a guess, never a false
-    // "daemon not reachable").
-    const workspace = status.workspace?.name
-      ? boundedTerminalText(status.workspace.name, HOME_INVENTORY_LABEL_MAX_CHARS, "Unknown")
-      : undefined;
+    // cannot list itself: the top bar names the workspace, says the session
+    // runs through the app, and draws one dot per connection the app's status
+    // carries. An older Desktop sends none, and the bar then draws no dots
+    // (never a guess, never a false "daemon not reachable").
     await runInkInteractiveSession({
       errorOutput,
       ...(firstRun ? { homeInventory: homeInventoryData(status.workspace?.name, undefined) } : {}),
       input,
       output,
-      topBar: { ...(workspace ? { workspace } : {}), throughApp: true },
+      // Read on every render, so the dots follow the latest status.
+      topBar: () => desktopTopBarData(barStatus),
       // Approve/decline a `requires_confirmation` write in-session. The runner
       // resolves the handle against the client that ran the originating turn
       // (handles are per-boot); `confirm` is single-use per handle.
