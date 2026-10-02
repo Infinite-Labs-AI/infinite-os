@@ -44,6 +44,8 @@ export interface ConversionHelpersOptions {
   consentMode?: "required" | "not_required"
   /** The site's own hosts (a referrer on one of them is not a campaign source). */
   ownHosts?: string[]
+  /** The installed Meta pixel the mirror fires on (B16); absent → the mirror fires nothing. */
+  metaPixelId?: string | null
 }
 
 function indent(source: string): string {
@@ -71,7 +73,7 @@ export function buildConversionHelpersScript(options: ConversionHelpersOptions =
     indent(trackThenNavigateSource()),
     indent(identifySource()),
     "})();",
-    buildMetaMirrorScript({ gate }),
+    buildMetaMirrorScript({ gate, pixelId: options.metaPixelId ?? null }),
     buildLandingAttributionScript({ ownHosts: options.ownHosts ?? [], gate })
   ].join("\n")
 }
@@ -86,7 +88,9 @@ export function conversionHelpersOptions(artifacts: WorkspaceInstallArtifacts): 
         ...(artifacts.infinite?.productionHosts ?? []),
         ...(artifacts.hostGuard?.exempt ?? [])
       ])
-    ]
+    ],
+    // The chosen pixel (the keys step's choice = the relay binding), managed or adopted (§3z.10, B16).
+    metaPixelId: artifacts.meta?.pixelId ?? null
   }
 }
 

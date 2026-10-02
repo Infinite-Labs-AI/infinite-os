@@ -33,6 +33,12 @@ const RESPONSES = (
   }
 ).outcomeResponses.cases
 
+const WIRE_IDS = (
+  JSON.parse(readFileSync(resolve(here, "../../../contracts/server-lane-v1.vectors.json"), "utf8")) as {
+    outcomeWireIds: { cases: Array<{ type: string; eventId: string; wire: string }> }
+  }
+).outcomeWireIds.cases
+
 const BUILD = { siteSourceKey: "site_test", productionHosts: [VECTORS.host] }
 const tempRoots: string[] = []
 
@@ -77,12 +83,22 @@ describe.each(["ts", "js", "node"] as const)("reportInfiniteOutcome (%s helper),
     await expect(outcome.postInfiniteOutcome({ type: "sign_up", eventId: "signup:acct_991" })).resolves.toBe(vector.report.accepted)
   })
 
-  it("sends the caller's stable eventId verbatim", async () => {
+  it.each(WIRE_IDS)("sends the wire eventId <type>:<eventId> (B16): $type / $wire", async (vector) => {
     fetchMock = vi.fn(async () => new Response(RESPONSES[1]!.body, { status: 202 }))
     vi.stubGlobal("fetch", fetchMock)
-    await (await helper(form)).reportInfiniteOutcome({ type: "sign_up", eventId: "signup:acct_991" })
+    await (await helper(form)).reportInfiniteOutcome({ type: vector.type, eventId: vector.eventId })
     const [, init] = fetchMock.mock.calls[0] as [string, RequestInit]
-    expect(JSON.parse(String(init.body)).eventId).toBe("signup:acct_991")
+    expect(JSON.parse(String(init.body)).eventId).toBe(vector.wire)
+  })
+
+  it("negative: one stable id reused for two outcome types never sends the same wire id", async () => {
+    fetchMock = vi.fn(async () => new Response(RESPONSES[0]!.body, { status: 202 }))
+    vi.stubGlobal("fetch", fetchMock)
+    const outcome = await helper(form)
+    await outcome.reportInfiniteOutcome({ type: "sign_up", eventId: "acct_991" })
+    await outcome.reportInfiniteOutcome({ type: "trial", eventId: "acct_991" })
+    const sent = fetchMock.mock.calls.map((call) => JSON.parse(String((call as [string, RequestInit])[1].body)).eventId)
+    expect(new Set(sent).size).toBe(2)
   })
 
   it("negative: an old-style call with no eventId THROWS at once (and sends nothing)", async () => {

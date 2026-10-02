@@ -16,7 +16,7 @@ import type { VirtualClock } from "./clock.js"
 import type { CookieJar } from "./cookie-jar.js"
 import { T0CustomEvent, T0Document, T0Element, T0Event, T0EventTarget, T0Text, parseMarkupInto } from "./dom.js"
 import type { T0LoadAction, T0LoaderBehaviour, T0PosthogInit, T0ResponseRule, T0SessionRecording } from "./protocol.js"
-import { T0_WATCHED_GLOBALS } from "./protocol.js"
+import { T0_SILENCED_FBQ, T0_WATCHED_GLOBALS } from "./protocol.js"
 import { bodyText, createFetch, createSendBeacon, createXhrClass, type RecorderEnv, type T0Recorder } from "./recorders.js"
 import { classifyLoader, loadFbeventsStub, loadGtagStub, loadPosthogStub, type StubHost } from "./stubs.js"
 
@@ -552,12 +552,19 @@ export class T0Page {
 
   /** Which watched analytics globals are defined now. */
   definedGlobals(): string[] {
-    return T0_WATCHED_GLOBALS.filter((name) => {
+    const defined: string[] = T0_WATCHED_GLOBALS.filter((name) => {
       try {
         return this.window[name] !== undefined && this.window[name] !== null
       } catch {
         return false
       }
     })
+    try {
+      const fbq = this.window.fbq as { __infiniteSilenced?: unknown } | undefined
+      if (typeof fbq === "function" && (fbq as { __infiniteSilenced?: unknown }).__infiniteSilenced === true) defined.push(T0_SILENCED_FBQ)
+    } catch {
+      // An fbq getter that throws is not the silenced stand-in.
+    }
+    return defined
   }
 }

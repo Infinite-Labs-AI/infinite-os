@@ -274,7 +274,8 @@ export function nodeOutcomeHelperSource(): string {
       "// with infiniteVisitKey({ clientIp, userAgent }) from ./infinite-server-lane.js, carry it (e.g.",
       "// Stripe metadata), and pass it as properties: { visitKey } so this skips its own derivation."
     ],
-    String.raw`${NODE_LANE_IMPORT}
+    String.raw`import { createHash } from "node:crypto"
+${NODE_LANE_IMPORT}
 
 /**
  * One header value from EITHER a plain object (req.headers on Node/Express) OR a WHATWG Headers
@@ -431,7 +432,17 @@ export function reportInfiniteOutcome(input) {
   if (!input || typeof input.eventId !== "string" || input.eventId.trim().length === 0) {
     throw new TypeError("reportInfiniteOutcome needs a stable eventId (an order, subscription or account id).")
   }
-  return infiniteSendOutcome(input)
+  return infiniteSendOutcome({ ...input, eventId: infiniteOutcomeWireId(input.type, input.eventId) })
+}
+
+/**
+ * The wire eventId of an outcome: "<type>:<eventId>" (a sha256 of the eventId once that would pass 160
+ * characters), so one stable id reused for two outcome types (sign_up and trial for one account) never
+ * collides in Infinite's dedupe. The echoed metaEventId is this wire id.
+ */
+function infiniteOutcomeWireId(type, eventId) {
+  const wire = String(type) + ":" + eventId
+  return wire.length <= 160 ? wire : String(type) + ":" + createHash("sha256").update(eventId, "utf8").digest("hex")
 }`
   )
 }

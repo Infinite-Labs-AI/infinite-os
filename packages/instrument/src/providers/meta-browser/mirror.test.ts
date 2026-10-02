@@ -27,7 +27,10 @@ interface MirrorPage {
   resolved(): number
 }
 
-function mirrorPage(options: BrowserVmOptions & { pixel?: boolean; consentMode?: "required" | "not_required"; matchDelayMs?: number | "never" } = {}): MirrorPage {
+/** The pixel the managed helper bakes in (B16: the mirror fires on it only). */
+const PIXEL = "1234567890123456"
+
+function mirrorPage(options: BrowserVmOptions & { pixel?: boolean; bakedPixel?: string | null; consentMode?: "required" | "not_required"; matchDelayMs?: number | "never" } = {}): MirrorPage {
   const vm = createBrowserVm(options)
   const timeline: unknown[][] = []
   if (options.pixel !== false) vm.window.fbq = (...args: unknown[]) => void timeline.push(["fbq", ...args])
@@ -42,7 +45,7 @@ function mirrorPage(options: BrowserVmOptions & { pixel?: boolean; consentMode?:
   }
   vm.window.__navigate = () => void timeline.push(["navigate"])
   vm.window.__resolved = 0
-  vm.runScript(buildMetaMirrorScript({ gate: { kind: "infinite-consent", mode: options.consentMode ?? "not_required" } }))
+  vm.runScript(buildMetaMirrorScript({ gate: { kind: "infinite-consent", mode: options.consentMode ?? "not_required" }, pixelId: options.bakedPixel === undefined ? PIXEL : options.bakedPixel }))
   expect(vm.scriptErrors).toEqual([])
   return {
     vm,
@@ -77,7 +80,22 @@ describe("infiniteMetaMirror: the server's instruction or nothing", () => {
     const page = mirrorPage()
     page.mirror("CompleteRegistration", "Server-ID_Case.Kept", "{ wait: 'none' }")
     await page.vm.settle()
-    expect(plain(tracks(page))).toEqual([["fbq", "track", "CompleteRegistration", {}, { eventID: "Server-ID_Case.Kept" }]])
+    expect(plain(tracks(page))).toEqual([["fbq", "trackSingle", PIXEL, "CompleteRegistration", {}, { eventID: "Server-ID_Case.Kept" }]])
+  })
+
+  it("§3z.10 (B16): fires on the BAKED pixel only (trackSingle); with no baked pixel it fires nothing", async () => {
+    const page = mirrorPage()
+    page.mirror("Lead", "id-baked", "{ wait: 'none' }")
+    await page.vm.settle()
+    expect(plain(tracks(page))).toEqual([["fbq", "trackSingle", PIXEL, "Lead", {}, { eventID: "id-baked" }]])
+    // negative: no baked pixel (or an invalid one) → nothing, resolved at once
+    for (const baked of [null, "123"]) {
+      const none = mirrorPage({ bakedPixel: baked })
+      none.mirror("Lead", "id-none")
+      await none.vm.settle()
+      expect(tracks(none)).toEqual([])
+      expect(none.resolved()).toBe(1)
+    }
   })
 
   it("refuses Purchase (webhook-only) and any event outside the allowlist", async () => {
@@ -93,7 +111,7 @@ describe("infiniteMetaMirror: the server's instruction or nothing", () => {
     const page = mirrorPage()
     for (const name of META_MIRROR_EVENTS) page.mirror(name, `id-${name}`, "{ wait: 'none' }")
     await page.vm.settle()
-    expect(tracks(page).map((entry) => entry[2])).toEqual([...META_MIRROR_EVENTS])
+    expect(tracks(page).map((entry) => entry[3])).toEqual([...META_MIRROR_EVENTS])
   })
 
   it("once per id; two ids → two mirrors", async () => {
@@ -102,7 +120,7 @@ describe("infiniteMetaMirror: the server's instruction or nothing", () => {
     page.mirror("Lead", "id-1", "{ wait: 'none' }")
     page.mirror("Lead", "id-2", "{ wait: 'none' }")
     await page.vm.settle()
-    expect(plain(tracks(page).map((entry) => (entry[4] as { eventID: string }).eventID))).toEqual(["id-1", "id-2"])
+    expect(plain(tracks(page).map((entry) => (entry[5] as { eventID: string }).eventID))).toEqual(["id-1", "id-2"])
     expect(page.resolved()).toBe(3)
   })
 
@@ -140,7 +158,7 @@ describe("infiniteMetaMirror: the page waits for THIS request, never longer than
     await page.vm.resourceLoaded(lead())
     expect(page.resolved()).toBe(1)
     expect(page.timeline.map((entry) => entry[0])).toEqual(["fbq", "navigate"])
-    expect(plain(page.timeline[0])).toEqual(["fbq", "track", "Lead", {}, { eventID: EVENT_ID }])
+    expect(plain(page.timeline[0])).toEqual(["fbq", "trackSingle", PIXEL, "Lead", {}, { eventID: EVENT_ID }])
     expect(page.vm.pendingTimers()).toEqual([])
     expect(page.vm.observing()).toBe(false)
     await page.vm.advance(1000)

@@ -40,6 +40,7 @@ import type { CheckResult, Evidence, T0Scenario } from "../wizard/contracts/jobs
 import { normalizeHost } from "../wizard/contracts/host-deny.js"
 import { FAKE_CLICK_ID_PREFIX, fakeClickIdFor } from "../wizard/contracts/test-engine.js"
 import type { T0Action, T0LoaderBehaviour, T0PageSource, T0Request, T0Session, T0SessionRecording } from "./protocol.js"
+import { T0_SILENCED_FBQ } from "./protocol.js"
 import { runT0Sessions, type T0RunOptions, type T0RunOutcome } from "./run.js"
 
 export const T0_SCENARIO_IDS = [
@@ -269,6 +270,10 @@ function toolsStarted(recording: T0SessionRecording, action: number): Set<Guarde
   if (posthogHits(recording).some((hit) => hit.action === action)) started.add("posthog")
   if (recording.posthogInits.some((init) => init.action === action)) started.add("posthog")
   if (fbqCalls(recording, action).some((call) => call[0] === "init")) started.add("meta")
+  // B18: on a silenced host the guard's inert `fbq` swallows the site's own calls; with no /tr sent, the
+  // pixel is SILENT (the flag decides, never `typeof fbq`).
+  const silenced = recording.globals.some((entry) => entry.action === action && entry.defined.includes(T0_SILENCED_FBQ))
+  if (silenced && !metaHits(recording).some((hit) => hit.action === action)) started.delete("meta")
   return started
 }
 

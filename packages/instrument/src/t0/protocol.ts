@@ -216,6 +216,13 @@ export interface T0ChildResponse {
   sessions: T0SessionRecording[]
 }
 
+/**
+ * §3z.9 / B18: reported among a load's defined globals when `window.fbq` is the inert stand-in the managed
+ * Meta guard defines on a silenced (preview) host. "Pixel silent" means THIS flag, not an undefined `fbq`
+ * (the site's own `fbq` calls must not throw there, and the `_fbc` capture still writes, decision 15).
+ */
+export const T0_SILENCED_FBQ = "fbq.__infiniteSilenced" as const
+
 /** The globals T0 reports as defined/undefined after each load. */
 export const T0_WATCHED_GLOBALS = [
   "gtag",

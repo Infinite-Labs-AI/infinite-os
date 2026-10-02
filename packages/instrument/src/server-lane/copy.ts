@@ -561,7 +561,7 @@ export const serverLaneWizardCopy = {
     "// In the route the browser awaits (e.g. POST /api/signup), after the account is created:",
     "const { metaEventId, metaEventName } = await reportInfiniteOutcome({",
     '  type: "sign_up",                  // the exact name from Infinite -> Conversions',
-    '  eventId: "signup:" + user.id,     // STABLE: the same id every time this sign-up is reported',
+    '  eventId: user.id,                 // STABLE and raw: the helper sends it as "sign_up:<id>", so one id serves every type',
     '  path: "/signup",',
     "  visitKeyInputs: request,          // the buyer's own request: same-visit attribution",
     "  campaign: body.campaign           // the page's infiniteCampaign(), passed through your request",
@@ -574,7 +574,7 @@ export const serverLaneWizardCopy = {
     "await infiniteMetaMirror(data.metaEventName, data.metaEventId)  // null: Infinite is not sending one, nothing fires",
     'location.assign("/welcome")',
     "```",
-    "- **`eventId` is required and stable** (an account, order or subscription id; a namespaced email hash for a lead). Calling without one throws, so the mistake shows up now. Infinite counts an `eventId` once, and the Meta id it returns is tied to it.",
+    "- **`eventId` is required and stable** (an account, order or subscription id; an email hash for a lead), passed RAW: the helper sends `<type>:<eventId>`, so the same account id for `sign_up` and `trial` never collides. Calling without one throws, so the mistake shows up now. Infinite counts each wire id once, and the Meta id it returns is that wire id.",
     "- **Never build a Meta event id in the page.** The page mirrors only the `metaEventId` the server returned; `null` means no mirror. The mirror fires once per id, refuses `Purchase`, and holds the page at most 0.4 s.",
     "- **Never fire a Meta conversion with `fbq` on a click.** A click is intent, not a conversion."
   ],

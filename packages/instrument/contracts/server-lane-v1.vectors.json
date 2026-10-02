@@ -1,5 +1,5 @@
 {
-  "$comment": "Server lane (lossless analytics) recipe vectors, shared with the receiving side. Every hex value is lowercase HMAC-SHA256 under `secret`. visitKey message = \"visit:\" + clientIp + \"|\" + userAgent + \"|\" + floor(epochSeconds / 1800); documentEventId = \"doc:\" + HMAC(visitKey + \"|\" + path + \"|\" + occurredAtMs); the body signature is HMAC over the exact JSON bytes of `documentEventBody`; the receipt request (GET \u2026/server-lane/receipt?since=<iso>) signature is HMAC over the RAW QUERY STRING as sent (`receiptQuery`). The OUTCOME vectors cover the optional `adMatch` block (the Meta Conversions API relay): `outcomeEmail` hashed with sha256 of the TRIMMED, LOWERCASED address gives `outcomeEmailHash`, and the signature is HMAC over the exact JSON bytes of `outcomeAdMatchBody` \u2014 key order included, since the signature is over bytes, not over a parsed object. The block also carries the BUYER'S BROWSER `client_ip_address` and `client_user_agent`, copied by the customer's server from ITS OWN inbound request \u2014 never from the (server-to-server) call to Infinite, whose ip and user agent describe the customer's host. adMatch is consumed by the relay at ingest and never stored.",
+  "$comment": "Server lane (lossless analytics) recipe vectors, shared with the receiving side. Every hex value is lowercase HMAC-SHA256 under `secret`. visitKey message = \"visit:\" + clientIp + \"|\" + userAgent + \"|\" + floor(epochSeconds / 1800); documentEventId = \"doc:\" + HMAC(visitKey + \"|\" + path + \"|\" + occurredAtMs); the body signature is HMAC over the exact JSON bytes of `documentEventBody`; the receipt request (GET …/server-lane/receipt?since=<iso>) signature is HMAC over the RAW QUERY STRING as sent (`receiptQuery`). The OUTCOME vectors cover the optional `adMatch` block (the Meta Conversions API relay): `outcomeEmail` hashed with sha256 of the TRIMMED, LOWERCASED address gives `outcomeEmailHash`, and the signature is HMAC over the exact JSON bytes of `outcomeAdMatchBody` — key order included, since the signature is over bytes, not over a parsed object. The block also carries the BUYER'S BROWSER `client_ip_address` and `client_user_agent`, copied by the customer's server from ITS OWN inbound request — never from the (server-to-server) call to Infinite, whose ip and user agent describe the customer's host. adMatch is consumed by the relay at ingest and never stored.",
   "secret": "test-secret",
   "clientIp": "203.0.113.9",
   "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
@@ -61,11 +61,11 @@
       {
         "name": "accepted, relay sending a Lead",
         "status": 202,
-        "body": "{\"accepted\":true,\"duplicate\":false,\"metaEventId\":\"9f2a5d41-7c0e-4b2a-9a77-2c0d8e4f6a10\",\"metaEventName\":\"Lead\"}",
+        "body": "{\"accepted\":true,\"duplicate\":false,\"metaEventId\":\"sign_up:acct_991\",\"metaEventName\":\"Lead\"}",
         "report": {
           "accepted": true,
           "duplicate": false,
-          "metaEventId": "9f2a5d41-7c0e-4b2a-9a77-2c0d8e4f6a10",
+          "metaEventId": "sign_up:acct_991",
           "metaEventName": "Lead"
         }
       },
@@ -83,7 +83,7 @@
       {
         "name": "duplicate: never a mirror",
         "status": 202,
-        "body": "{\"accepted\":true,\"duplicate\":true,\"metaEventId\":\"9f2a5d41-7c0e-4b2a-9a77-2c0d8e4f6a10\",\"metaEventName\":\"Lead\"}",
+        "body": "{\"accepted\":true,\"duplicate\":true,\"metaEventId\":\"sign_up:acct_991\",\"metaEventName\":\"Lead\"}",
         "report": {
           "accepted": true,
           "duplicate": true,
@@ -134,6 +134,26 @@
           "metaEventId": null,
           "metaEventName": null
         }
+      }
+    ]
+  },
+  "outcomeWireIds": {
+    "$comment": "reportInfiniteOutcome sends the wire eventId \"<type>:<eventId>\" (build plan section 3z.10, B16); once that passes 160 characters it sends \"<type>:\" + the sha256 hex of the eventId. One stable id reused for two outcome types never collides. The echoed metaEventId is the wire id.",
+    "cases": [
+      {
+        "type": "sign_up",
+        "eventId": "acct_991",
+        "wire": "sign_up:acct_991"
+      },
+      {
+        "type": "trial",
+        "eventId": "acct_991",
+        "wire": "trial:acct_991"
+      },
+      {
+        "type": "lead",
+        "eventId": "lead:xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "wire": "lead:c59f6d159833e1632c6b8c0a8ba2fc4d0aa300372bfff81a74abe8a6f51da2b8"
       }
     ]
   }

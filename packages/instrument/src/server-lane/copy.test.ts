@@ -337,7 +337,9 @@ describe("the wizard's recipes", () => {
 
   it("report from the awaited request with a stable eventId, and mirror only the returned id", () => {
     expect(report).toContain("reportInfiniteOutcome({")
-    expect(report).toMatch(/eventId: "signup:" \+ user\.id/)
+    // B16: the raw stable id; the helper namespaces it as "<type>:<id>" on the wire
+    expect(report).toMatch(/eventId: user\.id,/)
+    expect(report).toContain('"sign_up:<id>"')
     expect(report).toContain("infiniteMetaMirror(data.metaEventName, data.metaEventId)")
     expect(report).not.toMatch(/eventID:|fbq\(/)
   })

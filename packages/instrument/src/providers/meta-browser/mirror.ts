@@ -23,6 +23,10 @@
 //   - Only `Lead`, `CompleteRegistration`, `StartTrial` and `Subscribe` (decision 16). `Purchase` is
 //     REFUSED: a purchase reaches Meta from the payment webhook only, never as a browser event.
 //   - The id is used VERBATIM as `eventID`. Custom data is empty: no value, no contact data, never `ph`.
+//   - It fires on the INSTALLED pixel only (§3z.10, B16): the managed helper bakes the chosen pixel id (the
+//     keys step's choice = the relay's binding) and calls `fbq('trackSingle', <pixel>, name, {}, {eventID})`,
+//     so a page with several pixels never sends a conversion to one the relay does not pair. With no baked
+//     pixel the mirror fires NOTHING.
 //   - `identity` ({ email, externalId }) is handed to `window.infiniteMetaAdvancedMatch` when the site
 //     opted into Manual Advanced Matching; the hashing lives there and nowhere else.
 //   - ALWAYS returns a Promise and NEVER rejects. The caller awaits it before navigating. The budget
@@ -47,10 +51,15 @@ export const META_MIRROR_BUDGET_MS = 400
 export interface MetaMirrorScriptOptions {
   /** The consent hook. infinite-tag always passes the Infinite hook for the site's consent mode. */
   gate?: MetaBrowserGate
+  /** The chosen pixel (15–16 digits), baked in. Absent or invalid → the mirror fires nothing (B16). */
+  pixelId?: string | null
 }
+
+const PIXEL_ID = /^[0-9]{15,16}$/
 
 export function buildMetaMirrorScript(options: MetaMirrorScriptOptions = {}): string {
   const gate = options.gate ?? { kind: "none" }
+  const pixel = typeof options.pixelId === "string" && PIXEL_ID.test(options.pixelId) ? options.pixelId : null
   return [
     "(function () {",
     `  if (typeof window.${META_MIRROR_GLOBAL} === "function") return;`,
@@ -59,6 +68,7 @@ export function buildMetaMirrorScript(options: MetaMirrorScriptOptions = {}): st
       .map((line) => `  ${line}`),
     `  var ALLOWED = ${JSON.stringify(META_MIRROR_EVENTS)};`,
     `  var BUDGET_MS = ${META_MIRROR_BUDGET_MS};`,
+    `  var PIXEL = ${JSON.stringify(pixel)};`,
     "  var mirrored = {};",
     "  // THIS event's request: facebook.com (or a subdomain), path /tr, ev and eid both matching.",
     "  function isThisRequest(resource, eventName, eventId) {",
@@ -66,7 +76,7 @@ export function buildMetaMirrorScript(options: MetaMirrorScriptOptions = {}): st
     "      var url = new URL(String(resource));",
     "      if (url.hostname !== 'facebook.com' && url.hostname.slice(-13) !== '.facebook.com') return false;",
     "      if (url.pathname.indexOf('/tr') !== 0) return false;",
-    "      return url.searchParams.get('ev') === eventName && url.searchParams.get('eid') === eventId;",
+    "      return url.searchParams.get('ev') === eventName && url.searchParams.get('eid') === eventId && url.searchParams.get('id') === PIXEL;",
     "    } catch (_error) { return false; }",
     "  }",
     `  window.${META_MIRROR_GLOBAL} = function (metaEventName, metaEventId, options) {`,
@@ -74,6 +84,8 @@ export function buildMetaMirrorScript(options: MetaMirrorScriptOptions = {}): st
     "    try {",
     "      var opts = options || {};",
     "      if (typeof metaEventId !== 'string' || metaEventId.length === 0) return nothing;",
+    "      // No pixel was baked in: there is no installed pixel the relay pairs with, so nothing is mirrored.",
+    "      if (PIXEL === null) return nothing;",
     "      if (typeof metaEventName !== 'string' || ALLOWED.indexOf(metaEventName) === -1) return nothing;",
     "      if (!infiniteConsentAllows()) return nothing;",
     "      if (typeof opts.gate === 'function') {",
@@ -111,7 +123,7 @@ export function buildMetaMirrorScript(options: MetaMirrorScriptOptions = {}): st
     "              }",
     "            } catch (_error) { observer = null; }",
     "          }",
-    "          try { window.fbq('track', metaEventName, {}, { eventID: metaEventId }); } catch (_error) { release(); return; }",
+    "          try { window.fbq('trackSingle', PIXEL, metaEventName, {}, { eventID: metaEventId }); } catch (_error) { release(); return; }",
     "          if (!waitForRequest) release();",
     "        }",
     "        budget = setTimeout(function () { fire(); release(); }, budgetMs);",

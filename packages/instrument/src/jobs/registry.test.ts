@@ -419,7 +419,7 @@ describe("briefs carry the plan's decisions as data (review P0-1)", () => {
     appRoot: ".",
     plan: briefPlanFrom(plan, approvals),
     connections: briefConnectionsFrom(fixtureKeys()),
-    previewGuard: { expression: "__infiniteHostAllowed(location.hostname)", exemptHosts: ["acme-store.com"] }
+    previewGuard: { expression: "__infiniteHostAllowed(location.hostname)", exemptHosts: ["acme-store.com"], metaRecipe: "(function () { if (!(__infiniteHostAllowed(location.hostname))) { return; } <bootstrap> })();" }
   }
   const brief = buildBrief(seeded, briefFacts)
   const block = (id: string) => brief.slice(brief.indexOf(`### Job ${JSON.stringify(id)}`)).split("\n### ")[0]!
@@ -445,6 +445,12 @@ describe("briefs carry the plan's decisions as data (review P0-1)", () => {
     expect(() => buildBrief(seeded.filter((item) => item.jobId === "server_conversions"), noPlan)).toThrow(/conversion names/)
     expect(() => buildBrief(seeded.filter((item) => item.jobId === "privacy_paragraph"), { ...briefFacts, plan: { ...briefFacts.plan, privacyText: null } })).toThrow(/privacy paragraph/)
     expect(() => buildBrief(seeded.filter((item) => item.jobId === "preview_guard"), { ...briefFacts, previewGuard: null })).toThrow(/preview-guard expression/)
+    // B13: the Meta job-7 brief carries the exact adopted-pixel wrap; without it the brief refuses to guess.
+    const metaGuard = seeded.filter((item) => item.id === "preview_guard:meta")
+    if (metaGuard.length > 0) {
+      expect(buildBrief(metaGuard, briefFacts)).toContain("metaGuardRecipe")
+      expect(() => buildBrief(metaGuard, { ...briefFacts, previewGuard: { expression: "x", exemptHosts: [] } })).toThrow(/adopted Meta guard recipe/)
+    }
     expect(() => buildBrief(seeded.filter((item) => item.jobId === "server_conversions"), { ...briefFacts, plan: { ...briefFacts.plan, conversionNames: ["purchase"] } })).toThrow(/no approved conversion name/)
   })
 

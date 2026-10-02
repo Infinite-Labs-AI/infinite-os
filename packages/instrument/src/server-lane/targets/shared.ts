@@ -727,7 +727,7 @@ export interface InfiniteOutcomeReport {
       "// The browser is waiting on this request and you run Meta ads? Use reportInfiniteOutcome with a",
       "// STABLE eventId: its answer carries metaEventId, which the page passes to infiniteMetaMirror.",
       "//",
-      `//   const { metaEventId, metaEventName } = await ${OUTCOME_REPORT_EXPORT}({ type: "sign_up", eventId: "signup:" + user.id, path: "/signup", visitKeyInputs: req })`,
+      `//   const { metaEventId, metaEventName } = await ${OUTCOME_REPORT_EXPORT}({ type: "sign_up", eventId: user.id, path: "/signup", visitKeyInputs: req })  // sent as "sign_up:<id>"`,
       "//",
       "// Running Meta ads without PostHog? Add adMatch: adMatchFromRequest(request, { em }) and turn",
       "// the relay on in Infinite -> Site -> Settings; the outcome is forwarded to Meta's Conversions",
@@ -1025,7 +1025,19 @@ export function ${OUTCOME_REPORT_EXPORT}(input${t(": InfiniteOutcomeInput & { ev
   if (!input || typeof input.eventId !== "string" || input.eventId.trim().length === 0) {
     throw new TypeError("${OUTCOME_REPORT_EXPORT} needs a stable eventId (an order, subscription or account id).")
   }
-  return infiniteSendOutcome(input, input.eventId)
+  return infiniteOutcomeWireId(input.type, input.eventId).then((wireId) => infiniteSendOutcome(input, wireId))
+}
+
+/**
+ * The wire eventId of an outcome: "<type>:<eventId>" (a sha256 of the eventId once that would pass 160
+ * characters), so one stable id reused for two outcome types (sign_up and trial for one account) never
+ * collides in Infinite's dedupe. The echoed metaEventId is this wire id.
+ */
+async function infiniteOutcomeWireId(type${t(": string")}, eventId${t(": string")})${t(": Promise<string>")} {
+  const wire = String(type) + ":" + eventId
+  if (wire.length <= 160) return wire
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(eventId))
+  return String(type) + ":" + Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("")
 }
 
 /**
