@@ -21,7 +21,10 @@ function listFrame(viewId = "v1", fixture = "list-rows"): ToolViewFrameV1 {
   return { type: "tool.view", stage: "tool", message: view.title, viewId, name: view.tool, view };
 }
 
-afterEach(() => resetTurnState());
+afterEach(() => {
+  resetTurnState();
+  vi.unstubAllEnvs();
+});
 
 describe("the session draws the latest turn's answer views (CI-runnable)", () => {
   it("a finished turn with views shows the answer left and the view right", () => {
@@ -75,12 +78,50 @@ describe("the session draws the latest turn's answer views (CI-runnable)", () =>
     expect(commit).toContain("setViewFocus(null);");
   });
 
-  it("c copies through an OSC 52 write, only to a TTY, and the live turn knows the terminal's rows", () => {
+  it("c copies through an OSC 52 write to a TTY, and through pbcopy on a local Mac", () => {
     const handler = sessionSource.slice(sessionSource.indexOf("const handleViewKey"), sessionSource.indexOf("return next.handled;"));
-    expect(handler).toMatch(/next\.effect\?\.type === "copy" && sessionStdout\?\.isTTY/u);
+    expect(handler).toMatch(/next\.effect\?\.type === "copy"/u);
+    expect(handler).toContain("copyTargets(process.env, process.platform)");
+    expect(handler).toMatch(/targets\.osc52 && sessionStdout\?\.isTTY/u);
     expect(handler).toContain("sessionStdout.write(clipboardSequence(next.effect.text));");
-    const live = sessionSource.slice(sessionSource.indexOf("const liveTurn = useMemo"), sessionSource.indexOf("const liveLatest"));
-    expect(live).toMatch(/theme: t,\s+rows\s+\}/u);
+    expect(handler).toMatch(/targets\.pbcopy/u);
+    expect(handler).toContain("copyThroughPbcopy(next.effect.text)");
+  });
+
+  it("the live turn is drawn to the rows the live region gives it, and commits at that size", () => {
+    const sizing = sessionSource.slice(sessionSource.indexOf("const turnRowsAt"), sessionSource.indexOf("const liveLayout = inkTranscriptLayout"));
+    expect(sizing).toContain("inkLatestTurnRows({");
+    expect(sizing).toContain("keyBarRowCount(keyHintsFor(");
+    const commit = sessionSource.slice(sessionSource.indexOf("const commitLatestTurn"), sessionSource.indexOf("const [exitRequested"));
+    expect(commit).toContain("rows: liveTurnRowsRef.current");
+  });
+
+  it("a long document's page fits the window: the top of the page is on screen", () => {
+    resetTurnState();
+    const long = Array.from({ length: 60 }, (_, i) => `Line ${i + 1} of the body.`).join("\n");
+    const doc = decodeAnswerView({
+      v: 1, kind: "document", tool: "read_draft", title: "Win-back sequence", state: "ready", asOf: null,
+      scope: { workspaceName: "Demo", crossWorkspace: false }, caveats: [],
+      body: {
+        meta: [{ label: "From", value: "Demo Team" }, { label: "To", value: "Trial users" }, { label: "Subject", value: "Your trial ended" }],
+        sections: [{ text: long, format: "plain" }, { text: "The second email.", format: "plain" }],
+        versions: [{ id: "e1", label: "Email 1", sectionIndexes: [0] }, { id: "e2", label: "Email 2", sectionIndexes: [1] }]
+      }
+    });
+    if (!doc) throw new Error("document view does not decode");
+    recordTurnView({ type: "tool.view", stage: "tool", message: doc.title, viewId: "d1", name: doc.tool, view: doc });
+    for (const rows of [24, 30, 40]) {
+      const out = stripAnsi(renderInkInteractiveSessionToString({
+        columns: 100,
+        rows,
+        initialMessages: [{ role: "user", text: "show me the win-back emails" }, { role: "assistant", text: "Here are both emails." }],
+        onSubmitLine: async () => ({ messages: [] })
+      }));
+      expect(out, `${rows} rows`).toContain("Win-back sequence");
+      expect(out, `${rows} rows`).toContain("Line 1 of the body.");
+      expect(out, `${rows} rows`).toMatch(/page 1 of \d+/u);
+      expect(out.split("\n").length, `${rows} rows`).toBeLessThan(rows);
+    }
   });
 
   it("view keys are tried only with an empty composer and no card, picker or operator confirm", () => {
@@ -140,6 +181,8 @@ describe("views in a running session (fake TTY; skipped on CI like the other PTY
 describe("copy in a running session (fake TTY; skipped on CI like the other PTY tests)", () => {
   it.skipIf(process.env.CI === "true")("tab then c puts the minted link on the clipboard", { timeout: 30_000 }, async () => {
     resetTurnState();
+    // Copy as over SSH (OSC 52 only), so the test never touches this Mac's clipboard.
+    vi.stubEnv("SSH_TTY", "/dev/ttys999");
     const input = ttyInput();
     const output = ttyOutput(100);
     const session = runInkInteractiveSession({

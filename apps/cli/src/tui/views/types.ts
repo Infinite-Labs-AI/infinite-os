@@ -27,7 +27,11 @@ export interface ViewRenderCtx {
   caps: KeyContext["caps"];
   /** IANA zone for times (`asOf`); the system zone when absent. Tests pin it. */
   timeZone?: string;
-  /** The terminal's rows, when known: a document pages by width × rows. */
+  /**
+   * The most rows this view may take, when known: a document pages by width ×
+   * rows. `renderLiveTurn` starts from the live region's budget and lowers it
+   * until the whole turn fits.
+   */
   rows?: number;
 }
 
@@ -63,6 +67,12 @@ export interface ViewRender {
   rowCopies?: readonly (string | null)[];
   /** What `c` copies for the view as a whole (a minted link); used when the row has nothing. */
   copyText?: string;
+  /**
+   * A quiet view (a playbook read, a capability check): only its step line, with
+   * no head or source. The layout prints it with the Steps, never in the details
+   * pane, so it never splits or squeezes the answer.
+   */
+  quiet?: true;
 }
 
 /**
@@ -70,6 +80,6 @@ export interface ViewRender {
  * source line, the state reason, the explanation, truncation and caveats, so no
  * kind can drop or reword them.
  */
-export type KindRender = Omit<ViewRender, "head" | "source" | "fixAsk">;
+export type KindRender = Omit<ViewRender, "head" | "source" | "fixAsk" | "quiet">;
 
 export type KindRenderer<K extends AnswerViewKind> = (view: AnswerViewEnvelopeV1<K>, ctx: ViewRenderCtx) => KindRender;

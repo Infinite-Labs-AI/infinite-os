@@ -62,6 +62,11 @@ export function hasKindRenderer(kind: AnswerViewKind): boolean {
 export function renderView(view: AnswerViewV1, ctx: ViewRenderCtx): ViewRender {
   const shellCtx: ViewRenderCtx = { ...ctx, width: Math.max(1, Math.floor(ctx.width)) };
   const body = renderKindBody(view, shellCtx);
+  if (view.kind === "quiet") {
+    // Steps only (r4): no head, no source, no explanation, state reason,
+    // truncation or caveats. The layout prints it with the Steps.
+    return { head: "", source: null, detail: body?.detail ?? [], footnotes: [], keys: [], okKey: null, rowCount: 0, quiet: true };
+  }
   // Enter sends the state's fix ask only when no row has an ask of its own.
   const fixAsk = (body?.rowAsks ?? []).some((ask) => viewText(ask) !== "") ? null : stateFixAsk(view);
   return {

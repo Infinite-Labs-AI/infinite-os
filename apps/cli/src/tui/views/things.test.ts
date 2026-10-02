@@ -9,9 +9,12 @@ import { describe, expect, it } from "vitest";
 import { decodeAnswerView } from "../../desktop/answer-view-decode.js";
 import { stripAnsi } from "../lib/text.js";
 import { ansiFg, resolveTheme } from "../theme.js";
-import { clipboardSequence } from "./clipboard.js";
+import { DEFAULT_COMPOSER_ROWS, DEFAULT_KEY_BAR_ROWS, liveBodyRows } from "../ink/transcript-static.js";
+import type { Msg } from "../types.js";
+import { clipboardSequence, copyTargets } from "./clipboard.js";
 import { documentPageLines } from "./document.js";
 import { resolveViewKey, viewFocusAfterTurnDone, viewKeyFacts, viewKeyHints, type ViewFocusState } from "./focus.js";
+import { renderLiveTurn } from "./layout.js";
 import { hasKindRenderer, renderView } from "./registry.js";
 import type { ViewRender, ViewRenderCtx } from "./types.js";
 
@@ -280,7 +283,8 @@ describe("document", () => {
     const long = Array.from({ length: 60 }, (_, i) => `Line ${i + 1} of the body.`).join("\n");
     const v = view({ kind: "document", body: { meta: [], sections: [{ text: long, format: "plain" }] } });
     const rows = 20;
-    const per = documentPageLines(rows);
+    // One of the rows is the `page N of M` line.
+    const per = documentPageLines(rows) - 1;
     const first = draw(v, { rows });
     expect(first.pages).toBe(Math.ceil(60 / per));
     expect(text(first)).toContain("Line 1 of");
@@ -288,16 +292,29 @@ describe("document", () => {
     const second = draw(v, { rows, page: 1 });
     expect(text(second)).toContain(`Line ${per + 1} of`);
     expect(text(second)).not.toContain("Line 1 of");
-    // A narrower window wraps into more lines, so more pages.
-    const wrapped = Array.from({ length: 60 }, () => "word ".repeat(12).trim()).join("\n");
-    const wide = draw(view({ kind: "document", body: { meta: [], sections: [{ text: wrapped, format: "plain" }] } }), { rows, width: 120 });
-    const narrow = draw(view({ kind: "document", body: { meta: [], sections: [{ text: wrapped, format: "plain" }] } }), { rows, width: 40 });
-    expect(narrow.pages!).toBeGreaterThan(wide.pages!);
+    // A narrower window wraps into more lines, so more pages. Past r4's reading
+    // measure (76 columns) a wider pane changes nothing: the text stays 74 wide.
+    const wrapped = Array.from({ length: 60 }, () => "word ".repeat(17).trim()).join("\n");
+    const at = (width: number) => draw(view({ kind: "document", body: { meta: [], sections: [{ text: wrapped, format: "plain" }] } }), { rows, width });
+    expect(at(40).pages!).toBeGreaterThan(at(76).pages!);
+    expect(at(120).pages).toBe(at(76).pages);
+    expect(at(120).detail.every((line) => line.length <= 76)).toBe(true);
     // space moves to the next page.
     let state = viewFocusAfterTurnDone(v);
     expect(state.focus).toBe("document");
     state = resolveViewKey(" ", state, {}, viewKeyFacts(v, draw(v, { rows })));
     expect(state.page).toBe(1);
+  });
+
+  it("versions past 9 are named, never dropped silently", () => {
+    const versions = Array.from({ length: 11 }, (_, i) => ({ id: `e${i + 1}`, label: `E${i + 1}`, sectionIndexes: [0] }));
+    const render = draw(view({ kind: "document", body: { meta: [], sections: [{ text: "Hello.", format: "plain" }], versions } }), { width: 100 });
+    expect(render.tabs).toBe(9);
+    expect(render.detail[0]).toContain("9 E9");
+    expect(render.detail[0]).not.toContain("10 E10");
+    expect(render.detail[1]).toBe("+ 2 more not shown");
+    // Nine or fewer: no such line.
+    expect(text(draw(fixture("document-versions")))).not.toContain("more not shown");
   });
 
   it("prints its meta and the truncation of a long body", () => {
@@ -366,69 +383,173 @@ describe("quiet", () => {
   });
 });
 
+describe("a document page fits the live region", () => {
+  const long = Array.from({ length: 60 }, (_, i) => `Line ${i + 1} of the body.`).join("\n");
+  const doc = view({
+    kind: "document", title: "Win-back sequence",
+    body: {
+      meta: [{ label: "From", value: "Demo Team" }, { label: "To", value: "Trial users" }, { label: "Subject", value: "Your trial ended" }],
+      sections: [{ text: long, format: "plain" }, { text: "The second email.", format: "plain" }],
+      versions: [{ id: "e1", label: "Email 1", sectionIndexes: [0] }, { id: "e2", label: "Email 2", sectionIndexes: [1] }]
+    }
+  });
+  const messages: Msg[] = [
+    { role: "user", text: "show me the win-back emails" },
+    { kind: "trail", role: "system", text: "", tools: ["Read Draft(\"win-back\") (0.4s) :: 2 emails ✓"] },
+    { role: "assistant", text: "Here are both emails." }
+  ];
+  // The rows the session gives the latest turn: the live cap minus the top rule and one status row.
+  const budgetAt = (rows: number) => liveBodyRows(rows, DEFAULT_COMPOSER_ROWS, DEFAULT_KEY_BAR_ROWS, 1, false);
+
+  // 60 columns stack the answer, a rule and the steps on top of the view; at
+  // 24 rows that chrome alone is taller than the live region, so it starts at 30.
+  for (const [width, rowsList] of [[100, [24, 30, 40]], [60, [30, 40]]] as const) {
+    for (const rows of rowsList) {
+      it(`every page fits and every body line is reachable (${width} × ${rows})`, () => {
+        const budget = budgetAt(rows);
+        const base = viewFocusAfterTurnDone(doc);
+        const turn = (page: number) => renderLiveTurn({ messages, views: [doc], focus: { ...base, page }, width, color: false, theme, rows: budget });
+        const pages = turn(0).focused!.render.pages ?? 1;
+        expect(pages).toBeGreaterThan(1);
+        const seen = new Set<number>();
+        for (let page = 0; page < pages; page += 1) {
+          const lines = turn(page).lines;
+          expect(lines.length, `page ${page + 1} of ${pages}`).toBeLessThanOrEqual(budget);
+          for (const line of lines) {
+            const match = /Line (\d+) of the body/u.exec(line);
+            if (match) seen.add(Number(match[1]));
+          }
+        }
+        expect(seen.size).toBe(60);
+      });
+    }
+  }
+
+  it("without a known height a page is the default size", () => {
+    const render = draw(doc);
+    expect(render.pages).toBe(Math.ceil(60 / documentPageLines(undefined)));
+  });
+});
+
+describe("quiet in a turn", () => {
+  const messages: Msg[] = [
+    { role: "user", text: "write the trial email" },
+    { role: "assistant", text: "Here is a draft: Paying forty dollars per trial is the line to beat this week." }
+  ];
+
+  it("a turn whose only view is quiet keeps the answer full width and shows just the step line", () => {
+    const quiet = withBody("quiet-steps", {}, { title: "Read playbook", provenance: { source: "Playbooks", via: "our_db" } });
+    const lines = renderLiveTurn({ messages, views: [quiet], focus: null, width: 100, color: false, theme }).lines;
+    const out = lines.join("\n");
+    expect(lines.some((line) => line.includes(" │ "))).toBe(false);
+    expect(out).toContain("read the writing playbook");
+    expect(out).toContain("Paying forty dollars per trial is the line to beat this week.");
+    expect(out).not.toContain("Ready");
+    expect(out).not.toContain("Playbooks");
+    expect(out).not.toContain("Read playbook");
+    // The view's own render carries no head and no source.
+    const render = draw(quiet);
+    expect(render.quiet).toBe(true);
+    expect(render.head).toBe("");
+    expect(render.source).toBeNull();
+  });
+
+  it("a quiet view next to a list adds no head line to the details pane", () => {
+    const lines = renderLiveTurn({ messages, views: [fixture("quiet-steps"), fixture("list-rows")], focus: null, width: 100, color: false, theme }).lines;
+    const right = lines.filter((line) => line.includes(" │ ")).map((line) => line.slice(line.indexOf(" │ ") + 3));
+    expect(right.some((line) => line.includes("Ready") && !line.includes("Ads running"))).toBe(false);
+    expect(right.some((line) => line.includes("read the writing playbook"))).toBe(false);
+    expect(lines.join("\n")).toContain("read the writing playbook");
+    expect(right[0]).toContain("Ads running");
+  });
+
+  it("a quiet view never prints a caveat, an explanation or a state reason", () => {
+    const v = withBody("quiet-steps", {}, { caveats: ["a caveat"], explain: "what it does", state: "partial", stateReason: { code: "x", words: "partial" } });
+    const render = draw(v, { explainOpen: true });
+    expect(render.detail).toEqual(["read the writing playbook"]);
+  });
+});
+
 describe("scrub sweep: no escape or bidi character reaches the TTY", () => {
-  const ESC = "\u001b[2J\u001b]52;c;aGk=\u0007";
+  const ESC = "\u001b[2J\u001b]52;c;aGk=\u0007\u001b[8m\u001b[31m";
   const BIDI = "‮⁦‏";
   const dirty = (s: string) => `${s}${ESC}${BIDI}`;
 
-  const views: AnswerViewV1[] = [
-    view({
-      kind: "list", title: dirty("List"), next: [{ label: dirty("Next"), ask: dirty("ask") }],
-      body: {
-        layout: "rows", filterWords: dirty("filter"), emptyWords: dirty("empty"), total: 1, shown: 1,
-        omitted: { count: 1, reason: dirty("omitted") },
-        columns: [{ key: "a", label: dirty("Col"), unit: "text" }],
-        rows: [{
-          id: "r1", title: dirty("Row"), status: { word: dirty("on"), tone: "ok" }, url: dirty("https://example.com"), copy: dirty("copy"),
-          cells: { a: { text: dirty("cell") } }, detail: [{ label: dirty("Detail"), value: { text: dirty("value") } }],
-          appLink: { place: "p", label: dirty("Open") }
-        }]
-      }
-    }),
-    view({
-      kind: "list",
-      body: {
-        layout: "log", columns: [], total: 1, shown: 1,
-        rows: [{ id: "r1", title: dirty("Row"), cells: {}, from: dirty("a"), to: dirty("b"), at: dirty("2026-01-15T10:00:00Z"), who: dirty("who") }],
-        groups: [{ label: dirty("Group"), reason: dirty("why"), rows: [{ id: "r2", title: dirty("Grouped"), cells: {} }] }]
-      }
-    }),
-    view({
-      kind: "record", next: [{ label: dirty("Next"), ask: dirty("ask") }],
-      body: {
-        fields: [{ label: dirty("Field"), value: { text: dirty("value") } }, { label: dirty("Null"), value: { value: null, reason: { code: "x", words: dirty("why") } } }],
-        history: [{ at: dirty("when"), from: dirty("a"), to: dirty("b"), who: dirty("who"), source: dirty("src") }],
-        rule: { summary: dirty("rule"), channel: dirty("email"), schedule: dirty("hourly"), nextRunAt: dirty("soon"), checkEveryMinutes: 5, desktopRequired: true, version: 1 }
-      }
-    }),
-    view({
-      kind: "document",
-      body: {
-        meta: [{ label: dirty("Subject"), value: dirty("Hello") }],
-        sections: [
-          { heading: dirty("Heading"), text: dirty("**md** text"), format: "markdown", untrusted: true },
-          { text: dirty("plain\ntext"), format: "plain" },
-          { text: dirty("const a = 1;"), format: "code", language: dirty("ts") },
-          { text: dirty("stripped"), format: "html_stripped" }
-        ],
-        versions: [{ id: "v1", label: dirty("Version"), sectionIndexes: [0, 1, 2, 3] }],
-        liveUrl: dirty("https://example.com/live")
-      }
-    }),
-    view({
-      kind: "link",
-      body: {
-        target: "url", minted: true, opened: false, url: dirty("https://example.com"), shortUrl: dirty("https://s.example.com"),
-        finalUrl: dirty("https://example.com/final"), utm: { source: dirty("src"), medium: dirty("med") }, ga4Channel: dirty("Social"),
-        warnings: [dirty("warn")]
-      }
-    }),
-    view({
-      kind: "link",
-      body: { target: "local_file", minted: false, opened: true, warnings: [], file: { name: dirty("report.csv"), path: dirty("/tmp/report.csv"), app: dirty("Numbers") } }
-    }),
-    view({ kind: "quiet", body: { stepLine: dirty("step"), degraded: true } })
-  ];
+  const views = buildViews(dirty);
+  const cleanViews = buildViews((s) => s);
+
+  function buildViews(dirty: (s: string) => string): AnswerViewV1[] {
+    return [
+      view({
+        kind: "list", title: dirty("List"), next: [{ label: dirty("Next"), ask: dirty("ask") }],
+        body: {
+          layout: "rows", filterWords: dirty("filter"), emptyWords: dirty("empty"), total: 1, shown: 1,
+          omitted: { count: 1, reason: dirty("omitted") },
+          columns: [{ key: "a", label: dirty("Col"), unit: "text" }],
+          rows: [{
+            id: "r1", title: dirty("Row"), status: { word: dirty("on"), tone: "ok" }, url: dirty("https://example.com"), copy: dirty("copy"),
+            cells: { a: { text: dirty("cell") } }, detail: [{ label: dirty("Detail"), value: { text: dirty("value") } }],
+            appLink: { place: "p", label: dirty("Open") }
+          }]
+        }
+      }),
+      view({
+        kind: "list",
+        body: {
+          layout: "log", columns: [], total: 1, shown: 1,
+          rows: [{ id: "r1", title: dirty("Row"), cells: {}, from: dirty("a"), to: dirty("b"), at: dirty("2026-01-15T10:00:00Z"), who: dirty("who") }],
+          groups: [{ label: dirty("Group"), reason: dirty("why"), rows: [{ id: "r2", title: dirty("Grouped"), cells: {} }] }]
+        }
+      }),
+      view({
+        kind: "record", next: [{ label: dirty("Next"), ask: dirty("ask") }],
+        body: {
+          fields: [{ label: dirty("Field"), value: { text: dirty("value") } }, { label: dirty("Null"), value: { value: null, reason: { code: "x", words: dirty("why") } } }],
+          history: [{ at: dirty("when"), from: dirty("a"), to: dirty("b"), who: dirty("who"), source: dirty("src") }],
+          rule: { summary: dirty("rule"), channel: dirty("email"), schedule: dirty("hourly"), nextRunAt: dirty("soon"), checkEveryMinutes: 5, desktopRequired: true, version: 1 }
+        }
+      }),
+      view({
+        kind: "document",
+        body: {
+          meta: [{ label: dirty("Subject"), value: dirty("Hello") }],
+          sections: [
+            { heading: dirty("Heading"), text: dirty("**md** text"), format: "markdown", untrusted: true },
+            { text: dirty("plain\ntext"), format: "plain" },
+            { text: dirty("const a = 1;"), format: "code", language: dirty("ts") },
+            { text: dirty("stripped"), format: "html_stripped" }
+          ],
+          versions: [{ id: "v1", label: dirty("Version"), sectionIndexes: [0, 1, 2, 3] }],
+          liveUrl: dirty("https://example.com/live")
+        }
+      }),
+      view({
+        kind: "link",
+        body: {
+          target: "url", minted: true, opened: false, url: dirty("https://example.com"), shortUrl: dirty("https://s.example.com"),
+          finalUrl: dirty("https://example.com/final"), utm: { source: dirty("src"), medium: dirty("med") }, ga4Channel: dirty("Social"),
+          warnings: [dirty("warn")]
+        }
+      }),
+      view({
+        kind: "link",
+        body: { target: "local_file", minted: false, opened: true, warnings: [], file: { name: dirty("report.csv"), path: dirty("/tmp/report.csv"), app: dirty("Numbers") } }
+      }),
+      view({
+        kind: "link",
+        body: { target: "app_place", minted: false, opened: false, warnings: [dirty("warn")], appPlace: { place: "library", label: dirty("Library"), selectionCount: 2 } }
+      }),
+      view({
+        kind: "list",
+        body: {
+          layout: "files", total: 1, shown: 1,
+          columns: [{ key: "size", label: dirty("Size"), unit: "text" }],
+          rows: [{ id: "f1", title: dirty("report.csv"), cells: { size: { text: dirty("2 KB") } }, copy: dirty("/tmp/report.csv") }]
+        }
+      }),
+      view({ kind: "quiet", body: { stepLine: dirty("step"), degraded: true } })
+    ];
+  }
 
   it("every line from all five renderers is free of ESC, C1 and bidi controls", () => {
     for (const v of views) {
@@ -442,12 +563,17 @@ describe("scrub sweep: no escape or bidi character reaches the TTY", () => {
   });
 
   it("with colour on, the only escapes are the renderer's own colours", () => {
-    for (const v of views) {
-      const render = draw(v, { color: true });
-      for (const line of allLines(render)) {
-        expect(stripAnsi(line)).not.toMatch(/[\u001b\u0007‪-‮⁦-⁩]/u);
+    // The renderer's own codes: whatever it emits for the same view built from clean strings.
+    const SGR = /\u001b\[[0-9;]*m/gu;
+    views.forEach((v, index) => {
+      for (const overrides of [{ color: true }, { color: true, selected: 1 }, { color: true, width: 30 }]) {
+        const own = new Set(allLines(draw(cleanViews[index]!, overrides)).flatMap((line) => line.match(SGR) ?? []));
+        for (const line of allLines(draw(v, overrides))) {
+          const rest = line.replace(SGR, (code) => (own.has(code) ? "" : code));
+          expect(rest, `${v.kind}: ${JSON.stringify(line)}`).not.toMatch(/[\u001b\u0007\u0080-\u009f‪-‮⁦-⁩]/u);
+        }
       }
-    }
+    });
   });
 });
 
@@ -456,6 +582,14 @@ describe("clipboard", () => {
     expect(clipboardSequence("https://go.example.com/abc1")).toBe(
       `\u001b]52;c;${Buffer.from("https://go.example.com/abc1").toString("base64")}\u0007`
     );
+  });
+
+  it("a local Mac also copies through pbcopy (Terminal.app ignores OSC 52); SSH and other systems use OSC 52 only", () => {
+    expect(copyTargets({}, "darwin")).toEqual({ osc52: true, pbcopy: true });
+    expect(copyTargets({ SSH_TTY: "/dev/ttys001" }, "darwin")).toEqual({ osc52: true, pbcopy: false });
+    expect(copyTargets({ SSH_CONNECTION: "10.0.0.1 22 10.0.0.2 22" }, "darwin")).toEqual({ osc52: true, pbcopy: false });
+    expect(copyTargets({}, "linux")).toEqual({ osc52: true, pbcopy: false });
+    expect(copyTargets({}, "win32")).toEqual({ osc52: true, pbcopy: false });
   });
 
   it("never copies an escape: the text is scrubbed before it is encoded", () => {
